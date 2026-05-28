@@ -150,10 +150,10 @@ class MyCustomAdaptor:
     def __init__(self, value: MyCustomType):
         self.value = value
 
-    def __fly_types__(self):
+    def __get_ir_types__(self):
         return [...]  # MLIR types for this argument
 
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         return [...]  # ctypes pointers for invocation
 ```
 

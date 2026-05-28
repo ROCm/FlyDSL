@@ -7,10 +7,6 @@ on:
         description: 'Release type determines target S3 bucket (devreleases, nightlies, release)'
         type: string
         required: true
-      docker_image:
-        description: 'Docker base image for build'
-        type: string
-        required: true
       upload_s3_staging:
         description: 'Upload built wheels to the S3 staging bucket'
         type: boolean
@@ -28,7 +24,7 @@ on:
 
 jobs:
   build:
-    runs-on: linux-flydsl-mi325-1
+    runs-on: build-only-flydsl
     outputs:
       wheel_names: ${{ steps.collect-wheels.outputs.wheel_names }}
     permissions:
@@ -40,6 +36,19 @@ jobs:
         with:
           path: flydsl
 
+      - name: Pull or build manylinux Docker image
+        run: |
+          ROCM_VERSION=7.2
+          IMAGE="ghcr.io/rocm/flydsl-manylinux_2_28:rocm${ROCM_VERSION}-cp310-cp314"
+          if ! docker pull "${IMAGE}"; then
+            # The Dockerfile is self-contained, so avoid sending the full repo as build context.
+            docker build \
+              --build-arg ROCM_VERSION="${ROCM_VERSION}" \
+              -t "${IMAGE}" \
+              - < flydsl/.github/workflows/Dockerfile.manylinux_2_28
+          fi
+          echo "MANYLINUX_IMAGE=${IMAGE}" >> $GITHUB_ENV
+
       - name: Start build container
         run: |
           docker run -dt --network=host --user root \
@@ -47,29 +56,54 @@ jobs:
             --ipc=host --shm-size 16g \
             -w /flydsl \
             --name flydsl_build \
-            ${{ inputs.docker_image }}
+            "${MANYLINUX_IMAGE}"
 
       - name: Install build dependencies
         run: |
-          docker exec flydsl_build bash -c "apt-get update && apt-get install -y cmake build-essential patchelf software-properties-common"
-          # Install all CPython versions we ship wheels for (deadsnakes covers 3.10-3.13 on jammy/noble).
-          # Keep this list aligned with DEFAULT_PYTHON_VERSIONS in scripts/build_wheels.sh
-          # and with TheRock's supported set (3.10, 3.11, 3.12, 3.13).
-          docker exec flydsl_build bash -c "add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && apt-get install -y \
-            python3.10 python3.10-dev python3.10-venv \
-            python3.11 python3.11-dev python3.11-venv \
-            python3.12 python3.12-dev python3.12-venv \
-            python3.13 python3.13-dev python3.13-venv"
-          docker exec flydsl_build bash -c "python3 -m pip install -U pip setuptools wheel"
-          docker exec flydsl_build bash -c "python3 -m pip install ninja>=1.11.1"
+          # Create pythonX.Y symlinks so build_wheels.sh can find them.
+          # Skip free-threaded builds (cpXYZt) — they would overwrite the normal symlink.
+          docker exec flydsl_build bash -c '
+            for d in /opt/python/cp*; do
+              case "${d}" in *t) continue ;; esac
+              py="${d}/bin/python"
+              [ -x "${py}" ] || continue
+              ver=$("${py}" -c "import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}\")")
+              ln -sf "${py}" "/usr/local/bin/python${ver}"
+              echo "  python${ver} -> ${py}"
+            done
+            ln -sf /usr/local/bin/python3.12 /usr/local/bin/python3
+          '
+          docker exec flydsl_build bash -c "python3 -m pip install -q nanobind"
           docker exec flydsl_build bash -c "git config --global --add safe.directory '*'"
+
+      - name: Checkout source and submodules in build container
+        env:
+          CHECKOUT_REPOSITORY: ${{ github.repository }}
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: |
+          docker exec \
+            -e CHECKOUT_REPOSITORY="${CHECKOUT_REPOSITORY}" \
+            -e CHECKOUT_SHA="${CHECKOUT_SHA}" \
+            flydsl_build bash -c '
+              set -euo pipefail
+              echo "Checking out ${CHECKOUT_REPOSITORY}@${CHECKOUT_SHA} inside the build container."
+              cd /flydsl
+              find . -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+              git init
+              git remote add origin "https://github.com/${CHECKOUT_REPOSITORY}.git"
+              git fetch --no-tags --depth=1 origin "${CHECKOUT_SHA}"
+              git checkout --force FETCH_HEAD
+              git config --global --add safe.directory /flydsl
+              git submodule sync --recursive
+              git submodule update --init --recursive
+            '
 
       - name: Restore cached MLIR install tarball
         id: mlir-cache
         uses: actions/cache@v4
         with:
           path: mlir_install.tgz
-          key: mlir-install-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt', 'flydsl/.github/workflows/build-whl.yaml') }}
+          key: mlir-install-manylinux228-${{ hashFiles('flydsl/thirdparty/llvm-hash.txt', 'flydsl/scripts/build_llvm.sh', 'flydsl/CMakeLists.txt') }}
 
       - name: Use cached MLIR install tarball
         if: steps.mlir-cache.outputs.cache-hit == 'true'
@@ -90,7 +124,7 @@ jobs:
         run: |
           docker exec \
             -e MLIR_PATH=/llvm-project/mlir_install \
-            -e EXPECTED_GLIBC=2.35 \
+            -e EXPECTED_GLIBC=2.28 \
             -e FLYDSL_RELEASE_TYPE=${{ inputs.release_type }} \
             -e "FLYDSL_PACKAGE_VERSION_OVERRIDE=${PACKAGE_VERSION_OVERRIDE}" \
             flydsl_build bash -c "cd /flydsl && bash scripts/build_wheels.sh"
@@ -124,12 +158,14 @@ jobs:
       - name: Build summary
         if: always()
         env:
-          SUMMARY_DOCKER_IMAGE: ${{ inputs.docker_image }}
-          SUMMARY_LLVM_COMMIT: $(cat flydsl/thirdparty/llvm-hash.txt | tr -d '[:space:]')
+          SUMMARY_DOCKER_IMAGE: ${{ env.MANYLINUX_IMAGE }}
           SUMMARY_MLIR_CACHE: ${{ steps.mlir-cache.outputs.cache-hit == 'true' && 'Hit' || 'Miss (rebuilt)' }}
           SUMMARY_RELEASE_TYPE: ${{ inputs.release_type }}
           SUMMARY_WHEEL_DIR: dist
-        run: python3 flydsl/scripts/generate_summary.py build
+        run: |
+          SUMMARY_LLVM_COMMIT="$(tr -d '[:space:]' < flydsl/thirdparty/llvm-hash.txt)"
+          export SUMMARY_LLVM_COMMIT
+          python3 flydsl/scripts/generate_summary.py build
 
       - name: Configure AWS credentials
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
@@ -144,8 +180,10 @@ jobs:
 
       - name: Upload wheels to S3 staging
         if: ${{ github.repository_owner == 'ROCm' && inputs.upload_s3_staging }}
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
         run: |
-          aws s3 cp dist/ s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950/ \
+          aws s3 cp dist/ "s3://framework-whls-${RELEASE_TYPE}/whl-staging/gfx942-gfx950/" \
             --recursive --exclude "*" --include "*.whl"
 
       - name: Clean up

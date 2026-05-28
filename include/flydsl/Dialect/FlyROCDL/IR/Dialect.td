@@ -19,9 +19,24 @@ def FlyROCDL_Dialect : Dialect {
   ];
 
   let useDefaultTypePrinterParser = 1;
+  let useDefaultAttributePrinterParser = 1;
 }
 
-class FlyROCL_MmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyROCDL_I32EnumAttr<string enumName, string summary, list<I32EnumAttrCase> cases>
+    : I32EnumAttr<enumName, summary, cases> {
+  let genSpecializedAttr = 0;
+  let cppNamespace = FlyROCDL_Dialect.cppNamespace;
+}
+
+class FlyROCDL_EnumAttr<EnumInfo enumInfo, string attrMnemonic, list<Trait> traits = []>
+    : EnumAttr<FlyROCDL_Dialect, enumInfo, attrMnemonic, traits>;
+
+class FlyROCDL_Attr<string attrName, string attrMnemonic, list<Trait> traits = []>
+    : AttrDef<FlyROCDL_Dialect, attrName, traits> {
+  let mnemonic = attrMnemonic;
+}
+
+class FlyROCDL_MmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
         DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>
@@ -29,7 +44,7 @@ class FlyROCL_MmaOp<string typeName, string typeMnemonic, list<Trait> traits = [
   let mnemonic = typeMnemonic;
 }
 
-class FlyROCL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyROCDL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>, 
         DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>
@@ -37,7 +52,7 @@ class FlyROCL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits = 
   let mnemonic = typeMnemonic;
 }
 
-class FlyROCL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = []>
+class FlyROCDL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = []>
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>,
         DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
@@ -48,7 +63,7 @@ class FlyROCL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> t
   }];
 }
 
-class FlyROCL_StatefulMmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
+class FlyROCDL_StatefulMmaOp<string typeName, string typeMnemonic, list<Trait> traits = []> 
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
         DeclareTypeInterfaceMethods<Fly_MmaOpTypeInterface>,
         DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>

@@ -1,17 +1,16 @@
-#include "mlir/Dialect/Arith/IR/Arith.h"
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 FlyDSL Project Contributors
+
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
-#include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/SymbolTable.h"
-#include "mlir/Interfaces/FunctionInterfaces.h"
+#include "mlir/Dialect/SCF/Transforms/Patterns.h"
+#include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/Pass.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
-#include "llvm/ADT/SmallPtrSet.h"
+#include "mlir/Transforms/DialectConversion.h"
 
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
-#include "flydsl/Dialect/Fly/Transforms/Passes.h"
-#include "flydsl/Dialect/Fly/Utils/IntTupleUtils.h"
 
 #include <functional>
 
@@ -72,12 +71,13 @@ LLVM::LLVMStructType getLayoutStructType(MLIRContext *ctx, LayoutAttr attr) {
   return LLVM::LLVMStructType::getLiteral(ctx, fields, true);
 }
 
+LLVM::LLVMStructType getNarrowLayoutStructType(MLIRContext *ctx, Attribute attr);
 LLVM::LLVMStructType getComposedInnerStructType(MLIRContext *ctx, Attribute attr);
 
 LLVM::LLVMStructType getComposedLayoutStructType(MLIRContext *ctx, ComposedLayoutAttr attr) {
   SmallVector<Type> fields;
   if (!attr.isStaticOuter())
-    fields.push_back(getLayoutStructType(ctx, attr.getOuter()));
+    fields.push_back(getNarrowLayoutStructType(ctx, attr.getOuter()));
   if (!attr.isStaticOffset())
     fields.push_back(getIntTupleStructType(ctx, attr.getOffset()));
   if (!attr.isStaticInner())
@@ -112,48 +112,6 @@ LLVM::LLVMStructType getCoordTensorStructType(MLIRContext *ctx, CoordTensorType 
 }
 
 bool memrefHasDynamicLayout(fly::MemRefType ty) { return !isStaticNarrowLayout(ty.getLayout()); }
-
-//===----------------------------------------------------------------------===//
-// Arg expansion: DSL type -> single struct type (or passthrough)
-//
-// MemRef is expanded to separate arguments: fly.ptr + layout-struct (if dynamic)
-//===----------------------------------------------------------------------===//
-
-enum class ArgKind {
-  PassThrough,
-  IntTuple,
-  Layout,
-  ComposedLayout,
-  CoordTensor,
-  MemRefStatic,
-  MemRefDynamic,
-};
-
-struct ExpandedArg {
-  ArgKind kind;
-  SmallVector<Type, 2> types;
-};
-
-ExpandedArg expandArgType(Type ty) {
-  auto *ctx = ty.getContext();
-  if (auto intTupleTy = dyn_cast<IntTupleType>(ty))
-    return {ArgKind::IntTuple, {getIntTupleStructType(ctx, intTupleTy.getAttr())}};
-  if (auto layoutTy = dyn_cast<LayoutType>(ty))
-    return {ArgKind::Layout, {getLayoutStructType(ctx, layoutTy.getAttr())}};
-  if (auto composedTy = dyn_cast<ComposedLayoutType>(ty))
-    return {ArgKind::ComposedLayout, {getComposedLayoutStructType(ctx, composedTy.getAttr())}};
-  if (auto coordTy = dyn_cast<CoordTensorType>(ty))
-    return {ArgKind::CoordTensor, {getCoordTensorStructType(ctx, coordTy)}};
-  if (auto memrefTy = dyn_cast<fly::MemRefType>(ty)) {
-    auto ptrTy = memrefTy.getPointerType();
-    if (memrefHasDynamicLayout(memrefTy)) {
-      auto layoutStructTy = getNarrowLayoutStructType(ctx, memrefTy.getLayout());
-      return {ArgKind::MemRefDynamic, {ptrTy, layoutStructTy}};
-    }
-    return {ArgKind::MemRefStatic, {ptrTy}};
-  }
-  return {ArgKind::PassThrough, {ty}};
-}
 
 //===----------------------------------------------------------------------===//
 // Pack: DSL value -> LLVM struct value (for launch_func call site)
@@ -213,20 +171,22 @@ Value packLayoutToStruct(OpBuilder &builder, Location loc, Value layout, LayoutA
 
 Value packComposedInnerToStruct(OpBuilder &builder, Location loc, Value inner, Attribute attr,
                                 LLVM::LLVMStructType innerStructTy);
+Value packNarrowLayoutToStruct(OpBuilder &builder, Location loc, Value layout, Attribute attr,
+                               LLVM::LLVMStructType structTy);
 
 Value packComposedLayoutToStruct(OpBuilder &builder, Location loc, Value composed,
                                  ComposedLayoutAttr attr, LLVM::LLVMStructType structTy) {
   Value result = LLVM::UndefOp::create(builder, loc, structTy);
   int64_t idx = 0;
-  if (!attr.getOuter().isStatic()) {
+  if (!attr.isStaticOuter()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value outerVal = ComposedGetOuterOp::create(builder, loc, composed);
-    Value outerStruct = packLayoutToStruct(builder, loc, outerVal, attr.getOuter(), fieldTy);
+    Value outerStruct = packNarrowLayoutToStruct(builder, loc, outerVal, attr.getOuter(), fieldTy);
     result = LLVM::InsertValueOp::create(builder, loc, structTy, result, outerStruct,
                                          ArrayRef<int64_t>{idx});
     idx++;
   }
-  if (!attr.getOffset().isStatic()) {
+  if (!attr.isStaticOffset()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value offsetVal = ComposedGetOffsetOp::create(builder, loc, composed);
     Value offsetStruct = packIntTupleToStruct(builder, loc, offsetVal, attr.getOffset(), fieldTy);
@@ -358,6 +318,8 @@ Value unpackLayoutFromStruct(OpBuilder &builder, Location loc, Value structVal, 
 
 Value unpackComposedInnerFromStruct(OpBuilder &builder, Location loc, Value structVal,
                                     Attribute attr, LLVM::LLVMStructType innerStructTy);
+Value unpackNarrowLayoutFromStruct(OpBuilder &builder, Location loc, Value structVal,
+                                   Attribute attr, LLVM::LLVMStructType structTy);
 
 Type getNarrowLayoutType(Attribute attr) {
   if (auto layout = dyn_cast<LayoutAttr>(attr))
@@ -371,18 +333,21 @@ Value unpackComposedLayoutFromStruct(OpBuilder &builder, Location loc, Value str
                                      ComposedLayoutAttr attr, LLVM::LLVMStructType structTy) {
   int64_t idx = 0;
   Value outer;
-  if (!attr.getOuter().isStatic()) {
+  if (!attr.isStaticOuter()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value fieldVal =
         LLVM::ExtractValueOp::create(builder, loc, fieldTy, structVal, ArrayRef<int64_t>{idx});
-    outer = unpackLayoutFromStruct(builder, loc, fieldVal, attr.getOuter(), fieldTy);
+    outer = unpackNarrowLayoutFromStruct(builder, loc, fieldVal, attr.getOuter(), fieldTy);
     idx++;
   } else {
-    outer = StaticOp::create(builder, loc, LayoutType::get(attr.getOuter()));
+    if (auto layout = dyn_cast<LayoutAttr>(attr.getOuter()))
+      outer = LayoutType::get(layout).rebuildStaticValue(builder, loc, nullptr);
+    if (auto composed = dyn_cast<ComposedLayoutAttr>(attr.getOuter()))
+      outer = ComposedLayoutType::get(composed).rebuildStaticValue(builder, loc, nullptr);
   }
 
   Value offset;
-  if (!attr.getOffset().isStatic()) {
+  if (!attr.isStaticOffset()) {
     auto fieldTy = cast<LLVM::LLVMStructType>(structTy.getBody()[idx]);
     Value fieldVal =
         LLVM::ExtractValueOp::create(builder, loc, fieldTy, structVal, ArrayRef<int64_t>{idx});
@@ -408,6 +373,8 @@ Value unpackComposedLayoutFromStruct(OpBuilder &builder, Location loc, Value str
       innerTy = ComposedLayoutType::get(composed);
     if (auto swizzle = dyn_cast<SwizzleAttr>(innerAttr))
       innerTy = SwizzleType::get(swizzle);
+    if (auto coordSwizzle = dyn_cast<CoordSwizzleAttr>(innerAttr))
+      innerTy = CoordSwizzleType::get(coordSwizzle);
     inner = StaticOp::create(builder, loc, innerTy);
   }
 
@@ -424,13 +391,11 @@ Value unpackComposedInnerFromStruct(OpBuilder &builder, Location loc, Value stru
 }
 
 Value unpackNarrowLayoutFromStruct(OpBuilder &builder, Location loc, Value structVal,
-                                   Attribute attr, Type structTy) {
-  if (auto layout = dyn_cast<LayoutAttr>(attr))
-    return unpackLayoutFromStruct(builder, loc, structVal, layout,
-                                  cast<LLVM::LLVMStructType>(structTy));
-  if (auto composedLayout = dyn_cast<ComposedLayoutAttr>(attr))
-    return unpackComposedLayoutFromStruct(builder, loc, structVal, composedLayout,
-                                          cast<LLVM::LLVMStructType>(structTy));
+                                   Attribute attr, LLVM::LLVMStructType structTy) {
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(attr))
+    return unpackLayoutFromStruct(builder, loc, structVal, layoutAttr, structTy);
+  if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(attr))
+    return unpackComposedLayoutFromStruct(builder, loc, structVal, composedAttr, structTy);
   llvm_unreachable("unexpected layout attribute type");
 }
 
@@ -452,7 +417,7 @@ Value unpackCoordTensorFromStruct(OpBuilder &builder, Location loc, Value struct
 
   Value layout;
   if (!isStaticNarrowLayout(coordTy.getLayout())) {
-    Type fieldTy = outerStructTy.getBody()[idx];
+    auto fieldTy = cast<LLVM::LLVMStructType>(outerStructTy.getBody()[idx]);
     Value fieldVal =
         LLVM::ExtractValueOp::create(builder, loc, fieldTy, structVal, ArrayRef<int64_t>{idx});
     layout = unpackNarrowLayoutFromStruct(builder, loc, fieldVal, coordTy.getLayout(), fieldTy);
@@ -476,203 +441,131 @@ Value unpackDSLValueFromStruct(OpBuilder &builder, Location loc, Value structVal
   llvm_unreachable("unexpected DSL type");
 }
 
-// Remove static DSL arguments from function signatures
-void sinkStaticArgsFromFunc(FunctionOpInterface funcOp) {
-  Location loc = funcOp.getLoc();
-  OpBuilder builder(funcOp.getContext());
-  ArrayRef<Type> argTypes = funcOp.getArgumentTypes();
+//===----------------------------------------------------------------------===//
+// DslTypeConverter
+//
+// Drives function-signature / scf-boundary / launch_func rewriting through the
+// standard DialectConversion infrastructure:
+//
+//   * Static DSL types (anything implementing MayStaticTypeInterface and
+//     reporting isStatic()) convert to **zero** carrier types. Source
+//     materialization rebuilds a `fly.static` op at the use site; target
+//     materialization at boundaries drops the operand.
+//   * Dynamic IntTuple / Layout / ComposedLayout / CoordTensor convert to a
+//     single LLVM packed struct of their dynamic leaves. Source / target
+//     materializations call into the existing unpack / pack helpers above.
+//   * fly.memref expands to a `fly.ptr` carrier plus, when the layout is
+//     dynamic, an LLVM struct carrier holding the dynamic layout leaves. The
+//     pointer cannot live inside an llvm.struct (the LLVM verifier rejects
+//     `!fly.ptr` as an llvm.struct field type), which is why we use a 1:N
+//     conversion here instead of wrapping everything in a single outer struct.
+//   * Everything else passes through unchanged.
+//===----------------------------------------------------------------------===//
 
-  if (argTypes.empty())
-    return;
+class DslTypeConverter : public TypeConverter {
+public:
+  DslTypeConverter(MLIRContext *ctx) {
+    // Conversions are dispatched most-recently-added-first; register the
+    // generic static-sink last so it has priority over the per-type expanders
+    // below for any DSL type that reports isStatic().
+    addConversion([](Type ty) -> std::optional<Type> { return ty; });
 
-  bool hasBody = !funcOp.getFunctionBody().empty();
-  Block *entry = hasBody ? &funcOp.getFunctionBody().front() : nullptr;
-  if (hasBody)
-    builder.setInsertionPointToStart(entry);
+    addConversion([ctx](IntTupleType ty, SmallVectorImpl<Type> &out) -> LogicalResult {
+      out.push_back(getIntTupleStructType(ctx, ty.getAttr()));
+      return success();
+    });
+    addConversion([ctx](LayoutType ty, SmallVectorImpl<Type> &out) -> LogicalResult {
+      out.push_back(getLayoutStructType(ctx, ty.getAttr()));
+      return success();
+    });
+    addConversion([ctx](ComposedLayoutType ty, SmallVectorImpl<Type> &out) -> LogicalResult {
+      out.push_back(getComposedLayoutStructType(ctx, ty.getAttr()));
+      return success();
+    });
+    addConversion([ctx](CoordTensorType ty, SmallVectorImpl<Type> &out) -> LogicalResult {
+      out.push_back(getCoordTensorStructType(ctx, ty));
+      return success();
+    });
+    addConversion([ctx](fly::MemRefType ty, SmallVectorImpl<Type> &out) -> LogicalResult {
+      out.push_back(ty.getPointerType());
+      if (memrefHasDynamicLayout(ty))
+        out.push_back(getNarrowLayoutStructType(ctx, ty.getLayout()));
+      return success();
+    });
 
-  SmallVector<size_t> staticArgIndices;
-  SmallVector<Type> newArgTypes;
-  for (size_t i = 0; i < argTypes.size(); ++i) {
-    if (auto mayStatic = dyn_cast<MayStaticTypeInterface>(argTypes[i]);
-        mayStatic && mayStatic.isStatic()) {
-      staticArgIndices.push_back(i);
-      if (hasBody) {
-        BlockArgument arg = entry->getArgument(i);
-        Value staticVal = StaticOp::create(builder, loc, arg.getType());
-        arg.replaceAllUsesWith(staticVal);
+    addConversion(
+        [](MayStaticTypeInterface ty, SmallVectorImpl<Type> &out) -> std::optional<LogicalResult> {
+          if (!ty.isStatic())
+            return std::nullopt;
+          // 1:0 conversion - static DSL value is sunk at the boundary.
+          return success();
+        });
+
+    // Source materialization: carriers -> reconstruct an old-typed DSL value
+    // for any remaining uses (function entries, scf body entries, etc.).
+    addSourceMaterialization(
+        [](OpBuilder &b, Type oldType, ValueRange carriers, Location loc) -> Value {
+          if (carriers.empty()) {
+            // 1:0 (static DSL was sunk) - rebuild a `fly.static` value so
+            // downstream patterns keep seeing the normal-form sentinel.
+            if (isa<MayStaticTypeInterface>(oldType))
+              return StaticOp::create(b, loc, oldType);
+            return Value();
+          }
+          if (auto memrefTy = dyn_cast<fly::MemRefType>(oldType)) {
+            Value layout;
+            if (carriers.size() == 2) {
+              auto layoutStructTy = cast<LLVM::LLVMStructType>(carriers[1].getType());
+              layout = unpackNarrowLayoutFromStruct(b, loc, carriers[1], memrefTy.getLayout(),
+                                                    layoutStructTy);
+            } else {
+              layout = StaticOp::create(b, loc, getNarrowLayoutType(memrefTy.getLayout()));
+            }
+            return MakeViewOp::create(b, loc, carriers[0], layout);
+          }
+          if (carriers.size() == 1)
+            return unpackDSLValueFromStruct(b, loc, carriers[0], oldType);
+          return Value();
+        });
+
+    // Target materialization: an old-typed DSL value -> carrier(s) for the
+    // new boundary representation. Called at scf yields, launch_func operands,
+    // etc.
+    addTargetMaterialization([](OpBuilder &b, TypeRange newTypes, ValueRange oldValues,
+                                Location loc, Type) -> SmallVector<Value> {
+      if (newTypes.empty())
+        return {};
+      assert(oldValues.size() == 1 && "DSL boundary materialization expects a single source");
+      Value oldValue = oldValues.front();
+      Type oldType = oldValue.getType();
+      if (auto memrefTy = dyn_cast<fly::MemRefType>(oldType)) {
+        auto [ptr, layoutStruct] = packMemRefToPtrAndLayout(b, loc, oldValue, memrefTy);
+        SmallVector<Value> result;
+        result.push_back(ptr);
+        if (layoutStruct)
+          result.push_back(layoutStruct);
+        return result;
       }
-    } else {
-      newArgTypes.push_back(argTypes[i]);
-    }
+      auto structTy = cast<LLVM::LLVMStructType>(newTypes.front());
+      return {packDSLValueToStruct(b, loc, oldValue, oldType, structTy)};
+    });
   }
-  if (staticArgIndices.empty())
-    return;
+};
 
-  funcOp.setType(FunctionType::get(funcOp.getContext(), newArgTypes, funcOp.getResultTypes()));
+class RewriteLaunchFuncOperands : public OpConversionPattern<gpu::LaunchFuncOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
 
-  if (hasBody) {
-    for (int i = static_cast<int>(staticArgIndices.size()) - 1; i >= 0; --i)
-      entry->eraseArgument(staticArgIndices[i]);
+  LogicalResult matchAndRewrite(gpu::LaunchFuncOp op, OneToNOpAdaptor adaptor,
+                                ConversionPatternRewriter &rewriter) const override {
+    SmallVector<Value> kernelOperands;
+    for (ValueRange carriers : adaptor.getKernelOperands())
+      kernelOperands.append(carriers.begin(), carriers.end());
+
+    rewriter.modifyOpInPlace(op, [&] { op.getKernelOperandsMutable().assign(kernelOperands); });
+    return success();
   }
-}
-
-// Remove static operands from gpu.launch_func
-void removeStaticOperandsFromLaunchFunc(gpu::LaunchFuncOp launchOp) {
-  SmallVector<Value> oldOperands(launchOp.getKernelOperands().begin(),
-                                 launchOp.getKernelOperands().end());
-  SmallVector<Value> newOperands;
-  bool changed = false;
-
-  for (auto operand : oldOperands) {
-    if (auto mayStatic = dyn_cast<MayStaticTypeInterface>(operand.getType());
-        mayStatic && mayStatic.isStatic()) {
-      changed = true;
-      continue;
-    }
-    newOperands.push_back(operand);
-  }
-
-  if (changed)
-    launchOp.getKernelOperandsMutable().assign(newOperands);
-}
-
-bool rewriteDSLArgsToStructFromFunc(FunctionOpInterface op) {
-  ArrayRef<Type> argTypes = op.getArgumentTypes();
-  SmallVector<Type> oldInputs(argTypes.begin(), argTypes.end());
-
-  SmallVector<ExpandedArg> expandedArgs;
-  SmallVector<Type> newInputs;
-  bool changed = false;
-
-  for (Type oldType : oldInputs) {
-    auto expanded = expandArgType(oldType);
-    expandedArgs.push_back(expanded);
-    for (Type t : expanded.types)
-      newInputs.push_back(t);
-    if (expanded.kind != ArgKind::PassThrough)
-      changed = true;
-  }
-
-  if (!changed)
-    return false;
-
-  op.setType(FunctionType::get(op.getContext(), newInputs, op.getResultTypes()));
-
-  if (op.getFunctionBody().empty())
-    return true;
-
-  Block &entry = op.getFunctionBody().front();
-  Location loc = op.getLoc();
-
-  for (int i = static_cast<int>(oldInputs.size()) - 1; i >= 0; --i) {
-    if (expandedArgs[i].kind == ArgKind::MemRefDynamic) {
-      BlockArgument oldArg = entry.getArgument(i);
-      oldArg.setType(expandedArgs[i].types[0]);
-      entry.insertArgument(i + 1, expandedArgs[i].types[1], loc);
-    } else if (expandedArgs[i].kind == ArgKind::MemRefStatic) {
-      BlockArgument oldArg = entry.getArgument(i);
-      oldArg.setType(expandedArgs[i].types[0]);
-    } else if (expandedArgs[i].kind != ArgKind::PassThrough) {
-      BlockArgument oldArg = entry.getArgument(i);
-      oldArg.setType(expandedArgs[i].types[0]);
-    }
-  }
-
-  OpBuilder builder(&entry, entry.begin());
-
-  size_t newArgIdx = 0;
-  for (size_t i = 0; i < oldInputs.size(); ++i) {
-    if (expandedArgs[i].kind == ArgKind::PassThrough) {
-      newArgIdx++;
-      continue;
-    }
-
-    if (expandedArgs[i].kind == ArgKind::MemRefStatic) {
-      auto memrefTy = cast<fly::MemRefType>(oldInputs[i]);
-      BlockArgument ptrArg = entry.getArgument(newArgIdx);
-
-      Value layout = StaticOp::create(builder, loc, getNarrowLayoutType(memrefTy.getLayout()));
-      Value view = MakeViewOp::create(builder, loc, ptrArg, layout);
-
-      llvm::SmallPtrSet<Operation *, 8> except;
-      except.insert(view.getDefiningOp());
-      ptrArg.replaceAllUsesExcept(view, except);
-
-      newArgIdx++;
-      continue;
-    }
-
-    if (expandedArgs[i].kind == ArgKind::MemRefDynamic) {
-      auto memrefTy = cast<fly::MemRefType>(oldInputs[i]);
-      BlockArgument ptrArg = entry.getArgument(newArgIdx);
-      BlockArgument layoutStructArg = entry.getArgument(newArgIdx + 1);
-
-      Value layout = unpackNarrowLayoutFromStruct(builder, loc, layoutStructArg,
-                                                  memrefTy.getLayout(), layoutStructArg.getType());
-      Value view = MakeViewOp::create(builder, loc, ptrArg, layout);
-
-      llvm::SmallPtrSet<Operation *, 8> except;
-      except.insert(view.getDefiningOp());
-      for (Operation *user : layoutStructArg.getUsers())
-        except.insert(user);
-      ptrArg.replaceAllUsesExcept(view, except);
-
-      newArgIdx += 2;
-      continue;
-    }
-
-    BlockArgument structArg = entry.getArgument(newArgIdx);
-
-    SmallVector<OpOperand *, 16> usesToReplace;
-    for (OpOperand &use : structArg.getUses())
-      usesToReplace.push_back(&use);
-
-    Value reconstructed = unpackDSLValueFromStruct(builder, loc, structArg, oldInputs[i]);
-
-    for (OpOperand *use : usesToReplace)
-      use->set(reconstructed);
-
-    newArgIdx++;
-  }
-
-  return true;
-}
-
-void packDSLOperandsFromLaunchFunc(gpu::LaunchFuncOp op) {
-  OpBuilder builder(op);
-  Location loc = op.getLoc();
-
-  SmallVector<Value> oldKernelOperands(op.getKernelOperands().begin(),
-                                       op.getKernelOperands().end());
-  SmallVector<Value> newKernelOperands;
-  bool changed = false;
-
-  for (Value operand : oldKernelOperands) {
-    Type ty = operand.getType();
-    auto expanded = expandArgType(ty);
-
-    if (expanded.kind == ArgKind::PassThrough) {
-      newKernelOperands.push_back(operand);
-      continue;
-    }
-
-    changed = true;
-
-    if (expanded.kind == ArgKind::MemRefStatic || expanded.kind == ArgKind::MemRefDynamic) {
-      auto memrefTy = cast<fly::MemRefType>(ty);
-      auto [ptr, layoutStruct] = packMemRefToPtrAndLayout(builder, loc, operand, memrefTy);
-      newKernelOperands.push_back(ptr);
-      if (layoutStruct)
-        newKernelOperands.push_back(layoutStruct);
-    } else {
-      newKernelOperands.push_back(packDSLValueToStruct(
-          builder, loc, operand, ty, cast<LLVM::LLVMStructType>(expanded.types[0])));
-    }
-  }
-
-  if (changed)
-    op.getKernelOperandsMutable().assign(newKernelOperands);
-}
+};
 
 //===----------------------------------------------------------------------===//
 // Pass definition
@@ -685,23 +578,46 @@ public:
       RewriteFuncSignaturePass>::FlyRewriteFuncSignaturePassBase;
 
   void runOnOperation() override {
-    getOperation()->walk([&](FunctionOpInterface funcOp) {
-      sinkStaticArgsFromFunc(funcOp);
-      rewriteDSLArgsToStructFromFunc(funcOp);
+    MLIRContext *ctx = &getContext();
+    DslTypeConverter typeConverter(ctx);
+    RewritePatternSet patterns(ctx);
+    ConversionTarget target(*ctx);
+
+    populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns, typeConverter);
+    populateFunctionOpInterfaceTypeConversionPattern<gpu::GPUFuncOp>(patterns, typeConverter);
+    populateReturnOpTypeConversionPattern(patterns, typeConverter);
+    populateCallOpTypeConversionPattern(patterns, typeConverter);
+
+    // Everything not explicitly handled below is legal
+    target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
+    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
+      return typeConverter.isSignatureLegal(op.getFunctionType()) &&
+             typeConverter.isLegal(&op.getBody());
     });
-    getOperation()->walk([&](gpu::LaunchFuncOp launchOp) {
-      removeStaticOperandsFromLaunchFunc(launchOp);
-      packDSLOperandsFromLaunchFunc(launchOp);
+    target.addDynamicallyLegalOp<gpu::GPUFuncOp>([&](gpu::GPUFuncOp op) {
+      return typeConverter.isSignatureLegal(op.getFunctionType()) &&
+             typeConverter.isLegal(&op.getBody());
     });
+    target.addDynamicallyLegalOp<func::ReturnOp>([&](func::ReturnOp op) {
+      return isLegalForReturnOpTypeConversionPattern(op, typeConverter);
+    });
+    target.addDynamicallyLegalOp<func::CallOp>([&](func::CallOp op) {
+      return typeConverter.isLegal(op.getOperandTypes()) &&
+             typeConverter.isLegal(op.getResultTypes());
+    });
+    target.addDynamicallyLegalOp<gpu::LaunchFuncOp>([&](gpu::LaunchFuncOp op) {
+      return llvm::all_of(op.getKernelOperands().getTypes(),
+                          [&](Type t) { return typeConverter.isLegal(t); });
+    });
+
+    // scf.{for,if,while} + scf.yield + scf.condition signature handling.
+    scf::populateSCFStructuralTypeConversionsAndLegality(typeConverter, patterns, target);
+
+    patterns.add<RewriteLaunchFuncOperands>(typeConverter, ctx);
+
+    if (failed(applyPartialConversion(getOperation(), target, std::move(patterns))))
+      signalPassFailure();
   }
 };
 
 } // namespace
-
-namespace impl {
-
-std::unique_ptr<::mlir::Pass> createRewriteFuncSignaturePass() {
-  return std::make_unique<RewriteFuncSignaturePass>();
-}
-
-} // namespace impl

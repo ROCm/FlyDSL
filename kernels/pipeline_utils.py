@@ -1,4 +1,4 @@
-"""Shared pipeline utilities for gfx1250 GEMM kernels. """
+"""Shared pipeline utilities for gfx1250 GEMM kernels."""
 
 
 def make_tail_plan(num_buffers, pre_loaded, extra):
@@ -15,27 +15,15 @@ def make_tail_plan(num_buffers, pre_loaded, extra):
     steps = pre_loaded + extra
     plan = []
     for i in range(steps):
-        compute_stage = (
-            i if i < pre_loaded
-            else (i - pre_loaded + num_buffers - 1) % num_buffers
-        )
-        load_stage = (
-            (i + num_buffers - 1) % num_buffers if i < extra
-            else None
-        )
-        is_last = (i == steps - 1)
+        compute_stage = i if i < pre_loaded else (i - pre_loaded + num_buffers - 1) % num_buffers
+        load_stage = (i + num_buffers - 1) % num_buffers if i < extra else None
+        is_last = i == steps - 1
         if is_last:
             outstanding = -1
         else:
             j = i + 1
-            next_compute = (
-                j if j < pre_loaded
-                else (j - pre_loaded + num_buffers - 1) % num_buffers
-            )
-            outstanding = (
-                2 * (num_buffers - 2) if (load_stage is not None and load_stage != next_compute)
-                else 0
-            )
+            next_compute = j if j < pre_loaded else (j - pre_loaded + num_buffers - 1) % num_buffers
+            outstanding = 2 * (num_buffers - 2) if (load_stage is not None and load_stage != next_compute) else 0
         plan.append((load_stage, compute_stage, outstanding))
     return plan
 

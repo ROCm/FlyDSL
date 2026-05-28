@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+# fmt: off
+# ruff: noqa: E702,F841,I001
 
 
 """gfx1250 MoE 2-stage mxscale kernels (fp4/fp8/a8w4).
@@ -25,7 +27,9 @@ from kernels.moe_gemm_2stage_common_gfx1250 import (
     _compute_pipeline_plan,
     _compute_tdm_store_layout,
     _emit_stage1_gate_up_epilogue,
+    _emit_stage1_gate_up_splitk_epilogue,
     _emit_stage2_store_epilogue,
+    _emit_swiglu,
     _extract_sub8,
     _finalize_alloc_and_launch_2d,
     _make_moe_wave_layout,
@@ -36,7 +40,6 @@ from kernels.moe_gemm_2stage_common_gfx1250 import (
     _pick_mxscale_launch_shape,
     _require_gfx1250,
 )
-
 
 @functools.lru_cache(maxsize=64)
 def _compile_stage1_mxscale_kernel_impl(
@@ -58,20 +61,41 @@ def _compile_stage1_mxscale_kernel_impl(
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
     use_tdm_gather: bool = True,
+    use_tdm_gather_as: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     cluster_m: int = 1,
     cluster_n: int = 1,
+    k_batch: int = 1,
+    # ── Bias / activation ────────────────────────────────────────────
+    # ``enable_bias``: when True, the kernel signature includes an
+    # ``arg_bias`` operand of shape (E * 2*inter_dim,) f32. Stage1 adds
+    # ``bias[eid, gate_col]`` and ``bias[eid, inter_dim + up_col]``
+    # before activation. Layout matches torch's ``w1_bias`` (gate||up
+    # concatenation per expert).
+    # ``act``: ``"silu"`` (default) for ``silu(g)*u``; ``"swiglu"`` for
+    # GPT-OSS SwiGLU (``alpha=1.702``, ``limit=7.0``, hardcoded).
+    enable_bias: bool = False,
+    act: str = "silu",
 ):
-    """Compile mxscale stage1 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
+    """Compile mxscale stage1 single kernel (route-pack + TDM + WMMA_SCALE + epilog).
+
+    ``use_tdm_gather_as`` enables the TDM-gather path for the A-scale matrix,
+    moving that load off ``ds_cnt`` and onto ``tdm_cnt`` to eliminate the
+    ``s_wait_dscnt`` stalls that dominate the scalar per-byte fallback. Falls
+    back to the vectorised scalar path when the LDS scale layout is not
+    row-major (``wmma_m_rep > 1`` and not ``is_fp4``) or the row width is below
+    the TDM gather minimum (``scale_k_per_tile < 4``).
+    """
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
     from flydsl._mlir.dialects import llvm as llvm_dialect
-    from flydsl._mlir.dialects import scf
+    from flydsl._mlir.dialects import memref, scf
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr.rocdl import cluster
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
@@ -109,6 +133,59 @@ def _compile_stage1_mxscale_kernel_impl(
     interleaved_scale_cols_a = tp["interleaved_scale_cols_a"]
 
     N = int(inter_dim)
+
+    # ── Split-K validation / setup ────────────────────────────────────
+    # When k_batch > 1 the K dimension (model_dim) is split across the
+    # grid z-dim. Each CTA computes a K-slice and atomically accumulates
+    # gate / up partial sums into a [tokens*topk, 2*inter_dim] output.
+    # silu/mul fusion, doweight_stage1 and TDM store must be disabled for
+    # split-K; a separate reduction kernel fuses silu*mul and folds in
+    # the per-slot routing weight.
+    # Activation kind: 'silu' (default; matches the historical kernel
+    # that fuses ``silu(gate) * up`` in epilogue) or 'swiglu' (GPT-OSS
+    # gated-linear-unit; emits clamp + Swish_alpha + (up+1) in epilogue).
+    _act_kind = str(act).strip().lower()
+    if _act_kind not in ("silu", "swiglu"):
+        raise ValueError(
+            f"stage1 mxscale: unsupported act={act!r}; expected 'silu' or 'swiglu'")
+    _enable_bias = bool(enable_bias)
+    _is_splitk = int(k_batch) > 1
+    if _is_splitk:
+        if int(model_dim) % int(k_batch) != 0:
+            raise ValueError(
+                f"split-K requires model_dim divisible by k_batch, "
+                f"got model_dim={model_dim}, k_batch={k_batch}")
+        _k_per_batch = int(model_dim) // int(k_batch)
+        if _k_per_batch % int(tile_k) != 0:
+            raise ValueError(
+                f"split-K requires (model_dim // k_batch) divisible by tile_k, "
+                f"got k_per_batch={_k_per_batch}, tile_k={tile_k}")
+        if bool(use_tdm_store):
+            raise ValueError("split-K stage1 does not support use_tdm_store")
+        if bool(wave_specialized_tdm):
+            raise ValueError("split-K stage1 does not support wave_specialized_tdm")
+        if bool(doweight_stage1):
+            raise ValueError(
+                "split-K stage1 does not support fused doweight_stage1; "
+                "apply routing weight in the external reduction kernel")
+        # split-K stage1 atomically accumulates raw gate/up partials and
+        # fuses silu/mul in an external reduction kernel; SwiGLU would
+        # have to be applied there too, which is not currently wired.
+        if _act_kind != "silu":
+            raise ValueError(
+                "split-K stage1 fuses activation in the external reduction "
+                "kernel; only act='silu' is supported. Disable split-K "
+                "(k_batch=1) to use SwiGLU.")
+        _s1_out = str(out_dtype).strip().lower()
+        if _s1_out not in ("f16", "fp16", "half", "bf16", "bfloat16"):
+            raise ValueError(
+                f"split-K stage1 only supports fp16/bf16 output (x2 atomic fadd), "
+                f"got out_dtype={out_dtype!r}")
+        num_k_tiles_per_bz = _k_per_batch // int(tile_k)
+    else:
+        _k_per_batch = int(model_dim)
+        num_k_tiles_per_bz = num_k_tiles
+
     _merge_gate_up_tdm = bool((data_format in ("fp8", "a8w4")) and (N % int(tile_n) == 0))
     num_warps_s1 = int(m_warp) * int(n_warp)
     _tdm_loader_waves = 2 if _merge_gate_up_tdm else 4
@@ -125,6 +202,19 @@ def _compile_stage1_mxscale_kernel_impl(
         wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=is_fp4
     )
 
+    # A-scale TDM gather gating: requires A-side TDM gather (for _a_tok_ids
+    # SGPR caches), a row-major LDS scale layout (fp4 path is always row-major;
+    # non-fp4 is row-major only when wmma_m_rep == 1), and a gather row width
+    # of at least 4 bytes (TDM gather hardware constraint: row_width * elem_bytes % 4 == 0 and > 0).
+    _as_layout_rowmajor = bool(is_fp4) or (int(wmma_m_rep) == 1)
+    _as_row_bytes_ok = int(scale_k_per_tile) >= 4 and (int(scale_k_per_tile) % 4 == 0)
+    _use_tdm_gather_as = (
+        bool(use_tdm_gather_as)
+        and bool(use_tdm_gather)
+        and _as_layout_rowmajor
+        and _as_row_bytes_ok
+    )
+
     # Pipeline calculations for multi-buffer
     _use_pipeline = int(num_buffers) >= 2
     if _use_pipeline:
@@ -136,9 +226,10 @@ def _compile_stage1_mxscale_kernel_impl(
         else:
             _B_TDM_PER_STEP = 1 if bool(wave_specialized_tdm) else 4
         _pp = _compute_pipeline_plan(
-            num_k_tiles=num_k_tiles, num_buffers=int(num_buffers),
+            num_k_tiles=num_k_tiles_per_bz, num_buffers=int(num_buffers),
             B_TDM_PER_STEP=_B_TDM_PER_STEP, tile_m=int(tile_m),
             use_tdm_gather=use_tdm_gather,
+            use_tdm_gather_as=_use_tdm_gather_as,
             wave_specialized_tdm=wave_specialized_tdm,
             tdm_loader_waves=_tdm_loader_waves,
         )
@@ -147,6 +238,7 @@ def _compile_stage1_mxscale_kernel_impl(
         _tail_start = _pp["tail_start"]
         extra = _pp["extra"]
         _A_GATHER_GROUPS = _pp["A_GATHER_GROUPS"]
+        _AS_GATHER_GROUPS = _pp["AS_GATHER_GROUPS"]
         TDM_PER_STEP = _pp["TDM_PER_STEP"]
         _fence_outstanding = _pp["fence_outstanding"]
         _tail_plan = _pp["tail_plan"]
@@ -155,7 +247,10 @@ def _compile_stage1_mxscale_kernel_impl(
     alloc = SmemAllocator(
         None,
         arch=str(get_hip_arch()),
-        global_sym_name=f"moe_mxscale_{data_format}_s1_single_g{int(bool(use_tdm_gather))}",
+        global_sym_name=(
+            f"moe_mxscale_{data_format}_s1_single_g{int(bool(use_tdm_gather))}"
+            f"_as{int(_use_tdm_gather_as)}"
+        ),
     )
     _nb = int(num_buffers)
     off_ag_list, off_as_list = [], []
@@ -176,20 +271,33 @@ def _compile_stage1_mxscale_kernel_impl(
             _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_data_bytes; off_bu_list.append(_o)
             _o = alloc._align(alloc.ptr, 16); alloc.ptr = _o + lds_b_scale_bytes; off_bsu_list.append(_o)
 
+    # lds_tid: preloaded sorted_token_ids for current M-tile (tile_m entries, i32).
+    # Used to replace per-thread buffer_load(sorted_rsrc, ...) in the K-loop A-data/A-scale
+    # loaders and the epilogue. Invalid rows are pre-filled with sentinel 0xFFFFFFFF so
+    # that downstream tok/slot checks naturally reject them without needing row_in_route
+    # or row_in_valid masks.
+    lds_tid_bytes = int(tile_m) * 4
+    off_tid = alloc._align(alloc.ptr, 16)
+    alloc.ptr = off_tid + lds_tid_bytes
+
     if bool(use_tdm_store):
         from kernels.gemm_common_gfx1250 import store_acc_vec8_to_lds
         _ds1 = _compute_tdm_store_layout(
             warp_tile_m=warp_tile_m, warp_tile_n=warp_tile_n,
             num_warps=num_warps_s1, WMMA_N=WMMA_N, use_pipeline=_use_pipeline,
         )
+        total_d_bytes_s1 = _ds1["total_d_bytes"]
         lds_d_row_stride_s1 = _ds1["lds_d_row_stride"]
+        warp_d_bytes_s1 = _ds1["warp_d_bytes"]
         d_output_off_s1 = _ds1["d_output_off"]
         _lds_d_stride_elems_s1 = _ds1["lds_d_stride_elems"]
         _warp_d_elems_s1 = _ds1["warp_d_elems"]
         _n_col_d_elems_s1 = _ds1["n_col_d_elems"]
         d_need_epilogue_fence_s1 = _ds1["d_need_epilogue_fence"]
-        if _ds1["total_d_bytes"] > alloc.ptr:
-            alloc.ptr = _ds1["total_d_bytes"]
+        elem_bytes_d_s1 = 2
+        LDS_PAD_D_BYTES_s1 = 16
+        if total_d_bytes_s1 > alloc.ptr:
+            alloc.ptr = total_d_bytes_s1
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_mxscale_stage1_single(
@@ -202,12 +310,25 @@ def _compile_stage1_mxscale_kernel_impl(
         arg_expert_ids: fx.Tensor,
         arg_sorted_weights: fx.Tensor,
         arg_num_valid_ids: fx.Tensor,
+        # ``arg_bias`` (f32, flat E*2*inter_dim) is unused when
+        # ``enable_bias=False`` at compile time but is always present in
+        # the kernel signature so the runtime tuple shape is stable.
+        # Callers should pass an empty tensor when bias is disabled.
+        arg_bias: fx.Tensor,
         i32_tokens_in: fx.Int32,
         i32_inter_in: fx.Int32,
         i32_k_in: fx.Int32,
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = i32_k_in
+        # ASTRewriter strips ``const_expr(...)`` from ``if`` tests, which would
+        # otherwise eliminate every reference to ``const_expr`` from the
+        # rewritten function body and shrink ``co_freevars`` by one — causing
+        # CPython to reject ``f.__code__ = new_f_code_o`` because the original
+        # ``__closure__`` length no longer matches. Keep one explicit reference
+        # so the rewritten code object's free-vars list still includes
+        # ``const_expr``.
+        _keep_const_expr_ref = const_expr  # noqa: F841
         if const_expr(inst_prefetch):
             if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
                           arith.constant(0, type=T.i32)):
@@ -220,16 +341,18 @@ def _compile_stage1_mxscale_kernel_impl(
                     "\n".join(_prefetch_lines),
                     "", has_side_effects=True,
                 )
-        llvm_dialect.inline_asm(
-            None, [],
-            "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
-            "",
-            has_side_effects=True,
-        )
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
+
+        # Split-K: bz identifies the K-slice; k_base_idx is the starting
+        # K offset (in data elements, pre-pack) for this CTA.
+        if _is_splitk:
+            bz = gpu.block_id("z")  # already index type
+            k_base_idx = bz * arith.index(int(_k_per_batch))
+        else:
+            k_base_idx = arith.index(0)
 
         tokens_idx = arith.index_cast(T.index, i32_tokens_in)
         size_expert_ids = arith.index_cast(T.index, i32_size_expert_ids_in)
@@ -257,6 +380,11 @@ def _compile_stage1_mxscale_kernel_impl(
         sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False, num_records_bytes=sw_nbytes)
         out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=True)
         tw_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=True)
+        # bias resource: only meaningful when ``_enable_bias=True``. We
+        # always create it (with max_size=True so an empty tensor is
+        # tolerated) so the kernel signature stays stable; the epilogue
+        # only issues buffer_load on it when the constexpr flag is set.
+        bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=True)
 
         eid_i32 = buffer_ops.buffer_load(eid_rsrc, arith.index_cast(T.i32, by), vec_width=1, dtype=T.i32)
         eid_ok0 = arith.cmpi(arith.CmpIPredicate.sge, eid_i32, arith.constant(0, type=T.i32))
@@ -275,8 +403,8 @@ def _compile_stage1_mxscale_kernel_impl(
         blk_n = bx * arith.index(int(tile_n))
 
         if const_expr(use_cluster):
-            _local_x, _local_y = gpu.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+            _local_x, _local_y = cluster.compute_cluster_position()
+            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0
@@ -305,6 +433,8 @@ def _compile_stage1_mxscale_kernel_impl(
                     SmemPtr(base_ptr, off_bu_list[_bi], T.i8, shape=(lds_b_data_bytes,)).get()))
                 lds_bsu_bufs.append(get_op_result_or_value(
                     SmemPtr(base_ptr, off_bsu_list[_bi], T.i8, shape=(lds_b_scale_bytes,)).get()))
+
+        lds_tid = SmemPtr(base_ptr, off_tid, T.i32, shape=(int(tile_m),)).get()
 
         if const_expr(bool(use_tdm_store)):
             from kernels.gemm_common_gfx1250 import get_lds_memref
@@ -363,17 +493,13 @@ def _compile_stage1_mxscale_kernel_impl(
                 with ir.InsertionPoint(_if_elem.then_block):
                     row = elem // arith.index(int(packed_tile_k_a))
                     col = elem % arith.index(int(packed_tile_k_a))
-                    sorted_row = by * arith.index(int(tile_m)) + row
-                    row_i32 = arith.index_cast(T.i32, row)
-                    sorted_i32 = arith.index_cast(T.i32, sorted_row)
-                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, row_i32, arith.constant(int(route_tile_m), type=T.i32))
-                    row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
-                    row_ok = arith.andi(row_in_route, row_in_valid)
-                    sorted_safe = arith.select(row_ok, sorted_i32, block_row_start)
-                    fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
+                    # Use preloaded lds_tid instead of per-thread buffer_load(sorted_rsrc, ...).
+                    # Invalid rows were pre-filled with sentinel 0xFFFFFFFF at preload, so
+                    # tok=0xFFFFFF will make tok_ok=false for them.
+                    fused = _load_fused_from_lds(row)
                     tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
                     tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
-                    load_ok = arith.andi(row_ok, tok_ok)
+                    load_ok = tok_ok
                     x_idx = tok * arith.constant(K_packed_a, type=T.i32) + arith.index_cast(T.i32, k_packed_base + col)
                     x_idx_safe = arith.select(load_ok, x_idx, arith.constant(0, type=T.i32))
                     x_val = arith.select(load_ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
@@ -396,37 +522,77 @@ def _compile_stage1_mxscale_kernel_impl(
                 _acc = _acc + _vals[_vi]
             return _acc
 
+        def _preload_sorted_ids_to_lds():
+            """Preload tile_m sorted_token_ids entries into ``lds_tid`` (once per CTA).
+
+            Row ``ri`` (ri in ``[0, tile_m)``) gets the raw i32 from
+            ``sorted_token_ids[by * tile_m + ri]`` when that row is both inside
+            the block's route slot range and the valid prefix; otherwise the
+            sentinel ``0xFFFFFFFF`` is stored so that downstream
+            ``tok = fused & 0xFFFFFF`` / ``slot = fused >> 24`` decoding makes
+            ``tok_ok`` and ``slot_ok1`` naturally false, eliminating the need
+            for separate ``row_in_route`` / ``row_in_valid`` guards at every
+            consumer site.
+            """
+            _tid_in_range = arith.cmpi(
+                arith.CmpIPredicate.ult, tx, fx.Index(int(tile_m)))
+            _if_tid = scf.IfOp(_tid_in_range)
+            with ir.InsertionPoint(_if_tid.then_block):
+                _tx_i32 = arith.index_cast(T.i32, tx)
+                _sorted_row = by * fx.Index(int(tile_m)) + tx
+                _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
+                _in_route = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    _tx_i32,
+                    arith.constant(int(route_tile_m), type=T.i32),
+                )
+                _in_valid = arith.cmpi(
+                    arith.CmpIPredicate.slt, _sorted_i32, num_valid_i32)
+                _row_valid = arith.andi(_in_route, _in_valid)
+                _row_safe_i32 = arith.select(
+                    _row_valid, _sorted_i32, block_row_start)
+                _raw = buffer_ops.buffer_load(
+                    sorted_rsrc, _row_safe_i32, vec_width=1, dtype=T.i32)
+                _sentinel = arith.constant(-1, type=T.i32)  # 0xFFFFFFFF
+                _val = arith.select(_row_valid, _raw, _sentinel)
+                _vec1 = vector.from_elements(T.vec(1, T.i32), [_val])
+                vector.store(_vec1, lds_tid, [tx], alignment=4)
+                scf.YieldOp([])
+            workgroup_barrier(use_cluster=use_cluster)
+
+        def _load_fused_from_lds(row_index):
+            """Load the cached ``fused`` i32 for a row (``0 <= row_index < tile_m``).
+
+            ``row_index`` may be a Python int (compile-time constant) or an
+            index-typed SSA value — both map to a single ``ds_read_b32``.
+            Invalid rows were pre-filled with ``0xFFFFFFFF`` at preload time.
+            """
+            if isinstance(row_index, int):
+                row_index = arith.index(row_index)
+            return memref.load(lds_tid, [row_index])
+
         def _precompute_a_row_indices():
-            """Load sorted_ids for all tile_m rows and decode token_ids + output row indices."""
+            """Decode per-row token/slot meta from ``lds_tid`` into sgpr lists.
+
+            Reads the preloaded i32 for each ``ri`` via a uniform ``ds_read_b32``
+            (one per row for the whole wave), then ``readfirstlane`` to produce
+            sgpr values used by TDM gather and TDM store. Invalid rows decode
+            to ``tok=0xFFFFFF``/``slot=0xFF`` via the sentinel, which the
+            ``tok_ok`` / ``slot_ok`` checks below reject.
+            """
             _safe_row = arith.constant(0, type=T.i32)
             _one_i32 = arith.constant(1, type=T.i32)
             _zero_i32 = arith.constant(0, type=T.i32)
             for _ri in range_constexpr(int(tile_m)):
-                _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
-                _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
-                _row_in_route = arith.cmpi(
-                    arith.CmpIPredicate.ult,
-                    fx.Int32(_ri),
-                    fx.Int32(int(route_tile_m)),
-                )
-                _row_in_valid = arith.cmpi(
-                    arith.CmpIPredicate.slt,
-                    _sorted_i32,
-                    num_valid_i32,
-                )
-                _row_ok = arith.andi(_row_in_route, _row_in_valid)
-                _sorted_safe = arith.select(
-                    _row_ok, _sorted_i32,
-                    block_row_start,
-                )
-                _fused = buffer_ops.buffer_load(sorted_rsrc, _sorted_safe, vec_width=1, dtype=T.i32)
-                _tok = _fused & fx.Int32((1 << 24) - 1)
-                _slot = _fused >> fx.Int32(24)
+                _fused = _load_fused_from_lds(_ri)
+                _fused_sgpr = rocdl.readfirstlane(T.i32, _fused)
+                _tok = _fused_sgpr & fx.Int32((1 << 24) - 1)
+                _slot = _fused_sgpr >> fx.Int32(24)
                 _tok_ok = arith.cmpi(arith.CmpIPredicate.ult, _tok, i32_tokens_in)
                 _slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, _slot, fx.Int32(0))
                 _slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, _slot, c_topk_i32)
                 _slot_ok = arith.andi(_slot_ok0, _slot_ok1)
-                _row_tok_ok = arith.andi(_row_ok, _tok_ok)
+                _row_tok_ok = _tok_ok
                 _load_valid_i32 = arith.select(_row_tok_ok, _one_i32, _zero_i32)
                 _a_load_valids.append(rocdl.readfirstlane(T.i32, _load_valid_i32))
                 _tok_safe = arith.select(_row_tok_ok, _tok, _safe_row)
@@ -463,17 +629,35 @@ def _compile_stage1_mxscale_kernel_impl(
                 _a_tokens_topk_sgpr = rocdl.readfirstlane(T.i32, _m_i32)
             return _a_tokens_topk_sgpr
 
-        def issue_a_load_tdm_gather(k_base, target_lds):
-            """Load A data using TDM gather mode — one TDM instruction per 8 rows."""
-            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+        # Cache of K-invariant pieces of the TDM gather descriptor:
+        #   "desc"[_gi][buf_idx] — full TDMGatherDescriptor with addr_lo = base
+        #                          (built at global_byte_offset=None),
+        #   "pred"[_gi]          — issue predicate (valid_count > 0, wave owner),
+        #   "base_addr_lo"[_gi]  — dgroup0.lane2 at global_byte_offset=0,
+        #   "base_addr_hi"[_gi]  — dgroup0.lane3 at global_byte_offset=0
+        #                          (with the descriptor's type-field bits intact;
+        #                          consumed by tdm_ops.add_addr_with_carry to
+        #                          propagate the lo-32-bit overflow into hi).
+        # populated once by ``_build_a_gather_base_descs()`` before the K loop
+        # so the hot path (``issue_a_load_tdm_gather``) only advances the
+        # base address via the carry-safe ``update_*_addr64`` helper each
+        # iteration.
+        _a_gather_cache = {}
+
+        def _build_a_gather_base_descs(lds_bufs):
+            if "desc" in _a_gather_cache:
+                return
             _tokens_dim1 = _get_tokens_sgpr()
             _zero_i32 = arith.constant(0, type=T.i32)
+            _descs = []
+            _preds = []
+            _base_addr_lo = []
+            _base_addr_hi = []
             for _gi in range_constexpr(_TDM_GATHER_GROUPS):
                 _start = _gi * _TDM_GATHER_CHUNK
                 _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
                 _row_indices = _a_tok_ids[_start:_start + _cnt]
                 _valid_count = _sum_i32_values(_a_load_valids[_start:_start + _cnt])
-                _lds_off = fx.Index(_start * lds_a_stride_bytes)
                 _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
                 _issue_pred = _has_valid
                 if const_expr(wave_specialized_tdm):
@@ -484,11 +668,19 @@ def _compile_stage1_mxscale_kernel_impl(
                         arith.constant(_gather_owner, type=T.i32),
                     )
                     _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
-                _if_issue = scf.IfOp(_issue_pred)
-                with ir.InsertionPoint(_if_issue.then_block):
-                    desc = tdm_ops.make_tensor_gather_descriptor(
+                _preds.append(_issue_pred)
+
+                _lds_off = fx.Index(_start * lds_a_stride_bytes)
+                _per_buf = []
+                # NOTE: must use range_constexpr here. The AST rewriter
+                # (InsertEmptyYieldForSCFFor) turns a plain `range` inside a
+                # kernel body into scf_range -> scf.ForOp, making the loop
+                # variable an MLIR induction value (ArithValue) and breaking
+                # Python list indexing below.
+                for _buf_i in range_constexpr(len(lds_bufs)):
+                    _base_desc = tdm_ops.make_tensor_gather_descriptor(
                         global_ptr=arg_x,
-                        lds_memref=target_lds,
+                        lds_memref=lds_bufs[_buf_i],
                         row_indices=_row_indices,
                         row_width=int(packed_tile_k_a),
                         tensor_dim0=K_packed_a,
@@ -500,57 +692,381 @@ def _compile_stage1_mxscale_kernel_impl(
                         index_size=32,
                         gather_tile_dim1=_valid_count,
                         lds_byte_offset=_lds_off,
-                        global_byte_offset=k_packed_base,
+                        global_byte_offset=None,
                     )
-                    tdm_ops.tensor_load_gather(desc)
+                    _per_buf.append(_base_desc)
+                _descs.append(_per_buf)
+                # addr_lo / addr_hi are independent of buf_idx (only lds_addr
+                # differs), so we can extract them from any buffer's base
+                # descriptor.
+                _base_addr_lo.append(vector.extract(
+                    _per_buf[0].dgroup0,
+                    static_position=[2],
+                    dynamic_position=[],
+                ))
+                _base_addr_hi.append(vector.extract(
+                    _per_buf[0].dgroup0,
+                    static_position=[3],
+                    dynamic_position=[],
+                ))
+
+            _a_gather_cache["desc"] = _descs
+            _a_gather_cache["pred"] = _preds
+            _a_gather_cache["base_addr_lo"] = _base_addr_lo
+            _a_gather_cache["base_addr_hi"] = _base_addr_hi
+
+        def issue_a_load_tdm_gather(k_base, buf_idx):
+            """Hot path: advance addr_lo on the precomputed gather descriptor.
+
+            Requires ``_build_a_gather_base_descs(lds_bufs)`` to have been
+            called once before the K loop with the matching LDS buffer list.
+            Uses the carry-safe ``update_tensor_gather_descriptor_addr64`` so
+            that ``base_addr_lo + k_byte_off`` overflowing the i32 boundary
+            propagates into ``addr_hi`` instead of silently wrapping into a
+            wrong 4 GiB page (which on gfx1250 deadlocks the GPU in
+            ``amdgpu_mes_reg_write_reg_wait``).
+            """
+            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+            _k_byte_off_i32 = arith.index_cast(T.i32, k_packed_base)
+            _descs = _a_gather_cache["desc"]
+            _preds = _a_gather_cache["pred"]
+            _base_addr_lo = _a_gather_cache["base_addr_lo"]
+            _base_addr_hi = _a_gather_cache["base_addr_hi"]
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _if_issue = scf.IfOp(_preds[_gi])
+                with ir.InsertionPoint(_if_issue.then_block):
+                    tdm_ops.tensor_load_gather(
+                        tdm_ops.update_tensor_gather_descriptor_addr64(
+                            _descs[_gi][buf_idx],
+                            _base_addr_lo[_gi],
+                            _base_addr_hi[_gi],
+                            _k_byte_off_i32,
+                        )
+                    )
                     scf.YieldOp([])
+
+        # Cache of K-invariant 2D B / B-scale descriptors used by
+        # ``_issue_b_tdm_only``. Each entry stores a base TDMDescriptor2D
+        # built at k_base=0 plus its extracted scalar addr_lo / addr_hi, so
+        # the hot path can call the carry-safe
+        # ``update_tensor_descriptor_2d_addr64`` directly and avoid the
+        # silent i32-wraparound bug that the addr-lo-only shortcut has on
+        # large MoE expert-weight buffers (~3.5 GiB fp4 tensors with E=257
+        # experts on gfx1250 reliably trigger the overflow). Mirrors the
+        # hoist that wave_specialized_tdm already does internally via
+        # ``_active_stage_desc_base``. ``_build_b_base_descs()`` is closed
+        # over later-defined names (``_stage1_pair_row_base``, the
+        # ``make_desc_b*`` helpers, and the various ``lds_b*_bufs`` lists);
+        # those names are resolved at *call* time inside ``_if_blk``.
+        _b_desc_cache = {}
+
+        def _extract_desc_addr_lo(desc):
+            return vector.extract(
+                desc.dgroup0,
+                static_position=[2],
+                dynamic_position=[],
+            )
+
+        def _extract_desc_addr_hi(desc):
+            return vector.extract(
+                desc.dgroup0,
+                static_position=[3],
+                dynamic_position=[],
+            )
+
+        def _build_b_base_descs():
+            if "ready" in _b_desc_cache:
+                return
+            _zero_k = arith.index(0)
+            if const_expr(_merge_gate_up_tdm):
+                _n_pair = _stage1_pair_row_base()
+                _bg_pair = [
+                    make_desc_b_pair(lds_bg_pair_bufs[i], _n_pair, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bs_pair = [
+                    make_desc_bs_pair(lds_bs_pair_bufs[i], _n_pair, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _b_desc_cache["bg_pair"] = _bg_pair
+                _b_desc_cache["bs_pair"] = _bs_pair
+                _b_desc_cache["bg_pair_addr_lo"] = [
+                    _extract_desc_addr_lo(d) for d in _bg_pair
+                ]
+                _b_desc_cache["bg_pair_addr_hi"] = [
+                    _extract_desc_addr_hi(d) for d in _bg_pair
+                ]
+                _b_desc_cache["bs_pair_addr_lo"] = [
+                    _extract_desc_addr_lo(d) for d in _bs_pair
+                ]
+                _b_desc_cache["bs_pair_addr_hi"] = [
+                    _extract_desc_addr_hi(d) for d in _bs_pair
+                ]
+            else:
+                _eid_row = (
+                    arith.index_cast(T.index, eid_i32)
+                    * arith.index(int(2 * N))
+                )
+                _n_gate = _eid_row + blk_n
+                _n_up = _eid_row + blk_n + arith.index(int(N))
+                _bg = [
+                    make_desc_b(lds_bg_bufs[i], _n_gate, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bu = [
+                    make_desc_b(lds_bu_bufs[i], _n_up, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bs = [
+                    make_desc_bs(lds_bs_bufs[i], _n_gate, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _bsu = [
+                    make_desc_bs(lds_bsu_bufs[i], _n_up, _zero_k)
+                    for i in range_constexpr(_nb)
+                ]
+                _b_desc_cache["bg"] = _bg
+                _b_desc_cache["bu"] = _bu
+                _b_desc_cache["bs"] = _bs
+                _b_desc_cache["bsu"] = _bsu
+                _b_desc_cache["bg_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bg]
+                _b_desc_cache["bg_addr_hi"] = [_extract_desc_addr_hi(d) for d in _bg]
+                _b_desc_cache["bu_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bu]
+                _b_desc_cache["bu_addr_hi"] = [_extract_desc_addr_hi(d) for d in _bu]
+                _b_desc_cache["bs_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bs]
+                _b_desc_cache["bs_addr_hi"] = [_extract_desc_addr_hi(d) for d in _bs]
+                _b_desc_cache["bsu_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bsu]
+                _b_desc_cache["bsu_addr_hi"] = [_extract_desc_addr_hi(d) for d in _bsu]
+            _b_desc_cache["ready"] = True
+
+        def _b_data_k_byte_off(k_base):
+            # Byte offset along the fastest axis for a B-data descriptor:
+            #   non-fp4 / merged pair : (k_base / PACK_FACTOR_B) * 16 bytes
+            #   fp4                   : (k_base / PACK_FACTOR_B) bytes
+            # Matches `make_desc_b` / `make_desc_b_pair` global_offset math
+            # (elem_bytes=1 there, so element offset == byte offset).
+            _k_packed_b = (
+                k_base if PACK_FACTOR_B == 1
+                else k_base // fx.Index(PACK_FACTOR_B)
+            )
+            if const_expr(is_fp4):
+                return arith.index_cast(T.i32, _k_packed_b)
+            return arith.index_cast(
+                T.i32, _k_packed_b * fx.Index(16))
+
+        def _b_scale_k_byte_off(k_base):
+            # B-scale fastest-axis offset: k_base / SCALE_BLOCK bytes.
+            return arith.index_cast(
+                T.i32, k_base // fx.Index(SCALE_BLOCK))
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
 
         def issue_as_load(k_scale_base, target_lds):
-            total = int(tile_m * scale_k_per_tile)
-            rounds = (total + block_threads - 1) // block_threads
-            for it in range(rounds):
-                elem = tx + fx.Index(it * block_threads)
-                in_range = arith.cmpi(arith.CmpIPredicate.ult, arith.index_cast(T.i32, elem), arith.constant(total, type=T.i32))
-                _if_elem = scf.IfOp(in_range)
-                with ir.InsertionPoint(_if_elem.then_block):
-                    row = elem // arith.index(int(scale_k_per_tile))
-                    ksc = elem % arith.index(int(scale_k_per_tile))
-                    sorted_row = by * arith.index(int(tile_m)) + row
-                    row_i32 = arith.index_cast(T.i32, row)
-                    sorted_i32 = arith.index_cast(T.i32, sorted_row)
-                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, row_i32, arith.constant(int(route_tile_m), type=T.i32))
-                    row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
-                    row_ok = arith.andi(row_in_route, row_in_valid)
-                    sorted_safe = arith.select(row_ok, sorted_i32, block_row_start)
-                    fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
-                    tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
-                    tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
-                    load_ok = arith.andi(row_ok, tok_ok)
-                    ksc_off = k_scale_base + ksc
-                    sx_idx = tok * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
-                    sx_idx_safe = arith.select(load_ok, sx_idx, arith.constant(0, type=T.i32))
-                    sx_val = arith.select(load_ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
-                    if const_expr(is_fp4):
-                        lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
-                    else:
-                        warp_row_idx = row / arith.index(warp_tile_m)
-                        local_row = row % arith.index(warp_tile_m)
-                        lane_row = local_row % arith.index(WMMA_M)
-                        local_wm_idx = local_row / arith.index(WMMA_M)
-                        global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
-                        ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
-                        ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
-                        lds_idx = (
-                            global_lds_row * arith.index(interleaved_scale_cols_a)
-                            + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
-                            + local_wm_idx * arith.index(SCALES_PER_WMMA)
-                            + ksc_sub
+            """Vectorised scalar A-scale loader (Option B).
+
+            Each thread loads one ``SCALES_PER_WMMA``-sized chunk (4 bytes)
+            and writes it either to the row-major LDS slot (``is_fp4`` or
+            ``wmma_m_rep == 1``) or to the interleaved LDS slot. Avoiding a
+            full-row i8 vector load is important for row widths such as 16
+            bytes, where LLVM cannot legalize ``v16i8`` raw buffer loads.
+
+            Rare fallback: ``scale_k_per_tile`` not a multiple of 4 falls back
+              to the original per-byte loop for correctness.
+            """
+            _blk_bytes = int(SCALES_PER_WMMA)
+            _row_bytes = int(scale_k_per_tile)
+            if const_expr(_row_bytes % _blk_bytes == 0 and _row_bytes >= _blk_bytes):
+                _blk_vec_type = T.vec(_blk_bytes, T.i8)
+                _blks_per_row = _row_bytes // _blk_bytes
+                total = int(tile_m) * _blks_per_row
+                rounds = (total + block_threads - 1) // block_threads
+                for it in range(rounds):
+                    elem = tx + fx.Index(it * block_threads)
+                    in_range = arith.cmpi(
+                        arith.CmpIPredicate.ult,
+                        arith.index_cast(T.i32, elem),
+                        arith.constant(total, type=T.i32),
+                    )
+                    _if_elem = scf.IfOp(in_range)
+                    with ir.InsertionPoint(_if_elem.then_block):
+                        row = elem // arith.index(_blks_per_row)
+                        ksc_blk = elem % arith.index(_blks_per_row)
+                        fused = _load_fused_from_lds(row)
+                        tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
+                        tok_ok = arith.cmpi(
+                            arith.CmpIPredicate.ult, tok, i32_tokens_in,
                         )
-                    v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
-                    vector.store(v1, target_lds, [lds_idx], alignment=1)
+                        if const_expr(_as_layout_rowmajor):
+                            lds_idx = (
+                                row * arith.index(_row_bytes)
+                                + ksc_blk * arith.index(_blk_bytes)
+                            )
+                        else:
+                            warp_row_idx = row / arith.index(warp_tile_m)
+                            local_row = row % arith.index(warp_tile_m)
+                            lane_row = local_row % arith.index(WMMA_M)
+                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            global_lds_row = (
+                                warp_row_idx * arith.index(WMMA_M) + lane_row
+                            )
+                            lds_idx = (
+                                global_lds_row
+                                * arith.index(interleaved_scale_cols_a)
+                                + ksc_blk
+                                * arith.index(wmma_m_rep * SCALES_PER_WMMA)
+                                + local_wm_idx * arith.index(SCALES_PER_WMMA)
+                            )
+                        _if_ok = scf.IfOp(tok_ok, has_else=True)
+                        with ir.InsertionPoint(_if_ok.then_block):
+                            chunk_off = (
+                                k_scale_base
+                                + ksc_blk * arith.index(_blk_bytes)
+                            )
+                            sx_idx = (
+                                tok * arith.constant(K_scale, type=T.i32)
+                                + arith.index_cast(T.i32, chunk_off)
+                            )
+                            sx_raw = buffer_ops.buffer_load(
+                                sx_rsrc,
+                                arith.shrui(
+                                    sx_idx,
+                                    arith.constant(2, type=T.i32),
+                                ),
+                                vec_width=1,
+                                dtype=T.i32,
+                            )
+                            sx_vec = vector.bitcast(
+                                _blk_vec_type,
+                                vector.from_elements(T.vec(1, T.i32), [sx_raw]),
+                            )
+                            vector.store(
+                                sx_vec, target_lds, [lds_idx],
+                                alignment=_blk_bytes,
+                            )
+                            scf.YieldOp([])
+                        with ir.InsertionPoint(_if_ok.else_block):
+                            fill_vec = vector.bitcast(
+                                _blk_vec_type,
+                                vector.from_elements(
+                                    T.vec(1, T.i32),
+                                    [arith.constant(0x7F7F7F7F, type=T.i32)],
+                                ),
+                            )
+                            vector.store(
+                                fill_vec, target_lds, [lds_idx],
+                                alignment=_blk_bytes,
+                            )
+                            scf.YieldOp([])
+                        scf.YieldOp([])
+            else:
+                # Rare fallback: keep per-byte loop for scale widths not aligned
+                # to 4 bytes (should not happen for gfx1250 MoE MX configs).
+                total = int(tile_m * scale_k_per_tile)
+                rounds = (total + block_threads - 1) // block_threads
+                for it in range(rounds):
+                    elem = tx + fx.Index(it * block_threads)
+                    in_range = arith.cmpi(
+                        arith.CmpIPredicate.ult,
+                        arith.index_cast(T.i32, elem),
+                        arith.constant(total, type=T.i32),
+                    )
+                    _if_elem = scf.IfOp(in_range)
+                    with ir.InsertionPoint(_if_elem.then_block):
+                        row = elem // arith.index(int(scale_k_per_tile))
+                        ksc = elem % arith.index(int(scale_k_per_tile))
+                        fused = _load_fused_from_lds(row)
+                        tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
+                        tok_ok = arith.cmpi(
+                            arith.CmpIPredicate.ult, tok, i32_tokens_in,
+                        )
+                        load_ok = tok_ok
+                        ksc_off = k_scale_base + ksc
+                        sx_idx = tok * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
+                        sx_idx_safe = arith.select(load_ok, sx_idx, arith.constant(0, type=T.i32))
+                        sx_val = arith.select(
+                            load_ok,
+                            buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8),
+                            arith.constant(127, type=T.i8),
+                        )
+                        if is_fp4:
+                            lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
+                        else:
+                            warp_row_idx = row / arith.index(warp_tile_m)
+                            local_row = row % arith.index(warp_tile_m)
+                            lane_row = local_row % arith.index(WMMA_M)
+                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
+                            ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                            ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
+                            lds_idx = (
+                                global_lds_row * arith.index(interleaved_scale_cols_a)
+                                + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
+                                + local_wm_idx * arith.index(SCALES_PER_WMMA)
+                                + ksc_sub
+                            )
+                        v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
+                        vector.store(v1, target_lds, [lds_idx], alignment=1)
+                        scf.YieldOp([])
+
+        def issue_as_load_tdm_gather(k_scale_base, target_lds):
+            """TDM-gather A-scale loader (Option A).
+
+            Issues one TDM gather per 8-row group (``_TDM_GATHER_GROUPS``
+            total), each covering up to 8 rows × ``scale_k_per_tile`` bytes.
+            Reuses the ``_a_tok_ids`` SGPR cache built by
+            ``_precompute_a_row_indices()`` for the A-data path, so no extra
+            scalar loads of ``sorted_rsrc`` are issued here. Completion is
+            tracked via ``tdm_cnt`` instead of ``ds_cnt``, eliminating the
+            ``s_wait_dscnt 0`` stall cluster previously caused by per-byte
+            ``buffer_load`` + ``ds_write_b8`` on the scalar path.
+
+            Pre-conditions (enforced by the gating above):
+              - ``use_tdm_gather=True`` (otherwise ``_a_tok_ids`` is empty).
+              - Row-major LDS scale layout (``is_fp4`` or ``wmma_m_rep == 1``).
+              - ``scale_k_per_tile`` is a positive multiple of 4 (TDM row_width
+                hardware alignment).
+            """
+            _as_row_bytes = int(scale_k_per_tile)
+            _tokens_dim1 = _get_tokens_sgpr()
+            _zero_i32 = arith.constant(0, type=T.i32)
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _start = _gi * _TDM_GATHER_CHUNK
+                _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
+                _row_indices = _a_tok_ids[_start:_start + _cnt]
+                _valid_count = _sum_i32_values(_a_load_valids[_start:_start + _cnt])
+                _lds_off = fx.Index(_start * _as_row_bytes)
+                _has_valid = arith.cmpi(
+                    arith.CmpIPredicate.sgt, _valid_count, _zero_i32,
+                )
+                _issue_pred = _has_valid
+                if wave_specialized_tdm:
+                    _gather_owner = _gi % _tdm_loader_waves
+                    _is_gather_loader = arith.cmpi(
+                        arith.CmpIPredicate.eq,
+                        _tdm_wave_id,
+                        arith.constant(_gather_owner, type=T.i32),
+                    )
+                    _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
+                _if_issue = scf.IfOp(_issue_pred)
+                with ir.InsertionPoint(_if_issue.then_block):
+                    desc = tdm_ops.make_tensor_gather_descriptor(
+                        global_ptr=arg_scale_x,
+                        lds_memref=target_lds,
+                        row_indices=_row_indices,
+                        row_width=_as_row_bytes,
+                        tensor_dim0=int(K_scale),
+                        tensor_dim1=_tokens_dim1,
+                        stride=int(K_scale),
+                        elem_bytes=1,
+                        pad_interval=0,
+                        pad_amount=0,
+                        index_size=32,
+                        gather_tile_dim1=_valid_count,
+                        lds_byte_offset=_lds_off,
+                        global_byte_offset=k_scale_base,
+                    )
+                    tdm_ops.tensor_load_gather(desc)
                     scf.YieldOp([])
 
         def make_desc_b(lds_b_mem, n_off, k_base):
@@ -633,6 +1149,7 @@ def _compile_stage1_mxscale_kernel_impl(
 
         _if_blk = scf.IfOp(block_ok)
         with ir.InsertionPoint(_if_blk.then_block):
+            _preload_sorted_ids_to_lds()
             if const_expr(_use_tdm_gather_a or bool(use_tdm_store)):
                 _precompute_a_row_indices()
             a_data_bases = _precompute_a_data_bases()
@@ -1077,58 +1594,145 @@ def _compile_stage1_mxscale_kernel_impl(
                         _scale_adv_i32,
                     )
 
-                def _issue_active_b_tdm_only(stage_idx, curr_addr_lo):
+                # Pre-build per-stage TDMDescriptor2D bases. dgroup0 lanes 2/3
+                # carry placeholder addr_lo / addr_hi values that the hot path
+                # overwrites every iteration via the carry-safe
+                # ``update_tensor_descriptor_2d_addr_lo_hi`` helper, so the
+                # lane-3 placeholder here is only there to keep the descriptor
+                # well-typed -- ``_active_addr_hi`` is still consulted as the
+                # initial state of the hi register tracked through the pipeline
+                # so its type-field bits feed back into the carry helper.
+                _tdm_zero_addr_lo = arith.constant(0, type=T.i32)
+                _active_stage_desc_base = [
+                    tdm_ops.TDMDescriptor2D(
+                        vector.from_elements(T.vec(4, T.i32), [
+                            _tdm_pred,
+                            _active_stage_lds_addr[i],
+                            _tdm_zero_addr_lo,
+                            _active_addr_hi,
+                        ]),
+                        _active_dgroup1,
+                    )
+                    for i in range_constexpr(_nb)
+                ]
+
+                def _issue_active_b_tdm_only(stage_idx, curr_addr_lo, curr_addr_hi):
+                    """Issue one B-load and advance the carry-safe (lo, hi) pair.
+
+                    Both ``curr_addr_lo`` and ``curr_addr_hi`` come from the
+                    pipeline-carried state; the descriptor's lanes 2 and 3 are
+                    spliced from these every iteration so a lo-32-bit overflow
+                    in the K-loop accumulation propagates into hi instead of
+                    silently aliasing into the wrong 4 GiB page.
+                    """
                     _if_loader = scf.IfOp(_is_loader_wave)
                     with ir.InsertionPoint(_if_loader.then_block):
-                        _dg0 = vector.from_elements(T.vec(4, T.i32), [
-                            _tdm_pred,
-                            _active_stage_lds_addr[stage_idx],
-                            curr_addr_lo,
-                            _active_addr_hi,
-                        ])
                         tdm_ops.tensor_load_2d(
-                            tdm_ops.TDMDescriptor2D(_dg0, _active_dgroup1)
+                            tdm_ops.update_tensor_descriptor_2d_addr_lo_hi(
+                                _active_stage_desc_base[stage_idx],
+                                curr_addr_lo,
+                                curr_addr_hi,
+                            )
                         )
                         scf.YieldOp([])
-                    _next_addr_lo = arith.addi(curr_addr_lo, _active_adv_i32)
-                    return arith.select(
-                        _is_loader_wave,
-                        _next_addr_lo,
-                        curr_addr_lo,
+                    _next_addr_lo, _next_addr_hi = tdm_ops.add_addr_with_carry(
+                        curr_addr_lo, curr_addr_hi, _active_adv_i32,
                     )
+                    # Only loader waves advance the running address; non-loader
+                    # waves keep the current pair so the tracked SGPR state
+                    # stays in lockstep across waves (matching the original
+                    # addr-lo-only behaviour).
+                    return (
+                        arith.select(
+                            _is_loader_wave, _next_addr_lo, curr_addr_lo),
+                        arith.select(
+                            _is_loader_wave, _next_addr_hi, curr_addr_hi),
+                    )
+
+            if const_expr(_use_tdm_gather_a):
+                _build_a_gather_base_descs(lds_ag_bufs)
+            # Hoist K-invariant parts of B / B-scale 2D descriptors so the
+            # hot K loop only has to advance addr_lo per tile. In
+            # wave-specialized mode the hot path goes through
+            # ``_issue_active_b_tdm_only`` (which is already hoisted via
+            # ``_active_stage_desc_base``) and ``_issue_b_tdm_only`` is only
+            # reachable from the tail/non-pipelined paths; skip the build
+            # there to avoid emitting dead IR.
+            if const_expr(not wave_specialized_tdm):
+                _build_b_base_descs()
 
             # ── pipeline load helpers ─────────────────────────────────
             def _issue_b_tdm_only(k_base, buf_idx):
+                # Carry-safe: ``update_tensor_descriptor_2d_addr64`` performs
+                # ``(addr_lo : addr_hi) += k_off`` in i64 so an i32 wrap of
+                # ``base_addr_lo + k_off`` (common with ~3.5 GiB fp4 expert
+                # buffers on E=257 / gfx1250) propagates into addr_hi rather
+                # than silently redirecting the descriptor to a wrong 4 GiB
+                # page and deadlocking the GPU.
+                _k_data_off = _b_data_k_byte_off(k_base)
+                _k_scale_off = _b_scale_k_byte_off(k_base)
                 if const_expr(_merge_gate_up_tdm):
-                    _n_pair = _stage1_pair_row_base()
                     tdm_ops.tensor_load_2d(
-                        make_desc_b_pair(lds_bg_pair_bufs[buf_idx], _n_pair, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr64(
+                            _b_desc_cache["bg_pair"][buf_idx],
+                            _b_desc_cache["bg_pair_addr_lo"][buf_idx],
+                            _b_desc_cache["bg_pair_addr_hi"][buf_idx],
+                            _k_data_off,
+                        ))
                     tdm_ops.tensor_load_2d(
-                        make_desc_bs_pair(lds_bs_pair_bufs[buf_idx], _n_pair, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr64(
+                            _b_desc_cache["bs_pair"][buf_idx],
+                            _b_desc_cache["bs_pair_addr_lo"][buf_idx],
+                            _b_desc_cache["bs_pair_addr_hi"][buf_idx],
+                            _k_scale_off,
+                        ))
                 else:
-                    _eid_row = (arith.index_cast(T.index, eid_i32)
-                                * arith.index(int(2 * N)))
-                    _n_gate = _eid_row + blk_n
-                    _n_up = _eid_row + blk_n + arith.index(int(N))
                     tdm_ops.tensor_load_2d(
-                        make_desc_b(lds_bg_bufs[buf_idx], _n_gate, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr64(
+                            _b_desc_cache["bg"][buf_idx],
+                            _b_desc_cache["bg_addr_lo"][buf_idx],
+                            _b_desc_cache["bg_addr_hi"][buf_idx],
+                            _k_data_off,
+                        ))
                     tdm_ops.tensor_load_2d(
-                        make_desc_b(lds_bu_bufs[buf_idx], _n_up, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr64(
+                            _b_desc_cache["bu"][buf_idx],
+                            _b_desc_cache["bu_addr_lo"][buf_idx],
+                            _b_desc_cache["bu_addr_hi"][buf_idx],
+                            _k_data_off,
+                        ))
                     tdm_ops.tensor_load_2d(
-                        make_desc_bs(lds_bs_bufs[buf_idx], _n_gate, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr64(
+                            _b_desc_cache["bs"][buf_idx],
+                            _b_desc_cache["bs_addr_lo"][buf_idx],
+                            _b_desc_cache["bs_addr_hi"][buf_idx],
+                            _k_scale_off,
+                        ))
                     tdm_ops.tensor_load_2d(
-                        make_desc_bs(lds_bsu_bufs[buf_idx], _n_up, k_base))
+                        tdm_ops.update_tensor_descriptor_2d_addr64(
+                            _b_desc_cache["bsu"][buf_idx],
+                            _b_desc_cache["bsu_addr_lo"][buf_idx],
+                            _b_desc_cache["bsu_addr_hi"][buf_idx],
+                            _k_scale_off,
+                        ))
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if const_expr(_use_tdm_gather_a):
-                    issue_a_load_tdm_gather(k_base, lds_ag_bufs[buf_idx])
+                    issue_a_load_tdm_gather(k_base, buf_idx)
                 else:
                     issue_a_load(make_desc_a(k_base), lds_ag_bufs[buf_idx])
-                issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
+                if _use_tdm_gather_as:
+                    issue_as_load_tdm_gather(make_desc_as(k_base), lds_as_bufs[buf_idx])
+                else:
+                    issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
 
             def _issue_all_loads(k_base, buf_idx):
-                _issue_b_tdm_only(k_base, buf_idx)
-                _issue_scalar_loads(k_base, buf_idx)
+                if const_expr(is_fp4):
+                    _issue_scalar_loads(k_base, buf_idx)
+                    _issue_b_tdm_only(k_base, buf_idx)
+                else:
+                    _issue_b_tdm_only(k_base, buf_idx)
+                    _issue_scalar_loads(k_base, buf_idx)
 
             def _compute_with_mid_loads(acg, acu, buf_idx, mid_load_callback=None):
                 if const_expr(_use_scheduled_compute):
@@ -1141,22 +1745,33 @@ def _compile_stage1_mxscale_kernel_impl(
                     mid_compute_callback=mid_load_callback,
                 )
 
+            # Helper: apply split-K K-base offset. For non-splitk the
+            # compile-time constant expression is returned unchanged so
+            # the non-splitk code path is identical.
+            def _k_off(static_offset_val):
+                if _is_splitk:
+                    return k_base_idx + static_offset_val
+                return static_offset_val
+
             # ── main K-dimension reduction ────────────────────────────
             if const_expr(not _use_pipeline):
                 if const_expr(wave_specialized_tdm):
                     active_b_addr_lo = _active_addr_lo
-                    for kt in range_constexpr(num_k_tiles):
-                        k_base = fx.Index(kt * int(tile_k))
-                        active_b_addr_lo = _issue_active_b_tdm_only(
-                            0, active_b_addr_lo)
+                    active_b_addr_hi = _active_addr_hi
+                    for kt in range_constexpr(num_k_tiles_per_bz):
+                        k_base = _k_off(fx.Index(kt * int(tile_k)))
+                        active_b_addr_lo, active_b_addr_hi = (
+                            _issue_active_b_tdm_only(
+                                0, active_b_addr_lo, active_b_addr_hi)
+                        )
                         _issue_scalar_loads(k_base, 0)
                         tdm_ops.tensor_wait(0)
                         workgroup_barrier(use_cluster=use_cluster)
                         acc_g, acc_u = _compute_k_tile(acc_g, acc_u, 0)
                         workgroup_barrier(use_cluster=use_cluster)
                 else:
-                    for kt in range_constexpr(num_k_tiles):
-                        k_base = fx.Index(kt * int(tile_k))
+                    for kt in range_constexpr(num_k_tiles_per_bz):
+                        k_base = _k_off(fx.Index(kt * int(tile_k)))
                         _issue_all_loads(k_base, 0)
                         tdm_ops.tensor_wait(0)
                         workgroup_barrier(use_cluster=use_cluster)
@@ -1166,34 +1781,51 @@ def _compile_stage1_mxscale_kernel_impl(
                 # ── prologue ──
                 if const_expr(wave_specialized_tdm):
                     active_b_addr_lo = _active_addr_lo
+                    active_b_addr_hi = _active_addr_hi
                     for _pi in range_constexpr(pre_loaded):
-                        active_b_addr_lo = _issue_active_b_tdm_only(
-                            _pi, active_b_addr_lo)
-                        _issue_scalar_loads(fx.Index(_pi * int(tile_k)), _pi)
+                        active_b_addr_lo, active_b_addr_hi = (
+                            _issue_active_b_tdm_only(
+                                _pi, active_b_addr_lo, active_b_addr_hi)
+                        )
+                        _issue_scalar_loads(
+                            _k_off(fx.Index(_pi * int(tile_k))), _pi)
                 else:
                     for _pi in range_constexpr(pre_loaded):
-                        _issue_all_loads(fx.Index(_pi * int(tile_k)), _pi)
+                        _issue_all_loads(
+                            _k_off(fx.Index(_pi * int(tile_k))), _pi)
                 pipeline_fence(outstanding=0, use_cluster=use_cluster)
 
                 # ── main pipelined loop ──
                 if const_expr(loop_iters > 0):
                     if const_expr(wave_specialized_tdm):
-                        _init = list(acc_g) + list(acc_u) + [active_b_addr_lo]
+                        # Carry the (addr_lo, addr_hi) pair through the
+                        # pipeline state so the carry chain survives across
+                        # iterations.
+                        _init = (
+                            list(acc_g) + list(acc_u)
+                            + [active_b_addr_lo, active_b_addr_hi]
+                        )
                         for _li, _st in fx.range(0, loop_iters, 1, init=_init):
                             _ag = list(_st[:n_accs])
                             _au = list(_st[n_accs:2 * n_accs])
                             _cur_b_addr_lo = _st[2 * n_accs]
+                            _cur_b_addr_hi = _st[2 * n_accs + 1]
                             for _bi in range_constexpr(_nb):
                                 _lb = (_bi + _nb - 1) % _nb
                                 _kt = (_li * fx.Index(_nb)
                                        + fx.Index(pre_loaded + _bi))
-                                _kb = _kt * fx.Index(int(tile_k))
+                                _kb = _k_off(_kt * fx.Index(int(tile_k)))
                                 pipeline_fence_signal(
                                     outstanding=_fence_outstanding,
                                     use_cluster=use_cluster)
                                 pipeline_fence_wait(use_cluster=use_cluster)
-                                _cur_b_addr_lo = _issue_active_b_tdm_only(
-                                    _lb, _cur_b_addr_lo)
+                                _cur_b_addr_lo, _cur_b_addr_hi = (
+                                    _issue_active_b_tdm_only(
+                                        _lb,
+                                        _cur_b_addr_lo,
+                                        _cur_b_addr_hi,
+                                    )
+                                )
 
                                 def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
                                     _issue_scalar_loads(_mid_kb, _mid_lb)
@@ -1208,10 +1840,14 @@ def _compile_stage1_mxscale_kernel_impl(
                                 )
                                 if const_expr(_use_scheduled_compute):
                                     _hot_loop_scheduler_scheduled()
-                            _res = yield list(_ag) + list(_au) + [_cur_b_addr_lo]
+                            _res = yield (
+                                list(_ag) + list(_au)
+                                + [_cur_b_addr_lo, _cur_b_addr_hi]
+                            )
                         acc_g = list(_res[:n_accs])
                         acc_u = list(_res[n_accs:2 * n_accs])
                         active_b_addr_lo = _res[2 * n_accs]
+                        active_b_addr_hi = _res[2 * n_accs + 1]
                     else:
                         _init = list(acc_g) + list(acc_u)
                         for _li, _st in fx.range(0, loop_iters, 1, init=_init):
@@ -1221,7 +1857,7 @@ def _compile_stage1_mxscale_kernel_impl(
                                 _lb = (_bi + _nb - 1) % _nb
                                 _kt = (_li * fx.Index(_nb)
                                        + fx.Index(pre_loaded + _bi))
-                                _kb = _kt * fx.Index(int(tile_k))
+                                _kb = _k_off(_kt * fx.Index(int(tile_k)))
                                 pipeline_fence_signal(
                                     outstanding=_fence_outstanding,
                                     use_cluster=use_cluster)
@@ -1249,7 +1885,7 @@ def _compile_stage1_mxscale_kernel_impl(
                 if const_expr(loop_iters > 0):
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
                 elif const_expr(use_cluster):
-                    gpu.cluster_barrier()
+                    cluster.cluster_barrier()
 
                 # ── tail ──
                 _tail_li = 0
@@ -1273,13 +1909,18 @@ def _compile_stage1_mxscale_kernel_impl(
                         pipeline_fence_wait(use_cluster=use_cluster)
                         if const_expr(_ls is not None):
                             _tail_had_load = True
-                            _tkb = fx.Index(
+                            _tkb = _k_off(fx.Index(
                                 (_tail_start + pre_loaded + _tail_li)
-                                * int(tile_k))
+                                * int(tile_k)))
                             _tail_li += 1
                             if const_expr(wave_specialized_tdm):
-                                active_b_addr_lo = _issue_active_b_tdm_only(
-                                    _ls, active_b_addr_lo)
+                                active_b_addr_lo, active_b_addr_hi = (
+                                    _issue_active_b_tdm_only(
+                                        _ls,
+                                        active_b_addr_lo,
+                                        active_b_addr_hi,
+                                    )
+                                )
                             else:
                                 _issue_b_tdm_only(_tkb, _ls)
 
@@ -1341,6 +1982,13 @@ def _compile_stage1_mxscale_kernel_impl(
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
                 rocdl.sched_barrier(0)
 
+                # TDM-store path also needs bias / SwiGLU. Per-tile column
+                # base (used to load gate/up bias from the per-expert slab)
+                # is the tile's N origin in the (blk_n + warp_n_base + wn*WMMA_N
+                # + lane_kgrp*8 + vi) coordinate system.
+                if const_expr(_enable_bias):
+                    _c2_n_i32 = arith.constant(2, type=T.i32)
+                    _bias_row_base_i32_s1 = eid_i32 * (i32_inter_in * _c2_n_i32)
                 for _acc_idx, _vec_base, _m_off, _wn in _sub_tiles:
                     _wm_idx = _m_off // WMMA_M
                     _sc = _scale_per_wm_s1[_wm_idx]
@@ -1354,6 +2002,9 @@ def _compile_stage1_mxscale_kernel_impl(
                         vector=vector,
                         range_constexpr=range_constexpr,
                         ACC_VEC_SIZE=ACC_VEC_SIZE)
+                    _col_base_s1 = (
+                        blk_n + warp_n_base + fx.Index(_wn * WMMA_N)
+                        + lane_kgrp * fx.Index(8))
                     _fused = []
                     for _vi in range_constexpr(8):
                         _vg = vector.extract(
@@ -1364,7 +2015,23 @@ def _compile_stage1_mxscale_kernel_impl(
                             _sub8u,
                             static_position=[_vi],
                             dynamic_position=[])
-                        _y = silu(_vg) * _vu * _sc
+                        if const_expr(_enable_bias):
+                            _col_i32_s1 = arith.index_cast(
+                                T.i32, _col_base_s1 + fx.Index(_vi))
+                            _bg = buffer_ops.buffer_load(
+                                bias_rsrc,
+                                _bias_row_base_i32_s1 + _col_i32_s1,
+                                vec_width=1, dtype=T.f32)
+                            _bu = buffer_ops.buffer_load(
+                                bias_rsrc,
+                                _bias_row_base_i32_s1 + i32_inter_in + _col_i32_s1,
+                                vec_width=1, dtype=T.f32)
+                            _vg = _vg + _bg
+                            _vu = _vu + _bu
+                        if const_expr(_act_kind == "swiglu"):
+                            _y = _emit_swiglu(_vg, _vu, arith=arith, rocdl=rocdl, T=T) * _sc
+                        else:
+                            _y = silu(_vg) * _vu * _sc
                         _fused.append(_y)
                     _fused_sub8 = vector.from_elements(
                         T.vec(8, T.f32), _fused)
@@ -1470,38 +2137,84 @@ def _compile_stage1_mxscale_kernel_impl(
                         ),
                     )
 
-                _emit_stage1_gate_up_epilogue(
-                    sub_tiles=_sub_tiles,
-                    by=by,
-                    tile_m=int(tile_m),
-                    route_tile_m=int(route_tile_m),
-                    warp_m_base=warp_m_base,
-                    warp_n_base=warp_n_base,
-                    blk_n=blk_n,
-                    lane16=lane16,
-                    lane_kgrp=lane_kgrp,
-                    WMMA_N=WMMA_N,
-                    i32_tokens_in=i32_tokens_in,
-                    i32_inter_in=i32_inter_in,
-                    topk=int(topk),
-                    num_valid_i32=num_valid_i32,
-                    block_row_start=block_row_start,
-                    sorted_rsrc=sorted_rsrc,
-                    tw_rsrc=tw_rsrc,
-                    out_rsrc=out_rsrc,
-                    doweight_stage1=bool(doweight_stage1),
-                    out_elem_ty=out_elem_ty,
-                    load_gate_up_sub8=_load_gate_up_sub8,
-                    silu_fn=silu,
-                    ir=ir,
-                    fx=fx,
-                    arith=arith,
-                    buffer_ops=buffer_ops,
-                    scf=scf,
-                    vector=vector,
-                    range_constexpr=range_constexpr,
-                    T=T,
-                )
+                if _is_splitk:
+                    # Split-K: atomic-fadd gate/up partials into a
+                    # [tokens*topk, 2*inter_dim] buffer. silu/mul and the
+                    # routing weight fold in via the external reduction.
+                    _emit_stage1_gate_up_splitk_epilogue(
+                        sub_tiles=_sub_tiles,
+                        by=by,
+                        tile_m=int(tile_m),
+                        route_tile_m=int(route_tile_m),
+                        warp_m_base=warp_m_base,
+                        warp_n_base=warp_n_base,
+                        blk_n=blk_n,
+                        lane16=lane16,
+                        lane_kgrp=lane_kgrp,
+                        WMMA_N=WMMA_N,
+                        i32_tokens_in=i32_tokens_in,
+                        i32_inter_in=i32_inter_in,
+                        topk=int(topk),
+                        num_valid_i32=num_valid_i32,
+                        block_row_start=block_row_start,
+                        lds_tid=lds_tid,
+                        memref=memref,
+                        sorted_rsrc=sorted_rsrc,
+                        out_rsrc=out_rsrc,
+                        out_elem_ty=out_elem_ty,
+                        load_gate_up_sub8=_load_gate_up_sub8,
+                        ir=ir,
+                        fx=fx,
+                        arith=arith,
+                        buffer_ops=buffer_ops,
+                        scf=scf,
+                        vector=vector,
+                        range_constexpr=range_constexpr,
+                        rocdl=rocdl,
+                        T=T,
+                        bias_rsrc=bias_rsrc if _enable_bias else None,
+                        eid_i32=eid_i32 if _enable_bias else None,
+                        bias_scale=(1.0 / int(k_batch)) if _enable_bias else None,
+                    )
+                else:
+                    _emit_stage1_gate_up_epilogue(
+                        sub_tiles=_sub_tiles,
+                        by=by,
+                        tile_m=int(tile_m),
+                        route_tile_m=int(route_tile_m),
+                        warp_m_base=warp_m_base,
+                        warp_n_base=warp_n_base,
+                        blk_n=blk_n,
+                        lane16=lane16,
+                        lane_kgrp=lane_kgrp,
+                        WMMA_N=WMMA_N,
+                        i32_tokens_in=i32_tokens_in,
+                        i32_inter_in=i32_inter_in,
+                        topk=int(topk),
+                        num_valid_i32=num_valid_i32,
+                        block_row_start=block_row_start,
+                        lds_tid=lds_tid,
+                        memref=memref,
+                        sorted_rsrc=sorted_rsrc,
+                        tw_rsrc=tw_rsrc,
+                        out_rsrc=out_rsrc,
+                        doweight_stage1=bool(doweight_stage1),
+                        out_elem_ty=out_elem_ty,
+                        load_gate_up_sub8=_load_gate_up_sub8,
+                        silu_fn=silu,
+                        ir=ir,
+                        fx=fx,
+                        arith=arith,
+                        buffer_ops=buffer_ops,
+                        scf=scf,
+                        vector=vector,
+                        range_constexpr=range_constexpr,
+                        T=T,
+                        bias_rsrc=bias_rsrc if _enable_bias else None,
+                        eid_i32=eid_i32 if _enable_bias else None,
+                        act_kind=_act_kind,
+                        rocdl=rocdl,
+                    )
             scf.YieldOp([])
 
     @flyc.jit
@@ -1515,6 +2228,7 @@ def _compile_stage1_mxscale_kernel_impl(
         arg_expert_ids: fx.Tensor,
         arg_sorted_weights: fx.Tensor,
         arg_num_valid_ids: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_tokens_in: fx.Int32,
         i32_inter_in: fx.Int32,
         i32_k_in: fx.Int32,
@@ -1527,26 +2241,13 @@ def _compile_stage1_mxscale_kernel_impl(
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         gx = (inter_in + fx.Index(int(tile_n) - 1)) // fx.Index(int(tile_n))
         gy = size_expert_ids_in
-        _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
         launcher = moe_mxscale_stage1_single(
-            arg_out,
-            arg_x,
-            arg_w,
-            arg_scale_x,
-            arg_scale_w,
-            arg_sorted_token_ids,
-            arg_expert_ids,
-            arg_sorted_weights,
-            arg_num_valid_ids,
-            i32_tokens_in,
-            i32_inter_in,
-            i32_k_in,
-            i32_size_expert_ids_in,
-            value_attrs={
-                "rocdl.waves_per_eu": effective_waves_per_eu,
-                "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None,
-            },
+            arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
+            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_num_valid_ids,
+            arg_bias,
+            i32_tokens_in, i32_inter_in, i32_k_in, i32_size_expert_ids_in,
         )
+        _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
             alloc=alloc,
@@ -1555,8 +2256,10 @@ def _compile_stage1_mxscale_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
+            waves_per_eu=effective_waves_per_eu,
             ir=ir,
             cluster=_cluster_arg,
+            gz=int(k_batch),
         )
 
     if expert_sched_mode:
@@ -1588,25 +2291,50 @@ def _compile_stage2_mxscale_kernel_impl(
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
     use_tdm_gather: bool = True,
+    use_tdm_gather_as: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     cluster_m: int = 1,
     cluster_n: int = 1,
+    # ── Bias ────────────────────────────────────────────────────────
+    # Per-expert bias of shape (E, model_dim) applied after the GEMM.
+    # In atomic-accumulate mode the per-slot bias is divided by ``topk``
+    # in the epilogue so the sum across the ``topk`` per-token atomic
+    # adds reproduces a single ``+ bias`` per token (matches torch ref).
+    enable_bias: bool = False,
 ):
-    """Compile mxscale stage2 single kernel (route-pack + TDM + WMMA_SCALE + epilog)."""
+    """Compile mxscale stage2 single kernel (route-pack + TDM + WMMA_SCALE + epilog).
+
+    ``use_tdm_gather_as`` enables the TDM-gather path for the A-scale matrix
+    to eliminate the ``s_wait_dscnt`` stall cluster caused by per-byte
+    ``buffer_load`` + ``ds_write_b8`` on the scalar A-scale path. Falls back
+    to the vectorised scalar loader when the LDS scale layout is not row-major
+    (``wmma_m_rep > 1`` and not ``is_fp4``) or the row width is below the TDM
+    gather alignment (``scale_k_per_tile < 4`` / not a multiple of 4).
+    """
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
     from flydsl._mlir.dialects import llvm as llvm_dialect
-    from flydsl._mlir.dialects import scf
+    from flydsl._mlir.dialects import memref, scf
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr.rocdl import cluster
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
     if bool(use_tdm_store) and bool(accumulate):
         raise ValueError("use_tdm_store is not compatible with accumulate=True in moe mxscale stage2")
+    _enable_bias = bool(enable_bias)
+    if _enable_bias and bool(use_tdm_store):
+        # The TDM-store epilogue writes packed gather rows to LDS then to
+        # global memory, with no intermediate scalar add point matching
+        # how the standard epilogue applies bias. Disabling avoids
+        # silently dropping bias on this path.
+        raise ValueError(
+            "stage2 mxscale: enable_bias=True is not supported with "
+            "use_tdm_store=True; use the standard scatter-store path.")
 
     tp = _compute_mxscale_tiling(
         data_format=data_format, K=int(inter_dim),
@@ -1653,6 +2381,18 @@ def _compile_stage2_mxscale_kernel_impl(
     if use_cluster and effective_waves_per_eu is None:
         effective_waves_per_eu = 2
 
+    # A-scale TDM gather gating mirrors stage1: requires A-side TDM gather
+    # (for _a_tok_ids SGPRs), a row-major LDS scale layout, and a row width
+    # that is a positive multiple of 4 bytes (TDM gather hardware constraint).
+    _as_layout_rowmajor = bool(is_fp4) or (int(wmma_m_rep) == 1)
+    _as_row_bytes_ok = int(scale_k_per_tile) >= 4 and (int(scale_k_per_tile) % 4 == 0)
+    _use_tdm_gather_as = (
+        bool(use_tdm_gather_as)
+        and bool(use_tdm_gather)
+        and _as_layout_rowmajor
+        and _as_row_bytes_ok
+    )
+
     _use_pipeline = int(num_buffers) >= 2
     if _use_pipeline:
         from kernels.gemm_common_gfx1250 import (
@@ -1663,6 +2403,7 @@ def _compile_stage2_mxscale_kernel_impl(
             num_k_tiles=num_k_tiles, num_buffers=int(num_buffers),
             B_TDM_PER_STEP=_B_TDM_PER_STEP, tile_m=int(tile_m),
             use_tdm_gather=use_tdm_gather,
+            use_tdm_gather_as=_use_tdm_gather_as,
             wave_specialized_tdm=wave_specialized_tdm,
             tdm_loader_waves=_tdm_loader_waves,
         )
@@ -1671,6 +2412,7 @@ def _compile_stage2_mxscale_kernel_impl(
         _tail_start = _pp["tail_start"]
         extra = _pp["extra"]
         _A_GATHER_GROUPS = _pp["A_GATHER_GROUPS"]
+        _AS_GATHER_GROUPS = _pp["AS_GATHER_GROUPS"]
         TDM_PER_STEP = _pp["TDM_PER_STEP"]
         _fence_outstanding = _pp["fence_outstanding"]
         _tail_plan = _pp["tail_plan"]
@@ -1679,7 +2421,10 @@ def _compile_stage2_mxscale_kernel_impl(
     alloc = SmemAllocator(
         None,
         arch=str(get_hip_arch()),
-        global_sym_name=f"moe_mxscale_{data_format}_s2_single_g{int(bool(use_tdm_gather))}",
+        global_sym_name=(
+            f"moe_mxscale_{data_format}_s2_single_g{int(bool(use_tdm_gather))}"
+            f"_as{int(_use_tdm_gather_as)}"
+        ),
     )
     _nb = int(num_buffers)
     off_a_list, off_b_list, off_as_list, off_bs_list = [], [], [], []
@@ -1697,20 +2442,29 @@ def _compile_stage2_mxscale_kernel_impl(
         alloc.ptr = _obs + lds_b_scale_bytes
         off_bs_list.append(_obs)
 
+    # lds_tid: preloaded sorted_token_ids for current M-tile (see stage1 comments).
+    lds_tid_bytes = int(tile_m) * 4
+    off_tid = alloc._align(alloc.ptr, 16)
+    alloc.ptr = off_tid + lds_tid_bytes
+
     if bool(use_tdm_store):
         from kernels.gemm_common_gfx1250 import store_acc_vec8_to_lds
         _ds2 = _compute_tdm_store_layout(
             warp_tile_m=warp_tile_m, warp_tile_n=warp_tile_n,
             num_warps=num_warps, WMMA_N=WMMA_N, use_pipeline=_use_pipeline,
         )
+        total_d_bytes = _ds2["total_d_bytes"]
         lds_d_row_stride = _ds2["lds_d_row_stride"]
+        warp_d_bytes = _ds2["warp_d_bytes"]
         d_output_off = _ds2["d_output_off"]
         _lds_d_stride_elems = _ds2["lds_d_stride_elems"]
         _warp_d_elems = _ds2["warp_d_elems"]
         _n_col_d_elems = _ds2["n_col_d_elems"]
         d_need_epilogue_fence = _ds2["d_need_epilogue_fence"]
-        if _ds2["total_d_bytes"] > alloc.ptr:
-            alloc.ptr = _ds2["total_d_bytes"]
+        elem_bytes_d = 2
+        LDS_PAD_D_BYTES = 16
+        if total_d_bytes > alloc.ptr:
+            alloc.ptr = total_d_bytes
 
     _sub_tiles = _make_wmma_sub_tiles(
         wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=is_fp4
@@ -1727,12 +2481,24 @@ def _compile_stage2_mxscale_kernel_impl(
         arg_expert_ids: fx.Tensor,
         arg_sorted_weights: fx.Tensor,
         arg_num_valid_ids: fx.Tensor,
+        # Per-expert bias slab (E*model_dim, f32 flat). Pass an empty
+        # tensor when ``enable_bias=False``; only read when the
+        # constexpr flag is set.
+        arg_bias: fx.Tensor,
         i32_tokens_in: fx.Int32,
         i32_n_in: fx.Int32,
         i32_k_in: fx.Int32,
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = i32_k_in
+        # ASTRewriter strips ``const_expr(...)`` from ``if`` tests, which would
+        # otherwise eliminate every reference to ``const_expr`` from the
+        # rewritten function body and shrink ``co_freevars`` by one — causing
+        # CPython to reject ``f.__code__ = new_f_code_o`` because the original
+        # ``__closure__`` length no longer matches. Keep one explicit reference
+        # so the rewritten code object's free-vars list still includes
+        # ``const_expr``.
+        _keep_const_expr_ref = const_expr  # noqa: F841
         if const_expr(inst_prefetch):
             if arith.cmpi(arith.CmpIPredicate.eq, rocdl.wave_id(),
                           arith.constant(0, type=T.i32)):
@@ -1745,12 +2511,6 @@ def _compile_stage2_mxscale_kernel_impl(
                     "\n".join(_prefetch_lines),
                     "", has_side_effects=True,
                 )
-        llvm_dialect.inline_asm(
-            None, [],
-            "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
-            "",
-            has_side_effects=True,
-        )
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
@@ -1788,6 +2548,9 @@ def _compile_stage2_mxscale_kernel_impl(
         sw_rsrc = buffer_ops.create_buffer_resource(arg_scale_w, max_size=False, num_records_bytes=sw_nbytes)
         out_rsrc = buffer_ops.create_buffer_resource(arg_out, max_size=False, num_records_bytes=out_nbytes)
         tw_rsrc = buffer_ops.create_buffer_resource(arg_sorted_weights, max_size=True)
+        # bias: per-expert (E, model_dim) f32 slab, only read when
+        # ``_enable_bias`` constexpr is True (epilogue gates the load).
+        bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=True)
 
         eid_i32 = buffer_ops.buffer_load(eid_rsrc, arith.index_cast(T.i32, by), vec_width=1, dtype=T.i32)
         eid_ok0 = arith.cmpi(arith.CmpIPredicate.sge, eid_i32, arith.constant(0, type=T.i32))
@@ -1806,8 +2569,8 @@ def _compile_stage2_mxscale_kernel_impl(
         blk_n = bx * arith.index(int(tile_n))
 
         if const_expr(use_cluster):
-            _local_x, _local_y = gpu.compute_cluster_position()
-            _a_mcast_mask, b_mcast_mask = gpu.compute_mcast_masks(
+            _local_x, _local_y = cluster.compute_cluster_position()
+            _a_mcast_mask, b_mcast_mask = cluster.compute_mcast_masks(
                 _local_x, _local_y, int(cluster_m), int(cluster_n))
         else:
             b_mcast_mask = 0
@@ -1826,6 +2589,8 @@ def _compile_stage2_mxscale_kernel_impl(
             lds_b_bufs.append(get_op_result_or_value(_sb.get()))
             lds_as_bufs.append(get_op_result_or_value(_sas.get()))
             lds_bs_bufs.append(get_op_result_or_value(_sbs.get()))
+
+        lds_tid = SmemPtr(base_ptr, off_tid, T.i32, shape=(int(tile_m),)).get()
 
         if const_expr(bool(use_tdm_store)):
             from kernels.gemm_common_gfx1250 import get_lds_memref
@@ -1896,34 +2661,59 @@ def _compile_stage2_mxscale_kernel_impl(
                 _tokens_topk_sgpr = rocdl.readfirstlane(T.i32, _m_i32)
             return _tokens_topk_sgpr
 
+        def _preload_sorted_ids_to_lds():
+            """Preload tile_m sorted_token_ids entries into ``lds_tid`` (once per CTA).
+
+            See stage1 for the rationale. Invalid rows (row_in_route or
+            row_in_valid false) are stored as sentinel ``0xFFFFFFFF`` so
+            downstream ``tok_ok`` / ``slot_ok`` checks naturally reject them.
+            """
+            _tid_in_range = arith.cmpi(
+                arith.CmpIPredicate.ult, tx, fx.Index(int(tile_m)))
+            _if_tid = scf.IfOp(_tid_in_range)
+            with ir.InsertionPoint(_if_tid.then_block):
+                _tx_i32 = arith.index_cast(T.i32, tx)
+                _sorted_row = by * fx.Index(int(tile_m)) + tx
+                _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
+                _in_route = arith.cmpi(
+                    arith.CmpIPredicate.ult,
+                    _tx_i32,
+                    arith.constant(int(route_tile_m), type=T.i32),
+                )
+                _in_valid = arith.cmpi(
+                    arith.CmpIPredicate.slt, _sorted_i32, num_valid_i32)
+                _row_valid = arith.andi(_in_route, _in_valid)
+                _row_safe_i32 = arith.select(
+                    _row_valid, _sorted_i32, block_row_start)
+                _raw = buffer_ops.buffer_load(
+                    sorted_rsrc, _row_safe_i32, vec_width=1, dtype=T.i32)
+                _sentinel = arith.constant(-1, type=T.i32)  # 0xFFFFFFFF
+                _val = arith.select(_row_valid, _raw, _sentinel)
+                _vec1 = vector.from_elements(T.vec(1, T.i32), [_val])
+                vector.store(_vec1, lds_tid, [tx], alignment=4)
+                scf.YieldOp([])
+            workgroup_barrier(use_cluster=use_cluster)
+
+        def _load_fused_from_lds(row_index):
+            if isinstance(row_index, int):
+                row_index = arith.index(row_index)
+            return memref.load(lds_tid, [row_index])
+
         def _precompute_a_row_indices():
             _safe_row = arith.constant(0, type=T.i32)
             _one_i32 = arith.constant(1, type=T.i32)
             _zero_i32 = arith.constant(0, type=T.i32)
             for _ri in range_constexpr(int(tile_m)):
-                _sorted_row = by * fx.Index(int(tile_m)) + fx.Index(_ri)
-                _sorted_i32 = arith.index_cast(T.i32, _sorted_row)
-                _row_in_route = arith.cmpi(
-                    arith.CmpIPredicate.ult,
-                    fx.Int32(_ri),
-                    fx.Int32(int(route_tile_m)),
-                )
-                _row_in_valid = arith.cmpi(
-                    arith.CmpIPredicate.slt,
-                    _sorted_i32,
-                    num_valid_i32,
-                )
-                _row_ok = arith.andi(_row_in_route, _row_in_valid)
-                _sorted_safe = arith.select(_row_ok, _sorted_i32, block_row_start)
-                _fused = buffer_ops.buffer_load(sorted_rsrc, _sorted_safe, vec_width=1, dtype=T.i32)
-                _tok = _fused & fx.Int32((1 << 24) - 1)
-                _slot = _fused >> fx.Int32(24)
+                _fused = _load_fused_from_lds(_ri)
+                _fused_sgpr = rocdl.readfirstlane(T.i32, _fused)
+                _tok = _fused_sgpr & fx.Int32((1 << 24) - 1)
+                _slot = _fused_sgpr >> fx.Int32(24)
                 _tok_ok = arith.cmpi(arith.CmpIPredicate.ult, _tok, i32_tokens_in)
                 _slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, _slot, fx.Int32(0))
                 _slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, _slot, c_topk_i32)
                 _ts = _tok * c_topk_i32 + _slot
                 _ts_ok = arith.andi(_tok_ok, arith.andi(_slot_ok0, _slot_ok1))
-                _row_fully_ok = arith.andi(_row_ok, _ts_ok)
+                _row_fully_ok = _ts_ok
                 _row_valid_i32 = arith.select(_row_fully_ok, _one_i32, _zero_i32)
                 _a_row_valids.append(rocdl.readfirstlane(T.i32, _row_valid_i32))
                 _ts_safe = arith.select(_row_fully_ok, _ts, _safe_row)
@@ -1942,14 +2732,8 @@ def _compile_stage2_mxscale_kernel_impl(
                 with ir.InsertionPoint(_if_elem.then_block):
                     row = elem // arith.index(int(packed_tile_k_a))
                     col = elem % arith.index(int(packed_tile_k_a))
-                    sorted_row = by * arith.index(int(tile_m)) + row
-                    row_i32 = arith.index_cast(T.i32, row)
-                    sorted_i32 = arith.index_cast(T.i32, sorted_row)
-                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, row_i32, arith.constant(int(route_tile_m), type=T.i32))
-                    row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
-                    row_ok = arith.andi(row_in_route, row_in_valid)
-                    sorted_safe = arith.select(row_ok, sorted_i32, block_row_start)
-                    fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
+                    # Use preloaded lds_tid instead of per-thread buffer_load(sorted_rsrc, ...).
+                    fused = _load_fused_from_lds(row)
                     tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
                     slot = fused >> arith.constant(24, type=T.i32)
                     tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
@@ -1957,7 +2741,7 @@ def _compile_stage2_mxscale_kernel_impl(
                     slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, slot, c_topk_i32)
                     ts = tok * c_topk_i32 + slot
                     ts_ok = arith.andi(tok_ok, arith.andi(slot_ok0, slot_ok1))
-                    load_ok = arith.andi(row_ok, ts_ok)
+                    load_ok = ts_ok
                     x_idx = ts * arith.constant(K_packed_a, type=T.i32) + arith.index_cast(T.i32, k_packed_base + col)
                     x_idx_safe = arith.select(load_ok, x_idx, arith.constant(0, type=T.i32))
                     x_val = arith.select(load_ok, buffer_ops.buffer_load(x_rsrc, x_idx_safe, vec_width=1, dtype=T.i8), arith.constant(0, type=T.i8))
@@ -1966,17 +2750,27 @@ def _compile_stage2_mxscale_kernel_impl(
                     vector.store(v1, target_lds, [lds_idx], alignment=1)
                     scf.YieldOp([])
 
-        def issue_a_load_tdm_gather(k_base, target_lds):
-            """Load stage2 A rows via TDM gather using token-slot row ids."""
-            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+        # Cache of K-invariant pieces of the stage2 TDM gather descriptor.
+        # See the stage1 equivalent for the field-by-field rationale; the
+        # only stage2 differences are using ``_a_row_ids`` /
+        # ``_a_row_valids`` and ``_get_tokens_topk_sgpr`` (rows already encode
+        # token*topk slots) instead of the stage1 row sources.
+        _a_gather_cache = {}
+
+        def _build_a_gather_base_descs(lds_bufs):
+            if "desc" in _a_gather_cache:
+                return
             _tokens_topk = _get_tokens_topk_sgpr()
             _zero_i32 = arith.constant(0, type=T.i32)
+            _descs = []
+            _preds = []
+            _base_addr_lo = []
+            _base_addr_hi = []
             for _gi in range_constexpr(_TDM_GATHER_GROUPS):
                 _start = _gi * _TDM_GATHER_CHUNK
                 _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
                 _row_indices = _a_row_ids[_start:_start + _cnt]
                 _valid_count = _sum_i32_values(_a_row_valids[_start:_start + _cnt])
-                _lds_off = fx.Index(_start * lds_a_stride_bytes)
                 _has_valid = arith.cmpi(arith.CmpIPredicate.sgt, _valid_count, _zero_i32)
                 _issue_pred = _has_valid
                 if const_expr(wave_specialized_tdm):
@@ -1987,11 +2781,16 @@ def _compile_stage2_mxscale_kernel_impl(
                         arith.constant(_gather_owner, type=T.i32),
                     )
                     _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
-                _if_issue = scf.IfOp(_issue_pred)
-                with ir.InsertionPoint(_if_issue.then_block):
-                    desc = tdm_ops.make_tensor_gather_descriptor(
+                _preds.append(_issue_pred)
+
+                _lds_off = fx.Index(_start * lds_a_stride_bytes)
+                _per_buf = []
+                # See stage1 note: range_constexpr is mandatory here so the
+                # AST rewriter does not turn this into an scf.ForOp.
+                for _buf_i in range_constexpr(len(lds_bufs)):
+                    _base_desc = tdm_ops.make_tensor_gather_descriptor(
                         global_ptr=arg_x,
-                        lds_memref=target_lds,
+                        lds_memref=lds_bufs[_buf_i],
                         row_indices=_row_indices,
                         row_width=int(packed_tile_k_a),
                         tensor_dim0=K_packed_a,
@@ -2003,62 +2802,264 @@ def _compile_stage2_mxscale_kernel_impl(
                         index_size=32,
                         gather_tile_dim1=_valid_count,
                         lds_byte_offset=_lds_off,
-                        global_byte_offset=k_packed_base,
+                        global_byte_offset=None,
                     )
-                    tdm_ops.tensor_load_gather(desc)
+                    _per_buf.append(_base_desc)
+                _descs.append(_per_buf)
+                _base_addr_lo.append(vector.extract(
+                    _per_buf[0].dgroup0,
+                    static_position=[2],
+                    dynamic_position=[],
+                ))
+                _base_addr_hi.append(vector.extract(
+                    _per_buf[0].dgroup0,
+                    static_position=[3],
+                    dynamic_position=[],
+                ))
+
+            _a_gather_cache["desc"] = _descs
+            _a_gather_cache["pred"] = _preds
+            _a_gather_cache["base_addr_lo"] = _base_addr_lo
+            _a_gather_cache["base_addr_hi"] = _base_addr_hi
+
+        def issue_a_load_tdm_gather(k_base, buf_idx):
+            """Hot path: carry-safe advance of the precomputed gather descriptor.
+
+            Requires ``_build_a_gather_base_descs(lds_bufs)`` to have been
+            called once before the K loop with the matching LDS buffer list.
+            Uses ``update_tensor_gather_descriptor_addr64`` so a lo-32-bit
+            overflow of ``base_addr_lo + k_byte_off`` propagates into hi
+            instead of redirecting the descriptor to a wrong 4 GiB page.
+            """
+            k_packed_base = k_base if PACK_FACTOR_A == 1 else k_base // fx.Index(PACK_FACTOR_A)
+            _k_byte_off_i32 = arith.index_cast(T.i32, k_packed_base)
+            _descs = _a_gather_cache["desc"]
+            _preds = _a_gather_cache["pred"]
+            _base_addr_lo = _a_gather_cache["base_addr_lo"]
+            _base_addr_hi = _a_gather_cache["base_addr_hi"]
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _if_issue = scf.IfOp(_preds[_gi])
+                with ir.InsertionPoint(_if_issue.then_block):
+                    tdm_ops.tensor_load_gather(
+                        tdm_ops.update_tensor_gather_descriptor_addr64(
+                            _descs[_gi][buf_idx],
+                            _base_addr_lo[_gi],
+                            _base_addr_hi[_gi],
+                            _k_byte_off_i32,
+                        )
+                    )
                     scf.YieldOp([])
 
         def make_desc_as(k_base):
             return k_base / arith.index(SCALE_BLOCK)
 
         def issue_as_load(k_scale_base, target_lds):
-            total = int(tile_m * scale_k_per_tile)
-            rounds = (total + block_threads - 1) // block_threads
-            for it in range(rounds):
-                elem = tx + fx.Index(it * block_threads)
-                in_range = arith.cmpi(arith.CmpIPredicate.ult, arith.index_cast(T.i32, elem), arith.constant(total, type=T.i32))
-                _if_elem = scf.IfOp(in_range)
-                with ir.InsertionPoint(_if_elem.then_block):
-                    row = elem // arith.index(int(scale_k_per_tile))
-                    ksc = elem % arith.index(int(scale_k_per_tile))
-                    sorted_row = by * arith.index(int(tile_m)) + row
-                    row_i32 = arith.index_cast(T.i32, row)
-                    sorted_i32 = arith.index_cast(T.i32, sorted_row)
-                    row_in_route = arith.cmpi(arith.CmpIPredicate.ult, row_i32, arith.constant(int(route_tile_m), type=T.i32))
-                    row_in_valid = arith.cmpi(arith.CmpIPredicate.slt, sorted_i32, num_valid_i32)
-                    row_ok = arith.andi(row_in_route, row_in_valid)
-                    sorted_safe = arith.select(row_ok, sorted_i32, block_row_start)
-                    fused = buffer_ops.buffer_load(sorted_rsrc, sorted_safe, vec_width=1, dtype=T.i32)
-                    tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
-                    slot = fused >> arith.constant(24, type=T.i32)
-                    tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
-                    slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, slot, arith.constant(0, type=T.i32))
-                    slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, slot, c_topk_i32)
-                    ts = tok * c_topk_i32 + slot
-                    ts_ok = arith.andi(tok_ok, arith.andi(slot_ok0, slot_ok1))
-                    load_ok = arith.andi(row_ok, ts_ok)
-                    ksc_off = k_scale_base + ksc
-                    sx_idx = ts * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
-                    sx_idx_safe = arith.select(load_ok, sx_idx, arith.constant(0, type=T.i32))
-                    sx_val = arith.select(load_ok, buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8), arith.constant(127, type=T.i8))
-                    if const_expr(is_fp4):
-                        lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
-                    else:
-                        warp_row_idx = row / arith.index(warp_tile_m)
-                        local_row = row % arith.index(warp_tile_m)
-                        lane_row = local_row % arith.index(WMMA_M)
-                        local_wm_idx = local_row / arith.index(WMMA_M)
-                        global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
-                        ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
-                        ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
-                        lds_idx = (
-                            global_lds_row * arith.index(interleaved_scale_cols_a)
-                            + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
-                            + local_wm_idx * arith.index(SCALES_PER_WMMA)
-                            + ksc_sub
+            """Vectorised scalar A-scale loader (Option B) for stage2.
+
+            See stage1 ``issue_as_load`` for the 4-byte chunking rationale.
+            Stage2 addresses rows by ``ts = tok * topk + slot`` and the
+            ``load_ok`` guard checks both ``tok_ok`` and ``slot_ok``.
+            """
+            _blk_bytes = int(SCALES_PER_WMMA)
+            _row_bytes = int(scale_k_per_tile)
+            if const_expr(_row_bytes % _blk_bytes == 0 and _row_bytes >= _blk_bytes):
+                _blk_vec_type = T.vec(_blk_bytes, T.i8)
+                _blks_per_row = _row_bytes // _blk_bytes
+                total = int(tile_m) * _blks_per_row
+                rounds = (total + block_threads - 1) // block_threads
+                for it in range(rounds):
+                    elem = tx + fx.Index(it * block_threads)
+                    in_range = arith.cmpi(
+                        arith.CmpIPredicate.ult,
+                        arith.index_cast(T.i32, elem),
+                        arith.constant(total, type=T.i32),
+                    )
+                    _if_elem = scf.IfOp(in_range)
+                    with ir.InsertionPoint(_if_elem.then_block):
+                        row = elem // arith.index(_blks_per_row)
+                        ksc_blk = elem % arith.index(_blks_per_row)
+                        fused = _load_fused_from_lds(row)
+                        tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
+                        slot = fused >> arith.constant(24, type=T.i32)
+                        tok_ok = arith.cmpi(
+                            arith.CmpIPredicate.ult, tok, i32_tokens_in,
                         )
-                    v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
-                    vector.store(v1, target_lds, [lds_idx], alignment=1)
+                        slot_ok0 = arith.cmpi(
+                            arith.CmpIPredicate.sge, slot,
+                            arith.constant(0, type=T.i32),
+                        )
+                        slot_ok1 = arith.cmpi(
+                            arith.CmpIPredicate.slt, slot, c_topk_i32,
+                        )
+                        ts = tok * c_topk_i32 + slot
+                        ts_ok = arith.andi(tok_ok, arith.andi(slot_ok0, slot_ok1))
+                        if const_expr(_as_layout_rowmajor):
+                            lds_idx = (
+                                row * arith.index(_row_bytes)
+                                + ksc_blk * arith.index(_blk_bytes)
+                            )
+                        else:
+                            warp_row_idx = row / arith.index(warp_tile_m)
+                            local_row = row % arith.index(warp_tile_m)
+                            lane_row = local_row % arith.index(WMMA_M)
+                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            global_lds_row = (
+                                warp_row_idx * arith.index(WMMA_M) + lane_row
+                            )
+                            lds_idx = (
+                                global_lds_row
+                                * arith.index(interleaved_scale_cols_a)
+                                + ksc_blk
+                                * arith.index(wmma_m_rep * SCALES_PER_WMMA)
+                                + local_wm_idx * arith.index(SCALES_PER_WMMA)
+                            )
+                        _if_ok = scf.IfOp(ts_ok, has_else=True)
+                        with ir.InsertionPoint(_if_ok.then_block):
+                            chunk_off = (
+                                k_scale_base
+                                + ksc_blk * arith.index(_blk_bytes)
+                            )
+                            sx_idx = (
+                                ts * arith.constant(K_scale, type=T.i32)
+                                + arith.index_cast(T.i32, chunk_off)
+                            )
+                            sx_raw = buffer_ops.buffer_load(
+                                sx_rsrc,
+                                arith.shrui(
+                                    sx_idx,
+                                    arith.constant(2, type=T.i32),
+                                ),
+                                vec_width=1,
+                                dtype=T.i32,
+                            )
+                            sx_vec = vector.bitcast(
+                                _blk_vec_type,
+                                vector.from_elements(T.vec(1, T.i32), [sx_raw]),
+                            )
+                            vector.store(
+                                sx_vec, target_lds, [lds_idx],
+                                alignment=_blk_bytes,
+                            )
+                            scf.YieldOp([])
+                        with ir.InsertionPoint(_if_ok.else_block):
+                            fill_vec = vector.bitcast(
+                                _blk_vec_type,
+                                vector.from_elements(
+                                    T.vec(1, T.i32),
+                                    [arith.constant(0x7F7F7F7F, type=T.i32)],
+                                ),
+                            )
+                            vector.store(
+                                fill_vec, target_lds, [lds_idx],
+                                alignment=_blk_bytes,
+                            )
+                            scf.YieldOp([])
+                        scf.YieldOp([])
+            else:
+                total = int(tile_m * scale_k_per_tile)
+                rounds = (total + block_threads - 1) // block_threads
+                for it in range(rounds):
+                    elem = tx + fx.Index(it * block_threads)
+                    in_range = arith.cmpi(
+                        arith.CmpIPredicate.ult,
+                        arith.index_cast(T.i32, elem),
+                        arith.constant(total, type=T.i32),
+                    )
+                    _if_elem = scf.IfOp(in_range)
+                    with ir.InsertionPoint(_if_elem.then_block):
+                        row = elem // arith.index(int(scale_k_per_tile))
+                        ksc = elem % arith.index(int(scale_k_per_tile))
+                        fused = _load_fused_from_lds(row)
+                        tok = fused & arith.constant((1 << 24) - 1, type=T.i32)
+                        slot = fused >> arith.constant(24, type=T.i32)
+                        tok_ok = arith.cmpi(arith.CmpIPredicate.ult, tok, i32_tokens_in)
+                        slot_ok0 = arith.cmpi(arith.CmpIPredicate.sge, slot, arith.constant(0, type=T.i32))
+                        slot_ok1 = arith.cmpi(arith.CmpIPredicate.slt, slot, c_topk_i32)
+                        ts = tok * c_topk_i32 + slot
+                        ts_ok = arith.andi(tok_ok, arith.andi(slot_ok0, slot_ok1))
+                        load_ok = ts_ok
+                        ksc_off = k_scale_base + ksc
+                        sx_idx = ts * arith.constant(K_scale, type=T.i32) + arith.index_cast(T.i32, ksc_off)
+                        sx_idx_safe = arith.select(load_ok, sx_idx, arith.constant(0, type=T.i32))
+                        sx_val = arith.select(
+                            load_ok,
+                            buffer_ops.buffer_load(sx_rsrc, sx_idx_safe, vec_width=1, dtype=T.i8),
+                            arith.constant(127, type=T.i8),
+                        )
+                        if is_fp4:
+                            lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
+                        else:
+                            warp_row_idx = row / arith.index(warp_tile_m)
+                            local_row = row % arith.index(warp_tile_m)
+                            lane_row = local_row % arith.index(WMMA_M)
+                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
+                            ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                            ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
+                            lds_idx = (
+                                global_lds_row * arith.index(interleaved_scale_cols_a)
+                                + ksc_blk * arith.index(wmma_m_rep * SCALES_PER_WMMA)
+                                + local_wm_idx * arith.index(SCALES_PER_WMMA)
+                                + ksc_sub
+                            )
+                        v1 = vector.from_elements(T.vec(1, T.i8), [sx_val])
+                        vector.store(v1, target_lds, [lds_idx], alignment=1)
+                        scf.YieldOp([])
+
+        def issue_as_load_tdm_gather(k_scale_base, target_lds):
+            """TDM-gather A-scale loader (Option A) for stage2.
+
+            Reuses the ``_a_row_ids`` / ``_a_row_valids`` SGPR caches populated
+            by ``_precompute_a_row_indices()`` for the stage2 A-data TDM path,
+            where each row index is ``ts = tok * topk + slot``. Routes
+            completion through ``tdm_cnt`` to eliminate the ``s_wait_dscnt 0``
+            stall cluster caused by per-byte ``buffer_load`` + ``ds_write_b8``.
+
+            Pre-conditions (enforced by the gating in this kernel):
+              - ``use_tdm_gather=True`` (otherwise ``_a_row_ids`` is empty).
+              - Row-major LDS scale layout (``is_fp4`` or ``wmma_m_rep == 1``).
+              - ``scale_k_per_tile`` is a positive multiple of 4.
+            """
+            _as_row_bytes = int(scale_k_per_tile)
+            _tokens_topk = _get_tokens_topk_sgpr()
+            _zero_i32 = arith.constant(0, type=T.i32)
+            for _gi in range_constexpr(_TDM_GATHER_GROUPS):
+                _start = _gi * _TDM_GATHER_CHUNK
+                _cnt = min(_TDM_GATHER_CHUNK, int(tile_m) - _start)
+                _row_indices = _a_row_ids[_start:_start + _cnt]
+                _valid_count = _sum_i32_values(_a_row_valids[_start:_start + _cnt])
+                _lds_off = fx.Index(_start * _as_row_bytes)
+                _has_valid = arith.cmpi(
+                    arith.CmpIPredicate.sgt, _valid_count, _zero_i32,
+                )
+                _issue_pred = _has_valid
+                if wave_specialized_tdm:
+                    _gather_owner = _gi % _tdm_loader_waves
+                    _is_gather_loader = arith.cmpi(
+                        arith.CmpIPredicate.eq,
+                        _tdm_wave_id,
+                        arith.constant(_gather_owner, type=T.i32),
+                    )
+                    _issue_pred = arith.andi(_issue_pred, _is_gather_loader)
+                _if_issue = scf.IfOp(_issue_pred)
+                with ir.InsertionPoint(_if_issue.then_block):
+                    desc = tdm_ops.make_tensor_gather_descriptor(
+                        global_ptr=arg_scale_x,
+                        lds_memref=target_lds,
+                        row_indices=_row_indices,
+                        row_width=_as_row_bytes,
+                        tensor_dim0=int(K_scale),
+                        tensor_dim1=_tokens_topk,
+                        stride=int(K_scale),
+                        elem_bytes=1,
+                        pad_interval=0,
+                        pad_amount=0,
+                        index_size=32,
+                        gather_tile_dim1=_valid_count,
+                        lds_byte_offset=_lds_off,
+                        global_byte_offset=k_scale_base,
+                    )
+                    tdm_ops.tensor_load_gather(desc)
                     scf.YieldOp([])
 
         def make_desc_b(n_off, k_base, target_lds):
@@ -2092,6 +3093,74 @@ def _compile_stage2_mxscale_kernel_impl(
                 elem_bytes=1, pad_interval=0, pad_amount=0,
                 num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
 
+        # Cache of K-invariant 2D B / B-scale descriptors used by stage2's
+        # ``_issue_b_tdm_only``. Stage2 has no merge_gate_up_tdm path, so the
+        # cache is single-branched. Each entry stores the base descriptor
+        # plus its addr_lo / addr_hi extracted into SGPRs; the hot path then
+        # uses ``update_tensor_descriptor_2d_addr64`` so a per-K-tile delta
+        # that overflows base_addr_lo carries into addr_hi instead of
+        # silently wrapping into a wrong 4 GiB page (which deadlocks the GPU
+        # in ``amdgpu_mes_reg_write_reg_wait``). Mirrors the stage1 helper
+        # pair; closed over ``make_desc_b``, ``make_desc_bs``,
+        # ``lds_b_bufs``, ``lds_bs_bufs`` and
+        # ``eid_i32`` / ``n_idx`` / ``blk_n``, all resolved at call time
+        # inside ``_if_blk``.
+        _b_desc_cache = {}
+
+        def _extract_desc_addr_lo(desc):
+            return vector.extract(
+                desc.dgroup0,
+                static_position=[2],
+                dynamic_position=[],
+            )
+
+        def _extract_desc_addr_hi(desc):
+            return vector.extract(
+                desc.dgroup0,
+                static_position=[3],
+                dynamic_position=[],
+            )
+
+        def _build_b_base_descs():
+            if "ready" in _b_desc_cache:
+                return
+            _zero_k = arith.index(0)
+            _eid_idx = arith.index_cast(T.index, eid_i32)
+            _n_off = _eid_idx * n_idx + blk_n
+            _b = [
+                make_desc_b(_n_off, _zero_k, lds_b_bufs[i])
+                for i in range_constexpr(_nb)
+            ]
+            _bs = [
+                make_desc_bs(_n_off, _zero_k, lds_bs_bufs[i])
+                for i in range_constexpr(_nb)
+            ]
+            _b_desc_cache["b"] = _b
+            _b_desc_cache["bs"] = _bs
+            _b_desc_cache["b_addr_lo"] = [_extract_desc_addr_lo(d) for d in _b]
+            _b_desc_cache["b_addr_hi"] = [_extract_desc_addr_hi(d) for d in _b]
+            _b_desc_cache["bs_addr_lo"] = [_extract_desc_addr_lo(d) for d in _bs]
+            _b_desc_cache["bs_addr_hi"] = [_extract_desc_addr_hi(d) for d in _bs]
+            _b_desc_cache["ready"] = True
+
+        def _b_data_k_byte_off(k_base):
+            # Fastest-axis byte offset for stage2 B data descriptor:
+            #   non-fp4 : (k_base / PACK_FACTOR_B) * 16 bytes
+            #   fp4     : (k_base / PACK_FACTOR_B) bytes
+            # Matches make_desc_b global_offset math (elem_bytes=1).
+            _k_packed_b = (
+                k_base if PACK_FACTOR_B == 1
+                else k_base // fx.Index(PACK_FACTOR_B)
+            )
+            if const_expr(is_fp4):
+                return arith.index_cast(T.i32, _k_packed_b)
+            return arith.index_cast(
+                T.i32, _k_packed_b * fx.Index(16))
+
+        def _b_scale_k_byte_off(k_base):
+            return arith.index_cast(
+                T.i32, k_base // fx.Index(SCALE_BLOCK))
+
         def issue_b_load(k_base, target_lds_b, target_lds_bs):
             eid_idx = arith.index_cast(T.index, eid_i32)
             n_off = eid_idx * n_idx + blk_n
@@ -2119,6 +3188,7 @@ def _compile_stage2_mxscale_kernel_impl(
 
         _if_blk = scf.IfOp(block_ok)
         with ir.InsertionPoint(_if_blk.then_block):
+            _preload_sorted_ids_to_lds()
             if const_expr(_use_tdm_gather_a):
                 _precompute_a_row_indices()
             a_data_bases = _precompute_a_data_bases()
@@ -2435,45 +3505,99 @@ def _compile_stage2_mxscale_kernel_impl(
                     _data_adv_i32,
                     _scale_adv_i32,
                 )
-                def _issue_active_b_tdm_only(stage_idx, curr_addr_lo):
+
+                # See stage1 for rationale: pre-build per-stage TDMDescriptor2D
+                # bases so the hot path can splice in lanes 2 / 3 cheaply via
+                # ``update_tensor_descriptor_2d_addr_lo_hi``. The lane-3
+                # placeholder mirrors ``_active_addr_hi``, but the actual hi
+                # used at issue time comes from the (lo, hi) pair tracked
+                # through the pipeline state.
+                _tdm_zero_addr_lo = arith.constant(0, type=T.i32)
+                _active_stage_desc_base = [
+                    tdm_ops.TDMDescriptor2D(
+                        vector.from_elements(T.vec(4, T.i32), [
+                            _tdm_pred,
+                            _active_stage_lds_addr[i],
+                            _tdm_zero_addr_lo,
+                            _active_addr_hi,
+                        ]),
+                        _active_dgroup1,
+                    )
+                    for i in range_constexpr(_nb)
+                ]
+
+                def _issue_active_b_tdm_only(stage_idx, curr_addr_lo, curr_addr_hi):
+                    """Issue one B-load and advance the (lo, hi) pair carry-safely."""
                     _if_loader = scf.IfOp(_is_loader_wave)
                     with ir.InsertionPoint(_if_loader.then_block):
-                        _dg0 = vector.from_elements(T.vec(4, T.i32), [
-                            _tdm_pred,
-                            _active_stage_lds_addr[stage_idx],
-                            curr_addr_lo,
-                            _active_addr_hi,
-                        ])
                         tdm_ops.tensor_load_2d(
-                            tdm_ops.TDMDescriptor2D(_dg0, _active_dgroup1)
+                            tdm_ops.update_tensor_descriptor_2d_addr_lo_hi(
+                                _active_stage_desc_base[stage_idx],
+                                curr_addr_lo,
+                                curr_addr_hi,
+                            )
                         )
                         scf.YieldOp([])
-                    _next_addr_lo = arith.addi(curr_addr_lo, _active_adv_i32)
-                    return arith.select(
-                        _is_loader_wave,
-                        _next_addr_lo,
-                        curr_addr_lo,
+                    _next_addr_lo, _next_addr_hi = tdm_ops.add_addr_with_carry(
+                        curr_addr_lo, curr_addr_hi, _active_adv_i32,
                     )
+                    return (
+                        arith.select(
+                            _is_loader_wave, _next_addr_lo, curr_addr_lo),
+                        arith.select(
+                            _is_loader_wave, _next_addr_hi, curr_addr_hi),
+                    )
+
+            if const_expr(_use_tdm_gather_a):
+                _build_a_gather_base_descs(lds_a_bufs)
+            # See stage1 for the rationale of guarding on wave_specialized_tdm:
+            # in wave-specialized mode the hot path goes through
+            # ``_issue_active_b_tdm_only``; ``_issue_b_tdm_only`` is only used
+            # in non-pipelined / tail paths, so skip the cache build to avoid
+            # emitting dead IR.
+            if const_expr(not wave_specialized_tdm):
+                _build_b_base_descs()
 
             # ── pipeline load helpers ─────────────────────────────────
             def _issue_b_tdm_only(k_base, buf_idx):
-                _eid = arith.index_cast(T.index, eid_i32)
-                _n = _eid * n_idx + blk_n
+                # Carry-safe variant: ``update_tensor_descriptor_2d_addr64``
+                # adds the K-tile delta in i64 so an i32 wrap of base_addr_lo
+                # propagates into addr_hi rather than silently corrupting the
+                # descriptor address.
+                _k_data_off = _b_data_k_byte_off(k_base)
+                _k_scale_off = _b_scale_k_byte_off(k_base)
                 tdm_ops.tensor_load_2d(
-                    make_desc_b(_n, k_base, lds_b_bufs[buf_idx]))
+                    tdm_ops.update_tensor_descriptor_2d_addr64(
+                        _b_desc_cache["b"][buf_idx],
+                        _b_desc_cache["b_addr_lo"][buf_idx],
+                        _b_desc_cache["b_addr_hi"][buf_idx],
+                        _k_data_off,
+                    ))
                 tdm_ops.tensor_load_2d(
-                    make_desc_bs(_n, k_base, lds_bs_bufs[buf_idx]))
+                    tdm_ops.update_tensor_descriptor_2d_addr64(
+                        _b_desc_cache["bs"][buf_idx],
+                        _b_desc_cache["bs_addr_lo"][buf_idx],
+                        _b_desc_cache["bs_addr_hi"][buf_idx],
+                        _k_scale_off,
+                    ))
 
             def _issue_scalar_loads(k_base, buf_idx):
                 if const_expr(_use_tdm_gather_a):
-                    issue_a_load_tdm_gather(k_base, lds_a_bufs[buf_idx])
+                    issue_a_load_tdm_gather(k_base, buf_idx)
                 else:
                     issue_a_load(make_desc_a(k_base), lds_a_bufs[buf_idx])
-                issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
+                if _use_tdm_gather_as:
+                    issue_as_load_tdm_gather(make_desc_as(k_base), lds_as_bufs[buf_idx])
+                else:
+                    issue_as_load(make_desc_as(k_base), lds_as_bufs[buf_idx])
 
             def _issue_all_loads(k_base, buf_idx):
-                _issue_b_tdm_only(k_base, buf_idx)
-                _issue_scalar_loads(k_base, buf_idx)
+                if const_expr(is_fp4):
+                    _issue_scalar_loads(k_base, buf_idx)
+                    _issue_b_tdm_only(k_base, buf_idx)
+                else:
+                    _issue_b_tdm_only(k_base, buf_idx)
+                    _issue_scalar_loads(k_base, buf_idx)
 
             def _compute_with_mid_loads(accs_in, buf_idx, mid_load_callback=None):
                 if const_expr(_use_scheduled_compute):
@@ -2491,10 +3615,13 @@ def _compile_stage2_mxscale_kernel_impl(
                 # Single-buffer path (num_buffers=1)
                 if const_expr(wave_specialized_tdm):
                     active_b_addr_lo = _active_addr_lo
+                    active_b_addr_hi = _active_addr_hi
                     for kt in range_constexpr(num_k_tiles):
                         k_base = fx.Index(kt * int(tile_k))
-                        active_b_addr_lo = _issue_active_b_tdm_only(
-                            0, active_b_addr_lo)
+                        active_b_addr_lo, active_b_addr_hi = (
+                            _issue_active_b_tdm_only(
+                                0, active_b_addr_lo, active_b_addr_hi)
+                        )
                         _issue_scalar_loads(k_base, 0)
                         tdm_ops.tensor_wait(0)
                         workgroup_barrier(use_cluster=use_cluster)
@@ -2513,9 +3640,12 @@ def _compile_stage2_mxscale_kernel_impl(
                 # ── prologue: pre-load first `pre_loaded` stages ──
                 if const_expr(wave_specialized_tdm):
                     active_b_addr_lo = _active_addr_lo
+                    active_b_addr_hi = _active_addr_hi
                     for _pi in range_constexpr(pre_loaded):
-                        active_b_addr_lo = _issue_active_b_tdm_only(
-                            _pi, active_b_addr_lo)
+                        active_b_addr_lo, active_b_addr_hi = (
+                            _issue_active_b_tdm_only(
+                                _pi, active_b_addr_lo, active_b_addr_hi)
+                        )
                         _issue_scalar_loads(fx.Index(_pi * int(tile_k)), _pi)
                 else:
                     for _pi in range_constexpr(pre_loaded):
@@ -2525,10 +3655,17 @@ def _compile_stage2_mxscale_kernel_impl(
                 # ── main pipelined loop ──
                 if const_expr(loop_iters > 0):
                     if const_expr(wave_specialized_tdm):
-                        _init = list(acc) + [active_b_addr_lo]
+                        # Carry the (addr_lo, addr_hi) pair through the
+                        # pipeline state so the carry chain survives across
+                        # iterations.
+                        _init = (
+                            list(acc)
+                            + [active_b_addr_lo, active_b_addr_hi]
+                        )
                         for _li, _st in fx.range(0, loop_iters, 1, init=_init):
                             _acc = list(_st[:n_accs])
                             _cur_b_addr_lo = _st[n_accs]
+                            _cur_b_addr_hi = _st[n_accs + 1]
                             for _bi in range_constexpr(_nb):
                                 _lb = (_bi + _nb - 1) % _nb
                                 _kt = (_li * fx.Index(_nb)
@@ -2539,8 +3676,13 @@ def _compile_stage2_mxscale_kernel_impl(
                                     use_cluster=use_cluster)
                                 pipeline_fence_wait(use_cluster=use_cluster)
 
-                                _cur_b_addr_lo = _issue_active_b_tdm_only(
-                                    _lb, _cur_b_addr_lo)
+                                _cur_b_addr_lo, _cur_b_addr_hi = (
+                                    _issue_active_b_tdm_only(
+                                        _lb,
+                                        _cur_b_addr_lo,
+                                        _cur_b_addr_hi,
+                                    )
+                                )
 
                                 def _mid_issue_scalar(_mid_kb=_kb, _mid_lb=_lb):
                                     _issue_scalar_loads(_mid_kb, _mid_lb)
@@ -2554,9 +3696,13 @@ def _compile_stage2_mxscale_kernel_impl(
                                 )
                                 if const_expr(_use_scheduled_compute):
                                     _hot_loop_scheduler_scheduled()
-                            _res = yield list(_acc) + [_cur_b_addr_lo]
+                            _res = yield (
+                                list(_acc)
+                                + [_cur_b_addr_lo, _cur_b_addr_hi]
+                            )
                         acc = list(_res[:n_accs])
                         active_b_addr_lo = _res[n_accs]
+                        active_b_addr_hi = _res[n_accs + 1]
                     else:
                         _init = list(acc)
                         for _li, _st in fx.range(0, loop_iters, 1, init=_init):
@@ -2592,7 +3738,7 @@ def _compile_stage2_mxscale_kernel_impl(
                 if const_expr(loop_iters > 0):
                     pipeline_fence(outstanding=0, use_cluster=use_cluster)
                 elif const_expr(use_cluster):
-                    gpu.cluster_barrier()
+                    cluster.cluster_barrier()
 
                 # ── tail ──
                 _tail_li = 0
@@ -2620,8 +3766,13 @@ def _compile_stage2_mxscale_kernel_impl(
                             _tail_li += 1
 
                             if const_expr(wave_specialized_tdm):
-                                active_b_addr_lo = _issue_active_b_tdm_only(
-                                    _ls, active_b_addr_lo)
+                                active_b_addr_lo, active_b_addr_hi = (
+                                    _issue_active_b_tdm_only(
+                                        _ls,
+                                        active_b_addr_lo,
+                                        active_b_addr_hi,
+                                    )
+                                )
                             else:
                                 _issue_b_tdm_only(_tkb, _ls)
 
@@ -2729,6 +3880,8 @@ def _compile_stage2_mxscale_kernel_impl(
                     topk=int(topk),
                     num_valid_i32=num_valid_i32,
                     block_row_start=block_row_start,
+                    lds_tid=lds_tid,
+                    memref=memref,
                     sorted_rsrc=sorted_rsrc,
                     tw_rsrc=tw_rsrc,
                     out_rsrc=out_rsrc,
@@ -2745,6 +3898,8 @@ def _compile_stage2_mxscale_kernel_impl(
                     range_constexpr=range_constexpr,
                     rocdl=rocdl,
                     T=T,
+                    bias_rsrc=bias_rsrc if _enable_bias else None,
+                    eid_i32=eid_i32 if _enable_bias else None,
                 )
             scf.YieldOp([])
 
@@ -2759,6 +3914,7 @@ def _compile_stage2_mxscale_kernel_impl(
         arg_expert_ids: fx.Tensor,
         arg_sorted_weights: fx.Tensor,
         arg_num_valid_ids: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_tokens_in: fx.Int32,
         i32_n_in: fx.Int32,
         i32_k_in: fx.Int32,
@@ -2771,26 +3927,13 @@ def _compile_stage2_mxscale_kernel_impl(
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         gx = (n_in + fx.Index(int(tile_n) - 1)) // fx.Index(int(tile_n))
         gy = size_expert_ids_in
-        _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
         launcher = moe_mxscale_stage2_single(
-            arg_out,
-            arg_x,
-            arg_w,
-            arg_scale_x,
-            arg_scale_w,
-            arg_sorted_token_ids,
-            arg_expert_ids,
-            arg_sorted_weights,
-            arg_num_valid_ids,
-            i32_tokens_in,
-            i32_n_in,
-            i32_k_in,
-            i32_size_expert_ids_in,
-            value_attrs={
-                "rocdl.waves_per_eu": effective_waves_per_eu,
-                "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if use_cluster else None,
-            },
+            arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w,
+            arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights, arg_num_valid_ids,
+            arg_bias,
+            i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in,
         )
+        _cluster_arg = (int(cluster_m), int(cluster_n), 1) if use_cluster else None
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
             alloc=alloc,
@@ -2799,6 +3942,7 @@ def _compile_stage2_mxscale_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
+            waves_per_eu=effective_waves_per_eu,
             ir=ir,
             cluster=_cluster_arg,
         )
@@ -2834,11 +3978,16 @@ def _compile_moe_mxscale_gemm(
     expert_sched_mode: bool = True,
     num_buffers: int = 1,
     use_tdm_gather: bool = True,
+    use_tdm_gather_as: bool = True,
     use_tdm_store: bool = False,
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     cluster_m: int = 1,
     cluster_n: int = 1,
+    k_batch: int = 1,
+    # ── bias / activation (stage1 only consumes ``act``) ─────────────
+    enable_bias: bool = False,
+    act: str = "silu",
 ):
     _require_gfx1250()
     if waves_per_eu is not None and int(waves_per_eu) < 1:
@@ -2860,14 +4009,22 @@ def _compile_moe_mxscale_gemm(
         m_warp=int(single_m_warp), n_warp=int(single_n_warp),
         out_dtype=out_dtype, waves_per_eu=waves_per_eu, data_format=in_dtype,
         expert_sched_mode=expert_sched_mode, num_buffers=int(num_buffers),
-        use_tdm_gather=bool(use_tdm_gather), use_tdm_store=bool(use_tdm_store),
+        use_tdm_gather=bool(use_tdm_gather),
+        use_tdm_gather_as=bool(use_tdm_gather_as),
+        use_tdm_store=bool(use_tdm_store),
         inst_prefetch=bool(inst_prefetch), wave_specialized_tdm=bool(wave_specialized_tdm),
         cluster_m=int(cluster_m), cluster_n=int(cluster_n),
     )
 
     if stage == 1:
-        exe = _compile_stage1_mxscale_kernel_impl(doweight_stage1=bool(doweight), **common)
-        if in_dtype in ("fp8", "a8w4") and (int(inter_dim) % int(single_tile_n) == 0):
+        exe = _compile_stage1_mxscale_kernel_impl(
+            doweight_stage1=bool(doweight), k_batch=int(k_batch),
+            enable_bias=bool(enable_bias), act=str(act), **common)
+        if (
+            int(k_batch) == 1
+            and in_dtype in ("fp8", "a8w4")
+            and (int(inter_dim) % int(single_tile_n) == 0)
+        ):
             return _Stage1GateUpPackedWrapper(
                 exe,
                 experts=int(experts), inter_dim=int(inter_dim),
@@ -2877,17 +4034,28 @@ def _compile_moe_mxscale_gemm(
             )
         return exe
 
+    if int(k_batch) != 1:
+        raise ValueError(
+            "split-K (k_batch>1) is only supported on stage1 for MXScale MoE")
+    # ``act`` is stage1-only; stage2 has no fused activation.
     return _compile_stage2_mxscale_kernel_impl(
-        doweight_stage2=bool(doweight), accumulate=bool(accumulate), **common,
+        doweight_stage2=bool(doweight), accumulate=bool(accumulate),
+        enable_bias=bool(enable_bias), **common,
     )
 
 
-def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None, **kw):
-    return _compile_moe_mxscale_gemm(stage=1, doweight=doweight_stage1, **kw)
+def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None,
+                      k_batch=1, enable_bias=False, act="silu", **kw):
+    return _compile_moe_mxscale_gemm(
+        stage=1, doweight=doweight_stage1, k_batch=int(k_batch),
+        enable_bias=bool(enable_bias), act=str(act), **kw)
 
 
-def compile_moe_gemm2(*, doweight_stage2, accumulate=True, group_size=-1, use_cshuffle_epilog=None, **kw):
-    return _compile_moe_mxscale_gemm(stage=2, doweight=doweight_stage2, accumulate=accumulate, **kw)
+def compile_moe_gemm2(*, doweight_stage2, accumulate=True, group_size=-1,
+                      use_cshuffle_epilog=None, enable_bias=False, **kw):
+    return _compile_moe_mxscale_gemm(
+        stage=2, doweight=doweight_stage2, accumulate=accumulate,
+        enable_bias=bool(enable_bias), **kw)
 
 
 def compile_moe_gemm2_ex(*, mode=MoeGemm2Mode.ATOMIC, valid_mask=None, zero_intermediate=True, **kw):

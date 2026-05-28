@@ -18,10 +18,7 @@ _repo_root = Path(__file__).resolve().parents[1]
 _fly_pkg_dir = _repo_root / "build-fly" / "python_packages"
 if _fly_pkg_dir.exists():
     _p = str(_fly_pkg_dir)
-    _already = _p in sys.path or any(
-        os.path.isdir(ep) and os.path.samefile(ep, _p)
-        for ep in sys.path if ep
-    )
+    _already = _p in sys.path or any(os.path.isdir(ep) and os.path.samefile(ep, _p) for ep in sys.path if ep)
     if not _already:
         sys.path.insert(0, _p)
 
@@ -48,15 +45,16 @@ if _src_py_dir.exists() and (_src_py_dir / "flydsl").exists():
 _ensure_extensions = None
 try:
     from flydsl.compiler.context import ensure_flydsl_python_extensions
+
     _ensure_extensions = ensure_flydsl_python_extensions
 except ImportError:
     pass
 
 try:
-    from flydsl._mlir.ir import Context, Location, Module, InsertionPoint
+    from flydsl._mlir.ir import Context, InsertionPoint, Location, Module
 except ImportError:
     try:
-        from _mlir.ir import Context, Location, Module, InsertionPoint
+        from _mlir.ir import Context, InsertionPoint, Location, Module
     except ImportError:
         Context = Location = Module = InsertionPoint = None
 
@@ -71,11 +69,15 @@ def ctx():
             _ensure_extensions(context)
         with Location.unknown(context):
             module = Module.create()
-            yield type("MLIRContext", (), {
-                "context": context,
-                "module": module,
-                "location": Location.unknown(context),
-            })()
+            yield type(
+                "MLIRContext",
+                (),
+                {
+                    "context": context,
+                    "module": module,
+                    "location": Location.unknown(context),
+                },
+            )()
 
 
 @pytest.fixture

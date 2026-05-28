@@ -6,8 +6,28 @@ from .typing import *
 from .primitive import *
 from .gpu import *
 from .derived import *
+from .struct import *
 
-from . import utils
+from . import utils as utils
+from . import arith as arith
+from . import gpu as gpu
+from . import math as math
+from . import vector as vector
 
-from . import arith, vector, gpu, buffer_ops, rocdl, math
-from .rocdl import tdm_ops
+_LAZY_MODULES = {
+    "buffer_ops": ".buffer_ops",
+    "rocdl": ".rocdl",
+    "tdm_ops": ".rocdl.tdm_ops",
+}
+
+
+def __getattr__(name: str):
+    module_name = _LAZY_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    import importlib
+
+    module = importlib.import_module(module_name, __name__)
+    globals()[name] = module
+    return module

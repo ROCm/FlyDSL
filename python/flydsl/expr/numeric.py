@@ -37,6 +37,7 @@ def _infer_np_dtype(width, signed, name):
 
 class NumericMeta(type):
     width: int
+    log_width: int
     _ir_type = None
     _np_dtype = None
 
@@ -52,13 +53,13 @@ class NumericMeta(type):
         zero=None,
         **kwargs,
     ):
-        def _fly_values(self):
+        def _extract_to_ir_values(self):
             return [self.ir_value()]
 
-        def _fly_construct(cls, values):
+        def _construct_from_ir_values(cls, values):
             return cls(values[0])
 
-        def _c_pointers(self):
+        def _get_c_pointers(self):
             if width == 1:
                 c_value = ctypes.c_bool(self.value)
             elif signed:
@@ -70,24 +71,60 @@ class NumericMeta(type):
             return [ptr]
 
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
+        is_storable = width >= 8
+
+        def _dsl_size_of(cls):
+            return 1 if cls.width < 8 else (cls.width + 7) // 8
+
+        def _dsl_align_of(cls):
+            return 1 if cls.width < 8 else (cls.width + 7) // 8
+
+        def _peek_from_ptr(cls, ptr):
+            from .primitive import ptr_load, recast_iter
+
+            typed_ptr = recast_iter(cls, ptr)
+            return cls(ptr_load(typed_ptr, cls))
+
+        def _poke_into_ptr(cls, ptr, value):
+            from .primitive import ptr_store, recast_iter
+
+            typed_ptr = recast_iter(cls, ptr)
+            coerced = value.to(cls) if isinstance(value, Numeric) else cls(value)
+            ptr_store(coerced.ir_value(), typed_ptr)
+
+        def _not_storable(cls):
+            raise TypeError(f"sub-byte type {cls.__name__} (width={cls.width}) is not Storable")
 
         new_attrs = {
-            "__fly_values__": _fly_values,
-            "__fly_construct__": classmethod(_fly_construct),
+            "__extract_to_ir_values__": _extract_to_ir_values,
+            "__construct_from_ir_values__": classmethod(_construct_from_ir_values),
         }
+        if is_storable:
+            new_attrs["__dsl_size_of__"] = classmethod(_dsl_size_of)
+            new_attrs["__dsl_align_of__"] = classmethod(_dsl_align_of)
+            new_attrs["__peek_from_ptr__"] = classmethod(_peek_from_ptr)
+            new_attrs["__poke_into_ptr__"] = classmethod(_poke_into_ptr)
+        elif any(hasattr(base, "__dsl_size_of__") for base in bases):
+            new_attrs["__dsl_size_of__"] = classmethod(_not_storable)
+            new_attrs["__dsl_align_of__"] = classmethod(_not_storable)
+            new_attrs["__peek_from_ptr__"] = classmethod(_not_storable)
+            new_attrs["__poke_into_ptr__"] = classmethod(lambda cls, ptr, value: _not_storable(cls))
         if signed is not None:
-            new_attrs["__fly_ptrs__"] = _c_pointers
+            new_attrs["__get_c_pointers__"] = _get_c_pointers
+
             def _reusable_slot_spec(cls, arg):
-                ctype = getattr(cls, '_reusable_ctype', None)
+                ctype = getattr(cls, "_reusable_ctype", None)
                 if ctype is None:
                     return None
-                return ctype, lambda a: a.value if hasattr(a, 'value') else a
+                return ctype, lambda a: a.value if hasattr(a, "value") else a
+
             new_attrs["_reusable_slot_spec"] = classmethod(_reusable_slot_spec)
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
         if ir_type is not None:
             new_cls._ir_type = staticmethod(ir_type)
         new_cls.width = width
+        new_cls.log_width = (width - 1).bit_length()
         new_cls._np_dtype = inferred_np
         new_cls.signed = signed
         new_cls._zero = zero
@@ -176,22 +213,16 @@ def _coerce_operands(a, b, widen_bool=False):
 
     if ta.is_float or tb.is_float:
         dest = _resolve_float_type(ta, tb)
-        return (a if type(a) is dest else a.to(dest),
-                b if type(b) is dest else b.to(dest),
-                dest)
+        return (a if type(a) is dest else a.to(dest), b if type(b) is dest else b.to(dest), dest)
 
     # Both integers — pick wider; on tie, prefer unsigned when mixed sign
     if ta.signed == tb.signed:
         wider = ta if ta.width >= tb.width else tb
-        return (a if type(a) is wider else a.to(wider),
-                b if type(b) is wider else b.to(wider),
-                wider)
+        return (a if type(a) is wider else a.to(wider), b if type(b) is wider else b.to(wider), wider)
 
     u, s = (ta, tb) if not ta.signed else (tb, ta)
     dest = u if u.width >= s.width else s
-    return (a if type(a) is dest else a.to(dest),
-            b if type(b) is dest else b.to(dest),
-            dest)
+    return (a if type(a) is dest else a.to(dest), b if type(b) is dest else b.to(dest), dest)
 
 
 def _try_coerce_rhs(rhs):
@@ -226,8 +257,8 @@ def _unwrap_value(value):
         except Exception:
             log().error(f"failed to construct {as_numeric(value)} from {value}")
             return value
-    if hasattr(value, "__fly_values__"):
-        values = value.__fly_values__()
+    if hasattr(value, "__extract_to_ir_values__"):
+        values = value.__extract_to_ir_values__()
         if len(values) == 1:
             return values[0]
     if hasattr(value, "ir_value"):
@@ -243,7 +274,7 @@ def _wrap_like(value, exemplar=None):
     if exemplar is not None:
         if isinstance(exemplar, Numeric):
             return type(exemplar)(value)
-        ctor = getattr(type(exemplar), "__fly_construct__", None)
+        ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
         if ctor is not None:
             try:
                 return ctor([value])
@@ -260,6 +291,7 @@ def _wrap_like(value, exemplar=None):
 
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
     """Create a binary-operator closure for Numeric subclasses."""
+
     def _apply(lhs, rhs, *, loc=None, ip=None):
         rhs = _try_coerce_rhs(rhs)
         if rhs is None:
@@ -301,6 +333,15 @@ class Numeric(metaclass=NumericMeta):
         """Ternary select (for Boolean conditions from Int32 comparisons)."""
         return ArithValue(self).select(true_value, false_value, loc=loc)
 
+    @classmethod
+    def __coerce__(cls, value):
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(value)
+        except Exception:
+            raise TypeError(f"expects {cls.__name__}, got {type(value).__name__}")
+
     @property
     def dtype(self) -> Type["Numeric"]:
         return type(self)
@@ -330,8 +371,11 @@ class Numeric(metaclass=NumericMeta):
     def ir_value(self, *, loc=None, ip=None) -> ir.Value:
         return self.to(ir.Value, loc=loc, ip=ip)
 
-    def __fly_types__(self):
+    def __get_ir_types__(self):
         return [type(self).ir_type]
+
+    def __cache_signature__(self):
+        return (type(self),)
 
     def __neg__(self, *, loc=None, ip=None):
         if isinstance(self.value, (bool, int, float)):
@@ -690,7 +734,7 @@ class Uint64(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=T.i
 
 
 class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         if not isinstance(self.value, float):
             raise ValueError("host-side pointer requires a concrete float value")
         f16_val = np.float16(self.value)
@@ -700,7 +744,7 @@ class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):
 
 
 class BFloat16(Float, metaclass=NumericMeta, width=16, ir_type=T.bf16):
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         if not isinstance(self.value, float):
             raise ValueError("host-side pointer requires a concrete float value")
         f32_val = np.float32(self.value)
@@ -711,14 +755,14 @@ class BFloat16(Float, metaclass=NumericMeta, width=16, ir_type=T.bf16):
 
 
 class Float32(Float, metaclass=NumericMeta, width=32, ir_type=T.f32):
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         if not isinstance(self.value, float):
             raise ValueError("host-side pointer requires a concrete float value")
         return [ctypes.cast(ctypes.pointer(ctypes.c_float(self.value)), ctypes.c_void_p)]
 
 
 class Float64(Float, metaclass=NumericMeta, width=64, ir_type=T.f64):
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         if not isinstance(self.value, float):
             raise ValueError("host-side pointer requires a concrete float value")
         return [ctypes.cast(ctypes.pointer(ctypes.c_double(self.value)), ctypes.c_void_p)]
@@ -730,7 +774,9 @@ class Float8E5M2(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E5M2): ...
 class Float8E4M3FN(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E4M3FN): ...
 
 
-class Float8E4M3FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=lambda: ir.Float8E4M3FNUZType.get()): ...  # not in upstream MLIR extras T
+class Float8E4M3FNUZ(
+    Float, metaclass=NumericMeta, width=8, ir_type=lambda: ir.Float8E4M3FNUZType.get()
+): ...  # not in upstream MLIR extras T
 
 
 class Float8E4M3B11FNUZ(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E4M3B11FNUZ): ...
@@ -749,7 +795,6 @@ class Float8E8M0FNU(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E8M0FNU):
 
 
 class Float4E2M1FN(Float, metaclass=NumericMeta, width=4, ir_type=T.f4E2M1FN): ...
-
 
 
 # Float type rank for promotion (must be after class definitions)
@@ -811,16 +856,17 @@ def _promote(cls, a_type, b_type):
 Numeric.promote = _promote
 
 
-class Index(Integer, metaclass=NumericMeta, width=64, signed=False,
-            ir_type=lambda: ir.IndexType.get()):
+class Index(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=lambda: ir.IndexType.get()):
     """DSL Numeric for MLIR index type. Replaces arith.index(N).
 
     Usage:
         fx.Index(64)       # compile-time constant → arith.index(64)
         fx.Index(i32_val)  # cast i32/i64 ir.Value or Numeric to index
     """
+
     def __init__(self, x, *, loc=None, ip=None):
         from .utils.arith import index_cast
+
         # Unwrap DSL Numeric to ir.Value first
         if isinstance(x, Numeric) and not isinstance(x, Index):
             x = x.ir_value(loc=loc, ip=ip)
@@ -830,4 +876,3 @@ class Index(Integer, metaclass=NumericMeta, width=64, signed=False,
         # x is now either: Python int, or index-typed ir.Value
         # Pass directly to Numeric.__init__ (bypass Integer conversion logic)
         Numeric.__init__(self, x)
-

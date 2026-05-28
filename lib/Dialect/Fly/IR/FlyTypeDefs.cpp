@@ -13,6 +13,7 @@ namespace mlir::fly {
 bool BasisType::isStatic() const { return getAttr().isStatic(); }
 bool IntTupleType::isStatic() const { return getAttr().isStatic(); }
 bool SwizzleType::isStatic() const { return true; }
+bool CoordSwizzleType::isStatic() const { return true; }
 bool LayoutType::isStatic() const { return getAttr().isStatic(); }
 bool ComposedLayoutType::isStatic() const { return getAttr().isStatic(); }
 bool TileType::isStatic() const { return true; }
@@ -49,6 +50,13 @@ Value SwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc, Value cu
   return StaticOp::create(builder, loc, *this);
 }
 
+Value CoordSwizzleType::rebuildStaticValue(OpBuilder &builder, Location loc,
+                                           Value currentValue) const {
+  if (currentValue)
+    return nullptr;
+  return StaticOp::create(builder, loc, *this);
+}
+
 Value ComposedLayoutType::rebuildStaticValue(OpBuilder &builder, Location loc,
                                              Value currentValue) const {
   if (currentValue && isNormalForm(cast<TypedValue<ComposedLayoutType>>(currentValue)))
@@ -62,10 +70,20 @@ Value ComposedLayoutType::rebuildStaticValue(OpBuilder &builder, Location loc,
     inner = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
   else if (auto swizzleAttr = dyn_cast<SwizzleAttr>(innerAttr))
     inner = SwizzleType::get(swizzleAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto coordSwizzleAttr = dyn_cast<CoordSwizzleAttr>(innerAttr))
+    inner = CoordSwizzleType::get(coordSwizzleAttr).rebuildStaticValue(builder, loc, nullptr);
   if (!inner)
     return nullptr;
   Value offset = IntTupleType::get(attr.getOffset()).rebuildStaticValue(builder, loc, nullptr);
-  Value outer = LayoutType::get(attr.getOuter()).rebuildStaticValue(builder, loc, nullptr);
+  if (!offset)
+    return nullptr;
+  Value outer;
+  if (auto layoutAttr = dyn_cast<LayoutAttr>(attr.getOuter()))
+    outer = LayoutType::get(layoutAttr).rebuildStaticValue(builder, loc, nullptr);
+  else if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(attr.getOuter()))
+    outer = ComposedLayoutType::get(composedAttr).rebuildStaticValue(builder, loc, nullptr);
+  if (!outer)
+    return nullptr;
   return MakeComposedLayoutOp::create(builder, loc, *this, inner, offset, outer);
 }
 
@@ -316,13 +334,38 @@ static void printAlignAndSwizzle(AsmPrinter &printer, Type elemTy, AlignAttr ali
   }
 }
 
+// Parses the address-space. Accepts either:
+//   * a fly address space enum keyword (`global`, `shared`, `register`) parsed as
+//     `AddressSpaceAttr`, or
+//   * a dialect-qualified attribute (e.g. `#fly_rocdl.buffer_desc`) for
+//     target-specific spaces.
+static FailureOr<Attribute> parseAddressSpaceAttribute(AsmParser &parser) {
+  Attribute attr;
+  OptionalParseResult opt = parser.parseOptionalAttribute(attr);
+  if (opt.has_value()) {
+    if (failed(*opt))
+      return failure();
+    return attr;
+  }
+  auto enumAttr = FieldParser<AddressSpaceAttr>::parse(parser);
+  if (failed(enumAttr))
+    return failure();
+  return Attribute(*enumAttr);
+}
+
+static void printAddressSpaceAttribute(AsmPrinter &printer, Attribute attr) {
+  if (auto e = dyn_cast<AddressSpaceAttr>(attr))
+    printer.printStrippedAttrOrType(e);
+  else
+    printer.printAttribute(attr);
+}
+
 Type PointerType::parse(AsmParser &parser) {
   parser.getContext()->getOrLoadDialect<FlyDialect>();
   Type elemTy;
-  FailureOr<AddressSpaceAttr> addressSpace;
   if (parser.parseLess() || parser.parseType(elemTy) || parser.parseComma())
     return {};
-  addressSpace = FieldParser<AddressSpaceAttr>::parse(parser);
+  auto addressSpace = parseAddressSpaceAttribute(parser);
   if (failed(addressSpace))
     return {};
   AlignAttr alignment;
@@ -334,7 +377,7 @@ Type PointerType::parse(AsmParser &parser) {
 
 void PointerType::print(AsmPrinter &printer) const {
   printer << "<" << getElemTy() << ", ";
-  printer.printStrippedAttrOrType(getAddressSpace());
+  printAddressSpaceAttribute(printer, getAddressSpace());
   printAlignAndSwizzle(printer, getElemTy(), getAlignment(), getSwizzle(), getContext());
   printer << ">";
 }
@@ -342,10 +385,9 @@ void PointerType::print(AsmPrinter &printer) const {
 Type MemRefType::parse(AsmParser &parser) {
   parser.getContext()->getOrLoadDialect<FlyDialect>();
   Type elemTy;
-  FailureOr<AddressSpaceAttr> addressSpace;
   if (parser.parseLess() || parser.parseType(elemTy) || parser.parseComma())
     return {};
-  addressSpace = FieldParser<AddressSpaceAttr>::parse(parser);
+  auto addressSpace = parseAddressSpaceAttribute(parser);
   if (failed(addressSpace))
     return {};
   if (parser.parseComma())
@@ -362,7 +404,7 @@ Type MemRefType::parse(AsmParser &parser) {
 
 void MemRefType::print(AsmPrinter &printer) const {
   printer << "<" << getElemTy() << ", ";
-  printer.printStrippedAttrOrType(getAddressSpace());
+  printAddressSpaceAttribute(printer, getAddressSpace());
   printer << ", ";
   Attribute layoutAttr = getLayout();
   if (auto layout = dyn_cast<LayoutAttr>(layoutAttr))

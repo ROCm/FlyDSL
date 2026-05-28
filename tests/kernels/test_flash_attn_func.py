@@ -4,15 +4,20 @@
 Tests flash_attn_func against PyTorch SDPA.
 """
 
-import os
-import sys
 import argparse
 import csv
 import hashlib
-import math
-import random
-from pathlib import Path
+import json
 import logging
+import math
+import os
+import random
+import shutil
+import sys
+import tarfile
+import urllib.request
+from contextlib import contextmanager
+from pathlib import Path
 
 # Configure logging to show INFO level messages (required for kernel name display)
 logging.basicConfig(level=logging.INFO)
@@ -21,9 +26,9 @@ _repo = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_repo))
 
 try:
+    import numpy as np
     import torch
     import torch.nn.functional as F
-    import numpy as np
 except ImportError:
     print("PyTorch not available")
     sys.exit(1)
@@ -32,11 +37,10 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-from kernels.flash_attn_func import (
-    KERNEL_NAME,
+from kernels.flash_attn_func import (  # noqa: E402
     build_flash_attn_func_module,
 )
-from tests.test_common import run_perftest
+from tests.test_common import run_perftest  # noqa: E402
 
 # Tensor initialization range (uniform distribution)
 UNIFORM_RANGE = (-1, 1)
@@ -55,27 +59,131 @@ DEFAULT_CONFIGS = [
     (1, 256, 64, 128),
     (1, 512, 64, 128),
     (1, 1024, 64, 128),
-
     (1, 2048, 64, 128),
     (1, 4096, 64, 128),
     (1, 8192, 64, 128),
     (4, 8192, 64, 128),
-
     (1, 2048, 32, 128),
     (1, 4096, 32, 128),
     (1, 8192, 32, 128),
     (8, 8192, 32, 128),
-
     (1, 2048, 16, 128),
     (1, 4096, 16, 128),
     (1, 8192, 16, 128),
     (16, 8192, 16, 128),
-
     (1, 2048, 8, 128),
     (1, 4096, 8, 128),
     (1, 8192, 8, 128),
     (32, 8192, 8, 128),
 ]
+
+
+def _maybe_configure_custom_llvm_tools() -> None:
+    """Prefer the custom mlir-opt build used for peak FlashAttention perf."""
+    if os.getenv("FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM", "1").lower() in ("0", "false", "no", "off"):
+        return
+    if os.getenv("FLYDSL_COMPILE_LLVM_DIR"):
+        llvm_dir = Path(os.environ["FLYDSL_COMPILE_LLVM_DIR"]).expanduser()
+        if not (llvm_dir / "bin" / "mlir-opt").is_file():
+            raise RuntimeError(
+                f"FLYDSL_COMPILE_LLVM_DIR={llvm_dir} does not contain bin/mlir-opt. "
+                "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+            )
+        return
+
+    candidates = []
+    for env_name in ("FLYDSL_FLASH_ATTN_FUNC_LLVM_DIR", "FLYDSL_CUSTOM_LLVM_TOOLS_DIR"):
+        raw = os.getenv(env_name)
+        if raw:
+            candidates.append(Path(raw).expanduser())
+
+    archive_name = None
+    extract_dir = None
+    config_path = _repo / "thirdparty" / "custom-llvm-tools.json"
+    if config_path.is_file():
+        try:
+            cfg = json.loads(config_path.read_text())
+            archive_prefix = cfg.get("archive_name", "flydsl-mlir-tools")
+            llvm_ref = cfg.get("llvm_ref", "")
+            if len(llvm_ref) >= 12:
+                archive_stem = f"{archive_prefix}-{llvm_ref[:12]}-manylinux_2_28-x86_64"
+                archive_name = f"{archive_stem}.tar.gz"
+                extract_dir = _repo / "build-fly" / "custom-llvm-tools" / archive_stem
+                candidates.extend(
+                    [
+                        extract_dir,
+                        _repo / ".cache" / "custom-llvm-tools" / archive_stem,
+                    ]
+                )
+        except Exception as exc:
+            print(f"[flash_attn_func] failed to read custom LLVM tool config: {exc}")
+
+    candidates.extend(
+        [
+            _repo / "build-fly" / "custom-llvm-tools",
+            _repo / ".cache" / "custom-llvm-tools",
+        ]
+    )
+
+    for path in candidates:
+        if (path / "bin" / "mlir-opt").is_file():
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = str(path)
+            print(f"[flash_attn_func] using custom LLVM tools: {path}")
+            return
+
+    if archive_name and extract_dir:
+        root_dir = extract_dir.parent
+        archive_path = root_dir / archive_name
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        if not archive_path.is_file():
+            https_uri = f"https://rocm.frameworks-devreleases.amd.com/llvm-tools/gfx942-gfx950/{archive_name}"
+            print(f"[flash_attn_func] fetching custom LLVM tools: {archive_name}")
+            try:
+                urllib.request.urlretrieve(https_uri, archive_path)
+            except Exception as exc:
+                archive_path.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"failed to download custom LLVM tools from {https_uri}: {exc}. "
+                    "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+                ) from exc
+
+        if archive_path.is_file():
+            try:
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir)
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(archive_path, "r:gz") as tar:
+                    tar.extractall(extract_dir)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"failed to extract custom LLVM tools from {archive_path}: {exc}. "
+                    "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+                ) from exc
+
+        if (extract_dir / "bin" / "mlir-opt").is_file():
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = str(extract_dir)
+            print(f"[flash_attn_func] using custom LLVM tools: {extract_dir}")
+            return
+
+    raise RuntimeError(
+        "custom LLVM tools not found or missing bin/mlir-opt. "
+        "Set FLYDSL_COMPILE_LLVM_DIR to an LLVM tools directory, "
+        "or set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+    )
+
+
+@contextmanager
+def _custom_llvm_tools_env():
+    prev_llvm_dir = os.environ.get("FLYDSL_COMPILE_LLVM_DIR")
+    _maybe_configure_custom_llvm_tools()
+    try:
+        yield
+    finally:
+        if prev_llvm_dir is None:
+            os.environ.pop("FLYDSL_COMPILE_LLVM_DIR", None)
+        else:
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = prev_llvm_dir
 
 
 def setup_seed(seed: int) -> None:
@@ -96,9 +204,7 @@ def pytorch_ref_attention(q, k, v, causal=True):
 
 def compute_md5(tensor: torch.Tensor) -> str:
     """Compute MD5 hash of a tensor's raw bytes."""
-    return hashlib.md5(
-        tensor.contiguous().view(torch.uint8).detach().cpu().numpy().tobytes()
-    ).hexdigest()
+    return hashlib.md5(tensor.contiguous().view(torch.uint8).detach().cpu().numpy().tobytes()).hexdigest()
 
 
 def compare_arrays(
@@ -176,24 +282,29 @@ def compare_arrays(
         lower, upper = thresholds[i], thresholds[i + 1]
         count = int(np.sum((diff >= lower) & (diff < upper)))
         pct = 100.0 * count / total_elements
-        result["threshold_stats"].append(
-            {"range": f"[{lower:.0e}, {upper:.0e})", "count": count, "percentage": pct}
-        )
+        result["threshold_stats"].append({"range": f"[{lower:.0e}, {upper:.0e})", "count": count, "percentage": pct})
         print(f"    [{lower:.0e}, {upper:.0e}): {count:>8d} ({pct:6.2f}%)")
 
     count = int(np.sum(diff >= thresholds[-1]))
     pct = 100.0 * count / total_elements
-    result["threshold_stats"].append(
-        {"range": f">={thresholds[-1]:.0e}", "count": count, "percentage": pct}
-    )
+    result["threshold_stats"].append({"range": f">={thresholds[-1]:.0e}", "count": count, "percentage": pct})
     print(f"    >={thresholds[-1]:.0e}       : {count:>8d} ({pct:6.2f}%)")
 
     return result
 
 
 def run_config(
-    batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters,
-    seed=DEFAULT_SEED, dtype_str="f16", verbose=True,
+    batch,
+    seq_len,
+    num_heads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    dtype_str="f16",
+    verbose=True,
 ):
     device = "cuda"
     results = {}
@@ -206,14 +317,15 @@ def run_config(
         return results
 
     try:
-        exe = build_flash_attn_func_module(
-            num_heads=num_heads,
-            head_dim=head_dim,
-            causal=causal,
-            dtype_str=dtype_str,
-            waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
-            daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
-        )
+        with _custom_llvm_tools_env():
+            exe = build_flash_attn_func_module(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                causal=causal,
+                dtype_str=dtype_str,
+                waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
+                daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
+            )
     except Exception as e:
         results["err"] = f"build: {e}"
         import traceback
@@ -274,6 +386,7 @@ def run_config(
         )
 
     try:
+
         def kernel_fn():
             exe(q_flat, k_flat, v_flat, o_flat, B, S)
 
@@ -290,8 +403,16 @@ def run_config(
 
 
 def run_aiter_bench(
-    batch, seq_len, nheads, head_dim, dtype, causal,
-    warmup, iters, seed=DEFAULT_SEED, backend="ck",
+    batch,
+    seq_len,
+    nheads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    backend="ck",
 ):
     """Run true CK or true ASM kernel via aiter and return {tflops, max_err, us}."""
     try:
@@ -313,6 +434,7 @@ def run_aiter_bench(
     softmax_scale = 1.0 / math.sqrt(D)
 
     if backend == "ck":
+
         def aiter_forward():
             return aiter.mha_fwd(
                 q,
@@ -337,7 +459,9 @@ def run_aiter_bench(
                 None,
                 None,
             )
+
     elif backend == "asm":
+
         def aiter_forward():
             return aiter.fmha_v3_fwd(
                 q,
@@ -359,6 +483,7 @@ def run_aiter_bench(
                 None,
                 None,
             )
+
     else:
         return {"err": f"unsupported backend: {backend}"}
 
@@ -366,7 +491,9 @@ def run_aiter_bench(
         out = aiter_forward()[0]
         torch.cuda.synchronize()
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+
+        traceback.print_exc()
         return {"err": f"{backend}: {e}"}
 
     ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal).to(dtype)
@@ -374,6 +501,7 @@ def run_aiter_bench(
     results["max_err"] = max_err
 
     try:
+
         def bench_fn():
             aiter_forward()
 
@@ -454,22 +582,46 @@ def _csv_cmp(fly_r, other_r):
 def _write_cmp_csv(csv_path, data_rows, avg_rows):
     """Write compare-mode results to CSV."""
     header = [
-        "B", "S", "H", "D", "dtype", "causal",
-        "FlyDSL_Time(us)", "FlyDSL_TFLOPS", "FlyDSL_MaxErr",
-        "CK_Time(us)", "CK_TFLOPS", "CK_MaxErr",
-        "ASM_Time(us)", "ASM_TFLOPS", "ASM_MaxErr",
-        "Fly/CK_TFLOPS%", "Fly/CK_MaxErr_ratio",
-        "Fly/ASM_TFLOPS%", "Fly/ASM_MaxErr_ratio",
+        "B",
+        "S",
+        "H",
+        "D",
+        "dtype",
+        "causal",
+        "FlyDSL_Time(us)",
+        "FlyDSL_TFLOPS",
+        "FlyDSL_MaxErr",
+        "CK_Time(us)",
+        "CK_TFLOPS",
+        "CK_MaxErr",
+        "ASM_Time(us)",
+        "ASM_TFLOPS",
+        "ASM_MaxErr",
+        "Fly/CK_TFLOPS%",
+        "Fly/CK_MaxErr_ratio",
+        "Fly/ASM_TFLOPS%",
+        "Fly/ASM_MaxErr_ratio",
     ]
+
     def _metrics(fr, cr, ar):
         fck = _csv_cmp(fr, cr)
         fasm = _csv_cmp(fr, ar)
         return [
-            _csv_val(fr, "us"), _csv_val(fr, "tflops"), _csv_val(fr, "max_err"),
-            _csv_val(cr, "us"), _csv_val(cr, "tflops"), _csv_val(cr, "max_err"),
-            _csv_val(ar, "us"), _csv_val(ar, "tflops"), _csv_val(ar, "max_err"),
-            fck[0], fck[1], fasm[0], fasm[1],
+            _csv_val(fr, "us"),
+            _csv_val(fr, "tflops"),
+            _csv_val(fr, "max_err"),
+            _csv_val(cr, "us"),
+            _csv_val(cr, "tflops"),
+            _csv_val(cr, "max_err"),
+            _csv_val(ar, "us"),
+            _csv_val(ar, "tflops"),
+            _csv_val(ar, "max_err"),
+            fck[0],
+            fck[1],
+            fasm[0],
+            fasm[1],
         ]
+
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
@@ -481,22 +633,39 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
     """Write normal-mode results to CSV."""
-    header = ["B", "S", "H", "D", "dtype", "causal", "Path", "Status",
-              "MaxErr", "MinCos", "Time(us)", "TFLOPS"]
+    header = ["B", "S", "H", "D", "dtype", "causal", "Path", "Status", "MaxErr", "MinCos", "Time(us)", "TFLOPS"]
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
         for cfg, path, status, r in data_rows:
-            w.writerow(list(cfg) + [
-                path, status,
-                _csv_val(r, "max_err"), _csv_val(r, "min_cos"),
-                _csv_val(r, "us"), _csv_val(r, "tflops"),
-            ])
+            w.writerow(
+                list(cfg)
+                + [
+                    path,
+                    status,
+                    _csv_val(r, "max_err"),
+                    _csv_val(r, "min_cos"),
+                    _csv_val(r, "us"),
+                    _csv_val(r, "tflops"),
+                ]
+            )
         for label, avg in avg_rows:
-            w.writerow([label, "", "", "", "", "", "", "--",
-                _csv_val(avg, "max_err"), _csv_val(avg, "min_cos"),
-                _csv_val(avg, "us"), _csv_val(avg, "tflops"),
-            ])
+            w.writerow(
+                [
+                    label,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "--",
+                    _csv_val(avg, "max_err"),
+                    _csv_val(avg, "min_cos"),
+                    _csv_val(avg, "us"),
+                    _csv_val(avg, "tflops"),
+                ]
+            )
 
 
 def _avg_results(results_list, keys=("us", "tflops", "max_err")):
@@ -565,11 +734,7 @@ def _fmt_normal_row(cfg, path, status, r):
         return f"{prefix} | {'ERROR':>6s} | {r['err'][:60]}"
     us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
     tf_s = f"{r['tflops']:>9.1f}" if "tflops" in r else "      N/A"
-    return (
-        f"{prefix} | {status:>6s} | "
-        f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-        f"{us_s} {tf_s}"
-    )
+    return f"{prefix} | {status:>6s} | " f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | " f"{us_s} {tf_s}"
 
 
 def main():
@@ -585,15 +750,21 @@ def main():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
-        "--dtype", type=str, default=None, choices=["fp16", "bf16"],
+        "--dtype",
+        type=str,
+        default=None,
+        choices=["fp16", "bf16"],
         help="Data type: fp16 or bf16 (default: both)",
     )
     parser.add_argument(
-        "--seed", type=int, default=DEFAULT_SEED,
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
         help=f"Random seed for reproducibility (default: {DEFAULT_SEED})",
     )
     parser.add_argument(
-        "--compare", action="store_true",
+        "--compare",
+        action="store_true",
         help="Compare FlyDSL vs CK vs ASM performance (requires aiter)",
     )
     args = parser.parse_args()
@@ -616,7 +787,7 @@ def main():
         print(f"FlyDSL vs CK vs ASM  ({causal_desc}, {dtype_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
-        print(f"  CK: bf16+fp16, ASM: bf16 only")
+        print("  CK: bf16+fp16, ASM: bf16 only")
         print("=" * 130)
         print("Running benchmarks ...")
 
@@ -630,32 +801,48 @@ def main():
                     print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
                     fly_r = run_config(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, dtype_str=dtype_str, verbose=False,
+                        batch,
+                        seq_len,
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        dtype_str=dtype_str,
+                        verbose=False,
                     )
                     ck_r = run_aiter_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, backend="ck",
+                        batch,
+                        seq_len,
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        backend="ck",
                     )
                     asm_r = run_aiter_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, backend="asm",
+                        batch,
+                        seq_len,
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        backend="asm",
                     )
                     rows.append((cfg, fly_r, ck_r, asm_r))
 
         col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
         cmp_col = f"{'TFLOPS':>7s} {'MaxErr':>6s}"
-        hdr1 = (
-            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'CK':^28s} | {'ASM':^28s}"
-            f" | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
-        )
-        hdr2 = (
-            f"{'':>{_CFG_W}s} | {col} | {col} | {col}"
-            f" | {cmp_col} | {cmp_col}"
-        )
+        hdr1 = f"{_CFG_HDR} | {'FlyDSL':^28s} | {'CK':^28s} | {'ASM':^28s}" f" | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
+        hdr2 = f"{'':>{_CFG_W}s} | {col} | {col} | {col}" f" | {cmp_col} | {cmp_col}"
         sep = "-" * len(hdr2)
         print(f"\n{hdr1}")
         print(hdr2)
@@ -713,9 +900,16 @@ def main():
                     cfg = (batch, seq_len, nh, hd, dtype_key, causal_tag)
                     try:
                         r = run_config(
-                            batch, seq_len, nh, hd, dtype, causal,
-                            warmup=args.warmup, iters=args.iters,
-                            seed=args.seed, dtype_str=dtype_str,
+                            batch,
+                            seq_len,
+                            nh,
+                            hd,
+                            dtype,
+                            causal,
+                            warmup=args.warmup,
+                            iters=args.iters,
+                            seed=args.seed,
+                            dtype_str=dtype_str,
                         )
                         path = ""
                         if "err" in r:

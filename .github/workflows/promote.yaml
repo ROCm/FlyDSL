@@ -11,7 +11,6 @@ on:
         description: 'Space-separated list of wheel filenames to promote'
         type: string
         required: true
-
 jobs:
   promote:
     runs-on: linux-flydsl-mi325-1
@@ -37,22 +36,28 @@ jobs:
         run: bash ./flydsl/scripts/install_awscli.sh
 
       - name: Download wheels from staging
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          WHEEL_NAMES: ${{ inputs.wheel_names }}
         run: |
-          STAGING="s3://framework-whls-${{ inputs.release_type }}/whl-staging/gfx942-gfx950"
+          STAGING="s3://framework-whls-${RELEASE_TYPE}/whl-staging/gfx942-gfx950"
           mkdir -p /tmp/promote-wheels
           echo "Downloading wheels from ${STAGING}"
-          for WHL in ${{ inputs.wheel_names }}; do
+          for WHL in ${WHEEL_NAMES}; do
             echo "Downloading ${WHL}..."
             aws s3 cp "${STAGING}/${WHL}" "/tmp/promote-wheels/${WHL}"
           done
           echo "Downloaded wheels:"
           ls -lh /tmp/promote-wheels/
 
-      - name: Upload wheels to ${{ inputs.release_type }}
+      - name: Upload wheels to release
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          WHEEL_NAMES: ${{ inputs.wheel_names }}
         run: |
-          RELEASE="s3://framework-whls-${{ inputs.release_type }}/whl/gfx942-gfx950"
+          RELEASE="s3://framework-whls-${RELEASE_TYPE}/whl/gfx942-gfx950"
           echo "Uploading wheels to ${RELEASE}"
-          for WHL in ${{ inputs.wheel_names }}; do
+          for WHL in ${WHEEL_NAMES}; do
             echo "Uploading ${WHL}..."
             aws s3 cp "/tmp/promote-wheels/${WHL}" "${RELEASE}/${WHL}"
           done

@@ -81,6 +81,19 @@ def Fly_Swizzle : Fly_Type<"Swizzle", "swizzle", [
   ];
 }
 
+def Fly_CoordSwizzle : Fly_Type<"CoordSwizzle", "coord_swizzle", [
+    DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
+]> {
+  let parameters = (ins Fly_CoordSwizzleAttr:$attr);
+  let assemblyFormat = "`<` $attr `>`";
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins "CoordSwizzleAttr":$attr), [{
+      return $_get(attr.getContext(), attr);
+    }]>
+  ];
+}
+
 def Fly_ComposedLayout : Fly_Type<"ComposedLayout", "composed_layout", [
     DeclareTypeInterfaceMethods<Fly_NestedTypeInterface>,
     DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>
@@ -101,7 +114,7 @@ def Fly_ComposedLayout : Fly_Type<"ComposedLayout", "composed_layout", [
     TypeBuilderWithInferredContext<(ins "ComposedLayoutAttr":$attr), [{
       return $_get(attr.getContext(), attr);
     }]>,
-    TypeBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "LayoutAttr":$outer), [{
+    TypeBuilderWithInferredContext<(ins "Attribute":$inner, "IntTupleAttr":$offset, "Attribute":$outer), [{
       return $_get(inner.getContext(), ComposedLayoutAttr::get(inner, offset, outer));
     }]>
   ];
@@ -130,23 +143,23 @@ def Fly_Tile : Fly_Type<"Tile", "tile", [
 def Fly_Pointer : Fly_Type<"Pointer", "ptr", []> {
   let parameters = (ins
     "Type":$elemTy,
-    "AddressSpaceAttr":$addressSpace,
+    "Attribute":$addressSpace,
     "AlignAttr":$alignment,
     DefaultValuedParameter<"SwizzleAttr","SwizzleAttr::getTrivialSwizzle($_ctxt)">:$swizzle
   );
   let hasCustomAssemblyFormat = 1;
 
   let builders = [
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "Attribute":$addressSpace), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace,
                    AlignAttr::getTrivialAlignment(elemTy),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "AlignAttr":$alignment), [{
-      return $_get(elemTy.getContext(), elemTy, addressSpace, alignment, 
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "Attribute":$addressSpace, "AlignAttr":$alignment), [{
+      return $_get(elemTy.getContext(), elemTy, addressSpace, alignment,
                   SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "Attribute":$addressSpace, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, alignment, swizzle);
     }]>
   ];
@@ -177,7 +190,7 @@ def Fly_CoordTensor : Fly_Type<"CoordTensor", "coord_tensor", [
 def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
   let parameters = (ins
     "Type":$elemTy,
-    "AddressSpaceAttr":$addressSpace,
+    "Attribute":$addressSpace,
     "Attribute":$layout,
     "AlignAttr":$alignment,
     DefaultValuedParameter<"SwizzleAttr","SwizzleAttr::getTrivialSwizzle($_ctxt)">:$swizzle
@@ -187,7 +200,7 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
   let extraClassDeclaration = [{
     MemRefType at(int32_t idx) const;
     MemRefType at(ArrayRef<int32_t> idxs) const;
-    
+
     PointerType getPointerType() const;
     int32_t getValueDivisibility() const;
   }];
@@ -199,16 +212,16 @@ def Fly_MemRef : Fly_Type<"MemRef", "memref", []> {
                    AlignAttr::getTrivialAlignment(elemTy),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "Attribute":$layout), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "Attribute":$addressSpace, "Attribute":$layout), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout,
                    AlignAttr::getTrivialAlignment(elemTy),
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "Attribute":$layout, "AlignAttr":$alignment), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "Attribute":$addressSpace, "Attribute":$layout, "AlignAttr":$alignment), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout, alignment,
                    SwizzleAttr::getTrivialSwizzle(elemTy.getContext()));
     }]>,
-    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "AddressSpaceAttr":$addressSpace, "Attribute":$layout, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
+    TypeBuilderWithInferredContext<(ins "Type":$elemTy, "Attribute":$addressSpace, "Attribute":$layout, "AlignAttr":$alignment, "SwizzleAttr":$swizzle), [{
       return $_get(elemTy.getContext(), elemTy, addressSpace, layout, alignment, swizzle);
     }]>
   ];

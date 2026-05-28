@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-import numpy as np
-from itertools import product
 from abc import ABC, abstractmethod
+from itertools import product
 
-import flydsl
-import flydsl.expr as fx
+import numpy as np
+
 import flydsl.compiler as flyc
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm
-from flydsl.compiler.protocol import fly_values
+from flydsl.expr import buffer_ops, range_constexpr, vector
 from flydsl.expr.typing import T
-
-from flydsl.expr import buffer_ops, range_constexpr, vector, memref_load, memref_store
 
 
 def _run_compiled(exe, *args):
@@ -35,11 +31,11 @@ def _to_raw(v):
 
 
 def get_dtype_in_kernel(dtype: str):
-    if dtype == 'f32':
+    if dtype == "f32":
         return T.f32
-    elif dtype == 'f16':
+    elif dtype == "f16":
         return T.f16
-    elif dtype == 'bf16':
+    elif dtype == "bf16":
         return T.bf16
 
 
@@ -48,13 +44,20 @@ class TensorView:
         self.dtype = dtype
         self.shape = shape
         if stride is None:
-            self.stride = tuple((np.cumprod(shape[::-1])[::-1].tolist()+[1,])[1:])
+            self.stride = tuple(
+                (
+                    np.cumprod(shape[::-1])[::-1].tolist()
+                    + [
+                        1,
+                    ]
+                )[1:]
+            )
         else:
             self.stride = stride
         self.base_offset = base_offset
         self.load_impl = load_impl
         self.store_impl = store_impl
-    
+
     def _linear_offset(self, idxs):
         slice_shape = []
         slice_stride = []
@@ -72,10 +75,10 @@ class TensorView:
             return d_offset, tuple(slice_shape), tuple(slice_stride)
         else:
             return (d_offset,)
-    
+
     def _lazy_init(self):
         pass
-    
+
     def __repr__(self):
         return f"TensorView(offset={self.base_offset}, shape={self.shape}, stride={self.stride}, dtype={self.dtype})"
 
@@ -87,7 +90,7 @@ class TensorView:
             return self.load_impl(offset[0])
         else:
             return TensorView(self.dtype, offset[1], offset[2], offset[0], self.load_impl, self.store_impl)
-    
+
     def __setitem__(self, idxs, value):
         if not isinstance(idxs, tuple):
             idxs = (idxs,)
@@ -101,21 +104,21 @@ class TensorView:
         offset = self._linear_offset(idxs)
         assert len(offset) == 1
         return self.load_impl(offset[0], vec_size=vec_size)
-    
+
     def vec_store(self, idxs, value, vec_size):
         if not isinstance(idxs, tuple):
             idxs = (idxs,)
         offset = self._linear_offset(idxs)
         assert len(offset) == 1
         self.store_impl(offset[0], value, vec_size=vec_size)
-    
+
     def linear_offset(self, idxs):
         if not isinstance(idxs, tuple):
             idxs = (idxs,)
         offset = self._linear_offset(idxs)
         assert len(offset) == 1
         return offset[0]
-    
+
     def local_tile(self, tile_shape, tile_idxs):
         d_offset = self.base_offset
         stride = []
@@ -123,7 +126,7 @@ class TensorView:
             d_offset = d_offset + tile_idxs[i] * tile_shape[i] * self.stride[i]
             stride.append(self.stride[i])
         return TensorView(self.dtype, tile_shape, tuple(stride), d_offset, self.load_impl, self.store_impl)
-    
+
     def copy_(self, src_tensor, thread_layout, value_layout, thread_idxs, vec_size):
         src_tensor._lazy_init()
         ndim = len(thread_layout)
@@ -155,23 +158,22 @@ class TensorBase(ABC):
         self.shape = shape
         self.stride = stride
         self.base_offset = base_offset
-    
+
     @abstractmethod
     def load(self, offset):
         return None
-    
+
     @abstractmethod
     def store(self, offset, value):
         pass
-    
+
     def _lazy_init(self):
         if self.tensor_view is None:
-            self.tensor_view = TensorView(
-                self.dtype, self.shape, self.stride, self.base_offset, self.load, self.store)
+            self.tensor_view = TensorView(self.dtype, self.shape, self.stride, self.base_offset, self.load, self.store)
             self.stride = self.tensor_view.stride
             self.load_impl = self.tensor_view.load_impl
             self.store_impl = self.tensor_view.store_impl
-    
+
     def __repr__(self):
         self._lazy_init()
         return self.tensor_view.__repr__()
@@ -183,23 +185,23 @@ class TensorBase(ABC):
     def __setitem__(self, idxs, value):
         self._lazy_init()
         self.tensor_view[idxs] = value
-    
+
     def vec_load(self, idxs, vec_size):
         self._lazy_init()
         return self.tensor_view.vec_load(idxs, vec_size)
-    
+
     def vec_store(self, idxs, value, vec_size):
         self._lazy_init()
         self.tensor_view.vec_store(idxs, value, vec_size)
-    
+
     def linear_offset(self, idxs):
         self._lazy_init()
         return self.tensor_view.linear_offset(idxs)
-    
+
     def local_tile(self, tile_shape, tile_idxs):
         self._lazy_init()
         return self.tensor_view.local_tile(tile_shape, tile_idxs)
-    
+
     def copy_(self, src_tensor, thread_layout, value_layout, thread_idxs, vec_size):
         self._lazy_init()
         self.tensor_view.copy_(src_tensor, thread_layout, value_layout, thread_idxs, vec_size)
@@ -209,12 +211,12 @@ class TorchTensor(TensorBase):
     def __init__(self, torch_tensor, dtype, shape, stride=None, base_offset=0):
         super().__init__(dtype, shape, stride, base_offset)
         self.torch_tensor = torch_tensor
-    
+
     def load(self, offset, vec_size=1):
-        return self.torch_tensor.view(-1)[offset:offset+vec_size]
-    
+        return self.torch_tensor.view(-1)[offset : offset + vec_size]
+
     def store(self, offset, value, vec_size=1):
-        self.torch_tensor.view(-1)[offset:offset+vec_size] = value
+        self.torch_tensor.view(-1)[offset : offset + vec_size] = value
 
 
 class GTensor(TensorBase):
@@ -222,18 +224,19 @@ class GTensor(TensorBase):
         super().__init__(dtype, shape, stride, base_offset)
         self.rsrc = buffer_ops.create_buffer_resource(memref, max_size=True)
         self.cache_modifier = cache_modifier
-    
+
     def load(self, offset, vec_size=1):
         return buffer_ops.buffer_load(self.rsrc, offset, vec_width=vec_size, dtype=self.dtype)
-    
+
     def store(self, offset, value, vec_size=1):
         buffer_ops.buffer_store(value, self.rsrc, offset, cache_modifier=self.cache_modifier)
+
 
 class STensor(TensorBase):
     def __init__(self, memptr, dtype, shape, stride=None, base_offset=0):
         super().__init__(dtype, shape, stride, base_offset)
         self.memptr = memptr.get()
-    
+
     def load(self, offset, vec_size=1):
         vec_t = T.vec(vec_size, self.dtype)
         x = vector.load_op(vec_t, self.memptr, [offset])
@@ -242,7 +245,7 @@ class STensor(TensorBase):
         else:
             x = vector.extract(x, static_position=[0], dynamic_position=[])
             return x
-    
+
     def store(self, offset, value, vec_size=1):
         if vec_size > 1:
             vector.store(value, self.memptr, [offset], alignment=16)

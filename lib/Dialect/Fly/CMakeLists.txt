@@ -4,6 +4,7 @@ add_mlir_dialect_library(MLIRFlyDialect
   IR/FlyTypeDefs.cpp
   IR/FlyUniversalOps.cpp
   IR/FlyAttrDefs.cpp
+  IR/FlyLLVMTranslation.cpp
   Utils/IntUtils.cpp
   Utils/IntTupleUtils.cpp
   Utils/NormalForm.cpp
@@ -19,7 +20,14 @@ add_mlir_dialect_library(MLIRFlyDialect
   MLIRFlyIncGen
   FlyTransformPassIncGen
   FlyRewritePatternsIncGen
-  
+
   LINK_LIBS
+  MLIRFuncDialect
+  MLIRFuncTransforms
+  MLIRGPUDialect
   MLIRIR
+  MLIRLLVMDialect
+  MLIRSCFTransforms
+  MLIRTargetLLVMIRExport
+  MLIRTransforms
 )

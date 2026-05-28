@@ -32,23 +32,58 @@ namespace mlir {
 
 using namespace mlir;
 using namespace mlir::fly;
+using namespace mlir::fly_rocdl;
 
 namespace {
 
 unsigned mapToLLVMAddressSpace(AddressSpace addrSpace) {
   switch (addrSpace) {
+  case AddressSpace::Generic:
+    return 0;
   case AddressSpace::Global:
     return 1;
   case AddressSpace::Shared:
     return 3;
   case AddressSpace::Register:
     return 5;
-  case AddressSpace::BufferDesc:
-    return 8;
-  default:
-    assert(false && "Unsupported address space");
-    return 0;
   }
+  llvm_unreachable("unsupported address space");
+}
+
+unsigned mapAttrToLLVMAddressSpace(Attribute attr) {
+  if (auto e = dyn_cast<AddressSpaceAttr>(attr))
+    return mapToLLVMAddressSpace(e.getValue());
+  if (isTargetAddressSpace<BufferDescAddressAttr>(attr))
+    return 8;
+  return 0; // default to generic address space
+}
+
+// Create a freshly named LDS global of `[nbytes x i8]` in `addrSpace`, inserted
+// at the start of `moduleOp`. The symbol name is `prefix` followed by a counter
+// chosen to avoid collisions with existing globals in the module. Shared by
+// the static-LDS `make_ptr` and dynamic-LDS `get_dyn_shared` lowerings.
+static LLVM::GlobalOp createLDSGlobal(ConversionPatternRewriter &rewriter,
+                                      gpu::GPUModuleOp moduleOp, Location loc, StringRef prefix,
+                                      int64_t nbytes, int64_t align, unsigned addrSpace) {
+  llvm::StringSet<> existingNames;
+  for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>())
+    existingNames.insert(globalOp.getSymName());
+
+  unsigned counter = 0;
+  SmallString<128> symName = SymbolTable::generateSymbolName<128>(
+      prefix, [&](StringRef candidate) { return existingNames.contains(candidate); }, counter);
+
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(moduleOp.getBody());
+
+  auto arrayTy = LLVM::LLVMArrayType::get(IntegerType::get(rewriter.getContext(), 8), nbytes);
+  auto globalOp = LLVM::GlobalOp::create(rewriter, loc, arrayTy,
+                                         /*isConstant=*/false, LLVM::Linkage::External, symName,
+                                         /*value=*/Attribute(),
+                                         /*alignment=*/align, addrSpace);
+  // LDS (addrspace 3) symbols are per-workgroup hardware and can never resolve across DSO.
+  globalOp.setDsoLocal(true);
+  return globalOp;
 }
 
 class MakePtrOpLowering : public OpConversionPattern<MakePtrOp> {
@@ -63,13 +98,13 @@ public:
       return failure();
 
     Location loc = op.getLoc();
-    AddressSpace addrSpace = flyPtrTy.getAddressSpace().getValue();
+    Attribute addrSpaceAttr = flyPtrTy.getAddressSpace();
 
-    if (addrSpace == AddressSpace::Register) {
+    if (isGenericAddressSpace<AddressSpace::Register>(addrSpaceAttr)) {
       auto dictAttrs = op.getDictAttrs();
       if (!dictAttrs)
         return rewriter.notifyMatchFailure(op, "register make_ptr requires dictAttrs");
-      auto allocSize = dictAttrs->getAs<IntegerAttr>("allocaSize");
+      auto allocSize = dictAttrs->getAs<IntegerAttr>("allocSize");
       if (!allocSize)
         return rewriter.notifyMatchFailure(op, "register make_ptr requires allocSize in ptrAttrs");
       unsigned llvmAS = mapToLLVMAddressSpace(AddressSpace::Register);
@@ -79,7 +114,29 @@ public:
       Value ptr = LLVM::AllocaOp::create(rewriter, loc, llvmPtrTy, elemTy, nElems, 0);
       rewriter.replaceOp(op, ptr);
       return success();
-    } else if (addrSpace == AddressSpace::BufferDesc) {
+    } else if (isGenericAddressSpace<AddressSpace::Shared>(addrSpaceAttr)) {
+      // Static LDS sub-allocation. Each op lowers to a freshly named
+      // `@__shared_alloc_<n>` LDS global.
+      auto dictAttrs = op.getDictAttrs();
+      if (!dictAttrs)
+        return rewriter.notifyMatchFailure(
+            op, "shared make_ptr requires dictAttrs={allocBytes, allocAlign}");
+      auto allocBytesAttr = dictAttrs->getAs<IntegerAttr>("allocBytes");
+      auto allocAlignAttr = dictAttrs->getAs<IntegerAttr>("allocAlign");
+      if (!allocBytesAttr || !allocAlignAttr)
+        return rewriter.notifyMatchFailure(
+            op, "shared make_ptr requires allocBytes, allocAlign in dictAttrs");
+
+      auto moduleOp = op->getParentOfType<gpu::GPUModuleOp>();
+      if (!moduleOp)
+        return op->emitError("shared make_ptr must be inside a gpu.module");
+
+      LLVM::GlobalOp global =
+          createLDSGlobal(rewriter, moduleOp, loc, "__shared_alloc", allocBytesAttr.getInt(),
+                          allocAlignAttr.getInt(), /*addrSpace=*/3);
+      rewriter.replaceOpWithNewOp<LLVM::AddressOfOp>(op, global);
+      return success();
+    } else if (isTargetAddressSpace<BufferDescAddressAttr>(addrSpaceAttr)) {
       auto args = adaptor.getArgs();
       if (args.size() != 4)
         return rewriter.notifyMatchFailure(
@@ -90,8 +147,8 @@ public:
       Value numRecords = args[2];
       Value flags = args[3];
 
-      auto rsrcPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(),
-                                                  mapToLLVMAddressSpace(AddressSpace::BufferDesc));
+      unsigned llvmAS = mapAttrToLLVMAddressSpace(addrSpaceAttr);
+      auto rsrcPtrTy = LLVM::LLVMPointerType::get(rewriter.getContext(), llvmAS);
       Value bufferRsrc = ROCDL::MakeBufferRsrcOp::create(rewriter, loc, rsrcPtrTy, base, stride,
                                                          numRecords, flags);
       rewriter.replaceOp(op, BufferFatPtr::pack(rewriter, loc, bufferRsrc));
@@ -110,13 +167,29 @@ public:
                                 ConversionPatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     auto flyPtrTy = cast<fly::PointerType>(op.getResult().getType());
-    unsigned addrSpace = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
+    unsigned addrSpace = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
 
     auto moduleOp = op->getParentOfType<gpu::GPUModuleOp>();
     if (!moduleOp)
       return op->emitError("get_dyn_shared must be inside a gpu.module");
 
-    LLVM::GlobalOp sharedGlobal = getOrCreateDynSharedGlobal(rewriter, moduleOp, loc, addrSpace);
+    // Dynamic shared memory has a single logical region per kernel; reuse an
+    // existing `[0 x i8]` global if one is already present so multiple
+    // `get_dyn_shared` ops resolve to the same base symbol.
+    LLVM::GlobalOp sharedGlobal;
+    for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>()) {
+      if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
+        if (globalOp.getAddrSpace() == addrSpace && arrayType.getNumElements() == 0 &&
+            globalOp.getAlignment().value_or(0) == 1024) {
+          sharedGlobal = globalOp;
+          break;
+        }
+      }
+    }
+    if (!sharedGlobal) {
+      sharedGlobal = createLDSGlobal(rewriter, moduleOp, loc, "__dynamic_shared",
+                                     /*nbytes=*/0, /*align=*/1024, addrSpace);
+    }
 
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(op);
@@ -130,38 +203,6 @@ public:
 
     rewriter.replaceOp(op, sharedPtr);
     return success();
-  }
-
-private:
-  static LLVM::GlobalOp getOrCreateDynSharedGlobal(ConversionPatternRewriter &rewriter,
-                                                   gpu::GPUModuleOp moduleOp, Location loc,
-                                                   unsigned addrSpace) {
-    llvm::StringSet<> existingNames;
-    for (auto globalOp : moduleOp.getBody()->getOps<LLVM::GlobalOp>()) {
-      existingNames.insert(globalOp.getSymName());
-      if (auto arrayType = dyn_cast<LLVM::LLVMArrayType>(globalOp.getType())) {
-        if (globalOp.getAddrSpace() == addrSpace && arrayType.getNumElements() == 0 &&
-            globalOp.getAlignment().value_or(0) == 1024)
-          return globalOp;
-      }
-    }
-
-    unsigned counter = 0;
-    SmallString<128> symName = SymbolTable::generateSymbolName<128>(
-        "__dynamic_shared_", [&](StringRef candidate) { return existingNames.contains(candidate); },
-        counter);
-
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointToStart(moduleOp.getBody());
-
-    auto zeroArrayTy = LLVM::LLVMArrayType::get(IntegerType::get(rewriter.getContext(), 8), 0);
-
-    auto globalOp = LLVM::GlobalOp::create(rewriter, loc, zeroArrayTy,
-                                           /*isConstant=*/false, LLVM::Linkage::External, symName,
-                                           /*value=*/Attribute(),
-                                           /*alignment=*/1024, addrSpace);
-    globalOp.setDsoLocal(true);
-    return globalOp;
   }
 };
 
@@ -252,7 +293,7 @@ public:
       offsetVal = defOp->getOperand(0);
     }
 
-    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, base);
       rewriter.replaceOp(op, bp.addOffset(rewriter, loc, offsetVal));
       return success();
@@ -316,7 +357,7 @@ public:
       }
     }
 
-    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
@@ -361,7 +402,7 @@ public:
       }
     }
 
-    if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc) {
+    if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace())) {
       BufferFatPtr bp(flyPtrTy, ptr);
       Value zero = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
       ArrayAttr noAttrs;
@@ -703,15 +744,15 @@ public:
       return VectorType::get(vecTy.getShape(), convertedElem, vecTy.getScalableDims());
     });
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
-      if (flyMemRefTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
+      if (isTargetAddressSpace<BufferDescAddressAttr>(flyMemRefTy.getAddressSpace()))
         return BufferFatPtr::getType(flyMemRefTy.getContext());
-      unsigned as = mapToLLVMAddressSpace(flyMemRefTy.getAddressSpace().getValue());
+      unsigned as = mapAttrToLLVMAddressSpace(flyMemRefTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
-      if (flyPtrTy.getAddressSpace().getValue() == AddressSpace::BufferDesc)
+      if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
         return BufferFatPtr::getType(flyPtrTy.getContext());
-      unsigned as = mapToLLVMAddressSpace(flyPtrTy.getAddressSpace().getValue());
+      unsigned as = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
     });
     addConversion([&](fly::CopyAtomType atomTy) -> Type {

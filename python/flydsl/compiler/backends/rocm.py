@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-from typing import List
+from typing import List, Tuple
 
 from ...runtime.device import get_rocm_arch, is_rdna_arch
 from ...utils import env
@@ -33,7 +33,7 @@ class RocmBackend(BaseBackend):
         """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
-    def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
+    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
@@ -61,7 +61,7 @@ class RocmBackend(BaseBackend):
             "wave64": "false" if is_rdna_arch(chip) else "true",
         }
 
-        return [
+        pre_binary_fragments = [
             "fly-rewrite-func-signature",
             "fly-canonicalize",
             "fly-layout-lowering",
@@ -74,6 +74,8 @@ class RocmBackend(BaseBackend):
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
             f"fly-rocdl-cluster-attr)",
+        ]
+        binary_prep_fragments = [
             f"rocdl-attach-target{{{self._format_pass_opts(rocdl_opts)}}}",
             "convert-scf-to-cf",
             "convert-cf-to-llvm",
@@ -87,8 +89,16 @@ class RocmBackend(BaseBackend):
                 if env.debug.enable_debug_info
                 else []
             ),
-            f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}',
         ]
+        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}'
+        return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
+
+    def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
+        pre_binary_fragments, binary_fragment = self._pipeline_parts(compile_hints=compile_hints)
+        return [*pre_binary_fragments, binary_fragment]
+
+    def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+        return self._pipeline_parts(compile_hints=compile_hints)
 
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch

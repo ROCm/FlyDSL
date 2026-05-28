@@ -30,7 +30,7 @@ IntTupleAttr getProfileAttrFromLayoutAttr(Attribute layout) {
   if (auto layoutAttr = dyn_cast<LayoutAttr>(layout))
     return layoutAttr.getShape();
   if (auto composedAttr = dyn_cast<ComposedLayoutAttr>(layout))
-    return composedAttr.getOuter().getShape();
+    return getProfileAttrFromLayoutAttr(composedAttr.getOuter());
   throw std::invalid_argument("expected LayoutAttr or ComposedLayoutAttr");
 }
 
@@ -40,7 +40,7 @@ IntTupleAttr getProfileAttrFromType(Type ty) {
   if (auto layoutTy = dyn_cast<LayoutType>(ty))
     return layoutTy.getAttr().getShape();
   if (auto composedTy = dyn_cast<ComposedLayoutType>(ty))
-    return composedTy.getAttr().getOuter().getShape();
+    return getProfileAttrFromLayoutAttr(composedTy.getAttr());
   if (auto memrefTy = dyn_cast<fly::MemRefType>(ty))
     return getProfileAttrFromLayoutAttr(memrefTy.getLayout());
   if (auto coordTensorTy = dyn_cast<CoordTensorType>(ty))
@@ -143,6 +143,30 @@ bool isProfileWeaklyCongruent(MlirValue lhs, MlirValue rhs) {
   auto lhsProfile = detail::getProfileAttrFromType(lhsTy);
   auto rhsProfile = detail::getProfileAttrFromType(rhsTy);
   return intTupleIsWeaklyCongruent(lhsProfile, rhsProfile);
+}
+
+// Setter accepts either an int (interpreted as a Fly_AddressSpace enum case)
+// or any AddressSpaceAttr-compatible MLIR Attribute (e.g. `#fly_rocdl.buffer_desc`).
+Attribute getAddressSpaceFromObj(MLIRContext *ctx, nb::object obj, AddressSpace defaultAS) {
+  if (obj.is_none())
+    return AddressSpaceAttr::get(ctx, defaultAS);
+  if (nb::hasattr(obj, MLIR_PYTHON_CAPI_PTR_ATTR)) {
+    auto capsule = nb::cast<nb::capsule>(obj.attr(MLIR_PYTHON_CAPI_PTR_ATTR));
+    MlirAttribute mlirAttr = mlirPythonCapsuleToAttribute(capsule.ptr());
+    Attribute attr = unwrap(mlirAttr);
+    if (!attr)
+      throw std::invalid_argument("address_space: invalid Attribute");
+    return attr;
+  }
+  if (PyLong_Check(obj.ptr())) {
+    int32_t addrInt = nb::cast<int32_t>(obj);
+    if (addrInt < static_cast<int32_t>(AddressSpace::Generic) ||
+        addrInt > static_cast<int32_t>(AddressSpace::Register))
+      throw std::invalid_argument("address_space int must be a valid Fly_AddressSpace case");
+    return AddressSpaceAttr::get(ctx, static_cast<AddressSpace>(addrInt));
+  }
+  throw std::invalid_argument(
+      "address_space must be int (Fly_AddressSpace case) or an MLIR Attribute");
 }
 
 } // namespace
@@ -298,17 +322,23 @@ struct PyComposedLayoutType : PyConcreteType<PyComposedLayoutType> {
             innerAttr = composed.getAttr();
           else if (auto swizzle = dyn_cast<SwizzleType>(innerTy))
             innerAttr = swizzle.getAttr();
+          else if (auto coordSwizzle = dyn_cast<CoordSwizzleType>(innerTy))
+            innerAttr = coordSwizzle.getAttr();
           else
-            throw std::invalid_argument(
-                "inner must be a LayoutType, ComposedLayoutType or SwizzleType");
+            throw std::invalid_argument("inner must be a LayoutType, ComposedLayoutType, "
+                                        "SwizzleType, or CoordSwizzleType");
 
           IntTupleAttrBuilder builder{ctx};
           auto offsetAttr = getIntTupleAttrFromHandle(offset, builder);
-          auto outerTy = dyn_cast<LayoutType>(unwrap(outerObj));
-          if (!outerTy)
-            throw std::invalid_argument("outer must be a LayoutType");
+          Attribute outerAttr;
+          if (auto outerLayout = dyn_cast<LayoutType>(unwrap(outerObj)))
+            outerAttr = outerLayout.getAttr();
+          else if (auto outerComposed = dyn_cast<ComposedLayoutType>(unwrap(outerObj)))
+            outerAttr = outerComposed.getAttr();
+          else
+            throw std::invalid_argument("outer must be a LayoutType or ComposedLayoutType");
 
-          auto attr = ComposedLayoutAttr::get(innerAttr, offsetAttr, outerTy.getAttr());
+          auto attr = ComposedLayoutAttr::get(innerAttr, offsetAttr, outerAttr);
           return PyComposedLayoutType(context->getRef(), wrap(ComposedLayoutType::get(attr)));
         },
         "inner"_a, "offset"_a, "outer"_a, nb::kw_only(), "context"_a = nb::none(),
@@ -322,13 +352,21 @@ struct PyComposedLayoutType : PyConcreteType<PyComposedLayoutType> {
         return wrap(ComposedLayoutType::get(composed));
       if (auto swizzle = dyn_cast<SwizzleAttr>(innerAttr))
         return wrap(SwizzleType::get(swizzle));
-      throw std::invalid_argument("Expected LayoutAttr, ComposedLayoutAttr or SwizzleAttr");
+      if (auto coordSwizzle = dyn_cast<CoordSwizzleAttr>(innerAttr))
+        return wrap(CoordSwizzleType::get(coordSwizzle));
+      throw std::invalid_argument(
+          "Expected LayoutAttr, ComposedLayoutAttr, SwizzleAttr, or CoordSwizzleAttr");
     });
     c.def_prop_ro("offset", [](PyComposedLayoutType &self) -> MlirType {
       return wrap(IntTupleType::get(self.toCppType().getAttr().getOffset()));
     });
     c.def_prop_ro("outer", [](PyComposedLayoutType &self) -> MlirType {
-      return wrap(LayoutType::get(self.toCppType().getAttr().getOuter()));
+      Attribute outerAttr = self.toCppType().getAttr().getOuter();
+      if (auto layout = dyn_cast<LayoutAttr>(outerAttr))
+        return wrap(LayoutType::get(layout));
+      if (auto composed = dyn_cast<ComposedLayoutAttr>(outerAttr))
+        return wrap(ComposedLayoutType::get(composed));
+      throw std::invalid_argument("Expected LayoutAttr or ComposedLayoutAttr");
     });
     c.def_prop_ro("rank", [](PyComposedLayoutType &self) { return self.toCppType().rank(); });
     c.def_prop_ro("depth", [](PyComposedLayoutType &self) { return self.toCppType().depth(); });
@@ -369,6 +407,41 @@ struct PySwizzleType : PyConcreteType<PySwizzleType> {
 };
 
 // ---------------------------------------------------------------------------
+// CoordSwizzleType
+// ---------------------------------------------------------------------------
+struct PyCoordSwizzleType : PyConcreteType<PyCoordSwizzleType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::CoordSwizzleType, "CoordSwizzleType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t mask, int32_t baseRow, std::vector<int32_t> modeRow, int32_t baseCol,
+           std::vector<int32_t> modeCol, DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          auto attr = CoordSwizzleAttr::get(ctx, mask, baseRow, modeRow, baseCol, modeCol);
+          return PyCoordSwizzleType(context->getRef(), wrap(CoordSwizzleType::get(attr)));
+        },
+        "mask"_a, "base_row"_a, "mode_row"_a, "base_col"_a, "mode_col"_a, nb::kw_only(),
+        "context"_a = nb::none(), "Create a CoordSwizzleType");
+
+    c.def_prop_ro("mask",
+                  [](PyCoordSwizzleType &self) { return self.toCppType().getAttr().getMask(); });
+    c.def_prop_ro("base_row",
+                  [](PyCoordSwizzleType &self) { return self.toCppType().getAttr().getBaseRow(); });
+    c.def_prop_ro("mode_row", [](PyCoordSwizzleType &self) {
+      return std::vector<int32_t>(self.toCppType().getAttr().getModeRow().begin(),
+                                  self.toCppType().getAttr().getModeRow().end());
+    });
+    c.def_prop_ro("base_col",
+                  [](PyCoordSwizzleType &self) { return self.toCppType().getAttr().getBaseCol(); });
+    c.def_prop_ro("mode_col", [](PyCoordSwizzleType &self) {
+      return std::vector<int32_t>(self.toCppType().getAttr().getModeCol().begin(),
+                                  self.toCppType().getAttr().getModeCol().end());
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
 // PointerType
 // ---------------------------------------------------------------------------
 struct PyPointerType : PyConcreteType<PyPointerType> {
@@ -377,14 +450,12 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](PyType &elemTyObj, std::optional<int32_t> addressSpace, std::optional<int32_t> alignment,
+        [](PyType &elemTyObj, nb::object addressSpace, std::optional<int32_t> alignment,
            DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           auto elemType = unwrap(elemTyObj);
 
-          auto addr = AddressSpace::Global;
-          if (addressSpace.has_value())
-            addr = static_cast<AddressSpace>(addressSpace.value());
+          Attribute addrAttr = getAddressSpaceFromObj(ctx, addressSpace, AddressSpace::Global);
 
           int32_t alignSize =
               alignment.value_or(AlignAttr::getTrivialAlignment(elemType).getAlignment());
@@ -394,18 +465,22 @@ struct PyPointerType : PyConcreteType<PyPointerType> {
                 "alignment must be a positive multiple of element byte size (" +
                 std::to_string(elemByte) + "), got " + std::to_string(alignSize));
 
-          return PyPointerType(context->getRef(),
-                               wrap(PointerType::get(elemType, AddressSpaceAttr::get(ctx, addr),
-                                                     AlignAttr::get(ctx, alignSize))));
+          return PyPointerType(
+              context->getRef(),
+              wrap(PointerType::get(elemType, addrAttr, AlignAttr::get(ctx, alignSize))));
         },
         "elem_ty"_a, "address_space"_a = nb::none(), "alignment"_a = nb::none(), nb::kw_only(),
-        "context"_a = nb::none(), "Create a PointerType with element type and address space");
+        "context"_a = nb::none(),
+        "Create a PointerType. address_space accepts an int (Fly_AddressSpace "
+        "case) or a target-specific MLIR Attribute (e.g. "
+        "`#fly_rocdl.buffer_desc`).");
 
     c.def_prop_ro("element_type", [](PyPointerType &self) -> MlirType {
       return wrap(self.toCppType().getElemTy());
     });
-    c.def_prop_ro("address_space", [](PyPointerType &self) -> int32_t {
-      return static_cast<int32_t>(self.toCppType().getAddressSpace().getValue());
+    c.def_prop_ro("address_space", [](PyPointerType &self) -> nb::typed<nb::object, PyAttribute> {
+      return PyAttribute(self.getContext(), wrap(self.toCppType().getAddressSpace()))
+          .maybeDownCast();
     });
     c.def_prop_ro("alignment", [](PyPointerType &self) -> int32_t {
       return self.toCppType().getAlignment().getAlignment();
@@ -425,7 +500,7 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](PyType &elemTyObj, PyType &layoutObj, std::optional<int32_t> addressSpace,
+        [](PyType &elemTyObj, PyType &layoutObj, nb::object addressSpace,
            std::optional<int32_t> alignment, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
 
@@ -438,9 +513,7 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
           else
             throw std::invalid_argument("layout must be a LayoutType or ComposedLayoutType");
 
-          auto addr = AddressSpace::Register;
-          if (addressSpace.has_value())
-            addr = static_cast<AddressSpace>(addressSpace.value());
+          Attribute addrAttr = getAddressSpaceFromObj(ctx, addressSpace, AddressSpace::Register);
 
           auto elemType = unwrap(elemTyObj);
           int32_t alignSize =
@@ -451,14 +524,15 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
                 "alignment must be a positive multiple of element byte size (" +
                 std::to_string(elemByte) + "), got " + std::to_string(alignSize));
 
-          return PyMemRefType(context->getRef(), wrap(::mlir::fly::MemRefType::get(
-                                                     elemType, AddressSpaceAttr::get(ctx, addr),
-                                                     layoutAttr, AlignAttr::get(ctx, alignSize))));
+          return PyMemRefType(context->getRef(),
+                              wrap(::mlir::fly::MemRefType::get(elemType, addrAttr, layoutAttr,
+                                                                AlignAttr::get(ctx, alignSize))));
         },
-        "elem_ty"_a, "layout"_a, "address_space"_a = 0, "alignment"_a = nb::none(), nb::kw_only(),
-        "context"_a = nb::none(),
-        "Create a MemRefType with element type, layout, address space and "
-        "alignment");
+        "elem_ty"_a, "layout"_a, "address_space"_a = nb::none(), "alignment"_a = nb::none(),
+        nb::kw_only(), "context"_a = nb::none(),
+        "Create a MemRefType. address_space accepts an int (Fly_AddressSpace "
+        "case) or a target-specific MLIR Attribute (e.g. "
+        "`#fly_rocdl.buffer_desc`).");
 
     c.def_prop_ro("element_type", [](PyMemRefType &self) -> MlirType {
       return wrap(self.toCppType().getElemTy());
@@ -469,8 +543,9 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
         return wrap(LayoutType::get(la));
       return wrap(ComposedLayoutType::get(cast<ComposedLayoutAttr>(layout)));
     });
-    c.def_prop_ro("address_space", [](PyMemRefType &self) -> int32_t {
-      return static_cast<int32_t>(self.toCppType().getAddressSpace().getValue());
+    c.def_prop_ro("address_space", [](PyMemRefType &self) -> nb::typed<nb::object, PyAttribute> {
+      return PyAttribute(self.getContext(), wrap(self.toCppType().getAddressSpace()))
+          .maybeDownCast();
     });
     c.def_prop_ro("alignment", [](PyMemRefType &self) -> int32_t {
       return self.toCppType().getAlignment().getAlignment();
@@ -822,7 +897,10 @@ NB_MODULE(_mlirDialectsFly, m) {
       .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
            "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
       .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
-           "Decide whether to use 32-bit stride");
+           "Decide whether to use 32-bit stride")
+      .def("get_cache_signature", &DLTensorAdaptor::getCacheSignature,
+           "Cache-key tuple (alignment, use_32bit_stride, shape, stride) reflecting "
+           "the resolved layout state.");
 
   // -------------------------------------------------------------------------
   // Module-level helper functions
@@ -861,6 +939,7 @@ NB_MODULE(_mlirDialectsFly, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTileType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyLayoutType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PySwizzleType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyCoordSwizzleType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyComposedLayoutType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyPointerType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyMemRefType::bind(m);

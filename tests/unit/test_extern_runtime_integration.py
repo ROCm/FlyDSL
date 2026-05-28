@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
+import ctypes
+import threading
+
+import pytest
+
+from flydsl.compiler.jit_executor import _pack_ciface_args
+from flydsl.compiler.kernel_function import CompilationContext
+from flydsl.expr.extern import ffi
+
+
+def test_explicit_module_loader_args_follow_ciface_packing():
+    """Verify packed layout matches MLIR's packed-args wrapper:
+    packed -> [&holder0, &holder1]; *holder_i == &args[i]."""
+    module = ctypes.c_void_p()
+    err = ctypes.c_int32()
+
+    packed = _pack_ciface_args(module, err)
+    slots = ctypes.cast(packed, ctypes.POINTER(ctypes.c_void_p))
+
+    assert ctypes.c_void_p.from_address(slots[0]).value == ctypes.addressof(module)
+    assert ctypes.c_void_p.from_address(slots[1]).value == ctypes.addressof(err)
+    assert getattr(packed, "_keepalive")
+
+
+def test_compilation_context_current_is_thread_local():
+    barrier = threading.Barrier(2)
+    results = []
+
+    def worker():
+        with CompilationContext.create() as ctx:
+            barrier.wait(timeout=5)
+            results.append(CompilationContext.get_current() is ctx)
+            barrier.wait(timeout=5)
+        results.append(CompilationContext.get_current() is None)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(results) == 4
+    assert all(results)
+
+
+def test_link_libs_preserve_first_use_order_and_dedupe():
+    ctx = CompilationContext()
+
+    ctx.add_link_lib("/tmp/b.bc")
+    ctx.add_link_lib("/tmp/a.bc")
+    ctx.add_link_lib("/tmp/b.bc")
+
+    assert ctx.link_libs == ["/tmp/b.bc", "/tmp/a.bc"]
+
+
+def test_ffi_rejects_link_metadata_arguments():
+    with pytest.raises(TypeError, match="link_extern"):
+        ffi("extern_symbol", [], "void", bitcode_path="/tmp/lib.bc")
+
+    with pytest.raises(TypeError, match="link_extern"):
+        ffi("extern_symbol", [], "void", module_init_fn=lambda module: None)

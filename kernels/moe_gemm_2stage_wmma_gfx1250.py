@@ -14,7 +14,6 @@ from __future__ import annotations
 import functools
 
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-
 from kernels.moe_gemm_2stage import (
     MoeGemm2Mode,
     compile_moe_reduction,
@@ -30,6 +29,7 @@ from kernels.moe_gemm_2stage_common_gfx1250 import (
     _pick_fp16_single_launch_shape,
     _require_gfx1250,
 )
+
 
 @functools.lru_cache(maxsize=64)
 def _compile_stage1_wmma_kernel_impl(
@@ -53,10 +53,9 @@ def _compile_stage1_wmma_kernel_impl(
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
-    from flydsl._mlir.dialects import llvm as llvm_dialect
     from flydsl._mlir.dialects import scf
     from flydsl.compiler.kernel_function import CompilationContext
-    from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, vector
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
@@ -81,15 +80,15 @@ def _compile_stage1_wmma_kernel_impl(
     wmma_m_rep = warp_tile_m // WMMA_M
     wmma_n_rep = warp_tile_n // WMMA_N
     if wmma_m_rep <= 0 or wmma_n_rep <= 0:
-        raise ValueError(f"Invalid warp tiling for fp16 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}")
+        raise ValueError(
+            f"Invalid warp tiling for fp16 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}"
+        )
 
     n_accs = wmma_m_rep * wmma_n_rep
     num_k_tiles = int(model_dim) // int(tile_k)
     k_wmma_steps = int(tile_k) // WMMA_K
     n_total = int(2 * inter_dim)
-    _sub_tiles = _make_wmma_sub_tiles(
-        wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=False
-    )
+    _sub_tiles = _make_wmma_sub_tiles(wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=False)
 
     lds_a_stride = int(tile_k) + LDS_PAD_A
     lds_b_stride = int(tile_n) + LDS_PAD_B
@@ -121,19 +120,12 @@ def _compile_stage1_wmma_kernel_impl(
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = (arg_scale_x, arg_scale_w, arg_max_token_ids, i32_k_in)
-        llvm_dialect.inline_asm(
-            None, [],  # void result, no operands
-            "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
-            "",
-            has_side_effects=True,
-        )
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")  # inter tile
         by = gpu.block_id("y")  # expert block
 
         tokens_idx = arith.index_cast(T.index, i32_tokens_in)
-        inter_idx = arith.index_cast(T.index, i32_inter_in)
         size_expert_ids = arith.index_cast(T.index, i32_size_expert_ids_in)
 
         sorted_num = size_expert_ids * arith.index(int(route_tile_m))
@@ -142,7 +134,9 @@ def _compile_stage1_wmma_kernel_impl(
         x_nbytes = tokens_idx * arith.index(int(model_dim)) * arith.index(2)
         w_nbytes = arith.index(int(experts * n_total * int(model_dim) * 2))
 
-        sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes)
+        sorted_rsrc = buffer_ops.create_buffer_resource(
+            arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes
+        )
         eid_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes)
         x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes)
         w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes)
@@ -157,7 +151,10 @@ def _compile_stage1_wmma_kernel_impl(
         layout_thr = _make_moe_wave_layout(m_warp=m_warp, n_warp=n_warp, WAVE_SIZE=WAVE_SIZE, fx=fx)
         thr_coord = idx2crd(tx, layout_thr)
         wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
-            fx.get(thr_coord, 0), fx.get(thr_coord, 1), fx.get(thr_coord, 2), fx.get(thr_coord, 3)
+            fx.get(thr_coord, 0),
+            fx.get(thr_coord, 1),
+            fx.get(thr_coord, 2),
+            fx.get(thr_coord, 3),
         )
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
@@ -237,8 +234,10 @@ def _compile_stage1_wmma_kernel_impl(
                     n_local = elem % arith.index(int(tile_n))
                     w_idx = (n_base + n_local) * arith.index(int(model_dim)) + k_base + k_local
                     w_val = buffer_ops.buffer_load(
-                        w_rsrc, arith.index_cast(T.i32, w_idx),
-                        vec_width=1, dtype=T.f16,
+                        w_rsrc,
+                        arith.index_cast(T.i32, w_idx),
+                        vec_width=1,
+                        dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
                     v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
@@ -403,7 +402,6 @@ def _compile_stage1_wmma_kernel_impl(
             i32_inter_in,
             i32_k_in,
             i32_size_expert_ids_in,
-            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
@@ -413,6 +411,7 @@ def _compile_stage1_wmma_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
+            waves_per_eu=waves_per_eu,
             ir=ir,
         )
 
@@ -446,10 +445,9 @@ def _compile_stage2_wmma_kernel_impl(
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
-    from flydsl._mlir.dialects import llvm as llvm_dialect
     from flydsl._mlir.dialects import scf
     from flydsl.compiler.kernel_function import CompilationContext
-    from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+    from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, vector
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
@@ -472,14 +470,14 @@ def _compile_stage2_wmma_kernel_impl(
     wmma_m_rep = warp_tile_m // WMMA_M
     wmma_n_rep = warp_tile_n // WMMA_N
     if wmma_m_rep <= 0 or wmma_n_rep <= 0:
-        raise ValueError(f"Invalid warp tiling for fp16 stage2 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}")
+        raise ValueError(
+            f"Invalid warp tiling for fp16 stage2 single kernel: wmma_m_rep={wmma_m_rep}, wmma_n_rep={wmma_n_rep}"
+        )
 
     n_accs = wmma_m_rep * wmma_n_rep
     num_k_tiles = int(inter_dim) // int(tile_k)
     k_wmma_steps = int(tile_k) // WMMA_K
-    _sub_tiles = _make_wmma_sub_tiles(
-        wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=False
-    )
+    _sub_tiles = _make_wmma_sub_tiles(wmma_m_rep=wmma_m_rep, wmma_n_rep=wmma_n_rep, WMMA_M=WMMA_M, is_fp4=False)
 
     lds_a_stride = int(tile_k) + LDS_PAD_A
     lds_b_stride = int(tile_n) + LDS_PAD_B
@@ -509,12 +507,14 @@ def _compile_stage2_wmma_kernel_impl(
         i32_size_expert_ids_in: fx.Int32,
     ):
         _ = (arg_scale_x, arg_scale_w, i32_k_in)
-        llvm_dialect.inline_asm(
-            None, [],  # void result, no operands
-            "s_setreg_imm32_b32 hwreg(26, 4, 1), 1",
-            "",
-            has_side_effects=True,
-        )
+        # ASTRewriter strips ``const_expr(...)`` from ``if`` tests, which would
+        # otherwise eliminate every reference to ``const_expr`` from the
+        # rewritten function body and shrink ``co_freevars`` by one — causing
+        # CPython to reject ``f.__code__ = new_f_code_o`` because the original
+        # ``__closure__`` length no longer matches. Keep one explicit reference
+        # so the rewritten code object's free-vars list still includes
+        # ``const_expr``.
+        _keep_const_expr_ref = const_expr  # noqa: F841
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")  # n tile
@@ -539,7 +539,9 @@ def _compile_stage2_wmma_kernel_impl(
         if const_expr(not bool(accumulate)):
             out_nbytes = x_rows * n_idx * arith.index(2)
 
-        sorted_rsrc = buffer_ops.create_buffer_resource(arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes)
+        sorted_rsrc = buffer_ops.create_buffer_resource(
+            arg_sorted_token_ids, max_size=False, num_records_bytes=sorted_nbytes
+        )
         eid_rsrc = buffer_ops.create_buffer_resource(arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes)
         x_rsrc = buffer_ops.create_buffer_resource(arg_x, max_size=False, num_records_bytes=x_nbytes)
         w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=True)
@@ -556,7 +558,10 @@ def _compile_stage2_wmma_kernel_impl(
         layout_thr = _make_moe_wave_layout(m_warp=m_warp, n_warp=n_warp, WAVE_SIZE=WAVE_SIZE, fx=fx)
         thr_coord = idx2crd(tx, layout_thr)
         wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
-            fx.get(thr_coord, 0), fx.get(thr_coord, 1), fx.get(thr_coord, 2), fx.get(thr_coord, 3)
+            fx.get(thr_coord, 0),
+            fx.get(thr_coord, 1),
+            fx.get(thr_coord, 2),
+            fx.get(thr_coord, 3),
         )
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
@@ -632,8 +637,10 @@ def _compile_stage2_wmma_kernel_impl(
                     n_local = elem % arith.index(int(tile_n))
                     w_idx = (n_base + n_local) * arith.index(int(inter_dim)) + k_base + k_local
                     w_val = buffer_ops.buffer_load(
-                        w_rsrc, arith.index_cast(T.i32, w_idx),
-                        vec_width=1, dtype=T.f16,
+                        w_rsrc,
+                        arith.index_cast(T.i32, w_idx),
+                        vec_width=1,
+                        dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
                     v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
@@ -788,7 +795,6 @@ def _compile_stage2_wmma_kernel_impl(
             i32_n_in,
             i32_k_in,
             i32_size_expert_ids_in,
-            value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         )
         _finalize_alloc_and_launch_2d(
             ctx=ctx,
@@ -798,6 +804,7 @@ def _compile_stage2_wmma_kernel_impl(
             gy=gy,
             block_threads=block_threads,
             stream=stream,
+            waves_per_eu=waves_per_eu,
             ir=ir,
         )
 
@@ -812,6 +819,7 @@ def _compile_stage2_wmma_kernel_impl(
 # ---------------------------------------------------------------------------
 # Public API entry points for fp16/bf16
 # ---------------------------------------------------------------------------
+
 
 @functools.lru_cache(maxsize=1024)
 def _compile_moe_wmma_gemm(
@@ -835,13 +843,12 @@ def _compile_moe_wmma_gemm(
     if waves_per_eu is not None and int(waves_per_eu) < 1:
         raise ValueError(f"waves_per_eu must be >= 1, got {waves_per_eu!r}")
     if in_dtype not in ("fp16", "bf16"):
-        raise ValueError(
-            f"Unsupported in_dtype for WMMA stage{stage}: {in_dtype!r}, "
-            "expected 'fp16' or 'bf16'"
-        )
+        raise ValueError(f"Unsupported in_dtype for WMMA stage{stage}: {in_dtype!r}, " "expected 'fp16' or 'bf16'")
 
     single_tile_m, single_tile_n, single_m_warp, single_n_warp = _pick_fp16_single_launch_shape(
-        int(tile_m), int(tile_n), max_total_warps=8,
+        int(tile_m),
+        int(tile_n),
+        max_total_warps=8,
     )
     common = dict(
         inter_dim=int(inter_dim),
@@ -860,11 +867,15 @@ def _compile_moe_wmma_gemm(
 
     if stage == 1:
         exe = _compile_stage1_wmma_kernel_impl(
-            model_dim=int(model_dim), doweight_stage1=bool(doweight), **common,
+            model_dim=int(model_dim),
+            doweight_stage1=bool(doweight),
+            **common,
         )
     else:
         exe = _compile_stage2_wmma_kernel_impl(
-            doweight_stage2=bool(doweight), accumulate=bool(accumulate), **common,
+            doweight_stage2=bool(doweight),
+            accumulate=bool(accumulate),
+            **common,
         )
 
     if in_dtype == "bf16":
@@ -872,18 +883,38 @@ def _compile_moe_wmma_gemm(
     return exe
 
 
-def compile_moe_gemm1(*, doweight_stage1, group_size=-1, use_cshuffle_epilog=None,
-                       num_buffers=1, use_tdm_gather=True, use_tdm_store=False,
-                       inst_prefetch=False, wave_specialized_tdm=False,
-                       cluster_m=1, cluster_n=1, **kw):
+def compile_moe_gemm1(
+    *,
+    doweight_stage1,
+    group_size=-1,
+    use_cshuffle_epilog=None,
+    num_buffers=1,
+    use_tdm_gather=True,
+    use_tdm_store=False,
+    inst_prefetch=False,
+    wave_specialized_tdm=False,
+    cluster_m=1,
+    cluster_n=1,
+    **kw,
+):
     return _compile_moe_wmma_gemm(stage=1, doweight=doweight_stage1, **kw)
 
 
-def compile_moe_gemm2(*, doweight_stage2, accumulate=True, group_size=-1,
-                       use_cshuffle_epilog=None,
-                       num_buffers=1, use_tdm_gather=True, use_tdm_store=False,
-                       inst_prefetch=False, wave_specialized_tdm=False,
-                       cluster_m=1, cluster_n=1, **kw):
+def compile_moe_gemm2(
+    *,
+    doweight_stage2,
+    accumulate=True,
+    group_size=-1,
+    use_cshuffle_epilog=None,
+    num_buffers=1,
+    use_tdm_gather=True,
+    use_tdm_store=False,
+    inst_prefetch=False,
+    wave_specialized_tdm=False,
+    cluster_m=1,
+    cluster_n=1,
+    **kw,
+):
     return _compile_moe_wmma_gemm(stage=2, doweight=doweight_stage2, accumulate=accumulate, **kw)
 
 
@@ -898,13 +929,18 @@ def compile_moe_gemm2_ex(*, mode=MoeGemm2Mode.ATOMIC, valid_mask=None, zero_inte
         else:
             dtype_str = "f32"
         reduce_exe = compile_moe_reduction(
-            topk=kw["topk"], model_dim=kw["model_dim"],
-            dtype_str=dtype_str, use_mask=(valid_mask is not None),
+            topk=kw["topk"],
+            model_dim=kw["model_dim"],
+            dtype_str=dtype_str,
+            use_mask=(valid_mask is not None),
         )
         from kernels.moe_gemm_2stage import _MoeGemm2ReduceWrapper
+
         return _MoeGemm2ReduceWrapper(
-            gemm2_exe=gemm2_exe, reduce_exe=reduce_exe,
-            topk=kw["topk"], model_dim=kw["model_dim"],
+            gemm2_exe=gemm2_exe,
+            reduce_exe=reduce_exe,
+            topk=kw["topk"],
+            model_dim=kw["model_dim"],
             out_dtype_str=dtype_str,
             use_mask=(valid_mask is not None),
             zero_intermediate=zero_intermediate,

@@ -61,16 +61,16 @@ struct RegAccessInfo {
 
 struct RegAllocaInfo {
   MakePtrOp makePtrOp;
-  int32_t allocaSize;
+  int32_t allocSize;
   Type elemTy;
   VectorType vectorSSATy;
 };
 
 bool isRegValue(Value value) {
   if (auto ptrTy = dyn_cast<PointerType>(value.getType()))
-    return ptrTy.getAddressSpace().getValue() == AddressSpace::Register;
+    return isGenericAddressSpace<AddressSpace::Register>(ptrTy.getAddressSpace());
   if (auto memRefTy = dyn_cast<fly::MemRefType>(value.getType()))
-    return memRefTy.getAddressSpace().getValue() == AddressSpace::Register;
+    return isGenericAddressSpace<AddressSpace::Register>(memRefTy.getAddressSpace());
   return false;
 }
 
@@ -134,8 +134,8 @@ private:
     funcOp.walk([&](MakePtrOp makePtrOp) {
       if (!isRegValue(makePtrOp))
         return;
-      auto allocaSizeAttr = makePtrOp.getDictAttrs()->getAs<IntegerAttr>("allocaSize");
-      if (!allocaSizeAttr || allocaSizeAttr.getInt() <= 0)
+      auto allocSizeAttr = makePtrOp.getDictAttrs()->getAs<IntegerAttr>("allocSize");
+      if (!allocSizeAttr || allocSizeAttr.getInt() <= 0)
         return;
 
       PointerType ptrTy = cast<PointerType>(makePtrOp.getType());
@@ -143,8 +143,8 @@ private:
       Type ssaElemTy = projectToLLVMCompatibleElemTy(ptrTy.getElemTy());
       regAllocaInfos.try_emplace(
           makePtrOp,
-          RegAllocaInfo{makePtrOp, static_cast<int32_t>(allocaSizeAttr.getInt()), originElemTy,
-                        VectorType::get({allocaSizeAttr.getInt()}, ssaElemTy)});
+          RegAllocaInfo{makePtrOp, static_cast<int32_t>(allocSizeAttr.getInt()), originElemTy,
+                        VectorType::get({allocSizeAttr.getInt()}, ssaElemTy)});
       allocaOrder.push_back(makePtrOp);
     });
 

@@ -42,12 +42,10 @@ with ``@flyc.kernel``, use layout algebra to partition data, then launch with
        tC = fx.logical_divide(tC, fx.make_layout(1, 1))
 
        # Allocate register fragments, load, compute, store
-       RABTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1),
-                                 fx.AddressSpace.Register)
        copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-       rA = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
-       rB = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
-       rC = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
+       rA = fx.make_rmem_tensor(1, fx.Float32)
+       rB = fx.make_rmem_tensor(1, fx.Float32)
+       rC = fx.make_rmem_tensor(1, fx.Float32)
 
        fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
        fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
@@ -98,27 +96,37 @@ Compilation Pipeline
 --------------------
 
 On first call, ``@flyc.jit`` traces the Python function into an MLIR module,
-then compiles it through the Fly MLIR pipeline:
+then compiles it through the Fly MLIR pipeline. The pass list is built by
+``RocmBackend._pipeline_parts()`` in three stages; see
+:doc:`architecture_guide` §3 for the per-pass table.
 
 .. code-block:: text
 
    Python Function (@flyc.kernel / @flyc.jit)
            │
            ▼  AST Rewriting + Tracing
-      MLIR Module (gpu, arith, scf, memref dialects)
+      MLIR Module (fly, gpu, arith, scf, memref, vector dialects)
            │
            ▼  MlirCompiler.compile()
-      ┌────────────────────────────────────────────────┐
-      │  gpu-kernel-outlining                          │
-      │  fly-canonicalize                              │
-      │  fly-layout-lowering                           │
-      │  convert-fly-to-rocdl                          │
-      │  canonicalize + cse                            │
-      │  gpu.module(convert-gpu-to-rocdl{...})         │
-      │  rocdl-attach-target{chip=gfxNNN}              │
-      │  gpu-to-llvm → convert-arith/func-to-llvm      │
-      │  gpu-module-to-binary{format=fatbin}           │
-      └────────────────────────────────────────────────┘
+      ┌──────────────────────────────────────────────────────────┐
+      │ A. pre_binary_fragments  (Fly → ROCDL)                   │
+      │    fly-rewrite-func-signature → fly-canonicalize →       │
+      │    fly-layout-lowering → fly-int-swizzle-simplify →      │
+      │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
+      │    fly-promote-regmem-to-vectorssa →                     │
+      │    convert-fly-to-rocdl → canonicalize →                 │
+      │    gpu.module(convert-scf-to-cf, cse,                    │
+      │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
+      ├──────────────────────────────────────────────────────────┤
+      │ B. binary_prep_fragments  (→ LLVM)                       │
+      │    rocdl-attach-target{chip=gfxNNN} →                    │
+      │    convert-scf-to-cf → convert-cf-to-llvm →              │
+      │    gpu-to-llvm → convert-vector/arith/func-to-llvm →     │
+      │    reconcile-unrealized-casts                            │
+      ├──────────────────────────────────────────────────────────┤
+      │ C. binary_fragment                                       │
+      │    gpu-module-to-binary{format=fatbin}                   │
+      └──────────────────────────────────────────────────────────┘
            │
            ▼
       Cached Compiled Artifact (ExecutionEngine)

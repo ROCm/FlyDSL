@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
@@ -19,16 +20,32 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DOCKER_IMAGE: "rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1"
-  GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || 'ROCm/FlyDSL' }}
-  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id }}
+  DOCKER_IMAGE: "rocm/pytorch:rocm7.2_ubuntu24.04_py3.12_pytorch_release_2.9.1"
+  GITHUB_REPO_NAME: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+  GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
 
 jobs:
+  check-signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for Checks workflow
+        run: ./.github/scripts/check_signal.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          MAX_RETRIES: 5
+          RETRY_INTERVAL_SECONDS: 30
+
   # ---------------------------------------------------------------------------
   # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
   # Runs on 1-GPU and Navi runners only.
   # ---------------------------------------------------------------------------
   test:
+    needs: check-signal
     strategy:
       matrix:
         runners: [
@@ -144,6 +161,9 @@ jobs:
         run: |
           docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
           docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
+          docker exec flydsl_test bash -c "python3 -m pip uninstall -y triton pytorch-triton pytorch-triton-rocm triton-rocm amd-triton || true"
+          docker exec flydsl_test bash -c "python3 -m pip install --extra-index-url https://pypi.amd.com/triton/rocm-7.2.0/simple/ 'triton==3.7.0+amd.rocm7.2.0.gitd1660454'"
+          docker exec flydsl_test bash -c "python3 -c 'import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Installed triton\", triton.__version__)'"
 
       - name: Run tests
         run: |
@@ -162,19 +182,128 @@ jobs:
           fi
 
       - name: Run benchmarks
+        id: benchmarks
         run: |
-          docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && bash scripts/run_benchmark.sh"
+          docker exec -i flydsl_test bash <<'BASH'
+          set -e -o pipefail
+          export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
+          export AITER_REPO=/tmp/aiter
+          cd /flydsl-test
+          BENCH_LOG_DIR=/tmp/flydsl_bench_current bash scripts/run_benchmark.sh 2>&1 | tee /tmp/bench_current.out
+          python3 scripts/benchmark_output_to_csv.py /tmp/bench_current.out /tmp/bench_current.csv
+          BASH
+
+      - name: Run benchmark baselines
+        id: bench-baselines
+        timeout-minutes: 180
+        continue-on-error: true
+        run: |
+          docker exec -i flydsl_test bash <<'BASH'
+          set -u
+          cd /flydsl-test
+          rm -rf /tmp/flydsl-bench-main-*
+          rm -f /tmp/bench_main.csv /tmp/bench_prev_main.csv /tmp/bench_main_label /tmp/bench_prev_main_label
+          git worktree prune || true
+          git fetch origin main --depth=8
+
+          found=0
+          idx=0
+          for commit in $(git rev-list --max-count=8 FETCH_HEAD); do
+            label="main"
+            if [ "${idx}" -gt 0 ]; then
+              label="main~${idx}"
+            fi
+            worktree="/tmp/flydsl-bench-main-${idx}"
+            csv="/tmp/bench_candidate_${idx}.csv"
+            output="/tmp/bench_candidate_${idx}.out"
+            log_dir="/tmp/flydsl_bench_${label}"
+            echo "Trying benchmark baseline ${label} (${commit})"
+
+            if ! git worktree add --detach "${worktree}" "${commit}"; then
+              echo "Failed to create worktree for ${label}; trying older main commit."
+              idx=$((idx + 1))
+              continue
+            fi
+
+            (
+              set -e -o pipefail
+              cd "${worktree}"
+              export MLIR_PATH=/llvm-project/mlir_install
+              python3 -m pip install -e . --use-pep517 2>&1 | tail -5
+              export PYTHONPATH=/tmp/aiter:${PYTHONPATH:-}
+              export AITER_REPO=/tmp/aiter
+              BENCH_LOG_DIR="${log_dir}" bash scripts/run_benchmark.sh 2>&1 | tee "${output}"
+              python3 /flydsl-test/scripts/benchmark_output_to_csv.py "${output}" "${csv}"
+            )
+            status=$?
+            if [ "${status}" -eq 0 ] && [ -s "${csv}" ]; then
+              if [ "${found}" -eq 0 ]; then
+                cp "${csv}" /tmp/bench_main.csv
+                echo "${label}" >/tmp/bench_main_label
+              else
+                cp "${csv}" /tmp/bench_prev_main.csv
+                echo "${label}" >/tmp/bench_prev_main_label
+              fi
+              found=$((found + 1))
+              if [ "${found}" -ge 2 ]; then
+                break
+              fi
+            else
+              echo "Benchmark baseline ${label} failed; trying older main commit."
+            fi
+            idx=$((idx + 1))
+          done
+
+          if [ "${found}" -eq 0 ]; then
+            echo "No usable main benchmark baseline found."
+            exit 0
+          fi
+          if [ "${found}" -eq 1 ]; then
+            echo "Only one usable main benchmark baseline found."
+          fi
+          BASH
+
+      - name: Check benchmark performance (current vs main)
+        if: steps.bench-baselines.outcome != 'skipped'
+        timeout-minutes: 5
+        run: |
+          docker exec flydsl_test bash -c "
+            if [ ! -f /tmp/bench_main.csv ]; then
+              echo 'No usable main benchmark baseline found; skipping main comparison.'
+              exit 0
+            fi
+            cd /flydsl-test
+            main_label=\$(cat /tmp/bench_main_label 2>/dev/null || echo main)
+            python3 scripts/compare_benchmark.py /tmp/bench_main.csv /tmp/bench_current.csv \
+              --baseline-label \"\${main_label}\" --current-label current
+          "
+
+      - name: Check benchmark performance (current vs main~1)
+        if: steps.bench-baselines.outcome != 'skipped'
+        timeout-minutes: 5
+        run: |
+          docker exec flydsl_test bash -c "
+            if [ ! -f /tmp/bench_prev_main.csv ]; then
+              echo 'No second usable main benchmark baseline found; skipping previous-main comparison.'
+              exit 0
+            fi
+            cd /flydsl-test
+            prev_main_label=\$(cat /tmp/bench_prev_main_label 2>/dev/null || echo main~1)
+            python3 scripts/compare_benchmark.py /tmp/bench_prev_main.csv /tmp/bench_current.csv \
+              --baseline-label \"\${prev_main_label}\" --current-label current
+          "
 
       - name: Show benchmarks logs
         if: failure()
         run: |
-          docker exec flydsl_test bash -c 'cd /tmp/flydsl_bench && tar czf /tmp/flydsl_bench/logs.tgz *.log 2>/dev/null || echo "no logs"'
-          docker cp flydsl_test:/tmp/flydsl_bench/logs.tgz . || true
-          if [ -f logs.tgz ]; then
-            tar -xzf logs.tgz || true
-            cat *.log || true
+          docker exec flydsl_test bash -c 'cd /tmp && tar czf /tmp/flydsl_bench_logs.tgz flydsl_bench* bench_*.csv 2>/dev/null || echo "no logs"'
+          docker cp flydsl_test:/tmp/flydsl_bench_logs.tgz . || true
+          if [ -f flydsl_bench_logs.tgz ]; then
+            tar -xzf flydsl_bench_logs.tgz || true
+            cat flydsl_bench*/*.log || true
+            cat bench_*.csv || true
           else
-            echo "logs.tgz not found; skipping log extraction"
+            echo "flydsl_bench_logs.tgz not found; skipping log extraction"
           fi
       
       - name: Clean up
@@ -186,12 +315,20 @@ jobs:
   # ---------------------------------------------------------------------------
   # Multi-GPU allreduce tests: ONLY for 8-GPU runners.
   # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
+  # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
+  # the workflow is manually dispatched.
   # fail-fast: false ensures both runners always complete even if one fails.
   # ---------------------------------------------------------------------------
   multi-gpu:
     needs: test
     name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
     timeout-minutes: 120
+    if: |
+      always() && (
+        (github.event_name == 'pull_request' &&
+         contains(github.event.pull_request.labels.*.name, 'multi-gpu')) ||
+        github.event_name == 'workflow_dispatch'
+      )
     strategy:
       matrix:
         runners: [
@@ -266,6 +403,26 @@ jobs:
       - name: Build FlyDSL (uses MLIR install prefix)
         run: |
           docker exec flydsl_test bash -c "export MLIR_PATH=/llvm-project/mlir_install && cd /flydsl-test && python3 -m pip install -e . --use-pep517"
+
+      - name: Install mori (for shmem regression test)
+        timeout-minutes: 15
+        run: |
+          docker exec flydsl_test bash -c "
+            apt-get install -y libpci-dev libibverbs-dev &&
+            rm -rf /tmp/mori &&
+            git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/mori.git /tmp/mori &&
+            cd /tmp/mori && python3 -m pip install . &&
+            MORI_PRECOMPILE=1 python3 -c 'import mori'
+          "
+
+      - name: Run multi-GPU shmem regression test
+        timeout-minutes: 10
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test
+            python3 -m pytest tests/kernels/test_flydsl_shmem.py \
+              -m multi_gpu -v --no-header --tb=short
+          "
 
       - name: Run multi-GPU allreduce tests
         timeout-minutes: 30
