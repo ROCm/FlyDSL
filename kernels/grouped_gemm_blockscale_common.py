@@ -246,11 +246,9 @@ def make_lds_loader(*, lds_a, layout_lds, k_blocks16):
     def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
         col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base_bytes, k_blocks16)
         idx_a16 = crd2idx((curr_row_a_lds, col_base_swz_bytes), layout_lds) + lds_base
-        loaded_a16 = vector.load_op(T.vec(16, T.f8), lds_a, [idx_a16])
-        a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
-        a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-        a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
-        return a0, a1
+        loaded_a16 = Vector.load(T.vec(16, T.f8), lds_a, [idx_a16])
+        a_i64x2 = loaded_a16.bitcast(fx.Int64)
+        return a_i64x2[0], a_i64x2[1]
 
     return lds_load_packs_k64
 
@@ -311,8 +309,8 @@ def pack_i64x4_to_i32x8(x0, x1, x2, x3):
 
     Used to assemble the K=128 MFMA A/B operands on gfx950.
     """
-    v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
-    return Vector(v4).bitcast(fx.Int32)
+    v4 = Vector.from_elements([x0, x1, x2, x3], fx.Int64)
+    return v4.bitcast(fx.Int32)
 
 
 def make_hot_loop_scheduler(
@@ -469,7 +467,7 @@ def make_compute_tile(
                         sa_idx = sa_base + row_global
                         s_a_val = buffer_ops.buffer_load(sa_rsrc, sa_idx, vec_width=1, dtype=T.f32)
                         s_a_row.append(s_a_val)
-                    s_a_vec4 = vector.from_elements(T.f32x4, s_a_row)
+                    s_a_vec4 = Vector.from_elements(s_a_row, fx.Float32)
                     s_a_vecs.append(s_a_vec4)
 
                 sb_group_offset = group_idx * fx.Index(scale_n * scale_k)
@@ -533,7 +531,7 @@ def make_compute_tile(
                             mfma_result = mfma_fn(T.f32x4, [a1, b_packs1[ni], mfma_mid, 0, 0, 0])
 
                             s_a_v4 = s_a_vecs[mi]
-                            s_b_bc = vector.broadcast(T.f32x4, s_b_vals[ni])
+                            s_b_bc = Vector.filled((4,), fx.Float32(s_b_vals[ni]), fx.Float32)
                             scaled = ArithValue(mfma_result) * ArithValue(s_a_v4)
                             current_accs[acc_idx] = math_dialect.fma(scaled, s_b_bc, current_accs[acc_idx])
 
@@ -654,11 +652,11 @@ def make_epilogue_writers(
             col_local = col_base_local + (ni * 16)
             acc_idx = mi * num_acc_n + ni
             acc = accs[acc_idx]
-            val = vector.extract(acc, static_position=[ii], dynamic_position=[])
+            val = Vector(acc)[ii]
             v_out = arith.trunc_f(out_mlir(), val)
             lds_idx = row_base_lds + col_local
-            v1 = vector.from_elements(vec1_out, [v_out])
-            vector.store(v1, lds_out, [lds_idx], alignment=2)
+            v1 = Vector.from_elements([v_out])
+            v1.store(lds_out, [lds_idx], alignment=2)
 
     def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
         if d_group_off is None:
