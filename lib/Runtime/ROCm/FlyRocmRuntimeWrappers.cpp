@@ -17,7 +17,11 @@
 #include <vector>
 
 #include "hip/hip_runtime.h"
+#include "hip/hip_version.h"
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
+
+// hipDrvLaunchKernelEx + hipLaunchAttributeClusterDimension were added in HIP 7.0 / ROCm 7.0.
+#define FLY_HIP_HAS_CLUSTER_LAUNCH (HIP_VERSION >= 70000000)
 
 #define HIP_REPORT_IF_ERROR(expr)                                                                  \
   [](hipError_t result) {                                                                          \
@@ -68,7 +72,9 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
                                         intptr_t blockY, intptr_t blockZ, int32_t smem,
                                         hipStream_t stream, void **params, void **extra,
                                         size_t /*paramsCount*/) {
-#ifdef hipLaunchAttributeClusterDimension
+  const bool requestedRealCluster = (clusterX > 1) || (clusterY > 1) || (clusterZ > 1);
+
+#if FLY_HIP_HAS_CLUSTER_LAUNCH
   hipLaunchAttribute attrs[1];
   attrs[0].id = hipLaunchAttributeClusterDimension;
   attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
@@ -91,7 +97,6 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
   if (err == hipSuccess)
     return;
 
-  const bool requestedRealCluster = (clusterX > 1) || (clusterY > 1) || (clusterZ > 1);
   if (requestedRealCluster) {
     fprintf(stderr,
             "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
@@ -103,6 +108,7 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
     return;
   }
 
+  // cluster=(1,1,1) carries no cluster semantics — plain launch is equivalent.
   fprintf(stderr,
           "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
           "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
@@ -110,15 +116,20 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
                                             smem, stream, params, extra));
 #else
-  // Cluster launch not supported by this HIP version; ignore cluster dims
-  // and fall back to regular kernel launch.
-  if ((clusterX > 1) || (clusterY > 1) || (clusterZ > 1)) {
+  // HIP < 7.0: no cluster API. Refuse to downgrade silently — kernel relies on
+  // cluster semantics (multicast, cluster_barrier) that a plain launch breaks.
+  if (requestedRealCluster) {
     fprintf(stderr,
             "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
-            "hipLaunchAttributeClusterDimension is not available in this HIP "
-            "version; falling back to hipModuleLaunchKernel.\n",
-            static_cast<long>(clusterX), static_cast<long>(clusterY), static_cast<long>(clusterZ));
+            "FlyDSL was built against HIP %d (need HIP >= 7.0 / ROCm >= 7.0 "
+            "for hipDrvLaunchKernelEx + hipLaunchAttributeClusterDimension). "
+            "Aborting.\n",
+            static_cast<long>(clusterX), static_cast<long>(clusterY), static_cast<long>(clusterZ),
+            HIP_VERSION);
+    HIP_REPORT_IF_ERROR(hipErrorNotSupported);
+    return;
   }
+  // cluster=(1,1,1): plain launch is equivalent.
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
                                             smem, stream, params, extra));
 #endif
