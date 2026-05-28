@@ -4415,7 +4415,10 @@ def compile_mixed_moe_gemm2(
                                 _last_eq = arith.cmpi(
                                     CmpIPredicate.eq,
                                     _old,
-                                    arith.constant(int(_tfs_num_n_tiles) - 1),
+                                    arith.constant(
+                                        int(_tfs_num_n_tiles) - 1,
+                                        type=T.i32,
+                                    ),
                                 )
                                 _if_last = _tfs_scf_d.IfOp(
                                     _last_eq.ir_value() if hasattr(_last_eq, "ir_value")
