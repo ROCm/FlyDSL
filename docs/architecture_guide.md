@@ -146,26 +146,38 @@ Python Function (@flyc.kernel / @flyc.jit)
    Transformed Python Function
         │
         ▼  Tracing (execution inside MLIR Context)
-   MLIR Module (gpu, arith, scf, memref dialects)
+   MLIR Module (fly, gpu, arith, scf, memref, vector dialects)
         │
         ▼  MlirCompiler.compile()
-   ┌────────────────────────────────────────────────┐
-   │  gpu-kernel-outlining                          │  Outline GPU kernels
-   │  fly-canonicalize                              │  FlyDSL-specific canonicalization
-   │  fly-layout-lowering                           │  Layout algebra lowering
-   │  convert-fly-to-rocdl                          │  Fly ops → ROCDL intrinsics
-   │  canonicalize                                  │  Standard MLIR canonicalization
-   │  gpu.module(convert-scf-to-cf,                 │  SCF → ControlFlow
-   │             convert-gpu-to-rocdl{...})         │  GPU → ROCDL (inside gpu.module)
-   │  rocdl-attach-target{chip=gfxNNN}              │  Attach ROCm target
-   │  convert-scf-to-cf                             │  Host-side SCF → CF
-   │  convert-cf-to-llvm                            │  CF → LLVM dialect
-   │  gpu-to-llvm                                   │  GPU types → LLVM types
-   │  convert-arith-to-llvm                         │  Arith → LLVM
-   │  convert-func-to-llvm                          │  Func → LLVM
-   │  reconcile-unrealized-casts                    │  Clean up casts
-   │  gpu-module-to-binary{format=fatbin}           │  Emit HSACO binary
-   └────────────────────────────────────────────────┘
+   ┌────────────────────────────────────────────────────────┐
+   │ Stage A — pre_binary_fragments  (Fly → ROCDL)          │
+   │   fly-rewrite-func-signature                           │
+   │   fly-canonicalize                                     │
+   │   fly-layout-lowering                                  │
+   │   fly-int-swizzle-simplify                             │
+   │   canonicalize                                         │
+   │   fly-convert-atom-call-to-ssa-form                    │
+   │   fly-promote-regmem-to-vectorssa                      │
+   │   convert-fly-to-rocdl                                 │
+   │   canonicalize                                         │
+   │   gpu.module(convert-scf-to-cf, cse,                   │
+   │              convert-gpu-to-rocdl{chipset=gfxNNN ...}, │
+   │              fly-rocdl-cluster-attr)                   │
+   ├────────────────────────────────────────────────────────┤
+   │ Stage B — binary_prep_fragments  (→ LLVM)              │
+   │   rocdl-attach-target{chip=gfxNNN ...}                 │
+   │   convert-scf-to-cf                                    │
+   │   convert-cf-to-llvm                                   │
+   │   gpu-to-llvm{use-bare-pointers-...=true}              │
+   │   convert-vector-to-llvm                               │
+   │   convert-arith-to-llvm                                │
+   │   convert-func-to-llvm                                 │
+   │   reconcile-unrealized-casts                           │
+   │   ensure-debug-info-scope-on-llvm-func  (optional)     │
+   ├────────────────────────────────────────────────────────┤
+   │ Stage C — binary_fragment                              │
+   │   gpu-module-to-binary{format=fatbin opts="..."}       │
+   └────────────────────────────────────────────────────────┘
         │
         ▼
    JITCFunction (ExecutionEngine)
@@ -173,24 +185,55 @@ Python Function (@flyc.kernel / @flyc.jit)
 
 ### 3.2 Pipeline Stages in Detail
 
-The pipeline is defined in `MlirCompiler._pipeline_fragments()`:
+The pipeline is built by `RocmBackend._pipeline_parts()` in
+`python/flydsl/compiler/backends/rocm.py`. The orchestrator
+`_pipeline_fragments_for_mode()` in `jit_function.py` decides whether to run
+the pipeline as a single combined pass list (`pipeline_fragments()`) or split
+it for external LLVM codegen (`external_binary_pipeline_fragments()`). External
+mode runs Stages A and B with the bundled MLIR runtime, then invokes the
+external LLVM toolchain only for Stage C (`gpu-module-to-binary`).
 
-| Stage | Pass | Description |
+**Stage A — `pre_binary_fragments`** (Fly dialect → ROCDL lowering)
+
+| # | Pass | Description |
 |---|---|---|
-| 1 | `gpu-kernel-outlining` | Moves GPU kernel bodies into `gpu.func` inside `gpu.module`. |
-| 2 | `fly-canonicalize` | FlyDSL-specific canonicalization (custom pass). |
-| 3 | `fly-layout-lowering` | Lowers layout algebra operations to standard arithmetic. |
-| 4 | `convert-fly-to-rocdl` | Converts FlyDSL ops to ROCDL intrinsics. |
+| 1 | `fly-rewrite-func-signature` | Rewrite DSL types at function and SCF control-flow boundaries; lowers `IntTuple` / `Layout` / `ComposedLayout` / `CoordTensor` / `MemRef` to packed LLVM struct types and reconstructs them in the body via constructor ops. |
+| 2 | `fly-canonicalize` | FlyDSL-specific canonicalization (folds `!fly.layout` algebra when shapes are static). |
+| 3 | `fly-layout-lowering` | Lowers layout algebra (`fly.crd2idx`, partitions, divides) to concrete `arith` + `vector` ops. |
+| 4 | `fly-int-swizzle-simplify` | Algebraically simplifies the swizzle-shaped arith sequences emitted by `applySwizzle`. |
 | 5 | `canonicalize` | Standard MLIR canonicalization (constant folding, etc.). |
-| 6 | `convert-scf-to-cf` + `convert-gpu-to-rocdl` | Lowers SCF and GPU ops to ROCDL (inside `gpu.module`). |
-| 7 | `rocdl-attach-target` | Attaches `#rocdl.target<chip=gfxNNN>` for the target GPU. |
-| 8 | `convert-scf-to-cf` | Host-side SCF lowering. |
-| 9 | `convert-cf-to-llvm` | ControlFlow → LLVM dialect. |
-| 10 | `gpu-to-llvm` | GPU types/ops → LLVM dialect (host-side launch). |
-| 11 | `convert-arith-to-llvm` | Arithmetic → LLVM. |
-| 12 | `convert-func-to-llvm` | Function → LLVM. |
-| 13 | `reconcile-unrealized-casts` | Final cast cleanup. |
-| 14 | `gpu-module-to-binary` | Compiles GPU module to HSACO binary (fatbin). |
+| 6 | `fly-convert-atom-call-to-ssa-form` | Converts `copy_atom_call` / `mma_atom_call` to their SSA counterparts; promotes register tensors to vector SSA values. |
+| 7 | `fly-promote-regmem-to-vectorssa` | Promotes `fly.make_ptr(register)` memory semantics to vector SSA values (requires #6). |
+| 8 | `convert-fly-to-rocdl` | Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → `rocdl.buffer_load/store`, MMA atoms → `rocdl.mfma.*`). |
+| 9 | `canonicalize` | Second canonicalization round after ROCDL lowering. |
+| 10 | `gpu.module(convert-scf-to-cf, cse, convert-gpu-to-rocdl{chipset=gfxNNN ...}, fly-rocdl-cluster-attr)` | Inside the GPU module: SCF→CF, CSE, GPU intrinsics→ROCDL, then `fly-rocdl-cluster-attr` injects `amdgpu-cluster-dims` into the `llvm.func` `passthrough`. |
+
+**Stage B — `binary_prep_fragments`** (LLVM lowering, host + kernel)
+
+| # | Pass | Description |
+|---|---|---|
+| 11 | `rocdl-attach-target{chip=gfxNNN ...}` | Attaches `#rocdl.target<chip=gfxNNN>` (plus `fast`/`unsafe-math`/`wave64` options) to the GPU module for codegen. |
+| 12 | `convert-scf-to-cf` | Host-side SCF → ControlFlow. |
+| 13 | `convert-cf-to-llvm` | ControlFlow → LLVM dialect. |
+| 14 | `gpu-to-llvm{use-bare-pointers-for-host=true use-bare-pointers-for-kernels=true}` | GPU types and host launcher → LLVM. |
+| 15 | `convert-vector-to-llvm` | Vector → LLVM. |
+| 16 | `convert-arith-to-llvm` | Arith → LLVM. |
+| 17 | `convert-func-to-llvm` | Func → LLVM. |
+| 18 | `reconcile-unrealized-casts` | Final cast cleanup. |
+
+When `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, Stage B appends
+`ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}` after
+`reconcile-unrealized-casts` and before Stage C.
+
+**Stage C — `binary_fragment`**
+
+| # | Pass | Description |
+|---|---|---|
+| 19 | `gpu-module-to-binary{format=fatbin opts="..."}` | Invokes the LLVM AMDGPU backend and emits an HSA fatbin. |
+
+`gpu-kernel-outlining` is no longer a pass in the runtime pipeline — kernel
+outlining happens during Python tracing, when `@flyc.kernel` emits
+`gpu.func` ops directly into a `gpu.container_module`.
 
 ### 3.3 JIT Compilation Flow
 
@@ -332,7 +375,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `FLYDSL_DEBUG_AST_DIFF` | `false` | Print AST diff during rewrite. |
 | `FLYDSL_DEBUG_PRINT_ORIGIN_IR` | `false` | Print origin IR before compilation. |
 | `FLYDSL_DEBUG_PRINT_AFTER_ALL` | `false` | Print IR after each MLIR pass. |
-| `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | `true` | Generate debug info in compiled code. |
+| `FLYDSL_DEBUG_ENABLE_DEBUG_INFO` | `false` | Generate debug info in compiled code. |
 | `FLYDSL_DEBUG_ENABLE_VERIFIER` | `true` | Verify IR module. |
 | `FLYDSL_DEBUG_LOG_LEVEL` | `WARNING` | Logging level (DEBUG, INFO, WARNING, ERROR). |
 
@@ -373,26 +416,36 @@ Enable with `FLYDSL_DUMP_IR=1`:
 FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=./dumps python test_my_kernel.py
 ```
 
-Produces numbered `.mlir` files:
+Produces numbered dump files (exact pass count tracks `RocmBackend._pipeline_parts()`):
 ```
 dumps/my_func_name/
-├── 00_original.mlir
-├── 01_gpu-kernel-outlining.mlir
-├── 02_fly-canonicalize.mlir
-├── 03_fly-layout-lowering.mlir
-├── 04_convert-fly-to-rocdl.mlir
+├── 00_origin.mlir
+├── 01_fly_rewrite_func_signature.mlir
+├── 02_fly_canonicalize.mlir
+├── 03_fly_layout_lowering.mlir
+├── 04_fly_int_swizzle_simplify.mlir
 ├── 05_canonicalize.mlir
-├── 06_convert-scf-to-cf.mlir
-├── 07_rocdl-attach-target.mlir
-├── 08_convert-scf-to-cf.mlir
-├── 09_convert-cf-to-llvm.mlir
-├── 10_gpu-to-llvm.mlir
-├── 11_convert-arith-to-llvm.mlir
-├── 12_convert-func-to-llvm.mlir
-├── 13_reconcile-unrealized-casts.mlir
-├── 14_gpu-module-to-binary.mlir
-└── final_isa.s                      # AMD ISA assembly (best-effort)
+├── 06_fly_convert_atom_call_to_ssa_form.mlir
+├── 07_fly_promote_regmem_to_vectorssa.mlir
+├── 08_convert_fly_to_rocdl.mlir
+├── 09_canonicalize.mlir
+├── 10_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+│                                      # also runs fly-rocdl-cluster-attr
+├── 11_rocdl_attach_target.mlir
+├── 12_convert_scf_to_cf.mlir
+├── 13_convert_cf_to_llvm.mlir
+├── 14_gpu_to_llvm.mlir
+├── 15_convert_vector_to_llvm.mlir
+├── 16_convert_arith_to_llvm.mlir
+├── 17_convert_func_to_llvm.mlir
+├── 18_reconcile_unrealized_casts.mlir
+├── 19_gpu_module_to_binary.mlir
+├── 20_llvm_ir.ll
+└── 21_final_isa.s                    # AMD ISA assembly (best-effort)
 ```
+
+If `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`, the debug-info pass adds an extra
+numbered dump before `gpu_module_to_binary`.
 
 ---
 

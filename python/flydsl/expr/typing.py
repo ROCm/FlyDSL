@@ -376,7 +376,7 @@ class Constexpr:
 
     @staticmethod
     def _tuple_cache_signature(value):
-        return ("tuple", tuple(Constexpr._value_cache_signature(item) for item in value))
+        return ("tuple", tuple(Constexpr.value_signature(item) for item in value))
 
     @staticmethod
     def _lambda_cache_signature(value):
@@ -403,17 +403,17 @@ class Constexpr:
             tuple(Constexpr._lambda_const_cache_signature(item) for item in value.__code__.co_consts),
             value.__code__.co_names,
             value.__code__.co_varnames,
-            tuple(Constexpr._value_cache_signature(item) for item in defaults),
+            tuple(Constexpr.value_signature(item) for item in defaults),
         )
 
     @staticmethod
     def _lambda_const_cache_signature(value):
         if value is None:
             return (type(None), None)
-        return Constexpr._value_cache_signature(value)
+        return Constexpr.value_signature(value)
 
     @staticmethod
-    def _value_cache_signature(value):
+    def value_signature(value):
         scalar_sig = Constexpr._scalar_cache_signature(value)
         if scalar_sig is not None:
             return scalar_sig
@@ -426,10 +426,6 @@ class Constexpr:
             "Constexpr values support only int, bool, float, tuples of those scalar values, "
             "and lambdas without free variables"
         )
-
-    @staticmethod
-    def cache_signature(value):
-        return Constexpr._value_cache_signature(value)
 
     def __class_getitem__(cls, param):
         if cls is not Constexpr:
@@ -457,7 +453,7 @@ class Constexpr:
 
     @classmethod
     def _specialize(cls, value):
-        cache_key = Constexpr.cache_signature(value)
+        cache_key = Constexpr.value_signature(value)
         cached = Constexpr._value_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -509,15 +505,15 @@ class Constexpr:
             elif Constexpr._is_tuple_annotation(inner):
                 if not isinstance(value, tuple):
                     raise TypeError(f"expects tuple, got {type(value).__name__}")
-                Constexpr.cache_signature(value)
+                Constexpr.value_signature(value)
             elif inner in (int, bool, float):
                 if type(value) is not inner:
                     raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
-                Constexpr.cache_signature(value)
+                Constexpr.value_signature(value)
             elif not isinstance(value, inner):
                 raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
             else:
-                Constexpr.cache_signature(value)
+                Constexpr.value_signature(value)
         return value
 
     @classmethod
@@ -1122,6 +1118,9 @@ class Stream:
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
         return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
+
+    def __cache_signature__(self):
+        return (type(self),)
 
     @staticmethod
     def _extract_stream_value(arg):
@@ -1763,10 +1762,6 @@ class Array:
 
         def __extract_to_ir_values__(self) -> List[ir.Value]:
             return [self._ptr_value]
-
-        @classmethod
-        def __cache_signature__(cls):
-            return ("array", cls.dtype, cls.size, cls.align)
 
         @classmethod
         def __dsl_size_of__(cls) -> int:

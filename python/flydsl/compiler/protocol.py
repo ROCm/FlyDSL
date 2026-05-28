@@ -20,6 +20,7 @@ class DslType(Protocol):
 class JitArgument(Protocol):
     def __get_ir_types__(self) -> List[ir.Type]: ...
     def __get_c_pointers__(self) -> List[ctypes.c_void_p]: ...
+    def __cache_signature__(self) -> object: ...
 
 
 @runtime_checkable
@@ -47,8 +48,21 @@ def get_ir_types(obj) -> List[ir.Type]:
     try:
         ir_values = extract_to_ir_values(obj)
         return [v.type for v in ir_values]
-    except TypeError:
-        raise TypeError(f"Cannot derive IR types from {obj}")
+    except TypeError as exc:
+        raise TypeError(f"Cannot derive IR types from {obj}: {exc}") from exc
+
+
+def cache_signature(obj) -> object:
+    if hasattr(obj, "__cache_signature__"):
+        return obj.__cache_signature__()
+    if isinstance(obj, SimpleNamespace):
+        return tuple((name, cache_signature(value)) for name, value in vars(obj).items())
+    if isinstance(obj, (tuple, list)):
+        return tuple(cache_signature(x) for x in obj)
+    raise TypeError(
+        f"Cannot derive cache signature for {obj!r}: type {type(obj).__name__} does not "
+        "implement __cache_signature__."
+    )
 
 
 def get_c_pointers(obj) -> List[ctypes.c_void_p]:

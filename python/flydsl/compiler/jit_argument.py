@@ -124,8 +124,8 @@ def convert_to_jit_arguments(
             constexpr_values[param_name] = value
             continue
 
-        is_jit_arg = hasattr(value, "__get_ir_types__") and hasattr(value, "__get_c_pointers__")
-        is_dsl_type = hasattr(value, "__construct_from_ir_values__") and hasattr(value, "__extract_to_ir_values__")
+        is_jit_arg = isinstance(value, JitArgument)
+        is_dsl_type = isinstance(value, DslType)
         if is_jit_arg and is_dsl_type:
             jit_arg = value
             dsl_type = type(value)
@@ -167,10 +167,18 @@ class TensorAdaptor:
         tensor: torch.Tensor,
         assumed_align: Optional[int] = None,
         use_32bit_stride: bool = False,
+        dynamic_layout: bool = True,
     ):
         # Forward-only interop: DLPack export from torch rejects tensors that
         # still participate in autograd, so detach before crossing into FlyDSL.
         dlpack_tensor = tensor.detach() if tensor.requires_grad else tensor
+
+        # torch < 2.12 cannot export fp8 dtypes through DLPack (raises "float8 types are not supported by dlpack").
+        # Reinterpret as uint8 for transport; the original dtype is preserved in ``_orig_dtype``
+        # below and re-prepended to the cache signature so e4m3 / e5m2 / etc. don't collide.
+        #
+        # TODO: Drop both this view and ``_orig_dtype`` once the minimum torch version reaches 2.12 — DLPack 1.0 (PR
+        # pytorch/pytorch#145000) wires every fp8 code through DLConvertor.
         if _FLOAT8_DTYPES and dlpack_tensor.dtype in _FLOAT8_DTYPES:
             dlpack_tensor = dlpack_tensor.view(torch.uint8)
         self._tensor_keepalive = dlpack_tensor
@@ -186,29 +194,36 @@ class TensorAdaptor:
         self._orig_dtype = tensor.dtype
         self._orig_shape = tensor.shape
         self._orig_strides = tensor.stride()
-        # Marked-static dims contribute their (shape, stride) to the cache key.
-        self._cached_dims: frozenset = frozenset()
-        # Default to layout-dynamic memref so one compile serves all sizes.
-        # Skipped (falls back to static memref) for tensors without an
-        # unambiguous leading stride-1 dim -- 0-rank, all-non-unit-stride
-        # slices, multi-stride-1 broadcasts -- where C++ markLayoutDynamic
-        # throws RuntimeError or no stride-1 dim is found.
-        try:
-            self.tensor_adaptor.mark_layout_dynamic(-1, 1)
-            self._dyn_leading_dim = next(i for i, s in enumerate(self._orig_strides) if int(s) == 1)
-            self._is_layout_dynamic = True
-        except (RuntimeError, StopIteration):
-            self._dyn_leading_dim = -1
-            self._is_layout_dynamic = False
+        self._dyn_leading_dim = -1
+        self._is_layout_dynamic = False
+
+        if dynamic_layout:
+            try:
+                self._mark_layout_dynamic(leading_dim=-1, divisibility=1)
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"cannot auto-mark layout-dynamic for tensor "
+                    f"shape={tuple(tensor.shape)} strides={tuple(tensor.stride())}: {e}. "
+                    "Use flyc.from_dlpack(t) to wrap as a static memref instead."
+                ) from e
 
     @staticmethod
     def _extract_data_ptr(arg):
-        # arg may be a raw torch.Tensor or a TensorAdaptor wrapping one;
-        # both can hit the same fast-path CallState because they share
-        # raw_cache_signature / __cache_signature__ when defaults match.
         if hasattr(arg, "_tensor_keepalive"):
             return arg._tensor_keepalive.data_ptr()
         return arg.data_ptr()
+
+    @staticmethod
+    def _pick_unit_stride_axis(strides) -> int:
+        """Return the index of the first axis whose stride is one.
+
+        Raises ``RuntimeError`` if no axis qualifies, so callers do not have
+        to handle a None return.
+        """
+        candidates = [idx for idx, val in enumerate(strides) if int(val) == 1]
+        if not candidates:
+            raise RuntimeError("tensor has no axis with stride == 1; layout-dynamic memref requires one")
+        return candidates[0]
 
     @classmethod
     def _reusable_slot_spec(cls, arg):
@@ -220,7 +235,7 @@ class TensorAdaptor:
         Buffer slots use the in-place protocol: ``extract(arg, storage)``
         writes into ``storage`` via ``struct.pack_into``.
         """
-        if not hasattr(arg, "data_ptr"):
+        if not hasattr(arg, "data_ptr") and not isinstance(arg, cls):
             return None
 
         adaptor = arg if isinstance(arg, cls) else cls(arg)
@@ -281,48 +296,18 @@ class TensorAdaptor:
     def __get_c_pointers__(self):
         return self.tensor_adaptor.get_c_pointers()
 
-    @staticmethod
-    def raw_cache_signature(tensor: torch.Tensor):
-        """Lightweight cache sig from a raw tensor, no DLPack overhead.
-
-        Matches ``__cache_signature__`` for a default-constructed TensorAdaptor
-        (no ``mark_static`` calls).
-        """
-        return (tensor.dtype, None, False, tensor.dim())
-
     def __cache_signature__(self):
-        base = (
-            self._orig_dtype,
-            self.assumed_align,
-            self.use_32bit_stride,
-            len(self._orig_shape),
-        )
-        if not self._cached_dims:
-            return base
-        # Pack only the marked dims as sorted (dim, shape, stride) triples.
-        extras = tuple((d, int(self._orig_shape[d]), int(self._orig_strides[d])) for d in sorted(self._cached_dims))
-        return base + (extras,)
+        return (type(self), self._orig_dtype) + self.tensor_adaptor.get_cache_signature()
 
-    def mark_static(self, dims: Optional[List[int]] = None):
-        """Include the listed dims' shape/stride values in the JIT cache key.
-
-        ``dims=None`` marks every dim.  Call this when the compiled kernel
-        bakes concrete shape values into the generated IR (for example
-        ``num_records`` on a buffer resource derived from the static layout
-        cosize), so that calls with different shapes do not reuse a stale
-        compiled artifact.  Repeated calls accumulate.
-
-        Returns ``self`` for chaining.
-        """
-        rank = len(self._orig_shape)
-        target = range(rank) if dims is None else dims
-        new_dims = set(self._cached_dims)
-        for d in target:
-            d = int(d)
-            if not 0 <= d < rank:
-                raise IndexError(f"dim {d} out of range for rank {rank}")
-            new_dims.add(d)
-        self._cached_dims = frozenset(new_dims)
+    def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
+        # Always pass a concrete axis index down. The DLPack stride view that
+        # the backend sees can disagree with the framework view for tensors
+        # with zero-size or unit-size axes (DLPack often coerces such strides
+        # to 1), so we resolve on the framework strides here.
+        resolved = self._pick_unit_stride_axis(self._orig_strides) if leading_dim == -1 else int(leading_dim)
+        self.tensor_adaptor.mark_layout_dynamic(resolved, divisibility)
+        self._dyn_leading_dim = resolved
+        self._is_layout_dynamic = True
         return self
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
@@ -335,14 +320,13 @@ class TensorAdaptor:
         # Fix path: make C++ reset all dynamic flags before re-marking.
         if leading_dim is None:
             leading_dim = -1
-        if getattr(self, "_is_layout_dynamic", False) and leading_dim not in (-1, self._dyn_leading_dim):
+        if self._is_layout_dynamic and leading_dim not in (-1, self._dyn_leading_dim):
             raise NotImplementedError(
                 f"mark_layout_dynamic(leading_dim={leading_dim}) conflicts with "
                 f"auto-detected leading_dim={self._dyn_leading_dim} from __init__.  "
                 "Re-binding leading_dim is not supported yet (see TODO in jit_argument.py)."
             )
-        self.tensor_adaptor.mark_layout_dynamic(leading_dim, divisibility)
-        return self
+        return self._mark_layout_dynamic(leading_dim, divisibility)
 
 
 class PointerAdaptor:
@@ -357,7 +341,18 @@ class PointerAdaptor:
         self.pointer = pointer if isinstance(pointer, ctypes.c_void_p) else ctypes.c_void_p(pointer)
         self.address_space = address_space
         self.element_type = element_type
+        if alignment is None:
+            alignment = self._trivial_alignment_bytes(element_type)
         self.alignment = alignment
+
+    @staticmethod
+    def _trivial_alignment_bytes(element_type) -> int:
+        # Matches AlignAttr::getTrivialAlignment
+        if isinstance(element_type, type) and issubclass(element_type, Numeric):
+            width = element_type.width
+        else:
+            width = element_type.getIntOrFloatBitWidth()
+        return (width + 7) // 8
 
     def __get_ir_types__(self):
         ir_type = self.element_type
@@ -369,7 +364,19 @@ class PointerAdaptor:
         return [ctypes.cast(ctypes.pointer(self.pointer), ctypes.c_void_p)]
 
     def __cache_signature__(self):
-        return ("PointerAdaptor", self.element_type, str(self.address_space), self.alignment)
+        return (type(self), self.element_type, str(self.address_space), self.alignment)
+
+    @staticmethod
+    def _extract_pointer(arg):
+        if isinstance(arg, PointerAdaptor):
+            return arg.pointer.value
+        if isinstance(arg, ctypes.c_void_p):
+            return arg.value
+        return int(arg)
+
+    @classmethod
+    def _reusable_slot_spec(cls, arg):
+        return ctypes.c_void_p, cls._extract_pointer
 
 
 def from_dlpack(
@@ -378,7 +385,7 @@ def from_dlpack(
     assumed_align: Optional[int] = None,
     use_32bit_stride: bool = False,
 ) -> TensorAdaptor:
-    return TensorAdaptor(tensor, assumed_align, use_32bit_stride)
+    return TensorAdaptor(tensor, assumed_align, use_32bit_stride, dynamic_layout=False)
 
 
 def from_c_void_p(
