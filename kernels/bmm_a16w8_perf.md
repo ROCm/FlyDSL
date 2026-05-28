@@ -136,3 +136,78 @@ rocprofv3 --counter SQ_BUSY_CU_CYCLES_sum ...
 - **Split-K**：不适合此形状，LDS 瓶颈决定了并发上限已经饱和
 - **waves_per_eu**：LDS 限制 1 WG/WGP，改 waves_per_eu 无额外收益
 - **cluster_n=8 收益**：主要在 cold miss 路径（A HBM 减 7MB）；warm 态收益取决于 A 是否也在 L2
+
+---
+
+## 优化点分析
+
+以下各项按预估收益从大到小排列。参考实现：`wmma_gemm_gfx1250.py`（bf16 GEMM）、`gemm_fp8fp4_gfx1250.py`（WMMA_SCALE GEMM）。
+
+### 1. [最大] 改用 WMMA_SCALE fp8 路径 — 理论 3.5× 算力提升
+
+**现状**：当前计算路径是 fp8→bf16 转换 + bf16 WMMA (WMMA_K=32)：
+
+```
+ds_load_tr8_b64 (LDS load fp8)
+→ V_CVT_SCALE_PK8_BF16_FP8 (fp8→bf16 转换)
+→ [V_PK_MUL_BF16 (residual scale, fp32路径)]
+→ V_WMMA_F32_16x16x32_BF16
+```
+
+**优化**：gfx1250 的 `V_WMMA_SCALE_F32_16x16x128_F8F6F4` 指令支持 fp8×fp8 fused MAC with E8M0 scale，WMMA_K=128（4× wider）。`gemm_fp8fp4_gfx1250.py` 已完整实现该路径。
+
+- MI450 ubench: fp8 TFLOPS ≈ 15,036 vs bf16 TFLOPS ≈ 4,200 → **3.6× 理论算力**
+- WMMA_K=128 → LDS load 次数减少 4×，同时省去 CVT + MUL 的 VALU 开销
+
+**代价**：activation 需要先 cast 成 fp8，有精度损失（mantissa: 7bit→3bit for E4M3）。建议新增 `compile_bmm_a8w8_gfx1250()` 变体，端到端精度验证通过后替换当前路径。
+
+### 2. [中] Wave-specialized TDM
+
+**现状**：所有 wave 都发射 A + B 两个 TDM 指令（`wave_specialized=False`），loop-carry state 包含 3 个值（addr_lo_a, addr_lo_b, addr_hi_b）。
+
+**优化**：`wmma_gemm_gfx1250.py` 已实现 `wave_specialized_tdm=True`——wave 0 专门发 A，wave 1 专门发 B，其余 wave 纯计算。每 wave 从 2 条 TDM 降为 1 条，loop-carry 从 3 个降为 1 个。
+
+预估收益：热路径 10-20%（compute-bound 场景下更显著）。参考实现可直接移植，改动集中在 prologue / main loop / tail 的 TDM 发射逻辑。
+
+### 3. [中] Scale 加载延迟暴露
+
+**现状**：`_load_scale` 在每个 K-tile 的 `pipeline_fence_wait` 之后、`compute_tile` 之前**同步**加载。若 scale 不在 L2，400-600 cycle HBM 延迟完全暴露在关键路径上。
+
+**优化**：把下一个 K-tile 的 scale buffer_load 移入当前 tile 的 `mid_compute_callback`，与 WMMA 并行执行，隐藏 scale 加载延迟。
+
+影响范围：仅默认 fp32 scale 路径；`no_scale` / `use_e8m0_scale` 路径 scale 开销已足够小（常量或 1 byte load），无需修改。
+
+### 4. [小-中] LDS bank conflict — A fragment load
+
+**现状**：`LDS_PAD_A=8` bf16 → `lds_a_stride = 136 elem = 272 bytes`。A frag 用 `ds_load_b128`（128-bit）。wave 内 lane16=0 与 lane16=8 的行地址差 = 8 × 272 = 2176 bytes，bank offset 差 = 2176/4 = 544 ≡ 0 (mod 32)，产生 **2-way bank conflict**。
+
+**修复**：改 `LDS_PAD_A=12` → stride=140 elem=280 bytes → bank offset=70 ≡ 6 (mod 32)，GCD(6,32)=2，消除 2-way conflict。
+
+预估收益：LDS A 读吞吐提升 ~10-15%（仅在 LDS 是瓶颈时有效；decode memory-bound 场景可能不明显）。
+
+### 5. [小] Tile 参数调优与 occupancy
+
+**V4 decode M=64**：默认 `tile_m=128 > M=64`，浪费 50% tile。改 `tile_m=64` 直接消除浪费。
+
+**occupancy**：tile=64×128×128，3-stage：每 stage A≈17KB + B≈17KB = 34KB，三 stage ≈ 102KB。gfx1250 LDS = 320KB/WGP，102KB < 160KB，理论上可支持 **2 WG/WGP**，需实测 arena alignment 后确认。
+
+推荐流程：固定 `tile_m=64, tile_n=128, tile_k=128, num_buffers=3`，用 autotuner 搜索 `m_warp × n_warp` 和 `waves_per_eu`。
+
+### 6. [附赠] bf16 BMM 潜在溢出 bug
+
+`bmm_gfx1250.py`（bf16 BMM）的 `adv_b_i32 = tile_k × N × 2 = 262,144 bytes`。K=4096, tile_k=128 → 32 步累计进量 = 8MB。若初始 B ptr 的 low-32 位 ≥ 0xFC000000，addr_lo_b **会溢出 i32**，导致错误 TDM 地址。
+
+`bmm_a16w8` 已正确实现 carry propagation。应在 `bmm_gfx1250.py` 补充同样逻辑。
+
+### 汇总
+
+| # | 优化点 | 预估收益 | 难度 | 适用场景 |
+|---|--------|---------|------|---------|
+| 1 | WMMA_SCALE fp8 路径（新变体） | **3.5× 算力** | 高 | 精度验证后 |
+| 2 | Wave-specialized TDM | 10-20% | 中 | Compute-bound |
+| 3 | Scale buffer_load prefetch | 5-10% | 中 | fp32 scale 路径 |
+| 4 | LDS_PAD_A bank conflict 修复 | 5-10% | 低 | Compute-bound |
+| 5 | Tile 调优 + autotune | 10-30% | 低 | 各场景 |
+| 6 | bf16 BMM carry propagation | bug fix | 低 | bmm_gfx1250.py |
+
+**优先级**：先验证精度后走 WMMA_SCALE 路径（单项收益超过其余所有项之和）；tile 调优和 wave_specialized_tdm 是近期低风险的改善项。
