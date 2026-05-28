@@ -613,7 +613,10 @@ def compile_bmm_gfx1250(
                 tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
                 wave_specialized=False)
             addr_lo_a = arith.addi(addr_lo_a, adv_a_i32)
+            old_lo_b = addr_lo_b
             addr_lo_b = arith.addi(addr_lo_b, adv_b_i32)
+            carry = arith.cmpi(arith.CmpIPredicate.ult, addr_lo_b, old_lo_b)
+            addr_hi_b = arith.addi(addr_hi_b, arith.extui(T.i32, carry))
 
         pipeline_fence(outstanding=2 * (num_buffers - 2), use_cluster=False)
 
@@ -621,12 +624,13 @@ def compile_bmm_gfx1250(
         _fence_outstanding = 2 * (num_buffers - 2)
 
         if loop_iters > 0:
-            init_args = list(accs) + [addr_lo_a, addr_lo_b]
+            init_args = list(accs) + [addr_lo_a, addr_lo_b, addr_hi_b]
 
             for loop_iter, state in range(0, loop_iters, 1, init=init_args):
                 accs_in = list(state[:n_accs])
                 cur_lo_a = state[n_accs]
                 cur_lo_b = state[n_accs + 1]
+                cur_hi_b = state[n_accs + 2]
 
                 for buf_idx in range_constexpr(num_buffers):
                     load_stage = (buf_idx + num_buffers - 1) % num_buffers
@@ -634,7 +638,7 @@ def compile_bmm_gfx1250(
                     pipeline_fence_signal(outstanding=_fence_outstanding, use_cluster=False)
                     pipeline_fence_wait(use_cluster=False)
 
-                    addr_boxes = [[cur_lo_a], [cur_lo_b]]
+                    addr_boxes = [[cur_lo_a], [cur_lo_b], [cur_hi_b]]
 
                     def _mid_tdm(
                         _ls=load_stage,
@@ -647,13 +651,17 @@ def compile_bmm_gfx1250(
                             _ab[0][0], addr_hi_a])
                         dg0_b = vector.from_elements(T.vec(4, T.i32), [
                             pred_const, stages_b_lds_addr[_ls],
-                            _ab[1][0], addr_hi_b])
+                            _ab[1][0], _ab[2][0]])
                         issue_tdm_loads(
                             tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                             tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
                             wave_specialized=False)
                         _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                        _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
+                        old_lo_b = _ab[1][0]
+                        new_lo_b = arith.addi(old_lo_b, adv_b_i32)
+                        carry = arith.cmpi(arith.CmpIPredicate.ult, new_lo_b, old_lo_b)
+                        _ab[2][0] = arith.addi(_ab[2][0], arith.extui(T.i32, carry))
+                        _ab[1][0] = new_lo_b
                         _l2_prefetch(_k_off)
 
                     rocdl.sched_barrier(0)
@@ -664,13 +672,15 @@ def compile_bmm_gfx1250(
                         mid_compute_callback=_mid_tdm)
                     cur_lo_a = addr_boxes[0][0]
                     cur_lo_b = addr_boxes[1][0]
+                    cur_hi_b = addr_boxes[2][0]
                     hot_loop_scheduler()
 
-                results = yield list(accs_in) + [cur_lo_a, cur_lo_b]
+                results = yield list(accs_in) + [cur_lo_a, cur_lo_b, cur_hi_b]
 
             accs = list(results[:n_accs])
             addr_lo_a = results[n_accs]
             addr_lo_b = results[n_accs + 1]
+            addr_hi_b = results[n_accs + 2]
 
         # --- Tail ---
         if loop_iters > 0:
@@ -702,7 +712,7 @@ def compile_bmm_gfx1250(
                 _tail_mid_cb = None
                 if _load_stage is not None:
                     _tail_had_load = True
-                    _tail_ab = [[addr_lo_a], [addr_lo_b]]
+                    _tail_ab = [[addr_lo_a], [addr_lo_b], [addr_hi_b]]
 
                     def _tail_mid_nws(_ls=_load_stage, _ab=_tail_ab):
                         dg0_a = vector.from_elements(T.vec(4, T.i32), [
@@ -710,13 +720,17 @@ def compile_bmm_gfx1250(
                             _ab[0][0], addr_hi_a])
                         dg0_b = vector.from_elements(T.vec(4, T.i32), [
                             pred_const, stages_b_lds_addr[_ls],
-                            _ab[1][0], addr_hi_b])
+                            _ab[1][0], _ab[2][0]])
                         issue_tdm_loads(
                             tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
                             tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
                             wave_specialized=False)
                         _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                        _ab[1][0] = arith.addi(_ab[1][0], adv_b_i32)
+                        old_lo_b = _ab[1][0]
+                        new_lo_b = arith.addi(old_lo_b, adv_b_i32)
+                        carry = arith.cmpi(arith.CmpIPredicate.ult, new_lo_b, old_lo_b)
+                        _ab[2][0] = arith.addi(_ab[2][0], arith.extui(T.i32, carry))
+                        _ab[1][0] = new_lo_b
 
                     _tail_mid_cb = _tail_mid_nws
 
@@ -731,6 +745,7 @@ def compile_bmm_gfx1250(
                 if _load_stage is not None:
                     addr_lo_a = _tail_ab[0][0]
                     addr_lo_b = _tail_ab[1][0]
+                    addr_hi_b = _tail_ab[2][0]
 
         # --- Epilogue ---
         if use_tdm_store:

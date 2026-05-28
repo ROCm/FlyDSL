@@ -51,7 +51,7 @@ WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
 DS_LOADS_PER_A_FRAG = 2
 
-LDS_PAD_A = 8
+LDS_PAD_A = 12  # stride=140 elem=280B; was 8 (4-way LDS bank conflict)
 LDS_PAD_B_FP8 = 8   # in fp8 elements
 LDS_PAD_D_BYTES = 16
 
