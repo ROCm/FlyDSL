@@ -335,6 +335,25 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op=None
         addr_tis[t]（zeros / 残留），把结果 P2P scatter 到错误位置。
         仅 ``--sorting fixture`` 路径使用；aiter 路径下由 dispatch 真实
         ``total_recv`` 通过 ``num_local_tokens`` 自动 trim。
+
+    .. note:: D-flag C-1 (use_token_flag_sync) + ``--sorting fixture`` 共生约束
+
+        Fixture 用 ``n_unique_t = ceil(valid_m / k)`` 决定 sorted_token_ids
+        覆盖多少个 unique recv-slot（``t``）。当 ``valid_m == bs * k`` (默认)
+        时，``n_unique_t = bs``，仅 [0, bs) 的 t 进入 fused gemm2 epilogue。
+        对应 atomic_add 也只命中这 bs 个 (peer, src_lid) 对，但 combine 端
+        仍按 ``cur_rank_num_token = max_tok = bs`` 逐 lid 自旋等待 8 次
+        atomic（每个 dest_pe 1 次）。fixture 的 t-截断使 (peer, src_lid)
+        覆盖严重不均，部分 lid 永不被 bump → spin-wait 死锁。
+
+        解决方案：
+          * 推荐：``--sorting aiter`` 走真实路由（n_unique_t = total_recv）。
+          * 如必须用 fixture：将 ``--valid-m`` 调到 ``bs * k * world_size``
+            （如 ``bs=32 k=8 ws=8 → valid-m=2048``），让 t ∈ [0, total_recv)
+            完整覆盖 all (peer, lid)，atomic 分布均衡，spin-wait 可正常退出。
+
+        baseline (D-flag OFF) 不依赖 atomic 分布，所以 fixture 默认 valid-m
+        也跑得通；该约束仅出现在 ``--token-flag-sync`` 启用时。
     """
     epr        = args.num_experts_per_rank
     max_recv   = world_size * args.max_num_inp_token_per_rank
