@@ -106,9 +106,23 @@ def load_i64_global(addr_i64):
 
 
 def atomic_add_global_at(addr_i64, val):
-    """Monotonic global ``atomic fetch-and-add``; returns the old value."""
+    """Monotonic global ``atomic fetch-and-add``; returns the old value.
+
+    Uses ``syncscope="agent"`` (GPU-wide) to keep the lowering at
+    device-scope: ``atomicrmw`` without an explicit syncscope defaults
+    to system scope on AMDGPU, which inserts cross-card cache-flush
+    fences (``buffer_wbinvl1_vol`` + extra ``s_waitcnt`` etc.).  The
+    D-flag C-1 ``local_counter`` only needs cross-CTA visibility on the
+    SAME GPU (each row's counter is private to the rank that produced
+    those output rows), so agent scope is sufficient and considerably
+    cheaper than the default system scope.  System scope is reserved
+    for :func:`atomic_add_global_at_system` (the cross-card flag bump).
+    """
     ptr = _to_ptr_global(addr_i64)
-    return _llvm_d.AtomicRMWOp(_llvm_d.AtomicBinOp.add, ptr, arith.unwrap(val), _llvm_d.AtomicOrdering.monotonic).res
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.add, ptr, arith.unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic, syncscope="agent",
+    ).res
 
 
 def atomic_add_global_at_system(addr_i64, val):
@@ -129,12 +143,14 @@ def atomic_xchg_global_at_device(addr_i64, val):
 
     Consume-on-read reset of the per-(m_tile, j) local counter: the last
     N-tile completer issues one system-scope atomic_add on the remote flag
-    and xchg-resets the local slot to 0 for the next chain.
+    and xchg-resets the local slot to 0 for the next chain. syncscope=
+    "agent" keeps the reset GPU-wide; the counter is rank-private so the
+    default system scope's cross-card fences are unnecessary.
     """
     ptr = _to_ptr_global(addr_i64)
     return _llvm_d.AtomicRMWOp(
         _llvm_d.AtomicBinOp.xchg, ptr, arith.unwrap(val),
-        _llvm_d.AtomicOrdering.monotonic,
+        _llvm_d.AtomicOrdering.monotonic, syncscope="agent",
     ).res
 
 
@@ -156,11 +172,16 @@ def make_dispatch_kernel(
     data_type=None,
     max_recv: int = None,
     use_token_flag_sync: bool = False,
+    local_counter_size: int = 0,
 ):
     """Build intranode dispatch ``@flyc.kernel``.
 
     ``max_recv`` caps per-rank receive slots and must match combine-side
     decode semantics. ``None`` falls back to ``npes * max_tok_per_rank``.
+
+    ``local_counter_size`` is the compile-time element count of the
+    D-flag C-1 device-local row counter; only consumed when
+    ``use_token_flag_sync=True`` for the entry-side grid-stride memset.
     """
     if max_recv is None:
         max_recv = npes * max_tok_per_rank
@@ -211,6 +232,12 @@ def make_dispatch_kernel(
         # fused gemm2 epilogue cross-card atomic_add, combine stage 3 spin-
         # wait. const_expr DCEs every load/store when OFF.
         addr_comb_flag: fx.Int64,
+        # D-flag C-1 device-local row counter (i32[local_counter_size]). Only
+        # consumed when use_token_flag_sync=True: dispatch entry grid-stride
+        # memset reset so the first fused gemm2 atomic for each row sees
+        # _old==0 and wins the trigger lottery once per row. Size captured
+        # via the local_counter_size closure (see make_dispatch_jit).
+        addr_local_counter: fx.Int64,
         inp_cur_tok: fx.Int32,
     ):
         tid = fx.thread_idx.x
@@ -235,6 +262,15 @@ def make_dispatch_kernel(
             _zero_i32 = arith.constant(0)
             for i in range(gtid, mr_const, gthrd_num):
                 store_i32_system(addr_comb_flag, i, _zero_i32)
+            # Reset device_local_counter so the very first cross-card
+            # atomic-add per (row_i32) wins the ``_old==0`` trigger.
+            # Local store (no system fence): subsequent atomics on the
+            # counter from this rank's fused gemm2 stay device-scope and
+            # the dispatch->fused gemm2 dependency is enforced by the
+            # outer chain (dispatch finishes before fused gemm2 starts).
+            _r_ctr_reset = create_buffer_resource_from_addr(addr_local_counter)
+            for i in range(gtid, local_counter_size, gthrd_num):
+                buffer_store(_zero_i32, _r_ctr_reset, i)
             gpu.barrier()
             rocdl.s_waitcnt(0)
             _llvm_d.FenceOp(
@@ -1356,6 +1392,7 @@ def make_dispatch_jit(
     enable_std_moe=False,
     max_recv=None,
     use_token_flag_sync=False,
+    local_counter_size=0,
 ):
     """Build the dispatch JIT launcher.
 
@@ -1382,6 +1419,7 @@ def make_dispatch_jit(
         data_type=data_type,
         max_recv=max_recv,
         use_token_flag_sync=use_token_flag_sync,
+        local_counter_size=local_counter_size,
     )
 
     # Closure vars that key the JIT cache: every input to
@@ -1433,6 +1471,7 @@ def make_dispatch_jit(
         addr_out_disp_tok_map: fx.Int64,
         addr_disp_grid_bar: fx.Int64,
         addr_comb_flag: fx.Int64,
+        addr_local_counter: fx.Int64,
         inp_cur_tok: fx.Int32,
         stream: Stream = Stream(None),
     ):
@@ -1480,6 +1519,7 @@ def make_dispatch_jit(
             addr_out_disp_tok_map,
             addr_disp_grid_bar,
             addr_comb_flag,
+            addr_local_counter,
             inp_cur_tok,
         ).launch(
             grid=(block_num, 1, 1),
