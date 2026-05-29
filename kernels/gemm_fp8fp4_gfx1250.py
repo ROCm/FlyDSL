@@ -1327,6 +1327,7 @@ def compile_mxscale_gemm(
             emit_filler=None,
             mid_compute_callback=None,
             late_compute_callback=None,
+            a0_prefetch=None,
         ):
             current_accs = list(accs_in)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
@@ -1400,7 +1401,6 @@ def compile_mxscale_gemm(
 
             _pair_loads = _fp8_pair_a_loads
             _two_pair_loads = _fp8_pair_a_loads + _fp8_pair_b_loads
-            _three_pair_loads = _fp8_pair_b_loads + _fp8_pair_a_loads * 2
 
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
@@ -1409,7 +1409,10 @@ def compile_mxscale_gemm(
                 scale_pair = (a_scales, b_scales)
 
                 b0 = load_b_pair(0, ks)
-                a0 = load_a_pair(0, ks)
+                if const_expr(ks == 0 and a0_prefetch is not None):
+                    a0 = [a0_prefetch[0], load_a_frag(a_buf, a_bases[1], ks)]
+                else:
+                    a0 = load_a_pair(0, ks)
                 b1 = load_b_pair(1, ks)
                 b2 = load_b_pair(2, ks)
 
@@ -1421,29 +1424,34 @@ def compile_mxscale_gemm(
                 def _prefetch_a1():
                     a1_box[0] = load_a_pair(1, ks)
 
-                rocdl.s_wait_dscnt(_two_pair_loads + 3)
+                first_wait_keep = _two_pair_loads + 3
+                if const_expr(ks == 0 and a0_prefetch is not None):
+                    first_wait_keep += DS_LOADS_PER_A_FRAG
+                rocdl.s_wait_dscnt(first_wait_keep)
                 emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
 
                 if const_expr(ks == 0 and mid_compute_callback is not None):
                     rocdl.sched_barrier(0)
                     mid_compute_callback()
 
-                rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
-                emit_panel_2x2(0, 1, a0, b1, scale_pair)
-
                 def _prefetch_b3():
                     b3_box[0] = load_b_pair(3, ks)
 
-                rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
-                emit_panel_2x2(1, 0, a1_box[0], b0, scale_pair, prefetch_after_first_row=_prefetch_b3)
-
-                def _prefetch_a2_a3():
-                    a2_box[0] = load_a_pair(2, ks)
+                def _prefetch_a3():
                     a3_box[0] = load_a_pair(3, ks)
 
-                emit_panel_2x2(1, 1, a1_box[0], b1, scale_pair, prefetch_after_first_row=_prefetch_a2_a3)
+                rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
+                emit_panel_2x2(0, 1, a0, b1, scale_pair, prefetch_after_first_row=_prefetch_b3)
 
-                emit_panel_2x2(0, 2, a0, b2, scale_pair)
+                rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
+                emit_panel_2x2(1, 0, a1_box[0], b0, scale_pair, prefetch_after_first_row=_prefetch_a3)
+
+                def _prefetch_a2():
+                    a2_box[0] = load_a_pair(2, ks)
+
+                emit_panel_2x2(1, 1, a1_box[0], b1, scale_pair)
+
+                emit_panel_2x2(0, 2, a0, b2, scale_pair, prefetch_after_first_row=_prefetch_a2)
                 emit_panel_2x2_row(1, 2, 0, a1_box[0], b2, scale_pair)
                 rocdl.s_wait_dscnt(_pair_loads)
                 emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
@@ -1599,17 +1607,24 @@ def compile_mxscale_gemm(
                 else:
                     rocdl.sched_mfma(_fp8_pair_wm * _fp8_pair_wn)
 
+            def _sched_panel_row():
+                rocdl.sched_mfma(_fp8_pair_wn)
+
             _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads * 3 + _fp8_pair_a_loads
 
             for _ks in range_constexpr(k_wmma_steps):
-                rocdl.sched_dsrd(_initial_loads)
+                _ks_initial_loads = _initial_loads
+                if const_expr(_ks == 0):
+                    _ks_initial_loads -= DS_LOADS_PER_A_FRAG
+                rocdl.sched_dsrd(_ks_initial_loads)
+                _sched_panel_2x2(_fp8_pair_a_loads)
+                _sched_panel_2x2(_fp8_pair_b_loads)
                 _sched_panel_2x2(_fp8_pair_a_loads)
                 _sched_panel_2x2()
-                _sched_panel_2x2(_fp8_pair_b_loads)
-                _sched_panel_2x2(_fp8_pair_a_loads * 2)
+                _sched_panel_2x2(_fp8_pair_a_loads)
+                _sched_panel_row()
                 _sched_panel_2x2()
-                _sched_panel_2x2()
-                _sched_panel_2x2()
+                _sched_panel_row()
                 _sched_panel_2x2()
                 _sched_panel_2x2()
                 _sched_panel_2x2()
@@ -1630,6 +1645,7 @@ def compile_mxscale_gemm(
             emit_filler=None,
             mid_compute_callback=None,
             late_compute_callback=None,
+            a0_prefetch=None,
         ):
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
                 return compute_tile_b_streaming(
@@ -1672,6 +1688,7 @@ def compile_mxscale_gemm(
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
                     late_compute_callback=late_compute_callback,
+                    a0_prefetch=a0_prefetch,
                 )
             return compute_tile(
                 accs_in,
@@ -1716,6 +1733,16 @@ def compile_mxscale_gemm(
                 hot_loop_scheduler_fp8_quadrant()
             else:
                 hot_loop_scheduler()
+
+        def prefetch_fp8_deep_a0_frags(lds_a):
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
+            return [load_a_frag(a_buf, a_bases[0], 0)]
+
+        def maybe_prefetch_fp8_deep_a0(lds_a):
+            # Call only after the TDM fence for this stage; pre-fence LDS reads can race multicast delivery.
+            if const_expr(use_fp8_deep_pipeline_schedule):
+                return prefetch_fp8_deep_a0_frags(lds_a)
+            return None
 
         # ── Epilogue (unified via _sub_tiles) ──
         def _get_acc_sub8(accs, acc_idx, vec_base):
@@ -2179,6 +2206,7 @@ def compile_mxscale_gemm(
 
                             _late_tdm_ws_fence_signal = _late_tdm_ws_split_signal
 
+                        a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
                         rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
                             accs_in,
@@ -2188,6 +2216,7 @@ def compile_mxscale_gemm(
                             stages_bs_idx[buf_idx],
                             mid_compute_callback=_mid_tdm_ws,
                             late_compute_callback=_late_tdm_ws_fence_signal,
+                            a0_prefetch=a0_prefetch,
                         )
                         cur_addr_lo = addr_box[0]
                         hot_loop_scheduler_scheduled()
@@ -2226,6 +2255,7 @@ def compile_mxscale_gemm(
                         ):
                             _issue_active_tdm(_ls, _ab, scale_k_box=_scale_k, k_prefetch=_k_off)
 
+                        a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
                         rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
                             accs_in,
@@ -2234,6 +2264,7 @@ def compile_mxscale_gemm(
                             stages_as_idx[buf_idx],
                             stages_bs_idx[buf_idx],
                             mid_compute_callback=_mid_tdm_split_scale_dma,
+                            a0_prefetch=a0_prefetch,
                         )
                         cur_addr_lo = addr_box[0]
                         cur_scale_k = scale_k_box[0]
@@ -2280,6 +2311,7 @@ def compile_mxscale_gemm(
                             _scale_k[0] = _scale_k[0] + arith.index(tile_k)
                             _l2_prefetch(_k_off)
 
+                        a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
                         rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
                             accs_in,
@@ -2288,6 +2320,7 @@ def compile_mxscale_gemm(
                             stages_as_idx[buf_idx],
                             stages_bs_idx[buf_idx],
                             mid_compute_callback=_mid_tdm_scale_dma,
+                            a0_prefetch=a0_prefetch,
                         )
                         cur_lo_a = addr_boxes[0][0]
                         cur_lo_b = addr_boxes[1][0]
@@ -2344,6 +2377,7 @@ def compile_mxscale_gemm(
                             _ab[3][0] = _ab[3][0] + adv_bs_i32
                             _l2_prefetch(_k_off)
 
+                        a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
                         rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
                             accs_in,
@@ -2352,6 +2386,7 @@ def compile_mxscale_gemm(
                             stages_as_idx[buf_idx],
                             stages_bs_idx[buf_idx],
                             mid_compute_callback=_mid_tdm_nws,
+                            a0_prefetch=a0_prefetch,
                         )
                         cur_lo_a = addr_boxes[0][0]
                         cur_lo_b = addr_boxes[1][0]
@@ -2383,18 +2418,21 @@ def compile_mxscale_gemm(
                     _wait_scale_all()
                     _pipeline_fence(outstanding=0)
                 if const_expr(use_tdm_store):
+                    a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                     accs = compute_tile_scheduled(
                         accs,
                         stages_a_idx[_compute_stage],
                         stages_b_idx[_compute_stage],
                         stages_as_idx[_compute_stage],
                         stages_bs_idx[_compute_stage],
+                        a0_prefetch=a0_prefetch,
                     )
                 else:
 
                     def _emit_epi_addrs():
                         epi_addrs_box[0] = epilogue_prepare_addrs()
 
+                    a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                     accs = compute_tile_scheduled(
                         accs,
                         stages_a_idx[_compute_stage],
@@ -2402,6 +2440,7 @@ def compile_mxscale_gemm(
                         stages_as_idx[_compute_stage],
                         stages_bs_idx[_compute_stage],
                         emit_filler=_emit_epi_addrs,
+                        a0_prefetch=a0_prefetch,
                     )
             else:
                 _wait_scale_all()
@@ -2460,6 +2499,7 @@ def compile_mxscale_gemm(
 
                         _tail_mid_cb = _tail_mid_nws
 
+                a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                 rocdl.sched_barrier(0)
                 accs = compute_tile_scheduled(
                     accs,
@@ -2468,6 +2508,7 @@ def compile_mxscale_gemm(
                     stages_as_idx[_compute_stage],
                     stages_bs_idx[_compute_stage],
                     mid_compute_callback=_tail_mid_cb,
+                    a0_prefetch=a0_prefetch,
                 )
 
                 if const_expr(_load_stage is not None):
