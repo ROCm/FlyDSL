@@ -11,6 +11,7 @@ Validates:
 """
 
 import gc
+import math
 import weakref
 
 import pytest
@@ -320,6 +321,7 @@ class TestCacheDisabledRegression:
             num_warmup=1,
         )
 
+        assert math.isfinite(avg_us)
         assert avg_us >= 0
         assert len(_noop_launch._mem_cache) == 1
         assert len(_noop_launch._call_state_cache) == 1
