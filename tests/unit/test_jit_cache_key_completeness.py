@@ -129,9 +129,7 @@ def test_globals_snapshot_folded_into_cache_key_default_mode():
     import textwrap
 
     with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
-        f.write(
-            textwrap.dedent(
-                """
+        f.write(textwrap.dedent("""
                 import flydsl.compiler as flyc
                 import flydsl.expr as fx
 
@@ -141,9 +139,7 @@ def test_globals_snapshot_folded_into_cache_key_default_mode():
                 def k(A: fx.Tensor):
                     # reference FOO so it lands in co_names and the snapshot
                     _ = FOO
-                """
-            )
-        )
+                """))
         path = f.name
 
     def _full_key(jit_fn, *args):
