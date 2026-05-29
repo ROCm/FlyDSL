@@ -1097,6 +1097,7 @@ def build_flash_attn_opus_module(
             lo_vec = Vec.from_elements(s_lo, fx.Float32).ir_value()
             hi_vec = Vec.from_elements(s_hi, fx.Float32).ir_value()
             return _anchor_pair((lo_vec, hi_vec))
+            # return lo_vec, hi_vec
 
         def _attn_exp2_slice(v_s, start, length):
             if const_expr(start == 0):
@@ -1194,6 +1195,10 @@ def build_flash_attn_opus_module(
                 _raw(ballot),
                 _read_exec_i64(),
             )
+            _expect_true_i1 = arith.constant(
+                1, type=ir.IntegerType.get_signless(1)
+            )
+            # all_below = llvm.intr_expect(all_below, _expect_true_i1)
             # all_below = fx.Boolean(False).ir_value()
             _debug_count_lazy_branch(all_below)
 

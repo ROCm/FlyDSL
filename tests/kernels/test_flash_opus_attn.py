@@ -54,33 +54,33 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG = {
 # (batch, seq_len, num_heads, num_kv_heads, head_dim)
 # num_kv_heads == num_heads -> MHA; num_kv_heads < num_heads -> GQA/MQA.
 DEFAULT_CONFIGS = [
-    # (8, 128, 64, 64, 128),
-    # (8, 256, 64, 64, 128),
-    # (8, 512, 64, 64, 128),
-    # (1, 128, 64, 64, 128),
-    # (1, 256, 64, 64, 128),
-    # (1, 512, 64, 64, 128),
-    # (1, 1024, 64, 64, 128),
+    (8, 128, 64, 64, 128),
+    (8, 256, 64, 64, 128),
+    (8, 512, 64, 64, 128),
+    (1, 128, 64, 64, 128),
+    (1, 256, 64, 64, 128),
+    (1, 512, 64, 64, 128),
+    (1, 1024, 64, 64, 128),
 
-    # (1, 2048, 64, 64, 128),
-    # (1, 4096, 64, 64, 128),
-    # (1, 8192, 64, 64, 128),
-    # (4, 8192, 64, 64, 128),
+    (1, 2048, 64, 64, 128),
+    (1, 4096, 64, 64, 128),
+    (1, 8192, 64, 64, 128),
+    (4, 8192, 64, 64, 128),
 
-    # (1, 2048, 32, 32, 128),
-    # (1, 4096, 32, 32, 128),
-    # (1, 8192, 32, 32, 128),
-    # (8, 8192, 32, 32, 128),
+    (1, 2048, 32, 32, 128),
+    (1, 4096, 32, 32, 128),
+    (1, 8192, 32, 32, 128),
+    (8, 8192, 32, 32, 128),
 
-    # (1, 2048, 16, 16, 128),
-    # (1, 4096, 16, 16, 128),
-    # (1, 8192, 16, 16, 128),
-    # (16, 8192, 16, 16, 128),
+    (1, 2048, 16, 16, 128),
+    (1, 4096, 16, 16, 128),
+    (1, 8192, 16, 16, 128),
+    (16, 8192, 16, 16, 128),
 
-    # (1, 2048, 8, 8, 128),
-    # (1, 4096, 8, 8, 128),
-    # (1, 8192, 8, 8, 128),
-    # (32, 8192, 8, 8, 128),
+    (1, 2048, 8, 8, 128),
+    (1, 4096, 8, 8, 128),
+    (1, 8192, 8, 8, 128),
+    (32, 8192, 8, 8, 128),
 
     # GQA configs (num_kv_heads < num_heads).
     (16, 8192, 64, 64, 128),
@@ -344,6 +344,41 @@ def run_config(
             else:
                 exe(q_flat, k_flat, v_flat, o_flat, B, S)
 
+        # import time
+        # tm_start = time.time()
+        # for i in range(100):
+        #     kernel_fn()
+        # torch.cuda.synchronize()
+        # tm_end = time.time()
+        # us = (tm_end - tm_start) * 1e6 / 100
+        # print(f"CPU time: avg used {us} us")
+
+        # start_event = torch.cuda.Event(enable_timing=True)
+        # end_event = torch.cuda.Event(enable_timing=True)
+        # tm_start = time.time()
+        # start_event.record()
+        # for _ in range(iters):
+        #     kernel_fn()
+        # end_event.record()
+        # end_event.synchronize()
+        # tm_end = time.time()
+        # event_us = start_event.elapsed_time(end_event) * 1000.0 / iters
+        # us = (tm_end - tm_start) * 1e6 / 100
+        # print(f"CPU time2: avg used {us} us")
+        # print(f"cuda.Event time: avg used {event_us} us")
+
+        # Warm up ROCTracer/torch.profiler itself so the measured run_perftest
+        # below is not biased by first-profiler-session setup overhead.
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                kernel_fn()
+            torch.cuda.synchronize()
+
         _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)
         flops = 4.0 * S * s_eff * D * H * B
@@ -441,6 +476,18 @@ def run_aiter_bench(
         def bench_fn():
             aiter_forward()
 
+        # Warm up ROCTracer/torch.profiler itself so the measured run_perftest
+        # below is not biased by first-profiler-session setup overhead.
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                bench_fn()
+            torch.cuda.synchronize()
+
         _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)
         flops = 4.0 * S * s_eff * D * H * B
@@ -507,6 +554,18 @@ def run_opus_attn_bench(
 
         def bench_fn():
             opus_attn.forward_out(q, k, v, out_bench, causal=causal)
+
+        # Warm up ROCTracer/torch.profiler itself so the measured run_perftest
+        # below is not biased by first-profiler-session setup overhead.
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                bench_fn()
+            torch.cuda.synchronize()
 
         _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)
@@ -594,10 +653,13 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         "Fly/CK_TFLOPS%", "Fly/CK_MaxErr_ratio",
         "Fly/ASM_TFLOPS%", "Fly/ASM_MaxErr_ratio",
     ]
-    def _metrics(fr, or_, cr, ar):
-        fopus = _csv_cmp(fr, or_)
-        fck = _csv_cmp(fr, cr)
-        fasm = _csv_cmp(fr, ar)
+    def _metrics(fr, or_, cr, ar, cmp_overrides=None):
+        if cmp_overrides is None:
+            fopus = _csv_cmp(fr, or_)
+            fck = _csv_cmp(fr, cr)
+            fasm = _csv_cmp(fr, ar)
+        else:
+            fopus, fck, fasm = cmp_overrides
         return [
             _csv_val(fr, "us"), _csv_val(fr, "tflops"), _csv_val(fr, "max_err"),
             _csv_val(or_, "us"), _csv_val(or_, "tflops"), _csv_val(or_, "max_err"),
@@ -610,9 +672,17 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         w.writerow(header)
         for cfg, fr, or_, cr, ar in data_rows:
             w.writerow(list(cfg) + _metrics(fr, or_, cr, ar))
-        for label, fa, oa, ca, aa in avg_rows:
+        for avg_row in avg_rows:
+            if len(avg_row) == 6:
+                label, fa, oa, ca, aa, cmp_overrides = avg_row
+            else:
+                label, fa, oa, ca, aa = avg_row
+                cmp_overrides = None
             # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
-            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, oa, ca, aa))
+            w.writerow(
+                [label, "", "", "", "", "", ""]
+                + _metrics(fa, oa, ca, aa, cmp_overrides)
+            )
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
@@ -636,17 +706,50 @@ def _write_normal_csv(csv_path, data_rows, avg_rows):
             ])
 
 
+def _valid_result(r):
+    return not r.get("skip") and "err" not in r
+
+
 def _avg_results(results_list, keys=("us", "tflops", "max_err")):
-    """Average valid results over the specified keys."""
-    valid = [r for r in results_list if not r.get("skip") and "err" not in r]
+    """Average valid results over the specified keys.
+
+    TFLOPS is aggregated as total work / total time so mixed-size summaries stay
+    consistent with the measured runtimes.
+    """
+    valid = [r for r in results_list if _valid_result(r)]
     if not valid:
         return {"skip": True}
     avg = {}
     for key in keys:
+        if key == "tflops":
+            pairs = [
+                (r["us"], r["tflops"])
+                for r in valid
+                if "us" in r and "tflops" in r and r["us"] > 0
+            ]
+            if pairs:
+                total_us = sum(us for us, _ in pairs)
+                avg[key] = sum(us * tflops for us, tflops in pairs) / total_us
+                continue
         vals = [r[key] for r in valid if key in r]
         if vals:
             avg[key] = sum(vals) / len(vals)
     return avg
+
+
+def _avg_cmp_pair(rows, fly_idx, other_idx):
+    """Average FlyDSL and comparator over rows where both sides are valid."""
+    paired = [
+        (row[fly_idx], row[other_idx])
+        for row in rows
+        if _valid_result(row[fly_idx]) and _valid_result(row[other_idx])
+    ]
+    if not paired:
+        return {"skip": True}, {"skip": True}
+    return (
+        _avg_results([fly_r for fly_r, _ in paired]),
+        _avg_results([other_r for _, other_r in paired]),
+    )
 
 
 def _tag_group(cfg):
@@ -727,7 +830,7 @@ def main():
     causal_group.add_argument("--causal", action="store_true", dest="causal")
     causal_group.add_argument("--no-causal", action="store_false", dest="causal")
     parser.set_defaults(causal=None)
-    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
         "--dtype", type=str, default=None, choices=["fp16", "bf16"],
@@ -806,6 +909,44 @@ def main():
                         seed=args.seed, backend="asm",
                         num_kv_heads=nh_kv,
                     )
+
+                    # fly_r = None
+                    # opus_r = None
+                    # ck_r = None
+                    # asm_r = None
+                    # for i in range(4):
+                    #     res = run_config(
+                    #         batch, seq_len, nh, hd, dtype, causal,
+                    #         warmup=args.warmup, iters=args.iters,
+                    #         seed=args.seed, dtype_str=dtype_str, verbose=False,
+                    #         num_kv_heads=nh_kv,
+                    #     )
+                    #     # res = run_opus_attn_bench(
+                    #     #     batch, seq_len, nh, hd, dtype, causal,
+                    #     #     warmup=args.warmup, iters=args.iters,
+                    #     #     seed=args.seed, num_kv_heads=nh_kv,
+                    #     # )
+                    #     # res = run_aiter_bench(
+                    #     #     batch, seq_len, nh, hd, dtype, causal,
+                    #     #     warmup=args.warmup, iters=args.iters,
+                    #     #     seed=args.seed, backend="ck",
+                    #     #     num_kv_heads=nh_kv,
+                    #     # )
+                    #     # res = run_aiter_bench(
+                    #     #     batch, seq_len, nh, hd, dtype, causal,
+                    #     #     warmup=args.warmup, iters=args.iters,
+                    #     #     seed=args.seed, backend="asm",
+                    #     #     num_kv_heads=nh_kv,
+                    #     # )
+
+                    #     if i == 0:
+                    #         fly_r = res
+                    #     elif i == 1:
+                    #         opus_r = res
+                    #     elif i == 2:
+                    #         ck_r = res
+                    #     elif i == 3:
+                    #         asm_r = res
                     rows.append((cfg, fly_r, opus_r, ck_r, asm_r))
 
         col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
@@ -837,12 +978,27 @@ def main():
             oa = _avg_results([o for _, _, o, _, _ in subset])
             ca = _avg_results([c for _, _, _, c, _ in subset])
             aa = _avg_results([a for _, _, _, _, a in subset])
+            fopus_pair = _avg_cmp_pair(subset, 1, 2)
+            fck_pair = _avg_cmp_pair(subset, 1, 3)
+            fasm_pair = _avg_cmp_pair(subset, 1, 4)
             print(
                 f"{label:>{_CFG_W}s} | {_fmt_result(fa)} | "
                 f"{_fmt_result(oa)} | {_fmt_result(ca)} | {_fmt_result(aa)}"
-                f" | {_fmt_cmp(fa, oa)} | {_fmt_cmp(fa, ca)} | {_fmt_cmp(fa, aa)}"
+                f" | {_fmt_cmp(*fopus_pair)} | {_fmt_cmp(*fck_pair)}"
+                f" | {_fmt_cmp(*fasm_pair)}"
             )
-            cmp_avg_rows.append((label, fa, oa, ca, aa))
+            cmp_avg_rows.append((
+                label,
+                fa,
+                oa,
+                ca,
+                aa,
+                (
+                    _csv_cmp(*fopus_pair),
+                    _csv_cmp(*fck_pair),
+                    _csv_cmp(*fasm_pair),
+                ),
+            ))
 
         print(sep)
         _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _cmp_avg)

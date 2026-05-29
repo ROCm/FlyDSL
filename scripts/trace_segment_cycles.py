@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import glob
 import json
 import math
 import re
@@ -111,9 +112,28 @@ class KernelAnalysis:
     baseline: bool
     rows: list[CodeRow]
     trace_dir: Path
+    point_names: list[str]
     sample_intervals: list[SampleIntervalAnalysis]
     summary_records: list[SummaryRecord]
     all_intervals: list[IntervalResult]
+
+
+@dataclass(frozen=True)
+class TimedInstruction:
+    pos: int
+    code_idx: int
+    start_ts: int
+    end_ts: int
+    latency: int
+    stall: int
+
+
+@dataclass(frozen=True)
+class SpecificPartConfig:
+    trace_a: tuple[int, int, int, int]
+    trace_b: tuple[int, int, int, int]
+    interval_name: str
+    long_latency_threshold: int
 
 
 def parse_int(value: str | int | None) -> int:
@@ -291,6 +311,45 @@ def parse_config_sample_points(config: dict[str, object], path: Path) -> list[li
     return points
 
 
+def parse_config_sample_point_names(config: dict[str, object], path: Path) -> list[str]:
+    raw_points = config.get("sample points") or config.get("sample_points")
+    if not isinstance(raw_points, list) or len(raw_points) < 2:
+        raise SystemExit(f"{path} must contain 'sample points' with at least two entries")
+
+    names: list[str] = []
+    for point_idx, raw_point in enumerate(raw_points):
+        if isinstance(raw_point, dict) and "instruction" not in raw_point and len(raw_point) == 1:
+            names.append(str(next(iter(raw_point.keys()))))
+        else:
+            names.append(f"point{point_idx}")
+    return names
+
+
+def parse_config_extra_arrows(config: dict[str, object], path: Path, point_names: list[str]) -> set[tuple[str, str]] | None:
+    raw_arrows = config.get("extra_arrow")
+    if raw_arrows is None:
+        return None
+    if not isinstance(raw_arrows, list):
+        raise SystemExit(f"{path} 'extra_arrow' must be a list of [from_point, to_point] pairs")
+
+    known_names = set(point_names)
+    extra_arrows: set[tuple[str, str]] = set()
+    for arrow_idx, raw_arrow in enumerate(raw_arrows):
+        if (
+            not isinstance(raw_arrow, list)
+            or len(raw_arrow) != 2
+            or not all(isinstance(item, str) for item in raw_arrow)
+        ):
+            raise SystemExit(f"{path} extra_arrow entry {arrow_idx} must be [from_point, to_point]")
+        from_name, to_name = raw_arrow
+        if from_name not in known_names:
+            raise SystemExit(f"{path} extra_arrow entry {arrow_idx} uses unknown sample point {from_name!r}")
+        if to_name not in known_names:
+            raise SystemExit(f"{path} extra_arrow entry {arrow_idx} uses unknown sample point {to_name!r}")
+        extra_arrows.add((from_name, to_name))
+    return extra_arrows or None
+
+
 def parse_config_interval_infos(config: dict[str, object], points: list[list[str]], path: Path) -> list[IntervalInfo] | None:
     raw_infos = config.get("interval information") or config.get("interval_information")
     if raw_infos is None:
@@ -303,6 +362,35 @@ def parse_config_interval_infos(config: dict[str, object], points: list[list[str
             f"({len(points) - 1}), got {len(raw_infos)}"
         )
     return [interval_info_from_object(item, path, idx) for idx, item in enumerate(raw_infos)]
+
+
+def parse_specific_part_config(raw: object, path: Path, version_name: str) -> SpecificPartConfig:
+    if not isinstance(raw, dict):
+        raise SystemExit(f"{path} version {version_name} specific_part must be an object")
+    raw_pair = raw.get("se_sm_sl_wv_pair")
+    if not isinstance(raw_pair, list) or len(raw_pair) != 2:
+        raise SystemExit(f"{path} version {version_name} specific_part.se_sm_sl_wv_pair must contain two entries")
+
+    pairs: list[tuple[int, int, int, int]] = []
+    for pair_idx, item in enumerate(raw_pair):
+        if not isinstance(item, list) or len(item) != 4:
+            raise SystemExit(f"{path} version {version_name} se_sm_sl_wv_pair[{pair_idx}] must be [se, sm, sl, wv]")
+        pairs.append(tuple(int(value) for value in item))
+
+    interval_name = raw.get("interval_name")
+    if not isinstance(interval_name, str) or not interval_name:
+        raise SystemExit(f"{path} version {version_name} specific_part.interval_name must be a non-empty string")
+
+    long_lat_thr = raw.get("long_lat_thr")
+    if long_lat_thr is None:
+        raise SystemExit(f"{path} version {version_name} specific_part.long_lat_thr is required")
+
+    return SpecificPartConfig(
+        trace_a=pairs[0],
+        trace_b=pairs[1],
+        interval_name=interval_name,
+        long_latency_threshold=int(long_lat_thr),
+    )
 
 
 def config_value(config: dict[str, object], *keys: str) -> object | None:
@@ -318,6 +406,41 @@ def optional_str(value: object | None) -> str | None:
     if isinstance(value, (str, int)):
         return str(value)
     raise SystemExit(f"expected string or integer config value, got {type(value).__name__}")
+
+
+def config_kernel_name(config: dict[str, object], config_path: Path | None) -> str | None:
+    raw_name = config_value(config, "kernel", "kernel_name", "kernel name", "version", "name", "value")
+    if raw_name is not None:
+        return optional_str(raw_name)
+    if config_path is not None and config_path.name != "<config>":
+        return config_path.parent.name
+    return None
+
+
+def resolve_trace_dir(raw_trace_dir: object, config_path: Path) -> Path:
+    trace_text = str(raw_trace_dir)
+    if any(ch in trace_text for ch in "*?["):
+        candidates = [
+            Path(candidate)
+            for candidate in glob.glob(trace_text)
+            if Path(candidate).is_dir()
+        ]
+        if not candidates:
+            raise SystemExit(f"{config_path} trace_dir pattern matched no directories: {trace_text}")
+        trace_dir = sorted(candidates, key=lambda path: str(path))[0].resolve()
+    else:
+        trace_dir = Path(trace_text).resolve()
+    if not (trace_dir / "code.json").is_file():
+        raise SystemExit(f"missing code.json under {trace_dir}")
+    return trace_dir
+
+
+def merge_kernel_config(parent_config: dict[str, object], kernel_config: dict[str, object]) -> dict[str, object]:
+    merged = dict(kernel_config)
+    for key in ("interval information", "interval_information", "extra_arrow"):
+        if key not in merged and key in parent_config:
+            merged[key] = parent_config[key]
+    return merged
 
 
 def load_code(trace_dir: Path) -> list[CodeRow]:
@@ -687,6 +810,15 @@ def exact_instruction_sequences_from_lines(
     return candidates
 
 
+def sequence_candidates_from_matched_sequences(sequences: list[tuple[int, ...]]) -> list[set[int]]:
+    if not sequences:
+        return []
+    length = len(sequences[0])
+    if any(len(seq) != length for seq in sequences):
+        raise SystemExit("matched code sequences for the same sample point have different lengths")
+    return [set(seq[offset] for seq in sequences) for offset in range(length)]
+
+
 def match_any_sequence(
     instructions: list[list[int]],
     pos: int,
@@ -777,6 +909,191 @@ def scan_intervals(
     return intervals
 
 
+def match_sample_points_at(
+    instructions: list[list[int]],
+    pos: int,
+    point_code_sequences: list[list[set[int]]],
+) -> list[tuple[int, tuple[int, ...]]]:
+    matches: list[tuple[int, tuple[int, ...]]] = []
+    for point_idx, sequence_candidates in enumerate(point_code_sequences):
+        sequence = match_any_sequence(instructions, pos, sequence_candidates)
+        if sequence is not None:
+            matches.append((point_idx, sequence))
+    return matches
+
+
+def choose_initial_sample_point(matches: list[tuple[int, tuple[int, ...]]]) -> tuple[int, tuple[int, ...]]:
+    # At the beginning of a trace, prefer the earliest sample point if multiple
+    # identical instruction sequences match the same dynamic instruction.
+    return min(matches, key=lambda item: item[0])
+
+
+def choose_next_sample_point(
+    current_idx: int,
+    matches: list[tuple[int, tuple[int, ...]]],
+    num_points: int,
+    wave_file: str,
+    pos: int,
+    current_start_ts: int,
+    match_start_ts: int,
+    point_names: list[str] | None,
+    kernel_name: str | None = None,
+    extra_arrows: set[tuple[str, str]] | None = None,
+) -> tuple[int, tuple[int, ...]]:
+    expected_next = current_idx + 1
+    for point_idx, sequence in matches:
+        if point_idx == expected_next:
+            return point_idx, sequence
+
+    previous_matches = [(point_idx, sequence) for point_idx, sequence in matches if point_idx < current_idx]
+    if previous_matches:
+        return min(previous_matches, key=lambda item: item[0])
+
+    current_name = point_names[current_idx] if point_names and current_idx < len(point_names) else str(current_idx)
+    if extra_arrows and point_names:
+        for point_idx, sequence in matches:
+            if point_idx <= expected_next or point_idx >= num_points:
+                continue
+            point_name = point_names[point_idx]
+            if (current_name, point_name) in extra_arrows:
+                return point_idx, sequence
+
+    invalid_matches = [point_idx for point_idx, _sequence in matches]
+    expected_name = point_names[expected_next] if point_names and expected_next < len(point_names) else str(expected_next)
+    current_label = f"{current_name}(start_ts={current_start_ts})"
+    invalid_names = [
+        f"{point_names[point_idx] if point_names and point_idx < len(point_names) else str(point_idx)}"
+        f"(start_ts={match_start_ts})"
+        for point_idx in invalid_matches
+    ]
+    prefix = f"kernel={kernel_name} " if kernel_name else ""
+    raise SystemExit(
+        f"{prefix}{wave_file} pos={pos}: sample point {current_label} was followed by invalid sample point(s) "
+        f"{invalid_names}; expected {expected_name} or a previous sample point"
+    )
+
+
+def make_interval_result(
+    wave_path: Path,
+    se: int | None,
+    simd: int | None,
+    slot: int | None,
+    wave_id: int | None,
+    instructions: list[list[int]],
+    start_pos: int,
+    start_seq: tuple[int, ...],
+    end_pos: int,
+    end_seq: tuple[int, ...],
+) -> IntervalResult:
+    start_event = instructions[start_pos]
+    end_event = instructions[end_pos]
+    start_ts = int(start_event[0])
+    end_ts = int(end_event[0])
+    interval_events = tuple(
+        SegmentEvent(
+            code_idx=int(interval_event[4]),
+            start_ts=int(interval_event[0]),
+            latency=int(interval_event[3]),
+            stall=int(interval_event[2]),
+        )
+        for interval_event in instructions[start_pos : end_pos + len(end_seq)]
+    )
+    return IntervalResult(
+        wave_file=wave_path.name,
+        se=se,
+        simd=simd,
+        slot=slot,
+        wave_id=wave_id,
+        start_pos=start_pos,
+        end_pos=end_pos,
+        start_ts=start_ts,
+        end_ts=end_ts,
+        cycles=end_ts - start_ts,
+        inst_count=end_pos + len(end_seq) - start_pos,
+        start_code_indices=start_seq,
+        end_code_indices=end_seq,
+        events=interval_events,
+    )
+
+
+def scan_sample_point_intervals(
+    trace_dir: Path,
+    wave_glob: str,
+    se_filter: set[int] | None,
+    sm_filter: set[int] | None,
+    sl_filter: set[int] | None,
+    wv_filter: set[int] | None,
+    point_code_sequences: list[list[set[int]]],
+    point_names: list[str] | None = None,
+    kernel_name: str | None = None,
+    extra_arrows: set[tuple[str, str]] | None = None,
+) -> list[list[IntervalResult]]:
+    intervals_by_start_point: list[list[IntervalResult]] = [
+        [] for _ in range(max(0, len(point_code_sequences) - 1))
+    ]
+
+    for wave_path, se, simd, slot, wave_id in filtered_wave_file_entries(
+        trace_dir, wave_glob, se_filter, sm_filter, sl_filter, wv_filter
+    ):
+        with wave_path.open() as f:
+            data = json.load(f)
+        instructions = data["wave"]["instructions"]
+
+        current: tuple[int, int, tuple[int, ...]] | None = None
+        pos = 0
+        while pos < len(instructions):
+            matches = match_sample_points_at(instructions, pos, point_code_sequences)
+            if not matches:
+                pos += 1
+                continue
+
+            point_idx, sequence = choose_initial_sample_point(matches)
+            current = (point_idx, pos, sequence)
+            pos += len(sequence)
+            break
+
+        while current is not None and pos < len(instructions):
+            matches = match_sample_points_at(instructions, pos, point_code_sequences)
+            if not matches:
+                pos += 1
+                continue
+
+            current_idx, current_pos, current_seq = current
+            next_idx, next_seq = choose_next_sample_point(
+                current_idx,
+                matches,
+                len(point_code_sequences),
+                wave_path.name,
+                pos,
+                int(instructions[current_pos][0]),
+                int(instructions[pos][0]),
+                point_names,
+                kernel_name,
+                extra_arrows,
+            )
+
+            if next_idx == current_idx + 1 and current_idx < len(intervals_by_start_point):
+                intervals_by_start_point[current_idx].append(
+                    make_interval_result(
+                        wave_path,
+                        se,
+                        simd,
+                        slot,
+                        wave_id,
+                        instructions,
+                        current_pos,
+                        current_seq,
+                        pos,
+                        next_seq,
+                    )
+                )
+
+            current = (next_idx, pos, next_seq)
+            pos += len(next_seq)
+
+    return intervals_by_start_point
+
+
 def format_optional(value: int | None) -> str:
     return "-" if value is None else str(value)
 
@@ -840,13 +1157,41 @@ def print_occurrences(occurrences: list[Occurrence], limit: int) -> None:
         print(f"  ... {len(occurrences) - limit} more occurrences")
 
 
-def print_interval_results(rows: list[CodeRow], intervals: list[IntervalResult], limit: int) -> None:
-    sorted_intervals = sorted(intervals, key=lambda interval: interval.cycles, reverse=True)
+def interval_trace_indices(intervals: list[IntervalResult]) -> dict[tuple[str, int, int], int]:
+    grouped: dict[str, list[IntervalResult]] = defaultdict(list)
+    for interval in intervals:
+        grouped[interval.wave_file].append(interval)
+
+    result: dict[tuple[str, int, int], int] = {}
+    for wave_file, wave_intervals in grouped.items():
+        for idx, interval in enumerate(
+            sorted(wave_intervals, key=lambda item: (item.start_ts, item.start_pos)),
+            start=1,
+        ):
+            result[(wave_file, interval.start_ts, interval.start_pos)] = idx
+    return result
+
+
+def print_interval_results(
+    rows: list[CodeRow],
+    intervals: list[IntervalResult],
+    limit: int,
+    sort_by_cycles: bool = True,
+    show_trace_interval_idx: bool = False,
+) -> None:
+    sorted_intervals = (
+        sorted(intervals, key=lambda interval: interval.cycles, reverse=True)
+        if sort_by_cycles
+        else sorted(intervals, key=lambda interval: (interval.wave_file, interval.start_ts, interval.start_pos))
+    )
+    trace_indices = interval_trace_indices(intervals) if show_trace_interval_idx else {}
     shown_limit = len(sorted_intervals) if limit == 0 else min(limit, len(sorted_intervals))
     print(f"\n[start, end) intervals ({len(sorted_intervals)} total):")
     wave_width = max(len("wave_file"), *(len(interval.wave_file) for interval in sorted_intervals[:shown_limit]))
+    trace_idx_header = f" {'trace_interval_idx':>18s}" if show_trace_interval_idx else ""
     header = (
-        f"{'idx':>4s} {'wave_file':<{wave_width}s} {'se':>2s} {'sm':>2s} {'sl':>2s} {'wv':>2s} "
+        f"{'idx':>4s} {'wave_file':<{wave_width}s} {'se':>2s} {'sm':>2s} {'sl':>2s} {'wv':>2s}"
+        f"{trace_idx_header} "
         f"{'start_pos':>9s} {'end_pos':>7s} {'start_ts':>8s} {'end_ts':>8s} "
         f"{'cycles':>6s} {'inst_count':>10s} {'start_code_range':>16s} {'end_code_range':>14s}"
     )
@@ -854,10 +1199,16 @@ def print_interval_results(rows: list[CodeRow], intervals: list[IntervalResult],
     for idx, interval in enumerate(sorted_intervals[:shown_limit], start=1):
         start_range = format_code_sequence(interval.start_code_indices)
         end_range = format_code_sequence(interval.end_code_indices)
+        trace_idx_text = (
+            f" {trace_indices.get((interval.wave_file, interval.start_ts, interval.start_pos), 0):18d}"
+            if show_trace_interval_idx
+            else ""
+        )
         print(
             f"{idx:4d} {interval.wave_file:<{wave_width}s} "
             f"{format_optional(interval.se):>2s} {format_optional(interval.simd):>2s} "
-            f"{format_optional(interval.slot):>2s} {format_optional(interval.wave_id):>2s} "
+            f"{format_optional(interval.slot):>2s} {format_optional(interval.wave_id):>2s}"
+            f"{trace_idx_text} "
             f"{interval.start_pos:9d} {interval.end_pos:7d} "
             f"{interval.start_ts:8d} {interval.end_ts:8d} {interval.cycles:6d} "
             f"{interval.inst_count:10d} {start_range:>16s} {end_range:>14s}"
@@ -897,6 +1248,27 @@ def print_interval_cycles_summary(label: str, intervals: list[IntervalResult]) -
 
 def opcode_for_isa(isa: str) -> str:
     return isa.split(None, 1)[0] if isa.strip() else ""
+
+
+def instruction_category(isa: str) -> str:
+    opcode = opcode_for_isa(isa)
+    if not opcode:
+        return "OTHER"
+    if "mfma" in opcode:
+        return "MFMA"
+    if opcode.startswith(("buffer_", "global_", "raw_ptr_buffer")):
+        return "VMEM"
+    if opcode.startswith("ds_"):
+        return "LDS"
+    if opcode.startswith("s_waitcnt"):
+        return "WAITCNT"
+    if opcode.startswith("s_barrier"):
+        return "BARRIER"
+    if opcode.startswith("s_"):
+        return "SALU"
+    if opcode.startswith("v_"):
+        return "VALU"
+    return "OTHER"
 
 
 def interval_matches_inc_pattern(rows: list[CodeRow], interval: IntervalResult, pattern: tuple[str, ...]) -> bool:
@@ -1019,6 +1391,10 @@ def format_pct(value: float) -> str:
     return "-" if math.isnan(value) else f"{value:.1f}%"
 
 
+def format_float(value: float, width: int, precision: int = 1) -> str:
+    return f"{'-':>{width}s}" if math.isnan(value) else f"{value:{width}.{precision}f}"
+
+
 def build_summary_records(
     rows: list[CodeRow],
     interval_summaries: list[tuple[int, IntervalInfo | None, list[IntervalResult]]],
@@ -1060,12 +1436,12 @@ def analyze_kernel_config(
     raw_trace_dir = config_value(config, "trace_dir", "trace-dir", "trace dir", "trace")
     if raw_trace_dir is None:
         raise SystemExit(f"{config_path} kernel {name} missing trace_dir")
-    trace_dir = Path(str(raw_trace_dir)).resolve()
-    if not (trace_dir / "code.json").is_file():
-        raise SystemExit(f"missing code.json under {trace_dir}")
+    trace_dir = resolve_trace_dir(raw_trace_dir, config_path)
 
     rows = load_code(trace_dir)
     points = parse_config_sample_points(config, config_path)
+    point_names = parse_config_sample_point_names(config, config_path)
+    extra_arrows = parse_config_extra_arrows(config, config_path, point_names)
     interval_infos = parse_config_interval_infos(config, points, config_path)
     if interval_infos is None:
         interval_infos = [IntervalInfo() for _ in range(len(points) - 1)]
@@ -1079,21 +1455,28 @@ def analyze_kernel_config(
     sample_intervals: list[SampleIntervalAnalysis] = []
     interval_summaries: list[tuple[int, IntervalInfo | None, list[IntervalResult]]] = []
     all_intervals: list[IntervalResult] = []
+    point_code_sequences = [
+        exact_instruction_sequences_from_lines(rows, point_lines, f"{name} sample point {idx}")
+        for idx, point_lines in enumerate(points)
+    ]
+    intervals_by_point = scan_sample_point_intervals(
+        trace_dir,
+        wave_glob,
+        se_filter,
+        sm_filter,
+        sl_filter,
+        wv_filter,
+        point_code_sequences,
+        point_names,
+        name,
+        extra_arrows,
+    )
     for idx in range(len(points) - 1):
         interval_info = interval_infos[idx]
         inc_pattern = interval_info.inc_inst_pattern
-        start_code_sequences = exact_instruction_sequences_from_lines(rows, points[idx], f"{name} sample point {idx}")
-        end_code_sequences = exact_instruction_sequences_from_lines(rows, points[idx + 1], f"{name} sample point {idx + 1}")
-        intervals = scan_intervals(
-            trace_dir,
-            wave_glob,
-            se_filter,
-            sm_filter,
-            sl_filter,
-            wv_filter,
-            start_code_sequences,
-            end_code_sequences,
-        )
+        start_code_sequences = point_code_sequences[idx]
+        end_code_sequences = point_code_sequences[idx + 1]
+        intervals = intervals_by_point[idx]
         matched, unmatched = split_intervals_by_pattern(rows, intervals, inc_pattern)
         primary_intervals = unmatched if inc_pattern and matched else intervals
         all_intervals.extend(primary_intervals)
@@ -1118,6 +1501,7 @@ def analyze_kernel_config(
         baseline=baseline,
         rows=rows,
         trace_dir=trace_dir,
+        point_names=point_names,
         sample_intervals=sample_intervals,
         summary_records=build_summary_records(rows, interval_summaries),
         all_intervals=all_intervals,
@@ -1136,6 +1520,7 @@ def parse_kernel_versions(config: dict[str, object], config_path: Path) -> list[
         raw_config = raw_version.get("config")
         if not isinstance(raw_config, dict):
             raise SystemExit(f"{config_path} kernel version {version_idx} missing config object")
+        raw_config = merge_kernel_config(config, raw_config)
         name = str(raw_version.get("value") or raw_version.get("name") or f"version_{version_idx}")
         baseline = bool(raw_version.get("baseline", False))
         analyses.append(analyze_kernel_config(name, baseline, raw_config, config_path))
@@ -1160,6 +1545,8 @@ def print_compare_metric_row(
     print(
         f"{rank:4d} "
         f"{baseline_interval.wave_file:<24.24s} {other_interval.wave_file:<24.24s} "
+        f"{baseline_interval.start_ts:14d} {baseline_interval.end_ts:12d} "
+        f"{other_interval.start_ts:13d} {other_interval.end_ts:11d} "
         f"{baseline_interval.cycles:10d} {other_interval.cycles:10d} {delta_cycles:12d} {format_pct(delta_cycles_pct):>12s} "
         f"{baseline_interval.inst_count:14d} {other_interval.inst_count:14d} {delta_inst:15d} {format_pct(delta_inst_pct):>12s}"
     )
@@ -1191,6 +1578,8 @@ def print_interval_comparison_table(
     print(
         f"{'rank':>4s} "
         f"{baseline.name + '_wave':<24.24s} {other.name + '_wave':<24.24s} "
+        f"{baseline.name + '_start_ts':>14.14s} {baseline.name + '_end_ts':>12.12s} "
+        f"{other.name + '_start_ts':>13.13s} {other.name + '_end_ts':>11.11s} "
         f"{baseline.name + '_cycles':>10.10s} {other.name + '_cycles':>10.10s} {'delta_cycles':>12s} {'delta_cycles_pct':>12s} "
         f"{baseline.name + '_inst':>14.14s} {other.name + '_inst':>14.14s} {'delta_inst':>15s} {'delta_inst_pct':>12s}"
     )
@@ -1213,20 +1602,33 @@ def print_summary_compare_row(
     other_record: SummaryRecord,
     baseline_name: str,
     other_name: str,
+    total_base_sum_cycles: float,
+    total_other_sum_cycles: float,
 ) -> None:
     base_metrics = interval_metric_summary(baseline_record.intervals)
     other_metrics = interval_metric_summary(other_record.intervals)
     delta_avg_cycles = other_metrics["avg_cycles"] - base_metrics["avg_cycles"]
     delta_avg_inst = other_metrics["avg_inst_count"] - base_metrics["avg_inst_count"]
+    base_sum_cycles = base_metrics["count"] * base_metrics["avg_cycles"]
+    other_sum_cycles = base_metrics["count"] * other_metrics["avg_cycles"]
     print(
         f"{baseline_record.idx_label:>4s} {baseline_record.description or '-':<36.36s} "
         f"{int(base_metrics['count']):8d} {int(other_metrics['count']):8d} "
         f"{int(other_metrics['count'] - base_metrics['count']):8d} "
-        f"{base_metrics['avg_cycles']:12.1f} {other_metrics['avg_cycles']:12.1f} "
-        f"{delta_avg_cycles:13.1f} {format_pct(pct_delta(delta_avg_cycles, base_metrics['avg_cycles'])):>17s} "
-        f"{base_metrics['avg_inst_count']:16.1f} {other_metrics['avg_inst_count']:16.1f} "
-        f"{delta_avg_inst:17.1f} {format_pct(pct_delta(delta_avg_inst, base_metrics['avg_inst_count'])):>16s}"
+        f"{format_float(base_metrics['avg_cycles'], 12)} {format_float(other_metrics['avg_cycles'], 12)} "
+        f"{format_float(delta_avg_cycles, 13)} {format_pct(pct_delta(delta_avg_cycles, base_metrics['avg_cycles'])):>17s} "
+        f"{format_float(base_sum_cycles, 15)} {format_pct(pct_delta(base_sum_cycles, total_base_sum_cycles)):>19s} "
+        f"{format_float(other_sum_cycles, 16)} {format_pct(pct_delta(other_sum_cycles, total_other_sum_cycles)):>20s} "
+        f"{format_float(base_metrics['avg_inst_count'], 16)} {format_float(other_metrics['avg_inst_count'], 16)} "
+        f"{format_float(delta_avg_inst, 17)} {format_pct(pct_delta(delta_avg_inst, base_metrics['avg_inst_count'])):>16s}"
     )
+
+
+def summary_base_sum_cycles(record: SummaryRecord) -> float:
+    metrics = interval_metric_summary(record.intervals)
+    if math.isnan(metrics["avg_cycles"]):
+        return float("-inf")
+    return metrics["count"] * metrics["avg_cycles"]
 
 
 def print_all_summary_compare(
@@ -1264,7 +1666,423 @@ def print_all_summary_compare(
     )
 
 
-def run_compare_config(config: dict[str, object], config_path: Path, interval_print_limit: int) -> None:
+def print_kernel_summary_with_descriptions(rows: list[CodeRow], summary_records: list[SummaryRecord]) -> None:
+    print("\n=== Sample Interval Summary With Descriptions ===")
+    header = (
+        f"{'idx':>4s} {'description':<28s} {'count':>5s} {'avg_cycles':>10s} "
+        f"{'p50_cycles':>8s} {'p90_cycles':>8s} {'min_cycles':>8s} {'max_cycles':>8s} "
+        f"{'avg_inst_count':>14s} {'min_inst_count':>14s} {'max_inst_count':>14s} "
+        f"{'inc':>5s} {'no_inc':>6s} {'inc_pattern':<32s}"
+    )
+    print(header)
+
+    summary_lines: list[tuple[float, int, str]] = []
+    for order_idx, record in enumerate(summary_records):
+        avg_cycles, line = interval_summary_record(
+            record.idx_label,
+            record.description,
+            record.intervals,
+            rows,
+            record.inc_pattern,
+        )
+        summary_lines.append((avg_cycles, order_idx, line))
+
+    for _avg_cycles, _order_idx, line in sorted(
+        summary_lines, key=lambda item: (item[0], -item[1]), reverse=True
+    ):
+        print(line)
+
+
+def print_kernel_trace_info(analysis: KernelAnalysis, interval_print_limit: int) -> None:
+    print(f"\n################ trace info kernel={analysis.name} ################")
+    print(f"trace_dir={analysis.trace_dir}")
+    print(f"sample_intervals={len(analysis.sample_intervals)}")
+
+    for idx, sample in enumerate(analysis.sample_intervals):
+        start_name = analysis.point_names[idx] if idx < len(analysis.point_names) else f"point{idx}"
+        end_name = analysis.point_names[idx + 1] if idx + 1 < len(analysis.point_names) else f"point{idx + 1}"
+        print(f"\n=== Sample interval {idx + 1}/{len(analysis.sample_intervals)}: {start_name} -> {end_name} ===")
+        if sample.description or sample.inc_pattern:
+            detail = f"Description: {sample.description or '-'}"
+            if sample.inc_pattern:
+                detail += (
+                    f" | inc_inst_pattern={format_pattern(sample.inc_pattern)} "
+                    f"| matched={len(sample.inc_matched_intervals)} unmatched={len(sample.inc_unmatched_intervals)}"
+                )
+            print(detail)
+
+        print(f"Start code_idx candidates by instruction: {[format_code_candidates(c) for c in sample.start_code_sequences]}")
+        print(f"End code_idx candidates by instruction:   {[format_code_candidates(c) for c in sample.end_code_sequences]}")
+        if sample.intervals:
+            print_matched_code_sequences(
+                analysis.rows,
+                [interval.start_code_indices for interval in sample.intervals],
+                [interval.end_code_indices for interval in sample.intervals],
+            )
+
+        print(
+            f"Matched intervals: {len(sample.primary_intervals)}"
+            + (
+                f" (excluding {len(sample.inc_matched_intervals)} inc_inst_pattern matched)"
+                if sample.inc_matched_intervals
+                else ""
+            )
+        )
+        if sample.primary_intervals:
+            print_interval_results(
+                analysis.rows,
+                sample.primary_intervals,
+                interval_print_limit,
+                sort_by_cycles=False,
+                show_trace_interval_idx=True,
+            )
+            if sample.inc_matched_intervals:
+                print_interval_cycles_summary("inc_inst_pattern unmatched cycles summary", sample.primary_intervals)
+        elif sample.intervals:
+            print("All matched intervals were moved to inc_inst_pattern matched sample interval.")
+        else:
+            print("No [start, end) intervals matched for this sample interval.")
+
+        if sample.inc_matched_intervals:
+            print("\n--- inc_inst_pattern matched intervals (separate sample interval) ---")
+            print_interval_results(
+                analysis.rows,
+                sample.inc_matched_intervals,
+                interval_print_limit,
+                sort_by_cycles=False,
+                show_trace_interval_idx=True,
+            )
+            print_interval_cycles_summary("inc_inst_pattern matched cycles summary", sample.inc_matched_intervals)
+
+    print_kernel_summary_with_descriptions(analysis.rows, analysis.summary_records)
+
+
+def wave_filename_from_pair(pair: tuple[int, int, int, int]) -> str:
+    se, sm, sl, wv = pair
+    return f"se{se}_sm{sm}_sl{sl}_wv{wv}.json"
+
+
+def timed_instructions_from_wave(trace_dir: Path, pair: tuple[int, int, int, int]) -> list[TimedInstruction]:
+    wave_path = trace_dir / wave_filename_from_pair(pair)
+    if not wave_path.is_file():
+        raise SystemExit(f"missing requested wave trace file: {wave_path}")
+    with wave_path.open() as f:
+        data = json.load(f)
+    instructions = data["wave"]["instructions"]
+    return [
+        TimedInstruction(
+            pos=pos,
+            code_idx=int(event[4]),
+            start_ts=int(event[0]),
+            end_ts=int(event[0]) + int(event[3]),
+            latency=int(event[3]),
+            stall=int(event[2]),
+        )
+        for pos, event in enumerate(instructions)
+    ]
+
+
+def overlap_cycles(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
+    return max(0, min(a_end, b_end) - max(a_start, b_start))
+
+
+def overlapping_instructions(
+    instructions: list[TimedInstruction],
+    start_ts: int,
+    end_ts: int,
+) -> list[tuple[TimedInstruction, int]]:
+    overlaps: list[tuple[TimedInstruction, int]] = []
+    for inst in instructions:
+        overlap = overlap_cycles(start_ts, end_ts, inst.start_ts, inst.end_ts)
+        if overlap > 0:
+            overlaps.append((inst, overlap))
+    return overlaps
+
+
+def event_key(event: SegmentEvent) -> tuple[int, int, int]:
+    return event.start_ts, event.code_idx, event.latency
+
+
+def find_interval_info_index(interval_infos: list[IntervalInfo], interval_name: str) -> int:
+    for idx, info in enumerate(interval_infos):
+        if info.description == interval_name:
+            return idx
+    raise SystemExit(f"interval_name {interval_name!r} not found in interval information")
+
+
+def format_timed_instruction(rows: list[CodeRow], inst: TimedInstruction) -> str:
+    isa = rows[inst.code_idx].isa
+    return (
+        f"pos={inst.pos} ts=[{inst.start_ts},{inst.end_ts}) "
+        f"lat={inst.latency} stall={inst.stall} code_idx={inst.code_idx} "
+        f"type={instruction_category(isa)} opcode={opcode_for_isa(isa)} inst={isa}"
+    )
+
+
+def overlay_text(canvas: list[str], start_col: int, text: str) -> None:
+    if start_col < 0:
+        text = text[-start_col:]
+        start_col = 0
+    for idx, char in enumerate(text):
+        col = start_col + idx
+        if col >= len(canvas):
+            break
+        canvas[col] = char
+
+
+def overlay_tick_once(
+    canvas: list[str],
+    used_tick_values: set[int],
+    rel_value: int,
+    col: int,
+) -> None:
+    if rel_value in used_tick_values:
+        return
+    text = str(rel_value)
+    if col < 0:
+        return
+    if col + len(text) > len(canvas):
+        return
+    if any(canvas[col + idx] != " " for idx in range(len(text))):
+        return
+    overlay_text(canvas, col, text)
+    used_tick_values.add(rel_value)
+
+
+def draw_box_line(canvas: list[str], start_col: int, box_width: int, is_middle: bool, label: str = "") -> None:
+    end_col = min(len(canvas) - 1, start_col + box_width - 1)
+    if start_col >= len(canvas) or end_col < 0:
+        return
+    start_col = max(0, start_col)
+
+    if is_middle:
+        canvas[start_col] = "|"
+        canvas[end_col] = "|"
+        inner_width = max(0, end_col - start_col - 1)
+        label = label[:inner_width]
+        left_pad = (inner_width - len(label)) // 2 if inner_width >= len(label) else 0
+        for col in range(start_col + 1, end_col):
+            canvas[col] = " "
+        overlay_text(canvas, start_col + 1 + left_pad, label)
+        return
+
+    canvas[start_col] = "+"
+    canvas[end_col] = "+"
+    for col in range(start_col + 1, end_col):
+        if canvas[col] == " ":
+            canvas[col] = "-"
+
+
+def render_timeline_layer(
+    boxes: list[tuple[str, int, int]],
+    axis_min: int,
+    axis_max: int,
+    scale: int,
+    tick_position: str = "bottom",
+) -> list[str]:
+    width = max(1, math.ceil((axis_max - axis_min) / scale)) + 2
+    tick_line = [" "] * width
+    top_line = [" "] * width
+    mid_line = [" "] * width
+    bottom_line = [" "] * width
+    used_tick_values: set[int] = set()
+
+    for box_id, rel_start, rel_end in boxes:
+        start_col = max(0, (rel_start - axis_min) // scale)
+        end_col = max(start_col + 2, (rel_end - axis_min + scale - 1) // scale)
+        box_width = max(3, end_col - start_col + 1)
+        label = box_id[: max(1, box_width - 2)]
+        left_pad = (box_width - 2 - len(label)) // 2
+        right_pad = box_width - 2 - len(label) - left_pad
+
+        overlay_tick_once(tick_line, used_tick_values, rel_start, start_col)
+        overlay_tick_once(tick_line, used_tick_values, rel_end, end_col)
+        draw_box_line(top_line, start_col, box_width, is_middle=False)
+        draw_box_line(mid_line, start_col, box_width, is_middle=True, label=label)
+        draw_box_line(bottom_line, start_col, box_width, is_middle=False)
+
+    box_lines = [
+        "".join(top_line).rstrip(),
+        "".join(mid_line).rstrip(),
+        "".join(bottom_line).rstrip(),
+    ]
+    tick = "".join(tick_line).rstrip()
+    if tick_position == "top":
+        return [tick] + box_lines
+    return box_lines + [tick]
+
+
+def print_overlap_timeline(
+    rows: list[CodeRow],
+    center_inst: TimedInstruction,
+    overlaps: list[tuple[TimedInstruction, int]],
+) -> None:
+    if not overlaps:
+        return
+    rel_ranges = [(0, center_inst.end_ts - center_inst.start_ts)]
+    rel_ranges.extend((inst.start_ts - center_inst.start_ts, inst.end_ts - center_inst.start_ts) for inst, _overlap in overlaps)
+    axis_min = min(start for start, _end in rel_ranges)
+    axis_max = max(end for _start, end in rel_ranges)
+    scale = 1
+
+    print(f"timeline: origin={center_inst.start_ts}; rel_axis=[{axis_min},{axis_max}) scale={scale} cycle/char")
+    for line in render_timeline_layer(
+        [("C", 0, center_inst.end_ts - center_inst.start_ts)],
+        axis_min,
+        axis_max,
+        scale,
+        tick_position="top",
+    ):
+        print(line)
+    other_boxes = [
+        (str(rank), other_inst.start_ts - center_inst.start_ts, other_inst.end_ts - center_inst.start_ts)
+        for rank, (other_inst, _overlap) in enumerate(overlaps, start=1)
+    ]
+    for line in render_timeline_layer(other_boxes, axis_min, axis_max, scale):
+        print(line)
+    center_isa = rows[center_inst.code_idx].isa
+    print("legend:")
+    print(
+        f"  C: [{center_inst.start_ts},{center_inst.end_ts}) "
+        f"{instruction_category(center_isa)} {opcode_for_isa(center_isa)} code_idx={center_inst.code_idx} {center_isa}"
+    )
+    for rank, (other_inst, overlap) in enumerate(overlaps, start=1):
+        other_isa = rows[other_inst.code_idx].isa
+        print(
+            f"  {rank}: [{other_inst.start_ts},{other_inst.end_ts}) overlap={overlap} "
+            f"{instruction_category(other_isa)} {opcode_for_isa(other_isa)} code_idx={other_inst.code_idx} {other_isa}"
+        )
+
+
+def print_specific_part_direction(
+    title: str,
+    rows: list[CodeRow],
+    center_pair: tuple[int, int, int, int],
+    other_pair: tuple[int, int, int, int],
+    intervals: list[IntervalResult],
+    center_wave: list[TimedInstruction],
+    other_wave: list[TimedInstruction],
+    threshold: int,
+) -> None:
+    print(f"\n=== {title} ===")
+    print(f"center_trace={wave_filename_from_pair(center_pair)} other_trace={wave_filename_from_pair(other_pair)}")
+    print(f"matched_intervals={len(intervals)} long_latency_threshold={threshold}")
+
+    interval_by_event_key: dict[tuple[int, int, int], tuple[int, IntervalResult]] = {}
+    for interval_idx, interval in enumerate(intervals, start=1):
+        for event in interval.events:
+            interval_by_event_key.setdefault(event_key(event), (interval_idx, interval))
+    long_instructions = [
+        (inst, interval_by_event_key[(inst.start_ts, inst.code_idx, inst.latency)])
+        for inst in center_wave
+        if inst.latency > threshold and (inst.start_ts, inst.code_idx, inst.latency) in interval_by_event_key
+    ]
+    long_instructions.sort(key=lambda item: (item[0].start_ts, item[0].pos))
+
+    print(f"long_instruction_count={len(long_instructions)}")
+    if not long_instructions:
+        return
+
+    for idx, (long_inst, (interval_idx, owner_interval)) in enumerate(long_instructions, start=1):
+        long_isa = rows[long_inst.code_idx].isa
+        print(
+            f"\n-- long #{idx}: center {wave_filename_from_pair(center_pair)} "
+            f"matched_interval=#{interval_idx} "
+            f"interval_ts=[{owner_interval.start_ts},{owner_interval.end_ts}) "
+            f"interval_cycles={owner_interval.cycles} "
+            f"overlap_window=[{long_inst.start_ts},{long_inst.end_ts}) "
+            f"duration={long_inst.latency} type={instruction_category(long_isa)} "
+            f"opcode={opcode_for_isa(long_isa)} code_idx={long_inst.code_idx}"
+        )
+        print(f"center_inst: {format_timed_instruction(rows, long_inst)}")
+
+        overlaps = overlapping_instructions(other_wave, long_inst.start_ts, long_inst.end_ts)
+        print(f"overlap_in_{wave_filename_from_pair(other_pair)} count={len(overlaps)}")
+        if not overlaps:
+            continue
+        print_overlap_timeline(rows, long_inst, overlaps)
+        print("rank overlap_cycles other_start other_end other_latency other_pos other_type other_opcode other_code_idx other_instruction")
+        for rank, (other_inst, overlap) in enumerate(overlaps, start=1):
+            other_isa = rows[other_inst.code_idx].isa
+            print(
+                f"{rank:4d} {overlap:14d} {other_inst.start_ts:11d} {other_inst.end_ts:9d} "
+                f"{other_inst.latency:13d} {other_inst.pos:9d} "
+                f"{instruction_category(other_isa):>10s} {opcode_for_isa(other_isa):<24.24s} "
+                f"{other_inst.code_idx:14d} {other_isa}"
+            )
+
+
+def run_specific_part_config(config: dict[str, object], config_path: Path) -> None:
+    raw_versions = config.get("kernel versions") or config.get("kernel_versions")
+    if not isinstance(raw_versions, list):
+        raise SystemExit(f"{config_path} specific-part mode requires kernel versions")
+
+    print(f"Specific part config: {config_path}")
+    for version_idx, raw_version in enumerate(raw_versions):
+        if not isinstance(raw_version, dict):
+            raise SystemExit(f"{config_path} kernel version {version_idx} must be an object")
+        if "specific_part" not in raw_version:
+            continue
+
+        raw_config = raw_version.get("config")
+        if not isinstance(raw_config, dict):
+            raise SystemExit(f"{config_path} kernel version {version_idx} missing config object")
+        kernel_config = merge_kernel_config(config, raw_config)
+        version_name = str(raw_version.get("value") or raw_version.get("name") or f"version_{version_idx}")
+        specific_part = parse_specific_part_config(raw_version["specific_part"], config_path, version_name)
+        selected_se = sorted({specific_part.trace_a[0], specific_part.trace_b[0]})
+        selected_sm = sorted({specific_part.trace_a[1], specific_part.trace_b[1]})
+        selected_sl = sorted({specific_part.trace_a[2], specific_part.trace_b[2]})
+        selected_wv = sorted({specific_part.trace_a[3], specific_part.trace_b[3]})
+        kernel_config = dict(kernel_config)
+        kernel_config["se"] = ",".join(str(item) for item in selected_se)
+        kernel_config["sm"] = ",".join(str(item) for item in selected_sm)
+        kernel_config["sl"] = ",".join(str(item) for item in selected_sl)
+        kernel_config["wv"] = ",".join(str(item) for item in selected_wv)
+        analysis = analyze_kernel_config(version_name, bool(raw_version.get("baseline", False)), kernel_config, config_path)
+        interval_idx = find_interval_info_index(parse_config_interval_infos(kernel_config, parse_config_sample_points(kernel_config, config_path), config_path) or [], specific_part.interval_name)
+        intervals = analysis.sample_intervals[interval_idx].primary_intervals
+
+        trace_a_wave = timed_instructions_from_wave(analysis.trace_dir, specific_part.trace_a)
+        trace_b_wave = timed_instructions_from_wave(analysis.trace_dir, specific_part.trace_b)
+
+        print(f"\n################ kernel={version_name} ################")
+        print(f"trace_dir={analysis.trace_dir}")
+        print(f"interval_name={specific_part.interval_name} interval_index={interval_idx + 1}")
+        print(f"trace_a={wave_filename_from_pair(specific_part.trace_a)} trace_b={wave_filename_from_pair(specific_part.trace_b)}")
+
+        intervals_a = [interval for interval in intervals if interval.wave_file == wave_filename_from_pair(specific_part.trace_a)]
+        intervals_b = [interval for interval in intervals if interval.wave_file == wave_filename_from_pair(specific_part.trace_b)]
+
+        print_specific_part_direction(
+            "trace A long instructions vs trace B overlaps",
+            analysis.rows,
+            specific_part.trace_a,
+            specific_part.trace_b,
+            intervals_a,
+            trace_a_wave,
+            trace_b_wave,
+            specific_part.long_latency_threshold,
+        )
+        print_specific_part_direction(
+            "trace B long instructions vs trace A overlaps",
+            analysis.rows,
+            specific_part.trace_b,
+            specific_part.trace_a,
+            intervals_b,
+            trace_b_wave,
+            trace_a_wave,
+            specific_part.long_latency_threshold,
+        )
+        print_kernel_summary_with_descriptions(analysis.rows, analysis.summary_records)
+
+
+def run_compare_config(
+    config: dict[str, object],
+    config_path: Path,
+    interval_print_limit: int,
+    show_version_trace_info: bool = False,
+) -> None:
     analyses = parse_kernel_versions(config, config_path)
     baseline = next(analysis for analysis in analyses if analysis.baseline)
     others = [analysis for analysis in analyses if not analysis.baseline]
@@ -1276,13 +2094,20 @@ def run_compare_config(config: dict[str, object], config_path: Path, interval_pr
     for analysis in analyses:
         print(f"  {analysis.name}: trace_dir={analysis.trace_dir} baseline={analysis.baseline}")
 
+    if show_version_trace_info:
+        for analysis in analyses:
+            print_kernel_trace_info(analysis, interval_print_limit)
+        return
+
     for other in others:
         print(f"\n================ Compare {baseline.name} (baseline) vs {other.name} ================")
         sample_count = min(len(baseline.sample_intervals), len(other.sample_intervals))
         for idx in range(sample_count):
             base_sample = baseline.sample_intervals[idx]
             other_sample = other.sample_intervals[idx]
-            print(f"\n=== Compare Sample interval {idx + 1}/{sample_count}: point {idx} -> point {idx + 1} ===")
+            start_name = baseline.point_names[idx] if idx < len(baseline.point_names) else f"point{idx}"
+            end_name = baseline.point_names[idx + 1] if idx + 1 < len(baseline.point_names) else f"point{idx + 1}"
+            print(f"\n=== Compare Sample interval {idx + 1}/{sample_count}: {start_name} -> {end_name} ===")
             print(f"Baseline description: {base_sample.description or '-'}")
             print(f"Other description:    {other_sample.description or '-'}")
 
@@ -1328,20 +2153,50 @@ def run_compare_config(config: dict[str, object], config_path: Path, interval_pr
                 )
 
         print("\n=== Sample Interval Summary Compare ===")
+        other_records = {summary_compare_key(record): record for record in other.summary_records}
+        summary_pairs: list[tuple[SummaryRecord, SummaryRecord]] = []
+        for base_record in sorted(
+            baseline.summary_records,
+            key=summary_base_sum_cycles,
+            reverse=True,
+        ):
+            other_record = other_records.get(summary_compare_key(base_record))
+            if other_record is None:
+                continue
+            base_metrics = interval_metric_summary(base_record.intervals)
+            other_metrics = interval_metric_summary(other_record.intervals)
+            if base_metrics["count"] == 0 and other_metrics["count"] == 0:
+                continue
+            summary_pairs.append((base_record, other_record))
+        total_base_sum_cycles = sum(
+            interval_metric_summary(base_record.intervals)["count"]
+            * interval_metric_summary(base_record.intervals)["avg_cycles"]
+            for base_record, _other_record in summary_pairs
+            if not math.isnan(interval_metric_summary(base_record.intervals)["avg_cycles"])
+        )
+        total_other_sum_cycles = sum(
+            interval_metric_summary(base_record.intervals)["count"]
+            * interval_metric_summary(other_record.intervals)["avg_cycles"]
+            for base_record, other_record in summary_pairs
+            if not math.isnan(interval_metric_summary(other_record.intervals)["avg_cycles"])
+        )
         print(
             f"{'idx':>4s} {'description':<36s} "
             f"{baseline.name + '_count':>8.8s} {other.name + '_count':>8.8s} {'d_count':>8s} "
             f"{baseline.name + '_avg_cycles':>12.12s} {other.name + '_avg_cycles':>12.12s} {'d_avg_cycles':>13s} {'d_avg_cycles_pct':>17s} "
+            f"{'base_sum_cycles':>15s} {'base_sum_cycles_pct':>19s} "
+            f"{'other_sum_cycles':>16s} {'other_sum_cycles_pct':>20s} "
             f"{baseline.name + '_avg_inst':>16.16s} {other.name + '_avg_inst':>16.16s} {'d_avg_inst':>17s} {'d_avg_inst_pct':>16s}"
         )
-        other_records = {summary_compare_key(record): record for record in other.summary_records}
-        summary_pairs: list[tuple[SummaryRecord, SummaryRecord]] = []
-        for base_record in sorted_summary_records(baseline.rows, baseline.summary_records):
-            other_record = other_records.get(summary_compare_key(base_record))
-            if other_record is None:
-                continue
-            summary_pairs.append((base_record, other_record))
-            print_summary_compare_row(base_record, other_record, baseline.name, other.name)
+        for base_record, other_record in summary_pairs:
+            print_summary_compare_row(
+                base_record,
+                other_record,
+                baseline.name,
+                other.name,
+                total_base_sum_cycles,
+                total_other_sum_cycles,
+            )
 
         print_all_summary_compare(baseline, other, summary_pairs)
 
@@ -1358,6 +2213,7 @@ def run_interval_points_file(
     interval_print_limit: int,
 ) -> None:
     points, interval_infos = load_interval_points_file(points_file)
+    point_names = [f"point{idx}" for idx in range(len(points))]
     print(f"Interval points file: {points_file}")
     run_interval_points_data(
         rows,
@@ -1369,6 +2225,7 @@ def run_interval_points_file(
         wv_filter,
         points,
         interval_infos,
+        point_names,
         interval_print_limit,
     )
 
@@ -1383,12 +2240,31 @@ def run_interval_points_data(
     wv_filter: set[int] | None,
     points: list[list[str]],
     interval_infos: list[IntervalInfo] | None,
+    point_names: list[str] | None,
     interval_print_limit: int,
+    kernel_name: str | None = None,
+    extra_arrows: set[tuple[str, str]] | None = None,
 ) -> None:
     print(f"Sample points: {len(points)}")
     if interval_infos is not None:
         print(f"Interval descriptions: {len(interval_infos)}")
 
+    point_code_sequences = [
+        exact_instruction_sequences_from_lines(rows, point_lines, f"sample point {idx}")
+        for idx, point_lines in enumerate(points)
+    ]
+    intervals_by_point = scan_sample_point_intervals(
+        trace_dir,
+        wave_glob,
+        se_filter,
+        sm_filter,
+        sl_filter,
+        wv_filter,
+        point_code_sequences,
+        point_names,
+        kernel_name,
+        extra_arrows,
+    )
     all_intervals: list[IntervalResult] = []
     interval_summaries: list[tuple[int, IntervalInfo | None, list[IntervalResult]]] = []
     for idx in range(len(points) - 1):
@@ -1397,22 +2273,9 @@ def run_interval_points_data(
         interval_info = interval_infos[idx] if interval_infos is not None else None
         description = interval_info.description if interval_info is not None else None
         inc_pattern = interval_info.inc_inst_pattern if interval_info is not None else None
-        start_code_sequences = exact_instruction_sequences_from_lines(
-            rows, start_lines, f"sample point {idx}"
-        )
-        end_code_sequences = exact_instruction_sequences_from_lines(
-            rows, end_lines, f"sample point {idx + 1}"
-        )
-        intervals = scan_intervals(
-            trace_dir,
-            wave_glob,
-            se_filter,
-            sm_filter,
-            sl_filter,
-            wv_filter,
-            start_code_sequences,
-            end_code_sequences,
-        )
+        start_code_sequences = point_code_sequences[idx]
+        end_code_sequences = point_code_sequences[idx + 1]
+        intervals = intervals_by_point[idx]
         matched_for_pattern, unmatched_for_pattern = split_intervals_by_pattern(rows, intervals, inc_pattern)
         primary_intervals = unmatched_for_pattern if inc_pattern and matched_for_pattern else intervals
         all_intervals.extend(primary_intervals)
@@ -1420,7 +2283,9 @@ def run_interval_points_data(
             all_intervals.extend(matched_for_pattern)
         interval_summaries.append((idx, interval_info, intervals))
 
-        print(f"\n=== Sample interval {idx + 1}/{len(points) - 1}: point {idx} -> point {idx + 1} ===")
+        start_name = point_names[idx] if point_names and idx < len(point_names) else f"point{idx}"
+        end_name = point_names[idx + 1] if point_names and idx + 1 < len(point_names) else f"point{idx + 1}"
+        print(f"\n=== Sample interval {idx + 1}/{len(points) - 1}: {start_name} -> {end_name} ===")
         if description or inc_pattern:
             detail = f"Description: {description or '-'}"
             if inc_pattern:
@@ -1688,6 +2553,16 @@ def build_parser() -> argparse.ArgumentParser:
             "[point_i, point_i+1) intervals using the same trace-order matching logic."
         ),
     )
+    parser.add_argument(
+        "--specific-part",
+        action="store_true",
+        help="Run specific_part overlap analysis from a JSON config instead of normal summary/compare output.",
+    )
+    parser.add_argument(
+        "--show-version-trace-info",
+        action="store_true",
+        help="In compare JSON mode, print per-version single-kernel trace interval information before comparisons.",
+    )
     return parser
 
 
@@ -1700,6 +2575,11 @@ def main() -> None:
         config_path = args.trace_dir
         args.trace_dir = None
     config: dict[str, object] | None = load_json_config(config_path) if config_path is not None else None
+    if args.specific_part:
+        if config is None:
+            raise SystemExit("--specific-part requires a JSON config")
+        run_specific_part_config(config, config_path or Path("<config>"))
+        return
     if config is not None and ("kernel versions" in config or "kernel_versions" in config):
         interval_print_limit_raw = (
             args.interval_print_limit
@@ -1707,7 +2587,12 @@ def main() -> None:
             else config_value(config, "interval-print-limit", "interval_print_limit")
         )
         interval_print_limit = int(interval_print_limit_raw) if interval_print_limit_raw is not None else 0
-        run_compare_config(config, config_path or Path("<config>"), interval_print_limit)
+        run_compare_config(
+            config,
+            config_path or Path("<config>"),
+            interval_print_limit,
+            show_version_trace_info=args.show_version_trace_info,
+        )
         return
 
     trace_dir_value = args.trace_dir
@@ -1718,9 +2603,7 @@ def main() -> None:
     if trace_dir_value is None:
         raise SystemExit("trace_dir is required unless the JSON config contains trace_dir")
 
-    trace_dir = trace_dir_value.resolve()
-    if not (trace_dir / "code.json").is_file():
-        raise SystemExit(f"missing code.json under {trace_dir}")
+    trace_dir = resolve_trace_dir(trace_dir_value, config_path or Path("<config>"))
 
     rows = load_code(trace_dir)
     se_arg = args.se if args.se is not None else optional_str(config_value(config, "se")) if config is not None else None
@@ -1749,8 +2632,12 @@ def main() -> None:
     ]
     config_points: list[list[str]] | None = None
     config_interval_infos: list[IntervalInfo] | None = None
+    config_point_names: list[str] | None = None
+    config_extra_arrows: set[tuple[str, str]] | None = None
     if config is not None and ("sample points" in config or "sample_points" in config):
         config_points = parse_config_sample_points(config, config_path or Path("<config>"))
+        config_point_names = parse_config_sample_point_names(config, config_path or Path("<config>"))
+        config_extra_arrows = parse_config_extra_arrows(config, config_path or Path("<config>"), config_point_names)
         config_interval_infos = parse_config_interval_infos(config, config_points, config_path or Path("<config>"))
 
     if args.interval_points_file is not None or config_points is not None:
@@ -1775,7 +2662,10 @@ def main() -> None:
                 wv_filter,
                 config_points,
                 config_interval_infos,
+                config_point_names,
                 interval_print_limit,
+                config_kernel_name(config, config_path),
+                config_extra_arrows,
             )
         else:
             run_interval_points_file(

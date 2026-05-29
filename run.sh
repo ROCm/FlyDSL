@@ -7,8 +7,8 @@ alias ll='ls -l --color=auto'
 alias ls='ls --color=auto'
 alias python='python3'
 
-export HIP_VISIBLE_DEVICES=0
-# export HIP_VISIBLE_DEVICES=1
+# export HIP_VISIBLE_DEVICES=0
+export HIP_VISIBLE_DEVICES=1
 # export HIP_VISIBLE_DEVICES=3
 # export HIP_VISIBLE_DEVICES=4
 # export HIP_VISIBLE_DEVICES=6
@@ -40,8 +40,8 @@ function run_flydsl_op {
     export FLYDSL_DEBUG_LOG_TO_CONSOLE=1
     export FLYDSL_DEBUG_LOG_LEVEL=INFO
 
-    # export FLYDSL_RUNTIME_ENABLE_CACHE=1
-    export FLYDSL_DUMP_IR=1
+    # export FLYDSL_RUNTIME_ENABLE_CACHE=0
+    # export FLYDSL_DUMP_IR=1
     export FLYDSL_DUMP_DIR=./flydsl_dump
     export FLYDSL_ENABLE_OPUS_PATH=1
     # export FLYDSL_OPUS_SETPRIO=0
@@ -75,14 +75,20 @@ function run_flydsl_op {
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 512 --head_dim 128 --iters 100
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100
 
-    # python tests/kernels/test_flash_opus_attn.py --warmup 5 --iters 100 --compare
+    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
 
-    python3 scripts/trace_segment_cycles.py seg_asm/cpp_attn/main_loop_cluster0_7.json | tee trace_info.cpp.log
-    python3 scripts/trace_segment_cycles.py seg_asm/fyd_attn/main_loop_cluster0_7.json | tee trace_info.log
+
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+
+    # python3 scripts/trace_segment_cycles.py seg_asm/cpp_attn/main_loop_cluster0_7.json | tee trace_info.cpp.log
+    # python3 scripts/trace_segment_cycles.py seg_asm/fyd_attn/main_loop_cluster0_7.json | tee trace_info.log
     # python3 scripts/trace_segment_cycles.py seg_asm/main_loop_cluster0_7_compare.json | tee trace.diff.log
 
 

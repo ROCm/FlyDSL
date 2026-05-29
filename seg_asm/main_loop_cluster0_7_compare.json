@@ -1,5 +1,5 @@
 {
-  "interval-print-limit": "0",
+  "interval-print-limit": "10",
   "kernel versions": [
     {
       "key": "version",
@@ -114,7 +114,7 @@
         "sm": "*",
         "sl": "*",
         "wv": "*",
-        "trace_dir": "thread_trace/fyd_opus_b2_s1024/ui_output_agent_25819_dispatch_5"
+        "trace_dir": "thread_trace/fyd_opus_b2_s1024/ui_output_agent_65021_dispatch_5"
       }
     },
     {
@@ -268,7 +268,7 @@
         "sm": "*",
         "sl": "*",
         "wv": "*",
-        "trace_dir": "thread_trace/cpp_opus_b2_s1024/ui_output_agent_25550_dispatch_246"
+        "trace_dir": "thread_trace/cpp_opus_b2_s1024/ui_output_agent_30733_dispatch_261/"
       }
     }
   ]

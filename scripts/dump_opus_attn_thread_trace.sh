@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# YAML_FILE="./input_opus_attn_thread_trace.yaml"
-YAML_FILE="./input_opus_gqa_d128_thread_trace.yaml"
-
 TEST_CMD=(
   python tests/kernels/test_flash_opus_attn.py
   --causal
@@ -17,15 +14,18 @@ TEST_CMD=(
   --iters 100
 )
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 <output_trace_tar_path>"
-  echo "Example: $0 thread_trace/flash_attn_opus_kernel_0_b2_s1024_wpe2.tar.gz"
+if [[ $# -ne 2 ]]; then
+  echo "Usage: $0 <rocprof_input_yaml> <output_trace_tar_path>"
+  echo "Example: $0 ./input_opus_attn_thread_trace.yaml thread_trace/flash_attn_opus_kernel_0_b2_s1024_wpe2.tar.gz"
   exit 2
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
+
+YAML_FILE="$1"
+OUTPUT_TAR="$2"
 
 if [[ ! -f "${YAML_FILE}" ]]; then
   echo "Missing rocprofv3 input YAML: ${YAML_FILE}" >&2
@@ -54,7 +54,6 @@ ensure_rocprof_trace_decoder() {
   )
 }
 
-OUTPUT_TAR="$1"
 OUTPUT_DIR="$(dirname "${OUTPUT_TAR}")"
 OUTPUT_BASE="$(basename "${OUTPUT_TAR}")"
 TRACE_NAME="${OUTPUT_BASE%.tar.gz}"
@@ -81,13 +80,16 @@ if [[ ":${LD_LIBRARY_PATH:-}:" != *":${MLIR_LIBS_DIR}:"* ]]; then
   export LD_LIBRARY_PATH="${MLIR_LIBS_DIR}:${LD_LIBRARY_PATH:-}"
 fi
 
-export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-0}"
+# export HIP_VISIBLE_DEVICES=0
+export HIP_VISIBLE_DEVICES=1
 export FLYDSL_WAVES_PER_EU=2
 export FLYDSL_ENABLE_OPUS_PATH=1
 export FLYDSL_LOG_MORE="${FLYDSL_LOG_MORE:-1}"
 export FLYDSL_DEBUG_LOG_TO_CONSOLE="${FLYDSL_DEBUG_LOG_TO_CONSOLE:-1}"
 export FLYDSL_DEBUG_LOG_LEVEL="${FLYDSL_DEBUG_LOG_LEVEL:-INFO}"
 unset FLYDSL_OPUS_TRIGGER_LAZY_ELSE FLYDSL_OPUS_DEBUG_LAZY_ELSE FLYDSL_OPUS_DEBUG_LAZY_COUNTS
+
+rocm-smi | egrep "$HIP_VISIBLE_DEVICES    |Device"
 
 rm -rf ~/.flydsl/cache/*
 mkdir -p "${RPF_DIR}" "${OUTPUT_DIR}"
@@ -112,5 +114,7 @@ tar -zcf "${OUTPUT_TAR}" -C "${OUTPUT_DIR}" "${TRACE_NAME}"
 
 echo "Trace directory: ${FINAL_DIR}"
 echo "Trace archive:   ${OUTPUT_TAR}"
+ls -lah ${FINAL_DIR}
+ls -lah ${OUTPUT_TAR}
 echo "rocprofv3/test exit code: ${status}"
 exit "${status}"
