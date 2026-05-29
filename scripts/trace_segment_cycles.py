@@ -1954,6 +1954,86 @@ def print_overlap_timeline(
         )
 
 
+def print_group_overlap_timeline(
+    rows: list[CodeRow],
+    center_entries: list[tuple[int, TimedInstruction]],
+    other_wave: list[TimedInstruction],
+) -> None:
+    if not center_entries:
+        return
+
+    overlap_records: list[tuple[TimedInstruction, int, int]] = []
+    for long_idx, center_inst in center_entries:
+        for other_inst, overlap in overlapping_instructions(other_wave, center_inst.start_ts, center_inst.end_ts):
+            overlap_records.append((other_inst, overlap, long_idx))
+
+    if not overlap_records:
+        return
+
+    dedup_other: dict[tuple[int, int, int], dict[str, object]] = {}
+    for other_inst, overlap, long_idx in overlap_records:
+        key = (other_inst.pos, other_inst.start_ts, other_inst.code_idx)
+        entry = dedup_other.setdefault(key, {"inst": other_inst, "overlaps": []})
+        entry["overlaps"].append((long_idx, overlap))
+
+    other_entries = sorted(
+        ((entry["inst"], entry["overlaps"]) for entry in dedup_other.values()),
+        key=lambda item: (item[0].start_ts, item[0].pos),
+    )
+
+    rel_ranges = [
+        (center_inst.start_ts - center_entries[0][1].start_ts, center_inst.end_ts - center_entries[0][1].start_ts)
+        for _long_idx, center_inst in center_entries
+    ]
+    origin = min(center_inst.start_ts for _long_idx, center_inst in center_entries)
+    rel_ranges = [(center_inst.start_ts - origin, center_inst.end_ts - origin) for _long_idx, center_inst in center_entries]
+    rel_ranges.extend((other_inst.start_ts - origin, other_inst.end_ts - origin) for other_inst, _overlaps in other_entries)
+    axis_min = min(start for start, _end in rel_ranges)
+    axis_max = max(end for _start, end in rel_ranges)
+    scale = 1
+
+    print(f"timeline: origin={origin}; rel_axis=[{axis_min},{axis_max}) scale={scale} cycle/char")
+    center_boxes = [
+        (f"L{long_idx}", center_inst.start_ts - origin, center_inst.end_ts - origin)
+        for long_idx, center_inst in center_entries
+    ]
+    for line in render_timeline_layer(center_boxes, axis_min, axis_max, scale, tick_position="top"):
+        print(line)
+
+    other_boxes = [
+        (str(rank), other_inst.start_ts - origin, other_inst.end_ts - origin)
+        for rank, (other_inst, _overlaps) in enumerate(other_entries, start=1)
+    ]
+    for line in render_timeline_layer(other_boxes, axis_min, axis_max, scale):
+        print(line)
+
+    print("legend:")
+    for long_idx, center_inst in center_entries:
+        center_isa = rows[center_inst.code_idx].isa
+        print(
+            f"  L{long_idx}: [{center_inst.start_ts},{center_inst.end_ts}) "
+            f"{instruction_category(center_isa)} {opcode_for_isa(center_isa)} code_idx={center_inst.code_idx} {center_isa}"
+        )
+    for rank, (other_inst, overlaps) in enumerate(other_entries, start=1):
+        other_isa = rows[other_inst.code_idx].isa
+        overlap_text = ",".join(f"L{long_idx}:{overlap}" for long_idx, overlap in sorted(overlaps))
+        print(
+            f"  {rank}: [{other_inst.start_ts},{other_inst.end_ts}) overlaps={overlap_text} "
+            f"{instruction_category(other_isa)} {opcode_for_isa(other_isa)} code_idx={other_inst.code_idx} {other_isa}"
+        )
+
+    print("rank other_start other_end other_latency other_pos other_type other_opcode other_code_idx overlaps_by_long other_instruction")
+    for rank, (other_inst, overlaps) in enumerate(other_entries, start=1):
+        other_isa = rows[other_inst.code_idx].isa
+        overlap_text = ",".join(f"L{long_idx}:{overlap}" for long_idx, overlap in sorted(overlaps))
+        print(
+            f"{rank:4d} {other_inst.start_ts:11d} {other_inst.end_ts:9d} "
+            f"{other_inst.latency:13d} {other_inst.pos:9d} "
+            f"{instruction_category(other_isa):>10s} {opcode_for_isa(other_isa):<24.24s} "
+            f"{other_inst.code_idx:14d} {overlap_text:<24.24s} {other_isa}"
+        )
+
+
 def print_specific_part_direction(
     title: str,
     rows: list[CodeRow],
@@ -1983,33 +2063,28 @@ def print_specific_part_direction(
     if not long_instructions:
         return
 
-    for idx, (long_inst, (interval_idx, owner_interval)) in enumerate(long_instructions, start=1):
-        long_isa = rows[long_inst.code_idx].isa
-        print(
-            f"\n-- long #{idx}: center {wave_filename_from_pair(center_pair)} "
-            f"matched_interval=#{interval_idx} "
-            f"interval_ts=[{owner_interval.start_ts},{owner_interval.end_ts}) "
-            f"interval_cycles={owner_interval.cycles} "
-            f"overlap_window=[{long_inst.start_ts},{long_inst.end_ts}) "
-            f"duration={long_inst.latency} type={instruction_category(long_isa)} "
-            f"opcode={opcode_for_isa(long_isa)} code_idx={long_inst.code_idx}"
-        )
-        print(f"center_inst: {format_timed_instruction(rows, long_inst)}")
+    grouped: dict[int, dict[str, object]] = {}
+    for long_idx, (long_inst, (interval_idx, owner_interval)) in enumerate(long_instructions, start=1):
+        entry = grouped.setdefault(interval_idx, {"interval": owner_interval, "longs": []})
+        entry["longs"].append((long_idx, long_inst))
 
-        overlaps = overlapping_instructions(other_wave, long_inst.start_ts, long_inst.end_ts)
-        print(f"overlap_in_{wave_filename_from_pair(other_pair)} count={len(overlaps)}")
-        if not overlaps:
-            continue
-        print_overlap_timeline(rows, long_inst, overlaps)
-        print("rank overlap_cycles other_start other_end other_latency other_pos other_type other_opcode other_code_idx other_instruction")
-        for rank, (other_inst, overlap) in enumerate(overlaps, start=1):
-            other_isa = rows[other_inst.code_idx].isa
+    for interval_idx in sorted(grouped):
+        owner_interval = grouped[interval_idx]["interval"]
+        center_entries = sorted(grouped[interval_idx]["longs"], key=lambda item: (item[1].start_ts, item[1].pos))
+        print(
+            f"\n-- matched_interval #{interval_idx}: center {wave_filename_from_pair(center_pair)} "
+            f"interval_ts=[{owner_interval.start_ts},{owner_interval.end_ts}) "
+            f"interval_cycles={owner_interval.cycles} long_count={len(center_entries)}"
+        )
+        for long_idx, long_inst in center_entries:
+            long_isa = rows[long_inst.code_idx].isa
             print(
-                f"{rank:4d} {overlap:14d} {other_inst.start_ts:11d} {other_inst.end_ts:9d} "
-                f"{other_inst.latency:13d} {other_inst.pos:9d} "
-                f"{instruction_category(other_isa):>10s} {opcode_for_isa(other_isa):<24.24s} "
-                f"{other_inst.code_idx:14d} {other_isa}"
+                f"long L{long_idx}: overlap_window=[{long_inst.start_ts},{long_inst.end_ts}) "
+                f"duration={long_inst.latency} type={instruction_category(long_isa)} "
+                f"opcode={opcode_for_isa(long_isa)} code_idx={long_inst.code_idx}"
             )
+        print(f"overlap_in_{wave_filename_from_pair(other_pair)}")
+        print_group_overlap_timeline(rows, center_entries, other_wave)
 
 
 def run_specific_part_config(config: dict[str, object], config_path: Path) -> None:

@@ -143,11 +143,11 @@
       "baseline": false,
       "specific_part": {
         "se_sm_sl_wv_pair": [
-          [0, 1, 1, 0],
-          [0, 1, 0, 0]
+          [0, 0, 0, 0],
+          [0, 0, 1, 0]
         ],
         "interval_name": "Main loop Cluster 3",
-        "long_lat_thr": 20
+        "long_lat_thr": 2
       },
       "config": {
         "sample points": [

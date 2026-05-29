@@ -108,8 +108,35 @@ def pytorch_ref_attention(q, k, v, causal=True):
         rep = nh_q // nh_kv
         k_t = k_t.repeat_interleave(rep, dim=1)
         v_t = v_t.repeat_interleave(rep, dim=1)
+    score_elems = q_t.shape[0] * q_t.shape[1] * q_t.shape[2] * k_t.shape[2]
+    if score_elems > 128 * 1024 * 1024:
+        return pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=causal).transpose(1, 2)
     out = F.scaled_dot_product_attention(q_t, k_t, v_t, is_causal=causal)
     return out.transpose(1, 2)
+
+
+@torch.no_grad()
+def pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=True):
+    """Compute reference attention in Q chunks to avoid large SDPA workspaces."""
+    B, H, S, D = q_t.shape
+    max_score_elems = 64 * 1024 * 1024
+    chunk_size = max(1, min(S, max_score_elems // max(B * H * S, 1)))
+    out = torch.empty((B, H, S, D), device=q_t.device, dtype=torch.float32)
+    k_trans = k_t.transpose(-1, -2).contiguous()
+    scale = 1.0 / math.sqrt(D)
+    key_idx = torch.arange(S, device=q_t.device).view(1, 1, 1, S)
+
+    for q_start in range(0, S, chunk_size):
+        q_end = min(q_start + chunk_size, S)
+        q_chunk = q_t[:, :, q_start:q_end, :]
+        scores = torch.matmul(q_chunk, k_trans) * scale
+        if causal:
+            q_idx = torch.arange(q_start, q_end, device=q_t.device).view(1, 1, -1, 1)
+            scores = scores.masked_fill(key_idx > q_idx, float("-inf"))
+        probs = torch.softmax(scores, dim=-1)
+        out[:, :, q_start:q_end, :] = torch.matmul(probs, v_t)
+
+    return out
 
 
 def compute_md5(tensor: torch.Tensor) -> str:
@@ -578,6 +605,96 @@ def run_opus_attn_bench(
     return results
 
 
+def run_exp_isa_opus_bench(
+    batch, seq_len, nheads, head_dim, dtype, causal,
+    warmup, iters, seed=DEFAULT_SEED, dtype_str="bf16", verbose=False, num_kv_heads=None,
+):
+    """Run exp_isa/flash_attn_opus.v1.s and return a run_config-compatible result dict."""
+    if dtype != torch.bfloat16 or dtype_str != "bf16":
+        return {"skip": True}
+    if not causal:
+        return {"skip": True}
+
+    H_KV = num_kv_heads if num_kv_heads is not None else nheads
+    if (nheads, H_KV, head_dim) != (64, 64, 128):
+        return {"skip": True}
+    if seq_len % 256 != 0:
+        return {"skip": True}
+
+    try:
+        opus_asm = importlib.import_module("exp_isa.opus_asm")
+    except Exception as e:
+        return {"err": f"exp_isa.opus_asm import: {e}"}
+
+    results = {}
+    setup_seed(seed)
+    torch.cuda.empty_cache()
+
+    B, S, H, D = batch, seq_len, nheads, head_dim
+    q_4d = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    try:
+        out_4d = opus_asm.forward(q_4d, k_4d, v_4d, causal=causal)
+        torch.cuda.synchronize()
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return {"err": f"exp_isa_opus: {e}"}
+
+    ref_4d = pytorch_ref_attention(q_4d.float(), k_4d.float(), v_4d.float(), causal=causal).to(dtype)
+    o_f32 = out_4d.float()
+    ref_f32 = ref_4d.float()
+    max_err = (o_f32 - ref_f32).abs().max().item()
+    mean_err = (o_f32 - ref_f32).abs().mean().item()
+    cos_sim = F.cosine_similarity(o_f32.view(-1, D), ref_f32.view(-1, D), dim=1)
+    min_cos = cos_sim.min().item()
+    results["max_err"] = max_err
+    results["mean_err"] = mean_err
+    results["min_cos"] = min_cos
+    results["passed"] = max_err < 1e-2 and min_cos > 0.99
+
+    if verbose:
+        tag = f"B={B} S={S} H={H} D={D}"
+        result_md5 = compute_md5(out_4d)
+        ref_md5 = compute_md5(ref_4d)
+        print(f"  [{tag}] exp_isa_opus result_md5 = {result_md5}")
+        print(f"  [{tag}] exp_isa_opus ref_md5    = {ref_md5}")
+        print(f"  [{tag}] exp_isa_opus --- compare_arrays ---")
+        compare_arrays(
+            out_4d.to(torch.float32).detach().cpu().numpy(),
+            ref_4d.to(torch.float32).detach().cpu().numpy(),
+        )
+
+    try:
+        out_bench = torch.empty_like(q_4d)
+
+        def bench_fn():
+            opus_asm.forward_out(q_4d, k_4d, v_4d, out_bench, causal=causal)
+
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                bench_fn()
+            torch.cuda.synchronize()
+
+        _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
+        s_eff = S / 2.0 if causal else float(S)
+        flops = 4.0 * S * s_eff * D * H * B
+        results["us"] = us
+        results["tflops"] = flops / (us * 1e-6) / 1e12
+    except Exception as e:
+        results["bench_err"] = str(e)
+
+    return results
+
+
 def _fmt_result(r):
     """Format: 'Time(us) TFLOPS MaxErr'."""
     if r.get("skip"):
@@ -903,10 +1020,16 @@ def main():
                         seed=args.seed, backend="ck",
                         num_kv_heads=nh_kv,
                     )
-                    asm_r = run_aiter_bench(
+                    # asm_r = run_aiter_bench(
+                    #     batch, seq_len, nh, hd, dtype, causal,
+                    #     warmup=args.warmup, iters=args.iters,
+                    #     seed=args.seed, backend="asm",
+                    #     num_kv_heads=nh_kv,
+                    # )
+                    asm_r = run_exp_isa_opus_bench(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, backend="asm",
+                        seed=args.seed, dtype_str=dtype_str, verbose=False,
                         num_kv_heads=nh_kv,
                     )
 

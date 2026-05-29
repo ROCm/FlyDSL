@@ -1,10 +1,10 @@
 	.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 	.amdhsa_code_object_version 6
 	.text
-	.globl	flash_attn_opus_kernel_0
+	.globl	flash_attn_opus_kernel_hand_asm
 	.p2align	8
-	.type	flash_attn_opus_kernel_0,@function
-flash_attn_opus_kernel_0:
+	.type	flash_attn_opus_kernel_hand_asm,@function
+flash_attn_opus_kernel_hand_asm:
 ; OPUS ISA ANNOTATION
 ; Source map: FlyDSL/kernels/flash_attn_opus.py, selected kernel body around Python lines 1241-1987.
 ; Notation:
@@ -4923,7 +4923,7 @@ flash_attn_opus_kernel_0:
 	s_endpgm
 	.section	.rodata,"a",@progbits
 	.p2align	6, 0x0
-	.amdhsa_kernel flash_attn_opus_kernel_0
+	.amdhsa_kernel flash_attn_opus_kernel_hand_asm
 		.amdhsa_group_segment_fixed_size 68096
 		.amdhsa_private_segment_fixed_size 0
 		.amdhsa_kernarg_size 56
@@ -4964,18 +4964,18 @@ flash_attn_opus_kernel_0:
 	.end_amdhsa_kernel
 	.text
 .Lfunc_end0:
-	.size	flash_attn_opus_kernel_0, .Lfunc_end0-flash_attn_opus_kernel_0
+	.size	flash_attn_opus_kernel_hand_asm, .Lfunc_end0-flash_attn_opus_kernel_hand_asm
 
-	.set flash_attn_opus_kernel_0.num_vgpr, 250
-	.set flash_attn_opus_kernel_0.num_agpr, 0
-	.set flash_attn_opus_kernel_0.numbered_sgpr, 44
-	.set flash_attn_opus_kernel_0.num_named_barrier, 0
-	.set flash_attn_opus_kernel_0.private_seg_size, 0
-	.set flash_attn_opus_kernel_0.uses_vcc, 1
-	.set flash_attn_opus_kernel_0.uses_flat_scratch, 0
-	.set flash_attn_opus_kernel_0.has_dyn_sized_stack, 0
-	.set flash_attn_opus_kernel_0.has_recursion, 0
-	.set flash_attn_opus_kernel_0.has_indirect_call, 0
+	.set flash_attn_opus_kernel_hand_asm.num_vgpr, 250
+	.set flash_attn_opus_kernel_hand_asm.num_agpr, 0
+	.set flash_attn_opus_kernel_hand_asm.numbered_sgpr, 44
+	.set flash_attn_opus_kernel_hand_asm.num_named_barrier, 0
+	.set flash_attn_opus_kernel_hand_asm.private_seg_size, 0
+	.set flash_attn_opus_kernel_hand_asm.uses_vcc, 1
+	.set flash_attn_opus_kernel_hand_asm.uses_flat_scratch, 0
+	.set flash_attn_opus_kernel_hand_asm.has_dyn_sized_stack, 0
+	.set flash_attn_opus_kernel_hand_asm.has_recursion, 0
+	.set flash_attn_opus_kernel_hand_asm.has_indirect_call, 0
 	.p2alignl 6, 3212836864
 	.fill 256, 4, 3212836864
 	.section	.AMDGPU.gpr_maximums,"",@progbits
@@ -5026,7 +5026,7 @@ amdhsa.kernels:
     .kernarg_segment_align: 8
     .kernarg_segment_size: 56
     .max_flat_workgroup_size: 512
-    .name:           flash_attn_opus_kernel_0
+    .name:           flash_attn_opus_kernel_hand_asm
     .private_segment_fixed_size: 0
     .reqd_workgroup_size:
       - 512
@@ -5034,7 +5034,7 @@ amdhsa.kernels:
       - 1
     .sgpr_count:     50
     .sgpr_spill_count: 0
-    .symbol:         flash_attn_opus_kernel_0.kd
+    .symbol:         flash_attn_opus_kernel_hand_asm.kd
     .uniform_work_group_size: 1
     .uses_dynamic_stack: false
     .vgpr_count:     250
