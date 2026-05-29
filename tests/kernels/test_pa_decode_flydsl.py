@@ -289,10 +289,9 @@ def _flydsl_build_inputs_for_pscale(
     }
 
 
-@pytest.mark.skipif(torch.cuda.get_device_capability()[0] != 9, reason="skip on non sm90!")
-@pytest.mark.parametrize("num_batch", [1, 16])
-@pytest.mark.parametrize("num_seq_q", [1, 2])
-@pytest.mark.parametrize("max_seq_kv", [1024])
+@pytest.mark.parametrize("num_batch", [1, 16, 128])
+@pytest.mark.parametrize("num_seq_q", [1, 2, 4])
+@pytest.mark.parametrize("max_seq_kv", [1024, 8192])
 @pytest.mark.parametrize("kv_head_q_head", [(2, 8), (4, 32)])
 @pytest.mark.parametrize("p_scale_mode", ["none", "all_ones", "all_2", "per_head_random"])
 def test_attn_fp8_pscale(
@@ -614,8 +613,8 @@ def _flydsl_pscale_bench(
 
 def run_flydsl_pscale_perf():
     """Run a sweep of perf configs covering small/large batch and context."""
-    _kv_lens = [1024, 16384, 32768, 65536, 131072]
-    _seq_counts = [2, 4, 8, 16, 32, 64, 128, 256]
+    _kv_lens = [131072]
+    _seq_counts = [256]
     _base = dict(num_seq_q=2, block_size=16, num_head_kv=1, num_head_q=8, head_dim=128)
     configs = [
         dict(num_batch=ns, context_length=kv, **_base)
