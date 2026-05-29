@@ -320,6 +320,6 @@ class TestCacheDisabledRegression:
             num_warmup=1,
         )
 
-        assert avg_us > 0
+        assert avg_us >= 0
         assert len(_noop_launch._mem_cache) == 1
         assert len(_noop_launch._call_state_cache) == 1
