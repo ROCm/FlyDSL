@@ -2581,4 +2581,3 @@ def launch_moe_sorting_oneshot_fused_path(
         fx.Stream(stream),
     )
     _oneshot_fused_cf_cache[cache_key] = cf
-
