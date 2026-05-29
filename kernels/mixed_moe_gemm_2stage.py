@@ -4404,9 +4404,33 @@ def compile_mixed_moe_gemm2(
                                 else _is_lead
                             )
                             with _tfs_ir.InsertionPoint(_if_lead.then_block):
-                                # vmcnt(0)：等本卡 SLC store 离开 pipeline。
-                                rocdl.s_waitcnt(0)
-                                # device-scope cross-CTA atomic add
+                                # device-scope cross-CTA atomic add on the
+                                # per-row counter; only the thread that pushes
+                                # the counter to ``num_n_tiles - 1`` (= last
+                                # n-tile completion for this row) goes on to
+                                # publish the cross-card flag bump.  Without
+                                # this gate every (row, n_tile) thread would
+                                # fan out a system-scope atomic, multiplying
+                                # the flag traffic by ``num_n_tiles`` (=56 for
+                                # n=7168/tile_n=128) — wasted bandwidth that
+                                # competes with the legitimate combine spin.
+                                #
+                                # NOTE: ``s_waitcnt vmcnt(0)`` was previously
+                                # issued here (= every n-tile / lead thread)
+                                # to ensure local SLC stores leave pipeline
+                                # before publishing the flag.  But the FLAG
+                                # publish only happens on the last n-tile
+                                # (counter==num_n_tiles-1).  Pre-counter
+                                # increments from earlier n-tiles do NOT
+                                # depend on store retirement (the value we
+                                # write is consumed by the SAME thread on
+                                # the SAME row's later atomic, all device-
+                                # scope monotonic).  Moving the wait inside
+                                # the ``_if_last`` arm cuts the drain cost
+                                # by ``num_n_tiles``× while preserving the
+                                # producer→consumer happens-before across
+                                # cards (system-scope atomic still serialises
+                                # against in-flight VMEM via the wait below).
                                 _counter_addr = _tfs_byte_addr_local_counter(row_i32)
                                 _old = _tfs_atomic_add(
                                     _counter_addr, _c_tfs_one_i32)
@@ -4423,7 +4447,23 @@ def compile_mixed_moe_gemm2(
                                     else _last_eq
                                 )
                                 with _tfs_ir.InsertionPoint(_if_last.then_block):
-                                    # 跨卡 system-scope atomic add 远端 flag。
+                                    # vmcnt(0): wait for THIS rank's SLC P2P
+                                    # stores (issued by the gemm2 epilogue
+                                    # ``store_pair`` for every n-tile of this
+                                    # row) to retire from the VMEM pipeline
+                                    # BEFORE we publish the cross-card flag.
+                                    # The receiver (combine spin-wait) treats
+                                    # ``flag[lid] >= k`` as evidence that all
+                                    # k contributing rows on dst_lid have
+                                    # already landed in shmem_comb_inp_tok;
+                                    # without this drain, the system-scope
+                                    # atomic could overtake an unfinished SLC
+                                    # store for the same row, causing the
+                                    # combine to read a partially-written
+                                    # token.
+                                    rocdl.s_waitcnt(0)
+                                    # cross-card system-scope atomic add to
+                                    # bump remote flag[dest_lid] on dest_pe.
                                     dest_pe_idx = arith.index_cast(
                                         ir.IndexType.get(), dest_pe
                                     )
@@ -4434,7 +4474,9 @@ def compile_mixed_moe_gemm2(
                                         pe_flag_base_i64, dest_lid)
                                     _tfs_atomic_add_sys(
                                         _remote_addr, _c_tfs_one_i32)
-                                    # consume-on-read reset 本卡 counter
+                                    # consume-on-read: reset counter so a
+                                    # subsequent invocation (cudagraph replay)
+                                    # observes a clean ``_old==0`` lottery.
                                     _tfs_atomic_xchg(
                                         _counter_addr, _c_tfs_zero_i32)
                                     _tfs_scf_d.YieldOp([])

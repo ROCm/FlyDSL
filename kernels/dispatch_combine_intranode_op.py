@@ -313,6 +313,14 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # scatter. 0 until the first dispatch().
         self._raw_input_wts_ptr = 0
 
+        # Verify-side fp8_direct_cast gate (quant_type='fp8_direct_cast'
+        # AND wire dtype bf16). The verify path snapshots shmem_comb_out_tok
+        # through this flag to pick fp8 vs bf16/fp16 views.
+        self._use_fp8_cast = bool(
+            config.quant_type == "fp8_direct_cast"
+            and config.data_type == torch.bfloat16
+        )
+
         # Lazy skip_stage1 variant for the fused path (stage 2 + stage 3
         # only). Keyed by (input.dtype, enable_weights) so a runtime dtype
         # switch (e.g. fp4 dispatch + bf16 combine) cannot reuse a stale
@@ -764,6 +772,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 enable_std_moe=cfg.enable_std_moe,
                 max_recv=self._effective_max_recv,
                 use_token_flag_sync=cfg.use_token_flag_sync,
+                local_counter_size=int(self.device_local_counter.numel()),
             )
         return self._disp_jit_cache[d_dtype]
 
@@ -839,6 +848,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_p2p_out_scales,
                 *_std_args,
                 self._fx_comb_flag,
+                self._fx_local_counter,
                 inp_cur_tok,
                 stream,
             )
@@ -865,6 +875,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_p2p_out_scales,
                 *_std_args,
                 self._fx_comb_flag,
+                self._fx_local_counter,
                 inp_cur_tok,
                 stream,
             )
