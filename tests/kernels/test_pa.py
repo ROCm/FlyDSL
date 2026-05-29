@@ -659,10 +659,6 @@ def run_pa_decode_ps_test(
         raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
     if compute_type != aiter.dtypes.fp8:
         raise ValueError("This PS-only harness only keeps fp8 cases.")
-    if block_size != 1024:
-        raise ValueError("This PS-only harness only keeps block_size=1024 cases.")
-    if head_size != 128:
-        raise ValueError("This PS-only harness only keeps head_size=128 cases.")
     results: Dict[str, Union[float, int, str, bool, Tuple[int, int]]] = {
         "compute_type": dtype_to_name(compute_type),
         "quant_mode": quant_mode,
@@ -1232,7 +1228,7 @@ def sliding_window_accuracy_test() -> None:
     BATCH_SIZE_OPTIONS = [128]
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [True]
-    BLOCK_SIZE_OPTIONS = [1024]
+    BLOCK_SIZE_OPTIONS = [16, 1024]
     SLIDING_WINDOW_OPTIONS = [0]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 
