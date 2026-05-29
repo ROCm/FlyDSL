@@ -337,7 +337,11 @@ class BufferResourceDescriptor:
         return BufferResourceDescriptor(rsrc)
 
 
-def create_buffer_resource_from_addr(addr_i64: ir.Value) -> ir.Value:
+def create_buffer_resource_from_addr(
+    addr_i64: ir.Value,
+    *,
+    num_records_bytes: Optional[Union[int, ir.Value]] = None,
+) -> ir.Value:
     """Create AMD buffer resource descriptor from a raw i64 device address.
 
     Useful when working with runtime pointer arrays (e.g. IPC-mapped addresses
@@ -347,6 +351,7 @@ def create_buffer_resource_from_addr(addr_i64: ir.Value) -> ir.Value:
 
     Args:
         addr_i64: Raw 64-bit device address (i64 MLIR value).
+        num_records_bytes: Optional buffer size in bytes for hardware OOB checking.
 
     Returns:
         ROCDL buffer resource descriptor (!llvm.ptr<8>).
@@ -360,7 +365,19 @@ def create_buffer_resource_from_addr(addr_i64: ir.Value) -> ir.Value:
     base_ptr = llvm.IntToPtrOp(ptr_type, addr_i64).result
     flags = _create_i32_constant(_get_buffer_flags())
     stride = _create_i16_constant(0)
-    num_records = _create_i64_constant(0xFFFFFFFF)
+    if num_records_bytes is None:
+        num_records = _create_i64_constant(0xFFFFFFFF)
+    elif isinstance(num_records_bytes, int):
+        nbytes = max(0, min(int(num_records_bytes), 0xFFFFFFFF))
+        num_records = _create_i64_constant(nbytes)
+    else:
+        num_records = _unwrap_value(num_records_bytes)
+        i64_type = T.i64()
+        if not isinstance(num_records.type, ir.IntegerType) or num_records.type.width != 64:
+            if isinstance(num_records.type, ir.IndexType):
+                num_records = _unwrap_value(std_arith.IndexCastOp(i64_type, num_records).result)
+            else:
+                num_records = _unwrap_value(std_arith.ExtSIOp(i64_type, num_records).result)
     rsrc_type = ir.Type.parse("!llvm.ptr<8>")
     return rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride, num_records, flags).result
 

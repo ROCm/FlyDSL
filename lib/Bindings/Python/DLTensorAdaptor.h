@@ -336,6 +336,27 @@ public:
     return *this;
   }
 
+  // Each dim is encoded as a single signed int (no nested tuples) to keep
+  // the number of Python objects to ~2N + a couple of containers:
+  //   static  → dimSize          (>= 0)
+  //   dynamic → -divisibility    (<= -1; divisibility >= 1 invariant)
+  nb::tuple getCacheSignature() const {
+    auto encode = [](const DimInfo &dim) {
+      return dim.isDynamic ? -dim.divisibility : dim.dimSize;
+    };
+    nb::object shapeTuple = nb::steal(PyTuple_New(static_cast<Py_ssize_t>(shape_.size())));
+    for (size_t i = 0; i < shape_.size(); ++i) {
+      PyTuple_SET_ITEM(shapeTuple.ptr(), static_cast<Py_ssize_t>(i),
+                       PyLong_FromLongLong(encode(shape_[i])));
+    }
+    nb::object strideTuple = nb::steal(PyTuple_New(static_cast<Py_ssize_t>(stride_.size())));
+    for (size_t i = 0; i < stride_.size(); ++i) {
+      PyTuple_SET_ITEM(strideTuple.ptr(), static_cast<Py_ssize_t>(i),
+                       PyLong_FromLongLong(encode(stride_[i])));
+    }
+    return nb::make_tuple(alignment_, use32BitStride_, shapeTuple, strideTuple);
+  }
+
   DLTensorAdaptor &use32BitStride(bool use32BitStride) {
     if (use32BitStride_ == use32BitStride) {
       return *this;

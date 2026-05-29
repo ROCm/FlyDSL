@@ -10,6 +10,7 @@ from typing import Any, List
 
 from .._mlir import ir
 from ..compiler.protocol import (
+    cache_signature,
     dsl_align_of,
     dsl_size_of,
     extract_to_ir_values,
@@ -471,10 +472,11 @@ def _make_composite_class(
     def __cache_signature__(self):
         parts = [type(self)]
         for field in fields:
-            value = getattr(self, field.name)
-            sig = getattr(value, "__cache_signature__", None)
-            if callable(sig):
-                parts.append((field.name, sig()))
+            if _is_constexpr_type(field.type_spec):
+                # Constexpr fields are already folded into type(self) by _specialize_type,
+                # so only the non-constexpr field values need to be encoded here.
+                continue
+            parts.append((field.name, cache_signature(getattr(self, field.name))))
         return tuple(parts)
 
     namespace = {
