@@ -15,7 +15,7 @@ This module provides access to ROCm-specific GPU operations including:
 """
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
-from ..meta import _caller_location, _pinned_loc, traced_op
+from ..meta import traced_op
 from . import cdna4 as cdna4
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -53,54 +53,46 @@ mask_dsrd = 0x100
 mask_dswr = 0x200
 
 
-# Synchronization / scheduling primitives carry an explicit call-site Location so
-# ROCprof ATT maps them to the user's kernel line instead of the coarse kernel-default
-# location. ``_pinned_loc()`` lets an enclosing ``source_loc`` helper scope override it.
+# Synchronization / scheduling primitives are wrapped with @traced_op so ROCprof ATT
+# maps them to the user's kernel line instead of the coarse kernel-default location.
+# traced_op resolves loc (explicit > source_loc pin > caller line) and stamps the op via
+# the ambient location; their args are compile-time int masks, so the eager arg-unwrap is
+# a no-op (unlike the high-level helpers, which must use source_loc_scope instead).
 
 
+@traced_op
 def s_waitcnt(bitfield, *, loc=None, ip=None):
-    """``s_waitcnt`` that attributes to its call site for ROCprof ATT source mapping."""
-    if loc is None:
-        loc = _pinned_loc() or _caller_location(depth=1)
     return _ods_s_waitcnt(bitfield, loc=loc, ip=ip)
 
 
+@traced_op
 def sched_barrier(mask, *, loc=None, ip=None):
-    """``sched_barrier`` that attributes to its call site for ROCprof ATT source mapping."""
-    if loc is None:
-        loc = _pinned_loc() or _caller_location(depth=1)
     return _ods_sched_barrier(mask, loc=loc, ip=ip)
 
 
+@traced_op
 def sched_group_barrier(mask, size, group_id, *, loc=None, ip=None):
-    """``sched_group_barrier`` that attributes to its call site for ROCprof ATT source mapping."""
-    if loc is None:
-        loc = _pinned_loc() or _caller_location(depth=1)
     return _ods_sched_group_barrier(mask, size, group_id, loc=loc, ip=ip)
 
 
-def sched_mfma(cnt, *, loc=None):
-    if loc is None:
-        loc = _pinned_loc() or _caller_location(depth=1)
-    _ods_sched_group_barrier(mask_mfma, cnt, 0, loc=loc)
+@traced_op
+def sched_mfma(cnt, *, loc=None, ip=None):
+    return _ods_sched_group_barrier(mask_mfma, cnt, 0, loc=loc, ip=ip)
 
 
-def sched_vmem(cnt, *, loc=None):
-    if loc is None:
-        loc = _pinned_loc() or _caller_location(depth=1)
-    _ods_sched_group_barrier(mask_vmem_rd, cnt, 0, loc=loc)
+@traced_op
+def sched_vmem(cnt, *, loc=None, ip=None):
+    return _ods_sched_group_barrier(mask_vmem_rd, cnt, 0, loc=loc, ip=ip)
 
 
-def sched_dsrd(cnt, *, loc=None):
-    if loc is None:
-        loc = _pinned_loc() or _caller_location(depth=1)
-    _ods_sched_group_barrier(mask_dsrd, cnt, 0, loc=loc)
+@traced_op
+def sched_dsrd(cnt, *, loc=None, ip=None):
+    return _ods_sched_group_barrier(mask_dsrd, cnt, 0, loc=loc, ip=ip)
 
 
-def sched_dswr(cnt, *, loc=None):
-    if loc is None:
-        loc = _pinned_loc() or _caller_location(depth=1)
-    _ods_sched_group_barrier(mask_dswr, cnt, 0, loc=loc)
+@traced_op
+def sched_dswr(cnt, *, loc=None, ip=None):
+    return _ods_sched_group_barrier(mask_dswr, cnt, 0, loc=loc, ip=ip)
 
 
 def _unwrap_mfma_operand(v, *, loc=None):
