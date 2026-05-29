@@ -559,7 +559,7 @@ def _normalize_pa_output(running_sum, outs, zero_f):
     inv_sum_vec = vector.broadcast(T.f32x4, inv_sum)
     return [out * inv_sum_vec for out in outs]
 
-
+@flyc.jit
 def _make_pa_phase_helpers(
     *,
     trans_v,
