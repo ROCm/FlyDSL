@@ -39,7 +39,7 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 - **Broadcast**: when 2+ threads access the **same address** in the same bank, hardware broadcasts (no conflict)
 - LDS throughput: **128 bytes/cycle** (peak, no conflicts)
 - LDS latency: **~20-40 cycles** (async, hidden if enough work between write and read)
-- **VGPR context**: LDS ops use **arch_vgpr** (not accum_vgpr). On CDNA3, arch_vgpr and accum_vgpr are separate 256-entry register files. LDS optimization does not interact with MFMA accumulator register pressure. See `/kernel-trace-analysis` Section 5.5 for VGPR architecture details.
+- **VGPR context**: LDS ops use **arch_vgpr** (for addresses/data), not accum_vgpr. But occupancy on CDNA3 is governed by the **combined** 512-entry budget `arch_vgpr + accum_vgpr` (the two physical files share one occupancy budget — see `/kernel-trace-analysis`). So LDS-addressing logic that grows arch_vgpr *can* still cost occupancy even though it never touches the MFMA accumulators. Keep LDS-address VGPR pressure low when the kernel is near a 2-wave boundary.
 
 ## LDS Architecture on CDNA4 (gfx950)
 
@@ -56,7 +56,7 @@ Run `/kernel-trace-analysis` first. Apply this skill when the trace shows:
 - **Wavefront dispatch**: reads across a 64-thread wavefront are dispatched over **4 cycles** in waterfall fashion
 - **32 concurrent LDS operations**: hardware can concurrently execute 32 read or write instructions (each 32-bit); extended instructions (read2/write2) can be 64-bit each
 - **32 integer atomic units** for unordered atomic operations
-- **VGPR context**: same as gfx942 — LDS ops use **arch_vgpr** (not accum_vgpr). On CDNA4, arch_vgpr and accum_vgpr are separate 256-entry register files.
+- **VGPR context**: same as gfx942 — LDS ops use **arch_vgpr** (for addresses/data), but occupancy is governed by the combined 512-entry budget `arch_vgpr + accum_vgpr`. LDS-addressing arch_vgpr competes with MFMA accumulators for that shared budget.
 
 ### Key Differences from gfx942
 

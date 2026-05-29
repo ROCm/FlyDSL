@@ -26,10 +26,15 @@ an optimization plan.
 
 ---
 
-## Hotspot Analyzer Script
+## Analyzer Scripts
 
-The hotspot analyzer is located at `scripts/hotspot_analyzer.py`.
-It reads a `ui_output_agent_*_dispatch_*` directory and reports top-K stall hotspots.
+- `scripts/hotspot_analyzer.py` — reads a `ui_output_agent_*_dispatch_*` ATT
+  directory; reports top-K stall hotspots, stall-type breakdown, and occupancy
+  (combined-VGPR-pool model, reads accum/LDS/SGPR from `out_kernel_trace.csv`).
+- `scripts/pmc_l2_analyzer.py` — reads rocprofv3 PMC counter CSV(s); reports
+  L2 hit rate, HBM 32B-partial fraction, and over-fetch ratio. Use when a
+  kernel is memory-bound and you need to know *why* (ATT has no cache counters).
+  See "L2 / HBM efficiency analysis" under Step 5.
 
 ---
 
@@ -260,17 +265,43 @@ to the outermost scope line. Ignore this line; focus on lines with explicit user
 ### Register pressure check (architecture-aware)
 
 `hotspot_analyzer.py` auto-detects the GPU architecture from ISA instruction patterns
-and prints occupancy using the correct formula. The key difference:
+and computes occupancy (waves/SIMD) as the **minimum across every resource limiter**:
+
+```
+occupancy = min(vgpr_limit, lds_limit, sgpr_limit, hw_max=8)
+  vgpr_limit = 512 // (arch_vgpr_alloc + accum_vgpr_alloc)              # per SIMD
+  lds_limit  = (LDS_total // lds_per_wg) * waves_per_wg // 4_SIMDs      # per SIMD
+  sgpr_limit = 800 // sgpr_alloc                                        # per SIMD
+```
+
+**VGPR is a combined 512-entry pool on BOTH gfx942 and gfx950.** CDNA2 (gfx90a)
+unified the arch (256) and accum (256) VGPR files into one 512 budget per SIMD,
+and gfx942/gfx950 inherit that. Occupancy from VGPR is `512 / (arch + accum)` on
+both — NOT `256 / max(arch, accum)`. (The separate-pool `256/max` model only
+applied to gfx908 / CDNA1, where accum VGPRs were a distinct file accessible
+only by MFMA.)
 
 | Property | CDNA3 (gfx942) | CDNA4 (gfx950) |
 |---|---|---|
-| VGPR pools | 256 arch + 256 accum, **separate** | 256 arch + 256 accum, **combined 512 pool, flexibly split** |
-| Occupancy formula | `256 / max(arch_alloc, accum_alloc)` | `512 / (arch_alloc + accum_alloc)` |
+| VGPR pool | 512 combined (256 arch + 256 accum, unified budget) | 512 combined (same) |
+| Occupancy formula (VGPR) | `512 / (arch_alloc + accum_alloc)` | `512 / (arch_alloc + accum_alloc)` |
 | Alloc granularity | 8 VGPRs | 8 VGPRs |
 | LDS size | 64 KB | 160 KB |
 | LDS alloc block | 256 bytes | 1280 bytes |
 | VMCNT width | 6 bits (max 63 in-flight) | 6 bits (max 63 in-flight) |
 | LGKMCNT width | 4 bits (max 15 in-flight) | 4 bits (max 15 in-flight) |
+
+What actually changed in CDNA4 vs CDNA3 is the LDS size (64KB→160KB) and the LDS
+alloc granularity — not the VGPR pooling model.
+
+**Reading the real counts.** `code.json` only holds the (often single-CU,
+often vgpr-form) disassembly, so it cannot reveal accum_vgpr / LDS / SGPR /
+workgroup size — an AGPR-form-blind ISA scan reports `accum=0` and gets
+occupancy badly wrong. The analyzer reads `out_kernel_trace.csv` (staged next to
+the dispatch dir) for the authoritative `Accum_VGPR_Count` / `LDS_Block_Size` /
+`SGPR_Count` / `Workgroup_Size_*`. arch_vgpr is taken as `max(ISA_scan, CSV)` so
+a bogus-low CSV `VGPR_Count` field can't under-report. If no CSV is found it
+falls back to ISA-only and prints a warning.
 
 **Auto-detection**: gfx950-specific instructions (`v_mfma_scale_f32_*`, `v_mfma_f32_16x16x128_*`,
 `v_mfma_f32_32x32x64_*`) indicate CDNA4. Absence indicates CDNA3.
@@ -283,8 +314,62 @@ JOIN rocpd_info_kernel_symbol ks ON kd.kernel_symbol_id=ks.id
 JOIN rocpd_info_kernel ki ON kd.kernel_id=ki.id LIMIT 5;"
 ```
 
+Worked example (PA decode, gfx942): arch 144 + accum 136 = 280 combined → `512//280 = 1`
+wave/SIMD, VGPR-bound (LDS allows 5, SGPR allows 7). Reaching 2 waves needs
+combined ≤ 256, e.g. freeing ~24 VGPRs.
+
 **Warning**: `maxnreg` forcing `accum_vgpr=0` doubles occupancy but causes MFMA spills through
 arch_vgpr — measured 4.5x GPU slowdown. Do not use `maxnreg` for MFMA-heavy kernels.
+
+### L2 / HBM efficiency analysis (PMC, not ATT)
+
+When the ATT hotspots are dominated by `VMEM-load` at high stall rate (e.g.
+40-50% of stall, ~94% per-load), the kernel is memory-bound and the next
+question is **why** — and ATT cannot answer it (it has no cache counters).
+Capture PMC counters (see capture-kernel-trace "PMC Mode") and analyze with
+`scripts/pmc_l2_analyzer.py`:
+
+```bash
+python scripts/pmc_l2_analyzer.py \
+    /tmp/pmc_out/pass_1/pmc_l2_counter_collection.csv \
+    /tmp/pmc_ea_out/pass_1/pmc_ea_counter_collection.csv \
+    --kernel <kernel> --ideal-gb <bytes_per_dispatch_GB> --ea-channels 2
+```
+
+Three metrics, three decisions:
+
+| Metric | Formula | What it tells you |
+|---|---|---|
+| **L2 hit rate** | `TCC_HIT/(TCC_HIT+TCC_MISS)` | Is there temporal reuse to exploit? |
+| **32B fraction** | `TCC_EA0_RDREQ_32B/TCC_EA0_RDREQ` | Spatial locality / cache-line waste |
+| **over-fetch** | `est_HBM_bytes / (ideal_GB × dispatches)` | Redundant fetching |
+
+**Decision tree** for a memory-bound decode kernel:
+
+1. **L2 hit rate < 5%** → pure streaming, no reuse. This is **expected and
+   correct** for decode with independent per-sequence paged KV — each KV byte
+   is read once; the GQA (×heads) and MTP (×seq) reuse is captured in
+   registers/LDS, never re-reads L2. *"Improving L2 hit rate" is a non-goal.*
+   The only thing that raises it is real KV reuse = **shared-prefix serving**
+   (a workload/scheduling property, not a kernel change).
+2. **32B fraction ≈ 0%** → full 64B cache lines, no spatial-locality waste.
+   Nothing to fix at the line level. (High 32B% would point to scattered/
+   misaligned access worth restructuring.)
+3. **over-fetch ≈ 1.0x** → the kernel reads exactly the data it needs. The
+   achieved bandwidth (compute as `ideal_bytes / kernel_time`) is then the
+   real ceiling for this access pattern. **50-60% of theoretical HBM peak is
+   normal** even for clean streaming; paged-gather decode living at ~54% with
+   0% partial + ~1.0x over-fetch is healthy, not a defect.
+
+**Worked example (PA decode, gfx942, bs=16, ctx=131072, batch=256):**
+L2 hit 1.7%, 32B 0%, over-fetch 1.04x, 2.85 TB/s = 54% peak. Conclusion: the
+memory subsystem is clean; there is **no KV-load optimization left** — verified
+by also testing block_size 16→64 (regressed +7.8%) and confirming dwordx8
+doesn't exist on CDNA3 (dwordx4 / 16B is the max single vector load).
+
+**Counter-capture caveat**: keep each PMC job to ≤ ~4 TCC counters (single
+hardware pass). Multi-pass collection has triggered a GPU Hang on gfx942 — see
+capture-kernel-trace.
 
 ### MFMA latency reference (cycles = pipeline depth)
 
@@ -368,3 +453,5 @@ See /prefetch-data-load skill.
 | Source loc all `""` | Set `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`; check `-g` flag in compile pipeline |
 | Top hotspot is kernel decorator line | Debug info artifact — skip it, focus on op lines |
 | `--att` flag error | `--att` is boolean, no value; use `-i input.yaml` for full config |
+| GPU Hang / HW Exception during PMC | Too many counters → multi-pass. Split into single-pass jobs of ≤ ~4 TCC counters |
+| PMC `accum_vgpr=0` but kernel uses MFMA | vgpr-form MFMA: accumulators are in the arch VGPR file; read total from `VGPR_Count + Accum_VGPR_Count` |
