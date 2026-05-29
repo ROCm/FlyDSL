@@ -298,6 +298,15 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # every ``dispatch()`` call; 0 until the first dispatch.
         self._raw_input_wts_ptr = 0
 
+        # Verify-side helper: matches the launch-time fp8_direct_cast
+        # gate (``quant_type='fp8_direct_cast'`` AND wire dtype bf16).
+        # The verify path snapshots ``shmem_comb_out_tok`` through this
+        # flag to pick between fp8 and bf16/fp16 views.
+        self._use_fp8_cast = bool(
+            config.quant_type == "fp8_direct_cast"
+            and config.data_type == torch.bfloat16
+        )
+
         # Lazy skip_stage1 variant for the fused GEMM2+combine path
         # (Stage 2 + Stage 3 only, Stage 1 P2P scatter pre-staged
         # upstream).  Cache entries keyed by ``(input.dtype,
@@ -774,6 +783,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 enable_std_moe=cfg.enable_std_moe,
                 max_recv=self._effective_max_recv,
                 use_token_flag_sync=cfg.use_token_flag_sync,
+                local_counter_size=int(self.device_local_counter.numel()),
             )
         return self._disp_jit_cache[d_dtype]
 
@@ -849,6 +859,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_p2p_out_scales,
                 *_std_args,
                 self._fx_comb_flag,
+                self._fx_local_counter,
                 inp_cur_tok,
                 stream,
             )
@@ -875,6 +886,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 self._fx_p2p_out_scales,
                 *_std_args,
                 self._fx_comb_flag,
+                self._fx_local_counter,
                 inp_cur_tok,
                 stream,
             )
