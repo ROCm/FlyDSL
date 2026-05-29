@@ -51,19 +51,26 @@ from torch.profiler import ProfilerActivity, profile, record_function
 os.environ.setdefault("MORI_SHMEM_HEAP_SIZE", "16G")
 
 # dtype mapping
+# Keys mirror the ``torch.<dtype>`` repr suffix where applicable
+# (``float8_e4m3fn`` / ``float8_e4m3fnuz``) for PyTorch parity.  ``bf16``
+# / ``f32`` / ``fp4`` are kept as widely-used short aliases.
 DTYPE_MAP = {
     "bf16": torch.bfloat16,
     "f32": torch.float32,
-    "fp8_ocp": torch.float8_e4m3fn,
-    "fp8_fnuz": torch.float8_e4m3fnuz,
+    "float8_e4m3fn": torch.float8_e4m3fn,
+    "float8_e4m3fnuz": torch.float8_e4m3fnuz,
     "fp4": torch.float4_e2m1fn_x2,
 }
 
+# Values are mori's internal kernel-symbol suffix (private ABI of
+# ``mori/python/mori/ops/dispatch_combine.py::_DTYPE_SUFFIX``); keep them
+# verbatim so we can still locate the right ``ep_intranode_*.hsaco``
+# symbol at run time.
 MORI_KERNEL_SUFFIX = {
     "bf16": "bf16",
     "f32": "f32",
-    "fp8_ocp": "fp8_ocp",
-    "fp8_fnuz": "fp8_fnuz",
+    "float8_e4m3fn": "fp8_ocp",
+    "float8_e4m3fnuz": "fp8_fnuz",
     "fp4": "fp4",
 }
 
@@ -252,9 +259,36 @@ CI_CASES = [
         "zero_copy": False,
         "enable_std_moe": False,
     },
+    # Two fp8 dispatch flavours that share the kernel's ``hidden_elem_size==1``
+    # codepath (``cvt_pk_f32_fp8`` + ×0.5/×2.0 scaling for FNUZ).  Both should
+    # run on whatever arch the kernel JIT actually supports; we don't gate on
+    # arch here because the kernel is gfx942 native (verified by inspecting
+    # the emitted ISA: ``v_cvt_pk_f32_fp8_e32`` / ``_sdwa``).  If CI fails on
+    # a specific arch, fix the underlying codegen / runtime issue rather than
+    # silently skipping coverage.
     {
-        "name": "fp8_ocp_dispatch",
-        "dtype": "fp8_ocp",
+        "name": "float8_e4m3fn_dispatch",
+        "dtype": "float8_e4m3fn",
+        "max_tokens": 128,
+        "hidden_dim": 7168,
+        "quant_type": "none",
+        "zero_copy": False,
+        "enable_std_moe": False,
+        # OCP fp8 (``float8_e4m3fn``) is a gfx950+ device-side feature:
+        # ROCm's ``amd_hip_fp8.h`` defines ``HIP_FP8_TYPE_OCP=0`` for
+        # ``__gfx942__`` device compile, so mori's ``MORI_FP8_OCP(...)``
+        # macros are dropped at JIT-compile time and
+        # ``EpDispatchIntraNodeKernel_fp8_ocp`` is never generated.  The
+        # host-side mori launcher unconditionally dispatches to that
+        # symbol on ``torch.float8_e4m3fn`` and the resulting
+        # ``hipModuleGetFunction`` returns ``hipErrorNotFound``,
+        # poisoning the HIP context.  Gate on gfx950 (parity with the
+        # fp4 cases below) instead of pretending this works on gfx942.
+        "requires_arch": ("gfx950",),
+    },
+    {
+        "name": "float8_e4m3fnuz_dispatch",
+        "dtype": "float8_e4m3fnuz",
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
@@ -338,19 +372,20 @@ CI_CASES = [
     # when ``--combine-dtype != --dtype`` (max of the dispatch and
     # combine element sizes), so we don't set it here.
     {
-        "name": "mixed_fp8_ocp_dispatch_bf16_combine_zero_copy",
-        "dtype": "fp8_ocp",
+        "name": "mixed_float8_e4m3fn_dispatch_bf16_combine_zero_copy",
+        "dtype": "float8_e4m3fn",
         "combine_dtype": "bf16",
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
         "zero_copy": True,
         "enable_std_moe": False,
-        # Mori intranode kernel symbols for fp8_ocp are not shipped in
-        # this container, so the verify path falls back to the FlyDSL
-        # self-check (NaN/Inf liveness).  Functionality of zero-copy +
-        # mixed dtype is the gate here; cross-impl byte parity is
-        # tracked separately via the bf16-only cases.
+        # ``float8_e4m3fn`` (OCP) dispatch requires gfx950+ -- see the
+        # case-level comment on ``float8_e4m3fn_dispatch`` above for the
+        # full root-cause analysis (mori's fp8_ocp kernel is not
+        # generated for gfx942 because ROCm sets
+        # ``HIP_FP8_TYPE_OCP=0`` on device).
+        "requires_arch": ("gfx950",),
     },
     {
         "name": "mixed_fp4_dispatch_bf16_combine_zero_copy",
@@ -365,14 +400,16 @@ CI_CASES = [
         "requires_arch": ("gfx950",),
     },
     {
-        "name": "mixed_fp8_ocp_dispatch_bf16_combine_no_zero_copy",
-        "dtype": "fp8_ocp",
+        "name": "mixed_float8_e4m3fn_dispatch_bf16_combine_no_zero_copy",
+        "dtype": "float8_e4m3fn",
         "combine_dtype": "bf16",
         "max_tokens": 128,
         "hidden_dim": 7168,
         "quant_type": "none",
         "zero_copy": False,
         "enable_std_moe": False,
+        # OCP fp8 requires gfx950+; see ``float8_e4m3fn_dispatch`` above.
+        "requires_arch": ("gfx950",),
     },
     # ---- bs sweep: fp8_ocp dispatch -> bf16 combine, randomized zero_copy ----
     # Three cases at distinct M (4 / 32 / 8192) to cover the small-batch,
@@ -383,8 +420,8 @@ CI_CASES = [
     # once per case in the parent before spawn, so all 8 ranks see the
     # same resolved value and the kernel launch geometry stays consistent.
     {
-        "name": "mixed_fp8_dispatch_bf16_combine_bs4_random_zc",
-        "dtype": "fp8_ocp",
+        "name": "mixed_float8_e4m3fn_dispatch_bf16_combine_bs4_random_zc",
+        "dtype": "float8_e4m3fn",
         "combine_dtype": "bf16",
         "max_tokens": 4,
         "hidden_dim": 7168,
@@ -393,10 +430,12 @@ CI_CASES = [
         "_random_fields": {
             "zero_copy": [False, True],
         },
+        # OCP fp8 requires gfx950+; see ``float8_e4m3fn_dispatch`` above.
+        "requires_arch": ("gfx950",),
     },
     {
-        "name": "mixed_fp8_dispatch_bf16_combine_bs32_random_zc",
-        "dtype": "fp8_ocp",
+        "name": "mixed_float8_e4m3fn_dispatch_bf16_combine_bs32_random_zc",
+        "dtype": "float8_e4m3fn",
         "combine_dtype": "bf16",
         "max_tokens": 32,
         "hidden_dim": 7168,
@@ -405,10 +444,12 @@ CI_CASES = [
         "_random_fields": {
             "zero_copy": [False, True],
         },
+        # OCP fp8 requires gfx950+; see ``float8_e4m3fn_dispatch`` above.
+        "requires_arch": ("gfx950",),
     },
     {
-        "name": "mixed_fp8_dispatch_bf16_combine_bs8K_random_zc",
-        "dtype": "fp8_ocp",
+        "name": "mixed_float8_e4m3fn_dispatch_bf16_combine_bs8K_random_zc",
+        "dtype": "float8_e4m3fn",
         "combine_dtype": "bf16",
         "max_tokens": 8192,
         "hidden_dim": 7168,
@@ -417,6 +458,27 @@ CI_CASES = [
         "_random_fields": {
             "zero_copy": [False, True],
         },
+        # OCP fp8 requires gfx950+; see ``float8_e4m3fn_dispatch`` above.
+        "requires_arch": ("gfx950",),
+    },
+    # ---- FNUZ fp8 mixed-dtype coverage (gfx942 native) ----
+    # MI300/MI325 (gfx942) only support NANOO fp8 (fnuz) on device; ROCm's
+    # ``amd_hip_fp8.h`` exposes ``HIP_FP8_TYPE_FNUZ=1`` for ``__gfx942__``
+    # and mori's JIT emits ``EpDispatchIntraNodeKernel_fp8_fnuz``.  This
+    # mirrors the OCP ``mixed_float8_e4m3fn_dispatch_bf16_combine_no_zero_copy``
+    # case (gfx950-only above) so that the mixed-dtype dispatch + bf16
+    # combine path is exercised on gfx942 too -- FlyDSL self-check is
+    # the primary gate and mori's ``fp8_fnuz`` intranode kernel
+    # participates as the byte-level oracle.
+    {
+        "name": "mixed_float8_e4m3fnuz_dispatch_bf16_combine_no_zero_copy",
+        "dtype": "float8_e4m3fnuz",
+        "combine_dtype": "bf16",
+        "max_tokens": 128,
+        "hidden_dim": 7168,
+        "quant_type": "none",
+        "zero_copy": False,
+        "enable_std_moe": False,
     },
 ]
 
@@ -1452,8 +1514,8 @@ def profile_cudagraph_op(
 VERIFY_TOL = {
     "f32": {"atol": 1e-5, "rtol": 1e-4},
     "bf16": {"atol": 1e-2, "rtol": 1e-2},
-    "fp8_ocp": {"atol": 1e-1, "rtol": 5e-2},
-    "fp8_fnuz": {"atol": 1e-1, "rtol": 5e-2},
+    "float8_e4m3fn": {"atol": 1e-1, "rtol": 5e-2},
+    "float8_e4m3fnuz": {"atol": 1e-1, "rtol": 5e-2},
     "fp4": {"atol": 5e-1, "rtol": 1e-1},
 }
 
@@ -2620,8 +2682,8 @@ def _parse_args():
         help=(
             "combine launch-time dtype (mori parity).  Empty (default) "
             "reuses --dtype on both dispatch and combine; setting it to "
-            "a different dtype (e.g. --dtype fp8_ocp --combine-dtype bf16) "
-            "exercises the mixed-dtype path: fp4 / fp8_ocp dispatch + "
+            "a different dtype (e.g. --dtype float8_e4m3fn --combine-dtype bf16) "
+            "exercises the mixed-dtype path: fp4 / float8_e4m3fn dispatch + "
             "bf16 combine, with caller-side staging into the registered "
             "combine input buffer when zero_copy=True."
         ),
@@ -2706,7 +2768,7 @@ def _parse_args():
         help=(
             "Skip the standalone verify spawn in --ci-sweep and rely on "
             "the embedded verify_self that runs at the top of every "
-            "profile spawn. Halves spawn count when 99%+ of cases pass "
+            "profile spawn. Halves spawn count when nearly all cases pass "
             "(L1 main matrix); a verify failure still surfaces because "
             "run_profiler returns False before timing on a failed gate."
         ),
@@ -2843,7 +2905,7 @@ def _run_ci_sweep_main(ws, args):
     into the profile spawn (the embedded ``verify_self`` inside
     :func:`run_profiler` still gates timing, so a verify failure still
     surfaces -- this just halves spawn count on the L1 main matrix
-    where 99%+ of cases pass).
+    where nearly all cases pass).
     """
     base_output_dir = args.output_dir
     base_port = args.port
