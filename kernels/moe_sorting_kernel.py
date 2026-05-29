@@ -21,8 +21,6 @@ Packed token ID format: (topk_position << 24) | token_id
 """
 
 import functools
-import math
-from contextlib import contextmanager
 
 import torch
 
@@ -30,29 +28,23 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import memref as memref_ops
-from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, vector
+from flydsl.expr import buffer_ops, gpu, range_constexpr
 from flydsl.expr import rocdl as fly_rocdl
 from flydsl.expr.arith import ArithValue
-from flydsl.expr.typing import Int32, T
+from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from kernels.kernels_common import dtype_to_elem_type, get_warp_size
+from kernels.kernels_common import get_warp_size
+from kernels.topk_gating_softmax_kernel import (
+    _compute_topk_gating_layout,
+    _emit_topk_gating_softmax_body,
+)
 
 BLOCK_SIZE = 256
 UNIT_SIZE = 32  # GEMM tile-M, aka block_size in CK
 WARP_SIZE = get_warp_size()
-
-# Gating layout constants (mirror the standalone topk_gating_softmax kernel
-# in `kernels/topk_gating_softmax_kernel.py`). Duplicated here so the fused
-# oneshot path is self-contained: changing the standalone gating kernel
-# never silently re-shapes our fused kernel and vice-versa. The fused
-# kernel is CDNA-only (gated by `_supports_fused_oneshot`); the standalone
-# kernel keeps running on every arch unchanged.
-_GATING_WARPS_PER_BLOCK = 4
-_GATING_BLOCK_THREADS = _GATING_WARPS_PER_BLOCK * WARP_SIZE
 
 # DPP constants for prefix sum (used by oneshot and multiphase)
 DPP_ROW_SHR_1 = 0x111
@@ -208,377 +200,11 @@ _topk_fallback_scratch_cache = {}  # (device, M, topk) -> (topk_weights, topk_id
 _topk_fallback_builder_cache = {}  # (num_experts, topk, dtype_str, renormalize) -> launch_fn
 
 
-@contextmanager
-def _if_then(if_op):
-    """Context manager for scf.IfOp then-region.
-
-    Yields the then-block, and on exit emits a trailing ``scf.YieldOp`` if
-    the block does not already end in one. Used by the oneshot kernel
-    (zero-block / sort-block guards) and by the inlined fused gating body
-    (leader-active guard at the end of pass 5).
-    """
-    with ir.InsertionPoint(if_op.then_block):
-        try:
-            yield if_op.then_block
-        finally:
-            blk = if_op.then_block
-            if (not blk.operations) or not isinstance(blk.operations[-1], scf.YieldOp):
-                scf.YieldOp([])
-
-
-# ---------------------------------------------------------------------------
-# Fused-path gating helpers (inlined, NOT shared with the standalone kernel)
-# ---------------------------------------------------------------------------
-# These are the layout heuristic + MLIR body for the topk-gating-softmax
-# half of the fused oneshot kernel. They mirror the math in
-# ``kernels/topk_gating_softmax_kernel.py`` but are duplicated here on
-# purpose: the standalone kernel runs on every arch (including RDNA/Navi),
-# while the fused kernel is CDNA-only (gated by `_supports_fused_oneshot`).
-# Keeping the two copies independent avoids any chance that a refactor of
-# the fused gating path silently changes the IR / timing of the standalone
-# kernel that ships to non-CDNA targets.
-
-
-def _compute_topk_gating_layout(num_experts: int, topk: int, dtype_str: str):
-    """Resolve (VPT, THREADS_PER_TOKEN, TOKENS_PER_BLOCK, ATOM_BITS, ...)
-    for the fused oneshot's gating phase.
-
-    Constraints (same as the standalone gating kernel):
-      - ``VPT`` is a power of 2 in [1, 16]
-      - ``THREADS_PER_TOKEN = num_experts // VPT`` is a power of 2 <= WARP_SIZE
-      - prefer the largest ``VPT`` (fewest loads, widest atom)
-    """
-    elem_bits = 32 if dtype_str == "f32" else 16
-
-    VPT, THREADS_PER_TOKEN = None, None
-    for vpt in [16, 8, 4, 2, 1]:
-        if num_experts % vpt != 0:
-            continue
-        tpt = num_experts // vpt
-        if tpt > WARP_SIZE:
-            continue
-        if (tpt & (tpt - 1)) != 0:
-            continue
-        VPT, THREADS_PER_TOKEN = vpt, tpt
-        break
-
-    if VPT is None:
-        raise ValueError(
-            f"num_experts={num_experts} is not supported by the fused "
-            f"oneshot's gating layout: requires num_experts // VPT to be a "
-            f"power of 2 <= WARP_SIZE={WARP_SIZE} for some VPT in "
-            f"[16, 8, 4, 2, 1]."
-        )
-    if topk > num_experts:
-        raise ValueError(f"topk={topk} > num_experts={num_experts}")
-
-    TOKENS_PER_WARP = WARP_SIZE // THREADS_PER_TOKEN
-    TOKENS_PER_BLOCK = _GATING_WARPS_PER_BLOCK * TOKENS_PER_WARP
-
-    if elem_bits <= 16 and VPT % 8 == 0:
-        ATOM_BITS = 128  # 8 bf16/f16 per atom call
-    elif elem_bits <= 16 and VPT % 4 == 0:
-        ATOM_BITS = 64
-    elif elem_bits <= 16 and VPT % 2 == 0:
-        ATOM_BITS = 32
-    elif elem_bits == 32 and VPT % 2 == 0:
-        ATOM_BITS = 64
-    else:
-        ATOM_BITS = elem_bits
-    ELEMS_PER_ATOM = ATOM_BITS // elem_bits
-    ATOMS_PER_THREAD = VPT // ELEMS_PER_ATOM
-
-    return dict(
-        elem_bits=elem_bits,
-        VPT=VPT,
-        THREADS_PER_TOKEN=THREADS_PER_TOKEN,
-        TOKENS_PER_WARP=TOKENS_PER_WARP,
-        TOKENS_PER_BLOCK=TOKENS_PER_BLOCK,
-        ATOM_BITS=ATOM_BITS,
-        ELEMS_PER_ATOM=ELEMS_PER_ATOM,
-        ATOMS_PER_THREAD=ATOMS_PER_THREAD,
-    )
-
-
-def _emit_topk_gating_softmax_body(
-    GatingOutput,
-    TopkWeights,
-    TopkIndices,
-    TokenExpertIndices,
-    i32_num_tokens,
-    *,
-    num_experts: int,
-    topk: int,
-    dtype_str: str,
-    renormalize: bool,
-    VPT: int,
-    THREADS_PER_TOKEN: int,
-    TOKENS_PER_WARP: int,
-    TOKENS_PER_BLOCK: int,
-    ATOM_BITS: int,
-    ELEMS_PER_ATOM: int,
-    ATOMS_PER_THREAD: int,
-    elem_bits: int,
-    on_winner_idx=None,
-    on_winner_weight=None,
-    emit_tei: bool = True,
-):
-    """Emit MLIR for gating logits → softmax → top-K into the current
-    @flyc.kernel insertion point (used by the fused oneshot kernel).
-
-    Must be called from inside an ``@flyc.kernel`` so that ``fx.block_idx``,
-    ``fx.thread_idx``, buffer/copy-atom operations, etc. are valid in the
-    current tracing context.
-
-    Output stores
-    -------------
-    By default each leader lane writes the winning (weight, expert_idx, tei)
-    triples to the HBM tensors ``TopkWeights``, ``TopkIndices``,
-    ``TokenExpertIndices``. If ``on_winner_idx`` and/or ``on_winner_weight``
-    callbacks are provided they replace the corresponding HBM store. Each
-    callback is invoked once per (token, k) inside the leader-active region
-    with signature::
-
-        on_winner_idx(local_token_i32, global_token_i32, k_int, expert_idx_i32)
-        on_winner_weight(local_token_i32, global_token_i32, k_int, weight_f32)
-
-    ``local_token_i32`` is the token index within the block
-    (``0..TOKENS_PER_BLOCK-1``) and is suitable for indexing per-block LDS
-    staging buffers.
-
-    If ``emit_tei=False`` the TEI HBM store is suppressed entirely and the
-    ``TokenExpertIndices`` tensor argument is unused (callers may pass
-    ``None``). Similarly, callers providing ``on_winner_idx`` /
-    ``on_winner_weight`` may pass ``None`` for the corresponding HBM
-    tensor — the buffer-resource + slice for that output is only
-    materialised when its HBM store is enabled.
-    """
-    bid = fx.block_idx.x
-    tid = fx.thread_idx.x
-
-    elem_dtype = dtype_to_elem_type(dtype_str)
-    elem_type = elem_dtype.ir_type
-    compute_type = T.f32
-    register_addr_space = int(fx.AddressSpace.Register)
-
-    fm_fast = arith.FastMathFlags.fast
-
-    c_zero_f = fx.Float32(0.0)
-    c_neg_inf = fx.Float32(float("-inf"))
-    c_log2e = fx.Float32(1.4426950408889634)
-    c_one_f = fx.Float32(1.0)
-
-    c_warp = fx.Int32(WARP_SIZE)
-    c_tpt = fx.Int32(THREADS_PER_TOKEN)
-    c_tpw = fx.Int32(TOKENS_PER_WARP)
-    c_tpb = fx.Int32(TOKENS_PER_BLOCK)
-    c_vpt = fx.Int32(VPT)
-
-    warp_id = tid // c_warp  # 0..WARPS_PER_BLOCK-1
-    lane = tid % c_warp  # 0..WARP_SIZE-1
-    token_in_warp = lane // c_tpt  # 0..TOKENS_PER_WARP-1
-    expert_lane = lane % c_tpt  # 0..THREADS_PER_TOKEN-1
-    local_token = warp_id * c_tpw + token_in_warp  # 0..TOKENS_PER_BLOCK-1
-    global_token = bid * c_tpb + local_token  # token row
-
-    in_range = global_token < i32_num_tokens
-    global_token_safe = in_range.select(global_token, fx.Int32(0))
-
-    def group_reduce(x, mode):
-        """Butterfly reduce within a THREADS_PER_TOKEN sub-warp group."""
-        width_i32 = c_tpt
-        w = x
-        for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-            off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
-            peer = w.shuffle_xor(off, width_i32)
-            if mode == "max":
-                w = w.maximumf(peer)
-            else:
-                w = w.addf(peer, fastmath=fm_fast)
-        return w
-
-    def group_reduce_argmax(val, idx):
-        """Butterfly argmax within a THREADS_PER_TOKEN sub-warp group.
-
-        All lanes in the group end with the same (max_val, max_idx).
-        Ties are broken by the lower expert index.
-        """
-        width_i32 = c_tpt
-        wv, wi = val, idx
-        for _sh in range_constexpr(int(math.log2(THREADS_PER_TOKEN))):
-            off = fx.Int32(THREADS_PER_TOKEN // (2 << _sh))
-            peer_v = wv.shuffle_xor(off, width_i32)
-            peer_i = wi.shuffle_xor(off, width_i32)
-            is_greater = peer_v > wv
-            is_equal = ArithValue(peer_v) == ArithValue(wv)
-            peer_lower_idx = peer_i < wi
-            take_peer = is_greater | (is_equal & peer_lower_idx)
-            wv = take_peer.select(peer_v, wv)
-            wi = take_peer.select(peer_i, wi)
-        return wv, wi
-
-    GatingOutput_buf = fx.rocdl.make_buffer_tensor(GatingOutput)
-    row_gating = fx.slice(GatingOutput_buf, (global_token_safe, None))
-    gating_div = fx.logical_divide(row_gating, fx.make_layout(ELEMS_PER_ATOM, 1))
-
-    # Only materialise the output views/buffer-resources for the stores we
-    # actually emit. Callers supplying callbacks (V2 on-chip-sink mode)
-    # may pass `None` for the corresponding HBM tensors.
-    weights_div = None
-    if on_winner_weight is None:
-        TopkWeights_buf = fx.rocdl.make_buffer_tensor(TopkWeights)
-        row_weights = fx.slice(TopkWeights_buf, (global_token_safe, None))
-        weights_div = fx.logical_divide(row_weights, fx.make_layout(1, 1))
-
-    indices_div = None
-    if on_winner_idx is None:
-        TopkIndices_buf = fx.rocdl.make_buffer_tensor(TopkIndices)
-        row_indices = fx.slice(TopkIndices_buf, (global_token_safe, None))
-        indices_div = fx.logical_divide(row_indices, fx.make_layout(1, 1))
-
-    tei_div = None
-    if emit_tei:
-        TokenExpertIndices_buf = fx.rocdl.make_buffer_tensor(TokenExpertIndices)
-        row_tei = fx.slice(TokenExpertIndices_buf, (global_token_safe, None))
-        tei_div = fx.logical_divide(row_tei, fx.make_layout(1, 1))
-
-    copy_atom_in = fx.make_copy_atom(fx.rocdl.BufferCopy(ATOM_BITS), elem_bits)
-    # Use the older fx.memref_alloca + explicit MemRefType API rather than
-    # the newer fx.make_rmem_tensor helper: the latter is missing from the
-    # pre-built flydsl shipped under `build-fly/python_packages/` (which
-    # pytest's conftest puts ahead of the source `python/flydsl/` on
-    # sys.path), so make_rmem_tensor only works in script mode. memref_alloca
-    # is present in both versions and produces equivalent IR.
-    atom_reg_ty_in = fx.MemRefType.get(
-        elem_type,
-        fx.LayoutType.get(ELEMS_PER_ATOM, 1),
-        register_addr_space,
-    )
-    atom_reg_lay_in = fx.make_layout(ELEMS_PER_ATOM, 1)
-
-    copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-    scalar_reg_ty_f32 = fx.MemRefType.get(T.f32, fx.LayoutType.get(1, 1), register_addr_space)
-    scalar_reg_lay = fx.make_layout(1, 1)
-
-    def _load_atom_in(divided, atom_index):
-        """Load ELEMS_PER_ATOM contiguous elements starting at atom_index."""
-        view = fx.slice(divided, (None, atom_index))
-        r = fx.memref_alloca(atom_reg_ty_in, atom_reg_lay_in)
-        fx.copy_atom_call(copy_atom_in, view, r)
-        return fx.memref_load_vec(r)
-
-    def _store_scalar_f32(divided, index, val):
-        r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
-        v = fx.Vector.from_elements([val], fx.Float32)
-        fx.memref_store_vec(v, r)
-        view = fx.slice(divided, (None, index))
-        fx.copy_atom_call(copy_atom_f32, r, view)
-
-    def _store_scalar_i32(divided, index, val):
-        # `divided` is a logical_divide of a torch.float32-viewed buffer,
-        # so its element type is f32. Reinterpret the i32 bits as f32 and
-        # store via the f32 copy atom (avoids signed-vs-signless legalize
-        # failures when going through si32).
-        val_f32 = ArithValue(val).bitcast(T.f32)
-        r = fx.memref_alloca(scalar_reg_ty_f32, scalar_reg_lay)
-        v = fx.Vector.from_elements([val_f32], fx.Float32)
-        fx.memref_store_vec(v, r)
-        view = fx.slice(divided, (None, index))
-        fx.copy_atom_call(copy_atom_f32, r, view)
-
-    # Pass 1: load this thread's VPT experts + per-thread max
-    col_idx_list = []
-    for v in range_constexpr(VPT):
-        col_idx_list.append(expert_lane * c_vpt + fx.Int32(v))
-
-    c_atoms_pt = fx.Int32(ATOMS_PER_THREAD)
-    x_list = []
-    thread_max = c_neg_inf
-    for a in range_constexpr(ATOMS_PER_THREAD):
-        atom_idx = expert_lane * c_atoms_pt + fx.Int32(a)
-        atom_vec = _load_atom_in(gating_div, atom_idx)
-        for v in range_constexpr(ELEMS_PER_ATOM):
-            val_e = vector.extract(atom_vec, static_position=[v])
-            xv = val_e if dtype_str == "f32" else val_e.extf(compute_type)
-            x_list.append(xv)
-            thread_max = thread_max.maximumf(xv)
-
-    group_max = group_reduce(thread_max, "max")
-
-    # Pass 2: exp(x - max) and per-token sum
-    thread_sum = c_zero_f
-    exp_list = []
-    for v in range_constexpr(VPT):
-        sub = x_list[v] - group_max
-        scaled = sub * c_log2e
-        ev = scaled.exp2(fastmath=fm_fast)
-        exp_list.append(ev)
-        thread_sum = thread_sum + ev
-
-    group_sum = group_reduce(thread_sum, "sum")
-
-    # Pass 3: normalise -> softmax probabilities (kept in registers)
-    inv_sum = c_one_f / group_sum
-    prob_list = []
-    for v in range_constexpr(VPT):
-        prob_list.append(exp_list[v] * inv_sum)
-
-    # Pass 4: iterative top-K (sub-warp argmax → mask)
-    selected_weights = []  # one f32 per k iter (replicated across the group)
-    selected_indices = []  # one i32 per k iter (replicated across the group)
-    selected_sum = c_zero_f
-
-    for k_idx in range_constexpr(topk):
-        thread_best_val = c_neg_inf
-        thread_best_idx = fx.Int32(-1)
-        for v in range_constexpr(VPT):
-            pv = prob_list[v]
-            ci = col_idx_list[v]
-            is_better = pv > thread_best_val
-            thread_best_val = is_better.select(pv, thread_best_val)
-            thread_best_idx = is_better.select(ci, thread_best_idx)
-
-        global_best_val, global_best_idx = group_reduce_argmax(thread_best_val, thread_best_idx)
-
-        selected_weights.append(global_best_val)
-        selected_indices.append(global_best_idx)
-        selected_sum = selected_sum + global_best_val
-
-        for v in range_constexpr(VPT):
-            ci = col_idx_list[v]
-            is_winner = ArithValue(ci) == ArithValue(global_best_idx)
-            prob_list[v] = is_winner.select(c_neg_inf, prob_list[v])
-
-    # Pass 5: leader writes weights/indices/tei (with optional renorm).
-    c_eps = fx.Float32(1e-20)
-    denom = selected_sum.maximumf(c_eps)
-    inv_denom = c_one_f / denom
-
-    # Use explicit scf.IfOp here (rather than a Python `if`) so this body
-    # works when emitted from an @flyc.kernel that does not have the AST
-    # rewriter's `if`-detection coverage extended through helper calls.
-    leader_active = (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens)
-    _if_leader = scf.IfOp(leader_active.ir_value())
-    with _if_then(_if_leader):
-        num_tokens_v = ArithValue(i32_num_tokens)
-        for k_idx in range_constexpr(topk):
-            w_val = selected_weights[k_idx]
-            if renormalize:
-                w_val = w_val * inv_denom
-            if on_winner_weight is not None:
-                on_winner_weight(local_token, global_token, k_idx, w_val)
-            else:
-                _store_scalar_f32(weights_div, Int32(k_idx), w_val)
-
-            if on_winner_idx is not None:
-                on_winner_idx(local_token, global_token, k_idx, selected_indices[k_idx])
-            else:
-                _store_scalar_i32(indices_div, Int32(k_idx), selected_indices[k_idx])
-
-            if emit_tei:
-                # tei[t, k] = k * num_tokens + t  (matches vLLM convention).
-                tei_val = Int32(k_idx) * num_tokens_v + global_token
-                _store_scalar_i32(tei_div, Int32(k_idx), tei_val)
+# `_compute_topk_gating_layout` and `_emit_topk_gating_softmax_body` are
+# imported from `kernels.topk_gating_softmax_kernel` (see the top-level
+# imports) so the fused oneshot kernel below and the standalone gating
+# kernel share the same layout heuristic and MLIR emission code — they
+# can never disagree about VPT / TPT / ATOM_BITS or about per-token math.
 
 
 # ---------------------------------------------------------------------------
@@ -1229,8 +855,7 @@ def compile_moe_sorting_oneshot_fused(
 
         # =================== MOE_BUF ZEROING (blocks > 0 only) ===============
         is_zero_block = bid != c_zero_i32
-        _if_zero = scf.IfOp(is_zero_block.ir_value())
-        with _if_then(_if_zero):
+        if is_zero_block:
             zero_gid_v4 = (bid - c_one_i32) * fx.Int32(BLOCK_SIZE) + tid
             num_zero_blocks = gpu.grid_dim.x - c_one_i32
             zero_stride_v4 = num_zero_blocks * fx.Int32(BLOCK_SIZE)
@@ -1249,8 +874,7 @@ def compile_moe_sorting_oneshot_fused(
 
         # =================== SORTING (block 0 only) ==========================
         is_sort_block = bid == c_zero_i32
-        _if_sort = scf.IfOp(is_sort_block.ir_value())
-        with _if_then(_if_sort):
+        if is_sort_block:
             # ========== PHASE 1 (mesh CLEAR ONLY in fused kernel) ============
             # Gating's on_winner_idx callback fills `mesh_LDS` directly, so
             # the old "Phase 1 fill" loop is gone. The clear must still
@@ -1611,33 +1235,6 @@ def compile_moe_sorting_oneshot_fused(
         )
 
     return launch_moe_sorting_oneshot_fused
-
-
-# ---------------------------------------------------------------------------
-# LDS helpers for multiphase kernels (module-level, used inside @flyc.kernel)
-# ---------------------------------------------------------------------------
-def _lds_load_raw(raw_mr, idx):
-    """Load i32 from LDS raw memref. idx can be i32 or index."""
-    raw_idx = idx.ir_value() if hasattr(idx, "ir_value") else idx
-    if not isinstance(raw_idx.type, ir.IndexType):
-        raw_idx = ArithValue(idx).index_cast(T.index)
-        raw_idx = raw_idx.ir_value() if hasattr(raw_idx, "ir_value") else raw_idx
-    return fx.Int32(memref_ops.load(raw_mr, [raw_idx]))
-
-
-def _lds_store_raw(raw_mr, val, idx):
-    """Store i32 to LDS raw memref. idx can be i32 or index."""
-    v = val.ir_value() if hasattr(val, "ir_value") else val
-    raw_idx = idx.ir_value() if hasattr(idx, "ir_value") else idx
-    if not isinstance(raw_idx.type, ir.IndexType):
-        raw_idx = ArithValue(idx).index_cast(T.index)
-        raw_idx = raw_idx.ir_value() if hasattr(raw_idx, "ir_value") else raw_idx
-    memref_ops.store(v, raw_mr, [raw_idx])
-
-
-def _unwrap_raw(v):
-    """Unwrap DSL value to raw MLIR ir.Value."""
-    return v.ir_value() if hasattr(v, "ir_value") else v
 
 
 # ---------------------------------------------------------------------------
@@ -2890,93 +2487,6 @@ def moe_softmax_sort_flydsl(
     return sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf
 
 
-def launch_moe_sorting_oneshot_path(
-    topk_ids,
-    topk_weights,
-    sorted_ids,
-    sorted_weights,
-    sorted_expert_ids,
-    num_valid_ids,
-    moe_buf_i32,
-    expert_mask,
-    i32_tokens,
-    i32_moe_buf_elems,
-    n_grid_blocks,
-    *,
-    num_experts,
-    topk,
-    max_tokens=128,
-    unit_size=UNIT_SIZE,
-    has_mask=False,
-):
-    """Low-level launcher for oneshot path: single kernel.
-
-    This is the hot-path entry point — no torch ops, just JIT dispatch.
-    Uses AOT-compiled dispatch after the first call to bypass the ~70 us
-    JIT overhead (inspect.Signature.bind + cache key + dict lookup).
-    """
-
-    cache_key = (num_experts, topk, max_tokens, unit_size, has_mask, topk_ids.device.index)
-    cf = _oneshot_cf_cache.get(cache_key)
-    if cf is not None:
-        stream = torch.cuda.current_stream()
-        cf(
-            topk_ids,
-            topk_weights,
-            sorted_ids,
-            sorted_weights,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_buf_i32,
-            expert_mask,
-            i32_tokens,
-            i32_moe_buf_elems,
-            n_grid_blocks,
-            fx.Stream(stream),
-        )
-        return
-
-    launch_fn = _compile_moe_sorting_oneshot(
-        num_experts=num_experts,
-        topk=topk,
-        max_tokens=max_tokens,
-        unit_size=unit_size,
-        has_mask=has_mask,
-    )
-    stream = torch.cuda.current_stream()
-    launch_fn(
-        topk_ids,
-        topk_weights,
-        sorted_ids,
-        sorted_weights,
-        sorted_expert_ids,
-        num_valid_ids,
-        moe_buf_i32,
-        expert_mask,
-        i32_tokens,
-        i32_moe_buf_elems,
-        n_grid_blocks,
-        stream=stream,
-    )
-
-    cf = flyc.compile(
-        launch_fn,
-        topk_ids,
-        topk_weights,
-        sorted_ids,
-        sorted_weights,
-        sorted_expert_ids,
-        num_valid_ids,
-        moe_buf_i32,
-        expert_mask,
-        i32_tokens,
-        i32_moe_buf_elems,
-        n_grid_blocks,
-        fx.Stream(stream),
-    )
-    _oneshot_cf_cache[cache_key] = cf
-
-
 def launch_moe_sorting_oneshot_fused_path(
     gating_logits,
     sorted_ids,
@@ -3063,191 +2573,3 @@ def launch_moe_sorting_oneshot_fused_path(
     )
     _oneshot_fused_cf_cache[cache_key] = cf
 
-
-def launch_moe_sorting_multiphase_path(
-    topk_ids,
-    topk_weights,
-    sorted_ids,
-    sorted_weights,
-    sorted_expert_ids,
-    num_valid_ids,
-    moe_buf_i32,
-    workspace,
-    expert_mask,
-    i32_tokens,
-    i32_moe_buf_elems,
-    mesh_stride,
-    mesh_size,
-    ws_total,
-    *,
-    num_experts,
-    topk,
-    unit_size=UNIT_SIZE,
-    has_mask=False,
-):
-    """Low-level launcher for multiphase path via HBM workspace.
-
-    For small T (<=2048): fused P0_v2 (clear+scatter+count) + K4.
-    For large T (>2048): 4 separate kernels K1+K2+K3+K4.
-
-    Uses AOT-compiled dispatch after the first call for each sub-kernel
-    to bypass JIT overhead.
-    """
-
-    launch_clear_ws, launch_p0, launch_p1, launch_p23, launch_p0v2, launch_p0v2_p23, launch_4k_fused = (
-        _compile_moe_sorting_multiphase(
-            num_experts=num_experts,
-            topk=topk,
-            unit_size=unit_size,
-            has_mask=has_mask,
-        )
-    )
-
-    stream = torch.cuda.current_stream()
-    stream_arg = fx.Stream(stream)
-
-    num_cu = torch.cuda.get_device_properties(topk_ids.device).multi_processor_count
-
-    base_key = (num_experts, topk, unit_size, has_mask, topk_ids.device.index)
-    use_p0v2 = i32_tokens <= 2048
-
-    target_occupancy = 2
-    n_zero_blocks = min((i32_moe_buf_elems + BLOCK_SIZE - 1) // BLOCK_SIZE, num_cu * target_occupancy)
-    k4_grid = num_experts + n_zero_blocks
-
-    if use_p0v2:
-        ck = base_key + ("p0v2_p23",)
-        cf = _multiphase_cf_cache.get(ck)
-        if cf is not None:
-            cf(
-                topk_ids,
-                workspace,
-                topk_weights,
-                sorted_ids,
-                sorted_weights,
-                sorted_expert_ids,
-                num_valid_ids,
-                moe_buf_i32,
-                expert_mask,
-                i32_tokens,
-                mesh_stride,
-                mesh_size,
-                i32_moe_buf_elems,
-                k4_grid,
-                stream_arg,
-            )
-        else:
-            launch_p0v2_p23(
-                topk_ids,
-                workspace,
-                topk_weights,
-                sorted_ids,
-                sorted_weights,
-                sorted_expert_ids,
-                num_valid_ids,
-                moe_buf_i32,
-                expert_mask,
-                i32_tokens,
-                mesh_stride,
-                mesh_size,
-                i32_moe_buf_elems,
-                k4_grid,
-                stream=stream,
-            )
-            cf = flyc.compile(
-                launch_p0v2_p23,
-                topk_ids,
-                workspace,
-                topk_weights,
-                sorted_ids,
-                sorted_weights,
-                sorted_expert_ids,
-                num_valid_ids,
-                moe_buf_i32,
-                expert_mask,
-                i32_tokens,
-                mesh_stride,
-                mesh_size,
-                i32_moe_buf_elems,
-                k4_grid,
-                stream_arg,
-            )
-            _multiphase_cf_cache[ck] = cf
-        return
-
-    # 4-kernel path (T > 2048): fused clear+p0+p1+p23
-    k1_grid = (ws_total + 1023) // 1024
-    k2_grid = min(num_cu * target_occupancy, (i32_tokens * topk + 255) // 256)
-    k2_total = i32_tokens * topk
-    k2_stride = k2_grid * 256
-    k2_niters = (k2_total + k2_stride - 1) // k2_stride
-
-    ck = base_key + ("4k_fused",)
-    cf = _multiphase_cf_cache.get(ck)
-    if cf is not None:
-        cf(
-            topk_ids,
-            workspace,
-            topk_weights,
-            sorted_ids,
-            sorted_weights,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_buf_i32,
-            expert_mask,
-            i32_tokens,
-            mesh_stride,
-            mesh_size,
-            i32_moe_buf_elems,
-            ws_total,
-            k2_niters,
-            k1_grid,
-            k2_grid,
-            k4_grid,
-            stream_arg,
-        )
-    else:
-        launch_4k_fused(
-            topk_ids,
-            workspace,
-            topk_weights,
-            sorted_ids,
-            sorted_weights,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_buf_i32,
-            expert_mask,
-            i32_tokens,
-            mesh_stride,
-            mesh_size,
-            i32_moe_buf_elems,
-            ws_total,
-            k2_niters,
-            k1_grid,
-            k2_grid,
-            k4_grid,
-            stream=stream,
-        )
-        cf = flyc.compile(
-            launch_4k_fused,
-            topk_ids,
-            workspace,
-            topk_weights,
-            sorted_ids,
-            sorted_weights,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_buf_i32,
-            expert_mask,
-            i32_tokens,
-            mesh_stride,
-            mesh_size,
-            i32_moe_buf_elems,
-            ws_total,
-            k2_niters,
-            k1_grid,
-            k2_grid,
-            k4_grid,
-            stream_arg,
-        )
-        _multiphase_cf_cache[ck] = cf
