@@ -277,7 +277,7 @@ def read_kernel_metadata(dispatch_dir):
                 chosen = r
                 break
         if chosen is None:
-            return {}  # no matching kernel row — better to fall back to ISA-only
+            continue  # no matching row in this CSV — try the next candidate
 
         def _int(key):
             try:
@@ -359,14 +359,18 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
     is_vgpr_form = max_agpr == 0
 
     if csv_vgpr or csv_accum:
-        combined_count = csv_vgpr + csv_accum  # sub-counts sum to the total
         if is_vgpr_form:
-            # No physical AGPR; the whole total lives in the arch file.
-            arch_vgpr_count = combined_count
+            # No physical AGPR; the whole total lives in the arch file.  Guard
+            # against a bogus-low CSV total with the ISA v-register scan.
+            arch_vgpr_count = max(isa_arch, csv_vgpr + csv_accum)
             accum_vgpr_count = 0
+            combined_count = arch_vgpr_count
         else:
-            arch_vgpr_count = csv_vgpr
-            accum_vgpr_count = csv_accum
+            # agpr-form: arch and accum live in separate files; guard each
+            # sub-count with its ISA scan so a low CSV field can't under-report.
+            arch_vgpr_count = max(isa_arch, csv_vgpr)
+            accum_vgpr_count = max(isa_accum, csv_accum)
+            combined_count = arch_vgpr_count + accum_vgpr_count
     else:
         arch_vgpr_count = isa_arch
         accum_vgpr_count = isa_accum

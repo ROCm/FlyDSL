@@ -250,11 +250,15 @@ instructions. Instead, prefetch restructures the code so the compiler places
 
 **Always check register headroom before adding prefetch buffers:**
 
-On CDNA3 (gfx942 MI300X/MI308), VGPRs are split into **two separate register files**:
-- **arch_vgpr** (256 per SIMD): used by VALU, VMEM loads, LDS ops, and prefetch buffers
-- **accum_vgpr / AGPR** (256 per SIMD): used exclusively by MFMA result writeback
+On CDNA3 (gfx942 MI300X/MI308), VGPRs are tracked as two **physical** files that
+share **one combined 512-entry occupancy budget** per SIMD:
+- **arch_vgpr** (up to 256 per SIMD): used by VALU, VMEM loads, LDS ops, and prefetch buffers
+- **accum_vgpr / AGPR** (up to 256 per SIMD): used by MFMA result writeback
 
-Prefetch buffers consume **arch_vgpr only** (they hold global load results). MFMA accumulators use **accum_vgpr only**. These do not compete.
+Prefetch buffers physically live in **arch_vgpr** and MFMA accumulators in
+**accum_vgpr**, but occupancy is governed by their **sum** (`arch_vgpr +
+accum_vgpr`), so growing prefetch buffers *does* compete with MFMA accumulators
+for the shared 512 budget and can cost occupancy.
 
 ```python
 # Estimate arch_vgpr cost of prefetch buffers:
