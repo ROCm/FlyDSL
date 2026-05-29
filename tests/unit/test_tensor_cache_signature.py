@@ -51,25 +51,17 @@ def test_default_cache_signature_differs_by_rank():
     assert a.__cache_signature__() != b.__cache_signature__()
 
 
-def test_raw_cache_signature_matches_auto_adapted_tensor():
-    """Lightweight raw_cache_signature matches the full __cache_signature__ of an auto-adapted (dynamic_layout=True) TensorAdaptor, so fast/slow paths share the same cache slot."""
-    t = torch.empty((4, 8), dtype=torch.float32)
-    raw_sig = TensorAdaptor.raw_cache_signature(t)
-    auto_sig = TensorAdaptor(t).__cache_signature__()
-    assert raw_sig == auto_sig
-
-
-def test_raw_cache_signature_shares_across_shapes():
+def test_auto_adapted_cache_signature_shares_across_shapes():
     """Raw tensors hit the layout-dynamic memref path; the cache key elides shape/stride so one compile serves all shapes."""
     a = torch.empty((100,), dtype=torch.float32)
     b = torch.empty((999,), dtype=torch.float32)
-    assert TensorAdaptor.raw_cache_signature(a) == TensorAdaptor.raw_cache_signature(b)
+    assert TensorAdaptor(a).__cache_signature__() == TensorAdaptor(b).__cache_signature__()
 
 
-def test_raw_cache_signature_differs_by_rank():
+def test_auto_adapted_cache_signature_differs_by_rank():
     a = torch.empty((10,), dtype=torch.float32)
     b = torch.empty((2, 5), dtype=torch.float32)
-    assert TensorAdaptor.raw_cache_signature(a) != TensorAdaptor.raw_cache_signature(b)
+    assert TensorAdaptor(a).__cache_signature__() != TensorAdaptor(b).__cache_signature__()
 
 
 def test_pick_unit_stride_axis_returns_first_match():
