@@ -26,10 +26,15 @@ an optimization plan.
 
 ---
 
-## Hotspot Analyzer Script
+## Analyzer Scripts
 
-The hotspot analyzer is located at `scripts/hotspot_analyzer.py`.
-It reads a `ui_output_agent_*_dispatch_*` directory and reports top-K stall hotspots.
+- `scripts/hotspot_analyzer.py` — reads a `ui_output_agent_*_dispatch_*` ATT
+  directory; reports top-K stall hotspots, stall-type breakdown, and occupancy
+  (combined-VGPR-pool model, reads accum/LDS/SGPR from `out_kernel_trace.csv`).
+- `scripts/pmc_l2_analyzer.py` — reads rocprofv3 PMC counter CSV(s); reports
+  L2 hit rate, HBM 32B-partial fraction, and over-fetch ratio. Use when a
+  kernel is memory-bound and you need to know *why* (ATT has no cache counters).
+  See "L2 / HBM efficiency analysis" under Step 5.
 
 ---
 
@@ -316,6 +321,56 @@ combined ≤ 256, e.g. freeing ~24 VGPRs.
 **Warning**: `maxnreg` forcing `accum_vgpr=0` doubles occupancy but causes MFMA spills through
 arch_vgpr — measured 4.5x GPU slowdown. Do not use `maxnreg` for MFMA-heavy kernels.
 
+### L2 / HBM efficiency analysis (PMC, not ATT)
+
+When the ATT hotspots are dominated by `VMEM-load` at high stall rate (e.g.
+40-50% of stall, ~94% per-load), the kernel is memory-bound and the next
+question is **why** — and ATT cannot answer it (it has no cache counters).
+Capture PMC counters (see capture-kernel-trace "PMC Mode") and analyze with
+`scripts/pmc_l2_analyzer.py`:
+
+```bash
+python scripts/pmc_l2_analyzer.py \
+    /tmp/pmc_out/pass_1/pmc_l2_counter_collection.csv \
+    /tmp/pmc_ea_out/pass_1/pmc_ea_counter_collection.csv \
+    --kernel <kernel> --ideal-gb <bytes_per_dispatch_GB> --ea-channels 2
+```
+
+Three metrics, three decisions:
+
+| Metric | Formula | What it tells you |
+|---|---|---|
+| **L2 hit rate** | `TCC_HIT/(TCC_HIT+TCC_MISS)` | Is there temporal reuse to exploit? |
+| **32B fraction** | `TCC_EA0_RDREQ_32B/TCC_EA0_RDREQ` | Spatial locality / cache-line waste |
+| **over-fetch** | `est_HBM_bytes / (ideal_GB × dispatches)` | Redundant fetching |
+
+**Decision tree** for a memory-bound decode kernel:
+
+1. **L2 hit rate < 5%** → pure streaming, no reuse. This is **expected and
+   correct** for decode with independent per-sequence paged KV — each KV byte
+   is read once; the GQA (×heads) and MTP (×seq) reuse is captured in
+   registers/LDS, never re-reads L2. *"Improving L2 hit rate" is a non-goal.*
+   The only thing that raises it is real KV reuse = **shared-prefix serving**
+   (a workload/scheduling property, not a kernel change).
+2. **32B fraction ≈ 0%** → full 64B cache lines, no spatial-locality waste.
+   Nothing to fix at the line level. (High 32B% would point to scattered/
+   misaligned access worth restructuring.)
+3. **over-fetch ≈ 1.0x** → the kernel reads exactly the data it needs. The
+   achieved bandwidth (compute as `ideal_bytes / kernel_time`) is then the
+   real ceiling for this access pattern. **50-60% of theoretical HBM peak is
+   normal** even for clean streaming; paged-gather decode living at ~54% with
+   0% partial + ~1.0x over-fetch is healthy, not a defect.
+
+**Worked example (PA decode, gfx942, bs=16, ctx=131072, batch=256):**
+L2 hit 1.7%, 32B 0%, over-fetch 1.04x, 2.85 TB/s = 54% peak. Conclusion: the
+memory subsystem is clean; there is **no KV-load optimization left** — verified
+by also testing block_size 16→64 (regressed +7.8%) and confirming dwordx8
+doesn't exist on CDNA3 (dwordx4 / 16B is the max single vector load).
+
+**Counter-capture caveat**: keep each PMC job to ≤ ~4 TCC counters (single
+hardware pass). Multi-pass collection has triggered a GPU Hang on gfx942 — see
+capture-kernel-trace.
+
 ### MFMA latency reference (cycles = pipeline depth)
 
 | Instruction | Variant | Cycles | Notes |
@@ -398,3 +453,5 @@ See /prefetch-data-load skill.
 | Source loc all `""` | Set `FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1`; check `-g` flag in compile pipeline |
 | Top hotspot is kernel decorator line | Debug info artifact — skip it, focus on op lines |
 | `--att` flag error | `--att` is boolean, no value; use `-i input.yaml` for full config |
+| GPU Hang / HW Exception during PMC | Too many counters → multi-pass. Split into single-pass jobs of ≤ ~4 TCC counters |
+| PMC `accum_vgpr=0` but kernel uses MFMA | vgpr-form MFMA: accumulators are in the arch VGPR file; read total from `VGPR_Count + Accum_VGPR_Count` |
