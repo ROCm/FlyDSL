@@ -1209,7 +1209,13 @@ def compile_pa_decode_metadata(
             # cumulative-partition base for this sequence (→ local partition index),
             # kv_indptr[batch] gives the physical-page base into kv_page_indices.
             kv_part_base = buffer_ops.buffer_load(pip_rsrc, batch_idx, vec_width=1, dtype=T.i32)
-            kv_page_base = buffer_ops.buffer_load(kvindptr_rsrc, batch_idx, vec_width=1, dtype=T.i32)
+            # kv_indptr[batch] / kv_indptr[batch+1] in one dwordx2 load: this
+            # sequence's physical-page base and end in the flat kv_page_indices
+            # array.  kv_page_end clamps small-block page-gather reads so the last
+            # (partial) partition never reads past the sequence.
+            _kvind2 = buffer_ops.buffer_load(kvindptr_rsrc, batch_idx, vec_width=2, dtype=T.i32)
+            kv_page_base = vector.extract(_kvind2, static_position=[0], dynamic_position=[])
+            kv_page_end = vector.extract(_kvind2, static_position=[1], dynamic_position=[])
             local_part_start = kv_start - kv_part_base
 
             # Derive kv_head from q_head_range
@@ -1315,16 +1321,23 @@ def compile_pa_decode_metadata(
             # staged to LDS so every warp can read all pages for the V load.
             # (Only used when `_is_small_block`; for block_size >= 256 a partition
             # is a 256-token sub-tile of a single physical page.)
+            _kpi_last = kv_page_end - c_one  # last in-bounds page index for this seq
+
+            def _meta_load_phys_clamped(elem_idx):
+                # Clamp to the sequence's page range so the last (partial) partition
+                # never reads past the flat kv_page_indices window (kpi_rsrc has no
+                # HW bounds check).  Out-of-range lanes map to tokens >= context_len,
+                # which softmax masks to 0, so the clamped block's content is unused.
+                safe = arith.select(elem_idx < kv_page_end, elem_idx, _kpi_last)
+                return buffer_ops.buffer_load(kpi_rsrc, safe, vec_width=1, dtype=T.i32)
+
             def _meta_stage_phys(local_part):
                 page_base = kv_page_base + local_part * c_bpp
                 if const_expr(_block_size == 64):
-                    return buffer_ops.buffer_load(kpi_rsrc, page_base + warp_id, vec_width=1, dtype=T.i32)
-                return buffer_ops.buffer_load(
-                    kpi_rsrc,
-                    page_base + warp_id * arith.constant(TLOOP, type=T.i32),
-                    vec_width=TLOOP,
-                    dtype=T.i32,
-                )
+                    return _meta_load_phys_clamped(page_base + warp_id)
+                wbase = page_base + warp_id * arith.constant(TLOOP, type=T.i32)
+                elems = [_meta_load_phys_clamped(wbase + arith.constant(td, type=T.i32)) for td in range(TLOOP)]
+                return fx.Vector.from_elements(elems, dtype=fx.Int32)
 
             def _meta_store_phys_to_lds(phys_vec):
                 if (lane16id | rowid) == c_zero_i32:
