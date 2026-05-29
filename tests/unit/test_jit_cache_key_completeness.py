@@ -229,3 +229,35 @@ def test_dict_global_inplace_mutation_raises(tmp_path, monkeypatch):
     mod.CFG["tile"] = 128  # in-place mutation (same object id)
     with pytest.raises(RuntimeError, match="CFG"):
         mod.k(A)
+
+
+def test_drift_baseline_is_per_owner_cls():
+    """A JIT method reused across owner classes must drift-check each class
+    against its own baseline, not the first owner's. Otherwise a global seen only
+    under the second owner is skipped (not in the first owner's baseline) and a
+    later mutation silently reuses the memoized key segment instead of raising."""
+    from flydsl.compiler.jit_function import _snapshot_refs
+
+    @flyc.jit
+    def launch(A: fx.Tensor):
+        return A
+
+    # Two owner classes whose discovered refs read different module globals.
+    g = {"__name__": "m", "FOO": 1, "BAR": 1}
+
+    class A:
+        pass
+
+    class B:
+        pass
+
+    launch._global_refs_cache[A] = [("FOO", "m", g)]
+    launch._global_refs_cache[B] = [("BAR", "m", g)]
+    launch._used_global_vals[A] = _snapshot_refs(launch._global_refs_cache[A], stable=False)
+    launch._used_global_vals[B] = _snapshot_refs(launch._global_refs_cache[B], stable=False)
+
+    g["BAR"] = 2  # mutate a global seen only under owner B
+
+    launch._check_globals_drift(A)  # A's baseline (FOO) unchanged → no raise
+    with pytest.raises(RuntimeError, match="BAR"):
+        launch._check_globals_drift(B)  # B's own baseline catches the BAR drift

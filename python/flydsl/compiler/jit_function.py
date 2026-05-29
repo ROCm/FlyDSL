@@ -1228,8 +1228,11 @@ class JitFunction:
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
         self._extern_linkage_keys = set()
 
-        # snapshot the used globals on first compile and RAISE on any later drift.
-        self._used_global_vals: Optional[Dict[Tuple[str, str], Any]] = None
+        # owner_cls -> first-compile snapshot of the used globals; RAISE on any
+        # later drift. Keyed by owner_cls (like the refs/prefix caches below) so a
+        # JIT method reused across owner classes drift-checks each class against
+        # its own baseline instead of the first owner's.
+        self._used_global_vals: Dict[Any, Dict[Tuple[str, str], Any]] = {}
         # owner_cls -> discovered global refs. The (recursive) discovery is a pure
         # function of the dependency tree's code objects, so it's memoized here and
         # the hot path only re-snapshots the current values.
@@ -1256,7 +1259,7 @@ class JitFunction:
 
     def _check_globals_drift(self, owner_cls=None) -> None:
         """Raise if any captured global value has changed since first compile."""
-        baseline = self._used_global_vals
+        baseline = self._used_global_vals[owner_cls]
         for name, mod_name, var_dict in self._get_global_refs(owner_cls):
             key = (name, mod_name)
             old = baseline.get(key, _NOT_IN_BASELINE)
@@ -1421,9 +1424,10 @@ class JitFunction:
         owner_cls = type(bound_self) if bound_self is not None else None
         self._ensure_cache_manager(owner_cls)
 
-        # snapshot the used globals on first compile and RAISE on any later change.
-        if self._used_global_vals is None:
-            self._used_global_vals = _snapshot_refs(self._get_global_refs(owner_cls), stable=False)
+        # snapshot the used globals on first compile (per owner_cls) and RAISE on
+        # any later change.
+        if owner_cls not in self._used_global_vals:
+            self._used_global_vals[owner_cls] = _snapshot_refs(self._get_global_refs(owner_cls), stable=False)
         else:
             self._check_globals_drift(owner_cls)
 
