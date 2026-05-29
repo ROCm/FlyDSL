@@ -17,7 +17,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .._mlir import ir
 from .._mlir.dialects import func
@@ -105,6 +105,156 @@ def _create_mlir_context(*, load_dialects=True):
     if load_dialects:
         ctx.load_all_available_dialects()
     return ctx
+
+
+# Sentinel distinct from a real ``None`` snapshot value (a since-deleted global).
+_NOT_IN_BASELINE = object()
+
+
+# Environment variables that influence code generation. Their current values
+# enter the hot cache key so cross-process / cross-config artifacts don't collide.
+_CACHE_INVALIDATING_ENV_VARS = (
+    "FLYDSL_COMPILE_OPT_LEVEL",
+    "FLYDSL_COMPILE_BACKEND",
+    "FLYDSL_COMPILE_LLVM_DIR",
+    "ARCH",
+    "FLYDSL_GPU_ARCH",
+    "HSA_OVERRIDE_GFX_VERSION",
+    "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
+    "FLYDSL_EXTRA_SOURCE_DIRS",
+)
+
+
+# os._Environ keeps the live mapping in a plain dict (``_data``) keyed by the
+# OS-encoded bytes of each name; mutations to os.environ update it in place.
+# Reading it with pre-encoded keys skips os.environ.get's per-call key encoding,
+# which is ~5x faster on this hot path. Guarded: if the internal layout is
+# absent (non-posix / future CPython) we fall back to the public API. Values go
+# through os.fsdecode so the fast and slow paths — and thus two processes
+# sharing a cache dir — produce byte-for-byte identical keys.
+try:
+    _ENABLE_ENV_FAST_READ = isinstance(os.environ._data, dict)
+except Exception:
+    _ENABLE_ENV_FAST_READ = False
+_CACHE_INVALIDATING_ENV_VARS_ENCODED = tuple((n, os.fsencode(n)) for n in _CACHE_INVALIDATING_ENV_VARS)
+
+
+def _cache_invalidating_env_values() -> tuple:
+    # Re-read on every call: users may mutate os.environ mid-process (e.g.
+    # toggling FLYDSL_COMPILE_OPT_LEVEL between runs) and any caching here
+    # would freeze the first observed values into every subsequent cache key.
+    if _ENABLE_ENV_FAST_READ:
+        data = os.environ._data
+        return tuple((n, os.fsdecode(data[b]) if b in data else "") for n, b in _CACHE_INVALIDATING_ENV_VARS_ENCODED)
+    return tuple((n, os.environ.get(n, "")) for n in _CACHE_INVALIDATING_ENV_VARS)
+
+
+def _snapshot_global_value(val, *, stable):
+    """Summarize a captured global for the cache key / drift detection.
+
+    ``stable=True`` is cross-process-stable (no ``id()``, which is randomized per
+    process) so two processes importing the same module produce the same key —
+    suitable for folding into cache keys. ``stable=False`` includes ``id()`` so
+    in-process drift detection catches rebinding even when type/value look equal.
+    Scalars are summarized by value in both modes.
+    """
+    if isinstance(val, (int, float, bool, str, bytes, type(None))):
+        return ("scalar", val)
+    if stable:
+        if callable(val):
+            # qualname+module is stable across processes; repr would bake in
+            # <0x...> addresses for many callables.
+            qualname = getattr(val, "__qualname__", None) or getattr(val, "__name__", "?")
+            return ("callable", getattr(val, "__module__", "?"), qualname)
+        # Distinct instances of the same type collapse here; the stable=False
+        # path still catches rebinding via id().
+        return ("obj", type(val).__qualname__)
+    if callable(val):
+        return ("callable", id(val), repr(val))
+    return ("obj", id(val), type(val).__qualname__)
+
+
+def _discover_global_refs(func, owner_cls=None) -> List[Tuple[str, str, dict]]:
+    """Statically discover which module globals ``func`` and its (jit / kernel /
+    same-dir user) dependencies *read*.
+
+    The result depends only on the code objects in the dependency tree — NOT on
+    the current values of those globals — so it is stable across calls and can be
+    memoized per ``(func, owner_cls)``. The recursive walk (co_names + closures +
+    class members) therefore runs once instead of on every JIT call; the hot path
+    only re-reads the discovered values via :func:`_snapshot_refs`.
+
+    Returns a sorted list of ``(name, module_name, globals_dict)`` triples. The
+    snapshot is keyed on ``(name, module_name)`` so the same identifier appearing
+    in different modules doesn't collide. JitFunction / KernelFunction deps are
+    always recursed into (regardless of source location); plain Python helpers are
+    filtered by ``_is_user_function`` (same directory as the root file) to avoid
+    pulling stdlib / third-party globals into the snapshot.
+
+    ``owner_cls`` enables recursing into ``self.helper`` style method calls so
+    helpers attached to the owning class also have their globals tracked.
+    """
+    from .kernel_function import KernelFunction
+
+    try:
+        rootFile = inspect.getfile(func)
+    except (TypeError, OSError):
+        rootFile = ""
+    refs: Dict[Tuple[str, str], dict] = {}
+    visited: Set[int] = set()
+
+    def _walk(f, cls=None):
+        if id(f) in visited:
+            return
+        visited.add(id(f))
+        f_globals = getattr(f, "__globals__", {})
+        mod_name = f_globals.get("__name__", "?")
+        for name in f.__code__.co_names:
+            key = (name, mod_name)
+            if name in f_globals and key not in refs:
+                val = f_globals[name]
+                refs[key] = f_globals
+                underlying = _get_underlying_func(val)
+                if underlying is not None and (
+                    isinstance(val, (JitFunction, KernelFunction)) or _is_user_function(underlying, rootFile)
+                ):
+                    _walk(underlying)
+            # Also recurse through class-member helpers (self.helper(...))
+            if cls is not None:
+                try:
+                    obj = getattr(cls, name)
+                except AttributeError:
+                    obj = None
+                underlying = _get_underlying_func(obj) if obj is not None else None
+                if underlying is not None and _is_user_function(underlying, rootFile):
+                    _walk(underlying, cls=cls)
+        if f.__code__.co_freevars and getattr(f, "__closure__", None):
+            for _cname, cell in zip(f.__code__.co_freevars, f.__closure__):
+                try:
+                    val = cell.cell_contents
+                except ValueError:
+                    continue
+                underlying = _get_underlying_func(val)
+                if underlying is not None:
+                    _walk(underlying)
+
+    _walk(func, cls=owner_cls or _owner_class_from_func(func))
+    return [(name, mod_name, refs[(name, mod_name)]) for (name, mod_name) in sorted(refs)]
+
+
+def _snapshot_refs(refs: List[Tuple[str, str, dict]], *, stable: bool) -> Dict[Tuple[str, str], Any]:
+    """Read the *current* values of pre-discovered global refs into a snapshot.
+
+    Cheap O(N) dict reads with no recursion — this is what runs on every JIT call.
+    ``stable=True`` returns cross-process-stable values (no ``id()``), suitable for
+    folding into cache keys. ``stable=False`` returns id-bearing values used for
+    in-process drift detection.
+    """
+    out: Dict[Tuple[str, str], Any] = {}
+    for name, mod_name, var_dict in refs:
+        if name in var_dict:
+            out[(name, mod_name)] = _snapshot_global_value(var_dict[name], stable=stable)
+    return out
 
 
 class FlyDSLCompileError(RuntimeError):
@@ -346,9 +496,22 @@ def _collect_dependency_sources(
     visited: Optional[Set[int]] = None,
     owner_cls=None,
 ) -> List[str]:
+    from .kernel_function import KernelFunction
+
     if visited is None:
         visited = set()
     sources = []
+
+    def _emit(prefix: str, name: str, val, underlying):
+        # JitFunction has its own manager_key — use it as a stable identity
+        # so cross-directory deps are tracked without dragging in the full
+        # source file (which would force ad-hoc same-dir filtering).
+        if isinstance(val, JitFunction):
+            val._ensure_cache_manager()
+            sources.append(f"{prefix}jit:{name}:{val.manager_key}")
+            return False  # do not recurse: manager_key already covers transitive deps
+        sources.append(f"{prefix}{name}:{_get_func_source(underlying)}")
+        return True  # recurse to pick up nested helpers
 
     # 1) Scan global name references (co_names → __globals__)
     for name in func.__code__.co_names:
@@ -356,11 +519,15 @@ def _collect_dependency_sources(
         underlying = _get_underlying_func(obj)
         if underlying is None or id(underlying) in visited:
             continue
-        if not _is_user_function(underlying, rootFile):
+        # Always include JitFunction/KernelFunction regardless of source location;
+        # plain helpers stay behind the same-dir filter to avoid stdlib pollution.
+        is_jit_like = isinstance(obj, (JitFunction, KernelFunction))
+        if not is_jit_like and not _is_user_function(underlying, rootFile):
             continue
         visited.add(id(underlying))
-        sources.append(f"{name}:{_get_func_source(underlying)}")
-        sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+        should_recurse = _emit("", name, obj, underlying)
+        if should_recurse:
+            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
 
     # 2) Scan closure variables (co_freevars → __closure__) for callable
     #    dependencies.  This catches @flyc.kernel functions defined in an
@@ -375,8 +542,9 @@ def _collect_dependency_sources(
             if underlying is None or id(underlying) in visited:
                 continue
             visited.add(id(underlying))
-            sources.append(f"closure:{name}:{_get_func_source(underlying)}")
-            sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
+            should_recurse = _emit("closure:", name, val, underlying)
+            if should_recurse:
+                sources.extend(_collect_dependency_sources(underlying, rootFile, visited))
 
     owner_cls = owner_cls or _owner_class_from_func(func)
     if owner_cls is not None:
@@ -901,9 +1069,9 @@ def _resolve_jit_arg_type(arg, annotation):
     logic as convert_to_jit_arguments.  Returns the type (not an instance)."""
     from .jit_argument import JitArgumentRegistry
 
-    if isinstance(arg, int) and annotation is Stream:
-        return Stream
-    if hasattr(arg, "__get_c_pointers__"):
+    if isinstance(annotation, type) and issubclass(annotation, JitArgument):
+        return annotation
+    if isinstance(arg, JitArgument):
         return type(arg)
     constructor, _ = JitArgumentRegistry.get(type(arg))
     return constructor
@@ -1031,10 +1199,22 @@ class JitFunction:
         self._call_state_cache = {}  # cache_key -> CallState
         self._sig = None  # lazy: set on first call
         self._has_self_param = False  # lazy: set in _ensure_sig
-        self._target = None  # lazy: GPUTarget resolved once in _ensure_sig
+        self._backend_target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
         self._extern_linkage_keys = set()
+
+        # snapshot the used globals on first compile and RAISE on any later drift.
+        self._used_global_vals: Optional[Dict[Tuple[str, str], Any]] = None
+        # owner_cls -> discovered global refs. The (recursive) discovery is a pure
+        # function of the dependency tree's code objects, so it's memoized here and
+        # the hot path only re-snapshots the current values.
+        self._global_refs_cache: Dict[Any, List[Tuple[str, str, dict]]] = {}
+        # owner_cls -> pre-built ``("_globals_", ...)`` cache-key segment. The
+        # globals folded into the key cannot change without the drift check
+        # raising first, so the segment is built once and reused on every cache
+        # hit (matching Triton, which never re-snapshots globals per launch).
+        self._globals_prefix_cache: Dict[Any, tuple] = {}
 
     def __get__(self, obj, objtype=None):
         # when used as a method on a class bind the owning instance as the
@@ -1042,6 +1222,31 @@ class JitFunction:
         if obj is None:
             return self
         return partial(self.__call__, obj)
+
+    def _get_global_refs(self, owner_cls=None) -> List[Tuple[str, str, dict]]:
+        """Memoized global-ref discovery (see :func:`_discover_global_refs`)."""
+        cache = self._global_refs_cache
+        if owner_cls not in cache:
+            cache[owner_cls] = _discover_global_refs(self.func, owner_cls)
+        return cache[owner_cls]
+
+    def _check_globals_drift(self, owner_cls=None) -> None:
+        """Raise if any captured global value has changed since first compile."""
+        baseline = self._used_global_vals
+        for name, mod_name, var_dict in self._get_global_refs(owner_cls):
+            key = (name, mod_name)
+            old = baseline.get(key, _NOT_IN_BASELINE)
+            if old is _NOT_IN_BASELINE:
+                continue
+            new = _snapshot_global_value(var_dict[name], stable=False) if name in var_dict else None
+            if new != old:
+                raise RuntimeError(
+                    f"FlyDSL: global '{name}' (module '{mod_name}') used by @flyc.jit "
+                    f"'{self.func.__name__}' changed since first compile "
+                    f"(old={old!r}, new={new!r}). Capturing live globals is unsafe; "
+                    "restart the process or avoid mutating the global. Prefer passing "
+                    "the value as an explicit argument so it participates in the cache key."
+                )
 
     def cache_info(self) -> Optional[CacheInfo]:
         """Return cache statistics, or ``None`` if the disk cache is disabled."""
@@ -1061,7 +1266,10 @@ class JitFunction:
             self._sig = full_sig.replace(parameters=params[1:])
         else:
             self._sig = full_sig
-        self._target = get_backend().target  # resolve once; frozen dataclass, hashable
+        # NOTE: do NOT cache device_id here — torch.cuda.set_device() can move
+        # subsequent launches to a different GPU, and a frozen device_id would
+        # let the new device silently hit the old device's cache entry.
+        self._backend_target = get_backend().target  # frozen dataclass, stable
 
     def _ensure_cache_manager(self, owner_cls=None):
         if self.manager_key is not None and self._manager_owner_cls is owner_cls:
@@ -1105,10 +1313,13 @@ class JitFunction:
         * JitArgument-driven: the call value is (or is wrapped into) a
           ``JitArgument`` and its ``cache_signature()`` is appended.
         """
+        from ..runtime.device_runtime import get_device_runtime
         from .jit_argument import JitArgumentRegistry
 
         sig = self._sig
-        key_parts = [("_target_", self._target)]
+        # Re-read device_id and env vars on every call.
+        target = (self._backend_target, get_device_runtime().current_device_id())
+        key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", target)]
         if self.compile_hints:
             key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
 
@@ -1142,6 +1353,31 @@ class JitFunction:
 
         return tuple(key_parts)
 
+    def _globals_key_prefix(self, owner_cls=None) -> tuple:
+        """Memoized ``("_globals_", ...)`` cache-key segment for ``owner_cls``.
+
+        Built once from the first-call snapshot and reused on every cache hit.
+        Safe to memoize: any change to a folded global is caught by the drift
+        check, which raises before a stale segment could be used.
+
+        The stable snapshot is folded in so two processes that observe different
+        values for the same captured global cannot share an artifact —
+        cross-process silent stale hits are prevented even though in-process drift
+        detection (which raises) never runs in the second process.
+        """
+        cache = self._globals_prefix_cache
+        if owner_cls not in cache:
+            stable = _snapshot_refs(self._get_global_refs(owner_cls), stable=True)
+            cache[owner_cls] = (("_globals_", tuple(sorted(stable.items()))),) if stable else ()
+        return cache[owner_cls]
+
+    def _build_full_cache_key(self, bound_arguments, *, owner_cls=None, bound_self=None):
+        """Build the complete cache key: arg signatures + stable globals snapshot + self type."""
+        cache_key = self._globals_key_prefix(owner_cls) + self._resolve_and_make_cache_key(bound_arguments)
+        if bound_self is not None:
+            cache_key = (("_self_type_", type(bound_self)),) + cache_key
+        return cache_key
+
     @staticmethod
     def _cache_key_to_str(cache_key) -> str:
         """Convert tuple cache key to string for disk cache."""
@@ -1161,13 +1397,17 @@ class JitFunction:
         owner_cls = type(bound_self) if bound_self is not None else None
         self._ensure_cache_manager(owner_cls)
 
+        # snapshot the used globals on first compile and RAISE on any later change.
+        if self._used_global_vals is None:
+            self._used_global_vals = _snapshot_refs(self._get_global_refs(owner_cls), stable=False)
+        else:
+            self._check_globals_drift(owner_cls)
+
         sig = self._sig
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
-        cache_key = self._resolve_and_make_cache_key(bound.arguments)
-        if bound_self is not None:
-            cache_key = (("_self_type_", type(bound_self)),) + cache_key
+        cache_key = self._build_full_cache_key(bound.arguments, owner_cls=owner_cls, bound_self=bound_self)
 
         args_tuple = tuple(bound.arguments.values())
 
@@ -1457,7 +1697,7 @@ def _compile_impl(func, *args) -> CompiledFunction:
     sig = jf._sig  # guaranteed initialized after __call__
     bound = sig.bind(*args)
     bound.apply_defaults()
-    cache_key = jf._resolve_and_make_cache_key(bound.arguments)
+    cache_key = jf._build_full_cache_key(bound.arguments)
     args_tuple = tuple(bound.arguments.values())
 
     # Look up the CompiledArtifact.  We must hold a direct reference to it
