@@ -6,6 +6,7 @@ import contextlib
 import difflib
 import inspect
 import types
+import warnings
 from textwrap import dedent
 from typing import List
 
@@ -119,13 +120,15 @@ def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_e
 
 def _check_local_var(name, local_vars):
     if name not in local_vars:
-        raise NameError(
+        warnings.warn(
             f"Variable '{name}' is assigned inside a control flow body (while/if/for) "
             f"but is not a local variable in the current scope. "
             f"It may be a closure variable captured from an outer function. "
             f"Fix: pass it as a function parameter or assign it to a local variable "
-            f"before the control flow statement."
+            f"before the control flow statement.",
+            stacklevel=2,
         )
+        return None
     return local_vars[name]
 
 
@@ -316,31 +319,34 @@ class Transformer(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_For(self, node: ast.For):
-        self._record_target_symbols(node.target)
-        node.iter = self.visit(node.iter)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            self._record_target_symbols(node.target)
+            node.iter = self.visit(node.iter)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_If(self, node: ast.If):
-        node.test = self.visit(node.test)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_While(self, node: ast.While):
-        node.test = self.visit(node.test)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_With(self, node: ast.With):
@@ -1183,23 +1189,24 @@ class InsertEmptyYieldForSCFFor(Transformer):
             node.iter.func = ast.Name(id="scf_range", ctx=ast.Load())
         line = ast.dump(node.iter)
         if "for_" in line or "scf.for_" in line or "scf_range" in line:
-            node.iter = self.visit(node.iter)
             with self.symbol_scopes.control_flow_scope():
-                if isinstance(node.target, ast.Name):
-                    self.symbol_scopes.record_symbol(node.target.id)
-                node.body = self._visit_stmt_block(node.body)
-            if node.orelse:
+                node.iter = self.visit(node.iter)
                 with self.symbol_scopes.control_flow_scope():
-                    node.orelse = self._visit_stmt_block(node.orelse)
-            new_yield = ast.Expr(ast.Yield(value=None))
-            if node.body and not self._is_yield(node.body[-1]):
-                last_statement = node.body[-1]
-                assert (
-                    last_statement.end_lineno is not None
-                ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
-                new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
-                node.body.append(new_yield)
-            node = ast.fix_missing_locations(node)
+                    if isinstance(node.target, ast.Name):
+                        self.symbol_scopes.record_symbol(node.target.id)
+                    node.body = self._visit_stmt_block(node.body)
+                if node.orelse:
+                    with self.symbol_scopes.control_flow_scope():
+                        node.orelse = self._visit_stmt_block(node.orelse)
+                new_yield = ast.Expr(ast.Yield(value=None))
+                if node.body and not self._is_yield(node.body[-1]):
+                    last_statement = node.body[-1]
+                    assert (
+                        last_statement.end_lineno is not None
+                    ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
+                    new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
+                    node.body.append(new_yield)
+                node = ast.fix_missing_locations(node)
         return node
 
 

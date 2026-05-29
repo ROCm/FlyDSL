@@ -14,7 +14,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import buffer_ops
+from flydsl.expr import buffer_ops, range_constexpr
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -212,3 +212,63 @@ def test_iv_liveout_zero_iterations():
     torch.cuda.synchronize()
     assert out[0].item() == 999, f"expected i=999, got {out[0].item()}"
     assert out[1].item() == 0, f"expected acc=0, got {out[1].item()}"
+
+
+# ── Case 8: for-loop target does not leak into outer scope ──────────────────
+
+def test_comprehension_target_constexpr_not_leaked():
+    """for ni in range_constexpr(0) followed by if with [... for ni in range_constexpr(1)].
+
+    Previously ni leaked into active_symbols from the outer for loop,
+    causing the comprehension's ni to be collected as control-flow state.
+    """
+
+    @flyc.kernel
+    def kernel(Out: fx.Tensor, n: fx.Int32):
+        acc = fx.Int32(0)
+
+        for ni in range_constexpr(0):
+            acc = acc + fx.Int32(100)
+
+        if n > fx.Int32(0):
+            values = [fx.Int32(1) for ni in range_constexpr(1)]
+            acc = acc + values[0]
+
+        rsrc = buffer_ops.create_buffer_resource(Out)
+        buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+
+    @flyc.jit
+    def launch(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        kernel(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+    out, t_out = _make_out_tensor()
+    launch(t_out, fx.Int32(1))
+    torch.cuda.synchronize()
+    assert out.item() == 1
+
+
+def test_comprehension_target_dynamic_range_not_leaked():
+    """Same pattern with dynamic range() in the outer for loop."""
+
+    @flyc.kernel
+    def kernel(Out: fx.Tensor, n: fx.Int32):
+        acc = fx.Int32(0)
+
+        for ni in range(n):
+            acc = acc + fx.Int32(100)
+
+        if n > fx.Int32(0):
+            values = [fx.Int32(1) for ni in range(1)]
+            acc = acc + values[0]
+
+        rsrc = buffer_ops.create_buffer_resource(Out)
+        buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+
+    @flyc.jit
+    def launch(Out: fx.Tensor, n: fx.Int32, stream: fx.Stream = fx.Stream(None)):
+        kernel(Out, n).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
+
+    out, t_out = _make_out_tensor()
+    launch(t_out, fx.Int32(1))
+    torch.cuda.synchronize()
+    assert out.item() == 101  # range(1) → 1 iteration: acc=100, then +1 from comprehension
