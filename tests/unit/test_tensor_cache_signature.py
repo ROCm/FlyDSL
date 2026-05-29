@@ -3,12 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Tests for TensorAdaptor cache signature and the ``mark_static`` API.
+"""Tests for TensorAdaptor cache signatures.
 
-Default cache key is lightweight (dtype + align + 32-bit-stride flag + rank)
-so a single compiled kernel serves calls with different shapes.  When the
-kernel's compiled IR depends on concrete shape values, the affected dims must
-be marked with ``mark_static`` so they participate in the cache key.
+Two adaptation paths produce two distinct cache-key shapes:
+
+* ``flyc.from_dlpack(t)`` returns a *static-layout* TensorAdaptor: shape and
+  stride are baked into the memref type, so every distinct shape ends up
+  with its own compiled kernel. Chain ``.mark_layout_dynamic()`` to switch
+  to a layout-dynamic memref whose key elides shape/stride (one compile
+  serves all shapes).
+
+* Raw ``torch.Tensor`` arguments go through the auto-adapt path
+  (``TensorAdaptor(t)`` with ``dynamic_layout=True``) and behave like
+  ``from_dlpack(t).mark_layout_dynamic()``: layout-dynamic memref, no
+  shape/stride in the cache key.
 """
 
 import pytest
@@ -17,15 +25,18 @@ import torch
 import flydsl.compiler as flyc
 from flydsl.compiler.jit_argument import TensorAdaptor
 
-# -----------------------------------------------------------------------------
-# Default cache behavior: shape NOT in key, kernels reused across shapes
-# -----------------------------------------------------------------------------
+
+def test_dynamic_layout_cache_signature_shares_key_across_shapes():
+    a = flyc.from_dlpack(torch.empty((4, 8), dtype=torch.float32)).mark_layout_dynamic()
+    b = flyc.from_dlpack(torch.empty((100, 200), dtype=torch.float32)).mark_layout_dynamic()
+    assert a.__cache_signature__() == b.__cache_signature__()
 
 
-def test_default_cache_signature_shares_key_across_shapes():
+def test_default_static_cache_signature_differs_by_shape():
+    """``from_dlpack`` defaults to static layout: shape participates in the key."""
     a = flyc.from_dlpack(torch.empty((4, 8), dtype=torch.float32))
     b = flyc.from_dlpack(torch.empty((100, 200), dtype=torch.float32))
-    assert a.__cache_signature__() == b.__cache_signature__()
+    assert a.__cache_signature__() != b.__cache_signature__()
 
 
 def test_default_cache_signature_differs_by_dtype():
@@ -40,71 +51,57 @@ def test_default_cache_signature_differs_by_rank():
     assert a.__cache_signature__() != b.__cache_signature__()
 
 
-def test_raw_cache_signature_matches_default_dlpack():
-    """raw_cache_signature (lightweight path) and default __cache_signature__ agree."""
-    t = torch.empty((4, 8), dtype=torch.float32)
-    raw_sig = TensorAdaptor.raw_cache_signature(t)
-    dlpack_sig = flyc.from_dlpack(t).__cache_signature__()
-    assert raw_sig == dlpack_sig
-
-
-def test_raw_cache_signature_shares_across_shapes():
+def test_auto_adapted_cache_signature_shares_across_shapes():
+    """Raw tensors hit the layout-dynamic memref path; the cache key elides shape/stride so one compile serves all shapes."""
     a = torch.empty((100,), dtype=torch.float32)
     b = torch.empty((999,), dtype=torch.float32)
-    assert TensorAdaptor.raw_cache_signature(a) == TensorAdaptor.raw_cache_signature(b)
+    assert TensorAdaptor(a).__cache_signature__() == TensorAdaptor(b).__cache_signature__()
 
 
-def test_raw_cache_signature_differs_by_rank():
+def test_auto_adapted_cache_signature_differs_by_rank():
     a = torch.empty((10,), dtype=torch.float32)
     b = torch.empty((2, 5), dtype=torch.float32)
-    assert TensorAdaptor.raw_cache_signature(a) != TensorAdaptor.raw_cache_signature(b)
+    assert TensorAdaptor(a).__cache_signature__() != TensorAdaptor(b).__cache_signature__()
 
 
-# -----------------------------------------------------------------------------
-# mark_static: pin shape/stride values into the cache key
-# -----------------------------------------------------------------------------
+def test_pick_unit_stride_axis_returns_first_match():
+    """When several axes carry stride 1 (typical with degenerate axes), the
+    helper returns the lowest qualifying index. Example: shape (4, 1, 8, 1)
+    strides (8, 8, 1, 1) — axes 2 and 3 both qualify, axis 2 is returned.
+    """
+    t = torch.empty((4, 1, 8, 1), dtype=torch.float32)
+    assert TensorAdaptor._pick_unit_stride_axis(t.stride()) == 2
 
 
-def test_mark_static_all_dims_includes_shape_in_key():
-    a = flyc.from_dlpack(torch.empty((4, 8))).mark_static()
-    b = flyc.from_dlpack(torch.empty((4, 8))).mark_static()
-    c = flyc.from_dlpack(torch.empty((100, 200))).mark_static()
-    assert a.__cache_signature__() == b.__cache_signature__()
-    assert a.__cache_signature__() != c.__cache_signature__()
+def test_pick_unit_stride_axis_raises_without_unit_stride():
+    """Strided slices have no axis with stride 1; raise instead of returning None."""
+    sliced = torch.empty((4, 8))[:, ::2]  # strides (8, 2)
+    with pytest.raises(RuntimeError, match="stride == 1"):
+        TensorAdaptor._pick_unit_stride_axis(sliced.stride())
 
 
-def test_mark_static_per_dim_only_marked_dim_in_key():
-    """mark_static(dims=[1]) → dim 1 in key, dim 0 still 'dynamic'."""
-    s0 = flyc.from_dlpack(torch.empty((4, 8))).mark_static(dims=[1])
-    s1 = flyc.from_dlpack(torch.empty((100, 8))).mark_static(dims=[1])  # diff dim 0
-    s2 = flyc.from_dlpack(torch.empty((4, 16))).mark_static(dims=[1])  # diff dim 1
-    assert s0.__cache_signature__() == s1.__cache_signature__(), "dim 0 not in key"
-    assert s0.__cache_signature__() != s2.__cache_signature__(), "dim 1 in key"
+def test_auto_adapt_handles_size_one_degeneracies():
+    """Tensors with several stride-1 axes (size-1 unsqueeze, size-0 axes
+    whose stride PyTorch / DLPack happens to set to 1) must not silently
+    drop into a static memref — they should stay layout-dynamic with the
+    earliest unit-stride axis chosen.
+    """
+    # Fully degenerate (1, 1) tensor: every axis has stride 1; first wins.
+    assert TensorAdaptor(torch.empty((1, 1)))._dyn_leading_dim == 0
+    # (0, 8) is a real production case (size-0 outer axis). PyTorch's
+    # stride view has only axis 1 at stride 1, so that's what we pick.
+    assert TensorAdaptor(torch.empty((0, 8)))._dyn_leading_dim == 1
 
 
-def test_mark_static_returns_self_for_chaining():
-    t = flyc.from_dlpack(torch.empty((4, 8)))
-    assert t.mark_static() is t
-    assert t.mark_static(dims=[0]) is t
-
-
-def test_mark_static_accumulates_dims():
-    """Repeated calls union dim sets."""
-    a = flyc.from_dlpack(torch.empty((4, 8, 16))).mark_static(dims=[0]).mark_static(dims=[2])
-    b = flyc.from_dlpack(torch.empty((4, 8, 16))).mark_static(dims=[0, 2])
-    assert a.__cache_signature__() == b.__cache_signature__()
-
-
-def test_mark_static_out_of_range_raises():
-    t = flyc.from_dlpack(torch.empty((4,)))
-    with pytest.raises(IndexError):
-        t.mark_static(dims=[5])
-    with pytest.raises(IndexError):
-        t.mark_static(dims=[-1])
-
-
-def test_mark_static_default_vs_dynamic_differ_when_only_one_marked():
-    """A marked tensor and a default tensor with the same shape produce different keys."""
-    default = flyc.from_dlpack(torch.empty((4, 8)))
-    marked = flyc.from_dlpack(torch.empty((4, 8))).mark_static()
-    assert default.__cache_signature__() != marked.__cache_signature__()
+def test_auto_adapt_raises_when_no_unit_stride_axis():
+    """If no axis has stride 1 at all (e.g. a strided slice) the tensor
+    cannot be layout-dynamic; raise with an actionable hint instead of
+    silently falling back to a static memref (which would pin shape into
+    the cache key and trigger surprise per-shape recompiles).
+    """
+    base = torch.empty((4, 8), dtype=torch.float32)
+    sliced = base[:, ::2]  # shape (4, 4) strides (8, 2) — no unit stride
+    with pytest.raises(RuntimeError, match="auto-mark layout-dynamic"):
+        TensorAdaptor(sliced)
+    # Explicit escape hatch still works:
+    flyc.from_dlpack(sliced)  # static memref, shape participates in key

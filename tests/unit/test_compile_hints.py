@@ -212,7 +212,7 @@ class TestCompileHintsPropagation:
 
 
 class TestCacheKeyIncludesTarget:
-    """Verify that _make_cache_key includes the GPU target so different
+    """Verify that _resolve_and_make_cache_key includes the GPU target so different
     architectures produce different cache entries."""
 
     def test_cache_key_contains_target(self):
@@ -225,7 +225,7 @@ class TestCacheKeyIncludesTarget:
         sig = jf._sig
         bound = sig.bind()
         bound.apply_defaults()
-        key = jf._make_cache_key(bound.arguments)
+        key = jf._resolve_and_make_cache_key(bound.arguments)
 
         assert isinstance(key, tuple)
         assert len(key) >= 1
@@ -247,7 +247,7 @@ class TestCacheKeyIncludesTarget:
         bound = sig.bind()
         bound.apply_defaults()
 
-        key1 = jf._make_cache_key(bound.arguments)
+        key1 = jf._resolve_and_make_cache_key(bound.arguments)
         saved_target = jf._target
 
         # Monkeypatch to a different arch (ARCH is the env var for env.compile.arch)
@@ -263,7 +263,7 @@ class TestCacheKeyIncludesTarget:
             jf._target = None
             jf._ensure_sig()
 
-            key2 = jf._make_cache_key(bound.arguments)
+            key2 = jf._resolve_and_make_cache_key(bound.arguments)
             assert key1 != key2
             assert key1[0][1].arch != key2[0][1].arch
         finally:
