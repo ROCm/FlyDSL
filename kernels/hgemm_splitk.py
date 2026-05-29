@@ -134,7 +134,7 @@ def compile_hgemm_kernel(
         WMMA_IMPL = WmmaHalf_m16n16k16(dtype)
         DMA_BYTES = 4
         MFMA_PER_WARP_K = 2
-        ASYNC_COPY = False
+        ASYNC_COPY = True
     else:
         WMMA_IMPL = WmmaHalf_m16n16k32(dtype)
         DMA_BYTES = 16
