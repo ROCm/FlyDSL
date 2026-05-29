@@ -260,17 +260,43 @@ to the outermost scope line. Ignore this line; focus on lines with explicit user
 ### Register pressure check (architecture-aware)
 
 `hotspot_analyzer.py` auto-detects the GPU architecture from ISA instruction patterns
-and prints occupancy using the correct formula. The key difference:
+and computes occupancy (waves/SIMD) as the **minimum across every resource limiter**:
+
+```
+occupancy = min(vgpr_limit, lds_limit, sgpr_limit, hw_max=8)
+  vgpr_limit = 512 // (arch_vgpr_alloc + accum_vgpr_alloc)              # per SIMD
+  lds_limit  = (LDS_total // lds_per_wg) * waves_per_wg // 4_SIMDs      # per SIMD
+  sgpr_limit = 800 // sgpr_alloc                                        # per SIMD
+```
+
+**VGPR is a combined 512-entry pool on BOTH gfx942 and gfx950.** CDNA2 (gfx90a)
+unified the arch (256) and accum (256) VGPR files into one 512 budget per SIMD,
+and gfx942/gfx950 inherit that. Occupancy from VGPR is `512 / (arch + accum)` on
+both — NOT `256 / max(arch, accum)`. (The separate-pool `256/max` model only
+applied to gfx908 / CDNA1, where accum VGPRs were a distinct file accessible
+only by MFMA.)
 
 | Property | CDNA3 (gfx942) | CDNA4 (gfx950) |
 |---|---|---|
-| VGPR pools | 256 arch + 256 accum, **separate** | 256 arch + 256 accum, **combined 512 pool, flexibly split** |
-| Occupancy formula | `256 / max(arch_alloc, accum_alloc)` | `512 / (arch_alloc + accum_alloc)` |
+| VGPR pool | 512 combined (256 arch + 256 accum, unified budget) | 512 combined (same) |
+| Occupancy formula (VGPR) | `512 / (arch_alloc + accum_alloc)` | `512 / (arch_alloc + accum_alloc)` |
 | Alloc granularity | 8 VGPRs | 8 VGPRs |
 | LDS size | 64 KB | 160 KB |
 | LDS alloc block | 256 bytes | 1280 bytes |
 | VMCNT width | 6 bits (max 63 in-flight) | 6 bits (max 63 in-flight) |
 | LGKMCNT width | 4 bits (max 15 in-flight) | 4 bits (max 15 in-flight) |
+
+What actually changed in CDNA4 vs CDNA3 is the LDS size (64KB→160KB) and the LDS
+alloc granularity — not the VGPR pooling model.
+
+**Reading the real counts.** `code.json` only holds the (often single-CU,
+often vgpr-form) disassembly, so it cannot reveal accum_vgpr / LDS / SGPR /
+workgroup size — an AGPR-form-blind ISA scan reports `accum=0` and gets
+occupancy badly wrong. The analyzer reads `out_kernel_trace.csv` (staged next to
+the dispatch dir) for the authoritative `Accum_VGPR_Count` / `LDS_Block_Size` /
+`SGPR_Count` / `Workgroup_Size_*`. arch_vgpr is taken as `max(ISA_scan, CSV)` so
+a bogus-low CSV `VGPR_Count` field can't under-report. If no CSV is found it
+falls back to ISA-only and prints a warning.
 
 **Auto-detection**: gfx950-specific instructions (`v_mfma_scale_f32_*`, `v_mfma_f32_16x16x128_*`,
 `v_mfma_f32_32x32x64_*`) indicate CDNA4. Absence indicates CDNA3.
@@ -282,6 +308,10 @@ FROM rocpd_kernel_dispatch kd
 JOIN rocpd_info_kernel_symbol ks ON kd.kernel_symbol_id=ks.id
 JOIN rocpd_info_kernel ki ON kd.kernel_id=ki.id LIMIT 5;"
 ```
+
+Worked example (PA decode, gfx942): arch 144 + accum 136 = 280 combined → `512//280 = 1`
+wave/SIMD, VGPR-bound (LDS allows 5, SGPR allows 7). Reaching 2 waves needs
+combined ≤ 256, e.g. freeing ~24 VGPRs.
 
 **Warning**: `maxnreg` forcing `accum_vgpr=0` doubles occupancy but causes MFMA spills through
 arch_vgpr — measured 4.5x GPU slowdown. Do not use `maxnreg` for MFMA-heavy kernels.
