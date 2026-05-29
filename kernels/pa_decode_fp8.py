@@ -2389,24 +2389,23 @@ def compile_pa_decode_ps(
             return phys_blocks
 
         def _pa_small_block_store_phys_blocks_to_lds(phys_block_vec):
-            if lane16id == fx.Int32(0):
-                if rowid == fx.Int32(0):
-                    if const_expr(block_size == 64):
-                        # block_size=64: `_stage_phys_blocks` returned vec_width=1
-                        # → scalar i32, not a Vector.  Wrap in a 1-element
-                        # Vector so we can use the LDS `.store(...)` API.
-                        # Each warp writes 1 i32 to bt_lds_i32[warp_id];
-                        # `_load_v_phys_blocks_from_lds` reads back the 4-elem
-                        # vec starting at offset 0.
-                        fx.Vector.from_elements([phys_block_vec], dtype=fx.Int32).store(
-                            bt_lds_i32,
-                            [fx.Index(warp_id)],
-                        )
-                    else:
-                        phys_block_vec.store(
-                            bt_lds_i32,
-                            [fx.Index(warp_id * fx.Int32(TLOOP))],
-                        )
+            if (lane16id | rowid) == fx.Int32(0):
+                if const_expr(block_size == 64):
+                    # block_size=64: `_stage_phys_blocks` returned vec_width=1
+                    # → scalar i32, not a Vector.  Wrap in a 1-element
+                    # Vector so we can use the LDS `.store(...)` API.
+                    # Each warp writes 1 i32 to bt_lds_i32[warp_id];
+                    # `_load_v_phys_blocks_from_lds` reads back the 4-elem
+                    # vec starting at offset 0.
+                    fx.Vector.from_elements([phys_block_vec], dtype=fx.Int32).store(
+                        bt_lds_i32,
+                        [fx.Index(warp_id)],
+                    )
+                else:
+                    phys_block_vec.store(
+                        bt_lds_i32,
+                        [fx.Index(warp_id * fx.Int32(TLOOP))],
+                    )
 
         def _pa_small_block_load_v_phys_blocks_from_lds():
             v_phys_blocks = []
