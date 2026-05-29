@@ -7,6 +7,8 @@ from .primitive import *
 from .gpu import *
 from .derived import *
 from .struct import *
+from .meta import source_loc as source_loc
+from .meta import source_loc_scope as source_loc_scope
 
 from . import utils as utils
 from . import arith as arith

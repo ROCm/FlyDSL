@@ -20,6 +20,7 @@ from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
 from ..compiler.protocol import dsl_align_of, dsl_size_of
+from .meta import _caller_location, _pinned_loc
 from .numeric import Uint8
 from .primitive import get_dyn_shared, make_ptr
 from .struct import (
@@ -41,7 +42,18 @@ block_idx = Tuple3D(gpu.block_id)
 block_dim = Tuple3D(gpu.block_dim)
 grid_dim = Tuple3D(gpu.grid_dim)
 
-barrier = gpu.barrier
+
+def barrier(*, loc=None, ip=None, **kwargs):
+    """``gpu.barrier`` that attributes to its call site for ROCprof ATT source mapping.
+
+    Without this, a bare ``gpu.barrier()`` in a kernel body emits with no location and
+    inherits the coarse kernel-default location. ``_pinned_loc()`` lets a ``source_loc``
+    helper scope override it; otherwise the immediate caller line is used.
+    """
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    return gpu.barrier(loc=loc, ip=ip, **kwargs)
+
 
 _int = int
 

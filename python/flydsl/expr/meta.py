@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import inspect
+import threading
 from functools import wraps
 
 from .._mlir import ir
@@ -52,12 +53,68 @@ def _caller_location(depth=1):
     return ir.Location.name(label, childLoc=file_loc)
 
 
+_scope = threading.local()
+
+
+def _pinned_loc():
+    """Return the call-site Location pinned by an enclosing ``source_loc`` scope, or None."""
+    return getattr(_scope, "cur", None)
+
+
+class source_loc:
+    """Pin the user call-site location for every op emitted inside the ``with`` block.
+
+    A kernel helper that emits device ops is itself one (or more) Python frames above the
+    user's scheduling line, so ``traced_op``'s ``_caller_location(depth=1)`` would attribute
+    those ops to the helper body instead of the call site. Wrapping the helper body in
+    ``with source_loc():`` captures the caller once and makes both untraced ODS builders
+    (via MLIR's ambient location) and ``traced_op`` leaves (via the pin) resolve to it.
+
+    ``depth`` is the number of helper frames between this ``with`` statement and the user's
+    intended call site (1 when the helper is called directly from kernel code). It is
+    re-entrant: a nested ``source_loc`` is a no-op so the outermost scope wins.
+    """
+
+    def __init__(self, depth=1):
+        self._own = _pinned_loc() is None
+        self._loc = _caller_location(depth + 1) if self._own else None
+
+    def __enter__(self):
+        if self._own:
+            _scope.cur = self._loc
+            self._loc.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        if self._own:
+            self._loc.__exit__(*exc)
+            _scope.cur = None
+        return False
+
+
+def source_loc_scope(fn):
+    """Decorator form of :class:`source_loc` for a kernel helper.
+
+    Runs the whole helper body inside ``source_loc()`` so every op it emits attributes to
+    the helper's call site, without reindenting the body. The ``wrapper`` frame occupies
+    the same stack slot the helper body otherwise would, so the default ``depth=1`` (the
+    helper is called directly from kernel code) is correct here too.
+    """
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        with source_loc():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def traced_op(op):
     @wraps(op)
     def wrapper(*args, **kwargs):
         loc = kwargs.pop("loc", None)
         if loc is None:
-            loc = _caller_location(depth=1)
+            loc = _pinned_loc() or _caller_location(depth=1)
         args, kwargs = _flatten_args(args, kwargs)
         with loc:
             return op(*args, **kwargs)

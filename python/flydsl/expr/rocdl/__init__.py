@@ -15,7 +15,7 @@ This module provides access to ROCm-specific GPU operations including:
 """
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
-from ..meta import traced_op
+from ..meta import _caller_location, _pinned_loc, traced_op
 from . import cdna4 as cdna4
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -31,6 +31,9 @@ _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
 _ods_readfirstlane = readfirstlane
+_ods_s_waitcnt = s_waitcnt
+_ods_sched_barrier = sched_barrier
+_ods_sched_group_barrier = sched_group_barrier
 _ods_mfma_f32_32x32x8f16 = globals().get("mfma_f32_32x32x8f16", None)
 _ods_mfma_f32_32x32x8bf16_1k = globals().get("mfma_f32_32x32x8bf16_1k", None)
 _ods_mfma_f32_32x32x16_f16 = globals().get("mfma_f32_32x32x16_f16", None)
@@ -50,20 +53,54 @@ mask_dsrd = 0x100
 mask_dswr = 0x200
 
 
-def sched_mfma(cnt):
-    sched_group_barrier(mask_mfma, cnt, 0)
+# Synchronization / scheduling primitives carry an explicit call-site Location so
+# ROCprof ATT maps them to the user's kernel line instead of the coarse kernel-default
+# location. ``_pinned_loc()`` lets an enclosing ``source_loc`` helper scope override it.
 
 
-def sched_vmem(cnt):
-    sched_group_barrier(mask_vmem_rd, cnt, 0)
+def s_waitcnt(bitfield, *, loc=None, ip=None):
+    """``s_waitcnt`` that attributes to its call site for ROCprof ATT source mapping."""
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    return _ods_s_waitcnt(bitfield, loc=loc, ip=ip)
 
 
-def sched_dsrd(cnt):
-    sched_group_barrier(mask_dsrd, cnt, 0)
+def sched_barrier(mask, *, loc=None, ip=None):
+    """``sched_barrier`` that attributes to its call site for ROCprof ATT source mapping."""
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    return _ods_sched_barrier(mask, loc=loc, ip=ip)
 
 
-def sched_dswr(cnt):
-    sched_group_barrier(mask_dswr, cnt, 0)
+def sched_group_barrier(mask, size, group_id, *, loc=None, ip=None):
+    """``sched_group_barrier`` that attributes to its call site for ROCprof ATT source mapping."""
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    return _ods_sched_group_barrier(mask, size, group_id, loc=loc, ip=ip)
+
+
+def sched_mfma(cnt, *, loc=None):
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_mfma, cnt, 0, loc=loc)
+
+
+def sched_vmem(cnt, *, loc=None):
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_vmem_rd, cnt, 0, loc=loc)
+
+
+def sched_dsrd(cnt, *, loc=None):
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_dsrd, cnt, 0, loc=loc)
+
+
+def sched_dswr(cnt, *, loc=None):
+    if loc is None:
+        loc = _pinned_loc() or _caller_location(depth=1)
+    _ods_sched_group_barrier(mask_dswr, cnt, 0, loc=loc)
 
 
 def _unwrap_mfma_operand(v, *, loc=None):

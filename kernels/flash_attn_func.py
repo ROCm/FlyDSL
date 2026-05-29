@@ -73,6 +73,7 @@ def _pointer_store(value: ir.Value, ptr: ir.Value):
     return llvm.StoreOp(_llvm_value(value), _llvm_value(ptr))
 
 
+@fx.source_loc_scope
 def _waitcnt_vm_n(n):
     """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
     val = (n & _VMCNT_LO_MASK) | _LGKMCNT_EXPCNT_BASE | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
@@ -294,6 +295,7 @@ def build_flash_attn_func_module_primary(
         def _fmax(a, b):
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
+        @fx.source_loc_scope
         def mfma_acc(a, b, c):
             if const_expr(dtype_str == "bf16"):
                 if const_expr(USE_K16):
@@ -524,6 +526,7 @@ def build_flash_attn_func_module_primary(
             _dma_off = fx.Int32(0)
             _dma_aux = fx.Int32(1)
 
+            @fx.source_loc_scope
             def coop_dma_k(tile_start, buf_id=0):
                 """Load K tile via DMA with XOR-swizzled global fetch."""
                 if const_expr(isinstance(buf_id, int)):
@@ -570,6 +573,7 @@ def build_flash_attn_func_module_primary(
             LANES_PER_V_ROW = HEAD_DIM * 2 // DMA_BYTES
             ROWS_PER_DMA_BATCH_V = DMA_BATCH_BYTES // (HEAD_DIM * 2)
 
+            @fx.source_loc_scope
             def coop_dma_v(tile_start, buf_id=0):
                 """Load V tile via DMA with XOR-swizzled global fetch."""
                 v_lds_byte_base = lds_kv_base_idx + fx.Index((LDS_V_BASE + buf_id * LDS_V_TILE_SIZE) * 2)
@@ -1068,6 +1072,7 @@ def build_flash_attn_func_module_primary(
                 _steps = [(dc, pks) for dc in range(D_CHUNKS) for pks in range(PV_K_STEPS)]
                 TOTAL_PV = len(_steps)
 
+                @fx.source_loc_scope
                 def _read_v_pack(step_idx):
                     dc, pks = _steps[step_idx]
                     if const_expr(USE_HW_TR):
