@@ -5,8 +5,6 @@ args, globals-drift detection, and the ir.Type fallback in ``_arg_cache_sig``.""
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
 
@@ -38,7 +36,7 @@ def test_env_var_drift_changes_cache_key(monkeypatch):
     assert k1 != k2, "cache key must change when whitelisted env var changes"
 
 
-def test_globals_drift_default_raises(tmp_path):
+def test_globals_drift_default_raises(tmp_path, monkeypatch):
     """mutating a referenced global must raise."""
     src = tmp_path / "drift_default.py"
     src.write_text(
@@ -54,16 +52,13 @@ def test_globals_drift_default_raises(tmp_path):
 
     spec = importlib.util.spec_from_file_location("drift_default", src)
     mod = importlib.util.module_from_spec(spec)
-    os.environ["COMPILE_ONLY"] = "1"
-    try:
-        spec.loader.exec_module(mod)
-        A = torch.zeros(8, dtype=torch.float32)
+    monkeypatch.setenv("COMPILE_ONLY", "1")  # auto-restored, no leak across tests
+    spec.loader.exec_module(mod)
+    A = torch.zeros(8, dtype=torch.float32)
+    mod.k(A)
+    mod.FOO = 2
+    with pytest.raises(RuntimeError, match="FOO"):
         mod.k(A)
-        mod.FOO = 2
-        with pytest.raises(RuntimeError, match="FOO"):
-            mod.k(A)
-    finally:
-        os.environ.pop("COMPILE_ONLY", None)
 
 
 def test_env_var_not_cached_within_process(monkeypatch):
@@ -176,3 +171,61 @@ def test_cache_signature_requires_protocol_method():
 
     with pytest.raises(TypeError, match="__cache_signature__"):
         cache_signature(_NoSig())
+
+
+def _load_mod(tmp_path, name, body):
+    import importlib.util
+
+    src = tmp_path / f"{name}.py"
+    src.write_text(body)
+    spec = importlib.util.spec_from_file_location(name, src)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_container_global_folded_by_value_not_collapsed(tmp_path):
+    """A tuple/list/dict global must be folded into the key by *content*, not
+    collapsed to ('obj', <type>). Two independent loads (≈ two processes)
+    observing CFG=(128, 64) vs CFG=(128, 32) must produce different keys."""
+    body = (
+        "import flydsl.compiler as flyc\n"
+        "import flydsl.expr as fx\n"
+        "CFG = (128, 64)\n"
+        "@flyc.jit\n"
+        "def k(A: fx.Tensor):\n"
+        "    _ = CFG\n"
+        "    return A\n"
+    )
+
+    def _full_key(mod):
+        mod.k._ensure_sig()
+        bound = mod.k._sig.bind(torch.zeros(8, dtype=torch.float32))
+        bound.apply_defaults()
+        return mod.k._build_full_cache_key(bound.arguments)
+
+    k1 = _full_key(_load_mod(tmp_path, "cfg_a", body))
+    k2 = _full_key(_load_mod(tmp_path, "cfg_b", body.replace("(128, 64)", "(128, 32)")))
+    assert k1 != k2, "container global contents must participate in the cache key"
+
+
+def test_dict_global_inplace_mutation_raises(tmp_path, monkeypatch):
+    """In-place mutation of a referenced dict/list global must be detected by
+    drift (value-based snapshot), not silently reuse the old artifact."""
+    mod = _load_mod(
+        tmp_path,
+        "cfg_mut",
+        "import flydsl.compiler as flyc\n"
+        "import flydsl.expr as fx\n"
+        "CFG = {'tile': 64}\n"
+        "@flyc.jit\n"
+        "def k(A: fx.Tensor):\n"
+        "    _ = CFG\n"
+        "    return A\n",
+    )
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    A = torch.zeros(8, dtype=torch.float32)
+    mod.k(A)
+    mod.CFG["tile"] = 128  # in-place mutation (same object id)
+    with pytest.raises(RuntimeError, match="CFG"):
+        mod.k(A)

@@ -149,29 +149,53 @@ def _cache_invalidating_env_values() -> tuple:
     return tuple((n, os.environ.get(n, "")) for n in _CACHE_INVALIDATING_ENV_VARS)
 
 
-def _snapshot_global_value(val, *, stable):
+def _snapshot_global_value(val, *, stable, _path=()):
     """Summarize a captured global for the cache key / drift detection.
 
     ``stable=True`` is cross-process-stable (no ``id()``, which is randomized per
     process) so two processes importing the same module produce the same key —
     suitable for folding into cache keys. ``stable=False`` includes ``id()`` so
     in-process drift detection catches rebinding even when type/value look equal.
-    Scalars are summarized by value in both modes.
+    ``_path`` carries the ids of containers currently being walked, breaking reference cycles.
+
+    Scalars and builtin containers (tuple/list/dict/set) are summarized **by
+    value**, recursively, in both modes — so different contents produce different
+    keys (cross-process) and in-place mutation is detected (in-process).
     """
     if isinstance(val, (int, float, bool, str, bytes, type(None))):
         return ("scalar", val)
-    if stable:
-        if callable(val):
+    if isinstance(val, (tuple, list, set, frozenset, dict)):
+        if id(val) in _path:
+            return ("cycle", type(val).__qualname__)
+        _path = _path + (id(val),)
+        kind = type(val).__qualname__
+        if isinstance(val, dict):
+            # sort by repr for a canonical, comparison-safe order (mixed key types)
+            items = sorted(
+                (
+                    (
+                        _snapshot_global_value(k, stable=stable, _path=_path),
+                        _snapshot_global_value(v, stable=stable, _path=_path),
+                    )
+                    for k, v in val.items()
+                ),
+                key=repr,
+            )
+            return ("dict", tuple(items))
+        elems = (_snapshot_global_value(v, stable=stable, _path=_path) for v in val)
+        if isinstance(val, (set, frozenset)):
+            # sets are unordered: sort by repr for a canonical order
+            return (kind, tuple(sorted(elems, key=repr)))
+        return (kind, tuple(elems))
+    if callable(val):
+        if stable:
             # qualname+module is stable across processes; repr would bake in
             # <0x...> addresses for many callables.
             qualname = getattr(val, "__qualname__", None) or getattr(val, "__name__", "?")
             return ("callable", getattr(val, "__module__", "?"), qualname)
-        # Distinct instances of the same type collapse here; the stable=False
-        # path still catches rebinding via id().
-        return ("obj", type(val).__qualname__)
-    if callable(val):
         return ("callable", id(val), repr(val))
-    return ("obj", id(val), type(val).__qualname__)
+    # Opaque object: stable collapses to type; drift keeps id to catch rebinding.
+    return ("obj", type(val).__qualname__) if stable else ("obj", id(val), type(val).__qualname__)
 
 
 def _discover_global_refs(func, owner_cls=None) -> List[Tuple[str, str, dict]]:
