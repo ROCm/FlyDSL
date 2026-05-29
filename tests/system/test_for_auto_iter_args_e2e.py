@@ -216,6 +216,7 @@ def test_iv_liveout_zero_iterations():
 
 # ── Case 8: for-loop target does not leak into outer scope ──────────────────
 
+
 def test_comprehension_target_constexpr_not_leaked():
     """for ni in range_constexpr(0) followed by if with [... for ni in range_constexpr(1)].
 
