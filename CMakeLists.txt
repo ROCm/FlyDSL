@@ -12,6 +12,21 @@ find_package(MLIR REQUIRED CONFIG)
 
 message(STATUS "Found MLIR: ${MLIR_DIR}")
 
+# Detect whether this MLIR version uses PropertyRef (new) or OpaqueProperties (old).
+# Derive the install prefix from MLIR_DIR (which points to <prefix>/lib/cmake/mlir).
+get_filename_component(_MLIR_INSTALL_PREFIX "${MLIR_DIR}/../../.." ABSOLUTE)
+set(_MLIR_DETECT_INCLUDES "${_MLIR_INSTALL_PREFIX}/include")
+if(EXISTS "${_MLIR_DETECT_INCLUDES}/mlir/IR/OperationSupport.h")
+  file(STRINGS "${_MLIR_DETECT_INCLUDES}/mlir/IR/OperationSupport.h" _PROP_REF_LINE
+       REGEX "class PropertyRef")
+  if(_PROP_REF_LINE)
+    add_definitions(-DMLIR_HAS_PROPERTY_REF)
+    message(STATUS "MLIR uses PropertyRef (new API)")
+  else()
+    message(STATUS "MLIR uses OpaqueProperties (old API)")
+  endif()
+endif()
+
 set(LLVM_RUNTIME_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/bin)
 set(LLVM_LIBRARY_OUTPUT_INTDIR ${CMAKE_BINARY_DIR}/lib)
 set(LLVM_BUILD_TOOLS ON)
