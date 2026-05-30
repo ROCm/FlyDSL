@@ -28,6 +28,9 @@ class _FakeCudaRuntime(dr.DeviceRuntime):
     def device_count(self) -> int:
         return 1
 
+    def current_device_id(self) -> int:
+        return 0
+
 
 def test_default_runtime_kind_stays_rocm(monkeypatch):
     """Community users that do not opt into another runtime keep the ROCm default."""
