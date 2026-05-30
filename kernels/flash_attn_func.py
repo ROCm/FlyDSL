@@ -382,6 +382,7 @@ def build_flash_attn_func_module_primary(
             gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=elem_type)
             return _pointer_load(Vec.make_type(vec_elems, elem_dtype), gep)
 
+        @fx.source_loc_scope
         def _store_global_half(ptr, base_idx, val):
             gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=elem_type)
             _pointer_store(val, gep)
