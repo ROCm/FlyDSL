@@ -1327,133 +1327,133 @@ flash_attn_opus_kernel_hand_asm:
 	s_mov_b32 m0, s29
 	s_nop 0
 	buffer_load_dwordx4 v216, s[4:7], s38 offen lds
-;   v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[194:195], v217 offset:0
+; ;   v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[194:195], v217 offset:0
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[196:197], v217 offset:128
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[196:197], v217 offset:128
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[190:191], v217 offset:256
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[190:191], v217 offset:256
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[192:193], v217 offset:384
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[192:193], v217 offset:384
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[166:167], v217 offset:512
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[166:167], v217 offset:512
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[168:169], v217 offset:640
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[168:169], v217 offset:640
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[114:115], v217 offset:768
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[114:115], v217 offset:768
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[116:117], v217 offset:896
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[116:117], v217 offset:896
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[198:199], v217 offset:64
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[198:199], v217 offset:64
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[200:201], v217 offset:192
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[200:201], v217 offset:192
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[178:179], v217 offset:320
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[178:179], v217 offset:320
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[180:181], v217 offset:448
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[180:181], v217 offset:448
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[170:171], v217 offset:576
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[170:171], v217 offset:576
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[172:173], v217 offset:704
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[172:173], v217 offset:704
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[118:119], v217 offset:832
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[118:119], v217 offset:832
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[120:121], v217 offset:960
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[120:121], v217 offset:960
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[202:203], v217 offset:8704
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[202:203], v217 offset:8704
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[204:205], v217 offset:8832
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[204:205], v217 offset:8832
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[182:183], v217 offset:8960
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[182:183], v217 offset:8960
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[184:185], v217 offset:9088
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[184:185], v217 offset:9088
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[174:175], v217 offset:9216
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[174:175], v217 offset:9216
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[176:177], v217 offset:9344
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[176:177], v217 offset:9344
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[122:123], v217 offset:9472
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[122:123], v217 offset:9472
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[124:125], v217 offset:9600
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[124:125], v217 offset:9600
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[206:207], v217 offset:8768
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[206:207], v217 offset:8768
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[208:209], v217 offset:8896
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[208:209], v217 offset:8896
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[186:187], v217 offset:9024
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[186:187], v217 offset:9024
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[188:189], v217 offset:9152
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[188:189], v217 offset:9152
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[162:163], v217 offset:9280
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[162:163], v217 offset:9280
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[164:165], v217 offset:9408
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[164:165], v217 offset:9408
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[126:127], v217 offset:9536
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[126:127], v217 offset:9536
 
-	;;#ASMEND
-	;;#ASMSTART
-	ds_read_b64_tr_b16 v[128:129], v217 offset:9664
+; 	;;#ASMEND
+; 	;;#ASMSTART
+; 	ds_read_b64_tr_b16 v[128:129], v217 offset:9664
 
 	;;#ASMEND
 ;   rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
@@ -1490,6 +1490,7 @@ flash_attn_opus_kernel_hand_asm:
 ; rocdl.s_barrier()
 ; rocdl.sched_barrier(0)
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[66:69], v[2:17]
+	s_nop 1
 ; m_tile_max_a = _attn_row_max(v_s_1)
 	v_max_f32_e32 v194, v82, v83
 	v_max3_f32 v194, v194, v84, v85
@@ -1497,18 +1498,21 @@ flash_attn_opus_kernel_hand_asm:
 	v_max3_f32 v194, v194, v88, v89
 	v_max3_f32 v194, v194, v90, v91
 	v_mfma_f32_32x32x16_bf16 v[50:65], v[198:201], v[66:69], v[50:65]
+	s_nop 1
 	v_max3_f32 v194, v194, v92, v93
 	v_max3_f32 v194, v194, v94, v95
 	v_max3_f32 v194, v194, v96, v97
 	v_max3_f32 v194, v194, v98, v99
 	v_max3_f32 v194, v194, v100, v101
 	v_mfma_f32_32x32x16_bf16 v[34:49], v[202:205], v[66:69], v[34:49]
+	s_nop 1
 	v_max3_f32 v194, v194, v102, v103
 	v_max3_f32 v194, v194, v104, v105
 	v_max3_f32 v194, v194, v106, v107
 	v_max3_f32 v194, v194, v108, v109
 	v_max3_f32 v194, v194, v110, v111
 	v_mfma_f32_32x32x16_bf16 v[18:33], v[206:209], v[66:69], v[18:33]
+	s_nop 1
 	v_max3_f32 v66, v194, v112, v113
 	v_mov_b32_e32 v67, v66
 	s_nop 1
@@ -1530,6 +1534,7 @@ flash_attn_opus_kernel_hand_asm:
 	s_cmp_eq_u64 vcc, exec
 	s_cselect_b64 vcc, -1, 0
 	s_cbranch_vccnz .LBB0_12
+
 ; corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
 	v_sub_f32_e32 v67, v220, v66
 	v_exp_f32_e32 v68, v67
@@ -1635,9 +1640,9 @@ flash_attn_opus_kernel_hand_asm:
 ; v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 ; _sched_barrier_pairs(6, 5, 2)
 ; _sched_barrier_exp_pairs(6, 3, 2)
-	s_nop 0
-	v_mfma_f32_32x32x16_bf16 v[2:17], v[190:193], v[70:73], v[2:17]
+	s_nop 4
 	v_cndmask_b32_e32 v220, v66, v220, vcc
+	v_mfma_f32_32x32x16_bf16 v[2:17], v[190:193], v[70:73], v[2:17]
 	v_sub_f32_e32 v97, v97, v220
 	v_sub_f32_e32 v96, v96, v220
 	v_sub_f32_e32 v95, v95, v220
@@ -1649,30 +1654,35 @@ flash_attn_opus_kernel_hand_asm:
 	v_sub_f32_e32 v90, v90, v220
 	v_sub_f32_e32 v89, v89, v220
 	v_mfma_f32_32x32x16_bf16 v[34:49], v[182:185], v[70:73], v[34:49]
+	s_nop 1
 	v_sub_f32_e32 v88, v88, v220
 	v_sub_f32_e32 v87, v87, v220
 	v_sub_f32_e32 v86, v86, v220
 	v_sub_f32_e32 v85, v85, v220
 	v_sub_f32_e32 v84, v84, v220
 	v_mfma_f32_32x32x16_bf16 v[18:33], v[186:189], v[70:73], v[18:33]
+	s_nop 1
 	v_sub_f32_e32 v83, v83, v220
 	v_sub_f32_e32 v82, v82, v220
 	v_sub_f32_e32 v113, v113, v220
 	v_sub_f32_e32 v112, v112, v220
 	v_sub_f32_e32 v111, v111, v220
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[166:169], v[74:77], v[2:17]
+	s_nop 1
 	v_sub_f32_e32 v110, v110, v220
 	v_sub_f32_e32 v109, v109, v220
 	v_sub_f32_e32 v108, v108, v220
 	v_sub_f32_e32 v107, v107, v220
 	v_sub_f32_e32 v106, v106, v220
 	v_mfma_f32_32x32x16_bf16 v[50:65], v[170:173], v[74:77], v[50:65]
+	s_nop 1
 	v_sub_f32_e32 v105, v105, v220
 	v_sub_f32_e32 v104, v104, v220
 	v_sub_f32_e32 v103, v103, v220
 	v_sub_f32_e32 v102, v102, v220
 	v_sub_f32_e32 v101, v101, v220
 	v_mfma_f32_32x32x16_bf16 v[34:49], v[174:177], v[74:77], v[34:49]
+	s_nop 1
 	v_sub_f32_e32 v100, v100, v220
 	v_sub_f32_e32 v99, v99, v220
 	v_sub_f32_e32 v98, v98, v220
@@ -1685,22 +1695,27 @@ flash_attn_opus_kernel_hand_asm:
 	v_exp_f32_e32 v167, v83
 	v_exp_f32_e32 v168, v84
 	v_mfma_f32_32x32x16_bf16 v[18:33], v[162:165], v[74:77], v[18:33]
+	s_nop 1
 	v_exp_f32_e32 v162, v85
 	v_exp_f32_e32 v163, v86
 	v_exp_f32_e32 v164, v87
 	v_mfma_f32_32x32x16_bf16 v[2:17], v[114:117], v[78:81], v[2:17]
+	s_nop 1
 	v_exp_f32_e32 v114, v88
 	v_exp_f32_e32 v115, v89
 	v_exp_f32_e32 v116, v90
 	v_mfma_f32_32x32x16_bf16 v[50:65], v[118:121], v[78:81], v[50:65]
+	s_nop 1
 	v_exp_f32_e32 v117, v91
 	v_exp_f32_e32 v118, v92
 	v_exp_f32_e32 v119, v93
 	v_mfma_f32_32x32x16_bf16 v[34:49], v[122:125], v[78:81], v[34:49]
+	s_nop 1
 	v_exp_f32_e32 v120, v94
 	v_exp_f32_e32 v121, v95
 	v_exp_f32_e32 v122, v96
 	v_mfma_f32_32x32x16_bf16 v[18:33], v[126:129], v[78:81], v[18:33]
+	s_nop 1
 	v_exp_f32_e32 v123, v97
 ; if const_expr(OPUS_SETPRIO):
 ; 	rocdl.s_setprio(0)
