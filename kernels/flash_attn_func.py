@@ -283,15 +283,19 @@ def build_flash_attn_func_module_primary(
         def _mfma(mfma_fn, a, b, c):
             return mfma_fn(v16f32_type, [a, b, c])
 
+        @fx.source_loc_scope
         def _fadd(a, b):
             return arith.addf(_raw(a), _raw(b), fastmath=fm_fast)
 
+        @fx.source_loc_scope
         def _fsub(a, b):
             return arith.subf(_raw(a), _raw(b), fastmath=fm_fast)
 
+        @fx.source_loc_scope
         def _fmul(a, b):
             return arith.mulf(_raw(a), _raw(b), fastmath=fm_fast)
 
+        @fx.source_loc_scope
         def _fmax(a, b):
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
