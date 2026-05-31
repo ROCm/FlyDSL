@@ -470,7 +470,12 @@ def compile_mxscale_gemm(
             a_mcast_mask = 0
             b_mcast_mask = 0
 
-        layout_thr = fx.make_layout((m_warp, n_warp, 2, 16), (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
+        # The FP8 deep pipeline runs cleaner when adjacent wave ids advance M
+        # first; keep the default mapping for the other schedules.
+        if const_expr(use_fp8_deep_pipeline_schedule):
+            layout_thr = fx.make_layout((m_warp, n_warp, 2, 16), (WAVE_SIZE, m_warp * WAVE_SIZE, 16, 1))
+        else:
+            layout_thr = fx.make_layout((m_warp, n_warp, 2, 16), (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
         thr_coord = idx2crd(tx, layout_thr)
         wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
             fx.get(thr_coord, 0),
@@ -1414,7 +1419,6 @@ def compile_mxscale_gemm(
                 else:
                     a0 = load_a_pair(0, ks)
                 b1 = load_b_pair(1, ks)
-                b2 = load_b_pair(2, ks)
 
                 a1_box = [None]
                 b3_box = [None]
@@ -1429,6 +1433,7 @@ def compile_mxscale_gemm(
                     first_wait_keep += DS_LOADS_PER_A_FRAG
                 rocdl.s_wait_dscnt(first_wait_keep)
                 emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
+                b2 = load_b_pair(2, ks)
 
                 if const_expr(ks == 0 and mid_compute_callback is not None):
                     rocdl.sched_barrier(0)
@@ -1610,7 +1615,7 @@ def compile_mxscale_gemm(
             def _sched_panel_row():
                 rocdl.sched_mfma(_fp8_pair_wn)
 
-            _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads * 3 + _fp8_pair_a_loads
+            _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads * 2 + _fp8_pair_a_loads
 
             for _ks in range_constexpr(k_wmma_steps):
                 _ks_initial_loads = _initial_loads
@@ -1618,6 +1623,7 @@ def compile_mxscale_gemm(
                     _ks_initial_loads -= DS_LOADS_PER_A_FRAG
                 rocdl.sched_dsrd(_ks_initial_loads)
                 _sched_panel_2x2(_fp8_pair_a_loads)
+                rocdl.sched_dsrd(_fp8_pair_b_loads)
                 _sched_panel_2x2(_fp8_pair_b_loads)
                 _sched_panel_2x2(_fp8_pair_a_loads)
                 _sched_panel_2x2()
@@ -1904,9 +1910,17 @@ def compile_mxscale_gemm(
                 warp_lds_off + lane16 * arith.index(_lds_d_stride_elems) + lane_kgrp * arith.index(4 * elem_bytes_d)
             )
             wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
-            d_warp_off_sgpr = wave_id_idx * arith.index(warp_d_bytes) + arith.index(d_output_off)
-            warp_m_off_sgpr = (wave_id_idx / arith.index(n_warp)) * arith.index(warp_tile_m)
-            warp_n_off_sgpr = (wave_id_idx % arith.index(n_warp)) * arith.index(warp_tile_n)
+            # Match the TDM-store descriptor offsets to the compute wave mapping.
+            if const_expr(use_fp8_deep_pipeline_schedule):
+                wave_m_sgpr = wave_id_idx % arith.index(m_warp)
+                wave_n_sgpr = wave_id_idx / arith.index(m_warp)
+            else:
+                wave_m_sgpr = wave_id_idx / arith.index(n_warp)
+                wave_n_sgpr = wave_id_idx % arith.index(n_warp)
+            d_warp_linear_sgpr = wave_m_sgpr * arith.index(n_warp) + wave_n_sgpr
+            d_warp_off_sgpr = d_warp_linear_sgpr * arith.index(warp_d_bytes) + arith.index(d_output_off)
+            warp_m_off_sgpr = wave_m_sgpr * arith.index(warp_tile_m)
+            warp_n_off_sgpr = wave_n_sgpr * arith.index(warp_tile_n)
             d_desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_c,
                 lds_memref=d_lds_base_ptr,
