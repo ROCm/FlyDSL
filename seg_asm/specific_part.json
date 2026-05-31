@@ -515,10 +515,9 @@
           {
             "point15": {
               "instruction": [
-                "s_waitcnt vmcnt(4) lgkmcnt(0)",
-                "s_barrier",
                 "s_setprio 1",
-                "s_mov_b32 s10, 0xf149f2ca"
+                "s_mov_b32 s10, 0xf149f2ca",
+                "v_mfma_f32_32x32x16_bf16 v[80:95], v[28:31], v[112:115], v[80:95]"
               ]
             }
           },
@@ -552,9 +551,9 @@
           {
             "point19": {
               "instruction": [
-                "s_waitcnt vmcnt(2) lgkmcnt(0)",
-                "s_barrier",
-                "s_setprio 1"
+                "s_setprio 1",
+                "v_mfma_f32_32x32x16_bf16 v[80:95], v[204:207], v[96:99], v[80:95]",
+                "v_max3_f32 v204, v0, s10, v1"
               ]
             }
           },
