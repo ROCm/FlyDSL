@@ -1963,3 +1963,29 @@ FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
 }
 
 #undef FLY_INFER_RETURN_TYPES
+
+LogicalResult RecastIterOp::verify() {
+  auto srcTy = dyn_cast<PointerType>(getSrc().getType());
+  auto resultTy = dyn_cast<PointerType>(getResult().getType());
+  if (!srcTy || !resultTy)
+    return emitOpError("expected PointerType source and result");
+
+  if (srcTy.getAddressSpace() != resultTy.getAddressSpace())
+    return emitOpError("result pointer address space must match source");
+
+  // recast_iter only reinterprets the element type; it must not change the
+  // alignment guarantee in an unsound way. Narrowing the alignment is safe
+  // because a more strongly aligned pointer also satisfies any weaker alignment
+  // (for example, a 1024-byte-aligned pointer is necessarily 512-byte aligned),
+  // but claiming a stronger alignment than the source provides is not.
+  int32_t srcAlign = srcTy.getAlignment().getAlignment();
+  int32_t resultAlign = resultTy.getAlignment().getAlignment();
+  if (resultAlign <= 0 || srcAlign % resultAlign != 0)
+    return emitOpError("result pointer alignment must divide source alignment "
+                       "(narrowing is allowed, widening is not)");
+
+  if (srcTy.getSwizzle() != resultTy.getSwizzle())
+    return emitOpError("result pointer swizzle must match source");
+
+  return success();
+}

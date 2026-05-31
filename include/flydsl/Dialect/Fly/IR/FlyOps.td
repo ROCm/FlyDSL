@@ -471,6 +471,7 @@ def Fly_PtrStoreOp : Fly_Op<"ptr.store"> {
 def Fly_RecastIterOp : Fly_Op<"recast_iter", [Pure]> {
   let arguments = (ins Fly_Pointer:$src);
   let results = (outs Fly_Pointer:$result);
+  let hasVerifier = 1;
 }
 
 def Fly_MemRefAllocaOp : Fly_Op<"memref.alloca", []> {
