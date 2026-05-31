@@ -37,6 +37,8 @@ SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 
 LDS_PAD_A_BYTES = 16
 LDS_PAD_D_BYTES = 16
+LDS_SEGMENT_BYTES = 64 * 1024
+LDS_GFX1250_MAX_BYTES = 5 * LDS_SEGMENT_BYTES
 
 
 @functools.lru_cache(maxsize=256)
@@ -240,9 +242,9 @@ def compile_mxscale_gemm(
     # active loader wave must issue a full-tile descriptor by itself.
     tdm_desc_num_warps = 1 if wave_specialized_tdm else num_warps
 
-    # All pipeline stages share the same intra-stage layout. Keep that layout
-    # unchanged and only remap each logical stage to a physical base inside one
-    # LDS arena so TDM epilogue can alias the dead prefix of the arena.
+    # All pipeline stages share the same intra-stage layout in the generic
+    # arena path. The active gfx1250 FP8 TDM tile uses a separate reference
+    # pool layout below.
     stage_layout = SmemAllocator(None, arch=gpu_arch, global_sym_name=f"mxscale_{data_format}_layout")
     stage_a_data_rel_off = stage_layout._align(stage_layout.ptr, 16)
     stage_layout.ptr = stage_a_data_rel_off + lds_a_data_bytes
@@ -271,24 +273,73 @@ def compile_mxscale_gemm(
         ),
     )
 
-    stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
-    stage_phys_order.append(_last_compute_stage)
-    stage_base_off = [0] * num_buffers
-    for phys_i, logical_i in enumerate(stage_phys_order):
-        stage_base_off[logical_i] = phys_i * stage_pitch_bytes
-    arena_alloc.ptr = stage_pitch_bytes * num_buffers
-    arena_total_bytes = arena_alloc.ptr
-    epilogue_fence_threshold_bytes = tdm_epilogue_fence_threshold_bytes(
-        stage_base_off=stage_base_off,
-        tail_plan=_base_tail_plan,
-        loop_iters=loop_iters,
-        extra=extra,
+    use_ref_segmented_lds_layout = (
+        data_format == "fp8"
+        and tile_m == 256
+        and tile_n == 256
+        and tile_k == 128
+        and m_warp == 2
+        and n_warp == 2
+        and num_buffers == 4
+        and split_k == 1
+        and wave_specialized_tdm
+        and not use_scale_buffer_load
+        and not use_scale_opsel
     )
 
-    stage_a_data_off = [stage_base_off[i] + stage_a_data_rel_off for i in range(num_buffers)]
-    stage_b_data_off = [stage_base_off[i] + stage_b_data_rel_off for i in range(num_buffers)]
-    stage_a_scale_off = [stage_base_off[i] + stage_a_scale_rel_off for i in range(num_buffers)]
-    stage_b_scale_off = [stage_base_off[i] + stage_b_scale_rel_off for i in range(num_buffers)]
+    if use_ref_segmented_lds_layout:
+        # The A/B data pools are no longer packed into the same per-stage
+        # 64KiB segment window. Scale pools keep the reference 0x800 stride so
+        # every TDM LDS target remains 2KiB-aligned.
+        ref_a_stage_stride = 0x9000
+        ref_b_stage_stride = 0x8000
+        ref_scale_stage_stride = 0x800
+        if lds_a_data_bytes > ref_a_stage_stride:
+            raise RuntimeError(
+                "reference segmented LDS layout requires A stage <= 0x9000 bytes, "
+                f"got {lds_a_data_bytes}"
+            )
+        if lds_b_data_bytes > ref_b_stage_stride:
+            raise RuntimeError(
+                "reference segmented LDS layout requires B stage <= 0x8000 bytes, "
+                f"got {lds_b_data_bytes}"
+            )
+        if lds_a_scale_bytes > ref_scale_stage_stride or lds_b_scale_bytes > ref_scale_stage_stride:
+            raise RuntimeError(
+                "reference segmented LDS layout requires scale stage <= 0x800 bytes, "
+                f"got A={lds_a_scale_bytes} B={lds_b_scale_bytes}"
+            )
+
+        stage_a_data_off = [0x00000, 0x09000, 0x16000, 0x1F000]
+        stage_a_scale_off = [0x12000 + i * ref_scale_stage_stride for i in range(num_buffers)]
+        stage_b_scale_off = [0x28000 + i * ref_scale_stage_stride for i in range(num_buffers)]
+        stage_b_data_off = [0x30000 + i * ref_b_stage_stride for i in range(num_buffers)]
+        arena_alloc.ptr = LDS_GFX1250_MAX_BYTES
+        arena_total_bytes = arena_alloc.ptr
+
+        # The epilogue may reuse the prefix only after all main/tail TDM traffic
+        # is fully fenced. This is outside the hot loop and avoids assuming a
+        # single monotonic per-stage base for the segmented pool layout.
+        epilogue_fence_threshold_bytes = 0
+    else:
+        stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
+        stage_phys_order.append(_last_compute_stage)
+        stage_base_off = [0] * num_buffers
+        for phys_i, logical_i in enumerate(stage_phys_order):
+            stage_base_off[logical_i] = phys_i * stage_pitch_bytes
+        arena_alloc.ptr = stage_pitch_bytes * num_buffers
+        arena_total_bytes = arena_alloc.ptr
+        epilogue_fence_threshold_bytes = tdm_epilogue_fence_threshold_bytes(
+            stage_base_off=stage_base_off,
+            tail_plan=_base_tail_plan,
+            loop_iters=loop_iters,
+            extra=extra,
+        )
+
+        stage_a_data_off = [stage_base_off[i] + stage_a_data_rel_off for i in range(num_buffers)]
+        stage_b_data_off = [stage_base_off[i] + stage_b_data_rel_off for i in range(num_buffers)]
+        stage_a_scale_off = [stage_base_off[i] + stage_a_scale_rel_off for i in range(num_buffers)]
+        stage_b_scale_off = [stage_base_off[i] + stage_b_scale_rel_off for i in range(num_buffers)]
 
     if use_tdm_store:
         lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
@@ -397,7 +448,6 @@ def compile_mxscale_gemm(
         and num_buffers == 4
         and use_cluster
     )
-
     if use_b_streaming_schedule:
         print(
             f"[b_streaming] {data_format} tile=({tile_m},{tile_n},{tile_k}) " f"M_r={wmma_m_rep} N_r={wmma_n_rep}",
@@ -1414,11 +1464,14 @@ def compile_mxscale_gemm(
                 scale_pair = (a_scales, b_scales)
 
                 b0 = load_b_pair(0, ks)
-                if const_expr(ks == 0 and a0_prefetch is not None):
+                if const_expr(ks == 0 and a0_prefetch is not None and len(a0_prefetch) == _fp8_pair_wm):
+                    a0 = list(a0_prefetch)
+                elif const_expr(ks == 0 and a0_prefetch is not None):
                     a0 = [a0_prefetch[0], load_a_frag(a_buf, a_bases[1], ks)]
                 else:
                     a0 = load_a_pair(0, ks)
                 b1 = load_b_pair(1, ks)
+                b2 = load_b_pair(2, ks)
 
                 a1_box = [None]
                 b3_box = [None]
@@ -1430,10 +1483,9 @@ def compile_mxscale_gemm(
 
                 first_wait_keep = _two_pair_loads + 3
                 if const_expr(ks == 0 and a0_prefetch is not None):
-                    first_wait_keep += DS_LOADS_PER_A_FRAG
+                    first_wait_keep += DS_LOADS_PER_A_FRAG * len(a0_prefetch)
                 rocdl.s_wait_dscnt(first_wait_keep)
                 emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
-                b2 = load_b_pair(2, ks)
 
                 if const_expr(ks == 0 and mid_compute_callback is not None):
                     rocdl.sched_barrier(0)
@@ -1458,9 +1510,9 @@ def compile_mxscale_gemm(
 
                 emit_panel_2x2(0, 2, a0, b2, scale_pair, prefetch_after_first_row=_prefetch_a2)
                 emit_panel_2x2_row(1, 2, 0, a1_box[0], b2, scale_pair)
+                emit_panel_2x2_row(1, 2, 1, a1_box[0], b2, scale_pair)
                 rocdl.s_wait_dscnt(_pair_loads)
                 emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
-                emit_panel_2x2_row(1, 2, 1, a1_box[0], b2, scale_pair)
                 emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
 
                 emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
@@ -1615,22 +1667,21 @@ def compile_mxscale_gemm(
             def _sched_panel_row():
                 rocdl.sched_mfma(_fp8_pair_wn)
 
-            _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads * 2 + _fp8_pair_a_loads
+            _initial_loads = _fp8_scale_loads + _fp8_pair_b_loads * 3 + _fp8_pair_a_loads
 
             for _ks in range_constexpr(k_wmma_steps):
                 _ks_initial_loads = _initial_loads
                 if const_expr(_ks == 0):
-                    _ks_initial_loads -= DS_LOADS_PER_A_FRAG
+                    _ks_initial_loads -= _fp8_pair_a_loads
                 rocdl.sched_dsrd(_ks_initial_loads)
                 _sched_panel_2x2(_fp8_pair_a_loads)
-                rocdl.sched_dsrd(_fp8_pair_b_loads)
                 _sched_panel_2x2(_fp8_pair_b_loads)
                 _sched_panel_2x2(_fp8_pair_a_loads)
                 _sched_panel_2x2()
                 _sched_panel_2x2(_fp8_pair_a_loads)
                 _sched_panel_row()
-                _sched_panel_2x2()
                 _sched_panel_row()
+                _sched_panel_2x2()
                 _sched_panel_2x2()
                 _sched_panel_2x2()
                 _sched_panel_2x2()
@@ -1742,7 +1793,10 @@ def compile_mxscale_gemm(
 
         def prefetch_fp8_deep_a0_frags(lds_a):
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
-            return [load_a_frag(a_buf, a_bases[0], 0)]
+            return [
+                load_a_frag(a_buf, a_bases[wm_local], 0)
+                for wm_local in range_constexpr(_fp8_pair_wm)
+            ]
 
         def maybe_prefetch_fp8_deep_a0(lds_a):
             # Call only after the TDM fence for this stage; pre-fence LDS reads can race multicast delivery.
