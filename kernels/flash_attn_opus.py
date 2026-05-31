@@ -1140,6 +1140,25 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 v_o[dc] = _fmul(Vec(v_o[dc]), scale_vec)
 
+        def _anchor_v_o(v_o):
+            """Pin v_o accumulators at the current source position.
+
+            Mirrors the C++ pattern:
+              asm volatile("" : "+v"(v_o_pin[0]), ... ::);
+            """
+            acc_irs = [_llvm_value(v_o[dc]) for dc in range_constexpr(D_CHUNKS)]
+            ret_ty = ir.Type.parse(
+                "!llvm.struct<(vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>)>"
+            )
+            ret = llvm.inline_asm(
+                ret_ty,
+                acc_irs,
+                "",
+                "=v,=v,=v,=v,0,1,2,3",
+                has_side_effects=True,
+            )
+            return [llvm.extractvalue(acc_irs[dc].type, ret, [dc]) for dc in range_constexpr(D_CHUNKS)]
+
         def _debug_atomic_inc_lazy_count(byte_offset):
             rocdl.raw_buffer_atomic_fadd(
                 _llvm_value(fx.Float32(1.0)),
@@ -1439,7 +1458,7 @@ def build_flash_attn_opus_module(
             # pre/post-RA scheduler so the following lazy-rescale/score-update
             # VALU does not drift into a worse position relative to the MFMA
             # chain.
-            _sched_barrier_pairs(4, 5, 2)
+            _sched_barrier_pairs(4, 6, 2)
 
             #         bool below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
             #         bool all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
@@ -1459,6 +1478,7 @@ def build_flash_attn_opus_module(
                 m_new_a = _fmax(m_row, m_tile_max_a)
                 corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
                 _scale_o(v_o, corr_a)
+                v_o = _anchor_v_o(v_o)
                 v_p_0 = _scale_v_p(v_p_0, corr_a)
                 l_row = _fmul(l_row, corr_a)
                 m_row = m_new_a
@@ -1476,7 +1496,7 @@ def build_flash_attn_opus_module(
             v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 
             #         sched_barrier_pairs<6, 5, 2>();
-            _sched_barrier_pairs(6, 5, 2)
+            _sched_barrier_pairs(6, 6, 2)
             #         sched_barrier_exp_pairs<6, 3, 2>();
             # LLVM scheduling note:
             # `_sched_barrier_exp_pairs(6, 3, 2)` emits six repetitions of:
@@ -1620,7 +1640,7 @@ def build_flash_attn_opus_module(
             #         row_max = attn_row_max<T>(v_s[0]);
             m_tile_max_b = _attn_row_max(v_s_0)
             #         sched_barrier_pairs<4, 5, 4>();
-            _sched_barrier_pairs(4, 5, 4)
+            _sched_barrier_pairs(4, 6, 4)
 
             #         below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
             #         all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
@@ -1640,6 +1660,7 @@ def build_flash_attn_opus_module(
                 m_new_b = _fmax(m_row, m_tile_max_b)
                 corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
                 _scale_o(v_o, corr_b)
+                v_o = _anchor_v_o(v_o)
                 v_p_1 = _scale_v_p(v_p_1, corr_b)
                 l_row = _fmul(l_row, corr_b)
                 m_row = m_new_b
@@ -1781,6 +1802,7 @@ def build_flash_attn_opus_module(
         #     auto* v_o_pin = reinterpret_cast<vector_t<fp32_t, 16>*>(&v_o);
         #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(v_o, rescale_e3)
+        v_o = _anchor_v_o(v_o)
 
         #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
@@ -1889,6 +1911,7 @@ def build_flash_attn_opus_module(
         #     scale_output_tile<T>(v_o, rescale_m);
         #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(v_o, rescale_e7)
+        v_o = _anchor_v_o(v_o)
         #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(0)
@@ -1985,9 +2008,9 @@ def build_flash_attn_opus_module(
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
         #     sched_barrier_pairs<10, 5, 10>();
-        _sched_barrier_pairs(10, 5, 10)
+        _sched_barrier_pairs(9, 6, 10)
         #     sched_barrier_exp_pairs<6, 3, 10>();
-        _sched_barrier_exp_pairs(6, 3, 10)
+        _sched_barrier_exp_pairs(7, 3, 10)
         #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
         #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
@@ -2006,6 +2029,7 @@ def build_flash_attn_opus_module(
         #     scale_output_tile<T>(v_o, rescale_m);
         #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(v_o, rescale_e11)
+        v_o = _anchor_v_o(v_o)
         #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
         #     __builtin_amdgcn_sched_barrier(0);
