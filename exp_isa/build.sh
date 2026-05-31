@@ -16,9 +16,9 @@ echo "=== Compile flash_attn_opus.v1.s ==="
   "${ASM_SRC}" \
   -o "${CO_OUT}"
 
-echo "=== Build Python extension opus_asm_ext ==="
-rm -rf build
-python3 setup.py build_ext --inplace
+# echo "=== Build Python extension opus_asm_ext ==="
+# rm -rf build
+# python3 setup.py build_ext --inplace
 
 echo "=== Build complete ==="
 ls -lah "${CO_OUT}" opus_asm_ext*.so

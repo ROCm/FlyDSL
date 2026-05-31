@@ -2983,6 +2983,7 @@ _Z15gqa_d128_kernelI15opus_gqa_traitsILi32ELi64ELi128ELi8ELb1EEEv14opus_gqa_karg
 ;   - `s_setprio 0` + `s_barrier` close Ep C3.
 	s_waitcnt vmcnt(4) lgkmcnt(0)
 	s_barrier
+
 	s_setprio 1
 	s_mov_b32 s10, 0xf149f2ca
 	v_mfma_f32_32x32x16_bf16 v[80:95], v[28:31], v[112:115], v[80:95]
@@ -3560,6 +3561,9 @@ _Z15gqa_d128_kernelI15opus_gqa_traitsILi32ELi64ELi128ELi8ELb1EEEv14opus_gqa_karg
 	
 	;;#ASMEND
 .LBB0_23:
+	s_waitcnt vmcnt(2) lgkmcnt(0)
+	s_barrier
+
 ; Epilogue Cluster 7: (Ep C7): setprio 1 + MMA1 + always-rescale + sub_row + exp2 + scale_output_tile + setprio 0 + barrier.
 ; HPP (lines 657-673):
 ;   __builtin_amdgcn_s_setprio(1);
@@ -3594,8 +3598,6 @@ _Z15gqa_d128_kernelI15opus_gqa_traitsILi32ELi64ELi128ELi8ELb1EEEv14opus_gqa_karg
 ;   - 32 `v_pk_mul_f32 v[X:X+1], v[208:209], v[X:X+1] op_sel_hi:[0,1]`
 ;     scale v_o by rescale_m.
 ;   - `s_setprio 0` + `s_barrier` close Ep C7.
-	s_waitcnt vmcnt(2) lgkmcnt(0)
-	s_barrier
 	s_setprio 1
 	v_mfma_f32_32x32x16_bf16 v[80:95], v[204:207], v[96:99], v[80:95]
 	v_max3_f32 v204, v0, s10, v1

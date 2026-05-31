@@ -6,18 +6,10 @@ N="${1:-1}"
 #   exit 2
 # fi
 
-ANA_LOG="at.log"
-# : > "${ANA_LOG}"
+ANA_LOG="at2.log"
+: > "${ANA_LOG}"
 
-for ((iter = 1; iter <= N; iter++)); do
-echo "=== ana_trace iteration ${iter}/${N} ==="
-echo "=== ana_trace iteration ${iter}/${N} ===" >> "${ANA_LOG}"
-
-./scripts/dump_opus_attn_thread_trace.sh ./input_opus_attn_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
-./scripts/dump_opus_attn_thread_trace.sh ./input_opus_gqa_d128_thread_trace.yaml ./thread_trace/cpp_opus_b2_s1024.tar.gz
-
-python3 scripts/trace_segment_cycles.py seg_asm/fyd_cpp_compare.json > temp.log
-
+append_interval_analysis() {
 python3 - <<'PY' >> "${ANA_LOG}"
 import re
 from pathlib import Path
@@ -88,63 +80,68 @@ while i < len(lines):
 
     i += 1
 PY
+}
+
+print_selected_summary() {
+  local sample_header=" idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
+  local summary_header="baseline         other             base_sum_cycles  other_sum_cycles  delta_sum_cycles  delta_sum_cycles_pct  base_sum_inst  other_sum_inst  delta_sum_inst  delta_sum_inst_pct"
+  local pattern
+  local patterns=(
+    "Prologue"
+    "Main loop Cluster 0"
+    "Main loop Cluster 1"
+    "Main loop Cluster 2"
+    "Main loop Cluster 3"
+    "Main loop Cluster 4"
+    "Main loop Cluster 5"
+    "Main loop Cluster 6"
+    "Main loop Cluster 7"
+    "Main loop to Epilogue"
+    "Epilogue Cluster 0"
+    "Epilogue Cluster 1 "
+    "Epilogue Cluster 2"
+    "Epilogue Cluster 3"
+    "Epilogue Cluster 4"
+    "Epilogue Cluster 5"
+    "Epilogue Cluster 6"
+    "Epilogue Cluster 7"
+    "Epilogue Cluster 8"
+    "Epilogue Cluster 9"
+    "Epilogue Cluster 10"
+    "Epilogue Cluster 11"
+    "Epilogue Cluster 12"
+    "Epilogue Cluster 13"
+    "Epilogue output store"
+  )
+
+  for pattern in "${patterns[@]}"; do
+    echo "${sample_header}"
+    grep -F "${pattern}" "${ANA_LOG}"
+  done
+
+  echo "${summary_header}"
+  grep -F "cpp_attn         fyd_attn" "${ANA_LOG}"
+}
+
+
+for ((iter = 1; iter <= N; iter++)); do
+echo "=== ana_trace iteration ${iter}/${N} ==="
+echo "=== ana_trace iteration ${iter}/${N} ===" >> "${ANA_LOG}"
+
+./scripts/dump_opus_attn_thread_trace.sh ./input_opus_attn_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
+# ./scripts/dump_opus_attn_thread_trace.sh ./input_hand_asm_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
+# ./scripts/dump_opus_attn_thread_trace.sh ./input_opus_gqa_d128_thread_trace.yaml ./thread_trace/cpp_opus_b2_s1024.tar.gz
+
+python3 scripts/trace_segment_cycles.py seg_asm/fyd_cpp_compare.json > temp.log
+append_interval_analysis
 
 done
 
+print_selected_summary
 
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Prologue"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 0"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 1"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 2"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 3"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 4"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 5"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 6"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop Cluster 7"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Main loop to Epilogue"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 0"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 1 "
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 2"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 3"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 4"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 5"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 6"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 7"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 8"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 9"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 10"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 11"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 12"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue Cluster 13"
-echo " idx description                          cpp_attn fyd_attn  d_count cpp_attn_avg fyd_attn_avg  d_avg_cycles  d_avg_cycles_pct base_sum_cycles base_sum_cycles_pct other_sum_cycles other_sum_cycles_pct cpp_attn_avg_ins fyd_attn_avg_ins        d_avg_inst   d_avg_inst_pct"
-cat "${ANA_LOG}" | grep "Epilogue output store"
 
-echo "baseline         other             base_sum_cycles  other_sum_cycles  delta_sum_cycles  delta_sum_cycles_pct  base_sum_inst  other_sum_inst  delta_sum_inst  delta_sum_inst_pct"
-cat "${ANA_LOG}" | grep "cpp_attn         fyd_attn"
-
+# ./exp_isa/build.sh
+# ./scripts/dump_opus_attn_thread_trace.sh ./input_hand_asm_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
+# python3 scripts/trace_segment_cycles.py --specific-part seg_asm/specific_part.json | tee test3.log
 
 # set +x

@@ -21,7 +21,7 @@ import json
 import math
 import re
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -129,9 +129,15 @@ class TimedInstruction:
 
 
 @dataclass(frozen=True)
+class PerfCounterSeries:
+    names: tuple[str, ...]
+    samples: tuple[tuple[int, tuple[int, ...]], ...]
+
+
+@dataclass(frozen=True)
 class SpecificPartConfig:
-    trace_a: tuple[int, int, int, int]
-    trace_b: tuple[int, int, int, int]
+    trace_a: tuple[int, int, int, int] | None
+    trace_b: tuple[int, int, int, int] | None
     interval_name: str
     long_latency_threshold: int
 
@@ -368,14 +374,16 @@ def parse_specific_part_config(raw: object, path: Path, version_name: str) -> Sp
     if not isinstance(raw, dict):
         raise SystemExit(f"{path} version {version_name} specific_part must be an object")
     raw_pair = raw.get("se_sm_sl_wv_pair")
-    if not isinstance(raw_pair, list) or len(raw_pair) != 2:
-        raise SystemExit(f"{path} version {version_name} specific_part.se_sm_sl_wv_pair must contain two entries")
+    pairs: list[tuple[int, int, int, int]] | None = None
+    if raw_pair is not None:
+        if not isinstance(raw_pair, list) or len(raw_pair) != 2:
+            raise SystemExit(f"{path} version {version_name} specific_part.se_sm_sl_wv_pair must contain two entries")
 
-    pairs: list[tuple[int, int, int, int]] = []
-    for pair_idx, item in enumerate(raw_pair):
-        if not isinstance(item, list) or len(item) != 4:
-            raise SystemExit(f"{path} version {version_name} se_sm_sl_wv_pair[{pair_idx}] must be [se, sm, sl, wv]")
-        pairs.append(tuple(int(value) for value in item))
+        pairs = []
+        for pair_idx, item in enumerate(raw_pair):
+            if not isinstance(item, list) or len(item) != 4:
+                raise SystemExit(f"{path} version {version_name} se_sm_sl_wv_pair[{pair_idx}] must be [se, sm, sl, wv]")
+            pairs.append(tuple(int(value) for value in item))
 
     interval_name = raw.get("interval_name")
     if not isinstance(interval_name, str) or not interval_name:
@@ -386,8 +394,8 @@ def parse_specific_part_config(raw: object, path: Path, version_name: str) -> Sp
         raise SystemExit(f"{path} version {version_name} specific_part.long_lat_thr is required")
 
     return SpecificPartConfig(
-        trace_a=pairs[0],
-        trace_b=pairs[1],
+        trace_a=pairs[0] if pairs else None,
+        trace_b=pairs[1] if pairs else None,
         interval_name=interval_name,
         long_latency_threshold=int(long_lat_thr),
     )
@@ -1552,6 +1560,71 @@ def print_compare_metric_row(
     )
 
 
+def instruction_type_count_delta_entries(
+    source_rows: list[CodeRow],
+    source_interval: IntervalResult,
+    target_rows: list[CodeRow],
+    target_interval: IntervalResult,
+) -> list[tuple[int, SegmentEvent, str]]:
+    source_opcodes = [opcode_for_isa(source_rows[event.code_idx].isa) for event in source_interval.events]
+    target_opcodes = [opcode_for_isa(target_rows[event.code_idx].isa) for event in target_interval.events]
+    opcode_delta = Counter(source_opcodes) - Counter(target_opcodes)
+    entries: list[tuple[int, SegmentEvent, str]] = []
+    remaining = dict(opcode_delta)
+    for offset, event in enumerate(source_interval.events):
+        opcode = source_opcodes[offset]
+        if remaining.get(opcode, 0) <= 0:
+            continue
+        entries.append((offset, event, opcode))
+        remaining[opcode] -= 1
+    return entries
+
+
+def print_first_row_instruction_delta(
+    baseline: KernelAnalysis,
+    other: KernelAnalysis,
+    baseline_interval: IntervalResult,
+    other_interval: IntervalResult,
+) -> None:
+    print("\nFirst-row instruction-type count delta:")
+    print(
+        f"  {baseline.name}: wave={baseline_interval.wave_file} "
+        f"ts=[{baseline_interval.start_ts},{baseline_interval.end_ts}) inst_count={baseline_interval.inst_count}"
+    )
+    print(
+        f"  {other.name}: wave={other_interval.wave_file} "
+        f"ts=[{other_interval.start_ts},{other_interval.end_ts}) inst_count={other_interval.inst_count}"
+    )
+    added_entries = instruction_type_count_delta_entries(other.rows, other_interval, baseline.rows, baseline_interval)
+    removed_entries = instruction_type_count_delta_entries(baseline.rows, baseline_interval, other.rows, other_interval)
+    if not added_entries and not removed_entries:
+        print(f"  all opcode counts are identical between {baseline.name} and {other.name}.")
+        return
+
+    if added_entries:
+        print(f"  opcode types with more instructions in {other.name} (count={len(added_entries)}):")
+    for offset, event, opcode in added_entries:
+        dynamic_pos = other_interval.start_pos + offset
+        isa = other.rows[event.code_idx].isa
+        print(
+            f"    + {other.name} pos={dynamic_pos} ts={event.start_ts} "
+            f"code_idx={event.code_idx} opcode={opcode} inst={isa}"
+        )
+
+    if removed_entries:
+        print(
+            f"  opcode types with fewer instructions in {other.name} "
+            f"(count={len(removed_entries)}); showing {baseline.name} side:"
+        )
+    for offset, event, opcode in removed_entries:
+        dynamic_pos = baseline_interval.start_pos + offset
+        isa = baseline.rows[event.code_idx].isa
+        print(
+            f"    - {baseline.name} pos={dynamic_pos} ts={event.start_ts} "
+            f"code_idx={event.code_idx} opcode={opcode} inst={isa}"
+        )
+
+
 def print_interval_comparison_table(
     title: str,
     baseline: KernelAnalysis,
@@ -1567,6 +1640,8 @@ def print_interval_comparison_table(
     other_sorted = sorted_intervals_for_output(other_intervals)
     count_all = min(len(baseline_sorted), len(other_sorted))
     count = count_all if interval_print_limit == 0 else min(interval_print_limit, count_all)
+    if title in ("Primary interval comparison", "inc_inst_pattern matched interval comparison"):
+        print_first_row_instruction_delta(baseline, other, baseline_sorted[0], other_sorted[0])
     print(f"\n{title}: comparing {count_all} rows by baseline order")
     if len(baseline_sorted) != len(other_sorted):
         print(
@@ -1762,6 +1837,24 @@ def wave_filename_from_pair(pair: tuple[int, int, int, int]) -> str:
     return f"se{se}_sm{sm}_sl{sl}_wv{wv}.json"
 
 
+def pair_from_interval(interval: IntervalResult) -> tuple[int, int, int, int]:
+    if interval.se is None or interval.simd is None or interval.slot is None or interval.wave_id is None:
+        raise SystemExit(f"cannot infer se/sm/sl/wv from interval wave_file={interval.wave_file}")
+    return interval.se, interval.simd, interval.slot, interval.wave_id
+
+
+def auto_select_specific_part_pair(intervals: list[IntervalResult], interval_name: str) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    if not intervals:
+        raise SystemExit(f"cannot auto-select se_sm_sl_wv_pair: no intervals matched interval_name={interval_name!r}")
+    first = sorted(intervals, key=lambda item: (item.wave_file, item.start_ts, item.start_pos))[0]
+    trace_a = pair_from_interval(first)
+    se, sm, sl, wv = trace_a
+    if sl not in (0, 1):
+        raise SystemExit(f"cannot auto-select paired trace: slot must be 0 or 1, got {sl} from {first.wave_file}")
+    trace_b = (se, sm, 1 - sl, wv)
+    return trace_a, trace_b
+
+
 def timed_instructions_from_wave(trace_dir: Path, pair: tuple[int, int, int, int]) -> list[TimedInstruction]:
     wave_path = trace_dir / wave_filename_from_pair(pair)
     if not wave_path.is_file():
@@ -1912,6 +2005,100 @@ def render_timeline_layer(
     return box_lines + [tick]
 
 
+def load_perf_counter_series(
+    trace_dir: Path,
+    se: int | None,
+    simd: int | None,
+    counter_prefixes: tuple[str, ...] = (
+        "SQ_ACTIVE_INST_VALU",
+        "SQ_ACTIVE_INST_VALU2",
+        "SQ_VALU_MFMA_BUSY_CYCLES",
+        "SQ_VALU_MFMA_COEXEC_CYCLES",
+    ),
+) -> PerfCounterSeries | None:
+    if se is None:
+        return None
+    counter_path = trace_dir / f"se{se}_perfcounter.json"
+    if not counter_path.is_file():
+        return None
+
+    with counter_path.open() as f:
+        payload = json.load(f)
+
+    raw_names = payload.get("counter_names")
+    raw_data = payload.get("data")
+    if raw_names is None:
+        filenames_path = trace_dir / "filenames.json"
+        if filenames_path.is_file():
+            with filenames_path.open() as f:
+                raw_names = json.load(f).get("counter_names")
+    if not isinstance(raw_names, list) or not isinstance(raw_data, list):
+        return None
+
+    names = tuple(str(name) for name in raw_names)
+    selected_indices: list[int] = []
+    selected_names: list[str] = []
+    for prefix in counter_prefixes:
+        match_idx = next((idx for idx, name in enumerate(names) if name.split(":", 1)[0] == prefix), None)
+        if match_idx is not None:
+            selected_indices.append(match_idx)
+            selected_names.append(prefix)
+    if not selected_indices:
+        return None
+
+    # rocprof UI perfcounter rows are [timestamp, counters..., cu_or_slot, simd].
+    # The final column carries the SIMD mask selection index when att_perfcounters
+    # are emitted with suffixes like ":0x1".  If that column is absent, keep rows.
+    aggregate_by_ts: dict[int, list[int]] = {}
+    for raw_row in raw_data:
+        if not isinstance(raw_row, list) or len(raw_row) < 1 + len(names):
+            continue
+        if simd is not None and len(raw_row) >= 1 + len(names) + 2:
+            row_simd = raw_row[1 + len(names) + 1]
+            if isinstance(row_simd, int) and row_simd != simd:
+                continue
+        ts = int(raw_row[0])
+        values = aggregate_by_ts.setdefault(ts, [0] * len(selected_indices))
+        for out_idx, counter_idx in enumerate(selected_indices):
+            values[out_idx] += int(raw_row[1 + counter_idx])
+
+    samples = tuple((ts, tuple(values)) for ts, values in sorted(aggregate_by_ts.items()))
+    return PerfCounterSeries(names=tuple(selected_names), samples=samples)
+
+
+def render_perf_counter_lines(
+    series: PerfCounterSeries | None,
+    origin: int,
+    axis_min: int,
+    axis_max: int,
+    scale: int,
+) -> list[str]:
+    if series is None or not series.samples:
+        return []
+
+    width = max(1, math.ceil((axis_max - axis_min) / scale)) + 2
+    lines: list[str] = []
+    for counter_idx, name in enumerate(series.names):
+        canvas = [" "] * width
+        for ts, values in series.samples:
+            rel = ts - origin
+            if rel < axis_min or rel >= axis_max:
+                continue
+            value = values[counter_idx]
+            if value == 0:
+                continue
+            col = max(0, (rel - axis_min) // scale)
+            text = str(value)
+            if col + len(text) > len(canvas):
+                continue
+            if any(canvas[col + idx] != " " for idx in range(len(text))):
+                continue
+            overlay_text(canvas, col, text)
+        line = "".join(canvas).rstrip()
+        lines.append(f"{line:<{width}s}  c{counter_idx}={name}")
+    return lines
+
+
 def print_overlap_timeline(
     rows: list[CodeRow],
     center_inst: TimedInstruction,
@@ -1944,12 +2131,13 @@ def print_overlap_timeline(
     print("legend:")
     print(
         f"  C: [{center_inst.start_ts},{center_inst.end_ts}) "
-        f"{instruction_category(center_isa)} {opcode_for_isa(center_isa)} code_idx={center_inst.code_idx} {center_isa}"
+        f"latency={center_inst.latency} {instruction_category(center_isa)} "
+        f"{opcode_for_isa(center_isa)} code_idx={center_inst.code_idx} {center_isa}"
     )
     for rank, (other_inst, overlap) in enumerate(overlaps, start=1):
         other_isa = rows[other_inst.code_idx].isa
         print(
-            f"  {rank}: [{other_inst.start_ts},{other_inst.end_ts}) overlap={overlap} "
+            f"  {rank}: [{other_inst.start_ts},{other_inst.end_ts}) latency={other_inst.latency} overlap={overlap} "
             f"{instruction_category(other_isa)} {opcode_for_isa(other_isa)} code_idx={other_inst.code_idx} {other_isa}"
         )
 
@@ -1958,6 +2146,8 @@ def print_group_overlap_timeline(
     rows: list[CodeRow],
     center_entries: list[tuple[int, TimedInstruction]],
     other_wave: list[TimedInstruction],
+    trace_dir: Path | None = None,
+    center_pair: tuple[int, int, int, int] | None = None,
 ) -> None:
     if not center_entries:
         return
@@ -2007,18 +2197,25 @@ def print_group_overlap_timeline(
     for line in render_timeline_layer(other_boxes, axis_min, axis_max, scale):
         print(line)
 
+    perf_series = None
+    if trace_dir is not None and center_pair is not None:
+        perf_series = load_perf_counter_series(trace_dir, center_pair[0], center_pair[1])
+    for line in render_perf_counter_lines(perf_series, origin, axis_min, axis_max, scale):
+        print(line)
+
     print("legend:")
     for long_idx, center_inst in center_entries:
         center_isa = rows[center_inst.code_idx].isa
         print(
             f"  L{long_idx}: [{center_inst.start_ts},{center_inst.end_ts}) "
-            f"{instruction_category(center_isa)} {opcode_for_isa(center_isa)} code_idx={center_inst.code_idx} {center_isa}"
+            f"latency={center_inst.latency} {instruction_category(center_isa)} "
+            f"{opcode_for_isa(center_isa)} code_idx={center_inst.code_idx} {center_isa}"
         )
     for rank, (other_inst, overlaps) in enumerate(other_entries, start=1):
         other_isa = rows[other_inst.code_idx].isa
         overlap_text = ",".join(f"L{long_idx}:{overlap}" for long_idx, overlap in sorted(overlaps))
         print(
-            f"  {rank}: [{other_inst.start_ts},{other_inst.end_ts}) overlaps={overlap_text} "
+            f"  {rank}: [{other_inst.start_ts},{other_inst.end_ts}) latency={other_inst.latency} overlaps={overlap_text} "
             f"{instruction_category(other_isa)} {opcode_for_isa(other_isa)} code_idx={other_inst.code_idx} {other_isa}"
         )
 
@@ -2037,6 +2234,7 @@ def print_group_overlap_timeline(
 def print_specific_part_direction(
     title: str,
     rows: list[CodeRow],
+    trace_dir: Path,
     center_pair: tuple[int, int, int, int],
     other_pair: tuple[int, int, int, int],
     intervals: list[IntervalResult],
@@ -2076,15 +2274,8 @@ def print_specific_part_direction(
             f"interval_ts=[{owner_interval.start_ts},{owner_interval.end_ts}) "
             f"interval_cycles={owner_interval.cycles} long_count={len(center_entries)}"
         )
-        for long_idx, long_inst in center_entries:
-            long_isa = rows[long_inst.code_idx].isa
-            print(
-                f"long L{long_idx}: overlap_window=[{long_inst.start_ts},{long_inst.end_ts}) "
-                f"duration={long_inst.latency} type={instruction_category(long_isa)} "
-                f"opcode={opcode_for_isa(long_isa)} code_idx={long_inst.code_idx}"
-            )
         print(f"overlap_in_{wave_filename_from_pair(other_pair)}")
-        print_group_overlap_timeline(rows, center_entries, other_wave)
+        print_group_overlap_timeline(rows, center_entries, other_wave, trace_dir=trace_dir, center_pair=center_pair)
 
 
 def run_specific_part_config(config: dict[str, object], config_path: Path) -> None:
@@ -2105,35 +2296,42 @@ def run_specific_part_config(config: dict[str, object], config_path: Path) -> No
         kernel_config = merge_kernel_config(config, raw_config)
         version_name = str(raw_version.get("value") or raw_version.get("name") or f"version_{version_idx}")
         specific_part = parse_specific_part_config(raw_version["specific_part"], config_path, version_name)
-        selected_se = sorted({specific_part.trace_a[0], specific_part.trace_b[0]})
-        selected_sm = sorted({specific_part.trace_a[1], specific_part.trace_b[1]})
-        selected_sl = sorted({specific_part.trace_a[2], specific_part.trace_b[2]})
-        selected_wv = sorted({specific_part.trace_a[3], specific_part.trace_b[3]})
-        kernel_config = dict(kernel_config)
-        kernel_config["se"] = ",".join(str(item) for item in selected_se)
-        kernel_config["sm"] = ",".join(str(item) for item in selected_sm)
-        kernel_config["sl"] = ",".join(str(item) for item in selected_sl)
-        kernel_config["wv"] = ",".join(str(item) for item in selected_wv)
+        if specific_part.trace_a is not None and specific_part.trace_b is not None:
+            selected_se = sorted({specific_part.trace_a[0], specific_part.trace_b[0]})
+            selected_sm = sorted({specific_part.trace_a[1], specific_part.trace_b[1]})
+            selected_sl = sorted({specific_part.trace_a[2], specific_part.trace_b[2]})
+            selected_wv = sorted({specific_part.trace_a[3], specific_part.trace_b[3]})
+            kernel_config = dict(kernel_config)
+            kernel_config["se"] = ",".join(str(item) for item in selected_se)
+            kernel_config["sm"] = ",".join(str(item) for item in selected_sm)
+            kernel_config["sl"] = ",".join(str(item) for item in selected_sl)
+            kernel_config["wv"] = ",".join(str(item) for item in selected_wv)
+
         analysis = analyze_kernel_config(version_name, bool(raw_version.get("baseline", False)), kernel_config, config_path)
         interval_idx = find_interval_info_index(parse_config_interval_infos(kernel_config, parse_config_sample_points(kernel_config, config_path), config_path) or [], specific_part.interval_name)
         intervals = analysis.sample_intervals[interval_idx].primary_intervals
+        trace_a = specific_part.trace_a
+        trace_b = specific_part.trace_b
+        if trace_a is None or trace_b is None:
+            trace_a, trace_b = auto_select_specific_part_pair(intervals, specific_part.interval_name)
 
-        trace_a_wave = timed_instructions_from_wave(analysis.trace_dir, specific_part.trace_a)
-        trace_b_wave = timed_instructions_from_wave(analysis.trace_dir, specific_part.trace_b)
+        trace_a_wave = timed_instructions_from_wave(analysis.trace_dir, trace_a)
+        trace_b_wave = timed_instructions_from_wave(analysis.trace_dir, trace_b)
 
         print(f"\n################ kernel={version_name} ################")
         print(f"trace_dir={analysis.trace_dir}")
         print(f"interval_name={specific_part.interval_name} interval_index={interval_idx + 1}")
-        print(f"trace_a={wave_filename_from_pair(specific_part.trace_a)} trace_b={wave_filename_from_pair(specific_part.trace_b)}")
+        print(f"trace_a={wave_filename_from_pair(trace_a)} trace_b={wave_filename_from_pair(trace_b)}")
 
-        intervals_a = [interval for interval in intervals if interval.wave_file == wave_filename_from_pair(specific_part.trace_a)]
-        intervals_b = [interval for interval in intervals if interval.wave_file == wave_filename_from_pair(specific_part.trace_b)]
+        intervals_a = [interval for interval in intervals if interval.wave_file == wave_filename_from_pair(trace_a)]
+        intervals_b = [interval for interval in intervals if interval.wave_file == wave_filename_from_pair(trace_b)]
 
         print_specific_part_direction(
             "trace A long instructions vs trace B overlaps",
             analysis.rows,
-            specific_part.trace_a,
-            specific_part.trace_b,
+            analysis.trace_dir,
+            trace_a,
+            trace_b,
             intervals_a,
             trace_a_wave,
             trace_b_wave,
@@ -2142,8 +2340,9 @@ def run_specific_part_config(config: dict[str, object], config_path: Path) -> No
         print_specific_part_direction(
             "trace B long instructions vs trace A overlaps",
             analysis.rows,
-            specific_part.trace_b,
-            specific_part.trace_a,
+            analysis.trace_dir,
+            trace_b,
+            trace_a,
             intervals_b,
             trace_b_wave,
             trace_a_wave,

@@ -142,12 +142,8 @@
       "value": "fyd_attn",
       "baseline": false,
       "specific_part": {
-        "se_sm_sl_wv_pair": [
-          [0, 0, 0, 0],
-          [0, 0, 1, 0]
-        ],
         "interval_name": "Main loop Cluster 3",
-        "long_lat_thr": 2
+        "long_lat_thr": 20
       },
       "config": {
         "sample points": [
@@ -386,10 +382,10 @@
             }
           }
         ],
-        "se": "2",
-        "sm": "0",
-        "sl": "0",
-        "wv": "0",
+        "se": "*",
+        "sm": "*",
+        "sl": "*",
+        "wv": "*",
         "trace_dir": "thread_trace/fyd_opus_b2_s1024/ui_output_agent_*"
       }
     },
@@ -397,14 +393,6 @@
       "key": "version",
       "value": "cpp_attn",
       "baseline": true,
-      "specific_part": {
-        "se_sm_sl_wv_pair": [
-          [2, 0, 0, 0],
-          [2, 0, 1, 0]
-        ],
-        "interval_name": "Main loop Cluster 3",
-        "long_lat_thr": 20
-      },
       "config": {
         "sample points": [
           {
@@ -643,10 +631,10 @@
             }
           }
         ],
-        "se": "2",
-        "sm": "0",
-        "sl": "0",
-        "wv": "0",
+        "se": "*",
+        "sm": "*",
+        "sl": "*",
+        "wv": "*",
         "trace_dir": "thread_trace/cpp_opus_b2_s1024/ui_output_agent_*"
       }
     }

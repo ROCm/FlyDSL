@@ -1003,6 +1003,18 @@ def main():
                     cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
                     print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
+                    asm_r = run_aiter_bench(
+                        batch, seq_len, nh, hd, dtype, causal,
+                        warmup=args.warmup, iters=args.iters,
+                        seed=args.seed, backend="asm",
+                        num_kv_heads=nh_kv,
+                    )
+                    # asm_r = run_exp_isa_opus_bench(
+                    #     batch, seq_len, nh, hd, dtype, causal,
+                    #     warmup=args.warmup, iters=args.iters,
+                    #     seed=args.seed, dtype_str=dtype_str, verbose=False,
+                    #     num_kv_heads=nh_kv,
+                    # )
                     fly_r = run_config(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
@@ -1018,18 +1030,6 @@ def main():
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
                         seed=args.seed, backend="ck",
-                        num_kv_heads=nh_kv,
-                    )
-                    # asm_r = run_aiter_bench(
-                    #     batch, seq_len, nh, hd, dtype, causal,
-                    #     warmup=args.warmup, iters=args.iters,
-                    #     seed=args.seed, backend="asm",
-                    #     num_kv_heads=nh_kv,
-                    # )
-                    asm_r = run_exp_isa_opus_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, dtype_str=dtype_str, verbose=False,
                         num_kv_heads=nh_kv,
                     )
 
