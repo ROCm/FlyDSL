@@ -34,10 +34,35 @@ if not torch.cuda.is_available():
 SCALE_BLOCK = 32
 
 
+def preshuffle_e8m0_scale_coalesced(scale: torch.Tensor, block: int = 128) -> torch.Tensor:
+    """Lane-major scale layout for direct buffer_load->VGPR.
+
+    Per (M_block=128, K_tile): [group(2), lane16(16), 4 i32], so a buffer_load_b128's
+    16 lanes read 256 contiguous bytes. M = mb*128 + (group*4 + j)*16 + lane16.
+    """
+    M, Ks = scale.shape
+    assert M % block == 0 and Ks % 4 == 0, f"M={M} Ks={Ks} block={block}"
+    assert block == 128, "coalesced scale layout assumes warp_tile=128 (8 subtiles)"
+    Kt = Ks // 4
+    g = scale.view(M // block, 2, 4, 16, Kt, 4)  # [mb, group, j, lane16, kt, spw]
+    g = g.permute(0, 4, 1, 3, 2, 5).contiguous()  # [mb, kt, group, lane16, j, spw]
+    return g.view(M, Ks)
+
+
 def preshuffle_e8m0_scale(
-    scale: torch.Tensor, warp_tile: int, scale_k_per_tile: int = 4, WMMA_DIM: int = 16
+    scale: torch.Tensor,
+    warp_tile: int,
+    scale_k_per_tile: int = 4,
+    WMMA_DIM: int = 16,
+    coalesced: bool = False,
 ) -> torch.Tensor:
-    """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access."""
+    """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access.
+
+    ``coalesced=True`` produces the lane-major layout the scale_load_path
+    "vgpr"/"vgpr_ab_split" buffer_load->VGPR path expects.
+    """
+    if coalesced:
+        return preshuffle_e8m0_scale_coalesced(scale, block=warp_tile)
     _, K_scale = scale.shape
     assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
     SCALES_PER_WMMA = 4
@@ -383,8 +408,9 @@ def _run_mxscale_gemm_test(
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    _coalesced_scale = scale_load_path in ("vgpr", "vgpr_ab_split")
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
 
     # Preshuffle B data
     K_packed = padded_k // padded_shape["pack_b"]
@@ -600,7 +626,7 @@ def test_mxfp4_metadata_and_spill_regression(out_dtype):
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage"])
+@pytest.mark.parametrize("scale_load_path", ["tdm"])
 def test_mxfp8_gemm(
     M,
     N,
@@ -750,11 +776,10 @@ def test_b_streaming_with_wave_spec_tdm(data_format, M, N, K, tile_m, tile_n, ti
     )
 
 
-@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"])
 @pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [False, True])
-def test_mxfp8_wave_spec_scale_load_paths(scale_load_path, num_buffers, use_tdm_store, use_scale_opsel):
+def test_mxfp8_wave_spec_scale_load_paths(num_buffers, use_tdm_store, use_scale_opsel):
     _run_mxscale_gemm_test(
         "fp8",
         128,
@@ -771,28 +796,31 @@ def test_mxfp8_wave_spec_scale_load_paths(scale_load_path, num_buffers, use_tdm_
         l2_prefetch_distance=2,
         wave_specialized_tdm=True,
         use_scale_opsel=use_scale_opsel,
-        scale_load_path=scale_load_path,
+        scale_load_path="tdm",
     )
 
 
-def test_mxfp8_ab_split_scale_load_allows_extra_waves():
+@pytest.mark.parametrize("scale_load_path", ["vgpr", "vgpr_ab_split"])
+@pytest.mark.parametrize("cluster_m, cluster_n", [(1, 1), (2, 2)])
+def test_mxfp8_vgpr_scale_load(scale_load_path, cluster_m, cluster_n):
     _run_mxscale_gemm_test(
         "fp8",
-        128,
+        256 * cluster_m,
+        256 * cluster_n,
+        512,
         256,
-        384,
-        128,
         256,
         128,
         2,
-        4,
-        num_buffers=3,
+        2,
+        num_buffers=4,
         use_tdm_store=True,
         out_dtype="bf16",
         l2_prefetch_distance=2,
         wave_specialized_tdm=True,
-        use_scale_opsel=True,
-        scale_load_path="buffer_lds_stage_ab_split",
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+        scale_load_path=scale_load_path,
     )
 
 
@@ -1180,8 +1208,9 @@ def _run_benchmark(args):
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    _coalesced_scale = args.scale_load_path in ("vgpr", "vgpr_ab_split")
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
 
     K_packed = padded_k // PACK_B
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
@@ -1367,8 +1396,9 @@ def _run_graph_verify(args):
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    _coalesced_scale = args.scale_load_path in ("vgpr", "vgpr_ab_split")
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
     K_packed = padded_k // padded_shape["pack_b"]
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
 
@@ -1499,7 +1529,7 @@ if __name__ == "__main__":
         "--scale-load-path",
         type=str,
         default="tdm",
-        choices=["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"],
+        choices=["tdm", "vgpr", "vgpr_ab_split"],
     )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument("--b-streaming", action="store_true", default=False)
@@ -1530,7 +1560,7 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Functional verification: capture the kernel in a hipGraph, "
-        "replay once, assert bit-exact match against an eager launch. "
+        "replay once, assert bit-exact match against an eager launch. ",
     )
     parser.add_argument(
         "--fill-mode",
