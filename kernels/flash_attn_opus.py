@@ -1090,14 +1090,9 @@ def build_flash_attn_opus_module(
                 lo_sub.append(_fsub(s_lo[r], row_max))
             for r in range_constexpr(16):
                 hi_sub.append(_fsub(s_hi[r], row_max))
-            return lo_sub, hi_sub
-
-        def _anchor_v_s(v_s):
-            s_lo, s_hi = v_s
-            lo_vec = Vec.from_elements(s_lo, fx.Float32).ir_value()
-            hi_vec = Vec.from_elements(s_hi, fx.Float32).ir_value()
-            return _anchor_pair((lo_vec, hi_vec))
-            # return lo_vec, hi_vec
+            lo_vec = Vec.from_elements(lo_sub, fx.Float32).ir_value()
+            hi_vec = Vec.from_elements(hi_sub, fx.Float32).ir_value()
+            return lo_vec, hi_vec
 
         def _attn_exp2_slice(v_s, start, length):
             if const_expr(start == 0):
@@ -1200,6 +1195,22 @@ def build_flash_attn_opus_module(
                     scf.YieldOp([])
                 scf.YieldOp([])
 
+        def _anchor_scalar_f32(x):
+            """Pin a scalar f32 at the current source position (no-op asm).
+
+            Used to define a value *inside* a branch region so LLVM cannot hoist
+            it above the branch and fold a trivial 2-entry PHI into a `select`
+            (which would force a VCC mask + v_cndmask on AMDGPU).
+            """
+            x_ir = _llvm_value(x)
+            return llvm.inline_asm(
+                x_ir.type,
+                [x_ir],
+                "",
+                "=v,0",
+                has_side_effects=True,
+            )
+
         def _lazy_rescale_o(v_o, m_row, l_row, m_tile_max, v_p):
             """OPUS lazy rescale before the remaining MMA1 steps.
 
@@ -1217,7 +1228,7 @@ def build_flash_attn_opus_module(
             _expect_true_i1 = arith.constant(
                 1, type=ir.IntegerType.get_signless(1)
             )
-            # all_below = llvm.intr_expect(all_below, _expect_true_i1)
+            all_below = llvm.intr_expect(all_below, _expect_true_i1)
             # all_below = fx.Boolean(False).ir_value()
             _debug_count_lazy_branch(all_below)
 
@@ -1239,9 +1250,13 @@ def build_flash_attn_opus_module(
                 _scale_o(scaled_accs, corr)
                 scaled_v_p = _scale_v_p(v_p, corr)
                 scaled_l_row = _fmul(l_row, corr)
+                # Anchor m_tile_max *inside* the else so the merged m_row stays a
+                # PHI (resolved as a copy in the cold path, like C++'s
+                # `v_mov v219, v24`) instead of being folded into a select.
+                m_tile_max_else = _anchor_scalar_f32(m_tile_max)
                 scf.YieldOp(
                     [_raw(acc) for acc in scaled_accs]
-                    + [_raw(m_tile_max), _raw(scaled_l_row), _raw(_v_p_to_vec32(scaled_v_p))]
+                    + [m_tile_max_else, _raw(scaled_l_row), _raw(_v_p_to_vec32(scaled_v_p))]
                 )
 
             results = list(if_op.results)
@@ -1326,8 +1341,6 @@ def build_flash_attn_opus_module(
         m_row_pro = _attn_row_max(v_s_0)
         #     attn_sub_row<T>(v_s[0], m_row);
         v_s_0 = _attn_sub_row(v_s_0, m_row_pro)
-        #     asm volatile("" : "+v"(v_s[0]) ::);
-        v_s_0 = _anchor_v_s(v_s_0)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
         v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
         #     __builtin_amdgcn_sched_barrier(0);
@@ -1490,8 +1503,6 @@ def build_flash_attn_opus_module(
             v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
             #         attn_sub_row<T>(v_s[1], row_max);
             v_s_1 = _attn_sub_row(v_s_1, m_row)
-            #         asm volatile("" : "+v"(v_s[1]) ::);
-            v_s_1 = _anchor_v_s(v_s_1)
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
             v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 
@@ -1673,8 +1684,6 @@ def build_flash_attn_opus_module(
             v_o = _mma1_step_k(3, v_p_1, v_v, v_o)
             #         attn_sub_row<T>(v_s[0], row_max);
             v_s_0 = _attn_sub_row(v_s_0, m_row)
-            #         asm volatile("" : "+v"(v_s[0]) ::);
-            v_s_0 = _anchor_v_s(v_s_0)
             #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
             v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
             #         sched_barrier_pairs<6, 5, 4>();
@@ -1788,8 +1797,6 @@ def build_flash_attn_opus_module(
         m_row = row_max_e3
         #     attn_sub_row<T>(v_s[1], row_max);
         v_s_1 = _attn_sub_row(v_s_1, row_max_e3)
-        #     asm volatile("" : "+v"(v_s[1]) ::);
-        v_s_1 = _anchor_v_s(v_s_1)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
         #     sched_barrier_pairs<10, 5, 6>();
@@ -1898,8 +1905,6 @@ def build_flash_attn_opus_module(
         m_row = row_max_e7
         #     attn_sub_row<T>(v_s[0], row_max);
         v_s_0 = _attn_sub_row(v_s_0, row_max_e7)
-        #     asm volatile("" : "+v"(v_s[0]) ::);
-        v_s_0 = _anchor_v_s(v_s_0)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
         v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
         #     sched_barrier_pairs<10, 5, 8>();
@@ -2003,8 +2008,6 @@ def build_flash_attn_opus_module(
         m_row = row_max_e11
         #     attn_sub_row<T>(v_s[1], row_max);
         v_s_1 = _attn_sub_row(v_s_1, row_max_e11)
-        #     asm volatile("" : "+v"(v_s[1]) ::);
-        v_s_1 = _anchor_v_s(v_s_1)
         #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
         #     sched_barrier_pairs<10, 5, 10>();
