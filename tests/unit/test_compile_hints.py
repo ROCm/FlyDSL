@@ -217,7 +217,9 @@ class TestCacheKeyIncludesTarget:
     architectures produce different cache entries."""
 
     def test_cache_key_contains_target(self):
-        """Cache key must carry ('_target_', (GPUTarget, device_id))."""
+        """Cache key must carry an arch-only ('_target_', GPUTarget). The kernel
+        binary is device-independent, so the key has no device id and the same
+        artifact is shared across same-arch GPUs."""
         from flydsl.compiler.backends import GPUTarget, get_backend
 
         jf = _noop_launch
@@ -230,11 +232,8 @@ class TestCacheKeyIncludesTarget:
 
         assert isinstance(key, tuple)
         target_entry = next((v for k, v in key if k == "_target_"), None)
-        assert target_entry is not None
-        gpu_target, device_id = target_entry
-        assert isinstance(gpu_target, GPUTarget)
-        assert gpu_target == get_backend().target
-        assert isinstance(device_id, int)
+        assert isinstance(target_entry, GPUTarget)
+        assert target_entry == get_backend().target
 
     def test_different_arch_gives_different_key(self, monkeypatch):
         """Monkeypatch ARCH env var → different GPUTarget → different cache key.
@@ -269,7 +268,7 @@ class TestCacheKeyIncludesTarget:
             assert key1 != key2
             t1 = next(v for k, v in key1 if k == "_target_")
             t2 = next(v for k, v in key2 if k == "_target_")
-            assert t1[0].arch != t2[0].arch
+            assert t1.arch != t2.arch
         finally:
             monkeypatch.delenv("ARCH", raising=False)
             _make_backend.cache_clear()

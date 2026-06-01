@@ -1293,9 +1293,6 @@ class JitFunction:
             self._sig = full_sig.replace(parameters=params[1:])
         else:
             self._sig = full_sig
-        # NOTE: do NOT cache device_id here — torch.cuda.set_device() can move
-        # subsequent launches to a different GPU, and a frozen device_id would
-        # let the new device silently hit the old device's cache entry.
         self._backend_target = get_backend().target  # frozen dataclass, stable
 
     def _ensure_cache_manager(self, owner_cls=None):
@@ -1340,13 +1337,11 @@ class JitFunction:
         * JitArgument-driven: the call value is (or is wrapped into) a
           ``JitArgument`` and its ``cache_signature()`` is appended.
         """
-        from ..runtime.device_runtime import get_device_runtime
         from .jit_argument import JitArgumentRegistry
 
         sig = self._sig
-        # Re-read device_id and env vars on every call.
-        target = (self._backend_target, get_device_runtime().current_device_id())
-        key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", target)]
+        # Re-read env vars on every call.
+        key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
         if self.compile_hints:
             key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
 

@@ -83,18 +83,14 @@ def test_env_var_not_cached_within_process(monkeypatch):
     assert k1 != k2
 
 
-def test_device_id_in_cache_key_is_live():
-    """Regression: cache key's device_id slot must reflect the current device,
-    not a value frozen at first call.
+def test_cache_key_is_device_independent():
+    """The cache key's target is arch-only, with no device id component.
 
-    A previous implementation cached (target, device_id) inside _ensure_sig(),
-    so switching device with torch.cuda.set_device() after the first launch
-    would silently hit the other device's cached artifact.
-
-    device_id is now resolved through the active DeviceRuntime (per-backend),
-    queried live on every call.
+    The compiled kernel binary is device-independent, so a single in-process
+    artifact / func_exe is shared across same-arch GPUs (as on main). Folding a
+    device id into the key would needlessly split the cache per device.
     """
-    from flydsl.runtime.device_runtime import get_device_runtime
+    from flydsl.compiler.backends import GPUTarget, get_backend
 
     @flyc.jit
     def k(A: fx.Tensor):
@@ -102,10 +98,10 @@ def test_device_id_in_cache_key_is_live():
 
     A = torch.zeros(8, dtype=torch.float32)
     k._ensure_sig()
-    # Sanity check: target tuple's second slot is rebuilt per call, not cached.
     key1 = _key(k, A)
     target_entry = next(v for n, v in key1 if n == "_target_")
-    assert target_entry[1] == get_device_runtime().current_device_id()
+    assert isinstance(target_entry, GPUTarget)
+    assert target_entry == get_backend().target
 
 
 def test_globals_snapshot_folded_into_cache_key_default_mode():
