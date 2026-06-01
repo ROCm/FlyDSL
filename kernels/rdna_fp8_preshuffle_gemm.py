@@ -119,6 +119,18 @@ def compile_fp8_gemm(
     Returns:
         launch(c, a_fp8_f32, b_shuf_f32, scale_a_per_token, scale_b_per_channel, stream)
     """
+    # FP8 WMMA is not available on RDNA3 / RDNA3.5 (gfx11*). Without this
+    # guard the call to rocdl.wmma_f32_16x16x16_fp8_fp8 surfaces as a late
+    # LLVM "cannot select intrinsic" error during ISA generation.
+    from flydsl.runtime.device import get_rocm_arch
+
+    _arch = str(get_rocm_arch() or "")
+    if _arch.startswith("gfx11"):
+        raise RuntimeError(
+            f"rdna_fp8_preshuffle_gemm: FP8 WMMA is not available on {_arch} "
+            "(gfx11*); requires gfx12* (RDNA4) or newer."
+        )
+
     # Auto-select tile_n and k_unroll based on shape
     if tile_n is None:
         tile_n = 256 if M >= 256 else 128

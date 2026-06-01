@@ -7,7 +7,7 @@
 include "mlir/Pass/PassBase.td"
 
 def FlyRewriteFuncSignaturePass : Pass<"fly-rewrite-func-signature"> {
-  let summary = "Rewrite function signatures to use LLVM struct types";
+  let summary = "Rewrite DSL types at function and SCF control-flow boundaries";
   let description = [{
     This pass does the following:
     1. DSLTypes (IntTuple, Layout, ComposedLayout, CoordTensor, MemRef) are always lowered to
@@ -19,13 +19,18 @@ def FlyRewriteFuncSignaturePass : Pass<"fly-rewrite-func-signature"> {
        function body.
     3. On the caller side (`gpu.launch_func`), DSL operands are packed into the corresponding
        struct values using only their dynamic components, and static operands are omitted.
+    4. DSL types appearing as iter_args / results of `scf.for`, `scf.if`, and `scf.while` are
+       converted to LLVM struct types. At block entry the struct is unpacked back to normal-form
+       DSL values (via `MakeIntTupleOp` / `MakeLayoutOp` etc.), and at yield / condition
+       terminators the DSL values are packed back into structs.
   }];
-  
+
   let dependentDialects = [
     "arith::ArithDialect",
     "func::FuncDialect",
     "gpu::GPUDialect",
-    "LLVM::LLVMDialect"
+    "LLVM::LLVMDialect",
+    "scf::SCFDialect"
   ];
 }
 

@@ -374,6 +374,9 @@ class Numeric(metaclass=NumericMeta):
     def __get_ir_types__(self):
         return [type(self).ir_type]
 
+    def __cache_signature__(self):
+        return (type(self),)
+
     def __neg__(self, *, loc=None, ip=None):
         if isinstance(self.value, (bool, int, float)):
             return type(self)(-self.value)

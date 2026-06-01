@@ -10,6 +10,13 @@ import sys
 import pytest
 import torch
 
+from flydsl.runtime.device import get_rocm_arch
+from kernels.hgemm_splitk import hgemm_splitk_
+from tests.test_common import run_perftest, verify_output
+
+logging.basicConfig(level=logging.INFO)
+ARCH = str(get_rocm_arch())
+IS_GFX950 = ARCH == "gfx950"
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 _PYFLYDSL_SRC = os.path.join(_REPO_ROOT, "flydsl", "src")
 if _REPO_ROOT not in sys.path:
@@ -17,21 +24,10 @@ if _REPO_ROOT not in sys.path:
 if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
-from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.hgemm_splitk import hgemm_splitk_  # noqa: E402
-from tests.test_common import run_perftest, verify_output  # noqa: E402
-
-logging.basicConfig(level=logging.INFO)
-ARCH = str(get_rocm_arch())
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
-try:
-
-    HAS_AITER = True
-except Exception:
-    HAS_AITER = False
 
 DEFAULT_BENCH_ITERS = 50
 DEFAULT_BENCH_WARMUP = 3
@@ -49,18 +45,32 @@ def run_torch_bench(a, b):
     return c
 
 
+params = (
+    [
+        (2048, 2048, 2048, 128, 128, 64, 4, 1, 4, 4, 1),
+        (32, 384, 7168, 32, 64, 64, 5, 16, 2, 2, 1),
+        (32, 7168, 2048, 16, 64, 128, 4, 1, 1, 1, 2),
+        (32, 384, 16384, 32, 64, 256, 3, 16, 1, 4, 1),
+        (8, 5120, 2880, 16, 64, 64, 5, 3, 1, 2, 1),
+        (32, 2880, 2048, 16, 64, 128, 5, 2, 1, 2, 1),
+    ]
+    if IS_GFX950
+    else [
+        (32, 384, 7168, 16, 64, 128, 2, 14, 1, 2, 1),
+        (4, 384, 7168, 16, 64, 128, 2, 14, 1, 2, 1),
+        (65, 1024, 8192, 48, 64, 128, 2, 8, 1, 2, 1),
+        (8, 5120, 2880, 32, 128, 64, 2, 9, 2, 2, 1),
+        (4096, 4096, 4096, 128, 128, 64, 2, 1, 2, 2, 1),
+        (8192, 8192, 8192, 128, 128, 64, 2, 1, 2, 2, 1),
+        (32, 2880, 2048, 32, 64, 128, 2, 4, 1, 2, 1),
+    ]
+)
+
+
 @pytest.mark.parametrize("dtype", ["fp16", "bf16"])
 @pytest.mark.parametrize(
-    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS",
-    [
-        (32, 384, 7168, 16, 64, 128, 14, 1, 2),
-        (4, 384, 7168, 16, 64, 128, 14, 1, 2),
-        (65, 1024, 8192, 48, 64, 128, 8, 1, 2),
-        (8, 5120, 2880, 32, 128, 64, 9, 2, 2),
-        (4096, 4096, 4096, 128, 128, 64, 1, 2, 2),
-        (8192, 8192, 8192, 128, 128, 64, 1, 2, 2),
-        (32, 2880, 2048, 32, 64, 128, 4, 1, 2),
-    ],
+    "m, n, k, TILE_M, TILE_N, TILE_K, STAGES, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS",
+    params,
 )
 @pytest.mark.parametrize(
     "test_graph",
@@ -77,9 +87,11 @@ def test_mfma_flyc_splitk_hgemm(
     TILE_M,
     TILE_N,
     TILE_K,
+    STAGES,
     SPLIT_K,
     BLOCK_M_WARPS,
     BLOCK_N_WARPS,
+    BLOCK_K_WARPS,
     *,
     test_graph,
     bench_iters: int = DEFAULT_BENCH_ITERS,
@@ -122,9 +134,11 @@ def test_mfma_flyc_splitk_hgemm(
         "TILE_M": TILE_M,
         "TILE_N": TILE_N,
         "TILE_K": TILE_K,
+        "STAGES": STAGES,
         "SPLIT_K": SPLIT_K,
         "BLOCK_M_WARPS": BLOCK_M_WARPS,
         "BLOCK_N_WARPS": BLOCK_N_WARPS,
+        "BLOCK_K_WARPS": BLOCK_K_WARPS,
     }
 
     hgemm_splitk_(c_out, a_q, b_q, None, kwargs, torch.cuda.current_stream())
@@ -167,9 +181,11 @@ if __name__ == "__main__":
     parser.add_argument("--TILE_M", type=int, default=256)
     parser.add_argument("--TILE_N", type=int, default=256)
     parser.add_argument("--TILE_K", type=int, default=64)
+    parser.add_argument("--STAGES", type=int, default=2)
     parser.add_argument("--SPLIT_K", type=int, default=1)
     parser.add_argument("--BLOCK_M_WARPS", type=int, default=2)
     parser.add_argument("--BLOCK_N_WARPS", type=int, default=2)
+    parser.add_argument("--BLOCK_K_WARPS", type=int, default=1)
     parser.add_argument("--num_warmup", type=int, default=DEFAULT_BENCH_WARMUP)
     parser.add_argument("--num_iters", type=int, default=DEFAULT_BENCH_ITERS)
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
@@ -184,9 +200,11 @@ if __name__ == "__main__":
             TILE_M=args.TILE_M,
             TILE_N=args.TILE_N,
             TILE_K=args.TILE_K,
+            STAGES=args.STAGES,
             SPLIT_K=args.SPLIT_K,
             BLOCK_M_WARPS=args.BLOCK_M_WARPS,
             BLOCK_N_WARPS=args.BLOCK_N_WARPS,
+            BLOCK_K_WARPS=args.BLOCK_K_WARPS,
             test_graph=bool(args.test_graph),
             bench_iters=args.num_iters,
             bench_warmup=args.num_warmup,

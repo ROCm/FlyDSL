@@ -897,7 +897,10 @@ NB_MODULE(_mlirDialectsFly, m) {
       .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
            "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
       .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
-           "Decide whether to use 32-bit stride");
+           "Decide whether to use 32-bit stride")
+      .def("get_cache_signature", &DLTensorAdaptor::getCacheSignature,
+           "Cache-key tuple (alignment, use_32bit_stride, shape, stride) reflecting "
+           "the resolved layout state.");
 
   // -------------------------------------------------------------------------
   // Module-level helper functions

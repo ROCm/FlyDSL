@@ -94,10 +94,10 @@ combinations. In the reference ROCDL backend (`include/flydsl/Dialect/FlyROCDL/I
 are:
 
 ```tablegen
-class FlyROCL_CopyOp         // stateless CopyOp    : MayStatic + CopyOp
-class FlyROCL_StatefulCopyOp // stateful  CopyOp    : CopyOp + Stateful
-class FlyROCL_MmaOp          // stateless MmaOp     : MayStatic + MmaOp
-class FlyROCL_StatefulMmaOp  // stateful  MmaOp     : MmaOp    + Stateful
+class FlyROCDL_CopyOp         // stateless CopyOp    : MayStatic + CopyOp
+class FlyROCDL_StatefulCopyOp // stateful  CopyOp    : CopyOp + Stateful
+class FlyROCDL_MmaOp          // stateless MmaOp     : MayStatic + MmaOp
+class FlyROCDL_StatefulMmaOp  // stateful  MmaOp     : MmaOp    + Stateful
 ```
 
 Mnemonic: **stateful => no `MayStaticTypeInterface`**; the mutable state *is* the dynamic component,
@@ -298,14 +298,14 @@ Concrete instantiation for the reference ROCDL backend:
 ## 3. Recipe: Add a Stateless MmaOp
 
 Examples use the ROCDL backend with a hypothetical `CDNA5_MFMA`. For other backends substitute
-`FlyROCL_MmaOp` → your backend's base class, `CDNA<n>` → your chip family (`SM80`, `SM90`,
+`FlyROCDL_MmaOp` → your backend's base class, `CDNA<n>` → your chip family (`SM80`, `SM90`,
 `X86AVX512`, ...), `ROCDL::mfma_*` → your intrinsic ops (`NVVM::WgmmaMmaAsyncOp`, `vector.contract`,
 ...), `--convert-fly-to-rocdl` → your conversion pass. Everything else is identical.
 
 **Step 1 — TableGen declaration** in `include/flydsl/Dialect/FlyROCDL/IR/MmaAtom.td`:
 
 ```tablegen
-def FlyROCDL_MmaOpCDNA5_MFMA : FlyROCL_MmaOp<"MmaOpCDNA5_MFMA", "cdna5.mfma", []> {
+def FlyROCDL_MmaOpCDNA5_MFMA : FlyROCDL_MmaOp<"MmaOpCDNA5_MFMA", "cdna5.mfma", []> {
   let parameters = (ins "int32_t":$m, "int32_t":$n, "int32_t":$k,
                         "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc);
   let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` "
@@ -316,7 +316,7 @@ def FlyROCDL_MmaOpCDNA5_MFMA : FlyROCL_MmaOp<"MmaOpCDNA5_MFMA", "cdna5.mfma", []
 }
 ```
 
-The `FlyROCL_MmaOp` base auto-adds `DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>` +
+The `FlyROCDL_MmaOp` base auto-adds `DeclareTypeInterfaceMethods<Fly_MayStaticTypeInterface>` +
 `<Fly_MmaOpTypeInterface>`. `MNKDimensionList` is the shared parser/printer pair
 (`parseMNKDimensionList` / `printMNKDimensionList` in `lib/Dialect/Fly/IR/FlyDialect.cpp`) — reuse
 it.
@@ -391,11 +391,11 @@ concepts with per-call mutable state (AMD buffer descriptors, NVIDIA TMA descrip
 offsets, ...). State always lowers to `!llvm.struct<...>` in rocdl backend, so only the field set
 differs.
 
-**Step 1 — TableGen.** Pick `FlyROCL_StatefulCopyOp` as the base:
+**Step 1 — TableGen.** Pick `FlyROCDL_StatefulCopyOp` as the base:
 
 ```tablegen
 def FlyROCDL_CopyOpCDNA5GlobalCopy
-    : FlyROCL_StatefulCopyOp<"CopyOpCDNA5GlobalCopy", "cdna5.global_copy", []> {
+    : FlyROCDL_StatefulCopyOp<"CopyOpCDNA5GlobalCopy", "cdna5.global_copy", []> {
   let parameters = (ins "int32_t":$bitSize);
   let assemblyFormat = "`<` $bitSize `>`";
 }

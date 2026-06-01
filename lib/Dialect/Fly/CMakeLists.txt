@@ -22,7 +22,12 @@ add_mlir_dialect_library(MLIRFlyDialect
   FlyRewritePatternsIncGen
 
   LINK_LIBS
+  MLIRFuncDialect
+  MLIRFuncTransforms
   MLIRGPUDialect
   MLIRIR
+  MLIRLLVMDialect
+  MLIRSCFTransforms
   MLIRTargetLLVMIRExport
+  MLIRTransforms
 )
