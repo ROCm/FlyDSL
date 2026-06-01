@@ -340,7 +340,7 @@ def run_config(
     ref_f32 = ref_flat.float()
     max_err = (o_f32 - ref_f32).abs().max().item()
     mean_err = (o_f32 - ref_f32).abs().mean().item()
-    cos_sim = F.cosine_similarity(o_f32.view(-1, D), ref_f32.view(-1, D), dim=1)
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
     min_cos = cos_sim.min().item()
     results["max_err"] = max_err
     results["mean_err"] = mean_err
@@ -649,7 +649,7 @@ def run_exp_isa_opus_bench(
     ref_f32 = ref_4d.float()
     max_err = (o_f32 - ref_f32).abs().max().item()
     mean_err = (o_f32 - ref_f32).abs().mean().item()
-    cos_sim = F.cosine_similarity(o_f32.view(-1, D), ref_f32.view(-1, D), dim=1)
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
     min_cos = cos_sim.min().item()
     results["max_err"] = max_err
     results["mean_err"] = mean_err
@@ -673,6 +673,96 @@ def run_exp_isa_opus_bench(
 
         def bench_fn():
             opus_asm.forward_out(q_4d, k_4d, v_4d, out_bench, causal=causal)
+
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                bench_fn()
+            torch.cuda.synchronize()
+
+        _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
+        s_eff = S / 2.0 if causal else float(S)
+        flops = 4.0 * S * s_eff * D * H * B
+        results["us"] = us
+        results["tflops"] = flops / (us * 1e-6) / 1e12
+    except Exception as e:
+        results["bench_err"] = str(e)
+
+    return results
+
+
+def run_exp_isa_fmha_bench(
+    batch, seq_len, nheads, head_dim, dtype, causal,
+    warmup, iters, seed=DEFAULT_SEED, dtype_str="bf16", verbose=False, num_kv_heads=None,
+):
+    """Run exp_isa MI350 256x64 FMHA asm kernels and return a run_config-compatible result dict."""
+    if dtype != torch.bfloat16 or dtype_str != "bf16":
+        return {"skip": True}
+
+    H_KV = num_kv_heads if num_kv_heads is not None else nheads
+    if head_dim != 128 or H_KV <= 0 or nheads % H_KV != 0:
+        return {"skip": True}
+    if causal and nheads % 8 != 0:
+        return {"skip": True}
+    if seq_len % 256 != 0:
+        return {"skip": True}
+
+    try:
+        fmha_asm = importlib.import_module("exp_isa.fmha_asm")
+    except Exception as e:
+        return {"err": f"exp_isa.fmha_asm import: {e}"}
+
+    results = {}
+    setup_seed(seed)
+    torch.cuda.empty_cache()
+
+    B, S, H, D = batch, seq_len, nheads, head_dim
+    q_4d = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+    v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+
+    try:
+        out_4d = fmha_asm.forward(q_4d, k_4d, v_4d, causal=causal)
+        torch.cuda.synchronize()
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return {"err": f"exp_isa_fmha: {e}"}
+
+    ref_4d = pytorch_ref_attention(q_4d.float(), k_4d.float(), v_4d.float(), causal=causal).to(dtype)
+    o_f32 = out_4d.float()
+    ref_f32 = ref_4d.float()
+    max_err = (o_f32 - ref_f32).abs().max().item()
+    mean_err = (o_f32 - ref_f32).abs().mean().item()
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
+    min_cos = cos_sim.min().item()
+    results["max_err"] = max_err
+    results["mean_err"] = mean_err
+    results["min_cos"] = min_cos
+    results["passed"] = max_err < 1e-2 and min_cos > 0.99
+
+    if verbose:
+        tag = f"B={B} S={S} H={H} D={D}"
+        result_md5 = compute_md5(out_4d)
+        ref_md5 = compute_md5(ref_4d)
+        print(f"  [{tag}] exp_isa_fmha result_md5 = {result_md5}")
+        print(f"  [{tag}] exp_isa_fmha ref_md5    = {ref_md5}")
+        print(f"  [{tag}] exp_isa_fmha --- compare_arrays ---")
+        compare_arrays(
+            out_4d.to(torch.float32).detach().cpu().numpy(),
+            ref_4d.to(torch.float32).detach().cpu().numpy(),
+        )
+
+    try:
+        out_bench = torch.empty_like(q_4d)
+
+        def bench_fn():
+            fmha_asm.forward_out(q_4d, k_4d, v_4d, out_bench, causal=causal)
 
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
@@ -1003,18 +1093,24 @@ def main():
                     cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
                     print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
-                    asm_r = run_aiter_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, backend="asm",
-                        num_kv_heads=nh_kv,
-                    )
                     # asm_r = run_exp_isa_opus_bench(
                     #     batch, seq_len, nh, hd, dtype, causal,
                     #     warmup=args.warmup, iters=args.iters,
                     #     seed=args.seed, dtype_str=dtype_str, verbose=False,
                     #     num_kv_heads=nh_kv,
                     # )
+                    # asm_r = run_aiter_bench(
+                    #     batch, seq_len, nh, hd, dtype, causal,
+                    #     warmup=args.warmup, iters=args.iters,
+                    #     seed=args.seed, backend="asm",
+                    #     num_kv_heads=nh_kv,
+                    # )
+                    asm_r = run_exp_isa_fmha_bench(
+                        batch, seq_len, nh, hd, dtype, causal,
+                        warmup=args.warmup, iters=args.iters,
+                        seed=args.seed, dtype_str=dtype_str, verbose=False,
+                        num_kv_heads=nh_kv,
+                    )
                     fly_r = run_config(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,

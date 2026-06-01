@@ -5,20 +5,33 @@ set -x
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-ASM_SRC="${SCRIPT_DIR}/flash_attn_opus.v1.s"
-CO_OUT="${SCRIPT_DIR}/flash_attn_opus.v1.co"
+function compile_asm() {
+  local src="$1"
+  local out="$2"
+  echo "=== Compile $(basename "${src}") ==="
+  /opt/rocm/llvm/bin/clang++ \
+    -x assembler \
+    -target amdgcn-amd-amdhsa \
+    --offload-arch=gfx950 \
+    "${src}" \
+    -o "${out}"
+}
 
-echo "=== Compile flash_attn_opus.v1.s ==="
-/opt/rocm/llvm/bin/clang++ \
-  -x assembler \
-  -target amdgcn-amd-amdhsa \
-  --offload-arch=gfx950 \
-  "${ASM_SRC}" \
-  -o "${CO_OUT}"
+compile_asm \
+  "${SCRIPT_DIR}/flash_attn_opus.v1.s" \
+  "${SCRIPT_DIR}/flash_attn_opus.v1.co"
 
-# echo "=== Build Python extension opus_asm_ext ==="
+compile_asm \
+  "${SCRIPT_DIR}/fmha_fwd_hd128_bf16_1tg_8w_256x64_350_msk1_gm0.s" \
+  "${SCRIPT_DIR}/fmha_fwd_hd128_bf16_1tg_8w_256x64_350_msk1_gm0.co"
+
+compile_asm \
+  "${SCRIPT_DIR}/fmha_fwd_hd128_bf16_1tg_8w_256x64_350_msk0_gm0.s" \
+  "${SCRIPT_DIR}/fmha_fwd_hd128_bf16_1tg_8w_256x64_350_msk0_gm0.co"
+
+# echo "=== Build Python extensions ==="
 # rm -rf build
 # python3 setup.py build_ext --inplace
 
 echo "=== Build complete ==="
-ls -lah "${CO_OUT}" opus_asm_ext*.so
+ls -lah ./*.co ./*_asm_ext*.so

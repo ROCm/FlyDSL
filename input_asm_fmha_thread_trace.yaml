@@ -1,0 +1,19 @@
+jobs:
+ -
+  kernel_include_regex: (fwd_kernel_func)
+  kernel_exclude_regex:
+  kernel_iteration_range: "[1]"
+  output_file: out
+  output_directory: thread_trace/rpf_v3_opus_attn_b2_s1024_wpe2
+  output_format: [csv]
+  truncate_kernels: false
+  sys_trace: false
+  advanced_thread_trace: true
+  att_target_cu: 1
+  att_shader_engine_mask: "0xf"
+  att_simd_select: "0xf"
+  att_buffer_size: "0x10000000"
+
+  # att_activity: 10
+  att_perfcounter_ctrl: 1
+  att_perfcounters: "SQ_ACTIVE_INST_VALU:0x1 SQ_ACTIVE_INST_VALU2:0x1 SQ_VALU_MFMA_BUSY_CYCLES:0x1 SQ_VALU_MFMA_COEXEC_CYCLES:0x1"
