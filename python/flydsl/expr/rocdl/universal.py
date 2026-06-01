@@ -76,15 +76,19 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
-def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, *, sign_a=False, sign_b=False, clamp=False):
+def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create an arch-appropriate WMMA atom.
 
-    sign_a / sign_b / clamp are only meaningful on the gfx11 integer paths
-    (iu8 / iu4). They are forwarded to the ROCDL intrinsic so callers can pick
-    signed vs unsigned interpretation per-operand and request saturation. On
-    fp16/bf16 paths they must remain False (the fp intrinsics have no such
-    operands; verify() will reject otherwise). The gfx12 (RDNA4) path does not
-    expose these knobs yet.
+    Supported kwargs (gfx11 integer paths only — iu8 / iu4):
+        sign_a (bool, default False): treat A operand as signed.
+        sign_b (bool, default False): treat B operand as signed.
+        clamp  (bool, default False): saturate integer accumulator.
+    These are forwarded verbatim to MmaOpGFX11_WMMAType.get(); the ROCDL
+    intrinsic's verify() will reject them on fp16/bf16 paths.
+    The gfx12 (RDNA4) path does not expose these knobs yet and will raise
+    if any are passed as True.
+    Future WMMA ops for new architectures should extend kwargs here rather
+    than growing the positional signature.
     """
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
@@ -99,13 +103,13 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, *, sign_a=False, sign_b=False, c
 
     arch = (get_rocm_arch() or "").lower()
     if arch.startswith("gfx11"):
-        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, sign_a=sign_a, sign_b=sign_b, clamp=clamp)
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
     if arch.startswith("gfx12"):
-        if sign_a or sign_b or clamp:
+        if any(kwargs.get(k) for k in ("sign_a", "sign_b", "clamp")):
             raise ValueError("sign_a/sign_b/clamp are not supported on the gfx12 (RDNA4) WMMA path yet")
         return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
     raise ValueError(
-        f"WMMA is not available on target arch {arch!r}; " "supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
+        f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
     )
 
 
