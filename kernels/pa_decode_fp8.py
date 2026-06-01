@@ -2623,17 +2623,6 @@ def compile_pa_decode_ps(
             k_next_flat = None
             k_scale_next = None
             for _mtp_g in range_constexpr(_mtp_groups):
-                if const_expr(_mtp_g == _mtp_groups - 1):
-                    next_phys_blocks = _pa_small_block_stage_phys_blocks(next_block_base)
-                    # ── Cross-iter K-scale prefetch ──
-                    # Issue next iter's K-scale fetch using the VGPR
-                    # next_phys_blocks (avoids LDS round-trip).  Carried via
-                    # loop yield → consumed directly by next iter's row_newbcast,
-                    # giving an ENTIRE iter of compute to hide the load.
-                    # if const_expr(k_scale_per_token):
-                    #     k_scale_next = _load_my_k_scale_from_vgpr(next_phys_blocks)
-                    # # if const_expr(k_scale_per_token):
-                    # #     k_scale_next = arith.constant(1.0, type=T.f32)
 
                 state = cur_states[_mtp_g]
                 rmax, rsum = state[0], state[1]
@@ -2649,6 +2638,14 @@ def compile_pa_decode_ps(
                     k_scale_lane=k_scale_cur,
                 )
                 if const_expr(_mtp_g == _mtp_groups - 1):
+                    next_phys_blocks = _pa_small_block_stage_phys_blocks(next_block_base)
+                    
+                if const_expr(_mtp_g == _mtp_groups - 1):
+                    # ── Cross-iter K-scale prefetch ──
+                    # Issue next iter's K-scale fetch using the VGPR
+                    # next_phys_blocks (avoids LDS round-trip).  Carried via
+                    # loop yield → consumed directly by next iter's row_newbcast,
+                    # giving an ENTIRE iter of compute to hide the load.
                     if const_expr(k_scale_per_token):
                         k_scale_next = _load_my_k_scale_from_vgpr(next_phys_blocks)
                     # if const_expr(k_scale_per_token):
@@ -2665,7 +2662,7 @@ def compile_pa_decode_ps(
                 # overlap with the upcoming PV MFMA compute.
                 if const_expr(_mtp_g == _mtp_groups - 1):
                     _pa_small_block_store_phys_blocks_to_lds(next_phys_blocks)
-                gpu.barrier()
+                
                 if const_expr(_mtp_g == _mtp_groups - 1):
                     k_next_flat = _pa_small_block_load_k_flat(
                         k_global_ptr,
@@ -2678,6 +2675,8 @@ def compile_pa_decode_ps(
                         phys_blocks=next_phys_blocks,
                         qkhe_loop=_QKHELOOP,
                     )
+                gpu.barrier()
+                
                 outs = _pv_mfma(v_results, outs, v_correction)
                 new_states.append(tuple([rmax, rsum] + outs))
 
