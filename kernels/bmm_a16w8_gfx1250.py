@@ -1,8 +1,8 @@
 """Batched WMMA GEMM a16w8 kernel for gfx1250.
 
-C[b,m,n] = A[b,m,k] @ B_dequant[b,k,n]
+C[b,m,n] = A[b,m,k] @ B_dequant[b,n,k]^T
   A: bf16 (activations)
-  B: fp8_e4m3fn weights, optionally with per-128-block scale
+  B: fp8_e4m3fn weights in [B, N, K] layout (K-inner, wo_a format)
   C: bf16
 
 Scale modes (compile-time):
@@ -13,6 +13,7 @@ Scale modes (compile-time):
 
 DeepSeek-V4 use case: einsum("sgd,grd->sgr", o, wo_a)
   B=G=16, M=T (runtime), K=D=4096, N=R=1024
+  wo_a layout: [G, R, D] = [B, N, K] with K=D innermost (K-major)
 """
 
 import flydsl.compiler as flyc
@@ -96,7 +97,7 @@ def compile_bmm_a16w8_gfx1250(
 
     Tensors (all flat 1-D):
       arg_a:     A[B, M, K]               bf16
-      arg_b:     B[B, K, N]               fp8_e4m3
+      arg_b:     B[B, N, K]               fp8_e4m3 (wo_a layout, K-inner)
       arg_c:     C[B, M, N]               bf16 (or f32)
       arg_scale: scale[B, K//gk, N//gn]   fp32
 
@@ -181,9 +182,9 @@ def compile_bmm_a16w8_gfx1250(
     lds_a_elems = tile_m * lds_a_stride + LDS_PAD_A
     lds_a_bytes = lds_a_elems * ELEM_BYTES_A
 
-    # B LDS layout (fp8 — half the bytes of bf16 at equal element count)
-    lds_b_stride_fp8 = tile_n + LDS_PAD_B_FP8   # in fp8 elements
-    lds_b_elems_fp8 = tile_k * lds_b_stride_fp8 + LDS_PAD_B_FP8
+    # B LDS layout (fp8 — [N,K] K-inner; each N-row is K+pad fp8 elements wide)
+    lds_b_stride_fp8 = tile_k + LDS_PAD_B_FP8   # K+pad per N-row, in fp8 elements
+    lds_b_elems_fp8 = tile_n * lds_b_stride_fp8 + LDS_PAD_B_FP8
     lds_b_bytes = lds_b_elems_fp8 * ELEM_BYTES_B
 
     def _align_up(value: int, align: int) -> int:
@@ -290,7 +291,7 @@ def compile_bmm_a16w8_gfx1250(
         # --- Batch offsets ---
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
         a_batch_off = bz * m_idx              # [B*M, K] row offset for A
-        b_batch_off = bz * arith.index(K)    # [B*K, N] row offset for B
+        b_batch_off = bz * arith.index(N)    # [B*N, K] row offset for B
 
         c_batch_row_off = bz * m_idx         # [B*M, N] row offset for C
 
@@ -324,10 +325,10 @@ def compile_bmm_a16w8_gfx1250(
         def make_desc_b(lds_b_mem_ref, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_b, lds_memref=lds_b_mem_ref,
-                global_offset=(b_batch_off + k_base, blk_n),
-                tensor_shape=(tile_k, tile_n), strides=(N, 1),
-                tile_shape=(tile_k, tile_n), elem_bytes=ELEM_BYTES_B,
-                pad_interval=tile_n, pad_amount=LDS_PAD_B_FP8,
+                global_offset=(b_batch_off + blk_n, k_base),
+                tensor_shape=(tile_n, tile_k), strides=(K, 1),
+                tile_shape=(tile_n, tile_k), elem_bytes=ELEM_BYTES_B,
+                pad_interval=tile_k, pad_amount=LDS_PAD_B_FP8,
                 num_warps=num_warps, workgroup_mask=b_mcast_mask)
 
         # --- A LDS load helpers (bf16, unchanged from bf16 BMM) ---
@@ -357,29 +358,17 @@ def compile_bmm_a16w8_gfx1250(
 
         # --- B LDS load helpers (fp8 → bf16 with per-block scale) ---
         def _precompute_b_lane_bases_fp8(lds_base_idx):
-            # ds_load_tr8_b64 addressing: layout (2,4,4) strides (4,1,8) on lane_id.
-            # lane_id = lane_kgrp * 16 + lane16.
-            # lane_Kgrp = lane_id // 8 % 4 = lane_kgrp * 2 + lane16 // 8
-            # lane_Kid  = lane_id % 4       = lane16 % 4
-            # lane_nonKgrp = lane_id // 4 % 2 = (lane16 // 4) % 2  (kgrp contrib is even)
-            # K within WMMA step = lane_Kgrp * 4 + lane_Kid
-            # N-group = lane_nonKgrp * DS_LOAD_TR_VEC (DS_LOAD_TR_VEC = 8 for fp8)
-            lane4 = lane16 % arith.index(4)
-            lane_half = lane16 / arith.index(8)      # 0 if lane16<8, 1 if lane16>=8
-            nonK_grp = (lane16 / arith.index(4)) % arith.index(2)
-            k_lane_off = (
-                (lane_kgrp * arith.index(8) + lane_half * arith.index(4) + lane4)
-                * arith.index(lds_b_stride_fp8 * ELEM_BYTES_B)
-            )
-            n_lane_off = nonK_grp * arith.index(8 * ELEM_BYTES_B)
+            # B^T [N,K] K-inner LDS: each lane selects an N-row (like A's M-row),
+            # K is the offset within the row. Symmetric with _precompute_a_lane_bases.
+            row_stride_off = (warp_n_base + lane16) * arith.index(lds_b_stride_fp8 * ELEM_BYTES_B)
+            k_lane_off = lane_kgrp * arith.index(8 * ELEM_BYTES_B)
             bases = []
             for wn in range_constexpr(wmma_n_rep):
-                n_col = (
-                    (warp_n_base + arith.index(wn * WMMA_N))
-                    * arith.index(ELEM_BYTES_B)
-                    + n_lane_off
+                b_base = (
+                    row_stride_off
+                    + arith.index(wn * WMMA_N * lds_b_stride_fp8 * ELEM_BYTES_B)
+                    + k_lane_off
                 )
-                b_base = k_lane_off + n_col
                 bases.append(b_base)
             return lds_base_idx, bases
 
@@ -407,36 +396,40 @@ def compile_bmm_a16w8_gfx1250(
 
         def _load_frag_b_fp8_parts(lds_base_idx, b_lane_base, ks,
                                     e8m0_byte, residual_bf16):
-            """Load one 16×32 bf16 WMMA B fragment from fp8 LDS (ds_load_tr8_b64 × 2).
+            """Load one 16×32 bf16 WMMA B fragment from K-inner fp8 LDS (A-symmetric: lds_load_b128_raw × 2).
 
-            Takes pre-decomposed scale parts (e8m0_byte, residual_bf16) to avoid
-            recomputing scale decomposition across wmma_n_rep × k_half iterations.
+            B^T [N,K] layout: each lane holds one N-row; K offset within row.
+            Two 128-bit loads at 0 and +16 bytes cover 32 fp8 = one WMMA_K group.
+            Lower 64 bits (2×i32) extracted per load → 8 fp8 each.
             """
-            results = []
-            for k_half in range_constexpr(2):
-                k_row_off = (ks * WMMA_K + k_half * 16) * lds_b_stride_fp8 * ELEM_BYTES_B
-                elem_off = b_lane_base + arith.index(k_row_off)
-                ptr_val = _lds_ptr_raw(lds_base_idx, elem_off)
-                v_2xi32 = rocdl.ds_load_tr8_b64(ty_2xi32, ptr_val)
-                # V_CVT_SCALE_PK8_BF16_FP8: 8 fp8 → 8 bf16 with E8M0 scale
-                bf16_vec = rocdl.cvt_scale_pk8_bf16_fp8(ty_8xbf16, v_2xi32, _raw(e8m0_byte), 0)
-                results.append(arith.mulf(bf16_vec, vector.broadcast(ty_8xbf16, residual_bf16)))
-            return vector.shuffle(results[0], results[1], list(range(16)))
+            k_byte_off = arith.index(ks * WMMA_K * ELEM_BYTES_B)
+            off0 = b_lane_base + k_byte_off
+            off1 = b_lane_base + k_byte_off + arith.index(16)
+            raw0_128 = lds_load_b128_raw(lds_base_idx, off0)
+            raw1_128 = lds_load_b128_raw(lds_base_idx, off1)
+            raw0 = vector.shuffle(raw0_128, raw0_128, [0, 1])  # 2×i32 = 8 fp8
+            raw1 = vector.shuffle(raw1_128, raw1_128, [0, 1])
+            bf16_0 = rocdl.cvt_scale_pk8_bf16_fp8(ty_8xbf16, raw0, _raw(e8m0_byte), 0)
+            bf16_1 = rocdl.cvt_scale_pk8_bf16_fp8(ty_8xbf16, raw1, _raw(e8m0_byte), 0)
+            res0 = arith.mulf(bf16_0, vector.broadcast(ty_8xbf16, residual_bf16))
+            res1 = arith.mulf(bf16_1, vector.broadcast(ty_8xbf16, residual_bf16))
+            return vector.shuffle(res0, res1, list(range(16)))
 
         def _load_frag_b_fp8_parts_e8m0(lds_base_idx, b_lane_base, ks, e8m0_byte):
             """E8M0-only path: fp8 → bf16 with integer E8M0 scale, no residual mulf.
 
-            Eliminates 4×V_PK_MUL_BF16 vs the fp32 path. Scale must be pre-rounded
-            to nearest 2^n (stored as uint8 E8M0 in arg_scale).
+            Eliminates 4×V_PK_MUL_BF16 vs the fp32 path. Same A-symmetric lds_load_b128_raw layout.
             """
-            results = []
-            for k_half in range_constexpr(2):
-                k_row_off = (ks * WMMA_K + k_half * 16) * lds_b_stride_fp8 * ELEM_BYTES_B
-                elem_off = b_lane_base + arith.index(k_row_off)
-                ptr_val = _lds_ptr_raw(lds_base_idx, elem_off)
-                v_2xi32 = rocdl.ds_load_tr8_b64(ty_2xi32, ptr_val)
-                results.append(rocdl.cvt_scale_pk8_bf16_fp8(ty_8xbf16, v_2xi32, _raw(e8m0_byte), 0))
-            return vector.shuffle(results[0], results[1], list(range(16)))
+            k_byte_off = arith.index(ks * WMMA_K * ELEM_BYTES_B)
+            off0 = b_lane_base + k_byte_off
+            off1 = b_lane_base + k_byte_off + arith.index(16)
+            raw0_128 = lds_load_b128_raw(lds_base_idx, off0)
+            raw1_128 = lds_load_b128_raw(lds_base_idx, off1)
+            raw0 = vector.shuffle(raw0_128, raw0_128, [0, 1])
+            raw1 = vector.shuffle(raw1_128, raw1_128, [0, 1])
+            bf16_0 = rocdl.cvt_scale_pk8_bf16_fp8(ty_8xbf16, raw0, _raw(e8m0_byte), 0)
+            bf16_1 = rocdl.cvt_scale_pk8_bf16_fp8(ty_8xbf16, raw1, _raw(e8m0_byte), 0)
+            return vector.shuffle(bf16_0, bf16_1, list(range(16)))
 
         def load_wmma_frag_b_fp8(lds_base_idx, b_lane_base, ks, scale_val):
             """Load one 16×32 bf16 WMMA B fragment.
@@ -637,7 +630,7 @@ def compile_bmm_a16w8_gfx1250(
                 arg_a, (a_batch_off + blk_m, pf_k), (tile_m, tile_k), (K, 1),
                 elem_bytes=ELEM_BYTES_A, thread_id=tx, block_threads=block_threads)
             tdm_ops.l2_prefetch_tile(
-                arg_b, (b_batch_off + pf_k, blk_n), (tile_k, tile_n), (N, 1),
+                arg_b, (b_batch_off + blk_n, pf_k), (tile_n, tile_k), (K, 1),
                 elem_bytes=ELEM_BYTES_B, thread_id=tx, block_threads=block_threads)
 
         def _load_scale(k_tile_i32):
@@ -740,7 +733,7 @@ def compile_bmm_a16w8_gfx1250(
         dgroup1_b = desc_b_init.dgroup1
 
         adv_a_i32 = arith.constant(tile_k * ELEM_BYTES_A, type=T.i32)
-        adv_b_i32 = arith.constant(tile_k * N * ELEM_BYTES_B, type=T.i32)
+        adv_b_i32 = arith.constant(tile_k * ELEM_BYTES_B, type=T.i32)
         pred_const = arith.constant(1, type=T.i32)
 
         # --- Prologue ---
@@ -764,75 +757,152 @@ def compile_bmm_a16w8_gfx1250(
         # --- Main loop ---
         _fence_outstanding = 2 * (num_buffers - 2)
 
+        # Scale prefetch: overlap fp32 scale HBM load with WMMA by issuing it inside
+        # mid_compute_callback.  No-op for e8m0/no_scale (scale is cheap: 1 byte or
+        # constant).  The prefetched value is loop-carried so each iteration starts
+        # with scale already in registers.
+        _do_scale_prefetch = loop_iters > 0 and not _effective_e8m0
+
         if loop_iters > 0:
-            init_args = list(accs) + [addr_lo_a, addr_lo_b, addr_hi_b]
+            if _do_scale_prefetch:
+                # Scale prefetch path: each iteration uses the previously-prefetched
+                # scale and issues the next K-tile's scale load mid-WMMA via callback.
+                _prefetch_scale_0 = _load_scale(arith.constant(0, type=T.i32))
+                _sp_init = list(accs) + [addr_lo_a, addr_lo_b, addr_hi_b,
+                                         _prefetch_scale_0]
+                for loop_iter, state in range(0, loop_iters, 1, init=_sp_init):
+                    accs_in = list(state[:n_accs])
+                    cur_lo_a = state[n_accs]
+                    cur_lo_b = state[n_accs + 1]
+                    cur_hi_b = state[n_accs + 2]
+                    scale_box = [state[n_accs + 3]]
 
-            for loop_iter, state in range(0, loop_iters, 1, init=init_args):
-                accs_in = list(state[:n_accs])
-                cur_lo_a = state[n_accs]
-                cur_lo_b = state[n_accs + 1]
-                cur_hi_b = state[n_accs + 2]
+                    for buf_idx in range_constexpr(num_buffers):
+                        load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
-                for buf_idx in range_constexpr(num_buffers):
-                    load_stage = (buf_idx + num_buffers - 1) % num_buffers
+                        pipeline_fence_signal(outstanding=_fence_outstanding, use_cluster=use_cluster)
+                        pipeline_fence_wait(use_cluster=use_cluster)
 
-                    pipeline_fence_signal(outstanding=_fence_outstanding, use_cluster=use_cluster)
-                    pipeline_fence_wait(use_cluster=use_cluster)
+                        scale_val = scale_box[0]
+                        _next_k_i32 = arith.index_cast(
+                            T.i32,
+                            loop_iter * arith.index(num_buffers) + arith.index(buf_idx + 1))
 
-                    # Load scale for K-tile being computed (loop_iter*num_buffers + buf_idx)
-                    k_tile_compute_i32 = arith.index_cast(
-                        T.i32,
-                        loop_iter * arith.index(num_buffers) + arith.index(buf_idx))
-                    scale_val = _load_scale(k_tile_compute_i32)
+                        addr_boxes = [[cur_lo_a], [cur_lo_b], [cur_hi_b]]
 
-                    addr_boxes = [[cur_lo_a], [cur_lo_b], [cur_hi_b]]
+                        def _mid_tdm_sp(
+                            _ls=load_stage,
+                            _ab=addr_boxes,
+                            _k_off=(loop_iter * arith.index(num_buffers * tile_k)
+                                    + arith.index(buf_idx * tile_k)),
+                            _nk=_next_k_i32,
+                        ):
+                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_a_lds_addr[_ls],
+                                _ab[0][0], addr_hi_a])
+                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_b_lds_addr[_ls],
+                                _ab[1][0], _ab[2][0]])
+                            issue_tdm_loads(
+                                tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+                                tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+                                wave_specialized=False)
+                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
+                            old_lo_b = _ab[1][0]
+                            new_lo_b = arith.addi(old_lo_b, adv_b_i32)
+                            carry = arith.cmpi(arith.CmpIPredicate.ult, new_lo_b, old_lo_b)
+                            _ab[1][0] = new_lo_b
+                            _ab[2][0] = arith.addi(_ab[2][0], arith.extui(T.i32, carry))
+                            scale_box[0] = _load_scale(_nk)
+                            _l2_prefetch(_k_off)
 
-                    def _mid_tdm(
-                        _ls=load_stage,
-                        _ab=addr_boxes,
-                        _k_off=(loop_iter * arith.index(num_buffers * tile_k)
-                                + arith.index(buf_idx * tile_k)),
-                    ):
-                        dg0_a = vector.from_elements(T.vec(4, T.i32), [
-                            pred_const, stages_a_lds_addr[_ls],
-                            _ab[0][0], addr_hi_a])
-                        dg0_b = vector.from_elements(T.vec(4, T.i32), [
-                            pred_const, stages_b_lds_addr[_ls],
-                            _ab[1][0], _ab[2][0]])
-                        issue_tdm_loads(
-                            tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
-                            tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                            wave_specialized=False)
-                        _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
-                        # Advance addr_lo_b with carry propagation into addr_hi_b.
-                        # adv_b_i32 = tile_k*N*ELEM_BYTES_B = 131072 bytes; after 32
-                        # steps the cumulative advance is 4 MB, which can overflow i32
-                        # when B_ptr low-32 bits are near 0xFC000000 (e.g. M=512 bench).
-                        old_lo_b = _ab[1][0]
-                        new_lo_b = arith.addi(old_lo_b, adv_b_i32)
-                        carry = arith.cmpi(arith.CmpIPredicate.ult, new_lo_b, old_lo_b)
-                        _ab[1][0] = new_lo_b
-                        _ab[2][0] = arith.addi(_ab[2][0], arith.extui(T.i32, carry))
-                        _l2_prefetch(_k_off)
+                        rocdl.sched_barrier(0)
+                        accs_in = compute_tile(
+                            accs_in,
+                            stages_a_idx[buf_idx],
+                            stages_b_idx[buf_idx],
+                            scale_val,
+                            mid_compute_callback=_mid_tdm_sp)
+                        cur_lo_a = addr_boxes[0][0]
+                        cur_lo_b = addr_boxes[1][0]
+                        cur_hi_b = addr_boxes[2][0]
+                        hot_loop_scheduler()
 
-                    rocdl.sched_barrier(0)
-                    accs_in = compute_tile(
-                        accs_in,
-                        stages_a_idx[buf_idx],
-                        stages_b_idx[buf_idx],
-                        scale_val,
-                        mid_compute_callback=_mid_tdm)
-                    cur_lo_a = addr_boxes[0][0]
-                    cur_lo_b = addr_boxes[1][0]
-                    cur_hi_b = addr_boxes[2][0]
-                    hot_loop_scheduler()
+                    results = yield list(accs_in) + [cur_lo_a, cur_lo_b, cur_hi_b,
+                                                     scale_box[0]]
 
-                results = yield list(accs_in) + [cur_lo_a, cur_lo_b, cur_hi_b]
+                accs = list(results[:n_accs])
+                addr_lo_a = results[n_accs]
+                addr_lo_b = results[n_accs + 1]
+                addr_hi_b = results[n_accs + 2]
+            else:
+                init_args = list(accs) + [addr_lo_a, addr_lo_b, addr_hi_b]
 
-            accs = list(results[:n_accs])
-            addr_lo_a = results[n_accs]
-            addr_lo_b = results[n_accs + 1]
-            addr_hi_b = results[n_accs + 2]
+                for loop_iter, state in range(0, loop_iters, 1, init=init_args):
+                    accs_in = list(state[:n_accs])
+                    cur_lo_a = state[n_accs]
+                    cur_lo_b = state[n_accs + 1]
+                    cur_hi_b = state[n_accs + 2]
+
+                    for buf_idx in range_constexpr(num_buffers):
+                        load_stage = (buf_idx + num_buffers - 1) % num_buffers
+
+                        pipeline_fence_signal(outstanding=_fence_outstanding, use_cluster=use_cluster)
+                        pipeline_fence_wait(use_cluster=use_cluster)
+
+                        # Load scale for K-tile being computed (loop_iter*num_buffers + buf_idx)
+                        k_tile_compute_i32 = arith.index_cast(
+                            T.i32,
+                            loop_iter * arith.index(num_buffers) + arith.index(buf_idx))
+                        scale_val = _load_scale(k_tile_compute_i32)
+
+                        addr_boxes = [[cur_lo_a], [cur_lo_b], [cur_hi_b]]
+
+                        def _mid_tdm(
+                            _ls=load_stage,
+                            _ab=addr_boxes,
+                            _k_off=(loop_iter * arith.index(num_buffers * tile_k)
+                                    + arith.index(buf_idx * tile_k)),
+                        ):
+                            dg0_a = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_a_lds_addr[_ls],
+                                _ab[0][0], addr_hi_a])
+                            dg0_b = vector.from_elements(T.vec(4, T.i32), [
+                                pred_const, stages_b_lds_addr[_ls],
+                                _ab[1][0], _ab[2][0]])
+                            issue_tdm_loads(
+                                tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+                                tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+                                wave_specialized=False)
+                            _ab[0][0] = arith.addi(_ab[0][0], adv_a_i32)
+                            # Advance addr_lo_b with carry propagation into addr_hi_b.
+                            # adv_b_i32 = tile_k*ELEM_BYTES_B bytes (K-inner stride);
+                            # small value but carry guard kept for correctness at large K.
+                            old_lo_b = _ab[1][0]
+                            new_lo_b = arith.addi(old_lo_b, adv_b_i32)
+                            carry = arith.cmpi(arith.CmpIPredicate.ult, new_lo_b, old_lo_b)
+                            _ab[1][0] = new_lo_b
+                            _ab[2][0] = arith.addi(_ab[2][0], arith.extui(T.i32, carry))
+                            _l2_prefetch(_k_off)
+
+                        rocdl.sched_barrier(0)
+                        accs_in = compute_tile(
+                            accs_in,
+                            stages_a_idx[buf_idx],
+                            stages_b_idx[buf_idx],
+                            scale_val,
+                            mid_compute_callback=_mid_tdm)
+                        cur_lo_a = addr_boxes[0][0]
+                        cur_lo_b = addr_boxes[1][0]
+                        cur_hi_b = addr_boxes[2][0]
+                        hot_loop_scheduler()
+
+                    results = yield list(accs_in) + [cur_lo_a, cur_lo_b, cur_hi_b]
+
+                accs = list(results[:n_accs])
+                addr_lo_a = results[n_accs]
+                addr_lo_b = results[n_accs + 1]
+                addr_hi_b = results[n_accs + 2]
 
         # --- Tail ---
         if loop_iters > 0:

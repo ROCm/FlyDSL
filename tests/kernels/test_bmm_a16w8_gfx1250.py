@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Precision tests for a16w8 batched GEMM (fp8 weight + per-block scale) on gfx1250.
 
-Operation: C[b,m,n] = sum_k A[b,m,k] * (fp8_B[b,k,n] * scale[b,k//128,n//128])
-Reference: torch.bmm(A.float(), B_dequant.float()).bfloat16()
-  where B_dequant[b,k,n] = fp8_B[b,k,n].float() * scale_expanded[b,k,n]
+Operation: C[b,m,n] = sum_k A[b,m,k] * (fp8_B[b,n,k] * scale[b,k//128,n//128])
+  where B[b,n,k] = wo_a layout (N-outer, K-inner, K-major)
+Reference: torch.bmm(A.float(), B_dequant.transpose(-1,-2).float()).bfloat16()
+  where B_dequant[b,n,k] = fp8_B[b,n,k].float() * scale_expanded[b,n,k]
 """
 
 import argparse
@@ -52,25 +53,25 @@ def _dequant_b(b_fp8, scale, group_k, group_n):
     """Dequant B from fp8 + per-block scale to f32.
 
     Args:
-        b_fp8: [B, K, N] fp8 (as float8_e4m3fnuz or stored as int8 bytes)
+        b_fp8: [B, N, K] fp8 (wo_a layout, K-inner)
         scale: [B, K//gk, N//gn] fp32
         group_k, group_n: scale block sizes
     Returns:
-        [B, K, N] float32
+        [B, N, K] float32
     """
-    B, K, N = b_fp8.shape
+    B, N, K = b_fp8.shape
     # Convert fp8 to f32
     try:
         b_f32 = b_fp8.float()
     except RuntimeError:
         b_f32 = b_fp8.view(torch.int8).float() / 127.0  # rough approximation
 
-    # Expand scale: [B, K//gk, N//gn] → [B, K, N]
-    scale_exp = scale.unsqueeze(-1).unsqueeze(-1)           # [B, K//gk, N//gn, 1, 1]
-    scale_exp = scale_exp.view(B, K // group_k, N // group_n, 1, 1)
-    scale_exp = scale_exp.expand(-1, -1, -1, group_k, group_n)
-    scale_exp = scale_exp.permute(0, 1, 3, 2, 4)            # [B, K//gk, gk, N//gn, gn]
-    scale_exp = scale_exp.reshape(B, K, N)
+    # Expand scale: [B, K//gk, N//gn] → [B, N, K]
+    # scale_exp[b, n, k] = scale[b, k//gk, n//gn]
+    scale_exp = scale.view(B, K // group_k, N // group_n, 1, 1)
+    scale_exp = scale_exp.expand(-1, -1, -1, group_n, group_k)  # [B, K//gk, N//gn, gn, gk]
+    scale_exp = scale_exp.permute(0, 2, 3, 1, 4)                # [B, N//gn, gn, K//gk, gk]
+    scale_exp = scale_exp.reshape(B, N, K)
 
     return b_f32 * scale_exp
 
@@ -129,26 +130,29 @@ def run_a16w8_test(
         scale_ref = scale_fp32
         scale = scale_fp32
 
-    # B in fp8_e4m3fn (E4M3FN, bias=7) — matches gfx1250 V_CVT_PK_F32_FP8 hardware format.
+    # B in fp8_e4m3fn [B, N, K] (wo_a layout, K-inner/K-major).
     # Note: float8_e4m3fnuz (bias=8) causes 2× decode error on gfx1250.
     try:
-        b_f32_raw = torch.randn((B, K, N), dtype=torch.float32) * 0.1
+        b_f32_raw = torch.randn((B, N, K), dtype=torch.float32) * 0.1
         b_fp8 = b_f32_raw.clamp(-1.0, 1.0).to(torch.float8_e4m3fn)
         b_for_ref = b_fp8.float()
     except (AttributeError, RuntimeError):
-        b_for_ref = torch.randn((B, K, N), dtype=torch.float32) * 0.1
+        b_for_ref = torch.randn((B, N, K), dtype=torch.float32) * 0.1
         b_fp8 = (b_for_ref.clamp(-1.0, 1.0) * 127).to(torch.int8)
 
-    # Reference: dequant B then batched GEMM in f32
+    # Reference: dequant B then batched GEMM in f32.
+    # b_for_ref is [B, N, K] (wo_a layout); transpose to [B, K, N] for bmm.
     if no_scale:
-        ref = torch.bmm(a.float(), b_for_ref).bfloat16()
+        ref = torch.bmm(a.float(), b_for_ref.transpose(-1, -2)).bfloat16()
     else:
-        scale_expanded = (scale_ref.unsqueeze(-1).unsqueeze(-1)
-                          .expand(-1, -1, -1, group_k, group_n)
-                          .permute(0, 1, 3, 2, 4)
-                          .reshape(B, K, N))
-        b_dequant_f32 = b_for_ref * scale_expanded
-        ref = torch.bmm(a.float(), b_dequant_f32).bfloat16()
+        # Expand scale [B, K//gk, N//gn] → [B, N, K]: scale_expanded[b,n,k]=scale[b,k//gk,n//gn]
+        scale_expanded = (scale_ref
+                          .view(B, K // group_k, N // group_n, 1, 1)
+                          .expand(-1, -1, -1, group_n, group_k)   # [B, K//gk, N//gn, gn, gk]
+                          .permute(0, 2, 3, 1, 4)                 # [B, N//gn, gn, K//gk, gk]
+                          .reshape(B, N, K))
+        b_dequant_f32 = b_for_ref * scale_expanded          # [B, N, K]
+        ref = torch.bmm(a.float(), b_dequant_f32.transpose(-1, -2)).bfloat16()
 
     # Pad M if needed
     if mpad > M:
