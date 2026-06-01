@@ -330,7 +330,7 @@ def _run_mxscale_gemm_test(
     # Pre-bind via flyc.compile so the launch goes through the CompiledFunction
     # ctypes fast path (matches test_blockscale_preshuffle_gemm.py and any
     # production caller that bench-times this kernel). The slow JitFunction
-    # path adds ~17us of inspect.Signature.bind + _make_cache_key per call,
+    # path adds ~17us of inspect.Signature.bind + _resolve_and_make_cache_key per call,
     # which would mask genuine kernel timing differences in the bench path.
     # flyc.compile() launches the kernel once internally to trigger
     # compilation, so no separate eager call is needed for correctness.
@@ -1134,7 +1134,7 @@ def _run_benchmark(args):
 
     # Pre-bind via flyc.compile so the bench loop calls go through the
     # CompiledFunction ctypes fast path. The slow JitFunction path adds
-    # ~17us of inspect.Signature.bind + _make_cache_key per call, which
+    # ~17us of inspect.Signature.bind + _resolve_and_make_cache_key per call, which
     # would dominate per-launch latency for short kernels.
     compiled_exe = flyc.compile(
         launch_fn,

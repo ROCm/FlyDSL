@@ -64,7 +64,12 @@ def default_f8_type() -> ir.Type:
     """Select E4M3 f8 type compatible with the current GPU arch.
 
     - gfx95* (MI350): FP8 E4M3FN (OCP)
+    - gfx12*: FP8 E4M3FN (OCP)
     - gfx94* (MI300): FP8 E4M3FNUZ
+
+    Raises ``RuntimeError`` on gfx11* (RDNA3/RDNA3.5): these chips have no
+    native FP8 instructions, so FP8 compute would surface as a late LLVM
+    "cannot select" error. Fail early with a clear message instead.
     """
     arch = ""
     try:
@@ -73,6 +78,13 @@ def default_f8_type() -> ir.Type:
         arch = ""
     if "gfx95" in arch or "gfx12" in arch:
         return Float8E4M3FN.ir_type
+    if arch.startswith("gfx11"):
+        raise RuntimeError(
+            f"default_f8_type(): no native FP8 support on {arch}; "
+            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*. "
+            "Use bf16/f16 GEMM via "
+            "`rdna3_f16_gemm.create_wmma_gemm_module` on gfx11* targets."
+        )
     return Float8E4M3FNUZ.ir_type
 
 
@@ -364,7 +376,7 @@ class Constexpr:
 
     @staticmethod
     def _tuple_cache_signature(value):
-        return ("tuple", tuple(Constexpr._value_cache_signature(item) for item in value))
+        return ("tuple", tuple(Constexpr.value_signature(item) for item in value))
 
     @staticmethod
     def _lambda_cache_signature(value):
@@ -391,17 +403,17 @@ class Constexpr:
             tuple(Constexpr._lambda_const_cache_signature(item) for item in value.__code__.co_consts),
             value.__code__.co_names,
             value.__code__.co_varnames,
-            tuple(Constexpr._value_cache_signature(item) for item in defaults),
+            tuple(Constexpr.value_signature(item) for item in defaults),
         )
 
     @staticmethod
     def _lambda_const_cache_signature(value):
         if value is None:
             return (type(None), None)
-        return Constexpr._value_cache_signature(value)
+        return Constexpr.value_signature(value)
 
     @staticmethod
-    def _value_cache_signature(value):
+    def value_signature(value):
         scalar_sig = Constexpr._scalar_cache_signature(value)
         if scalar_sig is not None:
             return scalar_sig
@@ -414,10 +426,6 @@ class Constexpr:
             "Constexpr values support only int, bool, float, tuples of those scalar values, "
             "and lambdas without free variables"
         )
-
-    @staticmethod
-    def cache_signature(value):
-        return Constexpr._value_cache_signature(value)
 
     def __class_getitem__(cls, param):
         if cls is not Constexpr:
@@ -445,7 +453,7 @@ class Constexpr:
 
     @classmethod
     def _specialize(cls, value):
-        cache_key = Constexpr.cache_signature(value)
+        cache_key = Constexpr.value_signature(value)
         cached = Constexpr._value_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -497,15 +505,15 @@ class Constexpr:
             elif Constexpr._is_tuple_annotation(inner):
                 if not isinstance(value, tuple):
                     raise TypeError(f"expects tuple, got {type(value).__name__}")
-                Constexpr.cache_signature(value)
+                Constexpr.value_signature(value)
             elif inner in (int, bool, float):
                 if type(value) is not inner:
                     raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
-                Constexpr.cache_signature(value)
+                Constexpr.value_signature(value)
             elif not isinstance(value, inner):
                 raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
             else:
-                Constexpr.cache_signature(value)
+                Constexpr.value_signature(value)
         return value
 
     @classmethod
@@ -808,6 +816,36 @@ class Pointer(BuiltinDslType):
         return self.type.alignment
 
     @traced_op
+    def load(self, loc=None, ip=None):
+        return ptr_load(self, loc=loc, ip=ip)
+
+    @traced_op
+    def store(self, value, loc=None, ip=None):
+        if isinstance(value, (bool, int, float)):
+            value = self.element_type(value)
+        return ptr_store(value, self, loc=loc, ip=ip)
+
+    @traced_op
+    def __getitem__(self, offset, loc=None, ip=None):
+        return (self + offset).load(loc=loc, ip=ip)
+
+    @traced_op
+    def __setitem__(self, offset, value, loc=None, ip=None):
+        (self + offset).store(value, loc=loc, ip=ip)
+
+    @traced_op
+    def __add__(self, offset, loc=None, ip=None):
+        return add_offset(self, offset, loc=loc, ip=ip)
+
+    __radd__ = __add__
+
+    @traced_op
+    def __sub__(self, offset, loc=None, ip=None):
+        if isinstance(offset, ir.Value) and not isinstance(offset, ArithValue):
+            offset = ArithValue(offset, loc=loc, ip=ip)
+        return add_offset(self, -offset, loc=loc, ip=ip)
+
+    @traced_op
     def view(self, layout, loc=None, ip=None):
         return make_view(self, layout, loc=loc, ip=ip)
 
@@ -1080,6 +1118,9 @@ class Stream:
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
         return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
+
+    def __cache_signature__(self):
+        return (type(self),)
 
     @staticmethod
     def _extract_stream_value(arg):
@@ -1723,10 +1764,6 @@ class Array:
             return [self._ptr_value]
 
         @classmethod
-        def __cache_signature__(cls):
-            return ("array", cls.dtype, cls.size, cls.align)
-
-        @classmethod
         def __dsl_size_of__(cls) -> int:
             total_bytes = max(1, cls.dtype.width * cls.size // 8)
             return total_bytes
@@ -1743,6 +1780,14 @@ class Array:
         @classmethod
         def __poke_into_ptr__(cls, ptr, value):
             raise NotImplementedError(f"{cls.__name__} does not support __poke_into_ptr__ yet")
+
+        @traced_op
+        def __getitem__(self, offset, loc=None, ip=None):
+            return self.ptr.__getitem__(offset, loc=loc, ip=ip)
+
+        @traced_op
+        def __setitem__(self, offset, value, loc=None, ip=None):
+            self.ptr.__setitem__(offset, value, loc=loc, ip=ip)
 
         def view(self, layout, *, loc=None, ip=None):
             return make_view(self._ptr_value, layout, loc=loc, ip=ip)
