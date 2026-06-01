@@ -23,7 +23,6 @@ from kernels.gemm_common_gfx1250 import (
     issue_tdm_loads,
     lds_load_b128_raw,
     pipeline_fence,
-    pipeline_fence_partial,
     pipeline_fence_signal,
     pipeline_fence_wait,
     store_acc_vec8_to_buffer,
@@ -286,17 +285,18 @@ def compile_mxscale_gemm(
     # Scale prefetch depth (K-tiles ahead) for the buffer->VGPR path. D=1 is the
     # sweet spot; D=2 doubles scale VGPRs -> spill + ~18% regression.
     _bvs_D = int(os.environ.get("FLYDSL_BUFFER_VGPR_SCALE_DEPTH", "1"))
-    # overlay-chunks: issue one fragment load after each WMMA (vs batch-after-row)
-    # for finer LDS-load pipelining. OPT-IN: FLYDSL_OVERLAY_CHUNKS=1.
-    use_overlay_chunks = use_ref_segmented_lds_layout and (os.environ.get("FLYDSL_OVERLAY_CHUNKS", "0") == "1")
     # ab_half_split: repurpose the (under "vgpr") idle scale waves 2,3 as the
     # second halves of A/B, so all 4 waves share the A/B TDM (wave0=A0, wave1=B0,
     # wave2=A1, wave3=B1). Measured wall-neutral.
     use_ab_half_split = scale_load_path == "vgpr_ab_split"
-    # ab_half_fence: fence only {A0,B0}, compute the (m0-3,n0-3) quadrant while
-    # {A1,B1} TDM is still in flight, then fence {A1,B1} and compute the rest.
-    # Requires the half-split. OPT-IN: FLYDSL_AB_HALF_FENCE=1.
-    use_ab_half_fence = use_ab_half_split and (os.environ.get("FLYDSL_AB_HALF_FENCE", "0") == "1")
+    # scale-disabled: perf-ceiling probe. Feed a constant E8M0=1.0 to the scaled
+    # WMMA instead of loading scale -> removes the scale buffer_loads (issue slots)
+    # AND the scale VGPR ring (register pressure), while keeping the scaled-WMMA op
+    # identical. Numerically correct only when the real scale is all 1.0 (fill 0.1).
+    # OPT-IN: FLYDSL_SCALE_DISABLED=1.
+    use_scale_disabled = os.environ.get("FLYDSL_SCALE_DISABLED", "0") == "1"
+    # The buffer_load->VGPR scale ring is built only when scale is actually loaded.
+    _bvs_active = use_buffer_vgpr_scale and not use_scale_disabled
 
     if use_ref_segmented_lds_layout:
         # The A/B data pools are no longer packed into the same per-stage
@@ -443,7 +443,6 @@ def compile_mxscale_gemm(
         and (use_fp8_quadrant_schedule or use_fp8_deep_pipeline_schedule)
         and num_buffers == 4
         and use_cluster
-        and not use_ab_half_fence
     )
     if use_b_streaming_schedule:
         print(
@@ -1434,6 +1433,8 @@ def compile_mxscale_gemm(
                 ]
 
             def _load_a_scales(ks):
+                if const_expr(use_scale_disabled):
+                    return [fx.Int32(0x7F7F7F7F) for _ in range_constexpr(wmma_m_rep)]
                 if const_expr(use_buffer_vgpr_scale):
                     if const_expr(pf_a_scales is not None):
                         return pf_a_scales  # prefetched (issued in the prior compute tile)
@@ -1441,6 +1442,8 @@ def compile_mxscale_gemm(
                 return load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
 
             def _load_b_scales(ks):
+                if const_expr(use_scale_disabled):
+                    return [fx.Int32(0x7F7F7F7F) for _ in range_constexpr(b_scale_load_rep)]
                 if const_expr(use_buffer_vgpr_scale):
                     if const_expr(pf_b_scales is not None):
                         return pf_b_scales
@@ -1454,8 +1457,6 @@ def compile_mxscale_gemm(
                 b_pair,
                 scale_pair,
                 prefetch_after_first_row=None,
-                prefetch_after_first_row_wmma=None,
-                prefetch_after_second_row_wmma=None,
             ):
                 a_scales, b_scales = scale_pair
                 wm_base = wm_pair * _fp8_pair_wm
@@ -1470,9 +1471,6 @@ def compile_mxscale_gemm(
                         a_scales,
                         b_scales,
                     )
-                    # [overlay-chunks] one fragment load interleaved after each WMMA
-                    if const_expr(prefetch_after_first_row_wmma is not None):
-                        prefetch_after_first_row_wmma(wn_local)
                 if const_expr(prefetch_after_first_row is not None):
                     prefetch_after_first_row()
                 for wn_local in range_constexpr(_fp8_pair_wn):
@@ -1485,8 +1483,6 @@ def compile_mxscale_gemm(
                         a_scales,
                         b_scales,
                     )
-                    if const_expr(prefetch_after_second_row_wmma is not None):
-                        prefetch_after_second_row_wmma(wn_local)
 
             def emit_panel_2x2_row(wm_pair, wn_pair, row_local, a_pair, b_pair, scale_pair):
                 a_scales, b_scales = scale_pair
@@ -1520,286 +1516,68 @@ def compile_mxscale_gemm(
                 else:
                     a0 = load_a_pair(0, ks)
                 b1 = load_b_pair(1, ks)
-                if const_expr(use_overlay_chunks):
-                    # overlay-chunks: defer b2/b3/a1/a2/a3 and issue one fragment
-                    # load after each WMMA for finer LDS-load pipelining.
-                    a1 = [None for _ in range_constexpr(_fp8_pair_wm)]
-                    b2 = [None for _ in range_constexpr(_fp8_pair_wn)]
-                    b3 = [None for _ in range_constexpr(_fp8_pair_wn)]
-                    a2 = [None for _ in range_constexpr(_fp8_pair_wm)]
-                    a3 = [None for _ in range_constexpr(_fp8_pair_wm)]
+                b2 = load_b_pair(2, ks)
 
-                    def _pf_a1_chunk(ci):
-                        a1[ci] = load_a_frag(a_buf, a_bases[_fp8_pair_wm + ci], ks)
-
-                    def _pf_b2_chunk(ci):
-                        b2[ci] = load_b_frag(b_buf, b_bases, 2 * _fp8_pair_wn + ci, ks)
-
-                    first_wait_keep = _two_pair_loads + 3
-                    if const_expr(ks == 0 and a0_prefetch is not None):
-                        first_wait_keep += DS_LOADS_PER_A_FRAG * len(a0_prefetch)
-                    rocdl.s_wait_dscnt(first_wait_keep)
-                    emit_panel_2x2(
-                        0,
-                        0,
-                        a0,
-                        b0,
-                        scale_pair,
-                        prefetch_after_first_row_wmma=_pf_a1_chunk,
-                        prefetch_after_second_row_wmma=_pf_b2_chunk,
-                    )
-
-                    if const_expr(ks == 0 and mid_compute_callback is not None):
-                        rocdl.sched_barrier(0)
-                        mid_compute_callback()
-
-                    def _pf_b3_chunk(ci):
-                        b3[ci] = load_b_frag(b_buf, b_bases, 3 * _fp8_pair_wn + ci, ks)
-
-                    def _pf_a3_chunk(ci):
-                        a3[ci] = load_a_frag(a_buf, a_bases[3 * _fp8_pair_wm + ci], ks)
-
-                    rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
-                    emit_panel_2x2(0, 1, a0, b1, scale_pair, prefetch_after_first_row_wmma=_pf_b3_chunk)
-
-                    rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
-                    emit_panel_2x2(1, 0, a1, b0, scale_pair, prefetch_after_first_row_wmma=_pf_a3_chunk)
-
-                    def _pf_a2_chunk(ci):
-                        a2[ci] = load_a_frag(a_buf, a_bases[2 * _fp8_pair_wm + ci], ks)
-
-                    emit_panel_2x2(1, 1, a1, b1, scale_pair)
-                    emit_panel_2x2(0, 2, a0, b2, scale_pair, prefetch_after_first_row_wmma=_pf_a2_chunk)
-                    emit_panel_2x2_row(1, 2, 0, a1, b2, scale_pair)
-                    rocdl.s_wait_dscnt(_pair_loads)
-                    emit_panel_2x2(0, 3, a0, b3, scale_pair)
-                    emit_panel_2x2_row(1, 2, 1, a1, b2, scale_pair)
-                    emit_panel_2x2(1, 3, a1, b3, scale_pair)
-                    emit_panel_2x2(2, 0, a2, b0, scale_pair)
-                    if const_expr(is_last_ks and late_compute_callback is not None):
-                        rocdl.sched_barrier(0)
-                        late_compute_callback()
-                    emit_panel_2x2(2, 1, a2, b1, scale_pair)
-                    rocdl.s_wait_dscnt(0)
-                    emit_panel_2x2(3, 0, a3, b0, scale_pair)
-                    emit_panel_2x2(3, 1, a3, b1, scale_pair)
-                    if const_expr(is_last_ks and emit_filler is not None):
-                        rocdl.sched_barrier(0)
-                        emit_filler()
-                    emit_panel_2x2(2, 2, a2, b2, scale_pair)
-                    emit_panel_2x2(2, 3, a2, b3, scale_pair)
-                    emit_panel_2x2(3, 2, a3, b2, scale_pair)
-                    emit_panel_2x2(3, 3, a3, b3, scale_pair)
-                else:
-                    b2 = load_b_pair(2, ks)
-
-                    a1_box = [None]
-                    b3_box = [None]
-                    a2_box = [None]
-                    a3_box = [None]
-
-                    def _prefetch_a1():
-                        a1_box[0] = load_a_pair(1, ks)
-
-                    first_wait_keep = _two_pair_loads + 3
-                    if const_expr(ks == 0 and a0_prefetch is not None):
-                        first_wait_keep += DS_LOADS_PER_A_FRAG * len(a0_prefetch)
-                    rocdl.s_wait_dscnt(first_wait_keep)
-                    emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
-
-                    if const_expr(ks == 0 and mid_compute_callback is not None):
-                        rocdl.sched_barrier(0)
-                        mid_compute_callback()
-
-                    def _prefetch_b3():
-                        b3_box[0] = load_b_pair(3, ks)
-
-                    def _prefetch_a3():
-                        a3_box[0] = load_a_pair(3, ks)
-
-                    rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
-                    emit_panel_2x2(0, 1, a0, b1, scale_pair, prefetch_after_first_row=_prefetch_b3)
-
-                    rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
-                    emit_panel_2x2(1, 0, a1_box[0], b0, scale_pair, prefetch_after_first_row=_prefetch_a3)
-
-                    def _prefetch_a2():
-                        a2_box[0] = load_a_pair(2, ks)
-
-                    emit_panel_2x2(1, 1, a1_box[0], b1, scale_pair)
-
-                    emit_panel_2x2(0, 2, a0, b2, scale_pair, prefetch_after_first_row=_prefetch_a2)
-                    emit_panel_2x2_row(1, 2, 0, a1_box[0], b2, scale_pair)
-                    emit_panel_2x2_row(1, 2, 1, a1_box[0], b2, scale_pair)
-                    rocdl.s_wait_dscnt(_pair_loads)
-                    emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
-                    emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
-
-                    emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
-                    if const_expr(is_last_ks and late_compute_callback is not None):
-                        rocdl.sched_barrier(0)
-                        late_compute_callback()
-                    emit_panel_2x2(2, 1, a2_box[0], b1, scale_pair)
-
-                    rocdl.s_wait_dscnt(0)
-                    emit_panel_2x2(3, 0, a3_box[0], b0, scale_pair)
-                    emit_panel_2x2(3, 1, a3_box[0], b1, scale_pair)
-
-                    if const_expr(is_last_ks and emit_filler is not None):
-                        rocdl.sched_barrier(0)
-                        emit_filler()
-
-                    emit_panel_2x2(2, 2, a2_box[0], b2, scale_pair)
-                    emit_panel_2x2(2, 3, a2_box[0], b3_box[0], scale_pair)
-                    emit_panel_2x2(3, 2, a3_box[0], b2, scale_pair)
-                    emit_panel_2x2(3, 3, a3_box[0], b3_box[0], scale_pair)
-
-            return current_accs
-
-        def compute_tile_fp8_half_fence(
-            accs_in,
-            lds_a,
-            lds_b,
-            lds_as,
-            lds_bs,
-            mid_compute_callback=None,
-            quadrant_fence_callback=None,
-            scale_k_base=None,
-            pf_a_scales=None,
-            pf_b_scales=None,
-        ):
-            """Two-phase compute for the A/B half-fence schedule.
-
-            Phase 1 reads the first A/B half (A0/B0 = frags 0..3) and computes the
-            (0..3, 0..3) quadrant; phase 2 reads A1/B1 and computes the remaining
-            12 panels. ``quadrant_fence_callback`` (the {A1,B1} fence) runs between
-            the phases, at ks==0 only. No second-half ds_load is issued before that
-            fence -- the invariant the deep-pipeline schedule can't honour.
-            """
-            current_accs = list(accs_in)
-            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
-            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
-            as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
-            bs_buf, bs_bases = _precompute_scale_lane_bases(
-                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
-            )
-
-            def load_a_pair(wm_pair, ks):
-                wm_base = wm_pair * _fp8_pair_wm
-                return [
-                    load_a_frag(a_buf, a_bases[wm_base + wm_local], ks) for wm_local in range_constexpr(_fp8_pair_wm)
-                ]
-
-            def load_b_pair(wn_pair, ks):
-                wn_base = wn_pair * _fp8_pair_wn
-                return [
-                    load_b_frag(b_buf, b_bases, wn_base + wn_local, ks) for wn_local in range_constexpr(_fp8_pair_wn)
-                ]
-
-            def _load_a_scales(ks):
-                if const_expr(pf_a_scales is not None):
-                    return pf_a_scales
-                if const_expr(use_buffer_vgpr_scale):
-                    return _bvs_load_scales(_bvs_a_rsrc, _bvs_mb_a, wmma_m_rep, scale_k_base)
-                return load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
-
-            def _load_b_scales(ks):
-                if const_expr(pf_b_scales is not None):
-                    return pf_b_scales
-                if const_expr(use_buffer_vgpr_scale):
-                    return _bvs_load_scales(_bvs_b_rsrc, _bvs_mb_b, b_scale_load_rep, scale_k_base)
-                return load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
-
-            def emit_panel(wm_pair, wn_pair, a_pair, b_pair, scale_pair, prefetch_after_first_row=None):
-                a_scales, b_scales = scale_pair
-                wm_base = wm_pair * _fp8_pair_wm
-                wn_base = wn_pair * _fp8_pair_wn
-                for wn_local in range_constexpr(_fp8_pair_wn):
-                    _emit_wmma(
-                        current_accs,
-                        wm_base,
-                        wn_base + wn_local,
-                        a_pair[0],
-                        b_pair[wn_local],
-                        a_scales,
-                        b_scales,
-                    )
-                if const_expr(prefetch_after_first_row is not None):
-                    prefetch_after_first_row()
-                for wn_local in range_constexpr(_fp8_pair_wn):
-                    _emit_wmma(
-                        current_accs,
-                        wm_base + 1,
-                        wn_base + wn_local,
-                        a_pair[1],
-                        b_pair[wn_local],
-                        a_scales,
-                        b_scales,
-                    )
-
-            _pair_loads = _fp8_pair_a_loads
-            _two_pair_loads = _fp8_pair_a_loads + _fp8_pair_b_loads
-
-            for ks in range_constexpr(k_wmma_steps):
-                scale_pair = (_load_a_scales(ks), _load_b_scales(ks))
-
-                # ---- Phase 1: first half {A0,B0} -> quadrant (m0-3, n0-3) ----
-                # Issue a0,b0,b1 up front; prefetch a1 mid-panel(0,0). NO
-                # second-half (a2/a3/b2/b3) load may be issued before the fence.
-                b0 = load_b_pair(0, ks)
-                a0 = load_a_pair(0, ks)
-                b1 = load_b_pair(1, ks)
                 a1_box = [None]
+                b3_box = [None]
+                a2_box = [None]
+                a3_box = [None]
 
                 def _prefetch_a1():
                     a1_box[0] = load_a_pair(1, ks)
 
-                rocdl.s_wait_dscnt(_two_pair_loads + 3)
-                emit_panel(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
+                first_wait_keep = _two_pair_loads + 3
+                if const_expr(ks == 0 and a0_prefetch is not None):
+                    first_wait_keep += DS_LOADS_PER_A_FRAG * len(a0_prefetch)
+                rocdl.s_wait_dscnt(first_wait_keep)
+                emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
+
                 if const_expr(ks == 0 and mid_compute_callback is not None):
                     rocdl.sched_barrier(0)
                     mid_compute_callback()
-                rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
-                emit_panel(0, 1, a0, b1, scale_pair)
-                rocdl.s_wait_dscnt(_fp8_pair_b_loads)
-                emit_panel(1, 0, a1_box[0], b0, scale_pair)
-                emit_panel(1, 1, a1_box[0], b1, scale_pair)
-                rocdl.s_wait_dscnt(0)
 
-                # ---- {A1,B1} half-fence (once, before any second-half read) ----
-                if const_expr(ks == 0 and quadrant_fence_callback is not None):
-                    rocdl.sched_barrier(0)
-                    quadrant_fence_callback()
-
-                # ---- Phase 2: second half {A1,B1} -> remaining 12 panels ----
-                a1 = a1_box[0]
-                b2 = load_b_pair(2, ks)
-                b3 = load_b_pair(3, ks)
-                a2_box = [None]
-                a3_box = [None]
-
-                def _prefetch_a2():
-                    a2_box[0] = load_a_pair(2, ks)
+                def _prefetch_b3():
+                    b3_box[0] = load_b_pair(3, ks)
 
                 def _prefetch_a3():
                     a3_box[0] = load_a_pair(3, ks)
 
-                # panels reading only a0/a1 + b2/b3 first, prefetch a2,a3 meanwhile
-                rocdl.s_wait_dscnt(_two_pair_loads)
-                emit_panel(0, 2, a0, b2, scale_pair, prefetch_after_first_row=_prefetch_a2)
-                emit_panel(0, 3, a0, b3, scale_pair, prefetch_after_first_row=_prefetch_a3)
-                emit_panel(1, 2, a1, b2, scale_pair)
-                emit_panel(1, 3, a1, b3, scale_pair)
-                rocdl.s_wait_dscnt(_fp8_pair_a_loads)
-                emit_panel(2, 0, a2_box[0], b0, scale_pair)
-                emit_panel(2, 1, a2_box[0], b1, scale_pair)
+                rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
+                emit_panel_2x2(0, 1, a0, b1, scale_pair, prefetch_after_first_row=_prefetch_b3)
+
+                rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
+                emit_panel_2x2(1, 0, a1_box[0], b0, scale_pair, prefetch_after_first_row=_prefetch_a3)
+
+                def _prefetch_a2():
+                    a2_box[0] = load_a_pair(2, ks)
+
+                emit_panel_2x2(1, 1, a1_box[0], b1, scale_pair)
+
+                emit_panel_2x2(0, 2, a0, b2, scale_pair, prefetch_after_first_row=_prefetch_a2)
+                emit_panel_2x2_row(1, 2, 0, a1_box[0], b2, scale_pair)
+                emit_panel_2x2_row(1, 2, 1, a1_box[0], b2, scale_pair)
+                rocdl.s_wait_dscnt(_pair_loads)
+                emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
+                emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
+
+                emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
+                if const_expr(is_last_ks and late_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    late_compute_callback()
+                emit_panel_2x2(2, 1, a2_box[0], b1, scale_pair)
+
                 rocdl.s_wait_dscnt(0)
-                emit_panel(3, 0, a3_box[0], b0, scale_pair)
-                emit_panel(3, 1, a3_box[0], b1, scale_pair)
-                emit_panel(2, 2, a2_box[0], b2, scale_pair)
-                emit_panel(2, 3, a2_box[0], b3, scale_pair)
-                emit_panel(3, 2, a3_box[0], b2, scale_pair)
-                emit_panel(3, 3, a3_box[0], b3, scale_pair)
+                emit_panel_2x2(3, 0, a3_box[0], b0, scale_pair)
+                emit_panel_2x2(3, 1, a3_box[0], b1, scale_pair)
+
+                if const_expr(is_last_ks and emit_filler is not None):
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
+                emit_panel_2x2(2, 2, a2_box[0], b2, scale_pair)
+                emit_panel_2x2(2, 3, a2_box[0], b3_box[0], scale_pair)
+                emit_panel_2x2(3, 2, a3_box[0], b2, scale_pair)
+                emit_panel_2x2(3, 3, a3_box[0], b3_box[0], scale_pair)
 
             return current_accs
 
@@ -2372,14 +2150,6 @@ def compile_mxscale_gemm(
         def _pipeline_fence_signal(outstanding=0):
             pipeline_fence_signal(outstanding=outstanding, use_cluster=use_cluster)
 
-        def _pipeline_fence_partial(outstanding=0, first_half=True):
-            pipeline_fence_partial(
-                outstanding=outstanding,
-                first_half=first_half,
-                n_loader_waves=4,
-                use_cluster=use_cluster,
-            )
-
         if const_expr(wave_specialized_tdm):
 
             def _issue_active_tdm(load_stage, addr_box, k_prefetch=None):
@@ -2414,7 +2184,7 @@ def compile_mxscale_gemm(
                 addr_lo_as = addr_lo_as + adv_as_i32
                 addr_lo_bs = addr_lo_bs + adv_bs_i32
 
-        if const_expr(use_buffer_vgpr_scale):
+        if const_expr(_bvs_active):
             # Prologue: prefetch the first _bvs_D K-tiles (global->VGPR). Carried as
             # FLAT lists of i32 (list-of-tuples can't be loop-carried).
             _bvs_pf = [_bvs_prefetch(split_k_base + arith.index(_d * tile_k)) for _d in range(_bvs_D)]
@@ -2433,13 +2203,13 @@ def compile_mxscale_gemm(
         if const_expr(loop_iters > 0):
             if const_expr(wave_specialized_tdm):
                 init_args = list(accs) + [active_addr_lo]
-                if const_expr(use_buffer_vgpr_scale):
+                if const_expr(_bvs_active):
                     init_args = init_args + _bvs_ra + _bvs_rb
 
                 for loop_iter, state in range(0, loop_iters, 1, init=init_args):
                     accs_in = list(state[:n_accs])
                     cur_addr_lo = state[n_accs]
-                    if const_expr(use_buffer_vgpr_scale):
+                    if const_expr(_bvs_active):
                         _ra0 = n_accs + 1
                         _ring_a = list(state[_ra0 : _ra0 + _bvs_D * wmma_m_rep])
                         _rb0 = _ra0 + _bvs_D * wmma_m_rep
@@ -2461,91 +2231,55 @@ def compile_mxscale_gemm(
                         ):
                             _issue_active_tdm(_ls, _ab, k_prefetch=_k_off)
 
-                        if const_expr(use_ab_half_fence):
-                            # Fence {A0,B0} only; the {A1,B1} fence
-                            # fires mid-compute so its TDM overlaps the quadrant WMMAs.
-                            if const_expr(use_buffer_vgpr_scale):
-                                _cur_a = _ring_a[:wmma_m_rep]
-                                _cur_b = _ring_b[:b_scale_load_rep]
-                                _next_kb = (
-                                    split_k_base
-                                    + loop_iter * arith.index(num_buffers * tile_k)
-                                    + arith.index((buf_idx + _bvs_D) * tile_k)
-                                )
-                                _na, _nb2 = _bvs_prefetch(_next_kb)
-                                _ring_a = _ring_a[wmma_m_rep:] + list(_na)
-                                _ring_b = _ring_b[b_scale_load_rep:] + list(_nb2)
-                            else:
-                                _cur_a = None
-                                _cur_b = None
+                        if const_expr(not use_ws_tdm_split_signal_overlap):
+                            _pipeline_fence_signal(outstanding=_fence_outstanding)
+                        pipeline_fence_wait(use_cluster=use_cluster)
 
-                            _pipeline_fence_partial(outstanding=_fence_outstanding, first_half=True)
+                        _late_tdm_ws_fence_signal = None
+                        if const_expr(use_ws_tdm_split_signal_overlap):
 
-                            def _quad_fence():
-                                _pipeline_fence_partial(outstanding=_fence_outstanding, first_half=False)
-
-                            accs_in = compute_tile_fp8_half_fence(
-                                accs_in,
-                                stages_a_idx[buf_idx],
-                                stages_b_idx[buf_idx],
-                                stages_as_idx[buf_idx],
-                                stages_bs_idx[buf_idx],
-                                mid_compute_callback=_mid_tdm_ws,
-                                quadrant_fence_callback=_quad_fence,
-                                pf_a_scales=_cur_a,
-                                pf_b_scales=_cur_b,
-                            )
-                        else:
-                            if const_expr(not use_ws_tdm_split_signal_overlap):
+                            def _late_tdm_ws_split_signal():
                                 _pipeline_fence_signal(outstanding=_fence_outstanding)
-                            pipeline_fence_wait(use_cluster=use_cluster)
 
-                            _late_tdm_ws_fence_signal = None
-                            if const_expr(use_ws_tdm_split_signal_overlap):
+                            _late_tdm_ws_fence_signal = _late_tdm_ws_split_signal
 
-                                def _late_tdm_ws_split_signal():
-                                    _pipeline_fence_signal(outstanding=_fence_outstanding)
-
-                                _late_tdm_ws_fence_signal = _late_tdm_ws_split_signal
-
-                            a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
-                            rocdl.sched_barrier(0)
-                            # Consume scale prefetched _bvs_D K-tiles ago; issue the
-                            # K-tile +_bvs_D prefetch now (overlaps this tile's WMMAs).
-                            # NOTE: must stay AFTER the fence (matches the original
-                            # ordering); issuing the scale buffer_loads before the
-                            # cluster barrier hangs the vgpr path.
-                            if const_expr(use_buffer_vgpr_scale):
-                                _cur_a = _ring_a[:wmma_m_rep]
-                                _cur_b = _ring_b[:b_scale_load_rep]
-                                _next_kb = (
-                                    split_k_base
-                                    + loop_iter * arith.index(num_buffers * tile_k)
-                                    + arith.index((buf_idx + _bvs_D) * tile_k)
-                                )
-                                _na, _nb2 = _bvs_prefetch(_next_kb)
-                                _ring_a = _ring_a[wmma_m_rep:] + list(_na)
-                                _ring_b = _ring_b[b_scale_load_rep:] + list(_nb2)
-                            else:
-                                _cur_a = None
-                                _cur_b = None
-
-                            accs_in = compute_tile_scheduled(
-                                accs_in,
-                                stages_a_idx[buf_idx],
-                                stages_b_idx[buf_idx],
-                                stages_as_idx[buf_idx],
-                                stages_bs_idx[buf_idx],
-                                mid_compute_callback=_mid_tdm_ws,
-                                late_compute_callback=_late_tdm_ws_fence_signal,
-                                a0_prefetch=a0_prefetch,
-                                pf_a_scales=_cur_a,
-                                pf_b_scales=_cur_b,
+                        a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
+                        rocdl.sched_barrier(0)
+                        # Consume scale prefetched _bvs_D K-tiles ago; issue the
+                        # K-tile +_bvs_D prefetch now (overlaps this tile's WMMAs).
+                        # NOTE: must stay AFTER the fence; issuing the scale
+                        # buffer_loads before the cluster barrier hangs the vgpr path.
+                        if const_expr(_bvs_active):
+                            _cur_a = _ring_a[:wmma_m_rep]
+                            _cur_b = _ring_b[:b_scale_load_rep]
+                            _next_kb = (
+                                split_k_base
+                                + loop_iter * arith.index(num_buffers * tile_k)
+                                + arith.index((buf_idx + _bvs_D) * tile_k)
                             )
+                            _na, _nb2 = _bvs_prefetch(_next_kb)
+                            _ring_a = _ring_a[wmma_m_rep:] + list(_na)
+                            _ring_b = _ring_b[b_scale_load_rep:] + list(_nb2)
+                        else:
+                            _cur_a = None
+                            _cur_b = None
+
+                        accs_in = compute_tile_scheduled(
+                            accs_in,
+                            stages_a_idx[buf_idx],
+                            stages_b_idx[buf_idx],
+                            stages_as_idx[buf_idx],
+                            stages_bs_idx[buf_idx],
+                            mid_compute_callback=_mid_tdm_ws,
+                            late_compute_callback=_late_tdm_ws_fence_signal,
+                            a0_prefetch=a0_prefetch,
+                            pf_a_scales=_cur_a,
+                            pf_b_scales=_cur_b,
+                        )
                         cur_addr_lo = addr_box[0]
                         hot_loop_scheduler_scheduled()
 
-                    if const_expr(use_buffer_vgpr_scale):
+                    if const_expr(_bvs_active):
                         _bvs_yield = _ring_a + _ring_b
                     else:
                         _bvs_yield = []
@@ -2635,7 +2369,7 @@ def compile_mxscale_gemm(
         _bvs_tail_kt = [loop_iters * num_buffers]
 
         def _bvs_tail_kb():
-            if const_expr(not use_buffer_vgpr_scale):
+            if const_expr(not _bvs_active):
                 return None
             kb = split_k_base + arith.index(_bvs_tail_kt[0] * tile_k)
             _bvs_tail_kt[0] += 1
