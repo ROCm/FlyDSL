@@ -43,7 +43,7 @@ try:
         get_pa_metadata as flydsl_get_pa_metadata,
     )
     from kernels.pa_decode_fp8 import (
-        get_sw_ps_max_context_partition_num,
+        get_recommended_splits as flydsl_get_recommended_splits,
     )
     from kernels.pa_decode_fp8 import (
         pa_decode_ps_launch as flydsl_ps_launch,
@@ -487,10 +487,12 @@ def get_gluon_partition_count(
     query_length: int = 1,
 ) -> int:
     if sliding_window > 0:
-        return get_sw_ps_max_context_partition_num(
-            sliding_window,
-            context_partition_size,
-            query_length,
+        return flydsl_get_recommended_splits(
+            num_seqs,
+            num_kv_heads,
+            sliding_window=sliding_window,
+            context_partition_size=context_partition_size,
+            query_length=query_length,
         )
     split_kv_blocks = triton.cdiv(block_size, context_partition_size)
     return get_recommended_splits(num_seqs, num_kv_heads, split_kv_blocks)
@@ -853,10 +855,19 @@ def run_pa_decode_ps_test(
     ps_value_scale: torch.Tensor = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
 
-    max_context_partition_num = get_sw_ps_max_context_partition_num(
-        sliding_window,
-        context_partition_size,
-        query_length,
+    # sliding_window <= 0 → 0, the sentinel that makes `pa_decode_ps_launch`
+    # auto-compute the split count via `get_recommended_splits`.  For
+    # sliding_window > 0 use the window-based split count.
+    max_context_partition_num = (
+        flydsl_get_recommended_splits(
+            batch_size,
+            num_heads[1],
+            sliding_window=sliding_window,
+            context_partition_size=context_partition_size,
+            query_length=query_length,
+        )
+        if sliding_window > 0
+        else 0
     )
     flydsl_exp_sums = None
     flydsl_max_logits = None
