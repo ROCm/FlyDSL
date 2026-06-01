@@ -154,33 +154,6 @@ def pipeline_fence_wait(use_cluster=False):
         cluster.cluster_wait()
 
 
-def pipeline_fence_partial(outstanding=0, first_half=True, n_loader_waves=4, use_cluster=False):
-    """Half fence for the A/B half-split schedule.
-
-    Only the loader waves owning the targeted half tensor_wait (wave0->A0,
-    wave1->B0, wave2->A1, wave3->B1), then *all* waves run a full barrier:
-    first_half=True fences {A0,B0}, first_half=False fences {A1,B1}.
-
-    SAFETY: the cluster barrier is never weakened -- each call is a full
-    ``cluster_barrier``. It fences only the halves tensor_waited before its
-    signal; the un-waited half stays in flight until the matching second call.
-    """
-    half = n_loader_waves // 2
-    wid = rocdl.wave_id()
-    if first_half:
-        cond = arith.cmpi(arith.CmpIPredicate.ult, wid, arith.constant(half, type=T.i32))
-    else:
-        cond = arith.cmpi(arith.CmpIPredicate.uge, wid, arith.constant(half, type=T.i32))
-    if_op = scf.IfOp(cond)
-    with ir.InsertionPoint(if_op.then_block):
-        tdm_ops.tensor_wait(outstanding)
-        scf.YieldOp([])
-    if use_cluster:
-        cluster.cluster_barrier()
-    else:
-        gpu.barrier()
-
-
 def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
     """Emit one or more TDM loads, optionally one descriptor per loader wave."""
     if wave_specialized:
