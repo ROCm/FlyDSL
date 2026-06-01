@@ -306,7 +306,7 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
     return inp, wts, idx
 
 
-def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op=None, valid_recv=None):
+def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op):
     """为 GEMM2 / combine 构造 *静态* 输入（capture 期间不变）。
 
     Layout（生产对齐, topk=k）：
@@ -315,45 +315,18 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op=None
         kernel 内 A2 行寻址公式为 `t * topk + s`。
       - a2_scale (e8m0): [max_recv * topk, inter_dim/32]，覆盖 worst-case 大小。
       - W2 (weights): [num_experts_per_rank, model_dim, inter_dim]，per-expert FP4。
-      - sorted_token_ids 的来源由 ``args.sorting`` 控制：
-          fixture: 手工 round-robin 拼 (s<<24)|t，跟 dispatch 真实路由解耦
-          aiter:   aiter.moe_sorting_fwd 真实 sorting (capture 进 chain 每次重跑)
-        两种模式都按生产约定 (s<<24)|t 编码 entry，s = j_global ∈ [0, k)。
+      - sorted_token_ids 通过 ``aiter.moe_sorting_fwd`` 跟随 dispatch 真实路由
+        生成（capture 进 chain，每次 replay 重跑），按生产约定 (s<<24)|t 编码
+        entry，s = j_global ∈ [0, k)。
       - accumulate=True 时 output buffer = [max_recv, model_dim]（同一 t 的多个 s 走
         atomic_fadd 累加到同一行）；accumulate=False 时 output 扩到 [max_recv*topk, ...]。
 
     Parameters
     ----------
     disp_op
-        ``--sorting aiter`` 时必传。setup 阶段第一次 sorting 需要从
+        必传。setup 阶段第一次 sorting 需要从
         ``disp_op.shmem_disp_out_idx / shmem_disp_out_wts`` 拿真实路由表
-        (须在 build 之前先跑过一次 dispatch)。fixture 模式忽略此参数。
-    valid_recv
-        若给出，则 sorted_token_ids 的 `t` 字段只取 [0, valid_recv) 的 local-recv
-        槽位作为有效 token，其余以 max_recv 哨兵 padding。fused 路径必须传入实际
-        dispatch 后的 total_recv，否则 GEMM2 epilogue 会读到未被 dispatch 写入的
-        addr_tis[t]（zeros / 残留），把结果 P2P scatter 到错误位置。
-        仅 ``--sorting fixture`` 路径使用；aiter 路径下由 dispatch 真实
-        ``total_recv`` 通过 ``num_local_tokens`` 自动 trim。
-
-    .. note:: D-flag C-1 (use_token_flag_sync) + ``--sorting fixture`` 共生约束
-
-        Fixture 用 ``n_unique_t = ceil(valid_m / k)`` 决定 sorted_token_ids
-        覆盖多少个 unique recv-slot（``t``）。当 ``valid_m == bs * k`` (默认)
-        时，``n_unique_t = bs``，仅 [0, bs) 的 t 进入 fused gemm2 epilogue。
-        对应 atomic_add 也只命中这 bs 个 (peer, src_lid) 对，但 combine 端
-        仍按 ``cur_rank_num_token = max_tok = bs`` 逐 lid 自旋等待 8 次
-        atomic（每个 dest_pe 1 次）。fixture 的 t-截断使 (peer, src_lid)
-        覆盖严重不均，部分 lid 永不被 bump → spin-wait 死锁。
-
-        解决方案：
-          * 推荐：``--sorting aiter`` 走真实路由（n_unique_t = total_recv）。
-          * 如必须用 fixture：将 ``--valid-m`` 调到 ``bs * k * world_size``
-            （如 ``bs=32 k=8 ws=8 → valid-m=2048``），让 t ∈ [0, total_recv)
-            完整覆盖 all (peer, lid)，atomic 分布均衡，spin-wait 可正常退出。
-
-        baseline (D-flag OFF) 不依赖 atomic 分布，所以 fixture 默认 valid-m
-        也跑得通；该约束仅出现在 ``--token-flag-sync`` 启用时。
+        (须在 build 之前先跑过一次 dispatch)。
     """
     epr        = args.num_experts_per_rank
     max_recv   = world_size * args.max_num_inp_token_per_rank
@@ -487,129 +460,70 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op=None
     else:
         raise ValueError(f"unsupported gemm2_b_dtype={b_dtype!r}")
 
-    sorting_mode = getattr(args, "sorting", "fixture")
-    aiter_state = None  # 仅 aiter 模式填充
-
-    if sorting_mode == "aiter":
-        # ── aiter moe_sorting_fwd 真实路由 sorting ────────────────────────
-        # 输入: disp_op.shmem_disp_out_idx [mr, k] i32 (全 global expert id)
-        #       disp_op.shmem_disp_out_wts [mr, k] f32
-        # 输出: sorted_token_ids[max_padded] i32 = (j_global<<24)|t
-        #       sorted_expert_ids[max_blocks] i32 = local_expert_id_per_block
-        #       sorted_weights[max_padded] f32
-        #       num_valid_ids[2] i32 = [padding-after-total, num_input_tokens]
-        if not HAS_AITER_SORTING:
-            raise RuntimeError(
-                f"--sorting aiter requires aiter.moe_sorting_fwd; import failed: "
-                f"{_AITER_SORTING_ERR}"
-            )
-        if disp_op is None:
-            raise RuntimeError(
-                "--sorting aiter requires disp_op (must dispatch once before build)"
-            )
-        num_experts_global = world_size * epr
-        # aiter 公式上界 (op_tests/test_moe_sorting.py::moe_sorting_native):
-        #   max_padded = topk_ids.numel() + num_experts * block_size - topk
-        # bs=32,k=8,ws=8,epr=32,tile_m=32: 256*8 + 256*32 - 8 = 10232
-        max_padded = max_recv * gemm2_topk + num_experts_global * tile_m - gemm2_topk
-        max_blocks = (max_padded + tile_m - 1) // tile_m
-
-        sorted_token_ids  = torch.empty((max_padded,), dtype=torch.int32, device=dev)
-        sorted_weights    = torch.empty((max_padded,), dtype=torch.float32, device=dev)
-        sorted_expert_ids = torch.empty((max_blocks,), dtype=torch.int32, device=dev)
-        # aiter 输出 [2]: [0]=padded-total, [1]=num_input；GEMM2 只读 [0]
-        num_valid_ids     = torch.empty((2,), dtype=torch.int32, device=dev)
-
-        # local_expert_mask: 本卡 [rank*epr, (rank+1)*epr) 段为 1，其他为 0
-        expert_mask = torch.zeros(num_experts_global, dtype=torch.int32, device=dev)
-        expert_mask[rank * epr:(rank + 1) * epr] = 1
-        # moe_buf API 占位 (内容 unused，仅 alloc 形状对齐)
-        moe_buf = torch.empty((max_recv, model_dim), dtype=torch.bfloat16, device=dev)
-
-        # 用 dispatch 真实输出跑首次 sorting，把 sorted_* buffer fill 满 ──
-        # 这一次跑出来的 sorted 可能在 cudagraph capture 时被覆盖；chain
-        # 内 _run_aiter_sorting 每次 replay 会重填这些 buffer (in-place)。
-        _aiter_moe_sorting_fwd(  # type: ignore[misc]
-            disp_op.shmem_disp_out_idx.view(max_recv, gemm2_topk),
-            disp_op.shmem_disp_out_wts.view(max_recv, gemm2_topk),
-            sorted_token_ids,
-            sorted_weights,
-            sorted_expert_ids,
-            num_valid_ids,
-            moe_buf,
-            num_experts_global,
-            int(tile_m),
-            expert_mask,
-            disp_op.total_recv,
-            0,
+    # ── aiter moe_sorting_fwd 真实路由 sorting ────────────────────────
+    # 输入: disp_op.shmem_disp_out_idx [mr, k] i32 (全 global expert id)
+    #       disp_op.shmem_disp_out_wts [mr, k] f32
+    # 输出: sorted_token_ids[max_padded] i32 = (j_global<<24)|t
+    #       sorted_expert_ids[max_blocks] i32 = local_expert_id_per_block
+    #       sorted_weights[max_padded] f32
+    #       num_valid_ids[2] i32 = [padding-after-total, num_input_tokens]
+    if not HAS_AITER_SORTING:
+        raise RuntimeError(
+            f"aiter.moe_sorting_fwd is required (real routing only); "
+            f"import failed: {_AITER_SORTING_ERR}"
         )
-
-        sorted_size = max_padded
-        blocks      = max_blocks
-        effective_valid = -1  # 由 num_valid_ids[0] 在设备端动态决定
-        aiter_state = dict(
-            expert_mask=expert_mask,
-            moe_buf=moe_buf,
-            num_experts_global=num_experts_global,
-            tile_m=int(tile_m),
-            topk=int(gemm2_topk),
-            mr=int(max_recv),
+    if disp_op is None:
+        raise RuntimeError(
+            "aiter sorting requires disp_op (must dispatch once before build)"
         )
-    else:
-        # ── fixture: 手工 round-robin 拼 (s<<24)|t (legacy 行为) ──────────
-        # 总 valid (t, s) 对数 = args.valid_m (默认 = bs*topk 均衡路由结果)。
-        # 分布策略：n_unique_t 个唯一 token，每个全 topk slot，rotating 到 epr 个 expert。
-        # valid_recv 限制 `t` 的取值范围 (fused P2P 需要 t<total_recv)；不限制 s。
-        valid_m_default = args.max_num_inp_token_per_rank * gemm2_topk  # bs * topk
-        effective_valid = int(getattr(args, "valid_m", None) or valid_m_default)
-        effective_valid = max(0, min(effective_valid, a2_rows))  # cap 到 A2 上界
+    num_experts_global = world_size * epr
+    # aiter 公式上界 (op_tests/test_moe_sorting.py::moe_sorting_native):
+    #   max_padded = topk_ids.numel() + num_experts * block_size - topk
+    # bs=32,k=8,ws=8,epr=32,tile_m=32: 256*8 + 256*32 - 8 = 10232
+    max_padded = max_recv * gemm2_topk + num_experts_global * tile_m - gemm2_topk
+    max_blocks = (max_padded + tile_m - 1) // tile_m
 
-        t_cap = int(valid_recv) if valid_recv is not None else max_recv
-        n_unique_t = min((effective_valid + gemm2_topk - 1) // gemm2_topk, t_cap)
-        pairs: list[tuple[int, int]] = []
-        for ti in range(n_unique_t):
-            for si in range(gemm2_topk):
-                pairs.append((ti, si))
-                if len(pairs) >= effective_valid:
-                    break
-            if len(pairs) >= effective_valid:
-                break
+    sorted_token_ids  = torch.empty((max_padded,), dtype=torch.int32, device=dev)
+    sorted_weights    = torch.empty((max_padded,), dtype=torch.float32, device=dev)
+    sorted_expert_ids = torch.empty((max_blocks,), dtype=torch.int32, device=dev)
+    # aiter 输出 [2]: [0]=padded-total, [1]=num_input；GEMM2 只读 [0]
+    num_valid_ids     = torch.empty((2,), dtype=torch.int32, device=dev)
 
-        per_e = (len(pairs) + epr - 1) // epr
-        per_e_pad = ((max(per_e, 1) + tile_m - 1) // tile_m) * tile_m
-        blocks = epr * (per_e_pad // tile_m)
-        sorted_size = blocks * tile_m
+    # local_expert_mask: 本卡 [rank*epr, (rank+1)*epr) 段为 1，其他为 0
+    expert_mask = torch.zeros(num_experts_global, dtype=torch.int32, device=dev)
+    expert_mask[rank * epr:(rank + 1) * epr] = 1
+    # moe_buf API 占位 (内容 unused，仅 alloc 形状对齐)
+    moe_buf = torch.empty((max_recv, model_dim), dtype=torch.bfloat16, device=dev)
 
-        sorted_token_ids = torch.full(
-            (sorted_size,), max_recv, dtype=torch.int32, device=dev,
-        )
-        sorted_weights = torch.zeros(sorted_size, dtype=torch.float32, device=dev)
-        sorted_expert_ids = torch.zeros(blocks, dtype=torch.int32, device=dev)
-        for e in range(epr):
-            e_start = e * (per_e_pad // tile_m)
-            e_end = (e + 1) * (per_e_pad // tile_m)
-            sorted_expert_ids[e_start:e_end] = e
+    # 用 dispatch 真实输出跑首次 sorting，把 sorted_* buffer fill 满 ──
+    # 这一次跑出来的 sorted 可能在 cudagraph capture 时被覆盖；chain
+    # 内 _run_aiter_sorting 每次 replay 会重填这些 buffer (in-place)。
+    _aiter_moe_sorting_fwd(  # type: ignore[misc]
+        disp_op.shmem_disp_out_idx.view(max_recv, gemm2_topk),
+        disp_op.shmem_disp_out_wts.view(max_recv, gemm2_topk),
+        sorted_token_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        moe_buf,
+        num_experts_global,
+        int(tile_m),
+        expert_mask,
+        disp_op.total_recv,
+        0,
+    )
 
-        if pairs:
-            fused_host = []
-            e_count = [0] * epr
-            for i, (ti, si) in enumerate(pairs):
-                e = i % epr
-                j = e_count[e]
-                e_count[e] += 1
-                if j >= per_e_pad:
-                    continue
-                fused = (int(si) << 24) | int(ti)
-                fused_host.append((e * per_e_pad + j, fused))
-            if fused_host:
-                idxs = torch.tensor([p[0] for p in fused_host], dtype=torch.long, device=dev)
-                vals = torch.tensor([p[1] for p in fused_host], dtype=torch.int32, device=dev)
-                sorted_token_ids[idxs] = vals
-                sorted_weights[idxs] = 1.0
-
-        # num_valid_ids = sorted_size：让 kernel 走满所有 expert block；
-        # 哨兵 pad 由 t_ok / s_ok 在 row level 过滤。
-        num_valid_ids = torch.tensor([sorted_size], dtype=torch.int32, device=dev)
+    sorted_size = max_padded
+    blocks      = max_blocks
+    effective_valid = -1  # 由 num_valid_ids[0] 在设备端动态决定
+    aiter_state = dict(
+        expert_mask=expert_mask,
+        moe_buf=moe_buf,
+        num_experts_global=num_experts_global,
+        tile_m=int(tile_m),
+        topk=int(gemm2_topk),
+        mr=int(max_recv),
+    )
 
     bias_dummy = torch.empty((0,), dtype=torch.float32, device=dev)
 
@@ -618,7 +532,24 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op=None
     #   accumulate=False → [max_recv * topk, model_dim] (每个 (t,s) 独立 slot)
     out_dtype = cfg.data_type if cfg.data_type in (torch.bfloat16, torch.float16) else torch.bfloat16
     out_rows = max_recv if args.gemm2_accumulate else a2_rows
-    gemm2_out = torch.zeros(out_rows, model_dim, dtype=out_dtype, device=dev)
+    if cfg.zero_copy and args.bench_op == "baseline":
+        # zero-copy 模式：combine 端跳过 Stage 1, 直接读 shmem_comb_inp_tok。
+        # 调用者必须把 GEMM2 输出写到 op.get_registered_combine_input_buffer
+        # 返回的 view 上, 这样下游 combine 才能拿到正确数据。
+        # fused 路径有自己的 P2P scatter (走 _fx_p2p_comb_inp), 不走这条 hook,
+        # 所以仅 baseline + zero_copy 的组合需要 swap buffer。
+        # NOTE: 当 accumulate=True 且 out_rows == max_recv 时直接 view 即可,
+        # 否则形状不匹配 (registered buffer 是 [max_recv, model_dim]).
+        if out_rows != max_recv:
+            raise ValueError(
+                "zero-copy + baseline 需要 --gemm2-accumulate (默认), 否则 GEMM2 "
+                "输出 [max_recv*topk, model_dim] 与 shmem_comb_inp_tok "
+                "[max_recv, model_dim] 形状不匹配。"
+            )
+        gemm2_out = disp_op.get_registered_combine_input_buffer(out_dtype)
+        gemm2_out.zero_()
+    else:
+        gemm2_out = torch.zeros(out_rows, model_dim, dtype=out_dtype, device=dev)
 
     return dict(
         a2_storage=a2_storage,
@@ -641,7 +572,6 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op=None
         gemm2_topk=gemm2_topk,
         a2_rows=a2_rows,
         effective_valid=effective_valid,
-        sorting_mode=sorting_mode,
         aiter_state=aiter_state,
     )
 
@@ -655,8 +585,6 @@ def _run_aiter_sorting(gemm2_in, disp_op):
     每次 replay 用同一份 buffer，只刷新内容。
     """
     st = gemm2_in["aiter_state"]
-    if st is None:
-        return  # fixture 模式，no-op
     _aiter_moe_sorting_fwd(  # type: ignore[misc]
         disp_op.shmem_disp_out_idx.view(st["mr"], st["topk"]),
         disp_op.shmem_disp_out_wts.view(st["mr"], st["topk"]),
@@ -749,7 +677,7 @@ def _dump_gemm2_inputs(args, gemm2_in, out_dtype, *, prefix="[gemm2-dump]"):
     print(f"{prefix}  num_valid_ids value     = {int(gemm2_in['num_valid_ids'][0].item())}  "
           f"(kernel 走 row ∈ [0, this); row-level t/s 哨兵在内部 DCE)")
     print(f"{prefix}  effective_valid (real)  = {gemm2_in['effective_valid']}  "
-          f"(真正有效 (t, s) 对数 = host 视角的 valid_m)")
+          f"(-1 = aiter 真实路由 sorting，由 num_valid_ids[0] 在设备端动态决定)")
     print(f"{prefix}  sorted_size             = {gemm2_in['sorted_size']}")
 
     # 解码 sorted_token_ids，统计 atomic contention
@@ -897,7 +825,7 @@ def _baseline_chain(disp_op, gemm2_launch, gemm2_in, combine_idx,
         # launch; routing tables / total_recv 在 disp_op 内部 shmem buffer 上
         # 原地更新, combine_idx (= shmem_disp_out_idx 视图) 引用不变.
         disp_op.dispatch(inp, wts, scales, idx)
-        # fixture 模式下 no-op；aiter 模式下 capture aiter.moe_sorting_fwd
+        # capture aiter.moe_sorting_fwd to refresh sorted_* tables in-place
         _run_aiter_sorting(gemm2_in, disp_op)
     if os.environ.get("FLYDSL_DEBUG_CHAIN_DISPATCH_ONLY", "0") == "1":
         return None
@@ -1792,7 +1720,6 @@ def run_acceptance(rank, world_size, args):
     if rank == 0:
         _max_recv = world_size * cur_tok
         _a2_rows  = _max_recv * max(1, k)
-        _valid_m_eff = args.valid_m if args.valid_m is not None else cur_tok * max(1, k)
         print(f"\n{'='*78}")
         print(f"[acceptance] EP={world_size}, bs={cur_tok}, "
               f"h={cfg.hidden_dim}, inter={args.inter_dim}, k={k}, "
@@ -1802,7 +1729,7 @@ def run_acceptance(rank, world_size, args):
               f"tile_k2={args.tile_k2}, persist_m={args.persist_m}, "
               f"accumulate={args.gemm2_accumulate}")
         print(f"  GEMM2 layout: tokens_in=max_recv={_max_recv}, topk={k}, "
-              f"A2 rows={_a2_rows} (= bs*ep*topk), valid_m={_valid_m_eff}")
+              f"A2 rows={_a2_rows} (= bs*ep*topk)")
         print(f"  bench-op={args.bench_op}, fuse-mode={args.fuse_mode}, "
               f"fused_op_available={HAS_FUSED_OP}")
         if not HAS_FUSED_OP:
@@ -1842,17 +1769,16 @@ def run_acceptance(rank, world_size, args):
     # combine 依赖 disp_op 内部的 shmem_disp_out_* 表, 由 dispatch 写入;
     # 跑一次后这些表保持不变, chain 内 combine 直接读取静态视图.
     if rank == 0:
-        _sm = getattr(args, "sorting", "fixture")
         _rt = getattr(args, "routing", "random")
         _hr = int(getattr(args, "gemm2_scale_headroom", 0))
-        print(f"[setup] routing={_rt} sorting={_sm} "
+        print(f"[setup] routing={_rt} sorting=aiter "
               f"aiter_backend={_AITER_SORTING_BACKEND}; "
               f"aiter sorting available = {HAS_AITER_SORTING}; "
               f"gemm2_scale_headroom={_hr} (e8m0 scale = {127 - _hr}, "
               f"GEMM2 magnitude × 2^-{2*_hr})")
-        if _sm == "aiter" and not HAS_AITER_SORTING:
-            print(f"[setup] WARNING: --sorting aiter requested but aiter import "
-                  f"failed: {_AITER_SORTING_ERR}; will fail in _build_gemm2_static_inputs.")
+        if not HAS_AITER_SORTING:
+            print(f"[setup] ERROR: aiter.moe_sorting_fwd unavailable: "
+                  f"{_AITER_SORTING_ERR}; will fail in _build_gemm2_static_inputs.")
         print(f"[setup] running one-shot dispatch to populate routing tables…")
     disp_ret = disp_op.dispatch(inp, wts, scales, idx)
     combine_idx = disp_ret[3]                # shmem_disp_out_idx 视图
@@ -1860,30 +1786,38 @@ def run_acceptance(rank, world_size, args):
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
 
-    # 对 fused 路径来说，GEMM2 epilogue 会读 addr_tis[t] 来解码
-    # (dest_pe, dest_lid)，但 dispatch 只写了 [0, total_recv) 槽位。
-    # 所以 sorted_token_ids 的 t 必须落在 [0, total_recv)；否则会 P2P
-    # scatter 到错误位置（写到 PE 0 / slot 0），污染 combine stage 3 输入。
-    # 注意: 必须在 hard-reset *之前* 读 .item(), 否则 total_recv 会被清 0,
-    # sorted_token_ids 全是 padding 哨兵 → fused gemm2 launch 立即 fail.
-    valid_recv_for_gemm2 = None
-    if args.bench_op in ("fused", "both") and HAS_FUSED_OP:
-        valid_recv_for_gemm2 = int(dispatch_total_recv.item())
-        if rank == 0:
-            print(f"[setup] dispatch total_recv (rank0) = {valid_recv_for_gemm2}; "
-                  "will constrain sorted_token_ids to [0, total_recv) for fused path")
+    if rank == 0 and args.bench_op in ("fused", "both") and HAS_FUSED_OP:
+        print(f"[setup] dispatch total_recv (rank0) = "
+              f"{int(dispatch_total_recv.item())}")
 
     # 注意 (aiter sorting 时序)：build 必须在 hard-reset *之前* 跑。
-    # aiter 模式下 _build_gemm2_static_inputs 会调一次 moe_sorting_fwd
-    # (做首次 JIT + 占住 buffer)，需要 disp_op.total_recv 仍是 setup
-    # dispatch 写入的真实值；hard-reset 清 total_recv=0 之后跑 aiter，
-    # num_local_tokens 会被读成 0，sorted 全空（仅 buffer 形状有效）。
-    # 实际 chain 内每次 replay 重跑 dispatch 后 _run_aiter_sorting 会
-    # 用 fresh total_recv 重填 sorted_*。
+    # _build_gemm2_static_inputs 会调一次 moe_sorting_fwd (做首次 JIT + 占
+    # 住 buffer)，需要 disp_op.total_recv 仍是 setup dispatch 写入的真实
+    # 值；hard-reset 清 total_recv=0 之后跑 aiter，num_local_tokens 会被
+    # 读成 0，sorted 全空（仅 buffer 形状有效）。实际 chain 内每次 replay
+    # 重跑 dispatch 后 _run_aiter_sorting 会用 fresh total_recv 重填
+    # sorted_*。
     gemm2_in = _build_gemm2_static_inputs(
-        rank, world_size, dev, args, cfg,
-        disp_op=disp_op, valid_recv=valid_recv_for_gemm2,
+        rank, world_size, dev, args, cfg, disp_op=disp_op,
     )
+
+    # 端到端语义自检：zero-copy on 路径 GEMM2 必须直接把输出写到
+    # ``shmem_comb_inp_tok``；否则 combine Stage1 跳过后 peer 端 P2P 读到
+    # 的就是 stale shmem 数据。这里在 op 内部 raise 之前先打 banner 让
+    # rank0 一眼看出 gemm2_out 的归属。
+    if rank == 0 and args.bench_op in ("baseline", "both"):
+        _g_ptr = gemm2_in["gemm2_out"].data_ptr()
+        _shm_ptr = disp_op.shmem_comb_inp_tok.data_ptr()
+        _is_shmem = _g_ptr == _shm_ptr
+        print(f"[setup] gemm2_out.data_ptr() = 0x{_g_ptr:x}; "
+              f"shmem_comb_inp_tok.data_ptr() = 0x{_shm_ptr:x}; "
+              f"is_zero_copy_buffer={_is_shmem}; cfg.zero_copy={cfg.zero_copy}")
+        if cfg.zero_copy and not _is_shmem:
+            raise RuntimeError(
+                "zero-copy on but gemm2_out is NOT the registered shmem buffer; "
+                "combine Stage1 will skip the staging copy and peer reads will "
+                "see stale data."
+            )
 
     # ── 方案 A 的 hard-reset: 只清 setup dispatch 留下的 *local* counter
     # (dest_pe_ctr / disp_bar / comb_bar / total_recv / disp_grid_bar),
@@ -2066,7 +2000,7 @@ def _parse_args():
     p.add_argument("--world-size",           type=int, default=8)
     p.add_argument("--max-tokens",           type=int, default=32,
                    help="单卡 dispatch 输入 token 数 (bs)；max_recv = world_size * bs。"
-                        "默认 32 对齐生产均衡场景 (bs=32, ep=8, topk=8 → valid_m=bs*topk=256)。")
+                        "默认 32 对齐生产均衡场景 (bs=32, ep=8, topk=8)。")
     p.add_argument("--hidden-dim",           type=int, default=7168,
                    help="GEMM2 输出维度（== combine token 维度 == dispatch token 维度）")
     p.add_argument("--inter-dim",            type=int, default=2048,
@@ -2077,10 +2011,6 @@ def _parse_args():
     p.add_argument("--k",                    type=int, default=8,
                    help="MoE top-k：同时驱动 dispatch 路由 topk 和 GEMM2 compile-time "
                         "topk（A2 行寻址 t*topk+s, output atomic accumulate 跨 s）。")
-    p.add_argument("--valid-m",              type=int, default=None,
-                   help="GEMM2 本卡实际工作量 = 有效 (token, expert_slot) 对数。"
-                        "默认 = bs * topk（均衡路由：每张卡 bs*topk*ep/ep 条 assignment）。"
-                        "上限 = max_recv * topk = bs * topk * ep（worst-case 全部落本卡）。")
     p.add_argument("--routing",
                    choices=["random", "atomic1_8pe", "atomic8_1pe", "atomic2_4pe"],
                    default="random",
@@ -2100,14 +2030,6 @@ def _parse_args():
                         " lattice 塌缩 → 卡间命中数 = cur_tok*k 完美均衡，卡内每 "
                         "(PE,local_eid) cell 命中 cur_tok*k/epr 次。"
                         "require k%%4==0 (8/4=2 ✓) 且 ws>=4 (8 ✓)。")
-    p.add_argument("--sorting", choices=["fixture", "aiter"], default="fixture",
-                   help="sorted_token_ids 的来源："
-                        "fixture=手工 round-robin 拼 (s<<24)|t，跟 dispatch 真实路由"
-                        " 解耦（默认，保持历史行为，atomic contention 是 worst-case "
-                        "全 k）；"
-                        "aiter=每次 chain 在 dispatch 之后用 aiter.moe_sorting_fwd 真实"
-                        " sorting (capture-friendly in-place call)，sorted 内容反映"
-                        " 实际路由，contention 跟 routing/dup 联动。")
     # dispatch / combine
     # NOTE: empirically bn=256 is ~30% faster than bn=80 on combine
     # (27→19us @ bs=256/h=7168/k=8/EP=8) — the small grid was leaving
@@ -2143,7 +2065,7 @@ def _parse_args():
                    help="GEMM2 epilogue 走 plain store 的 reduce 模式（每行独立 slot）")
     p.add_argument("--gemm2-scale-headroom", type=int, default=0,
                    help="把 A2/W2 的 e8m0 micro-scale 从 127 降到 127-headroom "
-                        "(每降 1 缩小 2×)。fp4×fp4 random fixture 在 inter_dim=2048 "
+                        "(每降 1 缩小 2×)。fp4×fp4 random 输入在 inter_dim=2048 "
                         "下 GEMM2 输出 ~±4000，经 fp8_direct_cast 的 bf16→fp8 cast "
                         "会 saturate 到 ±inf → 后续 cast 回 bf16 出 NaN，污染 verify "
                         "数值对比。verify 时建议 headroom=4 (256× 缩放) → GEMM2 "
