@@ -22,3 +22,7 @@ class DeviceRuntime(metaclass=ABCMeta):
     @abstractmethod
     def device_count(self) -> int:
         """Number of visible devices for this runtime."""
+
+    @abstractmethod
+    def current_device_id(self) -> int:
+        """Current device id for this runtime."""
