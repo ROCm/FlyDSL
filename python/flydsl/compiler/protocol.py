@@ -134,3 +134,16 @@ def poke_into_ptr(dsl_type, ptr: ir.Value, value) -> None:
         dsl_type.__poke_into_ptr__(ptr, value)
         return
     raise TypeError(f"type {dsl_type} does not implement the Storable protocol")
+
+
+# Backward-compat aliases for the pre-#478 naming (`fly_*`).  External
+# downstreams (notably aiter's `aiter/ops/flydsl/kernels/{small_m_hgemm,
+# splitk_hgemm}.py`) still `from flydsl.compiler.protocol import fly_values`,
+# and `import aiter` runs all op registrations under a single try/except —
+# any single missing name silently disables ALL non-Triton ops including
+# `aiter.moe_sorting_fwd`, which is what the dispatch_combine test harness
+# uses for production-routing sorting.  Keep the old names as thin aliases
+# until the aiter port is updated.
+fly_values = extract_to_ir_values
+fly_types = get_ir_types
+fly_construct = construct_from_ir_values
