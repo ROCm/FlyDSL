@@ -2129,7 +2129,14 @@ def compile_pa_decode_ps(
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
         k_global_ptr = _extract_global_ptr(key_cache_ptr)
         v_global_ptr = _extract_global_ptr(value_cache_ptr)
-        bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, max_size=False)
+        # Real OOB bound for block_tables: max_size=False is a no-op for fly.memref
+        # args (size derivation only handles builtin memref → falls back to
+        # 0xFFFFFFFF), so pass the exact byte size explicitly.  block_tables is
+        # [num_seqs, stride_bt_seq] si32, and the grid is (num_seqs, num_kv_heads,
+        # num_partition) so grid_dim.x == num_seqs.  Reads past the array then get
+        # a HW bounds check (return 0) instead of a wild access.
+        _bt_records_bytes = fx.Int32(gpu.grid_dim.x) * stride_bt_seq * fx.Int32(4)
+        bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, num_records_bytes=_bt_records_bytes)
         es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
         ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
         to_rsrc = buffer_ops.create_buffer_resource(tmp_out_ptr, max_size=True)
