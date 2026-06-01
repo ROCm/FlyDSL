@@ -148,6 +148,7 @@ class ASTRewriter:
         assert isinstance(module.body[0], ast.FunctionDef), f"unexpected ast node {module.body[0]}"
 
         context = types.SimpleNamespace()
+        context.source_filename = f.__code__.co_filename
         for transformer_ctor in cls.transformers:
             orig_code = ast.unparse(module) if env.debug.ast_diff else None
             func_node = module.body[0]
@@ -1307,3 +1308,113 @@ class CanonicalizeWhile(Transformer):
             node = ast.fix_missing_locations(node)
             assign = ast.fix_missing_locations(assign)
             return [assign, node]
+
+
+class _SourceLoc:
+    """Per-statement MLIR location scope injected by InjectSourceLocations."""
+
+    __slots__ = ("_filename", "_line", "_loc")
+
+    def __init__(self, filename, line):
+        self._filename = filename
+        self._line = line
+        self._loc = None
+
+    def __enter__(self):
+        ctx = ir.Context.current
+        if env.debug.enable_debug_info and ctx is not None:
+            self._loc = ir.Location.file(self._filename, self._line, 0, context=ctx)
+            self._loc.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        loc, self._loc = self._loc, None
+        if loc is not None:
+            loc.__exit__(*exc)
+        return False
+
+
+@ASTRewriter.register
+class InjectSourceLocations(Transformer):
+    """Wrap each traced leaf statement in a source-line MLIR location."""
+
+    _SKIP = (
+        ast.Global,
+        ast.Nonlocal,
+        ast.Import,
+        ast.ImportFrom,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+        ast.Pass,
+        ast.Break,
+        ast.Continue,
+    )
+
+    @classmethod
+    def rewrite_globals(cls):
+        return {"_flydsl_source_loc": _SourceLoc}
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        self.generic_visit(node)
+        node.body = self._process_stmts(node.body)
+        return node
+
+    def _process_stmts(self, stmts):
+        new_stmts = []
+        for i, stmt in enumerate(stmts):
+            self._recurse_into(stmt)
+            if self._should_wrap(stmt, is_first=(i == 0)):
+                new_stmts.append(self._wrap(stmt))
+            else:
+                new_stmts.append(stmt)
+        return new_stmts
+
+    def _recurse_into(self, node):
+        # Wrap nested leaf statements too, but leave compound statements
+        # unwrapped to avoid CPython's static nested-block limit.
+        for field in ("body", "orelse", "finalbody"):
+            seq = getattr(node, field, None)
+            if isinstance(seq, list) and seq and isinstance(seq[0], ast.stmt):
+                setattr(node, field, self._process_stmts(seq))
+        if isinstance(node, ast.Try):
+            for handler in node.handlers:
+                handler.body = self._process_stmts(handler.body)
+
+    @staticmethod
+    def _is_compound(stmt):
+        if isinstance(stmt, ast.Try):
+            return True
+        for field in ("body", "orelse", "finalbody"):
+            seq = getattr(stmt, field, None)
+            if isinstance(seq, list) and seq and isinstance(seq[0], ast.stmt):
+                return True
+        return False
+
+    def _should_wrap(self, stmt, is_first):
+        if isinstance(stmt, self._SKIP):
+            return False
+        if self._is_compound(stmt):
+            return False
+        if (
+            is_first
+            and isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and isinstance(stmt.value.value, str)
+        ):
+            return False
+        return True
+
+    def _wrap(self, stmt):
+        line = stmt.lineno + self.first_lineno
+        call = ast.Call(
+            func=ast.Name(id="_flydsl_source_loc", ctx=ast.Load()),
+            args=[
+                ast.Constant(self.context.source_filename),
+                ast.Constant(line),
+            ],
+            keywords=[],
+        )
+        wrapped = ast.With(items=[ast.withitem(context_expr=call, optional_vars=None)], body=[stmt])
+        wrapped = ast.copy_location(wrapped, stmt)
+        return ast.fix_missing_locations(wrapped)

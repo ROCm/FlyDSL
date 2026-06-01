@@ -405,6 +405,10 @@ def _jit_function_cache_key(func: Callable, owner_cls=None) -> str:
     if all_closure_vals:
         parts.append("closure_vals:" + ",".join(all_closure_vals))
 
+    # Debug-info policy changes the emitted code object (DI pass and -g).
+    # Keep ATT debug-info-on artifacts away from normal debug-info-off cache entries.
+    parts.append(f"debug_info:{bool(env.debug.enable_debug_info)}")
+
     combined = "\n".join(parts)
     return hashlib.sha256(combined.encode()).hexdigest()[:32]
 

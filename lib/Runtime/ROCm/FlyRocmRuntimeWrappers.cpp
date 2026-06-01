@@ -68,7 +68,7 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
                                         intptr_t blockY, intptr_t blockZ, int32_t smem,
                                         hipStream_t stream, void **params, void **extra,
                                         size_t /*paramsCount*/) {
-#ifdef hipLaunchAttributeClusterDimension
+#if defined(HIP_VERSION) && HIP_VERSION >= 70200000
   hipLaunchAttribute attrs[1];
   attrs[0].id = hipLaunchAttributeClusterDimension;
   attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
