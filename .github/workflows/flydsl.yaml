@@ -26,6 +26,7 @@ env:
 
 jobs:
   check-signal:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'multi-gpu' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

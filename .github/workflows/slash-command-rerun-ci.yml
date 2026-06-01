@@ -1,32 +1,9 @@
-name: Rerun CI (comment or label)
+name: Rerun failed PR CI
 
-# Lets an authorized user re-run FlyDSL CI on a pull request, instead of pushing
-# empty commits. Two entry points:
-#
-#   1. Slash command (primary) — comment on the PR:
-#        /rerun-ci        re-run the latest "Fly DSL test" run for the PR head SHA
-#        /rerun-checks    re-run the latest "Checks" (pre-checks) run
-#        /rerun-all       re-run both of the above
-#        append "failed"  (e.g. "/rerun-ci failed") to re-run only FAILED jobs
-#
-#   2. Label — apply the `rerun-ci` label to the PR. This re-runs "Fly DSL test".
-#      NOTE: GitHub does NOT re-fire `pull_request: labeled` for a label that is
-#      already present, so to use the label a second time you must remove it and
-#      re-add it. The slash command has no such limitation and is preferred for
-#      repeated reruns.
-#
-# Why re-run the existing run instead of `workflow_dispatch` with a ref:
-#   - The workflow_dispatch REST API only accepts a branch or tag name for `ref`,
-#     NOT an arbitrary commit SHA — and a fork PR's head branch does not exist in
-#     this (base) repository. Re-running the existing run (`gh run rerun`)
-#     re-executes against the exact PR head commit and works for fork PRs too.
-#
-# Security model:
-#   - issue_comment / the label workflow always run this file from the DEFAULT
-#     branch of the BASE repo, so a fork PR cannot alter what this does.
-#   - We only ever *re-run an existing run* for the PR head SHA; PR code is never
-#     checked out or executed in this privileged job.
-#   - Only the PR author or users with write/maintain/admin may trigger it.
+# Trigger with either a PR comment containing "/rerun-ci" or the "rerun-ci"
+# label. The handler only re-runs completed, non-passing pull_request workflow
+# runs for the PR head SHA. The label is removed after handling so it can be
+# applied again if another rerun is needed.
 
 on:
   issue_comment:
@@ -35,134 +12,52 @@ on:
     types: [labeled]
 
 permissions:
-  contents: read
-  actions: write          # required to re-run the target workflow runs
+  actions: write
   pull-requests: read
-  issues: write           # required to react/comment on the PR
+  issues: write
 
 concurrency:
-  # Serialize reruns per PR; never cancel a rerun already in flight.
   group: rerun-ci-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Entry point A: slash command in a PR comment.
-  # ---------------------------------------------------------------------------
-  rerun-from-comment:
+  rerun:
     if: >
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      (contains(github.event.comment.body, '/rerun-ci') ||
-       contains(github.event.comment.body, '/rerun-checks') ||
-       contains(github.event.comment.body, '/rerun-all'))
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/rerun-ci')) ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.label.name == 'rerun-ci')
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve command, permission, and PR head SHA
-        id: ctx
+      - name: Re-run failed PR CI
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const prNumber = context.issue.number;
-            const body = context.payload.comment.body || "";
-            const commenter = context.payload.comment.user.login;
+            const isComment = context.eventName === "issue_comment";
+            const prNumber = isComment
+              ? context.issue.number
+              : context.payload.pull_request.number;
+            const actor = isComment
+              ? context.payload.comment.user.login
+              : context.payload.sender.login;
 
-            // which command? (most specific first)
-            let cmd = "rerun-ci";
-            if (body.includes("/rerun-all")) cmd = "rerun-all";
-            else if (body.includes("/rerun-checks")) cmd = "rerun-checks";
-            else if (body.includes("/rerun-ci")) cmd = "rerun-ci";
-            core.setOutput("cmd", cmd);
-
-            // "/rerun-ci failed" -> only re-run failed jobs of that run
-            core.setOutput("failed_only", String(/\/rerun-\S+\s+failed\b/.test(body)));
-
-            const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-            core.setOutput("head_sha", pr.data.head.sha);
-
-            // permission gate: write/maintain/admin OR the PR author
-            let level = "none";
-            try {
-              const perm = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner, repo, username: commenter,
-              });
-              level = perm.data.permission || "none";
-            } catch (e) {
-              core.warning(`permission lookup failed for ${commenter}: ${e.message}`);
-            }
-            const allowed = ["admin", "maintain", "write"].includes(level)
-                            || commenter === pr.data.user.login;
-            core.setOutput("allowed", String(allowed));
-
-            try {
-              await github.rest.reactions.createForIssueComment({
-                owner, repo, comment_id: context.payload.comment.id,
-                content: allowed ? "rocket" : "confused",
-              });
-            } catch (e) { core.warning(`could not add reaction: ${e.message}`); }
-
-            if (!allowed) {
-              core.setFailed(
-                `@${commenter} (permission: ${level}) may not rerun CI. ` +
-                `Only the PR author or users with write access can.`
-              );
+            if (isComment) {
+              const body = context.payload.comment.body || "";
+              if (!/(^|\n)\s*\/rerun-ci(?:\s|$)/.test(body)) {
+                core.info("No standalone /rerun-ci command found.");
+                return;
+              }
             }
 
-      - name: Re-run target workflow run(s)
-        if: steps.ctx.outputs.allowed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
-          CMD: ${{ steps.ctx.outputs.cmd }}
-          FAILED_ONLY: ${{ steps.ctx.outputs.failed_only }}
-        run: ./.github/scripts/rerun_ci.sh
+            const pr = isComment
+              ? (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data
+              : context.payload.pull_request;
+            const headSha = pr.head.sha;
 
-      - name: Acknowledge in the PR thread
-        if: steps.ctx.outputs.allowed == 'true'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const cmd = "${{ steps.ctx.outputs.cmd }}";
-            const failedOnly = "${{ steps.ctx.outputs.failed_only }}" === "true";
-            const sha = "${{ steps.ctx.outputs.head_sha }}".slice(0, 8);
-            const what = cmd === "rerun-all" ? "Fly DSL test + Checks"
-                       : (cmd === "rerun-checks" ? "Checks" : "Fly DSL test");
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: `🔁 Re-running ${failedOnly ? "failed jobs of " : ""}**${what}** ` +
-                    `for \`${sha}\` (requested by @${context.payload.comment.user.login}).`,
-            });
-
-  # ---------------------------------------------------------------------------
-  # Entry point B: the `rerun-ci` label is applied to the PR.
-  # Uses pull_request_target so it has the base-repo token even for fork PRs;
-  # it still only RE-RUNS an existing run and never checks out PR code.
-  # ---------------------------------------------------------------------------
-  rerun-from-label:
-    if: >
-      github.event_name == 'pull_request_target' &&
-      github.event.label.name == 'rerun-ci'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Resolve permission and PR head SHA
-        id: ctx
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const pr = context.payload.pull_request;
-            core.setOutput("head_sha", pr.head.sha);
-
-            // Who applied the label? (github.event.sender)
-            const actor = context.payload.sender.login;
             let level = "none";
             try {
               const perm = await github.rest.repos.getCollaboratorPermissionLevel({
@@ -172,34 +67,115 @@ jobs:
             } catch (e) {
               core.warning(`permission lookup failed for ${actor}: ${e.message}`);
             }
-            const allowed = ["admin", "maintain", "write"].includes(level)
-                            || actor === pr.user.login;
-            core.setOutput("allowed", String(allowed));
-            if (!allowed) {
-              core.setFailed(`@${actor} (permission: ${level}) may not rerun CI via label.`);
+            const allowed = ["admin", "maintain", "write"].includes(level) ||
+              actor === pr.user.login;
+
+            if (isComment) {
+              try {
+                await github.rest.reactions.createForIssueComment({
+                  owner,
+                  repo,
+                  comment_id: context.payload.comment.id,
+                  content: allowed ? "rocket" : "confused",
+                });
+              } catch (e) {
+                core.warning(`could not add reaction: ${e.message}`);
+              }
             }
 
-      - name: Re-run "Fly DSL test"
-        if: steps.ctx.outputs.allowed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
-          CMD: rerun-ci
-          FAILED_ONLY: "false"
-        run: ./.github/scripts/rerun_ci.sh
+            if (!allowed) {
+              core.setFailed(
+                `@${actor} (permission: ${level}) may not rerun CI for PR #${prNumber}.`
+              );
+              return;
+            }
 
-      - name: Acknowledge in the PR thread
-        if: steps.ctx.outputs.allowed == 'true'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const sha = "${{ steps.ctx.outputs.head_sha }}".slice(0, 8);
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: `🔁 Re-running **Fly DSL test** for \`${sha}\` ` +
-                    `(\`rerun-ci\` label applied by @${context.payload.sender.login}). ` +
-                    `Tip: remove + re-add the label to trigger again, or comment \`/rerun-ci\`.`,
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+              owner,
+              repo,
+              event: "pull_request",
+              head_sha: headSha,
+              per_page: 100,
             });
+
+            const ignoredConclusions = new Set(["skipped", "neutral"]);
+            const latestByWorkflow = new Map();
+            for (const run of runs) {
+              if (run.status !== "completed" || ignoredConclusions.has(run.conclusion)) {
+                continue;
+              }
+
+              const previous = latestByWorkflow.get(run.workflow_id);
+              const runTime = Date.parse(run.updated_at || run.created_at || "");
+              const previousTime = previous
+                ? Date.parse(previous.updated_at || previous.created_at || "")
+                : 0;
+              if (!previous || runTime > previousTime) {
+                latestByWorkflow.set(run.workflow_id, run);
+              }
+            }
+
+            const targets = [...latestByWorkflow.values()]
+              .filter((run) => run.conclusion !== "success")
+              .sort((a, b) => a.name.localeCompare(b.name));
+
+            const results = [];
+            for (const run of targets) {
+              let mode = "full run";
+              if (run.conclusion === "failure") {
+                mode = "failed jobs";
+                try {
+                  await github.request(
+                    "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs",
+                    { owner, repo, run_id: run.id }
+                  );
+                } catch (e) {
+                  core.warning(
+                    `failed-jobs rerun failed for ${run.name} (${run.id}): ${e.message}; ` +
+                    "falling back to a full rerun"
+                  );
+                  mode = "full run";
+                  await github.request(
+                    "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
+                    { owner, repo, run_id: run.id }
+                  );
+                }
+              } else {
+                await github.request(
+                  "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
+                  { owner, repo, run_id: run.id }
+                );
+              }
+              results.push(`- ${run.name}: ${mode} from run ${run.id} (${run.conclusion})`);
+            }
+
+            const sha = headSha.slice(0, 8);
+            const body = results.length > 0
+              ? [
+                  `Rerun request accepted for \`${sha}\` by @${actor}.`,
+                  "",
+                  ...results,
+                ].join("\n")
+              : `No failed completed PR CI runs found for \`${sha}\`.`;
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body,
+            });
+
+            if (!isComment) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  name: "rerun-ci",
+                });
+              } catch (e) {
+                if (e.status !== 404) {
+                  core.warning(`could not remove rerun-ci label: ${e.message}`);
+                }
+              }
+            }
