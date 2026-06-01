@@ -67,6 +67,28 @@ def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
     )
 
 
+def mul_f32_row_newbcast(scale_f32, value_f32, lane: int):
+    """Multiply ``value_f32`` by ``scale_f32`` broadcast within each 16-lane row.
+
+    Emits ``v_mul_f32 ... row_newbcast:N`` so the DPP row broadcast is fused
+    into the VALU multiply instead of requiring a separate lane-permute op.
+    ``lane`` must be a compile-time integer in [0, 15].
+    """
+    from ..._mlir import ir
+    from ..._mlir.dialects import llvm as _llvm
+
+    lane = int(lane)
+    if lane < 0 or lane >= 16:
+        raise ValueError(f"row_newbcast lane must be in [0, 15], got {lane}")
+    return _llvm.inline_asm(
+        ir.F32Type.get(),
+        [_to_ir(scale_f32), _to_ir(value_f32)],
+        f"v_mul_f32 $0, $1, $2 row_newbcast:{lane} row_mask:0xf bank_mask:0xf",
+        "=v,v,v",
+        has_side_effects=False,
+    )
+
+
 def s_prefetch_inst_burst(num_pages: int = 10, page_bytes: int = 4096):
     """gfx1250: prefetch ``num_pages`` cache lines of instructions ahead of PC.
 

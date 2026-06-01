@@ -764,6 +764,7 @@ def _make_pa_phase_helpers(
         q_frags,
         causal_bound,
         query_scale_lane=None,
+        k_scale_lane=None,
         *,
         preloaded_scales=None,
     ):
@@ -780,16 +781,29 @@ def _make_pa_phase_helpers(
             for k_step in range_constexpr(qkhe_loop * 2):
                 acc = rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_ops[td][k_step], q_frags[k_step], acc, 0, 0, 0])
             if const_expr(_k_scale_per_token_eff):
-                if const_expr(cache_scale_vecs and per_token_kv):
-                    k_scale_vec = _get_k_scale_vec(td, k_scale_vecs)
+                if const_expr(k_scale_per_token and not per_token_kv):
+                    q_scale = query_scale_lane * softmax_scale_base if const_expr(per_token_q) else softmax_q_scale
+                    scaled_elems = []
+                    for i in range_constexpr(4):
+                        acc_i = vector.extract(acc, static_position=[i], dynamic_position=[])
+                        acc_i = arith.mulf(
+                            arith.unwrap(acc_i),
+                            arith.unwrap(q_scale),
+                            fastmath=arith.FastMathFlags.contract,
+                        )
+                        scaled_elems.append(rocdl.mul_f32_row_newbcast(k_scale_lane, acc_i, td * 4 + i))
+                    d_out.append(fx.Vector.from_elements(scaled_elems, dtype=fx.Float32))
                 else:
-                    k_scale_vec = _get_k_scale_vec(td)
-                scale_vec = (
-                    k_scale_vec * query_scale_vec
-                    if const_expr(per_token_q)
-                    else k_scale_vec * vector.broadcast(T.f32x4, softmax_q_scale)
-                )
-                d_out.append(acc * scale_vec)
+                    if const_expr(cache_scale_vecs and per_token_kv):
+                        k_scale_vec = _get_k_scale_vec(td, k_scale_vecs)
+                    else:
+                        k_scale_vec = _get_k_scale_vec(td)
+                    scale_vec = (
+                        k_scale_vec * query_scale_vec
+                        if const_expr(per_token_q)
+                        else k_scale_vec * vector.broadcast(T.f32x4, softmax_q_scale)
+                    )
+                    d_out.append(acc * scale_vec)
             else:
                 if const_expr(per_token_q):
                     d_out.append(acc * (query_scale_vec * vector.broadcast(T.f32x4, k_scale_val)))
@@ -2482,9 +2496,8 @@ def compile_pa_decode_ps(
         # each thread holds ONE fp32 K-scale in a loop-carried VGPR.  The
         # prologue loads iter 0's K-scale; each iter loads iter (N+1)'s
         # K-scale during its own body, hiding the buffer_load latency behind
-        # the iter's compute.  The actual ds_write to scale_lds happens at
-        # the START of the next iter (consuming the carried VGPR), with the
-        # full preceding iter's work hiding the load.
+        # the iter's compute.  The carried VGPR is consumed directly by
+        # row_newbcast during QK, avoiding the former LDS staging round-trip.
         def _ks_buffer_load_for(my_phys, my_tok):
             _H4 = _HEAD // 4
             sr_idx = my_tok // fx.Int32(_H4)
@@ -2499,24 +2512,25 @@ def compile_pa_decode_ps(
 
         def _load_my_k_scale_from_vgpr(next_phys_blocks_):
             """Issue THIS thread's K-scale buffer_load using the in-VGPR
-            ``next_phys_blocks`` (avoids LDS round-trip)."""
+            ``next_phys_blocks`` (avoids LDS round-trip).
+
+            The per-lane load order matches row_newbcast consumption:
+            lane16id = 4 * td + i owns the scale consumed by
+            row_newbcast:(4 * td + i) for this row's ith output element.
+            """
+            lane_group = lane16id >> fx.Int32(2)
+            lane_elem = lane16id & fx.Int32(3)
+            tok_in_16_lane_row = rowid * fx.Int32(4) + lane_elem
             if const_expr(_block_size == 64):
                 my_phys = next_phys_blocks_  # scalar (vec_width=1 from buffer_load)
-                my_tok = rowid * fx.Int32(MFMA_N) + lane16id
+                my_tok = lane_group * fx.Int32(MFMA_N) + tok_in_16_lane_row
             else:
-                # block_size==16: extract next_phys_blocks_[rowid] via 3 selects.
+                # block_size==16: each lane group owns one 16-token physical block.
                 my_phys = vector.extract(
-                    arith.unwrap(next_phys_blocks_), static_position=[], dynamic_position=[fx.Index(rowid)]
+                    arith.unwrap(next_phys_blocks_), static_position=[], dynamic_position=[fx.Index(lane_group)]
                 )
-                my_tok = lane16id
+                my_tok = tok_in_16_lane_row
             return _ks_buffer_load_for(my_phys, my_tok)
-
-        def _stage_k_scale_to_lds(k_scale_scalar):
-            stage_tok = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
-            fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32).store(
-                scale_lds_f32,
-                [fx.Index(stage_tok)],
-            )
 
         # Pre-load the FIRST sub-partition's K so the loop body can issue the
         # next sub-partition's K prefetch in parallel with the current K's QK
@@ -2539,7 +2553,7 @@ def compile_pa_decode_ps(
         # Prefetch iter 0's K-scale into VGPR using the VGPR phys directly
         # (avoids an LDS read-after-write hazard since `first_phys_blocks`
         # is already in registers).  Each thread holds 1 fp32; loop carries
-        # it via init and stages to scale_lds at iter 0's start.
+        # it via init and row_newbcast consumes it directly in QK.
         if const_expr(k_scale_per_token):
             k_scale_init = _load_my_k_scale_from_vgpr(first_phys_blocks)
         else:
@@ -2592,18 +2606,9 @@ def compile_pa_decode_ps(
                 vhe_loop=_VHELOOP,
             )
 
-            # ── K-scale staging from loop-carried VGPR ──
             # k_scale_cur was prefetched in the PREVIOUS iter (or prologue
-            # for iter 0), so the buffer_load latency is fully overlapped
-            # with prev iter's compute — no vmcnt drain here.
-            #
-            # No cross-warp barrier needed: each warp stages its own 64
-            # slots (warp_id*64 + ...) and `_get_k_scale_vec` reads only
-            # its own warp's slots, so K-scale staging is purely
-            # warp-local.  The compiler-emitted s_waitcnt lgkmcnt at the
-            # downstream ds_read handles the intra-wave RAW hazard.
-            if const_expr(k_scale_per_token):
-                _stage_k_scale_to_lds(k_scale_cur)
+            # for iter 0), so row_newbcast can consume it directly during QK
+            # without a VGPR -> LDS -> VGPR staging round-trip.
 
             # Compute the NEXT sub-partition's K base address (clamped to
             # local_partition_start so the prefetch on the final loop
@@ -2618,6 +2623,18 @@ def compile_pa_decode_ps(
             k_next_flat = None
             k_scale_next = None
             for _mtp_g in range_constexpr(_mtp_groups):
+                if const_expr(_mtp_g == _mtp_groups - 1):
+                    next_phys_blocks = _pa_small_block_stage_phys_blocks(next_block_base)
+                    # ── Cross-iter K-scale prefetch ──
+                    # Issue next iter's K-scale fetch using the VGPR
+                    # next_phys_blocks (avoids LDS round-trip).  Carried via
+                    # loop yield → consumed directly by next iter's row_newbcast,
+                    # giving an ENTIRE iter of compute to hide the load.
+                    # if const_expr(k_scale_per_token):
+                    #     k_scale_next = _load_my_k_scale_from_vgpr(next_phys_blocks)
+                    # # if const_expr(k_scale_per_token):
+                    # #     k_scale_next = arith.constant(1.0, type=T.f32)
+
                 state = cur_states[_mtp_g]
                 rmax, rsum = state[0], state[1]
                 outs = [state[2 + vhe] for vhe in range_constexpr(_VHELOOP)]
@@ -2629,17 +2646,13 @@ def compile_pa_decode_ps(
                     q_frags_per_mtp[_mtp_g],
                     causal_bound,
                     query_scale_lane=qscale_per_mtp[_mtp_g],
+                    k_scale_lane=k_scale_cur,
                 )
-
                 if const_expr(_mtp_g == _mtp_groups - 1):
-                    next_phys_blocks = _pa_small_block_stage_phys_blocks(next_block_base)
-                    # ── Cross-iter K-scale prefetch ──
-                    # Issue next iter's K-scale fetch using the VGPR
-                    # next_phys_blocks (avoids LDS round-trip).  Carried via
-                    # loop yield → consumed at next iter's `_stage_k_scale_to_lds`,
-                    # giving an ENTIRE iter of compute to hide the load.
                     if const_expr(k_scale_per_token):
                         k_scale_next = _load_my_k_scale_from_vgpr(next_phys_blocks)
+                    # if const_expr(k_scale_per_token):
+                    #     k_scale_next = arith.constant(1.0, type=T.f32)
 
                 gpu.barrier()
 
@@ -2652,6 +2665,8 @@ def compile_pa_decode_ps(
                 # overlap with the upcoming PV MFMA compute.
                 if const_expr(_mtp_g == _mtp_groups - 1):
                     _pa_small_block_store_phys_blocks_to_lds(next_phys_blocks)
+                gpu.barrier()
+                if const_expr(_mtp_g == _mtp_groups - 1):
                     k_next_flat = _pa_small_block_load_k_flat(
                         k_global_ptr,
                         kv_h,
@@ -2663,7 +2678,6 @@ def compile_pa_decode_ps(
                         phys_blocks=next_phys_blocks,
                         qkhe_loop=_QKHELOOP,
                     )
-                gpu.barrier()
                 outs = _pv_mfma(v_results, outs, v_correction)
                 new_states.append(tuple([rmax, rsum] + outs))
 
