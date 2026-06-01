@@ -792,22 +792,6 @@ def compile_moe_sorting_oneshot_fused(
 
     gating_layout = _compute_topk_gating_layout(E, topk, dtype_str)
 
-    def _to_index(v):
-        raw = v.ir_value() if hasattr(v, "ir_value") else v
-        if isinstance(raw.type, ir.IndexType):
-            return raw
-        return ArithValue(v).index_cast(T.index)
-
-    def _lds_load(raw_mr, idx):
-        return fx.Int32(memref_ops.load(raw_mr, [_to_index(idx)]))
-
-    def _lds_store(raw_mr, val, idx):
-        v = val.ir_value() if hasattr(val, "ir_value") else val
-        memref_ops.store(v, raw_mr, [_to_index(idx)])
-
-    def _unwrap(v):
-        return v.ir_value() if hasattr(v, "ir_value") else v
-
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def moe_sorting_oneshot_fused_kernel(
         gating_logits: fx.Tensor,
@@ -894,7 +878,7 @@ def compile_moe_sorting_oneshot_fused(
                 is_valid = idx < fx.Int32(sub_tokens * smem_cols)
                 safe_idx = is_valid.select(idx, c_zero_i32)
                 safe_idx_ix = ArithValue(safe_idx).index_cast(T.index)
-                _lds_store(mesh_mr, c_zero_i32, safe_idx_ix)
+                _lds_store_raw(mesh_mr, c_zero_i32, safe_idx_ix)
             # Make the mesh clear visible to the gating callback writes
             # (gating's leader lanes update individual cells immediately
             # after this barrier).
@@ -913,12 +897,12 @@ def compile_moe_sorting_oneshot_fused(
             # bits to sorted_w which is also accessed via the i32 path).
             def on_winner_idx(local_token, global_token, k_int, expert_idx):
                 mesh_idx = local_token * c_smem_cols + expert_idx
-                _lds_store(mesh_mr, fx.Int32(k_int + 1), mesh_idx)
+                _lds_store_raw(mesh_mr, fx.Int32(k_int + 1), mesh_idx)
 
             def on_winner_weight(local_token, global_token, k_int, weight):
                 w_bits = ArithValue(weight).bitcast(T.i32)
                 w_idx = local_token * c_topk + fx.Int32(k_int)
-                _lds_store(weights_lds_mr, fx.Int32(w_bits), w_idx)
+                _lds_store_raw(weights_lds_mr, fx.Int32(w_bits), w_idx)
 
             _emit_topk_gating_softmax_body(
                 gating_logits,
@@ -946,7 +930,7 @@ def compile_moe_sorting_oneshot_fused(
             width8_i32 = fx.Int32(8)
 
             is_t0 = tid == c_zero_i32
-            _lds_store(cumsum_mr, c_zero_i32, c_zero_i32)
+            _lds_store_raw(cumsum_mr, c_zero_i32, c_zero_i32)
             gpu.barrier()
 
             for i_e in range_constexpr(0, E, BLOCK_SIZE // 8):
@@ -963,7 +947,7 @@ def compile_moe_sorting_oneshot_fused(
                     safe_eid = combined_valid.select(eid_local, c_zero_i32)
                     mesh_rd_addr = safe_sub * c_smem_cols + safe_eid
                     mesh_rd_ix = ArithValue(mesh_rd_addr).index_cast(T.index)
-                    mesh_val = _lds_load(mesh_mr, mesh_rd_ix)
+                    mesh_val = _lds_load_raw(mesh_mr, mesh_rd_ix)
 
                     has_token = combined_valid.select(
                         (mesh_val != c_zero_i32).select(c_one_i32, c_zero_i32),
@@ -981,7 +965,7 @@ def compile_moe_sorting_oneshot_fused(
                 cs_idx = write_valid.select(eid_local + c_one_i32, c_zero_i32)
                 cs_ix = ArithValue(cs_idx).index_cast(T.index)
                 cs_val = write_valid.select(cnt, c_zero_i32)
-                _lds_store(cumsum_mr, cs_val, cs_ix)
+                _lds_store_raw(cumsum_mr, cs_val, cs_ix)
             gpu.barrier()
 
             for i_cvt in range_constexpr(0, E, BLOCK_SIZE):
@@ -989,10 +973,10 @@ def compile_moe_sorting_oneshot_fused(
                 cvt_valid = cvt_eid < c_E
                 safe_cvt_idx = cvt_valid.select(cvt_eid + c_one_i32, c_zero_i32)
                 cvt_ix = ArithValue(safe_cvt_idx).index_cast(T.index)
-                raw_cnt_cvt = _lds_load(cumsum_mr, cvt_ix)
+                raw_cnt_cvt = _lds_load_raw(cumsum_mr, cvt_ix)
                 blocks_cvt = (raw_cnt_cvt + c_unit - c_one_i32) // c_unit
                 padded_cvt = (raw_cnt_cvt == c_zero_i32).select(c_zero_i32, blocks_cvt * c_unit)
-                _lds_store(cumsum_mr, cvt_valid.select(padded_cvt, c_zero_i32), cvt_ix)
+                _lds_store_raw(cumsum_mr, cvt_valid.select(padded_cvt, c_zero_i32), cvt_ix)
             gpu.barrier()
 
             if has_mask:
@@ -1003,7 +987,7 @@ def compile_moe_sorting_oneshot_fused(
                     ep_m = buffer_ops.buffer_load(mask_rsrc, ep_safe_eid, vec_width=1, dtype=T.i32)
                     should_zero = ep_valid & (ep_m == c_zero_i32)
                     ep_cs_ix = ArithValue(ep_valid.select(ep_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
-                    _lds_store(cumsum_mr, should_zero.select(c_zero_i32, _lds_load(cumsum_mr, ep_cs_ix)), ep_cs_ix)
+                    _lds_store_raw(cumsum_mr, should_zero.select(c_zero_i32, _lds_load_raw(cumsum_mr, ep_cs_ix)), ep_cs_ix)
                 gpu.barrier()
 
             is_wave0 = wave == c_zero_i32
@@ -1014,12 +998,12 @@ def compile_moe_sorting_oneshot_fused(
                 eid_ps_valid = is_wave0 & (eid_ps < c_E)
                 safe_eid_ps = eid_ps_valid.select(eid_ps + c_one_i32, c_zero_i32)
                 ps_ix = ArithValue(safe_eid_ps).index_cast(T.index)
-                val = eid_ps_valid.select(_lds_load(cumsum_mr, ps_ix), c_zero_i32)
+                val = eid_ps_valid.select(_lds_load_raw(cumsum_mr, ps_ix), c_zero_i32)
 
                 val = _dpp_intra_wave_prefix_sum(val, lane, WARP_SIZE)
                 val = val + prev_chunk_total
 
-                _lds_store(
+                _lds_store_raw(
                     cumdup_mr, eid_ps_valid.select(val, c_zero_i32), eid_ps_valid.select(eid_ps + c_one_i32, c_zero_i32)
                 )
 
@@ -1027,11 +1011,11 @@ def compile_moe_sorting_oneshot_fused(
                 prev_chunk_total = fly_rocdl.ds_bpermute(T.i32, last_addr, val)
                 prev_chunk_total = fx.Int32(prev_chunk_total)
 
-            _lds_store(cumdup_mr, is_t0.select(c_zero_i32, _lds_load(cumdup_mr, c_zero_i32)), c_zero_i32)
+            _lds_store_raw(cumdup_mr, is_t0.select(c_zero_i32, _lds_load_raw(cumdup_mr, c_zero_i32)), c_zero_i32)
             gpu.barrier()
 
             cs_E_ix_ps = ArithValue(c_E).index_cast(T.index)
-            total_padded = _lds_load(cumdup_mr, cs_E_ix_ps)
+            total_padded = _lds_load_raw(cumdup_mr, cs_E_ix_ps)
             buffer_ops.buffer_store(total_padded, nvalid_rsrc, c_zero_i32)
             buffer_ops.buffer_store(tokens, nvalid_rsrc, c_one_i32)
             gpu.barrier()
@@ -1041,8 +1025,8 @@ def compile_moe_sorting_oneshot_fused(
                 cp_valid = cp_idx <= c_E
                 safe_cp_idx = cp_valid.select(cp_idx, c_zero_i32)
                 cp_ix = ArithValue(safe_cp_idx).index_cast(T.index)
-                cp_val = _lds_load(cumdup_mr, cp_ix)
-                _lds_store(cumsum_mr, cp_val, cp_ix)
+                cp_val = _lds_load_raw(cumdup_mr, cp_ix)
+                _lds_store_raw(cumsum_mr, cp_val, cp_ix)
             gpu.barrier()
 
             if has_mask:
@@ -1053,8 +1037,8 @@ def compile_moe_sorting_oneshot_fused(
                     ml_mask = buffer_ops.buffer_load(mask_rsrc, safe_ml_eid, vec_width=1, dtype=T.i32)
                     ml_val = ml_valid.select(ml_mask, c_zero_i32)
                     ml_ix = ArithValue(ml_valid.select(ml_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
-                    _lds_store(cumdup_mr, ml_val, ml_ix)
-                _lds_store(cumdup_mr, is_t0.select(c_zero_i32, _lds_load(cumdup_mr, c_zero_i32)), c_zero_i32)
+                    _lds_store_raw(cumdup_mr, ml_val, ml_ix)
+                _lds_store_raw(cumdup_mr, is_t0.select(c_zero_i32, _lds_load_raw(cumdup_mr, c_zero_i32)), c_zero_i32)
                 gpu.barrier()
 
                 prev_chunk_total_m = c_zero_i32
@@ -1063,11 +1047,11 @@ def compile_moe_sorting_oneshot_fused(
                     eid_m_valid = is_wave0 & (eid_m < c_E)
                     safe_eid_m = eid_m_valid.select(eid_m + c_one_i32, c_zero_i32)
                     m_ix = ArithValue(safe_eid_m).index_cast(T.index)
-                    mval = eid_m_valid.select(_lds_load(cumdup_mr, m_ix), c_zero_i32)
+                    mval = eid_m_valid.select(_lds_load_raw(cumdup_mr, m_ix), c_zero_i32)
 
                     mval = _dpp_intra_wave_prefix_sum(mval, lane, WARP_SIZE)
                     mval = mval + prev_chunk_total_m
-                    _lds_store(
+                    _lds_store_raw(
                         cumdup_mr,
                         eid_m_valid.select(mval, c_zero_i32),
                         eid_m_valid.select(eid_m + c_one_i32, c_zero_i32),
@@ -1077,7 +1061,7 @@ def compile_moe_sorting_oneshot_fused(
                     prev_chunk_total_m = fly_rocdl.ds_bpermute(T.i32, last_addr_m, mval)
                     prev_chunk_total_m = fx.Int32(prev_chunk_total_m)
 
-                _lds_store(cumdup_mr, is_t0.select(c_zero_i32, _lds_load(cumdup_mr, c_zero_i32)), c_zero_i32)
+                _lds_store_raw(cumdup_mr, is_t0.select(c_zero_i32, _lds_load_raw(cumdup_mr, c_zero_i32)), c_zero_i32)
                 gpu.barrier()
             else:
                 for i_ml in range_constexpr(0, E, BLOCK_SIZE):
@@ -1085,7 +1069,7 @@ def compile_moe_sorting_oneshot_fused(
                     ml_valid = ml_eid < c_E
                     safe_ml_eid = ml_valid.select(ml_eid, c_zero_i32)
                     ml_ix = ArithValue(safe_ml_eid).index_cast(T.index)
-                    _lds_store(cumdup_mr, ml_valid.select(safe_ml_eid, c_zero_i32), ml_ix)
+                    _lds_store_raw(cumdup_mr, ml_valid.select(safe_ml_eid, c_zero_i32), ml_ix)
                 gpu.barrier()
 
             for i_eid in range_constexpr(0, E, BLOCK_SIZE):
@@ -1095,11 +1079,11 @@ def compile_moe_sorting_oneshot_fused(
 
                 cs_start_ix = ArithValue(safe_eid_wr).index_cast(T.index)
                 cs_end_ix = ArithValue(safe_eid_wr + c_one_i32).index_cast(T.index)
-                e_start = _lds_load(cumsum_mr, cs_start_ix)
-                e_end = eid_wr_valid.select(_lds_load(cumsum_mr, cs_end_ix), e_start)
-                local_eid = _lds_load(cumdup_mr, cs_start_ix)
+                e_start = _lds_load_raw(cumsum_mr, cs_start_ix)
+                e_end = eid_wr_valid.select(_lds_load_raw(cumsum_mr, cs_end_ix), e_start)
+                local_eid = _lds_load_raw(cumdup_mr, cs_start_ix)
 
-                _lds_store(cumdup_mr, e_start, cs_start_ix)
+                _lds_store_raw(cumdup_mr, e_start, cs_start_ix)
 
                 blk_start = e_start // c_unit
                 blk_end = e_end // c_unit
@@ -1111,8 +1095,8 @@ def compile_moe_sorting_oneshot_fused(
             gpu.barrier()
 
             cs_E_ix = ArithValue(c_E).index_cast(T.index)
-            cumE = _lds_load(cumsum_mr, cs_E_ix)
-            _lds_store(cumdup_mr, cumE, cs_E_ix)
+            cumE = _lds_load_raw(cumsum_mr, cs_E_ix)
+            _lds_store_raw(cumdup_mr, cumE, cs_E_ix)
             gpu.barrier()
 
             # ====================== PHASE 3: Scatter ==============================
@@ -1129,7 +1113,7 @@ def compile_moe_sorting_oneshot_fused(
                     sc_expert_enabled = eid_sc_valid & (sc_mask_val != c_zero_i32)
 
                 cs_sc_ix = ArithValue(safe_eid_sc).index_cast(T.index)
-                position = _lds_load(cumsum_mr, cs_sc_ix)
+                position = _lds_load_raw(cumsum_mr, cs_sc_ix)
 
                 for i_sub2 in range_constexpr(0, sub_tokens, 8):
                     my_sub = fx.Int32(i_sub2) + lane_group_os
@@ -1137,12 +1121,12 @@ def compile_moe_sorting_oneshot_fused(
                     safe_my_sub = my_sub_valid.select(my_sub, c_zero_i32)
                     my_mesh_addr = safe_my_sub * c_smem_cols + safe_eid_sc
                     my_mesh_ix = ArithValue(my_mesh_addr).index_cast(T.index)
-                    my_x = _lds_load(mesh_mr, my_mesh_ix)
+                    my_x = _lds_load_raw(mesh_mr, my_mesh_ix)
                     my_has_token = my_sub_valid & (my_x != c_zero_i32)
                     local_cnt = my_has_token.select(c_one_i32, c_zero_i32)
 
-                    cnt_raw = _unwrap(local_cnt)
-                    zero_raw = _unwrap(c_zero_i32)
+                    cnt_raw = _unwrap_val(local_cnt)
+                    zero_raw = _unwrap_val(c_zero_i32)
 
                     remote = fly_rocdl.update_dpp(
                         T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_1, DPP_ROW_MASK, DPP_BANK_MASK, True
@@ -1150,14 +1134,14 @@ def compile_moe_sorting_oneshot_fused(
                     should_add = lane_group_os >= c_one_i32
                     local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
 
-                    cnt_raw = _unwrap(local_cnt)
+                    cnt_raw = _unwrap_val(local_cnt)
                     remote = fly_rocdl.update_dpp(
                         T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_2, DPP_ROW_MASK, DPP_BANK_MASK, True
                     )
                     should_add = lane_group_os >= fx.Int32(2)
                     local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
 
-                    cnt_raw = _unwrap(local_cnt)
+                    cnt_raw = _unwrap_val(local_cnt)
                     remote = fly_rocdl.update_dpp(
                         T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_4, DPP_ROW_MASK, DPP_BANK_MASK, True
                     )
@@ -1180,12 +1164,12 @@ def compile_moe_sorting_oneshot_fused(
                     # instead of HBM. `my_sub` is the per-token local index
                     # 0..max_tokens-1; topk_slot_sc identifies the K rank.
                     w_lds_idx = my_has_token.select(my_sub * c_topk + topk_slot_sc, c_zero_i32)
-                    w_val_i32 = _lds_load(weights_lds_mr, w_lds_idx)
+                    w_val_i32 = _lds_load_raw(weights_lds_mr, w_lds_idx)
                     buffer_ops.buffer_store(w_val_i32, sorted_w_rsrc, safe_slot)
 
                     position = position + batch_total
 
-                _lds_store(cumsum_mr, position, cs_sc_ix)
+                _lds_store_raw(cumsum_mr, position, cs_sc_ix)
             gpu.barrier()
 
             sentinel_val = c_sentinel | tokens
@@ -1197,8 +1181,8 @@ def compile_moe_sorting_oneshot_fused(
 
                 cs_pad_ix = ArithValue(safe_eid_pad).index_cast(T.index)
                 cdp_ix = ArithValue(safe_eid_pad + c_one_i32).index_cast(T.index)
-                pad_start = _lds_load(cumsum_mr, cs_pad_ix)
-                pad_end = pad_valid.select(_lds_load(cumdup_mr, cdp_ix), pad_start)
+                pad_start = _lds_load_raw(cumsum_mr, cs_pad_ix)
+                pad_end = pad_valid.select(_lds_load_raw(cumdup_mr, cdp_ix), pad_start)
 
                 for j_pad in range_constexpr(unit_size):
                     pad_slot = pad_start + fx.Int32(j_pad)
