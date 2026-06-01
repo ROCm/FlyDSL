@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""融合 MoE Stage2 GEMM + EP Combine kernel。
+"""Fused MoE Stage2 GEMM + EP combine kernel.
 
-将 GEMM2 epilogue 中的本地 store_pair 改写为远端 P2P buffer_store，
-内联 combine Stage 1 的 P2P scatter。
+Rewrites the GEMM2 epilogue's local store_pair into a remote P2P
+buffer_store, inlining combine Stage 1's P2P scatter.
 
-模式：
-  - ``stage1_only``: 仅内联 Stage 1，host 端再 launch 裁剪后的 combine
-    跑 Stage 2/3。不需要 grid persistent。
-  - ``full``: Stage 2 (xdev barrier) + Stage 3 (weighted-accum) 一并内联，
-    要求 GEMM2 grid 完整 resident（PR2）。
+Modes:
+  - ``stage1_only``: inline Stage 1 only; the host then launches a
+    trimmed combine to run Stage 2/3. Grid persistence not required.
+  - ``full``: inline Stage 2 (xdev barrier) + Stage 3 (weighted accum)
+    as well; requires the GEMM2 grid to be fully resident (PR2).
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def compile_fused_moe_gemm2_combine(
     xcd_swizzle: int = 0,
     use_token_flag_sync: bool = False,
 ):
-    """编译融合 GEMM2+combine kernel，返回 host launcher。"""
+    """Compile the fused GEMM2+combine kernel and return its host launcher."""
     if mode == "full":
         raise NotImplementedError(
             "fused mode='full' not yet implemented (PR2). "
@@ -51,25 +51,24 @@ def compile_fused_moe_gemm2_combine(
     if mode != "stage1_only":
         raise ValueError(f"mode must be 'stage1_only' or 'full', got {mode!r}")
 
-    # 方案 B (slot = dest_lid * k + s) 要求 mt*k <= mr 才能复用 baseline 的
-    # shmem_comb_inp_tok (size = mr)；等价于 k <= npes。
+    # Plan B (slot = dest_lid * k + s) requires mt*k <= mr to reuse the
+    # baseline shmem_comb_inp_tok (size = mr), which is equivalent to k <= npes.
     if topk > npes:
         raise ValueError(
             f"fused GEMM2+combine (Plan B) requires topk <= npes; "
-            f"got topk={topk}, npes={npes}. "
-            "Plan B 的 (dest_lid * k + s) slot 需要 mt*k <= mr 才能复用 baseline buffer。"
+            f"got topk={topk}, npes={npes}."
         )
     if topk != experts_per_token:
         raise ValueError(
             f"topk ({topk}) must equal experts_per_token ({experts_per_token}) "
-            "in Plan B; sorted_token_ids 的 s 字段直接当 j_global slot id 用。"
+            "in Plan B; sorted_token_ids' s field is used directly as j_global."
         )
     if model_dim % tile_n != 0:
         raise ValueError(f"model_dim={model_dim} must be divisible by tile_n={tile_n}")
     if inter_dim % tile_k != 0:
         raise ValueError(f"inter_dim={inter_dim} must be divisible by tile_k={tile_k}")
     if (max_tok_per_rank & (max_tok_per_rank - 1)) != 0:
-        # epilogue 用 shift+mask 解码 dest_enc -> (dest_pe, dest_lid)
+        # Epilogue decodes dest_enc -> (dest_pe, dest_lid) via shift+mask.
         raise ValueError(
             f"max_tok_per_rank={max_tok_per_rank} must be a power of two."
         )
@@ -80,16 +79,18 @@ def compile_fused_moe_gemm2_combine(
     )
     if not fp8_cast and out_s not in ("bf16", "bfloat16", "f16", "fp16"):
         raise ValueError(
-            f"fused 模式输出必须是 bf16/f16 或 fp8e4m3fn, got {out_dtype!r}"
+            f"fused mode output must be bf16/f16 or fp8e4m3fn, got {out_dtype!r}"
         )
 
-    # in-kernel 权重 P2P scatter 不可靠（fabric 饱和时 ~16B 小写会丢，
-    # s_waitcnt+gpu.barrier 无法 grid-wide 等待其它块的 token 写排空），
-    # 一律由后续的 combine_no_stage1 轻量 Stage 1 处理。fused_cfg[3] 即
-    # enable_weights，固定 False。
+    # In-kernel weight P2P scatter is unreliable (~16B writes drop under
+    # fabric saturation, and s_waitcnt+gpu.barrier cannot grid-wide wait
+    # for other blocks' token writes to drain), so weights are always
+    # handled by the subsequent lightweight combine_no_stage1 Stage 1.
+    # fused_cfg[3] = enable_weights is therefore pinned to False.
     #
-    # fp8_cast=True 时 GEMM2 内部仍输出 bf16（保持 c_shuffle LDS/frag dtype），
-    # store_pair 处再做 bf16->fp32->cvt_pk_fp8 转换并按 1B/elem 写出。
+    # With fp8_cast=True the GEMM2 still emits bf16 internally (preserves
+    # the c_shuffle LDS/frag dtype); the store_pair site does the bf16 ->
+    # fp32 -> cvt_pk_fp8 conversion and writes 1B/elem out.
     fused_cfg = (
         int(npes),
         int(rank),
@@ -127,9 +128,11 @@ def estimate_max_resident_blocks(
     lds_bytes_per_block: int = 0,
     vgpr_per_thread: int = 96,
 ):
-    """估算 grid-wide 最大常驻 block 数，供 ``mode='full'`` 做 occupancy check。
+    """Estimate grid-wide max resident block count for ``mode='full'``
+    occupancy checks.
 
-    PR1 占位实现：硬编码 CU 数 + 1024 thread/CU 配额；后续接 ROCm 属性查询。
+    PR1 placeholder: hard-coded CU count + 1024 thread/CU budget; will be
+    wired to live ROCm device-property queries later.
     """
     cu_count = {
         "gfx950": 256,
