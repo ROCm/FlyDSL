@@ -51,15 +51,20 @@ from kernels.kernels_common import get_warp_size
 _WORK_INFO_FIELDS = 8
 
 
-def get_pa_metadata_info_v1(batch_size: int, num_head_k: int = 1):
+def get_pa_metadata_info_v1(batch_size: int, num_head_k: int = 1, num_cu: int = None):
     """Buffer sizes/dtypes, matching ``aiter.get_pa_metadata_info_v1``.
 
     Returns (shape, dtype) tuples for:
       work_metadata_ptrs, work_indptr, work_info_set,
       reduce_indptr, reduce_final_map, reduce_partial_map.
+
+    ``num_cu`` overrides the worklist bin count (default = device CU count);
+    pass a multiple of the CU count to oversubscribe the persistent grid.
     """
-    gpu = torch.cuda.current_device()
-    cu_num = torch.cuda.get_device_properties(gpu).multi_processor_count
+    if num_cu is None:
+        gpu = torch.cuda.current_device()
+        num_cu = torch.cuda.get_device_properties(gpu).multi_processor_count
+    cu_num = num_cu
 
     tile_cnt = batch_size
     max_work = (tile_cnt + cu_num - 1) * num_head_k
@@ -445,19 +450,24 @@ def get_pa_metadata_v1(
     fast_mode: bool = True,
     topk: int = -1,
     max_split_per_batch: int = -1,
+    num_cu: int = None,
 ) -> None:
     """Drop-in replacement for ``aiter.ops.attention.get_pa_metadata_v1``.
 
     PA-decode-specialized: requires causal, non-sparse, uniform qo. Fills
     ``work_indptr`` and ``work_info`` in-place; ``reduce_*`` are left untouched
     (the caller recomputes them from work_indptr/work_info).
+
+    ``num_cu`` overrides the worklist bin count (default = device CU count);
+    pass a multiple of the CU count to oversubscribe the persistent grid.
     """
     assert is_causal, "FlyDSL pa_metadata only supports causal"
     assert topk == -1, "FlyDSL pa_metadata does not support sparse (topk)"
     assert uni_seqlen_qo >= 1, "FlyDSL pa_metadata requires uniform qo length"
 
     dev = pages_kv_indptr.device
-    num_cu = torch.cuda.get_device_properties(dev).multi_processor_count
+    if num_cu is None:
+        num_cu = torch.cuda.get_device_properties(dev).multi_processor_count
     num_batches = context_lens.shape[0]
     query_length = uni_seqlen_qo
     warp_size = get_warp_size(get_rocm_arch())

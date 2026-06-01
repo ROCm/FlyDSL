@@ -34,6 +34,10 @@ from kernels.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_red
 # ── Kernel geometry constants ────────────────────────────────────────
 KV_BLOCK_SIZE = 1024  # physical page size (matches SP3 kBlockSize)
 KV_COMPUTE_BLOCK = 256  # tile size (matches SP3 kTileKV)
+# Persistent-grid oversubscription for the metadata decode path: launch
+# CU_count * this many workgroups so the HW keeps multiple workgroups resident
+# per CU (memory-latency hiding).  1 = original (1 wg/CU).
+_PA_METADATA_GRID_OVERSUB = 3
 NUM_WARPS = 4
 WARP_SIZE = 64
 BLOCK_THREADS = NUM_WARPS * WARP_SIZE  # 256
@@ -1789,7 +1793,14 @@ def get_pa_metadata(
     head_size = query.shape[-1]
 
     props = torch.cuda.get_device_properties(dev)
-    num_sm = props.multi_processor_count
+    # Oversubscribe the persistent grid: the decode kernel is memory-latency-bound
+    # and only ~3 workgroups/CU fit by VGPR, but the worklist defaults to 1 wg/CU
+    # (grid = CU count).  Distributing work across num_cu = CU_count * OVERSUB bins
+    # (and launching that many workgroups) lets the HW keep multiple workgroups
+    # resident per CU → more waves in flight → better latency hiding.
+    base_cu = props.multi_processor_count
+    num_sm = base_cu * _PA_METADATA_GRID_OVERSUB
+    num_sm = (num_sm // num_kv_heads) * num_kv_heads  # keep divisible by num_kv_heads
 
     seqlens_qo_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=dev) * query_length
 
@@ -1810,7 +1821,7 @@ def get_pa_metadata(
         (reduce_indptr_size, reduce_indptr_type),
         (reduce_final_map_size, reduce_final_map_type),
         (reduce_partial_map_size, reduce_partial_map_type),
-    ) = get_pa_metadata_info_v1(batch_size, num_kv_heads)
+    ) = get_pa_metadata_info_v1(batch_size, num_kv_heads, num_cu=num_sm)
 
     work_metadata_ptrs = torch.empty(work_meta_data_size, dtype=work_meta_data_type, device=dev)
     work_indptr = torch.empty(work_indptr_size, dtype=work_indptr_type, device=dev)
@@ -1838,6 +1849,7 @@ def get_pa_metadata(
         uni_seqlen_qo=query_length,
         fast_mode=True,
         max_split_per_batch=-1,
+        num_cu=num_sm,
     )
 
     # The FlyDSL get_pa_metadata_v1 produces the reduce_* maps natively
