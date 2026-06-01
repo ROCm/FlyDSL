@@ -987,7 +987,9 @@ def compile_moe_sorting_oneshot_fused(
                     ep_m = buffer_ops.buffer_load(mask_rsrc, ep_safe_eid, vec_width=1, dtype=T.i32)
                     should_zero = ep_valid & (ep_m == c_zero_i32)
                     ep_cs_ix = ArithValue(ep_valid.select(ep_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
-                    _lds_store_raw(cumsum_mr, should_zero.select(c_zero_i32, _lds_load_raw(cumsum_mr, ep_cs_ix)), ep_cs_ix)
+                    _lds_store_raw(
+                        cumsum_mr, should_zero.select(c_zero_i32, _lds_load_raw(cumsum_mr, ep_cs_ix)), ep_cs_ix
+                    )
                 gpu.barrier()
 
             is_wave0 = wave == c_zero_i32
