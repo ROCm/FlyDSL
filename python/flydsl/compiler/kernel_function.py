@@ -500,6 +500,8 @@ class KernelFunction:
             closure=func.__closure__,
         )
         self._original_func.__kwdefaults__ = func.__kwdefaults__
+        self._original_func.__qualname__ = func.__qualname__
+        self._original_func.__module__ = func.__module__
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
         self._name = name

@@ -1043,6 +1043,8 @@ class JitFunction:
             closure=func.__closure__,
         )
         self._original_func.__kwdefaults__ = func.__kwdefaults__
+        self._original_func.__qualname__ = func.__qualname__
+        self._original_func.__module__ = func.__module__
         self.func = ASTRewriter.transform(func)
         self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
