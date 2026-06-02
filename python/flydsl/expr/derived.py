@@ -7,6 +7,7 @@ from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .meta import traced_op
 from .numeric import Boolean, Numeric
 from .primitive import *
+from .primitive import _coerce_int_tuple
 from .typing import Int8, Layout, Tensor, TiledCopy, TiledMma
 
 __all__ = [
@@ -34,7 +35,7 @@ class ThrCopy(TiledCopy):
         super().__init__(tiled_copy)
         self.tiled_copy = tiled_copy
         self._thr_idx = thr_idx
-        self._thr_idx_int = make_int_tuple(self.thr_idx)
+        self._thr_idx_int = _coerce_int_tuple(self.thr_idx)
 
     @property
     def thr_idx(self):
@@ -64,7 +65,7 @@ class ThrMma(TiledMma):
         super().__init__(tiled_mma)
         self.tiled_mma = tiled_mma
         self._thr_idx = thr_idx
-        self._thr_idx_int = make_int_tuple(self.thr_idx)
+        self._thr_idx_int = _coerce_int_tuple(self.thr_idx)
 
     @property
     def thr_idx(self):
@@ -93,8 +94,8 @@ def make_rmem_tensor(shape_or_layout, dtype, *, loc=None, ip=None):
         tensor = make_rmem_tensor(8, fx.Float32)
         tensor = make_rmem_tensor(make_layout(4, 1), fx.Float16)
     """
-    if not issubclass(dtype, Numeric):
-        raise TypeError(f"dtype must be a Numeric type, but got {type(dtype)}")
+    if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+        raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
     elem_ty = dtype.ir_type if dtype is not Boolean else Int8.ir_type
 
     if not isinstance(shape_or_layout, Layout):

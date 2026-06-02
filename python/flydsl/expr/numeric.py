@@ -10,7 +10,6 @@ import numpy as np
 from .._mlir import ir
 from .._mlir.dialects import arith
 from .._mlir.extras import types as T
-from ..utils import log
 from .utils.arith import (
     ArithValue,
     _to_raw,
@@ -171,14 +170,17 @@ class NumericMeta(type):
 _CMP_OPS = frozenset({operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operator.ne})
 
 
-def _widen_narrow_int(x, widen_bool=False):
-    """Promote sub-32-bit integers (and optionally bools) to i32."""
-    ty = type(x)
-    if ty is Boolean and not widen_bool:
-        return x, ty
-    if ty.is_integer and ty.width < 32:
+def _widen_bool_to_int32(x, widen_bool=False):
+    """Promote Boolean to Int32 for arithmetic when widen_bool=True.
+
+    Per C++-style usual arithmetic conversions, we deliberately do NOT apply
+    integer promotion: i8/i16/u8/u16 stay at their narrow width.
+    Same-width same-signedness operands keep their type; cross-width or
+    cross-sign mixing is resolved by ``_coerce_operands``.
+    """
+    if widen_bool and type(x) is Boolean:
         return x.to(Int32), Int32
-    return x, ty
+    return x, type(x)
 
 
 def _resolve_float_type(ta, tb):
@@ -205,8 +207,8 @@ def _resolve_float_type(ta, tb):
 def _coerce_operands(a, b, widen_bool=False):
     """Promote *a* and *b* to a common scalar type."""
     ta, tb = type(a), type(b)
-    a, ta = _widen_narrow_int(a, widen_bool=widen_bool)
-    b, tb = _widen_narrow_int(b, widen_bool=widen_bool)
+    a, ta = _widen_bool_to_int32(a, widen_bool=widen_bool)
+    b, tb = _widen_bool_to_int32(b, widen_bool=widen_bool)
 
     if ta is tb:
         return a, b, ta
@@ -245,48 +247,6 @@ def _extract_arith(val, signed):
     """Unwrap Numeric.value, attaching signedness if it's an ArithValue."""
     v = val.value
     return v.with_signedness(signed) if isinstance(v, ArithValue) else v
-
-
-def _unwrap_value(value):
-    """Convert FlyDSL wrappers to raw MLIR values when possible."""
-    if isinstance(value, ir.Value):
-        return value
-    if isinstance(value, (bool, int, float)):
-        try:
-            return as_numeric(value).ir_value()
-        except Exception:
-            log().error(f"failed to construct {as_numeric(value)} from {value}")
-            return value
-    if hasattr(value, "__extract_to_ir_values__"):
-        values = value.__extract_to_ir_values__()
-        if len(values) == 1:
-            return values[0]
-    if hasattr(value, "ir_value"):
-        return value.ir_value()
-    return value
-
-
-def _wrap_like(value, exemplar=None):
-    """Wrap an MLIR value back to a FlyDSL wrapper when possible."""
-    if not isinstance(value, ir.Value):
-        return value
-
-    if exemplar is not None:
-        if isinstance(exemplar, Numeric):
-            return type(exemplar)(value)
-        ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
-        if ctor is not None:
-            try:
-                return ctor([value])
-            except Exception:
-                log().error(f"failed to construct {type(exemplar)} from {value}")
-                return value
-
-    try:
-        return Numeric.from_ir_type(value.type)(value)
-    except Exception:
-        log().error(f"failed to construct {Numeric.from_ir_type(value.type)} from {value}")
-        return value
 
 
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
@@ -331,7 +291,10 @@ class Numeric(metaclass=NumericMeta):
 
     def select(self, true_value, false_value, *, loc=None):
         """Ternary select (for Boolean conditions from Int32 comparisons)."""
-        return ArithValue(self).select(true_value, false_value, loc=loc)
+        from .typing import as_dsl_value
+
+        result = ArithValue(self).select(true_value, false_value, loc=loc)
+        return as_dsl_value(result, true_value)
 
     @classmethod
     def __coerce__(cls, value):
@@ -453,6 +416,9 @@ class Numeric(metaclass=NumericMeta):
             T.ui32(): Uint32,
             T.ui16(): Uint16,
             T.ui8(): Uint8,
+            T.i(128): Int128,
+            T.si(128): Int128,
+            T.ui(128): Uint128,
             T.f8E5M2(): Float8E5M2,
             T.f8E4M3(): Float8E4M3,
             T.f8E4M3FN(): Float8E4M3FN,
@@ -551,6 +517,13 @@ class Numeric(metaclass=NumericMeta):
 
     def __ge__(self, other, *, loc=None, ip=None):
         return _make_binop(operator.ge)(self, other, loc=loc, ip=ip)
+
+    def bitcast(self, dtype, *, loc=None, ip=None):
+        """Reinterpret this value's bits as *dtype* (a same-width Numeric type)."""
+        if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+            raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
+        res = arith.BitcastOp(dtype.ir_type, self.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+        return dtype(res, loc=loc, ip=ip)
 
 
 def as_numeric(obj):
@@ -717,6 +690,11 @@ class Int64(Integer, metaclass=NumericMeta, width=64, signed=True, ir_type=T.i64
     pass
 
 
+class Int128(Integer, metaclass=NumericMeta, width=128, signed=True, ir_type=lambda: T.i(128)):
+    def __get_c_pointers__(self):
+        raise TypeError("Int128 is not a JitArgument for now. ctypes has no support for 128b integers.")
+
+
 class Uint8(Integer, metaclass=NumericMeta, width=8, signed=False, ir_type=T.i8):
     pass
 
@@ -731,6 +709,11 @@ class Uint32(Integer, metaclass=NumericMeta, width=32, signed=False, ir_type=T.i
 
 class Uint64(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=T.i64):
     pass
+
+
+class Uint128(Integer, metaclass=NumericMeta, width=128, signed=False, ir_type=lambda: T.i(128)):
+    def __get_c_pointers__(self):
+        raise TypeError("Uint128 is not a JitArgument for now. ctypes has no support for 128b integers.")
 
 
 class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):

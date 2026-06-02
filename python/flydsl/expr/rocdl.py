@@ -95,9 +95,9 @@ def make_buffer_tensor(memref, alignment=4, loc=None, ip=None):
     from .._mlir.dialects import arith as _arith
     from .._mlir.dialects import fly
     from . import primitive as _prim
-    from .meta import _to_raw_value
+    from .typing import as_ir_value
 
-    raw_memref = _to_raw_value(memref)
+    raw_memref = as_ir_value(memref)
     layout = _prim.get_layout(memref, loc=loc, ip=ip)
     elem_type = fly.MemRefType(raw_memref.type).element_type
 

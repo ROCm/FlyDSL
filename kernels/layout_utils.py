@@ -87,7 +87,7 @@ def idx2crd(idx, layout):
     parsed = _parse_layout(layout)
 
     if parsed is None or _has_dynamic_strides(parsed[1]):
-        result = fx.idx2crd(idx, layout)
+        result = fx.idx2crd(fx.Int32(idx), layout)
         ndims = len(parsed[1]) if parsed else 1
         return [_wrap(fx.get(result, i)) for i in range(ndims)]
 

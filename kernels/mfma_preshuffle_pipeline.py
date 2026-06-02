@@ -325,7 +325,7 @@ def load_b_raw_w4a16(
     k2_base = lane_odd * fx.Index(half_bytes)
 
     coord_pack = (n_blk, k0, k1_local, n_intra, fx.Index(0))
-    idx_pack = crd2idx(coord_pack, layout_b)
+    idx_pack = crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
     idx_bytes = idx_pack + k2_base
 
     b4 = _buffer_load_vec(
@@ -463,7 +463,7 @@ def load_b_pack_k32(
     k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
 
     coord_pack = (n_blk, k0, k1, n_intra, fx.Index(0))
-    idx_pack = crd2idx(coord_pack, layout_b)
+    idx_pack = crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
 
     if unpack_int4:
         idx_bytes = idx_pack + k2_base
@@ -579,7 +579,7 @@ def lds_store_16b_xor16(
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
     coord_store = (row_local, col_swz)
-    idx0 = crd2idx(coord_store, layout_lds) + lds_base
+    idx0 = crd2idx(tuple(fx.Int32(c) for c in coord_store), layout_lds) + lds_base
     v16 = vector.bitcast(vec16_ty, vec_part_i32x4)
     vector.store(v16, lds_memref, [idx0])
 
@@ -606,7 +606,7 @@ def lds_store_8b_xor16(
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
     coord_store = (row_local, col_swz)
-    idx0 = crd2idx(coord_store, layout_lds) + lds_base
+    idx0 = crd2idx(tuple(fx.Int32(c) for c in coord_store), layout_lds) + lds_base
     v8 = vector.bitcast(vec8_ty, vec_part_i32x2)
     vector.store(v8, lds_memref, [idx0])
 
@@ -633,7 +633,7 @@ def lds_store_4b_xor16(
     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
     coord_store = (row_local, col_swz)
-    idx0 = crd2idx(coord_store, layout_lds) + lds_base
+    idx0 = crd2idx(tuple(fx.Int32(c) for c in coord_store), layout_lds) + lds_base
     v4 = vector.bitcast(vec4_ty, vec_part_i32x1)
     vector.store(v4, lds_memref, [idx0])
 
@@ -659,14 +659,14 @@ def lds_load_pack_k32(
     col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
     if ck_lds128:
         coord_a16 = (curr_row_a_lds, col_base_swz)
-        idx_a16 = crd2idx(coord_a16, layout_lds) + lds_base
+        idx_a16 = crd2idx(tuple(fx.Int32(c) for c in coord_a16), layout_lds) + lds_base
         loaded_a16 = vector.load_op(vec16_ty, lds_memref, [idx_a16])
         a_vec128 = vector.bitcast(vec2_i64_ty, loaded_a16)
         return vector.extract(a_vec128, static_position=[half], dynamic_position=[])
     else:
         col_swizzled = col_base_swz + (half * 8)
         coord_a = (curr_row_a_lds, col_swizzled)
-        idx_a = crd2idx(coord_a, layout_lds) + lds_base
+        idx_a = crd2idx(tuple(fx.Int32(c) for c in coord_a), layout_lds) + lds_base
         loaded_a8 = vector.load_op(vec8_ty, lds_memref, [idx_a])
         a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)
         return vector.extract(a_vec64, static_position=[0], dynamic_position=[])
