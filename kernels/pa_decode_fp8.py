@@ -129,9 +129,9 @@ def _extract_global_ptr(tensor):
     return _fly.extract_aligned_pointer_as_index(ptr_type, raw)
 
 
-def _global_load_i64x2(global_ptr, byte_offset_i64):
+def _global_load_i64x2(global_ptr, byte_offset_i64, *, nontemporal=False):
     ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset_i64), elem_type=T.i8)
-    return llvm.LoadOp(T.i64x2, ptr, alignment=16).result
+    return llvm.LoadOp(T.i64x2, ptr, alignment=16, nontemporal=nontemporal).result
 
 
 def _global_load_i32(global_ptr, elem_offset_i32):
@@ -1931,7 +1931,7 @@ def _pa_small_block_load_k_flat(
             kbo_dw = within_block_token * c_tok_stride_dw
             for qkhe in range_constexpr(qkhe_loop):
                 ka_dw = k_block_base_dw + fx.Int64(kbo_dw + k_he_off_dw[qkhe])
-                k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4))
+                k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4), nontemporal=True)
                 k2_words = fx.Vector(k2)
                 k_flat.append(k2_words[0])
                 k_flat.append(k2_words[1])
@@ -1944,7 +1944,7 @@ def _pa_small_block_load_k_flat(
             k_block_base_dw = _compute_block_base_dw_i64(phys_block, stride_k_block_i32, k_head_off)
             for qkhe in range_constexpr(qkhe_loop):
                 ka_dw = k_block_base_dw + fx.Int64(kbo_dw + k_he_off_dw[qkhe])
-                k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4))
+                k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4), nontemporal=True)
                 rocdl.sched_barrier(rocdl.mask_vmem_rd)
                 k2_words = fx.Vector(k2)
                 k_flat.append(k2_words[0])
@@ -1995,7 +1995,7 @@ def _pa_small_block_load_v_trans(
         for vhe in range_constexpr(vhe_loop):
             va_dw_delta = sub_block_idx * c_subblock_dw + vhead_elem_dw[vhe]
             va_byte = (v_block_base_dw + fx.Int64(va_dw_delta)) * fx.Int64(4)
-            v_i64x2 = _global_load_i64x2(v_global_ptr, va_byte)
+            v_i64x2 = _global_load_i64x2(v_global_ptr, va_byte, nontemporal=True)
             vhe_data.append(v_i64x2)
         v_results.append(vhe_data)
     return v_results
@@ -2372,7 +2372,7 @@ def compile_pa_decode_ps(
                 suffix = "v4i32"
             else:
                 raise ValueError(f"_s_buffer_load: unsupported vec_width={vec_width}")
-            cache_policy = arith.constant(0, type=T.i32)
+            cache_policy = arith.constant(1, type=T.i32)  # ".cg": SC0/GLC cache policy bit.
             return _llvm.call_intrinsic(
                 result_type,
                 f"llvm.amdgcn.s.buffer.load.{suffix}",
@@ -2508,7 +2508,13 @@ def compile_pa_decode_ps(
                 + kv_h * stride_ks_head_param
                 + d_in_row
             )
-            return buffer_ops.buffer_load(ks_rsrc, ks_off, vec_width=1, dtype=fx.Float32)
+            return buffer_ops.buffer_load(
+                ks_rsrc,
+                ks_off,
+                vec_width=1,
+                dtype=fx.Float32,
+                cache_modifier=1,  # ".cg": SC0/GLC cache policy bit.
+            )
 
         def _load_my_k_scale_from_vgpr(next_phys_blocks_):
             """Issue THIS thread's K-scale buffer_load using the in-VGPR
