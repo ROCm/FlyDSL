@@ -368,12 +368,16 @@ def make_tensor_descriptor_2d(
 
     # sgpr0: config bitfields
     _abe = 1 if atomic_barrier_enable else 0
+    # early_timeout (bit 21) is a multicast-load knob: 1 = GL1 returns to the
+    # requesters present when GL2 data arrives (latecomers re-broadcast); 0 =
+    # standard (wider merge) timeout. keep stores at 0 (store cannot multicast).
+    _early_timeout = 0 if for_store else 1
     g1_s0_upper = (
         (data_size_code << 16)  # data_size [17:16]
         | (_abe << 18)  # atomic_barrier_enable
         | (0 << 19)  # iterate_enable
         | (pad_enable << 20)  # pad_enable
-        | (0 << 21)  # early_timeout
+        | (_early_timeout << 21)  # early_timeout
         | (enc_interval << 22)  # pad_interval [24:22]
         | (enc_amount << 25)  # pad_amount [31:25]
     )

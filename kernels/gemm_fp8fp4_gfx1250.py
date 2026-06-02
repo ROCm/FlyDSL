@@ -11,9 +11,8 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -23,7 +22,6 @@ from kernels.gemm_common_gfx1250 import (
     get_lds_memref,
     issue_tdm_loads,
     lds_load_b128_raw,
-    lds_store_b128,
     pipeline_fence,
     pipeline_fence_signal,
     pipeline_fence_wait,
@@ -72,9 +70,6 @@ def compile_mxscale_gemm(
     b_streaming: bool = False,
     scale_load_path: str = "tdm",
     fp8_schedule: str = "auto",
-    hot_loop_sched_mode: str = "default",
-    hot_loop_manual_ds: int = 8,
-    hot_loop_manual_mfma: int = 8,
 ):
     """Compile an MXFP4 or MXFP8 GEMM kernel with TDM async copy.
 
@@ -294,38 +289,8 @@ def compile_mxscale_gemm(
     # second halves of A/B, so all 4 waves share the A/B TDM (wave0=A0, wave1=B0,
     # wave2=A1, wave3=B1). Measured wall-neutral.
     use_ab_half_split = scale_load_path == "vgpr_ab_split"
-    # scale-disabled: perf-ceiling probe. Feed a constant E8M0=1.0 to the scaled
-    # WMMA instead of loading scale -> removes the scale buffer_loads (issue slots)
-    # AND the scale VGPR ring (register pressure), while keeping the scaled-WMMA op
-    # identical. Numerically correct only when the real scale is all 1.0 (fill 0.1).
-    # OPT-IN: FLYDSL_SCALE_DISABLED=1.
-    use_scale_disabled = os.environ.get("FLYDSL_SCALE_DISABLED", "0") == "1"
-    # skip-scale-TDM: scale/TDM-isolation control probe. Keep the ENTIRE downstream
-    # scale path identical (LDS layout + ds_load scale reads + scaled-WMMA op), but
-    # never deliver scale via TDM. Instead the scale LDS stages are pre-filled once
-    # with a fixed E8M0 byte before the hot loop. This isolates the cost of the
-    # scale TDM vmem->LDS traffic alone (vs FLYDSL_SCALE_DISABLED, which also removes
-    # the LDS reads). Numerically correct only when the real scale is all 1.0
-    # (fill 0.1). OPT-IN: FLYDSL_SCALE_SKIP_TDM=1. Only valid on the TDM scale path
-    # with wave-specialized TDM (scale lives on loader waves 2,3, which are dropped).
-    use_skip_scale_tdm = os.environ.get("FLYDSL_SCALE_SKIP_TDM", "0") == "1"
-    if use_skip_scale_tdm:
-        if scale_load_path != "tdm":
-            raise ValueError(
-                "FLYDSL_SCALE_SKIP_TDM=1 only applies to scale_load_path='tdm', "
-                f"got {scale_load_path!r}"
-            )
-        if not wave_specialized_tdm:
-            raise ValueError(
-                "FLYDSL_SCALE_SKIP_TDM=1 requires wave_specialized_tdm=True "
-                "(scale is carried on dedicated loader waves 2,3)"
-            )
-        if use_scale_disabled:
-            raise ValueError(
-                "FLYDSL_SCALE_SKIP_TDM and FLYDSL_SCALE_DISABLED are mutually exclusive probes"
-            )
     # The buffer_load->VGPR scale ring is built only when scale is actually loaded.
-    _bvs_active = use_buffer_vgpr_scale and not use_scale_disabled
+    _bvs_active = use_buffer_vgpr_scale
 
     if use_ref_segmented_lds_layout:
         # The A/B data pools are no longer packed into the same per-stage
@@ -467,48 +432,6 @@ def compile_mxscale_gemm(
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
     use_b_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING
-    # hot_loop_sched_mode: deep-pipeline hot-loop scheduling.
-    #   "default" — original sched_barrier(0) fences + coarse hot_loop_scheduler.
-    #   "iglp"    — clean region (internal sched_barrier(0) suppressed), LLVM
-    #               MFMASmallGemmOpt via iglp_opt(0).
-    #   "manual"  — clean region + hand-emitted sched_group_barrier template,
-    #               granularity hot_loop_manual_ds:hot_loop_manual_mfma (default 8:8).
-    # Latency-hiding: a small DS group degenerates to "issue few ds -> wait(0)
-    # full-drain -> 1-2 WMMA" (exposes ds latency); larger DS+MFMA keeps ds in
-    # flight with partial drains + long WMMA bursts that hide it. Net win over
-    # "default" unconfirmed (AM underestimates ds latency) -> rank on silicon ATT.
-    _hl_modes = ("default", "iglp", "manual")
-    if hot_loop_sched_mode not in _hl_modes:
-        raise ValueError(f"hot_loop_sched_mode must be one of {_hl_modes}, got {hot_loop_sched_mode!r}")
-    _hl_iglp = hot_loop_sched_mode == "iglp"
-    _hl_manual = hot_loop_sched_mode == "manual"
-    _hl_clean_region = _hl_iglp or _hl_manual
-    if _hl_clean_region and not use_fp8_deep_pipeline_schedule:
-        raise ValueError(
-            f"hot_loop_sched_mode={hot_loop_sched_mode!r} currently requires the FP8 deep-pipeline schedule"
-        )
-    if _hl_manual and (hot_loop_manual_ds < 1 or hot_loop_manual_mfma < 1):
-        raise ValueError("hot_loop_manual_ds / hot_loop_manual_mfma must be >= 1")
-    # Deep-pipeline explicit s_wait_dscnt control (clean-region iglp/manual only).
-    # The SP3 prototype (poc_kl mxfp8fp4gemm) drains dscnt ~once per K-iteration;
-    # FlyDSL's compute_tile_fp8_deep_pipeline hardcodes 5 explicit s_wait_dscnt per
-    # ks, which double as scheduling barriers that pin each ds_load right before its
-    # consuming WMMA. Those explicit drains prevent the MI scheduler from hoisting
-    # the next ks's ds_load prefetch to overlap the current ks's WMMA (the
-    # prototype's "dW dW" future-buffer interleave). In a clean region the LLVM
-    # auto-waitcnt pass re-derives correct dscnt waits after reorder, so dropping
-    # some/all explicit drains is correctness-safe and lets IGLP+auto-waitcnt
-    # approach the prototype's single-drain structure.
-    #   keep   - emit all explicit dscnt drains (default; byte-identical to today)
-    #   single - one full drain (s_wait_dscnt 0) at the top of each ks, drop the
-    #            other 4 (mirrors the prototype's 1x s_wait_dscnt 0x0 per K-iter)
-    #   auto   - drop every explicit dscnt drain; auto-waitcnt owns them entirely
-    _hl_dscnt_mode = os.environ.get("FLYDSL_HL_DSCNT_MODE", "keep")
-    if _hl_dscnt_mode not in ("keep", "single", "auto"):
-        raise ValueError(f"FLYDSL_HL_DSCNT_MODE must be keep/single/auto, got {_hl_dscnt_mode!r}")
-    if _hl_dscnt_mode != "keep" and not _hl_clean_region:
-        raise ValueError("FLYDSL_HL_DSCNT_MODE!=keep requires hot_loop_sched_mode in {iglp,manual}")
-    _hl_keep_mid_dscnt = _hl_dscnt_mode == "keep"
     use_ws_tdm_split_signal_overlap = (
         wave_specialized_tdm
         and (use_fp8_quadrant_schedule or use_fp8_deep_pipeline_schedule)
@@ -566,20 +489,6 @@ def compile_mxscale_gemm(
     ):
         # Enable back-to-back WMMA issue (SCHED_MODE bit[4] = DISABLE_VALU_STALL)
         rocdl.disable_xdl_arb_stall()
-
-        # One-shot per clean scheduling region (iglp/manual): drive the LLVM
-        # PipelineSolver. iglp_opt(0) uses MFMASmallGemmOpt; manual emits the
-        # equivalent SchedGroup template by hand with repo-standard
-        # sched_group_barrier (tunable DS:MFMA). Over-provisioning is harmless.
-        _manual_pipeline_reps = num_buffers * n_accs
-
-        def _emit_pipeline_region_hint():
-            if const_expr(_hl_iglp):
-                rocdl.iglp_opt(0)
-            elif const_expr(_hl_manual):
-                for _grp in range_constexpr(_manual_pipeline_reps):
-                    rocdl.sched_group_barrier(rocdl.mask_dsrd, hot_loop_manual_ds, 0)
-                    rocdl.sched_group_barrier(rocdl.mask_mfma, hot_loop_manual_mfma, 0)
 
         if const_expr(inst_prefetch):
             if rocdl.wave_id() == fx.Int32(0):
@@ -1518,8 +1427,6 @@ def compile_mxscale_gemm(
                 ]
 
             def _load_a_scales(ks):
-                if const_expr(use_scale_disabled):
-                    return [fx.Int32(0x7F7F7F7F) for _ in range_constexpr(wmma_m_rep)]
                 if const_expr(use_buffer_vgpr_scale):
                     if const_expr(pf_a_scales is not None):
                         return pf_a_scales  # prefetched (issued in the prior compute tile)
@@ -1527,8 +1434,6 @@ def compile_mxscale_gemm(
                 return load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
 
             def _load_b_scales(ks):
-                if const_expr(use_scale_disabled):
-                    return [fx.Int32(0x7F7F7F7F) for _ in range_constexpr(b_scale_load_rep)]
                 if const_expr(use_buffer_vgpr_scale):
                     if const_expr(pf_b_scales is not None):
                         return pf_b_scales
@@ -1614,16 +1519,11 @@ def compile_mxscale_gemm(
                 first_wait_keep = _two_pair_loads + 3
                 if const_expr(ks == 0 and a0_prefetch is not None):
                     first_wait_keep += DS_LOADS_PER_A_FRAG * len(a0_prefetch)
-                if const_expr(_hl_dscnt_mode == "keep"):
-                    rocdl.s_wait_dscnt(first_wait_keep)
-                elif const_expr(_hl_dscnt_mode == "single"):
-                    rocdl.s_wait_dscnt(0)  # prototype-style: one full drain per ks
-                # auto: emit nothing here; auto-waitcnt re-derives all dscnt waits
+                rocdl.s_wait_dscnt(first_wait_keep)
                 emit_panel_2x2(0, 0, a0, b0, scale_pair, prefetch_after_first_row=_prefetch_a1)
 
                 if const_expr(ks == 0 and mid_compute_callback is not None):
-                    if const_expr(not _hl_clean_region):
-                        rocdl.sched_barrier(0)
+                    rocdl.sched_barrier(0)
                     mid_compute_callback()
 
                 def _prefetch_b3():
@@ -1632,12 +1532,10 @@ def compile_mxscale_gemm(
                 def _prefetch_a3():
                     a3_box[0] = load_a_pair(3, ks)
 
-                if const_expr(_hl_keep_mid_dscnt):
-                    rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
+                rocdl.s_wait_dscnt(_pair_loads + _fp8_pair_b_loads)
                 emit_panel_2x2(0, 1, a0, b1, scale_pair, prefetch_after_first_row=_prefetch_b3)
 
-                if const_expr(_hl_keep_mid_dscnt):
-                    rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
+                rocdl.s_wait_dscnt(_fp8_pair_b_loads + 2)
                 emit_panel_2x2(1, 0, a1_box[0], b0, scale_pair, prefetch_after_first_row=_prefetch_a3)
 
                 def _prefetch_a2():
@@ -1648,26 +1546,22 @@ def compile_mxscale_gemm(
                 emit_panel_2x2(0, 2, a0, b2, scale_pair, prefetch_after_first_row=_prefetch_a2)
                 emit_panel_2x2_row(1, 2, 0, a1_box[0], b2, scale_pair)
                 emit_panel_2x2_row(1, 2, 1, a1_box[0], b2, scale_pair)
-                if const_expr(_hl_keep_mid_dscnt):
-                    rocdl.s_wait_dscnt(_pair_loads)
+                rocdl.s_wait_dscnt(_pair_loads)
                 emit_panel_2x2(0, 3, a0, b3_box[0], scale_pair)
                 emit_panel_2x2(1, 3, a1_box[0], b3_box[0], scale_pair)
 
                 emit_panel_2x2(2, 0, a2_box[0], b0, scale_pair)
                 if const_expr(is_last_ks and late_compute_callback is not None):
-                    if const_expr(not _hl_clean_region):
-                        rocdl.sched_barrier(0)
+                    rocdl.sched_barrier(0)
                     late_compute_callback()
                 emit_panel_2x2(2, 1, a2_box[0], b1, scale_pair)
 
-                if const_expr(_hl_keep_mid_dscnt):
-                    rocdl.s_wait_dscnt(0)
+                rocdl.s_wait_dscnt(0)
                 emit_panel_2x2(3, 0, a3_box[0], b0, scale_pair)
                 emit_panel_2x2(3, 1, a3_box[0], b1, scale_pair)
 
                 if const_expr(is_last_ks and emit_filler is not None):
-                    if const_expr(not _hl_clean_region):
-                        rocdl.sched_barrier(0)
+                    rocdl.sched_barrier(0)
                     emit_filler()
 
                 emit_panel_2x2(2, 2, a2_box[0], b2, scale_pair)
@@ -2181,9 +2075,7 @@ def compile_mxscale_gemm(
         if const_expr(wave_specialized_tdm):
             # With scale on the VGPR path, drop scale waves 2,3 from the active TDM
             # path -- unless ab-half-split repurposes them as the second A/B halves.
-            # skip-scale-TDM drops the scale loader waves (2,3) from the active TDM
-            # path -- identical mechanism to the vgpr path -- so scale never DMAs.
-            _drop_scale_waves = (use_buffer_vgpr_scale and not use_ab_half_split) or use_skip_scale_tdm
+            _drop_scale_waves = use_buffer_vgpr_scale and not use_ab_half_split
             _active_wave_limit = 2 if _drop_scale_waves else 4
             active_pred_const = arith.select(tdm_wave_id < fx.Int32(_active_wave_limit), fx.Int32(1), fx.Int32(0))
 
@@ -2290,29 +2182,6 @@ def compile_mxscale_gemm(
             _bvs_ra = [_v for (_a, _b) in _bvs_pf for _v in _a]
             _bvs_rb = [_v for (_a, _b) in _bvs_pf for _v in _b]
 
-        if const_expr(use_skip_scale_tdm):
-            # Scale TDM is skipped (loader waves 2,3 dropped above). Pre-fill every
-            # scale LDS stage with a fixed E8M0 byte (0x7F = 1.0) so the unchanged
-            # downstream ds_load scale reads see a defined, constant value. The
-            # _pipeline_fence below issues the workgroup barrier that makes these
-            # writes visible before the first scale read. Threads cooperate: each
-            # lane writes a strided set of 16B chunks (one ds_store_b128 each).
-            _scale_fill = vector.full((4,), 0x7F7F7F7F, fx.Int32)
-            for i in range_constexpr(num_buffers):
-                for _smem, _sbytes in (
-                    (stages_as_mem[i], lds_a_scale_bytes),
-                    (stages_bs_mem[i], lds_b_scale_bytes),
-                ):
-                    _nchunks = _sbytes // 16
-                    _rounds = (_nchunks + block_threads - 1) // block_threads
-                    for _r in range_constexpr(_rounds):
-                        _chunk = tx + arith.index(_r * block_threads)
-                        _pred = arith.cmpi(arith.CmpIPredicate.ult, _chunk, arith.index(_nchunks))
-                        _if = scf.IfOp(_pred)
-                        with ir.InsertionPoint(_if.then_block):
-                            lds_store_b128(_smem, _chunk * arith.index(8), _scale_fill)
-                            scf.YieldOp([])
-
         _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
         # Main loop — acc_mixed style: fence at top, TDM_load mid-compute.
@@ -2366,11 +2235,7 @@ def compile_mxscale_gemm(
                             _late_tdm_ws_fence_signal = _late_tdm_ws_split_signal
 
                         a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
-                        if const_expr(_hl_clean_region):
-                            if const_expr(buf_idx == 0):
-                                _emit_pipeline_region_hint()
-                        else:
-                            rocdl.sched_barrier(0)
+                        rocdl.sched_barrier(0)
                         # Consume scale prefetched _bvs_D K-tiles ago; issue the
                         # K-tile +_bvs_D prefetch now (overlaps this tile's WMMAs).
                         # NOTE: must stay AFTER the fence; issuing the scale
@@ -2403,8 +2268,7 @@ def compile_mxscale_gemm(
                             pf_b_scales=_cur_b,
                         )
                         cur_addr_lo = addr_box[0]
-                        if const_expr(not _hl_clean_region):
-                            hot_loop_scheduler_scheduled()
+                        hot_loop_scheduler_scheduled()
 
                     if const_expr(_bvs_active):
                         _bvs_yield = _ring_a + _ring_b
@@ -2459,11 +2323,7 @@ def compile_mxscale_gemm(
                             _l2_prefetch(_k_off)
 
                         a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
-                        if const_expr(_hl_clean_region):
-                            if const_expr(buf_idx == 0):
-                                _emit_pipeline_region_hint()
-                        else:
-                            rocdl.sched_barrier(0)
+                        rocdl.sched_barrier(0)
                         accs_in = compute_tile_scheduled(
                             accs_in,
                             stages_a_idx[buf_idx],
@@ -2477,8 +2337,7 @@ def compile_mxscale_gemm(
                         cur_lo_b = addr_boxes[1][0]
                         cur_lo_as = addr_boxes[2][0]
                         cur_lo_bs = addr_boxes[3][0]
-                        if const_expr(not _hl_clean_region):
-                            hot_loop_scheduler_scheduled()
+                        hot_loop_scheduler_scheduled()
 
                     results = yield list(accs_in) + [cur_lo_a, cur_lo_b, cur_lo_as, cur_lo_bs]
 
@@ -2576,10 +2435,7 @@ def compile_mxscale_gemm(
                         _tail_mid_cb = _tail_mid_nws
 
                 a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
-                if const_expr(_hl_clean_region):
-                    _emit_pipeline_region_hint()
-                else:
-                    rocdl.sched_barrier(0)
+                rocdl.sched_barrier(0)
                 accs = compute_tile_scheduled(
                     accs,
                     stages_a_idx[_compute_stage],
@@ -2600,8 +2456,7 @@ def compile_mxscale_gemm(
                         addr_lo_as = _tail_ab[2][0]
                         addr_lo_bs = _tail_ab[3][0]
 
-                if const_expr(not _hl_clean_region):
-                    hot_loop_scheduler_scheduled()
+                hot_loop_scheduler_scheduled()
 
         accs = finalize_acc_layout(accs)
 
@@ -2647,9 +2502,6 @@ def compile_mxscale_gemm(
         b_streaming,
         scale_load_path,
         fp8_schedule,
-        hot_loop_sched_mode,
-        hot_loop_manual_ds,
-        hot_loop_manual_mfma,
     )
 
     @flyc.jit
