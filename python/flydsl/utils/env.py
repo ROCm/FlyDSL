@@ -230,6 +230,18 @@ class CompileEnvManager(EnvManager):
     arch = OptStr("", env_var="ARCH", description="Override target GPU architecture (e.g. gfx942, gfx950)")
     backend = OptStr("rocm", description="GPU compile backend id (e.g. rocm)")
     llvm_dir = OptStr("", description="External LLVM/MLIR install prefix for final code generation")
+    llvm_pass_pipeline = OptStr(
+        "",
+        description="Custom LLVM new-PM pass pipeline run on the device kernel IR before codegen "
+        "(e.g. 'default<O3>,my-pass'); requires FLYDSL_COMPILE_LLVM_DIR. Overridden by "
+        "@flyc.jit(llvm_pass_pipeline=...).",
+    )
+    llvm_pass_plugins = OptList(
+        [],
+        separator=":",
+        description="Colon-separated LLVM pass plugin .so paths loaded (opt --load-pass-plugin) "
+        "before running llvm_pass_pipeline. Overridden by @flyc.jit(llvm_pass_plugins=...).",
+    )
 
 
 class DebugEnvManager(EnvManager):
