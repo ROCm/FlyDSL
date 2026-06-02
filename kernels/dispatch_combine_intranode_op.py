@@ -793,7 +793,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
         out_idx = self.shmem_disp_out_idx.view(mr, k)
         out_scales = None
         if cfg.scale_bytes > 0:
-            out_scales = self.shmem_out_scales[: mr * cfg.scale_bytes].view(mr, cfg.scale_dim * cfg.scale_type_size)
+            # Mirror caller's scales layout: typed (fp32/fp16/bf16) or
+            # uint8 byte-stream view, both must round-trip out of the
+            # int8 shmem buffer with the same dtype + per-row dim.
+            # ``scales`` is guaranteed non-None here (all-or-none input
+            # contract enforced in _check_dispatch_inputs).
+            out_scales = self.shmem_out_scales[: mr * cfg.scale_bytes].view(scales.dtype).view(mr, scales.shape[1])
 
         result = (out_tok, out_wts, out_scales, out_idx, self.total_recv)
         if cfg.enable_std_moe:

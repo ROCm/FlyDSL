@@ -268,20 +268,25 @@ def make_dispatch_kernel(
                     buffer_store(idx_val, _r_idx_remote, dest_slot)
 
             if const_expr(enable_scales):
-                if lane < scale_n_i32:
-                    if do_publish:
-                        _r_scales = create_buffer_resource_from_addr(addr_inp_scales)
-                        sc_src_off = src_tok * scale_n_i32 + lane
-                        sc_val = buffer_load(_r_scales, sc_src_off, vec_width=1, dtype=T.i32())
-                        sc_dst_off = dest_tok_id * scale_n_i32 + lane
-                        _r_sc_remote = create_buffer_resource_from_addr(
-                            buffer_load(
-                                create_buffer_resource_from_addr(arith.unwrap(addr_p2p_out_scales)),
-                                dest_pe,
-                                vec_width=1,
-                                dtype=T.i64(),
-                            )
+                if do_publish:
+                    # Lane-strided loop covers ``scale_n_i32`` i32 slots;
+                    # previous ``if lane < scale_n_i32`` only fired for
+                    # the first wavefront-worth (<= 64 i32 = 256 B/token),
+                    # silently dropping the tail bytes when scale_dim is
+                    # large (e.g. per-1x128 scales => 128 i32 = 512 B).
+                    _r_scales = create_buffer_resource_from_addr(addr_inp_scales)
+                    _r_sc_remote = create_buffer_resource_from_addr(
+                        buffer_load(
+                            create_buffer_resource_from_addr(arith.unwrap(addr_p2p_out_scales)),
+                            dest_pe,
+                            vec_width=1,
+                            dtype=T.i64(),
                         )
+                    )
+                    for k_off in range(lane, scale_n_i32, 64):
+                        sc_src_off = src_tok * scale_n_i32 + k_off
+                        sc_val = buffer_load(_r_scales, sc_src_off, vec_width=1, dtype=T.i32())
+                        sc_dst_off = dest_tok_id * scale_n_i32 + k_off
                         buffer_store(sc_val, _r_sc_remote, sc_dst_off)
 
             # Token-embedding scatter. For dropped slots (duplicate destPE
