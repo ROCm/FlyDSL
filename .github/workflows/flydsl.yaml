@@ -46,6 +46,11 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     needs: check-signal
+    env:
+      # Some self-hosted runners configure a GitHub -> git-cache URL rewrite.
+      # If that cache is unavailable, checkout fails before the tests start.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
     strategy:
       matrix:
         runners: [
@@ -349,6 +354,10 @@ jobs:
     needs: test
     name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
     timeout-minutes: 120
+    env:
+      # Keep checkout independent of runner-local git-cache rewrites.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
     if: |
       always() && (
         (github.event_name == 'pull_request' &&
