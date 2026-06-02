@@ -7,7 +7,6 @@ from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .meta import traced_op
 from .numeric import Boolean, Numeric
 from .primitive import *
-from .primitive import _coerce_int_tuple
 from .typing import Int8, Layout, Tensor, TiledCopy, TiledMma
 
 __all__ = [
@@ -35,7 +34,7 @@ class ThrCopy(TiledCopy):
         super().__init__(tiled_copy)
         self.tiled_copy = tiled_copy
         self._thr_idx = thr_idx
-        self._thr_idx_int = _coerce_int_tuple(self.thr_idx)
+        self._thr_idx_int = make_int_tuple(self.thr_idx)
 
     @property
     def thr_idx(self):
@@ -65,7 +64,7 @@ class ThrMma(TiledMma):
         super().__init__(tiled_mma)
         self.tiled_mma = tiled_mma
         self._thr_idx = thr_idx
-        self._thr_idx_int = _coerce_int_tuple(self.thr_idx)
+        self._thr_idx_int = make_int_tuple(self.thr_idx)
 
     @property
     def thr_idx(self):
