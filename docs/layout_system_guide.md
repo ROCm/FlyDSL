@@ -30,7 +30,7 @@
 | | `fx.tiled_product(A, B)` | `fly.tiled_product` | Tiled product |
 | | `fx.flat_product(A, B)` | `fly.flat_product` | Flat product |
 | | `fx.raked_product(A, B)` | `fly.raked_product` | Raked product |
-| | `fx.block_product(A, B)` | `fly.block_product` | Blocked product |
+| | `fx.blocked_product(A, B)` | `fly.blocked_product` | Blocked product |
 | **Divides** | `fx.logical_divide(A, B)` | `fly.logical_divide` | Basic divide |
 | | `fx.zipped_divide(A, B)` | `fly.zipped_divide` | Zipped divide |
 | | `fx.tiled_divide(A, B)` | `fly.tiled_divide` | Tiled divide |
@@ -222,7 +222,7 @@ Products combine two layouts to create a larger layout. All products take `(layo
 | `tiled_product` | Creates hierarchical tiled structure. |
 | `flat_product` | Produces a flattened result. |
 | `raked_product` | Creates a raked (interleaved) access pattern. |
-| `block_product` | Creates a blocked access pattern. |
+| `blocked_product` | Creates a blocked access pattern. |
 
 ```python
 result = fx.logical_product(layout, tiler)
@@ -489,7 +489,7 @@ Which layout operation do I need?
 │
 ├── Combining layouts?
 │   ├── Sequential mapping → composition(A, B)
-│   ├── Extending threads → logical_product / raked_product / block_product
+│   ├── Extending threads → logical_product / raked_product / blocked_product
 │   └── Simplifying → coalesce(layout)
 │
 ├── Partitioning / tiling?

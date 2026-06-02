@@ -1,0 +1,385 @@
+name: FlyDSL vLLM nightly
+
+on:
+  schedule:
+    # Run after the FlyDSL nightly wheel publish/promote flow.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AITER_REPOSITORY: ROCm/aiter
+  AITER_REF: main
+  FLYDSL_REPOSITORY: ROCm/FlyDSL
+  FLYDSL_CI_WORKFLOW: ci.yaml
+  FLYDSL_WHEEL_BUCKET: framework-whls-nightlies
+  FLYDSL_WHEEL_PREFIX: whl/gfx942-gfx950
+  VLLM_BASE_IMAGE: rocm/vllm-dev:nightly
+
+jobs:
+  build-aiter-vllm-wheel:
+    name: Build aiter wheel for vLLM
+    runs-on: build-only-aiter
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout upstream aiter repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AITER_REPOSITORY }}
+          ref: ${{ env.AITER_REF }}
+          submodules: recursive
+          path: aiter-upstream
+
+      - name: Docker login
+        env:
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          for attempt in 1 2 3; do
+            if echo "$DOCKER_PASSWORD" | docker login -u rocmshared --password-stdin; then
+              echo "Docker login succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "Docker login attempt ${attempt} failed"
+            if [ "${attempt}" != 3 ]; then
+              sleep 10
+            fi
+          done
+          echo "Docker login failed after 3 attempts, continuing anyway"
+          exit 0
+
+      - name: Build aiter wheel in vLLM base image
+        run: |
+          set -euo pipefail
+          docker pull ${{ env.VLLM_BASE_IMAGE }}
+          docker run --rm \
+            --network=host \
+            -v "${{ github.workspace }}/aiter-upstream:/workspace" \
+            -w /workspace \
+            ${{ env.VLLM_BASE_IMAGE }} \
+            bash -lc '
+              set -euo pipefail
+              git config --global --add safe.directory /workspace
+              shopt -s nullglob
+              rm -rf dist build aiter_meta ./*.egg-info
+              python3 -m pip uninstall -y aiter amd-aiter || true
+              python3 -m pip config set global.default-timeout 60
+              python3 -m pip config set global.retries 10
+              python3 -m pip config set global.index-url https://ausartifactory.amd.com/artifactory/api/pypi/hw-cpe-prod-remote/simple
+              python3 -c "from pathlib import Path; src = Path(\"requirements.txt\"); dst = Path(\"requirements-flydsl-ci.txt\"); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith(\"flydsl==\")]; dst.write_text(\"\\n\".join(lines) + \"\\n\")"
+              python3 -m pip install -r requirements-flydsl-ci.txt
+              python3 -m pip install --upgrade pandas pyzmq einops numpy==1.26.2
+              python3 -m pip install --upgrade "pybind11>=3.0.1"
+              python3 -m pip install --upgrade "ninja>=1.11.1"
+              python3 -m pip install --upgrade "setuptools_scm[toml]>=6.2" wheel packaging psutil
+              python3 -m pip install tabulate
+              python3 setup.py bdist_wheel
+              ls -lh dist/*.whl
+            '
+
+      - name: Upload aiter wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiter-vllm-whl-${{ github.run_id }}
+          path: aiter-upstream/dist/*.whl
+          retention-days: 14
+
+  vllm-integration:
+    name: vLLM ${{ matrix.model }} ${{ matrix.kv_cache_dtype }} (8 GPU)
+    needs: build-aiter-vllm-wheel
+    timeout-minutes: 60
+    runs-on: linux-flydsl-mi355-8
+    permissions:
+      actions: read
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model: openai/gpt-oss-120b
+            kv_cache_dtype: fp8_kvcache
+            tp: 8
+            extra_args: --gpu-memory-utilization 0.3
+            extra_env_args: ""
+          - model: deepseek-ai/DeepSeek-R1-0528
+            kv_cache_dtype: default_kvcache
+            tp: 8
+            extra_args: --block-size 1
+            extra_env_args: ""
+          - model: moonshotai/Kimi-K2.5
+            kv_cache_dtype: default_kvcache
+            tp: 8
+            extra_args: --block-size 1 --trust-remote-code
+            extra_env_args: -e VLLM_USE_TRITON_FLASH_ATTN=0
+
+    steps:
+      - name: Checkout FlyDSL utility scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/install_awscli.sh
+          path: flydsl
+
+      - name: Checkout aiter helper script
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AITER_REPOSITORY }}
+          ref: ${{ env.AITER_REF }}
+          sparse-checkout: |
+            .github/scripts/install_triton.sh
+          path: aiter-upstream
+
+      - name: Download aiter wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aiter-vllm-whl-${{ github.run_id }}
+          path: aiter_wheels
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-nightlies
+
+      - name: Install AWS CLI
+        run: bash ./flydsl/scripts/install_awscli.sh
+
+      - name: Docker login
+        env:
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          for attempt in 1 2 3; do
+            if echo "$DOCKER_PASSWORD" | docker login -u rocmshared --password-stdin; then
+              echo "Docker login succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "Docker login attempt ${attempt} failed"
+            if [ "${attempt}" != 3 ]; then
+              sleep 10
+            fi
+          done
+          echo "Docker login failed after 3 attempts, continuing anyway"
+          exit 0
+
+      - name: Pull vLLM base image
+        run: docker pull ${{ env.VLLM_BASE_IMAGE }}
+
+      - name: Resolve latest FlyDSL CI run
+        id: latest-ci-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLYDSL_REPOSITORY: ${{ env.FLYDSL_REPOSITORY }}
+          FLYDSL_CI_WORKFLOW: ${{ env.FLYDSL_CI_WORKFLOW }}
+        run: |
+          set -euo pipefail
+
+          PY_TAG=$(docker run --rm ${{ env.VLLM_BASE_IMAGE }} python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          echo "Detected Python tag inside vLLM image: ${PY_TAG}"
+          echo "python_tag=${PY_TAG}" >> "${GITHUB_OUTPUT}"
+
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["FLYDSL_REPOSITORY"]
+          workflow = os.environ["FLYDSL_CI_WORKFLOW"]
+          url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs?branch=main&status=completed&per_page=20"
+
+          req = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+
+          with urllib.request.urlopen(req) as resp:
+              data = json.load(resp)
+
+          run = next((r for r in data.get("workflow_runs", []) if r.get("conclusion") == "success"), None)
+          if run is None:
+              raise SystemExit("No successful FlyDSL CI run found on main.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"run_id={run['id']}\n")
+              f.write(f"run_url={run['html_url']}\n")
+              f.write(f"head_sha={run['head_sha']}\n")
+              f.write(f"head_sha_short={run['head_sha'][:7]}\n")
+
+          print(f"Selected FlyDSL CI run: {run['html_url']} @ {run['head_sha'][:7]}")
+          PY
+
+      - name: Try download wheel from S3
+        id: s3-wheel
+        continue-on-error: true
+        env:
+          PY_TAG: ${{ steps.latest-ci-run.outputs.python_tag }}
+          SHA_SHORT: ${{ steps.latest-ci-run.outputs.head_sha_short }}
+        run: |
+          set -euo pipefail
+          mkdir -p wheel-input
+
+          aws s3 ls "s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${{ env.FLYDSL_WHEEL_PREFIX }}/" | awk '{print $4}' > /tmp/flydsl-s3-wheels.txt
+
+          WHEEL_NAME=$(PY_TAG="${PY_TAG}" SHA_SHORT="${SHA_SHORT}" python3 - <<'PY'
+          import os
+
+          py_tag = os.environ["PY_TAG"]
+          sha_short = os.environ["SHA_SHORT"]
+          with open("/tmp/flydsl-s3-wheels.txt", encoding="utf-8") as f:
+              wheels = [line.strip() for line in f if line.strip()]
+
+          matches = [w for w in wheels if w.startswith("flydsl-") and w.endswith(".whl") and py_tag in w and sha_short in w]
+          if not matches:
+              raise SystemExit(f"No S3 wheel found for run sha {sha_short} and tag {py_tag}.")
+
+          print(sorted(matches)[-1])
+          PY
+          )
+
+          WHEEL_PATH="wheel-input/${WHEEL_NAME}"
+          WHEEL_S3_URI="s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${{ env.FLYDSL_WHEEL_PREFIX }}/${WHEEL_NAME}"
+          echo "Downloading wheel from S3: ${WHEEL_S3_URI}"
+          aws s3 cp "${WHEEL_S3_URI}" "${WHEEL_PATH}"
+
+          echo "wheel_name=${WHEEL_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_source=s3" >> "${GITHUB_OUTPUT}"
+
+      - name: Download latest CI wheel artifact
+        if: steps.s3-wheel.outcome != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-wheels
+          repository: ${{ env.FLYDSL_REPOSITORY }}
+          run-id: ${{ steps.latest-ci-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: latest-ci-artifact
+
+      - name: Select wheel from artifact fallback
+        if: steps.s3-wheel.outcome != 'success'
+        id: artifact-wheel
+        env:
+          PY_TAG: ${{ steps.latest-ci-run.outputs.python_tag }}
+          SHA_SHORT: ${{ steps.latest-ci-run.outputs.head_sha_short }}
+        run: |
+          set -euo pipefail
+
+          WHEEL_PATH=$(PY_TAG="${PY_TAG}" SHA_SHORT="${SHA_SHORT}" python3 - <<'PY'
+          import glob
+          import os
+          import pathlib
+
+          py_tag = os.environ["PY_TAG"]
+          sha_short = os.environ["SHA_SHORT"]
+          wheels = sorted(glob.glob("latest-ci-artifact/**/*.whl", recursive=True))
+          candidates = [w for w in wheels if pathlib.Path(w).name.startswith("flydsl-") and py_tag in pathlib.Path(w).name and sha_short in pathlib.Path(w).name]
+          if not candidates:
+              candidates = [w for w in wheels if pathlib.Path(w).name.startswith("flydsl-") and py_tag in pathlib.Path(w).name]
+          if not candidates:
+              raise SystemExit(f"No artifact wheel found for tag {py_tag}.")
+          print(candidates[-1])
+          PY
+          )
+
+          WHEEL_NAME=$(basename "${WHEEL_PATH}")
+          echo "Using artifact fallback wheel: ${WHEEL_PATH}"
+          echo "wheel_name=${WHEEL_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_source=artifact" >> "${GITHUB_OUTPUT}"
+
+      - name: Run vLLM benchmark
+        env:
+          S3_WHEEL_PATH: ${{ steps.s3-wheel.outputs.wheel_path }}
+          S3_WHEEL_NAME: ${{ steps.s3-wheel.outputs.wheel_name }}
+          ARTIFACT_WHEEL_PATH: ${{ steps.artifact-wheel.outputs.wheel_path }}
+          ARTIFACT_WHEEL_NAME: ${{ steps.artifact-wheel.outputs.wheel_name }}
+        run: |
+          set -ex -o pipefail
+          WHEEL_PATH="${S3_WHEEL_PATH:-${ARTIFACT_WHEEL_PATH:-}}"
+          WHEEL_NAME="${S3_WHEEL_NAME:-${ARTIFACT_WHEEL_NAME:-}}"
+          if [ -z "${WHEEL_PATH}" ] || [ -z "${WHEEL_NAME}" ]; then
+            echo "No FlyDSL wheel resolved from S3 or artifact."
+            exit 1
+          fi
+
+          echo "Starting benchmark for model: ${{ matrix.model }} with kv_cache_dtype: ${{ matrix.kv_cache_dtype }}"
+          logFile="result_$(echo '${{ matrix.model }}' | sed 's/\//_/g')_kv_${{ matrix.kv_cache_dtype }}.log"
+
+          MODEL_MOUNT=""
+          if [ -d "/models" ]; then
+            MODEL_MOUNT="-v /models:/models"
+            echo "Using host model cache mount: /models"
+          else
+            echo "Warning: /models directory not found on runner; using remote model path."
+          fi
+
+          extraArgs="${{ matrix.extra_args }}"
+          if [[ "${{ matrix.kv_cache_dtype }}" == "fp8_kvcache" ]]; then
+            extraArgs="${extraArgs} --kv-cache-dtype fp8"
+          fi
+
+          docker run --rm --device=/dev/kfd --device=/dev/dri --group-add video \
+              --ulimit core=0:0 --ulimit memlock=-1:-1 --ulimit stack=67108864 --cap-add=SYS_PTRACE \
+              --network=host --security-opt seccomp=unconfined --shm-size=16G \
+              $MODEL_MOUNT \
+              -v "${{ github.workspace }}:/workspace" -w /workspace \
+              -e HF_TOKEN=${{ secrets.HF_TOKEN_TEST }} -e VLLM_ROCM_USE_AITER=1 \
+              ${{ matrix.extra_env_args }} \
+              ${{ env.VLLM_BASE_IMAGE }} bash -lc "
+                set -euo pipefail
+                shopt -s nullglob
+                aiter_wheels=(/workspace/aiter_wheels/*.whl)
+                if [ \"\${#aiter_wheels[@]}\" -ne 1 ]; then
+                  echo \"::error::Expected exactly one aiter wheel artifact, found \${#aiter_wheels[@]}\"
+                  exit 1
+                fi
+                if [ ! -f \"/workspace/${WHEEL_PATH}\" ]; then
+                  echo \"::error::FlyDSL wheel not found: /workspace/${WHEEL_PATH}\"
+                  exit 1
+                fi
+                bash /workspace/aiter-upstream/.github/scripts/install_triton.sh
+                python3 -m pip uninstall -y flydsl aiter amd-aiter || true
+                python3 -m pip install --no-deps \"\${aiter_wheels[0]}\"
+                python3 -m pip install --no-deps --ignore-installed \"/workspace/${WHEEL_PATH}\"
+                python3 -m pip show amd-aiter || python3 -m pip show aiter
+                python3 -m pip show flydsl
+                python3 -c \"import flydsl, aiter; print('flydsl:', flydsl.__file__); print('aiter:', aiter.__file__)\"
+                if [ -d \"/models/${{ matrix.model }}\" ]; then
+                  model_path=\"/models/${{ matrix.model }}\"
+                  echo \"Using cached model path: \${model_path}\"
+                else
+                  model_path=\"${{ matrix.model }}\"
+                  echo \"Using remote model path: \${model_path}\"
+                fi
+                python -m vllm.entrypoints.cli.main bench latency \
+                  --model \"\${model_path}\" \
+                  --batch-size 123 --input-len 456 --output-len 78 \
+                  --num-iters-warmup 3 --num-iters 10 \
+                  -tp ${{ matrix.tp }} --load-format dummy ${extraArgs}
+              " |& tee "${logFile}"
+
+          grep "Avg latency:" "${logFile}" | awk '{print $3}'
+
+      - name: Upload vLLM logs and wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-vllm-${{ strategy.job-index }}-${{ matrix.kv_cache_dtype }}
+          path: |
+            wheel-input/**/*.whl
+            latest-ci-artifact/**/*.whl
+            result_*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean up vLLM image
+        if: always()
+        run: docker rmi ${{ env.VLLM_BASE_IMAGE }} || true
