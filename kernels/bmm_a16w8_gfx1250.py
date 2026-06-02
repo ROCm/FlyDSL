@@ -52,8 +52,8 @@ WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
 WAVE_SIZE = 32
 DS_LOADS_PER_A_FRAG = 2
 
-LDS_PAD_A = 12  # stride=140 elem=280B; was 8 (4-way LDS bank conflict)
-LDS_PAD_B_FP8 = 8   # in fp8 elements
+LDS_PAD_A = 10  # stride=138 elem=276B=69DW; GCD(69,32)=1 (no bank conflict); was 12 (2-way), 8 (4-way)
+LDS_PAD_B_FP8 = 12  # stride=140 fp8=35DW; GCD(35,32)=1 (no bank conflict); was 8 (2-way)
 LDS_PAD_D_BYTES = 16
 
 ELEM_BYTES_A = 2    # bf16
