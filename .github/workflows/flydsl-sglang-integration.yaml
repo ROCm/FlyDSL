@@ -1,0 +1,347 @@
+name: FlyDSL SGLang nightly
+
+on:
+  schedule:
+    # Run after the FlyDSL nightly wheel publish/promote flow.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AITER_REPOSITORY: ROCm/aiter
+  AITER_REF: main
+  FLYDSL_REPOSITORY: ROCm/FlyDSL
+  FLYDSL_CI_WORKFLOW: ci.yaml
+  FLYDSL_WHEEL_BUCKET: framework-whls-nightlies
+  FLYDSL_WHEEL_PREFIX: whl/gfx942-gfx950
+  SGLANG_BRANCH: amd/aiter-ci
+  SGLANG_CI_HOSTNAME_OVERRIDE: linux-mi35x-gpu-8
+
+jobs:
+  select-sglang-tests:
+    name: Select SGLang tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      has_tests: ${{ steps.select.outputs.has_tests }}
+    steps:
+      - name: Checkout aiter downstream script
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AITER_REPOSITORY }}
+          ref: ${{ env.AITER_REF }}
+          sparse-checkout: |
+            .github/scripts/sglang_downstream.py
+          path: aiter-upstream
+
+      - name: Select SGLang tests
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 ./aiter-upstream/.github/scripts/sglang_downstream.py select-tests
+
+  sglang-integration:
+    if: needs.select-sglang-tests.outputs.has_tests == 'true'
+    name: SGLang ${{ matrix.model }} ${{ matrix.test_type }} (8 GPU)
+    needs: select-sglang-tests
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    runs-on: linux-flydsl-mi355-8
+    permissions:
+      actions: read
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select-sglang-tests.outputs.matrix) }}
+
+    env:
+      GPU_ARCH: gfx950
+
+    steps:
+      - name: Checkout FlyDSL utility scripts
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            scripts/install_awscli.sh
+          path: flydsl
+
+      - name: Checkout aiter downstream script
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AITER_REPOSITORY }}
+          ref: ${{ env.AITER_REF }}
+          sparse-checkout: |
+            .github/scripts/sglang_downstream.py
+          path: aiter-upstream
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: us-east-1
+          role-to-assume: arn:aws:iam::661452401056:role/framework-flydsl-nightlies
+
+      - name: Install AWS CLI
+        run: bash ./flydsl/scripts/install_awscli.sh
+
+      - name: Prepare SGLang workspace
+        run: |
+          set -ex
+          SGLANG_WORKSPACE="${RUNNER_TEMP}/sglang-downstream"
+          rm -rf "${SGLANG_WORKSPACE}"
+          git clone --depth 1 -b "${{ env.SGLANG_BRANCH }}" https://github.com/sgl-project/sglang.git "${SGLANG_WORKSPACE}"
+          test -d "${SGLANG_WORKSPACE}/sgl-kernel"
+          test -d "${SGLANG_WORKSPACE}/python"
+          echo "SGLANG_WORKSPACE=${SGLANG_WORKSPACE}" >> "${GITHUB_ENV}"
+
+      - name: Docker login
+        env:
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          for attempt in 1 2 3; do
+            if echo "$DOCKER_PASSWORD" | docker login -u rocmshared --password-stdin; then
+              echo "Docker login succeeded on attempt ${attempt}"
+              exit 0
+            fi
+            echo "Docker login attempt ${attempt} failed"
+            if [ "${attempt}" != 3 ]; then
+              sleep 10
+            fi
+          done
+          echo "Docker login failed after 3 attempts, continuing anyway"
+          exit 0
+
+      - name: Patch SGLang CI scripts for aiter runners
+        run: python3 ./aiter-upstream/.github/scripts/sglang_downstream.py patch-sglang "${SGLANG_WORKSPACE}"
+
+      - name: Start SGLang CI container
+        run: |
+          set -ex
+          docker rm -f ci_sglang || true
+          cd "${SGLANG_WORKSPACE}"
+          GITHUB_WORKSPACE="${SGLANG_WORKSPACE}" HF_TOKEN="${{ secrets.HF_TOKEN_TEST }}" bash scripts/ci/amd/amd_ci_start_container.sh
+          docker exec ci_sglang bash -lc 'pwd; ls -la /sglang-checkout; test -d /sglang-checkout/sgl-kernel; test -d /sglang-checkout/python; test -d /models'
+
+      - name: Setup pip config
+        run: |
+          docker exec -u root ci_sglang bash -c "pip config set global.default-timeout 60"
+          docker exec -u root ci_sglang bash -c "pip config set global.retries 10"
+
+      - name: Install SGLang dependencies
+        run: |
+          set -ex
+          cd "${SGLANG_WORKSPACE}"
+          bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-aiter-build
+          bash scripts/ci/amd/amd_ci_exec.sh pip install tabulate
+          bash scripts/ci/amd/amd_ci_exec.sh pip install mistral-common "lm-eval[api]"
+
+      - name: Resolve latest FlyDSL CI run
+        id: latest-ci-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLYDSL_REPOSITORY: ${{ env.FLYDSL_REPOSITORY }}
+          FLYDSL_CI_WORKFLOW: ${{ env.FLYDSL_CI_WORKFLOW }}
+        run: |
+          set -euo pipefail
+
+          PY_TAG=$(docker exec ci_sglang python3 -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+          echo "Detected Python tag inside SGLang image: ${PY_TAG}"
+          echo "python_tag=${PY_TAG}" >> "${GITHUB_OUTPUT}"
+
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          token = os.environ["GITHUB_TOKEN"]
+          repo = os.environ["FLYDSL_REPOSITORY"]
+          workflow = os.environ["FLYDSL_CI_WORKFLOW"]
+          url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}/runs?branch=main&status=completed&per_page=20"
+
+          req = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+
+          with urllib.request.urlopen(req) as resp:
+              data = json.load(resp)
+
+          run = next((r for r in data.get("workflow_runs", []) if r.get("conclusion") == "success"), None)
+          if run is None:
+              raise SystemExit("No successful FlyDSL CI run found on main.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"run_id={run['id']}\n")
+              f.write(f"run_url={run['html_url']}\n")
+              f.write(f"head_sha={run['head_sha']}\n")
+              f.write(f"head_sha_short={run['head_sha'][:7]}\n")
+
+          print(f"Selected FlyDSL CI run: {run['html_url']} @ {run['head_sha'][:7]}")
+          PY
+
+      - name: Try download wheel from S3
+        id: s3-wheel
+        continue-on-error: true
+        env:
+          PY_TAG: ${{ steps.latest-ci-run.outputs.python_tag }}
+          SHA_SHORT: ${{ steps.latest-ci-run.outputs.head_sha_short }}
+        run: |
+          set -euo pipefail
+          mkdir -p wheel-input
+
+          aws s3 ls "s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${{ env.FLYDSL_WHEEL_PREFIX }}/" | awk '{print $4}' > /tmp/flydsl-s3-wheels.txt
+
+          WHEEL_NAME=$(PY_TAG="${PY_TAG}" SHA_SHORT="${SHA_SHORT}" python3 - <<'PY'
+          import os
+
+          py_tag = os.environ["PY_TAG"]
+          sha_short = os.environ["SHA_SHORT"]
+          with open("/tmp/flydsl-s3-wheels.txt", encoding="utf-8") as f:
+              wheels = [line.strip() for line in f if line.strip()]
+
+          matches = [w for w in wheels if w.startswith("flydsl-") and w.endswith(".whl") and py_tag in w and sha_short in w]
+          if not matches:
+              raise SystemExit(f"No S3 wheel found for run sha {sha_short} and tag {py_tag}.")
+
+          print(sorted(matches)[-1])
+          PY
+          )
+
+          WHEEL_PATH="wheel-input/${WHEEL_NAME}"
+          WHEEL_S3_URI="s3://${{ env.FLYDSL_WHEEL_BUCKET }}/${{ env.FLYDSL_WHEEL_PREFIX }}/${WHEEL_NAME}"
+          echo "Downloading wheel from S3: ${WHEEL_S3_URI}"
+          aws s3 cp "${WHEEL_S3_URI}" "${WHEEL_PATH}"
+
+          echo "wheel_name=${WHEEL_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_source=s3" >> "${GITHUB_OUTPUT}"
+
+      - name: Download latest CI wheel artifact
+        if: steps.s3-wheel.outcome != 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: flydsl-wheels
+          repository: ${{ env.FLYDSL_REPOSITORY }}
+          run-id: ${{ steps.latest-ci-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: latest-ci-artifact
+
+      - name: Select wheel from artifact fallback
+        if: steps.s3-wheel.outcome != 'success'
+        id: artifact-wheel
+        env:
+          PY_TAG: ${{ steps.latest-ci-run.outputs.python_tag }}
+          SHA_SHORT: ${{ steps.latest-ci-run.outputs.head_sha_short }}
+        run: |
+          set -euo pipefail
+
+          WHEEL_PATH=$(PY_TAG="${PY_TAG}" SHA_SHORT="${SHA_SHORT}" python3 - <<'PY'
+          import glob
+          import os
+          import pathlib
+
+          py_tag = os.environ["PY_TAG"]
+          sha_short = os.environ["SHA_SHORT"]
+          wheels = sorted(glob.glob("latest-ci-artifact/**/*.whl", recursive=True))
+          candidates = [w for w in wheels if pathlib.Path(w).name.startswith("flydsl-") and py_tag in pathlib.Path(w).name and sha_short in pathlib.Path(w).name]
+          if not candidates:
+              candidates = [w for w in wheels if pathlib.Path(w).name.startswith("flydsl-") and py_tag in pathlib.Path(w).name]
+          if not candidates:
+              raise SystemExit(f"No artifact wheel found for tag {py_tag}.")
+          print(candidates[-1])
+          PY
+          )
+
+          WHEEL_NAME=$(basename "${WHEEL_PATH}")
+          echo "Using artifact fallback wheel: ${WHEEL_PATH}"
+          echo "wheel_name=${WHEEL_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_path=${WHEEL_PATH}" >> "${GITHUB_OUTPUT}"
+          echo "wheel_source=artifact" >> "${GITHUB_OUTPUT}"
+
+      - name: Install aiter and FlyDSL wheel under test
+        env:
+          S3_WHEEL_PATH: ${{ steps.s3-wheel.outputs.wheel_path }}
+          S3_WHEEL_NAME: ${{ steps.s3-wheel.outputs.wheel_name }}
+          ARTIFACT_WHEEL_PATH: ${{ steps.artifact-wheel.outputs.wheel_path }}
+          ARTIFACT_WHEEL_NAME: ${{ steps.artifact-wheel.outputs.wheel_name }}
+        run: |
+          set -euo pipefail
+          WHEEL_PATH="${S3_WHEEL_PATH:-${ARTIFACT_WHEEL_PATH:-}}"
+          WHEEL_NAME="${S3_WHEEL_NAME:-${ARTIFACT_WHEEL_NAME:-}}"
+          if [ -z "${WHEEL_PATH}" ] || [ -z "${WHEEL_NAME}" ]; then
+            echo "No FlyDSL wheel resolved from S3 or artifact."
+            exit 1
+          fi
+
+          docker cp "${WHEEL_PATH}" "ci_sglang:/tmp/${WHEEL_NAME}"
+          docker exec ci_sglang bash -lc "
+            set -ex
+            python3 -m pip uninstall -y flydsl amd-aiter aiter || true
+            rm -rf /tmp/aiter-under-test
+            git clone --depth 1 --recursive --shallow-submodules --branch '${{ env.AITER_REF }}' 'https://github.com/${{ env.AITER_REPOSITORY }}.git' /tmp/aiter-under-test
+            cd /tmp/aiter-under-test
+            python3 - <<'PY'
+          from pathlib import Path
+
+          src = Path('requirements.txt')
+          dst = Path('requirements-flydsl-ci.txt')
+          lines = [
+              line
+              for line in src.read_text().splitlines()
+              if line.strip() and not line.strip().startswith('flydsl==')
+          ]
+          dst.write_text('\\n'.join(lines) + '\\n')
+          PY
+            python3 -m pip install -r requirements-flydsl-ci.txt
+            python3 -m pip install --no-deps -e .
+            python3 -m pip install --no-deps --ignore-installed /tmp/${WHEEL_NAME}
+            python3 -m pip show flydsl
+            python3 -m pip show amd-aiter || python3 -m pip show aiter
+            python3 -c \"import flydsl, aiter; print('flydsl:', flydsl.__file__); print('aiter:', aiter.__file__)\"
+          "
+
+      - name: ${{ matrix.test_type }} Test MI35x (8-GPU ${{ matrix.model }})
+        timeout-minutes: ${{ matrix.timeout_minutes }}
+        env:
+          TEST_SPEC: ${{ toJson(matrix) }}
+          EXTRA_EXEC_ARGS: ${{ matrix.extra_exec_args }}
+          TEST_COMMAND: ${{ matrix.test_command }}
+        run: |
+          set -ex -o pipefail
+          cd "${SGLANG_WORKSPACE}"
+          > github_summary.md
+          mapfile -t MODEL_ENV_ARGS < <(python3 "${GITHUB_WORKSPACE}/aiter-upstream/.github/scripts/sglang_downstream.py" model-env-args)
+          bash scripts/ci/amd/amd_ci_exec.sh -w "/sglang-checkout/test" \
+            -e GITHUB_STEP_SUMMARY="/sglang-checkout/github_summary.md" \
+            -e AITER_USE_SYSTEM_TRITON=1 \
+            "${MODEL_ENV_ARGS[@]}" \
+            ${EXTRA_EXEC_ARGS} \
+            ${TEST_COMMAND} 2>&1 | tee "${GITHUB_WORKSPACE}/sglang_output.txt" || TEST_EXIT_CODE=$?
+          echo "$(<github_summary.md )" >> "$GITHUB_STEP_SUMMARY" || true
+          exit ${TEST_EXIT_CODE:-0}
+
+      - name: Upload SGLang logs and wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flydsl-sglang-${{ strategy.job-index }}
+          path: |
+            wheel-input/**/*.whl
+            latest-ci-artifact/**/*.whl
+            sglang_output.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Clean up SGLang
+        if: always()
+        run: |
+          docker rm -f ci_sglang || true
+          rm -rf "${SGLANG_WORKSPACE}" || true
