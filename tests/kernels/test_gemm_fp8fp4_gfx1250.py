@@ -331,6 +331,9 @@ def _run_mxscale_gemm_test(
     split_k=1,
     b_streaming=False,
     scale_load_path="tdm",
+    hot_loop_sched_mode="default",
+    hot_loop_manual_ds=8,
+    hot_loop_manual_mfma=8,
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -447,6 +450,9 @@ def _run_mxscale_gemm_test(
         expert_sched_mode=expert_sched_mode,
         b_streaming=b_streaming,
         scale_load_path=scale_load_path,
+        hot_loop_sched_mode=hot_loop_sched_mode,
+        hot_loop_manual_ds=hot_loop_manual_ds,
+        hot_loop_manual_mfma=hot_loop_manual_mfma,
     )
 
     # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
@@ -821,6 +827,51 @@ def test_mxfp8_vgpr_scale_load(scale_load_path, cluster_m, cluster_n):
         cluster_m=cluster_m,
         cluster_n=cluster_n,
         scale_load_path=scale_load_path,
+    )
+
+
+# IGLP hot-loop scheduling modes (FP8 deep-pipeline, scale=tdm). Covers the
+# baseline 'default' plus the two clean-region drivers ('iglp' = iglp_opt(0),
+# 'manual' = sched_group_barrier DS:MFMA template) at a few granularities in one
+# test. All modes must stay numerically correct; perf ranking is a separate
+# silicon-ATT exercise. Scope mirrors the deep-pipeline target:
+# 256x256x128, warps 2x2, num_buffers=4, wave_specialized_tdm, cluster (2,2).
+@pytest.mark.parametrize(
+    "hot_loop_sched_mode, hot_loop_manual_ds, hot_loop_manual_mfma",
+    [
+        ("default", 8, 8),
+        ("iglp", 8, 8),
+        ("manual", 8, 8),
+        ("manual", 4, 4),
+        ("manual", 2, 1),
+    ],
+)
+def test_mxfp8_hot_loop_sched_modes(hot_loop_sched_mode, hot_loop_manual_ds, hot_loop_manual_mfma):
+    if str(get_rocm_arch()) != "gfx1250":
+        pytest.skip("requires gfx1250")
+    if "FFMLITE_TOPOLOGY" in os.environ or "AM_TOPOLOGY" in os.environ:
+        pytest.skip("cluster multicast not supported on simulator")
+    _run_mxscale_gemm_test(
+        "fp8",
+        512,
+        512,
+        512,
+        256,
+        256,
+        128,
+        2,
+        2,
+        num_buffers=4,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        wave_specialized_tdm=True,
+        cluster_m=2,
+        cluster_n=2,
+        scale_load_path="tdm",
+        hot_loop_sched_mode=hot_loop_sched_mode,
+        hot_loop_manual_ds=hot_loop_manual_ds,
+        hot_loop_manual_mfma=hot_loop_manual_mfma,
     )
 
 
@@ -1252,6 +1303,9 @@ def _run_benchmark(args):
         atomic_barrier_enable=args.atomic_barrier_enable,
         b_streaming=args.b_streaming,
         scale_load_path=args.scale_load_path,
+        hot_loop_sched_mode=args.hot_loop_sched_mode,
+        hot_loop_manual_ds=args.hot_loop_manual_ds,
+        hot_loop_manual_mfma=args.hot_loop_manual_mfma,
     )
 
     compiled_exe = flyc.compile(
@@ -1435,6 +1489,9 @@ def _run_graph_verify(args):
         atomic_barrier_enable=args.atomic_barrier_enable,
         b_streaming=args.b_streaming,
         scale_load_path=args.scale_load_path,
+        hot_loop_sched_mode=args.hot_loop_sched_mode,
+        hot_loop_manual_ds=args.hot_loop_manual_ds,
+        hot_loop_manual_mfma=args.hot_loop_manual_mfma,
     )
 
     c_flat = c_gpu.contiguous()
@@ -1531,6 +1588,27 @@ if __name__ == "__main__":
         default="tdm",
         choices=["tdm", "vgpr", "vgpr_ab_split"],
     )
+    parser.add_argument(
+        "--hot-loop-sched-mode",
+        type=str,
+        default="default",
+        choices=["default", "iglp", "manual"],
+        help="FP8 deep-pipeline hot-loop scheduling: 'default' (baseline, "
+        "byte-identical), 'iglp' (iglp_opt(0) MFMASmallGemmOpt), or 'manual' "
+        "(hand-emitted sched_group_barrier DS:MFMA template).",
+    )
+    parser.add_argument(
+        "--hot-loop-manual-ds",
+        type=int,
+        default=8,
+        help="DS group size for --hot-loop-sched-mode manual.",
+    )
+    parser.add_argument(
+        "--hot-loop-manual-mfma",
+        type=int,
+        default=8,
+        help="MFMA group size for --hot-loop-sched-mode manual.",
+    )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument("--b-streaming", action="store_true", default=False)
     parser.add_argument(
@@ -1603,4 +1681,7 @@ if __name__ == "__main__":
             expert_sched_mode=args.expert_sched_mode,
             b_streaming=args.b_streaming,
             scale_load_path=args.scale_load_path,
+            hot_loop_sched_mode=args.hot_loop_sched_mode,
+            hot_loop_manual_ds=args.hot_loop_manual_ds,
+            hot_loop_manual_mfma=args.hot_loop_manual_mfma,
         )
