@@ -111,15 +111,24 @@ def _create_mlir_context(*, load_dialects=True):
 _NOT_IN_BASELINE = object()
 
 
-# Environment variables that influence code generation. Their current values
-# enter the hot cache key so cross-process / cross-config artifacts don't collide.
+# Environment variables that influence code generation *independently of the
+# resolved GPUTarget*. Their current values enter the hot cache key so
+# cross-process / cross-config artifacts don't collide.
+#
+# Arch selectors (ARCH / FLYDSL_GPU_ARCH / HSA_OVERRIDE_GFX_VERSION) are
+# deliberately NOT listed here. Their only effect is to pick the target arch,
+# which is already folded into the key via ("_target_", GPUTarget). Listing them
+# would (a) double-count arch and (b) make the key depend on *how* arch was
+# supplied -- env-injected during CPU/AOT pre-compilation vs device-detected at
+# GPU runtime. detect_target() normalizes both paths to the same GPUTarget, so a
+# cache built on a (GPU-less) build host with ARCH=gfx950 would otherwise never
+# be hit at runtime, where those env vars are unset and arch comes from the
+# device. Dropping the raw env vars loses no key precision: any arch change still
+# changes ("_target_", ...).
 _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_OPT_LEVEL",
     "FLYDSL_COMPILE_BACKEND",
     "FLYDSL_COMPILE_LLVM_DIR",
-    "ARCH",
-    "FLYDSL_GPU_ARCH",
-    "HSA_OVERRIDE_GFX_VERSION",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
 )
