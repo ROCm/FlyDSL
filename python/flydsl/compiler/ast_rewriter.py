@@ -6,6 +6,7 @@ import contextlib
 import difflib
 import inspect
 import types
+import warnings
 from textwrap import dedent
 from typing import List
 
@@ -67,7 +68,7 @@ def _unwrap_constexpr(node):
     return node
 
 
-def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None):
+def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_expr=None):
     write_args = []
     invoked_args = []
 
@@ -127,6 +128,8 @@ def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None):
     analyzer.visit(ast.Module(body=body_stmts, type_ignores=[]))
     if orelse_stmts:
         analyzer.visit(ast.Module(body=orelse_stmts, type_ignores=[]))
+    if test_expr is not None:
+        analyzer.visit(ast.Module(body=[ast.Expr(value=test_expr)], type_ignores=[]))
 
     invoked_args = [name for name in invoked_args if name not in write_args]
     write_args = [name for name in write_args if in_active_symbols(name)]
@@ -134,14 +137,27 @@ def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None):
     return write_args + invoked_args
 
 
+def _check_local_var(name, local_vars):
+    if name not in local_vars:
+        warnings.warn(
+            f"Variable '{name}' is assigned inside a control flow body (while/if/for) "
+            f"but is not a local variable in the current scope. "
+            f"It may be a closure variable captured from an outer function. "
+            f"Fix: pass it as a function parameter or assign it to a local variable "
+            f"before the control flow statement.",
+            stacklevel=2,
+        )
+        return None
+    return local_vars[name]
+
+
 def _state_value_expr(name):
     return ast.Call(
-        func=ast.Attribute(
-            value=ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
-            attr="get",
-            ctx=ast.Load(),
-        ),
-        args=[ast.Constant(value=name), ast.Constant(value=None)],
+        func=ast.Name(id="__check_local_var", ctx=ast.Load()),
+        args=[
+            ast.Constant(value=name),
+            ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+        ],
         keywords=[],
     )
 
@@ -323,31 +339,34 @@ class Transformer(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_For(self, node: ast.For):
-        self._record_target_symbols(node.target)
-        node.iter = self.visit(node.iter)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            self._record_target_symbols(node.target)
+            node.iter = self.visit(node.iter)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_If(self, node: ast.If):
-        node.test = self.visit(node.test)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_While(self, node: ast.While):
-        node.test = self.visit(node.test)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_With(self, node: ast.With):
@@ -659,6 +678,7 @@ class ReplaceIfWithDispatch(Transformer):
     def rewrite_globals(cls):
         return {
             "const_expr": const_expr,
+            "__check_local_var": _check_local_var,
             "scf_if_dispatch": cls.scf_if_dispatch,
             "scf_ifexp_dispatch": cls.scf_ifexp_dispatch,
             "scf_if_collect_results": cls._collect_result_dict,
@@ -1189,23 +1209,24 @@ class InsertEmptyYieldForSCFFor(Transformer):
             node.iter.func = ast.Name(id="scf_range", ctx=ast.Load())
         line = ast.dump(node.iter)
         if "for_" in line or "scf.for_" in line or "scf_range" in line:
-            node.iter = self.visit(node.iter)
             with self.symbol_scopes.control_flow_scope():
-                if isinstance(node.target, ast.Name):
-                    self.symbol_scopes.record_symbol(node.target.id)
-                node.body = self._visit_stmt_block(node.body)
-            if node.orelse:
+                node.iter = self.visit(node.iter)
                 with self.symbol_scopes.control_flow_scope():
-                    node.orelse = self._visit_stmt_block(node.orelse)
-            new_yield = ast.Expr(ast.Yield(value=None))
-            if node.body and not self._is_yield(node.body[-1]):
-                last_statement = node.body[-1]
-                assert (
-                    last_statement.end_lineno is not None
-                ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
-                new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
-                node.body.append(new_yield)
-            node = ast.fix_missing_locations(node)
+                    if isinstance(node.target, ast.Name):
+                        self.symbol_scopes.record_symbol(node.target.id)
+                    node.body = self._visit_stmt_block(node.body)
+                if node.orelse:
+                    with self.symbol_scopes.control_flow_scope():
+                        node.orelse = self._visit_stmt_block(node.orelse)
+                new_yield = ast.Expr(ast.Yield(value=None))
+                if node.body and not self._is_yield(node.body[-1]):
+                    last_statement = node.body[-1]
+                    assert (
+                        last_statement.end_lineno is not None
+                    ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
+                    new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
+                    node.body.append(new_yield)
+                node = ast.fix_missing_locations(node)
         return node
 
 
@@ -1249,44 +1270,83 @@ class ReplaceYieldWithSCFYield(Transformer):
 
 @ASTRewriter.register
 class CanonicalizeWhile(Transformer):
+    _counter = 0
+
     @staticmethod
-    def scf_while_init(cond, *, loc=None, ip=None):
-        if loc is None:
-            loc = ir.Location.unknown()
+    def scf_while_dispatch(before_fn, after_fn, *, result_names=(), result_values=()):
+        result_names, result_values = ReplaceIfWithDispatch._normalize_named_values(
+            result_names, result_values, "result_names", "result_values"
+        )
+        result_map = {name: value for name, value in zip(result_names, result_values)}
 
-        def wrapper():
-            nonlocal ip
-            inits = list(cond.owner.operands)
-            result_types = [i.type for i in inits]
-            while_op = scf.WhileOp(result_types, inits, loc=loc, ip=ip)
-            while_op.regions[0].blocks.append(*[i.type for i in inits])
-            before = while_op.regions[0].blocks[0]
-            while_op.regions[1].blocks.append(*[i.type for i in inits])
-            after = while_op.regions[1].blocks[0]
-            with ir.InsertionPoint(before) as ip:
-                cond_op = scf.ConditionOp(cond, list(before.arguments))
-                cond.owner.move_before(cond_op)
-            with ir.InsertionPoint(after):
-                yield inits
+        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
+        if none_vars:
+            raise TypeError(
+                f"Variable(s) {none_vars} initialized as None before a dynamic "
+                f"while loop (scf.while). Branches assign to these variables, but "
+                f"None cannot be yielded as an scf.while result. Initialize them "
+                f"with a value whose type matches the loop body assignment (e.g. "
+                f"fx.Int32(0), fx.Float32(0.0)), or wrap the condition with "
+                f"const_expr() if it is a compile-time constant."
+            )
 
-        if hasattr(CanonicalizeWhile.scf_while_init, "wrapper"):
-            next(CanonicalizeWhile.scf_while_init.wrapper, False)
-            del CanonicalizeWhile.scf_while_init.wrapper
-            return False
+        state_raw = []
+        for name, value in zip(result_names, result_values):
+            raw = _unwrap_value(value)
+            if not isinstance(raw, ir.Value):
+                raise TypeError(
+                    f"while-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
+                    "only MLIR-backed values can be loop-carried in dynamic while loops."
+                )
+            state_raw.append(raw)
+
+        result_types = [v.type for v in state_raw]
+        while_op = scf.WhileOp(result_types, state_raw, loc=ir.Location.unknown())
+        while_op.regions[0].blocks.append(*result_types)
+        while_op.regions[1].blocks.append(*result_types)
+
+        with ir.InsertionPoint(while_op.regions[0].blocks[0]):
+            before_args = list(while_op.regions[0].blocks[0].arguments)
+            wrapped_before = [_wrap_like(a, ex) for a, ex in zip(before_args, result_values)] if result_names else []
+            before_cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, wrapped_before)
+            cond_i1 = ReplaceIfWithDispatch._to_i1(before_cond)
+            if not isinstance(cond_i1, ir.Value):
+                raise TypeError(f"dynamic while condition must lower to ir.Value, got {type(cond_i1).__name__}")
+            scf.ConditionOp(cond_i1, before_args)
+
+        with ir.InsertionPoint(while_op.regions[1].blocks[0]):
+            after_args = list(while_op.regions[1].blocks[0].arguments)
+            wrapped_after = [_wrap_like(a, ex) for a, ex in zip(after_args, result_values)] if result_names else []
+            body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, wrapped_after)
+            if result_names:
+                body_values = ReplaceIfWithDispatch._normalize_branch_result(
+                    body_result, result_names, result_map, "while-body"
+                )
+                body_raw = ReplaceIfWithDispatch._unwrap_mlir_values(body_values, result_names, "while-body")
+                for name, expect_ty, got in zip(result_names, result_types, body_raw):
+                    if got.type != expect_ty:
+                        raise TypeError(
+                            f"while-loop variable '{name}' type mismatch: expected {expect_ty}, got {got.type}"
+                        )
+                scf.YieldOp(body_raw)
+            else:
+                scf.YieldOp([])
+
+        if not result_names:
+            return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
+
+        wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(while_op.results), result_values)
+        if len(result_names) == 1:
+            final_values = [wrapped]
         else:
-            CanonicalizeWhile.scf_while_init.wrapper = wrapper()
-            return next(CanonicalizeWhile.scf_while_init.wrapper)
-
-    @staticmethod
-    def scf_while_gen(cond, *, loc=None, ip=None):
-        yield CanonicalizeWhile.scf_while_init(cond, loc=loc, ip=ip)
-        yield CanonicalizeWhile.scf_while_init(cond, loc=loc, ip=ip)
+            final_values = list(wrapped)
+        return ReplaceIfWithDispatch._pack_named_values(result_names, final_values)
 
     @classmethod
     def rewrite_globals(cls):
         return {
-            "scf_while_gen": cls.scf_while_gen,
-            "scf_while_init": cls.scf_while_init,
+            "scf_while_dispatch": cls.scf_while_dispatch,
+            "scf_while_collect_results": ReplaceIfWithDispatch._collect_result_dict,
         }
 
     def visit_While(self, node: ast.While) -> List[ast.AST]:
@@ -1294,39 +1354,106 @@ class CanonicalizeWhile(Transformer):
             node.test = _unwrap_constexpr(node.test)
             node = super().visit_While(node)
             return node
+
+        if node.orelse:
+            raise NotImplementedError("while...else is not supported in dynamic while loops (scf.while)")
+
+        active_symbols_before_while = self.symbol_scopes.snapshot_symbol_scopes()
+
         with self.symbol_scopes.control_flow_scope():
-            node = super().visit_While(node)
-            if isinstance(node.test, ast.NamedExpr):
-                test = node.test.value
-            else:
-                test = node.test
-            w = ast.Call(func=ast.Name("scf_while_gen", ctx=ast.Load()), args=[test], keywords=[])
-            w = ast.copy_location(w, node)
-            assign = ast.Assign(
-                targets=[ast.Name(f"w_{node.lineno}", ctx=ast.Store())],
-                value=w,
-            )
-            assign = ast.fix_missing_locations(ast.copy_location(assign, node))
+            node.test = self.visit(node.test)
+            with self.symbol_scopes.control_flow_scope():
+                node.body = self._visit_stmt_block(node.body)
 
-            next_ = ast.Call(
-                func=ast.Name("next", ctx=ast.Load()),
-                args=[
-                    ast.Name(f"w_{node.lineno}", ctx=ast.Load()),
-                    ast.Constant(False, kind="bool"),
-                ],
-                keywords=[],
-            )
-            next_ = ast.fix_missing_locations(ast.copy_location(next_, node))
-            if isinstance(node.test, ast.NamedExpr):
-                node.test.value = next_
-            else:
-                new_test = ast.NamedExpr(target=ast.Name(f"__init__{node.lineno}", ctx=ast.Store()), value=next_)
-                new_test = ast.copy_location(new_test, node)
-                node.test = new_test
+            uid = CanonicalizeWhile._counter
+            CanonicalizeWhile._counter += 1
 
-            node = ast.fix_missing_locations(node)
-            assign = ast.fix_missing_locations(assign)
-            return [assign, node]
+            result_names = _collect_assigned_vars(node.body, active_symbols_before_while, test_expr=node.test)
+
+            fn_args = [ast.arg(arg="__ret_names", annotation=None)] + [
+                ast.arg(arg=v, annotation=None) for v in result_names
+            ]
+
+            def _state_return_node():
+                return ast.Return(
+                    value=ast.Call(
+                        func=ast.Name(id="scf_while_collect_results", ctx=ast.Load()),
+                        args=[
+                            ast.Name(id="__ret_names", ctx=ast.Load()),
+                            ast.Call(func=ast.Name(id="locals", ctx=ast.Load()), args=[], keywords=[]),
+                        ],
+                        keywords=[],
+                    )
+                )
+
+            before_name = f"__while_before_{uid}"
+            before_func = ast.FunctionDef(
+                name=before_name,
+                args=ast.arguments(posonlyargs=[], args=fn_args, kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=[ast.Return(value=node.test)],
+                decorator_list=[],
+                type_params=[],
+            )
+            setattr(before_func, _ASTREWRITE_MARKER, type(self).__name__)
+            before_func = ast.copy_location(before_func, node)
+            before_func = ast.fix_missing_locations(before_func)
+
+            after_name = f"__while_after_{uid}"
+            after_stmts = list(node.body) + ([_state_return_node()] if result_names else [])
+            after_func = ast.FunctionDef(
+                name=after_name,
+                args=ast.arguments(posonlyargs=[], args=fn_args, kwonlyargs=[], kw_defaults=[], defaults=[]),
+                body=after_stmts,
+                decorator_list=[],
+                type_params=[],
+            )
+            setattr(after_func, _ASTREWRITE_MARKER, type(self).__name__)
+            after_func = ast.copy_location(after_func, node)
+            after_func = ast.fix_missing_locations(after_func)
+
+            dispatch_args = [ast.Name(before_name, ctx=ast.Load()), ast.Name(after_name, ctx=ast.Load())]
+            dispatch_keywords = []
+            if result_names:
+                dispatch_keywords.extend(
+                    [
+                        ast.keyword(
+                            arg="result_names",
+                            value=ast.Tuple(
+                                elts=[ast.Constant(value=v) for v in result_names],
+                                ctx=ast.Load(),
+                            ),
+                        ),
+                        ast.keyword(
+                            arg="result_values",
+                            value=ast.Tuple(
+                                elts=[_state_value_expr(v) for v in result_names],
+                                ctx=ast.Load(),
+                            ),
+                        ),
+                    ]
+                )
+
+            dispatch_value = ast.Call(
+                func=ast.Name("scf_while_dispatch", ctx=ast.Load()),
+                args=dispatch_args,
+                keywords=dispatch_keywords,
+            )
+
+            if result_names:
+                if len(result_names) == 1:
+                    target = ast.Name(id=result_names[0], ctx=ast.Store())
+                else:
+                    target = ast.Tuple(
+                        elts=[ast.Name(id=v, ctx=ast.Store()) for v in result_names],
+                        ctx=ast.Store(),
+                    )
+                dispatch_stmt = ast.Assign(targets=[target], value=dispatch_value)
+            else:
+                dispatch_stmt = ast.Expr(value=dispatch_value)
+            dispatch_stmt = ast.copy_location(dispatch_stmt, node)
+            dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
+
+            return [before_func, after_func, dispatch_stmt]
 
 
 @ASTRewriter.register
