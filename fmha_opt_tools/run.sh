@@ -43,49 +43,47 @@ function run_flydsl_op {
     # export FLYDSL_RUNTIME_ENABLE_CACHE=0
     # export FLYDSL_DUMP_IR=1
     export FLYDSL_DUMP_DIR=./flydsl_dump
-    export FLYDSL_ENABLE_OPUS_PATH=1
-    # export FLYDSL_OPUS_SETPRIO=0
-    # export FLYDSL_OPUS_STAGGER=0
-    # export FLYDSL_OPUS_LAZY_RESCALE=0
-    # export FLYDSL_OPUS_TRIGGER_LAZY_ELSE=1
-    # export FLYDSL_OPUS_DEBUG_LAZY_COUNTS=1
-
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
-
+    # export FLYDSL_ENABLE_DUALWAVE_SWP_PATH=1
+    # export FLYDSL_DUALWAVE_SWP_SETPRIO=0
+    # export FLYDSL_DUALWAVE_SWP_STAGGER=0
+    # export FLYDSL_DUALWAVE_SWP_LAZY_RESCALE=0
+    # export FLYDSL_DUALWAVE_SWP_TRIGGER_LAZY_ELSE=1
+    # export FLYDSL_DUALWAVE_SWP_DEBUG_LAZY_COUNTS=1
 
     # python tests/kernels/test_moe_stage1_simple.py --size M
-
     # python tests/kernels/test_simple_gemm.py --size XL --waves_per_eu 1
     # python tests/kernels/test_simple_gemm.py --size NA4
     # python tests/kernels/test_simple_gemm.py --size all --dtype all
-
-    # python tests/kernels/test_flash_attn_func.py --warmup 5 --iters 100
-    # python tests/kernels/test_flash_attn_func.py --compare --warmup 5 --iters 100
-    # python tests/kernels/test_flash_attn_func.py --compare --causal --warmup 5 --iters 100
-
-    # python tests/kernels/test_flash_attn_func.py --compare --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --warmup 5 --iters 100
-    # python tests/kernels/test_flash_attn_func.py --compare --causal --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --warmup 5 --iters 100
-    # python tests/kernels/test_flash_attn_func.py --compare --causal --dtype bf16 --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --warmup 5 --iters 100
-
     # python tests/test_triton_flash_attn.py --compare --warmup 5 --iters 100
 
 
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 512 --head_dim 128 --iters 100
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_attn_fwd_ori.py --iters 100
+    # python tests/kernels/test_flash_attn_fwd_ori.py --causal --dtype bf16 --iters 100
+    # python tests/kernels/test_flash_attn_fwd_ori.py --causal --dtype bf16 --iters 100 --compare
+
+    # python tests/kernels/test_flash_attn_fwd_ori.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd_ori.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+
+
+
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 512 --head_dim 128 --iters 100
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100
 
     ./exp_isa/build.sh
-    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --iters 100 --compare
-    python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --iters 100
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --iters 100
+    python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --iters 100 --compare
+    python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
 
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
-    # python tests/kernels/test_flash_opus_attn.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
 
     # python3 scripts/trace_segment_cycles.py seg_asm/cpp_attn/main_loop_cluster0_7.json | tee trace_info.cpp.log
     # python3 scripts/trace_segment_cycles.py seg_asm/fyd_attn/main_loop_cluster0_7.json | tee trace_info.log
@@ -97,8 +95,8 @@ function run_flydsl_op {
     # ./install_python.sh
 
 
-    # rocprof -i perf_counters1.txt -o prof_v44_p1.csv python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
-    # rocprof -i perf_counters2.txt -o prof_v44_p2.csv python tests/kernels/test_flash_attn_func.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
+    # rocprof -i perf_counters1.txt -o prof_v44_p1.csv python tests/kernels/test_flash_attn_fwd_ori.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
+    # rocprof -i perf_counters2.txt -o prof_v44_p2.csv python tests/kernels/test_flash_attn_fwd_ori.py --batch 1 --num_heads 64 --seq_len 8192 --head_dim 128 --iters 5 --warmup 2
 
 }
 
