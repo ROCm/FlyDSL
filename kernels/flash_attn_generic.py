@@ -36,12 +36,7 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
 
-# ---- Module-level constants ----
-
-KERNEL_NAME = "flash_attn_func_kernel"
-
 _LOG2E = host_math.log2(host_math.e)  # 1.4426950408889634
-
 _VMCNT_LO_MASK = 0xF
 _LGKMCNT_EXPCNT_BASE = 0x3F70
 _VMCNT_HI_SHIFT = 14
@@ -91,10 +86,10 @@ def build_flash_attn_func_module_primary(
     daz=True,
     path_tag="auto",
     num_kv_heads=None,
-    opus_lazy_rescale=True,
-    opus_setprio=True,
-    opus_debug_lazy_counts=False,
-    opus_enable_stagger=True,
+    dualwave_swp_lazy_rescale=True,
+    dualwave_swp_setprio=True,
+    dualwave_swp_debug_lazy_counts=False,
+    dualwave_swp_enable_stagger=True,
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API.
 
@@ -116,24 +111,21 @@ def build_flash_attn_func_module_primary(
     K_SUB_N = 32
     WARP_SIZE = 64
 
-    # ── OPUS-style fast path (gfx950 D=128 bf16) ──
+    # ── DUALWAVE_SWP fast path (gfx950 D=128 bf16) ──
     # Built when:
     #   * outermost call (block_m is None)
     #   * head_dim == 128, dtype == bf16, gpu_arch startswith "gfx950"
-    #   * FLYDSL_ENABLE_OPUS_PATH=1 (opt-in until the port matches/beats baseline)
     # Runtime dispatch additionally requires seq_len >= 384 and seq_len % 256 == 0.
-    _opus_launch = None
-    _opus_path_requested = os.getenv("FLYDSL_ENABLE_OPUS_PATH", "0") == "1"
+    _dualwave_swp_launch = None
     if (
         block_m is None
         and head_dim == 128
         and dtype_str == "bf16"
         and gpu_arch.startswith("gfx950")
-        and _opus_path_requested
     ):
         try:
-            from kernels.flash_attn_opus import build_flash_attn_opus_module
-            _opus_launch = build_flash_attn_opus_module(
+            from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
+            _dualwave_swp_launch = build_flash_attn_dualwave_swp_module(
                 num_heads=num_heads,
                 head_dim=head_dim,
                 causal=causal,
@@ -141,37 +133,37 @@ def build_flash_attn_func_module_primary(
                 num_kv_heads=num_kv_heads,
                 waves_per_eu=waves_per_eu,
                 daz=daz,
-                opus_lazy_rescale=opus_lazy_rescale,
-                opus_setprio=opus_setprio,
-                opus_debug_lazy_counts=opus_debug_lazy_counts,
-                opus_enable_stagger=opus_enable_stagger,
+                dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+                dualwave_swp_setprio=dualwave_swp_setprio,
+                dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
+                dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
             )
-        except Exception as _opus_err:
+        except Exception as _dualwave_swp_err:
             import sys
             print(
-                f"[flash_attn_func] OPUS path build failed, falling back: {_opus_err}",
+                f"[flash_attn_func] OPUS path build failed, falling back: {_dualwave_swp_err}",
                 file=sys.stderr,
             )
-            _opus_launch = None
+            _dualwave_swp_launch = None
 
-    def _wrap_with_opus(_fallback):
+    def _wrap_with_dualwave_swp(_fallback):
         """Return a dispatcher that routes eligible runtime shapes to OPUS."""
-        if _opus_launch is None:
+        if _dualwave_swp_launch is None:
             return _fallback
 
-        def _opus_dispatch(*args, **kwargs):
+        def _dualwave_swp_dispatch(*args, **kwargs):
             S = args[5] if len(args) > 5 else kwargs.get("seq_len", 0)
             try:
                 S_int = int(S)
             except (TypeError, ValueError):
                 S_int = 0
             if S_int >= 384 and S_int % 256 == 0:
-                return _opus_launch(*args, **kwargs)
+                return _dualwave_swp_launch(*args, **kwargs)
             return _fallback(*args, **kwargs)
 
         if hasattr(_fallback, "compile"):
-            _opus_dispatch.compile = _fallback.compile
-        return _opus_dispatch
+            _dualwave_swp_dispatch.compile = _fallback.compile
+        return _dualwave_swp_dispatch
 
     # Auto tile selection: for H>=32, build both M=128 and M=256 variants
     # and dispatch at runtime based on B*S.
@@ -181,19 +173,19 @@ def build_flash_attn_func_module_primary(
             flat_work_group_size=256, block_m=128,
             unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
             daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads,
-            opus_lazy_rescale=opus_lazy_rescale,
-            opus_setprio=opus_setprio,
-            opus_debug_lazy_counts=opus_debug_lazy_counts,
-            opus_enable_stagger=opus_enable_stagger)
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger)
         _launcher_m256 = build_flash_attn_func_module_primary(
             num_heads, head_dim, causal, dtype_str, sm_scale, waves_per_eu,
             flat_work_group_size=512, block_m=256,
             unsafe_fp_math=unsafe_fp_math, fast_fp_math=fast_fp_math,
             daz=daz, path_tag=path_tag, num_kv_heads=num_kv_heads,
-            opus_lazy_rescale=opus_lazy_rescale,
-            opus_setprio=opus_setprio,
-            opus_debug_lazy_counts=opus_debug_lazy_counts,
-            opus_enable_stagger=opus_enable_stagger)
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger)
         _BS_THRESHOLD = 4096 * num_heads
 
         def _auto_launch(*args, **kwargs):
@@ -204,7 +196,7 @@ def build_flash_attn_func_module_primary(
                 return _launcher_m256(*args, **kwargs)
             return _launcher_m128(*args, **kwargs)
 
-        return _wrap_with_opus(_auto_launch)
+        return _wrap_with_dualwave_swp(_auto_launch)
 
     if block_m is not None:
         BLOCK_M = block_m
@@ -325,7 +317,7 @@ def build_flash_attn_func_module_primary(
     allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * 2
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
-    def flash_attn_func_kernel(
+    def flash_attn_generic_kernel(
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
@@ -1214,7 +1206,7 @@ def build_flash_attn_func_module_primary(
             if const_expr(daz)
             else None
         )
-        flash_attn_func_kernel(
+        flash_attn_generic_kernel(
             Q,
             K,
             V,
@@ -1258,7 +1250,7 @@ def build_flash_attn_func_module_primary(
 
     _launch.compile = _compile
 
-    return _wrap_with_opus(_launch)
+    return _wrap_with_dualwave_swp(_launch)
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary

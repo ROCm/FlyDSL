@@ -32,8 +32,7 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-from kernels.flash_attn_func import (
-    KERNEL_NAME,
+from kernels.flash_attn_generic import (
     build_flash_attn_func_module,
 )
 from tests.test_common import run_perftest
@@ -54,6 +53,7 @@ DEFAULT_CONFIGS = [
     (8, 512, 64, 64, 128),
     (1, 128, 64, 64, 128),
     (1, 256, 64, 64, 128),
+    (1, 384, 64, 64, 128),
     (1, 512, 64, 64, 128),
     (1, 1024, 64, 64, 128),
 
@@ -76,9 +76,9 @@ DEFAULT_CONFIGS = [
     (1, 4096, 8, 8, 128),
     (1, 8192, 8, 8, 128),
     (32, 8192, 8, 8, 128),
+    (16, 8192, 64, 64, 128),
 
     # GQA configs (num_kv_heads < num_heads).
-    (16, 8192, 64, 64, 128),
     (16, 8192, 64, 8, 128),
 ]
 
@@ -315,7 +315,7 @@ def run_aiter_bench(
     batch, seq_len, nheads, head_dim, dtype, causal,
     warmup, iters, seed=DEFAULT_SEED, backend="ck", num_kv_heads=None,
 ):
-    """Run true CK or true ASM kernel via aiter and return {tflops, max_err, us}."""
+    """Run true aiter_ck or true aiter_asm kernel via aiter and return {tflops, max_err, us}."""
     try:
         import aiter
     except Exception:
@@ -421,18 +421,35 @@ def _fmt_result(r):
 
 def _fmt_cmp(fly_r, other_r):
     """Format FlyDSL vs other: 'TFLOPS% MaxErr-ratio'."""
+    return _fmt_cmp_values(_cmp_values(fly_r, other_r))
+
+
+def _cmp_values(fly_r, other_r):
+    """Return numeric comparison values for one valid FlyDSL/comparator row."""
     if other_r.get("skip") or "err" in other_r or "err" in fly_r:
-        return f"{'--':>7s} {'--':>6s}"
+        return {"skip": True}
     fly_tf = fly_r.get("tflops")
     oth_tf = other_r.get("tflops")
     fly_err = fly_r.get("max_err")
     oth_err = other_r.get("max_err")
+    result = {}
     if fly_tf and oth_tf and oth_tf > 0:
-        pct = f"{fly_tf / oth_tf * 100:>6.1f}%"
+        result["tflops_pct"] = fly_tf / oth_tf * 100
+    if fly_err is not None and oth_err is not None and oth_err > 0:
+        result["max_err_ratio"] = fly_err / oth_err
+    return result
+
+
+def _fmt_cmp_values(cmp_r):
+    """Format numeric comparison values."""
+    if cmp_r.get("skip"):
+        return f"{'--':>7s} {'--':>6s}"
+    if "tflops_pct" in cmp_r:
+        pct = f"{cmp_r['tflops_pct']:>6.1f}%"
     else:
         pct = f"{'N/A':>7s}"
-    if fly_err is not None and oth_err is not None and oth_err > 0:
-        ratio = f"{fly_err / oth_err:>5.2f}x"
+    if "max_err_ratio" in cmp_r:
+        ratio = f"{cmp_r['max_err_ratio']:>5.2f}x"
     else:
         ratio = f"{'N/A':>6s}"
     return f"{pct} {ratio}"
@@ -461,12 +478,15 @@ def _csv_val(r, key):
 
 def _csv_cmp(fly_r, other_r):
     """Compute (tflops_pct_str, maxerr_ratio_str) for CSV, formatted to match console."""
-    if other_r.get("skip") or "err" in other_r or "err" in fly_r:
+    return _csv_cmp_values(_cmp_values(fly_r, other_r))
+
+
+def _csv_cmp_values(cmp_r):
+    """Format numeric comparison values for CSV."""
+    if cmp_r.get("skip"):
         return ("", "")
-    ft, ot = fly_r.get("tflops"), other_r.get("tflops")
-    pct = f"{ft / ot * 100:.1f}%" if ft and ot and ot > 0 else ""
-    fe, oe = fly_r.get("max_err"), other_r.get("max_err")
-    rat = f"{fe / oe:.2f}x" if fe is not None and oe is not None and oe > 0 else ""
+    pct = f"{cmp_r['tflops_pct']:.1f}%" if "tflops_pct" in cmp_r else ""
+    rat = f"{cmp_r['max_err_ratio']:.2f}x" if "max_err_ratio" in cmp_r else ""
     return (pct, rat)
 
 
@@ -475,14 +495,17 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
     header = [
         "B", "S", "H", "Hkv", "D", "dtype", "causal",
         "FlyDSL_Time(us)", "FlyDSL_TFLOPS", "FlyDSL_MaxErr",
-        "CK_Time(us)", "CK_TFLOPS", "CK_MaxErr",
-        "ASM_Time(us)", "ASM_TFLOPS", "ASM_MaxErr",
-        "Fly/CK_TFLOPS%", "Fly/CK_MaxErr_ratio",
-        "Fly/ASM_TFLOPS%", "Fly/ASM_MaxErr_ratio",
+        "aiter_ck_Time(us)", "aiter_ck_TFLOPS", "aiter_ck_MaxErr",
+        "aiter_asm_Time(us)", "aiter_asm_TFLOPS", "aiter_asm_MaxErr",
+        "Fly/aiter_ck_TFLOPS%", "Fly/aiter_ck_MaxErr_ratio",
+        "Fly/aiter_asm_TFLOPS%", "Fly/aiter_asm_MaxErr_ratio",
     ]
-    def _metrics(fr, cr, ar):
-        fck = _csv_cmp(fr, cr)
-        fasm = _csv_cmp(fr, ar)
+    def _metrics(fr, cr, ar, cmp_overrides=None):
+        if cmp_overrides is None:
+            fck = _csv_cmp(fr, cr)
+            fasm = _csv_cmp(fr, ar)
+        else:
+            fck, fasm = cmp_overrides
         return [
             _csv_val(fr, "us"), _csv_val(fr, "tflops"), _csv_val(fr, "max_err"),
             _csv_val(cr, "us"), _csv_val(cr, "tflops"), _csv_val(cr, "max_err"),
@@ -494,9 +517,14 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         w.writerow(header)
         for cfg, fr, cr, ar in data_rows:
             w.writerow(list(cfg) + _metrics(fr, cr, ar))
-        for label, fa, ca, aa in avg_rows:
+        for avg_row in avg_rows:
+            if len(avg_row) == 5:
+                label, fa, ca, aa, cmp_overrides = avg_row
+            else:
+                label, fa, ca, aa = avg_row
+                cmp_overrides = None
             # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
-            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, ca, aa))
+            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, ca, aa, cmp_overrides))
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
@@ -520,14 +548,35 @@ def _write_normal_csv(csv_path, data_rows, avg_rows):
             ])
 
 
+def _valid_result(r):
+    return not r.get("skip") and "err" not in r
+
+
 def _avg_results(results_list, keys=("us", "tflops", "max_err")):
     """Average valid results over the specified keys."""
-    valid = [r for r in results_list if not r.get("skip") and "err" not in r]
+    valid = [r for r in results_list if _valid_result(r)]
     if not valid:
         return {"skip": True}
     avg = {}
     for key in keys:
         vals = [r[key] for r in valid if key in r]
+        if vals:
+            avg[key] = sum(vals) / len(vals)
+    return avg
+
+
+def _avg_cmp_values(rows, fly_idx, other_idx):
+    """Average per-row comparison values over rows where both sides are valid."""
+    cmp_rows = [
+        _cmp_values(row[fly_idx], row[other_idx])
+        for row in rows
+        if _valid_result(row[fly_idx]) and _valid_result(row[other_idx])
+    ]
+    if not cmp_rows:
+        return {"skip": True}
+    avg = {}
+    for key in ("tflops_pct", "max_err_ratio"):
+        vals = [r[key] for r in cmp_rows if key in r]
         if vals:
             avg[key] = sum(vals) / len(vals)
     return avg
@@ -611,7 +660,7 @@ def main():
     causal_group.add_argument("--causal", action="store_true", dest="causal")
     causal_group.add_argument("--no-causal", action="store_false", dest="causal")
     parser.set_defaults(causal=None)
-    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
         "--dtype", type=str, default=None, choices=["fp16", "bf16"],
@@ -623,7 +672,7 @@ def main():
     )
     parser.add_argument(
         "--compare", action="store_true",
-        help="Compare FlyDSL vs CK vs ASM performance (requires aiter)",
+        help="Compare FlyDSL vs aiter_ck vs aiter_asm performance (requires aiter)",
     )
     args = parser.parse_args()
 
@@ -647,12 +696,12 @@ def main():
     dtype_desc = args.dtype or "bf16+fp16"
 
     if args.compare:
-        # ---- Comparison mode: FlyDSL vs CK vs ASM ----
+        # ---- Comparison mode: FlyDSL vs aiter_ck vs aiter_asm ----
         print("=" * 130)
-        print(f"FlyDSL vs CK vs ASM  ({causal_desc}, {dtype_desc})")
+        print(f"FlyDSL vs aiter_ck vs aiter_asm  ({causal_desc}, {dtype_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
-        print(f"  CK: bf16+fp16, ASM: bf16 only")
+        print(f"  aiter_ck: bf16+fp16, aiter_asm: bf16 only")
         print("=" * 130)
         print("Running benchmarks ...")
 
@@ -690,8 +739,8 @@ def main():
         col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
         cmp_col = f"{'TFLOPS':>7s} {'MaxErr':>6s}"
         hdr1 = (
-            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'CK':^28s} | {'ASM':^28s}"
-            f" | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
+            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'aiter_ck':^28s} | {'aiter_asm':^28s}"
+            f" | {'Fly/aiter_ck':^14s} | {'Fly/aiter_asm':^14s}"
         )
         hdr2 = (
             f"{'':>{_CFG_W}s} | {col} | {col} | {col}"
@@ -714,12 +763,23 @@ def main():
             fa = _avg_results([f for _, f, _, _ in subset])
             ca = _avg_results([c for _, _, c, _ in subset])
             aa = _avg_results([a for _, _, _, a in subset])
+            fck_cmp = _avg_cmp_values(subset, 1, 2)
+            fasm_cmp = _avg_cmp_values(subset, 1, 3)
             print(
                 f"{label:>{_CFG_W}s} | {_fmt_result(fa)} | "
                 f"{_fmt_result(ca)} | {_fmt_result(aa)}"
-                f" | {_fmt_cmp(fa, ca)} | {_fmt_cmp(fa, aa)}"
+                f" | {_fmt_cmp_values(fck_cmp)} | {_fmt_cmp_values(fasm_cmp)}"
             )
-            cmp_avg_rows.append((label, fa, ca, aa))
+            cmp_avg_rows.append((
+                label,
+                fa,
+                ca,
+                aa,
+                (
+                    _csv_cmp_values(fck_cmp),
+                    _csv_cmp_values(fasm_cmp),
+                ),
+            ))
 
         print(sep)
         _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _cmp_avg)

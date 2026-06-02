@@ -33,8 +33,7 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-from kernels.flash_attn_func import (
-    KERNEL_NAME,
+from kernels.flash_attn_generic import (
     build_flash_attn_func_module,
 )
 from tests.test_common import run_perftest
@@ -45,10 +44,10 @@ DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "waves_per_eu": int(os.getenv("FLYDSL_WAVES_PER_EU", "2")),
     "daz": True,
-    "opus_lazy_rescale": os.getenv("FLYDSL_OPUS_LAZY_RESCALE", "1") == "1",
-    "opus_setprio": os.getenv("FLYDSL_OPUS_SETPRIO", "1") == "1",
-    "opus_debug_lazy_counts": os.getenv("FLYDSL_OPUS_DEBUG_LAZY_COUNTS", "0") == "1",
-    "opus_enable_stagger": os.getenv("FLYDSL_OPUS_STAGGER", "1") == "1",
+    "dualwave_swp_lazy_rescale": os.getenv("FLYDSL_DUALWAVE_SWP_LAZY_RESCALE", "1") == "1",
+    "dualwave_swp_setprio": os.getenv("FLYDSL_DUALWAVE_SWP_SETPRIO", "1") == "1",
+    "dualwave_swp_debug_lazy_counts": os.getenv("FLYDSL_DUALWAVE_SWP_DEBUG_LAZY_COUNTS", "0") == "1",
+    "dualwave_swp_enable_stagger": os.getenv("FLYDSL_DUALWAVE_SWP_STAGGER", "1") == "1",
 }
 
 # (batch, seq_len, num_heads, num_kv_heads, head_dim)
@@ -59,6 +58,7 @@ DEFAULT_CONFIGS = [
     (8, 512, 64, 64, 128),
     (1, 128, 64, 64, 128),
     (1, 256, 64, 64, 128),
+    (1, 384, 64, 64, 128),
     (1, 512, 64, 64, 128),
     (1, 1024, 64, 64, 128),
 
@@ -81,9 +81,9 @@ DEFAULT_CONFIGS = [
     (1, 4096, 8, 8, 128),
     (1, 8192, 8, 8, 128),
     (32, 8192, 8, 8, 128),
+    (16, 8192, 64, 64, 128),
 
     # GQA configs (num_kv_heads < num_heads).
-    (16, 8192, 64, 64, 128),
     (16, 8192, 64, 8, 128),
 ]
 
@@ -266,12 +266,12 @@ def run_config(
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
             num_kv_heads=num_kv_heads,
-            opus_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_lazy_rescale"],
-            opus_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_setprio"],
-            opus_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
-                "opus_debug_lazy_counts"
+            dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+            dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
+            dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
+                "dualwave_swp_debug_lazy_counts"
             ],
-            opus_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_enable_stagger"],
+            dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
         )
     except Exception as e:
         results["err"] = f"build: {e}"
@@ -286,15 +286,15 @@ def run_config(
     q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
     k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
     v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-    trigger_lazy_else = os.getenv("FLYDSL_OPUS_TRIGGER_LAZY_ELSE", "0") == "1"
-    debug_lazy_counts = FLASH_ATTN_FUNC_KERNEL_CONFIG["opus_debug_lazy_counts"]
+    trigger_lazy_else = os.getenv("FLYDSL_DUALWAVE_SWP_TRIGGER_LAZY_ELSE", "0") == "1"
+    debug_lazy_counts = FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_debug_lazy_counts"]
     if trigger_lazy_else:
         q_4d.fill_(1.0)
         k_4d.zero_()
         if S >= 128:
             k_4d[:, 64:128, :, :].fill_(80.0)
         print(
-            "[OPUS_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, "
+            "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, "
             "K tile1=80 to force row_max - m_row > 8",
             flush=True,
         )
@@ -327,7 +327,7 @@ def run_config(
         results["all_below_true_count"] = all_below_true_count
         results["all_below_false_count"] = all_below_false_count
         print(
-            "[OPUS_LAZY_COUNTS] "
+            "[DUALWAVE_SWP_LAZY_COUNTS] "
             f"all_below_true_count = {all_below_true_count}, "
             f"all_below_false_count = {all_below_false_count}",
             flush=True,
@@ -371,29 +371,6 @@ def run_config(
             else:
                 exe(q_flat, k_flat, v_flat, o_flat, B, S)
 
-        # import time
-        # tm_start = time.time()
-        # for i in range(100):
-        #     kernel_fn()
-        # torch.cuda.synchronize()
-        # tm_end = time.time()
-        # us = (tm_end - tm_start) * 1e6 / 100
-        # print(f"CPU time: avg used {us} us")
-
-        # start_event = torch.cuda.Event(enable_timing=True)
-        # end_event = torch.cuda.Event(enable_timing=True)
-        # tm_start = time.time()
-        # start_event.record()
-        # for _ in range(iters):
-        #     kernel_fn()
-        # end_event.record()
-        # end_event.synchronize()
-        # tm_end = time.time()
-        # event_us = start_event.elapsed_time(end_event) * 1000.0 / iters
-        # us = (tm_end - tm_start) * 1e6 / 100
-        # print(f"CPU time2: avg used {us} us")
-        # print(f"cuda.Event time: avg used {event_us} us")
-
         # Warm up ROCTracer/torch.profiler itself so the measured run_perftest
         # below is not biased by first-profiler-session setup overhead.
         with torch.profiler.profile(
@@ -422,7 +399,7 @@ def run_aiter_bench(
     batch, seq_len, nheads, head_dim, dtype, causal,
     warmup, iters, seed=DEFAULT_SEED, backend="ck", num_kv_heads=None,
 ):
-    """Run true CK or true ASM kernel via aiter and return {tflops, max_err, us}."""
+    """Run true aiter_ck or true aiter_asm kernel via aiter and return {tflops, max_err, us}."""
     try:
         import aiter
     except Exception:
@@ -799,18 +776,35 @@ def _fmt_result(r):
 
 def _fmt_cmp(fly_r, other_r):
     """Format FlyDSL vs other: 'TFLOPS% MaxErr-ratio'."""
+    return _fmt_cmp_values(_cmp_values(fly_r, other_r))
+
+
+def _cmp_values(fly_r, other_r):
+    """Return numeric comparison values for one valid FlyDSL/comparator row."""
     if other_r.get("skip") or "err" in other_r or "err" in fly_r:
-        return f"{'--':>7s} {'--':>6s}"
+        return {"skip": True}
     fly_tf = fly_r.get("tflops")
     oth_tf = other_r.get("tflops")
     fly_err = fly_r.get("max_err")
     oth_err = other_r.get("max_err")
+    result = {}
     if fly_tf and oth_tf and oth_tf > 0:
-        pct = f"{fly_tf / oth_tf * 100:>6.1f}%"
+        result["tflops_pct"] = fly_tf / oth_tf * 100
+    if fly_err is not None and oth_err is not None and oth_err > 0:
+        result["max_err_ratio"] = fly_err / oth_err
+    return result
+
+
+def _fmt_cmp_values(cmp_r):
+    """Format numeric comparison values."""
+    if cmp_r.get("skip"):
+        return f"{'--':>7s} {'--':>6s}"
+    if "tflops_pct" in cmp_r:
+        pct = f"{cmp_r['tflops_pct']:>6.1f}%"
     else:
         pct = f"{'N/A':>7s}"
-    if fly_err is not None and oth_err is not None and oth_err > 0:
-        ratio = f"{fly_err / oth_err:>5.2f}x"
+    if "max_err_ratio" in cmp_r:
+        ratio = f"{cmp_r['max_err_ratio']:>5.2f}x"
     else:
         ratio = f"{'N/A':>6s}"
     return f"{pct} {ratio}"
@@ -839,12 +833,15 @@ def _csv_val(r, key):
 
 def _csv_cmp(fly_r, other_r):
     """Compute (tflops_pct_str, maxerr_ratio_str) for CSV, formatted to match console."""
-    if other_r.get("skip") or "err" in other_r or "err" in fly_r:
+    return _csv_cmp_values(_cmp_values(fly_r, other_r))
+
+
+def _csv_cmp_values(cmp_r):
+    """Format numeric comparison values for CSV."""
+    if cmp_r.get("skip"):
         return ("", "")
-    ft, ot = fly_r.get("tflops"), other_r.get("tflops")
-    pct = f"{ft / ot * 100:.1f}%" if ft and ot and ot > 0 else ""
-    fe, oe = fly_r.get("max_err"), other_r.get("max_err")
-    rat = f"{fe / oe:.2f}x" if fe is not None and oe is not None and oe > 0 else ""
+    pct = f"{cmp_r['tflops_pct']:.1f}%" if "tflops_pct" in cmp_r else ""
+    rat = f"{cmp_r['max_err_ratio']:.2f}x" if "max_err_ratio" in cmp_r else ""
     return (pct, rat)
 
 
@@ -854,11 +851,11 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         "B", "S", "H", "Hkv", "D", "dtype", "causal",
         "FlyDSL_Time(us)", "FlyDSL_TFLOPS", "FlyDSL_MaxErr",
         "OPUS_Time(us)", "OPUS_TFLOPS", "OPUS_MaxErr",
-        "CK_Time(us)", "CK_TFLOPS", "CK_MaxErr",
-        "ASM_Time(us)", "ASM_TFLOPS", "ASM_MaxErr",
+        "aiter_ck_Time(us)", "aiter_ck_TFLOPS", "aiter_ck_MaxErr",
+        "aiter_asm_Time(us)", "aiter_asm_TFLOPS", "aiter_asm_MaxErr",
         "Fly/OPUS_TFLOPS%", "Fly/OPUS_MaxErr_ratio",
-        "Fly/CK_TFLOPS%", "Fly/CK_MaxErr_ratio",
-        "Fly/ASM_TFLOPS%", "Fly/ASM_MaxErr_ratio",
+        "Fly/aiter_ck_TFLOPS%", "Fly/aiter_ck_MaxErr_ratio",
+        "Fly/aiter_asm_TFLOPS%", "Fly/aiter_asm_MaxErr_ratio",
     ]
     def _metrics(fr, or_, cr, ar, cmp_overrides=None):
         if cmp_overrides is None:
@@ -918,45 +915,33 @@ def _valid_result(r):
 
 
 def _avg_results(results_list, keys=("us", "tflops", "max_err")):
-    """Average valid results over the specified keys.
-
-    TFLOPS is aggregated as total work / total time so mixed-size summaries stay
-    consistent with the measured runtimes.
-    """
+    """Average valid results over the specified keys."""
     valid = [r for r in results_list if _valid_result(r)]
     if not valid:
         return {"skip": True}
     avg = {}
     for key in keys:
-        if key == "tflops":
-            pairs = [
-                (r["us"], r["tflops"])
-                for r in valid
-                if "us" in r and "tflops" in r and r["us"] > 0
-            ]
-            if pairs:
-                total_us = sum(us for us, _ in pairs)
-                avg[key] = sum(us * tflops for us, tflops in pairs) / total_us
-                continue
         vals = [r[key] for r in valid if key in r]
         if vals:
             avg[key] = sum(vals) / len(vals)
     return avg
 
 
-def _avg_cmp_pair(rows, fly_idx, other_idx):
-    """Average FlyDSL and comparator over rows where both sides are valid."""
-    paired = [
-        (row[fly_idx], row[other_idx])
+def _avg_cmp_values(rows, fly_idx, other_idx):
+    """Average per-row comparison values over rows where both sides are valid."""
+    cmp_rows = [
+        _cmp_values(row[fly_idx], row[other_idx])
         for row in rows
         if _valid_result(row[fly_idx]) and _valid_result(row[other_idx])
     ]
-    if not paired:
-        return {"skip": True}, {"skip": True}
-    return (
-        _avg_results([fly_r for fly_r, _ in paired]),
-        _avg_results([other_r for _, other_r in paired]),
-    )
+    if not cmp_rows:
+        return {"skip": True}
+    avg = {}
+    for key in ("tflops_pct", "max_err_ratio"):
+        vals = [r[key] for r in cmp_rows if key in r]
+        if vals:
+            avg[key] = sum(vals) / len(vals)
+    return avg
 
 
 def _tag_group(cfg):
@@ -1049,7 +1034,7 @@ def main():
     )
     parser.add_argument(
         "--compare", action="store_true",
-        help="Compare FlyDSL vs OPUS vs CK vs ASM performance (requires OPUS install and aiter)",
+        help="Compare FlyDSL vs OPUS vs aiter_ck vs aiter_asm performance (requires OPUS install and aiter)",
     )
     args = parser.parse_args()
 
@@ -1073,12 +1058,12 @@ def main():
     dtype_desc = args.dtype or "bf16+fp16"
 
     if args.compare:
-        # ---- Comparison mode: FlyDSL vs OPUS vs CK vs ASM ----
+        # ---- Comparison mode: FlyDSL vs OPUS vs aiter_ck vs aiter_asm ----
         print("=" * 130)
-        print(f"FlyDSL vs OPUS vs CK vs ASM  ({causal_desc}, {dtype_desc})")
+        print(f"FlyDSL vs OPUS vs aiter_ck vs aiter_asm  ({causal_desc}, {dtype_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
-        print(f"  OPUS: bf16 only, D=128/512; CK: bf16+fp16; ASM: bf16 only")
+        print(f"  OPUS: bf16 only, D=128/512; aiter_ck: bf16+fp16; aiter_asm: bf16 only")
         print("=" * 130)
         print("Running benchmarks ...")
 
@@ -1093,24 +1078,6 @@ def main():
                     cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
                     print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
-                    # asm_r = run_exp_isa_opus_bench(
-                    #     batch, seq_len, nh, hd, dtype, causal,
-                    #     warmup=args.warmup, iters=args.iters,
-                    #     seed=args.seed, dtype_str=dtype_str, verbose=False,
-                    #     num_kv_heads=nh_kv,
-                    # )
-                    # asm_r = run_aiter_bench(
-                    #     batch, seq_len, nh, hd, dtype, causal,
-                    #     warmup=args.warmup, iters=args.iters,
-                    #     seed=args.seed, backend="asm",
-                    #     num_kv_heads=nh_kv,
-                    # )
-                    asm_r = run_exp_isa_fmha_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, dtype_str=dtype_str, verbose=False,
-                        num_kv_heads=nh_kv,
-                    )
                     fly_r = run_config(
                         batch, seq_len, nh, hd, dtype, causal,
                         warmup=args.warmup, iters=args.iters,
@@ -1128,51 +1095,31 @@ def main():
                         seed=args.seed, backend="ck",
                         num_kv_heads=nh_kv,
                     )
-
-                    # fly_r = None
-                    # opus_r = None
-                    # ck_r = None
-                    # asm_r = None
-                    # for i in range(4):
-                    #     res = run_config(
-                    #         batch, seq_len, nh, hd, dtype, causal,
-                    #         warmup=args.warmup, iters=args.iters,
-                    #         seed=args.seed, dtype_str=dtype_str, verbose=False,
-                    #         num_kv_heads=nh_kv,
-                    #     )
-                    #     # res = run_opus_attn_bench(
-                    #     #     batch, seq_len, nh, hd, dtype, causal,
-                    #     #     warmup=args.warmup, iters=args.iters,
-                    #     #     seed=args.seed, num_kv_heads=nh_kv,
-                    #     # )
-                    #     # res = run_aiter_bench(
-                    #     #     batch, seq_len, nh, hd, dtype, causal,
-                    #     #     warmup=args.warmup, iters=args.iters,
-                    #     #     seed=args.seed, backend="ck",
-                    #     #     num_kv_heads=nh_kv,
-                    #     # )
-                    #     # res = run_aiter_bench(
-                    #     #     batch, seq_len, nh, hd, dtype, causal,
-                    #     #     warmup=args.warmup, iters=args.iters,
-                    #     #     seed=args.seed, backend="asm",
-                    #     #     num_kv_heads=nh_kv,
-                    #     # )
-
-                    #     if i == 0:
-                    #         fly_r = res
-                    #     elif i == 1:
-                    #         opus_r = res
-                    #     elif i == 2:
-                    #         ck_r = res
-                    #     elif i == 3:
-                    #         asm_r = res
+                    # asm_r = run_aiter_bench(
+                    #     batch, seq_len, nh, hd, dtype, causal,
+                    #     warmup=args.warmup, iters=args.iters,
+                    #     seed=args.seed, backend="asm",
+                    #     num_kv_heads=nh_kv,
+                    # )
+                    # asm_r = run_exp_isa_opus_bench(
+                    #     batch, seq_len, nh, hd, dtype, causal,
+                    #     warmup=args.warmup, iters=args.iters,
+                    #     seed=args.seed, dtype_str=dtype_str, verbose=False,
+                    #     num_kv_heads=nh_kv,
+                    # )
+                    asm_r = run_exp_isa_fmha_bench(
+                        batch, seq_len, nh, hd, dtype, causal,
+                        warmup=args.warmup, iters=args.iters,
+                        seed=args.seed, dtype_str=dtype_str, verbose=False,
+                        num_kv_heads=nh_kv,
+                    )
                     rows.append((cfg, fly_r, opus_r, ck_r, asm_r))
 
         col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
         cmp_col = f"{'TFLOPS':>7s} {'MaxErr':>6s}"
         hdr1 = (
-            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'OPUS':^28s} | {'CK':^28s} | {'ASM':^28s}"
-            f" | {'Fly/OPUS':^14s} | {'Fly/CK':^14s} | {'Fly/ASM':^14s}"
+            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'OPUS':^28s} | {'aiter_ck':^28s} | {'aiter_asm':^28s}"
+            f" | {'Fly/OPUS':^14s} | {'Fly/aiter_ck':^14s} | {'Fly/aiter_asm':^14s}"
         )
         hdr2 = (
             f"{'':>{_CFG_W}s} | {col} | {col} | {col} | {col}"
@@ -1197,14 +1144,14 @@ def main():
             oa = _avg_results([o for _, _, o, _, _ in subset])
             ca = _avg_results([c for _, _, _, c, _ in subset])
             aa = _avg_results([a for _, _, _, _, a in subset])
-            fopus_pair = _avg_cmp_pair(subset, 1, 2)
-            fck_pair = _avg_cmp_pair(subset, 1, 3)
-            fasm_pair = _avg_cmp_pair(subset, 1, 4)
+            fopus_cmp = _avg_cmp_values(subset, 1, 2)
+            fck_cmp = _avg_cmp_values(subset, 1, 3)
+            fasm_cmp = _avg_cmp_values(subset, 1, 4)
             print(
                 f"{label:>{_CFG_W}s} | {_fmt_result(fa)} | "
                 f"{_fmt_result(oa)} | {_fmt_result(ca)} | {_fmt_result(aa)}"
-                f" | {_fmt_cmp(*fopus_pair)} | {_fmt_cmp(*fck_pair)}"
-                f" | {_fmt_cmp(*fasm_pair)}"
+                f" | {_fmt_cmp_values(fopus_cmp)} | {_fmt_cmp_values(fck_cmp)}"
+                f" | {_fmt_cmp_values(fasm_cmp)}"
             )
             cmp_avg_rows.append((
                 label,
@@ -1213,9 +1160,9 @@ def main():
                 ca,
                 aa,
                 (
-                    _csv_cmp(*fopus_pair),
-                    _csv_cmp(*fck_pair),
-                    _csv_cmp(*fasm_pair),
+                    _csv_cmp_values(fopus_cmp),
+                    _csv_cmp_values(fck_cmp),
+                    _csv_cmp_values(fasm_cmp),
                 ),
             ))
 

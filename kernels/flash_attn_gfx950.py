@@ -1,33 +1,72 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""OPUS-style flash_attn fast path for FlyDSL (D=128 bf16 gfx950).
+"""Dual-wave, software-pipelined flash-attention kernel for gfx950 (D=128, bf16).
 
-Adopts OPUS's high-impact structural optimizations on top of the proven
-FlyDSL flash_attn_func BLOCK_M=256 algorithm. The dispatcher will only
-select this path when:
+This is the gfx950 fast path of FlyDSL flash attention. It computes the SAME
+math as the generic ``flash_attn_generic.py`` BLOCK_M=256 path -- and reuses its
+LDS / MFMA / Q-K-V-O addressing to inherit correctness -- but replaces the
+compiler-driven schedule with a hand-built software pipeline plus a two
+wave-group time-multiplexing scheme.
 
-    head_dim == 128, dtype == bf16, gpu_arch >= gfx950,
-    seq_len % 256 == 0, seq_len >= 384.
+Dispatched (from ``flash_attn_generic.py``) only when:
+    gpu_arch >= gfx950, head_dim == 128, dtype == bf16,
+    and (at runtime) seq_len % 256 == 0, seq_len >= 384.
 
-OPUS optimizations included:
-    * 3D grid launch (H, num_q_blocks, B): better workload distribution
-      across CUs vs. 1D grid (block_id_x decomposition arithmetic stays
-      in scalar registers from the launcher rather than per-thread).
-    * Double-buffered K and V LDS with DMA async loads.
-    * Online softmax with **lazy rescaling** (OPUS lines 476-484, 540-548):
-      skip ``O *= corr`` when no lane's row_max changed beyond
-      RESCALE_THRESHOLD (= 8.0), saving 32 v_pk_mul per skipped tile.
-    * ``s_setprio(1)`` raised before GEMM2/rescale, lowered after
-      (OPUS lines 471, 493, 535, 557).
-    * Inline-asm causal mask: ``v_cmp_lt_i32 + v_cndmask_b32`` pairs
-      with immediate K-position thresholds, replacing the 32-element
-      select chain (OPUS lines 233-249).
-    * ``s_nop 15; s_nop 7`` yield window after s_setprio(0) to let the
-      other wave-group seize the MFMA/VALU units.
+Tile / occupancy:
+    BLOCK_M = 256 (8 waves x 32 rows), BLOCK_N = 64, head_dim = 128,
+    waves_per_eu = 2. MFMA is ``mfma_f32_32x32x16_bf16`` (K=16, CDNA4).
+    GEMM1 = K @ Q^T (scores land directly in MFMA32 register layout); the
+    softmax is online over the KV dimension in registers; GEMM2 = V^T @ P.
+    Supports causal / non-causal and MHA / GQA (num_kv_heads <= num_heads).
 
-Layout (LDS, MFMA, Q/K/V/O addressing) matches existing
-``flash_attn_func.py`` BLOCK_M=256 path to inherit its proven correctness.
+Execution model -- explicit 8-cluster software pipeline:
+    Each main-loop iteration advances j by 2 (folds TWO KV tiles into the
+    running (m_row, l_row, v_o) state) and is split into 8 clusters C0..C7 that
+    strictly alternate a MEMORY stage (even) and a COMPUTE stage (odd); every
+    cluster ends with ``rocdl.s_barrier()``. Instruction interleaving inside a
+    cluster is pinned with ``rocdl.sched_barrier(0)`` fences and
+    ``rocdl.sched_group_barrier`` (IGroupLP) MFMA/VALU/EXP group hints rather
+    than left to the LLVM scheduler.
+        even C0/C2/C4/C6 : global->LDS async DMA (double-buffered K/V)
+                           + LDS->VGPR reads (+ causal mask)
+        odd  C1/C5       : Q*K (mma0) + finish the previous tile's softmax
+                           2nd-half exp2 + row-sum into l_row + cast P to bf16
+        odd  C3/C7       : P*V (mma1, 4 step_k) + lazy rescale
+                           + this tile's softmax 1st-half (row_max, sub_row,
+                           exp2 elems 0..15)
+    A large explicit prologue primes the pipeline (loads tile 0, first Q*K +
+    softmax) and a fully-unrolled epilogue (Clusters 0..13) drains it for the
+    final tiles that the loop leaves in flight.
+
+Key gfx950 optimizations:
+    * Two wave-groups (group A = waves 0-3, group B = waves 4-7,
+      ``DUALWAVE_SWP_ENABLE_STAGGER``). One extra prologue ``s_barrier`` on group B
+      offsets the groups by exactly ONE cluster (s_barriers match by ordinal,
+      one per cluster), so group A runs one cluster AHEAD of group B: while one
+      group COMPUTES (MFMA/VALU) the other LOADS (DMA + LDS reads + waitcnt
+      stalls), hiding one group's memory latency behind the other's MFMA. The
+      offset is closed by a matching extra barrier on group A in the epilogue.
+    * ``rocdl.s_setprio(1)/(0)`` (``DUALWAVE_SWP_SETPRIO``) brackets the heavy compute
+      clusters C3/C7 to hand the shared MFMA issue slots from the computing
+      group to the group just entering its compute phase, keeping the
+      compute/load alternation crisp.
+    * Lazy rescaling (``DUALWAVE_SWP_LAZY_RESCALE``): a uniform ``ballot(below) == exec``
+      scalar branch (``s_cbranch_scc``) skips the running O / l_row rescale
+      (~32 ``v_pk_mul``) for a tile whenever every lane's row-max moved by
+      <= ``RESCALE_THRESHOLD`` (8.0). The 1/sqrt(D) temperature scale is
+      pre-applied to Q rather than folded into the exp.
+    * Online-softmax ``exp2`` is split into a first half (elems 0..15) and a
+      second half (16..31) placed in different clusters so the transcendental
+      (TRANS) latency hides behind the MFMA chains.
+    * Double-buffered K and V LDS (buf0/buf1) filled by async DMA-to-LDS
+      (``buffer_load_dwordx4 ... lds``) and read with the gfx950 HW-transpose
+      ``ds_read_b64_tr_b16``; inline-asm causal mask
+      (``v_cmp_lt_i32 + v_cndmask_b32`` with immediate K-position thresholds).
+
+Layout: Q/K/V/O are 1D flattened from BSHD (batch, seq_len, num_heads,
+head_dim). Grid = (num_heads, num_q_blocks, batch); Block = (512, 1, 1) = 8
+waves. Requires head_dim == 128 (asserts gfx950+; no gfx942 fallback).
 """
 
 import math as host_math
@@ -44,15 +83,13 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
 
-KERNEL_NAME = "flash_attn_opus_kernel"
 _LOG2E = host_math.log2(host_math.e)
-
 # s_waitcnt bitfield encoding
 _VMCNT_LO_MASK = 0xF
 _LGKMCNT_EXPCNT_BASE = 0x3F70
 _VMCNT_HI_SHIFT = 14
 _VMCNT_HI_MASK = 0x3
-_LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.opus.lds">'
+_LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.dualwave_swp.lds">'
 
 
 def _llvm_value(value):
@@ -62,7 +99,7 @@ def _llvm_value(value):
 
 
 def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
-    """gfx950 ds_read_b64_tr_b16 with OPUS-style immediate byte offset."""
+    """gfx950 ds_read_b64_tr_b16 with DUALWAVE_SWP immediate byte offset."""
     imm = int(imm_offset)
     raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
     raw = llvm.inline_asm(
@@ -82,14 +119,6 @@ def _extract_aligned_pointer(tensor, address_space=None) -> ir.Value:
         "!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>"
     )
     return _fly.extract_aligned_pointer_as_index(ptr_type, _llvm_value(tensor))
-
-
-def _pointer_load(result_type, ptr):
-    return llvm.LoadOp(result_type, _llvm_value(ptr)).result
-
-
-def _pointer_store(value, ptr):
-    return llvm.StoreOp(_llvm_value(value), _llvm_value(ptr))
 
 
 def _waitcnt_vm_n(n):
@@ -116,7 +145,7 @@ def _lds_alias_scope_array(names):
     return ir.Attribute.parse(f"[{', '.join(attrs)}]")
 
 
-def build_flash_attn_opus_module(
+def build_flash_attn_dualwave_swp_module(
     num_heads,
     head_dim,
     causal=True,
@@ -124,12 +153,12 @@ def build_flash_attn_opus_module(
     num_kv_heads=None,
     waves_per_eu=2,
     daz=True,
-    opus_lazy_rescale=True,
-    opus_setprio=True,
-    opus_debug_lazy_counts=False,
-    opus_enable_stagger=True,
+    dualwave_swp_lazy_rescale=True,
+    dualwave_swp_setprio=True,
+    dualwave_swp_debug_lazy_counts=False,
+    dualwave_swp_enable_stagger=True,
 ):
-    """Build an OPUS-style flash_attn launcher for D=128 bf16 on gfx950.
+    """Build an DUALWAVE_SWP flash_attn launcher for D=128 bf16 on gfx950.
 
     Launcher signature: ``launcher(Q, K, V, O, batch_size, seq_len, stride_kv_n=None, stride_q_n=None, head_dim_runtime=None, *, stream=None)``
     """
@@ -137,19 +166,19 @@ def build_flash_attn_opus_module(
 
     if not gpu_arch.startswith("gfx950"):
         raise RuntimeError(
-            f"flash_attn_opus requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}"
+            f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}"
         )
     if head_dim != 128:
-        raise RuntimeError(f"flash_attn_opus is D=128 only, got head_dim={head_dim}")
+        raise RuntimeError(f"flash_attn_dualwave_swp is D=128 only, got head_dim={head_dim}")
     if dtype_str != "bf16":
-        raise RuntimeError(f"flash_attn_opus is bf16 only, got dtype={dtype_str}")
+        raise RuntimeError(f"flash_attn_dualwave_swp is bf16 only, got dtype={dtype_str}")
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
     assert num_heads % num_kv_heads == 0
 
     # ──────────────────────────── Tile constants ────────────────────────────
-    # Match existing flash_attn_func BLOCK_M=256 path for layout compatibility.
+    # Match existing flash_attn_generic BLOCK_M=256 path for layout compatibility.
     BLOCK_M = 256
     BLOCK_N = 64
     BLOCK_N_OUT = 64           # single sub-tile per outer iter (=BLOCK_N)
@@ -176,7 +205,7 @@ def build_flash_attn_opus_module(
     DEFAULT_STRIDE_Q_N = NUM_HEADS_Q * HEAD_DIM
     DEFAULT_STRIDE_KV_N = NUM_HEADS_KV * HEAD_DIM
 
-    # ── OPUS LDS trait constants (matches gqa_d128_kernel_template.hpp §4-5) ──
+    # ── DUALWAVE_SWP LDS trait constants (matches gqa_d128_kernel_template.hpp §4-5) ──
     # K/V LDS layout: interleaved double-buffer K0, V0, K1, V1.
     # Per-warp slab line stride: smem_linear_wave + smem_padding.
     #   K: 512 + 8 = 520 bf16 per line (smem_padding_16B = 16 B = 8 bf16)
@@ -198,54 +227,54 @@ def build_flash_attn_opus_module(
     SMEM_V_LINE_STRIDE = SMEM_LINEAR_WAVE + SMEM_V_PAD   # 544 bf16
     SMEM_K_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_K_LINE_STRIDE   # 8 * 2 * 520 = 8320
     SMEM_V_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_V_LINE_STRIDE   # 8 * 2 * 544 = 8704
-    NUM_PREFETCH_K = 2     # OPUS double-buffer
+    NUM_PREFETCH_K = 2     # DUALWAVE_SWP double-buffer
     NUM_PREFETCH_V = 2
-    # OPUS interleaved layout: [K0][V0][K1][V1]
-    OPUS_KV_PER_BUFFER = SMEM_K_TILE_ELEMS + SMEM_V_TILE_ELEMS   # 17024 bf16 per (K, V) pair
-    LDS_KV_TOTAL_SIZE = NUM_PREFETCH_K * OPUS_KV_PER_BUFFER       # 34048 bf16 = 68096 B
+    # DUALWAVE_SWP interleaved layout: [K0][V0][K1][V1]
+    DUALWAVE_SWP_KV_PER_BUFFER = SMEM_K_TILE_ELEMS + SMEM_V_TILE_ELEMS   # 17024 bf16 per (K, V) pair
+    LDS_KV_TOTAL_SIZE = NUM_PREFETCH_K * DUALWAVE_SWP_KV_PER_BUFFER       # 34048 bf16 = 68096 B
     # K and V buffer bases (bf16 element offsets within the unified LDS region).
-    OPUS_K_BUF_BASE = (0, OPUS_KV_PER_BUFFER)                     # K[0]=0, K[1]=17024
-    OPUS_V_BUF_BASE = (SMEM_K_TILE_ELEMS,                         # V[0]=8320
-                       SMEM_K_TILE_ELEMS + OPUS_KV_PER_BUFFER)    # V[1]=25344
-    # u_rk OPUS strides (per derived element strides for the 8-axis u_rk layout).
+    DUALWAVE_SWP_K_BUF_BASE = (0, DUALWAVE_SWP_KV_PER_BUFFER)                     # K[0]=0, K[1]=17024
+    DUALWAVE_SWP_V_BUF_BASE = (SMEM_K_TILE_ELEMS,                         # V[0]=8320
+                       SMEM_K_TILE_ELEMS + DUALWAVE_SWP_KV_PER_BUFFER)    # V[1]=25344
+    # u_rk DUALWAVE_SWP strides (per derived element strides for the 8-axis u_rk layout).
     #   N-grp y-axis (axis 2)  : stride 256 bf16 (between v_s_lo and v_s_hi)
     #   K-step axis (axes 4, 5): inner stride 16 (i_5 step), outer 4160 (i_4 d_rpt)
-    OPUS_URK_N_STRIP_STRIDE = 256       # bf16 offset to add for v_s_hi (n_strip=1)
-    OPUS_URK_KSTEP_INNER = 16            # bf16 stride between consecutive K-steps within a d_rpt
-    OPUS_URK_KSTEP_OUTER = SMEM_N_RPT * SMEM_K_LINE_STRIDE   # 4160 bf16 between d_rpt=0/1 arrays
-    # u_rv OPUS per-lane base coefficients and step strides.
-    #   base_per_lane(lane) = (lane/32)*OPUS_URV_GRPK + ((lane%16)/4)*OPUS_URV_LANE_HI
-    #                       + ((lane/16)%2)*OPUS_URV_GRP_N + (lane%4)*OPUS_URV_LANE_LO
-    OPUS_URV_GRPK     = 2176             # = 4 * 544 (grp_k stride, axes 2)
-    OPUS_URV_LANE_HI  = SMEM_V_LINE_STRIDE   # 544 (lane_hi stride, axes 3)
-    OPUS_URV_GRP_N    = 16               # 4 (lane_lo) * 4 (VEC_TR_V) = grp_n stride
-    OPUS_URV_LANE_LO  = 4                # VEC_TR_V (lane_lo stride)
-    OPUS_URV_STEP_K_STRIDE = 128         # = 2 * 64 = lane_hi_y * D_128B_SIZE (axis 4 element stride)
-    OPUS_URV_DC_AXIS0 = SMEM_N_RPT * SMEM_V_LINE_STRIDE   # 4352 (d_rpt array, axis 0 element stride)
-    OPUS_URV_DC_AXIS1 = 32               # axis 1 element stride (within half-D sub-row)
-    OPUS_URV_I5_STRIDE = D_128B_SIZE     # 64 (axis 5 element stride within a step_k)
+    DUALWAVE_SWP_URK_N_STRIP_STRIDE = 256       # bf16 offset to add for v_s_hi (n_strip=1)
+    DUALWAVE_SWP_URK_KSTEP_INNER = 16            # bf16 stride between consecutive K-steps within a d_rpt
+    DUALWAVE_SWP_URK_KSTEP_OUTER = SMEM_N_RPT * SMEM_K_LINE_STRIDE   # 4160 bf16 between d_rpt=0/1 arrays
+    # u_rv DUALWAVE_SWP per-lane base coefficients and step strides.
+    #   base_per_lane(lane) = (lane/32)*DUALWAVE_SWP_URV_GRPK + ((lane%16)/4)*DUALWAVE_SWP_URV_LANE_HI
+    #                       + ((lane/16)%2)*DUALWAVE_SWP_URV_GRP_N + (lane%4)*DUALWAVE_SWP_URV_LANE_LO
+    DUALWAVE_SWP_URV_GRPK     = 2176             # = 4 * 544 (grp_k stride, axes 2)
+    DUALWAVE_SWP_URV_LANE_HI  = SMEM_V_LINE_STRIDE   # 544 (lane_hi stride, axes 3)
+    DUALWAVE_SWP_URV_GRP_N    = 16               # 4 (lane_lo) * 4 (VEC_TR_V) = grp_n stride
+    DUALWAVE_SWP_URV_LANE_LO  = 4                # VEC_TR_V (lane_lo stride)
+    DUALWAVE_SWP_URV_STEP_K_STRIDE = 128         # = 2 * 64 = lane_hi_y * D_128B_SIZE (axis 4 element stride)
+    DUALWAVE_SWP_URV_DC_AXIS0 = SMEM_N_RPT * SMEM_V_LINE_STRIDE   # 4352 (d_rpt array, axis 0 element stride)
+    DUALWAVE_SWP_URV_DC_AXIS1 = 32               # axis 1 element stride (within half-D sub-row)
+    DUALWAVE_SWP_URV_I5_STRIDE = D_128B_SIZE     # 64 (axis 5 element stride within a step_k)
 
     # DMA load chunking
-    PATH_TAG = "OPUS"
+    PATH_TAG = "DUALWAVE_SWP"
     allocator = SmemAllocator(
         None,
         arch=gpu_arch,
-        global_sym_name=f"flash_attn_opus_smem_{PATH_TAG}",
+        global_sym_name=f"flash_attn_dualwave_swp_smem_{PATH_TAG}",
     )
     lds_kv_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * BF16_BYTES   # 68096 B for OPUS K0/V0/K1/V1
+    allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * BF16_BYTES   # 68096 B for DUALWAVE_SWP K0/V0/K1/V1
 
-    # OPUS lazy-rescale threshold (line 374)
-    OPUS_RESCALE_THRESHOLD = 8.0
+    # DUALWAVE_SWP lazy-rescale threshold (line 374)
+    DUALWAVE_SWP_RESCALE_THRESHOLD = 8.0
 
-    # Enable / disable individual OPUS optimizations via builder parameters.
-    OPUS_LAZY_RESCALE = bool(opus_lazy_rescale)
-    OPUS_SETPRIO = bool(opus_setprio)
-    OPUS_DEBUG_LAZY_COUNTS = bool(opus_debug_lazy_counts)
-    OPUS_ENABLE_STAGGER = bool(opus_enable_stagger)
+    # Enable / disable individual DUALWAVE_SWP optimizations via builder parameters.
+    DUALWAVE_SWP_LAZY_RESCALE = bool(dualwave_swp_lazy_rescale)
+    DUALWAVE_SWP_SETPRIO = bool(dualwave_swp_setprio)
+    DUALWAVE_SWP_DEBUG_LAZY_COUNTS = bool(dualwave_swp_debug_lazy_counts)
+    DUALWAVE_SWP_ENABLE_STAGGER = bool(dualwave_swp_enable_stagger)
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
-    def flash_attn_opus_kernel(
+    def flash_attn_dualwave_swp_gfx950_kernel(
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
@@ -392,7 +421,7 @@ def build_flash_attn_opus_module(
                 fastmath=fm_fast,
             )
         )
-        c_eight_f = fx.Float32(OPUS_RESCALE_THRESHOLD)
+        c_eight_f = fx.Float32(DUALWAVE_SWP_RESCALE_THRESHOLD)
         c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         width_i32 = fx.Int32(WARP_SIZE)
         shuf_32_i32 = fx.Int32(32)
@@ -423,10 +452,10 @@ def build_flash_attn_opus_module(
         )
 
         urv_base_per_lane = (
-            lane_div_32 * fx.Index(OPUS_URV_GRPK)
-            + ((lane % fx.Index(16)) // fx.Index(4)) * fx.Index(OPUS_URV_LANE_HI)
-            + ((lane // fx.Index(16)) % fx.Index(2)) * fx.Index(OPUS_URV_GRP_N)
-            + (lane % fx.Index(4)) * fx.Index(OPUS_URV_LANE_LO)
+            lane_div_32 * fx.Index(DUALWAVE_SWP_URV_GRPK)
+            + ((lane % fx.Index(16)) // fx.Index(4)) * fx.Index(DUALWAVE_SWP_URV_LANE_HI)
+            + ((lane // fx.Index(16)) % fx.Index(2)) * fx.Index(DUALWAVE_SWP_URV_GRP_N)
+            + (lane % fx.Index(4)) * fx.Index(DUALWAVE_SWP_URV_LANE_LO)
         )
 
         _NEG_INF_F32_BITS = 0xFF800000
@@ -563,7 +592,7 @@ def build_flash_attn_opus_module(
             ).ir_value()
 
         debug_counts_rsrc = (
-            _make_raw_buffer_rsrc(DebugCounts) if OPUS_DEBUG_LAZY_COUNTS else None
+            _make_raw_buffer_rsrc(DebugCounts) if DUALWAVE_SWP_DEBUG_LAZY_COUNTS else None
         )
 
         def _bitcast_i32(value):
@@ -573,7 +602,7 @@ def build_flash_attn_opus_module(
             return fx.Float32(ArithValue(value).bitcast(fx.Float32.ir_type))
 
         def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
-            """OPUS-style pair mask asm: 2 compares followed by 2 cndmasks."""
+            """DUALWAVE_SWP pair mask asm: 2 compares followed by 2 cndmasks."""
             asm_str = (
                 f"v_cmp_lt_i32_e64 $0, $6, {int(thr_x)}\n\t"
                 f"v_cmp_lt_i32_e64 $1, $6, {int(thr_y)}\n\t"
@@ -725,15 +754,15 @@ def build_flash_attn_opus_module(
 
         def _k_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
-                return fx.Index(OPUS_K_BUF_BASE[buf_id])
-            # runtime buf_id (rare): K0=0, K1=OPUS_KV_PER_BUFFER
-            return buf_id * fx.Index(OPUS_KV_PER_BUFFER)
+                return fx.Index(DUALWAVE_SWP_K_BUF_BASE[buf_id])
+            # runtime buf_id (rare): K0=0, K1=DUALWAVE_SWP_KV_PER_BUFFER
+            return buf_id * fx.Index(DUALWAVE_SWP_KV_PER_BUFFER)
 
         def _v_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
-                return fx.Index(OPUS_V_BUF_BASE[buf_id])
-            # runtime buf_id (rare): V0=SMEM_K_TILE_ELEMS, V1=SMEM_K_TILE_ELEMS+OPUS_KV_PER_BUFFER
-            return fx.Index(SMEM_K_TILE_ELEMS) + buf_id * fx.Index(OPUS_KV_PER_BUFFER)
+                return fx.Index(DUALWAVE_SWP_V_BUF_BASE[buf_id])
+            # runtime buf_id (rare): V0=SMEM_K_TILE_ELEMS, V1=SMEM_K_TILE_ELEMS+DUALWAVE_SWP_KV_PER_BUFFER
+            return fx.Index(SMEM_K_TILE_ELEMS) + buf_id * fx.Index(DUALWAVE_SWP_KV_PER_BUFFER)
 
         def _async_load_k(tile_start, buf_id):
             k_lds_byte_base = lds_kv_base_idx + _k_buf_base(buf_id) * fx.Index(BF16_BYTES)
@@ -808,7 +837,7 @@ def build_flash_attn_opus_module(
             return _raw(_bitcast_f32(lhs_i32)), _raw(_bitcast_f32(rhs_i32))
 
         def _async_load_k_from_lds_to_vgpr(buf_id, urk_base):
-            """Read all 16 K MFMA packs from LDS buffer `buf_id` (OPUS u_rk)."""
+            """Read all 16 K MFMA packs from LDS buffer `buf_id` (DUALWAVE_SWP u_rk)."""
             k_base = _k_buf_base(buf_id)
             k_lo = [None] * K_STEPS_QK
             k_hi = [None] * K_STEPS_QK
@@ -828,18 +857,18 @@ def build_flash_attn_opus_module(
                 ).result
 
             for ks in range_constexpr(K_STEPS_QK):
-                ks_offset = (ks // 4) * OPUS_URK_KSTEP_OUTER + (ks % 4) * OPUS_URK_KSTEP_INNER
+                ks_offset = (ks // 4) * DUALWAVE_SWP_URK_KSTEP_OUTER + (ks % 4) * DUALWAVE_SWP_URK_KSTEP_INNER
                 idx_lo = k_base + urk_base + fx.Index(ks_offset)
-                idx_hi = idx_lo + fx.Index(OPUS_URK_N_STRIP_STRIDE)
+                idx_hi = idx_lo + fx.Index(DUALWAVE_SWP_URK_N_STRIP_STRIDE)
                 k_lo[ks] = _load_k_pack_aligned(idx_lo)
                 k_hi[ks] = _load_k_pack_aligned(idx_hi)
             return (k_lo, k_hi)
 
         def _read_v_packs_for_buf(buf_id, urv_base):
-            """Read all V packs from LDS buffer `buf_id` in OPUS issue order.
+            """Read all V packs from LDS buffer `buf_id` in DUALWAVE_SWP issue order.
 
             Returns packs indexed as [k_substep][dc], but emits the ds_read_tr16_b64
-            sequence as dc outer / k_substep inner to mirror OPUS's tr_load layout
+            sequence as dc outer / k_substep inner to mirror DUALWAVE_SWP's tr_load layout
             issue order.
             """
             v_base = _v_buf_base(buf_id)
@@ -848,15 +877,15 @@ def build_flash_attn_opus_module(
             for dc in range_constexpr(D_CHUNKS):
                 i_0 = dc // 2     # axes 0 selection: 0 → D < 64, 1 → D >= 64 (d_rpt)
                 i_1 = dc % 2      # axes 1 selection: half-D sub-row group
-                dc_off = i_0 * OPUS_URV_DC_AXIS0 + i_1 * OPUS_URV_DC_AXIS1
+                dc_off = i_0 * DUALWAVE_SWP_URV_DC_AXIS0 + i_1 * DUALWAVE_SWP_URV_DC_AXIS1
                 for k_substep in range_constexpr(4):
-                    step_k_off = k_substep * OPUS_URV_STEP_K_STRIDE
+                    step_k_off = k_substep * DUALWAVE_SWP_URV_STEP_K_STRIDE
                     imm_lo = (step_k_off + dc_off) * BF16_BYTES
                     # axis 5 = 0 and axis 5 = 1 reads (in-register K stride 64 bf16)
                     a = _ds_read_tr_v4f16_imm(lds_base, imm_lo)
                     b = _ds_read_tr_v4f16_imm(
                         lds_base,
-                        imm_lo + OPUS_URV_I5_STRIDE * BF16_BYTES,
+                        imm_lo + DUALWAVE_SWP_URV_I5_STRIDE * BF16_BYTES,
                     )
                     packs[k_substep][dc] = Vec(a).shuffle(
                         Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]
@@ -874,7 +903,7 @@ def build_flash_attn_opus_module(
             return (v_s_lo, v_s_hi)
 
         def _causal_mask_inplace(v_s, tile_idx):
-            """Apply causal mask using OPUS inline-asm attn_mask_vec2_imm (OPUS u_rk path).
+            """Apply causal mask using DUALWAVE_SWP inline-asm attn_mask_vec2_imm (DUALWAVE_SWP u_rk path).
 
             This mirrors C++ attn_mask_causal_tile:
               k_pos = kv_start + i_n * W_N + lane_group * 4
@@ -958,7 +987,7 @@ def build_flash_attn_opus_module(
             return v_lo, v_hi
 
         def _causal_mask_prologue_if_needed(v_s, tile_idx=fx.Index(0), kv_end_pos=fx.Index(BLOCK_N)):
-            """Return masked score vectors when OPUS's causal guard is active."""
+            """Return masked score vectors when DUALWAVE_SWP's causal guard is active."""
             s_lo, s_hi = _v_s_vec_to_lists(v_s)
             acc_values = [_raw(v) for v in (s_lo + s_hi)]
             result_types = [v.type for v in acc_values]
@@ -1091,7 +1120,7 @@ def build_flash_attn_opus_module(
             )
 
         def _debug_count_lazy_branch(all_below):
-            if const_expr(not OPUS_DEBUG_LAZY_COUNTS):
+            if const_expr(not DUALWAVE_SWP_DEBUG_LAZY_COUNTS):
                 return
             lane_i32 = arith.index_cast(T.i32, _raw(lane))
             lane_is_zero = arith.cmpi(
@@ -1139,7 +1168,7 @@ def build_flash_attn_opus_module(
             )
 
         def _lazy_rescale_o(v_o, m_row, l_row, m_tile_max, v_p):
-            """OPUS lazy rescale before the remaining MMA1 steps.
+            """DUALWAVE_SWP lazy rescale before the remaining MMA1 steps.
 
             Cold path also scales v_p so the later step_k(1..3) contributions
             are accumulated in the new row-max basis.
@@ -1244,7 +1273,7 @@ def build_flash_attn_opus_module(
         # cluster AHEAD of group B for the whole main loop/epilogue, so one group
         # computes while the other loads (see the diagram at "(4)" above the
         # loop). Closed in the epilogue. Disabled -> one plain barrier (lock-step).
-        if const_expr(OPUS_ENABLE_STAGGER):
+        if const_expr(DUALWAVE_SWP_ENABLE_STAGGER):
             _stagger_extra_barrier_if_one()  # group B: +1 s_barrier -> open the shift
         else:
             rocdl.sched_barrier(0)
@@ -1437,7 +1466,7 @@ def build_flash_attn_opus_module(
             # Then the remaining 3 P*V steps, subtract the row max from the new
             # scores, and the first-half exp2. s_setprio(0) + fence + barrier
             # close the cluster (yielding the MFMA units to the other group).
-            if const_expr(OPUS_SETPRIO):
+            if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(1)
             v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
             v_s_1 = _v_s_vec_to_lists(v_s_1)
@@ -1476,7 +1505,7 @@ def build_flash_attn_opus_module(
             # chain.
             _sched_barrier_pairs(4, 6, 2)
 
-            if const_expr(OPUS_LAZY_RESCALE):
+            if const_expr(DUALWAVE_SWP_LAZY_RESCALE):
                 v_o, m_row, l_row, v_p_0 = _lazy_rescale_o(
                     v_o, m_row, l_row, m_tile_max_a, v_p_0
                 )
@@ -1521,7 +1550,7 @@ def build_flash_attn_opus_module(
             # the scheduler bunch all `v_exp_f32` or all MFMA instructions
             # together.
             _sched_barrier_exp_pairs(6, 3, 2)
-            if const_expr(OPUS_SETPRIO):
+            if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(0)
             # LLVM scheduling note:
             # `rocdl.sched_barrier(0)` lowers to
@@ -1608,14 +1637,14 @@ def build_flash_attn_opus_module(
             # 3 P*V steps, then subtract the row max and first-half exp2 of v_s_0.
             # Closes the iteration; yield_args carries the updated running state
             # (m_row, l_row, v_o accumulators, packed v_p_0) to the next iter.
-            if const_expr(OPUS_SETPRIO):
+            if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(1)
             v_v = v_packs_b
             v_o = _mma1_step_k(0, v_p_1, v_v, v_o)
             m_tile_max_b = _attn_row_max(v_s_0)
             _sched_barrier_pairs(4, 6, 4)
 
-            if const_expr(OPUS_LAZY_RESCALE):
+            if const_expr(DUALWAVE_SWP_LAZY_RESCALE):
                 v_o, m_row, l_row, v_p_1 = _lazy_rescale_o(
                     v_o, m_row, l_row, m_tile_max_b, v_p_1
                 )
@@ -1635,7 +1664,7 @@ def build_flash_attn_opus_module(
             v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
             _sched_barrier_pairs(6, 5, 4)
             _sched_barrier_exp_pairs(6, 3, 4)
-            if const_expr(OPUS_SETPRIO):
+            if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -1712,7 +1741,7 @@ def build_flash_attn_opus_module(
         # max, rescale factor exp2(m_row - new_max), update m_row, subtract the
         # row max from v_s_1 and first-half exp2, then scale the output v_o by
         # the rescale factor and anchor it. s_setprio(0) + fence + barrier.
-        if const_expr(OPUS_SETPRIO):
+        if const_expr(DUALWAVE_SWP_SETPRIO):
             rocdl.s_setprio(1)
         v_o = _mma1(v_p_0, v_packs_e3, v_o)
         m_tile_max_e3 = _attn_row_max(v_s_1)
@@ -1727,7 +1756,7 @@ def build_flash_attn_opus_module(
         _scale_o(v_o, rescale_e3)
         v_o = _anchor_v_o(v_o)
 
-        if const_expr(OPUS_SETPRIO):
+        if const_expr(DUALWAVE_SWP_SETPRIO):
             rocdl.s_setprio(0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -1782,7 +1811,7 @@ def build_flash_attn_opus_module(
         # Epilogue Cluster 7: full P*V + unconditional rescale (mirror of 3).
         # Full _mma1 for v_p_1, new combined row max, rescale_e7, update m_row,
         # sub_row + first-half exp2 of v_s_0, scale v_o, anchor. Fence + barrier.
-        if const_expr(OPUS_SETPRIO):
+        if const_expr(DUALWAVE_SWP_SETPRIO):
             rocdl.s_setprio(1)
         v_o = _mma1(v_p_1, v_packs_e7, v_o)
         m_tile_max_e7 = _attn_row_max(v_s_0)
@@ -1796,7 +1825,7 @@ def build_flash_attn_opus_module(
         rocdl.sched_barrier(0)
         _scale_o(v_o, rescale_e7)
         v_o = _anchor_v_o(v_o)
-        if const_expr(OPUS_SETPRIO):
+        if const_expr(DUALWAVE_SWP_SETPRIO):
             rocdl.s_setprio(0)
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
@@ -1902,7 +1931,7 @@ def build_flash_attn_opus_module(
         # of the prologue's group-B extra barrier. It lets group A (which has run
         # one cluster AHEAD the whole time) wait for group B, so both realign
         # before the store. Disabled -> one plain barrier.
-        if const_expr(OPUS_ENABLE_STAGGER):
+        if const_expr(DUALWAVE_SWP_ENABLE_STAGGER):
             _stagger_extra_barrier_if_zero()  # group A: +1 s_barrier -> close the shift
         else:
             rocdl.s_barrier()
@@ -1944,7 +1973,7 @@ def build_flash_attn_opus_module(
                     )
 
     @flyc.jit
-    def launch_flash_attn_opus(
+    def launch_flash_attn_dualwave_swp(
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
@@ -1975,7 +2004,7 @@ def build_flash_attn_opus_module(
             if const_expr(daz)
             else None
         )
-        flash_attn_opus_kernel(
+        flash_attn_dualwave_swp_gfx950_kernel(
             Q, K, V, O, DebugCounts, seq_len, stride_q_n, stride_kv_n, head_dim_runtime,
             value_attrs={
                 "rocdl.waves_per_eu": waves_per_eu,
@@ -1988,7 +2017,7 @@ def build_flash_attn_opus_module(
             stream=stream,
         )
 
-    _opus_compile_hints = {
+    _dualwave_swp_compile_hints = {
         "fast_fp_math": True,
         "unsafe_fp_math": True,
         "llvm_options": {
@@ -2009,13 +2038,13 @@ def build_flash_attn_opus_module(
             head_dim_runtime = HEAD_DIM
         if debug_counts is None:
             debug_counts = O
-        with CompilationContext.compile_hints(_opus_compile_hints):
+        with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             if stream is None:
-                return launch_flash_attn_opus(
+                return launch_flash_attn_dualwave_swp(
                     Q, K, V, O, debug_counts, batch_size, seq_len,
                     stride_q_n, stride_kv_n, head_dim_runtime
                 )
-            return launch_flash_attn_opus(
+            return launch_flash_attn_dualwave_swp(
                 Q, K, V, O, debug_counts, batch_size, seq_len,
                 stride_q_n, stride_kv_n, head_dim_runtime, stream=stream
             )
@@ -2032,9 +2061,9 @@ def build_flash_attn_opus_module(
             head_dim_runtime = HEAD_DIM
         if debug_counts is None:
             debug_counts = O
-        with CompilationContext.compile_hints(_opus_compile_hints):
+        with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             return flyc.compile(
-                launch_flash_attn_opus, Q, K, V, O, debug_counts, batch_size, seq_len,
+                launch_flash_attn_dualwave_swp, Q, K, V, O, debug_counts, batch_size, seq_len,
                 stride_q_n, stride_kv_n, head_dim_runtime,
                 fx.Stream(stream))
 
