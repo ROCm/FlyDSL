@@ -129,7 +129,7 @@ Products combine two layouts to create a larger layout:
 ```python
 fx.logical_product(layout, tiler)   # Basic mode-wise concatenation
 fx.raked_product(thr, val)          # Interleaved access pattern (common for TiledCopy)
-fx.block_product(layout, tiler)     # Blocked access pattern
+fx.blocked_product(layout, tiler)   # Blocked access pattern
 fx.zipped_product(layout, tiler)    # Zipped modes
 fx.tiled_product(layout, tiler)     # Hierarchical tiled structure
 fx.flat_product(layout, tiler)      # Flattened result

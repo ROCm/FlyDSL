@@ -102,13 +102,25 @@ def FlyROCDL_MmaOpGFX11_WMMA : FlyROCDL_MmaOp<"MmaOpGFX11_WMMA", "gfx11.wmma", [
     "int32_t":$k,
     "Type":$elemTyA,
     "Type":$elemTyB,
-    "Type":$elemTyAcc
+    "Type":$elemTyAcc,
+    // Integer-WMMA controls, forwarded to the ROCDL iu8/iu4 intrinsic. Ignored
+    // (and required to be false) on fp16/bf16 paths — those intrinsics have no
+    // such operands. Always-printed in the assembly format for clarity.
+    "bool":$signA,
+    "bool":$signB,
+    "bool":$clamp
   );
-  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `>`";
+  let assemblyFormat = "`<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc `,` `signA` `=` $signA `,` `signB` `=` $signB `,` `clamp` `=` $clamp `>`";
 
   let builders = [
+    // Legacy 6-arg builder: defaults signA/signB/clamp=false. Backward-compat
+    // for fp16/bf16 callers; integer callers should use the 9-arg form below.
     TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
-      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc);
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, false, false, false);
+    }]>,
+    // Explicit 9-arg builder for integer-WMMA callers.
+    TypeBuilderWithInferredContext<(ins "int32_t":$m, "int32_t":$n, "int32_t":$k, "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc, "bool":$signA, "bool":$signB, "bool":$clamp), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc, signA, signB, clamp);
     }]>
   ];
   let genVerifyDecl = 1;
