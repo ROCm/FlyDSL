@@ -223,9 +223,17 @@ def compile_pa_metadata_v1(
             # cid + num_works persist across kheads; lri + grt reset per khead
             # (matches the original, which overwrites reduce_* per khead).
             init = [
-                cid.ir_value(), c0.ir_value(), c0.ir_value(), c0.ir_value(),
-                num_works.ir_value(), c0.ir_value(), c0.ir_value(), kvend0.ir_value(),
-                remain0.ir_value(), c0.ir_value(), c0.ir_value(),
+                cid.ir_value(),
+                c0.ir_value(),
+                c0.ir_value(),
+                c0.ir_value(),
+                num_works.ir_value(),
+                c0.ir_value(),
+                c0.ir_value(),
+                kvend0.ir_value(),
+                remain0.ir_value(),
+                c0.ir_value(),
+                c0.ir_value(),
             ]
             wl = scf.WhileOp([i32] * 11, init)
             cbk = ir.Block.create_at_start(wl.before, [i32] * 11)
@@ -357,11 +365,21 @@ def compile_pa_metadata_v1(
                 # guard cid_ < num_cu) so the index is always in-bounds.
                 _store(wi_rsrc, cid_ + c1, n_nworks)
 
-                scf.YieldOp([
-                    n_cid.ir_value(), n_batch.ir_value(), n_kvblk.ir_value(), n_nsplit.ir_value(),
-                    n_nworks.ir_value(), n_pidx.ir_value(), n_kvbeg.ir_value(), n_kvend.ir_value(),
-                    n_remain.ir_value(), n_lri.ir_value(), n_grt.ir_value(),
-                ])
+                scf.YieldOp(
+                    [
+                        n_cid.ir_value(),
+                        n_batch.ir_value(),
+                        n_kvblk.ir_value(),
+                        n_nsplit.ir_value(),
+                        n_nworks.ir_value(),
+                        n_pidx.ir_value(),
+                        n_kvbeg.ir_value(),
+                        n_kvend.ir_value(),
+                        n_remain.ir_value(),
+                        n_lri.ir_value(),
+                        n_grt.ir_value(),
+                    ]
+                )
 
             cid = fx.Int32(wl.results[0])
             num_works = fx.Int32(wl.results[4])

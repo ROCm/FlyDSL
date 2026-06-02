@@ -1016,7 +1016,6 @@ def compile_pa_decode_metadata(
         softmax_scale = 1.0 / (head_dim**0.5)
     _softmax_scale = float(softmax_scale)
     _block_size = int(block_size)
-    _bs = _block_size
     # A partition is KV_COMPUTE_BLOCK (256) tokens.  For small blocks each
     # partition gathers ``_blocks_per_partition`` physical pages; for block_size
     # >= 256 each physical page holds ``_parts_per_block`` partitions (sub-tiles).
@@ -3134,10 +3133,7 @@ def pa_decode_ps_launch(
     # per-head V-scale (and legacy per_token_kv) are all disabled; otherwise use
     # the grid `compile_pa_decode_ps` kernel, which implements those features.
     _small_via_metadata = (
-        _PA_DECODE_PS_SMALL_BLOCK_VIA_METADATA
-        and not k_scale_per_token
-        and not v_scale_per_head
-        and not per_token_kv
+        _PA_DECODE_PS_SMALL_BLOCK_VIA_METADATA and not k_scale_per_token and not v_scale_per_head and not per_token_kv
     )
     if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES and not _small_via_metadata:
         if block_tables is None:
