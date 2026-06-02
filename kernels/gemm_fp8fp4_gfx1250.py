@@ -433,9 +433,7 @@ def compile_mxscale_gemm(
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
     use_b_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING
     if use_buffer_vgpr_scale and not use_fp8_deep_pipeline_schedule:
-        raise ValueError(
-            f"scale_load_path={scale_load_path!r} is only supported with the FP8 deep-pipeline schedule"
-        )
+        raise ValueError(f"scale_load_path={scale_load_path!r} is only supported with the FP8 deep-pipeline schedule")
     use_ws_tdm_split_signal_overlap = (
         wave_specialized_tdm
         and (use_fp8_quadrant_schedule or use_fp8_deep_pipeline_schedule)
