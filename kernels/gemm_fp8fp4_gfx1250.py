@@ -6,6 +6,7 @@ Select precision with ``data_format="fp4"|"fp8"|"a8w4"``.
 """
 
 import functools
+import inspect
 import os
 
 import flydsl.compiler as flyc
@@ -29,6 +30,30 @@ from kernels.gemm_common_gfx1250 import (
     store_acc_vec8_to_lds,
 )
 from kernels.pipeline_utils import make_tail_plan, tdm_epilogue_fence_threshold_bytes
+
+
+def _s_prefetch_inst_burst(num_pages: int, page_bytes: int = 4096):
+    """gfx1250: prefetch ``num_pages`` × 4 KB of instructions ahead of PC.
+
+    Caller must keep ``num_pages * page_bytes`` within shader bounds; over-reach
+    page-faults.
+    """
+    from flydsl._mlir.dialects import llvm as _llvm
+
+    lines = [f"s_prefetch_inst_pc_rel {pg * page_bytes}, null, 31" for pg in range(num_pages)]
+    _llvm.inline_asm(None, [], "\n".join(lines), "", has_side_effects=True)
+
+
+# compatible with no early_timeout descriptor
+_TDM_HAS_EARLY_TIMEOUT = "early_timeout" in inspect.signature(tdm_ops.make_tensor_descriptor_2d).parameters
+
+
+def _make_tdm_desc(*, early_timeout=False, **kwargs):
+    """Build a TDM descriptor, applying early_timeout only when supports it."""
+    if _TDM_HAS_EARLY_TIMEOUT:
+        kwargs["early_timeout"] = early_timeout
+    return tdm_ops.make_tensor_descriptor_2d(**kwargs)
+
 
 # Common constants
 WMMA_M, WMMA_N, WMMA_K = 16, 16, 128
@@ -284,7 +309,7 @@ def compile_mxscale_gemm(
         )
     # Scale prefetch depth (K-tiles ahead) for the buffer->VGPR path. D=1 is the
     # sweet spot; D=2 doubles scale VGPRs -> spill + ~18% regression.
-    _bvs_D = int(os.environ.get("FLYDSL_BUFFER_VGPR_SCALE_DEPTH", "1"))
+    _bvs_D = max(1, int(os.environ.get("FLYDSL_BUFFER_VGPR_SCALE_DEPTH", "1")))
     # ab_half_split: repurpose the (under "vgpr") idle scale waves 2,3 as the
     # second halves of A/B, so all 4 waves share the A/B TDM (wave0=A0, wave1=B0,
     # wave2=A1, wave3=B1). Measured wall-neutral.
@@ -494,7 +519,7 @@ def compile_mxscale_gemm(
 
         if const_expr(inst_prefetch):
             if rocdl.wave_id() == fx.Int32(0):
-                rocdl.s_prefetch_inst_burst(num_pages=4)
+                _s_prefetch_inst_burst(num_pages=4)
 
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
@@ -566,7 +591,7 @@ def compile_mxscale_gemm(
 
         def make_desc_a(memref, k_base):
             k_packed_off = k_base / arith.index(PACK_FACTOR_A)
-            return tdm_ops.make_tensor_descriptor_2d(
+            return _make_tdm_desc(
                 global_ptr=arg_a,
                 lds_memref=memref,
                 global_offset=(blk_m, k_packed_off),
@@ -579,11 +604,12 @@ def compile_mxscale_gemm(
                 num_warps=tdm_desc_num_warps,
                 workgroup_mask=a_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
+                early_timeout=True,
             )
 
         def make_desc_b(memref, k_base):
             k_packed_off = k_base / arith.index(PACK_FACTOR_B)
-            return tdm_ops.make_tensor_descriptor_2d(
+            return _make_tdm_desc(
                 global_ptr=arg_b,
                 lds_memref=memref,
                 global_offset=(blk_n / arith.index(16), k_packed_off * arith.index(16)),
@@ -596,12 +622,13 @@ def compile_mxscale_gemm(
                 num_warps=tdm_desc_num_warps,
                 workgroup_mask=b_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
+                early_timeout=True,
             )
 
         def make_desc_a_half(memref, k_base, m_half: int):
             row_start = m_half * ab_split_a_rows
             k_packed_off = k_base / arith.index(PACK_FACTOR_A)
-            return tdm_ops.make_tensor_descriptor_2d(
+            return _make_tdm_desc(
                 global_ptr=arg_a,
                 lds_memref=memref,
                 global_offset=(blk_m + arith.index(row_start), k_packed_off),
@@ -615,12 +642,13 @@ def compile_mxscale_gemm(
                 workgroup_mask=a_mcast_mask,
                 lds_byte_offset=arith.index(row_start * lds_a_stride_bytes),
                 atomic_barrier_enable=atomic_barrier_enable,
+                early_timeout=True,
             )
 
         def make_desc_b_half(memref, k_base, n_half: int):
             group_start = n_half * ab_split_b_groups
             k_packed_off = k_base / arith.index(PACK_FACTOR_B)
-            return tdm_ops.make_tensor_descriptor_2d(
+            return _make_tdm_desc(
                 global_ptr=arg_b,
                 lds_memref=memref,
                 global_offset=(blk_n / arith.index(16) + arith.index(group_start), k_packed_off * arith.index(16)),
@@ -634,13 +662,14 @@ def compile_mxscale_gemm(
                 workgroup_mask=b_mcast_mask,
                 lds_byte_offset=arith.index(group_start * packed_tile_k_b * 16),
                 atomic_barrier_enable=atomic_barrier_enable,
+                early_timeout=True,
             )
 
         def make_desc_as(memref, k_base):
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
             outer_off = blk_m / arith.index(wmma_m_rep)
             inner_off = k_scale_off * arith.index(wmma_m_rep)
-            return tdm_ops.make_tensor_descriptor_2d(
+            return _make_tdm_desc(
                 global_ptr=arg_a_scale,
                 lds_memref=memref,
                 global_offset=(outer_off, inner_off),
@@ -653,13 +682,14 @@ def compile_mxscale_gemm(
                 num_warps=tdm_desc_num_warps,
                 workgroup_mask=a_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
+                early_timeout=True,
             )
 
         def make_desc_bs(memref, k_base):
             k_scale_off = k_base / arith.index(SCALE_BLOCK)
             outer_off = blk_n / arith.index(b_scale_load_rep)
             inner_off = k_scale_off * arith.index(b_scale_load_rep)
-            return tdm_ops.make_tensor_descriptor_2d(
+            return _make_tdm_desc(
                 global_ptr=arg_b_scale,
                 lds_memref=memref,
                 global_offset=(outer_off, inner_off),
@@ -672,6 +702,7 @@ def compile_mxscale_gemm(
                 num_warps=tdm_desc_num_warps,
                 workgroup_mask=b_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
+                early_timeout=True,
             )
 
         if const_expr(wave_specialized_tdm):
@@ -2015,7 +2046,7 @@ def compile_mxscale_gemm(
             d_warp_off_sgpr = d_warp_linear_sgpr * arith.index(warp_d_bytes) + arith.index(d_output_off)
             warp_m_off_sgpr = wave_m_sgpr * arith.index(warp_tile_m)
             warp_n_off_sgpr = wave_n_sgpr * arith.index(warp_tile_n)
-            d_desc = tdm_ops.make_tensor_descriptor_2d(
+            d_desc = _make_tdm_desc(
                 global_ptr=arg_c,
                 lds_memref=d_lds_base_ptr,
                 global_offset=(blk_m + warp_m_off_sgpr, blk_n + warp_n_off_sgpr),

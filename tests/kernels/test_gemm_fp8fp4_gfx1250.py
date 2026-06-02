@@ -785,7 +785,7 @@ def test_b_streaming_with_wave_spec_tdm(data_format, M, N, K, tile_m, tile_n, ti
 @pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [False, True])
-def test_mxfp8_wave_spec_scale_load_paths(num_buffers, use_tdm_store, use_scale_opsel):
+def test_mxfp8_wave_spec_scale_load_tdm(num_buffers, use_tdm_store, use_scale_opsel):
     _run_mxscale_gemm_test(
         "fp8",
         128,
@@ -1120,7 +1120,7 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
     torch.cuda.synchronize()
 
     if flush_buf is None and prep_fn is None:
-        # Single event pair preserves back-to-back launch pipelining.
+        # Single event pair preserves back-to-back launch pipelining (returns mean latency).
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()

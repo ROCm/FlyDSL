@@ -215,6 +215,7 @@ def make_tensor_descriptor_2d(
     lds_byte_offset=None,
     for_store: bool = False,
     atomic_barrier_enable: bool = False,
+    early_timeout: bool = False,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -260,6 +261,10 @@ def make_tensor_descriptor_2d(
                        relying on TDM atomic-barrier semantics; this helper keeps
                        the encoded atomic-barrier address at zero, so all
                        participating waves must agree on that protocol.
+        early_timeout: Set the descriptor's early-timeout bit [21]. This is a
+                       multicast-load knob (1 = GL1 returns to the requesters
+                       present when GL2 data arrives, latecomers re-broadcast;
+                       default 0 = standard wider-merge timeout).
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -368,10 +373,7 @@ def make_tensor_descriptor_2d(
 
     # sgpr0: config bitfields
     _abe = 1 if atomic_barrier_enable else 0
-    # early_timeout (bit 21) is a multicast-load knob: 1 = GL1 returns to the
-    # requesters present when GL2 data arrives (latecomers re-broadcast); 0 =
-    # standard (wider merge) timeout. keep stores at 0 (store cannot multicast).
-    _early_timeout = 0 if for_store else 1
+    _early_timeout = 1 if early_timeout else 0
     g1_s0_upper = (
         (data_size_code << 16)  # data_size [17:16]
         | (_abe << 18)  # atomic_barrier_enable

@@ -65,21 +65,3 @@ def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
         "=v,v,v",
         has_side_effects=False,
     )
-
-
-def s_prefetch_inst_burst(num_pages: int = 3, page_bytes: int = 4096):
-    """gfx1250: prefetch ``num_pages`` × 4 KB of instructions ahead of PC.
-
-    Caller must keep ``num_pages * page_bytes`` within shader bounds; over-reach
-    page-faults.
-    """
-    from ..._mlir.dialects import llvm as _llvm
-
-    lines = [f"s_prefetch_inst_pc_rel {pg * page_bytes}, null, 31" for pg in range(num_pages)]
-    _llvm.inline_asm(
-        None,
-        [],
-        "\n".join(lines),
-        "",
-        has_side_effects=True,
-    )
