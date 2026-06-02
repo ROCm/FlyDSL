@@ -226,16 +226,6 @@ def build_flash_attn_opus_module(
     OPUS_URV_I5_STRIDE = D_128B_SIZE     # 64 (axis 5 element stride within a step_k)
 
     # DMA load chunking
-    VEC_WIDTH = 16
-    THREADS_PER_ROW_LOAD = HEAD_DIM // VEC_WIDTH
-    ROWS_PER_BATCH_LOAD = BLOCK_SIZE // THREADS_PER_ROW_LOAD
-    if ROWS_PER_BATCH_LOAD >= BLOCK_N:
-        NUM_BATCHES_KV = 1
-        KV_NEEDS_GUARD = ROWS_PER_BATCH_LOAD > BLOCK_N
-    else:
-        NUM_BATCHES_KV = BLOCK_N // ROWS_PER_BATCH_LOAD
-        KV_NEEDS_GUARD = False
-
     PATH_TAG = "OPUS"
     allocator = SmemAllocator(
         None,
@@ -266,10 +256,6 @@ def build_flash_attn_opus_module(
         stride_kv_n: fx.Int32,
         head_dim_runtime: fx.Int32,
     ):
-        #     using T = opus::remove_cvref_t<Traits>;
-        #     using D_ATTN = typename T::D_ATTN;
-        #     using D_ACC = typename T::D_ACC;
-        #
         elem_dtype = dtype_to_elem_type(dtype_str)
         elem_type = elem_dtype.ir_type
         compute_type = fx.Float32.ir_type
@@ -289,16 +275,6 @@ def build_flash_attn_opus_module(
         stride_kv_n_v = fx.Index(stride_kv_n)
         stride_kv_n_bytes = stride_kv_n_v * fx.Index(BF16_BYTES)
 
-        #     // Shared memory for K and V tiles
-        #     __shared__ char smem_buf[T::smem_size_bytes()];
-        #     smem<D_ATTN> s_k[2] = {
-        #         make_smem(reinterpret_cast<D_ATTN*>(smem_buf)),
-        #         make_smem(reinterpret_cast<D_ATTN*>(smem_buf) + T::smem_buffer_elems)
-        #     };
-        #     smem<D_ATTN> s_v[2] = {
-        #         make_smem(reinterpret_cast<D_ATTN*>(smem_buf) + T::smem_k_tile_elems),
-        #         make_smem(reinterpret_cast<D_ATTN*>(smem_buf) + T::smem_buffer_elems + T::smem_k_tile_elems)
-        #     };
         base_ptr = allocator.get_base()
         lds_kv = SmemPtr(
             base_ptr,
@@ -322,12 +298,6 @@ def build_flash_attn_opus_module(
                 [scope_name for scope_name in lds_scope_names if scope_name != name]
             )
 
-        #     const int workgroup_x = block_id_x();
-        #     const int q_block_idx = block_id_y();
-        #     const int b = block_id_z();
-        #     const int warp_id = __builtin_amdgcn_readfirstlane(thread_id_x() / T::WARP_SIZE);
-        #     const int lane_id = thread_id_x() % T::WARP_SIZE;
-        #     const int stagger = warp_id / 4;
         h_idx = fx.Index(gpu.block_idx.x)
         q_block_idx = fx.Index(gpu.block_idx.y)
         batch_idx = fx.Index(gpu.block_idx.z)
@@ -358,29 +328,15 @@ def build_flash_attn_opus_module(
         tr_col_sub = lane % 4
         tr_col_half = (lane % 32) // 16
 
-        #     const int q_block_size = T::NUM_WARPS * T::Q_TILE_SIZE;
-        #     const int q_block_start = q_block_idx * q_block_size;
         wave_q_offset = wave_id * ROWS_PER_WAVE
         q_block_size = BLOCK_M
         q_start = q_block_idx * q_block_size
 
-        #     const int group_size = kargs.H / kargs.H_KV;
-        #     const int h = (workgroup_x % kargs.H_KV) * group_size + (workgroup_x / kargs.H_KV);
-        #     const int h_kv = h / group_size;
-        #     const int q_block_size = T::NUM_WARPS * T::Q_TILE_SIZE;
-        #     const int q_block_start = q_block_idx * q_block_size;
-        #     const int qo_gmem_offset = b * kargs.stride_q_b + q_block_start * kargs.stride_q_n + h * kargs.stride_q_h;
-        #     const int kv_gmem_offset = b * kargs.stride_kv_b + h_kv * kargs.stride_kv_h;
         h_kv_idx = h_idx % NUM_HEADS_KV
         group_id = h_idx // NUM_HEADS_KV
         q_head_idx = h_kv_idx * GQA_GROUP_SIZE + group_id
         kv_head_idx = h_kv_idx
 
-        #     // Global memory tensors
-        #     auto g_q = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_q) + qo_gmem_offset);
-        #     auto g_k = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_k) + kv_gmem_offset);
-        #     auto g_v = make_gmem(reinterpret_cast<const D_ATTN*>(kargs.ptr_v) + kv_gmem_offset);
-        #     auto g_o = make_gmem(reinterpret_cast<D_ATTN*>(kargs.ptr_o) + qo_gmem_offset);
         q_gmem_byte_offset = (
             (batch_idx * seq_len_v + q_start) * stride_q_n_v
             + q_head_idx * fx.Index(HEAD_DIM)
@@ -424,14 +380,6 @@ def build_flash_attn_opus_module(
         n_in_warp = lane_in_warp // fx.Index(VEC_KV)
         d_bucket = lane_in_warp % fx.Index(VEC_KV)
 
-        #     // Scaling constants and online softmax state
-        #     constexpr D_ACC RESCALE_THRESHOLD = D_ACC(8.0f);
-        #     constexpr float LOG2_E = 1.44269504089f;
-        #     const float temperature_scale = (1.0f / sqrtf(static_cast<float>(kargs.D))) * LOG2_E;
-        #
-        #     D_ACC m_row = opus::numeric_limits<D_ACC>::lowest();
-        #     D_ACC l_row = 0.0f;
-        #     D_ACC rescale_m = 1.0f;
         c_neg_inf = fx.Float32(float("-inf"))
         # c_neg_inf = fx.Float32(float(-1e30))
         c_zero_f = fx.Float32(0.0)
@@ -455,16 +403,6 @@ def build_flash_attn_opus_module(
         v32bf16_type = Vec.make_type(PV_K_STEPS * 2 * 8, elem_dtype)
         v32f32_type = Vec.make_type(PV_K_STEPS * 2 * 8, fx.Float32)
 
-        #     // Tile traversal helpers
-        #     const int kv_tile_stride = T::KV_TILE_SIZE * kargs.stride_kv_n;
-        #     const int num_kv_tiles = ceil_div(kargs.N, T::KV_TILE_SIZE);
-        #     int max_num_tiles = num_kv_tiles;
-        #     if constexpr (T::CAUSAL) {
-        #         const int q_block_end = q_block_start + q_block_size;
-        #         const int causal_num_tiles = ceil_div(q_block_end, T::KV_TILE_SIZE);
-        #         max_num_tiles = causal_num_tiles < max_num_tiles ? causal_num_tiles : max_num_tiles;
-        #     }
-        #     auto kv_tile = [&](int tile_idx) { return tile_idx * kv_tile_stride; };
         kv_tile_size = fx.Index(BLOCK_N)
         num_kv_tiles = (seq_len_v + kv_tile_size - fx.Index(1)) // kv_tile_size
         if const_expr(CAUSAL):
@@ -478,14 +416,6 @@ def build_flash_attn_opus_module(
         else:
             max_num_tiles = num_kv_tiles
 
-        #     // Partition layouts
-        #     auto u_q  = make_layout_q<T>(warp_id, lane_id, kargs.stride_q_n);
-        #     auto u_gk = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
-        #     auto u_sk = make_layout_sk_sv<T, T::smem_padding_16B>(warp_id);
-        #     auto u_rk = make_layout_rk<T>(lane_id);
-        #     auto u_gv = make_layout_gk_gv<T>(warp_id, lane_id, kargs.stride_kv_n);
-        #     auto u_sv = make_layout_sk_sv<T, T::smem_padding_64B>(warp_id);
-        #     auto u_rv = make_layout_rv<T>(lane_id);
         urk_base_per_lane = (
             (lane_mod_32 % fx.Index(8)) * fx.Index(SMEM_K_LINE_STRIDE)
             + (lane_mod_32 // fx.Index(8)) * fx.Index(D_128B_SIZE)
@@ -499,9 +429,6 @@ def build_flash_attn_opus_module(
             + (lane % fx.Index(4)) * fx.Index(OPUS_URV_LANE_LO)
         )
 
-        #     // Causal masking helpers
-        #     [[maybe_unused]] const int q_start_pos = q_block_start + warp_id * T::Q_TILE_SIZE;
-        #     [[maybe_unused]] const opus::u32_t neg_inf_v = std::bit_cast<opus::u32_t>(-opus::numeric_limits<D_ACC>::infinity());
         _NEG_INF_F32_BITS = 0xFF800000
 
         _LGKMCNT_0_ONLY = 0xC07F
@@ -1267,30 +1194,26 @@ def build_flash_attn_opus_module(
                 _v_vec32_to_p(results[D_CHUNKS + 2]),
             )
 
-        def _waitcnt_lgkm_0_vm_n(n):
-            """Combined: lgkmcnt(0) + vmcnt(n)."""
-            val = (
-                (n & _VMCNT_LO_MASK)
-                | (7 << 4)
-                | (0 << 8)
-                | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
-            )
-            rocdl.s_waitcnt(val)
-
-        #     // Prologue
-        #     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(0));
+        # Prologue
+        # Kick off the async (DMA) copy of the first K tile (kv_tile 0) from
+        # global memory into LDS buffer 0, then wait for *all* outstanding
+        # counters (s_waitcnt 0) so the LDS data is guaranteed visible. The
+        # sched_barrier(0) is a scheduling fence (emits no instruction) that
+        # stops LLVM from moving work across it, and s_barrier syncs the whole
+        # workgroup so every wave sees the loaded K tile before MMA0.
         _async_load_k(fx.Index(0), 0)
-        #     __builtin_amdgcn_s_waitcnt(0);
         rocdl.s_waitcnt(0)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
 
-        #     v_q = load<T::VEC_Q>(g_q, u_q);
-        #     auto v_q_f32 = opus::cast<float>(v_q);
-        #     static_for<q_len>([&](auto i) { v_q_f32[i.value] *= temperature_scale; });
-        #     v_q = opus::cast<D_ATTN>(v_q_f32);
+        # Load this wave's Q rows and pre-scale by the softmax temperature.
+        # q_row_in_block: row index within the Q tile for this lane
+        #   (wave base offset + lane's position inside the 32-lane group).
+        # q_start_pos_i32 / q_row(_i32): absolute Q row position, used later for
+        #   the causal mask comparison.
+        # _load_q_all loads the full head_dim of Q for this lane (bf16); 
+        # _scale_q_all multiplies by 1/sqrt(D) temperature so MMA0 directly
+        # produces scaled scores (mirrors the C++ v_q *= temperature_scale).
         q_row_in_block = wave_q_offset + lane_mod_32
         q_start_pos_i32 = fx.Int32(q_start + wave_id_uni * fx.Index(ROWS_PER_WAVE))
         q_row = q_start + q_row_in_block
@@ -1298,69 +1221,155 @@ def build_flash_attn_opus_module(
         q_all_bf16 = _load_q_all(q_row_in_block)
         q_all_scaled_bf16 = _scale_q_all(q_all_bf16)
 
-        #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(1));
+        # Software-pipeline the next tiles while consuming the first one:
+        #   - prefetch K tile 1 into LDS buffer 1, and V tile 0 into V LDS buf 0
+        #     (these DMAs run in the background during the upcoming MMA0);
+        #   - read the already-resident K tile 0 from LDS into VGPRs (v_k) for
+        #     the prologue MMA0.
+        # s_waitcnt(lgkmcnt==0) waits only for the LDS read (v_k) to land;
+        # _waitcnt_vm_n(NUM_DMA_V) waits for just the V global loads, leaving
+        # the K-tile-1 DMA still in flight (overlapped with compute).
         _async_load_k(fx.Index(BLOCK_N), 1)
-        #     async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(0));
         _async_load_v(fx.Index(0), 0)
-        #     v_k = load<T::VEC_KV>(s_k[0], u_rk);
         v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
-
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_V)
 
-        #     if (stagger) {
-        #         __builtin_amdgcn_sched_barrier(0);
-        #         __builtin_amdgcn_s_barrier();
-        #     }
+        # Wave-group stagger -- OPENS the phase shift. 8 waves split into group A
+        # (waves 0-3) and group B (waves 4-7); _stagger_extra_barrier_if_one()
+        # makes ONLY group B run one extra s_barrier here. As s_barriers match
+        # by ordinal across the workgroup, every later group-B s_barrier then
+        # aligns with group A's NEXT cluster's s_barrier -- i.e. group A runs one
+        # cluster AHEAD of group B for the whole main loop/epilogue, so one group
+        # computes while the other loads (see the diagram at "(4)" above the
+        # loop). Closed in the epilogue. Disabled -> one plain barrier (lock-step).
         if const_expr(OPUS_ENABLE_STAGGER):
-            _stagger_extra_barrier_if_one()
+            _stagger_extra_barrier_if_one()  # group B: +1 s_barrier -> open the shift
         else:
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
 
-        #     v_s[0] = mma0(v_q, v_k);
+        # Prologue score computation + first softmax pass for KV tile 0:
+        #   - _mma0: QK^T -> raw scores v_s_0 (scaled by the Q pre-scale above);
+        #   - causal mask: for causal attention, mask out future keys in this
+        #     tile (sets them to -inf); non-causal just reshapes to lists;
+        #   - _attn_row_max: per-row running max m_row (softmax stability);
+        #   - _attn_sub_row: scores - m_row;
+        #   - _attn_exp2_slice(0,16): exp2 of the first half of the scores
+        #     (the second half is computed later, in the main-loop Cluster 1,
+        #     to overlap with the next MMA0).
+        # The trailing sched_barrier/s_barrier pair fences this softmax work
+        # and syncs the workgroup before the next K prefetch.
         v_s_0 = _mma0(v_k)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-
-        #     if constexpr (T::CAUSAL) {
-        #         const int kv_end_pos = T::KV_TILE_SIZE;
-        #         if (q_start_pos < kv_end_pos) {
-        #             attn_mask_causal_tile<T>(v_s[0], q_start_pos, 0, neg_inf_v, lane_id);
-        #         }
-        #     }
         if const_expr(CAUSAL):
             v_s_0 = _causal_mask_prologue_if_needed(v_s_0)
         else:
             v_s_0 = _v_s_vec_to_lists(v_s_0)
-        #     m_row = attn_row_max<T>(v_s[0]);
         m_row_pro = _attn_row_max(v_s_0)
-        #     attn_sub_row<T>(v_s[0], m_row);
         v_s_0 = _attn_sub_row(v_s_0, m_row_pro)
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
         v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(2));
+        # Prefetch K tile 2 into LDS buffer 0 (reusing buffer 0 now that tile 0
+        # has been consumed). This keeps the K double-buffer one step ahead of
+        # the main loop, which starts at j=3.
         _async_load_k(fx.Index(2 * BLOCK_N), 0)
 
+        # Build the loop-carried state for the main loop (scf.for init args):
+        #   [0] m_row  : running row max (seeded from the prologue tile);
+        #   [1] l_row  : running softmax denominator, starts at 0;
+        #   [2..]      : D_CHUNKS output accumulator banks v_o, all zero;
+        #   [last]     : packed v_p_0 (the prologue tile's exp'd probabilities)
+        #                carried in as vec32 so it can be passed through scf.for.
         l_row_init = c_zero_f
         init_args = [m_row_pro, l_row_init]
         for _ in range_constexpr(D_CHUNKS):
             init_args.append(c_zero_v16f32)
         init_args.append(_v_pair_to_vec32(v_p_0))
 
-        #     // Main loop
-        #     for (int j = 3; j < max_num_tiles - 1; j += 2) {
+        # ============================= Main loop =============================
+        # Software-pipelined flash-attention inner loop. Each iteration advances
+        # j by 2 and folds TWO KV tiles into the running (m_row, l_row, v_o)
+        # state. The body is 8 "clusters" C0..C7 that strictly alternate a
+        # MEMORY stage (even: C0/C2/C4/C6) and a COMPUTE stage (odd:
+        # C1/C3/C5/C7); every cluster ends with rocdl.s_barrier(). K and V each
+        # live in a 2-deep LDS double buffer (buf0/buf1).
+        #
+        # (1) Global memory -> LDS loads (background DMA, issued tiles ahead),
+        #     alternating V/K across the memory stages and ping-ponging buffers:
+        #       C0  _async_load_v(.., buf1)   V tile (j-2) -> V-LDS buf1
+        #       C2  _async_load_k(.., buf1)   K tile (j)   -> K-LDS buf1
+        #       C4  _async_load_v(.., buf0)   V tile (j-1) -> V-LDS buf0
+        #       C6  _async_load_k(.., buf0)   K tile (j+1) -> K-LDS buf0
+        #     The DMA is left in flight; each stage's s_waitcnt only drains what
+        #     the next compute stage actually needs (the rest stays overlapped).
+        #
+        # (2) LDS -> VGPR reads (each feeds the immediately following compute):
+        #       C0  K LDS buf1 -> v_k        (-> Q*K in C1)
+        #       C2  V LDS buf0 -> v_v        (-> P*V in C3)
+        #       C4  K LDS buf0 -> v_k        (-> Q*K in C5)
+        #       C6  V LDS buf1 -> v_packs    (-> P*V in C7)
+        #
+        # (3) Compute order + softmax split (all in the odd/compute clusters):
+        #       Q*K (mma0):  C1 -> v_s_1 (tile A) ; C5 -> v_s_0 (tile B)
+        #       P*V (mma1):  C3 (4x step_k)       ; C7 (4x step_k)
+        #     A tile's softmax is deliberately split across TWO compute clusters
+        #     so the exp (TRANS) latency hides behind MFMA. For tile A (scores
+        #     produced by C1):
+        #       C3: _attn_row_max -> _attn_sub_row(S - m) -> _attn_exp2_slice
+        #           FIRST half (elems 0..15), plus _lazy_rescale_o (rescale the
+        #           running v_o / l_row to the new combined row max);
+        #       C5: _attn_exp2_slice SECOND half (16..31) -> _attn_sum (row sum
+        #           into l_row) -> _cast_p (probabilities -> bf16);
+        #       C7: P*V consumes those bf16 probabilities.
+        #     Tile B (scores from C5) runs the same chain shifted by 4 clusters:
+        #     C7 (part 1) -> C1-of-next-iter (part 2) -> C3-of-next-iter (P*V).
+        #     So every compute cluster runs P*V for an OLDER tile while doing
+        #     softmax-part-1 for a NEWER tile, keeping MFMA and exp/VALU
+        #     interleaved (shaped by the _sched_barrier_*_pairs hints).
+        #
+        # (4) Two wave-groups: 8 waves split into group A (waves 0-3) and group
+        #     B (waves 4-7). The prologue's _stagger_extra_barrier_if_one()
+        #     makes ONLY group B run one extra s_barrier. s_barriers are matched
+        #     across the workgroup by ordinal position, and every cluster ends
+        #     with exactly one s_barrier, so from that point on each group-B
+        #     s_barrier aligns with group A's NEXT cluster's s_barrier.
+        #     Equivalently: GROUP A RUNS ONE CLUSTER AHEAD OF GROUP B for the
+        #     whole main loop and epilogue. Lining the two groups up by their
+        #     matched s_barriers ('b', where the columns are forced to align):
+        #
+        #       group A:  [ P0+QK0 ]--b--[   C0   ]--b--[   C1   ]--b--[   C2   ]
+        #       group B:  [   P0   ]--b--[  QK0   ]--b--[   C0   ]--b--[   C1   ]
+        #         P0  = pre-loop: prefetch K tile1 + read K tile0 (LDS->VGPR)
+        #         QK0 = prologue Q*K + first softmax pass (KV tile 0)
+        #         C0  = main-loop Cluster 0 (also prefetches K tile2); C1, C2 ...
+        #       (group B's first 'b' is the extra stagger barrier: it has only
+        #        done P0 while group A has already done P0+QK0.)
+        #
+        #     Because of this one-cluster offset, whenever one group is in a
+        #     COMPUTE cluster (MFMA/VALU) the other is in the adjacent MEMORY
+        #     cluster (DMA issue + LDS reads + waitcnt stalls): one group
+        #     computes while the other loads, and they swap at each s_barrier,
+        #     so the memory latency of one group is hidden behind the MFMA of
+        #     the other. The offset is closed at the end of the epilogue, where
+        #     _stagger_extra_barrier_if_zero() gives group A its matching +1.
+        #
+        # (5) rocdl.s_setprio(1)/(0) time-multiplexes the shared SIMD issue/MFMA
+        #     resources between the two groups. It wraps only the heaviest
+        #     compute regions, C3 and C7 (P*V + lazy rescale + first-half exp2):
+        #       - s_setprio(1) at the cluster start raises the computing group's
+        #         priority so its MFMA chain issues without being preempted;
+        #       - s_setprio(0) at the cluster end drops priority, ceding the
+        #         units to the other group that is just entering its compute
+        #         phase.
+        #     This explicit hand-off keeps the "one computes / one loads"
+        #     alternation crisp and prevents both groups from contending for the
+        #     MFMA pipe at the same time.
+        # =====================================================================
         loop_results = init_args
         for j, loop_args in range(
             fx.Index(3),
@@ -1374,72 +1383,66 @@ def build_flash_attn_opus_module(
             v_p_0 = _v_vec32_to_pair(loop_args[2 + D_CHUNKS])
             j_idx = j
 
-            #         // Cluster 0:
-            #         async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(j - 2));
+            # Main loop Cluster 0: memory stage for the current K tile.
+            # The body processes two KV tiles per iteration; clusters alternate
+            # memory stages (even) and compute stages (odd), double-buffered.
+            # Here: kick off the next V-tile DMA (buffer 1) in the background,
+            # read the already-resident K tile from LDS into VGPRs (v_k) for
+            # MMA0, then wait only for the LDS read + needed DMAs and sync the
+            # workgroup so all waves see the K data before MMA0.
             _async_load_v((j_idx - fx.Index(2)) * fx.Index(BLOCK_N), 1)
-            #         v_k = load<T::VEC_KV>(s_k[1], u_rk);
             v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
-            #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            #         // Cluster 1:
-            #         v_s[1] = mma0(v_q, v_k);
+            # Main loop Cluster 1: new scores + finish the previous tile's softmax.
+            # _mma0 computes QK^T -> v_s_1 for this tile. In parallel, finish the
+            # second-half exp2 of the previous tile's probabilities (v_p_0),
+            # accumulate its row sum into the running denominator l_row, cast the
+            # probabilities to bf16, and anchor them as inputs for the P*V MMA.
+            # The sched_group_barrier hints keep exp2/MFMA interleaved.
             v_s_1 = _mma0(v_k)
-            #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
             v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
-            #         l_row += attn_sum<T>(v_s[0]);
             tile_sum_a = _attn_sum(v_p_0)
             l_row = _fadd(l_row, tile_sum_a)
-            #         v_p = opus::cast<D_ATTN>(v_s[0]);
             v_p_0 = _cast_p(v_p_0)
-            #         asm volatile("" : "+v"(v_p) ::);
             v_p_0 = _anchor_v_p(v_p_0)
-            #         sched_barrier_exp_pairs<6, 3, 1>();
             _sched_barrier_exp_pairs(6, 3, 1)
-            #         sched_barrier_pairs<10, 5, 1>();
             _sched_barrier_pairs(10, 5, 1)
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            #         // Cluster 2:
-            #         async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(j));
+            # Main loop Cluster 2: memory stage for V reads / next K prefetch.
+            # Prefetch the next K tile (buffer 1) in the background, read this
+            # tile's V from LDS into VGPR packs (v_v) for the P*V MMA, wait for
+            # the LDS read + DMAs, and sync.
             _async_load_k(j_idx * fx.Index(BLOCK_N), 1)
-            #         v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
             v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
-            #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            #         // Cluster 3:
-            #         __builtin_amdgcn_s_setprio(1);
+            # Main loop Cluster 3: P*V accumulation + lazy rescale + next softmax.
+            # Raise wave priority, do the first P*V MFMA step into the output
+            # accumulators v_o, and reduce this tile's scores v_s_1 to per-row
+            # max (m_tile_max_a). _lazy_rescale_o then conditionally rescales the
+            # running output/denominator to the new combined row max (the branch
+            # is skipped when all lanes are already within RESCALE_THRESHOLD).
+            # Then the remaining 3 P*V steps, subtract the row max from the new
+            # scores, and the first-half exp2. s_setprio(0) + fence + barrier
+            # close the cluster (yielding the MFMA units to the other group).
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
-            #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
             v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
-            #         D_ACC row_max = attn_row_max<T>(v_s[1]);
             v_s_1 = _v_s_vec_to_lists(v_s_1)
             m_tile_max_a = _attn_row_max(v_s_1)
 
-            #         sched_barrier_pairs<4, 5, 2>();
             # LLVM scheduling note:
             # `_sched_barrier_pairs(4, 5, 2)` emits four repetitions of:
             #   rocdl.sched.group.barrier(_MFMA_MASK=0x008, 1, groupId=2)
@@ -1473,16 +1476,6 @@ def build_flash_attn_opus_module(
             # chain.
             _sched_barrier_pairs(4, 6, 2)
 
-            #         bool below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
-            #         bool all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
-            #         if (__builtin_expect(all_below, 1)) {
-            #             row_max = m_row;
-            #         } else {
-            #             rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-            #             scale_output_tile<T>(v_o, rescale_m);
-            #             l_row *= rescale_m;
-            #             m_row = row_max;
-            #         }
             if const_expr(OPUS_LAZY_RESCALE):
                 v_o, m_row, l_row, v_p_0 = _lazy_rescale_o(
                     v_o, m_row, l_row, m_tile_max_a, v_p_0
@@ -1495,20 +1488,13 @@ def build_flash_attn_opus_module(
                 v_p_0 = _scale_v_p(v_p_0, corr_a)
                 l_row = _fmul(l_row, corr_a)
                 m_row = m_new_a
-            #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
-            #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
-            #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
             v_o = _mma1_step_k(1, v_p_0, v_v, v_o)
             v_o = _mma1_step_k(2, v_p_0, v_v, v_o)
             v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
-            #         attn_sub_row<T>(v_s[1], row_max);
             v_s_1 = _attn_sub_row(v_s_1, m_row)
-            #         attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
             v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
 
-            #         sched_barrier_pairs<6, 5, 2>();
             _sched_barrier_pairs(6, 6, 2)
-            #         sched_barrier_exp_pairs<6, 3, 2>();
             # LLVM scheduling note:
             # `_sched_barrier_exp_pairs(6, 3, 2)` emits six repetitions of:
             #   rocdl.sched.group.barrier(_MFMA_MASK=0x008, 1, groupId=2)
@@ -1535,10 +1521,8 @@ def build_flash_attn_opus_module(
             # the scheduler bunch all `v_exp_f32` or all MFMA instructions
             # together.
             _sched_barrier_exp_pairs(6, 3, 2)
-            #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
-            #         __builtin_amdgcn_sched_barrier(0);
             # LLVM scheduling note:
             # `rocdl.sched_barrier(0)` lowers to
             # `llvm.amdgcn.sched.barrier(i32 0)`, then to the AMDGPU
@@ -1567,61 +1551,43 @@ def build_flash_attn_opus_module(
             # priority drop and wave synchronization boundary, so Cluster 4's
             # next K/V prefetch starts from a clean phase boundary.
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            #         // Cluster 4:
-            #         async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(j - 1));
+            # Main loop Cluster 4: memory stage for the second tile (LDS buf 0).
+            # Mirror of Cluster 0 for the other pipeline phase: prefetch V
+            # (buffer 0), read K from LDS buffer 0 into v_k, wait + sync.
             _async_load_v((j_idx - fx.Index(1)) * fx.Index(BLOCK_N), 0)
-            #         v_k = load<T::VEC_KV>(s_k[0], u_rk);
             v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
-            #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            #         // Cluster 5:
-            #         v_s[0] = mma0(v_q, v_k);
+            # Main loop Cluster 5: scores for the second tile + finish its softmax.
+            # Mirror of Cluster 1: _mma0 -> v_s_0; finish the second-half exp2 of
+            # v_p_1 (the tile-B probabilities produced in Cluster 3), accumulate
+            # its sum into l_row, cast to bf16 and anchor.
             v_s_0 = _mma0(v_k)
-            #         attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
             v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
-            #         l_row += attn_sum<T>(v_s[1]);
             tile_sum_b = _attn_sum(v_p_1)
             l_row = _fadd(l_row, tile_sum_b)
-            #         v_p = opus::cast<D_ATTN>(v_s[1]);
             v_p_1 = _cast_p(v_p_1)
-            #         asm volatile("" : "+v"(v_p) ::);
             v_p_1 = _anchor_v_p(v_p_1)
-            #         sched_barrier_exp_pairs<6, 3, 3>();
             _sched_barrier_exp_pairs(6, 3, 3)
-            #         sched_barrier_pairs<10, 5, 3>();
             _sched_barrier_pairs(10, 5, 3)
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            #         // Cluster 6:
-            #         async_load<T::VEC_KV>(g_k, s_k[0].ptr, u_gk, u_sk, kv_tile(j + 1));
+            # Main loop Cluster 6: memory stage + causal mask.
+            # Prefetch the next K tile (buffer 0) and read this tile's V packs
+            # (buffer 1). For causal attention, apply the causal mask to the
+            # freshly computed v_s_0 scores (mask out future keys); non-causal
+            # just reshapes to lists. Wait + sync.
             _async_load_k((j_idx + fx.Index(1)) * fx.Index(BLOCK_N), 0)
-            #         v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
             v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane)
-            #         if constexpr (T::CAUSAL) {
-            #             const int kv_end_pos = j * T::KV_TILE_SIZE;
-            #             if (q_start_pos < kv_end_pos) {
-            #                 attn_mask_causal_tile<T>(v_s[0], q_start_pos, j - 1, neg_inf_v, lane_id);
-            #             }
-            #         }
             if const_expr(CAUSAL):
                 v_s_0 = _causal_mask_prologue_if_needed(
                     v_s_0,
@@ -1630,39 +1596,25 @@ def build_flash_attn_opus_module(
                 )
             else:
                 v_s_0 = _v_s_vec_to_lists(v_s_0)
-            #         s_waitcnt_lgkmcnt(0_I);
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-            #         s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
             _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
-            #         // Cluster 7:
-            #         __builtin_amdgcn_s_setprio(1);
+            # Main loop Cluster 7: P*V accumulation + lazy rescale (second phase).
+            # Mirror of Cluster 3 for v_p_1 / v_s_0: first P*V step, per-row max
+            # of v_s_0, lazy rescale of the running output/denominator, remaining
+            # 3 P*V steps, then subtract the row max and first-half exp2 of v_s_0.
+            # Closes the iteration; yield_args carries the updated running state
+            # (m_row, l_row, v_o accumulators, packed v_p_0) to the next iter.
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(1)
-            #         v_o = mma1.step_k(0_I, v_p, v_v, v_o);
             v_v = v_packs_b
             v_o = _mma1_step_k(0, v_p_1, v_v, v_o)
-            #         row_max = attn_row_max<T>(v_s[0]);
             m_tile_max_b = _attn_row_max(v_s_0)
-            #         sched_barrier_pairs<4, 5, 4>();
             _sched_barrier_pairs(4, 6, 4)
 
-            #         below_thresh = ((row_max - m_row) <= RESCALE_THRESHOLD);
-            #         all_below = (__builtin_amdgcn_ballot_w64(below_thresh) == __builtin_amdgcn_read_exec());
-            #         if (__builtin_expect(all_below, 1)) {
-            #             row_max = m_row;
-            #         } else {
-            #             rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
-            #             scale_output_tile<T>(v_o, rescale_m);
-            #             l_row *= rescale_m;
-            #             m_row = row_max;
-            #         }
             if const_expr(OPUS_LAZY_RESCALE):
                 v_o, m_row, l_row, v_p_1 = _lazy_rescale_o(
                     v_o, m_row, l_row, m_tile_max_b, v_p_1
@@ -1675,94 +1627,71 @@ def build_flash_attn_opus_module(
                 v_p_1 = _scale_v_p(v_p_1, corr_b)
                 l_row = _fmul(l_row, corr_b)
                 m_row = m_new_b
-            #         v_o = mma1.step_k(1_I, v_p, v_v, v_o);
-            #         v_o = mma1.step_k(2_I, v_p, v_v, v_o);
-            #         v_o = mma1.step_k(3_I, v_p, v_v, v_o);
             v_v = v_packs_b
             v_o = _mma1_step_k(1, v_p_1, v_v, v_o)
             v_o = _mma1_step_k(2, v_p_1, v_v, v_o)
             v_o = _mma1_step_k(3, v_p_1, v_v, v_o)
-            #         attn_sub_row<T>(v_s[0], row_max);
             v_s_0 = _attn_sub_row(v_s_0, m_row)
-            #         attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
             v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
-            #         sched_barrier_pairs<6, 5, 4>();
             _sched_barrier_pairs(6, 5, 4)
-            #         sched_barrier_exp_pairs<6, 3, 4>();
             _sched_barrier_exp_pairs(6, 3, 4)
-            #         __builtin_amdgcn_s_setprio(0);
             if const_expr(OPUS_SETPRIO):
                 rocdl.s_setprio(0)
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
-            #         __builtin_amdgcn_s_barrier();
             rocdl.s_barrier()
-            #         __builtin_amdgcn_sched_barrier(0);
             rocdl.sched_barrier(0)
 
             yield_args = [m_row, l_row] + v_o + [_v_pair_to_vec32(v_p_0)]
             loop_results = yield yield_args
 
-        #     // Epilogue
+        # Epilogue: drain the software pipeline for the final KV tiles that the
+        # main loop left in flight (the loop stops at max_num_tiles - 1 because
+        # of its prefetch-ahead depth). First unpack the loop-carried state:
+        #   running row max, running denominator l_row, output accumulators v_o,
+        #   and the still-in-flight probabilities v_p_0. The epilogue clusters
+        #   mirror the main-loop clusters but with no further prefetch-ahead and
+        #   with unconditional (non-lazy) rescale, since this is the tail.
         m_row = loop_results[0]
         l_row = loop_results[1]
         v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
         v_p_0 = _v_vec32_to_pair(loop_results[2 + D_CHUNKS])
 
+        # Tile indices for the last three tiles handled by the epilogue.
         max_m3 = max_num_tiles - fx.Index(3)
         max_m2 = max_num_tiles - fx.Index(2)
         max_m1 = max_num_tiles - fx.Index(1)
 
-        #     // Cluster 0:
-        #     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 3));
+        # Epilogue Cluster 0: memory stage (like main-loop Cluster 0).
+        # Prefetch the V tile for max_m3 (buffer 1), read the resident K tile
+        # from LDS buffer 1 into v_k, wait + sync.
         _async_load_v(max_m3 * fx.Index(BLOCK_N), 1)
-        #     v_k = load<T::VEC_KV>(s_k[1], u_rk);
         v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 1:
-        #     v_s[1] = mma0(v_q, v_k);
+        # Epilogue Cluster 1: scores + finish the carried tile's softmax.
+        # _mma0 -> v_s_1; finish v_p_0's second-half exp2, add its sum into
+        # l_row, cast to bf16 and anchor (like main-loop Cluster 1).
         v_s_1 = _mma0(v_k)
-        #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
         v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
-        #     l_row += attn_sum<T>(v_s[0]);
         tile_sum_e1 = _attn_sum(v_p_0)
         l_row = _fadd(l_row, tile_sum_e1)
-        #     v_p = opus::cast<D_ATTN>(v_s[0]);
         v_p_0 = _cast_p(v_p_0)
-        #     asm volatile("" : "+v"(v_p) ::);
         v_p_0 = _anchor_v_p(v_p_0)
-        #     sched_barrier_exp_pairs<6, 3, 5>();
         _sched_barrier_exp_pairs(6, 3, 5)
-        #     sched_barrier_pairs<10, 5, 5>();
         _sched_barrier_pairs(10, 5, 5)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 2:
-        #     async_load<T::VEC_KV>(g_k, s_k[1].ptr, u_gk, u_sk, kv_tile(max_num_tiles - 1));
+        # Epilogue Cluster 2: memory stage + causal mask.
+        # Prefetch the K tile for max_m1, read V packs (buffer 0), and for
+        # causal attention mask the v_s_1 scores. Wait + sync.
         _async_load_k(max_m1 * fx.Index(BLOCK_N), 1)
-        #     v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
         v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
-        #     if constexpr (T::CAUSAL) {
-        #         const int kv_end_pos = (max_num_tiles - 2) * T::KV_TILE_SIZE;
-        #         if (q_start_pos < kv_end_pos) {
-        #             attn_mask_causal_tile<T>(v_s[1], q_start_pos, max_num_tiles - 3, neg_inf_v, lane_id);
-        #         }
-        #     }
         if const_expr(CAUSAL):
             v_s_1 = _causal_mask_prologue_if_needed(
                 v_s_1,
@@ -1771,106 +1700,71 @@ def build_flash_attn_opus_module(
             )
         else:
             v_s_1 = _v_s_vec_to_lists(v_s_1)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 3:
-        #     __builtin_amdgcn_s_setprio(1);
+        # Epilogue Cluster 3: full P*V + unconditional rescale.
+        # Unlike the main loop's lazy rescale, the epilogue always rescales:
+        # full _mma1 (all 4 P*V steps) for v_p_0, compute the new combined row
+        # max, rescale factor exp2(m_row - new_max), update m_row, subtract the
+        # row max from v_s_1 and first-half exp2, then scale the output v_o by
+        # the rescale factor and anchor it. s_setprio(0) + fence + barrier.
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
-        #     v_o = mma1(v_p, v_v, v_o);
         v_o = _mma1(v_p_0, v_packs_e3, v_o)
-        #     D_ACC row_max = max(m_row, attn_row_max<T>(v_s[1]));
         m_tile_max_e3 = _attn_row_max(v_s_1)
         row_max_e3 = _fmax(m_row, m_tile_max_e3)
-        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e3 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e3)))
-        #     m_row = row_max;
         m_row = row_max_e3
-        #     attn_sub_row<T>(v_s[1], row_max);
         v_s_1 = _attn_sub_row(v_s_1, row_max_e3)
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
-        #     sched_barrier_pairs<10, 5, 6>();
         _sched_barrier_pairs(10, 5, 6)
-        #     sched_barrier_exp_pairs<6, 3, 6>();
         _sched_barrier_exp_pairs(6, 3, 6)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     scale_output_tile<T>(v_o, rescale_m);
-        #     auto* v_o_pin = reinterpret_cast<vector_t<fp32_t, 16>*>(&v_o);
-        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(v_o, rescale_e3)
         v_o = _anchor_v_o(v_o)
 
-        #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(0)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 4:
-        #     async_load<T::VEC_KV>(g_v, s_v[0].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 2));
+        # Epilogue Cluster 4: memory stage (buffer 0).
+        # Prefetch the V tile for max_m2 (buffer 0), read K from LDS buffer 0
+        # into v_k, wait + sync.
         _async_load_v(max_m2 * fx.Index(BLOCK_N), 0)
-        #     v_k = load<T::VEC_KV>(s_k[0], u_rk);
         v_k = _async_load_k_from_lds_to_vgpr(0, urk_base_per_lane)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     s_waitcnt_vmcnt(number<T::k_buffer_load_insts + T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 5:
-        #     v_s[0] = mma0(v_q, v_k);
+        # Epilogue Cluster 5: scores + finish previous softmax + apply rescale.
+        # _mma0 -> v_s_0; also fold the Cluster-3 rescale into the running
+        # denominator (l_row *= rescale_e3), finish v_p_1's second-half exp2,
+        # add its sum into l_row, cast + anchor.
         v_s_0 = _mma0(v_k)
-        #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e3)
-        #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
         v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
-        #     l_row += attn_sum<T>(v_s[1]);
         tile_sum_e5 = _attn_sum(v_p_1)
         l_row = _fadd(l_row, tile_sum_e5)
-        #     v_p = opus::cast<D_ATTN>(v_s[1]);
         v_p_1 = _cast_p(v_p_1)
-        #     asm volatile("" : "+v"(v_p) ::);
         v_p_1 = _anchor_v_p(v_p_1)
-        #     sched_barrier_exp_pairs<6, 3, 7>();
         _sched_barrier_exp_pairs(6, 3, 7)
-        #     sched_barrier_pairs<10, 5, 7>();
         _sched_barrier_pairs(10, 5, 7)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 6:
-        #     v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+        # Epilogue Cluster 6: memory stage + causal mask.
+        # Read V packs (buffer 1) for the next P*V, mask v_s_0 for causal, then
+        # wait (only V DMAs remain outstanding now) + sync.
         v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane)
-        #     if constexpr (T::CAUSAL) {
-        #         const int kv_end_pos = (max_num_tiles - 1) * T::KV_TILE_SIZE;
-        #         if (q_start_pos < kv_end_pos) {
-        #             attn_mask_causal_tile<T>(v_s[0], q_start_pos, max_num_tiles - 2, neg_inf_v, lane_id);
-        #         }
-        #     }
         if const_expr(CAUSAL):
             v_s_0 = _causal_mask_prologue_if_needed(
                 v_s_0,
@@ -1879,104 +1773,66 @@ def build_flash_attn_opus_module(
             )
         else:
             v_s_0 = _v_s_vec_to_lists(v_s_0)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_V)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 7:
-        #     __builtin_amdgcn_s_setprio(1);
+        # Epilogue Cluster 7: full P*V + unconditional rescale (mirror of 3).
+        # Full _mma1 for v_p_1, new combined row max, rescale_e7, update m_row,
+        # sub_row + first-half exp2 of v_s_0, scale v_o, anchor. Fence + barrier.
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(1)
-        #     v_o = mma1(v_p, v_v, v_o);
         v_o = _mma1(v_p_1, v_packs_e7, v_o)
-        #     row_max = max(m_row, attn_row_max<T>(v_s[0]));
         m_tile_max_e7 = _attn_row_max(v_s_0)
         row_max_e7 = _fmax(m_row, m_tile_max_e7)
-        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e7 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e7)))
-        #     m_row = row_max;
         m_row = row_max_e7
-        #     attn_sub_row<T>(v_s[0], row_max);
         v_s_0 = _attn_sub_row(v_s_0, row_max_e7)
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[0]);
         v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
-        #     sched_barrier_pairs<10, 5, 8>();
         _sched_barrier_pairs(10, 5, 8)
-        #     sched_barrier_exp_pairs<6, 3, 8>();
         _sched_barrier_exp_pairs(6, 3, 8)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     scale_output_tile<T>(v_o, rescale_m);
-        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(v_o, rescale_e7)
         v_o = _anchor_v_o(v_o)
-        #     __builtin_amdgcn_s_setprio(0);
         if const_expr(OPUS_SETPRIO):
             rocdl.s_setprio(0)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 8:
-        #     async_load<T::VEC_KV>(g_v, s_v[1].ptr, u_gv, u_sv, kv_tile(max_num_tiles - 1));
+        # Epilogue Cluster 8: memory stage for the last tile (buffer 1).
+        # Prefetch V for max_m1 (buffer 1), read K from LDS buffer 1 into v_k,
+        # wait + sync.
         _async_load_v(max_m1 * fx.Index(BLOCK_N), 1)
-        #     v_k = load<T::VEC_KV>(s_k[1], u_rk);
         v_k = _async_load_k_from_lds_to_vgpr(1, urk_base_per_lane)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     s_waitcnt_vmcnt(number<T::v_buffer_load_insts>{});
         _waitcnt_vm_n(NUM_DMA_V)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 9:
-        #     v_s[1] = mma0(v_q, v_k);
+        # Epilogue Cluster 9: scores for the last tile + finish previous softmax.
+        # _mma0 -> v_s_1 (last tile); fold rescale_e7 into l_row, finish v_p_0's
+        # second-half exp2, add its sum, cast + anchor.
         v_s_1 = _mma0(v_k)
-        #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e7)
-        #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[0]);
         v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
         tile_sum_e9 = _attn_sum(v_p_0)
-        #     l_row += attn_sum<T>(v_s[0]);
         l_row = _fadd(l_row, tile_sum_e9)
-        #     v_p = opus::cast<D_ATTN>(v_s[0]);
         v_p_0 = _cast_p(v_p_0)
-        #     asm volatile("" : "+v"(v_p) ::);
         v_p_0 = _anchor_v_p(v_p_0)
-        #     sched_barrier_exp_pairs<6, 3, 9>();
         _sched_barrier_exp_pairs(6, 3, 9)
-        #     sched_barrier_pairs<10, 5, 9>();
         _sched_barrier_pairs(10, 5, 9)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 10:
-        #     v_v = tr_load<T::VEC_TR_V>(s_v[0], u_rv);
+        # Epilogue Cluster 10: memory stage + causal mask for the last tile.
+        # Read the last V packs (buffer 0), mask v_s_1 for causal; all DMAs are
+        # now drained (vmcnt 0). Wait + sync.
         v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane)
-        #     if constexpr (T::CAUSAL) {
-        #         const int kv_end_pos = max_num_tiles * T::KV_TILE_SIZE;
-        #         if (q_start_pos < kv_end_pos) {
-        #             attn_mask_causal_tile<T>(v_s[1], q_start_pos, max_num_tiles - 1, neg_inf_v, lane_id);
-        #         }
-        #     }
         if const_expr(CAUSAL):
             v_s_1 = _causal_mask_prologue_if_needed(
                 v_s_1,
@@ -1985,97 +1841,86 @@ def build_flash_attn_opus_module(
             )
         else:
             v_s_1 = _v_s_vec_to_lists(v_s_1)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     s_waitcnt_vmcnt(0_I);
         _waitcnt_vm_n(0)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 11:
-        #     v_o = mma1(v_p, v_v, v_o);
+        # Epilogue Cluster 11: full P*V + rescale + complete the last softmax.
+        # Full _mma1 for v_p_0, new combined row max, rescale_e11, update m_row,
+        # sub_row + first-half exp2 of v_s_1. Then (since there is no further
+        # main-loop pass) immediately complete v_p_1's second-half exp2, fold
+        # rescale_e11 into l_row, add the last tile's sum, cast + anchor the
+        # probabilities, and scale the output v_o by rescale_e11.
         v_o = _mma1(v_p_0, v_packs_e11, v_o)
-        #     row_max = max(m_row, attn_row_max<T>(v_s[1]));
         m_tile_max_e11 = _attn_row_max(v_s_1)
         row_max_e11 = _fmax(m_row, m_tile_max_e11)
-        #     rescale_m = __builtin_amdgcn_exp2f(m_row - row_max);
         rescale_e11 = rocdl.exp2(T.f32, _raw(_fsub(m_row, row_max_e11)))
-        #     m_row = row_max;
         m_row = row_max_e11
-        #     attn_sub_row<T>(v_s[1], row_max);
         v_s_1 = _attn_sub_row(v_s_1, row_max_e11)
-        #     attn_exp2_slice<T, 0, s_half_len>(v_s[1]);
         v_p_1 = _attn_exp2_slice(v_s_1, 0, 16)
-        #     sched_barrier_pairs<10, 5, 10>();
         _sched_barrier_pairs(9, 6, 10)
-        #     sched_barrier_exp_pairs<6, 3, 10>();
         _sched_barrier_exp_pairs(7, 3, 10)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     attn_exp2_slice<T, s_half_len, s_half_len>(v_s[1]);
         v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
-        #     l_row *= rescale_m;
         l_row = _fmul(l_row, rescale_e11)
         tile_sum_e11 = _attn_sum(v_p_1)
-        #     l_row += attn_sum<T>(v_s[1]);
         l_row = _fadd(l_row, tile_sum_e11)
-        #     v_p = opus::cast<D_ATTN>(v_s[1]);
         v_p_1 = _cast_p(v_p_1)
-        #     asm volatile("" : "+v"(v_p) ::);
         v_p_1 = _anchor_v_p(v_p_1)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     scale_output_tile<T>(v_o, rescale_m);
-        #     asm volatile("" : "+v"(v_o_pin[0]), "+v"(v_o_pin[1]), "+v"(v_o_pin[2]), "+v"(v_o_pin[3]) ::);
         _scale_o(v_o, rescale_e11)
         v_o = _anchor_v_o(v_o)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 12:
-        #     v_v = tr_load<T::VEC_TR_V>(s_v[1], u_rv);
+        # Epilogue Cluster 12: read the final V packs for the closing P*V.
+        # Only the LDS read needs waiting on (lgkmcnt 0); then sync.
         v_packs_e13 = _read_v_packs_for_buf(1, urv_base_per_lane)
-        #     s_waitcnt_lgkmcnt(0_I);
         rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
-        #     __builtin_amdgcn_s_barrier();
         rocdl.s_barrier()
-        #     __builtin_amdgcn_sched_barrier(0);
         rocdl.sched_barrier(0)
 
-        #     // Cluster 13:
-        #     v_o = mma1(v_p, v_v, v_o);
+        # Epilogue Cluster 13: final P*V accumulation.
+        # The last full _mma1 (v_p_1 against the final V packs) completes the
+        # output accumulator v_o. After this, v_o holds the unnormalized
+        # attention output (sum of P*V over all KV tiles).
         v_o = _mma1(v_p_1, v_packs_e13, v_o)
-        #     // ──── Normalize O and store to gmem ────
-        #     D_ACC l_inv = (l_row > D_ACC(0.0f)) ? (D_ACC(1.0f) / l_row) : D_ACC(0.0f);
-        #     static_for<o_len>([&](auto i) { v_o[i.value] *= l_inv; });
+
+        # Normalize O: divide the accumulated output by the softmax denominator.
+        # inv_l = 1 / l_row (reciprocal), guarded so that a zero denominator
+        # (e.g. a fully-masked row) yields 0 instead of inf/nan. _scale_o then
+        # multiplies every output accumulator by inv_l to finish softmax(QK^T)*V.
         inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
         inv_l = ArithValue(fx.Float32(l_row) > c_zero_f).select(inv_l_rcp, c_zero_f)
         _scale_o(v_o, inv_l)
 
-        #     if (!stagger) {
-        #         __builtin_amdgcn_s_barrier();
-        #     }
+        # Closing barrier -- CLOSES the phase shift. _stagger_extra_barrier_if_zero()
+        # makes ONLY group A run one extra s_barrier here -- the exact complement
+        # of the prologue's group-B extra barrier. It lets group A (which has run
+        # one cluster AHEAD the whole time) wait for group B, so both realign
+        # before the store. Disabled -> one plain barrier.
         if const_expr(OPUS_ENABLE_STAGGER):
-            _stagger_extra_barrier_if_zero()
+            _stagger_extra_barrier_if_zero()  # group A: +1 s_barrier -> close the shift
         else:
             rocdl.s_barrier()
 
-        #     auto u_o = make_layout_o<T>(warp_id, lane_id, kargs.stride_q_n);
-        #     auto v_o_bf16 = opus::cast<D_ATTN>(v_o);
-        #     store<T::VEC_O>(g_o, v_o_bf16, u_o);
+        # Store O back to global memory (bounds-guarded for the ragged last
+        # Q block). Only rows within seq_len are written. The output is laid
+        # out as D_CHUNKS column banks; for each bank, 4 store groups each pack
+        # 4 f32 accumulators into 2 bf16 dwords (v_cvt_pk_bf16_f32 -> lo/hi),
+        # forming one 8-byte (dwordx2) write. d_row_rel/d_col map the lane's
+        # MFMA output lane to its (row, head_dim column) destination, which
+        # _global_idx_q converts to a linear element index, then to a byte
+        # offset for the raw buffer store into O.
         q_in_bounds = q_row < seq_len_v
         if q_in_bounds:
             for dc in range_constexpr(D_CHUNKS):
                 for store_group in range_constexpr(4):
                     r_base = store_group * 4
+                    # Pack 4 f32 outputs -> 2 packed-bf16 dwords (lo, hi).
                     lo = rocdl.cvt_pk_bf16_f32(
                         Vec(v_o[dc])[r_base],
                         Vec(v_o[dc])[r_base + 1],
@@ -2085,6 +1930,7 @@ def build_flash_attn_opus_module(
                         Vec(v_o[dc])[r_base + 3],
                     )
                     o_pack = Vec.from_elements([lo, hi], fx.Int32).ir_value()
+                    # Map this lane's MFMA output to (row, head_dim col).
                     d_row_rel = lane_div_32 * 4 + store_group * 8
                     d_col = fx.Index(dc * D_CHUNK) + d_row_rel
                     o_global = _global_idx_q(q_row, d_col)
