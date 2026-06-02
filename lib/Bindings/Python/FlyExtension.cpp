@@ -94,8 +94,12 @@ struct IntTupleAttrBuilder {
       return IntTupleAttr::get(BasisAttr::get(IntAttr::getStatic(ctx, value), modes));
     } else {
       if (!nb::hasattr(args, "_CAPIPtr")) {
-        throw std::invalid_argument("Expected I32, got: " +
-                                    std::string(nb::str(nb::type_name(args)).c_str()));
+        // Report the instance's *type* name. nb::type_name expects a type object,
+        // so calling it on an arbitrary instance (e.g. an object with a falsy
+        // __fly_basis__ marker) reinterprets that instance as a PyTypeObject and
+        // segfaults instead of raising; Py_TYPE(...)->tp_name is always valid.
+        throw std::invalid_argument(std::string("Expected I32, got: ") +
+                                    Py_TYPE(args.ptr())->tp_name);
       }
       dyncElems.push_back(args);
       return IntTupleAttr::get(IntAttr::getDynamic(ctx));

@@ -486,6 +486,33 @@ def test_basis_E_rejects_invalid_modes():
     assert all(isinstance(m, int) for m in elem.modes) and isinstance(elem.value, int)
 
 
+def test_make_stride_rejects_non_stride_object():
+    """A non-stride object must raise a clean error from make_stride, not segfault.
+
+    Covers a falsy ``__fly_basis__`` marker (which is correctly not treated as a
+    basis leaf and falls through to the generic path) and an arbitrary object.
+    The generic path reports the value's type name, which must not be computed by
+    reinterpreting the instance as a Python type object.
+    """
+
+    class FalsyMarker:
+        __fly_basis__ = False
+        value = 1
+        modes = [0]
+
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            with InsertionPoint(module.body):
+                f = func.FuncOp("reject", FunctionType.get([], []))
+                with InsertionPoint(f.add_entry_block()):
+                    with pytest.raises(ValueError):
+                        fx.make_stride(FalsyMarker())
+                    with pytest.raises(ValueError):
+                        fx.make_stride(object())
+
+
 def test_basis_identity_size():
     """A basis-strided identity layout lowers through the pipeline; size = 4*8 = 32."""
 
