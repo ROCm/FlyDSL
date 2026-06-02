@@ -45,7 +45,6 @@ from flydsl._mlir.dialects import scf
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
-
 from kernels.kernels_common import get_warp_size
 
 _WORK_INFO_FIELDS = 8

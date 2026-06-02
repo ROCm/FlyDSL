@@ -2475,8 +2475,8 @@ def compile_pa_decode_ps(
             Saves the vmcnt(0) drain + readfirstlane that the VMEM
             buffer_load path imposes (result lands in SGPR directly, frees
             VMEM queue slots for V/K loads)."""
-            from flydsl._mlir.dialects import llvm as _llvm
             from flydsl._mlir import ir as _ir
+            from flydsl._mlir.dialects import llvm as _llvm
             from flydsl.expr.rocdl import _to_ir as _rocdl_to_ir
 
             i32_ty = _ir.IntegerType.get_signless(32)
