@@ -12,6 +12,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
@@ -587,7 +588,10 @@ def compile_mxscale_gemm(
         n_stride = arith.index(N)
         c_nrec = m_idx * n_stride * arith.index(elem_bytes_d)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
-        zero_i32 = fx.Int32(0)
+        c_global_ptr_type = ir.Type.parse("!llvm.ptr<1>")
+        c_global_base_i64 = llvm.PtrToIntOp(
+            T.i64, fly.extract_aligned_pointer_as_index(c_global_ptr_type, arg_c.__extract_to_ir_values__()[0])
+        ).result
 
         def make_desc_a(memref, k_base):
             k_packed_off = k_base / arith.index(PACK_FACTOR_A)
@@ -1920,13 +1924,28 @@ def compile_mxscale_gemm(
                 imm = m_off * _lds_d_stride_elems + wn * _n_col_d_elems
                 store_acc_vec8_to_lds(d_buf, d_base, imm, sub8, out_elem=_out_elem_local)
 
+        def _atomic_fadd_global(val, byte_off):
+            # Device-scoped, relaxed atomic add into C at c_global_base_i64 + byte_off.
+            addr_i64 = llvm.AddOp(
+                c_global_base_i64, arith.index_cast(T.i64, byte_off), llvm.IntegerOverflowFlags(0)
+            ).result
+            ptr = llvm.IntToPtrOp(c_global_ptr_type, addr_i64).result
+            llvm.AtomicRMWOp(
+                llvm.AtomicBinOp.fadd,
+                ptr,
+                val.ir_value(),
+                llvm.AtomicOrdering.monotonic,
+                syncscope="agent",
+                alignment=4,
+            )
+
         def _atomic_add_acc_vec8_to_buffer(acc_vec8, addr):
             if const_expr(_bf16_out):
                 h_vec = fx.Vector(arith.trunc_f(T.vec(8, _out_elem_local), acc_vec8))
                 for pair in range_constexpr(4):
                     pair_vec = fx.Vector.from_elements([h_vec[pair * 2], h_vec[pair * 2 + 1]])
-                    byte_off = arith.index_cast(T.i32, addr + arith.index(pair * 4))
-                    rocdl.raw_ptr_buffer_atomic_fadd(pair_vec, c_rsrc, byte_off, zero_i32, zero_i32)
+                    byte_off = addr + arith.index(pair * 4)
+                    _atomic_fadd_global(pair_vec, byte_off)
                 return 1
 
             acc_vec = fx.Vector(acc_vec8)
@@ -1934,8 +1953,8 @@ def compile_mxscale_gemm(
                 base_addr = addr[half] if isinstance(addr, (list, tuple)) else addr
                 for vi in range_constexpr(4):
                     val = acc_vec[half * 4 + vi]
-                    byte_off = arith.index_cast(T.i32, (base_addr + arith.index(vi)) * arith.index(4))
-                    rocdl.raw_ptr_buffer_atomic_fadd(val, c_rsrc, byte_off, zero_i32, zero_i32)
+                    byte_off = (base_addr + arith.index(vi)) * arith.index(4)
+                    _atomic_fadd_global(val, byte_off)
             return 2
 
         def epilogue_atomic_adds(final_accs, addrs):

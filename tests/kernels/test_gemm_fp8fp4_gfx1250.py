@@ -364,6 +364,10 @@ def _run_mxscale_gemm_test(
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
     torch_out_dtype = _dtype_map[out_dtype]
 
+    # Split-K accumulates across workgroups in fp32; half outputs are converted after.
+    kernel_out_dtype = "f32" if (split_k > 1 and out_dtype in ("bf16", "f16")) else out_dtype
+    torch_kernel_dtype = _dtype_map[kernel_out_dtype]
+
     torch.manual_seed(0)
 
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
@@ -421,7 +425,7 @@ def _run_mxscale_gemm_test(
     b_gpu = b.cuda()
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
-    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_out_dtype, device="cuda")
+    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_kernel_dtype, device="cuda")
 
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
@@ -439,7 +443,7 @@ def _run_mxscale_gemm_test(
         cluster_m=cluster_m,
         cluster_n=cluster_n,
         use_tdm_store=use_tdm_store,
-        out_dtype=out_dtype,
+        out_dtype=kernel_out_dtype,
         inst_prefetch=inst_prefetch,
         wave_specialized_tdm=wave_specialized_tdm,
         split_k=split_k,
@@ -469,7 +473,8 @@ def _run_mxscale_gemm_test(
     )
     torch.cuda.synchronize()
 
-    c_out = c_gpu[:M, :N].cpu()
+    # Convert the fp32 split-K accumulation back to the requested half dtype.
+    c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
 
     print(
         f"Out stats: min={c_out.float().min():.2f}, max={c_out.float().max():.2f}, "
@@ -664,6 +669,32 @@ def test_mxfp8_gemm(
         l2_prefetch_distance=2,
         use_scale_opsel=use_scale_opsel,
         scale_load_path=scale_load_path,
+    )
+
+
+@pytest.mark.parametrize("split_k", [2, 4, 6, 8])
+@pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
+def test_mxfp8_gemm_splitk(split_k, out_dtype):
+    """FP8 split-K: split_k workgroups accumulate partial K-sums into C via atomic add.
+
+    Exercises the atomic epilogue path (use_tdm_store=False). K=2048/tile_k=128 gives
+    every split_k value >= 2 local K-tiles (needed for double buffering).
+    """
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        2048,
+        128,
+        256,
+        128,
+        2,
+        4,
+        num_buffers=2,
+        use_tdm_store=False,
+        out_dtype=out_dtype,
+        l2_prefetch_distance=2,
+        split_k=split_k,
     )
 
 
@@ -1181,8 +1212,11 @@ def _run_benchmark(args):
     is_fp4 = data_format == "fp4"
     is_a8w4 = data_format == "a8w4"
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
-    torch_out_dtype = _dtype_map[args.out_dtype]
-    elem_bytes_d = 2 if args.out_dtype in ("bf16", "f16") else 4
+    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
+    # supported but compound rounding error, so we run f32 and convert back on the host.
+    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    torch_kernel_dtype = _dtype_map[kernel_out_dtype]
+    elem_bytes_d = 2 if kernel_out_dtype in ("bf16", "f16") else 4
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
 
     print("=" * 72)
@@ -1225,7 +1259,7 @@ def _run_benchmark(args):
     b_gpu = b.cuda()
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
-    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_out_dtype, device="cuda")
+    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_kernel_dtype, device="cuda")
 
     print("\n[1/3] Compiling kernel...")
     t0 = time.perf_counter()
@@ -1249,7 +1283,7 @@ def _run_benchmark(args):
         cluster_m=args.cluster_m,
         cluster_n=args.cluster_n,
         use_tdm_store=use_tdm_store,
-        out_dtype=args.out_dtype,
+        out_dtype=kernel_out_dtype,
         inst_prefetch=args.inst_prefetch,
         wave_specialized_tdm=args.wave_spec_tdm,
         split_k=args.split_k,
@@ -1412,8 +1446,11 @@ def _run_graph_verify(args):
     b_gpu = b.cuda()
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
-    torch_out_dtype = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}[args.out_dtype]
-    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_out_dtype, device="cuda")
+    _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
+    # supported but compound rounding error, so we run f32 and convert back on the host.
+    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    c_gpu = torch.zeros(padded_m, padded_n, dtype=_dtype_map[kernel_out_dtype], device="cuda")
 
     use_tdm_store = not args.no_tdm_store and args.split_k == 1
     launch_fn = compile_mxscale_gemm(
@@ -1432,7 +1469,7 @@ def _run_graph_verify(args):
         cluster_m=args.cluster_m,
         cluster_n=args.cluster_n,
         use_tdm_store=use_tdm_store,
-        out_dtype=args.out_dtype,
+        out_dtype=kernel_out_dtype,
         inst_prefetch=args.inst_prefetch,
         wave_specialized_tdm=args.wave_spec_tdm,
         split_k=args.split_k,
