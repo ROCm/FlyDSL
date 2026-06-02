@@ -2,7 +2,7 @@
 set -euo pipefail
 
 TEST_CMD=(
-  python tests/kernels/test_flash_opus_attn.py
+  python tests/kernels/test_flash_attn_fwd.py
   --causal
   --compare
   --dtype bf16

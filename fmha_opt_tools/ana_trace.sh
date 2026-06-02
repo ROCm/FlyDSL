@@ -128,12 +128,13 @@ for ((iter = 1; iter <= N; iter++)); do
 echo "=== ana_trace iteration ${iter}/${N} ==="
 echo "=== ana_trace iteration ${iter}/${N} ===" >> "${ANA_LOG}"
 
-# ./scripts/dump_opus_attn_thread_trace.sh ./input_opus_attn_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
-# ./scripts/dump_opus_attn_thread_trace.sh ./input_opus_gqa_d128_thread_trace.yaml ./thread_trace/cpp_opus_b2_s1024.tar.gz
-# ./scripts/dump_opus_attn_thread_trace.sh ./input_hand_asm_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
-./scripts/dump_opus_attn_thread_trace.sh ./input_asm_fmha_thread_trace.yaml ./thread_trace/asm_fmha_b2_s1024.tar.gz
+./fmha_opt_tools/dump_opus_attn_thread_trace.sh ./fmha_opt_tools/tt_dualwave_swp.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
+# ./fmha_opt_tools/dump_opus_attn_thread_trace.sh ./fmha_opt_tools/tt_cpp_opus_gqa_d128.yaml ./thread_trace/cpp_opus_b2_s1024.tar.gz
+# ./fmha_opt_tools/dump_opus_attn_thread_trace.sh ./fmha_opt_tools/tt_hand_asm.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
+# ./fmha_opt_tools/dump_opus_attn_thread_trace.sh ./fmha_opt_tools/tt_fmha_asm.yaml ./thread_trace/fmha_asm_b2_s1024.tar.gz
 
-python3 scripts/trace_segment_cycles.py seg_asm/fyd_cpp_compare.json > temp.log
+
+python3 fmha_opt_tools/trace_segment_cycles.py seg_asm/fyd_cpp_compare.json > temp.log
 append_interval_analysis
 
 done
@@ -142,7 +143,7 @@ print_selected_summary
 
 
 # ./exp_isa/build.sh
-# ./scripts/dump_opus_attn_thread_trace.sh ./input_hand_asm_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
-# python3 scripts/trace_segment_cycles.py --specific-part seg_asm/specific_part.json | tee test3.log
+# ./fmha_opt_tools/dump_opus_attn_thread_trace.sh ./input_hand_asm_thread_trace.yaml ./thread_trace/fyd_opus_b2_s1024.tar.gz
+# python3 fmha_opt_tools/trace_segment_cycles.py --specific-part seg_asm/specific_part.json | tee test3.log
 
 # set +x

@@ -582,7 +582,7 @@ def run_opus_attn_bench(
     return results
 
 
-def run_exp_isa_opus_bench(
+def run_exp_isa_hand_asm_bench(
     batch, seq_len, nheads, head_dim, dtype, causal,
     warmup, iters, seed=DEFAULT_SEED, dtype_str="bf16", verbose=False, num_kv_heads=None,
 ):
@@ -1101,7 +1101,7 @@ def main():
                     #     seed=args.seed, backend="asm",
                     #     num_kv_heads=nh_kv,
                     # )
-                    # asm_r = run_exp_isa_opus_bench(
+                    # asm_r = run_exp_isa_hand_asm_bench(
                     #     batch, seq_len, nh, hd, dtype, causal,
                     #     warmup=args.warmup, iters=args.iters,
                     #     seed=args.seed, dtype_str=dtype_str, verbose=False,
