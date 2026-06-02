@@ -138,8 +138,10 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::mul(IntTupleAttr lhs, IntTupleAttr r
   }
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::div(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  // A basis divisor has no quotient mode (reachable for rank>=3 identity layouts
-  // via complement), so reject it rather than miscompute a stride.
+  // A basis divisor has no quotient mode. This is reachable via complement() of a
+  // basis-strided (identity) layout of rank >= 2: complementImpl computes
+  // div(minStride, lastStride) with both leaves basis. Reject it with a named
+  // assert rather than miscompute a stride.
   assert(lhs.isLeaf() && rhs.isLeafInt() &&
          "div is undefined for a basis divisor; lower the identity layout first");
   if (lhs.isLeafInt()) {
@@ -196,7 +198,7 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::eq(IntTupleAttr lhs, IntTupleAttr rh
     return IntTupleAttr::get(lhs.getLeafAsBasis() == rhs.getLeafAsBasis());
   }
   // A scalar leaf and a basis monomial never coincide.
-  return materializeConstantLeaf(0);
+  return IntTupleAttr::getLeafStatic(ctx, 0);
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::ne(IntTupleAttr lhs, IntTupleAttr rhs) const {
   assert(lhs.isLeaf() && rhs.isLeaf());
@@ -206,7 +208,8 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::ne(IntTupleAttr lhs, IntTupleAttr rh
   if (lhs.isLeafBasis() && rhs.isLeafBasis()) {
     return IntTupleAttr::get(lhs.getLeafAsBasis() != rhs.getLeafAsBasis());
   }
-  return materializeConstantLeaf(1);
+  // A scalar leaf and a basis monomial never coincide.
+  return IntTupleAttr::getLeafStatic(ctx, 1);
 }
 
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::min(IntTupleAttr lhs, IntTupleAttr rhs) const {

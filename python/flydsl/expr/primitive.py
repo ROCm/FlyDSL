@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import operator
 from enum import IntEnum
 from typing import overload
 
@@ -373,6 +374,32 @@ class _BasisElem:
         self.modes = modes
 
 
+_INT32_MIN = -(2**31)
+_INT32_MAX = 2**31 - 1
+
+
+def _as_int32(name, x, *, nonneg=False):
+    """Validate that ``x`` is an int32 (optionally non-negative) and return it as ``int``.
+
+    Catches bad inputs in Python with an actionable error instead of deferring to
+    the nanobind ``int32_t`` cast on the C++ side. Accepts any integer-like value
+    (Python ``int``, NumPy integer scalars, ...) via ``operator.index`` while
+    rejecting ``float``/``str``. ``bool`` is rejected even though it subclasses
+    ``int`` -- ``E(True)`` is never intentional.
+    """
+    if isinstance(x, bool):
+        raise TypeError(f"E {name} must be an int, got bool: {x!r}")
+    try:
+        xi = operator.index(x)
+    except TypeError:
+        raise TypeError(f"E {name} must be an int, got {type(x).__name__}: {x!r}") from None
+    lo = 0 if nonneg else _INT32_MIN
+    if not (lo <= xi <= _INT32_MAX):
+        kind = "a non-negative int32" if nonneg else "an int32"
+        raise ValueError(f"E {name} must be {kind} ({lo}..{_INT32_MAX}), got {xi}")
+    return xi
+
+
 def E(*modes, value=1):
     """Build a scaled-basis stride leaf.
 
@@ -381,10 +408,16 @@ def E(*modes, value=1):
         E(1)            -> 1E1
         E(0, value=2)   -> 2E0
         E(0, 1)         -> 1E0E1   (a single leaf along modes 0 and 1)
+
+    Modes must be non-negative int32 values: the ``!fly.int_tuple`` assembly format
+    cannot round-trip a negative ``E<mode>`` (``1E-1`` fails to re-parse). The
+    coefficient ``value`` may be any int32 (``-2E0`` and ``0E0`` round-trip fine).
     """
     if not modes:
         raise ValueError("E requires at least one mode")
-    return _BasisElem(value, list(modes))
+    value = _as_int32("value", value)
+    modes = [_as_int32("mode", m, nonneg=True) for m in modes]
+    return _BasisElem(value, modes)
 
 
 def make_basis_stride(value, modes):

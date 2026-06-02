@@ -442,14 +442,48 @@ def test_basis_stride_via_E():
         fx.make_stride(fx.E(0, 1, value=2))
 
     def check(ir):
+        # Normalize whitespace so the checks do not depend on the MLIR printer's
+        # exact spacing around commas/colons.
+        compact = "".join(ir.split())
         # fx.E(0), fx.E(1) produce a (1E0, 1E1) stride, identical to make_identity_layout.
-        assert "!fly.layout<(4,8):(1E0,1E1)>" in ir
+        assert "!fly.layout<(4,8):(1E0,1E1)>" in compact
         # make_basis_stride(1, (0, 1)) yields the same flat basis stride.
-        assert "!fly.int_tuple<(1E0,1E1)>" in ir
+        assert "!fly.int_tuple<(1E0,1E1)>" in compact
         # value and multi-mode forms: fx.E(0, 1, value=2) -> 2E0E1.
-        assert "!fly.int_tuple<(2E0E1)>" in ir
+        assert "!fly.int_tuple<(2E0E1)>" in compact
 
     _build_and_verify_ir("basis_stride_via_E", build, check)
+
+
+def test_basis_E_rejects_invalid_modes():
+    """fx.E validates its inputs in Python instead of deferring to the C++ cast.
+
+    Negative modes are the key case: the !fly.int_tuple assembly format cannot
+    round-trip a negative E<mode> (`1E-1` fails to re-parse), so they must be
+    rejected at construction time.
+    """
+    with pytest.raises(ValueError):
+        fx.E()  # at least one mode required
+    with pytest.raises(ValueError):
+        fx.E(-1)  # negative mode is not round-trippable
+    with pytest.raises(ValueError):
+        fx.make_basis_stride(1, (0, -2))  # negative mode via the flat helper
+    with pytest.raises(TypeError):
+        fx.E(0.0)  # non-int mode
+    with pytest.raises(TypeError):
+        fx.E(0, value="x")  # non-int coefficient
+    with pytest.raises(ValueError):
+        fx.E(2**31)  # mode out of int32 range
+
+    # The coefficient may be any int32, including negative/zero (these round-trip).
+    assert fx.E(0, value=-2).value == -2
+    assert fx.E(0, value=0).value == 0
+
+    # Integer-like values (NumPy integer scalars) are accepted and normalized to int.
+    np = pytest.importorskip("numpy")
+    elem = fx.E(np.int32(2), value=np.int64(3))
+    assert elem.modes == [2] and elem.value == 3
+    assert all(isinstance(m, int) for m in elem.modes) and isinstance(elem.value, int)
 
 
 def test_basis_identity_size():
