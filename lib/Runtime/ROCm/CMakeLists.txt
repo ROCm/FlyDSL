@@ -11,7 +11,10 @@ find_package(hip REQUIRED CONFIG PATHS ${_rocm_paths})
 # not a macro, so a C++ #ifdef in the wrapper cannot see it. Probe by trying
 # to compile a TU that references it, then propagate a real macro.
 include(CheckCXXSourceCompiles)
-get_target_property(_HIP_HOST_INCLUDES hip::host INTERFACE_INCLUDE_DIRECTORIES)
+get_target_property(_HIP_HOST_INCLUDES hip::amdhip64 INTERFACE_INCLUDE_DIRECTORIES)
+if(NOT _HIP_HOST_INCLUDES)
+  get_target_property(_HIP_HOST_INCLUDES hip::host INTERFACE_INCLUDE_DIRECTORIES)
+endif()
 set(CMAKE_REQUIRED_INCLUDES ${_HIP_HOST_INCLUDES})
 set(CMAKE_REQUIRED_DEFINITIONS "-D__HIP_PLATFORM_AMD__")
 check_cxx_source_compiles("
