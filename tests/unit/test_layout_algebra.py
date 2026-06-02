@@ -428,6 +428,41 @@ def test_zipped_tiled_flat_product():
 
 
 # ==============================================================================
+# Basis strides (scaled-basis / CuTe E<I>) via fx.E
+# ==============================================================================
+
+
+def test_basis_stride_via_E():
+    """fx.E builds the same basis-strided layout as make_identity_layout."""
+
+    def build():
+        fx.make_layout(fx.make_shape(4, 8), fx.make_stride(fx.E(0), fx.E(1)))
+        fx.make_identity_layout(fx.make_shape(4, 8))
+        fx.make_basis_stride(1, (0, 1))
+        fx.make_stride(fx.E(0, 1, value=2))
+
+    def check(ir):
+        # fx.E(0), fx.E(1) produce a (1E0, 1E1) stride, identical to make_identity_layout.
+        assert "!fly.layout<(4,8):(1E0,1E1)>" in ir
+        # make_basis_stride(1, (0, 1)) yields the same flat basis stride.
+        assert "!fly.int_tuple<(1E0,1E1)>" in ir
+        # value and multi-mode forms: fx.E(0, 1, value=2) -> 2E0E1.
+        assert "!fly.int_tuple<(2E0E1)>" in ir
+
+    _build_and_verify_ir("basis_stride_via_E", build, check)
+
+
+def test_basis_identity_size():
+    """A basis-strided identity layout lowers through the pipeline; size = 4*8 = 32."""
+
+    def build():
+        layout = fx.make_layout(fx.make_shape(4, 8), fx.make_stride(fx.E(0), fx.E(1)))
+        return [fx.size(layout)]
+
+    _build_and_verify("basis_identity_size", build, [32])
+
+
+# ==============================================================================
 # Main
 # ==============================================================================
 

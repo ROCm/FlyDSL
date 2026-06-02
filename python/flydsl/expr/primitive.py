@@ -89,6 +89,8 @@ __all__ = [
     "make_int_tuple",
     "make_shape",
     "make_stride",
+    "E",
+    "make_basis_stride",
     "make_coord",
     "make_layout",
     "make_layout_like",
@@ -354,6 +356,44 @@ def make_stride(*stride, loc=None, ip=None):
     """
     IntTupleTy, dyncElems = _infer_variadic_int_tuple_type(stride, loc=loc, ip=ip)
     return fly.make_stride(IntTupleTy, dyncElems, loc=loc, ip=ip)
+
+
+class _BasisElem:
+    """A scaled-basis stride leaf (CuTe ScaledBasis / E<I>), e.g. ``fx.E(0)`` -> ``1E0``.
+
+    Duck-typed by the C++ int-tuple builder via the ``__fly_basis__`` marker. It is a
+    compile-time-only value (no runtime ``ir.Value`` operand), accepted anywhere a
+    stride entry is, e.g. ``make_stride(E(0), E(1))``.
+    """
+
+    __fly_basis__ = True
+
+    def __init__(self, value, modes):
+        self.value = value
+        self.modes = modes
+
+
+def E(*modes, value=1):
+    """Build a scaled-basis stride leaf.
+
+    Examples:
+        E(0)            -> 1E0
+        E(1)            -> 1E1
+        E(0, value=2)   -> 2E0
+        E(0, 1)         -> 1E0E1   (a single leaf along modes 0 and 1)
+    """
+    if not modes:
+        raise ValueError("E requires at least one mode")
+    return _BasisElem(value, list(modes))
+
+
+def make_basis_stride(value, modes):
+    """Build a flat basis stride, one ``E`` leaf per mode.
+
+    ``make_basis_stride(1, (0, 1))`` -> ``(1E0, 1E1)``, the stride
+    ``make_identity_layout`` emits for that rank.
+    """
+    return make_stride(*[E(m, value=value) for m in modes])
 
 
 @traced_op

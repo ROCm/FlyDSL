@@ -102,6 +102,11 @@ row_major = fx.make_ordered_layout((M, N), order=(1, 0))  # stride order: N-firs
 # Identity layout / tensor
 identity = fx.make_identity_layout((M, N))
 id_tensor = fx.make_identity_tensor((M, N))
+
+# Scaled-basis strides (CuTe E<I>): fx.E(mode, *, value=1)
+#   fx.E(0) -> 1E0, fx.E(0, value=2) -> 2E0, fx.E(0, 1) -> 1E0E1
+basis_layout = fx.make_layout((4, 8), fx.make_stride(fx.E(0), fx.E(1)))  # same as make_identity_layout((4, 8))
+flat_basis = fx.make_basis_stride(1, (0, 1))                             # !fly.int_tuple<(1E0, 1E1)>
 ```
 
 ---

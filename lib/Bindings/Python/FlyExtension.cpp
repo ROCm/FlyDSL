@@ -71,6 +71,14 @@ struct IntTupleAttrBuilder {
       return IntTupleAttr::get(IntAttr::getStatic(ctx, cInt));
     } else if (args.is_none()) {
       return IntTupleAttr::getLeafNone(ctx);
+    } else if (nb::hasattr(args, "__fly_basis__")) {
+      // Scaled-basis stride leaf (e.g. fx.E(0) -> 1E0), duck-typed on __fly_basis__.
+      int32_t value = nb::cast<int32_t>(args.attr("value"));
+      SmallVector<int32_t> modes;
+      for (auto mode : nb::cast<nb::list>(args.attr("modes"))) {
+        modes.push_back(nb::cast<int32_t>(mode));
+      }
+      return IntTupleAttr::get(BasisAttr::get(IntAttr::getStatic(ctx, value), modes));
     } else {
       if (!nb::hasattr(args, "_CAPIPtr")) {
         throw std::invalid_argument("Expected I32, got: " +
