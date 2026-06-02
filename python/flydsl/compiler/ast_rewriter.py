@@ -295,7 +295,7 @@ class Transformer(ast.NodeTransformer):
         return new_stmts
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        if getattr(node, _ASTREWRITE_MARKER, False):
+        if getattr(node, _ASTREWRITE_MARKER, None) == type(self).__name__:
             return node
 
         with self.symbol_scopes.function_scope():
@@ -708,7 +708,7 @@ class ReplaceIfWithDispatch(Transformer):
                 decorator_list=[],
                 type_params=[],
             )
-            setattr(then_func, _ASTREWRITE_MARKER, True)
+            setattr(then_func, _ASTREWRITE_MARKER, type(self).__name__)
             then_func = ast.copy_location(then_func, node)
             then_func = ast.fix_missing_locations(then_func)
 
@@ -750,7 +750,7 @@ class ReplaceIfWithDispatch(Transformer):
                     decorator_list=[],
                     type_params=[],
                 )
-                setattr(else_func, _ASTREWRITE_MARKER, True)
+                setattr(else_func, _ASTREWRITE_MARKER, type(self).__name__)
                 else_func = ast.copy_location(else_func, node)
                 else_func = ast.fix_missing_locations(else_func)
                 dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
@@ -772,7 +772,7 @@ class ReplaceIfWithDispatch(Transformer):
                     decorator_list=[],
                     type_params=[],
                 )
-                setattr(else_func, _ASTREWRITE_MARKER, True)
+                setattr(else_func, _ASTREWRITE_MARKER, type(self).__name__)
                 else_func = ast.copy_location(else_func, node)
                 else_func = ast.fix_missing_locations(else_func)
                 dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
