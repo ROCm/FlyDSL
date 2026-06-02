@@ -28,7 +28,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import memref as memref_ops
-from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import buffer_ops, gpu, range_constexpr
 from flydsl.expr import rocdl as fly_rocdl
@@ -41,7 +40,6 @@ from kernels.kernels_common import get_warp_size
 from kernels.topk_gating_softmax_kernel import (
     _compute_topk_gating_layout,
     _emit_topk_gating_softmax_body,
-    _if_then,
 )
 
 BLOCK_SIZE = 256
@@ -840,12 +838,8 @@ def compile_moe_sorting_oneshot_fused(
         c_sentinel = fx.Int32((topk << 24))
 
         # =================== MOE_BUF ZEROING (blocks > 0 only) ===============
-        # Explicit ``scf.IfOp`` instead of plain ``if`` — the then-body
-        # iterates ``range(_zs, _ze, _z1)`` with SSA values, which trips
-        # the AST rewriter (see ``_if_then`` docstring).
         is_zero_block = bid != c_zero_i32
-        _if_zero = scf.IfOp(is_zero_block.ir_value())
-        with _if_then(_if_zero):
+        if is_zero_block:
             zero_gid_v4 = (bid - c_one_i32) * fx.Int32(BLOCK_SIZE) + tid
             num_zero_blocks = gpu.grid_dim.x - c_one_i32
             zero_stride_v4 = num_zero_blocks * fx.Int32(BLOCK_SIZE)
@@ -863,11 +857,8 @@ def compile_moe_sorting_oneshot_fused(
                 buffer_ops.buffer_store(c_zero_v4, moe_buf_rsrc, z_elem)
 
         # =================== SORTING (block 0 only) ==========================
-        # Explicit ``scf.IfOp`` instead of plain ``if`` — see ``_if_then``
-        # docstring.
         is_sort_block = bid == c_zero_i32
-        _if_sort = scf.IfOp(is_sort_block.ir_value())
-        with _if_then(_if_sort):
+        if is_sort_block:
             # ========== PHASE 1 (mesh CLEAR ONLY in fused kernel) ============
             # Gating's on_winner_idx callback fills `mesh_LDS` directly, so
             # the old "Phase 1 fill" loop is gone. The clear must still

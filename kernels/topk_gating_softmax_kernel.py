@@ -43,30 +43,7 @@ BLOCK_THREADS = WARPS_PER_BLOCK * WARP_SIZE  # 256 on gfx95x
 
 @contextmanager
 def _if_then(if_op):
-    """Context manager for an explicit ``scf.IfOp`` then-region.
-
-    Used by the fused oneshot kernel in ``kernels/moe_sorting_kernel.py``
-    (block-level zero/sort guards) and by ``_emit_topk_gating_softmax_body``
-    below (leader-active guard).
-
-    Why explicit ``scf.IfOp`` instead of a plain Python ``if``:
-    -----------------------------------------------------------
-    The flydsl AST rewriter rewrites ``if cond:`` inside an ``@flyc.kernel``
-    into a synthetic nested function (``__then_N``) that becomes the
-    then-region of a generated ``scf.IfOp``. When the body of that synthetic
-    function contains a ``for _z in range(start, stop, step)`` whose
-    arguments are SSA values (e.g. ``ArithValue.index_cast(T.index)``), the
-    Python builtin ``range`` is invoked directly and raises::
-
-        TypeError: 'ArithValue' object cannot be interpreted as an integer
-
-    Both block-level guards in ``compile_moe_sorting_oneshot_fused``
-    (``is_zero_block`` and ``is_sort_block``) wrap bodies that iterate
-    ``range(..., ArithValue, ...)``, so they cannot be expressed as plain
-    Python ``if``. PR #540 was able to migrate the multiphase prefill
-    kernel away from ``_if_then`` only because that kernel's guarded
-    bodies do not contain SSA-range loops.
-    """
+    """Context manager for an explicit ``scf.IfOp`` then-region."""
     with ir.InsertionPoint(if_op.then_block):
         try:
             yield if_op.then_block
@@ -148,6 +125,7 @@ def _compute_topk_gating_layout(num_experts: int, topk: int, dtype_str: str):
     )
 
 
+@flyc.jit
 def _emit_topk_gating_softmax_body(
     GatingOutput,
     TopkWeights,
@@ -403,11 +381,7 @@ def _emit_topk_gating_softmax_body(
     denom = selected_sum.maximumf(c_eps)
     inv_denom = c_one_f / denom
 
-    # Explicit ``scf.IfOp`` for the leader-active guard — see ``_if_then``
-    # docstring for the AST-rewriter limitation that forces this pattern.
-    leader_active = (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens)
-    _if_leader = scf.IfOp(leader_active.ir_value())
-    with _if_then(_if_leader):
+    if (expert_lane == fx.Int32(0)) & (global_token < i32_num_tokens):
         num_tokens_v = ArithValue(i32_num_tokens)
         for k_idx in range_constexpr(topk):
             w_val = selected_weights[k_idx]
