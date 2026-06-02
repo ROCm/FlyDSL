@@ -152,7 +152,7 @@ __all__ = [
     "zipped_product",
     "tiled_product",
     "flat_product",
-    "block_product",
+    "blocked_product",
     "raked_product",
     "recast_layout",
     "tile_to_shape",
@@ -918,8 +918,8 @@ def flat_product(layout, tiler, loc=None, ip=None):
 
 
 @traced_op
-def block_product(layout, tiler, loc=None, ip=None):
-    return fly.block_product(layout, tiler, loc=loc, ip=ip)
+def blocked_product(layout, tiler, loc=None, ip=None):
+    return fly.blocked_product(layout, tiler, loc=loc, ip=ip)
 
 
 @traced_op

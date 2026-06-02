@@ -145,7 +145,7 @@ Products combine two layouts to create higher-rank layouts. They differ in how t
 | **Tiled Product** | Like logical, but group by tile | `fx.tiled_product(A, B)` |
 | **Flat Product** | Flatten all result modes | `fx.flat_product(A, B)` |
 | **Raked Product** | Interleave A and B elements (raked distribution) | `fx.raked_product(A, B)` |
-| **Blocked Product** | Block A elements together, then B (blocked distribution) | `fx.block_product(A, B)` |
+| **Blocked Product** | Block A elements together, then B (blocked distribution) | `fx.blocked_product(A, B)` |
 
 > **Reference:** `include/cute/layout.hpp` — `logical_product()`, `zipped_product()`, `tiled_product()`, `flat_product()`, `raked_product()`, `blocked_product()`.
 

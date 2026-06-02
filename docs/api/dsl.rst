@@ -62,7 +62,7 @@ Layout Products & Divides
 - **fx.logical_product(a, b)** -- layout product
 - **fx.zipped_product**, **fx.tiled_product**, **fx.flat_product** -- product variants
 - **fx.raked_product(thr_layout, val_layout)** -- interleaved (raked) product
-- **fx.block_product(a, b)** -- blocked product
+- **fx.blocked_product(a, b)** -- blocked product
 
 Coordinate Mapping
 ~~~~~~~~~~~~~~~~~~~
