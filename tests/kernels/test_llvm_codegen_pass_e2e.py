@@ -88,6 +88,64 @@ char FlyInsertNopPass::ID = 0;
 static RegisterPass<FlyInsertNopPass> X("fly-insert-nop", "Fly insert NOP", false, false);
 """
 
+# A MIR pass that *schedules* (reorders) instructions: within each block it swaps
+# adjacent instructions whenever that is provably safe — neither has memory/side
+# effects and no def of one overlaps any register operand (def or use, explicit
+# or implicit) of the other.  Semantics are preserved (results stay correct) but
+# the emitted instruction order changes.
+PLUGIN_SRC_REORDER = r"""
+#include "llvm/CodeGen/MachineBasicBlock.h"
+#include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/MachineFunctionPass.h"
+#include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/Pass.h"
+using namespace llvm;
+namespace {
+static bool unsafe(const MachineInstr &MI) {
+  return MI.mayLoadOrStore() || MI.hasUnmodeledSideEffects() || MI.isCall() ||
+         MI.isTerminator() || MI.isBranch() || MI.isInlineAsm() || MI.isMetaInstruction();
+}
+static bool canSwap(const MachineInstr &A, const MachineInstr &B, const TargetRegisterInfo *TRI) {
+  if (unsafe(A) || unsafe(B)) return false;
+  auto defConflicts = [&](const MachineInstr &X, const MachineInstr &Y) {
+    for (const MachineOperand &dx : X.operands()) {
+      if (!dx.isReg() || !dx.getReg() || !dx.isDef()) continue;
+      for (const MachineOperand &oy : Y.operands())
+        if (oy.isReg() && oy.getReg() && TRI->regsOverlap(dx.getReg(), oy.getReg())) return true;
+    }
+    return false;
+  };
+  return !defConflicts(A, B) && !defConflicts(B, A);
+}
+struct FlyReorderPass : public MachineFunctionPass {
+  static char ID;
+  FlyReorderPass() : MachineFunctionPass(ID) {}
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+    bool changed = false;
+    for (MachineBasicBlock &MBB : MF) {
+      for (auto it = MBB.begin(); it != MBB.end();) {
+        auto nxt = std::next(it);
+        if (nxt != MBB.end() && canSwap(*it, *nxt, TRI)) {
+          MBB.splice(it, &MBB, nxt); // move B before A
+          changed = true;
+          it = std::next(it);        // it still == A; skip past the swapped pair
+        } else {
+          ++it;
+        }
+      }
+    }
+    return changed;
+  }
+  StringRef getPassName() const override { return "Fly reorder MIR pass"; }
+};
+char FlyReorderPass::ID = 0;
+} // namespace
+static RegisterPass<FlyReorderPass> X("fly-reorder", "Fly reorder", false, false);
+"""
+
 
 def _gpu_available() -> bool:
     try:
@@ -145,6 +203,12 @@ def mir_pass_plugin(tmp_path_factory) -> str:
 def nop_pass_plugin(tmp_path_factory) -> str:
     """Compile the s_nop-inserting MIR pass plugin (modifies the machine code)."""
     return _build_codegen_plugin(tmp_path_factory, src=PLUGIN_SRC_NOP, name="FlyNop")
+
+
+@pytest.fixture(scope="module")
+def reorder_pass_plugin(tmp_path_factory) -> str:
+    """Compile the instruction-reordering (scheduling) MIR pass plugin."""
+    return _build_codegen_plugin(tmp_path_factory, src=PLUGIN_SRC_REORDER, name="FlyReorder")
 
 
 @flyc.kernel
@@ -290,6 +354,37 @@ def _extract_gpu_binary(dump_dir: Path) -> bytes:
     raise AssertionError(f"no gpu.binary found under {dump_dir}")
 
 
+def _jit_run_add(add, dump: Path, monkeypatch) -> None:
+    """Compile+run the add kernel into *dump*, asserting the result is correct."""
+    monkeypatch.setenv("FLYDSL_DUMP_DIR", str(dump))
+    n = 64
+    A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+    B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
+    C = torch.zeros(n, dtype=torch.float32).cuda()
+    tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
+    add(tA, B, C, n, stream=torch.cuda.Stream())
+    torch.cuda.synchronize()
+    assert torch.allclose(C, A + B)  # the codegen pass must preserve correctness
+
+
+def _kernel_instr_seq(disasm: str) -> list:
+    """Ordered list of disassembled instructions (mnemonic + operands, with the
+    trailing ``// addr: encoding`` comment stripped) across all functions."""
+    import re
+
+    seq = []
+    in_func = False
+    for ln in disasm.splitlines():
+        if re.match(r"^[0-9a-fA-F]+ <.+>:", ln):
+            in_func = True
+            continue
+        if in_func and "\t" in ln:
+            ins = ln.split("//")[0].strip()
+            if ins and not ins.startswith("."):
+                seq.append(ins)
+    return seq
+
+
 @pytest.mark.skipif(not _gpu_available(), reason="requires a ROCm GPU")
 def test_codegen_pass_modifies_asm(nop_pass_plugin, monkeypatch, tmp_path):
     """A codegen pass can change the emitted ASM.  Compile the same kernel through
@@ -306,21 +401,11 @@ def test_codegen_pass_modifies_asm(nop_pass_plugin, monkeypatch, tmp_path):
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
     monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
 
-    def _run(add, dump: Path):
-        monkeypatch.setenv("FLYDSL_DUMP_DIR", str(dump))
-        n = 64
-        A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-        B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-        C = torch.zeros(n, dtype=torch.float32).cuda()
-        tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
-        add(tA, B, C, n, stream=torch.cuda.Stream())
-        torch.cuda.synchronize()
-        assert torch.allclose(C, A + B)  # s_nop is harmless: result still correct
-
     mod_dump = tmp_path / "mod"
     base_dump = tmp_path / "base"
-    _run(_make_add_jit(llvm_codegen_passes=["fly-insert-nop"], llvm_codegen_plugins=[nop_pass_plugin]), mod_dump)
-    _run(_make_add_jit(), base_dump)  # baseline: same kernel, no codegen pass
+    add_mod = _make_add_jit(llvm_codegen_passes=["fly-insert-nop"], llvm_codegen_plugins=[nop_pass_plugin])
+    _jit_run_add(add_mod, mod_dump, monkeypatch)
+    _jit_run_add(_make_add_jit(), base_dump, monkeypatch)  # baseline: no codegen pass
 
     mod_hsaco = next(mod_dump.rglob("fly_llc.hsaco"), None)
     assert mod_hsaco is not None, "fly-llc HSACO dump not found"
@@ -334,3 +419,39 @@ def test_codegen_pass_modifies_asm(nop_pass_plugin, monkeypatch, tmp_path):
     mod_run = _max_entry_nop_run(_disasm(objdump, mcpu, mod_hsaco))
 
     assert mod_run > base_run, f"codegen pass did not modify the ASM: entry s_nop run base={base_run} mod={mod_run}"
+
+
+@pytest.mark.skipif(not _gpu_available(), reason="requires a ROCm GPU")
+def test_codegen_pass_reorders_instructions(reorder_pass_plugin, mir_pass_plugin, monkeypatch, tmp_path):
+    """A custom codegen *scheduling* pass can reorder instructions.  Both sides go
+    through the same fly-llc codegen driver (the baseline uses the no-op print
+    pass, so the *only* difference is the reordering — not regalloc/ISel that would
+    differ across codegen drivers).  The reorder run must (a) keep results correct,
+    (b) emit the *same multiset* of instructions (pure reorder), yet (c) in a
+    *different order*."""
+    objdump = _resolve_tool("FLYDSL_COMPILE_LLVM_OBJDUMP", "llvm-objdump")
+    if objdump is None:
+        pytest.skip("llvm-objdump not found; set FLYDSL_COMPILE_LLVM_OBJDUMP or place it in <llvm_dir>/bin")
+
+    from flydsl.compiler.backends.rocm import RocmBackend
+
+    mcpu = RocmBackend.detect_target().arch
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
+
+    mod_dump = tmp_path / "mod"
+    base_dump = tmp_path / "base"
+    add_mod = _make_add_jit(llvm_codegen_passes=["fly-reorder"], llvm_codegen_plugins=[reorder_pass_plugin])
+    add_base = _make_add_jit(llvm_codegen_passes=["fly-mir-pass"], llvm_codegen_plugins=[mir_pass_plugin])
+    _jit_run_add(add_mod, mod_dump, monkeypatch)  # correctness preserved under reordering
+    _jit_run_add(add_base, base_dump, monkeypatch)  # same fly-llc driver, no-op pass
+
+    mod_hsaco = next(mod_dump.rglob("fly_llc.hsaco"), None)
+    base_hsaco = next(base_dump.rglob("fly_llc.hsaco"), None)
+    assert mod_hsaco is not None and base_hsaco is not None, "fly-llc HSACO dump not found"
+
+    base_seq = _kernel_instr_seq(_disasm(objdump, mcpu, base_hsaco))
+    mod_seq = _kernel_instr_seq(_disasm(objdump, mcpu, mod_hsaco))
+    assert base_seq and mod_seq, "no instructions disassembled"
+    assert sorted(base_seq) == sorted(mod_seq), "reorder must not add or remove instructions"
+    assert base_seq != mod_seq, "scheduling pass did not change instruction order"
