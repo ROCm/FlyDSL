@@ -111,7 +111,7 @@ pip install pytest pandas
 pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
 
 # Run GEMM correctness tests (fast, ~15s)
-bash scripts/run_tests.sh
+python -m pytest tests/kernels/test_preshuffle_gemm.py -m "not large_shape"
 
 # Run performance benchmarks
 bash scripts/run_benchmark.sh
