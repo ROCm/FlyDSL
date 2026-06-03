@@ -31,16 +31,14 @@ def quant_paged_cache_pertoken(cache, block_size):
     scale_bytes_view = scale.permute(0, 2, 1).contiguous().view(DTYPE_FP8)
     if padded_bytes > scale_bytes:
         pad = torch.zeros(
-            num_blocks, num_head_kv, padded_bytes - scale_bytes,
-            dtype=DTYPE_FP8, device=cache.device,
+            num_blocks,
+            num_head_kv,
+            padded_bytes - scale_bytes,
+            dtype=DTYPE_FP8,
+            device=cache.device,
         )
         scale_bytes_view = torch.cat([scale_bytes_view, pad], dim=-1).contiguous()
-    scale = (
-        scale_bytes_view
-        .reshape(num_blocks, num_head_kv, scale_rows, head_dim)
-        .permute(0, 2, 1, 3)
-        .contiguous()
-    )
+    scale = scale_bytes_view.reshape(num_blocks, num_head_kv, scale_rows, head_dim).permute(0, 2, 1, 3).contiguous()
 
     cache_fp8[:, block_size:, :, :] = scale
 
@@ -118,7 +116,7 @@ def naive_attn_with_paged_kvcache_pscale_func(
         )
         BKS = (
             _combined[:, :block_size, :]
-            .reshape(-1, num_head_kv)        # (nblocks_local * block_size, H)
+            .reshape(-1, num_head_kv)  # (nblocks_local * block_size, H)
             .transpose(0, 1)[:, :seqlen]
             .repeat_interleave(head_per_group, dim=0)
         ).float()
@@ -181,8 +179,13 @@ def _flydsl_build_inputs_for_pscale(
     num_head_q,
     head_dim,
     device,
+    kv_varlen=True,
 ):
     """Build inputs in FlyDSL's expected layout + an equivalent naive view.
+
+    ``kv_varlen``: when True, each batch gets a DIFFERENT (random) context length
+    in ``[block_size, context_length]`` (``context_length`` is the max); when
+    False, all batches use the same ``context_length`` (uniform).
 
     Returns:
         flydsl_inputs (dict for pa_decode_ps_launch),
@@ -196,14 +199,31 @@ def _flydsl_build_inputs_for_pscale(
     query_bf16 = torch.randn(total_queries, num_head_q, head_dim, dtype=torch.bfloat16, device=device) * 0.3
     QS_naive = torch.ones((total_queries, num_head_q), dtype=torch.float32, device=device)
 
-    context_lengths = torch.tensor([context_length] * num_batch, dtype=torch.int32, device=device)
-    blocks_per_seq = (context_length + block_size - 1) // block_size
-    max_blocks_per_seq = max(blocks_per_seq, (16384 + block_size - 1) // block_size)
+    # Context lengths: per-batch DIFFERENT (variable) when kv_varlen, else uniform.
+    # When variable, each is in [block_size, context_length] (context_length = max),
+    # exercising partial last partitions / varlen.
+    if kv_varlen:
+        _ctx_rng = _random.Random(1234)
+        _min_ctx = max(block_size, num_seq_q + 1)
+        context_lengths_list = [_ctx_rng.randint(_min_ctx, context_length) for _ in range(num_batch)]
+    else:
+        context_lengths_list = [context_length] * num_batch
+    context_lengths = torch.tensor(context_lengths_list, dtype=torch.int32, device=device)
+    blocks_per_seq_list = [(c + block_size - 1) // block_size for c in context_lengths_list]
+    max_blocks_per_seq = max(max(blocks_per_seq_list), (16384 + block_size - 1) // block_size)
     total_blocks = max_blocks_per_seq * num_batch
+    # Per-batch block tables of each sequence's own length (flat-packed by the
+    # consumers via build_ps_page); the 2D `block_tables` is padded to a
+    # rectangular [num_batch, max_blocks_per_seq] for the small-block kernel.
     block_tables_list = [
-        [_random.randint(0, total_blocks - 1) for _ in range(blocks_per_seq)] for _ in range(num_batch)
+        [_random.randint(0, total_blocks - 1) for _ in range(blocks_per_seq_list[b])] for b in range(num_batch)
     ]
-    block_tables = torch.tensor(block_tables_list, dtype=torch.int32, device=device)
+    block_tables = torch.zeros((num_batch, max_blocks_per_seq), dtype=torch.int32, device=device)
+    for _b in range(num_batch):
+        if blocks_per_seq_list[_b] > 0:
+            block_tables[_b, : blocks_per_seq_list[_b]] = torch.tensor(
+                block_tables_list[_b], dtype=torch.int32, device=device
+            )
 
     # Match test_pa_decode_gluon2.py: build paged BF16 KV, then quantize K
     # per-token and V per-head with the packed K-scale tail rows.
@@ -271,15 +291,15 @@ def _flydsl_build_inputs_for_pscale(
         "block_tables_list": block_tables_list,
         "key_scale": KS_flydsl,
         "value_scale": VS_flydsl,
-        "blocks_per_seq": blocks_per_seq,
+        "blocks_per_seq": blocks_per_seq_list,
     }, {
         "Q_bf16": query_bf16,
         "kvcache": naive_kvcache,
         "block_ids": block_tables,
-        "nblocks": torch.tensor([blocks_per_seq] * num_batch, dtype=torch.int32, device=device),
+        "nblocks": torch.tensor(blocks_per_seq_list, dtype=torch.int32, device=device),
         "seqlenq": torch.tensor([num_seq_q] * num_batch, dtype=torch.int32, device=device),
         "num_seq_kvcache": torch.tensor(
-            [context_length - num_seq_q] * num_batch,
+            [c - num_seq_q for c in context_lengths_list],
             dtype=torch.int32,
             device=device,
         ),
@@ -337,6 +357,7 @@ def _flydsl_pscale_test_case(
         num_head_q,
         head_dim,
         device,
+        kv_varlen=os.environ.get("KV_VARLEN", "1") == "1",
     )
 
     # p_scale: per-q-head
@@ -419,8 +440,8 @@ def _flydsl_pscale_test_case(
         temporary_output=tmp_out,
         p_scale=p_scale,
         p_scale_inv=p_scale_inv,
-        v_scale_per_head=True,    # VS is per-kv-head (num_kv_heads,) fp32
-        k_scale_per_token=True,   # KS is per-token (num_blocks, num_kv_heads, block_size) fp32
+        v_scale_per_head=True,  # VS is per-kv-head (num_kv_heads,) fp32
+        k_scale_per_token=True,  # KS is per-token (num_blocks, num_kv_heads, block_size) fp32
     )
 
     # Compare
@@ -504,11 +525,18 @@ def _flydsl_pscale_bench(
     device = torch.device("cuda:0")
     torch.set_default_device(device)
     flydsl_inp, _ = _flydsl_build_inputs_for_pscale(
-        num_batch, num_seq_q, context_length, block_size,
-        num_head_kv, num_head_q, head_dim, device,
+        num_batch,
+        num_seq_q,
+        context_length,
+        block_size,
+        num_head_kv,
+        num_head_q,
+        head_dim,
+        device,
+        kv_varlen=os.environ.get("KV_VARLEN", "1") == "1",
     )
     p_scale, p_scale_inv = _make_pscale(p_scale_mode, num_head_q, device="cuda")
-    softmax_scale = 1.0 / (head_dim ** 0.5)
+    softmax_scale = 1.0 / (head_dim**0.5)
 
     def _build_ps_page(blocks_list, ctx_lens, bs, dev):
         actual = (ctx_lens + bs - 1) // bs
@@ -520,9 +548,11 @@ def _flydsl_pscale_bench(
         return torch.tensor(flat, dtype=torch.int32, device=dev), kv_indptr
 
     kv_page_indices, kv_indptr = _build_ps_page(
-        flydsl_inp["block_tables_list"], flydsl_inp["context_lengths"], block_size, device,
+        flydsl_inp["block_tables_list"],
+        flydsl_inp["context_lengths"],
+        block_size,
+        device,
     )
-
 
     eqgs = num_seq_q * (num_head_q // num_head_kv)
     context_partition_size = 256
@@ -534,21 +564,36 @@ def _flydsl_pscale_bench(
     max_logits = torch.full(inter_shape, float("-inf"), dtype=torch.float32, device=device)
     tmp_out = torch.empty(*inter_shape, head_dim, dtype=torch.bfloat16, device=device)
     output_flydsl = torch.empty(
-        num_batch * num_seq_q, num_head_q, head_dim,
-        dtype=torch.bfloat16, device=device,
+        num_batch * num_seq_q,
+        num_head_q,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
     )
 
     def _run_flydsl():
         pa_decode_ps_launch(
             output_flydsl,
-            flydsl_inp["query_bf16"], flydsl_inp["key_cache_fp8"], flydsl_inp["value_cache_trans"],
-            flydsl_inp["context_lengths"], kv_page_indices, kv_indptr, softmax_scale,
-            key_scale=flydsl_inp["key_scale"], value_scale=flydsl_inp["value_scale"],
-            sliding_window=0, metadata=None,
-            block_tables=flydsl_inp["block_tables"], max_context_partition_num=max_part,
-            exp_sums=exp_sums, max_logits=max_logits, temporary_output=tmp_out,
-            p_scale=p_scale, p_scale_inv=p_scale_inv,
-            v_scale_per_head=True, k_scale_per_token=True,
+            flydsl_inp["query_bf16"],
+            flydsl_inp["key_cache_fp8"],
+            flydsl_inp["value_cache_trans"],
+            flydsl_inp["context_lengths"],
+            kv_page_indices,
+            kv_indptr,
+            softmax_scale,
+            key_scale=flydsl_inp["key_scale"],
+            value_scale=flydsl_inp["value_scale"],
+            sliding_window=0,
+            metadata=None,
+            block_tables=flydsl_inp["block_tables"],
+            max_context_partition_num=max_part,
+            exp_sums=exp_sums,
+            max_logits=max_logits,
+            temporary_output=tmp_out,
+            p_scale=p_scale,
+            p_scale_inv=p_scale_inv,
+            v_scale_per_head=True,
+            k_scale_per_token=True,
         )
 
     # Warm JIT + first launch outside the timed region.
@@ -560,6 +605,7 @@ def _flydsl_pscale_bench(
     if compare_gluon:
         try:
             from aiter.ops.triton.gluon.pa_decode_gluon import pa_decode_gluon
+
             out_gluon = torch.empty_like(output_flydsl)
             exp_sums_g = torch.empty(inter_shape, dtype=torch.float32, device=device)
             max_logits_g = torch.full(inter_shape, float("-inf"), dtype=torch.float32, device=device)
@@ -569,28 +615,36 @@ def _flydsl_pscale_bench(
             _ks_view = flydsl_inp["key_scale"]
             _B, _sr, _H, _H4 = _ks_view.shape
             ks_gluon = (
-                _ks_view.permute(0, 2, 1, 3).contiguous()
+                _ks_view.permute(0, 2, 1, 3)
+                .contiguous()
                 .reshape(_B, _H, _sr * _H4)[:, :, :block_size]
-                .unsqueeze(-1).contiguous()
+                .unsqueeze(-1)
+                .contiguous()
             )
             # gluon wants per-token V scale of the same `[B, H, bs, 1]` shape.
             # Our v_scale is per-kv-head `(H,)`; broadcast to per-token.
             _vs_per_head = flydsl_inp["value_scale"]
-            vs_gluon = (
-                _vs_per_head.view(1, _H, 1, 1)
-                .expand(_B, _H, block_size, 1).contiguous()
-            )
+            vs_gluon = _vs_per_head.view(1, _H, 1, 1).expand(_B, _H, block_size, 1).contiguous()
 
             def _run_gluon():
                 pa_decode_gluon(
                     out_gluon,
-                    flydsl_inp["query_bf16"], flydsl_inp["key_cache_fp8"], flydsl_inp["value_cache_trans"],
-                    flydsl_inp["context_lengths"], flydsl_inp["block_tables"], softmax_scale,
-                    query_length=num_seq_q, max_context_partition_num=max_part,
+                    flydsl_inp["query_bf16"],
+                    flydsl_inp["key_cache_fp8"],
+                    flydsl_inp["value_cache_trans"],
+                    flydsl_inp["context_lengths"],
+                    flydsl_inp["block_tables"],
+                    softmax_scale,
+                    query_length=num_seq_q,
+                    max_context_partition_num=max_part,
                     context_partition_size=context_partition_size,
-                    key_scale=ks_gluon, value_scale=vs_gluon,
-                    exp_sums=exp_sums_g, max_logits=max_logits_g, temporary_output=tmp_out_g,
-                    sliding_window=0, ps=True,
+                    key_scale=ks_gluon,
+                    value_scale=vs_gluon,
+                    exp_sums=exp_sums_g,
+                    max_logits=max_logits_g,
+                    temporary_output=tmp_out_g,
+                    sliding_window=0,
+                    ps=True,
                 )
 
             _run_gluon()
@@ -604,9 +658,7 @@ def _flydsl_pscale_bench(
         f"b={num_batch} sq={num_seq_q} ctx={context_length} bs={block_size} "
         f"H_kv={num_head_kv} H_q={num_head_q} hd={head_dim}"
     )
-    gluon_str = (
-        f"  gluon={us_gluon:7.2f}us  speedup={speedup:.2f}x" if us_gluon is not None else ""
-    )
+    gluon_str = f"  gluon={us_gluon:7.2f}us  speedup={speedup:.2f}x" if us_gluon is not None else ""
     print(f"  [perf] {cfg_str:<60} flydsl={us_flydsl:7.2f}us{gluon_str}")
 
     return {"flydsl_us": us_flydsl, "gluon_us": us_gluon, "speedup": speedup}
@@ -614,15 +666,11 @@ def _flydsl_pscale_bench(
 
 def run_flydsl_pscale_perf():
     """Run a sweep of perf configs covering small/large batch and context."""
-    _kv_lens = [1024, 16384, 32768, 65536, 131072]
-    _seq_counts = [2, 4, 8, 16, 32, 64, 128, 256]
+    _kv_lens = [131072]
+    _seq_counts = [256]
     _base = dict(num_seq_q=2, block_size=16, num_head_kv=1, num_head_q=8, head_dim=128)
-    configs = [
-        dict(num_batch=ns, context_length=kv, **_base)
-        for kv in _kv_lens
-        for ns in _seq_counts
-    ]
-    p_scale_mode="none"
+    configs = [dict(num_batch=ns, context_length=kv, **_base) for kv in _kv_lens for ns in _seq_counts]
+    p_scale_mode = "none"
     print(f"\n=== FlyDSL pa_decode_ps_kernel performance (p_scale_mode={p_scale_mode}) ===")
     results = []
     for cfg in configs:
@@ -639,8 +687,8 @@ def run_flydsl_pscale_smoke():
     # `_safe_partition_start` clamp in pa_decode_fp8.py now keeps the
     # prologue's reads in-bounds for empty slots.
     configs = [
-        dict(num_batch=4, num_seq_q=1, context_length=1024, block_size=16, num_head_kv=2, num_head_q=8, head_dim=128),
-        dict(num_batch=8, num_seq_q=1, context_length=8192, block_size=16, num_head_kv=2, num_head_q=8, head_dim=128),
+        dict(num_batch=128, num_seq_q=2, context_length=128, block_size=16, num_head_kv=2, num_head_q=8, head_dim=128),
+        # dict(num_batch=8, num_seq_q=1, context_length=8192, block_size=16, num_head_kv=2, num_head_q=8, head_dim=128),
     ]
     modes = ["none", "all_ones", "all_2", "per_head_random"]
     all_ok = True
