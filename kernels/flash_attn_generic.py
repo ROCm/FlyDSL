@@ -111,16 +111,16 @@ def build_flash_attn_func_module_primary(
     K_SUB_N = 32
     WARP_SIZE = 64
 
-    # ── DUALWAVE_SWP fast path (gfx950 D=128 bf16) ──
+    # ── DUALWAVE_SWP fast path (gfx950 D=128 bf16/f16) ──
     # Built when:
     #   * outermost call (block_m is None)
-    #   * head_dim == 128, dtype == bf16, gpu_arch startswith "gfx950"
+    #   * head_dim == 128, dtype in (bf16, f16), gpu_arch startswith "gfx950"
     # Runtime dispatch additionally requires seq_len >= 384 and seq_len % 256 == 0.
     _dualwave_swp_launch = None
     if (
         block_m is None
         and head_dim == 128
-        and dtype_str == "bf16"
+        and dtype_str in ("bf16", "f16")
         and gpu_arch.startswith("gfx950")
     ):
         try:

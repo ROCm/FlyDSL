@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Dual-wave, software-pipelined flash-attention kernel for gfx950 (D=128, bf16).
+"""Dual-wave, software-pipelined flash-attention kernel for gfx950 (D=128, bf16/fp16).
 
 This is the gfx950 fast path of FlyDSL flash attention. It computes the SAME
 math as the generic ``flash_attn_generic.py`` BLOCK_M=256 path -- and reuses its
@@ -10,12 +10,12 @@ compiler-driven schedule with a hand-built software pipeline plus a two
 wave-group time-multiplexing scheme.
 
 Dispatched (from ``flash_attn_generic.py``) only when:
-    gpu_arch >= gfx950, head_dim == 128, dtype == bf16,
+    gpu_arch >= gfx950, head_dim == 128, dtype in (bf16, fp16),
     and (at runtime) seq_len % 256 == 0, seq_len >= 384.
 
 Tile / occupancy:
     BLOCK_M = 256 (8 waves x 32 rows), BLOCK_N = 64, head_dim = 128,
-    waves_per_eu = 2. MFMA is ``mfma_f32_32x32x16_bf16`` (K=16, CDNA4).
+    waves_per_eu = 2. MFMA is ``mfma_f32_32x32x16_{bf16,f16}`` (K=16, CDNA4).
     GEMM1 = K @ Q^T (scores land directly in MFMA32 register layout); the
     softmax is online over the KV dimension in registers; GEMM2 = V^T @ P.
     Supports causal / non-causal and MHA / GQA (num_kv_heads <= num_heads).
@@ -158,7 +158,7 @@ def build_flash_attn_dualwave_swp_module(
     dualwave_swp_debug_lazy_counts=False,
     dualwave_swp_enable_stagger=True,
 ):
-    """Build an DUALWAVE_SWP flash_attn launcher for D=128 bf16 on gfx950.
+    """Build an DUALWAVE_SWP flash_attn launcher for D=128 bf16/f16 on gfx950.
 
     Launcher signature: ``launcher(Q, K, V, O, batch_size, seq_len, stride_kv_n=None, stride_q_n=None, head_dim_runtime=None, *, stream=None)``
     """
@@ -170,8 +170,10 @@ def build_flash_attn_dualwave_swp_module(
         )
     if head_dim != 128:
         raise RuntimeError(f"flash_attn_dualwave_swp is D=128 only, got head_dim={head_dim}")
-    if dtype_str != "bf16":
-        raise RuntimeError(f"flash_attn_dualwave_swp is bf16 only, got dtype={dtype_str}")
+    if dtype_str not in ("bf16", "f16"):
+        raise RuntimeError(
+            f"flash_attn_dualwave_swp supports bf16/f16 only, got dtype={dtype_str}"
+        )
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
@@ -479,7 +481,9 @@ def build_flash_attn_dualwave_swp_module(
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
         def _mfma_acc(a, b, c):
-            return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
+            if const_expr(dtype_str == "bf16"):
+                return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
+            return _mfma(rocdl.mfma_f32_32x32x16_f16, a, b, c)
 
         def _sched_barrier_pairs(pairs, valu_cnt, group):
             """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups.
@@ -745,12 +749,18 @@ def build_flash_attn_dualwave_swp_module(
             )
 
         def _bf16_trunc_pack_v8(f32_vals):
-            pairs = []
-            for j in range_constexpr(4):
-                pairs.append(
-                    rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1])
-                )
-            return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
+            if const_expr(dtype_str == "bf16"):
+                pairs = []
+                for j in range_constexpr(4):
+                    pairs.append(
+                        rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1])
+                    )
+                return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
+            # fp16: truncate each f32 -> f16 (RNE) and build the v8 pack directly.
+            f16_vals = []
+            for i in range_constexpr(8):
+                f16_vals.append(fx.Float32(f32_vals[i]).to(elem_dtype))
+            return Vec.from_elements(f16_vals, elem_dtype).ir_value()
 
         def _k_buf_base(buf_id):
             if const_expr(isinstance(buf_id, int)):
@@ -1939,8 +1949,8 @@ def build_flash_attn_dualwave_swp_module(
         # Store O back to global memory (bounds-guarded for the ragged last
         # Q block). Only rows within seq_len are written. The output is laid
         # out as D_CHUNKS column banks; for each bank, 4 store groups each pack
-        # 4 f32 accumulators into 2 bf16 dwords (v_cvt_pk_bf16_f32 -> lo/hi),
-        # forming one 8-byte (dwordx2) write. d_row_rel/d_col map the lane's
+        # 4 f32 accumulators into 2 16-bit dwords (bf16: v_cvt_pk_bf16_f32;
+        # fp16: f32->f16 trunc), forming one 8-byte (dwordx2) write. d_row_rel/d_col map the lane's
         # MFMA output lane to its (row, head_dim column) destination, which
         # _global_idx_q converts to a linear element index, then to a byte
         # offset for the raw buffer store into O.
@@ -1949,16 +1959,25 @@ def build_flash_attn_dualwave_swp_module(
             for dc in range_constexpr(D_CHUNKS):
                 for store_group in range_constexpr(4):
                     r_base = store_group * 4
-                    # Pack 4 f32 outputs -> 2 packed-bf16 dwords (lo, hi).
-                    lo = rocdl.cvt_pk_bf16_f32(
-                        Vec(v_o[dc])[r_base],
-                        Vec(v_o[dc])[r_base + 1],
-                    )
-                    hi = rocdl.cvt_pk_bf16_f32(
-                        Vec(v_o[dc])[r_base + 2],
-                        Vec(v_o[dc])[r_base + 3],
-                    )
-                    o_pack = Vec.from_elements([lo, hi], fx.Int32).ir_value()
+                    # Pack 4 f32 outputs -> 2 packed-16bit dwords (lo, hi).
+                    if const_expr(dtype_str == "bf16"):
+                        lo = rocdl.cvt_pk_bf16_f32(
+                            Vec(v_o[dc])[r_base],
+                            Vec(v_o[dc])[r_base + 1],
+                        )
+                        hi = rocdl.cvt_pk_bf16_f32(
+                            Vec(v_o[dc])[r_base + 2],
+                            Vec(v_o[dc])[r_base + 3],
+                        )
+                        o_pack = Vec.from_elements([lo, hi], fx.Int32).ir_value()
+                    else:
+                        # fp16: trunc 4 f32 -> 4 f16 (RNE), view as 2 dwords.
+                        o_f16 = []
+                        for i in range_constexpr(4):
+                            o_f16.append(fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype))
+                        o_pack = (
+                            Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32).ir_value()
+                        )
                     # Map this lane's MFMA output to (row, head_dim col).
                     d_row_rel = lane_div_32 * 4 + store_group * 8
                     d_col = fx.Index(dc * D_CHUNK) + d_row_rel
