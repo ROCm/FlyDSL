@@ -10,8 +10,13 @@ import argparse
 import csv
 import hashlib
 import importlib
+import json
 import math
 import random
+import shutil
+import tarfile
+import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 import logging
 
@@ -86,6 +91,114 @@ DEFAULT_CONFIGS = [
     # GQA configs (num_kv_heads < num_heads).
     (16, 8192, 64, 8, 128),
 ]
+
+
+def _maybe_configure_custom_llvm_tools() -> None:
+    """Prefer the custom mlir-opt build used for peak FlashAttention perf."""
+    if os.getenv("FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM", "1").lower() in ("0", "false", "no", "off"):
+        return
+    if os.getenv("FLYDSL_COMPILE_LLVM_DIR"):
+        llvm_dir = Path(os.environ["FLYDSL_COMPILE_LLVM_DIR"]).expanduser()
+        if not (llvm_dir / "bin" / "mlir-opt").is_file():
+            raise RuntimeError(
+                f"FLYDSL_COMPILE_LLVM_DIR={llvm_dir} does not contain bin/mlir-opt. "
+                "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+            )
+        return
+
+    candidates = []
+    for env_name in ("FLYDSL_FLASH_ATTN_FUNC_LLVM_DIR", "FLYDSL_CUSTOM_LLVM_TOOLS_DIR"):
+        raw = os.getenv(env_name)
+        if raw:
+            candidates.append(Path(raw).expanduser())
+
+    archive_name = None
+    extract_dir = None
+    config_path = _repo / "thirdparty" / "custom-llvm-tools.json"
+    if config_path.is_file():
+        try:
+            cfg = json.loads(config_path.read_text())
+            archive_prefix = cfg.get("archive_name", "flydsl-mlir-tools")
+            llvm_ref = cfg.get("llvm_ref", "")
+            if len(llvm_ref) >= 12:
+                archive_stem = f"{archive_prefix}-{llvm_ref[:12]}-manylinux_2_28-x86_64"
+                archive_name = f"{archive_stem}.tar.gz"
+                extract_dir = _repo / "build-fly" / "custom-llvm-tools" / archive_stem
+                candidates.extend(
+                    [
+                        extract_dir,
+                        _repo / ".cache" / "custom-llvm-tools" / archive_stem,
+                    ]
+                )
+        except Exception as exc:
+            print(f"[flash_attn_func] failed to read custom LLVM tool config: {exc}")
+
+    candidates.extend(
+        [
+            _repo / "build-fly" / "custom-llvm-tools",
+            _repo / ".cache" / "custom-llvm-tools",
+        ]
+    )
+
+    for path in candidates:
+        if (path / "bin" / "mlir-opt").is_file():
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = str(path)
+            print(f"[flash_attn_func] using custom LLVM tools: {path}")
+            return
+
+    if archive_name and extract_dir:
+        root_dir = extract_dir.parent
+        archive_path = root_dir / archive_name
+        root_dir.mkdir(parents=True, exist_ok=True)
+
+        if not archive_path.is_file():
+            https_uri = f"https://rocm.frameworks-devreleases.amd.com/llvm-tools/gfx942-gfx950/{archive_name}"
+            print(f"[flash_attn_func] fetching custom LLVM tools: {archive_name}")
+            try:
+                urllib.request.urlretrieve(https_uri, archive_path)
+            except Exception as exc:
+                archive_path.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"failed to download custom LLVM tools from {https_uri}: {exc}. "
+                    "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+                ) from exc
+
+        if archive_path.is_file():
+            try:
+                if extract_dir.exists():
+                    shutil.rmtree(extract_dir)
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with tarfile.open(archive_path, "r:gz") as tar:
+                    tar.extractall(extract_dir)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"failed to extract custom LLVM tools from {archive_path}: {exc}. "
+                    "Set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+                ) from exc
+
+        if (extract_dir / "bin" / "mlir-opt").is_file():
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = str(extract_dir)
+            print(f"[flash_attn_func] using custom LLVM tools: {extract_dir}")
+            return
+
+    raise RuntimeError(
+        "custom LLVM tools not found or missing bin/mlir-opt. "
+        "Set FLYDSL_COMPILE_LLVM_DIR to an LLVM tools directory, "
+        "or set FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0 to use bundled LLVM."
+    )
+
+
+@contextmanager
+def _custom_llvm_tools_env():
+    prev_llvm_dir = os.environ.get("FLYDSL_COMPILE_LLVM_DIR")
+    _maybe_configure_custom_llvm_tools()
+    try:
+        yield
+    finally:
+        if prev_llvm_dir is None:
+            os.environ.pop("FLYDSL_COMPILE_LLVM_DIR", None)
+        else:
+            os.environ["FLYDSL_COMPILE_LLVM_DIR"] = prev_llvm_dir
 
 
 def setup_seed(seed: int) -> None:
@@ -258,21 +371,22 @@ def run_config(
         return results
 
     try:
-        exe = build_flash_attn_func_module(
-            num_heads=num_heads,
-            head_dim=head_dim,
-            causal=causal,
-            dtype_str=dtype_str,
-            waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
-            daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
-            num_kv_heads=num_kv_heads,
-            dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
-            dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
-            dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
-                "dualwave_swp_debug_lazy_counts"
-            ],
-            dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
-        )
+        with _custom_llvm_tools_env():
+            exe = build_flash_attn_func_module(
+                num_heads=num_heads,
+                head_dim=head_dim,
+                causal=causal,
+                dtype_str=dtype_str,
+                waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
+                daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
+                num_kv_heads=num_kv_heads,
+                dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+                dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
+                dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
+                    "dualwave_swp_debug_lazy_counts"
+                ],
+                dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
+            )
     except Exception as e:
         results["err"] = f"build: {e}"
         import traceback
