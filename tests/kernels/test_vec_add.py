@@ -6,23 +6,28 @@
 """Vector Addition Benchmark - GPU kernel with flydsl API"""
 
 import sys
-import os
-import numpy as np
+
 import pytest
-
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
-
-try:
-    import torch
-except ImportError:
-    torch = None
-if torch is None or not torch.cuda.is_available():
-    pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.runtime.device import get_rocm_arch
 from tests.test_common import checkAllclose, run_perftest
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+if torch is None or not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU benchmarks.", allow_module_level=True)
+
+
+def _validate_vec_width(vec_width: int):
+    if vec_width <= 0 or (vec_width not in (1, 2, 4) and vec_width % 4 != 0):
+        raise ValueError("vec_width must be 1, 2, 4, or a positive multiple of 4")
 
 
 @flyc.kernel
@@ -37,6 +42,10 @@ def vecAddKernel(
     tid = fx.thread_idx.x
 
     tile_elems = block_dim * vec_width
+    # CDNA buffer load/store atoms are emitted as up to 128-bit operations.
+    # Wider per-thread vectors are handled as multiple 128-bit chunks.
+    copy_width = 4 if vec_width > 4 else vec_width
+    chunks_per_thread = vec_width // copy_width
 
     # Wrap in buffer-descriptor-backed tensors for AMD buffer load/store
     A = fx.rocdl.make_buffer_tensor(A)
@@ -51,26 +60,25 @@ def vecAddKernel(
     tB = fx.slice(tB, (None, bid))
     tC = fx.slice(tC, (None, bid))
 
-    tA = fx.logical_divide(tA, fx.make_layout(vec_width, 1))
-    tB = fx.logical_divide(tB, fx.make_layout(vec_width, 1))
-    tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
+    tA = fx.logical_divide(tA, fx.make_layout(copy_width, 1))
+    tB = fx.logical_divide(tB, fx.make_layout(copy_width, 1))
+    tC = fx.logical_divide(tC, fx.make_layout(copy_width, 1))
 
-    RABMemRefTy = fx.MemRefType.get(
-        fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-    )
-    copyAtom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+    copyAtom = fx.make_copy_atom(fx.rocdl.BufferCopy(copy_width * fx.Float32.width), fx.Float32)
 
-    rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
-    rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
-    rC = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
+    rA = fx.make_rmem_tensor(copy_width, fx.Float32)
+    rB = fx.make_rmem_tensor(copy_width, fx.Float32)
+    rC = fx.make_rmem_tensor(copy_width, fx.Float32)
 
-    fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
-    fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
+    for chunk in fx.range_constexpr(chunks_per_thread):
+        chunk_idx = chunk * block_dim + tid
+        fx.copy_atom_call(copyAtom, fx.slice(tA, (None, chunk_idx)), rA)
+        fx.copy_atom_call(copyAtom, fx.slice(tB, (None, chunk_idx)), rB)
 
-    vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
-    fx.memref_store_vec(vC, rC)
+        vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
+        fx.memref_store_vec(vC, rC)
 
-    fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, tid)))
+        fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, chunk_idx)))
 
 
 @flyc.jit
@@ -86,9 +94,7 @@ def vecAdd(
 ):
     tile_elems = block_dim * vec_width
     grid_x = (n + tile_elems - 1) // tile_elems
-    vecAddKernel(A, B, C, block_dim, vec_width).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream
-    )
+    vecAddKernel(A, B, C, block_dim, vec_width).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
 
 def benchmark_pytorch_add(size: int):
@@ -123,13 +129,15 @@ def benchmark_pytorch_add(size: int):
     }
 
 
-def benchmark_vector_add(vec_width: int = 4):
+def benchmark_vector_add(vec_width: int = 4, *, size_multiplier: int = 10000, run_benchmark: bool = True):
     """Benchmark vector addition kernel performance."""
+
+    _validate_vec_width(vec_width)
 
     THREADS_PER_BLOCK = 256
     VEC_WIDTH = vec_width
     TILE_ELEMS = THREADS_PER_BLOCK * VEC_WIDTH
-    SIZE = TILE_ELEMS * 10000  # align to tile boundary
+    SIZE = TILE_ELEMS * size_multiplier  # align to tile boundary
 
     print("\n" + "=" * 80)
     print("Benchmark: Vector Addition (C = A + B) - flydsl API")
@@ -153,6 +161,8 @@ def benchmark_vector_add(vec_width: int = 4):
 
     error = checkAllclose(c_dev, a_dev + b_dev)
     print(f"  Correctness: max error = {error:.2e}")
+    if not run_benchmark:
+        return error < 1e-5
 
     def kernel_launch():
         vecAdd(tA, b_dev, c_dev, SIZE, SIZE, THREADS_PER_BLOCK, VEC_WIDTH, stream=stream)
@@ -183,13 +193,16 @@ def benchmark_vector_add(vec_width: int = 4):
     return error < 1e-5
 
 
-def test_benchmark_vector_add():
+@pytest.mark.parametrize("vec_width", [4, 8, 16])
+def test_benchmark_vector_add(vec_width):
     """Pytest wrapper for vector addition benchmark."""
     print("\n" + "=" * 80)
     print("ROCm GPU Benchmark - Vector Addition with flydsl API")
     print(f"GPU: {get_rocm_arch()}")
     print("=" * 80)
-    assert benchmark_vector_add(), "Vector addition benchmark failed correctness check"
+    assert benchmark_vector_add(
+        vec_width=vec_width, size_multiplier=1024, run_benchmark=False
+    ), "Vector addition benchmark failed correctness check"
 
 
 if __name__ == "__main__":
@@ -197,9 +210,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Vector Addition Benchmark")
     parser.add_argument("--benchmark", action="store_true", help="Run performance benchmark")
-    parser.add_argument(
-        "--vec-width", type=int, default=4, help="Vector width (default: 4)"
-    )
+    parser.add_argument("--vec-width", type=int, default=4, help="Vector width (default: 4)")
     args = parser.parse_args()
 
     print("\n" + "=" * 80)

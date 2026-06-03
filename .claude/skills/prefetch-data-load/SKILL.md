@@ -250,11 +250,15 @@ instructions. Instead, prefetch restructures the code so the compiler places
 
 **Always check register headroom before adding prefetch buffers:**
 
-On CDNA3 (gfx942 MI300X/MI308), VGPRs are split into **two separate register files**:
-- **arch_vgpr** (256 per SIMD): used by VALU, VMEM loads, LDS ops, and prefetch buffers
-- **accum_vgpr / AGPR** (256 per SIMD): used exclusively by MFMA result writeback
+On CDNA3 (gfx942 MI300X/MI308), VGPRs are tracked as two **physical** files that
+share **one combined 512-entry occupancy budget** per SIMD:
+- **arch_vgpr** (up to 256 per SIMD): used by VALU, VMEM loads, LDS ops, and prefetch buffers
+- **accum_vgpr / AGPR** (up to 256 per SIMD): used by MFMA result writeback
 
-Prefetch buffers consume **arch_vgpr only** (they hold global load results). MFMA accumulators use **accum_vgpr only**. These do not compete.
+Prefetch buffers physically live in **arch_vgpr** and MFMA accumulators in
+**accum_vgpr**, but occupancy is governed by their **sum** (`arch_vgpr +
+accum_vgpr`), so growing prefetch buffers *does* compete with MFMA accumulators
+for the shared 512 budget and can cost occupancy.
 
 ```python
 # Estimate arch_vgpr cost of prefetch buffers:
@@ -263,20 +267,24 @@ Prefetch buffers consume **arch_vgpr only** (they hold global load results). MFM
 #   - Double-buffering = 2 x 32 = 64 arch_vgpr (but one set is reused)
 #   - Net additional arch_vgpr ~ 32 (the "next" buffer)
 #
-# On MI300X (gfx942): 256 arch_vgpr + 256 accum_vgpr per SIMD
-# Occupancy = 256 / max(arch_vgpr, accum_vgpr) waves per SIMD
+# On MI300X (gfx942): arch_vgpr + accum_vgpr share ONE combined 512 budget/SIMD
+# Occupancy = 512 / (arch_vgpr_alloc + accum_vgpr_alloc) waves per SIMD
+# (combined-pool model — NOT 256/max; that was gfx908/CDNA1 only)
 #
-# Example: arch=148, accum=148 -> occupancy bottleneck = 148 -> 1 wave
-# Adding 32 arch_vgpr -> arch=180, accum=148 -> bottleneck = 180 -> still 1 wave (safe)
-# Adding 120 arch_vgpr -> arch=268 -> SPILL (critical, exceeds 256 per SIMD)
+# Example: arch=148, accum=148 -> combined 296 -> 512//296 = 1 wave
+# Adding 32 arch_vgpr -> combined 328 -> still 1 wave (safe)
+# To reach 2 waves you need combined (arch+accum) <= 256
+# arch+accum > 512 -> SPILL (exceeds the combined per-SIMD budget)
 ```
 
-**Critical thresholds (gfx942, per register file):**
-| Register File | Count | Max Waves/SIMD | Impact |
-|--------------|-------|---------------|--------|
-| arch_vgpr <= 128 | or accum <= 128 | 2 | Good occupancy |
-| arch_vgpr <= 256 | or accum <= 256 | 1 | Minimum occupancy |
-| arch_vgpr > 256 | or accum > 256 | **SPILL** | Register overflow -> severe perf regression |
+**Critical thresholds (gfx942, combined arch+accum budget):**
+| Combined arch_vgpr + accum_vgpr | Max Waves/SIMD | Impact |
+|--------------|---------------|--------|
+| <= 128 | 4 | High occupancy |
+| <= 170 | 3 | Good occupancy |
+| <= 256 | 2 | Moderate occupancy |
+| <= 512 | 1 | Minimum occupancy |
+| > 512 | **SPILL** | Register overflow -> severe perf regression |
 
 **How to check current VGPR allocation** (from rocprofv3 database):
 ```sql

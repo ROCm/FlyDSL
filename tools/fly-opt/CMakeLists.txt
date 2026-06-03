@@ -1,10 +1,12 @@
+get_property(_backend_opt_libs GLOBAL PROPERTY FLYDSL_BACKEND_FLYOPT_LINK_LIBS)
+
 set(LIBS
   MLIRFlyDialect
-  MLIRFlyROCDLDialect
-  MLIRFlyToROCDL
+  ${_backend_opt_libs}
   MLIRRegisterAllExtensions
 
   MLIRMlirOptMain
+  MLIRToLLVMIRTranslationRegistration
 )
 
 add_llvm_tool(fly-opt

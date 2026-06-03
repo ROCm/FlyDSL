@@ -32,7 +32,7 @@ gpu.module @promote_rmem_to_vector_ssa_copy {
     %copy_in_soff = fly.atom.set_value(%copy_in, "soffset", %c4_i32) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>
     %copy_out = fly.make_copy_atom {valBits = 16 : i32} : !fly.copy_atom<!fly.universal_copy<64>, 16>
 
-    %reg_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+    %reg_ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f16, register>
     %reg_view = fly.make_view(%reg_ptr, %vec4) : (!fly.ptr<f16, register>, !fly.layout<4:1>) -> !fly.memref<f16, register, 4:1>
 
     fly.copy_atom_call(%copy_in_soff, %src_view, %reg_view) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>, !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>, !fly.memref<f16, register, 4:1>) -> ()
@@ -66,7 +66,7 @@ gpu.module @promote_rmem_to_vector_ssa_copy {
     %src_view = fly.make_view(%src_desc, %vec4) : (!fly.ptr<f16, #fly_rocdl.buffer_desc>, !fly.layout<4:1>) -> !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>
 
     %copy_in = fly.make_copy_atom {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>
-    %reg_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+    %reg_ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f16, register>
     %reg_view = fly.make_view(%reg_ptr, %vec4) : (!fly.ptr<f16, register>, !fly.layout<4:1>) -> !fly.memref<f16, register, 4:1>
 
     scf.for %iv = %c0 to %c2 step %c1 {
@@ -125,11 +125,11 @@ gpu.module @promote_rmem_to_vector_ssa_copy_pred {
     %copy_in = fly.make_copy_atom {valBits = 16 : i32} : !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>
     %copy_in_soff = fly.atom.set_value(%copy_in, "soffset", %c4_i32) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>, i32) -> !fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>
 
-    %pred_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 1 : i64}} : () -> !fly.ptr<i1, register>
+    %pred_ptr = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i1, register>
     fly.ptr.store(%pred_val, %pred_ptr) : (i1, !fly.ptr<i1, register>) -> ()
     %pred_view = fly.make_view(%pred_ptr, %pred_layout) : (!fly.ptr<i1, register>, !fly.layout<1:1>) -> !fly.memref<i1, register, 1:1>
 
-    %reg_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+    %reg_ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f16, register>
     %reg_view = fly.make_view(%reg_ptr, %vec4) : (!fly.ptr<f16, register>, !fly.layout<4:1>) -> !fly.memref<f16, register, 4:1>
 
     fly.copy_atom_call(%copy_in_soff, %src_view, %reg_view, %pred_view) : (!fly.copy_atom<!fly_rocdl.cdna3.buffer_copy<64>, 16>, !fly.memref<f16, #fly_rocdl.buffer_desc, 4:1>, !fly.memref<f16, register, 4:1>, !fly.memref<i1, register, 1:1>) -> ()

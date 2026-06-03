@@ -9,7 +9,9 @@ Validates:
   - CompileCallable subscript syntax: flyc.compile[hints]
   - compile_hints propagation through JitFunction → MlirCompiler → pipeline
 """
+
 import gc
+import math
 import weakref
 
 import pytest
@@ -24,10 +26,10 @@ if torch is None or not torch.cuda.is_available():
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-
 # ──────────────────────────────────────────────────────────────
 # Minimal kernel for compile-hint tests
 # ──────────────────────────────────────────────────────────────
+
 
 @flyc.kernel
 def _noop_kernel():
@@ -51,12 +53,14 @@ def _reset_jit_caches(jit_fn):
 # Tests: LLVM option Python bindings
 # ──────────────────────────────────────────────────────────────
 
+
 class TestLLVMOptionBindings:
     """Test set_llvm_option_{bool,int,str} directly."""
 
     @staticmethod
     def _get_fly():
         from flydsl._mlir._mlir_libs import _mlirDialectsFly
+
         return _mlirDialectsFly
 
     def test_bool_round_trip(self):
@@ -92,11 +96,13 @@ class TestLLVMOptionBindings:
 # Tests: llvm_options context manager
 # ──────────────────────────────────────────────────────────────
 
+
 class TestLLVMOptionsContextManager:
     """Test the llvm_options context manager for scoped set/restore."""
 
     def test_bool_scoping(self):
         from flydsl.compiler.llvm_options import llvm_options
+
         _fly = TestLLVMOptionBindings._get_fly()
 
         # Get baseline
@@ -115,11 +121,13 @@ class TestLLVMOptionsContextManager:
     def test_mixed_types(self):
         from flydsl.compiler.llvm_options import llvm_options
 
-        with llvm_options({
-            "enable-post-misched": False,
-            "opt-bisect-limit": 100,
-            "module-summary-dot-file": "/tmp/test",
-        }):
+        with llvm_options(
+            {
+                "enable-post-misched": False,
+                "opt-bisect-limit": 100,
+                "module-summary-dot-file": "/tmp/test",
+            }
+        ):
             pass  # just verify no exceptions
 
     def test_invalid_type_raises(self):
@@ -133,6 +141,7 @@ class TestLLVMOptionsContextManager:
 # ──────────────────────────────────────────────────────────────
 # Tests: CompileCallable subscript
 # ──────────────────────────────────────────────────────────────
+
 
 class TestCompileCallable:
     """Test flyc.compile[hints] subscript syntax."""
@@ -153,6 +162,7 @@ class TestCompileCallable:
 
     def test_bare_compile_no_hints(self):
         """flyc.compile(fn) without subscript should not set hints."""
+
         @flyc.jit
         def _fresh(stream: fx.Stream = fx.Stream(None)):
             _noop_kernel().launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
@@ -165,12 +175,14 @@ class TestCompileCallable:
 # Tests: compile_hints pipeline propagation
 # ──────────────────────────────────────────────────────────────
 
+
 class TestCompileHintsPropagation:
     """Test that compile_hints flow through to the compilation pipeline."""
 
     def test_fp_math_reaches_pipeline(self, monkeypatch):
         """Verify fast_fp_math/unsafe_fp_math appear in rocdl-attach-target."""
         from flydsl.compiler.backends import rocm
+
         captured = {}
         monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
         _reset_jit_caches(_noop_launch)
@@ -192,18 +204,22 @@ class TestCompileHintsPropagation:
     def test_llvm_options_in_compile_hints(self):
         """Verify llvm_options key is accepted and doesn't crash."""
         _reset_jit_caches(_noop_launch)
-        exe = flyc.compile[{
-            "llvm_options": {"enable-post-misched": False},
-        }](_noop_launch)
+        exe = flyc.compile[
+            {
+                "llvm_options": {"enable-post-misched": False},
+            }
+        ](_noop_launch)
         exe()  # should compile and run without error
 
 
 class TestCacheKeyIncludesTarget:
-    """Verify that _make_cache_key includes the GPU target so different
+    """Verify that _resolve_and_make_cache_key includes the GPU target so different
     architectures produce different cache entries."""
 
     def test_cache_key_contains_target(self):
-        """First element of the cache key tuple must be ('_target_', GPUTarget(...))."""
+        """Cache key must carry an arch-only ('_target_', GPUTarget). The kernel
+        binary is device-independent, so the key has no device id and the same
+        artifact is shared across same-arch GPUs."""
         from flydsl.compiler.backends import GPUTarget, get_backend
 
         jf = _noop_launch
@@ -212,19 +228,19 @@ class TestCacheKeyIncludesTarget:
         sig = jf._sig
         bound = sig.bind()
         bound.apply_defaults()
-        key = jf._make_cache_key(bound.arguments)
+        key = jf._resolve_and_make_cache_key(bound.arguments)
 
         assert isinstance(key, tuple)
-        assert len(key) >= 1
-        name, val = key[0]
-        assert name == "_target_"
-        assert isinstance(val, GPUTarget)
-        assert val == get_backend().target
+        target_entry = next((v for k, v in key if k == "_target_"), None)
+        assert isinstance(target_entry, GPUTarget)
+        assert target_entry == get_backend().target
 
     def test_different_arch_gives_different_key(self, monkeypatch):
-        """Monkeypatch ARCH env var + reset _sig → different GPUTarget →
-        different cache key.  _target is resolved once in _ensure_sig(),
-        so we must reset _sig to force re-resolution after changing ARCH."""
+        """Monkeypatch ARCH env var → different GPUTarget → different cache key.
+
+        _backend_target is resolved once in _ensure_sig(); we reset _sig to
+        force re-resolution after changing ARCH.
+        """
         from flydsl.compiler.backends import _make_backend, get_backend
 
         jf = _noop_launch
@@ -234,10 +250,9 @@ class TestCacheKeyIncludesTarget:
         bound = sig.bind()
         bound.apply_defaults()
 
-        key1 = jf._make_cache_key(bound.arguments)
-        saved_target = jf._target
+        key1 = jf._resolve_and_make_cache_key(bound.arguments)
+        saved_target = jf._backend_target
 
-        # Monkeypatch to a different arch (ARCH is the env var for env.compile.arch)
         real_arch = get_backend().target.arch
         fake_arch = "gfx950" if real_arch != "gfx950" else "gfx942"
 
@@ -245,19 +260,20 @@ class TestCacheKeyIncludesTarget:
         _make_backend.cache_clear()
 
         try:
-            # Reset _sig/_target to force re-resolution with new ARCH
             jf._sig = None
-            jf._target = None
+            jf._backend_target = None
             jf._ensure_sig()
 
-            key2 = jf._make_cache_key(bound.arguments)
+            key2 = jf._resolve_and_make_cache_key(bound.arguments)
             assert key1 != key2
-            assert key1[0][1].arch != key2[0][1].arch
+            t1 = next(v for k, v in key1 if k == "_target_")
+            t2 = next(v for k, v in key2 if k == "_target_")
+            assert t1.arch != t2.arch
         finally:
             monkeypatch.delenv("ARCH", raising=False)
             _make_backend.cache_clear()
             jf._sig = sig
-            jf._target = saved_target
+            jf._backend_target = saved_target
 
 
 class TestCacheDisabledRegression:
@@ -307,6 +323,7 @@ class TestCacheDisabledRegression:
             num_warmup=1,
         )
 
-        assert avg_us > 0
+        assert math.isfinite(avg_us)
+        assert avg_us >= 0
         assert len(_noop_launch._mem_cache) == 1
         assert len(_noop_launch._call_state_cache) == 1

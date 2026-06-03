@@ -41,9 +41,8 @@ _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
 _ods_mfma_i32_16x16x32_i8 = mfma_i32_16x16x32_i8
 _ods_mfma_f32_16x16x32_f16 = globals().get("mfma_f32_16x16x32_f16", None)
 _ods_mfma_f32_16x16x32_bf16 = globals().get("mfma_f32_16x16x32_bf16", None)
-_ods_mfma_scale_f32_16x16x128_f8f6f4 = (
-    globals().get("mfma_scale_f32_16x16x128_f8f6f4", None)
-    or globals().get("mfma_scale_f32_16x16x128_f8f6f4_", None)
+_ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get("mfma_scale_f32_16x16x128_f8f6f4", None) or globals().get(
+    "mfma_scale_f32_16x16x128_f8f6f4_", None
 )
 mask_mfma = 0x008
 mask_vmem_rd = 0x020

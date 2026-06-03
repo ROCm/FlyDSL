@@ -15,18 +15,16 @@ if _REPO_ROOT not in sys.path:
 if _PYFLIR_SRC not in sys.path:
     sys.path.insert(0, _PYFLIR_SRC)
 
-# workaround for simulator
-import flydsl  # noqa: E402,F401 -- preload system comgr before torch/HIP loads LLVM
-
-import pytest
-import torch
+import pytest  # noqa: E402
+import torch  # noqa: E402
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
-from flydsl.runtime.device import get_rocm_arch
-from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm
-from tests.kernels.utils import fp4_utils
+import flydsl.compiler as flyc  # noqa: E402,I001
 
+from flydsl.runtime.device import get_rocm_arch  # noqa: E402
+from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm  # noqa: E402
+from tests.kernels.utils import fp4_utils  # noqa: E402
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -35,9 +33,9 @@ if not torch.cuda.is_available():
 SCALE_BLOCK = 32
 
 
-def preshuffle_e8m0_scale(scale: torch.Tensor, warp_tile: int,
-                          scale_k_per_tile: int = 4,
-                          WMMA_DIM: int = 16) -> torch.Tensor:
+def preshuffle_e8m0_scale(
+    scale: torch.Tensor, warp_tile: int, scale_k_per_tile: int = 4, WMMA_DIM: int = 16
+) -> torch.Tensor:
     """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access."""
     _, K_scale = scale.shape
     assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
@@ -55,8 +53,7 @@ def random_fp8_data(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
     return torch.randint(0, 126, (rows, cols), dtype=torch.uint8, device=device)
 
 
-def _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K,
-                           convert_fn, convert_fn_b=None):
+def _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, convert_fn, convert_fn_b=None):
     """Reference scaled GEMM: D = (A * A_scale) @ (B * B_scale)^T."""
     a_f32 = convert_fn(a.view(torch.uint8))[:M, :K]
     b_f32 = (convert_fn_b or convert_fn)(b.view(torch.uint8))[:N, :K]
@@ -68,21 +65,19 @@ def _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K,
 
 
 def reference_mxfp4_gemm(a_packed, b_packed, a_scale, b_scale, M, N, K):
-    return _reference_scaled_gemm(a_packed, b_packed, a_scale, b_scale,
-                                  M, N, K, fp4_utils.mxfp4_to_f32)
+    return _reference_scaled_gemm(a_packed, b_packed, a_scale, b_scale, M, N, K, fp4_utils.mxfp4_to_f32)
 
 
 def reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K):
     """Standard FP8 reference with SCALE_BLOCK=32."""
-    return _reference_scaled_gemm(a, b, a_scale, b_scale,
-                                  M, N, K, fp4_utils.fp8_e4m3_to_f32)
+    return _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, fp4_utils.fp8_e4m3_to_f32)
 
 
 def reference_a8w4_gemm(a_fp8, b_fp4, a_scale, b_scale, M, N, K):
     """Standard A8W4 reference: FP8 activation + FP4 weight, SCALE_BLOCK=32."""
-    return _reference_scaled_gemm(a_fp8, b_fp4, a_scale, b_scale, M, N, K,
-                                  fp4_utils.fp8_e4m3_to_f32,
-                                  convert_fn_b=fp4_utils.mxfp4_to_f32)
+    return _reference_scaled_gemm(
+        a_fp8, b_fp4, a_scale, b_scale, M, N, K, fp4_utils.fp8_e4m3_to_f32, convert_fn_b=fp4_utils.mxfp4_to_f32
+    )
 
 
 def _e8m0_exp_range(scale: torch.Tensor) -> tuple[int, int]:
@@ -91,8 +86,7 @@ def _e8m0_exp_range(scale: torch.Tensor) -> tuple[int, int]:
     return int(scale_u8.min().item()) - 127, int(scale_u8.max().item()) - 127
 
 
-def _a8w4_tolerances(a_scale: torch.Tensor, b_scale: torch.Tensor,
-                     K: int, out_dtype: str) -> tuple[float, float, str]:
+def _a8w4_tolerances(a_scale: torch.Tensor, b_scale: torch.Tensor, K: int, out_dtype: str) -> tuple[float, float, str]:
     """Scale-range-aware tolerance for mixed FP8xFP4 WMMA scale GEMM.
 
     A8W4 accumulates FP8 activations with FP4 weights and applies independent
@@ -103,7 +97,7 @@ def _a8w4_tolerances(a_scale: torch.Tensor, b_scale: torch.Tensor,
     a_min_exp, a_max_exp = _e8m0_exp_range(a_scale)
     b_min_exp, b_max_exp = _e8m0_exp_range(b_scale)
     peak_prod_exp = max(0, a_max_exp) + max(0, b_max_exp)
-    peak_prod_scale = float(2 ** peak_prod_exp)
+    peak_prod_scale = float(2**peak_prod_exp)
 
     if out_dtype in ("bf16", "f16"):
         rtol = min(5e-2, 1e-2 + 3e-3 * peak_prod_exp)
@@ -166,7 +160,7 @@ def _pad_2d_tensor(tensor: torch.Tensor, rows: int, cols: int, fill_value: int) 
     if tensor.shape == (rows, cols):
         return tensor
     padded = torch.full((rows, cols), fill_value, dtype=tensor.dtype, device=tensor.device)
-    padded[:tensor.shape[0], :tensor.shape[1]] = tensor
+    padded[: tensor.shape[0], : tensor.shape[1]] = tensor
     return padded
 
 
@@ -193,12 +187,29 @@ def _format_kernel_pad(M: int, N: int, K: int, padded_shape: dict[str, int]) -> 
 
 
 def _run_mxscale_gemm_test(
-    data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-    num_buffers, use_tdm_store, out_dtype,
-    wave_specialized_tdm=False, use_scale_opsel=False,
-    l2_prefetch_distance=0, cluster_m=1, cluster_n=1,
-    inst_prefetch=False, waves_per_eu=None,
-    expert_sched_mode=True, split_k=1,
+    data_format,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    num_buffers,
+    use_tdm_store,
+    out_dtype,
+    wave_specialized_tdm=False,
+    use_scale_opsel=False,
+    l2_prefetch_distance=0,
+    cluster_m=1,
+    cluster_n=1,
+    inst_prefetch=False,
+    waves_per_eu=None,
+    expert_sched_mode=True,
+    split_k=1,
+    b_streaming=False,
+    scale_load_path="tdm",
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -215,8 +226,7 @@ def _run_mxscale_gemm_test(
     if K % SCALE_BLOCK != 0:
         pytest.skip(f"K={K} must be divisible by SCALE_BLOCK={SCALE_BLOCK}")
 
-    padded_shape = _get_padded_problem_shape(
-        data_format, M, N, K, tile_m, tile_n, tile_k, split_k)
+    padded_shape = _get_padded_problem_shape(data_format, M, N, K, tile_m, tile_n, tile_k, split_k)
     padded_m = padded_shape["M"]
     padded_n = padded_shape["N"]
     padded_k = padded_shape["K"]
@@ -227,8 +237,7 @@ def _run_mxscale_gemm_test(
         pytest.skip(f"{num_buffers}-buf requires num_k_tiles >= {num_buffers}")
 
     # FP8 256x256 + f32 + TDM store exceeds LDS
-    if not is_fp4 and tile_m == 256 and tile_n == 256 \
-       and out_dtype == "f32" and use_tdm_store:
+    if not is_fp4 and tile_m == 256 and tile_n == 256 and out_dtype == "f32" and use_tdm_store:
         pytest.skip("256x256 tile with f32 TDM store exceeds LDS limit")
 
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
@@ -237,17 +246,19 @@ def _run_mxscale_gemm_test(
     torch.manual_seed(0)
 
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
-    mcast_str = f", cluster=({cluster_m},{cluster_n})" \
-        if cluster_m > 1 or cluster_n > 1 else ""
+    mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
     tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
+    scale_load_str = "" if scale_load_path == "tdm" else f", scale_load={scale_load_path}"
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
-    print(f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
-          f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-          f"{mcast_str}{tdm_str}, preshuffle, out={out_dtype}")
+    print(
+        f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
+        f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
+        f"{mcast_str}{tdm_str}{scale_load_str}, preshuffle, out={out_dtype}"
+    )
 
     # Generate data
     if is_a8w4:
-        a = random_fp8_data(M, K)       # FP8 activation
+        a = random_fp8_data(M, K)  # FP8 activation
         b = fp4_utils.random_fp4_packed(N, K)  # FP4 weight
     elif is_fp4:
         a = fp4_utils.random_fp4_packed(M, K)
@@ -268,11 +279,9 @@ def _run_mxscale_gemm_test(
     else:
         ref = reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K)
 
-    print(f"Ref stats: min={ref.min():.2f}, max={ref.max():.2f}, "
-          f"mean={ref.mean():.2f}, std={ref.std():.2f}")
+    print(f"Ref stats: min={ref.min():.2f}, max={ref.max():.2f}, " f"mean={ref.mean():.2f}, std={ref.std():.2f}")
 
-    a, b, a_scale, b_scale = _pad_mxscale_inputs(
-        a, b, a_scale, b_scale, padded_shape)
+    a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
     # Preshuffle scales
     skt = tile_k // SCALE_BLOCK
@@ -294,13 +303,19 @@ def _run_mxscale_gemm_test(
 
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=padded_m, N=padded_n, K=padded_k,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        m_warp=m_warp, n_warp=n_warp,
+        M=padded_m,
+        N=padded_n,
+        K=padded_k,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
         num_buffers=num_buffers,
         waves_per_eu=waves_per_eu,
         l2_prefetch_distance=l2_prefetch_distance,
-        cluster_m=cluster_m, cluster_n=cluster_n,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
         use_tdm_store=use_tdm_store,
         out_dtype=out_dtype,
         inst_prefetch=inst_prefetch,
@@ -308,21 +323,42 @@ def _run_mxscale_gemm_test(
         split_k=split_k,
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
+        b_streaming=b_streaming,
+        scale_load_path=scale_load_path,
     )
-    launch_fn(
-        c_gpu.contiguous().view(-1),
-        a_gpu.contiguous().view(-1),
-        b_gpu.contiguous().view(-1),
-        as_gpu.contiguous().view(-1),
-        bs_gpu.contiguous().view(-1),
-        padded_m, padded_n, torch.cuda.current_stream(),
+
+    # Pre-bind via flyc.compile so the launch goes through the CompiledFunction
+    # ctypes fast path (matches test_blockscale_preshuffle_gemm.py and any
+    # production caller that bench-times this kernel). The slow JitFunction
+    # path adds ~17us of inspect.Signature.bind + _resolve_and_make_cache_key per call,
+    # which would mask genuine kernel timing differences in the bench path.
+    # flyc.compile() launches the kernel once internally to trigger
+    # compilation, so no separate eager call is needed for correctness.
+    c_flat = c_gpu.contiguous().view(-1)
+    a_flat = a_gpu.contiguous().view(-1)
+    b_flat = b_gpu.contiguous().view(-1)
+    as_flat = as_gpu.contiguous().view(-1)
+    bs_flat = bs_gpu.contiguous().view(-1)
+
+    flyc.compile(
+        launch_fn,
+        c_flat,
+        a_flat,
+        b_flat,
+        as_flat,
+        bs_flat,
+        padded_m,
+        padded_n,
+        torch.cuda.current_stream(),
     )
     torch.cuda.synchronize()
 
     c_out = c_gpu[:M, :N].cpu()
 
-    print(f"Out stats: min={c_out.float().min():.2f}, max={c_out.float().max():.2f}, "
-          f"mean={c_out.float().mean():.2f}, std={c_out.float().std():.2f}")
+    print(
+        f"Out stats: min={c_out.float().min():.2f}, max={c_out.float().max():.2f}, "
+        f"mean={c_out.float().mean():.2f}, std={c_out.float().std():.2f}"
+    )
 
     if c_out.float().abs().max() < 1e-10:
         print("WARNING: kernel output is all zeros!")
@@ -338,8 +374,7 @@ def _run_mxscale_gemm_test(
     diff = (c_out_f - ref_f).abs()
     print(f"Abs diff: max={diff.max():.4f}, mean={diff.mean():.4f}")
 
-    cos_sim = torch.nn.functional.cosine_similarity(
-        c_out_f.flatten().unsqueeze(0), ref_f.flatten().unsqueeze(0)).item()
+    cos_sim = torch.nn.functional.cosine_similarity(c_out_f.flatten().unsqueeze(0), ref_f.flatten().unsqueeze(0)).item()
     print(f"Cosine similarity: {cos_sim:.6f}")
 
     # Tolerances: FP4 is exact; FP8/A8W4 have FP accumulation error
@@ -349,8 +384,7 @@ def _run_mxscale_gemm_test(
         else:
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-5, atol=1e-8)
     elif is_a8w4:
-        rtol, atol, tol_diag = _a8w4_tolerances(
-            a_scale_raw, b_scale_raw, K, out_dtype)
+        rtol, atol, tol_diag = _a8w4_tolerances(a_scale_raw, b_scale_raw, K, out_dtype)
         print(tol_diag)
         torch.testing.assert_close(c_out_f, ref_f, rtol=rtol, atol=atol)
     else:
@@ -387,6 +421,7 @@ def _extract_i64_metadata(compiled_ir: str, key: str) -> int:
 
 # ── pytest parametrized tests ──
 
+
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
     [
@@ -402,23 +437,51 @@ def _extract_i64_metadata(compiled_ir: str, key: str) -> int:
 @pytest.mark.parametrize("wave_specialized_tdm", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-def test_mxfp4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                     num_buffers, use_tdm_store, out_dtype,
-                     wave_specialized_tdm, use_scale_opsel):
+def test_mxfp4_gemm(
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    num_buffers,
+    use_tdm_store,
+    out_dtype,
+    wave_specialized_tdm,
+    use_scale_opsel,
+):
     _run_mxscale_gemm_test(
-        "fp4", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-        num_buffers, use_tdm_store, out_dtype,
+        "fp4",
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers,
+        use_tdm_store,
+        out_dtype,
         wave_specialized_tdm=wave_specialized_tdm,
-        use_scale_opsel=use_scale_opsel)
+        use_scale_opsel=use_scale_opsel,
+    )
 
 
 @pytest.mark.parametrize("out_dtype", ["bf16", "f16"])
 def test_mxfp4_metadata_and_spill_regression(out_dtype):
     launch_fn = _run_mxscale_gemm_test(
         "fp4",
-        1024, 1024, 1024,
-        256, 256, 256,
-        2, 2,
+        1024,
+        1024,
+        1024,
+        256,
+        256,
+        256,
+        2,
+        2,
         num_buffers=4,
         use_tdm_store=True,
         out_dtype=out_dtype,
@@ -426,9 +489,9 @@ def test_mxfp4_metadata_and_spill_regression(out_dtype):
     )
     artifact = _get_latest_artifact(launch_fn)
 
-    assert "known_block_size = array<i32: 128, 1, 1>" in artifact.source_ir, (
-        f"expected known_block_size metadata in source IR:\n{artifact.source_ir}"
-    )
+    assert (
+        "known_block_size = array<i32: 128, 1, 1>" in artifact.source_ir
+    ), f"expected known_block_size metadata in source IR:\n{artifact.source_ir}"
 
     compiled_ir = artifact.ir
     assert _extract_i64_metadata(compiled_ir, "max_flat_workgroup_size") == 128
@@ -447,13 +510,39 @@ def test_mxfp4_metadata_and_spill_regression(out_dtype):
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-def test_mxfp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                     num_buffers, use_tdm_store, out_dtype, use_scale_opsel):
+@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage"])
+def test_mxfp8_gemm(
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    num_buffers,
+    use_tdm_store,
+    out_dtype,
+    use_scale_opsel,
+    scale_load_path,
+):
     _run_mxscale_gemm_test(
-        "fp8", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-        num_buffers, use_tdm_store, out_dtype,
+        "fp8",
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers,
+        use_tdm_store,
+        out_dtype,
         l2_prefetch_distance=2,
-        use_scale_opsel=use_scale_opsel)
+        use_scale_opsel=use_scale_opsel,
+        scale_load_path=scale_load_path,
+    )
 
 
 @pytest.mark.parametrize(
@@ -468,13 +557,25 @@ def test_mxfp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                    num_buffers, use_tdm_store, out_dtype, use_scale_opsel):
+def test_a8w4_gemm(
+    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, use_tdm_store, out_dtype, use_scale_opsel
+):
     _run_mxscale_gemm_test(
-        "a8w4", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-        num_buffers, use_tdm_store, out_dtype,
+        "a8w4",
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers,
+        use_tdm_store,
+        out_dtype,
         l2_prefetch_distance=2,
-        use_scale_opsel=use_scale_opsel)
+        use_scale_opsel=use_scale_opsel,
+    )
 
 
 @pytest.mark.parametrize(
@@ -488,14 +589,164 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
     # Small-M path: pad M to 16 and dedicate one wave to the M dimension.
     _run_mxscale_gemm_test(
         "a8w4",
-        M, N, K,
-        16, 256, 256,
-        1, 4,
+        M,
+        N,
+        K,
+        16,
+        256,
+        256,
+        1,
+        4,
         num_buffers=2,
         use_tdm_store=use_tdm_store,
         out_dtype="bf16",
         l2_prefetch_distance=2,
         use_scale_opsel=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        ("fp4", 128, 512, 7168, 128, 128, 256, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 4),
+        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 4),
+    ],
+)
+def test_b_streaming_correctness(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        b_streaming=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        ("fp4", 128, 256, 512, 128, 128, 256, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 2),
+    ],
+)
+def test_b_streaming_with_wave_spec_tdm(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        b_streaming=True,
+        wave_specialized_tdm=True,
+    )
+
+
+@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"])
+@pytest.mark.parametrize("num_buffers", [2, 3])
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("use_scale_opsel", [False, True])
+def test_mxfp8_wave_spec_scale_load_paths(scale_load_path, num_buffers, use_tdm_store, use_scale_opsel):
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        384,
+        128,
+        256,
+        128,
+        2,
+        2,
+        num_buffers=num_buffers,
+        use_tdm_store=use_tdm_store,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        wave_specialized_tdm=True,
+        use_scale_opsel=use_scale_opsel,
+        scale_load_path=scale_load_path,
+    )
+
+
+def test_mxfp8_ab_split_scale_load_allows_extra_waves():
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        384,
+        128,
+        256,
+        128,
+        2,
+        4,
+        num_buffers=3,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        wave_specialized_tdm=True,
+        use_scale_opsel=True,
+        scale_load_path="buffer_lds_stage_ab_split",
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n",
+    [
+        ("fp4", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+        ("fp8", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+    ],
+)
+def test_b_streaming_with_cluster_mcast(
+    data_format,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    cluster_m,
+    cluster_n,
+):
+    if str(get_rocm_arch()) != "gfx1250":
+        pytest.skip("requires gfx1250")
+    if "FFMLITE_TOPOLOGY" in os.environ or "AM_TOPOLOGY" in os.environ:
+        pytest.skip("cluster multicast not supported on simulator")
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=2,
+        b_streaming=True,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
     )
 
 
@@ -515,14 +766,201 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
 @pytest.mark.parametrize("num_buffers", [2])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-def test_mxfp4_gemm_mcast(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-                            cluster_m, cluster_n, num_buffers, use_tdm_store,
-                            out_dtype):
+def test_mxfp4_gemm_mcast(
+    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n, num_buffers, use_tdm_store, out_dtype
+):
     _run_mxscale_gemm_test(
-        "fp4", M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp,
-        num_buffers, use_tdm_store, out_dtype,
+        "fp4",
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        num_buffers,
+        use_tdm_store,
+        out_dtype,
         l2_prefetch_distance=2,
-        cluster_m=cluster_m, cluster_n=cluster_n)
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    [
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("fp4", 128, 256, 256, 128, 256, 128, 2, 2),
+    ],
+    ids=["fp8-128x256x256", "fp4-128x256x256"],
+)
+def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+    """Verify that the gfx1250 MX-scale GEMM kernel works inside a hipGraph.
+
+    Captures one launch, replays once, and checks the replay output is
+    bit-equivalent to an eager launch with the same inputs. Catches kernel
+    regressions that would break graph capture / replay (accidental host
+    syncs, allocator allocations on the kernel path, stream-event API misuse).
+    """
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
+    if "FFMLITE_TOPOLOGY" in os.environ or "AM_TOPOLOGY" in os.environ:
+        pytest.skip("hipGraph capture/replay not supported on simulator")
+
+    is_fp4 = data_format == "fp4"
+
+    # Build inputs (mirrors _run_mxscale_gemm_test, but no padding needed
+    # because we pick a clean shape).
+    torch.manual_seed(0)
+    if is_fp4:
+        a = fp4_utils.random_fp4_packed(M, K)
+        b = fp4_utils.random_fp4_packed(N, K)
+    else:
+        a = random_fp8_data(M, K)
+        b = random_fp8_data(N, K)
+    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
+    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+
+    skt = tile_k // SCALE_BLOCK
+    warp_tile_m = tile_m // m_warp
+    warp_tile_n = tile_n // n_warp
+    a_scale_ps = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
+    b_scale_ps = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    pack_b = 2 if is_fp4 else 1
+    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
+
+    a_gpu = a.cuda()
+    b_gpu = b_ps.cuda()
+    as_gpu = a_scale_ps.cuda()
+    bs_gpu = b_scale_ps.cuda()
+    c_gpu = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+
+    launch_fn = compile_mxscale_gemm(
+        data_format=data_format,
+        M=M,
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=2,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        wave_specialized_tdm=False,
+        split_k=1,
+    )
+
+    c_flat = c_gpu.contiguous().view(-1)
+    a_flat = a_gpu.contiguous().view(-1)
+    b_flat = b_gpu.contiguous().view(-1)
+    as_flat = as_gpu.contiguous().view(-1)
+    bs_flat = bs_gpu.contiguous().view(-1)
+    compiled_exe = flyc.compile(
+        launch_fn,
+        c_flat,
+        a_flat,
+        b_flat,
+        as_flat,
+        bs_flat,
+        M,
+        N,
+        torch.cuda.current_stream(),
+    )
+
+    # Resolve stream lazily inside the launch closure so graph capture sees
+    # the active capture stream rather than a stream bound before capture.
+    def launch():
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, torch.cuda.current_stream())
+
+    # ── Eager run (reference) ──
+    c_gpu.zero_()
+    launch()
+    torch.cuda.synchronize()
+    eager_result = c_gpu.clone()
+    assert eager_result.abs().max().item() > 0, "Eager run produced all zeros — kernel did not execute properly."
+
+    # ── hipGraph capture ──
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    # Warmup on the capture stream so allocator state is stable
+    with torch.cuda.stream(s):
+        launch()
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    c_gpu.zero_()
+    with torch.cuda.graph(g, stream=s):
+        launch()
+    torch.cuda.synchronize()
+
+    # ── Replay ──
+    c_gpu.zero_()
+    g.replay()
+    torch.cuda.synchronize()
+    graph_result = c_gpu.clone()
+
+    # ── Verify ──
+    assert graph_result.abs().max().item() > 0, "hipGraph replay produced all zeros — kernel was NOT captured."
+    # Same inputs + same kernel + same stream-order = bit-exact equality
+    assert torch.equal(eager_result, graph_result), (
+        f"Eager vs hipGraph result mismatch: max abs diff = "
+        f"{(eager_result.float() - graph_result.float()).abs().max().item():.6f}"
+    )
+
+
+def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None):
+    """Per-launch timer that strips host launch overhead via hipGraph.
+
+    How it works:
+      - Capture a single kernel launch into a hipGraph
+      - Replay it N times in one stream submission burst
+      - Per-launch time = total_burst_time / N
+
+    NB: stream-ordered execution guarantees the N replays serialise — each
+    g.replay() is one submission to the stream and the next one cannot
+    start until the previous one finishes.
+
+    NB: no L2 flush between replays. The whole point of the graph is to
+    measure the kernel in a hot, back-to-back launch scenario (which is
+    what production serving looks like). For cold-cache numbers use the
+    regular _bench_kernel_us with flush_l2=True.
+    """
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+
+    # Warmup on the capture stream so the allocator / JIT cache is settled.
+    with torch.cuda.stream(capture_stream):
+        for _ in range(warmup):
+            if prep_fn is not None:
+                prep_fn()
+            run_fn()
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    torch.cuda.synchronize()
+
+    # Capture exactly one kernel launch into the graph.
+    g = torch.cuda.CUDAGraph()
+    if prep_fn is not None:
+        prep_fn()
+    with torch.cuda.graph(g, stream=capture_stream):
+        run_fn()
+    torch.cuda.synchronize()
+
+    # Time iters replays as one batch.
+    start_ev = torch.cuda.Event(enable_timing=True)
+    end_ev = torch.cuda.Event(enable_timing=True)
+    start_ev.record()
+    for _ in range(iters):
+        g.replay()
+    end_ev.record()
+    torch.cuda.synchronize()
+    total_us = start_ev.elapsed_time(end_ev) * 1e3
+    return total_us / iters
 
 
 def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
@@ -536,8 +974,8 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
     flush_buf = None
     if flush_l2:
         l2_bytes = getattr(
-            torch.cuda.get_device_properties(torch.cuda.current_device()),
-            "L2_cache_size", 4 * 1024 * 1024)
+            torch.cuda.get_device_properties(torch.cuda.current_device()), "L2_cache_size", 4 * 1024 * 1024
+        )
         alloc_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
         flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
 
@@ -563,8 +1001,7 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
 
     torch.cuda.synchronize()
 
-    latencies = sorted(
-        start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
+    latencies = sorted(start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
 
     n = len(latencies)
     if n >= 8:
@@ -591,8 +1028,7 @@ def _run_benchmark(args):
     if K % SCALE_BLOCK != 0:
         raise ValueError(f"K={K} must be divisible by SCALE_BLOCK={SCALE_BLOCK}")
 
-    padded_shape = _get_padded_problem_shape(
-        data_format, M, N, K, tile_m, tile_n, tile_k, args.split_k)
+    padded_shape = _get_padded_problem_shape(data_format, M, N, K, tile_m, tile_n, tile_k, args.split_k)
     padded_m = padded_shape["M"]
     padded_n = padded_shape["N"]
     padded_k = padded_shape["K"]
@@ -614,12 +1050,14 @@ def _run_benchmark(args):
     if needs_pad:
         print(f"  Kernel pad: M={padded_m}, N={padded_n}, K={padded_k}")
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
-    print(f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
-          f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}")
+    print(
+        f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
+        f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}, "
+        f"scale_load={args.scale_load_path}"
+    )
     if args.split_k > 1:
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
-    print(f"  Warmup={args.warmup}, Iters={args.iters}, "
-          f"L2 flush={'ON' if not args.no_flush_l2 else 'OFF'}")
+    print(f"  Warmup={args.warmup}, Iters={args.iters}, " f"L2 flush={'ON' if not args.no_flush_l2 else 'OFF'}")
     print("  Zero fill: ON (outside timing)")
     print("=" * 72)
 
@@ -638,8 +1076,7 @@ def _run_benchmark(args):
     a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
     b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
 
-    a, b, a_scale, b_scale = _pad_mxscale_inputs(
-        a, b, a_scale, b_scale, padded_shape)
+    a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
@@ -656,7 +1093,7 @@ def _run_benchmark(args):
     bs_gpu = b_scale.cuda()
     c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_out_dtype, device="cuda")
 
-    print(f"\n[1/3] Compiling kernel...")
+    print("\n[1/3] Compiling kernel...")
     t0 = time.perf_counter()
     use_tdm_store = not args.no_tdm_store
     if args.split_k > 1 and use_tdm_store:
@@ -664,13 +1101,19 @@ def _run_benchmark(args):
         use_tdm_store = False
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=padded_m, N=padded_n, K=padded_k,
-        tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        m_warp=args.m_warp, n_warp=args.n_warp,
+        M=padded_m,
+        N=padded_n,
+        K=padded_k,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=args.m_warp,
+        n_warp=args.n_warp,
         num_buffers=args.num_buffers,
         waves_per_eu=args.waves_per_eu,
         l2_prefetch_distance=args.l2_prefetch_distance,
-        cluster_m=args.cluster_m, cluster_n=args.cluster_n,
+        cluster_m=args.cluster_m,
+        cluster_n=args.cluster_n,
         use_tdm_store=use_tdm_store,
         out_dtype=args.out_dtype,
         inst_prefetch=args.inst_prefetch,
@@ -679,23 +1122,48 @@ def _run_benchmark(args):
         use_scale_opsel=args.use_scale_opsel,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
+        b_streaming=args.b_streaming,
+        scale_load_path=args.scale_load_path,
     )
 
-    stream = torch.cuda.current_stream()
     c_flat = c_gpu.view(-1)
     a_flat = a_gpu.view(-1)
     b_flat = b_gpu.view(-1)
     as_flat = as_gpu.view(-1)
     bs_flat = bs_gpu.view(-1)
 
+    # Pre-bind via flyc.compile so the bench loop calls go through the
+    # CompiledFunction ctypes fast path. The slow JitFunction path adds
+    # ~17us of inspect.Signature.bind + _resolve_and_make_cache_key per call, which
+    # would dominate per-launch latency for short kernels.
+    compiled_exe = flyc.compile(
+        launch_fn,
+        c_flat,
+        a_flat,
+        b_flat,
+        as_flat,
+        bs_flat,
+        padded_m,
+        padded_n,
+        torch.cuda.current_stream(),
+    )
+
     def prep_kernel():
         c_gpu.zero_()
 
+    # Resolve the stream lazily inside the closure so the graph-bench path
+    # captures on the active capture stream rather than the stream bound
+    # before capture. Same value on the eager path.
     def run_kernel():
-        launch_fn(
-            c_flat, a_flat, b_flat,
-            as_flat, bs_flat,
-            padded_m, padded_n, stream,
+        compiled_exe(
+            c_flat,
+            a_flat,
+            b_flat,
+            as_flat,
+            bs_flat,
+            padded_m,
+            padded_n,
+            torch.cuda.current_stream(),
         )
 
     prep_kernel()
@@ -704,9 +1172,20 @@ def _run_benchmark(args):
     compile_ms = (time.perf_counter() - t0) * 1e3
     print(f"      Compile + first launch: {compile_ms:.0f} ms")
 
-    print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
-    us = _bench_kernel_us(run_kernel, warmup=args.warmup, iters=args.iters,
-                          flush_l2=not args.no_flush_l2, prep_fn=prep_kernel)
+    use_graph = getattr(args, "use_graph", False)
+    if use_graph:
+        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph ({args.iters} replays)...")
+        # Graph mode prep: don't zero c_gpu inside the captured kernel
+        # (zero would be baked into the graph and runs every replay, but
+        # that's also fine — it would add a trivial memset per replay).
+        # We omit prep_fn here because the c_gpu state across replays
+        # doesn't matter for timing.
+        us = _bench_kernel_us_cudagraph(run_kernel, warmup=args.warmup, iters=args.iters)
+    else:
+        print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
+        us = _bench_kernel_us(
+            run_kernel, warmup=args.warmup, iters=args.iters, flush_l2=not args.no_flush_l2, prep_fn=prep_kernel
+        )
 
     logical_flops = 2.0 * M * N * K
     kernel_flops = 2.0 * padded_m * padded_n * padded_k
@@ -735,35 +1214,35 @@ def _run_benchmark(args):
     n_tiles = padded_n // tile_n
     k_tiles = padded_k // tile_k
     k_tiles_local = (padded_k // args.split_k) // tile_k
-    total_wmma = m_tiles * n_tiles * k_tiles * wmma_per_tile
     # Sequential WMMAs per workgroup (all k_tiles execute sequentially)
     seq_wmma = k_tiles_local * wmma_per_tile
     us_per_wmma = us / seq_wmma if seq_wmma > 0 else 0
 
-    print(f"\n[3/3] Results:")
+    print("\n[3/3] Results:")
     print(f"      Kernel time:  {us:.1f} us ({us / 1e3:.4f} ms)")
     if not needs_pad:
         print(f"      TFLOPS:       {kernel_tflops:.4f}")
     else:
         print(f"      TFLOPS:       {logical_tflops:.4f} (logical), {kernel_tflops:.4f} (kernel)")
-    print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  "
-          f"(read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
-    print(f"      Bytes moved:  {bytes_moved / 1e6:.1f} MB  "
-          f"(A={bytes_a / 1e6:.1f} B={bytes_b / 1e6:.1f} "
-          f"scale={bytes_scale / 1e6:.1f} D={bytes_d / 1e6:.1f})")
-    print(f"      ---")
-    print(f"      WMMA/tile:    {wmma_per_tile} "
-          f"({wmma_m_rep}m × {wmma_n_rep}n × {k_wmma_steps}k)")
+    print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  " f"(read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
+    print(
+        f"      Bytes moved:  {bytes_moved / 1e6:.1f} MB  "
+        f"(A={bytes_a / 1e6:.1f} B={bytes_b / 1e6:.1f} "
+        f"scale={bytes_scale / 1e6:.1f} D={bytes_d / 1e6:.1f})"
+    )
+    print("      ---")
+    print(f"      WMMA/tile:    {wmma_per_tile} " f"({wmma_m_rep}m × {wmma_n_rep}n × {k_wmma_steps}k)")
     if args.split_k > 1:
-        print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × "
-              f"{args.split_k} split-K × {k_tiles_local} local K-iters")
+        print(
+            f"      Total tiles:  {m_tiles}×{n_tiles} spatial × "
+            f"{args.split_k} split-K × {k_tiles_local} local K-iters"
+        )
     else:
         print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × {k_tiles} K-iters")
     print(f"      Seq WMMA/WG:  {seq_wmma}")
     print(f"      us/WMMA:      {us_per_wmma:.1f}")
     if us_per_wmma > 1000:
-        print(f"      WARNING: {us_per_wmma/1000:.1f} ms/WMMA indicates "
-              f"WMMA_SCALE trap-handler emulation")
+        print(f"      WARNING: {us_per_wmma/1000:.1f} ms/WMMA indicates " f"WMMA_SCALE trap-handler emulation")
     print("=" * 72)
 
     reported_tflops = kernel_tflops if not needs_pad else logical_tflops
@@ -774,11 +1253,10 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-format", type=str, default="fp4",
-                        choices=["fp4", "fp8", "a8w4"])
-    parser.add_argument("-M", type=int, default=8192)
-    parser.add_argument("-N", type=int, default=8192)
-    parser.add_argument("-K", type=int, default=8192)
+    parser.add_argument("--data-format", type=str, default="fp4", choices=["fp4", "fp8", "a8w4"])
+    parser.add_argument("-M", type=int, default=1024)
+    parser.add_argument("-N", type=int, default=1024)
+    parser.add_argument("-K", type=int, default=2048)
     parser.add_argument("--tile-m", type=int, default=128)
     parser.add_argument("--tile-n", type=int, default=256)
     parser.add_argument("--tile-k", type=int, default=256)
@@ -790,22 +1268,41 @@ if __name__ == "__main__":
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
     parser.add_argument("--no-tdm-store", action="store_true", default=False)
-    parser.add_argument("--out-dtype", type=str, default="bf16",
-                        choices=["f32", "bf16", "f16"])
+    parser.add_argument("--out-dtype", type=str, default="bf16", choices=["f32", "bf16", "f16"])
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
     parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
-    parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode",
-                        action="store_false", default=True)
-    parser.add_argument("--atomic-barrier-enable", action="store_true", default=False,
-                        help="Enable TDM atomic_barrier_enable (hardware auto-barrier)")
+    parser.add_argument(
+        "--scale-load-path",
+        type=str,
+        default="tdm",
+        choices=["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"],
+    )
+    parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
+    parser.add_argument("--b-streaming", action="store_true", default=False)
+    parser.add_argument(
+        "--atomic-barrier-enable",
+        action="store_true",
+        default=False,
+        help="Enable TDM atomic_barrier_enable (hardware auto-barrier)",
+    )
 
-    parser.add_argument("--benchmark", action="store_true", default=False,
-                        help="Run benchmark mode (timing only, no correctness check)")
+    parser.add_argument(
+        "--benchmark", action="store_true", default=False, help="Run benchmark mode (timing only, no correctness check)"
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-flush-l2", action="store_true", default=False)
+    parser.add_argument(
+        "--use-graph",
+        action="store_true",
+        default=False,
+        help="Time via hipGraph capture+replay to strip "
+        "host launch overhead from per-launch latency. "
+        "Implicitly disables L2 flush (graph replays "
+        "are back-to-back, hot-cache).",
+    )
     args = parser.parse_args()
 
     if args.benchmark:
@@ -814,9 +1311,14 @@ if __name__ == "__main__":
         use_tdm_store = not args.no_tdm_store and args.split_k == 1
         _run_mxscale_gemm_test(
             args.data_format,
-            args.M, args.N, args.K,
-            args.tile_m, args.tile_n, args.tile_k,
-            args.m_warp, args.n_warp,
+            args.M,
+            args.N,
+            args.K,
+            args.tile_m,
+            args.tile_n,
+            args.tile_k,
+            args.m_warp,
+            args.n_warp,
             num_buffers=args.num_buffers,
             use_tdm_store=use_tdm_store,
             out_dtype=args.out_dtype,
@@ -829,4 +1331,6 @@ if __name__ == "__main__":
             inst_prefetch=args.inst_prefetch,
             waves_per_eu=args.waves_per_eu,
             expert_sched_mode=args.expert_sched_mode,
+            b_streaming=args.b_streaming,
+            scale_load_path=args.scale_load_path,
         )

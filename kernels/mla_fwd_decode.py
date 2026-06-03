@@ -31,9 +31,7 @@ def _get_lds_size_per_cu(arch: str) -> int:
     rocminfo = shutil.which("rocminfo")
     if rocminfo is None:
         raise RuntimeError("rocminfo not found on PATH")
-    result = subprocess.run(
-        [rocminfo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    )
+    result = subprocess.run([rocminfo], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     agents = re.split(r"Agent\s*\d+", result.stdout)
     for agent in agents:
         if "Device Type" not in agent or agent.find("GPU") == -1:
@@ -48,9 +46,7 @@ def _get_lds_size_per_cu(arch: str) -> int:
                 m = re.search(r"Size\s*:\s*(\d+)", lines[i + 1])
                 if m:
                     return int(m.group(1)) * 1024  # KB -> bytes
-    raise RuntimeError(
-        f"No GPU GROUP segment found in rocminfo output for arch {arch!r}"
-    )
+    raise RuntimeError(f"No GPU GROUP segment found in rocminfo output for arch {arch!r}")
 
 
 def _is_fp8(dtype: torch.dtype) -> bool:
@@ -58,14 +54,14 @@ def _is_fp8(dtype: torch.dtype) -> bool:
 
 
 def flydsl_mla_fwd_decode(
-    query: torch.Tensor,        # [num_seqs, num_heads, head_size]
-    kv_buffer: torch.Tensor,    # [num_page, page_size, num_kv_heads, head_size]
+    query: torch.Tensor,  # [num_seqs, num_heads, head_size]
+    kv_buffer: torch.Tensor,  # [num_page, page_size, num_kv_heads, head_size]
     kv_page_indices: torch.Tensor,
     work_indptr: torch.Tensor,
     work_info_set: torch.Tensor,
-    final_output: torch.Tensor, # [num_seqs, num_heads, v_head_dim]
-    split_output: torch.Tensor, # [num_partial_slots, 1, num_heads, v_head_dim]
-    split_lse: torch.Tensor,    # [num_partial_slots, 1, num_heads, 1]
+    final_output: torch.Tensor,  # [num_seqs, num_heads, v_head_dim]
+    split_output: torch.Tensor,  # [num_partial_slots, 1, num_heads, v_head_dim]
+    split_lse: torch.Tensor,  # [num_partial_slots, 1, num_heads, 1]
     softmax_scale: float,
 ) -> None:
     """Launch the FlyDSL MLA decode forward kernel."""
@@ -82,12 +78,8 @@ def flydsl_mla_fwd_decode(
         )
 
         # ── shape validation ──
-        assert query.ndim == 3, (
-            f"query: expected 3D [num_seqs, num_heads, qk_head_dim], got shape {list(query.shape)}"
-        )
-        assert query.size(2) == QK_HEAD_DIM, (
-            f"query: head_dim={query.size(2)}, expected {QK_HEAD_DIM}"
-        )
+        assert query.ndim == 3, f"query: expected 3D [num_seqs, num_heads, qk_head_dim], got shape {list(query.shape)}"
+        assert query.size(2) == QK_HEAD_DIM, f"query: head_dim={query.size(2)}, expected {QK_HEAD_DIM}"
         assert kv_buffer.ndim == 4, (
             f"kv_buffer: expected 4D [num_page, page_size, num_kv_heads, qk_head_dim], "
             f"got shape {list(kv_buffer.shape)}"
@@ -96,30 +88,33 @@ def flydsl_mla_fwd_decode(
             f"kv_buffer: page_size*num_kv_heads must be 1, "
             f"got page_size={kv_buffer.size(1)}, num_kv_heads={kv_buffer.size(2)}"
         )
-        assert kv_buffer.size(3) == QK_HEAD_DIM, (
-            f"kv_buffer: head_dim={kv_buffer.size(3)}, expected {QK_HEAD_DIM}"
-        )
+        assert kv_buffer.size(3) == QK_HEAD_DIM, f"kv_buffer: head_dim={kv_buffer.size(3)}, expected {QK_HEAD_DIM}"
         num_seqs = query.size(0)
         assert final_output.shape == (num_seqs, num_heads, V_HEAD_DIM), (
-            f"final_output: expected shape [{num_seqs}, {num_heads}, {V_HEAD_DIM}], "
-            f"got {list(final_output.shape)}"
+            f"final_output: expected shape [{num_seqs}, {num_heads}, {V_HEAD_DIM}], " f"got {list(final_output.shape)}"
         )
         num_partial = split_output.size(0)
         assert split_output.ndim == 4 and split_output.shape[1:] == (1, num_heads, V_HEAD_DIM), (
-            f"split_output: expected [N, 1, {num_heads}, {V_HEAD_DIM}], "
-            f"got {list(split_output.shape)}"
+            f"split_output: expected [N, 1, {num_heads}, {V_HEAD_DIM}], " f"got {list(split_output.shape)}"
         )
-        assert split_lse.ndim == 4 and split_lse.shape[1:] == (1, num_heads, 1), (
-            f"split_lse: expected [N, 1, {num_heads}, 1], got {list(split_lse.shape)}"
-        )
-        assert split_lse.size(0) == num_partial, (
-            f"split_lse batch dim ({split_lse.size(0)}) != split_output batch dim ({num_partial})"
-        )
+        assert split_lse.ndim == 4 and split_lse.shape[1:] == (
+            1,
+            num_heads,
+            1,
+        ), f"split_lse: expected [N, 1, {num_heads}, 1], got {list(split_lse.shape)}"
+        assert (
+            split_lse.size(0) == num_partial
+        ), f"split_lse batch dim ({split_lse.size(0)}) != split_output batch dim ({num_partial})"
         dev = query.device
-        for name, t in [("kv_buffer", kv_buffer), ("kv_page_indices", kv_page_indices),
-                        ("work_indptr", work_indptr), ("work_info_set", work_info_set),
-                        ("final_output", final_output), ("split_output", split_output),
-                        ("split_lse", split_lse)]:
+        for name, t in [
+            ("kv_buffer", kv_buffer),
+            ("kv_page_indices", kv_page_indices),
+            ("work_indptr", work_indptr),
+            ("work_info_set", work_info_set),
+            ("final_output", final_output),
+            ("split_output", split_output),
+            ("split_lse", split_lse),
+        ]:
             assert t.device == dev, f"{name}: expected device {dev}, got {t.device}"
 
         # Output tensors must be contiguous: reshape() on a non-contiguous
@@ -127,9 +122,7 @@ def flydsl_mla_fwd_decode(
         # into the copy, and the caller's original tensor would never be
         # updated. Use view() after asserting contiguity so any layout
         # mismatch fails loudly here instead.
-        for name, t in [("final_output", final_output),
-                        ("split_output", split_output),
-                        ("split_lse", split_lse)]:
+        for name, t in [("final_output", final_output), ("split_output", split_output), ("split_lse", split_lse)]:
             assert t.is_contiguous(), (
                 f"{name}: must be contiguous (stride={list(t.stride())}, "
                 f"shape={list(t.shape)}); reshape() would silently copy and "
@@ -170,6 +163,5 @@ def flydsl_mla_fwd_decode(
         )
     else:
         raise NotImplementedError(
-            f"flydsl_mla_fwd_decode: unsupported num_heads={num_heads}, "
-            f"q_dtype={q_dtype}, kv_dtype={kv_dtype}"
+            f"flydsl_mla_fwd_decode: unsupported num_heads={num_heads}, " f"q_dtype={q_dtype}, kv_dtype={kv_dtype}"
         )

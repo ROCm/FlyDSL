@@ -15,8 +15,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/IR/FlyLLVMTranslation.h"
+#include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 
 #include "mlir/Dialect/GPU/IR/CompilationInterfaces.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
@@ -50,19 +50,16 @@ LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
   bool addNull = (object.getFormat() == gpu::CompilationTarget::Assembly);
   StringRef serializedStr = object.getObject().getValue();
   llvm::Constant *serializedCst =
-      llvm::ConstantDataArray::getString(module.getContext(), serializedStr,
-                                         addNull);
-  auto *serializedObj = new llvm::GlobalVariable(
-      module, serializedCst->getType(), true,
-      llvm::GlobalValue::InternalLinkage, serializedCst,
-      moduleName + "_binary");
+      llvm::ConstantDataArray::getString(module.getContext(), serializedStr, addNull);
+  auto *serializedObj = new llvm::GlobalVariable(module, serializedCst->getType(), true,
+                                                 llvm::GlobalValue::InternalLinkage, serializedCst,
+                                                 moduleName + "_binary");
   serializedObj->setAlignment(llvm::MaybeAlign(8));
   serializedObj->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::None);
 
   auto optLevel = llvm::APInt::getZero(32);
   if (DictionaryAttr objectProps = object.getProperties()) {
-    if (auto section = dyn_cast_or_null<StringAttr>(
-            objectProps.get(gpu::elfSectionName))) {
+    if (auto section = dyn_cast_or_null<StringAttr>(objectProps.get(gpu::elfSectionName))) {
       serializedObj->setSection(section.getValue());
     }
     if (auto optAttr = dyn_cast_or_null<IntegerAttr>(objectProps.get("O")))
@@ -79,58 +76,46 @@ LogicalResult embedExplicitModule(StringRef moduleName, gpu::ObjectAttr object,
       module, ptrTy, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
       llvm::ConstantPointerNull::get(ptrTy), getModuleIdentifier(moduleName));
 
-  auto loadPackedArg = [&](llvm::Value *packed, uint32_t index) {
-    llvm::Value *slot = builder.CreateConstGEP1_32(ptrTy, packed, index);
-    return builder.CreateLoad(ptrTy, slot);
-  };
-
-  auto *initFn = llvm::Function::Create(
-      llvm::FunctionType::get(voidTy, {ptrTy}, /*isVarArg=*/false),
-      llvm::GlobalValue::ExternalLinkage, "flydsl_gpu_module_init", module);
-  auto *initBlock =
-      llvm::BasicBlock::Create(module.getContext(), "entry", initFn);
+  // init/load take their outputs as explicit pointer args
+  // (void** module_out, int32_t* err) so they fit MLIR's packed-args wrapper.
+  auto *initFn =
+      llvm::Function::Create(llvm::FunctionType::get(voidTy, {ptrTy, ptrTy}, /*isVarArg=*/false),
+                             llvm::GlobalValue::ExternalLinkage, "flydsl_gpu_module_init", module);
+  auto *initBlock = llvm::BasicBlock::Create(module.getContext(), "entry", initFn);
   builder.SetInsertPoint(initBlock);
   auto initArgs = initFn->arg_begin();
-  llvm::Value *initPacked = initArgs++;
-  llvm::Value *outModulePtr = loadPackedArg(initPacked, 0);
-  llvm::Value *errPtr = loadPackedArg(initPacked, 1);
+  llvm::Value *outModulePtr = initArgs++;
+  llvm::Value *errPtr = initArgs++;
   builder.CreateStore(llvm::ConstantPointerNull::get(ptrTy), outModulePtr);
   builder.CreateStore(llvm::ConstantInt::get(i32Ty, 0), errPtr);
   builder.CreateRetVoid();
 
   auto *loadFn = llvm::Function::Create(
-      llvm::FunctionType::get(voidTy, {ptrTy}, /*isVarArg=*/false),
-      llvm::GlobalValue::ExternalLinkage, "flydsl_gpu_module_load_to_device",
-      module);
-  auto *loadBlock =
-      llvm::BasicBlock::Create(module.getContext(), "entry", loadFn);
+      llvm::FunctionType::get(voidTy, {ptrTy, ptrTy}, /*isVarArg=*/false),
+      llvm::GlobalValue::ExternalLinkage, "flydsl_gpu_module_load_to_device", module);
+  auto *loadBlock = llvm::BasicBlock::Create(module.getContext(), "entry", loadFn);
   builder.SetInsertPoint(loadBlock);
   auto loadArgs = loadFn->arg_begin();
-  llvm::Value *loadPacked = loadArgs++;
-  llvm::Value *moduleOutPtr = loadPackedArg(loadPacked, 0);
-  llvm::Value *loadErrPtr = loadPackedArg(loadPacked, 1);
+  llvm::Value *moduleOutPtr = loadArgs++;
+  llvm::Value *loadErrPtr = loadArgs++;
   llvm::Value *moduleObj = nullptr;
   if (object.getFormat() == gpu::CompilationTarget::Assembly) {
     llvm::FunctionCallee moduleLoadFn = module.getOrInsertFunction(
-        "mgpuModuleLoadJIT", llvm::FunctionType::get(ptrTy, {ptrTy, i32Ty},
-                                                     false));
+        "mgpuModuleLoadJIT", llvm::FunctionType::get(ptrTy, {ptrTy, i32Ty}, false));
     llvm::Constant *optValue = llvm::ConstantInt::get(i32Ty, optLevel);
     moduleObj = builder.CreateCall(moduleLoadFn, {serializedObj, optValue});
   } else {
     llvm::FunctionCallee moduleLoadFn = module.getOrInsertFunction(
-        "mgpuModuleLoad", llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty},
-                                                  false));
+        "mgpuModuleLoad", llvm::FunctionType::get(ptrTy, {ptrTy, i64Ty}, false));
     llvm::Constant *binarySize =
         llvm::ConstantInt::get(i64Ty, serializedStr.size() + (addNull ? 1 : 0));
     moduleObj = builder.CreateCall(moduleLoadFn, {serializedObj, binarySize});
   }
   builder.CreateStore(moduleObj, modulePtr);
   builder.CreateStore(moduleObj, moduleOutPtr);
-  llvm::Value *isNull =
-      builder.CreateICmpEQ(moduleObj, llvm::ConstantPointerNull::get(ptrTy));
-  llvm::Value *errValue = builder.CreateSelect(
-      isNull, llvm::ConstantInt::getSigned(i32Ty, -1),
-      llvm::ConstantInt::get(i32Ty, 0));
+  llvm::Value *isNull = builder.CreateICmpEQ(moduleObj, llvm::ConstantPointerNull::get(ptrTy));
+  llvm::Value *errValue = builder.CreateSelect(isNull, llvm::ConstantInt::getSigned(i32Ty, -1),
+                                               llvm::ConstantInt::get(i32Ty, 0));
   builder.CreateStore(errValue, loadErrPtr);
   builder.CreateRetVoid();
 
@@ -157,9 +142,8 @@ public:
     return module.getOrInsertFunction(
         "mgpuLaunchKernel",
         FunctionType::get(voidTy,
-                          ArrayRef<Type *>({ptrTy, intPtrTy, intPtrTy, intPtrTy,
-                                            intPtrTy, intPtrTy, intPtrTy, i32Ty,
-                                            ptrTy, ptrTy, ptrTy, i64Ty}),
+                          ArrayRef<Type *>({ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
+                                            intPtrTy, i32Ty, ptrTy, ptrTy, ptrTy, i64Ty}),
                           false));
   }
 
@@ -168,46 +152,39 @@ public:
         "mgpuLaunchClusterKernel",
         FunctionType::get(
             voidTy,
-            ArrayRef<Type *>({ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
-                              intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
-                              i32Ty, ptrTy, ptrTy, ptrTy, i64Ty}),
+            ArrayRef<Type *>({ptrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy, intPtrTy,
+                              intPtrTy, intPtrTy, intPtrTy, i32Ty, ptrTy, ptrTy, ptrTy, i64Ty}),
             false));
   }
 
   FunctionCallee getModuleFunctionFn() {
     return module.getOrInsertFunction(
-        "mgpuModuleGetFunction",
-        FunctionType::get(ptrTy, ArrayRef<Type *>({ptrTy, ptrTy}), false));
+        "mgpuModuleGetFunction", FunctionType::get(ptrTy, ArrayRef<Type *>({ptrTy, ptrTy}), false));
   }
 
   FunctionCallee getStreamCreateFn() {
-    return module.getOrInsertFunction("mgpuStreamCreate",
-                                      FunctionType::get(ptrTy, false));
+    return module.getOrInsertFunction("mgpuStreamCreate", FunctionType::get(ptrTy, false));
   }
 
   FunctionCallee getStreamDestroyFn() {
-    return module.getOrInsertFunction(
-        "mgpuStreamDestroy",
-        FunctionType::get(voidTy, ArrayRef<Type *>({ptrTy}), false));
+    return module.getOrInsertFunction("mgpuStreamDestroy",
+                                      FunctionType::get(voidTy, ArrayRef<Type *>({ptrTy}), false));
   }
 
   FunctionCallee getStreamSyncFn() {
-    return module.getOrInsertFunction(
-        "mgpuStreamSynchronize",
-        FunctionType::get(voidTy, ArrayRef<Type *>({ptrTy}), false));
+    return module.getOrInsertFunction("mgpuStreamSynchronize",
+                                      FunctionType::get(voidTy, ArrayRef<Type *>({ptrTy}), false));
   }
 
   Value *getOrCreateFunctionName(StringRef moduleName, StringRef kernelName) {
-    std::string globalName =
-        std::string(formatv("{0}_{1}_name", moduleName, kernelName));
+    std::string globalName = std::string(formatv("{0}_{1}_name", moduleName, kernelName));
     if (GlobalVariable *gv = module.getGlobalVariable(globalName, true))
       return gv;
     return builder.CreateGlobalString(kernelName, globalName);
   }
 
   Value *createKernelArgArray(mlir::gpu::LaunchFuncOp op) {
-    SmallVector<Value *> args =
-        moduleTranslation.lookupValues(op.getKernelOperands());
+    SmallVector<Value *> args = moduleTranslation.lookupValues(op.getKernelOperands());
     SmallVector<Type *> structTypes(args.size(), nullptr);
 
     for (auto [i, arg] : llvm::enumerate(args))
@@ -215,8 +192,7 @@ public:
 
     Type *structTy = StructType::create(module.getContext(), structTypes);
     Value *argStruct = builder.CreateAlloca(structTy, 0u);
-    Value *argArray = builder.CreateAlloca(
-        ptrTy, ConstantInt::get(intPtrTy, structTypes.size()));
+    Value *argArray = builder.CreateAlloca(ptrTy, ConstantInt::get(intPtrTy, structTypes.size()));
 
     for (auto [i, arg] : enumerate(args)) {
       Value *structMember = builder.CreateStructGEP(structTy, argStruct, i);
@@ -235,12 +211,10 @@ public:
     };
 
     mlir::gpu::KernelDim3 grid = op.getGridSizeOperandValues();
-    Value *gx = llvmValue(grid.x), *gy = llvmValue(grid.y),
-          *gz = llvmValue(grid.z);
+    Value *gx = llvmValue(grid.x), *gy = llvmValue(grid.y), *gz = llvmValue(grid.z);
 
     mlir::gpu::KernelDim3 block = op.getBlockSizeOperandValues();
-    Value *bx = llvmValue(block.x), *by = llvmValue(block.y),
-          *bz = llvmValue(block.z);
+    Value *bx = llvmValue(block.x), *by = llvmValue(block.y), *bz = llvmValue(block.z);
 
     Value *dynamicMemorySize = nullptr;
     if (mlir::Value dynSz = op.getDynamicSharedMemorySize())
@@ -257,8 +231,7 @@ public:
       return op.emitError() << "Couldn't find the binary: " << moduleIdentifier;
     Value *moduleObj = builder.CreateLoad(ptrTy, modulePtr);
     Value *functionName = getOrCreateFunctionName(moduleName, op.getKernelName());
-    Value *moduleFunction =
-        builder.CreateCall(getModuleFunctionFn(), {moduleObj, functionName});
+    Value *moduleFunction = builder.CreateCall(getModuleFunctionFn(), {moduleObj, functionName});
 
     Value *stream = nullptr;
     if (mlir::Value asyncObject = op.getAsyncObject()) {
@@ -272,24 +245,20 @@ public:
       stream = ConstantPointerNull::get(ptrTy);
     }
 
-    llvm::Constant *paramsCount =
-        llvm::ConstantInt::get(i64Ty, op.getNumKernelOperands());
+    llvm::Constant *paramsCount = llvm::ConstantInt::get(i64Ty, op.getNumKernelOperands());
     Value *nullPtr = ConstantPointerNull::get(ptrTy);
 
     if (op.hasClusterSize()) {
       mlir::gpu::KernelDim3 cluster = op.getClusterSizeOperandValues();
-      Value *cx = llvmValue(cluster.x), *cy = llvmValue(cluster.y),
-            *cz = llvmValue(cluster.z);
+      Value *cx = llvmValue(cluster.x), *cy = llvmValue(cluster.y), *cz = llvmValue(cluster.z);
       builder.CreateCall(
           getClusterKernelLaunchFn(),
-          ArrayRef<Value *>({moduleFunction, cx, cy, cz, gx, gy, gz, bx, by,
-                             bz, dynamicMemorySize, stream, argArray,
-                             nullPtr, paramsCount}));
+          ArrayRef<Value *>({moduleFunction, cx, cy, cz, gx, gy, gz, bx, by, bz, dynamicMemorySize,
+                             stream, argArray, nullPtr, paramsCount}));
     } else {
-      builder.CreateCall(getKernelLaunchFn(),
-                         ArrayRef<Value *>({moduleFunction, gx, gy, gz, bx, by,
-                                            bz, dynamicMemorySize, stream,
-                                            argArray, nullPtr, paramsCount}));
+      builder.CreateCall(getKernelLaunchFn(), ArrayRef<Value *>({moduleFunction, gx, gy, gz, bx, by,
+                                                                 bz, dynamicMemorySize, stream,
+                                                                 argArray, nullPtr, paramsCount}));
     }
 
     return success();
@@ -311,11 +280,9 @@ private:
 namespace {
 
 class ExplicitModuleAttrImpl
-    : public gpu::OffloadingLLVMTranslationAttrInterface::FallbackModel<
-          ExplicitModuleAttrImpl> {
+    : public gpu::OffloadingLLVMTranslationAttrInterface::FallbackModel<ExplicitModuleAttrImpl> {
 public:
-  LogicalResult embedBinary(Attribute attribute, Operation *operation,
-                            llvm::IRBuilderBase &builder,
+  LogicalResult embedBinary(Attribute attribute, Operation *operation, llvm::IRBuilderBase &builder,
                             LLVM::ModuleTranslation &moduleTranslation) const {
     auto op = dyn_cast_or_null<gpu::BinaryOp>(operation);
     if (!op)
@@ -323,29 +290,24 @@ public:
     gpu::ObjectAttr object = getFirstObject(op);
     if (!object)
       return failure();
-    return embedExplicitModule(op.getName(), object,
-                               *moduleTranslation.getLLVMModule());
+    return embedExplicitModule(op.getName(), object, *moduleTranslation.getLLVMModule());
   }
 
-  LogicalResult launchKernel(Attribute attribute, Operation *launchFuncOp,
-                             Operation *binaryOp,
+  LogicalResult launchKernel(Attribute attribute, Operation *launchFuncOp, Operation *binaryOp,
                              llvm::IRBuilderBase &builder,
                              LLVM::ModuleTranslation &moduleTranslation) const {
     auto op = dyn_cast_or_null<gpu::LaunchFuncOp>(launchFuncOp);
     if (!op)
-      return launchFuncOp->emitError("operation must be a GPU launch func Op."),
-             failure();
+      return launchFuncOp->emitError("operation must be a GPU launch func Op."), failure();
     if (!isa_and_nonnull<gpu::BinaryOp>(binaryOp))
       return binaryOp->emitError("operation must be a GPU binary."), failure();
-    return llvm::LaunchKernel(*moduleTranslation.getLLVMModule(), builder,
-                              moduleTranslation)
+    return llvm::LaunchKernel(*moduleTranslation.getLLVMModule(), builder, moduleTranslation)
         .createKernelLaunch(op);
   }
 };
 
 } // namespace
 
-void mlir::fly::registerExplicitModuleOffloadingLLVMTranslation(
-    MLIRContext &context) {
+void mlir::fly::registerExplicitModuleOffloadingLLVMTranslation(MLIRContext &context) {
   ExplicitModuleAttr::attachInterface<ExplicitModuleAttrImpl>(context);
 }

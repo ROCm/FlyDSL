@@ -14,9 +14,9 @@ Usage:
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
-import importlib.util
 
 import pytest
 
@@ -27,21 +27,20 @@ _FLYDSL_PY = os.path.join(_HERE, "../../python")
 if importlib.util.find_spec("flydsl._mlir") is None and os.path.isdir(_FLYDSL_PY) and _FLYDSL_PY not in sys.path:
     sys.path.insert(0, _FLYDSL_PY)
 
-import torch
-import torch.distributed as dist
+import mori.shmem as ms  # noqa: E402
+import torch  # noqa: E402
+import torch.distributed as dist  # noqa: E402
+from mori.ir.flydsl.runtime import get_bitcode_path  # noqa: E402
 
-import flydsl.compiler as flyc
-import flydsl.expr as fx
-from flydsl.expr import arith
-from flydsl.expr.extern import ffi
-from flydsl.compiler.extern_link import link_extern
-
-import mori.shmem as ms
-from mori.ir.flydsl.runtime import get_bitcode_path
-
-from flydsl._mlir import ir as _ir
-from flydsl._mlir.dialects import llvm as _llvm_d
-from flydsl._mlir.ir import IntegerAttr as _IntAttr, IntegerType as _IntTy
+import flydsl.compiler as flyc  # noqa: E402
+import flydsl.expr as fx  # noqa: E402
+from flydsl._mlir import ir as _ir  # noqa: E402
+from flydsl._mlir.dialects import llvm as _llvm_d  # noqa: E402
+from flydsl._mlir.ir import IntegerAttr as _IntAttr  # noqa: E402
+from flydsl._mlir.ir import IntegerType as _IntTy  # noqa: E402
+from flydsl.compiler.extern_link import link_extern  # noqa: E402
+from flydsl.expr import arith  # noqa: E402
+from flydsl.expr.extern import ffi  # noqa: E402
 
 
 def _mori_shmem_module_init(hip_module: int) -> None:
@@ -84,8 +83,8 @@ def _reconstruct_i64(lo, hi):
     def _lv(v):
         if isinstance(v, _ir.Value):
             return v
-        if hasattr(v, "__fly_values__"):
-            vals = v.__fly_values__()
+        if hasattr(v, "__extract_to_ir_values__"):
+            vals = v.__extract_to_ir_values__()
             if len(vals) == 1:
                 return vals[0]
         if isinstance(v, int):
@@ -112,8 +111,8 @@ def _store_i32_at(addr_i64, offset_i32, val_i32):
     def _lv(v):
         if isinstance(v, _ir.Value):
             return v
-        if hasattr(v, "__fly_values__"):
-            vals = v.__fly_values__()
+        if hasattr(v, "__extract_to_ir_values__"):
+            vals = v.__extract_to_ir_values__()
             if len(vals) == 1:
                 return vals[0]
         if isinstance(v, int):
@@ -272,6 +271,53 @@ def main():
         sys.exit(1)
     finally:
         cleanup()
+
+
+# Pytest entrypoint: spawn torchrun in a subprocess so this file's
+# multi-PE main() actually runs under ``pytest -m multi_gpu``.
+
+
+def _count_physical_gpus() -> int:
+    """Physical GPU count (subprocess to bypass HIP_VISIBLE_DEVICES)."""
+    import subprocess as _sp
+
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    try:
+        r = _sp.run(
+            [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        return int(r.stdout.strip()) if r.returncode == 0 else 0
+    except Exception:
+        return 0
+
+
+@pytest.mark.multi_gpu
+def test_flydsl_shmem_two_pe():
+    """Regression guard for the FlyDSL+mori shmem SIGSEGV (2 PEs)."""
+    import subprocess as _sp
+
+    phys_ng = _count_physical_gpus()
+    if phys_ng < 2:
+        pytest.skip(f"Requires >= 2 physical GPUs, found {phys_ng}.")
+
+    env = {k: v for k, v in os.environ.items() if k != "HIP_VISIBLE_DEVICES"}
+    cmd = [
+        "torchrun",
+        "--nproc_per_node=2",
+        "--master_port=29790",
+        __file__,
+    ]
+    result = _sp.run(cmd, env=env, timeout=180, capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"flydsl shmem test FAILED (exit code {result.returncode})\n"
+        f"stdout (last 4000 chars):\n{result.stdout[-4000:]}\n"
+        f"stderr (last 4000 chars):\n{result.stderr[-4000:]}"
+    )
+    assert "All tests PASSED" in result.stdout, f"expected success banner in stdout, got:\n{result.stdout[-4000:]}"
 
 
 if __name__ == "__main__":

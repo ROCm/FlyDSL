@@ -13,17 +13,18 @@ Usage:
 """
 
 import time
-import torch
 
 import pytest
+import torch
+
+import flydsl.compiler as flyc
+import flydsl.expr as fx
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 # ─────────────────────────────────────────────────────────────────
 # 1. FlyDSL vec_add
 # ─────────────────────────────────────────────────────────────────
-import flydsl.compiler as flyc
-import flydsl.expr as fx
 
 
 @flyc.kernel
@@ -47,13 +48,10 @@ def vecAddKernel(
     tB = fx.logical_divide(tB, fx.make_layout(vec_width, 1))
     tC = fx.logical_divide(tC, fx.make_layout(vec_width, 1))
     copy_bits = vec_width * 32
-    RABMemRefTy = fx.MemRefType.get(
-        fx.T.f32(), fx.LayoutType.get(vec_width, 1), fx.AddressSpace.Register
-    )
     copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
-    rA = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
-    rB = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
-    rC = fx.memref_alloca(RABMemRefTy, fx.make_layout(vec_width, 1))
+    rA = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rB = fx.make_rmem_tensor(vec_width, fx.Float32)
+    rC = fx.make_rmem_tensor(vec_width, fx.Float32)
     fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
     fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
     vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
@@ -74,9 +72,7 @@ def vecAdd(
 ):
     tile_elems = block_dim * vec_width
     grid_x = (n + tile_elems - 1) // tile_elems
-    vecAddKernel(A, B, C, block_dim, vec_width).launch(
-        grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream
-    )
+    vecAddKernel(A, B, C, block_dim, vec_width).launch(grid=(grid_x, 1, 1), block=(block_dim, 1, 1), stream=stream)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -87,8 +83,7 @@ try:
     import triton.language as tl
 
     @triton.jit
-    def triton_vec_add_kernel(a_ptr, b_ptr, c_ptr, n,
-                              BLOCK: tl.constexpr = 1024):
+    def triton_vec_add_kernel(a_ptr, b_ptr, c_ptr, n, BLOCK: tl.constexpr = 1024):
         pid = tl.program_id(0)
         offsets = pid * BLOCK + tl.arange(0, BLOCK)
         mask = offsets < n

@@ -13,10 +13,24 @@ build-backend = "setuptools.build_meta"
 
 [tool.black]
 line-length = 120
+extend-exclude = """
+/(
+  build
+  | build_.*
+  | build-fly
+  | thirdparty
+)/
+"""
 
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+extend-exclude = [
+  "build",
+  "build_*",
+  "build-fly",
+  "thirdparty",
+]
 
 [tool.ruff.lint]
 select = [

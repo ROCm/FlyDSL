@@ -126,6 +126,7 @@ def _coerce_other(self, other, *, loc=None, ip=None):
     # Broadcast scalar to vector when self is a vector and other is scalar
     if isinstance(self.type, ir.VectorType) and not isinstance(other.type, ir.VectorType):
         from ..._mlir.dialects import vector as _vector
+
         return _vector.broadcast(self.type, _to_raw(other), loc=loc, ip=ip)
     return other
 
@@ -405,25 +406,29 @@ class ArithValue(ir.Value):
     def rsqrt(self, *, fastmath=None, loc=None):
         """Reciprocal square root: 1/sqrt(self)."""
         from ..._mlir.dialects import math as _math
+
         return _math.rsqrt(self, fastmath=fastmath, loc=loc)
 
     def exp2(self, *, fastmath=None, loc=None):
         """Base-2 exponential: 2^self."""
         from ..._mlir.dialects import math as _math
+
         return _math.exp2(self, fastmath=fastmath, loc=loc)
 
     def shuffle_xor(self, offset, width, *, loc=None):
         """GPU warp shuffle with XOR mode."""
         from ..._mlir.dialects.gpu import ShuffleOp
+
         if isinstance(offset, int):
             offset = constant(offset, type=T.i32(), loc=loc)
         if isinstance(width, int):
             width = constant(width, type=T.i32(), loc=loc)
-        return ShuffleOp(_to_raw(self), _to_raw(offset),
-                         _to_raw(width), mode="xor", loc=loc).shuffleResult
+        return ShuffleOp(_to_raw(self), _to_raw(offset), _to_raw(width), mode="xor", loc=loc).shuffleResult
 
     def index_cast(self, target_type, *, loc=None):
         """Cast between index and integer types."""
+        if self.type == target_type:
+            return self
         return arith.IndexCastOp(target_type, self, loc=loc).result
 
     def __hash__(self):
@@ -438,7 +443,7 @@ class ArithValue(ir.Value):
             op_name = owner.name
             return f"ArithValue(type={ty}, op={op_name})"
         except Exception:
-            return f"ArithValue(type=?)"
+            return "ArithValue(type=?)"
 
     def __repr__(self):
         return self.__str__()
@@ -447,6 +452,7 @@ class ArithValue(ir.Value):
 # =========================================================================
 # Function-level arith API
 # =========================================================================
+
 
 def _to_raw(v):
     """Convert ArithValue / Numeric (Int32, Boolean, …) to raw ir.Value."""
@@ -505,6 +511,8 @@ def constant_vector(element_value, vector_type, *, loc=None):
 def index_cast(target_type, value, *, loc=None):
     """Cast between index and integer types."""
     v = _to_raw(value)
+    if v.type == target_type:
+        return v
     return arith.IndexCastOp(target_type, v, loc=loc).result
 
 

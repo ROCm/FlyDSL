@@ -30,9 +30,9 @@ gpu.module @promote_rmem_to_vector_ssa {
     %acc_stride = fly.make_int_tuple() : () -> !fly.int_tuple<(1,0)>
     %acc_layout = fly.make_layout(%acc_shape, %acc_stride) : (!fly.int_tuple<(4,1)>, !fly.int_tuple<(1,0)>) -> !fly.layout<(4,1):(1,0)>
 
-    %a_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
-    %b_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f16, register>
-    %acc_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 8 : i64}} : () -> !fly.ptr<f32, register>
+    %a_ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+    %b_ptr = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f16, register>
+    %acc_ptr = fly.make_ptr() {dictAttrs = {allocSize = 8 : i64}} : () -> !fly.ptr<f32, register>
 
     fly.ptr.store(%a_init, %a_ptr) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
     fly.ptr.store(%b_init, %b_ptr) : (vector<4xf16>, !fly.ptr<f16, register>) -> ()
@@ -99,9 +99,9 @@ gpu.module @promote_rmem_to_vector_ssa {
     %acc_stride = fly.make_int_tuple() : () -> !fly.int_tuple<(1,0)>
     %acc_layout = fly.make_layout(%acc_shape, %acc_stride) : (!fly.int_tuple<(4,1)>, !fly.int_tuple<(1,0)>) -> !fly.layout<(4,1):(1,0)>
 
-    %a_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 8 : i64}} : () -> !fly.ptr<f8E4M3FNUZ, register>
-    %b_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 8 : i64}} : () -> !fly.ptr<f8E4M3FNUZ, register>
-    %acc_ptr = fly.make_ptr() {dictAttrs = {allocaSize = 8 : i64}} : () -> !fly.ptr<f32, register>
+    %a_ptr = fly.make_ptr() {dictAttrs = {allocSize = 8 : i64}} : () -> !fly.ptr<f8E4M3FNUZ, register>
+    %b_ptr = fly.make_ptr() {dictAttrs = {allocSize = 8 : i64}} : () -> !fly.ptr<f8E4M3FNUZ, register>
+    %acc_ptr = fly.make_ptr() {dictAttrs = {allocSize = 8 : i64}} : () -> !fly.ptr<f32, register>
 
     fly.ptr.store(%a_init, %a_ptr) : (vector<8xf8E4M3FNUZ>, !fly.ptr<f8E4M3FNUZ, register>) -> ()
     fly.ptr.store(%b_init, %b_ptr) : (vector<8xf8E4M3FNUZ>, !fly.ptr<f8E4M3FNUZ, register>) -> ()
@@ -137,7 +137,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     %c0 = arith.constant 0 : index
     %zero = arith.constant dense<0.000000e+00> : vector<4xf32>
     %one = arith.constant dense<1.000000e+00> : vector<4xf32>
-    %reg = fly.make_ptr() {dictAttrs = {allocaSize = 4 : i64}} : () -> !fly.ptr<f32, register>
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 4 : i64}} : () -> !fly.ptr<f32, register>
 
     fly.ptr.store(%zero, %reg) : (vector<4xf32>, !fly.ptr<f32, register>) -> ()
     scf.if %pred {
@@ -169,7 +169,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     %c0_i32 = arith.constant 0 : i32
     %c1_i32 = arith.constant 1 : i32
     %c2_i32 = arith.constant 2 : i32
-    %reg = fly.make_ptr() {dictAttrs = {allocaSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
 
     fly.ptr.store(%c0_i32, %reg) : (i32, !fly.ptr<i32, register>) -> ()
     scf.while : () -> () {
@@ -215,7 +215,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     %c0_i32 = arith.constant 0 : i32
     %c1_i32 = arith.constant 1 : i32
     %c2_i32 = arith.constant 2 : i32
-    %reg = fly.make_ptr() {dictAttrs = {allocaSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
 
     fly.ptr.store(%c0_i32, %reg) : (i32, !fly.ptr<i32, register>) -> ()
     %if_res = scf.if %pred -> (i32) {
@@ -275,7 +275,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     %c2 = arith.constant 2 : index
     %c0_i32 = arith.constant 0 : i32
     %c1_i32 = arith.constant 1 : i32
-    %reg = fly.make_ptr() {dictAttrs = {allocaSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+    %reg = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
 
     fly.ptr.store(%c0_i32, %reg) : (i32, !fly.ptr<i32, register>) -> ()
     %sum = scf.for %iv = %c0 to %c2 step %c1 iter_args(%sum_iter = %c0_i32) -> (i32) {
@@ -335,7 +335,7 @@ gpu.module @promote_rmem_to_vector_ssa {
     %c1_i32 = arith.constant 1 : i32
 
     %if_res = scf.if %pred -> (i32) {
-      %local = fly.make_ptr() {dictAttrs = {allocaSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+      %local = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
       fly.ptr.store(%c0_i32, %local) : (i32, !fly.ptr<i32, register>) -> ()
 
       scf.for %iv = %c0 to %c2 step %c1 {
@@ -372,7 +372,7 @@ gpu.module @promote_rmem_to_vector_ssa {
   gpu.func @promote_void_if_with_region_local_register(%out: !fly.ptr<i32, global>, %pred: i1) kernel {
     %c42_i32 = arith.constant 42 : i32
     scf.if %pred {
-      %local = fly.make_ptr() {dictAttrs = {allocaSize = 1 : i64}} : () -> !fly.ptr<i32, register>
+      %local = fly.make_ptr() {dictAttrs = {allocSize = 1 : i64}} : () -> !fly.ptr<i32, register>
       fly.ptr.store(%c42_i32, %local) : (i32, !fly.ptr<i32, register>) -> ()
       %val = fly.ptr.load(%local) : (!fly.ptr<i32, register>) -> i32
       fly.ptr.store(%val, %out) : (i32, !fly.ptr<i32, global>) -> ()

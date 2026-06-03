@@ -4,8 +4,10 @@
 import ctypes
 import enum
 import operator
+import types
+from collections.abc import Callable as AbcCallable
 from inspect import isclass
-from typing import Generic, Type, TypeVar, overload
+from typing import Any, Callable, List, Type, get_origin, overload
 
 from flydsl.runtime.device import get_rocm_arch
 
@@ -62,7 +64,12 @@ def default_f8_type() -> ir.Type:
     """Select E4M3 f8 type compatible with the current GPU arch.
 
     - gfx95* (MI350): FP8 E4M3FN (OCP)
+    - gfx12*: FP8 E4M3FN (OCP)
     - gfx94* (MI300): FP8 E4M3FNUZ
+
+    Raises ``RuntimeError`` on gfx11* (RDNA3/RDNA3.5): these chips have no
+    native FP8 instructions, so FP8 compute would surface as a late LLVM
+    "cannot select" error. Fail early with a clear message instead.
     """
     arch = ""
     try:
@@ -71,6 +78,13 @@ def default_f8_type() -> ir.Type:
         arch = ""
     if "gfx95" in arch or "gfx12" in arch:
         return Float8E4M3FN.ir_type
+    if arch.startswith("gfx11"):
+        raise RuntimeError(
+            f"default_f8_type(): no native FP8 support on {arch}; "
+            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*. "
+            "Use bf16/f16 GEMM via "
+            "`rdna3_f16_gemm.create_wmma_gemm_module` on gfx11* targets."
+        )
     return Float8E4M3FNUZ.ir_type
 
 
@@ -268,6 +282,7 @@ __all__ = [
     "Layout",
     "Swizzle",
     "ComposedLayout",
+    "Pointer",
     "Tensor",
     "CopyAtom",
     "Tile",
@@ -321,11 +336,197 @@ def is_target_address_space(address_space, expected) -> bool:
     return str(actual) == str(exp)
 
 
-ValueT = TypeVar("ValueT")
+class Constexpr:
+    _annotation_cache: dict = {}
+    _value_cache: dict = {}
 
+    value_type: type | None = None
+    value: Any = None
+    is_specialized: bool = False
 
-class Constexpr(Generic[ValueT]):
-    pass
+    @staticmethod
+    def _type_name(param) -> str:
+        if Constexpr._is_callable_annotation(param):
+            return "Callable"
+        return getattr(param, "__name__", repr(param))
+
+    @staticmethod
+    def _is_callable_annotation(param) -> bool:
+        if param is Callable or param is AbcCallable:
+            return True
+        return get_origin(param) is AbcCallable
+
+    @staticmethod
+    def _is_tuple_annotation(param) -> bool:
+        return param is tuple or get_origin(param) is tuple
+
+    @staticmethod
+    def _is_supported_annotation(param) -> bool:
+        return param in (int, bool, float) or Constexpr._is_tuple_annotation(param)
+
+    @staticmethod
+    def _scalar_cache_signature(value):
+        if type(value) is bool:
+            return (bool, value)
+        if type(value) is int:
+            return (int, value)
+        if type(value) is float:
+            return (float, value)
+        return None
+
+    @staticmethod
+    def _tuple_cache_signature(value):
+        return ("tuple", tuple(Constexpr.value_signature(item) for item in value))
+
+    @staticmethod
+    def _lambda_cache_signature(value):
+        if not isinstance(value, types.FunctionType) or value.__name__ != "<lambda>":
+            return None
+        if value.__code__.co_freevars or value.__closure__:
+            raise TypeError("Constexpr lambda values must not capture free variables")
+        global_refs = [name for name in value.__code__.co_names if name in value.__globals__]
+        if global_refs:
+            raise TypeError(f"Constexpr lambda values must not reference globals: {global_refs}")
+        defaults = value.__defaults__ or ()
+        kwdefaults = value.__kwdefaults__ or {}
+        if kwdefaults:
+            raise TypeError("Constexpr lambda values must not use keyword-only defaults")
+        return (
+            "lambda",
+            value.__code__.co_argcount,
+            value.__code__.co_posonlyargcount,
+            value.__code__.co_kwonlyargcount,
+            value.__code__.co_nlocals,
+            value.__code__.co_stacksize,
+            value.__code__.co_flags,
+            value.__code__.co_code,
+            tuple(Constexpr._lambda_const_cache_signature(item) for item in value.__code__.co_consts),
+            value.__code__.co_names,
+            value.__code__.co_varnames,
+            tuple(Constexpr.value_signature(item) for item in defaults),
+        )
+
+    @staticmethod
+    def _lambda_const_cache_signature(value):
+        if value is None:
+            return (type(None), None)
+        return Constexpr.value_signature(value)
+
+    @staticmethod
+    def value_signature(value):
+        scalar_sig = Constexpr._scalar_cache_signature(value)
+        if scalar_sig is not None:
+            return scalar_sig
+        if isinstance(value, tuple):
+            return Constexpr._tuple_cache_signature(value)
+        lambda_sig = Constexpr._lambda_cache_signature(value)
+        if lambda_sig is not None:
+            return lambda_sig
+        raise TypeError(
+            "Constexpr values support only int, bool, float, tuples of those scalar values, "
+            "and lambdas without free variables"
+        )
+
+    def __class_getitem__(cls, param):
+        if cls is not Constexpr:
+            raise TypeError(f"{cls.__name__} cannot be re-parametrized")
+        if not Constexpr._is_supported_annotation(param) and not Constexpr._is_callable_annotation(param):
+            raise TypeError(
+                "Constexpr[...] supports only int, bool, float, tuple, or Callable annotations; " f"got {param!r}"
+            )
+        cached = Constexpr._annotation_cache.get(param)
+        if cached is not None:
+            return cached
+        result = type(
+            f"Constexpr[{Constexpr._type_name(param)}]",
+            (Constexpr,),
+            {
+                "__origin__": Constexpr,
+                "__args__": (param,),
+                "value_type": param,
+                "value": None,
+                "is_specialized": False,
+            },
+        )
+        Constexpr._annotation_cache[param] = result
+        return result
+
+    @classmethod
+    def _specialize(cls, value):
+        cache_key = Constexpr.value_signature(value)
+        cached = Constexpr._value_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        result = type(
+            f"Constexpr[{value!r}]",
+            (Constexpr,),
+            {
+                "__origin__": Constexpr,
+                "__args__": (type(value),),
+                "value_type": type(value),
+                "value": value,
+                "is_specialized": True,
+            },
+        )
+        Constexpr._value_cache[cache_key] = result
+        return result
+
+    @classmethod
+    def __construct_from_ir_values__(cls, values):
+        if values:
+            raise ValueError(f"{cls.__name__} expects 0 ir.Values, got {len(values)}")
+        if not cls.is_specialized:
+            raise TypeError(
+                f"{cls.__name__} must be value-specialized (e.g. Constexpr[42]) "
+                f"before reconstruction; the surrounding schema did not bind a value."
+            )
+        return cls.value
+
+    @classmethod
+    def __extract_to_ir_values__(cls):
+        return []
+
+    @classmethod
+    def __get_ir_types__(cls):
+        return []
+
+    @classmethod
+    def __get_c_pointers__(cls):
+        return []
+
+    @classmethod
+    def __coerce__(cls, value):
+        inner = cls.value_type
+        if inner is not None:
+            if Constexpr._is_callable_annotation(inner):
+                lambda_sig = Constexpr._lambda_cache_signature(value)
+                if lambda_sig is None:
+                    raise TypeError(f"expects lambda without free variables, got {type(value).__name__}")
+            elif Constexpr._is_tuple_annotation(inner):
+                if not isinstance(value, tuple):
+                    raise TypeError(f"expects tuple, got {type(value).__name__}")
+                Constexpr.value_signature(value)
+            elif inner in (int, bool, float):
+                if type(value) is not inner:
+                    raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
+                Constexpr.value_signature(value)
+            elif not isinstance(value, inner):
+                raise TypeError(f"expects {getattr(inner, '__name__', repr(inner))}, got {type(value).__name__}")
+            else:
+                Constexpr.value_signature(value)
+        return value
+
+    @classmethod
+    def __specialize_for_value__(cls, value):
+        if cls.is_specialized:
+            return cls
+        return Constexpr._specialize(value)
+
+    @staticmethod
+    def is_constexpr_annotation(annotation) -> bool:
+        if annotation is Constexpr:
+            return True
+        return isinstance(annotation, type) and issubclass(annotation, Constexpr)
 
 
 class BuiltinDslType(ir.Value):
@@ -340,10 +541,10 @@ class BuiltinDslType(ir.Value):
         return f"{type(self).__name__}<{super().__str__()}>"
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return cls(values[0])
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self]
 
 
@@ -614,6 +815,40 @@ class Pointer(BuiltinDslType):
     def alignment(self):
         return self.type.alignment
 
+    @traced_op
+    def load(self, loc=None, ip=None):
+        return ptr_load(self, loc=loc, ip=ip)
+
+    @traced_op
+    def store(self, value, loc=None, ip=None):
+        if isinstance(value, (bool, int, float)):
+            value = self.element_type(value)
+        return ptr_store(value, self, loc=loc, ip=ip)
+
+    @traced_op
+    def __getitem__(self, offset, loc=None, ip=None):
+        return (self + offset).load(loc=loc, ip=ip)
+
+    @traced_op
+    def __setitem__(self, offset, value, loc=None, ip=None):
+        (self + offset).store(value, loc=loc, ip=ip)
+
+    @traced_op
+    def __add__(self, offset, loc=None, ip=None):
+        return add_offset(self, offset, loc=loc, ip=ip)
+
+    __radd__ = __add__
+
+    @traced_op
+    def __sub__(self, offset, loc=None, ip=None):
+        if isinstance(offset, ir.Value) and not isinstance(offset, ArithValue):
+            offset = ArithValue(offset, loc=loc, ip=ip)
+        return add_offset(self, -offset, loc=loc, ip=ip)
+
+    @traced_op
+    def view(self, layout, loc=None, ip=None):
+        return make_view(self, layout, loc=loc, ip=ip)
+
 
 @ir.register_value_caster(MemRefType.static_typeid, replace=True)
 @ir.register_value_caster(CoordTensorType.static_typeid, replace=True)
@@ -872,10 +1107,10 @@ class Stream:
         self.value = value
         self._stream_storage = None
 
-    def __fly_types__(self):
+    def __get_ir_types__(self):
         return [gpu.AsyncTokenType.get()]
 
-    def __fly_ptrs__(self):
+    def __get_c_pointers__(self):
         if isinstance(self.value, int):
             self._stream_storage = ctypes.c_void_p(self.value)
         elif self.value is None:
@@ -883,6 +1118,9 @@ class Stream:
         else:
             self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
         return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
+
+    def __cache_signature__(self):
+        return (type(self),)
 
     @staticmethod
     def _extract_stream_value(arg):
@@ -898,10 +1136,10 @@ class Stream:
         return ctypes.c_void_p, cls._extract_stream_value
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return Stream(values[0])
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self.value]
 
 
@@ -1128,15 +1366,12 @@ class Vector(ArithValue):
 
     __hash__ = ArithValue.__hash__
 
-    def __fly_values__(self):
+    def __extract_to_ir_values__(self):
         return [self]
 
     @classmethod
-    def __fly_construct__(cls, values):
+    def __construct_from_ir_values__(cls, values):
         return cls(values[0])
-
-    def __fly_construct_from_values__(self, values):
-        return Vector(values[0], self.shape, self.dtype)
 
     def to(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
         if dtype is ir.Value:
@@ -1496,3 +1731,101 @@ def ones_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
 
 def zeros_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
     return Vector.zeros_like(a, dtype, loc=loc, ip=ip)
+
+
+class Array:
+    _cache: dict[tuple, type] = {}
+
+    class _Base:
+        dtype = None
+        size = None
+        align = None
+
+        def __init__(self, ptr_value):
+            self._ptr_value = ptr_value
+
+        def __repr__(self):
+            cls = type(self)
+            name = getattr(cls.dtype, "__name__", repr(cls.dtype))
+            suffix = f", {cls.align}" if cls.align != max(1, cls.dtype.width // 8) else ""
+            return f"Array[{name}, {cls.size}{suffix}]({self._ptr_value})"
+
+        @property
+        def ptr(self):
+            return self._ptr_value
+
+        @classmethod
+        def __construct_from_ir_values__(cls, values):
+            if len(values) != 1:
+                raise ValueError(f"{cls.__name__} expects 1 ir.Value, got {len(values)}")
+            return cls(values[0])
+
+        def __extract_to_ir_values__(self) -> List[ir.Value]:
+            return [self._ptr_value]
+
+        @classmethod
+        def __dsl_size_of__(cls) -> int:
+            total_bytes = max(1, cls.dtype.width * cls.size // 8)
+            return total_bytes
+
+        @classmethod
+        def __dsl_align_of__(cls) -> int:
+            return cls.align
+
+        @classmethod
+        def __peek_from_ptr__(cls, ptr):
+            typed_ptr = recast_iter(cls.dtype, ptr)
+            return cls(typed_ptr)
+
+        @classmethod
+        def __poke_into_ptr__(cls, ptr, value):
+            raise NotImplementedError(f"{cls.__name__} does not support __poke_into_ptr__ yet")
+
+        @traced_op
+        def __getitem__(self, offset, loc=None, ip=None):
+            return self.ptr.__getitem__(offset, loc=loc, ip=ip)
+
+        @traced_op
+        def __setitem__(self, offset, value, loc=None, ip=None):
+            self.ptr.__setitem__(offset, value, loc=loc, ip=ip)
+
+        def view(self, layout, *, loc=None, ip=None):
+            return make_view(self._ptr_value, layout, loc=loc, ip=ip)
+
+    def __class_getitem__(cls, params):
+        if not isinstance(params, tuple):
+            params = (params,)
+        if len(params) == 2:
+            dtype, size = params
+            align = None
+        elif len(params) == 3:
+            dtype, size, align = params
+        else:
+            raise TypeError("Array expects Array[dtype, size] or Array[dtype, size, align]")
+
+        if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+            raise TypeError(f"Array dtype must be a Numeric subclass, got {dtype!r}")
+        if not isinstance(size, int) or size <= 0:
+            raise TypeError(f"Array size must be a positive integer, got {size!r}")
+
+        elem_byte_size = max(1, dtype.width // 8)
+        if align is None:
+            align = elem_byte_size
+        else:
+            if not isinstance(align, int) or align <= 0:
+                raise TypeError(f"Array align must be a positive integer, got {align!r}")
+
+        cache_key = (dtype, size, align)
+        cached = cls._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        name = getattr(dtype, "__name__", repr(dtype))
+        suffix = f", {align}" if align != elem_byte_size else ""
+        array_type = type(
+            f"Array[{name}, {size}{suffix}]",
+            (cls._Base,),
+            {"dtype": dtype, "size": size, "align": align},
+        )
+        cls._cache[cache_key] = array_type
+        return array_type

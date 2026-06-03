@@ -12,8 +12,8 @@ def _to_raw_value(obj):
         return obj
     if isinstance(obj, type):
         return obj
-    if hasattr(obj, "__fly_values__"):
-        values = obj.__fly_values__()
+    if hasattr(obj, "__extract_to_ir_values__"):
+        values = obj.__extract_to_ir_values__()
         if len(values) != 1:
             raise ValueError(f"Primitive function expects 1 value, got {len(values)}")
         return values[0]

@@ -2,9 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 from ..._mlir import ir
-from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX1250_WMMAType
-from ..._mlir.dialects import arith, fly
-from ..._mlir.dialects._fly_enum_gen import AddressSpace
+from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import MmaOpGFX11_WMMAType, MmaOpGFX1250_WMMAType
 from ..._mlir.dialects.fly import AtomicOp, PointerType
 from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferAtomicType,
@@ -14,13 +12,8 @@ from ..._mlir.dialects.fly_rocdl import (
     TargetAddressSpace,
 )
 from ..._mlir.extras import types as T
-from ..primitive import (
-    get_iter,
-    get_layout,
-    make_ptr,
-    make_view,
-)
-from ..typing import Tensor
+from ..primitive import cosize, get_iter, get_layout, get_scalar, make_ptr, make_view
+from ..typing import Int16, Int32, Int64, Tensor
 
 
 def BufferCopy(bit_size):
@@ -83,59 +76,93 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
-def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
+def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
+    """Create an arch-appropriate WMMA atom.
+
+    Supported kwargs (gfx11 integer paths only — iu8 / iu4):
+        sign_a (bool, default False): treat A operand as signed.
+        sign_b (bool, default False): treat B operand as signed.
+        clamp  (bool, default False): saturate integer accumulator.
+    These are forwarded verbatim to MmaOpGFX11_WMMAType.get(); the ROCDL
+    intrinsic's verify() will reject them on fp16/bf16 paths.
+    The gfx12 (RDNA4) path does not expose these knobs yet and will raise
+    if any are passed as True.
+    Future WMMA ops for new architectures should extend kwargs here rather
+    than growing the positional signature.
+    """
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
         ty_acc = ir.F32Type.get()
     else:
         ty_acc = elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc
-    return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+
+    # Arch-aware dispatch:
+    #   * RDNA3 / RDNA3.5 (gfx1100..gfx1152) use the legacy v16-operand WMMA ABI.
+    #   * RDNA4 (gfx1250)                    uses the new v8-operand ABI.
+    from ...runtime.device import get_rocm_arch
+
+    arch = (get_rocm_arch() or "").lower()
+    if arch.startswith("gfx11"):
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
+    if arch.startswith("gfx12"):
+        if any(kwargs.get(k) for k in ("sign_a", "sign_b", "clamp")):
+            raise ValueError("sign_a/sign_b/clamp are not supported on the gfx12 (RDNA4) WMMA path yet")
+        return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+    raise ValueError(
+        f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
+    )
 
 
-def make_buffer_tensor(tensor: Tensor, max_size: bool = True) -> Tensor:
-    def _elem_bit_width(elem_ty):
-        if hasattr(elem_ty, "width"):
-            return int(elem_ty.width)
-        return 0
+def make_buffer_tensor(
+    tensor: Tensor,
+    max_size: bool = True,
+    *,
+    num_records_bytes=None,
+) -> Tensor:
+    """Wrap ``tensor`` in a buffer-resource view for hardware OOB-checked
+    loads / stores.
 
-    MAX_BUFFER_SIZE = 0xFFFFFFFF
-
+    ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
+    Pass ``num_records_bytes`` when the byte count is a compile-time
+    constant (folds to a constant in IR).  Otherwise with ``max_size=False``
+    it is derived at runtime from ``cosize(layout) * elem_bytes``.
+    """
     elem_ty = tensor.element_type
 
     ptr = get_iter(tensor)
     layout = get_layout(tensor)
 
-    elem_bits = _elem_bit_width(elem_ty)
-    elem_bytes = elem_bits // 8 if elem_bits > 0 else 1
-
-    if max_size:
-        # Always use max buffer size to handle dynamic tensor shapes safely.
-        # The JIT cache may reuse a compiled kernel for tensors of different
-        # leading dimensions; a static num_records from the traced shape would
-        # silently truncate larger tensors.  This matches the behavior of
-        # buffer_ops.create_buffer_resource(max_size=True).
-        num_records_bytes = MAX_BUFFER_SIZE
-    elif layout.is_static:
-        cosize = fly.cosize(layout)
-        num_records_bytes = cosize.get_static_leaf_int * elem_bytes
-        if num_records_bytes > MAX_BUFFER_SIZE:
-            num_records_bytes = MAX_BUFFER_SIZE
+    if num_records_bytes is not None:
+        # Coerce to i64: ROCDL make.buffer.rsrc requires an i64 num_records
+        # operand.  Int64(...) handles Python int, other fx Integer types
+        # (e.g. fx.Int32(M) * N), and raw ir.Value with i32/index/float types
+        # -- emitting the appropriate extension / cast.  Idempotent when the
+        # input is already Int64.
+        if not isinstance(num_records_bytes, Int64):
+            num_records_bytes = Int64(num_records_bytes)
+    elif max_size:
+        num_records_bytes = Int64(0xFFFFFFFF)
     else:
-        num_records_bytes = MAX_BUFFER_SIZE
+        elem_bits = elem_ty.width
+        if elem_bits % 8 == 0:
+            num_records_bytes = Int64(get_scalar(cosize(layout)) * (elem_bits // 8))
+        else:
+            num_records_bytes = Int64((get_scalar(cosize(layout)) * elem_bits + 7) // 8)
 
-    stride_val = arith.ConstantOp(T.i16(), ir.IntegerAttr.get(T.i16(), 0)).result
-    num_records_val = arith.ConstantOp(T.i64(), ir.IntegerAttr.get(T.i64(), num_records_bytes)).result
     from ..buffer_ops import _get_buffer_flags
 
-    flags_val_int = _get_buffer_flags()
-    flags_val = arith.ConstantOp(T.i32(), ir.IntegerAttr.get(T.i32(), flags_val_int)).result
-
-    src_ptr_ty = PointerType(ptr.type)
     buf_ptr_ty = PointerType.get(
         elem_ty=elem_ty.ir_type,
         address_space=TargetAddressSpace.BufferDesc,
-        alignment=src_ptr_ty.alignment,
+        alignment=ptr.alignment,
     )
-    buf_ptr = make_ptr(buf_ptr_ty, [ptr, stride_val, num_records_val, flags_val])
-
+    buf_ptr = make_ptr(
+        buf_ptr_ty,
+        [
+            ptr,
+            Int16(0).ir_value(),
+            num_records_bytes.ir_value(),
+            Int32(_get_buffer_flags()).ir_value(),
+        ],
+    )
     return make_view(buf_ptr, layout)

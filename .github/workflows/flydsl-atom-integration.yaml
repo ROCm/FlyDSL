@@ -44,13 +44,28 @@ jobs:
             accuracy_threshold: 0.92
             runner: linux-flydsl-mi355-8
             env_vars: ""
+          - model_name: gpt-oss-120b
+            model_path: openai/gpt-oss-120b
+            extra_args: --kv_cache_dtype fp8 --gpu-memory-utilization 0.3
+            accuracy_threshold: 0.38
+            runner: linux-flydsl-mi355-1
+            env_vars: |
+              ATOM_GPT_OSS_MODEL=1
+              HSA_NO_SCRATCH_RECLAIM=1
 
     env:
       CONTAINER_NAME: flydsl_atom_${{ strategy.job-index }}
+      # Keep checkout independent of runner-local git-cache rewrites.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
 
     steps:
       - name: Checkout FlyDSL utility scripts
         uses: actions/checkout@v4
+        env:
+          # Keep checkout independent of runner-local git-cache rewrites.
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
         with:
           sparse-checkout: |
             scripts/install_awscli.sh
@@ -58,6 +73,10 @@ jobs:
 
       - name: Checkout upstream ATOM repo
         uses: actions/checkout@v4
+        env:
+          # Keep checkout independent of runner-local git-cache rewrites.
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
         with:
           repository: ${{ env.ATOM_REPOSITORY }}
           ref: ${{ env.ATOM_REF }}

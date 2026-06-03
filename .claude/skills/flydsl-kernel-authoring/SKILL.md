@@ -26,16 +26,18 @@ FlyDSL is a Python DSL and MLIR-based compiler for writing high-performance GPU 
 ```
 Python (@flyc.kernel/@flyc.jit)
   -> AST Rewriting (for/if -> scf.for/scf.if)
-  -> MLIR Tracing (generates Fly dialect + gpu/arith/scf/memref ops)
+  -> MLIR Tracing (generates Fly dialect + gpu/arith/scf/memref/vector ops)
   -> MlirCompiler.compile() (Fly -> ROCDL -> LLVM -> HSACO binary)
   -> JITCFunction (ExecutionEngine wrapper)
 ```
 
 ### Key Passes
-1. `gpu-kernel-outlining` - Move kernel bodies to `gpu.func`
-2. `fly-layout-lowering` - Lower layout algebra to arithmetic
-3. `convert-fly-to-rocdl` - Fly ops -> ROCDL intrinsics
-4. `gpu-module-to-binary` - Emit HSACO binary
+Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages — see `docs/architecture_guide.md` §3 for the per-pass table. Highlights:
+1. `fly-rewrite-func-signature` - Rewrite DSL types at function / SCF boundaries to packed LLVM structs
+2. `fly-layout-lowering` - Lower layout algebra (`fly.crd2idx`, partitions, divides) to arithmetic
+3. `fly-convert-atom-call-to-ssa-form` + `fly-promote-regmem-to-vectorssa` - Lift copy/MMA atom calls and register memory to vector SSA
+4. `convert-fly-to-rocdl` - Fly ops -> ROCDL intrinsics
+5. `gpu-module-to-binary{format=fatbin}` - Emit HSACO binary via LLVM AMDGPU backend
 
 ### Key Source Paths
 - `python/flydsl/compiler/` - JIT compilation (jit_function.py, kernel_function.py)
@@ -127,7 +129,7 @@ Products combine two layouts to create a larger layout:
 ```python
 fx.logical_product(layout, tiler)   # Basic mode-wise concatenation
 fx.raked_product(thr, val)          # Interleaved access pattern (common for TiledCopy)
-fx.block_product(layout, tiler)     # Blocked access pattern
+fx.blocked_product(layout, tiler)   # Blocked access pattern
 fx.zipped_product(layout, tiler)    # Zipped modes
 fx.tiled_product(layout, tiler)     # Hierarchical tiled structure
 fx.flat_product(layout, tiler)      # Flattened result
@@ -511,9 +513,8 @@ def my_kernel(A: fx.Tensor, B: fx.Tensor, BLOCK_DIM: fx.Constexpr[int]):
     tB = fx.logical_divide(tB, fx.make_layout(1, 1))
 
     # 4. Allocate registers
-    RABTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(1, 1), fx.AddressSpace.Register)
     copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    rA = fx.memref_alloca(RABTy, fx.make_layout(1, 1))
+    rA = fx.make_rmem_tensor(1, fx.Float32)
 
     # 5. Copy: global -> register -> compute -> global
     fx.copy_atom_call(copyAtom, fx.slice(tA, (None, tid)), rA)
@@ -525,10 +526,9 @@ def my_kernel(A: fx.Tensor, B: fx.Tensor, BLOCK_DIM: fx.Constexpr[int]):
 ```python
 VEC_WIDTH = 4
 copy_bits = VEC_WIDTH * 32   # 128 bits
-MemRefTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register)
 copyAtom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
 
-rA = fx.memref_alloca(MemRefTy, fx.make_layout(VEC_WIDTH, 1))
+rA = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
 
 # Divide for VEC_WIDTH elements per thread
 tA = fx.logical_divide(tA, fx.make_layout(VEC_WIDTH, 1))
@@ -679,10 +679,9 @@ def elementwise_kernel(In: fx.Tensor, Out: fx.Tensor, BLOCK: fx.Constexpr[int], 
     tOut = fx.slice(tOut, (None, bid))
     tIn = fx.logical_divide(tIn, fx.make_layout(VEC, 1))
     tOut = fx.logical_divide(tOut, fx.make_layout(VEC, 1))
-    MemTy = fx.MemRefType.get(fx.T.f32(), fx.LayoutType.get(VEC, 1), fx.AddressSpace.Register)
     copy = fx.make_copy_atom(fx.UniversalCopy(VEC * 32), fx.Float32)
-    rIn = fx.memref_alloca(MemTy, fx.make_layout(VEC, 1))
-    rOut = fx.memref_alloca(MemTy, fx.make_layout(VEC, 1))
+    rIn = fx.make_rmem_tensor(VEC, fx.Float32)
+    rOut = fx.make_rmem_tensor(VEC, fx.Float32)
     fx.copy_atom_call(copy, fx.slice(tIn, (None, tid)), rIn)
     # Transform
 v = Vec(fx.memref_load_vec(rIn))
