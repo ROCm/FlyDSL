@@ -111,15 +111,13 @@ def _create_mlir_context(*, load_dialects=True):
 _NOT_IN_BASELINE = object()
 
 
-# Environment variables that influence code generation. Their current values
-# enter the hot cache key so cross-process / cross-config artifacts don't collide.
+# Environment variables that influence code generation *independently of the
+# resolved GPUTarget*. Their current values enter the hot cache key so
+# cross-process / cross-config artifacts don't collide.
 _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_OPT_LEVEL",
     "FLYDSL_COMPILE_BACKEND",
     "FLYDSL_COMPILE_LLVM_DIR",
-    "ARCH",
-    "FLYDSL_GPU_ARCH",
-    "HSA_OVERRIDE_GFX_VERSION",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
 )
