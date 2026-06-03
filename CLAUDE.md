@@ -155,7 +155,7 @@ hard-coding behavior when possible. Shared wave-size logic lives in
 ## Kernel Entry Points
 
 - **Paged attention decode**: `kernels/pa_decode_fp8.py`; primary regression harness is `tests/kernels/test_pa.py`.
-- **Flash/MLA attention**: `kernels/flash_attn_func.py`, `kernels/mla_fwd_decode.py`, `kernels/mla_fwd_decode_m16x8_fp8_fp8.py`.
+- **Flash/MLA attention**: `kernels/flash_attn_generic.py`, `kernels/flash_attn_gfx950.py`, `kernels/mla_fwd_decode.py`, `kernels/mla_fwd_decode_m16x8_fp8_fp8.py`.
 - **GEMM**: `kernels/preshuffle_gemm.py`, `kernels/preshuffle_gemm_v2.py`, `kernels/blockscale_preshuffle_gemm.py`, `kernels/hgemm_splitk.py`.
 - **gfx1250 GEMM/MoE**: `kernels/gemm_common_gfx1250.py`, `kernels/gemm_fp8fp4_gfx1250.py`, `kernels/wmma_gemm_gfx1250.py`, `kernels/moe_gemm_2stage_*_gfx1250.py`.
 - **MoE**: `kernels/moe_gemm_2stage.py`, `kernels/moe_blockscale_2stage.py`, `kernels/mixed_moe_gemm_2stage.py`.
