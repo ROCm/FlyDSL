@@ -43,6 +43,10 @@ DEFAULT_SEED = 123
 FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "waves_per_eu": int(os.getenv("FLYDSL_WAVES_PER_EU", "2")),
     "daz": True,
+    "dualwave_swp_lazy_rescale": os.getenv("FLYDSL_DUALWAVE_SWP_LAZY_RESCALE", "1") == "1",
+    "dualwave_swp_setprio": os.getenv("FLYDSL_DUALWAVE_SWP_SETPRIO", "1") == "1",
+    "dualwave_swp_debug_lazy_counts": os.getenv("FLYDSL_DUALWAVE_SWP_DEBUG_LAZY_COUNTS", "0") == "1",
+    "dualwave_swp_enable_stagger": os.getenv("FLYDSL_DUALWAVE_SWP_STAGGER", "1") == "1",
 }
 
 # (batch, seq_len, num_heads, num_kv_heads, head_dim)
@@ -103,8 +107,35 @@ def pytorch_ref_attention(q, k, v, causal=True):
         rep = nh_q // nh_kv
         k_t = k_t.repeat_interleave(rep, dim=1)
         v_t = v_t.repeat_interleave(rep, dim=1)
+    score_elems = q_t.shape[0] * q_t.shape[1] * q_t.shape[2] * k_t.shape[2]
+    if score_elems > 128 * 1024 * 1024:
+        return pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=causal).transpose(1, 2)
     out = F.scaled_dot_product_attention(q_t, k_t, v_t, is_causal=causal)
     return out.transpose(1, 2)
+
+
+@torch.no_grad()
+def pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=True):
+    """Compute reference attention in Q chunks to avoid large SDPA workspaces."""
+    B, H, S, D = q_t.shape
+    max_score_elems = 64 * 1024 * 1024
+    chunk_size = max(1, min(S, max_score_elems // max(B * H * S, 1)))
+    out = torch.empty((B, H, S, D), device=q_t.device, dtype=torch.float32)
+    k_trans = k_t.transpose(-1, -2).contiguous()
+    scale = 1.0 / math.sqrt(D)
+    key_idx = torch.arange(S, device=q_t.device).view(1, 1, 1, S)
+
+    for q_start in range(0, S, chunk_size):
+        q_end = min(q_start + chunk_size, S)
+        q_chunk = q_t[:, :, q_start:q_end, :]
+        scores = torch.matmul(q_chunk, k_trans) * scale
+        if causal:
+            q_idx = torch.arange(q_start, q_end, device=q_t.device).view(1, 1, -1, 1)
+            scores = scores.masked_fill(key_idx > q_idx, float("-inf"))
+        probs = torch.softmax(scores, dim=-1)
+        out[:, :, q_start:q_end, :] = torch.matmul(probs, v_t)
+
+    return out
 
 
 def compute_md5(tensor: torch.Tensor) -> str:
@@ -234,6 +265,12 @@ def run_config(
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
             num_kv_heads=num_kv_heads,
+            dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+            dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
+            dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
+                "dualwave_swp_debug_lazy_counts"
+            ],
+            dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
         )
     except Exception as e:
         results["err"] = f"build: {e}"
@@ -248,14 +285,32 @@ def run_config(
     q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
     k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
     v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    trigger_lazy_else = os.getenv("FLYDSL_DUALWAVE_SWP_TRIGGER_LAZY_ELSE", "0") == "1"
+    debug_lazy_counts = FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_debug_lazy_counts"]
+    if trigger_lazy_else:
+        q_4d.fill_(1.0)
+        k_4d.zero_()
+        if S >= 128:
+            k_4d[:, 64:128, :, :].fill_(80.0)
+        print(
+            "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, "
+            "K tile1=80 to force row_max - m_row > 8",
+            flush=True,
+        )
 
     q_flat = q_4d.contiguous().view(-1)
     k_flat = k_4d.contiguous().view(-1)
     v_flat = v_4d.contiguous().view(-1)
     o_flat = torch.zeros_like(q_flat)
+    debug_counts = (
+        torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy_counts else None
+    )
 
     try:
-        exe(q_flat, k_flat, v_flat, o_flat, B, S)
+        if debug_lazy_counts:
+            exe(q_flat, k_flat, v_flat, o_flat, B, S, debug_counts=debug_counts)
+        else:
+            exe(q_flat, k_flat, v_flat, o_flat, B, S)
         torch.cuda.synchronize()
     except Exception as e:
         results["err"] = f"exec: {e}"
@@ -264,6 +319,19 @@ def run_config(
         traceback.print_exc()
         return results
 
+    if debug_lazy_counts:
+        counts = debug_counts.detach().cpu().tolist()
+        all_below_true_count = int(counts[0])
+        all_below_false_count = int(counts[1])
+        results["all_below_true_count"] = all_below_true_count
+        results["all_below_false_count"] = all_below_false_count
+        print(
+            "[DUALWAVE_SWP_LAZY_COUNTS] "
+            f"all_below_true_count = {all_below_true_count}, "
+            f"all_below_false_count = {all_below_false_count}",
+            flush=True,
+        )
+
     ref_4d = pytorch_ref_attention(q_4d.float(), k_4d.float(), v_4d.float(), causal=causal).to(dtype)
     ref_flat = ref_4d.contiguous().view(-1)
 
@@ -271,7 +339,7 @@ def run_config(
     ref_f32 = ref_flat.float()
     max_err = (o_f32 - ref_f32).abs().max().item()
     mean_err = (o_f32 - ref_f32).abs().mean().item()
-    cos_sim = F.cosine_similarity(o_f32.view(-1, D), ref_f32.view(-1, D), dim=1)
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
     min_cos = cos_sim.min().item()
     results["max_err"] = max_err
     results["mean_err"] = mean_err
@@ -297,7 +365,22 @@ def run_config(
 
     try:
         def kernel_fn():
-            exe(q_flat, k_flat, v_flat, o_flat, B, S)
+            if debug_lazy_counts:
+                exe(q_flat, k_flat, v_flat, o_flat, B, S, debug_counts=debug_counts)
+            else:
+                exe(q_flat, k_flat, v_flat, o_flat, B, S)
+
+        # Warm up ROCTracer/torch.profiler itself so the measured run_perftest
+        # below is not biased by first-profiler-session setup overhead.
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                kernel_fn()
+            torch.cuda.synchronize()
 
         _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)
@@ -395,6 +478,18 @@ def run_aiter_bench(
     try:
         def bench_fn():
             aiter_forward()
+
+        # Warm up ROCTracer/torch.profiler itself so the measured run_perftest
+        # below is not biased by first-profiler-session setup overhead.
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                bench_fn()
+            torch.cuda.synchronize()
 
         _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
         s_eff = S / 2.0 if causal else float(S)
@@ -524,7 +619,10 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
                 label, fa, ca, aa = avg_row
                 cmp_overrides = None
             # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
-            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, ca, aa, cmp_overrides))
+            w.writerow(
+                [label, "", "", "", "", "", ""]
+                + _metrics(fa, ca, aa, cmp_overrides)
+            )
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
@@ -754,7 +852,8 @@ def main():
             print(
                 f"{_fmt_cfg(cfg)} | {_fmt_result(fly_r)} | "
                 f"{_fmt_result(ck_r)} | {_fmt_result(asm_r)}"
-                f" | {_fmt_cmp(fly_r, ck_r)} | {_fmt_cmp(fly_r, asm_r)}"
+                f" | {_fmt_cmp(fly_r, ck_r)}"
+                f" | {_fmt_cmp(fly_r, asm_r)}"
             )
 
         cmp_avg_rows = []
@@ -768,7 +867,8 @@ def main():
             print(
                 f"{label:>{_CFG_W}s} | {_fmt_result(fa)} | "
                 f"{_fmt_result(ca)} | {_fmt_result(aa)}"
-                f" | {_fmt_cmp_values(fck_cmp)} | {_fmt_cmp_values(fasm_cmp)}"
+                f" | {_fmt_cmp_values(fck_cmp)}"
+                f" | {_fmt_cmp_values(fasm_cmp)}"
             )
             cmp_avg_rows.append((
                 label,
