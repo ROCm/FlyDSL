@@ -83,7 +83,6 @@ class RocmBackend(BaseBackend):
             "convert-vector-to-llvm",
             "convert-arith-to-llvm",
             "convert-func-to-llvm",
-            "convert-ub-to-llvm",
             "reconcile-unrealized-casts",
             *(
                 ["ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}"]

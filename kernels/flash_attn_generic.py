@@ -1243,7 +1243,7 @@ def build_flash_attn_func_module_primary(
                     _store_global_half(o_ptr, o_global, o_f16)
 
     @flyc.jit
-    def launch_flash_attn_func(
+    def launch_flash_attn_generic(
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
@@ -1307,11 +1307,11 @@ def build_flash_attn_func_module_primary(
 
     def _launch(*args, **kwargs):
         with CompilationContext.compile_hints(_fmha_compile_hints):
-            return launch_flash_attn_func(*args, **kwargs)
+            return launch_flash_attn_generic(*args, **kwargs)
 
     def _compile(Q, K, V, O, batch_size, seq_len, stream=None):  # noqa: E741
         with CompilationContext.compile_hints(_fmha_compile_hints):
-            return flyc.compile(launch_flash_attn_func, Q, K, V, O, batch_size, seq_len, fx.Stream(stream))
+            return flyc.compile(launch_flash_attn_generic, Q, K, V, O, batch_size, seq_len, fx.Stream(stream))
 
     _launch.compile = _compile
 
