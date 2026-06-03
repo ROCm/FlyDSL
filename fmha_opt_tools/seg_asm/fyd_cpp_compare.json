@@ -1,5 +1,5 @@
 {
-  "interval-print-limit": "0",
+  "interval-print-limit": "10",
   "interval information": [
     {
       "key": "desc",
@@ -141,6 +141,10 @@
       "key": "version",
       "value": "fyd_attn",
       "baseline": false,
+      "specific_part": {
+        "interval_name": "Main loop Cluster 3",
+        "long_lat_thr": 20
+      },
       "config": {
         "sample points": [
           {
@@ -157,16 +161,16 @@
               "instruction": [
                 "s_mov_b32 m0, s19",
                 "s_add_i32 s38, s34, s37",
-                "buffer_load_dwordx4 v215, s[0:3], s38 offen lds"
+                "buffer_load_dwordx4 v213, s[0:3], s38 offen lds"
               ]
             }
           },
           {
             "point3": {
               "instruction": [
-                "v_mfma_f32_32x32x16_bf16 v[82:97], v[98:101], v[130:133], 0",
-                "v_exp_f32_e32 v122, v66",
-                "v_exp_f32_e32 v123, v67"
+                "v_mfma_f32_32x32x16_bf16 v[0:15], v[96:99], v[112:115], 0",
+                "v_exp_f32_e32 v151, v16",
+                "v_exp_f32_e32 v152, v17"
               ]
             }
           },
@@ -183,8 +187,8 @@
             "point5": {
               "instruction": [
                 "s_setprio 1",
-                "v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[66:69], v[2:17]",
-                "v_max_f32_e32 v194, v82, v83"
+                "v_mfma_f32_32x32x16_bf16 v[32:47], v[192:195], v[16:19], v[32:47]",
+                "v_max_f32_e32 v192, v0, v1"
               ]
             }
           },
@@ -193,16 +197,16 @@
               "instruction": [
                 "s_mov_b32 m0, s28",
                 "s_add_i32 s38, s27, s37",
-                "buffer_load_dwordx4 v215, s[0:3], s38 offen lds"
+                "buffer_load_dwordx4 v213, s[0:3], s38 offen lds"
               ]
             }
           },
           {
             "point7": {
               "instruction": [
-                "v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0",
-                "v_exp_f32_e32 v124, v98",
-                "v_exp_f32_e32 v125, v99"
+                "v_mfma_f32_32x32x16_bf16 v[16:31], v[0:3], v[112:115], 0",
+                "v_exp_f32_e32 v158, v96",
+                "v_exp_f32_e32 v159, v97"
               ]
             }
           },
@@ -211,7 +215,7 @@
               "instruction": [
                 "s_mov_b32 m0, s31",
                 "s_add_i32 s37, s35, s37",
-                "buffer_load_dwordx4 v215, s[4:7], s37 offen lds"
+                "buffer_load_dwordx4 v213, s[4:7], s37 offen lds"
               ]
             }
           },
@@ -219,17 +223,17 @@
             "point9": {
               "instruction": [
                 "s_setprio 1",
-                "v_mfma_f32_32x32x16_bf16 v[2:17], v[206:209], v[98:101], v[2:17]",
-                "v_max_f32_e32 v206, v66, v67"
+                "v_mfma_f32_32x32x16_bf16 v[32:47], v[204:207], v[96:99], v[32:47]",
+                "v_max_f32_e32 v204, v16, v17"
               ]
             }
           },
           {
             "point11": {
               "instruction": [
-                "v_exp_f32_e32 v115, v129",
                 "s_setprio 0",
-                "s_barrier"
+                "s_barrier",
+                "s_add_u32 s12, s12, 2"
               ]
             }
           },
@@ -245,9 +249,9 @@
           {
             "point13": {
               "instruction": [
-                "v_mfma_f32_32x32x16_bf16 v[82:97], v[98:101], v[130:133], 0",
-                "v_exp_f32_e32 v0, v66",
-                "v_exp_f32_e32 v122, v67"
+                "v_mfma_f32_32x32x16_bf16 v[0:15], v[96:99], v[112:115], 0",
+                "v_exp_f32_e32 v151, v16",
+                "v_exp_f32_e32 v152, v17"
               ]
             }
           },
@@ -264,8 +268,8 @@
             "point15": {
               "instruction": [
                 "s_setprio 1",
-                "v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[66:69], v[2:17]",
-                "v_max_f32_e32 v0, v82, v83"
+                "v_mfma_f32_32x32x16_bf16 v[32:47], v[192:195], v[16:19], v[32:47]",
+                "v_max_f32_e32 v192, v0, v1"
               ]
             }
           },
@@ -274,16 +278,16 @@
               "instruction": [
                 "s_mov_b32 m0, s28",
                 "s_mul_i32 s5, s4, s24",
-                "buffer_load_dwordx4 v215, s[0:3], s5 offen lds"
+                "buffer_load_dwordx4 v213, s[0:3], s5 offen lds"
               ]
             }
           },
           {
             "point17": {
               "instruction": [
-                "v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0",
-                "v_exp_f32_e32 v124, v98",
-                "v_exp_f32_e32 v125, v99"
+                "v_mfma_f32_32x32x16_bf16 v[80:95], v[64:67], v[112:115], 0",
+                "v_exp_f32_e32 v155, v96",
+                "v_exp_f32_e32 v156, v97"
               ]
             }
           },
@@ -291,8 +295,8 @@
             "point18": {
               "instruction": [
                 "v_add_u32_e32 v219, 0xc600, v219",
-                "ds_read_b64_tr_b16 v[194:195], v219",
-                "ds_read_b64_tr_b16 v[196:197], v219 offset:128"
+                "ds_read_b64_tr_b16 v[192:193], v219",
+                "ds_read_b64_tr_b16 v[194:195], v219 offset:128"
               ]
             }
           },
@@ -300,8 +304,8 @@
             "point19": {
               "instruction": [
                 "s_setprio 1",
-                "v_mfma_f32_32x32x16_bf16 v[2:17], v[194:197], v[98:101], v[2:17]",
-                "v_max_f32_e32 v194, v66, v67"
+                "v_mfma_f32_32x32x16_bf16 v[0:15], v[192:195], v[96:99], v[0:15]",
+                "s_nop 1"
               ]
             }
           },
@@ -310,70 +314,70 @@
               "instruction": [
                 "s_mov_b32 m0, s19",
                 "s_nop 0",
-                "buffer_load_dwordx4 v215, s[0:3], s9 offen lds"
+                "buffer_load_dwordx4 v213, s[0:3], s9 offen lds"
               ]
             }
           },
           {
             "point21": {
               "instruction": [
-                "v_mfma_f32_32x32x16_bf16 v[66:81], v[82:85], v[130:133], 0",
-                "v_exp_f32_e32 v106, v114",
-                "v_exp_f32_e32 v107, v115"
+                "v_mfma_f32_32x32x16_bf16 v[64:79], v[80:83], v[112:115], 0",
+                "v_exp_f32_e32 v111, v97",
+                "v_exp_f32_e32 v152, v98"
               ]
             }
           },
           {
             "point22": {
               "instruction": [
-                "ds_read_b64_tr_b16 v[122:123], v217",
-                "ds_read_b64_tr_b16 v[124:125], v217 offset:128",
-                "ds_read_b64_tr_b16 v[114:115], v217 offset:256"
+                "ds_read_b64_tr_b16 v[164:165], v217",
+                "ds_read_b64_tr_b16 v[166:167], v217 offset:128",
+                "ds_read_b64_tr_b16 v[144:145], v217 offset:256"
               ]
             }
           },
           {
             "point23": {
               "instruction": [
-                "v_mfma_f32_32x32x16_bf16 v[2:17], v[122:125], v[98:101], v[2:17]",
-                "v_max_f32_e32 v122, v66, v67",
-                "v_max3_f32 v122, v122, v68, v69"
+                "v_mfma_f32_32x32x16_bf16 v[0:15], v[164:167], v[96:99], v[0:15]",
+                "s_nop 2",
+                "v_max_f32_e32 v164, v64, v65"
               ]
             }
           },
           {
             "point24": {
               "instruction": [
-                "ds_read_b64_tr_b16 v[86:87], v219",
-                "ds_read_b64_tr_b16 v[88:89], v219 offset:128",
-                "ds_read_b64_tr_b16 v[90:91], v219 offset:256"
+                "ds_read_b64_tr_b16 v[84:85], v219",
+                "ds_read_b64_tr_b16 v[86:87], v219 offset:128",
+                "ds_read_b64_tr_b16 v[88:89], v219 offset:256"
               ]
             }
           },
           {
             "point25": {
               "instruction": [
-                "v_mfma_f32_32x32x16_bf16 v[2:17], v[86:89], v[66:69], v[2:17]",
-                "v_mfma_f32_32x32x16_bf16 v[50:65], v[102:105], v[66:69], v[50:65]",
-                "v_mfma_f32_32x32x16_bf16 v[34:49], v[118:121], v[66:69], v[34:49]"
+                "v_mfma_f32_32x32x16_bf16 v[0:15], v[84:87], v[64:67], v[0:15]",
+                "v_mfma_f32_32x32x16_bf16 v[16:31], v[100:103], v[64:67], v[16:31]",
+                "v_mfma_f32_32x32x16_bf16 v[32:47], v[116:119], v[64:67], v[32:47]"
               ]
             }
           },
           {
             "point26": {
               "instruction": [
-                "v_cvt_pk_bf16_f32 v2, v2, v3",
-                "v_cvt_pk_bf16_f32 v3, v4, v5",
-                "v_add_u32_e32 v0, s20, v210"
+                "v_cvt_pk_bf16_f32 v0, v0, v1",
+                "v_cvt_pk_bf16_f32 v1, v2, v3",
+                "v_add_u32_e32 v2, s20, v208"
               ]
             }
           },
           {
             "point27": {
               "instruction": [
-                "v_cvt_pk_bf16_f32 v0, v30, v31",
-                "v_cvt_pk_bf16_f32 v1, v32, v33",
-                "buffer_store_dwordx2 v[0:1], v4, s[0:3], 0 offen offset:240"
+                "v_cvt_pk_bf16_f32 v0, v60, v61",
+                "v_cvt_pk_bf16_f32 v1, v62, v63",
+                "buffer_store_dwordx2 v[0:1], v2, s[0:3], 0 offen offset:240"
               ]
             }
           }
