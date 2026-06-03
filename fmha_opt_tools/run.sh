@@ -36,13 +36,13 @@ function run_flydsl_op {
     # export FLYDSL_FLASH_ATTN_FUNC_PATH=fallback_n32
     # export FLYDSL_WAVES_PER_EU=3
 
-    export FLYDSL_LOG_MORE=1
-    export FLYDSL_DEBUG_LOG_TO_CONSOLE=1
-    export FLYDSL_DEBUG_LOG_LEVEL=INFO
+    # export FLYDSL_LOG_MORE=1
+    # export FLYDSL_DEBUG_LOG_TO_CONSOLE=1
+    # export FLYDSL_DEBUG_LOG_LEVEL=INFO
     export FLYDSL_FLASH_ATTN_FUNC_USE_CUSTOM_LLVM=0
 
     # export FLYDSL_RUNTIME_ENABLE_CACHE=0
-    export FLYDSL_DUMP_IR=1
+    # export FLYDSL_DUMP_IR=1
     export FLYDSL_DUMP_DIR=./flydsl_dump
     # export FLYDSL_ENABLE_DUALWAVE_SWP_PATH=1
     # export FLYDSL_DUALWAVE_SWP_SETPRIO=0
@@ -79,13 +79,13 @@ function run_flydsl_op {
 
     ./exp_isa/build.sh
     # python tests/kernels/test_flash_attn_fwd.py --iters 100
-    # python tests/kernels/test_flash_attn_fwd.py --iters 100 --compare
+    python tests/kernels/test_flash_attn_fwd.py --iters 100 --compare
     # python tests/kernels/test_flash_attn_fwd.py --causal --dtype fp16 --iters 100
     # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --iters 100
     # python tests/kernels/test_flash_attn_fwd.py --causal --dtype fp16 --iters 100 --compare
     # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --iters 100 --compare
 
-    python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
+    # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 64 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 16 --num_heads 64 --num_kv_heads 8 --seq_len 8192 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_attn_fwd.py --causal --dtype bf16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
     # python tests/kernels/test_flash_attn_fwd.py --causal --dtype fp16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
@@ -94,9 +94,7 @@ function run_flydsl_op {
     # python tests/kernels/test_flash_attn_fwd.py --dtype fp16 --batch 2 --num_heads 64 --num_kv_heads 64 --seq_len 1024 --head_dim 128 --iters 100 --compare
 
 
-    # python3 scripts/trace_segment_cycles.py seg_asm/cpp_attn/main_loop_cluster0_7.json | tee trace_info.cpp.log
-    # python3 scripts/trace_segment_cycles.py seg_asm/fyd_attn/main_loop_cluster0_7.json | tee trace_info.log
-    # python3 scripts/trace_segment_cycles.py seg_asm/main_loop_cluster0_7_compare.json | tee trace.diff.log
+    # python3 -m ruff check ./kernels/ ./tests/
 
 
     # export OPUS_INCLUDE_DIR=/shared/amdgpu/home/zhiming_ding_qle/yanguahe/code/wk_sp1/aiter/csrc/include
