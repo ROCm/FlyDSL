@@ -2490,6 +2490,12 @@ def compile_fp8fp4_gemm(
         elif const_expr(use_cluster):
             cluster.cluster_barrier()
         epi_addrs_box = [None]
+        _ptpc_scale_box = [None]
+
+        def _load_ptpc_scales_once():
+            if const_expr(is_ptpc and _ptpc_scale_box[0] is None):
+                _ptpc_scale_box[0] = epilogue_load_ptpc_scales()
+
         _tail_had_load = False
         # Tail K-tile index, so the VGPR-path scale buffer_load uses the right k_base.
         _bvs_tail_kt = [loop_iters * num_buffers]
@@ -2514,6 +2520,7 @@ def compile_fp8fp4_gemm(
                         stages_b_idx[_compute_stage],
                         stages_as_idx[_compute_stage],
                         stages_bs_idx[_compute_stage],
+                        emit_filler=(_load_ptpc_scales_once if is_ptpc else None),
                         a0_prefetch=a0_prefetch,
                         scale_k_base=_entry_kb,
                     )
@@ -2521,6 +2528,7 @@ def compile_fp8fp4_gemm(
 
                     def _emit_epi_addrs():
                         epi_addrs_box[0] = epilogue_prepare_addrs()
+                        _load_ptpc_scales_once()
 
                     a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                     accs = compute_tile_scheduled(
@@ -2596,7 +2604,8 @@ def compile_fp8fp4_gemm(
         accs = finalize_acc_layout(accs)
 
         if const_expr(is_ptpc):
-            _ptpc_sa, _ptpc_sb = epilogue_load_ptpc_scales()
+            _load_ptpc_scales_once()
+            _ptpc_sa, _ptpc_sb = _ptpc_scale_box[0]
             accs = epilogue_apply_ptpc_scale(accs, _ptpc_sa, _ptpc_sb)
 
         if const_expr(use_tdm_store):
