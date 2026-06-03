@@ -29,9 +29,9 @@ compile_asm \
   "${SCRIPT_DIR}/fmha_fwd_hd128_bf16_1tg_8w_256x64_350_msk0_gm0.s" \
   "${SCRIPT_DIR}/fmha_fwd_hd128_bf16_1tg_8w_256x64_350_msk0_gm0.co"
 
-# echo "=== Build Python extensions ==="
-# rm -rf build
-# python3 setup.py build_ext --inplace
+echo "=== Build Python extensions ==="
+rm -rf build
+python3 setup.py build_ext --inplace
 
 echo "=== Build complete ==="
 ls -lah ./*.co ./*_asm_ext*.so
