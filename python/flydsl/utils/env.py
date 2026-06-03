@@ -242,6 +242,20 @@ class CompileEnvManager(EnvManager):
         description="Colon-separated LLVM pass plugin .so paths loaded (opt --load-pass-plugin) "
         "before running llvm_pass_pipeline. Overridden by @flyc.jit(llvm_pass_plugins=...).",
     )
+    llvm_codegen_passes = OptList(
+        [],
+        description="Comma-separated MIR pass names inserted pre-emit by the fly-llc codegen path "
+        "(requires fly-llc + ld.lld + FLYDSL_COMPILE_LLVM_DIR). Overridden by "
+        "@flyc.jit(llvm_codegen_passes=...).",
+    )
+    llvm_codegen_plugins = OptList(
+        [],
+        separator=":",
+        description="Colon-separated legacy MIR pass plugin .so paths loaded by fly-llc "
+        "(fly-llc --load). Overridden by @flyc.jit(llvm_codegen_plugins=...).",
+    )
+    fly_llc = OptStr("", description="Path to the fly-llc tool (default: <FLYDSL_COMPILE_LLVM_DIR>/bin/fly-llc).")
+    lld = OptStr("", description="Path to ld.lld for the fly-llc codegen path (default: <llvm_dir>/bin/ld.lld).")
 
 
 class DebugEnvManager(EnvManager):

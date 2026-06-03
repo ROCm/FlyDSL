@@ -5,8 +5,8 @@
 
 import flydsl.compiler as flyc
 from flydsl.compiler.backends.rocm import RocmBackend
-from flydsl.compiler.external_llvm import llvm_opt_fingerprint
-from flydsl.compiler.jit_function import _effective_llvm_pass_config
+from flydsl.compiler.external_llvm import fly_llc_codegen_fingerprint, llvm_opt_fingerprint
+from flydsl.compiler.jit_function import _effective_llvm_codegen_config, _effective_llvm_pass_config
 
 
 def test_recodegen_fragments_use_opt_level_zero_by_default():
@@ -73,3 +73,40 @@ def test_fingerprint_changes_with_pipeline_and_plugins(tmp_path):
 def test_fingerprint_tolerates_missing_plugin():
     fp = llvm_opt_fingerprint("default<O0>", ["/does/not/exist.so"])
     assert "<missing>" in fp
+
+
+# --- custom MIR codegen (fly-llc) plumbing ---------------------------------
+
+
+def test_jit_decorator_records_llvm_codegen_hints():
+    @flyc.jit(llvm_codegen_passes=["fly-mir-pass"], llvm_codegen_plugins=["/tmp/libFlyMir.so"])
+    def f():  # pragma: no cover - never executed
+        pass
+
+    assert f.compile_hints["llvm_codegen_passes"] == ["fly-mir-pass"]
+    assert f.compile_hints["llvm_codegen_plugins"] == ["/tmp/libFlyMir.so"]
+
+
+def test_effective_codegen_config_prefers_hints_over_env(monkeypatch):
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_CODEGEN_PASSES", "env-pass")
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_CODEGEN_PLUGINS", "/env/a.so:/env/b.so")
+
+    passes, plugins = _effective_llvm_codegen_config({"llvm_codegen_passes": ["h"], "llvm_codegen_plugins": ["/h.so"]})
+    assert passes == ["h"]
+    assert plugins == ["/h.so"]
+
+    passes, plugins = _effective_llvm_codegen_config({})
+    assert passes == ["env-pass"]
+    assert plugins == ["/env/a.so", "/env/b.so"]
+
+
+def test_codegen_fingerprint_changes_with_passes_and_plugins(tmp_path):
+    assert fly_llc_codegen_fingerprint(["a"]) != fly_llc_codegen_fingerprint(["b"])
+
+    so = tmp_path / "libP.so"
+    so.write_bytes(b"v1")
+    fp1 = fly_llc_codegen_fingerprint(["a"], [str(so)])
+    so.write_bytes(b"v2-changed")
+    fp2 = fly_llc_codegen_fingerprint(["a"], [str(so)])
+    assert fp1 != fp2  # plugin content edit invalidates
+    assert str(so) in fp1

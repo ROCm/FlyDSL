@@ -334,3 +334,139 @@ def run_llvm_opt_then_binary(
     finally:
         if tmp_dir_obj is not None:
             tmp_dir_obj.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Custom-codegen path: fly-llc (IR -> obj with injectable MIR passes) + ld.lld
+# ---------------------------------------------------------------------------
+
+
+def _fly_llc_path() -> Path:
+    raw = env.compile.fly_llc.strip()
+    if raw:
+        return Path(raw).expanduser()
+    cand = _llvm_dir() / "bin" / "fly-llc"
+    if cand.is_file():
+        return cand
+    raise ExternalLLVMError(
+        "fly-llc tool not found: set FLYDSL_COMPILE_FLY_LLC or build fly-llc into <FLYDSL_COMPILE_LLVM_DIR>/bin."
+    )
+
+
+def _lld_path() -> Path:
+    raw = env.compile.lld.strip()
+    if raw:
+        return Path(raw).expanduser()
+    cand = _llvm_dir() / "bin" / "ld.lld"
+    if cand.is_file():
+        return cand
+    raise ExternalLLVMError(
+        "fly-llc codegen path needs ld.lld: set FLYDSL_COMPILE_LLD or place ld.lld in <FLYDSL_COMPILE_LLVM_DIR>/bin."
+    )
+
+
+def fly_llc_codegen_fingerprint(passes: Optional[list] = None, plugins: Optional[list] = None) -> str:
+    """Cache fingerprint for a fly-llc codegen configuration: the pass names plus
+    the fly-llc binary's and each plugin's content hash."""
+    parts = ["fly-llc-codegen:" + ",".join(passes or [])]
+    try:
+        parts.append(_file_hash(_fly_llc_path().resolve()))
+    except OSError:
+        parts.append("<no-fly-llc>")
+    except ExternalLLVMError:
+        parts.append("<no-fly-llc>")
+    for p in plugins or []:
+        path = Path(p).expanduser()
+        try:
+            parts.append(f"{path}:{_file_hash(path.resolve())}")
+        except OSError:
+            parts.append(f"{path}:<missing>")
+    return ";".join(parts)
+
+
+def _gpu_binary_module_text(name: str, target_cpu: str, hsaco: bytes) -> str:
+    """Build a ``builtin.module`` text embedding *hsaco* as a ``gpu.binary @name``
+    (every byte escaped as ``\\XX`` for the MLIR string attribute)."""
+    esc = "".join("\\%02X" % b for b in hsaco)
+    return (
+        "module attributes {gpu.container_module} {\n"
+        f'  gpu.binary @{name} [#gpu.object<#rocdl.target<chip = "{target_cpu}">, kernels = <>, bin = "{esc}">]\n'
+        "}\n"
+    )
+
+
+def run_fly_llc_codegen(
+    module: ir.Module,
+    *,
+    llvm_ir: str,
+    codegen_passes: list,
+    codegen_plugins: Optional[list] = None,
+    target_triple: str,
+    target_cpu: str,
+    work_dir: Optional[Path] = None,
+    stage_prefix: str = "fly_llc",
+) -> None:
+    """Codegen the device kernel's LLVM IR with injectable MIR passes and splice
+    the result back into *module*.
+
+    Flow: ``fly-llc <in.ll> -o <obj> --load=<plugin> --pre-emit-pass=<pass>``
+    (custom MIR passes run pre-emit in the standard codegen) -> ``ld.lld -shared``
+    -> wrap the HSACO bytes into a ``gpu.binary`` -> replace the in-process
+    ``gpu.module``.
+    """
+    fly_llc = _fly_llc_path()
+    lld = _lld_path()
+    prefix = _llvm_dir()
+
+    gpu_module = _single_top_level_op(module, "gpu.module")
+    name = _symbol_name(gpu_module)
+
+    tmp_dir_obj = None
+    if work_dir is None:
+        tmp_dir_obj = tempfile.TemporaryDirectory(prefix="flydsl_fly_llc_")
+        work_dir = Path(tmp_dir_obj.name)
+    else:
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+    in_ll = work_dir / f"{stage_prefix}_pre_codegen.ll"
+    obj = work_dir / f"{stage_prefix}.o"
+    hsaco = work_dir / f"{stage_prefix}.hsaco"
+    bin_mlir = work_dir / f"{stage_prefix}_binary.mlir"
+
+    try:
+        in_ll.write_text(llvm_ir, encoding="utf-8")
+
+        plugin_args = [f"--load={Path(p).expanduser()}" for p in (codegen_plugins or [])]
+        pass_args = [f"--pre-emit-pass={n}" for n in (codegen_passes or [])]
+        _run_tool(
+            [
+                str(fly_llc),
+                str(in_ll),
+                "-o",
+                str(obj),
+                f"-mtriple={target_triple}",
+                f"-mcpu={target_cpu}",
+                *plugin_args,
+                *pass_args,
+            ],
+            prefix=prefix,
+            what="fly-llc codegen",
+            work_dir=work_dir,
+        )
+
+        _run_tool(
+            [str(lld), "-shared", str(obj), "-o", str(hsaco)],
+            prefix=prefix,
+            what="ld.lld HSACO link",
+            work_dir=work_dir,
+        )
+
+        if not hsaco.is_file():
+            raise ExternalLLVMError(f"ld.lld did not create HSACO: {hsaco}")
+        text = _gpu_binary_module_text(name, target_cpu, hsaco.read_bytes())
+        bin_mlir.write_text(text, encoding="utf-8")
+        binary_module = ir.Module.parse(text, context=module.context)
+        _replace_gpu_module_with_binary_op(module, binary_module)
+    finally:
+        if tmp_dir_obj is not None:
+            tmp_dir_obj.cleanup()

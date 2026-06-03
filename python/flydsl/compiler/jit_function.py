@@ -124,6 +124,8 @@ _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_EXTRA_SOURCE_DIRS",
     "FLYDSL_COMPILE_LLVM_PASS_PIPELINE",
     "FLYDSL_COMPILE_LLVM_PASS_PLUGINS",
+    "FLYDSL_COMPILE_LLVM_CODEGEN_PASSES",
+    "FLYDSL_COMPILE_LLVM_CODEGEN_PLUGINS",
 )
 
 
@@ -749,6 +751,8 @@ class PipelineConfig:
     external: bool
     llvm_pass_pipeline: str = ""
     llvm_pass_plugins: Optional[list] = None
+    llvm_codegen_passes: Optional[list] = None
+    llvm_codegen_plugins: Optional[list] = None
 
 
 def _effective_llvm_pass_config(hints: dict):
@@ -763,6 +767,18 @@ def _effective_llvm_pass_config(hints: dict):
     return (pipeline or "").strip(), list(plugins or [])
 
 
+def _effective_llvm_codegen_config(hints: dict):
+    """Resolve the custom MIR codegen passes + plugins (fly-llc path), preferring
+    @flyc.jit compile_hints over the FLYDSL_COMPILE_LLVM_CODEGEN_* env vars."""
+    passes = hints.get("llvm_codegen_passes")
+    if passes is None:
+        passes = env.compile.llvm_codegen_passes
+    plugins = hints.get("llvm_codegen_plugins")
+    if plugins is None:
+        plugins = env.compile.llvm_codegen_plugins
+    return list(passes or []), list(plugins or [])
+
+
 def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
     """Return pipeline configuration including optional external split."""
     from .kernel_function import CompilationContext
@@ -770,10 +786,12 @@ def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
     hints = CompilationContext.get_compile_hints()
     llvm_opts = hints.get("llvm_options")
     llvm_pass_pipeline, llvm_pass_plugins = _effective_llvm_pass_config(hints)
+    llvm_codegen_passes, llvm_codegen_plugins = _effective_llvm_codegen_config(hints)
 
-    # Custom LLVM pass pipeline: split off the binary fragment so we can extract
-    # LLVM IR, run `opt`, and re-codegen externally (see MlirCompiler.compile).
-    if llvm_pass_pipeline:
+    # Custom LLVM IR pass pipeline (opt) and/or custom MIR codegen passes (fly-llc):
+    # both need the binary fragment split off so we can extract LLVM IR and run an
+    # external codegen tail (see MlirCompiler.compile).
+    if llvm_pass_pipeline or llvm_codegen_passes:
         pre_binary_fragments, binary_fragment = backend.external_binary_pipeline_fragments(compile_hints=hints)
         return PipelineConfig(
             fragments=[*pre_binary_fragments, binary_fragment],
@@ -783,6 +801,8 @@ def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
             external=False,
             llvm_pass_pipeline=llvm_pass_pipeline,
             llvm_pass_plugins=llvm_pass_plugins,
+            llvm_codegen_passes=llvm_codegen_passes,
+            llvm_codegen_plugins=llvm_codegen_plugins,
         )
 
     if _use_external_binary_codegen():
@@ -841,8 +861,8 @@ class MlirCompiler:
                 "use embedded codegen for kernels that require #fly.explicit_module."
             )
 
-        if cfg.llvm_pass_pipeline and link_libs:
-            raise RuntimeError("custom llvm_pass_pipeline does not support extern link_libs yet.")
+        if (cfg.llvm_pass_pipeline or cfg.llvm_codegen_passes) and link_libs:
+            raise RuntimeError("custom llvm_pass_pipeline / llvm_codegen_passes do not support extern link_libs yet.")
 
         if link_libs:
             link_opt = _format_link_lib_options(link_libs)
@@ -861,6 +881,10 @@ class MlirCompiler:
         dump_dir = Path(env.debug.dump_dir).resolve()
 
         with _llvm_ctx:
+            if cfg.llvm_codegen_passes:
+                return cls._compile_with_fly_llc(
+                    module, backend, cfg, func_name=func_name, dump_enabled=dump_enabled, dump_dir=dump_dir
+                )
             if cfg.llvm_pass_pipeline:
                 return cls._compile_with_llvm_opt(
                     module, backend, cfg, func_name=func_name, dump_enabled=dump_enabled, dump_dir=dump_dir
@@ -1018,6 +1042,52 @@ class MlirCompiler:
             pipeline=cfg.llvm_pass_pipeline,
             plugins=cfg.llvm_pass_plugins,
             llvm_options=cfg.llvm_opts,
+            work_dir=work_dir,
+        )
+        module.operation.verify()
+        return module
+
+    @classmethod
+    def _compile_with_fly_llc(
+        cls, module, backend, cfg, *, func_name: str, dump_enabled: bool, dump_dir: Path
+    ) -> ir.Module:
+        """Custom-codegen path: run the pre-binary fragments in-process, extract the
+        device LLVM IR, then codegen via ``fly-llc`` (injecting the requested MIR
+        passes pre-emit) + ``ld.lld``, and splice the resulting binary back."""
+        from .external_llvm import run_fly_llc_codegen
+        from .kernel_function import CompilationContext
+
+        hints = CompilationContext.get_compile_hints()
+        work_dir = None
+        if dump_enabled:
+            asm = module.operation.get_asm(enable_debug_info=True)
+            kernel_names = _infer_kernel_names_from_asm(asm)
+            subdir = kernel_names[0] if len(kernel_names) == 1 else (func_name or "module")
+            work_dir = dump_dir / _sanitize_path_component(subdir)
+            print(f"[flydsl.compile] FLYDSL_DUMP_IR=1 (llvm_codegen_passes) dir={work_dir}")
+
+        # Run everything up to (but not including) gpu-module-to-binary in-process.
+        _run_pipeline(
+            module,
+            cfg.pre_binary,
+            verifier=env.debug.enable_verifier,
+            print_after_all=env.debug.print_after_all,
+        )
+
+        llvm_ir = _extract_llvm_ir(module)
+        if llvm_ir is None:
+            raise FlyDSLCompileError(
+                "llvm_codegen_passes is set but the device LLVM IR could not be extracted from the gpu.module."
+            )
+
+        rocdl_opts = backend._rocdl_opts(compile_hints=hints)
+        run_fly_llc_codegen(
+            module,
+            llvm_ir=llvm_ir,
+            codegen_passes=cfg.llvm_codegen_passes,
+            codegen_plugins=cfg.llvm_codegen_plugins,
+            target_triple=rocdl_opts["triple"],
+            target_cpu=rocdl_opts["chip"],
             work_dir=work_dir,
         )
         module.operation.verify()
@@ -1438,6 +1508,11 @@ class JitFunction:
             from .external_llvm import llvm_opt_fingerprint
 
             key_parts.append(("_llvm_pass_", llvm_opt_fingerprint(eff_pipeline, eff_plugins)))
+        eff_cg_passes, eff_cg_plugins = _effective_llvm_codegen_config(self.compile_hints)
+        if eff_cg_passes:
+            from .external_llvm import fly_llc_codegen_fingerprint
+
+            key_parts.append(("_llvm_codegen_", fly_llc_codegen_fingerprint(eff_cg_passes, eff_cg_plugins)))
 
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
@@ -1760,21 +1835,32 @@ def jit(
     *,
     llvm_pass_pipeline: Optional[str] = None,
     llvm_pass_plugins: Optional[list] = None,
+    llvm_codegen_passes: Optional[list] = None,
+    llvm_codegen_plugins: Optional[list] = None,
 ) -> JitFunction:
     """JIT decorator for host launcher functions.
 
-    ``llvm_pass_pipeline``: optional LLVM new-PM pass pipeline (e.g.
-    ``"default<O3>,my-pass"``) run on the device kernel IR before codegen.
-    ``llvm_pass_plugins``: optional list of LLVM pass plugin ``.so`` paths
-    loaded (``opt --load-pass-plugin``) before running that pipeline.  Both
-    require ``FLYDSL_COMPILE_LLVM_DIR`` and override the
-    ``FLYDSL_COMPILE_LLVM_PASS_*`` env vars.
+    ``llvm_pass_pipeline`` / ``llvm_pass_plugins``: optional LLVM new-PM **IR**
+    pass pipeline (e.g. ``"default<O3>,my-pass"``) and pass plugin ``.so`` paths
+    run on the device kernel IR before codegen (``opt --load-pass-plugin``).
+
+    ``llvm_codegen_passes`` / ``llvm_codegen_plugins``: optional **MIR/codegen**
+    pass names inserted pre-emit, and legacy pass plugin ``.so`` paths, applied
+    via the ``fly-llc`` codegen path (``fly-llc --load`` + ``--pre-emit-pass``,
+    then ``ld.lld``).
+
+    All require ``FLYDSL_COMPILE_LLVM_DIR`` and override the corresponding
+    ``FLYDSL_COMPILE_LLVM_*`` env vars.
     """
     hints = {}
     if llvm_pass_pipeline is not None:
         hints["llvm_pass_pipeline"] = llvm_pass_pipeline
     if llvm_pass_plugins is not None:
         hints["llvm_pass_plugins"] = list(llvm_pass_plugins)
+    if llvm_codegen_passes is not None:
+        hints["llvm_codegen_passes"] = list(llvm_codegen_passes)
+    if llvm_codegen_plugins is not None:
+        hints["llvm_codegen_plugins"] = list(llvm_codegen_plugins)
 
     def _make(f: Callable) -> JitFunction:
         return JitFunction(f, compile_hints=hints or None)
