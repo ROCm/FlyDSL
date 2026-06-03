@@ -1,9 +1,9 @@
 """Batched WMMA GEMM a16w8 kernel for gfx1250.
 
-C[b,m,n] = A[b,m,k] @ B_dequant[b,n,k]^T
-  A: bf16 (activations)
+C[m,b,n] = A[m,b,k] @ B_dequant[b,n,k]^T
+  A: bf16 (activations) in [M, B, K] layout (M-major, B=groups middle, K inner)
   B: fp8_e4m3fn weights in [B, N, K] layout (K-inner, wo_a format)
-  C: bf16
+  C: bf16 in [M, B, N] layout
 
 Scale modes (compile-time):
   no_scale=True       fp8→bf16 via V_CVT_SCALE_PK8_BF16_FP8 with E8M0=127 (=1.0 constant).
@@ -13,7 +13,8 @@ Scale modes (compile-time):
 
 DeepSeek-V4 use case: einsum("sgd,grd->sgr", o, wo_a)
   B=G=16, M=T (runtime), K=D=4096, N=R=1024
-  wo_a layout: [G, R, D] = [B, N, K] with K=D innermost (K-major)
+  A (o) layout:    [T, G, D] = [M, B, K] with K innermost
+  B (wo_a) layout: [G, R, D] = [B, N, K] with K innermost (unchanged)
 """
 
 import flydsl.compiler as flyc
@@ -96,9 +97,9 @@ def compile_bmm_a16w8_gfx1250(
     Returns a JitFunction: launch_fn(arg_c, arg_a, arg_b, arg_scale, M, stream)
 
     Tensors (all flat 1-D):
-      arg_a:     A[B, M, K]               bf16
-      arg_b:     B[B, N, K]               fp8_e4m3 (wo_a layout, K-inner)
-      arg_c:     C[B, M, N]               bf16 (or f32)
+      arg_a:     A[M, B, K]               bf16  (M-major: tokens × groups × K)
+      arg_b:     B[B, N, K]               fp8_e4m3 (K-inner, wo_a format)
+      arg_c:     C[M, B, N]               bf16 or f32  (M-major: tokens × groups × N)
       arg_scale: scale[B, K//gk, N//gn]   fp32
 
     Constraints:
@@ -290,13 +291,13 @@ def compile_bmm_a16w8_gfx1250(
 
         # --- Batch offsets ---
         m_idx = arith.index_cast(T.index, i32_m.ir_value())
-        a_batch_off = bz * m_idx              # [B*M, K] row offset for A
-        b_batch_off = bz * arith.index(N)    # [B*N, K] row offset for B
-
-        c_batch_row_off = bz * m_idx         # [B*M, N] row offset for C
+        # A is [M, B, K]: batch bz shifts the K inner dimension by bz*K elements
+        a_batch_inner_off = bz * arith.index(K)   # inner K offset for A [M,B,K]
+        b_batch_off = bz * arith.index(N)         # [B*N, K] row offset for B (unchanged)
+        # C is [M, B, N]: batch bz shifts the N inner dimension by bz*N elements
+        c_batch_inner_off = bz * arith.index(N)   # inner N offset for C [M,B,N]
 
         # --- Epilogue setup ---
-        n_stride = arith.index(N)
         c_nrec = arith.index(B) * m_idx * arith.index(N * elem_bytes_d)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
 
@@ -316,8 +317,8 @@ def compile_bmm_a16w8_gfx1250(
         def make_desc_a(lds_a_mem_ref, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_a, lds_memref=lds_a_mem_ref,
-                global_offset=(a_batch_off + blk_m, k_base),
-                tensor_shape=(tile_m, tile_k), strides=(K, 1),
+                global_offset=(blk_m, a_batch_inner_off + k_base),
+                tensor_shape=(tile_m, tile_k), strides=(B * K, 1),
                 tile_shape=(tile_m, tile_k), elem_bytes=ELEM_BYTES_A,
                 pad_interval=tile_k, pad_amount=LDS_PAD_A,
                 num_warps=num_warps, workgroup_mask=a_mcast_mask)
@@ -587,18 +588,19 @@ def compile_bmm_a16w8_gfx1250(
 
         def epilogue_prepare_addrs():
             addrs = []
+            bn_stride = arith.index(B * N)
             for wm in range_constexpr(wmma_m_rep):
                 for wn in range_constexpr(wmma_n_rep):
-                    row = c_batch_row_off + blk_m + warp_m_base + arith.index(wm * WMMA_M) + lane16
-                    col_base = (blk_n + warp_n_base + arith.index(wn * WMMA_N)
-                                + lane_kgrp * arith.index(8))
+                    row = blk_m + warp_m_base + arith.index(wm * WMMA_M) + lane16
+                    col_base = (c_batch_inner_off + blk_n + warp_n_base
+                                + arith.index(wn * WMMA_N) + lane_kgrp * arith.index(8))
                     if _half_out:
-                        c_off_bytes = (row * n_stride + col_base) * arith.index(elem_bytes_d)
+                        c_off_bytes = (row * bn_stride + col_base) * arith.index(elem_bytes_d)
                         addrs.append(c_off_bytes)
                     else:
                         for half in range_constexpr(2):
                             col = col_base + arith.index(half * 4)
-                            c_off = row * n_stride + col
+                            c_off = row * bn_stride + col
                             addrs.append(c_off)
             return addrs
 
@@ -627,7 +629,7 @@ def compile_bmm_a16w8_gfx1250(
                 return
             pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
             tdm_ops.l2_prefetch_tile(
-                arg_a, (a_batch_off + blk_m, pf_k), (tile_m, tile_k), (K, 1),
+                arg_a, (blk_m, a_batch_inner_off + pf_k), (tile_m, tile_k), (B * K, 1),
                 elem_bytes=ELEM_BYTES_A, thread_id=tx, block_threads=block_threads)
             tdm_ops.l2_prefetch_tile(
                 arg_b, (b_batch_off + blk_n, pf_k), (tile_n, tile_k), (K, 1),
@@ -698,10 +700,10 @@ def compile_bmm_a16w8_gfx1250(
             d_desc = tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_c,
                 lds_memref=d_lds_base_ptr,
-                global_offset=(c_batch_row_off + blk_m + warp_m_off_sgpr,
-                               blk_n + warp_n_off_sgpr),
+                global_offset=(blk_m + warp_m_off_sgpr,
+                               c_batch_inner_off + blk_n + warp_n_off_sgpr),
                 tensor_shape=(warp_tile_m, warp_tile_n),
-                strides=(N, 1),
+                strides=(B * N, 1),
                 tile_shape=(warp_tile_m, warp_tile_n),
                 elem_bytes=elem_bytes_d,
                 pad_interval=warp_tile_n,

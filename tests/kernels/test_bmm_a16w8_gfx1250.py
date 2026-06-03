@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Precision tests for a16w8 batched GEMM (fp8 weight + per-block scale) on gfx1250.
 
-Operation: C[b,m,n] = sum_k A[b,m,k] * (fp8_B[b,n,k] * scale[b,k//128,n//128])
-  where B[b,n,k] = wo_a layout (N-outer, K-inner, K-major)
-Reference: torch.bmm(A.float(), B_dequant.transpose(-1,-2).float()).bfloat16()
+Operation: C[m,b,n] = sum_k A[m,b,k] * (fp8_B[b,n,k] * scale[b,k//128,n//128])
+  A[m,b,k]: tokens × groups × K (M-major)
+  B[b,n,k]: wo_a layout (K-inner, K-major, unchanged)
+  C[m,b,n]: tokens × groups × N (M-major)
+Reference: torch.einsum("mbk,bnk->mbn", A.float(), B_dequant.float()).bfloat16()
   where B_dequant[b,n,k] = fp8_B[b,n,k].float() * scale_expanded[b,n,k]
 """
 
@@ -107,8 +109,8 @@ def run_a16w8_test(
 
     torch.manual_seed(0)
 
-    # A: [B, M, K] bf16
-    a = torch.randn((B, M, K), dtype=torch.bfloat16, device="cpu") * 0.1
+    # A: [M, B, K] bf16
+    a = torch.randn((M, B, K), dtype=torch.bfloat16, device="cpu") * 0.1
     # scale: [B, K//gk, N//gn] fp32 (small positive values)
     scale_fp32 = (torch.rand((B, K // group_k, N // group_n), dtype=torch.float32) * 0.1 + 0.01)
 
@@ -140,10 +142,10 @@ def run_a16w8_test(
         b_for_ref = torch.randn((B, N, K), dtype=torch.float32) * 0.1
         b_fp8 = (b_for_ref.clamp(-1.0, 1.0) * 127).to(torch.int8)
 
-    # Reference: dequant B then batched GEMM in f32.
-    # b_for_ref is [B, N, K] (wo_a layout); transpose to [B, K, N] for bmm.
+    # Reference: dequant B then einsum with A [M,B,K] in f32.
     if no_scale:
-        ref = torch.bmm(a.float(), b_for_ref.transpose(-1, -2)).bfloat16()
+        # a: [M,B,K], b_for_ref: [B,N,K]
+        ref = torch.einsum("mbk,bnk->mbn", a.float(), b_for_ref.float()).bfloat16()
     else:
         # Expand scale [B, K//gk, N//gn] → [B, N, K]: scale_expanded[b,n,k]=scale[b,k//gk,n//gn]
         scale_expanded = (scale_ref
@@ -152,12 +154,12 @@ def run_a16w8_test(
                           .permute(0, 2, 3, 1, 4)                 # [B, N//gn, gn, K//gk, gk]
                           .reshape(B, N, K))
         b_dequant_f32 = b_for_ref * scale_expanded          # [B, N, K]
-        ref = torch.bmm(a.float(), b_dequant_f32.transpose(-1, -2)).bfloat16()
+        ref = torch.einsum("mbk,bnk->mbn", a.float(), b_dequant_f32.float()).bfloat16()
 
     # Pad M if needed
     if mpad > M:
-        a_pad = torch.zeros((B, mpad, K), dtype=torch.bfloat16)
-        a_pad[:, :M, :] = a
+        a_pad = torch.zeros((mpad, B, K), dtype=torch.bfloat16)
+        a_pad[:M, :, :] = a
     else:
         a_pad = a
 
@@ -165,7 +167,7 @@ def run_a16w8_test(
     a_gpu = a_pad.cuda().contiguous()
     b_gpu = b_fp8.cuda().contiguous()
     scale_gpu = scale.cuda().contiguous()
-    c_gpu = torch.zeros((B, mpad, N), dtype=torch.bfloat16, device="cuda")
+    c_gpu = torch.zeros((mpad, B, N), dtype=torch.bfloat16, device="cuda")
 
     print(
         f"a16w8 BMM B={B} M={M}(pad={mpad}) K={K} N={N} "
@@ -196,7 +198,7 @@ def run_a16w8_test(
     launch_fn(c_flat, a_flat, b_flat, scale_flat, mpad, torch.cuda.current_stream())
     torch.cuda.synchronize()
 
-    c_out = c_gpu[:, :M, :].cpu().float()
+    c_out = c_gpu[:M, :, :].cpu().float()
     ok = verify_output(c_out, ref.float(), rtol=rtol, atol=atol)
     if not ok:
         max_diff = (c_out - ref.float()).abs().max().item()
