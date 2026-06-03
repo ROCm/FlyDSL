@@ -231,9 +231,9 @@
           {
             "point11": {
               "instruction": [
+                "v_sub_f32_e32 v31, v15, v214",
                 "s_setprio 0",
-                "s_barrier",
-                "s_add_u32 s12, s12, 2"
+                "s_barrier"
               ]
             }
           },
