@@ -1,7 +1,6 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-
 setup(
     name="opus_asm_cpp",
     ext_modules=[

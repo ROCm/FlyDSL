@@ -20,9 +20,7 @@ _CODE_OBJECT = _THIS_DIR / "flash_attn_opus.v1.co"
 
 def _load_ext():
     if not _CODE_OBJECT.is_file():
-        raise RuntimeError(
-            f"{_CODE_OBJECT} not found. Build it with: cd {_THIS_DIR} && ./build.sh"
-        )
+        raise RuntimeError(f"{_CODE_OBJECT} not found. Build it with: cd {_THIS_DIR} && ./build.sh")
     if str(_THIS_DIR) not in sys.path:
         sys.path.insert(0, str(_THIS_DIR))
     return importlib.import_module("opus_asm_ext")
@@ -80,9 +78,7 @@ def forward_out(
     if (bk, sk, dk) != (b, s, d):
         raise ValueError("q/k/v must share B, S, and D")
     if (h, h_kv, d) != (64, 64, 128):
-        raise ValueError(
-            f"flash_attn_opus.v1.s supports H=64, H_KV=64, D=128; got H={h}, H_KV={h_kv}, D={d}"
-        )
+        raise ValueError(f"flash_attn_opus.v1.s supports H=64, H_KV=64, D=128; got H={h}, H_KV={h_kv}, D={d}")
     if s % 256 != 0:
         raise ValueError(f"seq_len must be divisible by 256, got {s}")
 

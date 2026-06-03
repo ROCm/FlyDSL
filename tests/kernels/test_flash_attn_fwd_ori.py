@@ -209,9 +209,7 @@ def pytorch_ref_attention(q, k, v, causal=True):
     v_t = v.transpose(1, 2).float()
     nh_q, nh_kv = q_t.shape[1], k_t.shape[1]
     if nh_q != nh_kv:
-        assert nh_q % nh_kv == 0, (
-            f"num_heads ({nh_q}) must be divisible by num_kv_heads ({nh_kv})"
-        )
+        assert nh_q % nh_kv == 0, f"num_heads ({nh_q}) must be divisible by num_kv_heads ({nh_kv})"
         rep = nh_q // nh_kv
         k_t = k_t.repeat_interleave(rep, dim=1)
         v_t = v_t.repeat_interleave(rep, dim=1)
@@ -363,9 +361,7 @@ def run_config(
     if num_kv_heads is None:
         num_kv_heads = num_heads
     if num_heads % num_kv_heads != 0:
-        results["err"] = (
-            f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
-        )
+        results["err"] = f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
         return results
 
     try:
@@ -378,16 +374,10 @@ def run_config(
                 waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
                 daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
                 num_kv_heads=num_kv_heads,
-                dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG[
-                    "dualwave_swp_lazy_rescale"
-                ],
+                dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
                 dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
-                dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
-                    "dualwave_swp_debug_lazy_counts"
-                ],
-                dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG[
-                    "dualwave_swp_enable_stagger"
-                ],
+                dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_debug_lazy_counts"],
+                dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
             )
     except Exception as e:
         results["err"] = f"build: {e}"
@@ -410,8 +400,7 @@ def run_config(
         if S >= 128:
             k_4d[:, 64:128, :, :].fill_(80.0)
         print(
-            "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, "
-            "K tile1=80 to force row_max - m_row > 8",
+            "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, " "K tile1=80 to force row_max - m_row > 8",
             flush=True,
         )
 
@@ -419,9 +408,7 @@ def run_config(
     k_flat = k_4d.contiguous().view(-1)
     v_flat = v_4d.contiguous().view(-1)
     o_flat = torch.zeros_like(q_flat)
-    debug_counts = (
-        torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy_counts else None
-    )
+    debug_counts = torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy_counts else None
 
     try:
         if debug_lazy_counts:
@@ -549,17 +536,17 @@ def run_aiter_bench(
 
         def aiter_forward():
             return aiter.mha_fwd(
-                q,                  # q
-                k,                  # k
-                v,                  # v
-                0.0,                # dropout_p
-                softmax_scale,      # softmax_scale
-                causal,             # is_causal
-                -1,                 # window_size_left
-                -1,                 # window_size_right
-                0,                  # sink_size
-                True,               # return_softmax_lse
-                False,              # return_dropout_randval
+                q,  # q
+                k,  # k
+                v,  # v
+                0.0,  # dropout_p
+                softmax_scale,  # softmax_scale
+                causal,  # is_causal
+                -1,  # window_size_left
+                -1,  # window_size_right
+                0,  # sink_size
+                True,  # return_softmax_lse
+                False,  # return_dropout_randval
                 cu_seqlens_q=None,
                 cu_seqlens_kv=None,
                 out=None,
@@ -575,17 +562,17 @@ def run_aiter_bench(
 
         def aiter_forward():
             return aiter.fmha_v3_fwd(
-                q,                  # q
-                k,                  # k
-                v,                  # v
-                0.0,                # dropout_p
-                softmax_scale,      # softmax_scale
-                causal,             # is_causal
-                -1,                 # window_size_left
-                -1,                 # window_size_right
-                True,               # return_softmax_lse
-                False,              # return_dropout_randval
-                2,                  # how_v3_bf16_cvt
+                q,  # q
+                k,  # k
+                v,  # v
+                0.0,  # dropout_p
+                softmax_scale,  # softmax_scale
+                causal,  # is_causal
+                -1,  # window_size_left
+                -1,  # window_size_right
+                True,  # return_softmax_lse
+                False,  # return_dropout_randval
+                2,  # how_v3_bf16_cvt
                 out=None,
                 bias=None,
                 alibi_slopes=None,
@@ -778,10 +765,7 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
                 label, fa, ca, aa = avg_row
                 cmp_overrides = None
             # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
-            w.writerow(
-                [label, "", "", "", "", "", ""]
-                + _metrics(fa, ca, aa, cmp_overrides)
-            )
+            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, ca, aa, cmp_overrides))
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
@@ -904,10 +888,7 @@ def _print_grouped_avgs(rows, tag_fn, print_avg_fn):
                 print_avg_fn(f"AVG ({ct})", subset)
 
 
-_CFG_HDR = (
-    f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} "
-    f"{'dtype':>5s} {'causal':>8s}"
-)
+_CFG_HDR = f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} " f"{'dtype':>5s} {'causal':>8s}"
 _CFG_W = len(_CFG_HDR)
 _PATH_W = 20
 
@@ -936,9 +917,10 @@ def main():
     parser.add_argument("--seq_len", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
     parser.add_argument(
-        "--num_kv_heads", type=int, default=None,
-        help="KV head count for GQA/MQA. Default = num_heads (MHA). "
-             "Requires num_heads %% num_kv_heads == 0.",
+        "--num_kv_heads",
+        type=int,
+        default=None,
+        help="KV head count for GQA/MQA. Default = num_heads (MHA). " "Requires num_heads %% num_kv_heads == 0.",
     )
     parser.add_argument("--head_dim", type=int, default=None)
     causal_group = parser.add_mutually_exclusive_group()
@@ -973,13 +955,15 @@ def main():
 
     if args.batch or args.seq_len or args.num_heads or args.head_dim or args.num_kv_heads:
         nh_single = args.num_heads or 8
-        configs = [(
-            args.batch or 1,
-            args.seq_len or 128,
-            nh_single,
-            args.num_kv_heads if args.num_kv_heads is not None else nh_single,
-            args.head_dim or 128,
-        )]
+        configs = [
+            (
+                args.batch or 1,
+                args.seq_len or 128,
+                nh_single,
+                args.num_kv_heads if args.num_kv_heads is not None else nh_single,
+                args.head_dim or 128,
+            )
+        ]
     else:
         configs = DEFAULT_CONFIGS
 
@@ -1055,10 +1039,7 @@ def main():
             f"{_CFG_HDR} | {'FlyDSL':^28s} | {'aiter_ck':^28s} | {'aiter_asm':^28s}"
             f" | {'Fly/aiter_ck':^14s} | {'Fly/aiter_asm':^14s}"
         )
-        hdr2 = (
-            f"{'':>{_CFG_W}s} | {col} | {col} | {col}"
-            f" | {cmp_col} | {cmp_col}"
-        )
+        hdr2 = f"{'':>{_CFG_W}s} | {col} | {col} | {col}" f" | {cmp_col} | {cmp_col}"
         sep = "-" * len(hdr2)
         print(f"\n{hdr1}")
         print(hdr2)
@@ -1085,16 +1066,18 @@ def main():
                 f" | {_fmt_cmp_values(fck_cmp)}"
                 f" | {_fmt_cmp_values(fasm_cmp)}"
             )
-            cmp_avg_rows.append((
-                label,
-                fa,
-                ca,
-                aa,
+            cmp_avg_rows.append(
                 (
-                    _csv_cmp_values(fck_cmp),
-                    _csv_cmp_values(fasm_cmp),
-                ),
-            ))
+                    label,
+                    fa,
+                    ca,
+                    aa,
+                    (
+                        _csv_cmp_values(fck_cmp),
+                        _csv_cmp_values(fasm_cmp),
+                    ),
+                )
+            )
 
         print(sep)
         _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _cmp_avg)

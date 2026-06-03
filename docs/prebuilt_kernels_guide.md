@@ -305,7 +305,8 @@ What operation do you need?
 | `kernels/moe_blockscale_2stage.py` | MoE Blockscale 2-stage |
 | `kernels/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
 | `kernels/pa_decode_fp8.py` | Paged attention decode (FP8) |
-| `kernels/flash_attn_func.py` | FlashAttention |
+| `kernels/flash_attn_generic.py` | FlashAttention generic fallback |
+| `kernels/flash_attn_gfx950.py` | FlashAttention gfx950 fast path |
 | `kernels/layernorm_kernel.py` | LayerNorm (layout API) |
 | `kernels/rmsnorm_kernel.py` | RMSNorm (layout API) |
 | `kernels/softmax_kernel.py` | Softmax (layout API) |
@@ -333,7 +334,7 @@ What operation do you need?
 | `tests/kernels/test_moe_blockscale.py` | MoE Blockscale GEMM |
 | `tests/kernels/test_moe_reduce.py` | MoE reduce kernel |
 | `tests/kernels/test_pa.py` | Paged attention decode |
-| `tests/kernels/test_flash_attn_func.py` | FlashAttention |
+| `tests/kernels/test_flash_attn_fwd.py` | FlashAttention |
 | `tests/kernels/test_layernorm.py` | LayerNorm |
 | `tests/kernels/test_rmsnorm.py` | RMSNorm |
 | `tests/kernels/test_softmax.py` | Softmax |

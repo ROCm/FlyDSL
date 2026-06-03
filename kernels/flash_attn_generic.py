@@ -105,9 +105,7 @@ def build_flash_attn_func_module_primary(
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
-    assert num_heads % num_kv_heads == 0, (
-        f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
-    )
+    assert num_heads % num_kv_heads == 0, f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
 
     BLOCK_N = 64
     K_SUB_N = 32
@@ -119,14 +117,10 @@ def build_flash_attn_func_module_primary(
     #   * head_dim == 128, dtype in (bf16, f16), gpu_arch startswith "gfx950"
     # Runtime dispatch additionally requires seq_len >= 384 and seq_len % 256 == 0.
     _dualwave_swp_launch = None
-    if (
-        block_m is None
-        and head_dim == 128
-        and dtype_str in ("bf16", "f16")
-        and gpu_arch.startswith("gfx950")
-    ):
+    if block_m is None and head_dim == 128 and dtype_str in ("bf16", "f16") and gpu_arch.startswith("gfx950"):
         try:
             from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
+
             _dualwave_swp_launch = build_flash_attn_dualwave_swp_module(
                 num_heads=num_heads,
                 head_dim=head_dim,
@@ -142,6 +136,7 @@ def build_flash_attn_func_module_primary(
             )
         except Exception as _dualwave_swp_err:
             import sys
+
             print(
                 f"[flash_attn_func] OPUS path build failed, falling back: {_dualwave_swp_err}",
                 file=sys.stderr,
@@ -445,10 +440,7 @@ def build_flash_attn_func_module_primary(
         # GQA/MQA: every GQA_GROUP_SIZE consecutive Q heads share one KV head.
         # Use Python ternary (ast.IfExp) so FlyDSL's `if`-rewriter doesn't
         # turn this into a dynamic dispatch and lose `kv_head_idx`.
-        kv_head_idx = (
-            q_head_idx if GQA_GROUP_SIZE == 1
-            else q_head_idx // GQA_GROUP_SIZE
-        )
+        kv_head_idx = q_head_idx if GQA_GROUP_SIZE == 1 else q_head_idx // GQA_GROUP_SIZE
 
         # ---- Cooperative load decomposition ----
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
@@ -638,9 +630,7 @@ def build_flash_attn_func_module_primary(
                     col_byte = unsw_col_f16 * 2
                     global_row = batch_idx * seq_len_v + tile_start + row_in_tile
                     global_byte = (
-                        global_row * fx.Index(STRIDE_TOKEN_KV * 2)
-                        + kv_head_idx * fx.Index(HEAD_DIM * 2)
-                        + col_byte
+                        global_row * fx.Index(STRIDE_TOKEN_KV * 2) + kv_head_idx * fx.Index(HEAD_DIM * 2) + col_byte
                     )
                     voffset = fx.Int32(global_byte)
 
@@ -685,9 +675,7 @@ def build_flash_attn_func_module_primary(
                     col_byte = unsw_col_f16 * 2
                     global_row = batch_idx * seq_len_v + tile_start + row_in_tile
                     global_byte = (
-                        global_row * fx.Index(STRIDE_TOKEN_KV * 2)
-                        + kv_head_idx * fx.Index(HEAD_DIM * 2)
-                        + col_byte
+                        global_row * fx.Index(STRIDE_TOKEN_KV * 2) + kv_head_idx * fx.Index(HEAD_DIM * 2) + col_byte
                     )
                     voffset = fx.Int32(global_byte)
 

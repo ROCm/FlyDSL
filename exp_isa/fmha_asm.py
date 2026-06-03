@@ -82,9 +82,7 @@ def forward_out(
     if (bk, sk, dk) != (b, s, d):
         raise ValueError("q/k/v must share B, S, and D")
     if d != 128 or h_kv <= 0 or h % h_kv != 0:
-        raise ValueError(
-            f"MI350 fmha asm supports H % H_KV == 0, D=128; got H={h}, H_KV={h_kv}, D={d}"
-        )
+        raise ValueError(f"MI350 fmha asm supports H % H_KV == 0, D=128; got H={h}, H_KV={h_kv}, D={d}")
     if causal and h % 8 != 0:
         raise ValueError(f"causal MI350 fmha asm requires H to be a multiple of 8, got H={h}")
     if s % 256 != 0:

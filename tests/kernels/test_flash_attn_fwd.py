@@ -4,21 +4,21 @@
 Tests flash_attn_func against PyTorch SDPA.
 """
 
-import os
-import sys
 import argparse
 import csv
 import hashlib
 import importlib
 import json
+import logging
 import math
+import os
 import random
 import shutil
+import sys
 import tarfile
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
-import logging
 
 # Configure logging to show INFO level messages (required for kernel name display)
 logging.basicConfig(level=logging.INFO)
@@ -27,9 +27,9 @@ _repo = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_repo))
 
 try:
+    import numpy as np
     import torch
     import torch.nn.functional as F
-    import numpy as np
 except ImportError:
     print("PyTorch not available")
     sys.exit(1)
@@ -38,10 +38,10 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-from kernels.flash_attn_generic import (
+from kernels.flash_attn_generic import (  # noqa: E402
     build_flash_attn_func_module,
 )
-from tests.test_common import run_perftest
+from tests.test_common import run_perftest  # noqa: E402
 
 # Tensor initialization range (uniform distribution)
 UNIFORM_RANGE = (-1, 1)
@@ -66,28 +66,23 @@ DEFAULT_CONFIGS = [
     (1, 384, 64, 64, 128),
     (1, 512, 64, 64, 128),
     (1, 1024, 64, 64, 128),
-
     (1, 2048, 64, 64, 128),
     (1, 4096, 64, 64, 128),
     (1, 8192, 64, 64, 128),
     (4, 8192, 64, 64, 128),
-
     (1, 2048, 32, 32, 128),
     (1, 4096, 32, 32, 128),
     (1, 8192, 32, 32, 128),
     (8, 8192, 32, 32, 128),
-
     (1, 2048, 16, 16, 128),
     (1, 4096, 16, 16, 128),
     (1, 8192, 16, 16, 128),
     (16, 8192, 16, 16, 128),
-
     (1, 2048, 8, 8, 128),
     (1, 4096, 8, 8, 128),
     (1, 8192, 8, 8, 128),
     (32, 8192, 8, 8, 128),
     (16, 8192, 64, 64, 128),
-
     # GQA configs (num_kv_heads < num_heads).
     (16, 8192, 64, 8, 128),
 ]
@@ -215,9 +210,7 @@ def pytorch_ref_attention(q, k, v, causal=True):
     v_t = v.transpose(1, 2).float()
     nh_q, nh_kv = q_t.shape[1], k_t.shape[1]
     if nh_q != nh_kv:
-        assert nh_q % nh_kv == 0, (
-            f"num_heads ({nh_q}) must be divisible by num_kv_heads ({nh_kv})"
-        )
+        assert nh_q % nh_kv == 0, f"num_heads ({nh_q}) must be divisible by num_kv_heads ({nh_kv})"
         rep = nh_q // nh_kv
         k_t = k_t.repeat_interleave(rep, dim=1)
         v_t = v_t.repeat_interleave(rep, dim=1)
@@ -254,9 +247,7 @@ def pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=True):
 
 def compute_md5(tensor: torch.Tensor) -> str:
     """Compute MD5 hash of a tensor's raw bytes."""
-    return hashlib.md5(
-        tensor.contiguous().view(torch.uint8).detach().cpu().numpy().tobytes()
-    ).hexdigest()
+    return hashlib.md5(tensor.contiguous().view(torch.uint8).detach().cpu().numpy().tobytes()).hexdigest()
 
 
 def compare_arrays(
@@ -334,24 +325,30 @@ def compare_arrays(
         lower, upper = thresholds[i], thresholds[i + 1]
         count = int(np.sum((diff >= lower) & (diff < upper)))
         pct = 100.0 * count / total_elements
-        result["threshold_stats"].append(
-            {"range": f"[{lower:.0e}, {upper:.0e})", "count": count, "percentage": pct}
-        )
+        result["threshold_stats"].append({"range": f"[{lower:.0e}, {upper:.0e})", "count": count, "percentage": pct})
         print(f"    [{lower:.0e}, {upper:.0e}): {count:>8d} ({pct:6.2f}%)")
 
     count = int(np.sum(diff >= thresholds[-1]))
     pct = 100.0 * count / total_elements
-    result["threshold_stats"].append(
-        {"range": f">={thresholds[-1]:.0e}", "count": count, "percentage": pct}
-    )
+    result["threshold_stats"].append({"range": f">={thresholds[-1]:.0e}", "count": count, "percentage": pct})
     print(f"    >={thresholds[-1]:.0e}       : {count:>8d} ({pct:6.2f}%)")
 
     return result
 
 
 def run_config(
-    batch, seq_len, num_heads, head_dim, dtype, causal, warmup, iters,
-    seed=DEFAULT_SEED, dtype_str="f16", verbose=True, num_kv_heads=None,
+    batch,
+    seq_len,
+    num_heads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    dtype_str="f16",
+    verbose=True,
+    num_kv_heads=None,
 ):
     device = "cuda"
     results = {}
@@ -365,9 +362,7 @@ def run_config(
     if num_kv_heads is None:
         num_kv_heads = num_heads
     if num_heads % num_kv_heads != 0:
-        results["err"] = (
-            f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
-        )
+        results["err"] = f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
         return results
 
     try:
@@ -382,9 +377,7 @@ def run_config(
                 num_kv_heads=num_kv_heads,
                 dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
                 dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
-                dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG[
-                    "dualwave_swp_debug_lazy_counts"
-                ],
+                dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_debug_lazy_counts"],
                 dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
             )
     except Exception as e:
@@ -408,8 +401,7 @@ def run_config(
         if S >= 128:
             k_4d[:, 64:128, :, :].fill_(80.0)
         print(
-            "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, "
-            "K tile1=80 to force row_max - m_row > 8",
+            "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, K tile1=80 to force row_max - m_row > 8",
             flush=True,
         )
 
@@ -417,9 +409,7 @@ def run_config(
     k_flat = k_4d.contiguous().view(-1)
     v_flat = v_4d.contiguous().view(-1)
     o_flat = torch.zeros_like(q_flat)
-    debug_counts = (
-        torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy_counts else None
-    )
+    debug_counts = torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy_counts else None
 
     try:
         if debug_lazy_counts:
@@ -479,6 +469,7 @@ def run_config(
         )
 
     try:
+
         def kernel_fn():
             if debug_lazy_counts:
                 exe(q_flat, k_flat, v_flat, o_flat, B, S, debug_counts=debug_counts)
@@ -510,8 +501,17 @@ def run_config(
 
 
 def run_aiter_bench(
-    batch, seq_len, nheads, head_dim, dtype, causal,
-    warmup, iters, seed=DEFAULT_SEED, backend="ck", num_kv_heads=None,
+    batch,
+    seq_len,
+    nheads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    backend="ck",
+    num_kv_heads=None,
 ):
     """Run true aiter_ck or true aiter_asm kernel via aiter and return {tflops, max_err, us}."""
     try:
@@ -534,19 +534,20 @@ def run_aiter_bench(
     softmax_scale = 1.0 / math.sqrt(D)
 
     if backend == "ck":
+
         def aiter_forward():
             return aiter.mha_fwd(
-                q,                  # q
-                k,                  # k
-                v,                  # v
-                0.0,                # dropout_p
-                softmax_scale,      # softmax_scale
-                causal,             # is_causal
-                -1,                 # window_size_left
-                -1,                 # window_size_right
-                0,                  # sink_size
-                True,               # return_softmax_lse
-                False,              # return_dropout_randval
+                q,  # q
+                k,  # k
+                v,  # v
+                0.0,  # dropout_p
+                softmax_scale,  # softmax_scale
+                causal,  # is_causal
+                -1,  # window_size_left
+                -1,  # window_size_right
+                0,  # sink_size
+                True,  # return_softmax_lse
+                False,  # return_dropout_randval
                 cu_seqlens_q=None,
                 cu_seqlens_kv=None,
                 out=None,
@@ -557,25 +558,28 @@ def run_aiter_bench(
                 v_descale=None,
                 gen=None,
             )
+
     elif backend == "asm":
+
         def aiter_forward():
             return aiter.fmha_v3_fwd(
-                q,                  # q
-                k,                  # k
-                v,                  # v
-                0.0,                # dropout_p
-                softmax_scale,      # softmax_scale
-                causal,             # is_causal
-                -1,                 # window_size_left
-                -1,                 # window_size_right
-                True,               # return_softmax_lse
-                False,              # return_dropout_randval
-                2,                  # how_v3_bf16_cvt
+                q,  # q
+                k,  # k
+                v,  # v
+                0.0,  # dropout_p
+                softmax_scale,  # softmax_scale
+                causal,  # is_causal
+                -1,  # window_size_left
+                -1,  # window_size_right
+                True,  # return_softmax_lse
+                False,  # return_dropout_randval
+                2,  # how_v3_bf16_cvt
                 out=None,
                 bias=None,
                 alibi_slopes=None,
                 gen=None,
             )
+
     else:
         return {"err": f"unsupported backend: {backend}"}
 
@@ -583,7 +587,9 @@ def run_aiter_bench(
         out = aiter_forward()[0]
         torch.cuda.synchronize()
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+
+        traceback.print_exc()
         return {"err": f"{backend}: {e}"}
 
     ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal).to(dtype)
@@ -591,6 +597,7 @@ def run_aiter_bench(
     results["max_err"] = max_err
 
     try:
+
         def bench_fn():
             aiter_forward()
 
@@ -618,8 +625,16 @@ def run_aiter_bench(
 
 
 def run_opus_attn_bench(
-    batch, seq_len, nheads, head_dim, dtype, causal,
-    warmup, iters, seed=DEFAULT_SEED, num_kv_heads=None,
+    batch,
+    seq_len,
+    nheads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    num_kv_heads=None,
 ):
     """Run the local opus_attn GQA kernels and return {tflops, max_err, us}."""
     if dtype != torch.bfloat16:
@@ -661,7 +676,9 @@ def run_opus_attn_bench(
         out = opus_attn.forward(q, k, v, causal=causal)
         torch.cuda.synchronize()
     except Exception as e:
-        import traceback; traceback.print_exc()
+        import traceback
+
+        traceback.print_exc()
         return {"err": f"opus_attn: {e}"}
 
     ref = pytorch_ref_attention(q.float(), k.float(), v.float(), causal=causal).to(dtype)
@@ -697,8 +714,18 @@ def run_opus_attn_bench(
 
 
 def run_exp_isa_hand_asm_bench(
-    batch, seq_len, nheads, head_dim, dtype, causal,
-    warmup, iters, seed=DEFAULT_SEED, dtype_str="bf16", verbose=False, num_kv_heads=None,
+    batch,
+    seq_len,
+    nheads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    dtype_str="bf16",
+    verbose=False,
+    num_kv_heads=None,
 ):
     """Run exp_isa/flash_attn_opus.v1.s and return a run_config-compatible result dict."""
     if dtype != torch.bfloat16 or dtype_str != "bf16":
@@ -787,8 +814,18 @@ def run_exp_isa_hand_asm_bench(
 
 
 def run_exp_isa_fmha_bench(
-    batch, seq_len, nheads, head_dim, dtype, causal,
-    warmup, iters, seed=DEFAULT_SEED, dtype_str="bf16", verbose=False, num_kv_heads=None,
+    batch,
+    seq_len,
+    nheads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    dtype_str="bf16",
+    verbose=False,
+    num_kv_heads=None,
 ):
     """Run exp_isa MI350 256x64 FMHA asm kernels and return a run_config-compatible result dict."""
     if dtype != torch.bfloat16 or dtype_str != "bf16":
@@ -962,15 +999,33 @@ def _csv_cmp_values(cmp_r):
 def _write_cmp_csv(csv_path, data_rows, avg_rows):
     """Write compare-mode results to CSV."""
     header = [
-        "B", "S", "H", "Hkv", "D", "dtype", "causal",
-        "FlyDSL_Time(us)", "FlyDSL_TFLOPS", "FlyDSL_MaxErr",
-        "OPUS_Time(us)", "OPUS_TFLOPS", "OPUS_MaxErr",
-        "aiter_ck_Time(us)", "aiter_ck_TFLOPS", "aiter_ck_MaxErr",
-        "aiter_asm_Time(us)", "aiter_asm_TFLOPS", "aiter_asm_MaxErr",
-        "Fly/OPUS_TFLOPS%", "Fly/OPUS_MaxErr_ratio",
-        "Fly/aiter_ck_TFLOPS%", "Fly/aiter_ck_MaxErr_ratio",
-        "Fly/aiter_asm_TFLOPS%", "Fly/aiter_asm_MaxErr_ratio",
+        "B",
+        "S",
+        "H",
+        "Hkv",
+        "D",
+        "dtype",
+        "causal",
+        "FlyDSL_Time(us)",
+        "FlyDSL_TFLOPS",
+        "FlyDSL_MaxErr",
+        "OPUS_Time(us)",
+        "OPUS_TFLOPS",
+        "OPUS_MaxErr",
+        "aiter_ck_Time(us)",
+        "aiter_ck_TFLOPS",
+        "aiter_ck_MaxErr",
+        "aiter_asm_Time(us)",
+        "aiter_asm_TFLOPS",
+        "aiter_asm_MaxErr",
+        "Fly/OPUS_TFLOPS%",
+        "Fly/OPUS_MaxErr_ratio",
+        "Fly/aiter_ck_TFLOPS%",
+        "Fly/aiter_ck_MaxErr_ratio",
+        "Fly/aiter_asm_TFLOPS%",
+        "Fly/aiter_asm_MaxErr_ratio",
     ]
+
     def _metrics(fr, or_, cr, ar, cmp_overrides=None):
         if cmp_overrides is None:
             fopus = _csv_cmp(fr, or_)
@@ -979,12 +1034,26 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         else:
             fopus, fck, fasm = cmp_overrides
         return [
-            _csv_val(fr, "us"), _csv_val(fr, "tflops"), _csv_val(fr, "max_err"),
-            _csv_val(or_, "us"), _csv_val(or_, "tflops"), _csv_val(or_, "max_err"),
-            _csv_val(cr, "us"), _csv_val(cr, "tflops"), _csv_val(cr, "max_err"),
-            _csv_val(ar, "us"), _csv_val(ar, "tflops"), _csv_val(ar, "max_err"),
-            fopus[0], fopus[1], fck[0], fck[1], fasm[0], fasm[1],
+            _csv_val(fr, "us"),
+            _csv_val(fr, "tflops"),
+            _csv_val(fr, "max_err"),
+            _csv_val(or_, "us"),
+            _csv_val(or_, "tflops"),
+            _csv_val(or_, "max_err"),
+            _csv_val(cr, "us"),
+            _csv_val(cr, "tflops"),
+            _csv_val(cr, "max_err"),
+            _csv_val(ar, "us"),
+            _csv_val(ar, "tflops"),
+            _csv_val(ar, "max_err"),
+            fopus[0],
+            fopus[1],
+            fck[0],
+            fck[1],
+            fasm[0],
+            fasm[1],
         ]
+
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
@@ -997,31 +1066,46 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
                 label, fa, oa, ca, aa = avg_row
                 cmp_overrides = None
             # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
-            w.writerow(
-                [label, "", "", "", "", "", ""]
-                + _metrics(fa, oa, ca, aa, cmp_overrides)
-            )
+            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, oa, ca, aa, cmp_overrides))
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
     """Write normal-mode results to CSV."""
-    header = ["B", "S", "H", "Hkv", "D", "dtype", "causal", "Path", "Status",
-              "MaxErr", "MinCos", "Time(us)", "TFLOPS"]
+    header = ["B", "S", "H", "Hkv", "D", "dtype", "causal", "Path", "Status", "MaxErr", "MinCos", "Time(us)", "TFLOPS"]
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(header)
         for cfg, path, status, r in data_rows:
-            w.writerow(list(cfg) + [
-                path, status,
-                _csv_val(r, "max_err"), _csv_val(r, "min_cos"),
-                _csv_val(r, "us"), _csv_val(r, "tflops"),
-            ])
+            w.writerow(
+                list(cfg)
+                + [
+                    path,
+                    status,
+                    _csv_val(r, "max_err"),
+                    _csv_val(r, "min_cos"),
+                    _csv_val(r, "us"),
+                    _csv_val(r, "tflops"),
+                ]
+            )
         for label, avg in avg_rows:
             # label + 7 empty (S, H, Hkv, D, dtype, causal, Path) + Status + 4 metrics
-            w.writerow([label, "", "", "", "", "", "", "", "--",
-                _csv_val(avg, "max_err"), _csv_val(avg, "min_cos"),
-                _csv_val(avg, "us"), _csv_val(avg, "tflops"),
-            ])
+            w.writerow(
+                [
+                    label,
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "--",
+                    _csv_val(avg, "max_err"),
+                    _csv_val(avg, "min_cos"),
+                    _csv_val(avg, "us"),
+                    _csv_val(avg, "tflops"),
+                ]
+            )
 
 
 def _valid_result(r):
@@ -1091,10 +1175,7 @@ def _print_grouped_avgs(rows, tag_fn, print_avg_fn):
                 print_avg_fn(f"AVG ({ct})", subset)
 
 
-_CFG_HDR = (
-    f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} "
-    f"{'dtype':>5s} {'causal':>8s}"
-)
+_CFG_HDR = f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} {'dtype':>5s} {'causal':>8s}"
 _CFG_W = len(_CFG_HDR)
 _PATH_W = 20
 
@@ -1114,11 +1195,7 @@ def _fmt_normal_row(cfg, path, status, r):
         return f"{prefix} | {'ERROR':>6s} | {r['err'][:60]}"
     us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
     tf_s = f"{r['tflops']:>9.1f}" if "tflops" in r else "      N/A"
-    return (
-        f"{prefix} | {status:>6s} | "
-        f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | "
-        f"{us_s} {tf_s}"
-    )
+    return f"{prefix} | {status:>6s} | {r['max_err']:>8.2e} {r['min_cos']:>8.5f} | {us_s} {tf_s}"
 
 
 def main():
@@ -1127,9 +1204,10 @@ def main():
     parser.add_argument("--seq_len", type=int, default=None)
     parser.add_argument("--num_heads", type=int, default=None)
     parser.add_argument(
-        "--num_kv_heads", type=int, default=None,
-        help="KV head count for GQA/MQA. Default = num_heads (MHA). "
-             "Requires num_heads %% num_kv_heads == 0.",
+        "--num_kv_heads",
+        type=int,
+        default=None,
+        help="KV head count for GQA/MQA. Default = num_heads (MHA). Requires num_heads %% num_kv_heads == 0.",
     )
     parser.add_argument("--head_dim", type=int, default=None)
     causal_group = parser.add_mutually_exclusive_group()
@@ -1139,15 +1217,21 @@ def main():
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
-        "--dtype", type=str, default=None, choices=["fp16", "bf16"],
+        "--dtype",
+        type=str,
+        default=None,
+        choices=["fp16", "bf16"],
         help="Data type: fp16 or bf16 (default: both)",
     )
     parser.add_argument(
-        "--seed", type=int, default=DEFAULT_SEED,
+        "--seed",
+        type=int,
+        default=DEFAULT_SEED,
         help=f"Random seed for reproducibility (default: {DEFAULT_SEED})",
     )
     parser.add_argument(
-        "--compare", action="store_true",
+        "--compare",
+        action="store_true",
         help="Compare FlyDSL vs OPUS vs aiter_ck vs aiter_asm performance (requires OPUS install and aiter)",
     )
     args = parser.parse_args()
@@ -1158,13 +1242,15 @@ def main():
 
     if args.batch or args.seq_len or args.num_heads or args.head_dim or args.num_kv_heads:
         nh_single = args.num_heads or 8
-        configs = [(
-            args.batch or 1,
-            args.seq_len or 128,
-            nh_single,
-            args.num_kv_heads if args.num_kv_heads is not None else nh_single,
-            args.head_dim or 128,
-        )]
+        configs = [
+            (
+                args.batch or 1,
+                args.seq_len or 128,
+                nh_single,
+                args.num_kv_heads if args.num_kv_heads is not None else nh_single,
+                args.head_dim or 128,
+            )
+        ]
     else:
         configs = DEFAULT_CONFIGS
 
@@ -1177,7 +1263,7 @@ def main():
         print(f"FlyDSL vs OPUS vs aiter_ck vs aiter_asm  ({causal_desc}, {dtype_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
-        print(f"  OPUS: bf16 only, D=128/512; aiter_ck: bf16+fp16; aiter_asm: bf16 only")
+        print("  OPUS: bf16 only, D=128/512; aiter_ck: bf16+fp16; aiter_asm: bf16 only")
         print("=" * 130)
         print("Running benchmarks ...")
 
@@ -1193,20 +1279,42 @@ def main():
                     print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
                     fly_r = run_config(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, dtype_str=dtype_str, verbose=False,
+                        batch,
+                        seq_len,
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        dtype_str=dtype_str,
+                        verbose=False,
                         num_kv_heads=nh_kv,
                     )
                     opus_r = run_opus_attn_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, num_kv_heads=nh_kv,
+                        batch,
+                        seq_len,
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        num_kv_heads=nh_kv,
                     )
                     ck_r = run_aiter_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, backend="ck",
+                        batch,
+                        seq_len,
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        backend="ck",
                         num_kv_heads=nh_kv,
                     )
                     # asm_r = run_aiter_bench(
@@ -1222,9 +1330,17 @@ def main():
                     #     num_kv_heads=nh_kv,
                     # )
                     asm_r = run_exp_isa_fmha_bench(
-                        batch, seq_len, nh, hd, dtype, causal,
-                        warmup=args.warmup, iters=args.iters,
-                        seed=args.seed, dtype_str=dtype_str, verbose=False,
+                        batch,
+                        seq_len,
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        dtype_str=dtype_str,
+                        verbose=False,
                         num_kv_heads=nh_kv,
                     )
                     rows.append((cfg, fly_r, opus_r, ck_r, asm_r))
@@ -1235,10 +1351,7 @@ def main():
             f"{_CFG_HDR} | {'FlyDSL':^28s} | {'OPUS':^28s} | {'aiter_ck':^28s} | {'aiter_asm':^28s}"
             f" | {'Fly/OPUS':^14s} | {'Fly/aiter_ck':^14s} | {'Fly/aiter_asm':^14s}"
         )
-        hdr2 = (
-            f"{'':>{_CFG_W}s} | {col} | {col} | {col} | {col}"
-            f" | {cmp_col} | {cmp_col} | {cmp_col}"
-        )
+        hdr2 = f"{'':>{_CFG_W}s} | {col} | {col} | {col} | {col} | {cmp_col} | {cmp_col} | {cmp_col}"
         sep = "-" * len(hdr2)
         print(f"\n{hdr1}")
         print(hdr2)
@@ -1267,18 +1380,20 @@ def main():
                 f" | {_fmt_cmp_values(fopus_cmp)} | {_fmt_cmp_values(fck_cmp)}"
                 f" | {_fmt_cmp_values(fasm_cmp)}"
             )
-            cmp_avg_rows.append((
-                label,
-                fa,
-                oa,
-                ca,
-                aa,
+            cmp_avg_rows.append(
                 (
-                    _csv_cmp_values(fopus_cmp),
-                    _csv_cmp_values(fck_cmp),
-                    _csv_cmp_values(fasm_cmp),
-                ),
-            ))
+                    label,
+                    fa,
+                    oa,
+                    ca,
+                    aa,
+                    (
+                        _csv_cmp_values(fopus_cmp),
+                        _csv_cmp_values(fck_cmp),
+                        _csv_cmp_values(fasm_cmp),
+                    ),
+                )
+            )
 
         print(sep)
         _print_grouped_avgs(rows, lambda r: _tag_group(r[0]), _cmp_avg)
@@ -1315,9 +1430,16 @@ def main():
                     cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
                     try:
                         r = run_config(
-                            batch, seq_len, nh, hd, dtype, causal,
-                            warmup=args.warmup, iters=args.iters,
-                            seed=args.seed, dtype_str=dtype_str,
+                            batch,
+                            seq_len,
+                            nh,
+                            hd,
+                            dtype,
+                            causal,
+                            warmup=args.warmup,
+                            iters=args.iters,
+                            seed=args.seed,
+                            dtype_str=dtype_str,
                             num_kv_heads=nh_kv,
                         )
                         path = ""

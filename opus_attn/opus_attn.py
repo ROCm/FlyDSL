@@ -19,10 +19,7 @@ _LIB_PATH = _THIS_DIR / "build" / "libopus_gqa_attn.so"
 
 def _load_lib():
     if not _LIB_PATH.is_file():
-        raise RuntimeError(
-            f"{_LIB_PATH} not found. Build/install it with: "
-            f"cd {_THIS_DIR} && ./install_python.sh"
-        )
+        raise RuntimeError(f"{_LIB_PATH} not found. Build/install it with: " f"cd {_THIS_DIR} && ./install_python.sh")
 
     lib = ctypes.CDLL(str(_LIB_PATH))
     lib.opus_gqa_forward.argtypes = [

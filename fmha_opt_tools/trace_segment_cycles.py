@@ -331,7 +331,9 @@ def parse_config_sample_point_names(config: dict[str, object], path: Path) -> li
     return names
 
 
-def parse_config_extra_arrows(config: dict[str, object], path: Path, point_names: list[str]) -> set[tuple[str, str]] | None:
+def parse_config_extra_arrows(
+    config: dict[str, object], path: Path, point_names: list[str]
+) -> set[tuple[str, str]] | None:
     raw_arrows = config.get("extra_arrow")
     if raw_arrows is None:
         return None
@@ -356,7 +358,9 @@ def parse_config_extra_arrows(config: dict[str, object], path: Path, point_names
     return extra_arrows or None
 
 
-def parse_config_interval_infos(config: dict[str, object], points: list[list[str]], path: Path) -> list[IntervalInfo] | None:
+def parse_config_interval_infos(
+    config: dict[str, object], points: list[list[str]], path: Path
+) -> list[IntervalInfo] | None:
     raw_infos = config.get("interval information") or config.get("interval_information")
     if raw_infos is None:
         return None
@@ -428,11 +432,7 @@ def config_kernel_name(config: dict[str, object], config_path: Path | None) -> s
 def resolve_trace_dir(raw_trace_dir: object, config_path: Path) -> Path:
     trace_text = str(raw_trace_dir)
     if any(ch in trace_text for ch in "*?["):
-        candidates = [
-            Path(candidate)
-            for candidate in glob.glob(trace_text)
-            if Path(candidate).is_dir()
-        ]
+        candidates = [Path(candidate) for candidate in glob.glob(trace_text) if Path(candidate).is_dir()]
         if not candidates:
             raise SystemExit(f"{config_path} trace_dir pattern matched no directories: {trace_text}")
         trace_dir = sorted(candidates, key=lambda path: str(path))[0].resolve()
@@ -511,9 +511,7 @@ def regex_segment(rows: list[CodeRow], start_pat: str, end_pat: str, occurrence:
     if not candidates:
         raise SystemExit("no segment matched --start-regex/--end-regex")
     if occurrence > len(candidates):
-        raise SystemExit(
-            f"--code-occurrence {occurrence} exceeds {len(candidates)} matched code segments"
-        )
+        raise SystemExit(f"--code-occurrence {occurrence} exceeds {len(candidates)} matched code segments")
 
     start, end = candidates[occurrence - 1]
     return list(range(start, end + 1))
@@ -540,9 +538,7 @@ def exact_instruction_segment(
     if not matches:
         raise SystemExit(f"{source_name} did not match any contiguous code.json instruction range")
     if occurrence > len(matches):
-        raise SystemExit(
-            f"--code-occurrence {occurrence} exceeds {len(matches)} exact instruction matches"
-        )
+        raise SystemExit(f"--code-occurrence {occurrence} exceeds {len(matches)} exact instruction matches")
 
     start = matches[occurrence - 1]
     return list(range(start, start + len(targets)))
@@ -967,7 +963,9 @@ def choose_next_sample_point(
                 return point_idx, sequence
 
     invalid_matches = [point_idx for point_idx, _sequence in matches]
-    expected_name = point_names[expected_next] if point_names and expected_next < len(point_names) else str(expected_next)
+    expected_name = (
+        point_names[expected_next] if point_names and expected_next < len(point_names) else str(expected_next)
+    )
     current_label = f"{current_name}(start_ts={current_start_ts})"
     invalid_names = [
         f"{point_names[point_idx] if point_names and point_idx < len(point_names) else str(point_idx)}"
@@ -1036,9 +1034,7 @@ def scan_sample_point_intervals(
     kernel_name: str | None = None,
     extra_arrows: set[tuple[str, str]] | None = None,
 ) -> list[list[IntervalResult]]:
-    intervals_by_start_point: list[list[IntervalResult]] = [
-        [] for _ in range(max(0, len(point_code_sequences) - 1))
-    ]
+    intervals_by_start_point: list[list[IntervalResult]] = [[] for _ in range(max(0, len(point_code_sequences) - 1))]
 
     for wave_path, se, simd, slot, wave_id in filtered_wave_file_entries(
         trace_dir, wave_glob, se_filter, sm_filter, sl_filter, wv_filter
@@ -1236,6 +1232,7 @@ def print_interval_results(
         f"avg_inst_count={statistics.mean(inst_counts):.1f} "
         f"min_inst_count={min(inst_counts):.0f} max_inst_count={max(inst_counts):.0f}"
     )
+
 
 def print_interval_cycles_summary(label: str, intervals: list[IntervalResult]) -> None:
     if not intervals:
@@ -1762,9 +1759,7 @@ def print_kernel_summary_with_descriptions(rows: list[CodeRow], summary_records:
         )
         summary_lines.append((avg_cycles, order_idx, line))
 
-    for _avg_cycles, _order_idx, line in sorted(
-        summary_lines, key=lambda item: (item[0], -item[1]), reverse=True
-    ):
+    for _avg_cycles, _order_idx, line in sorted(summary_lines, key=lambda item: (item[0], -item[1]), reverse=True):
         print(line)
 
 
@@ -1786,8 +1781,12 @@ def print_kernel_trace_info(analysis: KernelAnalysis, interval_print_limit: int)
                 )
             print(detail)
 
-        print(f"Start code_idx candidates by instruction: {[format_code_candidates(c) for c in sample.start_code_sequences]}")
-        print(f"End code_idx candidates by instruction:   {[format_code_candidates(c) for c in sample.end_code_sequences]}")
+        print(
+            f"Start code_idx candidates by instruction: {[format_code_candidates(c) for c in sample.start_code_sequences]}"
+        )
+        print(
+            f"End code_idx candidates by instruction:   {[format_code_candidates(c) for c in sample.end_code_sequences]}"
+        )
         if sample.intervals:
             print_matched_code_sequences(
                 analysis.rows,
@@ -1843,7 +1842,9 @@ def pair_from_interval(interval: IntervalResult) -> tuple[int, int, int, int]:
     return interval.se, interval.simd, interval.slot, interval.wave_id
 
 
-def auto_select_specific_part_pair(intervals: list[IntervalResult], interval_name: str) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+def auto_select_specific_part_pair(
+    intervals: list[IntervalResult], interval_name: str
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
     if not intervals:
         raise SystemExit(f"cannot auto-select se_sm_sl_wv_pair: no intervals matched interval_name={interval_name!r}")
     first = sorted(intervals, key=lambda item: (item.wave_file, item.start_ts, item.start_pos))[0]
@@ -2107,7 +2108,9 @@ def print_overlap_timeline(
     if not overlaps:
         return
     rel_ranges = [(0, center_inst.end_ts - center_inst.start_ts)]
-    rel_ranges.extend((inst.start_ts - center_inst.start_ts, inst.end_ts - center_inst.start_ts) for inst, _overlap in overlaps)
+    rel_ranges.extend(
+        (inst.start_ts - center_inst.start_ts, inst.end_ts - center_inst.start_ts) for inst, _overlap in overlaps
+    )
     axis_min = min(start for start, _end in rel_ranges)
     axis_max = max(end for _start, end in rel_ranges)
     scale = 1
@@ -2176,8 +2179,12 @@ def print_group_overlap_timeline(
         for _long_idx, center_inst in center_entries
     ]
     origin = min(center_inst.start_ts for _long_idx, center_inst in center_entries)
-    rel_ranges = [(center_inst.start_ts - origin, center_inst.end_ts - origin) for _long_idx, center_inst in center_entries]
-    rel_ranges.extend((other_inst.start_ts - origin, other_inst.end_ts - origin) for other_inst, _overlaps in other_entries)
+    rel_ranges = [
+        (center_inst.start_ts - origin, center_inst.end_ts - origin) for _long_idx, center_inst in center_entries
+    ]
+    rel_ranges.extend(
+        (other_inst.start_ts - origin, other_inst.end_ts - origin) for other_inst, _overlaps in other_entries
+    )
     axis_min = min(start for start, _end in rel_ranges)
     axis_max = max(end for _start, end in rel_ranges)
     scale = 1
@@ -2219,7 +2226,9 @@ def print_group_overlap_timeline(
             f"{instruction_category(other_isa)} {opcode_for_isa(other_isa)} code_idx={other_inst.code_idx} {other_isa}"
         )
 
-    print("rank other_start other_end other_latency other_pos other_type other_opcode other_code_idx overlaps_by_long other_instruction")
+    print(
+        "rank other_start other_end other_latency other_pos other_type other_opcode other_code_idx overlaps_by_long other_instruction"
+    )
     for rank, (other_inst, overlaps) in enumerate(other_entries, start=1):
         other_isa = rows[other_inst.code_idx].isa
         overlap_text = ",".join(f"L{long_idx}:{overlap}" for long_idx, overlap in sorted(overlaps))
@@ -2307,8 +2316,16 @@ def run_specific_part_config(config: dict[str, object], config_path: Path) -> No
             kernel_config["sl"] = ",".join(str(item) for item in selected_sl)
             kernel_config["wv"] = ",".join(str(item) for item in selected_wv)
 
-        analysis = analyze_kernel_config(version_name, bool(raw_version.get("baseline", False)), kernel_config, config_path)
-        interval_idx = find_interval_info_index(parse_config_interval_infos(kernel_config, parse_config_sample_points(kernel_config, config_path), config_path) or [], specific_part.interval_name)
+        analysis = analyze_kernel_config(
+            version_name, bool(raw_version.get("baseline", False)), kernel_config, config_path
+        )
+        interval_idx = find_interval_info_index(
+            parse_config_interval_infos(
+                kernel_config, parse_config_sample_points(kernel_config, config_path), config_path
+            )
+            or [],
+            specific_part.interval_name,
+        )
         intervals = analysis.sample_intervals[interval_idx].primary_intervals
         trace_a = specific_part.trace_a
         trace_b = specific_part.trace_b
@@ -2386,8 +2403,12 @@ def run_compare_config(
             print(f"Other description:    {other_sample.description or '-'}")
 
             print(f"\n--- {baseline.name} matched code information ---")
-            print(f"Start code_idx candidates by instruction: {[format_code_candidates(c) for c in base_sample.start_code_sequences]}")
-            print(f"End code_idx candidates by instruction:   {[format_code_candidates(c) for c in base_sample.end_code_sequences]}")
+            print(
+                f"Start code_idx candidates by instruction: {[format_code_candidates(c) for c in base_sample.start_code_sequences]}"
+            )
+            print(
+                f"End code_idx candidates by instruction:   {[format_code_candidates(c) for c in base_sample.end_code_sequences]}"
+            )
             if base_sample.intervals:
                 print_matched_code_sequences(
                     baseline.rows,
@@ -2397,8 +2418,12 @@ def run_compare_config(
             print(f"Matched intervals: {len(base_sample.primary_intervals)}")
 
             print(f"\n--- {other.name} matched code information ---")
-            print(f"Start code_idx candidates by instruction: {[format_code_candidates(c) for c in other_sample.start_code_sequences]}")
-            print(f"End code_idx candidates by instruction:   {[format_code_candidates(c) for c in other_sample.end_code_sequences]}")
+            print(
+                f"Start code_idx candidates by instruction: {[format_code_candidates(c) for c in other_sample.start_code_sequences]}"
+            )
+            print(
+                f"End code_idx candidates by instruction:   {[format_code_candidates(c) for c in other_sample.end_code_sequences]}"
+            )
             if other_sample.intervals:
                 print_matched_code_sequences(
                     other.rows,
@@ -2579,7 +2604,10 @@ def run_interval_points_data(
         else:
             print_instruction_sequence("Interval start instruction sequence:", start_lines)
             print_instruction_sequence("Interval end instruction sequence:", end_lines)
-        print(f"Matched intervals: {len(primary_intervals)}" + (f" (excluding {len(matched_for_pattern)} inc_inst_pattern matched)" if matched_for_pattern else ""))
+        print(
+            f"Matched intervals: {len(primary_intervals)}"
+            + (f" (excluding {len(matched_for_pattern)} inc_inst_pattern matched)" if matched_for_pattern else "")
+        )
         if primary_intervals:
             print_interval_results(rows, primary_intervals, interval_print_limit)
             if matched_for_pattern:
@@ -2623,6 +2651,7 @@ def run_interval_points_data(
             summary_records, key=lambda item: (item[0], -item[1]), reverse=True
         ):
             print(line)
+
 
 def ranked_aggregate_items(
     aggregate: dict[int, dict[str, object]],
@@ -2697,7 +2726,9 @@ def print_cycle_samples(
         row = rows[code_idx]
         samples = list(stats["latency_samples"])
         shown_samples = samples if sample_limit == 0 else samples[:sample_limit]
-        suffix = "" if sample_limit == 0 or len(samples) <= sample_limit else f" ... ({len(samples) - sample_limit} more)"
+        suffix = (
+            "" if sample_limit == 0 or len(samples) <= sample_limit else f" ... ({len(samples) - sample_limit} more)"
+        )
         mean_latency = statistics.mean(samples) if samples else 0.0
         print(
             f"{rank:4d} code_idx={code_idx} line={row.line} count={len(samples)} "
@@ -2721,7 +2752,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Report cycle cost for a contiguous instruction segment in rocprof UI traces."
     )
-    parser.add_argument("trace_dir", nargs="?", type=Path, help="Directory containing code.json and se*_sm*_sl*_wv*.json")
+    parser.add_argument(
+        "trace_dir", nargs="?", type=Path, help="Directory containing code.json and se*_sm*_sl*_wv*.json"
+    )
     parser.add_argument(
         "--config-json",
         "--config",
@@ -2880,15 +2913,25 @@ def main() -> None:
     trace_dir = resolve_trace_dir(trace_dir_value, config_path or Path("<config>"))
 
     rows = load_code(trace_dir)
-    se_arg = args.se if args.se is not None else optional_str(config_value(config, "se")) if config is not None else None
-    sm_arg = args.sm if args.sm is not None else optional_str(config_value(config, "sm")) if config is not None else None
-    sl_arg = args.sl if args.sl is not None else optional_str(config_value(config, "sl")) if config is not None else None
-    wv_arg = args.wv if args.wv is not None else optional_str(config_value(config, "wv")) if config is not None else None
+    se_arg = (
+        args.se if args.se is not None else optional_str(config_value(config, "se")) if config is not None else None
+    )
+    sm_arg = (
+        args.sm if args.sm is not None else optional_str(config_value(config, "sm")) if config is not None else None
+    )
+    sl_arg = (
+        args.sl if args.sl is not None else optional_str(config_value(config, "sl")) if config is not None else None
+    )
+    wv_arg = (
+        args.wv if args.wv is not None else optional_str(config_value(config, "wv")) if config is not None else None
+    )
     se_filter = parse_index_filter(se_arg, "se")
     sm_filter = parse_index_filter(sm_arg, "sm")
     sl_filter = parse_index_filter(sl_arg, "sl")
     wv_filter = parse_index_filter(wv_arg, "wv")
-    wave_glob = str(config_value(config, "wave_glob", "wave-glob") or args.wave_glob) if config is not None else args.wave_glob
+    wave_glob = (
+        str(config_value(config, "wave_glob", "wave-glob") or args.wave_glob) if config is not None else args.wave_glob
+    )
     interval_print_limit_raw = (
         args.interval_print_limit
         if args.interval_print_limit != 0 or config is None
@@ -3010,10 +3053,7 @@ def main() -> None:
     )
 
     print(f"Trace dir: {trace_dir}")
-    print(
-        f"Segment code_idx: {target[0]}..{target[-1]} "
-        f"({len(target)} executable instructions after filtering)"
-    )
+    print(f"Segment code_idx: {target[0]}..{target[-1]} " f"({len(target)} executable instructions after filtering)")
     print(f"Wave glob: {wave_glob}")
     if any(value is not None for value in (se_arg, sm_arg, sl_arg, wv_arg)):
         print(f"Wave filters: se={se_arg or '*'} sm={sm_arg or '*'} sl={sl_arg or '*'} wv={wv_arg or '*'}")

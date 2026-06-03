@@ -13,7 +13,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 THIS_DIR = Path(__file__).resolve().parent
 DEFAULT_EXE = THIS_DIR / "build" / "gqa_attn.exe"
 UNIFORM_RANGE = (-1, 1)
@@ -67,7 +66,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help="Set HIP_VISIBLE_DEVICES for both calls")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Fixed seed for Python input generation")
     parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds for each exe call")
-    parser.add_argument("--include-unsupported", action="store_true", help="Run configs even if this kernel rejects them")
+    parser.add_argument(
+        "--include-unsupported", action="store_true", help="Run configs even if this kernel rejects them"
+    )
     return parser.parse_args()
 
 
@@ -153,7 +154,9 @@ def shell_result_md5(
         raise RuntimeError(f"exe failed with rc={proc.returncode}\n{proc.stdout}")
 
     if not output_file.is_file():
-        raise RuntimeError("exe did not write output file. Rebuild gqa_attn.exe after updating gqa_host.cc.\n" + proc.stdout)
+        raise RuntimeError(
+            "exe did not write output file. Rebuild gqa_attn.exe after updating gqa_host.cc.\n" + proc.stdout
+        )
     return file_md5(output_file, batch * seq_len * num_heads * head_dim * 2)
 
 
@@ -172,8 +175,12 @@ def python_result_md5(
     torch.cuda.empty_cache()
 
     q = torch.empty(batch, seq_len, num_heads, head_dim, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
-    k = torch.empty(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
-    v = torch.empty(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+    k = torch.empty(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device).uniform_(
+        *UNIFORM_RANGE
+    )
+    v = torch.empty(batch, seq_len, num_kv_heads, head_dim, dtype=torch.bfloat16, device=device).uniform_(
+        *UNIFORM_RANGE
+    )
     out = torch.zeros_like(q)
 
     dump_tensor(torch, q, input_dir / "q.bin")
