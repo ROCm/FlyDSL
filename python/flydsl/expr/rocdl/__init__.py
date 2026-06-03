@@ -21,6 +21,7 @@ from . import cdna4 as cdna4
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)
 _ods_wmma_scale_f32_32x16x128_f4 = globals().get("wmma_scale_f32_32x16x128_f4", None)
+_ods_wmma_f32_16x16x128_fp8_fp8 = globals().get("wmma_f32_16x16x128_fp8_fp8", None)
 _ods_wave_id = wave_id  # ODS: wave_id(res, ...) -> i32
 _ods_cluster_workgroup_id_x = cluster_workgroup_id_x
 _ods_cluster_workgroup_id_y = cluster_workgroup_id_y
@@ -301,6 +302,32 @@ def wmma_scale_f32_32x16x128_f4(
         fmtScaleA=fmtScaleA,
         scaleBType=scaleBType,
         fmtScaleB=fmtScaleB,
+        reuseA=reuseA,
+        reuseB=reuseB,
+        loc=loc,
+        ip=ip,
+    ).result
+
+
+def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, reuseB=False, loc=None, ip=None):
+    """Non-scale V_WMMA_F32_16X16X128 (E4M3) for gfx1250 (wave32).
+
+    Operand types (wave32):
+        a: vector<16xi32> (16x128 FP8/E4M3 data)
+        b: vector<16xi32> (128x16 FP8/E4M3 data)
+        c: vector<8xf32>  (16x16 FP32 accumulator)
+    """
+    if _ods_wmma_f32_16x16x128_fp8_fp8 is None:
+        raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_fp8_fp8")
+    a_v = _unwrap_mfma_operand(a, loc=loc)
+    b_v = _unwrap_mfma_operand(b, loc=loc)
+    c_v = _unwrap_mfma_operand(c, loc=loc)
+    return _ods_wmma_f32_16x16x128_fp8_fp8(
+        result_type,
+        a_v,
+        b_v,
+        c_v,
+        modC=modC,
         reuseA=reuseA,
         reuseB=reuseB,
         loc=loc,
