@@ -22,15 +22,12 @@ import functools
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, gpu, buffer_ops, vector, rocdl
-from flydsl.expr import range_constexpr
+from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-
-from flydsl._mlir import ir
-from flydsl.expr.typing import T
-
 from kernels.grouped_gemm_blockscale_common import (
     compute_compile_constants,
     compute_mfma_tiling,
@@ -87,15 +84,24 @@ def compile_grouped_gemm_blockscale_contiguous(
     allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem_grouped_gemm")
 
     validate_params(
-        n=n, k=k, tile_n=tile_n, tile_k=tile_k,
-        scale_block_k=scale_block_k, scale_block_n=scale_block_n,
+        n=n,
+        k=k,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        scale_block_k=scale_block_k,
+        scale_block_n=scale_block_n,
         out_dtype=out_dtype,
     )
     out_mlir = out_mlir_for(out_dtype)
 
     _c = compute_compile_constants(
-        n=n, k=k, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        scale_block_k=scale_block_k, scale_block_n=scale_block_n,
+        n=n,
+        k=k,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        scale_block_k=scale_block_k,
+        scale_block_n=scale_block_n,
     )
     total_threads = _c.total_threads
     elem_bytes = _c.elem_bytes
@@ -107,14 +113,15 @@ def compile_grouped_gemm_blockscale_contiguous(
     kpack_bytes = _c.kpack_bytes
     tile_k_bytes = _c.tile_k_bytes
     tile_k_dwords = _c.tile_k_dwords
-    bytes_a_per_tile = _c.bytes_a_per_tile
-    bytes_per_thread_a = _c.bytes_per_thread_a
-    a_load_bytes = _c.a_load_bytes
     chunk_i32_a = _c.chunk_i32_a
     num_a_loads = _c.num_a_loads
 
     lds_alloc_offset, lds_tile_elems = setup_lds_allocation(
-        allocator=allocator, tile_m=tile_m, tile_k=tile_k, tile_n=tile_n, elem_bytes=elem_bytes,
+        allocator=allocator,
+        tile_m=tile_m,
+        tile_k=tile_k,
+        tile_n=tile_n,
+        elem_bytes=elem_bytes,
     )
 
     # Module name for caching
@@ -178,19 +185,13 @@ def compile_grouped_gemm_blockscale_contiguous(
 
         # Buffer resources
         a_nbytes = m_in * k_in
-        a_rsrc = buffer_ops.create_buffer_resource(
-            arg_a, max_size=False, num_records_bytes=a_nbytes
-        )
+        a_rsrc = buffer_ops.create_buffer_resource(arg_a, max_size=False, num_records_bytes=a_nbytes)
 
         b_nbytes = num_groups_in * n_in * k_in
-        b_rsrc = buffer_ops.create_buffer_resource(
-            arg_b, max_size=False, num_records_bytes=b_nbytes
-        )
+        b_rsrc = buffer_ops.create_buffer_resource(arg_b, max_size=False, num_records_bytes=b_nbytes)
 
         d_nbytes = m_in * n_in * fx.Index(2)  # bf16/f16 = 2 bytes
-        d_rsrc = buffer_ops.create_buffer_resource(
-            arg_d, max_size=False, num_records_bytes=d_nbytes
-        )
+        d_rsrc = buffer_ops.create_buffer_resource(arg_d, max_size=False, num_records_bytes=d_nbytes)
 
         # Scale buffers — gfx950 HW E8M0 path consumes int8 (one byte/scale,
         # pre-packed on host); gfx942 SW path consumes f32.
@@ -198,21 +199,15 @@ def compile_grouped_gemm_blockscale_contiguous(
 
         # scale_a: [scale_k, M] - transposed layout
         sa_nbytes = fx.Index(scale_k) * m_in * fx.Index(scale_byte_size)
-        sa_rsrc = buffer_ops.create_buffer_resource(
-            arg_scale_a, max_size=False, num_records_bytes=sa_nbytes
-        )
+        sa_rsrc = buffer_ops.create_buffer_resource(arg_scale_a, max_size=False, num_records_bytes=sa_nbytes)
 
         # scale_b: [num_groups, scale_n, scale_k]
         sb_nbytes = num_groups_in * fx.Index(scale_n * scale_k * scale_byte_size)
-        sb_rsrc = buffer_ops.create_buffer_resource(
-            arg_scale_b, max_size=False, num_records_bytes=sb_nbytes
-        )
+        sb_rsrc = buffer_ops.create_buffer_resource(arg_scale_b, max_size=False, num_records_bytes=sb_nbytes)
 
         # grouped_layout: [M]
         gl_nbytes = m_in * fx.Index(4)
-        gl_rsrc = buffer_ops.create_buffer_resource(
-            arg_grouped_layout, max_size=False, num_records_bytes=gl_nbytes
-        )
+        gl_rsrc = buffer_ops.create_buffer_resource(arg_grouped_layout, max_size=False, num_records_bytes=gl_nbytes)
 
         # Load group ID for this M-block (use first row of tile)
         group_id_i32 = buffer_ops.buffer_load(gl_rsrc, bx_m, vec_width=1, dtype=T.i32)
@@ -230,11 +225,19 @@ def compile_grouped_gemm_blockscale_contiguous(
             acc_init, accs = init_accumulators(_t.num_accs)
 
             _nb = make_n_block_coords(
-                wave_id=wave_id, by_n=by_n, group_idx=group_idx,
-                num_groups_in=num_groups_in, n_in=n_in, k_in=k_in,
-                lane_mod_16=lane_mod_16, kpack_bytes=kpack_bytes, elem_bytes=elem_bytes,
-                scale_block_n=scale_block_n, scale_k=scale_k,
-                n_per_wave=n_per_wave, num_acc_n=num_acc_n,
+                wave_id=wave_id,
+                by_n=by_n,
+                group_idx=group_idx,
+                num_groups_in=num_groups_in,
+                n_in=n_in,
+                k_in=k_in,
+                lane_mod_16=lane_mod_16,
+                kpack_bytes=kpack_bytes,
+                elem_bytes=elem_bytes,
+                scale_block_n=scale_block_n,
+                scale_k=scale_k,
+                n_per_wave=n_per_wave,
+                num_acc_n=num_acc_n,
             )
             n_tile_base = _nb.n_tile_base
             n_block_for_scale = _nb.n_block_for_scale
@@ -243,26 +246,40 @@ def compile_grouped_gemm_blockscale_contiguous(
             n_intra_list = _nb.n_intra_list
             c_scale_k = _nb.c_scale_k
 
-            (prefetch_a_tile, store_a_tile_to_lds,
-             a_row_local, a_col_local_i32, k_blocks16) = make_a_tile_loaders(
-                a_rsrc=a_rsrc, lds_a=lds_a, layout_lds=layout_lds,
-                bx_m=bx_m, tx=tx,
-                tile_m=tile_m, tile_k=tile_k,
-                tile_k_bytes=tile_k_bytes, tile_k_dwords=tile_k_dwords,
-                chunk_i32_a=chunk_i32_a, num_a_loads=num_a_loads,
-                total_threads=total_threads, elem_bytes=elem_bytes,
+            prefetch_a_tile, store_a_tile_to_lds, a_row_local, a_col_local_i32, k_blocks16 = make_a_tile_loaders(
+                a_rsrc=a_rsrc,
+                lds_a=lds_a,
+                layout_lds=layout_lds,
+                bx_m=bx_m,
+                tx=tx,
+                tile_m=tile_m,
+                tile_k=tile_k,
+                tile_k_bytes=tile_k_bytes,
+                tile_k_dwords=tile_k_dwords,
+                chunk_i32_a=chunk_i32_a,
+                num_a_loads=num_a_loads,
+                total_threads=total_threads,
+                elem_bytes=elem_bytes,
                 k_in=k_in,
             )
 
             lds_load_packs_k64 = make_lds_loader(
-                lds_a=lds_a, layout_lds=layout_lds, k_blocks16=k_blocks16,
+                lds_a=lds_a,
+                layout_lds=layout_lds,
+                k_blocks16=k_blocks16,
             )
 
             load_b_tile = make_b_loader(
-                arg_b=arg_b, b_rsrc=b_rsrc, layout_b=layout_b,
-                n_blk_list=n_blk_list, n_intra_list=n_intra_list,
-                lane_div_16=lane_div_16, kpack_bytes=kpack_bytes,
-                elem_bytes=elem_bytes, k_unroll=k_unroll, num_acc_n=num_acc_n,
+                arg_b=arg_b,
+                b_rsrc=b_rsrc,
+                layout_b=layout_b,
+                n_blk_list=n_blk_list,
+                n_intra_list=n_intra_list,
+                lane_div_16=lane_div_16,
+                kpack_bytes=kpack_bytes,
+                elem_bytes=elem_bytes,
+                k_unroll=k_unroll,
+                num_acc_n=num_acc_n,
             )
 
             # Base coordinates for A0 prefetch (mi=0, ku=0)
@@ -275,34 +292,58 @@ def compile_grouped_gemm_blockscale_contiguous(
             rocdl.sched_barrier(0)
 
             hot_loop_scheduler = make_hot_loop_scheduler(
-                _is_gfx950=_is_gfx950, sb_per_tile=sb_per_tile,
-                m_repeat=m_repeat, num_acc_n=num_acc_n,
-                k_unroll=k_unroll, num_a_loads=num_a_loads,
+                _is_gfx950=_is_gfx950,
+                sb_per_tile=sb_per_tile,
+                m_repeat=m_repeat,
+                num_acc_n=num_acc_n,
+                k_unroll=k_unroll,
+                num_a_loads=num_a_loads,
                 ku_per_sb=ku_per_sb,
             )
 
             prefetch_scales = make_prefetch_scales(
-                _is_gfx950=_is_gfx950, sa_rsrc=sa_rsrc, sb_rsrc=sb_rsrc,
-                group_idx=group_idx, scale_n=scale_n, scale_k=scale_k,
-                c_scale_k=c_scale_k, n_block_for_scale=n_block_for_scale,
-                bx_m=bx_m, lane_mod_16=lane_mod_16, m_in=m_in,
-                sb_per_tile=sb_per_tile, m_repeat=m_repeat, num_acc_n=num_acc_n,
+                _is_gfx950=_is_gfx950,
+                sa_rsrc=sa_rsrc,
+                sb_rsrc=sb_rsrc,
+                group_idx=group_idx,
+                scale_n=scale_n,
+                scale_k=scale_k,
+                c_scale_k=c_scale_k,
+                n_block_for_scale=n_block_for_scale,
+                bx_m=bx_m,
+                lane_mod_16=lane_mod_16,
+                m_in=m_in,
+                sb_per_tile=sb_per_tile,
+                m_repeat=m_repeat,
+                num_acc_n=num_acc_n,
             )
 
             compute_tile = make_compute_tile(
-                _is_gfx950=_is_gfx950, lds_load_packs_k64=lds_load_packs_k64,
-                sa_rsrc=sa_rsrc, sb_rsrc=sb_rsrc,
-                group_idx=group_idx, scale_n=scale_n, scale_k=scale_k,
-                c_scale_k=c_scale_k, n_block_for_scale=n_block_for_scale,
-                bx_m=bx_m, lane_mod_16=lane_mod_16, lane_div_16=lane_div_16,
-                m_in=m_in, sb_per_tile=sb_per_tile, m_repeat=m_repeat,
-                num_acc_n=num_acc_n, ku_per_sb=ku_per_sb,
+                _is_gfx950=_is_gfx950,
+                lds_load_packs_k64=lds_load_packs_k64,
+                sa_rsrc=sa_rsrc,
+                sb_rsrc=sb_rsrc,
+                group_idx=group_idx,
+                scale_n=scale_n,
+                scale_k=scale_k,
+                c_scale_k=c_scale_k,
+                n_block_for_scale=n_block_for_scale,
+                bx_m=bx_m,
+                lane_mod_16=lane_mod_16,
+                lane_div_16=lane_div_16,
+                m_in=m_in,
+                sb_per_tile=sb_per_tile,
+                m_repeat=m_repeat,
+                num_acc_n=num_acc_n,
+                ku_per_sb=ku_per_sb,
                 col_offset_base_bytes=col_offset_base_bytes,
-                mfma_res_ty=mfma_res_ty, acc_init=acc_init,
+                mfma_res_ty=mfma_res_ty,
+                acc_init=acc_init,
             )
 
             run_kloop = make_pingpong_kloop(
-                num_k_tiles=num_k_tiles, tile_k=tile_k,
+                num_k_tiles=num_k_tiles,
+                tile_k=tile_k,
                 prefetch_a_tile=prefetch_a_tile,
                 store_a_tile_to_lds=store_a_tile_to_lds,
                 load_b_tile=load_b_tile,
@@ -322,18 +363,30 @@ def compile_grouped_gemm_blockscale_contiguous(
             e_vec = 4 if (tile_n % (32 * 4)) == 0 else 2
 
             write_row_to_lds, store_pair = make_epilogue_writers(
-                accs=accs, d_rsrc=d_rsrc, out_mlir=out_mlir,
-                e_vec=e_vec, c_n=c_n,
+                accs=accs,
+                d_rsrc=d_rsrc,
+                out_mlir=out_mlir,
+                e_vec=e_vec,
+                c_n=c_n,
             )
 
             mfma_epilog(
                 use_cshuffle=True,
-                arith=arith, vector=vector, gpu=gpu,
+                arith=arith,
+                vector=vector,
+                gpu=gpu,
                 range_constexpr=range_constexpr,
-                tile_m=tile_m, tile_n=tile_n, e_vec=e_vec,
-                m_repeat=m_repeat, num_acc_n=num_acc_n,
-                tx=tx, lane_div_16=lane_div_16, lane_mod_16=lane_mod_16,
-                bx_m=bx_m, by_n=by_n, n_tile_base=n_tile_base,
+                tile_m=tile_m,
+                tile_n=tile_n,
+                e_vec=e_vec,
+                m_repeat=m_repeat,
+                num_acc_n=num_acc_n,
+                tx=tx,
+                lane_div_16=lane_div_16,
+                lane_mod_16=lane_mod_16,
+                bx_m=bx_m,
+                by_n=by_n,
+                n_tile_base=n_tile_base,
                 lds_out=lds_out,
                 frag_elem_type=out_mlir(),
                 write_row_to_lds=write_row_to_lds,
@@ -382,7 +435,7 @@ def compile_grouped_gemm_blockscale_contiguous(
             _wpe = int(waves_per_eu)
             if _wpe >= 1:
                 for op in ctx.gpu_module_body.operations:
-                    if hasattr(op, 'attributes') and op.OPERATION_NAME == "gpu.func":
+                    if hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func":
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(T.i32, _wpe)
         launcher.launch(grid=(gx, gy, 1), block=(total_threads, 1, 1), stream=stream)
 

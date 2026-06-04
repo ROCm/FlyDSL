@@ -9,12 +9,12 @@ Tests the contiguous grouped FP8 GEMM with block scaling, matching DeepGEMM's
 m_grouped_fp8_gemm_nt_contiguous API.
 """
 
+import logging
 import os
 import sys
-import logging
 
-import torch
 import pytest
+import torch
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -27,20 +27,19 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.grouped_gemm_blockscale_contiguous import compile_grouped_gemm_blockscale_contiguous
-from tests.kernels.blockscale_gemm_test_utils import (
-    ARCH,
+# Imports below depend on the sys.path manipulation above.
+from kernels.grouped_gemm_blockscale_contiguous import compile_grouped_gemm_blockscale_contiguous  # noqa: E402
+from tests.kernels.blockscale_gemm_test_utils import (  # noqa: E402
     DTYPE_FP8,
     USE_UE8M0,
     _as_i8,
     align,
-    ceil_div,
     fp32_e8m0_to_byte,
     fp32_to_e8m0,
     quantize_b_to_fp8,
 )
-from tests.test_common import run_perftest, verify_output
-from tests.utils import shuffle_weight
+from tests.test_common import run_perftest, verify_output  # noqa: E402
+from tests.utils import shuffle_weight  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 
@@ -189,13 +188,16 @@ def generate_grouped_gemm_inputs(
         pytest.param(8, 256, 7168, 2304, id="8g-7168x2304-large", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("out_dtype", [
-    pytest.param("bf16", id="bf16"),
-    pytest.param("f16", id="f16"),
-])
-def test_grouped_fp8_gemm(num_groups, m_per_group, n, k, out_dtype,
-                          *, tile_m=128, tile_n=128, tile_k=128,
-                          bench_iters=20, bench_warmup=3):
+@pytest.mark.parametrize(
+    "out_dtype",
+    [
+        pytest.param("bf16", id="bf16"),
+        pytest.param("f16", id="f16"),
+    ],
+)
+def test_grouped_fp8_gemm(
+    num_groups, m_per_group, n, k, out_dtype, *, tile_m=128, tile_n=128, tile_k=128, bench_iters=20, bench_warmup=3
+):
     """Verify grouped FP8 GEMM correctness against a PyTorch reference and
     report throughput. Single function combining correctness + bench, matching
     the convention of test_blockscale_preshuffle_gemm.py."""
@@ -204,7 +206,13 @@ def test_grouped_fp8_gemm(num_groups, m_per_group, n, k, out_dtype,
 
     # Generate inputs
     a_fp8, scale_a, b_fp8, scale_b, grouped_layout, d, ref_d, M = generate_grouped_gemm_inputs(
-        num_groups, m_per_group, n, k, scale_block_k, scale_block_n, out_dtype=out_dtype,
+        num_groups,
+        m_per_group,
+        n,
+        k,
+        scale_block_k,
+        scale_block_n,
+        out_dtype=out_dtype,
     )
 
     # Compile kernel
@@ -249,8 +257,7 @@ def test_grouped_fp8_gemm(num_groups, m_per_group, n, k, out_dtype,
     c_ref[padding_mask] = 0.0
 
     msg = f"num_groups={num_groups}, M={M}, N={n}, K={k}, out={out_dtype}"
-    passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg,
-                           logits_diff_threshold=1e-3)
+    passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg, logits_diff_threshold=1e-3)
     assert passed, f"Correctness check failed for {msg}"
 
     flops = 2 * M * n * k
@@ -274,8 +281,9 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--num_groups", type=int, default=4)
-    parser.add_argument("--m_per_group", type=int, default=0,
-                        help="Approx M rows per group (0 = sweep [128, 256, 512, 1024])")
+    parser.add_argument(
+        "--m_per_group", type=int, default=0, help="Approx M rows per group (0 = sweep [128, 256, 512, 1024])"
+    )
     parser.add_argument("-N", type=int, default=512)
     parser.add_argument("-K", type=int, default=512)
     parser.add_argument("--tile_m", type=int, default=128)
@@ -291,8 +299,15 @@ if __name__ == "__main__":
     m_list = [args.m_per_group] if args.m_per_group > 0 else [128, 256, 512, 1024]
 
     for m_per_group in m_list:
-        test_grouped_fp8_gemm(args.num_groups, m_per_group, args.N, args.K,
-                              out_dtype=args.out_dtype,
-                              tile_m=args.tile_m, tile_n=args.tile_n,
-                              tile_k=args.tile_k,
-                              bench_iters=args.num_iters, bench_warmup=args.num_warmup)
+        test_grouped_fp8_gemm(
+            args.num_groups,
+            m_per_group,
+            args.N,
+            args.K,
+            out_dtype=args.out_dtype,
+            tile_m=args.tile_m,
+            tile_n=args.tile_n,
+            tile_k=args.tile_k,
+            bench_iters=args.num_iters,
+            bench_warmup=args.num_warmup,
+        )

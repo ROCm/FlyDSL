@@ -17,7 +17,6 @@ import torch
 
 from flydsl.runtime.device import get_rocm_arch
 
-
 ARCH = get_rocm_arch()
 # Use appropriate FP8 dtype for the architecture
 DTYPE_FP8 = torch.float8_e4m3fn if "gfx95" in ARCH else torch.float8_e4m3fnuz

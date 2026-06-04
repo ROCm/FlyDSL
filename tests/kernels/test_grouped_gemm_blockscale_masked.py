@@ -9,12 +9,12 @@ Tests the masked grouped FP8 GEMM with block scaling, matching DeepGEMM's
 m_grouped_fp8_gemm_nt_masked API.
 """
 
+import logging
 import os
 import sys
-import logging
 
-import torch
 import pytest
+import torch
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -27,20 +27,18 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.grouped_gemm_blockscale_masked import compile_grouped_gemm_blockscale_masked
-from tests.kernels.blockscale_gemm_test_utils import (
-    ARCH,
+# Imports below depend on the sys.path manipulation above.
+from kernels.grouped_gemm_blockscale_masked import compile_grouped_gemm_blockscale_masked  # noqa: E402
+from tests.kernels.blockscale_gemm_test_utils import (  # noqa: E402
     DTYPE_FP8,
     USE_UE8M0,
     _as_i8,
-    align,
-    ceil_div,
     fp32_e8m0_to_byte,
     fp32_to_e8m0,
     quantize_b_to_fp8,
 )
-from tests.test_common import run_perftest, verify_output
-from tests.utils import shuffle_weight
+from tests.test_common import run_perftest, verify_output  # noqa: E402
+from tests.utils import shuffle_weight  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 
@@ -168,13 +166,27 @@ def generate_masked_grouped_gemm_inputs(
         pytest.param(8, 512, 300, 7168, 2304, id="8g-7168x2304-large", marks=pytest.mark.large_shape),
     ],
 )
-@pytest.mark.parametrize("out_dtype", [
-    pytest.param("bf16", id="bf16"),
-    pytest.param("f16", id="f16"),
-])
-def test_masked_grouped_fp8_gemm(num_groups, max_m, expected_m, n, k, out_dtype,
-                                 *, tile_m=128, tile_n=128, tile_k=128,
-                                 bench_iters=20, bench_warmup=3):
+@pytest.mark.parametrize(
+    "out_dtype",
+    [
+        pytest.param("bf16", id="bf16"),
+        pytest.param("f16", id="f16"),
+    ],
+)
+def test_masked_grouped_fp8_gemm(
+    num_groups,
+    max_m,
+    expected_m,
+    n,
+    k,
+    out_dtype,
+    *,
+    tile_m=128,
+    tile_n=128,
+    tile_k=128,
+    bench_iters=20,
+    bench_warmup=3,
+):
     """Verify masked grouped FP8 GEMM correctness against a PyTorch reference and
     report throughput. Single function combining correctness + bench, matching
     the convention of test_blockscale_preshuffle_gemm.py."""
@@ -183,7 +195,14 @@ def test_masked_grouped_fp8_gemm(num_groups, max_m, expected_m, n, k, out_dtype,
 
     # Generate inputs
     a_fp8, scale_a, b_fp8, scale_b, masked_m, d, ref_d = generate_masked_grouped_gemm_inputs(
-        num_groups, max_m, expected_m, n, k, scale_block_k, scale_block_n, out_dtype=out_dtype,
+        num_groups,
+        max_m,
+        expected_m,
+        n,
+        k,
+        scale_block_k,
+        scale_block_n,
+        out_dtype=out_dtype,
     )
 
     # Compile kernel
@@ -230,8 +249,7 @@ def test_masked_grouped_fp8_gemm(num_groups, max_m, expected_m, n, k, out_dtype,
         c_ref[g, m_val:, :] = 0.0
 
     msg = f"num_groups={num_groups}, max_m={max_m}, N={n}, K={k}, out={out_dtype}"
-    passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg,
-                           logits_diff_threshold=1e-3)
+    passed = verify_output(c_out_f32, c_ref, rtol=1e-2, atol=1e-2, msg=msg, logits_diff_threshold=1e-3)
     assert passed, f"Correctness check failed for {msg}"
 
     # Effective FLOPs/BW based on ACTUAL valid tokens (padding mostly skipped by kernel).
@@ -258,8 +276,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_groups", type=int, default=4)
     parser.add_argument("--max_m", type=int, default=512)
-    parser.add_argument("--expected_m", type=int, default=0,
-                        help="Approx valid M rows per group (0 = sweep [128, 256, 384])")
+    parser.add_argument(
+        "--expected_m", type=int, default=0, help="Approx valid M rows per group (0 = sweep [128, 256, 384])"
+    )
     parser.add_argument("-N", type=int, default=512)
     parser.add_argument("-K", type=int, default=512)
     parser.add_argument("--tile_m", type=int, default=128)
@@ -275,8 +294,16 @@ if __name__ == "__main__":
     m_list = [args.expected_m] if args.expected_m > 0 else [128, 256, 384]
 
     for expected_m in m_list:
-        test_masked_grouped_fp8_gemm(args.num_groups, args.max_m, expected_m, args.N, args.K,
-                                     out_dtype=args.out_dtype,
-                                     tile_m=args.tile_m, tile_n=args.tile_n,
-                                     tile_k=args.tile_k,
-                                     bench_iters=args.num_iters, bench_warmup=args.num_warmup)
+        test_masked_grouped_fp8_gemm(
+            args.num_groups,
+            args.max_m,
+            expected_m,
+            args.N,
+            args.K,
+            out_dtype=args.out_dtype,
+            tile_m=args.tile_m,
+            tile_n=args.tile_n,
+            tile_k=args.tile_k,
+            bench_iters=args.num_iters,
+            bench_warmup=args.num_warmup,
+        )

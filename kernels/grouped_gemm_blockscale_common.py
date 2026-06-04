@@ -12,12 +12,10 @@ scalar constants, helper closures) so they live in one place.
 from collections import namedtuple
 
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, gpu, rocdl, vector
-from flydsl.expr import range_constexpr
+from flydsl._mlir.dialects import math as math_dialect
+from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Vector
-from flydsl._mlir.dialects import math as math_dialect
-
 from kernels.mfma_preshuffle_pipeline import (
     crd2idx,
     lds_store_16b_xor16,
@@ -26,7 +24,6 @@ from kernels.mfma_preshuffle_pipeline import (
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
-
 
 CompileConstants = namedtuple(
     "CompileConstants",
@@ -160,9 +157,7 @@ def make_a_tile_loaders(
     code so the resulting MLIR (and ISA) is byte-identical. `k_blocks16`
     is returned for reuse by the downstream LDS-load helper.
     """
-    layout_a_tile_div4 = fx.make_layout(
-        (tile_m, tile_k_dwords), stride=(tile_k_dwords, 1)
-    )
+    layout_a_tile_div4 = fx.make_layout((tile_m, tile_k_dwords), stride=(tile_k_dwords, 1))
     c_chunk_a = fx.Index(chunk_i32_a)
     tx_i32_base = tx * c_chunk_a
     _k_div4_factor = k_in // fx.Index(4)
@@ -177,7 +172,9 @@ def make_a_tile_loaders(
     a_col_local_i32 = []
     for i in range_constexpr(num_a_loads):
         row_local, col_local_i32 = tile_chunk_coord_i32(
-            arith, tx_i32_base=tx_i32_base, i=i,
+            arith,
+            tx_i32_base=tx_i32_base,
+            i=i,
             total_threads=total_threads,
             layout_tile_div4=layout_a_tile_div4,
             chunk_i32=chunk_i32_a,
@@ -203,14 +200,18 @@ def make_a_tile_loaders(
         """Write prefetched A tile from VGPRs into LDS with XOR16 swizzle."""
         for i in range_constexpr(num_a_loads):
             lds_store_16b_xor16(
-                arith, vector,
-                lds_memref=lds_a, vec16_ty=T.f8x16,
+                arith,
+                vector,
+                lds_memref=lds_a,
+                vec16_ty=T.f8x16,
                 layout_lds=layout_lds,
                 row_local=a_row_local[i],
                 col_local_i32=a_col_local_i32[i],
-                tx_c4=c4_bytes, k_blocks16=k_blocks16,
+                tx_c4=c4_bytes,
+                k_blocks16=k_blocks16,
                 lds_base=lds_base,
-                vec_part_i32x4=a_parts[i], elem_bytes=elem_bytes,
+                vec_part_i32x4=a_parts[i],
+                elem_bytes=elem_bytes,
             )
 
     return prefetch_a_tile, store_a_tile_to_lds, a_row_local, a_col_local_i32, k_blocks16
@@ -223,6 +224,7 @@ def make_lds_loader(*, lds_a, layout_lds, k_blocks16):
     which loads 16B from LDS with the XOR16 swizzle and returns the two
     i64 halves.
     """
+
     def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
         col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base_bytes, k_blocks16)
         idx_a16 = crd2idx((curr_row_a_lds, col_base_swz_bytes), layout_lds) + lds_base
@@ -252,12 +254,17 @@ def make_b_loader(
     returning a list of length `k_unroll` where each entry is
     `(packs_half0[ni], packs_half1[ni])` for one K64 micro-step.
     """
+
     def load_b_pack(base_k, ki_step, ni):
         return load_b_pack_k32(
-            buffer_ops, arith, vector,
-            arg_b=arg_b, b_rsrc=b_rsrc,
+            buffer_ops,
+            arith,
+            vector,
+            arg_b=arg_b,
+            b_rsrc=b_rsrc,
             layout_b=layout_b,
-            base_k=base_k, ki_step=ki_step,
+            base_k=base_k,
+            ki_step=ki_step,
             n_blk=n_blk_list[ni],
             n_intra=n_intra_list[ni],
             lane_div_16=lane_div_16,
@@ -309,6 +316,7 @@ def make_hot_loop_scheduler(
     matching the MoE stage-2 pattern. Returns a zero-arg closure to be
     invoked once per K-tile body inside the ping-pong loop.
     """
+
     def hot_loop_scheduler():
         mfma_group = num_acc_n
         if _is_gfx950:
@@ -354,6 +362,7 @@ def make_prefetch_scales(
     Python `is None` guard keeps the contig MLIR identical to the
     pre-extraction code.
     """
+
     def prefetch_scales(k_tile_idx_py):
         if not _is_gfx950:
             return None
@@ -425,6 +434,7 @@ def make_compute_tile(
     and `group_idx * c_scale_k * m_in` for the masked path; only the
     gfx942 SW path uses it.
     """
+
     def compute_tile(accs_in, k_tile_idx_py, lds_base, b_tile_in, scales_pf, *, a0_prefetch=None):
         current_accs = list(accs_in)
 
@@ -480,14 +490,15 @@ def make_compute_tile(
 
                     for ni in range_constexpr(num_acc_n):
                         b128 = pack_i64x4_to_i32x8(
-                            b0_packs0[ni], b0_packs1[ni],
-                            b1_packs0[ni], b1_packs1[ni],
+                            b0_packs0[ni],
+                            b0_packs1[ni],
+                            b1_packs0[ni],
+                            b1_packs1[ni],
                         )
                         acc_idx = mi * num_acc_n + ni
                         current_accs[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
                             mfma_res_ty,
-                            [a128, b128, current_accs[acc_idx],
-                             0, 0, 0, sa_e8m0_list[mi], 0, sb_e8m0_list[ni]],
+                            [a128, b128, current_accs[acc_idx], 0, 0, 0, sa_e8m0_list[mi], 0, sb_e8m0_list[ni]],
                         )
             else:
                 for ku_local in range_constexpr(ku_per_sb):
@@ -543,6 +554,7 @@ def make_pingpong_kloop(
     Loop body is byte-identical between contig and masked, so this
     factory has no offset parameters.
     """
+
     def run_kloop(accs):
         # Prologue: prefetch first A tile into VGPRs, store to LDS, load B + scales
         a_regs0 = prefetch_a_tile(0)
@@ -563,8 +575,7 @@ def make_pingpong_kloop(
                 b_tile_ping = load_b_tile(fx.Index((k_pair + 1) * tile_k))
 
             # Compute current tile from pong LDS
-            accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong, scales_pong_pf,
-                                a0_prefetch=a0_prefetch_pong)
+            accs = compute_tile(accs, k_pair, lds_base_pong, b_tile_pong, scales_pong_pf, a0_prefetch=a0_prefetch_pong)
             a0_prefetch_pong = None
 
             # Store next A to LDS (ds_write after compute, overlaps with trailing MFMAs)
@@ -575,8 +586,7 @@ def make_pingpong_kloop(
 
             if k_pair + 1 < num_k_tiles:
                 # Prefetch first A pack from ping
-                a0_prefetch_ping = lds_load_packs_k64(
-                    row_a_lds_base, col_offset_base_bytes, lds_base_ping)
+                a0_prefetch_ping = lds_load_packs_k64(row_a_lds_base, col_offset_base_bytes, lds_base_ping)
 
                 # Prefetch next scales + A+B
                 if k_pair + 2 < num_k_tiles:
@@ -585,8 +595,9 @@ def make_pingpong_kloop(
                     b_tile_pong = load_b_tile(fx.Index((k_pair + 2) * tile_k))
 
                 # Compute current tile from ping LDS
-                accs = compute_tile(accs, k_pair + 1, lds_base_ping, b_tile_ping, scales_ping_pf,
-                                    a0_prefetch=a0_prefetch_ping)
+                accs = compute_tile(
+                    accs, k_pair + 1, lds_base_ping, b_tile_ping, scales_ping_pf, a0_prefetch=a0_prefetch_ping
+                )
                 a0_prefetch_ping = None
 
                 # Store next A to LDS
@@ -597,8 +608,7 @@ def make_pingpong_kloop(
 
                 # Prefetch first A pack from pong for next iteration
                 if k_pair + 2 < num_k_tiles:
-                    a0_prefetch_pong = lds_load_packs_k64(
-                        row_a_lds_base, col_offset_base_bytes, lds_base_pong)
+                    a0_prefetch_pong = lds_load_packs_k64(row_a_lds_base, col_offset_base_bytes, lds_base_pong)
 
         return accs
 
@@ -622,11 +632,17 @@ def make_epilogue_writers(
     path. Using a Python `is None` guard keeps the contig MLIR
     identical to the pre-extraction code.
     """
-    vec1_out = T.vec(1, out_mlir())
 
     def write_row_to_lds(
-        *, mi, ii, row_in_tile, row,
-        row_base_lds, col_base_local, num_acc_n, lds_out,
+        *,
+        mi,
+        ii,
+        row_in_tile,
+        row,
+        row_base_lds,
+        col_base_local,
+        num_acc_n,
+        lds_out,
     ):
         for ni in range_constexpr(num_acc_n):
             col_local = col_base_local + (ni * 16)
@@ -646,15 +662,11 @@ def make_epilogue_writers(
         byte_off = idx_out * 2
         if e_vec == 4:
             frag_i32x2 = Vector(frag).bitcast(fx.Int32)
-            buffer_ops.buffer_store(
-                frag_i32x2, d_rsrc, byte_off, offset_is_bytes=True
-            )
+            buffer_ops.buffer_store(frag_i32x2, d_rsrc, byte_off, offset_is_bytes=True)
         else:
             frag_i32x1 = Vector(frag).bitcast(fx.Int32)
             frag_i32 = frag_i32x1[0]
-            buffer_ops.buffer_store(
-                frag_i32, d_rsrc, byte_off, offset_is_bytes=True
-            )
+            buffer_ops.buffer_store(frag_i32, d_rsrc, byte_off, offset_is_bytes=True)
 
     return write_row_to_lds, store_pair
 
@@ -677,8 +689,11 @@ def compute_mfma_tiling(*, tile_m, tile_n):
     num_acc_n = n_per_wave // 16  # 2 for n_per_wave=32
     num_accs = m_repeat * num_acc_n
     return MfmaTilingConstants(
-        m_repeat=m_repeat, num_waves=num_waves, n_per_wave=n_per_wave,
-        num_acc_n=num_acc_n, num_accs=num_accs,
+        m_repeat=m_repeat,
+        num_waves=num_waves,
+        n_per_wave=n_per_wave,
+        num_acc_n=num_acc_n,
+        num_accs=num_accs,
     )
 
 
@@ -733,8 +748,11 @@ def make_n_block_coords(
 
     c_n_total = num_groups_in * n_in
     b_layout = make_preshuffle_b_layout(
-        arith, c_n=c_n_total, c_k=k_in,
-        kpack_bytes=kpack_bytes, elem_bytes=elem_bytes,
+        arith,
+        c_n=c_n_total,
+        c_k=k_in,
+        kpack_bytes=kpack_bytes,
+        elem_bytes=elem_bytes,
     )
     layout_b = b_layout.layout_b
 
