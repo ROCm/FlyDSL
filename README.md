@@ -77,7 +77,7 @@ Build from source only if you are developing FlyDSL itself or need a custom MLIR
 Prerequisites for source builds:
 
 - **Build tools**: `cmake` (>=3.20), C++17 compiler, optionally `ninja`
-- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by the build scripts)
+- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by `scripts/build_llvm.sh`; install them manually if you skip that step)
 
 ```bash
 # Clone ROCm LLVM and build MLIR (takes ~30min with -j64)
@@ -93,6 +93,7 @@ pip install -e .
 If you already have an MLIR build with Python bindings enabled, point to it instead:
 
 ```bash
+pip install nanobind numpy pybind11  # build.sh does not install these
 export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
 MLIR_PATH=$MLIR_PATH bash scripts/build.sh -j64
 pip install -e .
@@ -102,7 +103,13 @@ pip install -e .
 
 ### Run tests
 
+Tests and examples require `pytest`, `pandas`, and a ROCm build of `torch` (not installed by `pip install -e .`):
+
 ```bash
+pip install pytest pandas
+# torch must be a ROCm build matching your ROCm version (rocm7.2 shown):
+pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
+
 # Run GEMM correctness tests (fast, ~15s)
 bash scripts/run_tests.sh
 
@@ -220,26 +227,34 @@ def launch(arg_a: fx.Tensor, arg_b: fx.Tensor, n: fx.Constexpr[int],
 
 ### Compilation Pipeline
 
-On first call, `@flyc.jit` traces the Python function into an MLIR module, then compiles it through `MlirCompiler`:
+On first call, `@flyc.jit` traces the Python function into an MLIR module, then compiles it through `MlirCompiler`. The pass list is built by `RocmBackend._pipeline_parts()` in three stages — see [`docs/architecture_guide.md`](docs/architecture_guide.md#3-compilation-pipeline) for the per-pass table.
 
 ```
 Python Function (@flyc.kernel / @flyc.jit)
         │
         ▼  AST Rewriting + Tracing
-   MLIR Module (gpu, arith, scf, memref dialects)
+   MLIR Module (fly, gpu, arith, scf, memref, vector dialects)
         │
         ▼  MlirCompiler.compile()
-   ┌────────────────────────────────────────────────┐
-   │  gpu-kernel-outlining                          │
-   │  fly-canonicalize                              │
-   │  fly-layout-lowering                           │
-   │  convert-fly-to-rocdl                          │
-   │  canonicalize + cse                            │
-   │  gpu.module(convert-gpu-to-rocdl{...})         │
-   │  rocdl-attach-target{chip=gfxNNN}              │
-   │  gpu-to-llvm → convert-arith/func-to-llvm      │
-   │  gpu-module-to-binary{format=fatbin}           │
-   └────────────────────────────────────────────────┘
+   ┌──────────────────────────────────────────────────────────┐
+   │ A. pre_binary_fragments  (Fly → ROCDL)                   │
+   │    fly-rewrite-func-signature → fly-canonicalize →       │
+   │    fly-layout-lowering → fly-int-swizzle-simplify →      │
+   │    canonicalize → fly-convert-atom-call-to-ssa-form →    │
+   │    fly-promote-regmem-to-vectorssa →                     │
+   │    convert-fly-to-rocdl → canonicalize →                 │
+   │    gpu.module(convert-scf-to-cf, cse,                    │
+   │       convert-gpu-to-rocdl{...}, fly-rocdl-cluster-attr) │
+   ├──────────────────────────────────────────────────────────┤
+   │ B. binary_prep_fragments  (→ LLVM)                       │
+   │    rocdl-attach-target{chip=gfxNNN} →                    │
+   │    convert-scf-to-cf → convert-cf-to-llvm →              │
+   │    gpu-to-llvm → convert-vector/arith/func-to-llvm →     │
+   │    reconcile-unrealized-casts                            │
+   ├──────────────────────────────────────────────────────────┤
+   │ C. binary_fragment                                       │
+   │    gpu-module-to-binary{format=fatbin}                   │
+   └──────────────────────────────────────────────────────────┘
         │
         ▼
    Cached Compiled Artifact (ExecutionEngine)

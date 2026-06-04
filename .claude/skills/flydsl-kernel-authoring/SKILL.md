@@ -18,6 +18,15 @@ FlyDSL is a Python DSL and MLIR-based compiler for writing high-performance GPU 
 **Target GPU**: gfx942 (MI300X, CDNA3), gfx950 (MI350, CDNA4)
 **Python**: 3.12, ROCm 7.2
 
+**Scope (read this first)**: This skill is the **reference** — the full layout-algebra API
+surface, per-op tables, MFMA/copy-atom catalogs, environment variables, and an exhaustive
+troubleshooting list. Reach for it to *look something up* while writing or reviewing kernel
+code. If instead you want a *guided, step-by-step procedure* that turns a kernel requirement
+into a finished, tested kernel (classify -> skeleton -> compute -> control flow -> test), use
+the **flydsl-tile-programming** skill, which is the wizard companion to this reference. For
+diagnosing a kernel that already compiles but produces NaN/inf/wrong results, use the
+**debug-flydsl-kernel** skill.
+
 ---
 
 ## 1. Architecture and Compilation
@@ -26,16 +35,18 @@ FlyDSL is a Python DSL and MLIR-based compiler for writing high-performance GPU 
 ```
 Python (@flyc.kernel/@flyc.jit)
   -> AST Rewriting (for/if -> scf.for/scf.if)
-  -> MLIR Tracing (generates Fly dialect + gpu/arith/scf/memref ops)
+  -> MLIR Tracing (generates Fly dialect + gpu/arith/scf/memref/vector ops)
   -> MlirCompiler.compile() (Fly -> ROCDL -> LLVM -> HSACO binary)
   -> JITCFunction (ExecutionEngine wrapper)
 ```
 
 ### Key Passes
-1. `gpu-kernel-outlining` - Move kernel bodies to `gpu.func`
-2. `fly-layout-lowering` - Lower layout algebra to arithmetic
-3. `convert-fly-to-rocdl` - Fly ops -> ROCDL intrinsics
-4. `gpu-module-to-binary` - Emit HSACO binary
+Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages — see `docs/architecture_guide.md` §3 for the per-pass table. Highlights:
+1. `fly-rewrite-func-signature` - Rewrite DSL types at function / SCF boundaries to packed LLVM structs
+2. `fly-layout-lowering` - Lower layout algebra (`fly.crd2idx`, partitions, divides) to arithmetic
+3. `fly-convert-atom-call-to-ssa-form` + `fly-promote-regmem-to-vectorssa` - Lift copy/MMA atom calls and register memory to vector SSA
+4. `convert-fly-to-rocdl` - Fly ops -> ROCDL intrinsics
+5. `gpu-module-to-binary{format=fatbin}` - Emit HSACO binary via LLVM AMDGPU backend
 
 ### Key Source Paths
 - `python/flydsl/compiler/` - JIT compilation (jit_function.py, kernel_function.py)
@@ -127,7 +138,7 @@ Products combine two layouts to create a larger layout:
 ```python
 fx.logical_product(layout, tiler)   # Basic mode-wise concatenation
 fx.raked_product(thr, val)          # Interleaved access pattern (common for TiledCopy)
-fx.block_product(layout, tiler)     # Blocked access pattern
+fx.blocked_product(layout, tiler)   # Blocked access pattern
 fx.zipped_product(layout, tiler)    # Zipped modes
 fx.tiled_product(layout, tiler)     # Hierarchical tiled structure
 fx.flat_product(layout, tiler)      # Flattened result

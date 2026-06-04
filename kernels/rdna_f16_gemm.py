@@ -339,6 +339,8 @@ def create_wmma_gemm_module(
                     val = accs[idx][si]
                     if const_expr(out_dtype == "bf16"):
                         val = val.to(fx.BFloat16)
+                    elif const_expr(out_dtype == "f16"):
+                        val = val.to(fx.Float16)
                     elem_off = g_row * N + g_col
                     buffer_ops.buffer_store(val, c_rsrc, elem_off)
 
