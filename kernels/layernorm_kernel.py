@@ -29,8 +29,49 @@ EPS = 1e-5
 BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
-USE_NONTEMPORAL = True
-VEC_ALIGN = 16
+
+
+# ── Shared-memory allocation for block reductions ─────────────────────
+def _make_reduction_storage(red_slots: int):
+    @fx.struct
+    class SharedStorage:
+        s_red: fx.Array[fx.Float32, red_slots, 16]
+        s_red2: fx.Array[fx.Float32, red_slots, 16]
+
+    return SharedStorage
+
+
+def _load_scalar(copy_atom, elem_dtype, divided_tensor, index):
+    view = fx.slice(divided_tensor, (None, index))
+    r = fx.make_rmem_tensor(1, elem_dtype)
+    fx.copy_atom_call(copy_atom, view, r)
+    return fx.memref_load_vec(r)[0]
+
+
+def _store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, val):
+    r = fx.make_rmem_tensor(1, elem_dtype)
+    ts = full(1, store_dtype(val), store_dtype)
+    fx.memref_store_vec(ts, r)
+    view = fx.slice(divided_tensor, (None, index))
+    fx.copy_atom_call(copy_atom, r, view)
+
+
+def _load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
+    r = fx.make_rmem_tensor(vec_width, elem_dtype)
+    fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
+    return fx.memref_load_vec(r)
+
+
+def _store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
+    r = fx.make_rmem_tensor(vec_width, elem_dtype)
+    fx.memref_store_vec(val, r)
+    fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
+
+
+def _to_elem_scalar(dtype_str: str, elem_dtype, y):
+    if const_expr(dtype_str == "f32"):
+        return y
+    return y.to(elem_dtype)
 
 
 def _to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
@@ -53,19 +94,21 @@ def _to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
     return y.to(elem_dtype)
 
 
+def _store_yscale(scale_copy_atom, yscale_div, index, val):
+    r = fx.make_rmem_tensor(1, fx.Float32)
+    ts = full(1, fx.Float32(val), fx.Float32)
+    fx.memref_store_vec(ts, r)
+    fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
+
+
 def build_layernorm_module(M: int, N: int, dtype_str: str):
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    # ── Shared-memory allocation for block reductions ─────────────────────
-    @fx.struct
-    class SharedStorage:
-        s_sum: fx.Array[fx.Float32, RED_SLOTS, 16]
-        s_sumsq: fx.Array[fx.Float32, RED_SLOTS, 16]
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     # ── GPU kernel ────────────────────────────────────────────────────────
     @flyc.kernel
@@ -167,20 +210,10 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
 
-            def _load_vec(div_tensor, idx):
-                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
-                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return fx.memref_load_vec(r)
-
-            def _store_vec(val, div_tensor, idx):
-                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
-                fx.memref_store_vec(val, r)
-                fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
-
             # ── Pass 1: load input, accumulate sum / sumsq ───────────────
             for tile_i in range_constexpr(num_tiles_py):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec = _load_vec(in_div, idx)
+                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx)
                 in_local.append(vec)
                 x = vec.to(fx.Float32)
 
@@ -193,8 +226,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
 
-            g_cur = _load_vec(gamma_div, tid).to(fx.Float32)
-            b_cur = _load_vec(beta_div, tid).to(fx.Float32)
+            g_cur = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, tid).to(fx.Float32)
+            b_cur = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, beta_div, tid).to(fx.Float32)
 
             # ── Pass 2: normalize + affine + store ───────────────────────
             for tile_i in range_constexpr(num_tiles_py):
@@ -202,8 +235,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 b_next = b_cur
                 if const_expr(tile_i + 1 < num_tiles_py):
                     next_idx = tid + (tile_i + 1) * BLOCK_THREADS
-                    g_next = _load_vec(gamma_div, next_idx).to(fx.Float32)
-                    b_next = _load_vec(beta_div, next_idx).to(fx.Float32)
+                    g_next = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, next_idx).to(fx.Float32)
+                    b_next = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, beta_div, next_idx).to(fx.Float32)
                 else:
                     g_next = g_cur
                     b_next = b_cur
@@ -212,29 +245,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                 y = (x - mean) * rstd
                 y = y * g_cur + b_cur
 
-                out_e = y.to(elem_dtype)
-                if const_expr(dtype_str == "bf16"):
-                    if const_expr(USE_HW_CVT_PK_BF16_F32):
-                        out_e = y.to(elem_dtype)
-                    else:
-                        u = y.bitcast(fx.Uint32)
-                        upper = u >> 16
-                        lsb = upper & 1
-                        bias = lsb + 0x7FFF
-                        u_round = y.bitcast(fx.Uint32) + bias
-                        bf16_bits = u_round >> 16
-                        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
-                        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
-                        odd_sh = odd << 16
-                        packed = even | odd_sh
-                        out_e = packed.bitcast(elem_dtype)
-                elif const_expr(dtype_str == "f32"):
-                    out_e = y
-                else:
-                    out_e = y.to(elem_dtype)
-
+                out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
                 out_idx = tid + tile_i * BLOCK_THREADS
-                _store_vec(out_e, out_div, out_idx)
+                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, out_idx)
 
                 g_cur = g_next
                 b_cur = b_next
@@ -265,25 +278,12 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             beta_div = fx.logical_divide(Beta_buf, fx.make_layout(1, 1))
             out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
 
-            def _load_scalar(divided_tensor, index):
-                view = fx.slice(divided_tensor, (None, index))
-                r = fx.make_rmem_tensor(1, elem_dtype)
-                fx.copy_atom_call(copy_atom_s, view, r)
-                return fx.memref_load_vec(r)[0]
-
-            def _store_scalar(divided_tensor, index, val):
-                r = fx.make_rmem_tensor(1, elem_dtype)
-                ts = full(1, elem_dtype(val), elem_dtype)
-                fx.memref_store_vec(ts, r)
-                view = fx.slice(divided_tensor, (None, index))
-                fx.copy_atom_call(copy_atom_s, r, view)
-
             # ── Pass 1: sum + sumsq ──────────────────────────────────────
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 is_valid = idx < N
                 idx_safe = is_valid.select(idx, 0)
-                x_e = _load_scalar(row_div, idx_safe)
+                x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 x2 = x * x
                 x_safe = is_valid.select(x, c_zero_f)
@@ -298,9 +298,9 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
-                    x_e = _load_scalar(row_div, idx)
-                    g_e = _load_scalar(gamma_div, idx)
-                    b_e = _load_scalar(beta_div, idx)
+                    x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
+                    g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                    b_e = _load_scalar(copy_atom_s, elem_dtype, beta_div, idx)
                     x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                     b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
@@ -308,14 +308,8 @@ def build_layernorm_module(M: int, N: int, dtype_str: str):
                     norm = diff * rstd
                     scaled = norm * g
                     y = scaled + b
-                    y_e = y
-                    if const_expr(dtype_str == "bf16"):
-                        y_e = y.to(elem_dtype)
-                    elif const_expr(dtype_str == "f32"):
-                        y_e = y
-                    else:
-                        y_e = y.to(elem_dtype)
-                    _store_scalar(out_div, idx, y_e)
+                    y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
+                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
 
     # ── JIT host launcher ─────────────────────────────────────────────────
     @flyc.jit
@@ -356,10 +350,7 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    @fx.struct
-    class SharedStorage:
-        s_sum: fx.Array[fx.Float32, RED_SLOTS, 16]
-        s_sumsq: fx.Array[fx.Float32, RED_SLOTS, 16]
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def fused_add_layernorm_kernel(
@@ -459,28 +450,18 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
 
-            def _load_vec(div_tensor, idx):
-                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
-                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return fx.memref_load_vec(r)
-
-            def _store_vec(val, div_tensor, idx):
-                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
-                fx.memref_store_vec(val, r)
-                fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
-
             # Pass 1: add residual, cache/store it, and accumulate sum/sumsq.
             for tile_i in range_constexpr(num_tiles_py):
                 idx = tid + tile_i * BLOCK_THREADS
-                x = _load_vec(in_div, idx).to(fx.Float32)
-                residual = _load_vec(residual_in_div, idx).to(fx.Float32)
+                x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx).to(fx.Float32)
+                residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx).to(fx.Float32)
                 added_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, x + residual)
                 added_local.append(added_e)
                 added = added_e.to(fx.Float32)
                 added2 = added * added
                 thread_sum = thread_sum + added.reduce(ReductionOp.ADD, fastmath=fm_fast)
                 thread_sumsq = thread_sumsq + added2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                _store_vec(added_e, residual_out_div, idx)
+                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
 
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
@@ -489,12 +470,12 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
             for tile_i in range_constexpr(num_tiles_py):
                 idx = tid + tile_i * BLOCK_THREADS
                 added = added_local[tile_i].to(fx.Float32)
-                g = _load_vec(gamma_div, idx).to(fx.Float32)
-                b = _load_vec(beta_div, idx).to(fx.Float32)
+                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
+                b = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, beta_div, idx).to(fx.Float32)
                 y = (added - mean) * rstd
                 y = y * g + b
                 y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
-                _store_vec(y_e, out_div, idx)
+                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
 
         else:
             # ==============================================================
@@ -524,19 +505,6 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
             out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
             residual_out_div = fx.logical_divide(row_residual_out, fx.make_layout(1, 1))
 
-            def _load_scalar(divided_tensor, index):
-                view = fx.slice(divided_tensor, (None, index))
-                r = fx.make_rmem_tensor(1, elem_dtype)
-                fx.copy_atom_call(copy_atom_s, view, r)
-                return fx.memref_load_vec(r)[0]
-
-            def _store_scalar(divided_tensor, index, val):
-                r = fx.make_rmem_tensor(1, elem_dtype)
-                ts = full(1, elem_dtype(val), elem_dtype)
-                fx.memref_store_vec(ts, r)
-                view = fx.slice(divided_tensor, (None, index))
-                fx.copy_atom_call(copy_atom_s, r, view)
-
             c_zero_f = fx.Float32(0.0)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
@@ -545,17 +513,17 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
                 idx = tid + base_idx_int
                 is_valid = idx < N
                 idx_safe = is_valid.select(idx, 0)
-                x_e = _load_scalar(in_div, idx_safe)
-                r_e = _load_scalar(residual_in_div, idx_safe)
+                x_e = _load_scalar(copy_atom_s, elem_dtype, in_div, idx_safe)
+                r_e = _load_scalar(copy_atom_s, elem_dtype, residual_in_div, idx_safe)
                 x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
                 residual = r_e if dtype_str == "f32" else r_e.to(fx.Float32)
-                added_e = (x + residual) if dtype_str == "f32" else (x + residual).to(elem_dtype)
+                added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 added_safe = is_valid.select(added, c_zero_f)
                 thread_sum = thread_sum + added_safe
                 thread_sumsq = thread_sumsq + is_valid.select(added * added, c_zero_f)
                 if idx < N:
-                    _store_scalar(residual_out_div, idx, added_e)
+                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, residual_out_div, idx, added_e)
 
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
@@ -563,19 +531,16 @@ def build_fused_add_layernorm_module(M: int, N: int, dtype_str: str):
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
-                    added_e = _load_scalar(residual_out_div, idx)
-                    g_e = _load_scalar(gamma_div, idx)
-                    b_e = _load_scalar(beta_div, idx)
+                    added_e = _load_scalar(copy_atom_s, elem_dtype, residual_out_div, idx)
+                    g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                    b_e = _load_scalar(copy_atom_s, elem_dtype, beta_div, idx)
                     added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                     b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
                     y = (added - mean) * rstd
                     y = y * g + b
-                    if const_expr(dtype_str == "f32"):
-                        y_e = y
-                    else:
-                        y_e = y.to(elem_dtype)
-                    _store_scalar(out_div, idx, y_e)
+                    y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
+                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
 
     @flyc.jit
     def launch_fused_add_layernorm(
@@ -614,10 +579,7 @@ def _build_layernorm_quant_module(
     elem_bits = 32 if dtype_str == "f32" else 16
     quant_dtype_max = _quant_dtype_max(quant_dtype_str)
 
-    @fx.struct
-    class SharedStorage:
-        s_sum: fx.Array[fx.Float32, RED_SLOTS, 16]
-        s_sumsq: fx.Array[fx.Float32, RED_SLOTS, 16]
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def layernorm_quant_kernel(
@@ -651,12 +613,6 @@ def _build_layernorm_quant_module(
         YScale_buf = fx.rocdl.make_buffer_tensor(YScale)
         yscale_div = fx.logical_divide(YScale_buf, fx.make_layout(1, 1))
         scale_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-
-        def _store_yscale(index, val):
-            r = fx.make_rmem_tensor(1, fx.Float32)
-            ts = full(1, fx.Float32(val), fx.Float32)
-            fx.memref_store_vec(ts, r)
-            fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
 
         def wave_reduce_add(x):
             w = x
@@ -767,30 +723,10 @@ def _build_layernorm_quant_module(
             if const_expr(is_smooth):
                 copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
 
-            def _load_elem_vec(div_tensor, idx):
-                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
-                fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-                return fx.memref_load_vec(r)
-
-            def _store_elem_vec(val, div_tensor, idx):
-                r = fx.make_rmem_tensor(VEC_WIDTH, elem_dtype)
-                fx.memref_store_vec(val, r)
-                fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
-
-            def _load_vec_xscale(idx):
-                r = fx.make_rmem_tensor(xscale_vec_width, fx.Float32)
-                fx.copy_atom_call(copy_atom_xs, fx.slice(xscale_div, (None, idx)), r)
-                return fx.memref_load_vec(r)
-
             def _load_xscale_vec(idx):
-                s_lo = _load_vec_xscale(idx * 2)
-                s_hi = _load_vec_xscale(idx * 2 + 1)
+                s_lo = _load_vec(copy_atom_xs, xscale_vec_width, fx.Float32, xscale_div, idx * 2)
+                s_hi = _load_vec(copy_atom_xs, xscale_vec_width, fx.Float32, xscale_div, idx * 2 + 1)
                 return Vec(s_lo).shuffle(Vec(s_hi), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
-
-            def _store_quant_vec(val, div_tensor, idx):
-                r = fx.make_rmem_tensor(quant_half_width, quant_dtype)
-                fx.memref_store_vec(val, r)
-                fx.copy_atom_call(copy_atom_q, r, fx.slice(div_tensor, (None, idx)))
 
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
@@ -800,14 +736,14 @@ def _build_layernorm_quant_module(
             for tile_i in range_constexpr(num_tiles_py):
                 idx = tid + tile_i * BLOCK_THREADS
                 if const_expr(is_fused_add):
-                    x = _load_elem_vec(in_div, idx).to(fx.Float32)
-                    residual = _load_elem_vec(residual_in_div, idx).to(fx.Float32)
+                    x = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx).to(fx.Float32)
+                    residual = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, residual_in_div, idx).to(fx.Float32)
                     added_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, x + residual)
                     norm_input_local.append(added_e)
                     x_norm = added_e.to(fx.Float32)
-                    _store_elem_vec(added_e, residual_out_div, idx)
+                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, added_e, residual_out_div, idx)
                 else:
-                    x_e = _load_elem_vec(in_div, idx)
+                    x_e = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx)
                     norm_input_local.append(x_e)
                     x_norm = x_e.to(fx.Float32)
                 x2 = x_norm * x_norm
@@ -827,8 +763,8 @@ def _build_layernorm_quant_module(
             for tile_i in range_constexpr(num_tiles_py):
                 idx = tid + tile_i * BLOCK_THREADS
                 x = norm_input_local[tile_i].to(fx.Float32)
-                g = _load_elem_vec(gamma_div, idx).to(fx.Float32)
-                b = _load_elem_vec(beta_div, idx).to(fx.Float32)
+                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
+                b = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, beta_div, idx).to(fx.Float32)
                 y = (x - mean) * rstd
                 y = y * g + b
                 if const_expr(is_smooth):
@@ -843,7 +779,7 @@ def _build_layernorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(bid, final_scale)
+                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -854,8 +790,8 @@ def _build_layernorm_quant_module(
                 q_lo = q_i8.shuffle(q_i8, [0, 1, 2, 3])
                 q_hi = q_i8.shuffle(q_i8, [4, 5, 6, 7])
                 out_idx = tid * 2 + tile_i * BLOCK_THREADS * 2
-                _store_quant_vec(q_lo, out_div_q, out_idx)
-                _store_quant_vec(q_hi, out_div_q, out_idx + 1)
+                _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_lo, out_div_q, out_idx)
+                _store_vec(copy_atom_q, quant_half_width, quant_dtype, q_hi, out_div_q, out_idx + 1)
 
         else:
             # ==============================================================
@@ -893,38 +829,18 @@ def _build_layernorm_quant_module(
             if const_expr(is_smooth):
                 xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(1, 1))
 
-            def _load_scalar(divided_tensor, index):
-                view = fx.slice(divided_tensor, (None, index))
-                r = fx.make_rmem_tensor(1, elem_dtype)
-                fx.copy_atom_call(copy_atom_s, view, r)
-                return fx.memref_load_vec(r)[0]
-
-            def _store_elem_scalar(divided_tensor, index, val):
-                r = fx.make_rmem_tensor(1, elem_dtype)
-                ts = full(1, elem_dtype(val), elem_dtype)
-                fx.memref_store_vec(ts, r)
-                view = fx.slice(divided_tensor, (None, index))
-                fx.copy_atom_call(copy_atom_s, r, view)
-
-            def _store_quant_scalar(divided_tensor, index, val):
-                r = fx.make_rmem_tensor(1, quant_dtype)
-                ts = full(1, quant_dtype(val), quant_dtype)
-                fx.memref_store_vec(ts, r)
-                view = fx.slice(divided_tensor, (None, index))
-                fx.copy_atom_call(copy_atom_qs, r, view)
-
             def _abs_scalar(val):
                 is_neg = val < c_zero_f
                 neg_val = c_zero_f - val
                 return is_neg.select(neg_val, val)
 
             def _load_base_input_value(index):
-                x_e = _load_scalar(in_div, index)
+                x_e = _load_scalar(copy_atom_s, elem_dtype, in_div, index)
                 return x_e if dtype_str == "f32" else x_e.to(fx.Float32)
 
             def _load_norm_input_value(index):
                 if const_expr(is_fused_add):
-                    added_e = _load_scalar(residual_out_div, index)
+                    added_e = _load_scalar(copy_atom_s, elem_dtype, residual_out_div, index)
                     return added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 return _load_base_input_value(index)
 
@@ -937,11 +853,11 @@ def _build_layernorm_quant_module(
                 idx_safe = is_valid.select(idx, 0)
                 if const_expr(is_fused_add):
                     x = _load_base_input_value(idx_safe)
-                    r_e = _load_scalar(residual_in_div, idx_safe)
+                    r_e = _load_scalar(copy_atom_s, elem_dtype, residual_in_div, idx_safe)
                     residual = r_e if dtype_str == "f32" else r_e.to(fx.Float32)
-                    added_e = (x + residual) if dtype_str == "f32" else (x + residual).to(elem_dtype)
+                    added_e = _to_elem_scalar(dtype_str, elem_dtype, x + residual)
                     if idx < N:
-                        _store_elem_scalar(residual_out_div, idx, added_e)
+                        _store_scalar(copy_atom_s, elem_dtype, elem_dtype, residual_out_div, idx, added_e)
                     x = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 else:
                     x = _load_norm_input_value(idx_safe)
@@ -961,14 +877,14 @@ def _build_layernorm_quant_module(
                 is_valid = idx < N
                 idx_safe = is_valid.select(idx, 0)
                 x = _load_norm_input_value(idx_safe)
-                g_e = _load_scalar(gamma_div, idx_safe)
-                b_e = _load_scalar(beta_div, idx_safe)
+                g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
+                b_e = _load_scalar(copy_atom_s, elem_dtype, beta_div, idx_safe)
                 g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                 b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
                 y = (x - mean) * rstd
                 y = y * g + b
                 if const_expr(is_smooth):
-                    s_e = _load_scalar(xscale_div, idx_safe)
+                    s_e = _load_scalar(copy_atom_s, elem_dtype, xscale_div, idx_safe)
                     s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
@@ -979,7 +895,7 @@ def _build_layernorm_quant_module(
             final_scale = (scale == c_zero_f).select(c_one_f, scale)
 
             if tid == 0:
-                _store_yscale(bid, final_scale)
+                _store_yscale(scale_copy_atom, yscale_div, bid, final_scale)
 
             inv_scale = c_one_f / final_scale
 
@@ -987,19 +903,19 @@ def _build_layernorm_quant_module(
                 idx = tid + base_idx_int
                 if idx < N:
                     x = _load_norm_input_value(idx)
-                    g_e = _load_scalar(gamma_div, idx)
-                    b_e = _load_scalar(beta_div, idx)
+                    g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                    b_e = _load_scalar(copy_atom_s, elem_dtype, beta_div, idx)
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                     b = b_e if dtype_str == "f32" else b_e.to(fx.Float32)
                     y = (x - mean) * rstd
                     y = y * g + b
                     if const_expr(is_smooth):
-                        s_e = _load_scalar(xscale_div, idx)
+                        s_e = _load_scalar(copy_atom_s, elem_dtype, xscale_div, idx)
                         s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
-                    _store_quant_scalar(out_div, idx, q_i8)
+                    _store_scalar(copy_atom_qs, quant_dtype, quant_dtype, out_div, idx, q_i8)
 
     if is_fused_add:
         if is_smooth:
