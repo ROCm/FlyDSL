@@ -77,7 +77,7 @@ Build from source only if you are developing FlyDSL itself or need a custom MLIR
 Prerequisites for source builds:
 
 - **Build tools**: `cmake` (>=3.20), C++17 compiler, optionally `ninja`
-- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by the build scripts)
+- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by `scripts/build_llvm.sh`; install them manually if you skip that step)
 
 ```bash
 # Clone ROCm LLVM and build MLIR (takes ~30min with -j64)
@@ -93,6 +93,7 @@ pip install -e .
 If you already have an MLIR build with Python bindings enabled, point to it instead:
 
 ```bash
+pip install nanobind numpy pybind11  # build.sh does not install these
 export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
 MLIR_PATH=$MLIR_PATH bash scripts/build.sh -j64
 pip install -e .
@@ -102,7 +103,13 @@ pip install -e .
 
 ### Run tests
 
+Tests and examples require `pytest`, `pandas`, and a ROCm build of `torch` (not installed by `pip install -e .`):
+
 ```bash
+pip install pytest pandas
+# torch must be a ROCm build matching your ROCm version (rocm7.2 shown):
+pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
+
 # Run GEMM correctness tests (fast, ~15s)
 bash scripts/run_tests.sh
 
