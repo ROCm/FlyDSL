@@ -103,8 +103,23 @@ def _parse_fill_mode(arg: str):
     return ("const", value)
 
 
+_MXFP4_MAGS = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _nearest_mxfp4_value(value: float) -> float:
+    """Nearest E2M1-representable value to `value`, never zero unless value == 0."""
+    if value == 0:
+        return 0.0
+    sign = -1.0 if value < 0 else 1.0
+    mag = abs(float(value))
+    return sign * min(_MXFP4_MAGS, key=lambda m: abs(m - mag))
+
+
 def _fp4_e2m1_packed_fill(rows: int, cols: int, value: float) -> torch.Tensor:
-    dense = torch.full((rows, cols), float(value), dtype=torch.float32)
+    # Snap to the nearest nonzero E2M1 value: a raw round of a small fill (0.1)
+    # would land on 0 and make the whole weight tensor vanish.
+    snapped = _nearest_mxfp4_value(value)
+    dense = torch.full((rows, cols), float(snapped), dtype=torch.float32)
     return fp4_utils.f32_to_mxfp4(dense).view(torch.uint8)
 
 
@@ -158,6 +173,11 @@ def _fill_mode_label(fill_spec, data_format: str) -> str:
     label = f"const={fill_spec[1]:g}, E8M0 byte=127"
     if data_format in ("fp8", "a8w4"):
         label += f", FP8 byte=0x{_fp8_e4m3fn_byte(fill_spec[1]):02x}"
+    if data_format in ("fp4", "a8w4"):
+        eff = _nearest_mxfp4_value(fill_spec[1])
+        label += f", FP4={eff:g}"
+        if eff != fill_spec[1]:
+            label += f" (snapped from {fill_spec[1]:g})"
     return label
 
 
@@ -1203,11 +1223,6 @@ def reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K):
     return raw * sa[:M].view(M, 1) * sb[:N].view(1, N)
 
 
-def reference_ptpc_fp8_gemm(a, b, sa, sb, M, N, K):
-    """PTPC FP8 reference: D = (A_fp8 @ B_fp8^T) * sa[:,None] * sb[None,:]."""
-    return reference_ptpc_gemm("fp8", a, b, sa, sb, M, N, K)
-
-
 def _run_ptpc_gemm_test(
     M,
     N,
@@ -1399,15 +1414,18 @@ def _run_benchmark(args):
     is_fp4 = data_format == "fp4"
     is_a8w4 = data_format == "a8w4"
     is_ptpc = getattr(args, "scale_mode", "mxscale") == "ptpc"
-    if is_ptpc and data_format != "fp8":
-        raise ValueError(f"scale_mode='ptpc' only supports data_format='fp8', got {data_format!r}")
+    if is_ptpc and data_format not in ("fp8", "a8w4"):
+        raise ValueError(f"scale_mode='ptpc' only supports data_format='fp8' or 'a8w4', got {data_format!r}")
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
     # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
     # supported but compound rounding error, so we run f32 and convert back on the host.
     kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
     torch_kernel_dtype = _dtype_map[kernel_out_dtype]
     elem_bytes_d = 2 if kernel_out_dtype in ("bf16", "f16") else 4
-    fmt_name = "PTPC-FP8" if is_ptpc else ("A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8"))
+    if is_ptpc:
+        fmt_name = "PTPC-A8W4" if is_a8w4 else "PTPC-FP8"
+    else:
+        fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
 
     print("=" * 72)
     print(f"  {fmt_name} GEMM Benchmark on gfx1250")
@@ -1427,21 +1445,59 @@ def _run_benchmark(args):
     l2_flush_label = "OFF (graph)" if getattr(args, "use_graph", False) else ("OFF" if args.no_flush_l2 else "ON")
     print(f"  Warmup={args.warmup}, Iters={args.iters}, L2 flush={l2_flush_label}")
     print("  Output init: zero before warmup")
+    if is_ptpc:
+        # compile_ptpc_gemm forces these internally; flag the ones the user set off-default.
+        _ptpc_ignored = []
+        if args.no_tdm_store:
+            _ptpc_ignored.append("--no-tdm-store")
+        if not args.wave_spec_tdm:
+            _ptpc_ignored.append("--no-wave-spec-tdm")
+        if args.use_scale_opsel:
+            _ptpc_ignored.append("--use-scale-opsel")
+        if args.scale_load_path != "tdm":
+            _ptpc_ignored.append(f"--scale-load-path {args.scale_load_path}")
+        if args.b_streaming:
+            _ptpc_ignored.append("--b-streaming")
+        if _ptpc_ignored:
+            print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
 
     torch.manual_seed(0)
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
     if is_ptpc:
-        # PTPC: fp8 A/B with fp32 per-token (sa[M]) / per-channel (sb[N]) scales, no scale preshuffle.
-        a = _pad_2d_tensor(random_fp8_data(M, K), padded_m, padded_k, fill_value=0)
-        b = _pad_2d_tensor(random_fp8_data(N, K), padded_n, padded_k, fill_value=0)
-        b = fp4_utils.preshuffle_b_16x16(b, padded_n, padded_k)
-        a_scale = torch.zeros(padded_m, dtype=torch.float32)
-        a_scale[:M] = 0.5 + torch.rand(M, dtype=torch.float32)
-        b_scale = torch.zeros(padded_n, dtype=torch.float32)
-        b_scale[:N] = 0.5 + torch.rand(N, dtype=torch.float32)
-        print("  Fill mode: random fp8 A/B, fp32 per-token/per-channel scales")
+        # PTPC: fp8 A with fp32 per-token (sa[M]) / per-channel (sb[N]) scales, no scale preshuffle.
+        # B is fp8 (data_format="fp8") or FP4-packed 2-per-byte (data_format="a8w4").
+        K_packed_b = padded_k // PACK_B
+        b_kind = "fp4 (a8w4)" if is_a8w4 else "fp8"
+        fill_spec = _parse_fill_mode(getattr(args, "fill_mode", "random"))
+        if fill_spec[0] == "const":
+            value = fill_spec[1]
+            fp8_byte = _fp8_e4m3fn_byte(value)
+            a_raw = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+            b_raw = _fp4_e2m1_packed_fill(N, K, value) if is_a8w4 else torch.full((N, K), fp8_byte, dtype=torch.uint8)
+            # Neutral per-token/per-channel scales so the const output stays predictable.
+            a_scale = torch.zeros(padded_m, dtype=torch.float32)
+            a_scale[:M] = 1.0
+            b_scale = torch.zeros(padded_n, dtype=torch.float32)
+            b_scale[:N] = 1.0
+            if is_a8w4:
+                eff_b = _nearest_mxfp4_value(value)
+                b_note = f"fp4 B={eff_b:g}" + (f" (snapped from {value:g})" if eff_b != value else "")
+            else:
+                b_note = "fp8 B"
+            print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), {b_note}, sa=sb=1.0")
+        else:
+            a_raw = random_fp8_data(M, K)
+            b_raw = fp4_utils.random_fp4_packed(N, K) if is_a8w4 else random_fp8_data(N, K)
+            a_scale = torch.zeros(padded_m, dtype=torch.float32)
+            a_scale[:M] = 0.5 + torch.rand(M, dtype=torch.float32)
+            b_scale = torch.zeros(padded_n, dtype=torch.float32)
+            b_scale[:N] = 0.5 + torch.rand(N, dtype=torch.float32)
+            print(f"  Fill mode: random fp8 A / {b_kind} B, fp32 per-token/per-channel scales")
+        a = _pad_2d_tensor(a_raw, padded_m, padded_k, fill_value=0)
+        b = _pad_2d_tensor(b_raw, padded_n, K_packed_b, fill_value=0)
+        b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed_b)
     else:
         a, b, a_scale, b_scale, fill_spec = _fill_mode_inputs(
             M, N, K, data_format, getattr(args, "fill_mode", "random")
@@ -1471,11 +1527,12 @@ def _run_benchmark(args):
         print("      Note: split-K forces buffer-store atomic epilogue; disabling TDM store.")
         use_tdm_store = False
     if is_ptpc:
-        # compile_ptpc_gemm fixes data_format/scale_mode/wave_spec/use_tdm_store internally.
+        # compile_ptpc_gemm fixes scale_mode/wave_spec/use_tdm_store internally.
         launch_fn = compile_ptpc_gemm(
             M=padded_m,
             N=padded_n,
             K=padded_k,
+            data_format=data_format,
             tile_m=tile_m,
             tile_n=tile_n,
             tile_k=tile_k,
@@ -1781,7 +1838,7 @@ if __name__ == "__main__":
         default="mxscale",
         choices=["mxscale", "ptpc"],
         help="Scale organization: 'mxscale' (E8M0 block scale) or 'ptpc' "
-        "(per-token/per-channel fp32, fp8 only). PTPC currently wired for --benchmark.",
+        "(per-token/per-channel fp32; supports --data-format fp8 or a8w4).",
     )
     parser.add_argument("-M", type=int, default=1024)
     parser.add_argument("-N", type=int, default=1024)
@@ -1869,6 +1926,7 @@ if __name__ == "__main__":
             args.n_warp,
             num_buffers=args.num_buffers,
             out_dtype=args.out_dtype,
+            data_format=args.data_format,
             l2_prefetch_distance=args.l2_prefetch_distance,
             cluster_m=args.cluster_m,
             cluster_n=args.cluster_n,

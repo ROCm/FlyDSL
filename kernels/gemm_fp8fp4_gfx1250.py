@@ -929,7 +929,18 @@ def compile_fp8fp4_gemm(
                         fmtB=0,
                     )
                 else:
-                    accs[idx] = rocdl.wmma_f32_16x16x128_fp8_fp8(T.vec(8, T.f32), b_frag, a_frag, accs[idx])
+                    # for compatibility, use the following no-scale wmma instead future
+                    # accs[idx] = rocdl.wmma_f32_16x16x128_fp8_fp8(T.vec(8, T.f32), b_frag, a_frag, accs[idx])
+                    accs[idx] = rocdl.wmma_scale_f32_16x16x128_f8f6f4(
+                        T.vec(8, T.f32),
+                        b_frag,
+                        a_frag,
+                        accs[idx],
+                        0x7F7F7F7F,
+                        0x7F7F7F7F,
+                        fmtA=0,
+                        fmtB=0,
+                    )
                 return
             if const_expr(use_scale_opsel):
                 a_scale_idx = wm // 2
