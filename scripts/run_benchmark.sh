@@ -46,9 +46,11 @@ fi
 GPU_ARCH=$(python3 -c "from flydsl.runtime.device import get_rocm_arch; print(get_rocm_arch())" 2>/dev/null || echo "unknown")
 IS_CDNA=false
 IS_RDNA4=false
+IS_RDNA_WMMA=false  # gfx11* or gfx12* — both have WMMA for f16/bf16
 case "${GPU_ARCH}" in gfx9*) IS_CDNA=true ;; esac
 case "${GPU_ARCH}" in gfx120*) IS_RDNA4=true ;; esac
-echo "[run_benchmark] GPU arch: ${GPU_ARCH} (CDNA=${IS_CDNA}, RDNA4=${IS_RDNA4})"
+case "${GPU_ARCH}" in gfx11*|gfx12*) IS_RDNA_WMMA=true ;; esac
+echo "[run_benchmark] GPU arch: ${GPU_ARCH} (CDNA=${IS_CDNA}, RDNA4=${IS_RDNA4}, RDNA_WMMA=${IS_RDNA_WMMA})"
 
 SUCCESS_COUNT=0
 FAIL_COUNT=0
@@ -103,6 +105,24 @@ fp8,5120,5120,8320,128,256,128,2
 fp8,9728,8192,8320,128,256,128,2
 fp8,8192,8192,8192,128,256,128,2
 int8,9728,8192,8320,128,256,128,2
+'
+
+# SplitK HGEMM shapes:
+# "dtype,M,N,K,tile_m,tile_n,tile_k,stages,split_k,block_m_warps,block_n_warps,block_k_warps"
+HGEMM_SHAPES_GFX950='
+fp16,2048,2048,2048,128,128,64,4,1,4,4,1
+bf16,32,384,7168,32,64,64,5,16,2,2,1
+'
+HGEMM_SHAPES_CDNA3='
+fp16,4096,4096,4096,128,128,64,2,1,2,2,1
+bf16,32,384,7168,16,64,128,2,14,1,2,1
+'
+
+# FP8 8-wave row-scale GEMM shapes (gfx950 only):
+# "M,N,K,tile_m,tile_n,preshuffle_b"
+FP8_GEMM_8WAVE_ROWSCALE_SHAPES='
+5120,5120,8320,256,256,0
+8192,8192,8192,256,256,0
 '
 
 # FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
@@ -179,6 +199,7 @@ Usage:
 
 Supported ops:
   softmax | layernorm | rmsnorm | flash_attn | mla | gemm | moe
+  (gemm includes preshuffle GEMM, SplitK HGEMM, and FP8 8-wave row-scale GEMM)
 USAGE
 }
 
@@ -720,7 +741,107 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
   done
-  
+
+  if [ -n "${HGEMM_SHAPES:-}" ]; then
+    hgemm_shapes="${HGEMM_SHAPES}"
+  else
+    case "${GPU_ARCH}" in
+      gfx95*) hgemm_shapes="${HGEMM_SHAPES_GFX950}" ;;
+      *) hgemm_shapes="${HGEMM_SHAPES_CDNA3}" ;;
+    esac
+  fi
+
+  for shape in $hgemm_shapes; do
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
+    stages=$8; split_k=$9; block_m_warps=${10}; block_n_warps=${11}; block_k_warps=${12}
+    log="${BENCH_LOG_DIR}/hgemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_s${stages}_sk${split_k}.log"
+    if python3 tests/kernels/test_hgemm_splitk.py \
+      --dtype "$dtype" \
+      --num_warmup 3 \
+      --num_iters 50 \
+      -m "$M" \
+      -n "$N" \
+      -k "$K" \
+      --TILE_M "$tile_m" \
+      --TILE_N "$tile_n" \
+      --TILE_K "$tile_k" \
+      --STAGES "$stages" \
+      --SPLIT_K "$split_k" \
+      --BLOCK_M_WARPS "$block_m_warps" \
+      --BLOCK_N_WARPS "$block_n_warps" \
+      --BLOCK_K_WARPS "$block_k_warps" >"${log}" 2>&1; then
+      if grep -q "Skipped:" "${log}"; then
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        _emit_row "hgemm" "${shape_tag}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_sk${split_k}"
+        row="$(_py_parse_and_emit hgemm "${shape_tag}" "${dtype}" "${log}")"
+        set -- $row
+        _emit_row "$1" "$2" "$3" "$4" "$5"
+      fi
+    else
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+      echo "hgemm failed. Log: ${log}" >&2
+      _show_fail_log "${log}" "hgemm"
+    fi
+  done
+
+  if [ -n "${FP8_GEMM_8WAVE_ROWSCALE_SHAPES:-}" ]; then
+    for shape in $FP8_GEMM_8WAVE_ROWSCALE_SHAPES; do
+      [ -z "$shape" ] && continue
+      oldIFS=$IFS
+      IFS=,
+      # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+      set -- $shape
+      IFS=$oldIFS
+      M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; preshuffle_b=$6
+      dtype="fp8"
+      preshuffle_flag=""
+      preshuffle_tag="rowmajor"
+      if [ "${preshuffle_b}" = "1" ] || [ "${preshuffle_b}" = "true" ]; then
+        preshuffle_flag="--preshuffle_b"
+        preshuffle_tag="preshuffle_b"
+      fi
+      log="${BENCH_LOG_DIR}/fp8_gemm_8wave_rowscale_${M}x${N}x${K}_t${tile_m}x${tile_n}_${preshuffle_tag}.log"
+      if python3 tests/kernels/test_fp8_gemm_rowscale.py \
+        --wave_8 \
+        --num_warmups 10 \
+        --num_iters 100 \
+        -M "$M" \
+        -N "$N" \
+        -K "$K" \
+        --tile_m "$tile_m" \
+        --tile_n "$tile_n" \
+        ${preshuffle_flag} >"${log}" 2>&1; then
+        if grep -q "Skipped:" "${log}"; then
+          shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}_${preshuffle_tag}"
+          _emit_row "fp8_8wave_rowscale" "${shape_tag}" "${dtype}" "skip" "skip"
+        else
+          SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+          shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}_${preshuffle_tag}"
+          row="$(_py_parse_and_emit fp8_8wave_rowscale "${shape_tag}" "${dtype}" "${log}")"
+          set -- $row
+          _emit_row "$1" "$2" "$3" "$4" "$5"
+        fi
+      else
+        if grep -q "requires CDNA4\|Skipped:" "${log}" 2>/dev/null; then
+          shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}_${preshuffle_tag}"
+          _emit_row "fp8_8wave_rowscale" "${shape_tag}" "${dtype}" "skip" "skip"
+        else
+          FAIL_COUNT=$((FAIL_COUNT + 1))
+          echo "fp8 8wave row-scale gemm failed. Log: ${log}" >&2
+          _show_fail_log "${log}" "fp8_8wave_rowscale"
+        fi
+      fi
+    done
+  fi
+
   # FP4 GEMM (gfx950 only)
   for shape in $GEMM_FP4_SHAPES; do
     [ -z "$shape" ] && continue
@@ -1034,11 +1155,12 @@ if [ "${RUN_MOE}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
   done
 fi
 
-# RDNA4 WMMA GEMM benchmarks (via benchmark_common.py)
-if [ "${IS_RDNA4}" = "true" ]; then
+# RDNA WMMA GEMM benchmarks (gfx11* or gfx12*, via benchmark_common.py).
+# FP8 WMMA is gfx12-only and is skipped inside run_wmma_sweep on gfx11*.
+if [ "${IS_RDNA_WMMA}" = "true" ]; then
   echo ""
   echo "========================================================================"
-  echo "RDNA4 WMMA Benchmarks"
+  echo "RDNA WMMA Benchmarks (arch: ${GPU_ARCH})"
   echo "========================================================================"
   log="${BENCH_LOG_DIR}/rdna_wmma_sweep.log"
   if python3 -c "from tests.kernels.benchmark_common import run_wmma_sweep, print_perf_table; rows = run_wmma_sweep(); print_perf_table(rows)" >"${log}" 2>&1; then
@@ -1046,7 +1168,7 @@ if [ "${IS_RDNA4}" = "true" ]; then
     SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
   else
     FAIL_COUNT=$((FAIL_COUNT + 1))
-    echo "RDNA4 WMMA benchmark failed. Log: ${log}" >&2
+    echo "RDNA WMMA benchmark failed. Log: ${log}" >&2
     tail -20 "${log}" >&2
   fi
 fi
