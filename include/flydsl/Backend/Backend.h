@@ -13,6 +13,10 @@
 #ifndef FLYDSL_BACKEND_BACKEND_H
 #define FLYDSL_BACKEND_BACKEND_H
 
+#ifndef FLYDSL_BACKEND_COUNT
+#error "FLYDSL_BACKEND_COUNT must be defined by cmake/FlyDSLBackends.cmake."
+#endif
+
 #define FLYDSL_BACKEND_DETAIL_CONCAT(x, y) FLYDSL_BACKEND_DETAIL_CONCAT_IMPL(x, y)
 #define FLYDSL_BACKEND_DETAIL_CONCAT_IMPL(x, y) x##y
 

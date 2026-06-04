@@ -20,7 +20,7 @@ if(_n_backends EQUAL 0)
   message(FATAL_ERROR "FLYDSL_BACKENDS is empty — at least one backend is required.")
 endif()
 if(_n_backends GREATER 5)
-  message(FATAL_ERROR "FLYDSL_FOR_EACH_BACKEND supports at most 5 backend stacks.")
+  message(FATAL_ERROR "FLYDSL_FOR_EACH_BACKEND supports at most 5 backends.")
 endif()
 
 set(_FLYDSL_BACKENDS_ALLOWED rocdl)

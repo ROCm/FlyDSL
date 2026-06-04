@@ -20,7 +20,7 @@
 #include "flydsl/Dialect/Fly/Transforms/Passes.h"
 
 // Forward-declare per-backend CAPI registration functions.
-// FLYDSL_BACKEND_COUNT and FLYDSL_BACKEND_N are set by CMake.
+// FLYDSL_BACKEND_COUNT and FLYDSL_BACKEND_0..N-1 are set by CMake.
 #define DECLARE_BACKEND(name)                                                                      \
   extern "C" void flydsl_register_##name##_dialects(MlirDialectRegistry);                          \
   extern "C" void flydsl_register_##name##_passes(void);
