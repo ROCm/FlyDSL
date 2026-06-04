@@ -428,7 +428,7 @@ def compile_fp8fp4_gemm(
     COMPUTE_SCHEDULE_B_STREAMING = "b_streaming"
 
     fp8_deep_pipeline_eligible = (
-        data_format == "fp8"
+        data_format in ("fp8", "a8w4")
         and tile_m == 256
         and tile_n == 256
         and tile_k == 128
@@ -457,7 +457,9 @@ def compile_fp8fp4_gemm(
         # accumulators and uses the split to increase LDS-load-to-WMMA distance.
         if is_fp4:
             return COMPUTE_SCHEDULE_FP4_COL_BAND
-        if data_format == "fp8":
+        # A8W4 (FP8 act + FP4 weight) shares FP8's accumulator layout and operand
+        # path, so it reuses the FP8 schedules.
+        if data_format in ("fp8", "a8w4"):
             if fp8_schedule == "deep-pipeline" or (fp8_schedule == "auto" and fp8_deep_pipeline_eligible):
                 return COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
             return COMPUTE_SCHEDULE_FP8_QUADRANT
