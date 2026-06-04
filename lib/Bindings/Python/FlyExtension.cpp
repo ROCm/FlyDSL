@@ -896,6 +896,12 @@ NB_MODULE(_mlirDialectsFly, m) {
       .def("get_c_pointers", &DLTensorAdaptor::getCPointers, "Get list of c pointers")
       .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
            "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
+      .def("mark_shape_dynamic", &DLTensorAdaptor::markShapeDynamic, "dims"_a, "divisibilities"_a,
+           "Mark the shape leaf of each listed dimension dynamic, leaving others unchanged. "
+           "dims and divisibilities must be equal-length lists.")
+      .def("mark_stride_dynamic", &DLTensorAdaptor::markStrideDynamic, "dims"_a, "divisibilities"_a,
+           "Mark the stride leaf of each listed dimension dynamic, leaving others unchanged. "
+           "dims and divisibilities must be equal-length lists.")
       .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
            "Decide whether to use 32-bit stride")
       .def("get_cache_signature", &DLTensorAdaptor::getCacheSignature,
