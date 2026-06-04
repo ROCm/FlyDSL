@@ -31,121 +31,14 @@ import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
 from flydsl.compiler.external_llvm import ExternalLLVMError  # noqa: E402
 
-# Legacy MachineFunctionPass plugin: registers "fly-mir-pass" via RegisterPass,
-# runs pre-emit during codegen, prints the MF name (observable under `pytest -s`).
-PLUGIN_SRC = r"""
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/raw_ostream.h"
-using namespace llvm;
-namespace {
-struct FlyMirPass : public MachineFunctionPass {
-  static char ID;
-  FlyMirPass() : MachineFunctionPass(ID) {}
-  bool runOnMachineFunction(MachineFunction &MF) override {
-    errs() << "fly-mir-pass: ran on " << MF.getName() << "\n";
-    return false;
-  }
-  StringRef getPassName() const override { return "Fly demo MIR pass"; }
-};
-char FlyMirPass::ID = 0;
-} // namespace
-static RegisterPass<FlyMirPass> X("fly-mir-pass", "Fly demo MIR pass", false, false);
-"""
-
-# A MIR pass that *modifies* the machine code: inserts NOP_PER_FUNC ``s_nop`` at
-# the entry of every kernel.  The opcode is found by name so no AMDGPU target
-# headers are needed; the count is a distinctive, measurable change in the ASM.
+# Plugin sources live as standalone .cpp files (compiled at test time) under
+# llvm_pass_plugins/.  Each registers a legacy MachineFunctionPass:
+#   print_mir_pass.cpp      -> 'fly-mir-pass'   (no-op; prints the MF name)
+#   insert_nop_mir_pass.cpp -> 'fly-insert-nop' (inserts NOP_PER_FUNC s_nop)
+#   reorder_mir_pass.cpp    -> 'fly-reorder'    (safe adjacent-instr swap)
+_PLUGINS_DIR = Path(__file__).parent / "llvm_pass_plugins"
+# Must match the count inserted by insert_nop_mir_pass.cpp.
 NOP_PER_FUNC = 8
-PLUGIN_SRC_NOP = r"""
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/CodeGen/MachineInstrBuilder.h"
-#include "llvm/CodeGen/TargetInstrInfo.h"
-#include "llvm/CodeGen/TargetSubtargetInfo.h"
-#include "llvm/Pass.h"
-using namespace llvm;
-namespace {
-struct FlyInsertNopPass : public MachineFunctionPass {
-  static char ID;
-  FlyInsertNopPass() : MachineFunctionPass(ID) {}
-  bool runOnMachineFunction(MachineFunction &MF) override {
-    const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
-    unsigned NopOpc = ~0u;
-    for (unsigned i = 0, e = TII->getNumOpcodes(); i < e; ++i)
-      if (TII->getName(i) == "S_NOP") { NopOpc = i; break; }
-    if (NopOpc == ~0u || MF.empty()) return false;
-    MachineBasicBlock &MBB = MF.front();
-    auto It = MBB.begin();
-    for (int k = 0; k < 8; ++k)
-      BuildMI(MBB, It, DebugLoc(), TII->get(NopOpc)).addImm(0);
-    return true;
-  }
-  StringRef getPassName() const override { return "Fly insert NOP MIR pass"; }
-};
-char FlyInsertNopPass::ID = 0;
-} // namespace
-static RegisterPass<FlyInsertNopPass> X("fly-insert-nop", "Fly insert NOP", false, false);
-"""
-
-# A MIR pass that *schedules* (reorders) instructions: within each block it swaps
-# adjacent instructions whenever that is provably safe — neither has memory/side
-# effects and no def of one overlaps any register operand (def or use, explicit
-# or implicit) of the other.  Semantics are preserved (results stay correct) but
-# the emitted instruction order changes.
-PLUGIN_SRC_REORDER = r"""
-#include "llvm/CodeGen/MachineBasicBlock.h"
-#include "llvm/CodeGen/MachineFunction.h"
-#include "llvm/CodeGen/MachineFunctionPass.h"
-#include "llvm/CodeGen/TargetInstrInfo.h"
-#include "llvm/CodeGen/TargetRegisterInfo.h"
-#include "llvm/CodeGen/TargetSubtargetInfo.h"
-#include "llvm/Pass.h"
-using namespace llvm;
-namespace {
-static bool unsafe(const MachineInstr &MI) {
-  return MI.mayLoadOrStore() || MI.hasUnmodeledSideEffects() || MI.isCall() ||
-         MI.isTerminator() || MI.isBranch() || MI.isInlineAsm() || MI.isMetaInstruction();
-}
-static bool canSwap(const MachineInstr &A, const MachineInstr &B, const TargetRegisterInfo *TRI) {
-  if (unsafe(A) || unsafe(B)) return false;
-  auto defConflicts = [&](const MachineInstr &X, const MachineInstr &Y) {
-    for (const MachineOperand &dx : X.operands()) {
-      if (!dx.isReg() || !dx.getReg() || !dx.isDef()) continue;
-      for (const MachineOperand &oy : Y.operands())
-        if (oy.isReg() && oy.getReg() && TRI->regsOverlap(dx.getReg(), oy.getReg())) return true;
-    }
-    return false;
-  };
-  return !defConflicts(A, B) && !defConflicts(B, A);
-}
-struct FlyReorderPass : public MachineFunctionPass {
-  static char ID;
-  FlyReorderPass() : MachineFunctionPass(ID) {}
-  bool runOnMachineFunction(MachineFunction &MF) override {
-    const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
-    bool changed = false;
-    for (MachineBasicBlock &MBB : MF) {
-      for (auto it = MBB.begin(); it != MBB.end();) {
-        auto nxt = std::next(it);
-        if (nxt != MBB.end() && canSwap(*it, *nxt, TRI)) {
-          MBB.splice(it, &MBB, nxt); // move B before A
-          changed = true;
-          it = std::next(it);        // it still == A; skip past the swapped pair
-        } else {
-          ++it;
-        }
-      }
-    }
-    return changed;
-  }
-  StringRef getPassName() const override { return "Fly reorder MIR pass"; }
-};
-char FlyReorderPass::ID = 0;
-} // namespace
-static RegisterPass<FlyReorderPass> X("fly-reorder", "Fly reorder", false, false);
-"""
 
 
 def _gpu_available() -> bool:
@@ -169,8 +62,9 @@ def _resolve_tool(env_var: str, name: str):
     return None
 
 
-def _build_codegen_plugin(tmp_path_factory, *, src: str, name: str) -> str:
-    """Skip unless the codegen toolchain is present, then compile a plugin .so."""
+def _build_codegen_plugin(tmp_path_factory, *, cpp_name: str, lib_name: str) -> str:
+    """Skip unless the codegen toolchain is present, then compile a plugin .cpp
+    from llvm_pass_plugins/ into a .so."""
     raw = os.environ.get("FLYDSL_COMPILE_LLVM_DIR", "").strip()
     if not raw:
         pytest.skip("FLYDSL_COMPILE_LLVM_DIR not set; required to build/load a codegen pass plugin")
@@ -185,11 +79,9 @@ def _build_codegen_plugin(tmp_path_factory, *, src: str, name: str) -> str:
         pytest.skip("ld.lld not found; set FLYDSL_COMPILE_LLD or place ld.lld in <FLYDSL_COMPILE_LLVM_DIR>/bin")
 
     cxxflags = subprocess.check_output([str(llvm_config), "--cxxflags"], text=True).split()
-    work = tmp_path_factory.mktemp("codegen_plugin")
-    cpp = work / (name + ".cpp")
-    cpp.write_text(src, encoding="utf-8")
-    so = work / ("lib" + name + ".so")
-    subprocess.run([cxx, "-shared", "-fPIC", *cxxflags, str(cpp), "-o", str(so)], check=True)
+    src = _PLUGINS_DIR / cpp_name
+    so = tmp_path_factory.mktemp("codegen_plugin") / ("lib" + lib_name + ".so")
+    subprocess.run([cxx, "-shared", "-fPIC", *cxxflags, str(src), "-o", str(so)], check=True)
     assert so.is_file()
     return str(so)
 
@@ -197,19 +89,19 @@ def _build_codegen_plugin(tmp_path_factory, *, src: str, name: str) -> str:
 @pytest.fixture(scope="module")
 def mir_pass_plugin(tmp_path_factory) -> str:
     """Compile the print-only MIR pass plugin (and ensure fly-llc + ld.lld exist)."""
-    return _build_codegen_plugin(tmp_path_factory, src=PLUGIN_SRC, name="FlyMir")
+    return _build_codegen_plugin(tmp_path_factory, cpp_name="print_mir_pass.cpp", lib_name="FlyMir")
 
 
 @pytest.fixture(scope="module")
 def nop_pass_plugin(tmp_path_factory) -> str:
     """Compile the s_nop-inserting MIR pass plugin (modifies the machine code)."""
-    return _build_codegen_plugin(tmp_path_factory, src=PLUGIN_SRC_NOP, name="FlyNop")
+    return _build_codegen_plugin(tmp_path_factory, cpp_name="insert_nop_mir_pass.cpp", lib_name="FlyNop")
 
 
 @pytest.fixture(scope="module")
 def reorder_pass_plugin(tmp_path_factory) -> str:
     """Compile the instruction-reordering (scheduling) MIR pass plugin."""
-    return _build_codegen_plugin(tmp_path_factory, src=PLUGIN_SRC_REORDER, name="FlyReorder")
+    return _build_codegen_plugin(tmp_path_factory, cpp_name="reorder_mir_pass.cpp", lib_name="FlyReorder")
 
 
 @flyc.kernel
