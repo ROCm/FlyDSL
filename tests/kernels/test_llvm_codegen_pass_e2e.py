@@ -54,9 +54,10 @@ char FlyMirPass::ID = 0;
 static RegisterPass<FlyMirPass> X("fly-mir-pass", "Fly demo MIR pass", false, false);
 """
 
-# A MIR pass that *modifies* the machine code: inserts 8 ``s_nop`` at the entry
-# of every kernel.  The opcode is found by name so no AMDGPU target headers are
-# needed.  8 nops/function is a distinctive, measurable change in the ASM.
+# A MIR pass that *modifies* the machine code: inserts NOP_PER_FUNC ``s_nop`` at
+# the entry of every kernel.  The opcode is found by name so no AMDGPU target
+# headers are needed; the count is a distinctive, measurable change in the ASM.
+NOP_PER_FUNC = 8
 PLUGIN_SRC_NOP = r"""
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -385,6 +386,27 @@ def _kernel_instr_seq(disasm: str) -> list:
     return seq
 
 
+def _func_body_snop(disasm: str) -> int:
+    """Count ``s_nop`` in function bodies only (between the label and the first
+    ``s_endpgm``), excluding trailing alignment padding — robust even when the
+    injected nops get scheduled away from the entry."""
+    import re
+
+    n = 0
+    in_func = False
+    for ln in disasm.splitlines():
+        if re.match(r"^[0-9a-fA-F]+ <.+>:", ln):
+            in_func = True
+            continue
+        if in_func:
+            if "s_endpgm" in ln:
+                in_func = False
+                continue
+            if "s_nop" in ln:
+                n += 1
+    return n
+
+
 @pytest.mark.skipif(not _gpu_available(), reason="requires a ROCm GPU")
 def test_codegen_pass_modifies_asm(nop_pass_plugin, monkeypatch, tmp_path):
     """A codegen pass can change the emitted ASM.  Compile the same kernel through
@@ -455,3 +477,63 @@ def test_codegen_pass_reorders_instructions(reorder_pass_plugin, mir_pass_plugin
     assert base_seq and mod_seq, "no instructions disassembled"
     assert sorted(base_seq) == sorted(mod_seq), "reorder must not add or remove instructions"
     assert base_seq != mod_seq, "scheduling pass did not change instruction order"
+
+
+@pytest.mark.skipif(not _gpu_available(), reason="requires a ROCm GPU")
+def test_codegen_insert_after_runs_at_earlier_stage(nop_pass_plugin, mir_pass_plugin, monkeypatch, tmp_path):
+    """`--insert-after` injects a pass at an *earlier* codegen stage than pre-emit.
+    Insert the nop pass right after `machine-scheduler` (pre-RA): its 8 nops/func
+    survive register allocation + later scheduling, so the device binary's function
+    body has NOP_PER_FUNC more `s_nop` than the no-op baseline (same fly-llc
+    driver) — proving the pass ran via the earlier injection point."""
+    objdump = _resolve_tool("FLYDSL_COMPILE_LLVM_OBJDUMP", "llvm-objdump")
+    if objdump is None:
+        pytest.skip("llvm-objdump not found; set FLYDSL_COMPILE_LLVM_OBJDUMP or place it in <llvm_dir>/bin")
+
+    from flydsl.compiler.backends.rocm import RocmBackend
+
+    mcpu = RocmBackend.detect_target().arch
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setenv("FLYDSL_DUMP_IR", "1")
+
+    mod_dump = tmp_path / "mod"
+    base_dump = tmp_path / "base"
+    add_mod = _make_add_jit(
+        llvm_codegen_plugins=[nop_pass_plugin],
+        llvm_codegen_insert_after=["machine-scheduler=fly-insert-nop"],  # pre-RA
+    )
+    add_base = _make_add_jit(llvm_codegen_passes=["fly-mir-pass"], llvm_codegen_plugins=[mir_pass_plugin])
+    _jit_run_add(add_mod, mod_dump, monkeypatch)
+    _jit_run_add(add_base, base_dump, monkeypatch)
+
+    mod_hsaco = next(mod_dump.rglob("fly_llc.hsaco"), None)
+    base_hsaco = next(base_dump.rglob("fly_llc.hsaco"), None)
+    assert mod_hsaco is not None and base_hsaco is not None, "fly-llc HSACO dump not found"
+
+    base_n = _func_body_snop(_disasm(objdump, mcpu, base_hsaco))
+    mod_n = _func_body_snop(_disasm(objdump, mcpu, mod_hsaco))
+    delta = mod_n - base_n
+    assert (
+        delta >= NOP_PER_FUNC and delta % NOP_PER_FUNC == 0
+    ), f"pre-RA insert-after pass effect not observed: body s_nop base={base_n} mod={mod_n}"
+
+
+def test_codegen_insert_after_unknown_anchor_fails(nop_pass_plugin, monkeypatch):
+    """An unknown anchor pass name is rejected by fly-llc."""
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    add = _make_add_jit(
+        llvm_codegen_plugins=[nop_pass_plugin],
+        llvm_codegen_insert_after=["no-such-anchor=fly-insert-nop"],
+    )
+
+    n = 64
+    A = torch.zeros(n, dtype=torch.float32)
+    B = torch.zeros(n, dtype=torch.float32)
+    C = torch.zeros(n, dtype=torch.float32)
+    if _gpu_available():
+        A, B, C = A.cuda(), B.cuda(), C.cuda()
+    tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
+
+    with pytest.raises(ExternalLLVMError) as excinfo:
+        add(tA, B, C, n, stream=torch.cuda.Stream() if _gpu_available() else fx.Stream(None))
+    assert "no-such-anchor" in str(excinfo.value)

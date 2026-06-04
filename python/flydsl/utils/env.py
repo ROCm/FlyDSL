@@ -254,6 +254,13 @@ class CompileEnvManager(EnvManager):
         description="Colon-separated legacy MIR pass plugin .so paths loaded by fly-llc "
         "(fly-llc --load). Overridden by @flyc.jit(llvm_codegen_plugins=...).",
     )
+    llvm_codegen_insert_after = OptList(
+        [],
+        description="Comma-separated 'ANCHOR=PASS' entries inserting MIR pass PASS right after "
+        "codegen pass ANCHOR (fly-llc --insert-after), reaching earlier stages than pre-emit "
+        "(e.g. 'machine-scheduler=my-pass' for pre-RA). Overridden by "
+        "@flyc.jit(llvm_codegen_insert_after=...).",
+    )
     fly_llc = OptStr("", description="Path to the fly-llc tool (default: <FLYDSL_COMPILE_LLVM_DIR>/bin/fly-llc).")
     lld = OptStr("", description="Path to ld.lld for the fly-llc codegen path (default: <llvm_dir>/bin/ld.lld).")
 

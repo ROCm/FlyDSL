@@ -79,29 +79,41 @@ def test_fingerprint_tolerates_missing_plugin():
 
 
 def test_jit_decorator_records_llvm_codegen_hints():
-    @flyc.jit(llvm_codegen_passes=["fly-mir-pass"], llvm_codegen_plugins=["/tmp/libFlyMir.so"])
+    @flyc.jit(
+        llvm_codegen_passes=["fly-mir-pass"],
+        llvm_codegen_plugins=["/tmp/libFlyMir.so"],
+        llvm_codegen_insert_after=["machine-scheduler=fly-mir-pass"],
+    )
     def f():  # pragma: no cover - never executed
         pass
 
     assert f.compile_hints["llvm_codegen_passes"] == ["fly-mir-pass"]
     assert f.compile_hints["llvm_codegen_plugins"] == ["/tmp/libFlyMir.so"]
+    assert f.compile_hints["llvm_codegen_insert_after"] == ["machine-scheduler=fly-mir-pass"]
 
 
 def test_effective_codegen_config_prefers_hints_over_env(monkeypatch):
     monkeypatch.setenv("FLYDSL_COMPILE_LLVM_CODEGEN_PASSES", "env-pass")
     monkeypatch.setenv("FLYDSL_COMPILE_LLVM_CODEGEN_PLUGINS", "/env/a.so:/env/b.so")
+    monkeypatch.setenv("FLYDSL_COMPILE_LLVM_CODEGEN_INSERT_AFTER", "greedy=env-pass")
 
-    passes, plugins = _effective_llvm_codegen_config({"llvm_codegen_passes": ["h"], "llvm_codegen_plugins": ["/h.so"]})
+    passes, plugins, insert_after = _effective_llvm_codegen_config(
+        {"llvm_codegen_passes": ["h"], "llvm_codegen_plugins": ["/h.so"], "llvm_codegen_insert_after": ["a=h"]}
+    )
     assert passes == ["h"]
     assert plugins == ["/h.so"]
+    assert insert_after == ["a=h"]
 
-    passes, plugins = _effective_llvm_codegen_config({})
+    passes, plugins, insert_after = _effective_llvm_codegen_config({})
     assert passes == ["env-pass"]
     assert plugins == ["/env/a.so", "/env/b.so"]
+    assert insert_after == ["greedy=env-pass"]
 
 
 def test_codegen_fingerprint_changes_with_passes_and_plugins(tmp_path):
     assert fly_llc_codegen_fingerprint(["a"]) != fly_llc_codegen_fingerprint(["b"])
+    # insert-after specs participate in the fingerprint too
+    assert fly_llc_codegen_fingerprint([], [], ["m=a"]) != fly_llc_codegen_fingerprint([], [], ["m=b"])
 
     so = tmp_path / "libP.so"
     so.write_bytes(b"v1")

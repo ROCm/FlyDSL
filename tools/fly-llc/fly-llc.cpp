@@ -44,6 +44,17 @@ static cl::list<std::string> LoadLib("load",
                                      cl::desc("dlopen a legacy MIR pass plugin .so (repeatable)"));
 static cl::list<std::string>
     PreEmitPass("pre-emit-pass", cl::desc("named MIR pass to insert pre-emit (repeatable)"));
+static cl::list<std::string>
+    InsertAfter("insert-after",
+                cl::desc("ANCHOR=PASS: insert MIR pass PASS right after codegen pass ANCHOR "
+                         "(both are registered pass arg-names, e.g. greedy=my-pass); repeatable. "
+                         "This reaches earlier pipeline stages (pre/post-RA, pre-sched2, ...) that "
+                         "the pre-emit slot cannot."));
+
+// Look up a registered (legacy) pass by its command-line arg name.
+static const PassInfo *findPass(StringRef name) {
+  return PassRegistry::getPassRegistry()->getPassInfo(name);
+}
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
@@ -81,13 +92,37 @@ int main(int argc, char **argv) {
   M->setDataLayout(TM->createDataLayout());
   M->setTargetTriple(TT);
 
-  // Replicate addPassesToEmitFile so a custom MIR pass can be injected after
-  // the standard machine passes and before the asm printer.
+  // Replicate addPassesToEmitFile so custom MIR passes can be injected into the
+  // codegen pipeline: --insert-after schedules passes relative to named anchor
+  // passes (reaching earlier stages), and --pre-emit-pass appends after the
+  // whole machine pipeline (just before the asm printer).
   auto &CG = static_cast<CodeGenTargetMachineImpl &>(*TM);
   legacy::PassManager PM;
   auto *MMIWP = new MachineModuleInfoWrapperPass(&CG);
   TargetPassConfig *PC = CG.createPassConfig(PM);
   PC->setDisableVerify(true);
+
+  // Schedule --insert-after injections BEFORE the pipeline is built; each fires
+  // when the pipeline adds its anchor pass (TargetPassConfig::insertPass).
+  for (auto &spec : InsertAfter) {
+    auto eq = spec.find('=');
+    if (eq == StringRef::npos) {
+      errs() << "fly-llc: --insert-after expects ANCHOR=PASS, got: " << spec << "\n";
+      return 1;
+    }
+    const PassInfo *anchor = findPass(StringRef(spec).substr(0, eq));
+    const PassInfo *pass = findPass(StringRef(spec).substr(eq + 1));
+    if (!anchor) {
+      errs() << "fly-llc: unknown anchor pass: " << spec.substr(0, eq) << "\n";
+      return 1;
+    }
+    if (!pass || !pass->getNormalCtor()) {
+      errs() << "fly-llc: unknown MIR pass: " << spec.substr(eq + 1) << "\n";
+      return 1;
+    }
+    PC->insertPass(anchor->getTypeInfo(), pass->getTypeInfo());
+  }
+
   PM.add(PC);
   PM.add(MMIWP);
   TargetLibraryInfoImpl TLII(TT);
@@ -98,7 +133,7 @@ int main(int argc, char **argv) {
   }
   PC->addMachinePasses();
   for (auto &name : PreEmitPass) {
-    const PassInfo *PI = PassRegistry::getPassRegistry()->getPassInfo(StringRef(name));
+    const PassInfo *PI = findPass(name);
     if (!PI || !PI->getNormalCtor()) {
       errs() << "fly-llc: unknown MIR pass: " << name << "\n";
       return 1;

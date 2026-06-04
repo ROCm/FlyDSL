@@ -365,10 +365,12 @@ def _lld_path() -> Path:
     )
 
 
-def fly_llc_codegen_fingerprint(passes: Optional[list] = None, plugins: Optional[list] = None) -> str:
+def fly_llc_codegen_fingerprint(
+    passes: Optional[list] = None, plugins: Optional[list] = None, insert_after: Optional[list] = None
+) -> str:
     """Cache fingerprint for a fly-llc codegen configuration: the pass names plus
     the fly-llc binary's and each plugin's content hash."""
-    parts = ["fly-llc-codegen:" + ",".join(passes or [])]
+    parts = ["fly-llc-codegen:" + ",".join(passes or []) + "|after:" + ",".join(insert_after or [])]
     try:
         parts.append(_file_hash(_fly_llc_path().resolve()))
     except OSError:
@@ -399,8 +401,9 @@ def run_fly_llc_codegen(
     module: ir.Module,
     *,
     llvm_ir: str,
-    codegen_passes: list,
+    codegen_passes: Optional[list] = None,
     codegen_plugins: Optional[list] = None,
+    codegen_insert_after: Optional[list] = None,
     target_triple: str,
     target_cpu: str,
     work_dir: Optional[Path] = None,
@@ -409,9 +412,10 @@ def run_fly_llc_codegen(
     """Codegen the device kernel's LLVM IR with injectable MIR passes and splice
     the result back into *module*.
 
-    Flow: ``fly-llc <in.ll> -o <obj> --load=<plugin> --pre-emit-pass=<pass>``
-    (custom MIR passes run pre-emit in the standard codegen) -> ``ld.lld -shared``
-    -> wrap the HSACO bytes into a ``gpu.binary`` -> replace the in-process
+    Flow: ``fly-llc <in.ll> -o <obj> --load=<plugin> [--pre-emit-pass=<pass>]
+    [--insert-after=<anchor>=<pass>]`` (custom MIR passes run inside the standard
+    codegen — pre-emit and/or at named earlier stages) -> ``ld.lld -shared`` ->
+    wrap the HSACO bytes into a ``gpu.binary`` -> replace the in-process
     ``gpu.module``.
     """
     fly_llc = _fly_llc_path()
@@ -438,6 +442,7 @@ def run_fly_llc_codegen(
 
         plugin_args = [f"--load={Path(p).expanduser()}" for p in (codegen_plugins or [])]
         pass_args = [f"--pre-emit-pass={n}" for n in (codegen_passes or [])]
+        insert_after_args = [f"--insert-after={spec}" for spec in (codegen_insert_after or [])]
         _run_tool(
             [
                 str(fly_llc),
@@ -448,6 +453,7 @@ def run_fly_llc_codegen(
                 f"-mcpu={target_cpu}",
                 *plugin_args,
                 *pass_args,
+                *insert_after_args,
             ],
             prefix=prefix,
             what="fly-llc codegen",
