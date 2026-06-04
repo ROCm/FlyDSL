@@ -2666,17 +2666,12 @@ def compile_pa_decode_ps(
 
                 gpu.barrier()
 
-                rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, None)
-
-                # Issue the next sub-partition's K prefetch on the LAST MTP
-                # iter, after cross_warp_softmax_and_prob_pack but BEFORE
-                # _pv_mfma — same hoist as in pa_decode_metadata_kenrel's
-                # _process_block_split.  This lets the K VMEM load latency
-                # overlap with the upcoming PV MFMA compute.
                 if const_expr(_mtp_g == _mtp_groups - 1):
-                    _pa_small_block_store_phys_blocks_to_lds(next_phys_blocks)
-                
-                if const_expr(_mtp_g == _mtp_groups - 1):
+                    # Issue the next sub-partition's K prefetch on the LAST MTP
+                    # iter, after cross_warp_softmax_and_prob_pack but BEFORE
+                    # _pv_mfma — same hoist as in pa_decode_metadata_kenrel's
+                    # _process_block_split.  This lets the K VMEM load latency
+                    # overlap with the upcoming PV MFMA compute.
                     k_next_flat = _pa_small_block_load_k_flat(
                         k_global_ptr,
                         kv_h,
@@ -2688,8 +2683,13 @@ def compile_pa_decode_ps(
                         phys_blocks=next_phys_blocks,
                         qkhe_loop=_QKHELOOP,
                     )
+                rmax, rsum, outs, v_correction = _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, None)
+
+                if const_expr(_mtp_g == _mtp_groups - 1):
+                    _pa_small_block_store_phys_blocks_to_lds(next_phys_blocks)
+
                 gpu.barrier()
-                
+
                 outs = _pv_mfma(v_results, outs, v_correction)
                 new_states.append(tuple([rmax, rsum] + outs))
 
