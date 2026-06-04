@@ -454,11 +454,14 @@ if tbps is None or tflops is None:
         tflops = float(m.group(1))
         tbps = float(m.group(2))
 
-# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s"
+# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s".
+# Use the FIRST match: the base op (softmax/layernorm/rmsnorm) is benchmarked
+# first, so any later "Bandwidth:" lines come from fused/quant variants printed
+# by the same test (e.g. test_layernorm.py also runs fused_add/dynamicquant/
+# smoothquant). Taking the last match reported the slow scalar smoothquant path
+# as "layernorm" (~1.69 vs the real ~5.6 TB/s base).
 if tbps is None:
-    m_bw = None
-    for m_bw in re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt):
-        pass
+    m_bw = next(re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt), None)
     if m_bw:
         tbps = float(m_bw.group(1)) / 1000.0
 
