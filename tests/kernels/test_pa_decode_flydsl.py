@@ -686,9 +686,13 @@ def run_flydsl_pscale_smoke():
     # read OOB phys_blocks → OOB K addr → segfault).  The
     # `_safe_partition_start` clamp in pa_decode_fp8.py now keeps the
     # prologue's reads in-bounds for empty slots.
+    _kv_lens = [128, 256, 512, 1024, 16384, 32768, 65536, 131072]
+    _seq_counts = [2, 4, 8, 16, 32, 64, 128, 256]
+    _base = dict(num_seq_q=2, block_size=16, num_head_kv=1, num_head_q=8, head_dim=128)
     configs = [
-        dict(num_batch=128, num_seq_q=2, context_length=128, block_size=16, num_head_kv=2, num_head_q=8, head_dim=128),
-        # dict(num_batch=8, num_seq_q=1, context_length=8192, block_size=16, num_head_kv=2, num_head_q=8, head_dim=128),
+        dict(num_batch=ns, context_length=kv, **_base)
+        for kv in _kv_lens
+        for ns in _seq_counts
     ]
     modes = ["none", "all_ones", "all_2", "per_head_random"]
     all_ok = True
