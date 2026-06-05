@@ -28,7 +28,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLYDSL_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-TRITON_GFX1250_MODEL_PATH="${TRITON_GFX1250_MODEL_PATH:-/root/rocdtif-7.12-am+ffmlite-mi400-r4.03}"
+TRITON_GFX1250_MODEL_PATH="${TRITON_GFX1250_MODEL_PATH:-/root/rocdtif-7.13-am+ffmlite-mi400.8782547.464-rel-20260507}"
 DRAW_LOG="${DRAW_LOG:-./draw.log}"
 
 # --- Parse options ---

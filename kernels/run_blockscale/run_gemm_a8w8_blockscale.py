@@ -35,13 +35,22 @@ USE_TDM_STORE = False
 # Experimental: forwards to AMDGPU LLVM `amdgpu-loop-carried-load-percent`
 # function attribute via passthrough. Set to 0 to try less-conservative
 # scheduling of loop-carried VGPRs. None disables (no attribute set).
-LOOP_CARRIED_LOAD_PERCENT = 0
+LOOP_CARRIED_LOAD_PERCENT = 100
 # Kernarg preload: marks each kernel arg as `inreg` so the AMDGPU backend
 # preloads them into user SGPRs at dispatch (no s_load + s_wait_kmcnt at
 # wave entry). Saves ~1786 cycles of prologue stall on the gfx1250 sim.
 KERNARG_PRELOAD = True
 # Kernel variant: "reg_preload" (primary) or "manual".
 VARIANT = "manual"
+# Manual-only: reuseB on consecutive WMMAs sharing the A-operand (a_cur, n>0) →
+# matrix_b_reuse, skips re-reading those VGPRs on gfx1250.
+WMMA_OPERAND_REUSE = True
+
+# Manual-only EXPERIMENT: emit the steady main-loop workgroup barrier as a bare
+# s_barrier_signal/wait (no release/acquire fences) so the scheduler may hoist the
+# prefetch ds_loads up into the WMMA shadows. Verify via trace — a passing unit
+# test is NOT proof (cross-wave race is timing-dependent). False = stock gpu.barrier().
+USE_MANUAL_BARRIER = True
 
 # Output dtype ("bf16" / "fp16" / "f32")
 OUT_DTYPE = "bf16"
@@ -145,7 +154,8 @@ def main():
         f"l2_prefetch={L2_PREFETCH_DISTANCE}\n"
         f"  variant:    {VARIANT}\n"
         f"  out_dtype:  {OUT_DTYPE}\n"
-        f"  tdm_store:  {USE_TDM_STORE}"
+        f"  tdm_store:  {USE_TDM_STORE}\n"
+        f"  manual_barrier: {USE_MANUAL_BARRIER}"
     )
 
     launch_fn = compile_gemm_a8w8_blockscale(
@@ -163,6 +173,8 @@ def main():
         use_tdm_store=USE_TDM_STORE,
         loop_carried_load_percent=LOOP_CARRIED_LOAD_PERCENT,
         kernarg_preload=KERNARG_PRELOAD,
+        wmma_operand_reuse=WMMA_OPERAND_REUSE,
+        use_manual_barrier=USE_MANUAL_BARRIER,
     )
 
     print("Launching kernel...")

@@ -11,4 +11,7 @@ def preshuffle_fp8_weights_gfx1250(w: torch.Tensor) -> torch.Tensor:
     w = w.permute(0, 2, 1, 3).contiguous()
     w = w.view(N // 16, K * 16)
 
+    # Tag so gemm_a8w8_blockscale's wrapper can recover logical (N, K) from the
+    # (N//16, K*16) shuffled shape instead of misreading K as K*16.
+    w.is_shuffled = True
     return w
