@@ -1,37 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MoE token sorting kernels (FlyDSL).
+"""Standalone FlyDSL MoE token sorting kernels.
 
-Counting sort that reorganises router top-k selections by expert for batched
-expert GEMM. Output contract: packed ``(slot << 24) | token``, sentinel
-``(topk << 24) | M``, ``num_valid_ids = [num_tokens_post_pad, M]``, with the
-``moe_buf`` accumulator zeroed in the same launch.
+Reorders router top-k pairs by expert into unit_size-aligned runs for batched
+expert GEMM. Each path also zeros moe_buf through trailing grid blocks.
 
-Three variants, selected by padded token count
-(one thread per expert, W =``workgroup_width(experts)`` threads per block):
+Inputs/outputs:
+  - topk_ids: [tokens, topk] int32 expert ids; topk_weights: [tokens, topk] f32.
+  - sorted_ids: packed token ids; padding slots hold the sentinel.
+  - sorted_weights: gathered f32 weights for real pairs.
+  - sorted_expert_ids: dense expert id per unit_size block; -1 after valid blocks.
+  - num_valid_ids: [total_padded_pairs, num_local_tokens].
 
-- ``mesh_flatfill`` -- low token. One block stages a ``token x expert`` LDS mesh
-  (slot+1 per routed pair), histograms each expert column, flat-fills sentinels,
-  then scatters. JIT-unrolls over tokens, hence the token ceiling.
-- ``count_sort`` -- mid token. K1 counts pairs per expert; K2 prefix-sums the
-  counts to expert bases and scatters pairs in pair-index (stable) order.
-- ``count_sort_paired`` -- high token. K1 per-block histogram, K2 column-scans to
-  expert bases, K3 writes block/sentinel/tail structure, K4 scatters by block+rank.
+Packed token id: (topk_slot << 24) | token_id
+  - upper 8 bits: topk slot.
+  - lower 24 bits: token index.
+  - sentinel: (topk << 24) | tokens.
 
-Shared machinery: per-expert counts are padded up to ``unit_size``, then an
-inclusive ``ds_bpermute`` warp scan (folded across waves through LDS) turns them
-into expert base offsets; under ``has_mask`` the dense expert index is packed above
-the padded count so one scan carries both. The ``moe_buf`` zero is folded onto each
-variant's trailing grid blocks as a vectorized grid-stride memset.
+Paths:
+  - mesh_flatfill (low token):
+        one sort block, expert x token LDS mesh, constexpr token loop.
+  - count_sort (mid token):
+        K1 counts per expert; K2 scans, scatters, and zeros moe_buf.
+  - count_sort_paired (high token):
+        K1 block histograms; K2 column scan; K3 structure; K4 scatter.
 
-``unit_size`` (B) is the padding granularity / GEMM tile-M;
-``workgroup_size`` (W)``= workgroup_width(experts)`` is the thread-block width.
+Constraints:
+  - one thread per expert in scan/structure phases.
+  - mesh_flatfill: tokens <= 256 and mesh LDS fits LDS_BYTES_PER_BLOCK.
+  - mesh_flatfill assumes distinct routed experts within each token row.
+  - store_vec_width in (2, 4); unit_size % store_vec_width == 0.
 """
 
 import functools
 import math
-import warnings
 from typing import Literal
 
 import torch
@@ -44,189 +47,148 @@ from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
 
-# ===========================================================================
-# Constants.
-# ===========================================================================
-
-UNIT_SIZE = 32  # default padding granularity (GEMM tile-M)
-MAX_THREADS_PER_BLOCK = 1024  # AMD workgroup cap; one-thread-per-expert -> expert cap
+UNIT_SIZE = 32
+MAX_THREADS_PER_BLOCK = 1024
 LDS_BYTES_PER_BLOCK = 64 * 1024
-WARP_SIZE_FALLBACK = 64  # CDNA wave64, for the GPU-free diagnostics
-MAX_LOW_TOKEN_COUNT = 256  # mesh_flatfill JIT-unroll ceiling
-
-# mesh_flatfill <-> count_sort boundary: tokens* = M / (topk + T0). mesh cost is
-# const_cost + tokens*(a*topk + b); T0 folds the topk-independent per-token term b (the
-# mesh histogram) into the denominator so the boundary tracks it -- plain M/topk
-# mispredicts at low topk.
-_MESH_FLATFILL_RECOMMENDED_TOPK_OFFSET = 7  # T0, the topk-independent per-token term
-_MESH_FLATFILL_RECOMMENDED_M = {"gfx950": 320, "gfx942": 256}
-_MESH_FLATFILL_RECOMMENDED_M_FALLBACK = 256
-
-# count_sort <-> count_sort_paired boundary as a per-block chunk count K:
-# tokens* = K * workgroup_size / topk. count_sort streams ceil(num_pairs/W) chunks
-# (one W-wide scan+barrier pass over the pairs each) per block; count_sort_paired spreads
-# pairs across blocks and wins once that chunk count crosses the fitted K.
-_COUNT_SORT_CROSSOVER_CHUNKS = {"gfx950": 10, "gfx942": 8}
-_COUNT_SORT_CROSSOVER_CHUNKS_FALLBACK = 8
-
-# mesh_flatfill register-cache token ceiling (VGPR budget).
-_MESH_FLATFILL_CACHE_COLUMN_MAX_TOKENS = {"gfx950": 64, "gfx942": 64}
-_MESH_FLATFILL_CACHE_COLUMN_MAX_TOKENS_FALLBACK = 64
-
-# arch -> (store_vec_width, zero_target_occupancy) for the moe_buf zero launch.
-_STORE_VEC_OCCUPANCY = {"gfx950": (4, 2), "gfx942": (4, 2)}
-_STORE_VEC_OCCUPANCY_FALLBACK = (4, 2)
-
-
-# ===========================================================================
-# Feasibility / support helpers.
-# ===========================================================================
-
-
-def workgroup_width(experts: int, warp_size: int = WARP_SIZE_FALLBACK) -> int:
-    """Thread-block width (W): experts rounded up to whole waves, capped at the
-    workgroup limit. Decoupled from ``unit_size`` (B)."""
-    waves = (experts + warp_size - 1) // warp_size
-    return min(MAX_THREADS_PER_BLOCK, waves * warp_size)
-
-
-def mesh_lds_bytes(experts: int, tokens: int) -> int:
-    """LDS the mesh family allocates (the feasibility-binding term): a
-    ``width x tokens`` int32 mesh plus a ``width`` column."""
-    width = workgroup_width(experts)
-    return (width * tokens + width) * 4
-
-
-def _structural_unsupported(experts: int) -> str | None:
-    """Reason a one-thread-per-expert kernel can't run this many experts, or None."""
-    workgroup_size = workgroup_width(experts)
-    if experts > workgroup_size:
-        return f"experts ({experts}) > workgroup_size ({workgroup_size})"
-    if workgroup_size > MAX_THREADS_PER_BLOCK:
-        return f"workgroup_size ({workgroup_size}) exceeds the {MAX_THREADS_PER_BLOCK}-work-item workgroup limit"
-    return None
-
-
-def mesh_flatfill_unsupported(experts: int, tokens: int) -> str | None:
-    """Reason mesh_flatfill can't run this shape, or None. It JIT-unrolls over tokens and
-    stages a token x expert LDS mesh, so it has a token ceiling and an LDS cap."""
-    reason = _structural_unsupported(experts)
-    if reason is not None:
-        return reason
-    if tokens > MAX_LOW_TOKEN_COUNT:
-        return (
-            f"mesh_flatfill unrolls over tokens; tokens ({tokens}) exceeds the "
-            f"{MAX_LOW_TOKEN_COUNT}-token ceiling -- use count_sort"
-        )
-    used = mesh_lds_bytes(experts, tokens)
-    if used > LDS_BYTES_PER_BLOCK:
-        return (
-            f"mesh_flatfill needs {used // 1024} KiB LDS, over the "
-            f"{LDS_BYTES_PER_BLOCK // 1024} KiB cap -- use count_sort"
-        )
-    return None
-
-
-def _require_supported(reason: str | None) -> None:
-    if reason is not None:
-        raise ValueError(reason)
-
-
-# ===========================================================================
-# Arch-keyed tuning. Arch detection is best-effort (conservative fallback) so
-# the diagnostics stay GPU-free.
-# ===========================================================================
-
-
-def _value_for_arch(table: dict, fallback, arch: str | None = None):
-    """First ``table`` value whose arch-substring key matches the (detected) arch,
-    else ``fallback``. Arch detection is best-effort so the tuning stays GPU-free."""
-    if arch is None:
-        try:
-            arch = get_rocm_arch()
-        except Exception:
-            arch = None
-    arch = (arch or "").lower()
-    return next((v for k, v in table.items() if k in arch), fallback)
-
-
-def count_sort_crossover_tokens(workgroup_size: int, topk: int, arch: str | None = None) -> int:
-    """Token count where count_sort_paired overtakes count_sort: ``K * workgroup_size / topk``.
-
-    ``K`` is the per-block chunk count at the crossover (one chunk = one
-    ``workgroup_size``-wide pass over the ``tokens * topk`` pairs); see the
-    ``_COUNT_SORT_CROSSOVER_CHUNKS`` note.
-    """
-    chunks = _value_for_arch(
-        _COUNT_SORT_CROSSOVER_CHUNKS,
-        _COUNT_SORT_CROSSOVER_CHUNKS_FALLBACK,
-        arch,
-    )
-    return max(1, chunks * workgroup_size // topk)
-
-
-def mesh_flatfill_recommended_max_tokens(topk: int, arch: str | None = None) -> int:
-    """Token count where count_sort overtakes mesh_flatfill: ``M / (topk + T0)``.
-
-    ``T0`` (``_MESH_FLATFILL_RECOMMENDED_TOPK_OFFSET``) is mesh_flatfill's topk-independent
-    per-token cost, added to ``topk`` so the boundary tracks both cost terms.
-    """
-    m = _value_for_arch(
-        _MESH_FLATFILL_RECOMMENDED_M,
-        _MESH_FLATFILL_RECOMMENDED_M_FALLBACK,
-        arch,
-    )
-    return max(1, m // (topk + _MESH_FLATFILL_RECOMMENDED_TOPK_OFFSET))
-
-
-def mesh_flatfill_cache_column_max_tokens(arch: str | None = None) -> int:
-    return _value_for_arch(
-        _MESH_FLATFILL_CACHE_COLUMN_MAX_TOKENS,
-        _MESH_FLATFILL_CACHE_COLUMN_MAX_TOKENS_FALLBACK,
-        arch,
-    )
-
-
-def default_store_vec_width(arch: str | None = None) -> int:
-    return _value_for_arch(
-        _STORE_VEC_OCCUPANCY,
-        _STORE_VEC_OCCUPANCY_FALLBACK,
-        arch,
-    )[0]
-
-
-def default_zero_target_occupancy(arch: str | None = None) -> int:
-    return _value_for_arch(
-        _STORE_VEC_OCCUPANCY,
-        _STORE_VEC_OCCUPANCY_FALLBACK,
-        arch,
-    )[1]
+WARP_SIZE_FALLBACK = 64
+DEFAULT_STORE_VEC_WIDTH = 4
 
 
 def _get_warp_size(arch=None) -> int:
-    """CDNA wave64, RDNA wave32. Resolved at JIT time."""
+    """Wave size for the active ROCm arch."""
     if arch is None:
         arch = get_rocm_arch()
     return 32 if is_rdna_arch(arch) else 64
 
 
+@functools.lru_cache(maxsize=None)
+def get_num_cu(device_index: int) -> int:
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
+
+
+# -- host helpers --
+
+
+def workgroup_width(experts: int, warp_size: int = WARP_SIZE_FALLBACK) -> int:
+    waves = (experts + warp_size - 1) // warp_size
+    return min(MAX_THREADS_PER_BLOCK, waves * warp_size)
+
+
+def mesh_lds_bytes(experts: int, tokens: int) -> int:
+    width = workgroup_width(experts)
+    return (width * tokens + width) * 4
+
+
 def count_sort_paired_scratch_elems(tokens: int, topk: int, experts: int) -> tuple[int, int]:
-    """``(hist_elems, side_elems)``: ``hist`` is ``n_pair_blocks * experts`` int32;
-    ``counts`` and ``estart`` are ``experts`` int32 each."""
+    """Scratch layout: hist[n_pair_blocks, experts], counts[experts], estart[experts]."""
     num_pairs = tokens * topk
     workgroup_size = workgroup_width(experts)
     n_pair_blocks = (num_pairs + workgroup_size - 1) // workgroup_size
     return n_pair_blocks * experts, experts
 
 
-def _raw(v):
-    """Unwrap an fx value to its raw MLIR ``ir.Value`` (for raw ODS op builders)."""
+def _unwrap_val(v):
     return v.ir_value() if hasattr(v, "ir_value") else v
 
 
-# ===========================================================================
-# mesh_flatfill -- low-token mesh + flat-fill sort.
-# ===========================================================================
+def _warp_inclusive_scan(val, lane, log2_warp, c_zero_i32):
+    """Wave-local inclusive sum via ds_bpermute; no LDS/barrier."""
+    scanned = val
+    for step in range_constexpr(log2_warp):
+        off = 1 << step
+        in_range = lane >= off
+        peer_lane = in_range.select(lane - off, c_zero_i32)
+        peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, peer_lane * 4, scanned))
+        scanned = scanned + in_range.select(peer, c_zero_i32)
+    return scanned
+
+
+def _wave_cross_and_total(s_wave, wave, n_waves):
+    """Exclusive wave prefix and block total from per-wave totals in LDS."""
+    cross = fx.Int32(0)
+    total = fx.Int32(0)
+    for w in range_constexpr(n_waves):
+        wv = fx.memref_load(s_wave, fx.Int32(w))
+        cross = (wave > fx.Int32(w)).select(cross + wv, cross)
+        total = total + wv
+    return cross, total
+
+
+# -- shared device helpers --
+
+
+@flyc.jit
+def _zero_moe_buf_grid_stride(
+    tid: fx.Int32,
+    bid: fx.Int32,
+    moe_buf_rsrc,
+    i32_moe_buf_elems: fx.Int32,
+    block_offset: fx.Int32,
+    vec_width: fx.Constexpr[int],
+    workgroup_size: fx.Constexpr[int],
+):
+    """Grid-stride moe_buf zero with vector body and scalar tail."""
+    c_zero_i32 = fx.Int32(0)
+    c_cw_i32 = fx.Int32(vec_width)
+    c_workgroup_size_i32 = fx.Int32(workgroup_size)
+    c_zero_vec = fx.Vector.filled(vec_width, 0, fx.Int32)
+
+    total_vec = i32_moe_buf_elems // c_cw_i32
+    num_zero_blocks = gpu.grid_dim.x - block_offset
+    gid_vec = (bid - block_offset) * c_workgroup_size_i32 + tid
+    stride_vec = num_zero_blocks * c_workgroup_size_i32
+    n_iters = (total_vec + stride_vec - fx.Int32(1)) // stride_vec
+    for _z in range(fx.Index(0), ArithValue(n_iters).index_cast(T.index), fx.Index(1)):
+        idx = gid_vec + fx.Int32(_z) * stride_vec
+        if idx < total_vec:
+            buffer_ops.buffer_store(c_zero_vec, moe_buf_rsrc, idx * c_cw_i32)
+
+    # Keep the scalar tail single-owner after vectorized stores.
+    tail_start = total_vec * c_cw_i32
+    if bid == block_offset:
+        ti = tail_start + tid
+        if ti < i32_moe_buf_elems:
+            buffer_ops.buffer_store(c_zero_i32, moe_buf_rsrc, ti)
+
+
+@flyc.jit
+def _write_expert_id_blocks(
+    tid: fx.Int32,
+    my_local: fx.Int32,
+    block_offset: fx.Int32,
+    n_blocks: fx.Int32,
+    sorted_expert_ids_rsrc,
+    workgroup_size: fx.Constexpr[int],
+):
+    """Fill a contiguous sorted_expert_ids block run."""
+    c_workgroup_size_i32 = fx.Int32(workgroup_size)
+    n_blk_iters = (n_blocks + fx.Int32(workgroup_size - 1)) // c_workgroup_size_i32
+    for _jb in range(fx.Index(0), ArithValue(n_blk_iters).index_cast(T.index), fx.Index(1)):
+        b = fx.Int32(_jb) * c_workgroup_size_i32 + tid
+        if b < n_blocks:
+            buffer_ops.buffer_store(my_local, sorted_expert_ids_rsrc, block_offset + b)
+
+
+@flyc.jit
+def _fill_sentinel_pad(
+    tid: fx.Int32,
+    my_end_valid: fx.Int32,
+    pad_amount: fx.Int32,
+    sorted_ids_rsrc,
+    sentinel_id: fx.Constexpr[int],
+    n_pad_iters: fx.Constexpr[int],
+    workgroup_size: fx.Constexpr[int],
+):
+    """Fill one expert's padding slots with the packed-id sentinel."""
+    c_sentinel_i32 = fx.Int32(sentinel_id)
+    c_workgroup_size_i32 = fx.Int32(workgroup_size)
+    for _jp in range_constexpr(n_pad_iters):
+        pi = fx.Int32(_jp) * c_workgroup_size_i32 + tid
+        if pi < pad_amount:
+            buffer_ops.buffer_store(c_sentinel_i32, sorted_ids_rsrc, my_end_valid + pi)
+
+
+# -- mesh_flatfill: low-token LDS mesh path --
 
 
 def compile_mesh_flatfill(
@@ -239,15 +201,26 @@ def compile_mesh_flatfill(
     has_padding: bool = False,
     store_vec_width: int | None = None,
 ):
-    """Build the mesh_flatfill launcher (sort on block 0; zero ``moe_buf`` on blocks 1..N)."""
-    _require_supported(mesh_flatfill_unsupported(experts, tokens))
+    """Build the mesh_flatfill path.
+
+    Contract:
+      - tokens is padded M; the per-token loop is constexpr-unrolled.
+      - each token row must route to distinct experts (one mesh slot per expert).
+      - has_padding bounds valid pairs by num_local_tokens.
+      - has_mask drops masked experts and emits dense expert ids.
+
+    Grid:
+      - block 0 sorts through an expert x token LDS mesh.
+      - blocks > 0 zero moe_buf.
+    """
+    assert moe_sorting_supported("mesh_flatfill", experts=experts, tokens=tokens), "mesh_flatfill: unsupported shape"
 
     WARP_SIZE = _get_warp_size()
     workgroup_size = workgroup_width(experts, WARP_SIZE)
 
     vec_width = store_vec_width
     if vec_width is None:
-        vec_width = default_store_vec_width()
+        vec_width = DEFAULT_STORE_VEC_WIDTH
     assert vec_width in (2, 4), f"store_vec_width ({vec_width}) must be 2 or 4"
 
     assert workgroup_size % WARP_SIZE == 0
@@ -265,16 +238,13 @@ def compile_mesh_flatfill(
 
     needs_cross_wave_scan = experts > WARP_SIZE
 
-    # has_mask packs ``present`` (high bits) above ``padded`` (low bits) in one i32, so a
-    # single scan carries both: low bits give the padded base offset, and
-    # ``(high bits >> pack_shift) - present`` is the exclusive prefix of present experts =
-    # the dense (compacted) expert index. No extra scan / LDS.
+    # Under has_mask, one scan carries both dense expert id and padded offset.
     pack_shift = max_num_tokens_padded.bit_length()
     assert (not has_mask) or pack_shift + max(1, experts.bit_length()) <= 31
     pack_lo_mask = (1 << pack_shift) - 1
 
-    # Cache the mesh column in registers across histogram + scatter (gated by VGPR budget).
-    cache_column = tokens <= mesh_flatfill_cache_column_max_tokens()
+    # Keep the mesh column in registers only below the VGPR budget ceiling.
+    cache_column = tokens <= 64
 
     if needs_cross_wave_scan:
 
@@ -301,48 +271,48 @@ def compile_mesh_flatfill(
         expert_mask: fx.Tensor,
         num_local_tokens: fx.Tensor,
     ):
-        tid = fx.thread_idx.x
+        tid = gpu.thread_idx.x
 
-        topk_ids_rsrc = buffer_ops.create_buffer_resource(topk_ids)
-        topk_weights_rsrc = buffer_ops.create_buffer_resource(topk_weights)
-        sorted_ids_rsrc = buffer_ops.create_buffer_resource(sorted_ids)
-        sorted_weights_rsrc = buffer_ops.create_buffer_resource(sorted_weights)
-        sorted_expert_ids_rsrc = buffer_ops.create_buffer_resource(sorted_expert_ids)
-        num_valid_ids_rsrc = buffer_ops.create_buffer_resource(num_valid_ids)
+        topk_ids_rsrc = buffer_ops.create_buffer_resource(topk_ids, max_size=True)
+        topk_weights_rsrc = buffer_ops.create_buffer_resource(topk_weights, max_size=True)
+        sorted_ids_rsrc = buffer_ops.create_buffer_resource(sorted_ids, max_size=True)
+        sorted_weights_rsrc = buffer_ops.create_buffer_resource(sorted_weights, max_size=True)
+        sorted_expert_ids_rsrc = buffer_ops.create_buffer_resource(sorted_expert_ids, max_size=True)
+        num_valid_ids_rsrc = buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
 
         expert_id = fx.Int32(tid)
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        neg_one_i32 = fx.Int32(-1)
-        m_i32 = fx.Int32(tokens)
-        topk_i32 = fx.Int32(topk)
-        tokens_i32 = fx.Int32(tokens)
-        unit_size_i32 = fx.Int32(unit_size)
-        unit_size_minus_one = fx.Int32(unit_size - 1)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        workgroup_size_minus_one = fx.Int32(workgroup_size - 1)
-        max_num_m_blocks_i32 = fx.Int32(max_num_m_blocks)
-        num_pairs_i32 = fx.Int32(num_pairs)
-        experts_i32 = fx.Int32(experts)
-        pack_shift_i32 = fx.Int32(pack_shift)
-        pack_lo_mask_i32 = fx.Int32(pack_lo_mask)
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_neg_one_i32 = fx.Int32(-1)
+        c_m_i32 = fx.Int32(tokens)
+        c_topk_i32 = fx.Int32(topk)
+        c_tokens_i32 = fx.Int32(tokens)
+        c_unit_size_i32 = fx.Int32(unit_size)
+        c_unit_size_minus_one = fx.Int32(unit_size - 1)
+        c_workgroup_size_i32 = fx.Int32(workgroup_size)
+        c_workgroup_size_minus_one = fx.Int32(workgroup_size - 1)
+        c_max_num_m_blocks_i32 = fx.Int32(max_num_m_blocks)
+        c_num_pairs_i32 = fx.Int32(num_pairs)
+        c_experts_i32 = fx.Int32(experts)
+        c_pack_shift_i32 = fx.Int32(pack_shift)
+        c_pack_lo_mask_i32 = fx.Int32(pack_lo_mask)
 
         if const_expr(has_mask):
-            expert_mask_rsrc = buffer_ops.create_buffer_resource(expert_mask)
-            in_experts = expert_id < experts_i32
-            safe_e = in_experts.select(expert_id, zero_i32)
+            expert_mask_rsrc = buffer_ops.create_buffer_resource(expert_mask, max_size=True)
+            in_experts = expert_id < c_experts_i32
+            safe_e = in_experts.select(expert_id, c_zero_i32)
             mask_val = buffer_ops.buffer_load(expert_mask_rsrc, safe_e, vec_width=1, dtype=fx.Int32)
-            present = (in_experts & (mask_val != zero_i32)).select(one_i32, zero_i32)
+            present = (in_experts & (mask_val != c_zero_i32)).select(c_one_i32, c_zero_i32)
         else:
-            present = one_i32
+            present = c_one_i32
 
         if const_expr(has_padding):
-            num_local_tokens_rsrc = buffer_ops.create_buffer_resource(num_local_tokens)
-            n_local = buffer_ops.buffer_load(num_local_tokens_rsrc, zero_i32, vec_width=1, dtype=fx.Int32)
-            pair_bound = n_local * topk_i32
+            num_local_tokens_rsrc = buffer_ops.create_buffer_resource(num_local_tokens, max_size=True)
+            n_local = buffer_ops.buffer_load(num_local_tokens_rsrc, c_zero_i32, vec_width=1, dtype=fx.Int32)
+            pair_bound = n_local * c_topk_i32
         else:
-            n_local = m_i32
-            pair_bound = num_pairs_i32
+            n_local = c_m_i32
+            pair_bound = c_num_pairs_i32
 
         lane = tid % WARP_SIZE
         wave = tid // WARP_SIZE
@@ -351,54 +321,44 @@ def compile_mesh_flatfill(
         s_mesh = lds.s_mesh.view(fx.make_layout(n_mesh, 1))
         s_total = lds.s_total.view(fx.make_layout(1, 1))
 
-        # Clear the mesh.
+        # -- mesh fill --
+        # Fill stores slot+1; zero remains the unrouted sentinel.
         for i in range_constexpr(0, n_mesh, workgroup_size):
-            fx.memref_store(zero_i32, s_mesh, fx.Int32(i) + tid)
+            fx.memref_store(c_zero_i32, s_mesh, fx.Int32(i) + tid)
         gpu.barrier()
 
-        # Fill: one thread per pair writes slot+1 into mesh[expert, token].
         for j in range_constexpr(n_load_iters):
             p = fx.Int32(j * workgroup_size) + tid
             if p < pair_bound:
                 ex = buffer_ops.buffer_load(topk_ids_rsrc, p, vec_width=1, dtype=fx.Int32)
-                token = p // topk_i32
-                slot = p % topk_i32
-                fx.memref_store(slot + one_i32, s_mesh, ex * tokens_i32 + token)
+                token = p // c_topk_i32
+                slot = p % c_topk_i32
+                fx.memref_store(slot + c_one_i32, s_mesh, ex * c_tokens_i32 + token)
         gpu.barrier()
 
-        # Histogram this expert's mesh column (cache the cells for the scatter).
-        col_base = expert_id * tokens_i32
-        count = zero_i32
+        # -- count / prefix --
+        col_base = expert_id * c_tokens_i32
+        count = c_zero_i32
         col_vals: list = []
         for t in range_constexpr(tokens):
             mv = fx.memref_load(s_mesh, col_base + fx.Int32(t))
             if const_expr(cache_column):
                 col_vals.append(mv)
-            count = count + (mv != zero_i32).select(one_i32, zero_i32)
+            count = count + (mv != c_zero_i32).select(c_one_i32, c_zero_i32)
 
         if const_expr(has_mask):
-            count = (present != zero_i32).select(count, zero_i32)
+            count = (present != c_zero_i32).select(count, c_zero_i32)
 
-        padded = ((count + unit_size_minus_one) // unit_size_i32) * unit_size_i32
+        padded = ((count + c_unit_size_minus_one) // c_unit_size_i32) * c_unit_size_i32
 
         if const_expr(has_mask):
-            scan_val = (present << pack_shift_i32) | padded
+            scan_val = (present << c_pack_shift_i32) | padded
         else:
             scan_val = padded
 
-        # Inclusive scan of padded counts -> exclusive expert base offsets (intra-wave).
-        scanned = scan_val
-        for step in range_constexpr(log2_warp):
-            off = 1 << step
-            in_range = lane >= off
-            peer_lane = in_range.select(lane - off, zero_i32)
-            byte_addr = peer_lane * 4
-            peer_raw = fx.rocdl.ds_bpermute(T.i32, byte_addr, scanned)
-            peer = fx.Int32(peer_raw)
-            peer_safe = in_range.select(peer, zero_i32)
-            scanned = scanned + peer_safe
+        scanned = _warp_inclusive_scan(scan_val, lane, log2_warp, c_zero_i32)
 
-        # Fold the per-wave totals across waves (only when experts span >1 wave).
+        # Cross-wave prefix uses LDS only when one wave cannot cover all experts.
         if const_expr(needs_cross_wave_scan):
             s_wave = lds.s_wave.view(fx.make_layout(n_waves, 1))
 
@@ -408,30 +368,22 @@ def compile_mesh_flatfill(
 
             if wave == 0:
                 in_n_waves = lane < n_waves
-                safe_idx = in_n_waves.select(lane, zero_i32)
+                safe_idx = in_n_waves.select(lane, c_zero_i32)
                 loaded = fx.memref_load(s_wave, safe_idx)
-                val = in_n_waves.select(loaded, zero_i32)
+                val = in_n_waves.select(loaded, c_zero_i32)
 
-                for step in range_constexpr(log2_warp):
-                    off = 1 << step
-                    in_range = lane >= off
-                    peer_lane = in_range.select(lane - off, zero_i32)
-                    byte_addr = peer_lane * 4
-                    peer_raw = fx.rocdl.ds_bpermute(T.i32, byte_addr, val)
-                    peer = fx.Int32(peer_raw)
-                    peer_safe = in_range.select(peer, zero_i32)
-                    val = val + peer_safe
+                val = _warp_inclusive_scan(val, lane, log2_warp, c_zero_i32)
 
-                # Publish the grand total on this barrier (skips the broadcast barrier).
+                # Publish the scan total
                 if lane == fx.Int32(n_waves - 1):
-                    fx.memref_store(val, s_total, zero_i32)
+                    fx.memref_store(val, s_total, c_zero_i32)
 
                 not_lane_0 = lane > 0
-                peer_lane = not_lane_0.select(lane - 1, zero_i32)
+                peer_lane = not_lane_0.select(lane - 1, c_zero_i32)
                 byte_addr = peer_lane * 4
                 prev_raw = fx.rocdl.ds_bpermute(T.i32, byte_addr, val)
                 prev = fx.Int32(prev_raw)
-                exclusive_wave = not_lane_0.select(prev, zero_i32)
+                exclusive_wave = not_lane_0.select(prev, c_zero_i32)
 
                 if lane < n_waves:
                     fx.memref_store(exclusive_wave, s_wave, lane)
@@ -439,116 +391,88 @@ def compile_mesh_flatfill(
 
             wave_prefix = fx.memref_load(s_wave, wave)
             inclusive_scan = scanned + wave_prefix
-            total_scan = fx.memref_load(s_total, zero_i32)
+            total_scan = fx.memref_load(s_total, c_zero_i32)
         else:
             inclusive_scan = scanned
             if tid == fx.Int32(experts - 1):
-                fx.memref_store(inclusive_scan, s_total, zero_i32)
+                fx.memref_store(inclusive_scan, s_total, c_zero_i32)
             gpu.barrier()
-            total_scan = fx.memref_load(s_total, zero_i32)
+            total_scan = fx.memref_load(s_total, c_zero_i32)
 
         if const_expr(has_mask):
-            inclusive_padded = inclusive_scan & pack_lo_mask_i32
-            total_padded = total_scan & pack_lo_mask_i32
-            local_idx = (inclusive_scan >> pack_shift_i32) - present
+            inclusive_padded = inclusive_scan & c_pack_lo_mask_i32
+            total_padded = total_scan & c_pack_lo_mask_i32
+            local_idx = (inclusive_scan >> c_pack_shift_i32) - present
         else:
             inclusive_padded = inclusive_scan
             total_padded = total_scan
             local_idx = expert_id
 
-        # Flat vectorized sentinel fill of [0, total_padded); scatter overwrites valid slots.
-        cw_i32 = fx.Int32(vec_width)
+        # -- scatter / tails --
+        # Pre-fill the padded range; scatter overwrites valid slots.
+        c_cw_i32 = fx.Int32(vec_width)
         sentinel_vec = fx.Vector.filled(vec_width, sentinel_id, fx.Int32)
-        n_vec = total_padded // cw_i32
-        n_fill = (n_vec + workgroup_size_minus_one) // workgroup_size_i32
-        for k in range(zero_i32, n_fill):
-            vidx = k * workgroup_size_i32 + tid
+        n_vec = total_padded // c_cw_i32
+        n_fill = (n_vec + c_workgroup_size_minus_one) // c_workgroup_size_i32
+        for _k in range(fx.Index(0), ArithValue(n_fill).index_cast(T.index), fx.Index(1)):
+            vidx = fx.Int32(_k) * c_workgroup_size_i32 + tid
             if vidx < n_vec:
-                buffer_ops.buffer_store(sentinel_vec, sorted_ids_rsrc, vidx * cw_i32)
+                buffer_ops.buffer_store(sentinel_vec, sorted_ids_rsrc, vidx * c_cw_i32)
         gpu.barrier()
 
-        # Scatter this expert's valid pairs + write its per-block expert ids.
+        # Scatter valid pairs, then write this expert's output block ids.
         exclusive_padded = inclusive_padded - padded
-        block_offset = exclusive_padded // unit_size_i32
-        n_blocks = padded // unit_size_i32
+        block_offset = exclusive_padded // c_unit_size_i32
+        n_blocks = padded // c_unit_size_i32
 
         if tid < experts:
-            # Prefetch all weights before any store so the loads pipeline.
+            # Issue weight loads before stores to give memory latency room.
             w_vals: list = []
             for t in range_constexpr(tokens):
                 mv = col_vals[t] if const_expr(cache_column) else fx.memref_load(s_mesh, col_base + fx.Int32(t))
-                safe_slot = (mv != zero_i32).select(mv - one_i32, zero_i32)
+                safe_slot = (mv != c_zero_i32).select(mv - c_one_i32, c_zero_i32)
                 w_vals.append(
                     buffer_ops.buffer_load(
                         topk_weights_rsrc,
-                        fx.Int32(t) * topk_i32 + safe_slot,
+                        fx.Int32(t) * c_topk_i32 + safe_slot,
                         vec_width=1,
                         dtype=fx.Float32,
                     )
                 )
 
-            pos = zero_i32
+            pos = c_zero_i32
             for t in range_constexpr(tokens):
                 if const_expr(cache_column):
                     mv = col_vals[t]
                 else:
                     mv = fx.memref_load(s_mesh, col_base + fx.Int32(t))
-                is_match = mv != zero_i32
+                is_match = mv != c_zero_i32
                 if const_expr(has_mask):
-                    is_match = is_match & (present != zero_i32)
-                slot = mv - one_i32
+                    is_match = is_match & (present != c_zero_i32)
+                slot = mv - c_one_i32
                 write_pos = exclusive_padded + pos
                 token_i = fx.Int32(t)
                 packed = (slot << fx.Int32(24)) | token_i
                 if is_match:
                     buffer_ops.buffer_store(packed, sorted_ids_rsrc, write_pos)
                     buffer_ops.buffer_store(w_vals[t], sorted_weights_rsrc, write_pos)
-                pos = pos + is_match.select(one_i32, zero_i32)
+                pos = pos + is_match.select(c_one_i32, c_zero_i32)
 
-            for b in range(zero_i32, n_blocks):
-                buffer_ops.buffer_store(local_idx, sorted_expert_ids_rsrc, block_offset + b)
+            for _b in range(fx.Index(0), ArithValue(n_blocks).index_cast(T.index), fx.Index(1)):
+                buffer_ops.buffer_store(local_idx, sorted_expert_ids_rsrc, block_offset + fx.Int32(_b))
 
-        # Cooperative -1 fill of the trailing sorted_expert_ids blocks.
-        n_valid_blocks = total_padded // unit_size_i32
-        n_tail_iters = (max_num_m_blocks_i32 - n_valid_blocks + workgroup_size_minus_one) // workgroup_size_i32
-        for k in range(zero_i32, n_tail_iters):
-            b = n_valid_blocks + k * workgroup_size_i32 + tid
-            if b < max_num_m_blocks_i32:
-                buffer_ops.buffer_store(neg_one_i32, sorted_expert_ids_rsrc, b)
+        # Mark expert blocks beyond total_padded as invalid.
+        n_valid_blocks = total_padded // c_unit_size_i32
+        n_tail_iters = (c_max_num_m_blocks_i32 - n_valid_blocks + c_workgroup_size_minus_one) // c_workgroup_size_i32
+        for _k in range(fx.Index(0), ArithValue(n_tail_iters).index_cast(T.index), fx.Index(1)):
+            b = n_valid_blocks + fx.Int32(_k) * c_workgroup_size_i32 + tid
+            if b < c_max_num_m_blocks_i32:
+                buffer_ops.buffer_store(c_neg_one_i32, sorted_expert_ids_rsrc, b)
 
-        # Publish num_valid_ids = [num_tokens_post_pad, M].
+        # num_valid_ids contract: [post-pad pair count, local token count].
         if tid == fx.Int32(experts - 1):
-            buffer_ops.buffer_store(inclusive_padded, num_valid_ids_rsrc, zero_i32)
-            buffer_ops.buffer_store(n_local, num_valid_ids_rsrc, one_i32)
-
-    @flyc.jit
-    def _emit_zero(moe_buf: fx.Tensor, i32_moe_buf_elems: fx.Int32):
-        """Zero moe_buf on blocks 1..N via a vectorized grid-stride loop."""
-        tid = fx.thread_idx.x
-        bid = gpu.block_idx.x
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        cw_i32 = fx.Int32(vec_width)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-
-        moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf)
-        c_zero_vec = fx.Vector.filled(vec_width, 0, fx.Int32)
-        total_vec = i32_moe_buf_elems // cw_i32
-        num_zero_blocks = gpu.grid_dim.x - one_i32
-        gid_vec = (bid - one_i32) * workgroup_size_i32 + tid
-        stride_vec = num_zero_blocks * workgroup_size_i32
-        n_iters = (total_vec + stride_vec - one_i32) // stride_vec
-        for z in range(zero_i32, n_iters):
-            idx = gid_vec + z * stride_vec
-            if idx < total_vec:
-                buffer_ops.buffer_store(c_zero_vec, moe_buf_rsrc, idx * cw_i32)
-
-        # First zero block mops up the scalar tail.
-        tail_start = total_vec * cw_i32
-        if bid == one_i32:
-            ti = tail_start + tid
-            if ti < i32_moe_buf_elems:
-                buffer_ops.buffer_store(zero_i32, moe_buf_rsrc, ti)
+            buffer_ops.buffer_store(inclusive_padded, num_valid_ids_rsrc, c_zero_i32)
+            buffer_ops.buffer_store(n_local, num_valid_ids_rsrc, c_one_i32)
 
     @flyc.kernel(known_block_size=[workgroup_size, 1, 1])
     def kernel(
@@ -565,7 +489,17 @@ def compile_mesh_flatfill(
     ):
         bid = gpu.block_idx.x
         if bid != fx.Int32(0):
-            _emit_zero(moe_buf, i32_moe_buf_elems)
+            tid = gpu.thread_idx.x
+            moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf, max_size=True)
+            _zero_moe_buf_grid_stride(
+                tid,
+                bid,
+                moe_buf_rsrc,
+                i32_moe_buf_elems,
+                fx.Int32(1),
+                vec_width,
+                workgroup_size,
+            )
         if bid == fx.Int32(0):
             _emit_sort(
                 topk_ids,
@@ -633,9 +567,7 @@ def get_moe_sorting_mesh_flatfill_kernel(
     )
 
 
-# ===========================================================================
-# count_sort -- mid-token two-kernel counting sort.
-# ===========================================================================
+# -- count_sort: mid-token two-kernel path --
 
 
 def compile_count_sort(
@@ -648,13 +580,21 @@ def compile_count_sort(
     has_padding: bool = False,
     store_vec_width: int | None = None,
 ):
-    """Build the count_sort launcher: K1 (count) + K2 (scatter), with the ``moe_buf``
-    zero folded onto K2's trailing blocks."""
-    _require_supported(_structural_unsupported(experts))  # count_sort: only the expert/workgroup bound
+    """Build the count_sort path.
+
+    Phases:
+      - K1: one block per expert, counts matching pairs.
+      - K2: scans padded counts, scatters stable pair order, fills tails, zeros moe_buf.
+
+    Constraints:
+      - repeated experts in a token row are supported.
+      - pair loops are runtime scf.for loops; trace size is independent of tokens.
+    """
+    assert moe_sorting_supported("count_sort", experts=experts, tokens=tokens), "count_sort: unsupported shape"
 
     vec_width = store_vec_width
     if vec_width is None:
-        vec_width = default_store_vec_width()
+        vec_width = DEFAULT_STORE_VEC_WIDTH
     assert vec_width in (2, 4), f"store_vec_width ({vec_width}) must be 2 or 4"
 
     WARP_SIZE = _get_warp_size()
@@ -669,26 +609,22 @@ def compile_count_sort(
     max_num_m_blocks = (max_num_tokens_padded + unit_size - 1) // unit_size
     sentinel_id = (topk << 24) | tokens
 
-    # Trip counts are compile-time but the loops are runtime scf.for, so JIT is O(1) in tokens.
     n_chunks = (num_pairs + workgroup_size - 1) // workgroup_size
     n_tail_iters = (max_num_m_blocks + workgroup_size - 1) // workgroup_size
     n_pad_iters = (unit_size + workgroup_size - 1) // workgroup_size
 
-    # has_mask packs ``present`` (high bits) above ``padded`` (low bits) in one i32, so a
-    # single scan carries both: low bits give the base offset, ``(scan >> pack_shift) -
-    # present`` is the dense (compacted) expert index.
+    # Under has_mask, one scan carries both dense expert id and padded offset.
     pack_shift = max_num_tokens_padded.bit_length()
     assert (not has_mask) or pack_shift + max(1, experts.bit_length()) <= 31
     pack_lo_mask = (1 << pack_shift) - 1
 
     @fx.struct  # ty: ignore[too-many-positional-arguments]
     class ScanStorage:
-        # Double-buffered (2 * n_waves): the scatter alternates banks by chunk parity so
-        # it can drop the per-chunk reuse barrier (same-bank reuse is two chunks apart).
+        # Chunk parity selects a wave-total bank; same-bank reuse is two chunks apart.
         s_wave: fx.Array[fx.Int32, 2 * n_waves]
         s_excl: fx.Array[fx.Int32, workgroup_size]
 
-    # ------------------------------------------------------------------ K1
+    # -- K1 --
     @flyc.kernel(known_block_size=[workgroup_size, 1, 1])
     def count_kernel(
         topk_ids: fx.Tensor,
@@ -696,72 +632,69 @@ def compile_count_sort(
         expert_mask: fx.Tensor,
         num_local_tokens: fx.Tensor,
     ):
-        """One block per expert: count pairs routed to ``block_idx`` -> counts[e]."""
-        tid = fx.thread_idx.x
+        """K1: one block per expert; writes counts[e]."""
+        tid = gpu.thread_idx.x
         expert_bid = gpu.block_idx.x
         lane = tid % WARP_SIZE
         wave = tid // WARP_SIZE
 
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        num_pairs_i32 = fx.Int32(num_pairs)
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_workgroup_size_i32 = fx.Int32(workgroup_size)
+        c_num_pairs_i32 = fx.Int32(num_pairs)
 
-        topk_ids_rsrc = buffer_ops.create_buffer_resource(topk_ids)
-        counts_rsrc = buffer_ops.create_buffer_resource(counts)
+        topk_ids_rsrc = buffer_ops.create_buffer_resource(topk_ids, max_size=True)
+        counts_rsrc = buffer_ops.create_buffer_resource(counts, max_size=True)
 
         if const_expr(has_padding):
             n_local = buffer_ops.buffer_load(
-                buffer_ops.create_buffer_resource(num_local_tokens),
-                zero_i32,
+                buffer_ops.create_buffer_resource(num_local_tokens, max_size=True),
+                c_zero_i32,
                 vec_width=1,
                 dtype=fx.Int32,
             )
             pair_bound = n_local * fx.Int32(topk)
         else:
-            pair_bound = num_pairs_i32
+            pair_bound = c_num_pairs_i32
 
         lds = fx.SharedAllocator().allocate(ScanStorage).peek()
         s_wave = lds.s_wave.view(fx.make_layout(n_waves, 1))
 
         for _c, state in range(  # ty: ignore[no-matching-overload, not-iterable]
-            fx.Index(0), fx.Index(n_chunks), fx.Index(1), init=[zero_i32]
+            fx.Index(0),
+            fx.Index(n_chunks),
+            fx.Index(1),
+            init=[c_zero_i32],
         ):
             acc = state[0]
-            p = fx.Int32(_c) * workgroup_size_i32 + tid
+            p = fx.Int32(_c) * c_workgroup_size_i32 + tid
             valid = p < pair_bound
-            safe_p = valid.select(p, zero_i32)
+            safe_p = valid.select(p, c_zero_i32)
             ex = buffer_ops.buffer_load(topk_ids_rsrc, safe_p, vec_width=1, dtype=fx.Int32)
             is_mine = valid & (ex == expert_bid)
-            results = yield [acc + is_mine.select(one_i32, zero_i32)]
+            results = yield [acc + is_mine.select(c_one_i32, c_zero_i32)]
         local = results
 
-        scanned = local
-        for step in range_constexpr(log2_warp):
-            off = 1 << step
-            in_range = lane >= off
-            peer_lane = in_range.select(lane - off, zero_i32)
-            peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, peer_lane * 4, scanned))
-            scanned = scanned + in_range.select(peer, zero_i32)
+        scanned = _warp_inclusive_scan(local, lane, log2_warp, c_zero_i32)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
 
-        if tid == zero_i32:
-            total = zero_i32
+        if tid == c_zero_i32:
+            total = c_zero_i32
             for w in range_constexpr(n_waves):
                 total = total + fx.memref_load(s_wave, fx.Int32(w))
             if const_expr(has_mask):
                 em_val = buffer_ops.buffer_load(
-                    buffer_ops.create_buffer_resource(expert_mask),
+                    buffer_ops.create_buffer_resource(expert_mask, max_size=True),
                     expert_bid,
                     vec_width=1,
                     dtype=fx.Int32,
                 )
-                total = (em_val != zero_i32).select(total, zero_i32)
+                total = (em_val != c_zero_i32).select(total, c_zero_i32)
             buffer_ops.buffer_store(total, counts_rsrc, expert_bid)
 
-    # ------------------------------------------------------------------ K2
+    # -- K2 --
     @flyc.jit
     def _scatter_pairs(
         tid,
@@ -777,37 +710,34 @@ def compile_count_sort(
         sorted_weights_rsrc,
         s_wave,
     ):
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        topk_i32 = fx.Int32(topk)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_topk_i32 = fx.Int32(topk)
+        c_workgroup_size_i32 = fx.Int32(workgroup_size)
 
         for _c, state in range(  # ty: ignore[no-matching-overload, not-iterable]
-            fx.Index(0), fx.Index(n_chunks), fx.Index(1), init=[my_start]
+            fx.Index(0),
+            fx.Index(n_chunks),
+            fx.Index(1),
+            init=[my_start],
         ):
             position = state[0]
-            bank = (fx.Int32(_c) & one_i32) * fx.Int32(n_waves)
-            p = fx.Int32(_c) * workgroup_size_i32 + tid
+            bank = (fx.Int32(_c) & c_one_i32) * fx.Int32(n_waves)
+            p = fx.Int32(_c) * c_workgroup_size_i32 + tid
             valid = p < pair_bound
-            safe_p = valid.select(p, zero_i32)
+            safe_p = valid.select(p, c_zero_i32)
             ex = buffer_ops.buffer_load(topk_ids_rsrc, safe_p, vec_width=1, dtype=fx.Int32)
-            is_mine = valid & (ex == expert_bid) & (present_block != zero_i32)
-            v = is_mine.select(one_i32, zero_i32)
-            # Load early so its latency hides behind the scan.
+            is_mine = valid & (ex == expert_bid) & (present_block != c_zero_i32)
+            v = is_mine.select(c_one_i32, c_zero_i32)
+            # Load before scan so weight latency overlaps rank calculation.
             w_val = buffer_ops.buffer_load(topk_weights_rsrc, safe_p, vec_width=1, dtype=fx.Float32)
 
-            scan = v
-            for step in range_constexpr(log2_warp):
-                off = 1 << step
-                in_range = lane >= off
-                peer_lane = in_range.select(lane - off, zero_i32)
-                peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, peer_lane * 4, scan))
-                scan = scan + in_range.select(peer, zero_i32)
+            scan = _warp_inclusive_scan(v, lane, log2_warp, c_zero_i32)
             if lane == WARP_SIZE - 1:
                 fx.memref_store(scan, s_wave, bank + wave)
             gpu.barrier()
-            wcross = zero_i32
-            chunk_total = zero_i32
+            wcross = c_zero_i32
+            chunk_total = c_zero_i32
             for w in range_constexpr(n_waves):
                 wv = fx.memref_load(s_wave, bank + fx.Int32(w))
                 wcross = (wave > fx.Int32(w)).select(wcross + wv, wcross)
@@ -816,8 +746,8 @@ def compile_count_sort(
             dst = position + inclusive - v
 
             if is_mine:
-                token = safe_p // topk_i32
-                slot = safe_p % topk_i32
+                token = safe_p // c_topk_i32
+                slot = safe_p % c_topk_i32
                 packed = (slot << fx.Int32(24)) | token
                 buffer_ops.buffer_store(packed, sorted_ids_rsrc, dst)
                 buffer_ops.buffer_store(w_val, sorted_weights_rsrc, dst)
@@ -843,81 +773,68 @@ def compile_count_sort(
         s_wave,
         s_excl,
     ):
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        neg_one_i32 = fx.Int32(-1)
-        sentinel_i32 = fx.Int32(sentinel_id)
-        tokens_i32 = fx.Int32(tokens)
-        unit_size_i32 = fx.Int32(unit_size)
-        unit_size_minus_one = fx.Int32(unit_size - 1)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        workgroup_size_minus_one = fx.Int32(workgroup_size - 1)
-        experts_i32 = fx.Int32(experts)
-        max_num_m_blocks_i32 = fx.Int32(max_num_m_blocks)
-        pack_shift_i32 = fx.Int32(pack_shift)
-        pack_lo_mask_i32 = fx.Int32(pack_lo_mask)
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_neg_one_i32 = fx.Int32(-1)
+        c_tokens_i32 = fx.Int32(tokens)
+        c_unit_size_i32 = fx.Int32(unit_size)
+        c_unit_size_minus_one = fx.Int32(unit_size - 1)
+        c_workgroup_size_i32 = fx.Int32(workgroup_size)
+        c_experts_i32 = fx.Int32(experts)
+        c_max_num_m_blocks_i32 = fx.Int32(max_num_m_blocks)
+        c_pack_shift_i32 = fx.Int32(pack_shift)
+        c_pack_lo_mask_i32 = fx.Int32(pack_lo_mask)
 
-        # Step 1: padded-count prefix sum -> each expert's start offset + grand total.
-        in_experts = tid < experts_i32
-        safe_tid = in_experts.select(tid, zero_i32)
+        # -- prefix / structure --
+        in_experts = tid < c_experts_i32
+        safe_tid = in_experts.select(tid, c_zero_i32)
         cnt = in_experts.select(
             buffer_ops.buffer_load(counts_rsrc, safe_tid, vec_width=1, dtype=fx.Int32),
-            zero_i32,
+            c_zero_i32,
         )
         if const_expr(has_mask):
             em_val = in_experts.select(
                 buffer_ops.buffer_load(expert_mask_rsrc, safe_tid, vec_width=1, dtype=fx.Int32),
-                zero_i32,
+                c_zero_i32,
             )
-            present = (em_val != zero_i32).select(one_i32, zero_i32)
+            present = (em_val != c_zero_i32).select(c_one_i32, c_zero_i32)
         else:
-            present = one_i32
-        padded = ((cnt + unit_size_minus_one) // unit_size_i32) * unit_size_i32
+            present = c_one_i32
+        padded = ((cnt + c_unit_size_minus_one) // c_unit_size_i32) * c_unit_size_i32
 
         if const_expr(has_mask):
-            scan_val = (present << pack_shift_i32) | padded
+            scan_val = (present << c_pack_shift_i32) | padded
         else:
             scan_val = padded
 
-        scanned = scan_val
-        for step in range_constexpr(log2_warp):
-            off = 1 << step
-            in_range = lane >= off
-            peer_lane = in_range.select(lane - off, zero_i32)
-            peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, peer_lane * 4, scanned))
-            scanned = scanned + in_range.select(peer, zero_i32)
+        scanned = _warp_inclusive_scan(scan_val, lane, log2_warp, c_zero_i32)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
-        cross = zero_i32
-        total_scan = zero_i32
-        for w in range_constexpr(n_waves):
-            wv = fx.memref_load(s_wave, fx.Int32(w))
-            cross = (wave > fx.Int32(w)).select(cross + wv, cross)
-            total_scan = total_scan + wv
+        cross, total_scan = _wave_cross_and_total(s_wave, wave, n_waves)
         inclusive_scan = scanned + cross
 
         if const_expr(has_mask):
-            inclusive_padded = inclusive_scan & pack_lo_mask_i32
-            total_padded = total_scan & pack_lo_mask_i32
-            local_idx = (inclusive_scan >> pack_shift_i32) - present
+            inclusive_padded = inclusive_scan & c_pack_lo_mask_i32
+            total_padded = total_scan & c_pack_lo_mask_i32
+            local_idx = (inclusive_scan >> c_pack_shift_i32) - present
         else:
             inclusive_padded = inclusive_scan
             total_padded = total_scan
             local_idx = tid
         exclusive_padded = inclusive_padded - padded
 
-        # Publish (dense idx, start offset) per expert so each block reads its own from s_excl.
+        # Publish per-expert start; dense id rides the high bits under has_mask.
         if const_expr(has_mask):
-            packed_excl = (local_idx << pack_shift_i32) | exclusive_padded
+            packed_excl = (local_idx << c_pack_shift_i32) | exclusive_padded
         else:
             packed_excl = exclusive_padded
         fx.memref_store(packed_excl, s_excl, tid)
         gpu.barrier()
         my_packed = fx.memref_load(s_excl, expert_bid)
         if const_expr(has_mask):
-            my_start = my_packed & pack_lo_mask_i32
-            my_local = my_packed >> pack_shift_i32
+            my_start = my_packed & c_pack_lo_mask_i32
+            my_local = my_packed >> c_pack_shift_i32
         else:
             my_start = my_packed
             my_local = expert_bid
@@ -926,26 +843,22 @@ def compile_count_sort(
         if const_expr(has_mask):
             present_block = buffer_ops.buffer_load(expert_mask_rsrc, expert_bid, vec_width=1, dtype=fx.Int32)
         else:
-            present_block = one_i32
-        my_padded = ((my_count + unit_size_minus_one) // unit_size_i32) * unit_size_i32
+            present_block = c_one_i32
+        my_padded = ((my_count + c_unit_size_minus_one) // c_unit_size_i32) * c_unit_size_i32
         my_end_valid = my_start + my_count
-        block_offset = my_start // unit_size_i32
-        n_blocks = my_padded // unit_size_i32
+        block_offset = my_start // c_unit_size_i32
+        n_blocks = my_padded // c_unit_size_i32
 
         if const_expr(has_padding):
-            n_local = buffer_ops.buffer_load(num_local_tokens_rsrc, zero_i32, vec_width=1, dtype=fx.Int32)
+            n_local = buffer_ops.buffer_load(num_local_tokens_rsrc, c_zero_i32, vec_width=1, dtype=fx.Int32)
             pair_bound = n_local * fx.Int32(topk)
         else:
             pair_bound = fx.Int32(num_pairs)
 
-        # Step 2: sorted_expert_ids blocks.
-        n_blk_iters = (n_blocks + workgroup_size_minus_one) // workgroup_size_i32
-        for _jb in range(fx.Index(0), ArithValue(n_blk_iters).index_cast(T.index), fx.Index(1)):
-            b = fx.Int32(_jb) * workgroup_size_i32 + tid
-            if b < n_blocks:
-                buffer_ops.buffer_store(my_local, sorted_expert_ids_rsrc, block_offset + b)
+        # -- scatter / tails --
+        _write_expert_id_blocks(tid, my_local, block_offset, n_blocks, sorted_expert_ids_rsrc, workgroup_size)
 
-        # Step 3: scatter this expert's pairs in ascending pair-index order.
+        # Stable scatter in ascending pair-index order.
         _scatter_pairs(
             tid,
             expert_bid,
@@ -961,50 +874,22 @@ def compile_count_sort(
             s_wave,
         )
 
-        # Step 4: sentinel padding tail.
         pad_amount = my_padded - my_count
-        for _jp in range_constexpr(n_pad_iters):
-            pi = fx.Int32(_jp) * workgroup_size_i32 + tid
-            if pi < pad_amount:
-                buffer_ops.buffer_store(sentinel_i32, sorted_ids_rsrc, my_end_valid + pi)
+        _fill_sentinel_pad(tid, my_end_valid, pad_amount, sorted_ids_rsrc, sentinel_id, n_pad_iters, workgroup_size)
 
-        # Step 5: num_valid_ids (block 0) + the -1 block tail (idempotent in all blocks).
-        if (expert_bid == zero_i32) & (tid == zero_i32):
-            buffer_ops.buffer_store(total_padded, num_valid_ids_rsrc, zero_i32)
+        # Block 0 publishes num_valid_ids; all blocks may idempotently fill -1 tail.
+        if (expert_bid == c_zero_i32) & (tid == c_zero_i32):
+            buffer_ops.buffer_store(total_padded, num_valid_ids_rsrc, c_zero_i32)
             if const_expr(has_padding):
-                nvi1 = buffer_ops.buffer_load(num_local_tokens_rsrc, zero_i32, vec_width=1, dtype=fx.Int32)
+                nvi1 = buffer_ops.buffer_load(num_local_tokens_rsrc, c_zero_i32, vec_width=1, dtype=fx.Int32)
             else:
-                nvi1 = tokens_i32
-            buffer_ops.buffer_store(nvi1, num_valid_ids_rsrc, one_i32)
-        total_blocks = total_padded // unit_size_i32
+                nvi1 = c_tokens_i32
+            buffer_ops.buffer_store(nvi1, num_valid_ids_rsrc, c_one_i32)
+        total_blocks = total_padded // c_unit_size_i32
         for _jt in range(fx.Index(0), fx.Index(n_tail_iters), fx.Index(1)):
-            b = total_blocks + fx.Int32(_jt) * workgroup_size_i32 + tid
-            if b < max_num_m_blocks_i32:
-                buffer_ops.buffer_store(neg_one_i32, sorted_expert_ids_rsrc, b)
-
-    @flyc.jit
-    def _emit_zero(tid, bid, moe_buf_rsrc, i32_moe_buf_elems):
-        """Zero moe_buf on blocks experts.. via a vectorized grid-stride loop."""
-        zero_i32 = fx.Int32(0)
-        cw_i32 = fx.Int32(vec_width)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        experts_i32 = fx.Int32(experts)
-        c_zero_vec = fx.Vector.filled(vec_width, 0, fx.Int32)
-
-        total_vec = i32_moe_buf_elems // cw_i32
-        num_zero_blocks = gpu.grid_dim.x - experts_i32
-        gid_vec = (bid - experts_i32) * workgroup_size_i32 + tid
-        stride_vec = num_zero_blocks * workgroup_size_i32
-        n_iters = (total_vec + stride_vec - fx.Int32(1)) // stride_vec
-        for _z in range(fx.Index(0), ArithValue(n_iters).index_cast(T.index), fx.Index(1)):
-            idx = gid_vec + fx.Int32(_z) * stride_vec
-            if idx < total_vec:
-                buffer_ops.buffer_store(c_zero_vec, moe_buf_rsrc, idx * cw_i32)
-        tail_start = total_vec * cw_i32
-        if bid == experts_i32:
-            ti = tail_start + tid
-            if ti < i32_moe_buf_elems:
-                buffer_ops.buffer_store(zero_i32, moe_buf_rsrc, ti)
+            b = total_blocks + fx.Int32(_jt) * c_workgroup_size_i32 + tid
+            if b < c_max_num_m_blocks_i32:
+                buffer_ops.buffer_store(c_neg_one_i32, sorted_expert_ids_rsrc, b)
 
     @flyc.kernel(known_block_size=[workgroup_size, 1, 1])
     def scatter_kernel(
@@ -1020,7 +905,7 @@ def compile_count_sort(
         moe_buf: fx.Tensor,
         i32_moe_buf_elems: fx.Int32,
     ):
-        tid = fx.thread_idx.x
+        tid = gpu.thread_idx.x
         bid = gpu.block_idx.x
         lane = tid % WARP_SIZE
         wave = tid // WARP_SIZE
@@ -1029,23 +914,31 @@ def compile_count_sort(
         s_excl = lds.s_excl.view(fx.make_layout(workgroup_size, 1))
 
         if bid >= fx.Int32(experts):
-            moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf)
-            _emit_zero(tid, bid, moe_buf_rsrc, i32_moe_buf_elems)
+            moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf, max_size=True)
+            _zero_moe_buf_grid_stride(
+                tid,
+                bid,
+                moe_buf_rsrc,
+                i32_moe_buf_elems,
+                fx.Int32(experts),
+                vec_width,
+                workgroup_size,
+            )
         if bid < fx.Int32(experts):
             _emit_scatter(
                 tid,
                 bid,
                 lane,
                 wave,
-                buffer_ops.create_buffer_resource(topk_ids),
-                buffer_ops.create_buffer_resource(topk_weights),
-                buffer_ops.create_buffer_resource(sorted_ids),
-                buffer_ops.create_buffer_resource(sorted_weights),
-                buffer_ops.create_buffer_resource(sorted_expert_ids),
-                buffer_ops.create_buffer_resource(num_valid_ids),
-                buffer_ops.create_buffer_resource(counts),
-                buffer_ops.create_buffer_resource(expert_mask),
-                buffer_ops.create_buffer_resource(num_local_tokens),
+                buffer_ops.create_buffer_resource(topk_ids, max_size=True),
+                buffer_ops.create_buffer_resource(topk_weights, max_size=True),
+                buffer_ops.create_buffer_resource(sorted_ids, max_size=True),
+                buffer_ops.create_buffer_resource(sorted_weights, max_size=True),
+                buffer_ops.create_buffer_resource(sorted_expert_ids, max_size=True),
+                buffer_ops.create_buffer_resource(num_valid_ids, max_size=True),
+                buffer_ops.create_buffer_resource(counts, max_size=True),
+                buffer_ops.create_buffer_resource(expert_mask, max_size=True),
+                buffer_ops.create_buffer_resource(num_local_tokens, max_size=True),
                 s_wave,
                 s_excl,
             )
@@ -1068,7 +961,10 @@ def compile_count_sort(
     ):
         block = (workgroup_size, 1, 1)
         k1 = count_kernel(  # ty: ignore[call-non-callable]
-            topk_ids, counts, expert_mask, num_local_tokens
+            topk_ids,
+            counts,
+            expert_mask,
+            num_local_tokens,
         )
         k1.launch(grid=(experts, 1, 1), block=block, stream=stream)
         k2 = scatter_kernel(  # ty: ignore[call-non-callable]
@@ -1115,9 +1011,7 @@ def get_moe_sorting_count_sort_kernel(
     )
 
 
-# ===========================================================================
-# count_sort_paired -- high-token partition-by-pairs counting sort.
-# ===========================================================================
+# -- count_sort_paired: high-token pair-partitioned path --
 
 
 def compile_count_sort_paired(
@@ -1130,23 +1024,33 @@ def compile_count_sort_paired(
     has_padding: bool = False,
     store_vec_width: int | None = None,
 ):
-    """Build the count_sort_paired launcher: K1 (hist) -> K2 (colscan) -> K3 (structure) ->
-    K4 (scatter), with the ``moe_buf`` zero folded onto K4's trailing blocks."""
-    _require_supported(_structural_unsupported(experts))  # count_sort_paired: only the expert/workgroup bound
+    """Build the count_sort_paired path.
+    Repeated experts in a token row are supported.
+    Same-expert rank uses per-bit ballot match_any emulation.
+
+    Phases:
+      - K1: one block per pair slice, writes hist[block, expert].
+      - K2: one block per expert, exclusive scan down hist[:, expert].
+      - K3: expert starts, block ids, padding sentinels, num_valid_ids.
+      - K4: scatter to estart[e] + hist[block,e] + same-block rank; zero moe_buf.
+    """
+    assert moe_sorting_supported("count_sort_paired", experts=experts, tokens=tokens), (
+        "count_sort_paired: unsupported shape"
+    )
 
     vec_width = store_vec_width
     if vec_width is None:
-        vec_width = default_store_vec_width()
+        vec_width = DEFAULT_STORE_VEC_WIDTH
     assert vec_width in (2, 4), f"store_vec_width ({vec_width}) must be 2 or 4"
 
     WARP_SIZE = _get_warp_size()
-    # W is the block dim AND the pairs-per-block count (one thread per pair).
+    # workgroup_size is both block size and pairs per pair block.
     workgroup_size = workgroup_width(experts, WARP_SIZE)
     assert workgroup_size % WARP_SIZE == 0
     n_waves = workgroup_size // WARP_SIZE
     assert n_waves <= WARP_SIZE
     log2_warp = int(math.log2(WARP_SIZE))
-    # K4 rank: ballot rounds to fully discriminate an expert id (one per bit).
+    # Same-expert rank uses one ballot-discrimination round per expert-id bit.
     nbits = max(1, (experts - 1).bit_length())
 
     num_pairs = tokens * topk
@@ -1158,9 +1062,7 @@ def compile_count_sort_paired(
     n_tail_iters = (max_num_m_blocks + workgroup_size - 1) // workgroup_size
     n_pad_iters = (unit_size + workgroup_size - 1) // workgroup_size
 
-    # has_mask packs ``present`` (high bits) above ``padded`` (low bits) in one i32, so a
-    # single scan carries both: low bits give the base offset, ``(scan >> pack_shift) -
-    # present`` is the dense (compacted) expert index.
+    # Under has_mask, one scan carries both dense expert id and padded offset.
     pack_shift = max_num_tokens_padded.bit_length()
     assert (not has_mask) or pack_shift + max(1, experts.bit_length()) <= 31
     pack_lo_mask = (1 << pack_shift) - 1
@@ -1172,42 +1074,39 @@ def compile_count_sort_paired(
 
     @fx.struct  # ty: ignore[too-many-positional-arguments]
     class RankStorage:
-        # Per-expert accumulator shared by K1 (block histogram) and K4 (scatter rank).
+        # Per-expert accumulator for block histograms and per-block scatter rank.
         run: fx.Array[fx.Int32, experts]
 
-    def _same_key_wave_rank(ex, is_expert, zero_i32, one_i32):
-        """``(rank_wave, wave_total)`` for same-expert lanes, via match_any emulation.
-
-        Each round ANDs in the lanes that agree with this lane on bit ``b`` (``set_b`` if
-        this lane's bit is set, else its complement), so after ``nbits`` rounds ``match``
-        is the same-expert lane mask: mbcnt(match) -> rank within the group, ctpop -> size.
-        """
+    def _same_key_wave_rank(ex, is_expert, c_zero_i32, c_one_i32):
+        """Wave rank among lanes with the same expert id."""
 
         def _bit_is_set(b):
-            return ((ex >> fx.Int32(b)) & one_i32) == one_i32
+            return ((ex >> fx.Int32(b)) & c_one_i32) == c_one_i32
 
         if WARP_SIZE == 64:
-            active = fx.Int64(fx.rocdl.ballot(T.i64, _raw(is_expert)))
+            active = fx.Int64(fx.rocdl.ballot(T.i64, _unwrap_val(is_expert)))
             match = active
             for _b in range_constexpr(nbits):
-                set_b = fx.Int64(fx.rocdl.ballot(T.i64, _raw(is_expert & _bit_is_set(_b))))
+                set_b = fx.Int64(fx.rocdl.ballot(T.i64, _unwrap_val(is_expert & _bit_is_set(_b))))
                 match = _bit_is_set(_b).select(match & set_b, match & (active & ~set_b))
             match_lo = fx.Int32(ArithValue(match).trunci(T.i32))
             match_hi = fx.Int32(ArithValue(match >> fx.Int64(32)).trunci(T.i32))
-            lo = fx.Int32(fx.rocdl.mbcnt_lo(T.i32, _raw(match_lo), _raw(zero_i32)))
-            rank_wave = fx.Int32(fx.rocdl.mbcnt_hi(T.i32, _raw(match_hi), _raw(lo)))
-            wave_total = fx.Int32(ArithValue(fx.Int64(_llvm.intr_ctpop(_raw(match), results=[T.i64]))).trunci(T.i32))
+            lo = fx.Int32(fx.rocdl.mbcnt_lo(T.i32, _unwrap_val(match_lo), _unwrap_val(c_zero_i32)))
+            rank_wave = fx.Int32(fx.rocdl.mbcnt_hi(T.i32, _unwrap_val(match_hi), _unwrap_val(lo)))
+            wave_total = fx.Int32(
+                ArithValue(fx.Int64(_llvm.intr_ctpop(_unwrap_val(match), results=[T.i64]))).trunci(T.i32)
+            )
         else:
-            active = fx.Int32(fx.rocdl.ballot(T.i32, _raw(is_expert)))
+            active = fx.Int32(fx.rocdl.ballot(T.i32, _unwrap_val(is_expert)))
             match = active
             for _b in range_constexpr(nbits):
-                set_b = fx.Int32(fx.rocdl.ballot(T.i32, _raw(is_expert & _bit_is_set(_b))))
+                set_b = fx.Int32(fx.rocdl.ballot(T.i32, _unwrap_val(is_expert & _bit_is_set(_b))))
                 match = _bit_is_set(_b).select(match & set_b, match & (active & ~set_b))
-            rank_wave = fx.Int32(fx.rocdl.mbcnt_lo(T.i32, _raw(match), _raw(zero_i32)))
-            wave_total = fx.Int32(_llvm.intr_ctpop(_raw(match), results=[T.i32]))
+            rank_wave = fx.Int32(fx.rocdl.mbcnt_lo(T.i32, _unwrap_val(match), _unwrap_val(c_zero_i32)))
+            wave_total = fx.Int32(_llvm.intr_ctpop(_unwrap_val(match), results=[T.i32]))
         return rank_wave, wave_total
 
-    # ------------------------------------------------------------------ K1
+    # -- K1 --
     @flyc.kernel(known_block_size=[workgroup_size, 1, 1])
     def hist_kernel(
         topk_ids: fx.Tensor,
@@ -1215,69 +1114,70 @@ def compile_count_sort_paired(
         expert_mask: fx.Tensor,
         num_local_tokens: fx.Tensor,
     ):
-        """One block per pair-slice: histogram its pairs -> hist[block, :experts]."""
-        tid = fx.thread_idx.x
+        """K1: one block per pair slice, writes hist[block, expert]."""
+        tid = gpu.thread_idx.x
         block_bid = gpu.block_idx.x
         wave = tid // fx.Int32(WARP_SIZE)
 
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        num_pairs_i32 = fx.Int32(num_pairs)
-        experts_i32 = fx.Int32(experts)
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_workgroup_size_i32 = fx.Int32(workgroup_size)
+        c_num_pairs_i32 = fx.Int32(num_pairs)
+        c_experts_i32 = fx.Int32(experts)
 
-        topk_ids_rsrc = buffer_ops.create_buffer_resource(topk_ids)
-        hist_rsrc = buffer_ops.create_buffer_resource(hist)
+        topk_ids_rsrc = buffer_ops.create_buffer_resource(topk_ids, max_size=True)
+        hist_rsrc = buffer_ops.create_buffer_resource(hist, max_size=True)
 
         if const_expr(has_padding):
             n_local = buffer_ops.buffer_load(
-                buffer_ops.create_buffer_resource(num_local_tokens),
-                zero_i32,
+                buffer_ops.create_buffer_resource(num_local_tokens, max_size=True),
+                c_zero_i32,
                 vec_width=1,
                 dtype=fx.Int32,
             )
             pair_bound = n_local * fx.Int32(topk)
         else:
-            pair_bound = num_pairs_i32
+            pair_bound = c_num_pairs_i32
 
         lds = fx.SharedAllocator().allocate(RankStorage).peek()
         run = lds.run.view(fx.make_layout(experts, 1))
 
-        # Out-of-range / masked lanes fall out of every ballot (matches K4's drop).
-        p = block_bid * workgroup_size_i32 + tid
+        # -- pair histogram --
+        # Invalid or masked lanes are excluded from every same-key ballot.
+        p = block_bid * c_workgroup_size_i32 + tid
         valid = p < pair_bound
-        safe_p = valid.select(p, zero_i32)
+        safe_p = valid.select(p, c_zero_i32)
         ex = buffer_ops.buffer_load(topk_ids_rsrc, safe_p, vec_width=1, dtype=fx.Int32)
-        is_expert = valid & (ex >= zero_i32) & (ex < experts_i32)
+        is_expert = valid & (ex >= c_zero_i32) & (ex < c_experts_i32)
         if const_expr(has_mask):
-            mask_key = is_expert.select(ex, zero_i32)
+            mask_key = is_expert.select(ex, c_zero_i32)
             em_val = buffer_ops.buffer_load(
-                buffer_ops.create_buffer_resource(expert_mask),
+                buffer_ops.create_buffer_resource(expert_mask, max_size=True),
                 mask_key,
                 vec_width=1,
                 dtype=fx.Int32,
             )
-            is_expert = is_expert & (em_val != zero_i32)
-        safe_key = is_expert.select(ex, zero_i32)
+            is_expert = is_expert & (em_val != c_zero_i32)
+        safe_key = is_expert.select(ex, c_zero_i32)
 
-        rank_wave, wave_total = _same_key_wave_rank(ex, is_expert, zero_i32, one_i32)
+        rank_wave, wave_total = _same_key_wave_rank(ex, is_expert, c_zero_i32, c_one_i32)
 
-        if tid < experts_i32:
-            fx.memref_store(zero_i32, run, tid)
+        if tid < c_experts_i32:
+            fx.memref_store(c_zero_i32, run, tid)
         gpu.barrier()
 
-        # Wave w's lowest matching lane per expert folds that wave's total in.
+        # One lane per expert per wave contributes that wave's group total.
         for _w in range_constexpr(n_waves):
-            if (wave == fx.Int32(_w)) & is_expert & (rank_wave == zero_i32):
+            if (wave == fx.Int32(_w)) & is_expert & (rank_wave == c_zero_i32):
                 cur = fx.memref_load(run, safe_key)
                 fx.memref_store(cur + wave_total, run, safe_key)
             gpu.barrier()
 
-        if tid < experts_i32:
-            buffer_ops.buffer_store(fx.memref_load(run, tid), hist_rsrc, block_bid * experts_i32 + tid)
+        if tid < c_experts_i32:
+            buffer_ops.buffer_store(fx.memref_load(run, tid), hist_rsrc, block_bid * c_experts_i32 + tid)
 
-    # ------------------------------------------------------------------ K2
-    # n_col_strip = num_pairs / W^2 is O(1) (a handful), so its constexpr unroll is fine.
+    # -- K2 --
+    # n_col_strip is small enough to constexpr-unroll.
     n_col_strip = (n_pair_blocks + workgroup_size - 1) // workgroup_size
 
     @flyc.kernel(known_block_size=[workgroup_size, 1, 1])
@@ -1285,61 +1185,54 @@ def compile_count_sort_paired(
         hist: fx.Tensor,
         counts: fx.Tensor,
     ):
-        """One block per expert: cooperative exclusive prefix down its hist column."""
-        tid = fx.thread_idx.x
+        """K2: one block per expert, exclusive scan down hist[:, expert]."""
+        tid = gpu.thread_idx.x
         e = gpu.block_idx.x
         lane = tid % WARP_SIZE
         wave = tid // WARP_SIZE
 
-        zero_i32 = fx.Int32(0)
-        experts_i32 = fx.Int32(experts)
-        n_pair_blocks_i32 = fx.Int32(n_pair_blocks)
+        c_zero_i32 = fx.Int32(0)
+        c_experts_i32 = fx.Int32(experts)
+        c_n_pair_blocks_i32 = fx.Int32(n_pair_blocks)
         base_b = tid * fx.Int32(n_col_strip)
 
-        hist_rsrc = buffer_ops.create_buffer_resource(hist)
-        counts_rsrc = buffer_ops.create_buffer_resource(counts)
+        hist_rsrc = buffer_ops.create_buffer_resource(hist, max_size=True)
+        counts_rsrc = buffer_ops.create_buffer_resource(counts, max_size=True)
         lds = fx.SharedAllocator().allocate(ScanStorage).peek()
         s_wave = lds.s_wave.view(fx.make_layout(n_waves, 1))
 
-        strip_total = zero_i32
+        # -- column prefix --
+        strip_total = c_zero_i32
         for j in range_constexpr(n_col_strip):
             b = base_b + fx.Int32(j)
-            if b < n_pair_blocks_i32:
+            if b < c_n_pair_blocks_i32:
                 strip_total = strip_total + buffer_ops.buffer_load(
-                    hist_rsrc, b * experts_i32 + e, vec_width=1, dtype=fx.Int32
+                    hist_rsrc,
+                    b * c_experts_i32 + e,
+                    vec_width=1,
+                    dtype=fx.Int32,
                 )
 
-        scanned = strip_total
-        for step in range_constexpr(log2_warp):
-            off = 1 << step
-            in_range = lane >= off
-            peer_lane = in_range.select(lane - off, zero_i32)
-            peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, peer_lane * 4, scanned))
-            scanned = scanned + in_range.select(peer, zero_i32)
+        scanned = _warp_inclusive_scan(strip_total, lane, log2_warp, c_zero_i32)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
-        cross = zero_i32
-        total = zero_i32
-        for w in range_constexpr(n_waves):
-            wv = fx.memref_load(s_wave, fx.Int32(w))
-            cross = (wave > fx.Int32(w)).select(cross + wv, cross)
-            total = total + wv
+        cross, total = _wave_cross_and_total(s_wave, wave, n_waves)
         strip_excl = scanned + cross - strip_total
 
         run = strip_excl
         for j in range_constexpr(n_col_strip):
             b = base_b + fx.Int32(j)
-            if b < n_pair_blocks_i32:
-                idx = b * experts_i32 + e
+            if b < c_n_pair_blocks_i32:
+                idx = b * c_experts_i32 + e
                 v = buffer_ops.buffer_load(hist_rsrc, idx, vec_width=1, dtype=fx.Int32)
                 buffer_ops.buffer_store(run, hist_rsrc, idx)
                 run = run + v
 
-        if tid == zero_i32:
+        if tid == c_zero_i32:
             buffer_ops.buffer_store(total, counts_rsrc, e)
 
-    # ------------------------------------------------------------------ K3
+    # -- K3 --
     @flyc.jit
     def _emit_structure(
         tid,
@@ -1356,118 +1249,98 @@ def compile_count_sort_paired(
         s_wave,
         s_excl,
     ):
-        """Padded-count prefix -> expert starts + sorted_expert_ids + sentinel tail +
-        num_valid_ids + -1 tail. K4 fills the valid slots."""
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        neg_one_i32 = fx.Int32(-1)
-        sentinel_i32 = fx.Int32(sentinel_id)
-        tokens_i32 = fx.Int32(tokens)
-        unit_size_i32 = fx.Int32(unit_size)
-        unit_size_minus_one = fx.Int32(unit_size - 1)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        workgroup_size_minus_one = fx.Int32(workgroup_size - 1)
-        experts_i32 = fx.Int32(experts)
-        max_num_m_blocks_i32 = fx.Int32(max_num_m_blocks)
-        pack_shift_i32 = fx.Int32(pack_shift)
-        pack_lo_mask_i32 = fx.Int32(pack_lo_mask)
+        """K3: expert starts, block ids, padding sentinels, num_valid_ids."""
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_neg_one_i32 = fx.Int32(-1)
+        c_tokens_i32 = fx.Int32(tokens)
+        c_unit_size_i32 = fx.Int32(unit_size)
+        c_unit_size_minus_one = fx.Int32(unit_size - 1)
+        c_workgroup_size_i32 = fx.Int32(workgroup_size)
+        c_experts_i32 = fx.Int32(experts)
+        c_max_num_m_blocks_i32 = fx.Int32(max_num_m_blocks)
+        c_pack_shift_i32 = fx.Int32(pack_shift)
+        c_pack_lo_mask_i32 = fx.Int32(pack_lo_mask)
 
-        in_experts = tid < experts_i32
-        safe_tid = in_experts.select(tid, zero_i32)
+        in_experts = tid < c_experts_i32
+        safe_tid = in_experts.select(tid, c_zero_i32)
         cnt = in_experts.select(
             buffer_ops.buffer_load(counts_rsrc, safe_tid, vec_width=1, dtype=fx.Int32),
-            zero_i32,
+            c_zero_i32,
         )
         if const_expr(has_mask):
             em_val = in_experts.select(
                 buffer_ops.buffer_load(expert_mask_rsrc, safe_tid, vec_width=1, dtype=fx.Int32),
-                zero_i32,
+                c_zero_i32,
             )
-            present = (em_val != zero_i32).select(one_i32, zero_i32)
+            present = (em_val != c_zero_i32).select(c_one_i32, c_zero_i32)
         else:
-            present = one_i32
-        padded = ((cnt + unit_size_minus_one) // unit_size_i32) * unit_size_i32
+            present = c_one_i32
+        padded = ((cnt + c_unit_size_minus_one) // c_unit_size_i32) * c_unit_size_i32
 
         if const_expr(has_mask):
-            scan_val = (present << pack_shift_i32) | padded
+            scan_val = (present << c_pack_shift_i32) | padded
         else:
             scan_val = padded
 
-        scanned = scan_val
-        for step in range_constexpr(log2_warp):
-            off = 1 << step
-            in_range = lane >= off
-            peer_lane = in_range.select(lane - off, zero_i32)
-            peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, peer_lane * 4, scanned))
-            scanned = scanned + in_range.select(peer, zero_i32)
+        scanned = _warp_inclusive_scan(scan_val, lane, log2_warp, c_zero_i32)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
-        cross = zero_i32
-        total_scan = zero_i32
-        for w in range_constexpr(n_waves):
-            wv = fx.memref_load(s_wave, fx.Int32(w))
-            cross = (wave > fx.Int32(w)).select(cross + wv, cross)
-            total_scan = total_scan + wv
+        cross, total_scan = _wave_cross_and_total(s_wave, wave, n_waves)
         inclusive_scan = scanned + cross
 
         if const_expr(has_mask):
-            inclusive_padded = inclusive_scan & pack_lo_mask_i32
-            total_padded = total_scan & pack_lo_mask_i32
-            local_idx = (inclusive_scan >> pack_shift_i32) - present
+            inclusive_padded = inclusive_scan & c_pack_lo_mask_i32
+            total_padded = total_scan & c_pack_lo_mask_i32
+            local_idx = (inclusive_scan >> c_pack_shift_i32) - present
         else:
             inclusive_padded = inclusive_scan
             total_padded = total_scan
             local_idx = tid
         exclusive_padded = inclusive_padded - padded
 
-        # Block 0 publishes every expert's start; the dense index rides s_excl's high bits.
-        if (expert_bid == zero_i32) & in_experts:
+        # -- expert structure --
+        # Block 0 publishes estart; s_excl carries dense id when has_mask is set.
+        if (expert_bid == c_zero_i32) & in_experts:
             buffer_ops.buffer_store(exclusive_padded, estart_rsrc, tid)
         if const_expr(has_mask):
-            packed_excl = (local_idx << pack_shift_i32) | exclusive_padded
+            packed_excl = (local_idx << c_pack_shift_i32) | exclusive_padded
         else:
             packed_excl = exclusive_padded
         fx.memref_store(packed_excl, s_excl, tid)
         gpu.barrier()
         my_packed = fx.memref_load(s_excl, expert_bid)
         if const_expr(has_mask):
-            my_start = my_packed & pack_lo_mask_i32
-            my_local = my_packed >> pack_shift_i32
+            my_start = my_packed & c_pack_lo_mask_i32
+            my_local = my_packed >> c_pack_shift_i32
         else:
             my_start = my_packed
             my_local = expert_bid
 
         my_count = buffer_ops.buffer_load(counts_rsrc, expert_bid, vec_width=1, dtype=fx.Int32)
-        my_padded = ((my_count + unit_size_minus_one) // unit_size_i32) * unit_size_i32
-        block_offset = my_start // unit_size_i32
-        n_blocks = my_padded // unit_size_i32
+        my_padded = ((my_count + c_unit_size_minus_one) // c_unit_size_i32) * c_unit_size_i32
+        block_offset = my_start // c_unit_size_i32
+        n_blocks = my_padded // c_unit_size_i32
 
-        n_blk_iters = (n_blocks + workgroup_size_minus_one) // workgroup_size_i32
-        for _jb in range(fx.Index(0), ArithValue(n_blk_iters).index_cast(T.index), fx.Index(1)):
-            b = fx.Int32(_jb) * workgroup_size_i32 + tid
-            if b < n_blocks:
-                buffer_ops.buffer_store(my_local, sorted_expert_ids_rsrc, block_offset + b)
+        _write_expert_id_blocks(tid, my_local, block_offset, n_blocks, sorted_expert_ids_rsrc, workgroup_size)
 
         my_end_valid = my_start + my_count
         pad_amount = my_padded - my_count
-        for _jp in range_constexpr(n_pad_iters):
-            pi = fx.Int32(_jp) * workgroup_size_i32 + tid
-            if pi < pad_amount:
-                buffer_ops.buffer_store(sentinel_i32, sorted_ids_rsrc, my_end_valid + pi)
+        _fill_sentinel_pad(tid, my_end_valid, pad_amount, sorted_ids_rsrc, sentinel_id, n_pad_iters, workgroup_size)
 
-        if (expert_bid == zero_i32) & (tid == zero_i32):
-            buffer_ops.buffer_store(total_padded, num_valid_ids_rsrc, zero_i32)
+        if (expert_bid == c_zero_i32) & (tid == c_zero_i32):
+            buffer_ops.buffer_store(total_padded, num_valid_ids_rsrc, c_zero_i32)
             if const_expr(has_padding):
-                nvi1 = buffer_ops.buffer_load(num_local_tokens_rsrc, zero_i32, vec_width=1, dtype=fx.Int32)
+                nvi1 = buffer_ops.buffer_load(num_local_tokens_rsrc, c_zero_i32, vec_width=1, dtype=fx.Int32)
             else:
-                nvi1 = tokens_i32
-            buffer_ops.buffer_store(nvi1, num_valid_ids_rsrc, one_i32)
-        total_blocks = total_padded // unit_size_i32
+                nvi1 = c_tokens_i32
+            buffer_ops.buffer_store(nvi1, num_valid_ids_rsrc, c_one_i32)
+        total_blocks = total_padded // c_unit_size_i32
         for _jt in range(fx.Index(0), fx.Index(n_tail_iters), fx.Index(1)):
-            b = total_blocks + fx.Int32(_jt) * workgroup_size_i32 + tid
-            if b < max_num_m_blocks_i32:
-                buffer_ops.buffer_store(neg_one_i32, sorted_expert_ids_rsrc, b)
+            b = total_blocks + fx.Int32(_jt) * c_workgroup_size_i32 + tid
+            if b < c_max_num_m_blocks_i32:
+                buffer_ops.buffer_store(c_neg_one_i32, sorted_expert_ids_rsrc, b)
         return exclusive_padded
 
     @flyc.kernel(known_block_size=[workgroup_size, 1, 1])
@@ -1480,7 +1353,7 @@ def compile_count_sort_paired(
         expert_mask: fx.Tensor,
         num_local_tokens: fx.Tensor,
     ):
-        tid = fx.thread_idx.x
+        tid = gpu.thread_idx.x
         bid = gpu.block_idx.x
         lane = tid % WARP_SIZE
         wave = tid // WARP_SIZE
@@ -1492,18 +1365,18 @@ def compile_count_sort_paired(
             bid,
             lane,
             wave,
-            buffer_ops.create_buffer_resource(sorted_ids),
-            buffer_ops.create_buffer_resource(sorted_expert_ids),
-            buffer_ops.create_buffer_resource(num_valid_ids),
-            buffer_ops.create_buffer_resource(counts),
-            buffer_ops.create_buffer_resource(estart),
-            buffer_ops.create_buffer_resource(expert_mask),
-            buffer_ops.create_buffer_resource(num_local_tokens),
+            buffer_ops.create_buffer_resource(sorted_ids, max_size=True),
+            buffer_ops.create_buffer_resource(sorted_expert_ids, max_size=True),
+            buffer_ops.create_buffer_resource(num_valid_ids, max_size=True),
+            buffer_ops.create_buffer_resource(counts, max_size=True),
+            buffer_ops.create_buffer_resource(estart, max_size=True),
+            buffer_ops.create_buffer_resource(expert_mask, max_size=True),
+            buffer_ops.create_buffer_resource(num_local_tokens, max_size=True),
             s_wave,
             s_excl,
         )
 
-    # ------------------------------------------------------------------ K4
+    # -- K4 --
     @flyc.jit
     def _emit_pair_scatter(
         tid,
@@ -1518,48 +1391,48 @@ def compile_count_sort_paired(
         num_local_tokens_rsrc,
         run,
     ):
-        """Scatter this block's pairs once to estart[e] + hist[block,e] + rank."""
-        zero_i32 = fx.Int32(0)
-        one_i32 = fx.Int32(1)
-        topk_i32 = fx.Int32(topk)
-        warp_i32 = fx.Int32(WARP_SIZE)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        num_pairs_i32 = fx.Int32(num_pairs)
-        experts_i32 = fx.Int32(experts)
-        wave = tid // warp_i32
+        """K4: scatter pairs to estart[e] + hist[block,e] + same-block rank."""
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_topk_i32 = fx.Int32(topk)
+        c_warp_i32 = fx.Int32(WARP_SIZE)
+        c_workgroup_size_i32 = fx.Int32(workgroup_size)
+        c_num_pairs_i32 = fx.Int32(num_pairs)
+        c_experts_i32 = fx.Int32(experts)
+        wave = tid // c_warp_i32
 
         if const_expr(has_padding):
-            n_local = buffer_ops.buffer_load(num_local_tokens_rsrc, zero_i32, vec_width=1, dtype=fx.Int32)
-            pair_bound = n_local * topk_i32
+            n_local = buffer_ops.buffer_load(num_local_tokens_rsrc, c_zero_i32, vec_width=1, dtype=fx.Int32)
+            pair_bound = n_local * c_topk_i32
         else:
-            pair_bound = num_pairs_i32
+            pair_bound = c_num_pairs_i32
 
-        p = block_bid * workgroup_size_i32 + tid
+        p = block_bid * c_workgroup_size_i32 + tid
         valid = p < pair_bound
-        safe_p = valid.select(p, zero_i32)
+        safe_p = valid.select(p, c_zero_i32)
         ex = buffer_ops.buffer_load(topk_ids_rsrc, safe_p, vec_width=1, dtype=fx.Int32)
-        is_expert = valid & (ex >= zero_i32) & (ex < experts_i32)
+        is_expert = valid & (ex >= c_zero_i32) & (ex < c_experts_i32)
         if const_expr(has_mask):
-            mask_key = is_expert.select(ex, zero_i32)
+            mask_key = is_expert.select(ex, c_zero_i32)
             em_val = buffer_ops.buffer_load(expert_mask_rsrc, mask_key, vec_width=1, dtype=fx.Int32)
-            is_expert = is_expert & (em_val != zero_i32)
-        safe_key = is_expert.select(ex, zero_i32)
+            is_expert = is_expert & (em_val != c_zero_i32)
+        safe_key = is_expert.select(ex, c_zero_i32)
 
-        # Within-wave rank + a per-expert running count carried in wave order keeps
-        # the rank monotone in pair index (the stable order).
-        rank_wave, wave_total = _same_key_wave_rank(ex, is_expert, zero_i32, one_i32)
+        # -- pair scatter --
+        # Wave-order accumulator preserves stable pair-index order.
+        rank_wave, wave_total = _same_key_wave_rank(ex, is_expert, c_zero_i32, c_one_i32)
 
-        if tid < experts_i32:
-            fx.memref_store(zero_i32, run, tid)
+        if tid < c_experts_i32:
+            fx.memref_store(c_zero_i32, run, tid)
         gpu.barrier()
 
-        cross = zero_i32
+        cross = c_zero_i32
         for _w in range_constexpr(n_waves):
             rv = fx.memref_load(run, safe_key)
             take = (wave == fx.Int32(_w)) & is_expert
             cross = take.select(rv, cross)
             gpu.barrier()
-            if take & (rank_wave == zero_i32):
+            if take & (rank_wave == c_zero_i32):
                 cur = fx.memref_load(run, safe_key)
                 fx.memref_store(cur + wave_total, run, safe_key)
             gpu.barrier()
@@ -1567,40 +1440,19 @@ def compile_count_sort_paired(
         if is_expert:
             rank = cross + rank_wave
             block_base = buffer_ops.buffer_load(
-                hist_rsrc, block_bid * experts_i32 + safe_key, vec_width=1, dtype=fx.Int32
+                hist_rsrc,
+                block_bid * c_experts_i32 + safe_key,
+                vec_width=1,
+                dtype=fx.Int32,
             )
             base = buffer_ops.buffer_load(estart_rsrc, safe_key, vec_width=1, dtype=fx.Int32)
             dst = base + block_base + rank
-            token = safe_p // topk_i32
-            slot = safe_p % topk_i32
+            token = safe_p // c_topk_i32
+            slot = safe_p % c_topk_i32
             packed = (slot << fx.Int32(24)) | token
             buffer_ops.buffer_store(packed, sorted_ids_rsrc, dst)
             w_val = buffer_ops.buffer_load(topk_weights_rsrc, safe_p, vec_width=1, dtype=fx.Float32)
             buffer_ops.buffer_store(w_val, sorted_weights_rsrc, dst)
-
-    @flyc.jit
-    def _emit_zero(tid, bid, moe_buf_rsrc, i32_moe_buf_elems):
-        """Zero moe_buf on blocks n_pair_blocks.. via a vectorized grid-stride loop."""
-        zero_i32 = fx.Int32(0)
-        cw_i32 = fx.Int32(vec_width)
-        workgroup_size_i32 = fx.Int32(workgroup_size)
-        n_pair_blocks_i32 = fx.Int32(n_pair_blocks)
-        c_zero_vec = fx.Vector.filled(vec_width, 0, fx.Int32)
-
-        total_vec = i32_moe_buf_elems // cw_i32
-        num_zero_blocks = gpu.grid_dim.x - n_pair_blocks_i32
-        gid_vec = (bid - n_pair_blocks_i32) * workgroup_size_i32 + tid
-        stride_vec = num_zero_blocks * workgroup_size_i32
-        n_iters = (total_vec + stride_vec - fx.Int32(1)) // stride_vec
-        for _z in range(fx.Index(0), ArithValue(n_iters).index_cast(T.index), fx.Index(1)):
-            idx = gid_vec + fx.Int32(_z) * stride_vec
-            if idx < total_vec:
-                buffer_ops.buffer_store(c_zero_vec, moe_buf_rsrc, idx * cw_i32)
-        tail_start = total_vec * cw_i32
-        if bid == n_pair_blocks_i32:
-            ti = tail_start + tid
-            if ti < i32_moe_buf_elems:
-                buffer_ops.buffer_store(zero_i32, moe_buf_rsrc, ti)
 
     @flyc.kernel(known_block_size=[workgroup_size, 1, 1])
     def scatter_kernel(
@@ -1615,25 +1467,33 @@ def compile_count_sort_paired(
         moe_buf: fx.Tensor,
         i32_moe_buf_elems: fx.Int32,
     ):
-        tid = fx.thread_idx.x
+        tid = gpu.thread_idx.x
         bid = gpu.block_idx.x
         lds = fx.SharedAllocator().allocate(RankStorage).peek()
         run = lds.run.view(fx.make_layout(experts, 1))
         if bid >= fx.Int32(n_pair_blocks):
-            moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf)
-            _emit_zero(tid, bid, moe_buf_rsrc, i32_moe_buf_elems)
+            moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf, max_size=True)
+            _zero_moe_buf_grid_stride(
+                tid,
+                bid,
+                moe_buf_rsrc,
+                i32_moe_buf_elems,
+                fx.Int32(n_pair_blocks),
+                vec_width,
+                workgroup_size,
+            )
         if bid < fx.Int32(n_pair_blocks):
             _emit_pair_scatter(
                 tid,
                 bid,
-                buffer_ops.create_buffer_resource(topk_ids),
-                buffer_ops.create_buffer_resource(topk_weights),
-                buffer_ops.create_buffer_resource(sorted_ids),
-                buffer_ops.create_buffer_resource(sorted_weights),
-                buffer_ops.create_buffer_resource(hist),
-                buffer_ops.create_buffer_resource(estart),
-                buffer_ops.create_buffer_resource(expert_mask),
-                buffer_ops.create_buffer_resource(num_local_tokens),
+                buffer_ops.create_buffer_resource(topk_ids, max_size=True),
+                buffer_ops.create_buffer_resource(topk_weights, max_size=True),
+                buffer_ops.create_buffer_resource(sorted_ids, max_size=True),
+                buffer_ops.create_buffer_resource(sorted_weights, max_size=True),
+                buffer_ops.create_buffer_resource(hist, max_size=True),
+                buffer_ops.create_buffer_resource(estart, max_size=True),
+                buffer_ops.create_buffer_resource(expert_mask, max_size=True),
+                buffer_ops.create_buffer_resource(num_local_tokens, max_size=True),
                 run,
             )
 
@@ -1657,7 +1517,10 @@ def compile_count_sort_paired(
     ):
         block = (workgroup_size, 1, 1)
         k1 = hist_kernel(  # ty: ignore[call-non-callable]
-            topk_ids, hist, expert_mask, num_local_tokens
+            topk_ids,
+            hist,
+            expert_mask,
+            num_local_tokens,
         )
         k1.launch(grid=(n_pair_blocks, 1, 1), block=block, stream=stream)
         k2 = colscan_kernel(hist, counts)  # ty: ignore[call-non-callable]
@@ -1715,91 +1578,68 @@ def get_moe_sorting_count_sort_paired_kernel(
     )
 
 
-# ===========================================================================
-# Selection + feasibility.
-# ===========================================================================
+# -- selection and feasibility --
 
 MoESortingVariant = Literal["mesh_flatfill", "count_sort", "count_sort_paired"]
 VARIANTS: tuple[MoESortingVariant, ...] = ("mesh_flatfill", "count_sort", "count_sort_paired")
 
 
-def _variant_unsupported(variant: MoESortingVariant, *, experts: int, tokens: int) -> str | None:
-    """Reason ``variant`` can't run this shape, or None. mesh_flatfill has the token/LDS
-    ceiling; count_sort/count_sort_paired only have the structural (expert/workgroup) bound."""
-    if variant == "mesh_flatfill":
-        return mesh_flatfill_unsupported(experts, tokens)
-    return _structural_unsupported(experts)
-
-
-def mesh_flatfill_is_feasible(*, experts: int, tokens: int, topk: int, unit_size: int, arch: str | None = None) -> bool:
-    """True iff mesh_flatfill can run this shape correctly (not merely fast)."""
-    return mesh_flatfill_unsupported(experts, tokens) is None
-
-
-def select_moe_sorting_kernel(
-    *, num_experts: int, tokens: int, topk: int, unit_size: int, arch: str | None = None
-) -> MoESortingVariant:
-    """Fastest feasible variant for this shape (GPU-free). ``tokens`` is the padded
-    count, so the crossover keys on ``workgroup_width(num_experts)``."""
-    if mesh_flatfill_is_feasible(
-        experts=num_experts, tokens=tokens, topk=topk, unit_size=unit_size, arch=arch
-    ) and tokens <= mesh_flatfill_recommended_max_tokens(topk, arch):
-        return "mesh_flatfill"
-    workgroup_size = workgroup_width(num_experts)
-    if tokens <= count_sort_crossover_tokens(workgroup_size, topk, arch):
-        return "count_sort"
-    return "count_sort_paired"
-
-
-def _slow_reason(variant: MoESortingVariant, *, tokens: int, topk: int, experts: int, arch: str | None) -> str | None:
-    """If ``variant`` is feasible but not the fastest for this shape, why; else None."""
+def moe_sorting_supported(variant: MoESortingVariant, *, experts: int, tokens: int) -> bool:
+    """Shape gate for per-expert workgroups and mesh_flatfill LDS/unroll limits."""
     workgroup_size = workgroup_width(experts)
-    if variant == "mesh_flatfill":
-        rmax = mesh_flatfill_recommended_max_tokens(topk, arch)
-        if tokens > rmax:
-            return f"mesh_flatfill is tuned for tokens <= {rmax}; count_sort is faster at {tokens}"
-    elif variant == "count_sort":
-        crossover = count_sort_crossover_tokens(workgroup_size, topk, arch)
-        if tokens > crossover:
-            return f"above ~{crossover} tokens count_sort_paired is faster"
-    elif variant == "count_sort_paired":
-        crossover = count_sort_crossover_tokens(workgroup_size, topk, arch)
-        if tokens < crossover:
-            return f"below ~{crossover} tokens count_sort is faster"
-    return None
 
-
-def verify_moe_sorting_args(
-    *,
-    num_experts: int,
-    tokens: int,
-    topk: int,
-    unit_size: int,
-    arch: str | None = None,
-    kernel: MoESortingVariant | None = None,
-) -> bool:
-    """True iff these args can run. Infeasible -> False; feasible-but-slow -> True
-    after a ``warnings.warn``. ``kernel`` checks a forced variant, else the selected one."""
-    variant = kernel or select_moe_sorting_kernel(
-        num_experts=num_experts, tokens=tokens, topk=topk, unit_size=unit_size, arch=arch
-    )
-    if variant not in VARIANTS:
-        raise ValueError(f"unknown kernel {variant!r}; expected one of {list(VARIANTS)}")
-    if _variant_unsupported(variant, experts=num_experts, tokens=tokens) is not None:
+    if experts > workgroup_size:
         return False
-    slow = _slow_reason(variant, tokens=tokens, topk=topk, experts=num_experts, arch=arch)
-    if slow is not None:
-        warnings.warn(
-            f"moe_sorting {variant} supports (tokens={tokens}, experts={num_experts}, "
-            f"topk={topk}, unit_size={unit_size}) but is not the fastest variant: {slow}",
-            stacklevel=2,
-        )
+    if workgroup_size > MAX_THREADS_PER_BLOCK:
+        return False
+
+    if variant == "mesh_flatfill":
+        if tokens > 256:
+            return False
+
+        used = mesh_lds_bytes(experts, tokens)
+        if used > LDS_BYTES_PER_BLOCK:
+            return False
     return True
 
 
-# ===========================================================================
-# moe_buf zero grid + host entry.
-# ===========================================================================
+def select_moe_sorting_kernel(
+    *, num_experts: int, tokens: int, topk: int, arch: str | None = None
+) -> MoESortingVariant:
+    """Select mesh_flatfill, count_sort, or count_sort_paired from token regime."""
+    meshff_is_supported = moe_sorting_supported("mesh_flatfill", experts=num_experts, tokens=tokens)
+
+    arch = arch or get_rocm_arch()
+    if arch.startswith("gfx94"):
+        m = 256
+    elif arch.startswith("gfx95"):
+        m = 320
+    else:
+        m = 256
+
+    # m = num_pairs budget (tokens * topk)
+    # Convert the pair-budget to tokens.
+    # 7 was empirically found to be a good fit.
+    meshff_max_tokens = max(1, m // (topk + 7))
+    if meshff_is_supported and tokens <= meshff_max_tokens:
+        return "mesh_flatfill"
+
+    if arch.startswith("gfx94"):
+        chunks = 8
+    elif arch.startswith("gfx95"):
+        chunks = 10
+    else:
+        chunks = 8
+
+    workgroup_size = workgroup_width(num_experts)
+    count_sort_max_tokens = max(1, chunks * workgroup_size // topk)
+    if tokens <= count_sort_max_tokens:
+        return "count_sort"
+
+    return "count_sort_paired"
+
+
+# -- moe_buf zero grid and host entry --
 
 
 def moe_buf_zero_block_count(
@@ -1808,21 +1648,55 @@ def moe_buf_zero_block_count(
     num_cu: int,
     occupancy: int | None = None,
 ) -> int:
-    """Zero-block count: one per ``unit_size`` chunk, capped at ``num_cu * occupancy``."""
-    if occupancy is None:
-        occupancy = default_zero_target_occupancy()
+    """Number of trailing zero blocks capped by moe_buf coverage and occupancy."""
+    occupancy = occupancy or 2
     return min((i32_moe_buf_elems + unit_size - 1) // unit_size, num_cu * occupancy)
 
 
 def moe_buf_zero_grid(
     moe_buf: torch.Tensor, *, unit_size: int, zero_target_occupancy: int | None = None
 ) -> tuple[torch.Tensor, int, int]:
-    """``(moe_buf_i32, i32_moe_buf_elems, n_grid)``: block 0 sorts, blocks 1..N zero."""
+    """Return i32 moe_buf view, element count, and one-plus-zero-block count."""
     moe_buf_i32 = moe_buf.view(torch.int32)
     moe_buf_elems = moe_buf_i32.numel()
-    num_cu = torch.cuda.get_device_properties(moe_buf.device).multi_processor_count
+    num_cu = get_num_cu(moe_buf.device.index)
     n_zero_blocks = moe_buf_zero_block_count(moe_buf_elems, unit_size, num_cu, zero_target_occupancy)
     return moe_buf_i32, moe_buf_elems, 1 + n_zero_blocks
+
+
+def moe_sorting_get_workspace_size(
+    M: int,
+    num_experts: int,
+    topk: int,
+    unit_size: int = UNIT_SIZE,
+    *,
+    kernel: MoESortingVariant | None = None,
+) -> int:
+    """Scratch size in i32 elements for the selected sorting path."""
+    variant = kernel or select_moe_sorting_kernel(num_experts=num_experts, tokens=M, topk=topk)
+    if variant == "mesh_flatfill":
+        return 0
+    if variant == "count_sort":
+        return num_experts
+    if variant == "count_sort_paired":
+        hist_elems, side_elems = count_sort_paired_scratch_elems(M, topk, num_experts)
+        return hist_elems + 2 * side_elems
+    raise ValueError(f"unknown moe_sorting kernel {variant!r}")
+
+
+_moe_sorting_cf_cache: dict = {}
+
+
+def _launch_cached(cache, key, launch_fn, args, stream):
+    """AOT-compiled dispatch: cache keyed by constexpr values."""
+    cf = cache.get(key)
+    stream_arg = fx.Stream(stream)
+    if cf is not None:
+        cf(*args, stream_arg)
+    else:
+        launch_fn(*args, stream=stream)
+        cf = flyc.compile(launch_fn, *args, stream_arg)
+        cache[key] = cf
 
 
 def moe_sorting_flydsl(
@@ -1836,7 +1710,7 @@ def moe_sorting_flydsl(
     num_experts: int,
     unit_size: int = UNIT_SIZE,
     expert_mask: torch.Tensor | None = None,
-    num_local_tokens: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | int | float | None = None,
     workspace: torch.Tensor | None = None,
     *,
     kernel: MoESortingVariant | None = None,
@@ -1844,25 +1718,27 @@ def moe_sorting_flydsl(
     zero_target_occupancy: int | None = None,
     stream=None,
 ):
-    """Self-dispatching MoE sort: pick the variant for the shape, then run it.
+    """Host entry for standalone FlyDSL MoE sorting.
 
-    All output tensors must be pre-allocated by the caller; the kernels write their
-    own sentinels and fold the ``moe_buf`` zero into the launch. Selection keys on
-    the padded token count ``M = topk_ids.shape[0]``, so ``num_local_tokens`` only
-    bounds the valid work, never which variant runs. ``expert_mask`` /
-    ``num_local_tokens`` being non-None flips the compile-time ``has_mask`` /
-    ``has_padding`` flags; ``kernel=`` forces a variant; ``workspace`` is accepted
-    for API parity but unused (each variant self-allocates its scratch).
-
-    Returns ``(sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf)``.
+    - output tensors are caller-allocated.
+    - expert_mask enables dense local expert ids for the EP path.
+    - num_local_tokens bounds valid top-k pairs when input M is padded.
+    - returns sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf.
     """
-    del workspace  # variants self-allocate scratch
     device = topk_ids.device
     M = int(topk_ids.shape[0])
     topk = int(topk_ids.shape[1])
 
-    variant = kernel or select_moe_sorting_kernel(num_experts=num_experts, tokens=M, topk=topk, unit_size=unit_size)
-    # has_mask / has_padding are compile-time flags (part of the factory cache key).
+    variant = kernel or select_moe_sorting_kernel(num_experts=num_experts, tokens=M, topk=topk)
+
+    ws_elems = moe_sorting_get_workspace_size(M, num_experts, topk, unit_size, kernel=variant)
+    if ws_elems:
+        if workspace is None:
+            workspace = torch.empty(ws_elems, dtype=torch.int32, device=device)
+        workspace = workspace.view(torch.int32).reshape(-1)
+        if workspace.numel() < ws_elems:
+            raise ValueError(f"workspace too small: {variant} needs {ws_elems} int32 elems, got {workspace.numel()}")
+
     build_kw = dict(
         experts=num_experts,
         tokens=M,
@@ -1873,22 +1749,37 @@ def moe_sorting_flydsl(
         store_vec_width=store_vec_width,
     )
 
-    # Read only under has_mask / has_padding; identity placeholders otherwise.
     if expert_mask is None:
         expert_mask = torch.ones(num_experts, dtype=torch.int32, device=device)
     if num_local_tokens is None:
         num_local_tokens = torch.tensor([M], dtype=torch.int32, device=device)
-
+    elif not isinstance(num_local_tokens, torch.Tensor):
+        num_local_tokens = torch.tensor([int(num_local_tokens)], dtype=torch.int32, device=device)
     if stream is None:
         stream = torch.cuda.current_stream()
 
     moe_buf_i32, moe_buf_elems, n_grid = moe_buf_zero_grid(
-        moe_buf, unit_size=unit_size, zero_target_occupancy=zero_target_occupancy
+        moe_buf,
+        unit_size=unit_size,
+        zero_target_occupancy=zero_target_occupancy,
+    )
+
+    # Cache only on constexprs; moe_buf size and zero-grid count are runtime args.
+    cf_key = (
+        variant,
+        num_experts,
+        M,
+        topk,
+        unit_size,
+        build_kw["has_mask"],
+        build_kw["has_padding"],
+        store_vec_width,
+        device.index,
     )
 
     if variant == "mesh_flatfill":
         launcher = get_moe_sorting_mesh_flatfill_kernel(**build_kw)
-        launcher(
+        args = (
             topk_ids,
             topk_weights,
             sorted_ids,
@@ -1900,12 +1791,13 @@ def moe_sorting_flydsl(
             moe_buf_i32,
             moe_buf_elems,
             n_grid,
-            stream,
         )
+        _launch_cached(_moe_sorting_cf_cache, cf_key, launcher, args, stream)
     elif variant == "count_sort":
         launcher = get_moe_sorting_count_sort_kernel(**build_kw)
-        counts = torch.empty(num_experts, dtype=torch.int32, device=device)
-        launcher(
+        assert workspace is not None  # ws_elems > 0 for count_sort
+        counts = workspace[:num_experts]
+        args = (
             topk_ids,
             topk_weights,
             sorted_ids,
@@ -1918,15 +1810,16 @@ def moe_sorting_flydsl(
             moe_buf_i32,
             moe_buf_elems,
             n_grid - 1,
-            stream,
         )
+        _launch_cached(_moe_sorting_cf_cache, cf_key, launcher, args, stream)
     elif variant == "count_sort_paired":
         launcher = get_moe_sorting_count_sort_paired_kernel(**build_kw)
+        assert workspace is not None  # ws_elems > 0 for count_sort_paired
         hist_elems, side_elems = count_sort_paired_scratch_elems(M, topk, num_experts)
-        hist = torch.empty(hist_elems, dtype=torch.int32, device=device)
-        counts = torch.empty(side_elems, dtype=torch.int32, device=device)
-        estart = torch.empty(side_elems, dtype=torch.int32, device=device)
-        launcher(
+        hist = workspace[:hist_elems]
+        counts = workspace[hist_elems : hist_elems + side_elems]
+        estart = workspace[hist_elems + side_elems : hist_elems + 2 * side_elems]
+        args = (
             topk_ids,
             topk_weights,
             sorted_ids,
@@ -1941,8 +1834,8 @@ def moe_sorting_flydsl(
             moe_buf_i32,
             moe_buf_elems,
             n_grid - 1,
-            stream,
         )
+        _launch_cached(_moe_sorting_cf_cache, cf_key, launcher, args, stream)
     else:
         raise ValueError(f"unknown kernel {variant!r}; expected one of {list(VARIANTS)}")
 
@@ -1957,8 +1850,10 @@ def compile_moe_sorting(
     unit_size: int = UNIT_SIZE,
     has_mask: bool = False,
 ):
-    """Compile and return the three variant launchers ``(mesh_flatfill, count_sort, count_sort_paired)``
-    for a shape (``moe_sorting_flydsl`` selects between them per call)."""
+    """Build all sorting launchers for one static shape.
+
+    max_tokens sizes the mesh_flatfill constexpr token loop.
+    """
     build_kw = dict(
         experts=num_experts,
         tokens=max_tokens,
