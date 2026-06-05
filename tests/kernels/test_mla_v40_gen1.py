@@ -350,6 +350,7 @@ def _run_v40_decode(batch_size: int, ctx_len: int, *, seed: int = 0):
         lds_size=lds_size,
         stream=torch.cuda.current_stream(),
     )
+    torch.cuda.synchronize()
 
     return final_output[0], out_ref
 

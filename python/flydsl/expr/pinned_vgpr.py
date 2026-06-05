@@ -49,8 +49,8 @@ __all__ = [
     "read_pinned",
     "pinned_mfma_fp8_fp8",
     "pinned_mfma_fp8_fp8_init",
-    "pinned_mfma_f16",
-    "pinned_mfma_f16_init",
+    "pinned_mfma_bf16",
+    "pinned_mfma_bf16_init",
     "pinned_cvt_scalef32_pk_bf16_fp8",
     "pinned_cvt_pk_bf16_f32",
     "pinned_cvt_pk_bf16_f32_from_pinned",
@@ -400,16 +400,17 @@ def read_pinned(src: PinnedRange, *,
     from .typing import T
     ir = _ir_mod()
 
+    clobbers = list(_active_clobbers())
     if src.size == 1:
         return _llvm_mod().inline_asm(
             T.i32, [], f"v_mov_b32 $0, v[{src.lo}]",
-            ",".join(["=v"]),
+            ",".join(["=v"] + clobbers),
             has_side_effects=True,
         )
     if src.size == 2 and as_i64:
         return _llvm_mod().inline_asm(
             T.i64, [], f"v_mov_b64 $0, v[{src.lo}:{src.hi}]",
-            ",".join(["=v"]),
+            ",".join(["=v"] + clobbers),
             has_side_effects=True,
         )
     # Default: tuple of i32 dwords
@@ -418,7 +419,7 @@ def read_pinned(src: PinnedRange, *,
         outs.append(
             _llvm_mod().inline_asm(
                 T.i32, [], f"v_mov_b32 $0, v[{src.lo + i}]",
-                ",".join(["=v"]),
+                ",".join(["=v"] + clobbers),
                 has_side_effects=True,
             )
         )
@@ -585,9 +586,13 @@ def _emit_pinned_mfma_init(opcode: str, a: PinnedRange, b: PinnedRange, d: Pinne
         for i in range(b.size):
             lines.append(f"v_mov_b32 v[{b.lo + i}], ${operand_idx + i}")
         operand_idx += b.size
-    for i in range(4):
-        lines.append(f"v_mov_b32 v[{d.lo + i}], 0")
-    lines.append(f"{opcode} {d.asm_name}, {a.asm_name}, {b.asm_name}, {d.asm_name}")
+    # Use the 3-arg implicit-zero-accumulator encoding (literal `0` in 4th
+    # operand position).  Avoids the SIMD-write -> MFMA-read RAW hazard that
+    # `v_mov_b32 v[d], 0; v_mfma ... v[d:d+3], v[d:d+3]` exposes -- the v_mov
+    # writes through the SIMD pipeline and may not retire before MFMA reads C.
+    # HK uses this same encoding for init mfmas (see store_kv_tile_step and
+    # _do_qk_gemm's first pair).
+    lines.append(f"{opcode} {d.asm_name}, {a.asm_name}, {b.asm_name}, 0")
     if return_ssa:
         lines.append(f"v_mov_b64 $0, v[{d.lo + 0}:{d.lo + 1}]")
         lines.append(f"v_mov_b64 $1, v[{d.lo + 2}:{d.lo + 3}]")
@@ -635,25 +640,25 @@ def pinned_mfma_fp8_fp8_init(a, b, d, a_src, b_src):
                                   a, b, d, a_src, b_src)
 
 
-def pinned_mfma_f16(a, b, d, a_src, b_src, acc_src, *,
-                    return_ssa: Optional[bool] = None):
-    """``v_mfma_f32_16x16x32_f16 d, a, b, d`` (PV path in v40).
+def pinned_mfma_bf16(a, b, d, a_src, b_src, acc_src, *,
+                     return_ssa: Optional[bool] = None):
+    """``v_mfma_f32_16x16x32_bf16 d, a, b, d`` (QK + PV paths in v40).
 
-    A/B operands are size 4 vgprs each (bf16/f16 fragments, 8 elems/lane).
+    A/B operands are size 4 vgprs each (bf16 fragments, 8 elems/lane).
     D is size 4 (f32x4 accumulator).  See ``_emit_pinned_mfma`` for the
     semantics of ``a_src/b_src/acc_src=None`` and ``return_ssa``.
     """
     if a.size != 4 or b.size != 4:
-        raise ValueError(f"f16 mfma needs A/B size 4; got {a.size}/{b.size}")
-    return _emit_pinned_mfma("v_mfma_f32_16x16x32_f16",
+        raise ValueError(f"bf16 mfma needs A/B size 4; got {a.size}/{b.size}")
+    return _emit_pinned_mfma("v_mfma_f32_16x16x32_bf16",
                              a, b, d, a_src, b_src, acc_src,
                              return_ssa=return_ssa)
 
 
-def pinned_mfma_f16_init(a, b, d, a_src, b_src, *, return_ssa: bool = True):
+def pinned_mfma_bf16_init(a, b, d, a_src, b_src, *, return_ssa: bool = True):
     if a.size != 4 or b.size != 4:
-        raise ValueError(f"f16 mfma needs A/B size 4; got {a.size}/{b.size}")
-    return _emit_pinned_mfma_init("v_mfma_f32_16x16x32_f16",
+        raise ValueError(f"bf16 mfma needs A/B size 4; got {a.size}/{b.size}")
+    return _emit_pinned_mfma_init("v_mfma_f32_16x16x32_bf16",
                                   a, b, d, a_src, b_src,
                                   return_ssa=return_ssa)
 
@@ -675,7 +680,7 @@ def pinned_cvt_scalef32_pk_bf16_fp8(dst: PinnedRange, src_dw, scale_dw, *, opsel
     """
     if dst.size != 1:
         raise ValueError(f"pinned cvt dst must be size 1; got {dst.size}")
-    op_sel_str = "op_sel:[0,0,1]" if opsel else ""
+    op_sel_str = "op_sel:[1,0,0]" if opsel else ""
     asm = "\n".join([
         f"v_cvt_scalef32_pk_bf16_fp8 {dst.asm_name}, $0, $1 {op_sel_str}",
         "s_nop 0",
@@ -764,6 +769,11 @@ def pinned_v_mul_f32(dst: PinnedRange, factor_src):
         f"v_mul_f32_e32 v[{dst.lo + i}], $0, v[{dst.lo + i}]"
         for i in range(dst.size)
     ]
+    # Per-call clobbers force LLVM to order this mul AFTER any prior
+    # pinned-asm that wrote into the active layout (e.g. PV mfmas writing
+    # oaccu in place).  Without these, has_side_effects alone is not
+    # enough -- LLVM treats two side-effecting asm ops with disjoint
+    # operand/clobber lists as reorderable.
     _llvm_mod().inline_asm(
         None, [_to_ir(factor_src)], "\n".join(asm_lines),
         ",".join(["v"]), has_side_effects=True,

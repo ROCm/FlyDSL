@@ -158,8 +158,8 @@ def kn_pinned_vgpr_smoke(
     # ---- pinned_mfma_fp8_fp8_init (3-arg form) ----
     d2 = pv.pinned_mfma_fp8_fp8_init(a_pin, b_pin, d_pin, a_src, b_src)
 
-    # ---- pinned_mfma_f16 (bf16 PV variant) ----
-    d3 = pv.pinned_mfma_f16(a4_pin, b4_pin, d_pin, a4_src, b4_src, acc_src)
+    # ---- pinned_mfma_bf16 (bf16 PV variant) ----
+    d3 = pv.pinned_mfma_bf16(a4_pin, b4_pin, d_pin, a4_src, b4_src, acc_src)
 
     # ---- pinned_cvt_scalef32_pk_bf16_fp8 (low + high opsel) ----
     src_dw = buffer_ops.buffer_load(a_rsrc, tid, vec_width=1, dtype=T.i32)
