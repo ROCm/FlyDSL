@@ -14,9 +14,6 @@ The port mirrors gemm2_a4w4.cuh's atomic path instruction-for-instruction:
   * ``s_waitcnt vmcnt(23/22)`` + ``s_barrier`` cross-wave fences.
   * K=512 = 2 K-tiles fully unrolled; 32 ``mfma.scale.f32.16x16x128.f8f6f4``.
   * atomic bf16 epilog: LDS cshuffle -> ``global.atomic.fadd.v2bf16`` * topk weight.
-
-Reference IR: kernels/gemm2_port_ref/hip_gemm2_bm32.ll
-Design notes: kernels/gemm2_port_ref/PORT_DESIGN.md
 """
 
 import flydsl.compiler as flyc
