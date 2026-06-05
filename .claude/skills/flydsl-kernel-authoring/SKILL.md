@@ -18,6 +18,15 @@ FlyDSL is a Python DSL and MLIR-based compiler for writing high-performance GPU 
 **Target GPU**: gfx942 (MI300X, CDNA3), gfx950 (MI350, CDNA4)
 **Python**: 3.12, ROCm 7.2
 
+**Scope (read this first)**: This skill is the **reference** — the full layout-algebra API
+surface, per-op tables, MFMA/copy-atom catalogs, environment variables, and an exhaustive
+troubleshooting list. Reach for it to *look something up* while writing or reviewing kernel
+code. If instead you want a *guided, step-by-step procedure* that turns a kernel requirement
+into a finished, tested kernel (classify -> skeleton -> compute -> control flow -> test), use
+the **flydsl-tile-programming** skill, which is the wizard companion to this reference. For
+diagnosing a kernel that already compiles but produces NaN/inf/wrong results, use the
+**debug-flydsl-kernel** skill.
+
 ---
 
 ## 1. Architecture and Compilation

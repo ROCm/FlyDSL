@@ -19,6 +19,10 @@ list(LENGTH FLYDSL_BACKENDS _n_backends)
 if(_n_backends EQUAL 0)
   message(FATAL_ERROR "FLYDSL_BACKENDS is empty — at least one backend is required.")
 endif()
+if(_n_backends GREATER 5)
+  message(FATAL_ERROR "FLYDSL_FOR_EACH_BACKEND supports at most 5 backends.")
+endif()
+
 set(_FLYDSL_BACKENDS_ALLOWED rocdl)
 foreach(_b ${FLYDSL_BACKENDS})
   if(NOT _b IN_LIST _FLYDSL_BACKENDS_ALLOWED)
@@ -45,9 +49,11 @@ foreach(_backend ${FLYDSL_BACKENDS})
   include("${CMAKE_CURRENT_LIST_DIR}/backends/${_backend}.cmake")
 endforeach()
 
-# ---- Assemble FLYDSL_BACKENDS_TUPLE preprocessor define ----
-# Produces e.g. FLYDSL_BACKENDS_TUPLE=(rocdl) or (rocdl,myvendor)
-# C++ code uses FOR_EACH_BACKEND(MACRO, FLYDSL_BACKENDS_TUPLE) to iterate.
-string(JOIN "," _backends_joined ${FLYDSL_BACKENDS})
-set(FLYDSL_BACKENDS_TUPLE "(${_backends_joined})")
-add_compile_definitions(FLYDSL_BACKENDS_TUPLE=${FLYDSL_BACKENDS_TUPLE})
+# ---- Assemble backend preprocessor defines ----
+# C++ code uses FLYDSL_FOR_EACH_BACKEND(MACRO) to iterate over these.
+add_compile_definitions(FLYDSL_BACKEND_COUNT=${_n_backends})
+set(_backend_index 0)
+foreach(_backend ${FLYDSL_BACKENDS})
+  add_compile_definitions(FLYDSL_BACKEND_${_backend_index}=${_backend})
+  math(EXPR _backend_index "${_backend_index} + 1")
+endforeach()
