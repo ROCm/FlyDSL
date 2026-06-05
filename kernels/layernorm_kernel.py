@@ -720,7 +720,7 @@ def _build_layernorm_quant_module(
         mean = sum_val / n_float
         var = sumsq_val / n_float - mean * mean
         var = (var < c_zero_f).select(c_zero_f, var)
-        rstd = (var + eps_c).rsqrt(fastmath=fm_fast)
+        rstd = fmath.rsqrt(var + eps_c, fastmath=fm_fast)
 
         thread_row_max = c_zero_f
         for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):

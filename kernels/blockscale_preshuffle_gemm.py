@@ -252,7 +252,7 @@ def compile_blockscale_preshuffle_gemm(
             k0_base = base_k_bytes // c64_b
             k0 = k0_base + ku
             k1 = lane_div_16
-            coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], fx.Index(0))
+            coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], fx.Int32(0))
             idx_pack = crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
             b16 = _buffer_load_vec(
                 buffer_ops,
