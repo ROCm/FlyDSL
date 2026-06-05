@@ -554,6 +554,18 @@ def rcp(res, arg, **kw):
     return _op(res=res, arg=_to_ir(arg), **kw)
 
 
+def s_memrealtime(**kw):
+    """Read the 64-bit fixed-frequency real-time counter (``llvm.amdgcn.s.memrealtime``).
+
+    Returns an i64 ``ir.Value`` of ticks.  Used for in-kernel phase timing
+    (diff consecutive reads -> elapsed ticks; scale to wall-clock externally).
+    """
+    from ..._mlir.dialects import llvm as _llvm
+    from ..typing import T
+
+    return _llvm.call_intrinsic(T.i64, "llvm.amdgcn.s.memrealtime", [], [], [], **kw)
+
+
 @dsl_loc_tracing
 def perm_b32(src_hi, src_lo, sel, **kw):
     """Wrapper for ``llvm.amdgcn.perm`` returning one i32 lane value."""
