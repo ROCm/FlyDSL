@@ -73,6 +73,7 @@ _HIP = "mxfp4_moe_g2_a4w4_NE385_H7168_E512_TOPK9_"
 VARIANTS = [
     pytest.param(32, False, _HIP + "BM32_ATOMIC", id="bm32"),
     pytest.param(16, True, _HIP + "BM16_ATOMIC_NT", id="bm16nt"),
+    pytest.param(32, True, _HIP + "BM32_ATOMIC_NT", id="bm32nt"),
 ]
 
 # Compiled launchers reused across tests, keyed by (BM, use_nt).
