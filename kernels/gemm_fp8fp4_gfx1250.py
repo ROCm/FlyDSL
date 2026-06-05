@@ -13,7 +13,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm
+from flydsl._mlir.dialects import fly, llvm, scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
@@ -98,6 +98,8 @@ def compile_fp8fp4_gemm(
     b_streaming: bool = False,
     scale_load_path: str = "tdm",
     fp8_schedule: str = "auto",
+    m_oob_clip: bool = False,
+    m_oob_store: str = "buffer",
 ):
     """Compile an FP4/FP8/A8W4 GEMM kernel with TDM async copy.
 
@@ -148,6 +150,13 @@ def compile_fp8fp4_gemm(
         raise ValueError(f"num_buffers must be 2, 3, or 4, got {num_buffers}")
     if split_k < 1:
         raise ValueError(f"split_k must be >= 1, got {split_k}")
+    # m_oob_clip (non-tile-aligned M): buffer-store clips via num_records; the
+    # split_k>1 atomic path writes a raw global ptr (no num_records) so it is
+    # predicated per-lane (row < M) instead.
+    if m_oob_store not in ("buffer", "tdm_tail"):
+        raise ValueError(f"m_oob_store must be 'buffer' or 'tdm_tail', got {m_oob_store!r}")
+    if m_oob_store == "tdm_tail" and not (m_oob_clip and use_tdm_store and split_k == 1):
+        raise ValueError("m_oob_store='tdm_tail' requires m_oob_clip=True, use_tdm_store=True, split_k=1")
 
     use_cluster = cluster_m > 1 or cluster_n > 1
     if use_cluster:
@@ -621,6 +630,7 @@ def compile_fp8fp4_gemm(
                 workgroup_mask=a_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
                 early_timeout=True,
+                oob_outer_bound=(i32_m if m_oob_clip else None),
             )
 
         def make_desc_b(memref, k_base):
@@ -659,6 +669,7 @@ def compile_fp8fp4_gemm(
                 lds_byte_offset=arith.index(row_start * lds_a_stride_bytes),
                 atomic_barrier_enable=atomic_barrier_enable,
                 early_timeout=True,
+                oob_outer_bound=(i32_m if m_oob_clip else None),
             )
 
         def make_desc_b_half(memref, k_base, n_half: int):
@@ -2010,10 +2021,19 @@ def compile_fp8fp4_gemm(
             addr_idx = 0
             for acc_idx, vec_base, m_off, wn in _sub_tiles:
                 sub8 = _get_acc_sub8(final_accs, acc_idx, vec_base)
-                if const_expr(_bf16_out):
-                    addr_idx += _atomic_add_acc_vec8_to_buffer(sub8, addrs[addr_idx])
+                n_slots = 1 if _bf16_out else 2
+                addr_arg = addrs[addr_idx] if _bf16_out else addrs[addr_idx : addr_idx + 2]
+                # Atomics use a raw global ptr (no num_records clip); for m_oob_clip
+                # predicate per-lane so rows >= M (this sub-tile's row) are skipped.
+                if const_expr(m_oob_clip):
+                    row = blk_m + warp_m_base + arith.index(m_off) + lane16
+                    if_op = scf.IfOp(row < m_idx, [], has_else=False)
+                    with ir.InsertionPoint(if_op.then_block):
+                        _atomic_add_acc_vec8_to_buffer(sub8, addr_arg)
+                        scf.YieldOp([])
                 else:
-                    addr_idx += _atomic_add_acc_vec8_to_buffer(sub8, addrs[addr_idx : addr_idx + 2])
+                    _atomic_add_acc_vec8_to_buffer(sub8, addr_arg)
+                addr_idx += n_slots
 
         def grouped_accs_to_row_major(accs_grouped):
             row_major = [None] * n_accs
@@ -2167,6 +2187,7 @@ def compile_fp8fp4_gemm(
                 num_warps=1,
                 lds_byte_offset=d_warp_off_sgpr,
                 for_store=True,
+                oob_outer_bound=(i32_m if m_oob_clip else None),
             )
 
         # TDM descriptor lane layout: dgroup0 = [predicate, lds_addr, addr_lo, addr_hi].
@@ -2621,7 +2642,7 @@ def compile_fp8fp4_gemm(
             _ptpc_sa, _ptpc_sb = _ptpc_scale_box[0]
             accs = epilogue_apply_ptpc_scale(accs, _ptpc_sa, _ptpc_sb)
 
-        if const_expr(use_tdm_store):
+        def _emit_tdm_store():
             if const_expr(d_need_epilogue_fence):
                 _pipeline_fence(outstanding=0)
             rocdl.sched_barrier(0)
@@ -2629,7 +2650,8 @@ def compile_fp8fp4_gemm(
             rocdl.s_wait_dscnt(0)
             tdm_ops.tensor_store_2d(d_desc)
             tdm_ops.tensor_wait(0)
-        else:
+
+        def _emit_buffer_store():
             rocdl.sched_barrier(0)
             if const_expr(epi_addrs_box[0] is None):
                 epi_addrs_box[0] = epilogue_prepare_addrs()
@@ -2637,6 +2659,25 @@ def compile_fp8fp4_gemm(
                 epilogue_atomic_adds(accs, epi_addrs_box[0])
             else:
                 epilogue_stores(accs, epi_addrs_box[0])
+
+        # m_oob_clip output modes (regular TDM store can't OOB-clip rows >= M on
+        # this gfx1250 stepping):
+        #   off / "buffer": single path (TDM when aligned, else buffer num_records clip).
+        #   "tdm_tail": full tiles keep the fast TDM store; the <=1 partial last
+        #               M-tile (uniform per workgroup) falls back to buffer-store.
+        if const_expr(use_tdm_store and not m_oob_clip):
+            _emit_tdm_store()
+        elif const_expr(use_tdm_store and m_oob_clip and m_oob_store == "tdm_tail"):
+            full_tile = (blk_m + arith.index(tile_m)) <= m_idx
+            if_op = scf.IfOp(full_tile, [], has_else=True)
+            with ir.InsertionPoint(if_op.then_block):
+                _emit_tdm_store()
+                scf.YieldOp([])
+            with ir.InsertionPoint(if_op.else_block):
+                _emit_buffer_store()
+                scf.YieldOp([])
+        else:
+            _emit_buffer_store()
 
     cache_tag = (
         data_format,
@@ -2664,6 +2705,8 @@ def compile_fp8fp4_gemm(
         b_streaming,
         scale_load_path,
         fp8_schedule,
+        m_oob_clip,
+        m_oob_store,
     )
 
     @flyc.jit
@@ -2753,6 +2796,8 @@ def compile_ptpc_gemm(
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
     split_k: int = 1,
+    m_oob_clip: bool = False,
+    m_oob_store: str = "buffer",
 ):
     """Compile a PTPC (per-token per-channel) GEMM kernel.
 
@@ -2791,6 +2836,8 @@ def compile_ptpc_gemm(
         expert_sched_mode=expert_sched_mode,
         atomic_barrier_enable=atomic_barrier_enable,
         split_k=split_k,
+        m_oob_clip=m_oob_clip,
+        m_oob_store=m_oob_store,
     )
 
 

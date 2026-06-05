@@ -55,6 +55,7 @@ def preshuffle_e8m0_scale(
     scale_k_per_tile: int = 4,
     WMMA_DIM: int = 16,
     coalesced: bool = False,
+    row_align: int = None,
 ) -> torch.Tensor:
     """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access.
 
@@ -63,8 +64,16 @@ def preshuffle_e8m0_scale(
     """
     if coalesced:
         return preshuffle_e8m0_scale_coalesced(scale, block=warp_tile)
-    _, K_scale = scale.shape
+    rows, K_scale = scale.shape
     assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
+    # Accept an unpadded row count (M for a_scale / N for b_scale): pad rows to
+    # row_align (the GEMM reads tile_m-granular tiles, so callers pass row_align=tile_m)
+    # with E8M0 127 (=1.0). Padding rows feed only discarded output rows. No-op when
+    # already aligned. Defaults to warp_tile (the minimum the reshape needs).
+    align = row_align if row_align is not None else warp_tile
+    if rows % align != 0:
+        pad = _align_up(rows, align) - rows
+        scale = torch.cat([scale, torch.full((pad, K_scale), 127, dtype=scale.dtype, device=scale.device)], dim=0)
     SCALES_PER_WMMA = 4
     wmma_rep = warp_tile // WMMA_DIM
     k_groups = K_scale // scale_k_per_tile
@@ -1389,6 +1398,187 @@ def test_ptpc_a8w4_gemm_splitk(split_k):
     """PTPC A8W4 split-K: identity-scale K-loop + epilogue sa*sb + atomic add."""
     _run_ptpc_gemm_test(
         128, 256, 2048, 128, 256, 128, 2, 4, num_buffers=2, out_dtype="bf16", split_k=split_k, data_format="a8w4"
+    )
+
+
+# ---------------------------------------------------------------------------
+# M-pad removal (m_oob_clip): host passes a non-tile-aligned M; A/C (and ptpc
+# sa) are allocated at the real M. A-load TDM skips rows>=M, sa buffer_load
+# OOB->0, C buffer_store clips via num_records. N,K stay tile-aligned.
+# ---------------------------------------------------------------------------
+_DT = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+_MPAD_MS = [1, 16, 31, 64, 65, 100, 127, 128, 129, 130, 192, 255, 256, 257, 384, 500, 1000, 2048]
+
+
+def _assert_mpad(c_real, ref, out_dtype):
+    c = c_real.float()
+    ref_f = ref.to(_DT[out_dtype]).float()
+    peak = float(ref_f.abs().max())
+    if out_dtype in ("bf16", "f16"):
+        torch.testing.assert_close(c, ref_f, rtol=2e-2, atol=max(5e-2, 2e-2 * peak))
+    else:
+        torch.testing.assert_close(c, ref_f, rtol=1e-3, atol=max(1e-2, ref.shape[-1] * 0.6))
+
+
+def _run_ptpc_mpad(
+    M,
+    N,
+    K,
+    *,
+    data_format="fp8",
+    out_dtype="bf16",
+    m_oob_store="buffer",
+    split_k=1,
+    tile_m=128,
+    tile_n=128,
+    tile_k=128,
+    m_warp=2,
+    n_warp=2,
+    num_buffers=4,
+):
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"requires gfx1250, got {arch}")
+    assert N % tile_n == 0 and K % tile_k == 0, "M-pad test keeps N,K tile-aligned"
+    # split_k accumulates via atomic add into f32 (predicated per-lane on row < M).
+    kernel_out_dtype = "f32" if split_k > 1 else out_dtype
+    torch.manual_seed(0)
+    a = random_fp8_data(M, K)
+    b = fp4_utils.random_fp4_packed(N, K) if data_format == "a8w4" else random_fp8_data(N, K)
+    sa = (0.5 + torch.rand(M, dtype=torch.float32)).contiguous()
+    sb = (0.5 + torch.rand(N, dtype=torch.float32)).contiguous()
+    ref = reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K)
+    pack_b = 2 if data_format == "a8w4" else 1
+    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
+    c_gpu = torch.zeros(M, N, dtype=_DT[kernel_out_dtype], device="cuda")  # real M; zero for atomic
+    launch = compile_ptpc_gemm(
+        M=M,
+        N=N,
+        K=K,
+        data_format=data_format,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+        out_dtype=kernel_out_dtype,
+        split_k=split_k,
+        m_oob_clip=True,
+        m_oob_store=m_oob_store,
+    )
+    launch(c_gpu, a.cuda(), b_ps.cuda(), sa.cuda(), sb.cuda(), M, N, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+    _assert_mpad(c_gpu[:M].cpu(), ref, kernel_out_dtype)
+
+
+def _run_mxscale_mpad(
+    M,
+    N,
+    K,
+    *,
+    out_dtype="bf16",
+    m_oob_store="buffer",
+    tile_m=128,
+    tile_n=128,
+    tile_k=128,
+    m_warp=2,
+    n_warp=2,
+    num_buffers=4,
+):
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"requires gfx1250, got {arch}")
+    assert N % tile_n == 0 and K % tile_k == 0, "M-pad test keeps N,K tile-aligned"
+    torch.manual_seed(0)
+    a = random_fp8_data(M, K)
+    b = random_fp8_data(N, K)
+    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)  # real M, unpadded
+    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+    ref = reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K)
+    skt = tile_k // SCALE_BLOCK
+    # a_scale stays UNPADDED host-side; preshuffle pads rows to tile_m (the GEMM
+    # reads tile_m-granular scale tiles for the partial last M-tile). N is aligned.
+    as_ps = preshuffle_e8m0_scale(a_scale, tile_m // m_warp, scale_k_per_tile=skt, row_align=tile_m)
+    bs_ps = preshuffle_e8m0_scale(b_scale, tile_n // n_warp, scale_k_per_tile=skt)
+    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K)
+    c_gpu = torch.zeros(M, N, dtype=_DT[out_dtype], device="cuda")  # real M
+    launch = compile_mxscale_gemm(
+        data_format="fp8",
+        M=M,
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+        out_dtype=out_dtype,
+        m_oob_clip=True,
+        m_oob_store=m_oob_store,
+    )
+    launch(c_gpu, a.cuda(), b_ps.cuda(), as_ps.cuda(), bs_ps.cuda(), M, N, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+    _assert_mpad(c_gpu[:M].cpu(), ref, out_dtype)
+
+
+@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
+@pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
+@pytest.mark.parametrize("M", _MPAD_MS)
+def test_ptpc_fp8_gemm_mpad(M, out_dtype, m_oob_store):
+    _run_ptpc_mpad(M, 256, 512, out_dtype=out_dtype, m_oob_store=m_oob_store)
+
+
+@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
+@pytest.mark.parametrize("M", _MPAD_MS)
+def test_ptpc_a8w4_gemm_mpad(M, m_oob_store):
+    _run_ptpc_mpad(M, 256, 512, data_format="a8w4", m_warp=2, n_warp=4, num_buffers=2, m_oob_store=m_oob_store)
+
+
+@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
+@pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
+@pytest.mark.parametrize("M", _MPAD_MS)
+def test_mxfp8_gemm_mpad(M, out_dtype, m_oob_store):
+    _run_mxscale_mpad(M, 256, 512, out_dtype=out_dtype, m_oob_store=m_oob_store)
+
+
+@pytest.mark.parametrize("split_k", [2, 4])
+@pytest.mark.parametrize("M", [1, 64, 129, 192, 257, 500])
+def test_ptpc_fp8_gemm_splitk_mpad(M, split_k):
+    # split_k atomic output predicated per-lane on row < M (m_oob_store ignored).
+    _run_ptpc_mpad(M, 256, 2048, m_warp=2, n_warp=4, num_buffers=2, split_k=split_k)
+
+
+# Tile/warp-config diversity: the per-warp partial-tile clip uses
+# warp_tile_m = tile_m // m_warp, so M must be exercised against different warp
+# boundaries. Existing mpad tests are all m_warp=2 (warp_tile_m=64); these add
+# warp_tile_m in {128 (single M-warp / tile_m=256), 32 (fine 4-way split)}.
+_MPAD_WARP_CFGS = [
+    # (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
+    (128, 128, 128, 1, 4, 4),  # warp_tile_m=128: single M-warp, no M split
+    (128, 128, 128, 4, 2, 2),  # warp_tile_m=32: fine-grained M warps
+    (256, 128, 128, 2, 2, 2),  # tile_m=256, warp_tile_m=128
+]
+# Boundary-diverse M for warp_tile_m in {32, 128}: partial/full/OOB warps + aligned.
+_MPAD_WARP_MS = [1, 33, 64, 100, 129, 200, 256, 333]
+
+
+@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
+@pytest.mark.parametrize("tile_m,tile_n,tile_k,m_warp,n_warp,num_buffers", _MPAD_WARP_CFGS)
+@pytest.mark.parametrize("M", _MPAD_WARP_MS)
+def test_ptpc_fp8_gemm_mpad_warps(M, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, m_oob_store):
+    _run_ptpc_mpad(
+        M,
+        256,
+        512,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+        m_oob_store=m_oob_store,
     )
 
 
