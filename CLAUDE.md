@@ -183,15 +183,12 @@ kernel-selection pattern.
 
 ## Kernel Entry Points
 
-- **Paged attention decode**: `kernels/pa_decode_fp8.py` (incl. persistent FP8 scheduling); primary regression harness is `tests/kernels/test_pa.py`. Sliding-window support lives in `kernels/pa_decode_swa.py`, a backend module imported by `pa_decode_fp8.py` (`compile_pa_decode_sw`/`compile_pa_decode_sw_reduce`) and exercised through the fp8 kernel's `sliding_window` path, not a separate entry point.
-- **Flash/MLA attention**: `kernels/flash_attn_generic.py`, `kernels/flash_attn_gfx950.py`, `kernels/mla_fwd_decode.py`, `kernels/mla_fwd_decode_m16x8_fp8_fp8.py`.
-- **GEMM (CDNA)**: `kernels/preshuffle_gemm.py`, `kernels/preshuffle_gemm_v2.py`, `kernels/blockscale_preshuffle_gemm.py`, `kernels/hgemm_splitk.py`, `kernels/splitk_hgemm.py`, `kernels/small_m_hgemm.py`.
-- **FP8 GEMM (CDNA4)**: `kernels/fp8_gemm_4wave.py`, `kernels/fp8_gemm_8wave.py` (row-wise-scaled FP8 matmul; shared helpers in `kernels/fp8_gemm_utils.py`).
-- **RDNA GEMM (gfx11*/gfx120*, wave32 WMMA)**: `kernels/rdna3_f16_gemm.py` (gfx11* RDNA3/RDNA3.5, legacy v16-operand WMMA ABI), `kernels/rdna_f16_gemm.py` and `kernels/rdna_fp8_preshuffle_gemm.py` (gfx120x RDNA4, v8-operand ABI); regression harness is `tests/kernels/test_rdna_gemm.py`.
-- **gfx1250 GEMM/MoE**: `kernels/gemm_common_gfx1250.py`, `kernels/gemm_fp8fp4_gfx1250.py`, `kernels/wmma_gemm_gfx1250.py`, `kernels/moe_gemm_2stage_*_gfx1250.py` (`_common_`, `_mxscale_`, `_wmma_`).
-- **MoE**: `kernels/moe_gemm_2stage.py`, `kernels/moe_blockscale_2stage.py`, `kernels/mixed_moe_gemm_2stage.py`, `kernels/moe_sorting_kernel.py`, `kernels/topk_gating_softmax_kernel.py`; shared types in `kernels/moe_common.py`.
-- **Elementwise / reductions / fused quant**: `kernels/layernorm_kernel.py`, `kernels/rmsnorm_kernel.py`, `kernels/softmax_kernel.py`, `kernels/fused_rope_cache_kernel.py`, `kernels/qk_norm_rope_quant.py` (fused RMSNorm + RoPE + FP8 quant), `kernels/silu_and_mul_fq.py` (fused gate-act-mul + quant).
-- **Communication**: `kernels/custom_all_reduce.py` (Python shim) over `kernels/custom_all_reduce_kernel.py` (signal-protocol multi-GPU all-reduce).
+This is routing guidance, not a complete kernel inventory. Search the current `kernels/` tree before edits; keep user-facing catalogs in `docs/prebuilt_kernels_guide.md`.
+
+- **Attention**: start paged-decode changes in `kernels/pa_decode_fp8.py` and `tests/kernels/test_pa.py`; sliding-window is a backend mode imported by `pa_decode_fp8.py`, not a separate public entry point.
+- **GEMM / MoE**: choose by architecture and dtype first (CDNA MFMA, RDNA wave32 WMMA, gfx1250 TDM/WMMA/MX-scale). `tests/kernels/test_rdna_gemm.py` shows gfx11* vs gfx120* dispatch; reuse topical `*_common.py` / `*_utils.py` helpers.
+- **Other kernels**: keep regression tests close to touched `kernels/` modules; preserve host-shim vs device-kernel boundaries for multi-GPU communication (`custom_all_reduce.py` wraps the lower-level implementation).
+- **New families**: add focused `tests/kernels/test_*.py` coverage, update `docs/prebuilt_kernels_guide.md` for public APIs, and only add durable routing rules here when they prevent likely agent mistakes.
 
 ## Kernel Authoring Conventions
 
