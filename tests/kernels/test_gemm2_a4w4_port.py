@@ -24,7 +24,6 @@ these are heavy device tests (l2_device).
 import logging
 import os
 import sys
-import time
 
 import pytest
 import torch
@@ -181,18 +180,43 @@ def _run_hip(t, out=None):
     return out
 
 
-def _median_us(fn, warmup=15, iters=60):
-    for _ in range(warmup):
-        fn()
+def _graph_median_us(fn, warmup=8, replays=100, reps=20):
+    """Median per-replay GPU time (microseconds) using a HIP/CUDA graph.
+
+    ``fn`` enqueues exactly one kernel on the current stream. We warm up on a
+    side stream (to finish any lazy init before capture), capture a single
+    ``fn()`` into a CUDA graph, then time batches of ``replays`` graph replays
+    with CUDA events. Graph replay removes per-launch host overhead, and event
+    timing measures pure GPU time, so this isolates the kernel itself.
+
+    Note: the kernel atomic-accumulates into ``out`` and replays are not zeroed,
+    so the accumulator saturates to inf over many replays. That does not affect
+    the (data-independent) GEMM timing.
+    """
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        for _ in range(warmup):
+            fn()
+    torch.cuda.current_stream().wait_stream(s)
     torch.cuda.synchronize()
-    ts = []
-    for _ in range(iters):
-        s = time.perf_counter()
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
         fn()
-        torch.cuda.synchronize()
-        ts.append(time.perf_counter() - s)
-    ts.sort()
-    return ts[len(ts) // 2] * 1e6
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    samples = []
+    for _ in range(reps):
+        start.record()
+        for _ in range(replays):
+            g.replay()
+        end.record()
+        end.synchronize()
+        samples.append(start.elapsed_time(end) / replays * 1e3)  # ms total -> us/replay
+    samples.sort()
+    return samples[len(samples) // 2]
 
 
 def test_smoke():
@@ -223,11 +247,14 @@ def test_accuracy_vs_hip(srt):
 
 
 @pytest.mark.skipif(not HAS_AITER, reason="aiter required for the HIP gemm2 reference")
-@pytest.mark.parametrize("srt", [4096])
+# srt = roundup(M*TOPK, BM) for test.py's KIMI-K2.5 M-list {4,8,16,32,64,128,256}
+# plus a large context (M=16384 tokens -> srt=147456). TOPK=9, BM=32: the gemm2
+# down-proj processes the expanded+padded tokens.
+@pytest.mark.parametrize("srt", [64, 96, 160, 288, 576, 1152, 2304, 147456])
 def test_performance(srt):
-    """Wall-clock vs HIP at a GPU-saturating size. Reports the ratio and guards
-    against a large regression (loose bound — wall-clock includes host launch
-    overhead; pure GPU-kernel time is closer/faster, see PORT_DESIGN.md)."""
+    """CUDA-graph (GPU-event timed) kernel performance vs HIP at a GPU-saturating
+    size. Graph replay removes host launch overhead so this reflects pure
+    GPU-kernel time. Reports the ratio and guards against a large regression."""
     t = _make_inputs(srt=srt, seed=3)
     out = torch.zeros(t["M"], N_OUT, dtype=torch.bfloat16, device="cuda")
     launch = _compile_port(t, out)
@@ -264,10 +291,15 @@ def test_performance(srt):
             HIP_KERNEL_NAME,
         )
 
-    hip_us = _median_us(f_hip)
-    port_us = _median_us(f_port)
+    hip_us = _graph_median_us(f_hip)
+    port_us = _graph_median_us(f_port)
     ratio = port_us / hip_us
-    _LOG.info("gemm2 a4w4 srt=%d  HIP=%.1f us  port=%.1f us  port/HIP=%.2fx", srt, hip_us, port_us, ratio)
-    # Loose regression guard (saturated wall-clock; port is typically <=1.05x and
-    # faster on pure GPU time). Fail only on a large regression.
+    _LOG.info(
+        "gemm2 a4w4 srt=%d  HIP=%.1f us  port=%.1f us  port/HIP=%.2fx (cuda-graph)",
+        srt,
+        hip_us,
+        port_us,
+        ratio,
+    )
+    # Loose regression guard. Fail only on a large regression.
     assert ratio < 1.5, f"port too slow vs HIP: {ratio:.2f}x ({port_us:.1f} vs {hip_us:.1f} us)"

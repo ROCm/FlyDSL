@@ -137,6 +137,23 @@ def _lds_swizzle_mask(row):
     return (row & fx.Int32(14)) << fx.Int32(3)
 
 
+def _issue_a_load_lds(aq_rsrc, saq, slot, kt, car0, lane, wave):
+    """Issue one A->LDS tile load (sub=0): ``raw.ptr.buffer.load.lds`` into
+    s_Aq[slot]. Pulled out of _gemm2_body so it can be issued before the
+    cumsum-gated branch (the op is side-effecting and cannot be sunk back)."""
+    lane_div_8 = lane // fx.Int32(8)
+    lane_mod_8 = lane % fx.Int32(8)
+    lds_row = wave * fx.Int32(BM // 4)
+    mask = _lds_swizzle_mask(lds_row + lane_div_8)
+    voffset = ((lane_mod_8 * fx.Int32(16)) ^ mask) + car0 * fx.Int32(K // 2)
+    base_i32 = fx.Int32(memref_dialect.extract_aligned_pointer_as_index(saq.get()))
+    off_i32 = fx.Int32(slot * SAQ_SLOT_BYTES) + lds_row * fx.Int32(KH_TILE)
+    lds_ptr = _lds_ptr3(base_i32, off_i32)
+    rocdl.raw_ptr_buffer_load_lds(
+        aq_rsrc, lds_ptr, fx.Int32(16), voffset, fx.Int32(kt * KH_TILE), fx.Int32(0), fx.Int32(0)
+    )
+
+
 def compile_gemm2_a4w4_port():
     allocator = SmemAllocator(None, arch="gfx950", global_sym_name="gemm2port_smem")
     lds_off = allocator._align(allocator.ptr, 16)
@@ -163,6 +180,22 @@ def compile_gemm2_a4w4_port():
         lane = tx_i32 % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))  # wave == wave_n
 
+        # ── issue A->LDS as early as possible, BEFORE the cumsum-gated branch ──
+        # raw.ptr.buffer.load.lds is side-effecting (writes LDS), so the compiler
+        # cannot sink it back into the then-block. Issuing it here overlaps the
+        # A->LDS HBM latency with the cumsum load + bound check, shrinking the
+        # K-loop's first cross-wave barrier wait for A (the dominant fixed
+        # per-workgroup cost in the latency-bound small-M regime). A->LDS depends
+        # only on bx/lane (not cumsum/eids); for padding blocks it loads
+        # harmlessly into LDS and the early-return below still skips all compute.
+        m_row0 = (bx_i32 // fx.Int32(NUM_N_BLOCKS)) * fx.Int32(BM)
+        car0 = m_row0 + wave * fx.Int32(BM // 4) + (lane // fx.Int32(8))
+        aq_rsrc = buffer_ops.create_buffer_resource(arg_aq, max_size=False, num_records_bytes=fx.Index(AQ_BYTES))
+        saq = SmemPtr(allocator.get_base(), lds_off, T.i8, shape=(kStages * SAQ_SLOT_BYTES,))
+        _issue_a_load_lds(aq_rsrc, saq, 0, 0, car0, lane, wave)
+        _issue_a_load_lds(aq_rsrc, saq, 1, 1, car0, lane, wave)
+        rocdl.sched_barrier(0)
+
         # total_m_blocks = cumsum[0] / BM ; bound = total_m_blocks * NUM_N_BLOCKS
         cumsum0 = llvm.load(T.i32, _global_ptr1(arg_cumsum, fx.Int32(0)))
         total_m_blocks = cumsum0 // fx.Int32(BM)
@@ -174,7 +207,6 @@ def compile_gemm2_a4w4_port():
             _gemm2_body(
                 allocator,
                 lds_off,
-                arg_aq,
                 arg_ascale,
                 arg_bq,
                 arg_bscale,
@@ -230,7 +262,6 @@ def compile_gemm2_a4w4_port():
 def _gemm2_body(
     allocator,
     lds_off,
-    arg_aq,
     arg_ascale,
     arg_bq,
     arg_bscale,
@@ -243,8 +274,6 @@ def _gemm2_body(
     lane,
     wave,
 ):
-    c0 = fx.Int32(0)
-
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
     n_block_idx = bx_i32 % fx.Int32(NUM_N_BLOCKS)
     m_block_idx = bx_i32 // fx.Int32(NUM_N_BLOCKS)
@@ -253,7 +282,7 @@ def _gemm2_body(
     m_row = m_block_idx * fx.Int32(BM)
 
     # ── buffer resources (exact num_bytes) ──────────────────────────────────
-    aq_rsrc = buffer_ops.create_buffer_resource(arg_aq, max_size=False, num_records_bytes=fx.Index(AQ_BYTES))
+    # (A_q resource + A->LDS loads are issued by the kernel before the branch.)
     ascale_rsrc = buffer_ops.create_buffer_resource(
         arg_ascale, max_size=False, num_records_bytes=fx.Index(ASCALE_BYTES)
     )
@@ -268,8 +297,6 @@ def _gemm2_body(
     saq = SmemPtr(lds_base, lds_off, T.i8, shape=(kStages * SAQ_SLOT_BYTES,))
     lds_acc = SmemPtr(lds_base, lds_off, T.f32, shape=(LDS_ACC_FLOATS,))
 
-    lane_div_8 = lane // fx.Int32(8)
-    lane_mod_8 = lane % fx.Int32(8)
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
 
@@ -293,32 +320,7 @@ def _gemm2_body(
     chunk_base = m_row // fx.Int32(32)
     a_scale_s_base0 = rocdl.readfirstlane(T.i32, chunk_base * fx.Int32(kAS_per_chunk_dw) * fx.Int32(4))
 
-    # cached_actual_row[0] (sub=0): m_row + wave*(BM/4) + 0 + lane/8
-    car0 = m_row + wave * fx.Int32(BM // 4) + lane_div_8
-
-    # ── issue_a_load_lds(slot, kt) ──────────────────────────────────────────
-    def issue_a_load_lds(slot, kt):
-        # sub=0: lds_row = wave*(BM/4) + 0 ; row_off = lane/8
-        lds_row = wave * fx.Int32(BM // 4)
-        mask = _lds_swizzle_mask(lds_row + lane_div_8)
-        voffset = ((lane_mod_8 * fx.Int32(16)) ^ mask) + car0 * fx.Int32(K // 2)
-        # LDS dst pointer = base + slot*SAQ_SLOT_BYTES + lds_row*KH_TILE (bytes)
-        base_i32 = fx.Int32(memref_dialect.extract_aligned_pointer_as_index(saq.get()))
-        off_i32 = fx.Int32(slot * SAQ_SLOT_BYTES) + lds_row * fx.Int32(KH_TILE)
-        lds_ptr = _lds_ptr3(base_i32, off_i32)
-        rocdl.raw_ptr_buffer_load_lds(
-            aq_rsrc,
-            lds_ptr,
-            fx.Int32(16),
-            voffset,
-            fx.Int32(kt * KH_TILE),
-            c0,
-            c0,
-        )
-
-    issue_a_load_lds(0, 0)
-    issue_a_load_lds(1, 1)
-    rocdl.sched_barrier(0)
+    # (A->LDS for both slots is issued by the kernel before the in-range branch.)
 
     # ── a_scale (atomic) : v_voff = ((lane/16)*16 + lane%16)*4 ───────────────
     v_voff_scale = ((lane_div_16 * fx.Int32(16)) + lane_mod_16) * fx.Int32(4)
@@ -441,6 +443,28 @@ def _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, 
     lane_mod_16 = lane % fx.Int32(16)
     lds_base = _lds_base_ptr3(lds_acc.get())
 
+    tx_i32 = arith.index_cast(T.i32, gpu.thread_id("x"))
+    m_lane = tx_i32 // fx.Int32(32)
+    n_lane = tx_i32 % fx.Int32(32)
+    col_start = n_lane * fx.Int32(2)
+    stids_base = _global_base_ptr1(arg_stids)
+    sweights_base = _global_base_ptr1(arg_sweights)
+    out_base = _global_base_ptr1(arg_out)
+
+    M_REPS = BM // 8  # 4
+    # Prefetch sorted_token_ids / sorted_weights BEFORE the cshuffle stores and
+    # both LDS barriers. These read-only loads depend only on m_row/tid, so
+    # issuing them up front (invariant => freely hoistable, matching HIP's
+    # const __restrict__ inputs) overlaps their global latency with the store +
+    # barriers instead of exposing it in the dependent atomic loop. The epilog
+    # is ~half of the small-M kernel stall, so this is the main small-M lever.
+    packed = []
+    weight = []
+    for mr in range_constexpr(M_REPS):
+        sorted_pos = m_row + fx.Int32(mr * 8) + m_lane
+        packed.append(llvm.load(T.i32, _gep1(stids_base, sorted_pos * fx.Int32(4)), invariant=True))
+        weight.append(llvm.load(T.f32, _gep1(sweights_base, sorted_pos * fx.Int32(4)), invariant=True))
+
     # pre-store fence+barrier: all waves done reading s_Aq before lds_acc reuse
     # (HIP run_one __syncthreads() before apply_atomic_bf16_epilog).
     rocdl.barrier()
@@ -457,24 +481,11 @@ def _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, 
 
     rocdl.barrier()
 
-    # read back + weighted atomic add
-    tx_i32 = arith.index_cast(T.i32, gpu.thread_id("x"))
-    m_lane = tx_i32 // fx.Int32(32)
-    n_lane = tx_i32 % fx.Int32(32)
-    col_start = n_lane * fx.Int32(2)
-
-    stids_base = _global_base_ptr1(arg_stids)
-    sweights_base = _global_base_ptr1(arg_sweights)
-    out_base = _global_base_ptr1(arg_out)
-
-    M_REPS = BM // 8  # 4
+    # read back + weighted atomic add (token_id / weight prefetched above)
     for mr in range_constexpr(M_REPS):
         row_in_block = fx.Int32(mr * 8) + m_lane
-        sorted_pos = m_row + row_in_block
-        packed = llvm.load(T.i32, _gep1(stids_base, sorted_pos * fx.Int32(4)))
-        token_id = packed & fx.Int32(0x00FFFFFF)
+        token_id = packed[mr] & fx.Int32(0x00FFFFFF)
         valid = arith.cmpi(arith.CmpIPredicate.slt, token_id, i32_M)
-        weight = llvm.load(T.f32, _gep1(sweights_base, sorted_pos * fx.Int32(4)))
         if_op = scf.IfOp(valid, [], has_else=False)
         with ir.InsertionPoint(if_op.then_block):
             row_base_addr = token_id * fx.Int32(N_OUT) + n_block_idx * fx.Int32(BN) + col_start
@@ -482,7 +493,7 @@ def _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, 
                 # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
                 idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
                 v2 = Vec(llvm.load(T.vec(2, T.f32), _gep3(lds_base, idx0 * fx.Int32(4))))
-                pk = Vec.from_elements([v2[0] * weight, v2[1] * weight], fx.Float32).to(fx.BFloat16)
+                pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 off = (row_base_addr + fx.Int32(s * 64)) * fx.Int32(2)  # bf16 byte offset
                 out_ptr = _gep1(out_base, off)
                 llvm.AtomicRMWOp(

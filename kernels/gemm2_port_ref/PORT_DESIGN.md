@@ -230,3 +230,33 @@ pattern: compile against a throwaway buffer, then zero the real out and call onc
 /tmp/iter_gemm2.sh  → syncs kernel to remote, runs /tmp/run_compile_gemm2.sh
 (COMPILE_ONLY=1 + FLYDSL_DUMP_IR), dumps to /tmp/gemm2_dump/.
 Driver: /tmp/drive_gemm2.py. HIP ref rebuild: /tmp/emit_hip_ir.sh.
+
+## SMALL-M LATENCY OPTIMIZATION (post-port perf work)
+The 1:1 port matched HIP structurally but was ~1.3× slower at tiny latency-bound
+sizes (M≤32, kernels 4–6µs; crossover at M=64 where it already beat HIP). ATT
+(rocprofv3 advanced_thread_trace + hotspot_analyzer) region breakdown showed the
+**epilog = ~48% of small-M stalls** and the kernel is latency-bound (occupancy
+LDS-bound at 5 waves/SIMD, identical to HIP). Two bit-exact latency-hiding
+changes closed the gap:
+
+1. **Early A→LDS** — issue `raw.ptr.buffer.load.lds` before the cumsum-gated
+   early-return branch. The op is side-effecting so LLVM cannot sink it back
+   (pure resource-creation hoists ARE sunk by MachineSink — verified, inert);
+   this overlaps A→LDS HBM latency with the cumsum load + bound check.
+2. **Epilog token/weight prefetch** — load `sorted_token_ids`/`sorted_weights`
+   (invariant, read-only) at epilog entry, before the cshuffle stores and both
+   LDS barriers, instead of in the dependent atomic loop. They depend only on
+   m_row/tid, so their global latency overlaps the store+barriers. **Main lever.**
+
+Result (interleaved same-process rocprofv3, port absolute median time):
+M=4 5.92→4.96µs, M=16 6.36→5.32µs (~16% faster). port/HIP ratio: M=4 1.32→~1.0×,
+M=16 1.30→~1.0×, M=32 1.27→~1.13× (M=32 is the awkward 252-wg/256-CU occupancy
+point), M=64 0.96×, M=256 0.91→0.86×. Output still **bit-exact**; 4/4 pytest pass.
+
+Tried and reverted (no benefit): merging the 2 K-loop barriers (unsafe — HIP
+comments them "correctness fence, not a perf knob" — and perf-neutral since the
+kernel is memory-latency bound, not barrier-bound).
+
+**Measurement note:** per-process rocprofv3 at 4–6µs is dominated by GPU-clock
+state (±10%); use an interleaved same-process driver (`port(); hip()` in one loop
+under one trace) and track the port's absolute median as the stable signal.
