@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""1:1 FlyDSL port of aiter PR #3470 ``gemm2_a4w4`` (MXFP4 MoE down-proj, gfx950).
+"""FlyDSL port of aiter PR #3470 ``gemm2_a4w4`` (MXFP4 MoE down-proj, gfx950).
 
-Target instance (pinned, hardcoded constants):
-    ``mxfp4_moe_g2_a4w4_NE385_H7168_E512_TOPK9_BM32_ATOMIC``
-    launch_atomic<MAX_M=655360, NE=385, K=512, N_OUT=7168, TOPK=9, BM=32,
-                  kUseNT=false, kXcdSwizzle=0>
+Parametrized over the launch_atomic specialization:
+    ``launch_atomic<MAX_M=655360, NE=385, K=512, N_OUT=7168, TOPK=9, BM, kUseNT>``
+Supported instances (atomic path):
+  * BM=32, kUseNT=false -> ``...TOPK9_BM32_ATOMIC``        (compile_gemm2_a4w4_port(BM=32))
+  * BM=16, kUseNT=true  -> ``...TOPK9_BM16_ATOMIC_NT``     (compile_gemm2_a4w4_port(BM=16, use_nt=True))
 
 The port mirrors gemm2_a4w4.cuh's atomic path instruction-for-instruction:
   * 4 ``make.buffer.rsrc`` (A_q, A_scale, B_q, B_scale) with exact num_bytes.
-  * A -> LDS via ``raw.ptr.buffer.load.lds`` (2 slots), swizzled.
-  * B / scales via ``raw.ptr.buffer.load.v4i32`` / ``.i32``.
+  * A -> LDS via ``raw.ptr.buffer.load.lds`` (2 slots), swizzled (BM16: 2 waves).
+  * B / scales via ``raw.ptr.buffer.load.v4i32`` / ``.i32`` (NT: B aux=2).
   * ``s_waitcnt vmcnt(23/22)`` + ``s_barrier`` cross-wave fences.
-  * K=512 = 2 K-tiles fully unrolled; 32 ``mfma.scale.f32.16x16x128.f8f6f4``.
+  * K=512 = 2 K-tiles fully unrolled; 32 (BM32) / 16 (BM16) MFMAs.
   * atomic bf16 epilog: LDS cshuffle -> ``global.atomic.fadd.v2bf16`` * topk weight.
 """
 
@@ -26,13 +27,12 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
-# ── pinned compile-time constants (BM32 atomic instance) ────────────────────
+# ── shape constants (BM-independent) ─────────────────────────────────────────
 MAX_M = 655360
 NE = 385
 K = 512  # gemm2 contraction = inter_dim
 N_OUT = 7168  # gemm2 output dim = model_dim
 TOPK = 9
-BM = 32
 
 BN = 256
 BK = 256
@@ -41,8 +41,7 @@ KH_TILE = BK // 2  # 128 packed bytes per K-tile
 NUM_N_BLOCKS = N_OUT // 256  # 28
 K_TILES_TOTAL = K // BK  # 2
 kStages = 2
-kSubBlocks = BM // 32  # 1
-kMChunks = BM // 16  # 2
+_A_ROWS_PER_WAVE = 8  # each loading wave streams 8 A rows into LDS
 
 # scale-layout consts (mirror gemm2_a4w4.cuh)
 kBS_c_k1 = (K // 32) // 4 // 2  # 2
@@ -53,16 +52,37 @@ kBS_per_expert_dw = kBS_c_n1 * kBS_stride_n0_dw  # 28672
 kAS_c_k1 = (K // 32) // 4 // 2  # 2
 kAS_per_chunk_dw = kAS_c_k1 * 64  # 128
 
-# buffer resource sizes (bytes) — must match HIP make.buffer.rsrc num_bytes
+# BM-independent buffer resource sizes (bytes) — must match HIP make.buffer.rsrc
 AQ_BYTES = MAX_M * K_HALF  # 167772160
-ASCALE_BYTES = (MAX_M // BM) * kAS_per_chunk_dw * 4  # 10485760
 BQ_BYTES = NE * N_OUT * K_HALF  # 706478080
 BSCALE_BYTES = NE * kBS_per_expert_dw * 4  # 44154880
 
-# LDS: union{ s_Aq[2][32][128] (8KB) , lds_acc[32*256] f32 (32KB) } = 32KB
-LDS_ACC_FLOATS = BM * BN  # 8192
-SAQ_SLOT_BYTES = BM * KH_TILE  # 32*128 = 4096 bytes per slot
-LDS_BYTES = LDS_ACC_FLOATS * 4  # 32768 (union max)
+
+def ascale_bytes(BM):
+    """A_scale buffer-resource num_bytes for a given BM (kAS_bound_div=BM in
+    atomic mode): (MAX_M/BM) * kAS_per_chunk_dw * 4."""
+    return (MAX_M // BM) * kAS_per_chunk_dw * 4
+
+
+def saq_slot_bytes(BM):
+    return BM * KH_TILE  # s_Aq[slot] = BM rows x KH_TILE bytes
+
+
+def lds_bytes(BM):
+    return BM * BN * 4  # union max: lds_acc[BM*BN] f32 (>= 2*saq_slot_bytes)
+
+
+def kmchunks(BM):
+    return 1 if BM == 16 else BM // 16
+
+
+# Back-compat module constants (BM32 defaults; the test imports BM/ASCALE_BYTES).
+BM = 32
+kMChunks = kmchunks(BM)
+SAQ_SLOT_BYTES = saq_slot_bytes(BM)
+LDS_ACC_FLOATS = BM * BN
+LDS_BYTES = lds_bytes(BM)
+ASCALE_BYTES = ascale_bytes(BM)
 
 
 _PTR3 = "!llvm.ptr<3>"
@@ -82,14 +102,8 @@ def _lds_ptr3(base_i32, byte_off_i32):
 
 
 def _lds_base_ptr3(lds_view):
-    """One ptr<3> for the LDS base; offsets via GEP.
-
-    FlyDSL allocates LDS as a ``memref.global`` (SmemAllocator), so the raw
-    addrspace(3) pointer is obtained via extract_aligned_pointer_as_index ->
-    inttoptr. (HIP uses ``getelementptr ... @lds`` on an llvm.mlir.global, which
-    has no inttoptr; ``llvm.addressof`` cannot reference a memref.global, so this
-    one bridge is forced by FlyDSL's LDS model — confirmed by verifier.)
-    """
+    """One ptr<3> for the LDS base; offsets via GEP. (extract_aligned_pointer ->
+    inttoptr is forced by FlyDSL's memref.global LDS model.)"""
     base_i32 = fx.Int32(memref_dialect.extract_aligned_pointer_as_index(lds_view))
     return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(fx.Int64(base_i32)))
 
@@ -106,12 +120,7 @@ def _s_barrier_bare():
 
 
 def _global_base_ptr1(arg):
-    """One ptr<1> base for a global tensor (single memref->ptr conversion).
-
-    Mirrors HIP, which addresses the index/scalar tensors via plain addrspace(1)
-    GEP+load from the kernel-arg pointer (only A_q/A_scale/B_q/B_scale get buffer
-    resources). One inttoptr per arg is the irreducible memref->raw-ptr bridge.
-    """
+    """One ptr<1> base for a global tensor (single memref->ptr conversion)."""
     base_idx = buffer_ops.extract_base_index(arg, address_space=1)
     return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), _raw(fx.Int64(base_idx)))
 
@@ -126,37 +135,47 @@ def _global_ptr1(arg, byte_off_i32):
 
 
 def _lds_swizzle_mask(row):
-    """lds_swizzle_mask<ROW_BYTES=BK/2=128>(row): ((row & ((128/16-1)<<1)) << 3).
-
-    kRowMask = ((128/16) - 1) << 1 = 7 << 1 = 14 (0xE). mask = (row & 14) << 3.
-    ``row`` is an fx Int32 expression.
-    """
+    """lds_swizzle_mask<ROW_BYTES=BK/2=128>(row): mask = (row & 14) << 3."""
     return (row & fx.Int32(14)) << fx.Int32(3)
 
 
-def _issue_a_load_lds(aq_rsrc, saq, slot, kt, car0, lane, wave):
-    """Issue one A->LDS tile load (sub=0): ``raw.ptr.buffer.load.lds`` into
-    s_Aq[slot]. Pulled out of _gemm2_body so it can be issued before the
-    cumsum-gated branch (the op is side-effecting and cannot be sunk back)."""
+def _issue_a_load_lds(aq_rsrc, saq, slot, kt, car0, lane, wave, slot_bytes):
+    """Issue one A->LDS tile load: ``raw.ptr.buffer.load.lds`` into s_Aq[slot].
+    Identical formula for BM16/BM32 (lds_row = wave*8); BM16 callers gate this on
+    ``wave < BM/8``. Side-effecting, so it can be issued before the cumsum branch
+    without the compiler sinking it back."""
     lane_div_8 = lane // fx.Int32(8)
     lane_mod_8 = lane % fx.Int32(8)
-    lds_row = wave * fx.Int32(BM // 4)
+    lds_row = wave * fx.Int32(_A_ROWS_PER_WAVE)
     mask = _lds_swizzle_mask(lds_row + lane_div_8)
     voffset = ((lane_mod_8 * fx.Int32(16)) ^ mask) + car0 * fx.Int32(K // 2)
     base_i32 = fx.Int32(memref_dialect.extract_aligned_pointer_as_index(saq.get()))
-    off_i32 = fx.Int32(slot * SAQ_SLOT_BYTES) + lds_row * fx.Int32(KH_TILE)
+    off_i32 = fx.Int32(slot * slot_bytes) + lds_row * fx.Int32(KH_TILE)
     lds_ptr = _lds_ptr3(base_i32, off_i32)
     rocdl.raw_ptr_buffer_load_lds(
         aq_rsrc, lds_ptr, fx.Int32(16), voffset, fx.Int32(kt * KH_TILE), fx.Int32(0), fx.Int32(0)
     )
 
 
-def compile_gemm2_a4w4_port():
-    allocator = SmemAllocator(None, arch="gfx950", global_sym_name="gemm2port_smem")
-    lds_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_off + LDS_BYTES
+def compile_gemm2_a4w4_port(BM=32, use_nt=False):
+    """Compile the gemm2 a4w4 atomic port for the given BM / kUseNT specialization.
 
-    @flyc.kernel(name="gemm2_a4w4_port_bm32_atomic", known_block_size=[256, 1, 1])
+    BM=32, use_nt=False  -> mirrors ...BM32_ATOMIC
+    BM=16, use_nt=True   -> mirrors ...BM16_ATOMIC_NT (production fused-moe pick)
+    """
+    _kMChunks = kmchunks(BM)
+    _slot_bytes = saq_slot_bytes(BM)
+    _lds_acc_floats = BM * BN
+    _lds_bytes = lds_bytes(BM)
+    _ascale_bytes = ascale_bytes(BM)
+    _n_load_waves = BM // _A_ROWS_PER_WAVE  # BM16: 2, BM32: 4
+    _name = f"gemm2_a4w4_port_bm{BM}{'_nt' if use_nt else ''}_atomic"
+
+    allocator = SmemAllocator(None, arch="gfx950", global_sym_name=f"gemm2port_smem_bm{BM}{'_nt' if use_nt else ''}")
+    lds_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_off + _lds_bytes
+
+    @flyc.kernel(name=_name, known_block_size=[256, 1, 1])
     def gemm2_kernel(
         arg_aq: fx.Tensor,
         arg_ascale: fx.Tensor,
@@ -180,17 +199,27 @@ def compile_gemm2_a4w4_port():
         # ── issue A->LDS as early as possible, BEFORE the cumsum-gated branch ──
         # raw.ptr.buffer.load.lds is side-effecting (writes LDS), so the compiler
         # cannot sink it back into the then-block. Issuing it here overlaps the
-        # A->LDS HBM latency with the cumsum load + bound check, shrinking the
-        # K-loop's first cross-wave barrier wait for A (the dominant fixed
-        # per-workgroup cost in the latency-bound small-M regime). A->LDS depends
-        # only on bx/lane (not cumsum/eids); for padding blocks it loads
-        # harmlessly into LDS and the early-return below still skips all compute.
+        # A->LDS HBM latency with the cumsum load + bound check. A->LDS depends
+        # only on bx/lane (not cumsum/eids); padding blocks load harmlessly and
+        # the early-return below still skips all compute. BM16 loads only 16 rows
+        # (waves 0,1), so gate the issue on wave < BM/8.
         m_row0 = (bx_i32 // fx.Int32(NUM_N_BLOCKS)) * fx.Int32(BM)
-        car0 = m_row0 + wave * fx.Int32(BM // 4) + (lane // fx.Int32(8))
+        car0 = m_row0 + wave * fx.Int32(_A_ROWS_PER_WAVE) + (lane // fx.Int32(8))
         aq_rsrc = buffer_ops.create_buffer_resource(arg_aq, max_size=False, num_records_bytes=fx.Index(AQ_BYTES))
-        saq = SmemPtr(allocator.get_base(), lds_off, T.i8, shape=(kStages * SAQ_SLOT_BYTES,))
-        _issue_a_load_lds(aq_rsrc, saq, 0, 0, car0, lane, wave)
-        _issue_a_load_lds(aq_rsrc, saq, 1, 1, car0, lane, wave)
+        saq = SmemPtr(allocator.get_base(), lds_off, T.i8, shape=(kStages * _slot_bytes,))
+
+        def _issue_both_a_loads():
+            _issue_a_load_lds(aq_rsrc, saq, 0, 0, car0, lane, wave, _slot_bytes)
+            _issue_a_load_lds(aq_rsrc, saq, 1, 1, car0, lane, wave, _slot_bytes)
+
+        if const_expr(_n_load_waves < 4):  # BM16: only waves 0,1 hold A rows
+            a_pred = arith.cmpi(arith.CmpIPredicate.slt, wave, fx.Int32(_n_load_waves))
+            a_if = scf.IfOp(a_pred, [], has_else=False)
+            with ir.InsertionPoint(a_if.then_block):
+                _issue_both_a_loads()
+                scf.YieldOp([])
+        else:
+            _issue_both_a_loads()
         rocdl.sched_barrier(0)
 
         # total_m_blocks = cumsum[0] / BM ; bound = total_m_blocks * NUM_N_BLOCKS
@@ -215,6 +244,8 @@ def compile_gemm2_a4w4_port():
                 bx_i32,
                 lane,
                 wave,
+                BM,
+                use_nt,
             )
             scf.YieldOp([])
 
@@ -270,7 +301,15 @@ def _gemm2_body(
     bx_i32,
     lane,
     wave,
+    BM,
+    use_nt,
 ):
+    _kMChunks = kmchunks(BM)
+    _slot_bytes = saq_slot_bytes(BM)
+    _lds_acc_floats = BM * BN
+    _ascale_bytes = ascale_bytes(BM)
+    b_aux = 2 if use_nt else 0  # NT: B_q loads carry aux=2 (non-temporal hint)
+
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
     n_block_idx = bx_i32 % fx.Int32(NUM_N_BLOCKS)
     m_block_idx = bx_i32 // fx.Int32(NUM_N_BLOCKS)
@@ -281,7 +320,7 @@ def _gemm2_body(
     # ── buffer resources (exact num_bytes) ──────────────────────────────────
     # (A_q resource + A->LDS loads are issued by the kernel before the branch.)
     ascale_rsrc = buffer_ops.create_buffer_resource(
-        arg_ascale, max_size=False, num_records_bytes=fx.Index(ASCALE_BYTES)
+        arg_ascale, max_size=False, num_records_bytes=fx.Index(_ascale_bytes)
     )
     bq_rsrc = buffer_ops.create_buffer_resource(arg_bq, max_size=False, num_records_bytes=fx.Index(BQ_BYTES))
     bscale_rsrc = buffer_ops.create_buffer_resource(
@@ -290,15 +329,13 @@ def _gemm2_body(
 
     # ── LDS base ────────────────────────────────────────────────────────────
     lds_base = allocator.get_base()
-    # s_Aq view as bytes (i8); lds_acc view as f32 — same storage (union).
-    saq = SmemPtr(lds_base, lds_off, T.i8, shape=(kStages * SAQ_SLOT_BYTES,))
-    lds_acc = SmemPtr(lds_base, lds_off, T.f32, shape=(LDS_ACC_FLOATS,))
+    saq = SmemPtr(lds_base, lds_off, T.i8, shape=(kStages * _slot_bytes,))
+    lds_acc = SmemPtr(lds_base, lds_off, T.f32, shape=(_lds_acc_floats,))
 
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
 
     # ── s_base computations (readfirstlane'd, uniform per wave) ──────────────
-    # b_load_s_base[j] = ((e*N_OUT + n_block_idx*BN + wave*(BN/4) + j*16) * K_HALF)
     b_load_s_base = []
     for j in range_constexpr(4):
         v = (e * fx.Int32(N_OUT) + n_block_idx * fx.Int32(BN) + wave * fx.Int32(BN // 4) + fx.Int32(j * 16)) * fx.Int32(
@@ -306,18 +343,15 @@ def _gemm2_body(
         )
         b_load_s_base.append(rocdl.readfirstlane(T.i32, v))
 
-    # b_scale_s_base[mw]: mni_base = n_block_idx*(BN/16/2) + wave*(BN/64/2)
     mni_base = n_block_idx * fx.Int32(BN // 16 // 2) + wave * fx.Int32(BN // 64 // 2)
     b_scale_s_base = []
     for mw in range_constexpr(2):
         v = (e * fx.Int32(kBS_per_expert_dw) + (mni_base + fx.Int32(mw)) * fx.Int32(kBS_stride_n0_dw)) * fx.Int32(4)
         b_scale_s_base.append(rocdl.readfirstlane(T.i32, v))
 
-    # a_scale_s_base[0]: chunk_base = m_row/32 (BM!=16); sub=0
-    chunk_base = m_row // fx.Int32(32)
+    # a_scale_s_base[0]: chunk_base = m_row / BM (atomic kAS_bound_div = BM); sub=0
+    chunk_base = m_row // fx.Int32(BM)
     a_scale_s_base0 = rocdl.readfirstlane(T.i32, chunk_base * fx.Int32(kAS_per_chunk_dw) * fx.Int32(4))
-
-    # (A->LDS for both slots is issued by the kernel before the in-range branch.)
 
     # ── a_scale (atomic) : v_voff = ((lane/16)*16 + lane%16)*4 ───────────────
     v_voff_scale = ((lane_div_16 * fx.Int32(16)) + lane_mod_16) * fx.Int32(4)
@@ -332,7 +366,7 @@ def _gemm2_body(
         )
         a_scale_v.append(v)
 
-    # ── b_scale ku0/ku1 : IMM = ku*(kBS_stride_k0_dw*4) ─────────────────────
+    # ── b_scale ku0/ku1 ──────────────────────────────────────────────────────
     b_scale_v = [[None, None], [None, None]]
     for ku in range_constexpr(2):
         imm = ku * (kBS_stride_k0_dw * 4)
@@ -346,8 +380,7 @@ def _gemm2_body(
             )
             b_scale_v[ku][mw] = v
 
-    # ── B loads : v_voff = (lane/16)*256 + (lane%16)*16 + K_BYTE ─────────────
-    # b[slot][j][half] = i32x4 (vector<4xi32>)
+    # ── B loads (NT: cache_modifier=2) : v_voff = (lane/16)*256 + (lane%16)*16 + K_BYTE
     b = [[[None, None] for _ in range(4)] for _ in range(2)]
     for kc in range_constexpr(2):
         k_byte = kc * 2048
@@ -360,62 +393,61 @@ def _gemm2_body(
                     (v_voff_b + fx.Int32(imm)) // fx.Int32(4),
                     vec_width=4,
                     dtype=T.i32,
+                    cache_modifier=b_aux,
                     soffset_bytes=b_load_s_base[j],
                 )
                 b[kc][j][half] = Vec(frag)
 
-    # ── ds_read(slot) -> a[i][k] (i32x4) ─────────────────────────────────────
+    # ── ds_read(slot) -> a[i][k] (i32x4) ; i in [0,kMChunks) ─────────────────
     def issue_a_ds_read(slot):
         lane_row = lane_mod_16
         lane_col = lane_div_16 * fx.Int32(16)
         mask = _lds_swizzle_mask(lane_row)
         base_ptr = _lds_base_ptr3(saq.get())
-        a = [[None, None] for _ in range(kMChunks)]
+        a = [[None, None] for _ in range(_kMChunks)]
         for k in range_constexpr(2):
             lds_col = (lane_col + fx.Int32(k * 64)) ^ mask
-            for i in range_constexpr(kMChunks):
+            for i in range_constexpr(_kMChunks):
                 lds_row = lane_row + fx.Int32(i * 16)
-                byte_off = fx.Int32(slot * SAQ_SLOT_BYTES) + lds_row * fx.Int32(KH_TILE) + lds_col
+                byte_off = fx.Int32(slot * _slot_bytes) + lds_row * fx.Int32(KH_TILE) + lds_col
                 a[i][k] = llvm.load(T.vec(4, T.i32), _gep3(base_ptr, byte_off))  # ds_read_b128
         return a
 
-    # ── MFMA cluster ─────────────────────────────────────────────────────────
+    # ── MFMA cluster (BM16: kMChunks=1 -> i0 only) ───────────────────────────
     mfma_res_ty = T.f32x4
     zero4 = Vec.filled(4, 0.0, fx.Float32)
-    # HIP emits the .v4i32.v4i32 variant: A and B operands are passed as
-    # vector<4xi32> directly (no zero-padding to 8xi32).
+    accm = [[None, None, None, None] for _ in range(_kMChunks)]
 
-    accm = [[None, None, None, None] for _ in range(kMChunks)]
-
-    def mfma_cluster(slot, a, a_scale_aiter, b_scale_slot, init):
+    def mfma_cluster(slot, a, sa, b_scale_slot, init):
         for J in range_constexpr(4):
             mni = J // 2
             in_b = J % 2
             sb = b_scale_slot[mni]
-            sa = a_scale_aiter  # sub=0 -> a_scale_aiter[0]
-            i0, i1 = 0, 1
             b_J0 = b[slot][J][0]
             b_J1 = b[slot][J][1]
             if const_expr(init):
-                accm[i0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_res_ty, [a[i0][0], b_J0, zero4, 4, 4, 0, sa, 0 + in_b, sb]
+                accm[0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                    mfma_res_ty, [a[0][0], b_J0, zero4, 4, 4, 0, sa, 0 + in_b, sb]
                 )
-                accm[i1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_res_ty, [a[i1][0], b_J0, zero4, 4, 4, 1, sa, 0 + in_b, sb]
-                )
+                if const_expr(_kMChunks > 1):
+                    accm[1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                        mfma_res_ty, [a[1][0], b_J0, zero4, 4, 4, 1, sa, 0 + in_b, sb]
+                    )
             else:
-                accm[i0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_res_ty, [a[i0][0], b_J0, accm[i0][J], 4, 4, 0, sa, 0 + in_b, sb]
+                accm[0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                    mfma_res_ty, [a[0][0], b_J0, accm[0][J], 4, 4, 0, sa, 0 + in_b, sb]
                 )
-                accm[i1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    mfma_res_ty, [a[i1][0], b_J0, accm[i1][J], 4, 4, 1, sa, 0 + in_b, sb]
+                if const_expr(_kMChunks > 1):
+                    accm[1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                        mfma_res_ty, [a[1][0], b_J0, accm[1][J], 4, 4, 1, sa, 0 + in_b, sb]
+                    )
+            accm[0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                mfma_res_ty, [a[0][1], b_J1, accm[0][J], 4, 4, 2, sa, 2 + in_b, sb]
+            )
+            if const_expr(_kMChunks > 1):
+                accm[1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                    mfma_res_ty, [a[1][1], b_J1, accm[1][J], 4, 4, 3, sa, 2 + in_b, sb]
                 )
-            accm[i0][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                mfma_res_ty, [a[i0][1], b_J1, accm[i0][J], 4, 4, 2, sa, 2 + in_b, sb]
-            )
-            accm[i1][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                mfma_res_ty, [a[i1][1], b_J1, accm[i1][J], 4, 4, 3, sa, 2 + in_b, sb]
-            )
 
     # ── K loop (2 stages, fully unrolled) ────────────────────────────────────
     for S in range_constexpr(kStages):
@@ -429,13 +461,15 @@ def _gemm2_body(
         a = issue_a_ds_read(slot)
         mfma_cluster(slot, a, a_scale_v[kt], b_scale_v[slot], init=(S == 0))
 
-    # ── epilog: apply_atomic_bf16_epilog (BM=32) ────────────────────────────
+    # ── epilog: apply_atomic_bf16_epilog ─────────────────────────────────────
     saq._view_cache = None
     lds_acc._view_cache = None
-    _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, n_block_idx, wave, lane, i32_M)
+    _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, n_block_idx, wave, lane, i32_M, BM)
 
 
-def _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, n_block_idx, wave, lane, i32_M):
+def _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, n_block_idx, wave, lane, i32_M, BM):
+    _kMChunks = kmchunks(BM)
+    M_REPS = BM // 8  # BM32: 4, BM16: 2
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
     lds_base = _lds_base_ptr3(lds_acc.get())
@@ -448,13 +482,9 @@ def _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, 
     sweights_base = _global_base_ptr1(arg_sweights)
     out_base = _global_base_ptr1(arg_out)
 
-    M_REPS = BM // 8  # 4
     # Prefetch sorted_token_ids / sorted_weights BEFORE the cshuffle stores and
-    # both LDS barriers. These read-only loads depend only on m_row/tid, so
-    # issuing them up front (invariant => freely hoistable, matching HIP's
-    # const __restrict__ inputs) overlaps their global latency with the store +
-    # barriers instead of exposing it in the dependent atomic loop. The epilog
-    # is ~half of the small-M kernel stall, so this is the main small-M lever.
+    # both LDS barriers (invariant => freely hoistable), overlapping their global
+    # latency with the store + barriers instead of exposing it in the atomic loop.
     packed = []
     weight = []
     for mr in range_constexpr(M_REPS):
@@ -462,12 +492,11 @@ def _atomic_bf16_epilog(lds_acc, accm, arg_out, arg_stids, arg_sweights, m_row, 
         packed.append(llvm.load(T.i32, _gep1(stids_base, sorted_pos * fx.Int32(4)), invariant=True))
         weight.append(llvm.load(T.f32, _gep1(sweights_base, sorted_pos * fx.Int32(4)), invariant=True))
 
-    # pre-store fence+barrier: all waves done reading s_Aq before lds_acc reuse
-    # (HIP run_one __syncthreads() before apply_atomic_bf16_epilog).
+    # pre-store fence+barrier (HIP run_one __syncthreads() before the epilog).
     rocdl.barrier()
 
     # write accm -> lds_acc cshuffle (scalar f32 stores, as HIP does)
-    for i in range_constexpr(kMChunks):
+    for i in range_constexpr(_kMChunks):
         row_base = fx.Int32(i * 16) + lane_div_16 * fx.Int32(4)
         for J in range_constexpr(4):
             col = wave * fx.Int32(64) + fx.Int32(J * 16) + lane_mod_16
