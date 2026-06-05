@@ -1,11 +1,12 @@
 ---
 name: format-code
 description: >
-  Format and clean up changed files before committing, matching the project's CI style gate.
+  Format, clean up, and style-check changed files, matching the project's CI style gate.
   Formats Python with black + ruff and C/C++ with clang-format using the repository's
-  .clang-format. Use when the user says "format code", "clean up code", "lint",
-  "format before commit", "/format-code", or mentions black, ruff, clang-format, or CI style
-  failures while tidying their working tree.
+  .clang-format, and can also run check-only to reproduce the CI gate locally without editing
+  files. Use when the user says "format code", "clean up code", "lint", "format before commit",
+  "/format-code", wants to reproduce the "Check Python Code Style" CI job locally, is fixing a
+  CI style failure, is about to push Python changes, or mentions black, ruff, or clang-format.
 ---
 
 # Format Code
@@ -105,6 +106,36 @@ After formatting, print a summary listing:
 
 If any files were staged before formatting, remind the user to re-stage them
 (`git add <files>`) since the in-place edits made them show as modified again.
+
+## Check only (reproduce the CI gate without editing files)
+
+When the user wants to know whether the `Check Python Code Style` CI job will pass -- before
+pushing, or when that job has already failed -- run the wrapper without `--fix` so nothing is
+modified:
+
+```bash
+bash scripts/check_python_style.sh            # check committed Python diff vs origin/main (matches CI)
+bash scripts/check_python_style.sh --install  # install the black/ruff versions CI uses, if missing
+```
+
+What it checks:
+
+- By default it only checks the committed branch range (`origin/main`..HEAD), matching what CI
+  sees on a pushed branch.
+- Add `--include-local` to also check uncommitted, staged, and untracked Python files:
+  `bash scripts/check_python_style.sh --include-local`.
+
+To fix what the check reports, re-run with `--fix` (the formatting path above); add
+`--include-local` to also format local uncommitted/untracked files:
+
+```bash
+bash scripts/check_python_style.sh --fix
+bash scripts/check_python_style.sh --fix --include-local
+```
+
+If local checks pass but PR CI still flags unrelated files, the PR branch is likely behind
+`main`. Fetch `origin/main`, merge it into the PR branch when appropriate, rerun the check,
+then push the merge commit.
 
 ## Notes
 

@@ -198,6 +198,13 @@ class TensorAdaptor:
         self._dyn_leading_dim = -1
         self._is_layout_dynamic = False
 
+        # TODO: this duplicates state the C++ DLTensorAdaptor already owns. The
+        # reusable-slot fast path keeps it Python-side only to avoid building a
+        # heavy DLPack-backed adaptor per launch. Refactor to read the masks
+        # from C++ (single source of truth) once that path is reworked.
+        self._shape_dyn_indices: Tuple[int, ...] = ()
+        self._stride_dyn_indices: Tuple[int, ...] = ()
+
         if dynamic_layout:
             try:
                 self._mark_layout_dynamic(leading_dim=-1, divisibility=1)
@@ -244,19 +251,18 @@ class TensorAdaptor:
             return ctypes.c_void_p, cls._extract_data_ptr
 
         # Dynamic memref: pre-compute the layout-buffer packing plan.
-        # Layout matches C++ buildMemRefDesc: shape i32's then non-leading
-        # stride i32/i64's, little-endian packed.
-        rank = len(adaptor._orig_shape)
-        leading = adaptor._dyn_leading_dim
+        # Layout matches C++ buildMemRefDesc: dynamic-shape i32's (ascending
+        # index) then dynamic-stride i32/i64's (ascending index)
+        shape_dim_indices = adaptor._shape_dyn_indices
+        stride_dim_indices = adaptor._stride_dyn_indices
         use_32bit_stride = bool(adaptor.use_32bit_stride)
-        stride_dim_indices = tuple(d for d in range(rank) if d != leading)
-        shape_size = rank * 4
+        shape_size = len(shape_dim_indices) * 4
         stride_elem = 4 if use_32bit_stride else 8
         buf_ctype = ctypes.c_byte * (shape_size + len(stride_dim_indices) * stride_elem)
 
         import struct as _struct
 
-        shape_codec = _struct.Struct("<" + "i" * rank) if rank else None
+        shape_codec = _struct.Struct("<" + "i" * len(shape_dim_indices)) if shape_dim_indices else None
         if stride_dim_indices:
             stride_codec = _struct.Struct("<" + ("i" if use_32bit_stride else "q") * len(stride_dim_indices))
         else:
@@ -267,13 +273,14 @@ class TensorAdaptor:
             storage,
             _shape_codec=shape_codec,
             _stride_codec=stride_codec,
+            _shape_dims=shape_dim_indices,
             _stride_dims=stride_dim_indices,
             _shape_size=shape_size,
         ):
             tens = t._tensor_keepalive if isinstance(t, cls) else t
             mv = memoryview(storage).cast("b")
             if _shape_codec is not None:
-                _shape_codec.pack_into(mv, 0, *tens.shape)
+                _shape_codec.pack_into(mv, 0, *(tens.shape[d] for d in _shape_dims))
             if _stride_codec is not None:
                 _stride_codec.pack_into(mv, _shape_size, *(tens.stride(d) for d in _stride_dims))
 
@@ -309,7 +316,49 @@ class TensorAdaptor:
         self.tensor_adaptor.mark_layout_dynamic(resolved, divisibility)
         self._dyn_leading_dim = resolved
         self._is_layout_dynamic = True
+        rank = len(self._orig_shape)
+        self._shape_dyn_indices = tuple(range(rank))
+        self._stride_dyn_indices = tuple(d for d in range(rank) if d != resolved)
         return self
+
+    def _normalize_dims_div(self, dims, divisibility, what: str):
+        """Normalize the ``(dims, divisibility)`` argument forms.
+
+        * ``dims=int,  divisibility=int``  — single dimension, single divisibility.
+        * ``dims=list, divisibility=list`` — one-to-one; lists must be equal length.
+        * ``dims=list, divisibility=int``  — the divisibility is broadcast to every dim.
+
+        Negative dimension indices are accepted (Python-style, ``idx + rank``).
+        Returns ``(idx_list, div_list)`` of equal length.
+        """
+        rank = len(self._orig_shape)
+
+        dim_list = [dims] if isinstance(dims, int) else list(dims)
+        if isinstance(divisibility, int):
+            div_list = [divisibility] * len(dim_list)
+        else:
+            if isinstance(dims, int):
+                raise ValueError(f"{what}: divisibility must be an int when dims is a single int")
+            div_list = list(divisibility)
+            if len(div_list) != len(dim_list):
+                raise ValueError(
+                    f"{what}: dims (len {len(dim_list)}) and divisibility "
+                    f"(len {len(div_list)}) must have equal length"
+                )
+
+        normalized = []
+        for d in dim_list:
+            idx = int(d)
+            if idx < 0:
+                idx += rank
+            if idx < 0 or idx >= rank:
+                raise ValueError(f"{what}: dimension index {d} out of range for rank {rank}")
+            normalized.append(idx)
+        divs = [int(x) for x in div_list]
+        for v in divs:
+            if v <= 0 or (v & (v - 1)) != 0:
+                raise ValueError(f"{what}: divisibility {v} must be a power of two")
+        return normalized, divs
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
         # TODO: C++ markLayoutDynamic accumulates dynamic flags across calls
@@ -328,6 +377,53 @@ class TensorAdaptor:
                 "Re-binding leading_dim is not supported yet (see TODO in jit_argument.py)."
             )
         return self._mark_layout_dynamic(leading_dim, divisibility)
+
+    def mark_shape_dynamic(self, dims, divisibility=1):
+        """Mark the *shape* leaf of the given dimension(s) dynamic.
+        Strides and all other dims are left untouched.
+
+        ``dims`` is an int or list of ints (negative indices allowed).
+        ``divisibility`` (a power of two, default 1) is the compile-time
+        alignment guaranteed on each dynamic size, given per-dim or broadcast.
+
+        Examples::
+
+            # GEMM whose M varies per batch: mark M dynamic, keep K static.
+            flyc.from_dlpack(a).mark_shape_dynamic(0)
+
+            # dims 0 and 2 dynamic, both guaranteed multiples of 8.
+            t.mark_shape_dynamic([0, 2], divisibility=8)
+
+            # per-dim divisibility (mode 0 multiple of 16, mode 1 of 8).
+            t.mark_shape_dynamic([0, 1], [16, 8])
+        """
+        idxs, divs = self._normalize_dims_div(dims, divisibility, "mark_shape_dynamic")
+        self.tensor_adaptor.mark_shape_dynamic(idxs, divs)
+        self._shape_dyn_indices = tuple(sorted(set(self._shape_dyn_indices) | set(idxs)))
+        self._is_layout_dynamic = bool(self._shape_dyn_indices or self._stride_dyn_indices)
+        return self
+
+    def mark_stride_dynamic(self, dims, divisibility=1):
+        """Mark the *stride* leaf of the given dimension(s) dynamic. Shapes and all
+        other dims are left untouched.
+
+        ``dims`` is an int or list of ints (negative indices allowed).
+        ``divisibility`` (a power of two, default 1) is the compile-time
+        alignment guaranteed on each dynamic stride, given per-dim or broadcast.
+
+        Examples::
+
+            # Row stride varies but is always a multiple of 16 (e.g. padded rows).
+            flyc.from_dlpack(a).mark_stride_dynamic(0, divisibility=16)
+
+            # Combine with mark_shape_dynamic: M dynamic *and* its stride dynamic.
+            t.mark_shape_dynamic(0).mark_stride_dynamic([0, 1], divisibility=8)
+        """
+        idxs, divs = self._normalize_dims_div(dims, divisibility, "mark_stride_dynamic")
+        self.tensor_adaptor.mark_stride_dynamic(idxs, divs)
+        self._stride_dyn_indices = tuple(sorted(set(self._stride_dyn_indices) | set(idxs)))
+        self._is_layout_dynamic = bool(self._shape_dyn_indices or self._stride_dyn_indices)
+        return self
 
 
 class PointerAdaptor:

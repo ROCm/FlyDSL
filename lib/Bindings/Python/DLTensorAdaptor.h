@@ -336,6 +336,16 @@ public:
     return *this;
   }
 
+  DLTensorAdaptor &markShapeDynamic(nb::list dims, nb::list divisibilities) {
+    markDynamic(shape_, dims, divisibilities);
+    return *this;
+  }
+
+  DLTensorAdaptor &markStrideDynamic(nb::list dims, nb::list divisibilities) {
+    markDynamic(stride_, dims, divisibilities);
+    return *this;
+  }
+
   // Each dim is encoded as a single signed int (no nested tuples) to keep
   // the number of Python objects to ~2N + a couple of containers:
   //   static  → dimSize          (>= 0)
@@ -367,6 +377,24 @@ public:
   }
 
 private:
+  // Mark the listed dimensions of ``dims_`` (shape_ or stride_) dynamic with the
+  // matching divisibility, leaving every other entry unchanged.
+  void markDynamic(std::vector<DimInfo> &dims_, nb::list dims, nb::list divisibilities) {
+    int ndim = static_cast<int>(dims_.size());
+    size_t count = nb::len(dims);
+    if (nb::len(divisibilities) != count) {
+      throw std::runtime_error("markDynamic: dims and divisibilities must have equal length");
+    }
+    isMemrefStale_ = true;
+    for (size_t k = 0; k < count; ++k) {
+      int idx = nb::cast<int>(dims[k]);
+      if (idx < 0 || idx >= ndim) {
+        throw std::runtime_error("markDynamic: dimension index out of range");
+      }
+      dims_[idx].setDynamic(nb::cast<int>(divisibilities[k]));
+    }
+  }
+
   nb::object dlpackCapsule_;
   int32_t alignment_;
   bool use32BitStride_;

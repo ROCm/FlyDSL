@@ -77,7 +77,7 @@ Build from source only if you are developing FlyDSL itself or need a custom MLIR
 Prerequisites for source builds:
 
 - **Build tools**: `cmake` (>=3.20), C++17 compiler, optionally `ninja`
-- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by the build scripts)
+- **Python deps**: `nanobind`, `numpy`, `pybind11` (installed by `scripts/build_llvm.sh`; install them manually if you skip that step)
 
 ```bash
 # Clone ROCm LLVM and build MLIR (takes ~30min with -j64)
@@ -93,6 +93,7 @@ pip install -e .
 If you already have an MLIR build with Python bindings enabled, point to it instead:
 
 ```bash
+pip install nanobind numpy pybind11  # build.sh does not install these
 export MLIR_PATH=/path/to/llvm-project/build-flydsl/mlir_install
 MLIR_PATH=$MLIR_PATH bash scripts/build.sh -j64
 pip install -e .
@@ -102,9 +103,15 @@ pip install -e .
 
 ### Run tests
 
+Tests and examples require `pytest`, `pandas`, and a ROCm build of `torch` (not installed by `pip install -e .`):
+
 ```bash
+pip install pytest pandas
+# torch must be a ROCm build matching your ROCm version (rocm7.2 shown):
+pip install torch --index-url https://download.pytorch.org/whl/rocm7.2
+
 # Run GEMM correctness tests (fast, ~15s)
-bash scripts/run_tests.sh
+python -m pytest tests/kernels/test_preshuffle_gemm.py -m "not large_shape"
 
 # Run performance benchmarks
 bash scripts/run_benchmark.sh
@@ -363,7 +370,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **MoE Blockscale** | `test_moe_blockscale.py` | MoE blockscale 2-stage |
 | **MoE Reduce** | `test_moe_reduce.py` | MoE reduce kernel |
 | **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) — *WIP perf tuning* |
-| **FlashAttention** | `test_flash_attn_func.py` | Flash attention — *WIP perf tuning* |
+| **FlashAttention** | `test_flash_attn_fwd.py` | Flash attention — *WIP perf tuning* |
 | **LayerNorm** | `test_layernorm.py` | LayerNorm (layout API) |
 | **RMSNorm** | `test_rmsnorm.py` | RMSNorm (layout API) |
 | **Softmax** | `test_softmax.py` | Softmax (layout API) |
