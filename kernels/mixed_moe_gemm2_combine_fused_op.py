@@ -181,6 +181,7 @@ class FlyDSLMoeGemm2CombineOp:
         num_valid_ids: torch.Tensor,
         wts_buf: Optional[torch.Tensor] = None,
         dispatch_total_recv: Optional[torch.Tensor] = None,
+        cur_tok: Optional[int] = None,
         bias: Optional[torch.Tensor] = None,
         stream: Optional[torch.cuda.Stream] = None,
     ):
@@ -189,6 +190,10 @@ class FlyDSLMoeGemm2CombineOp:
         ``wts_buf`` 是 dispatch 写入 combine 的 f32[max_recv*k] 权重 buffer，
         None 时回退到 ``comb_op.shmem_disp_out_wts``。
         ``dispatch_total_recv`` 仅 ``full`` 模式使用，``stage1_only`` 忽略。
+        ``cur_tok`` 是本 rank 的本地 token 数（combine Stage 3 的输出行数）。
+        走 ``comb_op.dispatch`` 的路径可省略（op 内部已 stash）；融合 stage-1
+        （如融合 stage-1 单发核，直接写 ``comb_op`` 的 routing 表而不调 dispatch）
+        必须显式传，否则 ``combine_no_stage1`` 找不到 stash 会报错。
 
         返回 ``(out_tok, out_wts)``，等价于 ``comb_op.combine`` 的输出视图。
         """
@@ -206,6 +211,7 @@ class FlyDSLMoeGemm2CombineOp:
             sorted_weights=sorted_weights,
             num_valid_ids=num_valid_ids,
             wts_buf=wts_buf,
+            cur_tok=cur_tok,
             bias=bias,
             stream=stream,
         )
@@ -242,7 +248,7 @@ class FlyDSLMoeGemm2CombineOp:
 
     def _run_stage1_only(self, *, a2, w2, a2_scale, w2_scale,
                          sorted_token_ids, sorted_expert_ids, sorted_weights,
-                         num_valid_ids, wts_buf=None, bias=None, stream=None):
+                         num_valid_ids, wts_buf=None, cur_tok=None, bias=None, stream=None):
         """fused GEMM2 (epilogue P2P scatter) + combine_no_stage1 (Stage 2/3)。"""
         self._ensure_launch_fn()
 
@@ -348,7 +354,7 @@ class FlyDSLMoeGemm2CombineOp:
         # 流量仍走原生 baseline 通道（数据量 ≈ k*4B/token，远小于 token 流量
         # k*hidden_bytes，对 e2e 时间影响微）。
         return comb_op.combine_no_stage1(
-            self._dummy_inp, None, None, enable_weights=True,
+            self._dummy_inp, None, None, cur_tok=cur_tok, enable_weights=True,
         )
 
     def _run_full(self, a2, w2, a2_scale, w2_scale,

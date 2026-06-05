@@ -335,7 +335,7 @@ def make_dispatch_kernel(
                     dest_tok_lane0 = atomic_add_global_at(
                         buffer_load(_r_p2p_tok_off, dest_pe, vec_width=1, dtype=T.i64()), arith.constant(1)
                     )
-            dest_tok_id = readlane(T.i32(), dest_tok_lane0, 0)
+            dest_tok_id = readlane(T.i32(), arith.unwrap(dest_tok_lane0), arith.unwrap(arith.constant(0)))
 
             # Recv-cap overflow guard (mori-parity ``max_total_recv_tokens``).
             # Overflowed slots take the same drop path as duplicate-destPE:
@@ -513,7 +513,7 @@ def make_dispatch_kernel(
                     if is_local:
                         count_addr = addr_out_packed_recv_count + _to_i64(local_expert_id) * 4
                         packed_slot_lane0 = atomic_add_global_at(count_addr, arith.constant(1))
-                packed_slot = readlane(T.i32(), packed_slot_lane0, 0)
+                packed_slot = readlane(T.i32(), arith.unwrap(packed_slot_lane0), arith.unwrap(arith.constant(0)))
 
                 safe_local_expert = arith.select(is_local, local_expert_id, 0)
                 # Linear slot in flat ``packed_recv_x[experts_per_rank, max_tokens_per_expert]``.
