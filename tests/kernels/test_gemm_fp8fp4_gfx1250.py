@@ -1427,7 +1427,6 @@ def _run_ptpc_mpad(
     *,
     data_format="fp8",
     out_dtype="bf16",
-    m_oob_store="buffer",
     split_k=1,
     tile_m=128,
     tile_n=128,
@@ -1465,7 +1464,6 @@ def _run_ptpc_mpad(
         out_dtype=kernel_out_dtype,
         split_k=split_k,
         m_oob_clip=True,
-        m_oob_store=m_oob_store,
     )
     launch(c_gpu, a.cuda(), b_ps.cuda(), sa.cuda(), sb.cuda(), M, N, torch.cuda.current_stream())
     torch.cuda.synchronize()
@@ -1478,7 +1476,7 @@ def _run_mxscale_mpad(
     K,
     *,
     out_dtype="bf16",
-    m_oob_store="buffer",
+    use_tdm_store=True,
     tile_m=128,
     tile_n=128,
     tile_k=128,
@@ -1515,38 +1513,36 @@ def _run_mxscale_mpad(
         n_warp=n_warp,
         num_buffers=num_buffers,
         out_dtype=out_dtype,
+        use_tdm_store=use_tdm_store,
         m_oob_clip=True,
-        m_oob_store=m_oob_store,
     )
     launch(c_gpu, a.cuda(), b_ps.cuda(), as_ps.cuda(), bs_ps.cuda(), M, N, torch.cuda.current_stream())
     torch.cuda.synchronize()
     _assert_mpad(c_gpu[:M].cpu(), ref, out_dtype)
 
 
-@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
 @pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
 @pytest.mark.parametrize("M", _MPAD_MS)
-def test_ptpc_fp8_gemm_mpad(M, out_dtype, m_oob_store):
-    _run_ptpc_mpad(M, 256, 512, out_dtype=out_dtype, m_oob_store=m_oob_store)
+def test_ptpc_fp8_gemm_mpad(M, out_dtype):
+    _run_ptpc_mpad(M, 256, 512, out_dtype=out_dtype)
 
 
-@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
 @pytest.mark.parametrize("M", _MPAD_MS)
-def test_ptpc_a8w4_gemm_mpad(M, m_oob_store):
-    _run_ptpc_mpad(M, 256, 512, data_format="a8w4", m_warp=2, n_warp=4, num_buffers=2, m_oob_store=m_oob_store)
+def test_ptpc_a8w4_gemm_mpad(M):
+    _run_ptpc_mpad(M, 256, 512, data_format="a8w4", m_warp=2, n_warp=4, num_buffers=2)
 
 
-@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
+@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
 @pytest.mark.parametrize("M", _MPAD_MS)
-def test_mxfp8_gemm_mpad(M, out_dtype, m_oob_store):
-    _run_mxscale_mpad(M, 256, 512, out_dtype=out_dtype, m_oob_store=m_oob_store)
+def test_mxfp8_gemm_mpad(M, out_dtype, use_tdm_store):
+    _run_mxscale_mpad(M, 256, 512, out_dtype=out_dtype, use_tdm_store=use_tdm_store)
 
 
 @pytest.mark.parametrize("split_k", [2, 4])
 @pytest.mark.parametrize("M", [1, 64, 129, 192, 257, 500])
 def test_ptpc_fp8_gemm_splitk_mpad(M, split_k):
-    # split_k atomic output predicated per-lane on row < M (m_oob_store ignored).
+    # split_k atomic output predicated per-lane on row < M (auto buffer/atomic path).
     _run_ptpc_mpad(M, 256, 2048, m_warp=2, n_warp=4, num_buffers=2, split_k=split_k)
 
 
@@ -1564,10 +1560,9 @@ _MPAD_WARP_CFGS = [
 _MPAD_WARP_MS = [1, 33, 64, 100, 129, 200, 256, 333]
 
 
-@pytest.mark.parametrize("m_oob_store", ["buffer", "tdm_tail"])
 @pytest.mark.parametrize("tile_m,tile_n,tile_k,m_warp,n_warp,num_buffers", _MPAD_WARP_CFGS)
 @pytest.mark.parametrize("M", _MPAD_WARP_MS)
-def test_ptpc_fp8_gemm_mpad_warps(M, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, m_oob_store):
+def test_ptpc_fp8_gemm_mpad_warps(M, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers):
     _run_ptpc_mpad(
         M,
         256,
@@ -1578,7 +1573,6 @@ def test_ptpc_fp8_gemm_mpad_warps(M, tile_m, tile_n, tile_k, m_warp, n_warp, num
         m_warp=m_warp,
         n_warp=n_warp,
         num_buffers=num_buffers,
-        m_oob_store=m_oob_store,
     )
 
 
