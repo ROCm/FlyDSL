@@ -8,38 +8,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BASE_DIR="$(cd "${REPO_ROOT}/.." && pwd)"
 LLVM_SRC_DIR="$BASE_DIR/llvm-pipeline"
-LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-flydsl"
-LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install}"
-LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install.tgz}"
+LLVM_BUILD_DIR="$LLVM_SRC_DIR/build-coexec-samebank"
+LLVM_INSTALL_DIR="${LLVM_INSTALL_DIR:-$LLVM_SRC_DIR/mlir_install_coexec_samebank}"
+LLVM_INSTALL_TGZ="${LLVM_INSTALL_TGZ:-$LLVM_SRC_DIR/mlir_install_coexec_samebank.tgz}"
 LLVM_PACKAGE_INSTALL="${LLVM_PACKAGE_INSTALL:-1}"
 
-# Remote and branch for the LLVM pipeline checkout.
-LLVM_REMOTE="${LLVM_REMOTE:-https://github.com/AMD-Lightning-Internal/llvm-project.git}"
-LLVM_BRANCH="${LLVM_BRANCH:-amd/dev/aukerbow/CoExecScheduler-staging}"
+if [ ! -d "$LLVM_SRC_DIR" ]; then
+    echo "Error: LLVM source directory not found: $LLVM_SRC_DIR"
+    exit 1
+fi
 
 echo "Base directory: $BASE_DIR"
 echo "LLVM Source:    $LLVM_SRC_DIR"
 echo "LLVM Build:     $LLVM_BUILD_DIR"
 echo "LLVM Install:   $LLVM_INSTALL_DIR"
 echo "LLVM Tarball:   $LLVM_INSTALL_TGZ"
-echo "LLVM Remote:    $LLVM_REMOTE"
-echo "LLVM Branch:    $LLVM_BRANCH"
-
-# 1. Clone / checkout the llvm-pipeline source on the requested branch.
-if [ ! -d "$LLVM_SRC_DIR" ]; then
-    echo "Cloning ${LLVM_REMOTE} (${LLVM_BRANCH}) into ${LLVM_SRC_DIR} ..."
-    git clone --branch "$LLVM_BRANCH" "$LLVM_REMOTE" "$LLVM_SRC_DIR"
-else
-    echo "LLVM source directory already exists; fetching ${LLVM_BRANCH} ..."
-    pushd "$LLVM_SRC_DIR" >/dev/null
-    git fetch origin "$LLVM_BRANCH"
-    git checkout "$LLVM_BRANCH"
-    git pull --ff-only origin "$LLVM_BRANCH"
-    popd >/dev/null
-fi
-
-LLVM_COMMIT_RESOLVED=$(git -C "$LLVM_SRC_DIR" rev-parse HEAD)
-echo "LLVM Commit:    $LLVM_COMMIT_RESOLVED"
 
 # 2. Create Build Directory
 mkdir -p "$LLVM_BUILD_DIR"
@@ -115,9 +98,6 @@ if [[ "${LLVM_PACKAGE_INSTALL}" == "1" ]]; then
   fi
 
   echo "Creating tarball..."
-  # The install tree may still have files whose mtimes change (e.g. Python bytecode caches),
-  # which can cause GNU tar to exit(1) with "file changed as we read it". Treat those as
-  # non-fatal for packaging.
   tar --warning=no-file-changed --warning=no-file-removed --ignore-failed-read \
       -C "$(dirname "${LLVM_INSTALL_DIR}")" \
       -czf "${LLVM_INSTALL_TGZ}" "$(basename "${LLVM_INSTALL_DIR}")"
