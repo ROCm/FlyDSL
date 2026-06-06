@@ -98,7 +98,6 @@ def compile_fp8fp4_gemm(
     b_streaming: bool = False,
     scale_load_path: str = "tdm",
     fp8_schedule: str = "auto",
-    m_oob_clip: bool = False,
 ):
     """Compile an FP4/FP8/A8W4 GEMM kernel with TDM async copy.
 
@@ -622,7 +621,7 @@ def compile_fp8fp4_gemm(
                 workgroup_mask=a_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
                 early_timeout=True,
-                oob_outer_bound=(i32_m if m_oob_clip else None),
+                oob_outer_bound=i32_m,
             )
 
         def make_desc_b(memref, k_base):
@@ -661,7 +660,7 @@ def compile_fp8fp4_gemm(
                 lds_byte_offset=arith.index(row_start * lds_a_stride_bytes),
                 atomic_barrier_enable=atomic_barrier_enable,
                 early_timeout=True,
-                oob_outer_bound=(i32_m if m_oob_clip else None),
+                oob_outer_bound=i32_m,
             )
 
         def make_desc_b_half(memref, k_base, n_half: int):
@@ -2015,16 +2014,13 @@ def compile_fp8fp4_gemm(
                 sub8 = _get_acc_sub8(final_accs, acc_idx, vec_base)
                 n_slots = 1 if _bf16_out else 2
                 addr_arg = addrs[addr_idx] if _bf16_out else addrs[addr_idx : addr_idx + 2]
-                # Atomics use a raw global ptr (no num_records clip); for m_oob_clip
-                # predicate per-lane so rows >= M (this sub-tile's row) are skipped.
-                if const_expr(m_oob_clip):
-                    row = blk_m + warp_m_base + arith.index(m_off) + lane16
-                    if_op = scf.IfOp(row < m_idx, [], has_else=False)
-                    with ir.InsertionPoint(if_op.then_block):
-                        _atomic_add_acc_vec8_to_buffer(sub8, addr_arg)
-                        scf.YieldOp([])
-                else:
+                # Atomics use a raw global ptr (no num_records clip), so predicate
+                # per-lane to skip rows >= M.
+                row = blk_m + warp_m_base + arith.index(m_off) + lane16
+                if_op = scf.IfOp(row < m_idx, [], has_else=False)
+                with ir.InsertionPoint(if_op.then_block):
                     _atomic_add_acc_vec8_to_buffer(sub8, addr_arg)
+                    scf.YieldOp([])
                 addr_idx += n_slots
 
         def grouped_accs_to_row_major(accs_grouped):
@@ -2179,7 +2175,7 @@ def compile_fp8fp4_gemm(
                 num_warps=1,
                 lds_byte_offset=d_warp_off_sgpr,
                 for_store=True,
-                oob_outer_bound=(i32_m if m_oob_clip else None),
+                oob_outer_bound=i32_m,
             )
 
         # TDM descriptor lane layout: dgroup0 = [predicate, lds_addr, addr_lo, addr_hi].
@@ -2652,9 +2648,7 @@ def compile_fp8fp4_gemm(
             else:
                 epilogue_stores(accs, epi_addrs_box[0])
 
-        if const_expr(use_tdm_store and not m_oob_clip):
-            _emit_tdm_store()
-        elif const_expr(use_tdm_store and m_oob_clip):
+        if const_expr(use_tdm_store):
             full_tile = (blk_m + arith.index(tile_m)) <= m_idx
             if_op = scf.IfOp(full_tile, [], has_else=True)
             with ir.InsertionPoint(if_op.then_block):
@@ -2692,7 +2686,6 @@ def compile_fp8fp4_gemm(
         b_streaming,
         scale_load_path,
         fp8_schedule,
-        m_oob_clip,
     )
 
     @flyc.jit
@@ -2715,6 +2708,10 @@ def compile_fp8fp4_gemm(
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = (i32_n + (tile_n - 1)) // tile_n
         gz = split_k
+
+        if const_expr(use_cluster):
+            # Cluster launch needs a cluster-divisible grid
+            gx = ((gx + (cluster_m - 1)) // cluster_m) * cluster_m
 
         cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
         kernel_mxscale_gemm(
@@ -2782,7 +2779,6 @@ def compile_ptpc_gemm(
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
     split_k: int = 1,
-    m_oob_clip: bool = False,
 ):
     """Compile a PTPC (per-token per-channel) GEMM kernel.
 
@@ -2821,7 +2817,6 @@ def compile_ptpc_gemm(
         expert_sched_mode=expert_sched_mode,
         atomic_barrier_enable=atomic_barrier_enable,
         split_k=split_k,
-        m_oob_clip=m_oob_clip,
     )
 
 

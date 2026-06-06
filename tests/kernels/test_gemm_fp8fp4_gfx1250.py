@@ -1402,9 +1402,9 @@ def test_ptpc_a8w4_gemm_splitk(split_k):
 
 
 # ---------------------------------------------------------------------------
-# M-pad removal (m_oob_clip): host passes a non-tile-aligned M; A/C (and ptpc
-# sa) are allocated at the real M. A-load TDM skips rows>=M, sa buffer_load
-# OOB->0, C buffer_store clips via num_records. N,K stay tile-aligned.
+# Non-tile-aligned M (the default, no host M-padding): A/C (and ptpc sa) are
+# allocated at the real M. A-load TDM skips rows>=M, sa buffer_load OOB->0, C
+# buffer_store clips via num_records. N,K stay tile-aligned.
 # ---------------------------------------------------------------------------
 _DT = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 _MPAD_MS = [1, 16, 31, 64, 65, 100, 127, 128, 129, 130, 192, 255, 256, 257, 384, 500, 1000, 2048]
@@ -1434,6 +1434,8 @@ def _run_ptpc_mpad(
     m_warp=2,
     n_warp=2,
     num_buffers=4,
+    cluster_m=1,
+    cluster_n=1,
 ):
     arch = str(get_rocm_arch())
     if arch != "gfx1250":
@@ -1463,7 +1465,8 @@ def _run_ptpc_mpad(
         num_buffers=num_buffers,
         out_dtype=kernel_out_dtype,
         split_k=split_k,
-        m_oob_clip=True,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
     )
     launch(c_gpu, a.cuda(), b_ps.cuda(), sa.cuda(), sb.cuda(), M, N, torch.cuda.current_stream())
     torch.cuda.synchronize()
@@ -1483,6 +1486,8 @@ def _run_mxscale_mpad(
     m_warp=2,
     n_warp=2,
     num_buffers=4,
+    cluster_m=1,
+    cluster_n=1,
 ):
     arch = str(get_rocm_arch())
     if arch != "gfx1250":
@@ -1514,7 +1519,8 @@ def _run_mxscale_mpad(
         num_buffers=num_buffers,
         out_dtype=out_dtype,
         use_tdm_store=use_tdm_store,
-        m_oob_clip=True,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
     )
     launch(c_gpu, a.cuda(), b_ps.cuda(), as_ps.cuda(), bs_ps.cuda(), M, N, torch.cuda.current_stream())
     torch.cuda.synchronize()
@@ -1573,6 +1579,88 @@ def test_ptpc_fp8_gemm_mpad_warps(M, tile_m, tile_n, tile_k, m_warp, n_warp, num
         m_warp=m_warp,
         n_warp=n_warp,
         num_buffers=num_buffers,
+    )
+
+
+#   M=100 -> grid_m 1->2, tile1 fully OOB (rows>=100) under M-multicast
+#   M=129,200,450 -> partial last M-tile, grid divisible
+#   M=256,512 -> tile-aligned
+#   M=257,300 -> grid_m 3->4 (rounded); M=300 also makes tile3 fully OOB
+_MPAD_CLUSTER_MS = [100, 129, 200, 256, 257, 300, 450, 512]
+_MPAD_CLUSTERS = [(2, 2), (2, 4)]
+
+
+@pytest.mark.parametrize("cluster_m,cluster_n", _MPAD_CLUSTERS)
+@pytest.mark.parametrize("M", _MPAD_CLUSTER_MS)
+def test_ptpc_fp8_gemm_mpad_cluster(M, cluster_m, cluster_n):
+    _run_ptpc_mpad(M, 512, 512, m_warp=2, n_warp=2, num_buffers=2, cluster_m=cluster_m, cluster_n=cluster_n)
+
+
+@pytest.mark.parametrize("cluster_m,cluster_n", _MPAD_CLUSTERS)
+@pytest.mark.parametrize("M", _MPAD_CLUSTER_MS)
+def test_ptpc_a8w4_gemm_mpad_cluster(M, cluster_m, cluster_n):
+    _run_ptpc_mpad(
+        M, 512, 512, data_format="a8w4", m_warp=2, n_warp=4, num_buffers=2, cluster_m=cluster_m, cluster_n=cluster_n
+    )
+
+
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("cluster_m,cluster_n", _MPAD_CLUSTERS)
+@pytest.mark.parametrize("M", _MPAD_CLUSTER_MS)
+def test_mxfp8_gemm_mpad_cluster(M, cluster_m, cluster_n, use_tdm_store):
+    _run_mxscale_mpad(
+        M,
+        512,
+        512,
+        m_warp=2,
+        n_warp=2,
+        num_buffers=2,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+        use_tdm_store=use_tdm_store,
+    )
+
+
+@pytest.mark.parametrize("split_k", [2, 4])
+@pytest.mark.parametrize("M", [100, 129, 256, 300, 450])
+def test_ptpc_fp8_gemm_splitk_mpad_cluster(M, split_k):
+    # split_k atomic output (per-lane row<M predicate) combined with cluster>1.
+    _run_ptpc_mpad(M, 512, 2048, m_warp=2, n_warp=2, num_buffers=2, split_k=split_k, cluster_m=2, cluster_n=2)
+
+
+@pytest.mark.parametrize("cluster_m,cluster_n", [(2, 2), (2, 4)])
+@pytest.mark.parametrize("M", [100, 300, 512, 600, 700, 1024])
+def test_ptpc_fp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n):
+    _run_ptpc_mpad(
+        M,
+        1024,
+        512,
+        tile_m=256,
+        tile_n=256,
+        m_warp=2,
+        n_warp=2,
+        num_buffers=2,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+    )
+
+
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("cluster_m,cluster_n", [(2, 2), (2, 4)])
+@pytest.mark.parametrize("M", [100, 300, 512, 600, 700, 1024])
+def test_mxfp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n, use_tdm_store):
+    _run_mxscale_mpad(
+        M,
+        1024,
+        512,
+        tile_m=256,
+        tile_n=256,
+        m_warp=2,
+        n_warp=2,
+        num_buffers=2,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+        use_tdm_store=use_tdm_store,
     )
 
 
