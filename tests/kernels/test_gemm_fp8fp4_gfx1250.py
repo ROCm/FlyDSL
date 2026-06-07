@@ -4,6 +4,7 @@
 Kernel implementation: kernels/gemm_fp8fp4_gfx1250.py
 """
 
+import math
 import os
 import re
 import sys
@@ -33,10 +34,35 @@ if not torch.cuda.is_available():
 SCALE_BLOCK = 32
 
 
+def preshuffle_e8m0_scale_coalesced(scale: torch.Tensor, block: int = 128) -> torch.Tensor:
+    """Lane-major scale layout for direct buffer_load->VGPR.
+
+    Per (M_block=128, K_tile): [group(2), lane16(16), 4 i32], so a buffer_load_b128's
+    16 lanes read 256 contiguous bytes. M = mb*128 + (group*4 + j)*16 + lane16.
+    """
+    M, Ks = scale.shape
+    assert M % block == 0 and Ks % 4 == 0, f"M={M} Ks={Ks} block={block}"
+    assert block == 128, "coalesced scale layout assumes warp_tile=128 (8 subtiles)"
+    Kt = Ks // 4
+    g = scale.view(M // block, 2, 4, 16, Kt, 4)  # [mb, group, j, lane16, kt, spw]
+    g = g.permute(0, 4, 1, 3, 2, 5).contiguous()  # [mb, kt, group, lane16, j, spw]
+    return g.view(M, Ks)
+
+
 def preshuffle_e8m0_scale(
-    scale: torch.Tensor, warp_tile: int, scale_k_per_tile: int = 4, WMMA_DIM: int = 16
+    scale: torch.Tensor,
+    warp_tile: int,
+    scale_k_per_tile: int = 4,
+    WMMA_DIM: int = 16,
+    coalesced: bool = False,
 ) -> torch.Tensor:
-    """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access."""
+    """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access.
+
+    ``coalesced=True`` produces the lane-major layout the scale_load_path
+    "vgpr"/"vgpr_ab_split" buffer_load->VGPR path expects.
+    """
+    if coalesced:
+        return preshuffle_e8m0_scale_coalesced(scale, block=warp_tile)
     _, K_scale = scale.shape
     assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
     SCALES_PER_WMMA = 4
@@ -51,6 +77,101 @@ def preshuffle_e8m0_scale(
 def random_fp8_data(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
     """Generate random FP8/E4M3 data as uint8. Avoids NaN (0x7F/0xFF)."""
     return torch.randint(0, 126, (rows, cols), dtype=torch.uint8, device=device)
+
+
+def _fp8_e4m3fn_byte(value: float) -> int:
+    """Return torch's FP8 E4M3FN byte encoding for a finite scalar."""
+    t = torch.tensor([float(value)], dtype=torch.float8_e4m3fn)
+    byte = int(t.view(torch.uint8).item())
+    if (byte & 0x7F) == 0x7F:
+        raise SystemExit(f"--fill-mode constant {value:g} is outside the finite FP8 E4M3FN range")
+    return byte
+
+
+def _parse_fill_mode(arg: str):
+    """Parse --fill-mode as ('random',) or ('const', value)."""
+    if arg == "random":
+        return ("random",)
+    if arg == "zero":
+        return ("const", 0.0)
+    try:
+        value = float(arg)
+    except ValueError as e:
+        raise SystemExit(f"--fill-mode must be 'random' or a finite float constant, got {arg!r}") from e
+    if not math.isfinite(value):
+        raise SystemExit(f"--fill-mode constant must be finite, got {arg!r}")
+    return ("const", value)
+
+
+def _fp4_e2m1_packed_fill(rows: int, cols: int, value: float) -> torch.Tensor:
+    dense = torch.full((rows, cols), float(value), dtype=torch.float32)
+    return fp4_utils.f32_to_mxfp4(dense).view(torch.uint8)
+
+
+def _random_mxscale_inputs(M: int, N: int, K: int, data_format: str):
+    if data_format == "a8w4":
+        a = random_fp8_data(M, K)
+        b = fp4_utils.random_fp4_packed(N, K)
+    elif data_format == "fp4":
+        a = fp4_utils.random_fp4_packed(M, K)
+        b = fp4_utils.random_fp4_packed(N, K)
+    elif data_format == "fp8":
+        a = random_fp8_data(M, K)
+        b = random_fp8_data(N, K)
+    else:
+        raise ValueError(f"unsupported data_format={data_format!r}")
+    return a, b, fp4_utils.random_e8m0(M, K // SCALE_BLOCK), fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+
+
+def _const_fill_inputs(M, N, K, data_format: str, value: float):
+    """Build constant A/B tensors with neutral E8M0 scales for CLI runs."""
+    if data_format == "fp4":
+        a = _fp4_e2m1_packed_fill(M, K, value)
+        b = _fp4_e2m1_packed_fill(N, K, value)
+    elif data_format == "a8w4":
+        fp8_byte = _fp8_e4m3fn_byte(value)
+        a = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+        b = _fp4_e2m1_packed_fill(N, K, value)
+    elif data_format == "fp8":
+        fp8_byte = _fp8_e4m3fn_byte(value)
+        a = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+        b = torch.full((N, K), fp8_byte, dtype=torch.uint8)
+    else:
+        raise ValueError(f"unsupported data_format={data_format!r}")
+    a_scale = torch.full((M, K // SCALE_BLOCK), 127, dtype=torch.uint8)
+    b_scale = torch.full((N, K // SCALE_BLOCK), 127, dtype=torch.uint8)
+    return a, b, a_scale, b_scale
+
+
+def _fill_mode_inputs(M: int, N: int, K: int, data_format: str, fill_mode: str):
+    fill_spec = _parse_fill_mode(fill_mode)
+    if fill_spec[0] == "const":
+        a, b, a_scale, b_scale = _const_fill_inputs(M, N, K, data_format, fill_spec[1])
+    else:
+        a, b, a_scale, b_scale = _random_mxscale_inputs(M, N, K, data_format)
+    return a, b, a_scale, b_scale, fill_spec
+
+
+def _fill_mode_label(fill_spec, data_format: str) -> str:
+    if fill_spec[0] == "random":
+        return "random (seed=0)"
+    label = f"const={fill_spec[1]:g}, E8M0 byte=127"
+    if data_format in ("fp8", "a8w4"):
+        label += f", FP8 byte=0x{_fp8_e4m3fn_byte(fill_spec[1]):02x}"
+    return label
+
+
+def _has_nonzero_quantized_values(tensor: torch.Tensor, data_format: str) -> bool:
+    convert = fp4_utils.mxfp4_to_f32 if data_format == "fp4" else fp4_utils.fp8_e4m3_to_f32
+    return bool(convert(tensor.view(torch.uint8)).abs().max().item() > 0)
+
+
+def _expect_nonzero_graph_output(a: torch.Tensor, b: torch.Tensor, data_format: str, fill_spec) -> bool:
+    if fill_spec[0] == "random":
+        return True
+    a_format = "fp4" if data_format == "fp4" else "fp8"
+    b_format = "fp8" if data_format == "fp8" else "fp4"
+    return _has_nonzero_quantized_values(a, a_format) and _has_nonzero_quantized_values(b, b_format)
 
 
 def _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, convert_fn, convert_fn_b=None):
@@ -243,6 +364,10 @@ def _run_mxscale_gemm_test(
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
     torch_out_dtype = _dtype_map[out_dtype]
 
+    # Split-K accumulates across workgroups in fp32; half outputs are converted after.
+    kernel_out_dtype = "f32" if (split_k > 1 and out_dtype in ("bf16", "f16")) else out_dtype
+    torch_kernel_dtype = _dtype_map[kernel_out_dtype]
+
     torch.manual_seed(0)
 
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
@@ -287,8 +412,9 @@ def _run_mxscale_gemm_test(
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    _coalesced_scale = scale_load_path in ("vgpr", "vgpr_ab_split")
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
 
     # Preshuffle B data
     K_packed = padded_k // padded_shape["pack_b"]
@@ -299,7 +425,7 @@ def _run_mxscale_gemm_test(
     b_gpu = b.cuda()
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
-    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_out_dtype, device="cuda")
+    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_kernel_dtype, device="cuda")
 
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
@@ -317,7 +443,7 @@ def _run_mxscale_gemm_test(
         cluster_m=cluster_m,
         cluster_n=cluster_n,
         use_tdm_store=use_tdm_store,
-        out_dtype=out_dtype,
+        out_dtype=kernel_out_dtype,
         inst_prefetch=inst_prefetch,
         wave_specialized_tdm=wave_specialized_tdm,
         split_k=split_k,
@@ -327,18 +453,12 @@ def _run_mxscale_gemm_test(
         scale_load_path=scale_load_path,
     )
 
-    # Pre-bind via flyc.compile so the launch goes through the CompiledFunction
-    # ctypes fast path (matches test_blockscale_preshuffle_gemm.py and any
-    # production caller that bench-times this kernel). The slow JitFunction
-    # path adds ~17us of inspect.Signature.bind + _resolve_and_make_cache_key per call,
-    # which would mask genuine kernel timing differences in the bench path.
-    # flyc.compile() launches the kernel once internally to trigger
-    # compilation, so no separate eager call is needed for correctness.
-    c_flat = c_gpu.contiguous().view(-1)
-    a_flat = a_gpu.contiguous().view(-1)
-    b_flat = b_gpu.contiguous().view(-1)
-    as_flat = as_gpu.contiguous().view(-1)
-    bs_flat = bs_gpu.contiguous().view(-1)
+    # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
+    c_flat = c_gpu.contiguous()
+    a_flat = a_gpu.contiguous()
+    b_flat = b_gpu.contiguous()
+    as_flat = as_gpu.contiguous()
+    bs_flat = bs_gpu.contiguous()
 
     flyc.compile(
         launch_fn,
@@ -353,7 +473,8 @@ def _run_mxscale_gemm_test(
     )
     torch.cuda.synchronize()
 
-    c_out = c_gpu[:M, :N].cpu()
+    # Convert the fp32 split-K accumulation back to the requested half dtype.
+    c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
 
     print(
         f"Out stats: min={c_out.float().min():.2f}, max={c_out.float().max():.2f}, "
@@ -374,7 +495,13 @@ def _run_mxscale_gemm_test(
     diff = (c_out_f - ref_f).abs()
     print(f"Abs diff: max={diff.max():.4f}, mean={diff.mean():.4f}")
 
-    cos_sim = torch.nn.functional.cosine_similarity(c_out_f.flatten().unsqueeze(0), ref_f.flatten().unsqueeze(0)).item()
+    # Compute cosine in float64: for large M/N/K with large E8M0 scales the values
+    # (and their squares) overflow float32's accurate-summation range, so an fp32
+    # cosine reduction saturates and can print values outside [-1, 1]. fp64 keeps
+    # the diagnostic meaningful. (Pass/fail is gated by assert_close below, not this.)
+    cos_sim = torch.nn.functional.cosine_similarity(
+        c_out_f.flatten().unsqueeze(0).double(), ref_f.flatten().unsqueeze(0).double()
+    ).item()
     print(f"Cosine similarity: {cos_sim:.6f}")
 
     # Tolerances: FP4 is exact; FP8/A8W4 have FP accumulation error
@@ -510,7 +637,7 @@ def test_mxfp4_metadata_and_spill_regression(out_dtype):
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage"])
+@pytest.mark.parametrize("scale_load_path", ["tdm"])
 def test_mxfp8_gemm(
     M,
     N,
@@ -542,6 +669,32 @@ def test_mxfp8_gemm(
         l2_prefetch_distance=2,
         use_scale_opsel=use_scale_opsel,
         scale_load_path=scale_load_path,
+    )
+
+
+@pytest.mark.parametrize("split_k", [2, 4, 6, 8])
+@pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
+def test_mxfp8_gemm_splitk(split_k, out_dtype):
+    """FP8 split-K: split_k workgroups accumulate partial K-sums into C via atomic add.
+
+    Exercises the atomic epilogue path (use_tdm_store=False). K=2048/tile_k=128 gives
+    every split_k value >= 2 local K-tiles (needed for double buffering).
+    """
+    _run_mxscale_gemm_test(
+        "fp8",
+        128,
+        256,
+        2048,
+        128,
+        256,
+        128,
+        2,
+        4,
+        num_buffers=2,
+        use_tdm_store=False,
+        out_dtype=out_dtype,
+        l2_prefetch_distance=2,
+        split_k=split_k,
     )
 
 
@@ -660,11 +813,10 @@ def test_b_streaming_with_wave_spec_tdm(data_format, M, N, K, tile_m, tile_n, ti
     )
 
 
-@pytest.mark.parametrize("scale_load_path", ["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"])
 @pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [False, True])
-def test_mxfp8_wave_spec_scale_load_paths(scale_load_path, num_buffers, use_tdm_store, use_scale_opsel):
+def test_mxfp8_wave_spec_scale_load_tdm(num_buffers, use_tdm_store, use_scale_opsel):
     _run_mxscale_gemm_test(
         "fp8",
         128,
@@ -681,28 +833,31 @@ def test_mxfp8_wave_spec_scale_load_paths(scale_load_path, num_buffers, use_tdm_
         l2_prefetch_distance=2,
         wave_specialized_tdm=True,
         use_scale_opsel=use_scale_opsel,
-        scale_load_path=scale_load_path,
+        scale_load_path="tdm",
     )
 
 
-def test_mxfp8_ab_split_scale_load_allows_extra_waves():
+@pytest.mark.parametrize("scale_load_path", ["vgpr", "vgpr_ab_split"])
+@pytest.mark.parametrize("cluster_m, cluster_n", [(1, 1), (2, 2)])
+def test_mxfp8_vgpr_scale_load(scale_load_path, cluster_m, cluster_n):
     _run_mxscale_gemm_test(
         "fp8",
-        128,
+        256 * cluster_m,
+        256 * cluster_n,
+        512,
         256,
-        384,
-        128,
         256,
         128,
         2,
-        4,
-        num_buffers=3,
+        2,
+        num_buffers=4,
         use_tdm_store=True,
         out_dtype="bf16",
         l2_prefetch_distance=2,
         wave_specialized_tdm=True,
-        use_scale_opsel=True,
-        scale_load_path="buffer_lds_stage_ab_split",
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+        scale_load_path=scale_load_path,
     )
 
 
@@ -855,11 +1010,11 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         split_k=1,
     )
 
-    c_flat = c_gpu.contiguous().view(-1)
-    a_flat = a_gpu.contiguous().view(-1)
-    b_flat = b_gpu.contiguous().view(-1)
-    as_flat = as_gpu.contiguous().view(-1)
-    bs_flat = bs_gpu.contiguous().view(-1)
+    c_flat = c_gpu.contiguous()
+    a_flat = a_gpu.contiguous()
+    b_flat = b_gpu.contiguous()
+    as_flat = as_gpu.contiguous()
+    bs_flat = bs_gpu.contiguous()
     compiled_exe = flyc.compile(
         launch_fn,
         c_flat,
@@ -914,27 +1069,11 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     )
 
 
-def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None):
-    """Per-launch timer that strips host launch overhead via hipGraph.
-
-    How it works:
-      - Capture a single kernel launch into a hipGraph
-      - Replay it N times in one stream submission burst
-      - Per-launch time = total_burst_time / N
-
-    NB: stream-ordered execution guarantees the N replays serialise — each
-    g.replay() is one submission to the stream and the next one cannot
-    start until the previous one finishes.
-
-    NB: no L2 flush between replays. The whole point of the graph is to
-    measure the kernel in a hot, back-to-back launch scenario (which is
-    what production serving looks like). For cold-cache numbers use the
-    regular _bench_kernel_us with flush_l2=True.
-    """
+def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None, n_per_graph=20):
+    """Per-launch timer via hipGraph: capture n_per_graph launches, replay iters times, single event pair around the whole replay loop."""
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
 
-    # Warmup on the capture stream so the allocator / JIT cache is settled.
     with torch.cuda.stream(capture_stream):
         for _ in range(warmup):
             if prep_fn is not None:
@@ -943,15 +1082,46 @@ def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None):
     torch.cuda.current_stream().wait_stream(capture_stream)
     torch.cuda.synchronize()
 
-    # Capture exactly one kernel launch into the graph.
     g = torch.cuda.CUDAGraph()
     if prep_fn is not None:
         prep_fn()
     with torch.cuda.graph(g, stream=capture_stream):
-        run_fn()
+        for _ in range(n_per_graph):
+            run_fn()
     torch.cuda.synchronize()
 
-    # Time iters replays as one batch.
+    # Sanity guard against empty graph capture.
+    ref_start = torch.cuda.Event(enable_timing=True)
+    ref_end = torch.cuda.Event(enable_timing=True)
+    ref_start.record()
+    for _ in range(n_per_graph):
+        run_fn()
+    ref_end.record()
+    torch.cuda.synchronize()
+    ref_per_launch_us = ref_start.elapsed_time(ref_end) * 1e3 / n_per_graph
+
+    rep_start = torch.cuda.Event(enable_timing=True)
+    rep_end = torch.cuda.Event(enable_timing=True)
+    rep_start.record()
+    g.replay()
+    rep_end.record()
+    torch.cuda.synchronize()
+    first_replay_per_launch_us = rep_start.elapsed_time(rep_end) * 1e3 / n_per_graph
+
+    print(
+        f"SANITY_GRAPH,n_per_graph={n_per_graph},"
+        f"ref_per_launch_us={ref_per_launch_us:.3f},"
+        f"first_replay_per_launch_us={first_replay_per_launch_us:.3f}",
+        file=sys.stderr,
+        flush=True,
+    )
+    if first_replay_per_launch_us < 1.0 and ref_per_launch_us > 2.0:
+        raise RuntimeError(
+            f"hipGraph replay per-launch={first_replay_per_launch_us:.3f}us "
+            f"<< ref direct-launch={ref_per_launch_us:.3f}us. "
+            f"Graph capture likely empty (stream mismatch?)."
+        )
+
     start_ev = torch.cuda.Event(enable_timing=True)
     end_ev = torch.cuda.Event(enable_timing=True)
     start_ev.record()
@@ -959,18 +1129,11 @@ def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None):
         g.replay()
     end_ev.record()
     torch.cuda.synchronize()
-    total_us = start_ev.elapsed_time(end_ev) * 1e3
-    return total_us / iters
+    return start_ev.elapsed_time(end_ev) * 1e3 / (iters * n_per_graph)
 
 
 def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
-    """Per-iteration CUDA events timer with L2 flush, IQR outlier removal, median.
-
-    Follows the golden practices from benchmarks/gemm_gfx1250_benchmark.py:
-    - L2 flush between iterations via zero-fill of 2× L2 buffer
-    - Per-iteration event pairs (no inter-iteration sync on kernel)
-    - IQR outlier removal (if n >= 8), median latency
-    """
+    """Per-iter CUDA events with L2 flush + IQR-trimmed median; fast path uses a single event pair when no flush/prep is requested (preserves back-to-back launch pipelining)."""
     flush_buf = None
     if flush_l2:
         l2_bytes = getattr(
@@ -986,6 +1149,17 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
             prep_fn()
         run_fn()
     torch.cuda.synchronize()
+
+    if flush_buf is None and prep_fn is None:
+        # Single event pair preserves back-to-back launch pipelining (returns mean latency).
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            run_fn()
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) * 1e3 / iters
 
     start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
@@ -1038,8 +1212,11 @@ def _run_benchmark(args):
     is_fp4 = data_format == "fp4"
     is_a8w4 = data_format == "a8w4"
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
-    torch_out_dtype = _dtype_map[args.out_dtype]
-    elem_bytes_d = 2 if args.out_dtype in ("bf16", "f16") else 4
+    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
+    # supported but compound rounding error, so we run f32 and convert back on the host.
+    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    torch_kernel_dtype = _dtype_map[kernel_out_dtype]
+    elem_bytes_d = 2 if kernel_out_dtype in ("bf16", "f16") else 4
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
 
     print("=" * 72)
@@ -1057,32 +1234,23 @@ def _run_benchmark(args):
     )
     if args.split_k > 1:
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
-    print(f"  Warmup={args.warmup}, Iters={args.iters}, " f"L2 flush={'ON' if not args.no_flush_l2 else 'OFF'}")
-    print("  Zero fill: ON (outside timing)")
+    l2_flush_label = "OFF (graph)" if getattr(args, "use_graph", False) else ("OFF" if args.no_flush_l2 else "ON")
+    print(f"  Warmup={args.warmup}, Iters={args.iters}, L2 flush={l2_flush_label}")
+    print("  Output init: zero before warmup")
     print("=" * 72)
 
     torch.manual_seed(0)
-
-    if is_a8w4:
-        a = random_fp8_data(M, K)
-        b = fp4_utils.random_fp4_packed(N, K)
-    elif is_fp4:
-        a = fp4_utils.random_fp4_packed(M, K)
-        b = fp4_utils.random_fp4_packed(N, K)
-    else:
-        a = random_fp8_data(M, K)
-        b = random_fp8_data(N, K)
-
-    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
-    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+    a, b, a_scale, b_scale, fill_spec = _fill_mode_inputs(M, N, K, data_format, getattr(args, "fill_mode", "random"))
+    print(f"  Fill mode: {_fill_mode_label(fill_spec, data_format)}")
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    _coalesced_scale = args.scale_load_path in ("vgpr", "vgpr_ab_split")
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
 
     K_packed = padded_k // PACK_B
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
@@ -1091,7 +1259,7 @@ def _run_benchmark(args):
     b_gpu = b.cuda()
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
-    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_out_dtype, device="cuda")
+    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_kernel_dtype, device="cuda")
 
     print("\n[1/3] Compiling kernel...")
     t0 = time.perf_counter()
@@ -1115,7 +1283,7 @@ def _run_benchmark(args):
         cluster_m=args.cluster_m,
         cluster_n=args.cluster_n,
         use_tdm_store=use_tdm_store,
-        out_dtype=args.out_dtype,
+        out_dtype=kernel_out_dtype,
         inst_prefetch=args.inst_prefetch,
         wave_specialized_tdm=args.wave_spec_tdm,
         split_k=args.split_k,
@@ -1126,23 +1294,13 @@ def _run_benchmark(args):
         scale_load_path=args.scale_load_path,
     )
 
-    c_flat = c_gpu.view(-1)
-    a_flat = a_gpu.view(-1)
-    b_flat = b_gpu.view(-1)
-    as_flat = as_gpu.view(-1)
-    bs_flat = bs_gpu.view(-1)
-
-    # Pre-bind via flyc.compile so the bench loop calls go through the
-    # CompiledFunction ctypes fast path. The slow JitFunction path adds
-    # ~17us of inspect.Signature.bind + _resolve_and_make_cache_key per call, which
-    # would dominate per-launch latency for short kernels.
     compiled_exe = flyc.compile(
         launch_fn,
-        c_flat,
-        a_flat,
-        b_flat,
-        as_flat,
-        bs_flat,
+        c_gpu,
+        a_gpu,
+        b_gpu,
+        as_gpu,
+        bs_gpu,
         padded_m,
         padded_n,
         torch.cuda.current_stream(),
@@ -1151,16 +1309,13 @@ def _run_benchmark(args):
     def prep_kernel():
         c_gpu.zero_()
 
-    # Resolve the stream lazily inside the closure so the graph-bench path
-    # captures on the active capture stream rather than the stream bound
-    # before capture. Same value on the eager path.
     def run_kernel():
         compiled_exe(
-            c_flat,
-            a_flat,
-            b_flat,
-            as_flat,
-            bs_flat,
+            c_gpu,
+            a_gpu,
+            b_gpu,
+            as_gpu,
+            bs_gpu,
             padded_m,
             padded_n,
             torch.cuda.current_stream(),
@@ -1174,12 +1329,7 @@ def _run_benchmark(args):
 
     use_graph = getattr(args, "use_graph", False)
     if use_graph:
-        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph ({args.iters} replays)...")
-        # Graph mode prep: don't zero c_gpu inside the captured kernel
-        # (zero would be baked into the graph and runs every replay, but
-        # that's also fine — it would add a trivial memset per replay).
-        # We omit prep_fn here because the c_gpu state across replays
-        # doesn't matter for timing.
+        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph " f"({args.iters} replays)...")
         us = _bench_kernel_us_cudagraph(run_kernel, warmup=args.warmup, iters=args.iters)
     else:
         print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
@@ -1249,17 +1399,162 @@ def _run_benchmark(args):
     return us, reported_tflops, bw_gbs
 
 
+def _run_graph_verify(args):
+    """Compare eager launch and hipGraph replay for the CLI-selected shape."""
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        raise SystemExit(f"WMMA_SCALE requires gfx1250, got {arch}")
+
+    data_format = args.data_format
+    M, N, K = args.M, args.N, args.K
+    tile_m, tile_n, tile_k = args.tile_m, args.tile_n, args.tile_k
+    if K % SCALE_BLOCK != 0:
+        raise SystemExit(f"K={K} must be divisible by SCALE_BLOCK={SCALE_BLOCK}")
+
+    padded_shape = _get_padded_problem_shape(data_format, M, N, K, tile_m, tile_n, tile_k, args.split_k)
+    padded_m = padded_shape["M"]
+    padded_n = padded_shape["N"]
+    padded_k = padded_shape["K"]
+
+    print("=" * 72)
+    print(f"  Graph functional verification ({data_format}) on gfx1250")
+    print(f"  Shape: M={M}, N={N}, K={K}  (padded {padded_m}x{padded_n}x{padded_k})")
+    print(
+        f"  Tile: ({tile_m},{tile_n},{tile_k}) warps=({args.m_warp}x{args.n_warp}) "
+        f"nb={args.num_buffers} sk={args.split_k} "
+        f"cluster=({args.cluster_m},{args.cluster_n})"
+    )
+    print("=" * 72)
+
+    torch.manual_seed(0)
+    a, b, a_scale, b_scale, fill_spec = _fill_mode_inputs(M, N, K, data_format, getattr(args, "fill_mode", "random"))
+    expect_nonzero_output = _expect_nonzero_graph_output(a, b, data_format, fill_spec)
+    print(f"  Fill: {_fill_mode_label(fill_spec, data_format)}")
+
+    a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
+
+    skt = tile_k // SCALE_BLOCK
+    warp_tile_m = tile_m // args.m_warp
+    warp_tile_n = tile_n // args.n_warp
+    _coalesced_scale = args.scale_load_path in ("vgpr", "vgpr_ab_split")
+    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    K_packed = padded_k // padded_shape["pack_b"]
+    b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
+
+    a_gpu = a.cuda()
+    b_gpu = b.cuda()
+    as_gpu = a_scale.cuda()
+    bs_gpu = b_scale.cuda()
+    _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
+    # supported but compound rounding error, so we run f32 and convert back on the host.
+    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    c_gpu = torch.zeros(padded_m, padded_n, dtype=_dtype_map[kernel_out_dtype], device="cuda")
+
+    use_tdm_store = not args.no_tdm_store and args.split_k == 1
+    launch_fn = compile_mxscale_gemm(
+        data_format=data_format,
+        M=padded_m,
+        N=padded_n,
+        K=padded_k,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=args.m_warp,
+        n_warp=args.n_warp,
+        num_buffers=args.num_buffers,
+        waves_per_eu=args.waves_per_eu,
+        l2_prefetch_distance=args.l2_prefetch_distance,
+        cluster_m=args.cluster_m,
+        cluster_n=args.cluster_n,
+        use_tdm_store=use_tdm_store,
+        out_dtype=kernel_out_dtype,
+        inst_prefetch=args.inst_prefetch,
+        wave_specialized_tdm=args.wave_spec_tdm,
+        split_k=args.split_k,
+        use_scale_opsel=args.use_scale_opsel,
+        expert_sched_mode=args.expert_sched_mode,
+        atomic_barrier_enable=args.atomic_barrier_enable,
+        b_streaming=args.b_streaming,
+        scale_load_path=args.scale_load_path,
+    )
+
+    c_flat = c_gpu.contiguous()
+    a_flat = a_gpu.contiguous()
+    b_flat = b_gpu.contiguous()
+    as_flat = as_gpu.contiguous()
+    bs_flat = bs_gpu.contiguous()
+    compiled_exe = flyc.compile(
+        launch_fn,
+        c_flat,
+        a_flat,
+        b_flat,
+        as_flat,
+        bs_flat,
+        padded_m,
+        padded_n,
+        torch.cuda.current_stream(),
+    )
+
+    def launch():
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, padded_m, padded_n, torch.cuda.current_stream())
+
+    c_gpu.zero_()
+    launch()
+    torch.cuda.synchronize()
+    eager_result = c_gpu.clone()
+
+    g = torch.cuda.CUDAGraph()
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        launch()
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+
+    c_gpu.zero_()
+    with torch.cuda.graph(g, stream=s):
+        launch()
+    torch.cuda.synchronize()
+
+    c_gpu.zero_()
+    g.replay()
+    torch.cuda.synchronize()
+    graph_result = c_gpu.clone()
+
+    if expect_nonzero_output:
+        if eager_result.abs().max().item() == 0:
+            raise SystemExit(
+                "FAIL: eager run produced all zeros -- kernel did not execute (unexpected for non-zero fill)."
+            )
+        if graph_result.abs().max().item() == 0:
+            raise SystemExit(
+                "FAIL: hipGraph replay produced all zeros -- kernel was NOT captured (stream mismatch suspected)."
+            )
+    if not torch.equal(eager_result, graph_result):
+        diff = (eager_result.float() - graph_result.float()).abs().max().item()
+        raise SystemExit(f"FAIL: eager vs hipGraph result mismatch, max abs diff = {diff:.6f}")
+
+    sample_max = eager_result.abs().max().item()
+    print(
+        f"  Eager output |max| = {sample_max:.6g}"
+        + ("" if expect_nonzero_output else "  (zero is expected for this fill)")
+    )
+    print("  PASS: eager == hipGraph replay (bit-exact)")
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-format", type=str, default="fp4", choices=["fp4", "fp8", "a8w4"])
+    parser.add_argument("--data-format", type=str, default="fp8", choices=["fp4", "fp8", "a8w4"])
     parser.add_argument("-M", type=int, default=1024)
     parser.add_argument("-N", type=int, default=1024)
     parser.add_argument("-K", type=int, default=2048)
-    parser.add_argument("--tile-m", type=int, default=128)
+    parser.add_argument("--tile-m", type=int, default=256)
     parser.add_argument("--tile-n", type=int, default=256)
-    parser.add_argument("--tile-k", type=int, default=256)
+    parser.add_argument("--tile-k", type=int, default=128)
     parser.add_argument("--m-warp", type=int, default=2)
     parser.add_argument("--n-warp", type=int, default=2)
     parser.add_argument("--num-buffers", type=int, default=4, choices=[2, 3, 4])
@@ -1270,14 +1565,14 @@ if __name__ == "__main__":
     parser.add_argument("--no-tdm-store", action="store_true", default=False)
     parser.add_argument("--out-dtype", type=str, default="bf16", choices=["f32", "bf16", "f16"])
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
-    parser.add_argument("--wave-spec-tdm", action="store_true", default=False)
+    parser.add_argument("--no-wave-spec-tdm", dest="wave_spec_tdm", action="store_false", default=True)
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
     parser.add_argument(
         "--scale-load-path",
         type=str,
         default="tdm",
-        choices=["tdm", "buffer_lds_stage", "buffer_lds_stage_ab_split"],
+        choices=["tdm", "vgpr", "vgpr_ab_split"],
     )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument("--b-streaming", action="store_true", default=False)
@@ -1303,8 +1598,26 @@ if __name__ == "__main__":
         "Implicitly disables L2 flush (graph replays "
         "are back-to-back, hot-cache).",
     )
+    parser.add_argument(
+        "--verify-graph",
+        action="store_true",
+        default=False,
+        help="Functional verification: capture the kernel in a hipGraph, "
+        "replay once, assert bit-exact match against an eager launch. ",
+    )
+    parser.add_argument(
+        "--fill-mode",
+        type=str,
+        default="random",
+        help="Input fill mode: 'random', 'zero', or a finite float. Constant "
+        "mode uses FP8/FP4 encodings for A/B and neutral E8M0 scales.",
+    )
     args = parser.parse_args()
 
+    if args.verify_graph:
+        _run_graph_verify(args)
+        if not args.benchmark:
+            sys.exit(0)
     if args.benchmark:
         _run_benchmark(args)
     else:
