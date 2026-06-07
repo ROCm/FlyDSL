@@ -247,7 +247,8 @@ def cosine(a, b):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-M", "--M-list", default="4,8,16,32,64,128,256,8192,16384")
+    # ap.add_argument("-M", "--M-list", default="4,8,16,32,64,128,256,8192,16384")
+    ap.add_argument("-M", "--M-list", default="16384")
     ap.add_argument("--check", default=True, action="store_true",
                     help="cross-backend output cosine-sim sanity check per M")
     ap.add_argument("--cudagraph", default=True, action="store_true",
