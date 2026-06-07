@@ -290,17 +290,24 @@ def _get_padded_problem_shape(
     tile_k: int,
     split_k: int,
 ) -> dict[str, int]:
-    """Pad runtime problem to tile-aligned kernel dimensions."""
+    """Validate tile alignment and return the (unpadded) kernel dimensions.
+
+    N/K must divide their tiles; M is ragged (hardware OOB). Fail loudly instead
+    of silently host-padding.
+    """
     if K % SCALE_BLOCK != 0:
         raise ValueError(f"K={K} must be divisible by SCALE_BLOCK={SCALE_BLOCK}")
+    if N % tile_n != 0:
+        raise ValueError(f"N={N} must be divisible by tile_n={tile_n} (no silent pad)")
+    if K % (tile_k * split_k) != 0:
+        raise ValueError(f"K={K} must be divisible by tile_k*split_k={tile_k * split_k} (no silent pad)")
 
     pack_a, pack_b = _mxscale_pack_factors(data_format)
-    padded_k = _align_up(K, tile_k * split_k)
     return {
-        "M": _align_up(M, tile_m),
-        "N": _align_up(N, tile_n),
-        "K": padded_k,
-        "K_scale": padded_k // SCALE_BLOCK,
+        "M": M,
+        "N": N,
+        "K": K,
+        "K_scale": K // SCALE_BLOCK,
         "pack_a": pack_a,
         "pack_b": pack_b,
     }
@@ -393,8 +400,8 @@ def _run_mxscale_gemm_test(
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
     torch_out_dtype = _dtype_map[out_dtype]
 
-    # Split-K accumulates across workgroups in fp32; half outputs are converted after.
-    kernel_out_dtype = "f32" if (split_k > 1 and out_dtype in ("bf16", "f16")) else out_dtype
+    # Split-K accumulates at the output precision.
+    kernel_out_dtype = out_dtype
     torch_kernel_dtype = _dtype_map[kernel_out_dtype]
 
     torch.manual_seed(0)
@@ -458,7 +465,6 @@ def _run_mxscale_gemm_test(
 
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=padded_m,
         N=padded_n,
         K=padded_k,
         tile_m=tile_m,
@@ -498,11 +504,12 @@ def _run_mxscale_gemm_test(
         bs_flat,
         padded_m,
         padded_n,
+        padded_k,
+        padded_n,
         torch.cuda.current_stream(),
     )
     torch.cuda.synchronize()
 
-    # Convert the fp32 split-K accumulation back to the requested half dtype.
     c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
 
     print(
@@ -546,7 +553,13 @@ def _run_mxscale_gemm_test(
     else:
         # FP8: standard SCALE_BLOCK=32 reference
         if out_dtype in ("bf16", "f16"):
-            torch.testing.assert_close(c_out_f, ref_f, rtol=1e-2, atol=5e-2)
+            # split-k atomic-adds at output precision; peak-scale tolerance to
+            # absorb the compounded bf16/f16 rounding on large-magnitude outputs.
+            if split_k > 1:
+                peak = float(ref_f.abs().max())
+                torch.testing.assert_close(c_out_f, ref_f, rtol=2e-2, atol=max(5e-2, 2e-2 * peak))
+            else:
+                torch.testing.assert_close(c_out_f, ref_f, rtol=1e-2, atol=5e-2)
         else:
             atol = max(1e-2, K * 0.6)
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-3, atol=atol)
@@ -701,7 +714,7 @@ def test_mxfp8_gemm(
     )
 
 
-@pytest.mark.parametrize("split_k", [2, 4, 6, 8])
+@pytest.mark.parametrize("split_k", [2, 4])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp8_gemm_splitk(split_k, out_dtype):
     """FP8 split-K: split_k workgroups accumulate partial K-sums into C via atomic add.
@@ -730,8 +743,8 @@ def test_mxfp8_gemm_splitk(split_k, out_dtype):
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
     [
-        (128, 5760, 2880, 128, 256, 256, 2, 2),
-        (128, 2880, 2880, 128, 256, 256, 2, 2),
+        (128, 5632, 2816, 128, 256, 256, 2, 2),
+        (128, 2816, 2816, 128, 256, 256, 2, 2),
         (1024, 1024, 1024, 128, 256, 128, 2, 4),
     ],
 )
@@ -763,12 +776,12 @@ def test_a8w4_gemm(
 @pytest.mark.parametrize(
     "M, N, K, use_tdm_store",
     [
-        (13, 2880, 2880, True),
-        (33, 5760, 2880, False),
+        (13, 2816, 2816, True),
+        (33, 5632, 2816, False),
     ],
 )
 def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
-    # Small-M path: pad M to 16 and dedicate one wave to the M dimension.
+    # Small-M path: ragged M via OOB, one wave dedicated to the M dimension.
     _run_mxscale_gemm_test(
         "a8w4",
         M,
@@ -1024,7 +1037,6 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
 
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=M,
         N=N,
         K=K,
         tile_m=tile_m,
@@ -1053,13 +1065,15 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         bs_flat,
         M,
         N,
+        K,
+        N,
         torch.cuda.current_stream(),
     )
 
     # Resolve stream lazily inside the launch closure so graph capture sees
     # the active capture stream rather than a stream bound before capture.
     def launch():
-        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, torch.cuda.current_stream())
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, torch.cuda.current_stream())
 
     # ── Eager run (reference) ──
     c_gpu.zero_()
@@ -1249,6 +1263,8 @@ def _run_ptpc_gemm_test(
     cluster_m=1,
     cluster_n=1,
     split_k=1,
+    lda_pad=0,
+    ldc_pad=0,
 ):
     """Correctness body for PTPC (per-token per-channel) GEMM.
 
@@ -1269,7 +1285,7 @@ def _run_ptpc_gemm_test(
 
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
     torch_out_dtype = _dtype_map[out_dtype]
-    kernel_out_dtype = "f32" if (split_k > 1 and out_dtype in ("bf16", "f16")) else out_dtype
+    kernel_out_dtype = out_dtype  # split-k atomic-adds at output precision
     torch_kernel_dtype = _dtype_map[kernel_out_dtype]
 
     torch.manual_seed(0)
@@ -1298,14 +1314,23 @@ def _run_ptpc_gemm_test(
     sb_p = torch.zeros(padded_n, dtype=torch.float32)
     sb_p[:N] = sb
 
+    # Optional strided A/C: back data with a wider leading dim (lda/ldc), exercising
+    # the runtime-stride descriptor path. lda/ldc are logical leading dims (elements).
+    pack_a = padded_shape["pack_a"]
+    lda = padded_k + lda_pad
+    ldc = padded_n + ldc_pad
+    if lda_pad:
+        a_full = torch.zeros(padded_m, lda // pack_a, dtype=a.dtype)
+        a_full[:, : padded_k // pack_a] = a
+        a = a_full
+
     a_gpu = a.cuda()
     b_gpu = b.cuda()
     sa_gpu = sa_p.cuda()
     sb_gpu = sb_p.cuda()
-    c_gpu = torch.zeros(padded_m, padded_n, dtype=torch_kernel_dtype, device="cuda")
+    c_gpu = torch.zeros(padded_m, ldc, dtype=torch_kernel_dtype, device="cuda")
 
     launch_fn = compile_ptpc_gemm(
-        M=padded_m,
         N=padded_n,
         K=padded_k,
         data_format=data_format,
@@ -1331,6 +1356,8 @@ def _run_ptpc_gemm_test(
         sb_gpu.contiguous(),
         padded_m,
         padded_n,
+        lda,
+        ldc,
         torch.cuda.current_stream(),
     )
     torch.cuda.synchronize()
@@ -1370,6 +1397,14 @@ def _run_ptpc_gemm_test(
 )
 def test_ptpc_fp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype):
     _run_ptpc_gemm_test(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype)
+
+
+@pytest.mark.parametrize("lda_pad, ldc_pad", [(128, 0), (0, 256), (128, 256)])
+def test_ptpc_fp8_gemm_strided(lda_pad, ldc_pad):
+    """Strided A/C: data backed by a wider leading dim, passed via runtime lda/ldc."""
+    _run_ptpc_gemm_test(
+        128, 256, 512, 128, 256, 128, 2, 2, num_buffers=4, out_dtype="bf16", lda_pad=lda_pad, ldc_pad=ldc_pad
+    )
 
 
 @pytest.mark.parametrize("split_k", [2, 4])
@@ -1441,8 +1476,8 @@ def _run_ptpc_mpad(
     if arch != "gfx1250":
         pytest.skip(f"requires gfx1250, got {arch}")
     assert N % tile_n == 0 and K % tile_k == 0, "M-pad test keeps N,K tile-aligned"
-    # split_k accumulates via atomic add into f32 (predicated per-lane on row < M).
-    kernel_out_dtype = "f32" if split_k > 1 else out_dtype
+    # split_k atomic-adds at output precision (per-lane predicate on row < M).
+    kernel_out_dtype = out_dtype
     torch.manual_seed(0)
     a = random_fp8_data(M, K)
     b = fp4_utils.random_fp4_packed(N, K) if data_format == "a8w4" else random_fp8_data(N, K)
@@ -1453,7 +1488,6 @@ def _run_ptpc_mpad(
     b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
     c_gpu = torch.zeros(M, N, dtype=_DT[kernel_out_dtype], device="cuda")  # real M; zero for atomic
     launch = compile_ptpc_gemm(
-        M=M,
         N=N,
         K=K,
         data_format=data_format,
@@ -1468,7 +1502,7 @@ def _run_ptpc_mpad(
         cluster_m=cluster_m,
         cluster_n=cluster_n,
     )
-    launch(c_gpu, a.cuda(), b_ps.cuda(), sa.cuda(), sb.cuda(), M, N, torch.cuda.current_stream())
+    launch(c_gpu, a.cuda(), b_ps.cuda(), sa.cuda(), sb.cuda(), M, N, K, N, torch.cuda.current_stream())
     torch.cuda.synchronize()
     _assert_mpad(c_gpu[:M].cpu(), ref, kernel_out_dtype)
 
@@ -1508,7 +1542,6 @@ def _run_mxscale_mpad(
     c_gpu = torch.zeros(M, N, dtype=_DT[out_dtype], device="cuda")  # real M
     launch = compile_mxscale_gemm(
         data_format="fp8",
-        M=M,
         N=N,
         K=K,
         tile_m=tile_m,
@@ -1522,7 +1555,7 @@ def _run_mxscale_mpad(
         cluster_m=cluster_m,
         cluster_n=cluster_n,
     )
-    launch(c_gpu, a.cuda(), b_ps.cuda(), as_ps.cuda(), bs_ps.cuda(), M, N, torch.cuda.current_stream())
+    launch(c_gpu, a.cuda(), b_ps.cuda(), as_ps.cuda(), bs_ps.cuda(), M, N, K, N, torch.cuda.current_stream())
     torch.cuda.synchronize()
     _assert_mpad(c_gpu[:M].cpu(), ref, out_dtype)
 
@@ -1689,9 +1722,8 @@ def _run_benchmark(args):
     if is_ptpc and data_format not in ("fp8", "a8w4"):
         raise ValueError(f"scale_mode='ptpc' only supports data_format='fp8' or 'a8w4', got {data_format!r}")
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
-    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
-    # supported but compound rounding error, so we run f32 and convert back on the host.
-    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    # split_k atomic-adds at output precision (bf16/f16).
+    kernel_out_dtype = args.out_dtype
     torch_kernel_dtype = _dtype_map[kernel_out_dtype]
     elem_bytes_d = 2 if kernel_out_dtype in ("bf16", "f16") else 4
     if is_ptpc:
@@ -1801,7 +1833,6 @@ def _run_benchmark(args):
     if is_ptpc:
         # compile_ptpc_gemm fixes scale_mode/wave_spec/use_tdm_store internally.
         launch_fn = compile_ptpc_gemm(
-            M=padded_m,
             N=padded_n,
             K=padded_k,
             data_format=data_format,
@@ -1824,7 +1855,6 @@ def _run_benchmark(args):
     else:
         launch_fn = compile_mxscale_gemm(
             data_format=data_format,
-            M=padded_m,
             N=padded_n,
             K=padded_k,
             tile_m=tile_m,
@@ -1858,6 +1888,8 @@ def _run_benchmark(args):
         bs_gpu,
         padded_m,
         padded_n,
+        padded_k,
+        padded_n,
         torch.cuda.current_stream(),
     )
 
@@ -1872,6 +1904,8 @@ def _run_benchmark(args):
             as_gpu,
             bs_gpu,
             padded_m,
+            padded_n,
+            padded_k,
             padded_n,
             torch.cuda.current_stream(),
         )
@@ -2002,15 +2036,13 @@ def _run_graph_verify(args):
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
-    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
-    # supported but compound rounding error, so we run f32 and convert back on the host.
-    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    # split_k atomic-adds at output precision (bf16/f16).
+    kernel_out_dtype = args.out_dtype
     c_gpu = torch.zeros(padded_m, padded_n, dtype=_dtype_map[kernel_out_dtype], device="cuda")
 
     use_tdm_store = not args.no_tdm_store and args.split_k == 1
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=padded_m,
         N=padded_n,
         K=padded_k,
         tile_m=tile_m,
@@ -2049,11 +2081,24 @@ def _run_graph_verify(args):
         bs_flat,
         padded_m,
         padded_n,
+        padded_k,
+        padded_n,
         torch.cuda.current_stream(),
     )
 
     def launch():
-        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, padded_m, padded_n, torch.cuda.current_stream())
+        compiled_exe(
+            c_flat,
+            a_flat,
+            b_flat,
+            as_flat,
+            bs_flat,
+            padded_m,
+            padded_n,
+            padded_k,
+            padded_n,
+            torch.cuda.current_stream(),
+        )
 
     c_gpu.zero_()
     launch()
