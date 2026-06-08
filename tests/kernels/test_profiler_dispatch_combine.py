@@ -503,9 +503,8 @@ def _current_gpu_arch_prefix() -> str:
 
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-for _p in [_ROOT, "/home/yashao/FlyDSL/python", "/home/yashao/mori/python"]:
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 # Module-level skip when mori is unavailable AND we are being imported by
 # pytest collection.  This file is a torchrun standalone script, but pytest
@@ -608,8 +607,8 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
         num_experts_per_token=cfg.num_experts_per_token,
-        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.dispatch_warp_num_per_block_eff,
-        block_num=block_num if block_num is not None else cfg.dispatch_block_num_eff,
+        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.dispatch_warp_num_per_block,
+        block_num=block_num if block_num is not None else cfg.dispatch_block_num,
         gpu_per_node=world_size,
         use_external_inp_buf=not cfg.zero_copy,
         quant_type=cfg.quant_type,
@@ -2124,8 +2123,8 @@ def run_profiler(rank, world_size, args):
         max_token_type_size=_user_mtt,
     )
 
-    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.dispatch_block_num_eff
-    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.dispatch_warp_num_per_block_eff
+    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.dispatch_block_num
+    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.dispatch_warp_num_per_block
     meta = dict(
         world_size=world_size,
         max_tokens=cur_tok,
@@ -2134,10 +2133,10 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         warmup=args.warmup,
         iters=args.iters,
-        flydsl_dispatch_block_num=cfg.dispatch_block_num_eff,
-        flydsl_dispatch_warp_per_block=cfg.dispatch_warp_num_per_block_eff,
-        flydsl_combine_block_num=cfg.combine_block_num_eff,
-        flydsl_combine_warp_per_block=cfg.combine_warp_num_per_block_eff,
+        flydsl_dispatch_block_num=cfg.dispatch_block_num,
+        flydsl_dispatch_warp_per_block=cfg.dispatch_warp_num_per_block,
+        flydsl_combine_block_num=cfg.combine_block_num,
+        flydsl_combine_warp_per_block=cfg.combine_warp_num_per_block,
         mori_block_num=mori_bn,
         mori_warp_per_block=mori_wpb,
         zero_copy=cfg.zero_copy,
@@ -2170,8 +2169,8 @@ def run_profiler(rank, world_size, args):
     if _want_mori:
         mori_bn = args.mori_block_num if args.mori_block_num > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
-        bn_str = mori_bn if mori_bn else cfg.dispatch_block_num_eff
-        wpb_str = mori_wpb if mori_wpb else cfg.dispatch_warp_num_per_block_eff
+        bn_str = mori_bn if mori_bn else cfg.dispatch_block_num
+        wpb_str = mori_wpb if mori_wpb else cfg.dispatch_warp_num_per_block
         if rank == 0:
             print(
                 f"[profiler] building mori ref (block_num={bn_str}, warp_per_block={wpb_str}) "

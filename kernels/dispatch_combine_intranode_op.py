@@ -132,30 +132,10 @@ class FlyDSLDispatchCombineConfig:
         return self.hidden_dim
 
     @property
-    def block_dim(self):
-        return self.warp_num_per_block * 64
-
-    @property
     def zero_copy(self) -> bool:
         """``True`` => combine reads/writes through the registered shared
         staging buffer (no caller-side input copy)."""
         return not self.use_external_inp_buf
-
-    @property
-    def dispatch_warp_num_per_block_eff(self):
-        return self.dispatch_warp_num_per_block
-
-    @property
-    def dispatch_block_num_eff(self):
-        return self.dispatch_block_num
-
-    @property
-    def combine_warp_num_per_block_eff(self):
-        return self.combine_warp_num_per_block
-
-    @property
-    def combine_block_num_eff(self):
-        return self.combine_block_num
 
     @property
     def max_recv(self):
@@ -396,6 +376,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
             raise NotImplementedError(
                 "quant_type='fp8_direct_cast' is not supported with "
                 "enable_std_moe=True (asymmetric I/O dtypes not yet wired)"
+            )
+        # zero_copy (use_external_inp_buf=False) skips Stage 1, which is
+        # exactly where the bf16->fp8 cast lives, so fp8_direct_cast and
+        # zero_copy are mutually exclusive.  Both are static cfg, so reject
+        # the combination here instead of on the first combine() call.
+        if cfg.quant_type == "fp8_direct_cast" and cfg.zero_copy:
+            raise ValueError(
+                "quant_type='fp8_direct_cast' is incompatible with "
+                "zero_copy=True (use_external_inp_buf=False): zero_copy "
+                "skips Stage 1 where the bf16->fp8 cast lives."
             )
 
         # Kernel streams 16 B (v4i32) per lane; one stride check on
@@ -679,8 +669,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 experts_per_token=cfg.num_experts_per_token,
                 hidden_dim=cfg.hidden_dim,
                 max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=cfg.dispatch_block_num_eff,
-                warp_num_per_block=cfg.dispatch_warp_num_per_block_eff,
+                block_num=cfg.dispatch_block_num,
+                warp_num_per_block=cfg.dispatch_warp_num_per_block,
                 data_type=d_dtype,
                 scale_dim=cfg.scale_dim,
                 scale_type_size=cfg.scale_type_size,
@@ -823,8 +813,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 experts_per_token=cfg.num_experts_per_token,
                 hidden_dim=cfg.hidden_dim,
                 max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=cfg.combine_block_num_eff,
-                warp_num_per_block=cfg.combine_warp_num_per_block_eff,
+                block_num=cfg.combine_block_num,
+                warp_num_per_block=cfg.combine_warp_num_per_block,
                 data_type=c_dtype,
                 enable_weights=bool(enable_weights_flag),
                 enable_std_moe=cfg.enable_std_moe,
@@ -874,13 +864,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # fp8_direct_cast fires only when both the cfg knob is set AND
         # the launch dtype is bf16 (mori UseFp8DirectCast parity).
         fp8_dc = cfg.quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
-        if zero_copy and fp8_dc:
-            # Stage 1 is skipped in zero-copy, but that's where the
-            # bf16->fp8 cast lives, so the two switches are exclusive.
-            raise ValueError(
-                "fp8_direct_cast is incompatible with zero_copy=True "
-                "(zero_copy skips Stage 1 where the bf16->fp8 cast lives)."
-            )
+        # NOTE: the static zero_copy + fp8_direct_cast conflict is rejected
+        # up-front in _check_config(); only the per-call buffer-pointer
+        # contract is validated here.
         if zero_copy and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
             # Zero-copy contract: peers read ``shmem_comb_inp_tok``;
             # any other pointer = silent correctness bug.
@@ -1078,8 +1064,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 experts_per_token=cfg.num_experts_per_token,
                 hidden_dim=cfg.hidden_dim,
                 max_tok_per_rank=cfg.max_num_inp_token_per_rank,
-                block_num=cfg.combine_block_num_eff,
-                warp_num_per_block=cfg.combine_warp_num_per_block_eff,
+                block_num=cfg.combine_block_num,
+                warp_num_per_block=cfg.combine_warp_num_per_block,
                 data_type=c_dtype,
                 enable_weights=bool(enable_weights),
                 enable_std_moe=cfg.enable_std_moe,

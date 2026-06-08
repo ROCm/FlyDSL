@@ -619,28 +619,27 @@ def make_combine_kernel(
     # whitelist (``_SUPPORTED_TOK_DTYPES`` in dispatch_combine_intranode_op.py),
     # so no fallthrough is needed.
 
-    def _accum_experts(vals, vlds, all_vld):
+    def _accum_experts(vals):
         """Reduce the k per-expert i32 partials into one merged i32.
 
         Each value is widened via ``_to_accum`` (bf16/fp8/...->f32 vector),
         summed in high precision, then narrowed back via ``_from_accum``.
 
+        No per-slot validity masking is applied here: dispatch dedups
+        same-PE assignments and encodes duplicate / unrouted tok_map slots
+        with the ``dest_pe = npes`` sentinel, which ``_maybe_load`` already
+        collapses to a zero i32 (mori-equivalent ``srcPtrs[j] = nullptr``
+        skip).  Summing the partials folds those slots in as +0, so a
+        second ``arith.select`` mask would be redundant.
+
         Args:
-          vals: per-expert raw i32 values (one per k-slot).
-          vlds: per-expert i1 validity flags (used iff ``all_vld`` is False).
-          all_vld: when True, skip the masking and treat every slot as live.
+          vals: per-expert raw i32 values (one per k-slot); slots flagged
+            invalid by the tok_map decode are already zeroed by
+            ``_maybe_load`` before they reach here.
         """
-        if all_vld:
-            acc = _to_accum(vals[0])
-            for k_slot in range(1, len(vals)):
-                acc = acc + _to_accum(vals[k_slot])
-        else:
-            acc = _zero_accum()
-            for k_slot in range(len(vals)):
-                widened = _to_accum(vals[k_slot])
-                zero = _zero_accum()
-                vld_raw = arith.unwrap(vlds[k_slot])
-                acc = acc + arith.select(vld_raw, widened, zero)
+        acc = _to_accum(vals[0])
+        for k_slot in range(1, len(vals)):
+            acc = acc + _to_accum(vals[k_slot])
         return _from_accum(acc)
 
     def _weighted_accum_experts(vals, wts, vlds, all_vld):
@@ -671,11 +670,6 @@ def make_combine_kernel(
     _log2_max_recv = _log2_if_pow2(max_recv)
     _mask_max_tok = max_tok_per_rank - 1 if _log2_max_tok is not None else None
     _mask_max_recv = max_recv - 1 if _log2_max_recv is not None else None
-
-    # Dispatch dedups same-PE assignments: duplicate tok_map slots are
-    # encoded with ``dest_pe = npes`` (sentinel). Combine skips those via
-    # ``_maybe_load`` (mori-equivalent ``srcPtrs[j] = nullptr`` skip).
-    _use_compaction = True
 
     weight_bytes = experts_per_token * 4 if enable_weights else 0
     wt_n_i32 = experts_per_token if enable_weights else 0
@@ -1073,7 +1067,6 @@ def make_combine_kernel(
                     expert_tok_addr = arith.unwrap(addr_shmem_tok + expert_tok_off)
                     expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
                     expert_vlds.append(arith.constant(1, type=T.bool()))
-                eff_all_vld = True
             else:
                 # Baseline Stage 3: decode (peer_pe, dest_lid) from
                 # ``dest_tok_map[tok_id, 0..k)`` and read each slot of
@@ -1103,9 +1096,6 @@ def make_combine_kernel(
                     expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
                     expert_vlds.append(vld_k)
 
-                all_vld = npes >= experts_per_token  # else compaction is required
-                eff_all_vld = all_vld or _use_compaction
-
             # Stage 3 write-back is parameterised by ``U`` (unroll factor):
             #   _accum_step(ec_abs, U) emits U sub-loads per k-slot
             #     (soffset 0, 256, ..., (U-1)*256 B), reduces across k
@@ -1134,7 +1124,7 @@ def make_combine_kernel(
                     out_step = 256
 
                 for u in range_constexpr(U):
-                    acc = _accum_experts(vals[u], expert_vlds, eff_all_vld)
+                    acc = _accum_experts(vals[u])
                     kw = dict(cache_modifier=SLC_CACHE)
                     if u > 0:
                         kw["soffset_bytes"] = u * out_step
