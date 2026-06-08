@@ -106,17 +106,11 @@ def load_i64_global(addr_i64):
 
 
 def atomic_add_global_at(addr_i64, val):
-    """Monotonic global ``atomic fetch-and-add``; returns the old value.
+    """Monotonic global atomic fetch-and-add (returns old value).
 
-    Uses ``syncscope="agent"`` (GPU-wide) to keep the lowering at
-    device-scope: ``atomicrmw`` without an explicit syncscope defaults
-    to system scope on AMDGPU, which inserts cross-card cache-flush
-    fences (``buffer_wbinvl1_vol`` + extra ``s_waitcnt`` etc.).  The
-    D-flag C-1 ``local_counter`` only needs cross-CTA visibility on the
-    SAME GPU (each row's counter is private to the rank that produced
-    those output rows), so agent scope is sufficient and considerably
-    cheaper than the default system scope.  System scope is reserved
-    for :func:`atomic_add_global_at_system` (the cross-card flag bump).
+    ``syncscope="agent"`` keeps it device-scope (the default system scope
+    would add cross-card cache-flush fences). Used for the rank-private
+    token-level-sync ``local_counter``, which only needs cross-CTA visibility.
     """
     ptr = _to_ptr_global(addr_i64)
     return _llvm_d.AtomicRMWOp(
@@ -128,7 +122,7 @@ def atomic_add_global_at(addr_i64, val):
 def atomic_add_global_at_system(addr_i64, val):
     """System-scope (cross-card visible) atomic fetch-and-add (monotonic).
 
-    Used by the D-flag C-1 fused gemm2 epilogue to bump the remote per-token
+    Used by the token-level-sync fused gemm2 epilogue to bump the remote per-token
     flag on the combine kernel's home rank. Returns the old value.
     """
     ptr = _to_ptr_global(addr_i64)
@@ -139,13 +133,10 @@ def atomic_add_global_at_system(addr_i64, val):
 
 
 def atomic_xchg_global_at_device(addr_i64, val):
-    """Device-scope atomic exchange (monotonic). Returns the old value.
+    """Device-scope monotonic atomic exchange (returns old value).
 
-    Consume-on-read reset of the per-(m_tile, j) local counter: the last
-    N-tile completer issues one system-scope atomic_add on the remote flag
-    and xchg-resets the local slot to 0 for the next chain. syncscope=
-    "agent" keeps the reset GPU-wide; the counter is rank-private so the
-    default system scope's cross-card fences are unnecessary.
+    Consume-on-read reset of the rank-private local counter for the next
+    chain; ``syncscope="agent"`` since no cross-card visibility is needed.
     """
     ptr = _to_ptr_global(addr_i64)
     return _llvm_d.AtomicRMWOp(
@@ -172,16 +163,15 @@ def make_dispatch_kernel(
     data_type=None,
     max_recv: int = None,
     use_token_flag_sync: bool = False,
-    local_counter_size: int = 0,
 ):
     """Build intranode dispatch ``@flyc.kernel``.
 
     ``max_recv`` caps per-rank receive slots and must match combine-side
     decode semantics. ``None`` falls back to ``npes * max_tok_per_rank``.
 
-    ``local_counter_size`` is the compile-time element count of the
-    D-flag C-1 device-local row counter; only consumed when
-    ``use_token_flag_sync=True`` for the entry-side grid-stride memset.
+    The token-level-sync device-local row counter size is passed as a runtime
+    launch arg (``i32_local_counter_size``), so the kernel is size-generic and
+    needs no JIT-cache-key coupling.
     """
     if max_recv is None:
         max_recv = npes * max_tok_per_rank
@@ -227,18 +217,16 @@ def make_dispatch_kernel(
         addr_out_packed_recv_src_info: fx.Int64,  # i32[experts_per_rank * max_tok_per_expert]
         addr_out_disp_tok_map: fx.Int64,  # i64[max_recv * top_k]
         addr_disp_grid_bar: fx.Int64,  # i32[1]
-        # D-flag C-1 per-token flag base (i32[max_recv]). Only consumed when
-        # use_token_flag_sync=True: dispatch entry grid-stride memset reset,
-        # fused gemm2 epilogue cross-card atomic_add, combine stage 3 spin-
-        # wait. const_expr DCEs every load/store when OFF.
+        # token-level-sync per-token flag base (i32[max_recv]); DCE'd when OFF.
+        # dispatch resets it, fused gemm2 bumps it, combine stage 3 waits on it.
         addr_comb_flag: fx.Int64,
-        # D-flag C-1 device-local row counter (i32[local_counter_size]). Only
-        # consumed when use_token_flag_sync=True: dispatch entry grid-stride
-        # memset reset so the first fused gemm2 atomic for each row sees
-        # _old==0 and wins the trigger lottery once per row. Size captured
-        # via the local_counter_size closure (see make_dispatch_jit).
+        # token-level-sync device-local row counter (i32[local_counter_size]); DCE'd
+        # when OFF. dispatch resets it so each row's first atomic sees _old==0.
         addr_local_counter: fx.Int64,
         inp_cur_tok: fx.Int32,
+        # token-level-sync device-local row counter element count (runtime, so the
+        # kernel stays size-generic). Only used by the entry memset when ON.
+        i32_local_counter_size: fx.Int32,
     ):
         tid = fx.thread_idx.x
         bid = fx.block_idx.x
@@ -248,13 +236,10 @@ def make_dispatch_kernel(
         global_warp_num = block_num * warp_num_per_block
         work_limit = inp_cur_tok * experts_per_token
 
-        # D-flag C-1: grid-stride memset reset of the per-token flag at
-        # dispatch entry. Must complete before Phase 2 sends recv signals.
-        # Uses store_i32_system + release fence so the reset commits before
-        # any remote fused gemm2 epilogue's system-scope atomic_add (mixing
-        # relaxed stores with system atomics here previously raced and
-        # caused stale flag reads on the combine spin). const_expr OFF ->
-        # the entire reset block is DCE'd.
+        # token-level-sync: grid-stride memset reset of the per-token flag +
+        # local counter at dispatch entry. store_i32_system + release fence
+        # ensures the reset commits before any remote fused gemm2 epilogue's
+        # system-scope atomic_add (relaxed stores raced here previously).
         if const_expr(use_token_flag_sync):
             mr_const = npes * max_tok_per_rank
             gtid = bid * (warp_num_per_block * 64) + tid
@@ -262,14 +247,11 @@ def make_dispatch_kernel(
             _zero_i32 = arith.constant(0)
             for i in range(gtid, mr_const, gthrd_num):
                 store_i32_system(addr_comb_flag, i, _zero_i32)
-            # Reset device_local_counter so the very first cross-card
-            # atomic-add per (row_i32) wins the ``_old==0`` trigger.
-            # Local store (no system fence): subsequent atomics on the
-            # counter from this rank's fused gemm2 stay device-scope and
-            # the dispatch->fused gemm2 dependency is enforced by the
-            # outer chain (dispatch finishes before fused gemm2 starts).
+            # Reset device_local_counter (local store, no system fence) so the
+            # first per-row atomic-add wins the ``_old==0`` trigger; ordering
+            # vs fused gemm2 is enforced by the outer dispatch->gemm2 chain.
             _r_ctr_reset = create_buffer_resource_from_addr(addr_local_counter)
-            for i in range(gtid, local_counter_size, gthrd_num):
+            for i in range(gtid, i32_local_counter_size, gthrd_num):
                 buffer_store(_zero_i32, _r_ctr_reset, i)
             gpu.barrier()
             rocdl.s_waitcnt(0)
@@ -813,7 +795,7 @@ def make_combine_kernel(
         addr_inp_packed_recv_x: fx.Int64,  # expert-major token buffer
         addr_inp_disp_tok_map: fx.Int64,  # dispTokToEpSlotMap (i64[max_recv * top_k])
         addr_inp_disp_wts: fx.Int64,  # dispatch output weights (f32[max_recv * top_k])
-        # D-flag C-1 per-token flag base (i32[max_recv]). Only consumed when
+        # token-level-sync per-token flag base (i32[max_recv]). Only consumed when
         # use_token_flag_sync=True: stage 3 per-warp spin-wait on
         # flag[tok_id] >= experts_per_token. const_expr OFF -> DCE'd.
         addr_comb_flag: fx.Int64,
@@ -881,13 +863,8 @@ def make_combine_kernel(
         n_chunks = nbytes // 16  # 16-byte (4-i32) vector chunks per token
 
         if const_expr(skip_stage1):
-            # D-flag C-1 (``use_token_flag_sync``): the entire Stage 1
-            # weight scatter is elided -- Stage 3b reads weights directly
-            # from the local raw input buffer (``addr_inp_wts`` laid out
-            # ``[max_tok_per_rank, topk]``) instead of the P2P-scattered
-            # ``shmem_comb_inp_wts``.  This drops both the cross-PE
-            # weight write and the Stage 2 cross-device barrier from the
-            # critical path.
+            # token-level-sync elides the Stage 1 weight scatter entirely (Stage 3b
+            # reads weights locally); otherwise weight-only scatter still runs.
             if const_expr(enable_weights and not use_token_flag_sync):
                 if const_expr(zero_copy):
                     # Mori-parity zero-copy skip-Stage1 (intranode.hpp:297-306):
@@ -1110,12 +1087,10 @@ def make_combine_kernel(
         # ``xdev_bar_mem[rank]`` slot, then waits to observe the same flag
         # from every peer in its local xdev_bar_mem.
         #
-        # D-flag C-1: when ``use_token_flag_sync and skip_stage1`` is set,
-        # the entire grid-wide barrier is skipped: the fused gemm2 epilogue
-        # already published per-token system-scope atomic_add on the remote
-        # flag (stage 3 below spin-waits on it), and stage 3b reads weights
-        # directly from the local raw input buffer. Saves ~7-10us per chain.
-        # ``total_recv`` is still reset for cudagraph replay safety.
+        # token-level-sync (use_token_flag_sync and skip_stage1): skip the grid-wide
+        # barrier entirely -- the fused gemm2 epilogue already published the
+        # per-token flag that stage 3 spin-waits on. total_recv is still reset
+        # for cudagraph replay safety.
         if const_expr(not (use_token_flag_sync and skip_stage1)):
             fx.barrier()
             if tid == 0:
@@ -1149,7 +1124,7 @@ def make_combine_kernel(
             if tid == 0:
                 buffer_store(arith.constant(0), _r_trecv, 0)
         else:
-            # D-flag C-1 fast-path: keep ``total_recv`` reset for cudagraph
+            # token-level-sync fast-path: keep ``total_recv`` reset for cudagraph
             # replay safety; everything else is elided.
             if tid == 0:
                 buffer_store(arith.constant(0), _r_trecv, 0)
@@ -1176,15 +1151,9 @@ def make_combine_kernel(
             part_id = s3_work_idx % warps_per_tok
             hdim_off = part_id * hdim_per_warp
 
-            # D-flag C-1: per-warp spin-wait on the per-token flag.  Only
-            # lane 0 makes the call; warp lockstep guarantees the rest of
-            # the lanes converge at the implicit join below.  Each warp on
-            # the same ``tok_id`` (when ``warps_per_tok > 1``) re-spins,
-            # but once the flag is satisfied ``mori_shmem`` returns
-            # immediately (a single buffer_load with no fence), so the
-            # extra spins are essentially free.  The loop bound above
-            # caps ``tok_id`` to ``< cur_rank_num_token`` already, so no
-            # padding-token guard is needed.
+            # token-level-sync: lane-0 spin-wait on the per-token flag (flag >= k);
+            # warp lockstep rejoins the other lanes. tok_id is already capped
+            # to < cur_rank_num_token by the loop bound.
             if const_expr(use_token_flag_sync and skip_stage1):
                 if lane == 0:
                     _flag_addr = addr_comb_flag + _to_i64(tok_id) * 4
@@ -1196,12 +1165,9 @@ def make_combine_kernel(
             expert_vlds = []
 
             if const_expr(skip_stage1 and not zero_copy):
-                # Fused-upstream Stage 3: caller plain-stored a per-
-                # (tok_id, k_slot) partial into
-                # ``shmem_comb_inp[(tok_id*k + k_slot) * token_bytes]``.
+                # Fused-upstream Stage 3: read the per-(tok_id, k_slot) partial
+                # the epilogue plain-stored at shmem_comb_inp[(tok_id*k+k_slot)].
                 # No tok_map decode; unrouted slots are caller-zeroed.
-                # The zero_copy path is excluded -- it keeps the regular
-                # ``(dest_pe, dest_lid)`` Stage 3 decode.
                 for k_slot in range_constexpr(experts_per_token):
                     slot_idx = tok_id * experts_per_token + k_slot
                     expert_tok_off = _to_i64(slot_idx) * nbytes
@@ -1308,21 +1274,14 @@ def make_combine_kernel(
         # ``shmem_comb_inp_wts`` (or peer-side under zero-copy), f32-sum
         # across the k slots and write ``shmem_comb_out_wts``.
         #
-        # D-flag C-1 fast-path (``use_token_flag_sync and skip_stage1``):
-        # bypass the per-slot P2P / shmem_wts load and read directly from
-        # the local raw input weights buffer ``addr_inp_wts`` (laid out
-        # ``[max_tok_per_rank, topk] f32``). Still walks _rsrc_tok_map to
-        # get the per-slot _wvld flag so duplicate/overflow slots
-        # contribute zero (preserves the dup-aware math).
+        # token-level-sync fast-path: read weights directly from the local raw input
+        # buffer addr_inp_wts ([max_tok_per_rank, topk] f32) instead of the
+        # P2P-scattered shmem_wts. Still walks _rsrc_tok_map for the per-slot
+        # _wvld mask so duplicate/overflow slots contribute zero.
         if const_expr(enable_weights):
             rsrc_out_wts = create_buffer_resource_from_addr(addr_out_shmem_wts)
-            # ``_tfs_fast_wts`` is a plain Python ``bool`` -- both
-            # branches are emitted const_expr-style by mirroring it back
-            # into ``const_expr(...)`` at every gating site below.  The
-            # two branches are written as a top-level ``if/else`` over
-            # the boolean so the inactive branch never participates in
-            # IR emission (avoids ambiguous `continue` semantics inside
-            # ``range_constexpr``).
+            # Top-level if/else over the Python bool so the inactive branch
+            # never emits IR (avoids `continue` inside range_constexpr).
             _tfs_fast_wts = bool(use_token_flag_sync and skip_stage1)
             if const_expr(_tfs_fast_wts):
                 _rsrc_inp_wts_local = create_buffer_resource_from_addr(addr_inp_wts)
@@ -1330,12 +1289,8 @@ def make_combine_kernel(
                     wt_tm_off = wt_tok_id * experts_per_token
                     if lane < experts_per_token:
                         wt_acc = arith.constant(0.0, type=T.f32())
-                        # D-flag C-1: one local load of ``me.weights[t, lane]``;
-                        # the per-slot loop below only contributes a
-                        # ``_wvld`` mask so duplicate / overflow k_slots
-                        # contribute zero (preserves ``unique_pe_count *
-                        # me.weights[t, lane]`` semantic on dup-heavy
-                        # routing).
+                        # One local load of weights[t, lane]; the per-slot loop
+                        # only contributes the _wvld mask (dup-aware accum).
                         _wv_local = buffer_load(
                             _rsrc_inp_wts_local,
                             wt_tok_id * experts_per_token + lane,
@@ -1402,13 +1357,12 @@ def make_dispatch_jit(
     enable_std_moe=False,
     max_recv=None,
     use_token_flag_sync=False,
-    local_counter_size=0,
 ):
     """Build the dispatch JIT launcher.
 
     ``max_recv`` parameterises the per-rank receive-slot cap used for
     sentinel encoding; must match the value passed to ``make_combine_jit``.
-    ``use_token_flag_sync`` enables the D-flag C-1 fast-sync path (per-token
+    ``use_token_flag_sync`` enables the token-level-sync fast-sync path (per-token
     cross-card flag instead of grid-wide barrier); when False, the entry-
     side memset and the launcher's flag pointer are DCE'd.
     """
@@ -1429,7 +1383,6 @@ def make_dispatch_jit(
         data_type=data_type,
         max_recv=max_recv,
         use_token_flag_sync=use_token_flag_sync,
-        local_counter_size=local_counter_size,
     )
 
     # Closure vars that key the JIT cache: every input to
@@ -1483,6 +1436,7 @@ def make_dispatch_jit(
         addr_comb_flag: fx.Int64,
         addr_local_counter: fx.Int64,
         inp_cur_tok: fx.Int32,
+        i32_local_counter_size: fx.Int32,
         stream: Stream = Stream(None),
     ):
         _ = (
@@ -1531,6 +1485,7 @@ def make_dispatch_jit(
             addr_comb_flag,
             addr_local_counter,
             inp_cur_tok,
+            i32_local_counter_size,
         ).launch(
             grid=(block_num, 1, 1),
             block=(warp_num_per_block * 64, 1, 1),
