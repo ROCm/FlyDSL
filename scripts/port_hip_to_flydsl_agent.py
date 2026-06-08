@@ -283,10 +283,16 @@ def execute_tool(cfg: Config, name: str, args: dict[str, Any]) -> tuple[str, boo
             target = str(_resolve(cfg, args["path"])) if args.get("path") else str(cfg.repo_root)
             if shutil.which("rg"):
                 cmd = ["rg", "-n", "--no-heading", args["pattern"], target]
+                ok_codes = {0, 1}  # 1 = no matches
             else:
                 cmd = ["grep", "-rn", args["pattern"], target]
+                ok_codes = {0, 1}  # 1 = no matches
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=cfg.bash_timeout)
-            return _truncate(proc.stdout or "(no matches)"), False
+            out = proc.stdout or "(no matches)"
+            if proc.stderr:
+                out = f"{out}\n{proc.stderr}"
+            is_error = proc.returncode not in ok_codes
+            return _truncate(out), is_error
 
         return f"Unknown tool: {name}", True
     except subprocess.TimeoutExpired:
