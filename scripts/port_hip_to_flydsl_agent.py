@@ -1175,7 +1175,8 @@ def parse_task_prompt(client: anthropic.Anthropic, task: str, model: str) -> dic
 def build_config(fields: dict[str, Any]) -> Config:
     """Build a Config from the parsed field dict (fetch source, resolve paths)."""
     repo_root = Path(fields["repo_root"] or Path.cwd()).resolve()
-    output_dir = Path(fields["output_dir"]).resolve()
+    output_dir = Path(fields["output_dir"])
+    output_dir = (output_dir if output_dir.is_absolute() else (repo_root / output_dir)).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"{fields['kernel_name']}.py"
     plan_file = output_dir / "plan.md"
