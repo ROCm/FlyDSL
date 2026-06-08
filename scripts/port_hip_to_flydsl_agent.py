@@ -709,7 +709,10 @@ Kernel name:  {cfg.kernel_name}
 FlyDSL output target: {cfg.output}
 Test file:    {cfg.test_file or "(none)"}
 Write the plan to: {cfg.plan_file}
-Plan the KERNEL port only - do NOT design the unit test (the test author owns that)."""
+Plan the KERNEL port only - do NOT design the unit test (the test author owns that).
+
+Task context:
+{cfg.extra_context}"""
     if it > 0:
         s += f"""
 
@@ -746,7 +749,10 @@ Write the local compile-gate smoke harness to: {smoke_path}
 It MUST pass locally before you finish (the orchestrator re-runs this exact gate):
   COMPILE_ONLY=1 FLYDSL_RUNTIME_ENABLE_CACHE=0 ARCH={cfg.compile_arch} python3 {smoke_path}
 Your job is the KERNEL only - do NOT write the unit test (the test author owns that).
-Test file:    {cfg.test_file or "(none)"}"""
+Test file:    {cfg.test_file or "(none)"}
+
+Task context:
+{cfg.extra_context}"""
     if feedback:
         s += f"\n\nFix these issues before finishing:\n{feedback}"
     return s
