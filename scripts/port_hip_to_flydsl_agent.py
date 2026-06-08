@@ -811,8 +811,7 @@ def make_client() -> anthropic.Anthropic:
     key = os.environ.get("AMD_LLM_GATEWAY_KEY")
     if not key:
         raise SystemExit(
-            "AMD_LLM_GATEWAY_KEY is not set. Export it before running, e.g.:\n"
-            "    export AMD_LLM_GATEWAY_KEY=..."
+            "AMD_LLM_GATEWAY_KEY is not set. Export it before running, e.g.:\n" "    export AMD_LLM_GATEWAY_KEY=..."
         )
     return anthropic.Anthropic(
         base_url="https://llm-api.amd.com/Unified",
