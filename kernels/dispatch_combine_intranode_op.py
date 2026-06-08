@@ -99,7 +99,7 @@ class FlyDSLDispatchCombineConfig:
     scale_dim: int = 0
     scale_type_size: int = 0
     enable_std_moe: bool = False
-    use_external_inp_buf: bool = True
+    zero_copy: bool = False
     quant_type: str = "none"
     # Cap on total receive tokens across peers (mori ``maxTotalRecvTokens``).
     # ``0`` => worst-case ``ws * M``. Per-rank slots = ``ceil(cap/ws)``
@@ -137,10 +137,24 @@ class FlyDSLDispatchCombineConfig:
         return self.hidden_dim
 
     @property
-    def zero_copy(self) -> bool:
-        """``True`` => combine reads/writes through the registered shared
-        staging buffer (no caller-side input copy)."""
-        return not self.use_external_inp_buf
+    def block_dim(self):
+        return self.warp_num_per_block * 64
+
+    @property
+    def dispatch_warp_num_per_block_eff(self):
+        return self.dispatch_warp_num_per_block
+
+    @property
+    def dispatch_block_num_eff(self):
+        return self.dispatch_block_num
+
+    @property
+    def combine_warp_num_per_block_eff(self):
+        return self.combine_warp_num_per_block
+
+    @property
+    def combine_block_num_eff(self):
+        return self.combine_block_num
 
     @property
     def max_recv(self):
