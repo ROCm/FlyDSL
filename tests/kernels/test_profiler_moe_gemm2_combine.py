@@ -50,7 +50,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
+import tempfile
 
 import torch
 import torch.distributed as dist
@@ -377,8 +379,9 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op,
     # e8m0 micro-scale = 127 means 2^0 = 1.0; headroom>0 lowers to 127-h
     # (= 2^-h) and scales both a2 and w2 -- the GEMM2 output then scales
     # by 2^-2h, avoiding fp4*fp4 random overflow past fp8 e4m3 max=+/-448
-    # (causes NaN). See --gemm2-scale-headroom help. headroom=0 preserves
-    # legacy behaviour. Clamp [0, 127] so the e8m0 encoding never becomes
+    # (causes NaN). headroom is set automatically in run_acceptance (4 for
+    # verify+fp8_direct_cast, else 0); headroom=0 preserves legacy behaviour.
+    # Clamp [0, 127] so the e8m0 encoding never becomes
     # 0 (= 2^-127 ~= 0), which would collapse entire columns.
     _e8m0_headroom = max(0, min(127, int(getattr(args, "gemm2_scale_headroom", 0))))
     _e8m0_val = 127 - _e8m0_headroom
@@ -1878,6 +1881,18 @@ def run_acceptance(rank, world_size, args):
     dev = torch.device("cuda", rank)
     cur_tok = args.max_tokens
     k       = args.k
+    # gemm2_scale_headroom is fully script-managed (no CLI knob). The A2/W2
+    # e8m0 micro-scale only matters numerically in verify, and only when combine
+    # casts the (large, fp4-fed) GEMM2 output through fp8 (fp8_direct_cast),
+    # where it would saturate to NaN; headroom=4 (256x) brings it inside the
+    # fp8e4m3 +/-448 safe range. profile/bench is value- and perf-independent,
+    # so it stays 0. Stored on args so downstream readers see the value.
+    args.gemm2_scale_headroom = 4 if (
+        args.mode == "verify" and args.combine_quant_type == "fp8_direct_cast"
+    ) else 0
+    if rank == 0:
+        print(f"[setup] gemm2_scale_headroom={args.gemm2_scale_headroom} "
+              f"(auto; mode={args.mode}, combine_quant_type={args.combine_quant_type})")
     # mori recv headroom: enlarge the recv buffer capacity (M) to
     # ceil(bs*factor) for the mori baseline (unbalanced routing at large bs
     # can make some ranks receive > ws*bs). Only active under
@@ -1894,7 +1909,7 @@ def run_acceptance(rank, world_size, args):
                   f"bound ws*M={world_size * cap_tok}")
 
     # ── cfg / dispatch op ───────────────────────────────────────────────────
-    _dtype = DTYPE_MAP.get(args.dtype, torch.bfloat16)
+    _dtype = DTYPE_MAP.get(args.dispatch_dtype, torch.bfloat16)
     cfg = FlyDSLDispatchCombineConfig(
         rank=rank, world_size=world_size,
         hidden_dim=args.hidden_dim,
@@ -1902,14 +1917,16 @@ def run_acceptance(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         num_experts_per_token=k,
         data_type=_dtype,
-        warp_num_per_block=args.warp_per_block,
-        block_num=args.block_num,
+        dispatch_warp_num_per_block=args.dispatch_warp_per_block,
+        dispatch_block_num=args.dispatch_block_num,
+        combine_warp_num_per_block=args.combine_warp_per_block,
+        combine_block_num=args.combine_block_num,
         chip=args.chip,
         zero_copy=args.zero_copy,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,
-        quant_type=args.quant_type,
+        quant_type=args.combine_quant_type,
         use_token_flag_sync=args.token_flag_sync,
     )
     args.max_num_inp_token_per_rank = cap_tok  # consumed by _build_gemm2_static_inputs
@@ -2079,17 +2096,16 @@ def run_acceptance(rank, world_size, args):
         k=k,
         num_experts_per_rank=args.num_experts_per_rank,
         warmup=args.warmup, iters=args.iters,
-        block_num=cfg.block_num,
-        warp_per_block=cfg.warp_num_per_block,
+        dispatch_block_num=cfg.dispatch_block_num,
+        dispatch_warp_per_block=cfg.dispatch_warp_num_per_block,
+        combine_block_num=cfg.combine_block_num,
+        combine_warp_per_block=cfg.combine_warp_num_per_block,
         gemm2_a_dtype=args.gemm2_a_dtype,
         gemm2_b_dtype=args.gemm2_b_dtype,
         tile_m2=args.tile_m2, tile_n2=args.tile_n2, tile_k2=args.tile_k2,
         persist_m=args.persist_m,
         bench_op=args.bench_op,
     )
-
-    out_dir = os.path.join(args.output_dir, f"ep{world_size}_bs{cur_tok}")
-    os.makedirs(out_dir, exist_ok=True)
 
     # Path switch (both verify and profile entry points read this).
     test_baseline = args.bench_op in ("baseline", "both")
@@ -2219,6 +2235,17 @@ def run_acceptance(rank, world_size, args):
     assert args.mode == "profile" and args.cudagraph, \
         f"unsupported (mode={args.mode}, cudagraph={args.cudagraph})"
 
+    # --output-dir not given -> don't persist anything. The profiler trace JSON
+    # is still needed to compute stats, so write it to a scratch temp dir and
+    # remove it at the end (_persist_out gates the final "saved to" message).
+    # Only the profile path reaches here, so verify/bench never create a dir.
+    _persist_out = args.output_dir is not None
+    if _persist_out:
+        out_dir = os.path.join(args.output_dir, f"ep{world_size}_bs{cur_tok}")
+    else:
+        out_dir = tempfile.mkdtemp(prefix=f"moe_gemm2_ep{world_size}_bs{cur_tok}_")
+    os.makedirs(out_dir, exist_ok=True)
+
     base_stats = None
     fused_stats = None
 
@@ -2271,8 +2298,14 @@ def run_acceptance(rank, world_size, args):
     if rank == 0 and base_stats is not None and fused_stats is not None:
         _print_speedup(base_stats, fused_stats, world_size)
 
-    if rank == 0:
-        print(f"\n[acceptance] All trace/JSON saved to: {out_dir}/")
+    if _persist_out:
+        if rank == 0:
+            print(f"\n[acceptance] All trace/JSON saved to: {out_dir}/")
+    else:
+        # Scratch dir: drop it (no --output-dir was given, so nothing persists).
+        shutil.rmtree(out_dir, ignore_errors=True)
+        if rank == 0:
+            print("\n[acceptance] no --output-dir given; traces not saved.")
 
 
 # ─── Worker / CLI ─────────────────────────────────────────────────────────────
@@ -2326,18 +2359,49 @@ def _parse_args():
                         "collapse -> inter-rank hits = cur_tok*k perfectly balanced, "
                         "per (PE, local_eid) cell hit count = cur_tok*k/epr. "
                         "Requires k%%4==0 (8/4=2) and ws>=4 (8).")
-    # dispatch / combine
-    # NOTE: empirically bn=256 is ~30% faster than bn=80 on combine
-    # (27→19us @ bs=256/h=7168/k=8/EP=8) — the small grid was leaving
-    # CUs idle.  wpb=4 vs 16 shows no meaningful difference (the XDB
-    # barrier is wave-cooperative; more waves just adds protocol cost).
-    # Updated default to bn=256/wpb=4 to reflect the real optimum.
-    p.add_argument("--block-num",            type=int, default=256)
-    p.add_argument("--warp-per-block",       type=int, default=4)
+    # ── dispatch / combine ─────────────────────────────────────────────────
+    p.add_argument("--dispatch-dtype",         dest="dispatch_dtype",
+                   type=str, default="bf16", choices=list(DTYPE_MAP.keys()),
+                   help="dispatch token dtype (combine dtype follows the gemm2 output)")
+    # dispatch / combine each get their own grid geometry; empirically combine
+    # likes more warps per block than dispatch (the XDB barrier is
+    # wave-cooperative). Defaults mirror the op's per-phase defaults.
+    p.add_argument("--dispatch-block-num",     dest="dispatch_block_num",
+                   type=int, default=128, help="dispatch kernel grid block count")
+    p.add_argument("--dispatch-warp-per-block", dest="dispatch_warp_per_block",
+                   type=int, default=4, help="dispatch kernel warps per block")
+    p.add_argument("--combine-block-num",      dest="combine_block_num",
+                   type=int, default=128, help="combine kernel grid block count")
+    p.add_argument("--combine-warp-per-block", dest="combine_warp_per_block",
+                   type=int, default=8, help="combine kernel warps per block")
     p.add_argument("--chip",                 type=str, default="gfx950")
-    p.add_argument("--dtype",                type=str, default="bf16",
-                   choices=list(DTYPE_MAP.keys()),
-                   help="dispatch / combine token dtype")
+    p.add_argument("--zero-copy", dest="zero_copy",
+                   action="store_true", default=False)
+    p.add_argument("--enable-std-moe", action="store_true", default=False)
+    p.add_argument("--scale-dim",       type=int, default=0)
+    p.add_argument("--scale-type-size", type=int, default=0)
+    p.add_argument("--combine-quant-type",   dest="combine_quant_type",
+                   type=str, default="none", choices=["none", "fp8_direct_cast"])
+    p.add_argument("--baseline-comm", choices=["flydsl", "mori"], default="flydsl",
+                   help="Whether the baseline chain dispatch/combine use "
+                        "flydsl's own kernels or mori. mori: swap dispatch+"
+                        "combine to mori (gemm2 stays flydsl) for a 'mori "
+                        "dispatch + flydsl gemm2 + mori combine' baseline; "
+                        "needs profile/bench mode + bf16/fp16/fp8 dtype.")
+    p.add_argument("--mori-recv-factor", type=float, default=1.0,
+                   help="Only with --baseline-comm mori: enlarge recv buffer "
+                        "capacity to ceil(bs*factor); still dispatches bs "
+                        "tokens. mori default recv bound = ws*bs.")
+    # ── fused (gemm2 + combine) ─────────────────────────────────────────────
+    # token-level-sync: per-token flag sync switch. When on, dispatch / combine
+    # kernels enable reset + spin-wait and the fused gemm2 epilogue adds
+    # cross-device atomic_add. When off, the whole block is const_expr DCEd
+    # and behaviour matches baseline exactly. Only observable under
+    # --bench-op fused / both (the fused path).
+    p.add_argument("--token-flag-sync", dest="token_flag_sync",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Enable the token-level-sync per-token flag cross-device sync "
+                        "path; --no-token-flag-sync (default) disables it")
     # GEMM2
     # Default a=fp4/b=fp4 (production a4w4: GEMM1 output is SiLU + per-1x32
     # quantized to fp4 before feeding GEMM2; see ut_per1x32.py). The early
@@ -2360,74 +2424,35 @@ def _parse_args():
     p.add_argument("--xcd-swizzle",          type=int, default=0,
                    help="moe_gemm2 cross-XCD swizzle factor (0 disables; recommend 8 on MI300)")
     p.add_argument("--gemm2-accumulate",     dest="gemm2_accumulate",
-                   action="store_true", default=True,
-                   help="GEMM2 epilogue uses atomic-add (default True)")
-    p.add_argument("--no-gemm2-accumulate",  dest="gemm2_accumulate",
-                   action="store_false",
-                   help="GEMM2 epilogue uses plain-store reduce mode (per-row dedicated slot)")
-    p.add_argument("--gemm2-scale-headroom", type=int, default=0,
-                   help="Lower the A2/W2 e8m0 micro-scale from 127 to 127-headroom "
-                        "(each -1 shrinks by 2x). fp4xfp4 random inputs with inter_dim=2048 "
-                        "produce GEMM2 outputs ~+/-4000; fp8_direct_cast's bf16->fp8 cast "
-                        "saturates to +/-inf -> the subsequent cast back to bf16 yields NaN, "
-                        "polluting verify diff. Recommend headroom=4 (256x scaling) for verify -> "
-                        "GEMM2 output ~+/-15, well inside the fp8e4m3 max=+/-448 safe range. "
-                        "profile/bench keeps 0 (does not affect perf numbers).")
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="GEMM2 epilogue reduce mode: atomic-add (default) vs "
+                        "--no-gemm2-accumulate for plain-store (per-row dedicated slot)")
     # Mode
     p.add_argument("--mode", choices=["profile", "bench", "verify"], default="profile",
                    help="Only profile mode is supported in this skeleton")
-    p.add_argument("--cudagraph", action="store_true", default=True,
-                   help="This skeleton forces CUDAGraph; --no-cudagraph is a no-op placeholder")
-    p.add_argument("--no-cudagraph", dest="cudagraph", action="store_false")
+    p.add_argument("--cudagraph", dest="cudagraph",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="Use CUDAGraph capture/replay (default); --no-cudagraph runs eager")
     # --- Option A: capture dispatch into the chain too (mori best-practice).
     # Enabled by default; reproduce the old (broken) behaviour with --no-chain-include-dispatch.
-    p.add_argument("--chain-include-dispatch", action="store_true", default=True,
+    p.add_argument("--chain-include-dispatch", dest="chain_include_dispatch",
+                   action=argparse.BooleanOptionalAction, default=True,
                    help="Place dispatch inside the cudagraph chain so each replay "
                         "rewrites routing tables / total_recv, avoiding empty replays "
-                        "caused by combine clearing total_recv to 0.")
-    p.add_argument("--no-chain-include-dispatch", dest="chain_include_dispatch",
-                   action="store_false",
-                   help="Fall back to the old path: dispatch runs only once at setup. "
-                        "combine only does real work on the 1st chain, the rest run empty -- "
-                        "diagnostic / comparison only.")
+                        "caused by combine clearing total_recv to 0 (default). "
+                        "--no-chain-include-dispatch falls back to the old path "
+                        "(dispatch runs once at setup; only the 1st chain does real "
+                        "combine work, the rest run empty -- diagnostic only).")
     p.add_argument("--bench-op", choices=["baseline", "fused", "both"], default="baseline",
                    help="Which path to run")
     # Profile / output
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters",  type=int, default=20,
                    help="Profiler active iterations (effective = iters - skip(5))")
-    p.add_argument("--output-dir", type=str, default="acceptance_profile")
+    p.add_argument("--output-dir", type=str, default=None,
+                   help="Dir to persist profiler trace/JSON. Omit to not save "
+                        "anything (traces go to a temp dir, used for stats, then removed).")
     p.add_argument("--port",       type=int, default=29800)
-    # Feature switches (aligned with dispatch op)
-    p.add_argument("--zero-copy", dest="zero_copy",
-                   action="store_true", default=False)
-    p.add_argument("--enable-std-moe", action="store_true", default=False)
-    p.add_argument("--scale-dim",       type=int, default=0)
-    p.add_argument("--scale-type-size", type=int, default=0)
-    p.add_argument("--quant-type", type=str, default="none",
-                   choices=["none", "fp8_direct_cast"])
-    # token-level-sync: per-token flag sync switch. When on, dispatch / combine
-    # kernels enable reset + spin-wait and the fused gemm2 epilogue adds
-    # cross-device atomic_add. When off, the whole block is const_expr DCEd
-    # and behaviour matches baseline exactly. Only observable under
-    # --bench-op fused / both (the fused path).
-    p.add_argument("--token-flag-sync", dest="token_flag_sync",
-                   action="store_true", default=False,
-                   help="Enable the token-level-sync per-token flag cross-device sync path")
-    p.add_argument("--no-token-flag-sync", dest="token_flag_sync",
-                   action="store_false",
-                   help="Disable the token-level-sync path (default behaviour)")
-    # --- Baseline comm backend (flydsl native vs mori reference) ------------
-    p.add_argument("--baseline-comm", choices=["flydsl", "mori"], default="flydsl",
-                   help="Whether the baseline chain dispatch/combine use "
-                        "flydsl's own kernels or mori. mori: swap dispatch+"
-                        "combine to mori (gemm2 stays flydsl) for a 'mori "
-                        "dispatch + flydsl gemm2 + mori combine' baseline; "
-                        "needs profile/bench mode + bf16/fp16/fp8 dtype.")
-    p.add_argument("--mori-recv-factor", type=float, default=1.0,
-                   help="Only with --baseline-comm mori: enlarge recv buffer "
-                        "capacity to ceil(bs*factor); still dispatches bs "
-                        "tokens. mori default recv bound = ws*bs.")
     return p.parse_args()
 
 
