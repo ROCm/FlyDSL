@@ -29,7 +29,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, memref
 from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator
@@ -334,9 +334,7 @@ def compile_gemm1_a4w4(
                 v_voff_dx4 = (wave * 64 + lane) * 16
                 v_voff_dw = (wave * 64 + lane) * 4
                 for sub in range_constexpr(kSubBlocks):
-                    s_chunk_base = fx.Int32(
-                        _readfirstlane(((chunk_base_BM32 + sub) * kAS_per_chunk_dw * 4).ir_value())
-                    )
+                    s_chunk_base = fx.Int32(_readfirstlane(((chunk_base_BM32 + sub) * kAS_per_chunk_dw * 4).ir_value()))
                     lds_sub_off = sub * kAS_chunk_bytes
                     dst = _lds_ptr(s_Ascale_addr, (lds_sub_off + wave * 1024).ir_value())
                     _buffer_load_lds(A_scale_rsrc, dst, 16, v_voff_dx4.ir_value(), s_chunk_base.ir_value())
@@ -369,7 +367,7 @@ def compile_gemm1_a4w4(
             def issue_a_ds_read(lds_slot):
                 lane_row = lane % 16
                 lane_col = (lane // 16) * 16
-                mask = ((lane_row & 0xE) << 3)
+                mask = (lane_row & 0xE) << 3
                 a = [[None, None] for _ in range(kMChunks)]
                 for k in range_constexpr(2):
                     lds_col = (lane_col + k * 64) ^ mask
@@ -477,9 +475,7 @@ def compile_gemm1_a4w4(
                 for J in range_constexpr(4):
                     _sched_barrier()
                     _setprio(1)
-                    issue_mfma_cluster(
-                        J, OFFSET == 0, a, b_reg[slot_b], a_scale, b_scale_v[slot_b], accm
-                    )
+                    issue_mfma_cluster(J, OFFSET == 0, a, b_reg[slot_b], a_scale, b_scale_v[slot_b], accm)
                     _setprio(0)
                     _sched_barrier()
                     b_reg[slot_b][J] = issue_b_load_j(K_C, J)
@@ -495,9 +491,7 @@ def compile_gemm1_a4w4(
                 a = issue_a_ds_read(read_slot_a)
                 a_scale = issue_a_scale_ds_read(kt)
                 for J in range_constexpr(4):
-                    issue_mfma_cluster(
-                        J, False, a, b_reg[slot_b_drain], a_scale, b_scale_v[slot_b_drain], accm
-                    )
+                    issue_mfma_cluster(J, False, a, b_reg[slot_b_drain], a_scale, b_scale_v[slot_b_drain], accm)
 
             gpu.barrier()
 
@@ -523,7 +517,9 @@ def compile_gemm1_a4w4(
     # =====================================================================
     # epilog helper (lives in the kernel-trace scope via closure constants)
     # =====================================================================
-    def _epilog(accm, arg_aq_out, arg_ascale_out, m_block_idx, m_row, n_block_idx, wave, wave_n, lane, tid, lds_acc_addr):
+    def _epilog(
+        accm, arg_aq_out, arg_ascale_out, m_block_idx, m_row, n_block_idx, wave, wave_n, lane, tid, lds_acc_addr
+    ):
         EVec = 8
         M_REPS = BM // 16
         kSubBlocks_epi = 1 if BM < 32 else BM // 32

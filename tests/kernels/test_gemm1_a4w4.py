@@ -17,18 +17,15 @@ Run on the remote gfx950 container (see scripts/REMOTE_DZM.md)::
   python3 test_gemm1_a4w4.py
 """
 
-import os
-
-import pytest
-import torch
-
-import aiter
-from aiter import QuantType, dtypes
-from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
-from aiter.utility.fp4_utils import e8m0_shuffle
-
 import sys
 from pathlib import Path as _Path
+
+import aiter
+import pytest
+import torch
+from aiter import QuantType, dtypes
+from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
+
 _REPO_ROOT = _Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -37,14 +34,14 @@ from kernels.gemm1_a4w4 import compile_gemm1_a4w4  # noqa: E402
 # ----------------------------------------------------------------------------
 # KIMI-K2.5 TP=4 shape (mirrors /FlyDSL/test.py).  This is the NE=385 family.
 # ----------------------------------------------------------------------------
-NE = 385          # routed experts + 1 shared
-H = 7168          # model hidden / K
-INTER = 512       # per-shard inter_dim  -> N_OUT = 2*INTER = 1024
+NE = 385  # routed experts + 1 shared
+H = 7168  # model hidden / K
+INTER = 512  # per-shard inter_dim  -> N_OUT = 2*INTER = 1024
 TOPK = 9
-BM = 32           # primary FlyDSL port target
+BM = 32  # primary FlyDSL port target
 
-N_OUT = 2 * INTER          # 1024
-K = H                      # 7168
+N_OUT = 2 * INTER  # 1024
+K = H  # 7168
 MAX_M = 655360
 NUM_N_BLOCKS = N_OUT // 256  # 4
 
@@ -118,46 +115,60 @@ def _prepare_gemm1_inputs(hidden, topk_ids, topk_weight, M, device):
     a_scale = torch.empty((M, D_HIDDEN // 32), device=device, dtype=torch.uint8)
 
     aiter.mxfp4_moe_sort(
-        topk_ids=topk_ids, topk_weight=topk_weight,
-        sorted_token_ids=sorted_token_ids, sorted_expert_ids=sorted_expert_ids,
-        cumsum_tensor=cumsum_tensor, reverse_sorted=reverse_sorted,
+        topk_ids=topk_ids,
+        topk_weight=topk_weight,
+        sorted_token_ids=sorted_token_ids,
+        sorted_expert_ids=sorted_expert_ids,
+        cumsum_tensor=cumsum_tensor,
+        reverse_sorted=reverse_sorted,
         sorted_weights=sorted_weights,
-        masked_m=masked_m, m_indices=m_indices,
+        masked_m=masked_m,
+        m_indices=m_indices,
         bf16_zero_out=_empty_bf16(device),
         bf16_zero_workspace=_empty_bf16(device),
-        M_logical=M, NE=NE, TOPK=TOPK,
-        D_HIDDEN=D_HIDDEN, D_INTER=D_INTER, MB=BM,
+        M_logical=M,
+        NE=NE,
+        TOPK=TOPK,
+        D_HIDDEN=D_HIDDEN,
+        D_INTER=D_INTER,
+        MB=BM,
         prologue=1,
     )
     aiter.mxfp4_moe_quant(
-        a_input=hidden, a_quant=a_quant, a_scale=a_scale,
+        a_input=hidden,
+        a_quant=a_quant,
+        a_scale=a_scale,
         bf16_zero_out=_empty_bf16(device),
-        NE=NE, TOPK=TOPK, D_HIDDEN=D_HIDDEN, MB=BM,
+        NE=NE,
+        TOPK=TOPK,
+        D_HIDDEN=D_HIDDEN,
+        MB=BM,
     )
 
     padded_rows = ((max_sorted + 31) // 32) * 32
     cols = D_HIDDEN // 32
-    a_scale_sorted_shuffled = torch.empty(
-        (padded_rows * cols * 2,), device=device, dtype=torch.uint8)
+    a_scale_sorted_shuffled = torch.empty((padded_rows * cols * 2,), device=device, dtype=torch.uint8)
     aiter.mxfp4_moe_sort_scales(
         a_scale=a_scale,
         sorted_token_ids=sorted_token_ids,
         cumsum_tensor=cumsum_tensor,
         a_scale_sorted_shuffled=a_scale_sorted_shuffled,
-        NE=NE, TOPK=TOPK, D_HIDDEN=D_HIDDEN, D_INTER=D_INTER,
-        MB=BM, max_sorted=max_sorted,
+        NE=NE,
+        TOPK=TOPK,
+        D_HIDDEN=D_HIDDEN,
+        D_INTER=D_INTER,
+        MB=BM,
+        max_sorted=max_sorted,
     )
 
     # gemm1 output buffers (sized as in aiter._mxfp4_moe_run)
-    inter_sorted_quant = torch.empty(
-        (max_sorted, D_INTER // 2), device=device, dtype=torch.uint8)
+    inter_sorted_quant = torch.empty((max_sorted, D_INTER // 2), device=device, dtype=torch.uint8)
     BM_MIN = 64
     inter_scale_cols = D_INTER // 32
     inter_scale_bytes = max_sorted * (1024 // BM_MIN) * 4
     inter_scale_rows = (inter_scale_bytes + inter_scale_cols - 1) // inter_scale_cols
     inter_scale_rows = (inter_scale_rows + 31) // 32 * 32
-    inter_sorted_shuffled_scale = torch.empty(
-        (inter_scale_rows, inter_scale_cols), device=device, dtype=torch.uint8)
+    inter_sorted_shuffled_scale = torch.empty((inter_scale_rows, inter_scale_cols), device=device, dtype=torch.uint8)
 
     return dict(
         cumsum_tensor=cumsum_tensor,
@@ -215,8 +226,14 @@ def _run_one(M, device, w):
     inter_s_fly = torch.zeros_like(inter_s_gold)
 
     launch = compile_gemm1_a4w4(
-        MAX_M=MAX_M, NUM_EXPERTS=NE, K=K, N_OUT=N_OUT, BM=BM,
-        kUseNT=False, kInlineQuant=False, kXcdSwizzle=0,
+        MAX_M=MAX_M,
+        NUM_EXPERTS=NE,
+        K=K,
+        N_OUT=N_OUT,
+        BM=BM,
+        kUseNT=False,
+        kInlineQuant=False,
+        kXcdSwizzle=0,
     )
     n_tokens = M
     grid = _grid(M)
