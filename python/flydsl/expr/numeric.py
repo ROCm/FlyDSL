@@ -235,7 +235,7 @@ def _try_coerce_rhs(rhs):
         if isinstance(rhs.type, ir.VectorType):
             return None
         if isinstance(rhs.type, ir.IndexType):
-            return Int32(rhs)
+            return Index(rhs)
         try:
             return Numeric.from_ir_type(rhs.type)(rhs)
         except (ValueError, KeyError):
