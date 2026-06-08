@@ -77,7 +77,8 @@ A few gotchas worth front-loading:
 
 ## Running
 
-These notebooks execute kernels, so they need a built/installed FlyDSL and a ROCm GPU,
+These notebooks execute kernels, so they need a built/installed FlyDSL (`pip install -e .`
+from the project root — see the root README for the build) on a ROCm GPU, with `torch`,
 plus a couple of notebook tools:
 
 ```bash
@@ -92,5 +93,9 @@ Typst source instead. Then open them with Jupyter, or run headless:
 ```bash
 jupyter nbconvert --to notebook --execute --inplace examples/notebooks/*.ipynb
 ```
+
+The notebooks ship without a pinned kernelspec, so `nbconvert` (and Jupyter) run them
+against your **active** Python environment — make sure `flydsl` imports there. Work
+through them in order; `00`–`03` are the foundation for `04`–`05`.
 
 Cell outputs are committed **cleared**; run the cells to populate them.
