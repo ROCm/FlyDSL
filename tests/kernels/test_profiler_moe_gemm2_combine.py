@@ -335,7 +335,8 @@ def _build_dispatch_inputs(rank, world_size, dev, args, cfg):
     return inp, wts, idx
 
 
-def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op):
+def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op,
+                               force_zero_copy_out=None):
     """Build the *static* inputs for GEMM2 / combine (unchanged during capture).
 
     Layout (production-aligned, topk=k):
@@ -569,7 +570,9 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op):
     #   accumulate=False -> [max_recv * topk, model_dim] (each (t, s) its own slot)
     out_dtype = cfg.data_type if cfg.data_type in (torch.bfloat16, torch.float16) else torch.bfloat16
     out_rows = max_recv if args.gemm2_accumulate else a2_rows
-    if cfg.zero_copy and args.bench_op == "baseline":
+    _zc_out = (force_zero_copy_out if force_zero_copy_out is not None
+               else (cfg.zero_copy and args.bench_op == "baseline"))
+    if _zc_out:
         # zero-copy mode: the combine side skips Stage 1 and reads
         # shmem_comb_inp_tok directly. The caller must write GEMM2 output
         # into the view returned by op.get_registered_combine_input_buffer
@@ -792,6 +795,8 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
         out_dtype=out_s,
         accumulate=accumulate,
         persist_m=args.persist_m,
+        sort_block_m=args.sort_block_m,
+        b_nt=args.b_nt,
     )
 
     def _args(o, x, w, sx, sw, st, eids, sw_sorted):
@@ -854,6 +859,109 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
 # range(0, 0)" kernel. Without dispatch, measured combine GPU time is just
 # prologue + barrier + launch overhead (~17us at bs=256) and does not
 # reflect real Stage 1 P2P + Stage 3 work.
+_MORI_SUPPORTED_DTYPES = (
+    torch.bfloat16, torch.float16,
+    torch.float8_e4m3fn, torch.float8_e4m3fnuz,
+)
+
+
+def _build_mori_op(rank, world_size, cfg, block_num=None, warp_per_block=None):
+    """Build a mori EpDispatchCombineOp (mirrors
+    test_profiler_dispatch_combine.build_mori_ref).
+
+    Reuses this test's FlyDSLDispatchCombineConfig ``cfg``, mapping its shape /
+    dtype / launch-geometry fields onto mori's EpDispatchCombineConfig.
+    """
+    if cfg.data_type not in _MORI_SUPPORTED_DTYPES:
+        raise RuntimeError(
+            f"mori baseline needs dispatch dtype in {_MORI_SUPPORTED_DTYPES}, "
+            f"got cfg.data_type={cfg.data_type}; rerun with --dtype bf16/fp16/fp8_*."
+        )
+    from mori.ops.dispatch_combine import EpDispatchCombineConfig, EpDispatchCombineOp
+
+    elem = torch.tensor([], dtype=cfg.data_type).element_size()
+    mcfg = EpDispatchCombineConfig(
+        data_type=cfg.data_type,
+        rank=rank,
+        world_size=world_size,
+        hidden_dim=cfg.hidden_dim,
+        scale_dim=cfg.num_experts_per_token,
+        scale_type_size=4,
+        max_token_type_size=(
+            cfg.max_token_type_size if cfg.max_token_type_size > 0 else elem
+        ),
+        max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
+        num_experts_per_rank=cfg.num_experts_per_rank,
+        num_experts_per_token=cfg.num_experts_per_token,
+        warp_num_per_block=(
+            warp_per_block if warp_per_block is not None
+            else cfg.dispatch_warp_num_per_block_eff
+        ),
+        block_num=(
+            block_num if block_num is not None
+            else cfg.dispatch_block_num_eff
+        ),
+        gpu_per_node=world_size,
+        use_external_inp_buf=not cfg.zero_copy,
+        quant_type=cfg.quant_type,
+        # Only forward the cap when unset (0) or equal to the worst-case ws*M;
+        # otherwise mori treats it as a hard contract and a routing overflow
+        # device-asserts, permanently poisoning the HIP context.
+        max_total_recv_tokens=(
+            cfg.max_total_recv_tokens
+            if cfg.max_total_recv_tokens == 0
+            or cfg.max_total_recv_tokens
+            == cfg.world_size * cfg.max_num_inp_token_per_rank
+            else 0
+        ),
+    )
+    return EpDispatchCombineOp(mcfg)
+
+
+class _MoriDispOpAdapter:
+    """Adapt a mori EpDispatchCombineOp to the minimal FlyDSL disp_op surface
+    this test uses: dispatch / combine / get_registered_combine_input_buffer,
+    reset() / barrier() (for _capture_chain), shmem_disp_out_idx /
+    shmem_disp_out_wts / total_recv (for _run_moe_sorting, filled in-place by
+    dispatch return values), and shmem_comb_inp_tok (setup zero-copy ptr check).
+    """
+
+    def __init__(self, mori_op, out_dtype):
+        self._op = mori_op
+        self._out_dtype = out_dtype
+        self.shmem_disp_out_idx = None
+        self.shmem_disp_out_wts = None
+        self.total_recv = None
+        # mori combine Stage1 reads this registered buffer directly under
+        # zero-copy; gemm2_out must land here.
+        self.shmem_comb_inp_tok = mori_op.get_registered_combine_input_buffer(
+            out_dtype
+        )
+
+    def dispatch(self, inp, wts, scales, idx):
+        ret = self._op.dispatch(inp, wts, scales, idx)
+        _out, out_weights, _out_scales, out_indices, total_recv = ret
+        self.shmem_disp_out_idx = out_indices
+        self.shmem_disp_out_wts = out_weights
+        self.total_recv = total_recv
+        return ret
+
+    def combine(self, inp_for_kernel, weights, combine_idx, **kwargs):
+        return self._op.combine(inp_for_kernel, weights, combine_idx, **kwargs)
+
+    def get_registered_combine_input_buffer(self, dtype):
+        return self._op.get_registered_combine_input_buffer(dtype)
+
+    def reset(self):
+        r = getattr(self._op, "reset", None)
+        if callable(r):
+            r()
+        ms.shmem_barrier_all()
+
+    def barrier(self):
+        ms.shmem_barrier_all()
+
+
 def _baseline_chain(disp_op, gemm2_launch, gemm2_in, combine_idx,
                     dispatch_inputs=None):
     """baseline: [dispatch ->] [moe_sorting ->] moe_gemm2 -> combine.
@@ -873,11 +981,13 @@ def _baseline_chain(disp_op, gemm2_launch, gemm2_in, combine_idx,
     """
     if dispatch_inputs is not None:
         inp, wts, scales, idx = dispatch_inputs
-        # disp_op.dispatch caches the compiled jit kernel internally, so
-        # capture just relaunches it; routing tables / total_recv are
-        # updated in-place inside disp_op's shmem buffers, and combine_idx
-        # (= shmem_disp_out_idx view) keeps the same handle.
-        disp_op.dispatch(inp, wts, scales, idx)
+        # Re-dispatch every chain so routing / total_recv stay fresh, then
+        # combine the routing index produced by THIS dispatch (mirrors
+        # test_profiler_dispatch_combine._run_combine, which combines ret[3]).
+        # flydsl returns a stable shmem-view handle; mori returns its internal
+        # index buffer -- either way combine matches the current routing.
+        _disp_ret = disp_op.dispatch(inp, wts, scales, idx)
+        combine_idx = _disp_ret[3]
         # capture moe_sorting to refresh sorted_* tables in-place
         _run_moe_sorting(gemm2_in, disp_op)
     if os.environ.get("FLYDSL_DEBUG_CHAIN_DISPATCH_ONLY", "0") == "1":
@@ -1077,7 +1187,8 @@ def _print_aggregated(stats: dict, op_tag: str, world_size: int, meta: dict,
 
 
 # --- profile + cudagraph driver -----------------------------------------
-def _capture_chain(chain_fn, capture_stream, eager_warmup=1, disp_op=None):
+def _capture_chain(chain_fn, capture_stream, eager_warmup=1, disp_op=None,
+                   mori_capture=False):
     """eager warmup (triggers JIT compile) -> CUDAGraph capture.
 
     If the chain contains dispatch (option A), the sequence must mirror
@@ -1089,7 +1200,27 @@ def _capture_chain(chain_fn, capture_stream, eager_warmup=1, disp_op=None):
     Any deviation (extra sync, extra warmups, mid-sequence reset, ...)
     drifts mori shmem's internal cross-device counter and the very first
     chain_fn() during capture trips hipErrorIllegalAddress.
+
+    mori_capture=True (the --baseline-comm mori baseline chain): mirror the
+    single-op _cudagraph_capture_mori -- reset() but NO eager warmup, then
+    capture directly. mori dispatch/combine are precompiled hsaco (no JIT
+    warmup); an extra eager dispatch would advance mori's cross-device
+    monotonic flag, so the first captured launch would hit an inconsistent
+    counter (symmetric_memory illegal access).
     """
+    if mori_capture:
+        # Mirror test_profiler_dispatch_combine._cudagraph_capture_mori: NO
+        # reset and NO eager warmup -- just a global barrier, then capture
+        # dispatch+combine directly. mori dispatch/combine flag usage is
+        # self-consistent across replays; an extra reset() shifts the flag
+        # baseline so the recorded dispatch first-replay mismatches and trips a
+        # symmetric_memory illegal access.
+        ms.shmem_barrier_all()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, stream=capture_stream):
+            chain_fn()
+        return g
+
     if disp_op is not None:
         disp_op.reset()    # ms.shmem_barrier_all
     for _ in range(eager_warmup):
@@ -1109,7 +1240,7 @@ def _capture_chain(chain_fn, capture_stream, eager_warmup=1, disp_op=None):
 def profile_cudagraph_chain(chain_fn, op_tag: str,
                             rank: int, world_size: int, dev: torch.device,
                             iters: int, out_dir: str, meta: dict,
-                            disp_op=None):
+                            disp_op=None, mori_capture=False):
     """Use torch.profiler to capture per-kernel timings across CUDAGraph replays.
 
     When the chain includes dispatch (option A), disp_op must be passed so
@@ -1119,7 +1250,8 @@ def profile_cudagraph_chain(chain_fn, op_tag: str,
     ms.shmem_barrier_all()
 
     capture_stream = torch.cuda.Stream()
-    g = _capture_chain(chain_fn, capture_stream, eager_warmup=1, disp_op=disp_op)
+    g = _capture_chain(chain_fn, capture_stream, eager_warmup=1, disp_op=disp_op,
+                       mori_capture=mori_capture)
     if rank == 0:
         print(f"\n[profile+cudagraph] {op_tag} capture done")
 
@@ -1746,27 +1878,41 @@ def run_acceptance(rank, world_size, args):
     dev = torch.device("cuda", rank)
     cur_tok = args.max_tokens
     k       = args.k
+    # mori recv headroom: enlarge the recv buffer capacity (M) to
+    # ceil(bs*factor) for the mori baseline (unbalanced routing at large bs
+    # can make some ranks receive > ws*bs). Only active under
+    # --baseline-comm mori with factor > 1; the default factor=1.0 keeps
+    # cap_tok == cur_tok so the flydsl path is unchanged.
+    import math
+    cap_tok = cur_tok
+    if (getattr(args, "baseline_comm", "flydsl") == "mori"
+            and getattr(args, "mori_recv_factor", 1.0) > 1.0):
+        cap_tok = math.ceil(cur_tok * args.mori_recv_factor)
+        if rank == 0:
+            print(f"[mori-recv-factor] bs(input)={cur_tok} -> capacity "
+                  f"M={cap_tok} (factor={args.mori_recv_factor}); recv upper "
+                  f"bound ws*M={world_size * cap_tok}")
 
     # ── cfg / dispatch op ───────────────────────────────────────────────────
     _dtype = DTYPE_MAP.get(args.dtype, torch.bfloat16)
     cfg = FlyDSLDispatchCombineConfig(
         rank=rank, world_size=world_size,
         hidden_dim=args.hidden_dim,
-        max_num_inp_token_per_rank=cur_tok,
+        max_num_inp_token_per_rank=cap_tok,
         num_experts_per_rank=args.num_experts_per_rank,
         num_experts_per_token=k,
         data_type=_dtype,
         warp_num_per_block=args.warp_per_block,
         block_num=args.block_num,
         chip=args.chip,
-        use_external_inp_buf=args.use_external_inp_buf,
+        zero_copy=args.zero_copy,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,
         quant_type=args.quant_type,
         use_token_flag_sync=args.token_flag_sync,
     )
-    args.max_num_inp_token_per_rank = cur_tok  # consumed by _build_gemm2_static_inputs
+    args.max_num_inp_token_per_rank = cap_tok  # consumed by _build_gemm2_static_inputs
 
     # ── FP4 hard constraints ────────────────────────────────────────────────
     # FlyDSL FP4 mfma_scale_x128 path implicit assumptions:
@@ -1819,6 +1965,8 @@ def run_acceptance(rank, world_size, args):
             inter_dim=args.inter_dim,
             tile_m=args.tile_m2, tile_n=args.tile_n2, tile_k=args.tile_k2,
             persist_m=args.persist_m,
+            sort_block_m=args.sort_block_m,
+            b_nt=args.b_nt,
             a_dtype=args.gemm2_a_dtype, b_dtype=args.gemm2_b_dtype,
             xcd_swizzle=args.xcd_swizzle,
             use_token_flag_sync=args.token_flag_sync,
@@ -1947,6 +2095,67 @@ def run_acceptance(rank, world_size, args):
     test_baseline = args.bench_op in ("baseline", "both")
     test_fused    = args.bench_op in ("fused",    "both") and fused_op is not None
 
+    # --- Baseline comm backend (flydsl native / mori reference) -------------
+    # Default: baseline reuses the flydsl disp_op + shared gemm2_in /
+    # gemm2_launch / combine_idx. With --baseline-comm mori we build a separate
+    # mori adapter + its own baseline_gemm2_in (gemm2_out lands in mori's
+    # registered combine buffer under zero-copy), so the baseline chain becomes
+    # "mori dispatch + flydsl gemm2 + mori combine". The fused path always keeps
+    # the flydsl disp_op + shared gemm2_in (unaffected).
+    baseline_disp_op      = disp_op
+    baseline_gemm2_in     = gemm2_in
+    baseline_gemm2_launch = gemm2_launch
+    baseline_combine_idx  = combine_idx
+    if args.baseline_comm == "mori" and test_baseline:
+        if args.mode == "verify":
+            raise ValueError(
+                "--baseline-comm mori does not support verify mode (numeric "
+                "self-check relies on flydsl shmem buffers); use profile/bench."
+            )
+        # mori combine reads the gemm2 output cross-PE (peers P2P-read it),
+        # so it must live in mori's registered symmetric buffer; a plain
+        # external buffer faults once dispatch re-runs in the chain. Force
+        # zero-copy so gemm2 writes straight into mori's registered combine
+        # input buffer (gemm2_out == shmem_comb_inp_tok).
+        if not cfg.zero_copy and rank == 0:
+            print("[setup] baseline-comm=mori: forcing zero-copy (combine "
+                  "reads the registered symmetric gemm2 output buffer).")
+        cfg.zero_copy = True
+        _mori_zc = True
+        if rank == 0:
+            print(f"[setup] baseline-comm=mori: building mori "
+                  f"EpDispatchCombineOp as baseline dispatch/combine "
+                  f"(gemm2 still flydsl, zero_copy={_mori_zc})...")
+        _mori_op = _build_mori_op(rank, world_size, cfg)
+        mori_adapter = _MoriDispOpAdapter(_mori_op, gemm2_in["out_dtype"])
+        # One mori dispatch to populate routing tables; the first moe_sorting
+        # inside _build_gemm2_static_inputs needs a real total_recv.
+        _mori_ret = mori_adapter.dispatch(inp, wts, scales, idx)
+        baseline_combine_idx = _mori_ret[3]
+        torch.cuda.synchronize()
+        ms.shmem_barrier_all()
+        baseline_gemm2_in = _build_gemm2_static_inputs(
+            rank, world_size, dev, args, cfg, disp_op=mori_adapter,
+            force_zero_copy_out=_mori_zc,
+        )
+        baseline_gemm2_launch = _build_gemm2_callable(
+            args, baseline_gemm2_in, baseline_gemm2_in["out_dtype"],
+        )
+        baseline_disp_op = mori_adapter
+        if rank == 0:
+            _g = baseline_gemm2_in["gemm2_out"].data_ptr()
+            _sp = mori_adapter.shmem_comb_inp_tok.data_ptr()
+            print(f"[setup] mori baseline: gemm2_out=0x{_g:x} "
+                  f"mori_comb_inp=0x{_sp:x} is_zero_copy_buf={_g == _sp} "
+                  f"zero_copy={_mori_zc} "
+                  f"total_recv(rank0)={int(mori_adapter.total_recv.item())}")
+            if _mori_zc and _g != _sp:
+                raise RuntimeError(
+                    "mori baseline zero-copy on but gemm2_out is not mori's "
+                    "registered combine input buffer; combine Stage1 reads "
+                    "stale data."
+                )
+
     # --- Mode dispatch --------------------------------------------------------
     if args.mode == "verify":
         # verify only makes sense with --bench-op both (compares baseline vs fused).
@@ -1978,7 +2187,8 @@ def run_acceptance(rank, world_size, args):
         if test_baseline:
             def _bl():
                 return _baseline_chain(
-                    disp_op, gemm2_launch, gemm2_in, combine_idx,
+                    baseline_disp_op, baseline_gemm2_launch, baseline_gemm2_in,
+                    baseline_combine_idx,
                     dispatch_inputs=chain_disp_inputs,
                 )
             bench_results["baseline"] = _run_bench_eager(
@@ -2023,17 +2233,25 @@ def run_acceptance(rank, world_size, args):
 
     # Only pass disp_op to capture (so it runs reset) when the chain includes dispatch (option A).
     _capture_disp_op = disp_op if args.chain_include_dispatch else None
+    # Pass disp_op to capture (so the non-mori path runs reset) only when the
+    # chain includes dispatch. The mori_capture path ignores reset and just
+    # barriers, mirroring test_profiler_dispatch_combine._cudagraph_capture_mori.
+    _baseline_capture_disp_op = (
+        baseline_disp_op if args.chain_include_dispatch else None
+    )
 
     if test_baseline:
         def _baseline():
-            return _baseline_chain(disp_op, gemm2_launch, gemm2_in, combine_idx,
+            return _baseline_chain(baseline_disp_op, baseline_gemm2_launch,
+                                   baseline_gemm2_in, baseline_combine_idx,
                                    dispatch_inputs=chain_disp_inputs)
 
         base_stats = profile_cudagraph_chain(
             _baseline, "baseline",
             rank, world_size, dev,
             iters=args.iters, out_dir=out_dir, meta=meta,
-            disp_op=_capture_disp_op,
+            disp_op=_baseline_capture_disp_op,
+            mori_capture=(args.baseline_comm == "mori"),
         )
 
     if test_fused:
@@ -2134,6 +2352,11 @@ def _parse_args():
                    help="GEMM2 tile_k; the FP4 path requires >=256")
     p.add_argument("--persist-m",            type=int, default=-1,
                    help="moe_gemm2 persistent block count along M")
+    p.add_argument("--b-nt",                 dest="b_nt", type=int, default=2,
+                   choices=[0, 2],
+                   help="GEMM2 B(weight) load cache modifier: 2=streaming/non-temporal, 0=normal L2")
+    p.add_argument("--sort-block-m",         dest="sort_block_m", type=int, default=0,
+                   help="MoE sorting block_size for GEMM2 stage1; 0 means tile_m (must be a multiple of tile_m)")
     p.add_argument("--xcd-swizzle",          type=int, default=0,
                    help="moe_gemm2 cross-XCD swizzle factor (0 disables; recommend 8 on MI300)")
     p.add_argument("--gemm2-accumulate",     dest="gemm2_accumulate",
@@ -2176,8 +2399,8 @@ def _parse_args():
     p.add_argument("--output-dir", type=str, default="acceptance_profile")
     p.add_argument("--port",       type=int, default=29800)
     # Feature switches (aligned with dispatch op)
-    p.add_argument("--no-external-inp-buf", dest="use_external_inp_buf",
-                   action="store_false", default=True)
+    p.add_argument("--zero-copy", dest="zero_copy",
+                   action="store_true", default=False)
     p.add_argument("--enable-std-moe", action="store_true", default=False)
     p.add_argument("--scale-dim",       type=int, default=0)
     p.add_argument("--scale-type-size", type=int, default=0)
@@ -2194,6 +2417,17 @@ def _parse_args():
     p.add_argument("--no-token-flag-sync", dest="token_flag_sync",
                    action="store_false",
                    help="Disable the token-level-sync path (default behaviour)")
+    # --- Baseline comm backend (flydsl native vs mori reference) ------------
+    p.add_argument("--baseline-comm", choices=["flydsl", "mori"], default="flydsl",
+                   help="Whether the baseline chain dispatch/combine use "
+                        "flydsl's own kernels or mori. mori: swap dispatch+"
+                        "combine to mori (gemm2 stays flydsl) for a 'mori "
+                        "dispatch + flydsl gemm2 + mori combine' baseline; "
+                        "needs profile/bench mode + bf16/fp16/fp8 dtype.")
+    p.add_argument("--mori-recv-factor", type=float, default=1.0,
+                   help="Only with --baseline-comm mori: enlarge recv buffer "
+                        "capacity to ceil(bs*factor); still dispatches bs "
+                        "tokens. mori default recv bound = ws*bs.")
     return p.parse_args()
 
 

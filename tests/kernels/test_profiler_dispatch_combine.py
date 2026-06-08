@@ -611,7 +611,7 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.dispatch_warp_num_per_block_eff,
         block_num=block_num if block_num is not None else cfg.dispatch_block_num_eff,
         gpu_per_node=world_size,
-        use_external_inp_buf=not cfg.zero_copy,
+        zero_copy=cfg.zero_copy,
         quant_type=cfg.quant_type,
         # ``max_total_recv_tokens`` is intentionally NOT forwarded to
         # mori unless the cap equals the worst-case ws*M (effectively
@@ -2115,7 +2115,7 @@ def run_profiler(rank, world_size, args):
         dispatch_block_num=args.dispatch_block_num,
         combine_warp_num_per_block=args.combine_warp_per_block,
         combine_block_num=args.combine_block_num,
-        use_external_inp_buf=not args.zero_copy,
+        zero_copy=args.zero_copy,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,

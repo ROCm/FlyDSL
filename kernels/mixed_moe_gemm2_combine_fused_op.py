@@ -58,6 +58,8 @@ class FlyDSLMoeGemm2CombineOp:
         inter_dim: int,
         tile_m: int = 32, tile_n: int = 128, tile_k: int = 128,
         persist_m: int = 4,
+        sort_block_m: int = 0,
+        b_nt: int = 2,
         a_dtype: str = "fp8",
         b_dtype: str = "fp4",
         xcd_swizzle: int = 0,
@@ -70,6 +72,8 @@ class FlyDSLMoeGemm2CombineOp:
         self.tile_n      = tile_n
         self.tile_k      = tile_k
         self.persist_m   = persist_m
+        self.sort_block_m = sort_block_m
+        self.b_nt        = b_nt
         self.a_dtype     = a_dtype
         self.b_dtype     = b_dtype
         self.xcd_swizzle = xcd_swizzle
@@ -113,6 +117,8 @@ class FlyDSLMoeGemm2CombineOp:
         return dict(
             tile=(self.tile_m, self.tile_n, self.tile_k),
             persist_m=self.persist_m,
+            sort_block_m=self.sort_block_m,
+            b_nt=self.b_nt,
             xcd_swizzle=self.xcd_swizzle,
             a_dtype=self.a_dtype, b_dtype=self.b_dtype,
             out_dtype=self._out_dtype_str,
@@ -172,6 +178,8 @@ class FlyDSLMoeGemm2CombineOp:
             topk=k,
             tile_m=self.tile_m, tile_n=self.tile_n, tile_k=self.tile_k,
             persist_m=self.persist_m,
+            sort_block_m=self.sort_block_m,
+            b_nt=self.b_nt,
             a_dtype=self.a_dtype, b_dtype=self.b_dtype,
             out_dtype=self._out_dtype_str,
             rank=comb_cfg.rank, npes=comb_cfg.world_size,
