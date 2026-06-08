@@ -262,17 +262,19 @@ def execute_tool(cfg: Config, name: str, args: dict[str, Any]) -> tuple[str, boo
         if name == "run_bash":
             timeout = args.get("timeout", cfg.bash_timeout)
             proc = subprocess.run(
-                args["command"], shell=True, cwd=str(cfg.repo_root),
-                capture_output=True, text=True, timeout=timeout,
+                args["command"],
+                shell=True,
+                cwd=str(cfg.repo_root),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
             )
             out = f"$ {args['command']}\n[exit {proc.returncode}]\n{proc.stdout}{proc.stderr}"
             return _truncate(out), proc.returncode != 0
 
         if name == "list_dir":
             path = _resolve(cfg, args.get("path", "."))
-            entries = sorted(
-                f"{e.name}/" if e.is_dir() else e.name for e in path.iterdir()
-            )
+            entries = sorted(f"{e.name}/" if e.is_dir() else e.name for e in path.iterdir())
             return _truncate("\n".join(entries) or "(empty)"), False
 
         if name == "grep":
@@ -513,10 +515,7 @@ EVALUATION MODE: COMPILE + IR ALIGNMENT (no GPU).
      names/order may differ; instruction shape must match.
 Gating axes: compile AND ir_alignment (record compile result in ir_alignment.details).
 """
-    return (
-        SHARED_CONTEXT
-        + mode_block
-        + """
+    return SHARED_CONTEXT + mode_block + """
 ROLE: EVALUATOR (read-only for source; you MAY write only the performance doc).
 
 Be skeptical and concrete: never report a pass you did not actually observe. If a
@@ -572,7 +571,6 @@ after it, matching exactly:
 NOT gating). `feedback` must point at the specific divergence (file/line, missing
 layout, wrong atom, wrong unroll) so the next iteration can fix it directly.
 """.replace("{ratio}", f"{cfg.perf_ratio:g}").replace("{rtol}", f"{cfg.accuracy_rtol:g}")
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -639,15 +637,19 @@ def run_agent(
         tool_results = []
         for tu in tool_uses:
             result, is_error = execute_tool(cfg, tu.name, tu.input)
-            print(f"[{label}] -> {tu.name}({_brief(tu.input)}) "
-                  f"=> {'ERR ' if is_error else ''}{result[:200].splitlines()[0] if result else ''}",
-                  flush=True)
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tu.id,
-                "content": result,
-                "is_error": is_error,
-            })
+            print(
+                f"[{label}] -> {tu.name}({_brief(tu.input)}) "
+                f"=> {'ERR ' if is_error else ''}{result[:200].splitlines()[0] if result else ''}",
+                flush=True,
+            )
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tu.id,
+                    "content": result,
+                    "is_error": is_error,
+                }
+            )
         messages.append({"role": "user", "content": tool_results})
     else:
         print(f"[{label}] hit max_turns={cfg.max_turns}", flush=True)
@@ -684,8 +686,12 @@ def parse_verdict(text: str) -> dict[str, Any]:
 # Stage prompts
 # --------------------------------------------------------------------------- #
 def analyzer_task(
-    cfg: Config, it: int, feedback: str,
-    trace_dir: str | None, flydsl_ir: str | None, hip_ir: str | None,
+    cfg: Config,
+    it: int,
+    feedback: str,
+    trace_dir: str | None,
+    flydsl_ir: str | None,
+    hip_ir: str | None,
 ) -> str:
     s = f"""Port this HIP kernel to FlyDSL with 1:1 LLVM alignment.
 
@@ -741,8 +747,10 @@ Test file:    {cfg.test_file or "(none)"}"""
 def _hip_build_context(cfg: Config) -> str:
     inc = ", ".join(cfg.hip_include_dirs) or "(none)"
     bc = cfg.hip_build_cmd or "(default hipcc)"
-    return (f"HIP dep root: {cfg.hip_root}  (include with -I; the kernel may #include "
-            f"files here)\nHIP extra include dirs: {inc}\nHIP build command: {bc}")
+    return (
+        f"HIP dep root: {cfg.hip_root}  (include with -I; the kernel may #include "
+        f"files here)\nHIP extra include dirs: {inc}\nHIP build command: {bc}"
+    )
 
 
 def test_author_task(cfg: Config, test_path: Path) -> str:
@@ -803,15 +811,21 @@ def local_compile_gate(cfg: Config, smoke_path: Path) -> tuple[bool, str]:
     """Run the implementer's smoke harness locally under COMPILE_ONLY to verify the
     kernel traces+compiles before the (expensive, remote) evaluator sees it."""
     if not smoke_path.exists():
-        return False, (f"Smoke harness {smoke_path} was not written. Create it: import the "
-                       "kernel module and invoke the @flyc.jit launcher with representative "
-                       "dummy torch tensors (importing alone does not trigger tracing).")
+        return False, (
+            f"Smoke harness {smoke_path} was not written. Create it: import the "
+            "kernel module and invoke the @flyc.jit launcher with representative "
+            "dummy torch tensors (importing alone does not trigger tracing)."
+        )
     env = {**os.environ, "COMPILE_ONLY": "1", "FLYDSL_RUNTIME_ENABLE_CACHE": "0", "ARCH": cfg.compile_arch}
     print(f"[gate] running local COMPILE_ONLY (ARCH={cfg.compile_arch}): {smoke_path}")
     try:
         proc = subprocess.run(
-            ["python3", str(smoke_path)], cwd=str(cfg.repo_root), env=env,
-            capture_output=True, text=True, timeout=cfg.bash_timeout,
+            ["python3", str(smoke_path)],
+            cwd=str(cfg.repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=cfg.bash_timeout,
         )
     except subprocess.TimeoutExpired:
         return False, f"local COMPILE_ONLY smoke timed out after {cfg.bash_timeout}s"
@@ -827,9 +841,15 @@ def orchestrate(cfg: Config, client: anthropic.Anthropic) -> int:
     for it in range(cfg.max_iterations):
         print(f"\n\n########## ITERATION {it + 1}/{cfg.max_iterations} ##########")
 
-        run_agent(client, label=f"ANALYZER (it{it + 1})", system_prompt=ANALYZER_PROMPT,
-                  user_prompt=analyzer_task(cfg, it, feedback, trace_dir, flydsl_ir, hip_ir),
-                  tool_names=cfg.analyzer_tools, cfg=cfg, effort="max")
+        run_agent(
+            client,
+            label=f"ANALYZER (it{it + 1})",
+            system_prompt=ANALYZER_PROMPT,
+            user_prompt=analyzer_task(cfg, it, feedback, trace_dir, flydsl_ir, hip_ir),
+            tool_names=cfg.analyzer_tools,
+            cfg=cfg,
+            effort="max",
+        )
 
         # Implement + local COMPILE_ONLY gate: the kernel must trace+compile
         # locally before it reaches the (expensive, remote) evaluator. On failure,
@@ -837,42 +857,64 @@ def orchestrate(cfg: Config, client: anthropic.Anthropic) -> int:
         smoke_path = cfg.output.parent / "_smoke_compile.py"
         gate_feedback = feedback
         for attempt in range(cfg.compile_attempts):
-            run_agent(client, label=f"IMPLEMENTER (it{it + 1}.{attempt + 1})",
-                      system_prompt=IMPLEMENTER_PROMPT,
-                      user_prompt=implementer_task(cfg, it, gate_feedback, smoke_path),
-                      tool_names=cfg.implementer_tools, cfg=cfg, effort="xhigh")
+            run_agent(
+                client,
+                label=f"IMPLEMENTER (it{it + 1}.{attempt + 1})",
+                system_prompt=IMPLEMENTER_PROMPT,
+                user_prompt=implementer_task(cfg, it, gate_feedback, smoke_path),
+                tool_names=cfg.implementer_tools,
+                cfg=cfg,
+                effort="xhigh",
+            )
             ok, gate_out = local_compile_gate(cfg, smoke_path)
             if ok:
                 print(f"[gate] local COMPILE_ONLY passed (attempt {attempt + 1})")
                 break
-            print(f"[gate] local COMPILE_ONLY FAILED (attempt {attempt + 1}/{cfg.compile_attempts}); "
-                  "feeding error back to implementer")
+            print(
+                f"[gate] local COMPILE_ONLY FAILED (attempt {attempt + 1}/{cfg.compile_attempts}); "
+                "feeding error back to implementer"
+            )
             gate_feedback = ((feedback + "\n\n") if feedback else "") + (
                 "Your kernel FAILED the local COMPILE_ONLY gate. Fix these errors and make "
-                f"the smoke harness ({smoke_path}) exit 0:\n{gate_out}")
+                f"the smoke harness ({smoke_path}) exit 0:\n{gate_out}"
+            )
         else:
-            print(f"[gate] local compile still failing after {cfg.compile_attempts} attempts; "
-                  "proceeding so the evaluator records the failure")
+            print(
+                f"[gate] local compile still failing after {cfg.compile_attempts} attempts; "
+                "proceeding so the evaluator records the failure"
+            )
 
         # No test file: in GPU mode, author one once (HIP kernel as reference) so
         # the accuracy axis is verifiable. The FlyDSL kernel now exists, so its
         # entry point is concrete. compile_ir mode cannot run kernels, so skip.
         if cfg.test_file is None and cfg.eval_mode == "gpu":
             test_path = (cfg.repo_root / f"tests/kernels/test_{cfg.kernel_name}_autogen.py").resolve()
-            run_agent(client, label=f"TEST AUTHOR (it{it + 1})", system_prompt=TEST_AUTHOR_PROMPT,
-                      user_prompt=test_author_task(cfg, test_path),
-                      tool_names=cfg.test_author_tools, cfg=cfg)
+            run_agent(
+                client,
+                label=f"TEST AUTHOR (it{it + 1})",
+                system_prompt=TEST_AUTHOR_PROMPT,
+                user_prompt=test_author_task(cfg, test_path),
+                tool_names=cfg.test_author_tools,
+                cfg=cfg,
+            )
             if test_path.exists():
                 cfg.test_file = test_path
                 print(f"[orchestrate] using autogenerated test: {test_path}")
             else:
-                print(f"[orchestrate] WARNING: test author did not produce {test_path}; "
-                      "accuracy axis will be unverifiable this run.")
+                print(
+                    f"[orchestrate] WARNING: test author did not produce {test_path}; "
+                    "accuracy axis will be unverifiable this run."
+                )
 
-        verdict_text = run_agent(client, label=f"EVALUATOR (it{it + 1})",
-                                 system_prompt=evaluator_prompt(cfg),
-                                 user_prompt=evaluator_task(cfg, it),
-                                 tool_names=cfg.evaluator_tools, cfg=cfg, effort="medium")
+        verdict_text = run_agent(
+            client,
+            label=f"EVALUATOR (it{it + 1})",
+            system_prompt=evaluator_prompt(cfg),
+            user_prompt=evaluator_task(cfg, it),
+            tool_names=cfg.evaluator_tools,
+            cfg=cfg,
+            effort="medium",
+        )
         verdict = parse_verdict(verdict_text)
 
         print(f"\n----- VERDICT (it{it + 1}) -----")
@@ -922,12 +964,11 @@ def build_remote_ctx(host: str, user: str, container: str, remote_root: str, wor
     if container:
         run_pat = (
             f'ssh {target} "docker exec -e PYTHONPATH={remote_root}/python:{remote_root}/tests '
-            f'-e FLYDSL_RUNTIME_ENABLE_CACHE=0 {container} bash -c \'cd {workdir} && <CMD>\'"'
+            f"-e FLYDSL_RUNTIME_ENABLE_CACHE=0 {container} bash -c 'cd {workdir} && <CMD>'\""
         )
-        copy_in = f"scp <file> {target}:/tmp/ && ssh {target} \"docker cp /tmp/<file> {container}:{workdir}/\""
+        copy_in = f'scp <file> {target}:/tmp/ && ssh {target} "docker cp /tmp/<file> {container}:{workdir}/"'
         copy_out = (
-            f"ssh {target} \"docker cp {container}:<remote_path> /tmp/\" && "
-            f"scp {target}:/tmp/<file> <local_path>"
+            f'ssh {target} "docker cp {container}:<remote_path> /tmp/" && ' f"scp {target}:/tmp/<file> <local_path>"
         )
     else:
         run_pat = (
@@ -982,9 +1023,7 @@ def _clone_repo(url: str, ref: str, clone_dir: Path) -> None:
         clone_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "-C", str(clone_dir), "init", "-q"], check=True)
         subprocess.run(["git", "-C", str(clone_dir), "remote", "add", "origin", url], check=True)
-        shallow = subprocess.run(
-            ["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", ref]
-        )
+        shallow = subprocess.run(["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", ref])
         if shallow.returncode == 0:
             subprocess.run(["git", "-C", str(clone_dir), "checkout", "-q", "FETCH_HEAD"], check=True)
             print(f"[fetch] cloned {url} @ {ref} (shallow)")
@@ -1019,8 +1058,7 @@ def fetch_hip_source(raw: str, dest_root: Path, git_ref: str = "") -> tuple[Path
         url, _, subpath = raw.partition("#")
         if not subpath:
             raise SystemExit(
-                f"git HIP source needs a '#<subpath>' to the kernel file, e.g.\n"
-                f"  {url}#path/to/kernel.hip.cpp"
+                f"git HIP source needs a '#<subpath>' to the kernel file, e.g.\n" f"  {url}#path/to/kernel.hip.cpp"
             )
         clone_dir = (dest_root / "repo").resolve()
         _clone_repo(url, git_ref, clone_dir)
@@ -1050,30 +1088,30 @@ def fetch_hip_source(raw: str, dest_root: Path, git_ref: str = "") -> tuple[Path
 # --------------------------------------------------------------------------- #
 # Field defaults applied after parsing; also the source of truth for valid keys.
 CONFIG_DEFAULTS: dict[str, Any] = {
-    "hip_source": "",        # REQUIRED: local path / http(s) URL / git URL#subpath / GitHub blob URL
-    "hip_git_ref": "",       # commit/branch/tag (overrides a ref in a blob URL)
-    "kernel_name": "",       # REQUIRED
-    "output_dir": "",        # REQUIRED: artifacts dir
-    "test_file": "",         # optional pytest path; "" -> auto-generate
-    "repo_root": "",         # FlyDSL repo root; "" -> cwd
+    "hip_source": "",  # REQUIRED: local path / http(s) URL / git URL#subpath / GitHub blob URL
+    "hip_git_ref": "",  # commit/branch/tag (overrides a ref in a blob URL)
+    "kernel_name": "",  # REQUIRED
+    "output_dir": "",  # REQUIRED: artifacts dir
+    "test_file": "",  # optional pytest path; "" -> auto-generate
+    "repo_root": "",  # FlyDSL repo root; "" -> cwd
     "model": "claude-opus-4-8",
     "max_iterations": 10,
     "max_turns": 60,
     "accuracy_rtol": 1e-3,
     "perf_ratio": 1.10,
-    "eval_mode": "auto",     # auto | gpu | compile_ir
+    "eval_mode": "auto",  # auto | gpu | compile_ir
     "bash_timeout": 1800,
     "compile_arch": "gfx950",  # ARCH for the local COMPILE_ONLY gate before remote eval
-    "compile_attempts": 3,     # implementer retries to pass the local compile gate
+    "compile_attempts": 3,  # implementer retries to pass the local compile gate
     "hip_include_dirs": "",  # comma-separated -I dirs (relative -> against HIP root)
-    "hip_build_cmd": "",     # explicit HIP IR/reference build command
-    "ssh_host": "",          # remote GPU host (enables remote execution)
+    "hip_build_cmd": "",  # explicit HIP IR/reference build command
+    "ssh_host": "",  # remote GPU host (enables remote execution)
     "ssh_user": "",
-    "container": "",         # docker container on the remote (optional)
-    "remote_root": "",       # FlyDSL root on the remote host
-    "remote_workdir": "",    # remote scratch dir (default /tmp/flydsl_port)
-    "test_reference": "",    # path to a reference harness to BUILD the unit test from
-    "extra_context": "",     # anything else worth passing to the agents
+    "container": "",  # docker container on the remote (optional)
+    "remote_root": "",  # FlyDSL root on the remote host
+    "remote_workdir": "",  # remote scratch dir (default /tmp/flydsl_port)
+    "test_reference": "",  # path to a reference harness to BUILD the unit test from
+    "extra_context": "",  # anything else worth passing to the agents
 }
 
 TASK_PARSER_SYSTEM = f"""You convert a natural-language kernel-porting request into
@@ -1140,9 +1178,7 @@ def build_config(fields: dict[str, Any]) -> Config:
     output = output_dir / f"{fields['kernel_name']}.py"
     plan_file = output_dir / "plan.md"
     # Per-run hash so each invocation gets its own performance doc (no stale-append).
-    run_hash = hashlib.sha1(
-        f"{time.time()}|{fields['hip_source']}|{fields['kernel_name']}".encode()
-    ).hexdigest()[:8]
+    run_hash = hashlib.sha1(f"{time.time()}|{fields['hip_source']}|{fields['kernel_name']}".encode()).hexdigest()[:8]
     perf_doc = output_dir / f"performance_{run_hash}.md"
     print(f"Performance doc for this run: {perf_doc}")
     ir_dir = output_dir / "ir_dumps"
@@ -1159,8 +1195,11 @@ def build_config(fields: dict[str, Any]) -> Config:
 
     hip_include_dirs = [_abs_inc(s.strip()) for s in str(fields["hip_include_dirs"]).split(",") if s.strip()]
     remote_ctx = build_remote_ctx(
-        fields["ssh_host"], fields["ssh_user"], fields["container"],
-        fields["remote_root"], fields["remote_workdir"],
+        fields["ssh_host"],
+        fields["ssh_user"],
+        fields["container"],
+        fields["remote_root"],
+        fields["remote_workdir"],
     )
     test_reference = str(Path(fields["test_reference"]).resolve()) if fields["test_reference"] else ""
 
@@ -1169,8 +1208,10 @@ def build_config(fields: dict[str, Any]) -> Config:
         eval_mode = "gpu"  # a remote GPU is configured; don't fall back to compile_ir
     print(f"Evaluation mode: {eval_mode}{' (remote GPU)' if fields['ssh_host'] else ''}")
     if eval_mode == "gpu" and not trace_skill.exists():
-        print(f"WARNING: capture-kernel-trace skill not found at {trace_skill}; "
-              "the evaluator will record trace as unavailable.")
+        print(
+            f"WARNING: capture-kernel-trace skill not found at {trace_skill}; "
+            "the evaluator will record trace as unavailable."
+        )
 
     return Config(
         hip_source=hip_source,
@@ -1205,11 +1246,15 @@ def build_config(fields: dict[str, Any]) -> Config:
 def main() -> int:
     p = argparse.ArgumentParser(
         description="Port a HIP kernel to FlyDSL via a multi-agent loop (Anthropic API). "
-                    "Describe the whole request in natural language; an agent parses it.")
-    p.add_argument("task", nargs="+",
-                   help="Natural-language port request, e.g. \"Port gemm1_a4w4 from "
-                        "<github url> into ports/gemm1_a4w4, include dirs csrc/include, "
-                        "test on remote gpu01 in container flydsl_ctr\".")
+        "Describe the whole request in natural language; an agent parses it."
+    )
+    p.add_argument(
+        "task",
+        nargs="+",
+        help='Natural-language port request, e.g. "Port gemm1_a4w4 from '
+        "<github url> into ports/gemm1_a4w4, include dirs csrc/include, "
+        'test on remote gpu01 in container flydsl_ctr".',
+    )
     a = p.parse_args(sys.argv[1:])
 
     client = make_client()
