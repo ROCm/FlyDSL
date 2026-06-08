@@ -29,7 +29,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, memref
 from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator
@@ -148,6 +148,16 @@ def _vec_extract(vec, i, ty):
     return llvm.extractelement(vec, pos)
 
 
+def _bitcast(res_ty, v):
+    """Bit-reinterpret ``v`` (i32 / vector dword) to ``res_ty``.
+
+    ``arith.bitcast`` rejects scalar<->vector reinterprets ("same shape" check);
+    use ``llvm.bitcast`` which allows them (same total bit-width).  Mirrors the
+    HIP ``__builtin_bit_cast`` / reinterpret on the packed dwords.
+    """
+    return llvm.bitcast(res_ty, _i32(v))
+
+
 def _vec_insert(vec, val, i):
     pos = arith.unwrap(arith.constant(i, type=T.i64))
     return llvm.insertelement(vec, val, pos)
@@ -192,15 +202,22 @@ def compile_gemm1_a4w4(
     kInlineQuant: bool = False,
     kXcdSwizzle: int = 0,
 ):
-    # ---- scope guard: only the BM=32 non-inline-quant variant is ported. ----
-    if BM != 32 or kInlineQuant or kUseNT or kXcdSwizzle != 0:
-        raise NotImplementedError(
-            "gemm1_a4w4 FlyDSL port currently supports BM=32, kInlineQuant=False, "
-            f"kUseNT=False, kXcdSwizzle=0; got BM={BM}, kInlineQuant={kInlineQuant}, "
-            f"kUseNT={kUseNT}, kXcdSwizzle={kXcdSwizzle}"
-        )
+    # ---- static_asserts mirroring the HIP kernel (gemm1_a4w4.cuh:41-47). ----
     assert K == 7168, "static_assert(K == 7168)"
     assert N_OUT % 256 == 0, "static_assert(N_OUT % 256 == 0)"
+    assert BM in (16, 32, 64, 128), "static_assert(BM in {16,32,64,128})"
+    assert (not kInlineQuant) or BM in (16, 32), "kInlineQuant supports BM=16/32"
+    assert (not kInlineQuant) or BM != 128, "kInlineQuant not supported at BM=128"
+    assert kXcdSwizzle == 0, "no CSV gemm1 variant uses xcd swizzle"
+    # The CSV-required variants are:
+    #   (BM=16,  kUseNT=True,  kInlineQuant=True ),
+    #   (BM=32,  kUseNT=True,  kInlineQuant=False),
+    #   (BM=32,  kUseNT=False, kInlineQuant=False),
+    #   (BM=128, kUseNT=False, kInlineQuant=False).
+    # The kInlineQuant && BM==32 remap_xcd branch in HIP is dead code here and is
+    # intentionally NOT ported.
+    if kInlineQuant and BM == 32:
+        raise NotImplementedError("kInlineQuant && BM==32 (remap_xcd path) not required by CSV")
 
     # ---- derived compile-time constants (pure Python ints) ----
     BN = 256
@@ -208,7 +225,8 @@ def compile_gemm1_a4w4(
     K_HALF = K // 2
     K_TILES_TOTAL = K // BK
     kStages = 2
-    kAStages = 3
+    # BM-dependent (gemm1_a4w4.cuh:49-62):
+    kAStages = 2 if BM == 128 else 3
     kLoopIter = K_TILES_TOTAL - kStages
     kUnroll = kLoopIter
     kSubBlocks = 1 if BM < 32 else BM // 32
@@ -244,7 +262,8 @@ def compile_gemm1_a4w4(
     epi_kAS_c_k1 = (N_INTER // 32) // 4 // 2
     epi_kAS_per_chunk_dw = 1 * epi_kAS_c_k1 * 64  # 128
 
-    KERNEL_NAME = f"gemm1_a4w4_BM{BM}_K{K}_N{N_OUT}_E{NUM_EXPERTS}"
+    _tag = f"BM{BM}" + ("_NT" if kUseNT else "") + ("_IQ" if kInlineQuant else "")
+    KERNEL_NAME = f"gemm1_a4w4_{_tag}_K{K}_N{N_OUT}_E{NUM_EXPERTS}"
 
     # =====================================================================
     @flyc.kernel
@@ -259,6 +278,7 @@ def compile_gemm1_a4w4(
         i32_n_tokens: fx.Int32,
         arg_A_q_out: fx.Tensor,
         arg_A_scale_out: fx.Tensor,
+        arg_hidden_states: fx.Tensor,
     ):
         pid = fx.Int32(gpu.block_id("x"))
         tid = fx.Int32(gpu.thread_id("x"))
@@ -272,6 +292,13 @@ def compile_gemm1_a4w4(
         B_q_rsrc = _make_rsrc(arg_B_q, _i32(NUM_EXPERTS * N_OUT * K_HALF))
         A_scale_rsrc = _make_rsrc(arg_A_scale, _i32((MAX_M // 32) * kAS_per_chunk_dw * 4))
         B_scale_rsrc = _make_rsrc(arg_B_scale, _i32(NUM_EXPERTS * kBS_per_expert_dw * 4))
+        # hidden_states rsrc (live only for kInlineQuant; mirrors HIP):
+        #   base = hidden_states (IQ) / B_q (else, size=0 ⇒ OOB-trap), bytes =
+        #   n_tokens * K * sizeof(bf16) when IQ else 0.
+        if const_expr(kInlineQuant):
+            hidden_rsrc = _make_rsrc(arg_hidden_states, (n_tokens * (K * 2)).ir_value())
+        else:
+            hidden_rsrc = _make_rsrc(arg_B_q, _i32(0))
 
         # ---- scalar tile setup (read cumsum/sorted_expert_ids) ----
         cumsum_addr = _tensor_addr_i64(arg_cumsum)
@@ -300,14 +327,25 @@ def compile_gemm1_a4w4(
 
             m_indices_addr = _tensor_addr_i64(arg_m_indices)
 
-            # ---- gather cached_actual_row[sub] (BM=32 non-inline path) ----
-            row_off = lane // 8  # lane / 8
-            lds_row0 = wave * (BM // 4)  # wave * 8
+            # ---- cached row gather (gemm1_a4w4.cuh:382-410) ----
+            # Non-inline-quant path: cached_actual_row[sub] (BM>=32; BM==16 wave<2
+            # special is not in the CSV).  Inline-quant path: cached_row_inline[s].
             cached_actual_row = []
-            for sub in range_constexpr(kSubBlocks):
-                idx = m_row + lds_row0 + sub * 8 + row_off
-                ptr = _global_ptr(m_indices_addr, (idx * 4).ir_value())
-                cached_actual_row.append(fx.Int32(llvm.load(T.i32, ptr, alignment=4)))
+            cached_row_inline = []
+            if const_expr(not kInlineQuant):
+                row_off = lane // 8  # lane / 8
+                lds_row0 = wave * (BM // 4)  # wave * 8
+                for sub in range_constexpr(kSubBlocks):
+                    idx = m_row + lds_row0 + sub * 8 + row_off
+                    ptr = _global_ptr(m_indices_addr, (idx * 4).ir_value())
+                    cached_actual_row.append(fx.Int32(llvm.load(T.i32, ptr, alignment=4)))
+            else:
+                kCachedInline = 1 if BM == 16 else 2
+                rcls = wave * 4 + (lane // 16)
+                for s in range_constexpr(kCachedInline):
+                    idx = m_row + s * 16 + rcls
+                    ptr = _global_ptr(m_indices_addr, (idx * 4).ir_value())
+                    cached_row_inline.append(fx.Int32(llvm.load(T.i32, ptr, alignment=4)))
 
             # ---- b_load_s_base[0..3], b_scale_s_base[0..1], *_hi ----
             b_load_s_base = []
@@ -417,12 +455,87 @@ def compile_gemm1_a4w4(
                 return out
 
             # ----------------------------------------------------------------
+            # inline-quant producer (kInlineQuant, BM=16): bf16 hidden -> fp4+e8m0
+            # ----------------------------------------------------------------
+            def inline_quant_load_kt(B128_IDX, kt, row_token):
+                # gemm1_a4w4.cuh:197-207 — bf16 b128 load from hidden_rsrc.
+                v_voff = row_token * (K * 2) + ((lane // 4) % 4) * 64 + (lane % 4) * 16
+                # ``kt`` and ``B128_IDX`` come from range_constexpr / Python ints, so
+                # the offset is a plain Python int — _readfirstlane/_i32 handle that.
+                s_soff = fx.Int32(_readfirstlane(kt * (BK * 2) + B128_IDX * 256))
+                return _raw_buffer_load_b128(hidden_rsrc, v_voff.ir_value(), s_soff.ir_value(), 0)
+
+            def _inline_quant_body(B128_IDX, SUB, slot, kt, h_v, scale_accum):
+                # gemm1_a4w4.cuh:222-258 (steps 2-8). SUB is always 0 for BM=16.
+                h_dw = [_vec_extract(h_v, j, T.i32) for j in range(4)]
+                hm = [arith.unwrap(arith.andi(h_dw[j], _i32(0x7FFF7FFF))) for j in range(4)]
+                m01 = _pkmax_u16(hm[0], hm[1])
+                m23 = _pkmax_u16(hm[2], hm[3])
+                m0123 = _pkmax_u16(m01, m23)
+                lo = arith.unwrap(arith.andi(m0123, _i32(0xFFFF)))
+                hi = arith.unwrap(arith.shrui(m0123, _i32(16)))
+                local_amax = _max_u32(lo, hi)
+                amax_u32 = _dpp_quad_amax_u32(local_amax)
+                e8m0 = _encode_e8m0(amax_u32)  # fx.Int32
+                qs_bits = (e8m0 << 23).ir_value()
+                qs = arith.unwrap(arith.bitcast(T.f32, qs_bits))
+
+                v2bf16 = ir.VectorType.get([2], T.bf16)
+                pk = _i32(0)
+                for d in range_constexpr(4):
+                    src = _bitcast(v2bf16, h_dw[d])
+                    pk = rocdl.cvt_scalef32_pk_fp4_bf16(T.i32, pk, src, qs, d)
+
+                lib = lane % 4
+                r_in_chunk = wave * 4 + (lane // 16)
+                r = SUB * 16 + r_in_chunk
+                kb_in_kt = B128_IDX * 4 + ((lane // 4) % 4)
+                mask_r = (r & 0xE) << 3
+                b_off = lib * 4
+                dst_byte = slot * (BM * (BK // 2)) + r * (BK // 2) + (((kb_in_kt * 16) ^ mask_r) + b_off)
+                _lds_store(s_Aq_addr, dst_byte.ir_value(), pk, 4)
+
+                # kPackScale=True always for BM=16: scale_accum |= e8m0 << (pack_byte*8)
+                pack_byte = B128_IDX * 2 + SUB
+                contrib = (e8m0 & 0xFF) << (pack_byte * 8)
+                return scale_accum | contrib
+
+            def inline_quant_kt(B128_IDX, SUB, slot, kt, row_token, scale_accum):
+                h_v = inline_quant_load_kt(B128_IDX, kt, row_token)
+                return _inline_quant_body(B128_IDX, SUB, slot, kt, h_v, scale_accum)
+
+            def inline_quant_finish_kt(B128_IDX, SUB, slot, kt, h_v, scale_accum):
+                return _inline_quant_body(B128_IDX, SUB, slot, kt, h_v, scale_accum)
+
+            def inline_quant_pack_write(kt, scale_accum):
+                # gemm1_a4w4.cuh:261-266
+                r_in_chunk = wave * 4 + (lane // 16)
+                lane_tgt = ((lane // 4) % 4) * 16 + r_in_chunk
+                byte_off = kt * 256 + lane_tgt * 4
+                _lds_store(s_Ascale_addr, byte_off.ir_value(), _i32(scale_accum), 4)
+
+            # ----------------------------------------------------------------
             # issue_mfma_cluster(J, kInit, slot): 4 MFMA per J (BM=32 VGPR)
             #   accm[i][J] is f32x4 SSA; a is list, b_slot is [J][half], bs slot
             # ----------------------------------------------------------------
             def issue_mfma_cluster(J, kInit, a, b_slot, a_scale, b_scale_slot, accm):
                 in_b = J % 2
                 mni = J // 2
+                if const_expr(BM == 16):
+                    # gemm1_a4w4.cuh:338-345 single-chunk branch: op_sel_a in {0,2}.
+                    sa = a_scale[0]
+                    sb = b_scale_slot[mni]
+                    b0_v8 = _pack_v8i32_from_v4i32(b_slot[J][0])
+                    a_0 = _pack_v8i32_from_v4i32(a[0][0])
+                    c0 = _zero_v4f32() if kInit else accm[0][J]
+                    accm[0][J] = _mfma_scale(a_0, b0_v8, c0, 0, 0 + in_b, sa, sb)
+                    b1_v8 = _pack_v8i32_from_v4i32(b_slot[J][1])
+                    a_1 = _pack_v8i32_from_v4i32(a[0][1])
+                    accm[0][J] = _mfma_scale(a_1, b1_v8, accm[0][J], 2, 2 + in_b, sa, sb)
+                    return
+                # BM in {32, 64, 128}: 4 MFMA per (sub, J).  For BM==128 HIP pins C/D
+                # into AccVGPRs via inline asm; we use the VGPR intrinsic (option A) —
+                # same hardware MFMA, the backend keeps acc in (A)VGPRs at occ 1.
                 for sub in range_constexpr(kSubBlocks):
                     sa = a_scale[sub]
                     sb = b_scale_slot[mni]
@@ -451,13 +564,26 @@ def compile_gemm1_a4w4(
             b_reg = [[None, None, None, None] for _ in range(kStages)]
             b_scale_v = [None for _ in range(kStages)]
 
-            issue_a_scale_load()
+            if const_expr(not kInlineQuant):
+                issue_a_scale_load()
 
-            # prologue: kStages
+            # prologue: kStages (gemm1_a4w4.cuh:434-463)
             for K_C in range_constexpr(kStages):
-                issue_a_load_lds(K_C, K_C)
-                for j in range_constexpr(4):
-                    b_reg[K_C][j] = issue_b_load_j(K_C, j)
+                if const_expr(kInlineQuant):
+                    # BM=16 IQ else-branch (:447-455): two inline-quant calls (SUB=0,
+                    # B128_IDX 0,1) interleaved with the four B-loads.
+                    scale_accum = fx.Int32(0)
+                    scale_accum = inline_quant_kt(0, 0, K_C, K_C, cached_row_inline[0], scale_accum)
+                    b_reg[K_C][0] = issue_b_load_j(K_C, 0)
+                    b_reg[K_C][1] = issue_b_load_j(K_C, 1)
+                    scale_accum = inline_quant_kt(1, 0, K_C, K_C, cached_row_inline[0], scale_accum)
+                    b_reg[K_C][2] = issue_b_load_j(K_C, 2)
+                    b_reg[K_C][3] = issue_b_load_j(K_C, 3)
+                    inline_quant_pack_write(K_C, scale_accum)
+                else:
+                    issue_a_load_lds(K_C, K_C)
+                    for j in range_constexpr(4):
+                        b_reg[K_C][j] = issue_b_load_j(K_C, j)
                 b_scale_v[K_C] = issue_b_scale_load(K_C)
 
             # main loop: kUnroll (fully unrolled to match HIP static_for)
@@ -470,17 +596,42 @@ def compile_gemm1_a4w4(
                 gpu.barrier()
                 a = issue_a_ds_read(read_slot)
                 a_scale = issue_a_scale_ds_read(K_C - kStages)
-                issue_a_load_lds(write_slot, K_C)
+                if const_expr(not kInlineQuant):
+                    issue_a_load_lds(write_slot, K_C)
 
-                for J in range_constexpr(4):
+                if const_expr(kInlineQuant):
+                    # BM=16 IQ else-branch (:522-551): prefetch bf16, MFMA, then
+                    # finish-quant overlapped with the MFMA pipeline.
+                    h_v0 = inline_quant_load_kt(0, K_C, cached_row_inline[0])
+                    h_v1 = inline_quant_load_kt(1, K_C, cached_row_inline[0])
                     _sched_barrier()
-                    _setprio(1)
-                    issue_mfma_cluster(J, OFFSET == 0, a, b_reg[slot_b], a_scale, b_scale_v[slot_b], accm)
-                    _setprio(0)
-                    _sched_barrier()
-                    b_reg[slot_b][J] = issue_b_load_j(K_C, J)
-                    _sched_barrier()
-                b_scale_v[slot_b] = issue_b_scale_load(K_C)
+                    for J in range_constexpr(4):
+                        _sched_barrier()
+                        _setprio(1)
+                        issue_mfma_cluster(J, OFFSET == 0, a, b_reg[slot_b], a_scale, b_scale_v[slot_b], accm)
+                        _setprio(0)
+                        _sched_barrier()
+                        b_reg[slot_b][J] = issue_b_load_j(K_C, J)
+                        _sched_barrier()
+                    b_scale_v[slot_b] = issue_b_scale_load(K_C)
+                    scale_accum = fx.Int32(0)
+                    scale_accum = inline_quant_finish_kt(0, 0, write_slot, K_C, h_v0, scale_accum)
+                    scale_accum = inline_quant_finish_kt(1, 0, write_slot, K_C, h_v1, scale_accum)
+                    inline_quant_pack_write(K_C, scale_accum)
+                else:
+                    # gemm1_a4w4.cuh:529-543: the leading sched_barrier + s_setprio
+                    # fences around the MFMA cluster are emitted only for BM != 128.
+                    for J in range_constexpr(4):
+                        if const_expr(BM != 128):
+                            _sched_barrier()
+                            _setprio(1)
+                        issue_mfma_cluster(J, OFFSET == 0, a, b_reg[slot_b], a_scale, b_scale_v[slot_b], accm)
+                        if const_expr(BM != 128):
+                            _setprio(0)
+                        _sched_barrier()
+                        b_reg[slot_b][J] = issue_b_load_j(K_C, J)
+                        _sched_barrier()
+                    b_scale_v[slot_b] = issue_b_scale_load(K_C)
 
             # drain: kStages
             for S in range_constexpr(kStages):
@@ -600,16 +751,26 @@ def compile_gemm1_a4w4(
         with ir.InsertionPoint(if_kk.then_block):
             ku = n_block_idx >> 1
             ikxdl = n_block_idx & 1
-            for sub in range_constexpr(kSubBlocks_epi):
-                chunk = m_block_idx * kSubBlocks_epi + sub
+            if BM == 16:
+                # mxfp4_epilogs.hpp:127-133 — single LOW-byte store, chunk=m_block_idx.
+                chunk = m_block_idx
                 dword_off = chunk * epi_kAS_per_chunk_dw + ku * 64 + wave_grp * 16 + m_lane
-                lo = scales_per_mr[sub * 2 + 0]
-                hi = scales_per_mr[sub * 2 + 1]
-                pair = (lo & 0xFF) | ((hi & 0xFF) << 8)
-                pair16 = arith.unwrap(arith.trunci(T.i16, pair.ir_value()))
+                byte = scales_per_mr[0] & 0xFF
+                byte8 = arith.unwrap(arith.trunci(T.i8, byte.ir_value()))
                 addr_bytes = dword_off * 4 + ikxdl * 2
                 sptr = _global_ptr(ascale_out_addr, addr_bytes.ir_value())
-                llvm.store(pair16, sptr, alignment=2)
+                llvm.store(byte8, sptr, alignment=1)
+            else:
+                for sub in range_constexpr(kSubBlocks_epi):
+                    chunk = m_block_idx * kSubBlocks_epi + sub
+                    dword_off = chunk * epi_kAS_per_chunk_dw + ku * 64 + wave_grp * 16 + m_lane
+                    lo = scales_per_mr[sub * 2 + 0]
+                    hi = scales_per_mr[sub * 2 + 1]
+                    pair = (lo & 0xFF) | ((hi & 0xFF) << 8)
+                    pair16 = arith.unwrap(arith.trunci(T.i16, pair.ir_value()))
+                    addr_bytes = dword_off * 4 + ikxdl * 2
+                    sptr = _global_ptr(ascale_out_addr, addr_bytes.ir_value())
+                    llvm.store(pair16, sptr, alignment=2)
             scf_yield()
 
     # ---- Host launcher ----
@@ -625,9 +786,16 @@ def compile_gemm1_a4w4(
         i32_n_tokens: fx.Int32,
         arg_A_q_out: fx.Tensor,
         arg_A_scale_out: fx.Tensor,
+        arg_hidden_states: fx.Tensor,
         i32_grid: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
+        # The test passes the BM-correct grid (HIP launch():595-620):
+        #   TOPK=9, num_n_blocks=N_OUT/256
+        #   BM==128 : max_m_blocks = (n*TOPK + NE*(BM-1) + BM-1)/BM
+        #   else    : active = min(n*TOPK, NE)
+        #             max_m_blocks = (n*TOPK + active*(BM-1) + BM-1)/BM
+        #   grid    = max_m_blocks * num_n_blocks
         allocator.finalized = False
         ctx = CompilationContext.get_current()
         with ir.InsertionPoint(ctx.gpu_module_body):
@@ -645,6 +813,7 @@ def compile_gemm1_a4w4(
             i32_n_tokens,
             arg_A_q_out,
             arg_A_scale_out,
+            arg_hidden_states,
         )
         launcher.launch(grid=(i32_grid, 1, 1), block=(256, 1, 1), stream=stream)
 
@@ -712,6 +881,50 @@ def _update_dpp(old, src, ctrl, row_mask=0xF, bank_mask=0xF, bound_ctrl=True):
         [],
         [],
     )
+
+
+# ---------------------------------------------------------------------------
+# inline-quant (bf16 -> fp4 + e8m0) helpers (mxfp4_gemm_common.hpp:76-94)
+# ---------------------------------------------------------------------------
+
+
+def _pkmax_u16(a, b):
+    """v_pk_max_u16: element-wise max of two packed vector<2xi16> in i32 dwords.
+
+    HIP uses inline asm ``v_pk_max_u16``; ``arith.maxui`` on ``vector<2xi16>``
+    lowers to the same instruction on gfx950.
+    """
+    v2i16 = ir.VectorType.get([2], T.i16)
+    av = _bitcast(v2i16, a)
+    bv = _bitcast(v2i16, b)
+    mv = arith.unwrap(arith.maxui(av, bv))
+    return llvm.bitcast(T.i32, mv)
+
+
+def _max_u32(a, b):
+    cond = arith.unwrap(arith.cmpi(CmpIPredicate.ugt, _i32(a), _i32(b)))
+    return arith.unwrap(arith.select(cond, _i32(a), _i32(b)))
+
+
+def _dpp_quad_amax_u32(a32):
+    """inline_quant_dpp_quad_amax: two update.dpp (0xB1, 0x4E) + unsigned max."""
+    s1 = _update_dpp(a32, a32, 0xB1)
+    a32 = _max_u32(a32, s1)
+    s2 = _update_dpp(a32, a32, 0x4E)
+    return _max_u32(a32, s2)
+
+
+def _encode_e8m0(amax_u16):
+    """inline_quant_encode_e8m0: amax(u16)->e8m0 byte (min(254,max(0,bexp-2)))."""
+    amax = fx.Int32(_i32(amax_u16)) & 0xFFFF
+    f32bits = amax << 16
+    bexp = ((f32bits + 0x200000) >> 23) & 0xFF
+    # max(0, bexp - 2)
+    bm2 = bexp - 2
+    zero = fx.Int32(0)
+    c0 = arith.unwrap(arith.cmpi(CmpIPredicate.sgt, bm2.ir_value(), zero.ir_value()))
+    m0 = fx.Int32(arith.unwrap(arith.select(c0, bm2.ir_value(), zero.ir_value())))
+    return _min_u(m0, 254)
 
 
 # ---------------------------------------------------------------------------
