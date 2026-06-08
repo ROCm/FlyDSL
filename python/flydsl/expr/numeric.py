@@ -232,8 +232,10 @@ def _try_coerce_rhs(rhs):
     if isinstance(rhs, Numeric):
         return rhs
     if isinstance(rhs, ArithValue):
-        if isinstance(rhs.type, (ir.VectorType, ir.IndexType)):
-            return None  # no Numeric representation for vector/index
+        if isinstance(rhs.type, ir.VectorType):
+            return None
+        if isinstance(rhs.type, ir.IndexType):
+            return Int32(rhs)
         try:
             return Numeric.from_ir_type(rhs.type)(rhs)
         except (ValueError, KeyError):
