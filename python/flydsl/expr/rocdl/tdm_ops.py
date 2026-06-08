@@ -216,6 +216,8 @@ def make_tensor_descriptor_2d(
     for_store: bool = False,
     atomic_barrier_enable: bool = False,
     early_timeout: bool = False,
+    valid_inner=None,
+    valid_outer=None,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -265,6 +267,17 @@ def make_tensor_descriptor_2d(
                        multicast-load knob (1 = GL1 returns to the requesters
                        present when GL2 data arrives, latecomers re-broadcast;
                        default 0 = standard wider-merge timeout).
+        valid_inner:  Optional effective tensor extent along dim0 (innermost).
+                      Accepts a Python int or an MLIR i32 Value / SGPR.
+                      When set, overrides the default ``tdim0 = bpw_inner``
+                      so that accesses beyond ``valid_inner`` elements are
+                      treated as out-of-bounds by TDM hardware (load → zero-
+                      fill, store → drop). Must be the *remaining* count
+                      relative to this descriptor's folded base address
+                      (offset is already baked into the address).
+                      None (default) → ``tdim0 = bpw_inner`` (no OOB).
+        valid_outer:  Same as ``valid_inner`` but for dim1 (outermost).
+                      None (default) → ``tdim1 = bpw_outer`` (no OOB).
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -348,6 +361,17 @@ def make_tensor_descriptor_2d(
     tile_d0 = bpw_inner  # block dim0 per warp
     tile_d1 = bpw_outer  # block dim1 per warp
 
+    # Override tensor dims with caller-supplied valid bounds for OOB.
+    # When valid_inner/valid_outer is set, the TDM hardware will treat
+    # accesses beyond that extent as OOB (load → zero-fill, store → drop).
+    if valid_inner is not None:
+        tdim0 = valid_inner
+    if valid_outer is not None:
+        tdim1 = valid_outer
+
+    _td0_is_runtime = not isinstance(tdim0, int)
+    _td1_is_runtime = not isinstance(tdim1, int)
+
     # Padding can be applied to the LDS address when copying from memory to LDS,
     #  but not when copying from LDS to memory
     #  (there is no "de-padding" operation; padding is ignored).
@@ -393,19 +417,54 @@ def make_tensor_descriptor_2d(
         g1_s0 = arith.ori(upper_const, mask_i32)
 
     # sgpr1: atomic_barrier_addr[15:0]=0 | tensor_dim0_lo[31:16]
-    g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
-
     # sgpr2: tensor_dim0_hi[15:0] | tensor_dim1_lo[31:16]
-    g1_s2 = arith.constant(
-        ((tdim0 >> 16) & 0xFFFF) | ((tdim1 & 0xFFFF) << 16),
-        type=T.i32,
-    )
-
     # sgpr3: tensor_dim1_hi[15:0] | tile_dim0[31:16]
-    g1_s3 = arith.constant(
-        ((tdim1 >> 16) & 0xFFFF) | (tile_d0 << 16),
-        type=T.i32,
-    )
+    #
+    # tdim0/tdim1 may be runtime MLIR i32 values when valid_inner/valid_outer
+    # are SSA. Follow the same pattern as make_tensor_gather_descriptor.
+    if _td0_is_runtime or _td1_is_runtime:
+        # --- tdim0 contribution to sgpr1 and sgpr2 ---
+        if _td0_is_runtime:
+            _td0_lo = arith.andi(tdim0, arith.constant(0xFFFF, type=T.i32))
+            g1_s1 = arith.shli(_td0_lo, arith.constant(16, type=T.i32))
+            _td0_hi = arith.andi(
+                arith.shrui(tdim0, arith.constant(16, type=T.i32)),
+                arith.constant(0xFFFF, type=T.i32),
+            )
+        else:
+            g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
+            _td0_hi = arith.constant((tdim0 >> 16) & 0xFFFF, type=T.i32)
+
+        # --- tdim1 contribution to sgpr2 and sgpr3 ---
+        if _td1_is_runtime:
+            _td1_lo_shifted = arith.shli(
+                arith.andi(tdim1, arith.constant(0xFFFF, type=T.i32)),
+                arith.constant(16, type=T.i32),
+            )
+            g1_s2 = arith.ori(_td0_hi, _td1_lo_shifted)
+
+            _td1_hi = arith.andi(
+                arith.shrui(tdim1, arith.constant(16, type=T.i32)),
+                arith.constant(0xFFFF, type=T.i32),
+            )
+            g1_s3 = arith.ori(_td1_hi, arith.constant(tile_d0 << 16, type=T.i32))
+        else:
+            g1_s2 = arith.ori(_td0_hi, arith.constant((tdim1 & 0xFFFF) << 16, type=T.i32))
+            g1_s3 = arith.constant(
+                ((tdim1 >> 16) & 0xFFFF) | (tile_d0 << 16),
+                type=T.i32,
+            )
+    else:
+        # Pure compile-time constants (original fast path)
+        g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
+        g1_s2 = arith.constant(
+            ((tdim0 >> 16) & 0xFFFF) | ((tdim1 & 0xFFFF) << 16),
+            type=T.i32,
+        )
+        g1_s3 = arith.constant(
+            ((tdim1 >> 16) & 0xFFFF) | (tile_d0 << 16),
+            type=T.i32,
+        )
 
     # sgpr4: tile_dim1[15:0] | tile_dim2[31:16]=0
     g1_s4 = arith.constant(tile_d1 & 0xFFFF, type=T.i32)
