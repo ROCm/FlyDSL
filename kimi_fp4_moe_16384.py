@@ -48,7 +48,7 @@ STAGE2_KERNEL = 'flydsl_moe2_afp4_wfp4_bf16_t64x256x256_reduce_xcd4'
 
 @dataclass(frozen=True)
 class Stage1Config:
-    tile_m__64: int = 64
+    tile_m: int = 64
     tile_n: int = 128
     tile_k: int = 256
     waves_per_eu: int = 4
@@ -127,9 +127,9 @@ def compile_kimi_fp4_stage1_16384():
     inter_dim = INTER_DIM
     experts = EXPERTS
     topk = TOPK
-    tile_m = S1.tile_m__64
-    tile_n = S1.tile_n
-    tile_k = S1.tile_k
+    tile_m = S1.tile_m # 64
+    tile_n = S1.tile_n # 128
+    tile_k = S1.tile_k # 256
     model_dim_pad = 0
     inter_dim_pad = 0
     persist_m = 1
@@ -137,12 +137,12 @@ def compile_kimi_fp4_stage1_16384():
     waves_per_eu = S1.waves_per_eu
     k_batch = 1
     b_nt = S1.b_nt
-    xcd_swizzle = S1.xcd_swizzle
+    xcd_swizzle = S1.xcd_swizzle # TODO(zty), 为啥是4?
     gpu_arch = get_hip_arch()
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name='smem0')
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name='smem1')
     sort_block_m = max(32, tile_m)
-    num_waves = min(4, tile_n // 32)
+    num_waves = min(4, tile_n // 32) # 4
     total_threads = num_waves * 64
     pack_M = 1 if tile_m < 32 else 2
     n_per_wave = tile_n // num_waves
@@ -152,7 +152,7 @@ def compile_kimi_fp4_stage1_16384():
     elem_bytes = 1
     a_elem_bytes = 1
     b_elem_bytes = 1
-    tile_k_bytes = int(tile_k) * int(a_elem_bytes)
+    tile_k_bytes = int(tile_k) * int(a_elem_bytes) # 256
     a_elem_vec_pack = 2
     cbsz = 4
     blgp = 4
@@ -175,23 +175,24 @@ def compile_kimi_fp4_stage1_16384():
     bytes_per_thread_x = bytes_x_per_tile // total_threads
     _use_lds128 = os.environ.get('FLIR_CK_LDS128', '1') in ('1', 'true', 'True', 'YES', 'yes')
     pad_k = 0 if _use_lds128 else 8
-    lds_stride = tile_k + pad_k
+    lds_stride = tile_k + pad_k # 256 + 0 = 256
     _use_cshuffle_epilog = True
     _xcd_tag = f'_xcd{xcd_swizzle}' if xcd_swizzle > 0 else ''
     module_name = f'mfma_moe1_silu_mul_afp4_wfp4_bf16_t{tile_m}x{tile_n}x{tile_k}_pm{persist_m}_async{_xcd_tag}_v32'
     _cshuffle_elem_bytes = 2
-    _single_x_bytes = int(tile_m) * int(lds_stride) * int(a_elem_bytes)
-    lds_out_bytes = _cshuffle_elem_bytes * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0
-    lds_tid_bytes = int(tile_m) * 4
+    _single_x_bytes = int(tile_m) * int(lds_stride) * int(a_elem_bytes) # 16k = 64 * 256 * 1
+    lds_out_bytes = _cshuffle_elem_bytes * int(tile_m) * int(tile_n) if _use_cshuffle_epilog else 0 # 16k = 2 * 64 * 128
+    lds_tid_bytes = int(tile_m) * 4 # 256 = 64 * 4
     _input_elems = _single_x_bytes if a_elem_bytes == 1 else _single_x_bytes // 2
     _GLOBAL_ALIGN = 1024
-    _std_pong = max(_single_x_bytes, lds_out_bytes) + lds_tid_bytes
-    _std_ping = _single_x_bytes
-    _std_pong_aligned = allocator_pong._align(_std_pong, 128)
-    _std_total = allocator_pong._align(_std_pong_aligned, _GLOBAL_ALIGN) + allocator_pong._align(_std_ping, 128)
+    _std_pong = max(_single_x_bytes, lds_out_bytes) + lds_tid_bytes # 16k + 256
+    _std_ping = _single_x_bytes # 16k = 64 * 256 # A tile 放进lds的大小.
+    _std_pong_aligned = allocator_pong._align(_std_pong, 128) # 256
+    _std_total = allocator_pong._align(_std_pong_aligned, _GLOBAL_ALIGN) + allocator_pong._align(_std_ping, 128) # 
     _lds_limit = {'gfx950': 163840, 'gfx942': 65536}.get(gpu_arch, 0)
-    _split_lds_out = _lds_limit > 0 and lds_out_bytes > 0 and (_std_total > _lds_limit) and (num_waves >= 2)
-    if _split_lds_out:
+    _split_lds_out = _lds_limit > 0 and lds_out_bytes > 0 and (_std_total > _lds_limit) and (num_waves >= 2) # #False = 160k > 0 and 16k > 0 and ()
+    print(f"{_split_lds_out=}, {_std_total=}, {_lds_limit=}, {num_waves=}, {_std_pong=}, {_std_ping=}, {_std_pong_aligned=}, {_std_total=}")
+    if _split_lds_out: # False
         _half_out_bytes = _cshuffle_elem_bytes * int(tile_m) * (int(tile_n) // 2)
         _pong_buffer_bytes = max(_single_x_bytes, _half_out_bytes)
         _ping_buffer_bytes = max(_single_x_bytes, _half_out_bytes)
@@ -297,33 +298,33 @@ def compile_kimi_fp4_stage1_16384():
         vec16_x = T.vec(vec16_elems, x_elem)
         vec2_i64 = T.vec(2, i64)
 
-        def _ptr_buffer_resource(ptr, num_records_bytes):
+        def _ptr_buffer_resource(ptr, num_records_bytes): # 这种函数是不是能放外面呢.. 创建 buffer resources.
             addr = fx.ptrtoint(ptr)
             addr_i64 = arith.index_cast(T.i64, addr)
             return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=num_records_bytes)
-        acc_init = arith.constant_vector(0.0, vec4_f32)
-        c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
-        b_layout = make_preshuffle_b_layout(arith, c_n=c_n_total, c_k=k_in // pack_K, kpack_bytes=kpack_bytes, elem_bytes=b_elem_bytes)
+        acc_init = arith.constant_vector(0.0, vec4_f32) # 这个可以优化到mfma第一次直接初始化掉.
+        c_n_total = arith.constant(experts * (2 * inter_dim), index=True) # 385 * 2 * 512.
+        b_layout = make_preshuffle_b_layout(arith, c_n=c_n_total, c_k=k_in // pack_K, kpack_bytes=kpack_bytes, elem_bytes=b_elem_bytes) # B的layout. 这里我猜测 和我之前想得应该是一样的？TODO(zty): 
         layout_b = b_layout.layout_b
-        sorted_m = size_expert_ids_in * arith.constant(sort_block_m, index=True)
+        sorted_m = size_expert_ids_in * arith.constant(sort_block_m, index=True) # 64.
         layout_a_scale = make_preshuffle_scale_layout(arith, c_mn=sorted_m, c_k=arith.constant(model_dim, index=True))
         layout_b_scale = make_preshuffle_scale_layout(arith, c_mn=c_n_total, c_k=arith.constant(model_dim, index=True))
-        _eff_lds_stride = lds_stride
+        _eff_lds_stride = lds_stride # 256.
         _eff_tile_k_bytes = tile_k_bytes
-        if const_expr(use_async_copy and a_elem_vec_pack > 1):
-            _eff_lds_stride = lds_stride // a_elem_vec_pack
-            _eff_tile_k_bytes = tile_k_bytes // a_elem_vec_pack
-        shape_lds = fx.make_shape(tile_m, _eff_lds_stride)
-        stride_lds = fx.make_stride(_eff_lds_stride, 1)
-        layout_lds = fx.make_layout(shape_lds, stride_lds)
+        if const_expr(use_async_copy and a_elem_vec_pack > 1): # 2
+            _eff_lds_stride = lds_stride // a_elem_vec_pack # 128 = 256 // 2
+            _eff_tile_k_bytes = tile_k_bytes // a_elem_vec_pack # 128 = 256 // 2
+        shape_lds = fx.make_shape(tile_m, _eff_lds_stride) # 64, 128
+        stride_lds = fx.make_stride(_eff_lds_stride, 1) # 128, 1
+        layout_lds = fx.make_layout(shape_lds, stride_lds) # 64, 128
         tx = gpu.thread_id('x')
         by = gpu.block_id('x')
         bx_persist = gpu.block_id('y')
         if const_expr(xcd_swizzle > 0):
             _NUM_XCDS_S1 = 8
-            _c1_sw = arith.constant(1, index=True)
-            _c_tn_sw = arith.constant(tile_n, index=True)
-            _c_idp_sw = arith.constant(2 * inter_dim_pad, index=True)
+            _c1_sw = arith.constant(1, index=True) # 1
+            _c_tn_sw = arith.constant(tile_n, index=True) # 128
+            _c_idp_sw = arith.constant(2 * inter_dim_pad, index=True) # 0
             _c2_sw = arith.constant(2, index=True)
             _gx = (n_in - _c_idp_sw + _c2_sw * _c_tn_sw - _c1_sw) / _c_tn_sw / _c2_sw
             _c_pm_sw = arith.constant(persist_m, index=True)
@@ -344,22 +345,22 @@ def compile_kimi_fp4_stage1_16384():
             _wgid_in_group = _wgid % _num_wgid_in_group
             bx_persist = _first_pid_m + _wgid_in_group % _group_size_m
             by = _wgid_in_group / _group_size_m
-        by_n = by * arith.constant(tile_n, index=True)
+        by_n = by * arith.constant(tile_n, index=True) # by * 128
         k_base_idx = arith.index(0)
-        k_blocks16 = arith.constant(_eff_tile_k_bytes // 16, index=True)
-        layout_tx_wave_lane = fx.make_layout((num_waves, 64), stride=(64, 1))
-        layout_lane16 = fx.make_layout((4, 16), stride=(16, 1))
+        k_blocks16 = arith.constant(_eff_tile_k_bytes // 16, index=True) # 8 = 128 / 16. 
+        layout_tx_wave_lane = fx.make_layout((num_waves, 64), stride=(64, 1)) # (4,64):(64,1)
+        layout_lane16 = fx.make_layout((4, 16), stride=(16, 1)) # (4,16):(16,1)
         base_ptr_pong = allocator_pong.get_base()
         base_ptr_ping = allocator_ping.get_base()
         lds_x_pong = SmemPtr(base_ptr_pong, lds_pong_offset, x_lds_elem(), shape=(_input_elems,)).get()
         lds_x_ping = SmemPtr(base_ptr_ping, lds_ping_offset, x_lds_elem(), shape=(_input_elems,)).get()
         _lds_out_elem_type = T.bf16
-        if const_expr(_split_lds_out and _use_cshuffle_epilog):
+        if const_expr(_split_lds_out and _use_cshuffle_epilog): # False
             _half_out_elems = int(tile_m) * (int(tile_n) // 2)
             lds_out = SmemPtr(base_ptr_pong, lds_pong_offset, _lds_out_elem_type, shape=(_half_out_elems,)).get()
             lds_out_B = SmemPtr(base_ptr_ping, lds_ping_offset, _lds_out_elem_type, shape=(_half_out_elems,)).get()
         else:
-            lds_out = SmemPtr(base_ptr_pong, lds_pong_offset, _lds_out_elem_type, shape=(tile_m * tile_n,)).get() if _use_cshuffle_epilog else None
+            lds_out = SmemPtr(base_ptr_pong, lds_pong_offset, _lds_out_elem_type, shape=(tile_m * tile_n,)).get() if _use_cshuffle_epilog else None # True (64 * 128)
             lds_out_B = None
         lds_tid = SmemPtr(base_ptr_pong, _lds_tid_offset_pong, T.i32, shape=(tile_m,)).get()
         c_a_pack = arith.constant(int(a_elem_vec_pack), index=True)
@@ -484,7 +485,7 @@ def compile_kimi_fp4_stage1_16384():
             _tail_ku = k_unroll - _pad_ku_skip
             _tail_ku_packed = (_tail_ku + pack_K - 1) // pack_K if _pad_ku_skip > 0 else None
 
-            def load_b_packs_k64(base_k, ku: int, n_blk, n_intra):
+            def load_b_packs_k64(base_k, ku: int, n_blk, n_intra): # B g2r?
                 c64 = arith.constant(64, index=True)
                 base_k_bytes = base_k * arith.constant(int(b_elem_bytes), index=True)
                 k0 = base_k_bytes // c64 + arith.constant(ku, index=True)
@@ -498,7 +499,7 @@ def compile_kimi_fp4_stage1_16384():
                 b1 = vector.extract(b_i64x2, static_position=[1], dynamic_position=[])
                 return (b0, b1)
 
-            def load_b_tile(base_k, ku_limit=k_unroll):
+            def load_b_tile(base_k, ku_limit=k_unroll): # gate down & gate up.
                 """Load separated gate and up B tiles."""
                 gate_b_tile = []
                 up_b_tile = []
@@ -589,7 +590,7 @@ def compile_kimi_fp4_stage1_16384():
             _eff_bytes_per_buffer = int(tile_m) * int(_eff_lds_stride) * int(a_elem_bytes)
             _num_dma_loads = max(1, _eff_bytes_per_buffer // (total_threads * _dma_bytes))
 
-            def dma_x_tile_to_lds(base_k, lds_buffer):
+            def dma_x_tile_to_lds(base_k, lds_buffer): # A g2s 
                 c4_idx = arith.index(4)
                 base_k_div4 = base_k / c_a_pack * arith.constant(int(elem_bytes), index=True) / arith.index(4)
                 lds_ptr_i64 = None
@@ -607,22 +608,22 @@ def compile_kimi_fp4_stage1_16384():
                         lds_ptr_i64 = lds_ptr_i64 + arith.constant(total_threads * _dma_bytes, type=T.i64)
                     lds_ptr_type = ir.Type.parse('!llvm.ptr<3>')
                     lds_ptr = llvm.inttoptr(lds_ptr_type, lds_ptr_i64)
-                    rocdl.raw_ptr_buffer_load_lds(x_rsrc, lds_ptr, arith.constant(_dma_bytes, type=T.i32), global_offset, arith.constant(0, type=T.i32), arith.constant(0, type=T.i32), arith.constant(0, type=T.i32))
+                    rocdl.raw_ptr_buffer_load_lds(x_rsrc, lds_ptr, arith.constant(_dma_bytes, type=T.i32), global_offset, arith.constant(0, type=T.i32), arith.constant(0, type=T.i32), arith.constant(0, type=T.i32)) # 关键行. g2s loads了多少.
 
             def prefetch_x_to_lds(base_k, lds_buffer):
                 dma_x_tile_to_lds(base_k, lds_buffer)
 
-            def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer):
+            def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer): # A s2r
                 col_base_swz_bytes = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
                 col_base_swz = col_base_swz_bytes if elem_bytes == 1 else col_base_swz_bytes / arith.index(2)
                 idx_a16 = crd2idx([curr_row_a_lds, col_base_swz], layout_lds)
-                loaded_a16 = vector.load_op(vec16_x, lds_buffer, [idx_a16])
+                loaded_a16 = vector.load_op(vec16_x, lds_buffer, [idx_a16]) # float4 load.
                 a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
                 a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
                 a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
                 return (a0, a1)
 
-            def prefetch_full_a_from_lds(lds_buffer, ku_limit=k_unroll):
+            def prefetch_full_a_from_lds(lds_buffer, ku_limit=k_unroll): # 啥时候用？ for之前？
                 """Load entire A tile from LDS into registers before compute."""
                 a_regs = []
                 for k_idx in range_constexpr(ku_limit):
@@ -679,7 +680,7 @@ def compile_kimi_fp4_stage1_16384():
                                             up_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(mfma_res_ty, [a128, ub128, up_list[acc_idx], cbsz, blgp, ikxdl * pack_M + imxdl, a_scale_val, ikxdl * pack_N + inxdl, up_bs_val])
                 return (gate_list, up_list, epilogue_pf)
 
-            def load_a_subtile(k_idx, mi_idx, lds_buffer):
+            def load_a_subtile(k_idx, mi_idx, lds_buffer): 
                 """Load a single A sub-tile from LDS (one ds_read)."""
                 col_base = col_offset_base + k_idx * 128 // a_elem_vec_pack
                 mi_val = arith.constant(mi_idx * 16, index=True)
@@ -717,7 +718,7 @@ def compile_kimi_fp4_stage1_16384():
                         gate_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(mfma_res_ty, [a128, gb128, gate_list[acc_idx], cbsz, blgp, ikxdl * pack_M + imxdl, a_scale_val, ikxdl * pack_N + inxdl, gate_bs_val])
                         up_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(mfma_res_ty, [a128, ub128, up_list[acc_idx], cbsz, blgp, ikxdl * pack_M + imxdl, a_scale_val, ikxdl * pack_N + inxdl, up_bs_val])
 
-            def _interleaved_half(lds_read, lds_write, next_k_dma_py, next_k_load, prev_a_tile, prev_gate_w, prev_up_w, prev_a_scale, prev_gate_bs, prev_up_bs, acc_gate, acc_up):
+            def _interleaved_half(lds_read, lds_write, next_k_dma_py, next_k_load, prev_a_tile, prev_gate_w, prev_up_w, prev_a_scale, prev_gate_bs, prev_up_bs, acc_gate, acc_up): # 核心调度.
                 """One flatmm-style interleaved half-iteration (deep pipeline).
 
                     Generalized for arbitrary m_repeat (block_m=32, 64, ...).
@@ -777,12 +778,12 @@ def compile_kimi_fp4_stage1_16384():
                         _ak, _ami = _pp_a_reads[_p][_a_j]
                         _a_all[_ak, _ami] = load_a_subtile(_ak, _ami, lds_read)
                     rocdl.sched_barrier(0)
-                    rocdl.s_setprio(1)
+                    rocdl.s_setprio(1) # 4个warp，还用设置这个么... 好像也没有interleave是吧.
                     for _m_j in range_constexpr(len(_pp_mfma[_p])):
                         _k_idx, _ni_idx, _ikxdl, _inxdl, _ku128 = _pp_mfma[_p][_m_j]
                         _ni_packed_idx = _ni_idx // pack_N
                         _up_b_single = (prev_up_w[_k_idx][0][_ni_idx], prev_up_w[_k_idx][1][_ni_idx])
-                        compute_bmajor_mfma_phase(prev_a_tile, (prev_gate_w[_k_idx][0][_ni_idx], prev_gate_w[_k_idx][1][_ni_idx]), _up_b_single, _prev_asvs, _prev_gsv_list[_ni_packed_idx], _prev_usv_list[_ni_packed_idx], acc_gate, acc_up, _k_idx, _ni_idx, _ikxdl, _inxdl)
+                        compute_bmajor_mfma_phase(prev_a_tile, (prev_gate_w[_k_idx][0][_ni_idx], prev_gate_w[_k_idx][1][_ni_idx]), _up_b_single, _prev_asvs, _prev_gsv_list[_ni_packed_idx], _prev_usv_list[_ni_packed_idx], acc_gate, acc_up, _k_idx, _ni_idx, _ikxdl, _inxdl) # MFMA. 输出到 gate_list 和 up_list 里面来.
                     rocdl.s_setprio(0)
                     rocdl.sched_barrier(0)
                 cur_a_tile = []
@@ -815,7 +816,7 @@ def compile_kimi_fp4_stage1_16384():
                 return (cur_a_tile, cur_gate_w, cur_up_w, cur_a_scale, cur_gate_bs, cur_up_bs, acc_gate, acc_up)
             rocdl.sched_barrier(0)
             k0 = k_base_idx
-            prefetch_x_to_lds(k0, lds_x_pong)
+            prefetch_x_to_lds(k0, lds_x_pong) # TODO(zty) K0是什么意思？ pong? 应该是说的 for开始前吧.
             rocdl.sched_barrier(0)
             _k0_scale = k_base_idx // arith.constant(pack_K * 128, index=True)
             a_scale_pong, gate_bs_pong, up_bs_pong = prefetch_ab_scale_tile(_k0_scale)
@@ -832,7 +833,7 @@ def compile_kimi_fp4_stage1_16384():
             acc_up = [acc_init] * num_acc_n * m_repeat
             _k1 = k_base_idx + arith.constant(tile_k, index=True)
             rocdl.sched_barrier(0)
-            prefetch_x_to_lds(_k1, lds_x_ping)
+            prefetch_x_to_lds(_k1, lds_x_ping) # TODO(zty) K1是什么意思？ ping? 应该是说的 for开始前吧.
             _k0_b = k_base_idx // arith.constant(2, index=True)
             gate_w0, up_w0 = load_b_tile(_k0_b)
             rocdl.s_waitcnt(0)
@@ -998,21 +999,21 @@ def compile_kimi_fp4_stage1_16384():
 
     @flyc.jit
     def launch_kimi_fp4_stage1_16384(arg_out: fx.Pointer, arg_x: fx.Pointer, arg_w: fx.Pointer, arg_scale_x: fx.Pointer, arg_scale_w: fx.Pointer, arg_sorted_token_ids: fx.Pointer, arg_expert_ids: fx.Pointer, arg_max_token_ids: fx.Pointer, i32_tokens_in: fx.Int32, i32_inter_in: fx.Int32, i32_k_in: fx.Int32, i32_size_expert_ids_in: fx.Int32, stream: fx.Stream):
-        _ = _cache_tag
+        _ = _cache_tag # 让函数和cache_tag绑定，避免重复编译
         allocator_pong.finalized = False
         allocator_ping.finalized = False
         ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
+        with ir.InsertionPoint(ctx.gpu_module_body): # 前面算好了怎么切，这个真正挂到kernel里面.
             allocator_pong.finalize()
             allocator_ping.finalize()
-        inter_dim_pad_total = arith.constant(2 * inter_dim_pad, index=True)
-        tile_k_stage2 = tile_k // 2
-        tile2_pad = (tile_k_stage2 - (inter_dim - inter_dim_pad) % tile_k_stage2) % tile_k_stage2
-        inter_in = arith.index_cast(ir.IndexType.get(), i32_inter_in.ir_value())
-        tile_n_index = arith.constant(tile_n, index=True)
-        gx = (inter_in - inter_dim_pad_total + tile2_pad + 2 * tile_n_index - 1) / tile_n_index / arith.constant(2, index=True)
-        _c_pm_l = arith.constant(persist_m, index=True)
-        gy = (arith.index_cast(ir.IndexType.get(), i32_size_expert_ids_in.ir_value()) + _c_pm_l - arith.constant(1, index=True)) / _c_pm_l
+        inter_dim_pad_total = arith.constant(2 * inter_dim_pad, index=True) # 0 如果存在，*2, gemm1 
+        tile_k_stage2 = tile_k // 2 # 128 = 256 // 2
+        tile2_pad = (tile_k_stage2 - (inter_dim - inter_dim_pad) % tile_k_stage2) % tile_k_stage2 # 0 = div_up(pad, tile_k_stage2)
+        inter_in = arith.index_cast(ir.IndexType.get(), i32_inter_in.ir_value()) # 1024
+        tile_n_index = arith.constant(tile_n, index=True) # 128
+        gx = (inter_in - inter_dim_pad_total + tile2_pad + 2 * tile_n_index - 1) / tile_n_index / arith.constant(2, index=True) # 4 = div_up(1024, 2*128) # 成对处理tile_n
+        _c_pm_l = arith.constant(persist_m, index=True) # 这里是1.
+        gy = (arith.index_cast(ir.IndexType.get(), i32_size_expert_ids_in.ir_value()) + _c_pm_l - arith.constant(1, index=True)) / _c_pm_l # div_up(expert_ids_in, 1)
         moe_gemm1(arg_out, arg_x, arg_w, arg_scale_x, arg_scale_w, arg_sorted_token_ids, arg_expert_ids, arg_max_token_ids, i32_tokens_in, i32_inter_in, i32_k_in, i32_size_expert_ids_in).launch(grid=(gx, gy, k_batch), block=(total_threads, 1, 1), stream=stream)
     return launch_kimi_fp4_stage1_16384
 
@@ -1766,7 +1767,7 @@ def kimi_fp4_stage1_16384(a: torch.Tensor, w1: torch.Tensor, w1_scale: torch.Ten
     dev = a.device
     if out is None:
         out = torch.empty((TOKEN, TOPK, INTER_DIM), dtype=dtypes.bf16, device=dev)
-    sort_block_m = S1.tile_m__64
+    sort_block_m = S1.tile_m
     dense_blocks = min(TOKEN * TOPK * sort_block_m, sorted_token_ids.shape[0]) // sort_block_m
     grid_y = min(dense_blocks, sorted_expert_ids.shape[0])
     args = (_ptr_view_safe(out.view(-1)), _ptr_view_safe(a.view(-1)), _ptr_view_safe(w1.view(-1)), _ptr_view_safe(a1_scale.view(-1)), _ptr_view_safe(w1_scale.view(-1)), _ptr_view_safe(sorted_token_ids), _ptr_view_safe(sorted_expert_ids), _ptr_view_safe(num_valid_ids), TOKEN, INTER_DIM * 2, MODEL_DIM, grid_y, torch.cuda.current_stream())
