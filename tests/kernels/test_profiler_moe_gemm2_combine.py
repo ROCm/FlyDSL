@@ -35,7 +35,7 @@ Invocation:
 
   # Baseline + fused comparison
   torchrun --nproc_per_node=8 tests/kernels/test_profiler_moe_gemm2_combine.py \
-      --mode profile --cudagraph --bench-op both --fuse-mode auto
+      --mode profile --cudagraph --bench-op both
 
 CUDAGraph notes:
   - Once dispatch has run in setup, total_recv / out_idx / etc. live in shmem
@@ -917,7 +917,6 @@ def _fused_chain(disp_op, fused_op, gemm2_in, combine_idx, dispatch_total_recv,
         sorted_expert_ids=gemm2_in["sorted_expert_ids"],
         sorted_weights=gemm2_in["sorted_weights"],
         num_valid_ids=gemm2_in["num_valid_ids"],
-        dispatch_total_recv=dispatch_total_recv,
     )
     return out
 
@@ -1804,7 +1803,7 @@ def run_acceptance(rank, world_size, args):
               f"accumulate={args.gemm2_accumulate}")
         print(f"  GEMM2 layout: tokens_in=max_recv={_max_recv}, topk={k}, "
               f"A2 rows={_a2_rows} (= bs*ep*topk)")
-        print(f"  bench-op={args.bench_op}, fuse-mode={args.fuse_mode}, "
+        print(f"  bench-op={args.bench_op}, "
               f"fused_op_available={HAS_FUSED_OP}")
         if not HAS_FUSED_OP:
             print(f"  [warn] fused op import failed: {_FUSED_IMPORT_ERR}")
@@ -1821,7 +1820,6 @@ def run_acceptance(rank, world_size, args):
             tile_m=args.tile_m2, tile_n=args.tile_n2, tile_k=args.tile_k2,
             persist_m=args.persist_m,
             a_dtype=args.gemm2_a_dtype, b_dtype=args.gemm2_b_dtype,
-            force_mode=args.fuse_mode,
             xcd_swizzle=args.xcd_swizzle,
             use_token_flag_sync=args.token_flag_sync,
         )
@@ -1939,7 +1937,7 @@ def run_acceptance(rank, world_size, args):
         gemm2_b_dtype=args.gemm2_b_dtype,
         tile_m2=args.tile_m2, tile_n2=args.tile_n2, tile_k2=args.tile_k2,
         persist_m=args.persist_m,
-        bench_op=args.bench_op, fuse_mode=args.fuse_mode,
+        bench_op=args.bench_op,
     )
 
     out_dir = os.path.join(args.output_dir, f"ep{world_size}_bs{cur_tok}")
@@ -2171,8 +2169,6 @@ def _parse_args():
                         "diagnostic / comparison only.")
     p.add_argument("--bench-op", choices=["baseline", "fused", "both"], default="baseline",
                    help="Which path to run")
-    p.add_argument("--fuse-mode", choices=["auto", "full", "fallback"], default="auto",
-                   help="fused op internal mode (auto: pick by occupancy)")
     # Profile / output
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters",  type=int, default=20,
@@ -2187,17 +2183,17 @@ def _parse_args():
     p.add_argument("--scale-type-size", type=int, default=0)
     p.add_argument("--quant-type", type=str, default="none",
                    choices=["none", "fp8_direct_cast"])
-    # D-flag C-1: per-token flag sync switch. When on, dispatch / combine
+    # token-level-sync: per-token flag sync switch. When on, dispatch / combine
     # kernels enable reset + spin-wait and the fused gemm2 epilogue adds
     # cross-device atomic_add. When off, the whole block is const_expr DCEd
     # and behaviour matches baseline exactly. Only observable under
     # --bench-op fused / both (the fused path).
     p.add_argument("--token-flag-sync", dest="token_flag_sync",
                    action="store_true", default=False,
-                   help="Enable the D-flag C-1 per-token flag cross-device sync path")
+                   help="Enable the token-level-sync per-token flag cross-device sync path")
     p.add_argument("--no-token-flag-sync", dest="token_flag_sync",
                    action="store_false",
-                   help="Disable the D-flag C-1 path (default behaviour)")
+                   help="Disable the token-level-sync path (default behaviour)")
     return p.parse_args()
 
 

@@ -2448,9 +2448,9 @@ def compile_mixed_moe_gemm2(
     # doweight_stage2=False, enable_bias=False, topk=1, use_cshuffle_epilog
     # =True, and out_dtype in {bf16, f16}.
     fused_p2p_scatter: tuple | None = None,
-    # D-flag C-1: enable per-token flag cross-card atomic sync. Only active
-    # when fused_p2p_scatter is not None. Appends 2 more i64 addresses after
-    # the fused 4:
+    # token-level-sync: enable per-token flag cross-card atomic sync. Only
+    # active when fused_p2p_scatter is not None. Appends 2 more i64 addresses
+    # after the fused 4:
     #   addr_local_counter    (local i32[mr*topk], device-scope CTA reduce)
     #   addr_p2p_comb_flag    (i64[npes], remote shmem_comb_token_flag P2P table)
     # store_pair tail issues a device-scope atomic_add; the last N-tile
@@ -2692,7 +2692,7 @@ def compile_mixed_moe_gemm2(
         _fp2p_log2_max_tok = _fp2p_mask_max_tok = None
         _fp2p_token_nbytes = 0
 
-    # D-flag C-1 compile-time switch. Only meaningful with fused_p2p_scatter;
+    # token-level-sync compile-time switch. Only meaningful with fused_p2p_scatter;
     # silently degrade to False on the baseline path (no epilogue P2P scatter
     # means the token flag has no producer). _tfs_enabled feeds const_expr DCE.
     _tfs_enabled = bool(_fp2p_enabled and use_token_flag_sync)
@@ -2718,12 +2718,8 @@ def compile_mixed_moe_gemm2(
         _tfs_num_n_tiles = 0
 
     epilog_tag = "cshuffle"
-    # IMPORTANT: include tiling in the module name to avoid accidentally reusing a compiled
-    # binary for a different (tile_m, tile_n, tile_k) configuration.
-    # See stage1 note: include ABI tag to prevent binary reuse across signature changes.
-    # IMPORTANT: module name participates in the compiler cache key.
-    # Dynamic-shape variant: safe to reuse across (tokens/sorted_size/size_expert_ids) at runtime.
-    # Keep a distinct ABI tag so the compile cache never mixes with historical signatures.
+    # The module name participates in the compile cache key, so it must encode
+    # tiling + ABI tags to avoid reusing a binary across incompatible configs.
     _persistent = persist_m <= 0
     if _persistent:
         _cu_num = _get_cu_num()
@@ -2809,16 +2805,13 @@ def compile_mixed_moe_gemm2(
             arg_sorted_weights: fx.Tensor,
             arg_num_valid_ids: fx.Tensor,
             arg_bias: fx.Tensor,
-            # Fused-path 4 address params. Baseline callers pass fx.Int64(0)
-            # placeholders; _fp2p_enabled (Python compile-time constant)
-            # DCEs the related branches.
+            # Fused-path address params (baseline passes fx.Int64(0); DCE'd
+            # when _fp2p_enabled is False).
             addr_tis: fx.Int64,                 # i32[max_recv]   shmem_tok_id_to_src
             addr_p2p_comb_inp: fx.Int64,        # i64[npes]       remote shmem_comb_inp_tok bases
             addr_wts_buf: fx.Int64,             # f32[max_recv*k] dispatch-output weights
             addr_p2p_comb_inp_wts: fx.Int64,    # i64[npes]       remote shmem_comb_inp_wts bases
-            # D-flag C-1 2 address params. _tfs_enabled OFF -> fx.Int64(0)
-            # placeholders, DCE'd by const_expr along the after_row_stores
-            # path that follows store_pair.
+            # token-level-sync params (DCE'd when _tfs_enabled is False).
             addr_local_counter: fx.Int64,        # i32[mr*topk] device-local counter
             addr_p2p_comb_flag: fx.Int64,        # i64[npes]    remote shmem_comb_token_flag bases
             i32_tokens_in: fx.Int32,
@@ -4135,34 +4128,19 @@ def compile_mixed_moe_gemm2(
                             alignment=_e_vec * out_elem_bytes,
                         )
 
-                # D-flag C-1: `after_row_stores` is only bound by the
-                # fp2p+token_flag_sync branch below. Default to None at the
-                # Python scope so the `_fp2p_enabled=False` (non-P2P) path
-                # does not trip UnboundLocalError on a Python local that
-                # was declared but never assigned.
+                # `after_row_stores` is only bound by the token-level-sync
+                # branch below; default to None so the non-P2P path does not
+                # trip UnboundLocalError.
                 after_row_stores = None
 
-                # Fused-P2P epilogue, Plan B (per-(src_tok, s) slot).
-                # P2P `buffer_store(SLC)` writes the remote shmem_comb_inp_tok
-                # at an independent slot per (src_tok, s):
-                #     slot_id = dest_lid * k + s
-                #     slot_off_bytes = slot_id * token_nbytes
-                # Vs. v1 (slot = rank * max_tok + dest_lid), which shared a
-                # slot across multiple D-experts and required cross-card
-                # atomic_fadd: Plan B gives every (src_tok, s) its own slot
-                # so we emit plain stores and remove the cross-card atomic
-                # entirely. The downstream combine (skip_stage1=True) then
-                # reduces locally over (tok_id*k + j).
-                # Precondition: sorted_token_ids' `s` must be j_global (the
-                # top-k position); otherwise (peer_A, s_A) and (peer_B, s_B)
-                # could collide on the same slot.
-                # FlyDSLMoeGemm2CombineOp's ctor hard-asserts k <= npes, so
-                # buffer capacity mt*k <= mr and we reuse baseline storage.
-                #
-                # Note: weight P2P scatter is still handled by
-                # combine_no_stage1 (skip_stage1_keep_wts=True) on the static
-                # fabric. Concurrent ~16B writes alongside token P2P would
-                # silently drop on some xGMI paths.
+                # Fused-P2P epilogue, Plan B: each (src_tok, s) P2P-stores
+                # (SLC) to its own remote shmem_comb_inp_tok slot
+                #     slot_id = dest_lid * k + s   (slot_off = slot_id * nbytes)
+                # so no cross-card atomic is needed; combine (skip_stage1) then
+                # reduces locally over (tok_id*k + j). Requires s == j_global
+                # (else slots collide) and k <= npes (mt*k <= mr); both asserted
+                # by FlyDSLMoeGemm2CombineOp's ctor. Weights are scattered
+                # separately by combine_no_stage1, not here.
                 if const_expr(_fp2p_enabled):
                     _c_log2_max_tok = arith.constant(int(_fp2p_log2_max_tok))
                     _c_mask_max_tok = arith.constant(int(_fp2p_mask_max_tok))
@@ -4197,9 +4175,8 @@ def compile_mixed_moe_gemm2(
                         pe_base_i64 = lds_p2p_tok_bases_ptr.load(
                             [dest_pe_idx]
                         )
-                        # Plan B core: slot id is determined by (dest_lid, s)
-                        # alone, independent of source peer rank (each
-                        # src_pe's comb buffer is independently addressed).
+                        # slot id depends only on (dest_lid, s), independent
+                        # of source peer rank.
                         slot_id_i32 = dest_lid * _c_topk_v2 + s
                         slot_off_bytes_i32 = slot_id_i32 * _c_token_nbytes
                         rsrc_dst = (
@@ -4207,9 +4184,8 @@ def compile_mixed_moe_gemm2(
                                 pe_base_i64
                             )
                         )
-                        # D-flag C-1: expose dest_pe / dest_lid / row_i32
-                        # to after_row_stores; OFF -> the downstream
-                        # destructuring ignores these via _unused.
+                        # dest_pe / dest_lid / row_i32 are only consumed by
+                        # after_row_stores (token-level-sync); ignored when OFF.
                         return (
                             (fused2, slot_off_bytes_i32, rsrc_dst,
                              dest_pe, dest_lid, row_i32),
@@ -4221,16 +4197,12 @@ def compile_mixed_moe_gemm2(
                     ):
                         _, slot_off_bytes_i32, rsrc_dst, *_tfs_unused = row_ctx
                         col_i32 = arith.index_cast(T.i32, col_g0)
-                        # cache_modifier=2 (SLC): bypass L1 to reduce local
-                        # cache pollution; xGMI writes to remote HBM go via
-                        # L2 + fabric. LLVM inserts `s_waitcnt vmcnt(0) +
-                        # buffer_wbinvl1` at kernel exit so the store
-                        # leaves this GPU's pipeline before kernel return.
+                        # cache_modifier=2 (SLC): bypass L1; remote HBM writes
+                        # go via L2 + xGMI and drain at kernel exit.
                         if const_expr(_fp2p_fp8_cast):
-                            # fp8 P2P scatter (1B/elem): frag is vec<E_vec*bf16>;
-                            # pack via bf16 -> fp32 -> cvt_pk_fp8_f32 into an
-                            # i32 word and store. col_i32 doubles as the byte
-                            # offset (1B/elem, no scaling).
+                            # fp8 scatter (1B/elem): pack frag bf16 -> fp32 ->
+                            # cvt_pk_fp8_f32 into i32 words. col_i32 is the byte
+                            # offset directly (1B/elem).
                             total_off_bytes = slot_off_bytes_i32 + col_i32
                             _v_f32_ty = ir.VectorType.get(
                                 [_e_vec], T.f32
@@ -4324,12 +4296,9 @@ def compile_mixed_moe_gemm2(
                                     "supported: 2, 4, 8"
                                 )
                         else:
-                            # bf16/f16 P2P scatter (2B/elem).
-                            # offset_is_bytes=True is REQUIRED: buffer_store
-                            # defaults to treating offset as elem count and
-                            # auto-scales by frag elem_bytes; missing this
-                            # would double the byte offset (slot=2*lid /
-                            # col=2*col_g0) and clobber neighbouring slots.
+                            # bf16/f16 scatter (2B/elem). offset_is_bytes=True
+                            # is REQUIRED: otherwise buffer_store auto-scales the
+                            # offset by elem_bytes and clobbers neighbour slots.
                             col_off_bytes = col_i32 * _c_out_elem_bytes_i32
                             total_off_bytes = slot_off_bytes_i32 + col_off_bytes
                             buffer_ops.buffer_store(
@@ -4340,15 +4309,10 @@ def compile_mixed_moe_gemm2(
                                 cache_modifier=2,
                             )
 
-                    # D-flag C-1 after-row callback: after all
-                    # n_reps_shuffle SLC stores of the row have been issued,
-                    # the n_lane==0 thread runs:
-                    #   1. s_waitcnt vmcnt(0): drain this rank's SLC stores
-                    #      from the pipeline.
-                    #   2. atomicrmw add (device-scope) local_counter[row_i32].
-                    #   3. if old == num_n_tiles - 1 (last N-tile done):
-                    #      a. atomic_add_global_at_system(remote_flag[dest_lid], 1)
-                    #      b. atomic_xchg_global_at_device(local_counter[row_i32], 0)
+                    # token-level-sync after-row callback (n_lane==0 thread): bump a
+                    # device-scope per-row counter; the thread that completes
+                    # the last N-tile drains its SLC stores (vmcnt0), publishes
+                    # the cross-card per-token flag, and resets the counter.
                     if const_expr(_tfs_enabled):
                         from .dispatch_combine_intranode_kernel import (
                             atomic_add_global_at as _tfs_atomic_add,
@@ -4414,10 +4378,7 @@ def compile_mixed_moe_gemm2(
 
                         def after_row_stores(*, row_local, row, row_ctx, n_lane):
                             _, _, _, dest_pe, dest_lid, row_i32 = row_ctx
-                            # Only the n_lane==0 thread of each row issues
-                            # the atomic. Other lanes on the same row also
-                            # arrive here, but the atomic is gated inside
-                            # the if below.
+                            # Gate the atomic to the n_lane==0 thread of each row.
                             _zero_idx = arith.constant(0, index=True)
                             _is_lead = arith.cmpi(
                                 CmpIPredicate.eq, n_lane, _zero_idx)
@@ -4426,33 +4387,13 @@ def compile_mixed_moe_gemm2(
                                 else _is_lead
                             )
                             with _tfs_ir.InsertionPoint(_if_lead.then_block):
-                                # device-scope cross-CTA atomic add on the
-                                # per-row counter; only the thread that pushes
-                                # the counter to ``num_n_tiles - 1`` (= last
-                                # n-tile completion for this row) goes on to
-                                # publish the cross-card flag bump.  Without
-                                # this gate every (row, n_tile) thread would
-                                # fan out a system-scope atomic, multiplying
-                                # the flag traffic by ``num_n_tiles`` (=56 for
-                                # n=7168/tile_n=128) — wasted bandwidth that
-                                # competes with the legitimate combine spin.
-                                #
-                                # NOTE: ``s_waitcnt vmcnt(0)`` was previously
-                                # issued here (= every n-tile / lead thread)
-                                # to ensure local SLC stores leave pipeline
-                                # before publishing the flag.  But the FLAG
-                                # publish only happens on the last n-tile
-                                # (counter==num_n_tiles-1).  Pre-counter
-                                # increments from earlier n-tiles do NOT
-                                # depend on store retirement (the value we
-                                # write is consumed by the SAME thread on
-                                # the SAME row's later atomic, all device-
-                                # scope monotonic).  Moving the wait inside
-                                # the ``_if_last`` arm cuts the drain cost
-                                # by ``num_n_tiles``× while preserving the
-                                # producer→consumer happens-before across
-                                # cards (system-scope atomic still serialises
-                                # against in-flight VMEM via the wait below).
+                                # Device-scope per-row counter add; only the
+                                # thread reaching num_n_tiles-1 (last n-tile)
+                                # publishes the flag, so the system-scope atomic
+                                # fires once per row rather than per n-tile. The
+                                # vmcnt(0) drain lives in the _if_last arm below
+                                # (earlier increments are same-thread monotonic
+                                # and need no drain).
                                 _counter_addr = _tfs_byte_addr_local_counter(row_i32)
                                 _old = _tfs_atomic_add(
                                     _counter_addr, _c_tfs_one_i32)
@@ -4469,20 +4410,10 @@ def compile_mixed_moe_gemm2(
                                     else _last_eq
                                 )
                                 with _tfs_ir.InsertionPoint(_if_last.then_block):
-                                    # vmcnt(0): wait for THIS rank's SLC P2P
-                                    # stores (issued by the gemm2 epilogue
-                                    # ``store_pair`` for every n-tile of this
-                                    # row) to retire from the VMEM pipeline
-                                    # BEFORE we publish the cross-card flag.
-                                    # The receiver (combine spin-wait) treats
-                                    # ``flag[lid] >= k`` as evidence that all
-                                    # k contributing rows on dst_lid have
-                                    # already landed in shmem_comb_inp_tok;
-                                    # without this drain, the system-scope
-                                    # atomic could overtake an unfinished SLC
-                                    # store for the same row, causing the
-                                    # combine to read a partially-written
-                                    # token.
+                                    # Drain this rank's SLC stores before
+                                    # publishing the flag, else the system-scope
+                                    # atomic could overtake an unfinished store
+                                    # and the combine reads a partial token.
                                     rocdl.s_waitcnt(0)
                                     # cross-card system-scope atomic add to
                                     # bump remote flag[dest_lid] on dest_pe.
@@ -4544,11 +4475,9 @@ def compile_mixed_moe_gemm2(
                     _moe_gemm2_then_body()
                     scf.YieldOp([])
 
-                # m-tile barrier: the fused path waits only on LDS
-                # (lgkmcnt=0), not VMEM. The epilogue's remote P2P SLC writes
-                # have no dependency on the next m-tile prologue's ping-pong
-                # LDS, so we let them complete asynchronously across tiles
-                # to overlap A/B prefetch + MFMA with xGMI scatter latency.
+                # m-tile barrier: the fused path waits only on LDS (lgkmcnt=0),
+                # letting the epilogue's P2P SLC writes drain asynchronously to
+                # overlap xGMI scatter with the next tile's MFMA.
                 if const_expr(_fp2p_enabled):
                     _barrier(vmcnt=63, lgkmcnt=0)
                 else:
