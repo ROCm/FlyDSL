@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
 """Multi-agent orchestrator that ports a HIP kernel to FlyDSL.
 
 Built directly on the Anthropic Messages API (`import anthropic`). Each role is
