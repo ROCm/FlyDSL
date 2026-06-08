@@ -853,7 +853,9 @@ class Index(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=lamb
         from .utils.arith import index_cast
 
         # Unwrap DSL Numeric to ir.Value first
-        if isinstance(x, Numeric) and not isinstance(x, Index):
+        if isinstance(x, Index):
+            x = x.value
+        elif isinstance(x, Numeric):
             x = x.ir_value(loc=loc, ip=ip)
         # Cast integer ir.Value to index (skip if already index type)
         if isinstance(x, ir.Value) and not isinstance(x.type, ir.IndexType):
