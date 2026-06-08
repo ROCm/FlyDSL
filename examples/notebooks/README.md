@@ -15,7 +15,7 @@ last.
 | 02 | [`02_struct.ipynb`](02_struct.ipynb) | `@fx.struct` aggregate value types and their memory layout |
 | 03 | [`03_universal_ops.ipynb`](03_universal_ops.ipynb) | target-agnostic `Universal*` atoms + a vector-add capstone |
 | 04 | [`04_layout.ipynb`](04_layout.ipynb) | layout algebra: shape/stride, `crd2idx`, `logical_divide`, memref vs coord tensors |
-| 05 | [`05_tiled_copy_and_swizzle.ipynb`](05_tiled_copy_and_swizzle.ipynb) | thread-value layouts, partitioning, the LDS swizzle, drawing layouts with `print_typst` |
+| 05 | [`05_tiled_copy_and_swizzle.ipynb`](05_tiled_copy_and_swizzle.ipynb) | thread-value layouts, partitioning, the LDS swizzle (AMD CDNA), drawing layouts with `print_typst` |
 
 ## API cheat-sheet
 
@@ -63,7 +63,7 @@ fx.make_composed_layout(fx.static(fx.SwizzleType.get(mask, base, shift)), base) 
 fx.utils.print_typst(layout_or_tiled_copy, file="x.typ")        # Typst diagram (render with the `typst` pkg)
 ```
 
-Three gotchas worth front-loading:
+A few gotchas worth front-loading:
 
 - `fx.printf` takes only bare `{}` (no `{:.2f}`); a literal `%` is consumed by the
   device printf (write `"mod"`); a true `Boolean` prints as `-1`.
@@ -71,6 +71,9 @@ Three gotchas worth front-loading:
   `with wurlitzer.pipes() as (out, _): launch(...); torch.cuda.synchronize()`, then `print(out.read())`.
 - `Constexpr` `fp8`/`bf16` math is not rounded until the value is materialized as its
   MLIR type; only `f16`/`f32`/`f64` fold at trace time.
+- The layout cells in `04`/`05` (and `01` §6) print at *trace* time, so those notebooks
+  set `FLYDSL_RUNTIME_ENABLE_CACHE=0`: a warm JIT disk cache would skip the re-trace, and
+  the trace-time prints (and `print_typst`'s diagram files) would vanish on a re-run.
 
 ## Running
 
