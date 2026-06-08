@@ -269,12 +269,12 @@ def make_tensor_descriptor_2d(
                        default 0 = standard wider-merge timeout).
         valid_inner:  Optional effective tensor extent along dim0 (innermost).
                       Accepts a Python int or an MLIR i32 Value / SGPR.
-                      When set, overrides the default ``tdim0 = bpw_inner``
-                      so that accesses beyond ``valid_inner`` elements are
-                      treated as out-of-bounds by TDM hardware (load → zero-
-                      fill, store → drop). Must be the *remaining* count
-                      relative to this descriptor's folded base address
-                      (offset is already baked into the address).
+                      When set, the TDM hardware treats accesses beyond this
+                      extent as out-of-bounds (load → zero-fill, store → drop).
+                      This is a **global** count (matching tensor_shape
+                      convention). When ``num_warps > 1``, the per-warp
+                      remaining count is computed automatically as
+                      ``max(0, valid_inner - warp_off_inner)``.
                       None (default) → ``tdim0 = bpw_inner`` (no OOB).
         valid_outer:  Same as ``valid_inner`` but for dim1 (outermost).
                       None (default) → ``tdim1 = bpw_outer`` (no OOB).
@@ -362,12 +362,40 @@ def make_tensor_descriptor_2d(
     tile_d1 = bpw_outer  # block dim1 per warp
 
     # Override tensor dims with caller-supplied valid bounds for OOB.
-    # When valid_inner/valid_outer is set, the TDM hardware will treat
-    # accesses beyond that extent as OOB (load → zero-fill, store → drop).
+    # valid_inner / valid_outer are *global* counts (like tensor_shape).
+    # The per-warp remaining is max(0, valid - warp_off) so that each
+    # warp's descriptor correctly reflects how many elements are valid
+    # from its own base address.
     if valid_inner is not None:
-        tdim0 = valid_inner
+        if isinstance(valid_inner, int):
+            if num_warps > 1:
+                _vi_remaining = arith.index(valid_inner) - warp_off_inner
+                _vi_clamped = _unwrap(std_arith.maxsi(_raw(_vi_remaining), _raw(arith.index(0))))
+                tdim0 = _unwrap(std_arith.IndexCastOp(ir.IntegerType.get_signless(32), _vi_clamped).result)
+            else:
+                tdim0 = valid_inner
+        else:
+            if num_warps > 1:
+                _woff_inner_i32 = _unwrap(std_arith.IndexCastOp(ir.IntegerType.get_signless(32), _raw(warp_off_inner)).result)
+                _vi_sub = _unwrap(std_arith.subi(_raw(valid_inner), _woff_inner_i32))
+                tdim0 = _unwrap(std_arith.maxsi(_vi_sub, _raw(_i32_const(0))))
+            else:
+                tdim0 = valid_inner
     if valid_outer is not None:
-        tdim1 = valid_outer
+        if isinstance(valid_outer, int):
+            if num_warps > 1:
+                _vo_remaining = arith.index(valid_outer) - warp_off_outer
+                _vo_clamped = _unwrap(std_arith.maxsi(_raw(_vo_remaining), _raw(arith.index(0))))
+                tdim1 = _unwrap(std_arith.IndexCastOp(ir.IntegerType.get_signless(32), _vo_clamped).result)
+            else:
+                tdim1 = valid_outer
+        else:
+            if num_warps > 1:
+                _woff_outer_i32 = _unwrap(std_arith.IndexCastOp(ir.IntegerType.get_signless(32), _raw(warp_off_outer)).result)
+                _vo_sub = _unwrap(std_arith.subi(_raw(valid_outer), _woff_outer_i32))
+                tdim1 = _unwrap(std_arith.maxsi(_vo_sub, _raw(_i32_const(0))))
+            else:
+                tdim1 = valid_outer
 
     _td0_is_runtime = not isinstance(tdim0, int)
     _td1_is_runtime = not isinstance(tdim1, int)
