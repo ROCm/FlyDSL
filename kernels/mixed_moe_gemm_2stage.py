@@ -634,9 +634,9 @@ def compile_mixed_moe_gemm1(
 
             # ---- persist_m loop (same pattern as stage2) ----
             _PERSIST_M = persist_m
-            _c0_p = arith.constant(0, index=True)
-            _c1_p = arith.constant(1, index=True)
-            _c_pm = arith.constant(_PERSIST_M, index=True)
+            _c0_p = fx.Int32(0)
+            _c1_p = fx.Int32(1)
+            _c_pm = fx.Int32(_PERSIST_M)
             _for_persist = scf.ForOp(_c0_p, _c_pm, _c1_p)
             _for_ip = ir.InsertionPoint(_for_persist.body)
             _for_ip.__enter__()
@@ -2858,16 +2858,16 @@ def compile_mixed_moe_gemm2(
             bias_rsrc = buffer_ops.create_buffer_resource(arg_bias, max_size=False) if enable_bias else None
 
             # ---- persist loop ----
-            _c0_p = arith.constant(0, index=True)
-            _c1_p = arith.constant(1, index=True)
+            _c0_p = fx.Int32(0)
+            _c1_p = fx.Int32(1)
 
             if const_expr(_persistent):
                 # Expert-phase scheduling: contiguous M-tile dispatch.
                 # grid_y = cu_num, each CTA handles a contiguous chunk of M-tiles:
                 #   [bx_persist * tiles_per_block, ..., (bx_persist+1) * tiles_per_block - 1]
                 # Adjacent blocks process adjacent M-tiles -> same expert -> B weight L2 reuse.
-                _c_cu = arith.constant(_cu_num, index=True)
-                _c_tm_p = arith.constant(tile_m, index=True)
+                _c_cu = fx.Int32(_cu_num)
+                _c_tm_p = fx.Int32(tile_m)
                 _num_valid_idx = arith.index_cast(ir.IndexType.get(), num_valid_i32)
                 _total_m_tiles = (_num_valid_idx + _c_tm_p - _c1_p) / _c_tm_p
                 _tiles_per_block = (_total_m_tiles + _c_cu - _c1_p) / _c_cu
@@ -2876,9 +2876,9 @@ def compile_mixed_moe_gemm2(
                 _for_persist = scf.ForOp(_c0_p, _tiles_per_block, _c1_p, [_init_active])
             else:
                 # Legacy mode: fixed persist_m consecutive tiles.
-                _c_pm = arith.constant(persist_m, index=True)
+                _c_pm = fx.Int32(persist_m)
                 _init_prev_expert = arith.constant(0, type=T.i32)
-                _init_prev_b_base = arith.constant(0, index=True)
+                _init_prev_b_base = fx.Int32(0)
                 _for_persist = scf.ForOp(
                     _c0_p,
                     _c_pm,
