@@ -4145,6 +4145,7 @@ def compile_mixed_moe_gemm2(
                     _c_log2_max_tok = arith.constant(int(_fp2p_log2_max_tok))
                     _c_mask_max_tok = arith.constant(int(_fp2p_mask_max_tok))
                     _c_token_nbytes = arith.constant(int(_fp2p_token_nbytes))
+                    _c_npes_i32 = arith.constant(int(_fp2p_npes))
                     # Plan B: slot_id = dest_lid * k + s. k must equal the
                     # compile-time `topk` (the same sorted_token_ids drives
                     # both GEMM2 and Stage 3).
@@ -4159,18 +4160,25 @@ def compile_mixed_moe_gemm2(
                         )
                         t = fused2 & mask24_i32
                         s = fused2 >> 24
-                        t_ok = arith.cmpi(CmpIPredicate.ult, t, tokens_i32)
                         s_ok = arith.cmpi(CmpIPredicate.ult, s, topk_i32_v)
-                        row_valid = arith.andi(
-                            row_valid0, arith.andi(t_ok, s_ok)
-                        )
 
                         # dest_enc was resolved by the prologue into lds_addr_tis.
                         dest_enc = memref.load(lds_addr_tis, [row_local])
                         dest_pe = dest_enc >> _c_log2_max_tok
                         dest_lid = dest_enc & _c_mask_max_tok
+                        # Drop ghost sort rows (sentinel dest_pe == npes),
+                        # mirroring the baseline ``dest_pe < npes`` gate.
+                        pe_ok = arith.cmpi(CmpIPredicate.ult, dest_pe, _c_npes_i32)
+                        row_valid = arith.andi(
+                            row_valid0, arith.andi(s_ok, pe_ok)
+                        )
+                        # Clamp the sentinel dest_pe to 0 for the LDS base lookup
+                        # to avoid an OOB read (base is discarded for ghost rows).
+                        dest_pe_safe = arith.select(
+                            pe_ok, dest_pe, arith.constant(0)
+                        )
                         dest_pe_idx = arith.index_cast(
-                            ir.IndexType.get(), dest_pe
+                            ir.IndexType.get(), dest_pe_safe
                         )
                         pe_base_i64 = lds_p2p_tok_bases_ptr.load(
                             [dest_pe_idx]

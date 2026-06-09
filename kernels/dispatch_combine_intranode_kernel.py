@@ -427,6 +427,20 @@ def make_dispatch_kernel(
                 atomic_add_global_at(addr_out_total_recv, peer_recv_count)
                 buffer_store(arith.constant(0), _r_dest_ctr, src_pe)
 
+        # Sentinel-fill the ghost tail [total_recv, max_recv) of tok_id_to_src
+        # (decoded dest_pe == npes) so the fused gemm2 epilogue drops those rows.
+        rocdl.s_waitcnt(0)
+        _r_tis_fill = create_buffer_resource_from_addr(addr_shmem_tok_id_to_src)
+        _c_tis_sentinel = arith.constant(npes * max_tok_per_rank)
+        for fill_i in range(lane, max_recv, 64):
+            if global_warp_id == 0:
+                _total_recv_now = buffer_load(
+                    _r_total_rv, 0, vec_width=1, dtype=T.i32())
+                _is_ghost = arith.cmpi(
+                    arith.CmpIPredicate.uge, fill_i, _total_recv_now)
+                if _is_ghost:
+                    buffer_store(_c_tis_sentinel, _r_tis_fill, fill_i)
+
         if global_warp_id == 0:
             if lane == 0:
                 buffer_store(arith.constant(0), _r_tok_off, 0)

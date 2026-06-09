@@ -83,6 +83,22 @@ from kernels.dispatch_combine_intranode_op import (
 )
 from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm2
 
+# Reduction kernel for GEMM2 reduce (non-atomic) mode: sums the expanded
+# [max_recv*topk, model_dim] plain-store scratch over the topk dim back into
+# the token-level [max_recv, model_dim] layout that combine expects. This is
+# the same kernel the production aiter path uses (compile_moe_gemm2_ex /
+# flydsl_moe_stage2 reduce mode), so the harness can benchmark reduce-mode
+# GEMM2 -> combine without forcing --gemm2-accumulate.
+try:
+    from kernels.moe_gemm_2stage import compile_moe_reduction  # type: ignore
+
+    HAS_MOE_REDUCTION = True
+    _MOE_REDUCTION_ERR = ""
+except Exception as _e:  # noqa: BLE001
+    compile_moe_reduction = None  # type: ignore[assignment]
+    HAS_MOE_REDUCTION = False
+    _MOE_REDUCTION_ERR = repr(_e)
+
 # Preshuffle helpers — required so the GEMM2 kernel reads W2 in the layout
 # it was compiled to expect.  Without this both fp4 and fp8 weights are
 # interpreted as garbage and the dot-product collapses to ~0, masking any
@@ -374,6 +390,12 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op,
     # A2 capacity: worst case where every recv token is hit by topk local experts.
     a2_rows    = max_recv * gemm2_topk
 
+    # A2 micro-scale capacity: size to moe_sorting's padded token upper bound
+    # (not a2_rows) so the GEMM2 scale-buffer read (num_valid_ids[0]*K/32) can
+    # never go OOB and decode garbage e8m0 into a GEMM2 overflow.
+    _num_experts_global = world_size * epr
+    _scale_capacity_rows = max_recv * gemm2_topk + _num_experts_global * tile_m
+
     torch.manual_seed(123 + rank)
 
     # e8m0 micro-scale = 127 means 2^0 = 1.0; headroom>0 lowers to 127-h
@@ -404,7 +426,7 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op,
         #   2. mfma_scale_* would interpret the f32 bits as 4 packed e8m0
         #      bytes anyway, silently producing garbage results.
         a2_scale_1d = torch.full(
-            (a2_rows * (inter_dim // 32),), _e8m0_val,
+            (_scale_capacity_rows * (inter_dim // 32),), _e8m0_val,
             dtype=torch.uint8, device=dev,
         )
     elif a_dtype == "fp4":
@@ -414,8 +436,10 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op,
         )
         a2_storage = a2_view.view(-1)
         # 1x32 group scale (e8m0: 127 = 2^0 = 1.0; using 0 zeroes GEMM2 output).
+        # Sized to the padded sort total (see _scale_capacity_rows) so the
+        # kernel's sx_rsrc descriptor never reads past the tensor end.
         a2_scale_1d = torch.full(
-            (a2_rows * (inter_dim // 32),), _e8m0_val, dtype=torch.uint8, device=dev,
+            (_scale_capacity_rows * (inter_dim // 32),), _e8m0_val, dtype=torch.uint8, device=dev,
         )
     elif a_dtype in ("bf16", "fp16"):
         torch_a = torch.bfloat16 if a_dtype == "bf16" else torch.float16
@@ -567,34 +591,49 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op,
 
     bias_dummy = torch.empty((0,), dtype=torch.float32, device=dev)
 
-    # GEMM2 output buffer:
-    #   accumulate=True  -> [max_recv, model_dim]       (same-t slots
-    #                                                    atomic_fadd onto one row)
-    #   accumulate=False -> [max_recv * topk, model_dim] (each (t, s) its own slot)
+    # GEMM2 / combine-input buffers. `gemm2_out` is ALWAYS the token-level
+    # [max_recv, model_dim] buffer that combine reads, regardless of GEMM2
+    # epilogue mode:
+    #   accumulate=True  -> GEMM2 atomic_fadd writes directly into gemm2_out
+    #                       (same-t slots accumulate onto one row).
+    #   accumulate=False -> GEMM2 plain-stores into `gemm2_intermediate`
+    #                       [max_recv*topk, model_dim] (each (t, s) its own
+    #                       row); a reduction kernel then sums over topk into
+    #                       gemm2_out. This mirrors the production aiter path
+    #                       (flydsl_moe_stage2 / compile_moe_gemm2_ex reduce
+    #                       mode), where the topk fold-down is an internal
+    #                       step of the GEMM2 op and combine never sees the
+    #                       expanded layout.
     out_dtype = cfg.data_type if cfg.data_type in (torch.bfloat16, torch.float16) else torch.bfloat16
-    out_rows = max_recv if args.gemm2_accumulate else a2_rows
     _zc_out = (force_zero_copy_out if force_zero_copy_out is not None
                else (cfg.zero_copy and args.bench_op == "baseline"))
     if _zc_out:
         # zero-copy mode: the combine side skips Stage 1 and reads
-        # shmem_comb_inp_tok directly. The caller must write GEMM2 output
-        # into the view returned by op.get_registered_combine_input_buffer
-        # so the downstream combine sees the right data.
-        # The fused path has its own P2P scatter (via _fx_p2p_comb_inp) and
-        # bypasses this hook, so only baseline + zero_copy needs to swap.
-        # NOTE: under accumulate=True with out_rows == max_recv we can view
-        # the registered buffer directly; otherwise the shape mismatch
-        # (registered buffer is [max_recv, model_dim]) breaks the view.
-        if out_rows != max_recv:
-            raise ValueError(
-                "zero-copy + baseline requires --gemm2-accumulate (the default); "
-                "otherwise the GEMM2 output [max_recv*topk, model_dim] does not "
-                "match shmem_comb_inp_tok's [max_recv, model_dim]."
-            )
+        # shmem_comb_inp_tok directly. The caller must write the token-level
+        # GEMM2/reduction result into the view returned by
+        # op.get_registered_combine_input_buffer so the downstream combine
+        # sees the right data. The fused path has its own P2P scatter (via
+        # _fx_p2p_comb_inp) and bypasses this hook, so only baseline +
+        # zero_copy needs to swap. The registered buffer is
+        # [max_recv, model_dim]; in reduce mode the reduction kernel (not the
+        # GEMM2 kernel) writes here, so the shapes always match.
         gemm2_out = disp_op.get_registered_combine_input_buffer(out_dtype)
         gemm2_out.zero_()
     else:
-        gemm2_out = torch.zeros(out_rows, model_dim, dtype=out_dtype, device=dev)
+        gemm2_out = torch.zeros(max_recv, model_dim, dtype=out_dtype, device=dev)
+
+    # reduce mode needs an extra [max_recv*topk, model_dim] scratch for the
+    # non-atomic GEMM2 store; the reduction kernel folds it into gemm2_out.
+    gemm2_intermediate = None
+    if not args.gemm2_accumulate:
+        if not HAS_MOE_REDUCTION:
+            raise RuntimeError(
+                "reduce mode (--no-gemm2-accumulate) needs the FlyDSL moe "
+                f"reduction kernel, but its import failed: {_MOE_REDUCTION_ERR}"
+            )
+        gemm2_intermediate = torch.zeros(
+            a2_rows, model_dim, dtype=out_dtype, device=dev
+        )
 
     return dict(
         a2_storage=a2_storage,
@@ -607,6 +646,7 @@ def _build_gemm2_static_inputs(rank, world_size, dev, args, cfg, *, disp_op,
         num_valid_ids=num_valid_ids,
         bias=bias_dummy,
         gemm2_out=gemm2_out,
+        gemm2_intermediate=gemm2_intermediate,
         max_recv=max_recv,
         model_dim=model_dim,
         inter_dim=inter_dim,
@@ -766,9 +806,52 @@ def _dump_gemm2_inputs(args, gemm2_in, out_dtype, *, prefix="[gemm2-dump]"):
     print()
 
 
+def _build_reduction_callable(gemm2_in, out_dtype):
+    """Compile + warm up the topk reduction used by GEMM2 reduce mode.
+
+    Folds the expanded plain-store scratch X[max_recv, topk, model_dim] into
+    the token-level combine input Y[max_recv, model_dim] via Y[t] = sum_s X[t,s].
+    The scratch is zeroed before every GEMM2 launch (see launch_gemm2) so the
+    unmasked sum is exact: invalid (t, s) slots stay 0 and contribute nothing,
+    matching the atomic path where only routed slots atomic_fadd onto row t.
+
+    Returns a no-arg launcher (capturable after the warm-up JIT compile).
+    """
+    mr = int(gemm2_in["max_recv"])
+    topk = int(gemm2_in["gemm2_topk"])
+    md = int(gemm2_in["model_dim"])
+    reduce_dtype = (
+        "bf16" if out_dtype == torch.bfloat16
+        else ("f16" if out_dtype == torch.float16 else "f32")
+    )
+    reduce_exe = compile_moe_reduction(
+        topk=topk, model_dim=md, dtype_str=reduce_dtype, use_mask=False,
+    )
+    _X = gemm2_in["gemm2_intermediate"].view(mr, topk, md)
+    _Y = gemm2_in["gemm2_out"].view(mr, md)
+    _empty_mask = torch.empty(
+        (0, topk), dtype=torch.uint8, device=gemm2_in["gemm2_out"].device,
+    )
+
+    def launch_reduction():
+        reduce_exe(_X, _Y, _empty_mask, mr, torch.cuda.current_stream())
+
+    # Warm up (triggers JIT compile) outside any cudagraph capture.
+    launch_reduction()
+    return launch_reduction
+
+
 def _build_gemm2_callable(args, gemm2_in, out_dtype):
-    """Compile mixed_moe_gemm2 and return a launcher with the
-    launch(o, x, w, sx, sw, st, eids, sw_sorted) shape."""
+    """Compile mixed_moe_gemm2 and return a no-arg launcher.
+
+    atomic mode (accumulate=True): the GEMM2 kernel atomic_fadds directly into
+        gemm2_out [max_recv, model_dim].
+    reduce mode (accumulate=False): the GEMM2 kernel plain-stores into
+        gemm2_intermediate [max_recv*topk, model_dim], then a reduction kernel
+        sums over topk into gemm2_out [max_recv, model_dim]. Either way combine
+        reads the same token-level gemm2_out, so the GEMM2 epilogue mode stays
+        an internal detail (mirrors the production aiter flydsl_moe_stage2 path).
+    """
     out_s = "bf16" if out_dtype == torch.bfloat16 else (
         "f16" if out_dtype == torch.float16 else "f32"
     )
@@ -779,6 +862,12 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
     # we no longer force it so the kernel can be validated empirically.
     # If gemm2_out ends up all-zero, file a follow-up kernel fix PR.
     accumulate = args.gemm2_accumulate
+
+    # In reduce mode the GEMM2 kernel writes the expanded per-(t, s) scratch;
+    # the reduction kernel produces the token-level combine input. In atomic
+    # mode the GEMM2 kernel writes gemm2_out directly.
+    _kernel_out = (gemm2_in["gemm2_out"] if accumulate
+                   else gemm2_in["gemm2_intermediate"])
 
     # GEMM2 topk matches the dispatch routing topk (args.k): each recv
     # token can be hit by at most topk local experts; the A2 buffer is
@@ -825,7 +914,7 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
     compiled = flyc.compile(
         exe,
         *_args(
-            gemm2_in["gemm2_out"],
+            _kernel_out,
             gemm2_in["a2_storage"],
             gemm2_in["w2_storage"],
             gemm2_in["a2_scale_1d"],
@@ -836,10 +925,21 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
         ),
     )
 
+    # reduce mode: compile + warm up the topk reduction that folds the
+    # expanded scratch back into the token-level gemm2_out.
+    launch_reduction = None
+    if not accumulate:
+        launch_reduction = _build_reduction_callable(gemm2_in, out_dtype)
+
     def launch_gemm2():
+        if not accumulate:
+            # The plain-store scratch must start zeroed each launch so invalid
+            # (t, s) slots contribute 0 to the unmasked topk sum (the GEMM2
+            # kernel only writes routed slots).
+            gemm2_in["gemm2_intermediate"].zero_()
         compiled(
             *_args(
-                gemm2_in["gemm2_out"],
+                _kernel_out,
                 gemm2_in["a2_storage"],
                 gemm2_in["w2_storage"],
                 gemm2_in["a2_scale_1d"],
@@ -849,6 +949,8 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
                 gemm2_in["sorted_weights"],
             )
         )
+        if launch_reduction is not None:
+            launch_reduction()
 
     return launch_gemm2
 
@@ -1338,18 +1440,12 @@ def _snapshot_combine_out(disp_op):
     cfg = disp_op.cfg
     mt  = cfg.max_num_inp_token_per_rank
     k   = cfg.num_experts_per_token
-    if disp_op._use_fp8_cast:
-        fp8_bytes = mt * cfg.hidden_dim
-        out_tok = (
-            disp_op.shmem_comb_out_tok.view(torch.int8)[:fp8_bytes]
-            .view(torch.float8_e4m3fn).view(mt, cfg.hidden_dim)
-            .to(torch.bfloat16)
-        )
-    else:
-        out_tok = (
-            disp_op.shmem_comb_out_tok.view(torch.int8)[:mt * cfg.token_bytes]
-            .view(cfg.data_type).view(mt, cfg.token_view_dim)
-        )
+    # Combine output is always the external dtype (fp8_direct_cast uses fp8
+    # only on the wire; Stage 3 casts back to bf16 inline).
+    out_tok = (
+        disp_op.shmem_comb_out_tok.view(torch.int8)[:mt * cfg.token_bytes]
+        .view(cfg.data_type).view(mt, cfg.token_view_dim)
+    )
     out_wts = disp_op.shmem_comb_out_wts.view(mt, k)
     return out_tok.detach().clone(), out_wts.detach().clone()
 
@@ -1893,20 +1989,12 @@ def run_acceptance(rank, world_size, args):
     if rank == 0:
         print(f"[setup] gemm2_scale_headroom={args.gemm2_scale_headroom} "
               f"(auto; mode={args.mode}, combine_quant_type={args.combine_quant_type})")
-    # mori recv headroom: enlarge the recv buffer capacity (M) to
-    # ceil(bs*factor) for the mori baseline (unbalanced routing at large bs
-    # can make some ranks receive > ws*bs). Only active under
-    # --baseline-comm mori with factor > 1; the default factor=1.0 keeps
-    # cap_tok == cur_tok so the flydsl path is unchanged.
-    import math
+    # recv buffer capacity per rank (M). With per-(token,destPE) dedup in both
+    # flydsl and mori dispatch, each source rank contributes a given token at
+    # most once to any dest PE, so the recv upper bound is exactly ws*M with
+    # M == bs (cur_tok) -- no headroom factor needed (verified across the full
+    # aiter-config matrix: 0 overflow at M==bs for both comm backends).
     cap_tok = cur_tok
-    if (getattr(args, "baseline_comm", "flydsl") == "mori"
-            and getattr(args, "mori_recv_factor", 1.0) > 1.0):
-        cap_tok = math.ceil(cur_tok * args.mori_recv_factor)
-        if rank == 0:
-            print(f"[mori-recv-factor] bs(input)={cur_tok} -> capacity "
-                  f"M={cap_tok} (factor={args.mori_recv_factor}); recv upper "
-                  f"bound ws*M={world_size * cap_tok}")
 
     # ── cfg / dispatch op ───────────────────────────────────────────────────
     _dtype = DTYPE_MAP.get(args.dispatch_dtype, torch.bfloat16)
@@ -2388,10 +2476,6 @@ def _parse_args():
                         "combine to mori (gemm2 stays flydsl) for a 'mori "
                         "dispatch + flydsl gemm2 + mori combine' baseline; "
                         "needs profile/bench mode + bf16/fp16/fp8 dtype.")
-    p.add_argument("--mori-recv-factor", type=float, default=1.0,
-                   help="Only with --baseline-comm mori: enlarge recv buffer "
-                        "capacity to ceil(bs*factor); still dispatches bs "
-                        "tokens. mori default recv bound = ws*bs.")
     # ── fused (gemm2 + combine) ─────────────────────────────────────────────
     # token-level-sync: per-token flag sync switch. When on, dispatch / combine
     # kernels enable reset + spin-wait and the fused gemm2 epilogue adds
