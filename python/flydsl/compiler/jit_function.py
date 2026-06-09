@@ -1484,7 +1484,12 @@ class JitFunction:
             if kind == "tp":
                 parts.append((name, arg))
                 continue
-            # Arg already a JitArgument (cheap duck-check == the Protocol isinstance).
+            # Arg already a JitArgument: duck-check for the only method the key
+            # needs, instead of the full runtime_checkable-Protocol isinstance
+            # (which also probes __get_ir_types__/__get_c_pointers__). Every type
+            # that implements __cache_signature__ in the codebase is a complete
+            # JitArgument, so this selects the same branch as the full path while
+            # skipping the ~2.2us structural check.
             if hasattr(arg, "__cache_signature__"):
                 parts.append((name, arg.__cache_signature__()))
                 continue
