@@ -207,111 +207,6 @@ P_COMP_LO = pv.PinnedRange(120, 123, name="p_comp_lo")  # 4 vgprs
 P_COMP_HI = pv.PinnedRange(124, 127, name="p_comp_hi")
 OACCU_SUBS = OACCU_RANGE.split(4)           # 32 sub-tiles of 4 vgprs each
 
-# Debug isolation switch.  When True, the kernel dumps the raw p_comp
-# (QK output) of tile 0 into final_output and skips softmax / PV / OMgr.
-# Layout in final_output[1, qo_start, head_row, kv_col] (bf16):
-#   head_row = warp * 16 + k * 4 + lane // 16  (k in 0..3)
-#   kv_col   = (0..15) for the LO half, (16..31) for the HI half
-#              from p_comp_lo[k] and p_comp_hi[k] respectively.
-# Cols [32..512) are untouched (whatever previous launch left there).
-# Set to False for normal runs.
-DEBUG_FORCE_PCOMP_PATTERN: bool = False  # When True (with DEBUG_DUMP_QK),
-                                         # overwrite the SSA p_comp_lo/hi
-                                         # values with a known pattern
-                                         # (= lane * 1000 + dw_idx) before
-                                         # dumping.  Used to verify the
-                                         # dump's (head_row, kv_col) lane
-                                         # mapping matches mfma D layout.
-DEBUG_DUMP_QK: bool = False          # When True, bypass softmax/PV/OMgr and
-                                     # dump the 8 fp32 p_comp (QK output) per
-                                     # lane into final_output cols [0..31].
-                                     # See _debug_dump_p_comp for the layout.
-DEBUG_QK_PHASE_A_ONLY: bool = False  # When True (with DEBUG_DUMP_QK=True),
-                                     # also skip Phase B of _do_qk_gemm so
-                                     # the dump shows Q[:,0:256] * K only.
-DEBUG_QK_PHASE_B_ONLY: bool = False  # When True (with DEBUG_DUMP_QK=True),
-                                     # skip Phase A so p_comp starts at 0
-                                     # and only Phase B contributes.  Used
-                                     # to isolate Phase B's correctness.
-DEBUG_FAKE_Q_LDS_AS_ONES: bool = False  # When True, replace _load_q_lds_to_gpr
-                                        # with inline-asm v_mov_b32 of bf16
-                                        # pair {1.0, 1.0} (= 0x3F803F80) into
-                                        # the pinned q_lds slot.  Bypasses
-                                        # Phase 2 + ds_read path entirely.
-DEBUG_FAKE_K_LDS_AS_ONES: bool = False  # Same idea for _load_k_lds_to_gpr.
-DEBUG_FORCE_P2_SCALE_ONE: bool = False  # When True, replace scale_f in
-                                        # _p2_cvt_store_nope_chunk with const
-                                        # 1.0 (= fp32 0x3F800000).  If the
-                                        # Q LDS NaN disappears with this, the
-                                        # bug is in scale loading / lifetime.
-DEBUG_DUMP_KV_NOPE_DW: bool = False # When True, dump the 4 i32 fp8 dwords
-                                    # loaded by _kv_prefetch_tile (per lane,
-                                    # 2 tiles).  Layout per-lane (1 of 2 tiles):
-                                    #   head_row = warp*16 + lane//4
-                                    #   byte_off  = tile_idx*64 + (lane%4)*16 + i*4
-                                    # for i in 0..3.  Skips QK/softmax/PV/OMgr.
-DEBUG_DUMP_P2_NOPE_DW: bool = False # When True, dump the 4 i32 fp8 dwords
-                                    # loaded by Phase 2 vmem (per lane) into
-                                    # final_output BEFORE the cvts run.
-                                    # Layout per-lane (1 of 3 chunks):
-                                    #   head_row = warp*16 + lane//4
-                                    #   byte_off  = chunk*64 + (lane%4)*16 + i*4
-                                    # for i in 0..3 (1 dw per i, = 4 fp8 bytes).
-                                    # Skips QK/softmax/PV/OMgr (returns early).
-DEBUG_DUMP_PMFMA: bool = False      # When True dump p_mfma post-softmax.
-DEBUG_DUMP_LOCALMAX: bool = False   # When True dump local_max pre+post _warp_reduce_max.
-DEBUG_DUMP_KV_TOP: bool = False     # When True, dump pinned KV_TOP (v112..v115)
-                                    # right after _load_k_lds_to_gpr(KV_TOP,
-                                    # base, k_row=0, k_col=0) (= the very
-                                    # first K-side mfma A-operand) and skip
-                                    # downstream.  Layout: lane T writes 4
-                                    # dwords at final_output[0, warp*16 + T//4,
-                                    # (T%4)*16 + i*4] for i in 0..3 (1 dw / i).
-                                    # Compare against expected K[kv_rows of
-                                    # warp's row_tile, cols 0..32] in mfma
-                                    # A-tile layout.
-DEBUG_DUMP_K_LDS: bool = False      # When True, dump K LDS pong 0 contents
-                                    # after _kv_async_load_k completes.
-                                    # Layout per warp: 16 col_tiles × 2 row_tiles
-                                    # × 1024B = 32KB.  Each warp dumps a slice
-                                    # of K LDS to its head_row band in
-                                    # final_output.
-DEBUG_DUMP_Q_LDS: bool = False      # When True, after Phase 2 + s_barrier,
-                                    # dump each warp's 8 KiB slice of p_lds_q
-                                    # to final_output and skip QK/softmax/PV/
-                                    # OMgr.  Layout: lane T of warp w writes
-                                    # 16 bytes (1 dwordx4 = 8 bf16) at
-                                    #   row = w*16 + (T//8)
-                                    #   col_byte_start = (T%8)*16
-                                    # giving each warp its own 16 rows of
-                                    # 128 cols (16 lanes per row in the b128
-                                    # cycle). Two passes cover the full
-                                    # 256-col Q[:, 256:512] region per warp.
-DEBUG_BYPASS_P1_STAGING: bool = False # When True, _load_q_phase1 loads fp8
-                                      # directly into VGPRs (no staging LDS)
-                                      # and cvts to pinned q_vgpr in one pass.
-                                      # Simpler / lower-perf form for debugging
-                                      # the staged pipeline (see task #24).
-DEBUG_DUMP_Q_VGPR: bool = False      # When True, dump raw q_vgpr (v72..v103)
-                                     # of each warp right after _load_q_phase1
-                                     # / _load_q_phase2.  Skips QK/softmax/PV/
-                                     # OMgr.  Layout per lane: 32 dwords (=64
-                                     # bf16) written contiguously into
-                                     # final_output at
-                                     #   row = warp*16 + (lane // 4)
-                                     #   col = (lane % 4) * 64 + bf16_idx
-                                     # so each warp's 16 rows × 256 cols cover
-                                     # one warp's full q_vgpr contents in a
-                                     # readable linear layout.
-
-_DEBUG_RUN_EPILOGUE: bool = not (
-    DEBUG_DUMP_QK or DEBUG_DUMP_Q_VGPR or DEBUG_DUMP_Q_LDS
-    or DEBUG_DUMP_P2_NOPE_DW or DEBUG_DUMP_KV_NOPE_DW
-    or DEBUG_DUMP_K_LDS or DEBUG_DUMP_KV_TOP or DEBUG_DUMP_PMFMA
-    or DEBUG_DUMP_LOCALMAX
-)
-
-
 # ---------------------------------------------------------------------------
 # Small utility shims (mirror v32 transplant for consistency)
 # ---------------------------------------------------------------------------
@@ -408,6 +303,8 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     # --- metadata ---
     work_indptr: fx.Tensor,      # [num_workers + 1]                           (i32)
     work_info_set: fx.Tensor,    # [num_work_items * 8]                        (i32)
+    # --- optional per-head attention sink ---
+    attn_sink: fx.Tensor,        # [num_qheads] fp32 (caller fills -inf when no sink)
     # --- outputs ---
     final_output: fx.Tensor,     # [1, total_q, num_qheads, V_HEAD_DIM]        (bf16)
     split_output: fx.Tensor,     # [1, partial_slots, num_qheads, V_HEAD_DIM]  (f32)
@@ -461,6 +358,7 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     kv_last_page_lens_rsrc = buffer_ops.create_buffer_resource(kv_last_page_lens)
     work_indptr_rsrc = buffer_ops.create_buffer_resource(work_indptr)
     work_info_set_rsrc = buffer_ops.create_buffer_resource(work_info_set)
+    attn_sink_rsrc = buffer_ops.create_buffer_resource(attn_sink)
     final_output_rsrc = buffer_ops.create_buffer_resource(final_output)
     split_output_rsrc = buffer_ops.create_buffer_resource(split_output)
     split_lse_rsrc = buffer_ops.create_buffer_resource(split_lse)
@@ -468,7 +366,8 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     # Silence "unused" diagnostics until stages 3-12 land.
     _ = (
         query_nope_rsrc, query_rope_rsrc, kv_nope_rsrc, kv_rope_rsrc,
-        kv_page_indices_rsrc, kv_last_page_lens_rsrc, work_info_set_rsrc,
+        kv_page_indices_rsrc, kv_last_page_lens_rsrc,
+        work_info_set_rsrc, attn_sink_rsrc,
         final_output_rsrc, split_output_rsrc, split_lse_rsrc,
         lds_base_idx, softmax_scale, log2_num_qheads,
     )
@@ -509,6 +408,25 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     # Wave-uniform i32 forms of warp_idx / lane_idx for byte-offset math.
     warp_idx_i32 = _uniform_i32(warp_idx)
     lane_idx_i32 = _i32(lane_idx)
+
+    # ---- Per-lane attention sink ------------------------------------
+    # Load once at kernel entry: depends only on (warp_idx, lane_idx), not on
+    # work_idx, so it lives in a VGPR for the kernel's lifetime.  When the
+    # caller has no sink, it passes a tensor pre-filled with -inf so the
+    # epilogue's `exp(sink - row_max) -> 0` makes the fold a numerical no-op.
+    # head_idx = (warp_idx * 16 + (lane_idx & 15)) & (NUM_QO_HEADS - 1)
+    # (NUM_QO_HEADS is a power of 2, so the AND is the right mask for
+    # mtp > 1 wrap-around; for mtp == 1 it's a no-op since the value already
+    # fits.)
+    assert NUM_QO_HEADS & (NUM_QO_HEADS - 1) == 0
+    _sink_head_idx_i32 = _raw(
+        (ArithValue(warp_idx_i32) * fx.Int32(16) + (ArithValue(lane_idx_i32) & fx.Int32(15)))
+        & fx.Int32(NUM_QO_HEADS - 1)
+    )
+    attn_sink_lane = _raw(buffer_ops.buffer_load(
+        attn_sink_rsrc, _idx(_sink_head_idx_i32),
+        vec_width=1, dtype=T.f32,
+    ))
 
     def _q_warp_vmem_base(qo_start_i32):
         # i32 byte offsets fit for the shapes V40 targets.
@@ -605,71 +523,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         )
         # Zero-extend i8 to i32 so the cvt input is a clean v-class dword.
         return _raw(ArithValue(scale_byte).extui(T.i32))
-
-    def _p1_vmem_to_vgpr_chunk_direct(chunk_idx, q_vmem_base_i32):
-        """Direct vmem -> pinned q_vgpr (no staging LDS).
-
-        Each lane loads 16 fp8 bytes (= 4 i32 dwords) directly from VMEM into
-        SSA vgprs, then 8 cvts produce 8 bf16 dwords landing in pinned
-        ``q_vgpr[8*chunk_idx .. +7]``.
-
-        Per HK reader, lane (row_in_warp=lane&15, cb=(lane>>4)&3) needs fp8
-        bytes from row=row_in_warp, chunk_byte = 16*cb + 0..15.  We load
-        exactly that.
-        """
-        col_in_record = chunk_idx * Q_P1_CHUNK_COLS
-        scale_byte_in_rec = Q_SCALE_BASE_OFF + 2 * chunk_idx
-
-        row_in_warp_i32 = _raw(ArithValue(lane_idx_i32) % fx.Int32(16))
-        cb_i32 = _raw((ArithValue(lane_idx_i32) // fx.Int32(16)) % fx.Int32(4))
-
-        # VMEM byte offset: head_byte_base + chunk_byte
-        # head_byte_base = row_in_warp * 576  (warp base already in q_vmem_base)
-        # chunk_byte = 16 * cb  (within the chunk)
-        # Plus soffset = col_in_record (folded into the buffer_load instruction).
-        # buffer_load(dtype=T.i32) multiplies offset by 4, so pass element offsets.
-        v_off_dw = _raw(
-            ArithValue(q_vmem_base_i32) // fx.Int32(4)
-            + ArithValue(row_in_warp_i32) * fx.Int32(QK_PACKED_NOPE_BYTES // 4)
-            + ArithValue(cb_i32) * fx.Int32(4)   # 16 bytes / 4 bytes-per-i32 = 4 dwords
-        )
-        fp8_dw = buffer_ops.buffer_load(
-            query_nope_rsrc, v_off_dw,
-            vec_width=4, dtype=T.i32,
-            soffset_bytes=col_in_record,
-        )
-
-        # Scale byte: same per-lane address as before; consumer uses lane&15.
-        scale_row_i32 = _raw(ArithValue(lane_idx_i32) % fx.Int32(16))
-        v_off_scale = _raw(
-            ArithValue(q_vmem_base_i32)
-            + ArithValue(scale_row_i32) * fx.Int32(QK_PACKED_NOPE_BYTES)
-        )
-        scale_byte = buffer_ops.buffer_load(
-            query_nope_rsrc, v_off_scale,
-            vec_width=1, dtype=T.i8,
-            soffset_bytes=scale_byte_in_rec,
-        )
-        scale_dw = _raw(ArithValue(scale_byte).extui(T.i32))
-
-        # Drain vmem before cvts read the SSA values.
-        rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
-        rocdl.sched_barrier(0)
-
-        scale_f = _e8m0_to_f32(scale_dw)
-        fp8 = Vec(fp8_dw)
-
-        # 8 cvts, same ordering as the staged path: src_dw=0..3, opsel=False/True.
-        base = chunk_idx * 8
-        for src_dw_idx in range_constexpr(4):
-            dst_lo = Q_VGPR_TILES_BY_VGPR[base + 2 * src_dw_idx + 0]
-            dst_hi = Q_VGPR_TILES_BY_VGPR[base + 2 * src_dw_idx + 1]
-            pv.pinned_cvt_scalef32_pk_bf16_fp8(
-                dst_lo, _raw(fp8[src_dw_idx]), scale_f, opsel=False,
-            )
-            pv.pinned_cvt_scalef32_pk_bf16_fp8(
-                dst_hi, _raw(fp8[src_dw_idx]), scale_f, opsel=True,
-            )
 
     def _p1_staging_to_vgpr_chunk(chunk_idx, buf_idx, scale_dw):
         """Drain vmcnt+lgkmcnt, ds_read_b128 the staging slot, run 8 pinned
@@ -789,78 +642,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         scale_dw = _raw(ArithValue(scale_byte).extui(T.i32))
         return nope_dw, scale_dw
 
-    def _p2_dump_nope_dw(chunk_idx, nope_dw, qo_start_i32):
-        """Dump the 4 i32 fp8 dwords loaded by Phase 2 vmem for this lane
-        and chunk into final_output.  Per-lane:
-          head_row  = warp*16 + lane//4
-          byte_off  = chunk*64 + (lane%4)*16 + i*4   (i in 0..3, 1 dw / i)
-        Used to verify per-lane addressing in Phase 2 -- if the dumped
-        bytes don't match q_packed[head, col_in_record + col_group*16 + i*4],
-        Phase 2's v_off is wrong for this lane.
-        """
-        nope_vec = Vec(nope_dw)
-        head_row_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(4)
-        )
-        lane_byte_base_i32 = _raw(
-            (ArithValue(lane_idx_i32) % fx.Int32(4)) * fx.Int32(16)
-        )
-        row_base_byte = _raw(
-            ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32)
-            * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        for i in range_constexpr(4):
-            byte_off = _raw(
-                ArithValue(row_base_byte)
-                + fx.Int32(chunk_idx * 64)
-                + ArithValue(lane_byte_base_i32)
-                + fx.Int32(i * 4)
-            )
-            buffer_ops.buffer_store(
-                _raw(nope_vec[i]), final_output_rsrc, byte_off,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-
-    def _kv_dump_nope_dw(tile_idx, nope_dw, qo_start_i32):
-        """Dump 4 i32 fp8 dwords loaded by _kv_prefetch_tile per (warp, lane).
-        Mirror of _p2_dump_nope_dw but for KV NoPE.  Same layout in
-        final_output:
-          head_row = warp*16 + lane//4
-          byte_off = tile_idx*64 + (lane%4)*16 + i*4   (i in 0..3)
-        Compare against kv_packed[row_kv_ld, col_in_record + col_group_swz*16 + i*4]
-        where col_in_record = tile_idx*256.
-        """
-        nope_vec = Vec(nope_dw)
-        head_row_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(4)
-        )
-        lane_byte_base_i32 = _raw(
-            (ArithValue(lane_idx_i32) % fx.Int32(4)) * fx.Int32(16)
-        )
-        row_base_byte = _raw(
-            ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32)
-            * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        for i in range_constexpr(4):
-            byte_off = _raw(
-                ArithValue(row_base_byte)
-                + fx.Int32(tile_idx * 64)
-                + ArithValue(lane_byte_base_i32)
-                + fx.Int32(i * 4)
-            )
-            buffer_ops.buffer_store(
-                _raw(nope_vec[i]), final_output_rsrc, byte_off,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-
     def _p2_cvt_store_nope_chunk(chunk_idx, nope_dw, scale_dw):
         """Cvt the 4 fp8 dwords to 8 bf16 dwords and ds_write_b128 the lo/hi
         halves to LDS sub-blocks (kColTileBase, kColTileBase+1).
@@ -881,12 +662,7 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         col_group_i32 = _raw(ArithValue(lane_idx_i32) % fx.Int32(4))
 
         # E8M0 -> fp32 scale (one per chunk).
-        if const_expr(DEBUG_FORCE_P2_SCALE_ONE):
-            # Hard-code scale = 1.0 (= fp32 bits 0x3F800000) to test whether
-            # the NaN cluster in q_lds comes from scale loading vs other.
-            scale_f = _raw(fx.Float32(1.0))
-        else:
-            scale_f = _e8m0_to_f32(scale_dw)
+        scale_f = _e8m0_to_f32(scale_dw)
 
         # 8 cvts: lo_dw[0..3] from nope_dw[0,1] (lo/hi pairs), hi_dw[0..3]
         # from nope_dw[2,3].  All cvts share the same scale_f.
@@ -1008,19 +784,11 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
 
         nope_dw_0, scale_dw_0 = _p2_vmem_to_vgpr_nope_chunk(0, q_nope_base)
         nope_dw_1, scale_dw_1 = _p2_vmem_to_vgpr_nope_chunk(1, q_nope_base)
-        if const_expr(DEBUG_DUMP_P2_NOPE_DW):
-            # Drain vmem before reading nope_dw for the dump.
-            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
-            _p2_dump_nope_dw(0, nope_dw_0, qo_start_i32)
-            _p2_dump_nope_dw(1, nope_dw_1, qo_start_i32)
         _p2_cvt_store_nope_chunk(0, nope_dw_0, scale_dw_0)
         _p2_cvt_store_nope_chunk(1, nope_dw_1, scale_dw_1)
 
         nope_dw_2, scale_dw_2 = _p2_vmem_to_vgpr_nope_chunk(2, q_nope_base)
         _p2_load_rope_chunk(q_rope_base)
-        if const_expr(DEBUG_DUMP_P2_NOPE_DW):
-            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
-            _p2_dump_nope_dw(2, nope_dw_2, qo_start_i32)
         _p2_cvt_store_nope_chunk(2, nope_dw_2, scale_dw_2)
 
     # ===================================================================
@@ -1353,15 +1121,10 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
 
         # --- Drain + cvt+store tile 0 ---
         _kv_wait_loads(0, vmcnt=2)
-        if const_expr(DEBUG_DUMP_KV_NOPE_DW):
-            rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
-            _kv_dump_nope_dw(0, n0, qo_start_i32)
         _kv_cvt_store_tile_at(0, p_lds_kv_base_i32, n0, s0)
 
         # --- Drain + cvt+store tile 1 (NoPE waves only) ---
         _kv_wait_loads(1, vmcnt=0)
-        if const_expr(DEBUG_DUMP_KV_NOPE_DW):
-            _kv_dump_nope_dw(1, n1, qo_start_i32)
         if ArithValue(is_rope_owner) == 0:
             _kv_cvt_store_tile_at(1, p_lds_kv_base_i32, n1, s1)
 
@@ -1432,14 +1195,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         ``k_row_offset`` in {0, 16} -> row_tile ∈ {0, 1}.
         ``k_col_offset`` multiple of 32 in [0, 512) -> col_tile ∈ {0..15}.
         """
-        if const_expr(DEBUG_FAKE_K_LDS_AS_ONES):
-            for i in range_constexpr(4):
-                v_idx = dst_range.lo + i
-                llvm.inline_asm(
-                    None, [], f"v_mov_b32 v[{v_idx}], 0x3F803F80",
-                    "", has_side_effects=True,
-                )
-            return
         row_tile = k_row_offset // 16
         col_tile = k_col_offset // 32
         # sub_block_byte_offset(row_tile, col_tile) = (col_tile*2 + row_tile) * 1024
@@ -1450,76 +1205,11 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         )
         _pinned_ds_read_b128(dst_range, addr_i32, fixed_off)
 
-    def _debug_dump_kv_top(qo_start_i32, p_lds_kv_base_i32):
-        """Dump TWO views of K LDS for the same per-lane address:
-          cols [0..16)  bf16  = pinned KV_TOP after _pinned_ds_read_b128
-          cols [16..32) bf16  = SSA _lds_load_b128 from the SAME addr
-        If the two match -> read mechanism is consistent.
-        If they differ -> _pinned_ds_read_b128 returns different bytes.
-        """
-        head_row_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(4)
-        )
-        lane_byte_base_i32 = _raw(
-            (ArithValue(lane_idx_i32) % fx.Int32(4)) * fx.Int32(16)
-        )
-        row_base_byte = _raw(
-            ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32)
-            * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        # 1) Dump pinned KV_TOP (already written by _pinned_ds_read_b128 caller)
-        for i in range_constexpr(4):
-            slot = pv.PinnedRange(KV_RANGE.lo + i, KV_RANGE.lo + i)
-            dw_i32 = pv.read_pinned(slot, as_i64=False)
-            byte_off = _raw(
-                ArithValue(row_base_byte)
-                + ArithValue(lane_byte_base_i32)
-                + fx.Int32(i * 4)
-            )
-            buffer_ops.buffer_store(
-                dw_i32, final_output_rsrc, byte_off,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-        # 2) Do an independent _lds_load_b128 from the SAME per-lane addr the
-        # QK reader used.  Then dump that SSA value to cols [16..32) of the
-        # same head row.
-        addr_i32 = _raw(
-            ArithValue(p_lds_kv_base_i32) + ArithValue(qk_in_sb_byte_i32)
-        )
-        ssa_dws = _lds_load_b128(addr_i32, byte_offset=0)
-        ssa_vec = Vec(ssa_dws)
-        for i in range_constexpr(4):
-            byte_off = _raw(
-                ArithValue(row_base_byte)
-                + ArithValue(lane_byte_base_i32)
-                + fx.Int32(16 * 2)            # offset by 16 bf16 = 32 bytes
-                + fx.Int32(i * 4)
-            )
-            buffer_ops.buffer_store(
-                _raw(ssa_vec[i]), final_output_rsrc, byte_off,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-
     def _load_q_lds_to_gpr(dst_range, col_tile):
         """ds_read_b128 of one 16x32 bf16 Q sub-block from p_lds_q into
         pinned ``dst_range`` (4 vgprs).  ``col_tile`` in [0, 8) (selects
         col-tile inside Q[:, 256:512]'s 8-col-tile grid).
         """
-        if const_expr(DEBUG_FAKE_Q_LDS_AS_ONES):
-            # Bypass Phase 2 + ds_read entirely.  v_mov 0x3F803F80 (= bf16
-            # pair {1.0, 1.0}) directly into each pinned dst vgpr.
-            for i in range_constexpr(4):
-                v_idx = dst_range.lo + i
-                llvm.inline_asm(
-                    None, [],
-                    f"v_mov_b32 v[{v_idx}], 0x3F803F80",
-                    "", has_side_effects=True,
-                )
-            return
         # Reader Site-C XOR same as load_k_to_gpr.
         # Wave-major: per-warp base = p_lds_q + warp * Q_WARP_FINAL_BYTES
         lds_base_i32 = _i32(lds_base_idx)
@@ -1566,45 +1256,35 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
                     return_ssa=False,
                 )
 
-        if const_expr(DEBUG_DUMP_KV_TOP):
-            # Load chunk 0 K into KV_TOP, dump, skip the rest.
-            _load_k_lds_to_gpr(KV_TOP, p_lds_kv_curr_i32, 0, 0)
-            rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-            _debug_dump_kv_top(qo_start_i32, p_lds_kv_curr_i32)
-            return
-
         # ---- Phase A: 4 pairs over q_vgpr (Q[:, 0:256]) ----
         # K is loaded *directly into pinned KV_TOP/KV_BOT/KV_ALT_TOP/KV_ALT_BOT*
         # so the mfma reads pinned A in place (a_src=None).  Letting LLVM
         # allocate the K dwords as SSA would put them into v[64..71] and
         # clobber q_lds.
-        if const_expr(not DEBUG_QK_PHASE_B_ONLY):
-            for pair in range_constexpr(4):
-                k_col_0 = pair * 2 * BLOCK_K               # 0/64/128/192
-                k_col_1 = k_col_0 + BLOCK_K                # 32/96/160/224
+        for pair in range_constexpr(4):
+            k_col_0 = pair * 2 * BLOCK_K               # 0/64/128/192
+            k_col_1 = k_col_0 + BLOCK_K                # 32/96/160/224
 
-                _load_k_lds_to_gpr(KV_TOP,     p_lds_kv_curr_i32, 0,  k_col_0)
-                _load_k_lds_to_gpr(KV_BOT,     p_lds_kv_curr_i32, 16, k_col_0)
-                _load_k_lds_to_gpr(KV_ALT_TOP, p_lds_kv_curr_i32, 0,  k_col_1)
-                _load_k_lds_to_gpr(KV_ALT_BOT, p_lds_kv_curr_i32, 16, k_col_1)
+            _load_k_lds_to_gpr(KV_TOP,     p_lds_kv_curr_i32, 0,  k_col_0)
+            _load_k_lds_to_gpr(KV_BOT,     p_lds_kv_curr_i32, 16, k_col_0)
+            _load_k_lds_to_gpr(KV_ALT_TOP, p_lds_kv_curr_i32, 0,  k_col_1)
+            _load_k_lds_to_gpr(KV_ALT_BOT, p_lds_kv_curr_i32, 16, k_col_1)
 
-                rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-                rocdl.sched_barrier(0)
+            rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
+            rocdl.sched_barrier(0)
 
-                q_0 = Q_VGPR_TILES[pair * 2 + 0]
-                q_1 = Q_VGPR_TILES[pair * 2 + 1]
+            q_0 = Q_VGPR_TILES[pair * 2 + 0]
+            q_1 = Q_VGPR_TILES[pair * 2 + 1]
 
-                is_first = (pair == 0)
-                _qk_mfma(KV_TOP,     q_0, P_COMP_LO, None, None, is_first)
-                _qk_mfma(KV_BOT,     q_0, P_COMP_HI, None, None, is_first)
-                _qk_mfma(KV_ALT_TOP, q_1, P_COMP_LO, None, None, False)
-                _qk_mfma(KV_ALT_BOT, q_1, P_COMP_HI, None, None, False)
+            is_first = (pair == 0)
+            _qk_mfma(KV_TOP,     q_0, P_COMP_LO, None, None, is_first)
+            _qk_mfma(KV_BOT,     q_0, P_COMP_HI, None, None, is_first)
+            _qk_mfma(KV_ALT_TOP, q_1, P_COMP_LO, None, None, False)
+            _qk_mfma(KV_ALT_BOT, q_1, P_COMP_HI, None, None, False)
 
         # ---- Phase B: 4 pairs over q_lds (Q[:, 256:512]) ----
         # Q is loaded directly into the pinned q_lds tiles (q_k0_range /
         # q_k1_range); K direct-into KV_* as in Phase A.
-        if const_expr(DEBUG_QK_PHASE_A_ONLY):
-            return
         for pair in range_constexpr(4):
             k_col_0 = (NUM_QK_VGPR_ITER + pair * 2 + 0) * BLOCK_K
             k_col_1 = (NUM_QK_VGPR_ITER + pair * 2 + 1) * BLOCK_K
@@ -1621,11 +1301,8 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             rocdl.sched_barrier(0)
 
             # Phase B is always accumulate (Phase A already inited P_COMP).
-            # Exception: when DEBUG_QK_PHASE_B_ONLY is on, Phase A is skipped
-            # so Phase B's first pair must init.
-            phase_b_is_first = const_expr(DEBUG_QK_PHASE_B_ONLY) and (pair == 0)
-            _qk_mfma(KV_TOP,     q_k0_range, P_COMP_LO, None, None, phase_b_is_first)
-            _qk_mfma(KV_BOT,     q_k0_range, P_COMP_HI, None, None, phase_b_is_first)
+            _qk_mfma(KV_TOP,     q_k0_range, P_COMP_LO, None, None, False)
+            _qk_mfma(KV_BOT,     q_k0_range, P_COMP_HI, None, None, False)
             _qk_mfma(KV_ALT_TOP, q_k1_range, P_COMP_LO, None, None, False)
             _qk_mfma(KV_ALT_BOT, q_k1_range, P_COMP_HI, None, None, False)
 
@@ -1754,13 +1431,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             p_exp[i] = rocdl.exp2(T.f32, arg)
             local_sum = _raw(arith.addf(local_sum, p_exp[i], fastmath=fm_no_inf))
         local_sum = _warp_reduce_add(local_sum)
-
-        if const_expr(DEBUG_DUMP_LOCALMAX):
-            # slot 0..3 = p_exp[0], p_exp[1], p_exp[2], p_exp[3]
-            _debug_dump_localmax(p_exp[0], 0, qo_start_i32)
-            _debug_dump_localmax(p_exp[1], 1, qo_start_i32)
-            _debug_dump_localmax(p_exp[2], 2, qo_start_i32)
-            _debug_dump_localmax(p_exp[3], 3, qo_start_i32)
 
         if const_expr(is_first_iter):
             row_sum_e_new = local_sum
@@ -2301,8 +1971,25 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
                 soffset_bytes=batch_soff,
             )
 
-    def _do_omgr_v3_epilogue(qo_start_i32, row_sum_e_val):
-        """Full OMgr V3 epilogue: normalize oaccu by 1/row_sum_e, then 8
+    def _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val):
+        """row_sum_e_adj = row_sum_e + exp2((attn_sink_lane - row_max) * log2e)
+
+        When the caller passed a tensor pre-filled with -inf (the no-sink
+        case), exp2(-inf * log2e) = 0 makes this a no-op numerically.
+        Per-lane: attn_sink_lane already broadcasts across the 4 M-rows
+        owned by each lane group (HK head_idx masking).
+        """
+        c_log2e = _raw(fx.Float32(1.4426950408889634))
+        diff = _raw(arith.subf(attn_sink_lane, _raw(row_max_val),
+                               fastmath=fm_no_inf))
+        arg = _raw(arith.mulf(diff, c_log2e, fastmath=fm_no_inf))
+        sink_term = rocdl.exp2(T.f32, arg)
+        return _raw(arith.addf(_raw(row_sum_e_val), sink_term,
+                               fastmath=fm_no_inf))
+
+    def _do_omgr_v3_epilogue(qo_start_i32, row_max_val, row_sum_e_val):
+        """Full OMgr V3 epilogue: normalize oaccu by 1/row_sum_e_adj
+        (where row_sum_e_adj folds in the attention sink term), then 8
         output_to_vram_pair calls covering oaccu's 128 vgprs.
 
         Bounce LDS overlays p_lds_kv_next (p_lds_kv_1 in our wiring -- safe
@@ -2321,8 +2008,11 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         llvm.inline_asm(None, [], "s_nop 15\n\t s_nop 15", "",
                         has_side_effects=True)
 
+        # OutputFinal: always fold sink in (no-op when caller passed -inf).
+        row_sum_e_adj = _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val)
+
         # 1/row_sum_e via rocdl.rcp
-        reci = rocdl.rcp(T.f32, _raw(row_sum_e_val))
+        reci = rocdl.rcp(T.f32, _raw(row_sum_e_adj))
         pv.pinned_v_mul_f32(OACCU_RANGE, reci)
 
         # Fence again: normalize WRITES oaccu, OMgr cvts must read the
@@ -2338,17 +2028,24 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             _omgr16_output_pair(it, p_lds_o_base_i32, qo_start_i32)
             rocdl.sched_barrier(0)
 
-    def _do_omgr_v3_split_epilogue(partial_qo_loc_i32, row_max_val,
-                                   row_sum_e_val):
+    def _do_omgr_v3_split_epilogue(partial_qo_loc_i32, is_last_split_i1,
+                                   row_max_val, row_sum_e_val):
         """Split (multi-split) epilogue.  Mirrors HK lines 938-988:
 
-          - oaccu /= row_sum_e (same as the bf16 path; reduce kernel does NOT
-            re-divide, so the partial fp32 stored to split_output is the
+          - oaccu /= row_sum_e_adj (same as the bf16 path; reduce kernel does
+            NOT re-divide, so the partial fp32 stored to split_output is the
             already-normalized weighted-V).
           - 8 calls to _omgr32_output_pair into split_output.
           - Lanes 0..15 of each warp write per-Q-head LSE to
               split_lse[partial_qo_loc * NUM_QO_HEADS + warp*16 + lane]
-            with lse = row_max + ln(row_sum_e) * (1/log2e).
+            with lse = row_max + ln(row_sum_e_adj) * (1/log2e).
+
+        Attention sink: only the LAST split of each batch element folds
+        the sink term into row_sum_e (and thus into LSE).  Detected via
+        kv_offset == 0 (set by the metadata for the work item that ends
+        at the batch tail), avoiding the kv_indptr lookup.  The reducer's
+        sum_k exp(lse_k - global_lse) * out_k then routes exp(sink) into
+        the global denominator exactly once and contributes 0 to V.
         """
         from flydsl.expr import math as _math
 
@@ -2356,7 +2053,13 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         llvm.inline_asm(None, [], "s_nop 15\n\t s_nop 15", "",
                         has_side_effects=True)
 
-        reci = rocdl.rcp(T.f32, _raw(row_sum_e_val))
+        # row_sum_e_adj = is_last_split ? row_sum_e + sink_term : row_sum_e
+        row_sum_e_folded = _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val)
+        row_sum_e_adj = _raw(ArithValue(is_last_split_i1).select(
+            row_sum_e_folded, _raw(row_sum_e_val),
+        ))
+
+        reci = rocdl.rcp(T.f32, _raw(row_sum_e_adj))
         pv.pinned_v_mul_f32(OACCU_RANGE, reci)
         rocdl.sched_barrier(0)
 
@@ -2368,12 +2071,12 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             rocdl.sched_barrier(0)
 
         # ---- LSE write (lanes 0..15 only) -----------------------------
-        # lse = row_max + ln(row_sum_e)
+        # lse = row_max + ln(row_sum_e_adj)
         # HK uses __builtin_amdgcn_logf (= v_log_f32 = log2 in HW) * inv_log2e
-        # which simplifies to ln(row_sum_e). We use math.log2 + same multiply
-        # to match HK bit-for-bit.
+        # which simplifies to ln(row_sum_e_adj). We use math.log2 + same
+        # multiply to match HK bit-for-bit.
         inv_log2e_f32 = _raw(fx.Float32(1.0 / 1.4426950408889634))
-        log2_rse = _math.log2(_raw(row_sum_e_val), fastmath=fm_no_inf)
+        log2_rse = _math.log2(_raw(row_sum_e_adj), fastmath=fm_no_inf)
         scaled = _raw(arith.mulf(log2_rse, inv_log2e_f32, fastmath=fm_no_inf))
         lse_val = _raw(arith.addf(_raw(row_max_val), scaled,
                                   fastmath=fm_no_inf))
@@ -2422,11 +2125,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         """
         q_vmem_base = _q_warp_vmem_base(qo_start_i32)
 
-        if const_expr(DEBUG_BYPASS_P1_STAGING):
-            for chunk in range_constexpr(4):
-                _p1_vmem_to_vgpr_chunk_direct(chunk, q_vmem_base)
-            return
-
         # Stage chunks 0, 1 (vmem ops in flight = 4).
         s_0 = _p1_vmem_to_staging_chunk(0, 0, q_vmem_base)
         s_1 = _p1_vmem_to_staging_chunk(1, 1, q_vmem_base)
@@ -2457,361 +2155,12 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         ArithValue(_i32(lds_base_idx)) + fx.Int32(P_LDS_KV_0)
     )
 
-    def _debug_dump_localmax_i32(val_i32, slot_idx, qo_start_i32):
-        """Dump a raw i32 per lane (no bitcast)."""
-        head_row_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(4)
-        )
-        lane_byte_base_i32 = _raw(
-            (ArithValue(lane_idx_i32) % fx.Int32(4)) * fx.Int32(4)
-            + fx.Int32(slot_idx * 256)
-        )
-        row_base_byte = _raw(
-            ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32) * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        byte_off = _raw(
-            ArithValue(row_base_byte) + ArithValue(lane_byte_base_i32)
-        )
-        buffer_ops.buffer_store(
-            val_i32, final_output_rsrc, byte_off,
-            offset_is_bytes=True, soffset_bytes=batch_byte_off,
-        )
-
-    def _debug_dump_localmax(val_f32, slot_idx, qo_start_i32):
-        """Dump a single fp32 per lane to final_output.
-
-        Layout: each lane writes 4 bytes (one fp32) at
-          head_row = warp*16 + lane // 4
-          col_byte = slot_idx * 256 + (lane % 4) * 4
-        slot 0 -> cols 0..63 of head_row (pre-reduce per-lane)
-        slot 1 -> cols 64..127 of head_row (post-reduce per-lane)
-        Each warp's 16 head_rows hold all 64 lanes' values (4 lanes per head_row).
-        """
-        head_row_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(4)
-        )
-        lane_byte_base_i32 = _raw(
-            (ArithValue(lane_idx_i32) % fx.Int32(4)) * fx.Int32(4)
-            + fx.Int32(slot_idx * 256)
-        )
-        row_base_byte = _raw(
-            ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32) * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        byte_off = _raw(
-            ArithValue(row_base_byte) + ArithValue(lane_byte_base_i32)
-        )
-        # Store fp32 directly (4 bytes). Reader interprets as fp32 by re-viewing.
-        val_i32 = _raw(ArithValue(val_f32).bitcast(T.i32))
-        buffer_ops.buffer_store(
-            val_i32, final_output_rsrc, byte_off,
-            offset_is_bytes=True, soffset_bytes=batch_byte_off,
-        )
-
-    def _debug_dump_pmfma(qo_start_i32):
-        """Dump pinned p_mfma (v[P_MFMA_RANGE.lo..+3]) in KV_TOP-style layout."""
-        rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0, lgkmcnt=0))
-        rocdl.sched_barrier(0)
-        head_row_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(4)
-        )
-        lane_byte_base_i32 = _raw(
-            (ArithValue(lane_idx_i32) % fx.Int32(4)) * fx.Int32(16)
-        )
-        row_base_byte_pm = _raw(
-            ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off_pm = _raw(
-            ArithValue(qo_start_i32) * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        for i in range_constexpr(4):
-            slot = pv.PinnedRange(P_MFMA_RANGE.lo + i, P_MFMA_RANGE.lo + i)
-            dw_i32 = pv.read_pinned(slot, as_i64=False)
-            byte_off_pm = _raw(
-                ArithValue(row_base_byte_pm)
-                + ArithValue(lane_byte_base_i32)
-                + fx.Int32(i * 4)
-            )
-            buffer_ops.buffer_store(
-                dw_i32, final_output_rsrc, byte_off_pm,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off_pm,
-            )
-
-    def _debug_dump_p_comp(p_comp_lo_val, p_comp_hi_val, qo_start_i32):
-        """Dump 8 fp32 p_comp values per lane (= mfma D-tile of tile 0) as
-        bf16 into final_output[0, qo_start, head_row, kv_col].
-
-        Per cdna3 v_mfma_f32_16x16x32_f16 D layout, lane l holds D[k*4+l/16,
-        l%16] for k in 0..3.  warp_idx_i32 picks the head-row 16-row band.
-        """
-        if const_expr(DEBUG_FORCE_PCOMP_PATTERN):
-            # Override with known pattern: value at lane l, k = l*1000 + k (LO)
-            # and l*1000 + k + 100 (HI).  Cast to fp32 SSA Vec.
-            lane_f = arith.sitofp(T.f32, lane_idx_i32)
-            c1000 = _raw(fx.Float32(1000.0))
-            base = _raw(arith.mulf(lane_f, c1000, fastmath=fm_no_inf))
-            lo_elems = [_raw(arith.addf(base, _raw(fx.Float32(float(k))),
-                                        fastmath=fm_no_inf)) for k in range(4)]
-            hi_elems = [_raw(arith.addf(base, _raw(fx.Float32(float(k + 100))),
-                                        fastmath=fm_no_inf)) for k in range(4)]
-            p_comp_lo_val = _raw(Vec.from_elements(lo_elems, fx.Float32))
-            p_comp_hi_val = _raw(Vec.from_elements(hi_elems, fx.Float32))
-        lo_vec = Vec(p_comp_lo_val)
-        hi_vec = Vec(p_comp_hi_val)
-        head_row_base_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(16)
-        )
-        kv_col_lo_i32 = _raw(ArithValue(lane_idx_i32) % fx.Int32(16))
-        kv_col_hi_i32 = _raw(ArithValue(kv_col_lo_i32) + fx.Int32(16))
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32)
-            * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        for k in range_constexpr(4):
-            head_row_i32 = _raw(
-                ArithValue(head_row_base_i32) + fx.Int32(k * 4)
-            )
-            row_base_byte = _raw(
-                ArithValue(head_row_i32)
-                * fx.Int32(V_HEAD_DIM * 2)
-            )
-            # LO half: col in [0..15]
-            off_lo = _raw(
-                ArithValue(row_base_byte)
-                + ArithValue(kv_col_lo_i32) * fx.Int32(2)
-            )
-            val_lo_bf16 = _raw(
-                ArithValue(_raw(lo_vec[k])).truncf(T.bf16)
-            )
-            buffer_ops.buffer_store(
-                val_lo_bf16, final_output_rsrc, off_lo,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-            # HI half: col in [16..31]
-            off_hi = _raw(
-                ArithValue(row_base_byte)
-                + ArithValue(kv_col_hi_i32) * fx.Int32(2)
-            )
-            val_hi_bf16 = _raw(
-                ArithValue(_raw(hi_vec[k])).truncf(T.bf16)
-            )
-            buffer_ops.buffer_store(
-                val_hi_bf16, final_output_rsrc, off_hi,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-
-    def _debug_dump_q_vgpr(qo_start_i32):
-        """Dump raw q_vgpr (v72..v103) at the silver Q position each lane's
-        data corresponds to.
-
-        Per HK Phase 1 cvt ordering and reader formula:
-          chunk = vgpr_idx // 8           (in [0..4))   -> chunk cols base = chunk * 64
-          chunk_vgpr = vgpr_idx % 8       (in [0..8))
-          iter = chunk_vgpr // 4          (0 or 1) -> iter j adds 32 to col base
-          dw_in_iter = (chunk_vgpr // 2) % 4   (in [0..4))
-          opsel = chunk_vgpr % 2          (0 or 1)
-          For lane l:
-            row_in_warp = l & 15
-            cb = (l >> 4) & 3
-            col within chunk = 16 * cb + 8 * iter ? NO -- HK says
-                col base for iter j (within chunk) = 16 * cb + 8 * j (only 2 sub-blocks per chunk)
-            But we have 4 sub-tiles of 16 cols each = 4*16 = 64 cols/chunk.  So cb in
-            {0..3} cycles through sub-blocks of the chunk.  iter j adds 8 cols inside
-            the cb-selected sub-block.
-            full chunk_col = 16 * cb + 8 * iter + dw_in_iter * 2 + opsel
-          Absolute Q col = chunk * 64 + chunk_col
-          Silver head row = warp * 16 + row_in_warp
-        """
-        row_in_warp_i32 = _raw(ArithValue(lane_idx_i32) % fx.Int32(16))
-        cb_i32 = _raw((ArithValue(lane_idx_i32) // fx.Int32(16)) & fx.Int32(3))
-        head_row_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(row_in_warp_i32)
-        )
-        row_base_byte = _raw(
-            ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32)
-            * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        for vgpr_idx in range_constexpr(32):
-            chunk = vgpr_idx // 8
-            chunk_vgpr = vgpr_idx % 8
-            iter_ = chunk_vgpr // 4         # 0 or 1
-            dw_in_iter = (chunk_vgpr // 2) % 2   # 0 or 1 within 2-dword-per-iter-per-row?
-            # Actually each iter has 4 dwords (4 cols * 2 bf16/col = 8 cols).
-            # vgpr_idx 0,1 -> dw 0 of iter 0; vgpr_idx 2,3 -> dw 1 of iter 0; etc.
-            dw_in_iter = (chunk_vgpr % 4) // 2   # 0,0,1,1 within iter
-            opsel = chunk_vgpr % 2          # 0 or 1
-            slot = pv.PinnedRange(
-                Q_VGPR_RANGE.lo + vgpr_idx,
-                Q_VGPR_RANGE.lo + vgpr_idx,
-            )
-            dw_i32 = pv.read_pinned(slot, as_i64=False)
-            # chunk_col = 16 * cb + 8 * iter + dw_in_iter * 2 + 0 (the dword holds 2 bf16,
-            # writing those 2 bf16 covers opsel-low and opsel-high which represent col*2 and col*2+1)
-            # Each dword stores 2 consecutive bf16 (low and high of the dword) which correspond to
-            # 2 consecutive chunk_cols: base and base+1.  We write the dword (4 bytes) starting at
-            # bf16 col `base` = 16*cb + 8*iter + dw_in_iter*2 + opsel*?
-            # But there are TWO vgprs per (chunk, iter, dw_in_iter): one for opsel=False, one for True.
-            # Per HK, opsel selects WHICH 2 fp8 bytes of the source dword we read.  The OUTPUT
-            # bf16 pair goes into the WHOLE dword.  So:
-            #   vgpr opsel=False: bf16 pair at col base + 0, base + 1 ? or base + 0..1 with opsel = byte select
-            # The cleanest is: each vgpr holds a 2-bf16 pair representing 2 consecutive chunk_cols.
-            # The bytes (col base in the staging) for vgpr (dw_in_iter=d, opsel=o) =
-            # iter*8 + d*4 + o*2  -- but we need to confirm by experiment.
-            # For now assume: chunk_col_lo = 16*cb + 8*iter + (dw_in_iter*2 + opsel) * 2
-            #                 chunk_col_hi = chunk_col_lo + 1
-            chunk_col_base_const_part = 8 * iter_ + (dw_in_iter * 2 + opsel) * 2
-            q_col_i32 = _raw(
-                ArithValue(cb_i32) * fx.Int32(16)
-                + fx.Int32(chunk * 64 + chunk_col_base_const_part)
-            )
-            byte_off = _raw(
-                ArithValue(row_base_byte)
-                + ArithValue(q_col_i32) * fx.Int32(2)   # 2 bytes / bf16
-            )
-            buffer_ops.buffer_store(
-                dw_i32, final_output_rsrc, byte_off,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-
-    def _debug_dump_k_lds_to_vram(p_lds_kv_base_i32, qo_start_i32):
-        """Dump K LDS pong (32 KB = 16 col_tiles × 2 row_tiles × 1024 B each)
-        to final_output.  Layout: warp ``w`` dumps the 4 KB slice at
-        ``p_lds_kv + w * 4096`` (= 4 sub-blocks per warp).  Within each warp,
-        lane ``T`` reads 16 bytes (1 b128) at ``slice_base + T * 16`` and
-        writes them to ``final_output[0, w*16 + T//4, (T%4)*16 .. +8 bf16]``.
-        Two passes (each = 2KB) cover the warp's 4 KB.
-        """
-        head_row_base_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(16)
-            + ArithValue(lane_idx_i32) // fx.Int32(4)
-        )
-        lane_byte_in_pass_i32 = _raw(
-            (ArithValue(lane_idx_i32) % fx.Int32(4)) * fx.Int32(16)
-        )
-        row_base_byte = _raw(
-            ArithValue(head_row_base_i32) * fx.Int32(V_HEAD_DIM * 2)
-        )
-        batch_byte_off = _raw(
-            ArithValue(qo_start_i32)
-            * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-        )
-        # Warp w slice base = w * 4096 within the 32 KB pong.
-        warp_slice_base_i32 = _raw(
-            ArithValue(warp_idx_i32) * fx.Int32(4096)
-        )
-        for pass_idx in range_constexpr(4):
-            # Each pass = 1024 bytes per warp = 64 lanes × 16 bytes.
-            lds_addr = _raw(
-                ArithValue(p_lds_kv_base_i32)
-                + ArithValue(warp_slice_base_i32)
-                + fx.Int32(pass_idx * 1024)
-                + ArithValue(lane_idx_i32) * fx.Int32(16)
-            )
-            data = _lds_load_b128(lds_addr, byte_offset=0)
-            byte_off = _raw(
-                ArithValue(row_base_byte)
-                + fx.Int32(pass_idx * 64)
-                + ArithValue(lane_byte_in_pass_i32)
-            )
-            rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-            buffer_ops.buffer_store(
-                data, final_output_rsrc, byte_off,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-
-    def _debug_dump_q_lds_to_vram(qo_start_i32):
-        """Read each lane's bytes from p_lds_q and write them to final_output.
-
-        For each of 8 passes (covering 256 cols per warp), each lane reads 16
-        bytes (= 8 bf16 = one b128) from
-          p_lds_q + warp*Q_WARP_FINAL_BYTES + pass*1024 + (lane>>2)*64 + (lane&3)*16
-        which is exactly the byte layout Phase 2's NoPE cvt+store wrote.
-        (No row XOR -- we read raw bytes; comparison against expected requires
-        un-applying the writer's XOR in the host.  For now we just dump raw.)
-
-        Store target in final_output[0, head_row, col]:
-          head_row = warp*16 + (lane // 4)
-          byte_col_start = pass*32 + (lane & 3)*8   (= 8 bf16 = 16 bytes)
-        So per warp we write to cols [0..256) bf16 of head rows [w*16..+16).
-        """
-        for pass_idx in range_constexpr(8):
-            # LDS source addr per lane.
-            lds_base_i32 = _i32(lds_base_idx)
-            row_in_warp_i32 = _raw(ArithValue(lane_idx_i32) // fx.Int32(4))
-            col_group_i32 = _raw(ArithValue(lane_idx_i32) & fx.Int32(3))
-            byte_in_sb_i32 = _raw(ArithValue(col_group_i32) * fx.Int32(16))
-            lds_addr = _raw(
-                ArithValue(lds_base_i32)
-                + fx.Int32(P_LDS_Q)
-                + ArithValue(warp_idx_i32) * fx.Int32(Q_WARP_FINAL_BYTES)
-                + fx.Int32(pass_idx * Q_SUB_BLOCK_BYTES)
-                + ArithValue(row_in_warp_i32) * fx.Int32(Q_SUB_BLOCK_COLS * 2)
-                + ArithValue(byte_in_sb_i32)
-            )
-            # ds_read_b128 = 16 bytes -> i32x4 SSA value.
-            data = _lds_load_b128(lds_addr, byte_offset=0)
-
-            # VRAM dst: head_row = warp*16 + lane//4, byte_col_start = pass*32 + (lane&3)*8.
-            head_row_i32 = _raw(
-                ArithValue(warp_idx_i32) * fx.Int32(16)
-                + ArithValue(lane_idx_i32) // fx.Int32(4)
-            )
-            byte_col_start_i32 = _raw(
-                fx.Int32(pass_idx * 32 + 0)  # filled in below per lane via col_group
-                + ArithValue(col_group_i32) * fx.Int32(8)  # 8 bf16 = 16 bytes per lane
-            )
-            # final_output[0, head, col] is bf16; col_byte = head_row * V_HEAD_DIM*2
-            # + byte_col_start*2.
-            vram_byte_off = _raw(
-                ArithValue(head_row_i32) * fx.Int32(V_HEAD_DIM * 2)
-                + ArithValue(byte_col_start_i32) * fx.Int32(2)
-            )
-            batch_byte_off = _raw(
-                ArithValue(qo_start_i32)
-                * fx.Int32(NUM_QO_HEADS * V_HEAD_DIM * 2)
-            )
-            # Drain the ds_read first.
-            rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-            buffer_ops.buffer_store(
-                data, final_output_rsrc, vram_byte_off,
-                offset_is_bytes=True, soffset_bytes=batch_byte_off,
-            )
-
     def _process_one_kv_tile(kv_tile_start_i32, kv_tile_end_i32,
                               row_kv_ld_i32,
                               row_max_in, row_sum_e_in,
                               qo_start_i32,
                               is_first_iter, check_boundary):
         """Load KV tile, do QK + softmax + PV, return (row_max, row_sum_e)."""
-        if const_expr(DEBUG_DUMP_Q_VGPR):
-            # Dump pinned q_vgpr (set by _load_q_phase1) and short-circuit.
-            # We're on tile 0 only (caller ensures num_tiles==1 path is the
-            # one exercised; multi-tile would also dump but only tile 0's
-            # entry matters since q_vgpr is loaded once per work_idx).
-            _debug_dump_q_vgpr(qo_start_i32)
-            return row_max_in, row_sum_e_in
-
-        if const_expr(DEBUG_DUMP_Q_LDS):
-            _debug_dump_q_lds_to_vram(qo_start_i32)
-            return row_max_in, row_sum_e_in
-
-        if const_expr(DEBUG_DUMP_P2_NOPE_DW):
-            # Phase 2's dump already wrote final_output; skip downstream.
-            return row_max_in, row_sum_e_in
-
         # Single-pong K LDS: barrier prior iter's PV (which reads K LDS as V)
         # against this iter's _kv_async_load_k (which overwrites K LDS).
         # HK uses double-buffered ping-pong so it doesn't need this; FlyDSL
@@ -2823,23 +2172,13 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         _kv_async_load_k(p_lds_kv_0_base_i32_outer, row_kv_ld_i32,
                          check_boundary=check_boundary,
                          qo_start_i32=qo_start_i32)
-        if const_expr(DEBUG_DUMP_KV_NOPE_DW):
-            # Dumps already wrote final_output; skip QK / softmax / PV / OMgr.
-            return row_max_in, row_sum_e_in
         rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0, lgkmcnt=0))
         rocdl.s_barrier()
 
-        if const_expr(DEBUG_DUMP_K_LDS):
-            _debug_dump_k_lds_to_vram(p_lds_kv_0_base_i32_outer, qo_start_i32)
-            return row_max_in, row_sum_e_in
-
         _do_qk_gemm(p_lds_kv_0_base_i32_outer, qo_start_i32=qo_start_i32)
-        if const_expr(DEBUG_DUMP_KV_TOP):
-            return row_max_in, row_sum_e_in
 
         # Drain MFMA pipeline so the upcoming v_mov_b32 reads of v[120..127]
-        # see retired values (CDNA3 MFMA -> SIMD read hazard).  Required for
-        # both dump path and production softmax read.
+        # see retired values (CDNA3 MFMA -> SIMD read hazard).
         llvm.inline_asm(None, [], "s_nop 15\n\t s_nop 15", "",
                         has_side_effects=True)
 
@@ -2856,18 +2195,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             fx.Float32,
         ))
 
-        if const_expr(DEBUG_DUMP_QK):
-            # Bypass softmax/PV/OMgr.  Write the 8 fp32 p_comp values per
-            # lane as bf16 into final_output[0, qo_start, head_row, kv_col],
-            # for head_row covered by this warp/lane and kv_col in [0:32).
-            # Layout (mfma F32_16x16x32_F16 D-tile):
-            #   head_row = warp * 16 + k * 4 + lane // 16        (k in 0..3)
-            #   kv_col   = (lane & 15) for LO, 16 + (lane & 15) for HI
-            _debug_dump_p_comp(p_comp_lo_val, p_comp_hi_val, qo_start_i32)
-            # Short-circuit: return the input carry unchanged so caller's
-            # downstream code becomes a no-op for the values we care about.
-            return row_max_in, row_sum_e_in
-
         row_max_new, row_sum_e_new, rescale = _softmax_and_pack(
             p_comp_lo_val, p_comp_hi_val,
             row_max_in, row_sum_e_in,
@@ -2876,13 +2203,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             check_boundary=check_boundary,
             qo_start_i32=qo_start_i32,
         )
-
-        if const_expr(DEBUG_DUMP_PMFMA):
-            _debug_dump_pmfma(qo_start_i32)
-            return row_max_in, row_sum_e_in
-
-        if const_expr(DEBUG_DUMP_LOCALMAX):
-            return row_max_in, row_sum_e_in
 
         _do_pv_gemm(p_lds_kv_0_base_i32_outer, rescale,
                     is_first_iter=is_first_iter)
@@ -2901,9 +2221,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         #   [6] kv_offset            (0 = work item ends at batch tail)
         #   [7] padding
         wi_base = _idx(work_idx) * SIZE_MLA_WORK_INFO_IN_DW
-        # PAGE_SIZE==1: skip batch_idx + kv_offset, single 4-dw + 1-dw load.
-        # PAGE_SIZE >1: also need batch_idx (dw0) and kv_offset (dw6) for
-        # the tail-clip branch.
         wi_dw1_4 = buffer_ops.buffer_load(
             work_info_set_rsrc, wi_base + _idx(1),
             vec_width=4, dtype=T.i32,
@@ -2917,6 +2234,19 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         qo_start = rocdl.readfirstlane(T.i32, _raw(wi_vec[1]))
         kv_start_page = rocdl.readfirstlane(T.i32, _raw(wi_vec[3]))
         kv_end_page = rocdl.readfirstlane(T.i32, _raw(wi_dw5))
+        # kv_offset == 0 iff this work item ends at the batch tail (= last
+        # split of this batch element).  Used both by the PAGE_SIZE>1
+        # tail-clip and by the attention-sink fold gate in the split
+        # epilogue.  Cheap when sink is absent.
+        kv_offset = rocdl.readfirstlane(T.i32, _raw(buffer_ops.buffer_load(
+            work_info_set_rsrc, wi_base + _idx(6),
+            vec_width=1, dtype=T.i32,
+        )))
+        is_last_split = _raw(arith.cmpi(
+            arith.CmpIPredicate.eq,
+            ArithValue(kv_offset),
+            fx.Int32(0),
+        ))
 
         # Token-range conversion (HK lines 272-284).
         if const_expr(PAGE_SIZE == 1):
@@ -2928,10 +2258,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             ))
             batch_idx = rocdl.readfirstlane(T.i32, _raw(buffer_ops.buffer_load(
                 work_info_set_rsrc, wi_base + _idx(0),
-                vec_width=1, dtype=T.i32,
-            )))
-            kv_offset = rocdl.readfirstlane(T.i32, _raw(buffer_ops.buffer_load(
-                work_info_set_rsrc, wi_base + _idx(6),
                 vec_width=1, dtype=T.i32,
             )))
             kv_end_full = _raw(
@@ -3048,14 +2374,12 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
                 )
                 results = yield [rm_new, rse_new]
             # Run epilogue with the loop's final carry; branch on split vs final.
-            if const_expr(_DEBUG_RUN_EPILOGUE):
-                rm_final = results[0]
-                rse_final = results[1]
-                _dispatch_epilogue(rm_final, rse_final)
+            rm_final = results[0]
+            rse_final = results[1]
+            _dispatch_epilogue(rm_final, rse_final)
 
         def _single_tile_finish():
-            if const_expr(_DEBUG_RUN_EPILOGUE):
-                _dispatch_epilogue(row_max_t0, row_sum_e_t0)
+            _dispatch_epilogue(row_max_t0, row_sum_e_t0)
 
         def _dispatch_epilogue(rm_final, rse_final):
             """Runtime branch on partial_qo_loc:
@@ -3064,10 +2388,12 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             """
             if_op = scf.IfOp(is_split, [], has_else=True)
             with ir.InsertionPoint(if_op.then_block):
-                _do_omgr_v3_split_epilogue(partial_qo_loc, rm_final, rse_final)
+                _do_omgr_v3_split_epilogue(
+                    partial_qo_loc, is_last_split, rm_final, rse_final,
+                )
                 scf.YieldOp([])
             with ir.InsertionPoint(if_op.else_block):
-                _do_omgr_v3_epilogue(qo_start, rse_final)
+                _do_omgr_v3_epilogue(qo_start, rm_final, rse_final)
                 scf.YieldOp([])
 
         @flyc.jit
@@ -3093,6 +2419,7 @@ def launch_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     kv_last_page_lens: fx.Tensor,
     work_indptr: fx.Tensor,
     work_info_set: fx.Tensor,
+    attn_sink: fx.Tensor,
     final_output: fx.Tensor,
     split_output: fx.Tensor,
     split_lse: fx.Tensor,
@@ -3119,6 +2446,7 @@ def launch_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         kv_last_page_lens,
         work_indptr,
         work_info_set,
+        attn_sink,
         final_output,
         split_output,
         split_lse,
@@ -3163,7 +2491,7 @@ def mla_v40_decode_fwd(
     kv_buffer,        # [num_page, page_size, num_kv_heads=1, 576] FP8
     kv_buffer_rope,   # [num_page, page_size, num_kv_heads=1, 64]  BF16
     qo_indptr,        # unused (FlyDSL kernel takes per-warp work via work_indptr/work_info_set)
-    kv_indptr,        # unused (same)
+    kv_indptr,        # unused (kernel uses work_info wi[6] kv_offset==0 for last-split detection)
     kv_page_indices,
     kv_last_page_lens,
     work_indptr,
@@ -3173,6 +2501,7 @@ def mla_v40_decode_fwd(
     split_output,
     split_lse,
     final_output,
+    attn_sink=None,   # optional [num_heads] fp32: per-head sink logit
 ):
     """Drop-in replacement for ``aiter.hk_mla_v40_decode_fwd`` that dispatches
     to the FlyDSL V4.0 m16x8 decode kernel.
@@ -3181,7 +2510,12 @@ def mla_v40_decode_fwd(
     runtime device + tensor shapes so the caller does not have to.
     ``qo_indptr`` / ``kv_indptr`` are accepted for signature parity but
     unused -- the FlyDSL kernel reads per-warp work from
-    ``work_indptr`` + ``work_info_set``.
+    ``work_indptr`` + ``work_info_set``, and detects the last split of a
+    batch via ``wi[6] (kv_offset) == 0``.
+
+    ``attn_sink`` (optional): per-head sink logit treated as a virtual K
+    column with zero V.  When ``None``, an internal -inf tensor is used
+    (numerical no-op).
     """
     import math as _math
     import torch as _torch
@@ -3212,6 +2546,20 @@ def mla_v40_decode_fwd(
     global PAGE_SIZE
     PAGE_SIZE = page_sz
 
+    # No-sink path: synthesize a [nhead] fp32 tensor of -inf once per device.
+    # The kernel's fold becomes exp(-inf - row_max) = 0 -> row_sum_e += 0,
+    # i.e. a numerical no-op.  We cache the -inf tensor per (device, nhead)
+    # to avoid re-allocation on every call.
+    if attn_sink is None:
+        attn_sink = _get_neg_inf_sink(query.device, nhead)
+    else:
+        assert attn_sink.dtype == _torch.float32, (
+            f"attn_sink must be fp32, got {attn_sink.dtype}"
+        )
+        assert attn_sink.shape == (nhead,), (
+            f"attn_sink must be [nhead={nhead}], got {tuple(attn_sink.shape)}"
+        )
+
     launch_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         query.view(total_q, nhead, QK_PACKED_NOPE_BYTES),
         query_rope.view(total_q, nhead, QK_ROPE_HEAD_DIM),
@@ -3221,6 +2569,7 @@ def mla_v40_decode_fwd(
         kv_last_page_lens,
         work_indptr,
         work_info_set,
+        attn_sink,
         final_output,
         split_output,
         split_lse,
@@ -3230,3 +2579,18 @@ def mla_v40_decode_fwd(
         lds_size=lds_size,
         stream=_torch.cuda.current_stream(),
     )
+
+
+# Cache: (device.index, nhead) -> fp32 [nhead] tensor of -inf.
+_NEG_INF_SINK_CACHE: dict = {}
+
+
+def _get_neg_inf_sink(device, nhead: int):
+    import torch as _torch
+    key = (device.index if device.index is not None else 0, nhead)
+    t = _NEG_INF_SINK_CACHE.get(key)
+    if t is None:
+        t = _torch.full((nhead,), float("-inf"),
+                        dtype=_torch.float32, device=device)
+        _NEG_INF_SINK_CACHE[key] = t
+    return t
