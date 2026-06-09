@@ -1907,3 +1907,15 @@ Interpretation: v5 recovers most of the previous `sort_place_pad` gap, from
 roughly +2-3 us down to about +1 us in graph replay profiling.  The all-FlyDSL
 path still launches the same 8 kernels as aiter; the remaining graph-profiler
 gap is mostly `GEMM1`, with `sort_place_pad` now a smaller residual item.
+
+Rejected v7 padding-loop follow-up:
+
+- `v7_hippadloop` changed the padding expert loop to an explicit dynamic
+  `scf.ForOp(e_lo, e_hi, 1)`, closer to the aiter HIP source.
+- Static ISA became much smaller: v5 `sort_place_pad` was about 1079 assembly
+  lines with 79 static `global_store_dword` and 79 static `s_cbranch`
+  occurrences; v7 dropped to about 201 lines, 7 stores, and 8 branches.
+- Measured graph performance did not improve.  A 3-sample graph profiler saw
+  `sort_place_pad` around 33.0 us, and the default graph replay bench reported
+  `local_mxfp4_all_flydsl_us=1864.1`, slightly slower than saved v5's
+  `1862.6`.  The saved code therefore remains v5.
