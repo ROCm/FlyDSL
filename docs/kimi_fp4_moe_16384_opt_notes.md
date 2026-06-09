@@ -2493,3 +2493,44 @@ Current v3 baseline with the longer profiler defaults (`warmup=100`,
 | 128 | GEMM1 | 164.476 us | 170.508 us | +6.032 us |
 | 128 | GEMM2 | 82.186 us | 86.617 us | +4.431 us |
 | 128 | total | 252.823 us | 265.521 us | +12.698 us |
+
+## BM16 Sort DPP Scan Trials
+
+The FlyDSL sort v2 cumsum used DPP row shifts plus two `ds_bpermute` steps for
+the 16/32-lane carry. Aiter's `dpp_inclusive_scan_wave` uses pure DPP for the
+whole wave:
+
+```text
+row_shr 1/2/4/8, then update_dpp 0x142 row_mask=0xA, 0x143 row_mask=0xC
+```
+
+Two FlyDSL variants were tested:
+
+- Sort v3: exact aiter-style wave scan and wave-total scan. Static ISA removed
+  `ds_bpermute` and reduced `s_waitcnt` from 22 to 15, but added one extra
+  `s_barrier`.
+- Sort v4: pure-DPP wave scan while keeping v2's single-barrier cross-wave LDS
+  accumulation.
+
+Both variants remained correct:
+
+```text
+v3 min_cos=0.999997258
+v4 min_cos=0.999997020
+```
+
+Profiler medians:
+
+| M | variant | sort | total | result |
+| ---: | --- | ---: | ---: | --- |
+| 64 | v2 baseline | 7.057 us | 211.560 us | baseline |
+| 64 | v3 exact wave_totals | 6.869 us | 211.030 us | small sort win |
+| 64 | v4 DPP + old cross-wave | 6.954 us | 213.828 us | noisy total regression |
+| 128 | v2 baseline | 8.423 us | 265.521 us | baseline |
+| 128 | v3 exact wave_totals | 8.917 us | 266.945 us | regression |
+| 128 | v4 DPP + old cross-wave | 8.552 us | 267.231 us | regression |
+
+Conclusion: reducing `s_waitcnt` alone did not improve the stable small-M sort
+path. The extra barrier in v3 is harmful at M=128, and v4 did not beat the v2
+baseline. Keep sort v2 for now; the remaining sort gap likely needs ATT/Pmc
+analysis rather than scan-shape tweaks.
