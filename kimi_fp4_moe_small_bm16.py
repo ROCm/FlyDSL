@@ -514,9 +514,12 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
     num_acc_n = n_per_wave // 16
     k_unroll = tile_k // 128
     num_k_tiles = MODEL_DIM // tile_k
+    k_stages = 2
+    a_stages = 3
     a_elem_vec_pack = 2
     eff_lds_stride = tile_k // a_elem_vec_pack
     single_x_bytes = tile_m * eff_lds_stride
+    lds_x_bytes = a_stages * single_x_bytes
     lds_scale_bytes = num_k_tiles * 256
     lds_acc_bytes = tile_m * tile_n * 4
 
@@ -547,10 +550,10 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem_mxfp4_bm16_gemm1")
     lds_offset = allocator._align(allocator.ptr, 16)
-    lds_scale_offset = lds_offset + single_x_bytes
-    allocator.ptr = lds_offset + max(single_x_bytes + lds_scale_bytes, lds_acc_bytes)
+    lds_scale_offset = lds_offset + lds_x_bytes
+    allocator.ptr = lds_offset + max(lds_x_bytes + lds_scale_bytes, lds_acc_bytes)
 
-    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM16_INLINEQUANT_v0"
+    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM16_INLINEQUANT_v1"
 
     @flyc.kernel(name=module_name)
     def gemm1_inline(
@@ -568,7 +571,9 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
         i32 = T.i32
         i64 = T.i64
         f32 = T.f32
+        vec1_i32 = T.vec(1, i32)
         vec4_i32 = T.vec(4, i32)
+        vec2_bf16 = T.vec(2, T.bf16)
         vec2_i64 = T.vec(2, i64)
         vec4_i64 = T.vec(4, i64)
         vec8_i32 = T.vec(8, i32)
@@ -605,8 +610,8 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
         do_gemm = arith.andi(blk_valid, exp_valid)
 
         base_ptr = allocator.get_base()
-        lds_x_i8 = SmemPtr(base_ptr, lds_offset, T.f8, shape=(single_x_bytes,)).get()
-        lds_x_i32 = SmemPtr(base_ptr, lds_offset, T.i32, shape=(single_x_bytes // 4,)).get()
+        lds_x_i8 = SmemPtr(base_ptr, lds_offset, T.f8, shape=(lds_x_bytes,)).get()
+        lds_x_i32 = SmemPtr(base_ptr, lds_offset, T.i32, shape=(lds_x_bytes // 4,)).get()
         lds_scale_i32 = SmemPtr(
             base_ptr,
             lds_scale_offset,
@@ -732,87 +737,96 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
         def _max_u32(a, b):
             return arith.select(arith.cmpi(CmpIPredicate.ugt, b, a), b, a)
 
-        def inline_quant_tile(k_tile: int):
-            scale_accum = c0_i32
+        def inline_quant_load_half(k_tile: int, b128: int):
             lane_div4 = (lane_id // arith.constant(4, index=True)) % arith.constant(4, index=True)
             lane_mod4 = lane_id % arith.constant(4, index=True)
-            for b128 in range_constexpr(2):
-                v_byte_off = (
-                    row_token_idx * arith.constant(MODEL_DIM * 2, index=True)
-                    + arith.constant(k_tile * tile_k * 2 + b128 * 256, index=True)
-                    + lane_div4 * arith.constant(64, index=True)
-                    + lane_mod4 * arith.constant(16, index=True)
-                )
-                h16 = _buffer_load_vec(
-                    buffer_ops,
-                    vector,
-                    hidden_rsrc,
-                    v_byte_off,
-                    elem_type=T.i8,
-                    vec_elems=16,
-                    elem_bytes=1,
-                    offset_in_bytes=True,
-                    cache_modifier=0,
-                )
-                h4 = vector.bitcast(vec4_i32, h16)
-                local_amax = c0_i32
-                vals = []
-                for j in range_constexpr(4):
-                    w = ArithValue(vector.extract(h4, static_position=[j], dynamic_position=[]))
-                    lo_abs = (w & cffff_i32) & c7fff_i32
-                    hi_abs = (w >> c16_i32) & c7fff_i32
-                    local_amax = _max_u32(local_amax, lo_abs)
-                    local_amax = _max_u32(local_amax, hi_abs)
-                    vals.append(((w & cffff_i32) << c16_i32).bitcast(f32))
-                    vals.append((w & chi_mask_i32).bitcast(f32))
+            v_byte_off = (
+                row_token_idx * arith.constant(MODEL_DIM * 2, index=True)
+                + arith.constant(k_tile * tile_k * 2 + b128 * 256, index=True)
+                + lane_div4 * arith.constant(64, index=True)
+                + lane_mod4 * arith.constant(16, index=True)
+            )
+            h16 = _buffer_load_vec(
+                buffer_ops,
+                vector,
+                hidden_rsrc,
+                v_byte_off,
+                elem_type=T.i8,
+                vec_elems=16,
+                elem_bytes=1,
+                offset_in_bytes=True,
+                cache_modifier=0,
+            )
+            return vector.bitcast(vec4_i32, h16)
 
-                peer1 = local_amax.shuffle_xor(c1_i32, c64_i32)
-                local_amax = _max_u32(local_amax, peer1)
-                peer2 = local_amax.shuffle_xor(c2_i32, c64_i32)
-                local_amax = _max_u32(local_amax, peer2)
-
-                f32bits = local_amax << c16_i32
-                bexp = ((f32bits + c0x200000_i32) >> c23_i32) & arith.constant(255, type=i32)
-                e8m0 = bexp - c2_i32
-                e8m0 = arith.select(arith.cmpi(CmpIPredicate.slt, e8m0, c0_i32), c0_i32, e8m0)
-                e8m0 = arith.select(arith.cmpi(CmpIPredicate.sgt, e8m0, c254_i32), c254_i32, e8m0)
-                quant_scale = (e8m0 << c23_i32).bitcast(f32)
-
-                packed = c0_i32
-                for pair in range_constexpr(4):
-                    packed = ArithValue(
-                        llvm.call_intrinsic(
-                            i32,
-                            "llvm.amdgcn.cvt.scalef32.pk.fp4.f32",
-                            [
-                                packed,
-                                vals[2 * pair],
-                                vals[2 * pair + 1],
-                                quant_scale,
-                                arith.constant(pair, type=i32),
-                            ],
-                            [],
-                            [],
-                        )
+        def inline_quant_finish_half(a_slot: int, k_tile: int, b128: int, h4):
+            lane_div4 = (lane_id // arith.constant(4, index=True)) % arith.constant(4, index=True)
+            lane_mod4 = lane_id % arith.constant(4, index=True)
+            local_amax = c0_i32
+            bf16_pairs = []
+            for j in range_constexpr(4):
+                w = ArithValue(vector.extract(h4, static_position=[j], dynamic_position=[]))
+                lo_abs = (w & cffff_i32) & c7fff_i32
+                hi_abs = (w >> c16_i32) & c7fff_i32
+                local_amax = _max_u32(local_amax, lo_abs)
+                local_amax = _max_u32(local_amax, hi_abs)
+                bf16_pairs.append(
+                    vector.bitcast(
+                        vec2_bf16,
+                        vector.from_elements(vec1_i32, [w]),
                     )
-
-                kb_in_kt = arith.constant(b128 * 4, index=True) + lane_div4
-                col_sw = swizzle_xor16(r_in_chunk, kb_in_kt * arith.constant(16, index=True), k_blocks16)
-                byte_idx = crd2idx(
-                    [r_in_chunk, col_sw + lane_mod4 * arith.constant(4, index=True)],
-                    layout_lds,
                 )
-                word_idx = byte_idx // arith.constant(4, index=True)
-                vector.store(
-                    vector.from_elements(T.vec(1, i32), [packed]),
-                    lds_x_i32,
-                    [word_idx],
-                    alignment=4,
-                )
-                scale_accum = scale_accum | (e8m0 << arith.constant(b128 * 16, type=i32))
 
+            peer1 = local_amax.shuffle_xor(c1_i32, c64_i32)
+            local_amax = _max_u32(local_amax, peer1)
+            peer2 = local_amax.shuffle_xor(c2_i32, c64_i32)
+            local_amax = _max_u32(local_amax, peer2)
+
+            f32bits = local_amax << c16_i32
+            bexp = ((f32bits + c0x200000_i32) >> c23_i32) & arith.constant(255, type=i32)
+            e8m0 = bexp - c2_i32
+            e8m0 = arith.select(arith.cmpi(CmpIPredicate.slt, e8m0, c0_i32), c0_i32, e8m0)
+            e8m0 = arith.select(arith.cmpi(CmpIPredicate.sgt, e8m0, c254_i32), c254_i32, e8m0)
+            quant_scale = (e8m0 << c23_i32).bitcast(f32)
+
+            packed = c0_i32
+            for pair in range_constexpr(4):
+                packed = ArithValue(
+                    llvm.call_intrinsic(
+                        i32,
+                        "llvm.amdgcn.cvt.scalef32.pk.fp4.bf16",
+                        [
+                            packed,
+                            bf16_pairs[pair],
+                            quant_scale,
+                            arith.constant(pair, type=i32),
+                        ],
+                        [],
+                        [],
+                    )
+                )
+
+            kb_in_kt = arith.constant(b128 * 4, index=True) + lane_div4
+            col_sw = swizzle_xor16(r_in_chunk, kb_in_kt * arith.constant(16, index=True), k_blocks16)
+            byte_idx = crd2idx(
+                [r_in_chunk, col_sw + lane_mod4 * arith.constant(4, index=True)],
+                layout_lds,
+            )
+            word_idx = byte_idx // arith.constant(4, index=True)
+            word_idx = word_idx + arith.constant(a_slot * (single_x_bytes // 4), index=True)
+            vector.store(
+                vector.from_elements(T.vec(1, i32), [packed]),
+                lds_x_i32,
+                [word_idx],
+                alignment=4,
+            )
+            return e8m0
+
+        def inline_quant_write_scale(k_tile: int, e8m0_0, e8m0_1):
+            lane_div4 = (lane_id // arith.constant(4, index=True)) % arith.constant(4, index=True)
             lane_tgt = lane_div4 * arith.constant(16, index=True) + r_in_chunk
             scale_idx = arith.constant(k_tile * 64, index=True) + lane_tgt
+            scale_accum = e8m0_0 | (e8m0_1 << c16_i32)
             vector.store(
                 vector.from_elements(T.vec(1, i32), [scale_accum]),
                 lds_scale_i32,
@@ -820,9 +834,17 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
                 alignment=4,
             )
 
-        def lds_load_packs_k64(curr_row_a_lds, col_base):
+        def inline_quant_tile(k_tile: int, a_slot: int):
+            h4_0 = inline_quant_load_half(k_tile, 0)
+            e8m0_0 = inline_quant_finish_half(a_slot, k_tile, 0, h4_0)
+            h4_1 = inline_quant_load_half(k_tile, 1)
+            e8m0_1 = inline_quant_finish_half(a_slot, k_tile, 1, h4_1)
+            inline_quant_write_scale(k_tile, e8m0_0, e8m0_1)
+
+        def lds_load_packs_k64(curr_row_a_lds, col_base, a_slot: int):
             col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             idx_a16 = crd2idx([curr_row_a_lds, col_base_swz], layout_lds)
+            idx_a16 = idx_a16 + arith.constant(a_slot * single_x_bytes, index=True)
             loaded_a16 = vector.load_op(vec16_x, lds_x_i8, [idx_a16])
             a_i64x2 = vector.bitcast(vec2_i64, loaded_a16)
             return (
@@ -838,12 +860,12 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
         cbsz = 4
         blgp = 4
 
-        def compute_tile(acc_in, b_tile, a_scale, b_scale):
+        def compute_tile(acc_in, b_tile, a_scale, b_scale, a_slot: int):
             acc_list = list(acc_in)
             a_scale_val = vector.extract(a_scale, static_position=[0], dynamic_position=[])
             for k_idx in range_constexpr(k_unroll):
                 col_base = col_offset_base + arith.constant(k_idx * 64, index=True)
-                a0, a1 = lds_load_packs_k64(row_a_lds, col_base)
+                a0, a1 = lds_load_packs_k64(row_a_lds, col_base, a_slot)
                 a128 = pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64)
                 b_packs0, b_packs1 = b_tile[k_idx]
                 for ni in range_constexpr(num_acc_n // 2):
@@ -870,6 +892,53 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
                         )
             return acc_list
 
+        def compute_tile_prefetch_b(acc_in, b_tile, a_scale, b_scale, a_slot: int, next_k_tile: int):
+            acc_list = list(acc_in)
+            a_scale_val = vector.extract(a_scale, static_position=[0], dynamic_position=[])
+            a128_vals = []
+            next_b_tile = []
+            for k_idx in range_constexpr(k_unroll):
+                col_base = col_offset_base + arith.constant(k_idx * 64, index=True)
+                a0, a1 = lds_load_packs_k64(row_a_lds, col_base, a_slot)
+                a128_vals.append(pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64))
+                next_b_tile.append(([], []))
+
+            for ni in range_constexpr(num_acc_n // 2):
+                b_scale_i32 = b_scale[ni]
+                b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
+                for inxdl in range_constexpr(2):
+                    ni_idx = ni * 2 + inxdl
+                    rocdl.sched_barrier(0)
+                    rocdl.s_setprio(1)
+                    for k_idx in range_constexpr(k_unroll):
+                        b_packs0, b_packs1 = b_tile[k_idx]
+                        b0 = b_packs0[ni_idx]
+                        b1 = b_packs1[ni_idx]
+                        b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
+                        acc_list[ni_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                            vec4_f32,
+                            [
+                                a128_vals[k_idx],
+                                b128,
+                                acc_list[ni_idx],
+                                cbsz,
+                                blgp,
+                                k_idx * 2,
+                                a_scale_val,
+                                k_idx * 2 + inxdl,
+                                b_scale_val,
+                            ],
+                        )
+                    rocdl.s_setprio(0)
+                    rocdl.sched_barrier(0)
+                    for k_idx in range_constexpr(k_unroll):
+                        next_b0, next_b1 = load_b_packs_k64(next_k_tile, k_idx, ni_idx)
+                        next_b_tile[k_idx][0].append(next_b0)
+                        next_b_tile[k_idx][1].append(next_b1)
+                    rocdl.sched_barrier(0)
+
+            return acc_list, next_b_tile
+
         def _fmax_num(a, b):
             return ArithValue(arith.MaxNumFOp(arith._to_raw(a), arith._to_raw(b)).result)
 
@@ -882,15 +951,54 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
 
         def _then_body():
             acc = [arith.constant_vector(0.0, vec4_f32)] * num_acc_n
-            for k_tile in range_constexpr(num_k_tiles):
-                inline_quant_tile(k_tile)
-                b_tile = load_b_tile(k_tile)
-                b_scale = load_b_scale_tile(k_tile)
+            b_stages = []
+            b_scale_stages = []
+            for k_tile in range_constexpr(k_stages):
+                inline_quant_tile(k_tile, k_tile)
+                b_stages.append(load_b_tile(k_tile))
+                b_scale_stages.append(load_b_scale_tile(k_tile))
+
+            for offset in range_constexpr(0, num_k_tiles - k_stages):
+                read_slot = offset % a_stages
+                slot_b = offset % k_stages
+                next_k_tile = offset + k_stages
+                write_slot = next_k_tile % a_stages
+                rocdl.s_waitcnt(0)
+                gpu.barrier()
+                a_scale = load_a_scale_tile(offset)
+                h4_0 = inline_quant_load_half(next_k_tile, 0)
+                h4_1 = inline_quant_load_half(next_k_tile, 1)
+                rocdl.sched_barrier(0)
+                acc, next_b_tile = compute_tile_prefetch_b(
+                    acc,
+                    b_stages[slot_b],
+                    a_scale,
+                    b_scale_stages[slot_b],
+                    read_slot,
+                    next_k_tile,
+                )
+                b_scale_stages[slot_b] = load_b_scale_tile(next_k_tile)
+                e8m0_0 = inline_quant_finish_half(write_slot, next_k_tile, 0, h4_0)
+                e8m0_1 = inline_quant_finish_half(write_slot, next_k_tile, 1, h4_1)
+                inline_quant_write_scale(next_k_tile, e8m0_0, e8m0_1)
+                b_stages[slot_b] = next_b_tile
+
+            for tail in range_constexpr(0, k_stages):
+                k_tile = num_k_tiles - k_stages + tail
+                read_slot = k_tile % a_stages
+                slot_b = k_tile % k_stages
                 rocdl.s_waitcnt(0)
                 gpu.barrier()
                 a_scale = load_a_scale_tile(k_tile)
-                acc = compute_tile(acc, b_tile, a_scale, b_scale)
-                gpu.barrier()
+                acc = compute_tile(
+                    acc,
+                    b_stages[slot_b],
+                    a_scale,
+                    b_scale_stages[slot_b],
+                    read_slot,
+                )
+
+            gpu.barrier()
 
             for j in range_constexpr(num_acc_n):
                 j_local = j // 2

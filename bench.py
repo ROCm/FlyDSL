@@ -3,6 +3,10 @@ import time
 from dataclasses import dataclass
 import os
 
+from gpu_select import bind_empty_gpu_for_torch
+
+bind_empty_gpu_for_torch("bench")
+
 import torch
 
 import aiter
@@ -22,12 +26,20 @@ class Shape:
 
 KIMI = Shape(NE=385, H=7168, INTER=512, TOPK=9)
 
+DEFAULT_WARMUP = 100
+DEFAULT_EAGER_ITERS = 1000
+DEFAULT_GRAPH_ITERS = 2000
+DEFAULT_GRAPH_MEASURE = 51
+DEFAULT_GRAPH_WARMUP_REPLAYS = 5
+
 # mxfp4 tuned dispatch per token bucket (from kimik2_5_mxfp4_tuned_fmoe.csv).
 # (M_max, block_m, g1_suffix, g2_suffix)
 MXFP4_TUNED = [
     (128,   16, "BM16_INLINEQUANT", "TOPK{topk}_BM16_ATOMIC_NT"),  # M<=128: BM16 inline-quant, g2 non-temporal
-    (256,   32, "BM32_CACHED",      "TOPK{topk}_BM32_ATOMIC"),     # M<=256: BM32 cached
-    (10**9, 128, "BM128",           "BM128_NONATOMIC"),            # M>256: BM128 non-atomic
+    (512,   32, "BM32_NT",          "TOPK{topk}_BM32_ATOMIC_NT"),  # M<=512: BM32 read-once, g2 non-temporal
+    (2048,  32, "BM32_CACHED",      "TOPK{topk}_BM32_ATOMIC"),     # M<=2048: BM32 cached
+    (4096, 128, "BM128",            "BM128_NONATOMIC"),            # M=4096: bf16 flat_out + scatter_reduce
+    (10**9, 128, "BM128",           "BM128_NONATOMIC_MXFP4OUT"),   # M>=8192: mxfp4 flat_out + scatter_reduce_q
 ]
 
 
@@ -166,7 +178,7 @@ def make_flydsl_fn(shape, M, hidden, topk_ids, topk_weight, w, device):
 
 
 # ── timing ───────────────────────────────────────────────────────────────────
-def bench(fn, warmup=5, iters=30):
+def bench(fn, warmup=DEFAULT_WARMUP, iters=DEFAULT_EAGER_ITERS):
     """Eager wall-clock timing. Includes per-kernel CPU launch overhead, so on
     launch/latency-bound (small-M) shapes it OVER-estimates vs the real e2e path,
     which replays a single CUDA graph (one launch, no inter-kernel CPU bubbles)."""
@@ -182,8 +194,13 @@ def bench(fn, warmup=5, iters=30):
     ts.sort()
     return ts[len(ts) // 2] * 1e6  # median us
 
-tag = 0
-def bench_cudagraph(fn, warmup=5, iters=60, measure=5):
+def bench_cudagraph(
+    fn,
+    warmup=DEFAULT_WARMUP,
+    iters=DEFAULT_GRAPH_ITERS,
+    measure=DEFAULT_GRAPH_MEASURE,
+    graph_warmup_replays=DEFAULT_GRAPH_WARMUP_REPLAYS,
+):
     """CUDA-graph-faithful timing: capture `iters` back-to-back fn() calls into a
     SINGLE graph, replay the whole graph, and divide total GPU time by `iters`.
     The whole MoE pipeline runs as one graph -- CPU launch overhead and inter-
@@ -207,36 +224,22 @@ def bench_cudagraph(fn, warmup=5, iters=60, measure=5):
         for _ in range(iters):
             fn()
 
-    g.replay()  # warm the full graph once
-    # torch.cuda.synchronize()
+    for _ in range(graph_warmup_replays):
+        g.replay()
+    torch.cuda.synchronize()
 
     start = [torch.cuda.Event(enable_timing=True) for _ in range(measure)]
     end = [torch.cuda.Event(enable_timing=True) for _ in range(measure)]
     totals = []
-    activities = [
-        torch.profiler.ProfilerActivity.CPU,
-        torch.profiler.ProfilerActivity.CUDA,
-    ]
-    from contextlib import nullcontext
-    with nullcontext() as prof:
-    # with torch.profiler.profile(activities=activities, record_shapes=False) as prof:
+    for _ in range(measure):
+        start[_].record()
         g.replay()
-        g.replay()
-        for _ in range(measure):
-            start[_].record()
-            g.replay()
-            end[_].record()
-        torch.cuda.synchronize()
-        for _ in range(measure):
-            totals.append(start[_].elapsed_time(end[_]) * 1e3)  # ms -> us, total for `iters`
-        totals.sort()
-    global tag
-    tag += 1
-    out = f"{tag}.json.gz"
-    print(f"dump to: {out}")
-    if prof is not None:
-        prof.export_chrome_trace(out)
-    
+        end[_].record()
+    torch.cuda.synchronize()
+    for _ in range(measure):
+        totals.append(start[_].elapsed_time(end[_]) * 1e3)  # ms -> us, total for `iters`
+    totals.sort()
+
     return totals[len(totals) // 2] / iters  # median per-call us
 
 
@@ -247,18 +250,25 @@ def cosine(a, b):
 
 def main():
     ap = argparse.ArgumentParser()
-    # ap.add_argument("-M", "--M-list", default="4,8,16,32,64,128,256,8192,16384")
-    ap.add_argument("-M", "--M-list", default="16384")
+    ap.add_argument("-M", "--M-list", default="4,8,16,32,64,128,256,8192,16384")
+    #ap.add_argument("-M", "--M-list", default="16384")
     ap.add_argument("--check", default=True, action="store_true",
                     help="cross-backend output cosine-sim sanity check per M")
     ap.add_argument("--cudagraph", default=True, action="store_true",
                     help="time via CUDA-graph capture+replay (excludes CPU launch "
                          "overhead; faithful to the e2e cudagraph path). Default is "
                          "eager perf_counter, which includes launch overhead.")
-    ap.add_argument("--iters", type=int, default=100,
+    ap.add_argument("--iters", type=int, default=DEFAULT_EAGER_ITERS,
                     help="eager perf_counter iterations")
-    ap.add_argument("--graph-iters", type=int, default=60,
+    ap.add_argument("--graph-iters", type=int, default=DEFAULT_GRAPH_ITERS,
                     help="fn() calls captured per graph; total GPU time / this")
+    ap.add_argument("--warmup", type=int, default=DEFAULT_WARMUP,
+                    help="warmup fn() calls before timing or graph capture")
+    ap.add_argument("--measure", type=int, default=DEFAULT_GRAPH_MEASURE,
+                    help="CUDA-graph replay measurements; median is reported")
+    ap.add_argument("--graph-warmup-replays", type=int,
+                    default=DEFAULT_GRAPH_WARMUP_REPLAYS,
+                    help="full-graph replays before CUDA-event measurement")
     ap.add_argument("--ref-max-M", type=int, default=16385,
                     help="run torch_moe ground-truth ref for M<=this (slow on large "
                          "M since torch_moe loops over experts in python).")
@@ -267,10 +277,24 @@ def main():
     device = torch.device("cuda")
     shape = KIMI
     Ms = [int(x) for x in args.M_list.split(",")]
-    do_bench = bench_cudagraph if args.cudagraph else bench
-    bench_iters = args.graph_iters if args.cudagraph else args.iters
-    timing_mode = (f"cudagraph replay ({args.graph_iters}/graph)"
-                   if args.cudagraph else "eager perf_counter")
+    def time_fn(fn):
+        if args.cudagraph:
+            return bench_cudagraph(
+                fn,
+                warmup=args.warmup,
+                iters=args.graph_iters,
+                measure=args.measure,
+                graph_warmup_replays=args.graph_warmup_replays,
+            )
+        return bench(fn, warmup=args.warmup, iters=args.iters)
+
+    timing_mode = (
+        f"cudagraph replay ({args.graph_iters}/graph, "
+        f"warmup={args.warmup}, measure={args.measure}, "
+        f"graph_warmup_replays={args.graph_warmup_replays})"
+        if args.cudagraph
+        else f"eager perf_counter (warmup={args.warmup}, iters={args.iters})"
+    )
 
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"Timing: {timing_mode}")
@@ -332,14 +356,14 @@ def main():
             fly_ref_cos = (cosine(out.float(), ref_out)
                            if finite and ref_out is not None else float("nan"))
             print(f"bench flydsl, M={M} mx⋅fly={fly_mx_cos:.4f} fly⋅ref={fly_ref_cos:.4f}")
-            fly_us = do_bench(f_fn, iters=bench_iters)
+            fly_us = time_fn(f_fn)
             fly_ok = True
         except Exception as e:
             print(f"  [flydsl M={M}] ERROR: {type(e).__name__}: {e}", flush=True)
 
         try:
             print(f"bench mxfp4, M={M} bm={mx_bm} mx⋅ref={mx_ref_cos:.4f}")
-            mx_us = do_bench(mx_fn, iters=bench_iters)
+            mx_us = time_fn(mx_fn)
         except Exception as e:
             print(f"{M:>6} | mxfp4 timing ERROR: {type(e).__name__}: {e} — skipping")
             continue

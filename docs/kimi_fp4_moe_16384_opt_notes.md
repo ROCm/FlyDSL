@@ -2073,3 +2073,56 @@ Interpretation: GEMM1 is now effectively aligned with aiter for the fixed
 M=16384 Kimi mxfp4 path.  In the three default graph-profiler runs above,
 FlyDSL v36 GEMM1 is slightly faster than aiter by about `1-3 us`, and the
 all-FlyDSL pipeline remains bitwise equal to aiter for the benchmark output.
+
+## Small-M BM16 GEMM1 Pipeline v1
+
+Target:
+
+```text
+mxfp4_moe_g1_a4w4_NE385_H7168_E512_BM16_INLINEQUANT
+mxfp4_moe_g2_a4w4_NE385_H7168_E512_TOPK9_BM16_ATOMIC_NT
+```
+
+Change in `kimi_fp4_moe_small_bm16.py`:
+
+- Switch GEMM1 inline quant packing from the f32 fp4 intrinsic to the bf16
+  intrinsic used by aiter:
+  `llvm.amdgcn.cvt.scalef32.pk.fp4.bf16`.
+- Split inline quant into hidden load and finish/write phases.
+- Add 3 physical A LDS slots and 2 B register stages.
+- Preload the first two K tiles, then in the main K loop compute the current
+  tile while issuing the next tile's B loads and finishing the next tile's
+  hidden inline quant into a separate LDS slot.
+- Keep the drained last two K tiles as pure compute, matching the aiter
+  `kStages=2` structure.
+
+Default graph replay measurement uses the longer `bench.py` defaults:
+
+```text
+warmup=100 graph_iters=2000 measure=51 graph_warmup_replays=5
+```
+
+Stage-delta graph replay result after the pipeline change:
+
+| M | aiter | FlyDSL sort + aiter GEMM | FlyDSL GEMM1 + aiter GEMM2 | all FlyDSL | sort delta | GEMM1 delta | GEMM2 delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 39.164 us | 40.300 us | 52.012 us | 53.232 us | +1.135 us | +11.712 us | +1.220 us |
+| 8 | 58.727 us | 59.326 us | 66.738 us | 68.100 us | +0.599 us | +7.412 us | +1.362 us |
+| 16 | 96.095 us | 97.186 us | 99.299 us | 100.989 us | +1.091 us | +2.113 us | +1.690 us |
+| 32 | 146.344 us | 147.723 us | 152.987 us | 154.751 us | +1.380 us | +5.264 us | +1.764 us |
+| 64 | 200.434 us | 202.720 us | 211.454 us | 214.212 us | +2.286 us | +8.734 us | +2.758 us |
+| 128 | 251.650 us | 255.206 us | 261.301 us | 265.713 us | +3.556 us | +6.095 us | +4.412 us |
+
+Correctness stayed close to aiter for every row above:
+
+```text
+cos(sort_aiter, aiter)       >= 0.999996
+cos(gemm1fly_aiter, aiter)   >= 0.999997
+cos(allfly, aiter)           >= 0.999997
+```
+
+Interpretation: the previous BM16 FlyDSL GEMM1 path serialized inline quant,
+B loads, wait/barrier, and MFMA for every K tile.  The v1 pipeline removes a
+large part of that bubble.  The largest remaining gaps are now `M=4`
+(`+11.7 us` GEMM1) and `M=64` (`+8.7 us` GEMM1), while `M=16` is within about
+`+2.1 us` for GEMM1.
