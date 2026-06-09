@@ -728,3 +728,77 @@ local_mxfp4_opt_gemm1_us=2148.7
 
 This is a runnable checkpoint. It improves the earlier v1 CUDAGraph snapshot
 (`2248.6us`) but GEMM1 is still not fully aligned with aiter.
+
+### Step 7: GEMM1 Two-Slot A Pipeline
+
+The next useful optimization is `flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v5`.
+It changes the GEMM1 K loop from a single A LDS slot to two A LDS slots:
+
+```text
+slot 0: compute K tile i
+slot 1: preload A for K tile i + 1
+```
+
+B and B-scale for the next tile are also issued before computing the current
+tile. This mirrors the important part of aiter's two-stage GEMM1 pipeline
+without changing FlyDSL compiler passes.
+
+The launch grid is not the main GEMM1 issue:
+
+```text
+aiter GEMM1 CTA grid:  6136 x 1 x 1, block 256
+FlyDSL GEMM1 CTA grid: 4 x 1534 x 1, block 256
+```
+
+Both are 6136 CTAs. `rocprofv3` reports global work-items, so the same launch
+appears as:
+
+```text
+aiter:  Grid_Size=(1570816, 1, 1)
+FlyDSL: Grid_Size=(1024, 1534, 1)
+```
+
+Static GEMM1 ISA counts after v5:
+
+```text
+                 aiter GEMM1    FlyDSL GEMM1 v3    FlyDSL GEMM1 v5
+mfma_scale       1792           1792               1792
+buffer_load      408            414                414
+ds_read          536            543                543
+ds_write         128            96                 96
+s_waitcnt        320            599                492
+s_barrier        30             58                 31
+s_nop            123            388                416
+```
+
+Validated CUDAGraph result for v5:
+
+```text
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_cos=1.000000
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_max_abs=0.000000
+aiter_mxfp4_moe_us=1805.4
+local_mxfp4_opt_gemm1_us=2128.0
+```
+
+Torch profiler snapshot for the GEMM1 kernel itself:
+
+```text
+aiter GEMM1:  733.9us
+FlyDSL v5:   1070.8us
+```
+
+Resource metadata from the FlyDSL cached artifact:
+
+```text
+agpr_count=0
+sgpr_count=42
+vgpr_count=238
+spill=0
+LDS=131072
+```
+
+This confirms the current remaining GEMM1 gap is no longer grid or raw load
+count. The biggest static differences are now the extra `s_waitcnt` count and
+the much larger `s_nop` scheduler padding. A tried source-level reorder that
+held A fixed while sweeping N groups stayed correct but regressed CUDAGraph
+time to about `2286.8us`, so it was not kept.
