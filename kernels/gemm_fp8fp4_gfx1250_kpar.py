@@ -81,6 +81,7 @@ def compile_fp8fp4_gemm(
     tile_k: int = 128,
     m_warp: int = 2,
     n_warp: int = 2,
+    k_warp: int = 1,
     num_buffers: int = 2,
     waves_per_eu: int = None,
     l2_prefetch_distance: int = 2,
@@ -148,6 +149,14 @@ def compile_fp8fp4_gemm(
         raise ValueError(f"num_buffers must be 2, 3, or 4, got {num_buffers}")
     if split_k < 1:
         raise ValueError(f"split_k must be >= 1, got {split_k}")
+    if k_warp < 1:
+        raise ValueError(f"k_warp must be >= 1, got {k_warp}")
+    if k_warp > 1 and split_k > 1:
+        raise ValueError("k_warp > 1 is incompatible with split_k > 1")
+    if k_warp > 1 and use_tdm_store:
+        raise ValueError("k_warp > 1 requires use_tdm_store=False (epilogue uses LDS reduce + buffer store)")
+    if k_warp > 1 and wave_specialized_tdm:
+        raise ValueError("k_warp > 1 is incompatible with wave_specialized_tdm")
 
     use_cluster = cluster_m > 1 or cluster_n > 1
     if use_cluster:
@@ -155,7 +164,7 @@ def compile_fp8fp4_gemm(
             raise ValueError(f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
     effective_waves_per_eu = waves_per_eu
 
-    num_warps = m_warp * n_warp
+    num_warps = m_warp * n_warp * k_warp
     block_threads = num_warps * WAVE_SIZE
     if block_threads > 1024:
         raise ValueError(f"block_threads must be <= 1024, got {block_threads}")
@@ -226,6 +235,14 @@ def compile_fp8fp4_gemm(
 
     k_wmma_steps = tile_k // WMMA_K
 
+    # k_warp: each warp handles a K-slice of size tile_k // k_warp
+    warp_k_chunk = tile_k // k_warp        # K elements per warp (in compute)
+    warp_k_wmma_steps = warp_k_chunk // WMMA_K  # number of WMMA k-subtiles per warp
+    if k_warp > 1 and tile_k % (k_warp * WMMA_K) != 0:
+        raise ValueError(
+            f"tile_k={tile_k} must be divisible by k_warp * WMMA_K = {k_warp * WMMA_K}"
+        )
+
     wmma_m_rep = warp_tile_m // WMMA_M
     wmma_n_rep = warp_tile_n // WMMA_N_EFF
     n_accs = wmma_m_rep * wmma_n_rep
@@ -264,6 +281,8 @@ def compile_fp8fp4_gemm(
     # deriving per-wave offsets from ``wave_id``. In wave-specialized mode we
     # dedicate one loader wave to each tensor (A/B/A_scale/B_scale), so each
     # active loader wave must issue a full-tile descriptor by itself.
+    # For k_warp > 1: all num_warps (= m_warp * n_warp * k_warp) waves
+    # cooperatively load the same A/B tile into LDS.
     tdm_desc_num_warps = 1 if wave_specialized_tdm else num_warps
 
     # All pipeline stages share the same intra-stage layout in the generic
@@ -392,6 +411,25 @@ def compile_fp8fp4_gemm(
         if total_d_bytes > arena_total_bytes:
             arena_total_bytes = total_d_bytes
             arena_alloc.ptr = total_d_bytes
+    # k_warp > 1: epilogue LDS reduce buffer.
+    # After the main loop the A/B pipeline LDS is idle, so we alias the
+    # reduce buffer to byte offset 0 of the arena (reuse is safe because
+    # all TDM traffic has completed before the reduce).
+    # Layout: [k_warp, n_accs, ACC_VEC_SIZE] f32 elements.
+    # Each warp writes n_accs * ACC_VEC_SIZE f32 values = n_accs * ACC_VEC_SIZE * 4 bytes.
+    kpar_reduce_bytes_per_warp = 0
+    kpar_reduce_total_bytes = 0
+    kpar_reduce_f16_count = 0
+    if k_warp > 1:
+        # n_accs and ACC_VEC_SIZE known at compile time here
+        _kpar_n_accs = (warp_tile_m // WMMA_M) * (warp_tile_n // WMMA_N_EFF)
+        kpar_reduce_bytes_per_warp = _kpar_n_accs * ACC_VEC_SIZE * 4  # f32 bytes
+        kpar_reduce_total_bytes = k_warp * kpar_reduce_bytes_per_warp
+        kpar_reduce_f16_count = kpar_reduce_total_bytes // 2
+        if kpar_reduce_total_bytes > arena_total_bytes:
+            arena_total_bytes = kpar_reduce_total_bytes
+            arena_alloc.ptr = kpar_reduce_total_bytes
+
     check_smem_capacity(arena_total_bytes, gpu_arch)
 
     # TENSORcnt is tracked per-wave in hardware. Wave-specialized TDM issues one
@@ -426,6 +464,7 @@ def compile_fp8fp4_gemm(
     COMPUTE_SCHEDULE_FP8_QUADRANT = "fp8_quadrant"
     COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE = "fp8_deep_pipeline"
     COMPUTE_SCHEDULE_B_STREAMING = "b_streaming"
+    COMPUTE_SCHEDULE_K_PARALLEL = "k_parallel"
 
     fp8_deep_pipeline_eligible = (
         data_format in ("fp8", "a8w4")
@@ -447,6 +486,8 @@ def compile_fp8fp4_gemm(
         )
 
     def _pick_compute_schedule_kind():
+        if k_warp > 1:
+            return COMPUTE_SCHEDULE_K_PARALLEL
         if b_streaming:
             return COMPUTE_SCHEDULE_B_STREAMING
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8:
@@ -466,6 +507,7 @@ def compile_fp8fp4_gemm(
         return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
 
     compute_schedule_kind = _pick_compute_schedule_kind()
+    use_k_parallel_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_K_PARALLEL
     use_fp4_bank_friendly_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
@@ -554,20 +596,44 @@ def compile_fp8fp4_gemm(
 
         # The FP8 deep pipeline runs cleaner when adjacent wave ids advance M
         # first; keep the default mapping for the other schedules.
-        if const_expr(use_fp8_deep_pipeline_schedule):
+        # k_warp > 1: 3D layout (m_warp, n_warp, k_warp) within the warp grid;
+        # wave_k_idx selects this warp's K-slice within the tile.
+        if const_expr(k_warp > 1):
+            layout_thr = fx.make_layout(
+                (m_warp, n_warp, k_warp, 2, 16),
+                (n_warp * k_warp * WAVE_SIZE, k_warp * WAVE_SIZE, WAVE_SIZE, 16, 1),
+            )
+            thr_coord = idx2crd(tx, layout_thr)
+            wave_m_idx = fx.get(thr_coord, 0)
+            wave_n_idx = fx.get(thr_coord, 1)
+            wave_k_idx = fx.get(thr_coord, 2)
+            lane_kgrp = fx.get(thr_coord, 3)
+            lane16 = fx.get(thr_coord, 4)
+        elif const_expr(use_fp8_deep_pipeline_schedule):
             layout_thr = fx.make_layout((m_warp, n_warp, 2, 16), (WAVE_SIZE, m_warp * WAVE_SIZE, 16, 1))
+            thr_coord = idx2crd(tx, layout_thr)
+            wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
+                fx.get(thr_coord, 0),
+                fx.get(thr_coord, 1),
+                fx.get(thr_coord, 2),
+                fx.get(thr_coord, 3),
+            )
+            wave_k_idx = arith.index(0)
         else:
             layout_thr = fx.make_layout((m_warp, n_warp, 2, 16), (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
-        thr_coord = idx2crd(tx, layout_thr)
-        wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
-            fx.get(thr_coord, 0),
-            fx.get(thr_coord, 1),
-            fx.get(thr_coord, 2),
-            fx.get(thr_coord, 3),
-        )
+            thr_coord = idx2crd(tx, layout_thr)
+            wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
+                fx.get(thr_coord, 0),
+                fx.get(thr_coord, 1),
+                fx.get(thr_coord, 2),
+                fx.get(thr_coord, 3),
+            )
+            wave_k_idx = arith.index(0)
 
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
+        # K-slice start for this warp (in units of WMMA_K steps within the tile)
+        warp_k_start = wave_k_idx * arith.index(warp_k_wmma_steps)
 
         if const_expr(use_buffer_vgpr_scale):
             # Direct global->VGPR scale load (no TDM/LDS). Coalesced lane-major
@@ -1049,15 +1115,10 @@ def compile_fp8fp4_gemm(
                 next_result = _load_b_and_scales(nb_buf, nb_bases, nbs_buf, nbs_bases, nas_buf, nas_bases, n_ks)
                 rocdl.s_wait_dscnt(_bs_ds_loads)
             elif const_expr(skip_wait):
-                # All current-tile operands are loop-carried VGPRs. No current-tile
-                # ds_loads are pending; wait for exactly the number of next-tile in-flight
-                # loads per k-step so the WMMA starts immediately and the prefetch
-                # loads continue to fly during WMMA execution.
-                # Half of next-tile k-step loads: LLVM (guided by sched_dsrd(half),
-                # sched_mfma(1) hints) places this first half before the wait, and the
-                # second half after wn0 WMMA. wait(half) = no-op (only half are pending).
-                _n_pf_per_ks = _bs_ds_loads + wmma_m_rep * DS_LOADS_PER_A_FRAG
-                rocdl.s_wait_dscnt(_n_pf_per_ks // 2)
+                # All current-tile operands are loop-carried VGPRs (pre-fetched from the
+                # previous tile). No current-tile ds_loads are in flight; skip the wait
+                # so externally-issued next-tile ds_loads can complete during WMMA.
+                pass
             else:
                 rocdl.s_wait_dscnt(0)
 
@@ -1256,6 +1317,106 @@ def compile_fp8fp4_gemm(
                 current_accs = _a_streaming_compute(
                     current_accs, a_buf, a_bases, prev_b, prev_bs, prev_as,
                     k_wmma_steps - 1, emit_filler=emit_filler,
+                )
+            return current_accs
+
+        def compute_tile_k_parallel(
+            accs_in,
+            lds_a,
+            lds_b,
+            lds_as,
+            lds_bs,
+            emit_filler=None,
+            mid_compute_callback=None,
+        ):
+            """Compute tile for k_warp > 1: each warp only processes its K-slice.
+
+            Strategy: pre-shift the per-lane LDS base addresses by this warp's
+            K-slice byte offset (runtime, based on wave_k_idx). Then use the
+            standard load_a/b_frag helpers with compile-time ks_local in
+            [0, warp_k_wmma_steps), keeping all `ks` arguments as Python ints.
+
+            K-slice byte strides (compile-time):
+              A: warp_k_chunk // PACK_FACTOR_A bytes per warp
+              B: warp_k_chunk // PACK_FACTOR_B * 16 bytes per warp (tile layout)
+              A-scale: warp_k_wmma_steps * wmma_m_rep * SCALES_PER_WMMA bytes
+              B-scale: warp_k_wmma_steps * b_scale_load_rep * SCALES_PER_WMMA bytes
+            """
+            current_accs = list(accs_in)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
+            as_buf, as_bases = _precompute_scale_lane_bases(
+                lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a
+            )
+            bs_buf, bs_bases = _precompute_scale_lane_bases(
+                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
+            )
+
+            # Compile-time strides (bytes per warp K-slice)
+            _kpar_a_stride = warp_k_chunk // PACK_FACTOR_A
+            _kpar_b_stride = warp_k_chunk // PACK_FACTOR_B * 16
+            _kpar_as_stride = warp_k_wmma_steps * wmma_m_rep * SCALES_PER_WMMA
+            _kpar_bs_stride = warp_k_wmma_steps * b_scale_load_rep * SCALES_PER_WMMA
+
+            # Runtime K-slice byte offsets for this warp
+            kpar_a_off = wave_k_idx * arith.index(_kpar_a_stride)
+            kpar_b_off = wave_k_idx * arith.index(_kpar_b_stride)
+            kpar_as_off = wave_k_idx * arith.index(_kpar_as_stride)
+            kpar_bs_off = wave_k_idx * arith.index(_kpar_bs_stride)
+
+            # Pre-shift lane bases so that ks_local=0 corresponds to this warp's slice
+            kpar_a_bases = [base + kpar_a_off for base in a_bases]
+            kpar_b_bases = [base + kpar_b_off for base in b_bases]
+            kpar_as_bases = [as_bases[0] + kpar_as_off]
+            kpar_bs_bases = [bs_bases[0] + kpar_bs_off]
+
+            # Call standard load/compute helpers with compile-time ks_local ∈ [0, warp_k_wmma_steps)
+            if const_expr(warp_k_wmma_steps == 1):
+                b_frags, b_scales, a_scales = _load_b_and_scales(
+                    b_buf, kpar_b_bases, bs_buf, kpar_bs_bases, as_buf, kpar_as_bases, 0
+                )
+                current_accs = _a_streaming_compute(
+                    current_accs,
+                    a_buf,
+                    kpar_a_bases,
+                    b_frags,
+                    b_scales,
+                    a_scales,
+                    0,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback,
+                )
+            else:
+                prev_b, prev_bs, prev_as = _load_b_and_scales(
+                    b_buf, kpar_b_bases, bs_buf, kpar_bs_bases, as_buf, kpar_as_bases, 0
+                )
+                for ks_local in range_constexpr(warp_k_wmma_steps - 1):
+                    _mid_cb = mid_compute_callback if ks_local == 0 else None
+                    current_accs, (prev_b, prev_bs, prev_as) = _a_streaming_compute(
+                        current_accs,
+                        a_buf,
+                        kpar_a_bases,
+                        prev_b,
+                        prev_bs,
+                        prev_as,
+                        ks_local,
+                        next_bs_info=(
+                            b_buf, kpar_b_bases,
+                            bs_buf, kpar_bs_bases,
+                            as_buf, kpar_as_bases,
+                            ks_local + 1,
+                        ),
+                        mid_compute_callback=_mid_cb,
+                    )
+                current_accs = _a_streaming_compute(
+                    current_accs,
+                    a_buf,
+                    kpar_a_bases,
+                    prev_b,
+                    prev_bs,
+                    prev_as,
+                    warp_k_wmma_steps - 1,
+                    emit_filler=emit_filler,
                 )
             return current_accs
 
@@ -1830,19 +1991,13 @@ def compile_fp8fp4_gemm(
             _scale_dsrd = 0 if is_ptpc else 2
 
             if const_expr(_use_lds_pf):
-                # Interleaved full-tile prefetch: distribute next-tile ds_loads evenly
-                # across WMMAs so each WMMA group is preceded by roughly equal loads.
-                # floor(total/n_wmma) loads per WMMA; remainder goes to the first group.
+                # Interleaved full-tile prefetch: for each k-step, next-tile's ds_loads
+                # (10 total: A+B+scale) are emitted before the WMMA group; LLVM interleaves
+                # them into the WMMA latency slots guided by these hints.
                 _next_ks_loads = wmma_n_rep * _b_loads_per_frag + _scale_dsrd + wmma_m_rep * DS_LOADS_PER_A_FRAG
-                _n_wmma_per_ks = wmma_n_rep * wmma_m_rep
-                _loads_per_wmma = _next_ks_loads // _n_wmma_per_ks
-                _loads_extra = _next_ks_loads % _n_wmma_per_ks
                 for _ks in range_constexpr(k_wmma_steps):
-                    for _wn in range_constexpr(_n_wmma_per_ks):
-                        # Extra loads go to the first WMMA slot in each k-step.
-                        _this_loads = _loads_per_wmma + (1 if _wn < _loads_extra else 0)
-                        rocdl.sched_dsrd(_this_loads)
-                        rocdl.sched_mfma(1)
+                    rocdl.sched_dsrd(_next_ks_loads)
+                    rocdl.sched_mfma(wmma_n_rep * wmma_m_rep)
                 rocdl.sched_barrier(0)
                 return
 
@@ -1966,6 +2121,16 @@ def compile_fp8fp4_gemm(
             next_lds_bs=None,
             next_lds_as=None,
         ):
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_K_PARALLEL):
+                return compute_tile_k_parallel(
+                    accs_in,
+                    lds_a,
+                    lds_b,
+                    lds_as,
+                    lds_bs,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback,
+                )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
                 return compute_tile_b_streaming(
                     accs_in,
@@ -2050,7 +2215,10 @@ def compile_fp8fp4_gemm(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_scheduled():
-            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_K_PARALLEL):
+                # K-parallel uses the standard row-major scheduler (same streaming pattern)
+                hot_loop_scheduler()
+            elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
                 hot_loop_scheduler_b_streaming()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 hot_loop_scheduler_fp4_bank_friendly()
@@ -2444,18 +2612,9 @@ def compile_fp8fp4_gemm(
             pipeline_fence_signal(outstanding=outstanding, use_cluster=use_cluster)
 
         if const_expr(wave_specialized_tdm):
-            # Hoist uniform dg0 components to SGPR once.  readfirstlane marks each
-            # value as "provably uniform" to LLVM's divergence analysis, so when
-            # these are later packed into a dgroup0 vector LLVM allocates that
-            # vector in SGPR space and emits s_mov rather than v_readfirstlane
-            # per tile.
-            _pred_sgpr = rocdl.readfirstlane(T.i32, active_pred_const)
-            _addr_hi_sgpr = rocdl.readfirstlane(T.i32, active_addr_hi)
-            _stage_lds_sgprs = [rocdl.readfirstlane(T.i32, v) for v in active_stage_lds_addr]
 
             def _issue_active_tdm(load_stage, addr_box, k_prefetch=None):
-                # Build dg0 entirely from SGPR values so LLVM keeps it in SGPR space.
-                dg0 = _pack_dg0(_pred_sgpr, _stage_lds_sgprs[load_stage], addr_box[0], _addr_hi_sgpr)
+                dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[load_stage], addr_box[0], active_addr_hi)
                 tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
                 addr_box[0] = addr_box[0] + active_adv_i32
                 if k_prefetch is not None:
@@ -2896,35 +3055,131 @@ def compile_fp8fp4_gemm(
             _ptpc_sa, _ptpc_sb = _ptpc_scale_box[0]
             accs = epilogue_apply_ptpc_scale(accs, _ptpc_sa, _ptpc_sb)
 
-        def _emit_tdm_store():
-            if const_expr(d_need_epilogue_fence):
-                _pipeline_fence(outstanding=0)
-            rocdl.sched_barrier(0)
-            epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
+        # ── k_warp > 1: LDS cross-warp reduce ──
+        # After the main loop all TDM traffic is done; arena LDS is free to reuse.
+        # Each warp stores its partial accs at offset wave_k_idx * bytes_per_warp.
+        # gpu.barrier() synchronises, then wave_k_idx==0 sums all k_warp partials.
+        #
+        # LDS layout per warp (byte offsets from warp base):
+        #   FP4 (vec<16,f32>): acc[i] at byte i * 64 (= i * ACC_VEC_SIZE * 4)
+        #     stored as 2 × 8-element halves, each half 32 bytes:
+        #       half 0: bytes [i*64 + 0 .. i*64 + 31]  → 2 × lds_store_b128
+        #       half 1: bytes [i*64 + 32 .. i*64 + 63] → 2 × lds_store_b128
+        #   FP8/A8W4 (vec<8,f32>): acc[i] at byte i * 32 (= i * ACC_VEC_SIZE * 4)
+        #       bytes [i*32 + 0 .. i*32 + 31]  → 2 × lds_store_b128
+        #
+        # store_acc_vec8_to_lds uses f16-element offsets (each f16 = 2 bytes).
+        # Per-acc f16 stride: ACC_VEC_SIZE * 4 / 2 = ACC_VEC_SIZE * 2 f16 elems.
+        if const_expr(k_warp > 1):
+            # Allocate reduce buffer at arena base (pipeline LDS is no longer needed)
+            kpar_reduce_smem = SmemPtr(
+                arena_base_ptr, 0, elem_ty_lds, shape=(kpar_reduce_f16_count,)
+            )
+            kpar_reduce_buf = get_lds_memref(kpar_reduce_smem)
+            kpar_reduce_idx = extract_lds_base_idx(kpar_reduce_smem)
+
+            # Per-acc f16-element stride = ACC_VEC_SIZE * 2  (ACC_VEC_SIZE f32 = ACC_VEC_SIZE * 2 f16)
+            _kpar_acc_f16_stride = ACC_VEC_SIZE * 2
+            # f16 elements per warp = n_accs * ACC_VEC_SIZE * 2
+            _kpar_elems_per_warp = kpar_reduce_bytes_per_warp // 2
+
+            # Each warp stores its n_accs partial accumulators
+            _kpar_warp_base = wave_k_idx * arith.index(_kpar_elems_per_warp)
+            for _ki in range_constexpr(n_accs):
+                _acc_f16_base = _ki * _kpar_acc_f16_stride  # compile-time f16 offset within warp
+                if const_expr(ACC_VEC_SIZE == 16):
+                    # FP4: vec<16,f32> split into 2 × 8-element halves
+                    # half 0: f16 offset = _acc_f16_base,       half 1: _acc_f16_base + 16
+                    for _half in range_constexpr(2):
+                        _h_sub8 = _get_acc_sub8(accs, _ki, _half * 8)
+                        _imm = _acc_f16_base + _half * 16  # f16 elements
+                        store_acc_vec8_to_lds(kpar_reduce_buf, _kpar_warp_base, _imm, _h_sub8, out_elem=None)
+                else:
+                    # FP8/A8W4: vec<8,f32> stored as 2 × lds_store_b128
+                    store_acc_vec8_to_lds(
+                        kpar_reduce_buf, _kpar_warp_base, _acc_f16_base,
+                        _get_acc_sub8(accs, _ki, 0), out_elem=None
+                    )
+
             rocdl.s_wait_dscnt(0)
-            tdm_ops.tensor_store_2d(d_desc)
-            tdm_ops.tensor_wait(0)
+            gpu.barrier()
 
-        def _emit_buffer_store():
-            rocdl.sched_barrier(0)
-            if const_expr(epi_addrs_box[0] is None):
-                epi_addrs_box[0] = epilogue_prepare_addrs()
-            if const_expr(split_k > 1):
-                epilogue_atomic_adds(accs, epi_addrs_box[0])
+            # wave_k_idx == 0 reads and sums the other k_warp-1 partials
+            _kpar_is_reducer = wave_k_idx == arith.index(0)
+            if_reduce = scf.IfOp(_kpar_is_reducer, [], has_else=False)
+            with ir.InsertionPoint(if_reduce.then_block):
+                final_accs = list(accs)
+                for _w in range_constexpr(1, k_warp):
+                    # Byte base for warp _w in the reduce buffer
+                    _w_base_bytes = _w * kpar_reduce_bytes_per_warp
+                    for _ki in range_constexpr(n_accs):
+                        # Byte offset to start of acc[_ki] for warp _w
+                        _acc_byte_base = _w_base_bytes + _ki * ACC_VEC_SIZE * 4
+                        if const_expr(ACC_VEC_SIZE == 16):
+                            # FP4: 4 × ds_load_b128 → reconstruct vec<16,f32>
+                            # half 0: bytes [_acc_byte_base + 0 .. +31]
+                            # half 1: bytes [_acc_byte_base + 32 .. +63]
+                            raw0 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base)))
+                            raw1 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 16)))
+                            raw2 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 32)))
+                            raw3 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 48)))
+                            f32_0 = arith.bitcast(T.vec(4, T.f32), raw0)
+                            f32_1 = arith.bitcast(T.vec(4, T.f32), raw1)
+                            f32_2 = arith.bitcast(T.vec(4, T.f32), raw2)
+                            f32_3 = arith.bitcast(T.vec(4, T.f32), raw3)
+                            # Reassemble: [f32_0 | f32_1] = half0 vec<8,f32>, [f32_2 | f32_3] = half1
+                            half0 = fx.Vector(f32_0).shuffle(fx.Vector(f32_1), list(range(8)))
+                            half1 = fx.Vector(f32_2).shuffle(fx.Vector(f32_3), list(range(8)))
+                            partial16 = half0.shuffle(half1, list(range(16)))
+                            final_accs[_ki] = (fx.Vector(final_accs[_ki]).addf(partial16)).ir_value()
+                        else:
+                            # FP8/A8W4: 2 × ds_load_b128 → vec<8,f32>
+                            raw_lo = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base)))
+                            raw_hi = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 16)))
+                            f32_lo = arith.bitcast(T.vec(4, T.f32), raw_lo)
+                            f32_hi = arith.bitcast(T.vec(4, T.f32), raw_hi)
+                            partial8 = fx.Vector(f32_lo).shuffle(fx.Vector(f32_hi), list(range(8)))
+                            final_accs[_ki] = (fx.Vector(final_accs[_ki]).addf(partial8)).ir_value()
+
+                rocdl.s_wait_dscnt(0)
+
+                # Normal buffer store (only wave_k_idx==0 reaches here)
+                _kpar_addrs = epilogue_prepare_addrs()
+                epilogue_stores(final_accs, _kpar_addrs)
+                scf.YieldOp([])
+            # Other k_warp warps do nothing after the barrier
+
+        # k_warp > 1: store already handled in the LDS reduce block above
+        if const_expr(k_warp == 1):
+            def _emit_tdm_store():
+                if const_expr(d_need_epilogue_fence):
+                    _pipeline_fence(outstanding=0)
+                rocdl.sched_barrier(0)
+                epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
+                rocdl.s_wait_dscnt(0)
+                tdm_ops.tensor_store_2d(d_desc)
+                tdm_ops.tensor_wait(0)
+
+            def _emit_buffer_store():
+                rocdl.sched_barrier(0)
+                if const_expr(epi_addrs_box[0] is None):
+                    epi_addrs_box[0] = epilogue_prepare_addrs()
+                if const_expr(split_k > 1):
+                    epilogue_atomic_adds(accs, epi_addrs_box[0])
+                else:
+                    epilogue_stores(accs, epi_addrs_box[0])
+
+            if const_expr(use_tdm_store):
+                full_tile = (blk_m + arith.index(tile_m)) <= m_idx
+                if_op = scf.IfOp(full_tile, [], has_else=True)
+                with ir.InsertionPoint(if_op.then_block):
+                    _emit_tdm_store()
+                    scf.YieldOp([])
+                with ir.InsertionPoint(if_op.else_block):
+                    _emit_buffer_store()
+                    scf.YieldOp([])
             else:
-                epilogue_stores(accs, epi_addrs_box[0])
-
-        if const_expr(use_tdm_store):
-            full_tile = (blk_m + arith.index(tile_m)) <= m_idx
-            if_op = scf.IfOp(full_tile, [], has_else=True)
-            with ir.InsertionPoint(if_op.then_block):
-                _emit_tdm_store()
-                scf.YieldOp([])
-            with ir.InsertionPoint(if_op.else_block):
                 _emit_buffer_store()
-                scf.YieldOp([])
-        else:
-            _emit_buffer_store()
 
     cache_tag = (
         data_format,
@@ -2935,6 +3190,7 @@ def compile_fp8fp4_gemm(
         tile_k,
         m_warp,
         n_warp,
+        k_warp,
         num_buffers,
         compute_schedule_kind,
         effective_waves_per_eu,
