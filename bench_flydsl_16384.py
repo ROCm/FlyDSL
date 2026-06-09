@@ -45,6 +45,14 @@ from kimi_fp4_moe_16384_opt import (  # noqa: E402
 
 M = TOKEN
 
+# The 16k-M pipeline is much longer than the small BM16 path, but the previous
+# defaults were smoke-test sized. Keep the graph large enough to amortize event
+# noise while avoiding an unbounded multi-hour default run.
+DEFAULT_WARMUP = 200
+DEFAULT_GRAPH_ITERS = 256
+DEFAULT_GRAPH_MEASURE = 101
+DEFAULT_REPEAT = 9
+
 
 @dataclass(frozen=True)
 class KimiShape:
@@ -251,10 +259,10 @@ def max_abs(a, b):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--warmup", type=int, default=20)
-    parser.add_argument("--graph-iters", type=int, default=40)
-    parser.add_argument("--measure", type=int, default=40)
-    parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP)
+    parser.add_argument("--graph-iters", type=int, default=DEFAULT_GRAPH_ITERS)
+    parser.add_argument("--measure", type=int, default=DEFAULT_GRAPH_MEASURE)
+    parser.add_argument("--repeat", type=int, default=DEFAULT_REPEAT)
     parser.add_argument(
         "--runners",
         default=None,
@@ -274,6 +282,11 @@ def main():
     print(f"stage2={STAGE2_KERNEL}")
     print(f"mxfp4_stage1={MXFP4_STAGE1_KERNEL}")
     print(f"mxfp4_stage2={MXFP4_STAGE2_KERNEL}")
+    print(
+        f"Timing: graph warmup={args.warmup} graph_iters={args.graph_iters} "
+        f"measure={args.measure} repeat={args.repeat} "
+        f"measured_calls_per_runner={args.graph_iters * args.measure * args.repeat}"
+    )
 
     weights = build_weights(SHAPE, device)
     hidden, topk_ids, topk_weight = build_inputs(SHAPE, device)

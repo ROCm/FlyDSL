@@ -16,12 +16,15 @@ RUNNER_ORDER = (
     "allfly",
 )
 
-DEFAULT_SMALL_WARMUP = 10000
-DEFAULT_SMALL_EAGER_ITERS = 200000
-DEFAULT_SMALL_GRAPH_ITERS = 49152
-DEFAULT_SMALL_GRAPH_MEASURE = 701
-DEFAULT_SMALL_GRAPH_WARMUP_REPLAYS = 240
-DEFAULT_REPEAT = 31
+# Accuracy-first defaults for the tiny BM16 path. These kernels are short, so
+# use a large captured graph and many replay measurements by default; override
+# downward only for smoke tests.
+DEFAULT_SMALL_WARMUP = 20000
+DEFAULT_SMALL_EAGER_ITERS = 500000
+DEFAULT_SMALL_GRAPH_ITERS = 65536
+DEFAULT_SMALL_GRAPH_MEASURE = 1001
+DEFAULT_SMALL_GRAPH_WARMUP_REPLAYS = 320
+DEFAULT_REPEAT = 41
 
 
 def _time_fn(fn, args):

@@ -31,12 +31,12 @@ KIMI = Shape(NE=385, H=7168, INTER=512, TOPK=9)
 # CUDA-event and graph-replay noise can move the conclusion, so default to many
 # captured calls, replay measurements, and independent graph captures. Override
 # these down only for quick smoke tests or exploratory large-M sweeps.
-DEFAULT_WARMUP = 5000
-DEFAULT_EAGER_ITERS = 100000
-DEFAULT_GRAPH_ITERS = 32768
-DEFAULT_GRAPH_MEASURE = 701
-DEFAULT_GRAPH_WARMUP_REPLAYS = 160
-DEFAULT_REPEAT = 11
+DEFAULT_WARMUP = 10000
+DEFAULT_EAGER_ITERS = 200000
+DEFAULT_GRAPH_ITERS = 49152
+DEFAULT_GRAPH_MEASURE = 1001
+DEFAULT_GRAPH_WARMUP_REPLAYS = 240
+DEFAULT_REPEAT = 21
 
 # mxfp4 tuned dispatch per token bucket (from kimik2_5_mxfp4_tuned_fmoe.csv).
 # (M_max, block_m, g1_suffix, g2_suffix)

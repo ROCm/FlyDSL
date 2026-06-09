@@ -26,6 +26,16 @@ from bench_flydsl_16384 import (  # noqa: E402
 )
 
 
+# Profiler windows need to be longer than smoke tests for stable per-kernel
+# averages, especially in graph mode where the interesting unit is one logical
+# pipeline iteration inside the captured graph.
+DEFAULT_PROFILE_WARMUP = 100
+DEFAULT_PROFILE_ITERS = 8
+DEFAULT_PROFILE_GRAPH_ITERS = 64
+DEFAULT_PROFILE_REPEAT = 21
+DEFAULT_PROFILE_MAX_RETRIES = 400
+
+
 def _is_cuda_event(evt) -> bool:
     device_type = str(getattr(evt, "device_type", ""))
     device_time = float(getattr(evt, "self_device_time_total", 0.0) or 0.0)
@@ -362,29 +372,29 @@ def main():
         default="graph",
         help="profile CUDA/HIP graph replay by default; use eager for normal launch profiling",
     )
-    parser.add_argument("--warmup", type=int, default=20)
+    parser.add_argument("--warmup", type=int, default=DEFAULT_PROFILE_WARMUP)
     parser.add_argument(
         "--iters",
         type=int,
-        default=5,
+        default=DEFAULT_PROFILE_ITERS,
         help="eager iterations, or graph replay count in graph mode",
     )
     parser.add_argument(
         "--graph-iters",
         type=int,
-        default=20,
+        default=DEFAULT_PROFILE_GRAPH_ITERS,
         help="pipeline iterations captured inside each graph replay",
     )
     parser.add_argument(
         "--repeat",
         type=int,
-        default=5,
+        default=DEFAULT_PROFILE_REPEAT,
         help="valid profiler samples to collect per runner",
     )
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=40,
+        default=DEFAULT_PROFILE_MAX_RETRIES,
         help="extra profiler attempts allowed when event sequences are incomplete",
     )
     parser.add_argument(
