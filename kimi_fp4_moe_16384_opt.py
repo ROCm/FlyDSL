@@ -528,7 +528,7 @@ def compile_kimi_mxfp4_gemm1_16384():
     # Output scale layout consumed by GEMM2 for K=INTER_DIM=512.
     k_out_as_per_chunk_dw = ((INTER_DIM // 32) // 4 // 2) * 64
 
-    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v34_dppbound"
+    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v36_agprasm"
 
     @flyc.kernel(name=module_name)
     def gemm1(
@@ -547,6 +547,7 @@ def compile_kimi_mxfp4_gemm1_16384():
         f32 = T.f32
         vec4_f32 = T.vec(4, f32)
         vec2_i64 = T.vec(2, i64)
+        vec4_i32 = T.vec(4, i32)
         vec4_i64 = T.vec(4, i64)
         vec8_i32 = T.vec(8, i32)
         vec16_x = T.vec(16, T.f8)
@@ -748,6 +749,49 @@ def compile_kimi_mxfp4_gemm1_16384():
             v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
             return vector.bitcast(vec8_i32, v4)
 
+        def pack_i64x2_to_i32x4(x0, x1):
+            v2 = vector.from_elements(vec2_i64, [x0, x1])
+            return vector.bitcast(vec4_i32, v2)
+
+        def _raw(v):
+            return v.ir_value() if hasattr(v, "ir_value") else v
+
+        def mfma_scale_agpr_init(a128_v4, b128_v4, op_sel_a: int, scale_a, op_sel_b: int, scale_b):
+            alo = op_sel_a & 1
+            ahi = (op_sel_a >> 1) & 1
+            blo = op_sel_b & 1
+            bhi = (op_sel_b >> 1) & 1
+            asm = (
+                "v_mfma_scale_f32_16x16x128_f8f6f4 "
+                "$0, $1, $2, 0, $3, $4 "
+                f"op_sel:[{alo},{blo},0] op_sel_hi:[{ahi},{bhi},0] cbsz:4 blgp:4"
+            )
+            return llvm.inline_asm(
+                vec4_f32,
+                [_raw(a128_v4), _raw(b128_v4), _raw(scale_a), _raw(scale_b)],
+                asm,
+                "=a,v,v,v,v",
+                has_side_effects=True,
+            )
+
+        def mfma_scale_agpr_accum(a128_v4, b128_v4, acc, op_sel_a: int, scale_a, op_sel_b: int, scale_b):
+            alo = op_sel_a & 1
+            ahi = (op_sel_a >> 1) & 1
+            blo = op_sel_b & 1
+            bhi = (op_sel_b >> 1) & 1
+            asm = (
+                "v_mfma_scale_f32_16x16x128_f8f6f4 "
+                "$0, $1, $2, $0, $3, $4 "
+                f"op_sel:[{alo},{blo},0] op_sel_hi:[{ahi},{bhi},0] cbsz:4 blgp:4"
+            )
+            return llvm.inline_asm(
+                vec4_f32,
+                [_raw(a128_v4), _raw(b128_v4), _raw(scale_a), _raw(scale_b), _raw(acc)],
+                asm,
+                "=a,v,v,v,v,0",
+                has_side_effects=True,
+            )
+
         c0_i64 = arith.constant(0, type=i64)
         cbsz = 4
         blgp = 4
@@ -790,15 +834,15 @@ def compile_kimi_mxfp4_gemm1_16384():
                                 )
             return acc_list
 
-        def compute_tile_jmajor(acc_in, lds_x_tile, b_tile_in, a_scale, b_scale):
+        def compute_tile_jmajor(acc_in, lds_x_tile, b_tile_in, a_scale, b_scale, init_zero: bool = False):
             acc_list = list(acc_in)
-            a_pairs = []
+            a_pairs_v4 = []
             for k_idx in range_constexpr(k_unroll):
                 col_base = col_offset_base + arith.constant(k_idx * 128 // a_elem_vec_pack, index=True)
                 for mi_idx in range_constexpr(m_repeat):
                     curr_row_a_lds = row_a_lds + arith.constant(mi_idx * 16, index=True)
                     a0, a1 = lds_load_packs_k64(lds_x_tile, curr_row_a_lds, col_base)
-                    a_pairs.append(pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64))
+                    a_pairs_v4.append(pack_i64x2_to_i32x4(a0, a1))
 
             for ni in range_constexpr(num_acc_n_packed):
                 b_scale_i32 = b_scale[ni]
@@ -815,22 +859,29 @@ def compile_kimi_mxfp4_gemm1_16384():
                                 b_packs0, b_packs1 = b_tile_in[k_idx]
                                 b0 = b_packs0[ni_idx]
                                 b1 = b_packs1[ni_idx]
-                                b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
-                                a128 = a_pairs[k_idx * m_repeat + mi_idx]
-                                acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                    vec4_f32,
-                                    [
-                                        a128,
-                                        b128,
-                                        acc_list[acc_idx],
-                                        cbsz,
-                                        blgp,
-                                        k_idx * _scale_pack_m + imxdl,
+                                op_sel_a = k_idx * _scale_pack_m + imxdl
+                                op_sel_b = k_idx * _scale_pack_n + inxdl
+                                b128_v4 = pack_i64x2_to_i32x4(b0, b1)
+                                a128_v4 = a_pairs_v4[k_idx * m_repeat + mi_idx]
+                                if const_expr(init_zero and k_idx == 0):
+                                    acc_list[acc_idx] = mfma_scale_agpr_init(
+                                        a128_v4,
+                                        b128_v4,
+                                        op_sel_a,
                                         a_scale_val,
-                                        k_idx * _scale_pack_n + inxdl,
+                                        op_sel_b,
                                         b_scale_val,
-                                    ],
-                                )
+                                    )
+                                else:
+                                    acc_list[acc_idx] = mfma_scale_agpr_accum(
+                                        a128_v4,
+                                        b128_v4,
+                                        acc_list[acc_idx],
+                                        op_sel_a,
+                                        a_scale_val,
+                                        op_sel_b,
+                                        b_scale_val,
+                                    )
             return acc_list
 
         def compute_tile_jmajor_prefetch_a_b(
@@ -842,16 +893,17 @@ def compile_kimi_mxfp4_gemm1_16384():
             next_a_tile: int,
             next_a_slot: int,
             next_b_tile: int,
+            init_zero: bool = False,
         ):
             acc_list = list(acc_in)
             next_b_packs0, next_b_packs1 = make_empty_b_tile()
-            a_pairs = []
+            a_pairs_v4 = []
             for k_idx in range_constexpr(k_unroll):
                 col_base = col_offset_base + arith.constant(k_idx * 128 // a_elem_vec_pack, index=True)
                 for mi_idx in range_constexpr(m_repeat):
                     curr_row_a_lds = row_a_lds + arith.constant(mi_idx * 16, index=True)
                     a0, a1 = lds_load_packs_k64(lds_x_tile, curr_row_a_lds, col_base)
-                    a_pairs.append(pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64))
+                    a_pairs_v4.append(pack_i64x2_to_i32x4(a0, a1))
 
             dma_x_tile_to_lds(next_a_tile, lds_x_slots[next_a_slot])
 
@@ -870,22 +922,29 @@ def compile_kimi_mxfp4_gemm1_16384():
                                 b_packs0, b_packs1 = b_tile_in[k_idx]
                                 b0 = b_packs0[ni_idx]
                                 b1 = b_packs1[ni_idx]
-                                b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
-                                a128 = a_pairs[k_idx * m_repeat + mi_idx]
-                                acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                                    vec4_f32,
-                                    [
-                                        a128,
-                                        b128,
-                                        acc_list[acc_idx],
-                                        cbsz,
-                                        blgp,
-                                        k_idx * _scale_pack_m + imxdl,
+                                op_sel_a = k_idx * _scale_pack_m + imxdl
+                                op_sel_b = k_idx * _scale_pack_n + inxdl
+                                b128_v4 = pack_i64x2_to_i32x4(b0, b1)
+                                a128_v4 = a_pairs_v4[k_idx * m_repeat + mi_idx]
+                                if const_expr(init_zero and k_idx == 0):
+                                    acc_list[acc_idx] = mfma_scale_agpr_init(
+                                        a128_v4,
+                                        b128_v4,
+                                        op_sel_a,
                                         a_scale_val,
-                                        k_idx * _scale_pack_n + inxdl,
+                                        op_sel_b,
                                         b_scale_val,
-                                    ],
-                                )
+                                    )
+                                else:
+                                    acc_list[acc_idx] = mfma_scale_agpr_accum(
+                                        a128_v4,
+                                        b128_v4,
+                                        acc_list[acc_idx],
+                                        op_sel_a,
+                                        a_scale_val,
+                                        op_sel_b,
+                                        b_scale_val,
+                                    )
 
                     rocdl.sched_barrier(0)
                     for k_idx in range_constexpr(k_unroll):
@@ -1018,6 +1077,7 @@ def compile_kimi_mxfp4_gemm1_16384():
                         k_tile + 2,
                         next_slot,
                         k_tile + 2,
+                        init_zero=(k_tile == 0),
                     )
                 else:
                     acc = compute_tile_jmajor(
@@ -1026,6 +1086,7 @@ def compile_kimi_mxfp4_gemm1_16384():
                         b_tiles[curr_b_slot],
                         a_scale,
                         b_scales[curr_b_slot],
+                        init_zero=(k_tile == 0),
                     )
 
                 if const_expr(k_tile + 1 < num_k_tiles):

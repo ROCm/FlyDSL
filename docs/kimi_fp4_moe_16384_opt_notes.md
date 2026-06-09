@@ -1983,3 +1983,93 @@ Interpretation: `sort_place_pad` is now effectively aligned in graph replay
 profiling, with the remaining measured gap around +0.1 us.  End-to-end graph
 timing is still dominated by GEMM variance and should not be used to judge this
 specific sort-place change in isolation.
+
+## GEMM1 v36 AGPR Inline MFMA
+
+Current saved GEMM1 kernel:
+
+```text
+flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v36_agprasm
+```
+
+Motivation:
+
+- aiter BM128 GEMM1 uses inline asm constraints to keep accumulators in AGPR:
+  `=a` for the first zero-init MFMA and tied `+a` for accumulation.
+- The previous FlyDSL `v34_dppbound` used the ROCDL MFMA intrinsic for the main
+  loop.  Its final ISA had all MFMA destinations in VGPR, with resource usage
+  around `VGPR=256, AGPR=80` and graph-profiler GEMM1 medians about
+  `707-709 us`, roughly `+10-14 us` slower than aiter.
+
+Change:
+
+- Keep the v34 schedule, loads, waits, barriers, and epilogue.
+- Replace only the GEMM1 main-loop MFMA calls in `compute_tile_jmajor*` with
+  inline asm using the same instruction:
+  `v_mfma_scale_f32_16x16x128_f8f6f4`.
+- Use `=a,v,v,v,v` for the first MFMA of each accumulator and
+  `=a,v,v,v,v,0` for subsequent tied accumulation.  The tied form maps to the
+  same LLVM constraint shape emitted by clang for HIP `"+a"` inline asm.
+
+Rejected checks while developing v36:
+
+- `v35_agprinit` changed only the first MFMA to `=a` and left later MFMA calls
+  as ROCDL intrinsics.  It compiled but failed correctness
+  (`cos=0.960782`), because LLVM did not preserve the AGPR accumulator chain in
+  the same way aiter's tied asm does.
+- `v35_inlinevgprtest` used the same inline asm text with `=v` output.  It was
+  bitwise correct, proving the operand packing and `op_sel` mapping were
+  correct; the issue was specifically the incomplete AGPR constraint chain.
+
+Resource / ISA checks:
+
+| kernel | MFMA dest AGPR | MFMA src acc AGPR | VGPR / AGPR | spills |
+| --- | ---: | ---: | ---: | ---: |
+| aiter BM128 | 1792 / 1792 | 1760 / 1792 | 165 / 168 | 0 |
+| FlyDSL v34 | 0 / 1792 | 0 / 1792 | 256 / 80 | 0 |
+| FlyDSL v36 | 1792 / 1792 | 1760 / 1792 | 169 / 128 | 0 |
+
+Static instruction counts relevant to scheduling:
+
+| kernel | `s_waitcnt` | `s_barrier` | `buffer_load_dwordx4` | `buffer_load_lds` | `ds_read_b128` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| aiter BM128 | 320 | 30 | 340 | 128 | 480 |
+| FlyDSL v34 | 375 | 31 | 340 | 128 | 480 |
+| FlyDSL v36 | 287 | 31 | 340 | 128 | 480 |
+
+Default graph-profiler validation (`warmup=20`, `iters=5`,
+`graph_iters=20`, `repeat=5`; only `--max-retries 30` was changed to tolerate
+profiler event drops):
+
+| run | aiter GEMM1 | FlyDSL v36 GEMM1 | delta |
+| --- | ---: | ---: | ---: |
+| 1 | 695.5 us | 694.5 us | -1.1 us |
+| 2 | 696.9 us | 693.5 us | -3.4 us |
+| 3 | 695.1 us | 694.1 us | -1.0 us |
+
+Full graph-profiler totals from the same runs:
+
+| run | aiter total | FlyDSL all-FlyDSL total | delta |
+| --- | ---: | ---: | ---: |
+| 1 | 1856.8 us | 1843.5 us | -13.4 us |
+| 2 | 1858.4 us | 1842.3 us | -16.1 us |
+| 3 | 1851.5 us | 1842.7 us | -8.8 us |
+
+Default graph replay correctness / timing:
+
+```text
+/opt/venv/bin/python bench_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_all_flydsl
+
+local_mxfp4_all_flydsl_vs_aiter_mxfp4_cos=1.000000
+local_mxfp4_all_flydsl_vs_aiter_mxfp4_max_abs=0.000000
+aiter_mxfp4_moe_samples_us=1859.5,1855.5,1850.2 range_us=1850.2..1859.5
+aiter_mxfp4_moe_us=1855.5
+local_mxfp4_all_flydsl_samples_us=1841.5,1839.9,1841.0 range_us=1839.9..1841.5
+local_mxfp4_all_flydsl_us=1841.0
+```
+
+Interpretation: GEMM1 is now effectively aligned with aiter for the fixed
+M=16384 Kimi mxfp4 path.  In the three default graph-profiler runs above,
+FlyDSL v36 GEMM1 is slightly faster than aiter by about `1-3 us`, and the
+all-FlyDSL pipeline remains bitwise equal to aiter for the benchmark output.
