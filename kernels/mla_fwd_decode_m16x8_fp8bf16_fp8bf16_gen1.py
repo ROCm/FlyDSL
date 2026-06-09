@@ -80,6 +80,12 @@ V_HEAD_DIM: int = QK_HEAD_DIM                  # 512 (= NoPE + RoPE)
 # a separately-specialized kernel per value (no factory required).
 # Supported values: {1, 16, 32, 64}.  Mutate via _set_page_size() below.
 PAGE_SIZE: int = 1
+# HAS_ATTN_SINK is the second compile-time parameter (alongside PAGE_SIZE)
+# that the wrapper mutates per launch.  When False, the kernel skips the
+# per-lane sink VGPR load entirely and uses a -inf literal -> the sink
+# fold is a no-op the compiler eliminates.  When True, the kernel reads
+# `attn_sink` as a [num_qheads] fp32 tensor.
+HAS_ATTN_SINK: bool = False
 NUM_WARPS: int = 8
 WARP_SIZE: int = 64
 NUM_THREADS: int = NUM_WARPS * WARP_SIZE       # 512
@@ -304,7 +310,10 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     work_indptr: fx.Tensor,      # [num_workers + 1]                           (i32)
     work_info_set: fx.Tensor,    # [num_work_items * 8]                        (i32)
     # --- optional per-head attention sink ---
-    attn_sink: fx.Tensor,        # [num_qheads] fp32 (caller fills -inf when no sink)
+    # [num_qheads] fp32 when HAS_ATTN_SINK; ignored (caller passes a 1-elem
+    # dummy) when not HAS_ATTN_SINK.  The kernel reads it only inside
+    # `const_expr(HAS_ATTN_SINK)` so the dummy is never touched.
+    attn_sink: fx.Tensor,
     # --- outputs ---
     final_output: fx.Tensor,     # [1, total_q, num_qheads, V_HEAD_DIM]        (bf16)
     split_output: fx.Tensor,     # [1, partial_slots, num_qheads, V_HEAD_DIM]  (f32)
@@ -329,13 +338,13 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     # Single function-wide clobber.  Per-call wrappers do NOT re-clobber.
     PL.emit_clobber()
 
-    # Force PAGE_SIZE into this kernel's co_names so FlyDSL's
+    # Force PAGE_SIZE / HAS_ATTN_SINK into this kernel's co_names so FlyDSL's
     # _discover_global_refs (which walks co_names from the launcher) sees the
-    # dependency even though it's only used inside nested helpers like
-    # _get_kv_ld_row.  Without this, the JIT cache key misses PAGE_SIZE
-    # changes and a kernel compiled for PAGE_SIZE=1 is silently reused for
-    # PAGE_SIZE=16/32/64 (different work-info parse + index conversion).
+    # dependency even though they're only used inside nested helpers.  Without
+    # this, the JIT cache key misses the mutation and a kernel compiled for
+    # one value is silently reused for another.
     _ = PAGE_SIZE
+    _ = HAS_ATTN_SINK
 
     # ---- LDS allocator ------------------------------------------------
     arch = get_hip_arch()
@@ -410,23 +419,26 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     lane_idx_i32 = _i32(lane_idx)
 
     # ---- Per-lane attention sink ------------------------------------
-    # Load once at kernel entry: depends only on (warp_idx, lane_idx), not on
-    # work_idx, so it lives in a VGPR for the kernel's lifetime.  When the
-    # caller has no sink, it passes a tensor pre-filled with -inf so the
-    # epilogue's `exp(sink - row_max) -> 0` makes the fold a numerical no-op.
+    # Depends only on (warp_idx, lane_idx), not on work_idx, so it lives in a
+    # VGPR for the kernel's lifetime.  When HAS_ATTN_SINK is False we use the
+    # -inf literal: exp(-inf - row_max) -> 0 makes the fold a no-op the
+    # compiler eliminates, and we avoid the vmem load + per-nhead tensor.
     # head_idx = (warp_idx * 16 + (lane_idx & 15)) & (NUM_QO_HEADS - 1)
     # (NUM_QO_HEADS is a power of 2, so the AND is the right mask for
     # mtp > 1 wrap-around; for mtp == 1 it's a no-op since the value already
     # fits.)
     assert NUM_QO_HEADS & (NUM_QO_HEADS - 1) == 0
-    _sink_head_idx_i32 = _raw(
-        (ArithValue(warp_idx_i32) * fx.Int32(16) + (ArithValue(lane_idx_i32) & fx.Int32(15)))
-        & fx.Int32(NUM_QO_HEADS - 1)
-    )
-    attn_sink_lane = _raw(buffer_ops.buffer_load(
-        attn_sink_rsrc, _idx(_sink_head_idx_i32),
-        vec_width=1, dtype=T.f32,
-    ))
+    if const_expr(HAS_ATTN_SINK):
+        _sink_head_idx_i32 = _raw(
+            (ArithValue(warp_idx_i32) * fx.Int32(16) + (ArithValue(lane_idx_i32) & fx.Int32(15)))
+            & fx.Int32(NUM_QO_HEADS - 1)
+        )
+        attn_sink_lane = _raw(buffer_ops.buffer_load(
+            attn_sink_rsrc, _idx(_sink_head_idx_i32),
+            vec_width=1, dtype=T.f32,
+        ))
+    else:
+        attn_sink_lane = _raw(fx.Float32(float("-inf")))
 
     def _q_warp_vmem_base(qo_start_i32):
         # i32 byte offsets fit for the shapes V40 targets.
@@ -1974,8 +1986,6 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
     def _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val):
         """row_sum_e_adj = row_sum_e + exp2((attn_sink_lane - row_max) * log2e)
 
-        When the caller passed a tensor pre-filled with -inf (the no-sink
-        case), exp2(-inf * log2e) = 0 makes this a no-op numerically.
         Per-lane: attn_sink_lane already broadcasts across the 4 M-rows
         owned by each lane group (HK head_idx masking).
         """
@@ -2008,8 +2018,11 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         llvm.inline_asm(None, [], "s_nop 15\n\t s_nop 15", "",
                         has_side_effects=True)
 
-        # OutputFinal: always fold sink in (no-op when caller passed -inf).
-        row_sum_e_adj = _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val)
+        # OutputFinal: fold sink (compile-time skipped when no sink).
+        if const_expr(HAS_ATTN_SINK):
+            row_sum_e_adj = _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val)
+        else:
+            row_sum_e_adj = _raw(row_sum_e_val)
 
         # 1/row_sum_e via rocdl.rcp
         reci = rocdl.rcp(T.f32, _raw(row_sum_e_adj))
@@ -2054,10 +2067,14 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
                         has_side_effects=True)
 
         # row_sum_e_adj = is_last_split ? row_sum_e + sink_term : row_sum_e
-        row_sum_e_folded = _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val)
-        row_sum_e_adj = _raw(ArithValue(is_last_split_i1).select(
-            row_sum_e_folded, _raw(row_sum_e_val),
-        ))
+        # (compile-time skipped to raw row_sum_e when no sink configured)
+        if const_expr(HAS_ATTN_SINK):
+            row_sum_e_folded = _fold_sink_into_row_sum_e(row_max_val, row_sum_e_val)
+            row_sum_e_adj = _raw(ArithValue(is_last_split_i1).select(
+                row_sum_e_folded, _raw(row_sum_e_val),
+            ))
+        else:
+            row_sum_e_adj = _raw(row_sum_e_val)
 
         reci = rocdl.rcp(T.f32, _raw(row_sum_e_adj))
         pv.pinned_v_mul_f32(OACCU_RANGE, reci)
@@ -2550,8 +2567,16 @@ def mla_v40_decode_fwd(
     # The kernel's fold becomes exp(-inf - row_max) = 0 -> row_sum_e += 0,
     # i.e. a numerical no-op.  We cache the -inf tensor per (device, nhead)
     # to avoid re-allocation on every call.
+    # HAS_ATTN_SINK is a compile-time global: mutating it specializes a
+    # separate kernel via FlyDSL's JIT cache (same trick as PAGE_SIZE).
+    # When False, the kernel skips the per-lane vmem load entirely and uses
+    # a -inf literal -> the sink fold becomes dead code the compiler drops.
+    # The `attn_sink` tensor arg still needs SOMETHING for the signature; we
+    # pass a 1-element dummy that the kernel never reads.
+    global HAS_ATTN_SINK
     if attn_sink is None:
-        attn_sink = _get_neg_inf_sink(query.device, nhead)
+        HAS_ATTN_SINK = False
+        attn_sink_tensor = _get_sink_dummy(query.device)
     else:
         assert attn_sink.dtype == _torch.float32, (
             f"attn_sink must be fp32, got {attn_sink.dtype}"
@@ -2559,6 +2584,8 @@ def mla_v40_decode_fwd(
         assert attn_sink.shape == (nhead,), (
             f"attn_sink must be [nhead={nhead}], got {tuple(attn_sink.shape)}"
         )
+        HAS_ATTN_SINK = True
+        attn_sink_tensor = attn_sink
 
     launch_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         query.view(total_q, nhead, QK_PACKED_NOPE_BYTES),
@@ -2569,7 +2596,7 @@ def mla_v40_decode_fwd(
         kv_last_page_lens,
         work_indptr,
         work_info_set,
-        attn_sink,
+        attn_sink_tensor,
         final_output,
         split_output,
         split_lse,
@@ -2581,16 +2608,18 @@ def mla_v40_decode_fwd(
     )
 
 
-# Cache: (device.index, nhead) -> fp32 [nhead] tensor of -inf.
-_NEG_INF_SINK_CACHE: dict = {}
+# Per-device empty fp32 placeholder for the kernel's attn_sink arg when no
+# sink is in use.  Standard FlyDSL idiom for optional tensor args (see
+# aiter/ops/flydsl/gemm_kernels.py:_dummy_bias).  The kernel never reads it:
+# the const_expr(HAS_ATTN_SINK) branch substitutes a -inf literal instead.
+_SINK_DUMMY_CACHE: dict = {}
 
 
-def _get_neg_inf_sink(device, nhead: int):
+def _get_sink_dummy(device):
     import torch as _torch
-    key = (device.index if device.index is not None else 0, nhead)
-    t = _NEG_INF_SINK_CACHE.get(key)
+    key = device.index if device.index is not None else 0
+    t = _SINK_DUMMY_CACHE.get(key)
     if t is None:
-        t = _torch.full((nhead,), float("-inf"),
-                        dtype=_torch.float32, device=device)
-        _NEG_INF_SINK_CACHE[key] = t
+        t = _torch.empty(0, dtype=_torch.float32, device=device)
+        _SINK_DUMMY_CACHE[key] = t
     return t

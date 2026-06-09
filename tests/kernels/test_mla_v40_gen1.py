@@ -332,6 +332,9 @@ def _run_v40_decode(batch_size: int, ctx_len: int, *, seed: int = 0):
     lds_size = _lds_size_per_cu(arch) // OCCUPANCY
 
     # -- Launch FlyDSL kernel --
+    # No attn_sink: pass a 0-element fp32 placeholder (HAS_ATTN_SINK=False
+    # at module level makes the kernel skip the buffer load entirely).
+    attn_sink_dummy = torch.empty(0, dtype=torch.float32, device=gpu)
     launch_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         q_packed.view(total_q, NHEAD, V4_DIM_QK_PACKED),
         q_rope_bf16.view(total_q, NHEAD, V4_DIM_ROPE),
@@ -341,6 +344,7 @@ def _run_v40_decode(batch_size: int, ctx_len: int, *, seed: int = 0):
         kv_last_page_lens,
         work_indptr,
         work_info_set,
+        attn_sink_dummy,
         final_output,
         split_output,
         split_lse,
