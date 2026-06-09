@@ -9,7 +9,7 @@ the aiter V4 silver reference (which carries the same fp8 quantization
 noise the kernel pays at v_cvt_scalef32_pk_bf16_fp8).
 
 Inputs to the kernel are the v4-packed buffers:
-  * query     : [total_q, nhead, 576] fp8  (NoPE 448 + dup-E8M0 16 + pad 112)
+  * query     : [total_q, nhead, 512] fp8  (NoPE 448 + dup-E8M0 14 + pad 50)
   * query_rope: [total_q, nhead, 64]  bf16
   * kv_buffer : [num_page, page_size, 1, 576] fp8
   * kv_buffer_rope: [num_page, page_size, 1, 64] bf16
@@ -46,9 +46,12 @@ V4_DIM_ROPE = 64
 V4_DIM_QK = V4_DIM_NOPE + V4_DIM_ROPE       # 512
 V4_TILE = 64
 V4_NUM_TILES = V4_DIM_NOPE // V4_TILE       # 7
-V4_DIM_SCALE = V4_NUM_TILES + 1             # 8 (bpad8: 7 active + 1 pad)
-V4_DIM_QK_PACKED = 576
-V4_DIM_SCALE_DUP = V4_DIM_SCALE * 2         # 16
+# Layout: 448 NoPE + 14 dup-E8M0 + 50 B unused pad = 512 / token.
+# Scale is stored per-32-elt slot (14 = 448/32) with scale[2i]==scale[2i+1]
+# (duplicate-each); the actual quant tile is 64 elts so there are 7 unique
+# scales per token, written twice each.
+V4_DIM_QK_PACKED = 512
+V4_DIM_SCALE_DUP = V4_DIM_NOPE // (V4_TILE // 2)  # 14 bytes (post-duplicate_each)
 V4_PACK_OFF_NOPE = 0
 V4_PACK_OFF_SCALE = V4_DIM_NOPE             # 448
 
@@ -89,11 +92,9 @@ def quantize_v4_nope_bpad8(nope_fp32: torch.Tensor):
         (tiled / active_scale_pow2.unsqueeze(-1)).to(dtypes.fp8)
         .reshape(*leading, V4_DIM_NOPE)
     )
-    active_scale_e8m0 = _fp32_pow2_to_e8m0(active_scale_pow2)
-    scale_e8m0 = torch.zeros(
-        (*leading, V4_DIM_SCALE), dtype=torch.uint8, device=nope_fp32.device,
-    )
-    scale_e8m0[..., :V4_NUM_TILES] = active_scale_e8m0
+    # 7 active scales (one per 64-elt quant tile).  No padding inside the
+    # scale region; the packer below duplicates each byte to 14 slots.
+    scale_e8m0 = _fp32_pow2_to_e8m0(active_scale_pow2)
     return nope_fp8, scale_e8m0
 
 
@@ -108,10 +109,14 @@ def _duplicate_each_lastdim(x: torch.Tensor) -> torch.Tensor:
     return x.unsqueeze(-1).expand(*x.shape, 2).reshape(*x.shape[:-1], x.shape[-1] * 2)
 
 
-def pack_v4_nope_scale(nope_fp8: torch.Tensor, scale_e8m0_bpad8: torch.Tensor):
+def pack_v4_nope_scale(nope_fp8: torch.Tensor, scale_e8m0: torch.Tensor):
+    """Pack NOPE + duplicated E8M0 scale into 512-byte/token records.
+    7 input scale bytes -> 14 dup bytes at offset [448, 462); trailing 50
+    bytes [462, 512) are left uninitialized (kernel never reads them).
+    """
     leading = nope_fp8.shape[:-1]
     assert nope_fp8.shape[-1] == V4_DIM_NOPE
-    assert scale_e8m0_bpad8.shape[-1] == V4_DIM_SCALE
+    assert scale_e8m0.shape[-1] == V4_NUM_TILES
     packed = torch.zeros(
         (*leading, V4_DIM_QK_PACKED), dtype=torch.uint8, device=nope_fp8.device,
     )
@@ -119,7 +124,7 @@ def pack_v4_nope_scale(nope_fp8: torch.Tensor, scale_e8m0_bpad8: torch.Tensor):
         torch.uint8,
     )
     packed[..., V4_PACK_OFF_SCALE:V4_PACK_OFF_SCALE + V4_DIM_SCALE_DUP] = (
-        _duplicate_each_lastdim(scale_e8m0_bpad8)
+        _duplicate_each_lastdim(scale_e8m0)
     )
     return packed.view(dtypes.fp8)
 
@@ -204,7 +209,7 @@ NHEAD = NUM_QO_HEADS         # 128
 NHEAD_KV = 1
 PAGE_SIZE = 1
 
-assert QK_PACKED_NOPE_BYTES == V4_DIM_QK_PACKED == 576
+assert QK_PACKED_NOPE_BYTES == V4_DIM_QK_PACKED == 512
 assert QK_ROPE_HEAD_DIM == V4_DIM_ROPE == 64
 assert V_HEAD_DIM == V4_DIM_QK == 512
 

@@ -95,8 +95,10 @@ BLOCK_K: int = 32                              # mfma K-dim
 TILE_M: int = BLOCK_M // NUM_WARPS             # 16
 OCCUPANCY: int = 1
 
-# Packed Q-NoPE record: 448 fp8 + 16 dup-E8M0 + 112 pad = 576 B / token.
-QK_PACKED_NOPE_BYTES: int = 576
+# Packed Q-NoPE record: 448 fp8 + 14 dup-E8M0 + 50 B unused pad = 512 B / token.
+# Bytes [0, 448) NoPE, [448, 462) 7 dup-scales (scale[2i] == scale[2i+1]),
+# [462, 512) unused trailing pad (kernel never reads it).
+QK_PACKED_NOPE_BYTES: int = 512
 SIZE_MLA_WORK_INFO_IN_DW: int = 8
 
 # fp32 log2(e) (used to fuse exp into v_exp_f32 base-2).
@@ -112,7 +114,7 @@ Q_P1_NUM_STAGING_BUFFERS: int = 2                                        # doubl
 Q_P1_STAGING_BYTES_PER_WARP_TOTAL: int = (
     Q_P1_NUM_STAGING_BUFFERS * Q_P1_STAGING_BYTES_PER_WARP               # 2048
 )
-Q_SCALE_BASE_OFF: int = 448  # E8M0 scales start at byte 448 of the 576-byte record
+Q_SCALE_BASE_OFF: int = 448  # E8M0 scales start at byte 448 of the 512-byte record
 
 # ---------------------------------------------------------------------------
 # QManager Phase 2 LDS layout (final Q[:, 256:512] residence, bf16)
@@ -412,7 +414,7 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
 
     # ---- QManager Phase 1 helpers (vmem fp8 -> staging LDS -> q_vgpr) -
     # Per-warp Q vmem base byte offset.  Q layout = [total_q, num_qheads,
-    # 576-byte packed records]; each warp owns TILE_M=16 query rows of a
+    # 512-byte packed records]; each warp owns TILE_M=16 query rows of a
     # single qo_start slice.
     # Wave-uniform i32 forms of warp_idx / lane_idx for byte-offset math.
     warp_idx_i32 = _uniform_i32(warp_idx)
@@ -464,11 +466,11 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         zero-extended from i8) for later cvt consumption.
 
         Per-lane vmem offset (NoPE 16 fp8 = 16 B):
-            v_off = (lane>>2) * 576
+            v_off = (lane>>2) * 512
                     + ((lane&3) XOR ((lane>>4)&1) << 1) * 16
             i_off = chunk * 64           (folded into soffset_bytes)
         Per-lane vmem offset (E8M0 scale, 1 byte):
-            v_off_scale = (lane & 15) * 576
+            v_off_scale = (lane & 15) * 512
             i_off_scale = 448 + 2*chunk
 
         Spec Ch. 6.3 says the XOR on the col-quad swaps sub-tile row-bands
@@ -625,7 +627,7 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
 
         # buffer_load with dtype=T.i32 multiplies offset by 4 (element size),
         # so we must pass an *element* (i32-dword) offset, not bytes.
-        # QK_PACKED_NOPE_BYTES=576 is a multiple of 4 (=144 i32 dwords/row).
+        # QK_PACKED_NOPE_BYTES=512 is a multiple of 4 (=128 i32 dwords/row).
         # col_group * 16 bytes = col_group * 4 dwords.
         # q_vmem_base is in bytes; divide by 4 (it's also a multiple of 4).
         v_off_nope_dw = _raw(
@@ -951,10 +953,10 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             col_group_swz = col_group XOR (((lane>>4) & 1) << 1)
         """
         # Address fields per spec Ch. 8.5:
-        #   v_off_nope  = row_kv_ld * 576 + col_group_swz * 16
+        #   v_off_nope  = row_kv_ld * 512 + col_group_swz * 16
         #   s_off_nope  = col_tile_in_tile * 64
         #   i_off_nope  = kTileIdx * 256
-        kv_packed_stride = QK_PACKED_NOPE_BYTES                          # 576
+        kv_packed_stride = QK_PACKED_NOPE_BYTES                          # 512
         wave_tile_cols = 2 * KV_SUB_BLOCK_COLS                           # 64
 
         col_group_i32 = _raw(ArithValue(lane_idx_i32) & fx.Int32(3))
@@ -973,7 +975,7 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
         else:
             safe_row = row_kv_ld_i32
         # buffer_load with dtype=T.i32 multiplies offset by 4, so pass an
-        # *element* (i32-dword) offset.  kv_packed_stride=576 and
+        # *element* (i32-dword) offset.  kv_packed_stride=512 and
         # col_group_swz*16 are both multiples of 4.
         v_off_nope_dw = _raw(
             ArithValue(safe_row) * fx.Int32(kv_packed_stride // 4)
@@ -996,7 +998,7 @@ def kn_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1(
             ),
         )
 
-        # Scale: 1 byte/lane.  v_off_scale = safe_row * 576.
+        # Scale: 1 byte/lane.  v_off_scale = safe_row * 512.
         v_off_scale = _raw(
             ArithValue(safe_row) * fx.Int32(kv_packed_stride)
         )
@@ -2503,9 +2505,9 @@ launch_mla_v40_fwd_decode_m16x8_fp8bf16_fp8bf16_gen1.compile_hints = {
 # in ``aiter/mla.py`` can swap implementations without computing num_cus /
 # lds_size / log2_num_qheads / tensor reshapes themselves.
 def mla_v40_decode_fwd(
-    query,            # [total_q, num_heads, 576] FP8 (NoPE + dup-E8M0 + pad)
+    query,            # [total_q, num_heads, 512] FP8 (NoPE + dup-E8M0 + pad)
     query_rope,       # [total_q, num_heads, 64]  BF16
-    kv_buffer,        # [num_page, page_size, num_kv_heads=1, 576] FP8
+    kv_buffer,        # [num_page, page_size, num_kv_heads=1, 512] FP8
     kv_buffer_rope,   # [num_page, page_size, num_kv_heads=1, 64]  BF16
     qo_indptr,        # unused (FlyDSL kernel takes per-warp work via work_indptr/work_info_set)
     kv_indptr,        # unused (kernel uses work_info wi[6] kv_offset==0 for last-split detection)
