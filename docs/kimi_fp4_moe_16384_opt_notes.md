@@ -1769,3 +1769,81 @@ bench graph replay remains the authoritative end-to-end number.  In this
 snapshot the main remaining profiler-visible gaps are `GEMM1`, `scatter_reduce`,
 and `sort_place_pad`; `GEMM2`, `sort_cumsum`, and `sort_scales` are roughly
 matched or slightly ahead in FlyDSL.
+
+## Sort Place/Scatter v4-v6 Alignment
+
+The saved sort placement kernel is now:
+
+```text
+flydsl_kimi_mxfp4_sort_place_pad_NE385_TOPK9_M16384_BM128_v4_globalio
+```
+
+Changes:
+
+- Match aiter's phase order: place real routed tokens first, then barrier, then
+  fill the padded tail for each expert.
+- Switch `sort_place_pad` from buffer resources to raw global loads/stores,
+  matching the plain pointer access style used by aiter's HIP kernel.
+
+The saved scatter kernel is now:
+
+```text
+flydsl_kimi_mxfp4_scatter_reduce_q_NE385_H7168_E512_M16384_TOPK9_v6_weightpreload
+```
+
+Change:
+
+- Keep the v4 route-vector preload and raw global I/O, but preload only the 9
+  route weights before entering the decode/FMA body.  Unlike the rejected v5
+  experiment, this does not stage all q/scale payloads, so it adds latency
+  hiding without substantially increasing vector-register pressure.
+
+Validation:
+
+```text
+/opt/venv/bin/python bench_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_all_flydsl --warmup 5 \
+  --graph-iters 20 --measure 10 --repeat 1
+
+local_mxfp4_all_flydsl_vs_aiter_mxfp4_cos=1.000000
+local_mxfp4_all_flydsl_vs_aiter_mxfp4_max_abs=0.000000
+```
+
+Profiler baseline at the start of this round, before the changes:
+
+| stage | aiter | previous FlyDSL | delta |
+| --- | ---: | ---: | ---: |
+| sort_place_pad | 32.2 us | 35.2 us | +3.0 us |
+| scatter_reduce | 135.0 us | 140.2 us | +5.2 us |
+
+Profiler after the changes, run 1:
+
+| stage | aiter | FlyDSL v4/v6 | delta |
+| --- | ---: | ---: | ---: |
+| sort_place_pad | 32.1 us | 34.1 us | +2.0 us |
+| scatter_reduce | 135.5 us | 130.5 us | -5.0 us |
+| total kernel sum | 1860.1 us | 1860.1 us | +0.0 us |
+
+Profiler after the changes, run 2:
+
+| stage | aiter | FlyDSL v4/v6 | delta |
+| --- | ---: | ---: | ---: |
+| sort_place_pad | 31.8 us | 34.3 us | +2.5 us |
+| scatter_reduce | 134.6 us | 130.6 us | -4.0 us |
+| total kernel sum | 1853.4 us | 1861.7 us | +8.3 us |
+
+Default graph replay end-to-end timing after the changes:
+
+```text
+/opt/venv/bin/python bench_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_all_flydsl
+
+aiter_mxfp4_moe_samples_us=1872.3,1876.8,1856.9 range_us=1856.9..1876.8
+aiter_mxfp4_moe_us=1872.3
+local_mxfp4_all_flydsl_samples_us=1864.4,1864.2,1862.8 range_us=1862.8..1864.4
+local_mxfp4_all_flydsl_us=1864.2
+```
+
+Interpretation: `scatter_reduce` is now faster than aiter in the graph-profiler
+breakdown.  `sort_place_pad` improved by about 1 us but is still roughly
+2-2.5 us slower than aiter, so the next sort-side work should focus there.

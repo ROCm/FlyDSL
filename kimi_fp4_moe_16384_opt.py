@@ -152,6 +152,14 @@ def _global_store_i32(global_ptr, elem_offset, value, *, nontemporal: bool = Fal
     return llvm.StoreOp(raw_value, ptr, alignment=4, nontemporal=nontemporal)
 
 
+def _global_store_f32(global_ptr, elem_offset, value, *, nontemporal: bool = False):
+    elem_offset_i64 = _elem_offset_to_i64(elem_offset)
+    byte_offset_i64 = elem_offset_i64 * arith.constant(4, type=T.i64)
+    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=byte_offset_i64, elem_type=T.i8)
+    raw_value = value.ir_value() if hasattr(value, "ir_value") else value
+    return llvm.StoreOp(raw_value, ptr, alignment=4, nontemporal=nontemporal)
+
+
 def _elem_offset_to_i64(elem_offset):
     if isinstance(elem_offset, int):
         return arith.constant(elem_offset, type=T.i64)
@@ -264,7 +272,7 @@ def compile_kimi_mxfp4_scatter_reduce_q_16384():
     qcols_i32 = MODEL_DIM // 2 // 4
     scols_i32 = MODEL_DIM // 32 // 4
     out_i32_stride = MODEL_DIM // 2
-    module_name = "flydsl_kimi_mxfp4_scatter_reduce_q_NE385_H7168_E512_M16384_TOPK9_v4_routevec"
+    module_name = "flydsl_kimi_mxfp4_scatter_reduce_q_NE385_H7168_E512_M16384_TOPK9_v6_weightpreload"
 
     @flyc.kernel(name=module_name)
     def scatter_reduce_q(
@@ -322,9 +330,7 @@ def compile_kimi_mxfp4_scatter_reduce_q_16384():
         reverse_base = token_i32 * c_topk_i32
         route_ids_0_7 = _global_load_i32_vec(reverse_ptr, reverse_base, 8)
 
-        def accumulate_route(sorted_pos):
-            route_w = _global_load_f32(weights_ptr, sorted_pos)
-
+        def accumulate_route(sorted_pos, route_w):
             scale_idx = sorted_pos * c_scols_i32 + scale_word_col
             scale_word = ArithValue(_global_load_i32(scale_ptr, scale_idx))
             scale_shift = (blk & c3_i32) << c3_i32
@@ -346,6 +352,8 @@ def compile_kimi_mxfp4_scatter_reduce_q_16384():
                 )
                 acc_pairs[pair] = _fma_v2_f32(decoded_pair, route_w_pair, acc_pairs[pair])
 
+        route_pos = []
+        route_weights = []
         for i in range_constexpr(8):
             sorted_pos = ArithValue(
                 vector.extract(
@@ -354,12 +362,17 @@ def compile_kimi_mxfp4_scatter_reduce_q_16384():
                     dynamic_position=[],
                 )
             )
-            accumulate_route(sorted_pos)
+            route_pos.append(sorted_pos)
+            route_weights.append(_global_load_f32(weights_ptr, sorted_pos))
 
         sorted_pos = ArithValue(
             _global_load_i32(reverse_ptr, reverse_base + arith.constant(8, type=i32))
         )
-        accumulate_route(sorted_pos)
+        route_pos.append(sorted_pos)
+        route_weights.append(_global_load_f32(weights_ptr, sorted_pos))
+
+        for i in range_constexpr(TOPK):
+            accumulate_route(route_pos[i], route_weights[i])
 
         packed_words = []
         for k in range_constexpr(MXFP4_SCATTER_COLS_PER_THREAD // 2):
@@ -2063,7 +2076,7 @@ def compile_kimi_mxfp4_sort_16384():
             scf.YieldOp([])
 
     @flyc.kernel(
-        name="flydsl_kimi_mxfp4_sort_place_pad_NE385_TOPK9_M16384_BM128_v2_cumsumtail",
+        name="flydsl_kimi_mxfp4_sort_place_pad_NE385_TOPK9_M16384_BM128_v4_globalio",
         known_block_size=[threads, 1, 1],
     )
     def sort_place_pad(
@@ -2084,15 +2097,15 @@ def compile_kimi_mxfp4_sort_16384():
         tx_i32 = arith.index_cast(i32, tx)
         bx_i32 = arith.index_cast(i32, bx)
 
-        topk_rsrc = _ptr_buffer_resource(arg_topk_ids, topk_nbytes)
-        topk_weight_rsrc = _ptr_buffer_resource(arg_topk_weight, weight_nbytes)
-        offsets_rsrc = _ptr_buffer_resource(arg_block_offsets, block_offsets_nbytes)
-        real_rsrc = _ptr_buffer_resource(arg_real_counts, real_counts_nbytes)
-        cumsum_rsrc = _ptr_buffer_resource(arg_cumsum_tensor, cumsum_nbytes)
-        sorted_rsrc = _ptr_buffer_resource(arg_sorted_token_ids, sorted_nbytes)
-        reverse_rsrc = _ptr_buffer_resource(arg_reverse_sorted, reverse_nbytes)
-        weights_rsrc = _ptr_buffer_resource(arg_sorted_weights, sorted_nbytes)
-        mindices_rsrc = _ptr_buffer_resource(arg_m_indices, sorted_nbytes)
+        topk_ptr = _extract_global_ptr(arg_topk_ids)
+        topk_weight_ptr = _extract_global_ptr(arg_topk_weight)
+        offsets_ptr = _extract_global_ptr(arg_block_offsets)
+        real_ptr = _extract_global_ptr(arg_real_counts)
+        cumsum_ptr = _extract_global_ptr(arg_cumsum_tensor)
+        sorted_ptr = _extract_global_ptr(arg_sorted_token_ids)
+        reverse_ptr = _extract_global_ptr(arg_reverse_sorted)
+        weights_ptr = _extract_global_ptr(arg_sorted_weights)
+        mindices_ptr = _extract_global_ptr(arg_m_indices)
         base_ptr = allocator.get_base()
         local_offsets = SmemPtr(base_ptr, lds_count_offset, T.i32, shape=(EXPERTS,)).get()
         row_starts = SmemPtr(base_ptr, lds_starts_offset, T.i32, shape=(EXPERTS + 1,)).get()
@@ -2113,38 +2126,17 @@ def compile_kimi_mxfp4_sort_16384():
         with ir.InsertionPoint(_if_init.then_block):
             e_i32 = tx_i32
             off = e_i32 * c_sort_ctas + bx_i32
-            local = buffer_ops.buffer_load(offsets_rsrc, off, vec_width=1, dtype=i32)
-            start = buffer_ops.buffer_load(offsets_rsrc, e_i32 * c_sort_ctas, vec_width=1, dtype=i32)
+            local = _global_load_i32(offsets_ptr, off)
+            start = _global_load_i32(offsets_ptr, e_i32 * c_sort_ctas)
             memref.store(local, local_offsets, [tx])
             memref.store(start, row_starts, [tx])
             scf.YieldOp([])
 
         _if_last_start = scf.IfOp(arith.cmpi(CmpIPredicate.eq, tx_i32, c0_i32))
         with ir.InsertionPoint(_if_last_start.then_block):
-            last = buffer_ops.buffer_load(cumsum_rsrc, c0_i32, vec_width=1, dtype=i32)
+            last = _global_load_i32(cumsum_ptr, c0_i32)
             memref.store(last, row_starts, [arith.index(EXPERTS)])
             scf.YieldOp([])
-        gpu.barrier()
-
-        for ee in range_constexpr(experts_per_cta):
-            e = bx * arith.constant(experts_per_cta, index=True) + arith.constant(ee, index=True)
-            e_valid = arith.cmpi(CmpIPredicate.ult, e, arith.constant(EXPERTS, index=True))
-            _if_e = scf.IfOp(e_valid)
-            with ir.InsertionPoint(_if_e.then_block):
-                e_i32 = arith.index_cast(i32, e)
-                start = memref.load(row_starts, [e])
-                real = buffer_ops.buffer_load(real_rsrc, e_i32, vec_width=1, dtype=i32)
-                padded_end = memref.load(row_starts, [e + arith.index(1)])
-                real_end = start + real
-                j0 = ArithValue(real_end + tx_i32).index_cast(T.index)
-                j1 = ArithValue(padded_end).index_cast(T.index)
-                for j in range(j0, j1, c_threads_idx):
-                    j_i32 = arith.index_cast(i32, j)
-                    buffer_ops.buffer_store(c_pad, sorted_rsrc, j_i32)
-                    buffer_ops.buffer_store(c_pad, mindices_rsrc, j_i32)
-                    buffer_ops.buffer_store(c0_f32, weights_rsrc, j_i32)
-                scf.YieldOp([])
-
         gpu.barrier()
 
         c_start = bx * arith.constant(per_cta, index=True)
@@ -2157,16 +2149,37 @@ def compile_kimi_mxfp4_sort_16384():
             _if = scf.IfOp(valid)
             with ir.InsertionPoint(_if.then_block):
                 idx_i32 = arith.index_cast(i32, idx)
-                eid = buffer_ops.buffer_load(topk_rsrc, idx, vec_width=1, dtype=i32)
+                eid = ArithValue(_global_load_i32(topk_ptr, idx_i32))
                 sp = _lds_atomic_add_i32(local_offsets, eid, c1_i32)
                 token_id = idx_i32 // c_topk
                 topk_id = idx_i32 % c_topk
                 packed_id = (token_id & c_mask_token) | (topk_id << c_topk_shift)
-                w = buffer_ops.buffer_load(topk_weight_rsrc, idx, vec_width=1, dtype=f32)
-                buffer_ops.buffer_store(packed_id, sorted_rsrc, sp)
-                buffer_ops.buffer_store(token_id & c_mask_token, mindices_rsrc, sp)
-                buffer_ops.buffer_store(w, weights_rsrc, sp)
-                buffer_ops.buffer_store(sp, reverse_rsrc, idx_i32)
+                w = _global_load_f32(topk_weight_ptr, idx_i32)
+                _global_store_i32(sorted_ptr, sp, packed_id)
+                _global_store_i32(mindices_ptr, sp, token_id & c_mask_token)
+                _global_store_f32(weights_ptr, sp, w)
+                _global_store_i32(reverse_ptr, idx_i32, sp)
+                scf.YieldOp([])
+
+        gpu.barrier()
+
+        for ee in range_constexpr(experts_per_cta):
+            e = bx * arith.constant(experts_per_cta, index=True) + arith.constant(ee, index=True)
+            e_valid = arith.cmpi(CmpIPredicate.ult, e, arith.constant(EXPERTS, index=True))
+            _if_e = scf.IfOp(e_valid)
+            with ir.InsertionPoint(_if_e.then_block):
+                e_i32 = arith.index_cast(i32, e)
+                start = memref.load(row_starts, [e])
+                real = ArithValue(_global_load_i32(real_ptr, e_i32))
+                padded_end = memref.load(row_starts, [e + arith.index(1)])
+                real_end = start + real
+                j0 = ArithValue(real_end + tx_i32).index_cast(T.index)
+                j1 = ArithValue(padded_end).index_cast(T.index)
+                for j in range(j0, j1, c_threads_idx):
+                    j_i32 = arith.index_cast(i32, j)
+                    _global_store_i32(sorted_ptr, j_i32, c_pad)
+                    _global_store_i32(mindices_ptr, j_i32, c_pad)
+                    _global_store_f32(weights_ptr, j_i32, c0_f32)
                 scf.YieldOp([])
 
     @flyc.jit
