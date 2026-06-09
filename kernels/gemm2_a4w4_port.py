@@ -213,7 +213,7 @@ def compile_gemm2_a4w4_port(BM=32, use_nt=False, NE=NE, N_OUT=N_OUT, MAX_M=MAX_M
     # The atomic and mxfp4out paths stay one-shot: atomic is already faster than
     # HIP, and mxfp4out's heavy LDS-cshuffle epilog (130KB LDS, 1 block/CU) has no
     # spare occupancy to benefit from persistence.
-    _persistent = epilog == "nonatomic"
+    _persistent = epilog != "atomic"  # nonatomic bf16 + mxfp4out (persistent+XCD)
     _kMChunks = kmchunks(BM)
     _slot_bytes = saq_slot_bytes(BM)
     _lds_acc_floats = BM * BN
@@ -304,12 +304,24 @@ def compile_gemm2_a4w4_port(BM=32, use_nt=False, NE=NE, N_OUT=N_OUT, MAX_M=MAX_M
             step = arith.index_cast(T.index, _raw(gpu.grid_dim.x))
             grid_nb = arith.index_cast(T.i32, _raw(gpu.grid_dim.x))
 
+            # XCD-grouped interleave (mirrors xcd_remap.hpp swizzle=-1): remap the
+            # raw persistent index -> wgid so consecutive indices spread across the
+            # 8 XCDs and same-XCD tiles reuse B in that XCD's private L2 slice. Only
+            # constant divisors (cheap). HIP's plain NONATOMIC baseline omits this.
+            _NXCD = 8
+            _xq = bound // fx.Int32(_NXCD)
+            _xr = bound % fx.Int32(_NXCD)
+
+            def _xcd(pid):
+                xc = pid % fx.Int32(_NXCD)
+                return xc * _xq + fx.Int32(arith.minsi(_raw(xc), _raw(_xr))) + pid // fx.Int32(_NXCD)
+
             peel_if = scf.IfOp(arith.cmpi(arith.CmpIPredicate.slt, bx_i32, bound), [], has_else=False)
             with ir.InsertionPoint(peel_if.then_block):
-                m_row0 = (bx_i32 // fx.Int32(_num_n_blocks)) * fx.Int32(BM)
-                _issue_all_a_loads(m_row0)
+                tile = _xcd(bx_i32)
+                _issue_all_a_loads((tile // fx.Int32(_num_n_blocks)) * fx.Int32(BM))
                 rocdl.sched_barrier(0)
-                _run_tile(bx_i32)
+                _run_tile(tile)
                 scf.YieldOp([])
 
             saq._view_cache = None
@@ -321,9 +333,9 @@ def compile_gemm2_a4w4_port(BM=32, use_nt=False, NE=NE, N_OUT=N_OUT, MAX_M=MAX_M
                 # this tile overwrites the s_Aq slots (persistent-grid reuse race).
                 rocdl.barrier()
                 saq._view_cache = None
-                m_row0 = (wu // fx.Int32(_num_n_blocks)) * fx.Int32(BM)
-                _issue_all_a_loads(m_row0)
-                _run_tile(wu)
+                tile = _xcd(wu)
+                _issue_all_a_loads((tile // fx.Int32(_num_n_blocks)) * fx.Int32(BM))
+                _run_tile(tile)
                 scf.YieldOp([])
         else:
             # One-shot grid (atomic): issue A->LDS BEFORE the cumsum load so the
