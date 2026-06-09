@@ -2156,3 +2156,42 @@ This run compares aiter's `mxfp4_moe` CSV path against the original untagged
 | 32 | 145.8 us | 160.7 us | 1.10x | 0.9868 | 0.9548 | 0.9520 |
 | 64 | 200.3 us | 209.7 us | 1.05x | 0.9874 | 0.9555 | 0.9529 |
 | 128 | 251.4 us | 262.8 us | 1.05x | 0.9875 | 0.9562 | 0.9536 |
+
+## Small-M BM16 Stage Split
+
+`bench_small_bm16.py` was added to make the BM16 stage split reproducible.  It
+compares:
+
+- `aiter`: aiter `mxfp4_moe` CSV path.
+- `sort_aiter`: FlyDSL sort/zero-init plus aiter GEMM1/GEMM2.
+- `gemm1fly_aiter`: FlyDSL sort/GEMM1 plus aiter GEMM2.
+- `allfly`: FlyDSL sort/GEMM1/GEMM2.
+
+Default command:
+
+```text
+/opt/venv/bin/python bench_small_bm16.py -M 4,8,16,32,64,128
+```
+
+Default graph timing was:
+
+```text
+warmup=200 graph_iters=5000 measure=101 graph_warmup_replays=10 repeat=1
+```
+
+Results:
+
+| M | aiter | sort_aiter | gemm1fly_aiter | allfly | sort delta | GEMM1 delta | GEMM2 delta | cos all | max abs all |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 39.351 us | 42.560 us | 42.446 us | 42.535 us | +3.210 us | -0.114 us | +0.089 us | 0.999996305 | 0.031250 |
+| 8 | 59.011 us | 59.411 us | 60.372 us | 61.925 us | +0.400 us | +0.962 us | +1.553 us | 0.999998152 | 0.015625 |
+| 16 | 96.219 us | 97.519 us | 100.646 us | 102.193 us | +1.300 us | +3.128 us | +1.547 us | 0.999998629 | 0.015625 |
+| 32 | 145.850 us | 147.566 us | 150.351 us | 153.022 us | +1.717 us | +2.785 us | +2.671 us | 0.999999046 | 0.015625 |
+| 64 | 200.427 us | 202.655 us | 207.603 us | 210.420 us | +2.228 us | +4.948 us | +2.816 us | 0.999998689 | 0.031250 |
+| 128 | 251.346 us | 254.723 us | 260.665 us | 264.844 us | +3.377 us | +5.942 us | +4.179 us | 0.999998510 | 0.031250 |
+
+Interpretation: after the BM16 GEMM1 v4 alignment, the remaining small-M gap is
+not one uniform issue.  M=4 is almost entirely sort/prologue overhead.  M=64 and
+M=128 are dominated by GEMM1, with GEMM2 as the second largest term.  The next
+kernel-level optimization should therefore start from GEMM1 for M=64/128, while
+keeping sort/prologue in mind for the very small M=4 case.
