@@ -26,7 +26,12 @@ from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
-from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
+from .jit_argument import (
+    TensorAdaptor,
+    convert_to_jit_arguments,
+    is_type_param_annotation,
+    resolve_signature,
+)
 from .jit_executor import CompiledArtifact
 from .kernel_function import (
     CompilationContext,
@@ -1241,6 +1246,7 @@ class JitFunction:
         self._manager_owner_cls = None
         self.cache_manager = None
         self._call_state_cache = {}  # cache_key -> CallState
+        self._fast_key_plan = None  # lazily-built per-param key-extraction plan
         self._sig = None  # lazy: set on first call
         self._has_self_param = False  # lazy: set in _ensure_sig
         self._backend_target = None  # lazy: GPUTarget resolved once in _ensure_sig
@@ -1420,6 +1426,88 @@ class JitFunction:
             cache_key = (("_self_type_", type(bound_self)),) + cache_key
         return cache_key
 
+    def _build_fast_key_plan(self):
+        """Per-parameter classification, computed once from the signature.
+
+        Each entry is ``(kind, name)`` where ``kind`` mirrors the branch
+        ``_resolve_and_make_cache_key`` would take based on the *annotation*:
+        ``"cx"`` (Constexpr), ``"tp"`` (Type[...] param), ``"ann"`` (annotation
+        is a JitArgument subclass, e.g. ``Stream``/``Int32``), or ``"reg"``
+        (registry-resolved, e.g. tensors).  The remaining per-call decision
+        (arg already a JitArgument? tensor → lean signature?) is made cheaply in
+        ``_fast_cache_key`` without the runtime_checkable-Protocol ``isinstance``.
+        """
+        plan = []
+        empty = inspect.Parameter.empty
+        for name, param in self._sig.parameters.items():
+            ann = param.annotation
+            if ann is not empty and Constexpr.is_constexpr_annotation(ann):
+                plan.append(("cx", name))
+            elif ann is not empty and is_type_param_annotation(ann):
+                plan.append(("tp", name))
+            elif isinstance(ann, type) and issubclass(ann, JitArgument):
+                plan.append(("ann", name, ann))
+            else:
+                plan.append(("reg", name))
+        return plan
+
+    def _fast_cache_key(self, bound_arguments, *, owner_cls=None, bound_self=None):
+        """Lean equivalent of ``_build_full_cache_key`` for the cache-hit probe.
+
+        Produces a **byte-identical** key but avoids the two dominant per-launch
+        costs measured on the hot path: (1) building a full ``TensorAdaptor``
+        (DLPack export) per tensor just to read a signature — replaced by
+        ``TensorAdaptor.lean_cache_signature``; (2) the ``runtime_checkable``
+        ``isinstance(arg, JitArgument)`` Protocol structural check — replaced by
+        a cheap ``hasattr(arg, "__cache_signature__")``.  Unlike
+        ``_resolve_and_make_cache_key`` it does NOT mutate ``bound_arguments``;
+        the full resolution still runs on a cache miss.
+        """
+        from .jit_argument import JitArgumentRegistry
+
+        if self._fast_key_plan is None:
+            self._fast_key_plan = self._build_fast_key_plan()
+
+        parts = list(self._globals_key_prefix(owner_cls))
+        parts.append(("_env_", _cache_invalidating_env_values()))
+        parts.append(("_target_", self._backend_target))
+        if self.compile_hints:
+            parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
+
+        for entry in self._fast_key_plan:
+            kind = entry[0]
+            name = entry[1]
+            arg = bound_arguments[name]
+            if kind == "cx":
+                parts.append((name, Constexpr.value_signature(arg)))
+                continue
+            if kind == "tp":
+                parts.append((name, arg))
+                continue
+            # Arg already a JitArgument (cheap duck-check == the Protocol isinstance).
+            if hasattr(arg, "__cache_signature__"):
+                parts.append((name, arg.__cache_signature__()))
+                continue
+            if kind == "ann":
+                parts.append((name, cache_signature(entry[2](arg))))
+                continue
+            # registry-resolved: tensors take the no-DLPack lean signature.
+            ctor, _ = JitArgumentRegistry.get(type(arg))
+            if ctor is None:
+                raise TypeError(
+                    f"{name}: {type(arg).__name__} is neither a JitArgument nor has a registered "
+                    f"constructor; cannot derive cache signature."
+                )
+            if ctor is TensorAdaptor:
+                parts.append((name, TensorAdaptor.lean_cache_signature(arg)))
+            else:
+                parts.append((name, cache_signature(ctor(arg))))
+
+        cache_key = tuple(parts)
+        if bound_self is not None:
+            cache_key = (("_self_type_", type(bound_self)),) + cache_key
+        return cache_key
+
     @staticmethod
     def _cache_key_to_str(cache_key) -> str:
         """Convert tuple cache key to string for disk cache."""
@@ -1450,21 +1538,30 @@ class JitFunction:
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
-        cache_key = self._build_full_cache_key(bound.arguments, owner_cls=owner_cls, bound_self=bound_self)
-
-        args_tuple = tuple(bound.arguments.values())
-
         # Compile/runtime pairing at JIT entry (not in CompiledArtifact / ExecutionEngine init).
         from ..runtime.device_runtime import ensure_compile_runtime_pairing_from_env
 
         ensure_compile_runtime_pairing_from_env(compile_backend_name())
 
-        # Fast path: reuse pre-built CallState (no ctypes alloc, no DLPack)
-        call_state = self._call_state_cache.get(cache_key)
+        # Fast path: probe with a LEAN cache key (byte-identical to the full
+        # key, but no per-tensor DLPack/TensorAdaptor and no runtime_checkable
+        # Protocol isinstance — see _fast_cache_key).  CallState's slot
+        # extractors accept raw tensors, so the TensorAdaptor wrapping is only
+        # needed on a miss; pass the raw bound args straight through.
+        fast_key = self._fast_cache_key(bound.arguments, owner_cls=owner_cls, bound_self=bound_self)
+        call_state = self._call_state_cache.get(fast_key)
         if call_state is not None:
             if env.compile.compile_only:
                 return None
-            return call_state(args_tuple)
+            return call_state(tuple(bound.arguments.values()))
+
+        # Miss: do the full resolution (mutates bound.arguments into JitArgument
+        # instances for the compile path below).  The resulting key is identical
+        # to fast_key, so the CallState cached here is found by the fast probe on
+        # subsequent calls.
+        cache_key = self._build_full_cache_key(bound.arguments, owner_cls=owner_cls, bound_self=bound_self)
+
+        args_tuple = tuple(bound.arguments.values())
 
         # Normal path: check in-process cache first, then optional disk cache.
         # In run_only mode the disk cache is read regardless of enable_cache, since

@@ -307,6 +307,38 @@ class TensorAdaptor:
     def __cache_signature__(self):
         return (type(self), self._orig_dtype) + self.tensor_adaptor.get_cache_signature()
 
+    @classmethod
+    def lean_cache_signature(cls, t):
+        """Cache signature identical to ``cls(t).__cache_signature__()`` but
+        derived directly from ``dtype``/``shape``/``strides`` — WITHOUT the
+        DLPack export + ``DLTensorAdaptor`` construction that ``__init__`` does.
+
+        Used on the JIT cache-key fast path (cache hit), where only the key is
+        needed; the full adaptor is built lazily on a cache miss when the kernel
+        is actually compiled/launched.  Must stay byte-identical to
+        ``__cache_signature__()`` for the default construction
+        (``use_32bit_stride=False``, ``dynamic_layout=True``) — guarded by
+        ``tests/unit/test_lean_cache_signature.py``.
+
+        ``get_cache_signature()`` returns
+        ``(elem_bytes, use_32bit_stride, dynamic_dims, unit_stride_marker)``:
+        all dims dynamic (-1) and a 1 at the first unit-stride axis
+        (``_pick_unit_stride_axis``), the rest -1.
+        """
+        strides = tuple(int(s) for s in t.stride())
+        rank = len(strides)
+        unit_axis = next((i for i, s in enumerate(strides) if s == 1), None)
+        if unit_axis is None:
+            raise RuntimeError("tensor has no axis with stride == 1; layout-dynamic memref requires one")
+        return (
+            cls,
+            t.dtype,
+            t.element_size(),
+            False,
+            (-1,) * rank,
+            tuple(1 if i == unit_axis else -1 for i in range(rank)),
+        )
+
     def _mark_layout_dynamic(self, leading_dim: int, divisibility: int):
         # Always pass a concrete axis index down. The DLPack stride view that
         # the backend sees can disagree with the framework view for tensors
