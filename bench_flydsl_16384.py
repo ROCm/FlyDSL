@@ -39,13 +39,7 @@ from kimi_fp4_moe_16384 import (  # noqa: E402
 from kimi_fp4_moe_16384_opt import (  # noqa: E402
     MXFP4_STAGE1_KERNEL,
     MXFP4_STAGE2_KERNEL,
-    run_kimi_fp4_flydsl_atomic_stage2_16384,
-    run_kimi_fp4_flydsl_mxfp4_sort_16384,
-    run_kimi_fp4_mxfp4_moe_16384_aiter_ref,
     run_kimi_fp4_mxfp4_moe_16384_all_flydsl,
-    run_kimi_fp4_mxfp4_moe_16384_opt,
-    run_kimi_fp4_mxfp4_moe_16384_opt_gemm1,
-    run_kimi_fp4_mxfp4_moe_16384_opt_gemm2,
 )
 
 
@@ -173,78 +167,6 @@ def run_local_kimi(hidden, topk_ids, topk_weight, weights):
     )
 
 
-def run_local_kimi_mxfp4_sort(hidden, topk_ids, topk_weight, weights):
-    return run_kimi_fp4_flydsl_mxfp4_sort_16384(
-        hidden,
-        weights["w1"],
-        w2=weights["w2"],
-        topk_ids=topk_ids,
-        topk_weight=topk_weight,
-        w1_scale=weights["w1_scale"],
-        w2_scale=weights["w2_scale"],
-    )
-
-
-def run_local_kimi_atomic_stage2(hidden, topk_ids, topk_weight, weights):
-    return run_kimi_fp4_flydsl_atomic_stage2_16384(
-        hidden,
-        weights["w1"],
-        w2=weights["w2"],
-        topk_ids=topk_ids,
-        topk_weight=topk_weight,
-        w1_scale=weights["w1_scale"],
-        w2_scale=weights["w2_scale"],
-    )
-
-
-def run_local_mxfp4_opt(hidden, topk_ids, topk_weight, weights):
-    return run_kimi_fp4_mxfp4_moe_16384_opt(
-        hidden,
-        weights["w1"],
-        w2=weights["w2"],
-        topk_ids=topk_ids,
-        topk_weight=topk_weight,
-        w1_scale=weights["w1_scale"],
-        w2_scale=weights["w2_scale"],
-    )
-
-
-def run_local_mxfp4_opt_gemm2(hidden, topk_ids, topk_weight, weights):
-    return run_kimi_fp4_mxfp4_moe_16384_opt_gemm2(
-        hidden,
-        weights["w1"],
-        w2=weights["w2"],
-        topk_ids=topk_ids,
-        topk_weight=topk_weight,
-        w1_scale=weights["w1_scale"],
-        w2_scale=weights["w2_scale"],
-    )
-
-
-def run_local_mxfp4_opt_gemm1(hidden, topk_ids, topk_weight, weights):
-    return run_kimi_fp4_mxfp4_moe_16384_opt_gemm1(
-        hidden,
-        weights["w1"],
-        w2=weights["w2"],
-        topk_ids=topk_ids,
-        topk_weight=topk_weight,
-        w1_scale=weights["w1_scale"],
-        w2_scale=weights["w2_scale"],
-    )
-
-
-def run_local_mxfp4_aiter_ref(hidden, topk_ids, topk_weight, weights):
-    return run_kimi_fp4_mxfp4_moe_16384_aiter_ref(
-        hidden,
-        weights["w1"],
-        w2=weights["w2"],
-        topk_ids=topk_ids,
-        topk_weight=topk_weight,
-        w1_scale=weights["w1_scale"],
-        w2_scale=weights["w2_scale"],
-    )
-
-
 def run_local_mxfp4_all_flydsl(hidden, topk_ids, topk_weight, weights):
     return run_kimi_fp4_mxfp4_moe_16384_all_flydsl(
         hidden,
@@ -276,42 +198,6 @@ def make_runners(hidden, topk_ids, topk_weight, weights):
             topk_ids,
             topk_weight,
             weights["flydsl"],
-        ),
-        "local_kimi_fp4_mxfp4_sort": lambda: run_local_kimi_mxfp4_sort(
-            hidden,
-            topk_ids,
-            topk_weight,
-            weights["flydsl"],
-        ),
-        "local_kimi_fp4_atomic_stage2": lambda: run_local_kimi_atomic_stage2(
-            hidden,
-            topk_ids,
-            topk_weight,
-            weights["flydsl"],
-        ),
-        "local_mxfp4_aiter_ref": lambda: run_local_mxfp4_aiter_ref(
-            hidden,
-            topk_ids,
-            topk_weight,
-            weights["mxfp4"],
-        ),
-        "local_mxfp4_opt": lambda: run_local_mxfp4_opt(
-            hidden,
-            topk_ids,
-            topk_weight,
-            weights["mxfp4"],
-        ),
-        "local_mxfp4_opt_gemm1": lambda: run_local_mxfp4_opt_gemm1(
-            hidden,
-            topk_ids,
-            topk_weight,
-            weights["mxfp4"],
-        ),
-        "local_mxfp4_opt_gemm2": lambda: run_local_mxfp4_opt_gemm2(
-            hidden,
-            topk_ids,
-            topk_weight,
-            weights["mxfp4"],
         ),
         "local_mxfp4_all_flydsl": lambda: run_local_mxfp4_all_flydsl(
             hidden,
@@ -411,12 +297,6 @@ def main():
     check_specs = [
         ("aiter_mxfp4_vs_aiter", "aiter_mxfp4_moe", "aiter_moe"),
         ("local_vs_aiter", "local_kimi_fp4", "aiter_moe"),
-        ("local_mxfp4_sort_vs_aiter", "local_kimi_fp4_mxfp4_sort", "aiter_moe"),
-        ("local_atomic_stage2_vs_aiter", "local_kimi_fp4_atomic_stage2", "aiter_moe"),
-        ("local_mxfp4_ref_vs_aiter_mxfp4", "local_mxfp4_aiter_ref", "aiter_mxfp4_moe"),
-        ("local_mxfp4_opt_vs_aiter_mxfp4", "local_mxfp4_opt", "aiter_mxfp4_moe"),
-        ("local_mxfp4_opt_gemm1_vs_aiter_mxfp4", "local_mxfp4_opt_gemm1", "aiter_mxfp4_moe"),
-        ("local_mxfp4_opt_gemm2_vs_aiter_mxfp4", "local_mxfp4_opt_gemm2", "aiter_mxfp4_moe"),
         ("local_mxfp4_all_flydsl_vs_aiter_mxfp4", "local_mxfp4_all_flydsl", "aiter_mxfp4_moe"),
     ]
     for name, lhs_name, rhs_name in check_specs:

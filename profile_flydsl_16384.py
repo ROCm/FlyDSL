@@ -384,7 +384,7 @@ def main():
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=10,
+        default=40,
         help="extra profiler attempts allowed when event sequences are incomplete",
     )
     parser.add_argument(

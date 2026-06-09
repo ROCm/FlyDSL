@@ -1,9 +1,4 @@
-"""Experimental Kimi fp4 MoE paths for the fixed M=16384 shape.
-
-This file is intentionally separate from ``kimi_fp4_moe_16384.py``.  It keeps
-the known-good FlyDSL GEMMs intact while extracting the relevant mxfp4_moe
-orchestration from aiter for direct comparison and incremental migration.
-"""
+"""Fixed-shape FlyDSL mxfp4 MoE path for Kimi M=16384."""
 from __future__ import annotations
 
 import functools
@@ -11,10 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
-import aiter
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from aiter import dtypes
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, memref, scf
 from flydsl._mlir.dialects.arith import CmpIPredicate
@@ -25,21 +18,20 @@ from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from aiter.ops.flydsl.kernels.layout_utils import (
+from kernels.layout_utils import (
     _div_pow2,
     crd2idx,
     idx2crd,
     get as layout_get,
 )
-from aiter.ops.flydsl.kernels.mfma_epilogues import c_shuffle_epilog
-from aiter.ops.flydsl.kernels.mfma_preshuffle_pipeline import (
+from kernels.mfma_epilogues import c_shuffle_epilog
+from kernels.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
 
 from kimi_fp4_moe_16384 import (
-    BLOCK_M,
     EXPERTS,
     INTER_DIM,
     MODEL_DIM,
@@ -47,9 +39,6 @@ from kimi_fp4_moe_16384 import (
     TOPK,
     _ptr_view_safe,
     _run_compiled,
-    kimi_fp4_stage1_16384,
-    kimi_fp4_stage2_16384,
-    kimi_moe_sorting_16384,
 )
 
 
@@ -73,10 +62,6 @@ class Mxfp4SortBuffers:
     m_indices: torch.Tensor
     max_sorted: int
     block_m: int
-
-
-def _empty_bf16(device: torch.device) -> torch.Tensor:
-    return torch.empty((0,), dtype=dtypes.bf16, device=device)
 
 
 def _as_u8_storage(t: torch.Tensor) -> torch.Tensor:
@@ -433,7 +418,7 @@ def kimi_mxfp4_scatter_reduce_q_16384(
             f"expected reverse_sorted shape {(TOKEN * TOPK,)}, got {tuple(reverse_sorted.shape)}"
         )
     if out is None:
-        out = torch.empty((TOKEN, MODEL_DIM), dtype=dtypes.bf16, device=flat_out_q.device)
+        out = torch.empty((TOKEN, MODEL_DIM), dtype=torch.bfloat16, device=flat_out_q.device)
 
     args = (
         _ptr_view_safe(_as_u8_storage(flat_out_q).view(-1)),
@@ -1340,7 +1325,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
     """Compile a fixed-shape FlyDSL GEMM2 that stages MXFP4 flat output.
 
     This is the first direct FlyDSL port of aiter's Kimi-only
-    ``mxfp4_moe_gemm2_a4w4_mxfp4out`` path.  It keeps the public shape fixed:
+    fixed mxfp4 GEMM2 path. It keeps the public shape fixed:
 
     - A: sorted fp4, ``[max_sorted, 512 / 2]``
     - B: preshuffled fp4, ``[385, 7168, 512 / 2]``
@@ -2293,9 +2278,8 @@ def kimi_mxfp4_sort_16384(
     topk_weight: torch.Tensor,
     *,
     block_m: int = MXFP4_BLOCK_M,
-    use_flydsl: bool = False,
 ) -> Mxfp4SortBuffers:
-    """Run the fixed mxfp4_moe three-stage sorter for Kimi M=16384."""
+    """Run the fixed FlyDSL mxfp4 three-stage sorter for Kimi M=16384."""
     if tuple(topk_ids.shape) != (TOKEN, TOPK):
         raise ValueError(
             f"expected topk_ids shape {(TOKEN, TOPK)}, got {tuple(topk_ids.shape)}"
@@ -2307,59 +2291,37 @@ def kimi_mxfp4_sort_16384(
 
     device = topk_ids.device
     max_sorted = mxfp4_max_sorted_16384(block_m)
-    sorted_token_ids = torch.empty((max_sorted,), device=device, dtype=dtypes.i32)
+    sorted_token_ids = torch.empty((max_sorted,), device=device, dtype=torch.int32)
     sorted_expert_ids = torch.empty(
         (max_sorted // block_m,),
         device=device,
-        dtype=dtypes.i32,
+        dtype=torch.int32,
     )
-    cumsum_tensor = torch.empty((1,), device=device, dtype=dtypes.i32)
-    reverse_sorted = torch.empty((TOKEN * TOPK,), device=device, dtype=dtypes.i32)
-    sorted_weights = torch.empty((max_sorted,), device=device, dtype=dtypes.fp32)
-    masked_m = torch.empty((EXPERTS,), device=device, dtype=dtypes.i32)
-    m_indices = torch.empty((max_sorted,), device=device, dtype=dtypes.i32)
+    cumsum_tensor = torch.empty((1,), device=device, dtype=torch.int32)
+    reverse_sorted = torch.empty((TOKEN * TOPK,), device=device, dtype=torch.int32)
+    sorted_weights = torch.empty((max_sorted,), device=device, dtype=torch.float32)
+    masked_m = torch.empty((EXPERTS,), device=device, dtype=torch.int32)
+    m_indices = torch.empty((max_sorted,), device=device, dtype=torch.int32)
 
-    if use_flydsl:
-        if block_m != MXFP4_BLOCK_M:
-            raise ValueError(f"FlyDSL mxfp4 sort only supports block_m={MXFP4_BLOCK_M}")
-        block_offsets = torch.empty((EXPERTS * 16,), device=device, dtype=dtypes.i32)
-        real_counts = torch.empty((EXPERTS,), device=device, dtype=dtypes.i32)
-        args = (
-            _ptr_view_safe(topk_ids.view(-1)),
-            _ptr_view_safe(topk_weight.view(-1)),
-            _ptr_view_safe(sorted_token_ids.view(-1)),
-            _ptr_view_safe(sorted_expert_ids.view(-1)),
-            _ptr_view_safe(cumsum_tensor.view(-1)),
-            _ptr_view_safe(reverse_sorted.view(-1)),
-            _ptr_view_safe(sorted_weights.view(-1)),
-            _ptr_view_safe(masked_m.view(-1)),
-            _ptr_view_safe(m_indices.view(-1)),
-            _ptr_view_safe(block_offsets.view(-1)),
-            _ptr_view_safe(real_counts.view(-1)),
-            torch.cuda.current_stream(),
-        )
-        _run_compiled(compile_kimi_mxfp4_sort_16384(), args)
-    else:
-        aiter.mxfp4_moe_sort(
-            topk_ids=topk_ids,
-            topk_weight=topk_weight,
-            sorted_token_ids=sorted_token_ids,
-            sorted_expert_ids=sorted_expert_ids,
-            cumsum_tensor=cumsum_tensor,
-            reverse_sorted=reverse_sorted,
-            sorted_weights=sorted_weights,
-            masked_m=masked_m,
-            m_indices=m_indices,
-            bf16_zero_out=_empty_bf16(device),
-            bf16_zero_workspace=_empty_bf16(device),
-            M_logical=TOKEN,
-            NE=EXPERTS,
-            TOPK=TOPK,
-            D_HIDDEN=MODEL_DIM,
-            D_INTER=INTER_DIM,
-            MB=block_m,
-            prologue=1,
-        )
+    if block_m != MXFP4_BLOCK_M:
+        raise ValueError(f"FlyDSL mxfp4 sort only supports block_m={MXFP4_BLOCK_M}")
+    block_offsets = torch.empty((EXPERTS * 16,), device=device, dtype=torch.int32)
+    real_counts = torch.empty((EXPERTS,), device=device, dtype=torch.int32)
+    args = (
+        _ptr_view_safe(topk_ids.view(-1)),
+        _ptr_view_safe(topk_weight.view(-1)),
+        _ptr_view_safe(sorted_token_ids.view(-1)),
+        _ptr_view_safe(sorted_expert_ids.view(-1)),
+        _ptr_view_safe(cumsum_tensor.view(-1)),
+        _ptr_view_safe(reverse_sorted.view(-1)),
+        _ptr_view_safe(sorted_weights.view(-1)),
+        _ptr_view_safe(masked_m.view(-1)),
+        _ptr_view_safe(m_indices.view(-1)),
+        _ptr_view_safe(block_offsets.view(-1)),
+        _ptr_view_safe(real_counts.view(-1)),
+        torch.cuda.current_stream(),
+    )
+    _run_compiled(compile_kimi_mxfp4_sort_16384(), args)
     return Mxfp4SortBuffers(
         sorted_token_ids=sorted_token_ids,
         sorted_expert_ids=sorted_expert_ids,
@@ -2534,7 +2496,7 @@ def kimi_mxfp4_quant_16384(
     a_quant: torch.Tensor | None = None,
     a_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """FlyDSL port of aiter.mxfp4_moe_quant for the fixed Kimi shape."""
+    """FlyDSL mxfp4 input quantization for the fixed Kimi shape."""
     if tuple(hidden_states.shape) != (TOKEN, MODEL_DIM):
         raise ValueError(f"expected hidden shape {(TOKEN, MODEL_DIM)}, got {tuple(hidden_states.shape)}")
     device = hidden_states.device
@@ -2678,7 +2640,7 @@ def kimi_mxfp4_sort_scales_16384(
     cumsum_tensor: torch.Tensor,
     a_scale_sorted_shuffled: torch.Tensor,
 ) -> torch.Tensor:
-    """FlyDSL port of aiter.mxfp4_moe_sort_scales for the fixed Kimi shape."""
+    """FlyDSL mxfp4 scale gather/shuffle for the fixed Kimi shape."""
     args = (
         _ptr_view_safe(_as_u8_storage(a_scale).view(-1)),
         _ptr_view_safe(sorted_token_ids.view(-1)),
@@ -2690,429 +2652,6 @@ def kimi_mxfp4_sort_scales_16384(
     return a_scale_sorted_shuffled
 
 
-def expand_mxfp4_expert_ids_for_flydsl(
-    sorted_expert_ids: torch.Tensor,
-    *,
-    source_block_m: int = MXFP4_BLOCK_M,
-    target_block_m: int = BLOCK_M,
-) -> torch.Tensor:
-    """Expand mxfp4 BM=128 expert ids into the BM=64 format FlyDSL expects."""
-    if source_block_m == target_block_m:
-        return sorted_expert_ids
-    if source_block_m % target_block_m != 0:
-        raise ValueError(
-            f"cannot expand expert ids from block_m={source_block_m} "
-            f"to target_block_m={target_block_m}"
-        )
-    return torch.repeat_interleave(
-        sorted_expert_ids,
-        source_block_m // target_block_m,
-    )
-
-
-def run_kimi_fp4_flydsl_mxfp4_sort_16384(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weight: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Use mxfp4_moe sorting, then run the existing fixed FlyDSL GEMMs."""
-    sort = kimi_mxfp4_sort_16384(topk_ids, topk_weight)
-    flydsl_expert_ids = expand_mxfp4_expert_ids_for_flydsl(
-        sort.sorted_expert_ids,
-        source_block_m=sort.block_m,
-        target_block_m=BLOCK_M,
-    )
-    moe_out = torch.empty(
-        (TOKEN, MODEL_DIM),
-        dtype=hidden_states.dtype,
-        device=hidden_states.device,
-    )
-    a1, a1_scale = aiter.fused_dynamic_mxfp4_quant_moe_sort(
-        hidden_states,
-        sorted_ids=sort.sorted_token_ids,
-        num_valid_ids=sort.cumsum_tensor,
-        token_num=TOKEN,
-        topk=TOPK,
-        block_size=sort.block_m,
-        num_rows=None,
-    )
-    a2 = kimi_fp4_stage1_16384(
-        a1,
-        w1,
-        w1_scale.view(dtypes.fp8_e8m0),
-        a1_scale,
-        sort.sorted_token_ids,
-        flydsl_expert_ids,
-        sort.cumsum_tensor,
-    )
-    a2_q, a2_scale = aiter.fused_dynamic_mxfp4_quant_moe_sort(
-        a2.view(-1, INTER_DIM),
-        sorted_ids=sort.sorted_token_ids,
-        num_valid_ids=sort.cumsum_tensor,
-        token_num=TOKEN,
-        topk=TOPK,
-        block_size=sort.block_m,
-        num_rows=None,
-    )
-    return kimi_fp4_stage2_16384(
-        a2_q.view(TOKEN, TOPK, -1),
-        w2,
-        w2_scale.view(dtypes.fp8_e8m0),
-        a2_scale,
-        sort.sorted_token_ids,
-        sort.sorted_weights,
-        flydsl_expert_ids,
-        sort.cumsum_tensor,
-        moe_out,
-    )
-
-
-def run_kimi_fp4_flydsl_atomic_stage2_16384(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weight: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Use the fixed FlyDSL stage1 and generic FlyDSL atomic stage2."""
-    from aiter.ops.flydsl.moe_kernels import flydsl_moe_stage2
-
-    sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_out = (
-        kimi_moe_sorting_16384(topk_ids, topk_weight, hidden_states.dtype)
-    )
-    a1, a1_scale = aiter.fused_dynamic_mxfp4_quant_moe_sort(
-        hidden_states,
-        sorted_ids=sorted_ids,
-        num_valid_ids=num_valid_ids,
-        token_num=TOKEN,
-        topk=TOPK,
-        block_size=BLOCK_M,
-        num_rows=None,
-    )
-    a2 = kimi_fp4_stage1_16384(
-        a1,
-        w1,
-        w1_scale.view(dtypes.fp8_e8m0),
-        a1_scale,
-        sorted_ids,
-        sorted_expert_ids,
-        num_valid_ids,
-    )
-    a2_q, a2_scale = aiter.fused_dynamic_mxfp4_quant_moe_sort(
-        a2.view(-1, INTER_DIM),
-        sorted_ids=sorted_ids,
-        num_valid_ids=num_valid_ids,
-        token_num=TOKEN,
-        topk=TOPK,
-        block_size=BLOCK_M,
-        num_rows=None,
-    )
-    return flydsl_moe_stage2(
-        a2_q.view(TOKEN, TOPK, -1),
-        w2,
-        sorted_ids,
-        sorted_expert_ids,
-        num_valid_ids,
-        out=moe_out.zero_(),
-        topk=TOPK,
-        tile_m=64,
-        tile_n=256,
-        tile_k=256,
-        a_dtype="fp4",
-        b_dtype="fp4",
-        out_dtype="bf16",
-        mode="atomic",
-        w2_scale=w2_scale.view(dtypes.fp8_e8m0),
-        a2_scale=a2_scale,
-        sorted_weights=sorted_weights,
-        sort_block_m=BLOCK_M,
-        persist=True,
-        b_nt=0,
-        xcd_swizzle=4,
-    )
-
-
-def _run_mxfp4_pipeline_16384(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weight: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    *,
-    use_flydsl_sort: bool = False,
-    use_flydsl_quant: bool = False,
-    use_flydsl_sort_scales: bool = False,
-    use_flydsl_gemm1: bool = False,
-    use_flydsl_gemm2: bool = False,
-    use_flydsl_scatter_reduce_q: bool = False,
-) -> torch.Tensor:
-    """Fixed-shape mxfp4 pipeline with per-kernel migration switches."""
-    device = hidden_states.device
-    w1_u8 = _as_u8_storage(w1)
-    w2_u8 = _as_u8_storage(w2)
-    sort = kimi_mxfp4_sort_16384(topk_ids, topk_weight, use_flydsl=use_flydsl_sort)
-
-    a_quant = torch.empty((TOKEN, MODEL_DIM // 2), device=device, dtype=torch.uint8)
-    a_scale = torch.empty((TOKEN, MODEL_DIM // 32), device=device, dtype=torch.uint8)
-    if use_flydsl_quant:
-        kimi_mxfp4_quant_16384(hidden_states, a_quant, a_scale)
-    else:
-        aiter.mxfp4_moe_quant(
-            a_input=hidden_states,
-            a_quant=a_quant,
-            a_scale=a_scale,
-            bf16_zero_out=_empty_bf16(device),
-            NE=EXPERTS,
-            TOPK=TOPK,
-            D_HIDDEN=MODEL_DIM,
-            MB=sort.block_m,
-        )
-
-    padded_rows = ((sort.max_sorted + 31) // 32) * 32
-    a_scale_sorted_shuffled = torch.empty(
-        (padded_rows * (MODEL_DIM // 32) * 2,),
-        device=device,
-        dtype=torch.uint8,
-    )
-    if use_flydsl_sort_scales:
-        kimi_mxfp4_sort_scales_16384(
-            a_scale,
-            sort.sorted_token_ids,
-            sort.cumsum_tensor,
-            a_scale_sorted_shuffled,
-        )
-    else:
-        aiter.mxfp4_moe_sort_scales(
-            a_scale=a_scale,
-            sorted_token_ids=sort.sorted_token_ids,
-            cumsum_tensor=sort.cumsum_tensor,
-            a_scale_sorted_shuffled=a_scale_sorted_shuffled,
-            NE=EXPERTS,
-            TOPK=TOPK,
-            D_HIDDEN=MODEL_DIM,
-            D_INTER=INTER_DIM,
-            MB=sort.block_m,
-            max_sorted=sort.max_sorted,
-        )
-
-    inter_sorted_quant = torch.empty(
-        (sort.max_sorted, INTER_DIM // 2),
-        device=device,
-        dtype=torch.uint8,
-    )
-    inter_scale_cols = INTER_DIM // 32
-    inter_scale_bytes = sort.max_sorted * (1024 // 64) * 4
-    inter_scale_rows = (inter_scale_bytes + inter_scale_cols - 1) // inter_scale_cols
-    inter_scale_rows = ((inter_scale_rows + 31) // 32) * 32
-    inter_sorted_shuffled_scale = torch.empty(
-        (inter_scale_rows, inter_scale_cols),
-        device=device,
-        dtype=torch.uint8,
-    )
-    if use_flydsl_gemm1:
-        kimi_mxfp4_gemm1_16384(
-            a_quant=a_quant,
-            a_scale_sorted_shuffled=a_scale_sorted_shuffled,
-            w1=w1_u8,
-            w1_scale=w1_scale,
-            sorted_expert_ids=sort.sorted_expert_ids,
-            m_indices=sort.m_indices,
-            cumsum_tensor=sort.cumsum_tensor,
-            inter_sorted_quant=inter_sorted_quant,
-            inter_sorted_shuffled_scale=inter_sorted_shuffled_scale,
-        )
-    else:
-        aiter.mxfp4_moe_gemm1_a4w4(
-            cumsum_tensor=sort.cumsum_tensor,
-            a_quant=a_quant,
-            a_scale_sorted_shuffled=a_scale_sorted_shuffled,
-            w12_shuffled_quant=w1_u8,
-            w12_shuffled_scale=w1_scale,
-            sorted_expert_ids=sort.sorted_expert_ids,
-            m_indices=sort.m_indices,
-            inter_sorted_quant=inter_sorted_quant,
-            inter_sorted_shuffled_scale=inter_sorted_shuffled_scale,
-            hidden_states=hidden_states,
-            kernelName=MXFP4_STAGE1_KERNEL,
-        )
-
-    flat_out_q = torch.empty(
-        (sort.max_sorted, MODEL_DIM // 2),
-        dtype=torch.uint8,
-        device=device,
-    )
-    flat_out_scale = torch.empty(
-        (sort.max_sorted, MODEL_DIM // 32),
-        dtype=torch.uint8,
-        device=device,
-    )
-    if use_flydsl_gemm2:
-        kimi_mxfp4_gemm2_mxfp4out_16384(
-            inter_sorted_quant=inter_sorted_quant,
-            inter_sorted_shuffled_scale=inter_sorted_shuffled_scale,
-            w2=w2_u8,
-            w2_scale=w2_scale,
-            sorted_expert_ids=sort.sorted_expert_ids,
-            cumsum_tensor=sort.cumsum_tensor,
-            flat_out_q=flat_out_q,
-            flat_out_scale=flat_out_scale,
-        )
-    else:
-        aiter.mxfp4_moe_gemm2_a4w4_mxfp4out(
-            cumsum_tensor=sort.cumsum_tensor,
-            inter_sorted_quant=inter_sorted_quant,
-            inter_sorted_shuffled_scale=inter_sorted_shuffled_scale,
-            w3_shuffled_quant=w2_u8,
-            w3_shuffled_scale=w2_scale,
-            sorted_expert_ids=sort.sorted_expert_ids,
-            flat_out_q=flat_out_q,
-            flat_out_scale=flat_out_scale,
-            NE=EXPERTS,
-            D_HIDDEN=MODEL_DIM,
-            D_INTER=INTER_DIM,
-            max_sorted=sort.max_sorted,
-        )
-
-    out = torch.empty((TOKEN, MODEL_DIM), dtype=dtypes.bf16, device=device)
-    if use_flydsl_scatter_reduce_q:
-        kimi_mxfp4_scatter_reduce_q_16384(
-            flat_out_q=flat_out_q,
-            flat_out_scale=flat_out_scale,
-            reverse_sorted=sort.reverse_sorted,
-            sorted_weights=sort.sorted_weights,
-            out=out,
-        )
-    else:
-        aiter.mxfp4_moe_scatter_reduce_q(
-            flat_out_q=flat_out_q,
-            flat_out_scale=flat_out_scale,
-            reverse_sorted=sort.reverse_sorted,
-            sorted_weights=sort.sorted_weights,
-            out=out,
-            NE=EXPERTS,
-            TOPK=TOPK,
-            D_HIDDEN=MODEL_DIM,
-            MB=sort.block_m,
-        )
-    return out
-
-
-def run_kimi_fp4_mxfp4_moe_16384_aiter_ref(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weight: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Fixed-shape extraction of aiter's mxfp4 path, kept as the oracle."""
-    return _run_mxfp4_pipeline_16384(
-        hidden_states,
-        w1,
-        w2,
-        topk_ids,
-        topk_weight,
-        w1_scale,
-        w2_scale,
-        use_flydsl_sort=False,
-        use_flydsl_quant=False,
-        use_flydsl_sort_scales=False,
-        use_flydsl_gemm1=False,
-        use_flydsl_gemm2=False,
-        use_flydsl_scatter_reduce_q=False,
-    )
-
-
-def run_kimi_fp4_mxfp4_moe_16384_opt(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weight: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Current migration candidate: aiter mxfp4 GEMMs plus FlyDSL scatter/reduce-q."""
-    return _run_mxfp4_pipeline_16384(
-        hidden_states,
-        w1,
-        w2,
-        topk_ids,
-        topk_weight,
-        w1_scale,
-        w2_scale,
-        use_flydsl_sort=False,
-        use_flydsl_quant=False,
-        use_flydsl_sort_scales=False,
-        use_flydsl_gemm1=False,
-        use_flydsl_gemm2=False,
-        use_flydsl_scatter_reduce_q=True,
-    )
-
-
-def run_kimi_fp4_mxfp4_moe_16384_opt_gemm1(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weight: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Experimental candidate with FlyDSL GEMM1 plus FlyDSL scatter/reduce-q."""
-    return _run_mxfp4_pipeline_16384(
-        hidden_states,
-        w1,
-        w2,
-        topk_ids,
-        topk_weight,
-        w1_scale,
-        w2_scale,
-        use_flydsl_sort=False,
-        use_flydsl_quant=False,
-        use_flydsl_sort_scales=False,
-        use_flydsl_gemm1=True,
-        use_flydsl_gemm2=False,
-        use_flydsl_scatter_reduce_q=True,
-    )
-
-
-def run_kimi_fp4_mxfp4_moe_16384_opt_gemm2(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weight: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> torch.Tensor:
-    """Experimental candidate with FlyDSL GEMM2 MXFP4-out plus FlyDSL scatter/reduce-q."""
-    return _run_mxfp4_pipeline_16384(
-        hidden_states,
-        w1,
-        w2,
-        topk_ids,
-        topk_weight,
-        w1_scale,
-        w2_scale,
-        use_flydsl_sort=False,
-        use_flydsl_quant=False,
-        use_flydsl_sort_scales=False,
-        use_flydsl_gemm1=False,
-        use_flydsl_gemm2=True,
-        use_flydsl_scatter_reduce_q=True,
-    )
-
-
 def run_kimi_fp4_mxfp4_moe_16384_all_flydsl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -3122,19 +2661,49 @@ def run_kimi_fp4_mxfp4_moe_16384_all_flydsl(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> torch.Tensor:
-    """Initial full FlyDSL mxfp4 pipeline port for fixed Kimi M=16384."""
-    return _run_mxfp4_pipeline_16384(
-        hidden_states,
-        w1,
-        w2,
-        topk_ids,
-        topk_weight,
-        w1_scale,
-        w2_scale,
-        use_flydsl_sort=True,
-        use_flydsl_quant=True,
-        use_flydsl_sort_scales=True,
-        use_flydsl_gemm1=True,
-        use_flydsl_gemm2=True,
-        use_flydsl_scatter_reduce_q=True,
+    """Run the fixed Kimi M=16384 mxfp4 MoE path entirely with local FlyDSL kernels."""
+    device = hidden_states.device
+    w1_u8 = _as_u8_storage(w1)
+    w2_u8 = _as_u8_storage(w2)
+    sort = kimi_mxfp4_sort_16384(topk_ids, topk_weight)
+
+    a_quant, a_scale = kimi_mxfp4_quant_16384(hidden_states)
+
+    padded_rows = ((sort.max_sorted + 31) // 32) * 32
+    a_scale_sorted_shuffled = torch.empty(
+        (padded_rows * (MODEL_DIM // 32) * 2,),
+        device=device,
+        dtype=torch.uint8,
+    )
+    kimi_mxfp4_sort_scales_16384(
+        a_scale,
+        sort.sorted_token_ids,
+        sort.cumsum_tensor,
+        a_scale_sorted_shuffled,
+    )
+
+    inter_sorted_quant, inter_sorted_shuffled_scale = kimi_mxfp4_gemm1_16384(
+        a_quant=a_quant,
+        a_scale_sorted_shuffled=a_scale_sorted_shuffled,
+        w1=w1_u8,
+        w1_scale=w1_scale,
+        sorted_expert_ids=sort.sorted_expert_ids,
+        m_indices=sort.m_indices,
+        cumsum_tensor=sort.cumsum_tensor,
+    )
+
+    flat_out_q, flat_out_scale = kimi_mxfp4_gemm2_mxfp4out_16384(
+        inter_sorted_quant=inter_sorted_quant,
+        inter_sorted_shuffled_scale=inter_sorted_shuffled_scale,
+        w2=w2_u8,
+        w2_scale=w2_scale,
+        sorted_expert_ids=sort.sorted_expert_ids,
+        cumsum_tensor=sort.cumsum_tensor,
+    )
+
+    return kimi_mxfp4_scatter_reduce_q_16384(
+        flat_out_q=flat_out_q,
+        flat_out_scale=flat_out_scale,
+        reverse_sorted=sort.reverse_sorted,
+        sorted_weights=sort.sorted_weights,
     )
