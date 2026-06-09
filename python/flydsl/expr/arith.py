@@ -24,7 +24,6 @@ __all__ = [
     "index",  # Deprecated: will be removed in a future release
     "index_cast",  # Deprecated: will be removed in a future release
     "int_to_fp",
-    "select",
     "shli",
     "sitofp",
     "trunc_f",
@@ -46,7 +45,6 @@ from .utils.arith import (  # noqa: F401
     index,
     index_cast,
     int_to_fp,
-    select,
     shli,
     sitofp,
     trunc_f,

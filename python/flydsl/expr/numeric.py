@@ -524,7 +524,7 @@ class Numeric(metaclass=NumericMeta):
         """Reinterpret this value's bits as *dtype* (a same-width Numeric type)."""
         if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
             raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
-        res = arith.BitcastOp(dtype.ir_type, self.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+        res = arith.bitcast(dtype.ir_type, self.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
         return dtype(res, loc=loc, ip=ip)
 
 

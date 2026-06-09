@@ -219,7 +219,7 @@ def _is_int_tuple_value(value):
 
 
 def _expand_int_tuple_leaves(value, loc=None, ip=None):
-    from .numeric import Int32, Numeric
+    from .numeric import Int32, Int64, Numeric
 
     if _is_int_tuple_value(value):
         return _expand_int_tuple_leaves(value.to_py_value(loc=loc, ip=ip))
@@ -233,7 +233,7 @@ def _expand_int_tuple_leaves(value, loc=None, ip=None):
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IntegerType) and value.type.width < 32:
         return Int32(value, loc=loc, ip=ip).value
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IndexType):
-        return Int32(value, loc=loc, ip=ip).value
+        return Int64(value, loc=loc, ip=ip).value
     return value
 
 
