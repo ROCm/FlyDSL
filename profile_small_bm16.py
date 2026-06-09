@@ -8,11 +8,11 @@ from torch.profiler import ProfilerActivity, profile
 
 
 STAGE_NAMES = ("sort_zero_init", "GEMM1", "GEMM2")
-DEFAULT_PROFILE_WARMUP = 100
-DEFAULT_PROFILE_GRAPH_ITERS = 64
-DEFAULT_PROFILE_REPLAYS = 16
-DEFAULT_PROFILE_REPEAT = 9
-DEFAULT_PROFILE_MAX_RETRIES = 200
+DEFAULT_PROFILE_WARMUP = 300
+DEFAULT_PROFILE_GRAPH_ITERS = 128
+DEFAULT_PROFILE_REPLAYS = 4
+DEFAULT_PROFILE_REPEAT = 41
+DEFAULT_PROFILE_MAX_RETRIES = 500
 
 
 def _is_cuda_event(evt) -> bool:
@@ -120,6 +120,7 @@ def _collect_reports(
     logical_iters = graph_iters * replays
     reports = []
     attempts = 0
+    dropped = 0
     while len(reports) < repeat and attempts < repeat + max_retries:
         attempts += 1
         trace_path = None
@@ -137,21 +138,26 @@ def _collect_reports(
         )
         report = _ordered_rows(events, logical_iters)
         if report is None:
-            print(
-                f"M={m} {name} sample attempt {attempts}: dropped "
-                f"(device_kernel_events={len(events)})",
-                flush=True,
-            )
+            dropped += 1
+            if dropped <= 3 or dropped % 25 == 0:
+                print(
+                    f"M={m} {name}: dropped profiler sample {dropped} "
+                    f"(attempt={attempts}, device_kernel_events={len(events)})",
+                    flush=True,
+                )
             continue
         if (
             expected_kernels is not None
             and report["kernel_calls_per_iter"] != expected_kernels
         ):
-            print(
-                f"M={m} {name} sample attempt {attempts}: dropped "
-                f"(kernels/iter={report['kernel_calls_per_iter']}, expected={expected_kernels})",
-                flush=True,
-            )
+            dropped += 1
+            if dropped <= 3 or dropped % 25 == 0:
+                print(
+                    f"M={m} {name}: dropped profiler sample {dropped} "
+                    f"(attempt={attempts}, kernels/iter={report['kernel_calls_per_iter']}, "
+                    f"expected={expected_kernels})",
+                    flush=True,
+                )
             continue
         reports.append(report)
         print(
@@ -164,6 +170,12 @@ def _collect_reports(
         raise RuntimeError(
             f"M={m} {name}: only collected {len(reports)} valid profiler "
             f"samples after {attempts} attempts"
+        )
+    if dropped:
+        print(
+            f"M={m} {name}: accepted {len(reports)} samples after {attempts} "
+            f"attempts; dropped {dropped} incomplete profiler samples",
+            flush=True,
         )
     return reports
 
@@ -274,7 +286,8 @@ def main():
     print(
         f"mode=graph warmup={args.warmup} graph_iters={args.graph_iters} "
         f"replays={args.replays} logical_iters={args.graph_iters * args.replays} "
-        f"repeat={args.repeat}"
+        f"repeat={args.repeat} "
+        f"logical_iters_per_runner={args.graph_iters * args.replays * args.repeat}"
     )
     print("Preparing weights...", flush=True)
     weights = b.build_weights(shape, device)

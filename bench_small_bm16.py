@@ -16,12 +16,12 @@ RUNNER_ORDER = (
     "allfly",
 )
 
-DEFAULT_SMALL_WARMUP = 1000
-DEFAULT_SMALL_EAGER_ITERS = 20000
-DEFAULT_SMALL_GRAPH_ITERS = 10000
-DEFAULT_SMALL_GRAPH_MEASURE = 201
-DEFAULT_SMALL_GRAPH_WARMUP_REPLAYS = 30
-DEFAULT_REPEAT = 9
+DEFAULT_SMALL_WARMUP = 2000
+DEFAULT_SMALL_EAGER_ITERS = 50000
+DEFAULT_SMALL_GRAPH_ITERS = 20000
+DEFAULT_SMALL_GRAPH_MEASURE = 301
+DEFAULT_SMALL_GRAPH_WARMUP_REPLAYS = 80
+DEFAULT_REPEAT = 11
 
 
 def _time_fn(fn, args):
@@ -126,7 +126,8 @@ def main():
         else (
             f"graph warmup={args.warmup} graph_iters={args.graph_iters} "
             f"measure={args.measure} graph_warmup_replays={args.graph_warmup_replays} "
-            f"measured_calls_per_sample={args.graph_iters * args.measure}"
+            f"measured_calls_per_sample={args.graph_iters * args.measure} "
+            f"measured_calls_per_runner={args.graph_iters * args.measure * args.repeat}"
         )
     )
     print(f"GPU: {b.torch.cuda.get_device_name(0)}")

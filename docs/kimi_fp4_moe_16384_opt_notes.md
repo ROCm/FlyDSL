@@ -2413,20 +2413,20 @@ bench.py shared defaults:
   graph_warmup_replays=20
 
 bench_small_bm16.py defaults:
-  warmup=1000
-  eager_iters=20000
-  graph_iters=10000
-  measure=201
-  graph_warmup_replays=30
-  repeat=9
+  warmup=2000
+  eager_iters=50000
+  graph_iters=20000
+  measure=301
+  graph_warmup_replays=80
+  repeat=11
 
 profile_small_bm16.py defaults:
-  warmup=100
-  graph_iters=64
-  replays=16
-  logical_iters_per_sample=1024
-  repeat=9
-  max_retries=200
+  warmup=300
+  graph_iters=128
+  replays=4
+  logical_iters_per_sample=512
+  repeat=41
+  max_retries=500
 ```
 
 Use the default commands for final comparison:
@@ -2437,6 +2437,11 @@ Use the default commands for final comparison:
 ```
 
 For smoke checks only, override these values explicitly with small numbers.
+The defaults are intentionally slow: for BM16 the end-to-end bench measures
+`20000 * 301` graph calls per sample. The profiler uses `128 * 4` logical graph
+iterations per sample and `repeat=41`; larger per-sample profiler windows were
+observed to drop CUDA/HIP kernel events in `torch.profiler`, so profiler
+stability is improved by more samples rather than unbounded events per sample.
 
 ## BM16 GEMM2 v4 Packed-Multiply Trial
 
@@ -2480,8 +2485,8 @@ stable runtime win over v3. The two extra `s_waitcnt` instructions appear to
 erase the scalar-multiply reduction. Reverted to GEMM2 v3 as the current stable
 performance baseline.
 
-Current v3 baseline with the longer profiler defaults (`warmup=100`,
-`graph_iters=64`, `replays=16`, `repeat=9`):
+Previous v3 baseline collected before the accuracy-first profiler defaults were
+raised (`warmup=100`, `graph_iters=64`, `replays=16`, `repeat=9`):
 
 | M | stage | aiter | allfly v3 | delta |
 | ---: | --- | ---: | ---: | ---: |
