@@ -437,7 +437,7 @@ def compile_mxscale_gemm(
         )
 
     def _pick_compute_schedule_kind():
-        if b_streaming:
+        if b_streaming or wmma_m_rep == 1:
             return COMPUTE_SCHEDULE_B_STREAMING
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
@@ -2383,7 +2383,6 @@ def compile_mxscale_gemm(
                         cur_lo_b = addr_boxes[1][0]
                         cur_lo_as = addr_boxes[2][0]
                         cur_lo_bs = addr_boxes[3][0]
-                        hot_loop_scheduler_scheduled()
 
                     results = yield list(accs_in) + [cur_lo_a, cur_lo_b, cur_lo_as, cur_lo_bs]
 
