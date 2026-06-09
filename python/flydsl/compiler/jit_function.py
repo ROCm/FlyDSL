@@ -1344,21 +1344,48 @@ class JitFunction:
         self.cache_manager = JitCacheManager(cache_dir)
         self.cache_manager.load_all()
 
-    def _resolve_and_make_cache_key(self, bound_args):
-        """Resolve raw call values into JitArgument instances *in place* and
-        build the tuple cache key from them.
+    @staticmethod
+    def _raw_arg_cache_signature(arg, ann):
+        """Cache signature for a raw runtime argument without wrapping it.
 
-        Side effect: entries in ``bound_args`` whose annotation is neither
-        ``Constexpr[T]`` nor ``Type[T]`` are replaced with their resolved
-        ``JitArgument`` instance (e.g. ``int`` → ``Int32``,
-
-        * Annotation-driven (``Constexpr[T]`` / ``Type[T]``): value or type
-          baked directly into the key, ``bound_args`` left untouched.
-        * JitArgument-driven: the call value is (or is wrapped into) a
-          ``JitArgument`` and its ``cache_signature()`` is appended.
+        The hot launch path may receive plain Python values for annotated
+        runtime parameters, e.g. ``int`` for ``Int32`` or ``torch.cuda.Stream``
+        for ``Stream``. Those values do not affect generated code, so use the
+        JitArgument type's value-independent signature directly instead of
+        constructing a fresh JitArgument on every launch.
         """
         from .jit_argument import JitArgumentRegistry
 
+        if isinstance(arg, JitArgument):
+            return cache_signature(arg)
+        if hasattr(arg, "__cache_signature__"):
+            return arg.__cache_signature__()
+
+        if ann is not inspect.Parameter.empty and isinstance(ann, type):
+            if issubclass(ann, JitArgument):
+                return (ann,)
+            if hasattr(ann, "__get_c_pointers__"):
+                return (ann,)
+
+        if isinstance(arg, tuple):
+            return tuple(JitFunction._raw_arg_cache_signature(a, inspect.Parameter.empty) for a in arg)
+        if isinstance(arg, list):
+            return tuple(JitFunction._raw_arg_cache_signature(a, inspect.Parameter.empty) for a in arg)
+
+        ctor, _ = JitArgumentRegistry.get(type(arg))
+        if ctor is None:
+            raise TypeError(
+                f"{type(arg).__name__} is neither a JitArgument nor has a registered "
+                f"constructor; cannot derive cache signature."
+            )
+        if hasattr(ctor, "raw_cache_signature"):
+            return ctor.raw_cache_signature(arg)
+        if isinstance(arg, (int, float, bool)) and isinstance(ctor, type):
+            return (ctor,)
+        return cache_signature(ctor(arg))
+
+    def _resolve_and_make_cache_key(self, bound_args):
+        """Build the tuple cache key without resolving runtime args in place."""
         sig = self._sig
         # Re-read env vars on every call.
         key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
@@ -1377,21 +1404,7 @@ class JitFunction:
                     key_parts.append((name, arg))
                     continue
 
-            if isinstance(arg, JitArgument):
-                jit_arg = arg
-            elif isinstance(ann, type) and issubclass(ann, JitArgument):
-                jit_arg = ann(arg)
-            else:
-                ctor, _ = JitArgumentRegistry.get(type(arg))
-                if ctor is None:
-                    raise TypeError(
-                        f"{name}: {type(arg).__name__} is neither a JitArgument nor has a registered "
-                        f"constructor; cannot derive cache signature."
-                    )
-                jit_arg = ctor(arg)
-
-            bound_args[name] = jit_arg
-            key_parts.append((name, cache_signature(jit_arg)))
+            key_parts.append((name, self._raw_arg_cache_signature(arg, ann)))
 
         return tuple(key_parts)
 
@@ -1420,6 +1433,46 @@ class JitFunction:
             cache_key = (("_self_type_", type(bound_self)),) + cache_key
         return cache_key
 
+    def _can_direct_call_state(self, args_tuple, *, bound_self=None) -> bool:
+        if bound_self is not None:
+            return False
+        for (_name, param), _arg in zip(self._sig.parameters.items(), args_tuple):
+            ann = param.annotation
+            if ann is not inspect.Parameter.empty:
+                if Constexpr.is_constexpr_annotation(ann) or is_type_param_annotation(ann):
+                    return False
+        return True
+
+    def _set_direct_call_state(self, args_tuple, state, *, bound_self=None):
+        if self._can_direct_call_state(args_tuple, bound_self=bound_self):
+            params = tuple(self._sig.parameters.values())
+            names = tuple(p.name for p in params)
+            name_to_index = {name: idx for idx, name in enumerate(names)}
+            missing = inspect.Parameter.empty
+            defaults = tuple(p.default if p.default is not inspect.Parameter.empty else missing for p in params)
+            self._direct_call_state = (len(args_tuple), state, names, name_to_index, defaults, missing)
+
+    def _direct_call_args_tuple(self, args, kwargs, direct):
+        expected_len, _state, _names, name_to_index, defaults, missing = direct
+        if not kwargs:
+            return args if len(args) == expected_len else None
+        if len(args) > expected_len:
+            return None
+
+        values = list(defaults)
+        for idx, value in enumerate(args):
+            values[idx] = value
+
+        for name, value in kwargs.items():
+            idx = name_to_index.get(name)
+            if idx is None or idx < len(args):
+                return None
+            values[idx] = value
+
+        if any(value is missing for value in values):
+            return None
+        return tuple(values)
+
     @staticmethod
     def _cache_key_to_str(cache_key) -> str:
         """Convert tuple cache key to string for disk cache."""
@@ -1428,6 +1481,12 @@ class JitFunction:
     def __call__(self, *args, **kwargs):
         if ir.Context.current is not None:
             return self.func(*args, **kwargs)
+
+        direct = getattr(self, "_direct_call_state", None)
+        if direct is not None:
+            direct_args = self._direct_call_args_tuple(args, kwargs, direct)
+            if direct_args is not None:
+                return direct[1](direct_args)
 
         self._ensure_sig()
 
@@ -1464,6 +1523,7 @@ class JitFunction:
         if call_state is not None:
             if env.compile.compile_only:
                 return None
+            self._set_direct_call_state(args_tuple, call_state, bound_self=bound_self)
             return call_state(args_tuple)
 
         # Normal path: check in-process cache first, then optional disk cache.
@@ -1497,6 +1557,7 @@ class JitFunction:
                 state = None
             if state is not None:
                 self._call_state_cache[cache_key] = state
+                self._set_direct_call_state(args_tuple, state, bound_self=bound_self)
                 return state(args_tuple)
 
             # Fallback: run through DLPack (should not happen for static layout)
@@ -1660,6 +1721,7 @@ class JitFunction:
             state = None
         if state is not None:
             self._call_state_cache[cache_key] = state
+            self._set_direct_call_state(args_tuple, state, bound_self=bound_self)
             return state(args_tuple)
 
         # Fallback: run through DLPack
