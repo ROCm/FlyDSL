@@ -2096,7 +2096,8 @@ Change in `kimi_fp4_moe_small_bm16.py`:
 - Keep the drained last two K tiles as pure compute, matching the aiter
   `kStages=2` structure.
 
-Default graph replay measurement uses the longer `bench.py` defaults:
+Default graph replay measurement used the then-current longer `bench.py`
+defaults:
 
 ```text
 warmup=100 graph_iters=2000 measure=51 graph_warmup_replays=5
@@ -2126,3 +2127,32 @@ B loads, wait/barrier, and MFMA for every K tile.  The v1 pipeline removes a
 large part of that bubble.  The largest remaining gaps are now `M=4`
 (`+11.7 us` GEMM1) and `M=64` (`+8.7 us` GEMM1), while `M=16` is within about
 `+2.1 us` for GEMM1.
+
+## Bench.py Accurate Small-M Defaults
+
+`bench.py` defaults were increased again for small-M decisions, where the
+pipeline is only tens of microseconds and single replay/event overhead can hide
+real differences:
+
+```text
+warmup=200 graph_iters=5000 measure=101 graph_warmup_replays=10
+eager_iters=5000
+```
+
+Validation command:
+
+```text
+/opt/venv/bin/python bench.py -M 4,8,16,32,64,128 --ref-max-M 128
+```
+
+This run compares aiter's `mxfp4_moe` CSV path against the original untagged
+`fused_moe` FlyDSL CSV path, not the local extracted BM16 file.
+
+| M | mxfp4 | FlyDSL fused_moe | ratio | mx.fly | mx.ref | fly.ref |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 39.2 us | 52.3 us | 1.34x | 0.9845 | 0.9533 | 0.9482 |
+| 8 | 58.4 us | 71.9 us | 1.23x | 0.9868 | 0.9524 | 0.9485 |
+| 16 | 95.9 us | 115.4 us | 1.20x | 0.9876 | 0.9538 | 0.9515 |
+| 32 | 145.8 us | 160.7 us | 1.10x | 0.9868 | 0.9548 | 0.9520 |
+| 64 | 200.3 us | 209.7 us | 1.05x | 0.9874 | 0.9555 | 0.9529 |
+| 128 | 251.4 us | 262.8 us | 1.05x | 0.9875 | 0.9562 | 0.9536 |
