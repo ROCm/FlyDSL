@@ -2236,9 +2236,9 @@ def compile_mxscale_gemm(
 
         _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
-        # Main loop — acc_mixed style: fence at top, TDM_load mid-compute.
-        # This overlaps TDM DMA with the remaining WMMA instructions,
-        _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
+        # Main loop — issue-first style: TDM_load at top, fence after issue.
+        # outstanding = (num_buffers - 1) because the new issue precedes the fence.
+        _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 1)
 
         if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
             _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -2343,36 +2343,31 @@ def compile_mxscale_gemm(
                     for buf_idx in range_constexpr(num_buffers):
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
+                        addr_boxes = [[cur_lo_a], [cur_lo_b], [cur_lo_as], [cur_lo_bs]]
+                        _k_off = (
+                            split_k_base
+                            + loop_iter * arith.index(num_buffers * tile_k)
+                            + arith.index(buf_idx * tile_k)
+                        )
+                        dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[load_stage], addr_boxes[0][0], addr_hi_a)
+                        dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[load_stage], addr_boxes[1][0], addr_hi_b)
+                        dg0_as = _pack_dg0(pred_const, stages_as_lds_addr[load_stage], addr_boxes[2][0], addr_hi_as)
+                        dg0_bs = _pack_dg0(pred_const, stages_bs_lds_addr[load_stage], addr_boxes[3][0], addr_hi_bs)
+                        issue_tdm_loads(
+                            tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+                            tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+                            tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
+                            tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
+                            wave_specialized=wave_specialized_tdm,
+                        )
+                        addr_boxes[0][0] = addr_boxes[0][0] + adv_a_i32
+                        addr_boxes[1][0] = addr_boxes[1][0] + adv_b_i32
+                        addr_boxes[2][0] = addr_boxes[2][0] + adv_as_i32
+                        addr_boxes[3][0] = addr_boxes[3][0] + adv_bs_i32
+                        _l2_prefetch(_k_off)
+
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
                         pipeline_fence_wait(use_cluster=use_cluster)
-
-                        addr_boxes = [[cur_lo_a], [cur_lo_b], [cur_lo_as], [cur_lo_bs]]
-
-                        def _mid_tdm_nws(
-                            _ls=load_stage,
-                            _ab=addr_boxes,
-                            _k_off=(
-                                split_k_base
-                                + loop_iter * arith.index(num_buffers * tile_k)
-                                + arith.index(buf_idx * tile_k)
-                            ),
-                        ):
-                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls], _ab[0][0], addr_hi_a)
-                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls], _ab[1][0], addr_hi_b)
-                            dg0_as = _pack_dg0(pred_const, stages_as_lds_addr[_ls], _ab[2][0], addr_hi_as)
-                            dg0_bs = _pack_dg0(pred_const, stages_bs_lds_addr[_ls], _ab[3][0], addr_hi_bs)
-                            issue_tdm_loads(
-                                tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
-                                tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                                tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
-                                tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
-                                wave_specialized=wave_specialized_tdm,
-                            )
-                            _ab[0][0] = _ab[0][0] + adv_a_i32
-                            _ab[1][0] = _ab[1][0] + adv_b_i32
-                            _ab[2][0] = _ab[2][0] + adv_as_i32
-                            _ab[3][0] = _ab[3][0] + adv_bs_i32
-                            _l2_prefetch(_k_off)
 
                         a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[buf_idx])
                         rocdl.sched_barrier(0)
@@ -2382,7 +2377,6 @@ def compile_mxscale_gemm(
                             stages_b_idx[buf_idx],
                             stages_as_idx[buf_idx],
                             stages_bs_idx[buf_idx],
-                            mid_compute_callback=_mid_tdm_nws,
                             a0_prefetch=a0_prefetch,
                         )
                         cur_lo_a = addr_boxes[0][0]
