@@ -82,14 +82,22 @@ def _raw_lds_ptr(lds_base_idx, byte_offset):
     return _llvm.inttoptr(lds_ptr_ty, addr_i32)
 
 
-def lds_load_b128_raw(lds_base_idx, byte_offset):
+def lds_load_b128_raw(lds_base_idx, byte_offset, imm_byte_offset: int = 0):
     """Load 16 bytes from LDS using a pre-extracted base index (raw LLVM).
 
     Args:
-        lds_base_idx: Index value from ``extract_lds_base_idx``.
-        byte_offset: Byte offset (index-type) relative to the base.
+        lds_base_idx:    Index value from ``extract_lds_base_idx``.
+        byte_offset:     Byte offset (index-type) relative to the base.
+        imm_byte_offset: Compile-time immediate byte offset applied via GEP
+                         AFTER ``byte_offset``.  LLVM folds this into the
+                         ``ds_load_b128 ... offset:N`` immediate field,
+                         eliminating the per-element v_add_nc_u32 instruction.
+                         Must be a Python int; must fit in 16 bits (0–65535).
     """
     ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    if imm_byte_offset:
+        from flydsl.expr.buffer_ops import get_element_ptr as _gep
+        ptr_val = _gep(ptr_val, static_byte_offset=int(imm_byte_offset))
     return llvm_dialect.load(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), ptr_val)
 
 

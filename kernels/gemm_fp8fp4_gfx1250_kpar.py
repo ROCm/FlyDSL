@@ -153,10 +153,13 @@ def compile_fp8fp4_gemm(
         raise ValueError(f"k_warp must be >= 1, got {k_warp}")
     if k_warp > 1 and split_k > 1:
         raise ValueError("k_warp > 1 is incompatible with split_k > 1")
-    if k_warp > 1 and use_tdm_store:
-        raise ValueError("k_warp > 1 requires use_tdm_store=False (epilogue uses LDS reduce + buffer store)")
     if k_warp > 1 and wave_specialized_tdm:
         raise ValueError("k_warp > 1 is incompatible with wave_specialized_tdm")
+    # k_warp > 1 is only for tile_m == WMMA_M (single M row): m_warp must be 1.
+    if k_warp > 1 and tile_m != WMMA_M:
+        raise ValueError(f"k_warp > 1 requires tile_m == WMMA_M ({WMMA_M}), got tile_m={tile_m}")
+    if k_warp > 1 and m_warp != 1:
+        raise ValueError(f"k_warp > 1 requires m_warp == 1, got m_warp={m_warp}")
 
     use_cluster = cluster_m > 1 or cluster_n > 1
     if use_cluster:
@@ -402,7 +405,11 @@ def compile_fp8fp4_gemm(
     if use_tdm_store:
         lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
         warp_d_bytes = warp_tile_m * lds_d_row_stride
-        total_d_bytes = num_warps * warp_d_bytes
+        # k_warp > 1: m_warp == 1 always, so D-tile has m_warp * n_warp = n_warp slots.
+        # All k-warps at the same (m, n) position share ONE output tile; only
+        # wave_k_idx==0 writes to the D-tile after the reduce.
+        _tdm_d_num_warps = m_warp * n_warp  # = n_warp (since m_warp==1 for k_warp>1)
+        total_d_bytes = _tdm_d_num_warps * warp_d_bytes
         d_output_off = 0
         _lds_d_stride_elems = lds_d_row_stride // 2
         _warp_d_elems = warp_d_bytes // 2
@@ -411,24 +418,28 @@ def compile_fp8fp4_gemm(
         if total_d_bytes > arena_total_bytes:
             arena_total_bytes = total_d_bytes
             arena_alloc.ptr = total_d_bytes
-    # k_warp > 1: epilogue LDS reduce buffer.
-    # After the main loop the A/B pipeline LDS is idle, so we alias the
-    # reduce buffer to byte offset 0 of the arena (reuse is safe because
-    # all TDM traffic has completed before the reduce).
-    # Layout: [k_warp, n_accs, ACC_VEC_SIZE] f32 elements.
-    # Each warp writes n_accs * ACC_VEC_SIZE f32 values = n_accs * ACC_VEC_SIZE * 4 bytes.
-    kpar_reduce_bytes_per_warp = 0
-    kpar_reduce_total_bytes = 0
-    kpar_reduce_f16_count = 0
+
+    # k_warp > 1: per-thread f32 reduce buffer (matching reference pattern).
+    # Layout: block_threads × n_accs × ACC_VEC_SIZE f32 elements.
+    # Each thread stores at offset: tx * (n_accs * ACC_VEC_SIZE).
+    # Use T.f32 SmemPtr + vector.store/vector.load_op for consistency
+    # (mixing f16 memref store with raw-ptr load caused visibility issues).
+    kpar_reduce_f32_total = 0
+    kpar_reduce_off = 0  # byte offset into arena
+    kpar_f32_per_thread = 0
     if k_warp > 1:
-        # n_accs and ACC_VEC_SIZE known at compile time here
         _kpar_n_accs = (warp_tile_m // WMMA_M) * (warp_tile_n // WMMA_N_EFF)
-        kpar_reduce_bytes_per_warp = _kpar_n_accs * ACC_VEC_SIZE * 4  # f32 bytes
-        kpar_reduce_total_bytes = k_warp * kpar_reduce_bytes_per_warp
-        kpar_reduce_f16_count = kpar_reduce_total_bytes // 2
-        if kpar_reduce_total_bytes > arena_total_bytes:
-            arena_total_bytes = kpar_reduce_total_bytes
-            arena_alloc.ptr = kpar_reduce_total_bytes
+        kpar_f32_per_thread = _kpar_n_accs * ACC_VEC_SIZE  # f32 elems per thread
+        kpar_reduce_f32_total = block_threads * kpar_f32_per_thread
+        kpar_reduce_total_bytes = kpar_reduce_f32_total * 4  # bytes
+        if use_tdm_store:
+            kpar_reduce_off = _align_up(total_d_bytes, 16)
+        else:
+            kpar_reduce_off = 0
+        _kpar_arena_needed = kpar_reduce_off + kpar_reduce_total_bytes
+        if _kpar_arena_needed > arena_total_bytes:
+            arena_total_bytes = _kpar_arena_needed
+            arena_alloc.ptr = _kpar_arena_needed
 
     check_smem_capacity(arena_total_bytes, gpu_arch)
 
@@ -2214,10 +2225,30 @@ def compile_fp8fp4_gemm(
                     rocdl.sched_dsrd(_next_ks_loads)
             rocdl.sched_barrier(0)
 
+        def hot_loop_scheduler_k_parallel():
+            """Scheduler hints for K-parallel: use warp_k_wmma_steps (not k_wmma_steps).
+            Each warp only computes warp_k_wmma_steps WMMA groups, so TDM loads must
+            be issued within that shorter window to hide DMA latency correctly."""
+            _half_wm = wmma_m_rep // 2
+            _half_wmma = _half_wm * wmma_n_rep
+            _b_loads_per_frag = 2 if is_a8w4 else 4
+            _scale_dsrd = 0 if is_ptpc else 2
+
+            for _ks in range_constexpr(warp_k_wmma_steps):
+                if const_expr(_ks == 0):
+                    rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + _scale_dsrd + _half_wm * DS_LOADS_PER_A_FRAG)
+                else:
+                    rocdl.sched_dsrd(_half_wm * DS_LOADS_PER_A_FRAG)
+                rocdl.sched_mfma(_half_wmma)
+                rocdl.sched_dsrd(_half_wm * DS_LOADS_PER_A_FRAG)
+                rocdl.sched_mfma(_half_wmma)
+                if const_expr(_ks < warp_k_wmma_steps - 1):
+                    rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + _scale_dsrd)
+            rocdl.sched_barrier(0)
+
         def hot_loop_scheduler_scheduled():
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_K_PARALLEL):
-                # K-parallel uses the standard row-major scheduler (same streaming pattern)
-                hot_loop_scheduler()
+                hot_loop_scheduler_k_parallel()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
                 hot_loop_scheduler_b_streaming()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
@@ -2465,7 +2496,11 @@ def compile_fp8fp4_gemm(
             )
             wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
             # Match the TDM-store descriptor offsets to the compute wave mapping.
-            if const_expr(use_fp8_deep_pipeline_schedule):
+            # k_warp > 1: 3D layout (m_warp=1, n_warp, k_warp); wave_n_sgpr = wave_id / k_warp.
+            if const_expr(k_warp > 1):
+                wave_m_sgpr = arith.index(0)  # m_warp == 1 always for k_warp > 1
+                wave_n_sgpr = wave_id_idx / arith.index(k_warp)
+            elif const_expr(use_fp8_deep_pipeline_schedule):
                 wave_m_sgpr = wave_id_idx % arith.index(m_warp)
                 wave_n_sgpr = wave_id_idx / arith.index(m_warp)
             else:
@@ -3055,131 +3090,123 @@ def compile_fp8fp4_gemm(
             _ptpc_sa, _ptpc_sb = _ptpc_scale_box[0]
             accs = epilogue_apply_ptpc_scale(accs, _ptpc_sa, _ptpc_sb)
 
-        # ── k_warp > 1: LDS cross-warp reduce ──
-        # After the main loop all TDM traffic is done; arena LDS is free to reuse.
-        # Each warp stores its partial accs at offset wave_k_idx * bytes_per_warp.
-        # gpu.barrier() synchronises, then wave_k_idx==0 sums all k_warp partials.
-        #
-        # LDS layout per warp (byte offsets from warp base):
-        #   FP4 (vec<16,f32>): acc[i] at byte i * 64 (= i * ACC_VEC_SIZE * 4)
-        #     stored as 2 × 8-element halves, each half 32 bytes:
-        #       half 0: bytes [i*64 + 0 .. i*64 + 31]  → 2 × lds_store_b128
-        #       half 1: bytes [i*64 + 32 .. i*64 + 63] → 2 × lds_store_b128
-        #   FP8/A8W4 (vec<8,f32>): acc[i] at byte i * 32 (= i * ACC_VEC_SIZE * 4)
-        #       bytes [i*32 + 0 .. i*32 + 31]  → 2 × lds_store_b128
-        #
-        # store_acc_vec8_to_lds uses f16-element offsets (each f16 = 2 bytes).
-        # Per-acc f16 stride: ACC_VEC_SIZE * 4 / 2 = ACC_VEC_SIZE * 2 f16 elems.
-        if const_expr(k_warp > 1):
-            # Allocate reduce buffer at arena base (pipeline LDS is no longer needed)
-            kpar_reduce_smem = SmemPtr(
-                arena_base_ptr, 0, elem_ty_lds, shape=(kpar_reduce_f16_count,)
-            )
-            kpar_reduce_buf = get_lds_memref(kpar_reduce_smem)
-            kpar_reduce_idx = extract_lds_base_idx(kpar_reduce_smem)
-
-            # Per-acc f16-element stride = ACC_VEC_SIZE * 2  (ACC_VEC_SIZE f32 = ACC_VEC_SIZE * 2 f16)
-            _kpar_acc_f16_stride = ACC_VEC_SIZE * 2
-            # f16 elements per warp = n_accs * ACC_VEC_SIZE * 2
-            _kpar_elems_per_warp = kpar_reduce_bytes_per_warp // 2
-
-            # Each warp stores its n_accs partial accumulators
-            _kpar_warp_base = wave_k_idx * arith.index(_kpar_elems_per_warp)
-            for _ki in range_constexpr(n_accs):
-                _acc_f16_base = _ki * _kpar_acc_f16_stride  # compile-time f16 offset within warp
-                if const_expr(ACC_VEC_SIZE == 16):
-                    # FP4: vec<16,f32> split into 2 × 8-element halves
-                    # half 0: f16 offset = _acc_f16_base,       half 1: _acc_f16_base + 16
-                    for _half in range_constexpr(2):
-                        _h_sub8 = _get_acc_sub8(accs, _ki, _half * 8)
-                        _imm = _acc_f16_base + _half * 16  # f16 elements
-                        store_acc_vec8_to_lds(kpar_reduce_buf, _kpar_warp_base, _imm, _h_sub8, out_elem=None)
-                else:
-                    # FP8/A8W4: vec<8,f32> stored as 2 × lds_store_b128
-                    store_acc_vec8_to_lds(
-                        kpar_reduce_buf, _kpar_warp_base, _acc_f16_base,
-                        _get_acc_sub8(accs, _ki, 0), out_elem=None
-                    )
-
+        # ── Epilogue: TDM store or buffer store ──
+        # Shared helpers that work with any `accs_arg` list.
+        def _do_tdm_store(accs_arg):
+            if const_expr(d_need_epilogue_fence):
+                _pipeline_fence(outstanding=0)
+            rocdl.sched_barrier(0)
+            epilogue_lds_stores(accs_arg, d_lds_buffer, d_lane_base)
             rocdl.s_wait_dscnt(0)
+            tdm_ops.tensor_store_2d(d_desc)
+            tdm_ops.tensor_wait(0)
+
+        def _do_buffer_store(accs_arg):
+            rocdl.sched_barrier(0)
+            if const_expr(epi_addrs_box[0] is None):
+                epi_addrs_box[0] = epilogue_prepare_addrs()
+            if const_expr(split_k > 1):
+                epilogue_atomic_adds(accs_arg, epi_addrs_box[0])
+            else:
+                epilogue_stores(accs_arg, epi_addrs_box[0])
+
+        if const_expr(k_warp > 1):
+            # ── k_warp > 1: intra-WG split-K reduce via LDS ──
+            # Pattern from ROCm/aiter a16w4_moe_gemm_2stage.py#L2590:
+            #   - f32 SmemPtr (NOT f16) for type-consistent store/load
+            #   - vector.store / vector.load_op (NOT lds_store_b128 / lds_load_b128_raw)
+            #   - gpu.barrier() for synchronization
+            #   - Per-thread storage: tx * (n_accs * ACC_VEC_SIZE) f32 offset
+            reduce_lds = SmemPtr(
+                arena_base_ptr, kpar_reduce_off, T.f32,
+                shape=(kpar_reduce_f32_total,)
+            ).get()
+
+            # Per-thread base in f32 elements
+            tx_idx = fx.Index(tx)
+            _tx_base = tx_idx * arith.index(kpar_f32_per_thread)
+
+            # Step 1: All k_warp waves store their partial accs to LDS.
+            for _ki in range_constexpr(n_accs):
+                acc_v = fx.Vector(accs[_ki])
+                for _q in range_constexpr(ACC_VEC_SIZE // 4):
+                    _q_start = _q * 4
+                    sub4 = fx.Vector.from_elements(
+                        [acc_v[_q_start], acc_v[_q_start+1], acc_v[_q_start+2], acc_v[_q_start+3]]
+                    )
+                    _off = _tx_base + arith.index(_ki * ACC_VEC_SIZE + _q_start)
+                    from flydsl.expr import vector as _vec
+                    _vec.store(sub4.ir_value(), reduce_lds, [_off])
+
+            # Step 2: Workgroup barrier (same as reference — gpu.barrier() works here).
             gpu.barrier()
 
-            # wave_k_idx == 0 reads and sums the other k_warp-1 partials
-            _kpar_is_reducer = wave_k_idx == arith.index(0)
-            if_reduce = scf.IfOp(_kpar_is_reducer, [], has_else=False)
-            with ir.InsertionPoint(if_reduce.then_block):
-                final_accs = list(accs)
-                for _w in range_constexpr(1, k_warp):
-                    # Byte base for warp _w in the reduce buffer
-                    _w_base_bytes = _w * kpar_reduce_bytes_per_warp
-                    for _ki in range_constexpr(n_accs):
-                        # Byte offset to start of acc[_ki] for warp _w
-                        _acc_byte_base = _w_base_bytes + _ki * ACC_VEC_SIZE * 4
-                        if const_expr(ACC_VEC_SIZE == 16):
-                            # FP4: 4 × ds_load_b128 → reconstruct vec<16,f32>
-                            # half 0: bytes [_acc_byte_base + 0 .. +31]
-                            # half 1: bytes [_acc_byte_base + 32 .. +63]
-                            raw0 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base)))
-                            raw1 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 16)))
-                            raw2 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 32)))
-                            raw3 = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 48)))
-                            f32_0 = arith.bitcast(T.vec(4, T.f32), raw0)
-                            f32_1 = arith.bitcast(T.vec(4, T.f32), raw1)
-                            f32_2 = arith.bitcast(T.vec(4, T.f32), raw2)
-                            f32_3 = arith.bitcast(T.vec(4, T.f32), raw3)
-                            # Reassemble: [f32_0 | f32_1] = half0 vec<8,f32>, [f32_2 | f32_3] = half1
-                            half0 = fx.Vector(f32_0).shuffle(fx.Vector(f32_1), list(range(8)))
-                            half1 = fx.Vector(f32_2).shuffle(fx.Vector(f32_3), list(range(8)))
-                            partial16 = half0.shuffle(half1, list(range(16)))
-                            final_accs[_ki] = (fx.Vector(final_accs[_ki]).addf(partial16)).ir_value()
-                        else:
-                            # FP8/A8W4: 2 × ds_load_b128 → vec<8,f32>
-                            raw_lo = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base)))
-                            raw_hi = fx.Vector(lds_load_b128_raw(kpar_reduce_idx, arith.index(_acc_byte_base + 16)))
-                            f32_lo = arith.bitcast(T.vec(4, T.f32), raw_lo)
-                            f32_hi = arith.bitcast(T.vec(4, T.f32), raw_hi)
-                            partial8 = fx.Vector(f32_lo).shuffle(fx.Vector(f32_hi), list(range(8)))
-                            final_accs[_ki] = (fx.Vector(final_accs[_ki]).addf(partial8)).ir_value()
+            # Step 3: Start from own VGPR accs, load only partner waves, add.
+            # Own data is already in `accs` (VGPR) — no LDS reload needed.
+            # = (k_warp-1) partners × n_accs × (ACC_VEC_SIZE//4) ds_load_b128
+            _vec4f32 = T.vec(4, T.f32)
+            from flydsl.expr import vector as _vec
 
-                rocdl.s_wait_dscnt(0)
+            # Init partials from own VGPR accumulator, split into vec<4,f32> chunks.
+            partials = []
+            for _ki in range_constexpr(n_accs):
+                acc_v = fx.Vector(accs[_ki])
+                row = []
+                for _q in range_constexpr(ACC_VEC_SIZE // 4):
+                    qs = _q * 4
+                    row.append(fx.Vector.from_elements(
+                        [acc_v[qs], acc_v[qs+1], acc_v[qs+2], acc_v[qs+3]]
+                    ).ir_value())
+                partials.append(row)
 
-                # Normal buffer store (only wave_k_idx==0 reaches here)
-                _kpar_addrs = epilogue_prepare_addrs()
-                epilogue_stores(final_accs, _kpar_addrs)
-                scf.YieldOp([])
-            # Other k_warp warps do nothing after the barrier
+            # Add (k_warp-1) partners only — own wave already in VGPR, no reload.
+            # d=1..k_warp-1: partner = (wave_k_idx + d) % k_warp (runtime, no cndmask).
+            # Emits exactly (k_warp-1) × n_accs × (ACC_VEC_SIZE//4) ds_load_b128.
+            lane_in_wave = tx_idx % arith.index(WAVE_SIZE)
+            for _d in range_constexpr(1, k_warp):
+                _partner_wave = (wave_k_idx + arith.index(_d)) % arith.index(k_warp)
+                _partner_tx_base = (_partner_wave * arith.index(WAVE_SIZE) + lane_in_wave) \
+                                   * arith.index(kpar_f32_per_thread)
+                for _ki in range_constexpr(n_accs):
+                    for _q in range_constexpr(ACC_VEC_SIZE // 4):
+                        _off = _partner_tx_base + arith.index(_ki * ACC_VEC_SIZE + _q * 4)
+                        loaded = _vec.load_op(_vec4f32, reduce_lds, [_off])
+                        partials[_ki][_q] = arith.addf(partials[_ki][_q], loaded)
 
-        # k_warp > 1: store already handled in the LDS reduce block above
-        if const_expr(k_warp == 1):
-            def _emit_tdm_store():
-                if const_expr(d_need_epilogue_fence):
-                    _pipeline_fence(outstanding=0)
-                rocdl.sched_barrier(0)
-                epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
-                rocdl.s_wait_dscnt(0)
-                tdm_ops.tensor_store_2d(d_desc)
-                tdm_ops.tensor_wait(0)
-
-            def _emit_buffer_store():
-                rocdl.sched_barrier(0)
-                if const_expr(epi_addrs_box[0] is None):
-                    epi_addrs_box[0] = epilogue_prepare_addrs()
-                if const_expr(split_k > 1):
-                    epilogue_atomic_adds(accs, epi_addrs_box[0])
+            # Reassemble full-width accumulator from vec<4,f32> chunks.
+            final_accs = []
+            for _ki in range_constexpr(n_accs):
+                if const_expr(ACC_VEC_SIZE == 16):
+                    h0 = fx.Vector(partials[_ki][0]).shuffle(fx.Vector(partials[_ki][1]), list(range(8)))
+                    h1 = fx.Vector(partials[_ki][2]).shuffle(fx.Vector(partials[_ki][3]), list(range(8)))
+                    full = h0.shuffle(h1, list(range(16)))
                 else:
-                    epilogue_stores(accs, epi_addrs_box[0])
+                    full = fx.Vector(partials[_ki][0]).shuffle(fx.Vector(partials[_ki][1]), list(range(8)))
+                final_accs.append(full.ir_value())
 
+            # Step 4: All k_warp waves write the final result simultaneously.
+            # TDM: each wave has num_warps=1 descriptor with the same d_warp_off_sgpr
+            # (k_warp waves at same m/n position share the same D-tile LDS slot and
+            # global output — concurrent idempotent DMAs, same as original multi-warp design).
+            # buffer_store: same addresses, same values — also idempotent.
+            if const_expr(use_tdm_store):
+                _do_tdm_store(final_accs)
+            else:
+                _do_buffer_store(final_accs)
+
+        else:
+            # k_warp == 1: standard epilogue (unchanged from original).
             if const_expr(use_tdm_store):
                 full_tile = (blk_m + arith.index(tile_m)) <= m_idx
                 if_op = scf.IfOp(full_tile, [], has_else=True)
                 with ir.InsertionPoint(if_op.then_block):
-                    _emit_tdm_store()
+                    _do_tdm_store(accs)
                     scf.YieldOp([])
                 with ir.InsertionPoint(if_op.else_block):
-                    _emit_buffer_store()
+                    _do_buffer_store(accs)
                     scf.YieldOp([])
             else:
-                _emit_buffer_store()
+                _do_buffer_store(accs)
 
     cache_tag = (
         data_format,
