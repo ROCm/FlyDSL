@@ -322,12 +322,15 @@ def compile_kimi_mxfp4_gemm1_16384():
     _eff_lds_stride = tile_k // a_elem_vec_pack
     _eff_tile_k_bytes = tile_k // a_elem_vec_pack
     _single_x_bytes = tile_m * _eff_lds_stride
+    _lds_scale_bytes = (tile_m // 32) * num_k_tiles * 256
+    _kloop_lds_bytes = _single_x_bytes + _lds_scale_bytes
     _lds_acc_bytes = tile_m * tile_n * 4
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem_mxfp4_gemm1")
     lds_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_offset + max(_single_x_bytes, _lds_acc_bytes)
+    lds_scale_offset = lds_offset + _single_x_bytes
+    allocator.ptr = lds_offset + max(_kloop_lds_bytes, _lds_acc_bytes)
 
     x_nbytes = TOKEN * (MODEL_DIM // 2)
     x_scale_nbytes = max_sorted * (MODEL_DIM // 32) * 2
@@ -357,7 +360,7 @@ def compile_kimi_mxfp4_gemm1_16384():
     # Output scale layout consumed by GEMM2 for K=INTER_DIM=512.
     k_out_as_per_chunk_dw = ((INTER_DIM // 32) // 4 // 2) * 64
 
-    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v1"
+    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v3"
 
     @flyc.kernel(name=module_name)
     def gemm1(
@@ -412,6 +415,13 @@ def compile_kimi_mxfp4_gemm1_16384():
 
         base_ptr = allocator.get_base()
         lds_x = SmemPtr(base_ptr, lds_offset, T.f8, shape=(_single_x_bytes,)).get()
+        lds_scale_i8 = SmemPtr(base_ptr, lds_scale_offset, T.i8, shape=(_lds_scale_bytes,)).get()
+        lds_scale_i32 = SmemPtr(
+            base_ptr,
+            lds_scale_offset,
+            T.i32,
+            shape=(_lds_scale_bytes // 4,),
+        ).get()
         lds_acc = SmemPtr(base_ptr, lds_offset, T.f32, shape=(tile_m * tile_n,)).get()
 
         shape_lds = fx.make_shape(tile_m, _eff_lds_stride)
@@ -440,7 +450,7 @@ def compile_kimi_mxfp4_gemm1_16384():
             n_blk_list[ni] = _div_pow2(global_n, 16)
             n_intra_list[ni] = global_n % arith.constant(16, index=True)
 
-        bytes_per_thread_x = tile_m * tile_k // total_threads
+        bytes_per_thread_x = tile_m * tile_k // a_elem_vec_pack // total_threads
         x_load_bytes = 16
         num_x_loads = bytes_per_thread_x // x_load_bytes
         chunk_i32 = x_load_bytes // 4
@@ -515,15 +525,17 @@ def compile_kimi_mxfp4_gemm1_16384():
 
         def load_a_scale_tile(k_tile: int):
             a_scale_tile = []
-            chunk_base = bx_m / arith.constant(32, index=True)
             for mi in range_constexpr(m_repeat_packed):
                 scale_idx = (
-                    (chunk_base + arith.constant(mi, index=True))
-                    * arith.constant(k_as_per_chunk_dw, index=True)
+                    arith.constant(mi * k_as_per_chunk_dw, index=True)
                     + arith.constant(k_tile * k_bs_stride_k0_dw, index=True)
                     + lane_word
                 )
-                s = buffer_ops.buffer_load(sx_rsrc, scale_idx, vec_width=1, dtype=i32)
+                s = vector.extract(
+                    vector.load_op(T.vec(1, i32), lds_scale_i32, [scale_idx]),
+                    static_position=[0],
+                    dynamic_position=[],
+                )
                 a_scale_tile.append(vector.from_elements(T.vec(1, i32), [s]))
             return a_scale_tile
 
@@ -633,8 +645,70 @@ def compile_kimi_mxfp4_gemm1_16384():
                     arith.constant(0, type=i32),
                 )
 
+        def dma_a_scales_to_lds():
+            c4_idx = arith.index(4)
+            c16_idx = arith.index(16)
+            scale_chunk_bytes = arith.constant(k_as_per_chunk_dw * 4, index=True)
+            chunk_base = bx_m / arith.constant(32, index=True)
+            lds_scale_base = memref.extract_aligned_pointer_as_index(lds_scale_i8)
+            tx_bytes16 = tx * c16_idx
+            tx_bytes4 = tx * c4_idx
+            for sub in range_constexpr(tile_m // 32):
+                sub_idx = arith.constant(sub, index=True)
+                global_sub_base = (chunk_base + sub_idx) * scale_chunk_bytes
+                lds_sub_base = sub_idx * scale_chunk_bytes
+
+                lds_addr = (
+                    lds_scale_base
+                    + lds_sub_base
+                    + wave_id * arith.constant(1024, index=True)
+                )
+                lds_ptr_i64 = rocdl.readfirstlane(i64, arith.index_cast(i64, lds_addr))
+                lds_ptr = llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), lds_ptr_i64)
+                global_offset = arith.index_cast(i32, global_sub_base + tx_bytes16)
+                rocdl.raw_ptr_buffer_load_lds(
+                    sx_rsrc,
+                    lds_ptr,
+                    arith.constant(16, type=i32),
+                    global_offset,
+                    arith.constant(0, type=i32),
+                    arith.constant(0, type=i32),
+                    arith.constant(0, type=i32),
+                )
+
+                for tail in range_constexpr(3):
+                    byte_off = arith.constant(4096 + tail * 1024, index=True)
+                    lds_addr_tail = (
+                        lds_scale_base
+                        + lds_sub_base
+                        + byte_off
+                        + wave_id * arith.constant(256, index=True)
+                    )
+                    lds_ptr_tail_i64 = rocdl.readfirstlane(
+                        i64,
+                        arith.index_cast(i64, lds_addr_tail),
+                    )
+                    lds_ptr_tail = llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), lds_ptr_tail_i64)
+                    global_offset_tail = arith.index_cast(
+                        i32,
+                        global_sub_base + byte_off + tx_bytes4,
+                    )
+                    rocdl.raw_ptr_buffer_load_lds(
+                        sx_rsrc,
+                        lds_ptr_tail,
+                        arith.constant(4, type=i32),
+                        global_offset_tail,
+                        arith.constant(0, type=i32),
+                        arith.constant(0, type=i32),
+                        arith.constant(0, type=i32),
+                    )
+
         def _then_body():
             acc = [arith.constant_vector(0.0, vec4_f32)] * (m_repeat * num_acc_n)
+            dma_a_scales_to_lds()
+            rocdl.s_waitcnt(0)
+            gpu.barrier()
+
             for k_tile in range_constexpr(num_k_tiles):
                 gpu.barrier()
                 dma_x_tile_to_lds(k_tile)

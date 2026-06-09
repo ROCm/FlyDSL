@@ -669,7 +669,62 @@ spill=0
 LDS=131072
 ```
 
+Because VGPR does not spill, AGPR is not the first required porting target. It
+may still help occupancy or scheduling later, but the confirmed gap is currently
+extra load/wait/barrier work in the FlyDSL GEMM1 body.
+
 An attempted one-ahead LDS double-buffer/prefetch experiment reduced time a
 little but produced incorrect output, so it was not kept. A correct version
 needs to match aiter's physical LDS slot lifetime and explicit LDS read/write
 ordering more closely instead of just moving Python-level loads.
+
+### Step 6: GEMM1 Load Reduction Checkpoint
+
+The next two changes were kept in `kimi_fp4_moe_16384_opt.py` after validating
+correctness against aiter mxfp4.
+
+First, the A raw LDS DMA byte count was fixed for packed FP4:
+
+```python
+bytes_per_thread_x = tile_m * tile_k // a_elem_vec_pack // total_threads
+```
+
+The old expression missed the FP4 pack ratio and loaded twice the required A
+bytes per K tile. Static ISA counts changed from:
+
+```text
+FlyDSL v1 buffer_load total: 622
+  buffer_load_dwordx4 lds,offen: 224
+```
+
+to:
+
+```text
+FlyDSL v2 buffer_load total: 510
+  buffer_load_dwordx4 lds,offen: 112
+```
+
+That aligns the A raw vector load count with aiter, whose corresponding
+`buffer_load_dwordx4 lds,offen` count is 116.
+
+Second, A scales were moved from per-K-tile global scalar loads into a CTA-level
+LDS preload that mirrors aiter's `issue_a_scale_load` / `issue_a_scale_ds_read`
+structure:
+
+```text
+A scale global -> LDS once per CTA
+MFMA loop reads A scale dwords from LDS
+```
+
+Validated CUDAGraph result for
+`flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v3`:
+
+```text
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_cos=1.000000
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_max_abs=0.000000
+aiter_mxfp4_moe_us=1813.3
+local_mxfp4_opt_gemm1_us=2148.7
+```
+
+This is a runnable checkpoint. It improves the earlier v1 CUDAGraph snapshot
+(`2248.6us`) but GEMM1 is still not fully aligned with aiter.
