@@ -1042,8 +1042,8 @@ def compile_mxscale_gemm(
             if const_expr(_use_partial_drain):
                 next_result = _load_a_and_scales(*next_info)
                 rocdl.s_wait_dscnt(_as_ds_loads)
-            else:
-                rocdl.s_wait_dscnt(0)
+            # else:
+            #     rocdl.s_wait_dscnt(0)
 
             _emit_cols(0, b_frags_front)
 
@@ -1053,7 +1053,9 @@ def compile_mxscale_gemm(
 
             if const_expr(_back_wn > 0):
                 b_frags_back = [load_b_frag(b_buf, b_bases, _front_wn + h, ks) for h in range_constexpr(_back_wn)]
-                rocdl.s_wait_dscnt(_as_ds_loads if _use_partial_drain else 0)
+                if const_expr(_use_partial_drain):
+                    rocdl.s_wait_dscnt(_as_ds_loads)
+                # else: let HW resolve data dependencies naturally
                 _emit_cols(_front_wn, b_frags_back)
 
             if const_expr(_use_partial_drain):
