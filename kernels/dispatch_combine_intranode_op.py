@@ -1095,9 +1095,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
         cfg = self.cfg
         stream = torch.cuda.current_stream()
 
-        # fp8_direct_cast fires only when cfg asks for it AND caller
-        # passes bf16.
-        fp8_dc = cfg.quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
+        # Driven by config: under skip_stage1 the kernel never reads ``input``,
+        # so the fp8 placeholder dtype must not decide the mode (else fused
+        # mis-selects plain-fp8 output instead of fp8_direct_cast bf16 output).
+        fp8_dc = cfg.quant_type == "fp8_direct_cast"
         # ``input`` is unread under skip_stage1; a Python-level fp8 cast
         # here would still sit on the cudagraph critical path, so the
         # fused caller is expected to have CV-casted in GEMM2 epilogue.
