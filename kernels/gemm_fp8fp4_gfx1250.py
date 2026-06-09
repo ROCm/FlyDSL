@@ -21,6 +21,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 from kernels.gemm_common_gfx1250 import (
+    WGP_BARRIER_ID,
     extract_lds_base_idx,
     get_lds_memref,
     issue_tdm_loads,
@@ -767,16 +768,18 @@ def compile_fp8fp4_gemm(
             """
             k_byte_off = arith.index(ks * WMMA_K // PACK_FACTOR_A)
             byte_off = a_lane_base + k_byte_off
-            v0 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off))
+            # Use imm_byte_offset (GEP) for intra-frag strides so LLVM folds them
+            # into ds_load_b128 offset:N immediates, eliminating v_add_nc_u32.
+            v0 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off, 0))
             if const_expr(is_fp4):
                 # Interleaved stride=32: +0, +32
-                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(32)))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off, 32))
                 return v0.shuffle(v1, list(range(8)))
             else:
                 # Interleaved stride=32: +0, +32, +64, +96
-                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(32)))
-                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(64)))
-                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off + arith.index(96)))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off, 32))
+                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off, 64))
+                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, byte_off, 96))
                 v01 = v0.shuffle(v1, list(range(8)))
                 v23 = v2.shuffle(v3, list(range(8)))
                 return v01.shuffle(v23, list(range(16)))
@@ -826,11 +829,11 @@ def compile_fp8fp4_gemm(
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total per N-group
                 k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn * 2] + k_subtile_off
-                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0))
-                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(512)))
+                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 0))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 512))
                 base1 = b_lane_bases[wn * 2 + 1] + k_subtile_off
-                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, base1))
-                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, base1 + arith.index(512)))
+                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, base1, 0))
+                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, base1, 512))
                 v01 = v0.shuffle(v1, list(range(8)))
                 v23 = v2.shuffle(v3, list(range(8)))
                 return v01.shuffle(v23, list(range(16)))
@@ -840,8 +843,8 @@ def compile_fp8fp4_gemm(
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total
                 k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn] + k_subtile_off
-                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0))
-                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(512)))
+                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 0))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 512))
                 return v0.shuffle(v1, list(range(8)))
             else:
                 # FP8: 8 tiles per N-group
@@ -849,10 +852,10 @@ def compile_fp8fp4_gemm(
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 8 tiles total
                 k_subtile_off = arith.index(ks * _num_tiles * 256)
                 base0 = b_lane_bases[wn] + k_subtile_off
-                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0))
-                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(512)))
-                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(1024)))
-                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, base0 + arith.index(1536)))
+                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 0))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 512))
+                v2 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 1024))
+                v3 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 1536))
                 v01 = v0.shuffle(v1, list(range(8)))
                 v23 = v2.shuffle(v3, list(range(8)))
                 return v01.shuffle(v23, list(range(16)))
@@ -877,8 +880,7 @@ def compile_fp8fp4_gemm(
             num_loads = (reps + 3) // 4
             vecs = []
             for ld in range_constexpr(num_loads):
-                off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
-                vecs.append(fx.Vector(lds_load_b128_raw(lds_buffer, off)))
+                vecs.append(fx.Vector(lds_load_b128_raw(lds_buffer, eff_base, ld * 16)))
             results = []
             for i in range_constexpr(reps):
                 results.append(vecs[i // 4][i % 4])
@@ -891,8 +893,7 @@ def compile_fp8fp4_gemm(
             num_loads = (rep_count + 3) // 4
             vecs = []
             for ld in range_constexpr(num_loads):
-                off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
-                vecs.append(fx.Vector(lds_load_b128_raw(lds_buffer, off)))
+                vecs.append(fx.Vector(lds_load_b128_raw(lds_buffer, eff_base, ld * 16)))
             results = []
             for i in range_constexpr(rep_count):
                 results.append(vecs[i // 4][i % 4])
@@ -2328,7 +2329,12 @@ def compile_fp8fp4_gemm(
             return fx.Vector(desc.dgroup0)[lane]
 
         def _pack_dg0(pred, lds_addr, addr_lo, addr_hi):
-            return fx.Vector.from_elements([pred, lds_addr, addr_lo, addr_hi], fx.Int32)
+            # Build as two vec2 halves joined by shuffle so LLVM cannot
+            # reuse a nearby vec4 template (which causes a dead s_mov_b64
+            # for the upper pair that is immediately overwritten).
+            lo = fx.Vector.from_elements([pred, lds_addr], fx.Int32)
+            hi = fx.Vector.from_elements([addr_lo, addr_hi], fx.Int32)
+            return lo.shuffle(hi, [0, 1, 2, 3])
 
         # Precompute LDS addresses for TDM descriptor switching
         stages_a_lds_addr = []
@@ -2453,20 +2459,25 @@ def compile_fp8fp4_gemm(
             _addr_hi_sgpr = rocdl.readfirstlane(T.i32, active_addr_hi)
             _stage_lds_sgprs = [rocdl.readfirstlane(T.i32, v) for v in active_stage_lds_addr]
 
-            def _issue_active_tdm(load_stage, addr_box, k_prefetch=None):
-                # Build dg0 entirely from SGPR values so LLVM keeps it in SGPR space.
-                dg0 = _pack_dg0(_pred_sgpr, _stage_lds_sgprs[load_stage], addr_box[0], _addr_hi_sgpr)
+            def _issue_active_tdm(load_stage, addr_lo, k_prefetch=None):
+                """Issue TDM using pre-computed addr_lo (SGPR).
+
+                Caller is responsible for advancing addr_lo AFTER this call
+                (via active_adv_i32) so the s_add_co_i32 happens in the
+                compute window, not on the critical path just before TDM.
+                """
+                dg0 = _pack_dg0(_pred_sgpr, _stage_lds_sgprs[load_stage], addr_lo, _addr_hi_sgpr)
                 tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
-                addr_box[0] = addr_box[0] + active_adv_i32
                 if k_prefetch is not None:
                     _l2_prefetch(k_prefetch)
 
         # Prologue
         if const_expr(wave_specialized_tdm):
             for i in range_constexpr(pre_loaded):
-                addr_box = [active_addr_lo]
-                _issue_active_tdm(i, addr_box)
-                active_addr_lo = addr_box[0]
+                _issue_active_tdm(i, active_addr_lo)
+                # Advance right after TDM: s_add_co_i32 runs during the
+                # subsequent compute window, not on the next TDM's critical path.
+                active_addr_lo = active_addr_lo + active_adv_i32
         else:
             for i in range_constexpr(pre_loaded):
                 dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[i], addr_lo_a, addr_hi_a)
@@ -2567,6 +2578,8 @@ def compile_fp8fp4_gemm(
                     pf.append((_a_ks, _b_ks, _bs_ks, _as_ks))
                 return pf
 
+        _tail_pf_all_ks = None  # set from main-loop results if _use_lds_pf
+
         if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
             _pipeline_fence_signal(outstanding=_fence_outstanding)
 
@@ -2610,16 +2623,18 @@ def compile_fp8fp4_gemm(
                         load_stage = (buf_idx + num_buffers - 1) % num_buffers
                         next_buf = (buf_idx + 1) % num_buffers
 
-                        addr_box = [cur_addr_lo]
-
                         # TDM issued at START of each tile (before fence) for maximum
-                        # DMA overlap time.
+                        # DMA overlap time.  addr_lo is pre-computed (advanced from the
+                        # PREVIOUS tile's post-TDM window), so no s_delay_alu needed here.
                         _k_off_tdm = (
                             split_k_base
                             + loop_iter * arith.index(num_buffers * tile_k)
                             + arith.index(buf_idx * tile_k)
                         )
-                        _issue_active_tdm(load_stage, addr_box, k_prefetch=_k_off_tdm)
+                        _issue_active_tdm(load_stage, cur_addr_lo, k_prefetch=_k_off_tdm)
+                        # Advance addr right after TDM: s_add_co_i32 runs during the
+                        # fence + barrier window, arriving long before the next TDM call.
+                        cur_addr_lo = cur_addr_lo + active_adv_i32
 
                         if const_expr(not use_ws_tdm_split_signal_overlap):
                             _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -2686,7 +2701,6 @@ def compile_fp8fp4_gemm(
                                 pf_b_scales=_cur_b,
                             )
 
-                        cur_addr_lo = addr_box[0]
                         hot_loop_scheduler_scheduled()
 
                     if const_expr(_use_lds_pf):
@@ -2701,6 +2715,11 @@ def compile_fp8fp4_gemm(
 
                 accs = list(results[:n_accs])
                 active_addr_lo = results[n_accs]
+                # Extract pf_all_ks for the first tail tile (loop-carry from last iter).
+                if const_expr(_use_lds_pf):
+                    _tail_pf_all_ks = _flat_to_pf_all_ks(results, _pf_base)
+                else:
+                    _tail_pf_all_ks = None
             else:
                 init_args = list(accs) + [addr_lo_a, addr_lo_b, addr_lo_as, addr_lo_bs]
 
@@ -2771,12 +2790,12 @@ def compile_fp8fp4_gemm(
                 addr_lo_bs = results[n_accs + 3]
 
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
-        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
-            pipeline_fence_wait(use_cluster=use_cluster)
-        if const_expr(loop_iters > 0):
-            _pipeline_fence(outstanding=0)
-        elif const_expr(use_cluster):
-            cluster.cluster_barrier()
+        # if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+        #     pipeline_fence_wait(use_cluster=use_cluster)
+        # if const_expr(loop_iters > 0):
+        #     _pipeline_fence(outstanding=0)
+        # elif const_expr(use_cluster):
+        #     cluster.cluster_barrier()
         epi_addrs_box = [None]
         _ptpc_scale_box = [None]
 
@@ -2795,7 +2814,19 @@ def compile_fp8fp4_gemm(
             _bvs_tail_kt[0] += 1
             return kb
 
-        for _load_stage, _compute_stage, _outstanding in tail_plan:
+        # Pre-expand tail_plan: augment each entry with the NEXT active compute stage
+        # so we can do pf chaining without dict lookups inside the traced for loop.
+        _tail_plan_ext = []  # (load_stage, compute_stage, outstanding, next_compute_stage)
+        _tail_plan_active_cs = [cs for ls, cs, out in tail_plan if out != -1]
+        for _tei, (ls, cs, out) in enumerate(tail_plan):
+            _next_cs = None
+            if out != -1:
+                _apos = _tail_plan_active_cs.index(cs)
+                if _apos + 1 < len(_tail_plan_active_cs):
+                    _next_cs = _tail_plan_active_cs[_apos + 1]
+            _tail_plan_ext.append((ls, cs, out, _next_cs))
+
+        for _load_stage, _compute_stage, _outstanding, _tail_next_cs in _tail_plan_ext:
             _entry_kb = _bvs_tail_kb()
             if const_expr(_outstanding == -1):
                 if const_expr(_tail_had_load):
@@ -2830,62 +2861,93 @@ def compile_fp8fp4_gemm(
                         scale_k_base=_entry_kb,
                     )
             else:
-                _pipeline_fence_signal(outstanding=_outstanding)
-                pipeline_fence_wait(use_cluster=use_cluster)
-
-                _tail_mid_cb = None
+                # Issue TDM BEFORE fence (same as main loop) so the DMA starts
+                # early and the addr advancement happens in the fence window.
                 if const_expr(_load_stage is not None):
                     _tail_had_load = True
                     if const_expr(wave_specialized_tdm):
-                        _tail_addr_box = [active_addr_lo]
-
-                        def _tail_mid_ws(_ls=_load_stage, _ab=_tail_addr_box):
-                            _issue_active_tdm(_ls, _ab)
-
-                        _tail_mid_cb = _tail_mid_ws
+                        _issue_active_tdm(_load_stage, active_addr_lo)
+                        active_addr_lo = active_addr_lo + active_adv_i32
+                        # Pin TDM before the fence scheduling region so LLVM cannot
+                        # sink tensor_load_to_lds to after the barrier.
+                        rocdl.sched_barrier(0)
                     else:
-                        _tail_ab = [[addr_lo_a], [addr_lo_b], [addr_lo_as], [addr_lo_bs]]
+                        dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_load_stage], addr_lo_a, addr_hi_a)
+                        dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_load_stage], addr_lo_b, addr_hi_b)
+                        dg0_as = _pack_dg0(pred_const, stages_as_lds_addr[_load_stage], addr_lo_as, addr_hi_as)
+                        dg0_bs = _pack_dg0(pred_const, stages_bs_lds_addr[_load_stage], addr_lo_bs, addr_hi_bs)
+                        issue_tdm_loads(
+                            tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
+                            tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
+                            tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
+                            tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
+                            wave_specialized=wave_specialized_tdm,
+                        )
+                        addr_lo_a = addr_lo_a + adv_a_i32
+                        addr_lo_b = addr_lo_b + adv_b_i32
+                        addr_lo_as = addr_lo_as + adv_as_i32
+                        addr_lo_bs = addr_lo_bs + adv_bs_i32
+                    # When a TDM was just issued, use at least TDM_LOADS_PER_STEP as
+                    # the fence outstanding so the just-issued TDM stays in-flight
+                    # during compute (avoids s_wait_tensorcnt(0) immediately after issue).
+                    _tail_fence_out = max(_outstanding, TDM_LOADS_PER_STEP)
+                else:
+                    _tail_fence_out = _outstanding
 
-                        def _tail_mid_nws(_ls=_load_stage, _ab=_tail_ab):
-                            dg0_a = _pack_dg0(pred_const, stages_a_lds_addr[_ls], _ab[0][0], addr_hi_a)
-                            dg0_b = _pack_dg0(pred_const, stages_b_lds_addr[_ls], _ab[1][0], addr_hi_b)
-                            dg0_as = _pack_dg0(pred_const, stages_as_lds_addr[_ls], _ab[2][0], addr_hi_as)
-                            dg0_bs = _pack_dg0(pred_const, stages_bs_lds_addr[_ls], _ab[3][0], addr_hi_bs)
-                            issue_tdm_loads(
-                                tdm_ops.TDMDescriptor2D(dg0_a, dgroup1_a),
-                                tdm_ops.TDMDescriptor2D(dg0_b, dgroup1_b),
-                                tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
-                                tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
-                                wave_specialized=wave_specialized_tdm,
-                            )
-                            _ab[0][0] = _ab[0][0] + adv_a_i32
-                            _ab[1][0] = _ab[1][0] + adv_b_i32
-                            _ab[2][0] = _ab[2][0] + adv_as_i32
-                            _ab[3][0] = _ab[3][0] + adv_bs_i32
-
-                        _tail_mid_cb = _tail_mid_nws
+                if _tail_fence_out == 0 and _load_stage is None:
+                    # No new TDM was issued and previous TDMs are provably done
+                    # (outstanding=0 with no load). Skip tensor_wait; just signal
+                    # the barrier so other waves can proceed — tensorcnt is already 0.
+                    rocdl.s_barrier_signal(WGP_BARRIER_ID)
+                else:
+                    _pipeline_fence_signal(outstanding=_tail_fence_out)
+                pipeline_fence_wait(use_cluster=use_cluster)
 
                 a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                 rocdl.sched_barrier(0)
-                accs = compute_tile_scheduled(
-                    accs,
-                    stages_a_idx[_compute_stage],
-                    stages_b_idx[_compute_stage],
-                    stages_as_idx[_compute_stage],
-                    stages_bs_idx[_compute_stage],
-                    mid_compute_callback=_tail_mid_cb,
-                    a0_prefetch=a0_prefetch,
-                    scale_k_base=_entry_kb,
-                )
 
-                if const_expr(_load_stage is not None):
-                    if const_expr(wave_specialized_tdm):
-                        active_addr_lo = _tail_addr_box[0]
-                    else:
-                        addr_lo_a = _tail_ab[0][0]
-                        addr_lo_b = _tail_ab[1][0]
-                        addr_lo_as = _tail_ab[2][0]
-                        addr_lo_bs = _tail_ab[3][0]
+                _use_tail_pf = _use_lds_pf and _tail_pf_all_ks is not None
+                _has_tail_next = _tail_next_cs is not None
+
+                if _use_tail_pf and _has_tail_next:
+                    compute_result = compute_tile_scheduled(
+                        accs,
+                        stages_a_idx[_compute_stage],
+                        stages_b_idx[_compute_stage],
+                        stages_as_idx[_compute_stage],
+                        stages_bs_idx[_compute_stage],
+                        a0_prefetch=a0_prefetch,
+                        scale_k_base=_entry_kb,
+                        pf_all_ks=_tail_pf_all_ks,
+                        next_lds_a=stages_a_idx[_tail_next_cs],
+                        next_lds_b=stages_b_idx[_tail_next_cs],
+                        next_lds_bs=stages_bs_idx[_tail_next_cs],
+                        next_lds_as=stages_as_idx[_tail_next_cs],
+                    )
+                    accs = compute_result[0]
+                    _tail_pf_all_ks = compute_result[1]
+                elif _use_tail_pf:
+                    accs = compute_tile_scheduled(
+                        accs,
+                        stages_a_idx[_compute_stage],
+                        stages_b_idx[_compute_stage],
+                        stages_as_idx[_compute_stage],
+                        stages_bs_idx[_compute_stage],
+                        a0_prefetch=a0_prefetch,
+                        scale_k_base=_entry_kb,
+                        pf_all_ks=_tail_pf_all_ks,
+                    )
+                    _tail_pf_all_ks = None
+                else:
+                    accs = compute_tile_scheduled(
+                        accs,
+                        stages_a_idx[_compute_stage],
+                        stages_b_idx[_compute_stage],
+                        stages_as_idx[_compute_stage],
+                        stages_bs_idx[_compute_stage],
+                        a0_prefetch=a0_prefetch,
+                        scale_k_base=_entry_kb,
+                    )
 
                 hot_loop_scheduler_scheduled()
 
