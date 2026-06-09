@@ -284,6 +284,45 @@ def _snapshot_refs(refs: List[Tuple[str, str, dict]], *, stable: bool) -> Dict[T
     return out
 
 
+def _is_identity_stable(val) -> bool:
+    """True for values that ``_snapshot_global_value(stable=False)`` summarizes
+    purely by ``id()`` — i.e. the ``"callable"`` and opaque ``"obj"`` branches.
+
+    For these, an ``is`` comparison against the baseline object is exactly
+    equivalent to re-summarizing and comparing the snapshot (the snapshot's only
+    discriminant is the identity), so the drift check can skip the resummary —
+    including the per-call ``repr(val)`` that the callable branch builds. Scalars
+    and builtin containers are summarized *by value* (to catch in-place mutation),
+    so they stay on the full-compare path.
+    """
+    if isinstance(val, (int, float, bool, str, bytes, type(None))):
+        return False
+    if isinstance(val, (tuple, list, set, frozenset, dict)):
+        return False
+    return True
+
+
+def _snapshot_refs_for_drift(refs: List[Tuple[str, str, dict]]) -> Dict[Tuple[str, str], Any]:
+    """Baseline for in-process drift detection: ``(name, mod) -> (snapshot, fastref)``.
+
+    ``snapshot`` is the ``stable=False`` summary (as in :func:`_snapshot_refs`);
+    ``fastref`` is the live baseline object for identity-stable values (modules,
+    functions, classes, opaque objects) or ``None`` otherwise. Holding the
+    reference lets :meth:`JitFunction._check_globals_drift` short-circuit with an
+    ``is`` check — and, because the object is kept alive, eliminates the id-reuse
+    aliasing that comparing stored ``id()`` snapshots is theoretically prone to.
+    """
+    out: Dict[Tuple[str, str], Any] = {}
+    for name, mod_name, var_dict in refs:
+        if name in var_dict:
+            val = var_dict[name]
+            out[(name, mod_name)] = (
+                _snapshot_global_value(val, stable=False),
+                val if _is_identity_stable(val) else None,
+            )
+    return out
+
+
 class FlyDSLCompileError(RuntimeError):
     """Raised when an MLIR pass pipeline fails.
 
@@ -1288,8 +1327,14 @@ class JitFunction:
         baseline = self._used_global_vals[owner_cls]
         for name, mod_name, var_dict in self._get_global_refs(owner_cls):
             key = (name, mod_name)
-            old = baseline.get(key, _NOT_IN_BASELINE)
-            if old is _NOT_IN_BASELINE:
+            entry = baseline.get(key, _NOT_IN_BASELINE)
+            if entry is _NOT_IN_BASELINE:
+                continue
+            old, fastref = entry
+            # Identity-stable global (module/function/class/opaque object) that is
+            # still bound to the same object: nothing to re-summarize. Equivalent
+            # to ``new == old`` for these, but skips the resummary + repr() build.
+            if fastref is not None and var_dict.get(name) is fastref:
                 continue
             new = _snapshot_global_value(var_dict[name], stable=False) if name in var_dict else None
             if new != old:
@@ -1535,7 +1580,7 @@ class JitFunction:
         # snapshot the used globals on first compile (per owner_cls) and RAISE on
         # any later change.
         if owner_cls not in self._used_global_vals:
-            self._used_global_vals[owner_cls] = _snapshot_refs(self._get_global_refs(owner_cls), stable=False)
+            self._used_global_vals[owner_cls] = _snapshot_refs_for_drift(self._get_global_refs(owner_cls))
         else:
             self._check_globals_drift(owner_cls)
 
