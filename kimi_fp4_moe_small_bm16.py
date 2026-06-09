@@ -554,7 +554,7 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
     lds_scale_offset = lds_offset + lds_x_bytes
     allocator.ptr = lds_offset + max(lds_x_bytes + lds_scale_bytes, lds_acc_bytes)
 
-    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM16_INLINEQUANT_v4"
+    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM16_INLINEQUANT_v7"
 
     @flyc.kernel(name=module_name)
     def gemm1_inline(
@@ -997,6 +997,46 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
         def _fmax_num(a, b):
             return ArithValue(arith.MaxNumFOp(arith._to_raw(a), arith._to_raw(b)).result)
 
+        def _fmax_dpp_xor1(src):
+            src_i32 = src.bitcast(i32)
+            peer_i32 = ArithValue(
+                llvm.call_intrinsic(
+                    i32,
+                    "llvm.amdgcn.update.dpp.i32",
+                    [
+                        _raw(src_i32),
+                        _raw(src_i32),
+                        arith.constant(0xB1, type=i32),
+                        arith.constant(0xF, type=i32),
+                        arith.constant(0xF, type=i32),
+                        arith.constant(True, type=ir.IntegerType.get_signless(1)),
+                    ],
+                    [],
+                    [],
+                )
+            )
+            return _fmax_num(src, peer_i32.bitcast(f32))
+
+        def _fmax_dpp_xor2(src):
+            src_i32 = src.bitcast(i32)
+            peer_i32 = ArithValue(
+                llvm.call_intrinsic(
+                    i32,
+                    "llvm.amdgcn.update.dpp.i32",
+                    [
+                        _raw(src_i32),
+                        _raw(src_i32),
+                        arith.constant(0x4E, type=i32),
+                        arith.constant(0xF, type=i32),
+                        arith.constant(0xF, type=i32),
+                        arith.constant(True, type=ir.IntegerType.get_signless(1)),
+                    ],
+                    [],
+                    [],
+                )
+            )
+            return _fmax_num(src, peer_i32.bitcast(f32))
+
         def _silu_mul(g, u):
             t = g * neg_log2e
             emu = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [t], [], [])
@@ -1109,10 +1149,8 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
                 abs_v = llvm.call_intrinsic(f32, "llvm.fabs.f32", [res], [], [])
                 local_max = _fmax_num(local_max, abs_v)
 
-            peer1 = local_max.shuffle_xor(c1_i32, c64_i32)
-            local_max = _fmax_num(local_max, peer1)
-            peer2 = local_max.shuffle_xor(c2_i32, c64_i32)
-            local_max = _fmax_num(local_max, peer2)
+            local_max = _fmax_dpp_xor1(local_max)
+            local_max = _fmax_dpp_xor2(local_max)
 
             amax_i32 = local_max.bitcast(i32)
             quant_scale = (amax_i32 + c0x200000_i32).bitcast(f32) * c025_f32
@@ -1167,13 +1205,6 @@ def compile_kimi_mxfp4_gemm1_inline_bm16():
                     e8m0_i8,
                     out_scale_rsrc,
                     byte_off,
-                    cache_modifier=4,
-                    offset_is_bytes=True,
-                )
-                buffer_ops.buffer_store(
-                    arith.TruncIOp(i8, c0_i32).result,
-                    out_scale_rsrc,
-                    byte_off + c1_i32,
                     cache_modifier=4,
                     offset_is_bytes=True,
                 )

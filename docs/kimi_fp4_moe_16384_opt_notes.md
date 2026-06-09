@@ -2218,3 +2218,45 @@ Rejected follow-ups:
   from about `142.643 us` to `142.564 us`, and long graph timing made the
   M=64 GEMM1 stage delta worse (`+6.861 us`).  The saved code stays at GEMM1
   v4.
+
+## Small-M BM16 GEMM1 v7 Epilogue Cleanup
+
+Change:
+
+- Match aiter BM16 scale epilogue and write only the low scale byte.  The
+  adjacent byte is padding for BM16 and is not read by GEMM2.
+- Replace the epilogue f32 amax `shuffle_xor` reductions with DPP controls
+  `0xB1` and `0x4E`, matching aiter's `apply_cshuffle_quant_epilog`.
+
+Correctness sweep against aiter mxfp4:
+
+```text
+M=4   cos=0.999997199 max_abs=0.031250
+M=8   cos=0.999997497 max_abs=0.031250
+M=16  cos=0.999998033 max_abs=0.015625
+M=32  cos=0.999997973 max_abs=0.031250
+M=64  cos=0.999998271 max_abs=0.031250
+M=128 cos=0.999999046 max_abs=0.031250
+min_cos=0.999997199
+```
+
+Static ISA comparison:
+
+| kernel | `s_waitcnt` | `buffer_store_byte` | `ds_swizzle_b32` | `v_mov_b32_dpp` |
+| --- | ---: | ---: | ---: | ---: |
+| FlyDSL GEMM1 v4 | 152 | 2 | 2 | 0 |
+| FlyDSL GEMM1 v7 | 150 | 1 | 0 | 2 |
+
+Short graph profiler (`warmup=20`, `graph_iters=20`, `replays=5`) shows the
+GEMM1 kernel body moving in the right direction:
+
+| M | aiter GEMM1 | FlyDSL v7 GEMM1 | delta |
+| ---: | ---: | ---: | ---: |
+| 64 | 135.123 us | 141.395 us | +6.272 us |
+| 128 | 172.911 us | 170.789 us | -2.122 us |
+
+The M=128 profiler sample is noisy on the aiter side, but the static diff is
+strictly closer to aiter and correctness is unchanged.  A long graph sample
+with `--no-check` was noisy (`M=64` sort/GEMM stages all inflated together), so
+the retained evidence for this small cleanup is correctness plus direct kernel
+profiler/ISA alignment.
