@@ -409,7 +409,7 @@ def compile_kimi_mxfp4_gemm1_16384():
     # Output scale layout consumed by GEMM2 for K=INTER_DIM=512.
     k_out_as_per_chunk_dw = ((INTER_DIM // 32) // 4 // 2) * 64
 
-    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v7"
+    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v11"
 
     @flyc.kernel(name=module_name)
     def gemm1(
@@ -567,6 +567,20 @@ def compile_kimi_mxfp4_gemm1_16384():
                 b_tile.append((packs0, packs1))
             return b_tile
 
+        def make_empty_b_tile():
+            b_packs0 = []
+            b_packs1 = []
+            for _ku in range_constexpr(k_unroll):
+                b_packs0.append([None] * num_acc_n)
+                b_packs1.append([None] * num_acc_n)
+            return b_packs0, b_packs1
+
+        def finish_b_tile(b_packs0, b_packs1):
+            b_tile = []
+            for ku in range_constexpr(k_unroll):
+                b_tile.append((b_packs0[ku], b_packs1[ku]))
+            return b_tile
+
         lane_word = lane_div_16 * arith.constant(16, index=True) + lane_mod_16
 
         def load_a_scale_tile(k_tile: int):
@@ -700,6 +714,70 @@ def compile_kimi_mxfp4_gemm1_16384():
                                 )
             return acc_list
 
+        def compute_tile_jmajor_prefetch_a_b(
+            acc_in,
+            lds_x_tile,
+            b_tile_in,
+            a_scale,
+            b_scale,
+            next_a_tile: int,
+            next_a_slot: int,
+            next_b_tile: int,
+        ):
+            acc_list = list(acc_in)
+            next_b_packs0, next_b_packs1 = make_empty_b_tile()
+            a_pairs = []
+            for k_idx in range_constexpr(k_unroll):
+                col_base = col_offset_base + arith.constant(k_idx * 128 // a_elem_vec_pack, index=True)
+                for mi_idx in range_constexpr(m_repeat):
+                    curr_row_a_lds = row_a_lds + arith.constant(mi_idx * 16, index=True)
+                    a0, a1 = lds_load_packs_k64(lds_x_tile, curr_row_a_lds, col_base)
+                    a_pairs.append(pack_i64x4_to_i32x8(a0, a1, c0_i64, c0_i64))
+
+            dma_x_tile_to_lds(next_a_tile, lds_x_slots[next_a_slot])
+
+            for ni in range_constexpr(num_acc_n_packed):
+                b_scale_i32 = b_scale[ni]
+                b_scale_val = vector.extract(b_scale_i32, static_position=[0], dynamic_position=[])
+                for inxdl in range_constexpr(pack_N):
+                    ni_idx = ni * pack_N + inxdl
+                    for mi in range_constexpr(m_repeat_packed):
+                        a_scale_i32 = a_scale[mi]
+                        a_scale_val = vector.extract(a_scale_i32, static_position=[0], dynamic_position=[])
+                        for imxdl in range_constexpr(pack_M):
+                            mi_idx = mi * pack_M + imxdl
+                            acc_idx = mi_idx * num_acc_n + ni_idx
+                            for k_idx in range_constexpr(k_unroll):
+                                b_packs0, b_packs1 = b_tile_in[k_idx]
+                                b0 = b_packs0[ni_idx]
+                                b1 = b_packs1[ni_idx]
+                                b128 = pack_i64x4_to_i32x8(b0, b1, c0_i64, c0_i64)
+                                a128 = a_pairs[k_idx * m_repeat + mi_idx]
+                                acc_list[acc_idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                    vec4_f32,
+                                    [
+                                        a128,
+                                        b128,
+                                        acc_list[acc_idx],
+                                        cbsz,
+                                        blgp,
+                                        k_idx * _scale_pack_m + imxdl,
+                                        a_scale_val,
+                                        k_idx * _scale_pack_n + inxdl,
+                                        b_scale_val,
+                                    ],
+                                )
+
+                    rocdl.sched_barrier(0)
+                    for k_idx in range_constexpr(k_unroll):
+                        nb0, nb1 = load_b_packs_k64(next_b_tile, k_idx, ni_idx)
+                        next_b_packs0[k_idx][ni_idx] = nb0
+                        next_b_packs1[k_idx][ni_idx] = nb1
+                    rocdl.sched_barrier(0)
+
+            b_scale_next = load_b_scale_tile(next_b_tile)
+            return acc_list, finish_b_tile(next_b_packs0, next_b_packs1), b_scale_next
+
         _dma_bytes = 16
         _wave_size = 64
 
@@ -798,31 +876,52 @@ def compile_kimi_mxfp4_gemm1_16384():
             gpu.barrier()
 
             dma_x_tile_to_lds(0, lds_x_slots[0])
-            b_tile = load_b_tile(0)
-            b_scale = load_b_scale_tile(0)
-            rocdl.s_waitcnt(10)
+            dma_x_tile_to_lds(1, lds_x_slots[1])
+            b_tiles = [load_b_tile(0), load_b_tile(1)]
+            b_scales = [load_b_scale_tile(0), load_b_scale_tile(1)]
+            # Leave both initial B/B-scale tiles outstanding if possible; A0
+            # and A1 must be resident in LDS before the first two compute tiles.
+            rocdl.s_waitcnt(20)
             gpu.barrier()
             a_scale = load_a_scale_tile(0)
 
             for k_tile in range_constexpr(num_k_tiles):
-                if const_expr(k_tile + 1 < num_k_tiles):
-                    next_slot = (k_tile + 1) % 2
-                    dma_x_tile_to_lds(k_tile + 1, lds_x_slots[next_slot])
-                    b_tile_next = load_b_tile(k_tile + 1)
-                    b_scale_next = load_b_scale_tile(k_tile + 1)
-
                 curr_slot = k_tile % 2
-                acc = compute_tile_jmajor(acc, lds_x_slots[curr_slot], b_tile, a_scale, b_scale)
+                curr_b_slot = k_tile % 2
+                next_slot = k_tile % 2
+                if const_expr(k_tile + 2 < num_k_tiles):
+                    acc, b_tile_next, b_scale_next = compute_tile_jmajor_prefetch_a_b(
+                        acc,
+                        lds_x_slots[curr_slot],
+                        b_tiles[curr_b_slot],
+                        a_scale,
+                        b_scales[curr_b_slot],
+                        k_tile + 2,
+                        next_slot,
+                        k_tile + 2,
+                    )
+                else:
+                    acc = compute_tile_jmajor(
+                        acc,
+                        lds_x_slots[curr_slot],
+                        b_tiles[curr_b_slot],
+                        a_scale,
+                        b_scales[curr_b_slot],
+                    )
 
                 if const_expr(k_tile + 1 < num_k_tiles):
-                    # Only the next raw A->LDS loads must be complete before
-                    # that LDS slot is read by the next compute tile. The next
-                    # B and B-scale VMEM loads can remain outstanding.
-                    rocdl.s_waitcnt(10)
+                    # A and B are both two-ahead.  When a future tile was
+                    # issued, keep that tile's 4 A + 10 B/B-scale VMEM loads
+                    # outstanding; the next iteration consumes the older tile.
+                    if const_expr(k_tile + 2 < num_k_tiles):
+                        rocdl.s_waitcnt(14)
+                    else:
+                        rocdl.s_waitcnt(0)
                     gpu.barrier()
-                    b_tile = b_tile_next
-                    b_scale = b_scale_next
                     a_scale = load_a_scale_tile(k_tile + 1)
+                    if const_expr(k_tile + 2 < num_k_tiles):
+                        b_tiles[curr_b_slot] = b_tile_next
+                        b_scales[curr_b_slot] = b_scale_next
 
             gpu.barrier()
 

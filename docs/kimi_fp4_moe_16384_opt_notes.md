@@ -802,3 +802,193 @@ count. The biggest static differences are now the extra `s_waitcnt` count and
 the much larger `s_nop` scheduler padding. A tried source-level reorder that
 held A fixed while sweeping N groups stayed correct but regressed CUDAGraph
 time to about `2286.8us`, so it was not kept.
+
+### Step 8: v7 Load Count and ATT Checkpoint
+
+The current committed checkpoint is:
+
+```text
+c4a9fbf4 Checkpoint runnable Kimi mxfp4 GEMM1 optimization
+```
+
+`kimi_fp4_moe_16384_opt.py` is back at module suffix `v7`. This version is
+bit-exact against aiter mxfp4 for GEMM1:
+
+```text
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_cos=1.000000
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_max_abs=0.000000
+```
+
+The pipeline kernel count is aligned with aiter mxfp4: both paths launch 8
+kernels. GEMM1 launch shape is also equivalent in CTA count:
+
+```text
+aiter GEMM1:  wg=(256,1,1), grid=(1570816,1,1) threads = 6136 CTAs
+FlyDSL v7:    wg=(256,1,1), grid=(1024,1534,1) threads = 6136 CTAs
+```
+
+Static ISA confirms the important global load widths/counts are now aligned:
+
+```text
+                 aiter GEMM1    FlyDSL GEMM1 v7
+v_mfma           1792           1792
+buffer_load      408            408
+buffer_load_x4   340            340
+buffer_load_dw   68             68
+global_load      4              4
+ds_read          536            543
+ds_write         128            96
+s_waitcnt        320            121
+s_barrier        30             31
+s_nop            123            441
+```
+
+So the remaining gap is not extra `buffer_load` instructions or a different
+preshuffle load width. The remaining differences are scheduling/LDS details:
+FlyDSL still has more compiler scheduler padding and slightly different LDS
+traffic.
+
+ATT decode for v7 shows the practical bottleneck more clearly:
+
+```text
+aiter GEMM1:
+  total cycles 5.49M
+  total stalls 3.62M (65.9%)
+  MFMA/FMA     1.43M
+  VMEM-load    740.9K
+  VMEM-wait    644.9K
+  LDS          386.6K
+  barrier      166.8K
+
+FlyDSL GEMM1 v7:
+  total cycles 8.20M
+  total stalls 6.61M (80.6%)
+  VMEM-wait    2.54M
+  MFMA/FMA     1.71M
+  VMEM-load    1.28M
+  barrier      656.8K
+  LDS          147K
+  LDS/SMEMwait 129.7K
+```
+
+The next optimization target is therefore source scheduling: preserve the
+matched load counts but make the K loop closer to aiter's `run_one` sequence,
+where B/B-scale loads are issued per J cluster around MFMA clusters instead of
+creating long outstanding VMEM regions that later force large waits.
+
+A v8 experiment moved A LDS reads before issuing the next tile's A/B VMEM
+prefetch. It remained correct:
+
+```text
+cos=1.000000
+max_abs=0.000000
+```
+
+but regressed CUDAGraph time from the v7 range (`~2059-2078us`) to
+`~2105-2148us`, likely because it reduced useful B-load overlap. That source
+change was removed and should not be used as the next baseline.
+
+### Step 9: v9-v11 GEMM1 Scheduling Alignment
+
+The next successful direction was to match aiter's K-loop schedule more closely
+instead of changing load counts.
+
+`v9` changed B from one-ahead to two-ahead:
+
+```text
+initial: load B0 and B1
+loop K=i: compute with B_i, issue B_{i+2} by J cluster
+```
+
+This stayed bit-exact and improved GEMM1 from the v7 `~997-1042us` profiler
+range to:
+
+```text
+FlyDSL GEMM1 v9: 964.3us
+```
+
+ATT showed this was directionally useful but still wrong for A scheduling:
+issuing future A before reading current A caused many compiler-inserted
+`s_waitcnt vmcnt(0)` waits at the current A LDS read.
+
+`v10` fixed the order to the aiter shape:
+
+```text
+read current A from LDS
+issue future A -> LDS
+compute current J cluster
+issue future B for that J
+```
+
+This removed the large pre-A-read VMEM wait cluster. Results:
+
+```text
+CUDAGraph short:
+  aiter_mxfp4_moe_us=1824.7
+  local_mxfp4_opt_gemm1_us=1851.2
+
+Torch profiler:
+  aiter GEMM1=729.8us
+  FlyDSL GEMM1 v10=752.7us
+
+ATT v10:
+  total cycles 5.63M
+  total stalls 3.89M (69.1%)
+  MFMA/FMA   1.47M
+  VMEM-wait  894.6K
+  VMEM-load  576.0K
+  LDS        413.2K
+  barrier    150.5K
+```
+
+`v11` then made A two-ahead as well:
+
+```text
+initial: load A0/A1 and B0/B1
+loop K=i: read A_i, issue A_{i+2}, compute B_i, issue B_{i+2}
+barrier wait keeps the newest future A+B tile outstanding
+```
+
+This remains bit-exact:
+
+```text
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_cos=1.000000
+local_mxfp4_opt_gemm1_vs_aiter_mxfp4_max_abs=0.000000
+```
+
+Longer CUDAGraph run:
+
+```text
+CUDA_VISIBLE_DEVICES=6 /opt/venv/bin/python bench_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_opt_gemm1 \
+  --warmup 5 --graph-iters 20 --measure 20
+
+aiter_mxfp4_moe_us=1816.8
+local_mxfp4_opt_gemm1_us=1845.2
+```
+
+Profiler snapshot from a separate run:
+
+```text
+aiter GEMM1=729.7us
+FlyDSL GEMM1 v11=761.5us
+```
+
+ATT v11:
+
+```text
+instructions 4479
+total cycles 5.83M
+total stalls 4.01M (68.8%)
+MFMA/FMA   1.53M
+VMEM-wait  792.1K
+VMEM-load  669.3K
+LDS        430.2K
+barrier    211.5K
+```
+
+Current conclusion: the main scheduling gap has been closed at the Python
+level. Static load counts still match aiter (`buffer_load=408`, `MFMA=1792`).
+The remaining GEMM1 difference is now small and is likely in lower-level
+scheduling details, MFMA operand/register allocation, and the FlyDSL lowering
+around waits/barriers rather than missing Python-level work.
