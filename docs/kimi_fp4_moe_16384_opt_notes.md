@@ -2738,3 +2738,10 @@ static waitcnt count.  The next target is the residual hot-loop wait placement
 and dataflow: FlyDSL still has an early `s_waitcnt vmcnt(2)` between the first
 pair of MFMA instructions in the first cluster, while aiter waits differently
 before entering that pair.
+
+Rejected follow-up:
+
+- v10 inserted an explicit `rocdl.s_waitcnt(2)` at each MFMA cluster entry to
+  pull the pair-internal VMEM wait forward.  Static ISA moved the wait before the
+  two MFMA instructions, but total `s_waitcnt` increased from 126 to 151, so it
+  was not retained.
