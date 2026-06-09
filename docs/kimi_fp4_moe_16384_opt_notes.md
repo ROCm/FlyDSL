@@ -1919,3 +1919,67 @@ Rejected v7 padding-loop follow-up:
   `sort_place_pad` around 33.0 us, and the default graph replay bench reported
   `local_mxfp4_all_flydsl_us=1864.1`, slightly slower than saved v5's
   `1862.6`.  The saved code therefore remains v5.
+
+## Sort Place v14 Padding Lane Mask
+
+Current saved sort placement kernel:
+
+```text
+flydsl_kimi_mxfp4_sort_place_pad_NE385_TOPK9_M16384_BM128_v14_padlanemask
+```
+
+Change from v5:
+
+- Keep the v5 dynamic placement loop.
+- Add a padding-phase guard `tx < BM` before the unrolled expert padding loop.
+  Padding per expert is always in `[0, BM)`, because `sort_cumsum` rounds each
+  expert's real count up to a multiple of `BM=128`.  Therefore lanes
+  `tx>=128` cannot write padding and can skip the whole padding phase.
+
+Rejected follow-ups while searching for this:
+
+- `v8_udivrem`, `v9_udivmulsub`, `v10_divsimulsub`, and `v13_magicdiv9`
+  tried to replace `token_id = idx / 9` and `topk_id = idx % 9` lowering.
+  All were correct but slower in graph profiling.
+- `v11_ldsorder` changed sort-place LDS layout to look more like aiter's
+  compiler-chosen layout.  It was correct but slower in the short graph bench.
+- `v12_i32while` changed the placement loop from index `scf.ForOp` to an i32
+  `scf.WhileOp`.  It was correct but did not improve `sort_place_pad`.
+
+Graph replay profiler median over 5 valid samples:
+
+```text
+/opt/venv/bin/python profile_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_all_flydsl --max-retries 15
+```
+
+| stage | aiter | FlyDSL v14 | delta |
+| --- | ---: | ---: | ---: |
+| sort_count | 6.3 us | 6.5 us | +0.2 us |
+| sort_cumsum | 10.4 us | 9.7 us | -0.7 us |
+| sort_place_pad | 32.0 us | 32.1 us | +0.1 us |
+| quant | 59.5 us | 59.7 us | +0.1 us |
+| sort_scales | 55.4 us | 55.0 us | -0.4 us |
+| GEMM1 | 699.3 us | 711.8 us | +12.4 us |
+| GEMM2 | 861.8 us | 855.4 us | -6.4 us |
+| scatter_reduce | 135.3 us | 130.4 us | -4.8 us |
+| total kernel sum | 1860.6 us | 1860.7 us | +0.1 us |
+
+Default graph replay end-to-end timing:
+
+```text
+/opt/venv/bin/python bench_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_all_flydsl
+
+local_mxfp4_all_flydsl_vs_aiter_mxfp4_cos=1.000000
+local_mxfp4_all_flydsl_vs_aiter_mxfp4_max_abs=0.000000
+aiter_mxfp4_moe_samples_us=1890.5,1852.8,1855.9 range_us=1852.8..1890.5
+aiter_mxfp4_moe_us=1855.9
+local_mxfp4_all_flydsl_samples_us=1879.8,1865.2,1864.9 range_us=1864.9..1879.8
+local_mxfp4_all_flydsl_us=1865.2
+```
+
+Interpretation: `sort_place_pad` is now effectively aligned in graph replay
+profiling, with the remaining measured gap around +0.1 us.  End-to-end graph
+timing is still dominated by GEMM variance and should not be used to judge this
+specific sort-place change in isolation.

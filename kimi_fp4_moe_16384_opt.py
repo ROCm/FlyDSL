@@ -2076,7 +2076,7 @@ def compile_kimi_mxfp4_sort_16384():
             scf.YieldOp([])
 
     @flyc.kernel(
-        name="flydsl_kimi_mxfp4_sort_place_pad_NE385_TOPK9_M16384_BM128_v5_placeloop",
+        name="flydsl_kimi_mxfp4_sort_place_pad_NE385_TOPK9_M16384_BM128_v14_padlanemask",
         known_block_size=[threads, 1, 1],
     )
     def sort_place_pad(
@@ -2161,24 +2161,29 @@ def compile_kimi_mxfp4_sort_16384():
 
         gpu.barrier()
 
-        for ee in range_constexpr(experts_per_cta):
-            e = bx * arith.constant(experts_per_cta, index=True) + arith.constant(ee, index=True)
-            e_valid = arith.cmpi(CmpIPredicate.ult, e, arith.constant(EXPERTS, index=True))
-            _if_e = scf.IfOp(e_valid)
-            with ir.InsertionPoint(_if_e.then_block):
-                e_i32 = arith.index_cast(i32, e)
-                start = memref.load(row_starts, [e])
-                real = ArithValue(_global_load_i32(real_ptr, e_i32))
-                padded_end = memref.load(row_starts, [e + arith.index(1)])
-                real_end = start + real
-                j0 = ArithValue(real_end + tx_i32).index_cast(T.index)
-                j1 = ArithValue(padded_end).index_cast(T.index)
-                for j in range(j0, j1, c_threads_idx):
-                    j_i32 = arith.index_cast(i32, j)
-                    _global_store_i32(sorted_ptr, j_i32, c_pad)
-                    _global_store_i32(mindices_ptr, j_i32, c_pad)
-                    _global_store_f32(weights_ptr, j_i32, c0_f32)
-                scf.YieldOp([])
+        # Each expert pads by fewer than block_m rows, so only the first BM lanes can store padding.
+        pad_lane_valid = arith.cmpi(CmpIPredicate.ult, tx, arith.constant(block_m, index=True))
+        _if_pad_lane = scf.IfOp(pad_lane_valid)
+        with ir.InsertionPoint(_if_pad_lane.then_block):
+            for ee in range_constexpr(experts_per_cta):
+                e = bx * arith.constant(experts_per_cta, index=True) + arith.constant(ee, index=True)
+                e_valid = arith.cmpi(CmpIPredicate.ult, e, arith.constant(EXPERTS, index=True))
+                _if_e = scf.IfOp(e_valid)
+                with ir.InsertionPoint(_if_e.then_block):
+                    e_i32 = arith.index_cast(i32, e)
+                    start = memref.load(row_starts, [e])
+                    real = ArithValue(_global_load_i32(real_ptr, e_i32))
+                    padded_end = memref.load(row_starts, [e + arith.index(1)])
+                    real_end = start + real
+                    j0 = ArithValue(real_end + tx_i32).index_cast(T.index)
+                    j1 = ArithValue(padded_end).index_cast(T.index)
+                    for j in range(j0, j1, c_threads_idx):
+                        j_i32 = arith.index_cast(i32, j)
+                        _global_store_i32(sorted_ptr, j_i32, c_pad)
+                        _global_store_i32(mindices_ptr, j_i32, c_pad)
+                        _global_store_f32(weights_ptr, j_i32, c0_f32)
+                    scf.YieldOp([])
+            scf.YieldOp([])
 
     @flyc.jit
     def launch_sort(
