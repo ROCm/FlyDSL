@@ -50,7 +50,7 @@ for M in "${M_VALUES[@]}"; do
     python3 -u "$REPO_ROOT/tests/kernels/test_gemm_kpar_ffm.py" \
         --data-format fp4 \
         -M "$M" -N 512 -K 3072 \
-        --tile-m 16 --tile-n 128 --tile-k 512 \
+        --tile-m 16 --tile-n 16 --tile-k 512 \
         --m-warp 1 --n-warp 1 --k-warp 4 \
         --num-buffers 2 \
         --out-dtype bf16 \

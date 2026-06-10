@@ -22,7 +22,7 @@ export FLYDSL_ROOT="$REPO_ROOT"
 export HSA_ENABLE_SDMA=0
 export ROCM_PATH=/opt/rocm
 export FLYDSL_RUNTIME_ENABLE_CACHE=1
-unset FLYDSL_DUMP_IR FLYDSL_DUMP_DIR
+# unset FLYDSL_DUMP_IR FLYDSL_DUMP_DIR
 
 echo "Using triton: $TRITON_PY"
 python3 -c "import torch; f,t=torch.cuda.mem_get_info(); print(f'GPU free={f/1e9:.1f}GB / {t/1e9:.1f}GB')" 2>/dev/null || true
