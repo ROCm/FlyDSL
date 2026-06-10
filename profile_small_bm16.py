@@ -8,16 +8,35 @@ from torch.profiler import ProfilerActivity, profile
 
 
 STAGE_NAMES = ("sort_zero_init", "GEMM1", "GEMM2")
-# Keep the profiler graph window bounded: very large single profiler windows can
-# drop CUDA kernel events on this stack. For BM16, make each accepted sample
-# larger than a smoke test while relying on repeated accepted samples for the
-# median.
-DEFAULT_PROFILE_WARMUP = 3000
-DEFAULT_PROFILE_GRAPH_ITERS = 128
-DEFAULT_PROFILE_REPLAYS = 4
-DEFAULT_PROFILE_REPEAT = 101
-DEFAULT_PROFILE_MAX_RETRIES = 2000
-DEFAULT_PROFILE_AGGREGATION = "by-kernel"
+# Default to a fast iteration preset. The final preset keeps the old long-run
+# settings for handoff numbers.
+PROFILE_PRESETS = {
+    "smoke": {
+        "warmup": 100,
+        "graph_iters": 32,
+        "replays": 1,
+        "repeat": 5,
+        "max_retries": 100,
+        "aggregation": "by-kernel",
+    },
+    "quick": {
+        "warmup": 500,
+        "graph_iters": 64,
+        "replays": 2,
+        "repeat": 21,
+        "max_retries": 400,
+        "aggregation": "by-kernel",
+    },
+    "final": {
+        "warmup": 3000,
+        "graph_iters": 128,
+        "replays": 4,
+        "repeat": 101,
+        "max_retries": 2000,
+        "aggregation": "by-kernel",
+    },
+}
+DEFAULT_PROFILE_PRESET = "quick"
 
 
 def _is_cuda_event(evt) -> bool:
@@ -338,16 +357,25 @@ def main():
         default="aiter,sort_aiter,gemm1fly_aiter,allfly",
         help=f"comma-separated subset of: {','.join(small.RUNNER_ORDER)}",
     )
-    parser.add_argument("--warmup", type=int, default=DEFAULT_PROFILE_WARMUP)
-    parser.add_argument("--graph-iters", type=int, default=DEFAULT_PROFILE_GRAPH_ITERS)
-    parser.add_argument("--replays", type=int, default=DEFAULT_PROFILE_REPLAYS)
-    parser.add_argument("--repeat", type=int, default=DEFAULT_PROFILE_REPEAT)
-    parser.add_argument("--max-retries", type=int, default=DEFAULT_PROFILE_MAX_RETRIES)
+    parser.add_argument(
+        "--preset",
+        choices=tuple(PROFILE_PRESETS),
+        default=DEFAULT_PROFILE_PRESET,
+        help=(
+            "profiling budget: smoke is a quick sanity check, quick is the "
+            "default iteration mode, final uses long handoff settings"
+        ),
+    )
+    parser.add_argument("--warmup", type=int, default=None)
+    parser.add_argument("--graph-iters", type=int, default=None)
+    parser.add_argument("--replays", type=int, default=None)
+    parser.add_argument("--repeat", type=int, default=None)
+    parser.add_argument("--max-retries", type=int, default=None)
     parser.add_argument("--expected-kernels", type=int, default=3)
     parser.add_argument(
         "--aggregation",
         choices=("ordered", "by-kernel"),
-        default=DEFAULT_PROFILE_AGGREGATION,
+        default=None,
         help=(
             "ordered requires a complete event sequence for every graph replay; "
             "by-kernel estimates per-iteration time from each kernel's captured "
@@ -356,6 +384,11 @@ def main():
     )
     parser.add_argument("--trace-dir", default=None)
     args = parser.parse_args()
+
+    preset = PROFILE_PRESETS[args.preset]
+    for key, value in preset.items():
+        if getattr(args, key) is None:
+            setattr(args, key, value)
 
     if args.graph_iters <= 0 or args.replays <= 0 or args.repeat <= 0:
         raise ValueError("--graph-iters, --replays, and --repeat must be positive")
@@ -375,7 +408,7 @@ def main():
     print(f"GPU: {b.torch.cuda.get_device_name(0)}")
     print(f"Shape: NE={shape.NE} H={shape.H} INTER={shape.INTER} TOPK={shape.TOPK}")
     print(
-        f"mode=graph warmup={args.warmup} graph_iters={args.graph_iters} "
+        f"mode=graph preset={args.preset} warmup={args.warmup} graph_iters={args.graph_iters} "
         f"replays={args.replays} logical_iters={args.graph_iters * args.replays} "
         f"repeat={args.repeat} "
         f"logical_iters_per_runner={args.graph_iters * args.replays * args.repeat} "

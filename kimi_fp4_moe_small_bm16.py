@@ -203,7 +203,7 @@ def compile_kimi_mxfp4_sort_zero_init_bm16():
     allocator.ptr = lds_scratch_offset + 16 * 4
 
     @flyc.kernel(
-        name="flydsl_kimi_mxfp4_sort_zero_init_NE385_TOPK9_H7168_BM16_v2",
+        name="flydsl_kimi_mxfp4_sort_zero_init_NE385_TOPK9_H7168_BM16_v4_ifelse",
         known_block_size=[threads, 1, 1],
     )
     def sort_zero_init(
@@ -259,9 +259,10 @@ def compile_kimi_mxfp4_sort_zero_init_bm16():
 
         is_sort_cta = arith.cmpi(CmpIPredicate.eq, bx_i32, c0_i32)
 
-        # CTA0 does the single-CTA sort. All CTAs also participate in zero-init
-        # below, matching aiter's sort_quant_kernel_impl prologue=0 path.
-        sort_if = scf.IfOp(is_sort_cta)
+        # CTA0 does the single-CTA sort. The remaining CTAs zero the atomic
+        # output buffer so the sort CTA does not contend with the streaming
+        # int4 stores.
+        sort_if = scf.IfOp(is_sort_cta, has_else=True)
         with ir.InsertionPoint(sort_if.then_block):
             zero_valid = arith.cmpi(CmpIPredicate.ult, tx, c_experts_idx)
             if_zero = scf.IfOp(zero_valid)
@@ -399,16 +400,19 @@ def compile_kimi_mxfp4_sort_zero_init_bm16():
             scf.YieldOp([])
 
         # Full-grid zero-init: int4 stores over M * H * sizeof(bf16).
-        zero_vec = vector.from_elements(vec4_i32, [c0_i32, c0_i32, c0_i32, c0_i32])
-        m_idx = ArithValue(i32_m).index_cast(T.index)
-        total_vecs = m_idx * arith.constant((MODEL_DIM * 2) // 16, index=True)
-        gtid = bx * arith.constant(threads, index=True) + tx
-        step = arith.constant(INLINE_ZERO_CTAS * threads, index=True)
-        zero_loop = scf.ForOp(gtid, total_vecs, step)
-        with ir.InsertionPoint(zero_loop.body):
-            vi = zero_loop.induction_variable
-            elem_i32 = vi * arith.constant(4, index=True)
-            _global_store_vec4_i32(output_ptr, elem_i32, zero_vec, nontemporal=True)
+        with ir.InsertionPoint(sort_if.else_block):
+            zero_vec = vector.from_elements(vec4_i32, [c0_i32, c0_i32, c0_i32, c0_i32])
+            m_idx = ArithValue(i32_m).index_cast(T.index)
+            total_vecs = m_idx * arith.constant((MODEL_DIM * 2) // 16, index=True)
+            zero_bx = bx - arith.index(1)
+            gtid = zero_bx * arith.constant(threads, index=True) + tx
+            step = arith.constant(INLINE_ZERO_CTAS * threads, index=True)
+            zero_loop = scf.ForOp(gtid, total_vecs, step)
+            with ir.InsertionPoint(zero_loop.body):
+                vi = zero_loop.induction_variable
+                elem_i32 = vi * arith.constant(4, index=True)
+                _global_store_vec4_i32(output_ptr, elem_i32, zero_vec, nontemporal=True)
+                scf.YieldOp([])
             scf.YieldOp([])
 
     @flyc.jit
@@ -443,7 +447,7 @@ def compile_kimi_mxfp4_sort_zero_init_bm16():
             atomic_output,
             m,
         ).launch(
-            grid=(INLINE_ZERO_CTAS, 1, 1),
+            grid=(INLINE_ZERO_CTAS + 1, 1, 1),
             block=(threads, 1, 1),
             stream=stream,
         )
