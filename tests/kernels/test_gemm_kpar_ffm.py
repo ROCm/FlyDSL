@@ -21,7 +21,7 @@ if _REPO_ROOT not in sys.path:
 import torch
 
 import flydsl.compiler as flyc
-from kernels.gemm_fp8fp4_gfx1250_kpar import compile_fp8fp4_gemm
+from kernels.gemm_fp8fp4_gfx1250_unified import compile_fp8fp4_gemm
 from tests.kernels.utils import fp4_utils
 
 SCALE_BLOCK = 32
@@ -224,13 +224,25 @@ def run_kpar_gemm_test(
     print(f"Diff: max={diff.max():.6f}  mean={diff.mean():.6f}")
     print(f"Cosine similarity: {cos_sim:.6f}")
 
-    # Tolerances — bf16 accumulates rounding error proportional to peak values
+    # Tolerances — aligned with test_gemm_fp8fp4_gfx1250.py
     peak = float(ref_f.abs().max())
     if is_fp4:
         if out_dtype in ("bf16", "f16"):
             torch.testing.assert_close(c_out, ref_f, rtol=2e-2, atol=max(1.0, peak * 5e-3))
         else:
             torch.testing.assert_close(c_out, ref_f, rtol=1e-5, atol=1e-4)
+    elif is_a8w4:
+        # Scale-range-aware tolerance matching _a8w4_tolerances() in the main test.
+        a_exp = int(a_scale_raw.max().item()) - 127
+        b_exp = int(b_scale_raw.max().item()) - 127
+        peak_prod_exp = max(0, a_exp) + max(0, b_exp)
+        if out_dtype in ("bf16", "f16"):
+            rtol = min(5e-2, 1e-2 + 3e-3 * peak_prod_exp)
+            atol = max(5e-2, K * (0.6 + 1.5 * peak_prod_exp))
+        else:
+            rtol = min(2e-2, 1e-3 + 2e-3 * peak_prod_exp)
+            atol = max(1e-2, K * (0.6 + 0.55 * peak_prod_exp))
+        torch.testing.assert_close(c_out, ref_f, rtol=rtol, atol=atol)
     else:
         atol = max(1e-2, K * 0.6)
         torch.testing.assert_close(c_out, ref_f, rtol=2e-2, atol=atol)
