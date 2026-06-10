@@ -33,7 +33,7 @@ export HSA_ENABLE_SDMA=0
 
 # lld (ld.lld) resolves its toolchain relative to ROCM_PATH; without it the
 # backend link step fails with "could not find path component ... ld.lld".
-export ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
+export ROCM_PATH=/opt/rocm
 
 # ── default benchmark args (override by passing your own on the CLI) ──
 DEFAULT_ARGS=(
