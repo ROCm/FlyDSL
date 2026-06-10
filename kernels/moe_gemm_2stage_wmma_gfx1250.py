@@ -255,7 +255,7 @@ def _compile_stage1_wmma_kernel_impl(
 
         def _precompute_b_lane_bases():
             lane8 = lane16 % arith.index(8)
-            lane_ngrp = lane16 / arith.index(8)
+            lane_ngrp = lane16 // arith.index(8)
             k_lane_off = (lane_kgrp * arith.index(8) + lane8) * arith.index(lds_b_stride)
             n_lane_off = lane_ngrp * arith.index(8)
             bases = []
@@ -658,7 +658,7 @@ def _compile_stage2_wmma_kernel_impl(
 
         def _precompute_b_lane_bases():
             lane8 = lane16 % arith.index(8)
-            lane_ngrp = lane16 / arith.index(8)
+            lane_ngrp = lane16 // arith.index(8)
             k_lane_off = (lane_kgrp * arith.index(8) + lane8) * arith.index(lds_b_stride)
             n_lane_off = lane_ngrp * arith.index(8)
             bases = []
