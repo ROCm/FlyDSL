@@ -274,8 +274,10 @@ def build_flash_attn_dualwave_swp_module(
         o_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(O), fx.make_layout(1, 1))
         _load_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
         _store_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
+        _store_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
         _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
         _o_store_reg = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
+        _o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         _lds_ptr_ty = fx.PointerType.get(elem_dtype.ir_type, 2, DMA_BYTES)
 
         def _buffer_load_128(elem_index):
@@ -298,6 +300,11 @@ def build_flash_attn_dualwave_swp_module(
             """64-bit register->global store (buffer_store_dwordx2) into O."""
             fx.memref_store_vec(pack_i32_vec, _o_store_reg)
             fx.copy(_store_atom_64, _o_store_reg, fx.slice(o_div, (None, fx.Int32(elem_index))))
+
+        def _buffer_store_128(pack_i32_vec, elem_index):
+            """128-bit register->global store (buffer_store_dwordx4) into O."""
+            fx.memref_store_vec(pack_i32_vec, _o_store_reg_128)
+            fx.copy(_store_atom_128, _o_store_reg_128, fx.slice(o_div, (None, fx.Int32(elem_index))))
 
         lane_in_warp = tid % WARP_SIZE
         n_in_warp = lane_in_warp // VEC_KV
@@ -1368,32 +1375,58 @@ def build_flash_attn_dualwave_swp_module(
         else:
             rocdl.s_barrier()
 
-        # Store O back to global memory.
+        # Store O back to global memory, 128b per store: a lane fuses its own
+        # 4-col half with its half-wave partner's 4 cols (permlane32_swap), so a
+        # store_group pair covers 8 contiguous cols -> 8 dwordx4 per wave
+        # instead of 16 dwordx2.
+        pair_i32_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
+
+        def _o_pack_2dw(dc, store_group):
+            r_base = store_group * 4
+            # Pack 4 f32 outputs -> 2 packed-16bit dwords (lo, hi).
+            if const_expr(dtype_str == "bf16"):
+                lo = rocdl.cvt_pk_bf16_f32(
+                    Vec(v_o[dc])[r_base],
+                    Vec(v_o[dc])[r_base + 1],
+                )
+                hi = rocdl.cvt_pk_bf16_f32(
+                    Vec(v_o[dc])[r_base + 2],
+                    Vec(v_o[dc])[r_base + 3],
+                )
+                return lo, hi
+            # fp16: trunc 4 f32 -> 4 f16 (RNE), view as 2 dwords.
+            o_f16 = []
+            for i in range_constexpr(4):
+                o_f16.append(fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype))
+            pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
+            return _raw(pack[0]), _raw(pack[1])
+
+        is_hi_half = ArithValue(lane_div_32 != fx.Index(0))
+
+        def _swap_halves(dw):
+            # permlane32_swap(a,b) -> (a.lo|b.lo, a.hi|b.hi); with a=b=dw the
+            # partner dword dw[lane^32] is result[1] on low lanes, [0] on high.
+            swapped = rocdl.permlane32_swap(pair_i32_ty, _raw(dw), _raw(dw), False, False)
+            lo_res = llvm.extractvalue(T.i32, swapped, [0])
+            hi_res = llvm.extractvalue(T.i32, swapped, [1])
+            return is_hi_half.select(lo_res, hi_res)
+
         for dc in range_constexpr(D_CHUNKS):
-            for store_group in range_constexpr(4):
-                r_base = store_group * 4
-                # Pack 4 f32 outputs -> 2 packed-16bit dwords (lo, hi).
-                if const_expr(dtype_str == "bf16"):
-                    lo = rocdl.cvt_pk_bf16_f32(
-                        Vec(v_o[dc])[r_base],
-                        Vec(v_o[dc])[r_base + 1],
-                    )
-                    hi = rocdl.cvt_pk_bf16_f32(
-                        Vec(v_o[dc])[r_base + 2],
-                        Vec(v_o[dc])[r_base + 3],
-                    )
-                    o_pack = Vec.from_elements([lo, hi], fx.Int32)
-                else:
-                    # fp16: trunc 4 f32 -> 4 f16 (RNE), view as 2 dwords.
-                    o_f16 = []
-                    for i in range_constexpr(4):
-                        o_f16.append(fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype))
-                    o_pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-                # Map this lane's MFMA output to (row, head_dim col).
-                d_row_rel = lane_div_32 * 4 + store_group * 8
-                d_col = (dc * D_CHUNK) + d_row_rel
+            for g in range_constexpr(2):
+                d0_a, d1_a = _o_pack_2dw(dc, 2 * g)
+                d0_b, d1_b = _o_pack_2dw(dc, 2 * g + 1)
+                # low lanes: own group-2g cols 0-3 ++ partner's cols 4-7;
+                # high lanes: partner's group-(2g+1) cols 0-3 ++ own cols 4-7.
+                y0_a, y1_a = _swap_halves(d0_a), _swap_halves(d1_a)
+                y0_b, y1_b = _swap_halves(d0_b), _swap_halves(d1_b)
+                w0 = is_hi_half.select(y0_b, _raw(d0_a))
+                w1 = is_hi_half.select(y1_b, _raw(d1_a))
+                w2 = is_hi_half.select(_raw(d0_b), y0_a)
+                w3 = is_hi_half.select(_raw(d1_b), y1_a)
+                o_pack = Vec.from_elements([fx.Int32(w0), fx.Int32(w1), fx.Int32(w2), fx.Int32(w3)], fx.Int32)
+                d_col = (dc * D_CHUNK) + (2 * g + lane_div_32) * 8
                 o_global = _global_idx_q(q_row, d_col)
-                _buffer_store_64(o_pack, o_global)
+                _buffer_store_128(o_pack, o_global)
 
     @flyc.jit
     def launch_flash_attn_dualwave_swp(
