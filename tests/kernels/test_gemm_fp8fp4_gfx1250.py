@@ -331,6 +331,7 @@ def _run_mxscale_gemm_test(
     split_k=1,
     b_streaming=False,
     scale_load_path="tdm",
+    flat_schedule=False,
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -451,6 +452,7 @@ def _run_mxscale_gemm_test(
         expert_sched_mode=expert_sched_mode,
         b_streaming=b_streaming,
         scale_load_path=scale_load_path,
+        flat_schedule=flat_schedule,
     )
 
     # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
@@ -1576,6 +1578,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument("--b-streaming", action="store_true", default=False)
+    parser.add_argument("--flat-schedule", action="store_true", default=False)
     parser.add_argument(
         "--atomic-barrier-enable",
         action="store_true",
@@ -1646,4 +1649,5 @@ if __name__ == "__main__":
             expert_sched_mode=args.expert_sched_mode,
             b_streaming=args.b_streaming,
             scale_load_path=args.scale_load_path,
+            flat_schedule=args.flat_schedule,
         )
