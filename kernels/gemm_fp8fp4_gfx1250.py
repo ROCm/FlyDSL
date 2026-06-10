@@ -2844,6 +2844,11 @@ def compile_fp8fp4_gemm(
             if const_expr(_outstanding == -1):
                 if const_expr(_tail_had_load):
                     _pipeline_fence(outstanding=0)
+                # The final tail tile has no next tile to overlap, but if a prior
+                # tile pre-fetched this tile's operands (chained via _tail_pf_all_ks),
+                # pass them through so compute_tile uses skip_wait partial drains
+                # instead of a serial s_wait_dscnt(0) before every WMMA.
+                _last_pf = _tail_pf_all_ks if (_use_lds_pf and _tail_pf_all_ks is not None) else None
                 if const_expr(use_tdm_store):
                     a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                     accs = compute_tile_scheduled(
@@ -2855,6 +2860,7 @@ def compile_fp8fp4_gemm(
                         emit_filler=(_load_ptpc_scales_once if is_ptpc else None),
                         a0_prefetch=a0_prefetch,
                         scale_k_base=_entry_kb,
+                        pf_all_ks=_last_pf,
                     )
                 else:
 
@@ -2872,6 +2878,7 @@ def compile_fp8fp4_gemm(
                         emit_filler=_emit_epi_addrs,
                         a0_prefetch=a0_prefetch,
                         scale_k_base=_entry_kb,
+                        pf_all_ks=_last_pf,
                     )
             else:
                 # Issue TDM BEFORE fence (same as main loop) so the DMA starts
