@@ -3004,3 +3004,42 @@ Conclusion: keep GEMM2 v11.  It effectively closes the retained GEMM2 gap for
 `M=16,64` and keeps `M=128` within `+0.241 us` on GEMM2.  The remaining BM16
 work should start with `M=64` GEMM1, then the `M=64` sort gap.  `M=4` still has
 a GEMM2 fixed-cost gap, but it is no longer the main throughput bucket.
+
+## BM16 GEMM1 v12 B-Scale Cache Modifier
+
+Changed the retained BM16 GEMM1 B-scale scalar load from non-temporal
+`cache_modifier=2` to normal cached `cache_modifier=0`:
+
+```text
+flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM16_INLINEQUANT_v12
+```
+
+This mirrors the successful GEMM2 v11 change and matches aiter's B-scale load
+shape more closely: the B data loads remain non-temporal, but the scale dword
+loads use the normal cached path.
+
+Short correctness smoke for `M=64` stayed in the accepted cosine band:
+
+```text
+cos_sort=0.999998689
+cos_gemm1=0.999998927
+cos_all=0.999998927
+max_abs_all=0.031250
+```
+
+Default graph-profiler comparison:
+
+```text
+/opt/venv/bin/python profile_small_bm16.py -M 64 --runners sort_aiter,gemm1fly_aiter
+```
+
+| runner | sort_zero_init | GEMM1 | GEMM2 | total |
+| --- | ---: | ---: | ---: | ---: |
+| `sort_aiter` | 7.171 us | 131.178 us | 65.568 us | 203.946 us |
+| `gemm1fly_aiter` | 7.131 us | 131.829 us | 65.520 us | 204.557 us |
+| delta | -0.040 us | +0.651 us | -0.048 us | +0.611 us |
+
+Conclusion: keep v12.  The previous retained M=64 GEMM1 gap was about
+`+5.106 us`; v12 reduces the isolated GEMM1 gap to about `+0.651 us` in the
+graph-profiler run.  The remaining M=64 work is now small enough that further
+GEMM1 changes should be validated with the full default profile window.
