@@ -31,6 +31,8 @@ _ods_cluster_load_async_to_lds_b64 = cluster_load_async_to_lds_b64
 _ods_cluster_load_async_to_lds_b128 = cluster_load_async_to_lds_b128
 _ods_s_wait_asynccnt = s_wait_asynccnt
 _ods_readfirstlane = readfirstlane
+_ods_ballot = ballot
+_ods_readlane = readlane
 _ods_mfma_f32_32x32x8f16 = globals().get("mfma_f32_32x32x8f16", None)
 _ods_mfma_f32_32x32x8bf16_1k = globals().get("mfma_f32_32x32x8bf16_1k", None)
 _ods_mfma_f32_32x32x16_f16 = globals().get("mfma_f32_32x32x16_f16", None)
@@ -471,6 +473,51 @@ def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
 
 
+def cvt_pk_f32_fp8(res, src, word_sel, **kw):
+    """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8) into ``vector<2xf32>``.
+
+    ``word_sel=False`` decodes the low half (fp8 elems 0,1); ``word_sel=True`` the
+    high half (fp8 elems 2,3). A full v4f32 unpack requires both halves stitched
+    via a shuffle.
+    """
+    from ..._mlir.dialects.rocdl import cvt_pk_f32_fp8 as _op
+
+    return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
+
+
+def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
+    """ROCDL ``cvt_scalef32_pk_f32_fp4``: unpack 2 fp4 (from one i32 holding 8 packed
+    fp4 elems) into ``vector<2xf32>``, multiplied by ``scale``.
+
+    ``src_sel_index`` (Python int in ``[0,3]``) selects which fp4 pair within the
+    i32 lane is decoded. A full v8f32 unpack requires 4 calls (sel=0..3) plus
+    two-stage shuffle to stitch.
+    """
+    from ..._mlir.dialects.rocdl import cvt_scalef32_pk_f32_fp4 as _op
+
+    return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
+
+
+def cvt_scalef32_pk_fp4_f32(res, old_vdst, src0, src1, scale, dst_sel_index, **kw):
+    """ROCDL ``cvt_scalef32_pk_fp4_f32``: pack 2 fp32 into 2 fp4 and write them into
+    slot ``dst_sel_index`` of the i32 lane ``old_vdst`` (other slots preserved).
+
+    A full v8f32→i32 repack requires 4 calls (dst_sel=0..3) chaining ``old_vdst``
+    so each call accumulates a different pair into the running i32 value.
+    """
+    from ..._mlir.dialects.rocdl import cvt_scalef32_pk_fp4_f32 as _op
+
+    return _op(
+        res=res,
+        old_vdst=_to_ir(old_vdst),
+        src0=_to_ir(src0),
+        src1=_to_ir(src1),
+        scale=_to_ir(scale),
+        dst_sel_index=dst_sel_index,
+        **kw,
+    )
+
+
 def rcp(res, arg, **kw):
     from ..._mlir.dialects.rocdl import rcp as _op
 
@@ -518,3 +565,23 @@ def ds_bpermute(res, index, src, **kw):
 
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
+
+
+def ballot(res, pred, **kw):
+    """Wrap ROCDL ``ballot``: coerce ``pred`` to ``i1`` if needed.
+
+    ``res`` selects the lane-mask width (``i32`` on wave32, ``i64`` on wave64).
+    """
+    from ..._mlir.dialects import llvm as _llvm
+    from ..._mlir.ir import IntegerType
+
+    pred_v = _to_ir(pred)
+    i1 = IntegerType.get_signless(1)
+    if pred_v.type != i1:
+        pred_v = _llvm.TruncOp(i1, pred_v).result
+    return _ods_ballot(res=res, pred=pred_v, **kw)
+
+
+def readlane(res, src, lane, **kw):
+    """Wrap ROCDL ``readlane`` with ``_to_ir`` coercion (Python ``int`` ok for ``lane``)."""
+    return _ods_readlane(res=res, src0=_to_ir(src), src1=_to_ir(lane), **kw)
