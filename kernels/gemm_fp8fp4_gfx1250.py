@@ -2586,10 +2586,11 @@ def compile_fp8fp4_gemm(
         if const_expr(loop_iters > 0):
             if const_expr(wave_specialized_tdm):
                 if const_expr(_use_lds_pf):
-                    # Drain ALL prologue TDMs before issuing stage-0 ds_loads.
-                    # This is a one-time startup cost (~1-2 TDM latencies) that guarantees
-                    # every LDS stage is valid when the inner-loop post-fetch reads it.
+                    # Drain this wave's prologue TDMs, then barrier so every
+                    # wave's LDS writes are visible before any wave ds_loads.
                     rocdl.s_wait_tensorcnt(0)
+                    rocdl.s_barrier_signal(WGP_BARRIER_ID)
+                    rocdl.s_barrier_wait(WGP_BARRIER_ID)
                     _pf_init = _issue_pf_all_ks(
                         stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
                     )
@@ -2798,6 +2799,8 @@ def compile_fp8fp4_gemm(
         # has compute_stage == 0 (see make_tail_plan), which the prologue preloaded.
         if const_expr(loop_iters == 0 and _use_lds_pf):
             rocdl.s_wait_tensorcnt(0)
+            rocdl.s_barrier_signal(WGP_BARRIER_ID)
+            rocdl.s_barrier_wait(WGP_BARRIER_ID)
             _tail_pf_all_ks = _issue_pf_all_ks(
                 stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
             )
