@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
+import builtins
 import ctypes
 import fcntl
 import hashlib
@@ -1162,22 +1163,18 @@ def _build_call_state(sig, args_tuple, func_exe):
 
 
 def _build_dispatch_factory(slot_specs):
-    """Build a ``factory(packed, storages, func_exe) -> dispatch(args_tuple)``.
+    """Generate a straight-line dispatch-closure factory for ``slot_specs``.
 
-    The returned ``factory`` binds a thread's pre-allocated ``packed`` array and
-    ``storages`` into a straight-line ``dispatch`` closure that unrolls every
-    slot -- no per-slot Python loop, branch, or tuple-unpack -- with per-slot
-    storages and extract fns bound as closure locals (LOAD_DEREF).  This is the
-    universal hot-path win for a precompiled function invoked with new arguments
-    every call.
+    Returns ``make(packed, storages, func_exe) -> dispatch(args_tuple)``.  The
+    generated ``dispatch`` unrolls every slot -- no per-slot Python loop,
+    branch, or tuple-unpack -- with per-slot storages and extract fns bound as
+    closure locals (LOAD_DEREF).  This is the universal hot-path win for a
+    precompiled function invoked with new arguments every call.
     """
     setup, body, extracts = [], [], []
     for i, (arg_idx, ctype, extract) in enumerate(slot_specs):
         if extract is None:
-            # Null slot (auto-stream): its storage cell is allocated and pointed
-            # at by packed[i] in _make_dispatch, but never updated, so the stored
-            # handle stays 0 (HIP default stream).  No dispatch body line.
-            continue
+            continue  # null slot (auto-stream): packed[i] stays NULL after alloc
         try:
             probe = ctype(0)
         except TypeError:
@@ -1200,9 +1197,7 @@ def _build_dispatch_factory(slot_specs):
     src += "    return dispatch\n"
 
     ns = {}
-    # Compile with a descriptive filename so a traceback from an extract fn
-    # raised during dispatch points at "<flydsl-dispatch>" rather than "<string>".
-    code = compile(src, "<flydsl-dispatch>", "exec")  # src built from trusted internal slot_specs
+    code = builtins.compile(src, "<flydsl-dispatch>", "exec")  # generated from trusted internal slot_specs
     exec(code, ns)
     make = ns["make"]
     extracts = tuple(extracts)
