@@ -1161,31 +1161,74 @@ def _build_call_state(sig, args_tuple, func_exe):
     return CallState(slot_specs, func_exe)
 
 
+def _build_dispatch_factory(slot_specs):
+    """Generate a straight-line dispatch-closure factory for ``slot_specs``.
+
+    Returns ``make(packed, storages, func_exe) -> dispatch(args_tuple)``.  The
+    generated ``dispatch`` unrolls every slot -- no per-slot Python loop,
+    branch, or tuple-unpack -- with per-slot storages and extract fns bound as
+    closure locals (LOAD_DEREF).  This is the universal hot-path win for a
+    precompiled function invoked with new arguments every call.
+    """
+    setup, body, extracts = [], [], []
+    for i, (arg_idx, ctype, extract) in enumerate(slot_specs):
+        if extract is None:
+            continue  # null slot (auto-stream): packed[i] stays NULL after alloc
+        try:
+            probe = ctype(0)
+        except TypeError:
+            probe = ctype()
+        is_scalar = hasattr(probe, "value")
+        ei = len(extracts)
+        extracts.append(extract)
+        setup.append(f"    s{i} = storages[{i}]")
+        setup.append(f"    e{i} = extracts[{ei}]")
+        if is_scalar:
+            body.append(f"        s{i}.value = e{i}(a[{arg_idx}])")
+        else:
+            body.append(f"        e{i}(a[{arg_idx}], s{i})")
+
+    src = "def make(packed, storages, func_exe, extracts):\n"
+    src += "".join(line + "\n" for line in setup)
+    src += "    def dispatch(a):\n"
+    src += "".join(line + "\n" for line in body)
+    src += "        return func_exe(packed)\n"
+    src += "    return dispatch\n"
+
+    ns = {}
+    exec(src, ns)  # generated from trusted internal slot_specs
+    make = ns["make"]
+    extracts = tuple(extracts)
+
+    def factory(packed, storages, func_exe):
+        return make(packed, storages, func_exe, extracts)
+
+    return factory
+
+
 class CallState:
     """Pre-allocated state for fast kernel dispatch.
 
-    Built from JitArgument types' _reusable_slot_spec protocol — the same
-    types used by convert_to_jit_arguments for the full DLPack path.
-
-    Pre-allocates typed ctypes storage and a packed pointer array at init
-    time.  On each call, only updates .value on existing storage objects —
-    no ctypes object allocation, no pointer()/cast() calls.  Uses
-    thread-local storage for thread safety.
+    Built from JitArgument types' ``_reusable_slot_spec`` protocol.  At build
+    time the per-slot extract/store sequence is compiled into a straight-line
+    dispatch closure (see :func:`_build_dispatch_factory`).  Per thread it
+    allocates the packed pointer array and typed ctypes storages once and binds
+    them into that closure; each call then runs only the unrolled extract+store
+    body and invokes the JIT'd function -- no per-slot loop, no ctypes
+    allocation.  Thread-local for thread safety.
     """
 
-    __slots__ = ("_func_exe", "_spec", "_tls")
+    __slots__ = ("_func_exe", "_spec", "_tls", "_factory")
 
     def __init__(self, slot_specs, func_exe):
         self._func_exe = func_exe
         self._spec = slot_specs  # list of (arg_idx, ctype, extract_fn)
         self._tls = threading.local()
+        self._factory = _build_dispatch_factory(slot_specs)
 
-    def _init_buffers(self):
-        n_ptrs = len(self._spec)
-        packed = (ctypes.c_void_p * n_ptrs)()
+    def _make_dispatch(self):
+        packed = (ctypes.c_void_p * len(self._spec))()
         storages = []
-        updaters = []
-
         for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
             # ctype(0) works for scalar ctypes; array ctypes need zero-arg ctor.
             try:
@@ -1194,25 +1237,17 @@ class CallState:
                 s = ctype()
             packed[packed_idx] = ctypes.addressof(s)
             storages.append(s)
-            if extract is not None:
-                is_scalar = hasattr(s, "value")
-                updaters.append((arg_idx, s, extract, is_scalar))
-
+        # The dispatch closure keeps packed + storages alive; pin them on the
+        # thread-local too for clarity / introspection.
         self._tls.packed = packed
-        self._tls.updaters = updaters
-        self._tls._storages = storages
+        self._tls.storages = storages
+        return self._factory(packed, storages, self._func_exe)
 
     def __call__(self, args_tuple):
-        if not hasattr(self._tls, "packed"):
-            self._init_buffers()
-
-        for arg_idx, storage, extract, is_scalar in self._tls.updaters:
-            if is_scalar:
-                storage.value = extract(args_tuple[arg_idx])
-            else:
-                extract(args_tuple[arg_idx], storage)
-
-        return self._func_exe(self._tls.packed)
+        dispatch = getattr(self._tls, "dispatch", None)
+        if dispatch is None:
+            dispatch = self._tls.dispatch = self._make_dispatch()
+        return dispatch(args_tuple)
 
 
 class JitFunction:
