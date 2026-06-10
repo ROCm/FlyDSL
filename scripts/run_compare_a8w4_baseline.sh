@@ -32,4 +32,4 @@ unset FLYDSL_DUMP_IR FLYDSL_DUMP_DIR
 echo "Using triton: $TRITON_PY"
 python3 -c "import torch; f,t=torch.cuda.mem_get_info(); print(f'GPU free={f/1e9:.1f}GB / {t/1e9:.1f}GB')" 2>/dev/null || true
 
-exec python3 -u "$REPO_ROOT/scripts/compare_a8w4_baseline.py" "$@"
+exec python3 -u "$REPO_ROOT/scripts/compare_a8w4_baseline.py" --include-tdmopt "$@"

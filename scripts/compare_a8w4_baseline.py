@@ -76,6 +76,13 @@ def _make_args(M, N, K, tm, tn, tk, mw, nw, nb, warmup, iters):
 
 def _worker(kernel, cfg_vals, warmup, iters):
     """Run a single benchmark in this (isolated) process; print BENCH_RESULT us,tf,gbs."""
+    if kernel == "tdmopt":
+        import kernels.pipeline_utils_opt as opt_mod
+        import kernels.pipeline_utils as orig_mod
+        orig_mod.make_tail_plan = opt_mod.make_tail_plan
+        import kernels.gemm_fp8fp4_gfx1250 as gemm_mod
+        gemm_mod.make_tail_plan = opt_mod.make_tail_plan
+
     import tests.kernels.test_gemm_fp8fp4_gfx1250 as bench_mod
     if kernel == "baseline":
         from kernels import gemm_fp8fp4_gfx1250_baseline as mod
@@ -117,9 +124,11 @@ def main():
     p.add_argument("--iters", type=int, default=50)
     p.add_argument("--repeat", type=int, default=5,
                    help="isolated subprocess runs per (kernel,config); median reported")
+    p.add_argument("--include-tdmopt", action="store_true",
+                   help="also benchmark the tdmopt (graduated tail drain) variant")
     # worker-mode args (internal)
     p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    p.add_argument("--kernel", choices=["baseline", "current"], help=argparse.SUPPRESS)
+    p.add_argument("--kernel", choices=["baseline", "current", "tdmopt"], help=argparse.SUPPRESS)
     p.add_argument("--config", help=argparse.SUPPRESS)
     args = p.parse_args()
 
@@ -128,6 +137,10 @@ def main():
         _worker(args.kernel, cfg_vals, args.warmup, args.iters)
         return
 
+    kernels = ["baseline", "current"]
+    if args.include_tdmopt:
+        kernels.append("tdmopt")
+
     rows = []
     for cfg in DEFAULT_CONFIGS:
         M, N, K, tm, tn, tk, mw, nw, nb = cfg
@@ -135,7 +148,7 @@ def main():
         print(f"\n{'='*72}\n{tag}\n{'='*72}", flush=True)
 
         med = {}
-        for kernel in ("baseline", "current"):
+        for kernel in kernels:
             samples = []
             for r in range(args.repeat):
                 res = _run_subproc(kernel, cfg, args.warmup, args.iters)
@@ -150,28 +163,50 @@ def main():
                 med[kernel] = (us_med, tf_med, gbs_med, len(samples))
             else:
                 med[kernel] = None
-        rows.append((tag, med.get("baseline"), med.get("current")))
+        rows.append((tag, med))
 
     # ── summary table (medians) ──
-    print(f"\n\n{'='*92}\n  A8W4 GEMM: current vs baseline  "
-          f"(median of {args.repeat} isolated runs)\n{'='*92}")
-    hdr = (f"{'config':<40} {'base us':>9} {'cur us':>9} {'speedup':>9} "
-           f"{'base TF':>9} {'cur TF':>9}")
+    show_tdmopt = args.include_tdmopt
+    title = "A8W4 GEMM: current vs baseline"
+    if show_tdmopt:
+        title += " vs tdmopt"
+    print(f"\n\n{'='*120}\n  {title}  "
+          f"(median of {args.repeat} isolated runs)\n{'='*120}")
+
+    if show_tdmopt:
+        hdr = (f"{'config':<40} {'base us':>9} {'cur us':>9} {'cur spd':>9} "
+               f"{'tdm us':>9} {'tdm spd':>9} "
+               f"{'base TF':>9} {'cur TF':>9} {'tdm TF':>9}")
+    else:
+        hdr = (f"{'config':<40} {'base us':>9} {'cur us':>9} {'speedup':>9} "
+               f"{'base TF':>9} {'cur TF':>9}")
     print(hdr)
     print("-" * len(hdr))
-    for tag, base, cur in rows:
-        if base is None or cur is None:
-            b = "n/a" if base is None else f"{base[0]:.1f}"
-            c = "n/a" if cur is None else f"{cur[0]:.1f}"
-            print(f"{tag:<40} {b:>9} {c:>9} {'--':>9}")
-            continue
-        b_us, b_tf = base[0], base[1]
-        c_us, c_tf = cur[0], cur[1]
-        speedup = b_us / c_us if c_us > 0 else 0.0
-        print(f"{tag:<40} {b_us:>9.1f} {c_us:>9.1f} {speedup:>8.2f}x "
-              f"{b_tf:>9.2f} {c_tf:>9.2f}")
+    for tag, med in rows:
+        base = med.get("baseline")
+        cur = med.get("current")
+        tdm = med.get("tdmopt")
+
+        def _fmt(v):
+            return f"{v[0]:.1f}" if v else "n/a"
+
+        def _spd(ref, v):
+            if ref and v and v[0] > 0:
+                return f"{ref[0]/v[0]:.2f}x"
+            return "--"
+
+        if show_tdmopt:
+            print(f"{tag:<40} {_fmt(base):>9} {_fmt(cur):>9} {_spd(base,cur):>9} "
+                  f"{_fmt(tdm):>9} {_spd(base,tdm):>9} "
+                  f"{(f'{base[1]:.2f}' if base else 'n/a'):>9} "
+                  f"{(f'{cur[1]:.2f}' if cur else 'n/a'):>9} "
+                  f"{(f'{tdm[1]:.2f}' if tdm else 'n/a'):>9}")
+        else:
+            print(f"{tag:<40} {_fmt(base):>9} {_fmt(cur):>9} {_spd(base,cur):>9} "
+                  f"{(f'{base[1]:.2f}' if base else 'n/a'):>9} "
+                  f"{(f'{cur[1]:.2f}' if cur else 'n/a'):>9}")
     print("-" * len(hdr))
-    print("speedup > 1.0 means current is faster than baseline")
+    print("speedup > 1.0 means variant is faster than baseline")
 
 
 if __name__ == "__main__":
