@@ -2883,3 +2883,33 @@ The graph profiler did not show a runtime win.  On an otherwise idle GPU 3,
 The v6 sort median was worse than the retained v2/v5 measurements, so it was
 reverted.  The remaining sort gap is not fixed by simply trimming unused
 cross-wave LDS reads.
+
+## BM16 GEMM2 v9 Split-Barrier Trial
+
+Tried replacing the retained GEMM2 v3 precompute `s_waitcnt(0); s_barrier()`
+with aiter-style split barriers around the two A LDS slots:
+
+```text
+wait vmcnt(23); barrier; compute slot 0
+wait vmcnt(22); barrier; compute slot 1
+```
+
+This matched the high-level atomic BM16 source shape more closely than the
+earlier partial-wait-only attempts, but it was still not correct without
+aiter's full per-MFMA descending VMEM waits and exact instruction schedule.
+
+Correctness failed the accepted cosine band:
+
+```text
+M=4   cos=0.993439555 max_abs=3.984375
+M=8   cos=0.993382812 max_abs=5.243408
+M=16  cos=0.999997556 max_abs=0.054688
+M=32  cos=0.994739234 max_abs=6.148438
+M=64  cos=0.998132169 max_abs=5.007812
+M=128 cos=0.997795224 max_abs=5.382812
+min_cos=0.993382812
+```
+
+The trial was reverted.  This reinforces the prior ATT conclusion: GEMM2 wait
+optimization has to transplant the full aiter schedule, including the
+per-MFMA `vmcnt` ladder, rather than only splitting the coarse barrier.
