@@ -37,7 +37,8 @@ from tests.kernels.test_gemm_fp8fp4_gfx1250 import (
 # (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
 CONFIGS = [
     (1, 12288, 3072, 16, 64, 512, 1, 4, 4),
-    (64, 12288, 3072, 16, 64, 512, 1, 4, 4),
+    (64, 12288, 3072, 16, 256, 512, 1, 4, 4),
+    (4096, 12288, 3072, 64, 256, 256, 1, 4, 4),
 ]
 
 

@@ -162,8 +162,15 @@ def pipeline_fence_wait(use_cluster=False):
         cluster.cluster_wait()
 
 
-def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
-    """Emit one or more TDM loads, optionally one descriptor per loader wave."""
+def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None, cache_policies=None):
+    """Emit one or more TDM loads, optionally one descriptor per loader wave.
+
+    Args:
+        cache_policies: Optional per-descriptor cache policy list.  When given,
+            ``cache_policies[i]`` is forwarded to ``tensor_load_2d`` for the
+            *i*-th descriptor (e.g. ``1`` = ``TH_NT`` non-temporal hint on
+            gfx12+).  ``None`` (default) uses cache_policy 0 for every load.
+    """
     if wave_specialized:
         if wave_id is None:
             wave_id = rocdl.wave_id()
@@ -175,12 +182,14 @@ def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None):
             )
             if_op = scf.IfOp(is_loader_wave)
             with ir.InsertionPoint(if_op.then_block):
-                tdm_ops.tensor_load_2d(desc)
+                cp = cache_policies[idx] if cache_policies else 0
+                tdm_ops.tensor_load_2d(desc, cache_policy=cp)
                 scf.YieldOp([])
         return
 
-    for desc in descs:
-        tdm_ops.tensor_load_2d(desc)
+    for idx, desc in enumerate(descs):
+        cp = cache_policies[idx] if cache_policies else 0
+        tdm_ops.tensor_load_2d(desc, cache_policy=cp)
 
 
 def store_acc_vec8_to_lds(memref, base_elem_off, imm_elem_off, acc_vec8, out_elem=None):

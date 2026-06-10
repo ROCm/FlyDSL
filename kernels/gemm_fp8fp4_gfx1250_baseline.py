@@ -518,7 +518,7 @@ def compile_fp8fp4_gemm(
         _fp8_scale_loads = 0 if is_ptpc else (wmma_m_rep + 3) // 4 + (b_scale_load_rep + 3) // 4
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
-    def kernel_mxscale_gemm(
+    def kernel_mxscale_gemm_baseline(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
         arg_b: fx.Tensor,
@@ -2704,7 +2704,7 @@ def compile_fp8fp4_gemm(
     )
 
     @flyc.jit
-    def launch_mxscale_gemm(
+    def launch_mxscale_gemm_baseline(
         arg_c: fx.Tensor,
         arg_a: fx.Tensor,
         arg_b: fx.Tensor,
@@ -2731,7 +2731,7 @@ def compile_fp8fp4_gemm(
             gx = ((gx + (cluster_m - 1)) // cluster_m) * cluster_m
 
         cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
-        kernel_mxscale_gemm(
+        kernel_mxscale_gemm_baseline(
             arg_c,
             arg_a,
             arg_b,
@@ -2753,11 +2753,11 @@ def compile_fp8fp4_gemm(
         )
 
     if effective_expert_sched_mode:
-        launch_mxscale_gemm.compile_hints["llvm_options"] = {
+        launch_mxscale_gemm_baseline.compile_hints["llvm_options"] = {
             "amdgpu-expert-scheduling-mode": True,
         }
 
-    return launch_mxscale_gemm
+    return launch_mxscale_gemm_baseline
 
 
 def compile_mxscale_gemm(**kw):

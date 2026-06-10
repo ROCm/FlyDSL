@@ -24,7 +24,8 @@ export HSA_ENABLE_SDMA=0
 # path breaks the ld.lld lookup, so force /opt/rocm where the symlink lives.
 export ROCM_PATH=/opt/rocm
 export FLYDSL_RUNTIME_ENABLE_CACHE=1
-unset FLYDSL_DUMP_IR FLYDSL_DUMP_DIR
+# unset FLYDSL_DUMP_IR FLYDSL_DUMP_DIR
+export FLYDSL_DUMP_IR=1 
 
 echo "Using triton: $TRITON_PY"
 exec python3 -u "$REPO_ROOT/scripts/check_a8w4_precision.py" "$@"

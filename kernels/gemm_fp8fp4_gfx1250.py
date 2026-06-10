@@ -98,6 +98,7 @@ def compile_fp8fp4_gemm(
     b_streaming: bool = False,
     scale_load_path: str = "tdm",
     fp8_schedule: str = "auto",
+    weight_nt: bool = False,
 ):
     """Compile an FP4/FP8/A8W4 GEMM kernel with TDM async copy.
 
@@ -105,6 +106,9 @@ def compile_fp8fp4_gemm(
         data_format: "fp4" (E2M1), "fp8" (E4M3), or "a8w4" (FP8 act + FP4 weight).
         scale_mode: "mxscale" (E8M0 block scale via V_WMMA_SCALE) or "ptpc"
             (per-token sa[M] / per-channel sb[N] fp32, applied in the epilogue).
+        weight_nt: When True, apply GFX12+ TH_NT (non-temporal) cache hint
+            to weight B and B_scale TDM loads. When False (default), use
+            default cache policy.
 
     Data layout:
         A: [M, K_packed] uint8 (FP4: K_packed=K//2, FP8: K_packed=K)
@@ -126,6 +130,9 @@ def compile_fp8fp4_gemm(
     is_fp4 = data_format == "fp4"
     is_a8w4 = data_format == "a8w4"
     is_ptpc = scale_mode == "ptpc"
+
+    # GFX12+ TH_NT (non-temporal) cache hint for weight B TDM loads.
+    _b_cache_policy = 1 if weight_nt else 0
 
     if out_dtype not in ("f32", "bf16", "f16"):
         raise ValueError(f"out_dtype must be 'f32', 'bf16', or 'f16', got {out_dtype!r}")
@@ -1191,11 +1198,6 @@ def compile_fp8fp4_gemm(
 
             if const_expr(_has_pf and _has_next):
                 # ── Interleaved prefetch path ──
-                # For each k-step: emit next-tile's k-step ds_loads, then current-tile's
-                # k-step WMMAs (using loop-carried pf data).  LLVM's scheduler (guided by
-                # sched_dsrd/sched_mfma hints in hot_loop_scheduler) will interleave the
-                # ds_loads into the WMMA latency gaps so all 20 loads complete in VGPR
-                # by the time this tile finishes.
                 nxt_pf = []
                 for ks in range_constexpr(k_wmma_steps):
                     pf_a_ks, pf_b_ks, pf_bs_ks, pf_as_ks = pf_all_ks[ks]
@@ -2414,6 +2416,10 @@ def compile_fp8fp4_gemm(
         else:
             active_pred_const = pred_const
 
+        # Per-descriptor cache policies: NT (non-temporal) hint for B/B_scale loads.
+        # Order matches issue_tdm_loads calls: (A, B, A_scale, B_scale).
+        _tdm_cache_policies = [0, _b_cache_policy, 0, _b_cache_policy]
+
         if const_expr(use_ab_half_split):
             # All 4 waves load A/B halves: wave0=A0, wave1=B0, wave2=A1, wave3=B1.
             # Both halves of A share adv_a (same K-step); both halves of B share adv_b.
@@ -2467,7 +2473,7 @@ def compile_fp8fp4_gemm(
                 compute window, not on the critical path just before TDM.
                 """
                 dg0 = _pack_dg0(_pred_sgpr, _stage_lds_sgprs[load_stage], addr_lo, _addr_hi_sgpr)
-                tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
+                tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1), cache_policy=_b_cache_policy)
                 if k_prefetch is not None:
                     _l2_prefetch(k_prefetch)
 
@@ -2490,6 +2496,7 @@ def compile_fp8fp4_gemm(
                     tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
                     tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                     wave_specialized=wave_specialized_tdm,
+                    cache_policies=_tdm_cache_policies,
                 )
 
                 addr_lo_a = addr_lo_a + adv_a_i32
@@ -2586,11 +2593,7 @@ def compile_fp8fp4_gemm(
         if const_expr(loop_iters > 0):
             if const_expr(wave_specialized_tdm):
                 if const_expr(_use_lds_pf):
-                    # Drain this wave's prologue TDMs, then barrier so every
-                    # wave's LDS writes are visible before any wave ds_loads.
-                    rocdl.s_wait_tensorcnt(0)
-                    rocdl.s_barrier_signal(WGP_BARRIER_ID)
-                    rocdl.s_barrier_wait(WGP_BARRIER_ID)
+                    _pipeline_fence(outstanding=0)
                     _pf_init = _issue_pf_all_ks(
                         stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
                     )
@@ -2758,6 +2761,7 @@ def compile_fp8fp4_gemm(
                                 tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
                                 tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                                 wave_specialized=wave_specialized_tdm,
+                                cache_policies=_tdm_cache_policies,
                             )
                             _ab[0][0] = _ab[0][0] + adv_a_i32
                             _ab[1][0] = _ab[1][0] + adv_b_i32
@@ -2798,9 +2802,7 @@ def compile_fp8fp4_gemm(
         # (_use_tail_pf) carries operands across tail tiles. Tail plan entry 0 always
         # has compute_stage == 0 (see make_tail_plan), which the prologue preloaded.
         if const_expr(loop_iters == 0 and _use_lds_pf):
-            rocdl.s_wait_tensorcnt(0)
-            rocdl.s_barrier_signal(WGP_BARRIER_ID)
-            rocdl.s_barrier_wait(WGP_BARRIER_ID)
+            _pipeline_fence(outstanding=0)
             _tail_pf_all_ks = _issue_pf_all_ks(
                 stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
             )
@@ -2831,18 +2833,39 @@ def compile_fp8fp4_gemm(
             return kb
 
         # Pre-expand tail_plan: augment each entry with the NEXT active compute stage
-        # so we can do pf chaining without dict lookups inside the traced for loop.
-        _tail_plan_ext = []  # (load_stage, compute_stage, outstanding, next_compute_stage)
+        # and, for the pf path, the minimum fence outstanding that guarantees
+        # the next-tile's LDS stage is fully written before ds_loads read it.
+        _tail_plan_ext = []  # (load_stage, compute_stage, outstanding, next_cs, pf_fence_out)
         _tail_plan_active_cs = [cs for ls, cs, out in tail_plan if out != -1]
+
+        # Simulate the TDM in-flight queue at Python trace time to compute
+        # per-step pf_fence_out: the smallest outstanding value that still
+        # guarantees _next_cs is no longer in-flight after the fence drains.
+        _sim_inflight = []  # ordered list of stages — oldest first
         for _tei, (ls, cs, out) in enumerate(tail_plan):
             _next_cs = None
+            _pf_fence_out = out
             if out != -1:
+                if ls is not None:
+                    _sim_inflight.append(ls)
+                # Compute pf_fence_out BEFORE draining: how many can stay
+                # in-flight while still guaranteeing _next_cs has completed?
                 _apos = _tail_plan_active_cs.index(cs)
                 if _apos + 1 < len(_tail_plan_active_cs):
                     _next_cs = _tail_plan_active_cs[_apos + 1]
-            _tail_plan_ext.append((ls, cs, out, _next_cs))
+                if _next_cs is not None and _next_cs in _sim_inflight:
+                    _pos = _sim_inflight.index(_next_cs)
+                    _pf_fence_out = len(_sim_inflight) - _pos - 1
+                else:
+                    _pf_fence_out = len(_sim_inflight)
+                # Now apply the actual fence drain for subsequent steps.
+                _step_fence = max(out, TDM_LOADS_PER_STEP) if ls is not None else out
+                _step_fence = min(_step_fence, _pf_fence_out) if _next_cs is not None else _step_fence
+                if len(_sim_inflight) > _step_fence:
+                    _sim_inflight = _sim_inflight[len(_sim_inflight) - _step_fence:]
+            _tail_plan_ext.append((ls, cs, out, _next_cs, _pf_fence_out))
 
-        for _load_stage, _compute_stage, _outstanding, _tail_next_cs in _tail_plan_ext:
+        for _load_stage, _compute_stage, _outstanding, _tail_next_cs, _pf_fence_out in _tail_plan_ext:
             _entry_kb = _bvs_tail_kb()
             if const_expr(_outstanding == -1):
                 if const_expr(_tail_had_load):
@@ -2905,22 +2928,19 @@ def compile_fp8fp4_gemm(
                             tdm_ops.TDMDescriptor2D(dg0_as, dgroup1_as),
                             tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                             wave_specialized=wave_specialized_tdm,
+                            cache_policies=_tdm_cache_policies,
                         )
                         addr_lo_a = addr_lo_a + adv_a_i32
                         addr_lo_b = addr_lo_b + adv_b_i32
                         addr_lo_as = addr_lo_as + adv_as_i32
                         addr_lo_bs = addr_lo_bs + adv_bs_i32
-                    # When a TDM was just issued, use at least TDM_LOADS_PER_STEP as
-                    # the fence outstanding so the just-issued TDM stays in-flight
-                    # during compute (avoids s_wait_tensorcnt(0) immediately after issue).
                     _tail_fence_out = max(_outstanding, TDM_LOADS_PER_STEP)
                 else:
                     _tail_fence_out = _outstanding
 
-                if _tail_fence_out == 0 and _load_stage is None:
-                    # No new TDM was issued and previous TDMs are provably done
-                    # (outstanding=0 with no load). Skip tensor_wait; just signal
-                    # the barrier so other waves can proceed — tensorcnt is already 0.
+                if const_expr(_use_lds_pf and _tail_next_cs is not None):
+                    _tail_fence_out = _pf_fence_out
+                if const_expr(not _use_lds_pf) and _tail_fence_out == 0 and _load_stage is None:
                     rocdl.s_barrier_signal(WGP_BARRIER_ID)
                 else:
                     _pipeline_fence_signal(outstanding=_tail_fence_out)
@@ -3133,6 +3153,7 @@ def compile_ptpc_gemm(
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
     split_k: int = 1,
+    weight_nt: bool = False,
 ):
     """Compile a PTPC (per-token per-channel) GEMM kernel.
 
@@ -3170,6 +3191,7 @@ def compile_ptpc_gemm(
         expert_sched_mode=expert_sched_mode,
         atomic_barrier_enable=atomic_barrier_enable,
         split_k=split_k,
+        weight_nt=weight_nt,
     )
 
 
