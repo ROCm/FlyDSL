@@ -1057,15 +1057,7 @@ def compile_fp8fp4_gemm(
                 next_result = _load_b_and_scales(nb_buf, nb_bases, nbs_buf, nbs_bases, nas_buf, nas_bases, n_ks)
                 rocdl.s_wait_dscnt(_bs_ds_loads)
             elif const_expr(skip_wait):
-                # All current-tile operands are loop-carried VGPRs. No current-tile
-                # ds_loads are pending; wait for exactly the number of next-tile in-flight
-                # loads per k-step so the WMMA starts immediately and the prefetch
-                # loads continue to fly during WMMA execution.
-                # Half of next-tile k-step loads: LLVM (guided by sched_dsrd(half),
-                # sched_mfma(1) hints) places this first half before the wait, and the
-                # second half after wn0 WMMA. wait(half) = no-op (only half are pending).
-                _n_pf_per_ks = _bs_ds_loads + wmma_m_rep * DS_LOADS_PER_A_FRAG
-                rocdl.s_wait_dscnt(_n_pf_per_ks // 2)
+                pass
             else:
                 rocdl.s_wait_dscnt(0)
 
@@ -2597,6 +2589,7 @@ def compile_fp8fp4_gemm(
                     _pf_init = _issue_pf_all_ks(
                         stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
                     )
+                    rocdl.s_wait_dscnt(0)
                     _pf_init_flat = _pf_all_ks_to_flat(_pf_init)
                 else:
                     _pf_init_flat = []
@@ -2715,6 +2708,9 @@ def compile_fp8fp4_gemm(
                         _bvs_yield = _ring_a + _ring_b
                     else:
                         _bvs_yield = []
+                    if const_expr(_use_lds_pf):
+                        _pf_ds_per_ks = _bs_ds_loads + wmma_m_rep * DS_LOADS_PER_A_FRAG
+                        rocdl.s_wait_dscnt(_pf_ds_per_ks // 4)
                     results = yield list(accs_in) + [cur_addr_lo] + _pf_yield + _bvs_yield
 
                 accs = list(results[:n_accs])
@@ -2806,6 +2802,7 @@ def compile_fp8fp4_gemm(
             _tail_pf_all_ks = _issue_pf_all_ks(
                 stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
             )
+            rocdl.s_wait_dscnt(0)
 
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
         # if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
