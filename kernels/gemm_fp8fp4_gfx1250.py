@@ -2789,6 +2789,19 @@ def compile_fp8fp4_gemm(
                 addr_lo_as = results[n_accs + 2]
                 addr_lo_bs = results[n_accs + 3]
 
+        # When loop_iters == 0 (few K-tiles, e.g. large tile_k) the main loop never
+        # runs, so _tail_pf_all_ks is never seeded and the whole GEMM falls back to
+        # the non-prefetched tail (every WMMA preceded by s_wait_dscnt(0)). Seed it
+        # here exactly like the main-loop prologue: drain prologue TDMs, then issue
+        # the first compute stage's ds_loads so the tail's interleaved-prefetch path
+        # (_use_tail_pf) carries operands across tail tiles. Tail plan entry 0 always
+        # has compute_stage == 0 (see make_tail_plan), which the prologue preloaded.
+        if const_expr(loop_iters == 0 and _use_lds_pf):
+            rocdl.s_wait_tensorcnt(0)
+            _tail_pf_all_ks = _issue_pf_all_ks(
+                stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
+            )
+
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
         # if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
         #     pipeline_fence_wait(use_cluster=use_cluster)
