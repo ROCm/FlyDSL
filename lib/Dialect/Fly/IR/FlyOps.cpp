@@ -187,11 +187,19 @@ Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLike
 
 } // namespace
 
+// LLVM upstream renamed OpaqueProperties -> PropertyRef; MLIR_HAS_PROPERTY_REF
+// is set by CMake when the newer API is detected.
+#ifdef MLIR_HAS_PROPERTY_REF
+#define FLY_INFER_PROPERTIES_TYPE mlir::PropertyRef
+#else
+#define FLY_INFER_PROPERTIES_TYPE mlir::OpaqueProperties
+#endif
+
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
   llvm::LogicalResult OP::inferReturnTypes(                                                        \
       mlir::MLIRContext *context, std::optional<::mlir::Location> location,                        \
       mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
-      mlir::OpaqueProperties properties, mlir::RegionRange regions,                                \
+      FLY_INFER_PROPERTIES_TYPE properties, mlir::RegionRange regions,                             \
       llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
 
 //===----------------------------------------------------------------------===//

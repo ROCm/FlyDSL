@@ -16,14 +16,23 @@ if ! PYTHONPATH="$TRITON_PY" python3 -c "import triton" 2>/dev/null; then
     exit 1
 fi
 
-export PYTHONPATH="$TRITON_PY:${REPO_ROOT}/build-fly/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
-export LD_LIBRARY_PATH="${REPO_ROOT}/build-fly/python_packages/flydsl/_mlir/_mlir_libs:${LD_LIBRARY_PATH:-}"
+#export PYTHONPATH="$TRITON_PY:${REPO_ROOT}/build-fly/python_packages:${REPO_ROOT}:${PYTHONPATH:-}"
+#export LD_LIBRARY_PATH="${REPO_ROOT}/build-fly/python_packages/flydsl/_mlir/_mlir_libs:${LD_LIBRARY_PATH:-}"
+
+
+export ROCM_PATH=/home/jli10004/workspace/rocm-toolkit-samebank
+
+export PYTHONPATH=/home/jli10004/workspace/FlyDSL/build-fly-coexec-samebank-gemm-branch/python_packages:${PYTHONPATH:-}
+export LD_LIBRARY_PATH=/home/jli10004/workspace/FlyDSL/build-fly-coexec-samebank-gemm-branch/python_packages/flydsl/_mlir/_mlir_libs:${LD_LIBRARY_PATH:-}
+
 export FLYDSL_ROOT="$REPO_ROOT"
 
 # SDMA on this box faults on H2D; force blit-engine copies.
 export HSA_ENABLE_SDMA=0
-# lld resolves its toolchain relative to ROCM_PATH.
-export ROCM_PATH=/opt/rocm
+# lld resolves its toolchain (ld.lld + amdgcn device libs) relative to ROCM_PATH.
+# Keep the samebank toolkit set above (its llvm/bin/ld.lld -> matching LLD 23);
+# /opt/rocm has no ld.lld and would force the incompatible /usr/bin/ld.lld (LLD 18).
+export ROCM_PATH=/home/jli10004/workspace/rocm-toolkit-samebank
 # Benchmark needs the runtime cache on so compile happens once per kernel.
 export FLYDSL_RUNTIME_ENABLE_CACHE=1
 # Never dump IR during timing — it floods stdout and slows compile.
