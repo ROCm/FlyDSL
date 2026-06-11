@@ -2315,6 +2315,27 @@ def compile_fp8fp4_gemm(
                 block_threads=block_threads,
             )
 
+        def _l2_prefetch_b(k_base):
+            # Weight-only L2 prefetch: same tile-contiguous B addressing as
+            # make_desc_b / _l2_prefetch, but skips A. Used on the loop_iters==0
+            # (fully-unrolled) path where only B benefits from being warmed.
+            if const_expr(_effective_l2_pf <= 0):
+                return
+            pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
+            _pf_kt = K_packed_b // packed_tile_k_b
+            _pf_bn = blk_n / arith.index(tile_n)
+            _pf_bk = pf_k / arith.index(tile_k)
+            _pf_tile_blk0 = (_pf_bn * arith.index(_pf_kt) + _pf_bk) * arith.index(_b_num_blocks)
+            tdm_ops.l2_prefetch_tile(
+                arg_b,
+                (_pf_tile_blk0, arith.index(0)),
+                (_b_num_blocks, B_TILE_BYTES),
+                (B_TILE_BYTES, 1),
+                elem_bytes=1,
+                thread_id=tx,
+                block_threads=block_threads,
+            )
+
         # ====== Multi-stage pipeline ======
         acc_zero = arith.constant_vector(0.0, T.vec(ACC_VEC_SIZE, T.f32))
         accs = [acc_zero] * n_accs
@@ -2948,6 +2969,9 @@ def compile_fp8fp4_gemm(
         _tail_had_load = False
         # Tail K-tile index, so the VGPR-path scale buffer_load uses the right k_base.
         _bvs_tail_kt = [loop_iters * num_buffers]
+        # K-tile index of the next tail TDM load (prologue preloaded 0..pre_loaded-1),
+        # used to drive the weight-only L2 prefetch on the loop_iters==0 path.
+        _tail_load_kt = [loop_iters * num_buffers + pre_loaded]
 
         def _bvs_tail_kb():
             if const_expr(not _bvs_active):
@@ -3038,6 +3062,11 @@ def compile_fp8fp4_gemm(
                     if const_expr(wave_specialized_tdm):
                         _issue_active_tdm(_load_stage, active_addr_lo)
                         active_addr_lo = active_addr_lo + active_adv_i32
+                        # Weight-only L2 prefetch for a future tail tile (this path
+                        # runs when loop_iters==0, where the main loop never issues
+                        # any prefetch). A is left out by request.
+                        _l2_prefetch_b(split_k_base + arith.index(_tail_load_kt[0] * tile_k))
+                        _tail_load_kt[0] += 1
                         # Pin TDM before the fence scheduling region so LLVM cannot
                         # sink tensor_load_to_lds to after the barrier.
                         rocdl.sched_barrier(0)
