@@ -1225,33 +1225,45 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     )
 
 
-def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None, n_per_graph=20):
-    """Per-launch timer via hipGraph: capture n_per_graph launches, replay iters times, single event pair around the whole replay loop."""
+def _l2_cache_bytes() -> int:
+    """Reported L2 size (gfx1250 under-reports the effective LLC, so callers floor this)."""
+    return getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "L2_cache_size", 4 * 1024 * 1024)
+
+
+def _rotate_slot_count(working_set_bytes: int, flush_l2: bool, cap: int = 256) -> int:
+    """Number of rotate-buffer copies so the pool exceeds the last-level cache."""
+    if not flush_l2:
+        return 1
+    POOL_TARGET = 1024 * 1024 * 1024
+    target = max(_l2_cache_bytes() * 2, POOL_TARGET)
+    needed = -(-target // max(working_set_bytes, 1))  # ceil-div
+    return max(2, min(needed, cap))
+
+
+def _bench_kernel_us_cudagraph(run_slot, num_slots, warmup=10, iters=100):
+    """Per-launch timer via hipGraph: captures n_per_graph launches, replays them."""
+    n_per_graph = max(num_slots, 20)
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
 
     with torch.cuda.stream(capture_stream):
-        for _ in range(warmup):
-            if prep_fn is not None:
-                prep_fn()
-            run_fn()
+        for i in range(warmup):
+            run_slot(i)
     torch.cuda.current_stream().wait_stream(capture_stream)
     torch.cuda.synchronize()
 
     g = torch.cuda.CUDAGraph()
-    if prep_fn is not None:
-        prep_fn()
     with torch.cuda.graph(g, stream=capture_stream):
-        for _ in range(n_per_graph):
-            run_fn()
+        for j in range(n_per_graph):
+            run_slot(j)
     torch.cuda.synchronize()
 
     # Sanity guard against empty graph capture.
     ref_start = torch.cuda.Event(enable_timing=True)
     ref_end = torch.cuda.Event(enable_timing=True)
     ref_start.record()
-    for _ in range(n_per_graph):
-        run_fn()
+    for j in range(n_per_graph):
+        run_slot(j)
     ref_end.record()
     torch.cuda.synchronize()
     ref_per_launch_us = ref_start.elapsed_time(ref_end) * 1e3 / n_per_graph
@@ -1288,45 +1300,20 @@ def _bench_kernel_us_cudagraph(run_fn, warmup=10, iters=100, prep_fn=None, n_per
     return start_ev.elapsed_time(end_ev) * 1e3 / (iters * n_per_graph)
 
 
-def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
-    """Per-iter CUDA events with L2 flush + IQR-trimmed median; fast path uses a single event pair when no flush/prep is requested (preserves back-to-back launch pipelining)."""
-    flush_buf = None
-    if flush_l2:
-        l2_bytes = getattr(
-            torch.cuda.get_device_properties(torch.cuda.current_device()), "L2_cache_size", 4 * 1024 * 1024
-        )
-        alloc_bytes = max(l2_bytes * 2, 8 * 1024 * 1024)
-        flush_buf = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+def _bench_kernel_us(run_slot, num_slots, warmup=10, iters=50):
+    """Per-iter CUDA-event timer with rotating buffers (cold L2) + IQR-trimmed median."""
+    del num_slots  # rotation is handled inside run_slot; kept for call-site symmetry
 
-    for _ in range(warmup):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        if prep_fn is not None:
-            prep_fn()
-        run_fn()
+    for i in range(warmup):
+        run_slot(i)
     torch.cuda.synchronize()
-
-    if flush_buf is None and prep_fn is None:
-        # Single event pair preserves back-to-back launch pipelining (returns mean latency).
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(iters):
-            run_fn()
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) * 1e3 / iters
 
     start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
 
     for i in range(iters):
-        if flush_buf is not None:
-            flush_buf.zero_()
-        if prep_fn is not None:
-            prep_fn()
         start_ev[i].record()
-        run_fn()
+        run_slot(i)
         end_ev[i].record()
 
     torch.cuda.synchronize()
@@ -1342,7 +1329,6 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
         if filtered:
             latencies = filtered
 
-    del flush_buf
     return latencies[len(latencies) // 2]
 
 
@@ -1859,9 +1845,13 @@ def _run_benchmark(args):
     )
     if args.split_k > 1:
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
-    l2_flush_label = "OFF (graph)" if getattr(args, "use_graph", False) else ("OFF" if args.no_flush_l2 else "ON")
-    print(f"  Warmup={args.warmup}, Iters={args.iters}, L2 flush={l2_flush_label}")
-    print("  Output init: zero before warmup")
+    if args.no_flush_l2:
+        l2_flush_label = "OFF (hot L2, --no-flush-l2)"
+    elif getattr(args, "use_graph", False):
+        l2_flush_label = "OFF (graph replay is warm/L2-resident; use eager for cold HBM)"
+    else:
+        l2_flush_label = "ON (rotate buffers, cold HBM)"
+    print(f"  Warmup={args.warmup}, Iters={args.iters}, L2 defeat={l2_flush_label}")
     if is_ptpc:
         # compile_ptpc_gemm forces these internally; flag the ones the user set off-default.
         _ptpc_ignored = []
@@ -2017,16 +2007,13 @@ def _run_benchmark(args):
         torch.cuda.current_stream(),
     )
 
-    def prep_kernel():
-        c_gpu.zero_()
-
-    def run_kernel():
+    def run_one(c_, a_, b_, as_, bs_):
         compiled_exe(
-            c_gpu,
-            a_gpu,
-            b_gpu,
-            as_gpu,
-            bs_gpu,
+            c_,
+            a_,
+            b_,
+            as_,
+            bs_,
             padded_m,
             padded_n,
             padded_k,
@@ -2034,21 +2021,43 @@ def _run_benchmark(args):
             torch.cuda.current_stream(),
         )
 
-    prep_kernel()
-    run_kernel()
+    c_gpu.zero_()
+    run_one(c_gpu, a_gpu, b_gpu, as_gpu, bs_gpu)
     torch.cuda.synchronize()
     compile_ms = (time.perf_counter() - t0) * 1e3
     print(f"      Compile + first launch: {compile_ms:.0f} ms")
 
+    flush_l2 = not args.no_flush_l2
+    working_set = sum(t.numel() * t.element_size() for t in (a_gpu, b_gpu, as_gpu, bs_gpu, c_gpu))
+    num_slots = _rotate_slot_count(working_set, flush_l2)
+    a_pool = [a_gpu] + [a_gpu.clone() for _ in range(num_slots - 1)]
+    b_pool = [b_gpu] + [b_gpu.clone() for _ in range(num_slots - 1)]
+    as_pool = [as_gpu] + [as_gpu.clone() for _ in range(num_slots - 1)]
+    bs_pool = [bs_gpu] + [bs_gpu.clone() for _ in range(num_slots - 1)]
+    c_pool = [c_gpu] + [torch.zeros_like(c_gpu) for _ in range(num_slots - 1)]
+    print(
+        f"      Rotate buffers: {num_slots} slot(s), pool={working_set * num_slots / 1e6:.1f} MB "
+        f"(working set {working_set / 1e6:.1f} MB)" + ("  [HOT L2: --no-flush-l2]" if num_slots == 1 else "")
+    )
+
+    def run_slot(i):
+        s = i % num_slots
+        run_one(c_pool[s], a_pool[s], b_pool[s], as_pool[s], bs_pool[s])
+
     use_graph = getattr(args, "use_graph", False)
     if use_graph:
+        if not args.no_flush_l2:
+            print(
+                "      WARNING: hipGraph capture aliases the kernel-param buffer across "
+                "replayed launches, so the rotate buffers above do NOT take effect under "
+                "replay -- this number is WARM (L2-resident). Use eager mode (drop "
+                "--use-graph) for the cold-HBM number."
+            )
         print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph " f"({args.iters} replays)...")
-        us = _bench_kernel_us_cudagraph(run_kernel, warmup=args.warmup, iters=args.iters)
+        us = _bench_kernel_us_cudagraph(run_slot, num_slots, warmup=args.warmup, iters=args.iters)
     else:
         print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
-        us = _bench_kernel_us(
-            run_kernel, warmup=args.warmup, iters=args.iters, flush_l2=not args.no_flush_l2, prep_fn=prep_kernel
-        )
+        us = _bench_kernel_us(run_slot, num_slots, warmup=args.warmup, iters=args.iters)
 
     logical_flops = 2.0 * M * N * K
     kernel_flops = 2.0 * padded_m * padded_n * padded_k
@@ -2337,15 +2346,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
-    parser.add_argument("--no-flush-l2", action="store_true", default=False)
+    parser.add_argument(
+        "--no-flush-l2",
+        action="store_true",
+        default=False,
+        help="Disable the rotate-buffer L2 defeat (use a single hot buffer) for a "
+        "warm-cache measurement. Applies to both eager and --use-graph modes.",
+    )
     parser.add_argument(
         "--use-graph",
         action="store_true",
         default=False,
-        help="Time via hipGraph capture+replay to strip "
-        "host launch overhead from per-launch latency. "
-        "Implicitly disables L2 flush (graph replays "
-        "are back-to-back, hot-cache).",
+        help="Time via hipGraph capture+replay to strip host launch overhead from "
+        "per-launch latency. NOTE: graph replay measures the WARM (L2-resident) "
+        "regime -- rotate buffers do not survive hipGraph capture, so use the eager "
+        "path (drop --use-graph) for the cold-HBM number.",
     )
     parser.add_argument(
         "--verify-graph",
