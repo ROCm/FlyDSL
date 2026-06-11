@@ -1352,22 +1352,51 @@ class JitFunction:
             self._sig = full_sig
         self._backend_target = get_backend().target  # frozen dataclass, stable
 
-    def _ensure_cache_manager(self, owner_cls=None):
-        if self.manager_key is not None and self._manager_owner_cls is owner_cls:
-            return
-        self._manager_owner_cls = owner_cls
-        self.manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
+    def _clear_inprocess_caches(self):
+        self._call_state_cache.clear()
+        self._mem_cache.clear()
+        self._last_compiled = None
+        self._extern_linkage_keys.clear()
 
+    def _ensure_cache_manager(self, owner_cls=None):
+        """Refresh definition/cache-manager state when the active runtime mode needs it.
+
+        The cache-enabled hot path keeps using the existing ``manager_key`` once
+        a cache manager is initialized. Cache-disabled and run-only modes
+        re-hash the dependency graph on each call so helper source changes can
+        invalidate in-process artifacts during iterative development (#453).
+        """
         run_only = env.runtime.run_only
+        enable_cache = env.runtime.enable_cache
+        need_cache = enable_cache or run_only
+        validate_definition_key = (
+            self.manager_key is None
+            or self._manager_owner_cls is not owner_cls
+            or (need_cache and self.cache_manager is None)
+            or not enable_cache
+            or run_only
+        )
+        if not validate_definition_key:
+            return
+
+        self._manager_owner_cls = owner_cls
+        manager_key = _jit_function_cache_key(self.func, owner_cls=owner_cls)
+        if self.manager_key is not None and self.manager_key != manager_key:
+            self._clear_inprocess_caches()
+            self.cache_manager = None
+        self.manager_key = manager_key
+
         if run_only and env.debug.dump_ir:
             raise ValueError(
                 "FLYDSL_RUNTIME_RUN_ONLY=1 is incompatible with FLYDSL_DUMP_IR=1: "
                 "run-only mode skips the MLIR pass pipeline that would produce IR dumps."
             )
 
-        need_cache = env.runtime.enable_cache or run_only
         if not need_cache:
             self.cache_manager = None
+            return
+
+        if self.cache_manager is not None:
             return
 
         cache_root = env.runtime.cache_dir
@@ -1576,7 +1605,6 @@ class JitFunction:
             _compile_lock_ctx = nullcontext((None, None))
 
         with _compile_lock_ctx as (_lock_result, _cache_writer):
-
             if _lock_result is not None and not getattr(_lock_result, "_link_libs", None):
                 # Cache hit after waiting for another process to compile.
                 compiled_func = _lock_result
