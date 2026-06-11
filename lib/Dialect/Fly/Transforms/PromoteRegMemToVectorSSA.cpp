@@ -168,7 +168,7 @@ private:
     Block *oldEntry = &funcOp.getBody().front();
     Block *newEntry = opBuilder.createBlock(&funcOp.getBody());
     for (BlockArgument arg : oldEntry->getArguments())
-      newEntry->addArgument(arg.getType(), funcOp.getLoc());
+      newEntry->addArgument(arg.getType(), arg.getLoc());
 
     IRMapping mapping;
     for (auto it : llvm::zip(oldEntry->getArguments(), newEntry->getArguments()))
@@ -483,6 +483,10 @@ private:
     Block *oldBody = oldFor.getBody();
     Block *newBody = newFor.getBody();
     for (unsigned i = 0; i < oldBody->getNumArguments(); ++i)
+      newBody->getArgument(i).setLoc(oldBody->getArgument(i).getLoc());
+    for (unsigned i = oldBody->getNumArguments(); i < newBody->getNumArguments(); ++i)
+      newBody->getArgument(i).setLoc(oldFor.getLoc());
+    for (unsigned i = 0; i < oldBody->getNumArguments(); ++i)
       bodyMapping.map(oldBody->getArgument(i), newBody->getArgument(i));
 
     RegMem2VectorSSAMap bodyState = state;
@@ -533,14 +537,20 @@ private:
     beforeArgTypes.reserve(newInitArgs.size());
     for (Value initArg : newInitArgs)
       beforeArgTypes.push_back(initArg.getType());
-    SmallVector<Location> beforeArgLocs(beforeArgTypes.size(), oldWhile.getLoc());
+    SmallVector<Location> beforeArgLocs;
+    for (BlockArgument a : oldWhile.getBeforeArguments())
+      beforeArgLocs.push_back(a.getLoc());
+    beforeArgLocs.resize(beforeArgTypes.size(), oldWhile.getLoc());
     Block *newBefore =
         builder.createBlock(&newWhile.getBefore(), {}, beforeArgTypes, beforeArgLocs);
 
     SmallVector<Type> afterArgTypes(oldWhile.getResultTypes().begin(),
                                     oldWhile.getResultTypes().end());
     appendVectorSSATypes(touchedRoots, afterArgTypes);
-    SmallVector<Location> afterArgLocs(afterArgTypes.size(), oldWhile.getLoc());
+    SmallVector<Location> afterArgLocs;
+    for (BlockArgument a : oldWhile.getAfterArguments())
+      afterArgLocs.push_back(a.getLoc());
+    afterArgLocs.resize(afterArgTypes.size(), oldWhile.getLoc());
     Block *newAfter = builder.createBlock(&newWhile.getAfter(), {}, afterArgTypes, afterArgLocs);
 
     {
