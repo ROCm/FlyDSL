@@ -696,23 +696,25 @@ def compile_fp8fp4_gemm(
             )
 
         def make_desc_b(memref, k_base):
-            k_packed_off = k_base / arith.index(PACK_FACTOR_B)
-            # PERF EXPERIMENT: TDM dim0 (innermost) = one 16x16 tile = 256B, and
-            # write each tile into LDS on a _b_blk_stride (256 + pad) step so the
-            # read side (load_b_frag) sees padded tiles. pad_interval/pad_amount
-            # apply the LDS-write padding (global side unchanged).
-            # NOTE: still numerically wrong (single 256B global stride doesn't
-            # match real B layout) — perf-measurement only.
-            _b_outer_blocks = (tile_n // 16) * (packed_tile_k_b // 16)
+            # Tile-contiguous B (preshuffle_b_16x16_tiled): global is a flat array
+            # of 256B blocks ordered [n_tile, k_tile, ng_loc, kt_loc, 256B], so one
+            # GEMM tile's _b_num_blocks blocks are contiguous. TDM dim0 = 256B block,
+            # tile_shape dim0 = whole-tile block count -> one contiguous DMA per tile,
+            # advancing a full tile per K-step (no overlap). pad_interval/pad_amount
+            # add the LDS-write padding to break bank conflicts (global side flat).
+            _kt = K_packed_b // packed_tile_k_b  # K-direction GEMM tiles
+            bn = blk_n / arith.index(tile_n)
+            bk = k_base / arith.index(tile_k)
+            tile_blk0 = (bn * arith.index(_kt) + bk) * arith.index(_b_num_blocks)
             return _make_tdm_desc(
                 global_ptr=arg_b,
                 lds_memref=memref,
-                global_offset=(blk_n / arith.index(16), k_packed_off * arith.index(16)),
-                tensor_shape=(N // 16 * (K_packed_b // 16), 256),
-                strides=(256, 1),
-                tile_shape=(_b_outer_blocks, 256),
+                global_offset=(tile_blk0, arith.index(0)),
+                tensor_shape=(N * K_packed_b // B_TILE_BYTES, B_TILE_BYTES),
+                strides=(B_TILE_BYTES, 1),
+                tile_shape=(_b_num_blocks, B_TILE_BYTES),
                 elem_bytes=1,
-                pad_interval=256 if _b_pad else 0,
+                pad_interval=B_TILE_BYTES if _b_pad else 0,
                 pad_amount=_b_pad,
                 num_warps=tdm_desc_num_warps,
                 workgroup_mask=b_mcast_mask,
@@ -2452,7 +2454,7 @@ def compile_fp8fp4_gemm(
             desc_b1_init = make_desc_b_half(stages_b_mem[0], split_k_base, 1)
 
         adv_a_i32 = fx.Int32(tile_k // PACK_FACTOR_A)
-        adv_b_i32 = fx.Int32(packed_tile_k_b * 16)
+        adv_b_i32 = fx.Int32(_b_num_blocks * 256)
         adv_as_i32 = fx.Int32(tile_k // SCALE_BLOCK * wmma_m_rep)
         adv_bs_i32 = fx.Int32(tile_k // SCALE_BLOCK * b_scale_load_rep)
 

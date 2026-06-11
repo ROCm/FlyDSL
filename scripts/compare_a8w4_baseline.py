@@ -79,6 +79,13 @@ def _worker(kernel, cfg_vals, warmup, iters):
     import tests.kernels.test_gemm_fp8fp4_gfx1250 as bench_mod
     if kernel == "baseline":
         from kernels import gemm_fp8fp4_gfx1250_baseline as mod
+        # bench_mod hardcodes a8w4 -> preshuffle_b_16x16_tiled (the current
+        # kernel's tile-contiguous layout). The baseline kernel reads the flat
+        # 16x16 layout, so route its B preshuffle back to the flat variant.
+        from tests.kernels.utils import fp4_utils
+        fp4_utils.preshuffle_b_16x16_tiled = (
+            lambda b, rows, cols, tile_n, tile_kb: fp4_utils.preshuffle_b_16x16(b, rows, cols)
+        )
     else:
         from kernels import gemm_fp8fp4_gfx1250 as mod
     bench_mod.compile_mxscale_gemm = mod.compile_mxscale_gemm

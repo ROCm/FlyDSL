@@ -42,7 +42,7 @@ CONFIGS = [
 ]
 
 
-def _run_kernel(compile_fn, data_format, a, b, a_scale, b_scale, padded_shape, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, M, N):
+def _run_kernel(compile_fn, data_format, a, b, a_scale, b_scale, padded_shape, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, M, N, tiled_b):
     """Compile & run a single kernel variant, return c_out[:M,:N] on CPU as float."""
     padded_m = padded_shape["M"]
     padded_n = padded_shape["N"]
@@ -56,7 +56,14 @@ def _run_kernel(compile_fn, data_format, a, b, a_scale, b_scale, padded_shape, t
     b_s = preshuffle_e8m0_scale(b_scale.clone(), warp_tile_n, scale_k_per_tile=skt, coalesced=False)
 
     K_packed = padded_k // padded_shape["pack_b"]
-    b_shuf = fp4_utils.preshuffle_b_16x16(b.clone(), padded_n, K_packed)
+    # The current a8w4 kernel reads B from the tile-contiguous 256B-block layout
+    # (use_b_tile256); the baseline reads the flat 16x16 layout. Match each.
+    if tiled_b:
+        b_shuf = fp4_utils.preshuffle_b_16x16_tiled(
+            b.clone(), padded_n, K_packed, tile_n, tile_k // padded_shape["pack_b"]
+        )
+    else:
+        b_shuf = fp4_utils.preshuffle_b_16x16(b.clone(), padded_n, K_packed)
 
     a_gpu = a.cuda().contiguous()
     b_gpu = b_shuf.cuda().contiguous()
@@ -141,7 +148,7 @@ def main():
 
         # --- Current kernel ---
         try:
-            cur_f = _run_kernel(compile_current, "a8w4", a_pad, b_pad, as_pad, bs_pad, padded_shape, tm, tn, tk, mw, nw, nb, M, N)
+            cur_f = _run_kernel(compile_current, "a8w4", a_pad, b_pad, as_pad, bs_pad, padded_shape, tm, tn, tk, mw, nw, nb, M, N, tiled_b=True)
             row["cur"] = _metrics(cur_f, ref_f)
             print(f"  Current:  cos={row['cur']['cos']:.6f}  max_diff={row['cur']['max_diff']:.4f}  mean_diff={row['cur']['mean_diff']:.4f}")
         except Exception as e:
@@ -150,7 +157,7 @@ def main():
 
         # --- Baseline kernel ---
         try:
-            base_f = _run_kernel(compile_baseline, "a8w4", a_pad, b_pad, as_pad, bs_pad, padded_shape, tm, tn, tk, mw, nw, nb, M, N)
+            base_f = _run_kernel(compile_baseline, "a8w4", a_pad, b_pad, as_pad, bs_pad, padded_shape, tm, tn, tk, mw, nw, nb, M, N, tiled_b=False)
             row["base"] = _metrics(base_f, ref_f)
             print(f"  Baseline: cos={row['base']['cos']:.6f}  max_diff={row['base']['max_diff']:.4f}  mean_diff={row['base']['mean_diff']:.4f}")
         except Exception as e:

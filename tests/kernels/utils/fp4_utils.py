@@ -715,3 +715,27 @@ def preshuffle_b_16x16(b: Tensor, rows: int, cols: int) -> Tensor:
     b = b.view(rows // 16, 16, cols // 16, 16)
     b = b.permute(0, 2, 1, 3).contiguous()
     return b.view(rows, cols)
+
+
+def preshuffle_b_16x16_tiled(b: Tensor, rows: int, cols: int, tile_n: int, tile_kb: int) -> Tensor:
+    """Tile-aware B preshuffle: like preshuffle_b_16x16, but blocks of one GEMM
+    tile (tile_n rows x tile_kb cols) are stored contiguously in memory.
+
+    Layout (256B = one 16x16 byte tile):
+      [n_tile, k_tile, ng_loc(tile_n//16), kt_loc(tile_kb//16), 16, 16]
+    so a GEMM tile's (tile_n//16)*(tile_kb//16) blocks are contiguous in
+    n_group-major order, matching the kernel's LDS read order. This lets the
+    TDM descriptor use innermost dim0 = 256B with a single 256B stride.
+
+    rows = N, cols = K_packed_b (FP4: K//2). tile_kb = packed_tile_k_b.
+    """
+    assert rows % tile_n == 0, f"rows={rows} must be a multiple of tile_n={tile_n}"
+    assert cols % tile_kb == 0, f"cols={cols} must be a multiple of tile_kb={tile_kb}"
+    assert tile_n % 16 == 0 and tile_kb % 16 == 0
+    nt, kt = rows // tile_n, cols // tile_kb
+    ng, ktl = tile_n // 16, tile_kb // 16
+    # [nt, ng, 16, kt, ktl, 16]
+    b = b.view(nt, ng, 16, kt, ktl, 16)
+    # -> [nt, kt, ng, ktl, 16, 16]  (n_group-major blocks within a tile)
+    b = b.permute(0, 3, 1, 4, 2, 5).contiguous()
+    return b.view(rows, cols)
