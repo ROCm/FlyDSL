@@ -2315,13 +2315,10 @@ def compile_fp8fp4_gemm(
                 block_threads=block_threads,
             )
 
-        def _l2_prefetch_b(k_base):
-            # Weight-only L2 prefetch: same tile-contiguous B addressing as
-            # make_desc_b / _l2_prefetch, but skips A. Used on the loop_iters==0
-            # (fully-unrolled) path where only B benefits from being warmed.
-            if const_expr(_effective_l2_pf <= 0):
-                return
-            pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
+        def _l2_prefetch_b_at(pf_k):
+            # Weight-only L2 prefetch of the B tile at ABSOLUTE K-offset pf_k
+            # (no distance bias). Same tile-contiguous B addressing as
+            # make_desc_b / _l2_prefetch, but skips A.
             _pf_kt = K_packed_b // packed_tile_k_b
             _pf_bn = blk_n / arith.index(tile_n)
             _pf_bk = pf_k / arith.index(tile_k)
@@ -2335,6 +2332,13 @@ def compile_fp8fp4_gemm(
                 thread_id=tx,
                 block_threads=block_threads,
             )
+
+        def _l2_prefetch_b(k_base):
+            # Look-ahead weight prefetch: warm the B tile _effective_l2_pf tiles
+            # ahead. Used on the loop_iters==0 (fully-unrolled) tail path.
+            if const_expr(_effective_l2_pf <= 0):
+                return
+            _l2_prefetch_b_at(k_base + arith.index(_effective_l2_pf * tile_k))
 
         # ====== Multi-stage pipeline ======
         acc_zero = arith.constant_vector(0.0, T.vec(ACC_VEC_SIZE, T.f32))
@@ -2617,6 +2621,14 @@ def compile_fp8fp4_gemm(
 
         # Prologue
         if const_expr(wave_specialized_tdm):
+            # Cold-start: warm the prologue B tiles into L2 BEFORE their TDM loads.
+            # All waves participate (tx spans 0..block_threads-1), so the whole
+            # B tile's cache lines are covered. Issued up-front so the HBM round
+            # trip overlaps the prologue's TDM setup instead of being a serial
+            # 1500cc cold miss on the first tensor_load.
+            if const_expr(_effective_l2_pf > 0):
+                for i in range_constexpr(pre_loaded):
+                    _l2_prefetch_b_at(split_k_base + arith.index(i * tile_k))
             for i in range_constexpr(pre_loaded):
                 _issue_active_tdm(i, active_addr_lo)
                 # Advance right after TDM: s_add_co_i32 runs during the
