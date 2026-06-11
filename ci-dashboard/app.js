@@ -20,7 +20,7 @@ const S = {
   records: [], runs: [], updated: null, runMeta: new Map(),
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
-  trend: { key: null, arch: "all", metric: null, q: "", range: "10d", xmode: "commits" },
+  trend: { key: null, arch: "all", metric: null, q: "", range: "all", xmode: "commits" },
   theme: "dark",
 };
 
@@ -360,7 +360,7 @@ function selectKernel(k, rerail = true) {
   $("#metricSel").innerHTML = metrics.map(m => `<button data-m="${m}" class="${m === S.trend.metric ? "is-active" : ""}">${m}</button>`).join("");
   $("#trendArch").innerHTML = ["all", ...CFG.archOrder].map(a =>
     `<button data-a="${a}" class="${a === S.trend.arch ? "is-active" : ""}">${a}</button>`).join("");
-  $("#trendRange").innerHTML = [["10d", "10 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
+  $("#trendRange").innerHTML = [["3d", "3 days"], ["7d", "7 days"], ["all", "all (14d)"]].map(([v, t]) =>
     `<button data-r="${v}" class="${v === S.trend.range ? "is-active" : ""}">${t}</button>`).join("");
   $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
     `<button data-x="${v}" class="${v === S.trend.xmode ? "is-active" : ""}">${t}</button>`).join("");
@@ -434,8 +434,9 @@ function drawTrend(e) {
     });
     datasets.push({
       label: arch, data, borderColor: archCol(arch), backgroundColor: archCol(arch) + "22",
-      pointBackgroundColor: ptColor, pointBorderColor: ptColor, pointRadius: daily ? 2.5 : 3, pointHoverRadius: 5,
-      borderWidth: 2.2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
+      pointBackgroundColor: ptColor, pointBorderColor: ptColor,
+      pointRadius: daily ? 4 : points.length > 30 ? 1.5 : 3, pointHoverRadius: 6,
+      borderWidth: daily ? 2.4 : 2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
     });
   }
   $("#noiseNote").innerHTML =
