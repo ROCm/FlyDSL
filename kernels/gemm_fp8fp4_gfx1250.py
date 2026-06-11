@@ -2289,7 +2289,6 @@ def compile_fp8fp4_gemm(
                 return
             pf_k = k_base + arith.index(_effective_l2_pf * tile_k)
             pf_k_packed_a = pf_k / arith.index(PACK_FACTOR_A)
-            pf_k_packed_b = pf_k / arith.index(PACK_FACTOR_B)
             tdm_ops.l2_prefetch_tile(
                 arg_a,
                 (blk_m, pf_k_packed_a),
@@ -2299,11 +2298,18 @@ def compile_fp8fp4_gemm(
                 thread_id=tx,
                 block_threads=block_threads,
             )
+            # B is tile-contiguous (preshuffle_b_16x16_tiled): one GEMM tile is
+            # _b_num_blocks contiguous 256B blocks. Prefetch must use the SAME
+            # tile_blk0 addressing as make_desc_b, or it warms the wrong lines.
+            _pf_kt = K_packed_b // packed_tile_k_b
+            _pf_bn = blk_n / arith.index(tile_n)
+            _pf_bk = pf_k / arith.index(tile_k)
+            _pf_tile_blk0 = (_pf_bn * arith.index(_pf_kt) + _pf_bk) * arith.index(_b_num_blocks)
             tdm_ops.l2_prefetch_tile(
                 arg_b,
-                (blk_n / arith.index(16), pf_k_packed_b * arith.index(16)),
-                (tile_n // 16, packed_tile_k_b * 16),
-                (K_packed_b * 16, 1),
+                (_pf_tile_blk0, arith.index(0)),
+                (_b_num_blocks, B_TILE_BYTES),
+                (B_TILE_BYTES, 1),
                 elem_bytes=1,
                 thread_id=tx,
                 block_threads=block_threads,
