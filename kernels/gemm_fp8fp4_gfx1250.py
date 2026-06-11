@@ -66,6 +66,12 @@ SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 
 LDS_PAD_A_BYTES = 16
 LDS_PAD_D_BYTES = 16
+# PERF EXPERIMENT: pad each 256B B-tile in LDS by this many bytes to break
+# bank conflicts. 0 = original (no pad). Must be a multiple of 4. Read side
+# (load_b_frag) and write side (make_desc_b) both use B_TILE_BYTES + pad.
+# Sweepable via env FLYDSL_B_TILE_PAD for quick experiments.
+B_TILE_BYTES = 256
+LDS_PAD_B_TILE_BYTES = int(os.environ.get("FLYDSL_B_TILE_PAD", "16"))
 LDS_SEGMENT_BYTES = 64 * 1024
 LDS_GFX1250_MAX_BYTES = 5 * LDS_SEGMENT_BYTES
 
@@ -291,7 +297,17 @@ def compile_fp8fp4_gemm(
             raise ValueError(f"scale_load_path='vgpr_ab_split' requires tile_n divisible by 32, got {tile_n}")
 
     lds_a_data_bytes = tile_m * lds_a_stride_bytes
-    lds_b_data_bytes = tile_n * packed_tile_k_b
+    # PERF EXPERIMENT (a8w4 only): pad each 256B B-tile in LDS to break bank
+    # conflicts. _b_blk_stride is the per-16x16-tile byte step in LDS; the read
+    # side (_precompute_b_lane_bases / load_b_frag) and the TDM write side
+    # (make_desc_b) both use it. _b_pad=0 reproduces the original layout.
+    _b_pad = LDS_PAD_B_TILE_BYTES if is_a8w4 else 0
+    _b_blk_stride = B_TILE_BYTES + _b_pad
+    _b_num_blocks = (tile_n // 16) * (packed_tile_k_b // 16)
+    if _b_pad:
+        lds_b_data_bytes = _b_num_blocks * _b_blk_stride
+    else:
+        lds_b_data_bytes = tile_n * packed_tile_k_b
     ab_split_a_rows = tile_m // 2
     ab_split_b_groups = tile_n // 32
     _scale_guard_bytes = 16
@@ -681,16 +697,23 @@ def compile_fp8fp4_gemm(
 
         def make_desc_b(memref, k_base):
             k_packed_off = k_base / arith.index(PACK_FACTOR_B)
+            # PERF EXPERIMENT: TDM dim0 (innermost) = one 16x16 tile = 256B, and
+            # write each tile into LDS on a _b_blk_stride (256 + pad) step so the
+            # read side (load_b_frag) sees padded tiles. pad_interval/pad_amount
+            # apply the LDS-write padding (global side unchanged).
+            # NOTE: still numerically wrong (single 256B global stride doesn't
+            # match real B layout) — perf-measurement only.
+            _b_outer_blocks = (tile_n // 16) * (packed_tile_k_b // 16)
             return _make_tdm_desc(
                 global_ptr=arg_b,
                 lds_memref=memref,
                 global_offset=(blk_n / arith.index(16), k_packed_off * arith.index(16)),
-                tensor_shape=(N // 16, K_packed_b * 16),
-                strides=(K_packed_b * 16, 1),
-                tile_shape=(tile_n // 16, packed_tile_k_b * 16),
+                tensor_shape=(N // 16 * (K_packed_b // 16), 256),
+                strides=(256, 1),
+                tile_shape=(_b_outer_blocks, 256),
                 elem_bytes=1,
-                pad_interval=0,
-                pad_amount=0,
+                pad_interval=256 if _b_pad else 0,
+                pad_amount=_b_pad,
                 num_warps=tdm_desc_num_warps,
                 workgroup_mask=b_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
@@ -847,11 +870,14 @@ def compile_fp8fp4_gemm(
               kgrp0 and kgrp1 read alternating 16x16 tiles (stride = 2 tiles).
               kgrp offset = 1 tile = 256 bytes.
             """
-            _ngroup_stride = packed_tile_k_b * 16
+            # _b_blk_stride = padded 16x16-tile byte step (256 + pad). With
+            # _b_pad=0 this is exactly the original 256B layout. A n_group holds
+            # (packed_tile_k_b // 16) tiles.
+            _ngroup_stride = (packed_tile_k_b // 16) * _b_blk_stride
             _n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
             row_off = lane16 * arith.index(16)
-            # All formats: interleaved — kgrp offset = 1 tile = 256 bytes
-            k_tile_off = lane_kgrp * arith.index(256)
+            # All formats: interleaved — kgrp offset = 1 tile = _b_blk_stride bytes
+            k_tile_off = lane_kgrp * arith.index(_b_blk_stride)
             bases = []
             if const_expr(is_fp4):
                 for wn_half in range_constexpr(wmma_n_rep * 2):
@@ -891,12 +917,12 @@ def compile_fp8fp4_gemm(
                 return v01.shuffle(v23, list(range(16)))
             elif const_expr(is_a8w4):
                 # A8W4: FP4 weight, 4 tiles per N-group
-                # Interleaved stride=512: kgrp0→tiles 0,2; kgrp1→tiles 1,3
+                # Interleaved stride=2 tiles: kgrp0→tiles 0,2; kgrp1→tiles 1,3
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16  # 4 tiles total
-                k_subtile_off = arith.index(ks * _num_tiles * 256)
+                k_subtile_off = arith.index(ks * _num_tiles * _b_blk_stride)
                 base0 = b_lane_bases[wn] + k_subtile_off
                 v0 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 0))
-                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 512))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, base0, 2 * _b_blk_stride))
                 return v0.shuffle(v1, list(range(8)))
             else:
                 # FP8: 8 tiles per N-group
