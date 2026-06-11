@@ -13,15 +13,15 @@ const CFG = {
   warnPct: -1.0,         // surfaced as "watch"
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
   minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
-  archOrder: ["gfx950", "gfx942", "gfx1201"],
-  archColor: { gfx950: "#4aa8ff", gfx942: "#b389e6", gfx1201: "#e0934a" },
+  archOrder: ["gfx950", "gfx942", "gfx1201"],   // arch colors come from CSS vars (--gfx*) via archCol/archVar
 };
 
 const S = {
   records: [], runs: [], updated: null, runMeta: new Map(),
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
-  trend: { key: null, arch: "all", metric: null, q: "" },
+  trend: { key: null, arch: "all", metric: null, q: "", range: "10d", xmode: "commits" },
+  theme: "dark",
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -29,6 +29,13 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const kkey = r => `${r.op} ${r.shape} ${r.dtype}`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const VIEWS = ["health", "prcheck", "trends", "board"];
+
+// theme-aware colors: read the live CSS variables so canvas/SVG match the active theme
+const ARCHVAR = { gfx950: "--gfx950", gfx942: "--gfx942", gfx1201: "--gfx1201" };
+const cssVal = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || n;
+const archVar = a => `var(${ARCHVAR[a] || "--ink-2"})`;     // for inline style="" (CSS var)
+const archCol = a => cssVal(ARCHVAR[a] || "--ink-2");        // resolved value for <canvas>
+const commitUrl = sha => sha ? `https://github.com/${CFG.repo}/commit/${sha}` : "#";
 
 function relTime(iso) {
   if (!iso) return "—";
@@ -173,7 +180,7 @@ function sparkline(values, noise, lastReal) {
   const x = i => pad + (i / (values.length - 1)) * (W - 2 * pad);
   const y = v => H - pad - ((v - lo) / span) * (H - 2 * pad);
   const pts = values.map((v, i) => [x(i), y(v)]);
-  const col = lastReal ? "#f65f6c" : "#9aa6b4";
+  const col = lastReal ? cssVal("--bad") : cssVal("--ink-2");
   const gid = "sg" + (_sparkN++);
   const line = "M" + pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" L");
   const area = `M${pts[0][0].toFixed(1)},${(H - pad).toFixed(1)} ` +
@@ -182,7 +189,7 @@ function sparkline(values, noise, lastReal) {
   let band = "";
   if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
     const yh = y(noise.hi), yl = y(noise.lo);
-    band = `<rect x="0" y="${yh.toFixed(1)}" width="${W}" height="${Math.max(1, yl - yh).toFixed(1)}" fill="rgba(154,166,180,.14)"/>`;
+    band = `<rect x="0" y="${yh.toFixed(1)}" width="${W}" height="${Math.max(1, yl - yh).toFixed(1)}" fill="${cssVal("--band")}"/>`;
   }
   const [lx, ly] = pts[pts.length - 1];
   return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
@@ -253,13 +260,13 @@ function renderHealth() {
   $("#regList").innerHTML = list.map(({ r, vals, noise, real, d, sev }, i) => {
     const run = S.runMeta.get(r.run_id);
     const sha = (r.commit || "").slice(0, 7);
-    const href = `https://github.com/${CFG.repo}/actions/runs/${r.run_id}`;
+    const href = commitUrl(r.commit);
     const w = Math.max(4, Math.min(46, Math.abs(d) / maxAbs * 46));
     const bc = sev === "bad" ? "var(--bad)" : sev === "warn" ? "var(--warn)" : "var(--good)";
     return `<div class="reg-row s-${sev}" style="--i:${i}" data-k="${esc(kkey(r))}" data-arch="${r.arch}">
       <span class="op">${esc(r.op)} <span class="metric-tag">${r.metric}</span></span>
       <span class="shape">${esc(r.shape)} · ${esc(r.dtype)}</span>
-      <span class="reg-arch" style="color:${CFG.archColor[r.arch]}">${esc(r.arch)}</span>
+      <span class="reg-arch" style="color:${archVar(r.arch)}">${esc(r.arch)}</span>
       ${sparkline(vals, noise, real)}
       <span class="reg-delta ${sev}"><span class="dbar" style="width:${w}px;background:${bc}"></span>${fmtPct(d)}</span>
       <span class="commit"><a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${run?.branch === "main" ? "main" : "#" + (r.pr ?? "?")}·${sha}</a></span>
@@ -305,7 +312,7 @@ function renderPRCheck() {
     <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th class="num">PR</th><th class="num">main</th><th class="num">Δ vs main</th><th>baseline</th>
     </tr></thead><tbody>${rows.map(({ r, d, sev }) => `<tr class="${sev === "bad" ? "row-bad" : ""}">
       <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td><td class="k-dim">${esc(r.shape)}</td><td>${esc(r.dtype)}</td>
-      <td style="color:${CFG.archColor[r.arch]}">${esc(r.arch)}</td>
+      <td style="color:${archVar(r.arch)}">${esc(r.arch)}</td>
       <td class="num">${fmtVal(r.value, r.metric)}</td>
       <td class="num k-dim">${fmtVal(r.vs_main.baseline, r.metric)}</td>
       <td class="num delta ${sev}">${fmtPct(d)}</td>
@@ -321,10 +328,10 @@ function kernelIndex() {
   for (const r of S.records) {
     if (r.source !== "ci" || r.value == null) continue;
     const k = kkey(r);
-    if (!m.has(k)) m.set(k, { op: r.op, shape: r.shape, dtype: r.dtype, metrics: new Set(), reg: false });
-    m.get(k).metrics.add(r.metric);
+    if (!m.has(k)) m.set(k, { op: r.op, shape: r.shape, dtype: r.dtype, metrics: new Set(), runs: new Set(), reg: false });
+    const e = m.get(k); e.metrics.add(r.metric); e.runs.add(r.run_id);
   }
-  for (const [k, e] of m) e.reg = regKeys.has(k);
+  for (const [k, e] of m) { e.reg = regKeys.has(k); e.n = e.runs.size; }
   return m;
 }
 function renderKernelRail() {
@@ -332,7 +339,12 @@ function renderKernelRail() {
   let keys = [...idx.keys()];
   if (S.trend.q) { const q = S.trend.q.toLowerCase(); keys = keys.filter(k => k.toLowerCase().includes(q)); }
   keys.sort();
-  if (!S.trend.key && keys.length) selectKernel(keys.find(k => idx.get(k).reg) || keys[0], false);
+  // default to a regressed kernel, else the best-sampled one (so the chart isn't a lone point)
+  if (!S.trend.key && keys.length) {
+    const reg = keys.find(k => idx.get(k).reg);
+    const dense = keys.slice().sort((a, b) => idx.get(b).n - idx.get(a).n)[0];
+    selectKernel(reg || dense, false);
+  }
   $("#kernelList").innerHTML = keys.map(k => {
     const e = idx.get(k);
     return `<button class="kitem ${k === S.trend.key ? "is-active" : ""} ${e.reg ? "has-reg" : ""}" data-k="${esc(k)}">
@@ -348,6 +360,10 @@ function selectKernel(k, rerail = true) {
   $("#metricSel").innerHTML = metrics.map(m => `<button data-m="${m}" class="${m === S.trend.metric ? "is-active" : ""}">${m}</button>`).join("");
   $("#trendArch").innerHTML = ["all", ...CFG.archOrder].map(a =>
     `<button data-a="${a}" class="${a === S.trend.arch ? "is-active" : ""}">${a}</button>`).join("");
+  $("#trendRange").innerHTML = [["10d", "10 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
+    `<button data-r="${v}" class="${v === S.trend.range ? "is-active" : ""}">${t}</button>`).join("");
+  $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
+    `<button data-x="${v}" class="${v === S.trend.xmode ? "is-active" : ""}">${t}</button>`).join("");
   $("#trendTitle").innerHTML = `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${S.trend.metric}</small>`;
   if (rerail) $$("#kernelList .kitem").forEach(b => b.classList.toggle("is-active", b.dataset.k === k));
   drawTrend(e);
@@ -355,72 +371,106 @@ function selectKernel(k, rerail = true) {
 function drawTrend(e) {
   const metric = S.trend.metric, op = e.op, shape = e.shape, dtype = e.dtype;
   const recs = S.records.filter(r => r.source === "ci" && r.op === op && r.shape === shape && r.dtype === dtype && r.metric === metric);
-  const runIds = [...new Set(recs.map(r => r.run_id))].map(id => {
+  let runIds = [...new Set(recs.map(r => r.run_id))].map(id => {
     const any = recs.find(r => r.run_id === id);
     return { id, ts: any.ts, commit: any.commit, pr: any.pr, main: isMainRec(any) };
   }).sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
-  const labels = runIds.map(r => (r.commit || "").slice(0, 7));
+  // time-range filter (default 10 days). range is "<N>d" or "all".
+  const days = S.trend.range === "all" ? Infinity : parseInt((S.trend.range.match(/\d+/) || ["10"])[0], 10);
+  if (Number.isFinite(days)) {
+    const cutoff = Date.now() - days * 86400000;
+    runIds = runIds.filter(ri => !ri.ts || new Date(ri.ts).getTime() >= cutoff);
+  }
+  const val = new Map();                       // run_id|arch -> value
+  for (const r of recs) val.set(r.run_id + "|" + r.arch, r.value);
+
+  // x-axis points: one per commit, or one per day (daily mean) when xmode=daily
+  const daily = S.trend.xmode === "daily";
+  let points;
+  if (daily) {
+    const byDay = new Map();
+    for (const ri of runIds) { const d = (ri.ts || "").slice(0, 10); (byDay.get(d) || byDay.set(d, []).get(d)).push(ri); }
+    points = [...byDay.keys()].sort().map(d => {
+      const rs = byDay.get(d), last = rs[rs.length - 1];
+      return { date: d, dateLabel: d.slice(5), sha: "", commit: last.commit, pr: last.pr, main: rs.some(x => x.main), runs: rs };
+    });
+  } else {
+    points = runIds.map(ri => ({ date: (ri.ts || "").slice(0, 10), dateLabel: (ri.ts || "").slice(5, 10), sha: (ri.commit || "").slice(0, 7), commit: ri.commit, pr: ri.pr, main: ri.main, id: ri.id }));
+  }
+  const labels = points.map((p, i) => p.sha || p.dateLabel || String(i));
+  const valueAt = (p, arch) => {
+    if (daily) { const vs = p.runs.map(ri => val.get(ri.id + "|" + arch)).filter(v => v != null); return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null; }
+    return val.get(p.id + "|" + arch) ?? null;
+  };
   const single = S.trend.arch !== "all";
   const archs = single ? [S.trend.arch] : CFG.archOrder;
 
   const datasets = [];
   let note = "";
+  const span = `${points.length} ${daily ? "day" + (points.length === 1 ? "" : "s") : "commits"}` +
+    (S.trend.range === "all" ? "" : ` · last ${days}d`);
   if (single) {
     const noise = mainBaseline(op, shape, dtype, S.trend.arch, metric);
     if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
-      datasets.push({ label: "+2σ", data: labels.map(() => noise.hi), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: "rgba(150,162,178,.13)", order: 20 });
-      datasets.push({ label: "-2σ", data: labels.map(() => noise.lo), borderColor: "transparent", pointRadius: 0, fill: false, order: 20 });
-      datasets.push({ label: "main mean", data: labels.map(() => noise.mean), borderColor: "#626c79", borderDash: [4, 4], borderWidth: 1, pointRadius: 0, order: 19 });
-      note = `band = prior-main mean ${fmtVal(noise.mean, metric)} ± ${CFG.noiseK}σ (σ≈<b>${noise.relStd.toFixed(1)}%</b>, n=${noise.n}). A main point below the band, or a PR below its main baseline, is a real regression.`;
+      datasets.push({ label: "+2σ", data: points.map(() => noise.hi), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: cssVal("--band"), order: 20 });
+      datasets.push({ label: "-2σ", data: points.map(() => noise.lo), borderColor: "transparent", pointRadius: 0, fill: false, order: 20 });
+      datasets.push({ label: "main mean", data: points.map(() => noise.mean), borderColor: cssVal("--ink-4"), borderDash: [4, 4], borderWidth: 1, pointRadius: 0, order: 19 });
+      note = `${span} · band = prior-main mean ${fmtVal(noise.mean, metric)} ± ${CFG.noiseK}σ (σ≈<b>${noise.relStd.toFixed(1)}%</b>, n=${noise.n}).` +
+        (daily ? " Daily mean smooths run-to-run jitter." : " A point below the band is a real regression.");
     } else {
-      note = `n=${noise.n} prior main runs — too few for a noise band; using the fixed <b>${CFG.regressionPct}%</b> gate.`;
+      note = `${span} · n=${noise.n} prior main runs — too few for a noise band; fixed <b>${CFG.regressionPct}%</b> gate.`;
     }
   } else {
-    note = `one line per arch. Red = a main run below its prior-main noise band, or a PR run slower than main (beyond the ${CFG.regressionPct}% gate).`;
+    note = `${span} · one line per arch.` + (daily ? " Daily mean per arch — smooths CI jitter to expose real drift." : " Red = main below its prior-main band, or a PR slower than main.");
   }
   for (const arch of archs) {
     const noise = mainBaseline(op, shape, dtype, arch, metric);
-    const data = runIds.map(ri => { const r = recs.find(x => x.run_id === ri.id && x.arch === arch); return r ? r.value : null; });
+    const data = points.map(p => valueAt(p, arch));
     if (data.every(v => v == null)) continue;
-    const ptColor = runIds.map(ri => {
-      const r = recs.find(x => x.run_id === ri.id && x.arch === arch);
-      return (r && regOf(r, noise).real) ? "#f65f6c" : CFG.archColor[arch];
+    const ptColor = points.map((p, i) => {
+      if (daily) return archCol(arch);          // daily means aren't per-run regression calls
+      const r = recs.find(x => x.run_id === p.id && x.arch === arch);
+      return (r && regOf(r, noise).real) ? cssVal("--bad") : archCol(arch);
     });
     datasets.push({
-      label: arch, data, borderColor: CFG.archColor[arch], backgroundColor: CFG.archColor[arch] + "14",
-      pointBackgroundColor: ptColor, pointBorderColor: ptColor, pointRadius: 3, pointHoverRadius: 5,
+      label: arch, data, borderColor: archCol(arch), backgroundColor: archCol(arch) + "22",
+      pointBackgroundColor: ptColor, pointBorderColor: ptColor, pointRadius: daily ? 2.5 : 3, pointHoverRadius: 5,
       borderWidth: 2.2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
     });
   }
   $("#noiseNote").innerHTML =
     `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.3v4M8 5v.01" stroke-linecap="round"/></svg>` + note;
 
+  const tickCol = cssVal("--ink-3"), gridCol = cssVal("--grid");
   if (trendChart) trendChart.destroy();
   trendChart = new Chart($("#trendChart"), {
     type: "line", data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: { duration: 220 },
       interaction: { mode: "index", intersect: false },
+      onHover: (ev, els) => { if (ev.native) ev.native.target.style.cursor = els.length ? "pointer" : "default"; },
+      onClick: (ev, els) => { if (!els.length) return; const p = points[els[0].index]; if (p && p.commit) window.open(commitUrl(p.commit), "_blank", "noopener"); },
       plugins: {
-        legend: { labels: { color: "#98a1ae", font: { family: "IBM Plex Mono", size: 11 }, boxWidth: 10, usePointStyle: true, filter: i => !/σ|mean/.test(i.text) } },
+        legend: { labels: { color: cssVal("--ink-2"), font: { family: "IBM Plex Mono", size: 11 }, boxWidth: 10, usePointStyle: true, filter: i => !/σ|mean/.test(i.text) } },
         tooltip: {
-          backgroundColor: "#11161d", borderColor: "#2b333e", borderWidth: 1, titleColor: "#e8ebf0", bodyColor: "#98a1ae",
+          backgroundColor: cssVal("--panel"), borderColor: cssVal("--border"), borderWidth: 1, titleColor: cssVal("--ink"), bodyColor: cssVal("--ink-2"),
           titleFont: { family: "IBM Plex Mono" }, bodyFont: { family: "IBM Plex Mono" },
           filter: i => !/σ|mean/.test(i.dataset.label),
           callbacks: {
-            title: items => { const ri = runIds[items[0].dataIndex]; return `${(ri.commit || "").slice(0, 7)} · ${ri.main ? "main" : "#" + ri.pr}`; },
+            title: items => { const p = points[items[0].dataIndex]; return daily ? `${p.date} · ${p.runs.length} run${p.runs.length === 1 ? "" : "s"}` : `${p.sha} · ${p.main ? "main" : "#" + p.pr} · click to open`; },
             label: i => ` ${i.dataset.label}: ${fmtVal(i.parsed.y, metric)} ${metric}`,
           },
         },
       },
       scales: {
-        x: { grid: { color: "#1a2029" }, ticks: { color: "#626c79", font: { family: "IBM Plex Mono", size: 10 } } },
-        y: { grid: { color: "#1a2029" }, ticks: { color: "#626c79", font: { family: "IBM Plex Mono", size: 10 } },
-          title: { display: true, text: metric, color: "#626c79", font: { family: "IBM Plex Mono", size: 10 } } },
+        x: { grid: { color: gridCol }, ticks: { color: tickCol, font: { family: "IBM Plex Mono", size: 10 }, maxRotation: 0, autoSkipPadding: 12,
+          callback: function (v, i) { const p = points[i]; return p ? (p.sha ? [p.dateLabel, p.sha] : [p.dateLabel]) : v; } } },
+        y: { grid: { color: gridCol }, ticks: { color: tickCol, font: { family: "IBM Plex Mono", size: 10 } },
+          title: { display: true, text: metric, color: tickCol, font: { family: "IBM Plex Mono", size: 10 } } },
       },
     },
   });
-  // status-aware table
+  // status-aware table — always per-commit, with a real link to each commit
   $("#trendBody").innerHTML = runIds.slice().reverse().map(ri => {
     const cell = arch => {
       const r = recs.find(x => x.run_id === ri.id && x.arch === arch)
@@ -428,10 +478,13 @@ function drawTrend(e) {
       if (!r) return `<td class="num st-na">—</td>`;
       if (r.value == null) return `<td class="num cell-status ${r.status === "skip" ? "st-skip" : "st-missing"}">${r.status}</td>`;
       const real = regOf(r, mainBaseline(op, shape, dtype, arch, metric)).real;
-      return `<td class="num" style="color:${real ? "var(--bad)" : CFG.archColor[arch]}">${fmtVal(r.value, metric)}</td>`;
+      return `<td class="num" style="color:${real ? "var(--bad)" : archVar(arch)}">${fmtVal(r.value, metric)}</td>`;
     };
-    return `<tr><td>${(ri.commit || "").slice(0, 7)}</td><td class="k-dim">${(ri.ts || "").slice(0, 10)}</td>
-      <td class="k-dim">${ri.main ? "main" : "#" + ri.pr}</td>${cell("gfx950")}${cell("gfx942")}${cell("gfx1201")}</tr>`;
+    const sha = (ri.commit || "").slice(0, 7);
+    return `<tr><td><a class="commit-link" href="${commitUrl(ri.commit)}" target="_blank" rel="noopener">${sha || "—"}</a></td>` +
+      `<td class="k-dim">${(ri.ts || "").slice(0, 10)}</td>` +
+      `<td class="k-dim">${ri.main ? "main" : ri.pr ? `<a href="https://github.com/${CFG.repo}/pull/${ri.pr}" target="_blank" rel="noopener">#${ri.pr}</a>` : "branch"}</td>` +
+      `${cell("gfx950")}${cell("gfx942")}${cell("gfx1201")}</tr>`;
   }).join("");
 }
 
@@ -489,7 +542,7 @@ function renderBoard() {
       <div class="pr-top"><span class="pr-num">${who}</span><span class="pr-event">${esc(r.event || "")}</span>
         <span class="spacer"></span><span class="pr-meta" style="margin:0">${relTime(r.created_at)}</span></div>
       <a class="pr-title" href="${esc(r.url || "#")}" target="_blank" rel="noopener" style="color:inherit">${esc(r.title || r.branch || "")}</a>
-      <div class="pr-meta"><span>@${esc(r.actor || "?")}</span><span>${esc((r.commit || "").slice(0, 7))}</span></div>
+      <div class="pr-meta"><span>@${esc(r.actor || "?")}</span><a class="commit-link" href="${commitUrl(r.commit)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc((r.commit || "").slice(0, 7))}</a></div>
       ${perf}<div class="chips">${chips}</div></div>`;
   }).join("");
 }
@@ -523,6 +576,30 @@ function wire() {
   $("#kernelList").addEventListener("click", e => { const b = e.target.closest(".kitem"); if (b) selectKernel(b.dataset.k); });
   $("#metricSel").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.metric = b.dataset.m; selectKernel(S.trend.key); });
   $("#trendArch").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.arch = b.dataset.a; selectKernel(S.trend.key); });
+  $("#trendRange").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.range = b.dataset.r; selectKernel(S.trend.key); });
+  $("#trendXMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.xmode = b.dataset.x; selectKernel(S.trend.key); });
+  $("#themeBtn").addEventListener("click", toggleTheme);
+}
+
+const SUN_SVG = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="10" cy="10" r="3.4"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.5 4.5l1.4 1.4M14.1 14.1l1.4 1.4M15.5 4.5l-1.4 1.4M5.9 14.1l-1.4 1.4"/></svg>`;
+const MOON_SVG = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M16 11.5A6.5 6.5 0 1 1 8.5 4a5 5 0 0 0 7.5 7.5z"/></svg>`;
+function applyTheme(t) {
+  S.theme = t === "light" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", S.theme);
+  const btn = $("#themeBtn");
+  if (btn) { btn.innerHTML = S.theme === "light" ? MOON_SVG : SUN_SVG; btn.title = `Switch to ${S.theme === "light" ? "dark" : "light"} mode`; }
+}
+function toggleTheme() {
+  applyTheme(S.theme === "light" ? "dark" : "light");
+  try { localStorage.setItem("flydsl-theme", S.theme); } catch { /* ignore */ }
+  renderAll();                         // re-render SVG sparklines with theme colors
+  if (S.trend.key) selectKernel(S.trend.key);   // redraw the canvas chart
+}
+function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem("flydsl-theme"); } catch { /* ignore */ }
+  const prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+  applyTheme(saved || (prefersLight ? "light" : "dark"));
 }
 let refreshing = false;
 async function doRefresh() {
@@ -532,6 +609,7 @@ async function doRefresh() {
 
 window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
 document.addEventListener("DOMContentLoaded", () => {
+  initTheme();
   wire();
   if (VIEWS.includes(location.hash.slice(1))) showView(location.hash.slice(1));
   loadAll();
