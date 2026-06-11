@@ -469,6 +469,7 @@ def _run_mxscale_gemm_test(
     b_streaming=False,
     scale_load_path="tdm",
     a_load_path="tdm",
+    b_split_load=False,
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -512,11 +513,13 @@ def _run_mxscale_gemm_test(
     mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
     tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
     scale_load_str = "" if scale_load_path == "tdm" else f", scale_load={scale_load_path}"
+    a_load_str = "" if a_load_path == "tdm" else f", a_load={a_load_path}"
+    b_split_str = ", b_split_load" if b_split_load else ""
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
         f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-        f"{mcast_str}{tdm_str}{scale_load_str}, preshuffle, out={out_dtype}"
+        f"{mcast_str}{tdm_str}{scale_load_str}{a_load_str}{b_split_str}, preshuffle, out={out_dtype}"
     )
 
     # Generate data
@@ -599,6 +602,7 @@ def _run_mxscale_gemm_test(
         b_streaming=b_streaming,
         scale_load_path=scale_load_path,
         a_load_path=a_load_path,
+        b_split_load=b_split_load,
     )
 
     # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
@@ -910,6 +914,38 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
         out_dtype="bf16",
         l2_prefetch_distance=2,
         use_scale_opsel=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "scale_load_path, a_load_path, b_split_load",
+    [
+        ("tdm", "vgpr", False),
+        ("tdm", "vgpr", True),
+        ("tdm", "tdm", True),
+        ("vgpr", "tdm", False),
+    ],
+)
+def test_a8w4_small_m_load_path_variants(scale_load_path, a_load_path, b_split_load):
+    _run_mxscale_gemm_test(
+        "a8w4",
+        1,
+        256,
+        2048,
+        16,
+        64,
+        512,
+        1,
+        4,
+        num_buffers=4,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        wave_specialized_tdm=True,
+        l2_prefetch_distance=0,
+        use_scale_opsel=False,
+        scale_load_path=scale_load_path,
+        a_load_path=a_load_path,
+        b_split_load=b_split_load,
     )
 
 
@@ -1230,96 +1266,34 @@ def _l2_cache_bytes() -> int:
     return getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "L2_cache_size", 4 * 1024 * 1024)
 
 
-def _rotate_slot_count(working_set_bytes: int, flush_l2: bool, cap: int = 256) -> int:
-    """Number of rotate-buffer copies so the pool exceeds the last-level cache."""
-    if not flush_l2:
-        return 1
-    POOL_TARGET = 1024 * 1024 * 1024
-    target = max(_l2_cache_bytes() * 2, POOL_TARGET)
-    needed = -(-target // max(working_set_bytes, 1))  # ceil-div
+def _make_l2_flush_buffer(flush_l2: bool, flush_mb: int) -> torch.Tensor | None:
+    """Allocate a scratch buffer used only to evict data from L2."""
+    if not flush_l2 or flush_mb <= 0:
+        return None
+    nbytes = int(flush_mb) * 1024 * 1024
+    if nbytes <= 0:
+        return None
+    nelem = max(1, nbytes // torch.empty((), dtype=torch.int32).element_size())
+    cache = torch.empty(nelem, dtype=torch.int32, device="cuda")
+    cache.zero_()
+    torch.cuda.synchronize()
+    return cache
+
+
+def _graph_rotate_slot_count(working_set_bytes: int, target_bytes: int = 0, cap: int = 512) -> int:
+    """Number of graph-captured buffer slots for cold-L2 graph replay."""
+    target = max(_l2_cache_bytes() * 5, int(target_bytes), 1)
+    needed = 1 + math.ceil(target / max(working_set_bytes, 1))
     return max(2, min(needed, cap))
 
 
-def _bench_kernel_us_cudagraph(run_slot, num_slots, warmup=10, iters=100):
-    """Per-launch timer via hipGraph: captures n_per_graph launches, replays them."""
-    n_per_graph = max(num_slots, 20)
-    capture_stream = torch.cuda.Stream()
-    capture_stream.wait_stream(torch.cuda.current_stream())
-
-    with torch.cuda.stream(capture_stream):
-        for i in range(warmup):
-            run_slot(i)
-    torch.cuda.current_stream().wait_stream(capture_stream)
-    torch.cuda.synchronize()
-
-    g = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(g, stream=capture_stream):
-        for j in range(n_per_graph):
-            run_slot(j)
-    torch.cuda.synchronize()
-
-    # Sanity guard against empty graph capture.
-    ref_start = torch.cuda.Event(enable_timing=True)
-    ref_end = torch.cuda.Event(enable_timing=True)
-    ref_start.record()
-    for j in range(n_per_graph):
-        run_slot(j)
-    ref_end.record()
-    torch.cuda.synchronize()
-    ref_per_launch_us = ref_start.elapsed_time(ref_end) * 1e3 / n_per_graph
-
-    rep_start = torch.cuda.Event(enable_timing=True)
-    rep_end = torch.cuda.Event(enable_timing=True)
-    rep_start.record()
-    g.replay()
-    rep_end.record()
-    torch.cuda.synchronize()
-    first_replay_per_launch_us = rep_start.elapsed_time(rep_end) * 1e3 / n_per_graph
-
-    print(
-        f"SANITY_GRAPH,n_per_graph={n_per_graph},"
-        f"ref_per_launch_us={ref_per_launch_us:.3f},"
-        f"first_replay_per_launch_us={first_replay_per_launch_us:.3f}",
-        file=sys.stderr,
-        flush=True,
-    )
-    if first_replay_per_launch_us < 1.0 and ref_per_launch_us > 2.0:
-        raise RuntimeError(
-            f"hipGraph replay per-launch={first_replay_per_launch_us:.3f}us "
-            f"<< ref direct-launch={ref_per_launch_us:.3f}us. "
-            f"Graph capture likely empty (stream mismatch?)."
-        )
-
-    start_ev = torch.cuda.Event(enable_timing=True)
-    end_ev = torch.cuda.Event(enable_timing=True)
-    start_ev.record()
-    for _ in range(iters):
-        g.replay()
-    end_ev.record()
-    torch.cuda.synchronize()
-    return start_ev.elapsed_time(end_ev) * 1e3 / (iters * n_per_graph)
+def _flush_l2_cache(cache: torch.Tensor | None):
+    if cache is not None:
+        cache.zero_()
 
 
-def _bench_kernel_us(run_slot, num_slots, warmup=10, iters=50):
-    """Per-iter CUDA-event timer with rotating buffers (cold L2) + IQR-trimmed median."""
-    del num_slots  # rotation is handled inside run_slot; kept for call-site symmetry
-
-    for i in range(warmup):
-        run_slot(i)
-    torch.cuda.synchronize()
-
-    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
-
-    for i in range(iters):
-        start_ev[i].record()
-        run_slot(i)
-        end_ev[i].record()
-
-    torch.cuda.synchronize()
-
-    latencies = sorted(start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters))
-
+def _iqr_trimmed_median_us(latencies_us: list[float]) -> float:
+    latencies = sorted(latencies_us)
     n = len(latencies)
     if n >= 8:
         q1, q3 = latencies[n // 4], latencies[3 * n // 4]
@@ -1328,8 +1302,143 @@ def _bench_kernel_us(run_slot, num_slots, warmup=10, iters=50):
         filtered = [x for x in latencies if lo <= x <= hi]
         if filtered:
             latencies = filtered
-
     return latencies[len(latencies) // 2]
+
+
+def _bench_kernel_us_cudagraph(
+    run_slot,
+    num_slots=1,
+    warmup=10,
+    iters=100,
+    n_per_graph=20,
+    post_run_slot=None,
+):
+    """Per-launch timer via hipGraph."""
+    cold_rotate = num_slots > 1
+    n_per_graph = num_slots if cold_rotate else (1 if post_run_slot is not None else max(1, n_per_graph))
+    capture_stream = torch.cuda.Stream()
+    capture_stream.wait_stream(torch.cuda.current_stream())
+
+    def post_run_all_slots():
+        if post_run_slot is not None:
+            for slot in range(num_slots):
+                post_run_slot(slot)
+
+    def run_direct_graph_body():
+        if cold_rotate:
+            for slot in range(num_slots):
+                run_slot(slot)
+        else:
+            for _ in range(n_per_graph):
+                run_slot(0)
+
+    pre_capture_warmup = max(warmup, num_slots if cold_rotate else warmup)
+    with torch.cuda.stream(capture_stream):
+        post_run_all_slots()
+        for i in range(pre_capture_warmup):
+            slot = i % num_slots
+            run_slot(slot)
+            if post_run_slot is not None:
+                post_run_slot(slot)
+    torch.cuda.current_stream().wait_stream(capture_stream)
+    torch.cuda.synchronize()
+
+    graphs = []
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.stream(capture_stream):
+        with torch.cuda.graph(g, stream=capture_stream):
+            run_direct_graph_body()
+    graphs.append(g)
+    torch.cuda.synchronize()
+
+    def replay_graph_body():
+        graphs[0].replay()
+
+    ref_start = torch.cuda.Event(enable_timing=True)
+    ref_end = torch.cuda.Event(enable_timing=True)
+    with torch.cuda.stream(capture_stream):
+        run_direct_graph_body()
+        post_run_all_slots()
+        ref_start.record()
+        run_direct_graph_body()
+        ref_end.record()
+        post_run_all_slots()
+    torch.cuda.synchronize()
+    ref_per_launch_us = ref_start.elapsed_time(ref_end) * 1e3 / n_per_graph
+
+    rep_start = torch.cuda.Event(enable_timing=True)
+    rep_end = torch.cuda.Event(enable_timing=True)
+    with torch.cuda.stream(capture_stream):
+        replay_graph_body()
+        post_run_all_slots()
+        rep_start.record()
+        replay_graph_body()
+        rep_end.record()
+        post_run_all_slots()
+    torch.cuda.synchronize()
+    first_replay_per_launch_us = rep_start.elapsed_time(rep_end) * 1e3 / n_per_graph
+
+    print(
+        f"SANITY_GRAPH,n_per_graph={n_per_graph},"
+        f"ref_per_launch_us={ref_per_launch_us:.3f},"
+        f"first_replay_per_launch_us={first_replay_per_launch_us:.3f},"
+        f"cold_rotate_slots={num_slots if cold_rotate else 0}",
+        file=sys.stderr,
+        flush=True,
+    )
+    if first_replay_per_launch_us < 1.0 and ref_per_launch_us > 2.0:
+        raise RuntimeError(
+            f"hipGraph replay per-launch={first_replay_per_launch_us:.3f}us "
+            f"<< ref direct-launch={ref_per_launch_us:.3f}us. "
+            f"Graph capture likely empty (stream mismatch?)."
+    )
+
+    # Stabilize graph replay before collecting samples.
+    with torch.cuda.stream(capture_stream):
+        replay_graph_body()
+        post_run_all_slots()
+    torch.cuda.synchronize()
+
+    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    with torch.cuda.stream(capture_stream):
+        for i in range(iters):
+            start_ev[i].record()
+            replay_graph_body()
+            end_ev[i].record()
+            post_run_all_slots()
+    torch.cuda.synchronize()
+
+    latencies_us = [start_ev[i].elapsed_time(end_ev[i]) * 1e3 / n_per_graph for i in range(iters)]
+    return _iqr_trimmed_median_us(latencies_us)
+
+
+def _bench_kernel_us(run_once, flush_cache=None, warmup=10, iters=50, post_run=None):
+    """Per-iter CUDA-event timer with optional pre-launch L2 flush + IQR-trimmed median."""
+    if post_run is not None:
+        post_run()
+    for _ in range(warmup):
+        _flush_l2_cache(flush_cache)
+        run_once()
+        if post_run is not None:
+            post_run()
+    torch.cuda.synchronize()
+
+    start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+    end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
+
+    for i in range(iters):
+        _flush_l2_cache(flush_cache)
+        start_ev[i].record()
+        run_once()
+        end_ev[i].record()
+        if post_run is not None:
+            post_run()
+
+    torch.cuda.synchronize()
+
+    latencies_us = [start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters)]
+    return _iqr_trimmed_median_us(latencies_us)
 
 
 def reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K):
@@ -1841,16 +1950,26 @@ def _run_benchmark(args):
     print(
         f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
         f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}, "
-        f"scale_load={args.scale_load_path}, a_load={args.a_load_path}"
+        f"scale_load={args.scale_load_path}, a_load={args.a_load_path}, "
+        f"b_split_load={args.b_split_load}"
     )
+    if args.warmup < 0:
+        raise ValueError(f"--warmup must be >= 0, got {args.warmup}")
+    if args.iters <= 0:
+        raise ValueError(f"--iters must be > 0, got {args.iters}")
+    if args.l2_flush_mb < 0:
+        raise ValueError(f"--l2-flush-mb must be >= 0, got {args.l2_flush_mb}")
     if args.split_k > 1:
         print(f"  Split-K={args.split_k} (atomic accumulate, buffer-store epilogue)")
+        print("  Split-K timing excludes the required C reset from the reported kernel time")
     if args.no_flush_l2:
         l2_flush_label = "OFF (hot L2, --no-flush-l2)"
+    elif args.l2_flush_mb == 0:
+        l2_flush_label = "OFF (hot L2, --l2-flush-mb=0)"
     elif getattr(args, "use_graph", False):
-        l2_flush_label = "OFF (graph replay is warm/L2-resident; use eager for cold HBM)"
+        l2_flush_label = "ON (graph rotating buffers; compare against --no-flush-l2)"
     else:
-        l2_flush_label = "ON (rotate buffers, cold HBM)"
+        l2_flush_label = f"ON ({args.l2_flush_mb} MiB scratch clear before timed launches)"
     print(f"  Warmup={args.warmup}, Iters={args.iters}, L2 defeat={l2_flush_label}")
     if is_ptpc:
         # compile_ptpc_gemm forces these internally; flag the ones the user set off-default.
@@ -1865,6 +1984,8 @@ def _run_benchmark(args):
             _ptpc_ignored.append(f"--scale-load-path {args.scale_load_path}")
         if args.b_streaming:
             _ptpc_ignored.append("--b-streaming")
+        if args.b_split_load:
+            _ptpc_ignored.append("--b-split-load")
         if _ptpc_ignored:
             print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
@@ -1991,6 +2112,7 @@ def _run_benchmark(args):
             b_streaming=args.b_streaming,
             scale_load_path=args.scale_load_path,
             a_load_path=args.a_load_path,
+            b_split_load=args.b_split_load,
         )
 
     compiled_exe = flyc.compile(
@@ -2027,43 +2149,111 @@ def _run_benchmark(args):
     compile_ms = (time.perf_counter() - t0) * 1e3
     print(f"      Compile + first launch: {compile_ms:.0f} ms")
 
-    flush_l2 = not args.no_flush_l2
-    working_set = sum(t.numel() * t.element_size() for t in (a_gpu, b_gpu, as_gpu, bs_gpu, c_gpu))
-    num_slots = _rotate_slot_count(working_set, flush_l2)
-    a_pool = [a_gpu] + [a_gpu.clone() for _ in range(num_slots - 1)]
-    b_pool = [b_gpu] + [b_gpu.clone() for _ in range(num_slots - 1)]
-    as_pool = [as_gpu] + [as_gpu.clone() for _ in range(num_slots - 1)]
-    bs_pool = [bs_gpu] + [bs_gpu.clone() for _ in range(num_slots - 1)]
-    c_pool = [c_gpu] + [torch.zeros_like(c_gpu) for _ in range(num_slots - 1)]
-    print(
-        f"      Rotate buffers: {num_slots} slot(s), pool={working_set * num_slots / 1e6:.1f} MB "
-        f"(working set {working_set / 1e6:.1f} MB)" + ("  [HOT L2: --no-flush-l2]" if num_slots == 1 else "")
-    )
-
-    def run_slot(i):
-        s = i % num_slots
-        run_one(c_pool[s], a_pool[s], b_pool[s], as_pool[s], bs_pool[s])
-
     use_graph = getattr(args, "use_graph", False)
+    flush_l2 = not args.no_flush_l2 and args.l2_flush_mb > 0
+    working_set = sum(t.numel() * t.element_size() for t in (a_gpu, b_gpu, as_gpu, bs_gpu, c_gpu))
+    flush_cache = None if use_graph else _make_l2_flush_buffer(flush_l2, args.l2_flush_mb)
+    graph_num_slots = 1
+    if use_graph and flush_l2:
+        graph_rotate_target = max(_l2_cache_bytes() * 5, int(args.l2_flush_mb) * 1024 * 1024)
+        graph_num_slots = _graph_rotate_slot_count(working_set, graph_rotate_target)
+        graph_eviction_bytes = max(0, graph_num_slots - 1) * working_set
+        cap_note = (
+            "  [WARNING: capped below target]"
+            if graph_eviction_bytes < graph_rotate_target
+            else ""
+        )
+        print(
+            f"      L2 defeat: graph rotating buffers, slots={graph_num_slots}, "
+            f"pool={working_set * graph_num_slots / 1e6:.1f} MB "
+            f"(evict distance={graph_eviction_bytes / 1e6:.1f} MB, "
+            f"target={graph_rotate_target / 1e6:.1f} MB, "
+            f"reported L2={_l2_cache_bytes() / 1e6:.1f} MB, "
+            f"working set {working_set / 1e6:.1f} MB){cap_note}"
+        )
+    elif flush_cache is None:
+        print(f"      L2 defeat: OFF (hot-cache timing), working set {working_set / 1e6:.1f} MB")
+    else:
+        print(
+            f"      L2 defeat: ON, scratch={flush_cache.numel() * flush_cache.element_size() / 1e6:.1f} MB "
+            f"(reported L2={_l2_cache_bytes() / 1e6:.1f} MB, working set {working_set / 1e6:.1f} MB)"
+        )
+
+    clear_output_each_run = args.split_k > 1
+
+    def run_bench_once():
+        run_one(c_gpu, a_gpu, b_gpu, as_gpu, bs_gpu)
+
+    def reset_bench_output():
+        c_gpu.zero_()
+
     if use_graph:
-        if not args.no_flush_l2:
-            print(
-                "      WARNING: hipGraph capture aliases the kernel-param buffer across "
-                "replayed launches, so the rotate buffers above do NOT take effect under "
-                "replay -- this number is WARM (L2-resident). Use eager mode (drop "
-                "--use-graph) for the cold-HBM number."
+        if graph_num_slots == 1:
+            print(f"[2/3] Warming up ({args.warmup} iters) + bench via hot-cache hipGraph ({args.iters} replays)...")
+            us = _bench_kernel_us_cudagraph(
+                lambda _slot: run_bench_once(),
+                num_slots=1,
+                warmup=args.warmup,
+                iters=args.iters,
+                post_run_slot=(lambda _slot: reset_bench_output()) if clear_output_each_run else None,
             )
-        print(f"[2/3] Warming up ({args.warmup} iters) + bench via hipGraph " f"({args.iters} replays)...")
-        us = _bench_kernel_us_cudagraph(run_slot, num_slots, warmup=args.warmup, iters=args.iters)
+        else:
+            a_pool = [a_gpu] + [a_gpu.clone() for _ in range(graph_num_slots - 1)]
+            b_pool = [b_gpu] + [b_gpu.clone() for _ in range(graph_num_slots - 1)]
+            as_pool = [as_gpu] + [as_gpu.clone() for _ in range(graph_num_slots - 1)]
+            bs_pool = [bs_gpu] + [bs_gpu.clone() for _ in range(graph_num_slots - 1)]
+            c_pool = [c_gpu] + [torch.zeros_like(c_gpu) for _ in range(graph_num_slots - 1)]
+
+            def run_graph_slot(slot):
+                s = slot % graph_num_slots
+                run_one(c_pool[s], a_pool[s], b_pool[s], as_pool[s], bs_pool[s])
+
+            def reset_graph_slot(slot):
+                c_pool[slot % graph_num_slots].zero_()
+
+            print(
+                f"[2/3] Warming up ({args.warmup} iters) + bench via rotating-buffer hipGraph "
+                f"({args.iters} replays × {graph_num_slots} launches/replay, "
+                f"rotating graph-captured buffer slots)..."
+            )
+            us = _bench_kernel_us_cudagraph(
+                run_graph_slot,
+                num_slots=graph_num_slots,
+                warmup=args.warmup,
+                iters=args.iters,
+                post_run_slot=reset_graph_slot if clear_output_each_run else None,
+            )
     else:
         print(f"[2/3] Warming up ({args.warmup} iters) + benchmarking ({args.iters} iters)...")
-        us = _bench_kernel_us(run_slot, num_slots, warmup=args.warmup, iters=args.iters)
+        us = _bench_kernel_us(
+            run_bench_once,
+            flush_cache,
+            warmup=args.warmup,
+            iters=args.iters,
+            post_run=reset_bench_output if clear_output_each_run else None,
+        )
+
+    WMMA_K = 128
+    WMMA_N_EFF = 32 if is_fp4 else 16
+    wmma_m_rep = warp_tile_m // 16
+    wmma_n_rep = warp_tile_n // WMMA_N_EFF
+    k_wmma_steps = tile_k // WMMA_K
+    wmma_per_tile = wmma_m_rep * wmma_n_rep * k_wmma_steps
+    m_tiles = (padded_m + tile_m - 1) // tile_m
+    n_tiles = (padded_n + tile_n - 1) // tile_n
+    k_tiles = padded_k // tile_k
+    k_tiles_local = (padded_k // args.split_k) // tile_k
+    # Sequential WMMAs per workgroup (all k_tiles execute sequentially)
+    seq_wmma = k_tiles_local * wmma_per_tile
+    us_per_wmma = us / seq_wmma if seq_wmma > 0 else 0
 
     logical_flops = 2.0 * M * N * K
-    kernel_flops = 2.0 * padded_m * padded_n * padded_k
+    tile_m_covered = m_tiles * tile_m
+    tile_n_covered = n_tiles * tile_n
+    tile_flops = 2.0 * tile_m_covered * tile_n_covered * padded_k
     time_s = us / 1e6
     logical_tflops = logical_flops / time_s / 1e12 if time_s > 0 else 0.0
-    kernel_tflops = kernel_flops / time_s / 1e12 if time_s > 0 else 0.0
+    tile_tflops = tile_flops / time_s / 1e12 if time_s > 0 else 0.0
 
     bytes_a = padded_m * padded_k // PACK_A
     bytes_b = padded_n * padded_k // PACK_B
@@ -2076,26 +2266,12 @@ def _run_benchmark(args):
     read_bw_gbs = read_bytes / 1e9 / time_s if time_s > 0 else 0.0
     write_bw_gbs = write_bytes / 1e9 / time_s if time_s > 0 else 0.0
 
-    WMMA_K = 128
-    WMMA_N_EFF = 32 if is_fp4 else 16
-    wmma_m_rep = warp_tile_m // 16
-    wmma_n_rep = warp_tile_n // WMMA_N_EFF
-    k_wmma_steps = tile_k // WMMA_K
-    wmma_per_tile = wmma_m_rep * wmma_n_rep * k_wmma_steps
-    m_tiles = padded_m // tile_m
-    n_tiles = padded_n // tile_n
-    k_tiles = padded_k // tile_k
-    k_tiles_local = (padded_k // args.split_k) // tile_k
-    # Sequential WMMAs per workgroup (all k_tiles execute sequentially)
-    seq_wmma = k_tiles_local * wmma_per_tile
-    us_per_wmma = us / seq_wmma if seq_wmma > 0 else 0
-
     print("\n[3/3] Results:")
     print(f"      Kernel time:  {us:.1f} us ({us / 1e3:.4f} ms)")
-    if not needs_pad:
-        print(f"      TFLOPS:       {kernel_tflops:.4f}")
+    if tile_flops == logical_flops:
+        print(f"      TFLOPS:       {logical_tflops:.4f}")
     else:
-        print(f"      TFLOPS:       {logical_tflops:.4f} (logical), {kernel_tflops:.4f} (kernel)")
+        print(f"      TFLOPS:       {logical_tflops:.4f} (logical), {tile_tflops:.4f} (tile-covered)")
     print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  " f"(read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
     print(
         f"      Bytes moved:  {bytes_moved / 1e6:.1f} MB  "
@@ -2117,8 +2293,7 @@ def _run_benchmark(args):
         print(f"      WARNING: {us_per_wmma/1000:.1f} ms/WMMA indicates " f"WMMA_SCALE trap-handler emulation")
     print("=" * 72)
 
-    reported_tflops = kernel_tflops if not needs_pad else logical_tflops
-    return us, reported_tflops, bw_gbs
+    return us, logical_tflops, bw_gbs
 
 
 def _run_graph_verify(args):
@@ -2209,6 +2384,7 @@ def _run_graph_verify(args):
         b_streaming=args.b_streaming,
         scale_load_path=args.scale_load_path,
         a_load_path=args.a_load_path,
+        b_split_load=args.b_split_load,
     )
 
     c_flat = c_gpu.contiguous()
@@ -2335,6 +2511,14 @@ if __name__ == "__main__":
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument("--b-streaming", action="store_true", default=False)
     parser.add_argument(
+        "--b-split-load",
+        action="store_true",
+        default=False,
+        help="Split the B TDM load by N groups. With --a-load-path vgpr this reuses "
+        "wave0 for B half 0; with TDM A/scale it uses wave0=A, wave1/2=B halves, "
+        "wave3=A_scale+B_scale.",
+    )
+    parser.add_argument(
         "--atomic-barrier-enable",
         action="store_true",
         default=False,
@@ -2350,17 +2534,24 @@ if __name__ == "__main__":
         "--no-flush-l2",
         action="store_true",
         default=False,
-        help="Disable the rotate-buffer L2 defeat (use a single hot buffer) for a "
-        "warm-cache measurement. Applies to both eager and --use-graph modes.",
+        help="Disable L2 defeat for a hot-cache measurement. Applies to both eager "
+        "and --use-graph modes.",
+    )
+    parser.add_argument(
+        "--l2-flush-mb",
+        type=int,
+        default=256,
+        help="Scratch buffer size in MiB for eager cold-cache timing, and the "
+        "minimum address-rotation target for --use-graph rotating-buffer timing.",
     )
     parser.add_argument(
         "--use-graph",
         action="store_true",
         default=False,
         help="Time via hipGraph capture+replay to strip host launch overhead from "
-        "per-launch latency. NOTE: graph replay measures the WARM (L2-resident) "
-        "regime -- rotate buffers do not survive hipGraph capture, so use the eager "
-        "path (drop --use-graph) for the cold-HBM number.",
+        "per-launch latency. By default this captures a rotating-buffer graph to "
+        "avoid replaying the same tensor addresses; compare with --no-flush-l2 to "
+        "separate address-reuse/cache effects from launch overhead.",
     )
     parser.add_argument(
         "--verify-graph",
@@ -2432,4 +2623,5 @@ if __name__ == "__main__":
             b_streaming=args.b_streaming,
             scale_load_path=args.scale_load_path,
             a_load_path=args.a_load_path,
+            b_split_load=args.b_split_load,
         )
