@@ -737,6 +737,12 @@ std::pair<IntTuple, IntTuple> compositionImpl(const IntTupleBuilder<IntTuple> &b
     if (newShape.isStatic() && restShape.isStatic()) {
       int64_t restShapeVal = builder.getStaticValue(restShape);
       int64_t newShapeVal = builder.getStaticValue(newShape);
+      // A 0-extent mode here means the divisor does not tile the layout (e.g. an
+      // overlapping divisor whose complement is ill-formed). Reject it with a
+      // named assert rather than divide by zero (% below would SIGFPE).
+      assert(newShapeVal != 0 &&
+             "composition: divisor is not a tiling layout (a complement mode has 0 "
+             "extent); its strides must be ordered and divisible");
       assert(restShapeVal % newShapeVal == 0);
     }
 
