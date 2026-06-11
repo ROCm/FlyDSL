@@ -12,7 +12,7 @@ const CFG = {
   regressionPct: -3.0,   // fixed gate
   warnPct: -1.0,         // surfaced as "watch"
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
-  minSamples: 4,         // need at least this many main runs to trust a noise estimate
+  minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
   archOrder: ["gfx950", "gfx942", "gfx1201"],
   archColor: { gfx950: "#4aa8ff", gfx942: "#b389e6", gfx1201: "#e0934a" },
 };
@@ -79,10 +79,15 @@ async function enhanceLiveBoard() {
   if (!live || !live.workflow_runs) return;
   const wf = live.workflow_runs.filter(r => /fly\s*dsl\s*test/i.test(r.name || ""));
   const byId = new Map(S.runs.map(r => [r.run_id, r]));
+  // The live API often returns pull_requests:[] for fork PRs; reuse the PR the ingest
+  // snapshot already resolved for this head branch so new runs aren't shown as branch cards.
+  const branchToPr = new Map();
+  for (const r of S.runs) if (r.pr && r.branch) branchToPr.set(r.branch, r.pr);
   for (const r of wf) {
     const cur = byId.get(r.id);
+    const pr = r.pull_requests?.[0]?.number ?? cur?.pr ?? branchToPr.get(r.head_branch) ?? null;
     byId.set(r.id, {
-      run_id: r.id, pr: r.pull_requests?.[0]?.number ?? cur?.pr ?? null, commit: r.head_sha,
+      run_id: r.id, pr, commit: r.head_sha,
       branch: r.head_branch, event: r.event, title: r.display_title, status: r.status, conclusion: r.conclusion,
       url: r.html_url, created_at: r.created_at, updated_at: r.updated_at, actor: r.actor?.login, jobs: cur?.jobs || [],
     });
@@ -128,6 +133,37 @@ function realRegression(deltaPct, noise) {
 }
 function sev(deltaPct, real) { return real ? "bad" : deltaPct <= CFG.warnPct ? "warn" : deltaPct > 0 ? "ok" : "flat"; }
 
+// Baseline noise for "did main regress?": the main history EXCLUDING the latest main run.
+// On push-to-main, flydsl.yaml rebuilds origin/main in the same job, so a main run's own
+// vs_main is current-vs-itself (re-run variance) — useless as a historical signal. We instead
+// compare the latest main value against prior main runs.
+function mainBaseline(op, shape, dtype, arch, metric) {
+  const series = mainSeries(op, shape, dtype, arch, metric);
+  if (!series.length) return noiseOf([]);
+  const latestRun = series[series.length - 1].run_id;
+  return noiseOf(series.filter(s => s.run_id !== latestRun).map(s => s.value));
+}
+// Δ% and whether it is a real regression, given a prior-main baseline.
+//  - main run:  value vs the prior-main mean (a true historical comparison)
+//  - PR run:    vs_main is a real PR-commit-vs-main-commit diff, so use it directly
+function regOf(r, base) {
+  if (!r || r.value == null || r.metric === "speedup") return { d: null, real: false };
+  if (isMainRec(r)) {
+    if (base.mean == null) return { d: null, real: false, lowConf: true };
+    const d = (r.value - base.mean) / base.mean * 100;
+    const haveBand = base.n >= CFG.minSamples && base.relStd != null;
+    // confident only when enough prior history sizes the band; otherwise it's a
+    // raw-gate guess that can't be told apart from run-to-run noise.
+    const real = S.noiseAware
+      ? (haveBand && d <= -Math.max(Math.abs(CFG.regressionPct), CFG.noiseK * base.relStd))
+      : d <= CFG.regressionPct;
+    return { d, real, lowConf: !haveBand };
+  }
+  // PR run: vs_main is a real PR-commit-vs-main-commit diff in the same job — valid as-is.
+  if (!r.vs_main) return { d: null, real: false };
+  return { d: r.vs_main.delta_pct, real: realRegression(r.vs_main.delta_pct, base) };
+}
+
 let _sparkN = 0;
 function sparkline(values, noise, lastReal) {
   const W = 128, H = 34, pad = 4;
@@ -156,29 +192,33 @@ function sparkline(values, noise, lastReal) {
     `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="2.8" fill="${col}"/></svg>`;
 }
 
-/* latest record per (kernel,arch) over main runs, with vs_main */
+/* latest main-run record per (kernel,arch) */
 function latestMainByKernelArch() {
   const m = new Map();
   for (const r of S.records) {
-    if (r.source !== "ci" || r.metric === "speedup" || !r.vs_main || r.value == null || !isMainRec(r)) continue;
+    if (r.source !== "ci" || r.metric === "speedup" || r.value == null || !isMainRec(r)) continue;
     const k = `${r.arch}|${kkey(r)}`; const ex = m.get(k);
     if (!ex || (r.ts || "") > (ex.ts || "")) m.set(k, r);
   }
   return m;
 }
 
+/* one row per latest-main kernel/arch: latest value vs PRIOR main history */
+function healthRows() {
+  return [...latestMainByKernelArch().values()].map(r => {
+    const noise = mainBaseline(r.op, r.shape, r.dtype, r.arch, r.metric);
+    const vals = mainSeries(r.op, r.shape, r.dtype, r.arch, r.metric).map(s => s.value);
+    const { d, real } = regOf(r, noise);
+    return { r, vals, noise, d, real, sev: d == null ? "flat" : sev(d, real) };
+  });
+}
+
 /* ----------------------------------------------------------- 1 · HEALTH --- */
 function renderHealth() {
-  const latest = [...latestMainByKernelArch().values()];
-  const rows = latest.map(r => {
-    const series = mainSeries(r.op, r.shape, r.dtype, r.arch, r.metric);
-    const vals = series.map(s => s.value);
-    const noise = noiseOf(vals);
-    const real = realRegression(r.vs_main.delta_pct, noise);
-    return { r, vals, noise, real, d: r.vs_main.delta_pct, sev: sev(r.vs_main.delta_pct, real) };
-  });
+  const rows = healthRows();
   const reals = rows.filter(x => x.real);
-  const watch = rows.filter(x => !x.real && x.d <= CFG.warnPct);
+  // "watch" = dropped past the gate but not confident (thin main history can't size the noise band)
+  const watch = rows.filter(x => !x.real && x.d != null && x.d <= CFG.regressionPct);
   const list = [...reals, ...watch].sort((a, b) => a.d - b.d);
 
   // hero
@@ -189,18 +229,18 @@ function renderHealth() {
   const glyph = n
     ? `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l6 11H2z"/><path d="M8 6.4v3.2M8 11.5v.01"/></svg>`
     : `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 5"/></svg>`;
-  $("#heroLabel").innerHTML = glyph + (n ? `kernel regression${n > 1 ? "s" : ""} on main` : "main is clean");
-  const lastRun = latest.reduce((a, r) => (r.ts || "") > a ? r.ts : a, "");
-  const label = (latest.find(r => r.vs_main.label) || {}).vs_main?.label || "main";
+  $("#heroLabel").innerHTML = glyph + (n ? `confirmed regression${n > 1 ? "s" : ""} on main` : watch.length ? "no confirmed regressions" : "main is clean");
+  const lastRun = rows.reduce((a, x) => (x.r.ts || "") > a ? x.r.ts : a, "");
   $("#heroNote").innerHTML =
-    `gate <b>${CFG.regressionPct}%</b>${S.noiseAware ? ` or <b>${CFG.noiseK}×</b> run-to-run noise` : ""} · baseline <b>${esc(label)}</b>`;
+    `latest main vs <b>prior main history</b> · confirmed = below the ${CFG.noiseK}σ noise band ` +
+    `(needs ≥${CFG.minSamples} prior main runs)`;
   $("#heroStats").innerHTML =
-    `<div class="stat"><span class="v">${latest.length}</span><span class="l">kernel × arch</span></div>` +
-    `<div class="stat warn"><span class="v">${watch.length}</span><span class="l">within noise</span></div>` +
-    `<div class="stat"><span class="v">${new Set(latest.map(r => r.arch)).size}</span><span class="l">arches</span></div>` +
+    `<div class="stat"><span class="v">${rows.length}</span><span class="l">kernel × arch</span></div>` +
+    `<div class="stat warn"><span class="v">${watch.length}</span><span class="l">to check</span></div>` +
+    `<div class="stat"><span class="v">${new Set(rows.map(x => x.r.arch)).size}</span><span class="l">arches</span></div>` +
     `<div class="stat"><span class="v" style="font-size:15px">${relTime(lastRun)}</span><span class="l">last run</span></div>`;
   const badge = $("#healthBadge"); badge.hidden = false; badge.textContent = n; badge.classList.toggle("zero", n === 0);
-  $("#regHeadTitle").textContent = list.length ? `${reals.length} regressed · ${watch.length} watch` : "Regressions on main";
+  $("#regHeadTitle").textContent = list.length ? `${reals.length} confirmed · ${watch.length} to check` : "Regressions on main";
 
   // list
   if (!list.length) {
@@ -254,9 +294,8 @@ function renderPRCheck() {
   const latestRun = recs.reduce((a, r) => (r.ts || "") > (a.ts || "") ? r : a, { ts: "" }).run_id;
   const cur = recs.filter(r => r.run_id === latestRun);
   const rows = cur.map(r => {
-    const noise = noiseOf(mainSeries(r.op, r.shape, r.dtype, r.arch, r.metric).map(s => s.value));
-    const real = realRegression(r.vs_main.delta_pct, noise);
-    return { r, real, d: r.vs_main.delta_pct, sev: sev(r.vs_main.delta_pct, real) };
+    const { d, real } = regOf(r, mainBaseline(r.op, r.shape, r.dtype, r.arch, r.metric));
+    return { r, real, d, sev: sev(d, real) };
   }).sort((a, b) => a.d - b.d);
   const nbad = rows.filter(x => x.real).length;
   const nwatch = rows.filter(x => !x.real && x.d <= CFG.warnPct).length;
@@ -277,14 +316,15 @@ function renderPRCheck() {
 
 /* ------------------------------------------------------------ 3 · TRENDS --- */
 function kernelIndex() {
+  const regKeys = new Set(healthRows().filter(x => x.real).map(x => kkey(x.r)));
   const m = new Map();
   for (const r of S.records) {
     if (r.source !== "ci" || r.value == null) continue;
     const k = kkey(r);
     if (!m.has(k)) m.set(k, { op: r.op, shape: r.shape, dtype: r.dtype, metrics: new Set(), reg: false });
-    const e = m.get(k); e.metrics.add(r.metric);
-    if (r.regression && isMainRec(r)) e.reg = true;
+    m.get(k).metrics.add(r.metric);
   }
+  for (const [k, e] of m) e.reg = regKeys.has(k);
   return m;
 }
 function renderKernelRail() {
@@ -326,25 +366,25 @@ function drawTrend(e) {
   const datasets = [];
   let note = "";
   if (single) {
-    const noise = noiseOf(mainSeries(op, shape, dtype, S.trend.arch, metric).map(s => s.value));
+    const noise = mainBaseline(op, shape, dtype, S.trend.arch, metric);
     if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
       datasets.push({ label: "+2σ", data: labels.map(() => noise.hi), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: "rgba(150,162,178,.13)", order: 20 });
       datasets.push({ label: "-2σ", data: labels.map(() => noise.lo), borderColor: "transparent", pointRadius: 0, fill: false, order: 20 });
       datasets.push({ label: "main mean", data: labels.map(() => noise.mean), borderColor: "#626c79", borderDash: [4, 4], borderWidth: 1, pointRadius: 0, order: 19 });
-      note = `noise band = main mean ${fmtVal(noise.mean, metric)} ± ${CFG.noiseK}σ (σ≈<b>${noise.relStd.toFixed(1)}%</b>, n=${noise.n}). Points below the band are real regressions.`;
+      note = `band = prior-main mean ${fmtVal(noise.mean, metric)} ± ${CFG.noiseK}σ (σ≈<b>${noise.relStd.toFixed(1)}%</b>, n=${noise.n}). A main point below the band, or a PR below its main baseline, is a real regression.`;
     } else {
-      note = `n=${noise.n} main runs — too few for a noise band; using the fixed <b>${CFG.regressionPct}%</b> gate.`;
+      note = `n=${noise.n} prior main runs — too few for a noise band; using the fixed <b>${CFG.regressionPct}%</b> gate.`;
     }
   } else {
-    note = `one line per arch. Red points = drop beyond the kernel’s run-to-run noise on main (or the ${CFG.regressionPct}% gate).`;
+    note = `one line per arch. Red = a main run below its prior-main noise band, or a PR run slower than main (beyond the ${CFG.regressionPct}% gate).`;
   }
   for (const arch of archs) {
-    const noise = noiseOf(mainSeries(op, shape, dtype, arch, metric).map(s => s.value));
+    const noise = mainBaseline(op, shape, dtype, arch, metric);
     const data = runIds.map(ri => { const r = recs.find(x => x.run_id === ri.id && x.arch === arch); return r ? r.value : null; });
     if (data.every(v => v == null)) continue;
     const ptColor = runIds.map(ri => {
       const r = recs.find(x => x.run_id === ri.id && x.arch === arch);
-      return (r && r.vs_main && realRegression(r.vs_main.delta_pct, noise)) ? "#f0616d" : CFG.archColor[arch];
+      return (r && regOf(r, noise).real) ? "#f65f6c" : CFG.archColor[arch];
     });
     datasets.push({
       label: arch, data, borderColor: CFG.archColor[arch], backgroundColor: CFG.archColor[arch] + "14",
@@ -387,7 +427,7 @@ function drawTrend(e) {
         || S.records.find(x => x.run_id === ri.id && x.arch === arch && x.op === op && x.shape === shape && x.dtype === dtype);
       if (!r) return `<td class="num st-na">—</td>`;
       if (r.value == null) return `<td class="num cell-status ${r.status === "skip" ? "st-skip" : "st-missing"}">${r.status}</td>`;
-      const real = r.vs_main && realRegression(r.vs_main.delta_pct, noiseOf(mainSeries(op, shape, dtype, arch, metric).map(s => s.value)));
+      const real = regOf(r, mainBaseline(op, shape, dtype, arch, metric)).real;
       return `<td class="num" style="color:${real ? "var(--bad)" : CFG.archColor[arch]}">${fmtVal(r.value, metric)}</td>`;
     };
     return `<tr><td>${(ri.commit || "").slice(0, 7)}</td><td class="k-dim">${(ri.ts || "").slice(0, 10)}</td>
@@ -437,11 +477,13 @@ function renderBoard() {
       const link = j?.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener" title="${arch} · ${st}"></a>` : "";
       return `<div class="chip" data-c="${esc(st)}"><span class="arch">${esc(arch)}</span><span class="st">${esc(label)}</span>${link}</div>`;
     }).join("");
-    const wd = worstDeltaForRun(r.run_id);
+    // vs_main is only a real diff for PR runs (a main run rebuilds its own commit as baseline).
+    const wd = r.pr ? worstDeltaForRun(r.run_id) : null;
     const wsev = wd == null ? "none" : wd.worst <= CFG.regressionPct ? "bad" : wd.worst <= CFG.warnPct ? "warn" : "ok";
-    const perf = `<div class="pr-perf"><span class="lab">worst Δ vs main</span>` +
-      (wd == null ? `<span class="worst none">no perf data</span>`
-        : `<span class="worst ${wsev}">${fmtPct(wd.worst)}</span><span class="lab">${esc(wd.kernel)}</span>`) + `</div>`;
+    const perf = `<div class="pr-perf"><span class="lab">${r.pr ? "worst Δ vs main" : "branch"}</span>` +
+      (!r.pr ? `<span class="worst none">${esc(r.branch || "—")} commit</span>`
+        : wd == null ? `<span class="worst none">no perf data</span>`
+          : `<span class="worst ${wsev}">${fmtPct(wd.worst)}</span><span class="lab">${esc(wd.kernel)}</span>`) + `</div>`;
     const who = r.pr ? `#${r.pr}` : esc(r.branch || "—");
     return `<div class="pr-card ${overall}">
       <div class="pr-top"><span class="pr-num">${who}</span><span class="pr-event">${esc(r.event || "")}</span>
