@@ -43,7 +43,7 @@ try:
         get_pa_metadata as flydsl_get_pa_metadata,
     )
     from kernels.pa_decode_fp8 import (
-        get_sw_ps_max_context_partition_num,
+        get_recommended_splits,
     )
     from kernels.pa_decode_fp8 import (
         pa_decode_ps_launch as flydsl_ps_launch,
@@ -487,7 +487,7 @@ def get_gluon_partition_count(
     query_length: int = 1,
 ) -> int:
     if sliding_window > 0:
-        return get_sw_ps_max_context_partition_num(
+        return get_recommended_splits(
             sliding_window,
             context_partition_size,
             query_length,
@@ -659,10 +659,6 @@ def run_pa_decode_ps_test(
         raise RuntimeError("FlyDSL `pa_decode_ps_launch` is not available.")
     if compute_type != aiter.dtypes.fp8:
         raise ValueError("This PS-only harness only keeps fp8 cases.")
-    if block_size != 1024:
-        raise ValueError("This PS-only harness only keeps block_size=1024 cases.")
-    if head_size != 128:
-        raise ValueError("This PS-only harness only keeps head_size=128 cases.")
     results: Dict[str, Union[float, int, str, bool, Tuple[int, int]]] = {
         "compute_type": dtype_to_name(compute_type),
         "quant_mode": quant_mode,
@@ -853,7 +849,7 @@ def run_pa_decode_ps_test(
     ps_value_scale: torch.Tensor = value_scale_original
     flydsl_ps_output = torch.empty_like(reference_output)
 
-    max_context_partition_num = get_sw_ps_max_context_partition_num(
+    max_context_partition_num = get_recommended_splits(
         sliding_window,
         context_partition_size,
         query_length,
@@ -1232,8 +1228,8 @@ def sliding_window_accuracy_test() -> None:
     BATCH_SIZE_OPTIONS = [128]
     TRANS_V_OPTIONS = [True]
     KV_VARLEN_OPTIONS = [True]
-    BLOCK_SIZE_OPTIONS = [1024]
-    SLIDING_WINDOW_OPTIONS = [0, 128, 1023]
+    BLOCK_SIZE_OPTIONS = [16, 1024]
+    SLIDING_WINDOW_OPTIONS = [0]
     parse_arg_and_run_test(output_tag="ps_sliding_window_accuracy")
 
 

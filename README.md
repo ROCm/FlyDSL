@@ -370,7 +370,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **MoE Blockscale** | `test_moe_blockscale.py` | MoE blockscale 2-stage |
 | **MoE Reduce** | `test_moe_reduce.py` | MoE reduce kernel |
 | **PagedAttention** | `test_pa.py` | Paged attention decode (FP8) — *WIP perf tuning* |
-| **FlashAttention** | `test_flash_attn_func.py` | Flash attention — *WIP perf tuning* |
+| **FlashAttention** | `test_flash_attn_fwd.py` | Flash attention — *WIP perf tuning* |
 | **LayerNorm** | `test_layernorm.py` | LayerNorm (layout API) |
 | **RMSNorm** | `test_rmsnorm.py` | RMSNorm (layout API) |
 | **Softmax** | `test_softmax.py` | Softmax (layout API) |

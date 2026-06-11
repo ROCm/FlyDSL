@@ -468,6 +468,17 @@ def bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
         run_fn()
     torch.cuda.synchronize()
 
+    if flush_buf is None and prep_fn is None:
+        # Single event pair preserves back-to-back launch pipelining (returns mean latency).
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(iters):
+            run_fn()
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) * 1e3 / iters
+
     start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
 

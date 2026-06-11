@@ -278,11 +278,11 @@ class TensorAdaptor:
             _shape_size=shape_size,
         ):
             tens = t._tensor_keepalive if isinstance(t, cls) else t
-            mv = memoryview(storage).cast("b")
             if _shape_codec is not None:
-                _shape_codec.pack_into(mv, 0, *(tens.shape[d] for d in _shape_dims))
+                _shape_codec.pack_into(storage, 0, *[tens.shape[d] for d in _shape_dims])
             if _stride_codec is not None:
-                _stride_codec.pack_into(mv, _shape_size, *(tens.stride(d) for d in _stride_dims))
+                st = tens.stride()
+                _stride_codec.pack_into(storage, _shape_size, *[st[d] for d in _stride_dims])
 
         return [
             (ctypes.c_void_p, cls._extract_data_ptr),

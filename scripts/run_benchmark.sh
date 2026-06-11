@@ -69,11 +69,14 @@ LAYERNORM_SHAPES='
 RMSNORM_SHAPES='
 32768,8192,bf16
 '
-# FlashAttention shapes: "batch,seq_len,num_heads,head_dim,dtype,causal"
+# FlashAttention shapes:
+#   preferred: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,causal"
+#   legacy:    "batch,seq_len,num_heads,head_dim,dtype,causal" (num_kv_heads=num_heads)
 DEFAULT_FLASH_ATTN_FUNC_SHAPES='
-32,8192,8,128,bf16,true
-16,8192,16,128,bf16,true
-4,8192,64,128,bf16,true
+32,8192,8,8,128,bf16,true
+16,8192,16,16,128,bf16,true
+4,8192,64,64,128,bf16,true
+4,8192,64,8,128,bf16,true
 '
 FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
@@ -451,11 +454,14 @@ if tbps is None or tflops is None:
         tflops = float(m.group(1))
         tbps = float(m.group(2))
 
-# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s"
+# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s".
+# Use the FIRST match: the base op (softmax/layernorm/rmsnorm) is benchmarked
+# first, so any later "Bandwidth:" lines come from fused/quant variants printed
+# by the same test (e.g. test_layernorm.py also runs fused_add/dynamicquant/
+# smoothquant). Taking the last match reported the slow scalar smoothquant path
+# as "layernorm" (~1.69 vs the real ~5.6 TB/s base).
 if tbps is None:
-    m_bw = None
-    for m_bw in re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt):
-        pass
+    m_bw = next(re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt), None)
     if m_bw:
         tbps = float(m_bw.group(1)) / 1000.0
 
@@ -606,7 +612,14 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
     set -- $shape
     IFS=$oldIFS
-    batch=$1; seq_len=$2; heads=$3; head_dim=$4; dtype=$5; causal=$6
+    batch=$1; seq_len=$2; heads=$3
+    if [ "$#" -ge 7 ]; then
+      kv_heads=$4; head_dim=$5; dtype=$6; causal=$7
+    else
+      # Backward-compatible legacy format:
+      #   batch,seq_len,num_heads,head_dim,dtype,causal
+      kv_heads=$heads; head_dim=$4; dtype=$5; causal=$6
+    fi
     causal_flag="--causal"
     causal_tag="causal"
     case "${causal}" in
@@ -615,11 +628,12 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         causal_tag="nocausal"
         ;;
     esac
-    log="${BENCH_LOG_DIR}/flash_attn_B${batch}_S${seq_len}_H${heads}_D${head_dim}_${dtype}_${causal_tag}.log"
-    if python3 tests/kernels/test_flash_attn_func.py \
+    log="${BENCH_LOG_DIR}/flash_attn_B${batch}_S${seq_len}_H${heads}_Hkv${kv_heads}_D${head_dim}_${dtype}_${causal_tag}.log"
+    if python3 tests/kernels/test_flash_attn_fwd.py \
       --batch "$batch" \
       --seq_len "$seq_len" \
       --num_heads "$heads" \
+      --num_kv_heads "$kv_heads" \
       --head_dim "$head_dim" \
       --dtype "$dtype" \
       "${causal_flag}" \
@@ -631,7 +645,7 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       echo "flash_attn failed. Log: ${log}" >&2
       _show_fail_log "${log}" "flash_attn"
     fi
-    shape_tag="B${batch}S${seq_len}H${heads}D${head_dim}_${causal_tag}"
+    shape_tag="B${batch}S${seq_len}H${heads}Hkv${kv_heads}D${head_dim}_${causal_tag}"
     row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
