@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="scope">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlyDSL · CI Performance Dashboard</title>
+<meta name="description" content="Live CI status, kernel regressions, and performance trends for ROCm/FlyDSL on gfx950 / gfx942 / gfx1201.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23090c12'/%3E%3Cpath d='M6 22 L13 10 L17 17 L21 11 L26 22' fill='none' stroke='%232fe4cf' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div class="scanlines" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+      <rect width="32" height="32" rx="7" fill="#0c1018"/>
+      <path d="M5 23 L12 9 L16.5 18 L21 10 L27 23" fill="none" stroke="var(--signal)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div class="brand-text">
+      <span class="brand-name">FlyDSL</span>
+      <span class="brand-sub">CI&nbsp;·&nbsp;PERFORMANCE</span>
+    </div>
+  </div>
+
+  <div class="arch-legend" id="archLegend" aria-label="GPU architectures">
+    <span class="arch-chip" data-arch="gfx950"><i></i>gfx950<small>MI350X</small></span>
+    <span class="arch-chip" data-arch="gfx942"><i></i>gfx942<small>MI325</small></span>
+    <span class="arch-chip" data-arch="gfx1201"><i></i>gfx1201<small>Navi4</small></span>
+  </div>
+
+  <div class="status-cluster">
+    <span class="live" id="liveDot" title="Live status polled from the GitHub Actions API"><i></i>LIVE</span>
+    <span class="updated" id="updated" title="Timestamp of the loaded data snapshot">syncing…</span>
+    <button class="btn-refresh" id="refresh" title="Reload data (R)">↻</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs" role="tablist">
+  <button class="tab is-active" data-view="board"  role="tab"><span class="key">1</span>CI Board</button>
+  <button class="tab" data-view="regress" role="tab"><span class="key">2</span>Regressions<b class="badge" id="regBadge" hidden>0</b></button>
+  <button class="tab" data-view="trends"  role="tab"><span class="key">3</span>Trends</button>
+  <button class="tab" data-view="local"   role="tab"><span class="key">4</span>Local&nbsp;gfx950</button>
+</nav>
+
+<main id="main">
+  <!-- 1 · CI BOARD -->
+  <section class="view is-active" data-view="board">
+    <div class="view-head">
+      <div class="counts" id="boardCounts"></div>
+      <div class="seg" id="boardFilter" role="group" aria-label="Filter runs">
+        <button data-f="all" class="is-active">All</button>
+        <button data-f="pr">PRs</button>
+        <button data-f="main">main</button>
+        <button data-f="active">Active</button>
+      </div>
+    </div>
+    <div class="board-grid" id="boardGrid"></div>
+  </section>
+
+  <!-- 2 · REGRESSIONS -->
+  <section class="view" data-view="regress">
+    <div class="view-head wrap">
+      <div class="seg" id="baselineSel" role="group" aria-label="Baseline">
+        <button data-b="vs_main" class="is-active">vs main</button>
+        <button data-b="vs_tag">vs tag</button>
+      </div>
+      <div class="seg" id="runnerSel" role="group" aria-label="Runner"></div>
+      <label class="check"><input type="checkbox" id="regOnly" checked> regressions only</label>
+      <input class="search" id="regSearch" type="search" placeholder="filter op / shape / dtype…" spellcheck="false">
+      <span class="spacer"></span>
+      <span class="hint" id="regSummary"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="data" id="regTable">
+        <thead><tr>
+          <th data-sort="op">kernel</th>
+          <th data-sort="shape">shape</th>
+          <th data-sort="dtype">dtype</th>
+          <th data-sort="runner">runner</th>
+          <th data-sort="metric">metric</th>
+          <th data-sort="value" class="num">current</th>
+          <th data-sort="baseline" class="num">baseline</th>
+          <th data-sort="delta" class="num is-sorted">Δ&nbsp;%</th>
+          <th data-sort="ts">run</th>
+        </tr></thead>
+        <tbody id="regBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 3 · TRENDS -->
+  <section class="view" data-view="trends">
+    <div class="trends-layout">
+      <aside class="kernel-rail">
+        <input class="search" id="kernelSearch" type="search" placeholder="find kernel…" spellcheck="false">
+        <div class="kernel-list" id="kernelList"></div>
+      </aside>
+      <div class="trends-main">
+        <div class="view-head wrap">
+          <h2 class="chart-title" id="trendTitle">Select a kernel</h2>
+          <span class="spacer"></span>
+          <div class="seg" id="metricSel" role="group" aria-label="Metric"></div>
+        </div>
+        <div class="chart-frame"><canvas id="trendChart"></canvas></div>
+        <div class="table-wrap small">
+          <table class="data" id="trendTable">
+            <thead><tr><th>commit</th><th>date</th><th class="num">gfx950</th><th class="num">gfx942</th><th class="num">gfx1201</th></tr></thead>
+            <tbody id="trendBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 · LOCAL gfx950 -->
+  <section class="view" data-view="local">
+    <div class="view-head"><div class="counts" id="localCounts"></div></div>
+    <div id="localPane"></div>
+  </section>
+</main>
+
+<footer class="footer">
+  <span id="footSource">data: ROCm/FlyDSL</span>
+  <span class="sep">·</span>
+  <a id="footRepo" href="https://github.com/ROCm/FlyDSL" target="_blank" rel="noopener">github.com/ROCm/FlyDSL</a>
+  <span class="sep">·</span>
+  <span>ingest: <code>ci-dashboard/ingest/ingest.py</code></span>
+  <span class="spacer"></span>
+  <span class="sig">// gfx950 · gfx942 · gfx1201 //</span>
+</footer>
+
+<script src="./vendor/chart.umd.min.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
