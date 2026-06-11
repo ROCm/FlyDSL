@@ -69,7 +69,8 @@ async function loadAll() {
   S.runs = runs.runs || [];
   S.runMeta = new Map(S.runs.map(r => [r.run_id, r]));
   S.updated = hist.updated || runs.updated || null;
-  $("#updated").textContent = S.updated ? `snapshot ${relTime(S.updated)}` : "no data";
+  const up = $("#updated"); up.classList.remove("syncing");
+  up.textContent = S.updated ? `snapshot ${relTime(S.updated)}` : "no data";
   renderAll();
   enhanceLiveBoard();
 }
@@ -127,23 +128,32 @@ function realRegression(deltaPct, noise) {
 }
 function sev(deltaPct, real) { return real ? "bad" : deltaPct <= CFG.warnPct ? "warn" : deltaPct > 0 ? "ok" : "flat"; }
 
+let _sparkN = 0;
 function sparkline(values, noise, lastReal) {
-  const W = 116, H = 30, pad = 3;
+  const W = 128, H = 34, pad = 4;
   if (values.length < 2) return `<svg class="spark" width="${W}" height="${H}"></svg>`;
   const lo = Math.min(...values, noise.lo ?? Infinity), hi = Math.max(...values, noise.hi ?? -Infinity);
   const span = hi - lo || 1;
   const x = i => pad + (i / (values.length - 1)) * (W - 2 * pad);
   const y = v => H - pad - ((v - lo) / span) * (H - 2 * pad);
-  const pts = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const pts = values.map((v, i) => [x(i), y(v)]);
+  const col = lastReal ? "#f65f6c" : "#9aa6b4";
+  const gid = "sg" + (_sparkN++);
+  const line = "M" + pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" L");
+  const area = `M${pts[0][0].toFixed(1)},${(H - pad).toFixed(1)} ` +
+    pts.map(p => `L${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ") +
+    ` L${pts[pts.length - 1][0].toFixed(1)},${(H - pad).toFixed(1)} Z`;
   let band = "";
   if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
     const yh = y(noise.hi), yl = y(noise.lo);
-    band = `<rect x="0" y="${yh.toFixed(1)}" width="${W}" height="${Math.max(1, (yl - yh)).toFixed(1)}" fill="var(--band)"/>`;
+    band = `<rect x="0" y="${yh.toFixed(1)}" width="${W}" height="${Math.max(1, yl - yh).toFixed(1)}" fill="rgba(154,166,180,.14)"/>`;
   }
-  const lx = x(values.length - 1), ly = y(values[values.length - 1]);
-  const dot = `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="2.6" fill="${lastReal ? "var(--bad)" : "var(--ink-2)"}"/>`;
-  return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">${band}` +
-    `<polyline points="${pts}" fill="none" stroke="${lastReal ? "var(--bad)" : "var(--ink-2)"}" stroke-width="1.3"/>${dot}</svg>`;
+  const [lx, ly] = pts[pts.length - 1];
+  return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+    `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0" stop-color="${col}" stop-opacity="0.20"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>` +
+    `${band}<path d="${area}" fill="url(#${gid})"/><path d="${line}" fill="none" stroke="${col}" stroke-width="1.5" stroke-linejoin="round"/>` +
+    `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="2.8" fill="${col}"/></svg>`;
 }
 
 /* latest record per (kernel,arch) over main runs, with vs_main */
@@ -176,7 +186,10 @@ function renderHealth() {
   const n = reals.length;
   card.className = "hero " + (n ? "alert" : "clear");
   $("#heroNum").textContent = n;
-  $("#heroLabel").textContent = n ? `kernel regression${n > 1 ? "s" : ""} on main` : "main is clean";
+  const glyph = n
+    ? `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l6 11H2z"/><path d="M8 6.4v3.2M8 11.5v.01"/></svg>`
+    : `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 5"/></svg>`;
+  $("#heroLabel").innerHTML = glyph + (n ? `kernel regression${n > 1 ? "s" : ""} on main` : "main is clean");
   const lastRun = latest.reduce((a, r) => (r.ts || "") > a ? r.ts : a, "");
   const label = (latest.find(r => r.vs_main.label) || {}).vs_main?.label || "main";
   $("#heroNote").innerHTML =
@@ -191,20 +204,24 @@ function renderHealth() {
 
   // list
   if (!list.length) {
-    $("#regList").innerHTML = `<div class="reg-list-empty"><div class="big">✓ all kernels within budget</div>` +
-      `no kernel on main is slower than the gate or its noise band.</div>`;
+    $("#regList").innerHTML = `<div class="reg-list-empty"><div class="big">` +
+      `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 5"/></svg>` +
+      `all kernels within budget</div>no kernel on main is slower than the gate or its noise band.</div>`;
     return;
   }
-  $("#regList").innerHTML = list.map(({ r, vals, noise, real, d, sev }) => {
+  const maxAbs = Math.max(6, ...list.map(x => Math.abs(x.d)));
+  $("#regList").innerHTML = list.map(({ r, vals, noise, real, d, sev }, i) => {
     const run = S.runMeta.get(r.run_id);
     const sha = (r.commit || "").slice(0, 7);
     const href = `https://github.com/${CFG.repo}/actions/runs/${r.run_id}`;
-    return `<div class="reg-row" data-k="${esc(kkey(r))}" data-arch="${r.arch}">
+    const w = Math.max(4, Math.min(46, Math.abs(d) / maxAbs * 46));
+    const bc = sev === "bad" ? "var(--bad)" : sev === "warn" ? "var(--warn)" : "var(--good)";
+    return `<div class="reg-row s-${sev}" style="--i:${i}" data-k="${esc(kkey(r))}" data-arch="${r.arch}">
       <span class="op">${esc(r.op)} <span class="metric-tag">${r.metric}</span></span>
       <span class="shape">${esc(r.shape)} · ${esc(r.dtype)}</span>
       <span class="reg-arch" style="color:${CFG.archColor[r.arch]}">${esc(r.arch)}</span>
       ${sparkline(vals, noise, real)}
-      <span class="reg-delta ${sev}">${fmtPct(d)}</span>
+      <span class="reg-delta ${sev}"><span class="dbar" style="width:${w}px;background:${bc}"></span>${fmtPct(d)}</span>
       <span class="commit"><a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${run?.branch === "main" ? "main" : "#" + (r.pr ?? "?")}·${sha}</a></span>
     </div>`;
   }).join("");
@@ -330,12 +347,13 @@ function drawTrend(e) {
       return (r && r.vs_main && realRegression(r.vs_main.delta_pct, noise)) ? "#f0616d" : CFG.archColor[arch];
     });
     datasets.push({
-      label: arch, data, borderColor: CFG.archColor[arch], backgroundColor: CFG.archColor[arch] + "20",
+      label: arch, data, borderColor: CFG.archColor[arch], backgroundColor: CFG.archColor[arch] + "14",
       pointBackgroundColor: ptColor, pointBorderColor: ptColor, pointRadius: 3, pointHoverRadius: 5,
-      borderWidth: 2, tension: .2, spanGaps: true, order: 1, fill: false,
+      borderWidth: 2.2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
     });
   }
-  $("#noiseNote").innerHTML = note;
+  $("#noiseNote").innerHTML =
+    `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.3v4M8 5v.01" stroke-linecap="round"/></svg>` + note;
 
   if (trendChart) trendChart.destroy();
   trendChart = new Chart($("#trendChart"), {

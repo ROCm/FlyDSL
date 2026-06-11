@@ -20,7 +20,7 @@
       <path d="M6 26 L14 10 L19 20 L24 11 L30 26" fill="none" stroke="var(--brand)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
     <div class="brand-text">
-      <span class="brand-name">FlyDSL</span>
+      <span class="brand-name">Fly<b>DSL</b></span>
       <span class="brand-sub">CI&nbsp;PERFORMANCE</span>
     </div>
   </div>
@@ -32,16 +32,24 @@
   </div>
 
   <div class="status-cluster">
-    <span class="updated" id="updated">syncing…</span>
+    <span class="updated syncing" id="updated">syncing…</span>
     <button class="btn-refresh" id="refresh" title="Reload data (R)">↻</button>
   </div>
 </header>
 
 <nav class="tabs" id="tabs" role="tablist">
-  <button class="tab is-active" id="tab-health"  data-view="health"  role="tab" aria-selected="true"  aria-controls="panel-health"><span class="key">1</span>Health<b class="badge zero" id="healthBadge" hidden>0</b></button>
-  <button class="tab"           id="tab-prcheck" data-view="prcheck" role="tab" aria-selected="false" aria-controls="panel-prcheck"><span class="key">2</span>PR&nbsp;Check</button>
-  <button class="tab"           id="tab-trends"  data-view="trends"  role="tab" aria-selected="false" aria-controls="panel-trends"><span class="key">3</span>Trends</button>
-  <button class="tab"           id="tab-board"   data-view="board"   role="tab" aria-selected="false" aria-controls="panel-board"><span class="key">4</span>CI&nbsp;Board</button>
+  <button class="tab is-active" id="tab-health"  data-view="health"  role="tab" aria-selected="true"  aria-controls="panel-health">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8h3l1.8-4.5L8.5 13l2-7L12 8h3"/></svg>
+    <span class="key">1</span>Health<b class="badge zero" id="healthBadge" hidden>0</b></button>
+  <button class="tab"           id="tab-prcheck" data-view="prcheck" role="tab" aria-selected="false" aria-controls="panel-prcheck">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="1.8"/><circle cx="4" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><path d="M4 5.8v4.4M12 10.2V9a3 3 0 0 0-3-3H6.5"/></svg>
+    <span class="key">2</span>PR&nbsp;Check</button>
+  <button class="tab"           id="tab-trends"  data-view="trends"  role="tab" aria-selected="false" aria-controls="panel-trends">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 14.5h13M2.5 11l3.5-4 3 2.5 4.5-6"/></svg>
+    <span class="key">3</span>Trends</button>
+  <button class="tab"           id="tab-board"   data-view="board"   role="tab" aria-selected="false" aria-controls="panel-board">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+    <span class="key">4</span>CI&nbsp;Board</button>
 </nav>
 
 <main id="main">
@@ -60,7 +68,7 @@
 
     <div class="panel">
       <div class="panel-head">
-        <span class="t" id="regHeadTitle">Regressions on main</span>
+        <span class="t"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5l6.5 11.5h-13z"/><path d="M8 6.2v3M8 11.2v.01"/></svg><span id="regHeadTitle">Regressions on main</span></span>
         <span class="spacer"></span>
         <label class="check"><input type="checkbox" id="noiseAware" checked> noise-aware gate</label>
       </div>
