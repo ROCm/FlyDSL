@@ -33,11 +33,9 @@ class RocmBackend(BaseBackend):
         """Format {key: value, ...} as 'key=value key2=value2' for MLIR pass options."""
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
-    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
-        chip = self.target.arch
+    def _bin_cli_opts(self, *, compile_hints: dict) -> List[str]:
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
-
         bin_cli_opts = []
         if env.debug.enable_debug_info:
             bin_cli_opts.append("-g")
@@ -45,9 +43,12 @@ class RocmBackend(BaseBackend):
             bin_cli_opts.append(f"--amdgpu-waves-per-eu={waves_per_eu}")
         if maxnreg:
             bin_cli_opts.append(f"--amdgpu-num-vgpr={maxnreg}")
+        return bin_cli_opts
 
-        rocdl_opts = {
-            "O": 2,
+    def _rocdl_opts(self, *, compile_hints: dict, opt_level: int = 2) -> dict:
+        chip = self.target.arch
+        return {
+            "O": opt_level,
             "abi": 600,
             "chip": chip,
             "correct-sqrt": "true",
@@ -60,6 +61,24 @@ class RocmBackend(BaseBackend):
             "unsafe-math": "true" if compile_hints.get("unsafe_fp_math") else "false",
             "wave64": "false" if is_rdna_arch(chip) else "true",
         }
+
+    def llvm_recodegen_fragments(self, *, compile_hints: dict, opt_level: int = 0) -> Tuple[str, str]:
+        """Fragments to re-codegen an already-LLVM-dialect ``gpu.module`` that has
+        NO target attached: attach a ROCDL target at ``opt_level`` then emit the
+        device binary.  Used by the custom-LLVM-pass path, which has already run
+        its own ``opt`` pipeline, so codegen runs at ``O=0`` to avoid re-optimizing.
+        """
+        rocdl_opts = self._rocdl_opts(compile_hints=compile_hints, opt_level=opt_level)
+        bin_cli_opts = self._bin_cli_opts(compile_hints=compile_hints)
+        attach_fragment = f"rocdl-attach-target{{{self._format_pass_opts(rocdl_opts)}}}"
+        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}'
+        return attach_fragment, binary_fragment
+
+    def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+        chip = self.target.arch
+
+        bin_cli_opts = self._bin_cli_opts(compile_hints=compile_hints)
+        rocdl_opts = self._rocdl_opts(compile_hints=compile_hints, opt_level=2)
 
         pre_binary_fragments = [
             "fly-rewrite-func-signature",
