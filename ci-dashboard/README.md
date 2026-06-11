@@ -50,7 +50,7 @@ cd ci-dashboard && python3 -m http.server 8137
 To refresh the seed / data branch from real runs:
 
 ```bash
-python3 ci-dashboard/ingest/ingest.py --repo ROCm/FlyDSL --max-runs 40 --out-dir /tmp/out
+python3 ci-dashboard/ingest/ingest.py --repo ROCm/FlyDSL --max-runs 120 --history-days 14 --out-dir /tmp/out
 ```
 
 Tabs are deep-linkable: `#health`, `#prcheck`, `#trends`, `#board`. Keys `1`–`4` switch tabs, `r` reloads.

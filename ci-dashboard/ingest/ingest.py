@@ -53,10 +53,15 @@ def gh_text(path: str) -> str:
 
 
 def list_runs(repo: str, workflow: str, max_runs: int) -> list[dict]:
-    """Most recent runs of the benchmark workflow, newest first."""
-    per_page = min(max_runs, 100)
-    data = gh(f"repos/{repo}/actions/workflows/{workflow}/runs?per_page={per_page}")
-    return data.get("workflow_runs", [])[:max_runs]
+    """Most recent runs of the benchmark workflow, newest first (paginates past 100)."""
+    if max_runs <= 100:
+        data = gh(f"repos/{repo}/actions/workflows/{workflow}/runs?per_page={max_runs}")
+        return data.get("workflow_runs", [])[:max_runs]
+    pages = gh(f"repos/{repo}/actions/workflows/{workflow}/runs?per_page=100", paginate=True)
+    runs: list[dict] = []
+    for p in pages if isinstance(pages, list) else [pages]:
+        runs += p.get("workflow_runs", []) if isinstance(p, dict) else []
+    return runs[:max_runs]
 
 
 def run_jobs(repo: str, run_id: int) -> list[dict]:
