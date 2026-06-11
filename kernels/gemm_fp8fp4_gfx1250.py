@@ -99,6 +99,9 @@ def compile_fp8fp4_gemm(
     scale_load_path: str = "tdm",
     fp8_schedule: str = "auto",
     weight_nt: bool = False,
+    tdm_load_only: str = "all",
+    tdm_b_split: bool = False,
+    tdm_force_tensor: str = None,
 ):
     """Compile an FP4/FP8/A8W4 GEMM kernel with TDM async copy.
 
@@ -130,6 +133,40 @@ def compile_fp8fp4_gemm(
     is_fp4 = data_format == "fp4"
     is_a8w4 = data_format == "a8w4"
     is_ptpc = scale_mode == "ptpc"
+
+    # Ablation knob: normalize and validate. "all" (default) = production path.
+    # Ablation: force ALL loader waves to issue the SAME tensor's TDM (no wave
+    # specialization), to measure that tensor's pure load cost. {a,b,as,bs}.
+    if tdm_force_tensor is not None:
+        tdm_force_tensor = tdm_force_tensor.strip().lower()
+        if tdm_force_tensor not in ("a", "b", "as", "bs", "none"):
+            raise ValueError(f"tdm_force_tensor must be one of a,b,as,bs,none, got {tdm_force_tensor!r}")
+        if not wave_specialized_tdm:
+            raise ValueError("tdm_force_tensor requires wave_specialized_tdm=True")
+
+    tdm_load_only = (tdm_load_only or "all").strip().lower()
+    _load_only_sel = None  # set of {a,b,as,bs} kept, or None for 'all'
+    if tdm_load_only != "all":
+        _valid_load_toks = {"a", "b", "as", "bs"}
+        _toks = [t.strip() for t in tdm_load_only.split(",") if t.strip()]
+        if not _toks or any(t not in _valid_load_toks for t in _toks):
+            raise ValueError(f"tdm_load_only must be 'all' or comma list of {_valid_load_toks}, got {tdm_load_only!r}")
+        _load_only_sel = set(_toks)
+        # wave-spec path masks via the loader-wave predicate (handled below);
+        # cooperative path masks via issue_tdm_loads(enabled=...). Both supported.
+
+    # Ablation knob: split B across two loader waves (32-N halves each), reusing
+    # wave2 (A_scale's slot) for B's second half. wave0=A, wave1=B0, wave2=B1,
+    # wave3=B_scale. Drops A_scale load -> numerically invalid (ablation only).
+    if tdm_b_split:
+        if not wave_specialized_tdm:
+            raise ValueError("tdm_b_split requires wave_specialized_tdm=True")
+        if tdm_load_only != "all":
+            raise ValueError("tdm_b_split is mutually exclusive with tdm_load_only")
+        if is_ptpc:
+            raise ValueError("tdm_b_split requires the default mxscale TDM scale path")
+        if tile_n % 32 != 0:
+            raise ValueError(f"tdm_b_split requires tile_n divisible by 32, got {tile_n}")
 
     # GFX12+ TH_NT (non-temporal) cache hint for weight B TDM loads.
     _b_cache_policy = 1 if weight_nt else 0
@@ -321,6 +358,8 @@ def compile_fp8fp4_gemm(
     # "vgpr"/"vgpr_ab_split": load scale global->VGPR via buffer_load, bypassing
     # TDM+LDS entirely. Requires the reference segmented LDS layout.
     use_buffer_vgpr_scale = scale_load_path in ("vgpr", "vgpr_ab_split")
+    if tdm_b_split and use_buffer_vgpr_scale:
+        raise ValueError("tdm_b_split requires the default mxscale TDM scale path")
     if use_buffer_vgpr_scale and not use_ref_segmented_lds_layout:
         raise ValueError(
             f"scale_load_path={scale_load_path!r} requires the reference segmented "
@@ -746,6 +785,12 @@ def compile_fp8fp4_gemm(
             tdm_wave_is_as = tdm_wave_id == fx.Int32(2)
 
             def _select_wave_tdm_value(a_value, b_value, as_value, bs_value):
+                # Ablation: all waves issue the same forced tensor (no wave spec).
+                # 'none' issues no TDM at all; the selected value is unused but we
+                # still return a well-formed one (A) to keep tracing valid.
+                if const_expr(tdm_force_tensor is not None):
+                    return {"a": a_value, "b": b_value, "as": as_value, "bs": bs_value,
+                            "none": a_value}[tdm_force_tensor]
                 result = arith.select(tdm_wave_is_as, as_value, bs_value)
                 result = arith.select(tdm_wave_is_b, b_value, result)
                 return arith.select(tdm_wave_is_a, a_value, result)
@@ -2370,6 +2415,16 @@ def compile_fp8fp4_gemm(
             desc_a1_init = make_desc_a_half(stages_a_mem[0], split_k_base, 1)
             desc_b1_init = make_desc_b_half(stages_b_mem[0], split_k_base, 1)
 
+        if const_expr(tdm_b_split):
+            # wave0=A, wave1=B half0 (N[0:32]), wave2=B half1 (N[32:64]), wave3=B_scale.
+            stages_b0_lds_addr = []
+            stages_b1_lds_addr = []
+            for i in range_constexpr(num_buffers):
+                stages_b0_lds_addr.append(_dg0_lane(make_desc_b_half(stages_b_mem[i], arith.index(0), 0), 1))
+                stages_b1_lds_addr.append(_dg0_lane(make_desc_b_half(stages_b_mem[i], arith.index(0), 1), 1))
+            desc_b0_init = make_desc_b_half(stages_b_mem[0], split_k_base, 0)
+            desc_b1_init = make_desc_b_half(stages_b_mem[0], split_k_base, 1)
+
         adv_a_i32 = fx.Int32(tile_k // PACK_FACTOR_A)
         adv_b_i32 = fx.Int32(packed_tile_k_b * 16)
         adv_as_i32 = fx.Int32(tile_k // SCALE_BLOCK * wmma_m_rep)
@@ -2380,6 +2435,19 @@ def compile_fp8fp4_gemm(
             _drop_scale_waves = is_ptpc or (use_buffer_vgpr_scale and not use_ab_half_split)
             _active_wave_limit = 2 if _drop_scale_waves else 4
             active_pred_const = arith.select(tdm_wave_id < fx.Int32(_active_wave_limit), fx.Int32(1), fx.Int32(0))
+            # ABLATION: tdm_load_only restricts which loader waves issue TDM.
+            # wave0=A, wave1=B, wave2=A_scale, wave3=B_scale. Value is a comma list
+            # of {a,b,as,bs} or "all" (default). Suppresses the TDM predicate of
+            # non-selected waves while leaving all scheduling/fences identical.
+            # It is a compile arg (in cache_tag) so every variant is a distinct
+            # cached kernel — they can coexist and be pre-compiled in one process.
+            if const_expr(tdm_load_only and tdm_load_only != "all"):
+                _wave_for = {"a": 0, "b": 1, "as": 2, "bs": 3}
+                _sel = {_wave_for[t.strip()] for t in tdm_load_only.split(",") if t.strip()}
+                _allowed = arith.select(tdm_wave_id == fx.Int32(-999), fx.Int32(1), fx.Int32(0))
+                for _w in sorted(_sel):
+                    _allowed = arith.select(tdm_wave_id == fx.Int32(_w), fx.Int32(1), _allowed)
+                active_pred_const = arith.select(_allowed == fx.Int32(1), active_pred_const, fx.Int32(0))
 
             def _select4(values):
                 return _select_wave_tdm_value(values[0], values[1], values[2], values[3])
@@ -2412,6 +2480,17 @@ def compile_fp8fp4_gemm(
         # Order matches issue_tdm_loads calls: (A, B, A_scale, B_scale).
         _tdm_cache_policies = [0, _b_cache_policy, 0, _b_cache_policy]
 
+        # Cooperative-path ablation mask (A, B, A_scale, B_scale). None = all on.
+        if const_expr(_load_only_sel is None):
+            _tdm_enabled = None
+        else:
+            _tdm_enabled = [
+                "a" in _load_only_sel,
+                "b" in _load_only_sel,
+                "as" in _load_only_sel,
+                "bs" in _load_only_sel,
+            ]
+
         if const_expr(use_ab_half_split):
             # All 4 waves load A/B halves: wave0=A0, wave1=B0, wave2=A1, wave3=B1.
             # Both halves of A share adv_a (same K-step); both halves of B share adv_b.
@@ -2419,6 +2498,13 @@ def compile_fp8fp4_gemm(
                 (stages_a0_lds_addr, stages_b0_lds_addr, stages_a1_lds_addr, stages_b1_lds_addr),
                 (desc_a0_init, desc_b0_init, desc_a1_init, desc_b1_init),
                 (adv_a_i32, adv_b_i32, adv_a_i32, adv_b_i32),
+            )
+        elif const_expr(tdm_b_split):
+            # wave0=A, wave1=B half0, wave2=B half1, wave3=B_scale (A_scale dropped).
+            active_stage_lds_addr, active_addr_lo, active_addr_hi, active_dgroup1, active_adv_i32 = _select_active_tdm(
+                (stages_a_lds_addr, stages_b0_lds_addr, stages_b1_lds_addr, stages_bs_lds_addr),
+                (desc_a_init, desc_b0_init, desc_b1_init, desc_bs_init),
+                (adv_a_i32, adv_b_i32, adv_b_i32, adv_bs_i32),
             )
         elif const_expr(wave_specialized_tdm):
             active_stage_lds_addr, active_addr_lo, active_addr_hi, active_dgroup1, active_adv_i32 = _select_active_tdm(
@@ -2464,6 +2550,11 @@ def compile_fp8fp4_gemm(
                 (via active_adv_i32) so the s_add_co_i32 happens in the
                 compute window, not on the critical path just before TDM.
                 """
+                # Ablation: 'none' issues NO TDM at all — measures the bare
+                # skeleton floor (launch+barrier+WMMA, no tensor_load_to_lds, so
+                # the backend inserts no s_wait_tensorcnt). Numerically invalid.
+                if const_expr(tdm_force_tensor == "none"):
+                    return
                 dg0 = _pack_dg0(_pred_sgpr, _stage_lds_sgprs[load_stage], addr_lo, _addr_hi_sgpr)
                 tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1), cache_policy=_b_cache_policy)
                 if k_prefetch is not None:
@@ -2489,6 +2580,7 @@ def compile_fp8fp4_gemm(
                     tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                     wave_specialized=wave_specialized_tdm,
                     cache_policies=_tdm_cache_policies,
+                    enabled=_tdm_enabled,
                 )
 
                 addr_lo_a = addr_lo_a + adv_a_i32
@@ -2758,6 +2850,7 @@ def compile_fp8fp4_gemm(
                                 tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                                 wave_specialized=wave_specialized_tdm,
                                 cache_policies=_tdm_cache_policies,
+                                enabled=_tdm_enabled,
                             )
                             _ab[0][0] = _ab[0][0] + adv_a_i32
                             _ab[1][0] = _ab[1][0] + adv_b_i32
@@ -2926,6 +3019,7 @@ def compile_fp8fp4_gemm(
                             tdm_ops.TDMDescriptor2D(dg0_bs, dgroup1_bs),
                             wave_specialized=wave_specialized_tdm,
                             cache_policies=_tdm_cache_policies,
+                            enabled=_tdm_enabled,
                         )
                         addr_lo_a = addr_lo_a + adv_a_i32
                         addr_lo_b = addr_lo_b + adv_b_i32
@@ -3054,6 +3148,9 @@ def compile_fp8fp4_gemm(
         b_streaming,
         scale_load_path,
         fp8_schedule,
+        tdm_load_only,
+        tdm_b_split,
+        tdm_force_tensor,
     )
 
     @flyc.jit

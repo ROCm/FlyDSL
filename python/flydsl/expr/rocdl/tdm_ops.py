@@ -1119,6 +1119,13 @@ def tensor_wait(count: int = 0) -> None:
     Args:
         count: Number of outstanding operations to allow (0 = wait for all).
     """
+    # ABLATION: FLYDSL_DISABLE_TENSOR_WAIT=1 drops every s_wait_tensorcnt to
+    # measure how much of the kernel time is spent stalled on TDM completion.
+    # NUMERICALLY INVALID (compute reads LDS before DMA finishes) — timing only.
+    import os as _os
+
+    if _os.environ.get("FLYDSL_DISABLE_TENSOR_WAIT") == "1":
+        return
     rocdl.s_wait_tensorcnt(count)
 
 

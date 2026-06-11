@@ -162,7 +162,7 @@ def pipeline_fence_wait(use_cluster=False):
         cluster.cluster_wait()
 
 
-def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None, cache_policies=None):
+def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None, cache_policies=None, enabled=None):
     """Emit one or more TDM loads, optionally one descriptor per loader wave.
 
     Args:
@@ -170,11 +170,17 @@ def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None, cache_policies
             ``cache_policies[i]`` is forwarded to ``tensor_load_2d`` for the
             *i*-th descriptor (e.g. ``1`` = ``TH_NT`` non-temporal hint on
             gfx12+).  ``None`` (default) uses cache_policy 0 for every load.
+        enabled: Optional compile-time per-descriptor bool list. When given,
+            descriptor ``i`` is only emitted if ``enabled[i]`` is truthy. Used
+            by the cooperative-path tdm_load_only ablation to skip a tensor's
+            load entirely. ``None`` (default) emits every descriptor.
     """
     if wave_specialized:
         if wave_id is None:
             wave_id = rocdl.wave_id()
         for idx, desc in enumerate(descs):
+            if enabled is not None and not enabled[idx]:
+                continue
             is_loader_wave = arith.cmpi(
                 arith.CmpIPredicate.eq,
                 wave_id,
@@ -188,6 +194,8 @@ def issue_tdm_loads(*descs, wave_specialized=False, wave_id=None, cache_policies
         return
 
     for idx, desc in enumerate(descs):
+        if enabled is not None and not enabled[idx]:
+            continue
         cp = cache_policies[idx] if cache_policies else 0
         tdm_ops.tensor_load_2d(desc, cache_policy=cp)
 
