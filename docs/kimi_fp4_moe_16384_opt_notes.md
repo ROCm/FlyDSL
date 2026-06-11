@@ -3094,3 +3094,196 @@ Rejected related trials:
 
 Conclusion: keep v13 known-block.  It reduces the retained M=64 GEMM1 gap from
 about `+0.651 us` to about `+0.193 us` in the default graph-profiler window.
+
+## BM96 GEMM1 v2 64+32 LDS Staging Trial
+
+Tried replacing the retained BM96/BN512 GEMM1 accumulator epilogue staging from
+three 32-row LDS stages to two stages of 64 rows then 32 rows:
+
+```text
+flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM96_BN512_v2_seg64p32
+```
+
+Correctness remained in the accepted approximate band for the full all-FlyDSL
+path:
+
+```text
+cos=0.972634 max_abs=7.007812
+```
+
+Graph event timing:
+
+| runner | median |
+| --- | ---: |
+| `aiter_mxfp4_moe` | 1846.5 us |
+| `local_mxfp4_all_flydsl_bm96` | 1907.0 us |
+
+Graph profiler median by kernel:
+
+| stage | aiter | BM96 v2 | delta |
+| --- | ---: | ---: | ---: |
+| sort_count | 6.2 us | 6.7 us | +0.5 us |
+| sort_cumsum | 10.2 us | 10.9 us | +0.7 us |
+| sort_place_pad | 31.6 us | 32.6 us | +0.9 us |
+| quant | 58.4 us | 59.2 us | +0.8 us |
+| sort_scales | 55.4 us | 53.1 us | -2.3 us |
+| GEMM1 | 691.0 us | 741.2 us | +50.2 us |
+| GEMM2 | 859.5 us | 871.0 us | +11.5 us |
+| scatter_reduce | 133.8 us | 130.1 us | -3.7 us |
+| total | 1846.2 us | 1905.7 us | +59.5 us |
+
+Conclusion: reject v2.  Reducing the number of accumulator staging phases did
+not move GEMM1 relative to the retained 32-row segmented version (`~740.5 us` in
+prior graph-profiler runs), while doubling the epilogue LDS footprint from 64 KiB
+to 128 KiB.  The active BM96 file is kept on the cleaner three-stage
+`v1_mseg32_spillcheck` variant.
+
+Post-revert graph event smoke with the active `v1_mseg32_spillcheck` file:
+
+```text
+aiter_mxfp4_moe_us=1844.1
+local_mxfp4_all_flydsl_bm96_us=1897.1
+cos=0.972026 max_abs=7.292969
+```
+
+## BM128 GEMM2 BN512 Trial
+
+Added an isolated BM128/BN512 GEMM2 experiment:
+
+```text
+kimi_fp4_moe_16384_opt_bm128_bn512.py
+flydsl_kimi_mxfp4_gemm2_mxfp4out_NE385_H7168_E512_BM128_BN512_v0_skip_pad_epilog
+```
+
+The GEMM1 path is unchanged from the retained BM128 kernel.  GEMM2 changes:
+
+- `tile_m = 128`, `tile_n = 512`, `tile_k = 256`
+- persistent CTA grid stays at 256 CTAs
+- output epilogue uses 32-row segmented LDS staging so the f32 LDS tile is
+  `32 * 512 * 4 = 65536 B` instead of the impossible full
+  `128 * 512 * 4 = 262144 B`
+- padding-row store mask from the BM128/storemask trial is preserved
+- accumulator hint is raised to `amdgpu-agpr-alloc = 256,256`
+
+Resource metadata from `resource_inspect/bm128_bn512_gemm2_dump`:
+
+| kernel | LDS | SGPR | VGPR | AGPR | SGPR spill | VGPR spill | private segment |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BM128/BN256 storemask | 133120 B | 52 | 364 | 128 | 0 | 0 | 0 B |
+| BM128/BN512 segmented | 67584 B | 56 | 440 | 256 | 0 | 0 | 0 B |
+
+So the user's hunch was right on spill: the BN512 variant compiles without
+SGPR/VGPR spills and has no private segment.  It does, however, push AGPR usage
+to 256 and VGPR usage to 440.
+
+Medium graph-event comparison:
+
+```text
+/opt/venv/bin/python bench_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_all_flydsl_bm128_storemask,local_mxfp4_all_flydsl_bm128_bn512 \
+  --warmup 100 --graph-iters 128 --measure 31 --repeat 3
+```
+
+| runner | samples | median |
+| --- | --- | ---: |
+| `aiter_mxfp4_moe` | 1836.3, 1845.3, 1845.0 us | 1845.0 us |
+| `local_mxfp4_all_flydsl_bm128_storemask` | 1896.2, 1895.0, 1899.3 us | 1896.2 us |
+| `local_mxfp4_all_flydsl_bm128_bn512` | 1923.5, 1920.0, 1920.1 us | 1920.1 us |
+
+Graph profiler with one captured logical iteration per replay:
+
+```text
+/opt/venv/bin/python profile_flydsl_16384.py \
+  --runners local_mxfp4_all_flydsl_bm128_storemask,local_mxfp4_all_flydsl_bm128_bn512 \
+  --mode graph --warmup 50 --iters 20 --graph-iters 1 --repeat 5 \
+  --max-retries 20 --expected-kernels 8 --top 12
+```
+
+| stage | BM128/storemask | BM128/BN512 | delta |
+| --- | ---: | ---: | ---: |
+| sort_count | 6.5 us | 6.5 us | -0.0 us |
+| sort_cumsum | 9.8 us | 9.7 us | -0.2 us |
+| sort_place_pad | 32.2 us | 32.1 us | -0.2 us |
+| quant | 54.3 us | 54.5 us | +0.2 us |
+| sort_scales | 55.6 us | 55.3 us | -0.2 us |
+| GEMM1 | 694.6 us | 695.7 us | +1.2 us |
+| GEMM2 | 930.3 us | 952.2 us | +22.0 us |
+| scatter_reduce | 129.6 us | 129.8 us | +0.2 us |
+| total | 1914.5 us | 1938.1 us | +23.6 us |
+
+Conclusion: reject BM128/BN512 for now.  It halves the N-block count but the
+larger accumulator footprint and segmented epilogue make GEMM2 about `+22 us`
+slower than the retained BM128/BN256 storemask path.
+
+## BM128 GEMM1+GEMM2 BN512 Trial
+
+Tried changing GEMM1 as well, in a separate experiment file:
+
+```text
+kimi_fp4_moe_16384_opt_bm128_bn512_all.py
+flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_BN512_v0_mseg32
+flydsl_kimi_mxfp4_gemm2_mxfp4out_NE385_H7168_E512_BM128_BN512_v0_skip_pad_epilog
+```
+
+GEMM1 changes:
+
+- `tile_m = 128`, `tile_n = 512`, `tile_k = 256`
+- output epilogue uses 32-row segmented LDS staging copied from the BM96/BN512
+  path, so the accumulator staging buffer is `32 * 512 * 4 = 65536 B`
+- launch grid becomes `(2, 1534, 1)`, i.e. the same `3068` CTAs as the BM128
+  BN256 GEMM1 path `(4, 1534, 1)`
+
+Correctness is close enough for the relaxed criterion:
+
+```text
+local_mxfp4_all_flydsl_bm128_bn512_all_vs_aiter_mxfp4_cos=0.999806
+local_mxfp4_all_flydsl_bm128_bn512_all_vs_aiter_mxfp4_max_abs=2.000000
+```
+
+Medium graph-event comparison:
+
+```text
+/opt/venv/bin/python bench_flydsl_16384.py \
+  --runners aiter_mxfp4_moe,local_mxfp4_all_flydsl_bm128_storemask,local_mxfp4_all_flydsl_bm128_bn512,local_mxfp4_all_flydsl_bm128_bn512_all \
+  --warmup 100 --graph-iters 128 --measure 31 --repeat 3
+```
+
+| runner | samples | median |
+| --- | --- | ---: |
+| `aiter_mxfp4_moe` | 1850.8, 1840.6, 1851.5 us | 1850.8 us |
+| `local_mxfp4_all_flydsl_bm128_storemask` | 1896.0, 1898.1, 1896.4 us | 1896.4 us |
+| `local_mxfp4_all_flydsl_bm128_bn512` | 1917.7, 1918.6, 1923.7 us | 1918.6 us |
+| `local_mxfp4_all_flydsl_bm128_bn512_all` | 2066.2, 2066.9, 2067.5 us | 2066.9 us |
+
+Resource metadata:
+
+| GEMM1 kernel | LDS | SGPR | VGPR | AGPR | SGPR spill | VGPR spill | private segment |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| BM128/BN256 v36 | 131072 B | 38 | 300 | 128 | 0 | 0 | 0 B |
+| BM128/BN512 mseg32 | 65536 B | 44 | 512 | 256 | 0 | 56 | 180 B |
+
+Graph profiler with one captured logical iteration per replay:
+
+```text
+/opt/venv/bin/python profile_flydsl_16384.py \
+  --runners local_mxfp4_all_flydsl_bm128_storemask,local_mxfp4_all_flydsl_bm128_bn512_all \
+  --mode graph --warmup 50 --iters 20 --graph-iters 1 --repeat 3 \
+  --max-retries 20 --expected-kernels 8 --top 12
+```
+
+| stage | BM128/storemask | BM128/BN512 all | delta |
+| --- | ---: | ---: | ---: |
+| sort_count | 6.7 us | 6.5 us | -0.2 us |
+| sort_cumsum | 9.8 us | 9.5 us | -0.3 us |
+| sort_place_pad | 32.1 us | 31.9 us | -0.2 us |
+| quant | 55.1 us | 54.5 us | -0.5 us |
+| sort_scales | 55.6 us | 54.0 us | -1.6 us |
+| GEMM1 | 694.0 us | 851.2 us | +157.3 us |
+| GEMM2 | 935.9 us | 943.1 us | +7.3 us |
+| scatter_reduce | 129.6 us | 129.3 us | -0.2 us |
+| total | 1917.8 us | 2078.9 us | +161.0 us |
+
+Conclusion: reject BM128/BN512 for GEMM1.  It halves the N grid count but doubles
+the accumulator pressure (`AGPR=256`) and spills VGPRs, so GEMM1 regresses by
+about `+157 us`.  Keep the retained BM128/BN256 storemask path as the best
+BM128 baseline.

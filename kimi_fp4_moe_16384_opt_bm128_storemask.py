@@ -1,4 +1,4 @@
-"""Fixed-shape FlyDSL mxfp4 MoE path for Kimi M=16384."""
+"""BM128 experiment that skips GEMM2 padding-row output stores."""
 from __future__ import annotations
 
 import functools
@@ -1411,7 +1411,9 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
     gemm2_agpr_value_attrs = {"passthrough": [["amdgpu-agpr-alloc", "128,128"]]}
     gemm2_agpr_llvm_options = {"amdgpu-mfma-vgpr-form": False}
 
-    module_name = "flydsl_kimi_mxfp4_gemm2_mxfp4out_NE385_H7168_E512_BM128_v8_dppamax"
+    m_indices_nbytes = max_sorted * 4
+
+    module_name = "flydsl_kimi_mxfp4_gemm2_mxfp4out_NE385_H7168_E512_BM128_v10_skip_pad_epilog"
 
     @flyc.kernel(name=module_name)
     def gemm2_mxfp4out(
@@ -1423,6 +1425,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
         arg_scale_w: fx.Pointer,
         arg_expert_ids: fx.Pointer,
         arg_num_valid_ids: fx.Pointer,
+        arg_m_indices: fx.Pointer,
     ):
         i32 = T.i32
         i64 = T.i64
@@ -1441,6 +1444,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
         sw_rsrc = _ptr_buffer_resource(arg_scale_w, w_scale_nbytes)
         expert_rsrc = _ptr_buffer_resource(arg_expert_ids, expert_nbytes)
         numids_rsrc = _ptr_buffer_resource(arg_num_valid_ids, numids_nbytes)
+        midx_rsrc = _ptr_buffer_resource(arg_m_indices, m_indices_nbytes)
 
         tx = gpu.thread_id("x")
         pid = gpu.block_id("x")
@@ -1764,6 +1768,12 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
                 def _max_u32(a, b):
                     return arith.select(arith.cmpi(CmpIPredicate.ugt, b, a), b, a)
 
+                def precompute_row(*, row_local, row):
+                    row_i32 = arith.index_cast(i32, row)
+                    token_i32 = buffer_ops.buffer_load(midx_rsrc, row_i32, vec_width=1, dtype=i32)
+                    row_valid = arith.cmpi(CmpIPredicate.ult, token_i32, arith.constant(TOKEN, type=i32))
+                    return None, row_valid
+
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                     frag_vals = []
                     for i in range_constexpr(8):
@@ -1814,7 +1824,9 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
                     lane_in_scale = (col_i32 >> c3_i32) & c3_i32
                     _if_scale = scf.IfOp(arith.cmpi(CmpIPredicate.eq, lane_in_scale, c0_i32))
                     with ir.InsertionPoint(_if_scale.then_block):
-                        scale_off = row_i32 * arith.constant(MODEL_DIM // 32, type=i32) + (col_i32 >> arith.constant(5, type=i32))
+                        scale_off = row_i32 * arith.constant(MODEL_DIM // 32, type=i32) + (
+                            col_i32 >> arith.constant(5, type=i32)
+                        )
                         e8m0_i8 = arith.TruncIOp(T.i8, e8m0).result
                         buffer_ops.buffer_store(e8m0_i8, out_scale_rsrc, scale_off, cache_modifier=4)
                         scf.YieldOp([])
@@ -1841,7 +1853,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
                     lds_out=lds_out,
                     frag_elem_type=ir.F32Type.get(),
                     write_row_to_lds=write_row_to_lds,
-                    precompute_row=None,
+                    precompute_row=precompute_row,
                     store_pair=store_pair,
                 )
 
@@ -1862,6 +1874,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
         scale_w: fx.Pointer,
         expert_ids: fx.Pointer,
         num_valid_ids: fx.Pointer,
+        m_indices: fx.Pointer,
         stream: fx.Stream,
     ):
         allocator.finalized = False
@@ -1877,6 +1890,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
             scale_w,
             expert_ids,
             num_valid_ids,
+            m_indices,
             value_attrs=gemm2_agpr_value_attrs,
         ).launch(
             grid=(persistent_ctas, 1, 1),
@@ -1895,6 +1909,7 @@ def kimi_mxfp4_gemm2_mxfp4out_16384(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     sorted_expert_ids: torch.Tensor,
+    m_indices: torch.Tensor,
     cumsum_tensor: torch.Tensor,
     flat_out_q: torch.Tensor | None = None,
     flat_out_scale: torch.Tensor | None = None,
@@ -1923,6 +1938,7 @@ def kimi_mxfp4_gemm2_mxfp4out_16384(
         _ptr_view_safe(_as_u8_storage(w2_scale).view(-1)),
         _ptr_view_safe(sorted_expert_ids.view(-1)),
         _ptr_view_safe(cumsum_tensor.view(-1)),
+        _ptr_view_safe(m_indices.view(-1)),
         torch.cuda.current_stream(),
     )
     _run_compiled(compile_kimi_mxfp4_gemm2_mxfp4out_16384(), args)
@@ -1959,7 +1975,7 @@ def compile_kimi_mxfp4_sort_16384():
     cumsum_nbytes = 4
     reverse_nbytes = total_pairs * 4
     masked_nbytes = EXPERTS * 4
-    block_offsets_nbytes = EXPERTS * sort_ctas* 4
+    block_offsets_nbytes = EXPERTS * sort_ctas * 4
     real_counts_nbytes = EXPERTS * 4
 
     gpu_arch = get_hip_arch()
@@ -2698,6 +2714,7 @@ def run_kimi_fp4_mxfp4_moe_16384_all_flydsl(
         w2=w2_u8,
         w2_scale=w2_scale,
         sorted_expert_ids=sort.sorted_expert_ids,
+        m_indices=sort.m_indices,
         cumsum_tensor=sort.cumsum_tensor,
     )
 

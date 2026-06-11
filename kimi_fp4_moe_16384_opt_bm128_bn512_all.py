@@ -1,4 +1,4 @@
-"""Fixed-shape FlyDSL mxfp4 MoE path for Kimi M=16384."""
+"""BM128/BN512 experiment that skips GEMM2 padding-row output stores."""
 from __future__ import annotations
 
 import functools
@@ -448,7 +448,7 @@ def compile_kimi_mxfp4_gemm1_16384():
     """
 
     tile_m = MXFP4_BLOCK_M
-    tile_n = 256
+    tile_n = 512
     tile_k = 256
     total_threads = 256
     max_sorted = mxfp4_max_sorted_16384()
@@ -462,6 +462,8 @@ def compile_kimi_mxfp4_gemm1_16384():
     pack_N = 2
     pack_K = 2
     m_repeat = tile_m // 16
+    acc_segment_m = 32
+    acc_segment_m_repeat = acc_segment_m // 16
     num_waves = 4
     n_per_wave = tile_n // num_waves
     num_acc_n = n_per_wave // 16
@@ -477,7 +479,7 @@ def compile_kimi_mxfp4_gemm1_16384():
     _x_slots_bytes = 2 * _single_x_bytes
     _lds_scale_bytes = (tile_m // 32) * num_k_tiles * 256
     _kloop_lds_bytes = _x_slots_bytes + _lds_scale_bytes
-    _lds_acc_bytes = tile_m * tile_n * 4
+    _lds_acc_bytes = acc_segment_m * tile_n * 4
 
     gpu_arch = get_hip_arch()
     allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem_mxfp4_gemm1")
@@ -513,9 +515,9 @@ def compile_kimi_mxfp4_gemm1_16384():
     # Output scale layout consumed by GEMM2 for K=INTER_DIM=512.
     k_out_as_per_chunk_dw = ((INTER_DIM // 32) // 4 // 2) * 64
 
-    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_v36_agprasm"
+    module_name = "flydsl_kimi_mxfp4_gemm1_NE385_H7168_E512_BM128_BN512_v0_mseg32"
 
-    @flyc.kernel(name=module_name)
+    @flyc.kernel(name=module_name, known_block_size=[total_threads, 1, 1])
     def gemm1(
         arg_inter_sorted_quant: fx.Pointer,
         arg_inter_sorted_scale: fx.Pointer,
@@ -573,7 +575,7 @@ def compile_kimi_mxfp4_gemm1_16384():
             T.i32,
             shape=(_lds_scale_bytes // 4,),
         ).get()
-        lds_acc = SmemPtr(base_ptr, lds_offset, T.f32, shape=(tile_m * tile_n,)).get()
+        lds_acc = SmemPtr(base_ptr, lds_offset, T.f32, shape=(acc_segment_m * tile_n,)).get()
 
         shape_lds = fx.make_shape(tile_m, _eff_lds_stride)
         stride_lds = fx.make_stride(_eff_lds_stride, 1)
@@ -1109,34 +1111,10 @@ def compile_kimi_mxfp4_gemm1_16384():
             def _fmax_num(a, b):
                 return ArithValue(arith.MaxNumFOp(arith._to_raw(a), arith._to_raw(b), fastmath=fm_fast).result)
 
-            for mi in range_constexpr(m_repeat):
-                row_base = arith.constant(mi * 16, index=True) + lane_div_16 * arith.constant(4, index=True)
-                for j in range_constexpr(num_acc_n):
-                    j_local = j // 2
-                    col_local = (
-                        wave_id * arith.constant(32, index=True)
-                        + arith.constant(j_local * 16, index=True)
-                        + lane_mod_16
-                    )
-                    if const_expr(j % 2 == 1):
-                        col_local = col_local + arith.constant(128, index=True)
-                    for v_i in range_constexpr(4):
-                        row = row_base + arith.constant(v_i, index=True)
-                        val = vector.extract(acc[mi * num_acc_n + j], static_position=[v_i], dynamic_position=[])
-                        vector.store(
-                            vector.from_elements(T.vec(1, f32), [val]),
-                            lds_acc,
-                            [row * arith.constant(tile_n, index=True) + col_local],
-                            alignment=4,
-                        )
-
-            gpu.barrier()
-
             m_lane = tx / arith.constant(16, index=True)
             n_lane = tx % arith.constant(16, index=True)
             wave_grp = n_lane / arith.constant(4, index=True)
             kk = n_lane % arith.constant(4, index=True)
-            scales_per_mr = []
 
             def _silu_mul(g, u):
                 t = g * neg_log2e
@@ -1148,93 +1126,142 @@ def compile_kimi_mxfp4_gemm1_16384():
             def _max_u32(a, b):
                 return arith.select(arith.cmpi(CmpIPredicate.ugt, b, a), b, a)
 
-            for mr in range_constexpr(m_repeat):
-                row_local = arith.constant(mr * 16, index=True) + m_lane
-                result_vals = []
-                local_max = c0_f32
-                for e in range_constexpr(8):
-                    col_in_grp = kk * arith.constant(8, index=True) + arith.constant(e, index=True)
-                    gate_col = wave_grp * arith.constant(32, index=True) + col_in_grp
-                    up_col = gate_col + arith.constant(128, index=True)
-                    gate_v = vector.extract(
-                        vector.load_op(T.vec(1, f32), lds_acc, [row_local * arith.constant(tile_n, index=True) + gate_col]),
-                        static_position=[0],
-                        dynamic_position=[],
-                    )
-                    up_v = vector.extract(
-                        vector.load_op(T.vec(1, f32), lds_acc, [row_local * arith.constant(tile_n, index=True) + up_col]),
-                        static_position=[0],
-                        dynamic_position=[],
-                    )
-                    res = _silu_mul(gate_v, up_v)
-                    result_vals.append(res)
-                    abs_v = llvm.call_intrinsic(f32, "llvm.fabs.f32", [res], [], [])
-                    local_max = _fmax_num(local_max, abs_v)
+            for seg_m in range_constexpr(tile_m // acc_segment_m):
+                seg_m_repeat_base = seg_m * acc_segment_m_repeat
 
-                peer1 = _dpp_xor_f32(local_max, 1, bound_ctrl=True)
-                local_max = _fmax_num(local_max, peer1)
-                peer2 = _dpp_xor_f32(local_max, 2, bound_ctrl=True)
-                local_max = _fmax_num(local_max, peer2)
-
-                amax_i32 = local_max.bitcast(i32)
-                quant_scale = (amax_i32 + c0x200000_i32).bitcast(f32) * c025_f32
-                sb_raw = quant_scale.bitcast(i32) >> c23_i32
-                e8m0 = arith.select(arith.cmpi(CmpIPredicate.ugt, sb_raw, c254_i32), c254_i32, sb_raw)
-                scales_per_mr.append(e8m0)
-
-                packed = c0_i32
-                for pair in range_constexpr(4):
-                    packed = ArithValue(
-                        llvm.call_intrinsic(
-                            i32,
-                            "llvm.amdgcn.cvt.scalef32.pk.fp4.f32",
-                            [
-                                packed,
-                                result_vals[2 * pair],
-                                result_vals[2 * pair + 1],
-                                quant_scale,
-                                arith.constant(pair, type=i32),
-                            ],
-                            [],
-                            [],
+                for mi_seg in range_constexpr(acc_segment_m_repeat):
+                    mi = seg_m_repeat_base + mi_seg
+                    row_base = arith.constant(mi_seg * 16, index=True) + lane_div_16 * arith.constant(4, index=True)
+                    for j in range_constexpr(num_acc_n):
+                        j_local = j // 2
+                        col_local = (
+                            wave_id * arith.constant(n_per_wave // 2, index=True)
+                            + arith.constant(j_local * 16, index=True)
+                            + lane_mod_16
                         )
-                    )
+                        if const_expr(j % 2 == 1):
+                            col_local = col_local + arith.constant(tile_n // 2, index=True)
+                        for v_i in range_constexpr(4):
+                            row = row_base + arith.constant(v_i, index=True)
+                            val = vector.extract(acc[mi * num_acc_n + j], static_position=[v_i], dynamic_position=[])
+                            vector.store(
+                                vector.from_elements(T.vec(1, f32), [val]),
+                                lds_acc,
+                                [row * arith.constant(tile_n, index=True) + col_local],
+                                alignment=4,
+                            )
 
-                row_i32 = arith.index_cast(i32, bx_m + row_local)
-                byte_pos = (
-                    by * arith.constant(64, index=True)
-                    + wave_grp * arith.constant(16, index=True)
-                    + kk * arith.constant(4, index=True)
-                )
-                byte_pos_i32 = arith.index_cast(i32, byte_pos)
-                q_word_off = row_i32 * arith.constant((INTER_DIM // 2) // 4, type=i32) + (byte_pos_i32 >> c2_i32)
-                buffer_ops.buffer_store(packed, out_q_rsrc, q_word_off, cache_modifier=4)
+                gpu.barrier()
 
-            _if_scale = scf.IfOp(arith.cmpi(CmpIPredicate.eq, kk, arith.constant(0, index=True)))
-            with ir.InsertionPoint(_if_scale.then_block):
-                ku = by >> arith.constant(1, index=True)
-                ikxdl = by % arith.constant(2, index=True)
-                for sub in range_constexpr(tile_m // 32):
-                    chunk = bx * arith.constant(tile_m // 32, index=True) + arith.constant(sub, index=True)
-                    dword_off = (
-                        chunk * arith.constant(k_out_as_per_chunk_dw, index=True)
-                        + ku * arith.constant(64, index=True)
-                        + wave_grp * arith.constant(16, index=True)
-                        + m_lane
-                    )
-                    lo = scales_per_mr[sub * 2]
-                    hi = scales_per_mr[sub * 2 + 1]
-                    pair_i32 = lo | (hi << c8_i32)
-                    pair_i16 = arith.TruncIOp(T.i16, pair_i32).result
-                    byte_off = arith.index_cast(i32, dword_off * arith.constant(4, index=True) + ikxdl * arith.constant(2, index=True))
-                    buffer_ops.buffer_store(
-                        pair_i16,
-                        out_scale_rsrc,
-                        byte_off,
-                        cache_modifier=4,
-                        offset_is_bytes=True,
-                    )
-                scf.YieldOp([])
+                for n_half in range_constexpr(tile_n // 256):
+                    scales_per_mr = []
+                    for mr_pair in range_constexpr(2):
+                        global_mr = seg_m_repeat_base + mr_pair
+                        row_local = arith.constant(mr_pair * 16, index=True) + m_lane
+                        row_global = arith.constant(global_mr * 16, index=True) + m_lane
+                        result_vals = []
+                        local_max = c0_f32
+                        for e in range_constexpr(8):
+                            col_in_grp = kk * arith.constant(8, index=True) + arith.constant(e, index=True)
+                            gate_col = (
+                                arith.constant(n_half * 128, index=True)
+                                + wave_grp * arith.constant(32, index=True)
+                                + col_in_grp
+                            )
+                            up_col = gate_col + arith.constant(tile_n // 2, index=True)
+                            gate_v = vector.extract(
+                                vector.load_op(
+                                    T.vec(1, f32),
+                                    lds_acc,
+                                    [row_local * arith.constant(tile_n, index=True) + gate_col],
+                                ),
+                                static_position=[0],
+                                dynamic_position=[],
+                            )
+                            up_v = vector.extract(
+                                vector.load_op(
+                                    T.vec(1, f32),
+                                    lds_acc,
+                                    [row_local * arith.constant(tile_n, index=True) + up_col],
+                                ),
+                                static_position=[0],
+                                dynamic_position=[],
+                            )
+                            res = _silu_mul(gate_v, up_v)
+                            result_vals.append(res)
+                            abs_v = llvm.call_intrinsic(f32, "llvm.fabs.f32", [res], [], [])
+                            local_max = _fmax_num(local_max, abs_v)
+
+                        peer1 = _dpp_xor_f32(local_max, 1, bound_ctrl=True)
+                        local_max = _fmax_num(local_max, peer1)
+                        peer2 = _dpp_xor_f32(local_max, 2, bound_ctrl=True)
+                        local_max = _fmax_num(local_max, peer2)
+
+                        amax_i32 = local_max.bitcast(i32)
+                        quant_scale = (amax_i32 + c0x200000_i32).bitcast(f32) * c025_f32
+                        sb_raw = quant_scale.bitcast(i32) >> c23_i32
+                        e8m0 = arith.select(arith.cmpi(CmpIPredicate.ugt, sb_raw, c254_i32), c254_i32, sb_raw)
+                        scales_per_mr.append(e8m0)
+
+                        packed = c0_i32
+                        for pair in range_constexpr(4):
+                            packed = ArithValue(
+                                llvm.call_intrinsic(
+                                    i32,
+                                    "llvm.amdgcn.cvt.scalef32.pk.fp4.f32",
+                                    [
+                                        packed,
+                                        result_vals[2 * pair],
+                                        result_vals[2 * pair + 1],
+                                        quant_scale,
+                                        arith.constant(pair, type=i32),
+                                    ],
+                                    [],
+                                    [],
+                                )
+                            )
+
+                        row_i32 = arith.index_cast(i32, bx_m + row_global)
+                        byte_pos = (
+                            by * arith.constant(tile_n // 4, index=True)
+                            + arith.constant(n_half * 64, index=True)
+                            + wave_grp * arith.constant(16, index=True)
+                            + kk * arith.constant(4, index=True)
+                        )
+                        byte_pos_i32 = arith.index_cast(i32, byte_pos)
+                        q_word_off = row_i32 * arith.constant((INTER_DIM // 2) // 4, type=i32) + (byte_pos_i32 >> c2_i32)
+                        buffer_ops.buffer_store(packed, out_q_rsrc, q_word_off, cache_modifier=4)
+
+                    _if_scale = scf.IfOp(arith.cmpi(CmpIPredicate.eq, kk, arith.constant(0, index=True)))
+                    with ir.InsertionPoint(_if_scale.then_block):
+                        by_scale = by * arith.constant(tile_n // 256, index=True) + arith.constant(n_half, index=True)
+                        ku = by_scale >> arith.constant(1, index=True)
+                        ikxdl = by_scale % arith.constant(2, index=True)
+                        chunk = bx * arith.constant(tile_m // 32, index=True) + arith.constant(seg_m, index=True)
+                        dword_off = (
+                            chunk * arith.constant(k_out_as_per_chunk_dw, index=True)
+                            + ku * arith.constant(64, index=True)
+                            + wave_grp * arith.constant(16, index=True)
+                            + m_lane
+                        )
+                        lo = scales_per_mr[0]
+                        hi = scales_per_mr[1]
+                        pair_i32 = lo | (hi << c8_i32)
+                        pair_i16 = arith.TruncIOp(T.i16, pair_i32).result
+                        byte_off = arith.index_cast(
+                            i32,
+                            dword_off * arith.constant(4, index=True) + ikxdl * arith.constant(2, index=True),
+                        )
+                        buffer_ops.buffer_store(
+                            pair_i16,
+                            out_scale_rsrc,
+                            byte_off,
+                            cache_modifier=4,
+                            offset_is_bytes=True,
+                        )
+                        scf.YieldOp([])
+
+                gpu.barrier()
 
         _if_valid = scf.IfOp(do_gemm)
         with ir.InsertionPoint(_if_valid.then_block):
@@ -1337,7 +1364,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
     """
 
     tile_m = MXFP4_BLOCK_M
-    tile_n = 256
+    tile_n = 512
     tile_k = 256
     total_threads = 256
     max_sorted = mxfp4_max_sorted_16384()
@@ -1352,6 +1379,8 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
     pack_N = 2
     pack_K = 2
     m_repeat = tile_m // 16
+    acc_segment_m = 32
+    acc_segment_m_repeat = acc_segment_m // 16
     num_waves = 4
     n_per_wave = tile_n // num_waves
     num_acc_n = n_per_wave // 16
@@ -1367,7 +1396,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
     _eff_tile_k_bytes = tile_k_bytes // a_elem_vec_pack
     _single_x_bytes = tile_m * _eff_lds_stride * a_elem_bytes
     _input_elems = _single_x_bytes
-    _lds_acc_bytes = tile_m * tile_n * 4
+    _lds_acc_bytes = acc_segment_m * tile_n * 4
     _lds_x_bytes = 2 * _single_x_bytes
     _lds_scale_bytes = 2 * (tile_m // 32) * 256
 
@@ -1405,13 +1434,14 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
     k_bs_stride_n0_dw = 128
     k_bs_per_expert_dw = (MODEL_DIM // 16 // 2) * k_bs_stride_n0_dw
 
-    # Match aiter's nonatomic BM128 path more closely: aiter pins MFMA
-    # accumulators into AGPRs with inline asm.  This hint asks LLVM to reserve
-    # the same AGPR budget and prefer non-VGPR MFMA lowering where possible.
-    gemm2_agpr_value_attrs = {"passthrough": [["amdgpu-agpr-alloc", "128,128"]]}
+    # BN512 doubles the per-thread accumulator footprint versus BN256:
+    # (128 / 16) * (512 / 4 / 16) * 4 = 256 f32 accumulator lanes.
+    gemm2_agpr_value_attrs = {"passthrough": [["amdgpu-agpr-alloc", "256,256"]]}
     gemm2_agpr_llvm_options = {"amdgpu-mfma-vgpr-form": False}
 
-    module_name = "flydsl_kimi_mxfp4_gemm2_mxfp4out_NE385_H7168_E512_BM128_v8_dppamax"
+    m_indices_nbytes = max_sorted * 4
+
+    module_name = "flydsl_kimi_mxfp4_gemm2_mxfp4out_NE385_H7168_E512_BM128_BN512_v0_skip_pad_epilog"
 
     @flyc.kernel(name=module_name)
     def gemm2_mxfp4out(
@@ -1423,6 +1453,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
         arg_scale_w: fx.Pointer,
         arg_expert_ids: fx.Pointer,
         arg_num_valid_ids: fx.Pointer,
+        arg_m_indices: fx.Pointer,
     ):
         i32 = T.i32
         i64 = T.i64
@@ -1441,6 +1472,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
         sw_rsrc = _ptr_buffer_resource(arg_scale_w, w_scale_nbytes)
         expert_rsrc = _ptr_buffer_resource(arg_expert_ids, expert_nbytes)
         numids_rsrc = _ptr_buffer_resource(arg_num_valid_ids, numids_nbytes)
+        midx_rsrc = _ptr_buffer_resource(arg_m_indices, m_indices_nbytes)
 
         tx = gpu.thread_id("x")
         pid = gpu.block_id("x")
@@ -1456,7 +1488,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
         base_ptr = allocator.get_base()
         lds_x0 = SmemPtr(base_ptr, lds_x0_offset, T.f8, shape=(_input_elems,)).get()
         lds_x1 = SmemPtr(base_ptr, lds_x1_offset, T.f8, shape=(_input_elems,)).get()
-        lds_out = SmemPtr(base_ptr, lds_x0_offset, T.f32, shape=(tile_m * tile_n,)).get()
+        lds_out = SmemPtr(base_ptr, lds_x0_offset, T.f32, shape=(acc_segment_m * tile_n,)).get()
         lds_scale_i32 = SmemPtr(
             base_ptr,
             lds_scale_offset,
@@ -1764,6 +1796,12 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
                 def _max_u32(a, b):
                     return arith.select(arith.cmpi(CmpIPredicate.ugt, b, a), b, a)
 
+                def precompute_row(*, row_local, row):
+                    row_i32 = arith.index_cast(i32, row)
+                    token_i32 = buffer_ops.buffer_load(midx_rsrc, row_i32, vec_width=1, dtype=i32)
+                    row_valid = arith.cmpi(CmpIPredicate.ult, token_i32, arith.constant(TOKEN, type=i32))
+                    return None, row_valid
+
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                     frag_vals = []
                     for i in range_constexpr(8):
@@ -1814,36 +1852,61 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
                     lane_in_scale = (col_i32 >> c3_i32) & c3_i32
                     _if_scale = scf.IfOp(arith.cmpi(CmpIPredicate.eq, lane_in_scale, c0_i32))
                     with ir.InsertionPoint(_if_scale.then_block):
-                        scale_off = row_i32 * arith.constant(MODEL_DIM // 32, type=i32) + (col_i32 >> arith.constant(5, type=i32))
+                        scale_off = row_i32 * arith.constant(MODEL_DIM // 32, type=i32) + (
+                            col_i32 >> arith.constant(5, type=i32)
+                        )
                         e8m0_i8 = arith.TruncIOp(T.i8, e8m0).result
                         buffer_ops.buffer_store(e8m0_i8, out_scale_rsrc, scale_off, cache_modifier=4)
                         scf.YieldOp([])
 
-                c_shuffle_epilog(
-                    arith=arith,
-                    vector=vector,
-                    gpu=gpu,
-                    scf=scf,
-                    range_constexpr=range_constexpr,
-                    tile_m=tile_m,
-                    tile_n=tile_n,
-                    e_vec=8,
-                    cshuffle_nlane=32,
-                    block_size=total_threads,
-                    m_repeat=m_repeat,
-                    num_acc_n=num_acc_n,
-                    tx=tx,
-                    lane_div_16=lane_div_16,
-                    lane_mod_16=lane_mod_16,
-                    bx_m=bx_m,
-                    by_n=by_n,
-                    n_tile_base=n_tile_base,
-                    lds_out=lds_out,
-                    frag_elem_type=ir.F32Type.get(),
-                    write_row_to_lds=write_row_to_lds,
-                    precompute_row=None,
-                    store_pair=store_pair,
-                )
+                for seg_m in range_constexpr(tile_m // acc_segment_m):
+                    seg_m_repeat_base = seg_m * acc_segment_m_repeat
+                    bx_m_seg = bx_m + arith.constant(seg_m * acc_segment_m, index=True)
+
+                    def write_segment_row_to_lds(
+                        *,
+                        mi: int,
+                        ii: int,
+                        row_in_tile,
+                        row,
+                        row_base_lds,
+                        col_base_local,
+                        num_acc_n: int,
+                        lds_out,
+                    ):
+                        mi_full = seg_m_repeat_base + mi
+                        for ni in range_constexpr(num_acc_n):
+                            col_local = col_base_local + arith.constant(ni * 16, index=True)
+                            acc_idx = mi_full * num_acc_n + ni
+                            v = vector.extract(acc[acc_idx], static_position=[ii], dynamic_position=[])
+                            v1 = vector.from_elements(T.vec(1, f32), [v])
+                            vector.store(v1, lds_out, [row_base_lds + col_local], alignment=4)
+
+                    c_shuffle_epilog(
+                        arith=arith,
+                        vector=vector,
+                        gpu=gpu,
+                        scf=scf,
+                        range_constexpr=range_constexpr,
+                        tile_m=acc_segment_m,
+                        tile_n=tile_n,
+                        e_vec=8,
+                        cshuffle_nlane=32,
+                        block_size=total_threads,
+                        m_repeat=acc_segment_m_repeat,
+                        num_acc_n=num_acc_n,
+                        tx=tx,
+                        lane_div_16=lane_div_16,
+                        lane_mod_16=lane_mod_16,
+                        bx_m=bx_m_seg,
+                        by_n=by_n,
+                        n_tile_base=n_tile_base,
+                        lds_out=lds_out,
+                        frag_elem_type=ir.F32Type.get(),
+                        write_row_to_lds=write_segment_row_to_lds,
+                        precompute_row=precompute_row,
+                        store_pair=store_pair,
+                    )
 
             _then_body()
 
@@ -1862,6 +1925,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
         scale_w: fx.Pointer,
         expert_ids: fx.Pointer,
         num_valid_ids: fx.Pointer,
+        m_indices: fx.Pointer,
         stream: fx.Stream,
     ):
         allocator.finalized = False
@@ -1877,6 +1941,7 @@ def compile_kimi_mxfp4_gemm2_mxfp4out_16384():
             scale_w,
             expert_ids,
             num_valid_ids,
+            m_indices,
             value_attrs=gemm2_agpr_value_attrs,
         ).launch(
             grid=(persistent_ctas, 1, 1),
@@ -1895,6 +1960,7 @@ def kimi_mxfp4_gemm2_mxfp4out_16384(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     sorted_expert_ids: torch.Tensor,
+    m_indices: torch.Tensor,
     cumsum_tensor: torch.Tensor,
     flat_out_q: torch.Tensor | None = None,
     flat_out_scale: torch.Tensor | None = None,
@@ -1923,6 +1989,7 @@ def kimi_mxfp4_gemm2_mxfp4out_16384(
         _ptr_view_safe(_as_u8_storage(w2_scale).view(-1)),
         _ptr_view_safe(sorted_expert_ids.view(-1)),
         _ptr_view_safe(cumsum_tensor.view(-1)),
+        _ptr_view_safe(m_indices.view(-1)),
         torch.cuda.current_stream(),
     )
     _run_compiled(compile_kimi_mxfp4_gemm2_mxfp4out_16384(), args)
@@ -1959,7 +2026,7 @@ def compile_kimi_mxfp4_sort_16384():
     cumsum_nbytes = 4
     reverse_nbytes = total_pairs * 4
     masked_nbytes = EXPERTS * 4
-    block_offsets_nbytes = EXPERTS * sort_ctas* 4
+    block_offsets_nbytes = EXPERTS * sort_ctas * 4
     real_counts_nbytes = EXPERTS * 4
 
     gpu_arch = get_hip_arch()
@@ -2698,6 +2765,7 @@ def run_kimi_fp4_mxfp4_moe_16384_all_flydsl(
         w2=w2_u8,
         w2_scale=w2_scale,
         sorted_expert_ids=sort.sorted_expert_ids,
+        m_indices=sort.m_indices,
         cumsum_tensor=sort.cumsum_tensor,
     )
 

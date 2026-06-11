@@ -203,7 +203,7 @@ def compile_kimi_mxfp4_sort_zero_init_bm16():
     allocator.ptr = lds_scratch_offset + 16 * 4
 
     @flyc.kernel(
-        name="flydsl_kimi_mxfp4_sort_zero_init_NE385_TOPK9_H7168_BM16_v7_scan_pycmp",
+        name="flydsl_kimi_mxfp4_sort_zero_init_NE385_TOPK9_H7168_BM16_v9_cnt_select",
         known_block_size=[threads, 1, 1],
     )
     def sort_zero_init(
