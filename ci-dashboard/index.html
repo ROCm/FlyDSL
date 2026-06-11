@@ -41,15 +41,15 @@
 </header>
 
 <nav class="tabs" id="tabs" role="tablist">
-  <button class="tab is-active" data-view="board"  role="tab"><span class="key">1</span>CI Board</button>
-  <button class="tab" data-view="regress" role="tab"><span class="key">2</span>Regressions<b class="badge" id="regBadge" hidden>0</b></button>
-  <button class="tab" data-view="trends"  role="tab"><span class="key">3</span>Trends</button>
-  <button class="tab" data-view="local"   role="tab"><span class="key">4</span>Local&nbsp;gfx950</button>
+  <button class="tab is-active" id="tab-board"   data-view="board"   role="tab" aria-selected="true"  aria-controls="panel-board"><span class="key">1</span>CI Board</button>
+  <button class="tab"           id="tab-regress" data-view="regress" role="tab" aria-selected="false" aria-controls="panel-regress"><span class="key">2</span>Regressions<b class="badge" id="regBadge" hidden>0</b></button>
+  <button class="tab"           id="tab-trends"  data-view="trends"  role="tab" aria-selected="false" aria-controls="panel-trends"><span class="key">3</span>Trends</button>
+  <button class="tab"           id="tab-local"   data-view="local"   role="tab" aria-selected="false" aria-controls="panel-local"><span class="key">4</span>Local&nbsp;gfx950</button>
 </nav>
 
 <main id="main">
   <!-- 1 · CI BOARD -->
-  <section class="view is-active" data-view="board">
+  <section class="view is-active" data-view="board" id="panel-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
     <div class="view-head">
       <div class="counts" id="boardCounts"></div>
       <div class="seg" id="boardFilter" role="group" aria-label="Filter runs">
@@ -63,7 +63,7 @@
   </section>
 
   <!-- 2 · REGRESSIONS -->
-  <section class="view" data-view="regress">
+  <section class="view" data-view="regress" id="panel-regress" role="tabpanel" aria-labelledby="tab-regress" tabindex="0">
     <div class="view-head wrap">
       <div class="seg" id="baselineSel" role="group" aria-label="Baseline">
         <button data-b="vs_main" class="is-active">vs main</button>
@@ -94,7 +94,7 @@
   </section>
 
   <!-- 3 · TRENDS -->
-  <section class="view" data-view="trends">
+  <section class="view" data-view="trends" id="panel-trends" role="tabpanel" aria-labelledby="tab-trends" tabindex="0">
     <div class="trends-layout">
       <aside class="kernel-rail">
         <input class="search" id="kernelSearch" type="search" placeholder="find kernel…" spellcheck="false">
@@ -118,7 +118,7 @@
   </section>
 
   <!-- 4 · LOCAL gfx950 -->
-  <section class="view" data-view="local">
+  <section class="view" data-view="local" id="panel-local" role="tabpanel" aria-labelledby="tab-local" tabindex="0">
     <div class="view-head"><div class="counts" id="localCounts"></div></div>
     <div id="localPane"></div>
   </section>

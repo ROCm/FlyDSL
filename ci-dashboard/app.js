@@ -131,7 +131,7 @@ function renderBoard() {
   // newest run per PR (or per main branch commit)
   const groups = new Map();
   for (const r of S.runs) {
-    const key = r.pr ? `pr:${r.pr}` : `br:${r.branch}:${r.run_id}`;
+    const key = r.pr ? `pr:${r.pr}` : `br:${r.branch}:${r.commit}`;  // one card per PR, or per branch-commit
     const ex = groups.get(key);
     if (!ex || (r.created_at || "") > (ex.created_at || "")) groups.set(key, r);
   }
@@ -204,8 +204,11 @@ function sevClass(d) { return d <= CFG.regressionPct ? "reg" : d < 0 ? "neg" : "
 function renderRegress() {
   const base = S.reg.baseline;
   const rows = regRows();
+  // badge counts regressions for the *selected* baseline, not just vs_main
   const all = S.records.filter(r => r.source === "ci" && r[base] && r.metric !== "speedup");
-  const nReg = new Set(all.filter(r => r.regression).map(r => `${r.runner}|${kkey(r)}|${r.run_id}`)).size;
+  const nReg = new Set(
+    all.filter(r => r[base].delta_pct <= CFG.regressionPct).map(r => `${r.runner}|${kkey(r)}|${r.run_id}`)
+  ).size;
   $("#regBadge").hidden = !nReg; $("#regBadge").textContent = nReg;
   $("#regSummary").textContent = `${rows.length} rows · gate ${CFG.regressionPct}%`;
   const maxAbs = Math.max(8, ...rows.map(r => Math.abs(r[base].delta_pct)));
@@ -329,13 +332,13 @@ function renderLocal() {
   // latest local per kernel
   const loc = new Map();
   for (const r of S.local) { const k = kkey(r); const ex = loc.get(k); if (!ex || (r.ts || "") > (ex.ts || "")) loc.set(k, r); }
-  // latest CI gfx950 per kernel
+  // latest CI per (arch, kernel) — match each local record against CI of the same arch
   const ci = new Map();
-  for (const r of S.records) { if (r.source !== "ci" || r.arch !== "gfx950" || r.value == null) continue;
-    const k = kkey(r); const ex = ci.get(k); if (!ex || (r.ts || "") > (ex.ts || "")) ci.set(k, r); }
+  for (const r of S.records) { if (r.source !== "ci" || r.value == null) continue;
+    const k = `${r.arch}|${kkey(r)}`; const ex = ci.get(k); if (!ex || (r.ts || "") > (ex.ts || "")) ci.set(k, r); }
   let disagree = 0;
   const rows = [...loc.values()].map(l => {
-    const c = ci.get(kkey(l)); const cv = c?.value ?? null;
+    const c = ci.get(`${l.arch}|${kkey(l)}`); const cv = c?.value ?? null;
     const d = (cv && l.value) ? (l.value - cv) / cv * 100 : null;
     const bad = d != null && Math.abs(d) > CFG.localTolPct; if (bad) disagree++;
     return { l, cv, d, bad };
@@ -343,9 +346,10 @@ function renderLocal() {
   $("#localCounts").innerHTML =
     `<span><b>${rows.length}</b><i>kernels</i></span><span class="c-fail"><b>${disagree}</b>disagree &gt;${CFG.localTolPct}%</span>`;
   pane.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>
-    <th>kernel</th><th>shape</th><th>dtype</th><th class="num">local gfx950</th><th class="num">CI gfx950</th><th class="num">Δ%</th><th>local run</th>
+    <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th class="num">local</th><th class="num">CI</th><th class="num">Δ%</th><th>local run</th>
     </tr></thead><tbody>${rows.map(({ l, cv, d, bad }) => `<tr class="${bad ? "row-reg" : ""}">
       <td class="k-op">${esc(l.op)}</td><td class="k-dim">${esc(l.shape)}</td><td class="k-acc">${esc(l.dtype)}</td>
+      <td style="color:${CFG.archColor[l.arch] || "var(--ink-2)"}">${esc(l.arch || "")}</td>
       <td class="num">${fmtVal(l.value, l.metric)} <span class="metric-tag">${l.metric}</span></td>
       <td class="num k-dim">${cv == null ? "—" : fmtVal(cv, l.metric)}</td>
       <td class="num ${bad ? "disagree" : "agree"}">${d == null ? "—" : (d > 0 ? "+" : "") + d.toFixed(1)}</td>
@@ -358,7 +362,11 @@ const VIEWS = ["board", "regress", "trends", "local"];
 function showView(v) {
   if (!VIEWS.includes(v)) v = "board";
   S.view = v;
-  $$(".tab").forEach(t => t.classList.toggle("is-active", t.dataset.view === v));
+  $$(".tab").forEach(t => {
+    const on = t.dataset.view === v;
+    t.classList.toggle("is-active", on);
+    t.setAttribute("aria-selected", on ? "true" : "false");
+  });
   $$(".view").forEach(s => s.classList.toggle("is-active", s.dataset.view === v));
   if (location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
   if (v === "trends" && trendChart) trendChart.resize();

@@ -72,11 +72,44 @@ def runner_of(job_name: str) -> str | None:
     return m.group(1) if m and m.group(1) in BENCH_RUNNERS else None
 
 
+_PR_CACHE: dict[tuple[str, str], list[dict]] = {}
+
+
+def resolve_pr(repo: str, run: dict) -> int | None:
+    """The PR number for a run.
+
+    ``workflow_runs[].pull_requests`` is frequently empty for real PR runs (e.g. when the
+    head is a fork), so for pull_request events we fall back to looking the PR up by its
+    head ``owner:branch`` and matching the commit SHA.
+    """
+    prs = run.get("pull_requests") or []
+    if prs:
+        return prs[0]["number"]
+    if run.get("event") != "pull_request":
+        return None
+    owner = ((run.get("head_repository") or {}).get("owner") or {}).get("login")
+    branch = run.get("head_branch")
+    if not owner or not branch:
+        return None
+    key = (owner, branch)
+    if key not in _PR_CACHE:
+        try:
+            _PR_CACHE[key] = gh(f"repos/{repo}/pulls?state=all&head={owner}:{branch}&per_page=10")
+        except RuntimeError:
+            _PR_CACHE[key] = []
+    cands = _PR_CACHE[key] or []
+    sha = run.get("head_sha")
+    for p in cands:
+        if (p.get("head") or {}).get("sha") == sha:
+            return p.get("number")
+    return cands[0]["number"] if cands else None
+
+
 def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict], dict]:
     """Return (records, run_summary) for one workflow run."""
     run_id = run["id"]
     commit = run.get("head_sha")
-    pr = run["pull_requests"][0]["number"] if run.get("pull_requests") else None
+    pr = resolve_pr(repo, run)
     jobs = run_jobs(repo, run_id)
     records: list[dict] = []
     job_status: list[dict] = []

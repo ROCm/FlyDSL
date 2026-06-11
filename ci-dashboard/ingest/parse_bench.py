@@ -67,10 +67,11 @@ _AITER_ROW = re.compile(
 )
 
 _CMP_HEADER = re.compile(r"^=== Benchmark: current vs (?P<base>\S+) ===\s*$")
-# A comparison row. <base>= may be "main" or a tag like "v0.2.0"; dtype may be e.g. "int4_bf16".
+# A comparison row. <base>= may be "main", a fallback like "main~2", or a tag like "v0.2.0";
+# dtype may be e.g. "int4_bf16". The label allows ~ so the main~N fallback baselines parse.
 _CMP_ROW = re.compile(
     r"^\s*(?P<op>\S+)\s+(?P<shape>\S+)\s+(?P<dtype>\S+)\s+"
-    r"(?P<blabel>[\w][\w.\-]*)=\s*(?P<base_val>-?\d+(?:\.\d+)?)\s+(?P<unit>TB/s|TFLOPS)\s+"
+    r"(?P<blabel>[\w][\w.~\-]*)=\s*(?P<base_val>-?\d+(?:\.\d+)?)\s+(?P<unit>TB/s|TFLOPS)\s+"
     r"current=\s*(?P<cur>-?\d+(?:\.\d+)?)\s+(?:TB/s|TFLOPS)\s+"
     r"ratio=\s*(?P<ratio>-?\d+(?:\.\d+)?)x\s+"
     r"delta=\s*(?P<delta>[-+]?\d+(?:\.\d+)?)\s+\(\s*(?P<pct>[-+]?\d+(?:\.\d+)?)%\)\s*$"
@@ -191,7 +192,9 @@ def parse_log(text: str, regression_pct: float = DEFAULT_REGRESSION_PCT) -> list
         rec.metric = unit
         if rec.value is None:
             rec.value = cur
-        is_main = current_base == "main" or bl.label == "main"
+        # "main" and the "main~N" fallbacks (flydsl.yaml walks back when main won't build)
+        # are all the main baseline; anything else (v-tags) is the tag baseline.
+        is_main = current_base.startswith("main") or bl.label.startswith("main")
         if is_main:
             rec.vs_main = {"baseline": bl.baseline, "ratio": bl.ratio, "delta_pct": bl.delta_pct}
             rec.regression = bl.delta_pct <= regression_pct
@@ -213,7 +216,8 @@ def parse_aiter_compare(text: str) -> list[Record]:
 
     Produces one record per (op, shape, dtype) with ``metric="speedup"``,
     ``value`` = FlyDSL/AIter speedup (>1 means FlyDSL wins), and the raw latencies
-    under ``extra``. Later tables win on duplicate keys.
+    under ``extra``. Only the first table (the current run) is kept; the table is
+    re-emitted for the main/tag baseline rebuilds and those repeats are ignored.
     """
     lines = [clean(line) for line in text.splitlines()]
     out: dict[tuple, Record] = {}
@@ -276,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pr", type=int)
     ap.add_argument("--run-id", type=int)
     ap.add_argument("--ts", help="ISO-8601 timestamp for this run")
-    ap.add_argument("--source", default="ci", choices=["ci", "local-gfx950"])
+    ap.add_argument("--source", default="ci", help='"ci" or a local tag like "local-gfx950"')
     ap.add_argument("--regression-pct", type=float, default=DEFAULT_REGRESSION_PCT)
     ap.add_argument("--no-aiter", action="store_true", help="skip the FlyDSL-vs-AIter speedup table")
     ap.add_argument("--out", help="write JSON array here (default stdout)")

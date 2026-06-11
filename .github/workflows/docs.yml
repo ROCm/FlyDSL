@@ -47,7 +47,10 @@ jobs:
         run: |
           # Publish the static dashboard alongside the docs at /ci-dashboard.
           # Its data is fetched at runtime from the ci-dashboard-data branch.
-          cp -r ci-dashboard docs/_build/html/ci-dashboard
+          # Copy contents into a fresh target dir so a pre-existing dir can't nest.
+          rm -rf docs/_build/html/ci-dashboard
+          mkdir -p docs/_build/html/ci-dashboard
+          cp -r ci-dashboard/. docs/_build/html/ci-dashboard/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

@@ -5,7 +5,12 @@ Run:  python3 -m pytest ci-dashboard/ingest/test_parse_bench.py
   or:  python3 ci-dashboard/ingest/test_parse_bench.py
 """
 
-import parse_bench as pb
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # importable under pytest from repo root
+
+import parse_bench as pb  # noqa: E402
 
 # A miniature job log: timestamp prefixes + ANSI, a current table, a baseline-rebuild
 # table (must be ignored), two comparison blocks, and a FlyDSL-vs-AIter sweep.
@@ -57,6 +62,19 @@ def test_comparison_main_and_tag_and_regression():
     assert sm.vs_tag["tag"] == "v0.2.0" and sm.vs_tag["delta_pct"] == -2.5
     gm = d[("gemm", "5120x5120x8320_tile64x256x128", "fp8", "TFLOPS")]
     assert gm.vs_main["delta_pct"] == 1.9 and gm.regression is False
+
+
+def test_main_fallback_label_is_treated_as_main():
+    # flydsl.yaml walks back to main~1 / main~2 when main won't build; those rows must
+    # still populate vs_main (not vs_tag) and drive the regression flag.
+    log = (
+        "2026-06-09T09:00:00.0Z === Benchmark: current vs main~2 ===\n"
+        "2026-06-09T09:00:00.1Z   softmax 32768x8192 bf16  main~2= 4.200 TB/s  "
+        "current=  3.900 TB/s  ratio= 0.929x  delta= -0.300 ( -7.1%)\n"
+    )
+    sm = _by_key(pb.parse_log(log))[("softmax", "32768x8192", "bf16", "TB/s")]
+    assert sm.vs_main is not None and sm.vs_tag is None
+    assert sm.vs_main["delta_pct"] == -7.1 and sm.regression is True
 
 
 def test_aiter_speedup_with_commas():

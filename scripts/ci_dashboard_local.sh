@@ -41,15 +41,16 @@ BENCH_ARGS=(); [[ -n "$ONLY" ]] && BENCH_ARGS=(--only "$ONLY")
 bash scripts/run_benchmark.sh "${BENCH_ARGS[@]}" 2>&1 | tee "$LOG"
 
 OUT="$REPO_ROOT/ci-dashboard/data/local.json"
+RECORDS="$(mktemp)"; trap 'rm -f "$LOG" "$RECORDS"' EXIT
 echo "[local] parsing -> $OUT"
 python3 ci-dashboard/ingest/parse_bench.py "$LOG" \
-  --runner "local-${HOST}" --arch "$ARCH" --source local-gfx950 \
-  --commit "$COMMIT" --ts "$TS" --out /tmp/local_records.json
+  --runner "local-${HOST}" --arch "$ARCH" --source "local-${ARCH}" \
+  --commit "$COMMIT" --ts "$TS" --out "$RECORDS"
 
-python3 - "$OUT" "$TS" <<'PY'
+python3 - "$OUT" "$TS" "$RECORDS" <<'PY'
 import json, os, sys
-out, ts = sys.argv[1], sys.argv[2]
-recs = json.load(open("/tmp/local_records.json"))
+out, ts, records = sys.argv[1], sys.argv[2], sys.argv[3]
+recs = json.load(open(records))
 # merge with any existing local.json (newest per runner+kernel+metric wins)
 prev = []
 if os.path.exists(out):
