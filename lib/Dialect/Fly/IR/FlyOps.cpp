@@ -131,6 +131,159 @@ Type RebuildLayoutLikeType(Type type, LayoutAttr newLayoutAttr) {
   }
 }
 
+LogicalResult verifyLayoutProfile(std::optional<Location> location, StringRef opName,
+                                  StringRef subject, IntTupleAttr shape, IntTupleAttr stride) {
+  if (intTupleIsCongruent(shape, stride))
+    return success();
+
+  return emitOptionalError(location, opName,
+                           ": expected shape/stride profiles to match for ", subject,
+                           ", got shape ", shape, " and stride ", stride);
+}
+
+LogicalResult verifyLayoutProfile(std::optional<Location> location, StringRef opName,
+                                  StringRef subject, LayoutAttr layout) {
+  return verifyLayoutProfile(location, opName, subject, layout.getShape(), layout.getStride());
+}
+
+std::optional<int64_t> getStaticLeafValue(IntTupleAttr attr) {
+  if (!attr.isLeaf() || !attr.isStatic())
+    return std::nullopt;
+  return attr.extractIntFromLeaf().getValue();
+}
+
+std::optional<int64_t> getStaticProduct(IntTupleAttr attr) {
+  if (attr.isLeaf())
+    return getStaticLeafValue(attr);
+
+  int64_t product = 1;
+  for (int i = 0; i < attr.rank(); ++i) {
+    std::optional<int64_t> childProduct = getStaticProduct(attr.at(i));
+    if (!childProduct)
+      return std::nullopt;
+    product *= *childProduct;
+  }
+  return product;
+}
+
+LogicalResult verifyTileProfiles(std::optional<Location> location, StringRef opName,
+                                 StringRef subject, TileAttr tile) {
+  if (tile.isLeaf()) {
+    if (auto layout = dyn_cast<LayoutAttr>(tile.getValue()))
+      return verifyLayoutProfile(location, opName, subject, layout);
+    if (auto nestedTile = dyn_cast<TileAttr>(tile.getValue()))
+      return verifyTileProfiles(location, opName, subject, nestedTile);
+    return success();
+  }
+
+  for (int i = 0; i < tile.rank(); ++i) {
+    Attribute elem = tile.at(i);
+    if (auto layout = dyn_cast<LayoutAttr>(elem)) {
+      if (failed(verifyLayoutProfile(location, opName, subject, layout)))
+        return failure();
+    } else if (auto nestedTile = dyn_cast<TileAttr>(elem)) {
+      if (failed(verifyTileProfiles(location, opName, subject, nestedTile)))
+        return failure();
+    }
+  }
+  return success();
+}
+
+LogicalResult verifyCompositionImpl(IntTupleBuilder<IntTupleAttr> &builder,
+                                    std::optional<Location> location, StringRef opName,
+                                    IntTupleAttr lhsShape, IntTupleAttr rhsShape,
+                                    IntTupleAttr rhsStride) {
+  if (!rhsShape.isLeaf()) {
+    for (int i = 0; i < rhsShape.rank(); ++i) {
+      if (failed(verifyCompositionImpl(builder, location, opName, lhsShape, rhsShape.at(i),
+                                       rhsStride.at(i))))
+        return failure();
+    }
+    return success();
+  }
+
+  if (rhsStride.isLeafStaticValue(0) || lhsShape.isLeaf())
+    return success();
+
+  IntTupleAttr restShape = rhsShape;
+  IntTupleAttr restStride = rhsStride;
+  for (int i = 0; i < lhsShape.rank() - 1; ++i) {
+    IntTupleAttr currShape = lhsShape.at(i);
+
+    if (currShape.isStatic() && restStride.isStatic()) {
+      int64_t currShapeVal = builder.getStaticValue(currShape);
+      int64_t restStrideVal = builder.getStaticValue(restStride);
+      if (currShapeVal == 0)
+        return emitOptionalError(location, opName,
+                                 ": expected nonzero static outer shape component");
+      if (!(restStrideVal % currShapeVal == 0 || restStrideVal < currShapeVal)) {
+        return emitOptionalError(location, opName,
+                                 ": expected inner stride ", restStrideVal,
+                                 " to divide or be smaller than outer shape component ",
+                                 currShapeVal);
+      }
+    }
+
+    IntTupleAttr nextShape = builder.ceilDiv(currShape, restStride);
+    IntTupleAttr nextStride = builder.ceilDiv(restStride, currShape);
+
+    if (nextShape.isLeafStaticValue(1) || restShape.isLeafStaticValue(1)) {
+      restStride = nextStride;
+      continue;
+    }
+
+    IntTupleAttr newShape = builder.min(nextShape, restShape);
+
+    if (newShape.isStatic() && restShape.isStatic()) {
+      int64_t newShapeVal = builder.getStaticValue(newShape);
+      int64_t restShapeVal = builder.getStaticValue(restShape);
+      if (newShapeVal == 0 || restShapeVal % newShapeVal != 0) {
+        return emitOptionalError(location, opName,
+                                 ": expected composed shape component ", newShapeVal,
+                                 " to divide remaining inner shape ", restShapeVal);
+      }
+    }
+
+    restShape = builder.div(restShape, newShape);
+    restStride = nextStride;
+  }
+
+  return success();
+}
+
+LogicalResult verifyLayoutComposition(std::optional<Location> location, StringRef opName,
+                                      LayoutBuilder<LayoutAttr> &layoutBuilder,
+                                      LayoutAttr outerLayout, LayoutAttr innerLayout) {
+  if (failed(verifyLayoutProfile(location, opName, "outer layout", outerLayout)))
+    return failure();
+  if (failed(verifyLayoutProfile(location, opName, "inner layout", innerLayout)))
+    return failure();
+
+  LayoutAttr coalescedOuter = layoutCoalesce(layoutBuilder, outerLayout);
+  return verifyCompositionImpl(layoutBuilder, location, opName, coalescedOuter.getShape(),
+                               innerLayout.getShape(), innerLayout.getStride());
+}
+
+LogicalResult verifyLogicalDivide(std::optional<Location> location, StringRef opName,
+                                  LayoutAttr layout, LayoutAttr divisorLayout) {
+  if (failed(verifyLayoutProfile(location, opName, "layout", layout)))
+    return failure();
+  if (failed(verifyLayoutProfile(location, opName, "divisor layout", divisorLayout)))
+    return failure();
+
+  std::optional<int64_t> layoutSize = getStaticProduct(layout.getShape());
+  std::optional<int64_t> divisorSize = getStaticProduct(divisorLayout.getShape());
+  if (!layoutSize || !divisorSize)
+    return success();
+
+  if (*divisorSize == 0)
+    return emitOptionalError(location, opName, ": expected nonzero static divisor size");
+  if (*layoutSize % *divisorSize != 0)
+    return emitOptionalError(location, opName, ": expected static divisor size ", *divisorSize,
+                             " to divide static layout size ", *layoutSize);
+  return success();
+}
+
 Type applyIntTupleTransform(Type inputTy, function_ref<IntTupleAttr(IntTupleAttr)> fn) {
   if (auto tupleTy = dyn_cast<IntTupleType>(inputTy))
     return IntTupleType::get(fn(tupleTy.getAttr()));
@@ -207,6 +360,9 @@ FLY_INFER_RETURN_TYPES(MakeLayoutOp) {
   if (!strideType)
     return emitOptionalError(location, "MakeLayoutOp: expected IntTupleType for stride, got ",
                              operands[1].getType());
+  if (failed(verifyLayoutProfile(location, "MakeLayoutOp", "result layout",
+                                 shapeType.getAttr(), strideType.getAttr())))
+    return failure();
   auto layoutAttr = LayoutAttr::get(context, shapeType.getAttr(), strideType.getAttr());
   inferredReturnTypes.assign({LayoutType::get(context, layoutAttr)});
   return success();
@@ -1117,13 +1273,21 @@ FLY_INFER_RETURN_TYPES(CompositionOp) {
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   Type innerTy = operands[1].getType();
   LayoutAttr inferred;
-  if (auto tileTy = dyn_cast<TileType>(innerTy))
+  if (auto tileTy = dyn_cast<TileType>(innerTy)) {
+    if (failed(verifyLayoutProfile(location, "CompositionOp", "outer layout", outerLayoutAttr)))
+      return failure();
+    if (failed(verifyTileProfiles(location, "CompositionOp", "inner tile", tileTy.getAttr())))
+      return failure();
     inferred = layoutComposition(layoutBuilder, outerLayoutAttr, tileTy.getAttr());
-  else if (auto innerLayoutTy = dyn_cast<LayoutType>(innerTy))
+  } else if (auto innerLayoutTy = dyn_cast<LayoutType>(innerTy)) {
+    if (failed(verifyLayoutComposition(location, "CompositionOp", layoutBuilder, outerLayoutAttr,
+                                       innerLayoutTy.getAttr())))
+      return failure();
     inferred = layoutComposition(layoutBuilder, outerLayoutAttr, innerLayoutTy.getAttr());
-  else
+  } else {
     return emitOptionalError(
         location, "CompositionOp: expected TileType or LayoutType for inner, got ", innerTy);
+  }
 
   inferredReturnTypes.assign({RebuildLayoutLikeType(outerTy, inferred)});
   return success();
@@ -1184,8 +1348,16 @@ FLY_INFER_RETURN_TYPES(LogicalDivideOp) {
   LayoutAttr inferred;
   LayoutBuilder<LayoutAttr> layoutBuilder(context);
   if (auto divisorLayoutTy = dyn_cast<LayoutType>(divisorTy)) {
+    if (failed(verifyLogicalDivide(location, "LogicalDivideOp", layoutAttr,
+                                   divisorLayoutTy.getAttr())))
+      return failure();
     inferred = layoutLogicalDivide(layoutBuilder, layoutAttr, divisorLayoutTy.getAttr());
   } else if (auto divisorTileTy = dyn_cast<TileType>(divisorTy)) {
+    if (failed(verifyLayoutProfile(location, "LogicalDivideOp", "layout", layoutAttr)))
+      return failure();
+    if (failed(verifyTileProfiles(location, "LogicalDivideOp", "divisor tile",
+                                  divisorTileTy.getAttr())))
+      return failure();
     inferred = layoutLogicalDivide(layoutBuilder, layoutAttr, divisorTileTy.getAttr());
   } else {
     return emitOptionalError(
