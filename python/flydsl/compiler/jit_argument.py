@@ -22,7 +22,7 @@ from ..expr.typing import (
     Tensor,
     address_space_from_attr,
 )
-from .protocol import DslType, JitArgument
+from .protocol import DslType, JitArgument, is_dsl_type, is_jit_argument
 
 _RESOLVE_SIG_WARNED = set()
 
@@ -124,9 +124,9 @@ def convert_to_jit_arguments(
             constexpr_values[param_name] = value
             continue
 
-        is_jit_arg = isinstance(value, JitArgument)
-        is_dsl_type = isinstance(value, DslType)
-        if is_jit_arg and is_dsl_type:
+        is_jit_arg = is_jit_argument(value)
+        is_dsl = is_dsl_type(value)
+        if is_jit_arg and is_dsl:
             jit_arg = value
             dsl_type = type(value)
         elif is_jit_arg:

@@ -42,6 +42,7 @@ from .protocol import (
     cache_signature,
     construct_from_ir_values,
     get_ir_types,
+    is_jit_argument,
 )
 
 EXTRA_SOURCE_DIRS: List[str] = []
@@ -1414,7 +1415,7 @@ class JitFunction:
                     key_parts.append((name, arg))
                     continue
 
-            if isinstance(arg, JitArgument):
+            if is_jit_argument(arg):
                 jit_arg = arg
             elif isinstance(ann, type) and issubclass(ann, JitArgument):
                 jit_arg = ann(arg)

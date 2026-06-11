@@ -35,6 +35,37 @@ class Storable(Protocol):
     def __poke_into_ptr__(cls, ptr: ir.Value, value) -> None: ...
 
 
+# ``isinstance(obj, <runtime_checkable Protocol>)`` is O(number of protocol
+# members) and costs several microseconds per call (the negative case is the
+# most expensive). Whether an object satisfies these structural protocols is a
+# pure function of ``type(obj)`` -- the protocol only checks for the presence of
+# methods, which every instance of a type shares -- so the result is memoized by
+# type. This keeps the per-argument JIT dispatch / cache-key hot path cheap
+# (~0.1us dict lookup) instead of re-running the structural check every launch.
+_JIT_ARGUMENT_BY_TYPE: dict = {}
+_DSL_TYPE_BY_TYPE: dict = {}
+
+
+def is_jit_argument(obj) -> bool:
+    """``isinstance(obj, JitArgument)`` memoized by ``type(obj)``."""
+    t = type(obj)
+    r = _JIT_ARGUMENT_BY_TYPE.get(t)
+    if r is None:
+        r = isinstance(obj, JitArgument)
+        _JIT_ARGUMENT_BY_TYPE[t] = r
+    return r
+
+
+def is_dsl_type(obj) -> bool:
+    """``isinstance(obj, DslType)`` memoized by ``type(obj)``."""
+    t = type(obj)
+    r = _DSL_TYPE_BY_TYPE.get(t)
+    if r is None:
+        r = isinstance(obj, DslType)
+        _DSL_TYPE_BY_TYPE[t] = r
+    return r
+
+
 def get_ir_types(obj) -> List[ir.Type]:
     if isinstance(obj, ir.Value):
         return [obj.type]
