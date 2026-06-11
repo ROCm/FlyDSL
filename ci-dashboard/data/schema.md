@@ -21,7 +21,7 @@ All metrics are bigger-is-better. `metric` is `"TB/s"` (memory-bound ops),
       "commit": "e33eca2e…",
       "pr": 669,                        // null for main/push runs
       "run_id": 27196355973,
-      "source": "ci",                   // "ci" | "local-gfx950"
+      "source": "ci",
       "runner": "linux-flydsl-mi325-1",
       "arch": "gfx942",                 // gfx950 | gfx942 | gfx1201
       "op": "layernorm",
@@ -30,7 +30,7 @@ All metrics are bigger-is-better. `metric` is `"TB/s"` (memory-bound ops),
       "metric": "TB/s",
       "value": 3.971,                   // current value (null if skipped)
       "status": "ok",                   // ok | skip | missing
-      "vs_main": { "baseline": 4.270, "ratio": 0.930, "delta_pct": -7.0 },
+      "vs_main": { "label": "main", "baseline": 4.270, "ratio": 0.930, "delta_pct": -7.0 },
       "vs_tag":  { "tag": "v0.2.0", "baseline": 2.326, "ratio": 1.707, "delta_pct": 70.7 },
       "regression": true,               // vs_main.delta_pct <= -3.0
       "extra": null                     // {"flydsl_us","aiter_us","baseline"} for speedup rows
@@ -62,8 +62,3 @@ regression gate (`-3%`) is `parse_bench.DEFAULT_REGRESSION_PCT`.
   ]
 }
 ```
-
-## `local.json` — local gfx950 cross-check (optional)
-
-Same record shape as `history.json` with `source: "local-gfx950"` and
-`runner: "local-<hostname>"`. Written by `scripts/ci_dashboard_local.sh`.

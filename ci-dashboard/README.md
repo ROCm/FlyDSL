@@ -5,10 +5,10 @@ A static dashboard for FlyDSL CI benchmarks, served at
 
 | Tab | What it shows |
 |---|---|
-| **CI Board** | Today's open/running PRs with per-runner pass/fail/running chips (`gfx950` / `gfx942` / `gfx1201`). Live from the public Actions API, with a snapshot fallback. |
-| **Regressions** | `current vs main` and `current vs latest tag` deltas per kernel/shape/dtype, sortable/filterable. Red ≤ −3%, amber ≤ −1%. |
-| **Trends** | Per-kernel TB/s · TFLOPS time-series across commits, one line per runner. |
-| **Local gfx950** | Your local MI350X numbers beside CI's gfx950 result, flagging disagreements. |
+| **Health** | The landing page. A single count of *real* regressions on main, then those kernels with op / shape / arch / Δ% and a sparkline. "Real" = a drop beyond the kernel's run-to-run noise (or the −3% gate when samples are sparse). |
+| **PR Check** | Pick a PR → does its latest run slow any kernel vs main, with real-vs-watch counts. The merge-gating view. |
+| **Trends** | Per-kernel TB/s · TFLOPS across commits, one line per runner, with a main mean ± 2σ noise band (single-arch view). |
+| **CI Board** | Recent PRs/runs with per-runner pass/fail/running chips and each run's worst Δ vs main. Live from the public Actions API, snapshot fallback. |
 
 No build step, no framework: plain HTML/CSS/JS + a vendored `vendor/chart.umd.min.js`.
 
@@ -19,7 +19,7 @@ flydsl.yaml "Fly DSL test" run  ──logs──►  ci-dashboard-ingest.yml
    (3 GPU runners, per PR/main)               parse_bench.py → ingest.py
                                                      │ commit
                                                      ▼
-                            branch  ci-dashboard-data   history.json · runs.json · local.json
+                            branch  ci-dashboard-data   history.json · runs.json
                                                      │ fetched at runtime (raw.githubusercontent)
 docs.yml  ──copies ci-dashboard/ into the docs Pages artifact──►  /ci-dashboard  (the page)
                                                      + live PR status via the public Actions API
@@ -38,7 +38,6 @@ benchmark run) onto the `ci-dashboard-data` branch, which the page fetches live.
 - `ingest/ingest.py` — lists recent runs via `gh`, pulls the 3 benchmark jobs' logs, merges history,
   snapshots run status.
 - `data/` — seed `history.json` / `runs.json` (first-paint fallback) and `schema.md` (the contract).
-- `../scripts/ci_dashboard_local.sh` — local gfx950 cross-check runner.
 - `../.github/workflows/ci-dashboard-ingest.yml` — the ingestion workflow.
 
 ## Local development
@@ -54,7 +53,7 @@ To refresh the seed / data branch from real runs:
 python3 ci-dashboard/ingest/ingest.py --repo ROCm/FlyDSL --max-runs 40 --out-dir /tmp/out
 ```
 
-Tabs are deep-linkable: `#board`, `#regress`, `#trends`, `#local`. Keys `1`–`4` switch tabs, `r` reloads.
+Tabs are deep-linkable: `#health`, `#prcheck`, `#trends`, `#board`. Keys `1`–`4` switch tabs, `r` reloads.
 
 ## Configuration & forks
 
@@ -64,7 +63,6 @@ All wiring lives in the `CFG` object at the top of `app.js` (`repo`, `dataBranch
 
 The live CI board uses the **unauthenticated** public Actions API (60 requests/hour
 per IP). That is ample for the default 90 s refresh and the ≤6 requests per load; if
-the limit is hit the board degrades gracefully to the last `runs.json` snapshot and
-the `LIVE` indicator goes grey. The benchmark numbers never depend on the live API —
-they come from the data branch.
+the limit is hit the board degrades gracefully to the last `runs.json` snapshot. The
+benchmark numbers never depend on the live API — they come from the data branch.
 

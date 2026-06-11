@@ -196,7 +196,9 @@ def parse_log(text: str, regression_pct: float = DEFAULT_REGRESSION_PCT) -> list
         # are all the main baseline; anything else (v-tags) is the tag baseline.
         is_main = current_base.startswith("main") or bl.label.startswith("main")
         if is_main:
-            rec.vs_main = {"baseline": bl.baseline, "ratio": bl.ratio, "delta_pct": bl.delta_pct}
+            # label records which main was used ("main" or a "main~N" fallback) so the UI
+            # can show what the comparison was actually against.
+            rec.vs_main = {"label": bl.label, "baseline": bl.baseline, "ratio": bl.ratio, "delta_pct": bl.delta_pct}
             rec.regression = bl.delta_pct <= regression_pct
         else:
             rec.vs_tag = {"tag": current_base, "baseline": bl.baseline, "ratio": bl.ratio, "delta_pct": bl.delta_pct}
@@ -280,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pr", type=int)
     ap.add_argument("--run-id", type=int)
     ap.add_argument("--ts", help="ISO-8601 timestamp for this run")
-    ap.add_argument("--source", default="ci", help='"ci" or a local tag like "local-gfx950"')
+    ap.add_argument("--source", default="ci", help='record source tag (default "ci")')
     ap.add_argument("--regression-pct", type=float, default=DEFAULT_REGRESSION_PCT)
     ap.add_argument("--no-aiter", action="store_true", help="skip the FlyDSL-vs-AIter speedup table")
     ap.add_argument("--out", help="write JSON array here (default stdout)")

@@ -8,6 +8,21 @@ tiling, partitioning, data movement, and kernel structure at a high level.
 an end‑to‑end, MLIR‑native compiler stack for GPU kernels. Its core is the `fly` dialect—a first‑class
 layout IR with explicit algebra and coordinate mapping, plus a composable lowering pipeline to GPU/ROCDL.
 
+<div align="center">
+
+[![CI Performance Dashboard](https://img.shields.io/badge/CI_Performance-Dashboard-34d2c2?style=flat-square&labelColor=141922)](https://rocm.github.io/FlyDSL/ci-dashboard/)
+[![Docs](https://img.shields.io/badge/docs-rocm.github.io%2FFlyDSL-2f81f7?style=flat-square&labelColor=141922)](https://rocm.github.io/FlyDSL/)
+
+<a href="https://rocm.github.io/FlyDSL/ci-dashboard/">
+  <img src="ci-dashboard/assets/dashboard-banner.png" alt="FlyDSL CI Performance Dashboard" width="760">
+</a>
+
+</div>
+
+> **[CI Performance Dashboard →](https://rocm.github.io/FlyDSL/ci-dashboard/)** — kernel regressions on
+> `main`, per‑PR perf checks, and trends across `gfx950` / `gfx942` / `gfx1201`, parsed from every
+> benchmark run. See [`ci-dashboard/`](ci-dashboard/).
+
 ## Overview
 
 - **FlyDSL (Python DSL)**: author kernels in Python and compile them through the Fly dialect
