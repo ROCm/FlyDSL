@@ -232,7 +232,7 @@ def test_drift_baseline_is_per_owner_cls():
     against its own baseline, not the first owner's. Otherwise a global seen only
     under the second owner is skipped (not in the first owner's baseline) and a
     later mutation silently reuses the memoized key segment instead of raising."""
-    from flydsl.compiler.jit_function import _snapshot_refs
+    from flydsl.compiler.jit_function import _snapshot_refs_for_drift
 
     @flyc.jit
     def launch(A: fx.Tensor):
@@ -249,11 +249,48 @@ def test_drift_baseline_is_per_owner_cls():
 
     launch._global_refs_cache[A] = [("FOO", "m", g)]
     launch._global_refs_cache[B] = [("BAR", "m", g)]
-    launch._used_global_vals[A] = _snapshot_refs(launch._global_refs_cache[A], stable=False)
-    launch._used_global_vals[B] = _snapshot_refs(launch._global_refs_cache[B], stable=False)
+    launch._used_global_vals[A] = _snapshot_refs_for_drift(launch._global_refs_cache[A])
+    launch._used_global_vals[B] = _snapshot_refs_for_drift(launch._global_refs_cache[B])
 
     g["BAR"] = 2  # mutate a global seen only under owner B
 
     launch._check_globals_drift(A)  # A's baseline (FOO) unchanged → no raise
     with pytest.raises(RuntimeError, match="BAR"):
         launch._check_globals_drift(B)  # B's own baseline catches the BAR drift
+
+
+def test_drift_identity_stable_fastpath_and_container_mutation():
+    """The drift check short-circuits identity-stable globals (modules / functions
+    / classes) with an ``is`` compare, but must still: (1) raise when such a global
+    is rebound to a different object, and (2) catch *in-place* mutation of a
+    by-value container, which keeps its identity and so must not be fast-pathed."""
+    from flydsl.compiler.jit_function import _snapshot_refs_for_drift
+
+    @flyc.jit
+    def launch(A: fx.Tensor):
+        return A
+
+    def helper_a():
+        return 1
+
+    def helper_b():
+        return 2
+
+    g = {"__name__": "m", "fn": helper_a, "lst": [1, 2]}
+    launch._global_refs_cache[None] = [("fn", "m", g), ("lst", "m", g)]
+    launch._used_global_vals[None] = _snapshot_refs_for_drift(launch._global_refs_cache[None])
+
+    # Identity-stable + unchanged → fast ``is`` hit, no raise.
+    launch._check_globals_drift(None)
+
+    # Identity-stable rebound to a different object → ``is`` misses, full compare raises.
+    g["fn"] = helper_b
+    with pytest.raises(RuntimeError, match="fn"):
+        launch._check_globals_drift(None)
+    g["fn"] = helper_a
+    launch._check_globals_drift(None)  # restored → no raise
+
+    # In-place mutation of a by-value container (same identity) must still be caught.
+    g["lst"].append(3)
+    with pytest.raises(RuntimeError, match="lst"):
+        launch._check_globals_drift(None)
