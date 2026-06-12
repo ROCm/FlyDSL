@@ -2842,7 +2842,7 @@ def compile_fp8fp4_gemm(
         # Pre-expand tail_plan: augment each entry with the NEXT active compute stage
         # so we can do pf chaining without dict lookups inside the traced for loop.
         _tail_plan_ext = []  # (load_stage, compute_stage, outstanding, next_compute_stage)
-        _tail_plan_active_cs = [cs for ls, cs, out in tail_plan if out != -1]
+        _tail_plan_active_cs = [cs for ls, cs, out in tail_plan]
         for _tei, (ls, cs, out) in enumerate(tail_plan):
             _next_cs = None
             if out != -1:
