@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Pure-Python tests for parse_bench (no GPU, no network).
 
-Run:  python3 -m pytest ci-dashboard/ingest/test_parse_bench.py
-  or:  python3 ci-dashboard/ingest/test_parse_bench.py
+Run:  python3 -m pytest .github/dashboard/ingest/test_parse_bench.py
+  or:  python3 .github/dashboard/ingest/test_parse_bench.py
 """
 
 import os

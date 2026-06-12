@@ -50,7 +50,7 @@ jobs:
           base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${DATA_BRANCH}"
           curl -fsSL "$base/history.json" -o "$OUT/history.json" || echo "no existing history.json fetched (first run or unreachable) — starting fresh"
           curl -fsSL "$base/runs.json"    -o "$OUT/runs.json"    || true
-          python3 ci-dashboard/ingest/ingest.py \
+          python3 .github/dashboard/ingest/ingest.py \
             --repo "$GITHUB_REPOSITORY" \
             --max-runs "$MAX_RUNS" \
             --history-days 14 \

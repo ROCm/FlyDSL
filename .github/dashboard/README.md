@@ -21,7 +21,7 @@ flydsl.yaml "Fly DSL test" run  ──logs──►  ci-dashboard-ingest.yml
                                                      ▼
                             branch  ci-dashboard-data   history.json · runs.json
                                                      │ fetched at runtime (raw.githubusercontent)
-docs.yml  ──copies ci-dashboard/ into the docs Pages artifact──►  /ci-dashboard  (the page)
+docs.yml  ──copies .github/dashboard/ into the docs Pages artifact──►  /ci-dashboard  (the page)
                                                      + live PR status via the public Actions API
 ```
 
@@ -37,20 +37,23 @@ benchmark run) onto the `ci-dashboard-data` branch, which the page fetches live.
   comparison blocks into normalized records. Stdlib-only; runs in CI and locally.
 - `ingest/ingest.py` — lists recent runs via `gh`, pulls the 3 benchmark jobs' logs, merges history,
   snapshots run status.
-- `data/` — seed `history.json` / `runs.json` (first-paint fallback) and `schema.md` (the contract).
-- `../.github/workflows/ci-dashboard-ingest.yml` — the ingestion workflow.
+- `data/` — a small **seed snapshot** of `history.json` / `runs.json` (first-paint fallback only:
+  one most-recent sample per series, no history depth) plus `schema.md` (the contract). The full,
+  continuously-growing history is *not* committed here — it lives out-of-tree on the
+  `ci-dashboard-data` branch, which the page fetches at runtime and always prefers.
+- `../workflows/ci-dashboard-ingest.yml` — the ingestion workflow.
 
 ## Local development
 
 ```bash
-cd ci-dashboard && python3 -m http.server 8137
+cd .github/dashboard && python3 -m http.server 8137
 # open http://127.0.0.1:8137/  (loads the bundled seed; live board hits the public API)
 ```
 
 To refresh the seed / data branch from real runs:
 
 ```bash
-python3 ci-dashboard/ingest/ingest.py --repo ROCm/FlyDSL --max-runs 120 --history-days 14 --out-dir /tmp/out
+python3 .github/dashboard/ingest/ingest.py --repo ROCm/FlyDSL --max-runs 120 --history-days 14 --out-dir /tmp/out
 ```
 
 Tabs are deep-linkable: `#health`, `#prcheck`, `#trends`, `#board`. Keys `1`–`4` switch tabs, `r` reloads.

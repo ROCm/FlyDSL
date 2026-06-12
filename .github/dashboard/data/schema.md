@@ -1,9 +1,11 @@
 # CI dashboard data schema
 
-These files are produced by `ci-dashboard/ingest/` and consumed by `app.js`.
-The committed copies under `ci-dashboard/data/` are a **seed** for first paint; the
-live, continuously-updated copies live on the orphan `ci-dashboard-data` branch and
-are fetched at runtime (see `CFG.dataBranch` in `app.js`).
+These files are produced by `.github/dashboard/ingest/` and consumed by `app.js`.
+The committed copies under `.github/dashboard/data/` are only a small **seed snapshot**
+for first paint — a single most-recent sample per series, with no history depth (hence
+the `"note"` field on each file). The full, continuously-growing history is *not*
+committed here: it lives out-of-tree on the orphan `ci-dashboard-data` branch and is
+fetched at runtime, where `app.js` always prefers it over the seed (see `CFG.dataBranch`).
 
 All metrics are bigger-is-better. `metric` is `"TB/s"` (memory-bound ops),
 `"TFLOPS"` (compute-bound ops), or `"speedup"` (FlyDSL-vs-AIter ratio).
