@@ -10,6 +10,12 @@ FlyDSL is the Python front-end (*Flexible Layout Python DSL*) powered by the
 explicit algebra and coordinate mapping, plus a composable lowering pipeline
 to GPU/ROCDL.
 
+.. note::
+
+   **CI Performance Dashboard:** live CI status, per-kernel regressions, and
+   performance trends across ``gfx950`` / ``gfx942`` / ``gfx1201`` are at the
+   `CI Performance Dashboard <ci-dashboard/>`_.
+
 .. toctree::
    :maxdepth: 2
    :caption: Getting Started
