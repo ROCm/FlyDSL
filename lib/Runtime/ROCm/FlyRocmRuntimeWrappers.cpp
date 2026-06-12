@@ -108,14 +108,6 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
       HIP_REPORT_IF_ERROR(addErr);
       return;
     }
-    if (requestedRealCluster) {
-      hipKernelNodeAttrValue attrVal{};
-      attrVal.clusterDim.x = static_cast<unsigned>(clusterX);
-      attrVal.clusterDim.y = static_cast<unsigned>(clusterY);
-      attrVal.clusterDim.z = static_cast<unsigned>(clusterZ);
-      HIP_REPORT_IF_ERROR(
-          hipGraphKernelNodeSetAttribute(node, hipLaunchAttributeClusterDimension, &attrVal));
-    }
     HIP_REPORT_IF_ERROR(
         hipStreamUpdateCaptureDependencies(stream, &node, 1, hipStreamSetCaptureDependencies));
     return;

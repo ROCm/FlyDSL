@@ -112,7 +112,7 @@ def preshuffle_e8m0_scale_coalesced_general(
     orig_row = mb * warp_tile + orig_rep * WMMA_DIM + L
     # Clamp out-of-range (guard) rows so the gather stays in bounds; masked below.
     orig_row = torch.where(valid, orig_row, torch.zeros_like(orig_row))
-    colg = (kt * KS + ks)  # group-of-4 column index into the K dimension
+    colg = kt * KS + ks  # group-of-4 column index into the K dimension
     # Gather the 4 spw bytes for each (row, colg): scale viewed as [rows, KG*KS, 4].
     scale_g = scale.view(rows, KG * KS, 4)
     row_idx, colg_idx = torch.broadcast_tensors(orig_row, colg)
@@ -160,7 +160,9 @@ def preshuffle_e8m0_scale(
     return g.reshape(-1, k_groups * k_wmma_steps * wmma_rep * SCALES_PER_WMMA)
 
 
-def preshuffle_scale_for_load_path(scale, warp_tile, skt, *, scale_load_path, data_format, ref_segmented, row_align=None):
+def preshuffle_scale_for_load_path(
+    scale, warp_tile, skt, *, scale_load_path, data_format, ref_segmented, row_align=None
+):
     """Host scale preshuffle matching the kernel's selected scale_load_path.
 
     - 'tdm': interleaved TDM/LDS layout.
@@ -471,6 +473,7 @@ def _run_mxscale_gemm_test(
     a_load_path="tdm",
     b_split_load=False,
     return_launch_fn=False,
+    use_graph=False,
 ):
     """Unified test body for FP4 and FP8."""
     is_fp4 = data_format == "fp4"
@@ -515,11 +518,12 @@ def _run_mxscale_gemm_test(
     scale_load_str = "" if scale_load_path == "tdm" else f", scale_load={scale_load_path}"
     a_load_str = "" if a_load_path == "tdm" else f", a_load={a_load_path}"
     b_split_str = ", b_split_load" if b_split_load else ""
+    graph_str = ", graph" if use_graph else ""
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
         f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-        f"{mcast_str}{tdm_str}{scale_load_str}{a_load_str}{b_split_str}, preshuffle, out={out_dtype}"
+        f"{mcast_str}{tdm_str}{scale_load_str}{a_load_str}{b_split_str}{graph_str}, preshuffle, out={out_dtype}"
     )
 
     # Generate data
@@ -554,17 +558,34 @@ def _run_mxscale_gemm_test(
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
     _ref_seg = is_ref_segmented_lds_layout(
-        data_format=data_format, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, m_warp=m_warp, n_warp=n_warp,
-        num_buffers=num_buffers, split_k=split_k, wave_specialized_tdm=wave_specialized_tdm,
+        data_format=data_format,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+        split_k=split_k,
+        wave_specialized_tdm=wave_specialized_tdm,
         use_scale_opsel=use_scale_opsel,
     )
     a_scale = preshuffle_scale_for_load_path(
-        a_scale, warp_tile_m, skt, scale_load_path=scale_load_path, data_format=data_format,
-        ref_segmented=_ref_seg, row_align=tile_m,
+        a_scale,
+        warp_tile_m,
+        skt,
+        scale_load_path=scale_load_path,
+        data_format=data_format,
+        ref_segmented=_ref_seg,
+        row_align=tile_m,
     )
     b_scale = preshuffle_scale_for_load_path(
-        b_scale, warp_tile_n, skt, scale_load_path=scale_load_path, data_format=data_format,
-        ref_segmented=_ref_seg, row_align=tile_n,
+        b_scale,
+        warp_tile_n,
+        skt,
+        scale_load_path=scale_load_path,
+        data_format=data_format,
+        ref_segmented=_ref_seg,
+        row_align=tile_n,
     )
 
     # Preshuffle B data
@@ -612,7 +633,7 @@ def _run_mxscale_gemm_test(
     as_flat = as_gpu.contiguous()
     bs_flat = bs_gpu.contiguous()
 
-    flyc.compile(
+    compiled_exe = flyc.compile(
         launch_fn,
         c_flat,
         a_flat,
@@ -625,6 +646,35 @@ def _run_mxscale_gemm_test(
         padded_n,
         torch.cuda.current_stream(),
     )
+
+    if use_graph:
+
+        def _launch():
+            compiled_exe(
+                c_flat,
+                a_flat,
+                b_flat,
+                as_flat,
+                bs_flat,
+                padded_m,
+                padded_n,
+                padded_k,
+                padded_n,
+                torch.cuda.current_stream(),
+            )
+
+        g = torch.cuda.CUDAGraph()
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            _launch()
+        torch.cuda.current_stream().wait_stream(s)
+        torch.cuda.synchronize()
+        c_gpu.zero_()
+        with torch.cuda.graph(g, stream=s):
+            _launch()
+        c_gpu.zero_()
+        g.replay()
     torch.cuda.synchronize()
 
     c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
@@ -1135,14 +1185,23 @@ def test_mxfp4_gemm_mcast(
 
 
 @pytest.mark.parametrize(
-    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n",
     [
-        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
-        ("fp4", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2, 1, 1),
+        ("fp4", 128, 256, 256, 128, 256, 128, 2, 2, 1, 1),
+        ("fp8", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+        ("fp4", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
+        ("a8w4", 256, 512, 256, 128, 256, 128, 2, 4, 2, 2),
     ],
-    ids=["fp8-128x256x256", "fp4-128x256x256"],
+    ids=[
+        "fp8-128x256x256",
+        "fp4-128x256x256",
+        "fp8-256x512x256-cluster2x2",
+        "fp4-256x512x256-cluster2x2",
+        "a8w4-256x512x256-cluster2x2",
+    ],
 )
-def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
+def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n):
     """Verify that the gfx1250 MX-scale GEMM kernel works inside a hipGraph.
 
     Captures one launch, replays once, and checks the replay output is
@@ -1157,11 +1216,15 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         pytest.skip("hipGraph capture/replay not supported on simulator")
 
     is_fp4 = data_format == "fp4"
+    is_a8w4 = data_format == "a8w4"
 
     # Build inputs (mirrors _run_mxscale_gemm_test, but no padding needed
     # because we pick a clean shape).
     torch.manual_seed(0)
-    if is_fp4:
+    if is_a8w4:
+        a = random_fp8_data(M, K)  # FP8 activation
+        b = fp4_utils.random_fp4_packed(N, K)  # FP4 weight
+    elif is_fp4:
         a = fp4_utils.random_fp4_packed(M, K)
         b = fp4_utils.random_fp4_packed(N, K)
     else:
@@ -1175,7 +1238,7 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     warp_tile_n = tile_n // n_warp
     a_scale_ps = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
     b_scale_ps = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
-    pack_b = 2 if is_fp4 else 1
+    pack_b = 2 if (is_fp4 or is_a8w4) else 1
     b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
 
     a_gpu = a.cuda()
@@ -1198,6 +1261,8 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         out_dtype="bf16",
         wave_specialized_tdm=False,
         split_k=1,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
     )
 
     c_flat = c_gpu.contiguous()
@@ -1386,13 +1451,16 @@ def _bench_kernel_us_cudagraph(
         file=sys.stderr,
         flush=True,
     )
-    if (ref_per_launch_us > 2.0 and first_replay_per_launch_us < 0.25 * ref_per_launch_us
-            and first_replay_per_launch_us < 1.0):
+    if (
+        ref_per_launch_us > 2.0
+        and first_replay_per_launch_us < 0.25 * ref_per_launch_us
+        and first_replay_per_launch_us < 1.0
+    ):
         raise RuntimeError(
             f"hipGraph replay per-launch={first_replay_per_launch_us:.3f}us "
             f"<< ref direct-launch={ref_per_launch_us:.3f}us. "
             f"Graph capture likely empty (uncaptured cluster launch or stream mismatch?)."
-    )
+        )
 
     # Stabilize graph replay before collecting samples.
     with torch.cuda.stream(capture_stream):
@@ -2037,17 +2105,34 @@ def _run_benchmark(args):
 
         skt = tile_k // SCALE_BLOCK
         _ref_seg = is_ref_segmented_lds_layout(
-            data_format=data_format, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, m_warp=args.m_warp,
-            n_warp=args.n_warp, num_buffers=args.num_buffers, split_k=args.split_k,
-            wave_specialized_tdm=args.wave_spec_tdm, use_scale_opsel=args.use_scale_opsel,
+            data_format=data_format,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            m_warp=args.m_warp,
+            n_warp=args.n_warp,
+            num_buffers=args.num_buffers,
+            split_k=args.split_k,
+            wave_specialized_tdm=args.wave_spec_tdm,
+            use_scale_opsel=args.use_scale_opsel,
         )
         a_scale = preshuffle_scale_for_load_path(
-            a_scale, warp_tile_m, skt, scale_load_path=args.scale_load_path, data_format=data_format,
-            ref_segmented=_ref_seg, row_align=tile_m,
+            a_scale,
+            warp_tile_m,
+            skt,
+            scale_load_path=args.scale_load_path,
+            data_format=data_format,
+            ref_segmented=_ref_seg,
+            row_align=tile_m,
         )
         b_scale = preshuffle_scale_for_load_path(
-            b_scale, warp_tile_n, skt, scale_load_path=args.scale_load_path, data_format=data_format,
-            ref_segmented=_ref_seg, row_align=tile_n,
+            b_scale,
+            warp_tile_n,
+            skt,
+            scale_load_path=args.scale_load_path,
+            data_format=data_format,
+            ref_segmented=_ref_seg,
+            row_align=tile_n,
         )
 
         K_packed = padded_k // PACK_B
@@ -2159,11 +2244,7 @@ def _run_benchmark(args):
         graph_rotate_target = max(_l2_cache_bytes() * 5, int(args.l2_flush_mb) * 1024 * 1024)
         graph_num_slots = _graph_rotate_slot_count(working_set, graph_rotate_target)
         graph_eviction_bytes = max(0, graph_num_slots - 1) * working_set
-        cap_note = (
-            "  [WARNING: capped below target]"
-            if graph_eviction_bytes < graph_rotate_target
-            else ""
-        )
+        cap_note = "  [WARNING: capped below target]" if graph_eviction_bytes < graph_rotate_target else ""
         print(
             f"      L2 defeat: graph rotating buffers, slots={graph_num_slots}, "
             f"pool={working_set * graph_num_slots / 1e6:.1f} MB "
@@ -2335,17 +2416,34 @@ def _run_graph_verify(args):
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
     _ref_seg = is_ref_segmented_lds_layout(
-        data_format=data_format, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, m_warp=args.m_warp,
-        n_warp=args.n_warp, num_buffers=args.num_buffers, split_k=args.split_k,
-        wave_specialized_tdm=args.wave_spec_tdm, use_scale_opsel=args.use_scale_opsel,
+        data_format=data_format,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=args.m_warp,
+        n_warp=args.n_warp,
+        num_buffers=args.num_buffers,
+        split_k=args.split_k,
+        wave_specialized_tdm=args.wave_spec_tdm,
+        use_scale_opsel=args.use_scale_opsel,
     )
     a_scale = preshuffle_scale_for_load_path(
-        a_scale, warp_tile_m, skt, scale_load_path=args.scale_load_path, data_format=data_format,
-        ref_segmented=_ref_seg, row_align=tile_m,
+        a_scale,
+        warp_tile_m,
+        skt,
+        scale_load_path=args.scale_load_path,
+        data_format=data_format,
+        ref_segmented=_ref_seg,
+        row_align=tile_m,
     )
     b_scale = preshuffle_scale_for_load_path(
-        b_scale, warp_tile_n, skt, scale_load_path=args.scale_load_path, data_format=data_format,
-        ref_segmented=_ref_seg, row_align=tile_n,
+        b_scale,
+        warp_tile_n,
+        skt,
+        scale_load_path=args.scale_load_path,
+        data_format=data_format,
+        ref_segmented=_ref_seg,
+        row_align=tile_n,
     )
     K_packed = padded_k // padded_shape["pack_b"]
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
@@ -2542,8 +2640,7 @@ if __name__ == "__main__":
         "--no-flush-l2",
         action="store_true",
         default=False,
-        help="Disable L2 defeat for a hot-cache measurement. Applies to both eager "
-        "and --use-graph modes.",
+        help="Disable L2 defeat for a hot-cache measurement. Applies to both eager " "and --use-graph modes.",
     )
     parser.add_argument(
         "--l2-flush-mb",
@@ -2579,6 +2676,8 @@ if __name__ == "__main__":
 
     if args.scale_mode == "ptpc" and args.verify_graph:
         raise SystemExit("--scale-mode ptpc does not support --verify-graph")
+    if args.scale_mode == "ptpc" and args.use_graph and not args.benchmark:
+        raise SystemExit("--scale-mode ptpc does not support --use-graph for functional tests (use --benchmark)")
 
     def _run_correctness_test():
         """Run the functional test (computes a reference and asserts correctness)."""
@@ -2628,6 +2727,7 @@ if __name__ == "__main__":
                 scale_load_path=args.scale_load_path,
                 a_load_path=args.a_load_path,
                 b_split_load=args.b_split_load,
+                use_graph=args.use_graph,
             )
 
     if args.verify_graph:
