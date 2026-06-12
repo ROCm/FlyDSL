@@ -14,6 +14,7 @@ def make_tail_plan(num_buffers, pre_loaded, extra):
     """
     steps = pre_loaded + extra
     plan = []
+    prev_outstanding = 0
     for i in range(steps):
         compute_stage = i if i < pre_loaded else (i - pre_loaded + num_buffers - 1) % num_buffers
         load_stage = (i + num_buffers - 1) % num_buffers if i < extra else None
@@ -23,7 +24,16 @@ def make_tail_plan(num_buffers, pre_loaded, extra):
         else:
             j = i + 1
             next_compute = j if j < pre_loaded else (j - pre_loaded + num_buffers - 1) % num_buffers
-            outstanding = 2 * (num_buffers - 2) if (load_stage is not None and load_stage != next_compute) else 0
+            if load_stage is not None and load_stage != next_compute:
+                outstanding = 2 * (num_buffers - 2)
+            elif load_stage is None:
+                # No new TDM this step: decrement in-flight count by 2 (base
+                # units, which map to 1 post-scaling since caller does o//2) as
+                # one TDM completes during compute, but don't go below 0.
+                outstanding = max(0, prev_outstanding - 2)
+            else:
+                outstanding = 0
+        prev_outstanding = outstanding if outstanding >= 0 else 0
         plan.append((load_stage, compute_stage, outstanding))
     return plan
 

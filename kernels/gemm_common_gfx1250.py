@@ -82,6 +82,15 @@ def _raw_lds_ptr(lds_base_idx, byte_offset):
     return _llvm.inttoptr(lds_ptr_ty, addr_i32)
 
 
+def lds_load_b64_raw(lds_base_idx, byte_offset, imm_byte_offset: int = 0):
+    """Load 8 bytes from LDS (ds_load_b64) — avoids dead VGPR elements when only 2 scales needed."""
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    if imm_byte_offset:
+        from flydsl.expr.buffer_ops import get_element_ptr as _gep
+        ptr_val = _gep(ptr_val, static_byte_offset=int(imm_byte_offset))
+    return llvm_dialect.load(ir.VectorType.get([2], ir.IntegerType.get_signless(32)), ptr_val)
+
+
 def lds_load_b128_raw(lds_base_idx, byte_offset, imm_byte_offset: int = 0):
     """Load 16 bytes from LDS using a pre-extracted base index (raw LLVM).
 
@@ -119,7 +128,9 @@ def workgroup_barrier(use_cluster=False):
     if use_cluster:
         cluster.cluster_barrier()
     else:
-        gpu.barrier()
+        # gpu.barrier()
+        rocdl.s_barrier_signal(-1)
+        rocdl.s_barrier_wait(-1)
 
 
 def pipeline_fence(outstanding=0, use_cluster=False):
