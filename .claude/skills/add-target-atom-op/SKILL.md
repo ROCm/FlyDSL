@@ -368,7 +368,7 @@ If you skipped Step 4, emit the intrinsic directly here.
 **Step 7 — Python bindings**. In `lib/Bindings/Python/FlyROCDLExtension.cpp`, add a
 `PyMmaOpCDNA5_MFMAType : PyConcreteType<...>` following the existing `PyMmaOpCDNA3_MFMAType`
 template, and register it in the `NB_MODULE(_mlirDialectsFlyROCDL, m)` block. Then add a thin
-wrapper like `MFMA_CDNA5(m, n, k, elem, ...)` in `python/flydsl/expr/rocdl.py`.
+wrapper like `MFMA_CDNA5(m, n, k, elem, ...)` in `python/flydsl/expr/rocdl/universal.py`.
 
 **Step 8 — FileCheck test.** Clone `tests/mlir/Conversion/mma_atom.mlir` and swap the payload type:
 
