@@ -53,6 +53,39 @@ WARMUP_ITERS = 10
 BENCH_ITERS = 100
 
 
+def _torch_dtype(dtype: str):
+    if dtype == "f32":
+        return DTYPE_FP32
+    if dtype == "f16":
+        return DTYPE_FP16
+    if dtype == "bf16":
+        return DTYPE_BF16
+    raise ValueError(f"unsupported dtype: {dtype}")
+
+
+def _get_layernorm_configs():
+    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
+    if shapes_env:
+        configs = []
+        for part in shapes_env.split(";"):
+            p = part.strip()
+            if not p:
+                continue
+            m_s, n_s, dt = [x.strip() for x in p.split(",")]
+            configs.append((int(m_s), int(n_s), dt))
+    else:
+        configs = [
+            (64, 256, "f32"),     # Aligned
+            (128, 1024, "f32"),   # Aligned
+            (32, 128, "f16"),     # Aligned
+            (64, 2000, "f32"),    # Unaligned (tail handling)
+            (16, 512, "bf16"),    # BF16
+            (1024, 8192, "bf16"), # BF16
+            (32768, 8192, "bf16"),
+        ]
+    return configs
+
+
 def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting LayerNorm (M={M}, N={N}, dtype={dtype})")
 
@@ -159,25 +192,7 @@ def test_layernorm():
     print("Running LayerNorm Tests")
     print("=" * 80)
 
-    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
-        configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
-        ]
+    configs = _get_layernorm_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -199,7 +214,7 @@ def test_layernorm():
                     x = torch.randn(
                         (M, N),
                         device="cuda",
-                        dtype=DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32),
+                        dtype=_torch_dtype(dtype),
                     )
                     w = torch.rand((N,), device="cuda", dtype=x.dtype)
                     b = torch.rand((N,), device="cuda", dtype=x.dtype)
@@ -346,25 +361,7 @@ def test_fused_add_layernorm():
     print("Running FusedAdd LayerNorm Tests")
     print("=" * 80)
 
-    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
-        configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
-        ]
+    configs = _get_layernorm_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -383,7 +380,7 @@ def test_fused_add_layernorm():
                 try:
                     from aiter.ops.triton.normalization.norm import layernorm2d_fwd_with_add
 
-                    torch_dtype = DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32)
+                    torch_dtype = _torch_dtype(dtype)
                     x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     residual = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     residual_out = torch.empty_like(x)
@@ -542,25 +539,7 @@ def test_layernorm_dynamicquant():
     print("Running LayerNorm DynamicQuant Tests")
     print("=" * 80)
 
-    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
-        configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
-        ]
+    configs = _get_layernorm_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -579,7 +558,7 @@ def test_layernorm_dynamicquant():
                 try:
                     from aiter.ops.triton.normalization.norm import layernorm2d_fwd_with_dynamicquant
 
-                    torch_dtype = DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32)
+                    torch_dtype = _torch_dtype(dtype)
                     x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     w = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
                     b = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
@@ -743,25 +722,7 @@ def test_layernorm_smoothquant():
     print("Running LayerNorm SmoothQuant Tests")
     print("=" * 80)
 
-    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
-        configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
-        ]
+    configs = _get_layernorm_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -780,7 +741,7 @@ def test_layernorm_smoothquant():
                 try:
                     from aiter.ops.triton.normalization.norm import layernorm2d_fwd_with_smoothquant
 
-                    torch_dtype = DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32)
+                    torch_dtype = _torch_dtype(dtype)
                     x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     w = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
                     b = torch.rand((N,), device="cuda", dtype=torch_dtype).contiguous()
@@ -957,25 +918,7 @@ def test_fused_add_layernorm_dynamicquant():
     print("Running FusedAdd LayerNorm DynamicQuant Tests")
     print("=" * 80)
 
-    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
-        configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
-        ]
+    configs = _get_layernorm_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -994,7 +937,7 @@ def test_fused_add_layernorm_dynamicquant():
                 try:
                     from aiter.ops.triton.normalization.norm import layernorm2d_fwd_with_add_dynamicquant
 
-                    torch_dtype = DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32)
+                    torch_dtype = _torch_dtype(dtype)
                     x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     residual = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     residual_out = torch.empty_like(x)
@@ -1189,25 +1132,7 @@ def test_fused_add_layernorm_smoothquant():
     print("Running FusedAdd LayerNorm SmoothQuant Tests")
     print("=" * 80)
 
-    shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
-    if shapes_env:
-        configs = []
-        for part in shapes_env.split(";"):
-            p = part.strip()
-            if not p:
-                continue
-            m_s, n_s, dt = [x.strip() for x in p.split(",")]
-            configs.append((int(m_s), int(n_s), dt))
-    else:
-        configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
-        ]
+    configs = _get_layernorm_configs()
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"
     perf_rows = []
@@ -1226,7 +1151,7 @@ def test_fused_add_layernorm_smoothquant():
                 try:
                     from aiter.ops.triton.normalization.norm import layernorm2d_fwd_with_add_smoothquant
 
-                    torch_dtype = DTYPE_BF16 if dtype == "bf16" else (DTYPE_FP16 if dtype == "f16" else DTYPE_FP32)
+                    torch_dtype = _torch_dtype(dtype)
                     x = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     residual = torch.randn((M, N), device="cuda", dtype=torch_dtype).contiguous()
                     residual_out = torch.empty_like(x)

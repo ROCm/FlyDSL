@@ -35,8 +35,8 @@ VEC_WIDTH = 8
 def _make_reduction_storage(red_slots: int):
     @fx.struct
     class SharedStorage:
-        s_red: fx.Array[fx.Float32, red_slots, 16]
-        s_red2: fx.Array[fx.Float32, red_slots, 16]
+        s_sum: fx.Array[fx.Float32, red_slots, 16]
+        s_sumsq: fx.Array[fx.Float32, red_slots, 16]
 
     return SharedStorage
 
