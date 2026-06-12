@@ -1346,6 +1346,11 @@ def compile_fp8fp4_gemm(
             lds_bs,
             emit_filler=None,
             mid_compute_callback=None,
+            pf_all_ks=None,
+            next_lds_a=None,
+            next_lds_b=None,
+            next_lds_bs=None,
+            next_lds_as=None,
         ):
             current_accs = list(accs_in)
             a_buf, a_base = _precompute_a_lane_bases(lds_a)
@@ -1354,6 +1359,8 @@ def compile_fp8fp4_gemm(
             bs_buf, bs_base = _precompute_scale_lane_bases(
                 lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
             )
+            _has_pf = pf_all_ks is not None
+            _has_next = next_lds_b is not None
             _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
 
             def _fp4_get_a_scale_and_opsel(a_scales_all, wm_idx):
@@ -1414,6 +1421,63 @@ def compile_fp8fp4_gemm(
                     emit_filler_now=emit_filler_now,
                 )
 
+            if const_expr(_has_pf and _has_next):
+                nxt_a_buf, nxt_a_base = _precompute_a_lane_bases(next_lds_a)
+                nxt_b_buf, nxt_b_base = _precompute_b_lane_bases(next_lds_b)
+                nxt_as_buf, nxt_as_base = _precompute_scale_lane_bases(
+                    next_lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a
+                )
+                nxt_bs_buf, nxt_bs_base = _precompute_scale_lane_bases(
+                    next_lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
+                )
+                nxt_pf = []
+                for ks in range_constexpr(k_wmma_steps):
+                    pf_a_ks, pf_b_ks, pf_bs_ks, pf_as_ks = pf_all_ks[ks]
+                    _filler = emit_filler if ks == k_wmma_steps - 1 else None
+                    # Issue next-tile ks loads per WMMA order
+                    nxt_as_ks, nxt_bs_ks = _scales_for_emit(nxt_as_buf, nxt_as_base, nxt_bs_buf, nxt_bs_base, ks)
+                    nxt_a_ks = [load_a_frag(nxt_a_buf, nxt_a_base, wm, ks) for wm in range_constexpr(wmma_m_rep)]
+                    nxt_b_ks = [load_b_frag(nxt_b_buf, nxt_b_base, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    nxt_pf.append((nxt_a_ks, nxt_b_ks, nxt_bs_ks, nxt_as_ks))
+                    rocdl.sched_barrier(0)
+                    a_top = pf_a_ks[:_bank_half_wm]
+                    a_bottom = pf_a_ks[_bank_half_wm:]
+                    b_left = pf_b_ks[:_bank_half_wn]
+                    b_right = pf_b_ks[_bank_half_wn:]
+                    a_scales_all = pf_as_ks
+                    if const_expr(ks == 0 and mid_compute_callback is not None):
+                        rocdl.sched_barrier(0)
+                        mid_compute_callback()
+                    _emit_group(0, 0, a_top, b_left, a_scales_all, pf_bs_ks[:_bank_half_b_scale_rep])
+                    _emit_group(_bank_group_size, _bank_half_wm, a_bottom, b_left, a_scales_all, pf_bs_ks[:_bank_half_b_scale_rep])
+                    if const_expr(ks == k_wmma_steps - 1 and _filler is not None):
+                        rocdl.sched_barrier(0)
+                        _filler()
+                    _emit_group(2 * _bank_group_size, 0, a_top, b_right, a_scales_all, pf_bs_ks[_bank_half_b_scale_rep:])
+                    _emit_group(3 * _bank_group_size, _bank_half_wm, a_bottom, b_right, a_scales_all, pf_bs_ks[_bank_half_b_scale_rep:])
+                    rocdl.sched_barrier(0)
+                return current_accs, nxt_pf
+
+            if const_expr(_has_pf):
+                for ks in range_constexpr(k_wmma_steps):
+                    pf_a_ks, pf_b_ks, pf_bs_ks, pf_as_ks = pf_all_ks[ks]
+                    _filler = emit_filler if ks == k_wmma_steps - 1 else None
+                    a_top = pf_a_ks[:_bank_half_wm]
+                    a_bottom = pf_a_ks[_bank_half_wm:]
+                    b_left = pf_b_ks[:_bank_half_wn]
+                    b_right = pf_b_ks[_bank_half_wn:]
+                    if const_expr(ks == 0 and mid_compute_callback is not None):
+                        mid_compute_callback()
+                    _emit_group(0, 0, a_top, b_left, pf_as_ks, pf_bs_ks[:_bank_half_b_scale_rep])
+                    _emit_group(_bank_group_size, _bank_half_wm, a_bottom, b_left, pf_as_ks, pf_bs_ks[:_bank_half_b_scale_rep])
+                    if const_expr(ks == k_wmma_steps - 1 and _filler is not None):
+                        rocdl.sched_barrier(0)
+                        _filler()
+                    _emit_group(2 * _bank_group_size, 0, a_top, b_right, pf_as_ks, pf_bs_ks[_bank_half_b_scale_rep:])
+                    _emit_group(3 * _bank_group_size, _bank_half_wm, a_bottom, b_right, pf_as_ks, pf_bs_ks[_bank_half_b_scale_rep:])
+                return current_accs
+
+            # ── Original path (no prefetch) ──
             b_left_frags, b_left_scales = _load_b_half_bundle(0, 0, 0)
 
             for ks in range_constexpr(k_wmma_steps):
@@ -1496,6 +1560,11 @@ def compile_fp8fp4_gemm(
             emit_filler=None,
             mid_compute_callback=None,
             late_compute_callback=None,
+            pf_all_ks=None,
+            next_lds_a=None,
+            next_lds_b=None,
+            next_lds_bs=None,
+            next_lds_as=None,
         ):
             current_accs = list(accs_in)
             a_buf, a_base = _precompute_a_lane_bases(lds_a)
@@ -1504,6 +1573,8 @@ def compile_fp8fp4_gemm(
             bs_buf, bs_base = _precompute_scale_lane_bases(
                 lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
             )
+            _has_pf = pf_all_ks is not None
+            _has_next = next_lds_b is not None
             _b_half_loads = _fp8_half_wn * _b_frag_loads_per_wn
             _b_left_bundle_loads = _b_half_loads + _fp8_b_scale_loads
 
@@ -1590,6 +1661,78 @@ def compile_fp8fp4_gemm(
                         b_scales,
                     )
 
+            if const_expr(_has_pf and _has_next):
+                # ── Prefetch path: use pre-fetched VGPRs, issue next-tile loads per ks ──
+                nxt_a_buf, nxt_a_base = _precompute_a_lane_bases(next_lds_a)
+                nxt_b_buf, nxt_b_base = _precompute_b_lane_bases(next_lds_b)
+                nxt_as_buf, nxt_as_base = _precompute_scale_lane_bases(
+                    next_lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a
+                )
+                nxt_bs_buf, nxt_bs_base = _precompute_scale_lane_bases(
+                    next_lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
+                )
+                nxt_pf = []
+                for ks in range_constexpr(k_wmma_steps):
+                    pf_a_ks, pf_b_ks, pf_bs_ks, pf_as_ks = pf_all_ks[ks]
+                    _filler = emit_filler if ks == k_wmma_steps - 1 else None
+                    _mid_cb = mid_compute_callback if ks == 0 else None
+                    _late_cb = late_compute_callback if ks == k_wmma_steps - 1 else None
+                    # Issue next-tile ks loads (as, bs, a, b) per WMMA order
+                    nxt_as_ks, nxt_bs_ks = _scales_for_emit(nxt_as_buf, nxt_as_base, nxt_bs_buf, nxt_bs_base, ks)
+                    nxt_a_ks = [load_a_frag(nxt_a_buf, nxt_a_base, wm, ks) for wm in range_constexpr(wmma_m_rep)]
+                    nxt_b_ks = [load_b_frag(nxt_b_buf, nxt_b_base, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    nxt_pf.append((nxt_a_ks, nxt_b_ks, nxt_bs_ks, nxt_as_ks))
+                    rocdl.sched_barrier(0)
+                    # WMMAs using pre-fetched VGPRs (quadrant order)
+                    a_top = pf_a_ks[:_fp8_half_wm]
+                    a_bottom = pf_a_ks[_fp8_half_wm:]
+                    b_left = pf_b_ks[:_fp8_half_wn]
+                    b_right = pf_b_ks[_fp8_half_wn:]
+                    if const_expr(ks == 0 and _mid_cb is not None):
+                        rocdl.sched_barrier(0)
+                        _mid_cb()
+                    _emit_group(0, 0, a_top, b_left, pf_as_ks, pf_bs_ks)
+                    _emit_group(_fp8_half_wm, 0, a_bottom, b_left, pf_as_ks, pf_bs_ks)
+                    if const_expr(ks == k_wmma_steps - 1 and _late_cb is not None):
+                        rocdl.sched_barrier(0)
+                        _late_cb()
+                    if const_expr(ks == k_wmma_steps - 1 and _filler is not None):
+                        rocdl.sched_barrier(0)
+                        _filler()
+                    for wn_local in range_constexpr(_fp8_half_wn):
+                        _emit_group_col(0, _fp8_half_wn, a_top, b_right, pf_as_ks, pf_bs_ks, wn_local)
+                    for wn_local in range_constexpr(_fp8_half_wn):
+                        _emit_group_col(_fp8_half_wm, _fp8_half_wn, a_bottom, b_right, pf_as_ks, pf_bs_ks, wn_local)
+                    rocdl.sched_barrier(0)
+                return current_accs, nxt_pf
+
+            if const_expr(_has_pf):
+                # ── Tail: use pre-fetched VGPRs, no next-tile to fetch ──
+                for ks in range_constexpr(k_wmma_steps):
+                    pf_a_ks, pf_b_ks, pf_bs_ks, pf_as_ks = pf_all_ks[ks]
+                    _filler = emit_filler if ks == k_wmma_steps - 1 else None
+                    _late_cb = late_compute_callback if ks == k_wmma_steps - 1 else None
+                    a_top = pf_a_ks[:_fp8_half_wm]
+                    a_bottom = pf_a_ks[_fp8_half_wm:]
+                    b_left = pf_b_ks[:_fp8_half_wn]
+                    b_right = pf_b_ks[_fp8_half_wn:]
+                    if const_expr(ks == 0 and mid_compute_callback is not None):
+                        mid_compute_callback()
+                    _emit_group(0, 0, a_top, b_left, pf_as_ks, pf_bs_ks)
+                    _emit_group(_fp8_half_wm, 0, a_bottom, b_left, pf_as_ks, pf_bs_ks)
+                    if const_expr(ks == k_wmma_steps - 1 and _late_cb is not None):
+                        rocdl.sched_barrier(0)
+                        _late_cb()
+                    if const_expr(ks == k_wmma_steps - 1 and _filler is not None):
+                        rocdl.sched_barrier(0)
+                        _filler()
+                    for wn_local in range_constexpr(_fp8_half_wn):
+                        _emit_group_col(0, _fp8_half_wn, a_top, b_right, pf_as_ks, pf_bs_ks, wn_local)
+                    for wn_local in range_constexpr(_fp8_half_wn):
+                        _emit_group_col(_fp8_half_wm, _fp8_half_wn, a_bottom, b_right, pf_as_ks, pf_bs_ks, wn_local)
+                return current_accs
+
+            # ── Original path (no prefetch) ──
             b_left_frags, b_scales = _load_b_left_bundle(0)
             _first_top_row_keep = max((_fp8_half_wm - 1) * DS_LOADS_PER_A_FRAG - _fp8_b_scale_loads, 0)
             _bottom_left_keep = max(_b_half_loads - DS_LOADS_PER_A_FRAG, 0)
@@ -2064,6 +2207,11 @@ def compile_fp8fp4_gemm(
                     lds_bs,
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
+                    pf_all_ks=pf_all_ks,
+                    next_lds_a=next_lds_a,
+                    next_lds_b=next_lds_b,
+                    next_lds_bs=next_lds_bs,
+                    next_lds_as=next_lds_as,
                 )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
                 return compute_tile_fp8_quadrant(
@@ -2075,6 +2223,11 @@ def compile_fp8fp4_gemm(
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
                     late_compute_callback=late_compute_callback,
+                    pf_all_ks=pf_all_ks,
+                    next_lds_a=next_lds_a,
+                    next_lds_b=next_lds_b,
+                    next_lds_bs=next_lds_bs,
+                    next_lds_as=next_lds_as,
                 )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
                 return compute_tile_fp8_deep_pipeline(
@@ -2635,7 +2788,7 @@ def compile_fp8fp4_gemm(
         _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
         _use_lds_pf = (
             wave_specialized_tdm
-            and compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            and compute_schedule_kind != COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
             and not _bvs_active
         )
 
