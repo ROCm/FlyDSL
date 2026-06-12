@@ -1386,11 +1386,12 @@ def _bench_kernel_us_cudagraph(
         file=sys.stderr,
         flush=True,
     )
-    if first_replay_per_launch_us < 1.0 and ref_per_launch_us > 2.0:
+    if (ref_per_launch_us > 2.0 and first_replay_per_launch_us < 0.25 * ref_per_launch_us
+            and first_replay_per_launch_us < 1.0):
         raise RuntimeError(
             f"hipGraph replay per-launch={first_replay_per_launch_us:.3f}us "
             f"<< ref direct-launch={ref_per_launch_us:.3f}us. "
-            f"Graph capture likely empty (stream mismatch?)."
+            f"Graph capture likely empty (uncaptured cluster launch or stream mismatch?)."
     )
 
     # Stabilize graph replay before collecting samples.
@@ -2528,6 +2529,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--benchmark", action="store_true", default=False, help="Run benchmark mode (timing only, no correctness check)"
     )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help="With --benchmark, also run the correctness check before timing. "
+        "Without --benchmark, runs always verify and this flag is a no-op.",
+    )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument(
@@ -2572,56 +2580,66 @@ if __name__ == "__main__":
     if args.scale_mode == "ptpc" and args.verify_graph:
         raise SystemExit("--scale-mode ptpc does not support --verify-graph")
 
+    def _run_correctness_test():
+        """Run the functional test (computes a reference and asserts correctness)."""
+        if args.scale_mode == "ptpc":
+            _run_ptpc_gemm_test(
+                args.M,
+                args.N,
+                args.K,
+                args.tile_m,
+                args.tile_n,
+                args.tile_k,
+                args.m_warp,
+                args.n_warp,
+                num_buffers=args.num_buffers,
+                out_dtype=args.out_dtype,
+                data_format=args.data_format,
+                l2_prefetch_distance=args.l2_prefetch_distance,
+                cluster_m=args.cluster_m,
+                cluster_n=args.cluster_n,
+                split_k=args.split_k,
+            )
+        else:
+            use_tdm_store = not args.no_tdm_store and args.split_k == 1
+            _run_mxscale_gemm_test(
+                args.data_format,
+                args.M,
+                args.N,
+                args.K,
+                args.tile_m,
+                args.tile_n,
+                args.tile_k,
+                args.m_warp,
+                args.n_warp,
+                num_buffers=args.num_buffers,
+                use_tdm_store=use_tdm_store,
+                out_dtype=args.out_dtype,
+                wave_specialized_tdm=args.wave_spec_tdm,
+                split_k=args.split_k,
+                use_scale_opsel=args.use_scale_opsel,
+                l2_prefetch_distance=args.l2_prefetch_distance,
+                cluster_m=args.cluster_m,
+                cluster_n=args.cluster_n,
+                inst_prefetch=args.inst_prefetch,
+                waves_per_eu=args.waves_per_eu,
+                expert_sched_mode=args.expert_sched_mode,
+                b_streaming=args.b_streaming,
+                scale_load_path=args.scale_load_path,
+                a_load_path=args.a_load_path,
+                b_split_load=args.b_split_load,
+            )
+
     if args.verify_graph:
         _run_graph_verify(args)
         if not args.benchmark:
             sys.exit(0)
     if args.benchmark:
+        # Benchmark defaults to timing-only; --verify opts into a correctness check first.
+        if args.verify:
+            print("Verifying correctness before benchmark (--verify)...")
+            _run_correctness_test()
         _run_benchmark(args)
-    elif args.scale_mode == "ptpc":
-        _run_ptpc_gemm_test(
-            args.M,
-            args.N,
-            args.K,
-            args.tile_m,
-            args.tile_n,
-            args.tile_k,
-            args.m_warp,
-            args.n_warp,
-            num_buffers=args.num_buffers,
-            out_dtype=args.out_dtype,
-            data_format=args.data_format,
-            l2_prefetch_distance=args.l2_prefetch_distance,
-            cluster_m=args.cluster_m,
-            cluster_n=args.cluster_n,
-            split_k=args.split_k,
-        )
     else:
-        use_tdm_store = not args.no_tdm_store and args.split_k == 1
-        _run_mxscale_gemm_test(
-            args.data_format,
-            args.M,
-            args.N,
-            args.K,
-            args.tile_m,
-            args.tile_n,
-            args.tile_k,
-            args.m_warp,
-            args.n_warp,
-            num_buffers=args.num_buffers,
-            use_tdm_store=use_tdm_store,
-            out_dtype=args.out_dtype,
-            wave_specialized_tdm=args.wave_spec_tdm,
-            split_k=args.split_k,
-            use_scale_opsel=args.use_scale_opsel,
-            l2_prefetch_distance=args.l2_prefetch_distance,
-            cluster_m=args.cluster_m,
-            cluster_n=args.cluster_n,
-            inst_prefetch=args.inst_prefetch,
-            waves_per_eu=args.waves_per_eu,
-            expert_sched_mode=args.expert_sched_mode,
-            b_streaming=args.b_streaming,
-            scale_load_path=args.scale_load_path,
-            a_load_path=args.a_load_path,
-            b_split_load=args.b_split_load,
-        )
+        # Non-benchmark runs always verify.
+        _run_correctness_test()
