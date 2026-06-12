@@ -877,39 +877,21 @@ class ReplaceIfWithDispatch(Transformer):
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic ifexp condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
-        sandbox = scf.ExecuteRegionOp(result=[])
-        sandbox.region.blocks.append()
-        with ir.InsertionPoint(sandbox.region.blocks[0]):
-            probe_then = then_fn()
-            probe_then_raw = _unwrap_value(probe_then)
-            probe_else = else_fn()
-            probe_else_raw = _unwrap_value(probe_else)
-            if not isinstance(probe_then_raw, ir.Value):
-                raise TypeError(
-                    f"dynamic ifexp then-branch must produce an MLIR Value, " f"got {type(probe_then_raw).__name__}"
-                )
-            if not isinstance(probe_else_raw, ir.Value):
-                raise TypeError(
-                    f"dynamic ifexp else-branch must produce an MLIR Value, " f"got {type(probe_else_raw).__name__}"
-                )
-            if probe_then_raw.type != probe_else_raw.type:
-                raise TypeError(
-                    f"dynamic ifexp type mismatch: "
-                    f"then-branch produces {probe_then_raw.type}, "
-                    f"else-branch produces {probe_else_raw.type}"
-                )
-            yield_type = probe_then_raw.type
+        then_val = then_fn()
+        else_val = else_fn()
+        then_raw = _unwrap_value(then_val)
+        else_raw = _unwrap_value(else_val)
+        if not isinstance(then_raw, ir.Value):
+            raise TypeError(f"dynamic ifexp then-branch must produce an MLIR Value, got {type(then_raw).__name__}")
+        if not isinstance(else_raw, ir.Value):
+            raise TypeError(f"dynamic ifexp else-branch must produce an MLIR Value, got {type(else_raw).__name__}")
+        if then_raw.type != else_raw.type:
+            raise TypeError(
+                f"dynamic ifexp type mismatch: then-branch produces {then_raw.type}, else-branch produces {else_raw.type}"
+            )
 
-        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=ir.Location.unknown())
-        with ir.InsertionPoint(op.regions[0].blocks[0]):
-            scf.YieldOp([_unwrap_value(then_fn())])
-        if len(op.regions[1].blocks) == 0:
-            op.regions[1].blocks.append()
-        with ir.InsertionPoint(op.regions[1].blocks[0]):
-            scf.YieldOp([_unwrap_value(else_fn())])
-
-        sandbox.operation.erase()
-        return _wrap_like(op.results[0], probe_then)
+        result = arith.SelectOp(cond_i1, then_raw, else_raw).result
+        return _wrap_like(result, then_val)
 
 
 @ASTRewriter.register
