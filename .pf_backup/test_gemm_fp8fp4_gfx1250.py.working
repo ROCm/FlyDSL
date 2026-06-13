@@ -453,16 +453,9 @@ def _run_mxscale_gemm_test(
     a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
     b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
 
-    # Preshuffle B data. a8w4 uses the tile-contiguous 256B-block layout; ks-major
-    # within-tile order (B_NGMAJOR=1 reverts to n_group-major for comparison).
+    # Preshuffle B data
     K_packed = padded_k // padded_shape["pack_b"]
-    if is_a8w4:
-        _b_ksmajor = os.environ.get("B_NGMAJOR", "0") != "1"
-        b = fp4_utils.preshuffle_b_16x16_tiled(
-            b, padded_n, K_packed, tile_n, tile_k // padded_shape["pack_b"], ksmajor=_b_ksmajor
-        )
-    else:
-        b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
+    b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
 
     # Upload & launch
     a_gpu = a.cuda()

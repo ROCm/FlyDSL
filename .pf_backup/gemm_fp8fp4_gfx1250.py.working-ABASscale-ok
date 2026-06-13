@@ -66,11 +66,6 @@ SCALES_PER_WMMA = WMMA_K // SCALE_BLOCK  # 4
 
 LDS_PAD_A_BYTES = 16
 LDS_PAD_D_BYTES = 16
-# Tile-contiguous B (a8w4): one 16x16 byte tile = 256B. LDS may pad each tile to
-# break bank conflicts; read side (load_b_frag) and write side (make_desc_b) both
-# use B_TILE_BYTES + pad. 0 = no pad. Sweepable via FLYDSL_B_TILE_PAD.
-B_TILE_BYTES = 256
-LDS_PAD_B_TILE_BYTES = int(os.environ.get("FLYDSL_B_TILE_PAD", "16"))
 LDS_SEGMENT_BYTES = 64 * 1024
 LDS_GFX1250_MAX_BYTES = 5 * LDS_SEGMENT_BYTES
 
@@ -253,22 +248,10 @@ def compile_fp8fp4_gemm(
             raise ValueError(f"scale_load_path='vgpr_ab_split' requires tile_n divisible by 32, got {tile_n}")
 
     lds_a_data_bytes = tile_m * lds_a_stride_bytes
-    # Tile-contiguous B (a8w4): per-16x16-tile LDS pad. _b_pad=0 (non-a8w4) makes
-    # these byte-identical to the original (packed_tile_k_b*16) layout.
-    _b_pad = LDS_PAD_B_TILE_BYTES if is_a8w4 else 0
-    _b_blk_stride = B_TILE_BYTES + _b_pad  # padded 16×16-tile byte step in LDS
-    _b_ngroup_stride = (packed_tile_k_b // 16) * _b_blk_stride
+    _b_blk_stride = 256  # 256 bytes per 16×16 tile (HEAD formula, no padding)
+    _b_ngroup_stride = packed_tile_k_b * 16  # = (packed_tile_k_b // 16) * 256
     _b_num_blocks = (tile_n // 16) * (packed_tile_k_b // 16)
-    # ks-major within-tile block order (a8w4 only): k-block outer, n-group inner, so
-    # a ks-step is a contiguous block range (enables pad-free TDM K-split). The read
-    # side uses _b_blk_stride as the n-group step and _b_kstep as the k-block step.
-    # B_NGMAJOR=1 reverts to the verified n_group-major layout for comparison.
-    _b_ksmajor = is_a8w4 and os.environ.get("B_NGMAJOR", "0") != "1"
-    _b_kstep = (tile_n // 16) * _b_blk_stride  # k-block step in ks-major LDS
-    if _b_pad:
-        lds_b_data_bytes = _b_num_blocks * _b_blk_stride
-    else:
-        lds_b_data_bytes = tile_n * packed_tile_k_b  # HEAD formula
+    lds_b_data_bytes = tile_n * packed_tile_k_b  # HEAD formula
     ab_split_a_rows = tile_m // 2
     ab_split_b_groups = tile_n // 32
     _scale_guard_bytes = 16
@@ -708,10 +691,6 @@ def compile_fp8fp4_gemm(
         _cols_b = _seg_cols(_dk_b, packed_tile_k_b, WMMA_K // PACK_FACTOR_B)
         _cols_as = _seg_cols(_dk_as, interleaved_scale_cols_a, wmma_m_rep * SCALES_PER_WMMA)
         _cols_bs = _seg_cols(_dk_bs, interleaved_scale_cols_b, b_scale_load_rep * SCALES_PER_WMMA)
-        # ks-major B: K-split is a contiguous BLOCK range. (blk_off, blk_len) per seg,
-        # in 256B blocks; a ks-step spans _b_nblk_per_ks*ng_count blocks.
-        _b_nblk_per_ks = (WMMA_K // PACK_FACTOR_B // 16) * (tile_n // 16)
-        _cols_b_blk = _seg_cols(_dk_b, _b_num_blocks, _b_nblk_per_ks)
     else:
         _pf_load_table, _pf_plans, _pf_wmma_plan = [], [], []
         _pf_wpks = 0
@@ -841,32 +820,6 @@ def compile_fp8fp4_gemm(
             )
 
         def make_desc_b(memref, k_base):
-            if const_expr(is_a8w4):
-                # Tile-contiguous B (preshuffle_b_16x16_tiled): global is a flat
-                # array of 256B blocks ordered [n_tile, k_tile, ng_loc, kt_loc, 256B],
-                # so one GEMM tile's _b_num_blocks blocks are contiguous. TDM dim0 =
-                # 256B block, tile_shape dim0 = whole-tile block count -> one
-                # contiguous DMA per tile. pad_interval/pad_amount add the LDS-write
-                # padding to break bank conflicts (global side flat).
-                _kt = K_packed_b // packed_tile_k_b  # K-direction GEMM tiles
-                bn = blk_n / arith.index(tile_n)
-                bk = k_base / arith.index(tile_k)
-                tile_blk0 = (bn * arith.index(_kt) + bk) * arith.index(_b_num_blocks)
-                return _make_tdm_desc(
-                    global_ptr=arg_b,
-                    lds_memref=memref,
-                    global_offset=(tile_blk0, arith.index(0)),
-                    tensor_shape=(N * K_packed_b // B_TILE_BYTES, B_TILE_BYTES),
-                    strides=(B_TILE_BYTES, 1),
-                    tile_shape=(_b_num_blocks, B_TILE_BYTES),
-                    elem_bytes=1,
-                    pad_interval=B_TILE_BYTES if _b_pad else 0,
-                    pad_amount=_b_pad,
-                    num_warps=tdm_desc_num_warps,
-                    workgroup_mask=b_mcast_mask,
-                    atomic_barrier_enable=atomic_barrier_enable,
-                    early_timeout=True,
-                )
             k_packed_off = k_base / arith.index(PACK_FACTOR_B)
             return _make_tdm_desc(
                 global_ptr=arg_b,
@@ -992,29 +945,6 @@ def compile_fp8fp4_gemm(
             )
 
         def make_desc_b_seg(memref, k_base, seg):
-            if const_expr(_b_ksmajor):
-                # ks-major tile-contiguous: K-split = contiguous 256B-block sub-range.
-                blk_off, blk_len = _cols_b_blk[seg]
-                _kt = K_packed_b // packed_tile_k_b
-                bn = blk_n / arith.index(tile_n)
-                bk = k_base / arith.index(tile_k)
-                tile_blk0 = (bn * arith.index(_kt) + bk) * arith.index(_b_num_blocks) + arith.index(blk_off)
-                return _make_tdm_desc(
-                    global_ptr=arg_b,
-                    lds_memref=memref,
-                    global_offset=(tile_blk0, arith.index(0)),
-                    tensor_shape=(N * K_packed_b // B_TILE_BYTES, B_TILE_BYTES),
-                    strides=(B_TILE_BYTES, 1),
-                    tile_shape=(blk_len, B_TILE_BYTES),
-                    elem_bytes=1,
-                    pad_interval=B_TILE_BYTES if _b_pad else 0,
-                    pad_amount=_b_pad,
-                    num_warps=tdm_desc_num_warps,
-                    workgroup_mask=b_mcast_mask,
-                    lds_byte_offset=arith.index(blk_off * _b_blk_stride),
-                    atomic_barrier_enable=atomic_barrier_enable,
-                    early_timeout=True,
-                )
             col_off, col_len = _cols_b[seg]
             k_packed_off = k_base / arith.index(PACK_FACTOR_B) + arith.index(col_off)
             return _make_tdm_desc(
@@ -1132,13 +1062,8 @@ def compile_fp8fp4_gemm(
             # Single lane-dependent B base; per-wn and per-ks offsets go into ds_load imm.
             _n_group_base = arith.index(warp_tile_n // 16) * wave_n_idx
             row_off = lane16 * arith.index(16)
-            if const_expr(_b_ksmajor):
-                # ks-major: n-group step = _b_blk_stride, k-block step = _b_kstep.
-                k_tile_off = lane_kgrp * arith.index(_b_kstep)
-                base = _n_group_base * arith.index(_b_blk_stride) + row_off + k_tile_off
-            else:
-                k_tile_off = lane_kgrp * arith.index(_b_blk_stride)  # padded 16×16-tile step
-                base = _n_group_base * arith.index(_b_ngroup_stride) + row_off + k_tile_off
+            k_tile_off = lane_kgrp * arith.index(256)  # 256, HEAD formula
+            base = _n_group_base * arith.index(_b_ngroup_stride) + row_off + k_tile_off
             return lds_ptr, base
 
         def load_b_frag(lds_buffer, b_lane_base, wn, ks):
@@ -1162,15 +1087,9 @@ def compile_fp8fp4_gemm(
                 return v01.shuffle(v23, list(range(16)))
             elif const_expr(is_a8w4):
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16
-                if const_expr(_b_ksmajor):
-                    # ks-major: n-group step = _b_blk_stride, k-block step = _b_kstep.
-                    imm = wn * _b_blk_stride + ks * _num_tiles * _b_kstep
-                    v0 = fx.Vector(lds_load_b128_raw(lds_buffer, b_lane_base, imm))
-                    v1 = fx.Vector(lds_load_b128_raw(lds_buffer, b_lane_base, imm + 2 * _b_kstep))
-                else:
-                    imm = wn * _b_ngroup_stride + ks * _num_tiles * _b_blk_stride
-                    v0 = fx.Vector(lds_load_b128_raw(lds_buffer, b_lane_base, imm))
-                    v1 = fx.Vector(lds_load_b128_raw(lds_buffer, b_lane_base, imm + 2 * _b_blk_stride))
+                imm = wn * _b_ngroup_stride + ks * _num_tiles * 256  # HEAD formula (256)
+                v0 = fx.Vector(lds_load_b128_raw(lds_buffer, b_lane_base, imm))
+                v1 = fx.Vector(lds_load_b128_raw(lds_buffer, b_lane_base, imm + 2 * 256))
                 return v0.shuffle(v1, list(range(8)))
             else:
                 _num_tiles = WMMA_K // PACK_FACTOR_B // 16
@@ -2824,9 +2743,7 @@ def compile_fp8fp4_gemm(
             desc_b1_init = make_desc_b_half(stages_b_mem[0], split_k_base, 1)
 
         adv_a_i32 = fx.Int32(tile_k // PACK_FACTOR_A)
-        # Tile-contiguous a8w4 advances one full tile (_b_num_blocks 256B blocks) per
-        # K-step; the interleaved layout advances packed_tile_k_b*16 bytes.
-        adv_b_i32 = fx.Int32(_b_num_blocks * B_TILE_BYTES if is_a8w4 else packed_tile_k_b * 16)
+        adv_b_i32 = fx.Int32(packed_tile_k_b * 16)
         adv_as_i32 = fx.Int32(tile_k // SCALE_BLOCK * wmma_m_rep)
         adv_bs_i32 = fx.Int32(tile_k // SCALE_BLOCK * b_scale_load_rep)
 
@@ -2943,10 +2860,9 @@ def compile_fp8fp4_gemm(
                 # The remain seg writes at LDS offset col_off (per operand); _pack_dg0
                 # below rebuilds dg0 from the per-stage LDS base, so we must re-add that
                 # offset here (it was baked into the seg descriptor's dropped dg0).
-                _b_rem_lds_off = _cols_b_blk[1][0] * _b_blk_stride if _b_ksmajor else _cols_b[1][0] * 16
                 _seg_lds_off_rem = _select_wave_tdm_value(
                     arith.constant(_cols_a[1][0], type=T.i32),
-                    arith.constant(_b_rem_lds_off, type=T.i32),
+                    arith.constant(_cols_b[1][0] * 16, type=T.i32),
                     arith.constant(_cols_as[1][0], type=T.i32),
                     arith.constant(_cols_bs[1][0], type=T.i32),
                 )

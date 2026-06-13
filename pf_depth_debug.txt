@@ -1,0 +1,88 @@
+pf_depth_wmma — 状态 & WMMA-driven TDM K-split 进度
+======================================================================
+
+【默认行为：正确、已验证、已备份】
+- pf_depth_wmma=None（full-depth）：HEAD 逐位一致，1.0
+- sub-depth 无复用（num_k_tiles<=num_buffers）：真 sub-depth，1.0
+- sub-depth 有复用：自动回退 full prefetch + warn，1.0
+备份：.pf_backup/gemm_fp8fp4_gfx1250.py.working
+
+======================================================================
+【真·优化：WMMA-driven TDM K-split（按用户最终方案）】
+
+目标：把每个 tile 的 TDM 沿 K 切成 [pf, remain] 两条，remain 那条延后到
+当前 tile 的 remain 读完之后再发，从根上消除复用竞争（不再「整块覆盖」）。
+时序约束（用户）：pf 算完才 issue next-pf TDM；remain 算完才 issue next-remain TDM。
+取舍：memory-bound 用 full-depth（不切）；compute-bound 用 sub-depth（切+此约束，
+少点带宽无所谓）。
+
+可行性：已确认。a/b/as/bs 全是 K-连续/ks-major，K-split 可表达。
+  - A: tensor_shape==tile_shape==tile 区域（注意：seg 要把 tensor_shape 也改成 col_len）
+  - B: tensor_shape=全矩阵, tile_shape=tile（本来就 tile<tensor）
+  - scales: 同 A
+
+【已写（全部 gate 在 _pf_tdm_split，默认 off，不影响默认路径）】
+- K-split 量：_pf_tdm_Dk / _pf_pk_a,b / _pf_sc_a,b / _pf_tdm_split（PF_FORCE_DK 可强制）
+- 描述符：make_desc_{a,b,as,bs}_seg(memref,k_base,seg)  seg0=pf seg1=remain
+- dual active TDM：_select_active_tdm ×2 → _seg_dg_pf/rem, _seg_alo_pf/rem,
+  _issue_active_tdm_seg(load_stage, addr_lo, seg)
+- prologue：_pf_tdm_split 时改成「发 pf-seg + 发 remain-seg」每 stage
+备份：.pf_backup/gemm_fp8fp4_gfx1250.py.step1c-wip
+
+【已解决：seg 描述符 NaN 的第一层根因 —— LDS 偏移被丢】
+- 验证法：full-depth + PF_FORCE_DK=2，per-operand 隔离开关 PF_SPLIT_OP=a|b|as|bs|none|all
+  control：PF_SPLIT_OP=none（全 operand 两段都整块加载、幂等）→ 1.0 ⇒ dual-issue/等待机制本身没问题
+- tensor_shape 其实 vestigial（make_tensor_descriptor_2d 290 行解构后再没用），改它无效
+- 真根因：_issue_active_tdm_seg 重打包 dg0 时用 _stage_lds_sgprs[stage]（stage 基址），
+  丢掉了 seg 描述符里 baked 的 lds_byte_offset。结果 pf 和 remain 都写 LDS offset 0，
+  remain 覆盖 pf → 损坏。
+- 修复：为 seg1 预计算 per-operand remain LDS 偏移（wave-selected）
+  _seg_lds_off_rem=_select_wave_tdm_value(colA, colB*16, colAS, colBS)，
+  _stage_lds_rem_sgprs=[readfirstlane(v+off)]，seg1 用它。
+- 结果：PF_SPLIT_OP=a/as/bs → 1.0（K-split 正确）；b → 仍 nan（见下）
+
+【B 的第二层硬限制：pad 编码溢出（未解决，需换布局）】
+- B 用 preshuffle_b_16x16（*16 交错），n-group LDS stride=_b_ngroup_stride=packed_tile_k_b*16=4096B
+- K-split 要在 n-group 内切，需 pad 跳过组间间隙。DK=2 时：
+  pad_interval=2048B→enc=8（3-bit 字段上限 7，溢出）；pad_amount=2048B→enc=511（7-bit 上限 127，溢出）
+- 描述符 pad 最大只能 interval 1024B / amount 512B，B 的间隙 2048~4096B 根本编不出来
+- ⇒ B 在当前交错布局上，单条 padded TDM 无法表达 K-split（A/scale 偏移小，没这问题）
+- 路线（待定）：
+  (a) 换 tile-contiguous preshuffle（gemm 分支的 preshuffle_b_16x16_tiled），
+      若改成 kt-major 则 pf=连续 block 区间、免 pad；需改 make_desc_b + B 的 LDS 读地址
+  (b) B 改按 N 切（复用 make_desc_b_half，已验证），但需把 prefetch 顺序对 B 改成 N-major
+
+【已解决：B 用 ks-major tile-contiguous 布局，K-split 成功】
+- 用户确认 GitHub 的 tile-contiguous B（make_desc_b + preshuffle_b_16x16_tiled）已验证
+- port 进来（a8w4 专用，gate=is_a8w4）：模块常量 B_TILE_BYTES/LDS_PAD_B_TILE_BYTES、
+  _b_pad/_b_blk_stride/_b_ngroup_stride/lds_b_data_bytes、make_desc_b 的 a8w4 tiled 分支、
+  load_b_frag/_precompute_b_lane_bases 用 _b_blk_stride、adv_b、test 的 preshuffle_b_16x16_tiled
+  → ng-major baseline K=3072 = 1.0（port 正确）
+- 翻 ks-major（within-tile k-block 外、n-group 内）：preshuffle 加 ksmajor 参数
+  (permute 0,3,4,1,2,5)、_b_ksmajor=is_a8w4 & B_NGMAJOR!=1、_b_kstep=(tile_n//16)*_b_blk_stride、
+  load_b_frag/_precompute 的 ks-major 分支（n-group 步=_b_blk_stride、k-block 步=_b_kstep）
+  → ks-major baseline = 1.0（make_desc_b 不变，因为只加载连续 block，顺序由 preshuffle 决定）
+- make_desc_b_seg ks-major 分支：连续 block 区间切分（_cols_b_blk，per-block 小 pad，能编码）
+- 结果：PF_FORCE_DK=2 下 PF_SPLIT_OP=b/all/none 全 1.0 ✅ —— B 不再是瓶颈
+
+【约束：A/scale 的 pad_interval(=col_len) 必须 pow2-in-dwords】
+- DK=1/3 失败：A pf 或 remain 的 col_len 非 pow2 → compute_padding_encoding assert
+- 只有对称切分（DK=k_wmma_steps/2，col_len 都 pow2）才行；B（ks-major per-block pad）无此限
+- 真 feature 的 Dk 需选成 col_len pow2（对称切分天然满足）
+
+【env 调试开关补充】
+- B_NGMAJOR=1：B 回退到 n_group-major tile-contiguous（对照 ks-major）
+
+【Stage A+B 完成并多形状验证（对称 DK=2）】
+- PF_FORCE_DK=2 + PF_SPLIT_OP=all → 1.0：tile_n=64/128/256、m_warp=1/2、K=3072/6144
+- 备份：.pf_backup/{gemm_fp8fp4_gfx1250.py,test_...,fp4_utils.py}.ksplit-all-ok
+- 注意：m_warp=2 需 tile_m>=32（warp_tile_m>=16），否则 scale preshuffle wmma_rep=0（与本改动无关）
+
+【Stage C（进行中）：接真 sub-depth 流水】
+- 主循环：pf 算完发 next-pf TDM、remain 算完发 next-remain TDM（延后 remain reload）
+- tail 同样；去掉 num_k_tiles>num_buffers 的 full 回退
+- 约束：Dk 需让 A/scale 的 col_len 为 pow2-in-dwords（对称切分天然满足）
+
+【env 开关（调试用，默认 off）】
+- PF_FORCE_DK=<ks>     强制在第 ks 个 ks-step 处切 TDM（验证 seg 描述符）
+- PF_SPLIT_OP=a|b|as|bs|none|all   只切某个 operand（其余两段整块幂等），定位用

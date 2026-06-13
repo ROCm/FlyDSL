@@ -1,0 +1,66 @@
+pf_depth_wmma 调试结论
+======================================================================
+
+【现状】
+- full-depth（pf_depth_wmma=None）：已修好，cosine=1.0，和 HEAD 逐位一致。
+  （full-depth 路径已还原成 HEAD 的 loader 版本，offset 表只给 sub-depth 用。）
+- sub-depth（pf_depth_wmma<A）：错。
+
+----------------------------------------------------------------------
+【测试矩阵 / 关键证据】
+
+1) 总数据量对得上（同 K=2048）：没有缺 load
+   full-depth   : b128=196 b32=64 2addr=0  -> 848 dword
+   sub-depth D8 : b128=192 b32=72 2addr=4  -> 848 dword
+   v_wmma 都=64，tensor_load 都=4。数据全搬了，final tile 的 remain 也都发了。
+
+2) buffer 复用相关，但越复用越差（K 越大 / nb 越小）：
+   K=3072(6tiles)  nb=2:0.831  nb=3:0.859  nb=4:0.894
+   K=6144(12tiles) nb=3:0.710  nb=4:0.707
+   K=2048(4tiles)  nb=4(恰好无复用):PASS
+
+3) remain「开头一次性预取」(PF_REMAIN_UPFRONT) 和「compute 中途读」结果分毫不差：
+   K=2048:0.875/0.875   K=3072:0.859/0.859   K=6144:0.710/0.710
+   => 不是时序/竞争，是确定性 bug。
+
+4) nb=2 这一组：
+   full-depth(D=None)        : cosine 1.0  PASS
+   sub-depth D=8 (normal)    : 70% 错
+   sub-depth D=8 (UPFRONT)   : 70% 错
+
+----------------------------------------------------------------------
+【根因（钉死）】
+
+分水岭不是 nb、不是早读晚读，而是“从哪读”：
+  - 走 carry（next_lds，提前一拍预取）-> 永远对
+    （full-depth、FORCE_PIPE D=16 都对）
+  - 读 lds_a（当前 buffer，本 tile 读）-> 永远错
+    （nb=2/3/4 都错，开头读也错）
+
+=> 这条 pf 流水里“本 tile 直接读 lds_a”本身就是坏的；
+   只要所有操作数都来自提前预取的 carry 就对。
+
+含义：sub-depth 想对，remain 也必须像 carry 一样“上一拍从 next_lds 预取”，
+不能本 tile 读 lds_a。但那样 remain 要跨 loop 边界留在 VGPR = 整块 carry
+= 省 VGPR 的目的没了。
+
+----------------------------------------------------------------------
+【需要你定方向】
+
+A. 接受：pf 路径下没法“本 tile 读 lds_a”，
+   那“少预取、本 tile 补读 remain”的省 VGPR 思路在这条流水走不通。
+
+B. 怀疑 lds_a 在 pf 路径本可以读、只是某个 fence/地址没配对
+   （non-pf 路径读 lds_a 是对的）。若是这个，我去查 pf 主循环里
+   lds_a 对应 buffer 的 TDM 有没有被 fence 等到 / base 地址映射对不对。
+
+----------------------------------------------------------------------
+【ISA / 调试文件】
+- /data/zanzhang/FlyDSL-main/21_isa_subdepth_D8.s   (K=2048 nb=3 D=8, 失败)
+- /data/zanzhang/FlyDSL-main/21_final_isa_quad.s    (full-depth K=3072, 对照)
+- /tmp/isa_sub/kernel_mxscale_gemm_0/21_final_isa.s (sub-depth 原始 dump)
+
+【临时调试开关（默认关，gate 在 env）】
+- PF_DBG=1            打印 A/wpks/k/D/split_idx
+- PF_REMAIN_UPFRONT=1 remain 开头一次性预取（测试用）
+  代码里 _pf_remain_upfront 读这个 env（在 compile 函数作用域）
