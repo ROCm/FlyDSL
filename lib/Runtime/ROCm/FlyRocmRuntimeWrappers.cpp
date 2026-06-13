@@ -68,7 +68,9 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
                                         intptr_t blockY, intptr_t blockZ, int32_t smem,
                                         hipStream_t stream, void **params, void **extra,
                                         size_t /*paramsCount*/) {
-#ifdef hipLaunchAttributeClusterDimension
+#if defined(HIP_VERSION) && (HIP_VERSION >= 70200000)
+  // ROCm 7.2+: hipLaunchAttributeClusterDimension is functional at runtime
+  // (SWDEV-567096). ROCm 7.0 has the API but cluster attrs are not implemented.
   hipLaunchAttribute attrs[1];
   attrs[0].id = hipLaunchAttributeClusterDimension;
   attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
@@ -87,37 +89,15 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
   config.attrs = attrs;
   config.numAttrs = 1;
 
-  hipError_t err = hipDrvLaunchKernelEx(&config, function, params, extra);
-  if (err == hipSuccess)
-    return;
-
-  const bool requestedRealCluster = (clusterX > 1) || (clusterY > 1) || (clusterZ > 1);
-  if (requestedRealCluster) {
-    fprintf(stderr,
-            "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-            "for requested cluster=(%ld,%ld,%ld); not falling back to "
-            "hipModuleLaunchKernel.\n",
-            static_cast<int>(err), static_cast<long>(clusterX), static_cast<long>(clusterY),
-            static_cast<long>(clusterZ));
-    HIP_REPORT_IF_ERROR(err);
-    return;
-  }
-
-  fprintf(stderr,
-          "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-          "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
-          static_cast<int>(err));
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
-                                            smem, stream, params, extra));
+  HIP_REPORT_IF_ERROR(hipDrvLaunchKernelEx(&config, function, params, extra));
 #else
-  // Cluster launch not supported by this HIP version; ignore cluster dims
-  // and fall back to regular kernel launch.
   if ((clusterX > 1) || (clusterY > 1) || (clusterZ > 1)) {
     fprintf(stderr,
             "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
-            "hipLaunchAttributeClusterDimension is not available in this HIP "
-            "version; falling back to hipModuleLaunchKernel.\n",
-            static_cast<long>(clusterX), static_cast<long>(clusterY), static_cast<long>(clusterZ));
+            "built against HIP_VERSION < 7.2; falling back to "
+            "hipModuleLaunchKernel.\n",
+            static_cast<long>(clusterX), static_cast<long>(clusterY),
+            static_cast<long>(clusterZ));
   }
   HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
                                             smem, stream, params, extra));
