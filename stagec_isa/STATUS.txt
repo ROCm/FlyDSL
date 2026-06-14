@@ -1,0 +1,421 @@
+============================================================
+ Stage C / pf_depth_wmma 真 sub-depth 调试状态
+ (持续更新；最近更新见文末时间线)
+============================================================
+
+【目标】
+让 kernels/gemm_fp8fp4_gfx1250.py 的 pf_depth_wmma 真 sub-depth(D<A) 路径
+产出正确结果。原 Stage C 计划是"给可用的 sub-depth 加缓冲复用支持(deferred
+remain)"，但调试发现：真 sub-depth 计算路径从来没工作过(见【重大结论】)。
+
+============================================================
+【重大结论】真 sub-depth(D<A) 计算从未验证过、是坏的
+============================================================
+- 历史上所有"1.0 通过"都是:
+    (a) full-depth (pf_depth_wmma=None, assembled 路径), 或
+    (b) PF_FORCE_DK 的 seg 描述符测试 (仍是 full-depth compute).
+  从没有一个真正跑过 raw-table 的 D<A compute。
+- "G(K=1024 depth=1)通过 = sub-depth 主循环正确" 是【假象】:
+  K=1024 → num_k_tiles=4 > num_buffers=2 → 触发 L645 reuse fallback → 回退 full-depth。
+- 唯一不回退的真 sub-depth (num_k_tiles <= num_buffers) 例: K=512 depth=1
+  (num_k_tiles=2 == nb, loop_iters=0) → NaN。
+
+============================================================
+【cmodel 可信度】(ffm-env-setup skill 的 rocdtif-7.13)
+============================================================
+- 编译 / ISA dump: 完全可用可信。
+- 小 tile (a8w4 32/32/256) full-depth: 可信 (K=512, K=1024 都 PASS)。
+- 大 tile (128/128/256 K=3072; fp4 128/256 K=2048) full-depth: NaN, 但记忆/历史说
+  已验证 1.0 → 此 cmodel != 验证环境, 大 tile 结果【不可信】。
+- TDM (tensor_load_to_lds) 异步延迟: 【不建模】(当同步完成)。
+  → 强制 tensor_wait(0) 无效; reuse 竞争在此【看不见】(Stage C 核心修复只能真硬件验证)。
+- ds_load 延迟 (s_wait_dscnt): 【有建模】→ 确定性数据/计算 bug 可在此抓到。
+
+============================================================
+【复现配置】(都在小 tile, cmodel 可信)
+============================================================
+venv: /home/user/.venvs/flydsl-gfx1250/bin/python
+先 source: FFM_DIR=$(ls -d /data/docker/overlay2/*/diff/home/user/ffm-env/rocdtif-7.13-am+ffmlite-mi400.*-rel-* | head -1); source "$FFM_DIR/ffmlite_env.sh"
+
+FAIL (真 sub-depth, NaN):
+  python tests/kernels/test_gemm_fp8fp4_gfx1250.py --data-format a8w4 \
+    -M 32 -N 32 -K 512 --tile-m 32 --tile-n 32 --tile-k 256 \
+    --m-warp 2 --n-warp 2 --num-buffers 2 --out-dtype bf16 \
+    --pf-depth-wmma 1 --l2-prefetch-distance 0
+
+对照 PASS (同结构 full-depth): 去掉 --pf-depth-wmma 1
+对照 PASS (大 K 但回退): -K 1024 --pf-depth-wmma 1
+
+============================================================
+【已改动 / 已修复】(working tree, 未 commit)
+============================================================
+备份(改动前): .pf_backup/gemm_fp8fp4_gfx1250.py.pre-stagec
+
+[修复1-真bug] _l2_prefetch_b_at 未定义
+  - 现象: HEAD 及所有 .pf_backup 都【调用但从未定义】, 任何
+    wave_specialized_tdm=True + l2_prefetch_distance>0 (CLI默认2) 编译即 NameError。
+  - 修复: 在 _l2_prefetch (约 L2691) 后补了 B-only 精确-k 定义。
+  - 验证: full-depth l2pf=2 → PASS。
+
+[修复2-真bug] _pf_load_table a8w4 B offset 漏改 ks-major  ★关键
+  - 位置: L604-621 (elif is_a8w4 分支)。
+  - 现象: raw sub-depth 路径硬编码 +512 / *256 (旧 non-ksmajor 布局)。
+    默认是 ks-major(_b_ksmajor), 正确应同 load_b_frag(L1168-1179):
+      ksmajor:    imm = wn*_b_blk_stride + ks*_pf_num_tiles_b*_b_kstep;  第2个b128 = imm + 2*_b_kstep
+      non-ksmajor:imm = wn*_b_ngroup_stride + ks*_pf_num_tiles_b*_b_blk_stride; +2*_b_blk_stride
+  - 修复: 按 _b_ksmajor 分支, 与 load_b_frag 完全一致。
+  - 验证: dump ISA, B offset 由 (8704,9216 delta512) → (8704,9792 delta1088),
+    与通过的 full-depth 一致。但 kernel 仍 NaN → 还有 Bug#2。
+
+[调试开关-临时, 默认off, 待清理]
+  - PF_TDM_SPLIT_OFF=1 : 强制单条 full TDM (跳过 K-split)。证明 bug 不是 split。
+  - PF_FORCE_WAIT=1    : 每个 D<A WMMA 前强制 s_wait_dscnt(0)。证明 bug 不是 ds-wait。
+
+============================================================
+【Bug#2 - 未找到】修了 B 之后仍 NaN
+============================================================
+现象: K=512 depth=1 仍 NaN, 即使同时:
+  - PF_TDM_SPLIT_OFF=1 (无 split)
+  - 中和 scale (全 1.0 / E8M0=127)
+  - B offset 已修
+
+已逐一核对【与通过的 full-depth 一致】:
+  - A offset: 0/32/64/96/128.. ✔
+  - B offset (修复后): 8704/9792/10880/11968 ✔
+  - AS/BS offset 公式 (vs load_scale_b128 L1219 / load_scale_slice_b128 L1234) ✔
+  - 每个 WMMA 的 A_ks×B_ks 配对 + acc 累加链 ✔
+  - tile1 的 scale offset: 27392/27664/27396/27668 = 与 T1 完全一致 ✔
+
+★唯一可疑 (待用户/进一步确认): tile0 的 scale 寻址 与 full-depth 不同
+  - FAIL tile0 scale: as=v68+13056, bs=v69+13328
+  - T1   tile0 scale: as=v0 +192,   bs=v1 +4   (ds_load_2addr_b32)
+  - tile1 两者一致, 唯独 tile0 不同。若 FAIL 的 v68+13056 绝对 LDS 地址 != 真实
+    scale 区 → 读到非 1.0 的 E8M0 → 2^(255-127)=inf → NaN (与"中和scale也救不了"吻合,
+    因为 offset 错就读不到中和后的 scale)。
+  - 注意: 此处 base 是 VGPR(v68/v0), 仅看 ISA 文本无法直接判定绝对地址是否相等,
+    需要确认 scale lane base 计算 (_precompute_scale_lane_bases L1203) 在 raw seed
+    路径 vs full-depth assembled 路径是否给出同一基址。
+
+可能的根因区域 (Bug#2):
+  - compute_tile D<A 路径: with-next L1609-1644, final-tile L1657-1697
+  - _assemble_pf_ks (L1461) 的 table 索引 / scale 取值
+  - _issue_pf_all_ks sub-depth 分支 (L3046+)
+  - _pf_wmma_plan / _pf_split_idx / _pf_plans 的构造
+
+============================================================
+【ISA 文件】(stagec_isa/, dump 脚本 = dump_stagec_isa.py)
+============================================================
+  fail_loopiters0_depth1.s   真 sub-depth, NaN  (含 B 修复)
+  pass_loopiters0_full.s     full-depth, PASS   (同结构对照)
+  pass_mainloop_depth1.s     depth=1 K=1024 但回退 full-depth, PASS
+  各自的全 pass 中间产物在 _raw_<name>/kernel_mxscale_gemm_0/ (00_origin.mlir .. 21_final_isa.s)
+
+fixed FAIL compute 区注解见 git 对话记录; 关键行:
+  179-186 seed (tile0 ks0: A,B,as,bs)
+  189     tail TDM (tile1 → buffer1 +14336)
+  193-200 tile0 ks1 (remain)
+  201/211/221/224  四个 WMMA (tile0 ks0/ks1, tile1 ks0/ks1)
+  202-219 tile1 的 A/B/scale 读取 (buffer1, +14336)
+
+============================================================
+【ISA dump 方法】
+============================================================
+FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=<dir> + flyc.compile(...)
+→ <dir>/<kernel>_0/21_final_isa.s (+ 全 pass 阶段)。需先 source ffm env。
+
+============================================================
+【cmodel 不建模 TDM 异步延迟 — 已证实】
+============================================================
+- 证据1: PASS(full-depth) 在 TDM 飞行中(wait 0x1)就读 next buffer, 照样对。
+- 证据2: B-fixed + 强制 tensor_wait(0) 等齐 tail TDM (PF_TAIL_WAIT=1) → 仍 NaN。
+=> 此 cmodel 把 TDM 当同步完成。计划里的 s_wait_tensorcnt 顺序无法在此验证对错
+   (改 wait 顺序不影响 cmodel 结果), 只能真硬件验证。
+=> 当前 NaN 是【确定性数据/计算 bug】(Bug#2), 独立于 TDM-wait。
+   两层问题: (1) 确定性 bug, cmodel 可验; (2) TDM 异步竞争+wait 顺序, 只 HW 可验。
+
+============================================================
+【用户的完整 Stage C 计划 (WMMA-driven prefetch) — 权威设计】
+============================================================
+- A=每 tile 总 WMMA 数=k_wmma_steps*wpks; D=prefetch 的 WMMA 数(=pf_depth_wmma)。
+- tile 沿 K 切 [tile_pf=前 Dk 个 ks-step(D 个 WMMA), tile_remain=剩 A-D 个]。
+- ds_load 按 WMMA 演进序拆块(As0,a0,bs00,b00,...) = 现有 _pf_load_table。
+- compute ds_load 流水: WMMA i 消费 pos i、发 pos i+D 的 ds_load。phase 数按 D vs A-D:
+    D==A: 1 phase(只 fetch next tile)
+    D==A-D: 2 phase
+    D>A-D / D<A-D: 3 phase (next_tile_pf 的 fetch 位置不同)
+- ★TDM 分 pf-fast/remain-slow, 分开 issue 解决数据竞争, 边界交错 wait+issue:
+    边界1 (i==D, pf WMMA 消费完): wait(本 tile remain TDM) + issue(next tile pf TDM)
+    边界2 (i==A, tile 末尾):       wait(next tile pf TDM)   + issue(next tile remain TDM)
+- num_buffers=2 tile 大时能流起来。last tile 补最后 remain。
+
+【现状映射 (哪里错)】
+- prologue: pf+remain 背靠背发(没按边界/没延后) → 错
+- mainloop: 单条 full TDM(没分离/没边界 wait+issue) → 错
+- tail: 单条 full TDM → 错
+- compute_tile with-next D<A: 无 TDM 边界 callback → 缺
+- compute ds_load i→i+D: 在, 但有 Bug#2
+
+【修改计划草案 (待用户拍板)】
+A. compute_tile(D<A) 加两个 TDM 边界 callback (cb_pf_done@i==D, cb_remain_done@i==A);
+   with-next 和 final-tile 两路都加。
+B. mainloop 提供 callback + 两个地址 carry(cur_addr_lo_pf/_rem), 用 _issue_active_tdm_seg
+   发 pf/remain, 去掉单条 full TDM。
+C. prologue 改流水启动(发 tile0 pf, tile0 remain, tile1 pf)。
+D. tail/last tile 补最后 remain, 不发 next。
+E. gate 在真 pf_depth_wmma(D<A); 保留 seg 描述符。
+
+==================== 待用户回答的问题 (在此直接作答) ====================
+
+Q1. 【验证策略】
+   背景: 此 cmodel 不建模 TDM 异步延迟(已证实), 所以你计划里 s_wait_tensorcnt 的
+   顺序对错在这里测不出来(只 HW 可验); 同时当前还有一个确定性数据 bug(Bug#2),
+   它 cmodel 可验(B 修复+强制各种 wait+关 split 都仍 NaN)。
+   问: 选哪条路?
+     (a) 先在 cmodel 把确定性数据路径修对(定位+修 Bug#2), 再按计划接 TDM pf/remain
+         的边界 wait+issue 流水(wait 顺序靠设计正确, 留你 HW 验证)。
+     (b) 直接整体按计划重写, 全部交你真硬件验证(cmodel 只做编译/不崩 sanity)。
+   你的答复:b 按照我的流水没问题
+
+Q2. 【先支持哪些 D 情况】
+   4 种: D==A(1phase) / D==A-D(2phase) / D>A-D(3phase) / D<A-D(3phase)。
+   问: 先只做 D==A-D(对称, 最简单), 还是一上来覆盖全部 4 种?
+   你的答复:先做一个简单的吧，但是你要保证接口灵活性
+
+Q3. 【wait_tensorcnt 的 outstanding 计数】
+   要"等本 tile 的 remain TDM 完成"需指定 tensor_wait(N) 的 N(剩余在飞行条数)。
+   wave_specialized 下每次 issue 是 4 个 operand(a/b/as/bs, 每 wave 1 条)。
+   问: 你心里 N 是怎么定的? 有固定规则(如按 pf/remain 各算几条 + stage 深度),
+       还是要我从在飞行 TDM 的记账推导?
+   你的答复:飞行中推导，其实是固定的
+
+Q4. 【buffer 布局确认】
+   我的理解: tile_t 整个在 buffer t%nb(pf 区 + remain 区, 沿 K 用 seg 描述符切开),
+   tile_(t+1) 在 buffer (t+1)%nb。
+   问: 对吗? 若不对, 正确布局是?
+   你的答复:
+
+Q5. 【Bug#2 要不要我继续在 cmodel 挖】(若 Q1 选 b 可忽略)
+   当前确定性 NaN: A/B(修复后)/scale 的 offset 和 WMMA 配对都与通过的 full-depth 一致,
+   唯一不同是 tile0 scale 寻址(FAIL v68+13056 vs T1 v0+192)。
+   问: 要我继续定位这个, 还是按整体重写顺带解决?
+   你的答复:现急需pipeline
+
+=======================================================================
+
+【调试开关 (临时, 默认off, 待清理)】
+- PF_TDM_SPLIT_OFF=1 : 强制单 full TDM (证明 bug 非 split)
+- PF_FORCE_WAIT=1    : D<A WMMA 前强制 s_wait_dscnt(0) (证明 bug 非 ds-wait)
+- PF_TAIL_WAIT=1     : 强制 tail TDM 等齐 (证明 cmodel TDM 同步, bug 非 TDM-wait)
+
+============================================================
+【时间线】
+============================================================
+2026-06-13 sess2:
+  - ISA dump 任务完成 (depth1 vs full 对比, /tmp/pf_depth_cmp/)。
+  - 修复 _l2_prefetch_b_at (真 bug)。
+  - 发现 cmodel 大 tile 不可信 + TDM 异步不建模。
+  - 发现真 sub-depth 从未验证 ("G通过"是回退假象)。
+  - 修复 _pf_load_table a8w4 B ks-major offset (Bug#1, 验证 offset 已对)。
+  - Bug#2 未找到: B 修复后仍 NaN, A/B/scale offset 与 WMMA 配对均与通过路径一致,
+    唯 tile0 scale 寻址与 full-depth 不同(待查)。
+  - 证实 cmodel 不建模 TDM 异步(PF_TAIL_WAIT 仍 NaN) → NaN 是确定性 bug, TDM-wait 只 HW 可验。
+  - 用户给出完整 Stage C 计划(WMMA-driven prefetch, TDM pf/remain 边界交错 wait+issue)。
+  - 已向用户呈交"理解+现状映射+修改计划草案+4个问题", 等用户确认后再动手。
+  - 当前: 等用户回答验证策略/D情况/wait计数/buffer布局。
+  - 用户回答: Q1=b(整体重写,HW验证), Q2=先D==A-D但接口灵活, Q3=飞行推导(固定),
+    Q4=(空,按tile_t在buffer t%nb), Q5=急需pipeline不挖Bug#2; 后续追加"按分界点/tensor_wait(0)/先把精度搞对"。
+  - 实现 PIPELINE (gate PF_PIPELINE=1, 默认off):
+    * compute_tile/compute_tile_scheduled 加 tdm_cb_pf(@i==_pf_D)/tdm_cb_remain(@tile末) 接口 (灵活)。
+    * prologue split 已预热 tile0.pf+remain; 之后建 _pl_addr_pf_box/_pl_addr_rem_box。
+    * tail 加 _pf_pipeline 分支: 无 upfront full TDM, 用 callback 发 next tile 的 seg pf/remain,
+      tensor_wait(0), final tile 只 wait 不 issue。
+    * 关键坑: flydsl AST rewriter 不支持 continue; 编译期 if 必须 const_expr() 包住(否则被当 scf.if)。
+  - 结果: PF_PIPELINE=1 K=512 depth=1 → 编译+运行 OK, 但 NaN(100%)。
+    => 印证 cmodel TDM 同步: pipeline 的 wait 顺序不改变 cmodel 精度; NaN 是底层 Bug#2(确定性 D<A 计算 bug)。
+    => Bug#2 在 cmodel 和 HW 都会坏, 是精度真正拦路虎, 必须修。pipeline-100% vs legacy-99.4% 提示 tail 接线可能还有 tile1 加载新问题。
+  - 下一步: 定位 Bug#2 — 比 _assemble_pf_ks(D<A 组装/shuffle) vs load_a_frag/load_b_frag(full-depth), 之前只比了 offset。
+  - ★Bug#2 已精确定位(常量输入 A=B=1 scale=1 期望全512, correct map):
+    只有 warp(0,0)[rows0-15,cols0-15] 全对(256/1024), 其余 3 个 warp 全错(输出 1e25/inf)。
+    huge=读到未初始化 LDS 当 E8M0 scale(A/B 垃圾只到~1e6, 1e25 必是 scale 指数)。
+    warp(1,0)错→AS(按warp_m), warp(0,1)错→BS(按warp_n); warp_m或warp_n非0即错。
+    => Bug#2 = D<A raw 路径 scale 的 per-warp 寻址错(warp_m_base/warp_n_base 那层),
+       warp0 base=0 蒙对。full-depth 所有 warp 对 => base 函数没错, 是 raw 表用法/offset 不对。
+    下一步: 比 full-depth _load_b_and_scales / load_scale_b128 的 scale base/offset
+            vs raw 表 _pf_as_off/_pf_bs_off + _precompute_scale_lane_bases, 找 warp 层差异。
+  - ★★突破: Bug#2 = SCALE。实验:
+    * PF_SCALE_FRESH=1 (D<A 改用 load_scale_b128 现读 scale, split 仍 on) → 仍 99% NaN
+      => scale LDS 本身脏(split 加载错), 现读也读到垃圾。
+    * PF_TDM_SPLIT_OFF=1 + PF_SCALE_FRESH=1 (full TDM 加载 scale + 现读) → 错误 99%→4.5%(46/1024)!
+    => 两个 scale 子bug: (A) split 的 scale 描述符 make_desc_as/bs_seg 把 scale LDS 加载错(非0 warp 1e25);
+       (B) carry/table 的 scale 读取错。两者都避开(full TDM 加载 + load_scale_b128 现读) → 95.5% 对。
+    * 1e25 量级只可能是 E8M0 scale(A·B 最大~1e6), 印证是 scale。
+  - 残余 46(4.5%) 还 NaN(@~(0,16)), 待定位(可能 fresh scale 在 with-next/remain 的边界, 或 A/B)。
+  - 调试开关追加: PF_SCALE_FRESH=1 (D<A 用 load_scale_b128 现读 scale 而非 carry)。
+  - 修复方向(待定): pipeline 里 scale 不参与 pf/remain split — 用 full TDM 加载 + fresh 读;
+    只对 A/B 做 split(race fix 本就是 A/B 这种大操作数的事)。scale 小(E8M0), 切它无意义且有 bug。
+  - 残余特征(combo=split_off+scale_fresh, 常量输入): correct=944/1024, 错的是
+    warp(0,1) rows0-4 × cols16-31。值=488/484/488/488/500(应512, 偏低~12-28, 非NaN);
+    但 RANDOM 输入时这块=NaN(放大)。=> 残余还是个更小的 scale-offset bug(对的区、错的entry)。
+    怪点: 形状=warp_n=1 的前几行, 既非纯AS(warp00同warp_m全对)也非纯BS(BS错该整列错)。待挖。
+  - 当前状态: 已确认 scale 是 Bug#2 主因(99%→~95%)。pipeline 框架已实现(gate PF_PIPELINE,
+    compute_tile callback + tail). 待: (1) 把 scale-no-split+fresh 做成正式实现; (2) 挖 warp(0,1)rows0-4 残余;
+    (3) 残余清后 pipeline 整体 cmodel 验证; (4) HW 验证 TDM-wait 时序。
+  - 调试开关全集(默认off): PF_PIPELINE, PF_TDM_SPLIT_OFF, PF_SCALE_FRESH, PF_B_FRESH, PF_FORCE_WAIT, PF_TAIL_WAIT, PF_FORCE_DK, PF_SPLIT_OP, B_NGMAJOR。
+  - ★★★ 残余定位完成: 残余 4.5%(warp_n=1, rows0-4) 只在 TDM store 时出现!
+    实验链:
+    * combo(split_off+scale_fresh) TDM store → 4.5% 错(warp_n=1 rows0-4, 常量488 随机NaN)
+    * combo + PF_FORCE_WAIT → 仍 4.5% (非 ds-wait/调度)
+    * combo + PF_B_FRESH (B 也 load_b_frag 现读) → 仍 4.5% (非 B fragment)
+    * m_warp=4 n_warp=1 (warp_n恒0, tile64/16) → PASS (但 tile_n 也变了, 非纯隔离)
+    * combo + --no-tdm-store (buffer store) → ★PASS cosine 1.0★
+    => 结论: D<A 计算(accs)在 scale-fresh+no-split 下 100% 正确! 残余在 TDM STORE epilogue,
+       是 D<A 特定 bug(full-depth 的 TDM store 正常)。可能 LDS 复用时机/fence/threshold。
+  - 当前确定的正确配方(legacy depth=1): scale 用 full TDM 加载(不split) + load_scale_b128 现读
+    + buffer store → 100% 正确。A/B 从 carry 读 OK。
+  - 待办: (1) 把 scale full-load+fresh 做成正式实现(去 debug flag);
+    (2) 修 TDM store 的 D<A 残余(warp_n=1 rows0-4) 或 buffer store 过渡;
+    (3) 接 PF_PIPELINE (A/B split TDM 时序) 整体; (4) HW 验 TDM-wait。
+
+  ★★★★ 正式修复完成(无 debug flag): D<A 计算正确 ★★★★
+  代码改动(默认生效, gate 在真 D<A):
+    * _dk_as=_dk_bs=k_wmma_steps: scale 永不 K-split (L712 区). scale 小+split描述符 per-warp
+      mis-address 是 bug. 只 A/B split。
+    * D<A 两条路径(with-next/final)的 _emit_wmma: scale 改用 _scales_for_emit(现读, 含op_sel),
+      不再从 carry 取。A/B 仍从 carry。
+  验证(DEFAULT, 无 flag): depth=1 K=512:
+    * buffer store(--no-tdm-store) → PASSED cosine 1.0  ← D<A 计算(A/B split + scale full+fresh) 100% 正确!
+    * TDM store → 仍 4.5%(warp_n=1 rows0-4) ← TDM store epilogue 的 D<A 残余(独立 bug)
+  => 最难的 D<A 计算正确性达成。剩 TDM store epilogue 残余 + pipeline 时序(HW)。
+  下一步: (a) PF_PIPELINE + buffer store 验证 pipeline 路径计算; (b) 查/修 TDM store epilogue 残余。
+
+  ★★★★★ PIPELINE 计算路径验证通过 ★★★★★
+  * PF_PIPELINE=1 depth=1 K=512 + buffer store → PASSED cosine 1.0
+    => 真 pipeline(A/B pf/remain split TDM 在边界 issue + scale full+fresh) 计算 100% 正确!
+  * DEFAULT(无flag) depth=1 K=512 + buffer store → PASSED (legacy D<A 路径也对)
+  * full-depth depth=None K=512 TDM store → PASSED (回归 OK, scale 改动没破坏 full-depth)
+
+  剩余唯一问题: TDM store epilogue 对 D<A 的残余(4.5%, warp_n=1 rows0-4):
+  * 计算(accs)正确(buffer store 全对); 只 TDM store(epilogue_lds_stores→tensor_store_2d)错。
+  * 已排除: ds-wait race(加 s_wait_dscnt(0) 在 epilogue_lds_stores 前无效, 已回退)。
+  * full-depth TDM store 正常 => D<A 特定。accs 正确传入 epilogue 却 store 错 =>
+    怀疑 epilogue_lds_stores 的 LDS staging 或 tensor_store 对 D<A 的 LDS 状态/布局敏感。未解。
+  * 过渡方案: pipeline 用 buffer store(已验证全对); TDM store 残余单独修。
+
+  代码当前状态(working tree, 未commit; 备份 .pf_backup/*.pre-pipeline, *.pre-stagec):
+  - 真 bug 修复(默认生效): _l2_prefetch_b_at 定义; B ks-major offset; scale 不split(_dk_as/bs=k_wmma_steps);
+    D<A scale 用 _scales_for_emit 现读。
+  - PIPELINE 实现(gate PF_PIPELINE): compute_tile tdm_cb_pf/remain 边界callback; prologue 预热;
+    tail _pf_pipeline 分支(seg TDM via callback, tensor_wait(0))。
+  - 残留 debug 开关(默认off, 待清理): PF_PIPELINE(功能), PF_TDM_SPLIT_OFF, PF_FORCE_WAIT, PF_TAIL_WAIT, PF_FORCE_DK, PF_SPLIT_OP, B_NGMAJOR。
+    (PF_SCALE_FRESH/PF_B_FRESH 的引用已被 scale 正式化移除。)
+
+  ★ 范围澄清(重要): 当前只实现了 TAIL(loop_iters=0) 的 pipeline; 主循环(loop_iters>0)仍是 legacy。
+  - 无复用真 sub-depth(num_k_tiles<=nb, 如 K=512): loop_iters=0 → 走 tail pipeline → 已实现+验证(buffer store 1.0)。
+  - 复用真 sub-depth(num_k_tiles>nb, 如 K=1024 nb=2): loop_iters>0 → 走主循环, 但当前 L645 fallback 回退 full-depth。
+    主循环的 seg-split + 边界 wait/issue + cur_addr_lo_pf/rem 双carry + 去 fallback = 尚未实现(异步竞争 HW 战场)。
+  待办优先级:
+    (1) TDM store epilogue 残余(warp_n=1 rows0-4) — 或用 buffer store 过渡。
+    (2) 主循环 pipeline(复用场景, 真异步竞争, 需 HW 验)。
+    (3) 清理 debug 开关。
+
+  ★★★★★ 关键: 磁盘缓存碰撞 (测试方法论!) ★★★★★
+  - flyc 有磁盘缓存 ~/.flydsl/cache/*.pkl。cache key = sha256(toolchain hash + 函数源码 + 依赖源码 + closure 标量值)。
+  - closure 标量(含 _pf_D, _pf_full_depth, _pf_pipeline) 在 key 里 → depth/PF_PIPELINE 区分得开。
+  - 源码改动 → key 变 → 重编译。所以"跨编辑"不会用旧缓存。
+  - ★但 INLINE 读的 env flag (PF_TDM_SPLIT_OFF / PF_SCALE_FRESH / PF_FORCE_WAIT / PF_TAIL_WAIT)
+    是 const_expr(os.environ.get(...)), 不进 closure 标量 → 不在 key 里!
+    => 同源码下切换这些 inline flag, 第二次会命中第一次的缓存 binary, flag 失效, 结果污染!
+  - 教训: 凡用 inline env flag 的实验, 必须先 rm -rf ~/.flydsl/cache 再跑(每个 flag 组合一次)。
+    之前很多 combo 实验(PF_TDM_SPLIT_OFF+PF_SCALE_FRESH 等)可能被污染, 结论需用清缓存复核。
+  - 可靠(无 inline flag, 清缓存复核过)的结论:
+    * DEFAULT depth=1 K=512 buffer → PASS 1.0 (scale 修复后 D<A 计算正确)
+    * DEFAULT depth=1 K=512 TDM → 4.5% (TDM store epilogue 残余, 真实)
+  - 正式修复(_dk_as/bs 不split + _scales_for_emit 现读)是无条件的(不靠 inline flag), 所以可靠。
+
+  主循环 pipeline 已实现(去fallback+双carry+callback), 但 PF_PIPELINE 路径有确定性 bug:
+  - cache-cleared 确认: PF_PIPELINE K=512 buffer = 确定性 75%错(连跑两次都75%); br9dli3j4 的1.0是缓存污染。
+  - constant-map(PF_PIPELINE K=512): 只 warp(1,1) 对(256/1024), 其余 3 warp = -inf。
+  - 定位: DEFAULT tile1 用 legacy full TDM(_issue_active_tdm) 全对; PF_PIPELINE tile1 用 cb 的
+    seg 加载(_issue_active_tdm_seg) → per-warp 错。即 cb 的 seg 写入 buffer1 有 per-warp bug。
+    (prologue 的 seg 写 buffer0/load_stage=0 是对的 → DEFAULT 过)。
+  - 本质: 原 scale-seg per-warp 寻址 bug 的延续 — 计算端用"不切+fresh"绕过了, 但 cb 仍用 seg 描述符
+    WRITE scale 到 buffer1, 写入布局对非0 warp 仍错。
+  - 下一步: dump PF_PIPELINE ISA, 对比 cb seg 写入 vs prologue seg 写入的 per-warp 地址, 修 seg 写入。
+  - 注: 即便修好, pipeline 的异步复用竞争仍只能 HW 验(cmodel TDM 同步)。
+
+  ★★★★★★ PIPELINE 修复成功 ★★★★★★
+  - 根因: tail/主循环 pipeline 的 cb 缺【跨 wave barrier】。cb 是 wave_specialized(每 wave 发一个
+    operand 的 seg TDM), 而下个 tile 的 WMMA 读全部 operand(跨 wave) → 无 barrier 则其他 wave 的
+    TDM 写入不可见 → 3/4 warp 读 uninit → -inf。(constant-map: 只 warp(1,1) 对)。
+    DEFAULT(legacy) 有 pipeline_fence_wait(s_barrier) 所以没事; 我的 pipeline 分支漏了。
+  - 修复: cb_pf/cb_rem(tail) 和 _tdm_cb_pf/_tdm_cb_rem(主循环) 里, issue seg 后加 _pipeline_fence(0)
+    (= tensor_wait(0) + workgroup_barrier)。
+  - 验证(cache-cleared, buffer store):
+    * PF_PIPELINE K=512 (tail, loop_iters=0) → PASS 1.0
+    * PF_PIPELINE K=1024 (主循环 + 复用 num_k_tiles=4>nb=2, fallback已去) → PASS 1.0  ★真 sub-depth 跨复用!★
+  - => 完整 WMMA-driven prefetch pipeline (tail+主循环+复用) 计算 100% 正确(buffer store)。
+  - HW perf 注意: _pipeline_fence(0) 的 tensor_wait(0) 会等齐刚发的 TDM, 牺牲异步 overlap(pipeline 本意)。
+    HW 上应改成只等"被读的那条 TDM"+barrier、不等刚发的(允许 overlap)。但正确性已达成。
+  - 待验: PF_PIPELINE + TDM store(可能仍有之前的 epilogue 4.5% 残余); 更大 config; 清理 debug 开关。
+
+  ★★★★★★★ PIPELINE 全面通过 (cache-cleared) ★★★★★★★
+  - PF_PIPELINE K=512 buffer/TDM → 1.0;  K=1024 buffer/TDM (复用) → 1.0;  K=1536 buffer → 1.0。
+  - 意外收获: PF_PIPELINE + TDM store → 1.0!  (DEFAULT depth=1 TDM store 的 4.5% 残余被 cb 的
+    barrier 顺带修好 — 那也是跨 wave/LDS-reuse 的可见性问题)。
+  - 结论: 完整 WMMA-driven prefetch pipeline (tail + 主循环 + 复用 + buffer/TDM store) 计算 100% 正确。
+    Stage C 核心目标(真 sub-depth 跨缓冲复用)在 cmodel 层面达成。
+  - 剩: HW 验异步时序 + 把 cb 的 _pipeline_fence(0) 优化成不等刚发 TDM(恢复 overlap); 清理 debug 开关。
+
+  扩展验证全过(cache-cleared): tile_k=512 depth=2 K=2048 TDM→1.0; K=2048 depth=1 TDM→1.0;
+  full-depth K=1024 TDM(无pipeline回归)→1.0。覆盖 D=1/2, K=512..2048, buffer/TDM, tail/主循环/复用。
+  => D==A-D pipeline 在 cmodel 完成。剩余 = HW 异步验证 + barrier overlap 优化 + 清理 debug 开关 + (可选)D!=A-D 的 3-phase。
+
+  ★ tensor_wait 公式 (overlap 恢复) ★
+  - 错误版本: cb 用 _pipeline_fence(0), issue 后 wait(0) 把刚发的 TDM 也 drain 了 → 零 overlap。
+  - 正确公式: 每个 boundary fence 时 prefetch 已 issue 了 next, 所以 >=2 条在飞行(上一 phase 的 +
+    刚发的)。keep 刚发的(overlap), 只 drain 旧的:
+        _pf_keep = 1 + TDM_LOADS_PER_STEP*(num_buffers-2)   # nb=2 -> 1
+    cb_pf/cb_rem(有 next): _pipeline_fence(_pf_keep);  final tile(无 next): _pipeline_fence(0);
+    prologue fence(pipeline): _pipeline_fence(_pf_keep) (drain Pf0 给 seed, 留 Rm0 overlap phase1)。
+  - barrier 绑定: _pipeline_fence = s_wait_tensorcnt(N)+s_barrier_signal -1+s_barrier_wait -1
+    (ISA L134-136)。drain 完的跨 wave 可见; keep 在飞行的靠 cmodel 同步/HW prefetch 完成。
+  - cmodel: wait(1) 下 K=512/1024 buffer+TDM 全 PASS 1.0 (TDM 同步, count 不影响数据, 只验数据+barrier;
+    真 overlap HW 验)。
+
+  ★ 深流水 (用户公式) ★ — 替代上面的浅版 wait(1)
+  - 用户公式(A==2D, n buffer): prologue 预取满 + tensorcnt(0) 抽干; loop 每 phase issue 1 + 保持
+    2*(n-1) 在飞行(n-1 个 lookahead tile × pf/remain 各 1); tail 不再 issue, 每 phase 递减 2(n-1)-1,-2,...0。
+  - 实现: _pf_keep = 2*(num_buffers-1); prologue pipeline fence = _pipeline_fence(0); cb 用 _pf_keep。
+    cb 的 TDM 目标从 next_buf(1 ahead) 改成 load_stage(n-1 ahead, 进腾空 buffer, 同非 pipeline)。
+  - cmodel 结果(cache-cleared): nb=2 K=512/1024/2048 buffer+TDM 全 PASS 1.0 ✓;  nb=3/nb=4 NaN ✗。
+  - => nb=2 深流水完整工作(数据正确, ~1 tile overlap, HW 验时序)。这是用户主场景(nb=2 tile 大)。
+  - 注: count 是 HW-only 正确性(cmodel TDM 同步, 任何 count 都过数据+barrier); 真 overlap HW 验。
+
+  ★★ nb>2 修复 (深流水 general num_buffers) ★★
+  - 根因: pipeline TAIL 把两件事混成 _pl_next: (1) cb 的 TDM 填充目标; (2) nxt_raw carry 读取目标。
+    非 pipeline tail 是分开的: TDM 填 _load_stage(tail_plan 指定), nxt_raw 读 _tail_next_cs。
+    nb=2 时 _load_stage==_tail_next_cs 碰巧对; nb>2 时 cb 覆写了已预加载的 tile -> NaN。
+    (k_prefetch 只是 L2 软提示, 非地址, 排除; 主循环 load_stage 已对; 是 tail 的锅。)
+  - 修复: tail cb 填 _load_stage(条件 _load_stage is not None), next_lds 仍用 _tail_next_cs。
+  - cmodel(cache-cleared): nb=2/3/4 全 PASS 1.0。tail-only(K=768)/main+tail/buffer/TDM/d1/d2 全过。
+  - => 深流水对 general num_buffers 完成: prologue 抽干 + loop/tail 保持 2(n-1) + cb 填 load_stage。
+       数据正确(cmodel); 真异步 overlap 待 HW 验。
+
+  ★ DEFERRED-REUSE 重构 (用户要求, 边消费边复用当前 buffer, 省 1 buffer + 真 overlap) ★
+  - 改动: pre_loaded=num_buffers (条件化, L305 _pf_pipeline_pre 预判+后面 assert); loop cb load_stage=buf_idx
+    (复用当前 buffer); tail 用 +1 trick: make_tail_plan(num_buffers+1, ...) 再 stage mod num_buffers
+    (让 tail load_stage 也指向复用 buffer)。_pf_keep 现为 env PF_KEEP 可调(诊断用)。
+  - cmodel 结果: 数据 0.985 (random) / 1.0 (constant) —— 有微妙 bug, 未完成。
+  - 诊断结论(排除法, 极精确):
+    * per-operand 隔离: A=1.0 B=1.0 BS=1.0, 只有 AS(a-scale)=0.998 → bug 只在 a-scale!
+    * FORCE_TCNT0=1(所有 tensor_wait→0): 不变 → 确认 cmodel TDM 同步, 非时序/cross-wave。
+    * PF_KEEP 0..4: 全 0.985 → 非 _pf_keep 计数。
+    * buffer-store == TDM-store == 0.985 → 非 epilogue。
+    * ISA 里所有 AS 读(v69 ds_load_b32) offset 全对; make_desc_as(full) 替 seg 不变 → 非描述符/offset。
+    * LDS 布局: K=1024 standard 与 deferred 的 _last_compute_stage 都=1 → 非布局。
+    * loop-tile AS 与 reused-tile AS 都受影响 → 非单纯 cb refill, 是共性 AS 处理。
+  - 剩: AS 的 lane 提取(_assemble_pf_ks: _as_vecs[r//4][r%4])或 op_sel([::2])或 _pf_plans 的
+    _as_start/_as_n 在 deferred 下取到相邻 scale。极微妙, 静态难追。
+  - 诊断 toggle(临时, 用完删): PF_KEEP, PF_SCALE_FRESH(L1696区), FORCE_TCNT0(tdm_ops.py tensor_wait)。
+  - 回退点: .pf_backup/gemm_fp8fp4_gfx1250.py.pre-defer-reuse (标准 pipeline, 数据 1.0, 但无 overlap)。
+  - 待用户定: HW 边调 AS / 还是回退标准 pipeline 收口。

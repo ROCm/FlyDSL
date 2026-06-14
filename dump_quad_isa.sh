@@ -10,11 +10,12 @@ FFM_DIR=$(ls -d /data/docker/overlay2/*/diff/home/user/ffm-env/rocdtif-7.13-am+f
 source "$FFM_DIR/ffmlite_env.sh"
 export FLYDSL_ROOT=/data/zanzhang/FlyDSL-main
 export PYTHONPATH="/data/zanzhang/FlyDSL-main:${PYTHONPATH}"
+export PF_PIPELINE=1
 
 DUMP_DIR=/tmp/isa_quad_dump
 ARGS="--data-format a8w4 --scale-mode mxscale -M 1 -N 12288 -K ${K} \
-      --tile-m 16 --tile-n 256 --tile-k 512 \
-      --m-warp 1 --n-warp 4 --num-buffers 3 --split-k 1 \
+      --tile-m 32 --tile-n 256 --tile-k 256 \
+      --m-warp 1 --n-warp 4 --num-buffers 3 --split-k 1 --pf-depth-wmma 4 \
       --cluster-m 1 --cluster-n 1 --l2-prefetch-distance 0 \
       --out-dtype bf16"
 

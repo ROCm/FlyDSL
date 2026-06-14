@@ -1119,6 +1119,9 @@ def tensor_wait(count: int = 0) -> None:
     Args:
         count: Number of outstanding operations to allow (0 = wait for all).
     """
+    import os as _os
+    if _os.environ.get("FORCE_TCNT0", "0") == "1":
+        count = 0
     rocdl.s_wait_tensorcnt(count)
 
 

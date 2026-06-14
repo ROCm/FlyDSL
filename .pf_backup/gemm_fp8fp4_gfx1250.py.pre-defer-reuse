@@ -471,11 +471,6 @@ def compile_fp8fp4_gemm(
     def _pick_compute_schedule_kind():
         if b_streaming:
             return COMPUTE_SCHEDULE_B_STREAMING
-        # PF_FORCE_RMS=1: force the row-major-streaming schedule even for n_accs>=8 shapes
-        # (normally FP8_QUADRANT), so the WMMA-driven sub-depth prefetch pipeline
-        # (_use_lds_pf, gated on RMS) engages for the larger quadrant-eligible tiles too.
-        if os.environ.get("PF_FORCE_RMS", "0") == "1":
-            return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         # Quadrant schedules split B into left/right halves and compute
@@ -639,22 +634,6 @@ def compile_fp8fp4_gemm(
             _pf_wmma_plan.append(_pf_ks_wmma)
             _pf_plans.append((_pf_as_start, _pf_as_n, _pf_a_groups, _pf_b_groups, _pf_bs_groups))
 
-        # Per-ks scale SOURCE maps for the lazy (sub-ks) assembler: which
-        # (table_idx, sub) each PRE-opsel a_scales[r] / b_scales[f] entry reads from
-        # the raw carry. Mirrors _assemble_pf_ks's indexing exactly so the lazy path
-        # can materialize a SINGLE b_scale entry when its WMMA needs it — a shallow
-        # carry (_pf_D < wmma_n_rep) does not yet hold all of a ks-step's BS loads.
-        _pf_as_src = []   # _pf_as_src[ks][r]  -> (table_idx, sub)  (a_scales, pre-opsel)
-        _pf_bs_src = []   # _pf_bs_src[ks][f]  -> (table_idx, sub)  (b_scales, pre-opsel)
-        for _sks in range(k_wmma_steps):
-            _as_start, _as_n, _a_g, _b_g, _bs_groups = _pf_plans[_sks]
-            _pf_as_src.append([(_as_start + r // 4, r % 4) for r in range(wmma_m_rep)])
-            _bs_map = []
-            for _bs_start, _bs_n, _gs in _bs_groups:
-                for _i in range(_gs):
-                    _bs_map.append((_bs_start + _i // 4, _i % 4))
-            _pf_bs_src.append(_bs_map)
-
     # ── pf_depth_wmma: WMMA-granular prefetch depth ───────────────────────────
     # The cross-loop carry holds operands for the first _pf_D WMMAs of a tile.
     # In compute_tile, WMMA i consumes position i (carry if i<D, else cur_raw) and
@@ -687,14 +666,11 @@ def compile_fp8fp4_gemm(
             )
             _pf_D = _A_wmma
             _pf_full_depth = True
-        # Sub-ks-step depth IS supported: the carry (_pf_split_idx below) is per-WMMA,
-        # so _pf_D can be any 1.._A_wmma. The only quantity that must stay ks-aligned is
-        # the TDM seg split (_pf_Dk), because a ks-step's WMMAs all share the same K=128
-        # range (WMMA_K) — the DRAM->LDS TDM cannot split finer than a ks-step. We round
-        # _pf_Dk UP (ceil) so the carry always lies WITHIN the pf seg and never spills
-        # into the deferred remain region (which would read it before its TDM is issued).
-        # So a sub-ks _pf_D (e.g. 4 of 8) gives a finer CARRY depth while the seg split
-        # stays at the first ks boundary (pf=ks0, remain=ks1+).
+        if not _pf_full_depth and _pf_D < _pf_wpks:
+            raise ValueError(
+                f"pf_depth_wmma={pf_depth_wmma} must be >= WMMAs-per-ks ({_pf_wpks}) "
+                f"or None (full depth); sub-ks-step depth is unsupported."
+            )
         # Flatten the per-(ks,wm,wn_raw) plan into WMMA-evolution (snake) order so
         # _pf_wmma_plan_flat[p] = (table_start, count) and _pf_pos[p] = (ks, wm, wn).
         _pf_wmma_plan_flat = []
@@ -716,10 +692,7 @@ def compile_fp8fp4_gemm(
         # region is not overwritten under the read (fixes the reuse data race).
         # All operands are K-contiguous (A: per M-row, B: per n-group, scales:
         # ks-major), so the split is a contiguous sub-range of the inner K dim.
-        # ceil so the pf seg fully covers the carry: _pf_D=4,_pf_wpks=8 -> _pf_Dk=1
-        # (pf seg = ks0, carry = first 4 WMMAs ⊆ ks0). Backward compatible: when _pf_D
-        # is a ks-multiple, ceil == floor, so existing depths are unchanged.
-        _pf_Dk = (_pf_D + _pf_wpks - 1) // _pf_wpks       # ks-steps spanned by pf seg
+        _pf_Dk = _pf_D // _pf_wpks                        # ks-steps carried in pf
         # _pf_tdm_Dk = ks-boundary at which the per-tile TDM is split into pf/remain.
         # PF_FORCE_DK lets us validate the K-split descriptors on the full-depth path.
         _pf_force_dk = int(os.environ.get("PF_FORCE_DK", "0"))
@@ -769,7 +742,6 @@ def compile_fp8fp4_gemm(
         _cols_b_blk = _seg_cols(_dk_b, _b_num_blocks, _b_nblk_per_ks)
     else:
         _pf_load_table, _pf_plans, _pf_wmma_plan = [], [], []
-        _pf_as_src, _pf_bs_src = [], []
         _pf_wpks = 0
         _A_wmma = 0
         _pf_D = 0
@@ -1553,81 +1525,6 @@ def compile_fp8fp4_gemm(
                 _bs_ks = _bs_ks[::2]
             return _a_ks, _b_ks, _bs_ks, _as_ks
 
-        # Per-WMMA LAZY assembly for the sub-ks carry pipeline (_pf_D < _pf_wpks).
-        # _assemble_pf_ks assembles a WHOLE ks-step's frags at once, which needs all of
-        # that ks-step's raw b128 loads present when called. A sub-ks carry has fewer
-        # than one ks-step's WMMAs in flight, so ks-0 is incomplete at the ks boundary
-        # and the bulk assemble indexes past the end. Instead, assemble each
-        # A[wm,ks]/B[wn,ks]/scale[ks] JUST BEFORE its WMMA is emitted: the i->i+D
-        # ds_load pipeline guarantees WMMA i's raw loads (and any earlier WMMA's, e.g.
-        # B[wn] owned by wm=0) are in `raw` by iteration i. The `cache` dict (passed in,
-        # one per tile) keeps each frag assembled exactly once (A reused across wn,
-        # scales across the ks-step), so the shuffle count matches the bulk path. `raw`
-        # is the growing cur_all list, indexed by ABSOLUTE table index (raw[t]==entry t).
-        # NB: caches are explicit args, not closure cells — FlyDSL's AST rewriter treats
-        # an enclosing-scope `d[k]=v` as a local rebind (UnboundLocalError), so a captured
-        # mutable dict cannot be used here.
-        def _pf_lazy_a(raw, cache, ks, wm):
-            _k = (ks, wm)
-            if _k not in cache:
-                _s, _n = _pf_plans[ks][2][wm]   # a_groups[wm]
-                _r = raw[_s : _s + _n]
-                if const_expr(is_fp4):
-                    cache[_k] = _r[0].shuffle(_r[1], list(range(8)))
-                else:
-                    _v01 = _r[0].shuffle(_r[1], list(range(8)))
-                    _v23 = _r[2].shuffle(_r[3], list(range(8)))
-                    cache[_k] = _v01.shuffle(_v23, list(range(16)))
-            return cache[_k]
-
-        def _pf_lazy_b(raw, cache, ks, wn):
-            _k = (ks, wn)
-            if _k not in cache:
-                _s, _n = _pf_plans[ks][3][wn]   # b_groups[wn]
-                _r = raw[_s : _s + _n]
-                if const_expr(is_a8w4):
-                    cache[_k] = _r[0].shuffle(_r[1], list(range(8)))
-                else:
-                    _v01 = _r[0].shuffle(_r[1], list(range(8)))
-                    _v23 = _r[2].shuffle(_r[3], list(range(8)))
-                    cache[_k] = _v01.shuffle(_v23, list(range(16)))
-            return cache[_k]
-
-        def _pf_lazy_scales(raw, cache, ks, wm, wn):
-            """Lazy scale assembly for the sub-ks carry path. Returns (a_scales,
-            b_scales) post-opsel lists with AT LEAST the entries _emit_wmma reads for
-            (wm,wn) materialized. a_scales (AS) is owned by the ks-step's first WMMA so
-            it is always present -> assembled in full once. b_scales (BS) entries are
-            owned by wm=0's successive wn WMMAs, so for a shallow carry the later ones
-            arrive only as the loop advances -> materialize each on demand. cache[ks]
-            persists the (a_scales, partial b_scales) so each entry is built once."""
-            if ks not in cache:
-                if const_expr(is_ptpc):
-                    _as_ks = None
-                else:
-                    _as_pre = [raw[_ti][_sub] for (_ti, _sub) in _pf_as_src[ks]]
-                    _as_ks = _as_pre[::2] if const_expr(use_scale_opsel) else _as_pre
-                _bs_pre_len = len(_pf_bs_src[ks])
-                if const_expr(use_scale_opsel and not is_fp4):
-                    _bs_len = (_bs_pre_len + 1) // 2
-                else:
-                    _bs_len = _bs_pre_len
-                cache[ks] = (_as_ks, [None] * _bs_len)
-            _as_ks, _bs_list = cache[ks]
-            if const_expr(not is_ptpc):
-                # b_scale index _emit_wmma will read for this wn (matches its logic).
-                if const_expr(is_fp4):
-                    _bidx = wn * 2
-                elif const_expr(use_scale_opsel):
-                    _bidx = wn // 2
-                else:
-                    _bidx = wn
-                if _bs_list[_bidx] is None:
-                    _pre = _bidx * 2 if const_expr(use_scale_opsel and not is_fp4) else _bidx
-                    _ti, _sub = _pf_bs_src[ks][_pre]
-                    _bs_list[_bidx] = raw[_ti][_sub]
-            return _as_ks, _bs_list
-
         # ── Compute on one LDS buffer ──
         def compute_tile(
             accs_in,
@@ -1750,15 +1647,7 @@ def compile_fp8fp4_gemm(
                 _cur_buf_pairs = [(a_buf, a_base), (b_buf, b_base), (as_buf, as_base), (bs_buf, bs_base)]
                 cur_all = list(pf_all_ks)
                 nxt_raw = []
-                # _pf_D >= _pf_wpks: carry covers whole ks-steps -> bulk assemble each
-                # ks-step at its boundary (validated path, unchanged). _pf_D < _pf_wpks
-                # (sub-ks carry): a ks-step is never fully present at its boundary, so
-                # assemble per-WMMA, lazily, from the growing cur_all.
-                if const_expr(_pf_D >= _pf_wpks):
-                    _cur_ks = _assemble_pf_ks(cur_all, 0)  # ks 0 (positions 0.._pf_wpks-1)
-                else:
-                    _cur_ks = None
-                    _lz_ac, _lz_bc, _lz_scc = {}, {}, {}   # per-tile lazy-assembly caches
+                _cur_ks = _assemble_pf_ks(cur_all, 0)  # ks 0 (positions 0.._pf_wpks-1)
                 for i in range_constexpr(_A_wmma):
                     # ── TDM boundary 1 (pf WMMAs consumed): wait this tile's remain
                     # TDM, issue next tile's pf TDM. Fires once, before the first
@@ -1777,7 +1666,7 @@ def compile_fp8fp4_gemm(
                         for _t, _m in _pf_load_table[_ls : _ls + _lc]:
                             _nb, _nba = _nxt_buf_pairs[_t]
                             nxt_raw.append(fx.Vector(lds_load_b128_raw(_nb, _nba, _m)))
-                    if const_expr(_pf_D >= _pf_wpks and i % _pf_wpks == 0 and i > 0):
+                    if const_expr(i % _pf_wpks == 0 and i > 0):
                         _cur_ks = _assemble_pf_ks(cur_all, ks)
                     rocdl.sched_barrier(0)
                     if const_expr(os.environ.get("PF_FORCE_WAIT", "0") == "1"):
@@ -1789,13 +1678,7 @@ def compile_fp8fp4_gemm(
                     # them eliminates the per-WMMA fresh scale ds_load + blocking
                     # s_wait_dscnt. (Correct now: scales load full/un-split into LDS via
                     # the same _precompute_scale_lane_bases addressing.)
-                    if const_expr(_pf_D >= _pf_wpks):
-                        _emit_wmma(current_accs, wm, wn, _cur_ks[0][wm], _cur_ks[1][wn], _cur_ks[3], _cur_ks[2])
-                    else:
-                        _as_e, _bs_e = _pf_lazy_scales(cur_all, _lz_scc, ks, wm, wn)
-                        _emit_wmma(current_accs, wm, wn,
-                                   _pf_lazy_a(cur_all, _lz_ac, ks, wm),
-                                   _pf_lazy_b(cur_all, _lz_bc, ks, wn), _as_e, _bs_e)
+                    _emit_wmma(current_accs, wm, wn, _cur_ks[0][wm], _cur_ks[1][wn], _cur_ks[3], _cur_ks[2])
                     rocdl.sched_barrier(0)
                 # ── TDM boundary 2 (remain WMMAs done): wait next tile's pf TDM,
                 # issue next tile's remain TDM.
@@ -1824,12 +1707,7 @@ def compile_fp8fp4_gemm(
                 _p_mid = ((wmma_m_rep + 1) // 2) * wmma_n_rep - 1   # after ks0 front rows
                 _p_fill = _A_wmma - wmma_n_rep                       # last row of last ks
                 cur_all = list(pf_all_ks)
-                # Same bulk-vs-lazy split as the with-next path (see note there).
-                if const_expr(_pf_D >= _pf_wpks):
-                    _cur_ks = _assemble_pf_ks(cur_all, 0)
-                else:
-                    _cur_ks = None
-                    _lz_ac, _lz_bc, _lz_scc = {}, {}, {}   # per-tile lazy-assembly caches
+                _cur_ks = _assemble_pf_ks(cur_all, 0)
                 for i in range_constexpr(_A_wmma):
                     # TDM boundary 1 for the final tile: wait this tile's remain TDM
                     # before the remain WMMAs (the caller's cb issues NO next tile).
@@ -1842,7 +1720,7 @@ def compile_fp8fp4_gemm(
                         for _t, _m in _pf_load_table[_ls : _ls + _lc]:
                             _cb, _cba = _cur_buf_pairs[_t]
                             cur_all.append(fx.Vector(lds_load_b128_raw(_cb, _cba, _m)))
-                    if const_expr(_pf_D >= _pf_wpks and i % _pf_wpks == 0 and i > 0):
+                    if const_expr(i % _pf_wpks == 0 and i > 0):
                         _cur_ks = _assemble_pf_ks(cur_all, ks)
                     if const_expr(i == _p_fill and emit_filler is not None):
                         rocdl.sched_barrier(0)
@@ -1852,13 +1730,7 @@ def compile_fp8fp4_gemm(
                         rocdl.s_wait_dscnt(0)
                     # Scales from the raw carry (prefetched, like A/B): _cur_ks[3]=a_scales,
                     # [2]=b_scales. See the with-next path note.
-                    if const_expr(_pf_D >= _pf_wpks):
-                        _emit_wmma(current_accs, wm, wn, _cur_ks[0][wm], _cur_ks[1][wn], _cur_ks[3], _cur_ks[2])
-                    else:
-                        _as_e, _bs_e = _pf_lazy_scales(cur_all, _lz_scc, ks, wm, wn)
-                        _emit_wmma(current_accs, wm, wn,
-                                   _pf_lazy_a(cur_all, _lz_ac, ks, wm),
-                                   _pf_lazy_b(cur_all, _lz_bc, ks, wn), _as_e, _bs_e)
+                    _emit_wmma(current_accs, wm, wn, _cur_ks[0][wm], _cur_ks[1][wn], _cur_ks[3], _cur_ks[2])
                     rocdl.sched_barrier(0)
                     if const_expr(i == _p_mid and mid_compute_callback is not None):
                         rocdl.sched_barrier(0)
