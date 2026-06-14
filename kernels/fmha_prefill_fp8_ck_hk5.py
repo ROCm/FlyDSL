@@ -114,8 +114,11 @@ _alloc = SmemAllocator(None, arch="gfx942", global_sym_name="fmha_prefill_fp8_ck
 # the SAME bank (up to 32-way conflict on the ds_read). Same for V (stride KT). Fix: pad each LDS row
 # by 16 bytes so the row stride is coprime-ish with the 32-bank (128B) period, spreading rows across
 # banks. Padding only affects the LDS BUFFER strides; GLOBAL-memory strides keep HD/KT.
-_K_PAD = 16  # bytes of pad per K LDS row
-_V_PAD = 16  # bytes of pad per V LDS row
+# Padding swept (2026-06-14, sq16384): K_PAD=V_PAD=8 is the optimum (108.5 TF, LDS 18944) — beats the
+# original 16/16 (106.8, LDS 21504) with LESS LDS. The response is bank-period-sensitive & non-monotonic
+# (KPAD=0 -> 63 conflicts back; VPAD=4 -> 59; VPAD=32 -> 75). 8/8 is the sweet spot. Sweepable via env.
+_K_PAD = int(os.environ.get("FMHA_KPAD", "8"))  # bytes of pad per K LDS row
+_V_PAD = int(os.environ.get("FMHA_VPAD", "8"))  # bytes of pad per V LDS row
 _K_LDSW = HD + _K_PAD  # K LDS row width (bytes/elements, fp8=1B)
 _V_LDSW = KT + _V_PAD  # V LDS row width
 _K_BYTES = KT * _K_LDSW  # K tile [KT kv x (HD+pad)]
