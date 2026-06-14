@@ -84,12 +84,17 @@ def pack_paged_cache(
     page_size: int,
     scatter: bool = False,
     seed: int = 42,
+    v_col: bool = False,
 ) -> PagedCache:
     """Pack contiguous per-batch K/V fp8 into the kernel's physical paged pools.
 
     Mirrors the host packing in ``tests/fmha/src/bench/fmha_bench.cpp``:
       * K is rearranged to ``vec_k_col_v``: ``[pages, nk, hd/16, page_size, 16]``.
-      * V stays row-major within a page: ``[pages, page_size, nk, hd]``.
+      * V default: row-major within a page ``[pages, page_size, nk, hd]``.
+      * ``v_col=True``: **column-major V** ``[pages, nk, hd, page_size]`` (kv/page_size
+        contiguous per (head, d)) — matches CK-Tile's true ``vec_k_col_v`` V, which is
+        already GEMM2-ready (the contraction dim ``kv`` is contiguous) so the kernel needs
+        **no V transpose**. This is what lets CK avoid the gfx942 LDS-transpose DS-wait.
       * Pages for batch ``b`` occupy LTD slots ``[b*ppb, (b+1)*ppb)``; ``scatter``
         shuffles which physical pool page each slot maps to (gather-via-LTD).
     """
@@ -111,7 +116,10 @@ def pack_paged_cache(
     k_u8 = k_fp8.view(torch.uint8)
     v_u8 = v_fp8.view(torch.uint8)
     k_pool = torch.zeros(total_pages, nk, hd // VEC_X, page_size, VEC_X, dtype=torch.uint8)
-    v_pool = torch.zeros(total_pages, page_size, nk, hd, dtype=torch.uint8)
+    if v_col:
+        v_pool = torch.zeros(total_pages, nk, hd, page_size, dtype=torch.uint8)
+    else:
+        v_pool = torch.zeros(total_pages, page_size, nk, hd, dtype=torch.uint8)
 
     for bi in range(b):
         for t in range(sk):
@@ -121,8 +129,12 @@ def pack_paged_cache(
             # K: [nk, hd/16, 16] for this token -> [phys, nk, cg, tok, xi]
             kt = k_u8[bi, t]  # [nk, hd]
             k_pool[phys, :, :, tok, :] = kt.view(nk, hd // VEC_X, VEC_X)
-            # V row-major: [phys, tok, nk, hd]
-            v_pool[phys, tok] = v_u8[bi, t]
+            if v_col:
+                # column-major V: [phys, nk, hd, tok]
+                v_pool[phys, :, :, tok] = v_u8[bi, t]  # [nk, hd]
+            else:
+                # V row-major: [phys, tok, nk, hd]
+                v_pool[phys, tok] = v_u8[bi, t]
 
     block_table = torch.empty(b, ppb, dtype=torch.int32)
     for bi in range(b):

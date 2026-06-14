@@ -507,3 +507,72 @@ for sq in [int(x) for x in sys.argv[1:]] or [16384]:
     print(f"NWAVES={K.NWAVES} BM={K.BM} sq{sq} grid={grid}  {ms:.3f}ms  {tf(b,sq,sk,nq,ms):.1f}TF")
 ```
 FLOP convention (matches `asm/fwd_fp8` and the bench): causal FMHA = `b*nq*(2*sq*sk*hd + 2*sq*sk*hd)/2`.
+
+---
+
+## 11. CK-Tile structural port — `kernels/fmha_prefill_fp8_ck.py` (2026-06-14)
+
+A FRESH kernel modeled on AMD's **CK-Tile `BlockFmhaBatchPrefillPipelineQRKSVSAsync`** (the
+production fp8 batch-prefill pipeline, reached via aiter), not on PyISA. Drop-in: identical
+`run_attn` signature + tensor layouts, so `tests/kernels/bench_fmha_compare.py --kernels
+fmha_prefill_fp8_ck` and `ck_check.py` (new single-shape correctness runner) work unchanged.
+**Correctness: all 9 pytest cases + odd-tile (sq384) pass, err ≤ 0.055.** GPUs 2-7 are usable
+(0,1 were busy); benches/sweeps were parallelized across 6 and 7.
+
+### 11.1 BREAKTHROUGH: column-major V removes the transpose (the §6.2 conclusion was WRONG)
+
+CK's true `vec_k_col_v` stores **V column-major** `[pages, nhead_k, hd, page_size]` — the GEMM2
+contraction dim (`kv`) is **contiguous per (head, d)**, so GEMM2 needs **NO transpose**. Our kernels
+(8wave/v7/v8) used **row-major V** `[pages, page_size, nhead_k, hd]` and paid a 16×`ds_write_b8`
+scatter-transpose per slot — the source of the 54% LDS-wait. **CK avoids it purely by V layout, on
+the same gfx942, with NO `ds_read_tr`.** So §6.2's "the transpose DS-wait is irreducible on gfx942 /
+needs gfx950" is **incorrect**: it's removable by storing V column-major.
+
+`pack_paged_cache(..., v_col=True)` now produces the column-V pool; the kernel (env `FMHA_VCOL=1`,
+default) copies V→LDS with one 128-bit store/slot. **PMC: LDS-wait 54% → 18% of busy cycles.**
+
+### 11.2 Second win: masked/unmasked loop split
+
+CK splits the KV loop into fully-below-diagonal (unmasked) tiles + diagonal (masked) tiles. Interior
+tiles skip the per-element causal-mask VALU (`v_cmp`+`v_cndmask`). **VALU:MFMA 24→19, +13%.**
+
+### 11.3 CK levers that did NOT help (A/B-tested, env `FMHA_KT/DIAG/BUFK`)
+
+| lever | result |
+|---|---|
+| Large `kN0` (`FMHA_KT`>32) | regresses (VGPR/occupancy: KT=64→206 VGPR, KT=128→64 KB LDS/1 wg-CU) even WITH column-V |
+| `buffer_load_to_lds` (`FMHA_BUFK`) | **NOT broken — it was used wrong** (CORRECTED 2026-06-14). v12/our BUFK passed a *per-lane* LDS pointer; the HW does `M0=readfirstlane(lds_ptr)` and writes each lane L to `LDS[M0+L*size]` in lane order, silently dropping the per-lane term → scrambled tile (err ~2.5). Correct usage proven bit-exact in `tests/kernels/lds_dma_probe.py`: **wave-uniform** lds base + per-wave offset, `voffset`=per-lane global byte addr, `s_waitcnt vmcnt(0)`+barrier. BUT it does NOT unlock KT=128 (next row). |
+| async K-DMA + KT=128 (`kernels/fmha_prefill_fp8_ck_async.py`) | correct (all shapes pass) but **regresses: 32/35 TF**. Async K-DMA cut VGPR by only 1 (165→164) — the handoff's premise that "KT>32 regresses because K stages through VGPRs" is **FALSE**. VGPR is dominated by Q-once + o_acc + batched-softmax temporaries; KT=128 also forces 64 KB K+V LDS → 1 wg/CU. Lead CLOSED. |
+| cross-tile software pipeline (3-buf LDS + sv carry + MFMA/VALU interleave) | correct but **regresses**: carrying GEMM1(i+1) acc = +31 VGPR (165→196) → 3→2 waves/SIMD; the VALU-bound kernel can't recover the occupancy loss. Reverted. |
+| batched GEMM1+softmax+GEMM2 (in-wave overlap) | no scheduler help |
+| `arith.maxnumf` vs IEEE `maximumf` | **slower** despite fewer ops (scheduling/latency, not instr count) |
+| workgroup size `FMHA_NWAVES`∈{2,8} | NWAVES=4 best |
+| Diagonal-pair (`FMHA_DIAG`, default on) | WIN (kept) |
+
+### 11.4 Perf, bs=1 nq8 nk1 causal (TFLOPS), default (KT=32, VCOL, DIAG, NWAVES=4)
+
+| seq   | **fmha_prefill_fp8_ck** | v8 (prior best) | CK-Tile fp8 |
+|-------|-------------------------|-----------------|-------------|
+| 1024  | 5                       | 5               | 30          |
+| 2048  | 16                      | 15              | 62          |
+| 16384 | **61**                  | 50              | 141         |
+| 32768 | **69**                  | 57              | 145         |
+
+Resources: **VGPR=165, LDS=16 KB, 0 spills.** All 9 pytest cases + odd-tile/multi-tile pass.
+
+### 11.5 Verdict & remaining gap
+
+**+22% over the best prior FlyDSL kernel at large seq** (column-V + mask split), and the "structural
+/ needs-gfx950" conclusion is disproven. Still **~2.1× behind CK** at large seq. The remaining gap is
+**VALU-throughput-bound**: VALU:MFMA ≈ 19:1 and the per-element VALU cycles exceed the MFMA cycles, so
+even perfect MFMA/VALU overlap is capped by VALU. The static VALU is dominated by FlyDSL's **fp8
+pack/unpack codegen** (`v_or`/`v_bfe`/`v_perm`/`v_mov` ≈ 385 instr) + descale/rescale muls + softmax
+exp/mask. CK (hand-tuned C++ + CK compiler) emits far less VALU per element. **Tried and ruled out
+(2026-06-14):** the cross-tile pipeline (§11.3, regressed via +31 VGPR) and the async-K-DMA/KT=128
+path (§11.3, regressed; async DMA freed only 1 VGPR). **Remaining options to close the rest:**
+(a) cut FlyDSL fp8-codegen VALU (needs more vectorized lowering or DSL-level fixes — the real wall),
+(b) external-LLVM VGPR cap for 4 waves/SIMD, (c) a redesign with both per-32 online softmax (low VGPR)
+AND a single-buffered/streamed small-LDS V so KT can grow without the 64 KB cap, or (d) gfx950
+`ds_read_tr`. Column-V should also be ported back into v8 (the production kernel) for the immediate
++20% there. Artifacts: `tests/kernels/lds_dma_probe.py` (DMA usage proof), `kernels/fmha_prefill_fp8_ck_async.py`
+(correct async kernel, kept for reference).

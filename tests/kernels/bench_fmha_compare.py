@@ -58,7 +58,7 @@ def bench_flydsl(mod_name, b, sq, sk, nq, nk, ps):
     qf, qd = R.quantize_per_token_head(q)
     kf, kd = R.quantize_per_token_head(k)
     vf, vd = R.quantize_per_head(v)
-    c = R.pack_paged_cache(kf, vf, ps, scatter=True)
+    c = R.pack_paged_cache(kf, vf, ps, scatter=True, v_col=getattr(K, "V_COL", False))
     args = [
         qf.to("cuda"),
         c.k_pool.view(torch.float8_e4m3fnuz).to("cuda"),
