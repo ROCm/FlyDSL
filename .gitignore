@@ -7,6 +7,11 @@ cmake-build-*/
 # GPU core dumps
 gpucore.*
 
+# rocprof / FMHA bench artifacts
+pmc_*/
+.rocprofv3/
+tests/kernels/_fmha_prefill_runner.py
+
 # IR dumps
 my_ir_dumps*/
 

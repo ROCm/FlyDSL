@@ -41,7 +41,7 @@ sys.path.insert(0, "tests/kernels")
 sys.path.insert(0, "kernels")
 import torch
 import fmha_prefill_fp8_ref as R
-import fmha_prefill_fp8 as K
+import fmha_prefill_fp8_v8 as K  # canonical shipping kernel: per-shape dispatch (base <=sq1024, diagonal-pair above)
 
 b, sq, sk, nk, gqa, causal, ps, pscale = (
     int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]),

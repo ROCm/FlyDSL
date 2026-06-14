@@ -51,24 +51,27 @@ preserving **all** features, then optimize to match/beat the reference.
 ## 2. Current status (TL;DR)
 
 **Correctness: DONE.** All 9 pytest cases pass (err ≤ 0.055, fp8 noise floor).
-**Performance: best = `fmha_prefill_fp8_8wave.py` ("v4"), BM=128/4-wave.** Improved this session by
-**+17–23%** across all customer shapes via the CU-starvation fix. Remaining gap to PyISA/CK is
-**structural** (see §6) — multiple further levers tried, all neutral or regressive (documented in §5).
+**Performance: best = `fmha_prefill_fp8_v8.py` (per-shape dispatch: baseline ≤sq1024, diagonal-pair
+`v7` for larger).** Two wins landed: (1) the CU-starvation fix (BM=128/4-wave, +17-23%), then
+(2) **diagonal-pair tiling (v7), a further +8-24% at sq≥2048**. Remaining gap to CK is structural (§6).
 
 ### Measured performance, bs=1, nq=8, nk=1, causal, fp8 (TFLOPS)
 
-| seq   | v4 FlyDSL (best) | CK-Tile fp8 | PyISA asm |
-|-------|------------------|-------------|-----------|
-| 1024  | 5                | 30          | **36**    |
-| 2048  | 13               | 62          | **83**    |
-| 16384 | 47               | **141**     | — *(1)*   |
-| 32768 | 53               | **146**     | —         |
+| seq   | base BM=256 | v4 BM=128 | **v7 diag-pair** | **v8 dispatch (best)** | CK-Tile fp8 | PyISA asm |
+|-------|-------------|-----------|------------------|------------------------|-------------|-----------|
+| 1024  | 4.3         | 5.1       | 4.8 *(loss)*     | **5.1**                | 30          | **36**    |
+| 2048  | —           | 12.3      | 15.3            | **15.0**               | 62          | **83**    |
+| 16384 | 39.7        | 45.8      | 50.5            | **50.5**               | **141**     | — *(1)*   |
+| 32768 | ~45         | 52.9      | 56.9            | **56.9**               | **146**     | —         |
 
 *(1)* The PyISA harness (`asm/fwd_fp8`) always runs a slow CPU reference, so it is only practical
 to time up to ~sq2048. `validate=0` just skips the whole run (not a perf-only mode).
 
 **Interpretation:** PyISA wins at small seq; CK-Tile is the production bar at large seq (~145 TF).
-v4 is ~3× behind CK at large seq. The gap is structural, not a missing micro-opt (§6).
+The best FlyDSL is now ~2.6× behind CK at large seq (was ~3×). The remaining gap is structural (§6).
+**Diagonal-pair (v7) is a clean +8-24% at sq≥2048 but a LOSS at sq1024** (halving grid 64→32 starves
+CUs) — hence v8's per-shape dispatch (sq≤1024 → baseline, else → v7). VGPR 164→168 only, LDS
+unchanged: cheap, because the mirror tile runs sequentially in one kernel (shared live state).
 
 ---
 
