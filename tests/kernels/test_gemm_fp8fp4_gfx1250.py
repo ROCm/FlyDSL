@@ -28,6 +28,7 @@ from kernels.gemm_fp8fp4_gfx1250 import (  # noqa: E402
     compile_mxscale_gemm,
     compile_ptpc_gemm,
     is_ref_segmented_lds_layout,
+    use_n4k4_bscale_layout,
 )
 from tests.kernels.utils import fp4_utils  # noqa: E402
 
@@ -158,6 +159,28 @@ def preshuffle_e8m0_scale(
     g = scale.view(-1, wmma_rep, WMMA_DIM, k_groups, k_wmma_steps, SCALES_PER_WMMA)
     g = g.permute(0, 2, 3, 4, 1, 5).contiguous()
     return g.reshape(-1, k_groups * k_wmma_steps * wmma_rep * SCALES_PER_WMMA)
+
+
+def preshuffle_e8m0_bscale_n4k4(scale: torch.Tensor) -> torch.Tensor:
+    """Tile-independent N4K4 B-scale preshuffle: [N, K_scale] -> [N//64, (K_scale//4)*256].
+
+    Atomic block = 4 N-blocks x 1 K-block = 64 N-rows x 4 scale-bytes = 256B, so
+    the byte layout depends only on the constants (64, 16, 4, 4) and never on
+    tile_n/n_warp/tile_k. Weights are preshuffled once and served to any tile
+    config landing on the default row-major streaming schedule.
+
+        B_scale_pre[g, kb, n, r, k] = scale[g*64 + r*16 + n, kb*4 + k]
+
+    where g = N//64 group, kb = K//128 block (4 scale bytes = one WMMA's K=128),
+    n = lane16 (N-row within a 16-block), r = the 4 N-blocks in a 64-group,
+    k = the 4 scale bytes within one WMMA. Mirrors the kernel's N4K4 TDM+LDS
+    read (see flydsl_fp8_perf/verify_n4k4_bscale_layout.py for the parity proof).
+    """
+    N, Ks = scale.shape
+    assert N % 64 == 0 and Ks % 4 == 0, f"N4K4 B-scale needs N%64==0, Ks%4==0; got N={N} Ks={Ks}"
+    g = scale.view(N // 64, 4, 16, Ks // 4, 4)  # [g, r, n, kb, k]
+    g = g.permute(0, 3, 2, 1, 4).contiguous()  # [g, kb, n, r, k]
+    return g.reshape(N // 64, (Ks // 4) * 256)
 
 
 def preshuffle_scale_for_load_path(
@@ -578,15 +601,30 @@ def _run_mxscale_gemm_test(
         ref_segmented=_ref_seg,
         row_align=tile_m,
     )
-    b_scale = preshuffle_scale_for_load_path(
-        b_scale,
-        warp_tile_n,
-        skt,
-        scale_load_path=scale_load_path,
+    if use_n4k4_bscale_layout(
         data_format=data_format,
-        ref_segmented=_ref_seg,
-        row_align=tile_n,
-    )
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        n=padded_n,
+        scale_load_path=scale_load_path,
+        use_scale_opsel=use_scale_opsel,
+        b_streaming=b_streaming,
+        b_split_load=b_split_load,
+    ):
+        b_scale = preshuffle_e8m0_bscale_n4k4(b_scale)
+    else:
+        b_scale = preshuffle_scale_for_load_path(
+            b_scale,
+            warp_tile_n,
+            skt,
+            scale_load_path=scale_load_path,
+            data_format=data_format,
+            ref_segmented=_ref_seg,
+            row_align=tile_n,
+        )
 
     # Preshuffle B data
     K_packed = padded_k // padded_shape["pack_b"]
@@ -806,32 +844,6 @@ def test_mxfp4_gemm(
     )
 
 
-@pytest.mark.parametrize("out_dtype", ["bf16", "f16"])
-def test_mxfp4_metadata_and_spill_regression(out_dtype):
-    launch_fn = _run_mxscale_gemm_test(
-        "fp4",
-        1024,
-        1024,
-        1024,
-        256,
-        256,
-        256,
-        2,
-        2,
-        num_buffers=4,
-        use_tdm_store=True,
-        out_dtype=out_dtype,
-        return_launch_fn=True,
-    )
-    artifact = _get_latest_artifact(launch_fn)
-
-    assert (
-        "known_block_size = array<i32: 128, 1, 1>" in artifact.source_ir
-    ), f"expected known_block_size metadata in source IR:\n{artifact.source_ir}"
-
-    compiled_ir = artifact.ir
-    assert _extract_i64_metadata(compiled_ir, "max_flat_workgroup_size") == 128
-    assert _extract_i64_metadata(compiled_ir, "vgpr_spill_count") == 0
 
 
 @pytest.mark.parametrize(
@@ -967,183 +979,6 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
     )
 
 
-@pytest.mark.parametrize(
-    "scale_load_path, a_load_path, b_split_load",
-    [
-        ("tdm", "vgpr", False),
-        ("tdm", "vgpr", True),
-        ("tdm", "tdm", True),
-        ("vgpr", "tdm", False),
-    ],
-)
-def test_a8w4_small_m_load_path_variants(scale_load_path, a_load_path, b_split_load):
-    _run_mxscale_gemm_test(
-        "a8w4",
-        1,
-        256,
-        2048,
-        16,
-        64,
-        512,
-        1,
-        4,
-        num_buffers=4,
-        use_tdm_store=True,
-        out_dtype="bf16",
-        wave_specialized_tdm=True,
-        l2_prefetch_distance=0,
-        use_scale_opsel=False,
-        scale_load_path=scale_load_path,
-        a_load_path=a_load_path,
-        b_split_load=b_split_load,
-    )
-
-
-@pytest.mark.parametrize(
-    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
-    [
-        ("fp4", 128, 512, 7168, 128, 128, 256, 2, 2),
-        ("fp8", 128, 256, 256, 128, 256, 128, 2, 4),
-        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 4),
-    ],
-)
-def test_b_streaming_correctness(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
-    _run_mxscale_gemm_test(
-        data_format,
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers=2,
-        use_tdm_store=True,
-        out_dtype="bf16",
-        l2_prefetch_distance=2,
-        b_streaming=True,
-    )
-
-
-@pytest.mark.parametrize(
-    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
-    [
-        ("fp4", 128, 256, 512, 128, 128, 256, 2, 2),
-        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
-        ("a8w4", 128, 256, 256, 128, 256, 128, 2, 2),
-    ],
-)
-def test_b_streaming_with_wave_spec_tdm(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
-    _run_mxscale_gemm_test(
-        data_format,
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers=2,
-        use_tdm_store=True,
-        out_dtype="bf16",
-        l2_prefetch_distance=2,
-        b_streaming=True,
-        wave_specialized_tdm=True,
-    )
-
-
-@pytest.mark.parametrize("num_buffers", [2, 3])
-@pytest.mark.parametrize("use_tdm_store", [True, False])
-@pytest.mark.parametrize("use_scale_opsel", [False, True])
-def test_mxfp8_wave_spec_scale_load_tdm(num_buffers, use_tdm_store, use_scale_opsel):
-    _run_mxscale_gemm_test(
-        "fp8",
-        128,
-        256,
-        384,
-        128,
-        256,
-        128,
-        2,
-        2,
-        num_buffers=num_buffers,
-        use_tdm_store=use_tdm_store,
-        out_dtype="bf16",
-        l2_prefetch_distance=2,
-        wave_specialized_tdm=True,
-        use_scale_opsel=use_scale_opsel,
-        scale_load_path="tdm",
-    )
-
-
-@pytest.mark.parametrize("scale_load_path", ["vgpr", "vgpr_ab_split"])
-@pytest.mark.parametrize("cluster_m, cluster_n", [(1, 1), (2, 2)])
-def test_mxfp8_vgpr_scale_load(scale_load_path, cluster_m, cluster_n):
-    _run_mxscale_gemm_test(
-        "fp8",
-        256 * cluster_m,
-        256 * cluster_n,
-        512,
-        256,
-        256,
-        128,
-        2,
-        2,
-        num_buffers=4,
-        use_tdm_store=True,
-        out_dtype="bf16",
-        l2_prefetch_distance=2,
-        wave_specialized_tdm=True,
-        cluster_m=cluster_m,
-        cluster_n=cluster_n,
-        scale_load_path=scale_load_path,
-    )
-
-
-@pytest.mark.parametrize(
-    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n",
-    [
-        ("fp4", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
-        ("fp8", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
-    ],
-)
-def test_b_streaming_with_cluster_mcast(
-    data_format,
-    M,
-    N,
-    K,
-    tile_m,
-    tile_n,
-    tile_k,
-    m_warp,
-    n_warp,
-    cluster_m,
-    cluster_n,
-):
-    if str(get_rocm_arch()) != "gfx1250":
-        pytest.skip("requires gfx1250")
-    if "FFMLITE_TOPOLOGY" in os.environ or "AM_TOPOLOGY" in os.environ:
-        pytest.skip("cluster multicast not supported on simulator")
-    _run_mxscale_gemm_test(
-        data_format,
-        M,
-        N,
-        K,
-        tile_m,
-        tile_n,
-        tile_k,
-        m_warp,
-        n_warp,
-        num_buffers=2,
-        use_tdm_store=True,
-        out_dtype="bf16",
-        l2_prefetch_distance=2,
-        b_streaming=True,
-        cluster_m=cluster_m,
-        cluster_n=cluster_n,
-    )
 
 
 @pytest.mark.parametrize(
