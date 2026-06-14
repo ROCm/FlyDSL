@@ -303,11 +303,29 @@ def compile_fp8fp4_gemm(
     stage_bytes = _align_up(stage_layout.ptr, 128)
 
     _full_pf_req = os.environ.get("PF_FULL_PREFETCH", "0") == "1"
-    pre_loaded = num_buffers if _full_pf_req else (num_buffers - 1)
+    # Full-prefetch (pre_loaded=N, consume-then-backfill) is only SAFE when the
+    # WMMA-driven pipeline is actually engaged: the pf/remain TDM split + deferred
+    # backfill fences are what protect the buffer being consumed from being
+    # overwritten by its own backfill TDM. The pipeline requires a real sub-depth
+    # split (_pf_D < _A_wmma) with PF_PIPELINE=1. When the depth resolves to FULL
+    # (e.g. pf_depth_wmma >= total WMMAs/tile, as for small wmma_n_rep tiles), the
+    # pipeline is disabled but pre_loaded=N still issued backfill TDMs under the
+    # legacy (non-pipeline) fences -> write-after-read race that only surfaces with
+    # >=2 concurrent workgroups (single-WG TDMs finish fast enough to hide it).
+    # Gate pre_loaded/tail_plan on the EFFECTIVE flag, mirroring the _pf_D/_A_wmma
+    # math at line ~703 so the prologue/tail editing matches the executed fences.
+    _pf_pipeline_req = os.environ.get("PF_PIPELINE", "0") == "1"
+    _A_wmma_early = k_wmma_steps * wmma_m_rep * wmma_n_rep
+    _pf_D_early = _A_wmma_early if pf_depth_wmma is None else max(1, min(_A_wmma_early, int(pf_depth_wmma)))
+    if _full_pf_req and _pf_pipeline_req:
+        _wpks_early = wmma_m_rep * wmma_n_rep
+        _pf_D_early = min(_A_wmma_early, ((_pf_D_early + _wpks_early - 1) // _wpks_early) * _wpks_early)
+    _full_pf_eff = _full_pf_req and _pf_pipeline_req and (_pf_D_early < _A_wmma_early)
+    pre_loaded = num_buffers if _full_pf_eff else (num_buffers - 1)
     loop_iters = (num_k_tiles - pre_loaded) // num_buffers
     _tail_start = loop_iters * num_buffers
     extra = num_k_tiles - _tail_start - pre_loaded
-    _base_tail_plan = make_tail_plan(num_buffers, pre_loaded, extra, full_prefetch=_full_pf_req)
+    _base_tail_plan = make_tail_plan(num_buffers, pre_loaded, extra, full_prefetch=_full_pf_eff)
 
     _last_compute_stage = _base_tail_plan[-1][1]
 
@@ -3239,7 +3257,11 @@ def compile_fp8fp4_gemm(
             and _pf_tdm_split
             and os.environ.get("PF_PIPELINE", "0") == "1"
         )
-        _full_prefetch = _full_pf_req and _pf_pipeline
+        # Use _full_pf_eff (the early gate that drove pre_loaded/tail_plan), ANDed
+        # with the authoritative _pf_pipeline, so the executed backfill fences match
+        # the prologue/tail editing. _full_pf_req alone could enable backfill on a
+        # config whose pre_loaded stayed N-1, or vice versa.
+        _full_prefetch = _full_pf_eff and _pf_pipeline
         # Overlapped prologue startup (full-prefetch with a main loop): drain tile 0
         # alone first, then issue the remaining N-1 tiles' TDMs and tile 0's carry
         # ds_load together so the ds_load overlaps the in-flight TDMs instead of
@@ -3975,8 +3997,18 @@ def compile_fp8fp4_gemm(
             accs = epilogue_apply_ptpc_scale(accs, _ptpc_sa, _ptpc_sb)
 
         def _emit_tdm_store():
-            if const_expr(d_need_epilogue_fence):
-                _pipeline_fence(outstanding=0)
+            # epilogue_lds_stores writes the D-output into the reused LDS prefix
+            # (offset 0), which may still hold an input stage that OTHER waves are
+            # reading for their final WMMAs. That is an unconditional wave-to-wave
+            # LDS read/write hazard, so a workgroup barrier must precede the LDS
+            # store. (It is NOT a TDM-completion hazard: input TDMs are already
+            # drained and consumed by here, so no tensorcnt wait is required —
+            # verified that barrier-only removes the intermittent multi-workgroup
+            # NaN while a tensorcnt-0 wait alone does not.) The old
+            # `d_need_epilogue_fence` byte-threshold gate missed the loop_iters==0
+            # layouts where the last two tail tiles run after the final fence.
+            rocdl.s_barrier_signal(-1)
+            rocdl.s_barrier_wait(-1)
             rocdl.sched_barrier(0)
             epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
             rocdl.s_wait_dscnt(0)
