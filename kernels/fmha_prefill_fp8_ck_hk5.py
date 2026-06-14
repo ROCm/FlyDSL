@@ -1,6 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """FP8 causal FMHA prefill (paged, vec_k_col_v) for gfx942 — CK-Tile-structured FlyDSL port.
 
+★ THIS IS THE BEST FlyDSL FMHA KERNEL (canonical). It = the ck kernel + HK's LDS row PADDING to kill
+bank conflicts. Measured bs=1 nq8 nk1 causal: 5 / 18 / 101 / 121 TF @ sq 1024/2048/16384/32768
+(vs ck 5/16/61/70, vs CK-Tile 30/62/141/146). The padding (each K/V LDS row +16 bytes) drops
+SQ_LDS_BANK_CONFLICT from 68% -> 15% of busy (busy -43%), +66-73% at large seq. This CORRECTS the
+earlier "irreducible gfx942 LDS-wait ceiling" claim in the older docstrings/handoff: that 54-68%
+"LDS-wait" was BANK CONFLICTS, fixed cheaply by padding. (XOR-swizzle was tried too but lost: it cost
++27 VGPR for address math and we're VGPR-bound, so padding wins. Small seq sq1024/2048 is grid-starved
+/ launch-floored, not swizzle-fixable.) See memory feedback-hk-amd-kernel-tricks for the full diagnosis.
+
 This is a FRESH kernel modeled on AMD's CK-Tile ``BlockFmhaBatchPrefillPipelineQRKSVSAsync``
 (the production fp8 batch-prefill pipeline reached through aiter), NOT on the PyISA kernel that
 ``fmha_prefill_fp8_8wave.py`` ports. It keeps full feature parity with the 8wave/v8 baselines

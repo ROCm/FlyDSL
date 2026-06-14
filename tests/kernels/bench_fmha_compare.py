@@ -131,7 +131,7 @@ def bench_pyisa(b, sq, sk, nq, nk):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kernels", nargs="+", default=["fmha_prefill_fp8_v8"])
+    ap.add_argument("--kernels", nargs="+", default=["fmha_prefill_fp8_ck_hk5"])
     ap.add_argument("--seqs", nargs="+", type=int, default=None, help="override seq_lens (bs=1)")
     ap.add_argument("--no-pyisa", action="store_true")
     ap.add_argument("--ck", action="store_true", help="also bench CK Tile (aiter fp8); needs aiter built")
