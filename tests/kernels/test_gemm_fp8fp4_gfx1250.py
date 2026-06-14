@@ -138,7 +138,7 @@ def preshuffle_e8m0_scale(
     """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access.
 
     ``coalesced=True`` produces the lane-major layout the scale_load_path
-    "vgpr"/"vgpr_ab_split" buffer_load->VGPR path expects.
+    "vgpr" buffer_load->VGPR path expects.
     """
     if coalesced:
         return preshuffle_e8m0_scale_coalesced(scale, block=warp_tile)
@@ -189,12 +189,12 @@ def preshuffle_scale_for_load_path(
     """Host scale preshuffle matching the kernel's selected scale_load_path.
 
     - 'tdm': interleaved TDM/LDS layout.
-    - 'vgpr'/'vgpr_ab_split' on the ref-segmented deep-pipeline config: legacy
-      lane-major coalesced layout.
+    - 'vgpr' on the ref-segmented deep-pipeline config: legacy lane-major
+      coalesced layout.
     - 'vgpr' on any other (general) config: general coalesced layout, with the
       a8w4/fp4 lane_kgrp scale shift.
     """
-    if scale_load_path in ("vgpr", "vgpr_ab_split"):
+    if scale_load_path == "vgpr":
         if ref_segmented:
             return preshuffle_e8m0_scale(scale, warp_tile, scale_k_per_tile=skt, coalesced=True)
         kgrp_shift = 1 if data_format in ("a8w4", "fp4") else 0
@@ -493,10 +493,7 @@ def _run_mxscale_gemm_test(
     split_k=1,
     b_streaming=False,
     scale_load_path="tdm",
-    a_load_path="tdm",
-    b_split_load=False,
     return_launch_fn=False,
-    use_graph=False,
 ):
     """Unified test body for FP4 and FP8."""
     is_fp4 = data_format == "fp4"
@@ -539,14 +536,11 @@ def _run_mxscale_gemm_test(
     mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
     tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
     scale_load_str = "" if scale_load_path == "tdm" else f", scale_load={scale_load_path}"
-    a_load_str = "" if a_load_path == "tdm" else f", a_load={a_load_path}"
-    b_split_str = ", b_split_load" if b_split_load else ""
-    graph_str = ", graph" if use_graph else ""
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
         f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-        f"{mcast_str}{tdm_str}{scale_load_str}{a_load_str}{b_split_str}{graph_str}, preshuffle, out={out_dtype}"
+        f"{mcast_str}{tdm_str}{scale_load_str}, preshuffle, out={out_dtype}"
     )
 
     # Generate data
@@ -612,7 +606,6 @@ def _run_mxscale_gemm_test(
         scale_load_path=scale_load_path,
         use_scale_opsel=use_scale_opsel,
         b_streaming=b_streaming,
-        b_split_load=b_split_load,
     ):
         b_scale = preshuffle_e8m0_bscale_n4k4(b_scale)
     else:
@@ -660,8 +653,6 @@ def _run_mxscale_gemm_test(
         expert_sched_mode=expert_sched_mode,
         b_streaming=b_streaming,
         scale_load_path=scale_load_path,
-        a_load_path=a_load_path,
-        b_split_load=b_split_load,
     )
 
     # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
@@ -671,7 +662,7 @@ def _run_mxscale_gemm_test(
     as_flat = as_gpu.contiguous()
     bs_flat = bs_gpu.contiguous()
 
-    compiled_exe = flyc.compile(
+    flyc.compile(
         launch_fn,
         c_flat,
         a_flat,
@@ -684,35 +675,6 @@ def _run_mxscale_gemm_test(
         padded_n,
         torch.cuda.current_stream(),
     )
-
-    if use_graph:
-
-        def _launch():
-            compiled_exe(
-                c_flat,
-                a_flat,
-                b_flat,
-                as_flat,
-                bs_flat,
-                padded_m,
-                padded_n,
-                padded_k,
-                padded_n,
-                torch.cuda.current_stream(),
-            )
-
-        g = torch.cuda.CUDAGraph()
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            _launch()
-        torch.cuda.current_stream().wait_stream(s)
-        torch.cuda.synchronize()
-        c_gpu.zero_()
-        with torch.cuda.graph(g, stream=s):
-            _launch()
-        c_gpu.zero_()
-        g.replay()
     torch.cuda.synchronize()
 
     c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
@@ -842,8 +804,6 @@ def test_mxfp4_gemm(
         wave_specialized_tdm=wave_specialized_tdm,
         use_scale_opsel=use_scale_opsel,
     )
-
-
 
 
 @pytest.mark.parametrize(
@@ -979,6 +939,83 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
     )
 
 
+# ── Tile-independent N4K4 B-scale coverage ──
+# tile_m=16, m_warp=1 -> wmma_m_rep=1 (odd) -> the default row-major streaming
+# schedule, which is the (phase-1) N4K4 B-scale path. The sweep covers every
+# tile_n/n_warp that maps to a distinct read shape (b32/b64/b128 per_load and
+# group counts 1/2/4 and the non-power-of-2 group count 3 that exercises the
+# TDM warp-distribution power-of-two padding), both data formats, k_wmma_steps
+# 1/2/4, wave-spec on/off, f32/bf16, multi-buffer, and ragged/decode M.
+_N4K4_N_FOR_TN = {16: 128, 32: 128, 64: 128, 128: 256, 192: 384, 256: 512}
+_N4K4_TN_NW = [
+    (16, 1), (32, 1), (32, 2), (64, 1), (64, 2), (64, 4),
+    (128, 1), (128, 2), (128, 4), (192, 1), (192, 2), (192, 4),
+    (256, 1), (256, 2), (256, 4),
+]  # fmt: skip
+
+
+def _gen_n4k4_configs():
+    cfgs, seen = [], set()
+
+    def add(fmt, M, tile_n, n_warp, tile_k, nbuf, od, ws):
+        N = _N4K4_N_FOR_TN[tile_n]
+        K = tile_k * max(nbuf, 2)  # >= nbuf K-tiles for double/triple buffering
+        key = (fmt, M, N, K, tile_n, tile_k, n_warp, nbuf, od, ws)
+        if key not in seen:
+            seen.add(key)
+            cfgs.append(key)
+
+    for fmt in ("fp8", "a8w4"):
+        # 1) full tile_n x n_warp shape sweep (all rep/group/per_load cases),
+        #    non-wave-spec so the cooperative TDM warp distribution is exercised.
+        for tn, nw in _N4K4_TN_NW:
+            add(fmt, 16, tn, nw, 256, 2, "bf16", False)
+        # 2) wave-spec (needs >=4 waves -> n_warp=4), M=1 decode-like. The real
+        #    decode shape (tile_n=64) uses deep K + 4 buffers; larger tile_n keeps
+        #    a modest tile so LDS fits while still exercising the wave-spec TDM.
+        add(fmt, 1, 64, 4, 512, 4, "bf16", True)
+        for tn in (128, 192, 256):
+            add(fmt, 1, tn, 4, 256, 2, "bf16", True)
+        # 3) k_wmma_steps 1/2/4 on the next_pow2 (192) and clean (256/64) shapes.
+        for tn, nw in [(192, 4), (256, 4), (64, 4)]:
+            for tk in (128, 512):
+                add(fmt, 16, tn, nw, tk, 2, "bf16", False)
+        # 4) f32 + triple buffering on a few shapes.
+        for tn, nw in [(192, 4), (128, 2), (32, 2)]:
+            add(fmt, 16, tn, nw, 256, 3, "f32", False)
+        # 5) ragged / decode / OOB M.
+        for M in (1, 13, 33):
+            add(fmt, M, 256, 4, 256, 2, "bf16", False)
+    return cfgs
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_n, tile_k, n_warp, num_buffers, out_dtype, ws", _gen_n4k4_configs()
+)
+def test_mxscale_n4k4_bscale(data_format, M, N, K, tile_n, tile_k, n_warp, num_buffers, out_dtype, ws):
+    # Guard: every config here must actually take the N4K4 B-scale layout, else
+    # the sweep would silently test the legacy path instead.
+    assert use_n4k4_bscale_layout(
+        data_format=data_format, tile_m=16, tile_n=tile_n, tile_k=tile_k, m_warp=1, n_warp=n_warp, n=N
+    ), f"config does not hit the N4K4 gate: {(data_format, tile_n, tile_k, n_warp, N)}"
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        16,
+        tile_n,
+        tile_k,
+        1,
+        n_warp,
+        num_buffers,
+        use_tdm_store=True,
+        out_dtype=out_dtype,
+        wave_specialized_tdm=ws,
+        l2_prefetch_distance=0,
+        use_scale_opsel=False,
+        scale_load_path="tdm",
+    )
 
 
 @pytest.mark.parametrize(
@@ -1020,23 +1057,14 @@ def test_mxfp4_gemm_mcast(
 
 
 @pytest.mark.parametrize(
-    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n",
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
     [
-        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2, 1, 1),
-        ("fp4", 128, 256, 256, 128, 256, 128, 2, 2, 1, 1),
-        ("fp8", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
-        ("fp4", 256, 512, 256, 128, 256, 128, 2, 2, 2, 2),
-        ("a8w4", 256, 512, 256, 128, 256, 128, 2, 4, 2, 2),
+        ("fp8", 128, 256, 256, 128, 256, 128, 2, 2),
+        ("fp4", 128, 256, 256, 128, 256, 128, 2, 2),
     ],
-    ids=[
-        "fp8-128x256x256",
-        "fp4-128x256x256",
-        "fp8-256x512x256-cluster2x2",
-        "fp4-256x512x256-cluster2x2",
-        "a8w4-256x512x256-cluster2x2",
-    ],
+    ids=["fp8-128x256x256", "fp4-128x256x256"],
 )
-def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n):
+def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp):
     """Verify that the gfx1250 MX-scale GEMM kernel works inside a hipGraph.
 
     Captures one launch, replays once, and checks the replay output is
@@ -1051,15 +1079,11 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         pytest.skip("hipGraph capture/replay not supported on simulator")
 
     is_fp4 = data_format == "fp4"
-    is_a8w4 = data_format == "a8w4"
 
     # Build inputs (mirrors _run_mxscale_gemm_test, but no padding needed
     # because we pick a clean shape).
     torch.manual_seed(0)
-    if is_a8w4:
-        a = random_fp8_data(M, K)  # FP8 activation
-        b = fp4_utils.random_fp4_packed(N, K)  # FP4 weight
-    elif is_fp4:
+    if is_fp4:
         a = fp4_utils.random_fp4_packed(M, K)
         b = fp4_utils.random_fp4_packed(N, K)
     else:
@@ -1073,7 +1097,7 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     warp_tile_n = tile_n // n_warp
     a_scale_ps = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
     b_scale_ps = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
-    pack_b = 2 if (is_fp4 or is_a8w4) else 1
+    pack_b = 2 if is_fp4 else 1
     b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
 
     a_gpu = a.cuda()
@@ -1096,8 +1120,6 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         out_dtype="bf16",
         wave_specialized_tdm=False,
         split_k=1,
-        cluster_m=cluster_m,
-        cluster_n=cluster_n,
     )
 
     c_flat = c_gpu.contiguous()
@@ -1854,8 +1876,7 @@ def _run_benchmark(args):
     print(
         f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
         f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}, "
-        f"scale_load={args.scale_load_path}, a_load={args.a_load_path}, "
-        f"b_split_load={args.b_split_load}"
+        f"scale_load={args.scale_load_path}"
     )
     if args.warmup < 0:
         raise ValueError(f"--warmup must be >= 0, got {args.warmup}")
@@ -1888,8 +1909,6 @@ def _run_benchmark(args):
             _ptpc_ignored.append(f"--scale-load-path {args.scale_load_path}")
         if args.b_streaming:
             _ptpc_ignored.append("--b-streaming")
-        if args.b_split_load:
-            _ptpc_ignored.append("--b-split-load")
         if _ptpc_ignored:
             print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
@@ -2032,8 +2051,6 @@ def _run_benchmark(args):
             atomic_barrier_enable=args.atomic_barrier_enable,
             b_streaming=args.b_streaming,
             scale_load_path=args.scale_load_path,
-            a_load_path=args.a_load_path,
-            b_split_load=args.b_split_load,
         )
 
     compiled_exe = flyc.compile(
@@ -2317,8 +2334,6 @@ def _run_graph_verify(args):
         atomic_barrier_enable=args.atomic_barrier_enable,
         b_streaming=args.b_streaming,
         scale_load_path=args.scale_load_path,
-        a_load_path=args.a_load_path,
-        b_split_load=args.b_split_load,
     )
 
     c_flat = c_gpu.contiguous()
@@ -2434,24 +2449,10 @@ if __name__ == "__main__":
         "--scale-load-path",
         type=str,
         default="tdm",
-        choices=["tdm", "vgpr", "vgpr_ab_split"],
-    )
-    parser.add_argument(
-        "--a-load-path",
-        type=str,
-        default="tdm",
-        choices=["tdm", "vgpr", "vgpr_ascale"],
+        choices=["tdm", "vgpr"],
     )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument("--b-streaming", action="store_true", default=False)
-    parser.add_argument(
-        "--b-split-load",
-        action="store_true",
-        default=False,
-        help="Split the B TDM load by N groups. With --a-load-path vgpr this reuses "
-        "wave0 for B half 0; with TDM A/scale it uses wave0=A, wave1/2=B halves, "
-        "wave3=A_scale+B_scale.",
-    )
     parser.add_argument(
         "--atomic-barrier-enable",
         action="store_true",
@@ -2511,8 +2512,6 @@ if __name__ == "__main__":
 
     if args.scale_mode == "ptpc" and args.verify_graph:
         raise SystemExit("--scale-mode ptpc does not support --verify-graph")
-    if args.scale_mode == "ptpc" and args.use_graph and not args.benchmark:
-        raise SystemExit("--scale-mode ptpc does not support --use-graph for functional tests (use --benchmark)")
 
     def _run_correctness_test():
         """Run the functional test (computes a reference and asserts correctness)."""
@@ -2560,9 +2559,6 @@ if __name__ == "__main__":
                 expert_sched_mode=args.expert_sched_mode,
                 b_streaming=args.b_streaming,
                 scale_load_path=args.scale_load_path,
-                a_load_path=args.a_load_path,
-                b_split_load=args.b_split_load,
-                use_graph=args.use_graph,
             )
 
     if args.verify_graph:
