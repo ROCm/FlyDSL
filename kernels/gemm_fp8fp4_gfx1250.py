@@ -779,6 +779,42 @@ def compile_fp8fp4_gemm(
         # PF_FORCE_DK lets us validate the K-split descriptors on the full-depth path.
         _pf_force_dk = int(os.environ.get("PF_FORCE_DK", "0"))
         _pf_tdm_Dk = _pf_force_dk if _pf_force_dk > 0 else _pf_Dk
+        # ── pow2-safe K-split convention ──────────────────────────────────────
+        # The TDM LDS-row padding (pad_interval, in dwords) is a 3-bit log2 field,
+        # so each seg's per-row write width must be a power of 2. A split at Dk
+        # writes Dk ks-steps in the pf seg and (kws-Dk) in the remain seg; for the
+        # pad to be representable, BOTH Dk and (kws-Dk) (times the per-ks element
+        # unit, which is already pow2 for the supported tiles) must be powers of 2.
+        # The only interior split satisfying a+b=2^n with both pow2 is the midpoint
+        # (Dk == kws/2), e.g. tile_k=512 -> 256:256, tile_k=256 -> 128:128. Round the
+        # requested Dk UP to the midpoint when needed (keeps the carry inside the pf
+        # seg); if the carry can't fit the midpoint or kws is not splittable, fall
+        # back to full-depth (no split). Bound to A/B/AS/BS uniformly.
+        def _is_pow2(_x):
+            return _x > 0 and (_x & (_x - 1)) == 0
+
+        if 0 < _pf_tdm_Dk < k_wmma_steps and not (_is_pow2(_pf_tdm_Dk) and _is_pow2(k_wmma_steps - _pf_tdm_Dk)):
+            _mid = k_wmma_steps // 2
+            _orig_dk = _pf_tdm_Dk
+            if (
+                k_wmma_steps % 2 == 0
+                and _is_pow2(_mid)
+                and _pf_tdm_Dk <= _mid
+                and _pf_D <= _mid * _pf_wpks
+            ):
+                _pf_tdm_Dk = _mid
+                print(
+                    f"[pf_pipeline] pow2-safe K-split: pf_tdm_Dk {_orig_dk} -> {_pf_tdm_Dk} "
+                    f"(kws={k_wmma_steps}, midpoint split for pow2 pad)",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[pf_pipeline] no pow2-safe interior K-split (pf_tdm_Dk={_orig_dk}, "
+                    f"kws={k_wmma_steps}, _pf_D={_pf_D}); falling back to full-depth (no split)",
+                    flush=True,
+                )
+                _pf_tdm_Dk = k_wmma_steps
         _pf_tdm_split = 0 < _pf_tdm_Dk < k_wmma_steps
         # WMMA index of the pf/remain segment boundary: the next_pf TDM (cb_pf)
         # overwrites the pf seg (ks0.._pf_tdm_Dk-1), which is fully CONSUMED only at
