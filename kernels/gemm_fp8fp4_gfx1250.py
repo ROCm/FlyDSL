@@ -549,95 +549,130 @@ def compile_fp8fp4_gemm(
     # Consumed inside the kernel as a closed-over Python constant.
     # Tags: 0=A, 1=B, 2=AS, 3=BS
     _PF_TAG_A, _PF_TAG_B, _PF_TAG_AS, _PF_TAG_BS = 0, 1, 2, 3
+    # Order-graft: the carry/lazy-assembly pipeline is order-agnostic (compute_tile just
+    # iterates _pf_pos and loads _pf_wmma_plan_flat[i]), so the SAME machinery serves
+    # FP8_QUADRANT by building the table in QUADRANT emit-order instead of RMS snake.
+    # Gated by PF_QUADRANT=1 + tile_m<=64 (tile_m=128 needs a separate design); default
+    # off = zero change to existing behavior.
+    _pf_allow_quadrant = (
+        os.environ.get("PF_QUADRANT", "0") == "1"
+        and compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
+        and tile_m <= 64
+    )
     _use_lds_pf_outer = (
         wave_specialized_tdm
-        and compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+        and (compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING or _pf_allow_quadrant)
         and not _bvs_active
     )
     if _use_lds_pf_outer:
         _pf_bs_stride = 2 if (use_scale_opsel and not is_fp4) else 1
         _pf_num_tiles_b = WMMA_K // PACK_FACTOR_B // 16
-        _pf_load_table = []  # [(tag, imm), ...]  in WMMA-driven order
-        _pf_plans = []       # per ks: (as_start, as_n, a_groups, b_groups, bs_groups)
-        # _pf_wmma_plan[ks][wm][wn_raw] = (table_start, table_count)
-        # Records which slice of _pf_load_table to issue before each WMMA.
-        _pf_wmma_plan = []
+
+        # Per-tile WMMA emit order: list of (wm, wn). The table, _pf_pos, and
+        # _pf_wmma_plan_flat are all built in THIS order, so compute_tile emits in it.
+        if compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT:
+            # Quadrant: top-left rows, bottom-left rows, top-right cols, bottom-right
+            # cols — mirrors compute_tile_fp8_quadrant's _emit_group / _emit_group_col.
+            _hwm, _hwn = wmma_m_rep // 2, wmma_n_rep // 2
+            _pf_order = (
+                [(_wm, _wn) for _wm in range(_hwm) for _wn in range(_hwn)]            # TL
+                + [(_wm, _wn) for _wm in range(_hwm, wmma_m_rep) for _wn in range(_hwn)]  # BL
+                + [(_wm, _wn) for _wn in range(_hwn, wmma_n_rep) for _wm in range(_hwm)]  # TR (col-major)
+                + [(_wm, _wn) for _wn in range(_hwn, wmma_n_rep) for _wm in range(_hwm, wmma_m_rep)]  # BR
+            )
+        else:
+            # RMS: snake wn for odd wm (the original order).
+            _pf_order = [
+                (_wm, (wmma_n_rep - 1 - _wnr) if (_wm % 2 == 1) else _wnr)
+                for _wm in range(wmma_m_rep)
+                for _wnr in range(wmma_n_rep)
+            ]
+
+        _pf_load_table = []      # [(tag, imm), ...] in WMMA emit order
+        _pf_plans = []           # per ks: (as_start, as_n, a_groups[wm], b_groups[wn], bs_groups)
+        _pf_pos = []             # per emitted WMMA: (ks, wm, wn)
+        _pf_wmma_plan_flat = []  # per emitted WMMA: (table_start, count)
+
+        # Per-operand load emitters (identical bytes to the legacy build). Each appends
+        # to _pf_load_table and returns its (start, count) group descriptor. The A-imm
+        # formula is uniform: wm=0 reduces wm*WMMA_M*stride to 0 = the old wm==0 case.
+        def _emit_a_load(wm, ks):
+            _a_imm = wm * WMMA_M * lds_a_stride_bytes + ks * (WMMA_K // PACK_FACTOR_A)
+            _start = len(_pf_load_table)
+            for _sub in range(DS_LOADS_PER_A_FRAG):
+                _pf_load_table.append((_PF_TAG_A, _a_imm + _sub * 32))
+            return (_start, DS_LOADS_PER_A_FRAG)
+
+        def _emit_b_load(wn, ks):
+            _start = len(_pf_load_table)
+            if is_fp4:
+                _imm0 = wn * 2 * _b_ngroup_stride + ks * _pf_num_tiles_b * 256
+                _imm1 = (wn * 2 + 1) * _b_ngroup_stride + ks * _pf_num_tiles_b * 256
+                _pf_load_table.extend([(_PF_TAG_B, _imm0), (_PF_TAG_B, _imm0 + 512),
+                                       (_PF_TAG_B, _imm1), (_PF_TAG_B, _imm1 + 512)])
+                return (_start, 4)
+            if is_a8w4:
+                # Mirror load_b_frag's a8w4 LDS layout EXACTLY (ks-major default vs
+                # n-group-major) so raw sub-depth B reads hit the assembled offsets.
+                if _b_ksmajor:
+                    _imm = wn * _b_blk_stride + ks * _pf_num_tiles_b * _b_kstep
+                    _bstep = 2 * _b_kstep
+                else:
+                    _imm = wn * _b_ngroup_stride + ks * _pf_num_tiles_b * _b_blk_stride
+                    _bstep = 2 * _b_blk_stride
+                _pf_load_table.extend([(_PF_TAG_B, _imm), (_PF_TAG_B, _imm + _bstep)])
+                return (_start, 2)
+            _imm = wn * _b_ngroup_stride + ks * _pf_num_tiles_b * 256
+            for _so in (0, 512, 1024, 1536):
+                _pf_load_table.append((_PF_TAG_B, _imm + _so))
+            return (_start, 4)
+
+        def _emit_as_load(ks):
+            _as_n = (wmma_m_rep + 3) // 4
+            _as_off = ks * wmma_m_rep * SCALES_PER_WMMA
+            _start = len(_pf_load_table)
+            for _ld in range(_as_n):
+                _pf_load_table.append((_PF_TAG_AS, _as_off + _ld * 16))
+            return (_start, _as_n)
+
+        def _emit_bs_group_load(bsg, ks):
+            _rep_start = bsg * _pf_bs_stride
+            _gs = min(_pf_bs_stride, b_scale_load_rep - _rep_start)
+            _bs_n = (_gs + 3) // 4
+            _bs_off = (ks * b_scale_load_rep + _rep_start) * SCALES_PER_WMMA
+            _start = len(_pf_load_table)
+            for _ld in range(_bs_n):
+                _pf_load_table.append((_PF_TAG_BS, _bs_off + _ld * 16))
+            return (_start, _bs_n, _gs)
+
         for _pf_ks in range(k_wmma_steps):
-            _pf_as_n = (wmma_m_rep + 3) // 4
-            _pf_as_off = _pf_ks * wmma_m_rep * SCALES_PER_WMMA
-            _pf_a_groups, _pf_b_groups, _pf_bs_groups = [], [], []
-            _pf_as_start = None
-            _pf_ks_wmma = []
-            # Iterate in exact WMMA (wm, wn_raw) order so table entries line up
-            # with the interleave points in compute_tile.
-            for _pf_wm in range(wmma_m_rep):
-                _pf_wm_plan = []
-                for _pf_wn_raw in range(wmma_n_rep):
-                    # snake wn for odd wm (mirrors compute_tile WMMA order)
-                    _pf_wn = (wmma_n_rep - 1 - _pf_wn_raw) if (_pf_wm % 2 == 1) else _pf_wn_raw
-                    _wmma_start = len(_pf_load_table)
-                    if _pf_wm == 0 and _pf_wn_raw == 0:
-                        # AS: placed at the first WMMA of each ks.
-                        _pf_as_start = len(_pf_load_table)
-                        for _pf_ld in range(_pf_as_n):
-                            _pf_load_table.append((_PF_TAG_AS, _pf_as_off + _pf_ld * 16))
-                    if _pf_wm == 0:
-                        if not is_ptpc:
-                            _pf_bsg = _pf_wn // _pf_bs_stride
-                            if _pf_wn % _pf_bs_stride == 0:
-                                _pf_rep_start = _pf_bsg * _pf_bs_stride
-                                _pf_gs = min(_pf_bs_stride, b_scale_load_rep - _pf_rep_start)
-                                _pf_bs_n = (_pf_gs + 3) // 4
-                                _pf_bs_off = (_pf_ks * b_scale_load_rep + _pf_rep_start) * SCALES_PER_WMMA
-                                _pf_bs_start = len(_pf_load_table)
-                                for _pf_ld in range(_pf_bs_n):
-                                    _pf_load_table.append((_PF_TAG_BS, _pf_bs_off + _pf_ld * 16))
-                                _pf_bs_groups.append((_pf_bs_start, _pf_bs_n, _pf_gs))
-                        if _pf_wn_raw == 0:
-                            _pf_a_imm = _pf_ks * (WMMA_K // PACK_FACTOR_A)
-                            _pf_a_start = len(_pf_load_table)
-                            for _pf_sub in range(DS_LOADS_PER_A_FRAG):
-                                _pf_load_table.append((_PF_TAG_A, _pf_a_imm + _pf_sub * 32))
-                            _pf_a_groups.append((_pf_a_start, DS_LOADS_PER_A_FRAG))
-                        _pf_b_start = len(_pf_load_table)
-                        if is_fp4:
-                            _pf_imm0 = _pf_wn * 2 * _b_ngroup_stride + _pf_ks * _pf_num_tiles_b * 256
-                            _pf_imm1 = (_pf_wn * 2 + 1) * _b_ngroup_stride + _pf_ks * _pf_num_tiles_b * 256
-                            _pf_load_table += [(_PF_TAG_B, _pf_imm0), (_PF_TAG_B, _pf_imm0 + 512),
-                                               (_PF_TAG_B, _pf_imm1), (_PF_TAG_B, _pf_imm1 + 512)]
-                            _pf_b_groups.append((_pf_b_start, 4))
-                        elif is_a8w4:
-                            # Mirror load_b_frag's a8w4 LDS layout EXACTLY: the raw
-                            # sub-depth path must read B from the same offsets as the
-                            # assembled path. ks-major (default) steps by _b_blk_stride
-                            # (n-group) / _b_kstep (k-block); n-group-major steps by
-                            # _b_ngroup_stride / _b_blk_stride. The old hardcoded 256/512
-                            # only matched a stale non-ks-major layout, so real sub-depth
-                            # B reads landed at the wrong LDS offset → garbage → NaN.
-                            if const_expr(_b_ksmajor):
-                                _pf_imm = _pf_wn * _b_blk_stride + _pf_ks * _pf_num_tiles_b * _b_kstep
-                                _pf_b_step = 2 * _b_kstep
-                            else:
-                                _pf_imm = _pf_wn * _b_ngroup_stride + _pf_ks * _pf_num_tiles_b * _b_blk_stride
-                                _pf_b_step = 2 * _b_blk_stride
-                            _pf_load_table += [(_PF_TAG_B, _pf_imm), (_PF_TAG_B, _pf_imm + _pf_b_step)]
-                            _pf_b_groups.append((_pf_b_start, 2))
-                        else:
-                            _pf_imm = _pf_wn * _b_ngroup_stride + _pf_ks * _pf_num_tiles_b * 256
-                            for _pf_sub_off in (0, 512, 1024, 1536):
-                                _pf_load_table.append((_PF_TAG_B, _pf_imm + _pf_sub_off))
-                            _pf_b_groups.append((_pf_b_start, 4))
-                    elif _pf_wn_raw == 0:
-                        # wm > 0: only A frag at the first wn of each wm row.
-                        _pf_a_imm = _pf_wm * WMMA_M * lds_a_stride_bytes + _pf_ks * (WMMA_K // PACK_FACTOR_A)
-                        _pf_a_start = len(_pf_load_table)
-                        for _pf_sub in range(DS_LOADS_PER_A_FRAG):
-                            _pf_load_table.append((_PF_TAG_A, _pf_a_imm + _pf_sub * 32))
-                        _pf_a_groups.append((_pf_a_start, DS_LOADS_PER_A_FRAG))
-                    _pf_wm_plan.append((_wmma_start, len(_pf_load_table) - _wmma_start))
-                _pf_ks_wmma.append(_pf_wm_plan)
-            _pf_wmma_plan.append(_pf_ks_wmma)
-            _pf_plans.append((_pf_as_start, _pf_as_n, _pf_a_groups, _pf_b_groups, _pf_bs_groups))
+            # Load each operand at its FIRST use in emit order (AS once per ks at the
+            # first WMMA; BS once per group; A once per wm; B once per wn). Per-WMMA
+            # slice order is AS,BS,A,B — for snake this reproduces the legacy table
+            # byte-for-byte; for quadrant it lays loads out in quadrant order.
+            _a_seen, _b_seen, _bs_seen, _recs = {}, {}, {}, {}
+            _as_rec = None
+            for (_wm, _wn) in _pf_order:
+                _wmma_start = len(_pf_load_table)
+                if _as_rec is None:
+                    _as_rec = _emit_as_load(_pf_ks)
+                if not is_ptpc:
+                    _bsg = _wn // _pf_bs_stride
+                    if _bsg not in _bs_seen:
+                        _bs_seen[_bsg] = _emit_bs_group_load(_bsg, _pf_ks)
+                if _wm not in _a_seen:
+                    _a_seen[_wm] = _emit_a_load(_wm, _pf_ks)
+                if _wn not in _b_seen:
+                    _b_seen[_wn] = _emit_b_load(_wn, _pf_ks)
+                _recs[(_wm, _wn)] = (_wmma_start, len(_pf_load_table) - _wmma_start)
+            _as_start, _as_n = _as_rec
+            _a_groups = [_a_seen[_wm] for _wm in range(wmma_m_rep)]   # indexed by wm
+            _b_groups = [_b_seen[_wn] for _wn in range(wmma_n_rep)]   # indexed by wn
+            _bs_groups = [_bs_seen[_g] for _g in sorted(_bs_seen.keys())]
+            _pf_plans.append((_as_start, _as_n, _a_groups, _b_groups, _bs_groups))
+            for (_wm, _wn) in _pf_order:
+                _pf_pos.append((_pf_ks, _wm, _wn))
+                _pf_wmma_plan_flat.append(_recs[(_wm, _wn)])
 
         # Per-ks scale SOURCE maps for the lazy (sub-ks) assembler: which
         # (table_idx, sub) each PRE-opsel a_scales[r] / b_scales[f] entry reads from
@@ -695,16 +730,7 @@ def compile_fp8fp4_gemm(
         # into the deferred remain region (which would read it before its TDM is issued).
         # So a sub-ks _pf_D (e.g. 4 of 8) gives a finer CARRY depth while the seg split
         # stays at the first ks boundary (pf=ks0, remain=ks1+).
-        # Flatten the per-(ks,wm,wn_raw) plan into WMMA-evolution (snake) order so
-        # _pf_wmma_plan_flat[p] = (table_start, count) and _pf_pos[p] = (ks, wm, wn).
-        _pf_wmma_plan_flat = []
-        _pf_pos = []
-        for _fks in range(k_wmma_steps):
-            for _fwm in range(wmma_m_rep):
-                for _fwnr in range(wmma_n_rep):
-                    _fwn = (wmma_n_rep - 1 - _fwnr) if (_fwm % 2 == 1) else _fwnr
-                    _pf_wmma_plan_flat.append(_pf_wmma_plan[_fks][_fwm][_fwnr])
-                    _pf_pos.append((_fks, _fwm, _fwn))
+        # (_pf_pos and _pf_wmma_plan_flat were built in emit order in the table loop.)
         # Table entries [0:_pf_split_idx) are the carry (first _pf_D WMMAs).
         _pf_split_idx = (
             _pf_wmma_plan_flat[_pf_D][0] if _pf_D < _A_wmma else len(_pf_load_table)
@@ -2620,7 +2646,10 @@ def compile_fp8fp4_gemm(
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
                 )
-            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
+            # Order-graft: when PF_QUADRANT routes a quadrant shape onto the pf pipeline
+            # (_pf_allow_quadrant), fall through to compute_tile (which now emits in
+            # quadrant order via _pf_pos). Otherwise use the legacy hand-tuned quadrant.
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT and not _pf_allow_quadrant):
                 return compute_tile_fp8_quadrant(
                     accs_in,
                     lds_a,
@@ -3174,7 +3203,7 @@ def compile_fp8fp4_gemm(
         _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
         _use_lds_pf = (
             wave_specialized_tdm
-            and compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+            and (compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING or _pf_allow_quadrant)
             and not _bvs_active
         )
 
@@ -3188,18 +3217,24 @@ def compile_fp8fp4_gemm(
             and _pf_tdm_split
             and os.environ.get("PF_PIPELINE", "0") == "1"
         )
-        # Pipeline TDM-wait count (DEEP n-buffer prefetch). Steady state keeps the whole
-        # lookahead in flight: (num_buffers-1) tiles ahead, 2 TDMs each (pf+remain) =>
-        #     _pf_keep = 2 * (num_buffers - 1)
-        # Each boundary fence drains exactly the OLDEST 1 (the tile being consumed ~n-1
-        # tiles after it was issued -> done by HW latency) and keeps the rest overlapping.
-        # The barrier bound into _pipeline_fence makes the DRAINED one cross-wave visible
-        # before its ds_load. The prologue drains to 0 (pre-loaded tiles consumed ready);
-        # the in-flight count builds up to _pf_keep over the first few loop tiles. A
-        # boundary that issues NO next TDM (tail/final) drains further (down to 0).
+        # Pipeline TDM-wait count (DEEP n-buffer prefetch). The K-split issues TWO TDMs
+        # per tile (pf+remain), so the full split lookahead across num_buffers buffers is
+        # 2*num_buffers, minus the one tile being consumed => 2*num_buffers-1 in flight.
+        # ALL loop fences (cb_pf, cb_rem, steady) use this SAME count so the pipeline runs
+        # at a single uniform depth with no mid-tile drain stutter (the old split of
+        # cb=2(n-1) vs steady=... made the wait counts alternate 4/5/4/5 and stalled).
+        # Each fence's BARRIER provides cross-wave visibility; the wait just bounds the
+        # in-flight set. The prologue drains to 0 (pre-loaded tiles consumed ready); the
+        # count builds to _pf_keep over the first loop tiles; tail/final boundaries that
+        # issue NO next TDM drain further (down to 0).
         # NOTE: cmodel treats TDM as synchronous, so this count is NOT cmodel-validatable
         # (any value passes data+barrier checks) -- the real overlap is HW-validated.
-        _pf_keep = 2 * (num_buffers - 1)
+        _pf_keep = 2 * num_buffers - 1
+        # Steady tile-boundary fence: same uniform depth as the cb fences (see above).
+        # The old default TDM_LOADS_PER_STEP*(num_buffers-2) assumed ONE TDM/tile and for
+        # nb=3 drained to 1, throwing away the whole lookahead -> defeated the pipeline.
+        if _pf_pipeline:
+            _fence_outstanding = _pf_keep
 
         # Compute per-k-step prefetch flat-list layout (trace-time constants).
         if const_expr(_use_lds_pf):
@@ -3442,10 +3477,19 @@ def compile_fp8fp4_gemm(
                                 # oldest 1 (the tile about to be consumed).
                                 _pipeline_fence(outstanding=_pf_keep)
 
-                            def _tdm_cb_rem(_nb=load_stage):
+                            def _tdm_cb_rem(_nb=load_stage, _bi=buf_idx):
                                 _issue_active_tdm_seg(_nb, _addr_rem_box[0], 1)
                                 _addr_rem_box[0] = _addr_rem_box[0] + active_adv_i32
-                                _pipeline_fence(outstanding=_pf_keep)
+                                # cb_rem fires at the tile's END. For buf_idx < nb-1 the
+                                # NEXT buf_idx's steady fence (top of its iteration) follows
+                                # immediately with nothing reading LDS between, and drains
+                                # further (_fence_outstanding <= _pf_keep) -> this fence is
+                                # fully subsumed (the ISA showed wait(_pf_keep)+barrier then
+                                # wait(_fence_outstanding)+barrier back-to-back). Skip it.
+                                # The LAST buf_idx may instead flow to the tail (which has no
+                                # steady fence), so it MUST keep its fence/barrier.
+                                if const_expr(_bi == num_buffers - 1):
+                                    _pipeline_fence(outstanding=_pf_keep)
 
                         if const_expr(not use_ws_tdm_split_signal_overlap):
                             _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -3666,6 +3710,20 @@ def compile_fp8fp4_gemm(
                     _next_cs = _tail_plan_active_cs[_apos + 1]
             _tail_plan_ext.append((ls, cs, out, _next_cs))
 
+        # Tail TDM drain countdown (split pipeline). At the main->tail boundary the steady
+        # state holds _pf_keep = 2*num_buffers-1 TDMs in flight. The tail issues no new
+        # deep lookahead, so the in-flight bound must wind DOWN to 0 across the tail —
+        # one step per cb fence (cb_pf, cb_rem) — e.g. nb=3: 5(boundary) ->4,3,2,1,0.
+        # The old code used a binary keep-_pf_keep / drain-0, which stayed at 5 then hard
+        # -dropped to 0 at the first no-load entry (over-drain, lost overlap, and never
+        # produced the gradual descent). The final tile forces 0 (every TDM must complete
+        # before the epilogue). Trace-time counter (the tail loop is fully unrolled).
+        _tail_tcnt_box = [2 * num_buffers - 1]
+
+        def _tail_drain_next():
+            _tail_tcnt_box[0] = max(0, _tail_tcnt_box[0] - 1)
+            return _tail_tcnt_box[0]
+
         for _load_stage, _compute_stage, _outstanding, _tail_next_cs in _tail_plan_ext:
             _entry_kb = _bvs_tail_kb()
             if const_expr(_pf_pipeline):
@@ -3687,20 +3745,20 @@ def compile_fp8fp4_gemm(
                 _pl_load = _load_stage
                 _pl_has_load = _load_stage is not None
 
-                def _cb_pf(_n=_pl_load, _has=_pl_has_load):
+                def _cb_pf(_n=_pl_load, _has=_pl_has_load, _final=not _pl_has_next):
                     if const_expr(_has):
                         _issue_active_tdm_seg(_n, _pl_addr_pf_box[0], 0)
                         _pl_addr_pf_box[0] = _pl_addr_pf_box[0] + active_adv_i32
                     # wait+barrier (bound = _pipeline_fence) makes the drained TDMs
-                    # cross-wave visible. With a next TDM just issued -> keep the lookahead
-                    # in flight (overlap), drain the older. No load this entry -> drain 0.
-                    _pipeline_fence(outstanding=_pf_keep if _has else 0)
+                    # cross-wave visible. Wind the in-flight bound down by 1 per cb fence;
+                    # the final tile forces 0 so all TDMs complete before the epilogue.
+                    _pipeline_fence(outstanding=0 if const_expr(_final) else _tail_drain_next())
 
                 def _cb_rem(_n=_pl_load, _has=_pl_has_load):
                     if const_expr(_has):
                         _issue_active_tdm_seg(_n, _pl_addr_rem_box[0], 1)
                         _pl_addr_rem_box[0] = _pl_addr_rem_box[0] + active_adv_i32
-                    _pipeline_fence(outstanding=_pf_keep if _has else 0)
+                    _pipeline_fence(outstanding=_tail_drain_next())
 
                 a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                 rocdl.sched_barrier(0)
