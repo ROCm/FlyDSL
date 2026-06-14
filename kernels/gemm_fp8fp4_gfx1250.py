@@ -302,11 +302,12 @@ def compile_fp8fp4_gemm(
     stage_layout.ptr = stage_b_scale_rel_off + lds_b_scale_bytes
     stage_bytes = _align_up(stage_layout.ptr, 128)
 
-    pre_loaded = num_buffers - 1
+    _full_pf_req = os.environ.get("PF_FULL_PREFETCH", "0") == "1"
+    pre_loaded = num_buffers if _full_pf_req else (num_buffers - 1)
     loop_iters = (num_k_tiles - pre_loaded) // num_buffers
     _tail_start = loop_iters * num_buffers
     extra = num_k_tiles - _tail_start - pre_loaded
-    _base_tail_plan = make_tail_plan(num_buffers, pre_loaded, extra)
+    _base_tail_plan = make_tail_plan(num_buffers, pre_loaded, extra, full_prefetch=_full_pf_req)
 
     _last_compute_stage = _base_tail_plan[-1][1]
 
@@ -703,6 +704,16 @@ def compile_fp8fp4_gemm(
         _A_wmma = k_wmma_steps * _pf_wpks             # total WMMAs in a tile
         _raw_D = _A_wmma if pf_depth_wmma is None else int(pf_depth_wmma)
         _pf_D = max(1, min(_A_wmma, _raw_D))
+        # Full-prefetch backfills the buffer being consumed NOW, so the carry/look-
+        # ahead depth must align with the pf/remain TDM SEGMENT boundary (a whole
+        # ks-step). A sub-ks carry (D < _pf_wpks) makes the look-ahead read the
+        # remain region before the pf seg is consumed, so cb_pf cannot find a clean
+        # point to overwrite the live buffer's pf seg (it is either still being read
+        # or its carry is still in flight) -> data race on buffer reuse. Snap D UP to
+        # a ks multiple here so each phase maps 1:1 to a TDM segment (the design the
+        # WMMA-driven pipeline assumes). Legacy (non-full-prefetch) keeps sub-ks.
+        if _full_pf_req and os.environ.get("PF_PIPELINE", "0") == "1":
+            _pf_D = min(_A_wmma, ((_pf_D + _pf_wpks - 1) // _pf_wpks) * _pf_wpks)
         _pf_full_depth = _pf_D == _A_wmma
         # Sub-depth reads the tile's "remain" operands from its own LDS buffer
         # mid-compute. That is only safe when the buffer is never reused: once a
@@ -751,6 +762,12 @@ def compile_fp8fp4_gemm(
         _pf_force_dk = int(os.environ.get("PF_FORCE_DK", "0"))
         _pf_tdm_Dk = _pf_force_dk if _pf_force_dk > 0 else _pf_Dk
         _pf_tdm_split = 0 < _pf_tdm_Dk < k_wmma_steps
+        # WMMA index of the pf/remain segment boundary: the next_pf TDM (cb_pf)
+        # overwrites the pf seg (ks0.._pf_tdm_Dk-1), which is fully CONSUMED only at
+        # this WMMA. When the cb backfills the buffer being consumed NOW (full-
+        # prefetch), cb_pf MUST fire here, not at the (smaller) carry depth _pf_D —
+        # else it clobbers the still-unread pf-seg tail [_pf_D : _pf_seg_wmmas).
+        _pf_seg_wmmas = _pf_tdm_Dk * _pf_wpks
         # DEBUG: PF_TDM_SPLIT_OFF=1 forces the single full TDM path (prologue + tail)
         # even for sub-depth, to isolate the sub-depth COMPUTE from the K-split TDM
         # wiring. (Temporary diagnostic — remove after Stage C.)
@@ -766,14 +783,16 @@ def compile_fp8fp4_gemm(
             return _pf_tdm_Dk if _pf_split_op in ("all", op) else k_wmma_steps
 
         _dk_a, _dk_b = _op_dk("a"), _op_dk("b")
-        # Scales (AS/BS) are NEVER K-split: they are tiny (E8M0, 1 byte per 32-K block)
-        # so splitting wastes a TDM and — critically — the split scale descriptor
-        # mis-addresses the per-warp scale region (warp_n/warp_m>0 read uninit LDS →
-        # huge E8M0 → NaN). Load the full scale tile in both segs (idempotent) and read
-        # it fresh in compute (see PF_SCALE_FRESH default below). Only A/B get the real
-        # pf/remain split (the race fix targets the big operands). Override PF_SPLIT_OP
-        # for scales is intentionally ignored.
-        _dk_as, _dk_bs = k_wmma_steps, k_wmma_steps
+        # Scales (AS/BS) are K-split at the SAME pf/remain boundary as A/B. They MUST
+        # be split: loading the full scale tile in BOTH segs writes the same LDS scale
+        # region (offset 0) from cb_pf AND cb_rem. In the deep WMMA-driven pipeline both
+        # TDMs are in flight at once, so a tile reusing the buffer reads a torn/raced
+        # scale value -> nondeterministic ~0.1% wrong outputs (constant scales hid it).
+        # Splitting makes pf write ks0 scales and remain write ks1 scales into disjoint
+        # LDS, identical to A/B (which are race-free), so the scale read is safe at full
+        # pipeline depth. _seg_cols falls back to full-in-both when the scale tile is too
+        # small to split (pk >= full), which stays correct (single small region).
+        _dk_as, _dk_bs = _op_dk("as"), _op_dk("bs")
 
         # Per-operand (col_off, col_len) for seg 0 (pf) and seg 1 (remain), computed
         # at config scope (pure Python) so the traced make_desc_*_seg only index a
@@ -1785,11 +1804,15 @@ def compile_fp8fp4_gemm(
                 else:
                     _cur_ks = None
                     _lz_ac, _lz_bc, _lz_scc = {}, {}, {}   # per-tile lazy-assembly caches
+                # cb_pf fires once the pf SEGMENT is fully consumed. Legacy backfills
+                # an already-dead buffer, so the carry depth _pf_D suffices; full-
+                # prefetch backfills the live buffer, so it must wait until the whole
+                # pf seg (ks0.._pf_tdm_Dk-1) is read -> _pf_seg_wmmas (>= _pf_D).
+                _cb_pf_at = _pf_seg_wmmas if _full_prefetch else _pf_D
                 for i in range_constexpr(_A_wmma):
-                    # ── TDM boundary 1 (pf WMMAs consumed): wait this tile's remain
-                    # TDM, issue next tile's pf TDM. Fires once, before the first
-                    # remain WMMA (i == _pf_D). See WMMA-driven prefetch plan.
-                    if const_expr(i == _pf_D and tdm_cb_pf is not None):
+                    # ── TDM boundary 1 (pf seg consumed): wait this tile's remain TDM,
+                    # issue next tile's pf TDM. See WMMA-driven prefetch plan.
+                    if const_expr(i == _cb_pf_at and tdm_cb_pf is not None):
                         tdm_cb_pf()
                     ks, wm, wn = _pf_pos[i]
                     _j = i + _pf_D
@@ -3187,7 +3210,6 @@ def compile_fp8fp4_gemm(
                 _stage_lds_rem_sgprs = [
                     rocdl.readfirstlane(T.i32, v + _seg_lds_off_rem) for v in active_stage_lds_addr
                 ]
-
                 def _issue_active_tdm_seg(load_stage, addr_lo, seg, k_prefetch=None):
                     """Issue one K-segment (seg 0=pf, 1=remain) of the per-tile TDM."""
                     _dg1 = _seg_dg_pf if seg == 0 else _seg_dg_rem
@@ -3217,22 +3239,23 @@ def compile_fp8fp4_gemm(
             and _pf_tdm_split
             and os.environ.get("PF_PIPELINE", "0") == "1"
         )
-        # Pipeline TDM-wait count (DEEP n-buffer prefetch). The K-split issues TWO TDMs
-        # per tile (pf+remain), so the full split lookahead across num_buffers buffers is
-        # 2*num_buffers, minus the one tile being consumed => 2*num_buffers-1 in flight.
-        # ALL loop fences (cb_pf, cb_rem, steady) use this SAME count so the pipeline runs
-        # at a single uniform depth with no mid-tile drain stutter (the old split of
-        # cb=2(n-1) vs steady=... made the wait counts alternate 4/5/4/5 and stalled).
-        # Each fence's BARRIER provides cross-wave visibility; the wait just bounds the
-        # in-flight set. The prologue drains to 0 (pre-loaded tiles consumed ready); the
-        # count builds to _pf_keep over the first loop tiles; tail/final boundaries that
-        # issue NO next TDM drain further (down to 0).
-        # NOTE: cmodel treats TDM as synchronous, so this count is NOT cmodel-validatable
-        # (any value passes data+barrier checks) -- the real overlap is HW-validated.
-        _pf_keep = 2 * num_buffers - 1
-        # Steady tile-boundary fence: same uniform depth as the cb fences (see above).
-        # The old default TDM_LOADS_PER_STEP*(num_buffers-2) assumed ONE TDM/tile and for
-        # nb=3 drained to 1, throwing away the whole lookahead -> defeated the pipeline.
+        _full_prefetch = _full_pf_req and _pf_pipeline
+        # Overlapped prologue startup (full-prefetch with a main loop): drain tile 0
+        # alone first, then issue the remaining N-1 tiles' TDMs and tile 0's carry
+        # ds_load together so the ds_load overlaps the in-flight TDMs instead of
+        # serializing after a single all-tiles drain.
+        _pf_overlap_prologue = _full_prefetch and loop_iters > 0
+        # Pipeline TDM-wait count. Each phase boundary issues 1 TDM then fences.
+        # Full-prefetch: cb_pf + cb_rem each fence to 2*(N-1). After issuing 1 TDM
+        # the FIFO has at most 2*(N-1)+1 entries; draining to 2*(N-1) retires the
+        # oldest — which is exactly the same-type TDM from N-1 tiles ago (the one
+        # the NEXT phase will read). Legacy: same analysis with N-1 look-ahead.
+        # NOTE: cmodel treats TDM as synchronous — NOT cmodel-validatable.
+        if const_expr(_full_prefetch):
+            _pf_keep = 2 * (num_buffers - 1)
+        else:
+            _pf_keep = max(0, 2 * (num_buffers - 1) - 2)
+        _pf_keep_cb_rem = _pf_keep
         if _pf_pipeline:
             _fence_outstanding = _pf_keep
 
@@ -3341,6 +3364,10 @@ def compile_fp8fp4_gemm(
                     _issue_active_tdm_seg(i, _seg_alo_rem_pl, 1)
                     active_addr_lo = active_addr_lo + active_adv_i32
                     _seg_alo_rem_pl = _seg_alo_rem_pl + active_adv_i32
+                    # Overlapped startup: drain tile 0 alone right after issuing it so
+                    # its carry ds_load (below) overlaps tiles 1..N-1's TDMs.
+                    if const_expr(_pf_overlap_prologue and i == 0):
+                        _pipeline_fence(outstanding=0)
             else:
                 for i in range_constexpr(pre_loaded):
                     _issue_active_tdm(i, active_addr_lo)
@@ -3389,17 +3416,29 @@ def compile_fp8fp4_gemm(
         # first (num_buffers-1) tiles are consumed from a fully-ready/visible state. The
         # steady-state in-flight count then builds up to _pf_keep over the first loop
         # tiles (matches the user's deep-pipeline prologue: prefetch-all then tensorcnt 0).
-        if const_expr(_pf_pipeline):
+        if const_expr(_pf_overlap_prologue):
+            # tile 0 already drained + barriered in the prologue. Issue its carry
+            # ds_load NOW (overlaps tiles 1..N-1's in-flight TDMs), then drain those
+            # TDMs and finally the carry ds_load.
+            _pf_init = _issue_pf_all_ks(
+                stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
+            )
+            _pf_init_flat = _pf_all_ks_to_flat(_pf_init)
+            _pipeline_fence(outstanding=0)
+            rocdl.s_wait_dscnt(0)
+        elif const_expr(_pf_pipeline):
             _pipeline_fence(outstanding=0)
         else:
             _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
-        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap and not _full_prefetch):
             _pipeline_fence_signal(outstanding=_fence_outstanding)
 
         if const_expr(loop_iters > 0):
             if const_expr(wave_specialized_tdm):
-                if const_expr(_use_lds_pf):
+                if const_expr(_pf_overlap_prologue):
+                    pass  # _pf_init / _pf_init_flat already computed above
+                elif const_expr(_use_lds_pf):
                     _pf_init = _issue_pf_all_ks(
                         stages_a_idx[0], stages_b_idx[0], stages_bs_idx[0], stages_as_idx[0]
                     )
@@ -3443,7 +3482,10 @@ def compile_fp8fp4_gemm(
                         _ring_b = list(state[_rb0 : _rb0 + _bvs_D * b_scale_load_rep])
 
                     for buf_idx in range_constexpr(num_buffers):
-                        load_stage = (buf_idx + num_buffers - 1) % num_buffers
+                        if const_expr(_full_prefetch):
+                            load_stage = buf_idx
+                        else:
+                            load_stage = (buf_idx + num_buffers - 1) % num_buffers
                         next_buf = (buf_idx + 1) % num_buffers
 
                         _tdm_cb_pf = None
@@ -3473,30 +3515,22 @@ def compile_fp8fp4_gemm(
                             def _tdm_cb_pf(_nb=load_stage):
                                 _issue_active_tdm_seg(_nb, _addr_pf_box[0], 0)
                                 _addr_pf_box[0] = _addr_pf_box[0] + active_adv_i32
-                                # Keep the whole lookahead in flight (overlap), drain the
-                                # oldest 1 (the tile about to be consumed).
                                 _pipeline_fence(outstanding=_pf_keep)
 
                             def _tdm_cb_rem(_nb=load_stage, _bi=buf_idx):
                                 _issue_active_tdm_seg(_nb, _addr_rem_box[0], 1)
                                 _addr_rem_box[0] = _addr_rem_box[0] + active_adv_i32
-                                # cb_rem fires at the tile's END. For buf_idx < nb-1 the
-                                # NEXT buf_idx's steady fence (top of its iteration) follows
-                                # immediately with nothing reading LDS between, and drains
-                                # further (_fence_outstanding <= _pf_keep) -> this fence is
-                                # fully subsumed (the ISA showed wait(_pf_keep)+barrier then
-                                # wait(_fence_outstanding)+barrier back-to-back). Skip it.
-                                # The LAST buf_idx may instead flow to the tail (which has no
-                                # steady fence), so it MUST keep its fence/barrier.
-                                if const_expr(_bi == num_buffers - 1):
-                                    _pipeline_fence(outstanding=_pf_keep)
+                                if const_expr(_full_prefetch):
+                                    _pipeline_fence(outstanding=_pf_keep_cb_rem)
+                                elif const_expr(_bi == num_buffers - 1):
+                                    _pipeline_fence(outstanding=_pf_keep_cb_rem)
 
                         if const_expr(not use_ws_tdm_split_signal_overlap):
                             _pipeline_fence_signal(outstanding=_fence_outstanding)
                         pipeline_fence_wait(use_cluster=use_cluster)
 
                         _late_tdm_ws_fence_signal = None
-                        if const_expr(use_ws_tdm_split_signal_overlap):
+                        if const_expr(use_ws_tdm_split_signal_overlap and not _full_prefetch):
 
                             def _late_tdm_ws_split_signal():
                                 _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -3710,15 +3744,13 @@ def compile_fp8fp4_gemm(
                     _next_cs = _tail_plan_active_cs[_apos + 1]
             _tail_plan_ext.append((ls, cs, out, _next_cs))
 
-        # Tail TDM drain countdown (split pipeline). At the main->tail boundary the steady
-        # state holds _pf_keep = 2*num_buffers-1 TDMs in flight. The tail issues no new
-        # deep lookahead, so the in-flight bound must wind DOWN to 0 across the tail —
-        # one step per cb fence (cb_pf, cb_rem) — e.g. nb=3: 5(boundary) ->4,3,2,1,0.
-        # The old code used a binary keep-_pf_keep / drain-0, which stayed at 5 then hard
-        # -dropped to 0 at the first no-load entry (over-drain, lost overlap, and never
-        # produced the gradual descent). The final tile forces 0 (every TDM must complete
-        # before the epilogue). Trace-time counter (the tail loop is fully unrolled).
-        _tail_tcnt_box = [2 * num_buffers - 1]
+        # Tail TDM drain countdown (split pipeline). At the main->tail boundary the
+        # last cb_rem fence leaves at most _pf_keep_cb_rem TDMs in flight. The tail
+        # issues no new deep lookahead, so the in-flight bound must wind DOWN to 0
+        # across the tail — one step per cb fence (cb_pf, cb_rem).
+        # The final tile forces 0 (every TDM must complete before the epilogue).
+        # Trace-time counter (the tail loop is fully unrolled).
+        _tail_tcnt_box = [_pf_keep_cb_rem]
 
         def _tail_drain_next():
             _tail_tcnt_box[0] = max(0, _tail_tcnt_box[0] - 1)

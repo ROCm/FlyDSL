@@ -69,29 +69,88 @@ def _make_args(M, N, K, tm, tn, tk, mw, nw, nb, warmup, iters):
         b_streaming=False,
         scale_load_path="tdm",
         verify_graph=False,
+        pf_depth_wmma=int(os.environ.get("PF_DEPTH_WMMA", "4")),
     )
 
 
-def _worker(kernel, cfg_vals, warmup, iters):
-    """Run a single benchmark in this (isolated) process; print BENCH_RESULT us,tf,gbs."""
+# Compile-time env per mode. PF_* flags are read inside the kernel at trace time,
+# so setting them in this (isolated) process before compile selects the variant.
+_MODES = ("baseline", "legacy", "fullpf")
+_MODE_ENV = {
+    "baseline": {"PF_QUADRANT": None, "PF_PIPELINE": None, "PF_FULL_PREFETCH": None},
+    "legacy": {"PF_QUADRANT": "1", "PF_PIPELINE": "1", "PF_FULL_PREFETCH": None},
+    "fullpf": {"PF_QUADRANT": "1", "PF_PIPELINE": "1", "PF_FULL_PREFETCH": "1"},
+}
+
+
+def _worker(mode, cfg_vals, warmup, iters):
+    """Run accuracy + benchmark for one mode in this (isolated) process.
+
+    Prints: BENCH_RESULT us,tf,gbs,cosine,passed
+    """
+    import contextlib
+    import io
+
+    for k, v in _MODE_ENV[mode].items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    # Isolate each mode's disk cache: the PF_* flags are not part of the JIT cache
+    # key, so a shared dir would let one mode load another mode's compiled kernel.
+    os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = f"/tmp/cmp_cache_{mode}"
+
     import tests.kernels.test_gemm_fp8fp4_gfx1250 as bench_mod
-    if kernel == "baseline":
+    if mode == "baseline":
         from kernels import gemm_fp8fp4_gfx1250_baseline as mod
+
+        # The reference kernel predates pf_depth_wmma (and any other newer pipeline
+        # knobs); drop kwargs it does not accept so the shared harness drives both.
+        _orig_compile = mod.compile_mxscale_gemm
+
+        def _baseline_compile(**kw):
+            kw.pop("pf_depth_wmma", None)
+            return _orig_compile(**kw)
+
+        bench_mod.compile_mxscale_gemm = _baseline_compile
     else:
         from kernels import gemm_fp8fp4_gfx1250 as mod
-    bench_mod.compile_mxscale_gemm = mod.compile_mxscale_gemm
+        bench_mod.compile_mxscale_gemm = mod.compile_mxscale_gemm
 
+    M, N, K, tm, tn, tk, mw, nw, nb = cfg_vals
+    pf_depth = None if mode == "baseline" else int(os.environ.get("PF_DEPTH_WMMA", "4"))
+
+    # ── accuracy: run the test body once, capture cosine, pass = no AssertionError ──
+    cos = float("nan")
+    passed = 0
+    _buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(_buf):
+            bench_mod._run_mxscale_gemm_test(
+                "a8w4", M, N, K, tm, tn, tk, mw, nw, nb,
+                use_tdm_store=True, out_dtype="bf16",
+                wave_specialized_tdm=True, cluster_m=1, cluster_n=1,
+                split_k=1, scale_load_path="tdm", pf_depth_wmma=pf_depth,
+            )
+        passed = 1
+    except AssertionError:
+        passed = 0
+    for line in _buf.getvalue().splitlines():
+        if "Cosine similarity:" in line:
+            cos = float(line.split(":")[1].strip())
+
+    # ── perf ──
     args = _make_args(*cfg_vals, warmup, iters)
     us, tf, gbs = bench_mod._run_benchmark(args)
-    print(f"{_RESULT_PREFIX}{us},{tf},{gbs}", flush=True)
+    print(f"{_RESULT_PREFIX}{us},{tf},{gbs},{cos},{passed}", flush=True)
 
 
-def _run_subproc(kernel, cfg, warmup, iters):
-    """Spawn an isolated worker; return (us, tf, gbs) or None on failure."""
+def _run_subproc(mode, cfg, warmup, iters):
+    """Spawn an isolated worker; return (us, tf, gbs, cos, passed) or None on failure."""
     cfg_csv = ",".join(str(v) for v in cfg)
     cmd = [
         sys.executable, "-u", os.path.abspath(__file__),
-        "--worker", "--kernel", kernel, "--config", cfg_csv,
+        "--worker", "--kernel", mode, "--config", cfg_csv,
         "--warmup", str(warmup), "--iters", str(iters),
     ]
     try:
@@ -101,8 +160,10 @@ def _run_subproc(kernel, cfg, warmup, iters):
         return None
     for line in out.stdout.splitlines():
         if line.startswith(_RESULT_PREFIX):
-            us, tf, gbs = (float(x) for x in line[len(_RESULT_PREFIX):].split(","))
-            return (us, tf, gbs)
+            parts = line[len(_RESULT_PREFIX):].split(",")
+            us, tf, gbs, cos = (float(x) for x in parts[:4])
+            passed = int(parts[4]) if len(parts) > 4 else -1
+            return (us, tf, gbs, cos, passed)
     # No result line: surface a short tail of the worker's stderr for diagnosis.
     tail = "\n".join(out.stderr.strip().splitlines()[-3:])
     print(f"    FAILED (rc={out.returncode}): {tail}", file=sys.stderr)
@@ -115,9 +176,12 @@ def main():
     p.add_argument("--iters", type=int, default=50)
     p.add_argument("--repeat", type=int, default=5,
                    help="isolated subprocess runs per (kernel,config); median reported")
+    p.add_argument("--configs", default=None,
+                   help="override DEFAULT_CONFIGS: 'M,N,K,tm,tn,tk,mw,nw,nb' tuples "
+                        "separated by ';' (e.g. '1,12288,4096,32,256,256,1,4,2;...')")
     # worker-mode args (internal)
     p.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    p.add_argument("--kernel", choices=["baseline", "current"], help=argparse.SUPPRESS)
+    p.add_argument("--kernel", choices=list(_MODES), help=argparse.SUPPRESS)
     p.add_argument("--config", help=argparse.SUPPRESS)
     args = p.parse_args()
 
@@ -126,50 +190,73 @@ def main():
         _worker(args.kernel, cfg_vals, args.warmup, args.iters)
         return
 
+    configs = DEFAULT_CONFIGS
+    if args.configs:
+        configs = [tuple(int(x) for x in c.split(",")) for c in args.configs.split(";") if c.strip()]
+
     rows = []
-    for cfg in DEFAULT_CONFIGS:
+    for cfg in configs:
         M, N, K, tm, tn, tk, mw, nw, nb = cfg
         tag = f"M{M} N{N} K{K} t({tm},{tn},{tk}) w{mw}x{nw} b{nb}"
         print(f"\n{'='*72}\n{tag}\n{'='*72}", flush=True)
 
         med = {}
-        for kernel in ("baseline", "current"):
+        for mode in _MODES:
             samples = []
             for r in range(args.repeat):
-                res = _run_subproc(kernel, cfg, args.warmup, args.iters)
+                res = _run_subproc(mode, cfg, args.warmup, args.iters)
                 if res is not None:
                     samples.append(res)
-                    print(f"  [{kernel}] run {r+1}/{args.repeat}: "
-                          f"{res[0]:.2f} us, {res[1]:.2f} TF", flush=True)
+                    _ok = "ok" if res[4] == 1 else ("FAIL" if res[4] == 0 else "?")
+                    print(f"  [{mode}] run {r+1}/{args.repeat}: "
+                          f"{res[0]:.2f} us, {res[1]:.2f} TF, cos={res[3]:.5f} {_ok}", flush=True)
             if samples:
-                us_med = statistics.median(s[0] for s in samples)
-                tf_med = statistics.median(s[1] for s in samples)
-                gbs_med = statistics.median(s[2] for s in samples)
-                med[kernel] = (us_med, tf_med, gbs_med, len(samples))
+                med[mode] = (
+                    statistics.median(s[0] for s in samples),  # us
+                    statistics.median(s[1] for s in samples),  # tf
+                    statistics.median(s[2] for s in samples),  # gbs
+                    statistics.median(s[3] for s in samples),  # cosine
+                    min(s[4] for s in samples),                # passed (worst)
+                )
             else:
-                med[kernel] = None
-        rows.append((tag, med.get("baseline"), med.get("current")))
+                med[mode] = None
+        rows.append((tag, med))
 
-    # ── summary table (medians) ──
-    print(f"\n\n{'='*92}\n  A8W4 GEMM: current vs baseline  "
-          f"(median of {args.repeat} isolated runs)\n{'='*92}")
-    hdr = (f"{'config':<40} {'base us':>9} {'cur us':>9} {'speedup':>9} "
-           f"{'base TF':>9} {'cur TF':>9}")
+    # ── perf summary table (medians) ── speedups vs baseline ──
+    print(f"\n\n{'='*104}\n  A8W4 GEMM: baseline vs legacy vs full-prefetch  "
+          f"(median of {args.repeat} isolated runs)\n{'='*104}")
+    hdr = (f"{'config':<38} {'base us':>8} {'leg us':>8} {'pf us':>8} "
+           f"{'leg/base':>9} {'pf/base':>9} {'pf/leg':>8}")
     print(hdr)
     print("-" * len(hdr))
-    for tag, base, cur in rows:
-        if base is None or cur is None:
-            b = "n/a" if base is None else f"{base[0]:.1f}"
-            c = "n/a" if cur is None else f"{cur[0]:.1f}"
-            print(f"{tag:<40} {b:>9} {c:>9} {'--':>9}")
-            continue
-        b_us, b_tf = base[0], base[1]
-        c_us, c_tf = cur[0], cur[1]
-        speedup = b_us / c_us if c_us > 0 else 0.0
-        print(f"{tag:<40} {b_us:>9.1f} {c_us:>9.1f} {speedup:>8.2f}x "
-              f"{b_tf:>9.2f} {c_tf:>9.2f}")
+
+    def _us(m):
+        return m[0] if m else None
+
+    for tag, med in rows:
+        b, lg, pf = _us(med.get("baseline")), _us(med.get("legacy")), _us(med.get("fullpf"))
+        def _f(x):
+            return f"{x:.1f}" if x is not None else "n/a"
+        def _sp(num, den):
+            return f"{den / num:.2f}x" if (num and den) else "--"
+        print(f"{tag:<38} {_f(b):>8} {_f(lg):>8} {_f(pf):>8} "
+              f"{_sp(lg, b):>9} {_sp(pf, b):>9} {_sp(pf, lg):>8}")
     print("-" * len(hdr))
-    print("speedup > 1.0 means current is faster than baseline")
+    print("ratio > 1.0 = faster than the denominator (base=baseline, leg=legacy)")
+
+    # ── accuracy summary ── cosine + pass/fail per mode ──
+    print(f"\n{'='*104}\n  Accuracy (cosine vs torch ref; PASS = within a8w4 tolerance)\n{'='*104}")
+    ahdr = f"{'config':<38} {'baseline':>18} {'legacy':>18} {'full-prefetch':>18}"
+    print(ahdr)
+    print("-" * len(ahdr))
+    for tag, med in rows:
+        def _acc(m):
+            if not m:
+                return "n/a"
+            return f"{m[3]:.5f} {'PASS' if m[4] == 1 else 'FAIL'}"
+        print(f"{tag:<38} {_acc(med.get('baseline')):>18} "
+              f"{_acc(med.get('legacy')):>18} {_acc(med.get('fullpf')):>18}")
+    print("-" * len(ahdr))
 
 
 if __name__ == "__main__":

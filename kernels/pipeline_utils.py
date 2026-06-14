@@ -1,7 +1,7 @@
 """Shared pipeline utilities for gfx1250 GEMM kernels."""
 
 
-def make_tail_plan(num_buffers, pre_loaded, extra):
+def make_tail_plan(num_buffers, pre_loaded, extra, full_prefetch=False):
     """Compute a compile-time tail execution plan for the N-stage pipeline.
 
     Returns a list of (load_stage, compute_stage, outstanding) tuples, one per
@@ -9,21 +9,35 @@ def make_tail_plan(num_buffers, pre_loaded, extra):
 
     Args:
         num_buffers: total number of pipeline stages.
-        pre_loaded:  stages already loaded and ready to compute (= num_buffers - 1).
+        pre_loaded:  stages already loaded and ready to compute.
         extra:       additional tiles that must be loaded in the tail.
+        full_prefetch: when True, backfill the just-consumed buffer (load_stage
+                       = compute_stage) instead of the (N-1)-ahead buffer.
     """
     steps = pre_loaded + extra
     plan = []
     prev_outstanding = 0
+
+    def _compute_stage(idx):
+        # Full-prefetch: prologue filled all N buffers (pre_loaded == N) and the
+        # tail consumes tiles in order from buffer idx % N, backfilling that same
+        # buffer. Legacy: pre_loaded buffers computed in place, then wrap.
+        if full_prefetch:
+            return idx % num_buffers
+        return idx if idx < pre_loaded else (idx - pre_loaded + num_buffers - 1) % num_buffers
+
     for i in range(steps):
-        compute_stage = i if i < pre_loaded else (i - pre_loaded + num_buffers - 1) % num_buffers
-        load_stage = (i + num_buffers - 1) % num_buffers if i < extra else None
+        compute_stage = _compute_stage(i)
+        if i < extra:
+            load_stage = compute_stage if full_prefetch else (i + num_buffers - 1) % num_buffers
+        else:
+            load_stage = None
         is_last = i == steps - 1
         if is_last:
             outstanding = -1
         else:
             j = i + 1
-            next_compute = j if j < pre_loaded else (j - pre_loaded + num_buffers - 1) % num_buffers
+            next_compute = _compute_stage(j)
             if load_stage is not None and load_stage != next_compute:
                 outstanding = 2 * (num_buffers - 2)
             elif load_stage is None:

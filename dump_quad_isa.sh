@@ -1,17 +1,22 @@
 #!/bin/bash
 # Dump ISA and check accuracy for fp8_quadrant tile
-# Usage: bash dump_quad_isa.sh [K]
+# Usage: bash dump_quad_isa.sh [K] [PF_FULL_PREFETCH]
+#   K                default 1536 (6 K-tiles -> exercises main loop + tail)
+#   PF_FULL_PREFETCH default 1     (full-prefetch pipeline; 0 = legacy n-1 prefetch)
 
-K=${1:-3072}
+K=${1:-1536}
+export PF_FULL_PREFETCH=${2:-1}
 
-FFM_DIR=$(ls -d /data/docker/overlay2/*/diff/home/user/ffm-env/rocdtif-7.13-am+ffmlite-mi400.*-rel-* 2>/dev/null | head -1)
-[ -z "$FFM_DIR" ] && { echo "ERR: no rocdtif-7.13+ found" >&2; exit 1; }
-
-source "$FFM_DIR/ffmlite_env.sh"
+# FFM_DIR=$(ls -d /data/docker/overlay2/*/diff/home/user/ffm-env/rocdtif-7.13-am+ffmlite-mi400.*-rel-* 2>/dev/null | head -1)
+# [ -z "$FFM_DIR" ] && { echo "ERR: no rocdtif-7.13+ found" >&2; exit 1; }
+#
+# source "$FFM_DIR/ffmlite_env.sh"
 export FLYDSL_ROOT=/data/zanzhang/FlyDSL-main
 export PYTHONPATH="/data/zanzhang/FlyDSL-main:${PYTHONPATH}"
+export PF_QUADRANT=1
 export PF_PIPELINE=1
 
+echo "PF_FULL_PREFETCH=${PF_FULL_PREFETCH}"
 DUMP_DIR=/tmp/isa_quad_dump
 ARGS="--data-format a8w4 --scale-mode mxscale -M 1 -N 12288 -K ${K} \
       --tile-m 32 --tile-n 256 --tile-k 256 \
@@ -29,8 +34,8 @@ FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=${DUMP_DIR} COMPILE_ONLY=1 FLYDSL_RUNTIME_ENABL
     python3 tests/kernels/test_gemm_fp8fp4_gfx1250.py ${ARGS} 2>&1 | grep "COMPILE_ONLY"
 
 ISA=${DUMP_DIR}/kernel_mxscale_gemm_0/21_final_isa.s
-cp ${ISA} /data/zanzhang/FlyDSL-main/21_final_isa_quad.s
-echo "Saved: 21_final_isa_quad.s ($(wc -l < /data/zanzhang/FlyDSL-main/21_final_isa_quad.s) lines, $(grep -c v_nop /data/zanzhang/FlyDSL-main/21_final_isa_quad.s) v_nops)"
+cp ${ISA} ./21_final_isa_quad.s
+echo "Saved: 21_final_isa_quad.s ($(wc -l < ./21_final_isa_quad.s) lines, $(grep -c v_nop ./21_final_isa_quad.s) v_nops)"
 echo ""
 echo "=== barrier/wait distribution ==="
-grep -n "s_barrier_wait\|s_wait_dscnt 0x0\|v_nop" /data/zanzhang/FlyDSL-main/21_final_isa_quad.s | grep -v "offset\|#" | head -30
+grep -n "s_barrier_wait\|s_wait_dscnt 0x0\|v_nop" ./21_final_isa_quad.s | grep -v "offset\|#" | head -30
