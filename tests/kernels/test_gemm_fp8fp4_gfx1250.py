@@ -27,7 +27,6 @@ from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm_fp8fp4_gfx1250 import (  # noqa: E402
     compile_mxscale_gemm,
     compile_ptpc_gemm,
-    is_ref_segmented_lds_layout,
     use_n4k4_bscale_layout,
     use_natural_ascale_vgpr,
 )
@@ -40,109 +39,14 @@ if not torch.cuda.is_available():
 SCALE_BLOCK = 32
 
 
-def preshuffle_e8m0_scale_coalesced(scale: torch.Tensor, block: int = 128) -> torch.Tensor:
-    """Lane-major scale layout for direct buffer_load->VGPR.
-
-    Per (M_block=128, K_tile): [group(2), lane16(16), 4 i32], so a buffer_load_b128's
-    16 lanes read 256 contiguous bytes. M = mb*128 + (group*4 + j)*16 + lane16.
-    """
-    M, Ks = scale.shape
-    assert M % block == 0 and Ks % 4 == 0, f"M={M} Ks={Ks} block={block}"
-    assert block == 128, "coalesced scale layout assumes warp_tile=128 (8 subtiles)"
-    Kt = Ks // 4
-    g = scale.view(M // block, 2, 4, 16, Kt, 4)  # [mb, group, j, lane16, kt, spw]
-    g = g.permute(0, 4, 1, 3, 2, 5).contiguous()  # [mb, kt, group, lane16, j, spw]
-    return g.view(M, Ks)
-
-
-def preshuffle_e8m0_scale_coalesced_general(
-    scale: torch.Tensor,
-    warp_tile: int,
-    scale_k_per_tile: int,
-    kgrp_shift: int,
-    WMMA_DIM: int = 16,
-    row_align: int = None,
-    b128: bool = False,
-) -> torch.Tensor:
-    """General lane-major scale layout for the buffer_load->VGPR path.
-
-    Generalizes :func:`preshuffle_e8m0_scale_coalesced` (which is locked to
-    warp_tile=128, scale_k_per_tile=4, no lane_kgrp) to arbitrary ``warp_tile``,
-    ``scale_k_per_tile`` (=> ``k_wmma_steps``) and the a8w4/fp4 ``lane_kgrp``
-    scale shift. The byte delivered to every *physical* 32-lane index
-    ``lane32 = lane_kgrp*16 + lane16`` is baked here so the kernel's load address
-    is lane_kgrp-agnostic and fully coalesced (32 lanes -> 512 contiguous bytes
-    per (k_wmma_step, rep_group)).
-
-    Per (row_block of ``warp_tile`` rows, K-tile): layout is
-    ``[k_wmma_step, rep_group(ceil(rep/4)), lane32(32), j(4), spw(4)]`` and the
-    value at ``(lane32=(G*16+L), rep=grp*4+j)`` is the original e8m0 quadruple of
-    row ``block*warp_tile + (rep + G*kgrp_shift)*16 + L``; slots whose shifted rep
-    reaches ``rep_count`` are filled with E8M0 127 (=1.0) guards.
-
-    Mirrors the TDM/LDS path value-for-value (see the offline parity check in
-    ``flydsl_fp8_perf/verify_vgpr_scale_layout.py``), so it is correct by
-    construction against the working ``scale_load_path='tdm'`` path.
-    """
-    rows, K_scale = scale.shape
-    assert K_scale % scale_k_per_tile == 0, f"K_scale={K_scale} % spt={scale_k_per_tile}"
-    assert scale_k_per_tile % 4 == 0, f"scale_k_per_tile={scale_k_per_tile} must be a multiple of 4"
-    align = row_align if row_align is not None else warp_tile
-    if rows % align != 0:
-        pad = _align_up(rows, align) - rows
-        scale = torch.cat([scale, torch.full((pad, K_scale), 127, dtype=scale.dtype, device=scale.device)], dim=0)
-        rows = scale.shape[0]
-    R = warp_tile // WMMA_DIM  # rep_count (wmma reps per warp tile)
-    KS = scale_k_per_tile // 4  # k_wmma_steps
-    KG = K_scale // scale_k_per_tile  # K-tiles
-    NG = (R + 3) // 4  # rep groups (vec4 b128 each)
-    num_mb = rows // warp_tile
-
-    # Index grids over [mb, kt, ks, grp, lane32, j]; spw is the trailing dim.
-    dev = scale.device
-    mb = torch.arange(num_mb, device=dev).view(num_mb, 1, 1, 1, 1, 1)
-    kt = torch.arange(KG, device=dev).view(1, KG, 1, 1, 1, 1)
-    ks = torch.arange(KS, device=dev).view(1, 1, KS, 1, 1, 1)
-    grp = torch.arange(NG, device=dev).view(1, 1, 1, NG, 1, 1)
-    l32 = torch.arange(32, device=dev).view(1, 1, 1, 1, 32, 1)
-    j = torch.arange(4, device=dev).view(1, 1, 1, 1, 1, 4)
-    G = l32 // 16
-    L = l32 % 16
-    rep = grp * 4 + j
-    orig_rep = rep + G * kgrp_shift
-    valid = orig_rep < R
-    orig_row = mb * warp_tile + orig_rep * WMMA_DIM + L
-    # Clamp out-of-range (guard) rows so the gather stays in bounds; masked below.
-    orig_row = torch.where(valid, orig_row, torch.zeros_like(orig_row))
-    colg = kt * KS + ks  # group-of-4 column index into the K dimension
-    # Gather the 4 spw bytes for each (row, colg): scale viewed as [rows, KG*KS, 4].
-    scale_g = scale.view(rows, KG * KS, 4)
-    row_idx, colg_idx = torch.broadcast_tensors(orig_row, colg)
-    out = scale_g[row_idx, colg_idx]  # [mb, KG, KS, NG, 32, 4, 4]
-    out = torch.where(valid.unsqueeze(-1), out, torch.full_like(out, 127))
-    if b128:
-        # b128 variant: move ks to the innermost (next to spw) so a lane's
-        # KS scale-words are contiguous -> one buffer_load_b128 reads a whole
-        # tile's ks per (rep,lane). Output order [mb, kt, grp, j, lane32, ks, spw].
-        out = out.permute(0, 1, 3, 5, 4, 2, 6).contiguous()
-    return out.reshape(num_mb, -1).contiguous()
-
-
 def preshuffle_e8m0_scale(
     scale: torch.Tensor,
     warp_tile: int,
     scale_k_per_tile: int = 4,
     WMMA_DIM: int = 16,
-    coalesced: bool = False,
     row_align: int = None,
 ) -> torch.Tensor:
-    """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access.
-
-    ``coalesced=True`` produces the lane-major layout the scale_load_path
-    "vgpr" buffer_load->VGPR path expects.
-    """
-    if coalesced:
-        return preshuffle_e8m0_scale_coalesced(scale, block=warp_tile)
+    """Preshuffle E8M0 scale: byte swap + interleave for WMMA TDM/LDS access."""
     rows, K_scale = scale.shape
     assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
     # Accept an unpadded row count (M for a_scale / N for b_scale): pad rows to
@@ -184,29 +88,8 @@ def preshuffle_e8m0_bscale_n4k4(scale: torch.Tensor) -> torch.Tensor:
     return g.reshape(N // 64, (Ks // 4) * 256)
 
 
-def preshuffle_scale_for_load_path(
-    scale, warp_tile, skt, *, scale_load_path, data_format, ref_segmented, row_align=None
-):
-    """Host scale preshuffle matching the kernel's selected scale_load_path.
-
-    - 'tdm': interleaved TDM/LDS layout.
-    - 'vgpr' on the ref-segmented deep-pipeline config: legacy lane-major
-      coalesced layout.
-    - 'vgpr' on any other (general) config: general coalesced layout, with the
-      a8w4/fp4 lane_kgrp scale shift.
-    """
-    if scale_load_path == "vgpr":
-        if ref_segmented:
-            return preshuffle_e8m0_scale(scale, warp_tile, scale_k_per_tile=skt, coalesced=True)
-        kgrp_shift = 1 if data_format in ("a8w4", "fp4") else 0
-        # FLYDSL_BUFFER_VGPR_SCALE_PRELOAD=1 switches the general vgpr path to the
-        # b128 layout (ks innermost) so the kernel reads scales with wide
-        # buffer_load_b128 instead of many b32. Must match the kernel flag of the
-        # same name (kernels/gemm_fp8fp4_gfx1250.py::_bvs_b128).
-        b128 = bool(int(os.environ.get("FLYDSL_BUFFER_VGPR_SCALE_PRELOAD", "0")))
-        return preshuffle_e8m0_scale_coalesced_general(
-            scale, warp_tile, skt, kgrp_shift, row_align=row_align, b128=b128
-        )
+def preshuffle_scale_for_load_path(scale, warp_tile, skt, *, row_align=None):
+    """Host scale preshuffle for the TDM/LDS interleaved layout."""
     return preshuffle_e8m0_scale(scale, warp_tile, scale_k_per_tile=skt, row_align=row_align)
 
 
@@ -492,7 +375,6 @@ def _run_mxscale_gemm_test(
     waves_per_eu=None,
     expert_sched_mode=True,
     split_k=1,
-    scale_load_path="tdm",
     ascale_load_path="vgpr",
     return_launch_fn=False,
 ):
@@ -536,12 +418,11 @@ def _run_mxscale_gemm_test(
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
     mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
     tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
-    scale_load_str = "" if scale_load_path == "tdm" else f", scale_load={scale_load_path}"
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
         f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-        f"{mcast_str}{tdm_str}{scale_load_str}, preshuffle, out={out_dtype}"
+        f"{mcast_str}{tdm_str}, preshuffle, out={out_dtype}"
     )
 
     # Generate data
@@ -575,18 +456,6 @@ def _run_mxscale_gemm_test(
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // m_warp
     warp_tile_n = tile_n // n_warp
-    _ref_seg = is_ref_segmented_lds_layout(
-        data_format=data_format,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        m_warp=m_warp,
-        n_warp=n_warp,
-        num_buffers=num_buffers,
-        split_k=split_k,
-        wave_specialized_tdm=wave_specialized_tdm,
-        use_scale_opsel=use_scale_opsel,
-    )
     _natural_ascale = use_natural_ascale_vgpr(
         data_format=data_format,
         tile_m=tile_m,
@@ -595,7 +464,6 @@ def _run_mxscale_gemm_test(
         m_warp=m_warp,
         n_warp=n_warp,
         n=padded_n,
-        scale_load_path=scale_load_path,
         ascale_load_path=ascale_load_path,
         use_scale_opsel=use_scale_opsel,
         wave_specialized_tdm=wave_specialized_tdm,
@@ -605,15 +473,7 @@ def _run_mxscale_gemm_test(
         # the (already row-padded) tensor is uploaded as-is.
         pass
     else:
-        a_scale = preshuffle_scale_for_load_path(
-            a_scale,
-            warp_tile_m,
-            skt,
-            scale_load_path=scale_load_path,
-            data_format=data_format,
-            ref_segmented=_ref_seg,
-            row_align=tile_m,
-        )
+        a_scale = preshuffle_scale_for_load_path(a_scale, warp_tile_m, skt, row_align=tile_m)
     if use_n4k4_bscale_layout(
         data_format=data_format,
         tile_m=tile_m,
@@ -622,7 +482,6 @@ def _run_mxscale_gemm_test(
         m_warp=m_warp,
         n_warp=n_warp,
         n=padded_n,
-        scale_load_path=scale_load_path,
         use_scale_opsel=use_scale_opsel,
         num_buffers=num_buffers,
         out_dtype=out_dtype,
@@ -630,15 +489,7 @@ def _run_mxscale_gemm_test(
     ):
         b_scale = preshuffle_e8m0_bscale_n4k4(b_scale)
     else:
-        b_scale = preshuffle_scale_for_load_path(
-            b_scale,
-            warp_tile_n,
-            skt,
-            scale_load_path=scale_load_path,
-            data_format=data_format,
-            ref_segmented=_ref_seg,
-            row_align=tile_n,
-        )
+        b_scale = preshuffle_scale_for_load_path(b_scale, warp_tile_n, skt, row_align=tile_n)
 
     # Preshuffle B data
     K_packed = padded_k // padded_shape["pack_b"]
@@ -672,7 +523,6 @@ def _run_mxscale_gemm_test(
         split_k=split_k,
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
-        scale_load_path=scale_load_path,
         ascale_load_path=ascale_load_path,
     )
 
@@ -839,7 +689,6 @@ def test_mxfp4_gemm(
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("use_scale_opsel", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-@pytest.mark.parametrize("scale_load_path", ["tdm"])
 def test_mxfp8_gemm(
     M,
     N,
@@ -853,7 +702,6 @@ def test_mxfp8_gemm(
     use_tdm_store,
     out_dtype,
     use_scale_opsel,
-    scale_load_path,
 ):
     _run_mxscale_gemm_test(
         "fp8",
@@ -870,7 +718,6 @@ def test_mxfp8_gemm(
         out_dtype,
         l2_prefetch_distance=2,
         use_scale_opsel=use_scale_opsel,
-        scale_load_path=scale_load_path,
     )
 
 
@@ -1035,7 +882,6 @@ def test_mxscale_n4k4_bscale(data_format, M, N, K, tile_n, tile_k, n_warp, num_b
         wave_specialized_tdm=ws,
         l2_prefetch_distance=0,
         use_scale_opsel=False,
-        scale_load_path="tdm",
     )
 
 
@@ -1100,7 +946,6 @@ def test_mxscale_natural_ascale(data_format, M, tile_m, tile_n, tile_k, m_warp, 
         wave_specialized_tdm=True,
         l2_prefetch_distance=0,
         use_scale_opsel=False,
-        scale_load_path="tdm",
     )
 
 
@@ -1961,8 +1806,7 @@ def _run_benchmark(args):
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
     print(
         f"  Buffers={args.num_buffers}, out={args.out_dtype}, "
-        f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}, "
-        f"scale_load={args.scale_load_path}"
+        f"opsel={args.use_scale_opsel}, inst_prefetch={args.inst_prefetch}"
     )
     if args.warmup < 0:
         raise ValueError(f"--warmup must be >= 0, got {args.warmup}")
@@ -1991,8 +1835,6 @@ def _run_benchmark(args):
             _ptpc_ignored.append("--no-wave-spec-tdm")
         if args.use_scale_opsel:
             _ptpc_ignored.append("--use-scale-opsel")
-        if args.scale_load_path != "tdm":
-            _ptpc_ignored.append(f"--scale-load-path {args.scale_load_path}")
         if _ptpc_ignored:
             print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
@@ -2042,36 +1884,8 @@ def _run_benchmark(args):
         a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
         skt = tile_k // SCALE_BLOCK
-        _ref_seg = is_ref_segmented_lds_layout(
-            data_format=data_format,
-            tile_m=tile_m,
-            tile_n=tile_n,
-            tile_k=tile_k,
-            m_warp=args.m_warp,
-            n_warp=args.n_warp,
-            num_buffers=args.num_buffers,
-            split_k=args.split_k,
-            wave_specialized_tdm=args.wave_spec_tdm,
-            use_scale_opsel=args.use_scale_opsel,
-        )
-        a_scale = preshuffle_scale_for_load_path(
-            a_scale,
-            warp_tile_m,
-            skt,
-            scale_load_path=args.scale_load_path,
-            data_format=data_format,
-            ref_segmented=_ref_seg,
-            row_align=tile_m,
-        )
-        b_scale = preshuffle_scale_for_load_path(
-            b_scale,
-            warp_tile_n,
-            skt,
-            scale_load_path=args.scale_load_path,
-            data_format=data_format,
-            ref_segmented=_ref_seg,
-            row_align=tile_n,
-        )
+        a_scale = preshuffle_scale_for_load_path(a_scale, warp_tile_m, skt, row_align=tile_m)
+        b_scale = preshuffle_scale_for_load_path(b_scale, warp_tile_n, skt, row_align=tile_n)
 
         K_packed = padded_k // PACK_B
         b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
@@ -2133,7 +1947,6 @@ def _run_benchmark(args):
             use_scale_opsel=args.use_scale_opsel,
             expert_sched_mode=args.expert_sched_mode,
             atomic_barrier_enable=args.atomic_barrier_enable,
-            scale_load_path=args.scale_load_path,
         )
 
     compiled_exe = flyc.compile(
@@ -2350,36 +2163,8 @@ def _run_graph_verify(args):
     skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
-    _ref_seg = is_ref_segmented_lds_layout(
-        data_format=data_format,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        m_warp=args.m_warp,
-        n_warp=args.n_warp,
-        num_buffers=args.num_buffers,
-        split_k=args.split_k,
-        wave_specialized_tdm=args.wave_spec_tdm,
-        use_scale_opsel=args.use_scale_opsel,
-    )
-    a_scale = preshuffle_scale_for_load_path(
-        a_scale,
-        warp_tile_m,
-        skt,
-        scale_load_path=args.scale_load_path,
-        data_format=data_format,
-        ref_segmented=_ref_seg,
-        row_align=tile_m,
-    )
-    b_scale = preshuffle_scale_for_load_path(
-        b_scale,
-        warp_tile_n,
-        skt,
-        scale_load_path=args.scale_load_path,
-        data_format=data_format,
-        ref_segmented=_ref_seg,
-        row_align=tile_n,
-    )
+    a_scale = preshuffle_scale_for_load_path(a_scale, warp_tile_m, skt, row_align=tile_m)
+    b_scale = preshuffle_scale_for_load_path(b_scale, warp_tile_n, skt, row_align=tile_n)
     K_packed = padded_k // padded_shape["pack_b"]
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
 
@@ -2415,7 +2200,6 @@ def _run_graph_verify(args):
         use_scale_opsel=args.use_scale_opsel,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
-        scale_load_path=args.scale_load_path,
     )
 
     c_flat = c_gpu.contiguous()
@@ -2527,12 +2311,6 @@ if __name__ == "__main__":
     parser.add_argument("--no-wave-spec-tdm", dest="wave_spec_tdm", action="store_false", default=True)
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--use-scale-opsel", action="store_true", default=False)
-    parser.add_argument(
-        "--scale-load-path",
-        type=str,
-        default="tdm",
-        choices=["tdm", "vgpr"],
-    )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument(
         "--atomic-barrier-enable",
@@ -2638,7 +2416,6 @@ if __name__ == "__main__":
                 inst_prefetch=args.inst_prefetch,
                 waves_per_eu=args.waves_per_eu,
                 expert_sched_mode=args.expert_sched_mode,
-                scale_load_path=args.scale_load_path,
             )
 
     if args.verify_graph:
