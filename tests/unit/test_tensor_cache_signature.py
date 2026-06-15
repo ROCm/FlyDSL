@@ -72,7 +72,7 @@ def test_multiple_unit_stride_axes_pick_first():
     axes 2 and 3 both qualify, axis 2 wins -> every stride dim except 2 is dynamic.
     """
     t = torch.empty((4, 1, 8, 1), dtype=torch.float32)
-    assert TorchTensorJitArg(t)._stride_dyn_indices == (0, 1, 3)
+    assert TorchTensorJitArg(t).stride_dyn_indices == (0, 1, 3)
 
 
 def test_auto_adapt_handles_size_one_degeneracies():
@@ -82,9 +82,9 @@ def test_auto_adapt_handles_size_one_degeneracies():
     leading dim is the one excluded from the dynamic *stride* mask.
     """
     # Fully degenerate (1, 1): every axis has stride 1; first (axis 0) is leading.
-    assert TorchTensorJitArg(torch.empty((1, 1)))._stride_dyn_indices == (1,)
+    assert TorchTensorJitArg(torch.empty((1, 1))).stride_dyn_indices == (1,)
     # (0, 8): only axis 1 has stride 1, so it is the leading dim.
-    assert TorchTensorJitArg(torch.empty((0, 8)))._stride_dyn_indices == (0,)
+    assert TorchTensorJitArg(torch.empty((0, 8))).stride_dyn_indices == (0,)
 
 
 def test_auto_adapt_raises_when_no_unit_stride_axis():
@@ -126,8 +126,8 @@ def test_mark_shape_dynamic_only_touches_shape():
     assert shape_tuple[0] == -16  # dim0 shape dynamic, div=16
     assert shape_tuple[1] == 128  # dim1 shape static
     assert stride_tuple == (128, 1)  # all strides untouched/static
-    assert t._shape_dyn_indices == (0,)
-    assert t._stride_dyn_indices == ()
+    assert t.shape_dyn_indices == (0,)
+    assert t.stride_dyn_indices == ()
 
 
 def test_mark_shape_and_stride_accumulate_without_reset():
@@ -141,8 +141,8 @@ def test_mark_shape_and_stride_accumulate_without_reset():
     assert shape_tuple == (-16, 16, 32)  # only dim0 shape dynamic
     assert stride_tuple[0] == -8 and stride_tuple[1] == -8  # dims 0,1 stride dynamic
     assert stride_tuple[2] == 1  # dim2 stride still static
-    assert t._shape_dyn_indices == (0,)
-    assert t._stride_dyn_indices == (0, 1)
+    assert t.shape_dyn_indices == (0,)
+    assert t.stride_dyn_indices == (0, 1)
 
 
 def test_mark_dynamic_list_with_per_dim_divisibility():
@@ -150,7 +150,7 @@ def test_mark_dynamic_list_with_per_dim_divisibility():
     *_, _, stride_tuple = t.__cache_signature__()
     assert stride_tuple[0] == -8
     assert stride_tuple[2] == -4
-    assert t._stride_dyn_indices == (0, 2)
+    assert t.stride_dyn_indices == (0, 2)
 
 
 def test_mark_dynamic_broadcast_divisibility():
@@ -161,7 +161,7 @@ def test_mark_dynamic_broadcast_divisibility():
 
 def test_mark_dynamic_negative_index():
     t = flyc.from_torch_tensor(torch.empty((8, 128), dtype=torch.float32)).mark_shape_dynamic(-1)
-    assert t._shape_dyn_indices == (1,)
+    assert t.shape_dyn_indices == (1,)
 
 
 def test_mark_dynamic_rejects_int_dims_with_list_divisibility():
@@ -187,7 +187,7 @@ def test_mark_dynamic_allows_duplicates_last_wins():
     t = flyc.from_torch_tensor(torch.empty((8, 128), dtype=torch.float32)).mark_stride_dynamic([0, 0], [8, 16])
     *_, _, stride_tuple = t.__cache_signature__()
     assert stride_tuple[0] == -16  # second entry (div=16) overwrote the first
-    assert t._stride_dyn_indices == (0,)
+    assert t.stride_dyn_indices == (0,)
 
 
 def test_mark_dynamic_rejects_non_power_of_two_divisibility():

@@ -27,7 +27,7 @@ def _expected_layout_bytes(t, use_32bit=False):
     """Canonical dynamic-layout buffer: dynamic-shape i32's then dynamic-stride
     i32/i64's, little-endian -- matches C++ buildMemRefDesc."""
     ad = ja.TorchTensorJitArg(t, use_32bit_stride=use_32bit)
-    sd, std, u32 = ad._shape_dyn_indices, ad._stride_dyn_indices, ad.use_32bit_stride
+    sd, std, u32 = ad.shape_dyn_indices, ad.stride_dyn_indices, ad.use_32bit_stride
     out = struct.pack("<" + "i" * len(sd), *[t.shape[d] for d in sd])
     out += struct.pack("<" + ("i" if u32 else "q") * len(std), *[t.stride(d) for d in std])
     return out
