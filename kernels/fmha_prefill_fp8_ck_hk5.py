@@ -428,6 +428,9 @@ def attn_kernel(
             safe_m = m_is_neg.select(fx.Float32(0.0), m_new)
             corr = fx.Float32(fx.rocdl.exp2(f32t, _ar(m_run - safe_m)))
             corr = m_is_neg.select(fx.Float32(0.0), corr)
+            # Fold the loop-invariant p_scale shift into the pivot ONCE (s - safe_m + log2_ps ==
+            # s - (safe_m - log2_ps)), removing one add per softmax element.
+            safe_m_p = safe_m - log2_pscale
 
             # exp + running-sum (per element), then a single rescale of o_acc.
             l_loc = fx.Float32(0.0)
@@ -435,7 +438,7 @@ def attn_kernel(
             for sub in fx.range_constexpr(NSUB):
                 p_sub = []
                 for i in fx.range_constexpr(16):
-                    p = fx.Float32(fx.rocdl.exp2(f32t, _ar((s_all[sub][i] - safe_m) + log2_pscale)))
+                    p = fx.Float32(fx.rocdl.exp2(f32t, _ar(s_all[sub][i] - safe_m_p)))
                     p_sub.append(p)
                     l_loc = l_loc + p
                 p_all.append(p_sub)
