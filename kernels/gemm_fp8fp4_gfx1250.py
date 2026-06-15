@@ -338,19 +338,24 @@ def compile_fp8fp4_gemm(
         use_scale_opsel=use_scale_opsel,
         b_streaming=b_streaming,
     )
+    use_n4k4_opsel = False
     if use_n4k4_bscale:
         if K_scale % 4 != 0:
             raise ValueError(f"N4K4 B-scale requires K_scale % 4 == 0, got {K_scale}")
         n4k4_n_groups = N // 64
         n4k4_bs_global_row_stride = (K // WMMA_K) * 256
         n4k4_bs_lds_row_stride = k_wmma_steps * 256
-        # Impact: cost-free when tile_n//64 is already a power of
-        # two (tile_n=64/128/256 -> 1/2/4 groups); only a non-pow2 group count
-        # (e.g. tile_n=192: 3->4) copies one extra oob-clipped scale group per
-        # tile (~0.1% of B traffic, no extra WMMA).
-        _n4k4_groups = (tile_n + 63) // 64
-        n4k4_bs_tile_groups = 1 << (_n4k4_groups - 1).bit_length()
+        # Per-tile N-group count padded to a power of two so the TDM warp split
+        # stays clean (a non-pow2 count, e.g. 192->3, miscopies LDS). Cost-free
+        # for 64/128/256 (1/2/4 groups); tile_n=192 copies 1 extra oob-clipped group.
+        n4k4_bs_tile_groups = 1 << ((tile_n + 63) // 64 - 1).bit_length()
         n4k4_bs_lds_rows = n4k4_bs_tile_groups
+        # N op_sel: pack blocks (j, j+rep/2) into one VGPR via lane_kgrp (kgrp1 =
+        # the "second half"), halving B-scale loads & VGPRs. Power-of-2 rep only
+        # (then the kgrp byte offset is uniform); rep 1/3/6/12 stay off.
+        use_n4k4_opsel = wmma_n_rep >= 2 and (wmma_n_rep & (wmma_n_rep - 1)) == 0
+        _half = wmma_n_rep // 2
+        n4k4_opsel_kgrp_off = (_half // 4) * n4k4_bs_lds_row_stride + (_half % 4) * 4
 
     _b_frag_loads_per_wn = 2 if is_a8w4 else 4
     _a_frag_loads_per_wm = 2 if is_fp4 else 4
@@ -1126,15 +1131,21 @@ def compile_fp8fp4_gemm(
         _N4K4_LOADERS = {1: lds_load_b32_raw, 2: lds_load_b64_raw, 4: lds_load_b128_raw}
 
         def load_n4k4_bscale(lds_buffer, bases, reps, ks=0):
-            """Load *reps* B-scale i32s from the N4K4 LDS layout for K-subtile *ks*."""
+            """Load N4K4 B-scale i32s for K-subtile *ks*."""
             b0, lane_off = bases
             ks_off = arith.index(ks * 256)
             row_stride = arith.index(n4k4_bs_lds_row_stride)
-            per_load = 4 if reps % 4 == 0 else (2 if reps % 2 == 0 else 1)
+            if const_expr(use_n4k4_opsel):
+                n_load = reps // 2  # read first half; kgrp1 supplies the matching second half
+                lane = lane_off + lane_kgrp * arith.index(n4k4_opsel_kgrp_off)
+            else:
+                n_load = reps
+                lane = lane_off
+            per_load = 4 if n_load % 4 == 0 else (2 if n_load % 2 == 0 else 1)
             results = []
-            for i in range_constexpr(reps // per_load):
+            for i in range_constexpr(n_load // per_load):
                 blk = b0 + arith.index(i * per_load)
-                off = (blk // arith.index(4)) * row_stride + (blk % arith.index(4)) * arith.index(4) + lane_off + ks_off
+                off = (blk // arith.index(4)) * row_stride + (blk % arith.index(4)) * arith.index(4) + lane + ks_off
                 raw = _N4K4_LOADERS[per_load](lds_buffer, off)
                 if const_expr(per_load == 1):
                     results.append(raw)
@@ -1273,6 +1284,9 @@ def compile_fp8fp4_gemm(
                 if const_expr(use_scale_opsel):
                     b_scale_idx = wn // 2
                     b_opsel = wn % 2
+                elif const_expr(use_n4k4_opsel):
+                    b_scale_idx = wn % (wmma_n_rep // 2)
+                    b_opsel = wn // (wmma_n_rep // 2)
                 else:
                     b_scale_idx = wn
                     b_opsel = 0
