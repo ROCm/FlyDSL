@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """FP8 causal FMHA prefill (paged, vec_k_col_v) for gfx942 — CK-Tile-structured FlyDSL port.
 
-★ EXPERIMENT (kdlds = K-Descale-to-LDS) over the canonical hk5 kernel. Identical to ck_hk5 (ck +
-HK LDS row padding) EXCEPT it stages the per-token-head K-descale vector into a small ping-ponged LDS
-tile once per KT key-tile, then reads it from LDS during score scaling — instead of issuing the
-per-subtile K-descale VMEM loads late in the GEMM1 path. Hypothesis: move the K-descale traffic off
-the critical score-scaling path and amortise it with the cooperative K/V load. Correctness matches
-hk5 (err 0.043 @ sq1024). Perf vs hk5 is NOT yet established — treat as an unbenchmarked variant.
-For the canonical best kernel and the LDS-padding bank-conflict diagnosis, see ck_hk5 / memory
-feedback-hk-amd-kernel-tricks.
+★ CURRENT BEST FlyDSL FMHA prefill kernel (2026-06-15). = hk5 (ck + LDS padding) + three stacked
+VALU wins: kdlds (K-descale staged in LDS, off the score-scaling critical path), exp-bias hoist
+(per-tile exp constant folded), and LOG2E-into-descale (whole score domain in log2 units, removing the
+per-element *LOG2E). Device-fair (rocprof / bench_fmha_fair.py, NOT do_bench which adds ~0.3ms host
+overhead) it reaches ~109/129 TF graph-timed (116/131 rocprof) @ sq16384/32768 vs hk5 103/122.
+
+★ PER-SHAPE DISPATCH (KT and DIAG are compile-time consts -> pick the build per seqlen):
+    sq<=1024 : FMHA_KT=64 FMHA_DIAG=0   -> 26 TF  (CK-Tile 29, gap 1.12x)
+    sq~2048  : FMHA_KT=64 FMHA_DIAG=1   -> 55 TF  (CK-Tile 62, gap 1.13x)
+    sq>=16384: FMHA_KT=32 FMHA_DIAG=1   -> 116/131 (CK-Tile 141/145, gap 1.22x/1.11x)
+KT=64 amortizes softmax VALU better at SMALL seq but REGRESSES large seq (sq16384 116->86), so it must
+stay per-shape. Remaining ~1.1-1.22x gap to CK is the 0.2.0-scheduler structural wall (won't fill the
+softmax exp shadow with independent MFMA; confirmed by 4 parallel-agent attempts — see memory
+feedback-fmha-perf-lessons). For the LDS-padding bank-conflict diagnosis see ck_hk5.
 
 This is a FRESH kernel modeled on AMD's CK-Tile ``BlockFmhaBatchPrefillPipelineQRKSVSAsync``
 (the production fp8 batch-prefill pipeline reached through aiter), NOT on the PyISA kernel that
