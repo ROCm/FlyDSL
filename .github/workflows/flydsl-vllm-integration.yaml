@@ -22,7 +22,7 @@ env:
 jobs:
   build-aiter-vllm-wheel:
     name: Build aiter wheel for vLLM
-    runs-on: build-only-aiter
+    runs-on: build-only-flydsl
     permissions:
       contents: read
     steps:
@@ -68,7 +68,6 @@ jobs:
               python3 -m pip uninstall -y aiter amd-aiter || true
               python3 -m pip config set global.default-timeout 60
               python3 -m pip config set global.retries 10
-              python3 -m pip config set global.index-url https://ausartifactory.amd.com/artifactory/api/pypi/hw-cpe-prod-remote/simple
               python3 -c "from pathlib import Path; src = Path(\"requirements.txt\"); dst = Path(\"requirements-flydsl-ci.txt\"); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith(\"flydsl==\")]; dst.write_text(\"\\n\".join(lines) + \"\\n\")"
               python3 -m pip install -r requirements-flydsl-ci.txt
               python3 -m pip install --upgrade pandas pyzmq einops numpy==1.26.2
@@ -135,6 +134,7 @@ jobs:
 
       - name: Download aiter wheel artifact
         uses: actions/download-artifact@v4
+        timeout-minutes: 30
         with:
           name: aiter-vllm-whl-${{ github.run_id }}
           path: aiter_wheels
@@ -256,6 +256,7 @@ jobs:
       - name: Download latest CI wheel artifact
         if: steps.s3-wheel.outcome != 'success'
         uses: actions/download-artifact@v4
+        timeout-minutes: 30
         with:
           name: flydsl-wheels
           repository: ${{ env.FLYDSL_REPOSITORY }}
@@ -347,7 +348,9 @@ jobs:
                 fi
                 bash /workspace/aiter-upstream/.github/scripts/install_triton.sh
                 python3 -m pip uninstall -y flydsl aiter amd-aiter || true
-                python3 -m pip install --no-deps \"\${aiter_wheels[0]}\"
+                python3 -m pip config set global.default-timeout 60
+                python3 -m pip config set global.retries 10
+                python3 -m pip install \"\${aiter_wheels[0]}\"
                 python3 -m pip install --no-deps --ignore-installed \"/workspace/${WHEEL_PATH}\"
                 python3 -m pip show amd-aiter || python3 -m pip show aiter
                 python3 -m pip show flydsl

@@ -3195,6 +3195,7 @@ def pa_decode_ps_launch(
         metadata["reduce_final_map"],
         metadata["reduce_partial_map"],
         query_length,  # max_qlen
+        0,  # num_kv_splits: splits are data-driven via reduce_* maps
         output,
         None,
     )
