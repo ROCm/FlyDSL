@@ -25,7 +25,6 @@ from kernels.gemm_common_gfx1250 import (
     get_lds_memref,
     issue_tdm_loads,
     lds_load_b32_raw,
-    lds_load_b64_raw,
     lds_load_b128_raw,
     pipeline_fence,
     pipeline_fence_signal,
@@ -110,7 +109,8 @@ def use_n4k4_bscale_layout(
 ):
     """B-scale uses the tile-independent N4K4 layout on row-major-streaming and the
     FP8/A8W4 quadrant schedule (one preshuffle serves both); deep-pipeline and fp4
-    keep the legacy layout."""
+    keep the legacy layout. (Production layout is 32x4 `preshuffle_scale`; the gate
+    name keeps "n4k4" until the naming cleanup TODO.)"""
     if scale_mode != "mxscale":
         return False
     if data_format not in ("fp8", "a8w4"):
@@ -119,9 +119,9 @@ def use_n4k4_bscale_layout(
         return False
     if tile_k % 128 != 0:
         return False
-    if n % 64 != 0:
+    if n % 32 != 0:
         return False
-    if tile_n % 64 != 0 and 64 % tile_n != 0:
+    if tile_n % 32 != 0:
         return False
     wmma_m_rep = (tile_m // m_warp) // WMMA_M
     wmma_n_rep = (tile_n // n_warp) // WMMA_N
@@ -358,24 +358,22 @@ def compile_fp8fp4_gemm(
         wave_specialized_tdm=wave_specialized_tdm,
         fp8_schedule=fp8_schedule,
     )
-    use_n4k4_opsel = False
+    # 32x4 B-scale layout (preshuffle_scale): [N//32, K//128, 32, 4]. A 128B atomic
+    # (32 N-rows x 4 K-scales) = one 32-lane WMMA scale VGPR. op_sel pairs an atom's
+    # two 16-N halves into one b32 load (1 load -> 2 WMMAs); enabled for every even-
+    # rep FP8/A8W4 schedule. Odd rep / warp_tile_n=16 owns half an atom (runtime
+    # 16-half select) and fp4 is already 1 atom = 1 WMMA, so both stay op_sel=0.
+    bs32_opsel = False
     if use_n4k4_bscale:
-        if K_scale % 4 != 0:
-            raise ValueError(f"N4K4 B-scale requires K_scale % 4 == 0, got {K_scale}")
-        n4k4_n_groups = N // 64
-        n4k4_bs_global_row_stride = (K // WMMA_K) * 256
-        n4k4_bs_lds_row_stride = k_wmma_steps * 256
-        # Per-tile N-group count padded to a power of two so the TDM warp split
-        # stays clean (a non-pow2 count, e.g. 192->3, miscopies LDS). Cost-free
-        # for 64/128/256 (1/2/4 groups); tile_n=192 copies 1 extra oob-clipped group.
-        n4k4_bs_tile_groups = 1 << ((tile_n + 63) // 64 - 1).bit_length()
-        n4k4_bs_lds_rows = n4k4_bs_tile_groups
-        # N op_sel: pack blocks (j, j+rep/2) into one VGPR via lane_kgrp (kgrp1 =
-        # the "second half"), halving B-scale loads & VGPRs. Power-of-2 rep only
-        # (then the kgrp byte offset is uniform); rep 1/3/6/12 stay off.
-        use_n4k4_opsel = wmma_n_rep >= 2 and (wmma_n_rep & (wmma_n_rep - 1)) == 0
-        _half = wmma_n_rep // 2
-        n4k4_opsel_kgrp_off = (_half // 4) * n4k4_bs_lds_row_stride + (_half % 4) * 4
+        bs32_atom_bytes = 128  # 32 rows x 4 K-scales
+        bs32_global_row_stride = (K // WMMA_K) * bs32_atom_bytes  # bytes per atom row (= K)
+        bs32_lds_row_stride = k_wmma_steps * bs32_atom_bytes  # LDS bytes per atom row
+        bs32_tile_atoms = tile_n // 32
+        # Pad atom count to pow2 so the TDM warp split stays clean (non-pow2, e.g.
+        # 6, miscopies LDS). Cost-free for pow2 atom counts; else 1-2 oob-clipped.
+        bs32_tile_atoms_pad = 1 << (bs32_tile_atoms - 1).bit_length()
+        bs32_opsel = (not is_fp4) and (wmma_n_rep % 2 == 0)
+        bs32_n_load = (wmma_n_rep // 2) if bs32_opsel else wmma_n_rep  # b32 loads per ks
 
     # A-scale natural buffer_load->VGPR (no reshuffle), paired with N4K4 B (TDM).
     # TEMP: ascale_load_path='tdm' fallback + non-ws kept until those legacy paths
@@ -414,7 +412,8 @@ def compile_fp8fp4_gemm(
     # The general VGPR scale path holds scales in registers (no ds_load), so it
     # contributes zero. Finalized below once use_natural_ascale is known.
     _a_scale_ds = (wmma_m_rep + 3) // 4
-    _b_scale_ds = (b_scale_load_rep + 3) // 4
+    # 32x4 B-scale issues bs32_n_load b32 ds_loads per ks; legacy packs into b128s.
+    _b_scale_ds = bs32_n_load if use_n4k4_bscale else (b_scale_load_rep + 3) // 4
     _scale_ds_loads = _a_scale_ds + _b_scale_ds
     _a_frag_ds = wmma_m_rep * _a_frag_loads_per_wm
     _bs_ds_loads = wmma_n_rep * _b_frag_loads_per_wn + _scale_ds_loads
@@ -428,7 +427,7 @@ def compile_fp8fp4_gemm(
     # Natural A-scale lives in VGPRs (buffer_load), so it needs no LDS.
     lds_a_scale_bytes = 0 if (is_ptpc or use_natural_ascale) else tile_m * scale_k_per_tile + _scale_guard_bytes
     if use_n4k4_bscale:
-        lds_b_scale_bytes = n4k4_bs_lds_rows * n4k4_bs_lds_row_stride + _scale_guard_bytes
+        lds_b_scale_bytes = bs32_tile_atoms_pad * bs32_lds_row_stride + _scale_guard_bytes
     else:
         lds_b_scale_bytes = 0 if is_ptpc else tile_n * scale_k_per_tile + _scale_guard_bytes
     interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
@@ -628,10 +627,7 @@ def compile_fp8fp4_gemm(
         _fp8_half_wn = wmma_n_rep // 2
         _fp8_group_size = _fp8_half_wm * _fp8_half_wn
         if use_n4k4_bscale:
-            # N4K4 B-scale ds_load instruction count (matches load_n4k4_bscale).
-            _n4k4_bn = b_scale_load_rep // 2 if use_n4k4_opsel else b_scale_load_rep
-            _n4k4_bpl = 4 if _n4k4_bn % 4 == 0 else (2 if _n4k4_bn % 2 == 0 else 1)
-            _fp8_b_scale_loads = _n4k4_bn // _n4k4_bpl
+            _fp8_b_scale_loads = bs32_n_load  # 32x4: one b32 per atom-or-WMMA per ks
         else:
             _fp8_b_scale_loads = 0 if is_ptpc else (b_scale_load_rep + 3) // 4
     if use_fp8_deep_pipeline_schedule:
@@ -814,18 +810,18 @@ def compile_fp8fp4_gemm(
 
         def make_desc_bs(memref, k_base):
             if const_expr(use_n4k4_bscale):
-                # N4K4: copy this tile's N-groups x K-blocks slice of the
-                # preshuffled [N//64, (K//128)*256] B-scale tensor. Each row is
-                # one 64-N group; the contiguous dim1 = tile_k//128 * 256B blocks.
-                g_off = blk_n // arith.index(64)
-                col_off = (k_base // arith.index(WMMA_K)) * arith.index(256)
+                # 32x4: copy this tile's 32-N atoms x K-blocks slice of the
+                # preshuffled [N//32, (K//128)*128] B-scale tensor. Each row is one
+                # 32-N atom group; contiguous dim1 = tile_k//128 * 128B atomics.
+                a_off = blk_n // arith.index(32)
+                col_off = (k_base // arith.index(WMMA_K)) * arith.index(bs32_atom_bytes)
                 return _make_tdm_desc(
                     global_ptr=arg_b_scale,
                     lds_memref=memref,
-                    global_offset=(g_off, col_off),
-                    tensor_shape=(n4k4_n_groups, n4k4_bs_global_row_stride),
-                    strides=(n4k4_bs_global_row_stride, 1),
-                    tile_shape=(n4k4_bs_tile_groups, n4k4_bs_lds_row_stride),
+                    global_offset=(a_off, col_off),
+                    tensor_shape=(N // 32, bs32_global_row_stride),
+                    strides=(bs32_global_row_stride, 1),
+                    tile_shape=(bs32_tile_atoms_pad, bs32_lds_row_stride),
                     elem_bytes=1,
                     pad_interval=0,
                     pad_amount=0,
@@ -833,7 +829,7 @@ def compile_fp8fp4_gemm(
                     workgroup_mask=b_mcast_mask,
                     atomic_barrier_enable=atomic_barrier_enable,
                     early_timeout=True,
-                    oob_outer_bound=n4k4_n_groups,
+                    oob_outer_bound=N // 32,
                 )
             k_scale_off = k_base // arith.index(SCALE_BLOCK)
             outer_off = blk_n // arith.index(b_scale_load_rep)
@@ -993,50 +989,43 @@ def compile_fp8fp4_gemm(
                     base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             return lds_ptr, [base]
 
-        def _precompute_n4k4_bscale_bases(lds_ptr):
-            """Precompute (first_block, lane_byte) for this warp's N4K4 reads.
+        def _precompute_bs32_bases(lds_ptr):
+            """Tile-local 32-N atom base for the warp's 32x4 B-scale read.
 
-            The TDM copies the 64-N group(s) containing the tile; within a copied
-            group a lane's 4 N-blocks are 16 contiguous bytes and consecutive
-            groups are n4k4_bs_lds_row_stride apart. ``b0`` is the warp's first
-            N-block *inside the copied group(s)*: its own N offset plus, for tiles
-            smaller than one 64-N group, the tile's slice offset within its group.
-            Only lanes 0..15 carry the consumed scale (scaleAType=0, no op_sel);
-            lanes 16..31 read the same word.
+            An LDS atom row (32 N-rows x 4 K-scales = 128B) is one 32-lane WMMA scale
+            VGPR. op_sel path (even rep): the warp owns whole atoms atom0+j. Else
+            (fp4 / odd rep): each WMMA reads its own 16/32-N into the operand lanes.
             """
-            b0 = wave_n_idx * arith.index(b_scale_load_rep)
-            if const_expr(tile_n < 64):
-                # Sub-64 tile: whole containing group was copied; shift to this
-                # tile's slice (row offset 0/16/32/48 -> N-block 0/1/2/3).
-                b0 = b0 + (blk_n % arith.index(64)) // arith.index(16)
-            lane_off = lane16 * arith.index(16)
-            return lds_ptr, (b0, lane_off)
+            return lds_ptr, warp_n_base // arith.index(32)
 
-        _N4K4_LOADERS = {1: lds_load_b32_raw, 2: lds_load_b64_raw, 4: lds_load_b128_raw}
-
-        def load_n4k4_bscale(lds_buffer, bases, reps, ks=0):
-            """Load N4K4 B-scale i32s for K-subtile *ks*."""
-            b0, lane_off = bases
-            ks_off = arith.index(ks * 256)
-            row_stride = arith.index(n4k4_bs_lds_row_stride)
-            if const_expr(use_n4k4_opsel):
-                n_load = reps // 2  # read first half; kgrp1 supplies the matching second half
-                lane = lane_off + lane_kgrp * arith.index(n4k4_opsel_kgrp_off)
-            else:
-                n_load = reps
-                lane = lane_off
-            per_load = 4 if n_load % 4 == 0 else (2 if n_load % 2 == 0 else 1)
+        def load_bs32_bscale(lds_buffer, atom0, ks):
+            """Load 32x4 B-scale i32s for K-subtile *ks* (one b32 per atom-or-WMMA)."""
+            stride = arith.index(bs32_lds_row_stride)
+            ks_off = arith.index(ks * bs32_atom_bytes)
             results = []
-            for i in range_constexpr(n_load // per_load):
-                blk = b0 + arith.index(i * per_load)
-                off = (blk // arith.index(4)) * row_stride + (blk % arith.index(4)) * arith.index(4) + lane + ks_off
-                raw = _N4K4_LOADERS[per_load](lds_buffer, off)
-                if const_expr(per_load == 1):
-                    results.append(raw)
-                else:
-                    vec = fx.Vector(raw)
-                    for j in range_constexpr(per_load):
-                        results.append(vec[j])
+            if const_expr(bs32_opsel):
+                # Even rep: full 32-lane atom; op_sel picks the 16-half in _emit_wmma.
+                lane = (lane_kgrp * arith.index(16) + lane16) * arith.index(4)
+                for j in range_constexpr(wmma_n_rep // 2):
+                    off = (atom0 + arith.index(j)) * stride + ks_off + lane
+                    results.append(lds_load_b32_raw(lds_buffer, off))
+            elif const_expr(is_fp4):
+                # fp4: one 32-N atom per WMMA (no op_sel).
+                lane = (lane_kgrp * arith.index(16) + lane16) * arith.index(4)
+                for wn in range_constexpr(wmma_n_rep):
+                    off = (atom0 + arith.index(wn)) * stride + ks_off + lane
+                    results.append(lds_load_b32_raw(lds_buffer, off))
+            else:
+                # fp8 odd rep: each WMMA's 16-N into lanes 0-15 (op_sel=0); the atom
+                # and its 16-half are runtime (warp may start mid-atom).
+                for wn in range_constexpr(wmma_n_rep):
+                    row16 = warp_n_base + arith.index(wn * 16)
+                    off = (
+                        (row16 // arith.index(32)) * stride
+                        + ks_off
+                        + (row16 % arith.index(32) + lane16) * arith.index(4)
+                    )
+                    results.append(lds_load_b32_raw(lds_buffer, off))
             return results
 
         def load_scale_b128(lds_buffer, scale_base, reps, ks=0):
@@ -1074,9 +1063,9 @@ def compile_fp8fp4_gemm(
         _vgpr_scale_box = [None]
 
         def _load_b_scale_lds(bs_buf, bs_bases, ks):
-            """Load B-scale from LDS, dispatching to the N4K4 or legacy layout."""
+            """Load B-scale from LDS, dispatching to the 32x4 or legacy layout."""
             if const_expr(use_n4k4_bscale):
-                return load_n4k4_bscale(bs_buf, bs_bases, b_scale_load_rep, ks)
+                return load_bs32_bscale(bs_buf, bs_bases, ks)
             return load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
 
         def _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks):
@@ -1169,13 +1158,12 @@ def compile_fp8fp4_gemm(
                     scaleBType=a_opsel,
                 )
             else:
-                # 16x16x128 WMMA: A8W4 (fmtA=FP4) or FP8 (fmtA=FP8)
-                if const_expr(use_scale_opsel):
+                # 16x16x128 WMMA: A8W4 (fmtA=FP4) or FP8 (fmtA=FP8). op_sel pairs
+                # adjacent 16-N halves (legacy use_scale_opsel or 32x4 even rep);
+                # else one scale per WMMA (32x4 odd rep, or no op_sel).
+                if const_expr(use_scale_opsel or bs32_opsel):
                     b_scale_idx = wn // 2
                     b_opsel = wn % 2
-                elif const_expr(use_n4k4_opsel):
-                    b_scale_idx = wn % (wmma_n_rep // 2)
-                    b_opsel = wn // (wmma_n_rep // 2)
                 else:
                     b_scale_idx = wn
                     b_opsel = 0
@@ -1289,7 +1277,7 @@ def compile_fp8fp4_gemm(
                     lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a
                 )
             if const_expr(use_n4k4_bscale):
-                bs_buf, bs_bases = _precompute_n4k4_bscale_bases(lds_bs)
+                bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
             else:
                 bs_buf, bs_bases = _precompute_scale_lane_bases(
                     lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
@@ -1492,7 +1480,7 @@ def compile_fp8fp4_gemm(
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
             as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
             if const_expr(use_n4k4_bscale):
-                bs_buf, bs_bases = _precompute_n4k4_bscale_bases(lds_bs)
+                bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
             else:
                 bs_buf, bs_bases = _precompute_scale_lane_bases(
                     lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
@@ -1586,7 +1574,11 @@ def compile_fp8fp4_gemm(
                     )
 
             b_left_frags, b_scales = _load_b_left_bundle(0)
-            _first_top_row_keep = max((_fp8_half_wm - 1) * DS_LOADS_PER_A_FRAG - _fp8_b_scale_loads, 0)
+            # Margin = a-top drain depth (b-scale is issued earlier, so it is unrelated);
+            # keep it at the per-WMMA count so op_sel's fewer b-scale loads don't widen
+            # keep and race the top-row A frags.
+            _top_keep_margin = b_scale_load_rep if const_expr(bs32_opsel) else _fp8_b_scale_loads
+            _first_top_row_keep = max((_fp8_half_wm - 1) * DS_LOADS_PER_A_FRAG - _top_keep_margin, 0)
             _bottom_left_keep = max(_b_half_loads - DS_LOADS_PER_A_FRAG, 0)
 
             for ks in range_constexpr(k_wmma_steps):
@@ -2325,7 +2317,7 @@ def compile_fp8fp4_gemm(
         adv_as_i32 = fx.Int32(tile_k // SCALE_BLOCK * wmma_m_rep)
         # N4K4 advances by one tile's worth of K-blocks (k_wmma_steps*256B) per
         # K-step; the legacy interleaved layout advances by scale_k_per_tile*rep.
-        adv_bs_i32 = fx.Int32(n4k4_bs_lds_row_stride if use_n4k4_bscale else tile_k // SCALE_BLOCK * b_scale_load_rep)
+        adv_bs_i32 = fx.Int32(bs32_lds_row_stride if use_n4k4_bscale else tile_k // SCALE_BLOCK * b_scale_load_rep)
 
         pred_const = fx.Int32(1)
         if const_expr(wave_specialized_tdm):

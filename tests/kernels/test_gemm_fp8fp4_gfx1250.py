@@ -66,26 +66,19 @@ def preshuffle_e8m0_scale(
     return g.reshape(-1, k_groups * k_wmma_steps * wmma_rep * SCALES_PER_WMMA)
 
 
-def preshuffle_e8m0_bscale_n4k4(scale: torch.Tensor) -> torch.Tensor:
-    """Tile-independent N4K4 B-scale preshuffle: [N, K_scale] -> [N//64, (K_scale//4)*256].
+def preshuffle_scale(scale: torch.Tensor) -> torch.Tensor:
+    """32x4 scale layout (A or B): [R, Ks] -> [R//32, K] (Ks = K//32).
 
-    Atomic block = 4 N-blocks x 1 K-block = 64 N-rows x 4 scale-bytes = 256B, so
-    the byte layout depends only on the constants (64, 16, 4, 4) and never on
-    tile_n/n_warp/tile_k. Weights are preshuffled once and served to any tile
-    config landing on the default row-major streaming schedule.
+        out[r_o, k_o, r_i, k_i] = scale[r_o*32 + r_i, k_o*4 + k_i]
 
-        B_scale_pre[g, kb, n, r, k] = scale[g*64 + r*16 + n, kb*4 + k]
-
-    where g = N//64 group, kb = K//128 block (4 scale bytes = one WMMA's K=128),
-    n = lane16 (N-row within a 16-block), r = the 4 N-blocks in a 64-group,
-    k = the 4 scale bytes within one WMMA. Mirrors the kernel's N4K4 TDM+LDS
-    read (see flydsl_fp8_perf/verify_n4k4_bscale_layout.py for the parity proof).
+    A 128B atomic (32 rows x 4 K-scales) is exactly one 32-lane WMMA scale VGPR
+    (lane L = row L's 4 K-scales). tile-independent; serves fp8 (16x16, op_sel) and
+    fp4 (32x16) uniformly.
     """
-    N, Ks = scale.shape
-    assert N % 64 == 0 and Ks % 4 == 0, f"N4K4 B-scale needs N%64==0, Ks%4==0; got N={N} Ks={Ks}"
-    g = scale.view(N // 64, 4, 16, Ks // 4, 4)  # [g, r, n, kb, k]
-    g = g.permute(0, 3, 2, 1, 4).contiguous()  # [g, kb, n, r, k]
-    return g.reshape(N // 64, (Ks // 4) * 256)
+    R, Ks = scale.shape
+    assert R % 32 == 0 and Ks % 4 == 0, f"preshuffle_scale needs R%32==0, Ks%4==0; got R={R} Ks={Ks}"
+    x = scale.view(R // 32, 32, Ks // 4, 4).permute(0, 2, 1, 3).contiguous()  # [R//32, Ks//4, 32, 4]
+    return x.reshape(R // 32, -1)  # [R//32, K]
 
 
 def preshuffle_scale_for_load_path(scale, warp_tile, skt, *, row_align=None):
@@ -487,7 +480,7 @@ def _run_mxscale_gemm_test(
         out_dtype=out_dtype,
         wave_specialized_tdm=wave_specialized_tdm,
     ):
-        b_scale = preshuffle_e8m0_bscale_n4k4(b_scale)
+        b_scale = preshuffle_scale(b_scale)
     else:
         b_scale = preshuffle_scale_for_load_path(b_scale, warp_tile_n, skt, row_align=tile_n)
 
@@ -814,9 +807,9 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
 # group counts 1/2/4 and the non-power-of-2 group count 3 that exercises the
 # TDM warp-distribution power-of-two padding), both data formats, k_wmma_steps
 # 1/2/4, wave-spec on/off, f32/bf16, multi-buffer, and ragged/decode M.
-_N4K4_N_FOR_TN = {16: 128, 32: 128, 64: 128, 128: 256, 192: 384, 256: 512}
+_N4K4_N_FOR_TN = {32: 128, 64: 128, 128: 256, 192: 384, 256: 512}
 _N4K4_TN_NW = [
-    (16, 1), (32, 1), (32, 2), (64, 1), (64, 2), (64, 4),
+    (32, 1), (32, 2), (64, 1), (64, 2), (64, 4),
     (128, 1), (128, 2), (128, 4), (192, 1), (192, 2), (192, 4),
     (256, 1), (256, 2), (256, 4),
 ]  # fmt: skip
