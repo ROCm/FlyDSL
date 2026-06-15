@@ -388,13 +388,11 @@ def attn_kernel(
                     k_lds_elem = kbuf + (fx.Int32(sub * BN) + kv_local) * fx.Int32(_K_LDSW) + fx.Int32(ks * 16) + half * fx.Int32(8)
                     kv8 = fx.Vector.load(fx.typing.T.vec(8, fx.typing.T.i8), k_lds, [fx.Index(k_lds_elem)])
                     k_packs.append(fx.Vector(kv8).bitcast(fx.Int64)[0])
-                fx.rocdl.sched_dsrd(KSTEPS)
                 acc_raw = fx.Vector.filled(16, 0.0, fx.Float32).ir_value()
                 for ks in fx.range_constexpr(KSTEPS):
                     a_raw = k_packs[ks].ir_value() if hasattr(k_packs[ks], "ir_value") else k_packs[ks]
                     b_raw = q_i64[ks].ir_value() if hasattr(q_i64[ks], "ir_value") else q_i64[ks]
                     acc_raw = fx.rocdl.mfma_f32_32x32x16_fp8_fp8(f32x16, a_raw, b_raw, acc_raw, 0, 0, 0).res
-                    fx.rocdl.sched_mfma(1)
                 sv.append(fx.Vector(acc_raw))
 
             # --- descale + causal mask for all subtiles -> s_vals[sub][i] ---
@@ -475,7 +473,6 @@ def attn_kernel(
                         v_lds_elem = vbuf + d_col * fx.Int32(_V_LDSW) + fx.Int32(sub * BN) + fx.Int32(s * 16) + half * fx.Int32(8)
                         vv8 = fx.Vector.load(fx.typing.T.vec(8, fx.typing.T.i8), vt_lds, [fx.Index(v_lds_elem)])
                         v_packs.append(fx.Vector(vv8).bitcast(fx.Int64)[0])
-                fx.rocdl.sched_dsrd(DT * 2)
                 for dt in fx.range_constexpr(DT):
                     acc2 = fx.Vector(o_acc[dt]).ir_value()
                     for s in fx.range_constexpr(2):
@@ -484,7 +481,6 @@ def attn_kernel(
                         a_raw = v_i64.ir_value() if hasattr(v_i64, "ir_value") else v_i64
                         b_raw = p_i64.ir_value() if hasattr(p_i64, "ir_value") else p_i64
                         acc2 = fx.rocdl.mfma_f32_32x32x16_fp8_fp8(f32x16, a_raw, b_raw, acc2, 0, 0, 0).res
-                        fx.rocdl.sched_mfma(1)
                     o_acc[dt] = fx.Vector(acc2)
             return m_new, l_run, o_acc
 
