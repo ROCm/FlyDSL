@@ -29,6 +29,7 @@ from kernels.gemm_fp8fp4_gfx1250 import (  # noqa: E402
     compile_ptpc_gemm,
     is_ref_segmented_lds_layout,
     use_n4k4_bscale_layout,
+    use_natural_ascale_vgpr,
 )
 from tests.kernels.utils import fp4_utils  # noqa: E402
 
@@ -492,6 +493,7 @@ def _run_mxscale_gemm_test(
     expert_sched_mode=True,
     split_k=1,
     scale_load_path="tdm",
+    ascale_load_path="vgpr",
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -585,15 +587,33 @@ def _run_mxscale_gemm_test(
         wave_specialized_tdm=wave_specialized_tdm,
         use_scale_opsel=use_scale_opsel,
     )
-    a_scale = preshuffle_scale_for_load_path(
-        a_scale,
-        warp_tile_m,
-        skt,
-        scale_load_path=scale_load_path,
+    _natural_ascale = use_natural_ascale_vgpr(
         data_format=data_format,
-        ref_segmented=_ref_seg,
-        row_align=tile_m,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        n=padded_n,
+        scale_load_path=scale_load_path,
+        ascale_load_path=ascale_load_path,
+        use_scale_opsel=use_scale_opsel,
+        wave_specialized_tdm=wave_specialized_tdm,
     )
+    if _natural_ascale:
+        # Natural path reads A_scale[M, K//32] straight from VGPRs -- no reshuffle,
+        # the (already row-padded) tensor is uploaded as-is.
+        pass
+    else:
+        a_scale = preshuffle_scale_for_load_path(
+            a_scale,
+            warp_tile_m,
+            skt,
+            scale_load_path=scale_load_path,
+            data_format=data_format,
+            ref_segmented=_ref_seg,
+            row_align=tile_m,
+        )
     if use_n4k4_bscale_layout(
         data_format=data_format,
         tile_m=tile_m,
@@ -604,6 +624,9 @@ def _run_mxscale_gemm_test(
         n=padded_n,
         scale_load_path=scale_load_path,
         use_scale_opsel=use_scale_opsel,
+        num_buffers=num_buffers,
+        out_dtype=out_dtype,
+        wave_specialized_tdm=wave_specialized_tdm,
     ):
         b_scale = preshuffle_e8m0_bscale_n4k4(b_scale)
     else:
@@ -650,6 +673,7 @@ def _run_mxscale_gemm_test(
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
         scale_load_path=scale_load_path,
+        ascale_load_path=ascale_load_path,
     )
 
     # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
@@ -1009,6 +1033,71 @@ def test_mxscale_n4k4_bscale(data_format, M, N, K, tile_n, tile_k, n_warp, num_b
         use_tdm_store=True,
         out_dtype=out_dtype,
         wave_specialized_tdm=ws,
+        l2_prefetch_distance=0,
+        use_scale_opsel=False,
+        scale_load_path="tdm",
+    )
+
+
+def _gen_natural_ascale_configs():
+    # (fmt, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf) for the natural A-scale
+    # buffer_load path (wave-spec, default ascale_load_path='vgpr'). Covers wave
+    # counts 2/3/4, A-scale M op_sel via tile_m (rep 1/2/4/8/16), tile_k (k_steps
+    # 1/2/4), multi-64 tile_n, and ragged M. tile_k kept small at large tile_m so
+    # LDS fits. M==tile_m exercises a full M tile; M<tile_m exercises OOB.
+    cfgs = []
+    for fmt in ("fp8", "a8w4"):
+        # 4-wave (n_warp=4, tile_n=64 -> rep_n=1 row-major): rep_m sweep via tile_m.
+        cfgs += [
+            (fmt, 16, 16, 64, 512, 1, 4, 2),  # rep1, k_steps=4
+            (fmt, 32, 32, 64, 512, 1, 4, 2),  # rep2 (op_sel)
+            (fmt, 64, 64, 64, 256, 1, 4, 2),  # rep4 (op_sel)
+            (fmt, 128, 128, 64, 256, 1, 4, 2),  # rep8 (op_sel)
+            (fmt, 256, 256, 64, 128, 1, 4, 2),  # rep16 (op_sel)
+            (fmt, 16, 16, 64, 128, 1, 4, 2),  # k_steps=1
+            (fmt, 16, 16, 64, 256, 1, 4, 2),  # k_steps=2
+            (fmt, 16, 16, 128, 256, 1, 4, 2),  # tile_n=128
+            (fmt, 16, 16, 192, 256, 1, 4, 2),  # tile_n=192 (next_pow2)
+            (fmt, 16, 16, 256, 256, 1, 4, 2),  # tile_n=256
+        ]
+        # 2-wave (wave0 issues A-data + B-scale): rep_m 1/2 (row-major needs n_accs<8).
+        cfgs += [(fmt, 16, 16, 64, 512, 1, 2, 2), (fmt, 32, 32, 64, 512, 1, 2, 2)]
+        # 3-wave (wave0/1/2 = A/B/B-scale).
+        cfgs += [(fmt, 16, 16, 192, 256, 1, 3, 2)]
+        # ragged / OOB M.
+        cfgs += [(fmt, 13, 16, 64, 512, 1, 4, 2), (fmt, 33, 64, 64, 256, 1, 4, 2)]
+    return cfgs
+
+
+@pytest.mark.parametrize("data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf", _gen_natural_ascale_configs())
+def test_mxscale_natural_ascale(data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf):
+    # Guard: every config must take BOTH the natural A-scale path and N4K4 B-scale.
+    N = 2 * tile_n
+    K = tile_k * nbuf
+    assert use_natural_ascale_vgpr(
+        data_format=data_format,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        n=N,
+        wave_specialized_tdm=True,
+    ), f"config does not hit the natural A-scale gate: {(data_format, tile_m, tile_n, tile_k, m_warp, n_warp)}"
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        nbuf,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        wave_specialized_tdm=True,
         l2_prefetch_distance=0,
         use_scale_opsel=False,
         scale_load_path="tdm",
