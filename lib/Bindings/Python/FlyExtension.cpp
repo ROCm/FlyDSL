@@ -11,6 +11,7 @@
 
 #include "BindingUtils.h"
 #include "DLTensorAdaptor.h"
+#include "MemRefSpec.h"
 #include "TiledOpTraits.h"
 
 #include "LlvmConfig/llvm.h"
@@ -873,40 +874,55 @@ NB_MODULE(_mlirDialectsFly, m) {
   m.doc() = "MLIR Python FlyDSL Extension";
 
   // -------------------------------------------------------------------------
+  // MemRefSpec: metadata-driven memref-type + cache-signature generator
+  // -------------------------------------------------------------------------
+  using MemRefSpec = utils::MemRefSpec;
+
+  nb::class_<MemRefSpec>(m, "MemRefSpec")
+      .def(nb::init<int32_t, const std::vector<int64_t> &, const std::vector<int64_t> &,
+                    std::optional<int32_t>, bool>(),
+           "element_bits"_a, "shape"_a, "strides"_a, "alignment"_a = nb::none(),
+           "use_32bit_stride"_a = false,
+           "Create from raw metadata (element bit width + shape/strides); context-free. "
+           "If alignment is None, defaults to the element width rounded up to bytes (minimum 1).")
+      .def("mark_layout_dynamic", &MemRefSpec::markLayoutDynamic, "leading_dim"_a = -1,
+           "divisibility"_a = 1, "Mark entire layout dynamic except the leading-dim stride")
+      .def("mark_shape_dynamic", &MemRefSpec::markShapeDynamic, "dims"_a, "divisibilities"_a,
+           "Mark the shape leaf of each listed dimension dynamic (equal-length lists).")
+      .def("mark_stride_dynamic", &MemRefSpec::markStrideDynamic, "dims"_a, "divisibilities"_a,
+           "Mark the stride leaf of each listed dimension dynamic (equal-length lists).")
+      .def("use_32bit_stride", &MemRefSpec::use32BitStride, "use_32bit_stride"_a,
+           "Decide whether to use 32-bit dynamic strides")
+      .def("get_memref_type", &MemRefSpec::getMemRefType, "element_type"_a,
+           "Get the fly.memref MLIR type (element type built in the active context)")
+      .def("get_cache_signature", &MemRefSpec::getCacheSignature,
+           "Cache-key tuple (alignment, use_32bit_stride, shape, stride)")
+      .def_prop_ro("shape_dyn_indices", &MemRefSpec::getShapeDynIndices,
+                   "Indices of dynamic-shape dims")
+      .def_prop_ro("stride_dyn_indices", &MemRefSpec::getStrideDynIndices,
+                   "Indices of dynamic-stride dims");
+
+  // -------------------------------------------------------------------------
   // DLTensorAdaptor (standalone, not an MLIR type)
   // -------------------------------------------------------------------------
   using DLTensorAdaptor = utils::DLTensorAdaptor;
 
   nb::class_<DLTensorAdaptor>(m, "DLTensorAdaptor")
-      .def(nb::init<nb::object, std::optional<int32_t>, bool>(), "dlpack_capsule"_a,
-           "alignment"_a = nb::none(), "use_32bit_stride"_a = false,
-           "Create a DLTensorAdaptor from a DLPack capsule. "
-           "If alignment is None, defaults to element size in bytes (minimum "
-           "1). ")
+      .def(nb::init<nb::object>(), "dlpack_capsule"_a,
+           "Create a DLTensorAdaptor from a DLPack capsule.")
       .def_prop_ro("shape", &DLTensorAdaptor::getShape, "Get tensor shape as tuple")
       .def_prop_ro("stride", &DLTensorAdaptor::getStride, "Get tensor stride as tuple")
       .def_prop_ro("data_ptr", &DLTensorAdaptor::getDataPtr, "Get data pointer as int64")
       .def_prop_ro("address_space", &DLTensorAdaptor::getAddressSpace,
                    "Get address space (0=host, 1=device)")
-      .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes, "Get total size in bytes")
-      .def("build_memref_desc", &DLTensorAdaptor::buildMemRefDesc,
-           "Build memref descriptor based on current dynamic marks")
-      .def("get_memref_type", &DLTensorAdaptor::getMemRefType,
-           "Get fly.memref MLIR type based on current dynamic marks")
-      .def("get_c_pointers", &DLTensorAdaptor::getCPointers, "Get list of c pointers")
-      .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
-           "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
-      .def("mark_shape_dynamic", &DLTensorAdaptor::markShapeDynamic, "dims"_a, "divisibilities"_a,
-           "Mark the shape leaf of each listed dimension dynamic, leaving others unchanged. "
-           "dims and divisibilities must be equal-length lists.")
-      .def("mark_stride_dynamic", &DLTensorAdaptor::markStrideDynamic, "dims"_a, "divisibilities"_a,
-           "Mark the stride leaf of each listed dimension dynamic, leaving others unchanged. "
-           "dims and divisibilities must be equal-length lists.")
-      .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
-           "Decide whether to use 32-bit stride")
-      .def("get_cache_signature", &DLTensorAdaptor::getCacheSignature,
-           "Cache-key tuple (alignment, use_32bit_stride, shape, stride) reflecting "
-           "the resolved layout state.");
+      .def_prop_ro(
+          "dtype", [](DLTensorAdaptor &self) { return wrap(self.getDtype()); },
+          "The dtype as an MLIR element type (ir Type); requires an active MLIR context")
+      .def_prop_ro("dtype_id", &DLTensorAdaptor::getDtypeId,
+                   "Context-free dtype id (code, bits, lanes) for use as a cache discriminator")
+      .def_prop_ro("element_bits", &DLTensorAdaptor::getElementBits,
+                   "Element width in bits (bits * lanes), at sub-byte granularity")
+      .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes, "Get total size in bytes");
 
   // -------------------------------------------------------------------------
   // Module-level helper functions

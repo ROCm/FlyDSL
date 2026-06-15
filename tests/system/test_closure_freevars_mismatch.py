@@ -117,7 +117,7 @@ def test_constexpr_annotation_survives_freevar_rebuild():
 
     launch = make_kernel()
     out = torch.zeros(1, device="cuda", dtype=torch.int32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
     launch(t_out, fx.Int32(10))
     torch.cuda.synchronize()
     assert out.item() == 11  # 10 + 1

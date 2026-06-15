@@ -154,7 +154,7 @@ def benchmark_vector_add(vec_width: int = 4, *, size_multiplier: int = 10000, ru
 
     stream = torch.cuda.Stream()
 
-    tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH)
+    tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=VEC_WIDTH)
 
     vecAdd(tA, b_dev, c_dev, SIZE, SIZE, THREADS_PER_BLOCK, VEC_WIDTH, stream=stream)
     torch.cuda.synchronize()

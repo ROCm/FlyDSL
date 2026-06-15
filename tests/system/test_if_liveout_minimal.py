@@ -70,7 +70,7 @@ def test_if_liveout_silent_bug():
     threshold = BLOCK // 2  # 32
 
     out = torch.zeros(size, device="cuda", dtype=torch.float32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=4)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=4)
 
     bugLaunch(t_out, threshold, size, BLOCK)
     torch.cuda.synchronize()

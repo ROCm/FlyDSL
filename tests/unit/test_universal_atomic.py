@@ -71,7 +71,7 @@ def test_reduce_add_atomic():
     out_dev = torch.zeros(1, device="cuda", dtype=torch.float32)
 
     stream = torch.cuda.Stream()
-    tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=1)
     reduce_add(tA, out_dev, N, N, BLOCK_DIM, stream=stream)
     torch.cuda.synchronize()
 
@@ -131,7 +131,7 @@ def test_reduce_max_atomic():
     out_dev = torch.full((1,), float("-inf"), device="cuda", dtype=torch.float32)
 
     stream = torch.cuda.Stream()
-    tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=1)
     reduce_max(tA, out_dev, N, N, BLOCK_DIM, stream=stream)
     torch.cuda.synchronize()
 

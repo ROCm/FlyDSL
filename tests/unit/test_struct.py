@@ -5,7 +5,6 @@
 
 """Unit tests for unified struct / union / Array / Storage types."""
 
-import ctypes
 import importlib
 
 import pytest
@@ -15,11 +14,11 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl.compiler import jit_function
 from flydsl.compiler.protocol import (
+    c_abi_spec,
     construct_from_ir_values,
     dsl_align_of,
     dsl_size_of,
     extract_to_ir_values,
-    get_c_pointers,
     get_ir_types,
 )
 from flydsl.expr.numeric import Float32, Int32, Uint8
@@ -294,10 +293,15 @@ def test_host_jit_argument_protocol_pointers():
 
     with ir.Context(), ir.Location.unknown():
         p = HostPair(a=Int32(7), b=Int32(11))
-        ptrs = p.__get_c_pointers__()
-        assert len(ptrs) == 2
-        assert all(isinstance(ptr, ctypes.c_void_p) for ptr in ptrs)
-        assert len(get_c_pointers(p)) == 2
+        slots = c_abi_spec(p)
+        assert len(slots) == 2
+        # Each slot fills its storage in place from the struct instance.
+        values = []
+        for ctype, fill in slots:
+            s = ctype(0)
+            fill(p, s)
+            values.append(s.value)
+        assert values == [7, 11]
 
 
 # ---------------------------------------------------------------------------
