@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import os
 import re
 import subprocess
 import sys
@@ -83,27 +84,47 @@ def bench_flydsl(mod_name, b, sq, sk, nq, nk, ps):
 
 
 def bench_ck(b, sq, sk, nq, nk):
-    """CK Tile fp8 paged FMHA via aiter's op_test helper (PER_TOKEN_HEAD vec_k_col_v).
-    Requires the aiter repo on PYTHONPATH and its kernels JIT-compiled (first call ~5min)."""
-    if b != 1:
-        return None  # helper profile path validated for bs=1 here
-    try:
-        import torch as _t
+    """CK Tile fp8 paged FMHA via aiter's test_batch_prefill (vectorized = vec_k_col_v).
 
-        sys.path.insert(0, "/workspaces/amir/aiter")
-        from op_tests.test_batch_prefill import run_batch_prefill_per_token_head as _run
-    except Exception:
+    Requires aiter installed and on PYTHONPATH (default: /workspaces/aiter).
+    First call JIT-compiles CK kernels (~5 min); subsequent runs are fast."""
+    if b != 1 or sq != sk:
         return None
+    aiter_root = os.environ.get("AITER_ROOT", "/workspaces/aiter")
     try:
-        r = _run(
-            kvcache_layout="vec_k_col_v", table_layout="sglang", batch_size=b,
-            qo_len=sq, kv_len=sk, page_size=64, num_qo_heads=nq, num_kv_heads=nk,
-            head_dim=HD, causal=True, logits_soft_cap=0.0, dtype=_t.bfloat16,
-            contiguous_kv=True, seed=42, profile=True, skip_reference=True,
+        sys.path.insert(0, aiter_root)
+        from aiter import dtypes
+        from op_tests.test_batch_prefill import test_batch_prefill
+
+        page_size = int(os.environ.get("CK_PAGE_SIZE", "1024"))
+        r = test_batch_prefill(
+            kvcache_layout="vectorized",
+            table_layout="sglang",
+            input_dtype=dtypes.fp8,
+            batch_size=b,
+            qo_len=sq,
+            kv_len=sk,
+            page_size=page_size,
+            num_qo_heads=nq,
+            num_kv_heads=nk,
+            head_dim=HD,
+            causal=True,
+            logits_soft_cap=0.0,
+            dtype=torch.bfloat16,
+            q_init_min=-10,
+            q_init_max=10,
+            kv_init_min=-5,
+            kv_init_max=5,
+            contiguous_kv=True,
+            return_lse=False,
+            seed=42,
+            profile=True,
         )
-        return r["time_us"] / 1e3, r["tflops"], 0
+        if r and r.get("time_us") is not None:
+            return r["time_us"] / 1e3, r["tflops"], 0
     except Exception:
         return None
+    return None
 
 
 def bench_pyisa(b, sq, sk, nq, nk):
