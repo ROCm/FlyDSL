@@ -133,7 +133,6 @@ def use_n4k4_bscale_layout(
     scale_mode="mxscale",
     scale_load_path="tdm",
     use_scale_opsel=False,
-    b_streaming=False,
 ):
     """Whether B-scale uses the tile-independent N4K4 preshuffle layout."""
     if scale_mode != "mxscale":
@@ -155,7 +154,7 @@ def use_n4k4_bscale_layout(
     n_accs = wmma_m_rep * wmma_n_rep
     # Row-major streaming is selected exactly when a rep is odd or n_accs < 8
     # (see _pick_compute_schedule_kind); otherwise fp8/a8w4 route to quadrant.
-    return (not b_streaming) and (wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8)
+    return wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8
 
 
 @functools.lru_cache(maxsize=256)
@@ -183,7 +182,6 @@ def compile_fp8fp4_gemm(
     use_scale_opsel: bool = False,
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
-    b_streaming: bool = False,
     scale_load_path: str = "tdm",
     fp8_schedule: str = "auto",
 ):
@@ -228,8 +226,6 @@ def compile_fp8fp4_gemm(
         raise ValueError(f"fp8_schedule must be one of {fp8_schedule_modes}, got {fp8_schedule!r}")
     if fp8_schedule != "auto" and data_format != "fp8":
         raise ValueError(f"fp8_schedule={fp8_schedule!r} is only valid for data_format='fp8'")
-    if fp8_schedule != "auto" and b_streaming:
-        raise ValueError("fp8_schedule cannot be combined with b_streaming=True")
     effective_expert_sched_mode = bool(expert_sched_mode)
 
     if num_buffers not in (2, 3, 4, 5, 6):
@@ -336,7 +332,6 @@ def compile_fp8fp4_gemm(
         scale_mode=scale_mode,
         scale_load_path=scale_load_path,
         use_scale_opsel=use_scale_opsel,
-        b_streaming=b_streaming,
     )
     use_n4k4_opsel = False
     if use_n4k4_bscale:
@@ -568,7 +563,6 @@ def compile_fp8fp4_gemm(
     COMPUTE_SCHEDULE_FP4_COL_BAND = "fp4_col_band"
     COMPUTE_SCHEDULE_FP8_QUADRANT = "fp8_quadrant"
     COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE = "fp8_deep_pipeline"
-    COMPUTE_SCHEDULE_B_STREAMING = "b_streaming"
 
     fp8_deep_pipeline_eligible = (
         data_format in ("fp8", "a8w4")
@@ -590,8 +584,6 @@ def compile_fp8fp4_gemm(
         )
 
     def _pick_compute_schedule_kind():
-        if b_streaming:
-            return COMPUTE_SCHEDULE_B_STREAMING
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         # Quadrant schedules split B into left/right halves and compute
@@ -612,7 +604,6 @@ def compile_fp8fp4_gemm(
     use_fp4_bank_friendly_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
-    use_b_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING
 
     if use_n4k4_bscale:
         assert compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
@@ -640,11 +631,6 @@ def compile_fp8fp4_gemm(
         and num_buffers == 4
         and use_cluster
     )
-    if use_b_streaming_schedule:
-        print(
-            f"[b_streaming] {data_format} tile=({tile_m},{tile_n},{tile_k}) " f"M_r={wmma_m_rep} N_r={wmma_n_rep}",
-            flush=True,
-        )
 
     if use_fp4_bank_friendly_schedule:
         _bank_half_wm = wmma_m_rep // 2
@@ -1367,59 +1353,6 @@ def compile_fp8fp4_gemm(
                 return accs, next_result
             return accs
 
-        def _b_streaming_compute(
-            accs,
-            b_buf,
-            b_bases,
-            a_frags,
-            a_scales,
-            b_scales,
-            ks,
-            emit_filler=None,
-            next_info=None,
-            mid_compute_callback=None,
-        ):
-            """B-streaming counterpart to _a_streaming_compute (A held, B streamed)."""
-            next_result = None
-            _front_wn = (wmma_n_rep + 1) // 2
-            _back_wn = wmma_n_rep - _front_wn
-
-            def _emit_cols(start_wn, b_frags_chunk):
-                for frag_i in range_constexpr(len(b_frags_chunk)):
-                    wn = start_wn + frag_i
-                    if const_expr(wn == wmma_n_rep - 1 and emit_filler is not None):
-                        rocdl.sched_barrier(0)
-                        emit_filler()
-                    for wm_raw in range_constexpr(wmma_m_rep):
-                        wm = (wmma_m_rep - 1 - wm_raw) if (wn % 2 == 1) else wm_raw
-                        _emit_wmma(accs, wm, wn, a_frags[wm], b_frags_chunk[frag_i], a_scales, b_scales)
-
-            b_frags_front = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(_front_wn)]
-            _use_partial_drain = next_info is not None and _front_wn * wmma_m_rep >= 4
-
-            if const_expr(_use_partial_drain):
-                next_result = _load_a_and_scales(*next_info)
-                rocdl.s_wait_dscnt(_as_ds_loads)
-            else:
-                rocdl.s_wait_dscnt(0)
-
-            _emit_cols(0, b_frags_front)
-
-            if const_expr(mid_compute_callback is not None):
-                rocdl.sched_barrier(0)
-                mid_compute_callback()
-
-            if const_expr(_back_wn > 0):
-                b_frags_back = [load_b_frag(b_buf, b_bases, _front_wn + h, ks) for h in range_constexpr(_back_wn)]
-                rocdl.s_wait_dscnt(_as_ds_loads if _use_partial_drain else 0)
-                _emit_cols(_front_wn, b_frags_back)
-
-            if const_expr(_use_partial_drain):
-                return accs, next_result
-            if const_expr(next_info is not None):
-                return accs, _load_a_and_scales(*next_info)
-            return accs
-
         # ── Compute on one LDS buffer ──
         def compute_tile(
             accs_in,
@@ -1999,57 +1932,6 @@ def compile_fp8fp4_gemm(
 
             return current_accs
 
-        def compute_tile_b_streaming(
-            accs_in, lds_a, lds_b, lds_as, lds_bs, emit_filler=None, mid_compute_callback=None
-        ):
-            """compute_tile counterpart with A held and B streamed."""
-            current_accs = list(accs_in)
-            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
-            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
-            as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
-            bs_buf, bs_bases = _precompute_scale_lane_bases(
-                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
-            )
-            load_args = (a_buf, a_bases, as_buf, as_bases, bs_buf, bs_bases)
-
-            if const_expr(k_wmma_steps == 1):
-                a_frags, a_scales, b_scales = _load_a_and_scales(*load_args, 0)
-                return _b_streaming_compute(
-                    current_accs,
-                    b_buf,
-                    b_bases,
-                    a_frags,
-                    a_scales,
-                    b_scales,
-                    0,
-                    emit_filler=emit_filler,
-                    mid_compute_callback=mid_compute_callback,
-                )
-
-            prev_a, prev_as, prev_bs = _load_a_and_scales(*load_args, 0)
-            for ks in range_constexpr(k_wmma_steps - 1):
-                current_accs, (prev_a, prev_as, prev_bs) = _b_streaming_compute(
-                    current_accs,
-                    b_buf,
-                    b_bases,
-                    prev_a,
-                    prev_as,
-                    prev_bs,
-                    ks,
-                    next_info=load_args + (ks + 1,),
-                    mid_compute_callback=mid_compute_callback if ks == 0 else None,
-                )
-            return _b_streaming_compute(
-                current_accs,
-                b_buf,
-                b_bases,
-                prev_a,
-                prev_as,
-                prev_bs,
-                k_wmma_steps - 1,
-                emit_filler=emit_filler,
-            )
-
         def hot_loop_scheduler():
             _half_wm = wmma_m_rep // 2
             _half_wmma = _half_wm * wmma_n_rep
@@ -2173,16 +2055,6 @@ def compile_fp8fp4_gemm(
             pf_a_scales=None,
             pf_b_scales=None,
         ):
-            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
-                return compute_tile_b_streaming(
-                    accs_in,
-                    lds_a,
-                    lds_b,
-                    lds_as,
-                    lds_bs,
-                    emit_filler=emit_filler,
-                    mid_compute_callback=mid_compute_callback,
-                )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 return compute_tile_fp4_bank_friendly(
                     accs_in,
@@ -2232,32 +2104,8 @@ def compile_fp8fp4_gemm(
                 pf_b_scales=pf_b_scales,
             )
 
-        def hot_loop_scheduler_b_streaming():
-            """hot_loop_scheduler counterpart for B-streaming."""
-            _front_wn = (wmma_n_rep + 1) // 2
-            _back_wn = wmma_n_rep - _front_wn
-            _a_loads_total = wmma_m_rep * DS_LOADS_PER_A_FRAG
-            _front_b_loads = _front_wn * _b_frag_loads_per_wn
-            _back_b_loads = _back_wn * _b_frag_loads_per_wn
-            _next_ks_loads = _a_loads_total + _scale_ds_loads
-
-            for _ks in range_constexpr(k_wmma_steps):
-                if const_expr(_ks == 0):
-                    rocdl.sched_dsrd(_next_ks_loads + _front_b_loads)
-                else:
-                    rocdl.sched_dsrd(_front_b_loads)
-                rocdl.sched_mfma(_front_wn * wmma_m_rep)
-                if const_expr(_back_wn > 0):
-                    rocdl.sched_dsrd(_back_b_loads)
-                    rocdl.sched_mfma(_back_wn * wmma_m_rep)
-                if const_expr(_ks < k_wmma_steps - 1):
-                    rocdl.sched_dsrd(_next_ks_loads)
-            rocdl.sched_barrier(0)
-
         def hot_loop_scheduler_scheduled():
-            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_B_STREAMING):
-                hot_loop_scheduler_b_streaming()
-            elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_COL_BAND):
                 hot_loop_scheduler_fp4_bank_friendly()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
                 hot_loop_scheduler_fp8_deep_pipeline()
@@ -3067,7 +2915,6 @@ def compile_fp8fp4_gemm(
         use_scale_opsel,
         expert_sched_mode,
         atomic_barrier_enable,
-        b_streaming,
         scale_load_path,
         fp8_schedule,
     )
@@ -3180,7 +3027,6 @@ def compile_ptpc_gemm(
     return compile_fp8fp4_gemm(
         data_format=data_format,
         scale_mode="ptpc",
-        b_streaming=False,
         wave_specialized_tdm=True,
         use_scale_opsel=False,
         fp8_schedule="auto",

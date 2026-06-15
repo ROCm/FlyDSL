@@ -491,7 +491,6 @@ def _run_mxscale_gemm_test(
     waves_per_eu=None,
     expert_sched_mode=True,
     split_k=1,
-    b_streaming=False,
     scale_load_path="tdm",
     return_launch_fn=False,
 ):
@@ -605,7 +604,6 @@ def _run_mxscale_gemm_test(
         n=padded_n,
         scale_load_path=scale_load_path,
         use_scale_opsel=use_scale_opsel,
-        b_streaming=b_streaming,
     ):
         b_scale = preshuffle_e8m0_bscale_n4k4(b_scale)
     else:
@@ -651,7 +649,6 @@ def _run_mxscale_gemm_test(
         split_k=split_k,
         use_scale_opsel=use_scale_opsel,
         expert_sched_mode=expert_sched_mode,
-        b_streaming=b_streaming,
         scale_load_path=scale_load_path,
     )
 
@@ -1907,8 +1904,6 @@ def _run_benchmark(args):
             _ptpc_ignored.append("--use-scale-opsel")
         if args.scale_load_path != "tdm":
             _ptpc_ignored.append(f"--scale-load-path {args.scale_load_path}")
-        if args.b_streaming:
-            _ptpc_ignored.append("--b-streaming")
         if _ptpc_ignored:
             print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
@@ -2049,7 +2044,6 @@ def _run_benchmark(args):
             use_scale_opsel=args.use_scale_opsel,
             expert_sched_mode=args.expert_sched_mode,
             atomic_barrier_enable=args.atomic_barrier_enable,
-            b_streaming=args.b_streaming,
             scale_load_path=args.scale_load_path,
         )
 
@@ -2332,7 +2326,6 @@ def _run_graph_verify(args):
         use_scale_opsel=args.use_scale_opsel,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
-        b_streaming=args.b_streaming,
         scale_load_path=args.scale_load_path,
     )
 
@@ -2452,7 +2445,6 @@ if __name__ == "__main__":
         choices=["tdm", "vgpr"],
     )
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
-    parser.add_argument("--b-streaming", action="store_true", default=False)
     parser.add_argument(
         "--atomic-barrier-enable",
         action="store_true",
@@ -2557,7 +2549,6 @@ if __name__ == "__main__":
                 inst_prefetch=args.inst_prefetch,
                 waves_per_eu=args.waves_per_eu,
                 expert_sched_mode=args.expert_sched_mode,
-                b_streaming=args.b_streaming,
                 scale_load_path=args.scale_load_path,
             )
 
