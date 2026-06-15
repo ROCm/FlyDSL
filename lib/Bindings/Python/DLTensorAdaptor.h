@@ -28,7 +28,19 @@ public:
       throw std::runtime_error("DLTensor must have at least one dimension");
     }
     shape_.assign(tensor_->shape, tensor_->shape + ndim_);
-    stride_.assign(tensor_->strides, tensor_->strides + ndim_);
+    if (tensor_->strides) {
+      stride_.assign(tensor_->strides, tensor_->strides + ndim_);
+    } else {
+      // DLPack: NULL strides denotes a row-major compact tensor. Strides are in
+      // *elements* (not bytes): last dim is 1, each earlier dim the product of
+      // the trailing shapes.
+      stride_.resize(ndim_);
+      int64_t s = 1;
+      for (int i = ndim_ - 1; i >= 0; --i) {
+        stride_[i] = s;
+        s *= shape_[i];
+      }
+    }
   }
 
   nb::tuple getShape() const {

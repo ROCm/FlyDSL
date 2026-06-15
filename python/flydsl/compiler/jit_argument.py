@@ -382,9 +382,11 @@ class DLTensorJitArg(MemRefJitArg):
         return self.adaptor.dtype
 
     def __c_abi_spec__(self):
+        with_stream = self.with_stream_dlpack
+
         def _open(a):
             t = a.dltensor if hasattr(a, "dltensor") else a
-            return DLTensorAdaptor(t.__dlpack__(stream=-1) if a.with_stream_dlpack else t.__dlpack__())
+            return DLTensorAdaptor(t.__dlpack__(stream=-1) if with_stream else t.__dlpack__())
 
         if not self.is_layout_dynamic:
 
@@ -550,9 +552,8 @@ def from_dlpack(
     *,
     assumed_align: Optional[int] = None,
     use_32bit_stride: bool = False,
-) -> TorchTensorJitArg:
-    # TODO: change to DLTensorJitArg.
-    return TorchTensorJitArg(tensor, assumed_align, use_32bit_stride, dynamic_layout=False)
+) -> DLTensorJitArg:
+    return DLTensorJitArg(tensor, assumed_align, use_32bit_stride, dynamic_layout=False)
 
 
 def from_torch_tensor(
