@@ -25,6 +25,7 @@ import flydsl.compiler as flyc  # noqa: E402,I001
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm_fp8fp4_gfx1250 import (  # noqa: E402
+    _is_fp8_deep_pipeline,
     compile_mxscale_gemm,
     compile_ptpc_gemm,
     use_n4k4_bscale_layout,
@@ -460,6 +461,8 @@ def _run_mxscale_gemm_test(
         ascale_load_path=ascale_load_path,
         use_scale_opsel=use_scale_opsel,
         wave_specialized_tdm=wave_specialized_tdm,
+        num_buffers=num_buffers,
+        out_dtype=out_dtype,
     )
     if _natural_ascale:
         # Natural path reads A_scale[M, K//32] straight from VGPRs -- no reshuffle,
@@ -939,6 +942,44 @@ def test_mxscale_natural_ascale(data_format, M, tile_m, tile_n, tile_k, m_warp, 
         wave_specialized_tdm=True,
         l2_prefetch_distance=0,
         use_scale_opsel=False,
+    )
+
+
+@pytest.mark.parametrize("ascale_load_path", ["vgpr", "tdm"])
+@pytest.mark.parametrize("data_format", ["fp8", "a8w4"])
+def test_mxscale_deep_pipeline(data_format, ascale_load_path):
+    # Deep-pipeline (fixed 256x256x128 / nbuf4 / wave-spec): 32x4 B-scale + A-scale
+    # via natural VGPR (default) or 32x4 TDM. Guard: must hit the deep schedule.
+    assert _is_fp8_deep_pipeline(
+        data_format=data_format,
+        tile_m=256,
+        tile_n=256,
+        tile_k=128,
+        m_warp=2,
+        n_warp=2,
+        num_buffers=4,
+        out_dtype="bf16",
+        wave_specialized_tdm=True,
+        use_scale_opsel=False,
+        fp8_schedule="auto",
+    ), "config does not hit the deep-pipeline schedule"
+    _run_mxscale_gemm_test(
+        data_format,
+        256,
+        256,
+        512,
+        256,
+        256,
+        128,
+        2,
+        2,
+        4,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        wave_specialized_tdm=True,
+        l2_prefetch_distance=0,
+        use_scale_opsel=False,
+        ascale_load_path=ascale_load_path,
     )
 
 
