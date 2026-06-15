@@ -398,7 +398,7 @@ def attn_kernel(
                 sv.append(fx.Vector(acc_raw))
 
             # --- descale + causal mask for all subtiles -> s_vals[sub][i] ---
-            qs = q_descale * fx.Float32(sm_scale)  # per-lane constant (folds sm into q descale)
+            qs = q_descale * fx.Float32(sm_scale * LOG2E)  # per-lane const (folds sm AND log2e into descale)
             s_all = []  # flat list over subtiles
             for sub in fx.range_constexpr(NSUB):
                 kv0 = kv0_outer + fx.Int32(sub * BN)
@@ -428,7 +428,7 @@ def attn_kernel(
             m_new = m_run.maximumf(m_loc)
             m_is_neg = m_new < fx.Float32(-1.0e38)
             safe_m = m_is_neg.select(fx.Float32(0.0), m_new)
-            corr = fx.Float32(fx.rocdl.exp2(f32t, _ar((m_run - safe_m) * fx.Float32(LOG2E))))
+            corr = fx.Float32(fx.rocdl.exp2(f32t, _ar(m_run - safe_m)))
             corr = m_is_neg.select(fx.Float32(0.0), corr)
 
             # exp + running-sum (per element), then a single rescale of o_acc.
@@ -437,7 +437,7 @@ def attn_kernel(
             for sub in fx.range_constexpr(NSUB):
                 p_sub = []
                 for i in fx.range_constexpr(16):
-                    p = fx.Float32(fx.rocdl.exp2(f32t, _ar((s_all[sub][i] - safe_m) * fx.Float32(LOG2E) + log2_pscale)))
+                    p = fx.Float32(fx.rocdl.exp2(f32t, _ar((s_all[sub][i] - safe_m) + log2_pscale)))
                     p_sub.append(p)
                     l_loc = l_loc + p
                 p_all.append(p_sub)
