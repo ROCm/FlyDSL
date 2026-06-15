@@ -3,7 +3,7 @@
 
 from itertools import chain
 from types import SimpleNamespace
-from typing import Callable, List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Callable, List, Protocol, Tuple, runtime_checkable
 
 from .._mlir import ir
 
