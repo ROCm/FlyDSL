@@ -34,11 +34,29 @@ Tunables (env): FMHA_NWAVES (waves/wg, default 4 -> TILE_BM=128), FMHA_KT (outer
 default 32), FMHA_VCOL (column-V, default 1), FMHA_DIAG (diagonal-pair, default 1),
 FMHA_BUFK (async K DMA, default 0 -- broken in this wheel).
 
-PERF (MI308X gfx942, flydsl 0.2.0), bs=1 nq8 nk1 causal, TFLOPS @ sq 1024/2048/16384/32768:
-    this kernel  5 / 16 / 61 / 69      (VGPR 165, LDS 16 KB, 0 spills)
-    v8 baseline  5 / 15 / 50 / 57
-    CK-Tile fp8  30 / 62 / 141 / 145
-=> +22% over the best prior FlyDSL kernel at large seq; still ~2.1x behind CK at large seq.
+PERF (MI308X gfx942, flydsl 0.2.0), bs=1 nq8 nk1 causal, TFLOPS @ sq 1024/16384/32768
+(2026-06-15 re-measure, live CK via aiter):
+    this kernel  6 / 108 / 128     (VGPR 166, LDS 18944, 0 spills)
+    CK-Tile fp8  37 / 170 / 177
+=> ratio CK/FlyDSL = 6.2 / 1.57 / 1.38 (was 1.65/1.45 before this session's VALU folds).
+
+2026-06-15 VALU-FOLD SESSION (+5/+6 TF @ sq16384/32768): three op-count cuts kept, all confirmed
+VALU-bound by PMC (VALUBusy 62% vs MfmaUtil 24% at sq16384):
+    (1) fold LOG2E into the qs descale const (scores live in log2-space; drops a per-element fmul);
+    (2) drop the explicit sched_mfma(1)/sched_dsrd hints (they over-constrained the post-RA
+        scheduler; removing them gained ~1-2 TF AND removed code);
+    (3) fold the loop-invariant log2_pscale into the softmax pivot (safe_m_p = safe_m - log2_pscale),
+        removing one add per softmax element.
+UPPER-BOUND PROBE: gutting the softmax max-reduction + exp2 gives 129/156 TF -- but CK's 170/177 is
+ABOVE even that VALU-free ceiling, so the residual gap is OCCUPANCY (3 waves, VGPR-pinned at 166),
+not just VALU. NEW DEAD-ENDS this session (all measured): waves_per_eu/maxnreg compile hints (the
+0.2.0 embedded gpu-module-to-binary backend formats --amdgpu-num-vgpr but the VGPR count stays 166
+-> no 4th wave); kdv-hoist / vectorized-descale / KT=64 (all +VGPR -> regress, confirming hard
+VGPR-binding); manual max/sum trees (compiler already schedules optimally); s_setprio removal
+(regresses -> the existing setprio is load-bearing); halving the P-transpose ds_bpermute (WRONG --
+the 4 permutes gather from distinct source-lane halves, not redundant). Small seq (sq1024) stays
+grid-starved at 6 TF: split-K is a documented wash and DIAG=0/smaller-tile only reach 7 TF (each
+block does too little work; CK's 37 TF needs a persistent/finer scheme = major rewrite).
 
 KEY WIN -- COLUMN-V (VCOL): CK's true vec_k_col_v stores V column-major so the GEMM2 contraction
 dim (kv) is contiguous => NO transpose. We match it (pack_paged_cache(v_col=True)); the V->LDS
@@ -48,17 +66,24 @@ transpose DS-wait is irreducible / needs gfx950 ds_read_tr -- CK avoids it purel
 so do we. Second win: masked/unmasked loop split (CK does this) -- interior tiles skip the
 per-element causal-mask VALU (VALU:MFMA 24->19, +13%).
 
-REMAINING GAP (~2.1x) is VALU/scheduling-bound, not memory or transpose:
-  * VALU:MFMA ~19:1; the softmax VALU sits between the two MFMA bursts with no independent MFMA to
-    hide it. Overlapping it needs cross-tile software pipelining with INDEPENDENT MFMA streams.
-  * FlyDSL 0.2.0's scheduler does NOT auto-overlap MFMA with VALU (batched GEMM1+softmax, bigger
-    KT, and arith.maxnumf-vs-maximumf all failed to help or regressed); occupancy is VGPR-pinned
-    at 3 waves/SIMD and workgroup-size tuning didn't move it.
-  * buffer_load_to_lds (would free VGPR for a big tile) is BROKEN (wrong results; v12 too).
-DEAD-ENDS here: KT>32 (VGPR/occupancy regress), batched-within-tile overlap (no scheduler help),
-maxnumf (slower despite fewer ops), NWAVES!=4. Next levers to reach 145: manual cross-tile
-pipeline interleaving independent GEMM1(i+1) MFMAs into softmax(i) VALU; external-LLVM VGPR cap
-for 4 waves/SIMD; a fixed buffer_load_to_lds; or gfx950 ds_read_tr.
+REMAINING GAP (1.38-1.57x) is OCCUPANCY-bound: the kernel is wedged at 3 waves/SIMD by VGPR=166
+(the o_acc accumulators alone are 64 VGPR, allocated to VGPR not AGPR -- agpr_count=0). CK's 177 TF
+exceeds our exp2-free upper bound of 156, so closing the gap REQUIRES a 4th wave (needs VGPR<=128)
+or an independent-MFMA software pipeline -- both blocked here:
+  * VALU:MFMA ~62:24 (PMC); softmax VALU sits between the MFMA bursts with no independent MFMA to
+    hide it. A cross-tile pipeline (GEMM1(i+1) MFMAs during softmax(i)) needs 2 tiles' accumulators
+    live = +16 VGPR -> drops to 2 waves (every +VGPR lever measured this session regressed).
+  * The 4-wave occupancy unlock is unreachable in the 0.2.0 wheel: waves_per_eu/maxnreg hints ARE
+    plumbed (--amdgpu-waves-per-eu/--amdgpu-num-vgpr in the embedded gpu-module-to-binary backend)
+    but the VGPR allocation ignores the cap (stays 166); AGPR accumulation is not exposed; external
+    -LLVM codegen (FLYDSL_COMPILE_LLVM_DIR) would respect function attrs but needs a separate
+    validated LLVM/MLIR install prefix (high effort, part of the JIT cache key).
+  * buffer_load_to_lds (would free K's VGPRs for a big tile) is STILL BROKEN (re-tested: err 3.0).
+DEAD-ENDS: KT>32, NWAVES!=4, maxnumf, batched-within-tile overlap, readfirstlane, XOR-swizzle,
+buffer_load_to_lds, waves_per_eu/maxnreg hints, kdv-hoist, vectorized-descale, manual reduction
+trees, dropping s_setprio. Genuine next levers (all major effort): external-LLVM VGPR cap or AGPR
+accumulation for 4 waves/SIMD; a fixed buffer_load_to_lds; gfx950 ds_read_tr; or a persistent /
+finer-grained scheme for small-seq grid starvation.
 """
 
 import os
