@@ -2666,8 +2666,9 @@ def compile_mixed_moe_gemm2(
             raise ValueError(f"fused_p2p_scatter requires out_dtype bf16/f16, got {out_dtype!r}")
         if accumulate:
             raise ValueError("fused_p2p_scatter requires accumulate=False (no local atomic_add).")
-        if doweight_stage2:
-            raise ValueError("fused_p2p_scatter requires doweight_stage2=False (combine handles weighting).")
+        # doweight_stage2 is supported in the fused P2P path: the epilogue
+        # weights each GEMM2 fragment by sorted_weights[row] before the scatter,
+        # required because combine_no_stage1 reduces tokens unweighted.
         if enable_bias:
             raise ValueError("fused_p2p_scatter does not support enable_bias=True (PR1 MVP).")
         if topk != _fp2p_k:
@@ -2680,6 +2681,7 @@ def compile_mixed_moe_gemm2(
                 "fused_p2p_scatter requires use_cshuffle_epilog=True (LDS shuffle to coalesce P2P stores)."
             )
 
+        _fp2p_doweight = bool(doweight_stage2)
         _fp2p_log2_max_tok = _fp2p_max_tok.bit_length() - 1
         _fp2p_mask_max_tok = _fp2p_max_tok - 1
         # bf16/f16 -> 2 bytes/elem; fp8_cast packs via cvt_pk_fp8_f32 in the
@@ -2689,6 +2691,7 @@ def compile_mixed_moe_gemm2(
     else:
         _fp2p_npes = _fp2p_rank = _fp2p_max_tok = _fp2p_k = 0
         _fp2p_enable_wts = _fp2p_fp8_cast = False
+        _fp2p_doweight = False
         _fp2p_log2_max_tok = _fp2p_mask_max_tok = None
         _fp2p_token_nbytes = 0
 
@@ -2735,6 +2738,7 @@ def compile_mixed_moe_gemm2(
             f"_k{_fp2p_k}"
             f"{'_wts' if _fp2p_enable_wts else ''}"
             f"{'_fp8' if _fp2p_fp8_cast else ''}"
+            f"{'_dw2' if _fp2p_doweight else ''}"
         )
     _tfs_modtag = "_tfsync" if _tfs_enabled else ""
     module_name = (
@@ -2814,6 +2818,7 @@ def compile_mixed_moe_gemm2(
             # token-level-sync params (DCE'd when _tfs_enabled is False).
             addr_local_counter: fx.Int64,        # i32[mr*topk] device-local counter
             addr_p2p_comb_flag: fx.Int64,        # i64[npes]    remote shmem_comb_token_flag bases
+            addr_total_recv: fx.Int64,           # i32[>=1] dispatch total_recv (real token count); approach-1 ghost gate
             i32_tokens_in: fx.Int32,
             i32_n_in: fx.Int32,
             i32_k_in: fx.Int32,
@@ -4152,6 +4157,18 @@ def compile_mixed_moe_gemm2(
                     _c_topk_v2 = arith.constant(int(_fp2p_k))
                     _c_out_elem_bytes_i32 = arith.constant(int(out_elem_bytes))
 
+                    # Ghost gate source: load dispatch total_recv (real token
+                    # count) once and promote to SGPR; rows with t >= total_recv
+                    # are padding and get dropped below.
+                    _r_total_recv = buffer_ops.create_buffer_resource_from_addr(
+                        addr_total_recv
+                    )
+                    num_real_i32 = buffer_ops.buffer_load(
+                        _r_total_recv, arith.constant(0, index=True),
+                        vec_width=1, dtype=T.i32,
+                    )
+                    num_real_i32 = rocdl.ReadfirstlaneOp(T.i32, num_real_i32).res
+
                     def precompute_row(*, row_local, row):
                         fused2 = memref.load(lds_tid, [row_local])
                         row_i32 = arith.index_cast(T.i32, row)
@@ -4161,16 +4178,19 @@ def compile_mixed_moe_gemm2(
                         t = fused2 & mask24_i32
                         s = fused2 >> 24
                         s_ok = arith.cmpi(CmpIPredicate.ult, s, topk_i32_v)
+                        # Ghost gate: drop rows whose sorted token id t exceeds
+                        # the real token count (replaces dispatch sentinel-fill).
+                        t_ok = arith.cmpi(CmpIPredicate.ult, t, num_real_i32)
 
                         # dest_enc was resolved by the prologue into lds_addr_tis.
                         dest_enc = memref.load(lds_addr_tis, [row_local])
                         dest_pe = dest_enc >> _c_log2_max_tok
                         dest_lid = dest_enc & _c_mask_max_tok
-                        # Drop ghost sort rows (sentinel dest_pe == npes),
-                        # mirroring the baseline ``dest_pe < npes`` gate.
+                        # pe_ok now only guards the LDS base lookup against stale
+                        # ghost dest_enc; ghost rows themselves are dropped by t_ok.
                         pe_ok = arith.cmpi(CmpIPredicate.ult, dest_pe, _c_npes_i32)
                         row_valid = arith.andi(
-                            row_valid0, arith.andi(s_ok, pe_ok)
+                            row_valid0, arith.andi(t_ok, arith.andi(s_ok, pe_ok))
                         )
                         # Clamp the sentinel dest_pe to 0 for the LDS base lookup
                         # to avoid an OOB read (base is discarded for ghost rows).
@@ -4192,6 +4212,8 @@ def compile_mixed_moe_gemm2(
                                 pe_base_i64
                             )
                         )
+                        # When doweight is on, the weight is already applied
+                        # upstream in write_row_to_lds; do NOT re-apply it here.
                         # dest_pe / dest_lid / row_i32 are only consumed by
                         # after_row_stores (token-level-sync); ignored when OFF.
                         return (
@@ -4582,6 +4604,7 @@ def compile_mixed_moe_gemm2(
             addr_p2p_comb_inp_wts: fx.Int64,
             addr_local_counter: fx.Int64,
             addr_p2p_comb_flag: fx.Int64,
+            addr_total_recv: fx.Int64,
             i32_tokens_in: fx.Int32,
             i32_n_in: fx.Int32,
             i32_k_in: fx.Int32,
@@ -4594,7 +4617,7 @@ def compile_mixed_moe_gemm2(
                  arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
                  arg_num_valid_ids, arg_bias),
                 (addr_tis, addr_p2p_comb_inp, addr_wts_buf, addr_p2p_comb_inp_wts,
-                 addr_local_counter, addr_p2p_comb_flag),
+                 addr_local_counter, addr_p2p_comb_flag, addr_total_recv),
                 i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in, stream,
             )
 
@@ -4629,7 +4652,7 @@ def compile_mixed_moe_gemm2(
              arg_sorted_token_ids, arg_expert_ids, arg_sorted_weights,
              arg_num_valid_ids, arg_bias),
             (_zero_i64, _zero_i64, _zero_i64, _zero_i64,
-             _zero_i64, _zero_i64),
+             _zero_i64, _zero_i64, _zero_i64),
             i32_tokens_in, i32_n_in, i32_k_in, i32_size_expert_ids_in, stream,
         )
 

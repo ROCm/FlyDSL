@@ -64,6 +64,7 @@ class FlyDSLMoeGemm2CombineOp:
         b_dtype: str = "fp4",
         xcd_swizzle: int = 0,
         use_token_flag_sync: bool = False,
+        doweight_fused: bool = True,
     ):
         self.comb_cfg    = comb_cfg
         self.comb_op     = comb_op
@@ -78,6 +79,9 @@ class FlyDSLMoeGemm2CombineOp:
         self.b_dtype     = b_dtype
         self.xcd_swizzle = xcd_swizzle
         self.use_token_flag_sync = bool(use_token_flag_sync)
+        # Apply routing weights in the GEMM2 epilogue; combine_no_stage1
+        # reduces tokens unweighted, so this is on by default for correctness.
+        self.doweight_fused = bool(doweight_fused)
 
         # fp8_direct_cast: GEMM2 epilogue casts + 1B/elem P2P scatters inline,
         # avoiding the baseline's input.to(fp8) copy.
@@ -187,6 +191,7 @@ class FlyDSLMoeGemm2CombineOp:
             experts_per_token=k,
             xcd_swizzle=self.xcd_swizzle,
             use_token_flag_sync=self.use_token_flag_sync,
+            doweight_fused=self.doweight_fused,
         )
 
     def _run_stage1_only(self, *, a2, w2, a2_scale, w2_scale,
@@ -244,6 +249,7 @@ class FlyDSLMoeGemm2CombineOp:
             comb_op._fx_p2p_comb_inp_wts,
             comb_op._fx_local_counter,
             comb_op._fx_p2p_comb_flag,
+            comb_op._fx_out_total_recv,
         )
         if self._compiled is None:
             self._compiled = flyc.compile(

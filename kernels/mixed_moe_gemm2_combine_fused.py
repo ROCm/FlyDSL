@@ -37,6 +37,7 @@ def compile_fused_moe_gemm2_combine(
     inter_dim_pad: int = 0,
     xcd_swizzle: int = 0,
     use_token_flag_sync: bool = False,
+    doweight_fused: bool = False,
 ):
     """Compile the fused GEMM2+combine kernel and return its host launcher."""
     # Plan B slot = dest_lid * k + s; reusing baseline shmem_comb_inp_tok
@@ -96,7 +97,7 @@ def compile_fused_moe_gemm2_combine(
         b_nt=b_nt,
         a_dtype=a_dtype, b_dtype=b_dtype, out_dtype=gemm2_out_dtype,
         accumulate=False,
-        doweight_stage2=False,
+        doweight_stage2=bool(doweight_fused),
         enable_bias=False,
         model_dim_pad=model_dim_pad,
         inter_dim_pad=inter_dim_pad,

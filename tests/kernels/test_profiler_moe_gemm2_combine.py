@@ -728,7 +728,7 @@ def _dump_gemm2_inputs(args, gemm2_in, out_dtype, *, prefix="[gemm2-dump]"):
           f"({'atomic_fadd accumulates s onto output row t' if args.gemm2_accumulate else 'plain store, (t,s) owns its row'})")
     print(f"{prefix}   persist_m       = {args.persist_m}")
     print(f"{prefix}   xcd_swizzle     = {args.xcd_swizzle}")
-    print(f"{prefix}   doweight_stage2 = False")
+    print(f"{prefix}   doweight_stage2 = True")
 
     print(f"\n{prefix} === RUNTIME TENSORS (launch args; dtype/shape/dev) ===")
     print(f"{prefix}  [pos  0] o   = arg_out (gemm2_out)         "
@@ -881,7 +881,7 @@ def _build_gemm2_callable(args, gemm2_in, out_dtype):
         tile_m=args.tile_m2,
         tile_n=args.tile_n2,
         tile_k=args.tile_k2,
-        doweight_stage2=False,
+        doweight_stage2=True,
         a_dtype=args.gemm2_a_dtype,
         b_dtype=args.gemm2_b_dtype,
         out_dtype=out_s,
