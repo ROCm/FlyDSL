@@ -195,7 +195,6 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     beta_ref = beta_dev.to(DTYPE_FP32)
     if is_smooth:
         xscale_dev = xscale_t.to(torch_dtype).contiguous()
-        xscale_ref = xscale_dev.to(DTYPE_FP32)
 
     output_dev = torch.empty((M, N), device="cuda", dtype=DTYPE_INT8)
     yscale_dev = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
@@ -289,8 +288,6 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
     beta_dev = beta_t.to(torch_dtype).contiguous()
     output_dev = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     residual_out_dev = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-    gamma_ref = gamma_dev.to(DTYPE_FP32)
-    beta_ref = beta_dev.to(DTYPE_FP32)
     if dtype == "f32":
         atol = 1e-4
     elif dtype == "f16":
@@ -384,11 +381,8 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     gamma_dev = gamma_t.to(torch_dtype).contiguous()
     beta_dev = beta_t.to(torch_dtype).contiguous()
     residual_out_dev = torch.empty((M, N), device="cuda", dtype=torch_dtype)
-    gamma_ref = gamma_dev.to(DTYPE_FP32)
-    beta_ref = beta_dev.to(DTYPE_FP32)
     if is_smooth:
         xscale_dev = xscale_t.to(torch_dtype).contiguous()
-        xscale_ref = xscale_dev.to(DTYPE_FP32)
     if dtype == "f32":
         residual_atol = 1e-4
     elif dtype == "f16":

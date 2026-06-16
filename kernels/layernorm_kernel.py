@@ -17,7 +17,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
@@ -1250,7 +1249,9 @@ def _build_fused_add_layernorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            launcher = fused_add_layernorm_quant_kernel(Input, ResidualIn, Gamma, Beta, XScale, YScale, Output, ResidualOut)
+            launcher = fused_add_layernorm_quant_kernel(
+                Input, ResidualIn, Gamma, Beta, XScale, YScale, Output, ResidualOut
+            )
             launcher.launch(
                 grid=(m_in, 1, 1),
                 block=(BLOCK_THREADS, 1, 1),
@@ -1273,7 +1274,9 @@ def _build_fused_add_layernorm_quant_module(
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
-            launcher = fused_add_layernorm_quant_kernel(Input, ResidualIn, Gamma, Beta, Gamma, YScale, Output, ResidualOut)
+            launcher = fused_add_layernorm_quant_kernel(
+                Input, ResidualIn, Gamma, Beta, Gamma, YScale, Output, ResidualOut
+            )
             launcher.launch(
                 grid=(m_in, 1, 1),
                 block=(BLOCK_THREADS, 1, 1),
