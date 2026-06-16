@@ -279,14 +279,19 @@ def read_kernel_metadata(dispatch_dir, kernel_filter=""):
         chosen = None
         if kernel_filter:
             # Explicit filter: kernel name substring, narrowed by Dispatch_Id when available.
-            for r in rows:
-                if kernel_filter not in r.get("Kernel_Name", ""):
-                    continue
-                if dispatch_id and has_dispatch_col:
-                    if str(r.get("Dispatch_Id", "")).strip() != dispatch_id:
-                        continue
-                chosen = r
-                break
+            can_disambiguate = bool(dispatch_id and has_dispatch_col)
+            matches = [r for r in rows if kernel_filter in r.get("Kernel_Name", "")]
+            if can_disambiguate:
+                matches = [r for r in matches if str(r.get("Dispatch_Id", "")).strip() == dispatch_id]
+            if matches:
+                chosen = matches[0]
+                if not can_disambiguate and len(matches) > 1:
+                    # First-substring-wins: no dispatch id available to pick between same-named rows.
+                    print(
+                        f"  warning: --kernel '{kernel_filter}' matched {len(matches)} rows in "
+                        f"{os.path.basename(path)} with no dispatch id to disambiguate; using the "
+                        "first match (pass a more specific --kernel)"
+                    )
         else:
             # Legacy heuristic: bidirectional substring match against the dir basename.
             # Works for timestamped dirs like ``20240101_120000_pa_decode_kernel``.
