@@ -14,6 +14,13 @@ the per-element instruction difference via the ISA dump. It's a small, isolated 
 own — but softmax does this 16-64x per kv-tile, and removing 2 VALU ops/element adds up
 when you're VALU-heavy (the attention kernel runs at VALU:MFMA ~23:1, Lesson 12).
 
+### Idiomatic style (flydsl-layout-algebra skill, Recipe A "elementwise / 1-D")
+The global load/store is the textbook layout-API elementwise shape: make_buffer_tensor +
+two-stage logical_divide to a per-thread element view + a 32-bit copy atom into/out of an rmem
+tensor (no raw buffer_load/buffer_store byte math). The exp2 ITSELF stays direct: rocdl.exp2 vs
+Float32.exp2() on a register value is the whole point, and the softmax exp / range reduction is
+the skill's "bespoke numeric" stay-direct case, not a layout op.
+
 Run BOTH:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_13_fast_exp2.py
 ISA diff:  FLYDSL_DUMP_IR=1 FLYDSL_DUMP_DIR=/tmp/isa_slow FLYDSL_RUNTIME_ENABLE_CACHE=0 \
              HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_13_fast_exp2.py slow
@@ -41,12 +48,26 @@ def _exp2_expr(arg):
 def make_kernel(fast: bool):
     @flyc.kernel(known_block_size=[TPB, 1, 1])
     def exp_kernel(X: fx.Tensor, Y: fx.Tensor):
-        tid = fx.Int32(fx.thread_idx.x)
-        bid = fx.Int32(fx.block_idx.x)
-        idx = bid * fx.Int32(TPB) + tid
-        rX = fx.buffer_ops.create_buffer_resource(X)
-        rY = fx.buffer_ops.create_buffer_resource(Y)
-        x = fx.Float32(fx.buffer_ops.buffer_load(rX, idx, vec_width=1, dtype=fx.Float32))
+        # IDIOMATIC (flydsl-layout-algebra skill, Recipe A "elementwise / 1-D"): wrap globals with
+        # make_buffer_tensor, logical_divide to a per-thread element view, and move data through a
+        # 32-bit copy atom into/out of an rmem tensor. The exp2 itself stays DIRECT — rocdl.exp2 vs
+        # Float32.exp2() on a register value is the whole point of the lesson, and the softmax exp /
+        # range-reduction is the skill's "bespoke numeric" stay-direct case, not a layout op.
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+        bX = fx.rocdl.make_buffer_tensor(X)
+        bY = fx.rocdl.make_buffer_tensor(Y)
+
+        tX = fx.slice(fx.logical_divide(bX, fx.make_layout(TPB, 1)), (None, bid))
+        tY = fx.slice(fx.logical_divide(bY, fx.make_layout(TPB, 1)), (None, bid))
+        tX = fx.logical_divide(tX, fx.make_layout(1, 1))
+        tY = fx.logical_divide(tY, fx.make_layout(1, 1))
+
+        copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+        rX = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+        fx.copy_atom_call(copy_atom, fx.slice(tX, (None, tid)), rX)
+        x = fx.Float32(fx.Vector(fx.memref_load_vec(rX))[0])
+
         # softmax always evaluates exp(s - m) with s - m <= 0, so clamp to <= 0 to make the
         # fast path valid (this mirrors the real kernel's safe_m subtraction).
         xs = (x < fx.Float32(0.0)).select(x, fx.Float32(0.0))
@@ -55,7 +76,10 @@ def make_kernel(fast: bool):
         # value defined only inside an if/else and used after it. So compute y with NO statement-level
         # branch: a host-side helper picks the expression before tracing.
         y = _exp2_expr(arg) if fast else fx.Float32(arg.exp2())
-        fx.buffer_ops.buffer_store(y.ir_value(), rY, idx.ir_value())
+
+        rY = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+        fx.memref_store_vec(fx.Vector.from_elements([y], fx.Float32).ir_value(), rY)
+        fx.copy_atom_call(copy_atom, rY, fx.slice(tY, (None, tid)))
 
     return exp_kernel
 

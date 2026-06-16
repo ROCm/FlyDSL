@@ -18,6 +18,14 @@ Key ideas:
   - range_constexpr(N) fully UNROLLS a compile-time loop (the K steps are known at compile
     time). Runtime-bounded loops use range(start,stop,step,init=[...]) + yield (Lesson 06).
 
+### Idiomatic note
+The instruction is declared ONCE as a typed MMA atom (`make_mma_atom` +
+`fly.mma_atom_call_ssa`) instead of repeating the raw opcode each K-step — exactly the
+copy-atom-style naming from Lessons 00/01. We keep the explicit K-loop and the per-lane
+WIDE load (vec_width=4 == one 64-bit buffer load) hand-written, because chaining the
+accumulator fragment across K-steps and the wide-load mechanic ARE this lesson's payload;
+the fully tiled `fx.gemm` (which would absorb the K-loop) arrives in Lessons 03/05.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_02_gemm_tiles.py
 """
 
@@ -25,6 +33,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import fly
 from flydsl.autotune import do_bench
 
 M = N = 16
@@ -42,6 +51,10 @@ def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     rB = fx.buffer_ops.create_buffer_resource(B)
     rC = fx.buffer_ops.create_buffer_resource(C)
 
+    # IDIOMATIC: name the 16x16x16 bf16 MFMA once; reuse it every K-step.
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+    f32x4 = fx.typing.T.vec(4, fx.typing.T.f32)
+
     acc = fx.Vector.filled(4, 0.0, fx.Float32).ir_value()
     for ks in fx.range_constexpr(KSTEPS):
         k0 = ks * 16 + 0  # this K-step's base column in the [M,K]/[N,K] matrices
@@ -52,9 +65,8 @@ def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
         b_vec = fx.buffer_ops.buffer_load(rB, b_off, vec_width=4, dtype=fx.BFloat16)
         a_i16 = fx.Vector(a_vec).bitcast(fx.Int16)
         b_i16 = fx.Vector(b_vec).bitcast(fx.Int16)
-        acc = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-            fx.typing.T.vec(4, fx.typing.T.f32), a_i16.ir_value(), b_i16.ir_value(), acc, 0, 0, 0
-        )
+        # chain: this step's accumulator is last step's result (c operand).
+        acc = fly.mma_atom_call_ssa([f32x4], mma_atom, a_i16.ir_value(), b_i16.ir_value(), acc)
 
     accv = fx.Vector(acc)
     for e in fx.range_constexpr(4):

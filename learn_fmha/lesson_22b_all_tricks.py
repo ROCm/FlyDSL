@@ -25,6 +25,17 @@ transpose (ds_bpermute, Lesson 12) clean, this capstone uses the 32x32x16 fp8 MF
 the production kernel: each lane holds 16 C-regs, kv split across 2 half-groups (one
 shuffle_xor instead of two). The lane<->element layout was verified the Lesson-01 way.
 
+IDIOMATIC STYLE (matches kernels/fmha_prefill_fp8_layout.py, the layout-API rewrite of the
+production kernel): both GEMMs are driven through a TYPED MMA ATOM
+(``fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, fp8))`` + ``fly.mma_atom_call_ssa`` via the
+``_mfma`` helper) instead of the raw ``fx.rocdl.mfma_f32_32x32x16_fp8_fp8`` intrinsic — the
+MFMA shape/dtype is declared ONCE and the call sites read as a matmul op. Per the
+flydsl-layout-algebra skill's "Layout Algebra vs Direct Indexing" table, everything else stays
+DIRECT (the skill says the algebra does NOT fit): the K/V cooperative gather + hand LDS layout,
+the online softmax, the ds_bpermute P-transpose + cvt_pk_fp8 packing, and the causal-bound math
+are bespoke register packing / swizzle / reductions. This is the same hybrid scope as the layout
+template — a readability swap of the GEMMs, not a re-layout of the kernel.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_22b_all_tricks.py            # all shapes
       HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_22b_all_tricks.py 1 1024 1024 1 1.0
 """
@@ -34,6 +45,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -116,6 +128,21 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor,
         lo = fx.rocdl.cvt_pk_fp8_f32(fx.typing.T.i32, fx.Float32(v0).ir_value(), fx.Float32(v1).ir_value(), fx.Int32(0).ir_value(), False)
         return fx.rocdl.cvt_pk_fp8_f32(fx.typing.T.i32, fx.Float32(v2).ir_value(), fx.Float32(v3).ir_value(), lo, True)
 
+    # IDIOMATIC (flydsl-layout-algebra skill, "tiled-MMA" recipe): declare the 32x32x16 fp8 MFMA
+    # ONCE as a typed layout-API atom and drive BOTH GEMMs through `fly.mma_atom_call_ssa`, instead
+    # of repeating the raw `rocdl.mfma_f32_32x32x16_fp8_fp8` intrinsic at each GEMM site. Same hybrid
+    # scope as the production kernels/fmha_prefill_fp8_layout.py: the MFMA shape/dtype is named once,
+    # the call sites read as a matmul op. The operands are the SAME packed-fp8 i64 / v16f32 acc as
+    # before, so the lane dataflow (and the ds_bpermute P-transpose feeding GEMM2) is unchanged.
+    f32x16 = fx.typing.T.vec(16, f32t)
+    _mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, fx.typing.T.f8))
+
+    def _mfma(a, b, c):
+        a_raw = a.ir_value() if hasattr(a, "ir_value") else a
+        b_raw = b.ir_value() if hasattr(b, "ir_value") else b
+        c_raw = c.ir_value() if hasattr(c, "ir_value") else c
+        return fly.mma_atom_call_ssa([f32x16], _mma_atom, a_raw, b_raw, c_raw)
+
     kv_local = lane % fx.Int32(32)
 
     # causal kv-tile cap (Lesson 14): skip fully-masked tiles.
@@ -184,7 +211,7 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor,
             k_elem = kv_local * fx.Int32(HD) + fx.Int32(ks * 16) + half * fx.Int32(8)
             kv8 = fx.Vector.load(fx.typing.T.vec(8, fx.typing.T.i8), k_lds, [fx.Index(k_elem)])
             k_i64 = fx.Vector(kv8).bitcast(fx.Int64)[0]
-            acc = fx.rocdl.mfma_f32_32x32x16_fp8_fp8(fx.typing.T.vec(16, f32t), k_i64.ir_value(), q_i64[ks].ir_value(), acc, 0, 0, 0).res
+            acc = _mfma(k_i64, q_i64[ks], acc)  # GEMM1: S = K @ Q^T (typed atom)
         sv_raw = fx.Vector(acc)
         # 32x32x16 C-layout: lane holds 16 vals S[kv=(i//4)*8+half*4+i%4, q=q_local].
         sv = []
@@ -238,7 +265,7 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor,
                 v_elem = d_col * fx.Int32(BN) + fx.Int32(s * 16) + half * fx.Int32(8)
                 vv8 = fx.Vector.load(fx.typing.T.vec(8, fx.typing.T.i8), vt_lds, [fx.Index(v_elem)])
                 v_i64 = fx.Vector(vv8).bitcast(fx.Int64)[0]
-                acc2 = fx.rocdl.mfma_f32_32x32x16_fp8_fp8(fx.typing.T.vec(16, f32t), v_i64.ir_value(), p_i64_s[s].ir_value(), acc2, 0, 0, 0).res
+                acc2 = _mfma(v_i64, p_i64_s[s], acc2)  # GEMM2: O = V^T @ P (typed atom)
             o_acc[dt] = fx.Vector(acc2)
         fx.gpu.barrier()
         st = yield [m_new, l_run] + o_acc

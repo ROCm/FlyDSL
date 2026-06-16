@@ -29,6 +29,17 @@ CDNA3 (gfx942) 16x16x16 fragment layout (verified empirically below, not guessed
 We VERIFY this against torch `A @ B.T`. If the layout were wrong the assert fails — that
 is the whole point: you discover the layout by checking, never by trusting a comment.
 
+### Idiomatic note: NAME the instruction with an MMA atom
+The raw intrinsic `fx.rocdl.mfma_f32_16x16x16bf16_1k_(...)` is the bare hardware opcode.
+The layout-algebra style instead declares the instruction ONCE as a typed *MMA atom*
+  `fx.make_mma_atom(fx.rocdl.MFMA(M, N, K, bf16))`
+and calls it with `fly.mma_atom_call_ssa([acc_type], atom, a, b, c)`. The atom is the
+matrix analogue of the copy atom from Lesson 00: it names WHICH instruction; the lane
+fragments below say WHICH element each lane feeds it. In a full GEMM you'd let
+`fx.make_tiled_mma` + `fx.gemm` build the fragments for you (Lessons 02/03/05), but here
+we keep the fragment loads EXPLICIT and hand-written, because the lane<->element mapping
+IS the lesson — `fx.gemm` would hide exactly what we are trying to expose.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_01_single_mfma.py
 """
 
@@ -36,6 +47,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import fly
 
 M = N = KD = 16  # one 16x16x16 tile
 
@@ -50,7 +62,13 @@ def mfma_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     rB = fx.buffer_ops.create_buffer_resource(B)
     rC = fx.buffer_ops.create_buffer_resource(C)
 
+    # IDIOMATIC: declare the 16x16x16 bf16 MFMA once as a typed atom (vs spelling out the
+    # raw `mfma_f32_16x16x16bf16_1k_` opcode at the call site).
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(M, N, KD, fx.BFloat16))
+    f32x4 = fx.typing.T.vec(4, fx.typing.T.f32)
+
     # --- load this lane's A fragment: A[mn, k_outer*4 + e], e=0..3 (row-major A [M,K]) ---
+    # This explicit per-lane load IS the pedagogy: lane (k_outer, mn) owns 4 contiguous K.
     a_base = mn * fx.Int32(KD) + k_outer * fx.Int32(4)
     a_vec = fx.Vector.from_elements(
         [fx.buffer_ops.buffer_load(rA, a_base + fx.Int32(e), vec_width=1, dtype=fx.BFloat16) for e in range(4)],
@@ -67,15 +85,7 @@ def mfma_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
     # The `1k` bf16 MFMA takes its operands as vector<4xi16> (raw 16-bit lanes), so bitcast.
     a_i16 = fx.Vector(a_vec).bitcast(fx.Int16)
     b_i16 = fx.Vector(b_vec).bitcast(fx.Int16)
-    acc = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-        fx.typing.T.vec(4, fx.typing.T.f32),
-        a_i16.ir_value(),
-        b_i16.ir_value(),
-        c0.ir_value(),
-        0,
-        0,
-        0,
-    )
+    acc = fly.mma_atom_call_ssa([f32x4], mma_atom, a_i16.ir_value(), b_i16.ir_value(), c0.ir_value())
     acc = fx.Vector(acc)
 
     # --- store: lane (i_outer=k_outer, n=mn) holds C[k_outer*4 + e, mn] ---

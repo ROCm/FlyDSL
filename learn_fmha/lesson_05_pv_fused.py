@@ -28,6 +28,14 @@ is REAL and must be done (through LDS, or via ds_bpermute). We meet that head-on
 Lesson 07 (fp8) and fix it in Lessons 11-12. Teaching point: **whether you pay a transpose
 depends on the MFMA shape you chose** — it is not fundamental to attention.
 
+### Idiomatic note
+Both GEMMs use ONE typed MMA atom (`make_mma_atom` + `fly.mma_atom_call_ssa`) — declared
+once, called for QK and again per output d-tile for PV. The softmax stays direct (Lesson
+04). The explicit fragment loads/stores are kept on purpose: the lesson's whole point is
+that GEMM2's A-operand P[q,kv] is the SAME 4 registers softmax produced (no transpose for
+this 16x16x16 shape) — a fact you can only SEE in the hand-mapped lane layout, not under
+`fx.gemm`.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_05_pv_fused.py
 """
 
@@ -35,6 +43,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import fly
 
 BQ = 16
 BKV = 16
@@ -58,17 +67,22 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, sm_scale
     rV = fx.buffer_ops.create_buffer_resource(V)
     rO = fx.buffer_ops.create_buffer_resource(O)
 
+    # IDIOMATIC: one typed 16x16x16 bf16 MFMA atom serves BOTH attention GEMMs.
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+    f32x4 = fx.typing.T.vec(4, fx.typing.T.f32)
+
     # --- GEMM1: S[kv=k_outer*4+e, q=mn] ---
     acc = fx.Vector.filled(4, 0.0, fx.Float32).ir_value()
     for ks in fx.range_constexpr(KSTEPS):
         k0 = fx.Int32(ks * 16) + k_outer * fx.Int32(4)
         k_vec = fx.buffer_ops.buffer_load(rK, mn * fx.Int32(HD) + k0, vec_width=4, dtype=fx.BFloat16)
         q_vec = fx.buffer_ops.buffer_load(rQ, mn * fx.Int32(HD) + k0, vec_width=4, dtype=fx.BFloat16)
-        acc = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-            fx.typing.T.vec(4, fx.typing.T.f32),
+        acc = fly.mma_atom_call_ssa(
+            [f32x4],
+            mma_atom,
             fx.Vector(k_vec).bitcast(fx.Int16).ir_value(),
             fx.Vector(q_vec).bitcast(fx.Int16).ir_value(),
-            acc, 0, 0, 0,
+            acc,
         )
     sv = [fx.Float32(fx.Vector(acc)[e]) * fx.Float32(sm_scale) for e in range(4)]
 
@@ -101,10 +115,12 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor, sm_scale
             fx.BFloat16,
         )
         b_i16 = fx.Vector(b_bf16).bitcast(fx.Int16)
-        o = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-            fx.typing.T.vec(4, fx.typing.T.f32),
-            a_i16.ir_value(), b_i16.ir_value(),
-            fx.Vector.filled(4, 0.0, fx.Float32).ir_value(), 0, 0, 0,
+        o = fly.mma_atom_call_ssa(
+            [f32x4],
+            mma_atom,
+            a_i16.ir_value(),
+            b_i16.ir_value(),
+            fx.Vector.filled(4, 0.0, fx.Float32).ir_value(),
         )
         ov = fx.Vector(o)
         # C result: lane holds O[q=k_outer*4+e, d=dt*16+mn]

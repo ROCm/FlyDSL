@@ -23,6 +23,12 @@ Recall the C-fragment layout from Lesson 01 (mfma 16x16x16):
 sm_scale (1/sqrt(hd)) is folded in at store time (in real attention it multiplies S
 before softmax; here we apply it to show where it goes).
 
+### Idiomatic note
+The QK MFMA is declared once as a typed atom (`make_mma_atom` + `fly.mma_atom_call_ssa`),
+the same naming used for the copy atom. We keep the explicit per-lane loads and the
+C-fragment store hand-written because the S=[kv,q] layout choice — which element each lane
+ends up holding — is the whole point of this lesson and is invisible under `fx.gemm`.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_03_qk_scores.py
 """
 
@@ -30,6 +36,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import fly
 
 BQ = 16  # queries in the tile
 BKV = 16  # keys in the tile
@@ -47,6 +54,10 @@ def qk_kernel(Q: fx.Tensor, K: fx.Tensor, S: fx.Tensor, sm_scale: fx.Constexpr[f
     rK = fx.buffer_ops.create_buffer_resource(K)
     rS = fx.buffer_ops.create_buffer_resource(S)
 
+    # IDIOMATIC: name the QK MFMA (A=K, B=Q -> S = K @ Q^T) once.
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+    f32x4 = fx.typing.T.vec(4, fx.typing.T.f32)
+
     acc = fx.Vector.filled(4, 0.0, fx.Float32).ir_value()
     for ks in fx.range_constexpr(KSTEPS):
         k0 = fx.Int32(ks * 16) + k_outer * fx.Int32(4)
@@ -55,14 +66,12 @@ def qk_kernel(Q: fx.Tensor, K: fx.Tensor, S: fx.Tensor, sm_scale: fx.Constexpr[f
         q_off = mn * fx.Int32(HD) + k0
         k_vec = fx.buffer_ops.buffer_load(rK, k_off, vec_width=4, dtype=fx.BFloat16)
         q_vec = fx.buffer_ops.buffer_load(rQ, q_off, vec_width=4, dtype=fx.BFloat16)
-        acc = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-            fx.typing.T.vec(4, fx.typing.T.f32),
+        acc = fly.mma_atom_call_ssa(
+            [f32x4],
+            mma_atom,
             fx.Vector(k_vec).bitcast(fx.Int16).ir_value(),  # A = K
             fx.Vector(q_vec).bitcast(fx.Int16).ir_value(),  # B = Q  (instruction does K @ Q^T)
             acc,
-            0,
-            0,
-            0,
         )
     accv = fx.Vector(acc)
     # lane holds S[kv = k_outer*4+e, q = mn]; store with sm_scale folded in.

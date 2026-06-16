@@ -31,6 +31,13 @@ The `(sk - sq)` offset aligns the diagonal when the key sequence is longer than 
 sequence (prefix KV). Forgetting it silently breaks any case with sk != sq. Masked entries
 get score -inf -> p=0. The all-masked guard (Lesson 04) prevents NaN for fully-masked rows.
 
+### Idiomatic style (flydsl-layout-algebra skill)
+Both GEMMs go through a single typed MFMA atom: `fx.make_mma_atom(fx.rocdl.MFMA(16,16,16, bf16))`
+driven by `fly.mma_atom_call_ssa`, instead of repeating the raw `mfma_f32_16x16x16bf16_1k_`
+intrinsic. The global LOADS stay direct: the per-lane causal-masked, strided kv gathers are the
+skill's "jagged / bespoke register packing" stay-direct case, so the zipped_divide / tiled_copy
+layout partitioning is deliberately not applied to them.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_06_causal_seqloop.py
 """
 
@@ -38,6 +45,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import fly
 
 BQ = 16
 BKV = 16
@@ -63,6 +71,20 @@ def attn_kernel(Q, K, V, O, sq: fx.Int32, sk: fx.Int32, sm_scale: fx.Constexpr[f
     rK = fx.buffer_ops.create_buffer_resource(K)
     rV = fx.buffer_ops.create_buffer_resource(V)
     rO = fx.buffer_ops.create_buffer_resource(O)
+
+    # IDIOMATIC (flydsl-layout-algebra skill, "tiled-MMA" recipe): declare the 16x16x16 bf16 MFMA
+    # ONCE as a typed layout-API atom and drive BOTH GEMMs through `fly.mma_atom_call_ssa`, instead
+    # of repeating the raw `rocdl.mfma_f32_16x16x16bf16_1k_` intrinsic at each call site. The MFMA
+    # shape/dtype is named once; the call sites read as a matmul op. Operands are the SAME i16-bitcast
+    # vec(4) fragments as the raw intrinsic, so the lane dataflow is unchanged.
+    # The GLOBAL LOADS stay direct (create_buffer_resource + buffer_load): per-lane causal-masked,
+    # strided kv gathers are the skill's "jagged / bespoke register packing" stay-direct case — the
+    # zipped_divide/tiled_copy partitioning does not express them cleanly.
+    f32x4 = fx.typing.T.vec(4, fx.typing.T.f32)
+    _mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+
+    def _mfma(a_i16, b_i16, acc):
+        return fly.mma_atom_call_ssa([f32x4], _mma_atom, a_i16, b_i16, acc)
 
     # this lane's query column q = mn (single q-tile at row 0..15). Preload Q fragment (reused).
     q_packs = []
@@ -102,11 +124,10 @@ def attn_kernel(Q, K, V, O, sq: fx.Int32, sk: fx.Int32, sm_scale: fx.Constexpr[f
             k_row = kv0 + mn
             k_row_safe = (k_row < sk_i).select(k_row, fx.Int32(0))
             k_vec = fx.buffer_ops.buffer_load(rK, k_row_safe * fx.Int32(HD) + k0, vec_width=4, dtype=fx.BFloat16)
-            acc = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-                fx.typing.T.vec(4, fx.typing.T.f32),
+            acc = _mfma(
                 fx.Vector(k_vec).bitcast(fx.Int16).ir_value(),
                 fx.Vector(q_packs[ks]).bitcast(fx.Int16).ir_value(),
-                acc, 0, 0, 0,
+                acc,
             )
         # apply scale + causal mask
         sv = []
@@ -158,9 +179,7 @@ def attn_kernel(Q, K, V, O, sq: fx.Int32, sk: fx.Int32, sm_scale: fx.Constexpr[f
             a_bf16 = fx.Vector.from_elements(a_elems, fx.BFloat16)
             a_i16 = fx.Vector(a_bf16).bitcast(fx.Int16)
             o_resc = (fx.Vector(o_acc[dt]) * corr4).ir_value()
-            o_new = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-                fx.typing.T.vec(4, fx.typing.T.f32), a_i16.ir_value(), b_i16.ir_value(), o_resc, 0, 0, 0,
-            )
+            o_new = _mfma(a_i16.ir_value(), b_i16.ir_value(), o_resc)
             new_o.append(fx.Vector(o_new))
         st = yield [m_new, l_run] + new_o
 

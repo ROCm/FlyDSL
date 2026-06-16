@@ -34,6 +34,12 @@ Subtract the max before exp (standard). We also carry the all-masked guard idea:
 max is -inf (no valid kv), force it to 0 so exp(-inf - 0) = 0 instead of NaN. Not needed
 for this dense tile but introduced here because Lesson 06's causal masking will need it.
 
+### Idiomatic note
+GEMM1 reuses the typed MMA atom (`make_mma_atom` + `fly.mma_atom_call_ssa`). The softmax
+itself — the cross-lane max/sum reduction — stays as DIRECT register + `shuffle_xor` code:
+the layout-algebra skill explicitly says reductions stay direct, and the lane-shuffle
+mechanic is exactly what this lesson teaches.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_04_softmax.py
 """
 
@@ -41,6 +47,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import fly
 
 BQ = 16
 BKV = 16
@@ -61,17 +68,21 @@ def softmax_kernel(Q: fx.Tensor, K: fx.Tensor, P: fx.Tensor, sm_scale: fx.Conste
     rK = fx.buffer_ops.create_buffer_resource(K)
     rP = fx.buffer_ops.create_buffer_resource(P)
 
+    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, fx.BFloat16))
+    f32x4 = fx.typing.T.vec(4, fx.typing.T.f32)
+
     # --- GEMM1 (same as Lesson 03): sv[e] = S[kv=k_outer*4+e, q=mn] * sm_scale ---
     acc = fx.Vector.filled(4, 0.0, fx.Float32).ir_value()
     for ks in fx.range_constexpr(KSTEPS):
         k0 = fx.Int32(ks * 16) + k_outer * fx.Int32(4)
         k_vec = fx.buffer_ops.buffer_load(rK, mn * fx.Int32(HD) + k0, vec_width=4, dtype=fx.BFloat16)
         q_vec = fx.buffer_ops.buffer_load(rQ, mn * fx.Int32(HD) + k0, vec_width=4, dtype=fx.BFloat16)
-        acc = fx.rocdl.mfma_f32_16x16x16bf16_1k_(
-            fx.typing.T.vec(4, fx.typing.T.f32),
+        acc = fly.mma_atom_call_ssa(
+            [f32x4],
+            mma_atom,
             fx.Vector(k_vec).bitcast(fx.Int16).ir_value(),
             fx.Vector(q_vec).bitcast(fx.Int16).ir_value(),
-            acc, 0, 0, 0,
+            acc,
         )
     sv = [fx.Float32(fx.Vector(acc)[e]) * fx.Float32(sm_scale) for e in range(4)]
 

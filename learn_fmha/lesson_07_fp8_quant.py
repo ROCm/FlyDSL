@@ -30,6 +30,13 @@ the V side entirely with column-major V.
 Single q-tile (16 q) vs all kv (16/tile), one wavefront. BKV=32 per kv-tile (one fp8
 MFMA K-step covers 32 kv).
 
+### Idiomatic style (flydsl-layout-algebra skill)
+The 16x16x32 fp8 MFMA is declared ONCE as a typed atom -- `fx.make_mma_atom(fx.rocdl.MFMA(16,16,32,
+f8))` -- and both GEMMs run through `fly.mma_atom_call_ssa`, instead of repeating the raw
+`mfma_f32_16x16x32_fp8_fp8_` intrinsic. Everything fp8-specific stays direct on purpose (the skill's
+"hand-rolled register packing the algebra does not express cleanly" criterion): cvt_pk_fp8_f32
+packing, i32/i64 dword loads, per-tensor descale, and the P-transpose through LDS.
+
 Run:  HIP_VISIBLE_DEVICES=2 python3 learn_fmha/lesson_07_fp8_quant.py
 """
 
@@ -38,6 +45,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
@@ -72,6 +80,19 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor,
     rK = fx.buffer_ops.create_buffer_resource(K)
     rV = fx.buffer_ops.create_buffer_resource(V)
     rO = fx.buffer_ops.create_buffer_resource(O)
+
+    # IDIOMATIC (flydsl-layout-algebra skill, "tiled-MMA" recipe): declare the 16x16x32 fp8 MFMA
+    # ONCE as a typed layout-API atom and drive BOTH GEMMs through `fly.mma_atom_call_ssa`, instead
+    # of repeating the raw `rocdl.mfma_f32_16x16x32_fp8_fp8_` intrinsic. Operands stay the SAME packed
+    # i64 fp8 fragments + vec(4) f32 accumulator, so lane dataflow is unchanged.
+    # The fp8-SPECIFIC parts stay direct (skill: "hand-rolled register packing the algebra does not
+    # express cleanly"): cvt_pk_fp8_f32 packing, i32/i64 dword loads, per-tensor descale, and the
+    # P-transpose through LDS. The MFMA is the one piece that maps onto the typed atom cleanly.
+    f32x4 = fx.typing.T.vec(4, fx.typing.T.f32)
+    _mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, fx.typing.T.f8))
+
+    def _mfma(a_i64, b_i64, acc):
+        return fly.mma_atom_call_ssa([f32x4], _mma_atom, a_i64, b_i64, acc)
 
     # preload this lane's Q fragment (fp8, 8 per k-step as i64), reused across kv tiles.
     q_packs = []
@@ -111,9 +132,7 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor,
                 off = k_row_safe * fx.Int32(HD) + fx.Int32(ks * 32) + k_outer * fx.Int32(8)
                 kw = fx.buffer_ops.buffer_load(rK, off // fx.Int32(4), vec_width=2, dtype=fx.Int32)
                 k_i64 = fx.Vector(kw).bitcast(fx.Int64)[0]
-                acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8_(
-                    fx.typing.T.vec(4, fx.typing.T.f32), k_i64.ir_value(), q_packs[ks].ir_value(), acc, 0, 0, 0
-                )
+                acc = _mfma(k_i64.ir_value(), q_packs[ks].ir_value(), acc)
             for e in fx.range_constexpr(4):
                 kv = kv0 + fx.Int32(sub * 16) + k_outer * fx.Int32(4) + fx.Int32(e)
                 s = fx.Float32(fx.Vector(acc)[e]) * qk_descale
@@ -174,9 +193,7 @@ def attn_kernel(Q: fx.Tensor, K: fx.Tensor, V: fx.Tensor, O: fx.Tensor,
                 v_elems.append(kv_ok.select(vv, fx.Int8(0)))
             v_i64 = fx.Vector(fx.Vector.from_elements(v_elems, fx.Int8)).bitcast(fx.Int64)[0]
             o_resc = (fx.Vector(o_acc[dt]) * corr4).ir_value()
-            o_new = fx.rocdl.mfma_f32_16x16x32_fp8_fp8_(
-                fx.typing.T.vec(4, fx.typing.T.f32), v_i64.ir_value(), p_i64.ir_value(), o_resc, 0, 0, 0
-            )
+            o_new = _mfma(v_i64.ir_value(), p_i64.ir_value(), o_resc)
             new_o.append(fx.Vector(o_new))
         fx.gpu.barrier()
         st = yield [m_new, l_run] + new_o
@@ -249,4 +266,3 @@ if __name__ == "__main__":
     else:
         for shp in [(16, 64, 1), (16, 64, 0), (16, 48, 1)]:
             subprocess.run([sys.executable, __file__, *map(str, shp)], check=False)
-        print(f"sq={sq} sk={sk} causal={causal}  err={err:.4f}  {'PASS' if err < 6e-2 else 'FAIL'}")
