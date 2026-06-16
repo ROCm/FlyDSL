@@ -91,16 +91,41 @@ def _unwrap_val(v):
     return v.ir_value() if hasattr(v, "ir_value") else v
 
 
-def _warp_inclusive_scan(val, lane, log2_warp, c_zero_i32):
-    """Wave-local inclusive sum via ds_bpermute; no LDS/barrier."""
-    scanned = val
-    for step in range_constexpr(log2_warp):
-        off = 1 << step
-        in_range = lane >= off
-        peer_lane = in_range.select(lane - off, c_zero_i32)
-        peer = fx.Int32(fx.rocdl.ds_bpermute(T.i32, peer_lane * 4, scanned))
-        scanned = scanned + in_range.select(peer, c_zero_i32)
-    return scanned
+DPP_ROW_SHR_1 = 0x111
+DPP_ROW_SHR_2 = 0x112
+DPP_ROW_SHR_4 = 0x114
+DPP_ROW_SHR_8 = 0x118
+DPP_ROW_MASK = 0xF
+DPP_BANK_MASK = 0xF
+
+
+def _dpp_intra_wave_prefix_sum(val, lane, log2_warp):
+    """Wave-local inclusive sum: 4 DPP row-shifts then ds_bpermute cross-row carries."""
+    warp_size = 1 << log2_warp
+
+    val_raw = _unwrap_val(val)
+    zero_raw = _unwrap_val(fx.Int32(0))
+
+    for shift, dpp_op, threshold in [
+        (1, DPP_ROW_SHR_1, 1),
+        (2, DPP_ROW_SHR_2, 2),
+        (4, DPP_ROW_SHR_4, 4),
+        (8, DPP_ROW_SHR_8, 8),
+    ]:
+        remote = fx.rocdl.update_dpp(T.i32, zero_raw, val_raw, dpp_op, DPP_ROW_MASK, DPP_BANK_MASK, True)
+        val = (lane >= fx.Int32(threshold)).select(val + fx.Int32(remote), val)
+        val_raw = _unwrap_val(val)
+
+    src_lane_16 = (lane & fx.Int32(0x30)) - fx.Int32(1)
+    remote16 = fx.rocdl.ds_bpermute(T.i32, src_lane_16 * fx.Int32(4), val)
+    val = (lane >= fx.Int32(16)).select(val + fx.Int32(remote16), val)
+
+    if warp_size > 32:
+        src_lane_32 = (lane & fx.Int32(0x30)) - fx.Int32(17)
+        remote32 = fx.rocdl.ds_bpermute(T.i32, src_lane_32 * fx.Int32(4), val)
+        val = (lane >= fx.Int32(32)).select(val + fx.Int32(remote32), val)
+
+    return val
 
 
 def _wave_cross_and_total(s_wave, wave, n_waves):
@@ -356,7 +381,7 @@ def compile_mesh_flatfill(
         else:
             scan_val = padded
 
-        scanned = _warp_inclusive_scan(scan_val, lane, log2_warp, c_zero_i32)
+        scanned = _dpp_intra_wave_prefix_sum(scan_val, lane, log2_warp)
 
         # Cross-wave prefix uses LDS only when one wave cannot cover all experts.
         if const_expr(needs_cross_wave_scan):
@@ -372,7 +397,7 @@ def compile_mesh_flatfill(
                 loaded = fx.memref_load(s_wave, safe_idx)
                 val = in_n_waves.select(loaded, c_zero_i32)
 
-                val = _warp_inclusive_scan(val, lane, log2_warp, c_zero_i32)
+                val = _dpp_intra_wave_prefix_sum(val, lane, log2_warp)
 
                 # Publish the scan total
                 if lane == fx.Int32(n_waves - 1):
@@ -675,7 +700,7 @@ def compile_count_sort(
             results = yield [acc + is_mine.select(c_one_i32, c_zero_i32)]
         local = results
 
-        scanned = _warp_inclusive_scan(local, lane, log2_warp, c_zero_i32)
+        scanned = _dpp_intra_wave_prefix_sum(local, lane, log2_warp)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
@@ -732,7 +757,7 @@ def compile_count_sort(
             # Load before scan so weight latency overlaps rank calculation.
             w_val = buffer_ops.buffer_load(topk_weights_rsrc, safe_p, vec_width=1, dtype=fx.Float32)
 
-            scan = _warp_inclusive_scan(v, lane, log2_warp, c_zero_i32)
+            scan = _dpp_intra_wave_prefix_sum(v, lane, log2_warp)
             if lane == WARP_SIZE - 1:
                 fx.memref_store(scan, s_wave, bank + wave)
             gpu.barrier()
@@ -807,7 +832,7 @@ def compile_count_sort(
         else:
             scan_val = padded
 
-        scanned = _warp_inclusive_scan(scan_val, lane, log2_warp, c_zero_i32)
+        scanned = _dpp_intra_wave_prefix_sum(scan_val, lane, log2_warp)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
@@ -1213,7 +1238,7 @@ def compile_count_sort_paired(
                     dtype=fx.Int32,
                 )
 
-        scanned = _warp_inclusive_scan(strip_total, lane, log2_warp, c_zero_i32)
+        scanned = _dpp_intra_wave_prefix_sum(strip_total, lane, log2_warp)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
@@ -1283,7 +1308,7 @@ def compile_count_sort_paired(
         else:
             scan_val = padded
 
-        scanned = _warp_inclusive_scan(scan_val, lane, log2_warp, c_zero_i32)
+        scanned = _dpp_intra_wave_prefix_sum(scan_val, lane, log2_warp)
         if lane == WARP_SIZE - 1:
             fx.memref_store(scanned, s_wave, wave)
         gpu.barrier()
