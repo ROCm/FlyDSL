@@ -118,17 +118,29 @@ def build_flash_attn_func_module_primary(
     #   * generic fallback: partial last q-tile via Q-load/O-store bounds, and
     #     partial last kv-tile via per-(batch) num_records-bounded DMA loads /
     #     clamped non-DMA loads + causal / non-causal padding masks.
-    #   * DUALWAVE_SWP fast path (built below): now handles any seq_len >= 1
+    #   * DUALWAVE_SWP fast path (built below): handles any seq_len >= 1
     #     (the pipeline floors its tile count at the 4-tile minimum; extra tiles
     #     read 0 via the num_records bound and are masked out).
-    _DUALWAVE_MIN_SEQ = 1
+    # The only hard floor is seq_len >= 1, enforced by `_guard_seqlen` below.
+
+    # Dense short-sequence routing: on MI350 (gfx950) the software-pipelined
+    # DUALWAVE_SWP kernel pays a fixed pipeline/prologue cost that dominates very
+    # short sequences, where the generic M128/M256 fallback is markedly faster
+    # (measured ~1.4-1.8x faster at seq_len=128, ~tie at 256, and dualwave wins
+    # decisively from 384 up). For DENSE (non-packed) shapes only, route
+    # seq_len < this threshold to the generic fallback. Packed/varlen shapes are
+    # never routed here -- they have no generic cu_seqlens path and always use
+    # DUALWAVE_SWP.
+    _DUALWAVE_MIN_DENSE_SEQ = 256
 
     # ── DUALWAVE_SWP fast path (gfx950 D=128 bf16/f16) ──
     # Built when:
     #   * outermost call (block_m is None)
     #   * head_dim == 128, dtype in (bf16, f16), gpu_arch startswith "gfx950"
-    # Runtime dispatch additionally requires seq_len >= 384 (any alignment; the
-    # DUALWAVE_SWP kernel handles non-256/64-aligned seq_len internally).
+    # The DUALWAVE_SWP kernel can compute any seq_len >= 1 (any alignment; it
+    # handles non-256/64-aligned seq_len internally). Runtime routing policy:
+    # packed/varlen shapes always use DUALWAVE_SWP; dense shapes use it for
+    # seq_len >= _DUALWAVE_MIN_DENSE_SEQ and the generic fallback below that.
     _dualwave_swp_launch = None
     # FLYDSL_DISABLE_DUALWAVE_SWP=1 forces the generic fallback even on gfx950 D=128
     # bf16/f16 (used to exercise/validate the generic kernel on gfx950 hardware).
@@ -180,11 +192,13 @@ def build_flash_attn_func_module_primary(
     def _guard_seqlen(_dispatched):
         """Reject seq_len values the kernel cannot compute correctly.
 
-        Both variants now handle arbitrary seq_len: the DUALWAVE_SWP fast path
-        for seq_len >= 384, and the generic fallback for any seq_len (partial
+        Both variants handle arbitrary seq_len: the DUALWAVE_SWP fast path for
+        any seq_len >= 1, and the generic fallback for any seq_len (partial
         last q-tile via Q/O bounds, partial last kv-tile via bounded/clamped KV
         loads + causal / non-causal padding masks). So the only constraint left
-        is seq_len >= 1. A symbolic / non-int seq_len is let through.
+        is seq_len >= 1. A symbolic / non-int seq_len is let through. (Dense
+        runtime routing prefers the generic fallback below
+        _DUALWAVE_MIN_DENSE_SEQ; that is a perf policy, not a correctness bound.)
         """
 
         def _guarded(*args, **kwargs):
@@ -210,21 +224,46 @@ def build_flash_attn_func_module_primary(
             dispatched = _fallback
         else:
 
+            # DUALWAVE_SWP-only launch parameters: the generic fallback's launch
+            # signature is (Q, K, V, O, batch_size, seq_len, stream=...) and does
+            # NOT accept these. A dense short-seq call that passes any of them must
+            # therefore stay on DUALWAVE_SWP rather than route to the generic
+            # fallback (which would raise an unexpected-kwarg error). `stream` is
+            # common to both launchers and is intentionally excluded here.
+            _DUALWAVE_ONLY_KWARGS = frozenset(
+                {"stride_kv_n", "stride_q_n", "head_dim_runtime", "debug_counts", "workspace"}
+            )
+
             def _dualwave_swp_dispatch(*args, **kwargs):
                 # The DUALWAVE_SWP kernel handles non-aligned seq_len (partial
                 # last q-block + partial/odd kv-tile count) the same way the
-                # reference asm does, so the only constraint is the software-
-                # pipeline depth minimum (>= 384). seq_len need NOT be a
-                # multiple of 256/64 for this path.
+                # reference asm does; seq_len need NOT be a multiple of 256/64.
+                # Routing:
+                #   * Packed/varlen (cu_seqlens given): always DUALWAVE_SWP -- the
+                #     generic fallback has no cu_seqlens path. seq_len here is
+                #     max_seqlen (sizes grid_y); per-batch ranges come from
+                #     cu_seqlens inside the kernel.
+                #   * Dense: DUALWAVE_SWP for seq_len >= _DUALWAVE_MIN_DENSE_SEQ;
+                #     shorter dense shapes go to the faster generic fallback
+                #     (see _DUALWAVE_MIN_DENSE_SEQ note above) -- BUT only when the
+                #     call uses no DUALWAVE_SWP-only launch params (the generic
+                #     launcher cannot represent those), otherwise stay on dualwave.
                 S_int = _extract_seq_len(args, kwargs)
-                if S_int is not None and S_int >= _DUALWAVE_MIN_SEQ:
-                    # Varlen: forward the cu_seqlens captured at build time (S here
-                    # is max_seqlen, which sizes grid_y; per-batch ranges come from
-                    # cu_seqlens inside the kernel).
-                    if cu_seqlens_q is not None:
-                        return _dualwave_swp_launch(
-                            *args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs
-                        )
+                if cu_seqlens_q is not None:
+                    # Packed/varlen: always DUALWAVE_SWP (no generic cu_seqlens path).
+                    return _dualwave_swp_launch(*args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs)
+                # Check keyword PRESENCE, not value: the generic launcher rejects
+                # the keyword itself, so an explicit `debug_counts=None` (or any
+                # dualwave-only kwarg passed as None) must still keep the call on
+                # DUALWAVE_SWP.
+                # Positional threshold is 7, not 6: the generic launcher's
+                # signature is (Q, K, V, O, batch_size, seq_len, stream) -- 7
+                # positionals including the shared `stream` -- so a valid
+                # `exe(Q,K,V,O,B,S,stream)` call must still reach the generic
+                # fallback. Only an 8th+ positional is a true DUALWAVE-only arg
+                # (dualwave's 7th positional is `stride_kv_n`, not `stream`).
+                _has_dualwave_only = any(k in kwargs for k in _DUALWAVE_ONLY_KWARGS) or len(args) > 7
+                if S_int is None or S_int >= _DUALWAVE_MIN_DENSE_SEQ or _has_dualwave_only:
                     return _dualwave_swp_launch(*args, **kwargs)
                 return _fallback(*args, **kwargs)
 
