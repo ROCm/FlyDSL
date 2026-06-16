@@ -72,8 +72,8 @@ Kernel docstring reference (MI308X, flydsl 0.2.0): 5 / 16 / 61 / 69 TF at sq 102
 | Path | Purpose |
 |------|---------|
 | `~/workspace/FlyDSL/.devcontainer/` | Devcontainer for FMHA work |
-| `~/workspace/docs/REPRODUCIBILITY.md` | Step-by-step setup guide |
-| `~/workspace/docs/JOURNAL.md` | This file |
+| `learn_fmha/docs/REPRODUCIBILITY.md` | Step-by-step setup guide |
+| `learn_fmha/docs/JOURNAL.md` | This file |
 | `~/.ssh/config` | GitHub SSH identity |
 | `~/.claude/CLAUDE.md` | KB awareness for Claude Code |
 | `~/knowledge-base` → workspace clone | KB symlink |
@@ -128,5 +128,66 @@ python3 tests/kernels/bench_fmha_compare.py \
 | sq=32768 | 122 TF (18.014 ms) | 177 TF (12.456 ms) | **1.45×** |
 
 FlyDSL closes most of the gap at large seq (~69% of CK at sq=32768), but CK wins at all shapes. Small-seq FlyDSL is grid-starved (6 TF vs CK 37 TF).
+
+---
+
+## 7. Autoresearch optimization loop — hk5 VALU folds (2026-06-16)
+
+Ran the `fmha-hk5-autoresearch` skill (autonomous commit→measure→keep/reset loop)
+on branch `opt/fmha-hk5-loop` (off `opt/fmha-batch-prefill-fp8`). Goal: close the
+FlyDSL→CK-Tile gap at large seq. Repro of the loop itself is in
+[`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) §11.
+
+### Result
+
+| Shape (bs=1, nq8, nk1, causal) | Baseline | **After** | CK-Tile | Ratio before → after |
+|---|---|---|---|---|
+| sq=1024  | 4–6 TF | 6 TF  | 37 TF  | 6.2× (unchanged, grid-starved) |
+| sq=16384 | 103 TF | **108 TF** | 170 TF | 1.65× → **1.57×** |
+| sq=32768 | 122 TF | **128 TF** | 177 TF | 1.45× → **1.38×** |
+
+Net: +5/+6 TF at large seq, all from cutting per-element softmax VALU op-count
+(the binding resource — PMC shows VALUBusy 62% vs MfmaUtil 24%). Correctness gate
+(max-abs err < 6e-2) green on all shapes incl. GQA, p_scale∈{16,64}, non-causal,
+partial tiles. 9/9 `test_fmha_prefill_fp8` pass.
+
+### Kept levers (4 commits)
+
+| Commit | Lever | Effect |
+|---|---|---|
+| `5e3af84f` | Fold LOG2E into `qs` descale — scores enter log2-space, drops a per-element fmul | +2% @ sq16384/32768 |
+| `15d8d1cc` | Drop `sched_mfma`/`sched_dsrd` hints — they over-constrained the scheduler; removing them gained perf *and* deleted code | +1–2 TF |
+| `2f7e2484` | Fold `p_scale` shift into the softmax pivot (`safe_m_p = safe_m - log2_pscale`) — removes one VALU add per element | +2 TF |
+| `c1e3247b` | Docstring PERF table + lever ledger refresh | (doc) |
+
+### Diagnosis (the durable finding)
+
+- **VALU-bound, not memory/transpose.** PMC: VALUBusy 62%, MfmaUtil 24%,
+  LDSBankConflict 1.5%, MemUnitStalled 0.16%. Every change that cut VALU op-count
+  without adding register state won; everything else regressed.
+- **The residual gap is occupancy, not VALU.** Upper-bound probe (gut exp2 +
+  max-reduction → VALU-free) reaches only ~156 TF, *below* CK's 177. So even a
+  perfect softmax can't close the gap from inside the loop — the wall is the
+  3-waves/SIMD occupancy cliff (VGPR pinned at 166; a 4th wave needs ≤128).
+
+### Dead-ends measured this session (do not re-try)
+
+- `waves_per_eu` / `maxnreg` compile hints — plumbed through **both** the embedded
+  `gpu-module-to-binary` and the external-LLVM (`FLYDSL_COMPILE_LLVM_DIR`) codegen
+  paths, but `--amdgpu-num-vgpr=128` is **advisory, not enforced**: VGPR stays 166,
+  no 4th wave. This closes lever L4 in the 0.2.0 wheel.
+- +VGPR levers (kdv-hoist, vectorized descale, KT=64) all regress (86/93/69 TF) —
+  confirms hard VGPR-binding; any lever that grows live state loses.
+- Halving the P-transpose `ds_bpermute` — **wrong** (err 3.0+): the 4 bpermutes
+  gather from distinct source-lane halves, not redundant.
+- `buffer_load_to_lds` (async-K, `FMHA_BUFK=1`) — still broken in 0.2.0 (err 3.0).
+- AGPR accumulation (`agpr_count=0`; o_acc lives in VGPR) — not exposed in 0.2.0.
+
+### Remaining gap is structural / out of scope for this loop
+
+Closing the last 1.38–1.57× needs a compiler-level lever (enforce VGPR cap →
+4 waves, or AGPR accumulation) or a major rewrite (persistent/finer-grained
+scheme for small-seq grid starvation, fixed async-K). None reachable from kernel
+source in the 0.2.0 wheel.
 
 **Config caveat:** FlyDSL uses `page_size=16`; CK path uses aiter `vectorized` layout with `page_size=1024` (env `CK_PAGE_SIZE`). Quantization: CK uses aiter **per-tensor** fp8 descale; FlyDSL uses per-token-head Q/K + per-head V descale — not identical numerics/setup, but same operator class (fp8 causal batch prefill, vec_k_col_v-style layout).

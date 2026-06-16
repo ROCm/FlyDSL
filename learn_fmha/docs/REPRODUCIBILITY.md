@@ -289,8 +289,8 @@ Then rebuild and re-run §4–§5.
 | Benchmark script | `~/workspace/FlyDSL/tests/kernels/bench_fmha_compare.py` |
 | FMHA tutorials | `~/workspace/FlyDSL/learn_fmha/` |
 | Devcontainer | `~/workspace/FlyDSL/.devcontainer/` |
-| This guide | `~/workspace/docs/REPRODUCIBILITY.md` |
-| Session journal | `~/workspace/docs/JOURNAL.md` |
+| This guide | `learn_fmha/docs/REPRODUCIBILITY.md` |
+| Session journal | `learn_fmha/docs/JOURNAL.md` |
 
 ---
 
@@ -317,3 +317,52 @@ Before optimizing FMHA further, consult:
 - `~/knowledge-base/flydsl-jdbba/` — FlyDSL measurement discipline
 - `~/workspace/FlyDSL/FMHA_FP8_OPTIMIZATION_HANDOFF.md` — full port context
 - `~/workspace/FlyDSL/learn_fmha/README.md` — profiling loop & lesson index
+
+---
+
+## 11. Reproduce the hk5 autoresearch optimization loop (2026-06-16)
+
+Branch `opt/fmha-hk5-loop` carries 4 commits that lift large-seq from 103/122 →
+**108/128 TF** (CK ratio 1.65/1.45 → 1.57/1.38). See [`JOURNAL.md`](JOURNAL.md)
+§7 for the result table, kept levers, and dead-end ledger. To reproduce:
+
+### Setup (inside the devcontainer, aiter built per §5b)
+
+```bash
+cd /workspaces/FlyDSL
+git checkout opt/fmha-hk5-loop      # off opt/fmha-batch-prefill-fp8
+git log --oneline -4                # 5e3af84f, 15d8d1cc, 2f7e2484, c1e3247b
+```
+
+The 4 commits are independent VALU-op-count cuts in
+`kernels/fmha_prefill_fp8_ck_hk5.py`; no toolchain change is needed (kernel code
+is read from the mounted tree, not the wheel).
+
+### Verify correctness (one shape per process — see §5)
+
+```bash
+cd /workspaces/FlyDSL
+python3 tests/kernels/ck_check.py fmha_prefill_fp8_ck_hk5  1 256 256 1 8 1 16 1.0   # base
+python3 tests/kernels/ck_check.py fmha_prefill_fp8_ck_hk5  1 64  64  2 2 1 16 64.0  # p_scale cancel
+python3 tests/kernels/ck_check.py fmha_prefill_fp8_ck_hk5  1 64  64  1 1 0 16 1.0   # non-causal
+# each prints "... -> ERR <x> OK|FAIL"; OK iff err < 6e-2
+python3 -m pytest tests/kernels/test_fmha_prefill_fp8.py -v   # 9 passed
+```
+
+### Measure vs CK-Tile
+
+```bash
+python3 tests/kernels/bench_fmha_compare.py \
+  --kernels fmha_prefill_fp8_ck_hk5 --ck --no-pyisa > /tmp/bench.log 2>&1
+grep -E 'sq(16384|32768)' /tmp/bench.log
+# expect ~5.10ms/108TF (sq16384), ~17.2ms/128TF (sq32768) vs CK 170/177
+```
+
+### The loop discipline (for continuing the search)
+
+Per the `fmha-hk5-autoresearch` skill: commit each attempt FIRST, run correctness
+gate (err<6e-2 all shapes), measure all 3 seq lengths, confirm structural changes
+in ISA/PMC — then keep (advance branch) or `git reset` (log as dead-end). Levers
+already proven dead this session are listed in JOURNAL §7; do not re-try them.
+The remaining gap is occupancy-bound (VGPR pinned at 166 → 3 waves/SIMD), not
+reachable from kernel source in flydsl 0.2.0.
