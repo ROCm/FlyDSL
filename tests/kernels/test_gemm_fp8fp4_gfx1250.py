@@ -28,8 +28,6 @@ from kernels.gemm_fp8fp4_gfx1250 import (  # noqa: E402
     _is_fp8_deep_pipeline,
     compile_mxscale_gemm,
     compile_ptpc_gemm,
-    use_n4k4_bscale_layout,
-    use_natural_ascale_vgpr,
 )
 from tests.kernels.utils import fp4_utils  # noqa: E402
 
@@ -38,33 +36,6 @@ if not torch.cuda.is_available():
 
 
 SCALE_BLOCK = 32
-
-
-def preshuffle_e8m0_scale(
-    scale: torch.Tensor,
-    warp_tile: int,
-    scale_k_per_tile: int = 4,
-    WMMA_DIM: int = 16,
-    row_align: int = None,
-) -> torch.Tensor:
-    """Preshuffle E8M0 scale: byte swap + interleave for WMMA TDM/LDS access."""
-    rows, K_scale = scale.shape
-    assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
-    # Accept an unpadded row count (M for a_scale / N for b_scale): pad rows to
-    # row_align (the GEMM reads tile_m-granular tiles, so callers pass row_align=tile_m)
-    # with E8M0 127 (=1.0). Padding rows feed only discarded output rows. No-op when
-    # already aligned. Defaults to warp_tile (the minimum the reshape needs).
-    align = row_align if row_align is not None else warp_tile
-    if rows % align != 0:
-        pad = _align_up(rows, align) - rows
-        scale = torch.cat([scale, torch.full((pad, K_scale), 127, dtype=scale.dtype, device=scale.device)], dim=0)
-    SCALES_PER_WMMA = 4
-    wmma_rep = warp_tile // WMMA_DIM
-    k_groups = K_scale // scale_k_per_tile
-    k_wmma_steps = scale_k_per_tile // SCALES_PER_WMMA
-    g = scale.view(-1, wmma_rep, WMMA_DIM, k_groups, k_wmma_steps, SCALES_PER_WMMA)
-    g = g.permute(0, 2, 3, 4, 1, 5).contiguous()
-    return g.reshape(-1, k_groups * k_wmma_steps * wmma_rep * SCALES_PER_WMMA)
 
 
 def preshuffle_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -80,11 +51,6 @@ def preshuffle_scale(scale: torch.Tensor) -> torch.Tensor:
     assert R % 32 == 0 and Ks % 4 == 0, f"preshuffle_scale needs R%32==0, Ks%4==0; got R={R} Ks={Ks}"
     x = scale.view(R // 32, 32, Ks // 4, 4).permute(0, 2, 1, 3).contiguous()  # [R//32, Ks//4, 32, 4]
     return x.reshape(R // 32, -1)  # [R//32, K]
-
-
-def preshuffle_scale_for_load_path(scale, warp_tile, skt, *, row_align=None):
-    """Host scale preshuffle for the TDM/LDS interleaved layout."""
-    return preshuffle_e8m0_scale(scale, warp_tile, scale_k_per_tile=skt, row_align=row_align)
 
 
 def random_fp8_data(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
@@ -360,7 +326,6 @@ def _run_mxscale_gemm_test(
     num_buffers,
     use_tdm_store,
     out_dtype,
-    wave_specialized_tdm=False,
     l2_prefetch_distance=0,
     cluster_m=1,
     cluster_n=1,
@@ -368,7 +333,6 @@ def _run_mxscale_gemm_test(
     waves_per_eu=None,
     expert_sched_mode=True,
     split_k=1,
-    ascale_load_path="vgpr",
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -442,28 +406,8 @@ def _run_mxscale_gemm_test(
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
-    # Preshuffle scales
-    skt = tile_k // SCALE_BLOCK
-    warp_tile_m = tile_m // m_warp
-    _natural_ascale = use_natural_ascale_vgpr(
-        data_format=data_format,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        m_warp=m_warp,
-        n_warp=n_warp,
-        n=padded_n,
-        ascale_load_path=ascale_load_path,
-        wave_specialized_tdm=wave_specialized_tdm,
-        num_buffers=num_buffers,
-        out_dtype=out_dtype,
-    )
-    if _natural_ascale:
-        # Natural path reads A_scale[M, K//32] straight from VGPRs -- no reshuffle,
-        # the (already row-padded) tensor is uploaded as-is.
-        pass
-    else:
-        a_scale = preshuffle_scale_for_load_path(a_scale, warp_tile_m, skt, row_align=tile_m)
+    # mxscale scales: A-scale is always read from its natural A_scale[M, K//32] layout
+    # straight into VGPRs (no reshuffle -- upload as-is); B-scale is always 32x4.
     b_scale = preshuffle_scale(b_scale)
 
     # Preshuffle B data
@@ -494,10 +438,8 @@ def _run_mxscale_gemm_test(
         use_tdm_store=use_tdm_store,
         out_dtype=kernel_out_dtype,
         inst_prefetch=inst_prefetch,
-        wave_specialized_tdm=wave_specialized_tdm,
         split_k=split_k,
         expert_sched_mode=expert_sched_mode,
-        ascale_load_path=ascale_load_path,
     )
 
     # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
@@ -615,7 +557,6 @@ def _extract_i64_metadata(compiled_ir: str, key: str) -> int:
 )
 @pytest.mark.parametrize("num_buffers", [2, 3, 4])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
-@pytest.mark.parametrize("wave_specialized_tdm", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp4_gemm(
     M,
@@ -629,7 +570,6 @@ def test_mxfp4_gemm(
     num_buffers,
     use_tdm_store,
     out_dtype,
-    wave_specialized_tdm,
 ):
     _run_mxscale_gemm_test(
         "fp4",
@@ -644,7 +584,6 @@ def test_mxfp4_gemm(
         num_buffers,
         use_tdm_store,
         out_dtype,
-        wave_specialized_tdm=wave_specialized_tdm,
     )
 
 
@@ -770,65 +709,61 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
     )
 
 
-# ── Tile-independent N4K4 B-scale coverage ──
+# ── Tile-independent 32x4 B-scale coverage ──
 # tile_m=16, m_warp=1 -> wmma_m_rep=1 (odd) -> the default row-major streaming
-# schedule, which is the (phase-1) N4K4 B-scale path. The sweep covers every
+# schedule, exercising the 32x4 B-scale path. The sweep covers every
 # tile_n/n_warp that maps to a distinct read shape (b32/b64/b128 per_load and
 # group counts 1/2/4 and the non-power-of-2 group count 3 that exercises the
 # TDM warp-distribution power-of-two padding), both data formats, k_wmma_steps
 # 1/2/4, wave-spec on/off, f32/bf16, multi-buffer, and ragged/decode M.
-_N4K4_N_FOR_TN = {32: 128, 64: 128, 128: 256, 192: 384, 256: 512}
-_N4K4_TN_NW = [
-    (32, 1), (32, 2), (64, 1), (64, 2), (64, 4),
-    (128, 1), (128, 2), (128, 4), (192, 1), (192, 2), (192, 4),
-    (256, 1), (256, 2), (256, 4),
-]  # fmt: skip
+_BS32_N_FOR_TN = {32: 128, 64: 128, 128: 256, 192: 384, 256: 512}
+_BS32_TN_NW = [
+    (32, 2),
+    (64, 2),
+    (64, 4),
+    (128, 2),
+    (128, 4),
+    (192, 2),
+    (192, 4),
+    (256, 2),
+    (256, 4),
+]  # fmt: skip  (n_warp>=2: wave-specialized TDM requires >=2 waves)
 
 
-def _gen_n4k4_configs():
+def _gen_bs32_configs():
     cfgs, seen = [], set()
 
-    def add(fmt, M, tile_n, n_warp, tile_k, nbuf, od, ws):
-        N = _N4K4_N_FOR_TN[tile_n]
+    def add(fmt, M, tile_n, n_warp, tile_k, nbuf, od):
+        N = _BS32_N_FOR_TN[tile_n]
         K = tile_k * max(nbuf, 2)  # >= nbuf K-tiles for double/triple buffering
-        key = (fmt, M, N, K, tile_n, tile_k, n_warp, nbuf, od, ws)
+        key = (fmt, M, N, K, tile_n, tile_k, n_warp, nbuf, od)
         if key not in seen:
             seen.add(key)
             cfgs.append(key)
 
     for fmt in ("fp8", "a8w4"):
-        # 1) full tile_n x n_warp shape sweep (all rep/group/per_load cases),
-        #    non-wave-spec so the cooperative TDM warp distribution is exercised.
-        for tn, nw in _N4K4_TN_NW:
-            add(fmt, 16, tn, nw, 256, 2, "bf16", False)
-        # 2) wave-spec (needs >=4 waves -> n_warp=4), M=1 decode-like. The real
-        #    decode shape (tile_n=64) uses deep K + 4 buffers; larger tile_n keeps
-        #    a modest tile so LDS fits while still exercising the wave-spec TDM.
-        add(fmt, 1, 64, 4, 512, 4, "bf16", True)
+        # 1) full tile_n x n_warp shape sweep (all rep/group/per_load cases).
+        for tn, nw in _BS32_TN_NW:
+            add(fmt, 16, tn, nw, 256, 2, "bf16")
+        # 2) M=1 decode-like. The real decode shape (tile_n=64) uses deep K + 4 buffers.
+        add(fmt, 1, 64, 4, 512, 4, "bf16")
         for tn in (128, 192, 256):
-            add(fmt, 1, tn, 4, 256, 2, "bf16", True)
+            add(fmt, 1, tn, 4, 256, 2, "bf16")
         # 3) k_wmma_steps 1/2/4 on the next_pow2 (192) and clean (256/64) shapes.
         for tn, nw in [(192, 4), (256, 4), (64, 4)]:
             for tk in (128, 512):
-                add(fmt, 16, tn, nw, tk, 2, "bf16", False)
+                add(fmt, 16, tn, nw, tk, 2, "bf16")
         # 4) f32 + triple buffering on a few shapes.
         for tn, nw in [(192, 4), (128, 2), (32, 2)]:
-            add(fmt, 16, tn, nw, 256, 3, "f32", False)
+            add(fmt, 16, tn, nw, 256, 3, "f32")
         # 5) ragged / decode / OOB M.
         for M in (1, 13, 33):
-            add(fmt, M, 256, 4, 256, 2, "bf16", False)
+            add(fmt, M, 256, 4, 256, 2, "bf16")
     return cfgs
 
 
-@pytest.mark.parametrize(
-    "data_format, M, N, K, tile_n, tile_k, n_warp, num_buffers, out_dtype, ws", _gen_n4k4_configs()
-)
-def test_mxscale_n4k4_bscale(data_format, M, N, K, tile_n, tile_k, n_warp, num_buffers, out_dtype, ws):
-    # Guard: every config here must actually take the N4K4 B-scale layout, else
-    # the sweep would silently test the legacy path instead.
-    assert use_n4k4_bscale_layout(
-        data_format=data_format, tile_m=16, tile_n=tile_n, tile_k=tile_k, m_warp=1, n_warp=n_warp, n=N
-    ), f"config does not hit the N4K4 gate: {(data_format, tile_n, tile_k, n_warp, N)}"
+@pytest.mark.parametrize("data_format, M, N, K, tile_n, tile_k, n_warp, num_buffers, out_dtype", _gen_bs32_configs())
+def test_mxscale_bscale_32x4(data_format, M, N, K, tile_n, tile_k, n_warp, num_buffers, out_dtype):
     _run_mxscale_gemm_test(
         data_format,
         M,
@@ -842,7 +777,6 @@ def test_mxscale_n4k4_bscale(data_format, M, N, K, tile_n, tile_k, n_warp, num_b
         num_buffers,
         use_tdm_store=True,
         out_dtype=out_dtype,
-        wave_specialized_tdm=ws,
         l2_prefetch_distance=0,
     )
 
@@ -879,19 +813,8 @@ def _gen_natural_ascale_configs():
 
 @pytest.mark.parametrize("data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf", _gen_natural_ascale_configs())
 def test_mxscale_natural_ascale(data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf):
-    # Guard: every config must take BOTH the natural A-scale path and N4K4 B-scale.
     N = 2 * tile_n
     K = tile_k * nbuf
-    assert use_natural_ascale_vgpr(
-        data_format=data_format,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        m_warp=m_warp,
-        n_warp=n_warp,
-        n=N,
-        wave_specialized_tdm=True,
-    ), f"config does not hit the natural A-scale gate: {(data_format, tile_m, tile_n, tile_k, m_warp, n_warp)}"
     _run_mxscale_gemm_test(
         data_format,
         M,
@@ -905,16 +828,14 @@ def test_mxscale_natural_ascale(data_format, M, tile_m, tile_n, tile_k, m_warp, 
         nbuf,
         use_tdm_store=True,
         out_dtype="bf16",
-        wave_specialized_tdm=True,
         l2_prefetch_distance=0,
     )
 
 
-@pytest.mark.parametrize("ascale_load_path", ["vgpr", "tdm"])
 @pytest.mark.parametrize("data_format", ["fp8", "a8w4"])
-def test_mxscale_deep_pipeline(data_format, ascale_load_path):
-    # Deep-pipeline (fixed 256x256x128 / nbuf4 / wave-spec): 32x4 B-scale + A-scale
-    # via natural VGPR (default) or 32x4 TDM. Guard: must hit the deep schedule.
+def test_mxscale_deep_pipeline(data_format):
+    # Deep-pipeline (fixed 256x256x128 / nbuf4): 32x4 B-scale + A-scale via natural
+    # VGPR ring. Guard: must hit the deep schedule.
     assert _is_fp8_deep_pipeline(
         data_format=data_format,
         tile_m=256,
@@ -924,7 +845,6 @@ def test_mxscale_deep_pipeline(data_format, ascale_load_path):
         n_warp=2,
         num_buffers=4,
         out_dtype="bf16",
-        wave_specialized_tdm=True,
         fp8_schedule="auto",
     ), "config does not hit the deep-pipeline schedule"
     _run_mxscale_gemm_test(
@@ -940,9 +860,7 @@ def test_mxscale_deep_pipeline(data_format, ascale_load_path):
         4,
         use_tdm_store=True,
         out_dtype="bf16",
-        wave_specialized_tdm=True,
         l2_prefetch_distance=0,
-        ascale_load_path=ascale_load_path,
     )
 
 
@@ -1020,11 +938,9 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
     b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
 
-    skt = tile_k // SCALE_BLOCK
-    warp_tile_m = tile_m // m_warp
-    warp_tile_n = tile_n // n_warp
-    a_scale_ps = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt)
-    b_scale_ps = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt)
+    # A-scale natural (as-is, VGPR ring); B-scale 32x4.
+    a_scale_ps = a_scale
+    b_scale_ps = preshuffle_scale(b_scale)
     pack_b = 2 if is_fp4 else 1
     b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
 
@@ -1046,7 +962,6 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         num_buffers=2,
         use_tdm_store=True,
         out_dtype="bf16",
-        wave_specialized_tdm=False,
         split_k=1,
     )
 
@@ -1595,11 +1510,10 @@ def _run_mxscale_mpad(
     a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)  # real M, unpadded
     b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
     ref = reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K)
-    skt = tile_k // SCALE_BLOCK
-    # a_scale stays UNPADDED host-side; preshuffle pads rows to tile_m (the GEMM
-    # reads tile_m-granular scale tiles for the partial last M-tile). N is aligned.
-    as_ps = preshuffle_e8m0_scale(a_scale, tile_m // m_warp, scale_k_per_tile=skt, row_align=tile_m)
-    bs_ps = preshuffle_e8m0_scale(b_scale, tile_n // n_warp, scale_k_per_tile=skt)
+    # A-scale natural (as-is, unpadded): the VGPR ring reads A_scale[M, K//32] and
+    # OOB rows of the partial last M-tile read 0 via buffer bounds. B-scale 32x4.
+    as_ps = a_scale
+    bs_ps = preshuffle_scale(b_scale)
     b_ps = fp4_utils.preshuffle_b_16x16(b, N, K)
     c_gpu = torch.zeros(M, N, dtype=_DT[out_dtype], device="cuda")  # real M
     launch = compile_mxscale_gemm(
@@ -1825,8 +1739,6 @@ def _run_benchmark(args):
         _ptpc_ignored = []
         if args.no_tdm_store:
             _ptpc_ignored.append("--no-tdm-store")
-        if not args.wave_spec_tdm:
-            _ptpc_ignored.append("--no-wave-spec-tdm")
         if _ptpc_ignored:
             print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
@@ -1875,9 +1787,7 @@ def _run_benchmark(args):
 
         a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
-        skt = tile_k // SCALE_BLOCK
-        a_scale = preshuffle_scale_for_load_path(a_scale, warp_tile_m, skt, row_align=tile_m)
-        b_scale = preshuffle_scale_for_load_path(b_scale, warp_tile_n, skt, row_align=tile_n)
+        b_scale = preshuffle_scale(b_scale)
 
         K_packed = padded_k // PACK_B
         b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
@@ -1934,7 +1844,6 @@ def _run_benchmark(args):
             use_tdm_store=use_tdm_store,
             out_dtype=kernel_out_dtype,
             inst_prefetch=args.inst_prefetch,
-            wave_specialized_tdm=args.wave_spec_tdm,
             split_k=args.split_k,
             expert_sched_mode=args.expert_sched_mode,
             atomic_barrier_enable=args.atomic_barrier_enable,
@@ -2151,11 +2060,7 @@ def _run_graph_verify(args):
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
-    skt = tile_k // SCALE_BLOCK
-    warp_tile_m = tile_m // args.m_warp
-    warp_tile_n = tile_n // args.n_warp
-    a_scale = preshuffle_scale_for_load_path(a_scale, warp_tile_m, skt, row_align=tile_m)
-    b_scale = preshuffle_scale_for_load_path(b_scale, warp_tile_n, skt, row_align=tile_n)
+    b_scale = preshuffle_scale(b_scale)
     K_packed = padded_k // padded_shape["pack_b"]
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
 
@@ -2186,7 +2091,6 @@ def _run_graph_verify(args):
         use_tdm_store=use_tdm_store,
         out_dtype=kernel_out_dtype,
         inst_prefetch=args.inst_prefetch,
-        wave_specialized_tdm=args.wave_spec_tdm,
         split_k=args.split_k,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
@@ -2298,7 +2202,6 @@ if __name__ == "__main__":
     parser.add_argument("--no-tdm-store", action="store_true", default=False)
     parser.add_argument("--out-dtype", type=str, default="bf16", choices=["f32", "bf16", "f16"])
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
-    parser.add_argument("--no-wave-spec-tdm", dest="wave_spec_tdm", action="store_false", default=True)
     parser.add_argument("--waves-per-eu", type=int, default=None)
     parser.add_argument("--disable-expert-sched-mode", dest="expert_sched_mode", action="store_false", default=True)
     parser.add_argument(
@@ -2396,7 +2299,6 @@ if __name__ == "__main__":
                 num_buffers=args.num_buffers,
                 use_tdm_store=use_tdm_store,
                 out_dtype=args.out_dtype,
-                wave_specialized_tdm=args.wave_spec_tdm,
                 split_k=args.split_k,
                 l2_prefetch_distance=args.l2_prefetch_distance,
                 cluster_m=args.cluster_m,
