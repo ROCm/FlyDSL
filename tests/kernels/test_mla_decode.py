@@ -329,6 +329,7 @@ def run_single(
             reduce_final_map,
             reduce_partial_map,
             max_seqlen_qo,
+            max_split_per_batch,
             out_asm,
             None,
         )
@@ -347,6 +348,7 @@ def run_single(
             reduce_final_map,
             reduce_partial_map,
             max_seqlen_qo,
+            max_split_per_batch,
             out_tensor,
             None,
         )
