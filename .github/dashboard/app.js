@@ -28,7 +28,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const kkey = r => `${r.op} ${r.shape} ${r.dtype}`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const VIEWS = ["health", "prcheck", "trends", "board"];
+const VIEWS = ["health", "prcheck", "board"];
 
 // theme-aware colors: read the live CSS variables so canvas/SVG match the active theme
 const ARCHVAR = { gfx950: "--gfx950", gfx942: "--gfx942", gfx1201: "--gfx1201" };
@@ -549,22 +549,29 @@ function renderBoard() {
 }
 
 /* ------------------------------------------------------------------ shell -- */
-function renderAll() { renderHealth(); renderPRCheck(); renderKernelRail(); renderBoard(); }
+function renderAll() { renderHealth(); renderKernelRail(); renderPRCheck(); renderBoard(); }
 function showView(v) {
+  if (v === "trends") v = "health";
   if (!VIEWS.includes(v)) v = "health";
   S.view = v;
   $$(".tab").forEach(t => { const on = t.dataset.view === v; t.classList.toggle("is-active", on); t.setAttribute("aria-selected", on ? "true" : "false"); });
   $$(".view").forEach(s => s.classList.toggle("is-active", s.dataset.view === v));
   if (location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
-  if (v === "trends" && trendChart) trendChart.resize();
+  if (v === "health" && trendChart) trendChart.resize();
 }
-function goTrend(k, arch) { S.trend.key = null; S.trend.arch = arch || "all"; showView("trends"); selectKernel(k); }
+function goTrend(k, arch) {
+  S.trend.key = null; S.trend.arch = arch || "all";
+  if (S.view !== "health") showView("health");
+  selectKernel(k);
+  const el = document.getElementById("trendsSection");
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 function wire() {
   $("#tabs").addEventListener("click", e => { const t = e.target.closest(".tab"); if (t) showView(t.dataset.view); });
   document.addEventListener("keydown", e => {
     if (e.target.matches("input,select")) return;
-    const map = { 1: "health", 2: "prcheck", 3: "trends", 4: "board" };
+    const map = { 1: "health", 2: "prcheck", 3: "board" };
     if (map[e.key]) showView(map[e.key]);
     if (e.key.toLowerCase() === "r") doRefresh();
   });

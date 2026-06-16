@@ -6,22 +6,19 @@
 <title>FlyDSL · CI Performance Dashboard</title>
 <meta name="description" content="Kernel performance regressions, trends, and CI status for ROCm/FlyDSL on gfx950 / gfx942 / gfx1201.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0f14'/%3E%3Cpath d='M6 22 L13 10 L17 17 L21 11 L26 22' fill='none' stroke='%2334d2c2' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
 
 <header class="topbar">
-  <div class="brand">
-    <svg class="brand-mark" viewBox="0 0 36 36" width="34" height="34" aria-hidden="true">
-      <rect width="36" height="36" rx="9" fill="#171d26"/>
+  <div class="header-left">
+    <svg class="brand-mark" viewBox="0 0 36 36" width="32" height="32" aria-hidden="true">
+      <rect width="36" height="36" rx="9" fill="#141519"/>
       <path d="M6 26 L14 10 L19 20 L24 11 L30 26" fill="none" stroke="var(--brand)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    <div class="brand-text">
+    <div>
       <span class="brand-name">Fly<b>DSL</b></span>
-      <span class="brand-sub">CI&nbsp;PERFORMANCE</span>
+      <span class="brand-sub">CI PERFORMANCE</span>
     </div>
   </div>
 
@@ -33,28 +30,22 @@
 
   <div class="status-cluster">
     <span class="updated syncing" id="updated">syncing…</span>
-    <button class="btn-refresh" id="themeBtn" title="Toggle theme" aria-label="Toggle light/dark theme"></button>
-    <button class="btn-refresh" id="refresh" title="Reload data (R)">↻</button>
+    <button class="btn-icon" id="themeBtn" title="Toggle theme" aria-label="Toggle light/dark theme"></button>
+    <button class="btn-icon" id="refresh" title="Reload data (R)">↻</button>
   </div>
 </header>
 
 <nav class="tabs" id="tabs" role="tablist">
   <button class="tab is-active" id="tab-health"  data-view="health"  role="tab" aria-selected="true"  aria-controls="panel-health">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 8h3l1.8-4.5L8.5 13l2-7L12 8h3"/></svg>
-    <span class="key">1</span>Health<b class="badge zero" id="healthBadge" hidden>0</b></button>
+    Health<b class="badge zero" id="healthBadge" hidden>0</b></button>
   <button class="tab"           id="tab-prcheck" data-view="prcheck" role="tab" aria-selected="false" aria-controls="panel-prcheck">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="1.8"/><circle cx="4" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><path d="M4 5.8v4.4M12 10.2V9a3 3 0 0 0-3-3H6.5"/></svg>
-    <span class="key">2</span>PR&nbsp;Check</button>
-  <button class="tab"           id="tab-trends"  data-view="trends"  role="tab" aria-selected="false" aria-controls="panel-trends">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 14.5h13M2.5 11l3.5-4 3 2.5 4.5-6"/></svg>
-    <span class="key">3</span>Trends</button>
+    PR Check</button>
   <button class="tab"           id="tab-board"   data-view="board"   role="tab" aria-selected="false" aria-controls="panel-board">
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
-    <span class="key">4</span>CI&nbsp;Board</button>
+    CI Board</button>
 </nav>
 
 <main id="main">
-  <!-- 1 · HEALTH (landing) -->
+  <!-- 1 · HEALTH + TRENDS (merged landing) -->
   <section class="view is-active" data-view="health" id="panel-health" role="tabpanel" aria-labelledby="tab-health" tabindex="0">
     <div class="hero" id="heroCard">
       <div class="hero-main">
@@ -69,7 +60,7 @@
 
     <div class="panel">
       <div class="panel-head">
-        <span class="t"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5l6.5 11.5h-13z"/><path d="M8 6.2v3M8 11.2v.01"/></svg><span id="regHeadTitle">Regressions on main</span></span>
+        <span class="t"><span id="regHeadTitle">Regressions on main</span></span>
         <span class="spacer"></span>
         <label class="check"><input type="checkbox" id="noiseAware" checked> noise-aware gate</label>
       </div>
@@ -78,22 +69,9 @@
       </div>
       <div id="regList"></div>
     </div>
-  </section>
 
-  <!-- 2 · PR CHECK -->
-  <section class="view" data-view="prcheck" id="panel-prcheck" role="tabpanel" aria-labelledby="tab-prcheck" tabindex="0">
-    <div class="view-head">
-      <h2 class="section-title">Does this PR slow any kernel vs main?</h2>
-      <span class="spacer"></span>
-      <select class="sel" id="prSelect" aria-label="Select PR"></select>
-    </div>
-    <div class="view-head" style="margin-top:-6px"><span class="hint" id="prSummary"></span></div>
-    <div id="prPane"></div>
-  </section>
-
-  <!-- 3 · TRENDS -->
-  <section class="view" data-view="trends" id="panel-trends" role="tabpanel" aria-labelledby="tab-trends" tabindex="0">
-    <div class="trends-layout">
+    <!-- Trends (inline) -->
+    <div class="trends-layout" id="trendsSection">
       <aside class="kernel-rail">
         <input class="search" id="kernelSearch" type="search" placeholder="find kernel…" spellcheck="false">
         <div class="kernel-list" id="kernelList"></div>
@@ -119,7 +97,18 @@
     </div>
   </section>
 
-  <!-- 4 · CI BOARD -->
+  <!-- 2 · PR CHECK -->
+  <section class="view" data-view="prcheck" id="panel-prcheck" role="tabpanel" aria-labelledby="tab-prcheck" tabindex="0">
+    <div class="view-head">
+      <h2 class="section-title">Does this PR slow any kernel vs main?</h2>
+      <span class="spacer"></span>
+      <select class="sel" id="prSelect" aria-label="Select PR"></select>
+    </div>
+    <div class="view-head" style="margin-top:-6px"><span class="hint" id="prSummary"></span></div>
+    <div id="prPane"></div>
+  </section>
+
+  <!-- 3 · CI BOARD -->
   <section class="view" data-view="board" id="panel-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
     <div class="view-head">
       <div class="counts" id="boardCounts"></div>
@@ -139,8 +128,6 @@
   <span id="footSource">data: ROCm/FlyDSL</span>
   <span class="sep">·</span>
   <a href="https://github.com/ROCm/FlyDSL" target="_blank" rel="noopener">github.com/ROCm/FlyDSL</a>
-  <span class="sep">·</span>
-  <span>ingest: <code>.github/dashboard/ingest/ingest.py</code></span>
   <span class="spacer"></span>
   <span>gfx950 · gfx942 · gfx1201</span>
 </footer>
