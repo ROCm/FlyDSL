@@ -11,7 +11,6 @@ from typing import Callable, List, Optional
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
-from .protocol import c_abi_spec
 
 _GPU_MODULE_INIT = "flydsl_gpu_module_init"
 _GPU_MODULE_LOAD_TO_DEVICE = "flydsl_gpu_module_load_to_device"
@@ -236,7 +235,6 @@ class CompiledArtifact:
         self._jit_module = None
         self._func_exe = None
         self._lock = threading.Lock()
-        self._call_state = None
 
     def __getstate__(self):
         # Serialise post-load processors by fully-qualified name so the
@@ -305,7 +303,6 @@ class CompiledArtifact:
         self._jit_module = None
         self._func_exe = None
         self._lock = threading.Lock()
-        self._call_state = None
 
     def _ensure_engine(self):
         with self._lock:
@@ -365,16 +362,6 @@ class CompiledArtifact:
             func_ptr = self._engine.raw_lookup(self._entry)
             self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
         return self._func_exe
-
-    def __call__(self, *args, **kwargs):
-        cs = self._call_state
-        if cs is None:
-            with self._lock:
-                if self._call_state is None:
-                    slot_specs = [(i, ctype, fill) for i, arg in enumerate(args) for ctype, fill in c_abi_spec(arg)]
-                    self._call_state = CallState(slot_specs, self._get_func_exe())
-                cs = self._call_state
-        return cs(args)
 
     def dump(self, compiled: bool = True):
         if compiled:
