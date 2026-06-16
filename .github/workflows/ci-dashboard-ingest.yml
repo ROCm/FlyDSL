@@ -15,8 +15,8 @@ on:
   workflow_dispatch:
     inputs:
       max_runs:
-        description: "How many recent runs to scan (≈12 runs/day; 120 ≈ 10 days)"
-        default: "120"
+        description: "How many recent runs to scan (≈1-2 runs/day; 60 ≈ 30 days)"
+        default: "60"
 
 concurrency:
   group: ci-dashboard-data          # serialize pushes to the data branch
@@ -41,7 +41,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           DATA_BRANCH: ci-dashboard-data
-          MAX_RUNS: ${{ github.event.inputs.max_runs || '120' }}
+          MAX_RUNS: ${{ github.event.inputs.max_runs || '60' }}
         run: |
           set -euo pipefail
           OUT="${RUNNER_TEMP}/dashboard-data"
@@ -53,7 +53,7 @@ jobs:
           python3 .github/dashboard/ingest/ingest.py \
             --repo "$GITHUB_REPOSITORY" \
             --max-runs "$MAX_RUNS" \
-            --history-days 14 \
+            --history-days 30 \
             --out-dir "$OUT"
 
       - name: Publish to data branch
@@ -83,5 +83,5 @@ jobs:
             echo "no data change"; exit 0
           fi
           git commit -qm "ci-dashboard: ingest $(date -u +%FT%TZ) [skip ci]"
-          git push -q origin "HEAD:${DATA_BRANCH}"
+          git push -qf origin "HEAD:${DATA_BRANCH}"
           echo "published $(wc -c < history.json) bytes of history"
