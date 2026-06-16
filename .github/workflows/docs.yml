@@ -44,6 +44,15 @@ jobs:
           cd docs
           make html
 
+      - name: Bundle CI performance dashboard
+        run: |
+          # Publish the static dashboard alongside the docs at /ci-dashboard.
+          # Its data is fetched at runtime from the ci-dashboard-data branch.
+          # Copy contents into a fresh target dir so a pre-existing dir can't nest.
+          rm -rf docs/_build/html/ci-dashboard
+          mkdir -p docs/_build/html/ci-dashboard
+          cp -r .github/dashboard/. docs/_build/html/ci-dashboard/
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
