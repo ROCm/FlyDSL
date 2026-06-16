@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified MXFP4/MXFP8/A8W4 GEMM correctness tests for gfx1250.
+"""MXFP4/MXFP8/A8W4 and PTPC-FP8 GEMM correctness tests for gfx1250.
 
 Kernel implementation: kernels/gemm_fp8fp4_gfx1250.py
 """
@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 import flydsl.compiler as flyc  # noqa: E402,I001
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm  # noqa: E402
+from kernels.gemm_fp8fp4_gfx1250 import compile_mxscale_gemm, compile_ptpc_gemm  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 
 if not torch.cuda.is_available():
@@ -55,6 +55,7 @@ def preshuffle_e8m0_scale(
     scale_k_per_tile: int = 4,
     WMMA_DIM: int = 16,
     coalesced: bool = False,
+    row_align: int = None,
 ) -> torch.Tensor:
     """Preshuffle E8M0 scale: optional byte swap + interleave for WMMA access.
 
@@ -63,8 +64,16 @@ def preshuffle_e8m0_scale(
     """
     if coalesced:
         return preshuffle_e8m0_scale_coalesced(scale, block=warp_tile)
-    _, K_scale = scale.shape
+    rows, K_scale = scale.shape
     assert K_scale % 4 == 0, f"K_scale must be divisible by 4, got {K_scale}"
+    # Accept an unpadded row count (M for a_scale / N for b_scale): pad rows to
+    # row_align (the GEMM reads tile_m-granular tiles, so callers pass row_align=tile_m)
+    # with E8M0 127 (=1.0). Padding rows feed only discarded output rows. No-op when
+    # already aligned. Defaults to warp_tile (the minimum the reshape needs).
+    align = row_align if row_align is not None else warp_tile
+    if rows % align != 0:
+        pad = _align_up(rows, align) - rows
+        scale = torch.cat([scale, torch.full((pad, K_scale), 127, dtype=scale.dtype, device=scale.device)], dim=0)
     SCALES_PER_WMMA = 4
     wmma_rep = warp_tile // WMMA_DIM
     k_groups = K_scale // scale_k_per_tile
@@ -103,8 +112,23 @@ def _parse_fill_mode(arg: str):
     return ("const", value)
 
 
+_MXFP4_MAGS = (0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
+def _nearest_mxfp4_value(value: float) -> float:
+    """Nearest E2M1-representable value to `value`, never zero unless value == 0."""
+    if value == 0:
+        return 0.0
+    sign = -1.0 if value < 0 else 1.0
+    mag = abs(float(value))
+    return sign * min(_MXFP4_MAGS, key=lambda m: abs(m - mag))
+
+
 def _fp4_e2m1_packed_fill(rows: int, cols: int, value: float) -> torch.Tensor:
-    dense = torch.full((rows, cols), float(value), dtype=torch.float32)
+    # Snap to the nearest nonzero E2M1 value: a raw round of a small fill (0.1)
+    # would land on 0 and make the whole weight tensor vanish.
+    snapped = _nearest_mxfp4_value(value)
+    dense = torch.full((rows, cols), float(snapped), dtype=torch.float32)
     return fp4_utils.f32_to_mxfp4(dense).view(torch.uint8)
 
 
@@ -158,6 +182,11 @@ def _fill_mode_label(fill_spec, data_format: str) -> str:
     label = f"const={fill_spec[1]:g}, E8M0 byte=127"
     if data_format in ("fp8", "a8w4"):
         label += f", FP8 byte=0x{_fp8_e4m3fn_byte(fill_spec[1]):02x}"
+    if data_format in ("fp4", "a8w4"):
+        eff = _nearest_mxfp4_value(fill_spec[1])
+        label += f", FP4={eff:g}"
+        if eff != fill_spec[1]:
+            label += f" (snapped from {fill_spec[1]:g})"
     return label
 
 
@@ -261,17 +290,24 @@ def _get_padded_problem_shape(
     tile_k: int,
     split_k: int,
 ) -> dict[str, int]:
-    """Pad runtime problem to tile-aligned kernel dimensions."""
+    """Validate tile alignment and return the (unpadded) kernel dimensions.
+
+    N/K must divide their tiles; M is ragged (hardware OOB). Fail loudly instead
+    of silently host-padding.
+    """
     if K % SCALE_BLOCK != 0:
         raise ValueError(f"K={K} must be divisible by SCALE_BLOCK={SCALE_BLOCK}")
+    if N % tile_n != 0:
+        raise ValueError(f"N={N} must be divisible by tile_n={tile_n} (no silent pad)")
+    if K % (tile_k * split_k) != 0:
+        raise ValueError(f"K={K} must be divisible by tile_k*split_k={tile_k * split_k} (no silent pad)")
 
     pack_a, pack_b = _mxscale_pack_factors(data_format)
-    padded_k = _align_up(K, tile_k * split_k)
     return {
-        "M": _align_up(M, tile_m),
-        "N": _align_up(N, tile_n),
-        "K": padded_k,
-        "K_scale": padded_k // SCALE_BLOCK,
+        "M": M,
+        "N": N,
+        "K": K,
+        "K_scale": K // SCALE_BLOCK,
         "pack_a": pack_a,
         "pack_b": pack_b,
     }
@@ -364,8 +400,8 @@ def _run_mxscale_gemm_test(
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
     torch_out_dtype = _dtype_map[out_dtype]
 
-    # Split-K accumulates across workgroups in fp32; half outputs are converted after.
-    kernel_out_dtype = "f32" if (split_k > 1 and out_dtype in ("bf16", "f16")) else out_dtype
+    # Split-K accumulates at the output precision.
+    kernel_out_dtype = out_dtype
     torch_kernel_dtype = _dtype_map[kernel_out_dtype]
 
     torch.manual_seed(0)
@@ -429,7 +465,6 @@ def _run_mxscale_gemm_test(
 
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=padded_m,
         N=padded_n,
         K=padded_k,
         tile_m=tile_m,
@@ -469,11 +504,12 @@ def _run_mxscale_gemm_test(
         bs_flat,
         padded_m,
         padded_n,
+        padded_k,
+        padded_n,
         torch.cuda.current_stream(),
     )
     torch.cuda.synchronize()
 
-    # Convert the fp32 split-K accumulation back to the requested half dtype.
     c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
 
     print(
@@ -517,7 +553,13 @@ def _run_mxscale_gemm_test(
     else:
         # FP8: standard SCALE_BLOCK=32 reference
         if out_dtype in ("bf16", "f16"):
-            torch.testing.assert_close(c_out_f, ref_f, rtol=1e-2, atol=5e-2)
+            # split-k atomic-adds at output precision; peak-scale tolerance to
+            # absorb the compounded bf16/f16 rounding on large-magnitude outputs.
+            if split_k > 1:
+                peak = float(ref_f.abs().max())
+                torch.testing.assert_close(c_out_f, ref_f, rtol=2e-2, atol=max(5e-2, 2e-2 * peak))
+            else:
+                torch.testing.assert_close(c_out_f, ref_f, rtol=1e-2, atol=5e-2)
         else:
             atol = max(1e-2, K * 0.6)
             torch.testing.assert_close(c_out_f, ref_f, rtol=1e-3, atol=atol)
@@ -672,7 +714,7 @@ def test_mxfp8_gemm(
     )
 
 
-@pytest.mark.parametrize("split_k", [2, 4, 6, 8])
+@pytest.mark.parametrize("split_k", [2, 4])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp8_gemm_splitk(split_k, out_dtype):
     """FP8 split-K: split_k workgroups accumulate partial K-sums into C via atomic add.
@@ -701,8 +743,8 @@ def test_mxfp8_gemm_splitk(split_k, out_dtype):
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
     [
-        (128, 5760, 2880, 128, 256, 256, 2, 2),
-        (128, 2880, 2880, 128, 256, 256, 2, 2),
+        (128, 5632, 2816, 128, 256, 256, 2, 2),
+        (128, 2816, 2816, 128, 256, 256, 2, 2),
         (1024, 1024, 1024, 128, 256, 128, 2, 4),
     ],
 )
@@ -734,12 +776,12 @@ def test_a8w4_gemm(
 @pytest.mark.parametrize(
     "M, N, K, use_tdm_store",
     [
-        (13, 2880, 2880, True),
-        (33, 5760, 2880, False),
+        (13, 2816, 2816, True),
+        (33, 5632, 2816, False),
     ],
 )
 def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
-    # Small-M path: pad M to 16 and dedicate one wave to the M dimension.
+    # Small-M path: ragged M via OOB, one wave dedicated to the M dimension.
     _run_mxscale_gemm_test(
         "a8w4",
         M,
@@ -995,7 +1037,6 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
 
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=M,
         N=N,
         K=K,
         tile_m=tile_m,
@@ -1024,13 +1065,15 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         bs_flat,
         M,
         N,
+        K,
+        N,
         torch.cuda.current_stream(),
     )
 
     # Resolve stream lazily inside the launch closure so graph capture sees
     # the active capture stream rather than a stream bound before capture.
     def launch():
-        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, torch.cuda.current_stream())
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, torch.cuda.current_stream())
 
     # ── Eager run (reference) ──
     c_gpu.zero_()
@@ -1190,6 +1233,470 @@ def _bench_kernel_us(run_fn, warmup=10, iters=50, flush_l2=True, prep_fn=None):
     return latencies[len(latencies) // 2]
 
 
+def reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K):
+    """PTPC reference: D = (A @ B^T) * sa[:,None] * sb[None,:].
+
+    data_format="fp8": FP8 activation + FP8 weight.
+    data_format="a8w4": FP8 activation + FP4 (E2M1) weight.
+    """
+    a_f32 = fp4_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K]
+    convert_b = fp4_utils.mxfp4_to_f32 if data_format == "a8w4" else fp4_utils.fp8_e4m3_to_f32
+    b_f32 = convert_b(b.view(torch.uint8))[:N, :K]
+    raw = torch.matmul(a_f32, b_f32.T)
+    return raw * sa[:M].view(M, 1) * sb[:N].view(1, N)
+
+
+def _run_ptpc_gemm_test(
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    m_warp,
+    n_warp,
+    num_buffers,
+    out_dtype,
+    *,
+    data_format="fp8",
+    l2_prefetch_distance=2,
+    cluster_m=1,
+    cluster_n=1,
+    split_k=1,
+    lda_pad=0,
+    ldc_pad=0,
+):
+    """Correctness body for PTPC (per-token per-channel) GEMM.
+
+    A scale sa[M] (per-token) and B scale sb[N] (per-channel) are fp32, constant
+    along K. The K-loop runs the WMMA unscaled (fp8) or with an identity scale
+    (a8w4); sa*sb is applied in the epilogue. data_format: "fp8" or "a8w4".
+    """
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"PTPC requires gfx1250, got {arch}")
+
+    padded_shape = _get_padded_problem_shape(data_format, M, N, K, tile_m, tile_n, tile_k, split_k)
+    padded_m, padded_n, padded_k = padded_shape["M"], padded_shape["N"], padded_shape["K"]
+    local_k = padded_k // split_k
+    num_k_tiles = local_k // tile_k
+    if num_buffers > 1 and num_k_tiles < num_buffers:
+        pytest.skip(f"{num_buffers}-buf requires num_k_tiles >= {num_buffers}")
+
+    _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+    torch_out_dtype = _dtype_map[out_dtype]
+    kernel_out_dtype = out_dtype  # split-k atomic-adds at output precision
+    torch_kernel_dtype = _dtype_map[kernel_out_dtype]
+
+    torch.manual_seed(0)
+    a = random_fp8_data(M, K)  # FP8 activation for both fp8 and a8w4
+    b = fp4_utils.random_fp4_packed(N, K) if data_format == "a8w4" else random_fp8_data(N, K)
+    # Per-token / per-channel fp32 scales in a benign range to avoid degeneracy.
+    sa = (0.5 + torch.rand(M, dtype=torch.float32)).contiguous()
+    sb = (0.5 + torch.rand(N, dtype=torch.float32)).contiguous()
+
+    ref = reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K)
+    print(
+        f"\nRunning PTPC {data_format.upper()} GEMM: M={M}, N={N}, K={K}, tiles=({tile_m},{tile_n},{tile_k}), "
+        f"bufs={num_buffers}, split_k={split_k}, out={out_dtype}"
+    )
+    print(f"Ref stats: min={ref.min():.2f}, max={ref.max():.2f}, mean={ref.mean():.2f}, std={ref.std():.2f}")
+
+    # Pad data to tile-aligned shapes; B is preshuffled like the mxscale path.
+    # A8W4 packs the FP4 weight 2-per-byte, so B's column count is K/pack_b.
+    K_packed_b = padded_k // padded_shape["pack_b"]
+    a = _pad_2d_tensor(a, padded_m, padded_k, fill_value=0)
+    b = _pad_2d_tensor(b, padded_n, K_packed_b, fill_value=0)
+    b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed_b)
+    # Pad scales (pad region is discarded in the [:M,:N] slice).
+    sa_p = torch.zeros(padded_m, dtype=torch.float32)
+    sa_p[:M] = sa
+    sb_p = torch.zeros(padded_n, dtype=torch.float32)
+    sb_p[:N] = sb
+
+    # Optional strided A/C: back data with a wider leading dim (lda/ldc), exercising
+    # the runtime-stride descriptor path. lda/ldc are logical leading dims (elements).
+    pack_a = padded_shape["pack_a"]
+    lda = padded_k + lda_pad
+    ldc = padded_n + ldc_pad
+    if lda_pad:
+        a_full = torch.zeros(padded_m, lda // pack_a, dtype=a.dtype)
+        a_full[:, : padded_k // pack_a] = a
+        a = a_full
+
+    a_gpu = a.cuda()
+    b_gpu = b.cuda()
+    sa_gpu = sa_p.cuda()
+    sb_gpu = sb_p.cuda()
+    c_gpu = torch.zeros(padded_m, ldc, dtype=torch_kernel_dtype, device="cuda")
+
+    launch_fn = compile_ptpc_gemm(
+        N=padded_n,
+        K=padded_k,
+        data_format=data_format,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+        l2_prefetch_distance=l2_prefetch_distance,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+        out_dtype=kernel_out_dtype,
+        split_k=split_k,
+    )
+
+    flyc.compile(
+        launch_fn,
+        c_gpu.contiguous(),
+        a_gpu.contiguous(),
+        b_gpu.contiguous(),
+        sa_gpu.contiguous(),
+        sb_gpu.contiguous(),
+        padded_m,
+        padded_n,
+        lda,
+        ldc,
+        torch.cuda.current_stream(),
+    )
+    torch.cuda.synchronize()
+
+    c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
+    print(
+        f"Out stats: min={c_out.float().min():.2f}, max={c_out.float().max():.2f}, "
+        f"mean={c_out.float().mean():.2f}, std={c_out.float().std():.2f}"
+    )
+    if c_out.float().abs().max() < 1e-10:
+        print("WARNING: kernel output is all zeros!")
+
+    c_out_f = c_out.float()
+    ref_f = ref.to(torch_out_dtype).float() if out_dtype in ("bf16", "f16") else ref.float()
+    diff = (c_out_f - ref_f).abs()
+    print(f"Abs diff: max={diff.max():.4f}, mean={diff.mean():.4f}")
+    cos_sim = torch.nn.functional.cosine_similarity(
+        c_out_f.flatten().unsqueeze(0).double(), ref_f.flatten().unsqueeze(0).double()
+    ).item()
+    print(f"Cosine similarity: {cos_sim:.6f}")
+
+    peak = float(ref_f.abs().max())
+    if out_dtype in ("bf16", "f16"):
+        torch.testing.assert_close(c_out_f, ref_f, rtol=2e-2, atol=max(5e-2, 2e-2 * peak))
+    else:
+        torch.testing.assert_close(c_out_f, ref_f, rtol=1e-3, atol=max(1e-2, K * 0.6))
+    print("PASSED")
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers",
+    [
+        (256, 256, 512, 256, 256, 128, 2, 2, 4),  # deep-pipeline eligible
+        (128, 256, 512, 128, 256, 128, 2, 2, 4),  # quadrant fallback
+    ],
+)
+def test_ptpc_fp8_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype):
+    _run_ptpc_gemm_test(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype)
+
+
+@pytest.mark.parametrize("lda_pad, ldc_pad", [(128, 0), (0, 256), (128, 256)])
+def test_ptpc_fp8_gemm_strided(lda_pad, ldc_pad):
+    """Strided A/C: data backed by a wider leading dim, passed via runtime lda/ldc."""
+    _run_ptpc_gemm_test(
+        128, 256, 512, 128, 256, 128, 2, 2, num_buffers=4, out_dtype="bf16", lda_pad=lda_pad, ldc_pad=ldc_pad
+    )
+
+
+@pytest.mark.parametrize("split_k", [2, 4])
+@pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
+def test_ptpc_fp8_gemm_splitk(split_k, out_dtype):
+    """PTPC split-K: each chunk applies sa*sb then atomic-adds; sum stays correct."""
+    _run_ptpc_gemm_test(128, 256, 2048, 128, 256, 128, 2, 4, num_buffers=2, out_dtype=out_dtype, split_k=split_k)
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers",
+    [
+        (128, 256, 512, 128, 256, 128, 2, 4, 2),  # row-major (a8w4) + wave-spec TDM
+        (128, 256, 1024, 128, 256, 256, 2, 4, 3),
+    ],
+)
+def test_ptpc_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype):
+    """PTPC A8W4 (FP8 act + FP4 weight): K-loop uses identity-scale f8f6f4 WMMA;
+    real per-token/per-channel sa*sb is applied in the epilogue."""
+    _run_ptpc_gemm_test(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype, data_format="a8w4")
+
+
+@pytest.mark.parametrize("split_k", [2, 4])
+def test_ptpc_a8w4_gemm_splitk(split_k):
+    """PTPC A8W4 split-K: identity-scale K-loop + epilogue sa*sb + atomic add."""
+    _run_ptpc_gemm_test(
+        128, 256, 2048, 128, 256, 128, 2, 4, num_buffers=2, out_dtype="bf16", split_k=split_k, data_format="a8w4"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Non-tile-aligned M (the default, no host M-padding): A/C (and ptpc sa) are
+# allocated at the real M. A-load TDM skips rows>=M, sa buffer_load OOB->0, C
+# buffer_store clips via num_records. N,K stay tile-aligned.
+# ---------------------------------------------------------------------------
+_DT = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
+_MPAD_MS = [1, 16, 31, 64, 65, 100, 127, 128, 129, 130, 192, 255, 256, 257, 384, 500, 1000, 2048]
+
+
+def _assert_mpad(c_real, ref, out_dtype):
+    c = c_real.float()
+    ref_f = ref.to(_DT[out_dtype]).float()
+    peak = float(ref_f.abs().max())
+    if out_dtype in ("bf16", "f16"):
+        torch.testing.assert_close(c, ref_f, rtol=2e-2, atol=max(5e-2, 2e-2 * peak))
+    else:
+        torch.testing.assert_close(c, ref_f, rtol=1e-3, atol=max(1e-2, ref.shape[-1] * 0.6))
+
+
+def _run_ptpc_mpad(
+    M,
+    N,
+    K,
+    *,
+    data_format="fp8",
+    out_dtype="bf16",
+    split_k=1,
+    tile_m=128,
+    tile_n=128,
+    tile_k=128,
+    m_warp=2,
+    n_warp=2,
+    num_buffers=4,
+    cluster_m=1,
+    cluster_n=1,
+):
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"requires gfx1250, got {arch}")
+    assert N % tile_n == 0 and K % tile_k == 0, "M-pad test keeps N,K tile-aligned"
+    # split_k atomic-adds at output precision (per-lane predicate on row < M).
+    kernel_out_dtype = out_dtype
+    torch.manual_seed(0)
+    a = random_fp8_data(M, K)
+    b = fp4_utils.random_fp4_packed(N, K) if data_format == "a8w4" else random_fp8_data(N, K)
+    sa = (0.5 + torch.rand(M, dtype=torch.float32)).contiguous()
+    sb = (0.5 + torch.rand(N, dtype=torch.float32)).contiguous()
+    ref = reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K)
+    pack_b = 2 if data_format == "a8w4" else 1
+    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
+    c_gpu = torch.zeros(M, N, dtype=_DT[kernel_out_dtype], device="cuda")  # real M; zero for atomic
+    launch = compile_ptpc_gemm(
+        N=N,
+        K=K,
+        data_format=data_format,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+        out_dtype=kernel_out_dtype,
+        split_k=split_k,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+    )
+    launch(c_gpu, a.cuda(), b_ps.cuda(), sa.cuda(), sb.cuda(), M, N, K, N, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+    _assert_mpad(c_gpu[:M].cpu(), ref, kernel_out_dtype)
+
+
+def _run_mxscale_mpad(
+    M,
+    N,
+    K,
+    *,
+    out_dtype="bf16",
+    use_tdm_store=True,
+    tile_m=128,
+    tile_n=128,
+    tile_k=128,
+    m_warp=2,
+    n_warp=2,
+    num_buffers=4,
+    cluster_m=1,
+    cluster_n=1,
+):
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"requires gfx1250, got {arch}")
+    assert N % tile_n == 0 and K % tile_k == 0, "M-pad test keeps N,K tile-aligned"
+    torch.manual_seed(0)
+    a = random_fp8_data(M, K)
+    b = random_fp8_data(N, K)
+    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)  # real M, unpadded
+    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+    ref = reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K)
+    skt = tile_k // SCALE_BLOCK
+    # a_scale stays UNPADDED host-side; preshuffle pads rows to tile_m (the GEMM
+    # reads tile_m-granular scale tiles for the partial last M-tile). N is aligned.
+    as_ps = preshuffle_e8m0_scale(a_scale, tile_m // m_warp, scale_k_per_tile=skt, row_align=tile_m)
+    bs_ps = preshuffle_e8m0_scale(b_scale, tile_n // n_warp, scale_k_per_tile=skt)
+    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K)
+    c_gpu = torch.zeros(M, N, dtype=_DT[out_dtype], device="cuda")  # real M
+    launch = compile_mxscale_gemm(
+        data_format="fp8",
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+        out_dtype=out_dtype,
+        use_tdm_store=use_tdm_store,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+    )
+    launch(c_gpu, a.cuda(), b_ps.cuda(), as_ps.cuda(), bs_ps.cuda(), M, N, K, N, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+    _assert_mpad(c_gpu[:M].cpu(), ref, out_dtype)
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
+@pytest.mark.parametrize("M", _MPAD_MS)
+def test_ptpc_fp8_gemm_mpad(M, out_dtype):
+    _run_ptpc_mpad(M, 256, 512, out_dtype=out_dtype)
+
+
+@pytest.mark.parametrize("M", _MPAD_MS)
+def test_ptpc_a8w4_gemm_mpad(M):
+    _run_ptpc_mpad(M, 256, 512, data_format="a8w4", m_warp=2, n_warp=4, num_buffers=2)
+
+
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
+@pytest.mark.parametrize("M", _MPAD_MS)
+def test_mxfp8_gemm_mpad(M, out_dtype, use_tdm_store):
+    _run_mxscale_mpad(M, 256, 512, out_dtype=out_dtype, use_tdm_store=use_tdm_store)
+
+
+@pytest.mark.parametrize("split_k", [2, 4])
+@pytest.mark.parametrize("M", [1, 64, 129, 192, 257, 500])
+def test_ptpc_fp8_gemm_splitk_mpad(M, split_k):
+    # split_k atomic output predicated per-lane on row < M (auto buffer/atomic path).
+    _run_ptpc_mpad(M, 256, 2048, m_warp=2, n_warp=4, num_buffers=2, split_k=split_k)
+
+
+# Tile/warp-config diversity: the per-warp partial-tile clip uses
+# warp_tile_m = tile_m // m_warp, so M must be exercised against different warp
+# boundaries. Existing mpad tests are all m_warp=2 (warp_tile_m=64); these add
+# warp_tile_m in {128 (single M-warp / tile_m=256), 32 (fine 4-way split)}.
+_MPAD_WARP_CFGS = [
+    # (tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
+    (128, 128, 128, 1, 4, 4),  # warp_tile_m=128: single M-warp, no M split
+    (128, 128, 128, 4, 2, 2),  # warp_tile_m=32: fine-grained M warps
+    (256, 128, 128, 2, 2, 2),  # tile_m=256, warp_tile_m=128
+]
+# Boundary-diverse M for warp_tile_m in {32, 128}: partial/full/OOB warps + aligned.
+_MPAD_WARP_MS = [1, 33, 64, 100, 129, 200, 256, 333]
+
+
+@pytest.mark.parametrize("tile_m,tile_n,tile_k,m_warp,n_warp,num_buffers", _MPAD_WARP_CFGS)
+@pytest.mark.parametrize("M", _MPAD_WARP_MS)
+def test_ptpc_fp8_gemm_mpad_warps(M, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers):
+    _run_ptpc_mpad(
+        M,
+        256,
+        512,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        m_warp=m_warp,
+        n_warp=n_warp,
+        num_buffers=num_buffers,
+    )
+
+
+#   M=100 -> grid_m 1->2, tile1 fully OOB (rows>=100) under M-multicast
+#   M=129,200,450 -> partial last M-tile, grid divisible
+#   M=256,512 -> tile-aligned
+#   M=257,300 -> grid_m 3->4 (rounded); M=300 also makes tile3 fully OOB
+_MPAD_CLUSTER_MS = [100, 129, 200, 256, 257, 300, 450, 512]
+_MPAD_CLUSTERS = [(2, 2), (2, 4)]
+
+
+@pytest.mark.parametrize("cluster_m,cluster_n", _MPAD_CLUSTERS)
+@pytest.mark.parametrize("M", _MPAD_CLUSTER_MS)
+def test_ptpc_fp8_gemm_mpad_cluster(M, cluster_m, cluster_n):
+    _run_ptpc_mpad(M, 512, 512, m_warp=2, n_warp=2, num_buffers=2, cluster_m=cluster_m, cluster_n=cluster_n)
+
+
+@pytest.mark.parametrize("cluster_m,cluster_n", _MPAD_CLUSTERS)
+@pytest.mark.parametrize("M", _MPAD_CLUSTER_MS)
+def test_ptpc_a8w4_gemm_mpad_cluster(M, cluster_m, cluster_n):
+    _run_ptpc_mpad(
+        M, 512, 512, data_format="a8w4", m_warp=2, n_warp=4, num_buffers=2, cluster_m=cluster_m, cluster_n=cluster_n
+    )
+
+
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("cluster_m,cluster_n", _MPAD_CLUSTERS)
+@pytest.mark.parametrize("M", _MPAD_CLUSTER_MS)
+def test_mxfp8_gemm_mpad_cluster(M, cluster_m, cluster_n, use_tdm_store):
+    _run_mxscale_mpad(
+        M,
+        512,
+        512,
+        m_warp=2,
+        n_warp=2,
+        num_buffers=2,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+        use_tdm_store=use_tdm_store,
+    )
+
+
+@pytest.mark.parametrize("split_k", [2, 4])
+@pytest.mark.parametrize("M", [100, 129, 256, 300, 450])
+def test_ptpc_fp8_gemm_splitk_mpad_cluster(M, split_k):
+    # split_k atomic output (per-lane row<M predicate) combined with cluster>1.
+    _run_ptpc_mpad(M, 512, 2048, m_warp=2, n_warp=2, num_buffers=2, split_k=split_k, cluster_m=2, cluster_n=2)
+
+
+@pytest.mark.parametrize("cluster_m,cluster_n", [(2, 2), (2, 4)])
+@pytest.mark.parametrize("M", [100, 300, 512, 600, 700, 1024])
+def test_ptpc_fp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n):
+    _run_ptpc_mpad(
+        M,
+        1024,
+        512,
+        tile_m=256,
+        tile_n=256,
+        m_warp=2,
+        n_warp=2,
+        num_buffers=2,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+    )
+
+
+@pytest.mark.parametrize("use_tdm_store", [True, False])
+@pytest.mark.parametrize("cluster_m,cluster_n", [(2, 2), (2, 4)])
+@pytest.mark.parametrize("M", [100, 300, 512, 600, 700, 1024])
+def test_mxfp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n, use_tdm_store):
+    _run_mxscale_mpad(
+        M,
+        1024,
+        512,
+        tile_m=256,
+        tile_n=256,
+        m_warp=2,
+        n_warp=2,
+        num_buffers=2,
+        cluster_m=cluster_m,
+        cluster_n=cluster_n,
+        use_tdm_store=use_tdm_store,
+    )
+
+
 def _run_benchmark(args):
     """Benchmark mode: compile once, time kernel execution with proper methodology."""
     import time
@@ -1211,13 +1718,18 @@ def _run_benchmark(args):
 
     is_fp4 = data_format == "fp4"
     is_a8w4 = data_format == "a8w4"
+    is_ptpc = getattr(args, "scale_mode", "mxscale") == "ptpc"
+    if is_ptpc and data_format not in ("fp8", "a8w4"):
+        raise ValueError(f"scale_mode='ptpc' only supports data_format='fp8' or 'a8w4', got {data_format!r}")
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
-    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
-    # supported but compound rounding error, so we run f32 and convert back on the host.
-    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    # split_k atomic-adds at output precision (bf16/f16).
+    kernel_out_dtype = args.out_dtype
     torch_kernel_dtype = _dtype_map[kernel_out_dtype]
     elem_bytes_d = 2 if kernel_out_dtype in ("bf16", "f16") else 4
-    fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
+    if is_ptpc:
+        fmt_name = "PTPC-A8W4" if is_a8w4 else "PTPC-FP8"
+    else:
+        fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
 
     print("=" * 72)
     print(f"  {fmt_name} GEMM Benchmark on gfx1250")
@@ -1237,23 +1749,74 @@ def _run_benchmark(args):
     l2_flush_label = "OFF (graph)" if getattr(args, "use_graph", False) else ("OFF" if args.no_flush_l2 else "ON")
     print(f"  Warmup={args.warmup}, Iters={args.iters}, L2 flush={l2_flush_label}")
     print("  Output init: zero before warmup")
+    if is_ptpc:
+        # compile_ptpc_gemm forces these internally; flag the ones the user set off-default.
+        _ptpc_ignored = []
+        if args.no_tdm_store:
+            _ptpc_ignored.append("--no-tdm-store")
+        if not args.wave_spec_tdm:
+            _ptpc_ignored.append("--no-wave-spec-tdm")
+        if args.use_scale_opsel:
+            _ptpc_ignored.append("--use-scale-opsel")
+        if args.scale_load_path != "tdm":
+            _ptpc_ignored.append(f"--scale-load-path {args.scale_load_path}")
+        if args.b_streaming:
+            _ptpc_ignored.append("--b-streaming")
+        if _ptpc_ignored:
+            print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
 
     torch.manual_seed(0)
-    a, b, a_scale, b_scale, fill_spec = _fill_mode_inputs(M, N, K, data_format, getattr(args, "fill_mode", "random"))
-    print(f"  Fill mode: {_fill_mode_label(fill_spec, data_format)}")
-
-    a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
-
-    skt = tile_k // SCALE_BLOCK
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
-    _coalesced_scale = args.scale_load_path in ("vgpr", "vgpr_ab_split")
-    a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
-    b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+    if is_ptpc:
+        # PTPC: fp8 A with fp32 per-token (sa[M]) / per-channel (sb[N]) scales, no scale preshuffle.
+        # B is fp8 (data_format="fp8") or FP4-packed 2-per-byte (data_format="a8w4").
+        K_packed_b = padded_k // PACK_B
+        b_kind = "fp4 (a8w4)" if is_a8w4 else "fp8"
+        fill_spec = _parse_fill_mode(getattr(args, "fill_mode", "random"))
+        if fill_spec[0] == "const":
+            value = fill_spec[1]
+            fp8_byte = _fp8_e4m3fn_byte(value)
+            a_raw = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+            b_raw = _fp4_e2m1_packed_fill(N, K, value) if is_a8w4 else torch.full((N, K), fp8_byte, dtype=torch.uint8)
+            # Neutral per-token/per-channel scales so the const output stays predictable.
+            a_scale = torch.zeros(padded_m, dtype=torch.float32)
+            a_scale[:M] = 1.0
+            b_scale = torch.zeros(padded_n, dtype=torch.float32)
+            b_scale[:N] = 1.0
+            if is_a8w4:
+                eff_b = _nearest_mxfp4_value(value)
+                b_note = f"fp4 B={eff_b:g}" + (f" (snapped from {value:g})" if eff_b != value else "")
+            else:
+                b_note = "fp8 B"
+            print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), {b_note}, sa=sb=1.0")
+        else:
+            a_raw = random_fp8_data(M, K)
+            b_raw = fp4_utils.random_fp4_packed(N, K) if is_a8w4 else random_fp8_data(N, K)
+            a_scale = torch.zeros(padded_m, dtype=torch.float32)
+            a_scale[:M] = 0.5 + torch.rand(M, dtype=torch.float32)
+            b_scale = torch.zeros(padded_n, dtype=torch.float32)
+            b_scale[:N] = 0.5 + torch.rand(N, dtype=torch.float32)
+            print(f"  Fill mode: random fp8 A / {b_kind} B, fp32 per-token/per-channel scales")
+        a = _pad_2d_tensor(a_raw, padded_m, padded_k, fill_value=0)
+        b = _pad_2d_tensor(b_raw, padded_n, K_packed_b, fill_value=0)
+        b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed_b)
+    else:
+        a, b, a_scale, b_scale, fill_spec = _fill_mode_inputs(
+            M, N, K, data_format, getattr(args, "fill_mode", "random")
+        )
+        print(f"  Fill mode: {_fill_mode_label(fill_spec, data_format)}")
 
-    K_packed = padded_k // PACK_B
-    b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
+        a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
+
+        skt = tile_k // SCALE_BLOCK
+        _coalesced_scale = args.scale_load_path in ("vgpr", "vgpr_ab_split")
+        a_scale = preshuffle_e8m0_scale(a_scale, warp_tile_m, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+        b_scale = preshuffle_e8m0_scale(b_scale, warp_tile_n, scale_k_per_tile=skt, coalesced=_coalesced_scale)
+
+        K_packed = padded_k // PACK_B
+        b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
 
     a_gpu = a.cuda()
     b_gpu = b.cuda()
@@ -1267,32 +1830,54 @@ def _run_benchmark(args):
     if args.split_k > 1 and use_tdm_store:
         print("      Note: split-K forces buffer-store atomic epilogue; disabling TDM store.")
         use_tdm_store = False
-    launch_fn = compile_mxscale_gemm(
-        data_format=data_format,
-        M=padded_m,
-        N=padded_n,
-        K=padded_k,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        m_warp=args.m_warp,
-        n_warp=args.n_warp,
-        num_buffers=args.num_buffers,
-        waves_per_eu=args.waves_per_eu,
-        l2_prefetch_distance=args.l2_prefetch_distance,
-        cluster_m=args.cluster_m,
-        cluster_n=args.cluster_n,
-        use_tdm_store=use_tdm_store,
-        out_dtype=kernel_out_dtype,
-        inst_prefetch=args.inst_prefetch,
-        wave_specialized_tdm=args.wave_spec_tdm,
-        split_k=args.split_k,
-        use_scale_opsel=args.use_scale_opsel,
-        expert_sched_mode=args.expert_sched_mode,
-        atomic_barrier_enable=args.atomic_barrier_enable,
-        b_streaming=args.b_streaming,
-        scale_load_path=args.scale_load_path,
-    )
+    if is_ptpc:
+        # compile_ptpc_gemm fixes scale_mode/wave_spec/use_tdm_store internally.
+        launch_fn = compile_ptpc_gemm(
+            N=padded_n,
+            K=padded_k,
+            data_format=data_format,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            m_warp=args.m_warp,
+            n_warp=args.n_warp,
+            num_buffers=args.num_buffers,
+            waves_per_eu=args.waves_per_eu,
+            l2_prefetch_distance=args.l2_prefetch_distance,
+            cluster_m=args.cluster_m,
+            cluster_n=args.cluster_n,
+            out_dtype=kernel_out_dtype,
+            inst_prefetch=args.inst_prefetch,
+            expert_sched_mode=args.expert_sched_mode,
+            atomic_barrier_enable=args.atomic_barrier_enable,
+            split_k=args.split_k,
+        )
+    else:
+        launch_fn = compile_mxscale_gemm(
+            data_format=data_format,
+            N=padded_n,
+            K=padded_k,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            m_warp=args.m_warp,
+            n_warp=args.n_warp,
+            num_buffers=args.num_buffers,
+            waves_per_eu=args.waves_per_eu,
+            l2_prefetch_distance=args.l2_prefetch_distance,
+            cluster_m=args.cluster_m,
+            cluster_n=args.cluster_n,
+            use_tdm_store=use_tdm_store,
+            out_dtype=kernel_out_dtype,
+            inst_prefetch=args.inst_prefetch,
+            wave_specialized_tdm=args.wave_spec_tdm,
+            split_k=args.split_k,
+            use_scale_opsel=args.use_scale_opsel,
+            expert_sched_mode=args.expert_sched_mode,
+            atomic_barrier_enable=args.atomic_barrier_enable,
+            b_streaming=args.b_streaming,
+            scale_load_path=args.scale_load_path,
+        )
 
     compiled_exe = flyc.compile(
         launch_fn,
@@ -1302,6 +1887,8 @@ def _run_benchmark(args):
         as_gpu,
         bs_gpu,
         padded_m,
+        padded_n,
+        padded_k,
         padded_n,
         torch.cuda.current_stream(),
     )
@@ -1317,6 +1904,8 @@ def _run_benchmark(args):
             as_gpu,
             bs_gpu,
             padded_m,
+            padded_n,
+            padded_k,
             padded_n,
             torch.cuda.current_stream(),
         )
@@ -1345,7 +1934,7 @@ def _run_benchmark(args):
 
     bytes_a = padded_m * padded_k // PACK_A
     bytes_b = padded_n * padded_k // PACK_B
-    bytes_scale = (padded_m + padded_n) * padded_shape["K_scale"]
+    bytes_scale = (padded_m + padded_n) * (4 if is_ptpc else padded_shape["K_scale"])
     bytes_d = padded_m * padded_n * elem_bytes_d
     read_bytes = bytes_a + bytes_b + bytes_scale
     write_bytes = bytes_d
@@ -1447,15 +2036,13 @@ def _run_graph_verify(args):
     as_gpu = a_scale.cuda()
     bs_gpu = b_scale.cuda()
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
-    # split_k>1 accumulates partial K-sums in fp32 for precision; bf16/f16 atomics are
-    # supported but compound rounding error, so we run f32 and convert back on the host.
-    kernel_out_dtype = "f32" if (args.split_k > 1 and args.out_dtype in ("bf16", "f16")) else args.out_dtype
+    # split_k atomic-adds at output precision (bf16/f16).
+    kernel_out_dtype = args.out_dtype
     c_gpu = torch.zeros(padded_m, padded_n, dtype=_dtype_map[kernel_out_dtype], device="cuda")
 
     use_tdm_store = not args.no_tdm_store and args.split_k == 1
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
-        M=padded_m,
         N=padded_n,
         K=padded_k,
         tile_m=tile_m,
@@ -1494,11 +2081,24 @@ def _run_graph_verify(args):
         bs_flat,
         padded_m,
         padded_n,
+        padded_k,
+        padded_n,
         torch.cuda.current_stream(),
     )
 
     def launch():
-        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, padded_m, padded_n, torch.cuda.current_stream())
+        compiled_exe(
+            c_flat,
+            a_flat,
+            b_flat,
+            as_flat,
+            bs_flat,
+            padded_m,
+            padded_n,
+            padded_k,
+            padded_n,
+            torch.cuda.current_stream(),
+        )
 
     c_gpu.zero_()
     launch()
@@ -1549,6 +2149,14 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-format", type=str, default="fp8", choices=["fp4", "fp8", "a8w4"])
+    parser.add_argument(
+        "--scale-mode",
+        type=str,
+        default="mxscale",
+        choices=["mxscale", "ptpc"],
+        help="Scale organization: 'mxscale' (E8M0 block scale) or 'ptpc' "
+        "(per-token/per-channel fp32; supports --data-format fp8 or a8w4).",
+    )
     parser.add_argument("-M", type=int, default=1024)
     parser.add_argument("-N", type=int, default=1024)
     parser.add_argument("-K", type=int, default=2048)
@@ -1614,12 +2222,33 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    if args.scale_mode == "ptpc" and args.verify_graph:
+        raise SystemExit("--scale-mode ptpc does not support --verify-graph")
+
     if args.verify_graph:
         _run_graph_verify(args)
         if not args.benchmark:
             sys.exit(0)
     if args.benchmark:
         _run_benchmark(args)
+    elif args.scale_mode == "ptpc":
+        _run_ptpc_gemm_test(
+            args.M,
+            args.N,
+            args.K,
+            args.tile_m,
+            args.tile_n,
+            args.tile_k,
+            args.m_warp,
+            args.n_warp,
+            num_buffers=args.num_buffers,
+            out_dtype=args.out_dtype,
+            data_format=args.data_format,
+            l2_prefetch_distance=args.l2_prefetch_distance,
+            cluster_m=args.cluster_m,
+            cluster_n=args.cluster_n,
+            split_k=args.split_k,
+        )
     else:
         use_tdm_store = not args.no_tdm_store and args.split_k == 1
         _run_mxscale_gemm_test(

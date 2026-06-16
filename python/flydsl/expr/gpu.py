@@ -20,7 +20,7 @@ from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
 from ..compiler.protocol import dsl_align_of, dsl_size_of
-from .numeric import Uint8
+from .numeric import Numeric, Uint8
 from .primitive import get_dyn_shared, make_ptr
 from .struct import (
     Arena,
@@ -104,6 +104,8 @@ class SharedAllocator(Arena):
         return self._base
 
     def allocate(self, storable_or_int, alignment=None):
+        if isinstance(storable_or_int, Numeric) and not isinstance(storable_or_int.value, ir.Value):
+            storable_or_int = int(storable_or_int.value)
         if not self._static:
             return super().allocate(storable_or_int, alignment)
         return self._allocate_static(storable_or_int, alignment)
