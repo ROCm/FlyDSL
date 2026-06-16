@@ -63,7 +63,7 @@ FlyDSL/
 │   │   ├── vector.py                 # Vector dialect ops
 │   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
 │   │   ├── buffer_ops.py             # Buffer / memory operations
-│   │   └── rocdl.py                  # ROCm-specific intrinsics
+│   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
 │   ├── runtime/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
 │   └── utils/
