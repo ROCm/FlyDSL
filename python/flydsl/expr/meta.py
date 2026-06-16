@@ -7,6 +7,7 @@ from functools import wraps
 from .._mlir import ir
 
 
+# TODO: remove this in the future.
 def _to_raw_value(obj):
     if isinstance(obj, ir.Value):
         return obj
@@ -24,6 +25,7 @@ def _to_raw_value(obj):
     return obj
 
 
+# TODO: remove this in the future.
 def _flatten_args(args, kwargs):
     new_args = tuple(_to_raw_value(a) for a in args)
     new_kwargs = {k: _to_raw_value(v) if k not in ("loc", "ip") else v for k, v in kwargs.items()}
@@ -52,6 +54,7 @@ def _caller_location(depth=1):
     return ir.Location.name(label, childLoc=file_loc)
 
 
+# TODO: remove this in the future.
 def traced_op(op):
     @wraps(op)
     def wrapper(*args, **kwargs):
@@ -63,3 +66,44 @@ def traced_op(op):
             return op(*args, **kwargs)
 
     return wrapper
+
+
+def dsl_loc_tracing(op):
+    """Capture the caller's Python source position as an MLIR Location
+
+    TODO: enhance this in the recent changes. loc is missed in the op arguments.
+    """
+
+    @wraps(op)
+    def wrapper(*args, **kwargs):
+        loc = kwargs.pop("loc", None)
+        if loc is None:
+            loc = _caller_location(depth=1)
+        with loc:
+            return op(*args, **kwargs)
+
+    return wrapper
+
+
+def dsl_wrap_result(target=None):
+    """Wrap the op result(s) back into DslType values.
+
+    - ``target=None`` (default): dispatch by the result's ``ir.Type``.
+    - ``target=SomeClass``: force ``SomeClass(value)`` — useful when the result
+      type cannot be uniquely determined from the ``ir.Type`` (vectors, …).
+
+    Multi-value returns (tuples / lists) are wrapped element-wise.
+    """
+
+    def decorator(op, target):
+        @wraps(op)
+        def wrapper(*args, **kwargs):
+            from .typing import as_dsl_value
+
+            return as_dsl_value(op(*args, **kwargs), target)
+
+        return wrapper
+
+    if inspect.isfunction(target):
+        return decorator(target, None)
+    return lambda op: decorator(op, target)

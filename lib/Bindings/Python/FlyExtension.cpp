@@ -534,6 +534,45 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
         "case) or a target-specific MLIR Attribute (e.g. "
         "`#fly_rocdl.buffer_desc`).");
 
+    // Build a layout-dynamic MemRefType from per-dim *encoded* values each
+    // entry is ``v >= 0`` -> static size/stride ``v``; ``v < 0`` -> dynamic dim
+    // with divisibility ``-v``. Shape dynamic leaves are always 32-bit; stride
+    // dynamic leaves follow ``use_32bit_stride``.  Address space is global.
+    c.def_static(
+        "get",
+        [](PyType &elemTyObj, const std::vector<int64_t> &shapeEnc,
+           const std::vector<int64_t> &strideEnc, bool use32BitStride, int32_t alignment,
+           DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          Type elemType = unwrap(elemTyObj);
+          int n = static_cast<int>(shapeEnc.size());
+          auto leaf = [&](int64_t v, bool i32) -> Attribute {
+            if (v < 0)
+              return IntTupleAttr::getLeafDynamic(ctx, i32 ? 32 : 64, static_cast<int32_t>(-v));
+            return IntTupleAttr::getLeafStatic(ctx, v);
+          };
+          SmallVector<Attribute> sh(n), st(n);
+          for (int i = 0; i < n; ++i) {
+            sh[i] = leaf(shapeEnc[i], /*i32=*/true);
+            st[i] = leaf(strideEnc[i], use32BitStride);
+          }
+          IntTupleAttr shapeAttr =
+              n == 1 ? cast<IntTupleAttr>(sh[0]) : IntTupleAttr::get(ArrayAttr::get(ctx, sh));
+          IntTupleAttr strideAttr =
+              n == 1 ? cast<IntTupleAttr>(st[0]) : IntTupleAttr::get(ArrayAttr::get(ctx, st));
+          LayoutAttr layoutAttr = LayoutAttr::get(ctx, shapeAttr, strideAttr);
+          AddressSpaceAttr addrSpaceAttr = AddressSpaceAttr::get(ctx, AddressSpace::Global);
+          AlignAttr alignAttr = AlignAttr::get(ctx, alignment);
+          return PyMemRefType(
+              context->getRef(),
+              wrap(::mlir::fly::MemRefType::get(elemType, addrSpaceAttr, layoutAttr, alignAttr)));
+        },
+        "elem_ty"_a, "shape_enc"_a, "stride_enc"_a, "use_32bit_stride"_a, "alignment"_a,
+        nb::kw_only(), "context"_a = nb::none(),
+        "Build a layout-dynamic MemRefType from encoded per-dim values: v>=0 static "
+        "size/stride, v<0 dynamic with divisibility -v (same encoding as the cache "
+        "signature). Python owns the layout state.");
+
     c.def_prop_ro("element_type", [](PyMemRefType &self) -> MlirType {
       return wrap(self.toCppType().getElemTy());
     });
@@ -878,35 +917,21 @@ NB_MODULE(_mlirDialectsFly, m) {
   using DLTensorAdaptor = utils::DLTensorAdaptor;
 
   nb::class_<DLTensorAdaptor>(m, "DLTensorAdaptor")
-      .def(nb::init<nb::object, std::optional<int32_t>, bool>(), "dlpack_capsule"_a,
-           "alignment"_a = nb::none(), "use_32bit_stride"_a = false,
-           "Create a DLTensorAdaptor from a DLPack capsule. "
-           "If alignment is None, defaults to element size in bytes (minimum "
-           "1). ")
+      .def(nb::init<nb::object>(), "dlpack_capsule"_a,
+           "Create a DLTensorAdaptor from a DLPack capsule.")
       .def_prop_ro("shape", &DLTensorAdaptor::getShape, "Get tensor shape as tuple")
       .def_prop_ro("stride", &DLTensorAdaptor::getStride, "Get tensor stride as tuple")
       .def_prop_ro("data_ptr", &DLTensorAdaptor::getDataPtr, "Get data pointer as int64")
       .def_prop_ro("address_space", &DLTensorAdaptor::getAddressSpace,
                    "Get address space (0=host, 1=device)")
-      .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes, "Get total size in bytes")
-      .def("build_memref_desc", &DLTensorAdaptor::buildMemRefDesc,
-           "Build memref descriptor based on current dynamic marks")
-      .def("get_memref_type", &DLTensorAdaptor::getMemRefType,
-           "Get fly.memref MLIR type based on current dynamic marks")
-      .def("get_c_pointers", &DLTensorAdaptor::getCPointers, "Get list of c pointers")
-      .def("mark_layout_dynamic", &DLTensorAdaptor::markLayoutDynamic, "leading_dim"_a = -1,
-           "divisibility"_a = 1, "Mark entire layout as dynamic except leading dim stride")
-      .def("mark_shape_dynamic", &DLTensorAdaptor::markShapeDynamic, "dims"_a, "divisibilities"_a,
-           "Mark the shape leaf of each listed dimension dynamic, leaving others unchanged. "
-           "dims and divisibilities must be equal-length lists.")
-      .def("mark_stride_dynamic", &DLTensorAdaptor::markStrideDynamic, "dims"_a, "divisibilities"_a,
-           "Mark the stride leaf of each listed dimension dynamic, leaving others unchanged. "
-           "dims and divisibilities must be equal-length lists.")
-      .def("use_32bit_stride", &DLTensorAdaptor::use32BitStride, "use_32bit_stride"_a,
-           "Decide whether to use 32-bit stride")
-      .def("get_cache_signature", &DLTensorAdaptor::getCacheSignature,
-           "Cache-key tuple (alignment, use_32bit_stride, shape, stride) reflecting "
-           "the resolved layout state.");
+      .def_prop_ro(
+          "dtype", [](DLTensorAdaptor &self) { return wrap(self.getDtype()); },
+          "The dtype as an MLIR element type (ir Type); requires an active MLIR context")
+      .def_prop_ro("dtype_id", &DLTensorAdaptor::getDtypeId,
+                   "Context-free dtype id (code, bits, lanes) for use as a cache discriminator")
+      .def_prop_ro("element_bits", &DLTensorAdaptor::getElementBits,
+                   "Element width in bits (bits * lanes), at sub-byte granularity")
+      .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes, "Get total size in bytes");
 
   // -------------------------------------------------------------------------
   // Module-level helper functions

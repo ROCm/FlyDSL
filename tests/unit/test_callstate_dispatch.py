@@ -26,8 +26,8 @@ from flydsl.expr.numeric import Int32  # noqa: E402
 def _expected_layout_bytes(t, use_32bit=False):
     """Canonical dynamic-layout buffer: dynamic-shape i32's then dynamic-stride
     i32/i64's, little-endian -- matches C++ buildMemRefDesc."""
-    ad = ja.TensorAdaptor(t, use_32bit_stride=use_32bit)
-    sd, std, u32 = ad._shape_dyn_indices, ad._stride_dyn_indices, ad.use_32bit_stride
+    ad = ja.TorchTensorJitArg(t, use_32bit_stride=use_32bit)
+    sd, std, u32 = ad.shape_dyn_indices, ad.stride_dyn_indices, ad.use_32bit_stride
     out = struct.pack("<" + "i" * len(sd), *[t.shape[d] for d in sd])
     out += struct.pack("<" + ("i" if u32 else "q") * len(std), *[t.stride(d) for d in std])
     return out
@@ -49,29 +49,31 @@ def _layouts():
 @pytest.mark.parametrize("name,t", _layouts(), ids=[n for n, _ in _layouts()])
 @pytest.mark.parametrize("use_32bit", [False, True], ids=["stride64", "stride32"])
 def test_dynamic_layout_buffer_pack_bytes(name, t, use_32bit):
-    """``TensorAdaptor._reusable_slot_spec`` returns (data-ptr, layout-buffer)
-    for a dynamic tensor; the in-place pack writes exactly the canonical bytes,
+    """``TorchTensorJitArg.__c_abi_spec__`` returns (data-ptr, layout-buffer)
+    for a dynamic tensor; the in-place fills write exactly the canonical bytes,
     across contiguous/non-contiguous layouts, ranks, and stride widths."""
-    adaptor = ja.TensorAdaptor(t, use_32bit_stride=use_32bit)
-    spec = ja.TensorAdaptor._reusable_slot_spec(adaptor)
-    assert isinstance(spec, list) and len(spec) == 2
+    adaptor = ja.TorchTensorJitArg(t, use_32bit_stride=use_32bit)
+    slots = adaptor.__c_abi_spec__()
+    assert isinstance(slots, list) and len(slots) == 2
 
-    (_dp_ctype, dp_extract), (buf_ctype, pack) = spec
+    (dp_ctype, dp_fill), (buf_ctype, pack) = slots
     storage = buf_ctype()
-    pack(t, storage)  # raw tensor at dispatch time (isinstance != cls -> reads t directly)
-
+    pack(t, storage)  # raw tensor at dispatch time (no _tensor_keepalive -> reads t directly)
     assert bytes(storage) == _expected_layout_bytes(t, use_32bit)
-    assert dp_extract(t) == t.data_ptr()
+
+    dp = dp_ctype(0)
+    dp_fill(t, dp)
+    assert dp.value == t.data_ptr()
 
 
 def test_callstate_dispatch_packs_changing_args_and_auto_stream():
     """CallState fills the packed array correctly when called with new args each
     time: data ptr, dynamic layout bytes, scalar value, and a NULL auto-stream."""
     proto = torch.empty((4, 8), dtype=torch.float32)
-    spec_t = ja.TensorAdaptor._reusable_slot_spec(proto)
-    spec_i = Int32._reusable_slot_spec(0)
+    slots_t = ja.TorchTensorJitArg(proto).__c_abi_spec__()  # [(ctype, fill)] x2 (data ptr + layout)
+    slots_i = Int32(0).__c_abi_spec__()  # [(ctype, fill)]
     # arg layout: arg0 = tensor (2 slots), arg1 = int (1 slot); + auto-stream NULL.
-    slot_specs = [(0, *spec_t[0]), (0, *spec_t[1]), (1, *spec_i), (-1, ctypes.c_void_p, None)]
+    slot_specs = [(0, *slots_t[0]), (0, *slots_t[1]), (1, *slots_i[0]), (-1, ctypes.c_void_p, None)]
 
     captured = []
 
@@ -79,7 +81,7 @@ def test_callstate_dispatch_packs_changing_args_and_auto_stream():
         # Dereference each packed cell via its slot ctype to read the value the
         # kernel ABI would see; do not touch CallState internals.
         row = []
-        for i, (_arg_idx, ctype, _extract) in enumerate(slot_specs):
+        for i, (_arg_idx, ctype, _fill) in enumerate(slot_specs):
             obj = ctype.from_address(packed[i])
             row.append(obj.value if hasattr(obj, "value") else bytes(obj))
         captured.append(row)

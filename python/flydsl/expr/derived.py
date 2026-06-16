@@ -93,8 +93,8 @@ def make_rmem_tensor(shape_or_layout, dtype, *, loc=None, ip=None):
         tensor = make_rmem_tensor(8, fx.Float32)
         tensor = make_rmem_tensor(make_layout(4, 1), fx.Float16)
     """
-    if not issubclass(dtype, Numeric):
-        raise TypeError(f"dtype must be a Numeric type, but got {type(dtype)}")
+    if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+        raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
     elem_ty = dtype.ir_type if dtype is not Boolean else Int8.ir_type
 
     if not isinstance(shape_or_layout, Layout):

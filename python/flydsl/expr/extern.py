@@ -20,6 +20,7 @@ from .._mlir.ir import (
     DenseI32ArrayAttr,
     FlatSymbolRefAttr,
     InsertionPoint,
+    IntegerAttr,
     IntegerType,
     TypeAttr,
 )
@@ -121,16 +122,18 @@ class ExternFunction:
         if len(args) != len(arg_types):
             raise TypeError(f"ffi {self.symbol!r} expects {len(arg_types)} argument(s), got {len(args)}")
 
-        from .._mlir.dialects import llvm as _llvm
-        from .._mlir.ir import IntegerAttr
+        from .numeric import Numeric
 
         raw_args: List[ir.Value] = []
         for arg_pos, arg in enumerate(args):
             expected_type = arg_types[arg_pos]
 
+            if isinstance(arg, Numeric) and isinstance(arg.value, (bool, int)):
+                arg = int(arg.value)
+
             if isinstance(arg, int):
                 target_type = expected_type or IntegerType.get_signless(64)
-                raw_args.append(_llvm.ConstantOp(target_type, IntegerAttr.get(target_type, arg)).result)
+                raw_args.append(llvm.ConstantOp(target_type, IntegerAttr.get(target_type, arg)).result)
                 continue
 
             if isinstance(arg, ir.Value):

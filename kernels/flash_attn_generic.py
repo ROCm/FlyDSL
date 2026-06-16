@@ -228,11 +228,21 @@ def build_flash_attn_func_module_primary(
             # signature is (Q, K, V, O, batch_size, seq_len, stream=...) and does
             # NOT accept these. A dense short-seq call that passes any of them must
             # therefore stay on DUALWAVE_SWP rather than route to the generic
-            # fallback (which would raise an unexpected-kwarg error). `stream` is
-            # common to both launchers and is intentionally excluded here.
+            # fallback (which would raise an unexpected-kwarg error).
             _DUALWAVE_ONLY_KWARGS = frozenset(
                 {"stride_kv_n", "stride_q_n", "head_dim_runtime", "debug_counts", "workspace"}
             )
+
+            def _reject_optional_positionals(args):
+                if len(args) > 6:
+                    raise TypeError(
+                        "flash_attn_func launcher accepts only Q, K, V, O, batch_size, "
+                        "and seq_len as positional arguments; pass stream=..., "
+                        "stride_kv_n=..., stride_q_n=..., head_dim_runtime=..., "
+                        "debug_counts=..., and workspace=... by keyword. This keeps "
+                        "optional launch arguments unambiguous across the generic and "
+                        "DUALWAVE_SWP paths."
+                    )
 
             def _dualwave_swp_dispatch(*args, **kwargs):
                 # The DUALWAVE_SWP kernel handles non-aligned seq_len (partial
@@ -248,27 +258,36 @@ def build_flash_attn_func_module_primary(
                 #     (see _DUALWAVE_MIN_DENSE_SEQ note above) -- BUT only when the
                 #     call uses no DUALWAVE_SWP-only launch params (the generic
                 #     launcher cannot represent those), otherwise stay on dualwave.
+                _reject_optional_positionals(args)
                 S_int = _extract_seq_len(args, kwargs)
                 if cu_seqlens_q is not None:
                     # Packed/varlen: always DUALWAVE_SWP (no generic cu_seqlens path).
-                    return _dualwave_swp_launch(*args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs)
+                    return _dualwave_swp_launch(
+                        *args,
+                        cu_seqlens_q=cu_seqlens_q,
+                        cu_seqlens_kv=cu_seqlens_kv,
+                        **kwargs,
+                    )
                 # Check keyword PRESENCE, not value: the generic launcher rejects
                 # the keyword itself, so an explicit `debug_counts=None` (or any
                 # dualwave-only kwarg passed as None) must still keep the call on
                 # DUALWAVE_SWP.
-                # Positional threshold is 7, not 6: the generic launcher's
-                # signature is (Q, K, V, O, batch_size, seq_len, stream) -- 7
-                # positionals including the shared `stream` -- so a valid
-                # `exe(Q,K,V,O,B,S,stream)` call must still reach the generic
-                # fallback. Only an 8th+ positional is a true DUALWAVE-only arg
-                # (dualwave's 7th positional is `stride_kv_n`, not `stream`).
-                _has_dualwave_only = any(k in kwargs for k in _DUALWAVE_ONLY_KWARGS) or len(args) > 7
+                # Keep optional launch parameters keyword-only at the dispatcher
+                # boundary. The generic launcher historically accepted a 7th
+                # positional `stream`, while DUALWAVE_SWP's 7th positional is
+                # `stride_kv_n`; accepting either positionally would make the same
+                # call shape-dependent once dense short sequences route to generic.
+                _has_dualwave_only = any(k in kwargs for k in _DUALWAVE_ONLY_KWARGS)
                 if S_int is None or S_int >= _DUALWAVE_MIN_DENSE_SEQ or _has_dualwave_only:
                     return _dualwave_swp_launch(*args, **kwargs)
                 return _fallback(*args, **kwargs)
 
             if hasattr(_fallback, "compile"):
-                _dualwave_swp_dispatch.compile = _fallback.compile
+                def _dualwave_swp_compile(*args, **kwargs):
+                    _reject_optional_positionals(args)
+                    return _fallback.compile(*args, **kwargs)
+
+                _dualwave_swp_dispatch.compile = _dualwave_swp_compile
             dispatched = _dualwave_swp_dispatch
 
         if block_m is None:
@@ -369,13 +388,9 @@ def build_flash_attn_func_module_primary(
     # MFMA32 K-dimension: 16 on gfx950+ (CDNA4) for both GEMMs.
     USE_K16 = gpu_arch.startswith("gfx950")
 
-    # 128-bit permlane-fused O-store needs gfx950: it uses permlane32_swap AND
-    # cvt_pk_bf16_f32, both of which are gfx950 (CDNA4) only -- on gfx942 the LLVM
-    # backend cannot select them ("Cannot select intrinsic llvm.amdgcn.permlane32.swap").
-    # gfx942 falls back to a per-lane dwordx2 store using .to(elem_dtype) (arch-correct
-    # bf16/f16 conversion). FLYDSL_GENERIC_OSTORE_SCALAR=1 forces the scalar path so the
-    # gfx942 store can be validated on gfx950 hardware.
-    USE_PERMLANE_OSTORE = gpu_arch.startswith("gfx950") and os.environ.get("FLYDSL_GENERIC_OSTORE_SCALAR", "0") != "1"
+    # 128-bit permlane-fused O-store needs gfx950 (permlane32_swap + cvt_pk_bf16_f32,
+    # both CDNA4-only); gfx942 falls back to a per-lane dwordx2 store via .to(elem_dtype).
+    USE_PERMLANE_OSTORE = gpu_arch.startswith("gfx950")
     K_STEP_QK = 16 if USE_K16 else 8
     K_STEPS_QK = head_dim // K_STEP_QK
     D_CHUNK = 32
@@ -721,13 +736,9 @@ def build_flash_attn_func_module_primary(
                     lds_row = load_row_in_batch + row_offset
                     _v_store_to_lds(v_base, lds_row, vecs[batch])
 
-        # Per-(batch) byte bounds: rows >= seq_len read past this batch's region,
-        # so a bounded num_records makes the hardware return 0 on OOB loads and
-        # drop OOB stores (arbitrary-seqlen safe, no fault). Equivalent to
-        # max_size for an aligned seq_len, so the aligned hot path is unchanged.
-        # Same num_records trick as the hand-asm / DUALWAVE_SWP kernel
-        # (flash_attn_gfx950.py), used here for the K/V DMA loads, the Q-load,
-        # and the O-store -- so no per-lane q_in_bounds select / O-store predicate.
+        # Per-batch num_records bound: rows >= seq_len read/write past this batch's
+        # region, so OOB loads return 0 and OOB stores drop (arbitrary-seqlen safe;
+        # aligned hot path unchanged). Same asm trick, used for K/V/Q loads + O-store.
         _kv_nrec_bytes = _raw((batch_idx + fx.Index(1)) * seq_len_v * fx.Index(STRIDE_TOKEN_KV * 2))
         _q_nrec_bytes = _raw((batch_idx + fx.Index(1)) * seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
         q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=False, num_records_bytes=_q_nrec_bytes)
@@ -829,10 +840,8 @@ def build_flash_attn_func_module_primary(
                     )
 
         # ---- Preload Q^T B-operand packs once (register-resident) ----
-        # B operand uses j = lane_mod_32, k-subblock = lane_div_32*MFMA_LANE_K.
-        # Q is loaded through the num_records-bounded q_rsrc, so an out-of-bounds
-        # row (q_row >= seq_len, partial last q-tile) reads 0 from hardware -- no
-        # q_in_bounds select / row clamp needed (DUALWAVE_SWP-style boundary).
+        # B operand: j = lane_mod_32, k-subblock = lane_div_32*MFMA_LANE_K. Q is
+        # num_records-bounded (q_rsrc) so OOB rows read 0 -- no q_in_bounds select.
         q_row = q_start + wave_q_offset + lane_mod_32
         q_row_i32 = fx.Int32(q_row)
         q_b_packs = []
@@ -1136,13 +1145,10 @@ def build_flash_attn_func_module_primary(
                         s_raw_hi_15,
                     ]
                 else:
-                    # Non-causal KV padding mask: set keys whose absolute column
-                    # index >= seq_len to -inf, so bounded/clamped out-of-bounds
-                    # KV (which reads 0 on the DMA path or a duplicated row on the
-                    # non-DMA path) does not leak into the softmax. (Causal already
-                    # masks these columns via the kv_col > q_row test above.) The
-                    # element->column layout mirrors the causal masking above:
-                    # lo col = kv_start + lane_div_32*4 + ((r//4)*8 + r%4); hi = +K_SUB_N.
+                    # Non-causal KV padding mask: keys with absolute column >= seq_len
+                    # -> -inf, so OOB KV (0 or duplicated row) doesn't leak into softmax.
+                    # Col layout (mirrors causal): lo = kv_start + lane_div_32*4 +
+                    # ((r//4)*8 + r%4); hi = +K_SUB_N.
                     kv_start_i32 = fx.Int32(kv_start)
                     lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(4)
                     seq_len_i32 = fx.Int32(seq_len_v)
@@ -1368,12 +1374,9 @@ def build_flash_attn_func_module_primary(
             loop_results = yield _yield_args
 
         # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
-        # Ported from flash_attn_gfx950.py: pack 4 f32 -> 2 packed-16bit dwords
-        # (cvt_pk_bf16_f32 / RNE trunc), then permlane32_swap fuses each lane's
-        # 4 cols with its half-wave partner's 4 cols so one store covers 8
-        # contiguous cols -> 4 dwordx4 per wave per d_chunk instead of 16 scalar
-        # stores. O is num_records-bounded (o_rsrc), so OOB rows of a partial
-        # last q-tile are dropped by hardware -- no per-lane predicate needed.
+        # gfx950: pack 4 f32 -> 2 bf16 dwords (cvt_pk_bf16_f32), permlane32_swap fuses
+        # each lane's 4 cols with its half-wave partner's -> 8 cols/store. O is
+        # num_records-bounded (o_rsrc) -> partial-q-tile OOB rows drop.
         l_final = loop_results[1]
         o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
 
@@ -1422,11 +1425,9 @@ def build_flash_attn_func_module_primary(
                     o_global = global_idx_q(q_row, d_col)
                     buffer_ops.buffer_store(o_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
         else:
-            # gfx942 (CDNA3) fallback: no permlane32_swap / cvt_pk_bf16_f32. Each lane
-            # stores its own 16 output cols as 4 dwordx2 groups (4 contiguous cols each),
-            # packed via .to(elem_dtype) (arch-correct bf16/f16 conversion). Same column
-            # map as the per-element store: d_col = dc*D_CHUNK + lane_div_32*4 + 8*grp + r.
-            # O is num_records-bounded (o_rsrc) -> OOB rows of a partial last q-tile drop.
+            # gfx942 fallback (no permlane32_swap / cvt_pk_bf16_f32): each lane stores
+            # its 16 cols as 4 dwordx2 groups via .to(elem_dtype); col map d_col =
+            # dc*D_CHUNK + lane_div_32*4 + 8*grp + r. num_records bound drops OOB rows.
             for dc in range_constexpr(D_CHUNKS):
                 for grp in range_constexpr(4):
                     r0 = grp * 4

@@ -203,12 +203,12 @@ def compile_blockscale_preshuffle_gemm(
         # ---- Wave / lane decomposition ----
         wave_size = 64
         layout_wave_lane = fx.make_layout((4, wave_size), (64, 1))
-        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        coord_wave_lane = fx.idx2crd(fx.Int32(tx), layout_wave_lane)
         wave_id = fx.get(coord_wave_lane, 0)
         lane_id = fx.get(coord_wave_lane, 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
-        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        coord_lane16 = fx.idx2crd(fx.Int32(lane_id), layout_lane16)
         lane_div_16 = fx.get(coord_lane16, 0)
         lane_mod_16 = fx.get(coord_lane16, 1)
 
@@ -252,8 +252,8 @@ def compile_blockscale_preshuffle_gemm(
             k0_base = base_k_bytes // c64_b
             k0 = k0_base + ku
             k1 = lane_div_16
-            coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], fx.Index(0))
-            idx_pack = crd2idx(coord_pack, layout_b)
+            coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], fx.Int32(0))
+            idx_pack = crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
             b16 = _buffer_load_vec(
                 buffer_ops,
                 vector,

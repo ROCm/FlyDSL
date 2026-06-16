@@ -394,7 +394,7 @@ def _compile_stage1_mxscale_kernel_impl(
         block_ok = arith.andi(block_in_valid, arith.andi(eid_ok0, eid_ok1))
 
         layout_thr = _make_moe_wave_layout(m_warp=m_warp, n_warp=n_warp, WAVE_SIZE=WAVE_SIZE, fx=fx)
-        thr_coord = idx2crd(tx, layout_thr)
+        thr_coord = idx2crd(fx.Int32(tx), layout_thr)
         wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
             fx.get(thr_coord, 0), fx.get(thr_coord, 1), fx.get(thr_coord, 2), fx.get(thr_coord, 3)
         )
@@ -457,7 +457,7 @@ def _compile_stage1_mxscale_kernel_impl(
                 + arith.index(d_output_off_s1)
             )
             warp_m_off_sgpr_s1 = (
-                (wave_id_idx_s1 / arith.index(int(n_warp)))
+                (wave_id_idx_s1 // arith.index(int(n_warp)))
                 * arith.index(warp_tile_m)
             )
             warp_n_off_sgpr_s1 = (
@@ -478,7 +478,7 @@ def _compile_stage1_mxscale_kernel_impl(
             return x * sig
 
         def make_desc_a(k_base):
-            return k_base / arith.index(PACK_FACTOR_A)
+            return k_base // arith.index(PACK_FACTOR_A)
 
         # TDM gather for A data
         _use_tdm_gather_a = bool(use_tdm_gather)
@@ -860,7 +860,7 @@ def _compile_stage1_mxscale_kernel_impl(
                 T.i32, k_base // fx.Index(SCALE_BLOCK))
 
         def make_desc_as(k_base):
-            return k_base / arith.index(SCALE_BLOCK)
+            return k_base // arith.index(SCALE_BLOCK)
 
         def issue_as_load(k_scale_base, target_lds):
             """Vectorised scalar A-scale loader (Option B).
@@ -903,10 +903,10 @@ def _compile_stage1_mxscale_kernel_impl(
                                 + ksc_blk * arith.index(_blk_bytes)
                             )
                         else:
-                            warp_row_idx = row / arith.index(warp_tile_m)
+                            warp_row_idx = row // arith.index(warp_tile_m)
                             local_row = row % arith.index(warp_tile_m)
                             lane_row = local_row % arith.index(WMMA_M)
-                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            local_wm_idx = local_row // arith.index(WMMA_M)
                             global_lds_row = (
                                 warp_row_idx * arith.index(WMMA_M) + lane_row
                             )
@@ -992,12 +992,12 @@ def _compile_stage1_mxscale_kernel_impl(
                         if is_fp4:
                             lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
                         else:
-                            warp_row_idx = row / arith.index(warp_tile_m)
+                            warp_row_idx = row // arith.index(warp_tile_m)
                             local_row = row % arith.index(warp_tile_m)
                             lane_row = local_row % arith.index(WMMA_M)
-                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            local_wm_idx = local_row // arith.index(WMMA_M)
                             global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
-                            ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                            ksc_blk = ksc // arith.index(SCALES_PER_WMMA)
                             ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
                             lds_idx = (
                                 global_lds_row * arith.index(interleaved_scale_cols_a)
@@ -1073,7 +1073,7 @@ def _compile_stage1_mxscale_kernel_impl(
             if const_expr(is_fp4):
                 return tdm_ops.make_tensor_descriptor_2d(
                     global_ptr=arg_w, lds_memref=lds_b_mem,
-                    global_offset=(n_off, k_base / arith.index(PACK_FACTOR_B)),
+                    global_offset=(n_off, k_base // arith.index(PACK_FACTOR_B)),
                     tensor_shape=(int(tile_n), int(packed_tile_k_b)),
                     strides=(K_packed_b, 1),
                     tile_shape=(int(tile_n), int(packed_tile_k_b)),
@@ -1081,7 +1081,7 @@ def _compile_stage1_mxscale_kernel_impl(
                     num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_w, lds_memref=lds_b_mem,
-                global_offset=(n_off / arith.index(16), (k_base / arith.index(PACK_FACTOR_B)) * arith.index(16)),
+                global_offset=(n_off // arith.index(16), (k_base // arith.index(PACK_FACTOR_B)) * arith.index(16)),
                 tensor_shape=(int(experts * (2 * N) // 16), int(K_packed_b * 16)),
                 strides=(K_packed_b * 16, 1),
                 tile_shape=(int(tile_n // 16), int(packed_tile_k_b * 16)),
@@ -1093,7 +1093,7 @@ def _compile_stage1_mxscale_kernel_impl(
         def make_desc_b_pair(lds_b_mem, n_off, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_w, lds_memref=lds_b_mem,
-                global_offset=(n_off / arith.index(16), (k_base / arith.index(PACK_FACTOR_B)) * arith.index(16)),
+                global_offset=(n_off // arith.index(16), (k_base // arith.index(PACK_FACTOR_B)) * arith.index(16)),
                 tensor_shape=(int(experts * (2 * N) // 16), int(K_packed_b * 16)),
                 strides=(K_packed_b * 16, 1),
                 tile_shape=(int((2 * tile_n) // 16), int(packed_tile_k_b * 16)),
@@ -1105,7 +1105,7 @@ def _compile_stage1_mxscale_kernel_impl(
         def make_desc_bs(lds_bs_mem, n_off, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_scale_w, lds_memref=lds_bs_mem,
-                global_offset=(n_off, k_base / arith.index(SCALE_BLOCK)),
+                global_offset=(n_off, k_base // arith.index(SCALE_BLOCK)),
                 tensor_shape=(int(tile_n), int(scale_k_per_tile)),
                 strides=(K_scale, 1),
                 tile_shape=(int(tile_n), int(scale_k_per_tile)),
@@ -1115,7 +1115,7 @@ def _compile_stage1_mxscale_kernel_impl(
         def make_desc_bs_pair(lds_bs_mem, n_off, k_base):
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_scale_w, lds_memref=lds_bs_mem,
-                global_offset=(n_off, k_base / arith.index(SCALE_BLOCK)),
+                global_offset=(n_off, k_base // arith.index(SCALE_BLOCK)),
                 tensor_shape=(int(2 * tile_n), int(scale_k_per_tile)),
                 strides=(K_scale, 1),
                 tile_shape=(int(2 * tile_n), int(scale_k_per_tile)),
@@ -1124,7 +1124,7 @@ def _compile_stage1_mxscale_kernel_impl(
 
         def _stage1_pair_row_base():
             _eid_row = arith.index_cast(T.index, eid_i32) * arith.index(int(2 * N))
-            _tile_idx = blk_n / arith.index(int(tile_n))
+            _tile_idx = blk_n // arith.index(int(tile_n))
             return _eid_row + _tile_idx * arith.index(int(2 * tile_n))
 
         _ldrs = _make_mxscale_data_loaders(
@@ -2560,7 +2560,7 @@ def _compile_stage2_mxscale_kernel_impl(
         block_ok = arith.andi(block_in_valid, arith.andi(eid_ok0, eid_ok1))
 
         layout_thr = _make_moe_wave_layout(m_warp=m_warp, n_warp=n_warp, WAVE_SIZE=WAVE_SIZE, fx=fx)
-        thr_coord = idx2crd(tx, layout_thr)
+        thr_coord = idx2crd(fx.Int32(tx), layout_thr)
         wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
             fx.get(thr_coord, 0), fx.get(thr_coord, 1), fx.get(thr_coord, 2), fx.get(thr_coord, 3)
         )
@@ -2613,7 +2613,7 @@ def _compile_stage2_mxscale_kernel_impl(
                 + arith.index(d_output_off)
             )
             warp_m_off_sgpr = (
-                (wave_id_idx / arith.index(int(n_warp)))
+                (wave_id_idx // arith.index(int(n_warp)))
                 * arith.index(warp_tile_m)
             )
             warp_n_off_sgpr = (
@@ -2720,7 +2720,7 @@ def _compile_stage2_mxscale_kernel_impl(
                 _a_row_ids.append(rocdl.readfirstlane(T.i32, _ts_safe))
 
         def make_desc_a(k_base):
-            return k_base / arith.index(PACK_FACTOR_A)
+            return k_base // arith.index(PACK_FACTOR_A)
 
         def issue_a_load(k_packed_base, target_lds):
             total = int(tile_m * packed_tile_k_a)
@@ -2851,7 +2851,7 @@ def _compile_stage2_mxscale_kernel_impl(
                     scf.YieldOp([])
 
         def make_desc_as(k_base):
-            return k_base / arith.index(SCALE_BLOCK)
+            return k_base // arith.index(SCALE_BLOCK)
 
         def issue_as_load(k_scale_base, target_lds):
             """Vectorised scalar A-scale loader (Option B) for stage2.
@@ -2899,10 +2899,10 @@ def _compile_stage2_mxscale_kernel_impl(
                                 + ksc_blk * arith.index(_blk_bytes)
                             )
                         else:
-                            warp_row_idx = row / arith.index(warp_tile_m)
+                            warp_row_idx = row // arith.index(warp_tile_m)
                             local_row = row % arith.index(warp_tile_m)
                             lane_row = local_row % arith.index(WMMA_M)
-                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            local_wm_idx = local_row // arith.index(WMMA_M)
                             global_lds_row = (
                                 warp_row_idx * arith.index(WMMA_M) + lane_row
                             )
@@ -2989,12 +2989,12 @@ def _compile_stage2_mxscale_kernel_impl(
                         if is_fp4:
                             lds_idx = row * arith.index(int(scale_k_per_tile)) + ksc
                         else:
-                            warp_row_idx = row / arith.index(warp_tile_m)
+                            warp_row_idx = row // arith.index(warp_tile_m)
                             local_row = row % arith.index(warp_tile_m)
                             lane_row = local_row % arith.index(WMMA_M)
-                            local_wm_idx = local_row / arith.index(WMMA_M)
+                            local_wm_idx = local_row // arith.index(WMMA_M)
                             global_lds_row = warp_row_idx * arith.index(WMMA_M) + lane_row
-                            ksc_blk = ksc / arith.index(SCALES_PER_WMMA)
+                            ksc_blk = ksc // arith.index(SCALES_PER_WMMA)
                             ksc_sub = ksc % arith.index(SCALES_PER_WMMA)
                             lds_idx = (
                                 global_lds_row * arith.index(interleaved_scale_cols_a)
@@ -3066,7 +3066,7 @@ def _compile_stage2_mxscale_kernel_impl(
             if const_expr(is_fp4):
                 return tdm_ops.make_tensor_descriptor_2d(
                     global_ptr=arg_w, lds_memref=target_lds,
-                    global_offset=(n_off, k_base / arith.index(PACK_FACTOR_B)),
+                    global_offset=(n_off, k_base // arith.index(PACK_FACTOR_B)),
                     tensor_shape=(int(tile_n), int(packed_tile_k_b)),
                     strides=(K_packed_b, 1),
                     tile_shape=(int(tile_n), int(packed_tile_k_b)),
@@ -3074,7 +3074,7 @@ def _compile_stage2_mxscale_kernel_impl(
                     num_warps=tdm_desc_num_warps, workgroup_mask=b_mcast_mask)
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_w, lds_memref=target_lds,
-                global_offset=(n_off / arith.index(16), (k_base / arith.index(PACK_FACTOR_B)) * arith.index(16)),
+                global_offset=(n_off // arith.index(16), (k_base // arith.index(PACK_FACTOR_B)) * arith.index(16)),
                 tensor_shape=(int(N_total // 16), int(K_packed_b * 16)),
                 strides=(int(K_packed_b * 16), 1),
                 tile_shape=(int(tile_n // 16), int(packed_tile_k_b * 16)),
@@ -3086,7 +3086,7 @@ def _compile_stage2_mxscale_kernel_impl(
         def make_desc_bs(n_off, k_base, target_lds):
             return tdm_ops.make_tensor_descriptor_2d(
                 global_ptr=arg_scale_w, lds_memref=target_lds,
-                global_offset=(n_off, k_base / arith.index(SCALE_BLOCK)),
+                global_offset=(n_off, k_base // arith.index(SCALE_BLOCK)),
                 tensor_shape=(int(tile_n), int(scale_k_per_tile)),
                 strides=(K_scale, 1),
                 tile_shape=(int(tile_n), int(scale_k_per_tile)),

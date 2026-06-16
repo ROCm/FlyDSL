@@ -14,7 +14,7 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
-from ..expr.numeric import _unwrap_value, _wrap_like
+from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 
 
@@ -496,7 +496,7 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _to_i1(cond):
-        return _unwrap_value(cond)
+        return as_ir_value(cond)
 
     @staticmethod
     def _normalize_named_values(names, values, names_label="names", values_label="values"):
@@ -542,7 +542,7 @@ class ReplaceIfWithDispatch(Transformer):
     def _unwrap_mlir_values(values, state_names, branch_label):
         raw_values = []
         for name, value in zip(state_names, values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"if/else variable '{name}' in {branch_label} is {type(raw).__name__}, "
@@ -555,7 +555,7 @@ class ReplaceIfWithDispatch(Transformer):
     def _pack_dispatch_results(results, state_values):
         if not results:
             return None
-        wrapped = [_wrap_like(v, exemplar) for v, exemplar in zip(results, state_values)]
+        wrapped = [as_dsl_value(v, exemplar) for v, exemplar in zip(results, state_values)]
         if len(wrapped) == 1:
             return wrapped[0]
         return tuple(wrapped)
@@ -622,7 +622,7 @@ class ReplaceIfWithDispatch(Transformer):
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
-        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
+        none_vars = [name for name, value in zip(result_names, result_values) if as_ir_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -652,7 +652,7 @@ class ReplaceIfWithDispatch(Transformer):
 
         state_raw = []
         for name, value in zip(result_names, result_values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"state variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
@@ -881,9 +881,9 @@ class ReplaceIfWithDispatch(Transformer):
         sandbox.region.blocks.append()
         with ir.InsertionPoint(sandbox.region.blocks[0]):
             probe_then = then_fn()
-            probe_then_raw = _unwrap_value(probe_then)
+            probe_then_raw = as_ir_value(probe_then)
             probe_else = else_fn()
-            probe_else_raw = _unwrap_value(probe_else)
+            probe_else_raw = as_ir_value(probe_else)
             if not isinstance(probe_then_raw, ir.Value):
                 raise TypeError(
                     f"dynamic ifexp then-branch must produce an MLIR Value, " f"got {type(probe_then_raw).__name__}"
@@ -902,14 +902,14 @@ class ReplaceIfWithDispatch(Transformer):
 
         op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=ir.Location.unknown())
         with ir.InsertionPoint(op.regions[0].blocks[0]):
-            scf.YieldOp([_unwrap_value(then_fn())])
+            scf.YieldOp([as_ir_value(then_fn())])
         if len(op.regions[1].blocks) == 0:
             op.regions[1].blocks.append()
         with ir.InsertionPoint(op.regions[1].blocks[0]):
-            scf.YieldOp([_unwrap_value(else_fn())])
+            scf.YieldOp([as_ir_value(else_fn())])
 
         sandbox.operation.erase()
-        return _wrap_like(op.results[0], probe_then)
+        return as_dsl_value(op.results[0], probe_then)
 
 
 @ASTRewriter.register
@@ -942,7 +942,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         stop_val = InsertEmptyYieldForSCFFor._to_index(stop)
         step_val = InsertEmptyYieldForSCFFor._to_index(step)
         if init is not None:
-            init = [_unwrap_value(v) for v in init]
+            init = [as_ir_value(v) for v in init]
             for_op = scf.ForOp(start_val, stop_val, step_val, init)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable, list(for_op.inner_iter_args)
@@ -953,9 +953,9 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
     @staticmethod
     def scf_for_dispatch(start, stop, step, body_fn, *, result_names=(), result_values=()):
-        start_val = _unwrap_value(start)
-        stop_val = _unwrap_value(stop)
-        step_val = _unwrap_value(step)
+        start_val = as_ir_value(start)
+        stop_val = as_ir_value(stop)
+        step_val = as_ir_value(step)
 
         i32_ty = ir.IntegerType.get_signless(32)
         idx_ty = ir.IndexType.get()
@@ -974,7 +974,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         result_values = tuple(result_values)
         result_map = {name: value for name, value in zip(result_names, result_values)}
 
-        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
+        none_vars = [name for name, value in zip(result_names, result_values) if as_ir_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -994,7 +994,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
         state_raw = []
         for name, value in zip(result_names, result_values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"for-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
@@ -1006,7 +1006,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
         with ir.InsertionPoint(for_op.body):
             iv = for_op.induction_variable
-            inner_args = [_wrap_like(a, ex) for a, ex in zip(for_op.inner_iter_args, result_values)]
+            inner_args = [as_dsl_value(a, ex) for a, ex in zip(for_op.inner_iter_args, result_values)]
 
             body_result = body_fn(iv, result_names, *inner_args)
 
@@ -1305,7 +1305,7 @@ class CanonicalizeWhile(Transformer):
         )
         result_map = {name: value for name, value in zip(result_names, result_values)}
 
-        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
+        none_vars = [name for name, value in zip(result_names, result_values) if as_ir_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -1318,7 +1318,7 @@ class CanonicalizeWhile(Transformer):
 
         state_raw = []
         for name, value in zip(result_names, result_values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"while-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
@@ -1333,7 +1333,7 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[0].blocks[0]):
             before_args = list(while_op.regions[0].blocks[0].arguments)
-            wrapped_before = [_wrap_like(a, ex) for a, ex in zip(before_args, result_values)] if result_names else []
+            wrapped_before = [as_dsl_value(a, ex) for a, ex in zip(before_args, result_values)] if result_names else []
             before_cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, wrapped_before)
             cond_i1 = ReplaceIfWithDispatch._to_i1(before_cond)
             if not isinstance(cond_i1, ir.Value):
@@ -1342,7 +1342,7 @@ class CanonicalizeWhile(Transformer):
 
         with ir.InsertionPoint(while_op.regions[1].blocks[0]):
             after_args = list(while_op.regions[1].blocks[0].arguments)
-            wrapped_after = [_wrap_like(a, ex) for a, ex in zip(after_args, result_values)] if result_names else []
+            wrapped_after = [as_dsl_value(a, ex) for a, ex in zip(after_args, result_values)] if result_names else []
             body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, wrapped_after)
             if result_names:
                 body_values = ReplaceIfWithDispatch._normalize_branch_result(

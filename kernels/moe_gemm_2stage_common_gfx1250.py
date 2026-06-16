@@ -820,7 +820,7 @@ def _mxscale_precompute_a_scale_lane_bases(
     interleaved_scale_cols_a: int,
     arith,
 ):
-    warp_lds_row = warp_m_base / arith.index(wmma_m_rep) + lane16
+    warp_lds_row = warp_m_base // arith.index(wmma_m_rep) + lane16
     base = warp_lds_row * arith.index(interleaved_scale_cols_a)
     return [base]
 

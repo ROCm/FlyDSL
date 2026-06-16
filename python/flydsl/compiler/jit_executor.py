@@ -11,7 +11,6 @@ from typing import Callable, List, Optional
 
 from .._mlir import ir
 from .._mlir.execution_engine import ExecutionEngine
-from .protocol import get_c_pointers
 
 _GPU_MODULE_INIT = "flydsl_gpu_module_init"
 _GPU_MODULE_LOAD_TO_DEVICE = "flydsl_gpu_module_load_to_device"
@@ -134,23 +133,85 @@ def _load_gpu_modules(engine: ExecutionEngine) -> List[int]:
     return [module.value]
 
 
-class _ArgPacker:
-    """Thread-local buffer for packing C pointer arguments."""
+def build_abi_storage(ctypes_seq):
+    """One zeroed ctypes storage per slot ctype, plus a packed pointer array of their addresses."""
+    packed = (ctypes.c_void_p * len(ctypes_seq))()
+    storages = []
+    for i, ct in enumerate(ctypes_seq):
+        try:
+            s = ct(0)
+        except TypeError:
+            s = ct()
+        storages.append(s)
+        packed[i] = ctypes.addressof(s)
+    return storages, packed
 
-    def __init__(self):
+
+def _build_dispatch_factory(slot_specs):
+    """Generate a straight-line dispatch-closure factory for ``slot_specs``.
+
+    Returns ``make(packed, storages, func_exe) -> dispatch(args_tuple)``.  The
+    generated ``dispatch`` unrolls every slot -- no per-slot Python loop, branch,
+    or tuple-unpack -- with per-slot storages and fill fns bound as closure locals.
+    """
+    setup, body, fills = [], [], []
+    for i, (arg_idx, _, fill) in enumerate(slot_specs):
+        if fill is None:
+            continue  # null slot (auto-stream): packed[i] stays NULL after alloc
+        fi = len(fills)
+        fills.append(fill)
+        setup.append(f"    s{i} = storages[{i}]")
+        setup.append(f"    f{i} = fills[{fi}]")
+        body.append(f"        f{i}(a[{arg_idx}], s{i})")
+
+    src = "def make(packed, storages, func_exe, fills):\n"
+    src += "".join(line + "\n" for line in setup)
+    src += "    def dispatch(a):\n"
+    src += "".join(line + "\n" for line in body)
+    src += "        return func_exe(packed)\n"
+    src += "    return dispatch\n"
+
+    ns = {}
+    exec(compile(src, "<flydsl-dispatch>", "exec"), ns)
+    make = ns["make"]
+    fills = tuple(fills)
+
+    def factory(packed, storages, func_exe):
+        return make(packed, storages, func_exe, fills)
+
+    return factory
+
+
+class CallState:
+    """Pre-allocated state for fast kernel dispatch -- the single storage + fill
+    dispatch implementation.
+
+    each call then runs only the unrolled per-slot fills and invokes the JIT'd function
+    -- no per-slot loop, no ctypes allocation. Thread-local for thread safety.
+    """
+
+    __slots__ = ("_func_exe", "_spec", "_tls", "_factory")
+
+    def __init__(self, slot_specs, func_exe):
+        self._func_exe = func_exe
+        self._spec = slot_specs  # list of (arg_idx, ctype, fill)
         self._tls = threading.local()
+        self._factory = _build_dispatch_factory(slot_specs)
 
-    def pack(self, ptrs: List[ctypes.c_void_p]):
-        size = len(ptrs)
-        buf = getattr(self._tls, "packed_args", None)
-        capacity = getattr(self._tls, "capacity", 0)
-        if buf is None or capacity < size:
-            buf = (ctypes.c_void_p * size)()
-            self._tls.packed_args = buf
-            self._tls.capacity = size
-        for i, ptr in enumerate(ptrs):
-            buf[i] = ptr
-        return buf
+    def _make_dispatch(self):
+        # Allocate one typed storage per slot + the packed pointer array; the null
+        # auto-stream slot uses c_void_p -> NULL (its fill is None, never written).
+        storages, packed = build_abi_storage([ctype for _arg_idx, ctype, _fill in self._spec])
+        # The dispatch closure keeps packed + storages alive
+        self._tls.packed = packed
+        self._tls.storages = storages
+        return self._factory(packed, storages, self._func_exe)
+
+    def __call__(self, args_tuple):
+        dispatch = getattr(self._tls, "dispatch", None)
+        if dispatch is None:
+            dispatch = self._tls.dispatch = self._make_dispatch()
+        return dispatch(args_tuple)
 
 
 class CompiledArtifact:
@@ -174,7 +235,6 @@ class CompiledArtifact:
         self._jit_module = None
         self._func_exe = None
         self._lock = threading.Lock()
-        self._packer = _ArgPacker()
 
     def __getstate__(self):
         # Serialise post-load processors by fully-qualified name so the
@@ -243,7 +303,6 @@ class CompiledArtifact:
         self._jit_module = None
         self._func_exe = None
         self._lock = threading.Lock()
-        self._packer = _ArgPacker()
 
     def _ensure_engine(self):
         with self._lock:
@@ -303,23 +362,6 @@ class CompiledArtifact:
             func_ptr = self._engine.raw_lookup(self._entry)
             self._func_exe = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(func_ptr)
         return self._func_exe
-
-    def __call__(self, *args, **kwargs):
-        func_exe = self._get_func_exe()
-
-        owned: list = []
-        all_c_ptrs: List[ctypes.c_void_p] = []
-        for arg in args:
-            ptrs = get_c_pointers(arg)
-            owned.append(ptrs)
-            owned.append(arg)
-            all_c_ptrs.extend(ptrs)
-
-        packed_args = self._packer.pack(all_c_ptrs)
-
-        result = func_exe(packed_args)
-        del owned
-        return result
 
     def dump(self, compiled: bool = True):
         if compiled:
