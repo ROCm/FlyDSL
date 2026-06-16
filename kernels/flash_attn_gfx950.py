@@ -294,12 +294,10 @@ def build_flash_attn_dualwave_swp_module(
         q_head_idx = h_kv_idx * GQA_GROUP_SIZE + group_id
         kv_head_idx = h_kv_idx
 
-        # Per-batch token ranges. Dense: batch_idx*seq_len .. (batch_idx+1)*seq_len
-        # (every batch the same seq_len, regular stride). Varlen: read the cumulative
-        # cu_seqlens_q / cu_seqlens_kv (int32 [B+1]) so this batch's Q rows are the
-        # packed range [cu_q[z], cu_q[z+1]) and its KV rows [cu_k[z], cu_k[z+1]).
-        # q_tok_base / kv_tok_base replace `batch_idx*seq_len` in every address; the
-        # _end values bound num_records; seqlen_q/kv drive the OOB skip + masks/tiles.
+        # Per-batch token ranges. Dense: batch_idx*seq_len. Varlen: read cumulative
+        # cu_seqlens_q / cu_seqlens_kv (int32 [B+1]) -> packed [cu[z], cu[z+1]).
+        # *_tok_base replace batch_idx*seq_len in addresses; *_tok_end bound
+        # num_records; seqlen_q/kv drive the OOB skip + masks/tiles.
         if const_expr(VARLEN):
             # cu_seqlens read through the element-indexed Layout API + a 32-bit copy
             # atom (same idiom as Q/K/V/O views), not a raw buffer resource.
@@ -335,19 +333,10 @@ def build_flash_attn_dualwave_swp_module(
         NUM_DMA_K = SMEM_D_RPT
         NUM_DMA_V = SMEM_D_RPT
 
-        # Copy atoms + flat (element-indexed) buffer-tensor views for Q/K/V/O,
-        # built once as straight-line SSA dominating the loop so the load/store
-        # helpers below are plain functions.
-        #
-        # Non-aligned seqlen support (copied from the hand-asm num_records bound):
-        # bound num_records to the END of THIS batch's region (= asm's
-        # num_records = seq_len*stride). A partial last q-block or a partial/extra
-        # kv-tile then reads rows with absolute index >= seq_len at a byte offset
-        # >= num_records, so hardware OOB returns 0 on loads and drops the OOB
-        # O-stores -- no fault, no corruption. For aligned seqlen every access is
-        # in-bounds, so results are unchanged.
-        # (raw index ir.Value; make_buffer_tensor's Int64() coercion accepts a raw
-        # index value and emits the index->i64 cast, but not the fx.Index wrapper.)
+        # Copy atoms + element-indexed buffer-tensor views for Q/K/V/O, built once as
+        # straight-line SSA dominating the loop. num_records is bound to the END of
+        # this batch's region so OOB rows (partial last q-block / extra kv-tile) read 0
+        # and OOB stores drop (no fault); aligned seqlen is fully in-bounds, unchanged.
         q_nrec_bytes = _raw(q_tok_end * stride_q_n_v * BF16_BYTES)
         kv_nrec_bytes = _raw(kv_tok_end * stride_kv_n_v * BF16_BYTES)
         q_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Q, num_records_bytes=q_nrec_bytes), fx.make_layout(1, 1))
@@ -439,24 +428,13 @@ def build_flash_attn_dualwave_swp_module(
             max_num_tiles = fx.Index(ArithValue(causal_num_tiles < num_kv_tiles).select(causal_num_tiles, num_kv_tiles))
         else:
             max_num_tiles = num_kv_tiles
-        # Non-aligned kv support: the prologue + 2-tile-unrolled loop + 3-tile
-        # drain pipeline requires an EVEN tile count (max_num_tiles = 4 + 2*iters).
-        # ceil(seq_len/64) can be odd when seq_len is not a multiple of 64, so
-        # round up to even. The single extra tile is fully out of range (its keys
-        # have absolute index >= seq_len), so it reads 0 (num_records bound) and
-        # is masked to -inf (causal mask, or the seq padding-mask below in the
-        # non-causal path) -- contributing nothing to the softmax. Aligned sizes
-        # are already a multiple of 4, so this is a no-op for them. Done before
-        # the split-K chunking so each split inherits an even total.
-        # (No fx.Index(...) wrap: Index arithmetic already yields an index whose
-        # backing value is an ArithValue, as required by scf.range's stop.)
+        # Pipeline (prologue + 2-tile loop + 3-tile drain) needs an EVEN tile count,
+        # so round ceil(seq_len/64) up to even. The extra tile is out of range -> reads
+        # 0 (num_records) and is masked, contributing nothing; aligned sizes: no-op.
         max_num_tiles = ((max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
-        # seq_len >= 1 support: the prologue(1) + 2-tile loop + 3-tile drain
-        # pipeline needs at least 4 tiles. For a tiny seq_len (< ~192) ceil/round
-        # can give 2, so floor the tile count at 4. The extra tiles are entirely
-        # out of range (keys >= seq_len) -> read 0 (num_records bound) and are
-        # masked (causal mask / non-causal seq padding mask), contributing
-        # nothing. seq_len that already yields >= 4 tiles is unaffected.
+        # Pipeline needs >= 4 tiles; for tiny seq_len (< ~192) floor the count at 4.
+        # The extra tiles are out of range -> read 0 (num_records) and are masked,
+        # contributing nothing; seq_len already yielding >= 4 tiles is unaffected.
         max_num_tiles = fx.Index(ArithValue(max_num_tiles < fx.Index(4)).select(fx.Index(4), max_num_tiles))
 
         # Split-K tile range [split_t0, split_t_end). chunk is EVEN (preserves
@@ -1109,11 +1087,9 @@ def build_flash_attn_dualwave_swp_module(
                 m_out = _anchor_scalar_f32(m_tile_max)
             return ([o0, o1, o2, o3], m_out, l_out, _v_vec32_to_p(vp_out))
 
-        # Split-K: empty splits (fewer than 4 tiles to do) skip the whole
-        # pipeline and only write zeros below; non-splitk traces no guard.
-        # Varlen: grid_y is sized for max_seqlen, so a q-block past THIS batch's
-        # seqlen_q has no rows to compute -- skip the whole pipeline (the condition
-        # is uniform across the WG, so the workgroup barriers inside stay balanced).
+        # Split-K: empty splits (< 4 tiles) skip the pipeline, writing zeros below.
+        # Varlen: grid_y is sized for max_seqlen, so a q-block past this batch's
+        # seqlen_q has no rows -> skip (uniform across the WG, barriers stay balanced).
         # VARLEN and SPLITK are mutually exclusive, so they share the one guard.
         if const_expr(SPLITK):
             _split_if = _scf.IfOp(_raw(split_nonempty))
@@ -1161,12 +1137,9 @@ def build_flash_attn_dualwave_swp_module(
                 else:
                     v_s_0 = _causal_mask_prologue_if_needed(v_s_0)
             else:
-                # Non-causal KV padding mask for the PROLOGUE tile too: for a tiny
-                # seq_len the only real tile is tile 0 (prologue), so its keys with
-                # absolute column >= seq_len must be masked here (the epilogue mask
-                # only covers the last 3 tiles). Gated inside _seq_pad_mask_if_needed
-                # -> a no-op once tile 0 is full (seq_len >= BLOCK_N), so larger
-                # seq_len is unaffected and the hot loop is untouched.
+                # Non-causal padding mask for the prologue tile too: for tiny seq_len
+                # tile 0 is the only real tile, so its keys >= seq_len must be masked
+                # here. Gated -> no-op once tile 0 is full (seq_len >= BLOCK_N).
                 if const_expr(SPLITK):
                     v_s_0 = _seq_pad_mask_if_needed(v_s_0, split_t0)
                 else:
@@ -1648,14 +1621,10 @@ def build_flash_attn_dualwave_swp_module(
                 mrow_base = grid_z * NUM_HEADS_Q * seq_len_v * (HEAD_DIM // 2)
                 lrow_base = mrow_base + grid_z * NUM_HEADS_Q * seq_len_v
                 ml_row_idx = (split_z * NUM_HEADS_Q + q_head_idx) * seq_len_v + q_row
-                # Non-aligned seqlen: the workspace is indexed directly by q_row and
-                # (unlike O) cannot be num_records-bounded (a single flat buffer for
-                # all splits/heads), so an OOB row q_row >= seq_len would corrupt a
-                # neighbour's slot. Guard the writes by q_row < seq_len; the combine
-                # kernel only reads rows s < seq_len, so skipped rows are never read.
-                # lane and lane+32 share lane%32 -> share q_row, so the half-wave
-                # permlane32_swap fuse below is applied with both partners equally
-                # active/inactive. For aligned seqlen the guard is always true.
+                # The workspace is indexed directly by q_row and (unlike O) can't be
+                # num_records-bounded, so guard writes by q_row < seq_len (combine only
+                # reads s < seq_len). lane and lane+32 share q_row, so the half-wave
+                # permlane32_swap fuse applies to both equally; aligned: always true.
                 _if_qrow = _scf.IfOp(_raw(ArithValue(q_row < seq_len_v)))
                 with _if_then(_if_qrow):
                     for dc in range_constexpr(D_CHUNKS):
@@ -1773,11 +1742,9 @@ def build_flash_attn_dualwave_swp_module(
         den = _raw(fx.Float32(0.0))
         acc = _raw(Vec.filled(4, 0.0, fx.Float32))
         for i in range_constexpr(NUM_KV_SPLITS):
-            # Empty split (causal tail block): l == 0 and O_partial is zeroed, so it
-            # contributes nothing -- skip its O reads. The runtime `if` (its condition
-            # holds a call, so the AST rewriter lowers it to scf.if) reassigns the
-            # pre-existing acc/den so the update propagates out of the branch; the
-            # not-taken path keeps acc/den unchanged. One merged exit.
+            # Empty split (causal tail): l == 0 and O_partial is zeroed -> skip its O
+            # reads. The runtime `if` (call in cond -> scf.if) reassigns pre-existing
+            # acc/den so the update propagates; not-taken keeps them unchanged.
             @flyc.jit
             def _accum_split(acc, den):
                 if fx.Float32(l_s[i]) > fx.Float32(0.0):
