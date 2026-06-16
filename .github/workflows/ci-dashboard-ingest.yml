@@ -1,0 +1,74 @@
+name: CI Dashboard Ingest
+
+# After each CI benchmark, update dashboard data on the gh-pages branch.
+# Pages is served from gh-pages — data lives alongside the site, like ATOM.
+
+on:
+  workflow_run:
+    workflows: ["Fly DSL test"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      max_runs:
+        description: "Runs to scan (default 3 for incremental; use 120 for 60-day backfill)"
+        default: "3"
+
+concurrency:
+  group: gh-pages-data
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (ingest scripts)
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Ingest benchmark runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_RUNS: ${{ github.event.inputs.max_runs || '3' }}
+        run: |
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/dashboard-data"
+          mkdir -p "$OUT"
+          base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/ci-dashboard/data"
+          curl -fsSL "$base/history.json" -o "$OUT/history.json" || echo "first run — starting fresh"
+          curl -fsSL "$base/runs.json"    -o "$OUT/runs.json"    || true
+          python3 .github/dashboard/ingest/ingest.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --max-runs "$MAX_RUNS" \
+            --history-days 90 \
+            --out-dir "$OUT"
+
+      - name: Update data on gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OUT="${RUNNER_TEMP}/dashboard-data"
+          PUB="${RUNNER_TEMP}/publish"
+          rm -rf "$PUB"; mkdir -p "$PUB"; cd "$PUB"
+          git init -q
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --depth=1 origin gh-pages
+          git checkout gh-pages
+          mkdir -p ci-dashboard/data
+          cp "$OUT/history.json" "$OUT/runs.json" ci-dashboard/data/
+          git add ci-dashboard/data/history.json ci-dashboard/data/runs.json
+          if git diff --cached --quiet; then
+            echo "no data change"; exit 0
+          fi
+          git commit -qm "ci-dashboard: ingest $(date -u +%FT%TZ) [skip ci]"
+          git push origin gh-pages
+          echo "published $(wc -c < ci-dashboard/data/history.json) bytes of history"
