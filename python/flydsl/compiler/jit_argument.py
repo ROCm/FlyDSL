@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Type, get_origin
 import torch
 
 from .._mlir import ir
-from .._mlir._mlir_libs._mlirDialectsFly import DLTensorAdaptor, MemRefSpec
+from .._mlir._mlir_libs._mlirDialectsFly import DLTensorAdaptor, MemRefType
 from .._mlir.extras import types as T
 from ..expr.numeric import Numeric
 from ..expr.typing import (
@@ -173,6 +173,71 @@ class _LayoutPlan:
         self.buf_ctype = ctypes.c_byte * self.codec.size
 
 
+class MemRefSpec:
+    # shape[i] / stride[i] hold the *encoded* per-dim value: a non-negative value
+    # is a static size/stride; a negative value ``-div`` marks a dynamic dim with
+    # divisibility ``div``.  This is exactly the cache-signature encoding, so
+    # get_cache_signature returns it directly and the dyn-index masks are ``v < 0``.
+    __slots__ = ("alignment", "use_32bit_stride", "ndim", "shape", "stride")
+
+    def __init__(self, element_bits, shape, strides, alignment=None, use_32bit_stride=False):
+        if len(shape) != len(strides):
+            raise RuntimeError("MemRefSpec: shape and strides must have equal rank")
+        n = len(shape)
+        if n == 0:
+            raise RuntimeError("MemRefSpec: must have at least one dimension")
+        self.alignment = alignment if alignment is not None else (element_bits + 7) // 8
+        if self.alignment < 1:
+            raise RuntimeError("Alignment must be at least 1")
+        self.use_32bit_stride = use_32bit_stride
+        self.ndim = n
+        self.shape = [int(s) for s in shape]  # encoded, all static initially
+        self.stride = [int(s) for s in strides]
+
+    def mark_layout_dynamic(self, leading_dim=-1, divisibility=1):
+        if leading_dim == -1:
+            leading_dim = next((i for i in range(self.ndim) if self.stride[i] == 1), -1)
+        if leading_dim < 0 or leading_dim >= self.ndim:
+            raise RuntimeError("tensor has no axis with stride == 1; layout-dynamic memref requires one")
+        if self.stride[leading_dim] != 1:
+            raise RuntimeError("Leading dimension must have stride 1")
+        for i in range(self.ndim):
+            self.shape[i] = -1  # all shapes dynamic, divisibility 1
+        for i in range(self.ndim):
+            if i != leading_dim:
+                self.stride[i] = -divisibility  # non-leading strides dynamic
+        return self
+
+    def mark_shape_dynamic(self, dims, divisibilities):
+        for idx, div in zip(dims, divisibilities):
+            if idx < 0 or idx >= self.ndim:
+                raise RuntimeError("markDynamic: dimension index out of range")
+            self.shape[idx] = -int(div)
+        return self
+
+    def mark_stride_dynamic(self, dims, divisibilities):
+        for idx, div in zip(dims, divisibilities):
+            if idx < 0 or idx >= self.ndim:
+                raise RuntimeError("markDynamic: dimension index out of range")
+            self.stride[idx] = -int(div)
+        return self
+
+    def get_cache_signature(self):
+        # shape / stride already hold the encoded values -- direct read, no scan.
+        return (self.alignment, self.use_32bit_stride, tuple(self.shape), tuple(self.stride))
+
+    @property
+    def shape_dyn_indices(self):
+        return tuple(i for i, v in enumerate(self.shape) if v < 0)
+
+    @property
+    def stride_dyn_indices(self):
+        return tuple(i for i, v in enumerate(self.stride) if v < 0)
+
+    def get_memref_type(self, element_type):
+        return MemRefType.get(element_type, self.shape, self.stride, self.use_32bit_stride, self.alignment)
+
+
 class MemRefJitArg(abc.ABC):
     """Framework-neutral base for arguments whose bottom IR type is a ``memref``.
 
@@ -201,29 +266,46 @@ class MemRefJitArg(abc.ABC):
         use_32bit_stride: bool = False,
         dynamic_layout: bool = True,
     ):
-        self.spec = MemRefSpec(element_bits, list(shape), list(strides), assumed_align, use_32bit_stride)
+        self.element_bits = element_bits
+        self.shape = tuple(shape)
+        self.strides = tuple(strides)
+        self.assumed_align = assumed_align
         self.use_32bit_stride = use_32bit_stride
         self.dtype = dtype
-        self.rank = len(shape)
-        self.is_layout_dynamic = False
+        self.rank = len(self.shape)
+        self.dynamic_layout = dynamic_layout
+        # Lazy: the MemRefSpec object is constructed only when the compile path
+        # (__get_ir_types__) or an explicit mark_* actually needs it.
+        self.spec = None
+        self.is_layout_dynamic = dynamic_layout
 
-        if dynamic_layout:
-            try:
-                self.mark_layout_dynamic()
-            except RuntimeError as e:
-                raise RuntimeError(
-                    f"cannot auto-mark layout-dynamic for tensor "
-                    f"shape={tuple(shape)} strides={tuple(strides)}: {e}. "
-                    "Use flyc.from_dlpack(t) to wrap as a static memref instead."
-                ) from e
+        # Validate eagerly so a no-unit-stride tensor fails at wrap time (same
+        # timing as before) with the same actionable message.
+        if dynamic_layout and 1 not in self.strides:
+            raise RuntimeError(
+                f"cannot auto-mark layout-dynamic for tensor "
+                f"shape={self.shape} strides={self.strides}: tensor has no axis "
+                f"with stride == 1; layout-dynamic memref requires one. "
+                "Use flyc.from_dlpack(t) to wrap as a static memref instead."
+            )
+
+    def _ensure_spec(self):
+        if self.spec is None:
+            spec = MemRefSpec(
+                self.element_bits, self.shape, self.strides, self.assumed_align, self.use_32bit_stride
+            )
+            if self.dynamic_layout:
+                spec.mark_layout_dynamic()
+            self.spec = spec
+        return self.spec
 
     @property
     def shape_dyn_indices(self) -> Tuple[int, ...]:
-        return self.spec.shape_dyn_indices
+        return self._ensure_spec().shape_dyn_indices
 
     @property
     def stride_dyn_indices(self) -> Tuple[int, ...]:
-        return self.spec.stride_dyn_indices
+        return self._ensure_spec().stride_dyn_indices
 
     @abc.abstractmethod
     def __c_abi_spec__(self): ...
@@ -234,19 +316,24 @@ class MemRefJitArg(abc.ABC):
         Framework-specific (torch dtype map / dlpack)."""
 
     def __get_ir_types__(self):
-        return [self.spec.get_memref_type(self.element_type)]
+        return [self._ensure_spec().get_memref_type(self.element_type)]
 
     def __cache_signature__(self):
-        # TODO: ``type(self)`` and the framework-specific ``dtype`` make
-        # every framework wrap a distinct key, so the same tensor wrapped by
-        # TorchTensorJitArg vs DLTensorJitArg never shares a cache entry. But
-        # for the *MLIR module* they are identical -- both lower to the same
-        # memref type via the same MemRefSpec; only the C-ABI fill path differs
-        # (torch handle vs dlpack capsule). The compiled module could be reused
-        # across frameworks by keying on a framework-neutral, context-free dtype
-        # id and a shared memref-family tag instead, keeping the per-wrapper
-        # fill separate.
-        return (type(self), self.dtype) + tuple(self.spec.get_cache_signature())
+        # TODO: ``type(self)`` + framework ``dtype`` make TorchTensorJitArg and
+        # DLTensorJitArg wrap distinct keys though they lower to the same memref;
+        # a framework-neutral dtype id + memref-family tag could share the module.
+        if self.spec is not None:
+            return (type(self), self.dtype) + self.spec.get_cache_signature()
+        align = self.assumed_align if self.assumed_align is not None else (self.element_bits + 7) // 8
+        n = self.rank
+        if self.dynamic_layout:
+            unit = self.strides.index(1)  # validated in __init__
+            shape = (-1,) * n
+            stride = tuple(self.strides[i] if i == unit else -1 for i in range(n))
+        else:
+            shape = self.shape
+            stride = self.strides
+        return (type(self), self.dtype, align, self.use_32bit_stride, shape, stride)
 
     def _normalize_dims_div(self, dims, divisibility, what: str):
         """Normalize the ``(dims, divisibility)`` argument forms.
@@ -286,7 +373,7 @@ class MemRefJitArg(abc.ABC):
         return normalized, divs
 
     def mark_layout_dynamic(self, leading_dim: Optional[int] = None, divisibility: int = 1):
-        self.spec.mark_layout_dynamic(-1 if leading_dim is None else leading_dim, divisibility)
+        self._ensure_spec().mark_layout_dynamic(-1 if leading_dim is None else leading_dim, divisibility)
         self.is_layout_dynamic = True
         return self
 
@@ -310,7 +397,7 @@ class MemRefJitArg(abc.ABC):
             t.mark_shape_dynamic([0, 1], [16, 8])
         """
         idxs, divs = self._normalize_dims_div(dims, divisibility, "mark_shape_dynamic")
-        self.spec.mark_shape_dynamic(idxs, divs)
+        self._ensure_spec().mark_shape_dynamic(idxs, divs)
         self.is_layout_dynamic = True
         return self
 
@@ -331,7 +418,7 @@ class MemRefJitArg(abc.ABC):
             t.mark_shape_dynamic(0).mark_stride_dynamic([0, 1], divisibility=8)
         """
         idxs, divs = self._normalize_dims_div(dims, divisibility, "mark_stride_dynamic")
-        self.spec.mark_stride_dynamic(idxs, divs)
+        self._ensure_spec().mark_stride_dynamic(idxs, divs)
         self.is_layout_dynamic = True
         return self
 
@@ -363,14 +450,14 @@ class DLTensorJitArg(MemRefJitArg):
         except Exception:
             with_stream = False
             dl = dltensor.__dlpack__()
-        adaptor = DLTensorAdaptor(dl)
-        self.adaptor = adaptor
+        dladaptor = DLTensorAdaptor(dl)
+        self.dladaptor = dladaptor
         self.with_stream_dlpack = with_stream
         super().__init__(
-            element_bits=adaptor.element_bits,
-            shape=adaptor.shape,
-            strides=adaptor.stride,
-            dtype=adaptor.dtype_id,
+            element_bits=dladaptor.element_bits,
+            shape=dladaptor.shape,
+            strides=dladaptor.stride,
+            dtype=dladaptor.dtype_id,
             assumed_align=assumed_align,
             use_32bit_stride=use_32bit_stride,
             dynamic_layout=dynamic_layout,
@@ -379,12 +466,15 @@ class DLTensorJitArg(MemRefJitArg):
     @property
     def element_type(self):
         # The dtype as an ir Type, built in the active (compile) context.
-        return self.adaptor.dtype
+        return self.dladaptor.dtype
 
     def __c_abi_spec__(self):
         with_stream = self.with_stream_dlpack
 
         def _open(a):
+            ad = getattr(a, "dladaptor", None)
+            if ad is not None:
+                return ad
             t = a.dltensor if hasattr(a, "dltensor") else a
             return DLTensorAdaptor(t.__dlpack__(stream=-1) if with_stream else t.__dlpack__())
 
@@ -397,17 +487,17 @@ class DLTensorJitArg(MemRefJitArg):
 
         # Layout-dynamic: the pointer and layout slots are dispatched back to back
         # for this arg, so they share a single ``__dlpack__()`` per launch. The
-        # pointer fill opens the live tensor once and hands the adaptor to the
+        # pointer fill opens the live tensor once and hands the dladaptor to the
         # layout fill through a thread-local (thread-safe; never mutates the arg).
         plan = _LayoutPlan(self.shape_dyn_indices, self.stride_dyn_indices, bool(self.use_32bit_stride))
         shared = threading.local()
 
         def ptr_fill(a, s, _open=_open, _shared=shared):
             ad = _open(a)
-            _shared.adaptor = ad
+            _shared.dladaptor = ad
             s.value = ad.data_ptr
 
-        body = ["    _ad = _shared.adaptor"]
+        body = ["    _ad = _shared.dladaptor"]
         terms = []
         if plan.shape:
             body.append("    sh = _ad.shape")

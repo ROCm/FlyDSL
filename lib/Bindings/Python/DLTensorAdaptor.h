@@ -3,7 +3,19 @@
 
 #pragma once
 
-#include "MemRefSpec.h"
+#include "mlir-c/Bindings/Python/Interop.h"
+#include "mlir-c/IR.h"
+#include "mlir-c/Support.h"
+#include "mlir/Bindings/Python/Nanobind.h"
+#include "mlir/Bindings/Python/NanobindAdaptors.h"
+#include "mlir/CAPI/IR.h"
+#include "mlir/CAPI/Wrap.h"
+
+#include <mlir/IR/MLIRContext.h>
+#include <mlir/IR/Value.h>
+
+#include "flydsl/Dialect/Fly/IR/FlyDialect.h"
+#include "flydsl/Dialect/Fly/Utils/IntUtils.h"
 
 #include "dlpack/dlpack.h"
 
@@ -11,7 +23,27 @@
 #include <string>
 #include <vector>
 
+namespace nb = nanobind;
+using namespace nb::literals;
+
+using namespace mlir;
+using namespace mlir::fly;
+using namespace mlir::python::nanobind_adaptors;
+
 namespace mlir::fly::utils {
+
+inline MLIRContext *getCurrentContext() {
+  nb::object currentCtx = mlir::python::irModule().attr("Context").attr("current");
+  if (currentCtx.is_none()) {
+    throw std::runtime_error("No MLIR context available. Either pass a context explicitly or "
+                             "call within an active ir.Context (using 'with context:')");
+  }
+  auto capsule = mlirApiObjectToCapsule(currentCtx);
+  if (!capsule) {
+    throw std::runtime_error("Invalid MLIR context capsule");
+  }
+  return unwrap(mlirPythonCapsuleToContext(capsule->ptr()));
+}
 
 class DLTensorAdaptor {
 public:

@@ -11,7 +11,6 @@
 
 #include "BindingUtils.h"
 #include "DLTensorAdaptor.h"
-#include "MemRefSpec.h"
 #include "TiledOpTraits.h"
 
 #include "LlvmConfig/llvm.h"
@@ -535,6 +534,45 @@ struct PyMemRefType : PyConcreteType<PyMemRefType> {
         "case) or a target-specific MLIR Attribute (e.g. "
         "`#fly_rocdl.buffer_desc`).");
 
+    // Build a layout-dynamic MemRefType from per-dim *encoded* values each
+    // entry is ``v >= 0`` -> static size/stride ``v``; ``v < 0`` -> dynamic dim
+    // with divisibility ``-v``. Shape dynamic leaves are always 32-bit; stride
+    // dynamic leaves follow ``use_32bit_stride``.  Address space is global.
+    c.def_static(
+        "get",
+        [](PyType &elemTyObj, const std::vector<int64_t> &shapeEnc,
+           const std::vector<int64_t> &strideEnc, bool use32BitStride, int32_t alignment,
+           DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          Type elemType = unwrap(elemTyObj);
+          int n = static_cast<int>(shapeEnc.size());
+          auto leaf = [&](int64_t v, bool i32) -> Attribute {
+            if (v < 0)
+              return IntTupleAttr::getLeafDynamic(ctx, i32 ? 32 : 64, static_cast<int32_t>(-v));
+            return IntTupleAttr::getLeafStatic(ctx, v);
+          };
+          SmallVector<Attribute> sh(n), st(n);
+          for (int i = 0; i < n; ++i) {
+            sh[i] = leaf(shapeEnc[i], /*i32=*/true);
+            st[i] = leaf(strideEnc[i], use32BitStride);
+          }
+          IntTupleAttr shapeAttr =
+              n == 1 ? cast<IntTupleAttr>(sh[0]) : IntTupleAttr::get(ArrayAttr::get(ctx, sh));
+          IntTupleAttr strideAttr =
+              n == 1 ? cast<IntTupleAttr>(st[0]) : IntTupleAttr::get(ArrayAttr::get(ctx, st));
+          LayoutAttr layoutAttr = LayoutAttr::get(ctx, shapeAttr, strideAttr);
+          AddressSpaceAttr addrSpaceAttr = AddressSpaceAttr::get(ctx, AddressSpace::Global);
+          AlignAttr alignAttr = AlignAttr::get(ctx, alignment);
+          return PyMemRefType(
+              context->getRef(),
+              wrap(::mlir::fly::MemRefType::get(elemType, addrSpaceAttr, layoutAttr, alignAttr)));
+        },
+        "elem_ty"_a, "shape_enc"_a, "stride_enc"_a, "use_32bit_stride"_a, "alignment"_a,
+        nb::kw_only(), "context"_a = nb::none(),
+        "Build a layout-dynamic MemRefType from encoded per-dim values: v>=0 static "
+        "size/stride, v<0 dynamic with divisibility -v (same encoding as the cache "
+        "signature). Python owns the layout state.");
+
     c.def_prop_ro("element_type", [](PyMemRefType &self) -> MlirType {
       return wrap(self.toCppType().getElemTy());
     });
@@ -872,35 +910,6 @@ struct PyMmaOpUniversalFMAType : PyConcreteType<PyMmaOpUniversalFMAType> {
 
 NB_MODULE(_mlirDialectsFly, m) {
   m.doc() = "MLIR Python FlyDSL Extension";
-
-  // -------------------------------------------------------------------------
-  // MemRefSpec: metadata-driven memref-type + cache-signature generator
-  // -------------------------------------------------------------------------
-  using MemRefSpec = utils::MemRefSpec;
-
-  nb::class_<MemRefSpec>(m, "MemRefSpec")
-      .def(nb::init<int32_t, const std::vector<int64_t> &, const std::vector<int64_t> &,
-                    std::optional<int32_t>, bool>(),
-           "element_bits"_a, "shape"_a, "strides"_a, "alignment"_a = nb::none(),
-           "use_32bit_stride"_a = false,
-           "Create from raw metadata (element bit width + shape/strides); context-free. "
-           "If alignment is None, defaults to the element width rounded up to bytes (minimum 1).")
-      .def("mark_layout_dynamic", &MemRefSpec::markLayoutDynamic, "leading_dim"_a = -1,
-           "divisibility"_a = 1, "Mark entire layout dynamic except the leading-dim stride")
-      .def("mark_shape_dynamic", &MemRefSpec::markShapeDynamic, "dims"_a, "divisibilities"_a,
-           "Mark the shape leaf of each listed dimension dynamic (equal-length lists).")
-      .def("mark_stride_dynamic", &MemRefSpec::markStrideDynamic, "dims"_a, "divisibilities"_a,
-           "Mark the stride leaf of each listed dimension dynamic (equal-length lists).")
-      .def("use_32bit_stride", &MemRefSpec::use32BitStride, "use_32bit_stride"_a,
-           "Decide whether to use 32-bit dynamic strides")
-      .def("get_memref_type", &MemRefSpec::getMemRefType, "element_type"_a,
-           "Get the fly.memref MLIR type (element type built in the active context)")
-      .def("get_cache_signature", &MemRefSpec::getCacheSignature,
-           "Cache-key tuple (alignment, use_32bit_stride, shape, stride)")
-      .def_prop_ro("shape_dyn_indices", &MemRefSpec::getShapeDynIndices,
-                   "Indices of dynamic-shape dims")
-      .def_prop_ro("stride_dyn_indices", &MemRefSpec::getStrideDynIndices,
-                   "Indices of dynamic-stride dims");
 
   // -------------------------------------------------------------------------
   // DLTensorAdaptor (standalone, not an MLIR type)
