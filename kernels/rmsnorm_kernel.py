@@ -99,6 +99,18 @@ def _store_yscale(scale_copy_atom, yscale_div, index, val):
     fx.copy_atom_call(scale_copy_atom, r, fx.slice(yscale_div, (None, index)))
 
 
+def _quant_dtype_to_elem_type(dtype_str: str):
+    if dtype_str in ("i8", "int8"):
+        return fx.Int8
+    raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
+
+
+def _quant_dtype_max(dtype_str: str) -> float:
+    if dtype_str in ("i8", "int8"):
+        return 127.0
+    raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
+
+
 def build_rmsnorm_module(M: int, N: int, dtype_str: str):
     if M > 8192 and N <= 2048:
         return _build_rmsnorm_large_m_small_n_module(M, N, dtype_str)
@@ -608,18 +620,6 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
     return launch_fused_add_rmsnorm
 
 
-def _quant_dtype_to_elem_type(dtype_str: str):
-    if dtype_str in ("i8", "int8"):
-        return fx.Int8
-    raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
-
-
-def _quant_dtype_max(dtype_str: str) -> float:
-    if dtype_str in ("i8", "int8"):
-        return 127.0
-    raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
-
-
 def _build_rmsnorm_quant_module(
     M: int,
     N: int,
@@ -628,8 +628,6 @@ def _build_rmsnorm_quant_module(
     is_smooth: bool,
     quant_dtype_str: str = "i8",
 ):
-    arch = get_hip_arch()
-
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -751,7 +749,6 @@ def _build_rmsnorm_quant_module(
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
-            xscale_vec_width = 4
             # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
@@ -766,11 +763,11 @@ def _build_rmsnorm_quant_module(
             out_div_q = fx.logical_divide(row_out, fx.make_layout(quant_half_width, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
             if const_expr(is_smooth):
-                xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(xscale_vec_width, 1))
+                xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             if const_expr(is_smooth):
-                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
+                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             copy_atom_q = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 8)
 
             thread_sumsq = c_zero_f
@@ -803,9 +800,7 @@ def _build_rmsnorm_quant_module(
                 x = in_local[tile_i].to(fx.Float32)
                 y = (x * rrms) * g
                 if const_expr(is_smooth):
-                    s_lo = _load_vec(copy_atom_xs, xscale_vec_width, fx.Float32, xscale_div, idx * 2)
-                    s_hi = _load_vec(copy_atom_xs, xscale_vec_width, fx.Float32, xscale_div, idx * 2 + 1)
-                    s = Vec(s_lo).shuffle(Vec(s_hi), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
+                    s = _load_vec(copy_atom_xs, VEC_WIDTH, elem_dtype, xscale_div, idx).to(fx.Float32)
                     y = y * s
 
                 y_local.append(y)
@@ -848,7 +843,10 @@ def _build_rmsnorm_quant_module(
             )
             copy_atom_qs = fx.make_copy_atom(fx.rocdl.BufferCopy(8), 8)
             if const_expr(is_smooth):
-                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+                copy_atom_xs = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                    elem_bits,
+                )
 
             row_in = fx.slice(Input_buf, (bid, None))
             row_out = fx.slice(Output_buf, (bid, None))
@@ -892,7 +890,8 @@ def _build_rmsnorm_quant_module(
                 g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                 y = (x * rrms) * g
                 if const_expr(is_smooth):
-                    s = _load_scalar(copy_atom_xs, fx.Float32, xscale_div, idx_safe)
+                    s_e = _load_scalar(copy_atom_xs, elem_dtype, xscale_div, idx_safe)
+                    s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
                 thread_row_max = thread_row_max.maximumf(is_valid.select(y_abs, c_zero_f))
@@ -916,7 +915,8 @@ def _build_rmsnorm_quant_module(
                     g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
                     y = (x * rrms) * g
                     if const_expr(is_smooth):
-                        s = _load_scalar(copy_atom_xs, fx.Float32, xscale_div, idx)
+                        s_e = _load_scalar(copy_atom_xs, elem_dtype, xscale_div, idx)
+                        s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
@@ -1128,7 +1128,6 @@ def _build_fused_add_rmsnorm_quant_module(
             num_tiles = N // tile_cols
             quant_half_width = VEC_WIDTH // 2
             abs_mask = full(VEC_WIDTH, fx.Uint32(0x7FFFFFFF), fx.Uint32)
-            xscale_vec_width = 4
             # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             ResidualIn_buf = fx.rocdl.make_buffer_tensor(ResidualIn)
@@ -1149,11 +1148,11 @@ def _build_fused_add_rmsnorm_quant_module(
             residual_out_div = fx.logical_divide(row_residual_out, fx.make_layout(VEC_WIDTH, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
             if const_expr(is_smooth):
-                xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(xscale_vec_width, 1))
+                xscale_div = fx.logical_divide(XScale_buf, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             if const_expr(is_smooth):
-                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
+                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
             copy_atom_q = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 8)
 
             thread_sumsq = c_zero_f
@@ -1188,9 +1187,7 @@ def _build_fused_add_rmsnorm_quant_module(
                 added = add_local[tile_i] if dtype_str == "f32" else add_local[tile_i].to(fx.Float32)
                 y = (added * rrms) * g
                 if const_expr(is_smooth):
-                    s_lo = _load_vec(copy_atom_xs, xscale_vec_width, fx.Float32, xscale_div, idx * 2)
-                    s_hi = _load_vec(copy_atom_xs, xscale_vec_width, fx.Float32, xscale_div, idx * 2 + 1)
-                    s = Vec(s_lo).shuffle(Vec(s_hi), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
+                    s = _load_vec(copy_atom_xs, VEC_WIDTH, elem_dtype, xscale_div, idx).to(fx.Float32)
                     y = y * s
 
                 y_local.append(y)
@@ -1235,7 +1232,10 @@ def _build_fused_add_rmsnorm_quant_module(
             )
             copy_atom_qs = fx.make_copy_atom(fx.rocdl.BufferCopy(8), 8)
             if const_expr(is_smooth):
-                copy_atom_xs = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+                copy_atom_xs = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                    elem_bits,
+                )
 
             row_in = fx.slice(Input_buf, (bid, None))
             row_residual_in = fx.slice(ResidualIn_buf, (bid, None))
@@ -1290,7 +1290,8 @@ def _build_fused_add_rmsnorm_quant_module(
                 added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                 y = (added * rrms) * g
                 if const_expr(is_smooth):
-                    s = _load_scalar(copy_atom_xs, fx.Float32, xscale_div, idx_safe)
+                    s_e = _load_scalar(copy_atom_xs, elem_dtype, xscale_div, idx_safe)
+                    s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                     y = y * s
                 y_abs = _abs_scalar(y)
                 thread_row_max = thread_row_max.maximumf(is_valid.select(y_abs, c_zero_f))
@@ -1314,7 +1315,8 @@ def _build_fused_add_rmsnorm_quant_module(
                     added = added_e if dtype_str == "f32" else added_e.to(fx.Float32)
                     y = (added * rrms) * g
                     if const_expr(is_smooth):
-                        s = _load_scalar(copy_atom_xs, fx.Float32, xscale_div, idx)
+                        s_e = _load_scalar(copy_atom_xs, elem_dtype, xscale_div, idx)
+                        s = s_e if dtype_str == "f32" else s_e.to(fx.Float32)
                         y = y * s
                     q = y * inv_scale
                     q_i8 = q.to(quant_dtype)
