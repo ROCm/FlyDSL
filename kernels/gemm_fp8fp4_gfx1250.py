@@ -97,7 +97,6 @@ def _is_fp8_deep_pipeline(
     num_buffers,
     out_dtype,
     wave_specialized_tdm,
-    use_scale_opsel,
     fp8_schedule,
 ):
     """Whether this config takes the FP8/A8W4 deep-pipeline schedule (fixed
@@ -114,14 +113,8 @@ def _is_fp8_deep_pipeline(
         and num_buffers == 4
         and wave_specialized_tdm
         and out_dtype == "bf16"
-        and not use_scale_opsel
     )
     return fp8_schedule == "deep-pipeline" or (fp8_schedule == "auto" and eligible)
-
-
-def _is_row_major_streaming(wmma_m_rep, wmma_n_rep, n_accs):
-    # Mirrors _pick_compute_schedule_kind: row-major when a rep is odd or n_accs < 8.
-    return wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8
 
 
 def use_n4k4_bscale_layout(
@@ -134,27 +127,19 @@ def use_n4k4_bscale_layout(
     n_warp,
     n,
     scale_mode="mxscale",
-    use_scale_opsel=False,
     num_buffers=2,
     out_dtype="f32",
     wave_specialized_tdm=False,
     fp8_schedule="auto",
 ):
-    """B-scale uses the 32x4 `preshuffle_scale` layout on every FP8/A8W4 mxscale
-    schedule (row-major, quadrant, deep-pipeline); fp4 keeps the legacy layout. (The
-    gate name keeps "n4k4" until the naming cleanup TODO; extra kwargs are kept for
-    signature compatibility.)"""
+    """B-scale uses the 32x4 `preshuffle_scale` layout on every mxscale schedule
+    (row-major, quadrant, deep-pipeline, fp4 bank-friendly); ptpc has no K-loop
+    B-scale. The N/tile_n%32 and tile_k%128 requirements are enforced in
+    compile_fp8fp4_gemm. (The gate name keeps "n4k4" until the naming cleanup TODO;
+    extra kwargs are kept for signature compatibility.)"""
     if scale_mode != "mxscale":
         return False
-    if data_format not in ("fp8", "a8w4"):
-        return False
-    if use_scale_opsel:
-        return False
-    if tile_k % 128 != 0:
-        return False
-    if n % 32 != 0:
-        return False
-    if tile_n % 32 != 0:
+    if data_format not in ("fp8", "a8w4", "fp4"):
         return False
     return True
 
@@ -170,7 +155,6 @@ def use_natural_ascale_vgpr(
     n,
     scale_mode="mxscale",
     ascale_load_path="vgpr",
-    use_scale_opsel=False,
     wave_specialized_tdm=False,
     num_buffers=2,
     out_dtype="bf16",
@@ -178,9 +162,11 @@ def use_natural_ascale_vgpr(
 ):
     """Whether A-scale uses the natural (un-reshuffled) buffer_load->VGPR path.
 
-    Row-major-streaming (decode) and deep-pipeline: A read straight from runtime
-    ``A_scale[M, K//32]`` into VGPRs (loop-ahead prefetched), paired with 32x4 B (TDM).
-    Quadrant keeps legacy/TDM A-scale (its target is A=tdm-M4K4). Requires wave-spec TDM."""
+    A read straight from runtime ``A_scale[M, K//32]`` into VGPRs (loop-ahead
+    prefetched), paired with 32x4 B (TDM). Used by every ws schedule (row-major,
+    quadrant, fp4 bank-friendly, deep-with-explicit-vgpr). Requires wave-spec TDM."""
+    if data_format not in ("fp8", "a8w4", "fp4"):
+        return False
     if ascale_load_path != "vgpr":
         return False
     if not wave_specialized_tdm:
@@ -194,27 +180,9 @@ def use_natural_ascale_vgpr(
         n_warp=n_warp,
         n=n,
         scale_mode=scale_mode,
-        use_scale_opsel=use_scale_opsel,
     ):
         return False
-    wmma_m_rep = (tile_m // m_warp) // WMMA_M
-    wmma_n_rep = (tile_n // n_warp) // WMMA_N
-    if _is_row_major_streaming(wmma_m_rep, wmma_n_rep, wmma_m_rep * wmma_n_rep):
-        return True
-    # Deep-pipeline (even rep) also defaults to natural A-scale; quadrant does not.
-    return _is_fp8_deep_pipeline(
-        data_format=data_format,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        m_warp=m_warp,
-        n_warp=n_warp,
-        num_buffers=num_buffers,
-        out_dtype=out_dtype,
-        wave_specialized_tdm=wave_specialized_tdm,
-        use_scale_opsel=use_scale_opsel,
-        fp8_schedule=fp8_schedule,
-    )
+    return True
 
 
 @functools.lru_cache(maxsize=256)
@@ -239,7 +207,6 @@ def compile_fp8fp4_gemm(
     inst_prefetch: bool = False,
     wave_specialized_tdm: bool = False,
     split_k: int = 1,
-    use_scale_opsel: bool = False,
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
     ascale_load_path: str = "auto",
@@ -285,7 +252,6 @@ def compile_fp8fp4_gemm(
                 num_buffers=num_buffers,
                 out_dtype=out_dtype,
                 wave_specialized_tdm=wave_specialized_tdm,
-                use_scale_opsel=use_scale_opsel,
                 fp8_schedule=fp8_schedule,
             )
             else "vgpr"
@@ -379,6 +345,14 @@ def compile_fp8fp4_gemm(
     if warp_tile_n % WMMA_N_EFF != 0:
         raise ValueError(f"warp_tile_n={warp_tile_n} must be a multiple of {WMMA_N_EFF}")
 
+    # mxscale B-scale is always the 32x4 `preshuffle_scale` layout: require N/tile_n a
+    # multiple of 32 and tile_k a multiple of 128 (no legacy sub-32 fallback).
+    if scale_mode == "mxscale" and (N % 32 != 0 or tile_n % 32 != 0 or tile_k % 128 != 0):
+        raise ValueError(
+            f"mxscale 32x4 B-scale requires N%32==0, tile_n%32==0, tile_k%128==0; "
+            f"got N={N}, tile_n={tile_n}, tile_k={tile_k}"
+        )
+
     if split_k > 1 and use_tdm_store:
         raise ValueError("split_k > 1 currently requires use_tdm_store=False")
 
@@ -406,7 +380,6 @@ def compile_fp8fp4_gemm(
         n_warp=n_warp,
         n=N,
         scale_mode=scale_mode,
-        use_scale_opsel=use_scale_opsel,
         num_buffers=num_buffers,
         out_dtype=out_dtype,
         wave_specialized_tdm=wave_specialized_tdm,
@@ -444,7 +417,6 @@ def compile_fp8fp4_gemm(
         n=N,
         scale_mode=scale_mode,
         ascale_load_path=ascale_load_path,
-        use_scale_opsel=use_scale_opsel,
         wave_specialized_tdm=wave_specialized_tdm,
         num_buffers=num_buffers,
         out_dtype=out_dtype,
@@ -488,7 +460,6 @@ def compile_fp8fp4_gemm(
     else:
         lds_b_scale_bytes = 0 if is_ptpc else tile_n * scale_k_per_tile + _scale_guard_bytes
     interleaved_scale_cols_a = wmma_m_rep * scale_k_per_tile
-    interleaved_scale_cols_b = b_scale_load_rep * scale_k_per_tile
 
     def _align_up(value: int, align: int) -> int:
         if value % align == 0:
@@ -620,13 +591,11 @@ def compile_fp8fp4_gemm(
         and num_buffers == 4
         and wave_specialized_tdm
         and out_dtype == "bf16"
-        and not use_scale_opsel
     )
     if fp8_schedule == "deep-pipeline" and not fp8_deep_pipeline_eligible:
         raise ValueError(
             "fp8_schedule='deep-pipeline' requires fp8 256x256x128, "
-            "m_warp=n_warp=2, num_buffers=4, wave_specialized_tdm=True, "
-            "out_dtype='bf16', and use_scale_opsel=False"
+            "m_warp=n_warp=2, num_buffers=4, wave_specialized_tdm=True, out_dtype='bf16'"
         )
 
     def _pick_compute_schedule_kind():
@@ -656,6 +625,7 @@ def compile_fp8fp4_gemm(
             COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING,
             COMPUTE_SCHEDULE_FP8_QUADRANT,
             COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE,
+            COMPUTE_SCHEDULE_FP4_COL_BAND,
         )
     use_ws_tdm_split_signal_overlap = (
         wave_specialized_tdm
@@ -668,7 +638,6 @@ def compile_fp8fp4_gemm(
         _bank_half_wm = wmma_m_rep // 2
         _bank_half_wn = wmma_n_rep // 2
         _bank_group_size = _bank_half_wm * _bank_half_wn
-        _bank_half_b_scale_rep = b_scale_load_rep // 2
         _bank_group_to_row_major = []
         for _wm in range(_bank_half_wm):
             for _wn in range(_bank_half_wn):
@@ -872,38 +841,19 @@ def compile_fp8fp4_gemm(
             )
 
         def make_desc_bs(memref, k_base):
-            if const_expr(use_n4k4_bscale):
-                # 32x4: copy this tile's 32-N atoms x K-blocks slice of the
-                # preshuffled [N//32, (K//128)*128] B-scale tensor. Each row is one
-                # 32-N atom group; contiguous dim1 = tile_k//128 * 128B atomics.
-                a_off = blk_n // arith.index(32)
-                col_off = (k_base // arith.index(WMMA_K)) * arith.index(bs32_atom_bytes)
-                return _make_tdm_desc(
-                    global_ptr=arg_b_scale,
-                    lds_memref=memref,
-                    global_offset=(a_off, col_off),
-                    tensor_shape=(N // 32, bs32_global_row_stride),
-                    strides=(bs32_global_row_stride, 1),
-                    tile_shape=(bs32_tile_atoms_pad, bs32_lds_row_stride),
-                    elem_bytes=1,
-                    pad_interval=0,
-                    pad_amount=0,
-                    num_warps=tdm_desc_num_warps,
-                    workgroup_mask=b_mcast_mask,
-                    atomic_barrier_enable=atomic_barrier_enable,
-                    early_timeout=True,
-                    oob_outer_bound=N // 32,
-                )
-            k_scale_off = k_base // arith.index(SCALE_BLOCK)
-            outer_off = blk_n // arith.index(b_scale_load_rep)
-            inner_off = k_scale_off * arith.index(b_scale_load_rep)
+            # 32x4: copy this tile's 32-N atoms x K-blocks slice of the preshuffled
+            # [N//32, (K//128)*128] B-scale tensor. Each row is one 32-N atom group;
+            # contiguous dim1 = tile_k//128 * 128B atomics. (mxscale only; ptpc never
+            # calls this -- its desc_bs is a placeholder.)
+            a_off = blk_n // arith.index(32)
+            col_off = (k_base // arith.index(WMMA_K)) * arith.index(bs32_atom_bytes)
             return _make_tdm_desc(
                 global_ptr=arg_b_scale,
                 lds_memref=memref,
-                global_offset=(outer_off, inner_off),
-                tensor_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
-                strides=(b_scale_load_rep * K_scale, 1),
-                tile_shape=(WMMA_M * n_warp, interleaved_scale_cols_b),
+                global_offset=(a_off, col_off),
+                tensor_shape=(N // 32, bs32_global_row_stride),
+                strides=(bs32_global_row_stride, 1),
+                tile_shape=(bs32_tile_atoms_pad, bs32_lds_row_stride),
                 elem_bytes=1,
                 pad_interval=0,
                 pad_amount=0,
@@ -911,6 +861,7 @@ def compile_fp8fp4_gemm(
                 workgroup_mask=b_mcast_mask,
                 atomic_barrier_enable=atomic_barrier_enable,
                 early_timeout=True,
+                oob_outer_bound=N // 32,
             )
 
         if const_expr(wave_specialized_tdm):
@@ -1046,10 +997,6 @@ def compile_fp8fp4_gemm(
             if const_expr(is_fp4 or is_a8w4):
                 # FP4/A8W4: always add lane_kgrp offset (no opsel on BScale)
                 base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
-            else:
-                # FP8: conditional on opsel
-                if const_expr(use_scale_opsel):
-                    base = base + lane_kgrp * arith.index(SCALES_PER_WMMA)
             return lds_ptr, [base]
 
         def _precompute_bs32_bases(lds_ptr):
@@ -1105,31 +1052,15 @@ def compile_fp8fp4_gemm(
                 results.append(vecs[i // 4][i % 4])
             return results
 
-        def load_scale_slice_b128(lds_buffer, scale_base, full_reps, rep_start, rep_count, ks=0):
-            """Load a contiguous slice of packed scale VGPRs for one K-subtile."""
-            ks_byte_off = (ks * full_reps + rep_start) * SCALES_PER_WMMA
-            eff_base = scale_base if ks_byte_off == 0 else scale_base + arith.index(ks_byte_off)
-            num_loads = (rep_count + 3) // 4
-            vecs = []
-            for ld in range_constexpr(num_loads):
-                off = eff_base if ld == 0 else eff_base + arith.index(ld * 16)
-                vecs.append(fx.Vector(lds_load_b128_raw(lds_buffer, off)))
-            results = []
-            for i in range_constexpr(rep_count):
-                results.append(vecs[i // 4][i % 4])
-            return results
-
         # Holds the current tile's prefetched VGPR scales (a_flat, b_flat), each
         # ordered [k_wmma_step][rep]. compute_tile sets it before emitting; the
         # general-vgpr branch of _scales_for_emit slices it per K-subtile. Set-then-
         # consume is sequential at emit time (same pattern as epi_addrs_box).
         _vgpr_scale_box = [None]
 
-        def _load_b_scale_lds(bs_buf, bs_bases, ks):
-            """Load B-scale from LDS, dispatching to the 32x4 or legacy layout."""
-            if const_expr(use_n4k4_bscale):
-                return load_bs32_bscale(bs_buf, bs_bases, ks)
-            return load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
+        def _load_b_scale_lds(bs_buf, bs_atom0, ks):
+            """Load 32x4 B-scale from LDS (mxscale only; ptpc reads no K-loop B-scale)."""
+            return load_bs32_bscale(bs_buf, bs_atom0, ks)
 
         def _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks):
             """Load both scale tensors and apply op_sel downsampling per format.
@@ -1146,13 +1077,8 @@ def compile_fp8fp4_gemm(
                 a = pf_a[ks * nat_as_load : (ks + 1) * nat_as_load]
                 b = _load_b_scale_lds(bs_buf, bs_bases, ks)
                 return a, b
-            a_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
-            b_all = _load_b_scale_lds(bs_buf, bs_bases, ks)
-            if const_expr(use_scale_opsel):
-                a = a_all[::2]
-                b = b_all if const_expr(is_fp4) else b_all[::2]
-            else:
-                a, b = a_all, b_all
+            a = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
+            b = _load_b_scale_lds(bs_buf, bs_bases, ks)
             return a, b
 
         def _load_b_and_scales(b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, ks):
@@ -1197,10 +1123,7 @@ def compile_fp8fp4_gemm(
                         fmtB=0,
                     )
                 return
-            if const_expr(use_scale_opsel):
-                a_scale_idx = wm // 2
-                a_opsel = wm % 2
-            elif const_expr(use_natural_ascale_opsel):
+            if const_expr(use_natural_ascale_opsel):
                 # Natural A M op_sel pairs (j, j+rep/2): kgrp1 carries the second half.
                 a_scale_idx = wm % nat_as_half
                 a_opsel = wm // nat_as_half
@@ -1209,22 +1132,23 @@ def compile_fp8fp4_gemm(
                 a_opsel = 0
 
             if const_expr(is_fp4):
-                # 32x16 WMMA with A/B swap: SRC0=B, SRC1=A
+                # 32x16 WMMA with A/B swap: SRC0=B, SRC1=A. 32x4 reads one 32-N atom
+                # per WMMA (idx wn).
                 accs[idx] = rocdl.wmma_scale_f32_32x16x128_f4(
                     T.vec(16, T.f32),
                     b_frag,
                     a_frag,
                     accs[idx],
-                    b_scales[wn * 2],
+                    b_scales[wn],
                     a_scales[a_scale_idx],
                     scaleAType=0,
                     scaleBType=a_opsel,
                 )
             else:
                 # 16x16x128 WMMA: A8W4 (fmtA=FP4) or FP8 (fmtA=FP8). op_sel pairs
-                # adjacent 16-N halves (legacy use_scale_opsel or 32x4 even rep);
-                # else one scale per WMMA (32x4 odd rep, or no op_sel).
-                if const_expr(use_scale_opsel or bs32_opsel):
+                # adjacent 16-N halves (32x4 even rep); else one scale per WMMA
+                # (32x4 odd rep, or no op_sel).
+                if const_expr(bs32_opsel):
                     b_scale_idx = wn // 2
                     b_opsel = wn % 2
                 else:
@@ -1342,9 +1266,7 @@ def compile_fp8fp4_gemm(
             if const_expr(use_n4k4_bscale):
                 bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
             else:
-                bs_buf, bs_bases = _precompute_scale_lane_bases(
-                    lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
-                )
+                bs_buf, bs_bases = lds_bs, None  # ptpc: B-scale in epilogue, bases unused
 
             if const_expr(k_wmma_steps == 1):
                 b_frags, b_scales, a_scales = _load_b_and_scales(b_buf, b_bases, bs_buf, bs_bases, as_buf, as_bases, 0)
@@ -1387,19 +1309,33 @@ def compile_fp8fp4_gemm(
             lds_bs,
             emit_filler=None,
             mid_compute_callback=None,
+            scale_k_base=None,
+            pf_a_scales=None,
+            pf_b_scales=None,
         ):
             current_accs = list(accs_in)
+            if const_expr(use_natural_ascale):
+                # A-scale from the VGPR ring (loop-prefetched, else inline tail load).
+                if const_expr(pf_a_scales is not None):
+                    _vgpr_scale_box[0] = (pf_a_scales, pf_b_scales)
+                else:
+                    rocdl.sched_barrier(0)
+                    _vgpr_scale_box[0] = _bvs_prefetch(scale_k_base)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
-            as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
-            bs_buf, bs_bases = _precompute_scale_lane_bases(
-                lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
-            )
-            _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
+            if const_expr(use_natural_ascale):
+                as_buf, as_bases = None, None  # A-scale from the VGPR ring, not LDS
+            else:
+                as_buf, as_bases = _precompute_scale_lane_bases(
+                    lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a
+                )
+            bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
+            _b_half_scale_loads = _bank_half_wn  # 32x4: one b32 per 32-N atom/WMMA
 
             def _fp4_get_a_scale_and_opsel(a_scales_all, wm_idx):
-                if const_expr(use_scale_opsel):
-                    return a_scales_all[(wm_idx // 2) * 2], wm_idx % 2
+                if const_expr(use_natural_ascale_opsel):
+                    # Natural M op_sel pairs (wm, wm+rep/2): kgrp1 carries the second half.
+                    return a_scales_all[wm_idx % nat_as_half], wm_idx // nat_as_half
                 return a_scales_all[wm_idx], 0
 
             def _load_a_group(wm_base, wm_count, ks):
@@ -1410,11 +1346,19 @@ def compile_fp8fp4_gemm(
                     load_b_frag(b_buf, b_bases, wn_base + wn_local, ks) for wn_local in range_constexpr(_bank_half_wn)
                 ]
 
-            def _load_b_half_bundle(wn_base, rep_start, ks):
+            def _load_bs32_b_half(atom0, wn_base, ks):
+                # 32x4: load this N-half's atoms, one ds_load_b32 per 32-N WMMA (no op_sel).
+                stride = arith.index(bs32_lds_row_stride)
+                ks_off = arith.index(ks * bs32_atom_bytes)
+                lane = (lane_kgrp * arith.index(16) + lane16) * arith.index(4)
+                return [
+                    lds_load_b32_raw(bs_buf, (atom0 + arith.index(wn_base + wn_local)) * stride + ks_off + lane)
+                    for wn_local in range_constexpr(_bank_half_wn)
+                ]
+
+            def _load_b_half_bundle(wn_base, ks):
                 b_frags = _load_b_half(wn_base, ks)
-                b_scales = load_scale_slice_b128(
-                    bs_buf, bs_bases[0], b_scale_load_rep, rep_start, _bank_half_b_scale_rep, ks
-                )
+                b_scales = _load_bs32_b_half(bs_bases, wn_base, ks)
                 return b_frags, b_scales
 
             def _emit_group_rows(
@@ -1436,7 +1380,7 @@ def compile_fp8fp4_gemm(
                             b_frags[wn_local],
                             a_frag,
                             current_accs[idx],
-                            b_scales[wn_local * 2],
+                            b_scales[wn_local],
                             a_scale,
                             scaleAType=0,
                             scaleBType=a_opsel,
@@ -1455,11 +1399,15 @@ def compile_fp8fp4_gemm(
                     emit_filler_now=emit_filler_now,
                 )
 
-            b_left_frags, b_left_scales = _load_b_half_bundle(0, 0, 0)
+            b_left_frags, b_left_scales = _load_b_half_bundle(0, 0)
 
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
-                a_scales_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
+                if const_expr(use_natural_ascale):
+                    pf_a, _ = _vgpr_scale_box[0]
+                    a_scales_all = pf_a[ks * nat_as_load : (ks + 1) * nat_as_load]
+                else:
+                    a_scales_all = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
 
                 a_top_frags = _load_a_group(0, _bank_half_wm, ks)
                 a_bottom_frags = _load_a_group(_bank_half_wm, _bank_half_wm, ks)
@@ -1480,7 +1428,7 @@ def compile_fp8fp4_gemm(
                     rocdl.sched_barrier(0)
                     mid_compute_callback()
 
-                b_right_frags, b_right_scales = _load_b_half_bundle(_bank_half_wn, _bank_half_b_scale_rep, ks)
+                b_right_frags, b_right_scales = _load_b_half_bundle(_bank_half_wn, ks)
 
                 # Hold only the next B half outstanding while the second
                 # quadrant consumes the current left-half fragments.
@@ -1496,7 +1444,7 @@ def compile_fp8fp4_gemm(
                 )
 
                 if const_expr(not is_last_ks):
-                    next_left_frags, next_left_scales = _load_b_half_bundle(0, 0, ks + 1)
+                    next_left_frags, next_left_scales = _load_b_half_bundle(0, ks + 1)
                     # Older right-half loads must be ready before consuming
                     # them, while the next ks left-half preload can remain in
                     # flight under the final two quadrants.
@@ -1537,17 +1485,30 @@ def compile_fp8fp4_gemm(
             emit_filler=None,
             mid_compute_callback=None,
             late_compute_callback=None,
+            scale_k_base=None,
+            pf_a_scales=None,
+            pf_b_scales=None,
         ):
             current_accs = list(accs_in)
+            if const_expr(use_natural_ascale):
+                # A-scale from the VGPR ring (loop-prefetched, else inline tail load).
+                if const_expr(pf_a_scales is not None):
+                    _vgpr_scale_box[0] = (pf_a_scales, pf_b_scales)
+                else:
+                    rocdl.sched_barrier(0)
+                    _vgpr_scale_box[0] = _bvs_prefetch(scale_k_base)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
-            as_buf, as_bases = _precompute_scale_lane_bases(lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a)
+            if const_expr(use_natural_ascale):
+                as_buf, as_bases = None, None  # A-scale from the VGPR ring, not LDS
+            else:
+                as_buf, as_bases = _precompute_scale_lane_bases(
+                    lds_as, warp_m_base, wmma_m_rep, interleaved_scale_cols_a
+                )
             if const_expr(use_n4k4_bscale):
                 bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
             else:
-                bs_buf, bs_bases = _precompute_scale_lane_bases(
-                    lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
-                )
+                bs_buf, bs_bases = lds_bs, None  # ptpc: B-scale in epilogue, bases unused
             _b_half_loads = _fp8_half_wn * _b_frag_loads_per_wn
             _b_left_bundle_loads = _b_half_loads + _fp8_b_scale_loads
 
@@ -1562,20 +1523,16 @@ def compile_fp8fp4_gemm(
             def _load_a_scales(ks):
                 if const_expr(is_ptpc):
                     return None  # PTPC: scale applied in epilogue, not in K-loop
-                a_scales = load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
-                if const_expr(use_scale_opsel):
-                    return a_scales[::2]
-                return a_scales
+                if const_expr(use_natural_ascale):
+                    # A from the VGPR ring (slice this ks); M op_sel via nat_as_half in _emit.
+                    pf_a, _ = _vgpr_scale_box[0]
+                    return pf_a[ks * nat_as_load : (ks + 1) * nat_as_load]
+                return load_scale_b128(as_buf, as_bases[0], wmma_m_rep, ks)
 
             def _load_b_scales(ks):
                 if const_expr(is_ptpc):
                     return None  # PTPC: scale applied in epilogue, not in K-loop
-                if const_expr(use_n4k4_bscale):
-                    return _load_b_scale_lds(bs_buf, bs_bases, ks)  # op_sel in _emit_wmma
-                b_scales = load_scale_b128(bs_buf, bs_bases[0], b_scale_load_rep, ks)
-                if const_expr(use_scale_opsel):
-                    return b_scales[::2]
-                return b_scales
+                return _load_b_scale_lds(bs_buf, bs_bases, ks)  # 32x4; op_sel in _emit_wmma
 
             def _load_b_left_bundle(ks):
                 return _load_b_half(0, ks), _load_b_scales(ks)
@@ -1750,9 +1707,7 @@ def compile_fp8fp4_gemm(
             if const_expr(use_n4k4_bscale):
                 bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
             else:
-                bs_buf, bs_bases = _precompute_scale_lane_bases(
-                    lds_bs, warp_n_base, b_scale_load_rep, interleaved_scale_cols_b
-                )
+                bs_buf, bs_bases = lds_bs, None  # ptpc: B-scale in epilogue, bases unused
 
             def load_a_pair(wm_pair, ks):
                 wm_base = wm_pair * _fp8_pair_wm
@@ -1918,9 +1873,9 @@ def compile_fp8fp4_gemm(
 
         def hot_loop_scheduler_fp4_bank_friendly():
             _a_all_loads = wmma_m_rep * DS_LOADS_PER_A_FRAG
-            _a_scale_loads = (wmma_m_rep + 3) // 4
+            _a_scale_loads = 0 if use_natural_ascale else (wmma_m_rep + 3) // 4
             _b_half_loads = _bank_half_wn * 4
-            _b_half_scale_loads = (_bank_half_b_scale_rep + 3) // 4
+            _b_half_scale_loads = _bank_half_wn  # 32x4: one b32 per 32-N atom/WMMA
             _group_wmma = _bank_group_size
             _right_half_loads = _b_half_loads + _b_half_scale_loads
 
@@ -1939,7 +1894,7 @@ def compile_fp8fp4_gemm(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_fp8_quadrant():
-            _a_scale_loads = 0 if is_ptpc else (wmma_m_rep + 3) // 4
+            _a_scale_loads = 0 if (is_ptpc or use_natural_ascale) else (wmma_m_rep + 3) // 4
             _a_top_loads = _fp8_half_wm * DS_LOADS_PER_A_FRAG
             _a_bottom_loads = _a_top_loads
             _b_half_loads = _fp8_half_wn * _b_frag_loads_per_wn
@@ -2028,6 +1983,9 @@ def compile_fp8fp4_gemm(
                     lds_bs,
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
+                    scale_k_base=scale_k_base,
+                    pf_a_scales=pf_a_scales,
+                    pf_b_scales=pf_b_scales,
                 )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
                 return compute_tile_fp8_quadrant(
@@ -2039,6 +1997,9 @@ def compile_fp8fp4_gemm(
                     emit_filler=emit_filler,
                     mid_compute_callback=mid_compute_callback,
                     late_compute_callback=late_compute_callback,
+                    scale_k_base=scale_k_base,
+                    pf_a_scales=pf_a_scales,
+                    pf_b_scales=pf_b_scales,
                 )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
                 return compute_tile_fp8_deep_pipeline(
@@ -2915,7 +2876,6 @@ def compile_fp8fp4_gemm(
         inst_prefetch,
         wave_specialized_tdm,
         split_k,
-        use_scale_opsel,
         expert_sched_mode,
         atomic_barrier_enable,
         ascale_load_path,
@@ -3031,7 +2991,6 @@ def compile_ptpc_gemm(
         data_format=data_format,
         scale_mode="ptpc",
         wave_specialized_tdm=True,
-        use_scale_opsel=False,
         fp8_schedule="auto",
         use_tdm_store=(split_k == 1),
         N=N,
