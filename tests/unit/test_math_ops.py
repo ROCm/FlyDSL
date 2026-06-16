@@ -604,7 +604,7 @@ class TestMathOpsGPU:
         a_dev = a_host.cuda()
         c_dev = _torch.empty_like(a_dev)
 
-        tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(
+        tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(
             leading_dim=0,
             divisibility=VEC_WIDTH,
         )
@@ -684,7 +684,7 @@ class TestMathOpsGPU:
         a_dev = a_host.cuda()
         c_dev = _torch.empty_like(a_dev)
 
-        tA = flyc.from_dlpack(a_dev).mark_layout_dynamic(
+        tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(
             leading_dim=0,
             divisibility=VEC_WIDTH,
         )

@@ -62,7 +62,7 @@ def test_inline_compare_buffer_store_no_liveout(monkeypatch):
     threshold = BLOCK // 2
 
     out = torch.zeros(size, device="cuda", dtype=torch.float32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=4)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=4)
 
     conditionalStore(t_out, threshold, size, BLOCK)
     torch.cuda.synchronize()
@@ -152,7 +152,7 @@ def test_inline_compare_buffer_store_with_liveout(monkeypatch):
 
     a = torch.randn(size, device="cuda", dtype=torch.float32)
     c = torch.empty_like(a)
-    t_a = flyc.from_dlpack(a).mark_layout_dynamic(leading_dim=0, divisibility=VEC)
+    t_a = flyc.from_torch_tensor(a).mark_layout_dynamic(leading_dim=0, divisibility=VEC)
 
     liveoutIf(t_a, c, threshold, size, BLOCK, VEC)
     torch.cuda.synchronize()
@@ -242,7 +242,7 @@ def test_inline_compare_buffer_store_with_liveout_flag(monkeypatch):
 
     a = torch.randn(size, device="cuda", dtype=torch.float32)
     c = torch.empty_like(a)
-    t_a = flyc.from_dlpack(a).mark_layout_dynamic(leading_dim=0, divisibility=VEC)
+    t_a = flyc.from_torch_tensor(a).mark_layout_dynamic(leading_dim=0, divisibility=VEC)
 
     liveoutIfFlag(t_a, c, threshold, size, BLOCK, VEC)
     torch.cuda.synchronize()

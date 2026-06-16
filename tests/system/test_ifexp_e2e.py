@@ -35,7 +35,7 @@ def test_ifexp_static_cond_true(monkeypatch):
         ifexp_true_kernel(Out).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
     out = torch.zeros(1, device="cuda", dtype=torch.int32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
     ifexp_true_launch(t_out)
     torch.cuda.synchronize()
     assert out[0].item() == 42, f"expected 42, got {out[0].item()}"
@@ -59,7 +59,7 @@ def test_ifexp_static_cond_false(monkeypatch):
         ifexp_false_kernel(Out).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
     out = torch.zeros(1, device="cuda", dtype=torch.int32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
     ifexp_false_launch(t_out)
     torch.cuda.synchronize()
     assert out[0].item() == 99, f"expected 99, got {out[0].item()}"
@@ -83,7 +83,7 @@ def test_ifexp_dynamic_cond_true(monkeypatch):
         ifexp_dyn_kernel(Out, x).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
     out = torch.zeros(1, device="cuda", dtype=torch.int32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
     ifexp_dyn_launch(t_out, fx.Int32(5))
     torch.cuda.synchronize()
     assert out[0].item() == 15, f"expected 15 (5+10), got {out[0].item()}"
@@ -107,7 +107,7 @@ def test_ifexp_dynamic_cond_false(monkeypatch):
         ifexp_dyn_kernel(Out, x).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
     out = torch.zeros(1, device="cuda", dtype=torch.int32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
     ifexp_dyn_launch(t_out, fx.Int32(-3))
     torch.cuda.synchronize()
     assert out[0].item() == -13, f"expected -13 (-3-10), got {out[0].item()}"
@@ -132,7 +132,7 @@ def test_ifexp_nested(monkeypatch):
         ifexp_nested_kernel(Out, x, flag).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
     out = torch.zeros(1, device="cuda", dtype=torch.int32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
 
     ifexp_nested_launch(t_out, fx.Int32(5), fx.Int32(1))
     torch.cuda.synchronize()
@@ -163,7 +163,7 @@ def test_ifexp_in_for_loop(monkeypatch):
         ifexp_loop_kernel(Out, x).launch(grid=(1, 1, 1), block=(1, 1, 1), stream=stream.value)
 
     out = torch.zeros(1, device="cuda", dtype=torch.int32)
-    t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
 
     ifexp_loop_launch(t_out, fx.Int32(5))
     torch.cuda.synchronize()
