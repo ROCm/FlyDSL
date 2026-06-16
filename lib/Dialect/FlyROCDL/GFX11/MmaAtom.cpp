@@ -117,54 +117,42 @@ Attribute MmaOpGFX11_WMMAType::getThrValLayoutC() const {
 
 LogicalResult MmaOpGFX11_WMMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
                                           int32_t n, int32_t k, Type elemTyA, Type elemTyB,
-                                          Type elemTyAcc) {
+                                          Type elemTyAcc, bool signA, bool signB, bool clamp) {
   if (m != 16 || n != 16 || k != 16) {
     return emitError() << "GFX11 WMMA requires M=N=K=16, got " << m << "x" << n << "x" << k;
   }
 
-  bool valid = false;
+  // Determine which path this is. fp16/bf16 inputs go to the f32-accumulator
+  // intrinsics, which have no sign/clamp operands. iu8/iu4 inputs go to the
+  // i32-accumulator intrinsics, which take all three.
+  const bool isFp = (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32()) ||
+                    (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32());
 
-  // fp16/bf16 inputs, f32 accumulator. (16-bit accumulator variants exist on
-  // RDNA3 but require VGPR-pair packing/expansion around OPSEL; not yet
-  // implemented here.)
-  if (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32())
-    valid = true;
-  if (elemTyA.isBF16() && elemTyB.isBF16() && elemTyAcc.isF32())
-    valid = true;
-
-  // Integer inputs: REQUIRE explicit unsigned signedness (ui8/ui4).
-  //
-  // The atom contract is unsigned-only because emitAtomCallSSA invokes the
-  // ROCDL iu8/iu4 intrinsics with signA=signB=false (unsigned interpretation
-  // of the packed operands).
-  auto isUI = [](Type t, unsigned width) {
+  // For integer paths, accept any IntegerType width 8 or 4 regardless of
+  // signedness (signless/si/ui). The caller controls how the input bits are
+  // interpreted via signA/signB on the intrinsic.
+  auto isInt = [](Type t, unsigned width) {
     auto it = dyn_cast<IntegerType>(t);
-    return it && it.getWidth() == width && it.isUnsigned();
+    return it && it.getWidth() == width;
   };
+  const bool isI8x8 = isInt(elemTyA, 8) && isInt(elemTyB, 8) && elemTyAcc.isInteger(32);
+  const bool isI4x4 = isInt(elemTyA, 4) && isInt(elemTyB, 4) && elemTyAcc.isInteger(32);
+  const bool isInt8or4 = isI8x8 || isI4x4;
 
-  if (isUI(elemTyA, 8) && isUI(elemTyB, 8) && elemTyAcc.isInteger(32))
-    valid = true;
-  if (isUI(elemTyA, 4) && isUI(elemTyB, 4) && elemTyAcc.isInteger(32))
-    valid = true;
-
-  if (!valid) {
-    // Steer the caller to ui8/ui4 explicitly.
-    auto looksLikeInt = [](Type t, unsigned w) {
-      auto it = dyn_cast<IntegerType>(t);
-      return it && it.getWidth() == w;
-    };
-    if ((looksLikeInt(elemTyA, 8) || looksLikeInt(elemTyA, 4)) && elemTyAcc.isInteger(32)) {
-      return emitError() << "GFX11 WMMA integer inputs must be unsigned "
-                            "(ui8/ui4); got A="
-                         << elemTyA << ", B=" << elemTyB
-                         << ". The lowered ROCDL iu8/iu4 intrinsic is invoked "
-                            "with signA=signB=false, so signless/signed "
-                            "operands would silently get unsigned semantics. "
-                            "Signed-integer WMMA is not yet implemented.";
-    }
+  if (!isFp && !isInt8or4) {
     return emitError() << "unsupported GFX11 WMMA configuration: " << m << "x" << n << "x" << k
                        << " with A=" << elemTyA << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
   }
+
+  // fp16/bf16 intrinsics do not have signA/signB/clamp operands. Refuse to
+  // construct an atom that promises something the codegen cannot deliver.
+  if (isFp && (signA || signB || clamp)) {
+    return emitError() << "GFX11 WMMA fp16/bf16 path does not accept signA/signB/clamp "
+                          "(the ROCDL fp WMMA intrinsics have no such operands); "
+                          "got signA="
+                       << signA << ", signB=" << signB << ", clamp=" << clamp;
+  }
+
   return success();
 }
 
@@ -247,7 +235,6 @@ FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   StringRef opName;
   SmallVector<NamedAttribute, 3> attrs;
   SmallVector<Value, 3> operands;
-  BoolAttr falseAttr = builder.getBoolAttr(false);
 
   if (elemTyA.isF16() && elemTyB.isF16() && elemTyAcc.isF32()) {
     opName = ROCDL::wmma_f32_16x16x16_f16::getOperationName();
@@ -256,21 +243,19 @@ FailureOr<Value> MmaOpGFX11_WMMAType::emitAtomCallSSA(OpBuilder &builder, Locati
     opName = ROCDL::wmma_f32_16x16x16_bf16::getOperationName();
     operands = {a, b, c};
   } else if (elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32)) {
-    // Unsigned-only by contract (see verify()). signA=signB=false matches the
-    // ui8 element type enforced there. clamp=false preserves wraparound on the
-    // i32 accumulator.
+    // Integer paths: signA/signB/clamp come from the type parameters so the
+    // caller controls whether each operand is interpreted as signed.
     opName = ROCDL::wmma_i32_16x16x16_iu8::getOperationName();
     operands = {a, b, c};
-    attrs.push_back({builder.getStringAttr("signA"), falseAttr});
-    attrs.push_back({builder.getStringAttr("signB"), falseAttr});
-    attrs.push_back({builder.getStringAttr("clamp"), falseAttr});
+    attrs.push_back({builder.getStringAttr("signA"), builder.getBoolAttr(getSignA())});
+    attrs.push_back({builder.getStringAttr("signB"), builder.getBoolAttr(getSignB())});
+    attrs.push_back({builder.getStringAttr("clamp"), builder.getBoolAttr(getClamp())});
   } else if (elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32)) {
-    // Same unsigned-only contract as iu8; see verify().
     opName = ROCDL::wmma_i32_16x16x16_iu4::getOperationName();
     operands = {a, b, c};
-    attrs.push_back({builder.getStringAttr("signA"), falseAttr});
-    attrs.push_back({builder.getStringAttr("signB"), falseAttr});
-    attrs.push_back({builder.getStringAttr("clamp"), falseAttr});
+    attrs.push_back({builder.getStringAttr("signA"), builder.getBoolAttr(getSignA())});
+    attrs.push_back({builder.getStringAttr("signB"), builder.getBoolAttr(getSignB())});
+    attrs.push_back({builder.getStringAttr("clamp"), builder.getBoolAttr(getClamp())});
   } else {
     return failure();
   }

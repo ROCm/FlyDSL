@@ -225,7 +225,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
@@ -528,7 +528,7 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             # Pass 2: normalize + gamma + store (reuse cached added values)
             for tile_i in range_constexpr(num_tiles):
@@ -786,7 +786,7 @@ def _build_rmsnorm_quant_module(
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             thread_row_max = c_zero_f
             y_local = []
@@ -1174,7 +1174,7 @@ def _build_fused_add_rmsnorm_quant_module(
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             thread_row_max = c_zero_f
             y_local = []

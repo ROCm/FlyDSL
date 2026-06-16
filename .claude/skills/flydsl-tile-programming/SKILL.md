@@ -1,3 +1,14 @@
+---
+name: flydsl-tile-programming
+description: >
+  Guided step-by-step wizard for producing a new FlyDSL GPU kernel from a requirement:
+  classify the kernel type, pick a skeleton, fill in compute, add control flow / sync / LDS,
+  then test on GPU. Use when the user wants to WRITE a new kernel, port a Triton kernel to
+  FlyDSL, or learn tile programming by following a procedure. For API/layout-algebra lookups,
+  per-op reference tables, and troubleshooting, use the flydsl-kernel-authoring skill instead.
+allowed-tools: Read Edit Bash Grep Glob Agent
+---
+
 # FlyDSL Tile Programming
 
 Guide users through writing GPU kernels using FlyDSL's tile programming model (CuTe-style layout algebra). This skill is a step-by-step wizard that takes a kernel requirement and produces a correct, tested FlyDSL kernel.
@@ -5,6 +16,8 @@ Guide users through writing GPU kernels using FlyDSL's tile programming model (C
 **Trigger**: User wants to write a new FlyDSL kernel, port a Triton kernel to FlyDSL, or learn tile programming patterns.
 
 **Prerequisites**: FlyDSL installed (editable mode via `pip install -e .`). GPU access required for testing.
+
+**Scope (read this first)**: This skill is the *procedure* — follow the steps in order to produce a kernel. It is the companion to the **flydsl-kernel-authoring** skill, which is the *reference* (the full layout-algebra API surface, per-op tables, environment variables, and an exhaustive troubleshooting list). When you need to look something up rather than follow a step, go to flydsl-kernel-authoring. This wizard links there instead of duplicating those tables.
 
 ---
 
@@ -409,16 +422,13 @@ FLYDSL_DUMP_IR=1 PYTHONPATH=./ python my_kernel.py
 
 ## Step 8: Debug Common Errors
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `TypeError: 'int' has no attribute 'type'` | Passing Python int where a DSL value is expected | Use `fx.Int32(N)` / `fx.Index(N)` |
-| `NameError: name 'x' not defined` inside `__then_*` | AST rewriter extracted if-body as function, variable not captured | Use `const_expr()` for static conditions |
-| `arith.absf` not found | Prefer `Vector`/`ArithValue` operators | Use `-v`, comparison, and `cond.select(...)` |
-| Scalar + vector type mismatch | Can't use scalar with raw vector ops | Use `Vec.filled()` to splat |
-| LDS overflow / wrong results | Exceeds per-CU LDS capacity | Check total LDS bytes vs limit |
-| `buffer_load` returns wrong data | Offset is in elements, not bytes | Don't multiply by sizeof yourself |
-| `range(..., init=...)` ignored, loop unrolled | Bounds are Python int constants | Use `fx.Index(N)` for bounds |
-| Cache stale after C++ pass edit | Disk cache not auto-invalidated for C++ changes | `rm -rf ~/.flydsl/cache` or `FLYDSL_RUNTIME_ENABLE_CACHE=0` |
+If the kernel fails to compile or produces wrong results, consult the full error -> cause -> fix
+table in the **flydsl-kernel-authoring** skill (§10 Troubleshooting), which covers the common
+wizard pitfalls: Python `int` where a DSL value is expected, `NameError` inside extracted
+`__then_*` branches, missing `arith.absf`, scalar/vector mismatches, LDS overflow,
+`buffer_load` element-vs-byte offsets, `range(..., init=...)` being unrolled, and stale caches.
+For deeper kernel-debugging methodology (all-1s test, single-partition isolation, MFMA operand
+layout checks), use the **debug-flydsl-kernel** skill.
 
 ---
 
@@ -466,18 +476,10 @@ Key insight: **Layout is the glue**. Every operation (divide, partition, copy, g
 
 ## MFMA Instruction Reference (AMD CDNA3/4)
 
-| Instruction | M | N | K | Input | Output | Notes |
-|------------|---|---|---|-------|--------|-------|
-| `MFMA(16,16,4,Float32)` | 16 | 16 | 4 | f32 | f32 | Basic FP32 |
-| `MFMA(16,16,16,Float32)` | 16 | 16 | 16 | f16 | f32 | FP16 input |
-| `MFMA(16,16,32,Float32)` | 16 | 16 | 32 | fp8 | f32 | FP8 CDNA3 |
-| `MFMA(16,16,16,Float32,elem_type_b=BFloat16)` | 16 | 16 | 16 | bf16 | f32 | BF16 |
-| `mfma_scale_f32_16x16x128_f8f6f4` | 16 | 16 | 128 | fp8/fp6/fp4 | f32 | CDNA4 scaled |
-
-For `make_tiled_mma` atom_layout, the shape is `(M_rep, N_rep, K_rep)`:
-- `(2,2,1)` = 2x2 grid of MMA atoms = 4 atoms per thread group
-- `(4,1,1)` = 4 atoms along M dimension
-- Stride `(1,2,0)` means M varies fastest, then N, K is broadcast
+For the table of available MFMA instruction shapes (`MFMA(16,16,4,Float32)`,
+`MFMA(16,16,16,Float32)`, FP8/BF16/CDNA4-scaled variants) and how `make_tiled_mma`'s
+`(M_rep, N_rep, K_rep)` atom_layout works, see the **flydsl-kernel-authoring** skill (§6 MFMA
+Integration). Use it when choosing the MMA atom for the Pattern C (GEMM) skeleton above.
 
 ---
 

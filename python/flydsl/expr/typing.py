@@ -37,12 +37,15 @@ from .numeric import (
     Int16,
     Int32,
     Int64,
+    Int128,
     Integer,
     Numeric,
     Uint8,
     Uint16,
     Uint32,
     Uint64,
+    Uint128,
+    as_numeric,
 )
 from .primitive import *
 from .utils.arith import (
@@ -56,6 +59,97 @@ from .utils.arith import (
 )
 
 
+def as_ir_value(value, *, keep_static=False):
+    """Convert any DslType value into a raw ``ir.Value``
+
+    This is the *canonical* "DSL -> ir.Value" converter. Body code that
+    needs to feed an MLIR builder should call this explicitly per argument.
+
+    Behavior summary:
+      - ``None``                                    -> ``None``
+      - ``ir.Value``                                -> returned unchanged
+      - ``Numeric`` holding a Python literal, when
+        ``keep_static=True``                        -> returned unchanged
+        ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
+      - ``tuple`` / ``list``                        -> recursed, shape preserved
+      - object with ``__extract_to_ir_values__``    -> single value extracted; multi-value returns a list
+      - ``bool`` / ``int`` / ``float``              -> promoted via ``as_numeric(value).ir_value()``
+      - object with ``ir_value()``                  -> called as a fallback
+      - anything else                               -> returned unchanged
+    """
+    if value is None:
+        return None
+    if isinstance(value, ir.Value):
+        return value
+    if keep_static and isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
+        return value
+    if isinstance(value, tuple):
+        return tuple(as_ir_value(v, keep_static=keep_static) for v in value)
+    if isinstance(value, list):
+        return [as_ir_value(v, keep_static=keep_static) for v in value]
+    if hasattr(value, "__extract_to_ir_values__"):
+        values = value.__extract_to_ir_values__()
+        if len(values) == 1:
+            return values[0]
+        return values
+    if isinstance(value, (bool, int, float)):
+        return as_numeric(value).ir_value()
+    if hasattr(value, "ir_value"):
+        return value.ir_value()
+    return value
+
+
+def as_dsl_value(value, exemplar=None):
+    """Wrap a raw ``ir.Value`` back into a DSL value. This is the inverse
+    of :func:`as_ir_value` (``ir.Value -> DslType``).
+
+    ``exemplar`` is an optional *type template* describing how to wrap ``value``:
+      - a DslType class                         -> constructed directly via ``exemplar(value)``
+      - a DslType instance                      -> ``type(exemplar)(value)``
+
+    Behavior summary (mirrors the branches of :func:`as_ir_value`):
+      - ``None``                                    -> ``None``
+      - ``tuple`` / ``list``                        -> recursed, shape preserved,
+        paired element-wise with ``exemplar`` (a non-sequence ``exemplar`` is
+        broadcast to every element)
+      - with no usable ``exemplar``: a ``value`` already satisfying the
+        ``DslType`` protocol is returned unchanged; a bare scalar ``ir.Value``
+        is dispatched by ``value.type`` via ``Numeric.from_ir_type``; any other
+        non-``ir.Value`` is returned unchanged.
+
+    Raises ``TypeError`` when a bare ``ir.Value`` cannot be wrapped into any DSL
+    value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list)):
+        exemplars = exemplar if isinstance(exemplar, (tuple, list)) else [exemplar] * len(value)
+        return type(value)(as_dsl_value(v, ex) for v, ex in zip(value, exemplars))
+
+    if exemplar is not None and isinstance(value, ir.Value):
+        if isclass(exemplar):
+            return exemplar(value)
+        if isinstance(exemplar, Numeric):
+            return type(exemplar)(value)
+        ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
+        if ctor is not None:
+            try:
+                return ctor([value])
+            except Exception:
+                raise ValueError(f"failed to construct {type(exemplar)} from {value}")
+
+    from ..compiler.protocol import DslType
+
+    if isinstance(value, DslType):
+        return value
+    if not isinstance(value, ir.Value):
+        return value
+    try:
+        return Numeric.from_ir_type(value.type)(value)
+    except Exception as e:
+        raise TypeError(f"as_dsl_value cannot wrap ir.Value of type {value.type!s} into a DSL value") from e
+
+
 def _vec(n: int, elem: ir.Type) -> ir.Type:
     return ir.VectorType.get([int(n)], elem)
 
@@ -64,7 +158,12 @@ def default_f8_type() -> ir.Type:
     """Select E4M3 f8 type compatible with the current GPU arch.
 
     - gfx95* (MI350): FP8 E4M3FN (OCP)
+    - gfx12*: FP8 E4M3FN (OCP)
     - gfx94* (MI300): FP8 E4M3FNUZ
+
+    Raises ``RuntimeError`` on gfx11* (RDNA3/RDNA3.5): these chips have no
+    native FP8 instructions, so FP8 compute would surface as a late LLVM
+    "cannot select" error. Fail early with a clear message instead.
     """
     arch = ""
     try:
@@ -73,6 +172,13 @@ def default_f8_type() -> ir.Type:
         arch = ""
     if "gfx95" in arch or "gfx12" in arch:
         return Float8E4M3FN.ir_type
+    if arch.startswith("gfx11"):
+        raise RuntimeError(
+            f"default_f8_type(): no native FP8 support on {arch}; "
+            "FP8 instructions are available on gfx94*, gfx95*, and gfx12*. "
+            "Use bf16/f16 GEMM via "
+            "`rdna3_f16_gemm.create_wmma_gemm_module` on gfx11* targets."
+        )
     return Float8E4M3FNUZ.ir_type
 
 
@@ -152,6 +258,10 @@ class Types:
     @property
     def i64x2(self) -> ir.Type:
         return _vec(2, Int64.ir_type)
+
+    @property
+    def i128(self) -> ir.Type:
+        return Int128.ir_type
 
     # ---- Float scalars & vectors ----
     @property
@@ -236,6 +346,9 @@ __all__ = [
     "Types",
     "T",
     "default_f8_type",
+    # DSL utilities
+    "as_ir_value",
+    "as_dsl_value",
     "is_generic_address_space",
     "is_target_address_space",
     # DSL value types
@@ -260,11 +373,13 @@ __all__ = [
     "Int16",
     "Int32",
     "Int64",
+    "Int128",
     "Index",
     "Uint8",
     "Uint16",
     "Uint32",
     "Uint64",
+    "Uint128",
     "Constexpr",
     "IntTuple",
     "Layout",
@@ -570,11 +685,8 @@ class IntTuple(BuiltinDslType):
         if self.is_leaf:
             if self.is_static:
                 return self.get_static_leaf_int
-            val = next(leaf_iter)
-            width = ir.IntegerType(val.type).width
-            wrapper = Int64 if width == 64 else Int32
-            return wrapper(val)
-        return tuple(IntTuple(get_(self, i))._rebuild_py_value(leaf_iter) for i in range(self.rank))
+            return next(leaf_iter)
+        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range(self.rank))
 
     @traced_op
     def to_py_value(self, loc=None, ip=None):
@@ -809,7 +921,7 @@ class Pointer(BuiltinDslType):
 
     @traced_op
     def store(self, value, loc=None, ip=None):
-        if isinstance(value, (bool, int, float)):
+        if isinstance(value, (bool, int, float, Numeric)):
             value = self.element_type(value)
         return ptr_store(value, self, loc=loc, ip=ip)
 
@@ -905,7 +1017,7 @@ class Tensor(BuiltinDslType):
 
     @traced_op
     def load(self, loc=None, ip=None):
-        return Vector(memref_load_vec(self, loc=loc, ip=ip), self.shape.to_py_value(), self.dtype)
+        return memref_load_vec(self, loc=loc, ip=ip)
 
     @traced_op
     def store(self, vector, loc=None, ip=None):

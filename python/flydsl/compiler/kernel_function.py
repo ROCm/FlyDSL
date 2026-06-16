@@ -483,6 +483,25 @@ class KernelFunction:
     _current: Optional["KernelFunction"] = None
 
     def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
+        # ASTRewriter.transform mutates `func.__code__` in place.  To preserve
+        # the *pre-rewrite* code object (whose co_names / co_freevars still
+        # reference helper callables that the rewriter inlines into IR ops),
+        # build a shallow function wrapper around the original __code__ here,
+        # BEFORE the transform runs.  The JIT-cache dependency collector
+        # uses this to detect changes to closure-captured helpers.
+        import types as _types
+
+        _orig_code = func.__code__
+        self._original_func = _types.FunctionType(
+            _orig_code,
+            func.__globals__,
+            name=func.__name__,
+            argdefs=func.__defaults__,
+            closure=func.__closure__,
+        )
+        self._original_func.__kwdefaults__ = func.__kwdefaults__
+        self._original_func.__qualname__ = func.__qualname__
+        self._original_func.__module__ = func.__module__
         self._func = ASTRewriter.transform(func)
         self._some_args = some_args
         self._name = name
