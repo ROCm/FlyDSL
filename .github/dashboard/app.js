@@ -6,7 +6,6 @@
 
 const CFG = {
   repo: "ROCm/FlyDSL",
-  dataBranch: "https://raw.githubusercontent.com/ROCm/FlyDSL/ci-dashboard-data/",
   bundled: "./data/",
   api: "https://api.github.com/repos/ROCm/FlyDSL",
   regressionPct: -3.0,   // fixed gate
@@ -67,11 +66,8 @@ async function getJSON(url, timeout = 8000) {
   catch { return null; } finally { clearTimeout(id); }
 }
 async function loadAll() {
-  const [hb, hs] = await Promise.all([getJSON(CFG.dataBranch + "history.json"), getJSON(CFG.bundled + "history.json")]);
-  const [rb, rs] = await Promise.all([getJSON(CFG.dataBranch + "runs.json"), getJSON(CFG.bundled + "runs.json")]);
-  const newer = (a, b) => (a && (!b || (a.updated || "") >= (b.updated || ""))) ? a : b;
-  const hist = newer(hb, hs) || { records: [] };
-  const runs = newer(rb, rs) || { runs: [] };
+  const hist = await getJSON(CFG.bundled + "history.json") || { records: [] };
+  const runs = await getJSON(CFG.bundled + "runs.json") || { runs: [] };
   S.records = hist.records || [];
   S.runs = runs.runs || [];
   S.runMeta = new Map(S.runs.map(r => [r.run_id, r]));
