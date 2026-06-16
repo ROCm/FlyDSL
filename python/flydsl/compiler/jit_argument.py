@@ -291,9 +291,7 @@ class MemRefJitArg(abc.ABC):
 
     def _ensure_spec(self):
         if self.spec is None:
-            spec = MemRefSpec(
-                self.element_bits, self.shape, self.strides, self.assumed_align, self.use_32bit_stride
-            )
+            spec = MemRefSpec(self.element_bits, self.shape, self.strides, self.assumed_align, self.use_32bit_stride)
             if self.dynamic_layout:
                 spec.mark_layout_dynamic()
             self.spec = spec
