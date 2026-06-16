@@ -59,22 +59,15 @@ def perftest(num_iters=20, num_warmup=3, testGraph=False, num_rotate_args=0, nee
                 avg = np.mean(latencies) * 1000
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
             if int(os.environ.get("FLYDSL_PERFTEST_USE_EVENTS", 0)):
-                # Profiler-safe timing path: avoids nesting torch.profiler under an
-                # external rocprofv3 session.  Each iteration is timed with a pair of
-                # HIP events; the reported average matches rocprofv3 dispatch timing.
-                data = None
-                latencies = []
-                for iter_idx in range(num_iters):
-                    start_event = torch.cuda.Event(enable_timing=True)
-                    end_event = torch.cuda.Event(enable_timing=True)
-                    args_i, kwargs_i = rotate_args[iter_idx % len(rotate_args)]
-                    start_event.record()
-                    data = func(*args_i, **kwargs_i)
-                    end_event.record()
-                    end_event.synchronize()
-                    latencies.append(start_event.elapsed_time(end_event))
+                # HIP-event timing, avoids nesting torch.profiler under an external rocprofv3 session.
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
+                data = run_iters_rotate(num_iters, func, rotate_args)
+                end_event.record()
+                end_event.synchronize()
                 torch.cuda.empty_cache()
-                avg = np.mean(latencies) * 1000
+                avg = start_event.elapsed_time(end_event) / num_iters * 1000
             else:
                 import torch.profiler as tpf
 
