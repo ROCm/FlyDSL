@@ -1,4 +1,10 @@
 # FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL)
+
+[![Nightly CI](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml)
+[![Docs](https://img.shields.io/badge/Docs-rocm.github.io%2FFlyDSL-blue)](https://rocm.github.io/FlyDSL)
+[![Performance Dashboard](https://img.shields.io/badge/Performance--Dashboard-blue)](https://rocm.github.io/FlyDSL/ci-dashboard/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
+
 > A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling. 
 
 FlyDSL is the **Python front‑end** of the project: a *Flexible Layout Python DSL* for expressing
@@ -153,6 +159,8 @@ bash scripts/build.sh -j64
 ## Documentation
 
 **Full documentation: [rocm.github.io/FlyDSL](https://rocm.github.io/FlyDSL)**
+
+**CI Performance Dashboard: [rocm.github.io/FlyDSL/ci-dashboard](https://rocm.github.io/FlyDSL/ci-dashboard/)**
 
 | **Topic** | **Description** | **Guide** |
 |---|---|---|
