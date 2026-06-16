@@ -77,6 +77,22 @@ DEFAULT_FLASH_ATTN_FUNC_SHAPES='
 16,8192,16,16,128,bf16,true
 4,8192,64,64,128,bf16,true
 4,8192,64,8,128,bf16,true
+1,64,4,4,128,bf16,true
+1,64,4,4,128,bf16,false
+1,30,4,4,128,bf16,true
+1,30,4,4,128,bf16,false
+1,1,4,4,128,bf16,true
+1,1,4,4,128,bf16,false
+2,7,4,4,128,bf16,true
+2,7,4,4,128,bf16,false
+3,31,3,3,128,bf16,true
+3,31,3,3,128,bf16,false
+5,33,5,5,128,bf16,true
+5,33,5,5,128,bf16,false
+5,63,7,7,128,bf16,true
+5,63,7,7,128,bf16,false
+3,65,3,3,128,bf16,true
+3,65,3,3,128,bf16,false
 '
 FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
