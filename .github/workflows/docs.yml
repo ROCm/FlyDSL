@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - ci_dashboard
   pull_request:
     branches:
       - main
@@ -49,7 +50,7 @@ jobs:
           path: docs/_build/html
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci_dashboard')
     needs: build
     runs-on: ubuntu-latest
     environment:
