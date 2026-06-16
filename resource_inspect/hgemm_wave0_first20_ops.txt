@@ -1,0 +1,73 @@
+Wave0 first 20 scheduled data ops, current B4 tail-prefetch version
+===================================================================
+
+Scope
+-----
+Only wave0.
+
+CTA-local mapping:
+
+  wave0 computes C[0:128, 0:128]
+  A ranges are CTA-local A[M, K]
+  B ranges are CTA-local B[N, K], because this kernel receives B as transposed/packed (N, K)
+  C ranges are CTA-local C[M, N]
+
+Current loop starts after previous loop tail already prefetched:
+
+  live A0[0:16, 0:32]
+  live B0[0:16, 0:32]
+  live B0[16:32, 0:32]
+  live B0[32:48, 0:32]
+  live B0[48:64, 0:32]
+
+Notation:
+
+  A0 = current BLOCK_K tile, K 0:32
+  B0 = current BLOCK_K tile, K 0:32
+  A2/B2 = next BLOCK_K tile being copied global -> LDS
+  buffer_load B2_chunk[0] means CTA-wide global->LDS copy chunk, not only wave0's fragment
+
+
+First 20 Ops
+------------
+
+01. mfma C[0:16, 0:16] += A0[0:16, 0:32] * B0[0:16, 0:32]
+
+02. ds_read B0[64:80, 0:32]
+
+03. buffer_load B2_chunk[0]
+
+04. mfma C[0:16, 16:32] += A0[0:16, 0:32] * B0[16:32, 0:32]
+
+05. ds_read B0[80:96, 0:32]
+
+06. ds_read A0[16:32, 0:32]
+
+07. mfma C[0:16, 32:48] += A0[0:16, 0:32] * B0[32:48, 0:32]
+
+08. ds_read B0[96:112, 0:32]
+
+09. mfma C[0:16, 48:64] += A0[0:16, 0:32] * B0[48:64, 0:32]
+
+10. ds_read B0[112:128, 0:32]
+
+11. mfma C[0:16, 64:80] += A0[0:16, 0:32] * B0[64:80, 0:32]
+
+12. buffer_load B2_chunk[1]
+
+13. mfma C[0:16, 80:96] += A0[0:16, 0:32] * B0[80:96, 0:32]
+
+14. mfma C[0:16, 96:112] += A0[0:16, 0:32] * B0[96:112, 0:32]
+
+15. mfma C[0:16, 112:128] += A0[0:16, 0:32] * B0[112:128, 0:32]
+
+16. mfma C[16:32, 0:16] += A0[16:32, 0:32] * B0[0:16, 0:32]
+
+17. buffer_load B2_chunk[2]
+
+18. mfma C[16:32, 16:32] += A0[16:32, 0:32] * B0[16:32, 0:32]
+
+19. ds_read A0[32:48, 0:32]
+
+20. mfma C[16:32, 32:48] += A0[16:32, 0:32] * B0[32:48, 0:32]
+
