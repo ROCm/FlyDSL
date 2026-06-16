@@ -35,7 +35,12 @@ if is_rdna_arch():
 
 from kernels.moe_sorting_kernel import (  # noqa: E402
     UNIT_SIZE,
+    _supports_fused_oneshot,
+    moe_softmax_sort_flydsl,
     moe_sorting_flydsl,
+)
+from kernels.topk_gating_softmax_kernel import (  # noqa: E402
+    build_topk_gating_softmax_module,
 )
 
 WARMUP_ITERS = 3
@@ -646,6 +651,234 @@ def test_moe_sorting_vs_aiter(T, E, topk):
 
 
 # ---------------------------------------------------------------------------
+# Fused softmax+top-K+sort tests (moe_softmax_sort_flydsl)
+# ---------------------------------------------------------------------------
+_TORCH_DTYPE = {"f32": torch.float32, "f16": torch.float16, "bf16": torch.bfloat16}
+
+
+def _call_softmax_sort_fused(
+    gating_logits, E, topk, dtype_str, *, model_dim=4096, unit_size=UNIT_SIZE, expert_mask=None, renormalize=True
+):
+    """Allocate outputs and call moe_softmax_sort_flydsl. Mirrors
+    `_call_flydsl` but takes raw gating logits and dispatches through the
+    fused entry point."""
+    M = gating_logits.shape[0]
+    max_padded = M * topk + E * unit_size - topk
+    max_blocks = (max_padded + unit_size - 1) // unit_size
+    device = gating_logits.device
+    s_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
+    s_w = torch.empty(max_padded, dtype=torch.float32, device=device)
+    s_eids = torch.empty(max_blocks, dtype=torch.int32, device=device)
+    nv = torch.empty(2, dtype=torch.int32, device=device)
+    buf = torch.empty((M, model_dim), dtype=torch.bfloat16, device=device)
+    return moe_softmax_sort_flydsl(
+        gating_logits,
+        s_ids,
+        s_w,
+        s_eids,
+        nv,
+        buf,
+        E,
+        topk,
+        dtype_str,
+        unit_size=unit_size,
+        expert_mask=expert_mask,
+        renormalize=renormalize,
+    )
+
+
+def _two_kernel_reference(
+    gating_logits, E, topk, dtype_str, *, model_dim=4096, unit_size=UNIT_SIZE, expert_mask=None, renormalize=True
+):
+    """Run gating + sort as two separate kernels; return the same output
+    tuple as the fused path. Used as the regression oracle for the fused
+    kernel: anything the fused kernel produces must match what these two
+    kernels produce on the same gating logits."""
+    M = gating_logits.shape[0]
+    device = gating_logits.device
+
+    topk_weights = torch.empty((M, topk), dtype=torch.float32, device=device)
+    topk_ids = torch.empty((M, topk), dtype=torch.int32, device=device)
+    tei = torch.empty((M, topk), dtype=torch.int32, device=device)
+
+    launch_topk = build_topk_gating_softmax_module(
+        num_experts=E,
+        topk=topk,
+        dtype_str=dtype_str,
+        renormalize=renormalize,
+    )
+    stream = torch.cuda.current_stream()
+    launch_topk(gating_logits, topk_weights, topk_ids, tei, M, stream=stream)
+
+    max_padded = M * topk + E * unit_size - topk
+    max_blocks = (max_padded + unit_size - 1) // unit_size
+    s_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
+    s_w = torch.empty(max_padded, dtype=torch.float32, device=device)
+    s_eids = torch.empty(max_blocks, dtype=torch.int32, device=device)
+    nv = torch.empty(2, dtype=torch.int32, device=device)
+    buf = torch.empty((M, model_dim), dtype=torch.bfloat16, device=device)
+    return moe_sorting_flydsl(
+        topk_ids,
+        topk_weights,
+        s_ids,
+        s_w,
+        s_eids,
+        nv,
+        buf,
+        E,
+        unit_size,
+        expert_mask=expert_mask,
+    )
+
+
+def _check_outputs_equal(ref_tuple, fused_tuple, *, topk, M, unit_size, label):
+    """Compare the 5-tuple outputs of the two paths. Returns True on success.
+
+    `sorted_ids` may legitimately differ in order within each expert's
+    padded block (the sort is bag-of-tokens within an expert). We compare
+    set-equality per expert block and exact equality for everything else.
+    """
+    ref_ids, ref_w, ref_eids, ref_nv, ref_buf = ref_tuple
+    fused_ids, fused_w, fused_eids, fused_nv, fused_buf = fused_tuple
+
+    passed = True
+
+    nv_ok = torch.equal(ref_nv, fused_nv)
+    print(
+        f"  [{label}/num_valid_ids] ref={ref_nv.tolist()} fused={fused_nv.tolist()} " f"({'OK' if nv_ok else 'FAIL'})"
+    )
+    passed &= nv_ok
+
+    num_padded = ref_nv[0].item()
+    passed &= check_sorted_ids(ref_ids, fused_ids, num_padded, topk, M, f"{label}/sorted_ids")
+    passed &= check_sorted_weights(
+        ref_w,
+        fused_w,
+        ref_ids,
+        topk,
+        M,
+        gpu_ids=fused_ids,
+        num_padded=num_padded,
+        label=f"{label}/sorted_weights",
+    )
+    # Both paths leave the trailing blocks of `sorted_expert_ids`
+    # uninitialised (they're allocated via torch.empty in both the fused
+    # and reference launchers), so compare only the in-range blocks.
+    num_valid_blocks = num_padded // unit_size
+    passed &= check_expert_ids(
+        ref_eids,
+        fused_eids,
+        f"{label}/sorted_expert_ids",
+        num_valid_blocks=num_valid_blocks,
+    )
+
+    buf_zero = (fused_buf.view(torch.int32) == 0).all().item()
+    print(f"  [{label}/moe_buf_zeroed] {'OK' if buf_zero else 'FAIL'}")
+    passed &= buf_zero
+
+    return passed
+
+
+def _run_softmax_sort_fused_test(T, E, topk, dtype_str, *, renormalize=True, unit_size=UNIT_SIZE, model_dim=4096):
+    """Generate gating logits, run both paths, compare. Returns bool."""
+    print(f"\n{'=' * 60}")
+    print(f"Fused softmax_sort test: T={T}, E={E}, topk={topk}, " f"dtype={dtype_str}, renorm={renormalize}")
+    print(f"{'=' * 60}")
+
+    torch.manual_seed(42 + T * 1000 + E * 10 + topk + hash(dtype_str) % 100)
+    torch_dtype = _TORCH_DTYPE[dtype_str]
+
+    # Generate logits in fp32, then quantise to the kernel dtype so the
+    # reference path sees identical bytes. Without this, bf16/f16 boundary
+    # ties at the top-K cutoff can swing differently in fp32 vs quantised
+    # arithmetic and produce spurious mismatches.
+    gating_fp32 = torch.rand((T, E), device="cuda", dtype=torch.float32) * 4.0 - 2.0
+    gating_dev = gating_fp32.to(torch_dtype).contiguous()
+
+    fused_out = _call_softmax_sort_fused(
+        gating_dev,
+        E,
+        topk,
+        dtype_str,
+        model_dim=model_dim,
+        unit_size=unit_size,
+        renormalize=renormalize,
+    )
+    ref_out = _two_kernel_reference(
+        gating_dev,
+        E,
+        topk,
+        dtype_str,
+        model_dim=model_dim,
+        unit_size=unit_size,
+        renormalize=renormalize,
+    )
+    torch.cuda.synchronize()
+
+    passed = _check_outputs_equal(
+        ref_out,
+        fused_out,
+        topk=topk,
+        M=T,
+        unit_size=unit_size,
+        label=f"fused(T={T},E={E},k={topk},{dtype_str})",
+    )
+    print(f"  >>> {'PASSED' if passed else 'FAILED'}")
+    return passed
+
+
+FUSED_ONESHOT_CONFIGS = [
+    # (T, E, topk, dtype)
+    (1, 256, 8, "bf16"),
+    (4, 256, 8, "bf16"),
+    (8, 256, 8, "bf16"),
+    (16, 256, 8, "bf16"),
+    (1, 128, 4, "bf16"),
+    (8, 128, 4, "bf16"),
+    (1, 32, 5, "bf16"),
+    (4, 32, 5, "bf16"),
+    # dtype coverage
+    (8, 256, 8, "f16"),
+    (8, 256, 8, "f32"),
+    # Edge cases
+    (7, 256, 8, "bf16"),  # M not a multiple of TOKENS_PER_BLOCK
+    (13, 256, 8, "bf16"),  # arbitrary M < TOKENS_PER_BLOCK
+]
+
+
+@pytest.mark.parametrize("T,E,topk,dtype_str", FUSED_ONESHOT_CONFIGS)
+def test_moe_softmax_sort_fused_oneshot(T, E, topk, dtype_str):
+    assert _supports_fused_oneshot(E, topk, dtype_str), (
+        f"Test config {E=}/{topk=}/{dtype_str=} not supported by fused oneshot; " "check FUSED_ONESHOT_CONFIGS"
+    )
+    passed = _run_softmax_sort_fused_test(T, E, topk, dtype_str)
+    assert passed, (
+        f"moe_softmax_sort_flydsl fused oneshot mismatch for " f"T={T}, E={E}, topk={topk}, dtype={dtype_str}"
+    )
+
+
+@pytest.mark.parametrize(
+    "T,E,topk,dtype_str",
+    [
+        # M > FUSED_ONESHOT_MAX_T forces the fused entry to take its 2-kernel fallback
+        # (separate gating + moe_sorting launches). The gating layout must
+        # still be supported.
+        (32, 256, 8, "bf16"),
+        (64, 256, 8, "bf16"),
+        (128, 256, 8, "bf16"),
+        (1024, 256, 8, "bf16"),
+    ],
+)
+def test_moe_softmax_sort_fallback(T, E, topk, dtype_str):
+    """The fused-path entry must remain correct when it falls back to the
+    2-kernel chain because M exceeds the oneshot bound."""
+    passed = _run_softmax_sort_fused_test(T, E, topk, dtype_str)
+    assert passed, (
+        f"moe_softmax_sort_flydsl fallback path mismatch for " f"T={T}, E={E}, topk={topk}, dtype={dtype_str}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Benchmark utilities
 # ---------------------------------------------------------------------------
 def bench_eager_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE, flush_l2=True):
@@ -681,6 +914,56 @@ def bench_eager_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE, flush_l2=True):
         latencies = [x for x in latencies if lo <= x <= hi] or latencies
     del flush_buf
     return latencies[len(latencies) // 2]
+
+
+def bench_kernel_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
+    """Pure on-device kernel time (per invocation, microseconds).
+
+    Uses ``torch.profiler`` (CUPTI on CUDA, roctracer on ROCm) to capture
+    per-kernel begin/end timestamps from the GPU command processor itself.
+    The returned figure sums every GPU kernel that ran during ``iters``
+    invocations of ``fn`` and divides by ``iters``.
+
+    Compared to ``bench_graph_us``:
+      - ``bench_graph_us`` measures end-to-end CUDA-graph replay latency,
+        which still includes graph-replay overhead and any inter-kernel
+        dispatch gaps on the GPU command processor.
+      - ``bench_kernel_us`` measures only the wall time the GPU is actually
+        executing kernels — i.e. the floor on kernel runtime, with launch
+        and dispatch effects removed.
+
+    For multi-kernel paths (e.g. unfused gating + sort) this returns the
+    sum of all per-kernel durations, which is the right comparison point
+    for fusion: it isolates how much on-device compute fusion saved,
+    independent of dispatch / scheduler effects.
+    """
+    try:
+        from torch.profiler import ProfilerActivity, profile
+    except ImportError:
+        return None
+
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+
+    try:
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            for _ in range(iters):
+                fn()
+            torch.cuda.synchronize()
+    except Exception:
+        return None
+
+    total_us = 0.0
+    for k in prof.key_averages():
+        # Sum events with non-zero on-device dwell. This naturally excludes
+        # host-side stubs like hipModuleLaunchKernel / cudaLaunchKernel and
+        # hipDeviceSynchronize / cudaDeviceSynchronize, whose self_device_time
+        # is 0 because no work runs on the GPU under their name.
+        sd = getattr(k, "self_device_time_total", 0.0)
+        if sd > 0:
+            total_us += sd
+    return total_us / iters
 
 
 def bench_graph_us(fn, warmup=BENCH_WARMUP, iters=BENCH_MEASURE):
@@ -722,8 +1005,8 @@ def run_bench_comparison(token_sweep=None):
     """Benchmark FlyDSL vs CK (aiter) across T values in eager and graph modes."""
     try:
         from aiter.fused_moe import moe_sorting as aiter_moe_sorting
-    except ImportError:
-        print("  aiter not available, skipping CK comparison")
+    except (ImportError, AttributeError) as e:
+        print(f"  aiter not available ({type(e).__name__}: {e}), skipping CK comparison")
         aiter_moe_sorting = None
 
     E, topk, model_dim = 256, 8, 4096
@@ -739,13 +1022,18 @@ def run_bench_comparison(token_sweep=None):
     print(f"  Device: {torch.cuda.get_device_name(0)}")
     props = torch.cuda.get_device_properties(0)
     print(f"  CUs: {props.multi_processor_count}, oneshot threshold: T<={sub_tokens}")
-    print(f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), graph ({BENCH_MEASURE} replays)")
-    print(f"{'=' * 110}")
     print(
-        f"{'T':>6s} | {'Path':>7s} | {'FLY eager':>10s} | {'FLY graph':>10s} | "
-        f"{'CK eager':>10s} | {'CK graph':>10s} | {'Eager':>7s} | {'Graph':>7s}"
+        f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), graph ({BENCH_MEASURE} replays), "
+        f"kernel (on-device dwell)"
     )
-    print("-" * 110)
+    print(f"{'=' * 140}")
+    print(
+        f"{'T':>6s} | {'Path':>7s} | "
+        f"{'FLY eager':>10s} | {'FLY graph':>10s} | {'FLY kern':>10s} | "
+        f"{'CK eager':>10s} | {'CK graph':>10s} | {'CK kern':>10s} | "
+        f"{'Eager':>7s} | {'Graph':>7s} | {'Kern':>7s}"
+    )
+    print("-" * 140)
 
     for T in token_sweep:
         torch.manual_seed(42)
@@ -779,8 +1067,9 @@ def run_bench_comparison(token_sweep=None):
 
         fly_eager = bench_eager_us(fly_fn)
         fly_graph = bench_graph_us(fly_fn)
+        fly_kernel = bench_kernel_us(fly_fn)
 
-        ck_eager, ck_graph = None, None
+        ck_eager, ck_graph, ck_kernel = None, None, None
         if aiter_moe_sorting is not None:
 
             def ck_fn():
@@ -790,6 +1079,7 @@ def run_bench_comparison(token_sweep=None):
 
             ck_eager = bench_eager_us(ck_fn)
             ck_graph = bench_graph_us(ck_fn)
+            ck_kernel = bench_kernel_us(ck_fn)
 
         def fmt(v):
             return f"{v:8.1f}us" if v is not None else "       N/A"
@@ -801,13 +1091,161 @@ def run_bench_comparison(token_sweep=None):
             return f"  {r:.2f}x"
 
         print(
-            f"{T:>6d} | {path:>7s} | {fmt(fly_eager)} | {fmt(fly_graph)} | "
-            f"{fmt(ck_eager)} | {fmt(ck_graph)} | "
-            f"{ratio(fly_eager, ck_eager)} | {ratio(fly_graph, ck_graph)}"
+            f"{T:>6d} | {path:>7s} | "
+            f"{fmt(fly_eager)} | {fmt(fly_graph)} | {fmt(fly_kernel)} | "
+            f"{fmt(ck_eager)} | {fmt(ck_graph)} | {fmt(ck_kernel)} | "
+            f"{ratio(fly_eager, ck_eager)} | {ratio(fly_graph, ck_graph)} | "
+            f"{ratio(fly_kernel, ck_kernel)}"
         )
 
-    print("=" * 110)
-    print("  Ratio < 1.0 = FlyDSL faster. Eager includes launch overhead. Graph amortizes it.")
+    print("=" * 140)
+    print("  Ratio < 1.0 = FlyDSL faster. Eager includes host launch overhead;")
+    print("  Graph amortizes launch but includes dispatch gaps; Kern is pure on-GPU kernel time.")
+    print()
+
+
+def run_fused_bench_comparison(token_sweep=None, dtype_str="bf16", num_experts=256, topk=8, model_dim=4096):
+    """Benchmark fused softmax+top-K+sort vs the unfused 2-kernel chain.
+
+    Measures the routing stage (gating + sort) end-to-end across a range of
+    M values, in eager mode, CUDA-graph mode, and pure on-device kernel
+    time (profiler-based).
+
+    Parameters
+    ----------
+    token_sweep : list[int] | None
+        M values to sweep. Default: [1, 4, 8, 16, 32, 64].
+    dtype_str   : 'bf16' | 'f16' | 'f32'.
+    num_experts : E for the MoE router (e.g. 256 for DeepSeek R1).
+    topk        : Experts per token (e.g. 8 for DeepSeek R1).
+    model_dim   : Hidden size — sets `moe_buf` size, which controls the
+                  blocks-1..N zero-pass cost portion of the kernel
+                  (DeepSeek R1: 7168).
+    """
+    E = num_experts
+    if token_sweep is None:
+        # Decode regime is where fusion applies. Include a few sizes above
+        # FUSED_ONESHOT_MAX_T=16 so the fallback path is also exercised.
+        token_sweep = [1, 4, 8, 16, 32, 64]
+
+    torch_dtype = _TORCH_DTYPE[dtype_str]
+
+    print(f"\n{'=' * 145}")
+    print(
+        f"  MoE Fused Routing Benchmark: fused vs (gating + moe_sorting) "
+        f"(E={E}, topk={topk}, dtype={dtype_str}, "
+        f"model_dim={model_dim}, unit_size={UNIT_SIZE})"
+    )
+    print(f"  Device: {torch.cuda.get_device_name(0)}")
+    print(
+        f"  Modes: eager (with L2 flush, median of {BENCH_MEASURE}), "
+        f"graph ({BENCH_MEASURE} replays), kernel (sum of on-device kernel time)"
+    )
+    print(f"{'=' * 145}")
+    print(
+        f"{'T':>6s} | {'Path':>9s} | "
+        f"{'unfused eager':>14s} | {'fused eager':>13s} | "
+        f"{'unfused graph':>14s} | {'fused graph':>13s} | "
+        f"{'unfused kern':>13s} | {'fused kern':>12s} | "
+        f"{'Eager':>7s} | {'Graph':>7s} | {'Kern':>7s}"
+    )
+    print("-" * 145)
+
+    # Cache the standalone gating launcher so the unfused path doesn't pay
+    # compile time inside the measured region.
+    launch_topk = build_topk_gating_softmax_module(
+        num_experts=E,
+        topk=topk,
+        dtype_str=dtype_str,
+        renormalize=True,
+    )
+
+    for T in token_sweep:
+        torch.manual_seed(42)
+        gating_logits = (
+            (torch.rand((T, E), device="cuda", dtype=torch.float32) * 4.0 - 2.0).to(torch_dtype).contiguous()
+        )
+
+        max_num_tokens_padded = T * topk + E * UNIT_SIZE - topk
+        max_num_m_blocks = (max_num_tokens_padded + UNIT_SIZE - 1) // UNIT_SIZE
+        sorted_ids = torch.empty(max_num_tokens_padded, dtype=torch.int32, device="cuda")
+        sorted_w = torch.empty(max_num_tokens_padded, dtype=torch.float32, device="cuda")
+        sorted_eids = torch.empty(max_num_m_blocks, dtype=torch.int32, device="cuda")
+        nvalid = torch.empty(2, dtype=torch.int32, device="cuda")
+        moe_buf_2d = torch.empty((T, model_dim), dtype=torch.bfloat16, device="cuda")
+
+        # Unfused: separate gating + sort tensors
+        u_topk_w = torch.empty((T, topk), dtype=torch.float32, device="cuda")
+        u_topk_ids = torch.empty((T, topk), dtype=torch.int32, device="cuda")
+        u_tei = torch.empty((T, topk), dtype=torch.int32, device="cuda")
+
+        def unfused_fn():
+            stream = torch.cuda.current_stream()
+            launch_topk(gating_logits, u_topk_w, u_topk_ids, u_tei, T, stream=stream)
+            moe_sorting_flydsl(
+                u_topk_ids,
+                u_topk_w,
+                sorted_ids,
+                sorted_w,
+                sorted_eids,
+                nvalid,
+                moe_buf_2d,
+                E,
+                UNIT_SIZE,
+            )
+
+        def fused_fn():
+            moe_softmax_sort_flydsl(
+                gating_logits,
+                sorted_ids,
+                sorted_w,
+                sorted_eids,
+                nvalid,
+                moe_buf_2d,
+                E,
+                topk,
+                dtype_str,
+                unit_size=UNIT_SIZE,
+            )
+
+        # Warm up both paths once before measurement (covers compile cache).
+        unfused_fn()
+        fused_fn()
+        torch.cuda.synchronize()
+
+        unfused_eager = bench_eager_us(unfused_fn)
+        fused_eager = bench_eager_us(fused_fn)
+        unfused_graph = bench_graph_us(unfused_fn)
+        fused_graph = bench_graph_us(fused_fn)
+        unfused_kernel = bench_kernel_us(unfused_fn)
+        fused_kernel = bench_kernel_us(fused_fn)
+
+        path = "fused" if T <= 16 else "fallback"
+
+        def fmt(v, w=12):
+            return f"{v:{w}.1f}us" if v is not None else f"{'N/A':>{w + 2}s}"
+
+        def ratio(unfused, fused):
+            if unfused is None or fused is None or fused == 0:
+                return "    N/A"
+            # Speedup: how much faster is fused vs unfused? >1.0 = fused wins.
+            r = unfused / fused
+            return f"  {r:.2f}x"
+
+        print(
+            f"{T:>6d} | {path:>9s} | "
+            f"{fmt(unfused_eager)} | {fmt(fused_eager)} | "
+            f"{fmt(unfused_graph)} | {fmt(fused_graph)} | "
+            f"{fmt(unfused_kernel, 11)} | {fmt(fused_kernel, 10)} | "
+            f"{ratio(unfused_eager, fused_eager)} | "
+            f"{ratio(unfused_graph, fused_graph)} | "
+            f"{ratio(unfused_kernel, fused_kernel)}"
+        )
+
+    print("=" * 145)
+    print("  Ratio > 1.0 = fused faster. Eager includes host launch overhead (2 launches vs 1);")
+    print("  Graph amortizes launch but still includes inter-kernel dispatch gaps;")
+    print("  Kern is pure on-GPU kernel time (sum of per-kernel device dwell, via torch.profiler).")
     print()
 
 
@@ -821,9 +1259,27 @@ def main():
     parser.add_argument("-k", "--topk", type=int, default=None, help="Top-k")
     parser.add_argument("--all", action="store_true", help="Run all configs")
     parser.add_argument("--aiter", action="store_true", help="Compare with aiter")
-    parser.add_argument("--bench", action="store_true", help="Run benchmark sweep (eager + graph, FlyDSL vs CK)")
+    parser.add_argument("--bench", action="store_true", help="Run benchmark sweep (eager + graph + kern, FlyDSL vs CK)")
+    parser.add_argument(
+        "--bench-fused", action="store_true", help="Run fused-vs-unfused benchmark for moe_softmax_sort_flydsl"
+    )
     parser.add_argument(
         "--bench-tokens", type=str, default=None, help="Comma-separated T values for bench (default: all)"
+    )
+    parser.add_argument("--bench-experts", type=int, default=256, help="Num experts E for --bench-fused (default 256)")
+    parser.add_argument("--bench-topk", type=int, default=8, help="topk for --bench-fused (default 8)")
+    parser.add_argument(
+        "--bench-dtype",
+        type=str,
+        default="bf16",
+        choices=["bf16", "f16", "f32"],
+        help="Gating-logits dtype for --bench-fused (default bf16)",
+    )
+    parser.add_argument(
+        "--bench-model-dim",
+        type=int,
+        default=4096,
+        help="Hidden size (moe_buf width) for --bench-fused " "(DeepSeek R1: 7168; default 4096)",
     )
     args = parser.parse_args()
 
@@ -832,6 +1288,19 @@ def main():
         if args.bench_tokens:
             token_sweep = [int(t) for t in args.bench_tokens.split(",")]
         run_bench_comparison(token_sweep=token_sweep)
+        return
+
+    if args.bench_fused:
+        token_sweep = None
+        if args.bench_tokens:
+            token_sweep = [int(t) for t in args.bench_tokens.split(",")]
+        run_fused_bench_comparison(
+            token_sweep=token_sweep,
+            dtype_str=args.bench_dtype,
+            num_experts=args.bench_experts,
+            topk=args.bench_topk,
+            model_dim=args.bench_model_dim,
+        )
         return
 
     if args.T is not None:

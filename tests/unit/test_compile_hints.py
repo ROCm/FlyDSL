@@ -217,7 +217,9 @@ class TestCacheKeyIncludesTarget:
     architectures produce different cache entries."""
 
     def test_cache_key_contains_target(self):
-        """First element of the cache key tuple must be ('_target_', GPUTarget(...))."""
+        """Cache key must carry an arch-only ('_target_', GPUTarget). The kernel
+        binary is device-independent, so the key has no device id and the same
+        artifact is shared across same-arch GPUs."""
         from flydsl.compiler.backends import GPUTarget, get_backend
 
         jf = _noop_launch
@@ -229,16 +231,16 @@ class TestCacheKeyIncludesTarget:
         key = jf._resolve_and_make_cache_key(bound.arguments)
 
         assert isinstance(key, tuple)
-        assert len(key) >= 1
-        name, val = key[0]
-        assert name == "_target_"
-        assert isinstance(val, GPUTarget)
-        assert val == get_backend().target
+        target_entry = next((v for k, v in key if k == "_target_"), None)
+        assert isinstance(target_entry, GPUTarget)
+        assert target_entry == get_backend().target
 
     def test_different_arch_gives_different_key(self, monkeypatch):
-        """Monkeypatch ARCH env var + reset _sig → different GPUTarget →
-        different cache key.  _target is resolved once in _ensure_sig(),
-        so we must reset _sig to force re-resolution after changing ARCH."""
+        """Monkeypatch ARCH env var → different GPUTarget → different cache key.
+
+        _backend_target is resolved once in _ensure_sig(); we reset _sig to
+        force re-resolution after changing ARCH.
+        """
         from flydsl.compiler.backends import _make_backend, get_backend
 
         jf = _noop_launch
@@ -249,9 +251,8 @@ class TestCacheKeyIncludesTarget:
         bound.apply_defaults()
 
         key1 = jf._resolve_and_make_cache_key(bound.arguments)
-        saved_target = jf._target
+        saved_target = jf._backend_target
 
-        # Monkeypatch to a different arch (ARCH is the env var for env.compile.arch)
         real_arch = get_backend().target.arch
         fake_arch = "gfx950" if real_arch != "gfx950" else "gfx942"
 
@@ -259,19 +260,20 @@ class TestCacheKeyIncludesTarget:
         _make_backend.cache_clear()
 
         try:
-            # Reset _sig/_target to force re-resolution with new ARCH
             jf._sig = None
-            jf._target = None
+            jf._backend_target = None
             jf._ensure_sig()
 
             key2 = jf._resolve_and_make_cache_key(bound.arguments)
             assert key1 != key2
-            assert key1[0][1].arch != key2[0][1].arch
+            t1 = next(v for k, v in key1 if k == "_target_")
+            t2 = next(v for k, v in key2 if k == "_target_")
+            assert t1.arch != t2.arch
         finally:
             monkeypatch.delenv("ARCH", raising=False)
             _make_backend.cache_clear()
             jf._sig = sig
-            jf._target = saved_target
+            jf._backend_target = saved_target
 
 
 class TestCacheDisabledRegression:

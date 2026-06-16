@@ -167,6 +167,11 @@ def test_all():
             # (16, 512, "bf16"),    # BF16
             # (1024, 8192, "bf16"), # BF16
             (32768, 8192, "bf16"),
+            # Covers the large-M small-N path in build_rmsnorm_module
+            # (M > 8192 and N <= 2048): it launches BLOCK_M * THREADS_PER_ROW
+            # = 512..1024 threads/block, which requires known_block_size.
+            # N=512 is a real DeepSeek-R1 shape and hits the 1024-thread case.
+            (16384, 512, "bf16"),
         ]
 
     do_compare = os.environ.get("ROCDSL_COMPARE_AITER", "0") == "1"

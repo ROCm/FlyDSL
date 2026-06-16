@@ -26,6 +26,7 @@ env:
 
 jobs:
   check-signal:
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'multi-gpu' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -46,6 +47,11 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     needs: check-signal
+    env:
+      # Some self-hosted runners configure a GitHub -> git-cache URL rewrite.
+      # If that cache is unavailable, checkout fails before the tests start.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
     strategy:
       matrix:
         runners: [
@@ -58,6 +64,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        env:
+          # Some self-hosted runners configure a GitHub -> git-cache URL rewrite.
+          # If that cache is unavailable, checkout fails before the tests start.
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
         with:
           repository: ${{ env.GITHUB_REPO_NAME }}
           ref: ${{ env.GITHUB_COMMIT_SHA }}
@@ -162,7 +173,7 @@ jobs:
           docker exec flydsl_test bash -c "rm -rf /tmp/aiter && git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/aiter.git /tmp/aiter"
           docker exec flydsl_test bash -c "python3 -c \"from pathlib import Path; src = Path('/tmp/aiter/requirements.txt'); dst = Path('/tmp/aiter/requirements-flydsl-ci.txt'); lines = [line for line in src.read_text().splitlines() if line.strip() and not line.strip().startswith('flydsl==')]; dst.write_text('\\n'.join(lines) + '\\n')\" && python3 -m pip install -r /tmp/aiter/requirements-flydsl-ci.txt"
           docker exec flydsl_test bash -c "python3 -m pip uninstall -y triton pytorch-triton pytorch-triton-rocm triton-rocm amd-triton || true"
-          docker exec flydsl_test bash -c "python3 -m pip install --extra-index-url https://pypi.amd.com/triton/rocm-7.2.0/simple/ 'triton==3.7.0+amd.rocm7.2.0.gitd0d77a509'"
+          docker exec flydsl_test bash -c "python3 -m pip install --extra-index-url https://pypi.amd.com/triton/rocm-7.2.0/simple/ triton"
           docker exec flydsl_test bash -c "python3 -c 'import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Installed triton\", triton.__version__)'"
 
       - name: Run tests
@@ -339,7 +350,7 @@ jobs:
           docker rm flydsl_test
 
   # ---------------------------------------------------------------------------
-  # Multi-GPU allreduce tests: ONLY for 8-GPU runners.
+  # Multi-GPU communication operator tests: ONLY for 8-GPU runners.
   # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
   # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
   # the workflow is manually dispatched.
@@ -347,8 +358,12 @@ jobs:
   # ---------------------------------------------------------------------------
   multi-gpu:
     needs: test
-    name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
+    name: Multi-GPU Communication Operator Tests (${{ matrix.runners }})
     timeout-minutes: 120
+    env:
+      # Keep checkout independent of runner-local git-cache rewrites.
+      GIT_CONFIG_GLOBAL: /dev/null
+      GIT_CONFIG_NOSYSTEM: "1"
     if: |
       always() && (
         (github.event_name == 'pull_request' &&
@@ -366,6 +381,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        env:
+          # Keep checkout independent of runner-local git-cache rewrites.
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/flydsl-gitconfig
+          GIT_CONFIG_NOSYSTEM: "1"
         with:
           repository: ${{ env.GITHUB_REPO_NAME }}
           ref: ${{ env.GITHUB_COMMIT_SHA }}
@@ -448,6 +467,18 @@ jobs:
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_flydsl_shmem.py \
               -m multi_gpu -v --no-header --tb=short
+          "
+
+      - name: Run multi-GPU dispatch/combine CI sweep (8-GPU, accuracy + cudagraph perf)
+        timeout-minutes: 30
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test &&
+            python tests/kernels/test_profiler_dispatch_combine.py \
+              --ci-sweep \
+              --world-size 8 \
+              --port 29503 \
+              --output-dir /tmp/flydsl_ci_sweep
           "
 
       - name: Run multi-GPU allreduce tests

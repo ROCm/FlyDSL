@@ -37,6 +37,10 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import get_warp_size
+from kernels.topk_gating_softmax_kernel import (
+    _compute_topk_gating_layout,
+    _emit_topk_gating_softmax_body,
+)
 
 BLOCK_SIZE = 256
 UNIT_SIZE = 32  # GEMM tile-M, aka block_size in CK
@@ -187,8 +191,20 @@ def _lds_store_raw(raw_mr, val, idx):
 # _make_cache_key, and dict lookup, reducing dispatch from ~70 us to ~5 us.
 # ---------------------------------------------------------------------------
 _oneshot_cf_cache = {}  # (num_experts, topk, max_tokens, unit_size, has_mask, device) -> CompiledFunction
+_oneshot_fused_cf_cache = {}  # fused oneshot: same key + (dtype_str, renormalize) -> CompiledFunction
 _multiphase_cf_cache = {}  # (num_experts, topk, unit_size, kernel_name, *constexpr_vals) -> CompiledFunction
 _dummy_mask_cache = {}  # device -> torch.Tensor(1, dtype=i32, value=1)
+
+# Caches for moe_softmax_sort_flydsl's unfused fallback path.
+_topk_fallback_scratch_cache = {}  # (device, M, topk) -> (topk_weights, topk_ids, tei)
+_topk_fallback_builder_cache = {}  # (num_experts, topk, dtype_str, renormalize) -> launch_fn
+
+
+# `_compute_topk_gating_layout` and `_emit_topk_gating_softmax_body` are
+# imported from `kernels.topk_gating_softmax_kernel` (see the top-level
+# imports) so the fused oneshot kernel below and the standalone gating
+# kernel share the same layout heuristic and MLIR emission code — they
+# can never disagree about VPT / TPT / ATOM_BITS or about per-token math.
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +717,510 @@ def _compile_moe_sorting_oneshot(
         )
 
     return launch_moe_sorting_oneshot
+
+
+# ---------------------------------------------------------------------------
+# FlyDSL GPU kernel — fused (gating + sort) oneshot path
+# ---------------------------------------------------------------------------
+@functools.lru_cache(maxsize=256)
+def compile_moe_sorting_oneshot_fused(
+    *,
+    num_experts: int,
+    topk: int,
+    dtype_str: str = "bf16",
+    renormalize: bool = True,
+    max_tokens: int = 16,
+    unit_size: int = UNIT_SIZE,
+    has_mask: bool = False,
+):
+    """Compile the fused (gating + sort) oneshot-path MoE kernel.
+
+    Reads `gating_logits[M, E]` directly, performs softmax + top-K in block
+    0, stages all per-token-K intermediates in on-chip LDS, then runs the
+    sort phases (count → prefix-sum → scatter + padding) without ever
+    round-tripping the routing intermediates through HBM. Phase 1 of the
+    original sort (mesh fill) is gone — gating's leader-write callback
+    fills the mesh directly. Phase 3's per-token weight load now reads from
+    a small `weights_lds[max_tokens, topk]` region instead of HBM. Blocks
+    > 0 zero the moe_buf as in the unfused oneshot kernel.
+
+    Parameters identical to ``_compile_moe_sorting_oneshot`` plus:
+        dtype_str   — input dtype for the gating logits (``f32`` / ``f16`` / ``bf16``)
+        renormalize — whether the top-K weights are renormalised to sum to 1
+    """
+    arch = get_hip_arch()
+    E = num_experts
+    smem_cols = E + 1
+
+    if arch in ("gfx942",) or str(arch).startswith("gfx94"):
+        lds_capacity_bytes = 65536
+    elif str(arch).startswith("gfx95"):
+        lds_capacity_bytes = 163840
+    else:
+        lds_capacity_bytes = 65536
+
+    lds_capacity_ints = lds_capacity_bytes // 4
+    target_occupancy = 2
+    r = lds_capacity_ints // target_occupancy // smem_cols
+    sub_unroll = 8
+    cumsum_bufs = 2
+    if r < (cumsum_bufs + sub_unroll):
+        raise ValueError(
+            f"LDS too small for E={E}: need at least " f"{(cumsum_bufs + sub_unroll) * smem_cols * 4} bytes"
+        )
+    r_for_sub = ((r - cumsum_bufs) // sub_unroll) * sub_unroll
+    r_token_min = ((max_tokens + sub_unroll - 1) // sub_unroll) * sub_unroll
+    r_for_sub = min(r_for_sub, r_token_min)
+    sub_tokens = r_for_sub
+
+    allocator = SmemAllocator(None, arch=arch)
+    cumsum_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = cumsum_offset + smem_cols * 4
+    cumdup_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = cumdup_offset + smem_cols * 4
+    mesh_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = mesh_offset + sub_tokens * smem_cols * 4
+
+    # V2 LDS region: weights_lds[max_tokens, topk] — gating winner weights
+    # staged on-chip so Phase 3's scatter reads them from LDS instead of
+    # HBM. ≤512 B at the oneshot-path bound (max_tokens=16, topk=8) so it
+    # has negligible occupancy impact.
+    weights_lds_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = weights_lds_offset + max_tokens * topk * 4
+
+    gating_layout = _compute_topk_gating_layout(E, topk, dtype_str)
+
+    @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
+    def moe_sorting_oneshot_fused_kernel(
+        gating_logits: fx.Tensor,
+        sorted_token_ids: fx.Tensor,
+        sorted_weights_out: fx.Tensor,
+        sorted_expert_ids: fx.Tensor,
+        num_valid_ids: fx.Tensor,
+        moe_buf: fx.Tensor,
+        expert_mask_tensor: fx.Tensor,
+        i32_tokens: fx.Int32,
+        i32_moe_buf_elems: fx.Int32,
+    ):
+        bid = gpu.block_idx.x
+        tid = gpu.thread_idx.x
+        lane = tid % WARP_SIZE
+        wave = tid // WARP_SIZE
+        tokens = i32_tokens
+        c_zero_i32 = fx.Int32(0)
+        c_one_i32 = fx.Int32(1)
+        c_oob_idx = fx.Int32(0x7FFFFFFF)
+        c4_i32 = fx.Int32(4)
+
+        moe_buf_rsrc = buffer_ops.create_buffer_resource(moe_buf, max_size=True)
+        sorted_ids_rsrc = buffer_ops.create_buffer_resource(sorted_token_ids, max_size=True)
+        sorted_w_rsrc = buffer_ops.create_buffer_resource(sorted_weights_out, max_size=True)
+        sorted_e_rsrc = buffer_ops.create_buffer_resource(sorted_expert_ids, max_size=True)
+        nvalid_rsrc = buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
+        mask_rsrc = buffer_ops.create_buffer_resource(expert_mask_tensor, max_size=True)
+
+        base_ptr = allocator.get_base()
+        cumsum_mr = SmemPtr(base_ptr, cumsum_offset, T.i32, shape=(smem_cols,)).get()
+        cumdup_mr = SmemPtr(base_ptr, cumdup_offset, T.i32, shape=(smem_cols,)).get()
+        mesh_mr = SmemPtr(base_ptr, mesh_offset, T.i32, shape=(sub_tokens * smem_cols,)).get()
+        weights_lds_mr = SmemPtr(
+            base_ptr,
+            weights_lds_offset,
+            T.i32,
+            shape=(max_tokens * topk,),
+        ).get()
+
+        c_topk = fx.Int32(topk)
+        c_E = fx.Int32(E)
+        c_unit = fx.Int32(unit_size)
+        c_sub_tokens = fx.Int32(sub_tokens)
+        c_smem_cols = fx.Int32(smem_cols)
+        c_sentinel = fx.Int32((topk << 24))
+
+        # =================== MOE_BUF ZEROING (blocks > 0 only) ===============
+        is_zero_block = bid != c_zero_i32
+        if is_zero_block:
+            zero_gid_v4 = (bid - c_one_i32) * fx.Int32(BLOCK_SIZE) + tid
+            num_zero_blocks = gpu.grid_dim.x - c_one_i32
+            zero_stride_v4 = num_zero_blocks * fx.Int32(BLOCK_SIZE)
+            i32_moe_buf_v4 = i32_moe_buf_elems >> fx.Int32(2)
+            zero_niters = (i32_moe_buf_v4 + zero_stride_v4 - c_one_i32) // zero_stride_v4
+            _zs = fx.Index(0)
+            _ze = ArithValue(zero_niters).index_cast(T.index)
+            _z1 = fx.Index(1)
+            c_zero_v4 = fx.Vector.filled(4, 0, fx.Int32)
+            c4_i32 = fx.Int32(4)
+            for _z in range(_zs, _ze, _z1):
+                z_idx_v4 = zero_gid_v4 + fx.Int32(_z) * zero_stride_v4
+                z_valid = z_idx_v4 < i32_moe_buf_v4
+                z_elem = z_valid.select(z_idx_v4 * c4_i32, c_oob_idx)
+                buffer_ops.buffer_store(c_zero_v4, moe_buf_rsrc, z_elem)
+
+        # =================== SORTING (block 0 only) ==========================
+        is_sort_block = bid == c_zero_i32
+        if is_sort_block:
+            # ========== PHASE 1 (mesh CLEAR ONLY in fused kernel) ============
+            # Gating's on_winner_idx callback fills `mesh_LDS` directly, so
+            # the old "Phase 1 fill" loop is gone. The clear must still
+            # happen first (gating only writes winning cells; Phase 2 reads
+            # every cell and treats 0 as "no token").
+            for i_clear in range_constexpr(0, sub_tokens * smem_cols, BLOCK_SIZE):
+                idx = fx.Int32(i_clear) + tid
+                is_valid = idx < fx.Int32(sub_tokens * smem_cols)
+                safe_idx = is_valid.select(idx, c_zero_i32)
+                safe_idx_ix = ArithValue(safe_idx).index_cast(T.index)
+                _lds_store_raw(mesh_mr, c_zero_i32, safe_idx_ix)
+            # Make the mesh clear visible to the gating callback writes
+            # (gating's leader lanes update individual cells immediately
+            # after this barrier).
+            gpu.barrier()
+
+            # =========== PHASE 0 (fused): Gating + softmax + top-K ===========
+            # `local_token` is the per-block 0..TOKENS_PER_BLOCK-1 index.
+            # For block 0 the global token equals local_token, but we use
+            # local_token for the LDS indices (mesh / weights_lds rows).
+            #
+            # mesh_LDS layout: `[sub_tokens, smem_cols]` row-major. Each
+            # winning cell is set to `k_idx + 1` (so 0 still means "empty").
+            #
+            # weights_LDS layout: `[max_tokens, topk]` row-major. Stored as
+            # i32 bits (we bitcast the f32 weight; Phase 3 stores those
+            # bits to sorted_w which is also accessed via the i32 path).
+            def on_winner_idx(local_token, global_token, k_int, expert_idx):
+                mesh_idx = local_token * c_smem_cols + expert_idx
+                _lds_store_raw(mesh_mr, fx.Int32(k_int + 1), mesh_idx)
+
+            def on_winner_weight(local_token, global_token, k_int, weight):
+                w_bits = ArithValue(weight).bitcast(T.i32)
+                w_idx = local_token * c_topk + fx.Int32(k_int)
+                _lds_store_raw(weights_lds_mr, fx.Int32(w_bits), w_idx)
+
+            _emit_topk_gating_softmax_body(
+                gating_logits,
+                None,  # TopkWeights HBM not used in fused
+                None,  # TopkIndices HBM not used in fused
+                None,  # TokenExpertIndices HBM not used in fused
+                i32_tokens,
+                num_experts=num_experts,
+                topk=topk,
+                dtype_str=dtype_str,
+                renormalize=renormalize,
+                on_winner_idx=on_winner_idx,
+                on_winner_weight=on_winner_weight,
+                emit_tei=False,
+                **gating_layout,
+            )
+            # Make the gating LDS writes visible to Phase 2 (different
+            # threads will read those mesh / weights_LDS cells).
+            gpu.barrier()
+
+            # ===================== PHASE 2: Count + Prefix Sum =====================
+            c_lane_group_sz = fx.Int32(8)
+            lane_group_id = tid // c_lane_group_sz
+            lane_group_os = tid % c_lane_group_sz
+            width8_i32 = fx.Int32(8)
+
+            is_t0 = tid == c_zero_i32
+            _lds_store_raw(cumsum_mr, c_zero_i32, c_zero_i32)
+            gpu.barrier()
+
+            for i_e in range_constexpr(0, E, BLOCK_SIZE // 8):
+                eid_local = fx.Int32(i_e) + lane_group_id
+                eid_valid = eid_local < c_E
+
+                cnt = c_zero_i32
+                for i_sub in range_constexpr(0, sub_tokens, 8):
+                    sub_idx = fx.Int32(i_sub) + lane_group_os
+                    sub_valid = sub_idx < c_sub_tokens
+                    combined_valid = eid_valid & sub_valid
+
+                    safe_sub = combined_valid.select(sub_idx, c_zero_i32)
+                    safe_eid = combined_valid.select(eid_local, c_zero_i32)
+                    mesh_rd_addr = safe_sub * c_smem_cols + safe_eid
+                    mesh_rd_ix = ArithValue(mesh_rd_addr).index_cast(T.index)
+                    mesh_val = _lds_load_raw(mesh_mr, mesh_rd_ix)
+
+                    has_token = combined_valid.select(
+                        (mesh_val != c_zero_i32).select(c_one_i32, c_zero_i32),
+                        c_zero_i32,
+                    )
+
+                    reduced = has_token
+                    for sh in range_constexpr(3):
+                        off = fx.Int32(1 << sh)
+                        peer = reduced.shuffle_xor(off, width8_i32)
+                        reduced = reduced + peer
+                    cnt = cnt + reduced
+
+                write_valid = eid_valid & (lane_group_os == c_zero_i32)
+                cs_idx = write_valid.select(eid_local + c_one_i32, c_zero_i32)
+                cs_ix = ArithValue(cs_idx).index_cast(T.index)
+                cs_val = write_valid.select(cnt, c_zero_i32)
+                _lds_store_raw(cumsum_mr, cs_val, cs_ix)
+            gpu.barrier()
+
+            for i_cvt in range_constexpr(0, E, BLOCK_SIZE):
+                cvt_eid = fx.Int32(i_cvt) + tid
+                cvt_valid = cvt_eid < c_E
+                safe_cvt_idx = cvt_valid.select(cvt_eid + c_one_i32, c_zero_i32)
+                cvt_ix = ArithValue(safe_cvt_idx).index_cast(T.index)
+                raw_cnt_cvt = _lds_load_raw(cumsum_mr, cvt_ix)
+                blocks_cvt = (raw_cnt_cvt + c_unit - c_one_i32) // c_unit
+                padded_cvt = (raw_cnt_cvt == c_zero_i32).select(c_zero_i32, blocks_cvt * c_unit)
+                _lds_store_raw(cumsum_mr, cvt_valid.select(padded_cvt, c_zero_i32), cvt_ix)
+            gpu.barrier()
+
+            if has_mask:
+                for i_ep in range_constexpr(0, E, BLOCK_SIZE):
+                    ep_eid = fx.Int32(i_ep) + tid
+                    ep_valid = ep_eid < c_E
+                    ep_safe_eid = ep_valid.select(ep_eid, c_zero_i32)
+                    ep_m = buffer_ops.buffer_load(mask_rsrc, ep_safe_eid, vec_width=1, dtype=T.i32)
+                    should_zero = ep_valid & (ep_m == c_zero_i32)
+                    ep_cs_ix = ArithValue(ep_valid.select(ep_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
+                    _lds_store_raw(
+                        cumsum_mr, should_zero.select(c_zero_i32, _lds_load_raw(cumsum_mr, ep_cs_ix)), ep_cs_ix
+                    )
+                gpu.barrier()
+
+            is_wave0 = wave == c_zero_i32
+            prev_chunk_total = c_zero_i32
+
+            for chunk_start in range_constexpr(0, E, WARP_SIZE):
+                eid_ps = fx.Int32(chunk_start) + lane
+                eid_ps_valid = is_wave0 & (eid_ps < c_E)
+                safe_eid_ps = eid_ps_valid.select(eid_ps + c_one_i32, c_zero_i32)
+                ps_ix = ArithValue(safe_eid_ps).index_cast(T.index)
+                val = eid_ps_valid.select(_lds_load_raw(cumsum_mr, ps_ix), c_zero_i32)
+
+                val = _dpp_intra_wave_prefix_sum(val, lane, WARP_SIZE)
+                val = val + prev_chunk_total
+
+                _lds_store_raw(
+                    cumdup_mr, eid_ps_valid.select(val, c_zero_i32), eid_ps_valid.select(eid_ps + c_one_i32, c_zero_i32)
+                )
+
+                last_addr = fx.Int32((WARP_SIZE - 1) * 4)
+                prev_chunk_total = fly_rocdl.ds_bpermute(T.i32, last_addr, val)
+                prev_chunk_total = fx.Int32(prev_chunk_total)
+
+            _lds_store_raw(cumdup_mr, is_t0.select(c_zero_i32, _lds_load_raw(cumdup_mr, c_zero_i32)), c_zero_i32)
+            gpu.barrier()
+
+            cs_E_ix_ps = ArithValue(c_E).index_cast(T.index)
+            total_padded = _lds_load_raw(cumdup_mr, cs_E_ix_ps)
+            buffer_ops.buffer_store(total_padded, nvalid_rsrc, c_zero_i32)
+            buffer_ops.buffer_store(tokens, nvalid_rsrc, c_one_i32)
+            gpu.barrier()
+
+            for i_cp in range_constexpr(0, E + 1, BLOCK_SIZE):
+                cp_idx = fx.Int32(i_cp) + tid
+                cp_valid = cp_idx <= c_E
+                safe_cp_idx = cp_valid.select(cp_idx, c_zero_i32)
+                cp_ix = ArithValue(safe_cp_idx).index_cast(T.index)
+                cp_val = _lds_load_raw(cumdup_mr, cp_ix)
+                _lds_store_raw(cumsum_mr, cp_val, cp_ix)
+            gpu.barrier()
+
+            if has_mask:
+                for i_ml in range_constexpr(0, E, BLOCK_SIZE):
+                    ml_eid = fx.Int32(i_ml) + tid
+                    ml_valid = ml_eid < c_E
+                    safe_ml_eid = ml_valid.select(ml_eid, c_zero_i32)
+                    ml_mask = buffer_ops.buffer_load(mask_rsrc, safe_ml_eid, vec_width=1, dtype=T.i32)
+                    ml_val = ml_valid.select(ml_mask, c_zero_i32)
+                    ml_ix = ArithValue(ml_valid.select(ml_eid + c_one_i32, c_zero_i32)).index_cast(T.index)
+                    _lds_store_raw(cumdup_mr, ml_val, ml_ix)
+                _lds_store_raw(cumdup_mr, is_t0.select(c_zero_i32, _lds_load_raw(cumdup_mr, c_zero_i32)), c_zero_i32)
+                gpu.barrier()
+
+                prev_chunk_total_m = c_zero_i32
+                for chunk_start_m in range_constexpr(0, E, WARP_SIZE):
+                    eid_m = fx.Int32(chunk_start_m) + lane
+                    eid_m_valid = is_wave0 & (eid_m < c_E)
+                    safe_eid_m = eid_m_valid.select(eid_m + c_one_i32, c_zero_i32)
+                    m_ix = ArithValue(safe_eid_m).index_cast(T.index)
+                    mval = eid_m_valid.select(_lds_load_raw(cumdup_mr, m_ix), c_zero_i32)
+
+                    mval = _dpp_intra_wave_prefix_sum(mval, lane, WARP_SIZE)
+                    mval = mval + prev_chunk_total_m
+                    _lds_store_raw(
+                        cumdup_mr,
+                        eid_m_valid.select(mval, c_zero_i32),
+                        eid_m_valid.select(eid_m + c_one_i32, c_zero_i32),
+                    )
+
+                    last_addr_m = fx.Int32((WARP_SIZE - 1) * 4)
+                    prev_chunk_total_m = fly_rocdl.ds_bpermute(T.i32, last_addr_m, mval)
+                    prev_chunk_total_m = fx.Int32(prev_chunk_total_m)
+
+                _lds_store_raw(cumdup_mr, is_t0.select(c_zero_i32, _lds_load_raw(cumdup_mr, c_zero_i32)), c_zero_i32)
+                gpu.barrier()
+            else:
+                for i_ml in range_constexpr(0, E, BLOCK_SIZE):
+                    ml_eid = fx.Int32(i_ml) + tid
+                    ml_valid = ml_eid < c_E
+                    safe_ml_eid = ml_valid.select(ml_eid, c_zero_i32)
+                    ml_ix = ArithValue(safe_ml_eid).index_cast(T.index)
+                    _lds_store_raw(cumdup_mr, ml_valid.select(safe_ml_eid, c_zero_i32), ml_ix)
+                gpu.barrier()
+
+            for i_eid in range_constexpr(0, E, BLOCK_SIZE):
+                eid_wr = fx.Int32(i_eid) + tid
+                eid_wr_valid = eid_wr < c_E
+                safe_eid_wr = eid_wr_valid.select(eid_wr, c_zero_i32)
+
+                cs_start_ix = ArithValue(safe_eid_wr).index_cast(T.index)
+                cs_end_ix = ArithValue(safe_eid_wr + c_one_i32).index_cast(T.index)
+                e_start = _lds_load_raw(cumsum_mr, cs_start_ix)
+                e_end = eid_wr_valid.select(_lds_load_raw(cumsum_mr, cs_end_ix), e_start)
+                local_eid = _lds_load_raw(cumdup_mr, cs_start_ix)
+
+                _lds_store_raw(cumdup_mr, e_start, cs_start_ix)
+
+                blk_start = e_start // c_unit
+                blk_end = e_end // c_unit
+                for j_blk in range_constexpr(max_tokens):
+                    blk_idx = blk_start + fx.Int32(j_blk)
+                    blk_valid = eid_wr_valid & (blk_idx < blk_end)
+                    safe_blk = blk_valid.select(blk_idx, c_oob_idx)
+                    buffer_ops.buffer_store(local_eid, sorted_e_rsrc, safe_blk)
+            gpu.barrier()
+
+            cs_E_ix = ArithValue(c_E).index_cast(T.index)
+            cumE = _lds_load_raw(cumsum_mr, cs_E_ix)
+            _lds_store_raw(cumdup_mr, cumE, cs_E_ix)
+            gpu.barrier()
+
+            # ====================== PHASE 3: Scatter ==============================
+            for i_e2 in range_constexpr(0, E, BLOCK_SIZE // 8):
+                eid_sc = fx.Int32(i_e2) + lane_group_id
+                eid_sc_valid = eid_sc < c_E
+                safe_eid_sc = eid_sc_valid.select(eid_sc, c_E)
+
+                sc_expert_enabled = eid_sc_valid
+                if has_mask:
+                    sc_mask_val = buffer_ops.buffer_load(
+                        mask_rsrc, eid_sc_valid.select(eid_sc, c_zero_i32), vec_width=1, dtype=T.i32
+                    )
+                    sc_expert_enabled = eid_sc_valid & (sc_mask_val != c_zero_i32)
+
+                cs_sc_ix = ArithValue(safe_eid_sc).index_cast(T.index)
+                position = _lds_load_raw(cumsum_mr, cs_sc_ix)
+
+                for i_sub2 in range_constexpr(0, sub_tokens, 8):
+                    my_sub = fx.Int32(i_sub2) + lane_group_os
+                    my_sub_valid = sc_expert_enabled & (my_sub < c_sub_tokens)
+                    safe_my_sub = my_sub_valid.select(my_sub, c_zero_i32)
+                    my_mesh_addr = safe_my_sub * c_smem_cols + safe_eid_sc
+                    my_mesh_ix = ArithValue(my_mesh_addr).index_cast(T.index)
+                    my_x = _lds_load_raw(mesh_mr, my_mesh_ix)
+                    my_has_token = my_sub_valid & (my_x != c_zero_i32)
+                    local_cnt = my_has_token.select(c_one_i32, c_zero_i32)
+
+                    cnt_raw = _unwrap_val(local_cnt)
+                    zero_raw = _unwrap_val(c_zero_i32)
+
+                    remote = fly_rocdl.update_dpp(
+                        T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_1, DPP_ROW_MASK, DPP_BANK_MASK, True
+                    )
+                    should_add = lane_group_os >= c_one_i32
+                    local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
+
+                    cnt_raw = _unwrap_val(local_cnt)
+                    remote = fly_rocdl.update_dpp(
+                        T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_2, DPP_ROW_MASK, DPP_BANK_MASK, True
+                    )
+                    should_add = lane_group_os >= fx.Int32(2)
+                    local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
+
+                    cnt_raw = _unwrap_val(local_cnt)
+                    remote = fly_rocdl.update_dpp(
+                        T.i32, zero_raw, cnt_raw, DPP_ROW_SHR_4, DPP_ROW_MASK, DPP_BANK_MASK, True
+                    )
+                    should_add = lane_group_os >= fx.Int32(4)
+                    local_cnt = should_add.select(local_cnt + fx.Int32(remote), local_cnt)
+
+                    last_lane_of_group = tid | fx.Int32(7)
+                    last_addr = last_lane_of_group * c4_i32
+                    batch_total = fly_rocdl.ds_bpermute(T.i32, last_addr, local_cnt)
+                    batch_total = fx.Int32(batch_total)
+
+                    slot = position + local_cnt - c_one_i32
+                    safe_x = my_has_token.select(my_x, c_one_i32)
+                    topk_slot_sc = safe_x - c_one_i32
+                    packed_id = (topk_slot_sc << fx.Int32(24)) | my_sub
+                    safe_slot = my_has_token.select(slot, c_oob_idx)
+                    buffer_ops.buffer_store(packed_id, sorted_ids_rsrc, safe_slot)
+
+                    # Fused: weight comes from LDS (gating staged it there)
+                    # instead of HBM. `my_sub` is the per-token local index
+                    # 0..max_tokens-1; topk_slot_sc identifies the K rank.
+                    w_lds_idx = my_has_token.select(my_sub * c_topk + topk_slot_sc, c_zero_i32)
+                    w_val_i32 = _lds_load_raw(weights_lds_mr, w_lds_idx)
+                    buffer_ops.buffer_store(w_val_i32, sorted_w_rsrc, safe_slot)
+
+                    position = position + batch_total
+
+                _lds_store_raw(cumsum_mr, position, cs_sc_ix)
+            gpu.barrier()
+
+            sentinel_val = c_sentinel | tokens
+            c_zero_as_i32 = c_zero_i32
+            for i_pad in range_constexpr(0, E, BLOCK_SIZE):
+                eid_pad = fx.Int32(i_pad) + tid
+                pad_valid = eid_pad < c_E
+                safe_eid_pad = pad_valid.select(eid_pad, c_zero_i32)
+
+                cs_pad_ix = ArithValue(safe_eid_pad).index_cast(T.index)
+                cdp_ix = ArithValue(safe_eid_pad + c_one_i32).index_cast(T.index)
+                pad_start = _lds_load_raw(cumsum_mr, cs_pad_ix)
+                pad_end = pad_valid.select(_lds_load_raw(cumdup_mr, cdp_ix), pad_start)
+
+                for j_pad in range_constexpr(unit_size):
+                    pad_slot = pad_start + fx.Int32(j_pad)
+                    pad_slot_valid = pad_valid & (pad_slot < pad_end)
+                    safe_pad_slot = pad_slot_valid.select(pad_slot, c_oob_idx)
+                    buffer_ops.buffer_store(sentinel_val, sorted_ids_rsrc, safe_pad_slot)
+                    buffer_ops.buffer_store(c_zero_as_i32, sorted_w_rsrc, safe_pad_slot)
+
+    @flyc.jit
+    def launch_moe_sorting_oneshot_fused(
+        gating_logits: fx.Tensor,
+        sorted_token_ids: fx.Tensor,
+        sorted_weights_out: fx.Tensor,
+        sorted_expert_ids: fx.Tensor,
+        num_valid_ids_out: fx.Tensor,
+        moe_buf: fx.Tensor,
+        expert_mask_tensor: fx.Tensor,
+        i32_tokens: fx.Int32,
+        i32_moe_buf_elems: fx.Int32,
+        n_grid_blocks: fx.Constexpr[int],
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator.finalize()
+
+        launcher = moe_sorting_oneshot_fused_kernel(
+            gating_logits,
+            sorted_token_ids,
+            sorted_weights_out,
+            sorted_expert_ids,
+            num_valid_ids_out,
+            moe_buf,
+            expert_mask_tensor,
+            i32_tokens,
+            i32_moe_buf_elems,
+        )
+        launcher.launch(
+            grid=(n_grid_blocks, 1, 1),
+            block=(BLOCK_SIZE, 1, 1),
+            stream=stream,
+        )
+
+    return launch_moe_sorting_oneshot_fused
 
 
 # ---------------------------------------------------------------------------
@@ -1770,3 +2290,271 @@ def moe_sorting_flydsl(
             _launch_cached(_multiphase_cf_cache, base_key + ("4k_fused",), launch_4k_fused, k4_args, stream)
 
     return sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf
+
+
+def _supports_fused_oneshot(num_experts: int, topk: int, dtype_str: str) -> bool:
+    """Whether the fused oneshot kernel supports this configuration.
+
+    Matches `_compute_topk_gating_layout`'s constraints: returns False when
+    the gating layout heuristic cannot find a valid (VPT, THREADS_PER_TOKEN)
+    pair for `num_experts`, or when `topk > num_experts`.
+    """
+    try:
+        _compute_topk_gating_layout(num_experts, topk, dtype_str)
+        return True
+    except ValueError:
+        return False
+
+
+def _alloc_topk_fallback(device, M, topk, num_experts):
+    """Allocate / cache HBM buffers used by the unfused 2-kernel fallback.
+
+    `topk_weights` is f32, `topk_ids` is i32, both shaped `[M, topk]`.
+    `tei` is `[M, topk]` i32 (consumed by gating but unused downstream).
+    The cache is keyed on shape so different M values get separate buffers.
+    """
+    key = (device, M, topk)
+    cached = _topk_fallback_scratch_cache.get(key)
+    if cached is not None:
+        return cached
+    topk_weights = torch.empty((M, topk), dtype=torch.float32, device=device)
+    topk_ids = torch.empty((M, topk), dtype=torch.int32, device=device)
+    tei = torch.empty((M, topk), dtype=torch.int32, device=device)
+    cached = (topk_weights, topk_ids, tei)
+    _topk_fallback_scratch_cache[key] = cached
+    return cached
+
+
+def moe_softmax_sort_flydsl(
+    gating_logits,
+    sorted_ids,
+    sorted_weights,
+    sorted_expert_ids,
+    num_valid_ids,
+    moe_buf,
+    num_experts,
+    topk,
+    dtype_str,
+    unit_size=UNIT_SIZE,
+    expert_mask=None,
+    renormalize=True,
+    num_local_tokens=None,
+):
+    """Fused entry point: gating logits → softmax → top-K → sort.
+
+    For small M (M ≤ FUSED_ONESHOT_MAX_T) with a supported (num_experts, topk, dtype)
+    layout, runs a single fused kernel that produces the sort outputs
+    directly from `gating_logits[M, num_experts]`. Otherwise falls back to
+    the original 2-kernel chain (`topk_gating_softmax` then
+    `moe_sorting_flydsl`).
+
+    The output tensor contract is identical to `moe_sorting_flydsl` so this
+    function is a drop-in replacement at the next-higher layer that wants
+    to skip the explicit gating step.
+
+    Parameters
+    ----------
+    gating_logits   : (M, num_experts) bf16/f16/f32 router logits.
+    sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf
+                    : pre-allocated output tensors (same layout/contract as
+                      `moe_sorting_flydsl`).
+    num_experts     : E (e.g. 256 for DeepSeek R1).
+    topk            : K (e.g. 8 for DeepSeek R1).
+    dtype_str       : 'f32' | 'f16' | 'bf16' — must match `gating_logits.dtype`.
+    unit_size       : GEMM tile-M alignment (default `UNIT_SIZE`).
+    expert_mask     : optional EP mask (int32 [E], 1=enabled / 0=masked).
+    renormalize     : if True, rescale top-K weights to sum to 1 (matches
+                      DeepSeek V3 / vLLM convention).
+    num_local_tokens: optional override for the dynamic M (matches the
+                      `moe_sorting_flydsl` convention).
+    """
+    if num_local_tokens is not None:
+        M = num_local_tokens.item() if isinstance(num_local_tokens, torch.Tensor) else int(num_local_tokens)
+    else:
+        M = gating_logits.shape[0]
+
+    device = gating_logits.device
+    moe_buf_i32 = moe_buf.view(torch.int32)
+    moe_buf_elems = moe_buf_i32.numel()
+
+    has_mask = expert_mask is not None
+    if not has_mask:
+        mask_tensor = _dummy_mask_cache.get(device)
+        if mask_tensor is None:
+            mask_tensor = torch.ones(1, dtype=torch.int32, device=device)
+            _dummy_mask_cache[device] = mask_tensor
+    else:
+        mask_tensor = expert_mask
+
+    sub_tokens = _compute_sub_tokens(num_experts)
+    FUSED_ONESHOT_MAX_T = 16
+
+    fusion_ok = (
+        M <= min(sub_tokens, FUSED_ONESHOT_MAX_T)
+        and topk <= num_experts
+        and _supports_fused_oneshot(num_experts, topk, dtype_str)
+    )
+
+    if fusion_ok:
+        max_tokens = max(M, 8)
+        max_tokens = ((max_tokens + 7) // 8) * 8
+
+        target_occupancy = 2
+        num_cu = torch.cuda.get_device_properties(device).multi_processor_count
+        n_zero_blocks = min(
+            (moe_buf_elems + BLOCK_SIZE - 1) // BLOCK_SIZE,
+            num_cu * target_occupancy,
+        )
+        n_grid_blocks = 1 + n_zero_blocks
+
+        launch_moe_sorting_oneshot_fused_path(
+            gating_logits,
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf_i32,
+            mask_tensor,
+            M,
+            moe_buf_elems,
+            n_grid_blocks,
+            num_experts=num_experts,
+            topk=topk,
+            dtype_str=dtype_str,
+            renormalize=renormalize,
+            max_tokens=max_tokens,
+            unit_size=unit_size,
+            has_mask=has_mask,
+        )
+    else:
+        # Fallback: run gating and sort as two separate kernels.
+        topk_weights, topk_ids, tei = _alloc_topk_fallback(device, M, topk, num_experts)
+
+        builder_key = (num_experts, topk, dtype_str, renormalize)
+        launch_topk = _topk_fallback_builder_cache.get(builder_key)
+        if launch_topk is None:
+            # Local import avoids forcing every caller to know about the
+            # builder; the cache keeps the import cost out of the hot path.
+            from kernels.topk_gating_softmax_kernel import (
+                build_topk_gating_softmax_module,
+            )
+
+            launch_topk = build_topk_gating_softmax_module(
+                num_experts=num_experts,
+                topk=topk,
+                dtype_str=dtype_str,
+                renormalize=renormalize,
+            )
+            _topk_fallback_builder_cache[builder_key] = launch_topk
+
+        stream = torch.cuda.current_stream()
+        launch_topk(
+            gating_logits,
+            topk_weights,
+            topk_ids,
+            tei,
+            M,
+            stream=stream,
+        )
+        moe_sorting_flydsl(
+            topk_ids,
+            topk_weights,
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf,
+            num_experts,
+            unit_size=unit_size,
+            expert_mask=expert_mask,
+            num_local_tokens=M,
+        )
+
+    return sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_buf
+
+
+def launch_moe_sorting_oneshot_fused_path(
+    gating_logits,
+    sorted_ids,
+    sorted_weights,
+    sorted_expert_ids,
+    num_valid_ids,
+    moe_buf_i32,
+    expert_mask,
+    i32_tokens,
+    i32_moe_buf_elems,
+    n_grid_blocks,
+    *,
+    num_experts,
+    topk,
+    dtype_str,
+    renormalize=True,
+    max_tokens=16,
+    unit_size=UNIT_SIZE,
+    has_mask=False,
+):
+    """Low-level launcher for the fused (gating + sort) oneshot path.
+
+    LDS-direct: reads `gating_logits[M, E]` and emits the sort outputs
+    in one kernel launch with no HBM intermediates. The launcher carries no
+    scratch tensors — all per-token-K data is staged in LDS inside the
+    kernel.
+    """
+    cache_key = (num_experts, topk, max_tokens, unit_size, n_grid_blocks, dtype_str, renormalize, has_mask)
+    cf = _oneshot_fused_cf_cache.get(cache_key)
+    if cf is not None:
+        stream = torch.cuda.current_stream()
+        cf(
+            gating_logits,
+            sorted_ids,
+            sorted_weights,
+            sorted_expert_ids,
+            num_valid_ids,
+            moe_buf_i32,
+            expert_mask,
+            i32_tokens,
+            i32_moe_buf_elems,
+            n_grid_blocks,
+            fx.Stream(stream),
+        )
+        return
+
+    launch_fn = compile_moe_sorting_oneshot_fused(
+        num_experts=num_experts,
+        topk=topk,
+        dtype_str=dtype_str,
+        renormalize=renormalize,
+        max_tokens=max_tokens,
+        unit_size=unit_size,
+        has_mask=has_mask,
+    )
+    stream = torch.cuda.current_stream()
+    launch_fn(
+        gating_logits,
+        sorted_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        moe_buf_i32,
+        expert_mask,
+        i32_tokens,
+        i32_moe_buf_elems,
+        n_grid_blocks,
+        stream=stream,
+    )
+
+    cf = flyc.compile(
+        launch_fn,
+        gating_logits,
+        sorted_ids,
+        sorted_weights,
+        sorted_expert_ids,
+        num_valid_ids,
+        moe_buf_i32,
+        expert_mask,
+        i32_tokens,
+        i32_moe_buf_elems,
+        n_grid_blocks,
+        fx.Stream(stream),
+    )
+    _oneshot_fused_cf_cache[cache_key] = cf

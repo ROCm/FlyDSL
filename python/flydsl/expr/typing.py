@@ -37,12 +37,15 @@ from .numeric import (
     Int16,
     Int32,
     Int64,
+    Int128,
     Integer,
     Numeric,
     Uint8,
     Uint16,
     Uint32,
     Uint64,
+    Uint128,
+    as_numeric,
 )
 from .primitive import *
 from .utils.arith import (
@@ -54,6 +57,97 @@ from .utils.arith import (
     int_to_fp,
     int_to_int,
 )
+
+
+def as_ir_value(value, *, keep_static=False):
+    """Convert any DslType value into a raw ``ir.Value``
+
+    This is the *canonical* "DSL -> ir.Value" converter. Body code that
+    needs to feed an MLIR builder should call this explicitly per argument.
+
+    Behavior summary:
+      - ``None``                                    -> ``None``
+      - ``ir.Value``                                -> returned unchanged
+      - ``Numeric`` holding a Python literal, when
+        ``keep_static=True``                        -> returned unchanged
+        ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
+      - ``tuple`` / ``list``                        -> recursed, shape preserved
+      - object with ``__extract_to_ir_values__``    -> single value extracted; multi-value returns a list
+      - ``bool`` / ``int`` / ``float``              -> promoted via ``as_numeric(value).ir_value()``
+      - object with ``ir_value()``                  -> called as a fallback
+      - anything else                               -> returned unchanged
+    """
+    if value is None:
+        return None
+    if isinstance(value, ir.Value):
+        return value
+    if keep_static and isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
+        return value
+    if isinstance(value, tuple):
+        return tuple(as_ir_value(v, keep_static=keep_static) for v in value)
+    if isinstance(value, list):
+        return [as_ir_value(v, keep_static=keep_static) for v in value]
+    if hasattr(value, "__extract_to_ir_values__"):
+        values = value.__extract_to_ir_values__()
+        if len(values) == 1:
+            return values[0]
+        return values
+    if isinstance(value, (bool, int, float)):
+        return as_numeric(value).ir_value()
+    if hasattr(value, "ir_value"):
+        return value.ir_value()
+    return value
+
+
+def as_dsl_value(value, exemplar=None):
+    """Wrap a raw ``ir.Value`` back into a DSL value. This is the inverse
+    of :func:`as_ir_value` (``ir.Value -> DslType``).
+
+    ``exemplar`` is an optional *type template* describing how to wrap ``value``:
+      - a DslType class                         -> constructed directly via ``exemplar(value)``
+      - a DslType instance                      -> ``type(exemplar)(value)``
+
+    Behavior summary (mirrors the branches of :func:`as_ir_value`):
+      - ``None``                                    -> ``None``
+      - ``tuple`` / ``list``                        -> recursed, shape preserved,
+        paired element-wise with ``exemplar`` (a non-sequence ``exemplar`` is
+        broadcast to every element)
+      - with no usable ``exemplar``: a ``value`` already satisfying the
+        ``DslType`` protocol is returned unchanged; a bare scalar ``ir.Value``
+        is dispatched by ``value.type`` via ``Numeric.from_ir_type``; any other
+        non-``ir.Value`` is returned unchanged.
+
+    Raises ``TypeError`` when a bare ``ir.Value`` cannot be wrapped into any DSL
+    value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list)):
+        exemplars = exemplar if isinstance(exemplar, (tuple, list)) else [exemplar] * len(value)
+        return type(value)(as_dsl_value(v, ex) for v, ex in zip(value, exemplars))
+
+    if exemplar is not None and isinstance(value, ir.Value):
+        if isclass(exemplar):
+            return exemplar(value)
+        if isinstance(exemplar, Numeric):
+            return type(exemplar)(value)
+        ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
+        if ctor is not None:
+            try:
+                return ctor([value])
+            except Exception:
+                raise ValueError(f"failed to construct {type(exemplar)} from {value}")
+
+    from ..compiler.protocol import DslType
+
+    if isinstance(value, DslType):
+        return value
+    if not isinstance(value, ir.Value):
+        return value
+    try:
+        return Numeric.from_ir_type(value.type)(value)
+    except Exception as e:
+        raise TypeError(f"as_dsl_value cannot wrap ir.Value of type {value.type!s} into a DSL value") from e
 
 
 def _vec(n: int, elem: ir.Type) -> ir.Type:
@@ -165,6 +259,10 @@ class Types:
     def i64x2(self) -> ir.Type:
         return _vec(2, Int64.ir_type)
 
+    @property
+    def i128(self) -> ir.Type:
+        return Int128.ir_type
+
     # ---- Float scalars & vectors ----
     @property
     def f16(self) -> ir.Type:
@@ -248,6 +346,9 @@ __all__ = [
     "Types",
     "T",
     "default_f8_type",
+    # DSL utilities
+    "as_ir_value",
+    "as_dsl_value",
     "is_generic_address_space",
     "is_target_address_space",
     # DSL value types
@@ -272,11 +373,13 @@ __all__ = [
     "Int16",
     "Int32",
     "Int64",
+    "Int128",
     "Index",
     "Uint8",
     "Uint16",
     "Uint32",
     "Uint64",
+    "Uint128",
     "Constexpr",
     "IntTuple",
     "Layout",
@@ -490,8 +593,7 @@ class Constexpr:
     def __get_ir_types__(cls):
         return []
 
-    @classmethod
-    def __get_c_pointers__(cls):
+    def __c_abi_spec__(self):
         return []
 
     @classmethod
@@ -582,11 +684,8 @@ class IntTuple(BuiltinDslType):
         if self.is_leaf:
             if self.is_static:
                 return self.get_static_leaf_int
-            val = next(leaf_iter)
-            width = ir.IntegerType(val.type).width
-            wrapper = Int64 if width == 64 else Int32
-            return wrapper(val)
-        return tuple(IntTuple(get_(self, i))._rebuild_py_value(leaf_iter) for i in range(self.rank))
+            return next(leaf_iter)
+        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range(self.rank))
 
     @traced_op
     def to_py_value(self, loc=None, ip=None):
@@ -821,7 +920,7 @@ class Pointer(BuiltinDslType):
 
     @traced_op
     def store(self, value, loc=None, ip=None):
-        if isinstance(value, (bool, int, float)):
+        if isinstance(value, (bool, int, float, Numeric)):
             value = self.element_type(value)
         return ptr_store(value, self, loc=loc, ip=ip)
 
@@ -917,7 +1016,7 @@ class Tensor(BuiltinDslType):
 
     @traced_op
     def load(self, loc=None, ip=None):
-        return Vector(memref_load_vec(self, loc=loc, ip=ip), self.shape.to_py_value(), self.dtype)
+        return memref_load_vec(self, loc=loc, ip=ip)
 
     @traced_op
     def store(self, vector, loc=None, ip=None):
@@ -1105,35 +1204,26 @@ class Stream:
 
     def __init__(self, value=None):
         self.value = value
-        self._stream_storage = None
 
     def __get_ir_types__(self):
         return [gpu.AsyncTokenType.get()]
 
-    def __get_c_pointers__(self):
-        if isinstance(self.value, int):
-            self._stream_storage = ctypes.c_void_p(self.value)
-        elif self.value is None:
-            self._stream_storage = ctypes.c_void_p(0)
-        else:
-            self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
-        return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
-
     def __cache_signature__(self):
         return (type(self),)
 
-    @staticmethod
-    def _extract_stream_value(arg):
-        raw = arg.value if isinstance(arg, Stream) else arg
-        if raw is None:
-            return 0
-        elif isinstance(raw, int):
-            return raw
-        return raw.cuda_stream
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            raw = a.value if hasattr(a, "_is_stream_param") else a
+            if raw is None:
+                s.value = 0
+            elif isinstance(raw, int):
+                s.value = raw
+            elif hasattr(raw, "cuda_stream"):
+                s.value = raw.cuda_stream
+            else:
+                raise ValueError(f"invalid stream value: {raw}")
 
-    @classmethod
-    def _reusable_slot_spec(cls, arg):
-        return ctypes.c_void_p, cls._extract_stream_value
+        return [(ctypes.c_void_p, fill)]
 
     @classmethod
     def __construct_from_ir_values__(cls, values):

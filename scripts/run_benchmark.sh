@@ -69,11 +69,30 @@ LAYERNORM_SHAPES='
 RMSNORM_SHAPES='
 32768,8192,bf16
 '
-# FlashAttention shapes: "batch,seq_len,num_heads,head_dim,dtype,causal"
+# FlashAttention shapes:
+#   preferred: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,causal"
+#   legacy:    "batch,seq_len,num_heads,head_dim,dtype,causal" (num_kv_heads=num_heads)
 DEFAULT_FLASH_ATTN_FUNC_SHAPES='
-32,8192,8,128,bf16,true
-16,8192,16,128,bf16,true
-4,8192,64,128,bf16,true
+32,8192,8,8,128,bf16,true
+16,8192,16,16,128,bf16,true
+4,8192,64,64,128,bf16,true
+4,8192,64,8,128,bf16,true
+1,64,4,4,128,bf16,true
+1,64,4,4,128,bf16,false
+1,30,4,4,128,bf16,true
+1,30,4,4,128,bf16,false
+1,1,4,4,128,bf16,true
+1,1,4,4,128,bf16,false
+2,7,4,4,128,bf16,true
+2,7,4,4,128,bf16,false
+3,31,3,3,128,bf16,true
+3,31,3,3,128,bf16,false
+5,33,5,5,128,bf16,true
+5,33,5,5,128,bf16,false
+5,63,7,7,128,bf16,true
+5,63,7,7,128,bf16,false
+3,65,3,3,128,bf16,true
+3,65,3,3,128,bf16,false
 '
 FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
@@ -139,6 +158,16 @@ GEMM_FP4_SHAPES_ASYNC='
 
 8192,8192,8192,128,256,128,2
 8192,8192,8192,128,256,256,2
+'
+
+# FP6FP4 GEMM shapes (MXFP6 A x MXFP4 B; requires --wfp6, gfx950 only):
+# "M,N,K,tile_m,tile_n,tile_k". Same shapes as GEMM_FP4_SHAPES so fp6fp4 and
+# fp4 line up 1:1.
+GEMM_FP6FP4_SHAPES='
+8192,8192,8192,64,128,256
+8192,8192,8192,64,256,256
+8192,8192,8192,128,256,256
+8192,8192,8192,128,256,128
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -451,11 +480,14 @@ if tbps is None or tflops is None:
         tflops = float(m.group(1))
         tbps = float(m.group(2))
 
-# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s"
+# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s".
+# Use the FIRST match: the base op (softmax/layernorm/rmsnorm) is benchmarked
+# first, so any later "Bandwidth:" lines come from fused/quant variants printed
+# by the same test (e.g. test_layernorm.py also runs fused_add/dynamicquant/
+# smoothquant). Taking the last match reported the slow scalar smoothquant path
+# as "layernorm" (~1.69 vs the real ~5.6 TB/s base).
 if tbps is None:
-    m_bw = None
-    for m_bw in re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt):
-        pass
+    m_bw = next(re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt), None)
     if m_bw:
         tbps = float(m_bw.group(1)) / 1000.0
 
@@ -606,7 +638,14 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
     set -- $shape
     IFS=$oldIFS
-    batch=$1; seq_len=$2; heads=$3; head_dim=$4; dtype=$5; causal=$6
+    batch=$1; seq_len=$2; heads=$3
+    if [ "$#" -ge 7 ]; then
+      kv_heads=$4; head_dim=$5; dtype=$6; causal=$7
+    else
+      # Backward-compatible legacy format:
+      #   batch,seq_len,num_heads,head_dim,dtype,causal
+      kv_heads=$heads; head_dim=$4; dtype=$5; causal=$6
+    fi
     causal_flag="--causal"
     causal_tag="causal"
     case "${causal}" in
@@ -615,11 +654,12 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         causal_tag="nocausal"
         ;;
     esac
-    log="${BENCH_LOG_DIR}/flash_attn_B${batch}_S${seq_len}_H${heads}_D${head_dim}_${dtype}_${causal_tag}.log"
-    if python3 tests/kernels/test_flash_attn_func.py \
+    log="${BENCH_LOG_DIR}/flash_attn_B${batch}_S${seq_len}_H${heads}_Hkv${kv_heads}_D${head_dim}_${dtype}_${causal_tag}.log"
+    if python3 tests/kernels/test_flash_attn_fwd.py \
       --batch "$batch" \
       --seq_len "$seq_len" \
       --num_heads "$heads" \
+      --num_kv_heads "$kv_heads" \
       --head_dim "$head_dim" \
       --dtype "$dtype" \
       "${causal_flag}" \
@@ -631,7 +671,7 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       echo "flash_attn failed. Log: ${log}" >&2
       _show_fail_log "${log}" "flash_attn"
     fi
-    shape_tag="B${batch}S${seq_len}H${heads}D${head_dim}_${causal_tag}"
+    shape_tag="B${batch}S${seq_len}H${heads}Hkv${kv_heads}D${head_dim}_${causal_tag}"
     row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
@@ -944,6 +984,52 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         FAIL_COUNT=$((FAIL_COUNT + 1))
         echo "gemm fp4 async failed. Log: ${log}" >&2
         _show_fail_log "${log}" "gemm_fp4_async"
+      fi
+    fi
+  done
+
+  # FP6FP4 GEMM (MXFP6 A x MXFP4 B, gfx950 only)
+  for shape in $GEMM_FP6FP4_SHAPES; do
+    [ -z "$shape" ] && continue
+    oldIFS=$IFS
+    IFS=,
+    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
+    set -- $shape
+    IFS=$oldIFS
+    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
+    dtype="fp6fp4"
+    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
+    if python3 tests/kernels/test_preshuffle_gemm.py \
+      --wfp6 \
+      --in_dtype fp6 \
+      --num_warmup 10 \
+      --num_iters 100 \
+      -M "$M" \
+      -N "$N" \
+      -K "$K" \
+      --tile_m "$tile_m" \
+      --tile_n "$tile_n" \
+      --tile_k "$tile_k" >"${log}" 2>&1; then
+      # Check if test was skipped due to architecture
+      if grep -q "Skipping FP6\|Skipped" "${log}"; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      else
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
+        set -- $row
+        _emit_row "$1" "$2" "$3" "$4" "$5"
+      fi
+    else
+      # Skip gracefully on unsupported architectures or missing features
+      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
+        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      else
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        echo "gemm fp6 failed. Log: ${log}" >&2
+        _show_fail_log "${log}" "gemm_fp6"
       fi
     fi
   done

@@ -85,15 +85,18 @@ struct PyMmaOpGFX11_WMMAType : PyConcreteType<PyMmaOpGFX11_WMMAType> {
     c.def_static(
         "get",
         [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
-           DefaultingPyMlirContext context) {
-          return PyMmaOpGFX11_WMMAType(context->getRef(), wrap(MmaOpGFX11_WMMAType::get(
-                                                              m, n, k, unwrap(elemTyA),
-                                                              unwrap(elemTyB), unwrap(elemTyAcc))));
+           bool signA, bool signB, bool clamp, DefaultingPyMlirContext context) {
+          return PyMmaOpGFX11_WMMAType(
+              context->getRef(),
+              wrap(MmaOpGFX11_WMMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
+                                            unwrap(elemTyAcc), signA, signB, clamp)));
         },
         "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
-        "context"_a = nb::none(),
+        "sign_a"_a = false, "sign_b"_a = false, "clamp"_a = false, "context"_a = nb::none(),
         "Create a MmaOpGFX11_WMMAType with m, n, k dimensions and element types "
-        "(RDNA3 / RDNA3.5 wave32 WMMA, v16 operand ABI)");
+        "(RDNA3 / RDNA3.5 wave32 WMMA, v16 operand ABI). "
+        "sign_a/sign_b/clamp are forwarded to the iu8/iu4 intrinsic for integer "
+        "paths; must be false for fp16/bf16.");
   }
 };
 

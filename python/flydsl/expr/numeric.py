@@ -10,7 +10,6 @@ import numpy as np
 from .._mlir import ir
 from .._mlir.dialects import arith
 from .._mlir.extras import types as T
-from ..utils import log
 from .utils.arith import (
     ArithValue,
     _to_raw,
@@ -59,17 +58,6 @@ class NumericMeta(type):
         def _construct_from_ir_values(cls, values):
             return cls(values[0])
 
-        def _get_c_pointers(self):
-            if width == 1:
-                c_value = ctypes.c_bool(self.value)
-            elif signed:
-                c_value = getattr(ctypes, f"c_int{width}")(self.value)
-            else:
-                c_value = getattr(ctypes, f"c_uint{width}")(self.value)
-            ptr = ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)
-            ptr._prevent_gc = c_value
-            return [ptr]
-
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
         is_storable = width >= 8
 
@@ -110,15 +98,23 @@ class NumericMeta(type):
             new_attrs["__peek_from_ptr__"] = classmethod(_not_storable)
             new_attrs["__poke_into_ptr__"] = classmethod(lambda cls, ptr, value: _not_storable(cls))
         if signed is not None:
-            new_attrs["__get_c_pointers__"] = _get_c_pointers
 
-            def _reusable_slot_spec(cls, arg):
-                ctype = getattr(cls, "_reusable_ctype", None)
-                if ctype is None:
-                    return None
-                return ctype, lambda a: a.value if hasattr(a, "value") else a
+            def __c_abi_spec__(self):
+                w = self.width
+                ct = ctypes.c_bool if w == 1 else getattr(ctypes, f"c_{'int' if self.signed else 'uint'}{w}", None)
+                if ct is None:
+                    raise TypeError(
+                        f"{type(self).__name__} (width={w}) has no host C-ABI and cannot be a launch argument"
+                    )
 
-            new_attrs["_reusable_slot_spec"] = classmethod(_reusable_slot_spec)
+                def fill(a, s):
+                    # ``a`` may be a bare Python int (fast path) or a Numeric
+                    # instance (slow path); read via the ``hasattr(a, "value")`` shim.
+                    s.value = a.value if hasattr(a, "value") else a
+
+                return [(ct, fill)]
+
+            new_attrs["__c_abi_spec__"] = __c_abi_spec__
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
         if ir_type is not None:
@@ -171,14 +167,17 @@ class NumericMeta(type):
 _CMP_OPS = frozenset({operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operator.ne})
 
 
-def _widen_narrow_int(x, widen_bool=False):
-    """Promote sub-32-bit integers (and optionally bools) to i32."""
-    ty = type(x)
-    if ty is Boolean and not widen_bool:
-        return x, ty
-    if ty.is_integer and ty.width < 32:
+def _widen_bool_to_int32(x, widen_bool=False):
+    """Promote Boolean to Int32 for arithmetic when widen_bool=True.
+
+    Per C++-style usual arithmetic conversions, we deliberately do NOT apply
+    integer promotion: i8/i16/u8/u16 stay at their narrow width.
+    Same-width same-signedness operands keep their type; cross-width or
+    cross-sign mixing is resolved by ``_coerce_operands``.
+    """
+    if widen_bool and type(x) is Boolean:
         return x.to(Int32), Int32
-    return x, ty
+    return x, type(x)
 
 
 def _resolve_float_type(ta, tb):
@@ -205,8 +204,8 @@ def _resolve_float_type(ta, tb):
 def _coerce_operands(a, b, widen_bool=False):
     """Promote *a* and *b* to a common scalar type."""
     ta, tb = type(a), type(b)
-    a, ta = _widen_narrow_int(a, widen_bool=widen_bool)
-    b, tb = _widen_narrow_int(b, widen_bool=widen_bool)
+    a, ta = _widen_bool_to_int32(a, widen_bool=widen_bool)
+    b, tb = _widen_bool_to_int32(b, widen_bool=widen_bool)
 
     if ta is tb:
         return a, b, ta
@@ -230,8 +229,10 @@ def _try_coerce_rhs(rhs):
     if isinstance(rhs, Numeric):
         return rhs
     if isinstance(rhs, ArithValue):
-        if isinstance(rhs.type, (ir.VectorType, ir.IndexType)):
-            return None  # no Numeric representation for vector/index
+        if isinstance(rhs.type, ir.VectorType):
+            return None
+        if isinstance(rhs.type, ir.IndexType):
+            return Index(rhs)
         try:
             return Numeric.from_ir_type(rhs.type)(rhs)
         except (ValueError, KeyError):
@@ -245,48 +246,6 @@ def _extract_arith(val, signed):
     """Unwrap Numeric.value, attaching signedness if it's an ArithValue."""
     v = val.value
     return v.with_signedness(signed) if isinstance(v, ArithValue) else v
-
-
-def _unwrap_value(value):
-    """Convert FlyDSL wrappers to raw MLIR values when possible."""
-    if isinstance(value, ir.Value):
-        return value
-    if isinstance(value, (bool, int, float)):
-        try:
-            return as_numeric(value).ir_value()
-        except Exception:
-            log().error(f"failed to construct {as_numeric(value)} from {value}")
-            return value
-    if hasattr(value, "__extract_to_ir_values__"):
-        values = value.__extract_to_ir_values__()
-        if len(values) == 1:
-            return values[0]
-    if hasattr(value, "ir_value"):
-        return value.ir_value()
-    return value
-
-
-def _wrap_like(value, exemplar=None):
-    """Wrap an MLIR value back to a FlyDSL wrapper when possible."""
-    if not isinstance(value, ir.Value):
-        return value
-
-    if exemplar is not None:
-        if isinstance(exemplar, Numeric):
-            return type(exemplar)(value)
-        ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
-        if ctor is not None:
-            try:
-                return ctor([value])
-            except Exception:
-                log().error(f"failed to construct {type(exemplar)} from {value}")
-                return value
-
-    try:
-        return Numeric.from_ir_type(value.type)(value)
-    except Exception:
-        log().error(f"failed to construct {Numeric.from_ir_type(value.type)} from {value}")
-        return value
 
 
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
@@ -331,7 +290,10 @@ class Numeric(metaclass=NumericMeta):
 
     def select(self, true_value, false_value, *, loc=None):
         """Ternary select (for Boolean conditions from Int32 comparisons)."""
-        return ArithValue(self).select(true_value, false_value, loc=loc)
+        from .typing import as_dsl_value
+
+        result = ArithValue(self).select(true_value, false_value, loc=loc)
+        return as_dsl_value(result, true_value)
 
     @classmethod
     def __coerce__(cls, value):
@@ -453,6 +415,9 @@ class Numeric(metaclass=NumericMeta):
             T.ui32(): Uint32,
             T.ui16(): Uint16,
             T.ui8(): Uint8,
+            T.i(128): Int128,
+            T.si(128): Int128,
+            T.ui(128): Uint128,
             T.f8E5M2(): Float8E5M2,
             T.f8E4M3(): Float8E4M3,
             T.f8E4M3FN(): Float8E4M3FN,
@@ -551,6 +516,13 @@ class Numeric(metaclass=NumericMeta):
 
     def __ge__(self, other, *, loc=None, ip=None):
         return _make_binop(operator.ge)(self, other, loc=loc, ip=ip)
+
+    def bitcast(self, dtype, *, loc=None, ip=None):
+        """Reinterpret this value's bits as *dtype* (a same-width Numeric type)."""
+        if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+            raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
+        res = arith.bitcast(dtype.ir_type, self.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+        return dtype(res, loc=loc, ip=ip)
 
 
 def as_numeric(obj):
@@ -717,6 +689,11 @@ class Int64(Integer, metaclass=NumericMeta, width=64, signed=True, ir_type=T.i64
     pass
 
 
+class Int128(Integer, metaclass=NumericMeta, width=128, signed=True, ir_type=lambda: T.i(128)):
+    def __get_c_pointers__(self):
+        raise TypeError("Int128 is not a JitArgument for now. ctypes has no support for 128b integers.")
+
+
 class Uint8(Integer, metaclass=NumericMeta, width=8, signed=False, ir_type=T.i8):
     pass
 
@@ -733,39 +710,44 @@ class Uint64(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=T.i
     pass
 
 
-class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):
+class Uint128(Integer, metaclass=NumericMeta, width=128, signed=False, ir_type=lambda: T.i(128)):
     def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        f16_val = np.float16(self.value)
-        bits = f16_val.view(np.uint16)
-        c_val = ctypes.c_short(bits)
-        return [ctypes.cast(ctypes.pointer(c_val), ctypes.c_void_p)]
+        raise TypeError("Uint128 is not a JitArgument for now. ctypes has no support for 128b integers.")
+
+
+class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            v = a.value if hasattr(a, "value") else a
+            s.value = int(np.float16(v).view(np.uint16))
+
+        return [(ctypes.c_short, fill)]
 
 
 class BFloat16(Float, metaclass=NumericMeta, width=16, ir_type=T.bf16):
-    def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        f32_val = np.float32(self.value)
-        bits = f32_val.view(np.uint32)
-        bf16_bits = np.uint16(bits >> 16)
-        c_val = ctypes.c_short(bf16_bits)
-        return [ctypes.cast(ctypes.pointer(c_val), ctypes.c_void_p)]
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            v = a.value if hasattr(a, "value") else a
+            bits = np.float32(v).view(np.uint32)
+            s.value = int(np.uint16(bits >> 16))
+
+        return [(ctypes.c_short, fill)]
 
 
 class Float32(Float, metaclass=NumericMeta, width=32, ir_type=T.f32):
-    def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        return [ctypes.cast(ctypes.pointer(ctypes.c_float(self.value)), ctypes.c_void_p)]
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            s.value = a.value if hasattr(a, "value") else a
+
+        return [(ctypes.c_float, fill)]
 
 
 class Float64(Float, metaclass=NumericMeta, width=64, ir_type=T.f64):
-    def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        return [ctypes.cast(ctypes.pointer(ctypes.c_double(self.value)), ctypes.c_void_p)]
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            s.value = a.value if hasattr(a, "value") else a
+
+        return [(ctypes.c_double, fill)]
 
 
 class Float8E5M2(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E5M2): ...
@@ -868,7 +850,9 @@ class Index(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=lamb
         from .utils.arith import index_cast
 
         # Unwrap DSL Numeric to ir.Value first
-        if isinstance(x, Numeric) and not isinstance(x, Index):
+        if isinstance(x, Index):
+            x = x.value
+        elif isinstance(x, Numeric):
             x = x.ir_value(loc=loc, ip=ip)
         # Cast integer ir.Value to index (skip if already index type)
         if isinstance(x, ir.Value) and not isinstance(x.type, ir.IndexType):
