@@ -453,10 +453,8 @@ jobs:
         timeout-minutes: 15
         run: |
           docker exec flydsl_test bash -c "
-            apt-get install -y libpci-dev libibverbs-dev &&
-            rm -rf /tmp/mori &&
-            git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/mori.git /tmp/mori &&
-            cd /tmp/mori && python3 -m pip install . &&
+            apt-get install -y libpci-dev libibverbs-dev libgrpc++1.51 libgrpc29 &&
+            python3 -m pip install amd_mori &&
             MORI_PRECOMPILE=1 python3 -c 'import mori'
           "
 
