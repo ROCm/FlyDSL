@@ -843,6 +843,7 @@ def compile_hgemm_kernel(
             init_zero=False,
             k0_prefetch_k_offset=None,
             k0_prefetch_lds_stage=None,
+            next_k0_read_stage=None,
         ):
             # K32 sub-buffer ping-pong (see fp8-4wave-8buffer design notes):
             #   h1: bfld tile_{i+1} K1 -> prefetch_lds_stage (lead 1)
@@ -862,6 +863,9 @@ def compile_hgemm_kernel(
                 return load_b_frag_from(s, warp_atom_k_idx, jj)
 
             def load_a_slice(warp_atom_k_idx, initial_a=None):
+                # initial_a may be a single frag (legacy) or a full list (full carry).
+                if const_expr(isinstance(initial_a, list)):
+                    return list(initial_a)
                 out = [0] * WARP_M_STEPS
                 for ii in range_constexpr(WARP_M_STEPS):
                     if const_expr(initial_a is not None and ii == 0):
@@ -871,6 +875,9 @@ def compile_hgemm_kernel(
                 return out
 
             def load_b_slice(warp_atom_k_idx, initial_bs=None):
+                # initial_bs may be a partial list (B_INITIAL_READS) or a full list.
+                if const_expr(isinstance(initial_bs, list) and len(initial_bs) == WARP_N_STEPS):
+                    return list(initial_bs)
                 out = [0] * WARP_N_STEPS
                 for jj in range_constexpr(WARP_N_STEPS):
                     if const_expr(initial_bs is not None and jj < B_INITIAL_READS_CONST):
@@ -900,32 +907,69 @@ def compile_hgemm_kernel(
                 else:
                     raise NotImplementedError(f"MFMA_PER_WARP_K={MFMA_PER_WARP_K} not supported")
 
-            def compute_slice(a_frags, b_frags, zero_acc=False):
+            # Compute one K32 slice (64 MFMAs) while dripping the next slice's
+            # operand ds_reads into the MFMA shadows. The operands consumed here
+            # (a_frags/b_frags) are fully ready on entry (carried in registers from
+            # the previous half); the reads issued here (read_k_idx into out_a/out_b)
+            # are for the NEXT half and only consumed after this half's lgkmcnt(0),
+            # so their ~64-cyc latency hides fully under the 64 MFMAs. ds_reads are
+            # spread front-loaded-but-interleaved so all land before the half's
+            # trailing lgkmcnt(0).
+            def compute_slice_interleaved(a_frags, b_frags, read_k_idx, read_stage=None, zero_acc=False):
+                out_a = [0] * WARP_M_STEPS
+                out_b = [0] * WARP_N_STEPS
+                rstage = s if read_stage is None else fx.Index(read_stage)
+                reads = []
+                if const_expr(read_k_idx is not None):
+                    for ii in range_constexpr(WARP_M_STEPS):
+                        reads.append(("a", ii))
+                    for jj in range_constexpr(WARP_N_STEPS):
+                        reads.append(("b", jj))
+                n_reads = len(reads)
+                # Distribute the reads across the MFMA grid; keep them in the first
+                # ~3/4 of the MFMAs so they all complete before the closing lgkmcnt.
+                read_at = spread_counts(n_reads, WARP_M_STEPS * WARP_N_STEPS)
+                cursor = 0
                 for ii in range_constexpr(WARP_M_STEPS):
                     for jj in range_constexpr(WARP_N_STEPS):
                         if const_expr(zero_acc):
                             c_frags_new[ii * WARP_N_STEPS + jj] = WMMA_IMPL.init(a_frags[ii], b_frags[jj])
                         else:
                             do_mfma(ii, jj, a_frags[ii], b_frags[jj])
+                        step = ii * WARP_N_STEPS + jj
+                        for _ in range_constexpr(read_at[step]):
+                            kind, idx = reads[cursor]
+                            if const_expr(kind == "a"):
+                                out_a[idx] = load_a_frag_from(rstage, read_k_idx, idx)
+                            else:
+                                out_b[idx] = load_b_frag_from(rstage, read_k_idx, idx)
+                            cursor += 1
+                return out_a, out_b
 
+            # K0 operands of this tile are fully carried in on entry (a0/b0 full
+            # group); load_*_slice just unpacks the carried frags (no LDS read when
+            # the full group is provided).
             a0_frags = load_a_slice(k0_idx, prefetched_initial_a_frag)
             b0_frags = load_b_slice(k0_idx, prefetched_initial_b_frags)
-            a1_frags = load_a_slice(k1_idx)
-            b1_frags = load_b_slice(k1_idx)
 
-            # half-1: prefetch next tile's K1 (lead 1), compute this tile's K0.
+            # half-1: bfld next tile's K1 (lead 1); compute K0 while reading this
+            # tile's K1 operands for half-2.
             if const_expr(prefetch_k_offset is not None):
                 ldg_sts_async_kgroup(prefetch_k_offset, prefetch_lds_stage, 1)
-            compute_slice(a0_frags, b0_frags, init_zero)
+            a1_frags, b1_frags = compute_slice_interleaved(a0_frags, b0_frags, k1_idx, zero_acc=init_zero)
 
             __barrier_lgkmcnt()
 
-            # half-2: prefetch the tile-after-next's K0 (lead 2) into the buffer we
-            # just consumed (current_stage), compute this tile's K1.
+            # half-2: bfld the tile-after-next's K0 (lead 2) into the just-consumed
+            # buffer; compute K1 while reading the NEXT tile's K0 group (from
+            # next_k0_read_stage) to carry into the next iteration.
             if const_expr(k0_prefetch_k_offset is not None):
                 ldg_sts_async_kgroup(k0_prefetch_k_offset, k0_prefetch_lds_stage, 0)
-            compute_slice(a1_frags, b1_frags)
-            return c_frags_new
+            next_a0, next_b0 = compute_slice_interleaved(
+                a1_frags, b1_frags, k0_idx if next_k0_read_stage is not None else None,
+                read_stage=next_k0_read_stage,
+            )
+            return c_frags_new, next_a0, next_b0
 
         warp_offset = get_dma_copy_warp_offset()
 
@@ -1018,7 +1062,8 @@ def compile_hgemm_kernel(
             __barrier((STAGES - 2) * LDG_WAIT_COUNT)
             if const_expr(REGISTER_PREFETCH_K1):
                 # tile0 compute: h1 bfld tile1.K1 -> stage1; h2 bfld tile2.K0 -> stage0.
-                c_frags = ldmatrix_compute_tile_register_prefetch(
+                # half-2 reads tile1's K0 (stage1) into the carry for the next iter.
+                c_frags, carry_a0, carry_b0 = ldmatrix_compute_tile_register_prefetch(
                     arith.constant(0, index=True),
                     c_frags,
                     prefetch_k_offset=ks_begin + BLOCK_K,
@@ -1026,9 +1071,67 @@ def compile_hgemm_kernel(
                     init_zero=True,
                     k0_prefetch_k_offset=ks_begin + 2 * BLOCK_K,
                     k0_prefetch_lds_stage=arith.constant(0, index=True),
+                    next_k0_read_stage=arith.constant(1 % STAGES, index=True),
                 )
                 hot_loop_scheduler_register_prefetch(tail_prefetch_initial=True)
-            else:
+                next_stage_init = arith.constant(1 % STAGES, index=True)
+                __barrier(RP1_TAIL_VMCNT)
+
+                init_state = (
+                    [ks_begin + fx.Int32(BLOCK_K), next_stage_init]
+                    + c_frags
+                    + carry_a0
+                    + carry_b0
+                )
+                for bki, state in range(1, BLOCK_K_LOOPS - (STAGES - 1), 1, init=init_state):
+                    k_offset = state[0]
+                    current_stage = fx.Index(state[1])
+                    c_frags = state[2 : 2 + C_FRAGS_LEN]
+                    carry_a0 = state[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + WARP_M_STEPS]
+                    carry_b0 = state[2 + C_FRAGS_LEN + WARP_M_STEPS : 2 + C_FRAGS_LEN + WARP_M_STEPS + WARP_N_STEPS]
+                    next_stage = (current_stage + 1) % STAGES
+                    prefetch_k_offset = k_offset + (STAGES - 1) * BLOCK_K
+                    # lead-2 K0 offset runs past the last tile in the final loop
+                    # iterations; clamp it so the (unused) prefetch stays in-bounds.
+                    k0_pf_offset = k_offset + fx.Int32(STAGES * BLOCK_K)
+                    k0_pf_max = ks_begin + fx.Int32((BLOCK_K_LOOPS - 1) * BLOCK_K)
+                    k0_pf_offset = arith.select(
+                        arith.cmpi(arith.CmpIPredicate.slt, k0_pf_offset, k0_pf_max),
+                        k0_pf_offset,
+                        k0_pf_max,
+                    )
+                    c_frags_new, carry_a0_next, carry_b0_next = ldmatrix_compute_tile_register_prefetch(
+                        current_stage,
+                        c_frags,
+                        prefetched_initial_a_frag=carry_a0,
+                        prefetched_initial_b_frags=carry_b0,
+                        prefetch_k_offset=prefetch_k_offset,
+                        prefetch_lds_stage=next_stage,
+                        k0_prefetch_k_offset=k0_pf_offset,
+                        k0_prefetch_lds_stage=current_stage,
+                        next_k0_read_stage=next_stage,
+                    )
+                    k_offset_next = k_offset + fx.Int32(BLOCK_K)
+                    hot_loop_scheduler_register_prefetch(prefetched_initial=True, tail_prefetch_initial=True)
+                    __barrier(RP1_TAIL_VMCNT)
+                    results = (
+                        yield [k_offset_next, next_stage] + c_frags_new + carry_a0_next + carry_b0_next
+                    )
+                current_stage = fx.Index(results[1])
+                c_frags = results[2 : 2 + C_FRAGS_LEN]
+                carry_a0 = results[2 + C_FRAGS_LEN : 2 + C_FRAGS_LEN + WARP_M_STEPS]
+                carry_b0 = results[2 + C_FRAGS_LEN + WARP_M_STEPS : 2 + C_FRAGS_LEN + WARP_M_STEPS + WARP_N_STEPS]
+                for s in range_constexpr(0, STAGES - 1):
+                    c_frags, carry_a0, carry_b0 = ldmatrix_compute_tile_register_prefetch(
+                        current_stage,
+                        c_frags,
+                        prefetched_initial_a_frag=carry_a0,
+                        prefetched_initial_b_frags=carry_b0,
+                    )
+                    rocdl.sched_barrier(0)
+                    current_stage = (current_stage + 1) % STAGES
+
+            if const_expr(not REGISTER_PREFETCH_K1):
                 c_frags = ldmatrix_compute_tile_streaming(
                     arith.constant(0, index=True),
                     c_frags,
@@ -1037,49 +1140,25 @@ def compile_hgemm_kernel(
                     init_zero=True,
                 )
                 hot_loop_scheduler(tail_prefetch_initial=True)
-            next_stage_init = arith.constant(1 % STAGES, index=True)
-            __barrier((STAGES - 2) * LDG_WAIT_COUNT)
-            prefetched_tile_a_frag, prefetched_tile_b_frags = load_initial_frags_from(next_stage_init)
+                next_stage_init = arith.constant(1 % STAGES, index=True)
+                __barrier((STAGES - 2) * LDG_WAIT_COUNT)
+                prefetched_tile_a_frag, prefetched_tile_b_frags = load_initial_frags_from(next_stage_init)
 
-            init_state = (
-                [ks_begin + fx.Int32(BLOCK_K), next_stage_init]
-                + c_frags
-                + [prefetched_tile_a_frag]
-                + prefetched_tile_b_frags
-            )
-            for bki, state in range(1, BLOCK_K_LOOPS - (STAGES - 1), 1, init=init_state):
-                k_offset = state[0]
-                current_stage = fx.Index(state[1])
-                c_frags = state[2 : 2 + C_FRAGS_LEN]
-                prefetched_tile_a_frag = state[2 + C_FRAGS_LEN]
-                prefetched_tile_b_frags = state[3 + C_FRAGS_LEN : 3 + C_FRAGS_LEN + B_INITIAL_READS_CONST]
-                next_stage = (current_stage + 1) % STAGES
-                write_stage = (current_stage + STAGES - 1) % STAGES
-                prefetch_k_offset = k_offset + (STAGES - 1) * BLOCK_K
-                if const_expr(REGISTER_PREFETCH_K1):
-                    # K1 of tile i+1 (lead 1) -> next_stage; K0 of tile i+2 (lead 2)
-                    # -> current_stage (the buffer whose K0 we consumed this iter).
-                    # The lead-2 K0 offset runs past the last tile in the final loop
-                    # iterations; clamp it to the last valid tile so the (unused)
-                    # prefetch reads in-bounds global memory instead of faulting.
-                    k0_pf_offset = k_offset + fx.Int32(STAGES * BLOCK_K)
-                    k0_pf_max = ks_begin + fx.Int32((BLOCK_K_LOOPS - 1) * BLOCK_K)
-                    k0_pf_offset = arith.select(
-                        arith.cmpi(arith.CmpIPredicate.slt, k0_pf_offset, k0_pf_max),
-                        k0_pf_offset,
-                        k0_pf_max,
-                    )
-                    c_frags_new = ldmatrix_compute_tile_register_prefetch(
-                        current_stage,
-                        c_frags,
-                        prefetched_initial_a_frag=prefetched_tile_a_frag,
-                        prefetched_initial_b_frags=prefetched_tile_b_frags,
-                        prefetch_k_offset=prefetch_k_offset,
-                        prefetch_lds_stage=next_stage,
-                        k0_prefetch_k_offset=k0_pf_offset,
-                        k0_prefetch_lds_stage=current_stage,
-                    )
-                else:
+                init_state = (
+                    [ks_begin + fx.Int32(BLOCK_K), next_stage_init]
+                    + c_frags
+                    + [prefetched_tile_a_frag]
+                    + prefetched_tile_b_frags
+                )
+                for bki, state in range(1, BLOCK_K_LOOPS - (STAGES - 1), 1, init=init_state):
+                    k_offset = state[0]
+                    current_stage = fx.Index(state[1])
+                    c_frags = state[2 : 2 + C_FRAGS_LEN]
+                    prefetched_tile_a_frag = state[2 + C_FRAGS_LEN]
+                    prefetched_tile_b_frags = state[3 + C_FRAGS_LEN : 3 + C_FRAGS_LEN + B_INITIAL_READS_CONST]
+                    next_stage = (current_stage + 1) % STAGES
+                    write_stage = (current_stage + STAGES - 1) % STAGES
+                    prefetch_k_offset = k_offset + (STAGES - 1) * BLOCK_K
                     c_frags_new = ldmatrix_compute_tile_streaming(
                         current_stage,
                         c_frags,
@@ -1088,47 +1167,28 @@ def compile_hgemm_kernel(
                         prefetch_k_offset=prefetch_k_offset,
                         prefetch_lds_stage=write_stage,
                     )
-                k_offset_next = k_offset + fx.Int32(BLOCK_K)
-                if const_expr(REGISTER_PREFETCH_K1):
-                    hot_loop_scheduler_register_prefetch(prefetched_initial=True, tail_prefetch_initial=True)
-                else:
+                    k_offset_next = k_offset + fx.Int32(BLOCK_K)
                     hot_loop_scheduler(prefetched_initial=True, tail_prefetch_initial=True)
-                if const_expr(REGISTER_PREFETCH_K1):
-                    # The K0 we read next (next_stage K0) was prefetched 2 tiles ago
-                    # (lead 2), so it has long landed. Keep the most recent k-group's
-                    # bfld in flight instead of draining (vmcnt 0) so global-load
-                    # latency overlaps with MFMA.
-                    __barrier(RP1_TAIL_VMCNT)
-                else:
                     __barrier((STAGES - 2) * LDG_WAIT_COUNT)
-                prefetched_tile_a_frag_next, prefetched_tile_b_frags_next = load_initial_frags_from(next_stage)
-                results = (
-                    yield [k_offset_next, next_stage]
-                    + c_frags_new
-                    + [prefetched_tile_a_frag_next]
-                    + prefetched_tile_b_frags_next
-                )
-            current_stage = fx.Index(results[1])
-            c_frags = results[2 : 2 + C_FRAGS_LEN]
-            prefetched_tile_a_frag = results[2 + C_FRAGS_LEN]
-            prefetched_tile_b_frags = results[3 + C_FRAGS_LEN : 3 + C_FRAGS_LEN + B_INITIAL_READS_CONST]
-            for s in range_constexpr(0, STAGES - 1):
-                if const_expr(REGISTER_PREFETCH_K1):
-                    c_frags = ldmatrix_compute_tile_register_prefetch(
-                        current_stage,
-                        c_frags,
-                        prefetched_initial_a_frag=prefetched_tile_a_frag,
-                        prefetched_initial_b_frags=prefetched_tile_b_frags,
+                    prefetched_tile_a_frag_next, prefetched_tile_b_frags_next = load_initial_frags_from(next_stage)
+                    results = (
+                        yield [k_offset_next, next_stage]
+                        + c_frags_new
+                        + [prefetched_tile_a_frag_next]
+                        + prefetched_tile_b_frags_next
                     )
-                    rocdl.sched_barrier(0)
-                else:
+                current_stage = fx.Index(results[1])
+                c_frags = results[2 : 2 + C_FRAGS_LEN]
+                prefetched_tile_a_frag = results[2 + C_FRAGS_LEN]
+                prefetched_tile_b_frags = results[3 + C_FRAGS_LEN : 3 + C_FRAGS_LEN + B_INITIAL_READS_CONST]
+                for s in range_constexpr(0, STAGES - 1):
                     c_frags = ldmatrix_compute_tile_streaming(
                         current_stage,
                         c_frags,
                         prefetched_initial_a_frag=prefetched_tile_a_frag,
                         prefetched_initial_b_frags=prefetched_tile_b_frags,
                     )
-                current_stage = (current_stage + 1) % STAGES
+                    current_stage = (current_stage + 1) % STAGES
 
         else:
 
