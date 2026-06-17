@@ -214,7 +214,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
@@ -304,7 +304,7 @@ def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
     BLOCK_THREADS_SPECIAL = BLOCK_M * THREADS_PER_ROW
     elem_bits = 32 if dtype_str == "f32" else 16
 
-    @flyc.kernel
+    @flyc.kernel(known_block_size=[BLOCK_THREADS_SPECIAL, 1, 1])
     def rmsnorm_large_m_small_n_kernel(
         Input: fx.Tensor,
         Gamma: fx.Tensor,
@@ -517,7 +517,7 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             # Pass 2: normalize + gamma + store (reuse cached added values)
             for tile_i in range_constexpr(num_tiles):
@@ -628,8 +628,6 @@ def _build_rmsnorm_quant_module(
     is_smooth: bool,
     quant_dtype_str: str = "i8",
 ):
-    arch = get_hip_arch()
-
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -790,7 +788,7 @@ def _build_rmsnorm_quant_module(
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             thread_row_max = c_zero_f
             y_local = []
@@ -1176,7 +1174,7 @@ def _build_fused_add_rmsnorm_quant_module(
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
             ms_eps = mean_sq + eps_c
-            rrms = ms_eps.rsqrt(fastmath=fm_fast)
+            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             thread_row_max = c_zero_f
             y_local = []

@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(_project_root, "python"))
 project = "FlyDSL"
 copyright = "2024-2026, Advanced Micro Devices, Inc."
 author = "AMD"
-release = "0.2.0"
+release = "0.2.2"
 
 # -- General configuration ---------------------------------------------------
 extensions = [

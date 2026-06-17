@@ -250,7 +250,7 @@ def compile_wmma_gemm_tdm(
 
         # --- Thread/wave decomposition ---
         layout_thr = fx.make_layout((m_warp, n_warp, 2, 16), (n_warp * WAVE_SIZE, WAVE_SIZE, 16, 1))
-        thr_coord = idx2crd(tx, layout_thr)
+        thr_coord = idx2crd(fx.Int32(tx), layout_thr)
         wave_m_idx, wave_n_idx, lane_kgrp, lane16 = (
             fx.get(thr_coord, 0),
             fx.get(thr_coord, 1),
@@ -344,7 +344,7 @@ def compile_wmma_gemm_tdm(
             After precompute, lane8/lane_ngrp are dead → frees VGPRs.
             """
             lane8 = lane16 % arith.index(8)
-            lane_ngrp = lane16 / arith.index(8)
+            lane_ngrp = lane16 // arith.index(8)
             k_lane_off = (lane_kgrp * arith.index(8) + lane8) * arith.index(lds_b_stride * elem_bytes)
             n_lane_off = lane_ngrp * arith.index(8 * elem_bytes)
             bases = []
@@ -648,7 +648,7 @@ def compile_wmma_gemm_tdm(
             wave_id_idx = arith.index_cast(T.index, rocdl.wave_id())
             d_warp_off_sgpr = wave_id_idx * arith.index(warp_d_bytes) + arith.index(d_output_off)
 
-            warp_m_off_sgpr = (wave_id_idx / arith.index(n_warp)) * arith.index(warp_tile_m)
+            warp_m_off_sgpr = (wave_id_idx // arith.index(n_warp)) * arith.index(warp_tile_m)
             warp_n_off_sgpr = (wave_id_idx % arith.index(n_warp)) * arith.index(warp_tile_n)
 
             d_desc = tdm_ops.make_tensor_descriptor_2d(
@@ -933,8 +933,8 @@ def compile_wmma_gemm_tdm(
 
         idx_m = arith.index_cast(T.index, i32_m.ir_value())
         idx_n = arith.index_cast(T.index, i32_n.ir_value())
-        gx = _raw((idx_m + arith.index(tile_m - 1)) / arith.index(tile_m))
-        gy = _raw((idx_n + arith.index(tile_n - 1)) / arith.index(tile_n))
+        gx = _raw((idx_m + arith.index(tile_m - 1)) // arith.index(tile_m))
+        gy = _raw((idx_n + arith.index(tile_n - 1)) // arith.index(tile_n))
 
         cluster_arg = (cluster_m, cluster_n, 1) if use_cluster else None
         kernel_wmma_gemm_tdm(

@@ -142,7 +142,7 @@ class TestForAutoIterArgs:
 
     def test_iv_liveout(self):
         out = torch.zeros(2, device="cuda", dtype=torch.int32)
-        t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+        t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
         _run_iv_liveout(t_out, fx.Int32(5))
         torch.cuda.synchronize()
         assert out[0].item() == 4, f"iv liveout: expected 4, got {out[0].item()}"
@@ -150,7 +150,7 @@ class TestForAutoIterArgs:
 
     def test_iv_assign(self):
         out = torch.zeros(1, device="cuda", dtype=torch.int32)
-        t_out = flyc.from_dlpack(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
+        t_out = flyc.from_torch_tensor(out).mark_layout_dynamic(leading_dim=0, divisibility=1)
         _run_iv_assign(t_out, fx.Int32(0), fx.Int32(10))
         torch.cuda.synchronize()
         assert out[0].item() == 9, f"iv assign: expected 9, got {out[0].item()}"

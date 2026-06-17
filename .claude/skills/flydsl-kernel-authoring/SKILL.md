@@ -55,7 +55,7 @@ Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages
 - `python/flydsl/expr/derived.py` - CopyAtom, MmaAtom, TiledCopy, TiledMma wrappers
 - `python/flydsl/expr/gpu.py` - GPU operations (thread_idx, block_idx, barrier)
 - `python/flydsl/expr/buffer_ops.py` - AMD buffer load/store intrinsics
-- `python/flydsl/expr/rocdl.py` - MFMA and other ROCm intrinsics
+- `python/flydsl/expr/rocdl/` - MFMA/WMMA and other ROCm intrinsics (package: cdna4, cluster, inline_asm, tdm_ops, universal)
 - `python/flydsl/utils/smem_allocator.py` - LDS (shared memory) management
 - `kernels/` - Pre-built kernels (preshuffle_gemm.py, layernorm, softmax, rmsnorm)
 

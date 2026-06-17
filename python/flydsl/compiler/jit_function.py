@@ -9,7 +9,6 @@ import os
 import pickle
 import pkgutil
 import tempfile
-import threading
 import time
 import types
 from collections import namedtuple
@@ -27,7 +26,7 @@ from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
 from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
-from .jit_executor import CompiledArtifact
+from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
     FuncLocationTracker,
@@ -38,6 +37,7 @@ from .kernel_function import (
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import (
     JitArgument,
+    c_abi_spec,
     cache_signature,
     construct_from_ir_values,
     get_ir_types,
@@ -1109,8 +1109,6 @@ def _build_call_state(sig, args_tuple, func_exe):
     Resolves each parameter's JitArgument type using the same registry as
     convert_to_jit_arguments, then asks it for a reusable slot specification.
     This ensures a single source of truth for argument packing.
-
-    Returns a CallState, or None if any parameter can't be fast-pathed.
     """
 
     slot_specs = []
@@ -1131,88 +1129,21 @@ def _build_call_state(sig, args_tuple, func_exe):
         arg = args_tuple[i]
 
         jit_arg_type = _resolve_jit_arg_type(arg, annotation)
-        if jit_arg_type is None or not hasattr(jit_arg_type, "_reusable_slot_spec"):
-            return None
+        if jit_arg_type is None:
+            raise TypeError(
+                f"@flyc.jit argument {param_name!r} of type {type(arg).__name__} is not a "
+                f"registered JitArgument type and cannot be packed for host dispatch."
+            )
 
-        spec = jit_arg_type._reusable_slot_spec(arg)
-        if spec is None:
-            return None
-
-        # A spec is either (ctype, extract) or a list of such tuples for
-        # multi-slot ABIs (e.g. dynamic-memref tensors with a layout buffer).
-        slot_list = spec if isinstance(spec, list) else [spec]
-
-        for ctype, extract in slot_list:
-            # Scalar slots: extract(arg) -> value.  Buffer slots:
-            # extract(arg, storage) writes in place.
-            try:
-                if hasattr(ctype, "value"):
-                    extract(arg)
-                else:
-                    extract(arg, ctype())
-            except (AttributeError, TypeError):
-                return None
-            slot_specs.append((i, ctype, extract))
+        inst = arg if isinstance(arg, jit_arg_type) else jit_arg_type(arg)
+        for ctype, fill in c_abi_spec(inst):
+            slot_specs.append((i, ctype, fill))
 
     # Auto-stream: NULL ptr selects HIP default stream when no user stream arg.
     if not has_user_stream:
         slot_specs.append((-1, ctypes.c_void_p, None))
 
     return CallState(slot_specs, func_exe)
-
-
-class CallState:
-    """Pre-allocated state for fast kernel dispatch.
-
-    Built from JitArgument types' _reusable_slot_spec protocol — the same
-    types used by convert_to_jit_arguments for the full DLPack path.
-
-    Pre-allocates typed ctypes storage and a packed pointer array at init
-    time.  On each call, only updates .value on existing storage objects —
-    no ctypes object allocation, no pointer()/cast() calls.  Uses
-    thread-local storage for thread safety.
-    """
-
-    __slots__ = ("_func_exe", "_spec", "_tls")
-
-    def __init__(self, slot_specs, func_exe):
-        self._func_exe = func_exe
-        self._spec = slot_specs  # list of (arg_idx, ctype, extract_fn)
-        self._tls = threading.local()
-
-    def _init_buffers(self):
-        n_ptrs = len(self._spec)
-        packed = (ctypes.c_void_p * n_ptrs)()
-        storages = []
-        updaters = []
-
-        for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
-            # ctype(0) works for scalar ctypes; array ctypes need zero-arg ctor.
-            try:
-                s = ctype(0)
-            except TypeError:
-                s = ctype()
-            packed[packed_idx] = ctypes.addressof(s)
-            storages.append(s)
-            if extract is not None:
-                is_scalar = hasattr(s, "value")
-                updaters.append((arg_idx, s, extract, is_scalar))
-
-        self._tls.packed = packed
-        self._tls.updaters = updaters
-        self._tls._storages = storages
-
-    def __call__(self, args_tuple):
-        if not hasattr(self._tls, "packed"):
-            self._init_buffers()
-
-        for arg_idx, storage, extract, is_scalar in self._tls.updaters:
-            if is_scalar:
-                storage.value = extract(args_tuple[arg_idx])
-            else:
-                extract(args_tuple[arg_idx], storage)
-
-        return self._func_exe(self._tls.packed)
 
 
 class JitFunction:
@@ -1487,26 +1418,13 @@ class JitFunction:
             if env.compile.compile_only:
                 return None
             # Build CallState via JitArgument registry (same dispatch as compile path)
-            try:
-                state = _build_call_state(
-                    sig,
-                    args_tuple,
-                    cached_func._get_func_exe(),
-                )
-            except Exception:
-                state = None
-            if state is not None:
-                self._call_state_cache[cache_key] = state
-                return state(args_tuple)
-
-            # Fallback: run through DLPack (should not happen for static layout)
-            log().warning("CallState build failed on cache hit, falling back to DLPack path")
-            if not hasattr(self, "_cached_ctx"):
-                self._cached_ctx = _create_mlir_context()
-            with self._cached_ctx:
-                _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
-                _ensure_stream_arg(jit_args)
-                return cached_func(*jit_args)
+            state = _build_call_state(
+                sig,
+                args_tuple,
+                cached_func._get_func_exe(),
+            )
+            self._call_state_cache[cache_key] = state
+            return state(args_tuple)
 
         if run_only:
             cdir = getattr(self.cache_manager, "cache_dir", None)
@@ -1647,28 +1565,16 @@ class JitFunction:
             print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={get_backend().target.arch})")
             return None
 
-        # Build CallState so subsequent calls skip DLPack. The in-process
-        # CompiledArtifact cache above owns the ExecutionEngine/code object,
-        # so the function pointer remains valid even when disk cache is off.
-        try:
-            state = _build_call_state(
-                sig,
-                args_tuple,
-                compiled_func._get_func_exe(),
-            )
-        except Exception:
-            state = None
-        if state is not None:
-            self._call_state_cache[cache_key] = state
-            return state(args_tuple)
-
-        # Fallback: run through DLPack
-        if not hasattr(self, "_cached_ctx"):
-            self._cached_ctx = _create_mlir_context()
-        with self._cached_ctx:
-            _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
-            _ensure_stream_arg(jit_args)
-            return compiled_func(*jit_args)
+        # The in-process CompiledArtifact cache above owns the ExecutionEngine/
+        # code object, so the function pointer remains valid even when disk
+        # cache is off.
+        state = _build_call_state(
+            sig,
+            args_tuple,
+            compiled_func._get_func_exe(),
+        )
+        self._call_state_cache[cache_key] = state
+        return state(args_tuple)
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:
@@ -1759,12 +1665,6 @@ def _compile_impl(func, *args) -> CompiledFunction:
     call_state = jf._call_state_cache.get(cache_key)
     if call_state is None:
         call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
-    if call_state is None:
-        raise RuntimeError(
-            "flyc.compile(): failed to build CallState.  "
-            "One or more argument types do not support the fast dispatch path "
-            "(missing _reusable_slot_spec)."
-        )
 
     return CompiledFunction(call_state, artifact)
 

@@ -27,13 +27,7 @@ pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
 
 FLY_PIPELINE = (
-    "builtin.module("
-    "fly-canonicalize,"
-    "fly-layout-lowering,"
-    "fly-canonicalize,"
-    "convert-fly-to-rocdl,"
-    "canonicalize,"
-    "cse)"
+    "builtin.module(fly-canonicalize,fly-layout-lowering,fly-canonicalize,convert-fly-to-rocdl,canonicalize,cse)"
 )
 
 
@@ -85,9 +79,8 @@ def test_layout_dynamic_types():
         with Location.unknown(ctx):
             module = Module.create()
             i32 = IntegerType.get_signless(32)
-            idx = IndexType.get()
             with InsertionPoint(module.body):
-                f = func.FuncOp("dynamic_layout", FunctionType.get([i32] * 4, [idx]))
+                f = func.FuncOp("dynamic_layout", FunctionType.get([i32] * 4, [i32]))
                 entry = f.add_entry_block()
                 with InsertionPoint(entry):
                     dim0, dim1, stride0, stride1 = entry.arguments
@@ -98,7 +91,7 @@ def test_layout_dynamic_types():
                     layout = fx.make_layout(shape, stride)
                     sz = fx.size(layout)
                     sc = fx.get_scalar(sz)
-                    func.ReturnOp([arith.IndexCastOp(idx, sc).result])
+                    func.ReturnOp([sc.ir_value()])
 
             pm = PassManager.parse(FLY_PIPELINE, ctx)
             pm.run(module.operation)
@@ -138,9 +131,8 @@ def test_mixed_static_dynamic():
         with Location.unknown(ctx):
             module = Module.create()
             i32 = IntegerType.get_signless(32)
-            idx = IndexType.get()
             with InsertionPoint(module.body):
-                f = func.FuncOp("mixed_layout", FunctionType.get([i32, i32], [idx]))
+                f = func.FuncOp("mixed_layout", FunctionType.get([i32, i32], [i32]))
                 entry = f.add_entry_block()
                 with InsertionPoint(entry):
                     runtime_extent, runtime_stride = entry.arguments
@@ -152,8 +144,8 @@ def test_mixed_static_dynamic():
                     stride = fx.make_stride(c16, runtime_stride)
                     layout = fx.make_layout(shape, stride)
                     sz = fx.size(layout)
-                    sc = fx.get_scalar(sz)
-                    func.ReturnOp([arith.IndexCastOp(idx, sc).result])
+                    sc = fx.get_scalar(sz).ir_value()
+                    func.ReturnOp([sc])
 
             pm = PassManager.parse(FLY_PIPELINE, ctx)
             pm.run(module.operation)

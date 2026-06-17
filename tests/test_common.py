@@ -8,7 +8,6 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-import torch.profiler as tpf
 
 logger = logging.getLogger("flydsl")
 
@@ -59,18 +58,33 @@ def perftest(num_iters=20, num_warmup=3, testGraph=False, num_rotate_args=0, nee
                     latencies.append(start_event.elapsed_time(end_event))
                 avg = np.mean(latencies) * 1000
                 logger.info(f"avg: {avg} us/iter from cuda.Event")
-            with tpf.profile(
-                activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
-                profile_memory=False,
-                with_stack=False,
-                with_modules=True,
-            ) as prof:
+            if int(os.environ.get("FLYDSL_PERFTEST_USE_EVENTS", 0)):
+                # HIP-event timing, avoids nesting torch.profiler under an external rocprofv3 session.
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
                 data = run_iters_rotate(num_iters, func, rotate_args)
-                torch.cuda.synchronize()
+                end_event.record()
+                end_event.synchronize()
                 torch.cuda.empty_cache()
-            avg = get_trace_perf(prof, num_iters)
+                avg = start_event.elapsed_time(end_event) / num_iters * 1000
+            else:
+                import torch.profiler as tpf
+
+                with tpf.profile(
+                    activities=[tpf.ProfilerActivity.CPU, tpf.ProfilerActivity.CUDA],
+                    profile_memory=False,
+                    with_stack=False,
+                    with_modules=True,
+                ) as prof:
+                    data = run_iters_rotate(num_iters, func, rotate_args)
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                avg = get_trace_perf(prof, num_iters)
 
             if testGraph:
+                import torch.profiler as tpf
+
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     data = run_iters_rotate(num_iters, func, rotate_args)

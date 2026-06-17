@@ -35,6 +35,10 @@ if not torch.cuda.is_available():
 from kernels.flash_attn_generic import (  # noqa: E402
     build_flash_attn_func_module,
 )
+from kernels.flash_attn_gfx950 import (  # noqa: E402
+    build_flash_attn_dualwave_swp_module,
+    dualwave_splitk_workspace_elems,
+)
 from tests.test_common import run_perftest  # noqa: E402
 
 # Tensor initialization range (uniform distribution)
@@ -49,36 +53,68 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG = {
     "dualwave_swp_enable_stagger": os.getenv("FLYDSL_DUALWAVE_SWP_STAGGER", "1") == "1",
 }
 
-# (batch, seq_len, num_heads, num_kv_heads, head_dim)
+# (batch, seq_len, num_heads, num_kv_heads, head_dim, num_kv_splits)
 # num_kv_heads == num_heads -> MHA; num_kv_heads < num_heads -> GQA/MQA.
+# num_kv_splits > 1 -> split-K path (gfx950 DUALWAVE_SWP only, seq_len >= 384, D=128).
 DEFAULT_CONFIGS = [
-    (8, 128, 64, 64, 128),
-    (8, 256, 64, 64, 128),
-    (8, 512, 64, 64, 128),
-    (1, 128, 64, 64, 128),
-    (1, 256, 64, 64, 128),
-    (1, 384, 64, 64, 128),
-    (1, 512, 64, 64, 128),
-    (1, 1024, 64, 64, 128),
-    (1, 2048, 64, 64, 128),
-    (1, 4096, 64, 64, 128),
-    (1, 8192, 64, 64, 128),
-    (4, 8192, 64, 64, 128),
-    (1, 2048, 32, 32, 128),
-    (1, 4096, 32, 32, 128),
-    (1, 8192, 32, 32, 128),
-    (8, 8192, 32, 32, 128),
-    (1, 2048, 16, 16, 128),
-    (1, 4096, 16, 16, 128),
-    (1, 8192, 16, 16, 128),
-    (16, 8192, 16, 16, 128),
-    (1, 2048, 8, 8, 128),
-    (1, 4096, 8, 8, 128),
-    (1, 8192, 8, 8, 128),
-    (32, 8192, 8, 8, 128),
-    (16, 8192, 64, 64, 128),
+    (8, 128, 64, 64, 128, 1),
+    (8, 256, 64, 64, 128, 1),
+    (8, 512, 64, 64, 128, 1),
+    (1, 128, 64, 64, 128, 1),
+    (1, 256, 64, 64, 128, 1),
+    (1, 384, 64, 64, 128, 1),
+    (1, 512, 64, 64, 128, 1),
+    (1, 1024, 64, 64, 128, 1),
+    (1, 2048, 64, 64, 128, 1),
+    (1, 4096, 64, 64, 128, 1),
+    (1, 8192, 64, 64, 128, 1),
+    (4, 8192, 64, 64, 128, 1),
+    (1, 2048, 32, 32, 128, 1),
+    (1, 4096, 32, 32, 128, 1),
+    (1, 8192, 32, 32, 128, 1),
+    (8, 8192, 32, 32, 128, 1),
+    (1, 2048, 16, 16, 128, 1),
+    (1, 4096, 16, 16, 128, 1),
+    (1, 8192, 16, 16, 128, 1),
+    (16, 8192, 16, 16, 128, 1),
+    (1, 2048, 8, 8, 128, 1),
+    (1, 4096, 8, 8, 128, 1),
+    (1, 8192, 8, 8, 128, 1),
+    (32, 8192, 8, 8, 128, 1),
+    (16, 8192, 64, 64, 128, 1),
     # GQA configs (num_kv_heads < num_heads).
-    (16, 8192, 64, 8, 128),
+    (16, 8192, 64, 8, 128, 1),
+    (2, 1024, 64, 64, 128, 1),
+    # (1, 98144, 3, 3, 128, 5),
+    # (1, 147216, 3, 3, 128, 5),
+    # (1, 196288, 3, 3, 128, 5),
+    # (1, 245360, 3, 3, 128, 5),
+    # (1, 294432, 3, 3, 128, 5),
+    # (1, 12268, 24, 24, 128, 1),
+    # (1, 18402, 24, 24, 128, 1),
+    # (1, 24536, 24, 24, 128, 1),
+    # (1, 30670, 24, 24, 128, 2),
+    # (1, 36804, 24, 24, 128, 2),
+    # (1, 64, 4, 4, 128, 1),
+    # (1, 30, 4, 4, 128, 1),
+    # (1, 1, 4, 4, 128, 1),
+    # (2, 7, 4, 4, 128, 1),
+    # (3, 31, 3, 3, 128, 1),
+    # (5, 33, 5, 5, 128, 1),
+    # (5, 63, 7, 7, 128, 1),
+    # (3, 65, 3, 3, 128, 1),
+]
+
+# QKV varlen test cases (packed cu_seqlens). Each entry is
+#   (per_batch_seqlens, num_heads, num_kv_heads, head_dim)
+# batch = len(per_batch_seqlens); per batch seqlen_q == seqlen_kv (self-attention).
+# Exercise uneven per-batch lengths, non-256/64-multiple lengths, seqlen<256, GQA.
+VARLEN_CONFIGS = [
+    # ([8192], 64, 64, 128),  # uneven; 128 -> partial last q-block; MHA
+    ([512, 256, 1024, 128], 64, 64, 128),  # uneven; 128 -> partial last q-block; MHA
+    ([300, 700, 500], 32, 32, 128),  # all non-256-multiples; partial q+kv tiles
+    ([1024, 1024], 64, 8, 128),  # even, GQA (num_kv_heads=8)
+    ([1, 3, 31, 33, 63, 65], 16, 16, 128),  # small (<256) + non-multiples; 4 batches
 ]
 
 
@@ -235,21 +271,72 @@ def run_config(
     dtype_str="f16",
     verbose=True,
     num_kv_heads=None,
+    varlen_seqlens=None,
 ):
     device = "cuda"
     results = {}
 
-    if seq_len % 128 != 0:
-        results["err"] = f"seq_len ({seq_len}) must be divisible by 128 for flash_attn_func"
-        return results
-    if head_dim % 32 != 0 or head_dim < 64:
-        results["err"] = f"head_dim ({head_dim}) must be >= 64 and divisible by 32"
-        return results
+    # ── flash_attn_func size / dtype / GPU-arch constraints ──────────────────
+    # Reject an unsupported config up-front by raising ValueError with a clear
+    # reason (mirrors the kernel's own guards in flash_attn_generic.py) instead
+    # of building a kernel that would assert, read KV out-of-bounds, or return
+    # garbage. The sweep callers wrap run_config in try/except, so the raise is
+    # surfaced as an ERROR row.
     if num_kv_heads is None:
         num_kv_heads = num_heads
+
+    # 1) GPU architecture. MFMA32 + the LDS-transpose paths need CDNA3 (gfx942)
+    #    or CDNA4 (gfx950); the DUALWAVE_SWP fast path is gfx950-only.
+    try:
+        gpu_arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    except Exception:
+        gpu_arch = ""
+    if not (gpu_arch.startswith("gfx942") or gpu_arch.startswith("gfx950")):
+        raise ValueError(
+            f"unsupported GPU arch '{gpu_arch or 'unknown'}': flash_attn_func requires "
+            f"CDNA3 (gfx942) or CDNA4 (gfx950)"
+        )
+
+    # 2) dtype: only f16 / bf16.
+    if dtype_str not in ("f16", "bf16"):
+        raise ValueError(f"dtype_str ('{dtype_str}') must be 'f16' or 'bf16'")
+
+    # 3) head_dim: a multiple of 32 and >= 64 (the DUALWAVE_SWP fast path further
+    #    needs exactly 128; other head_dims simply run the generic path).
+    if head_dim % 32 != 0 or head_dim < 64:
+        raise ValueError(f"head_dim ({head_dim}) must be >= 64 and a multiple of 32")
+
+    # 4) GQA/MQA head divisibility.
     if num_heads % num_kv_heads != 0:
-        results["err"] = f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
-        return results
+        raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
+
+    # 5) seq_len: arbitrary length is supported (the DUALWAVE_SWP fast path for
+    #    seq_len >= 384, the generic fallback for any seq_len -- partial last
+    #    q-tile via Q/O bounds, partial last kv-tile via bounded/clamped KV loads
+    #    + causal / non-causal padding masks). Only seq_len >= 1 is required.
+    if seq_len < 1:
+        raise ValueError(f"seq_len ({seq_len}) must be >= 1")
+
+    # ── QKV varlen (packed cu_seqlens) ───────────────────────────────────────
+    # When varlen_seqlens is given, this batch is packed: Q/O are [total_tok, H, D],
+    # K/V are [total_tok, H_kv, D], per-batch token ranges come from the cumulative
+    # cu_seqlens (int32 [B+1]) passed to the build call. Per batch seqlen_q==seqlen_kv.
+    varlen = varlen_seqlens is not None
+    if varlen:
+        _vl = [int(s) for s in varlen_seqlens]
+        if len(_vl) < 1 or any(s < 1 for s in _vl):
+            raise ValueError(f"varlen_seqlens must be a non-empty list of positive ints, got {varlen_seqlens}")
+        batch = len(_vl)
+        seq_len = max(_vl)
+        _cu = [0]
+        for s in _vl:
+            _cu.append(_cu[-1] + s)
+        total_tok = _cu[-1]
+        cu_seqlens_q = torch.tensor(_cu, dtype=torch.int32, device=device)
+        cu_seqlens_kv = cu_seqlens_q  # self-attn: q==kv per batch
+    else:
+        cu_seqlens_q = None
+        cu_seqlens_kv = None
 
     try:
         exe = build_flash_attn_func_module(
@@ -260,6 +347,8 @@ def run_config(
             waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
             daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
             num_kv_heads=num_kv_heads,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
             dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
             dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
             dualwave_swp_debug_lazy_counts=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_debug_lazy_counts"],
@@ -275,24 +364,32 @@ def run_config(
     B, S, H, D = batch, seq_len, num_heads, head_dim
     H_KV = num_kv_heads
     setup_seed(seed)
-    q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-    k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-    v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-    trigger_lazy_else = os.getenv("FLYDSL_DUALWAVE_SWP_TRIGGER_LAZY_ELSE", "0") == "1"
     debug_lazy_counts = FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_debug_lazy_counts"]
-    if trigger_lazy_else:
-        q_4d.fill_(1.0)
-        k_4d.zero_()
-        if S >= 128:
-            k_4d[:, 64:128, :, :].fill_(80.0)
-        print(
-            "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, " "K tile1=80 to force row_max - m_row > 8",
-            flush=True,
-        )
-
-    q_flat = q_4d.contiguous().view(-1)
-    k_flat = k_4d.contiguous().view(-1)
-    v_flat = v_4d.contiguous().view(-1)
+    if varlen:
+        # Packed [total_tok, H/H_kv, D]; reference slices each batch out by cu_seqlens.
+        q_3d = torch.empty(total_tok, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        k_3d = torch.empty(total_tok, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        v_3d = torch.empty(total_tok, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        q_flat = q_3d.contiguous().view(-1)
+        k_flat = k_3d.contiguous().view(-1)
+        v_flat = v_3d.contiguous().view(-1)
+    else:
+        q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        trigger_lazy_else = os.getenv("FLYDSL_DUALWAVE_SWP_TRIGGER_LAZY_ELSE", "0") == "1"
+        if trigger_lazy_else:
+            q_4d.fill_(1.0)
+            k_4d.zero_()
+            if S >= 128:
+                k_4d[:, 64:128, :, :].fill_(80.0)
+            print(
+                "[DUALWAVE_SWP_LAZY_ELSE_DEBUG] constructed Q=1, K tile0=0, " "K tile1=80 to force row_max - m_row > 8",
+                flush=True,
+            )
+        q_flat = q_4d.contiguous().view(-1)
+        k_flat = k_4d.contiguous().view(-1)
+        v_flat = v_4d.contiguous().view(-1)
     o_flat = torch.zeros_like(q_flat)
     debug_counts = torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy_counts else None
 
@@ -322,8 +419,20 @@ def run_config(
             flush=True,
         )
 
-    ref_4d = pytorch_ref_attention(q_4d.float(), k_4d.float(), v_4d.float(), causal=causal).to(dtype)
-    ref_flat = ref_4d.contiguous().view(-1)
+    if varlen:
+        # Per-batch reference: SDPA on each unpacked [seqlen_b] slice -> packed buffer.
+        ref_3d = torch.empty(total_tok, H, D, dtype=dtype, device=device)
+        for _b in range(batch):
+            s0, s1 = _cu[_b], _cu[_b + 1]
+            qb = q_3d[s0:s1].unsqueeze(0).float()
+            kb = k_3d[s0:s1].unsqueeze(0).float()
+            vb = v_3d[s0:s1].unsqueeze(0).float()
+            rb = pytorch_ref_attention(qb, kb, vb, causal=causal).to(dtype)
+            ref_3d[s0:s1] = rb.squeeze(0)
+        ref_flat = ref_3d.contiguous().view(-1)
+    else:
+        ref_4d = pytorch_ref_attention(q_4d.float(), k_4d.float(), v_4d.float(), causal=causal).to(dtype)
+        ref_flat = ref_4d.contiguous().view(-1)
 
     o_f32 = o_flat.float()
     ref_f32 = ref_flat.float()
@@ -363,6 +472,156 @@ def run_config(
 
         # Warm up ROCTracer/torch.profiler itself so the measured run_perftest
         # below is not biased by first-profiler-session setup overhead.
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                kernel_fn()
+            torch.cuda.synchronize()
+
+        _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
+        if varlen:
+            # Sum per-batch FLOPs (each batch attends only within its own seqlen).
+            flops = sum(4.0 * sb * (sb / 2.0 if causal else float(sb)) * D * H for sb in _vl)
+        else:
+            s_eff = S / 2.0 if causal else float(S)
+            flops = 4.0 * S * s_eff * D * H * B
+        tflops = flops / (us * 1e-6) / 1e12
+        results["us"] = us
+        results["tflops"] = tflops
+    except Exception as e:
+        results["bench_err"] = str(e)
+
+    return results
+
+
+def run_splitk_config(
+    batch,
+    seq_len,
+    num_heads,
+    head_dim,
+    dtype,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    dtype_str="bf16",
+    verbose=True,
+    num_kv_heads=None,
+    num_kv_splits=2,
+):
+    """Run the gfx950 DUALWAVE_SWP kernel in split-K mode (num_kv_splits > 1).
+
+    Drives ``build_flash_attn_dualwave_swp_module(num_kv_splits=...)`` directly
+    (the generic flash_attn_func dispatch does not plumb split-K) with the
+    required fp32 workspace, then validates the combined output vs torch SDPA.
+    Returns a run_config-compatible result dict (max_err / min_cos / passed /
+    us / tflops) so it prints through the same summary table.
+    """
+    device = "cuda"
+    results = {}
+
+    if int(num_kv_splits) < 2:
+        results["err"] = f"run_splitk_config requires num_kv_splits >= 2, got {num_kv_splits}"
+        return results
+    # Not-applicable shapes are SKIPPED (not failed) so a default-config sweep with
+    # --num_kv_splits N quietly skips D!=128 / non-bf16,f16 / seq_len<384 configs.
+    if head_dim != 128 or dtype_str not in ("bf16", "f16") or seq_len < 384:
+        return {"skip": True}
+    if num_kv_heads is None:
+        num_kv_heads = num_heads
+    if num_heads % num_kv_heads != 0:
+        results["err"] = f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
+        return results
+
+    # The split-K workspace is a single buffer-tensor addressed with a 32-bit
+    # num_records (bytes). When batch*splits*heads*seq is large enough that the
+    # fp32 workspace exceeds 4 GiB, high m/l offsets fall past the descriptor and
+    # get OOB-dropped -> wrong combine. Split-K targets SMALL grids anyway, so
+    # SKIP (not fail) any shape whose workspace would overflow 32-bit addressing.
+    ws_elems = dualwave_splitk_workspace_elems(batch, num_heads, seq_len, int(num_kv_splits), head_dim=head_dim)
+    if ws_elems * 4 >= 0xFFFFFFFF:
+        return {"skip": True}
+
+    try:
+        exe = build_flash_attn_dualwave_swp_module(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            causal=causal,
+            dtype_str=dtype_str,
+            waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
+            daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
+            num_kv_heads=num_kv_heads,
+            dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+            dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
+            dualwave_swp_debug_lazy_counts=False,
+            dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
+            num_kv_splits=int(num_kv_splits),
+        )
+    except Exception as e:
+        results["err"] = f"build: {e}"
+        import traceback
+
+        traceback.print_exc()
+        return results
+
+    B, S, H, D = batch, seq_len, num_heads, head_dim
+    H_KV = num_kv_heads
+    setup_seed(seed)
+    q_4d = torch.empty(B, S, H, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    k_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+    v_4d = torch.empty(B, S, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+
+    q_flat = q_4d.contiguous().view(-1)
+    k_flat = k_4d.contiguous().view(-1)
+    v_flat = v_4d.contiguous().view(-1)
+    o_flat = torch.zeros_like(q_flat)
+    workspace = torch.zeros(ws_elems, dtype=torch.float32, device=device)
+
+    try:
+        exe(q_flat, k_flat, v_flat, o_flat, B, S, workspace=workspace)
+        torch.cuda.synchronize()
+    except Exception as e:
+        results["err"] = f"exec: {e}"
+        import traceback
+
+        traceback.print_exc()
+        return results
+
+    ref_4d = pytorch_ref_attention(q_4d.float(), k_4d.float(), v_4d.float(), causal=causal).to(dtype)
+    ref_flat = ref_4d.contiguous().view(-1)
+
+    o_f32 = o_flat.float()
+    ref_f32 = ref_flat.float()
+    max_err = (o_f32 - ref_f32).abs().max().item()
+    mean_err = (o_f32 - ref_f32).abs().mean().item()
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
+    min_cos = cos_sim.min().item()
+    results["max_err"] = max_err
+    results["mean_err"] = mean_err
+    results["min_cos"] = min_cos
+    results["passed"] = max_err < 1e-2 and min_cos > 0.99
+
+    if verbose:
+        tag = f"B={B} S={S} H={H} D={D} splits={num_kv_splits}"
+        result_md5 = compute_md5(o_flat)
+        ref_md5 = compute_md5(ref_flat)
+        print(f"  [{tag}] result_md5 = {result_md5}")
+        print(f"  [{tag}] ref_md5    = {ref_md5}")
+        print(f"  [{tag}] --- compare_arrays ---")
+        compare_arrays(
+            o_flat.to(torch.float32).detach().cpu().numpy(),
+            ref_flat.to(torch.float32).detach().cpu().numpy(),
+        )
+
+    try:
+
+        def kernel_fn():
+            exe(q_flat, k_flat, v_flat, o_flat, B, S, workspace=workspace)
+
         with torch.profiler.profile(
             activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
             profile_memory=False,
@@ -602,6 +861,7 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         "D",
         "dtype",
         "causal",
+        "kv_sp",
         "FlyDSL_Time(us)",
         "FlyDSL_TFLOPS",
         "FlyDSL_MaxErr",
@@ -650,8 +910,8 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
             else:
                 label, fa, ca, aa = avg_row
                 cmp_overrides = None
-            # label + 6 empty cfg columns (S, H, Hkv, D, dtype, causal)
-            w.writerow([label, "", "", "", "", "", ""] + _metrics(fa, ca, aa, cmp_overrides))
+            # label + 7 empty cfg columns (S, H, Hkv, D, dtype, causal, kv_sp)
+            w.writerow([label, "", "", "", "", "", "", ""] + _metrics(fa, ca, aa, cmp_overrides))
 
 
 def _write_normal_csv(csv_path, data_rows, avg_rows):
@@ -664,6 +924,7 @@ def _write_normal_csv(csv_path, data_rows, avg_rows):
         "D",
         "dtype",
         "causal",
+        "kv_sp",
         "Path",
         "Status",
         "MaxErr",
@@ -687,10 +948,11 @@ def _write_normal_csv(csv_path, data_rows, avg_rows):
                 ]
             )
         for label, avg in avg_rows:
-            # label + 7 empty (S, H, Hkv, D, dtype, causal, Path) + Status + 4 metrics
+            # label + 8 empty (S, H, Hkv, D, dtype, causal, kv_sp, Path) + Status + 4 metrics
             w.writerow(
                 [
                     label,
+                    "",
                     "",
                     "",
                     "",
@@ -742,7 +1004,7 @@ def _avg_cmp_values(rows, fly_idx, other_idx):
 
 
 def _tag_group(cfg):
-    """Extract (dtype_key, causal_tag) from config tuple (B, S, H, Hkv, D, dtype, causal)."""
+    """Extract (dtype_key, causal_tag) from config tuple (B, S, H, Hkv, D, dtype, causal, kv_sp)."""
     return cfg[5], cfg[6]
 
 
@@ -774,15 +1036,15 @@ def _print_grouped_avgs(rows, tag_fn, print_avg_fn):
                 print_avg_fn(f"AVG ({ct})", subset)
 
 
-_CFG_HDR = f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} " f"{'dtype':>5s} {'causal':>8s}"
+_CFG_HDR = f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} {'dtype':>5s} {'causal':>8s} {'kv_sp':>5s}"
 _CFG_W = len(_CFG_HDR)
 _PATH_W = 20
 
 
 def _fmt_cfg(cfg):
-    """Format config tuple (B, S, H, Hkv, D, dtype, causal) as fixed-width columns."""
-    B, S, H, Hkv, D, dt, cs = cfg
-    return f"{B:>4d} {S:>6d} {H:>4d} {Hkv:>4d} {D:>4d} {dt:>5s} {cs:>8s}"
+    """Format config tuple (B, S, H, Hkv, D, dtype, causal, kv_sp) as fixed-width columns."""
+    B, S, H, Hkv, D, dt, cs, ksp = cfg
+    return f"{B:>4d} {S:>6d} {H:>4d} {Hkv:>4d} {D:>4d} {dt:>5s} {cs:>8s} {ksp:>5d}"
 
 
 def _fmt_normal_row(cfg, path, status, r):
@@ -792,9 +1054,71 @@ def _fmt_normal_row(cfg, path, status, r):
     prefix = f"{cfg_s}{path_s}"
     if "err" in r:
         return f"{prefix} | {'ERROR':>6s} | {r['err'][:60]}"
+    if r.get("skip"):
+        return f"{prefix} | {'SKIP':>6s} | n/a"
     us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
     tf_s = f"{r['tflops']:>9.1f}" if "tflops" in r else "      N/A"
     return f"{prefix} | {status:>6s} | " f"{r['max_err']:>8.2e} {r['min_cos']:>8.5f} | " f"{us_s} {tf_s}"
+
+
+def _run_varlen_section(args, dtypes_to_test, causals_to_test, dtype_map):
+    """Self-contained QKV varlen test/bench: the FlyDSL packed cu_seqlens path vs a
+    per-batch SDPA reference (computed inside run_config). One row per
+    (dtype, causal, VARLEN_CONFIG). Returns True if all rows passed."""
+    if not VARLEN_CONFIGS:
+        return True
+    print("=" * 130)
+    print("QKV varlen (packed cu_seqlens): FlyDSL vs per-batch SDPA reference")
+    print("=" * 130)
+    hdr = (
+        f"  {'seqlens':<28} {'B':>3} {'H':>4} {'Hkv':>4} {'D':>4} {'dtype':>6} "
+        f"{'causal':>8} | {'Time(us)':>10} {'TFLOPS':>8} {'MaxErr':>9} {'status':>7}"
+    )
+    print(hdr)
+    print("  " + "-" * (len(hdr) - 2))
+    all_ok = True
+    for dtype_key in dtypes_to_test:
+        dtype, dtype_str = dtype_map[dtype_key]
+        for causal in causals_to_test:
+            for seqlens, nh, nh_kv, hd in VARLEN_CONFIGS:
+                nh_kv_eff = args.num_kv_heads if args.num_kv_heads is not None else nh_kv
+                ctag = "causal" if causal else "nocausal"
+                sl_str = str(seqlens)
+                if len(sl_str) > 28:
+                    sl_str = sl_str[:25] + "..."
+                pre = f"  {sl_str:<28} {len(seqlens):>3} {nh:>4} {nh_kv_eff:>4} {hd:>4} {dtype_key:>6} {ctag:>8} |"
+                try:
+                    r = run_config(
+                        len(seqlens),
+                        max(seqlens),
+                        nh,
+                        hd,
+                        dtype,
+                        causal,
+                        warmup=args.warmup,
+                        iters=args.iters,
+                        seed=args.seed,
+                        dtype_str=dtype_str,
+                        verbose=False,
+                        num_kv_heads=nh_kv_eff,
+                        varlen_seqlens=seqlens,
+                    )
+                except Exception as e:
+                    print(f"{pre} RAISED: {e}")
+                    all_ok = False
+                    continue
+                if "err" in r:
+                    print(f"{pre} ERR: {r['err']}")
+                    all_ok = False
+                    continue
+                us = r.get("us", float("nan"))
+                tf = r.get("tflops", float("nan"))
+                me = r.get("max_err", float("nan"))
+                passed = bool(r.get("passed", False))
+                all_ok = all_ok and passed
+                print(f"{pre} {us:>10.1f} {tf:>8.1f} {me:>9.2e} {('PASS' if passed else 'FAIL'):>7}")
+    print("=" * 130)
+    return all_ok
 
 
 def main():
@@ -809,6 +1133,13 @@ def main():
         help="KV head count for GQA/MQA. Default = num_heads (MHA). " "Requires num_heads %% num_kv_heads == 0.",
     )
     parser.add_argument("--head_dim", type=int, default=None)
+    parser.add_argument(
+        "--num_kv_splits",
+        type=int,
+        default=1,
+        help="Split-K factor for the gfx950 DUALWAVE_SWP kernel. >1 runs the split-K "
+        "path (+combine kernel) via run_splitk_config; D=128 bf16/f16, seq_len >= 384.",
+    )
     causal_group = parser.add_mutually_exclusive_group()
     causal_group.add_argument("--causal", action="store_true", dest="causal")
     causal_group.add_argument("--no-causal", action="store_false", dest="causal")
@@ -848,6 +1179,7 @@ def main():
                 nh_single,
                 args.num_kv_heads if args.num_kv_heads is not None else nh_single,
                 args.head_dim or 128,
+                args.num_kv_splits,
             )
         ]
     else:
@@ -861,6 +1193,11 @@ def main():
         print("=" * 130)
         print(f"FlyDSL vs aiter_ck vs aiter_asm  ({causal_desc}, {dtype_desc})")
         print(f"GPU: {torch.cuda.get_device_name(0)}")
+        if args.num_kv_splits > 1:
+            print(
+                f"  FlyDSL column: split-K path (num_kv_splits={args.num_kv_splits}); "
+                f"D!=128 / non-bf16,f16 / seq_len<384 / ws>4GiB configs SKIP"
+            )
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
         print("  aiter_ck: bf16+fp16, aiter_asm: bf16 only")
         print("=" * 130)
@@ -870,27 +1207,49 @@ def main():
         for dtype_key in dtypes_to_test:
             dtype, dtype_str = dtype_map[dtype_key]
             for causal in causals_to_test:
-                for batch, seq_len, nh, nh_kv_default, hd in configs:
+                for batch, seq_len, nh, nh_kv_default, hd, cfg_kv_splits in configs:
                     causal_tag = "causal" if causal else "nocausal"
-                    # CLI --num_kv_heads (if set) overrides the per-config default.
+                    # CLI --num_kv_heads / --num_kv_splits (if set) override the per-config default.
                     nh_kv = args.num_kv_heads if args.num_kv_heads is not None else nh_kv_default
-                    cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
+                    kv_splits = args.num_kv_splits if args.num_kv_splits > 1 else cfg_kv_splits
+                    cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag, kv_splits)
                     print(f"  {_fmt_cfg(cfg)} ...", flush=True)
 
-                    fly_r = run_config(
-                        batch,
-                        seq_len,
-                        nh,
-                        hd,
-                        dtype,
-                        causal,
-                        warmup=args.warmup,
-                        iters=args.iters,
-                        seed=args.seed,
-                        dtype_str=dtype_str,
-                        verbose=False,
-                        num_kv_heads=nh_kv,
-                    )
+                    try:
+                        if kv_splits > 1:
+                            fly_r = run_splitk_config(
+                                batch,
+                                seq_len,
+                                nh,
+                                hd,
+                                dtype,
+                                causal,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                seed=args.seed,
+                                dtype_str=dtype_str,
+                                verbose=False,
+                                num_kv_heads=nh_kv,
+                                num_kv_splits=kv_splits,
+                            )
+                        else:
+                            fly_r = run_config(
+                                batch,
+                                seq_len,
+                                nh,
+                                hd,
+                                dtype,
+                                causal,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                seed=args.seed,
+                                dtype_str=dtype_str,
+                                verbose=False,
+                                num_kv_heads=nh_kv,
+                            )
+                    except Exception as _fly_err:
+                        print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)}: {_fly_err}", flush=True)
+                        fly_r = {"err": str(_fly_err)}
                     ck_r = run_aiter_bench(
                         batch,
                         seq_len,
@@ -973,6 +1332,9 @@ def main():
         _write_cmp_csv(csv_path, rows, cmp_avg_rows)
         print(f"Results saved to: {csv_path}")
 
+        if configs is DEFAULT_CONFIGS:
+            _run_varlen_section(args, dtypes_to_test, causals_to_test, dtype_map)
+
     else:
         # ---- Normal FlyDSL test mode ----
         print("=" * 130)
@@ -993,30 +1355,52 @@ def main():
         for dtype_key in dtypes_to_test:
             dtype, dtype_str = dtype_map[dtype_key]
             for causal in causals_to_test:
-                for batch, seq_len, nh, nh_kv_default, hd in configs:
+                for batch, seq_len, nh, nh_kv_default, hd, cfg_kv_splits in configs:
                     causal_tag = "causal" if causal else "nocausal"
-                    # CLI --num_kv_heads (if set) overrides the per-config default.
+                    # CLI --num_kv_heads / --num_kv_splits (if set) override the per-config default.
                     nh_kv = args.num_kv_heads if args.num_kv_heads is not None else nh_kv_default
-                    cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag)
+                    kv_splits = args.num_kv_splits if args.num_kv_splits > 1 else cfg_kv_splits
+                    cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag, kv_splits)
                     try:
-                        r = run_config(
-                            batch,
-                            seq_len,
-                            nh,
-                            hd,
-                            dtype,
-                            causal,
-                            warmup=args.warmup,
-                            iters=args.iters,
-                            seed=args.seed,
-                            dtype_str=dtype_str,
-                            num_kv_heads=nh_kv,
-                        )
+                        if kv_splits > 1:
+                            r = run_splitk_config(
+                                batch,
+                                seq_len,
+                                nh,
+                                hd,
+                                dtype,
+                                causal,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                seed=args.seed,
+                                dtype_str=dtype_str,
+                                num_kv_heads=nh_kv,
+                                num_kv_splits=kv_splits,
+                            )
+                        else:
+                            r = run_config(
+                                batch,
+                                seq_len,
+                                nh,
+                                hd,
+                                dtype,
+                                causal,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                seed=args.seed,
+                                dtype_str=dtype_str,
+                                num_kv_heads=nh_kv,
+                            )
                         path = ""
                         if "err" in r:
+                            print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)}: {r['err']}", flush=True)
                             print(_fmt_normal_row(cfg, path, "ERROR", r))
                             all_passed = False
                             rows.append((cfg, path, "ERROR", r))
+                            continue
+                        if r.get("skip"):
+                            print(_fmt_normal_row(cfg, path, "SKIP", r))
+                            rows.append((cfg, path, "SKIP", r))
                             continue
 
                         status = "PASS" if r["passed"] else "FAIL"
@@ -1025,6 +1409,7 @@ def main():
                         print(_fmt_normal_row(cfg, path, status, r))
                         rows.append((cfg, path, status, r))
                     except Exception as e:
+                        print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)}: {e}", flush=True)
                         print(_fmt_normal_row(cfg, "", "ERROR", {"err": str(e)}))
                         all_passed = False
                         rows.append((cfg, "", "ERROR", {"err": str(e)}))
@@ -1053,7 +1438,12 @@ def main():
         csv_path = f"fmha_perf_{_gpu_short_name()}.csv"
         _write_normal_csv(csv_path, rows, normal_avg_rows)
         print(f"Results saved to: {csv_path}")
-        if all_passed:
+
+        varlen_ok = True
+        if configs is DEFAULT_CONFIGS:
+            varlen_ok = _run_varlen_section(args, dtypes_to_test, causals_to_test, dtype_map)
+
+        if all_passed and varlen_ok:
             print("All tests PASSED")
         else:
             print("Some tests FAILED")
