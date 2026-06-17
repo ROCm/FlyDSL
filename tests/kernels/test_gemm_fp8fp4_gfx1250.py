@@ -25,7 +25,6 @@ import flydsl.compiler as flyc  # noqa: E402,I001
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm_fp8fp4_gfx1250 import (  # noqa: E402
-    _is_fp8_deep_pipeline,
     compile_mxscale_gemm,
     compile_ptpc_gemm,
 )
@@ -38,19 +37,33 @@ if not torch.cuda.is_available():
 SCALE_BLOCK = 32
 
 
-def preshuffle_scale(scale: torch.Tensor) -> torch.Tensor:
-    """32x4 scale layout (A or B): [R, Ks] -> [R//32, K] (Ks = K//32).
+def preshuffle_scale(scale: torch.Tensor, *, inactive_fill: int = 0) -> torch.Tensor:
+    """32x4 scale layout (A or B): [R, Ks] -> [ceil(R/32), K] (Ks = K//32).
 
-        out[r_o, k_o, r_i, k_i] = scale[r_o*32 + r_i, k_o*4 + k_i]
-
-    A 128B atomic (32 rows x 4 K-scales) is exactly one 32-lane WMMA scale VGPR
-    (lane L = row L's 4 K-scales). tile-independent; serves fp8 (16x16, op_sel) and
-    fp4 (32x16) uniformly.
+    out[r_o, k_o, r_i, k_i] = scale[r_o*32 + r_i, k_o*4 + k_i]
     """
     R, Ks = scale.shape
-    assert R % 32 == 0 and Ks % 4 == 0, f"preshuffle_scale needs R%32==0, Ks%4==0; got R={R} Ks={Ks}"
+    assert Ks % 4 == 0, f"preshuffle_scale needs Ks%4==0; got R={R} Ks={Ks}"
+    R_blocks = (R + 31) // 32
+    if R_blocks * 32 != R:
+        storage = torch.full((R_blocks * 32, Ks), inactive_fill, dtype=scale.dtype, device=scale.device)
+        storage[:R, :] = scale
+        scale = storage
+        R = R_blocks * 32
     x = scale.view(R // 32, 32, Ks // 4, 4).permute(0, 2, 1, 3).contiguous()  # [R//32, Ks//4, 32, 4]
     return x.reshape(R // 32, -1)  # [R//32, K]
+
+
+def _select_ascale_load_path(M: int) -> str:
+    return "vgpr" if M < 32 else "shuffled_tdm"
+
+
+def _prepare_a_scale_for_path(a_scale: torch.Tensor, ascale_load_path: str) -> torch.Tensor:
+    if ascale_load_path == "vgpr":
+        return a_scale
+    if ascale_load_path == "shuffled_tdm":
+        return preshuffle_scale(a_scale)
+    raise ValueError(f"unsupported ascale_load_path={ascale_load_path!r}")
 
 
 def random_fp8_data(rows: int, cols: int, *, device="cpu") -> torch.Tensor:
@@ -298,10 +311,10 @@ def _pad_mxscale_inputs(
     b_scale: torch.Tensor,
     padded_shape: dict[str, int],
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Pad data/scale tensors so the kernel can run full tiles safely."""
+    """Prepare mxscale tensors without extending A-scale rows."""
     a = _pad_2d_tensor(a, padded_shape["M"], padded_shape["K"] // padded_shape["pack_a"], fill_value=0)
     b = _pad_2d_tensor(b, padded_shape["N"], padded_shape["K"] // padded_shape["pack_b"], fill_value=0)
-    a_scale = _pad_2d_tensor(a_scale, padded_shape["M"], padded_shape["K_scale"], fill_value=127)
+    assert a_scale.shape == (padded_shape["M"], padded_shape["K_scale"])
     b_scale = _pad_2d_tensor(b_scale, padded_shape["N"], padded_shape["K_scale"], fill_value=127)
     return a, b, a_scale, b_scale
 
@@ -333,6 +346,7 @@ def _run_mxscale_gemm_test(
     waves_per_eu=None,
     expert_sched_mode=True,
     split_k=1,
+    ascale_load_path=None,
     return_launch_fn=False,
 ):
     """Unified test body for FP4 and FP8."""
@@ -351,6 +365,8 @@ def _run_mxscale_gemm_test(
     padded_n = padded_shape["N"]
     padded_k = padded_shape["K"]
     local_k = padded_k // split_k
+    if ascale_load_path is None:
+        ascale_load_path = _select_ascale_load_path(M)
 
     num_k_tiles = local_k // tile_k
     if num_buffers > 1 and num_k_tiles < num_buffers:
@@ -376,7 +392,7 @@ def _run_mxscale_gemm_test(
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
         f"tiles=({tile_m},{tile_n},{tile_k}), bufs={num_buffers}"
-        f"{mcast_str}{tdm_str}, preshuffle, out={out_dtype}"
+        f"{mcast_str}{tdm_str}, ascale={ascale_load_path}, preshuffle, out={out_dtype}"
     )
 
     # Generate data
@@ -406,8 +422,7 @@ def _run_mxscale_gemm_test(
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
-    # mxscale scales: A-scale is always read from its natural A_scale[M, K//32] layout
-    # straight into VGPRs (no reshuffle -- upload as-is); B-scale is always 32x4.
+    a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
     b_scale = preshuffle_scale(b_scale)
 
     # Preshuffle B data
@@ -440,6 +455,7 @@ def _run_mxscale_gemm_test(
         inst_prefetch=inst_prefetch,
         split_k=split_k,
         expert_sched_mode=expert_sched_mode,
+        ascale_load_path=ascale_load_path,
     )
 
     # Keep 2D — dynamic_layout=True packs shape as i32; flattening overflows for M*K >= 2^31.
@@ -545,6 +561,30 @@ def _extract_i64_metadata(compiled_ir: str, key: str) -> int:
 # ── pytest parametrized tests ──
 
 
+def _gen_mxfp8_gemm_configs():
+    # (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
+    base = [
+        (128, 256, 256, 128, 256, 128, 2, 4),
+        (256, 256, 256, 256, 256, 128, 2, 2),
+        (1024, 1024, 1024, 128, 256, 128, 2, 4),
+    ]
+    cfgs = [(*shape, num_buffers) for shape in base for num_buffers in (2, 3)]
+    cfgs.append((256, 256, 512, 256, 256, 128, 2, 2, 4))
+    return cfgs
+
+
+def _gen_a8w4_gemm_configs():
+    # (M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers)
+    base = [
+        (128, 5632, 2816, 128, 256, 256, 2, 2),
+        (128, 2816, 2816, 128, 256, 256, 2, 2),
+        (1024, 1024, 1024, 128, 256, 128, 2, 4),
+    ]
+    cfgs = [(*shape, num_buffers) for shape in base for num_buffers in (2, 3)]
+    cfgs.append((256, 256, 512, 256, 256, 128, 2, 2, 4))
+    return cfgs
+
+
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
     [
@@ -588,14 +628,9 @@ def test_mxfp4_gemm(
 
 
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
-    [
-        (128, 256, 256, 128, 256, 128, 2, 4),
-        (256, 256, 256, 256, 256, 128, 2, 2),
-        (1024, 1024, 1024, 128, 256, 128, 2, 4),
-    ],
+    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers",
+    _gen_mxfp8_gemm_configs(),
 )
-@pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp8_gemm(
@@ -655,14 +690,9 @@ def test_mxfp8_gemm_splitk(split_k, out_dtype):
 
 
 @pytest.mark.parametrize(
-    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
-    [
-        (128, 5632, 2816, 128, 256, 256, 2, 2),
-        (128, 2816, 2816, 128, 256, 256, 2, 2),
-        (1024, 1024, 1024, 128, 256, 128, 2, 4),
-    ],
+    "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers",
+    _gen_a8w4_gemm_configs(),
 )
-@pytest.mark.parametrize("num_buffers", [2, 3])
 @pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, use_tdm_store, out_dtype):
@@ -781,38 +811,38 @@ def test_mxscale_bscale_32x4(data_format, M, N, K, tile_n, tile_k, n_warp, num_b
     )
 
 
-def _gen_natural_ascale_configs():
-    # (fmt, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf) for the natural A-scale
-    # buffer_load path (wave-spec, default ascale_load_path='vgpr'). Covers wave
+def _gen_ascale_32x4_configs():
+    # (fmt, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf) for the A-scale
+    # 32x4 TDM path. Covers wave
     # counts 2/3/4, A-scale M op_sel via tile_m (rep 1/2/4/8/16), tile_k (k_steps
     # 1/2/4), multi-64 tile_n, and ragged M. tile_k kept small at large tile_m so
-    # LDS fits. M==tile_m exercises a full M tile; M<tile_m exercises OOB.
+    # LDS fits. All cases use M>=32; small-M coverage stays on the VGPR path.
     cfgs = []
     for fmt in ("fp8", "a8w4"):
         # 4-wave (n_warp=4, tile_n=64 -> rep_n=1 row-major): rep_m sweep via tile_m.
         cfgs += [
-            (fmt, 16, 16, 64, 512, 1, 4, 2),  # rep1, k_steps=4
+            (fmt, 32, 16, 64, 512, 1, 4, 2),  # rep1, k_steps=4
             (fmt, 32, 32, 64, 512, 1, 4, 2),  # rep2 (op_sel)
             (fmt, 64, 64, 64, 256, 1, 4, 2),  # rep4 (op_sel)
             (fmt, 128, 128, 64, 256, 1, 4, 2),  # rep8 (op_sel)
             (fmt, 256, 256, 64, 128, 1, 4, 2),  # rep16 (op_sel)
-            (fmt, 16, 16, 64, 128, 1, 4, 2),  # k_steps=1
-            (fmt, 16, 16, 64, 256, 1, 4, 2),  # k_steps=2
-            (fmt, 16, 16, 128, 256, 1, 4, 2),  # tile_n=128
-            (fmt, 16, 16, 192, 256, 1, 4, 2),  # tile_n=192 (next_pow2)
-            (fmt, 16, 16, 256, 256, 1, 4, 2),  # tile_n=256
+            (fmt, 32, 16, 64, 128, 1, 4, 2),  # k_steps=1
+            (fmt, 32, 16, 64, 256, 1, 4, 2),  # k_steps=2
+            (fmt, 32, 16, 128, 256, 1, 4, 2),  # tile_n=128
+            (fmt, 32, 16, 192, 256, 1, 4, 2),  # tile_n=192 (next_pow2)
+            (fmt, 32, 16, 256, 256, 1, 4, 2),  # tile_n=256
         ]
-        # 2-wave (wave0 issues A-data + B-scale): rep_m 1/2 (row-major needs n_accs<8).
-        cfgs += [(fmt, 16, 16, 64, 512, 1, 2, 2), (fmt, 32, 32, 64, 512, 1, 2, 2)]
-        # 3-wave (wave0/1/2 = A/B/B-scale).
-        cfgs += [(fmt, 16, 16, 192, 256, 1, 3, 2)]
+        # 2-wave (wave0 issues A-data + B-scale, wave1 issues B-data + A-scale).
+        cfgs += [(fmt, 32, 16, 64, 512, 1, 2, 2), (fmt, 32, 32, 64, 512, 1, 2, 2)]
+        # 3-wave keeps B-scale as wave0 secondary while wave2 issues A-scale.
+        cfgs += [(fmt, 32, 16, 192, 256, 1, 3, 2)]
         # ragged / OOB M.
-        cfgs += [(fmt, 13, 16, 64, 512, 1, 4, 2), (fmt, 33, 64, 64, 256, 1, 4, 2)]
+        cfgs += [(fmt, 33, 16, 64, 512, 1, 4, 2), (fmt, 65, 64, 64, 256, 1, 4, 2)]
     return cfgs
 
 
-@pytest.mark.parametrize("data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf", _gen_natural_ascale_configs())
-def test_mxscale_natural_ascale(data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf):
+@pytest.mark.parametrize("data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf", _gen_ascale_32x4_configs())
+def test_mxscale_ascale_32x4(data_format, M, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf):
     N = 2 * tile_n
     K = tile_k * nbuf
     _run_mxscale_gemm_test(
@@ -829,38 +859,58 @@ def test_mxscale_natural_ascale(data_format, M, tile_m, tile_n, tile_k, m_warp, 
         use_tdm_store=True,
         out_dtype="bf16",
         l2_prefetch_distance=0,
+        ascale_load_path="shuffled_tdm",
     )
 
 
 @pytest.mark.parametrize("data_format", ["fp8", "a8w4"])
-def test_mxscale_deep_pipeline(data_format):
-    # Deep-pipeline (fixed 256x256x128 / nbuf4): 32x4 B-scale + A-scale via natural
-    # VGPR ring. Guard: must hit the deep schedule.
-    assert _is_fp8_deep_pipeline(
-        data_format=data_format,
-        tile_m=256,
-        tile_n=256,
-        tile_k=128,
-        m_warp=2,
-        n_warp=2,
-        num_buffers=4,
-        out_dtype="bf16",
-        fp8_schedule="auto",
-    ), "config does not hit the deep-pipeline schedule"
+@pytest.mark.parametrize("M", [1, 13, 31])
+def test_mxscale_ascale_vgpr_small_m(data_format, M):
     _run_mxscale_gemm_test(
         data_format,
-        256,
-        256,
-        512,
-        256,
-        256,
+        M,
         128,
+        512,
+        16,
+        64,
+        256,
+        1,
         2,
         2,
-        4,
         use_tdm_store=True,
         out_dtype="bf16",
         l2_prefetch_distance=0,
+        ascale_load_path="vgpr",
+    )
+
+
+@pytest.mark.parametrize(
+    "data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf",
+    [
+        ("fp8", 32, 128, 512, 32, 64, 256, 1, 2, 2),  # row-major, M>=32
+        ("fp8", 33, 128, 512, 64, 64, 256, 1, 2, 2),  # row-major ragged M>=32
+        ("fp8", 128, 512, 512, 128, 256, 256, 2, 2, 2),  # quadrant
+        ("a8w4", 128, 512, 512, 128, 256, 256, 2, 2, 2),  # quadrant
+        ("fp8", 256, 256, 512, 256, 256, 128, 2, 2, 4),  # deep-pipeline
+        ("fp4", 128, 256, 512, 128, 128, 256, 2, 2, 2),  # FP4 quadrant
+    ],
+)
+def test_mxscale_ascale_vgpr_general(data_format, M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, nbuf):
+    _run_mxscale_gemm_test(
+        data_format,
+        M,
+        N,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        m_warp,
+        n_warp,
+        nbuf,
+        use_tdm_store=True,
+        out_dtype="bf16",
+        l2_prefetch_distance=0,
+        ascale_load_path="vgpr",
     )
 
 
@@ -938,8 +988,8 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
     b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
 
-    # A-scale natural (as-is, VGPR ring); B-scale 32x4.
-    a_scale_ps = a_scale
+    ascale_load_path = _select_ascale_load_path(M)
+    a_scale_ps = _prepare_a_scale_for_path(a_scale, ascale_load_path)
     b_scale_ps = preshuffle_scale(b_scale)
     pack_b = 2 if is_fp4 else 1
     b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
@@ -963,6 +1013,7 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         use_tdm_store=True,
         out_dtype="bf16",
         split_k=1,
+        ascale_load_path=ascale_load_path,
     )
 
     c_flat = c_gpu.contiguous()
@@ -1510,9 +1561,8 @@ def _run_mxscale_mpad(
     a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)  # real M, unpadded
     b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
     ref = reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K)
-    # A-scale natural (as-is, unpadded): the VGPR ring reads A_scale[M, K//32] and
-    # OOB rows of the partial last M-tile read 0 via buffer bounds. B-scale 32x4.
-    as_ps = a_scale
+    ascale_load_path = _select_ascale_load_path(M)
+    as_ps = _prepare_a_scale_for_path(a_scale, ascale_load_path)
     bs_ps = preshuffle_scale(b_scale)
     b_ps = fp4_utils.preshuffle_b_16x16(b, N, K)
     c_gpu = torch.zeros(M, N, dtype=_DT[out_dtype], device="cuda")  # real M
@@ -1530,6 +1580,7 @@ def _run_mxscale_mpad(
         use_tdm_store=use_tdm_store,
         cluster_m=cluster_m,
         cluster_n=cluster_n,
+        ascale_load_path=ascale_load_path,
     )
     launch(c_gpu, a.cuda(), b_ps.cuda(), as_ps.cuda(), bs_ps.cuda(), M, N, K, N, torch.cuda.current_stream())
     torch.cuda.synchronize()
@@ -1746,6 +1797,7 @@ def _run_benchmark(args):
     torch.manual_seed(0)
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
+    ascale_load_path = _select_ascale_load_path(M)
     if is_ptpc:
         # PTPC: fp8 A with fp32 per-token (sa[M]) / per-channel (sb[N]) scales, no scale preshuffle.
         # B is fp8 (data_format="fp8") or FP4-packed 2-per-byte (data_format="a8w4").
@@ -1787,6 +1839,7 @@ def _run_benchmark(args):
 
         a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
+        a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
         b_scale = preshuffle_scale(b_scale)
 
         K_packed = padded_k // PACK_B
@@ -1847,6 +1900,7 @@ def _run_benchmark(args):
             split_k=args.split_k,
             expert_sched_mode=args.expert_sched_mode,
             atomic_barrier_enable=args.atomic_barrier_enable,
+            ascale_load_path=ascale_load_path,
         )
 
     compiled_exe = flyc.compile(
@@ -2060,6 +2114,8 @@ def _run_graph_verify(args):
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
+    ascale_load_path = _select_ascale_load_path(M)
+    a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
     b_scale = preshuffle_scale(b_scale)
     K_packed = padded_k // padded_shape["pack_b"]
     b = fp4_utils.preshuffle_b_16x16(b, padded_n, K_packed)
@@ -2094,6 +2150,7 @@ def _run_graph_verify(args):
         split_k=args.split_k,
         expert_sched_mode=args.expert_sched_mode,
         atomic_barrier_enable=args.atomic_barrier_enable,
+        ascale_load_path=ascale_load_path,
     )
 
     c_flat = c_gpu.contiguous()
