@@ -14,8 +14,8 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
-from ..expr.typing import as_dsl_value, as_ir_value
 from ..expr.meta import capture_user_location
+from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 
 

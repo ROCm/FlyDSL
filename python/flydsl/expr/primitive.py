@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-import builtins
 import inspect
 from enum import IntEnum
 from functools import wraps
