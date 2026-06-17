@@ -425,6 +425,96 @@ def unpack_b_w4a16(packed32, arith, vector, scale_val=None, use_gfx950_cvt=False
     return (b0, b1)
 
 
+def _fp4_code_to_f32_bits(code, arith):
+    """Convert one MX-FP4 (E2M1) 4-bit code (in low nibble of ``code``) to the
+    IEEE-754 f32 bit pattern (as an i32), pure-ALU (no gfx950 scaled-convert).
+
+    E2M1 layout: [sign:1][exp:2][mantissa:1]. The 16 representable values are
+    {0, .5, 1, 1.5, 2, 3, 4, 6} and their negatives (matches
+    ``fp4_utils.mxfp4_to_f32`` LUT order).
+
+    Magnitude index ``mag = code & 7`` maps to f32 as:
+      mag>=2 (normal): exp_field = mag>>1, mant = mag&1
+                       f32_exp = exp_field + 126, f32_mantissa_msb = mant
+      mag==1 -> 0.5 (0x3F000000), mag==0 -> 0.0 (subnormal fixups).
+    The sign bit (code bit 3) is OR'd into f32 bit 31.
+    """
+    sign = (code & fx.Int32(0x8)) << fx.Int32(28)  # code bit3 -> f32 bit31
+    mag = code & fx.Int32(0x7)
+    exp_field = mag >> fx.Int32(1)  # logical shift (0..3)
+    mant = mag & fx.Int32(0x1)
+    norm_bits = ((exp_field + fx.Int32(126)) << fx.Int32(23)) | (mant << fx.Int32(22))
+    is_zero = arith.cmpi(CmpIPredicate.eq, mag, fx.Int32(0))
+    is_half = arith.cmpi(CmpIPredicate.eq, mag, fx.Int32(1))
+    mag_bits = arith.select(is_half, fx.Int32(0x3F000000), norm_bits)  # 0.5
+    mag_bits = arith.select(is_zero, fx.Int32(0x00000000), mag_bits)  # 0.0
+    return mag_bits | sign
+
+
+def _fp4x4_in_i32_to_bf16x4_i64(nib_i32, arith, vector, scale_val=None):
+    """Convert one i32 holding 4 E2M1 codes (low nibble of each byte) to 4 bf16
+    packed as i64. Mirrors ``_i8x4_in_i32_to_bf16x4_i64`` packing.
+
+    f32->bf16 uses the lshr-16 truncation (exact here: every E2M1 magnitude has
+    <=3 significant mantissa bits, so the low 16 f32 bits are zero).
+
+    When ``scale_val`` is given (an f32 per-32-element block scale), each value is
+    multiplied by it before bf16 truncation. For MX block scales (E8M0 = pure
+    powers of two) this exponent-only multiply is exact and leaves the low 16
+    f32 bits zero, so the lshr-16 truncation stays exact.
+    """
+    f32_bits = [_fp4_code_to_f32_bits((nib_i32 >> fx.Int32(8 * i)) & fx.Int32(0xF), arith) for i in range(4)]
+    if scale_val is not None:
+        scaled = []
+        for b in f32_bits:
+            fv = arith.bitcast(T.f32, _arith._to_raw(b))
+            fv = fv * scale_val
+            scaled.append(arith.bitcast(T.i32, _arith._to_raw(fv)))
+        f32_bits = scaled
+    c16 = fx.Int32(16)
+    c_ffff0000 = fx.Int32(0xFFFF0000)
+    i32_lo = (f32_bits[0] >> c16) | (f32_bits[1] & c_ffff0000)
+    i32_hi = (f32_bits[2] >> c16) | (f32_bits[3] & c_ffff0000)
+    v2 = vector.from_elements(T.i32x2, [_arith._to_raw(i32_lo), _arith._to_raw(i32_hi)])
+    v64 = vector.bitcast(T.vec(1, T.i64), v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
+def dequant_fp4_to_bf16(packed32, arith, vector, scale_val=None):
+    """Dequantize 8 packed MX-FP4 (E2M1) nibbles -> (b0, b1), two i64 each
+    holding 4 bf16, for one bf16 MFMA K64 micro-step on gfx942 (CDNA3).
+
+    Drop-in replacement for ``unpack_b_w4a16`` on the FP4 weight path: same
+    even/odd nibble split (b0 = nibbles 0,2,4,6; b1 = 1,3,5,7) so the existing
+    int4_bf16 preshuffle layout and MFMA consumption order are reused unchanged.
+
+    ``scale_val`` is the f32 per-32-element E8M0 block scale (one block == one
+    K64 micro-step). Because E8M0 scales are powers of two, applying it here as
+    an exponent-only multiply on the dequantized weight is exact and equivalent
+    to a post-MFMA scale of the dot product (the scale is constant across the
+    block's K reduction). Pass ``None`` for the unscaled magnitude.
+    """
+    c_0f0f = fx.Int32(0x0F0F0F0F)
+    even = packed32 & c_0f0f
+    odd = (packed32 >> fx.Int32(4)) & c_0f0f
+    b0 = _fp4x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
+    b1 = _fp4x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
+    return (b0, b1)
+
+
+def e8m0_to_f32_inkernel(e8m0_i32, arith):
+    """Decode an E8M0 block-scale byte (biased exponent) to an f32 scale.
+
+    Equivalent to ``v_ldexp_f32(1.0, byte - 127)`` for the normal range
+    (byte in 1..254): the result is ``2^(byte-127)`` built directly as
+    ``(byte << 23)`` reinterpreted as f32. The byte==0 (tiny) / byte==0xFF
+    (NaN) specials of ``fp4_utils.e8m0_to_f32`` are not reproduced because MX
+    weight scales are always in the normal range.
+    """
+    bits = (e8m0_i32 & fx.Int32(0xFF)) << fx.Int32(23)
+    return arith.bitcast(T.f32, _arith._to_raw(bits))
+
+
 def load_b_pack_k32(
     buffer_ops,
     arith,

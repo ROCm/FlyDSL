@@ -46,6 +46,7 @@ from .mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from .mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     crd2idx,
+    dequant_fp4_to_bf16,
     extract_bf16_scale,
     lds_store_4b_xor16,
     lds_store_8b_xor16,
@@ -126,14 +127,18 @@ def compile_moe_gemm1(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}  # legacy; kept until stage2/reduction are migrated
 
-    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16")
+    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4_bf16")
     if in_dtype not in _valid_dtypes:
         raise ValueError(f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}")
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    # bf16 activations x MX-FP4 (E2M1) weights, per-32 E8M0 block scale; reuses the
+    # int4_bf16 groupwise pipeline with a pure-ALU FP4 decode (bf16 MFMA, no cvt).
+    is_fp4_bf16 = in_dtype == "fp4_bf16"
+    is_w4_bf16 = is_int4_bf16 or is_fp4_bf16
     is_f16 = in_dtype == "fp16"
-    is_bf16 = is_int4_bf16 or in_dtype == "bf16"
+    is_bf16 = is_w4_bf16 or in_dtype == "bf16"
     is_f16_or_bf16 = is_f16 or is_bf16
-    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
+    needs_scale_w = (not is_f16_or_bf16) or is_w4_bf16
     elem_bytes = 2 if is_f16_or_bf16 else 1
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
@@ -156,8 +161,13 @@ def compile_moe_gemm1(
     # "int8smooth" still uses int8 MFMA, but X/scale_x are provided per (token,slot).
     is_int8 = is_int8 or x_is_token_slot
 
-    # w_is_int4: True for any variant where weights are packed int4.
-    w_is_int4 = is_int4 or is_int4_bf16
+    # w_is_int4: True for any variant whose weights are packed 4-bit (int4 or FP4).
+    # All such variants share kpack_bytes=8, w_elem=i8, and weight bytes // 2.
+    w_is_int4 = is_int4 or is_w4_bf16
+
+    # MX-FP4 always carries a per-32-element block scale; force groupwise on.
+    if is_fp4_bf16 and group_size <= 0:
+        group_size = 32
 
     # Group-wise scale support for W4A16
     # NOTE: Only group_size=32 is supported due to int4 preshuffle layout constraints.
@@ -168,7 +178,8 @@ def compile_moe_gemm1(
             f"This is due to int4 preshuffle layout constraints. "
             f"Please use Triton kernel for other group sizes."
         )
-    is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
+    # Gates the per-32 block-scale load/compute/epilogue paths for the W4A16 family.
+    is_int4_bf16_groupwise = is_w4_bf16 and use_groupwise_scale
     num_groups = model_dim // group_size if use_groupwise_scale else 1
     _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
     experts * (2 * inter_dim) * num_groups
@@ -177,6 +188,7 @@ def compile_moe_gemm1(
 
     _is_gfx950 = "gfx95" in get_hip_arch()
     _has_cvt_off_f32_i4 = hasattr(rocdl, "cvt_off_f32_i4")
+    # gfx950 int4 fast cvt path; FP4 never uses it (pure-ALU dequant on all archs).
     use_gfx950_cvt = is_int4_bf16 and _is_gfx950 and _has_cvt_off_f32_i4
 
     # Split-K validation
@@ -982,6 +994,13 @@ def compile_moe_gemm1(
                                             sc_g,
                                             sc_u,
                                         )
+                                    elif const_expr(is_fp4_bf16):
+                                        # gfx942 MX-FP4: pure-ALU E2M1->bf16 dequant with the
+                                        # per-32 E8M0 block scale folded in (exact: powers of 2).
+                                        bg0, bg1 = dequant_fp4_to_bf16(packed_g, arith, vector, scale_val=sc_g)
+                                        gate_list[acc_idx] = mfma_k64(gate_list[acc_idx], a0, a1, bg0, bg1)
+                                        bu0, bu1 = dequant_fp4_to_bf16(packed_u, arith, vector, scale_val=sc_u)
+                                        up_list[acc_idx] = mfma_k64(up_list[acc_idx], a0, a1, bu0, bu1)
                                     else:
                                         bg0, bg1 = unpack_b_w4a16(
                                             packed_g,
@@ -1816,14 +1835,18 @@ def compile_moe_gemm2(
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
-    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16")
+    _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4_bf16")
     if in_dtype not in _valid_dtypes:
         raise ValueError(f"in_dtype must be one of {_valid_dtypes}, got {in_dtype!r}")
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    # fp4_bf16 (a16w4): bf16 activations x MX-FP4 (E2M1) weights, per-32 E8M0 block
+    # scale; structurally identical to int4_bf16 groupwise (gfx942 pure-ALU decode).
+    is_fp4_bf16 = in_dtype == "fp4_bf16"
+    is_w4_bf16 = is_int4_bf16 or is_fp4_bf16  # W4A16 family (bf16 act, packed 4-bit weight)
     is_f16 = in_dtype == "fp16"
-    is_bf16 = is_int4_bf16 or in_dtype == "bf16"
+    is_bf16 = is_w4_bf16 or in_dtype == "bf16"
     is_f16_or_bf16 = is_f16 or is_bf16
-    needs_scale_w = (not is_f16_or_bf16) or is_int4_bf16
+    needs_scale_w = (not is_f16_or_bf16) or is_w4_bf16
     elem_bytes = 2 if is_f16_or_bf16 else 1
     out_s = str(out_dtype).strip().lower()
     if out_s not in ("f16", "fp16", "half", "bf16", "bfloat16", "f32", "fp32", "float"):
@@ -1833,10 +1856,14 @@ def compile_moe_gemm2(
     if (not bool(accumulate)) and out_is_f32:
         raise ValueError("compile_moe_gemm2(accumulate=False) only supports out_dtype in {'f16','bf16'}")
     is_int4 = in_dtype == "int4"
-    # w_is_int4: True for any variant where weights are packed int4.
-    w_is_int4 = is_int4 or is_int4_bf16
+    # w_is_int4: True for any variant whose weights are packed 4-bit (int4 or FP4).
+    w_is_int4 = is_int4 or is_w4_bf16
     # INT4 here means W4A8: A2 is int8, W is packed int4 and unpacked to int8 in-kernel.
     is_int8 = (in_dtype in ("int8", "int8smooth")) or is_int4
+
+    # MX-FP4 always carries a per-32-element block scale; force groupwise on.
+    if is_fp4_bf16 and group_size <= 0:
+        group_size = 32
 
     # Group-wise scale support for W4A16
     use_groupwise_scale = w_is_int4 and group_size > 0
@@ -1846,7 +1873,7 @@ def compile_moe_gemm2(
             f"This is due to int4 preshuffle layout constraints. "
             f"Please use Triton kernel for other group sizes."
         )
-    is_int4_bf16_groupwise = is_int4_bf16 and use_groupwise_scale
+    is_int4_bf16_groupwise = is_w4_bf16 and use_groupwise_scale
     # Stage2 K dimension is inter_dim (weight shape: [E, model_dim, inter_dim])
     num_groups = inter_dim // group_size if use_groupwise_scale else 1
     _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
@@ -2609,6 +2636,11 @@ def compile_moe_gemm2(
                                             p_idx, p_tmp, p_sc = _pending_acc
                                             acc_list[p_idx] = _acc_scaled_f32(acc_list[p_idx], p_tmp, p_sc)
                                         _pending_acc = (acc_idx, tmp, sc)
+                                    elif const_expr(is_fp4_bf16):
+                                        # gfx942 MX-FP4: pure-ALU E2M1->bf16 dequant with the
+                                        # per-32 E8M0 block scale folded in (exact: powers of 2).
+                                        b0, b1 = dequant_fp4_to_bf16(packed, arith, vector, scale_val=sc)
+                                        acc_list[acc_idx] = mfma_k64(acc_list[acc_idx], a0, a1, b0, b1)
                                     else:
                                         b0, b1 = unpack_b_w4a16(
                                             packed,

@@ -416,17 +416,20 @@ def run_moe_stage1(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4_bf16", "fp4", "a8w4"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4_bf16','fp4','a8w4'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    is_fp4_bf16 = in_dtype == "fp4_bf16"  # gfx942 MX-FP4: bf16 act, E2M1 weight, E8M0 block scale
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
     is_a8w4 = in_dtype == "a8w4"  # MX-FP8 activation + MX-FP4 weight
-    is_fp4_path = is_fp4 or is_a8w4  # shared weight/shuffle pipeline
-    use_packed_int4 = is_int4 or is_int4_bf16
+    is_fp4_path = is_fp4 or is_a8w4  # shared weight/shuffle pipeline (gfx950 scaled MFMA)
+    # fp4_bf16 reuses the packed-4bit int4_bf16 groupwise pipeline (pure-ALU dequant).
+    use_packed_int4 = is_int4 or is_int4_bf16 or is_fp4_bf16
+    use_w4_groupwise = (is_int4_bf16 or is_fp4_bf16) and group_size > 0
 
     # Quantize inputs / weights.
     if is_fp4_path:
@@ -492,20 +495,35 @@ def run_moe_stage1(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
+    elif in_dtype == "fp4_bf16":
+        # gfx942 MX-FP4: X is bf16; W is MX-FP4 (E2M1 codes 0..15 packed 2/byte), with a
+        # per-32 E8M0 (power-of-2) block scale. We generate random E2M1 codes directly and
+        # carry the decoded magnitudes for the reference (group scale applied by torch ref).
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q = torch.randint(0, 16, (experts, 2 * inter_dim, model_dim), device=device, dtype=torch.int8)
+        w2_q = None
+        scale_w1 = None
+        scale_x = None
     else:
         # W4A8: X is int8, W is int4 packed (host packs from int8 values in [-8,7]).
         x_q, scale_x = pertoken_quant(x_fp32, quant_dtype=torch.int8)
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, _scale_w2_unused = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for int4 variants ---
-    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    # --- Groupwise scale for int4 / fp4 W4A16 variants ---
+    use_groupwise_scale = use_w4_groupwise
     scale_w1_groups = None  # [E, K//group_size, 2*inter_dim] for kernel (Opt 0 layout)
     if use_groupwise_scale:
         N_total = 2 * inter_dim
         num_groups_s1 = model_dim // group_size
         if scale_w1_groups_in is not None:
             scale_w1_groups = scale_w1_groups_in
+        elif is_fp4_bf16:
+            # MX-FP4 block scale = E8M0 = pure power of two. Small exponent range keeps
+            # decoded weights within bf16 range; powers of two make the kernel's
+            # exponent-only pre-scale exact vs the reference.
+            _exps = torch.randint(-2, 3, (experts, num_groups_s1, N_total), device=device)
+            scale_w1_groups = torch.pow(2.0, _exps.to(torch.float32))
         else:
             # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
             _scale_torch_dtype = torch.bfloat16 if scale_dtype == "bf16" else torch.float32
@@ -551,6 +569,15 @@ def run_moe_stage1(
         # Flatten W1 for our FlyDSL kernel (treat expert dim as part of N).
         w1_shuffled_flat = w1_shuffled.view(experts * (2 * inter_dim), model_dim)
         w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim)
+        if is_fp4_bf16:
+            # Reference consumes decoded E2M1 magnitudes; torch ref then applies the
+            # group scale (matches kernel: dequant_fp4_to_bf16 * E8M0 block scale).
+            _lut = torch.tensor(
+                [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+                device=device,
+                dtype=torch.float32,
+            )
+            w1_q_flat = _lut[w1_q.long()].view(experts * (2 * inter_dim), model_dim)
         scale_w1_flat = None if scale_w1 is None else scale_w1.view(experts * (2 * inter_dim), 1)
 
         # No host-side padding: keep tensors contiguous and rely on kernel-side resource sizes / early-exit.
@@ -727,8 +754,8 @@ def run_moe_stage1(
                 group_size=group_size,
                 scale_w1_groups=scale_w1_groups,
             )
-            rtol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
-            atol = 0.5 if (is_int4 or is_int4_bf16) else 0.25
+            rtol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4_bf16) else 0.25
+            atol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4_bf16) else 0.25
             assert verify_output(out.to(torch.float32), ref, rtol=rtol, atol=atol)
         else:
             # Use original-dtype view for fp4/a8w4 so `_detect_scale_kind` picks the right branch.
@@ -746,14 +773,14 @@ def run_moe_stage1(
                 group_size=group_size,
                 scale_w1_groups=scale_w1_groups,
             )
-            rtol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4_path) else 0.25
-            atol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4_path) else 0.25
+            rtol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4_bf16 or is_fp4_path) else 0.25
+            atol = 0.5 if (is_int4 or is_int4_bf16 or is_fp4_bf16 or is_fp4_path) else 0.25
             assert verify_output(
                 out.to(torch.float32),
                 ref,
                 rtol=rtol,
                 atol=atol,
-                logits_diff_threshold=1 if is_fp4_path else 2e-3,
+                logits_diff_threshold=1 if (is_fp4_path or is_fp4_bf16) else 2e-3,
             )
 
     # Note: kernel launches full expert-block range; effective work is gated by num_valid_ids.
@@ -1042,18 +1069,20 @@ def run_moe_stage2(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4_bf16", "fp4", "a8w4"):
         raise ValueError(
-            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4'), got {in_dtype!r}"
+            f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4_bf16','fp4','a8w4'), got {in_dtype!r}"
         )
     is_int4 = in_dtype == "int4"
     is_int4_bf16 = in_dtype == "int4_bf16"  # W4A16: bf16 activations, packed int4 weights
+    is_fp4_bf16 = in_dtype == "fp4_bf16"  # gfx942 MX-FP4: bf16 act, E2M1 weight, E8M0 block scale
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
     is_a8w4 = in_dtype == "a8w4"  # MX-FP8 activation + MX-FP4 weight
     # Share the FP4 stage2 path (W2 shuffle / scale sort / mixed kernel).
     is_fp4_path = is_fp4 or is_a8w4
-    use_packed_int4 = is_int4 or is_int4_bf16
+    use_packed_int4 = is_int4 or is_int4_bf16 or is_fp4_bf16
+    use_w4_groupwise = (is_int4_bf16 or is_fp4_bf16) and group_size > 0
 
     # Quantize inputs / weights.
     if in_dtype == "fp8":
@@ -1090,6 +1119,16 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
+    elif in_dtype == "fp4_bf16":
+        # gfx942 MX-FP4 stage2: A2 is bf16; W2 is MX-FP4 (E2M1 codes 0..15) with a per-32
+        # E8M0 (power-of-2) block scale over the inter_dim (K) axis. W1 is unused by stage2
+        # (A2 is provided), but the shared path shuffles it, so keep a valid dummy.
+        x_q = x_fp32.to(torch.bfloat16)
+        w1_q = torch.zeros((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.int8)
+        w2_q = torch.randint(0, 16, (experts, model_dim, inter_dim), device=device, dtype=torch.int8)
+        scale_w1 = None
+        scale_w2 = None
+        scale_x = None
     elif in_dtype in ("fp4", "a8w4"):
         from tests.kernels.utils import fp4_utils
 
@@ -1114,13 +1153,17 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
 
-    # --- Groupwise scale for int4 variants (stage 2) ---
-    use_groupwise_scale = is_int4_bf16 and group_size > 0
+    # --- Groupwise scale for int4 / fp4 W4A16 variants (stage 2) ---
+    use_groupwise_scale = use_w4_groupwise
     scale_w2_groups = None  # [E, inter_dim//group_size, model_dim] Opt 0 layout
     if use_groupwise_scale:
         num_groups_s2 = inter_dim // group_size
         if scale_w2_groups_in is not None:
             scale_w2_groups = scale_w2_groups_in
+        elif is_fp4_bf16:
+            # MX-FP4 block scale = E8M0 = power of two (exact exponent-only pre-scale).
+            _exps = torch.randint(-2, 3, (experts, num_groups_s2, model_dim), device=device)
+            scale_w2_groups = torch.pow(2.0, _exps.to(torch.float32))
         else:
             # Generate random groupwise scale [E, num_groups, N] (Opt 0: cache-friendly).
             _scale_torch_dtype = torch.bfloat16 if scale_dtype == "bf16" else torch.float32
@@ -1177,7 +1220,7 @@ def run_moe_stage2(
 
         # Stage2 input (A2): either provided (gemm1->quantize chaining) or built from stage1 reference.
         # For int4_bf16, A2 is bf16 (same as fp16 for scale handling).
-        if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16")):
+        if a2_fp8_in is not None and (a2_scale_in is not None or in_dtype in ("fp16", "bf16", "int4_bf16", "fp4_bf16")):
             a2_q = a2_fp8_in
             a2_scale = a2_scale_in
         else:
@@ -1485,9 +1528,18 @@ def run_moe_stage2(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
+        w2_ref = w2_q
+        if is_fp4_bf16:
+            # Reference consumes decoded E2M1 magnitudes; torch ref applies the group scale.
+            _lut2 = torch.tensor(
+                [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+                device=device,
+                dtype=torch.float32,
+            )
+            w2_ref = _lut2[w2_q.long()]
         ref2 = torch_moe_gemm2(
             a2_q,
-            w2_q,
+            w2_ref,
             a2_scale,
             scale_w2,
             topk_ids.to(torch.int64),
@@ -1523,6 +1575,7 @@ def run_moe_stage2(
         "int8smooth": (8, 8, "per_token_f32", "per_row_f32"),
         "int4": (8, 4, "per_token_f32", "per_row_f32"),
         "int4_bf16": (16, 4, "none", "per_row_f32"),
+        "fp4_bf16": (16, 4, "none", "groupwise"),
         "fp4": (4, 4, "per_block_e8m0_32", "per_block_e8m0_32"),
         "a8w4": (8, 4, "per_block_e8m0_32", "per_block_e8m0_32"),
     }
@@ -2211,6 +2264,83 @@ def test_moe_gemm_w4a16_groupwise_scale(scale_dtype):
         return_outputs=True,
         skip_ref=False,
         scale_dtype=scale_dtype,
+    )
+
+
+def test_moe_gemm_a16w4_mxfp4_gfx942():
+    """gfx942 MX-FP4 a16w4: bf16 activations x E2M1 weights, per-32 E8M0 block scale.
+
+    Validates the software dequant path (dequant_fp4_to_bf16 + exact power-of-2
+    block pre-scale) for both stage1 and stage2 against the torch reference.
+    """
+    tokens, model_dim, inter_dim, experts, topk = 64, 256, 128, 4, 2
+    tile_m, tile_n, tile_k = 16, 64, 128
+    device = torch.device("cuda")
+    s = 0.2
+    x_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * s
+    # Weight fp32 tensors are only used for shapes; fp4_bf16 generates E2M1 codes internally.
+    w1_fp32 = torch.randn((experts, 2 * inter_dim, model_dim), device=device, dtype=torch.float32) * s
+    w2_fp32 = torch.randn((experts, model_dim, inter_dim), device=device, dtype=torch.float32) * s
+    score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
+    topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
+    topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+    routing = build_routing_buffers(
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        experts=experts,
+        model_dim=model_dim,
+        tile_m=tile_m,
+    )
+    out1, _ = run_moe_stage1(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        in_dtype="fp4_bf16",
+        group_size=32,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        num_iters=2,
+        num_warmup=1,
+        x_fp32_in=x_fp32,
+        w1_fp32_in=w1_fp32,
+        w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids,
+        topk_weights_in=topk_weights,
+        routing_in=routing,
+        return_outputs=True,
+        skip_ref=False,
+        scale_dtype="f32",
+    )
+    a2 = out1.to(torch.bfloat16)
+    run_moe_stage2(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        in_dtype="fp4_bf16",
+        group_size=32,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        num_iters=2,
+        num_warmup=1,
+        x_fp32_in=x_fp32,
+        w1_fp32_in=w1_fp32,
+        w2_fp32_in=w2_fp32,
+        topk_ids_in=topk_ids,
+        topk_weights_in=topk_weights,
+        routing_in=routing,
+        a2_fp8_in=a2,
+        a2_scale_in=None,
+        return_outputs=True,
+        skip_ref=False,
+        scale_dtype="f32",
     )
 
 
