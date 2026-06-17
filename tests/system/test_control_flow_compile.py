@@ -47,7 +47,7 @@ def test_control_flow_kernel_snippet_compiles_without_error(monkeypatch):
     size = threads * vec
     a = torch.randn(size, device="cuda", dtype=torch.float32)
     c = torch.empty_like(a)
-    t_a = flyc.from_dlpack(a).mark_layout_dynamic(leading_dim=0, divisibility=vec)
+    t_a = flyc.from_torch_tensor(a).mark_layout_dynamic(leading_dim=0, divisibility=vec)
     vecAbs(t_a, c, size, size, threads, vec)
 
 
@@ -137,7 +137,7 @@ def test_control_flow_dynamic_if_end_to_end_numeric(monkeypatch):
     b = torch.randn(size, device="cuda", dtype=torch.float32)
     c = torch.empty_like(a)
 
-    t_a = flyc.from_dlpack(a).mark_layout_dynamic(leading_dim=0, divisibility=vec_width)
+    t_a = flyc.from_torch_tensor(a).mark_layout_dynamic(leading_dim=0, divisibility=vec_width)
     dynamicIfVec(t_a, b, c, size, block_dim, vec_width)
     torch.cuda.synchronize()
 

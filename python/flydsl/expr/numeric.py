@@ -58,17 +58,6 @@ class NumericMeta(type):
         def _construct_from_ir_values(cls, values):
             return cls(values[0])
 
-        def _get_c_pointers(self):
-            if width == 1:
-                c_value = ctypes.c_bool(self.value)
-            elif signed:
-                c_value = getattr(ctypes, f"c_int{width}")(self.value)
-            else:
-                c_value = getattr(ctypes, f"c_uint{width}")(self.value)
-            ptr = ctypes.cast(ctypes.pointer(c_value), ctypes.c_void_p)
-            ptr._prevent_gc = c_value
-            return [ptr]
-
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
         is_storable = width >= 8
 
@@ -109,15 +98,23 @@ class NumericMeta(type):
             new_attrs["__peek_from_ptr__"] = classmethod(_not_storable)
             new_attrs["__poke_into_ptr__"] = classmethod(lambda cls, ptr, value: _not_storable(cls))
         if signed is not None:
-            new_attrs["__get_c_pointers__"] = _get_c_pointers
 
-            def _reusable_slot_spec(cls, arg):
-                ctype = getattr(cls, "_reusable_ctype", None)
-                if ctype is None:
-                    return None
-                return ctype, lambda a: a.value if hasattr(a, "value") else a
+            def __c_abi_spec__(self):
+                w = self.width
+                ct = ctypes.c_bool if w == 1 else getattr(ctypes, f"c_{'int' if self.signed else 'uint'}{w}", None)
+                if ct is None:
+                    raise TypeError(
+                        f"{type(self).__name__} (width={w}) has no host C-ABI and cannot be a launch argument"
+                    )
 
-            new_attrs["_reusable_slot_spec"] = classmethod(_reusable_slot_spec)
+                def fill(a, s):
+                    # ``a`` may be a bare Python int (fast path) or a Numeric
+                    # instance (slow path); read via the ``hasattr(a, "value")`` shim.
+                    s.value = a.value if hasattr(a, "value") else a
+
+                return [(ct, fill)]
+
+            new_attrs["__c_abi_spec__"] = __c_abi_spec__
 
         new_cls = super().__new__(cls, name, bases, new_attrs | attrs)
         if ir_type is not None:
@@ -719,38 +716,38 @@ class Uint128(Integer, metaclass=NumericMeta, width=128, signed=False, ir_type=l
 
 
 class Float16(Float, metaclass=NumericMeta, width=16, ir_type=T.f16):
-    def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        f16_val = np.float16(self.value)
-        bits = f16_val.view(np.uint16)
-        c_val = ctypes.c_short(bits)
-        return [ctypes.cast(ctypes.pointer(c_val), ctypes.c_void_p)]
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            v = a.value if hasattr(a, "value") else a
+            s.value = int(np.float16(v).view(np.uint16))
+
+        return [(ctypes.c_short, fill)]
 
 
 class BFloat16(Float, metaclass=NumericMeta, width=16, ir_type=T.bf16):
-    def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        f32_val = np.float32(self.value)
-        bits = f32_val.view(np.uint32)
-        bf16_bits = np.uint16(bits >> 16)
-        c_val = ctypes.c_short(bf16_bits)
-        return [ctypes.cast(ctypes.pointer(c_val), ctypes.c_void_p)]
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            v = a.value if hasattr(a, "value") else a
+            bits = np.float32(v).view(np.uint32)
+            s.value = int(np.uint16(bits >> 16))
+
+        return [(ctypes.c_short, fill)]
 
 
 class Float32(Float, metaclass=NumericMeta, width=32, ir_type=T.f32):
-    def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        return [ctypes.cast(ctypes.pointer(ctypes.c_float(self.value)), ctypes.c_void_p)]
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            s.value = a.value if hasattr(a, "value") else a
+
+        return [(ctypes.c_float, fill)]
 
 
 class Float64(Float, metaclass=NumericMeta, width=64, ir_type=T.f64):
-    def __get_c_pointers__(self):
-        if not isinstance(self.value, float):
-            raise ValueError("host-side pointer requires a concrete float value")
-        return [ctypes.cast(ctypes.pointer(ctypes.c_double(self.value)), ctypes.c_void_p)]
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            s.value = a.value if hasattr(a, "value") else a
+
+        return [(ctypes.c_double, fill)]
 
 
 class Float8E5M2(Float, metaclass=NumericMeta, width=8, ir_type=T.f8E5M2): ...

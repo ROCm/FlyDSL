@@ -433,7 +433,7 @@ def build_fused_rope_cache_module(
             shape = getattr(tensor, "_orig_shape", None)
             leading_dim = len(shape) - 1 if shape is not None else -1
             return tensor.mark_layout_dynamic(leading_dim=leading_dim)
-        return flyc.from_dlpack(tensor).mark_layout_dynamic(leading_dim=tensor.ndim - 1)
+        return flyc.from_torch_tensor(tensor).mark_layout_dynamic(leading_dim=tensor.ndim - 1)
 
     @flyc.jit
     def _jit_launch_fused_rope_cache(

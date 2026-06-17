@@ -593,8 +593,7 @@ class Constexpr:
     def __get_ir_types__(cls):
         return []
 
-    @classmethod
-    def __get_c_pointers__(cls):
+    def __c_abi_spec__(self):
         return []
 
     @classmethod
@@ -1205,35 +1204,26 @@ class Stream:
 
     def __init__(self, value=None):
         self.value = value
-        self._stream_storage = None
 
     def __get_ir_types__(self):
         return [gpu.AsyncTokenType.get()]
 
-    def __get_c_pointers__(self):
-        if isinstance(self.value, int):
-            self._stream_storage = ctypes.c_void_p(self.value)
-        elif self.value is None:
-            self._stream_storage = ctypes.c_void_p(0)
-        else:
-            self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
-        return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
-
     def __cache_signature__(self):
         return (type(self),)
 
-    @staticmethod
-    def _extract_stream_value(arg):
-        raw = arg.value if isinstance(arg, Stream) else arg
-        if raw is None:
-            return 0
-        elif isinstance(raw, int):
-            return raw
-        return raw.cuda_stream
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            raw = a.value if hasattr(a, "_is_stream_param") else a
+            if raw is None:
+                s.value = 0
+            elif isinstance(raw, int):
+                s.value = raw
+            elif hasattr(raw, "cuda_stream"):
+                s.value = raw.cuda_stream
+            else:
+                raise ValueError(f"invalid stream value: {raw}")
 
-    @classmethod
-    def _reusable_slot_spec(cls, arg):
-        return ctypes.c_void_p, cls._extract_stream_value
+        return [(ctypes.c_void_p, fill)]
 
     @classmethod
     def __construct_from_ir_values__(cls, values):

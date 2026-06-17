@@ -131,9 +131,9 @@ def _bench_fp8_gemm(
         sa_flat = sa.contiguous().view(-1)
         sb_flat = sb.contiguous().view(-1)
         if static_weight_scale:
-            b_flat = flyc.from_dlpack(b_flat)
-            sa_flat = flyc.from_dlpack(sa_flat)
-            sb_flat = flyc.from_dlpack(sb_flat)
+            b_flat = flyc.from_torch_tensor(b_flat)
+            sa_flat = flyc.from_torch_tensor(sa_flat)
+            sb_flat = flyc.from_torch_tensor(sb_flat)
         return (
             _as_i8(a).contiguous().view(-1),
             b_flat,
