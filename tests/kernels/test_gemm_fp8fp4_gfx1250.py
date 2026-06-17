@@ -337,7 +337,6 @@ def _run_mxscale_gemm_test(
     m_warp,
     n_warp,
     num_buffers,
-    use_tdm_store,
     out_dtype,
     l2_prefetch_distance=0,
     cluster_m=1,
@@ -367,13 +366,14 @@ def _run_mxscale_gemm_test(
     local_k = padded_k // split_k
     if ascale_load_path is None:
         ascale_load_path = _select_ascale_load_path(M)
+    tdm_store_enabled = split_k == 1
 
     num_k_tiles = local_k // tile_k
     if num_buffers > 1 and num_k_tiles < num_buffers:
         pytest.skip(f"{num_buffers}-buf requires num_k_tiles >= {num_buffers}")
 
     # FP8 256x256 + f32 + TDM store exceeds LDS
-    if not is_fp4 and tile_m == 256 and tile_n == 256 and out_dtype == "f32" and use_tdm_store:
+    if not is_fp4 and tile_m == 256 and tile_n == 256 and out_dtype == "f32" and tdm_store_enabled:
         pytest.skip("256x256 tile with f32 TDM store exceeds LDS limit")
 
     _dtype_map = {"f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
@@ -387,7 +387,7 @@ def _run_mxscale_gemm_test(
 
     fmt_name = "A8W4" if is_a8w4 else ("MXFP4" if is_fp4 else "MXFP8")
     mcast_str = f", cluster=({cluster_m},{cluster_n})" if cluster_m > 1 or cluster_n > 1 else ""
-    tdm_str = ", tdm_store" if use_tdm_store else ", buffer_store"
+    tdm_str = ", tdm_store" if tdm_store_enabled else ", buffer_store"
     pad_str = _format_kernel_pad(M, N, K, padded_shape)
     print(
         f"\nRunning {fmt_name} GEMM: M={M}, N={N}, K={K}{pad_str}, "
@@ -450,7 +450,6 @@ def _run_mxscale_gemm_test(
         l2_prefetch_distance=l2_prefetch_distance,
         cluster_m=cluster_m,
         cluster_n=cluster_n,
-        use_tdm_store=use_tdm_store,
         out_dtype=kernel_out_dtype,
         inst_prefetch=inst_prefetch,
         split_k=split_k,
@@ -585,6 +584,30 @@ def _gen_a8w4_gemm_configs():
     return cfgs
 
 
+def test_mxscale_compile_auto_selects_splitk_store_path():
+    """Direct compile API should not require a store-path override for split-K."""
+    arch = str(get_rocm_arch())
+    if arch != "gfx1250":
+        pytest.skip(f"WMMA_SCALE requires gfx1250, got {arch}")
+
+    launch_fn = compile_mxscale_gemm(
+        data_format="fp8",
+        N=256,
+        K=2048,
+        tile_m=128,
+        tile_n=256,
+        tile_k=128,
+        m_warp=2,
+        n_warp=4,
+        num_buffers=2,
+        l2_prefetch_distance=2,
+        out_dtype="bf16",
+        split_k=2,
+        ascale_load_path="shuffled_tdm",
+    )
+    assert callable(launch_fn)
+
+
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp",
     [
@@ -596,7 +619,6 @@ def _gen_a8w4_gemm_configs():
     ],
 )
 @pytest.mark.parametrize("num_buffers", [2, 3, 4])
-@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp4_gemm(
     M,
@@ -608,7 +630,6 @@ def test_mxfp4_gemm(
     m_warp,
     n_warp,
     num_buffers,
-    use_tdm_store,
     out_dtype,
 ):
     _run_mxscale_gemm_test(
@@ -622,7 +643,6 @@ def test_mxfp4_gemm(
         m_warp,
         n_warp,
         num_buffers,
-        use_tdm_store,
         out_dtype,
     )
 
@@ -631,7 +651,6 @@ def test_mxfp4_gemm(
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers",
     _gen_mxfp8_gemm_configs(),
 )
-@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp8_gemm(
     M,
@@ -643,7 +662,6 @@ def test_mxfp8_gemm(
     m_warp,
     n_warp,
     num_buffers,
-    use_tdm_store,
     out_dtype,
 ):
     _run_mxscale_gemm_test(
@@ -657,7 +675,6 @@ def test_mxfp8_gemm(
         m_warp,
         n_warp,
         num_buffers,
-        use_tdm_store,
         out_dtype,
         l2_prefetch_distance=2,
     )
@@ -668,7 +685,7 @@ def test_mxfp8_gemm(
 def test_mxfp8_gemm_splitk(split_k, out_dtype):
     """FP8 split-K: split_k workgroups accumulate partial K-sums into C via atomic add.
 
-    Exercises the atomic epilogue path (use_tdm_store=False). K=2048/tile_k=128 gives
+    Exercises the auto-selected atomic epilogue path. K=2048/tile_k=128 gives
     every split_k value >= 2 local K-tiles (needed for double buffering).
     """
     _run_mxscale_gemm_test(
@@ -682,7 +699,6 @@ def test_mxfp8_gemm_splitk(split_k, out_dtype):
         2,
         4,
         num_buffers=2,
-        use_tdm_store=False,
         out_dtype=out_dtype,
         l2_prefetch_distance=2,
         split_k=split_k,
@@ -693,9 +709,8 @@ def test_mxfp8_gemm_splitk(split_k, out_dtype):
     "M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers",
     _gen_a8w4_gemm_configs(),
 )
-@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
-def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, use_tdm_store, out_dtype):
+def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers, out_dtype):
     _run_mxscale_gemm_test(
         "a8w4",
         M,
@@ -707,20 +722,19 @@ def test_a8w4_gemm(M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, num_buffers,
         m_warp,
         n_warp,
         num_buffers,
-        use_tdm_store,
         out_dtype,
         l2_prefetch_distance=2,
     )
 
 
 @pytest.mark.parametrize(
-    "M, N, K, use_tdm_store",
+    "M, N, K",
     [
-        (13, 2816, 2816, True),
-        (33, 5632, 2816, False),
+        (13, 2816, 2816),
+        (33, 5632, 2816),
     ],
 )
-def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
+def test_a8w4_gemm_irregular_m_tile16(M, N, K):
     # Small-M path: ragged M via OOB, one wave dedicated to the M dimension.
     _run_mxscale_gemm_test(
         "a8w4",
@@ -733,7 +747,6 @@ def test_a8w4_gemm_irregular_m_tile16(M, N, K, use_tdm_store):
         1,
         4,
         num_buffers=2,
-        use_tdm_store=use_tdm_store,
         out_dtype="bf16",
         l2_prefetch_distance=2,
     )
@@ -805,7 +818,6 @@ def test_mxscale_bscale_32x4(data_format, M, N, K, tile_n, tile_k, n_warp, num_b
         1,
         n_warp,
         num_buffers,
-        use_tdm_store=True,
         out_dtype=out_dtype,
         l2_prefetch_distance=0,
     )
@@ -856,7 +868,6 @@ def test_mxscale_ascale_32x4(data_format, M, tile_m, tile_n, tile_k, m_warp, n_w
         m_warp,
         n_warp,
         nbuf,
-        use_tdm_store=True,
         out_dtype="bf16",
         l2_prefetch_distance=0,
         ascale_load_path="shuffled_tdm",
@@ -877,7 +888,6 @@ def test_mxscale_ascale_vgpr_small_m(data_format, M):
         1,
         2,
         2,
-        use_tdm_store=True,
         out_dtype="bf16",
         l2_prefetch_distance=0,
         ascale_load_path="vgpr",
@@ -907,7 +917,6 @@ def test_mxscale_ascale_vgpr_general(data_format, M, N, K, tile_m, tile_n, tile_
         m_warp,
         n_warp,
         nbuf,
-        use_tdm_store=True,
         out_dtype="bf16",
         l2_prefetch_distance=0,
         ascale_load_path="vgpr",
@@ -928,10 +937,9 @@ def test_mxscale_ascale_vgpr_general(data_format, M, N, K, tile_m, tile_n, tile_
     ],
 )
 @pytest.mark.parametrize("num_buffers", [2])
-@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["f32", "bf16"])
 def test_mxfp4_gemm_mcast(
-    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n, num_buffers, use_tdm_store, out_dtype
+    M, N, K, tile_m, tile_n, tile_k, m_warp, n_warp, cluster_m, cluster_n, num_buffers, out_dtype
 ):
     _run_mxscale_gemm_test(
         "fp4",
@@ -944,7 +952,6 @@ def test_mxfp4_gemm_mcast(
         m_warp,
         n_warp,
         num_buffers,
-        use_tdm_store,
         out_dtype,
         l2_prefetch_distance=2,
         cluster_m=cluster_m,
@@ -1010,7 +1017,6 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         m_warp=m_warp,
         n_warp=n_warp,
         num_buffers=2,
-        use_tdm_store=True,
         out_dtype="bf16",
         split_k=1,
         ascale_load_path=ascale_load_path,
@@ -1541,7 +1547,6 @@ def _run_mxscale_mpad(
     K,
     *,
     out_dtype="bf16",
-    use_tdm_store=True,
     tile_m=128,
     tile_n=128,
     tile_k=128,
@@ -1577,7 +1582,6 @@ def _run_mxscale_mpad(
         n_warp=n_warp,
         num_buffers=num_buffers,
         out_dtype=out_dtype,
-        use_tdm_store=use_tdm_store,
         cluster_m=cluster_m,
         cluster_n=cluster_n,
         ascale_load_path=ascale_load_path,
@@ -1598,11 +1602,10 @@ def test_ptpc_a8w4_gemm_mpad(M):
     _run_ptpc_mpad(M, 256, 512, data_format="a8w4", m_warp=2, n_warp=4, num_buffers=2)
 
 
-@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
 @pytest.mark.parametrize("M", _MPAD_MS)
-def test_mxfp8_gemm_mpad(M, out_dtype, use_tdm_store):
-    _run_mxscale_mpad(M, 256, 512, out_dtype=out_dtype, use_tdm_store=use_tdm_store)
+def test_mxfp8_gemm_mpad(M, out_dtype):
+    _run_mxscale_mpad(M, 256, 512, out_dtype=out_dtype)
 
 
 @pytest.mark.parametrize("split_k", [2, 4])
@@ -1664,10 +1667,9 @@ def test_ptpc_a8w4_gemm_mpad_cluster(M, cluster_m, cluster_n):
     )
 
 
-@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("cluster_m,cluster_n", _MPAD_CLUSTERS)
 @pytest.mark.parametrize("M", _MPAD_CLUSTER_MS)
-def test_mxfp8_gemm_mpad_cluster(M, cluster_m, cluster_n, use_tdm_store):
+def test_mxfp8_gemm_mpad_cluster(M, cluster_m, cluster_n):
     _run_mxscale_mpad(
         M,
         512,
@@ -1677,7 +1679,6 @@ def test_mxfp8_gemm_mpad_cluster(M, cluster_m, cluster_n, use_tdm_store):
         num_buffers=2,
         cluster_m=cluster_m,
         cluster_n=cluster_n,
-        use_tdm_store=use_tdm_store,
     )
 
 
@@ -1705,10 +1706,9 @@ def test_ptpc_fp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n):
     )
 
 
-@pytest.mark.parametrize("use_tdm_store", [True, False])
 @pytest.mark.parametrize("cluster_m,cluster_n", [(2, 2), (2, 4)])
 @pytest.mark.parametrize("M", [100, 300, 512, 600, 700, 1024])
-def test_mxfp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n, use_tdm_store):
+def test_mxfp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n):
     _run_mxscale_mpad(
         M,
         1024,
@@ -1720,7 +1720,6 @@ def test_mxfp8_gemm_mpad_cluster_tm256(M, cluster_m, cluster_n, use_tdm_store):
         num_buffers=2,
         cluster_m=cluster_m,
         cluster_n=cluster_n,
-        use_tdm_store=use_tdm_store,
     )
 
 
@@ -1785,13 +1784,6 @@ def _run_benchmark(args):
     else:
         l2_flush_label = f"ON ({args.l2_flush_mb} MiB scratch clear before timed launches)"
     print(f"  Warmup={args.warmup}, Iters={args.iters}, L2 defeat={l2_flush_label}")
-    if is_ptpc:
-        # compile_ptpc_gemm forces these internally; flag the ones the user set off-default.
-        _ptpc_ignored = []
-        if args.no_tdm_store:
-            _ptpc_ignored.append("--no-tdm-store")
-        if _ptpc_ignored:
-            print(f"  Note: PTPC ignores (forced internally): {', '.join(_ptpc_ignored)}")
     print("=" * 72)
 
     torch.manual_seed(0)
@@ -1853,12 +1845,7 @@ def _run_benchmark(args):
 
     print("\n[1/3] Compiling kernel...")
     t0 = time.perf_counter()
-    use_tdm_store = not args.no_tdm_store
-    if args.split_k > 1 and use_tdm_store:
-        print("      Note: split-K forces buffer-store atomic epilogue; disabling TDM store.")
-        use_tdm_store = False
     if is_ptpc:
-        # compile_ptpc_gemm fixes scale_mode/wave_spec/use_tdm_store internally.
         launch_fn = compile_ptpc_gemm(
             N=padded_n,
             K=padded_k,
@@ -1894,7 +1881,6 @@ def _run_benchmark(args):
             l2_prefetch_distance=args.l2_prefetch_distance,
             cluster_m=args.cluster_m,
             cluster_n=args.cluster_n,
-            use_tdm_store=use_tdm_store,
             out_dtype=kernel_out_dtype,
             inst_prefetch=args.inst_prefetch,
             split_k=args.split_k,
@@ -2129,7 +2115,6 @@ def _run_graph_verify(args):
     kernel_out_dtype = args.out_dtype
     c_gpu = torch.zeros(padded_m, padded_n, dtype=_dtype_map[kernel_out_dtype], device="cuda")
 
-    use_tdm_store = not args.no_tdm_store and args.split_k == 1
     launch_fn = compile_mxscale_gemm(
         data_format=data_format,
         N=padded_n,
@@ -2144,7 +2129,6 @@ def _run_graph_verify(args):
         l2_prefetch_distance=args.l2_prefetch_distance,
         cluster_m=args.cluster_m,
         cluster_n=args.cluster_n,
-        use_tdm_store=use_tdm_store,
         out_dtype=kernel_out_dtype,
         inst_prefetch=args.inst_prefetch,
         split_k=args.split_k,
@@ -2256,7 +2240,6 @@ if __name__ == "__main__":
     parser.add_argument("--l2-prefetch-distance", type=int, default=2)
     parser.add_argument("--cluster-m", type=int, default=1)
     parser.add_argument("--cluster-n", type=int, default=1)
-    parser.add_argument("--no-tdm-store", action="store_true", default=False)
     parser.add_argument("--out-dtype", type=str, default="bf16", choices=["f32", "bf16", "f16"])
     parser.add_argument("--inst-prefetch", action="store_true", default=False)
     parser.add_argument("--waves-per-eu", type=int, default=None)
@@ -2342,7 +2325,6 @@ if __name__ == "__main__":
                 split_k=args.split_k,
             )
         else:
-            use_tdm_store = not args.no_tdm_store and args.split_k == 1
             _run_mxscale_gemm_test(
                 args.data_format,
                 args.M,
@@ -2354,7 +2336,6 @@ if __name__ == "__main__":
                 args.m_warp,
                 args.n_warp,
                 num_buffers=args.num_buffers,
-                use_tdm_store=use_tdm_store,
                 out_dtype=args.out_dtype,
                 split_k=args.split_k,
                 l2_prefetch_distance=args.l2_prefetch_distance,

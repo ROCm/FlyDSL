@@ -86,7 +86,6 @@ def compile_fp8fp4_gemm(
     l2_prefetch_distance: int = 2,
     cluster_m: int = 1,
     cluster_n: int = 1,
-    use_tdm_store: bool = True,
     out_dtype: str = "f32",
     inst_prefetch: bool = False,
     split_k: int = 1,
@@ -137,6 +136,7 @@ def compile_fp8fp4_gemm(
         raise ValueError(f"num_buffers must be 2, 3, 4, 5 or 6, got {num_buffers}")
     if split_k < 1:
         raise ValueError(f"split_k must be >= 1, got {split_k}")
+    tdm_store_enabled = split_k == 1
 
     use_cluster = cluster_m > 1 or cluster_n > 1
     if use_cluster:
@@ -206,9 +206,6 @@ def compile_fp8fp4_gemm(
             f"mxscale 32x4 B-scale requires N%32==0, tile_n%32==0, tile_k%128==0; "
             f"got N={N}, tile_n={tile_n}, tile_k={tile_k}"
         )
-
-    if split_k > 1 and use_tdm_store:
-        raise ValueError("split_k > 1 currently requires use_tdm_store=False")
 
     num_k_tiles = split_k_chunk // tile_k
     if num_k_tiles < num_buffers:
@@ -367,7 +364,7 @@ def compile_fp8fp4_gemm(
     stage_a_scale_off = [stage_base_off[i] + stage_a_scale_rel_off for i in range(num_buffers)]
     stage_b_scale_off = [stage_base_off[i] + stage_b_scale_rel_off for i in range(num_buffers)]
 
-    if use_tdm_store:
+    if tdm_store_enabled:
         lds_d_row_stride = warp_tile_n * elem_bytes_d + LDS_PAD_D_BYTES
         warp_d_bytes = warp_tile_m * lds_d_row_stride
         total_d_bytes = num_warps * warp_d_bytes
@@ -2044,7 +2041,7 @@ def compile_fp8fp4_gemm(
         stages_as_idx = [extract_lds_base_idx(stages_as[i]) for i in range_constexpr(num_buffers)]
         stages_bs_idx = [extract_lds_base_idx(stages_bs[i]) for i in range_constexpr(num_buffers)]
 
-        if const_expr(use_tdm_store):
+        if const_expr(tdm_store_enabled):
             d_lds_base_ptr = arena_base_ptr
             d_lds_f16_count = total_d_bytes // 2
             d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty_lds, shape=(d_lds_f16_count,))
@@ -2376,7 +2373,7 @@ def compile_fp8fp4_gemm(
             if const_expr(_outstanding == -1):
                 if const_expr(_tail_had_load):
                     _pipeline_fence(outstanding=0)
-                if const_expr(use_tdm_store):
+                if const_expr(tdm_store_enabled):
                     a0_prefetch = maybe_prefetch_fp8_deep_a0(stages_a_idx[_compute_stage])
                     accs = compute_tile_scheduled(
                         accs,
@@ -2467,7 +2464,7 @@ def compile_fp8fp4_gemm(
             else:
                 epilogue_stores(accs, epi_addrs_box[0])
 
-        if const_expr(use_tdm_store):
+        if const_expr(tdm_store_enabled):
             full_tile = (blk_m + arith.index(tile_m)) <= m_idx
             if_op = scf.IfOp(full_tile, [], has_else=True)
             with ir.InsertionPoint(if_op.then_block):
@@ -2494,7 +2491,7 @@ def compile_fp8fp4_gemm(
         l2_prefetch_distance,
         cluster_m,
         cluster_n,
-        use_tdm_store,
+        tdm_store_enabled,
         out_dtype,
         inst_prefetch,
         split_k,
@@ -2611,7 +2608,6 @@ def compile_ptpc_gemm(
     return compile_fp8fp4_gemm(
         data_format=data_format,
         scale_mode="ptpc",
-        use_tdm_store=(split_k == 1),
         N=N,
         K=K,
         tile_m=tile_m,
