@@ -10,11 +10,12 @@ For each dense cell we have auto (new batch-aware routing) and generic
   - overall: auto is within noise of min(auto, generic) on every cell (the new
     gate never leaves the materially-faster of the two providers unused).
 """
+
 import csv
 import sys
 from collections import defaultdict
 
-CSV = sys.argv[1] if len(sys.argv) > 1 else "scripts/dense_routing_verify.csv"
+CSV = sys.argv[1] if len(sys.argv) > 1 else "dense_routing_verify.csv"
 NOISE = 1.02  # 2% tolerance
 
 rows = list(csv.DictReader(open(CSV)))

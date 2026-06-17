@@ -11,11 +11,12 @@
 # materially faster provider unused. The cells the new gate changes vs the old
 # flat S<256 gate (large-batch S=192/255) are flagged explicitly.
 set -uo pipefail
-cd /sgl-workspace/FlyDSL-pr685
-export PYTHONPATH="/sgl-workspace/FlyDSL-pr685:/sgl-workspace/FlyDSL-lab/build-fly/python_packages:${PYTHONPATH:-}"
-export LD_LIBRARY_PATH="/sgl-workspace/FlyDSL-lab/build-fly/python_packages/flydsl/_mlir/_mlir_libs:${LD_LIBRARY_PATH:-}"
+# Run from the repo root (assumes the editable install / PYTHONPATH is already set,
+# as for the normal test suite). GPU and output path are overridable.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO_ROOT"
 GPU=${GPU:-0}; H=tests/kernels/test_flash_attn_fwd.py
-OUT=${OUT:-/sgl-workspace/FlyDSL-pr685/scripts/dense_routing_verify.csv}
+OUT=${OUT:-"$REPO_ROOT/dense_routing_verify.csv"}
 PROG=${OUT%.csv}.progress
 : > "$PROG"
 log(){ echo "[$(date -u +%H:%M:%S)] $*" >> "$PROG"; }
