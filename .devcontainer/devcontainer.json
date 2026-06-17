@@ -1,0 +1,30 @@
+{
+  "name": "FlyDSL FMHA (ROCm 7.13)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/FlyDSL",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/FlyDSL,type=bind,consistency=cached",
+  "runArgs": [
+    "--device=/dev/kfd",
+    "--device=/dev/dri",
+    "--group-add=video",
+    "--ipc=host",
+    "--shm-size=64g",
+    "-e", "HIP_VISIBLE_DEVICES=2",
+    "-e", "AITER_ROOT=/workspaces/aiter"
+  ],
+  "mounts": [
+    "source=${localEnv:HOME}/workspace/aiter,target=/workspaces/aiter,type=bind,consistency=cached"
+  ],
+  "postCreateCommand": "pip install flydsl einops && if ! python -c 'import aiter' 2>/dev/null; then cd /workspaces/aiter && AITER_USE_SYSTEM_TRITON=1 python3 setup.py develop; fi && python -c \"import flydsl, aiter, torch; print('flydsl OK, aiter OK, torch', torch.__version__)\"",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python"
+      ]
+    }
+  },
+  "remoteUser": "root"
+}
