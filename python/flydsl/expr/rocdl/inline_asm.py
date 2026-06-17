@@ -12,6 +12,8 @@ TODO: Remove these inline asm wrappers once upstream MLIR adds proper ROCDL
 dialect ops for v_cvt_off_f32_i4 and v_cvt_pk_bf16_f32.
 """
 
+from ..meta import dsl_loc_tracing
+
 
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
@@ -22,6 +24,7 @@ def _to_ir(v):
     return v
 
 
+@dsl_loc_tracing
 def cvt_off_f32_i4(src_i32, byte_sel=None):
     """gfx9xx: v_cvt_off_f32_i4 — convert low nibble (bits[3:0]) to f32.
 
@@ -49,6 +52,7 @@ def cvt_off_f32_i4(src_i32, byte_sel=None):
     )
 
 
+@dsl_loc_tracing
 def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
     """gfx950: v_cvt_pk_bf16_f32 vdst, vsrc0, vsrc1.
 

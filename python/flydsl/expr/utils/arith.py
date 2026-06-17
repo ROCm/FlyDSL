@@ -7,7 +7,7 @@ from functools import partialmethod
 from ..._mlir import ir
 from ..._mlir.dialects import arith, math
 from ..._mlir.extras import types as T
-from ..meta import traced_op
+from ..meta import dsl_loc_tracing
 
 
 def element_type(ty) -> ir.Type:
@@ -37,7 +37,8 @@ def recast_type(src_type, res_elem_type) -> ir.Type:
     return res_elem_type
 
 
-def arith_const(value, ty=None, *, loc=None, ip=None):
+@dsl_loc_tracing
+def arith_const(value, ty=None):
     if isinstance(value, ir.Value):
         return value
 
@@ -64,10 +65,11 @@ def arith_const(value, ty=None, *, loc=None, ip=None):
         value = float(value)
     else:
         raise ValueError(f"unsupported constant type: {type(value)}")
-    return arith.constant(ty, value, loc=loc, ip=ip)
+    return arith.constant(ty, value)
 
 
-def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
+@dsl_loc_tracing
+def fp_to_fp(src, res_elem_type):
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     src_elem_type = element_type(src.type)
@@ -75,29 +77,32 @@ def fp_to_fp(src, res_elem_type, *, loc=None, ip=None):
         return src
     res_type = recast_type(src.type, res_elem_type)
     if res_elem_type.width > src_elem_type.width:
-        return arith.extf(res_type, src, loc=loc, ip=ip)
-    return arith.truncf(res_type, src, loc=loc, ip=ip)
+        return arith.extf(res_type, src)
+    return arith.truncf(res_type, src)
 
 
-def fp_to_int(src, signed, res_elem_type, *, loc=None, ip=None):
+@dsl_loc_tracing
+def fp_to_int(src, signed, res_elem_type):
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
     if signed:
-        return arith.fptosi(res_type, src, loc=loc, ip=ip)
-    return arith.fptoui(res_type, src, loc=loc, ip=ip)
+        return arith.fptosi(res_type, src)
+    return arith.fptoui(res_type, src)
 
 
-def int_to_fp(src, signed, res_elem_type, *, loc=None, ip=None):
+@dsl_loc_tracing
+def int_to_fp(src, signed, res_elem_type):
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     res_type = recast_type(src.type, res_elem_type)
     if signed and element_type(src.type).width > 1:
-        return arith.sitofp(res_type, src, loc=loc, ip=ip)
-    return arith.uitofp(res_type, src, loc=loc, ip=ip)
+        return arith.sitofp(res_type, src)
+    return arith.uitofp(res_type, src)
 
 
-def int_to_int(src, dst_type, *, signed=None, loc=None, ip=None):
+@dsl_loc_tracing
+def int_to_int(src, dst_type, *, signed=None):
     if not isinstance(src, ir.Value) and hasattr(src, "ir_value"):
         src = src.ir_value()
     src_width = element_type(src.type).width
@@ -109,14 +114,15 @@ def int_to_int(src, dst_type, *, signed=None, loc=None, ip=None):
         if signed is None:
             signed = getattr(src, "signed", None)
         if signed and src_width > 1:
-            return arith.extsi(dst_ir_type, src, loc=loc, ip=ip)
-        return arith.extui(dst_ir_type, src, loc=loc, ip=ip)
-    return arith.trunci(dst_ir_type, src, loc=loc, ip=ip)
+            return arith.extsi(dst_ir_type, src)
+        return arith.extui(dst_ir_type, src)
+    return arith.trunci(dst_ir_type, src)
 
 
-def _coerce_other(self, other, *, loc=None, ip=None):
+@dsl_loc_tracing
+def _coerce_other(self, other):
     if isinstance(other, (int, float, bool)):
-        return arith_const(other, self.type, loc=loc, ip=ip).with_signedness(self.signed)
+        return arith_const(other, self.type).with_signedness(self.signed)
     if not isinstance(other, ArithValue):
         # Accept DSL Numeric types (Int32, Float32, etc.) by unwrapping via ir_value()
         if hasattr(other, "ir_value"):
@@ -127,7 +133,7 @@ def _coerce_other(self, other, *, loc=None, ip=None):
     if isinstance(self.type, ir.VectorType) and not isinstance(other.type, ir.VectorType):
         from ..._mlir.dialects import vector as _vector
 
-        return _vector.broadcast(self.type, _to_raw(other), loc=loc, ip=ip)
+        return _vector.broadcast(self.type, _to_raw(other))
     return other
 
 
@@ -138,57 +144,59 @@ _ARITH_OPS = {
 }
 
 
-def _binary_op(self, other, op, *, loc=None, ip=None):
-    other = _coerce_other(self, other, loc=loc, ip=ip)
+@dsl_loc_tracing
+def _binary_op(self, other, op):
+    other = _coerce_other(self, other)
     if other is NotImplemented:
         return NotImplemented
 
     if op in _ARITH_OPS:
         float_fn, int_fn = _ARITH_OPS[op]
         if self.is_float:
-            return float_fn(self, other, loc=loc, ip=ip)
-        return int_fn(self, other, loc=loc, ip=ip)
+            return float_fn(self, other)
+        return int_fn(self, other)
 
     if op == "div":
         if self.is_float:
-            return arith.divf(self, other, loc=loc, ip=ip)
+            return arith.divf(self, other)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
-            return arith.divui(self, other, loc=loc, ip=ip)
+            return arith.divui(self, other)
         fp_ty = T.f64() if et.width > 32 else T.f32()
-        lhs = int_to_fp(self, self.signed, fp_ty, loc=loc, ip=ip)
-        rhs = int_to_fp(other, other.signed, fp_ty, loc=loc, ip=ip)
-        return arith.divf(lhs, rhs, loc=loc, ip=ip)
+        lhs = int_to_fp(self, self.signed, fp_ty)
+        rhs = int_to_fp(other, other.signed, fp_ty)
+        return arith.divf(lhs, rhs)
 
     if op == "floordiv":
         if self.is_float:
-            q = arith.divf(self, other, loc=loc, ip=ip)
-            return math.floor(q, loc=loc, ip=ip)
+            q = arith.divf(self, other)
+            return math.floor(q)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
-            return arith.divui(self, other, loc=loc, ip=ip)
+            return arith.divui(self, other)
         if self.signed is not False:
-            return arith.floordivsi(self, other, loc=loc, ip=ip)
-        return arith.divui(self, other, loc=loc, ip=ip)
+            return arith.floordivsi(self, other)
+        return arith.divui(self, other)
 
     if op == "mod":
         if self.is_float:
-            return arith.remf(self, other, loc=loc, ip=ip)
+            return arith.remf(self, other)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
-            return arith.remui(self, other, loc=loc, ip=ip)
+            return arith.remui(self, other)
         if self.signed is not False:
-            return arith.remsi(self, other, loc=loc, ip=ip)
-        return arith.remui(self, other, loc=loc, ip=ip)
+            return arith.remsi(self, other)
+        return arith.remui(self, other)
 
     raise ValueError(f"unknown binary op: {op}")
 
 
-def _rbinary_op(self, other, op, *, loc=None, ip=None):
-    other = _coerce_other(self, other, loc=loc, ip=ip)
+@dsl_loc_tracing
+def _rbinary_op(self, other, op):
+    other = _coerce_other(self, other)
     if other is NotImplemented:
         return NotImplemented
-    return _binary_op(other, self, op, loc=loc, ip=ip)
+    return _binary_op(other, self, op)
 
 
 _CMP_FLOAT_PRED = {
@@ -217,16 +225,17 @@ _CMP_INT_UNSIGNED = {
 }
 
 
-def _comparison_op(self, other, predicate, *, loc=None, ip=None):
-    other = _coerce_other(self, other, loc=loc, ip=ip)
+@dsl_loc_tracing
+def _comparison_op(self, other, predicate):
+    other = _coerce_other(self, other)
     if other is NotImplemented:
         return NotImplemented
 
     if self.is_float:
-        return arith.cmpf(_CMP_FLOAT_PRED[predicate], self, other, loc=loc, ip=ip)
+        return arith.cmpf(_CMP_FLOAT_PRED[predicate], self, other)
     if self.signed is not False:
-        return arith.cmpi(_CMP_INT_SIGNED[predicate], self, other, loc=loc, ip=ip)
-    return arith.cmpi(_CMP_INT_UNSIGNED[predicate], self, other, loc=loc, ip=ip)
+        return arith.cmpi(_CMP_INT_SIGNED[predicate], self, other)
+    return arith.cmpi(_CMP_INT_UNSIGNED[predicate], self, other)
 
 
 _BITWISE_OPS = {
@@ -236,62 +245,68 @@ _BITWISE_OPS = {
 }
 
 
-def _bitwise_op(self, other, op, reverse=False, *, loc=None, ip=None):
-    other = _coerce_other(self, other, loc=loc, ip=ip)
+@dsl_loc_tracing
+def _bitwise_op(self, other, op, reverse=False):
+    other = _coerce_other(self, other)
     if other is NotImplemented:
         return NotImplemented
     fn = _BITWISE_OPS[op]
     if reverse:
-        return fn(other, self, loc=loc, ip=ip)
-    return fn(self, other, loc=loc, ip=ip)
+        return fn(other, self)
+    return fn(self, other)
 
 
-def _shift_op(self, other, op, reverse=False, *, loc=None, ip=None):
-    other = _coerce_other(self, other, loc=loc, ip=ip)
+@dsl_loc_tracing
+def _shift_op(self, other, op, reverse=False):
+    other = _coerce_other(self, other)
     if other is NotImplemented:
         return NotImplemented
     lhs, rhs = (other, self) if reverse else (self, other)
     if op == "shl":
-        return arith.shli(lhs, rhs, loc=loc, ip=ip)
+        return arith.shli(lhs, rhs)
     signed = getattr(lhs, "signed", None)
     if signed is True:
-        return arith.shrsi(lhs, rhs, loc=loc, ip=ip)
-    return arith.shrui(lhs, rhs, loc=loc, ip=ip)
+        return arith.shrsi(lhs, rhs)
+    return arith.shrui(lhs, rhs)
 
 
-def _pow_op(self, other, reverse=False, *, loc=None, ip=None):
-    other = _coerce_other(self, other, loc=loc, ip=ip)
+@dsl_loc_tracing
+def _pow_op(self, other, reverse=False):
+    other = _coerce_other(self, other)
     if other is NotImplemented:
         return NotImplemented
     if reverse:
         self, other = other, self
     if self.is_float and other.is_float:
-        return math.powf(self, other, loc=loc, ip=ip)
+        return math.powf(self, other)
     if self.is_float and not other.is_float:
-        return math.fpowi(self, other, loc=loc, ip=ip)
+        return math.fpowi(self, other)
     if not self.is_float and other.is_float:
         fp_ty = element_type(other.type)
-        lhs = int_to_fp(self, self.signed, fp_ty, loc=loc, ip=ip)
-        return math.powf(lhs, other, loc=loc, ip=ip)
-    return math.ipowi(self, other, loc=loc, ip=ip)
+        lhs = int_to_fp(self, self.signed, fp_ty)
+        return math.powf(lhs, other)
+    return math.ipowi(self, other)
 
 
-def _neg_op(self, *, loc=None, ip=None):
+@dsl_loc_tracing
+def _neg_op(self):
     if self.type == T.bool():
         raise TypeError("negation is not supported for boolean type")
     if self.is_float:
-        return arith.negf(self, loc=loc, ip=ip)
-    c0 = arith_const(0, self.type, loc=loc, ip=ip)
-    return arith.subi(c0, self, loc=loc, ip=ip)
+        return arith.negf(self)
+    c0 = arith_const(0, self.type)
+    return arith.subi(c0, self)
 
 
-def _invert_op(self, *, loc=None, ip=None):
-    return arith.xori(self, arith_const(-1, self.type, loc=loc, ip=ip))
+@dsl_loc_tracing
+def _invert_op(self):
+    return arith.xori(self, arith_const(-1, self.type))
 
 
-def _select_raw_operand(value, other, *, loc=None):
+@dsl_loc_tracing
+def _select_raw_operand(value, other):
     if isinstance(value, (int, float, bool)):
-        return _to_raw(arith_const(value, _to_raw(other).type, loc=loc))
+        return _to_raw(arith_const(value, _to_raw(other).type))
     return _to_raw(value)
 
 
@@ -311,7 +326,7 @@ def _select_raw_operand(value, other, *, loc=None):
 @ir.register_value_caster(ir.IndexType.static_typeid)
 @ir.register_value_caster(ir.VectorType.static_typeid)
 class ArithValue(ir.Value):
-    def __init__(self, v, signed=None, *, loc=None, ip=None):
+    def __init__(self, v, signed=None):
         if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
             v = v.ir_value()
         super().__init__(v)
@@ -361,75 +376,89 @@ class ArithValue(ir.Value):
     __rlshift__ = partialmethod(_shift_op, op="shl", reverse=True)
     __rrshift__ = partialmethod(_shift_op, op="shr", reverse=True)
 
-    def select(self, true_value, false_value, *, loc=None):
+    @dsl_loc_tracing
+    def select(self, true_value, false_value):
         """Ternary select: self (i1 condition) ? true_value : false_value."""
-        true_value = _select_raw_operand(true_value, false_value, loc=loc)
-        false_value = _select_raw_operand(false_value, true_value, loc=loc)
-        return arith.SelectOp(_to_raw(self), true_value, false_value, loc=loc).result
+        true_value = _select_raw_operand(true_value, false_value)
+        false_value = _select_raw_operand(false_value, true_value)
+        return arith.SelectOp(_to_raw(self), true_value, false_value).result
 
-    def extf(self, target_type, *, loc=None):
+    @dsl_loc_tracing
+    def extf(self, target_type):
         """Extend float precision (e.g. bf16 → f32)."""
-        return arith.ExtFOp(target_type, self, loc=loc).result
+        return arith.ExtFOp(target_type, self).result
 
-    def truncf(self, target_type, *, loc=None):
+    @dsl_loc_tracing
+    def truncf(self, target_type):
         """Truncate float precision (e.g. f32 → bf16)."""
-        return arith.TruncFOp(target_type, self, loc=loc).result
+        return arith.TruncFOp(target_type, self).result
 
-    def extui(self, target_type, *, loc=None):
+    @dsl_loc_tracing
+    def extui(self, target_type):
         """Zero-extend integer to wider type (e.g. i32 → i64)."""
-        return arith.ExtUIOp(target_type, self, loc=loc).result
+        return arith.ExtUIOp(target_type, self).result
 
-    def extsi(self, target_type, *, loc=None):
+    @dsl_loc_tracing
+    def extsi(self, target_type):
         """Sign-extend integer to wider type (e.g. i32 → i64)."""
-        return arith.ExtSIOp(target_type, self, loc=loc).result
+        return arith.ExtSIOp(target_type, self).result
 
-    def trunci(self, target_type, *, loc=None):
+    @dsl_loc_tracing
+    def trunci(self, target_type):
         """Truncate integer to narrower type (e.g. i64 → i32)."""
-        return arith.TruncIOp(target_type, self, loc=loc).result
+        return arith.TruncIOp(target_type, self).result
 
-    def bitcast(self, target_type, *, loc=None):
+    @dsl_loc_tracing
+    def bitcast(self, target_type):
         """Reinterpret bits as different type (same bit width)."""
-        return arith.BitcastOp(target_type, self, loc=loc).result
+        return arith.BitcastOp(target_type, self).result
 
-    def shrui(self, amount, *, loc=None):
+    @dsl_loc_tracing
+    def shrui(self, amount):
         """Unsigned right shift (zero-fills high bits)."""
-        return arith.ShRUIOp(self, _to_raw(amount), loc=loc).result
+        return arith.ShRUIOp(self, _to_raw(amount)).result
 
-    def addf(self, other, *, fastmath=None, loc=None):
+    @dsl_loc_tracing
+    def addf(self, other, *, fastmath=None):
         """Float add with optional fastmath flags."""
-        return arith.addf(self, _to_raw(other), fastmath=fastmath, loc=loc)
+        return arith.addf(self, _to_raw(other), fastmath=fastmath)
 
-    def maximumf(self, other, *, loc=None):
+    @dsl_loc_tracing
+    def maximumf(self, other):
         """Float maximum (NaN-propagating)."""
-        return arith.maximumf(self, _to_raw(other), loc=loc)
+        return arith.maximumf(self, _to_raw(other))
 
-    def rsqrt(self, *, fastmath=None, loc=None):
+    @dsl_loc_tracing
+    def rsqrt(self, *, fastmath=None):
         """Reciprocal square root: 1/sqrt(self)."""
         from ..._mlir.dialects import math as _math
 
-        return _math.rsqrt(self, fastmath=fastmath, loc=loc)
+        return _math.rsqrt(self, fastmath=fastmath)
 
-    def exp2(self, *, fastmath=None, loc=None):
+    @dsl_loc_tracing
+    def exp2(self, *, fastmath=None):
         """Base-2 exponential: 2^self."""
         from ..._mlir.dialects import math as _math
 
-        return _math.exp2(self, fastmath=fastmath, loc=loc)
+        return _math.exp2(self, fastmath=fastmath)
 
-    def shuffle_xor(self, offset, width, *, loc=None):
+    @dsl_loc_tracing
+    def shuffle_xor(self, offset, width):
         """GPU warp shuffle with XOR mode."""
         from ..._mlir.dialects.gpu import ShuffleOp
 
         if isinstance(offset, int):
-            offset = constant(offset, type=T.i32(), loc=loc)
+            offset = constant(offset, type=T.i32())
         if isinstance(width, int):
-            width = constant(width, type=T.i32(), loc=loc)
-        return ShuffleOp(_to_raw(self), _to_raw(offset), _to_raw(width), mode="xor", loc=loc).shuffleResult
+            width = constant(width, type=T.i32())
+        return ShuffleOp(_to_raw(self), _to_raw(offset), _to_raw(width), mode="xor").shuffleResult
 
-    def index_cast(self, target_type, *, loc=None):
+    @dsl_loc_tracing
+    def index_cast(self, target_type):
         """Cast between index and integer types."""
         if self.type == target_type:
             return self
-        return arith.IndexCastOp(target_type, self, loc=loc).result
+        return arith.IndexCastOp(target_type, self).result
 
     def __hash__(self):
         return super().__hash__()
@@ -463,8 +492,8 @@ def _to_raw(v):
     return ir.Value._CAPICreate(v._CAPIPtr)
 
 
-@traced_op
-def constant(value, *, type=None, index=False, loc=None, ip=None):
+@dsl_loc_tracing
+def constant(value, *, type=None, index=False):
     """Create a constant value.
 
     Args:
@@ -486,17 +515,17 @@ def constant(value, *, type=None, index=False, loc=None, ip=None):
         raise ValueError(f"unsupported constant type: {builtins.type(value)}")
     if isinstance(mlir_type, (ir.F16Type, ir.F32Type, ir.F64Type, ir.BF16Type)):
         value = float(value)
-    return arith.constant(mlir_type, value, loc=loc, ip=ip)
+    return arith.constant(mlir_type, value)
 
 
-@traced_op
-def index(value, *, loc=None, ip=None):
+@dsl_loc_tracing
+def index(value):
     """Create an index constant."""
-    return constant(value, index=True, loc=loc, ip=ip)
+    return constant(value, index=True)
 
 
-@traced_op
-def constant_vector(element_value, vector_type, *, loc=None):
+@dsl_loc_tracing
+def constant_vector(element_value, vector_type):
     """Create a splat constant vector."""
     elem_ty = element_type(vector_type)
     if is_float_type(elem_ty):
@@ -504,58 +533,58 @@ def constant_vector(element_value, vector_type, *, loc=None):
     else:
         attr = ir.IntegerAttr.get(elem_ty, int(element_value))
     dense = ir.DenseElementsAttr.get_splat(vector_type, attr)
-    return arith.constant(vector_type, dense, loc=loc)
+    return arith.constant(vector_type, dense)
 
 
-@traced_op
-def index_cast(target_type, value, *, loc=None):
+@dsl_loc_tracing
+def index_cast(target_type, value):
     """Cast between index and integer types."""
     v = _to_raw(value)
     if v.type == target_type:
         return v
-    return arith.IndexCastOp(target_type, v, loc=loc).result
+    return arith.IndexCastOp(target_type, v).result
 
 
-@traced_op
-def select(condition, true_value, false_value, *, loc=None):
+@dsl_loc_tracing
+def select(condition, true_value, false_value):
     """Select between two values based on a boolean condition."""
-    true_value = _select_raw_operand(true_value, false_value, loc=loc)
-    false_value = _select_raw_operand(false_value, true_value, loc=loc)
-    return arith.SelectOp(_to_raw(condition), true_value, false_value, loc=loc).result
+    true_value = _select_raw_operand(true_value, false_value)
+    false_value = _select_raw_operand(false_value, true_value)
+    return arith.SelectOp(_to_raw(condition), true_value, false_value).result
 
 
-@traced_op
-def sitofp(target_type, value, *, loc=None):
+@dsl_loc_tracing
+def sitofp(target_type, value):
     """Convert signed integer to floating point."""
-    return arith.SIToFPOp(target_type, _to_raw(value), loc=loc).result
+    return arith.SIToFPOp(target_type, _to_raw(value)).result
 
 
-@traced_op
-def trunc_f(target_type, value, *, loc=None):
+@dsl_loc_tracing
+def trunc_f(target_type, value):
     """Truncate floating point to narrower type (e.g. f32 -> f16)."""
-    return arith.TruncFOp(target_type, _to_raw(value), loc=loc).result
+    return arith.TruncFOp(target_type, _to_raw(value)).result
 
 
-@traced_op
-def andi(lhs, rhs, *, loc=None):
+@dsl_loc_tracing
+def andi(lhs, rhs):
     """Bitwise AND."""
-    return arith.AndIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
+    return arith.AndIOp(_to_raw(lhs), _to_raw(rhs)).result
 
 
-@traced_op
-def xori(lhs, rhs, *, loc=None):
+@dsl_loc_tracing
+def xori(lhs, rhs):
     """Bitwise XOR."""
-    return arith.XOrIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
+    return arith.XOrIOp(_to_raw(lhs), _to_raw(rhs)).result
 
 
-@traced_op
-def shli(lhs, rhs, *, loc=None):
+@dsl_loc_tracing
+def shli(lhs, rhs):
     """Left shift."""
-    return arith.ShLIOp(_to_raw(lhs), _to_raw(rhs), loc=loc).result
+    return arith.ShLIOp(_to_raw(lhs), _to_raw(rhs)).result
 
 
-def unwrap(val, *, type=None, index=False, loc=None):
+def unwrap(val, *, type=None, index=False):
     """Unwrap ArithValue to raw ir.Value. Materializes Python scalars."""
     if isinstance(val, (int, float, bool)):
-        return _to_raw(constant(val, type=type, index=index, loc=loc))
+        return _to_raw(constant(val, type=type, index=index))
     return _to_raw(val)

@@ -10,12 +10,14 @@ import numpy as np
 from .._mlir import ir
 from .._mlir.dialects import arith
 from .._mlir.extras import types as T
+from .meta import dsl_loc_tracing
 from .utils.arith import (
     ArithValue,
     _to_raw,
     arith_const,
     fp_to_fp,
     fp_to_int,
+    index_cast,
     int_to_fp,
     int_to_int,
     is_float_type,
@@ -251,7 +253,7 @@ def _extract_arith(val, signed):
 def _make_binop(op, promote=True, widen_bool=False, swap=False):
     """Create a binary-operator closure for Numeric subclasses."""
 
-    def _apply(lhs, rhs, *, loc=None, ip=None):
+    def _apply(lhs, rhs):
         rhs = _try_coerce_rhs(rhs)
         if rhs is None:
             return NotImplemented
@@ -270,13 +272,13 @@ def _make_binop(op, promote=True, widen_bool=False, swap=False):
         lv, rv = _extract_arith(lhs, lhs.signed), _extract_arith(rhs, rhs.signed)
         if swap:
             lv, rv = rv, lv
-        return out_type(op(lv, rv), loc=loc, ip=ip)
+        return out_type(op(lv, rv))
 
     return _apply
 
 
 class Numeric(metaclass=NumericMeta):
-    def __init__(self, value, *, loc=None, ip=None):
+    def __init__(self, value):
         self.value = value
 
     def __str__(self) -> str:
@@ -288,11 +290,11 @@ class Numeric(metaclass=NumericMeta):
     def __hash__(self):
         return hash(type(self)) ^ hash(self.value)
 
-    def select(self, true_value, false_value, *, loc=None):
+    def select(self, true_value, false_value):
         """Ternary select (for Boolean conditions from Int32 comparisons)."""
         from .typing import as_dsl_value
 
-        result = ArithValue(self).select(true_value, false_value, loc=loc)
+        result = ArithValue(self).select(true_value, false_value)
         return as_dsl_value(result, true_value)
 
     @classmethod
@@ -308,14 +310,14 @@ class Numeric(metaclass=NumericMeta):
     def dtype(self) -> Type["Numeric"]:
         return type(self)
 
-    def to(self, dtype, *, loc=None, ip=None):
+    def to(self, dtype):
         if dtype is type(self):
             return self
         elif isinstance(dtype, type) and issubclass(dtype, Numeric):
             return dtype(self)
         elif dtype is ir.Value:
             if isinstance(self.value, (int, float, bool)):
-                return arith_const(self.value, type(self).ir_type, loc=loc, ip=ip)
+                return arith_const(self.value, type(self).ir_type)
             elif isinstance(self.value, ir.Value):
                 res = self.value
                 if not isinstance(res, ArithValue):
@@ -330,8 +332,8 @@ class Numeric(metaclass=NumericMeta):
         else:
             raise ValueError(f"unable to convert {type(self)} to {dtype}")
 
-    def ir_value(self, *, loc=None, ip=None) -> ir.Value:
-        return self.to(ir.Value, loc=loc, ip=ip)
+    def ir_value(self) -> ir.Value:
+        return self.to(ir.Value)
 
     def __get_ir_types__(self):
         return [type(self).ir_type]
@@ -339,37 +341,37 @@ class Numeric(metaclass=NumericMeta):
     def __cache_signature__(self):
         return (type(self),)
 
-    def __neg__(self, *, loc=None, ip=None):
+    def __neg__(self):
         if isinstance(self.value, (bool, int, float)):
             return type(self)(-self.value)
-        return type(self)(-self.value, loc=loc, ip=ip)
+        return type(self)(-self.value)
 
-    def __fly_bool__(self, *, loc=None, ip=None):
+    def __fly_bool__(self):
         if isinstance(self.value, (int, float, bool)):
             return Boolean(bool(self.value))
-        zero = arith_const(type(self).zero, type(self).ir_type, loc=loc, ip=ip)
-        return self.__ne__(type(self)(zero, loc=loc, ip=ip), loc=loc, ip=ip)
+        zero = arith_const(type(self).zero, type(self).ir_type)
+        return self.__ne__(type(self)(zero))
 
-    def __fly_not__(self, *, loc=None, ip=None):
-        b = self.__fly_bool__(loc=loc, ip=ip)
+    def __fly_not__(self):
+        b = self.__fly_bool__()
         if isinstance(b.value, bool):
             return Boolean(not b.value)
-        zero = arith_const(0, T.bool(), loc=loc, ip=ip)
-        return Boolean(b.ir_value().__eq__(zero), loc=loc, ip=ip)
+        zero = arith_const(0, T.bool())
+        return Boolean(b.ir_value().__eq__(zero))
 
-    def __fly_and__(self, other, *, loc=None, ip=None):
-        lhs = self.__fly_bool__(loc=loc, ip=ip)
-        rhs = as_numeric(other).__fly_bool__(loc=loc, ip=ip)
+    def __fly_and__(self, other):
+        lhs = self.__fly_bool__()
+        rhs = as_numeric(other).__fly_bool__()
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value and rhs.value)
-        return Boolean(lhs.ir_value().__and__(rhs.ir_value()), loc=loc, ip=ip)
+        return Boolean(lhs.ir_value().__and__(rhs.ir_value()))
 
-    def __fly_or__(self, other, *, loc=None, ip=None):
-        lhs = self.__fly_bool__(loc=loc, ip=ip)
-        rhs = as_numeric(other).__fly_bool__(loc=loc, ip=ip)
+    def __fly_or__(self, other):
+        lhs = self.__fly_bool__()
+        rhs = as_numeric(other).__fly_bool__()
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value or rhs.value)
-        return Boolean(lhs.ir_value().__or__(rhs.ir_value()), loc=loc, ip=ip)
+        return Boolean(lhs.ir_value().__or__(rhs.ir_value()))
 
     def __bool__(self):
         if isinstance(self.value, (int, float, bool)):
@@ -435,94 +437,95 @@ class Numeric(metaclass=NumericMeta):
             raise ValueError(f"unsupported mlir type: {ir_type}")
         return ir2dsl_map[ir_type]
 
-    def __add__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.add, widen_bool=True)(self, other, loc=loc, ip=ip)
+    def __add__(self, other):
+        return _make_binop(operator.add, widen_bool=True)(self, other)
 
-    def __sub__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.sub, widen_bool=True)(self, other, loc=loc, ip=ip)
+    def __sub__(self, other):
+        return _make_binop(operator.sub, widen_bool=True)(self, other)
 
-    def __mul__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.mul, widen_bool=True)(self, other, loc=loc, ip=ip)
+    def __mul__(self, other):
+        return _make_binop(operator.mul, widen_bool=True)(self, other)
 
-    def __floordiv__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.floordiv, widen_bool=True)(self, other, loc=loc, ip=ip)
+    def __floordiv__(self, other):
+        return _make_binop(operator.floordiv, widen_bool=True)(self, other)
 
-    def __truediv__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.truediv, widen_bool=True)(self, other, loc=loc, ip=ip)
+    def __truediv__(self, other):
+        return _make_binop(operator.truediv, widen_bool=True)(self, other)
 
-    def __mod__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.mod, widen_bool=True)(self, other, loc=loc, ip=ip)
+    def __mod__(self, other):
+        return _make_binop(operator.mod, widen_bool=True)(self, other)
 
-    def __radd__(self, other, *, loc=None, ip=None):
-        return self.__add__(other, loc=loc, ip=ip)
+    def __radd__(self, other):
+        return self.__add__(other)
 
-    def __rsub__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.sub, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
+    def __rsub__(self, other):
+        return _make_binop(operator.sub, widen_bool=True, swap=True)(self, other)
 
-    def __rmul__(self, other, *, loc=None, ip=None):
-        return self.__mul__(other, loc=loc, ip=ip)
+    def __rmul__(self, other):
+        return self.__mul__(other)
 
-    def __rfloordiv__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.floordiv, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
+    def __rfloordiv__(self, other):
+        return _make_binop(operator.floordiv, widen_bool=True, swap=True)(self, other)
 
-    def __rtruediv__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.truediv, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
+    def __rtruediv__(self, other):
+        return _make_binop(operator.truediv, widen_bool=True, swap=True)(self, other)
 
-    def __rmod__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.mod, widen_bool=True, swap=True)(self, other, loc=loc, ip=ip)
+    def __rmod__(self, other):
+        return _make_binop(operator.mod, widen_bool=True, swap=True)(self, other)
 
-    def __pow__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.pow)(self, other, loc=loc, ip=ip)
+    def __pow__(self, other):
+        return _make_binop(operator.pow)(self, other)
 
-    def __eq__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.eq)(self, other, loc=loc, ip=ip)
+    def __eq__(self, other):
+        return _make_binop(operator.eq)(self, other)
 
-    def __ne__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.ne)(self, other, loc=loc, ip=ip)
+    def __ne__(self, other):
+        return _make_binop(operator.ne)(self, other)
 
     # ── Proxy methods: delegate ArithValue-specific ops via ir_value() ──
-    def maximumf(self, other, *, loc=None):
+    def maximumf(self, other):
         """Float maximum — delegates to ArithValue.maximumf."""
-        return type(self)(self.ir_value().maximumf(_to_raw(other), loc=loc))
+        return type(self)(self.ir_value().maximumf(_to_raw(other)))
 
-    def minimumf(self, other, *, loc=None):
+    def minimumf(self, other):
         """Float minimum — delegates to ArithValue.minimumf."""
-        return type(self)(self.ir_value().minimumf(_to_raw(other), loc=loc))
+        return type(self)(self.ir_value().minimumf(_to_raw(other)))
 
-    def exp2(self, *, fastmath=None, loc=None):
+    def exp2(self, *, fastmath=None):
         """Base-2 exponential — delegates to ArithValue.exp2."""
-        return type(self)(self.ir_value().exp2(fastmath=fastmath, loc=loc))
+        return type(self)(self.ir_value().exp2(fastmath=fastmath))
 
-    def shuffle_xor(self, offset, width, *, loc=None):
+    def shuffle_xor(self, offset, width):
         """GPU warp shuffle XOR — delegates to ArithValue.shuffle_xor."""
-        return type(self)(self.ir_value().shuffle_xor(offset, width, loc=loc))
+        return type(self)(self.ir_value().shuffle_xor(offset, width))
 
-    def shrui(self, amount, *, loc=None):
+    def shrui(self, amount):
         """Unsigned right shift — delegates to ArithValue.shrui."""
-        return type(self)(self.ir_value().shrui(amount, loc=loc))
+        return type(self)(self.ir_value().shrui(amount))
 
-    def addf(self, other, *, fastmath=None, loc=None):
+    def addf(self, other, *, fastmath=None):
         """Float add with fastmath — delegates to ArithValue.addf."""
-        return type(self)(self.ir_value().addf(_to_raw(other), fastmath=fastmath, loc=loc))
+        return type(self)(self.ir_value().addf(_to_raw(other), fastmath=fastmath))
 
-    def __lt__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.lt)(self, other, loc=loc, ip=ip)
+    def __lt__(self, other):
+        return _make_binop(operator.lt)(self, other)
 
-    def __le__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.le)(self, other, loc=loc, ip=ip)
+    def __le__(self, other):
+        return _make_binop(operator.le)(self, other)
 
-    def __gt__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.gt)(self, other, loc=loc, ip=ip)
+    def __gt__(self, other):
+        return _make_binop(operator.gt)(self, other)
 
-    def __ge__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.ge)(self, other, loc=loc, ip=ip)
+    def __ge__(self, other):
+        return _make_binop(operator.ge)(self, other)
 
-    def bitcast(self, dtype, *, loc=None, ip=None):
+    @dsl_loc_tracing
+    def bitcast(self, dtype):
         """Reinterpret this value's bits as *dtype* (a same-width Numeric type)."""
         if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
             raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
-        res = arith.bitcast(dtype.ir_type, self.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
-        return dtype(res, loc=loc, ip=ip)
+        res = arith.bitcast(dtype.ir_type, self.ir_value())
+        return dtype(res)
 
 
 def as_numeric(obj):
@@ -532,7 +535,7 @@ def as_numeric(obj):
 
 
 class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i32):
-    def __init__(self, x, *, loc=None, ip=None):
+    def __init__(self, x):
         ty = type(self)
 
         if isinstance(x, (bool, int, float)):
@@ -551,17 +554,17 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
         elif isinstance(x, ir.Value):
             x_val = x
             if isinstance(x.type, ir.IndexType):
-                x_val = arith.index_cast(ty.ir_type, x, loc=loc, ip=ip)
+                x_val = index_cast(ty.ir_type, x)
             elif isinstance(x.type, ir.IntegerType):
                 if x.type.width != ty.width:
                     x_val = int_to_int(x, ty, signed=ty.signed)
             elif is_float_type(x.type):
-                x_val = fp_to_int(x, ty.signed, ty.ir_type, loc=loc, ip=ip)
+                x_val = fp_to_int(x, ty.signed, ty.ir_type)
         elif isinstance(x, Integer):
             if isinstance(x.value, ir.Value):
-                raw = x.ir_value(loc=loc, ip=ip)
+                raw = x.ir_value()
                 if isinstance(raw.type, ir.IndexType):
-                    x_val = arith.index_cast(ty.ir_type, raw, loc=loc, ip=ip)
+                    x_val = index_cast(ty.ir_type, raw)
                 else:
                     x_val = int_to_int(raw, ty)
             else:
@@ -579,52 +582,52 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
 
         super().__init__(x_val)
 
-    def __invert__(self, *, loc=None, ip=None):
+    def __invert__(self):
         res_type = type(self)
-        return res_type(self.ir_value(loc=loc, ip=ip).__invert__(loc=loc, ip=ip))
+        return res_type(self.ir_value().__invert__())
 
-    def __lshift__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.lshift)(self, other, loc=loc, ip=ip)
+    def __lshift__(self, other):
+        return _make_binop(operator.lshift)(self, other)
 
-    def __rlshift__(self, other, *, loc=None, ip=None):
+    def __rlshift__(self, other):
         other_ = as_numeric(other)
         if not isinstance(other_, Integer):
             raise ValueError(f"left-shift requires integer operands, got {other_}")
-        return other_.__lshift__(self, loc=loc, ip=ip)
+        return other_.__lshift__(self)
 
-    def __rshift__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.rshift)(self, other, loc=loc, ip=ip)
+    def __rshift__(self, other):
+        return _make_binop(operator.rshift)(self, other)
 
-    def __rrshift__(self, other, *, loc=None, ip=None):
+    def __rrshift__(self, other):
         other_ = as_numeric(other)
         if not isinstance(other_, Integer):
             raise ValueError(f"right-shift requires integer operands, got {other_}")
-        return other_.__rshift__(self, loc=loc, ip=ip)
+        return other_.__rshift__(self)
 
-    def __and__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.and_)(self, other, loc=loc, ip=ip)
+    def __and__(self, other):
+        return _make_binop(operator.and_)(self, other)
 
-    def __rand__(self, other, *, loc=None, ip=None):
-        return self.__and__(other, loc=loc, ip=ip)
+    def __rand__(self, other):
+        return self.__and__(other)
 
-    def __or__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.or_)(self, other, loc=loc, ip=ip)
+    def __or__(self, other):
+        return _make_binop(operator.or_)(self, other)
 
-    def __ror__(self, other, *, loc=None, ip=None):
-        return self.__or__(other, loc=loc, ip=ip)
+    def __ror__(self, other):
+        return self.__or__(other)
 
-    def __xor__(self, other, *, loc=None, ip=None):
-        return _make_binop(operator.xor)(self, other, loc=loc, ip=ip)
+    def __xor__(self, other):
+        return _make_binop(operator.xor)(self, other)
 
-    def __rxor__(self, other, *, loc=None, ip=None):
-        return self.__xor__(other, loc=loc, ip=ip)
+    def __rxor__(self, other):
+        return self.__xor__(other)
 
     def is_static(self):
         return not isinstance(self.value, ir.Value)
 
 
 class Float(Numeric, metaclass=NumericMeta, width=32, ir_type=T.f32):
-    def __init__(self, x, *, loc=None, ip=None):
+    def __init__(self, x):
         ty = type(self)
 
         if isinstance(x, (bool, int, float)):
@@ -634,11 +637,11 @@ class Float(Numeric, metaclass=NumericMeta, width=32, ir_type=T.f32):
                 raise ValueError("bare signless integer cannot be promoted to float; use a typed wrapper")
             elif is_float_type(x.type):
                 if x.type != ty.ir_type:
-                    x = fp_to_fp(x, ty.ir_type, loc=loc, ip=ip)
+                    x = fp_to_fp(x, ty.ir_type)
             super().__init__(x)
         elif isinstance(x, Integer):
             if isinstance(x.value, ir.Value):
-                x = int_to_fp(x.value, type(x).signed, ty.ir_type, loc=loc, ip=ip)
+                x = int_to_fp(x.value, type(x).signed, ty.ir_type)
             else:
                 x = float(x.value)
             super().__init__(x)
@@ -649,23 +652,23 @@ class Float(Numeric, metaclass=NumericMeta, width=32, ir_type=T.f32):
 
 
 class Boolean(Integer, metaclass=NumericMeta, width=1, signed=True, ir_type=T.bool):
-    def __init__(self, a, *, loc=None, ip=None):
+    def __init__(self, a):
         value = None
         if isinstance(a, (bool, int, float)):
             value = bool(a)
         elif isinstance(a, Numeric):
-            Boolean.__init__(self, a.value, loc=loc, ip=ip)
+            Boolean.__init__(self, a.value)
             return
         elif isinstance(a, ArithValue):
             if a.type == T.bool():
                 value = a
             else:
-                value = a != arith_const(0, a.type, loc=loc, ip=ip)
+                value = a != arith_const(0, a.type)
         if value is None:
             raise ValueError(f"no Boolean coercion defined for {a}")
-        super().__init__(value, loc=loc, ip=ip)
+        super().__init__(value)
 
-    def __neg__(self, *, loc=None, ip=None):
+    def __neg__(self):
         raise TypeError("unary minus is undefined for booleans")
 
 
@@ -846,17 +849,17 @@ class Index(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=lamb
         fx.Index(i32_val)  # cast i32/i64 ir.Value or Numeric to index
     """
 
-    def __init__(self, x, *, loc=None, ip=None):
+    def __init__(self, x):
         from .utils.arith import index_cast
 
         # Unwrap DSL Numeric to ir.Value first
         if isinstance(x, Index):
             x = x.value
         elif isinstance(x, Numeric):
-            x = x.ir_value(loc=loc, ip=ip)
+            x = x.ir_value()
         # Cast integer ir.Value to index (skip if already index type)
         if isinstance(x, ir.Value) and not isinstance(x.type, ir.IndexType):
-            x = index_cast(ir.IndexType.get(), x, loc=loc)
+            x = index_cast(ir.IndexType.get(), x)
         # x is now either: Python int, or index-typed ir.Value
         # Pass directly to Numeric.__init__ (bypass Integer conversion logic)
         Numeric.__init__(self, x)

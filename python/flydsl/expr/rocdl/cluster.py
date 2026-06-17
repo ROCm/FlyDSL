@@ -6,6 +6,7 @@
 from ..._mlir import ir
 from ..._mlir.dialects import gpu, rocdl, scf
 from .. import arith as _arith_ext
+from ..meta import dsl_loc_tracing
 from ..typing import T
 from . import cluster_workgroup_id_x, cluster_workgroup_id_y, wave_id
 
@@ -14,6 +15,7 @@ CLUSTER_BARRIER_ID = -3
 CLUSTER_WAIT_ALL = CLUSTER_BARRIER_ID
 
 
+@dsl_loc_tracing
 def is_wave_leader():
     """Return true for wave-0 inside the workgroup."""
     return _arith_ext.cmpi(
@@ -23,9 +25,10 @@ def is_wave_leader():
     )
 
 
+@dsl_loc_tracing
 def cluster_signal_once_per_wg():
     """Signal cluster barrier from exactly one wave per workgroup."""
-    if_op = scf.IfOp(is_wave_leader(), [], has_else=False, loc=ir.Location.unknown())
+    if_op = scf.IfOp(is_wave_leader(), [], has_else=False)
     if len(if_op.regions[0].blocks) == 0:
         if_op.regions[0].blocks.append(*[])
     with ir.InsertionPoint(if_op.regions[0].blocks[0]):
@@ -33,11 +36,13 @@ def cluster_signal_once_per_wg():
         scf.YieldOp([])
 
 
+@dsl_loc_tracing
 def cluster_wait():
     """Wait on the cluster user barrier."""
     rocdl.s_barrier_wait(CLUSTER_WAIT_ALL)
 
 
+@dsl_loc_tracing
 def cluster_barrier():
     """Workgroup + cluster barrier with one-wave signal semantics.
 
@@ -51,6 +56,7 @@ def cluster_barrier():
     cluster_wait()
 
 
+@dsl_loc_tracing
 def compute_cluster_position():
     """Compute a workgroup's (row, col) position within its cluster.
 
@@ -62,6 +68,7 @@ def compute_cluster_position():
     return local_x, local_y
 
 
+@dsl_loc_tracing
 def compute_mcast_masks(local_x, local_y, cluster_m: int, cluster_n: int):
     """Compute MCAST workgroup_mask values for A and B matrices.
 

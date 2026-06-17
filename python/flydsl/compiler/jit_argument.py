@@ -516,11 +516,11 @@ _TORCH_DTYPE_TO_MLIR_BUILDER = {
     torch.float32: T.f32,
     torch.float64: T.f64,
     torch.bool: lambda: ir.IntegerType.get_signless(1),
-    torch.uint8: lambda: ir.IntegerType.get_unsigned(8),
-    torch.int8: lambda: ir.IntegerType.get_signed(8),
-    torch.int16: lambda: ir.IntegerType.get_signed(16),
-    torch.int32: lambda: ir.IntegerType.get_signed(32),
-    torch.int64: lambda: ir.IntegerType.get_signed(64),
+    torch.uint8: lambda: ir.IntegerType.get_signless(8),
+    torch.int8: lambda: ir.IntegerType.get_signless(8),
+    torch.int16: lambda: ir.IntegerType.get_signless(16),
+    torch.int32: lambda: ir.IntegerType.get_signless(32),
+    torch.int64: lambda: ir.IntegerType.get_signless(64),
 }
 for _torch_name, _mlir_ctor in (
     ("float8_e5m2", ir.Float8E5M2Type),
