@@ -480,6 +480,57 @@ def _fp4x4_in_i32_to_bf16x4_i64(nib_i32, arith, vector, scale_val=None):
     return vector.extract(v64, static_position=[0], dynamic_position=[])
 
 
+def _fp4x4_in_i32_to_bf16x4_i64_via_fp8(nib_i32, arith, vector):
+    """Fast E2M1->bf16 for 4 nibbles (low nibble of each byte of ``nib_i32``).
+
+    Builds the E4M3FNUZ fp8 byte for all 4 nibbles with branchless SWAR integer
+    ops (once per i32, not per-nibble), then uses the hardware ``cvt_pk_f32_fp8``
+    to expand fp8->f32 -- avoiding the per-nibble IEEE-bit construction and the
+    cmp/select special-casing of the pure-ALU path.
+
+    E2M1 magnitude (mag = code & 7) -> E4M3FNUZ byte, gathered for all 4 nibbles
+    with a single ``v_perm_b32`` byte-LUT (mag is already a 0..7 byte index):
+      mag: 0    1    2    3    4    5    6    7
+      fp8: 0x00 0x38 0x40 0x44 0x48 0x4C 0x50 0x54
+    The sign bit (code bit3) goes to fp8 bit7, but is forced off when mag==0 so
+    E2M1 -0.0 maps to fp8 +0.0 (0x80 is NaN in FNUZ), matching the reference LUT.
+
+    f32->bf16 uses the lshr-16 truncation (exact: every value has <=3 mantissa
+    bits, so the low 16 f32 bits are zero).
+    """
+    from flydsl.expr import rocdl
+
+    c7 = fx.Int32(7)
+    mag = nib_i32 & fx.Int32(0x07070707)
+    # v_perm_b32 byte pool {SRC_HI:SRC_LO}: sel 0..3 -> SRC_LO bytes, 4..7 -> SRC_HI.
+    src_lo = fx.Int32(0x44403800)  # bytes[0..3] = fp8[mag 0..3]
+    src_hi = fx.Int32(0x54504C48)  # bytes[4..7] = fp8[mag 4..7]
+    magbyte = _arith.ArithValue(
+        rocdl.perm_b32(_arith._to_raw(src_hi), _arith._to_raw(src_lo), _arith._to_raw(mag))
+    )
+    nz = ((mag + fx.Int32(0x7F7F7F7F)) >> c7) & fx.Int32(0x01010101)  # 1 per byte if mag>=1
+    signbit = (nib_i32 & fx.Int32(0x08080808)) << fx.Int32(4)  # code bit3 -> fp8 bit7 (0x80)
+    signmask = nz << c7  # 0x80 where mag>=1 (drop sign on zero -> avoid FNUZ NaN)
+    fp8_i32 = magbyte | (signbit & signmask)
+
+    lo = rocdl.cvt_pk_f32_fp8(T.f32x2, _arith._to_raw(fp8_i32), word_sel=False)
+    hi = rocdl.cvt_pk_f32_fp8(T.f32x2, _arith._to_raw(fp8_i32), word_sel=True)
+    f = [
+        vector.extract(lo, static_position=[0], dynamic_position=[]),
+        vector.extract(lo, static_position=[1], dynamic_position=[]),
+        vector.extract(hi, static_position=[0], dynamic_position=[]),
+        vector.extract(hi, static_position=[1], dynamic_position=[]),
+    ]
+    bits = [arith.bitcast(T.i32, _arith._to_raw(fv)) for fv in f]
+    c16 = fx.Int32(16)
+    c_ffff0000 = fx.Int32(0xFFFF0000)
+    i32_lo = (bits[0] >> c16) | (bits[1] & c_ffff0000)
+    i32_hi = (bits[2] >> c16) | (bits[3] & c_ffff0000)
+    v2 = vector.from_elements(T.i32x2, [_arith._to_raw(i32_lo), _arith._to_raw(i32_hi)])
+    v64 = vector.bitcast(T.vec(1, T.i64), v2)
+    return vector.extract(v64, static_position=[0], dynamic_position=[])
+
+
 def dequant_fp4_to_bf16(packed32, arith, vector, scale_val=None):
     """Dequantize 8 packed MX-FP4 (E2M1) nibbles -> (b0, b1), two i64 each
     holding 4 bf16, for one bf16 MFMA K64 micro-step on gfx942 (CDNA3).
@@ -497,6 +548,11 @@ def dequant_fp4_to_bf16(packed32, arith, vector, scale_val=None):
     c_0f0f = fx.Int32(0x0F0F0F0F)
     even = packed32 & c_0f0f
     odd = (packed32 >> fx.Int32(4)) & c_0f0f
+    if scale_val is None:
+        # Fast path (gfx942): SWAR fp8-byte build + hardware cvt_pk_f32_fp8.
+        b0 = _fp4x4_in_i32_to_bf16x4_i64_via_fp8(even, arith, vector)
+        b1 = _fp4x4_in_i32_to_bf16x4_i64_via_fp8(odd, arith, vector)
+        return (b0, b1)
     b0 = _fp4x4_in_i32_to_bf16x4_i64(even, arith, vector, scale_val=scale_val)
     b1 = _fp4x4_in_i32_to_bf16x4_i64(odd, arith, vector, scale_val=scale_val)
     return (b0, b1)
