@@ -223,6 +223,15 @@ def build_flash_attn_func_module_primary(
         else:
 
             def _dualwave_swp_dispatch(*args, **kwargs):
+                # Optional launch args must be keyword: the generic and DUALWAVE_SWP
+                # launchers differ past the 6 required positionals (generic's 7th is
+                # `stream`; DUALWAVE_SWP's is `stride_kv_n`), so a 7th positional
+                # would silently mean different things once routing picks a path.
+                if len(args) > 6:
+                    raise TypeError(
+                        "flash_attn_func: pass only Q, K, V, O, batch_size, seq_len "
+                        "positionally; stream/stride_*/debug_counts/workspace by keyword."
+                    )
                 # Packed/varlen always uses DUALWAVE_SWP (no generic cu_seqlens path);
                 # cu_seqlens captured at build time are forwarded here.
                 if cu_seqlens_q is not None:
