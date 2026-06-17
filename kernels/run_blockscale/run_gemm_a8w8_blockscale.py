@@ -35,7 +35,7 @@ USE_TDM_STORE = False
 # Experimental: forwards to AMDGPU LLVM `amdgpu-loop-carried-load-percent`
 # function attribute via passthrough. Set to 0 to try less-conservative
 # scheduling of loop-carried VGPRs. None disables (no attribute set).
-LOOP_CARRIED_LOAD_PERCENT = 100
+LOOP_CARRIED_LOAD_PERCENT = 0
 # Kernarg preload: marks each kernel arg as `inreg` so the AMDGPU backend
 # preloads them into user SGPRs at dispatch (no s_load + s_wait_kmcnt at
 # wave entry). Saves ~1786 cycles of prologue stall on the gfx1250 sim.
@@ -51,6 +51,14 @@ WMMA_OPERAND_REUSE = True
 # prefetch ds_loads up into the WMMA shadows. Verify via trace — a passing unit
 # test is NOT proof (cross-wave race is timing-dependent). False = stock gpu.barrier().
 USE_MANUAL_BARRIER = True
+
+# Manual-only: fully preload the A panel (A0..A_{M-1}) in the prologue and refill
+# each A row's registers IN PLACE for tile T+1 — timed one compute-row after the
+# row's last read, so the reload never WARs a live WMMA read. Single A set (no
+# second buffer); B stays double-buffered. Requires scales_per_tile==1 (tile_k ==
+# scale_block_k). A ds_load win, not a VGPR win — verify the A-refill distance in
+# the trace (a passing unit test is NOT proof).
+A_RESIDENT_REFILL = True
 
 # Output dtype ("bf16" / "fp16" / "f32")
 OUT_DTYPE = "bf16"
@@ -175,6 +183,7 @@ def main():
         kernarg_preload=KERNARG_PRELOAD,
         wmma_operand_reuse=WMMA_OPERAND_REUSE,
         use_manual_barrier=USE_MANUAL_BARRIER,
+        a_resident_refill=A_RESIDENT_REFILL,
     )
 
     print("Launching kernel...")
