@@ -15,7 +15,7 @@ This module provides access to ROCm-specific GPU operations including:
 """
 
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
-from ..meta import traced_op
+from ..meta import dsl_loc_tracing
 from . import cdna4 as cdna4
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
@@ -53,23 +53,27 @@ mask_dsrd = 0x100
 mask_dswr = 0x200
 
 
+@dsl_loc_tracing
 def sched_mfma(cnt):
     sched_group_barrier(mask_mfma, cnt, 0)
 
 
+@dsl_loc_tracing
 def sched_vmem(cnt):
     sched_group_barrier(mask_vmem_rd, cnt, 0)
 
 
+@dsl_loc_tracing
 def sched_dsrd(cnt):
     sched_group_barrier(mask_dsrd, cnt, 0)
 
 
+@dsl_loc_tracing
 def sched_dswr(cnt):
     sched_group_barrier(mask_dswr, cnt, 0)
 
 
-def _unwrap_mfma_operand(v, *, loc=None):
+def _unwrap_mfma_operand(v):
     """MFMA operands are MLIR Values; some trailing operands are i32 flags.
 
     Accept Python ints and materialize them as i32 signless constants.
@@ -79,108 +83,108 @@ def _unwrap_mfma_operand(v, *, loc=None):
     from .. import arith as _arith_ext
 
     if isinstance(v, int):
-        return _arith_ext.unwrap(_arith_ext.constant(v, type=IntegerType.get_signless(32), loc=loc), loc=loc)
-    return _arith_ext.unwrap(v, loc=loc)
+        return _arith_ext.unwrap(_arith_ext.constant(v, type=IntegerType.get_signless(32)))
+    return _arith_ext.unwrap(v)
 
 
-def _split_mfma_operands(operands, *, loc=None):
+def _split_mfma_operands(operands):
     """Split [a, b, c, cbsz, abid, blgp] into (a, b, c) Values + (cbsz, abid, blgp) ints."""
-    a = _unwrap_mfma_operand(operands[0], loc=loc)
-    b = _unwrap_mfma_operand(operands[1], loc=loc)
-    c = _unwrap_mfma_operand(operands[2], loc=loc)
+    a = _unwrap_mfma_operand(operands[0])
+    b = _unwrap_mfma_operand(operands[1])
+    c = _unwrap_mfma_operand(operands[2])
     cbsz = int(operands[3]) if len(operands) > 3 else 0
     abid = int(operands[4]) if len(operands) > 4 else 0
     blgp = int(operands[5]) if len(operands) > 5 else 0
     return a, b, c, cbsz, abid, blgp
 
 
-@traced_op
-def mfma_f32_32x32x8f16(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_f32_32x32x8f16(result_type, operands):
     if _ods_mfma_f32_32x32x8f16 is None:
         raise AttributeError("ROCDL op not found: mfma_f32_32x32x8f16")
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_32x32x8f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_32x32x8f16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_32x32x8bf16_1k(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_f32_32x32x8bf16_1k(result_type, operands):
     if _ods_mfma_f32_32x32x8bf16_1k is None:
         raise AttributeError("ROCDL op not found: mfma_f32_32x32x8bf16_1k")
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_32x32x8bf16_1k(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_32x32x8bf16_1k(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_32x32x16_f16(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_f32_32x32x16_f16(result_type, operands):
     if _ods_mfma_f32_32x32x16_f16 is None:
         raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_f16")
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_32x32x16_f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_32x32x16_f16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_32x32x16_bf16(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_f32_32x32x16_bf16(result_type, operands):
     if _ods_mfma_f32_32x32x16_bf16 is None:
         raise AttributeError("ROCDL op not found: mfma_f32_32x32x16_bf16")
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_32x32x16_bf16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_32x32x16_bf16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_16x16x16f16(result_type, operands, *, loc=None, ip=None):
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_16x16x16f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+@dsl_loc_tracing
+def mfma_f32_16x16x16f16(result_type, operands):
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_16x16x16f16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_16x16x16bf16_1k(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_f32_16x16x16bf16_1k(result_type, operands):
     if _ods_mfma_f32_16x16x16bf16_1k is None:
         raise AttributeError("ROCDL op not found: mfma_f32_16x16x16bf16_1k")
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_16x16x16bf16_1k(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_16x16x16bf16_1k(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_16x16x32_fp8_fp8(result_type, operands, *, loc=None, ip=None):
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_16x16x32_fp8_fp8(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+@dsl_loc_tracing
+def mfma_f32_16x16x32_fp8_fp8(result_type, operands):
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_16x16x32_fp8_fp8(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_i32_16x16x32_i8(result_type, operands, *, loc=None, ip=None):
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_i32_16x16x32_i8(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+@dsl_loc_tracing
+def mfma_i32_16x16x32_i8(result_type, operands):
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_i32_16x16x32_i8(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_16x16x32_f16(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_f32_16x16x32_f16(result_type, operands):
     if _ods_mfma_f32_16x16x32_f16 is None:
         raise AttributeError("ROCDL op not found: mfma_f32_16x16x32_f16 (gfx950+)")
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_16x16x32_f16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_16x16x32_f16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_f32_16x16x32_bf16(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_f32_16x16x32_bf16(result_type, operands):
     if _ods_mfma_f32_16x16x32_bf16 is None:
         raise AttributeError("ROCDL op not found: mfma_f32_16x16x32_bf16 (gfx950+)")
-    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands, loc=loc)
-    return _ods_mfma_f32_16x16x32_bf16(result_type, a, b, c, cbsz, abid, blgp, loc=loc, ip=ip).result
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_f32_16x16x32_bf16(result_type, a, b, c, cbsz, abid, blgp).result
 
 
-@traced_op
-def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None):
+@dsl_loc_tracing
+def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands):
     if _ods_mfma_scale_f32_16x16x128_f8f6f4 is None:
         raise AttributeError("ROCDL op not found: mfma_scale_f32_16x16x128_f8f6f4(_)")
-    a = _unwrap_mfma_operand(operands[0], loc=loc)
-    b = _unwrap_mfma_operand(operands[1], loc=loc)
-    c = _unwrap_mfma_operand(operands[2], loc=loc)
+    a = _unwrap_mfma_operand(operands[0])
+    b = _unwrap_mfma_operand(operands[1])
+    c = _unwrap_mfma_operand(operands[2])
     cbsz = int(operands[3]) if len(operands) > 3 else 0
     blgp = int(operands[4]) if len(operands) > 4 else 0
     opselA = int(operands[5]) if len(operands) > 5 else 0
-    scaleA = _unwrap_mfma_operand(operands[6], loc=loc) if len(operands) > 6 else a
+    scaleA = _unwrap_mfma_operand(operands[6]) if len(operands) > 6 else a
     opselB = int(operands[7]) if len(operands) > 7 else 0
-    scaleB = _unwrap_mfma_operand(operands[8], loc=loc) if len(operands) > 8 else b
+    scaleB = _unwrap_mfma_operand(operands[8]) if len(operands) > 8 else b
     return _ods_mfma_scale_f32_16x16x128_f8f6f4(
         result_type,
         a,
@@ -192,11 +196,10 @@ def mfma_scale_f32_16x16x128_f8f6f4(result_type, operands, *, loc=None, ip=None)
         scaleA,
         opselB,
         scaleB,
-        loc=loc,
-        ip=ip,
     ).result
 
 
+@dsl_loc_tracing
 def wmma_scale_f32_16x16x128_f8f6f4(
     result_type,
     a,
@@ -214,8 +217,6 @@ def wmma_scale_f32_16x16x128_f8f6f4(
     fmtScaleB=0,
     reuseA=False,
     reuseB=False,
-    loc=None,
-    ip=None,
 ):
     """V_WMMA_SCALE_F32_16X16X128_F8F6F4 for gfx1250 (wave32).
 
@@ -232,11 +233,11 @@ def wmma_scale_f32_16x16x128_f8f6f4(
     """
     if _ods_wmma_scale_f32_16x16x128_f8f6f4 is None:
         raise AttributeError("ROCDL op not found: wmma_scale_f32_16x16x128_f8f6f4")
-    a_v = _unwrap_mfma_operand(a, loc=loc)
-    b_v = _unwrap_mfma_operand(b, loc=loc)
-    c_v = _unwrap_mfma_operand(c, loc=loc)
-    sA = _unwrap_mfma_operand(scaleA, loc=loc)
-    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    a_v = _unwrap_mfma_operand(a)
+    b_v = _unwrap_mfma_operand(b)
+    c_v = _unwrap_mfma_operand(c)
+    sA = _unwrap_mfma_operand(scaleA)
+    sB = _unwrap_mfma_operand(scaleB)
     return _ods_wmma_scale_f32_16x16x128_f8f6f4(
         result_type,
         a_v,
@@ -253,11 +254,10 @@ def wmma_scale_f32_16x16x128_f8f6f4(
         fmtScaleB=fmtScaleB,
         reuseA=reuseA,
         reuseB=reuseB,
-        loc=loc,
-        ip=ip,
     ).result
 
 
+@dsl_loc_tracing
 def wmma_scale_f32_32x16x128_f4(
     result_type,
     a,
@@ -273,8 +273,6 @@ def wmma_scale_f32_32x16x128_f4(
     fmtScaleB=0,
     reuseA=False,
     reuseB=False,
-    loc=None,
-    ip=None,
 ):
     """V_WMMA_SCALE_F32_32X16X128_F4 for gfx1250 (wave32).
 
@@ -287,11 +285,11 @@ def wmma_scale_f32_32x16x128_f4(
     """
     if _ods_wmma_scale_f32_32x16x128_f4 is None:
         raise AttributeError("ROCDL op not found: wmma_scale_f32_32x16x128_f4")
-    a_v = _unwrap_mfma_operand(a, loc=loc)
-    b_v = _unwrap_mfma_operand(b, loc=loc)
-    c_v = _unwrap_mfma_operand(c, loc=loc)
-    sA = _unwrap_mfma_operand(scaleA, loc=loc)
-    sB = _unwrap_mfma_operand(scaleB, loc=loc)
+    a_v = _unwrap_mfma_operand(a)
+    b_v = _unwrap_mfma_operand(b)
+    c_v = _unwrap_mfma_operand(c)
+    sA = _unwrap_mfma_operand(scaleA)
+    sB = _unwrap_mfma_operand(scaleB)
     return _ods_wmma_scale_f32_32x16x128_f4(
         result_type,
         a_v,
@@ -306,12 +304,11 @@ def wmma_scale_f32_32x16x128_f4(
         fmtScaleB=fmtScaleB,
         reuseA=reuseA,
         reuseB=reuseB,
-        loc=loc,
-        ip=ip,
     ).result
 
 
-def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, reuseB=False, loc=None, ip=None):
+@dsl_loc_tracing
+def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, reuseB=False):
     """Non-scale V_WMMA_F32_16X16X128 (E4M3) for gfx1250 (wave32).
 
     Operand types (wave32):
@@ -321,22 +318,13 @@ def wmma_f32_16x16x128_fp8_fp8(result_type, a, b, c, *, modC=0, reuseA=False, re
     """
     if _ods_wmma_f32_16x16x128_fp8_fp8 is None:
         raise AttributeError("ROCDL op not found: wmma_f32_16x16x128_fp8_fp8")
-    a_v = _unwrap_mfma_operand(a, loc=loc)
-    b_v = _unwrap_mfma_operand(b, loc=loc)
-    c_v = _unwrap_mfma_operand(c, loc=loc)
-    return _ods_wmma_f32_16x16x128_fp8_fp8(
-        result_type,
-        a_v,
-        b_v,
-        c_v,
-        modC=modC,
-        reuseA=reuseA,
-        reuseB=reuseB,
-        loc=loc,
-        ip=ip,
-    ).result
+    a_v = _unwrap_mfma_operand(a)
+    b_v = _unwrap_mfma_operand(b)
+    c_v = _unwrap_mfma_operand(c)
+    return _ods_wmma_f32_16x16x128_fp8_fp8(result_type, a_v, b_v, c_v, modC=modC, reuseA=reuseA, reuseB=reuseB).result
 
 
+@dsl_loc_tracing
 def wave_id():
     """Get wave-id-in-workgroup as SGPR (via TTMP8[29:25]).
 
@@ -349,6 +337,7 @@ def wave_id():
     return _ods_wave_id(i32)
 
 
+@dsl_loc_tracing
 def cluster_workgroup_id_x():
     """Get workgroup position within cluster along X (SGPR, gfx1250)."""
     from ..._mlir import ir
@@ -357,6 +346,7 @@ def cluster_workgroup_id_x():
     return _ods_cluster_workgroup_id_x(i32)
 
 
+@dsl_loc_tracing
 def cluster_workgroup_id_y():
     """Get workgroup position within cluster along Y (SGPR, gfx1250)."""
     from ..._mlir import ir
@@ -365,6 +355,7 @@ def cluster_workgroup_id_y():
     return _ods_cluster_workgroup_id_y(i32)
 
 
+@dsl_loc_tracing
 def cluster_workgroup_id_z():
     """Get workgroup position within cluster along Z (SGPR, gfx1250)."""
     from ..._mlir import ir
@@ -373,6 +364,7 @@ def cluster_workgroup_id_z():
     return _ods_cluster_workgroup_id_z(i32)
 
 
+@dsl_loc_tracing
 def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0, mask=None):
     """Per-lane cluster broadcast load: Global -> LDS with MCAST (gfx1250).
 
@@ -401,6 +393,7 @@ def cluster_load_async_to_lds(global_ptr, lds_ptr, size_bytes, offset=0, cpol=0,
     fn(global_ptr, lds_ptr, offset, cpol, mask)
 
 
+@dsl_loc_tracing
 def disable_xdl_arb_stall():
     """Disable WMMA multicycle arbitration stall by setting SCHED_MODE bit 4."""
     from ..._mlir.dialects import llvm as _llvm
@@ -414,11 +407,13 @@ def disable_xdl_arb_stall():
     _llvm.call_intrinsic(None, "llvm.amdgcn.s.setreg", [imm_val, val_val], [], [])
 
 
+@dsl_loc_tracing
 def s_wait_asynccnt(count=0):
     """Wait for outstanding async load/store operations (ASYNCcnt counter)."""
     _ods_s_wait_asynccnt(count)
 
 
+@dsl_loc_tracing
 def lds_transpose_load(result_type, lds_memref, elem_offset, elem_bytes):
     """Transpose-load from LDS memref via ds_load_tr16_b128 (gfx1250).
 
@@ -482,24 +477,28 @@ def _to_ir(v):
     return v
 
 
+@dsl_loc_tracing
 def raw_ptr_buffer_atomic_fadd(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fadd as _op
 
     return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
 
 
+@dsl_loc_tracing
 def raw_ptr_buffer_atomic_fmax(vdata, rsrc, offset, soffset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_atomic_fmax as _op
 
     return _op(_to_ir(vdata), _to_ir(rsrc), _to_ir(offset), _to_ir(soffset), _to_ir(aux), **kw)
 
 
+@dsl_loc_tracing
 def cvt_pk_fp8_f32(res, src_a, src_b, old, word_sel, **kw):
     from ..._mlir.dialects.rocdl import cvt_pk_fp8_f32 as _op
 
     return _op(res=res, src_a=_to_ir(src_a), src_b=_to_ir(src_b), old=_to_ir(old), word_sel=word_sel, **kw)
 
 
+@dsl_loc_tracing
 def cvt_pk_f32_fp8(res, src, word_sel, **kw):
     """ROCDL ``cvt_pk_f32_fp8``: unpack one i32 (4 packed fp8) into ``vector<2xf32>``.
 
@@ -512,6 +511,7 @@ def cvt_pk_f32_fp8(res, src, word_sel, **kw):
     return _op(res=res, src=_to_ir(src), word_sel=word_sel, **kw)
 
 
+@dsl_loc_tracing
 def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
     """ROCDL ``cvt_scalef32_pk_f32_fp4``: unpack 2 fp4 (from one i32 holding 8 packed
     fp4 elems) into ``vector<2xf32>``, multiplied by ``scale``.
@@ -525,6 +525,7 @@ def cvt_scalef32_pk_f32_fp4(res, src, scale, src_sel_index, **kw):
     return _op(res=res, src=_to_ir(src), scale=_to_ir(scale), src_sel_index=src_sel_index, **kw)
 
 
+@dsl_loc_tracing
 def cvt_scalef32_pk_fp4_f32(res, old_vdst, src0, src1, scale, dst_sel_index, **kw):
     """ROCDL ``cvt_scalef32_pk_fp4_f32``: pack 2 fp32 into 2 fp4 and write them into
     slot ``dst_sel_index`` of the i32 lane ``old_vdst`` (other slots preserved).
@@ -545,12 +546,14 @@ def cvt_scalef32_pk_fp4_f32(res, old_vdst, src0, src1, scale, dst_sel_index, **k
     )
 
 
+@dsl_loc_tracing
 def rcp(res, arg, **kw):
     from ..._mlir.dialects.rocdl import rcp as _op
 
     return _op(res=res, arg=_to_ir(arg), **kw)
 
 
+@dsl_loc_tracing
 def perm_b32(src_hi, src_lo, sel, **kw):
     """Wrapper for ``llvm.amdgcn.perm`` returning one i32 lane value."""
     from ..._mlir.dialects import llvm as _llvm
@@ -566,6 +569,7 @@ def perm_b32(src_hi, src_lo, sel, **kw):
     )
 
 
+@dsl_loc_tracing
 def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, **kw):
     from ..._mlir.dialects.rocdl import raw_ptr_buffer_load_lds as _op
 
@@ -574,6 +578,7 @@ def raw_ptr_buffer_load_lds(rsrc, lds_ptr, size, voffset, soffset, offset, aux, 
     )
 
 
+@dsl_loc_tracing
 def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0, **kw):
     """Load ``size_bytes`` from a buffer resource into LDS.
 
@@ -584,16 +589,19 @@ def buffer_load_to_lds(rsrc, lds_ptr, voffset, size_bytes=4, soffset=0, offset=0
     return raw_ptr_buffer_load_lds(rsrc, lds_ptr, size_bytes, voffset, soffset, offset, 0, **kw)
 
 
+@dsl_loc_tracing
 def ds_bpermute(res, index, src, **kw):
     from ..._mlir.dialects.rocdl import ds_bpermute as _op
 
     return _op(res=res, index=_to_ir(index), src=_to_ir(src), **kw)
 
 
+@dsl_loc_tracing
 def readfirstlane(res, src, **kw):
     return _ods_readfirstlane(res=res, src=_to_ir(src), **kw)
 
 
+@dsl_loc_tracing
 def ballot(res, pred, **kw):
     """Wrap ROCDL ``ballot``: coerce ``pred`` to ``i1`` if needed.
 
@@ -609,6 +617,7 @@ def ballot(res, pred, **kw):
     return _ods_ballot(res=res, pred=pred_v, **kw)
 
 
+@dsl_loc_tracing
 def readlane(res, src, lane, **kw):
     """Wrap ROCDL ``readlane`` with ``_to_ir`` coercion (Python ``int`` ok for ``lane``)."""
     return _ods_readlane(res=res, src0=_to_ir(src), src1=_to_ir(lane), **kw)

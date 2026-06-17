@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
@@ -29,9 +30,9 @@ from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, re
 from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
-    FuncLocationTracker,
     KernelFunction,
     create_gpu_module,
+    func_def_location,
     get_gpu_module_body,
 )
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
@@ -1468,15 +1469,13 @@ class JitFunction:
                     param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
                     has_user_stream = _ensure_stream_arg(jit_args)
                     ir_types = get_ir_types(jit_args)
-                    loc = ir.Location.unknown(ctx)
+                    loc = func_def_location(self.func, ctx)
 
                     log().info(f"jit_args={jit_args}")
                     log().info(f"dsl_types={dsl_types}")
 
                     module = ir.Module.create(loc=loc)
                     module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
-
-                    func_tracker = FuncLocationTracker(self.func)
 
                     with ir.InsertionPoint(module.body), loc:
                         backend = get_backend()
@@ -1486,7 +1485,7 @@ class JitFunction:
                         func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
                         entry_block = func_op.add_entry_block()
 
-                        with CompilationContext.create(func_tracker) as comp_ctx:
+                        with CompilationContext.create() as comp_ctx:
                             comp_ctx.gpu_module_op = gpu_module
                             comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
 
@@ -1499,10 +1498,12 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
-                                if bound_self is not None:
-                                    self.func(bound_self, **named_args)
-                                else:
-                                    self.func(**named_args)
+                                # Bound the call-site boundary at the jit body.
+                                with tracing_context(self.func):
+                                    if bound_self is not None:
+                                        self.func(bound_self, **named_args)
+                                    else:
+                                        self.func(**named_args)
                                 func.ReturnOp([])
 
                     original_ir = module.operation.get_asm(enable_debug_info=True)
