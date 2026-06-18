@@ -370,6 +370,21 @@ def compile_hgemm_kernel(
             tk = k_offset // _PRESH_TK
             invariant = (tm * _K_TILES_SH * tile_row + mi) * _PRESH_TK + within
             return invariant + tk * (tile_row * _PRESH_TK)
+
+        def preshuffle_vaddr_soffset(row, k_offset, within, tile_row):
+            # Split the preshuffle offset into a per-lane vaddr part (loop-invariant)
+            # and a wave-uniform soffset part (the K-step term tk*tile_row*TK). The
+            # soffset is the same for all lanes (depends only on k_offset), so it can
+            # ride the scalar soffset of buffer_load instead of being recomputed into
+            # each lane's vaddr every K tile (mirrors fp8_gemm_4wave's s33 usage).
+            row = fx.Index(row)
+            within = fx.Index(within)
+            tm = row // tile_row
+            mi = row % tile_row
+            vaddr = (tm * _K_TILES_SH * tile_row + mi) * _PRESH_TK + within
+            tk = fx.Index(k_offset) // _PRESH_TK
+            soff = tk * (tile_row * _PRESH_TK)
+            return vaddr, soff
         C_ = GTensor(C, dtype=dtype_, shape=(-1, n))
         if const_expr(HAS_BIAS):
             BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
@@ -624,6 +639,20 @@ def compile_hgemm_kernel(
                 raise NotImplementedError(f"DMA_BYTES={DMA_BYTES} not supported")
             llvm.InlineAsmOp(None, [lds_ptr, global_offset, rsrc], asm, "s,v,s", has_side_effects=True)
 
+        def buffer_load_lds_inline_soff(rsrc, lds_ptr, vaddr_off, soffset):
+            # Like buffer_load_lds_inline but the wave-uniform K-step rides the scalar
+            # soffset ($3) instead of being folded into the per-lane vaddr ($1). Lets
+            # vaddr stay loop-invariant (shared VGPR across K tiles).
+            if const_expr(DMA_BYTES == 16):
+                asm = "s_mov_b32 m0, $0\n\tbuffer_load_dwordx4 $1, $2, $3 offen lds"
+            elif const_expr(DMA_BYTES == 8):
+                asm = "s_mov_b32 m0, $0\n\tbuffer_load_dwordx2 $1, $2, $3 offen lds"
+            elif const_expr(DMA_BYTES == 4):
+                asm = "s_mov_b32 m0, $0\n\tbuffer_load_dword $1, $2, $3 offen lds"
+            else:
+                raise NotImplementedError(f"DMA_BYTES={DMA_BYTES} not supported")
+            llvm.InlineAsmOp(None, [lds_ptr, vaddr_off, rsrc, soffset], asm, "s,v,s,s", has_side_effects=True)
+
         def get_async_lds_ptr(lds_tensor, lds_stage, i):
             lds_offset = lds_tensor.linear_offset((fx.Index(lds_stage), 0, 0)) * DTYPE_BYTES
             lds_base = memref.extract_aligned_pointer_as_index(lds_tensor.memptr) + lds_offset
@@ -668,11 +697,14 @@ def compile_hgemm_kernel(
                 fx.Index(0),
             )
             if const_expr(PRESHUFFLE):
-                global_offset = preshuffle_off_split(safe_row_idx, fx.Index(k_offset), a_within, BLOCK_M) * DTYPE_BYTES
+                vaddr_e, soff_e = preshuffle_vaddr_soffset(safe_row_idx, fx.Index(k_offset), a_within, BLOCK_M)
+                vaddr_i32 = arith.index_cast(T.i32, vaddr_e * DTYPE_BYTES)
+                soff_i32 = rocdl.readfirstlane(T.i32, arith.index_cast(T.i32, soff_e * DTYPE_BYTES))
+                buffer_load_lds_inline_soff(A_.rsrc, lds_ptr, vaddr_i32, soff_i32)
             else:
                 global_offset = A_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
-            global_offset = arith.index_cast(T.i32, global_offset)
-            buffer_load_lds_inline(A_.rsrc, lds_ptr, global_offset)
+                global_offset = arith.index_cast(T.i32, global_offset)
+                buffer_load_lds_inline(A_.rsrc, lds_ptr, global_offset)
 
         def ldg_sts_a_async(k_offset, lds_stage):
             for i in range_constexpr(LDG_REG_A_COUNT_AS):
@@ -706,11 +738,14 @@ def compile_hgemm_kernel(
                 fx.Index(0),
             )
             if const_expr(PRESHUFFLE):
-                global_offset = preshuffle_off_split(safe_row_idx, fx.Index(k_offset), b_within, BLOCK_N) * DTYPE_BYTES
+                vaddr_e, soff_e = preshuffle_vaddr_soffset(safe_row_idx, fx.Index(k_offset), b_within, BLOCK_N)
+                vaddr_i32 = arith.index_cast(T.i32, vaddr_e * DTYPE_BYTES)
+                soff_i32 = rocdl.readfirstlane(T.i32, arith.index_cast(T.i32, soff_e * DTYPE_BYTES))
+                buffer_load_lds_inline_soff(B_.rsrc, lds_ptr, vaddr_i32, soff_i32)
             else:
                 global_offset = B_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
-            global_offset = arith.index_cast(T.i32, global_offset)
-            buffer_load_lds_inline(B_.rsrc, lds_ptr, global_offset)
+                global_offset = arith.index_cast(T.i32, global_offset)
+                buffer_load_lds_inline(B_.rsrc, lds_ptr, global_offset)
 
         def ldg_sts_b_async(k_offset, lds_stage):
             for i in range_constexpr(LDG_REG_B_COUNT_AS):
