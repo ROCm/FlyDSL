@@ -874,7 +874,7 @@ def test_mxscale_ascale_32x4(data_format, M, tile_m, tile_n, tile_k, m_warp, n_w
     )
 
 
-@pytest.mark.parametrize("data_format", ["fp8", "a8w4"])
+@pytest.mark.parametrize("data_format", ["fp8", "a8w4", "fp4"])
 @pytest.mark.parametrize("M", [1, 13, 31])
 def test_mxscale_ascale_vgpr_small_m(data_format, M):
     _run_mxscale_gemm_test(

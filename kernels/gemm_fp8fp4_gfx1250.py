@@ -529,6 +529,7 @@ def compile_fp8fp4_gemm(
 
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
+        m_idx = fx.Index(i32_m)
 
         def _load_contig_i32(rsrc, base_idx, n, soff):
             # Load n contiguous i32 values through the widest legal buffer_load chunks.
@@ -546,29 +547,61 @@ def compile_fp8fp4_gemm(
                         out[start + c] = rv[c]
             return out
 
+        _scale_identity_i32 = arith.constant(0x7F7F7F7F, type=T.i32)
+
         if const_expr(use_ascale_vgpr):
             # A-scale VGPR path: read scale_A[M, K//32] directly from its row-major layout.
-            _ascale_rsrc = buffer_ops.create_buffer_resource(arg_a_scale, max_size=False)
+            _ascale_nbytes = m_idx * arith.index(K_scale)
+            _ascale_rsrc = buffer_ops.create_buffer_resource(
+                arg_a_scale,
+                max_size=False,
+                num_records_bytes=_ascale_nbytes,
+            )
             _ascale_row_i32 = K_scale // 4
             _ascale_row0 = blk_m + warp_m_base + lane16
             if const_expr(ascale_opsel):
                 _ascale_row0 = _ascale_row0 + lane_kgrp * arith.index(ascale_half * WMMA_M)
             _vs_tile_a = k_wmma_steps * ascale_load
 
-            def _load_ascale(k_base):
+            def _load_contig_i32_guarded_row(row, n, soff):
+                row_valid = row < m_idx
+                safe_row = arith.select(row_valid, row, arith.index(0))
+                vals = _load_contig_i32(
+                    _ascale_rsrc,
+                    safe_row * arith.index(_ascale_row_i32),
+                    n,
+                    soff,
+                )
+                for j in range_constexpr(n):
+                    vals[j] = arith.select(row_valid, vals[j], _scale_identity_i32)
+                return vals
+
+            def _load_ascale_impl(k_base, guarded):
                 kt = k_base // arith.index(tile_k)
                 soff = arith.index_cast(T.i32, kt * arith.index(scale_k_per_tile))
                 vals = [None] * (k_wmma_steps * ascale_load)
                 for i in range_constexpr(ascale_load):
-                    vidx = (_ascale_row0 + arith.index(i * WMMA_M)) * arith.index(_ascale_row_i32)
-                    ks_vals = _load_contig_i32(_ascale_rsrc, vidx, k_wmma_steps, soff)
+                    row = _ascale_row0 + arith.index(i * WMMA_M)
+                    if const_expr(guarded):
+                        ks_vals = _load_contig_i32_guarded_row(row, k_wmma_steps, soff)
+                    else:
+                        vidx = row * arith.index(_ascale_row_i32)
+                        ks_vals = _load_contig_i32(_ascale_rsrc, vidx, k_wmma_steps, soff)
                     for ks in range_constexpr(k_wmma_steps):
                         vals[ks * ascale_load + i] = ks_vals[ks]
                 return vals
 
+            def _load_ascale(k_base):
+                full_tile = (blk_m + arith.index(tile_m)) <= m_idx
+                if_op = scf.IfOp(full_tile, [T.i32] * _vs_tile_a, has_else=True)
+                with ir.InsertionPoint(if_op.then_block):
+                    scf.YieldOp([arith.unwrap(v) for v in _load_ascale_impl(k_base, guarded=False)])
+                with ir.InsertionPoint(if_op.else_block):
+                    scf.YieldOp([arith.unwrap(v) for v in _load_ascale_impl(k_base, guarded=True)])
+                return list(if_op.results)
+
             _bvs_prefetch = _load_ascale
 
-        m_idx = fx.Index(i32_m)
         # Runtime leading-dim strides (strided A/C). Dense callers pass lda == K,
         # ldc == N for byte-identical addressing. A's stride is in packed elements.
         if const_expr(PACK_FACTOR_A == 1):
@@ -804,8 +837,6 @@ def compile_fp8fp4_gemm(
         def _precompute_as32_bases(lds_ptr):
             """Tile-local first A row, relative to the copied 32-row block base."""
             return lds_ptr, (blk_m % arith.index(32)) + warp_m_base
-
-        _scale_identity_i32 = arith.constant(0x7F7F7F7F, type=T.i32)
 
         def _mask_a_scale_oob(word, row_abs):
             return arith.select(row_abs < m_idx, word, _scale_identity_i32)
