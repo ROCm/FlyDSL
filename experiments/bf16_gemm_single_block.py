@@ -110,6 +110,15 @@ def assert_no_spills() -> None:
     print(f"spill_check=ok isa={isa_path}")
 
 
+def preshuffle_rows_k(t: torch.Tensor, tile_row: int, tile_k: int) -> torch.Tensor:
+    """Permute a row-major [R, K] tensor so each [tile_row, tile_k] block is
+    physically contiguous: [R, K] -> [R//tr, K//tk, tr, tk] -> flat. Matches the
+    kernel's preshuffle_off mapping (PRESHUFFLE=True)."""
+    r, k = t.shape[-2:]
+    assert r % tile_row == 0 and k % tile_k == 0, f"need R%{tile_row}==0 K%{tile_k}==0, got R={r} K={k}"
+    return t.reshape(r // tile_row, tile_row, k // tile_k, tile_k).permute(0, 2, 1, 3).contiguous().view(r, k)
+
+
 def make_inputs(m: int, n: int, k: int, *, skip_init: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     device = torch.device("cuda")
     if skip_init:
@@ -188,10 +197,16 @@ def main() -> None:
         action="store_true",
         help="Enable the experimental K32-blocked LDS layout for B.",
     )
+    parser.add_argument(
+        "--preshuffle",
+        action="store_true",
+        help="Preshuffle A/B so each [256, BLOCK_K] tile is contiguous in global memory.",
+    )
     args = parser.parse_args()
     HGEMM_KWARGS["A_LDS_K32_BLOCKING"] = bool(args.a_lds_k32_blocking)
     HGEMM_KWARGS["B_LDS_K32_BLOCKING"] = bool(args.b_lds_k32_blocking)
     HGEMM_KWARGS["K32_REGISTER_PIPELINE"] = bool(args.k32_register_pipeline)
+    HGEMM_KWARGS["PRESHUFFLE"] = bool(args.preshuffle)
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA/ROCm device is not available")
@@ -212,8 +227,17 @@ def main() -> None:
     a, b, c = make_inputs(args.m, args.n, args.k, skip_init=args.skip_init)
     b_t = b.t().contiguous() if not args.skip_init else torch.empty((args.n, args.k), device=b.device, dtype=b.dtype)
 
+    # The kernel consumes preshuffled A / B_T; the reference check below still uses
+    # the original a / b, so correctness is validated against the true GEMM.
+    tile_k = int(HGEMM_KWARGS["TILE_K"])
+    if args.preshuffle:
+        a_k = preshuffle_rows_k(a, 256, tile_k)
+        b_t_k = preshuffle_rows_k(b_t, 256, tile_k)
+    else:
+        a_k, b_t_k = a, b_t
+
     # First call compiles and launches the fixed-shape FlyDSL kernel.
-    run_kernel(c, a, b_t)
+    run_kernel(c, a_k, b_t_k)
     torch.cuda.synchronize()
     assert_no_spills()
 
@@ -222,7 +246,7 @@ def main() -> None:
     if not args.no_check and not args.skip_init:
         max_abs, cos = check_result(c, a, b)
 
-    us = time_kernel(c, a, b_t, warmup=args.warmup, iters=args.iters)
+    us = time_kernel(c, a_k, b_t_k, warmup=args.warmup, iters=args.iters)
     tflops = (2.0 * args.m * args.n * args.k) / (us * 1.0e-6) / 1.0e12
 
     print(f"arch={get_rocm_arch()}")

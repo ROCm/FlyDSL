@@ -153,6 +153,7 @@ def compile_hgemm_kernel(
     A_LDS_K32_BLOCKING: bool = False,
     B_LDS_K32_BLOCKING: bool = False,
     K32_REGISTER_PIPELINE: bool = False,
+    PRESHUFFLE: bool = False,
     HAS_BIAS: bool = False,
 ):
     assert BLOCK_M_WARPS * BLOCK_N_WARPS * BLOCK_K_WARPS <= 16
@@ -337,6 +338,21 @@ def compile_hgemm_kernel(
 
         A_ = GTensor(A, dtype=dtype_, shape=(-1, k))
         B_ = GTensor(B, dtype=dtype_, shape=(n, k))
+
+        # Preshuffle: A/B are pre-permuted on the host so each [TILE_ROW, BLOCK_K]
+        # tile is physically contiguous in global memory. A row-major load of a
+        # tile then hits one contiguous run instead of TILE_ROW strided segments,
+        # improving L1/L2 line utilization. Map a logical (row, col) coordinate to
+        # the shuffled linear element offset.
+        _PRESH_TK = BLOCK_K  # K granularity of a contiguous tile
+        _K_TILES_SH = k // _PRESH_TK
+
+        def preshuffle_off(row, col, tile_row):
+            tm = row // tile_row
+            mi = row % tile_row
+            tk = col // _PRESH_TK
+            ki = col % _PRESH_TK
+            return ((tm * _K_TILES_SH + tk) * tile_row + mi) * _PRESH_TK + ki
         C_ = GTensor(C, dtype=dtype_, shape=(-1, n))
         if const_expr(HAS_BIAS):
             BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
@@ -592,7 +608,10 @@ def compile_hgemm_kernel(
                 row_idx,
                 fx.Index(0),
             )
-            global_offset = A_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
+            if const_expr(PRESHUFFLE):
+                global_offset = preshuffle_off(safe_row_idx, col_idx, BLOCK_M) * DTYPE_BYTES
+            else:
+                global_offset = A_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
             global_offset = arith.index_cast(T.i32, global_offset)
             buffer_load_lds_inline(A_.rsrc, lds_ptr, global_offset)
 
@@ -626,7 +645,10 @@ def compile_hgemm_kernel(
                 row_idx,
                 fx.Index(0),
             )
-            global_offset = B_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
+            if const_expr(PRESHUFFLE):
+                global_offset = preshuffle_off(safe_row_idx, col_idx, BLOCK_N) * DTYPE_BYTES
+            else:
+                global_offset = B_.linear_offset((safe_row_idx, col_idx)) * DTYPE_BYTES
             global_offset = arith.index_cast(T.i32, global_offset)
             buffer_load_lds_inline(B_.rsrc, lds_ptr, global_offset)
 
