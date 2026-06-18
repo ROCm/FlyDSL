@@ -391,11 +391,17 @@ def compile_hgemm_kernel(
                 asm = f"s_waitcnt vmcnt({vmcnt})"
             llvm.InlineAsmOp(None, [], asm, "", has_side_effects=True)
 
-        def __barrier_lgkmcnt(use_s_barrier=True):
+        def __barrier_lgkmcnt(use_s_barrier=True, vmcnt=None):
+            # vmcnt is None -> LDS-only sync; otherwise also bound in-flight global
+            # loads. Both RP1 half barriers carry vmcnt + lgkmcnt(0): each half has a
+            # ds_read of a globally-prefetched block (needs vmcnt to ensure the bfld
+            # landed) and writes LDS that another wave will overwrite next iter
+            # (needs lgkmcnt(0)+s_barrier for cross-wave WAR/visibility).
+            wait = "s_waitcnt lgkmcnt(0)" if vmcnt is None else f"s_waitcnt vmcnt({vmcnt}) lgkmcnt(0)"
             if const_expr(use_s_barrier):
-                asm = "s_waitcnt lgkmcnt(0)\n\ts_barrier"
+                asm = wait + "\n\ts_barrier"
             else:
-                asm = "s_waitcnt lgkmcnt(0)"
+                asm = wait
             llvm.InlineAsmOp(None, [], asm, "", has_side_effects=True)
 
         def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=ir.Type.parse("!llvm.ptr<1>")):
@@ -985,7 +991,7 @@ def compile_hgemm_kernel(
                 a0_frags, b0_frags, k1_idx, zero_acc=init_zero, bfld_tasks=h1_bfld
             )
 
-            __barrier_lgkmcnt()
+            __barrier_lgkmcnt(vmcnt=RP1_TAIL_VMCNT)
 
             # half-2: bfld the tile-after-next's K0 (lead 2) dripped into the MFMAs;
             # compute K1 while reading the NEXT tile's K0 group (from
@@ -1105,7 +1111,7 @@ def compile_hgemm_kernel(
                 )
                 hot_loop_scheduler_register_prefetch(tail_prefetch_initial=True)
                 next_stage_init = arith.constant(1 % STAGES, index=True)
-                __barrier(RP1_TAIL_VMCNT)
+                __barrier_lgkmcnt(vmcnt=RP1_TAIL_VMCNT)
 
                 init_state = (
                     [ks_begin + fx.Int32(BLOCK_K), next_stage_init]
@@ -1143,7 +1149,7 @@ def compile_hgemm_kernel(
                     )
                     k_offset_next = k_offset + fx.Int32(BLOCK_K)
                     hot_loop_scheduler_register_prefetch(prefetched_initial=True, tail_prefetch_initial=True)
-                    __barrier(RP1_TAIL_VMCNT)
+                    __barrier_lgkmcnt(vmcnt=RP1_TAIL_VMCNT)
                     results = (
                         yield [k_offset_next, next_stage] + c_frags_new + carry_a0_next + carry_b0_next
                     )
