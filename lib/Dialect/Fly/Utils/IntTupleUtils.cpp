@@ -138,58 +138,91 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::mul(IntTupleAttr lhs, IntTupleAttr r
   }
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::div(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
-  return IntTupleAttr::get(lhs.getLeafAsInt() / rhs.getLeafAsInt());
+  // A basis divisor has no quotient mode. This is reachable via complement() of a
+  // basis-strided (identity) layout of rank >= 2: complementImpl computes
+  // div(minStride, lastStride) with both leaves basis. Reject it with a named
+  // assert rather than miscompute a stride.
+  //
+  // The dividend may be an integer (the common case) or a basis monomial
+  // (div(Basis, Int) -> (value/k)E); any other leaf kind (e.g. a none leaf) is
+  // unsupported -- gate it explicitly so getLeafAsBasis() is never called on a
+  // non-basis leaf.
+  assert((lhs.isLeafInt() || lhs.isLeafBasis()) && rhs.isLeafInt() &&
+         "div is undefined for a basis divisor; lower the identity layout first");
+  if (lhs.isLeafInt()) {
+    return IntTupleAttr::get(lhs.getLeafAsInt() / rhs.getLeafAsInt());
+  }
+  return IntTupleAttr::get(intSafeDiv(lhs.getLeafAsBasis(), rhs.getLeafAsInt()));
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::mod(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() && "mod is defined only on integer leaves");
   return IntTupleAttr::get(lhs.getLeafAsInt() % rhs.getLeafAsInt());
 }
 
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::logicalAnd(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() && "logicalAnd requires integer leaves");
   return IntTupleAttr::get(lhs.getLeafAsInt() && rhs.getLeafAsInt());
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::logicalOr(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() && "logicalOr requires integer leaves");
   return IntTupleAttr::get(lhs.getLeafAsInt() || rhs.getLeafAsInt());
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::logicalNot(IntTupleAttr val) const {
-  assert(val.isLeafInt());
+  assert(val.isLeafInt() && "logicalNot requires an integer leaf");
   return IntTupleAttr::get(!val.getLeafAsInt());
 }
 
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::lt(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  // Ordering is defined only on integer leaves: basis directions are free-module
+  // generators with no total order, and strides are ordered via getStaticValue.
+  assert(lhs.isLeafInt() && rhs.isLeafInt() &&
+         "lt is defined only on integer leaves; basis directions have no order");
   return IntTupleAttr::get(lhs.getLeafAsInt() < rhs.getLeafAsInt());
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::le(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() &&
+         "le is defined only on integer leaves; basis directions have no order");
   return IntTupleAttr::get(lhs.getLeafAsInt() <= rhs.getLeafAsInt());
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::gt(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() &&
+         "gt is defined only on integer leaves; basis directions have no order");
   return IntTupleAttr::get(lhs.getLeafAsInt() > rhs.getLeafAsInt());
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::ge(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() &&
+         "ge is defined only on integer leaves; basis directions have no order");
   return IntTupleAttr::get(lhs.getLeafAsInt() >= rhs.getLeafAsInt());
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::eq(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
-  return IntTupleAttr::get(lhs.getLeafAsInt() == rhs.getLeafAsInt());
+  assert(lhs.isLeaf() && rhs.isLeaf());
+  if (lhs.isLeafInt() && rhs.isLeafInt()) {
+    return IntTupleAttr::get(lhs.getLeafAsInt() == rhs.getLeafAsInt());
+  }
+  if (lhs.isLeafBasis() && rhs.isLeafBasis()) {
+    return IntTupleAttr::get(lhs.getLeafAsBasis() == rhs.getLeafAsBasis());
+  }
+  // A scalar leaf and a basis monomial never coincide.
+  return IntTupleAttr::getLeafStatic(ctx, 0);
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::ne(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
-  return IntTupleAttr::get(lhs.getLeafAsInt() != rhs.getLeafAsInt());
+  assert(lhs.isLeaf() && rhs.isLeaf());
+  if (lhs.isLeafInt() && rhs.isLeafInt()) {
+    return IntTupleAttr::get(lhs.getLeafAsInt() != rhs.getLeafAsInt());
+  }
+  if (lhs.isLeafBasis() && rhs.isLeafBasis()) {
+    return IntTupleAttr::get(lhs.getLeafAsBasis() != rhs.getLeafAsBasis());
+  }
+  // A scalar leaf and a basis monomial never coincide.
+  return IntTupleAttr::getLeafStatic(ctx, 1);
 }
 
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::min(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() && "min is defined only on integer leaves");
   return IntTupleAttr::get(intMin(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::max(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() && "max is defined only on integer leaves");
   return IntTupleAttr::get(intMax(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::safeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const {
@@ -209,13 +242,14 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::ceilDiv(IntTupleAttr lhs, IntTupleAt
   }
 }
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::shapeDiv(IntTupleAttr lhs, IntTupleAttr rhs) const {
-  assert(lhs.isLeafInt() && rhs.isLeafInt());
+  assert(lhs.isLeafInt() && rhs.isLeafInt() && "shapeDiv requires integer leaves");
   return IntTupleAttr::get(intShapeDiv(lhs.getLeafAsInt(), rhs.getLeafAsInt()));
 }
 
 IntTupleAttr IntTupleBuilder<IntTupleAttr>::applySwizzle(IntTupleAttr v,
                                                          SwizzleAttr swizzle) const {
-  assert(v.isLeafInt() && "applySwizzle only supports leafInt IntTupleAttr");
+  assert(v.isLeafInt() &&
+         "applySwizzle is undefined on a basis leaf; lower the identity layout first");
   return IntTupleAttr::get(intApplySwizzle(v.getLeafAsInt(), swizzle));
 }
 
@@ -226,8 +260,10 @@ IntTupleAttr IntTupleBuilder<IntTupleAttr>::applyCoordSwizzle(IntTupleAttr coord
   }
   IntTupleAttr row = selectPath(*this, coord, swizzle.getModeRow());
   IntTupleAttr col = selectPath(*this, coord, swizzle.getModeCol());
-  assert(row.isLeafInt() && "coord swizzle row mode must select a leaf int");
-  assert(col.isLeafInt() && "coord swizzle col mode must select a leaf int");
+  assert(row.isLeafInt() &&
+         "coord swizzle row mode must select an integer leaf (basis unsupported)");
+  assert(col.isLeafInt() &&
+         "coord swizzle col mode must select an integer leaf (basis unsupported)");
 
   IntTupleAttr newCol =
       IntTupleAttr::get(intApplyCoordSwizzle(row.getLeafAsInt(), col.getLeafAsInt(), swizzle));

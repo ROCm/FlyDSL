@@ -420,6 +420,102 @@ def test_zipped_tiled_flat_product():
 
 
 # ==============================================================================
+# Basis strides (scaled-basis / CuTe E<I>) via fx.E
+# ==============================================================================
+
+
+def test_basis_stride_via_E():
+    """fx.E builds the same basis-strided layout as make_identity_layout."""
+
+    def build():
+        fx.make_layout(fx.make_shape(4, 8), fx.make_stride(fx.E(0), fx.E(1)))
+        fx.make_identity_layout(fx.make_shape(4, 8))
+        fx.make_basis_stride(1, (0, 1))
+        fx.make_stride(fx.E(0, 1, value=2))
+
+    def check(ir):
+        # Normalize whitespace so the checks do not depend on the MLIR printer's
+        # exact spacing around commas/colons.
+        compact = "".join(ir.split())
+        # fx.E(0), fx.E(1) produce a (1E0, 1E1) stride, identical to make_identity_layout.
+        assert "!fly.layout<(4,8):(1E0,1E1)>" in compact
+        # make_basis_stride(1, (0, 1)) yields the same flat basis stride.
+        assert "!fly.int_tuple<(1E0,1E1)>" in compact
+        # value and multi-mode forms: fx.E(0, 1, value=2) -> 2E0E1.
+        assert "!fly.int_tuple<(2E0E1)>" in compact
+
+    _build_and_verify_ir("basis_stride_via_E", build, check)
+
+
+def test_basis_E_rejects_invalid_modes():
+    """fx.E validates its inputs in Python instead of deferring to the C++ cast.
+
+    Negative modes are the key case: the !fly.int_tuple assembly format cannot
+    round-trip a negative E<mode> (`1E-1` fails to re-parse), so they must be
+    rejected at construction time.
+    """
+    with pytest.raises(ValueError):
+        fx.E()  # at least one mode required
+    with pytest.raises(ValueError):
+        fx.E(-1)  # negative mode is not round-trippable
+    with pytest.raises(ValueError):
+        fx.make_basis_stride(1, (0, -2))  # negative mode via the flat helper
+    with pytest.raises(TypeError):
+        fx.E(0.0)  # non-int mode
+    with pytest.raises(TypeError):
+        fx.E(0, value="x")  # non-int coefficient
+    with pytest.raises(ValueError):
+        fx.E(2**31)  # mode out of int32 range
+
+    # The coefficient may be any int32, including negative/zero (these round-trip).
+    assert fx.E(0, value=-2).value == -2
+    assert fx.E(0, value=0).value == 0
+
+    # Integer-like values (NumPy integer scalars) are accepted and normalized to int.
+    np = pytest.importorskip("numpy")
+    elem = fx.E(np.int32(2), value=np.int64(3))
+    assert elem.modes == [2] and elem.value == 3
+    assert all(isinstance(m, int) for m in elem.modes) and isinstance(elem.value, int)
+
+
+def test_make_stride_rejects_non_stride_object():
+    """A non-stride object must raise a clean error from make_stride, not segfault.
+
+    Covers a falsy ``__fly_basis__`` marker (which is correctly not treated as a
+    basis leaf and falls through to the generic path) and an arbitrary object.
+    The generic path reports the value's type name, which must not be computed by
+    reinterpreting the instance as a Python type object.
+    """
+
+    class FalsyMarker:
+        __fly_basis__ = False
+        value = 1
+        modes = [0]
+
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            with InsertionPoint(module.body):
+                f = func.FuncOp("reject", FunctionType.get([], []))
+                with InsertionPoint(f.add_entry_block()):
+                    with pytest.raises(ValueError):
+                        fx.make_stride(FalsyMarker())
+                    with pytest.raises(ValueError):
+                        fx.make_stride(object())
+
+
+def test_basis_identity_size():
+    """A basis-strided identity layout lowers through the pipeline; size = 4*8 = 32."""
+
+    def build():
+        layout = fx.make_layout(fx.make_shape(4, 8), fx.make_stride(fx.E(0), fx.E(1)))
+        return [fx.size(layout)]
+
+    _build_and_verify("basis_identity_size", build, [32])
+
+
+# ==============================================================================
 # Main
 # ==============================================================================
 
