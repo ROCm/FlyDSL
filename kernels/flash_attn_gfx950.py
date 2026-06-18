@@ -102,6 +102,7 @@ def build_flash_attn_dualwave_swp_module(
     dualwave_swp_enable_stagger=True,
     num_kv_splits=1,
     varlen=False,
+    cross_seqlen=False,
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=128 bf16/f16 on gfx950.
 
@@ -215,6 +216,10 @@ def build_flash_attn_dualwave_swp_module(
     DUALWAVE_SWP_DEBUG_LAZY_COUNTS = bool(dualwave_swp_debug_lazy_counts)
     DUALWAVE_SWP_ENABLE_STAGGER = bool(dualwave_swp_enable_stagger)
     VARLEN = bool(varlen)
+    # Cross-length (seqlen_q != seqlen_kv): emit the extra in-loop v_s_1 causal mask
+    # so a diagonal kv-tile landing on the v_s_1 slot is masked. Off by default so
+    # self-attention keeps its exact schedule (no perf change).
+    CROSS_SEQLEN = bool(cross_seqlen)
     if VARLEN and num_kv_splits and int(num_kv_splits) > 1:
         raise ValueError("varlen is not supported together with num_kv_splits > 1")
 
@@ -228,6 +233,7 @@ def build_flash_attn_dualwave_swp_module(
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         seq_len: fx.Int32,
+        seq_len_kv: fx.Int32,
         stride_q_n: fx.Int32,
         stride_kv_n: fx.Int32,
         head_dim_runtime: fx.Int32,
@@ -245,6 +251,7 @@ def build_flash_attn_dualwave_swp_module(
         _EXP_MASK = 0x400
 
         seq_len_v = fx.Index(seq_len)
+        seq_len_kv_v = fx.Index(seq_len_kv)
         stride_q_n_v = fx.Index(stride_q_n)
         stride_kv_n_v = fx.Index(stride_kv_n)
 
@@ -318,13 +325,19 @@ def build_flash_attn_dualwave_swp_module(
             seqlen_kv_v = kv_tok_end - kv_tok_base
             seqlen_kv_i32 = fx.Int32(seqlen_kv_v)
         else:
+            # Dense: Q is [B, seqlen_q, H, D], K/V are [B, seqlen_kv, H_kv, D] with
+            # independent seqlen_q (= seq_len) and seqlen_kv (= seq_len_kv).
             q_tok_base = batch_idx * seq_len_v
-            kv_tok_base = batch_idx * seq_len_v
+            kv_tok_base = batch_idx * seq_len_kv_v
             q_tok_end = (batch_idx + fx.Index(1)) * seq_len_v
-            kv_tok_end = (batch_idx + fx.Index(1)) * seq_len_v
+            kv_tok_end = (batch_idx + fx.Index(1)) * seq_len_kv_v
             seqlen_q_v = seq_len_v
-            seqlen_kv_v = seq_len_v
-            seqlen_kv_i32 = seq_len
+            seqlen_kv_v = seq_len_kv_v
+            seqlen_kv_i32 = seq_len_kv
+
+        # Bottom-right causal offset: row r (0-based in seqlen_q) keeps keys
+        # [0, r + delta], delta = seqlen_kv - seqlen_q. delta == 0 for self-attn.
+        delta_i32 = fx.Int32(seqlen_kv_i32 - fx.Int32(seqlen_q_v))
 
         q_gmem_elem_offset = (q_tok_base + q_start) * stride_q_n_v + q_head_idx * HEAD_DIM
         kv_gmem_elem_offset = kv_tok_base * stride_kv_n_v + kv_head_idx * HEAD_DIM
@@ -403,6 +416,10 @@ def build_flash_attn_dualwave_swp_module(
 
         c_neg_inf = fx.Float32(float("-inf"))
         # c_neg_inf = fx.Float32(float(-1e30))
+        # Finite floor for the row-max: a fully-masked row (bottom-right causal,
+        # seqlen_q > seqlen_kv) has max == -inf; flooring it finite makes
+        # exp2(-inf - floor) == 0 (no NaN), so acc/l stay 0 and O is zeroed below.
+        c_neg_floor = fx.Float32(-3.0e38)
         c_zero_f = fx.Float32(0.0)
         head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
         c_log2e_f = fx.Float32(_LOG2E)
@@ -423,8 +440,11 @@ def build_flash_attn_dualwave_swp_module(
         kv_tile_size = BLOCK_N
         num_kv_tiles = (seqlen_kv_v + kv_tile_size - 1) // kv_tile_size
         if const_expr(CAUSAL):
-            q_block_end = q_start + BLOCK_M
-            causal_num_tiles = (q_block_end + kv_tile_size - 1) // kv_tile_size
+            # Bottom-right: last kept key col for this q-block = q_start+BLOCK_M-1+delta,
+            # so tiles = ceil((q_start+BLOCK_M+delta)/64), clamped >= 0 (delta may be < 0).
+            causal_end_i32 = fx.Int32(q_start + BLOCK_M) + delta_i32
+            causal_end_i32 = fx.Int32(ArithValue(causal_end_i32 > fx.Int32(0)).select(causal_end_i32, fx.Int32(0)))
+            causal_num_tiles = (fx.Index(causal_end_i32) + kv_tile_size - 1) // kv_tile_size
             max_num_tiles = fx.Index(ArithValue(causal_num_tiles < num_kv_tiles).select(causal_num_tiles, num_kv_tiles))
         else:
             max_num_tiles = num_kv_tiles
@@ -814,7 +834,8 @@ def build_flash_attn_dualwave_swp_module(
             kv_tile_start = tile_idx * BLOCK_N
             kv_start_i32 = fx.Int32(kv_tile_start)
             lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(4)
-            rel_lo_i32 = fx.Int32(q_row_i32 - kv_start_i32 - lane_off_i32)
+            # Bottom-right causal: keep key col <= q_row + delta (delta=seqlen_kv-seqlen_q).
+            rel_lo_i32 = fx.Int32(q_row_i32 + delta_i32 - kv_start_i32 - lane_off_i32)
             # v_s_hi: i_n=1, so N += W_N = 32
             rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(32))
             neg_inf_i32 = fx.Int32(_NEG_INF_F32_BITS)
@@ -886,7 +907,7 @@ def build_flash_attn_dualwave_swp_module(
         def _causal_mask_prologue_if_needed(v_s, tile_idx=fx.Index(0), kv_end_pos=BLOCK_N):
             """Return masked score vectors when DUALWAVE_SWP's causal guard is active."""
             s_lo, s_hi = v_s
-            if q_start_pos_i32 < fx.Int32(kv_end_pos):
+            if q_start_pos_i32 + delta_i32 < fx.Int32(kv_end_pos):
                 lo_list, hi_list = _v_s_vec_to_lists(v_s)
                 _causal_mask_inplace((lo_list, hi_list), tile_idx)
                 s_lo = Vec.from_elements([_raw(v) for v in lo_list], fx.Float32).ir_value()
@@ -1145,6 +1166,9 @@ def build_flash_attn_dualwave_swp_module(
                 else:
                     v_s_0 = _seq_pad_mask_if_needed(v_s_0)
             m_row_pro = _attn_row_max(v_s_0)
+            if const_expr(CAUSAL):
+                # Floor fully-masked rows (-inf) to finite so exp2 yields 0, not NaN.
+                m_row_pro = _fmax(m_row_pro, c_neg_floor)
             v_s_0 = _attn_sub_row(v_s_0, m_row_pro)
             v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
             rocdl.sched_barrier(0)
@@ -1219,7 +1243,14 @@ def build_flash_attn_dualwave_swp_module(
                 if const_expr(DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(1)
                 v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
-                v_s_1 = _v_s_vec_to_lists(v_s_1)
+                # v_s_1 holds tile j_idx-2. For seqlen_q != seqlen_kv (cross_seqlen) a
+                # diagonal kv-tile can land on this slot, so mask it too (guarded ->
+                # no-op for fully kept tiles). Self-attention skips this entirely to
+                # preserve its schedule (the diagonal only ever hits v_s_0/epilogue).
+                if const_expr(CAUSAL and CROSS_SEQLEN):
+                    v_s_1 = _causal_mask_prologue_if_needed(v_s_1, j_idx - 2, (j_idx - 1) * BLOCK_N)
+                else:
+                    v_s_1 = _v_s_vec_to_lists(v_s_1)
                 m_tile_max_a = _attn_row_max(v_s_1)
 
                 _sched_barrier_pairs(4, 6, 2)
@@ -1793,6 +1824,7 @@ def build_flash_attn_dualwave_swp_module(
         CuSeqKv: fx.Tensor,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
+        seq_len_kv: fx.Int32,
         stride_q_n: fx.Int32,
         stride_kv_n: fx.Int32,
         head_dim_runtime: fx.Int32,
@@ -1824,6 +1856,7 @@ def build_flash_attn_dualwave_swp_module(
             CuSeqQ,
             CuSeqKv,
             seq_len,
+            seq_len_kv,
             stride_q_n,
             stride_kv_n,
             head_dim_runtime,
@@ -1866,6 +1899,7 @@ def build_flash_attn_dualwave_swp_module(
         head_dim_runtime=None,
         debug_counts=None,
         *,
+        seq_len_kv=None,
         workspace=None,
         cu_seqlens_q=None,
         cu_seqlens_kv=None,
@@ -1877,6 +1911,9 @@ def build_flash_attn_dualwave_swp_module(
             stride_q_n = DEFAULT_STRIDE_Q_N
         if head_dim_runtime is None:
             head_dim_runtime = HEAD_DIM
+        # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
+        if seq_len_kv is None:
+            seq_len_kv = seq_len
         if SPLITK:
             if workspace is None:
                 raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
@@ -1901,6 +1938,7 @@ def build_flash_attn_dualwave_swp_module(
                     cu_seqlens_kv,
                     batch_size,
                     seq_len,
+                    seq_len_kv,
                     stride_q_n,
                     stride_kv_n,
                     head_dim_runtime,
@@ -1915,6 +1953,7 @@ def build_flash_attn_dualwave_swp_module(
                 cu_seqlens_kv,
                 batch_size,
                 seq_len,
+                seq_len_kv,
                 stride_q_n,
                 stride_kv_n,
                 head_dim_runtime,
@@ -1933,6 +1972,7 @@ def build_flash_attn_dualwave_swp_module(
         head_dim_runtime=None,
         debug_counts=None,
         *,
+        seq_len_kv=None,
         workspace=None,
         cu_seqlens_q=None,
         cu_seqlens_kv=None,
@@ -1944,6 +1984,8 @@ def build_flash_attn_dualwave_swp_module(
             stride_q_n = DEFAULT_STRIDE_Q_N
         if head_dim_runtime is None:
             head_dim_runtime = HEAD_DIM
+        if seq_len_kv is None:
+            seq_len_kv = seq_len
         if SPLITK:
             if workspace is None:
                 raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
@@ -1966,6 +2008,7 @@ def build_flash_attn_dualwave_swp_module(
                 cu_seqlens_kv,
                 batch_size,
                 seq_len,
+                seq_len_kv,
                 stride_q_n,
                 stride_kv_n,
                 head_dim_runtime,
