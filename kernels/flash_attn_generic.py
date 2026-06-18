@@ -74,6 +74,34 @@ def _waitcnt_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
+# Dense seq_len routing thresholds (gfx950). The DUALWAVE_SWP pipeline pays a
+# fixed prologue/epilogue cost amortized over total work (batch * seq_len), not
+# seq_len alone -- so its crossover vs the generic kernel happens at a lower
+# seq_len for large batches. Mirrors the existing batch*seq M128/M256 selector.
+_DUALWAVE_MIN_DENSE_SEQ = 256  # B=1: dualwave wins from S=256 up
+_DUALWAVE_LARGE_BATCH = 8  # at B>=8 the crossover drops to...
+_DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH = 192  # ...S=192
+
+# DUALWAVE_SWP-only launch kwargs: a dense call passing any of these cannot use
+# the generic launcher (different signature) and must stay on DUALWAVE_SWP.
+_DUALWAVE_ONLY_KWARGS = frozenset({"stride_kv_n", "stride_q_n", "head_dim_runtime", "debug_counts", "workspace"})
+
+
+def _routes_dense_to_dualwave(batch, seq_len):
+    """Dense routing: True -> DUALWAVE_SWP, False -> generic fallback.
+
+    Batch-aware threshold (see notes above). A non-int seq_len routes to
+    DUALWAVE_SWP (it handles any length); packed/varlen and dualwave-only-kwarg
+    cases are decided by the caller before this is reached.
+    """
+    if not isinstance(seq_len, int):
+        return True
+    b = batch if isinstance(batch, int) else 1
+    if b >= _DUALWAVE_LARGE_BATCH:
+        return seq_len >= _DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH
+    return seq_len >= _DUALWAVE_MIN_DENSE_SEQ
+
+
 def build_flash_attn_func_module_primary(
     num_heads,
     head_dim,
@@ -113,16 +141,13 @@ def build_flash_attn_func_module_primary(
     K_SUB_N = 32
     WARP_SIZE = 64
 
-    # Arbitrary seq_len: the generic fallback handles any length (partial q/kv tiles
-    # via num_records bounds + padding masks); the DUALWAVE_SWP fast path handles
-    # seq_len >= 1.
-    _DUALWAVE_MIN_SEQ = 1
-
-    # DUALWAVE_SWP fast path (gfx950 D=128 bf16/f16): built for the outermost call;
-    # runtime dispatch needs seq_len >= 384 (any alignment, handled internally).
+    # Both variants compute any seq_len >= 1 (the only correctness floor, enforced
+    # by `_guard_seqlen`); the dense seq_len routing is a perf policy. DUALWAVE_SWP
+    # (gfx950 D=128 bf16/f16) is built for the outermost call only; dense routing
+    # uses `_routes_dense_to_dualwave`, and packed/varlen always uses DUALWAVE_SWP.
     _dualwave_swp_launch = None
-    # FLYDSL_DISABLE_DUALWAVE_SWP=1 forces the generic fallback even on gfx950 D=128
-    # bf16/f16 (used to exercise/validate the generic kernel on gfx950 hardware).
+    # FLYDSL_DISABLE_DUALWAVE_SWP=1 forces the generic fallback (used to validate
+    # the generic kernel on gfx950 hardware).
     _dualwave_swp_disabled = os.environ.get("FLYDSL_DISABLE_DUALWAVE_SWP", "0") == "1"
     if (
         block_m is None
@@ -146,9 +171,7 @@ def build_flash_attn_func_module_primary(
                 dualwave_swp_setprio=dualwave_swp_setprio,
                 dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
                 dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-                # QKV varlen (packed cu_seqlens). Non-None cu_seqlens_q -> build the
-                # varlen kernel variant; the runtime tensors are captured here and
-                # forwarded into the dualwave launch by _wrap_with_dualwave_swp below.
+                # Non-None cu_seqlens_q builds the packed/varlen kernel variant.
                 varlen=(cu_seqlens_q is not None),
             )
         except Exception as _dualwave_swp_err:
@@ -169,14 +192,8 @@ def build_flash_attn_func_module_primary(
             return None
 
     def _guard_seqlen(_dispatched):
-        """Reject seq_len values the kernel cannot compute correctly.
-
-        Both variants now handle arbitrary seq_len: the DUALWAVE_SWP fast path
-        for seq_len >= 384, and the generic fallback for any seq_len (partial
-        last q-tile via Q/O bounds, partial last kv-tile via bounded/clamped KV
-        loads + causal / non-causal padding masks). So the only constraint left
-        is seq_len >= 1. A symbolic / non-int seq_len is let through.
-        """
+        """Enforce the only correctness floor (seq_len >= 1). A symbolic/non-int
+        seq_len is let through; dense routing is a perf policy, not a bound."""
 
         def _guarded(*args, **kwargs):
             S_int = _extract_seq_len(args, kwargs)
@@ -188,10 +205,14 @@ def build_flash_attn_func_module_primary(
             _guarded.compile = _dispatched.compile
         return _guarded
 
+    def _extract_batch(args, kwargs):
+        B = args[4] if len(args) > 4 else kwargs.get("batch_size", None)
+        return B if isinstance(B, int) else 1
+
     def _wrap_with_dualwave_swp(_fallback):
-        """Route eligible runtime shapes to DUALWAVE_SWP, then apply the seq_len
-        guard (only at the outermost, user-facing build; inner recursive builds
-        carry ``block_m`` set and are guarded by their parent)."""
+        """Route runtime shapes between DUALWAVE_SWP and the generic fallback, then
+        apply the seq_len guard at the outermost build (inner block_m-set builds are
+        guarded by their parent)."""
         if cu_seqlens_q is not None and _dualwave_swp_launch is None:
             raise ValueError(
                 "QKV varlen (cu_seqlens) is only supported on the gfx950 DUALWAVE_SWP "
@@ -202,18 +223,26 @@ def build_flash_attn_func_module_primary(
         else:
 
             def _dualwave_swp_dispatch(*args, **kwargs):
-                # DUALWAVE_SWP handles non-aligned seq_len (partial last q-block +
-                # partial/odd kv-tile count) like the reference asm; only constraint
-                # is the pipeline depth minimum (seq_len >= 384).
-                S_int = _extract_seq_len(args, kwargs)
-                if S_int is not None and S_int >= _DUALWAVE_MIN_SEQ:
-                    # Varlen: forward the cu_seqlens captured at build time (S here
-                    # is max_seqlen, which sizes grid_y; per-batch ranges come from
-                    # cu_seqlens inside the kernel).
-                    if cu_seqlens_q is not None:
-                        return _dualwave_swp_launch(
-                            *args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs
-                        )
+                # Optional launch args must be keyword: the generic and DUALWAVE_SWP
+                # launchers differ past the 6 required positionals (generic's 7th is
+                # `stream`; DUALWAVE_SWP's is `stride_kv_n`), so a 7th positional
+                # would silently mean different things once routing picks a path.
+                if len(args) > 6:
+                    raise TypeError(
+                        "flash_attn_func: pass only Q, K, V, O, batch_size, seq_len "
+                        "positionally; stream/stride_*/debug_counts/workspace by keyword."
+                    )
+                # Packed/varlen always uses DUALWAVE_SWP (no generic cu_seqlens path);
+                # cu_seqlens captured at build time are forwarded here.
+                if cu_seqlens_q is not None:
+                    return _dualwave_swp_launch(*args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs)
+                # A dense call carrying a DUALWAVE_SWP-only kwarg cannot use the
+                # generic launcher (different signature), so it stays on DUALWAVE_SWP.
+                # Check key presence, not value (an explicit `debug_counts=None` still
+                # counts). Otherwise route by the batch-aware dense threshold.
+                if any(k in kwargs for k in _DUALWAVE_ONLY_KWARGS):
+                    return _dualwave_swp_launch(*args, **kwargs)
+                if _routes_dense_to_dualwave(_extract_batch(args, kwargs), _extract_seq_len(args, kwargs)):
                     return _dualwave_swp_launch(*args, **kwargs)
                 return _fallback(*args, **kwargs)
 
