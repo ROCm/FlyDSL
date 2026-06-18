@@ -90,6 +90,7 @@ def build_flash_attn_func_module_primary(
     num_kv_heads=None,
     cu_seqlens_q=None,
     cu_seqlens_kv=None,
+    cross_seqlen=False,
     dualwave_swp_lazy_rescale=True,
     dualwave_swp_setprio=True,
     dualwave_swp_debug_lazy_counts=False,
@@ -150,6 +151,9 @@ def build_flash_attn_func_module_primary(
                 # varlen kernel variant; the runtime tensors are captured here and
                 # forwarded into the dualwave launch by _wrap_with_dualwave_swp below.
                 varlen=(cu_seqlens_q is not None),
+                # Emit the extra v_s_1 causal mask needed for seqlen_q != seqlen_kv
+                # (bottom-right). Off by default so self-attention keeps its schedule.
+                cross_seqlen=cross_seqlen,
             )
         except Exception as _dualwave_swp_err:
             import sys
@@ -197,8 +201,25 @@ def build_flash_attn_func_module_primary(
                 "QKV varlen (cu_seqlens) is only supported on the gfx950 DUALWAVE_SWP "
                 "path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)"
             )
+
+        def _fallback_no_diff_kv(*args, **kwargs):
+            # seq_len_kv (cross-length attention) is a gfx950 DUALWAVE_SWP feature;
+            # the generic fallback is self-attention only. Drop an equal seq_len_kv,
+            # reject a differing one with a clear error.
+            skv = kwargs.pop("seq_len_kv", None)
+            S_int = _extract_seq_len(args, kwargs)
+            if skv is not None and S_int is not None and int(skv) != S_int:
+                raise NotImplementedError(
+                    "seq_len_kv != seq_len (cross-length attention) is only supported on the "
+                    "gfx950 DUALWAVE_SWP path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)."
+                )
+            return _fallback(*args, **kwargs)
+
+        if hasattr(_fallback, "compile"):
+            _fallback_no_diff_kv.compile = _fallback.compile
+
         if _dualwave_swp_launch is None:
-            dispatched = _fallback
+            dispatched = _fallback_no_diff_kv
         else:
 
             def _dualwave_swp_dispatch(*args, **kwargs):
@@ -215,7 +236,7 @@ def build_flash_attn_func_module_primary(
                             *args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs
                         )
                     return _dualwave_swp_launch(*args, **kwargs)
-                return _fallback(*args, **kwargs)
+                return _fallback_no_diff_kv(*args, **kwargs)
 
             if hasattr(_fallback, "compile"):
                 _dualwave_swp_dispatch.compile = _fallback.compile
