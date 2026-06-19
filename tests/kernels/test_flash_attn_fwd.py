@@ -52,9 +52,11 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG: dict = {
 # num_kv_heads == num_heads -> MHA; num_kv_heads < num_heads -> GQA/MQA.
 # num_kv_splits > 1 -> split-K path (gfx950 DUALWAVE_SWP only, seq_len >= 384, D=128).
 DEFAULT_CONFIGS = [
+    # set1
     (16, 8192, 64, 64, 128, 1),
     (16, 8192, 64, 8, 128, 1),
     (2, 1024, 64, 64, 128, 1),
+    # set2
     (8, 128, 64, 64, 128, 1),
     (8, 256, 64, 64, 128, 1),
     (8, 512, 64, 64, 128, 1),
@@ -79,78 +81,114 @@ DEFAULT_CONFIGS = [
     (1, 4096, 8, 8, 128, 1),
     (1, 8192, 8, 8, 128, 1),
     (32, 8192, 8, 8, 128, 1),
+    # set3
     (1, 8192, 2, 2, 128, 4),
     (1, 4096, 2, 2, 128, 4),
     (1, 2048, 4, 4, 128, 4),
     (1, 8192, 4, 4, 128, 2),
-    # (1, 98144, 3, 3, 128, 5),
-    # (1, 147216, 3, 3, 128, 5),
-    # (1, 196288, 3, 3, 128, 5),
-    # (1, 245360, 3, 3, 128, 5),
-    # (1, 294432, 3, 3, 128, 5),
-    # (1, 12268, 24, 24, 128, 1),
-    # (1, 18402, 24, 24, 128, 1),
-    # (1, 24536, 24, 24, 128, 1),
-    # (1, 30670, 24, 24, 128, 2),
-    # (1, 36804, 24, 24, 128, 2),
-    # (1, 32768, 24, 24, 128, 1),
-    # (1, 32768, 32, 32, 128, 1),
-    # (1, 64, 4, 4, 128, 1),
-    # (1, 30, 4, 4, 128, 1),
-    # (1, 1, 4, 4, 128, 1),
-    # (2, 7, 4, 4, 128, 1),
-    # (3, 31, 3, 3, 128, 1),
-    # (5, 33, 5, 5, 128, 1),
-    # (5, 63, 7, 7, 128, 1),
-    # (3, 65, 3, 3, 128, 1),
+    # set4
+    (1, 98144, 3, 3, 128, 5),
+    (1, 147216, 3, 3, 128, 5),
+    (1, 196288, 3, 3, 128, 5),
+    (1, 245360, 3, 3, 128, 5),
+    (1, 294432, 3, 3, 128, 5),
+    (1, 12268, 24, 24, 128, 1),
+    (1, 18402, 24, 24, 128, 1),
+    (1, 24536, 24, 24, 128, 1),
+    (1, 30670, 24, 24, 128, 2),
+    (1, 36804, 24, 24, 128, 2),
+    (1, 32768, 24, 24, 128, 1),
+    (1, 32768, 32, 32, 128, 1),
+    # set5
+    (1, 64, 4, 4, 128, 1),
+    (1, 30, 4, 4, 128, 1),
+    (1, 1, 4, 4, 128, 1),
+    (2, 7, 4, 4, 128, 1),
+    (3, 31, 3, 3, 128, 1),
+    (5, 33, 5, 5, 128, 1),
+    (5, 63, 7, 7, 128, 1),
+    (3, 65, 3, 3, 128, 1),
 ]
 
-# QKV varlen test cases (packed cu_seqlens). Each entry is
-#   (per_batch_seqlens, num_heads, num_kv_heads, head_dim)
-VARLEN_CONFIGS = [
-    ([1024, 8192], 64, 64, 128),
-    ([512, 256, 1024, 128], 64, 64, 128),  # uneven; 128 -> partial last q-block; MHA
-    # ([300, 700, 500], 32, 32, 128),  # all non-256-multiples; partial q+kv tiles
-    # ([1024, 1024], 64, 8, 128),  # even, GQA (num_kv_heads=8)
-    # ([1, 3, 31, 33, 63, 65], 16, 16, 128),  # small (<256) + non-multiples; 4 batches
+# Additional dense/varlen/cross-length cases.
+# Row format: [seqlen_q, seqlen_kv, batch, num_heads, num_kv_heads, head_dim, num_kv_splits]
+# - seqlen_kv is None: packed varlen self-attn, seqlen_q is per-batch Q/KV seqlens.
+# - batch is an int: dense cross-length attention, seqlen_q/seqlen_kv are scalar lengths.
+# - batch is None: packed varlen cross-length attention, seqlen_q/seqlen_kv are per-batch lists.
+EXTRA_CONFIGS = [
+    # varlen
+    [[1024, 8192], None, None, 64, 64, 128, 1],
+    [[512, 256, 1024, 128], None, None, 64, 64, 128, 1],  # uneven; MHA
+    [[300, 700, 500], None, None, 32, 32, 128, 1],  # non-256/64-multiple
+    [[1024, 1024], None, None, 64, 8, 128, 1],  # even, GQA
+    [[1, 3, 31, 33, 63, 65], None, None, 16, 16, 128, 1],  # small + non-multiple
+    # cross-length
+    [31, 65, 1, 64, 8, 128, 1],
+    [31, 100, 1, 64, 8, 128, 1],
+    [31, 127, 1, 64, 8, 128, 1],
+    [31, 1024, 1, 64, 8, 128, 1],
+    [31, 8192, 1, 64, 8, 128, 1],
+    [65, 31, 1, 64, 8, 128, 1],
+    [65, 127, 1, 64, 8, 128, 1],
+    [65, 1024, 1, 64, 8, 128, 1],
+    [65, 8192, 1, 64, 8, 128, 1],
+    [100, 31, 1, 64, 8, 128, 1],
+    [100, 127, 1, 64, 8, 128, 1],
+    [100, 8192, 1, 64, 8, 128, 1],
+    [127, 31, 1, 64, 8, 128, 1],
+    [127, 1024, 1, 64, 8, 128, 1],
+    [127, 8192, 1, 64, 8, 128, 1],
+    [1024, 31, 1, 64, 8, 128, 1],
+    [1024, 100, 1, 64, 8, 128, 1],
+    [1024, 8192, 1, 64, 8, 128, 1],
+    [8192, 65, 1, 64, 8, 128, 1],
+    [8192, 127, 1, 64, 8, 128, 1],
+    [8192, 1024, 1, 64, 8, 128, 1],
+    # varlen cross-length
+    [[1024, 8192], [8192, 1024], None, 64, 64, 128, 1],
+    [[512, 256, 1024, 128], [256, 512, 512, 256], None, 64, 8, 128, 1],
+    [[300, 700, 500], [700, 300, 500], None, 32, 32, 128, 1],  # non-multiple
+    [[1024, 31], [31, 1024], None, 64, 8, 128, 1],  # extreme q>>kv/q<<kv
+    [[1, 65, 127, 333], [200, 64, 31, 100], None, 16, 16, 128, 1],
 ]
 
-# Cross-length (seqlen_q != seqlen_kv) test: BOTTOM-RIGHT aligned causal mask.
-# Each entry is (batch, (seqlen_q, seqlen_kv), num_heads, num_kv_heads, head_dim, num_kv_splits).
-QKV_DIFF_CONFIGS = [
-    (1, (31, 65), 64, 8, 128, 1),
-    (1, (31, 100), 64, 8, 128, 1),
-    # (1, (31, 127), 64, 8, 128, 1),
-    # (1, (31, 1024), 64, 8, 128, 1),
-    # (1, (31, 8192), 64, 8, 128, 1),
-    # (1, (65, 31), 64, 8, 128, 1),
-    # (1, (65, 127), 64, 8, 128, 1),
-    # (1, (65, 1024), 64, 8, 128, 1),
-    # (1, (65, 8192), 64, 8, 128, 1),
-    # (1, (100, 31), 64, 8, 128, 1),
-    # (1, (100, 127), 64, 8, 128, 1),
-    # (1, (100, 8192), 64, 8, 128, 1),
-    # (1, (127, 31), 64, 8, 128, 1),
-    # (1, (127, 1024), 64, 8, 128, 1),
-    # (1, (127, 8192), 64, 8, 128, 1),
-    # (1, (1024, 31), 64, 8, 128, 1),
-    # (1, (1024, 100), 64, 8, 128, 1),
-    # (1, (1024, 8192), 64, 8, 128, 1),
-    # (1, (8192, 65), 64, 8, 128, 1),
-    # (1, (8192, 127), 64, 8, 128, 1),
-    # (1, (8192, 1024), 64, 8, 128, 1),
-]
 
-# Varlen (packed cu_seqlens) with per-batch seqlen_q != seqlen_kv (bottom-right
-# causal). Each entry: (seqlens_q, seqlens_kv, num_heads, num_kv_heads, head_dim);
-# seqlens_q/seqlens_kv are per-batch lists of equal length (batch = len).
-VARLEN_DIFF_CONFIGS = [
-    ([1024, 8192], [8192, 1024], 64, 64, 128),
-    ([512, 256, 1024, 128], [256, 512, 512, 256], 64, 8, 128),  # mixed q<kv & q>kv, GQA
-    # ([300, 700, 500], [700, 300, 500], 32, 32, 128),  # non-64-multiple, multi-tile
-    # ([1024, 31], [31, 1024], 64, 8, 128),  # extreme q>>kv (zero rows) & q<<kv
-    # ([1, 65, 127, 333], [200, 64, 31, 100], 16, 16, 128),  # small + non-multiples mixed
-]
+def _short_label(value):
+    label = str(value)
+    return label if len(label) <= 24 else label[:21] + "..."
+
+
+def _extra_case_from_config(row):
+    seqlen_q, seqlen_kv, batch, nh, nh_kv, hd, kv_splits = row
+    if seqlen_kv is None:
+        return {
+            "sq_label": _short_label(seqlen_q),
+            "skv_label": _short_label(seqlen_q),
+            "nh": nh,
+            "nh_kv": nh_kv,
+            "hd": hd,
+            "kv_splits": kv_splits,
+            "kwargs": {"varlen_seqlens_q": list(seqlen_q)},
+        }
+    if batch is not None:
+        return {
+            "sq_label": f"[{seqlen_q}]",
+            "skv_label": f"[{seqlen_kv}]",
+            "nh": nh,
+            "nh_kv": nh_kv,
+            "hd": hd,
+            "kv_splits": kv_splits,
+            "kwargs": {"batch": batch, "seqlen_q": seqlen_q, "seqlen_kv": seqlen_kv},
+        }
+    return {
+        "sq_label": _short_label(seqlen_q),
+        "skv_label": _short_label(seqlen_kv),
+        "nh": nh,
+        "nh_kv": nh_kv,
+        "hd": hd,
+        "kv_splits": kv_splits,
+        "kwargs": {"varlen_seqlens_q": list(seqlen_q), "varlen_seqlens_kv": list(seqlen_kv)},
+    }
 
 
 def setup_seed(seed: int) -> None:
@@ -1172,6 +1210,20 @@ def _fmt_extra_normal_row(sq, skv, nh, nh_kv, hd, dtype_key, causal_tag, status,
     return f"{prefix} | {status:>6s} | {r['max_err']:>8.2e} {min_cos_s} | {us_s} {tf_s}"
 
 
+def _fmt_extra_cmp_avg_row(label, fly_r, ck_r, fly_ck_cmp):
+    return f"{label:>{_EXTRA_W}s} | {_fmt_result(fly_r)} | {_fmt_result(ck_r)} | {_fmt_cmp_values(fly_ck_cmp)}"
+
+
+def _fmt_extra_normal_avg_row(label, r):
+    if r.get("skip"):
+        return None
+    us_s = f"{r['us']:>10.1f}" if "us" in r else "       N/A"
+    tf_s = f"{r['tflops']:>9.1f}" if "tflops" in r else "      N/A"
+    min_cos = r.get("min_cos")
+    min_cos_s = f"{min_cos:>8.5f}" if min_cos is not None else f"{'N/A':>8s}"
+    return f"{label:>{_EXTRA_W}s} | {'--':>6s} | {r['max_err']:>8.2e} {min_cos_s} | {us_s} {tf_s}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="flash_attn_func FlyDSL Test/Benchmark")
     parser.add_argument("--batch", type=int, default=None)
@@ -1214,6 +1266,11 @@ def main():
         "--compare",
         action="store_true",
         help="Compare FlyDSL vs aiter_ck vs aiter_asm performance (requires aiter)",
+    )
+    parser.add_argument(
+        "--extra",
+        action="store_true",
+        help="Run additional varlen/cross-length configs from EXTRA_CONFIGS",
     )
     # ── Kernel build options (override defaults without env vars) ──────────────
     parser.add_argument(
@@ -1291,54 +1348,9 @@ def main():
 
     causal_desc = {True: "causal", False: "non-causal", None: "causal+non-causal"}[args.causal]
     dtype_desc = args.dtype or "bf16+fp16"
-    extra_cases = []
-    if configs is DEFAULT_CONFIGS:
-        for seqlens, nh, nh_kv, hd in VARLEN_CONFIGS:
-            sq_label = str(seqlens)
-            if len(sq_label) > 24:
-                sq_label = sq_label[:21] + "..."
-            extra_cases.append(
-                {
-                    "kind": "varlen",
-                    "sq_label": sq_label,
-                    "skv_label": sq_label,
-                    "nh": nh,
-                    "nh_kv": nh_kv,
-                    "hd": hd,
-                    "kwargs": {"varlen_seqlens_q": list(seqlens)},
-                }
-            )
-        for batch, (sq, skv), nh, nh_kv, hd, kv_splits in QKV_DIFF_CONFIGS:
-            extra_cases.append(
-                {
-                    "kind": "qkv_diff",
-                    "sq_label": f"[{sq}]",
-                    "skv_label": f"[{skv}]",
-                    "nh": nh,
-                    "nh_kv": nh_kv,
-                    "hd": hd,
-                    "kv_splits": kv_splits,
-                    "kwargs": {"batch": batch, "seqlen_q": sq, "seqlen_kv": skv},
-                }
-            )
-        for sqs, skvs, nh, nh_kv, hd in VARLEN_DIFF_CONFIGS:
-            label_q = str(sqs)
-            label_kv = str(skvs)
-            if len(label_q) > 24:
-                label_q = label_q[:21] + "..."
-            if len(label_kv) > 24:
-                label_kv = label_kv[:21] + "..."
-            extra_cases.append(
-                {
-                    "kind": "varlen_diff",
-                    "sq_label": label_q,
-                    "skv_label": label_kv,
-                    "nh": nh,
-                    "nh_kv": nh_kv,
-                    "hd": hd,
-                    "kwargs": {"varlen_seqlens_q": list(sqs), "varlen_seqlens_kv": list(skvs)},
-                }
-            )
+    extra_cases = (
+        [_extra_case_from_config(row) for row in EXTRA_CONFIGS] if args.extra and configs is DEFAULT_CONFIGS else []
+    )
 
     if args.compare:
         # ---- Comparison mode: FlyDSL vs aiter_ck vs aiter_asm ----
@@ -1557,6 +1569,16 @@ def main():
             print("  " + "-" * (len(xhdr2) - 2))
             for sq, skv, nh, nh_kv_eff, hd, dtype_key, ctag, fly_r, ck_r in varlen_cmp_rows:
                 print(_fmt_extra_cmp_row(sq, skv, nh, nh_kv_eff, hd, dtype_key, ctag, fly_r, ck_r))
+            print("  " + "-" * (len(xhdr2) - 2))
+
+            def _extra_cmp_avg(label, subset):
+                fly_avg = _avg_results([row[7] for row in subset])
+                ck_avg = _avg_results([row[8] for row in subset])
+                fly_ck_cmp = _avg_cmp_values(subset, 7, 8)
+                print(_fmt_extra_cmp_avg_row(label, fly_avg, ck_avg, fly_ck_cmp))
+
+            _print_grouped_avgs(varlen_cmp_rows, lambda r: (r[5], r[6]), _extra_cmp_avg)
+            print("=" * len(xhdr2))
             varlen_csv_path = f"fmha_varlen_perf_compare_{_gpu_short_name()}.csv"
             _write_varlen_cmp_csv(varlen_csv_path, varlen_cmp_rows)
             print(f"Varlen results saved to: {varlen_csv_path}")
@@ -1728,7 +1750,19 @@ def main():
             print("  " + "-" * (len(xhdr) - 2))
             for sq, skv, nh, nh_kv_eff, hd, dtype_key, ctag, status, r in varlen_rows:
                 print(_fmt_extra_normal_row(sq, skv, nh, nh_kv_eff, hd, dtype_key, ctag, status, r))
-            print("=" * 130)
+            print("  " + "-" * (len(xhdr) - 2))
+
+            def _extra_normal_avg(label, subset):
+                avg = _avg_results(
+                    [row[8] for row in subset],
+                    keys=("max_err", "min_cos", "us", "tflops"),
+                )
+                avg_row = _fmt_extra_normal_avg_row(label, avg)
+                if avg_row is not None:
+                    print(avg_row)
+
+            _print_grouped_avgs(varlen_rows, lambda r: (r[5], r[6]), _extra_normal_avg)
+            print("=" * len(xhdr))
             varlen_csv_path = f"fmha_varlen_perf_{_gpu_short_name()}.csv"
             _write_varlen_normal_csv(varlen_csv_path, varlen_rows)
             print(f"Varlen results saved to: {varlen_csv_path}")
