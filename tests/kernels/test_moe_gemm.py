@@ -416,7 +416,7 @@ def run_moe_stage1(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4", "a6w4"):
         raise ValueError(
             f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4'), got {in_dtype!r}"
         )
@@ -799,7 +799,7 @@ def run_moe_stage1(
     print(
         f"FlyDSL MoE stage1[{in_dtype}]: "
         f"{us:.1f} us, "
-        f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
+        f"{tflops:.2f} TFLOPS(logical, M={tokens * topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
     )
     # Compare + benchmark vs aiter stage1 (optional; enabled by default when aiter is runnable).
@@ -912,6 +912,7 @@ def run_moe_stage2(
     routing_in: Optional[RoutingBuffers] = None,
     a2_fp8_in: Optional[torch.Tensor] = None,
     a2_scale_in: Optional[torch.Tensor] = None,
+    a2_ref_in: Optional[torch.Tensor] = None,
     return_outputs: bool = False,
     skip_ref: bool = False,
     init_scale: float = 0.2,
@@ -1042,7 +1043,7 @@ def run_moe_stage2(
     #     f"{' (even)' if even_dispatch else ' (random)'}"
     # )
 
-    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4"):
+    if in_dtype not in ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16", "fp4", "a8w4", "a6w4"):
         raise ValueError(
             f"in_dtype must be one of ('fp8','fp16','bf16','int8','int8smooth','int4','int4_bf16','fp4','a8w4'), got {in_dtype!r}"
         )
@@ -1051,8 +1052,9 @@ def run_moe_stage2(
     is_int8smooth = in_dtype == "int8smooth"
     is_fp4 = in_dtype == "fp4"
     is_a8w4 = in_dtype == "a8w4"  # MX-FP8 activation + MX-FP4 weight
+    is_a6w4 = in_dtype == "a6w4"  # MXFP6-E2M3 activation + MXFP4 weight
     # Share the FP4 stage2 path (W2 shuffle / scale sort / mixed kernel).
-    is_fp4_path = is_fp4 or is_a8w4
+    is_fp4_path = is_fp4 or is_a8w4 or is_a6w4
     use_packed_int4 = is_int4 or is_int4_bf16
 
     # Quantize inputs / weights.
@@ -1090,13 +1092,13 @@ def run_moe_stage2(
         w1_q, scale_w1 = pertoken_quant(w1_fp32, quant_dtype=torch.int8, dtypeMax=7)
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
-    elif in_dtype in ("fp4", "a8w4"):
+    elif in_dtype in ("fp4", "a8w4", "a6w4"):
         from tests.kernels.utils import fp4_utils
 
         if fp4_utils is None:
             pytest.skip("fp4_utils not available (triton not installed)")
         if "gfx95" not in ARCH:
-            pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
+            pytest.skip(f"FP4/FP6 MFMA requires gfx950+, got {ARCH}")
         # FP4 / A8W4 share the MXFP4 W2 path; quantize W2 only here. A2 comes
         # from `a2_fp8_in` (FP4 packed bytes for 'fp4', MX-FP8 e4m3fn for 'a8w4').
         w2_flat_fp32 = w2_fp32.view(experts * model_dim, inter_dim)
@@ -1263,7 +1265,7 @@ def run_moe_stage2(
 
     if is_fp4_path:
         fp4_accumulate = not bool(use_reduce)
-        a_dtype_kernel = "fp8" if is_a8w4 else "fp4"
+        a_dtype_kernel = "fp8" if is_a8w4 else ("fp6" if is_a6w4 else "fp4")
         exe = compile_mixed_moe_gemm2(
             model_dim=model_dim,
             inter_dim=inter_dim,
@@ -1485,8 +1487,12 @@ def run_moe_stage2(
     torch.cuda.synchronize()
 
     if not bool(skip_ref):
+        # For a6w4: use a2_ref_in (low-6-bit E2M3 codes) instead of a2_q
+        # (FP8-padded kernel layout), and tell the reference to decode as mxfp6.
+        _a2_ref = a2_ref_in if a2_ref_in is not None else a2_q
+        _a2_kind = "mxfp6" if a2_ref_in is not None else None
         ref2 = torch_moe_gemm2(
-            a2_q,
+            _a2_ref,
             w2_q,
             a2_scale,
             scale_w2,
@@ -1496,6 +1502,7 @@ def run_moe_stage2(
             doweight_stage2=doweight_stage2,
             group_size=group_size,
             scale_w2_groups=scale_w2_groups,
+            a2_kind=_a2_kind,
         )
         assert verify_output(out.to(torch.float32), ref2, rtol=0.5, atol=0.5)
 
@@ -1525,6 +1532,7 @@ def run_moe_stage2(
         "int4_bf16": (16, 4, "none", "per_row_f32"),
         "fp4": (4, 4, "per_block_e8m0_32", "per_block_e8m0_32"),
         "a8w4": (8, 4, "per_block_e8m0_32", "per_block_e8m0_32"),
+        "a6w4": (6, 4, "per_block_e8m0_32", "per_block_e8m0_32"),
     }
     a_bits, w_bits, a_scale_mode, w_scale_mode = _BYTES_SPEC[in_dtype]
     if use_groupwise_scale:
@@ -1559,7 +1567,7 @@ def run_moe_stage2(
     tbps = float("nan") if us <= 0 else bytes_moved / 1e12 / (us / 1e6)
     print(
         f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
-        f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
+        f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens * topk} | "
         f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
     # Optional compare vs aiter stage2.
@@ -1622,7 +1630,7 @@ def run_moe_stage2(
             tflops_ck = flops / (us_ck / 1e6) / 1e12
             print(
                 f"[aiter] stage2: {us_ck:.1f} us, "
-                f"{tflops_ck:.2f} TFLOPS(logical, M={tokens*topk}), FlyDSL vs aiter speedups: {tflops / tflops_ck:.2f}x"
+                f"{tflops_ck:.2f} TFLOPS(logical, M={tokens * topk}), FlyDSL vs aiter speedups: {tflops / tflops_ck:.2f}x"
             )
 
             # Correctness run (best-effort; do not fail perf comparison if aiter diverges).
@@ -1873,7 +1881,11 @@ def test_moe_gemm_2stage(
         #   a8w4 -> MX-FP8 e4m3fn (1 B/elem)
         # run_moe_stage2 sorts the raw E8M0 scale [tokens*topk, inter_dim//32] internally.
         out1_fp32 = out1_fp16.to(torch.float32).view(tokens * topk, inter_dim)
-        quantize_a2 = _per_1x32_mxfp8_quant if in_dtype == "a8w4" else _per_1x32_fp4_quant
+        quantize_a2 = (
+            _per_1x32_mxfp8_quant
+            if in_dtype == "a8w4"
+            else _per_1x32_mxfp6_quant if in_dtype == "a6w4" else _per_1x32_fp4_quant
+        )
         a2_q, a2_scale = quantize_a2(out1_fp32)
     elif w_fp4_kernel:
         a2_q = out1_fp16.to(torch.float32)
@@ -1983,6 +1995,21 @@ def _per_1x32_mxfp8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     x_q = x_q.view(shape_orig).contiguous()
     scale_bytes = scale_e8m0.view(*shape_orig[:-1], shape_orig[-1] // 32).view(torch.uint8).contiguous()
     return x_q, scale_bytes
+
+
+def _per_1x32_mxfp6_quant(
+    x: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Quantize a tensor to MXFP6-E2M3 with per-1x32 E8M0 block scaling.
+
+    Returns:
+      a_pad      [..., K] uint8  FP8-padded kernel input (cbsz=2 layout).
+      scale_e8m0 [..., K//32] uint8  E8M0 block scale.
+      a_unpacked [..., K] uint8  low-6-bit E2M3 codes used by the reference.
+    """
+    from tests.kernels.utils.fp4_utils import per_1x32_f6_quant
+
+    return per_1x32_f6_quant(x.bfloat16())
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
@@ -2269,6 +2296,83 @@ def test_moe_gemm_w4a16_groupwise_scale(scale_dtype):
                 pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 shape requires gfx950+"),
             ],
         ),
+        # ── Realworld MoE model shapes (stage2 down-projection) ──────────────
+        # tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k
+        # Mixtral-8x7B: hidden=4096, inter=14336, E=8, topk=2
+        pytest.param(
+            128,
+            4096,
+            256,
+            8,
+            2,
+            64,
+            256,
+            256,
+            id="Mixtral8x7B-T128",
+            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+"),
+        ),
+        pytest.param(
+            512,
+            4096,
+            256,
+            8,
+            2,
+            64,
+            256,
+            256,
+            id="Mixtral8x7B-T512",
+            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+"),
+        ),
+        # Qwen3-30B-A3B: hidden=2048, inter=768, E=64, topk=8
+        pytest.param(
+            128,
+            2048,
+            256,
+            64,
+            8,
+            64,
+            256,
+            256,
+            id="Qwen3-30B-A3B-T128",
+            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+"),
+        ),
+        pytest.param(
+            512,
+            2048,
+            256,
+            64,
+            8,
+            64,
+            256,
+            256,
+            id="Qwen3-30B-A3B-T512",
+            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+"),
+        ),
+        # DeepSeek-V3: hidden=7168, inter=2048, E=256, topk=8
+        pytest.param(
+            128,
+            7168,
+            256,
+            256,
+            8,
+            64,
+            256,
+            128,
+            id="DeepSeekV3-T128",
+            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+"),
+        ),
+        pytest.param(
+            512,
+            7168,
+            256,
+            256,
+            8,
+            64,
+            256,
+            128,
+            id="DeepSeekV3-T512",
+            marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+"),
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -2277,6 +2381,7 @@ def test_moe_gemm_w4a16_groupwise_scale(scale_dtype):
         "fp8",
         pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
         pytest.param("a8w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A8W4 requires gfx950+")),
+        pytest.param("a6w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A6W4 requires gfx950+")),
     ],
 )
 def test_moe_stage2_standalone(
@@ -2302,7 +2407,7 @@ def test_moe_stage2_standalone(
     3. Reduce mode (FlyDSL): GEMM2 + FlyDSL reduce kernel
     For FP4 / A8W4: atomic mode + torch reduce mode (MXFP4 weight path).
     """
-    is_fp4_path = in_dtype in ("fp4", "a8w4")
+    is_fp4_path = in_dtype in ("fp4", "a8w4", "a6w4")
     if is_fp4_path:
         from tests.kernels.utils import fp4_utils
 
@@ -2341,12 +2446,26 @@ def test_moe_stage2_standalone(
         _A2_QUANTIZERS = {
             "fp4": _per_1x32_fp4_quant,
             "a8w4": _per_1x32_mxfp8_quant,
+            "a6w4": _per_1x32_mxfp6_quant,
         }
         device = torch.device("cuda")
         torch.manual_seed(seed)
         a2_fp32 = torch.randn((tokens * topk, inter_dim), device=device, dtype=torch.float32) * 0.2
-        a2_q, a2_scale = _A2_QUANTIZERS[in_dtype](a2_fp32)
-        fp4_args = dict(common_args, a2_fp8_in=a2_q, a2_scale_in=a2_scale)
+        quant_result = _A2_QUANTIZERS[in_dtype](a2_fp32)
+        if in_dtype == "a6w4":
+            # _per_1x32_mxfp6_quant returns (a_pad, scale, a_unpacked).
+            # Pass a_pad to the kernel, a_unpacked + a2_kind="mxfp6" to the
+            # reference so torch_moe_gemm2 can dequantize correctly.
+            a2_q, a2_scale, a2_unpacked = quant_result
+            fp4_args = dict(
+                common_args,
+                a2_fp8_in=a2_q,
+                a2_scale_in=a2_scale,
+                a2_ref_in=a2_unpacked,
+            )
+        else:
+            a2_q, a2_scale = quant_result
+            fp4_args = dict(common_args, a2_fp8_in=a2_q, a2_scale_in=a2_scale)
         run_moe_stage2(**fp4_args, kernel_name=f"moe_gemm2_atomic_{in_dtype}")
         run_moe_stage2(**fp4_args, use_reduce=True, kernel_name=f"moe_gemm2_reduce_torch_{in_dtype}")
         return
