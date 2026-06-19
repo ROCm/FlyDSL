@@ -350,8 +350,8 @@ def flydsl_flash_attn_func(
 
         # ── launch ──────────────────────────────────────────────────────────
         if splitk:
-            workspace = torch.zeros(ws_elems, dtype=torch.float32, device=q.device)
-            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=workspace, stream=launch_stream)
+            _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
+            exe(q_flat, k_flat, v_flat, o_flat, B, Sq, workspace=_ws, stream=launch_stream)
         elif varlen:
             kwargs = dict(cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, stream=launch_stream)
             if cross:
