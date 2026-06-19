@@ -291,6 +291,7 @@ def compile_fp8fp4_gemm(
     _a_frag_ds = wmma_m_rep * _a_frag_loads_per_wm
     _bs_ds_loads = wmma_n_rep * _b_frag_loads_per_wn + _scale_ds_loads
     _as_ds_loads = _a_frag_ds + _scale_ds_loads
+    _row_major_k_prefetch_bundle_ds = _a_frag_ds + _bs_ds_loads
 
     lds_a_stride_bytes = packed_tile_k_a + LDS_PAD_A_BYTES
 
@@ -436,6 +437,9 @@ def compile_fp8fp4_gemm(
     use_fp4_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
+    _row_major_k_prefetch_eligible = wmma_m_rep == 1 and wmma_n_rep <= 2 and k_wmma_steps > 1
+    use_row_major_k_prefetch = _row_major_k_prefetch_eligible
+    _row_major_k_prefetch_depth = 2 if (use_row_major_k_prefetch and wmma_n_rep == 1 and k_wmma_steps > 2) else 1
 
     # A-scale VGPR-ring prefetch depth (K-tiles ahead).
     _bvs_D_default = 3 if (use_ascale_vgpr and use_row_major_streaming_schedule) else 1
@@ -1148,6 +1152,45 @@ def compile_fp8fp4_gemm(
                     mid_compute_callback=mid_compute_callback,
                 )
             else:
+                if const_expr(use_row_major_k_prefetch):
+
+                    def _load_bundle(ks):
+                        b_frags, b_scales, a_scales = _load_b_and_scales(
+                            b_buf, b_bases, as_buf, as_bases, bs_buf, bs_bases, ks
+                        )
+                        a_frag = load_a_frag(a_buf, a_bases[0], ks)
+                        return a_frag, b_frags, a_scales, b_scales
+
+                    def _emit_bundle(bundle, emit_filler_now=False):
+                        a_frag, b_frags, a_scales, b_scales = bundle
+                        if const_expr(emit_filler_now and emit_filler is not None):
+                            rocdl.sched_barrier(0)
+                            emit_filler()
+                        for wn in range_constexpr(wmma_n_rep):
+                            _emit_wmma(current_accs, 0, wn, a_frag, b_frags[wn], a_scales, b_scales)
+
+                    # Keep future K-subtile LDS reads outstanding while only draining
+                    # the current bundle before its single row-major WMMA.
+                    preload_depth = min(k_wmma_steps, _row_major_k_prefetch_depth + 1)
+                    bundle_queue = [_load_bundle(pre_ks) for pre_ks in range_constexpr(preload_depth)]
+                    next_ks = preload_depth
+                    for ks in range_constexpr(k_wmma_steps):
+                        is_last_ks = ks == k_wmma_steps - 1
+                        cur_bundle = bundle_queue.pop(0)
+                        rocdl.s_wait_dscnt(len(bundle_queue) * _row_major_k_prefetch_bundle_ds)
+
+                        _emit_bundle(cur_bundle, emit_filler_now=is_last_ks)
+
+                        if const_expr(ks == 0 and mid_compute_callback is not None):
+                            rocdl.sched_barrier(0)
+                            mid_compute_callback()
+
+                        if const_expr(next_ks < k_wmma_steps):
+                            bundle_queue.append(_load_bundle(next_ks))
+                            next_ks += 1
+
+                    return current_accs
+
                 prev_b, prev_bs, prev_as = _load_b_and_scales(b_buf, b_bases, as_buf, as_bases, bs_buf, bs_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
                     _mid_cb = mid_compute_callback if ks == 0 else None
@@ -1677,6 +1720,17 @@ def compile_fp8fp4_gemm(
             return current_accs
 
         def hot_loop_scheduler():
+            if const_expr(use_row_major_k_prefetch):
+                _queue_depth = min(k_wmma_steps, _row_major_k_prefetch_depth + 1)
+                for _ks in range_constexpr(k_wmma_steps):
+                    if const_expr(_ks == 0):
+                        rocdl.sched_dsrd(_row_major_k_prefetch_bundle_ds * _queue_depth)
+                    elif const_expr(_ks + _queue_depth <= k_wmma_steps):
+                        rocdl.sched_dsrd(_row_major_k_prefetch_bundle_ds)
+                    rocdl.sched_mfma(wmma_n_rep)
+                rocdl.sched_barrier(0)
+                return
+
             _half_wm = wmma_m_rep // 2
             _half_wmma = _half_wm * wmma_n_rep
             _b_loads_per_frag = 2 if is_a8w4 else 4
@@ -2562,7 +2616,7 @@ def compile_fp8fp4_gemm(
             arena_alloc.finalize()
 
         gx = (i32_m + (tile_m - 1)) // tile_m
-        gy = (i32_n + (tile_n - 1)) // tile_n
+        gy = N // tile_n
         gz = split_k
 
         if const_expr(use_cluster):
