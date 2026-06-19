@@ -418,7 +418,7 @@ def _run_mxscale_gemm_test(
     else:
         ref = reference_mxfp8_gemm(a, b, a_scale, b_scale, M, N, K)
 
-    print(f"Ref stats: min={ref.min():.2f}, max={ref.max():.2f}, " f"mean={ref.mean():.2f}, std={ref.std():.2f}")
+    print(f"Ref stats: min={ref.min():.2f}, max={ref.max():.2f}, mean={ref.mean():.2f}, std={ref.std():.2f}")
 
     a, b, a_scale, b_scale = _pad_mxscale_inputs(a, b, a_scale, b_scale, padded_shape)
 
@@ -1765,7 +1765,7 @@ def _run_benchmark(args):
     if needs_pad:
         print(f"  Kernel pad: M={padded_m}, N={padded_n}, K={padded_k}")
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
-    print(f"  Buffers={args.num_buffers}, out={args.out_dtype}, " f"inst_prefetch={args.inst_prefetch}")
+    print(f"  Buffers={args.num_buffers}, out={args.out_dtype}, inst_prefetch={args.inst_prefetch}")
     if args.warmup < 0:
         raise ValueError(f"--warmup must be >= 0, got {args.warmup}")
     if args.iters <= 0:
@@ -2042,25 +2042,24 @@ def _run_benchmark(args):
         print(f"      TFLOPS:       {logical_tflops:.4f}")
     else:
         print(f"      TFLOPS:       {logical_tflops:.4f} (logical), {tile_tflops:.4f} (tile-covered)")
-    print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  " f"(read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
+    print(f"      Bandwidth:    {bw_gbs:.1f} GB/s  (read: {read_bw_gbs:.1f} + write: {write_bw_gbs:.1f})")
     print(
         f"      Bytes moved:  {bytes_moved / 1e6:.1f} MB  "
         f"(A={bytes_a / 1e6:.1f} B={bytes_b / 1e6:.1f} "
         f"scale={bytes_scale / 1e6:.1f} D={bytes_d / 1e6:.1f})"
     )
     print("      ---")
-    print(f"      WMMA/tile:    {wmma_per_tile} " f"({wmma_m_rep}m × {wmma_n_rep}n × {k_wmma_steps}k)")
+    print(f"      WMMA/tile:    {wmma_per_tile} ({wmma_m_rep}m × {wmma_n_rep}n × {k_wmma_steps}k)")
     if args.split_k > 1:
         print(
-            f"      Total tiles:  {m_tiles}×{n_tiles} spatial × "
-            f"{args.split_k} split-K × {k_tiles_local} local K-iters"
+            f"      Total tiles:  {m_tiles}×{n_tiles} spatial × {args.split_k} split-K × {k_tiles_local} local K-iters"
         )
     else:
         print(f"      Total tiles:  {m_tiles}×{n_tiles} spatial × {k_tiles} K-iters")
     print(f"      Seq WMMA/WG:  {seq_wmma}")
     print(f"      us/WMMA:      {us_per_wmma:.1f}")
     if us_per_wmma > 1000:
-        print(f"      WARNING: {us_per_wmma/1000:.1f} ms/WMMA indicates " f"WMMA_SCALE trap-handler emulation")
+        print(f"      WARNING: {us_per_wmma / 1000:.1f} ms/WMMA indicates WMMA_SCALE trap-handler emulation")
     print("=" * 72)
 
     return us, logical_tflops, bw_gbs
@@ -2267,7 +2266,7 @@ if __name__ == "__main__":
         "--no-flush-l2",
         action="store_true",
         default=False,
-        help="Disable L2 defeat for a hot-cache measurement. Applies to both eager " "and --use-graph modes.",
+        help="Disable L2 defeat for a hot-cache measurement. Applies to both eager and --use-graph modes.",
     )
     parser.add_argument(
         "--l2-flush-mb",

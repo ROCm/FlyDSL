@@ -209,7 +209,7 @@ def compile_fp8fp4_gemm(
 
     num_k_tiles = split_k_chunk // tile_k
     if num_k_tiles < num_buffers:
-        raise ValueError(f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, " f"got {num_k_tiles}")
+        raise ValueError(f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, got {num_k_tiles}")
 
     gpu_arch = str(get_hip_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
@@ -340,9 +340,7 @@ def compile_fp8fp4_gemm(
     arena_alloc = SmemAllocator(
         None,
         arch=gpu_arch,
-        global_sym_name=(
-            f"mxscale_{data_format}_{tile_m}x{tile_n}x{tile_k}_" f"{m_warp}x{n_warp}_{num_buffers}buf_arena"
-        ),
+        global_sym_name=(f"mxscale_{data_format}_{tile_m}x{tile_n}x{tile_k}_{m_warp}x{n_warp}_{num_buffers}buf_arena"),
     )
 
     stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
@@ -565,16 +563,18 @@ def compile_fp8fp4_gemm(
 
             def _load_contig_i32_guarded_row(row, n, soff):
                 row_valid = row < m_idx
-                safe_row = arith.select(row_valid, row, arith.index(0))
-                vals = _load_contig_i32(
-                    _ascale_rsrc,
-                    safe_row * arith.index(_ascale_row_i32),
-                    n,
-                    soff,
-                )
-                for j in range_constexpr(n):
-                    vals[j] = arith.select(row_valid, vals[j], _scale_identity_i32)
-                return vals
+                if_op = scf.IfOp(row_valid, [T.i32] * n, has_else=True)
+                with ir.InsertionPoint(if_op.then_block):
+                    vals = _load_contig_i32(
+                        _ascale_rsrc,
+                        row * arith.index(_ascale_row_i32),
+                        n,
+                        soff,
+                    )
+                    scf.YieldOp([arith.unwrap(v) for v in vals])
+                with ir.InsertionPoint(if_op.else_block):
+                    scf.YieldOp([arith.unwrap(_scale_identity_i32) for _ in range(n)])
+                return list(if_op.results)
 
             def _load_ascale_impl(k_base, guarded):
                 kt = k_base // arith.index(tile_k)
@@ -2259,9 +2259,16 @@ def compile_fp8fp4_gemm(
             else:
                 _issue_active_tdm(i, addr_box)
             active_addr_lo = addr_box[0]
-        if const_expr(_bvs_active and loop_iters > 0):
-            _bvs_pf = [_bvs_prefetch(split_k_base + arith.index(_d * tile_k)) for _d in range(_bvs_D)]
-            _bvs_ra = [_v for _a in _bvs_pf for _v in _a]
+        _bvs_tail_seed = []
+        _bvs_tail_issue_start = loop_iters * num_buffers
+        if const_expr(_bvs_active):
+            _bvs_initial_depth = _bvs_D if loop_iters > 0 else min(_bvs_D, num_k_tiles)
+            _bvs_pf = [_bvs_prefetch(split_k_base + arith.index(_d * tile_k)) for _d in range(_bvs_initial_depth)]
+            if const_expr(loop_iters > 0):
+                _bvs_ra = [_v for _a in _bvs_pf for _v in _a]
+            else:
+                _bvs_tail_seed = list(_bvs_pf)
+                _bvs_tail_issue_start = _bvs_initial_depth
 
         _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
@@ -2354,8 +2361,14 @@ def compile_fp8fp4_gemm(
 
             accs = list(results[:n_accs])
             active_addr_lo = results[n_accs]
+            _result_off = n_accs + 1
             if const_expr(secondary_scale_tdm):
                 active_sec_lo = results[n_accs + 1]
+                _result_off = _result_off + 1
+            if const_expr(_bvs_active):
+                _bvs_tail_flat = list(results[_result_off : _result_off + _bvs_D * _vs_tile_a])
+                _bvs_tail_seed = [_bvs_tail_flat[_d * _vs_tile_a : (_d + 1) * _vs_tile_a] for _d in range(_bvs_D)]
+                _bvs_tail_issue_start = loop_iters * num_buffers + _bvs_D
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
         if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
             pipeline_fence_wait(use_cluster=use_cluster)
@@ -2380,8 +2393,8 @@ def compile_fp8fp4_gemm(
             _bvs_tail_kt[0] += 1
             return kb
 
-        _bvs_tail_ring = []
-        _bvs_tail_issue_kt = [loop_iters * num_buffers]
+        _bvs_tail_ring = list(_bvs_tail_seed)
+        _bvs_tail_issue_kt = [_bvs_tail_issue_start]
 
         def _bvs_tail_issue_one():
             if const_expr(_bvs_active and _bvs_tail_issue_kt[0] < num_k_tiles):
@@ -2396,8 +2409,6 @@ def compile_fp8fp4_gemm(
 
         if const_expr(_bvs_active):
             rocdl.sched_barrier(0)
-            for _ in range_constexpr(_bvs_D):
-                _bvs_tail_issue_one()
 
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             _entry_kb, _pf_a_scales = _bvs_tail_scales()
