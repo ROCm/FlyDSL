@@ -7,7 +7,6 @@ per-channel fp32 scales applied in the epilogue (``scale_mode="ptpc"``).
 """
 
 import functools
-import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -437,13 +436,17 @@ def compile_fp8fp4_gemm(
     use_fp4_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
-    _row_major_k_prefetch_eligible = wmma_m_rep == 1 and wmma_n_rep <= 2 and k_wmma_steps > 1
-    use_row_major_k_prefetch = _row_major_k_prefetch_eligible
-    _row_major_k_prefetch_depth = 2 if (use_row_major_k_prefetch and wmma_n_rep == 1 and k_wmma_steps > 2) else 1
+    use_row_major_k_prefetch = wmma_m_rep == 1 and k_wmma_steps > 1
+    _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
+    _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
+    use_row_major_late_signal = use_row_major_k_prefetch
 
-    # A-scale VGPR-ring prefetch depth (K-tiles ahead).
-    _bvs_D_default = 3 if (use_ascale_vgpr and use_row_major_streaming_schedule) else 1
-    _bvs_D = max(1, int(os.environ.get("FLYDSL_BUFFER_VGPR_SCALE_DEPTH", str(_bvs_D_default))))
+    # A-scale VGPR-ring prefetch depth (K-tiles ahead).  Deeper K tiles expose
+    # more latency to hide; depth 4 improves the small-M row-major large-K path
+    if use_ascale_vgpr and use_row_major_streaming_schedule:
+        _bvs_D = 4 if num_buffers >= 4 else 3
+    else:
+        _bvs_D = 1
     _bvs_active = use_ascale_vgpr
 
     if is_mxscale:
@@ -456,6 +459,7 @@ def compile_fp8fp4_gemm(
     use_ws_tdm_split_signal_overlap = (
         (use_fp8_quadrant_schedule or use_fp8_deep_pipeline_schedule) and num_buffers == 4 and use_cluster
     )
+    use_tdm_late_signal_overlap = use_ws_tdm_split_signal_overlap or use_row_major_late_signal
 
     if use_fp4_quadrant_schedule:
         _fp4_half_wm = wmma_m_rep // 2
@@ -1124,6 +1128,7 @@ def compile_fp8fp4_gemm(
             lds_bs,
             emit_filler=None,
             mid_compute_callback=None,
+            late_compute_callback=None,
             scale_k_base=None,
             pf_a_scales=None,
         ):
@@ -1178,6 +1183,10 @@ def compile_fp8fp4_gemm(
                         is_last_ks = ks == k_wmma_steps - 1
                         cur_bundle = bundle_queue.pop(0)
                         rocdl.s_wait_dscnt(len(bundle_queue) * _row_major_k_prefetch_bundle_ds)
+
+                        if const_expr(is_last_ks and late_compute_callback is not None):
+                            rocdl.sched_barrier(0)
+                            late_compute_callback()
 
                         _emit_bundle(cur_bundle, emit_filler_now=is_last_ks)
 
@@ -1898,6 +1907,7 @@ def compile_fp8fp4_gemm(
                 lds_bs,
                 emit_filler=emit_filler,
                 mid_compute_callback=mid_compute_callback,
+                late_compute_callback=late_compute_callback,
                 scale_k_base=scale_k_base,
                 pf_a_scales=pf_a_scales,
             )
@@ -2330,7 +2340,7 @@ def compile_fp8fp4_gemm(
         # This overlaps TDM DMA with the remaining WMMA instructions,
         _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
 
-        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+        if const_expr(loop_iters > 0 and use_tdm_late_signal_overlap):
             _pipeline_fence_signal(outstanding=_fence_outstanding)
 
         if const_expr(loop_iters > 0):
@@ -2368,12 +2378,12 @@ def compile_fp8fp4_gemm(
                     ):
                         _issue_active_tdm(_ls, _ab, k_prefetch=_k_off, sec_box=_sb)
 
-                    if const_expr(not use_ws_tdm_split_signal_overlap):
+                    if const_expr(not use_tdm_late_signal_overlap):
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
                     pipeline_fence_wait(use_cluster=use_cluster)
 
                     _late_tdm_ws_fence_signal = None
-                    if const_expr(use_ws_tdm_split_signal_overlap):
+                    if const_expr(use_tdm_late_signal_overlap):
 
                         def _late_tdm_ws_split_signal():
                             _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -2424,7 +2434,7 @@ def compile_fp8fp4_gemm(
                 _bvs_tail_seed = [_bvs_tail_flat[_d * _vs_tile_a : (_d + 1) * _vs_tile_a] for _d in range(_bvs_D)]
                 _bvs_tail_issue_start = loop_iters * num_buffers + _bvs_D
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
-        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+        if const_expr(loop_iters > 0 and use_tdm_late_signal_overlap):
             pipeline_fence_wait(use_cluster=use_cluster)
         if const_expr(loop_iters > 0):
             _pipeline_fence(outstanding=0)
@@ -2594,6 +2604,8 @@ def compile_fp8fp4_gemm(
         expert_sched_mode,
         atomic_barrier_enable,
         ascale_load_path,
+        _row_major_k_prefetch_depth,
+        _bvs_D,
     )
 
     @flyc.jit
