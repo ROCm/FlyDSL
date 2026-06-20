@@ -3187,11 +3187,6 @@ def pa_decode_ps_launch(
     )
 
     from aiter.ops.attention import pa_reduce_v1
-
-    # Pass by keyword: aiter reordered pa_reduce_v1's positional args (num_kv_splits
-    # moved to a trailing optional), so positional calls silently misalign. Keyword
-    # names are stable across aiter versions. num_kv_splits=0 means auto (SM_count);
-    # the actual splits are data-driven via the reduce_* maps.
     pa_reduce_v1(
         partial_output=partial_output[query_length:],
         partial_lse=partial_lse[query_length:],
