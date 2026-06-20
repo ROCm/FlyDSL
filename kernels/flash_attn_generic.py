@@ -138,6 +138,34 @@ def build_flash_attn_func_module_primary(
         num_kv_heads = num_heads
     assert num_heads % num_kv_heads == 0, f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
 
+    # fp8 (e4m3fn) is gfx950 dual-wave SWP only, D=128 only, dense only. Route it
+    # through the SWP builder directly (the generic fallback below is f16/bf16 only)
+    # and reject unsupported fp8 configs with a clear error rather than silently
+    # falling through to the generic assert. The returned launcher takes the same
+    # public call signature plus q/k/v_descale kwargs (forwarded by the SWP wrapper).
+    if dtype_str == "fp8":
+        if not gpu_arch.startswith("gfx950"):
+            raise ValueError(f"fp8 flash_attn requires gfx950 (got '{gpu_arch or 'unknown'}')")
+        if head_dim != 128:
+            raise ValueError(f"fp8 flash_attn requires head_dim == 128 (got {head_dim})")
+        if cu_seqlens_q is not None or cu_seqlens_kv is not None:
+            raise ValueError("fp8 flash_attn does not support varlen (cu_seqlens) yet")
+        from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
+
+        return build_flash_attn_dualwave_swp_module(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            causal=causal,
+            dtype_str="fp8",
+            num_kv_heads=num_kv_heads,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+        )
+
     BLOCK_N = 64
     K_SUB_N = 32
     WARP_SIZE = 64

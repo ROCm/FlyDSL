@@ -15,11 +15,13 @@ up to even, and a kv padding-mask on the non-causal path).
 
 import contextlib
 import math as host_math
+import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, vector
+from flydsl._mlir.dialects import rocdl as _raw_rocdl
 from flydsl._mlir.dialects import scf as _scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
@@ -48,6 +50,24 @@ def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
         raw_type,
         [_raw(addr_i32)],
         f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n",
+        "=v,v,~{memory}",
+        has_side_effects=True,
+    )
+    return vector.BitCastOp(result_type, raw).result
+
+
+def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
+    """gfx950 ds_read_b64_tr_b8 (8-bit transpose) with immediate byte offset.
+
+    Returns 64 bits = 8 fp8 (the fp8 analog of ds_read_b64_tr_b16's 4 bf16),
+    used for the fp8 V transpose load.
+    """
+    imm = int(imm_offset)
+    raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
+    raw = llvm.inline_asm(
+        raw_type,
+        [_raw(addr_i32)],
+        f"ds_read_b64_tr_b8 $0, $1 offset:{imm}\n",
         "=v,v,~{memory}",
         has_side_effects=True,
     )
@@ -117,8 +137,15 @@ def build_flash_attn_dualwave_swp_module(
         raise RuntimeError(f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}")
     if head_dim != 128:
         raise RuntimeError(f"flash_attn_dualwave_swp is D=128 only, got head_dim={head_dim}")
-    if dtype_str not in ("bf16", "f16"):
-        raise RuntimeError(f"flash_attn_dualwave_swp supports bf16/f16 only, got dtype={dtype_str}")
+    if dtype_str not in ("bf16", "f16", "fp8"):
+        raise RuntimeError(f"flash_attn_dualwave_swp supports bf16/f16/fp8 only, got dtype={dtype_str}")
+    # fp8 is dense-only for now: split-K and packed varlen are not implemented for
+    # fp8, so reject them at the builder boundary rather than building a path that
+    # would silently produce wrong results.
+    if dtype_str == "fp8" and int(num_kv_splits) > 1:
+        raise RuntimeError(f"fp8 flash_attn does not support split-K (num_kv_splits={num_kv_splits})")
+    if dtype_str == "fp8" and varlen:
+        raise RuntimeError("fp8 flash_attn does not support packed varlen (cu_seqlens)")
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
@@ -158,15 +185,26 @@ def build_flash_attn_dualwave_swp_module(
     # LDS trait constants (gqa_d128_kernel_template.hpp §4-5). Interleaved
     # double-buffer K0,V0,K1,V1; per-line stride = smem_linear_wave + padding
     # (K: 520 bf16, V: 544 bf16); total LDS (2 K + 2 V) = 68096 B.
-    BF16_BYTES = 2
-    D_128B_SIZE = 64  # = 128 B / sizeof(bf16) = 64 bf16
-    VEC_KV = 8  # bf16 per ds_read pack (also MFMA pack_a/pack_b)
-    SMEM_LINEAR_WAVE = WARP_SIZE * 16 // BF16_BYTES  # 64 * 8 = 512 bf16 per wave per "line"
+    #
+    # ELEM_BYTES is the LDS/global element width in bytes. The 2-byte (bf16/f16)
+    # layout is the only one wired today; the constant replaces the former
+    # hard-coded ``BF16_BYTES = 2`` so the 1-byte (fp8) address math can be
+    # derived from the same expressions when the fp8 path is enabled.
+    ELEM_BYTES = 1 if dtype_str == "fp8" else 2
+    D_128B_SIZE = 128 // ELEM_BYTES  # elements per 128 B row (64 bf16 / 128 fp8)
+    VEC_KV = 16 // ELEM_BYTES  # elements per 16 B ds_read/DMA pack (8 bf16 / 16 fp8)
+    # Lane-split granularity for the K/V DMA: how many lanes cover one N-row's D.
+    # This must stay 8 (a 128 B = D_128B_SIZE row is filled by 8 lanes x 16 B),
+    # INDEPENDENT of the per-lane element count (VEC_KV). For bf16 these coincide
+    # (both 8); for fp8 VEC_KV=16 but the lane-split is still 8 -- conflating them
+    # makes the DMA write (16-wide) inconsistent with the read gather (8-wide).
+    LANE_SPLIT_KV = 8
+    SMEM_LINEAR_WAVE = WARP_SIZE * 16 // ELEM_BYTES  # 64 * 8 = 512 bf16 per wave per "line"
     SMEM_N_PER_WAVE = SMEM_LINEAR_WAVE // D_128B_SIZE  # 8 KV rows per wave per line
     SMEM_N_RPT = BLOCK_N // SMEM_N_PER_WAVE  # 64 / 8 = 8 lines along N
     SMEM_D_RPT = HEAD_DIM // D_128B_SIZE  # 128 / 64 = 2 lines along D
-    SMEM_K_PAD = 16 // BF16_BYTES  # 8 bf16 (= 16 B padding)
-    SMEM_V_PAD = 64 // BF16_BYTES  # 32 bf16 (= 64 B padding)
+    SMEM_K_PAD = 16 // ELEM_BYTES  # 8 bf16 (= 16 B padding)
+    SMEM_V_PAD = 64 // ELEM_BYTES  # 32 bf16 (= 64 B padding)
     SMEM_K_LINE_STRIDE = SMEM_LINEAR_WAVE + SMEM_K_PAD  # 520 bf16
     SMEM_V_LINE_STRIDE = SMEM_LINEAR_WAVE + SMEM_V_PAD  # 544 bf16
     SMEM_K_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_K_LINE_STRIDE  # 8 * 2 * 520 = 8320
@@ -184,18 +222,32 @@ def build_flash_attn_dualwave_swp_module(
     # u_rk DUALWAVE_SWP strides (per derived element strides for the 8-axis u_rk layout).
     #   N-grp y-axis (axis 2)  : stride 256 bf16 (between v_s_lo and v_s_hi)
     #   K-step axis (axes 4, 5): inner stride 16 (i_5 step), outer 4160 (i_4 d_rpt)
-    DUALWAVE_SWP_URK_N_STRIP_STRIDE = 256  # bf16 offset to add for v_s_hi (n_strip=1)
+    # n_strip=1 offset to v_s_hi. fp8 LDS is 2x denser (SMEM_LINEAR_WAVE doubled),
+    # so the second N-strip sits at 512 fp8 elems (vs 256 bf16); verified by NaN->0.
+    DUALWAVE_SWP_URK_N_STRIP_STRIDE = 512 if dtype_str == "fp8" else 256
     DUALWAVE_SWP_URK_KSTEP_INNER = 16  # bf16 stride between consecutive K-steps within a d_rpt
-    DUALWAVE_SWP_URK_KSTEP_OUTER = SMEM_N_RPT * SMEM_K_LINE_STRIDE  # 4160 bf16 between d_rpt=0/1 arrays
+    # bf16/f16: head_dim=128 spans 2 d_rpt LDS arrays (D 0-63, 64-127), so K-steps
+    # 4-7 jump by a full array stride. fp8: D_128B_SIZE=128 -> the whole head_dim
+    # is ONE row (SMEM_D_RPT=1), so the 8 K-steps must walk linearly (ks*16); the
+    # array jump would read past the single fp8 row into uninitialized/V LDS.
+    if dtype_str == "fp8":
+        DUALWAVE_SWP_URK_KSTEP_OUTER = 4 * DUALWAVE_SWP_URK_KSTEP_INNER  # 64 -> ks*16
+    else:
+        DUALWAVE_SWP_URK_KSTEP_OUTER = SMEM_N_RPT * SMEM_K_LINE_STRIDE  # 4160 bf16 between d_rpt=0/1 arrays
     # u_rv DUALWAVE_SWP per-lane base coefficients and step strides.
     #   base_per_lane(lane) = (lane/32)*DUALWAVE_SWP_URV_GRPK + ((lane%16)/4)*DUALWAVE_SWP_URV_LANE_HI
     #                       + ((lane/16)%2)*DUALWAVE_SWP_URV_GRP_N + (lane%4)*DUALWAVE_SWP_URV_LANE_LO
-    DUALWAVE_SWP_URV_GRPK = 2176  # = 4 * 544 (grp_k stride, axes 2)
-    DUALWAVE_SWP_URV_LANE_HI = SMEM_V_LINE_STRIDE  # 544 (lane_hi stride, axes 3)
+    DUALWAVE_SWP_URV_GRPK = 4 * SMEM_V_LINE_STRIDE  # bf16: 4*544=2176; fp8: 4*1088=4352 (grp_k stride, axes 2)
     DUALWAVE_SWP_URV_GRP_N = 16  # 4 (lane_lo) * 4 (VEC_TR_V) = grp_n stride
     DUALWAVE_SWP_URV_LANE_LO = 4  # VEC_TR_V (lane_lo stride)
-    DUALWAVE_SWP_URV_STEP_K_STRIDE = 128  # = 2 * 64 = lane_hi_y * D_128B_SIZE (axis 4 element stride)
-    DUALWAVE_SWP_URV_DC_AXIS0 = SMEM_N_RPT * SMEM_V_LINE_STRIDE  # 4352 (d_rpt array, axis 0 element stride)
+    DUALWAVE_SWP_URV_LANE_HI = SMEM_V_LINE_STRIDE  # bf16: 544; fp8: 1088 (lane_hi stride, axes 3)
+    # axis 4 (k_substep) stride: bf16 lane_hi_y(2) * D_128B_SIZE(64) = 128; fp8 has
+    # the single-row D layout so the k_substep advances by 2*D_128B_SIZE/... -> 256
+    # (verified: NaN 1.5%->0, mean_cos 0->0.204 vs the bf16 value 128).
+    DUALWAVE_SWP_URV_STEP_K_STRIDE = 256 if dtype_str == "fp8" else 128
+    # axis 0 (dc//2, D>=64 half): bf16 jumps a full V d_rpt array; fp8 stays within
+    # the single V row, so the two D-halves are 64 fp8 elems apart.
+    DUALWAVE_SWP_URV_DC_AXIS0 = 64 if dtype_str == "fp8" else SMEM_N_RPT * SMEM_V_LINE_STRIDE
     DUALWAVE_SWP_URV_DC_AXIS1 = 32  # axis 1 element stride (within half-D sub-row)
     DUALWAVE_SWP_URV_I5_STRIDE = D_128B_SIZE  # 64 (axis 5 element stride within a step_k)
 
@@ -203,9 +255,90 @@ def build_flash_attn_dualwave_swp_module(
     # 68096 B for the dual-wave software pipeline.
     _lds_elem_dtype = dtype_to_elem_type(dtype_str)
 
-    @fx.struct
-    class SharedStorage:
-        kv: fx.Array[_lds_elem_dtype, LDS_KV_TOTAL_SIZE, 16]
+    # fp8 PV precision mode selection. Exactly one mode is active for fp8 (the modes are
+    # mutually exclusive; invalid env combinations fail fast below). The selectors:
+    #   FLYDSL_FP8_HIPREC=1 (default) -> high-precision-P: fp8 V dequantized to bf16
+    #       in-kernel (public fp8 V * v_descale) and PV run in bf16, fp8 P fed as bf16.
+    #   FLYDSL_FP8_HIPREC=0 + FLYDSL_FP8_PV_FROMBF16=1 -> packed-fp8 PV via the proven
+    #       bf16 V/P element order, with both operands converted to fp8 at the MMA.
+    #   FLYDSL_FP8_HIPREC=0 + FLYDSL_FP8_PV_NATIVE=1 -> experimental key-contiguous fp8 V
+    #       (currently below the fixed gate; kept only for layout debugging).
+    if dtype_str == "fp8":
+        _hiprec_env = os.environ.get("FLYDSL_FP8_HIPREC", "1") != "0"
+        _native_env = os.environ.get("FLYDSL_FP8_PV_NATIVE", "0") == "1"
+        _frombf16_env = os.environ.get("FLYDSL_FP8_PV_FROMBF16", "0") == "1"
+        if _native_env and _frombf16_env:
+            raise ValueError("FLYDSL_FP8_PV_NATIVE and FLYDSL_FP8_PV_FROMBF16 are mutually exclusive; set at most one.")
+        if _hiprec_env and (_native_env or _frombf16_env):
+            raise ValueError(
+                "FLYDSL_FP8_PV_NATIVE / FLYDSL_FP8_PV_FROMBF16 require FLYDSL_FP8_HIPREC=0 "
+                "(high-precision-P is the default and is incompatible with the packed-fp8 PV modes)."
+            )
+        _FP8_HIPREC_P = _hiprec_env
+        _FP8_PV_FROMBF16 = _frombf16_env
+        _FP8_PV_NATIVE = _native_env
+    else:
+        _FP8_HIPREC_P = False
+        _FP8_PV_FROMBF16 = False
+        _FP8_PV_NATIVE = False
+    _EB_BF = 2
+    _D128_BF = 128 // _EB_BF
+    _VEC_BF = 16 // _EB_BF
+    _SLW_BF = WARP_SIZE * 16 // _EB_BF
+    _SNRPT_BF = BLOCK_N // (_SLW_BF // _D128_BF)
+    _SDRPT_BF = HEAD_DIM // _D128_BF
+    _VLS_BF = _SLW_BF + 64 // _EB_BF
+    VT_BF16_ELEMS = _SNRPT_BF * _SDRPT_BF * _VLS_BF
+    VT_BF16_TOTAL = NUM_PREFETCH_K * VT_BF16_ELEMS
+    _URV_GRPK_BF = 4 * _VLS_BF
+    _URV_GRP_N_BF = 16
+    _URV_LANE_LO_BF = 4
+    _URV_LANE_HI_BF = _VLS_BF
+    _URV_STEPK_BF = 128
+    _URV_DC_AXIS0_BF = _SNRPT_BF * _VLS_BF
+    _URV_DC_AXIS1_BF = 32
+    _URV_I5_BF = _D128_BF
+
+    # _FP8_PV_FROMBF16: packed-fp8 PV MMA reusing the proven bf16 V datapath. V is
+    # dequantized to bf16 into the vt LDS region and read by the proven
+    # _read_vt_packs_bf16 transpose, then both the V operand and the softmax
+    # probabilities P are quantized to fp8 in-register and fed to the fp8xfp8 PV MFMA.
+    # This guarantees the P (A) and V (B) operands share the proven element order by
+    # construction, so a genuine fp8xfp8 PV MMA passes the fixed gate. It is a
+    # correctness bridge: it adds a bf16 round-trip + per-MMA conversion, so it is not
+    # the throughput-optimal path.
+    #
+    # _FP8_PV_NATIVE: experimental key-contiguous fp8 V staging (vtf, D-major: row D =
+    # BLOCK_N keys + 16B pad) read as 8 keys via a plain i64 load. It currently FAILS the
+    # fixed gate (min_cos ~0.886 nocausal, ~0.04 causal) due to a key/D layout-indexing
+    # defect in _stage_vtf_fp8 / _read_vtf_packs_fp8 -- not an fp8-P precision limit (host
+    # numerics of the same packing reach min_cos ~0.9996). Kept only for layout debugging.
+    # Both vt-based PV modes share the proven bf16 vt staging + transpose read below.
+    _PV_USE_VT = _FP8_HIPREC_P or _FP8_PV_FROMBF16
+    _VTF_PAD = 16
+    _VTF_ROW = BLOCK_N + _VTF_PAD  # bytes per D-row: BLOCK_N keys contiguous + pad
+    VTF_FP8_ELEMS = HEAD_DIM * _VTF_ROW
+    VTF_FP8_TOTAL = NUM_PREFETCH_K * VTF_FP8_ELEMS
+
+    if _PV_USE_VT:
+
+        @fx.struct
+        class SharedStorage:
+            kv: fx.Array[_lds_elem_dtype, LDS_KV_TOTAL_SIZE, 16]
+            vt: fx.Array[fx.BFloat16, VT_BF16_TOTAL, 16]
+
+    elif _FP8_PV_NATIVE:
+
+        @fx.struct
+        class SharedStorage:
+            kv: fx.Array[_lds_elem_dtype, LDS_KV_TOTAL_SIZE, 16]
+            vtf: fx.Array[fx.Int8, VTF_FP8_TOTAL, 16]
+
+    else:
+
+        @fx.struct
+        class SharedStorage:
+            kv: fx.Array[_lds_elem_dtype, LDS_KV_TOTAL_SIZE, 16]
 
     # DUALWAVE_SWP lazy-rescale threshold (line 374)
     DUALWAVE_SWP_RESCALE_THRESHOLD = 8.0
@@ -232,6 +365,9 @@ def build_flash_attn_dualwave_swp_module(
         DebugCounts: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
+        QDescale: fx.Tensor,
+        KDescale: fx.Tensor,
+        VDescale: fx.Tensor,
         seq_len: fx.Int32,
         seq_len_kv: fx.Int32,
         stride_q_n: fx.Int32,
@@ -258,6 +394,12 @@ def build_flash_attn_dualwave_swp_module(
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
         lds_kv_base_ptr = buffer_ops.create_llvm_ptr(lds_kv_base_idx, address_space=3)
+        if const_expr(_PV_USE_VT):
+            lds_vt_base_idx = fx.Index(fx.ptrtoint(lds.vt.ptr))
+            lds_vt_base_ptr = buffer_ops.create_llvm_ptr(lds_vt_base_idx, address_space=3)
+        if const_expr(_FP8_PV_NATIVE):
+            lds_vtf_base_idx = fx.Index(fx.ptrtoint(lds.vtf.ptr))
+            lds_vtf_base_ptr = buffer_ops.create_llvm_ptr(lds_vtf_base_idx, address_space=3)
 
         lds_scope_names = ("lds_k0", "lds_k1", "lds_v0", "lds_v1")
 
@@ -343,6 +485,10 @@ def build_flash_attn_dualwave_swp_module(
         kv_gmem_elem_offset = kv_tok_base * stride_kv_n_v + kv_head_idx * HEAD_DIM
 
         DMA_BYTES = 16
+        # Native fp8 QK uses the single fp8 K DMA (SMEM_D_RPT=1). The high-precision-P
+        # PV builds vt by an in-kernel fp8 V load (1 fp8 DMA) + a register dequant +
+        # LDS store, so its global memory traffic is still the single fp8 V load.
+        # vmcnt accounting counts the actual global loads issued.
         NUM_DMA_K = SMEM_D_RPT
         NUM_DMA_V = SMEM_D_RPT
 
@@ -350,20 +496,59 @@ def build_flash_attn_dualwave_swp_module(
         # straight-line SSA dominating the loop. num_records is bound to the END of
         # this batch's region so OOB rows (partial last q-block / extra kv-tile) read 0
         # and OOB stores drop (no fault); aligned seqlen is fully in-bounds, unchanged.
-        q_nrec_bytes = _raw(q_tok_end * stride_q_n_v * BF16_BYTES)
-        kv_nrec_bytes = _raw(kv_tok_end * stride_kv_n_v * BF16_BYTES)
-        q_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(Q, num_records_bytes=q_nrec_bytes), fx.make_layout(1, 1))
-        k_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(K, num_records_bytes=kv_nrec_bytes), fx.make_layout(1, 1))
-        v_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(V, num_records_bytes=kv_nrec_bytes), fx.make_layout(1, 1))
-        o_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(O, num_records_bytes=q_nrec_bytes), fx.make_layout(1, 1))
+        q_nrec_bytes = _raw(q_tok_end * stride_q_n_v * ELEM_BYTES)
+        kv_nrec_bytes = _raw(kv_tok_end * stride_kv_n_v * ELEM_BYTES)
+        # O is always 16-bit (bf16/f16) -- for the fp8 path Q/K/V are 1-byte but the
+        # output is bf16, so the O buffer's num_records must use the OUTPUT element
+        # size (2 B), not ELEM_BYTES (1 B for fp8). Using ELEM_BYTES would halve the
+        # O descriptor and silently drop every store past the midpoint (the upper
+        # wave-group's q rows -> zero output).
+        OUT_ELEM_BYTES = 2 if dtype_str == "fp8" else ELEM_BYTES
+        o_nrec_bytes = _raw(q_tok_end * stride_q_n_v * OUT_ELEM_BYTES)
+
+        def _make_buf_div(tensor, nrec_bytes):
+            # fp8: build the Q/K/V buffer view as i8-typed. The global->LDS DMA
+            # (BufferCopyLDS128b) is illegal with an fp8-typed source memref on
+            # current FlyROCDL (the dst is i8), and the i32 register loads read the
+            # byte buffer regardless of element type, so an i8 view serves both. For
+            # bf16/f16 keep the native element type. (recast the buffer iter to i8.)
+            bt = fx.rocdl.make_buffer_tensor(tensor, num_records_bytes=nrec_bytes)
+            if const_expr(dtype_str == "fp8"):
+                it = fx.get_iter(bt)
+                i8_ptr_ty = fx.PointerType.get(
+                    elem_ty=fx.Int8.ir_type,
+                    address_space=fx.PointerType(it.type).address_space,
+                    alignment=fx.PointerType(it.type).alignment,
+                )
+                bt = fx.Tensor(fx.make_view(fx.recast_iter(i8_ptr_ty, it), fx.get_layout(bt)))
+            return fx.logical_divide(bt, fx.make_layout(1, 1))
+
+        q_div = _make_buf_div(Q, q_nrec_bytes)
+        k_div = _make_buf_div(K, kv_nrec_bytes)
+        v_div = _make_buf_div(V, kv_nrec_bytes)
+        o_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(O, num_records_bytes=o_nrec_bytes), fx.make_layout(1, 1))
         _load_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
         _store_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
         _store_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
         _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
         _o_store_reg = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
         _o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-        _lds_ptr_ty = fx.PointerType.get(elem_dtype.ir_type, 2, DMA_BYTES)
-        if const_expr(SPLITK):
+        # fp8: type the global->LDS DMA dst as i8 (matches the i8 the DMA lowers the
+        # fp8 global src to); a fp8-typed shared memref makes BufferCopyLDS128b
+        # illegal. The K/V LDS reads are byte-addressed (i64 K-read, ds_read_tr8 V),
+        # independent of this element type.
+        _dma_lds_dtype = fx.Int8 if dtype_str == "fp8" else elem_dtype
+        _lds_ptr_ty = fx.PointerType.get(_dma_lds_dtype.ir_type, 2, DMA_BYTES)
+        # fp8 S-logit debug dump (FLYDSL_FP8_SDUMP=1): store raw post-QK logits to
+        # the DebugCounts (f32 scratch) buffer to read off the lane->(row,col) map.
+        # SDUMP: dump raw post-QK logits to the DebugCounts slot. FLYDSL_FP8_SDUMP=1
+        # is the fp8-only legacy gate; FLYDSL_SDUMP=1 enables it for ANY dtype (used to
+        # diff the fp8 vs bf16 QK accumulator cell-by-cell for the key-map analysis).
+        _FP8_SDUMP = const_expr(
+            (dtype_str == "fp8" and os.environ.get("FLYDSL_FP8_SDUMP", "0") == "1")
+            or os.environ.get("FLYDSL_SDUMP", "0") == "1"
+        )
+        if const_expr(SPLITK or _FP8_SDUMP):
             # Split-K workspace (fp32-elem indexed), passed via the DebugCounts slot:
             # [O_partial: Z*H*S*D/2 packed 16-bit pairs][Mrow: Z*H*S][Lrow: Z*H*S],
             # Z = batch*splits. O_partial holds kernel-native bf16/fp16, 2 cols/dword.
@@ -388,6 +573,13 @@ def build_flash_attn_dualwave_swp_module(
             """128-bit global->register load (buffer_load_dwordx4) from Q."""
             return fly.copy_atom_call_ssa([v4i32_type], _load_atom_128, fx.slice(q_div, (None, fx.Int32(elem_index))))
 
+        _load_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
+        v2i32_type = Vec.make_type(2, fx.Int32)
+
+        def _buffer_load_64(elem_index):
+            """64-bit global->register load (buffer_load_dwordx2) from Q (fp8: 8 elems)."""
+            return fly.copy_atom_call_ssa([v2i32_type], _load_atom_64, fx.slice(q_div, (None, fx.Int32(elem_index))))
+
         def _buffer_load_lds_128(src_div, lds_byte_addr, src_elem, soffset_elems):
             """128-bit global->LDS DMA (buffer_load_dwordx4 ... lds).
 
@@ -411,8 +603,8 @@ def build_flash_attn_dualwave_swp_module(
             fx.copy(_store_atom_128, _o_store_reg_128, fx.slice(o_div, (None, fx.Int32(elem_index))))
 
         lane_in_warp = tid % WARP_SIZE
-        n_in_warp = lane_in_warp // VEC_KV
-        d_bucket = lane_in_warp % VEC_KV
+        n_in_warp = lane_in_warp // LANE_SPLIT_KV
+        d_bucket = lane_in_warp % LANE_SPLIT_KV
 
         c_neg_inf = fx.Float32(float("-inf"))
         # c_neg_inf = fx.Float32(float(-1e30))
@@ -430,6 +622,26 @@ def build_flash_attn_dualwave_swp_module(
                 fastmath=fm_fast,
             )
         )
+        # fp8 logit scale: Q is fed raw to the QK MFMA (not pre-scaled), so the
+        # full q_descale*k_descale*sm_scale*log2e multiplies the fp32 logits after
+        # the MFMA. Descales are runtime shape-[1] fp32 tensors (placeholders on
+        # the bf16/f16 path, read only here under const_expr fp8).
+        if const_expr(dtype_str == "fp8"):
+
+            def _load_scale_scalar(tensor):
+                _div = fx.logical_divide(fx.rocdl.make_buffer_tensor(tensor), fx.make_layout(1, 1))
+                _atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+                _v = fly.copy_atom_call_ssa([Vec.make_type(1, fx.Float32)], _atom, fx.slice(_div, (None, fx.Int32(0))))
+                return fx.Float32(Vec(_v, (1,), fx.Float32)[0])
+
+            _qd = _load_scale_scalar(QDescale)
+            _kd = _load_scale_scalar(KDescale)
+            _vd_fp8 = _load_scale_scalar(VDescale)
+            c_logit_scale = fx.Float32(
+                arith.mulf(
+                    _raw(c_sm_scale_log2e), _raw(arith.mulf(_raw(_qd), _raw(_kd), fastmath=fm_fast)), fastmath=fm_fast
+                )
+            )
         c_eight_f = fx.Float32(DUALWAVE_SWP_RESCALE_THRESHOLD)
         c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         v64bf16_type = Vec.make_type(K_STEPS_QK * MFMA_LANE_K, elem_dtype)
@@ -476,8 +688,14 @@ def build_flash_attn_dualwave_swp_module(
             split_t0 = 0
             split_t_end = max_num_tiles
 
+        # K-contraction half selected by lane_div_32 advances by MFMA_LANE_K (=8)
+        # head-dim elements -- the 32x32x16 MFMA holds 8 K-elements per lane for BOTH
+        # bf16 and fp8 (same geometry). bf16 VEC_KV==8==MFMA_LANE_K so this is
+        # byte-identical for bf16/f16; for fp8 VEC_KV==16 was wrong (it is the 16B
+        # DMA pack width, not the MFMA per-lane K count) and caused the QK key
+        # duplication / stride-2 / dropped-key placement bug.
         urk_base_per_lane = (
-            (lane_mod_32 % 8) * SMEM_K_LINE_STRIDE + (lane_mod_32 // 8) * D_128B_SIZE + lane_div_32 * VEC_KV
+            (lane_mod_32 % 8) * SMEM_K_LINE_STRIDE + (lane_mod_32 // 8) * D_128B_SIZE + lane_div_32 * MFMA_LANE_K
         )
 
         urv_base_per_lane = (
@@ -503,11 +721,34 @@ def build_flash_attn_dualwave_swp_module(
         def _fmax(a, b):
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
-        # MMA via the layout MMA atom
+        # MMA via the layout MMA atom (bf16/f16). For fp8, mma_atom_call_ssa hits a
+        # vector<8xf8>->i64 materialization that MLIR cannot legalize, so QK uses
+        # the raw rocdl OpView with scalar-i64 operands (8 packed fp8), the proven
+        # pattern from pa_decode (validated in mma_i64_validated.py).
         _mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, elem_dtype))
 
         def _mfma_acc(a, b, c):
             return fly.mma_atom_call_ssa([v16f32_type], _mma_atom, a, b, c)
+
+        def _mfma_acc_fp8_i64(a_i64, b_i64, c_v16):
+            # a_i64/b_i64: scalar i64 (8 fp8 each); c_v16: vector<16xf32> acc.
+            return _raw_rocdl.mfma_f32_32x32x16_fp8_fp8(
+                v16f32_type, _raw(a_i64), _raw(b_i64), _raw(c_v16), 0, 0, 0
+            ).result
+
+        # P element dtype: bf16 for both vt-based PV modes (HIPREC + FROMBF16, which
+        # carry P/V through the proven bf16 datapath and only differ at the MMA), else
+        # the kernel elem dtype.
+        p_elem = fx.BFloat16 if _PV_USE_VT else elem_dtype
+        # The bf16 V transpose read (_read_vt_packs_bf16) is shared by both vt-based PV
+        # modes (HIPREC and FROMBF16), so its v4bf16 read type must exist for both.
+        if const_expr(_PV_USE_VT):
+            _v4bf16_type = Vec.make_type(4, fx.BFloat16)
+        if const_expr(_FP8_HIPREC_P):
+            _bf16_mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, fx.BFloat16))
+
+            def _mfma_acc_bf16(a_v8, b_v8, c_v16):
+                return fly.mma_atom_call_ssa([v16f32_type], _bf16_mma_atom, a_v8, b_v8, c_v16)
 
         def _sched_barrier_pairs(pairs, valu_cnt, group):
             """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups."""
@@ -522,7 +763,7 @@ def build_flash_attn_dualwave_swp_module(
                 rocdl.sched_group_barrier(_EXP_MASK, exp_cnt, group)
 
         def _ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes):
-            byte_offset = lds_base_elem_idx * 2 + lds_kv_base_idx
+            byte_offset = lds_base_elem_idx * ELEM_BYTES + lds_kv_base_idx
             addr_i32 = fx.Int32(byte_offset)
             return _ds_read_tr16_b64_imm(v4f16_type, addr_i32, imm_bytes)
 
@@ -539,6 +780,17 @@ def build_flash_attn_dualwave_swp_module(
             )
 
         def _load_q_all(q_row_in_block):
+            if const_expr(ELEM_BYTES == 1):
+                # fp8: each K-step's 8 fp8 come from a 64-bit load; keep them as a
+                # scalar i64 (the raw fp8 MMA operand form). Return the list of 8
+                # i64 packs directly -- no v8-fp8 concat (which can't bitcast to i64).
+                q_i64_packs = []
+                for ks in range_constexpr(K_STEPS_QK):
+                    q_col = (ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
+                    g_idx = q_row_in_block * stride_q_n_v + q_col
+                    q_i32_pack = _buffer_load_64(q_gmem_elem_offset + g_idx)
+                    q_i64_packs.append(fx.Int64(Vec(q_i32_pack, (2,), fx.Int32).bitcast(fx.Int64)[0]))
+                return q_i64_packs
             q_raw_packs = []
             for ks in range_constexpr(K_STEPS_QK):
                 q_col = (ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
@@ -557,6 +809,12 @@ def build_flash_attn_dualwave_swp_module(
             return Vec(q_all, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
 
         def _scale_q_all(q_all_bf16):
+            if const_expr(ELEM_BYTES == 1):
+                # fp8: Q is pre-quantized; do NOT upconvert/rescale it (fpext is
+                # invalid on fp8 vectors and rescaling would corrupt the e4m3
+                # operand). The combined q_descale*k_descale*sm_scale*log2e is
+                # applied to the fp32 logits after the QK MFMA instead.
+                return q_all_bf16
             fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
             q_all_f32_op = llvm.FPExtOp(v64f32_type, _raw(q_all_bf16))
             q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
@@ -573,6 +831,10 @@ def build_flash_attn_dualwave_swp_module(
             return Vec(q_all_scaled_bf16, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
 
         def _get_q_pack(q_all_scaled_bf16, ks):
+            if const_expr(dtype_str == "fp8"):
+                # native fp8: q_all is a list of per-K-step scalar i64 packs.
+                return q_all_scaled_bf16[ks]
+            # bf16/f16: q_all is a v64 vector; slice the ks-th v8 pack.
             q_vec = Vec(q_all_scaled_bf16)
             base = ks * MFMA_LANE_K
             return q_vec.shuffle(q_vec, [base + i for i in range(MFMA_LANE_K)]).ir_value()
@@ -640,7 +902,15 @@ def build_flash_attn_dualwave_swp_module(
                 llvm.extractvalue(hi_ir.type, ret, [1]),
             )
 
+        def _anchor_i64(x):
+            x_ir = _raw(x)
+            return llvm.inline_asm(x_ir.type, [x_ir], "", "=v,0", has_side_effects=True)
+
         def _anchor_v_p(v_p):
+            if const_expr(dtype_str == "fp8" and not _PV_USE_VT):
+                # fp8 P packs are scalar i64; pin each (no vector concat).
+                p_lo, p_hi = v_p
+                return ([_anchor_i64(x) for x in p_lo], [_anchor_i64(x) for x in p_hi])
             p_lo, p_hi = v_p
             p_lo_all = _concat_vectors(p_lo[0], p_lo[1])
             p_hi_all = _concat_vectors(p_hi[0], p_hi[1])
@@ -653,7 +923,7 @@ def build_flash_attn_dualwave_swp_module(
                 "=v,0",
                 has_side_effects=True,
             )
-            p_vec = Vec(p_all_anchored, (PV_K_STEPS * 2 * 8,), elem_dtype)
+            p_vec = Vec(p_all_anchored, (PV_K_STEPS * 2 * 8,), p_elem)
             anchored_lo = []
             anchored_hi = []
             for pks in range_constexpr(PV_K_STEPS):
@@ -664,13 +934,25 @@ def build_flash_attn_dualwave_swp_module(
             return anchored_lo, anchored_hi
 
         def _v_p_to_vec32(v_p):
+            if const_expr(dtype_str == "fp8" and not _PV_USE_VT):
+                # fp8: pack the flat list of i64 P packs into a single
+                # vector<(2*PV_K_STEPS)xi64> so it is one MLIR value (scf.for /
+                # scf.if loop-carry requires SSA values, not Python lists).
+                p_lo, p_hi = v_p
+                flat = list(p_lo) + list(p_hi)
+                return Vec.from_elements([_raw(fx.Int64(x)) for x in flat], fx.Int64).ir_value()
             p_lo, p_hi = v_p
             p_lo_all = _concat_vectors(p_lo[0], p_lo[1])
             p_hi_all = _concat_vectors(p_hi[0], p_hi[1])
             return _concat_vectors(p_lo_all, p_hi_all).ir_value()
 
         def _v_vec32_to_p(v_p_all):
-            p_vec = Vec(v_p_all, (PV_K_STEPS * 2 * 8,), elem_dtype)
+            if const_expr(dtype_str == "fp8" and not _PV_USE_VT):
+                pv = Vec(v_p_all, (PV_K_STEPS * 2,), fx.Int64)
+                lo = [fx.Int64(pv[i]) for i in range(PV_K_STEPS)]
+                hi = [fx.Int64(pv[PV_K_STEPS + i]) for i in range(PV_K_STEPS)]
+                return lo, hi
+            p_vec = Vec(v_p_all, (PV_K_STEPS * 2 * 8,), p_elem)
             p_lo = []
             p_hi = []
             for pks in range_constexpr(PV_K_STEPS):
@@ -681,6 +963,41 @@ def build_flash_attn_dualwave_swp_module(
             return p_lo, p_hi
 
         def _scale_v_p(v_p, scale_scalar):
+            if const_expr(_PV_USE_VT):
+                # P is v8 bf16 in both vt-based PV modes: ext to f32, scale, repack bf16.
+                p_lo, p_hi = v_p
+                out_lo, out_hi = [], []
+                for src, dst in ((p_lo, out_lo), (p_hi, out_hi)):
+                    for pk in src:
+                        f32 = Vec(llvm.FPExtOp(Vec.make_type(8, fx.Float32), _raw(pk)).result, (8,), fx.Float32)
+                        scaled = [fx.Float32(f32[i]) * scale_scalar for i in range(8)]
+                        dst.append(_bf16_trunc_pack_v8(scaled))
+                return out_lo, out_hi
+            if const_expr(dtype_str == "fp8" and not _PV_USE_VT):
+                # fp8: unpack each i64 P pack (8 fp8) -> f32 via cvt_pk_f32_fp8,
+                # multiply by the lazy-rescale correction, repack to i64.
+                p_lo, p_hi = v_p
+                out_lo, out_hi = [], []
+                for src, dst in ((p_lo, out_lo), (p_hi, out_hi)):
+                    for pk in src:
+                        words = Vec(
+                            Vec.from_elements([_raw(fx.Int64(pk))], fx.Int64).bitcast(fx.Int32).ir_value(),
+                            (2,),
+                            fx.Int32,
+                        )
+                        f32s = []
+                        for w in range_constexpr(2):
+                            word = _raw(fx.Int32(words[w]))
+                            lo2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, False), (2,), fx.Float32)
+                            hi2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, True), (2,), fx.Float32)
+                            f32s += [
+                                fx.Float32(lo2[0]) * scale_scalar,
+                                fx.Float32(lo2[1]) * scale_scalar,
+                                fx.Float32(hi2[0]) * scale_scalar,
+                                fx.Float32(hi2[1]) * scale_scalar,
+                            ]
+                        dst.append(_bf16_trunc_pack_v8(f32s))
+                return out_lo, out_hi
             fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
             p_all = _v_p_to_vec32(v_p)
             p_all_f32_op = llvm.FPExtOp(v32f32_type, _raw(p_all))
@@ -712,12 +1029,49 @@ def build_flash_attn_dualwave_swp_module(
                 has_side_effects=True,
             )
 
+        def _pack_v8_bf16(f32_vals):
+            # Always pack 8 f32 -> v8 bf16 (mode-independent). Used to stage V into the
+            # bf16 vt LDS region for both _FP8_HIPREC_P and _FP8_PV_FROMBF16.
+            pairs = []
+            for j in range_constexpr(4):
+                pairs.append(rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1]))
+            return Vec.from_elements(pairs, fx.Int32).bitcast(fx.BFloat16).ir_value()
+
+        def _pack_v8_fp8_i64(f32_vals):
+            # Pack 8 f32 -> 8 fp8 e4m3 -> scalar i64 (the raw fp8 MMA operand form).
+            # Same idiom as the fp8 branch of _bf16_trunc_pack_v8, factored out so the
+            # _FP8_PV_FROMBF16 path can build fp8 operands from proven-order v8 bf16 packs.
+            words = []
+            for j in range_constexpr(2):
+                b = j * 4
+                lo = rocdl.cvt_pk_fp8_f32(T.i32, _raw(f32_vals[b + 0]), _raw(f32_vals[b + 1]), fx.Int32(0), False)
+                w = rocdl.cvt_pk_fp8_f32(T.i32, _raw(f32_vals[b + 2]), _raw(f32_vals[b + 3]), lo, True)
+                words.append(w)
+            return fx.Int64(Vec.from_elements(words, fx.Int32).bitcast(fx.Int64)[0])
+
+        def _v8bf16_to_fp8_i64(v8bf):
+            # Convert a v8 bf16 ir value (proven-order P or V pack) to a fp8 i64 MMA
+            # operand: ext to f32, then pack to 8 fp8 e4m3. Used by _FP8_PV_FROMBF16.
+            v8f32 = Vec(llvm.FPExtOp(Vec.make_type(8, fx.Float32), _raw(v8bf)).result, (8,), fx.Float32)
+            return _pack_v8_fp8_i64([v8f32[i] for i in range_constexpr(8)])
+
         def _bf16_trunc_pack_v8(f32_vals):
+            if const_expr(_PV_USE_VT):
+                # Both vt-based PV modes carry P as v8 bf16 (HIPREC runs a bf16 PV MMA;
+                # FROMBF16 converts P to fp8 at the MMA via _v8bf16_to_fp8_i64).
+                pairs = []
+                for j in range_constexpr(4):
+                    pairs.append(rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1]))
+                return Vec.from_elements(pairs, fx.Int32).bitcast(fx.BFloat16).ir_value()
             if const_expr(dtype_str == "bf16"):
                 pairs = []
                 for j in range_constexpr(4):
                     pairs.append(rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1]))
                 return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
+            if const_expr(dtype_str == "fp8"):
+                # fp8 PV operand: pack 8 f32 probabilities -> 8 fp8 -> scalar i64
+                # (the raw fp8 MMA operand form; mirrors mla/pa_decode P-pack).
+                return _pack_v8_fp8_i64(f32_vals)
             # fp16: truncate each f32 -> f16 (RNE) and build the v8 pack directly.
             f16_vals = []
             for i in range_constexpr(8):
@@ -736,12 +1090,12 @@ def build_flash_attn_dualwave_swp_module(
             return SMEM_K_TILE_ELEMS + buf_id * DUALWAVE_SWP_KV_PER_BUFFER
 
         def _async_load_k(tile_start, buf_id):
-            k_lds_byte_base = lds_kv_base_idx + _k_buf_base(buf_id) * BF16_BYTES
+            k_lds_byte_base = lds_kv_base_idx + _k_buf_base(buf_id) * ELEM_BYTES
             for d in range_constexpr(NUM_DMA_K):
                 lds_addr = (
                     k_lds_byte_base
-                    + wave_id_uni * (SMEM_K_LINE_STRIDE * BF16_BYTES)
-                    + (d * SMEM_N_RPT * SMEM_K_LINE_STRIDE * BF16_BYTES)
+                    + wave_id_uni * (SMEM_K_LINE_STRIDE * ELEM_BYTES)
+                    + (d * SMEM_N_RPT * SMEM_K_LINE_STRIDE * ELEM_BYTES)
                 )
 
                 n_in_tile = n_in_warp * NUM_WAVES + wave_id
@@ -750,18 +1104,116 @@ def build_flash_attn_dualwave_swp_module(
                 _buffer_load_lds_128(k_div, lds_addr, src_elem, tile_start * stride_kv_n_v)
 
         def _async_load_v(tile_start, buf_id):
-            v_lds_byte_base = lds_kv_base_idx + _v_buf_base(buf_id) * BF16_BYTES
+            # fp8 hiprec PV: the V buffer fed to P*V is the bf16 dequant scratch, not
+            # the fp8 V in kv LDS. Stage it here -- same (tile_start, buf_id) and the
+            # same caller wait/barrier as the fp8 V load -- so vt[buf_id] mirrors the
+            # fp8 V double-buffer tile-for-tile BY CONSTRUCTION (no read-time guess).
+            if const_expr(_PV_USE_VT):
+                _stage_vt_dequant_fp8(tile_start, buf_id)
+                return
+            if const_expr(_FP8_PV_NATIVE):
+                _stage_vtf_fp8(tile_start, buf_id)
+                return
+            v_lds_byte_base = lds_kv_base_idx + _v_buf_base(buf_id) * ELEM_BYTES
             for d in range_constexpr(NUM_DMA_V):
                 lds_addr = (
                     v_lds_byte_base
-                    + wave_id_uni * (SMEM_V_LINE_STRIDE * BF16_BYTES)
-                    + (d * SMEM_N_RPT * SMEM_V_LINE_STRIDE * BF16_BYTES)
+                    + wave_id_uni * (SMEM_V_LINE_STRIDE * ELEM_BYTES)
+                    + (d * SMEM_N_RPT * SMEM_V_LINE_STRIDE * ELEM_BYTES)
                 )
 
                 n_in_tile = n_in_warp * NUM_WAVES + wave_id
                 global_d = d_bucket * VEC_KV + (d * D_128B_SIZE)
                 src_elem = kv_gmem_elem_offset + n_in_tile * stride_kv_n_v + global_d
                 _buffer_load_lds_128(v_div, lds_addr, src_elem, tile_start * stride_kv_n_v)
+
+        # High-precision-P PV: the fp8 V tile is dequantized to bf16 IN-KERNEL (from
+        # the public fp8 V + v_descale) and written into the vt LDS region laid out
+        # like the bf16 V tile, so the proven bf16 _read_vt_packs_bf16 + bf16 PV MMA
+        # apply unchanged. _stage_vt_dequant_fp8 loads each lane's 16 fp8 V elems from
+        # global, unpacks via cvt_pk_f32_fp8, scales by v_descale, truncates to bf16,
+        # and stores the two 8-wide bf16 d-halves into vt. (No host bf16 V scratch.)
+        if const_expr(_PV_USE_VT):
+            _v_fp8_load64_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
+
+        def _stage_vt_dequant_fp8(tile_start, buf_id):
+            # In-kernel high-precision V: dequant the fp8 V tile to bf16 and write it
+            # into vt at the SAME positions the bf16 V staging used, so the proven
+            # _read_vt_packs_bf16 inverts it by construction. The bf16 staging's two
+            # d-iters cover D-halves 64 apart (global_d = d_bucket*8 + d*64), so we
+            # issue ONE 8-fp8 (64-bit) load per d-iter at that D offset -- NOT one
+            # contiguous 16-fp8 load (which would gather the wrong D columns).
+            vt_buf = buf_id * VT_BF16_ELEMS
+            n_in_tile = n_in_warp * NUM_WAVES + wave_id
+            for d in range_constexpr(_SDRPT_BF):
+                global_d = d_bucket * _VEC_BF + (d * _D128_BF)  # bf16-layout D offset (8-wide, 64 apart)
+                src_elem = kv_gmem_elem_offset + n_in_tile * stride_kv_n_v + global_d + tile_start * stride_kv_n_v
+                v_i32x2 = fly.copy_atom_call_ssa(
+                    [v2i32_type], _v_fp8_load64_atom, fx.slice(v_div, (None, fx.Int32(src_elem)))
+                )
+                v_words = Vec(v_i32x2, (2,), fx.Int32)
+                bf = []
+                for w in range_constexpr(2):
+                    word = _raw(fx.Int32(v_words[w]))
+                    lo2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, False), (2,), fx.Float32)
+                    hi2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, True), (2,), fx.Float32)
+                    for e in (lo2[0], lo2[1], hi2[0], hi2[1]):
+                        # Both vt-based PV modes dequantize V (*v_descale) into bf16 vt.
+                        # HIPREC then runs a bf16 PV MMA; FROMBF16 re-quantizes the
+                        # dequantized V and P to fp8 inside _mma1_step_k. v_descale is
+                        # therefore already folded into the V operand for both -> no
+                        # inv_l v_descale fold for either.
+                        bf.append(fx.Float32(e) * _vd_fp8)
+                v8bf = _pack_v8_bf16(bf)  # v8 bf16 (ir value)
+                # The bf16 DMA (BufferCopyLDS128b) spread the 64 lanes' 16B writes
+                # across LDS automatically (lane L -> base + L*16B = L*8 bf16); the
+                # explicit register->LDS store must add that per-lane offset itself so
+                # the layout the _read_vt_packs_bf16 transpose expects is reproduced.
+                byte_off = (vt_buf + wave_id_uni * _VLS_BF + d * _SNRPT_BF * _VLS_BF + lane * _VEC_BF) * _EB_BF
+                lds_ptr = buffer_ops.get_element_ptr(lds_vt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
+                llvm.StoreOp(_raw(v8bf), lds_ptr, alignment=16)
+
+        def _stage_vtf_fp8(tile_start, buf_id):
+            # Native fp8 V key-contiguous staging: each lane owns one key (=n_in_tile)
+            # and 16 D-columns (d_bucket*16..+16); scatter its 16 fp8 so key is
+            # contiguous in vtf (vtf[buf + D*_VTF_ROW + key]).
+            vtf_buf = buf_id * VTF_FP8_ELEMS
+            n_in_tile = n_in_warp * NUM_WAVES + wave_id
+            d_base = d_bucket * VEC_KV
+            src_elem = kv_gmem_elem_offset + n_in_tile * stride_kv_n_v + d_base + tile_start * stride_kv_n_v
+            v_i32x4 = fly.copy_atom_call_ssa([v4i32_type], _load_atom_128, fx.slice(v_div, (None, fx.Int32(src_elem))))
+            v_words = Vec(v_i32x4, (4,), fx.Int32)
+            for w in range_constexpr(4):
+                word = ArithValue(fx.Int32(v_words[w]))
+                for bsel in range_constexpr(4):
+                    d_col = d_base + w * 4 + bsel
+                    byte = ArithValue((word >> fx.Int32(bsel * 8)) & fx.Int32(0xFF)).trunci(T.i8)
+                    off = vtf_buf + d_col * _VTF_ROW + n_in_tile
+                    p = buffer_ops.get_element_ptr(lds_vtf_base_ptr, byte_offset=fx.Int32(off), elem_type=T.i8)
+                    llvm.StoreOp(_raw(byte), p, alignment=1)
+
+        def _read_vtf_packs_fp8(buf_id):
+            # Native fp8 PV read: 8 contiguous keys per pack = a plain i64 load (keys
+            # are contiguous in vtf). mfma_f32_32x32x16_fp8 B(V) thread layout:
+            # D = lane%32, k_group = lane//32 (8 keys); k_substep picks the 16-key
+            # block, dc the 32-D chunk. key_base = k_substep*16 + (lane//32)*8.
+            vtf_buf = buf_id * VTF_FP8_ELEMS
+            packs = [[None] * D_CHUNKS for _ in range(4)]
+            for dc in range_constexpr(D_CHUNKS):
+                for k_substep in range_constexpr(4):
+                    # mfma_f32_32x32x16_fp8 B(V) thread layout: D = lane%32 + dc*32
+                    # (N output chunk), the 8 contraction keys per lane-group start at
+                    # k_substep*16 + (lane//32)*8. This mapping is the best of the
+                    # principled variants tried (cos 0.944 vs 0.47-0.61) but is still
+                    # WRONG: it does not match the proven bf16 B-operand element order, so
+                    # this path caps at ~0.886. The residual is THIS layout defect, not
+                    # fp8-P precision. _FP8_PV_FROMBF16 is the correct path.
+                    d_col = (lane % 32) + dc * 32
+                    key_base = k_substep * 16 + (lane // 32) * 8
+                    off = vtf_buf + d_col * _VTF_ROW + key_base
+                    p = buffer_ops.get_element_ptr(lds_vtf_base_ptr, byte_offset=fx.Int32(off), elem_type=T.i8)
+                    packs[k_substep][dc] = fx.Int64(llvm.LoadOp(T.i64, p, alignment=1).result)
+            return packs
 
         def _reduction_pair(v_f32):
             v_i32 = _bitcast_i32(v_f32)
@@ -779,10 +1231,13 @@ def build_flash_attn_dualwave_swp_module(
 
             def _load_k_pack_aligned(elem_idx):
                 scope_name = _lds_scope("k", buf_id)
-                byte_offset = elem_idx * BF16_BYTES
+                byte_offset = elem_idx * ELEM_BYTES
                 ptr = buffer_ops.get_element_ptr(lds_kv_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
+                # fp8: load the 8-fp8 pack as a scalar i64 (an LLVM-legal type) for
+                # the raw fp8 MMA; bf16/f16 load the v8 element pack as before.
+                load_ty = T.i64 if const_expr(dtype_str == "fp8") else mfma_pack_type
                 return llvm.LoadOp(
-                    mfma_pack_type,
+                    load_ty,
                     ptr,
                     alignment=16,
                     alias_scopes=_lds_alias_scopes(scope_name),
@@ -797,8 +1252,34 @@ def build_flash_attn_dualwave_swp_module(
                 k_hi[ks] = _load_k_pack_aligned(idx_hi)
             return (k_lo, k_hi)
 
-        def _read_v_packs_for_buf(buf_id, urv_base):
+        def _read_vt_packs_bf16(buf_id):
+            urv = (
+                lane_div_32 * _URV_GRPK_BF
+                + ((lane % 16) // 4) * _URV_LANE_HI_BF
+                + ((lane // 16) % 2) * _URV_GRP_N_BF
+                + (lane % 4) * _URV_LANE_LO_BF
+            )
+            packs = [[None] * D_CHUNKS for _ in range(4)]
+            for dc in range_constexpr(D_CHUNKS):
+                dc_off = (dc // 2) * _URV_DC_AXIS0_BF + (dc % 2) * _URV_DC_AXIS1_BF
+                for k_substep in range_constexpr(4):
+                    imm_lo = (k_substep * _URV_STEPK_BF + dc_off) * _EB_BF
+                    byte0 = (urv + buf_id * VT_BF16_ELEMS) * _EB_BF + lds_vt_base_idx
+                    a = _ds_read_tr16_b64_imm(_v4bf16_type, fx.Int32(byte0), imm_lo)
+                    b = _ds_read_tr16_b64_imm(_v4bf16_type, fx.Int32(byte0), imm_lo + _URV_I5_BF * _EB_BF)
+                    packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
+            return packs
+
+        def _read_v_packs_for_buf(buf_id, urv_base, vt_tile_start=None):
             """Read all V packs from LDS buffer `buf_id` in DUALWAVE_SWP issue order."""
+            if const_expr(_PV_USE_VT):
+                # vt[buf_id] was staged by _async_load_v(.., buf_id) for the matching
+                # tile, so just read it -- the tile correspondence is enforced at load
+                # time (vt_tile_start ignored here). For _FP8_PV_FROMBF16 the read also
+                # re-quantizes each proven-order V pack to a fp8 i64 operand.
+                return _read_vt_packs_bf16(buf_id)
+            if const_expr(_FP8_PV_NATIVE):
+                return _read_vtf_packs_fp8(buf_id)
             v_base = _v_buf_base(buf_id)
             lds_base = v_base + urv_base
             packs = [[None] * D_CHUNKS for _ in range(4)]
@@ -808,14 +1289,22 @@ def build_flash_attn_dualwave_swp_module(
                 dc_off = i_0 * DUALWAVE_SWP_URV_DC_AXIS0 + i_1 * DUALWAVE_SWP_URV_DC_AXIS1
                 for k_substep in range_constexpr(4):
                     step_k_off = k_substep * DUALWAVE_SWP_URV_STEP_K_STRIDE
-                    imm_lo = (step_k_off + dc_off) * BF16_BYTES
-                    # axis 5 = 0 and axis 5 = 1 reads (in-register K stride 64 bf16)
-                    a = _ds_read_tr_v4f16_imm(lds_base, imm_lo)
-                    b = _ds_read_tr_v4f16_imm(
-                        lds_base,
-                        imm_lo + DUALWAVE_SWP_URV_I5_STRIDE * BF16_BYTES,
-                    )
-                    packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
+                    imm_lo = (step_k_off + dc_off) * ELEM_BYTES
+                    if const_expr(ELEM_BYTES == 1):
+                        # fp8: b8 transpose read -> 64 bits (8 fp8) as a scalar i64,
+                        # the raw fp8 PV MMA operand form (v8 fp8 can't bitcast to
+                        # i64). Read as v2i32 then assemble i64.
+                        byte_off = lds_base * ELEM_BYTES + lds_kv_base_idx
+                        v_v2i32 = _ds_read_tr8_b64_imm(Vec.make_type(2, fx.Int32), fx.Int32(byte_off), imm_lo)
+                        packs[k_substep][dc] = fx.Int64(Vec(v_v2i32, (2,), fx.Int32).bitcast(fx.Int64)[0])
+                    else:
+                        # axis 5 = 0 and axis 5 = 1 reads (in-register K stride 64 bf16)
+                        a = _ds_read_tr_v4f16_imm(lds_base, imm_lo)
+                        b = _ds_read_tr_v4f16_imm(
+                            lds_base,
+                            imm_lo + DUALWAVE_SWP_URV_I5_STRIDE * ELEM_BYTES,
+                        )
+                        packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
             return packs
 
         def _mma0(v_k):
@@ -824,8 +1313,21 @@ def build_flash_attn_dualwave_swp_module(
             v_s_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
                 q_pack = _get_q_pack(q_all_scaled_bf16, ks)
-                v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo)
-                v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi)
+                if const_expr(dtype_str == "fp8"):
+                    # native fp8 QK: mfma_f32_32x32x16_fp8_fp8 with raw fp8 Q/K (i64
+                    # packs); the descale*sm_scale*log2e is applied to fp32 logits below.
+                    v_s_lo = _mfma_acc_fp8_i64(k_lo[ks], q_pack, v_s_lo)
+                    v_s_hi = _mfma_acc_fp8_i64(k_hi[ks], q_pack, v_s_hi)
+                else:
+                    v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo)
+                    v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi)
+            if const_expr(ELEM_BYTES == 1):
+                # native fp8: apply q_descale*k_descale*sm_scale*log2e to the fp32
+                # logits (Q was fed raw to the MFMA). bf16/f16 bake the scale into Q,
+                # so their logits are pre-scaled and skip this.
+                scale_vec = Vec.from_elements([c_logit_scale], fx.Float32).broadcast_to(16)
+                v_s_lo = _fmul(Vec(v_s_lo), scale_vec)
+                v_s_hi = _fmul(Vec(v_s_hi), scale_vec)
             return (v_s_lo, v_s_hi)
 
         def _causal_mask_inplace(v_s, tile_idx):
@@ -969,8 +1471,22 @@ def build_flash_attn_dualwave_swp_module(
                 p_pk = v_p_lo[step]
             else:
                 p_pk = v_p_hi[step - 2]
+            if const_expr(_FP8_PV_FROMBF16):
+                # Quantize the proven-order v8 bf16 P operand to fp8 i64 once per step
+                # (V is quantized per dc below). This realizes a native fp8xfp8 PV MMA
+                # while reusing the proven bf16 P/V layout, so the A/B operands share
+                # element order by construction (packed-fp8-P precision suffices here).
+                p_pk_f8 = _v8bf16_to_fp8_i64(p_pk)
             for dc in range_constexpr(D_CHUNKS):
-                v_o[dc] = _mfma_acc(v_pk[dc], p_pk, v_o[dc])
+                if const_expr(_FP8_PV_FROMBF16):
+                    v_pk_f8 = _v8bf16_to_fp8_i64(v_pk[dc])
+                    v_o[dc] = _mfma_acc_fp8_i64(v_pk_f8, p_pk_f8, v_o[dc])
+                elif const_expr(_FP8_HIPREC_P):
+                    v_o[dc] = _mfma_acc_bf16(v_pk[dc], p_pk, v_o[dc])
+                elif const_expr(dtype_str == "fp8"):
+                    v_o[dc] = _mfma_acc_fp8_i64(v_pk[dc], p_pk, v_o[dc])
+                else:
+                    v_o[dc] = _mfma_acc(v_pk[dc], p_pk, v_o[dc])
             return v_o
 
         def _mma1(v_p, v_v, v_o):
@@ -1151,6 +1667,16 @@ def build_flash_attn_dualwave_swp_module(
 
             # Prologue scores + first softmax pass for KV tile 0
             v_s_0 = _mma0(v_k)
+            if const_expr(_FP8_SDUMP):
+                # Dump the 32 raw logits/lane (16 lo + 16 hi) to DebugCounts at
+                # index ((wave*WARP_SIZE + lane)*32 + r). Read back vs torch QK^T to
+                # recover the lane->(query_row, kv_col) map. (q_block 0 only.)
+                _sd_base = (wave_id_uni * fx.Index(WARP_SIZE) + lane) * fx.Index(32)
+                _sl = Vec(v_s_0[0])
+                _sh = Vec(v_s_0[1])
+                for _r in range_constexpr(16):
+                    _ws_store_f32(fx.Float32(_sl[_r]), _sd_base + fx.Index(_r))
+                    _ws_store_f32(fx.Float32(_sh[_r]), _sd_base + fx.Index(16 + _r))
             rocdl.sched_barrier(0)
             if const_expr(CAUSAL):
                 if const_expr(SPLITK):
@@ -1231,7 +1757,7 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 2 (memory): prefetch next K (buf1), read this tile's V from
                 # LDS (v_v) for P*V, wait + sync.
                 _async_load_k(j_idx * BLOCK_N, 1)
-                v_v = _read_v_packs_for_buf(0, urv_base_per_lane)
+                v_v = _read_v_packs_for_buf(0, urv_base_per_lane, vt_tile_start=(j_idx - 2) * BLOCK_N)
                 rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
                 _waitcnt_vm_n(NUM_DMA_K + NUM_DMA_V)
                 rocdl.sched_barrier(0)
@@ -1311,7 +1837,7 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 6 (memory): prefetch next K (buf0), read V packs (buf1),
                 # apply causal mask to v_s_0 (if causal), wait + sync.
                 _async_load_k((j_idx + 1) * BLOCK_N, 0)
-                v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane)
+                v_packs_b = _read_v_packs_for_buf(1, urv_base_per_lane, vt_tile_start=(j_idx - 1) * BLOCK_N)
                 if const_expr(CAUSAL):
                     v_s_0 = _causal_mask_prologue_if_needed(
                         v_s_0,
@@ -1399,7 +1925,7 @@ def build_flash_attn_dualwave_swp_module(
 
             # Epilogue C2 (memory): prefetch K max_m1, read V packs (buf0), causal mask v_s_1, sync.
             _async_load_k(max_m1 * BLOCK_N, 1)
-            v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane)
+            v_packs_e3 = _read_v_packs_for_buf(0, urv_base_per_lane, vt_tile_start=max_m3 * BLOCK_N)
             if const_expr(CAUSAL):
                 v_s_1 = _causal_mask_prologue_if_needed(
                     v_s_1,
@@ -1461,7 +1987,7 @@ def build_flash_attn_dualwave_swp_module(
             rocdl.sched_barrier(0)
 
             # Epilogue C6 (memory): read V packs (buf1), causal mask v_s_0, sync.
-            v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane)
+            v_packs_e7 = _read_v_packs_for_buf(1, urv_base_per_lane, vt_tile_start=max_m2 * BLOCK_N)
             if const_expr(CAUSAL):
                 v_s_0 = _causal_mask_prologue_if_needed(
                     v_s_0,
@@ -1523,7 +2049,7 @@ def build_flash_attn_dualwave_swp_module(
 
             # Epilogue C10 (memory): read last V packs (buf0), causal mask v_s_1,
             # drain all DMAs (vmcnt 0), sync.
-            v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane)
+            v_packs_e11 = _read_v_packs_for_buf(0, urv_base_per_lane, vt_tile_start=max_m1 * BLOCK_N)
             if const_expr(CAUSAL):
                 v_s_1 = _causal_mask_prologue_if_needed(
                     v_s_1,
@@ -1564,7 +2090,7 @@ def build_flash_attn_dualwave_swp_module(
             rocdl.sched_barrier(0)
 
             # Epilogue C12 (memory): read the final V packs for the closing P*V.
-            v_packs_e13 = _read_v_packs_for_buf(1, urv_base_per_lane)
+            v_packs_e13 = _read_v_packs_for_buf(1, urv_base_per_lane, vt_tile_start=max_m1 * BLOCK_N)
             rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -1579,6 +2105,12 @@ def build_flash_attn_dualwave_swp_module(
             # combine kernel re-weights by w_s * l_s.
             inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
             inv_l = ArithValue(fx.Float32(l_row) > c_zero_f).select(inv_l_rcp, c_zero_f)
+            if const_expr(dtype_str == "fp8" and not _PV_USE_VT):
+                # native-vtf fp8 PV used raw fp8 V (= V / v_descale), so the PV
+                # accumulator is 1/v_descale too large; fold v_descale into the O scale.
+                # Both vt-based PV modes (HIPREC, FROMBF16) already dequanted V*v_descale
+                # into vt, so skip here.
+                inv_l = fx.Float32(_fmul(inv_l, _vd_fp8))
             _scale_o(v_o, inv_l)
 
             # CLOSE the phase shift: one extra s_barrier on group A (complement of
@@ -1597,8 +2129,9 @@ def build_flash_attn_dualwave_swp_module(
 
             def _o_pack_2dw(dc, store_group):
                 r_base = store_group * 4
-                # Pack 4 f32 outputs -> 2 packed-16bit dwords (lo, hi).
-                if const_expr(dtype_str == "bf16"):
+                # Pack 4 f32 outputs -> 2 packed-16bit dwords (lo, hi). Output is
+                # bf16 for both the bf16 path and the fp8 path (fp8 output is bf16).
+                if const_expr(dtype_str != "f16"):
                     lo = rocdl.cvt_pk_bf16_f32(
                         Vec(v_o[dc])[r_base],
                         Vec(v_o[dc])[r_base + 1],
@@ -1822,6 +2355,9 @@ def build_flash_attn_dualwave_swp_module(
         DebugCounts: fx.Tensor,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
+        QDescale: fx.Tensor,
+        KDescale: fx.Tensor,
+        VDescale: fx.Tensor,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
         seq_len_kv: fx.Int32,
@@ -1855,6 +2391,9 @@ def build_flash_attn_dualwave_swp_module(
             DebugCounts,
             CuSeqQ,
             CuSeqKv,
+            QDescale,
+            KDescale,
+            VDescale,
             seq_len,
             seq_len_kv,
             stride_q_n,
@@ -1903,6 +2442,9 @@ def build_flash_attn_dualwave_swp_module(
         workspace=None,
         cu_seqlens_q=None,
         cu_seqlens_kv=None,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
         stream=None,
     ):
         if stride_kv_n is None:
@@ -1926,6 +2468,14 @@ def build_flash_attn_dualwave_swp_module(
             cu_seqlens_q = O
         if cu_seqlens_kv is None:
             cu_seqlens_kv = O
+        # Per-tensor fp8 descales (shape-[1] fp32). The kernel only reads them on
+        # the fp8 path; bf16/f16 launches pass O as an unused placeholder.
+        if q_descale is None:
+            q_descale = O
+        if k_descale is None:
+            k_descale = O
+        if v_descale is None:
+            v_descale = O
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             if stream is None:
                 return launch_flash_attn_dualwave_swp(
@@ -1936,6 +2486,9 @@ def build_flash_attn_dualwave_swp_module(
                     debug_counts,
                     cu_seqlens_q,
                     cu_seqlens_kv,
+                    q_descale,
+                    k_descale,
+                    v_descale,
                     batch_size,
                     seq_len,
                     seq_len_kv,
@@ -1951,6 +2504,9 @@ def build_flash_attn_dualwave_swp_module(
                 debug_counts,
                 cu_seqlens_q,
                 cu_seqlens_kv,
+                q_descale,
+                k_descale,
+                v_descale,
                 batch_size,
                 seq_len,
                 seq_len_kv,
@@ -1976,6 +2532,9 @@ def build_flash_attn_dualwave_swp_module(
         workspace=None,
         cu_seqlens_q=None,
         cu_seqlens_kv=None,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
         stream=None,
     ):
         if stride_kv_n is None:
@@ -1996,6 +2555,12 @@ def build_flash_attn_dualwave_swp_module(
             cu_seqlens_q = O
         if cu_seqlens_kv is None:
             cu_seqlens_kv = O
+        if q_descale is None:
+            q_descale = O
+        if k_descale is None:
+            k_descale = O
+        if v_descale is None:
+            v_descale = O
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             return flyc.compile(
                 launch_flash_attn_dualwave_swp,
@@ -2006,6 +2571,9 @@ def build_flash_attn_dualwave_swp_module(
                 debug_counts,
                 cu_seqlens_q,
                 cu_seqlens_kv,
+                q_descale,
+                k_descale,
+                v_descale,
                 batch_size,
                 seq_len,
                 seq_len_kv,

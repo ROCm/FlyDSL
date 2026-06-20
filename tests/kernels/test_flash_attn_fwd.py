@@ -37,6 +37,13 @@ from tests.test_common import run_perftest  # noqa: E402
 # Tensor initialization range (uniform distribution)
 UNIFORM_RANGE = (-1, 1)
 DEFAULT_SEED = 123
+# fp8 correctness gate (fixed; fp8 is lossy). These thresholds are intentionally
+# not relaxed: an fp8 path that cannot meet them is a real failure, not a reason
+# to move the gate.
+FP8_MAX_ERR = 5e-2
+FP8_MIN_COS = 0.98
+# OCP e4m3fn (NOT the fnuz variant) end-to-end on gfx950.
+FP8_DTYPE = torch.float8_e4m3fn
 # Kernel config: populated from CLI args in main(); defaults here are only used
 # if run_attn_config / _cfg_kw is called before main() (e.g. unit tests).
 FLASH_ATTN_FUNC_KERNEL_CONFIG: dict = {
@@ -822,16 +829,418 @@ def run_aiter_bench(
     return results
 
 
+# ── fp8 (e4m3fn) support ─────────────────────────────────────────────────────
+# fp8 forward attention. Inputs Q/K/V are pre-quantized to e4m3fn on the host
+# (no in-kernel quantization); per-tensor shape-[1] fp32 descales restore scale.
+# QK logits use effective_logit_scale = sm_scale * q_descale * k_descale; the PV
+# contribution / output applies v_descale. Accumulation (QK logits, online
+# softmax max/sum, PV) stays fp32; output is bf16. The correctness reference
+# dequantizes the SAME e4m3fn Q/K/V and applies the descales before the SDPA
+# reference -- comparing against un-dequantized fp8 inputs would be an invalid
+# reference.
+
+
+def _is_pow2(x):
+    return x > 0 and (x & (x - 1)) == 0
+
+
+def quantize_per_tensor_fp8(x):
+    """Per-tensor quantize a float tensor to e4m3fn + a shape-[1] fp32 descale.
+
+    Mirrors aiter.ops.quant.per_tensor_quant: descale = amax / fp8_max, the
+    stored fp8 value is round(x / descale), and dequant is fp8_value * descale.
+    Uses aiter's helper when available (so the harness and the aiter comparator
+    share identical quantization), with a numerically identical torch fallback.
+    """
+    try:
+        from aiter import dtypes as _adtypes
+        from aiter import per_tensor_quant as _ptq
+
+        x_fp8, descale = _ptq(x, quant_dtype=_adtypes.fp8)
+        # Enforce e4m3fn (not fnuz) and the expected per-tensor descale shape.
+        if x_fp8.dtype != FP8_DTYPE:
+            raise ValueError(f"aiter per_tensor_quant produced {x_fp8.dtype}, expected {FP8_DTYPE}")
+        return x_fp8.contiguous(), descale.to(torch.float32).view(1).contiguous()
+    except ImportError:
+        fp8_max = torch.finfo(FP8_DTYPE).max
+        amax = x.abs().max().to(torch.float32)
+        descale = (amax / fp8_max).clamp(min=1e-12).view(1)
+        x_fp8 = (x.to(torch.float32) / descale).to(FP8_DTYPE)
+        return x_fp8.contiguous(), descale.to(torch.float32).contiguous()
+
+
+def _dequant_fp8(x_fp8, descale):
+    """Dequantize e4m3fn back to float32: fp8_value * descale."""
+    return x_fp8.to(torch.float32) * descale.to(torch.float32)
+
+
+def run_fp8_config(
+    batch,
+    seq_len,
+    num_heads,
+    head_dim,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    verbose=True,
+    num_kv_heads=None,
+    num_kv_splits=1,
+):
+    """Run the FlyDSL fp8 (e4m3fn) forward path and validate vs a dequantized-input
+    SDPA reference at the fixed fp8 gate (max_err < 5e-2 and min_cos > 0.98).
+
+    Unsupported fp8 configurations (non-gfx950, head_dim != 128, split-K) raise a
+    clear error that is surfaced as an ERROR row (never a silent SKIP). Returns a
+    run_config-compatible dict so it prints through the same summary table.
+    """
+    device = "cuda"
+    results = {}
+
+    if num_kv_heads is None:
+        num_kv_heads = num_heads
+
+    # fp8 split-K is not implemented. Reject it explicitly rather than silently
+    # running a dense fp8 forward while the config row advertises kv_sp>1 (which
+    # would validate the wrong path).
+    if int(num_kv_splits) > 1:
+        results["err"] = f"fp8 split-K (num_kv_splits={num_kv_splits}) is not implemented (dense fp8 only)"
+        return results
+
+    # fp8 forward is gfx950-only and head_dim==128 only. Reject anything else
+    # up-front with a clear, specific error (surfaced as an ERROR row) rather
+    # than a SKIP that would mask a real failure.
+    try:
+        gpu_arch = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    except Exception:
+        gpu_arch = ""
+    if not gpu_arch.startswith("gfx950"):
+        results["err"] = f"fp8 requires gfx950 (got '{gpu_arch or 'unknown'}')"
+        return results
+    if head_dim != 128:
+        results["err"] = f"fp8 requires head_dim == 128 (got {head_dim})"
+        return results
+    if num_heads % num_kv_heads != 0:
+        results["err"] = f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
+        return results
+    if seq_len < 1:
+        results["err"] = f"seq_len ({seq_len}) must be >= 1"
+        return results
+
+    B, S, H, D = batch, seq_len, num_heads, head_dim
+    H_KV = num_kv_heads
+    setup_seed(seed)
+
+    # Host bf16 master tensors -> per-tensor e4m3fn + shape-[1] fp32 descales.
+    q_bf16 = torch.empty(B, S, H, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+    k_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+    v_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device=device).uniform_(*UNIFORM_RANGE)
+    q_fp8, q_descale = quantize_per_tensor_fp8(q_bf16)
+    k_fp8, k_descale = quantize_per_tensor_fp8(k_bf16)
+    v_fp8, v_descale = quantize_per_tensor_fp8(v_bf16)
+
+    # Build the FlyDSL fp8 module through the PUBLIC builder (the same entry users
+    # call); it routes gfx950 + D=128 + fp8 to the dual-wave SWP path and rejects
+    # unsupported fp8 configs with a clear error. The fp8 kernel ABI adds
+    # q/k/v_descale (forwarded as launch kwargs). Imported locally because the
+    # module-level imports use the higher-level flash_attn_interface wrapper.
+    from kernels.flash_attn_generic import build_flash_attn_func_module
+
+    try:
+        exe = build_flash_attn_func_module(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            causal=causal,
+            dtype_str="fp8",
+            waves_per_eu=FLASH_ATTN_FUNC_KERNEL_CONFIG["waves_per_eu"],
+            daz=FLASH_ATTN_FUNC_KERNEL_CONFIG.get("daz", False),
+            num_kv_heads=num_kv_heads,
+            dualwave_swp_lazy_rescale=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_lazy_rescale"],
+            dualwave_swp_setprio=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_setprio"],
+            dualwave_swp_debug_lazy_counts=False,
+            dualwave_swp_enable_stagger=FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_enable_stagger"],
+        )
+    except Exception as e:
+        results["err"] = f"build: {e}"
+        return results
+
+    o_bf16 = torch.zeros(B, S, H, D, dtype=torch.bfloat16, device=device)
+    q_flat = q_fp8.contiguous().view(-1)
+    k_flat = k_fp8.contiguous().view(-1)
+    v_flat = v_fp8.contiguous().view(-1)
+    o_flat = o_bf16.contiguous().view(-1)
+
+    # Public fp8 ABI: pre-quantized fp8 Q/K/V + per-tensor q/k/v_descale only. The
+    # kernel runs QK on fp8 MFMA and dequantizes V in-kernel for the high-precision
+    # PV; no production data is routed through debug/varlen slots.
+    fp8_exec_kwargs = dict(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
+
+    try:
+        exe(q_flat, k_flat, v_flat, o_flat, B, S, **fp8_exec_kwargs)
+        torch.cuda.synchronize()
+    except Exception as e:
+        results["err"] = f"exec: {e}"
+        return results
+
+    # Reference: dequantize the SAME e4m3fn Q/K/V (applying descales) and run the
+    # high-precision SDPA reference the bf16 path uses.
+    ref_4d = pytorch_ref_attention(
+        _dequant_fp8(q_fp8, q_descale),
+        _dequant_fp8(k_fp8, k_descale),
+        _dequant_fp8(v_fp8, v_descale),
+        causal=causal,
+    )
+    ref_flat = ref_4d.to(torch.float32).contiguous().view(-1)
+
+    o_f32 = o_flat.float()
+    ref_f32 = ref_flat.float()
+    max_err = (o_f32 - ref_f32).abs().max().item()
+    mean_err = (o_f32 - ref_f32).abs().mean().item()
+    cos_sim = F.cosine_similarity(o_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1)
+    min_cos = cos_sim.min().item()
+    results["max_err"] = max_err
+    results["mean_err"] = mean_err
+    results["min_cos"] = min_cos
+    results["passed"] = max_err < FP8_MAX_ERR and min_cos > FP8_MIN_COS
+
+    if verbose:
+        tag = f"B={B} S={S} H={H} D={D} fp8"
+        print(f"  [{tag}] --- compare_arrays ---")
+        compare_arrays(
+            o_f32.detach().cpu().numpy(),
+            ref_f32.detach().cpu().numpy(),
+        )
+
+    try:
+
+        def kernel_fn():
+            # Time the SAME public-ABI call as the correctness run: descales are
+            # keyword-only on the launcher (positional args after B,S are
+            # stride_kv_n/stride_q_n/head_dim_runtime), so they MUST be passed as
+            # kwargs or they would silently bind to the stride/head_dim slots.
+            exe(q_flat, k_flat, v_flat, o_flat, B, S, **fp8_exec_kwargs)
+
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                kernel_fn()
+            torch.cuda.synchronize()
+
+        _, us = run_perftest(kernel_fn, num_iters=iters, num_warmup=warmup)
+        s_eff = S / 2.0 if causal else float(S)
+        flops = 4.0 * S * s_eff * D * H * B
+        results["us"] = us
+        results["tflops"] = flops / (us * 1e-6) / 1e12
+    except Exception as e:
+        # A failed timing path must not be reportable as a clean PASS-with-N/A row.
+        # Keep the correctness numbers visible but mark the row not-passed so the
+        # summary surfaces the failure (see the status logic in main()).
+        results["bench_err"] = str(e)
+        results["passed"] = False
+
+    return results
+
+
+def aiter_asm_fp8_dispatch_ok(batch, seq_len, num_heads, num_kv_heads, head_dim):
+    """Predicate: does this dense fp8 shape reach aiter's NATIVE gfx950 fp8 ASM
+    kernel (fwd_hd128_fp8*.co, dtype fp8bf16, bf16_cvt=0)?
+
+    Mirrors the aiter dispatch gate for native fp8 ASM: head_dim == 128, GQA
+    ratio (num_heads / num_kv_heads) a power of two, and seqlen_q > 128. When
+    this is False the aiter dispatcher falls back to CK, which must be labeled
+    honestly per-shape (never reported as 'aiter asm fp8').
+    """
+    if head_dim != 128 or num_kv_heads <= 0 or num_heads % num_kv_heads != 0:
+        return False
+    if not _is_pow2(num_heads // num_kv_heads):
+        return False
+    return seq_len > 128
+
+
+def run_aiter_fp8_bench(
+    batch,
+    seq_len,
+    nheads,
+    head_dim,
+    causal,
+    warmup,
+    iters,
+    seed=DEFAULT_SEED,
+    backend="asm",
+    num_kv_heads=None,
+):
+    """Run aiter's fp8 forward and return {tflops, max_err, us, label}.
+
+    backend="asm": drive the NATIVE gfx950 fp8 ASM kernel via
+      aiter.ops.mha.fmha_v3_fwd(..., how_v3_bf16_cvt=0) directly. This is the
+      genuine native-fp8 path (#2911), NOT the bf16-convert path (bf16_cvt!=0)
+      and NOT a CK/triton fallback. Shapes that do not meet the native-asm gate
+      are SKIPPED (so the asm column never silently substitutes CK for asm).
+    backend="ck": secondary comparison via aiter.mha_fwd with descales.
+    """
+    try:
+        import aiter
+        from aiter.ops.mha import fmha_v3_fwd
+    except Exception:
+        return {"err": "aiter not installed"}
+
+    if num_kv_heads is None:
+        num_kv_heads = nheads
+    asm_ok = aiter_asm_fp8_dispatch_ok(batch, seq_len, nheads, num_kv_heads, head_dim)
+    if backend == "asm" and not asm_ok:
+        # Native fp8 ASM kernel is not selected for this shape -> SKIP rather
+        # than fall back to CK and mislabel it as asm.
+        return {"skip": True}
+
+    results = {}
+    setup_seed(seed)
+    torch.cuda.empty_cache()
+
+    B, S, H, D = batch, seq_len, nheads, head_dim
+    H_KV = num_kv_heads
+    q_bf16 = torch.empty(B, S, H, D, dtype=torch.bfloat16, device="cuda").uniform_(*UNIFORM_RANGE)
+    k_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device="cuda").uniform_(*UNIFORM_RANGE)
+    v_bf16 = torch.empty(B, S, H_KV, D, dtype=torch.bfloat16, device="cuda").uniform_(*UNIFORM_RANGE)
+    q_fp8, q_descale = quantize_per_tensor_fp8(q_bf16)
+    k_fp8, k_descale = quantize_per_tensor_fp8(k_bf16)
+    v_fp8, v_descale = quantize_per_tensor_fp8(v_bf16)
+    softmax_scale = 1.0 / math.sqrt(D)
+
+    if backend == "asm":
+        results["label"] = "aiter_asm_fp8"
+
+        def aiter_forward():
+            out = torch.empty((B, S, H, D), device="cuda", dtype=torch.bfloat16)
+            return fmha_v3_fwd(
+                q_fp8,
+                k_fp8,
+                v_fp8,
+                0.0,  # dropout_p
+                softmax_scale,  # softmax_scale (descales applied separately)
+                causal,  # is_causal
+                -1,  # window_size_left
+                -1,  # window_size_right
+                False,  # return_softmax_lse
+                False,  # return_dropout_randval
+                0,  # how_v3_bf16_cvt = 0 -> native fp8 (NOT bf16-convert)
+                out,
+                None,  # bias
+                None,  # alibi_slopes
+                q_descale,
+                k_descale,
+                v_descale,
+                None,  # gen
+            )
+
+    elif backend == "ck":
+        # CK fp8 is the labeled secondary comparison. Label honestly so a shape
+        # that DID meet the asm gate is never silently reported as the headline.
+        results["label"] = "aiter_ck_fp8" if asm_ok else "aiter_ck_fp8(fallback)"
+
+        def aiter_forward():
+            # CK fp8 needs an explicit bf16 output tensor; without it the op
+            # infers an fp8 output and rejects ("invalid argument for fmha_fwd").
+            out = torch.empty((B, S, H, D), device="cuda", dtype=torch.bfloat16)
+            return aiter.mha_fwd(
+                q_fp8,
+                k_fp8,
+                v_fp8,
+                0.0,  # dropout_p
+                softmax_scale,  # softmax_scale
+                causal,  # is_causal
+                -1,  # window_size_left
+                -1,  # window_size_right
+                0,  # sink_size
+                False,  # return_softmax_lse
+                False,  # return_dropout_randval
+                cu_seqlens_q=None,
+                cu_seqlens_kv=None,
+                out=out,
+                bias=None,
+                alibi_slopes=None,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+                gen=None,
+            )
+
+    else:
+        return {"err": f"unsupported backend: {backend}"}
+
+    try:
+        res = aiter_forward()
+        out = res[0] if isinstance(res, (tuple, list)) else res
+        torch.cuda.synchronize()
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return {"err": f"{backend}: {e}"}
+
+    # Compare against the dequantized-input SDPA reference (same e4m3fn inputs).
+    # Compute the FULL fixed fp8 gate (max_err AND min_cos) so a claim that an
+    # aiter fp8 row is within the gate is provable, not half-checked.
+    ref = pytorch_ref_attention(
+        _dequant_fp8(q_fp8, q_descale),
+        _dequant_fp8(k_fp8, k_descale),
+        _dequant_fp8(v_fp8, v_descale),
+        causal=causal,
+    )
+    out_f32 = out.float()
+    ref_f32 = ref.float()
+    max_err = (out_f32 - ref_f32).abs().max().item()
+    min_cos = F.cosine_similarity(out_f32.reshape(-1, D), ref_f32.reshape(-1, D), dim=1).min().item()
+    results["max_err"] = max_err
+    results["min_cos"] = min_cos
+    results["passed"] = max_err < FP8_MAX_ERR and min_cos > FP8_MIN_COS
+
+    try:
+
+        def bench_fn():
+            aiter_forward()
+
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            profile_memory=False,
+            with_stack=False,
+            with_modules=True,
+        ):
+            for _ in range(10):
+                bench_fn()
+            torch.cuda.synchronize()
+
+        _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
+        s_eff = S / 2.0 if causal else float(S)
+        flops = 4.0 * S * s_eff * D * H * B
+        results["us"] = us
+        results["tflops"] = flops / (us * 1e-6) / 1e12
+    except Exception as e:
+        results["bench_err"] = str(e)
+
+    return results
+
+
 def _fmt_result(r):
-    """Format: 'Time(us) TFLOPS MaxErr'."""
+    """Format: 'Time(us) TFLOPS MaxErr MinCos St'.
+
+    MinCos + a PASS/FAIL status are shown whenever the row carries the fixed-gate
+    fields (fp8 comparator rows set min_cos/passed); for rows without them the
+    extra columns render as '--' so the bf16/f16 layout is unchanged in width.
+    """
     if r.get("skip"):
-        return f"{'--':>10s} {'--':>8s} {'--':>8s}"
+        return f"{'--':>10s} {'--':>8s} {'--':>8s} {'--':>7s} {'--':>4s}"
     if "err" in r:
-        return f"{'--':>10s} {'ERR':>8s} {'--':>8s}"
+        return f"{'--':>10s} {'ERR':>8s} {'--':>8s} {'--':>7s} {'--':>4s}"
     us = f"{r['us']:>10.1f}" if "us" in r else f"{'N/A':>10s}"
     tf = f"{r['tflops']:>8.1f}" if "tflops" in r else f"{'N/A':>8s}"
     err = f"{r['max_err']:>8.2e}" if "max_err" in r else f"{'N/A':>8s}"
-    return f"{us} {tf} {err}"
+    cos = f"{r['min_cos']:>7.4f}" if "min_cos" in r else f"{'--':>7s}"
+    st = ("PASS" if r.get("passed") else "FAIL") if "passed" in r else "--"
+    return f"{us} {tf} {err} {cos} {st:>4s}"
 
 
 def _fmt_cmp(fly_r, other_r):
@@ -919,17 +1328,26 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
         "FlyDSL_Time(us)",
         "FlyDSL_TFLOPS",
         "FlyDSL_MaxErr",
+        "FlyDSL_MinCos",
+        "FlyDSL_Status",
         "aiter_ck_Time(us)",
         "aiter_ck_TFLOPS",
         "aiter_ck_MaxErr",
+        "aiter_ck_MinCos",
+        "aiter_ck_Status",
         "aiter_asm_Time(us)",
         "aiter_asm_TFLOPS",
         "aiter_asm_MaxErr",
+        "aiter_asm_MinCos",
+        "aiter_asm_Status",
         "Fly/aiter_ck_TFLOPS%",
         "Fly/aiter_ck_MaxErr_ratio",
         "Fly/aiter_asm_TFLOPS%",
         "Fly/aiter_asm_MaxErr_ratio",
     ]
+
+    def _status_val(r):
+        return ("PASS" if r.get("passed") else "FAIL") if "passed" in r else ""
 
     def _metrics(fr, cr, ar, cmp_overrides=None):
         if cmp_overrides is None:
@@ -941,12 +1359,18 @@ def _write_cmp_csv(csv_path, data_rows, avg_rows):
             _csv_val(fr, "us"),
             _csv_val(fr, "tflops"),
             _csv_val(fr, "max_err"),
+            _csv_val(fr, "min_cos"),
+            _status_val(fr),
             _csv_val(cr, "us"),
             _csv_val(cr, "tflops"),
             _csv_val(cr, "max_err"),
+            _csv_val(cr, "min_cos"),
+            _status_val(cr),
             _csv_val(ar, "us"),
             _csv_val(ar, "tflops"),
             _csv_val(ar, "max_err"),
+            _csv_val(ar, "min_cos"),
+            _status_val(ar),
             fck[0],
             fck[1],
             fasm[0],
@@ -1253,8 +1677,8 @@ def main():
         "--dtype",
         type=str,
         default=None,
-        choices=["fp16", "bf16"],
-        help="Data type: fp16 or bf16 (default: both)",
+        choices=["fp16", "bf16", "fp8"],
+        help="Data type: fp16, bf16, or fp8 (e4m3fn). Default: bf16+fp16 (fp8 must be requested explicitly).",
     )
     parser.add_argument(
         "--seed",
@@ -1327,7 +1751,16 @@ def main():
         }
     )
 
-    dtype_map = {"fp16": (torch.float16, "f16"), "bf16": (torch.bfloat16, "bf16")}
+    # For fp8 the "torch dtype" entry is the dtype the host-side bf16 master
+    # tensors are drawn in before per-tensor quantization to e4m3fn; the FlyDSL
+    # dtype_str is "fp8". fp8 is never part of the default (bf16+fp16) sweep --
+    # it must be requested explicitly so the unchanged dtype coverage is the
+    # default behavior.
+    dtype_map = {
+        "fp16": (torch.float16, "f16"),
+        "bf16": (torch.bfloat16, "bf16"),
+        "fp8": (torch.bfloat16, "fp8"),
+    }
     dtypes_to_test = [args.dtype] if args.dtype else ["bf16", "fp16"]
     causals_to_test = [args.causal] if args.causal is not None else [True, False]
 
@@ -1363,7 +1796,15 @@ def main():
                 f"D!=128 / non-bf16,f16 / seq_len<384 / ws>4GiB configs SKIP"
             )
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
-        print("  aiter_ck: bf16+fp16, aiter_asm: bf16 only")
+        if "fp8" in dtypes_to_test:
+            print(
+                "  fp8 mode: aiter_asm column = NATIVE gfx950 fp8 ASM (fmha_v3_fwd, "
+                "how_v3_bf16_cvt=0); SKIP where the native-asm gate (hdim=128, pow2 "
+                "GQA, seqlen_q>128) is not met. aiter_ck column = aiter_ck fp8 (mha_fwd "
+                "with descales), secondary."
+            )
+        else:
+            print("  aiter_ck: bf16+fp16, aiter_asm: bf16 only (how_v3_bf16_cvt=2, bf16-convert)")
         print("=" * 130)
         print("Running benchmarks ...")
 
@@ -1389,60 +1830,104 @@ def main():
                     del _q, _k, _v
 
                     try:
-                        fly_r = run_attn_config(
+                        if dtype_str == "fp8":
+                            fly_r = run_fp8_config(
+                                batch,
+                                seq_len,
+                                nh,
+                                hd,
+                                causal,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                seed=args.seed,
+                                verbose=False,
+                                num_kv_heads=nh_kv,
+                                num_kv_splits=kv_splits,
+                            )
+                        else:
+                            # upstream unified run_config/run_splitk_config into
+                            # run_attn_config (handles split-K via num_kv_splits).
+                            fly_r = run_attn_config(
+                                nh,
+                                hd,
+                                dtype,
+                                causal,
+                                args.warmup,
+                                args.iters,
+                                batch=batch,
+                                seqlen_q=seq_len,
+                                num_kv_heads=nh_kv,
+                                num_kv_splits=kv_splits,
+                                seed=args.seed,
+                                dtype_str=dtype_str,
+                                trigger_lazy_else=args.trigger_lazy_else,
+                                compare_mode=True,
+                                precomputed_ref=shared_ref,
+                            )
+                    except Exception as _fly_err:
+                        print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)}: {_fly_err}", flush=True)
+                        fly_r = {"err": str(_fly_err)}
+                    if dtype_str == "fp8":
+                        ck_r = run_aiter_fp8_bench(
+                            batch,
+                            seq_len,
+                            nh,
+                            hd,
+                            causal,
+                            warmup=args.warmup,
+                            iters=args.iters,
+                            seed=args.seed,
+                            backend="ck",
+                            num_kv_heads=nh_kv,
+                        )
+                        asm_r = run_aiter_fp8_bench(
+                            batch,
+                            seq_len,
+                            nh,
+                            hd,
+                            causal,
+                            warmup=args.warmup,
+                            iters=args.iters,
+                            seed=args.seed,
+                            backend="asm",
+                            num_kv_heads=nh_kv,
+                        )
+                    else:
+                        ck_r = run_aiter_bench(
+                            batch,
+                            seq_len,
                             nh,
                             hd,
                             dtype,
                             causal,
-                            args.warmup,
-                            args.iters,
-                            batch=batch,
-                            seqlen_q=seq_len,
-                            num_kv_heads=nh_kv,
-                            num_kv_splits=kv_splits,
+                            warmup=args.warmup,
+                            iters=args.iters,
                             seed=args.seed,
-                            dtype_str=dtype_str,
-                            trigger_lazy_else=args.trigger_lazy_else,
-                            compare_mode=True,
+                            backend="ck",
+                            num_kv_heads=nh_kv,
                             precomputed_ref=shared_ref,
                         )
-                    except Exception as _fly_err:
-                        print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)}: {_fly_err}", flush=True)
-                        fly_r = {"err": str(_fly_err)}
-                    ck_r = run_aiter_bench(
-                        batch,
-                        seq_len,
-                        nh,
-                        hd,
-                        dtype,
-                        causal,
-                        warmup=args.warmup,
-                        iters=args.iters,
-                        seed=args.seed,
-                        backend="ck",
-                        num_kv_heads=nh_kv,
-                        precomputed_ref=shared_ref,
-                    )
-                    asm_r = run_aiter_bench(
-                        batch,
-                        seq_len,
-                        nh,
-                        hd,
-                        dtype,
-                        causal,
-                        warmup=args.warmup,
-                        iters=args.iters,
-                        seed=args.seed,
-                        backend="asm",
-                        num_kv_heads=nh_kv,
-                        precomputed_ref=shared_ref,
-                    )
+                        asm_r = run_aiter_bench(
+                            batch,
+                            seq_len,
+                            nh,
+                            hd,
+                            dtype,
+                            causal,
+                            warmup=args.warmup,
+                            iters=args.iters,
+                            seed=args.seed,
+                            backend="asm",
+                            num_kv_heads=nh_kv,
+                            precomputed_ref=shared_ref,
+                        )
                     rows.append((cfg, fly_r, ck_r, asm_r))
 
-        col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s}"
+        col = f"{'Time(us)':>10s} {'TFLOPS':>8s} {'MaxErr':>8s} {'MinCos':>7s} {'St':>4s}"
+        _col_w = len(col)
         cmp_col = f"{'TFLOPS':>7s} {'MaxErr':>6s}"
         hdr1 = (
-            f"{_CFG_HDR} | {'FlyDSL':^28s} | {'aiter_ck':^28s} | {'aiter_asm':^28s}"
+            f"{_CFG_HDR} | {'FlyDSL':^{_col_w}s} | {'aiter_ck':^{_col_w}s} | {'aiter_asm':^{_col_w}s}"
             f" | {'Fly/aiter_ck':^14s} | {'Fly/aiter_asm':^14s}"
         )
         hdr2 = f"{'':>{_CFG_W}s} | {col} | {col} | {col}" f" | {cmp_col} | {cmp_col}"
@@ -1610,22 +2095,39 @@ def main():
                     kv_splits = args.num_kv_splits if args.num_kv_splits > 1 else cfg_kv_splits
                     cfg = (batch, seq_len, nh, nh_kv, hd, dtype_key, causal_tag, kv_splits)
                     try:
-                        r = run_attn_config(
-                            nh,
-                            hd,
-                            dtype,
-                            causal,
-                            args.warmup,
-                            args.iters,
-                            batch=batch,
-                            seqlen_q=seq_len,
-                            num_kv_heads=nh_kv,
-                            num_kv_splits=kv_splits,
-                            seed=args.seed,
-                            dtype_str=dtype_str,
-                            verbose=True,
-                            trigger_lazy_else=args.trigger_lazy_else,
-                        )
+                        if dtype_str == "fp8":
+                            r = run_fp8_config(
+                                batch,
+                                seq_len,
+                                nh,
+                                hd,
+                                causal,
+                                warmup=args.warmup,
+                                iters=args.iters,
+                                seed=args.seed,
+                                verbose=False,
+                                num_kv_heads=nh_kv,
+                                num_kv_splits=kv_splits,
+                            )
+                        else:
+                            # upstream unified run_config/run_splitk_config into
+                            # run_attn_config (handles split-K via num_kv_splits).
+                            r = run_attn_config(
+                                nh,
+                                hd,
+                                dtype,
+                                causal,
+                                args.warmup,
+                                args.iters,
+                                batch=batch,
+                                seqlen_q=seq_len,
+                                num_kv_heads=nh_kv,
+                                num_kv_splits=kv_splits,
+                                seed=args.seed,
+                                dtype_str=dtype_str,
+                                verbose=True,
+                                trigger_lazy_else=args.trigger_lazy_else,
+                            )
                         path = ""
                         if "err" in r:
                             print(f"    [FlyDSL unsupported] {_fmt_cfg(cfg)}: {r['err']}", flush=True)
@@ -1638,9 +2140,17 @@ def main():
                             rows.append((cfg, path, "SKIP", r))
                             continue
 
-                        status = "PASS" if r["passed"] else "FAIL"
-                        if not r["passed"]:
+                        # A timing-path failure (bench_err) is surfaced as BENCHERR
+                        # so a correctness-passing row whose benchmark crashed is
+                        # never reported as a clean pass.
+                        if r.get("bench_err"):
+                            print(f"    [FlyDSL bench failed] {_fmt_cfg(cfg)}: {r['bench_err']}", flush=True)
+                            status = "BENCHERR"
                             all_passed = False
+                        else:
+                            status = "PASS" if r["passed"] else "FAIL"
+                            if not r["passed"]:
+                                all_passed = False
                         print(_fmt_normal_row(cfg, path, status, r))
                         rows.append((cfg, path, status, r))
                     except Exception as e:
