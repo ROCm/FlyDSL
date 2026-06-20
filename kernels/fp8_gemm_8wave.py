@@ -195,6 +195,9 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
         rocdl.s_barrier()
 
         a1_frag = a_s2r.load(a_cur1)
+        # Main loop prefetches a_next1 one step behind; issue the final
+        # K_ITERS - 1 tile here, otherwise c10 / c11 read stale A1 data.
+        a_g2s.load(a_next1, A1_gl_offset + (K_ITERS - 1) * BLOCK_K)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)

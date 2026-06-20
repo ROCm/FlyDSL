@@ -397,7 +397,7 @@ def run_test(
     do_bench = bench or os.environ.get("FLYDSL_BENCH", "0") == "1"
 
     # AITER cross-check (and optional benchmark)
-    if HAS_AITER and not negative_slots and not apply_scale:
+    if HAS_AITER and dtype_str == "bf16" and not negative_slots and not apply_scale:
         # AITER Triton wrapper expects int64 slots/positions and 4D cos/sin
         slots_i64 = slot_mapping.to(torch.int64)
         pos_i64 = positions_i32.to(torch.int64)

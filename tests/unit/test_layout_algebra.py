@@ -32,13 +32,7 @@ pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
 
 FLY_PIPELINE = (
-    "builtin.module("
-    "fly-canonicalize,"
-    "fly-layout-lowering,"
-    "fly-canonicalize,"
-    "convert-fly-to-rocdl,"
-    "canonicalize,"
-    "cse)"
+    "builtin.module(fly-canonicalize,fly-layout-lowering,fly-canonicalize,convert-fly-to-rocdl,canonicalize,cse)"
 )
 
 
@@ -218,9 +212,8 @@ def test_composition_static_vs_dynamic():
         with Location.unknown(ctx):
             module = Module.create()
             i32 = IntegerType.get_signless(32)
-            idx = IndexType.get()
             with InsertionPoint(module.body):
-                f = func.FuncOp("comp_dyn", FunctionType.get([i32] * 8, [idx]))
+                f = func.FuncOp("comp_dyn", FunctionType.get([i32] * 8, [i32]))
                 entry = f.add_entry_block()
                 with InsertionPoint(entry):
                     args = list(entry.arguments)
@@ -228,8 +221,8 @@ def test_composition_static_vs_dynamic():
                     B = fx.make_layout(fx.make_shape(args[4], args[5]), fx.make_stride(args[6], args[7]))
                     R = fx.composition(A, B)
                     sz = fx.size(R)
-                    sc = fx.get_scalar(sz)
-                    func.ReturnOp([arith.IndexCastOp(idx, sc).result])
+                    sc = fx.get_scalar(sz).ir_value()
+                    func.ReturnOp([sc])
             pm = PassManager.parse(FLY_PIPELINE, ctx)
             pm.run(module.operation)
             assert module.operation.verify()
@@ -317,9 +310,8 @@ def test_complement_rank_2_dynamic_stride_error():
         with Location.unknown(ctx):
             module = Module.create()
             i32 = IntegerType.get_signless(32)
-            idx = IndexType.get()
             with InsertionPoint(module.body):
-                f = func.FuncOp("compl_dyn", FunctionType.get([i32], [idx]))
+                f = func.FuncOp("compl_dyn", FunctionType.get([i32], [i32]))
                 entry = f.add_entry_block()
                 with InsertionPoint(entry):
                     runtime_stride = entry.arguments[0]
@@ -328,8 +320,8 @@ def test_complement_rank_2_dynamic_stride_error():
                     tiler = fx.make_layout(shape, stride)
                     comp = fx.complement(tiler, 12)
                     sz = fx.size(comp)
-                    sc = fx.get_scalar(sz)
-                    func.ReturnOp([arith.IndexCastOp(idx, sc).result])
+                    sc = fx.get_scalar(sz).ir_value()
+                    func.ReturnOp([sc])
 
             pm = PassManager.parse(FLY_PIPELINE, ctx)
             pm.run(module.operation)

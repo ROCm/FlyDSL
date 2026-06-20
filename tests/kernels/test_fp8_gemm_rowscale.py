@@ -78,6 +78,7 @@ def _bench_fp8_gemm(
     num_iters: int = 10,
     vs_torch: bool = False,
     b_preshuffled: bool = False,
+    static_weight_scale: bool = True,
 ):
     """Run + verify a single (M, N, K, tile) configuration. Returns TFLOPS."""
     if "gfx95" not in ARCH:
@@ -107,7 +108,10 @@ def _bench_fp8_gemm(
             BLOCK_N=tile_n,
             b_preshuffled=b_preshuffled,
         )
-        print(f"\n[fp8_gemm_8wave] M={M} N={N} K={K} BLOCK_M={tile_m} BLOCK_N={tile_n} preshuffle_b={b_preshuffled}")
+        print(
+            f"\n[fp8_gemm_8wave] M={M} N={N} K={K} BLOCK_M={tile_m} BLOCK_N={tile_n} "
+            f"preshuffle_b={b_preshuffled} static_weight_scale={static_weight_scale}"
+        )
     else:
         launch_fn = compile_fp8_gemm_4w(
             K=K,
@@ -119,16 +123,23 @@ def _bench_fp8_gemm(
         print(
             f"\n[fp8_gemm_4wave] M={M} N={N} K={K} "
             f"BLOCK_M={tile_m} BLOCK_N={tile_n} xcd_remap={not disable_xcd_remap} "
-            f"preshuffle_b={b_preshuffled}"
+            f"preshuffle_b={b_preshuffled} static_weight_scale={static_weight_scale}"
         )
 
     def _args(c, a, b, sa, sb):
+        b_flat = _as_i8(b).contiguous().view(-1)
+        sa_flat = sa.contiguous().view(-1)
+        sb_flat = sb.contiguous().view(-1)
+        if static_weight_scale:
+            b_flat = flyc.from_torch_tensor(b_flat)
+            sa_flat = flyc.from_torch_tensor(sa_flat)
+            sb_flat = flyc.from_torch_tensor(sb_flat)
         return (
             _as_i8(a).contiguous().view(-1),
-            _as_i8(b).contiguous().view(-1),
+            b_flat,
             c.contiguous().view(-1),
-            sa.contiguous().view(-1),
-            sb.contiguous().view(-1),
+            sa_flat,
+            sb_flat,
             M,
             N,
             torch.cuda.current_stream(),
@@ -270,6 +281,12 @@ if __name__ == "__main__":
         default=False,
         help="Use 8-Wave Ping-Pong variant.",
     )
+    parser.add_argument(
+        "--dynamic_weight_scale",
+        action="store_true",
+        default=False,
+        help="Use dynamic tensor arguments for weight and scales instead of static DLPack adaptors.",
+    )
     args = parser.parse_args()
 
     torch.set_default_device("cuda")
@@ -287,6 +304,7 @@ if __name__ == "__main__":
             num_iters=args.num_iters,
             vs_torch=args.vs_torch,
             b_preshuffled=args.preshuffle_b,
+            static_weight_scale=not args.dynamic_weight_scale,
         )
     except pytest.skip.Exception as e:
         print(f"Skipped: {e}")

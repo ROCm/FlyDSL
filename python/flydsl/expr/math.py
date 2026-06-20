@@ -1,53 +1,100 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
+# Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Math dialect API — DSL-friendly wrappers with traced locations and auto-unwrap.
+"""Math dialect API — thin DSL wrappers over the MLIR ``math`` dialect.
 
 Usage:
-    from flydsl.expr import math
+    import flydsl.expr as fx
 
-    y = math.exp(x)
-    y = math.sqrt(x, fastmath="fast")
-    y = math.fma(a, b, c)
-    pred = math.isnan(x)
+    y = fx.exp(x)
+    y = fx.sqrt(x, fastmath="fast")
+    y = fx.fma(a, b, c)
+    pred = fx.isnan(x)
 """
 
 from functools import wraps
 
 from .._mlir import ir
-from .._mlir.dialects import math as _mlir_math
-from .._mlir.dialects.math import *  # noqa: F401,F403
-from .meta import _caller_location, _flatten_args
+from .._mlir.dialects import math
+from .meta import dsl_loc_tracing
 from .numeric import Numeric
-from .utils.arith import _to_raw
+from .typing import as_ir_value
+
+__all__ = [
+    "absf",
+    "ceil",
+    "floor",
+    "trunc",
+    "round",
+    "roundeven",
+    "exp",
+    "exp2",
+    "expm1",
+    "log",
+    "log2",
+    "log10",
+    "log1p",
+    "sqrt",
+    "rsqrt",
+    "cbrt",
+    "sin",
+    "cos",
+    "tan",
+    "asin",
+    "acos",
+    "atan",
+    "sinh",
+    "cosh",
+    "tanh",
+    "asinh",
+    "acosh",
+    "atanh",
+    "erf",
+    "erfc",
+    "sincos",
+    "absi",
+    "ctlz",
+    "cttz",
+    "ctpop",
+    "powf",
+    "fpowi",
+    "ipowi",
+    "atan2",
+    "copysign",
+    "fma",
+    "clampf",
+    "isnan",
+    "isinf",
+    "isfinite",
+    "isnormal",
+]
 
 
-def _traced_math_op(fn):
-    """Like @traced_op, but re-wraps results to preserve Numeric class hierarchy.
-
-    If the first positional arg is a Numeric (Float32, Int32, …), the MLIR
-    result is wrapped back into the appropriate Numeric subclass via
-    ``Numeric.from_ir_type``.  Raw ir.Value inputs pass through unchanged.
-    """
-
+def dsl_math_wrap_result(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        from .typing import Vector
+
         first = args[0] if args else None
-        do_rewrap = isinstance(first, Numeric)
+        is_vector = isinstance(first, Vector)
+        is_numeric = isinstance(first, Numeric)
 
-        loc = kwargs.pop("loc", None)
-        if loc is None:
-            loc = _caller_location(depth=1)
-        args, kwargs = _flatten_args(args, kwargs)
-        with loc:
-            result = fn(*args, **kwargs)
+        result = fn(*args, **kwargs)
 
-        if not do_rewrap:
-            return result
+        if not (is_vector or is_numeric):
+            return tuple(result) if not isinstance(result, ir.Value) and hasattr(result, "__iter__") else result
+
+        def dsl_wrap(value):
+            if not isinstance(value, ir.Value):
+                return value
+            if is_vector:
+                elem_dtype = Numeric.from_ir_type(ir.VectorType(value.type).element_type)
+                return Vector(value, first.shape, elem_dtype)
+            return Numeric.from_ir_type(value.type)(value)
+
         if isinstance(result, ir.Value):
-            return Numeric.from_ir_type(result.type)(result)
-        # Multi-result (e.g. sincos)
-        return tuple(Numeric.from_ir_type(r.type)(r) for r in result)
+            return dsl_wrap(result)
+        return tuple(dsl_wrap(r) for r in result)
 
     return wrapper
 
@@ -57,154 +104,184 @@ def _traced_math_op(fn):
 # ---------------------------------------------------------------------------
 
 
-@_traced_math_op
-def absf(x, *, fastmath=None, **kw):
-    return _mlir_math.absf(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def absf(x, *, fastmath=None, **kwargs):
+    return math.absf(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def ceil(x, *, fastmath=None, **kw):
-    return _mlir_math.ceil(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def ceil(x, *, fastmath=None, **kwargs):
+    return math.ceil(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def floor(x, *, fastmath=None, **kw):
-    return _mlir_math.floor(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def floor(x, *, fastmath=None, **kwargs):
+    return math.floor(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def trunc(x, *, fastmath=None, **kw):
-    return _mlir_math.trunc(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def trunc(x, *, fastmath=None, **kwargs):
+    return math.trunc(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def round(x, *, fastmath=None, **kw):
-    return _mlir_math.round(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def round(x, *, fastmath=None, **kwargs):
+    return math.round(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def roundeven(x, *, fastmath=None, **kw):
-    return _mlir_math.roundeven(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def roundeven(x, *, fastmath=None, **kwargs):
+    return math.roundeven(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def exp(x, *, fastmath=None, **kw):
-    return _mlir_math.exp(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def exp(x, *, fastmath=None, **kwargs):
+    return math.exp(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def exp2(x, *, fastmath=None, **kw):
-    return _mlir_math.exp2(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def exp2(x, *, fastmath=None, **kwargs):
+    return math.exp2(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def expm1(x, *, fastmath=None, **kw):
-    return _mlir_math.expm1(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def expm1(x, *, fastmath=None, **kwargs):
+    return math.expm1(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def log(x, *, fastmath=None, **kw):
-    return _mlir_math.log(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def log(x, *, fastmath=None, **kwargs):
+    return math.log(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def log2(x, *, fastmath=None, **kw):
-    return _mlir_math.log2(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def log2(x, *, fastmath=None, **kwargs):
+    return math.log2(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def log10(x, *, fastmath=None, **kw):
-    return _mlir_math.log10(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def log10(x, *, fastmath=None, **kwargs):
+    return math.log10(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def log1p(x, *, fastmath=None, **kw):
-    return _mlir_math.log1p(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def log1p(x, *, fastmath=None, **kwargs):
+    return math.log1p(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def sqrt(x, *, fastmath=None, **kw):
-    return _mlir_math.sqrt(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def sqrt(x, *, fastmath=None, **kwargs):
+    return math.sqrt(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def rsqrt(x, *, fastmath=None, **kw):
-    return _mlir_math.rsqrt(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def rsqrt(x, *, fastmath=None, **kwargs):
+    return math.rsqrt(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def cbrt(x, *, fastmath=None, **kw):
-    return _mlir_math.cbrt(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def cbrt(x, *, fastmath=None, **kwargs):
+    return math.cbrt(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def sin(x, *, fastmath=None, **kw):
-    return _mlir_math.sin(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def sin(x, *, fastmath=None, **kwargs):
+    return math.sin(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def cos(x, *, fastmath=None, **kw):
-    return _mlir_math.cos(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def cos(x, *, fastmath=None, **kwargs):
+    return math.cos(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def tan(x, *, fastmath=None, **kw):
-    return _mlir_math.tan(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def tan(x, *, fastmath=None, **kwargs):
+    return math.tan(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def asin(x, *, fastmath=None, **kw):
-    return _mlir_math.asin(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def asin(x, *, fastmath=None, **kwargs):
+    return math.asin(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def acos(x, *, fastmath=None, **kw):
-    return _mlir_math.acos(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def acos(x, *, fastmath=None, **kwargs):
+    return math.acos(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def atan(x, *, fastmath=None, **kw):
-    return _mlir_math.atan(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def atan(x, *, fastmath=None, **kwargs):
+    return math.atan(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def sinh(x, *, fastmath=None, **kw):
-    return _mlir_math.sinh(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def sinh(x, *, fastmath=None, **kwargs):
+    return math.sinh(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def cosh(x, *, fastmath=None, **kw):
-    return _mlir_math.cosh(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def cosh(x, *, fastmath=None, **kwargs):
+    return math.cosh(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def tanh(x, *, fastmath=None, **kw):
-    return _mlir_math.tanh(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def tanh(x, *, fastmath=None, **kwargs):
+    return math.tanh(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def asinh(x, *, fastmath=None, **kw):
-    return _mlir_math.asinh(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def asinh(x, *, fastmath=None, **kwargs):
+    return math.asinh(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def acosh(x, *, fastmath=None, **kw):
-    return _mlir_math.acosh(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def acosh(x, *, fastmath=None, **kwargs):
+    return math.acosh(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def atanh(x, *, fastmath=None, **kw):
-    return _mlir_math.atanh(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def atanh(x, *, fastmath=None, **kwargs):
+    return math.atanh(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def erf(x, *, fastmath=None, **kw):
-    return _mlir_math.erf(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def erf(x, *, fastmath=None, **kwargs):
+    return math.erf(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def erfc(x, *, fastmath=None, **kw):
-    return _mlir_math.erfc(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def erfc(x, *, fastmath=None, **kwargs):
+    return math.erfc(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -212,10 +289,11 @@ def erfc(x, *, fastmath=None, **kw):
 # ---------------------------------------------------------------------------
 
 
-@_traced_math_op
-def sincos(x, *, fastmath=None, **kw):
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def sincos(x, *, fastmath=None, **kwargs):
     """Simultaneous sin and cos.  Returns ``(sin(x), cos(x))``."""
-    return _mlir_math.sincos(_to_raw(x), fastmath=fastmath, **kw)
+    return math.sincos(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -223,24 +301,28 @@ def sincos(x, *, fastmath=None, **kw):
 # ---------------------------------------------------------------------------
 
 
-@_traced_math_op
-def absi(x, **kw):
-    return _mlir_math.absi(_to_raw(x), **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def absi(x, **kwargs):
+    return math.absi(as_ir_value(x), **kwargs)
 
 
-@_traced_math_op
-def ctlz(x, **kw):
-    return _mlir_math.ctlz(_to_raw(x), **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def ctlz(x, **kwargs):
+    return math.ctlz(as_ir_value(x), **kwargs)
 
 
-@_traced_math_op
-def cttz(x, **kw):
-    return _mlir_math.cttz(_to_raw(x), **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def cttz(x, **kwargs):
+    return math.cttz(as_ir_value(x), **kwargs)
 
 
-@_traced_math_op
-def ctpop(x, **kw):
-    return _mlir_math.ctpop(_to_raw(x), **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def ctpop(x, **kwargs):
+    return math.ctpop(as_ir_value(x), **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -248,29 +330,34 @@ def ctpop(x, **kw):
 # ---------------------------------------------------------------------------
 
 
-@_traced_math_op
-def powf(base, exp, *, fastmath=None, **kw):
-    return _mlir_math.powf(_to_raw(base), _to_raw(exp), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def powf(base, exp, *, fastmath=None, **kwargs):
+    return math.powf(as_ir_value(base), as_ir_value(exp), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def fpowi(base, exp, *, fastmath=None, **kw):
-    return _mlir_math.fpowi(_to_raw(base), _to_raw(exp), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def fpowi(base, exp, *, fastmath=None, **kwargs):
+    return math.fpowi(as_ir_value(base), as_ir_value(exp), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def ipowi(base, exp, **kw):
-    return _mlir_math.ipowi(_to_raw(base), _to_raw(exp), **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def ipowi(base, exp, **kwargs):
+    return math.ipowi(as_ir_value(base), as_ir_value(exp), **kwargs)
 
 
-@_traced_math_op
-def atan2(y, x, *, fastmath=None, **kw):
-    return _mlir_math.atan2(_to_raw(y), _to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def atan2(y, x, *, fastmath=None, **kwargs):
+    return math.atan2(as_ir_value(y), as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def copysign(mag, sign, *, fastmath=None, **kw):
-    return _mlir_math.copysign(_to_raw(mag), _to_raw(sign), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def copysign(mag, sign, *, fastmath=None, **kwargs):
+    return math.copysign(as_ir_value(mag), as_ir_value(sign), fastmath=fastmath, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -278,36 +365,42 @@ def copysign(mag, sign, *, fastmath=None, **kw):
 # ---------------------------------------------------------------------------
 
 
-@_traced_math_op
-def fma(a, b, c, *, fastmath=None, **kw):
-    return _mlir_math.fma(_to_raw(a), _to_raw(b), _to_raw(c), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def fma(a, b, c, *, fastmath=None, **kwargs):
+    return math.fma(as_ir_value(a), as_ir_value(b), as_ir_value(c), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def clampf(x, lo, hi, *, fastmath=None, **kw):
-    return _mlir_math.clampf(_to_raw(x), _to_raw(lo), _to_raw(hi), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def clampf(x, lo, hi, *, fastmath=None, **kwargs):
+    return math.clampf(as_ir_value(x), as_ir_value(lo), as_ir_value(hi), fastmath=fastmath, **kwargs)
 
 
 # ---------------------------------------------------------------------------
-# Predicates (return i1)
+# Predicates :: Float -> Boolean
 # ---------------------------------------------------------------------------
 
 
-@_traced_math_op
-def isnan(x, *, fastmath=None, **kw):
-    return _mlir_math.isnan(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def isnan(x, *, fastmath=None, **kwargs):
+    return math.isnan(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def isinf(x, *, fastmath=None, **kw):
-    return _mlir_math.isinf(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def isinf(x, *, fastmath=None, **kwargs):
+    return math.isinf(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def isfinite(x, *, fastmath=None, **kw):
-    return _mlir_math.isfinite(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def isfinite(x, *, fastmath=None, **kwargs):
+    return math.isfinite(as_ir_value(x), fastmath=fastmath, **kwargs)
 
 
-@_traced_math_op
-def isnormal(x, *, fastmath=None, **kw):
-    return _mlir_math.isnormal(_to_raw(x), fastmath=fastmath, **kw)
+@dsl_loc_tracing
+@dsl_math_wrap_result
+def isnormal(x, *, fastmath=None, **kwargs):
+    return math.isnormal(as_ir_value(x), fastmath=fastmath, **kwargs)

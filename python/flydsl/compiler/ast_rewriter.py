@@ -4,15 +4,18 @@
 import ast
 import contextlib
 import difflib
+import functools
 import inspect
 import types
+import warnings
 from textwrap import dedent
 from typing import List
 
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
-from ..expr.numeric import _unwrap_value, _wrap_like
+from ..expr.meta import capture_user_location
+from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 
 
@@ -21,6 +24,12 @@ def _set_lineno(node, n=1):
         child.lineno = n
         child.end_lineno = n
     return node
+
+
+def _locate_block_args(block, loc):
+    """Give a region block's arguments (e.g. scf.for iv / iter_args) *loc*."""
+    for arg in block.arguments:
+        ir.BlockArgument(arg).set_location(loc)
 
 
 def _find_func_in_code_object(co, func_name):
@@ -119,13 +128,15 @@ def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_e
 
 def _check_local_var(name, local_vars):
     if name not in local_vars:
-        raise NameError(
+        warnings.warn(
             f"Variable '{name}' is assigned inside a control flow body (while/if/for) "
             f"but is not a local variable in the current scope. "
             f"It may be a closure variable captured from an outer function. "
             f"Fix: pass it as a function parameter or assign it to a local variable "
-            f"before the control flow statement."
+            f"before the control flow statement.",
+            stacklevel=2,
         )
+        return None
     return local_vars[name]
 
 
@@ -160,7 +171,8 @@ class ASTRewriter:
         module = ast.parse(f_src)
         assert isinstance(module.body[0], ast.FunctionDef), f"unexpected ast node {module.body[0]}"
 
-        context = types.SimpleNamespace()
+        context = types.SimpleNamespace(python_globals=f.__globals__)
+        context.filename = f.__code__.co_filename
         for transformer_ctor in cls.transformers:
             orig_code = ast.unparse(module) if env.debug.ast_diff else None
             func_node = module.body[0]
@@ -208,11 +220,36 @@ class ASTRewriter:
             log().warning("could not find rewritten function %s in code object", f.__name__)
             return f
 
-        f.__code__ = new_f_code_o
-
         for name, val in cls.rewrite_globals.items():
             f.__globals__[name] = val
 
+        # AST transforms may remove free-variable references, e.g.
+        # const_expr(True) is unpacked to True, dropping const_expr
+        # from co_freevars.  This makes co_freevars shorter than
+        # __closure__, so direct f.__code__ assignment raises ValueError.
+        # Rebuild the function with a matching (smaller) closure.
+        if f.__closure__ and new_f_code_o.co_freevars != f.__code__.co_freevars:
+            old_cells = {name: cell for name, cell in zip(f.__code__.co_freevars, f.__closure__)}
+            new_closure = []
+            for var in new_f_code_o.co_freevars:
+                if var in old_cells:
+                    new_closure.append(old_cells[var])
+                else:
+                    raise RuntimeError(
+                        f"AST rewriter produced free variable {var!r} that " f"is not in the original closure"
+                    )
+            new_f = types.FunctionType(
+                new_f_code_o,
+                f.__globals__,
+                f.__name__,
+                f.__defaults__,
+                tuple(new_closure),
+            )
+            new_f.__kwdefaults__ = f.__kwdefaults__
+            functools.update_wrapper(new_f, f)
+            return new_f
+
+        f.__code__ = new_f_code_o
         return f
 
 
@@ -288,7 +325,7 @@ class Transformer(ast.NodeTransformer):
         return new_stmts
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        if getattr(node, _ASTREWRITE_MARKER, False):
+        if getattr(node, _ASTREWRITE_MARKER, None) == type(self).__name__:
             return node
 
         with self.symbol_scopes.function_scope():
@@ -316,31 +353,34 @@ class Transformer(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_For(self, node: ast.For):
-        self._record_target_symbols(node.target)
-        node.iter = self.visit(node.iter)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            self._record_target_symbols(node.target)
+            node.iter = self.visit(node.iter)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_If(self, node: ast.If):
-        node.test = self.visit(node.test)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_While(self, node: ast.While):
-        node.test = self.visit(node.test)
         with self.symbol_scopes.control_flow_scope():
-            node.body = self._visit_stmt_block(node.body)
-        if node.orelse:
+            node.test = self.visit(node.test)
             with self.symbol_scopes.control_flow_scope():
-                node.orelse = self._visit_stmt_block(node.orelse)
+                node.body = self._visit_stmt_block(node.body)
+            if node.orelse:
+                with self.symbol_scopes.control_flow_scope():
+                    node.orelse = self._visit_stmt_block(node.orelse)
         return node
 
     def visit_With(self, node: ast.With):
@@ -444,7 +484,7 @@ class ReplaceIfWithDispatch(Transformer):
 
     @staticmethod
     def _to_i1(cond):
-        return _unwrap_value(cond)
+        return as_ir_value(cond)
 
     @staticmethod
     def _normalize_named_values(names, values, names_label="names", values_label="values"):
@@ -490,7 +530,7 @@ class ReplaceIfWithDispatch(Transformer):
     def _unwrap_mlir_values(values, state_names, branch_label):
         raw_values = []
         for name, value in zip(state_names, values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"if/else variable '{name}' in {branch_label} is {type(raw).__name__}, "
@@ -503,7 +543,7 @@ class ReplaceIfWithDispatch(Transformer):
     def _pack_dispatch_results(results, state_values):
         if not results:
             return None
-        wrapped = [_wrap_like(v, exemplar) for v, exemplar in zip(results, state_values)]
+        wrapped = [as_dsl_value(v, exemplar) for v, exemplar in zip(results, state_values)]
         if len(wrapped) == 1:
             return wrapped[0]
         return tuple(wrapped)
@@ -570,7 +610,7 @@ class ReplaceIfWithDispatch(Transformer):
         if not isinstance(cond_i1, ir.Value):
             raise TypeError(f"dynamic if condition must lower to ir.Value, got {type(cond_i1).__name__}")
 
-        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
+        none_vars = [name for name, value in zip(result_names, result_values) if as_ir_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -583,16 +623,16 @@ class ReplaceIfWithDispatch(Transformer):
 
         if not result_names:
             has_else = else_fn is not None
-            if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
+            if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=capture_user_location())
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
                 ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
-                scf.YieldOp([])
+                scf.YieldOp([], loc=capture_user_location())
             if has_else:
                 if len(if_op.regions[1].blocks) == 0:
                     if_op.regions[1].blocks.append(*[])
                 with ir.InsertionPoint(if_op.regions[1].blocks[0]):
                     ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
-                    scf.YieldOp([])
+                    scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
         if else_fn is None:
@@ -600,7 +640,7 @@ class ReplaceIfWithDispatch(Transformer):
 
         state_raw = []
         for name, value in zip(result_names, result_values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"state variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
@@ -609,7 +649,7 @@ class ReplaceIfWithDispatch(Transformer):
             state_raw.append(raw)
 
         result_types = [v.type for v in state_raw]
-        if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
+        if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=capture_user_location())
 
         with ir.InsertionPoint(if_op.regions[0].blocks[0]):
             then_result = ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
@@ -623,7 +663,7 @@ class ReplaceIfWithDispatch(Transformer):
                         f"if/else variable '{name}' type mismatch in then-branch: "
                         f"expected {expect_ty}, got {got.type}"
                     )
-            scf.YieldOp(then_raw)
+            scf.YieldOp(then_raw, loc=capture_user_location())
 
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
@@ -639,7 +679,7 @@ class ReplaceIfWithDispatch(Transformer):
                         f"if/else variable '{name}' type mismatch in else-branch: "
                         f"expected {expect_ty}, got {got.type}"
                     )
-            scf.YieldOp(else_raw)
+            scf.YieldOp(else_raw, loc=capture_user_location())
 
         wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(if_op.results), result_values)
         if len(result_names) == 1:
@@ -702,7 +742,7 @@ class ReplaceIfWithDispatch(Transformer):
                 decorator_list=[],
                 type_params=[],
             )
-            setattr(then_func, _ASTREWRITE_MARKER, True)
+            setattr(then_func, _ASTREWRITE_MARKER, type(self).__name__)
             then_func = ast.copy_location(then_func, node)
             then_func = ast.fix_missing_locations(then_func)
 
@@ -744,7 +784,7 @@ class ReplaceIfWithDispatch(Transformer):
                     decorator_list=[],
                     type_params=[],
                 )
-                setattr(else_func, _ASTREWRITE_MARKER, True)
+                setattr(else_func, _ASTREWRITE_MARKER, type(self).__name__)
                 else_func = ast.copy_location(else_func, node)
                 else_func = ast.fix_missing_locations(else_func)
                 dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
@@ -766,7 +806,7 @@ class ReplaceIfWithDispatch(Transformer):
                     decorator_list=[],
                     type_params=[],
                 )
-                setattr(else_func, _ASTREWRITE_MARKER, True)
+                setattr(else_func, _ASTREWRITE_MARKER, type(self).__name__)
                 else_func = ast.copy_location(else_func, node)
                 else_func = ast.fix_missing_locations(else_func)
                 dispatch_args.append(ast.Name(else_name, ctx=ast.Load()))
@@ -829,9 +869,9 @@ class ReplaceIfWithDispatch(Transformer):
         sandbox.region.blocks.append()
         with ir.InsertionPoint(sandbox.region.blocks[0]):
             probe_then = then_fn()
-            probe_then_raw = _unwrap_value(probe_then)
+            probe_then_raw = as_ir_value(probe_then)
             probe_else = else_fn()
-            probe_else_raw = _unwrap_value(probe_else)
+            probe_else_raw = as_ir_value(probe_else)
             if not isinstance(probe_then_raw, ir.Value):
                 raise TypeError(
                     f"dynamic ifexp then-branch must produce an MLIR Value, " f"got {type(probe_then_raw).__name__}"
@@ -848,16 +888,16 @@ class ReplaceIfWithDispatch(Transformer):
                 )
             yield_type = probe_then_raw.type
 
-        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=ir.Location.unknown())
+        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=capture_user_location())
         with ir.InsertionPoint(op.regions[0].blocks[0]):
-            scf.YieldOp([_unwrap_value(then_fn())])
+            scf.YieldOp([as_ir_value(then_fn())], loc=capture_user_location())
         if len(op.regions[1].blocks) == 0:
             op.regions[1].blocks.append()
         with ir.InsertionPoint(op.regions[1].blocks[0]):
-            scf.YieldOp([_unwrap_value(else_fn())])
+            scf.YieldOp([as_ir_value(else_fn())], loc=capture_user_location())
 
         sandbox.operation.erase()
-        return _wrap_like(op.results[0], probe_then)
+        return as_dsl_value(op.results[0], probe_then)
 
 
 @ASTRewriter.register
@@ -866,17 +906,18 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
     @staticmethod
     def _to_index(val):
+        loc = capture_user_location()
         if isinstance(val, ir.Value):
             if val.type == ir.IndexType.get():
                 return val
-            return arith.IndexCastOp(ir.IndexType.get(), val).result
+            return arith.IndexCastOp(ir.IndexType.get(), val, loc=loc).result
         if hasattr(val, "ir_value"):
             raw = val.ir_value()
             if isinstance(raw, ir.Value) and raw.type != ir.IndexType.get():
-                return arith.IndexCastOp(ir.IndexType.get(), raw).result
+                return arith.IndexCastOp(ir.IndexType.get(), raw, loc=loc).result
             return raw
         if isinstance(val, int) and not isinstance(val, bool):
-            return arith.ConstantOp(ir.IndexType.get(), val).result
+            return arith.ConstantOp(ir.IndexType.get(), val, loc=loc).result
         raise TypeError(f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}")
 
     @staticmethod
@@ -890,20 +931,24 @@ class InsertEmptyYieldForSCFFor(Transformer):
         stop_val = InsertEmptyYieldForSCFFor._to_index(stop)
         step_val = InsertEmptyYieldForSCFFor._to_index(step)
         if init is not None:
-            init = [_unwrap_value(v) for v in init]
-            for_op = scf.ForOp(start_val, stop_val, step_val, init)
+            init = [as_ir_value(v) for v in init]
+            loc = capture_user_location()
+            for_op = scf.ForOp(start_val, stop_val, step_val, init, loc=loc)
+            _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable, list(for_op.inner_iter_args)
         else:
-            for_op = scf.ForOp(start_val, stop_val, step_val)
+            loc = capture_user_location()
+            for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable
 
     @staticmethod
     def scf_for_dispatch(start, stop, step, body_fn, *, result_names=(), result_values=()):
-        start_val = _unwrap_value(start)
-        stop_val = _unwrap_value(stop)
-        step_val = _unwrap_value(step)
+        start_val = as_ir_value(start)
+        stop_val = as_ir_value(stop)
+        step_val = as_ir_value(step)
 
         i32_ty = ir.IntegerType.get_signless(32)
         idx_ty = ir.IndexType.get()
@@ -913,7 +958,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 raise TypeError(f"for-loop {name} must be i32, got {type(val).__name__}")
             if val.type == idx_ty:
                 log().warning("for-loop %s is index type, consider using fx.Int32 instead", name)
-                bounds[i] = (name, arith.IndexCastOp(i32_ty, val).result)
+                bounds[i] = (name, arith.IndexCastOp(i32_ty, val, loc=capture_user_location()).result)
             elif val.type != i32_ty:
                 raise TypeError(f"for-loop {name} must be i32, got {val.type}")
         start_val, stop_val, step_val = bounds[0][1], bounds[1][1], bounds[2][1]
@@ -922,7 +967,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
         result_values = tuple(result_values)
         result_map = {name: value for name, value in zip(result_names, result_values)}
 
-        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
+        none_vars = [name for name, value in zip(result_names, result_values) if as_ir_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -933,16 +978,18 @@ class InsertEmptyYieldForSCFFor(Transformer):
             )
 
         if not result_names:
-            for_op = scf.ForOp(start_val, stop_val, step_val)
+            loc = capture_user_location()
+            for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 iv = for_op.induction_variable
                 body_fn(iv, result_names)
-                scf.YieldOp([])
+                scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
         state_raw = []
         for name, value in zip(result_names, result_values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"for-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
@@ -950,11 +997,13 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 )
             state_raw.append(raw)
 
-        for_op = scf.ForOp(start_val, stop_val, step_val, state_raw)
+        loc = capture_user_location()
+        for_op = scf.ForOp(start_val, stop_val, step_val, state_raw, loc=loc)
+        _locate_block_args(for_op.body, loc)
 
         with ir.InsertionPoint(for_op.body):
             iv = for_op.induction_variable
-            inner_args = [_wrap_like(a, ex) for a, ex in zip(for_op.inner_iter_args, result_values)]
+            inner_args = [as_dsl_value(a, ex) for a, ex in zip(for_op.inner_iter_args, result_values)]
 
             body_result = body_fn(iv, result_names, *inner_args)
 
@@ -968,7 +1017,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
                     raise TypeError(
                         f"for-loop variable '{name}' type mismatch: " f"expected {expect_ty}, got {got.type}"
                     )
-            scf.YieldOp(body_raw)
+            scf.YieldOp(body_raw, loc=capture_user_location())
 
         wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(for_op.results), result_values)
         if len(result_names) == 1:
@@ -1183,23 +1232,24 @@ class InsertEmptyYieldForSCFFor(Transformer):
             node.iter.func = ast.Name(id="scf_range", ctx=ast.Load())
         line = ast.dump(node.iter)
         if "for_" in line or "scf.for_" in line or "scf_range" in line:
-            node.iter = self.visit(node.iter)
             with self.symbol_scopes.control_flow_scope():
-                if isinstance(node.target, ast.Name):
-                    self.symbol_scopes.record_symbol(node.target.id)
-                node.body = self._visit_stmt_block(node.body)
-            if node.orelse:
+                node.iter = self.visit(node.iter)
                 with self.symbol_scopes.control_flow_scope():
-                    node.orelse = self._visit_stmt_block(node.orelse)
-            new_yield = ast.Expr(ast.Yield(value=None))
-            if node.body and not self._is_yield(node.body[-1]):
-                last_statement = node.body[-1]
-                assert (
-                    last_statement.end_lineno is not None
-                ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
-                new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
-                node.body.append(new_yield)
-            node = ast.fix_missing_locations(node)
+                    if isinstance(node.target, ast.Name):
+                        self.symbol_scopes.record_symbol(node.target.id)
+                    node.body = self._visit_stmt_block(node.body)
+                if node.orelse:
+                    with self.symbol_scopes.control_flow_scope():
+                        node.orelse = self._visit_stmt_block(node.orelse)
+                new_yield = ast.Expr(ast.Yield(value=None))
+                if node.body and not self._is_yield(node.body[-1]):
+                    last_statement = node.body[-1]
+                    assert (
+                        last_statement.end_lineno is not None
+                    ), f"last_statement {ast.unparse(last_statement)} must have end_lineno"
+                    new_yield = ast.fix_missing_locations(_set_lineno(new_yield, last_statement.end_lineno))
+                    node.body.append(new_yield)
+                node = ast.fix_missing_locations(node)
         return node
 
 
@@ -1217,7 +1267,7 @@ class ReplaceYieldWithSCFYield(Transformer):
                 processed.append(a.ir_value())
             else:
                 processed.append(a)
-        scf.YieldOp(processed)
+        scf.YieldOp(processed, loc=capture_user_location())
         parent_op = ir.InsertionPoint.current.block.owner
         if hasattr(parent_op, "results") and len(parent_op.results):
             results = list(parent_op.results)
@@ -1252,7 +1302,7 @@ class CanonicalizeWhile(Transformer):
         )
         result_map = {name: value for name, value in zip(result_names, result_values)}
 
-        none_vars = [name for name, value in zip(result_names, result_values) if _unwrap_value(value) is None]
+        none_vars = [name for name, value in zip(result_names, result_values) if as_ir_value(value) is None]
         if none_vars:
             raise TypeError(
                 f"Variable(s) {none_vars} initialized as None before a dynamic "
@@ -1265,7 +1315,7 @@ class CanonicalizeWhile(Transformer):
 
         state_raw = []
         for name, value in zip(result_names, result_values):
-            raw = _unwrap_value(value)
+            raw = as_ir_value(value)
             if not isinstance(raw, ir.Value):
                 raise TypeError(
                     f"while-loop variable '{name}' is {type(raw).__name__}, not an MLIR Value; "
@@ -1274,22 +1324,25 @@ class CanonicalizeWhile(Transformer):
             state_raw.append(raw)
 
         result_types = [v.type for v in state_raw]
-        while_op = scf.WhileOp(result_types, state_raw, loc=ir.Location.unknown())
-        while_op.regions[0].blocks.append(*result_types)
-        while_op.regions[1].blocks.append(*result_types)
+        loc = capture_user_location()
+        while_op = scf.WhileOp(result_types, state_raw, loc=loc)
+        # Give the loop-carried block arguments the user location.
+        arg_locs = [loc] * len(result_types)
+        while_op.regions[0].blocks.append(*result_types, arg_locs=arg_locs)
+        while_op.regions[1].blocks.append(*result_types, arg_locs=arg_locs)
 
         with ir.InsertionPoint(while_op.regions[0].blocks[0]):
             before_args = list(while_op.regions[0].blocks[0].arguments)
-            wrapped_before = [_wrap_like(a, ex) for a, ex in zip(before_args, result_values)] if result_names else []
+            wrapped_before = [as_dsl_value(a, ex) for a, ex in zip(before_args, result_values)] if result_names else []
             before_cond = ReplaceIfWithDispatch._call_branch(before_fn, result_names, wrapped_before)
             cond_i1 = ReplaceIfWithDispatch._to_i1(before_cond)
             if not isinstance(cond_i1, ir.Value):
                 raise TypeError(f"dynamic while condition must lower to ir.Value, got {type(cond_i1).__name__}")
-            scf.ConditionOp(cond_i1, before_args)
+            scf.ConditionOp(cond_i1, before_args, loc=capture_user_location())
 
         with ir.InsertionPoint(while_op.regions[1].blocks[0]):
             after_args = list(while_op.regions[1].blocks[0].arguments)
-            wrapped_after = [_wrap_like(a, ex) for a, ex in zip(after_args, result_values)] if result_names else []
+            wrapped_after = [as_dsl_value(a, ex) for a, ex in zip(after_args, result_values)] if result_names else []
             body_result = ReplaceIfWithDispatch._call_branch(after_fn, result_names, wrapped_after)
             if result_names:
                 body_values = ReplaceIfWithDispatch._normalize_branch_result(
@@ -1301,9 +1354,9 @@ class CanonicalizeWhile(Transformer):
                         raise TypeError(
                             f"while-loop variable '{name}' type mismatch: expected {expect_ty}, got {got.type}"
                         )
-                scf.YieldOp(body_raw)
+                scf.YieldOp(body_raw, loc=capture_user_location())
             else:
-                scf.YieldOp([])
+                scf.YieldOp([], loc=capture_user_location())
 
         if not result_names:
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)

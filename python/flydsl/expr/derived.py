@@ -4,7 +4,7 @@
 
 from .._mlir.dialects import fly
 from .._mlir.dialects._fly_enum_gen import MmaOperand
-from .meta import traced_op
+from .meta import dsl_loc_tracing
 from .numeric import Boolean, Numeric
 from .primitive import *
 from .typing import Int8, Layout, Tensor, TiledCopy, TiledMma
@@ -40,17 +40,17 @@ class ThrCopy(TiledCopy):
     def thr_idx(self):
         return self._thr_idx
 
-    @traced_op
-    def partition_S(self, src: Tensor, loc=None, ip=None):
-        return tiled_copy_partition_src(self, src, self._thr_idx_int, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def partition_S(self, src: Tensor):
+        return tiled_copy_partition_src(self, src, self._thr_idx_int)
 
-    @traced_op
-    def partition_D(self, dst: Tensor, loc=None, ip=None):
-        return tiled_copy_partition_dst(self, dst, self._thr_idx_int, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def partition_D(self, dst: Tensor):
+        return tiled_copy_partition_dst(self, dst, self._thr_idx_int)
 
-    @traced_op
-    def retile(self, t: Tensor, loc=None, ip=None):
-        return tiled_copy_retile(self, t, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def retile(self, t: Tensor):
+        return tiled_copy_retile(self, t)
 
 
 class ThrMma(TiledMma):
@@ -70,20 +70,21 @@ class ThrMma(TiledMma):
     def thr_idx(self):
         return self._thr_idx
 
-    @traced_op
-    def partition_A(self, a: Tensor, loc=None, ip=None):
-        return tiled_mma_partition(MmaOperand.A, self.tiled_mma, a, self._thr_idx_int, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def partition_A(self, a: Tensor):
+        return tiled_mma_partition(MmaOperand.A, self.tiled_mma, a, self._thr_idx_int)
 
-    @traced_op
-    def partition_B(self, b: Tensor, loc=None, ip=None):
-        return tiled_mma_partition(MmaOperand.B, self.tiled_mma, b, self._thr_idx_int, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def partition_B(self, b: Tensor):
+        return tiled_mma_partition(MmaOperand.B, self.tiled_mma, b, self._thr_idx_int)
 
-    @traced_op
-    def partition_C(self, c: Tensor, loc=None, ip=None):
-        return tiled_mma_partition(MmaOperand.C, self.tiled_mma, c, self._thr_idx_int, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def partition_C(self, c: Tensor):
+        return tiled_mma_partition(MmaOperand.C, self.tiled_mma, c, self._thr_idx_int)
 
 
-def make_rmem_tensor(shape_or_layout, dtype, *, loc=None, ip=None):
+@dsl_loc_tracing
+def make_rmem_tensor(shape_or_layout, dtype):
     """Creates a tensor in register memory with the specified layout/shape and data type.
 
     If shape_or_layout is a shape, it is converted to a layout with column-major ordering.
@@ -93,20 +94,21 @@ def make_rmem_tensor(shape_or_layout, dtype, *, loc=None, ip=None):
         tensor = make_rmem_tensor(8, fx.Float32)
         tensor = make_rmem_tensor(make_layout(4, 1), fx.Float16)
     """
-    if not issubclass(dtype, Numeric):
-        raise TypeError(f"dtype must be a Numeric type, but got {type(dtype)}")
+    if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
+        raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
     elem_ty = dtype.ir_type if dtype is not Boolean else Int8.ir_type
 
     if not isinstance(shape_or_layout, Layout):
-        layout = make_ordered_layout(shape_or_layout, 0, loc=loc, ip=ip)
+        layout = make_ordered_layout(shape_or_layout, 0)
     else:
         layout = shape_or_layout
 
     tensorTy = fly.MemRefType.get(elem_ty, layout.type, fly.AddressSpace.Register)
-    return memref_alloca(tensorTy, layout=layout, loc=loc, ip=ip)
+    return memref_alloca(tensorTy, layout=layout)
 
 
-def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
+@dsl_loc_tracing
+def make_layout_tv(thr_layout, val_layout):
     """Build a thread-value (TV) layout from separate thread and value layouts.
 
     Computes the raked product of *thr_layout* and *val_layout*, then
@@ -131,11 +133,13 @@ def make_layout_tv(thr_layout, val_layout, loc=None, ip=None):
     return (tiler_mn, layout_tv)
 
 
+@dsl_loc_tracing
 def make_tiled_copy_tv(atom, thr_layout, val_layout):
     tiler_mn, layout_tv = make_layout_tv(thr_layout, val_layout)
     return make_tiled_copy(atom, layout_tv, tiler_mn)
 
 
+@dsl_loc_tracing
 def make_tiled_copy_A(copy_atom, tiled_mma):
     """Create a TiledCopy matched to operand A of *tiled_mma*."""
     layout_tv = tiled_mma.tv_layout_A_tiled
@@ -147,6 +151,7 @@ def make_tiled_copy_A(copy_atom, tiled_mma):
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
 
+@dsl_loc_tracing
 def make_tiled_copy_B(copy_atom, tiled_mma):
     """Create a TiledCopy matched to operand B of *tiled_mma*."""
     layout_tv = tiled_mma.tv_layout_B_tiled
@@ -158,6 +163,7 @@ def make_tiled_copy_B(copy_atom, tiled_mma):
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
 
 
+@dsl_loc_tracing
 def make_tiled_copy_C(copy_atom, tiled_mma):
     """Create a TiledCopy matched to operand C of *tiled_mma*."""
     layout_tv = tiled_mma.tv_layout_C_tiled

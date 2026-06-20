@@ -10,14 +10,16 @@ from typing import Any, List
 
 from .._mlir import ir
 from ..compiler.protocol import (
+    c_abi_spec,
+    cache_signature,
     dsl_align_of,
     dsl_size_of,
     extract_to_ir_values,
-    get_c_pointers,
     get_ir_types,
     peek_from_ptr,
     poke_into_ptr,
 )
+from .meta import dsl_loc_tracing
 from .primitive import add_offset
 from .typing import Array, Constexpr, Pointer
 
@@ -30,6 +32,9 @@ __all__ = [
     "Align",
     "Storage",
     "Arena",
+    "is_composite_type",
+    "is_struct_type",
+    "is_specializable_struct_type",
 ]
 
 
@@ -328,6 +333,18 @@ def _inline_display_name(display: str, params, fields: tuple[FieldDef, ...]) -> 
     return f"{display}[{body}]"
 
 
+def is_specializable_struct_type(tp: Any) -> bool:
+    """True if *tp* is a struct type carrying a (possibly nested) Constexpr field."""
+    if not is_struct_type(tp):
+        return False
+    for _name, eff in _effective_field_defs(tp):
+        if isinstance(eff, type) and issubclass(eff, Constexpr):
+            return True
+        if is_specializable_struct_type(eff):
+            return True
+    return False
+
+
 def _make_composite_class(
     *,
     name: str,
@@ -413,13 +430,20 @@ def _make_composite_class(
             )
         )
 
-    def __get_c_pointers__(self):
-        return list(
-            chain.from_iterable(
-                get_c_pointers(_carrier_for_field(eff_type, getattr(self, name)))
-                for name, eff_type in _effective_field_defs(type(self))
-            )
-        )
+    def __c_abi_spec__(self):
+        # Recurse each non-constexpr field through the shared ABI dispatcher and
+        # wrap every sub-slot fill so it reads the field off the struct instance.
+        slots = []
+        for name, eff_type in _effective_field_defs(type(self)):
+            if _is_constexpr_type(eff_type):
+                continue
+            for ctype, subfill in c_abi_spec(getattr(self, name)):
+
+                def fill(struct_arg, s, _n=name, _f=subfill):
+                    _f(getattr(struct_arg, _n), s)
+
+                slots.append((ctype, fill))
+        return slots
 
     @classmethod
     def __dsl_size_of__(cls) -> int:
@@ -471,10 +495,11 @@ def _make_composite_class(
     def __cache_signature__(self):
         parts = [type(self)]
         for field in fields:
-            value = getattr(self, field.name)
-            sig = getattr(value, "__cache_signature__", None)
-            if callable(sig):
-                parts.append((field.name, sig()))
+            if _is_constexpr_type(field.type_spec):
+                # Constexpr fields are already folded into type(self) by _specialize_type,
+                # so only the non-constexpr field values need to be encoded here.
+                continue
+            parts.append((field.name, cache_signature(getattr(self, field.name))))
         return tuple(parts)
 
     namespace = {
@@ -494,7 +519,7 @@ def _make_composite_class(
         "__construct_from_ir_values__": __construct_from_ir_values__,
         "__cache_signature__": __cache_signature__,
         "__get_ir_types__": __get_ir_types__,
-        "__get_c_pointers__": __get_c_pointers__,
+        "__c_abi_spec__": __c_abi_spec__,
         "__dsl_size_of__": __dsl_size_of__,
         "__dsl_align_of__": __dsl_align_of__,
         "__peek_from_ptr__": __peek_from_ptr__,
@@ -744,6 +769,7 @@ class Arena:
         self._offset = offset + nbytes
         return offset
 
+    @dsl_loc_tracing
     def allocate(self, storable_or_int, alignment=None):
         """Allocate a Storable type or raw bytes, returning ``Storage[T]``.
 

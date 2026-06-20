@@ -206,6 +206,66 @@ print(f'Instructions: {n}, with source mapping: {has_src} ({100*has_src//max(n,1
 
 ---
 
+## PMC Mode: Cache / HBM Counter Capture (separate from ATT)
+
+ATT (above) gives per-instruction stall timing but **no cache counters**. To
+answer "what is the L2 hit rate / HBM read efficiency", capture hardware
+performance counters (PMC) in a **separate** run. PMC and ATT cannot be
+combined in one job.
+
+**Counter set** (L2 + HBM read efficiency):
+
+```yaml
+# /tmp/pmc_l2.yaml
+jobs:
+  - pmc: [TCC_HIT_sum, TCC_MISS_sum, TCC_REQ_sum]
+    kernel_include_regex: pa_decode_ps_kernel_0
+    output_file: pmc_l2
+    output_directory: /tmp/pmc_out
+    output_format: [csv]
+```
+
+```yaml
+# /tmp/pmc_ea.yaml  (HBM-facing read requests + 32B-partial fraction)
+jobs:
+  - pmc: [TCC_EA0_RDREQ_sum, TCC_EA0_RDREQ_32B_sum, TCC_EA0_RDREQ_DRAM_sum, TCP_TCC_READ_REQ_sum]
+    kernel_include_regex: pa_decode_ps_kernel_0
+    output_file: pmc_ea
+    output_directory: /tmp/pmc_ea_out
+    output_format: [csv]
+```
+
+Run each (cache disabled is NOT needed — PMC doesn't use source mapping, so
+leave `FLYDSL_RUNTIME_ENABLE_CACHE=1` for speed):
+
+```bash
+HIP_VISIBLE_DEVICES=<gpu> FLYDSL_RUNTIME_ENABLE_CACHE=1 PYTHONPATH=./ \
+  rocprofv3 -i /tmp/pmc_l2.yaml -- python <test_script> --perf
+HIP_VISIBLE_DEVICES=<gpu> FLYDSL_RUNTIME_ENABLE_CACHE=1 PYTHONPATH=./ \
+  rocprofv3 -i /tmp/pmc_ea.yaml -- python <test_script> --perf
+```
+
+**CRITICAL — keep each job to a single hardware pass (≤ ~4 TCC counters).**
+Packing many counters into one job forces multi-pass collection, which on
+gfx942 has been observed to trigger a **GPU Hang (HW Exception)**. Split into
+multiple single-pass jobs (as above) instead of one big counter list.
+
+Discover available counters with:
+```bash
+rocprofv3 --list-avail 2>/dev/null | grep -iE "TCC_HIT|TCC_MISS|TCC_EA0_RDREQ|TCP_TCC_READ"
+```
+
+Output lands in `<output_directory>/pass_1/<output_file>_counter_collection.csv`.
+Analyze with `kernel-trace-analysis/scripts/pmc_l2_analyzer.py` (see that skill).
+
+Quick interpretation:
+- **L2 hit rate** = `TCC_HIT/(TCC_HIT+TCC_MISS)`. For independent per-sequence
+  paged-KV decode, ~1-3% is **expected** (streaming, no reuse) — not a bug.
+- **32B fraction** = `TCC_EA0_RDREQ_32B/TCC_EA0_RDREQ`. ~0% = full 64B lines,
+  no spatial-locality waste.
+
+---
+
 ## Output
 
 After capture, report:
@@ -240,3 +300,5 @@ Run /kernel-trace-analysis to analyze bottlenecks.
 | Trace truncated (missing instructions) | Increase `att_buffer_size` to `0xC000000` (192MB) |
 | SSH timeout | Increase timeout, check host connectivity |
 | `kernel_iteration_range` mismatch | Test runs fewer iterations than expected -- use `"[0, [1-2]]"` |
+| GPU Hang / HW Exception during PMC capture | Counter list forced multi-pass — split into single-pass jobs of ≤ ~4 TCC counters |
+| PMC CSV empty / wrong kernel row | Match `Kernel_Name` substring; the first row may be a torch/elementwise kernel |

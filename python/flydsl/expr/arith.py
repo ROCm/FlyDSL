@@ -15,9 +15,27 @@ Usage:
 
 from .._mlir.dialects.arith import *  # noqa: F401,F403
 
+__all__ = [
+    "ArithValue",  # Deprecated: will be removed in a future release
+    "_to_raw",  # Deprecated: will be removed in a future release
+    "andi",
+    "constant",
+    "constant_vector",
+    "index",  # Deprecated: will be removed in a future release
+    "index_cast",  # Deprecated: will be removed in a future release
+    "int_to_fp",
+    "shli",
+    "sitofp",
+    "trunc_f",
+    "unwrap",  # Deprecated: will be removed in a future release
+    "xori",
+    "cmpi",
+    "cmpf",
+]
+
 # Override star-import cmpi/cmpf to accept Numeric types (Int32, etc.)
 from .._mlir.dialects import arith as _mlir_arith
-from .meta import traced_op
+from .meta import dsl_loc_tracing
 from .utils.arith import (  # noqa: F401
     ArithValue,
     _to_raw,
@@ -36,7 +54,7 @@ from .utils.arith import (  # noqa: F401
 )
 
 
-@traced_op
+@dsl_loc_tracing
 def cmpi(predicate, lhs, rhs, **kwargs):
     """Integer comparison accepting DSL numeric types (Int32, ArithValue, etc.).
 
@@ -51,7 +69,7 @@ def cmpi(predicate, lhs, rhs, **kwargs):
     return _mlir_arith.cmpi(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
 
 
-@traced_op
+@dsl_loc_tracing
 def cmpf(predicate, lhs, rhs, **kwargs):
     """Floating-point comparison accepting DSL numeric types.
 

@@ -47,28 +47,29 @@ def run_torch_bench(a, b):
 
 params = (
     [
-        (32, 384, 7168, 32, 64, 256, 14, 1, 2, 2),
-        (32, 7168, 2048, 16, 64, 256, 2, 1, 2, 1),
-        (32, 384, 16384, 32, 64, 256, 16, 1, 2, 2),
-        (8, 5120, 2880, 32, 128, 64, 9, 1, 4, 1),
-        (32, 2880, 2048, 32, 64, 256, 4, 1, 2, 2),
+        (2048, 2048, 2048, 128, 128, 64, 4, 1, 4, 4, 1),
+        (32, 384, 7168, 32, 64, 64, 5, 16, 2, 2, 1),
+        (32, 7168, 2048, 16, 64, 128, 4, 1, 1, 1, 2),
+        (32, 384, 16384, 32, 64, 256, 3, 16, 1, 4, 1),
+        (8, 5120, 2880, 16, 64, 64, 5, 3, 1, 2, 1),
+        (32, 2880, 2048, 16, 64, 128, 5, 2, 1, 2, 1),
     ]
     if IS_GFX950
     else [
-        (32, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
-        (4, 384, 7168, 16, 64, 128, 14, 1, 2, 1),
-        (65, 1024, 8192, 48, 64, 128, 8, 1, 2, 1),
-        (8, 5120, 2880, 32, 128, 64, 9, 2, 2, 1),
-        (4096, 4096, 4096, 128, 128, 64, 1, 2, 2, 1),
-        (8192, 8192, 8192, 128, 128, 64, 1, 2, 2, 1),
-        (32, 2880, 2048, 32, 64, 128, 4, 1, 2, 1),
+        (32, 384, 7168, 16, 64, 128, 2, 14, 1, 2, 1),
+        (4, 384, 7168, 16, 64, 128, 2, 14, 1, 2, 1),
+        (65, 1024, 8192, 48, 64, 128, 2, 8, 1, 2, 1),
+        (8, 5120, 2880, 32, 128, 64, 2, 9, 2, 2, 1),
+        (4096, 4096, 4096, 128, 128, 64, 2, 1, 2, 2, 1),
+        (8192, 8192, 8192, 128, 128, 64, 2, 1, 2, 2, 1),
+        (32, 2880, 2048, 32, 64, 128, 2, 4, 1, 2, 1),
     ]
 )
 
 
 @pytest.mark.parametrize("dtype", ["fp16", "bf16"])
 @pytest.mark.parametrize(
-    "m, n, k, TILE_M, TILE_N, TILE_K, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS",
+    "m, n, k, TILE_M, TILE_N, TILE_K, STAGES, SPLIT_K, BLOCK_M_WARPS, BLOCK_N_WARPS, BLOCK_K_WARPS",
     params,
 )
 @pytest.mark.parametrize(
@@ -86,6 +87,7 @@ def test_mfma_flyc_splitk_hgemm(
     TILE_M,
     TILE_N,
     TILE_K,
+    STAGES,
     SPLIT_K,
     BLOCK_M_WARPS,
     BLOCK_N_WARPS,
@@ -132,6 +134,7 @@ def test_mfma_flyc_splitk_hgemm(
         "TILE_M": TILE_M,
         "TILE_N": TILE_N,
         "TILE_K": TILE_K,
+        "STAGES": STAGES,
         "SPLIT_K": SPLIT_K,
         "BLOCK_M_WARPS": BLOCK_M_WARPS,
         "BLOCK_N_WARPS": BLOCK_N_WARPS,
@@ -178,6 +181,7 @@ if __name__ == "__main__":
     parser.add_argument("--TILE_M", type=int, default=256)
     parser.add_argument("--TILE_N", type=int, default=256)
     parser.add_argument("--TILE_K", type=int, default=64)
+    parser.add_argument("--STAGES", type=int, default=2)
     parser.add_argument("--SPLIT_K", type=int, default=1)
     parser.add_argument("--BLOCK_M_WARPS", type=int, default=2)
     parser.add_argument("--BLOCK_N_WARPS", type=int, default=2)
@@ -196,6 +200,7 @@ if __name__ == "__main__":
             TILE_M=args.TILE_M,
             TILE_N=args.TILE_N,
             TILE_K=args.TILE_K,
+            STAGES=args.STAGES,
             SPLIT_K=args.SPLIT_K,
             BLOCK_M_WARPS=args.BLOCK_M_WARPS,
             BLOCK_N_WARPS=args.BLOCK_N_WARPS,
