@@ -7,7 +7,6 @@ per-channel fp32 scales applied in the epilogue (``scale_mode="ptpc"``).
 """
 
 import functools
-import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -209,7 +208,7 @@ def compile_fp8fp4_gemm(
 
     num_k_tiles = split_k_chunk // tile_k
     if num_k_tiles < num_buffers:
-        raise ValueError(f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, " f"got {num_k_tiles}")
+        raise ValueError(f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, got {num_k_tiles}")
 
     gpu_arch = str(get_hip_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
@@ -291,6 +290,7 @@ def compile_fp8fp4_gemm(
     _a_frag_ds = wmma_m_rep * _a_frag_loads_per_wm
     _bs_ds_loads = wmma_n_rep * _b_frag_loads_per_wn + _scale_ds_loads
     _as_ds_loads = _a_frag_ds + _scale_ds_loads
+    _row_major_k_prefetch_bundle_ds = _a_frag_ds + _bs_ds_loads
 
     lds_a_stride_bytes = packed_tile_k_a + LDS_PAD_A_BYTES
 
@@ -340,9 +340,7 @@ def compile_fp8fp4_gemm(
     arena_alloc = SmemAllocator(
         None,
         arch=gpu_arch,
-        global_sym_name=(
-            f"mxscale_{data_format}_{tile_m}x{tile_n}x{tile_k}_" f"{m_warp}x{n_warp}_{num_buffers}buf_arena"
-        ),
+        global_sym_name=(f"mxscale_{data_format}_{tile_m}x{tile_n}x{tile_k}_{m_warp}x{n_warp}_{num_buffers}buf_arena"),
     )
 
     stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
@@ -438,10 +436,17 @@ def compile_fp8fp4_gemm(
     use_fp4_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
+    use_row_major_k_prefetch = wmma_m_rep == 1 and k_wmma_steps > 1
+    _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
+    _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
+    use_row_major_late_signal = use_row_major_k_prefetch
 
-    # A-scale VGPR-ring prefetch depth (K-tiles ahead).
-    _bvs_D_default = 3 if (use_ascale_vgpr and use_row_major_streaming_schedule) else 1
-    _bvs_D = max(1, int(os.environ.get("FLYDSL_BUFFER_VGPR_SCALE_DEPTH", str(_bvs_D_default))))
+    # A-scale VGPR-ring prefetch depth (K-tiles ahead).  Deeper K tiles expose
+    # more latency to hide; depth 4 improves the small-M row-major large-K path
+    if use_ascale_vgpr and use_row_major_streaming_schedule:
+        _bvs_D = 4 if num_buffers >= 4 else 3
+    else:
+        _bvs_D = 1
     _bvs_active = use_ascale_vgpr
 
     if is_mxscale:
@@ -454,6 +459,7 @@ def compile_fp8fp4_gemm(
     use_ws_tdm_split_signal_overlap = (
         (use_fp8_quadrant_schedule or use_fp8_deep_pipeline_schedule) and num_buffers == 4 and use_cluster
     )
+    use_tdm_late_signal_overlap = use_ws_tdm_split_signal_overlap or use_row_major_late_signal
 
     if use_fp4_quadrant_schedule:
         _fp4_half_wm = wmma_m_rep // 2
@@ -529,6 +535,7 @@ def compile_fp8fp4_gemm(
 
         warp_m_base = wave_m_idx * arith.index(warp_tile_m)
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
+        m_idx = fx.Index(i32_m)
 
         def _load_contig_i32(rsrc, base_idx, n, soff):
             # Load n contiguous i32 values through the widest legal buffer_load chunks.
@@ -546,29 +553,63 @@ def compile_fp8fp4_gemm(
                         out[start + c] = rv[c]
             return out
 
+        _scale_identity_i32 = arith.constant(0x7F7F7F7F, type=T.i32)
+
         if const_expr(use_ascale_vgpr):
             # A-scale VGPR path: read scale_A[M, K//32] directly from its row-major layout.
-            _ascale_rsrc = buffer_ops.create_buffer_resource(arg_a_scale, max_size=False)
+            _ascale_nbytes = m_idx * arith.index(K_scale)
+            _ascale_rsrc = buffer_ops.create_buffer_resource(
+                arg_a_scale,
+                max_size=False,
+                num_records_bytes=_ascale_nbytes,
+            )
             _ascale_row_i32 = K_scale // 4
             _ascale_row0 = blk_m + warp_m_base + lane16
             if const_expr(ascale_opsel):
                 _ascale_row0 = _ascale_row0 + lane_kgrp * arith.index(ascale_half * WMMA_M)
             _vs_tile_a = k_wmma_steps * ascale_load
 
-            def _load_ascale(k_base):
+            def _load_contig_i32_guarded_row(row, n, soff):
+                row_valid = row < m_idx
+                if_op = scf.IfOp(row_valid, [T.i32] * n, has_else=True)
+                with ir.InsertionPoint(if_op.then_block):
+                    vals = _load_contig_i32(
+                        _ascale_rsrc,
+                        row * arith.index(_ascale_row_i32),
+                        n,
+                        soff,
+                    )
+                    scf.YieldOp([arith.unwrap(v) for v in vals])
+                with ir.InsertionPoint(if_op.else_block):
+                    scf.YieldOp([arith.unwrap(_scale_identity_i32) for _ in range(n)])
+                return list(if_op.results)
+
+            def _load_ascale_impl(k_base, guarded):
                 kt = k_base // arith.index(tile_k)
                 soff = arith.index_cast(T.i32, kt * arith.index(scale_k_per_tile))
                 vals = [None] * (k_wmma_steps * ascale_load)
                 for i in range_constexpr(ascale_load):
-                    vidx = (_ascale_row0 + arith.index(i * WMMA_M)) * arith.index(_ascale_row_i32)
-                    ks_vals = _load_contig_i32(_ascale_rsrc, vidx, k_wmma_steps, soff)
+                    row = _ascale_row0 + arith.index(i * WMMA_M)
+                    if const_expr(guarded):
+                        ks_vals = _load_contig_i32_guarded_row(row, k_wmma_steps, soff)
+                    else:
+                        vidx = row * arith.index(_ascale_row_i32)
+                        ks_vals = _load_contig_i32(_ascale_rsrc, vidx, k_wmma_steps, soff)
                     for ks in range_constexpr(k_wmma_steps):
                         vals[ks * ascale_load + i] = ks_vals[ks]
                 return vals
 
+            def _load_ascale(k_base):
+                full_tile = (blk_m + arith.index(tile_m)) <= m_idx
+                if_op = scf.IfOp(full_tile, [T.i32] * _vs_tile_a, has_else=True)
+                with ir.InsertionPoint(if_op.then_block):
+                    scf.YieldOp([arith.unwrap(v) for v in _load_ascale_impl(k_base, guarded=False)])
+                with ir.InsertionPoint(if_op.else_block):
+                    scf.YieldOp([arith.unwrap(v) for v in _load_ascale_impl(k_base, guarded=True)])
+                return list(if_op.results)
+
             _bvs_prefetch = _load_ascale
 
-        m_idx = fx.Index(i32_m)
         # Runtime leading-dim strides (strided A/C). Dense callers pass lda == K,
         # ldc == N for byte-identical addressing. A's stride is in packed elements.
         if const_expr(PACK_FACTOR_A == 1):
@@ -804,8 +845,6 @@ def compile_fp8fp4_gemm(
         def _precompute_as32_bases(lds_ptr):
             """Tile-local first A row, relative to the copied 32-row block base."""
             return lds_ptr, (blk_m % arith.index(32)) + warp_m_base
-
-        _scale_identity_i32 = arith.constant(0x7F7F7F7F, type=T.i32)
 
         def _mask_a_scale_oob(word, row_abs):
             return arith.select(row_abs < m_idx, word, _scale_identity_i32)
@@ -1089,6 +1128,7 @@ def compile_fp8fp4_gemm(
             lds_bs,
             emit_filler=None,
             mid_compute_callback=None,
+            late_compute_callback=None,
             scale_k_base=None,
             pf_a_scales=None,
         ):
@@ -1117,6 +1157,49 @@ def compile_fp8fp4_gemm(
                     mid_compute_callback=mid_compute_callback,
                 )
             else:
+                if const_expr(use_row_major_k_prefetch):
+
+                    def _load_bundle(ks):
+                        b_frags, b_scales, a_scales = _load_b_and_scales(
+                            b_buf, b_bases, as_buf, as_bases, bs_buf, bs_bases, ks
+                        )
+                        a_frag = load_a_frag(a_buf, a_bases[0], ks)
+                        return a_frag, b_frags, a_scales, b_scales
+
+                    def _emit_bundle(bundle, emit_filler_now=False):
+                        a_frag, b_frags, a_scales, b_scales = bundle
+                        if const_expr(emit_filler_now and emit_filler is not None):
+                            rocdl.sched_barrier(0)
+                            emit_filler()
+                        for wn in range_constexpr(wmma_n_rep):
+                            _emit_wmma(current_accs, 0, wn, a_frag, b_frags[wn], a_scales, b_scales)
+
+                    # Keep future K-subtile LDS reads outstanding while only draining
+                    # the current bundle before its single row-major WMMA.
+                    preload_depth = min(k_wmma_steps, _row_major_k_prefetch_depth + 1)
+                    bundle_queue = [_load_bundle(pre_ks) for pre_ks in range_constexpr(preload_depth)]
+                    next_ks = preload_depth
+                    for ks in range_constexpr(k_wmma_steps):
+                        is_last_ks = ks == k_wmma_steps - 1
+                        cur_bundle = bundle_queue.pop(0)
+                        rocdl.s_wait_dscnt(len(bundle_queue) * _row_major_k_prefetch_bundle_ds)
+
+                        if const_expr(is_last_ks and late_compute_callback is not None):
+                            rocdl.sched_barrier(0)
+                            late_compute_callback()
+
+                        _emit_bundle(cur_bundle, emit_filler_now=is_last_ks)
+
+                        if const_expr(ks == 0 and mid_compute_callback is not None):
+                            rocdl.sched_barrier(0)
+                            mid_compute_callback()
+
+                        if const_expr(next_ks < k_wmma_steps):
+                            bundle_queue.append(_load_bundle(next_ks))
+                            next_ks += 1
+
+                    return current_accs
+
                 prev_b, prev_bs, prev_as = _load_b_and_scales(b_buf, b_bases, as_buf, as_bases, bs_buf, bs_bases, 0)
                 for ks in range_constexpr(k_wmma_steps - 1):
                     _mid_cb = mid_compute_callback if ks == 0 else None
@@ -1646,6 +1729,17 @@ def compile_fp8fp4_gemm(
             return current_accs
 
         def hot_loop_scheduler():
+            if const_expr(use_row_major_k_prefetch):
+                _queue_depth = min(k_wmma_steps, _row_major_k_prefetch_depth + 1)
+                for _ks in range_constexpr(k_wmma_steps):
+                    if const_expr(_ks == 0):
+                        rocdl.sched_dsrd(_row_major_k_prefetch_bundle_ds * _queue_depth)
+                    elif const_expr(_ks + _queue_depth <= k_wmma_steps):
+                        rocdl.sched_dsrd(_row_major_k_prefetch_bundle_ds)
+                    rocdl.sched_mfma(wmma_n_rep)
+                rocdl.sched_barrier(0)
+                return
+
             _half_wm = wmma_m_rep // 2
             _half_wmma = _half_wm * wmma_n_rep
             _b_loads_per_frag = 2 if is_a8w4 else 4
@@ -1813,6 +1907,7 @@ def compile_fp8fp4_gemm(
                 lds_bs,
                 emit_filler=emit_filler,
                 mid_compute_callback=mid_compute_callback,
+                late_compute_callback=late_compute_callback,
                 scale_k_base=scale_k_base,
                 pf_a_scales=pf_a_scales,
             )
@@ -2228,9 +2323,16 @@ def compile_fp8fp4_gemm(
             else:
                 _issue_active_tdm(i, addr_box)
             active_addr_lo = addr_box[0]
-        if const_expr(_bvs_active and loop_iters > 0):
-            _bvs_pf = [_bvs_prefetch(split_k_base + arith.index(_d * tile_k)) for _d in range(_bvs_D)]
-            _bvs_ra = [_v for _a in _bvs_pf for _v in _a]
+        _bvs_tail_seed = []
+        _bvs_tail_issue_start = loop_iters * num_buffers
+        if const_expr(_bvs_active):
+            _bvs_initial_depth = _bvs_D if loop_iters > 0 else min(_bvs_D, num_k_tiles)
+            _bvs_pf = [_bvs_prefetch(split_k_base + arith.index(_d * tile_k)) for _d in range(_bvs_initial_depth)]
+            if const_expr(loop_iters > 0):
+                _bvs_ra = [_v for _a in _bvs_pf for _v in _a]
+            else:
+                _bvs_tail_seed = list(_bvs_pf)
+                _bvs_tail_issue_start = _bvs_initial_depth
 
         _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
@@ -2238,7 +2340,7 @@ def compile_fp8fp4_gemm(
         # This overlaps TDM DMA with the remaining WMMA instructions,
         _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
 
-        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+        if const_expr(loop_iters > 0 and use_tdm_late_signal_overlap):
             _pipeline_fence_signal(outstanding=_fence_outstanding)
 
         if const_expr(loop_iters > 0):
@@ -2276,12 +2378,12 @@ def compile_fp8fp4_gemm(
                     ):
                         _issue_active_tdm(_ls, _ab, k_prefetch=_k_off, sec_box=_sb)
 
-                    if const_expr(not use_ws_tdm_split_signal_overlap):
+                    if const_expr(not use_tdm_late_signal_overlap):
                         _pipeline_fence_signal(outstanding=_fence_outstanding)
                     pipeline_fence_wait(use_cluster=use_cluster)
 
                     _late_tdm_ws_fence_signal = None
-                    if const_expr(use_ws_tdm_split_signal_overlap):
+                    if const_expr(use_tdm_late_signal_overlap):
 
                         def _late_tdm_ws_split_signal():
                             _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -2323,10 +2425,16 @@ def compile_fp8fp4_gemm(
 
             accs = list(results[:n_accs])
             active_addr_lo = results[n_accs]
+            _result_off = n_accs + 1
             if const_expr(secondary_scale_tdm):
                 active_sec_lo = results[n_accs + 1]
+                _result_off = _result_off + 1
+            if const_expr(_bvs_active):
+                _bvs_tail_flat = list(results[_result_off : _result_off + _bvs_D * _vs_tile_a])
+                _bvs_tail_seed = [_bvs_tail_flat[_d * _vs_tile_a : (_d + 1) * _vs_tile_a] for _d in range(_bvs_D)]
+                _bvs_tail_issue_start = loop_iters * num_buffers + _bvs_D
         # Tail — same acc_mixed pattern: fence at top, TDM mid-compute.
-        if const_expr(loop_iters > 0 and use_ws_tdm_split_signal_overlap):
+        if const_expr(loop_iters > 0 and use_tdm_late_signal_overlap):
             pipeline_fence_wait(use_cluster=use_cluster)
         if const_expr(loop_iters > 0):
             _pipeline_fence(outstanding=0)
@@ -2349,8 +2457,8 @@ def compile_fp8fp4_gemm(
             _bvs_tail_kt[0] += 1
             return kb
 
-        _bvs_tail_ring = []
-        _bvs_tail_issue_kt = [loop_iters * num_buffers]
+        _bvs_tail_ring = list(_bvs_tail_seed)
+        _bvs_tail_issue_kt = [_bvs_tail_issue_start]
 
         def _bvs_tail_issue_one():
             if const_expr(_bvs_active and _bvs_tail_issue_kt[0] < num_k_tiles):
@@ -2365,8 +2473,6 @@ def compile_fp8fp4_gemm(
 
         if const_expr(_bvs_active):
             rocdl.sched_barrier(0)
-            for _ in range_constexpr(_bvs_D):
-                _bvs_tail_issue_one()
 
         for _load_stage, _compute_stage, _outstanding in tail_plan:
             _entry_kb, _pf_a_scales = _bvs_tail_scales()
@@ -2498,6 +2604,8 @@ def compile_fp8fp4_gemm(
         expert_sched_mode,
         atomic_barrier_enable,
         ascale_load_path,
+        _row_major_k_prefetch_depth,
+        _bvs_D,
     )
 
     @flyc.jit
@@ -2520,7 +2628,7 @@ def compile_fp8fp4_gemm(
             arena_alloc.finalize()
 
         gx = (i32_m + (tile_m - 1)) // tile_m
-        gy = (i32_n + (tile_n - 1)) // tile_n
+        gy = N // tile_n
         gz = split_k
 
         if const_expr(use_cluster):
