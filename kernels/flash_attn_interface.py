@@ -50,98 +50,6 @@ def _gpu_arch(device: torch.device) -> str:
         return ""
 
 
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
-
-
-def _paged_kv_page_size(k: torch.Tensor, kv_cache_layout: str) -> int:
-    if kv_cache_layout == "linear":
-        return int(k.shape[1])
-    if kv_cache_layout == "linear3d":
-        return 1
-    if kv_cache_layout == "vectorized":
-        return int(k.shape[3])
-    raise ValueError(f"flydsl_flash_attn_func: unsupported kv_cache_layout={kv_cache_layout}")
-
-
-def _logical_kv_from_pages(
-    k_pages: torch.Tensor,
-    v_pages: torch.Tensor,
-    kv_cache_layout: str,
-    kv_len: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if kv_cache_layout in ("linear", "linear3d"):
-        kb = k_pages.reshape(-1, k_pages.shape[-2], k_pages.shape[-1])
-        vb = v_pages.reshape(-1, v_pages.shape[-2], v_pages.shape[-1])
-    elif kv_cache_layout == "vectorized":
-        kb = (
-            k_pages.permute(0, 3, 1, 2, 4)
-            .contiguous()
-            .reshape(-1, k_pages.shape[1], k_pages.shape[2] * k_pages.shape[4])
-        )
-        vb = v_pages.permute(0, 2, 4, 1, 3).contiguous().reshape(-1, v_pages.shape[1], v_pages.shape[3])
-    else:
-        raise ValueError(f"flydsl_flash_attn_func: unsupported kv_cache_layout={kv_cache_layout}")
-    return kb[:kv_len].contiguous(), vb[:kv_len].contiguous()
-
-
-def _materialize_paged_kv_for_fallback(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    *,
-    cu_seqlens_q: Optional[torch.Tensor],
-    kv_indptr: Optional[torch.Tensor],
-    kv_indices: Optional[torch.Tensor],
-    kv_last_page_lens: Optional[torch.Tensor],
-    block_table: Optional[torch.Tensor],
-    seqlen_k: Optional[torch.Tensor],
-    kv_cache_layout: str,
-    kv_lookup_table: str,
-) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[int]]:
-    """Temporary host-side ABI bridge until a native paged-KV FlyDSL kernel exists."""
-    page_size = _paged_kv_page_size(k, kv_cache_layout)
-    dense_q = q.dim() == 4
-    batch = q.shape[0] if dense_q else int(cu_seqlens_q.numel() - 1)
-
-    k_batches: list[torch.Tensor] = []
-    v_batches: list[torch.Tensor] = []
-    kv_lens: list[int] = []
-    for b in range(batch):
-        if kv_lookup_table == "vllm":
-            if block_table is None or seqlen_k is None:
-                raise ValueError("flydsl_flash_attn_func: vllm paged KV requires block_table and seqlen_k")
-            kv_len = int(seqlen_k[b].item())
-            page_ids = block_table[b, : _ceil_div(kv_len, page_size)].to(device=k.device, dtype=torch.long)
-        elif kv_lookup_table == "sglang":
-            if kv_indptr is None or kv_indices is None:
-                raise ValueError("flydsl_flash_attn_func: sglang paged KV requires kv_indptr and kv_indices")
-            start = int(kv_indptr[b].item())
-            end = int(kv_indptr[b + 1].item())
-            page_ids = kv_indices[start:end].to(device=k.device, dtype=torch.long)
-            if kv_last_page_lens is None:
-                kv_len = int(page_ids.numel()) * page_size
-            else:
-                kv_len = (int(page_ids.numel()) - 1) * page_size + int(kv_last_page_lens[b].item())
-        else:
-            raise ValueError(f"flydsl_flash_attn_func: unsupported kv_lookup_table={kv_lookup_table}")
-        kb, vb = _logical_kv_from_pages(k[page_ids], v[page_ids], kv_cache_layout, kv_len)
-        k_batches.append(kb)
-        v_batches.append(vb)
-        kv_lens.append(kv_len)
-
-    if dense_q:
-        if len(set(kv_lens)) != 1:
-            raise ValueError("flydsl_flash_attn_func: dense paged-KV fallback requires equal seqlen_k per batch")
-        return torch.stack(k_batches, dim=0), torch.stack(v_batches, dim=0), None, kv_lens[0]
-
-    cu_kv = [0]
-    for kv_len in kv_lens:
-        cu_kv.append(cu_kv[-1] + kv_len)
-    cu_seqlens_kv = torch.tensor(cu_kv, dtype=torch.int32, device=q.device)
-    return torch.cat(k_batches, dim=0), torch.cat(v_batches, dim=0), cu_seqlens_kv, max(kv_lens)
-
-
 # ── build-cache helpers ────────────────────────────────────────────────────
 
 
@@ -244,6 +152,167 @@ def _build_splitk(
         dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
     )
+
+
+@functools.lru_cache(maxsize=256)
+def _build_paged(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    cross_seqlen: bool,
+    waves_per_eu: int,
+    daz: bool,
+    lazy_rescale: bool,
+    setprio: bool,
+    enable_stagger: bool,
+):
+    """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True)."""
+    from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
+
+    return build_flash_attn_dualwave_swp_module(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str=dtype_str,
+        num_kv_heads=num_kv_heads,
+        paged=True,
+        cross_seqlen=cross_seqlen,
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+        dualwave_swp_lazy_rescale=lazy_rescale,
+        dualwave_swp_setprio=setprio,
+        dualwave_swp_enable_stagger=enable_stagger,
+    )
+
+
+# ── paged-KV native path ────────────────────────────────────────────────────
+
+# gfx950 dualwave paged-KV currently supports exactly one configuration.
+_PAGED_PAGE_SIZE = 64
+
+
+def _flydsl_flash_attn_paged(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    causal: bool,
+    num_kv_heads: Optional[int],
+    block_table: Optional[torch.Tensor],
+    seqlen_k: Optional[torch.Tensor],
+    max_seqlen_kv: Optional[int],
+    kv_cache_layout: str,
+    kv_lookup_table: str,
+    kv_indptr: Optional[torch.Tensor],
+    kv_indices: Optional[torch.Tensor],
+    kv_last_page_lens: Optional[torch.Tensor],
+    cu_seqlens_q: Optional[torch.Tensor],
+    num_kv_splits: int,
+    out: Optional[torch.Tensor],
+    waves_per_eu: int,
+    daz: bool,
+    dualwave_swp_lazy_rescale: bool,
+    dualwave_swp_setprio: bool,
+    dualwave_swp_enable_stagger: bool,
+    stream,
+) -> torch.Tensor:
+    """Native paged-KV attention on the gfx950 dualwave kernel.
+
+    Supported config ONLY (anything else raises): linear cache layout
+    [NumBlocks, PageSize=64, NumKVHeads, HeadDim], vLLM lookup (block_table +
+    seqlen_k), causal, dense 4D Q, D=128, dtype bf16/f16, num_kv_splits=1.
+    """
+    if kv_cache_layout != "linear":
+        raise NotImplementedError(
+            f"flydsl_flash_attn_func: native paged KV supports kv_cache_layout='linear' only, "
+            f"got {kv_cache_layout!r}"
+        )
+    if kv_lookup_table != "vllm":
+        raise NotImplementedError(
+            f"flydsl_flash_attn_func: native paged KV supports kv_lookup_table='vllm' only, "
+            f"got {kv_lookup_table!r}"
+        )
+    if not causal:
+        raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports causal=True only")
+    if num_kv_splits > 1:
+        raise NotImplementedError("flydsl_flash_attn_func: native paged KV does not support split-K")
+    if cu_seqlens_q is not None:
+        raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports dense 4D Q only (no varlen)")
+    if block_table is None or seqlen_k is None:
+        raise ValueError("flydsl_flash_attn_func: native paged KV (vllm) requires block_table and seqlen_k")
+    if q.dim() != 4:
+        raise ValueError(f"flydsl_flash_attn_func: paged dense q must be 4D [B,Sq,H,D], got {q.dim()}D")
+    if k.dim() != 4:
+        raise ValueError(
+            f"flydsl_flash_attn_func: linear paged K/V must be 4D [NumBlocks,PageSize,Hkv,D], got {k.dim()}D"
+        )
+
+    dtype_str = _dtype_str(q)
+    B, Sq, H, D = q.shape
+    page_size = int(k.shape[1])
+    Hkv = int(k.shape[2])
+    if page_size != _PAGED_PAGE_SIZE:
+        raise NotImplementedError(
+            f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
+        )
+    if D != 128:
+        raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=128 only, got {D}")
+    if int(k.shape[3]) != D:
+        raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k.shape[3]}) must match q head_dim ({D})")
+
+    if num_kv_heads is None:
+        num_kv_heads = Hkv
+    if H % num_kv_heads != 0:
+        raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
+
+    # The paged cache is addressed through a single buffer descriptor whose
+    # num_records is a 32-bit byte count, so the whole K (or V) cache must be
+    # < 4 GiB. (vLLM/SGLang shard the cache per layer well under this in practice.)
+    cache_bytes = k.numel() * k.element_size()
+    if cache_bytes > 0xFFFFFFFF:
+        raise ValueError(
+            f"flydsl_flash_attn_func: paged K cache is {cache_bytes} bytes, exceeding the 4 GiB "
+            f"limit of a 32-bit buffer descriptor; reduce NumBlocks/page padding or shard the cache"
+        )
+
+    # Per-batch KV lengths differ in general → bottom-right cross-length masking.
+    skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
+    cross = skv != Sq
+    block_table_stride = int(block_table.shape[1])
+    # Flatten to 1-D (like q/k/v/o) so the kernel's flat element index
+    # `batch_idx*block_table_stride + tile_idx` addresses it correctly; a 2-D
+    # buffer view resolves the index through its nested layout, not row-major.
+    block_table_i32 = (block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)).contiguous().reshape(-1)
+
+    with torch.cuda.device(q.device.index):
+        launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
+        exe = _build_paged(
+            num_heads=H,
+            num_kv_heads=num_kv_heads,
+            head_dim=D,
+            causal=causal,
+            dtype_str=dtype_str,
+            cross_seqlen=cross,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            lazy_rescale=dualwave_swp_lazy_rescale,
+            setprio=dualwave_swp_setprio,
+            enable_stagger=dualwave_swp_enable_stagger,
+        )
+        if out is None:
+            out = torch.empty_like(q)
+        q_flat = q.contiguous().reshape(-1)
+        k_flat = k.contiguous().reshape(-1)
+        v_flat = v.contiguous().reshape(-1)
+        o_flat = out.reshape(-1)
+        kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
+        if cross:
+            kwargs["seq_len_kv"] = skv
+        exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
+
+    return out
 
 
 # ── public API ─────────────────────────────────────────────────────────────
@@ -350,62 +419,21 @@ def flydsl_flash_attn_func(
 
     paged_kv = any(x is not None for x in (kv_indptr, kv_indices, kv_last_page_lens, block_table, seqlen_k))
     if paged_kv:
-        if kv_cache_layout not in ("linear", "linear3d", "vectorized"):
-            raise ValueError(f"flydsl_flash_attn_func: unsupported kv_cache_layout={kv_cache_layout}")
-        if kv_lookup_table not in ("vllm", "sglang"):
-            raise ValueError(f"flydsl_flash_attn_func: unsupported kv_lookup_table={kv_lookup_table}")
-        # Future native paged-KV FlyDSL kernel call shape:
-        # return flydsl_flash_attn_paged_func(
-        #     q,
-        #     k,
-        #     v,
-        #     cu_seqlens_q=cu_seqlens_q,
-        #     kv_indptr=kv_indptr,
-        #     kv_indices=kv_indices,
-        #     kv_last_page_lens=kv_last_page_lens,
-        #     block_table=block_table,
-        #     seqlen_k=seqlen_k,
-        #     max_seqlen_q=max_seqlen_q,
-        #     max_seqlen_kv=max_seqlen_kv,
-        #     kv_cache_layout=kv_cache_layout,
-        #     kv_lookup_table=kv_lookup_table,
-        #     out=out,
-        #     stream=stream,
-        #     # plus kernel build options as needed:
-        #     # waves_per_eu=waves_per_eu,
-        #     # daz=daz,
-        #     # dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
-        #     # dualwave_swp_setprio=dualwave_swp_setprio,
-        #     # dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-        #     # debug_counts=debug_counts,
-        # )
-        #
-        # Temporary bridge: materialize the logical K/V sequence from the physical
-        # paged cache, then call the existing dense/varlen FlyDSL kernels.
-        k_logical, v_logical, fallback_cu_kv, fallback_max_kv = _materialize_paged_kv_for_fallback(
+        return _flydsl_flash_attn_paged(
             q,
             k,
             v,
-            cu_seqlens_q=cu_seqlens_q,
+            causal=causal,
+            num_kv_heads=num_kv_heads,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            max_seqlen_kv=max_seqlen_kv,
+            kv_cache_layout=kv_cache_layout,
+            kv_lookup_table=kv_lookup_table,
             kv_indptr=kv_indptr,
             kv_indices=kv_indices,
             kv_last_page_lens=kv_last_page_lens,
-            block_table=block_table,
-            seqlen_k=seqlen_k,
-            kv_cache_layout=kv_cache_layout,
-            kv_lookup_table=kv_lookup_table,
-        )
-        return flydsl_flash_attn_func(
-            q,
-            k_logical,
-            v_logical,
-            causal=causal,
-            num_kv_heads=num_kv_heads,
             cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=fallback_cu_kv,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=fallback_max_kv,
-            cross_seqlen=True if fallback_cu_kv is not None else cross_seqlen,
             num_kv_splits=num_kv_splits,
             out=out,
             waves_per_eu=waves_per_eu,
@@ -413,7 +441,6 @@ def flydsl_flash_attn_func(
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
             dualwave_swp_setprio=dualwave_swp_setprio,
             dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-            debug_counts=debug_counts,
             stream=stream,
         )
 
