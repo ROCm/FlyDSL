@@ -903,11 +903,15 @@ FLY_INFER_RETURN_TYPES(SliceOp) {
   if (auto srcCoordTensorTy = dyn_cast<CoordTensorType>(srcTy)) {
     Attribute layout = srcCoordTensorTy.getLayout();
     Attribute newLayout;
-    if (auto la = dyn_cast<LayoutAttr>(layout))
+    if (auto la = dyn_cast<LayoutAttr>(layout)) {
       newLayout = sliceLayout(la);
-    else
+      IntTupleAttr offsetAttr = layoutCrd2Idx(builder, coordAttr, la.getShape(), la.getStride());
+      IntTupleAttr newBase = intTupleAdd(builder, srcCoordTensorTy.getBase(), offsetAttr);
+      inferredReturnTypes.assign({CoordTensorType::get(newBase, newLayout)});
+    } else {
       newLayout = sliceComposed(cast<ComposedLayoutAttr>(layout));
-    inferredReturnTypes.assign({CoordTensorType::get(srcCoordTensorTy.getBase(), newLayout)});
+      inferredReturnTypes.assign({CoordTensorType::get(srcCoordTensorTy.getBase(), newLayout)});
+    }
     return success();
   }
 
