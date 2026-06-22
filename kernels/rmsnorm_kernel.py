@@ -110,9 +110,9 @@ def _quant_dtype_max(dtype_str: str) -> float:
     raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
 
 
-def build_rmsnorm_module(M: int, N: int, dtype_str: str):
-    if M > 8192 and N <= 2048:
-        return _build_rmsnorm_large_m_small_n_module(M, N, dtype_str)
+def build_rmsnorm_module(N: int, dtype_str: str):
+    if N <= 2048:
+        return _build_rmsnorm_large_m_small_n_module(N, dtype_str)
 
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
@@ -308,7 +308,7 @@ def build_rmsnorm_module(M: int, N: int, dtype_str: str):
     return launch_rmsnorm
 
 
-def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
+def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str):
     BLOCK_N = 1 << (N - 1).bit_length()
     BLOCK_M = max(min(16384 // BLOCK_N, 32), 8)
     THREADS_PER_ROW = min(WARP_SIZE, 1024 // BLOCK_M)
@@ -321,6 +321,7 @@ def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
         Gamma: fx.Tensor,
         _Unused: fx.Tensor,
         Output: fx.Tensor,
+        MIn: fx.Int32,
     ):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
@@ -329,7 +330,7 @@ def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
         row_local = tid // THREADS_PER_ROW
         row = bid * fx.Int32(BLOCK_M) + row_local
 
-        if row < M:
+        if row < MIn:
             elem_dtype = dtype_to_elem_type(dtype_str)
             fm_fast = arith.FastMathFlags.fast
             eps_c = EPS
@@ -395,9 +396,9 @@ def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output)
+        launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output, m_in)
         launcher.launch(
-            grid=((M + BLOCK_M - 1) // BLOCK_M, 1, 1),
+            grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
             block=(BLOCK_THREADS_SPECIAL, 1, 1),
             stream=stream,
         )
@@ -405,7 +406,7 @@ def _build_rmsnorm_large_m_small_n_module(M: int, N: int, dtype_str: str):
     return launch_rmsnorm_large_m_small_n
 
 
-def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
+def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
@@ -620,7 +621,6 @@ def build_fused_add_rmsnorm_module(M: int, N: int, dtype_str: str):
 
 
 def _build_rmsnorm_quant_module(
-    M: int,
     N: int,
     dtype_str: str,
     *,
@@ -964,13 +964,11 @@ def _build_rmsnorm_quant_module(
 
 
 def build_rmsnorm_dynamicquant_module(
-    M: int,
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
 ):
     return _build_rmsnorm_quant_module(
-        M,
         N,
         dtype_str,
         is_smooth=False,
@@ -979,13 +977,11 @@ def build_rmsnorm_dynamicquant_module(
 
 
 def build_rmsnorm_smoothquant_module(
-    M: int,
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
 ):
     return _build_rmsnorm_quant_module(
-        M,
         N,
         dtype_str,
         is_smooth=True,
@@ -994,7 +990,6 @@ def build_rmsnorm_smoothquant_module(
 
 
 def _build_fused_add_rmsnorm_quant_module(
-    M: int,
     N: int,
     dtype_str: str,
     *,
@@ -1368,13 +1363,11 @@ def _build_fused_add_rmsnorm_quant_module(
 
 
 def build_fused_add_rmsnorm_dynamicquant_module(
-    M: int,
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
 ):
     return _build_fused_add_rmsnorm_quant_module(
-        M,
         N,
         dtype_str,
         is_smooth=False,
@@ -1383,13 +1376,11 @@ def build_fused_add_rmsnorm_dynamicquant_module(
 
 
 def build_fused_add_rmsnorm_smoothquant_module(
-    M: int,
     N: int,
     dtype_str: str,
     quant_dtype_str: str = "i8",
 ):
     return _build_fused_add_rmsnorm_quant_module(
-        M,
         N,
         dtype_str,
         is_smooth=True,

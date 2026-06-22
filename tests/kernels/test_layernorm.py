@@ -90,7 +90,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting LayerNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        launch_fn = build_layernorm_module(M, N, dtype)
+        launch_fn = build_layernorm_module(N, dtype)
     except ValueError as e:
         print(f"[FAIL] Compile failed: {e}")
         return False, None
@@ -173,9 +173,9 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
 
     try:
         if is_smooth:
-            launch_fn = build_layernorm_smoothquant_module(M, N, dtype)
+            launch_fn = build_layernorm_smoothquant_module(N, dtype)
         else:
-            launch_fn = build_layernorm_dynamicquant_module(M, N, dtype)
+            launch_fn = build_layernorm_dynamicquant_module(N, dtype)
     except Exception as e:
         print(f"[FAIL] Compile failed for {mode} layernorm (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return False, None
@@ -270,7 +270,7 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting FusedAdd LayerNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        launch_fn = build_fused_add_layernorm_module(M, N, dtype)
+        launch_fn = build_fused_add_layernorm_module(N, dtype)
     except Exception as e:
         print(f"[FAIL] Compile failed for fused_add layernorm (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return False, None
@@ -358,9 +358,9 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
 
     try:
         if is_smooth:
-            launch_fn = build_fused_add_layernorm_smoothquant_module(M, N, dtype)
+            launch_fn = build_fused_add_layernorm_smoothquant_module(N, dtype)
         else:
-            launch_fn = build_fused_add_layernorm_dynamicquant_module(M, N, dtype)
+            launch_fn = build_fused_add_layernorm_dynamicquant_module(N, dtype)
     except Exception as e:
         print(
             f"[FAIL] Compile failed for fused_add {mode} layernorm "

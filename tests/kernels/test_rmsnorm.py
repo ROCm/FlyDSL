@@ -91,7 +91,7 @@ def run_test(M: int, N: int, dtype: str = "f32"):
     print(f"\nTesting RMSNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        launch_fn = build_rmsnorm_module(M, N, dtype)
+        launch_fn = build_rmsnorm_module(N, dtype)
     except Exception as e:
         print(f"[FAIL] Compile failed for (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
         return False, None
@@ -168,9 +168,9 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
 
     try:
         if is_smooth:
-            launch_fn = build_rmsnorm_smoothquant_module(M, N, dtype)
+            launch_fn = build_rmsnorm_smoothquant_module(N, dtype)
         else:
-            launch_fn = build_rmsnorm_dynamicquant_module(M, N, dtype)
+            launch_fn = build_rmsnorm_dynamicquant_module(N, dtype)
     except Exception as e:
         print(f"[FAIL] Compile failed for {mode} (M={M}, N={N}, dtype={dtype}): " f"{type(e).__name__}: {e}")
         return False, None
@@ -262,7 +262,7 @@ def run_fused_add_test(M: int, N: int, dtype: str):
     print(f"\nTesting FusedAdd RMSNorm (M={M}, N={N}, dtype={dtype})")
 
     try:
-        launch_fn = build_fused_add_rmsnorm_module(M, N, dtype)
+        launch_fn = build_fused_add_rmsnorm_module(N, dtype)
     except Exception as e:
         print(f"[FAIL] Compile failed for fused_add rmsnorm (M={M}, N={N}, dtype={dtype}): " f"{type(e).__name__}: {e}")
         return False, None
@@ -359,9 +359,9 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
 
     try:
         if is_smooth:
-            launch_fn = build_fused_add_rmsnorm_smoothquant_module(M, N, dtype)
+            launch_fn = build_fused_add_rmsnorm_smoothquant_module(N, dtype)
         else:
-            launch_fn = build_fused_add_rmsnorm_dynamicquant_module(M, N, dtype)
+            launch_fn = build_fused_add_rmsnorm_dynamicquant_module(N, dtype)
     except Exception as e:
         print(
             f"[FAIL] Compile failed for fused_add rmsnorm {mode} "

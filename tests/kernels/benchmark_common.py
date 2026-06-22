@@ -198,7 +198,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     if op == "layernorm":
         from kernels.layernorm_kernel import build_layernorm_module
 
-        m = build_layernorm_module(1, N, dtype)
+        m = build_layernorm_module(N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
@@ -209,7 +209,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     if op == "rmsnorm":
         from kernels.rmsnorm_kernel import build_rmsnorm_module
 
-        m = build_rmsnorm_module(1, N, dtype)
+        m = build_rmsnorm_module(N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
