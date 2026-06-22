@@ -1128,6 +1128,12 @@ class TiledCopy(BuiltinDslType):
     def layout_dst_tv_tiled(self):
         return static(self.type.tiled_tv_layout_dst)
 
+    def partition_S(self, src: Tensor):
+        return tiled_copy_partition_src(self, src, make_int_tuple(-1))
+
+    def partition_D(self, dst: Tensor):
+        return tiled_copy_partition_dst(self, dst, make_int_tuple(-1))
+
     def get_slice(self, thr_idx):
         from .derived import ThrCopy
 
