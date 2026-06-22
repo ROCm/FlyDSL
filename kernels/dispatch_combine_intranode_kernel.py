@@ -24,6 +24,7 @@ from flydsl.expr.rocdl import (
     cvt_pk_fp8_f32,
     cvt_scalef32_pk_f32_fp4,
     cvt_scalef32_pk_fp4_f32,
+    readfirstlane,
     readlane,
     s_waitcnt,
 )
@@ -34,7 +35,7 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 # Bump when generated kernel shape changes.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v5-mori-parity-2026-05"
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v6-combine-uniform-read"
 
 # Stage-3 switches from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
@@ -45,6 +46,29 @@ _SLC_CACHE = 2
 def _to_i64(v):
     """Zero-extend i32 (Numeric / ArithValue / ir.Value) to i64 ``ArithValue``."""
     return arith.extui(T.i64(), arith.unwrap(v))
+
+
+def _wave_uniform_i64(addr):
+    """Broadcast a wave-uniform i64 address to SGPR via ``readfirstlane`` so
+    ``create_buffer_resource_from_addr`` emits a *uniform* buffer descriptor.
+
+    A buffer descriptor built from a per-lane VGPR address forces the AMDGPU
+    backend to emit a per-op waterfall loop (readfirstlane x4 + saveexec +
+    execnz). Besides the raw instruction cost, that exec-masked control flow is
+    a scheduling barrier: the combine Stage-3 gather issues k per-expert loads
+    that the waterfall then serialises, throttling memory-level parallelism on
+    the reduction reads. Forcing the (genuinely warp-uniform) source base into
+    SGPR removes the waterfall and lets the k loads stay in flight together.
+
+    Caller must guarantee ``addr`` is warp-uniform with lane 0 active.
+    """
+    v = arith.unwrap(addr)
+    c32 = arith.unwrap(arith.constant(32, type=T.i64()))
+    lo = arith.trunci(T.i32(), v)
+    hi = arith.trunci(T.i32(), arith.shrui(v, c32))
+    lo_u = readfirstlane(T.i32(), lo)
+    hi_u = readfirstlane(T.i32(), hi)
+    return arith.ori(arith.shli(arith.extui(T.i64(), hi_u), c32), arith.extui(T.i64(), lo_u))
 
 
 def _i32_to_vec_bitcast(target_vec_type, i32_scalar):
@@ -1166,7 +1190,9 @@ def make_combine_kernel(
                     slot_idx = tok_id * experts_per_token + k_slot
                     expert_tok_off = _to_i64(slot_idx) * nbytes
                     expert_tok_addr = arith.unwrap(addr_shmem_tok + expert_tok_off)
-                    expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
+                    # Warp-uniform source base -> SGPR descriptor (no per-lane
+                    # buffer waterfall on the k-way gather; see _wave_uniform_i64).
+                    expert_rsrcs.append(create_buffer_resource_from_addr(_wave_uniform_i64(expert_tok_addr)))
                     expert_vlds.append(arith.constant(1, type=T.bool()))
             else:
                 # Baseline Stage 3: decode (peer_pe, dest_lid) from
@@ -1194,7 +1220,11 @@ def make_combine_kernel(
                     else:
                         expert_tok_off = _to_i64(safe_pe * max_tok_per_rank + tok_id) * nbytes
                         expert_tok_addr = arith.unwrap(addr_shmem_tok + expert_tok_off)
-                    expert_rsrcs.append(create_buffer_resource_from_addr(expert_tok_addr))
+                    # The per-expert source base is warp-uniform (decoded from
+                    # tok_map[tok_id]); force it to SGPR so the k reduction loads
+                    # do not each spawn a per-lane buffer waterfall (which both
+                    # adds instructions and serialises the k-way gather).
+                    expert_rsrcs.append(create_buffer_resource_from_addr(_wave_uniform_i64(expert_tok_addr)))
                     expert_vlds.append(vld_k)
 
             # Stage 3 write-back is parameterised by ``U`` (unroll factor):
@@ -1315,10 +1345,11 @@ def make_combine_kernel(
                                 wt_safe_dtok = arith.select(wt_vld, wt_dtok, 0)
                                 wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
                                 wt_src_off = _to_i64(wt_safe_dtok) * weight_bytes
-                                wt_rsrc = create_buffer_resource_from_addr(wt_pe_base + wt_src_off)
+                                # 094d0819: warp-uniform source base -> SGPR descriptor (no per-lane waterfall)
+                                wt_rsrc = create_buffer_resource_from_addr(_wave_uniform_i64(wt_pe_base + wt_src_off))
                             else:
                                 wt_src_off = _to_i64(wt_safe_pe * max_tok_per_rank + wt_tok_id) * weight_bytes
-                                wt_rsrc = create_buffer_resource_from_addr(addr_shmem_wts + wt_src_off)
+                                wt_rsrc = create_buffer_resource_from_addr(_wave_uniform_i64(addr_shmem_wts + wt_src_off))
                             wt_val = buffer_load(wt_rsrc, lane, vec_width=1, dtype=T.f32())
                             if const_expr(npes >= experts_per_token):
                                 wt_acc = wt_acc + wt_val
