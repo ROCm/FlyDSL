@@ -131,6 +131,13 @@ def compile_mixed_moe_gemm1(
     is large, so each CTA is already compute-heavy. persist_m>1 serializes M blocks
     that the GPU can process in parallel.
 
+    persist_m:
+      - > 0: legacy mode -- grid_y = ceil(size_expert_ids / persist_m) and each
+        CTA processes exactly persist_m consecutive M tiles.
+      - <= 0: **persistent mode** -- grid_y = cu_num (auto-detected), each CTA
+        round-robins over a contiguous chunk of M tiles (one expert block per
+        tile, stride = tiles_per_block). Mirrors the stage2 persistent scheme.
+
     gate_mode controls the gate/up computation strategy — see GateMode enum.
     """
     gpu_arch = get_hip_arch()
@@ -257,9 +264,15 @@ def compile_mixed_moe_gemm1(
     _gui_tag = "_gui" if gate_up_interleave else ""
     _as1_tag = "_as1" if a_scale_one else ""
     _xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
+    # Persistent mode: persist_m <= 0 launches grid_y = cu_num WGs, each of which
+    # round-robins over a contiguous chunk of M-tiles (one expert block per tile).
+    # Mirrors the stage2 (`moe_gemm2`) persistent scheme.
+    _persistent = persist_m <= 0
+    _cu_num = _get_cu_num() if _persistent else 0
+    _pm_tag = f"_persist_cu{_cu_num}" if _persistent else f"_pm{persist_m}"
     module_name = (
         f"mfma_moe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"
-        f"_t{tile_m}x{tile_n}x{tile_k}_pm{persist_m}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}_v32"
+        f"_t{tile_m}x{tile_n}x{tile_k}{_pm_tag}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}_v32"
     ).replace("-", "_")
 
     # -- LDS sizing --
@@ -503,8 +516,11 @@ def compile_mixed_moe_gemm1(
                 else:
                     _c2_sw = arith.constant(2, index=True)
                     _gx = (n_in - _c_idp_sw + _c2_sw * _c_tn_sw - _c1_sw) / _c_tn_sw / _c2_sw
-                _c_pm_sw = arith.constant(persist_m, index=True)
-                _gy = (size_expert_ids_in + _c_pm_sw - _c1_sw) / _c_pm_sw
+                if const_expr(_persistent):
+                    _gy = arith.constant(_cu_num, index=True)
+                else:
+                    _c_pm_sw = arith.constant(persist_m, index=True)
+                    _gy = (size_expert_ids_in + _c_pm_sw - _c1_sw) / _c_pm_sw
 
                 _linear_id = bx_persist * _gx + by
                 _num_wgs = _gx * _gy
@@ -637,15 +653,34 @@ def compile_mixed_moe_gemm1(
                 sorted_scale_rsrc = buffer_ops.create_buffer_resource(arg_out_scale_sorted, max_size=False)
 
             # ---- persist_m loop (same pattern as stage2) ----
-            _PERSIST_M = persist_m
             _c0_p = arith.constant(0, index=True)
             _c1_p = arith.constant(1, index=True)
-            _c_pm = arith.constant(_PERSIST_M, index=True)
-            _for_persist = scf.ForOp(_c0_p, _c_pm, _c1_p)
+            if const_expr(_persistent):
+                # Persistent mode: grid_y = cu_num WGs. Each WG round-robins over a
+                # contiguous chunk of M-tiles (one expert block = sort_block_m rows):
+                #   [bx_persist * tiles_per_block, ..., (bx_persist+1)*tiles_per_block - 1]
+                # Adjacent WGs cover adjacent M-tiles -> same expert -> B-weight L2 reuse.
+                # Promote num_valid_ids to an SGPR so the loop trip count stays uniform.
+                _num_valid_sgpr = rocdl.ReadfirstlaneOp(T.i32, num_valid_i32).res
+                _num_valid_idx = arith.index_cast(ir.IndexType.get(), _num_valid_sgpr)
+                _c_sbm_p = arith.constant(sort_block_m, index=True)
+                _c_cu = arith.constant(_cu_num, index=True)
+                _total_m_tiles = (_num_valid_idx + _c_sbm_p - _c1_p) / _c_sbm_p
+                _tiles_per_block = (_total_m_tiles + _c_cu - _c1_p) / _c_cu
+                _i1 = ir.IntegerType.get_signless(1)
+                _init_active = arith.constant(1, type=_i1)
+                _for_persist = scf.ForOp(_c0_p, _tiles_per_block, _c1_p, [_init_active])
+            else:
+                _c_pm = arith.constant(persist_m, index=True)
+                _for_persist = scf.ForOp(_c0_p, _c_pm, _c1_p)
             _for_ip = ir.InsertionPoint(_for_persist.body)
             _for_ip.__enter__()
             _mi_p = _for_persist.induction_variable
-            bx = bx_persist * _c_pm + _mi_p
+            if const_expr(_persistent):
+                _still_active = _for_persist.inner_iter_args[0]
+                bx = bx_persist * _tiles_per_block + _mi_p
+            else:
+                bx = bx_persist * arith.constant(persist_m, index=True) + _mi_p
             bx_m = bx * arith.constant(sort_block_m, index=True)
 
             # Block validity
@@ -2314,16 +2349,29 @@ def compile_mixed_moe_gemm1(
                         lds_out_split=lds_out_B,
                     )
 
-            _if_blk = scf.IfOp(blk_valid)
-            with ir.InsertionPoint(_if_blk.then_block):
-                _ifexpert_of = scf.IfOp(exp_valid)
-                with ir.InsertionPoint(_ifexpert_of.then_block):
+            if const_expr(_persistent):
+                # Short-circuit: contiguous M-tiles are monotonically increasing,
+                # so once bx_m >= num_valid_ids all remaining tiles are invalid.
+                _cur_active = arith.andi(_still_active, blk_valid)
+                _do_gemm = arith.andi(_cur_active, exp_valid)
+                _if_blk = scf.IfOp(_do_gemm)
+                with ir.InsertionPoint(_if_blk.then_block):
                     _moe_gemm1_body()
                     scf.YieldOp([])
-                scf.YieldOp([])
 
-            gpu.barrier()
-            scf.YieldOp([])
+                gpu.barrier()
+                scf.YieldOp([_cur_active])
+            else:
+                _if_blk = scf.IfOp(blk_valid)
+                with ir.InsertionPoint(_if_blk.then_block):
+                    _ifexpert_of = scf.IfOp(exp_valid)
+                    with ir.InsertionPoint(_ifexpert_of.then_block):
+                        _moe_gemm1_body()
+                        scf.YieldOp([])
+                    scf.YieldOp([])
+
+                gpu.barrier()
+                scf.YieldOp([])
             _for_ip.__exit__(None, None, None)
 
     # -- Host launcher --
@@ -2348,6 +2396,7 @@ def compile_mixed_moe_gemm1(
         gate_mode,
         a_scale_one,
         xcd_swizzle,
+        _cu_num if _persistent else 0,
     )
 
     @flyc.jit
@@ -2384,12 +2433,15 @@ def compile_mixed_moe_gemm1(
             gx = (inter_in - inter_dim_pad_total + tile_n_index - 1) / tile_n_index
         else:
             gx = (inter_in - inter_dim_pad_total + 2 * tile_n_index - 1) / tile_n_index / arith.constant(2, index=True)
-        _c_pm_l = arith.constant(persist_m, index=True)
-        gy = (
-            arith.index_cast(ir.IndexType.get(), i32_size_expert_ids_in.ir_value())
-            + _c_pm_l
-            - arith.constant(1, index=True)
-        ) / _c_pm_l
+        if const_expr(_persistent):
+            gy = arith.constant(_cu_num, index=True)
+        else:
+            _c_pm_l = arith.constant(persist_m, index=True)
+            gy = (
+                arith.index_cast(ir.IndexType.get(), i32_size_expert_ids_in.ir_value())
+                + _c_pm_l
+                - arith.constant(1, index=True)
+            ) / _c_pm_l
 
         moe_gemm1(
             arg_out,
