@@ -149,11 +149,17 @@ class FusedMoEStage1Stage2:
             _cu = 256
         bn = block_num if block_num is not None else (
             min(_cu, 64) if self.mtpr <= 32 else (min(_cu, 128) if self.mtpr <= 128 else _cu))
+        # NOTE: the legacy shared ``warp_num_per_block``/``block_num`` config
+        # fields were removed upstream (PR #712); launch geometry now comes
+        # from the per-phase ``dispatch_*``/``combine_*`` defaults plus the
+        # auto-loaded tuning table. ``bn``/``warp_num_per_block`` were already
+        # inert here (combine used its per-phase defaults), so they are no
+        # longer forwarded; pin ``combine_block_num=bn`` below if an explicit
+        # CU-aware combine geometry is desired.
         self.comb_cfg = FlyDSLDispatchCombineConfig(
             rank=rank, world_size=world_size, hidden_dim=model_dim,
             max_num_inp_token_per_rank=self.mtpr, num_experts_per_rank=self.epr,
             num_experts_per_token=topk, data_type=torch.bfloat16,
-            warp_num_per_block=int(warp_num_per_block), block_num=bn,
             scale_dim=0, scale_type_size=0, enable_std_moe=False,
         )
         self.comb_op = FlyDSLDispatchCombineIntraNodeOp(self.comb_cfg)

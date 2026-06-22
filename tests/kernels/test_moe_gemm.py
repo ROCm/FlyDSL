@@ -337,6 +337,7 @@ def run_moe_stage1(
     even_dispatch: bool = False,
     out_dtype: str = "f16",
     k_batch: int = 1,
+    stage1_persist_m: int = 1,
 ):
     assert model_dim % 64 == 0
     assert model_dim % tile_k == 0
@@ -601,6 +602,7 @@ def run_moe_stage1(
             b_dtype="fp4",
             out_dtype="f16",
             act="silu",
+            persist_m=int(stage1_persist_m),
         )
         bias_dummy = torch.empty((0,), device=device, dtype=torch.float32)
         # Empty placeholder: stage1 writes a sorted E8M0 scale buffer only
@@ -929,6 +931,7 @@ def run_moe_stage2(
     scale_w2_groups_in: Optional[torch.Tensor] = None,
     scale_dtype: str = "f32",
     even_dispatch: bool = False,
+    stage2_persist_m: int = 4,
 ):
     """MoE stage2 (gemm2): out2[t] = sum_{slot} ( out1[t,slot] @ W2[expert]^T ) with optional routed weight."""
 
@@ -1277,6 +1280,7 @@ def run_moe_stage2(
             b_dtype="fp4",
             out_dtype="f16",
             accumulate=fp4_accumulate,
+            persist_m=int(stage2_persist_m),
         )
         bias_dummy = torch.empty((0,), device=device, dtype=torch.float32)
 
@@ -1770,6 +1774,8 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    stage1_persist_m: int = 1,
+    stage2_persist_m: int = 4,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
 
@@ -1865,6 +1871,7 @@ def test_moe_gemm_2stage(
         skip_ref=bool(skip_ref),
         w_fp4_kernel=w_fp4_kernel,
         test_graph=test_graph,
+        stage1_persist_m=int(stage1_persist_m),
     )
 
     if in_dtype in ("fp4", "a8w4"):
@@ -1929,6 +1936,7 @@ def test_moe_gemm_2stage(
         use_reduce=bool(use_reduce),
         use_valid_mask=use_valid_mask,
         test_graph=test_graph,
+        stage2_persist_m=int(stage2_persist_m),
     )
 
 
@@ -2377,6 +2385,184 @@ def test_moe_stage2_standalone(
     )
 
 
+# ---------------------------------------------------------------------------
+# Persistent-mode coverage (stage1 round-robin scheduling, mirrors stage2)
+# ---------------------------------------------------------------------------
+# persist_m <= 0 launches grid_y = cu_num work-groups, each of which round-robins
+# over a contiguous chunk of M-tiles (one expert block per tile). The kernel math
+# is identical to the legacy fixed-tile scheduler, so:
+#   - functionality: persistent output must match the legacy (persist_m=1) output,
+#   - accuracy:      both are checked against the torch reference in run_moe_*,
+#   - performance:   run_moe_* prints TFLOPS / TB/s for each scheduler.
+# These cases only cover the fp4 / a8w4 mixed kernels (the only ones with a
+# persist_m knob); other dtypes use compile_moe_gemm1, which has no persist_m.
+
+
+@pytest.mark.parametrize(
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n, tile_k",
+    [
+        pytest.param(256, 1024, 256, 8, 2, 64, 256, 256, id="persist-S"),
+        pytest.param(
+            1024,
+            2048,
+            256,
+            32,
+            8,
+            128,
+            256,
+            256,
+            id="persist-L",
+            marks=pytest.mark.large_shape,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "in_dtype",
+    [
+        pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
+        pytest.param("a8w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A8W4 requires gfx950+")),
+    ],
+)
+def test_moe_stage1_persistent(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    in_dtype: str,
+    *,
+    seed: int = 0,
+    num_iters: int = 10,
+    num_warmup: int = 3,
+):
+    """Stage1 persistent (round-robin) scheduling: accuracy + functionality + perf.
+
+    Runs the fp4/a8w4 stage1 kernel in both the legacy fixed-tile scheduler
+    (persist_m=1) and the new persistent scheduler (persist_m=0) with identical
+    inputs, and asserts the two outputs match. Each run also verifies against the
+    torch reference (skip_ref=False) and reports TFLOPS / TB/s.
+    """
+    if "gfx95" not in ARCH:
+        pytest.skip(f"{in_dtype} requires gfx950+, got {ARCH}")
+    from tests.kernels.utils import fp4_utils
+
+    if fp4_utils is None:
+        pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
+    if model_dim < 256 or tile_k < 256:
+        pytest.skip(f"{in_dtype} requires model_dim >= 256 and tile_k >= 256, got {model_dim}, {tile_k}")
+    if inter_dim < tile_n or inter_dim % tile_n != 0:
+        pytest.skip(f"inter_dim ({inter_dim}) must be a positive multiple of tile_n ({tile_n})")
+    if tile_m < 32 or tile_m % 32 != 0:
+        pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
+
+    common = dict(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        doweight_stage1=False,
+        in_dtype=in_dtype,
+        moe_sort_mode="torch",
+        seed=seed,
+        num_iters=num_iters,
+        num_warmup=num_warmup,
+        return_outputs=True,
+    )
+
+    # Legacy fixed-tile scheduler (verifies vs torch reference internally).
+    out_legacy, _ = run_moe_stage1(**common, stage1_persist_m=1)
+    # Persistent round-robin scheduler (verifies vs torch reference internally).
+    out_persist, _ = run_moe_stage1(**common, stage1_persist_m=0)
+
+    # Functional equivalence: persistent scheduling must not change the result.
+    if not torch.equal(out_persist, out_legacy):
+        assert verify_output(
+            out_persist.to(torch.float32),
+            out_legacy.to(torch.float32),
+            rtol=1e-3,
+            atol=1e-3,
+            msg="stage1 persistent vs legacy:",
+        )
+
+
+@pytest.mark.parametrize(
+    "tokens, model_dim, inter_dim, experts, topk, tile_m, tile_n1, tile_k1, tile_n2, tile_k2",
+    [
+        pytest.param(128, 1024, 256, 8, 2, 64, 128, 256, 256, 256, id="persist2-S"),
+        pytest.param(
+            256,
+            1024,
+            256,
+            8,
+            2,
+            128,
+            128,
+            256,
+            256,
+            256,
+            id="persist2-L",
+            marks=pytest.mark.large_shape,
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "in_dtype",
+    [
+        pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
+        pytest.param("a8w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A8W4 requires gfx950+")),
+    ],
+)
+def test_moe_gemm_2stage_persistent(
+    tokens: int,
+    model_dim: int,
+    inter_dim: int,
+    experts: int,
+    topk: int,
+    tile_m: int,
+    tile_n1: int,
+    tile_k1: int,
+    tile_n2: int,
+    tile_k2: int,
+    in_dtype: str,
+):
+    """End-to-end 2-stage run with BOTH stages in persistent mode (persist_m=0).
+
+    Exercises the new stage1 persistent scheduler together with the stage2
+    persistent scheduler; accuracy is verified against the torch reference inside
+    each stage and perf is reported by the shared run_moe_* harness.
+    """
+    if "gfx95" not in ARCH:
+        pytest.skip(f"{in_dtype} requires gfx950+, got {ARCH}")
+    test_moe_gemm_2stage(
+        tokens=tokens,
+        model_dim=model_dim,
+        inter_dim=inter_dim,
+        experts=experts,
+        topk=topk,
+        tile_m=tile_m,
+        tile_n1=tile_n1,
+        tile_k1=tile_k1,
+        tile_n2=tile_n2,
+        tile_k2=tile_k2,
+        doweight_stage1=False,
+        in_dtype=in_dtype,
+        out_dtype="f16",
+        use_reduce=False,
+        use_valid_mask=False,
+        test_graph=False,
+        group_size=-1,
+        stage1_persist_m=0,
+        stage2_persist_m=0,
+    )
+
+
 if __name__ == "__main__":
     torch.set_default_device("cuda")
 
@@ -2503,6 +2689,20 @@ if __name__ == "__main__":
     parser.add_argument("--num_iters", type=int, default=2, help="Benchmark iters")
     parser.add_argument("--num_warmup", type=int, default=1, help="Benchmark warmup iters")
 
+    # Persistent-mode scheduling (fp4 / a8w4 mixed kernels only).
+    parser.add_argument(
+        "--stage1_persist_m",
+        type=int,
+        default=1,
+        help="Stage1 persist_m: >0 fixed-tile scheduler, <=0 persistent round-robin (grid_y=cu_num).",
+    )
+    parser.add_argument(
+        "--stage2_persist_m",
+        type=int,
+        default=4,
+        help="Stage2 persist_m: >0 fixed-tile scheduler, <=0 persistent round-robin (grid_y=cu_num).",
+    )
+
     # graph mode test
     parser.add_argument(
         "--test_graph",
@@ -2576,6 +2776,8 @@ if __name__ == "__main__":
             use_reduce=use_reduce,
             use_valid_mask=bool(args.use_valid_mask),
             test_graph=bool(args.test_graph),
+            stage1_persist_m=int(args.stage1_persist_m),
+            stage2_persist_m=int(args.stage2_persist_m),
         )
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.

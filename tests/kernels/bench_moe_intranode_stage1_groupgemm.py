@@ -434,7 +434,6 @@ def _run_stage2_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, ep
         rank=rank, world_size=world, hidden_dim=model_dim,
         max_num_inp_token_per_rank=mtpr, num_experts_per_rank=epr,
         num_experts_per_token=topk, data_type=torch.bfloat16,
-        warp_num_per_block=int(args.warps), block_num=bn,
         scale_dim=0, scale_type_size=0, enable_std_moe=False,
     )
     dce = FlyDSLDispatchCombineIntraNodeOp(cfg_e)
@@ -1158,7 +1157,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     cfg_a = FlyDSLDispatchCombineConfig(
         rank=rank, world_size=world, hidden_dim=model_dim, max_num_inp_token_per_rank=mtpr,
         num_experts_per_rank=epr, num_experts_per_token=topk, data_type=torch.bfloat16,
-        warp_num_per_block=int(args.warps), block_num=bn, scale_dim=0, scale_type_size=0,
+        scale_dim=0, scale_type_size=0,
         enable_std_moe=False)
     dc = FlyDSLDispatchCombineIntraNodeOp(cfg_a)
     torch.cuda.synchronize(); ms.shmem_barrier_all()
@@ -1246,7 +1245,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         rank=rank, world_size=world, hidden_dim=model_dim, max_num_inp_token_per_rank=mtpr,
         num_experts_per_rank=epr, num_experts_per_token=topk,
         data_type=(torch.float4_e2m1fn_x2 if _is_fp4 else torch.float8_e4m3fn),
-        warp_num_per_block=int(args.warps), block_num=bn, scale_dim=_scale_mx_blocks,
+        scale_dim=_scale_mx_blocks,
         scale_type_size=1, enable_std_moe=False)
     dcf = FlyDSLDispatchCombineIntraNodeOp(cfg_fp8)
     torch.cuda.synchronize(); ms.shmem_barrier_all()
@@ -1683,7 +1682,6 @@ def run_one(args, rank, world, dev):
         rank=rank, world_size=world, hidden_dim=model_dim,
         max_num_inp_token_per_rank=mtpr, num_experts_per_rank=epr,
         num_experts_per_token=topk, data_type=token_dtype,
-        warp_num_per_block=int(args.warps), block_num=bn,
         scale_dim=scale_mx_blocks, scale_type_size=1, enable_std_moe=False,
     )
     dc = FlyDSLDispatchCombineIntraNodeOp(cfg)
@@ -1794,7 +1792,6 @@ def run_one(args, rank, world, dev):
                 rank=rank, world_size=world, hidden_dim=model_dim,
                 max_num_inp_token_per_rank=mtpr, num_experts_per_rank=epr,
                 num_experts_per_token=topk, data_type=torch.bfloat16,
-                warp_num_per_block=int(args.warps), block_num=bn,
                 scale_dim=0, scale_type_size=0, enable_std_moe=False,
             )
             dc_b = FlyDSLDispatchCombineIntraNodeOp(cfg_b)
