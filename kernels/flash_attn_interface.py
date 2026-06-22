@@ -50,6 +50,98 @@ def _gpu_arch(device: torch.device) -> str:
         return ""
 
 
+def _ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _paged_kv_page_size(k: torch.Tensor, kv_cache_layout: str) -> int:
+    if kv_cache_layout == "linear":
+        return int(k.shape[1])
+    if kv_cache_layout == "linear3d":
+        return 1
+    if kv_cache_layout == "vectorized":
+        return int(k.shape[3])
+    raise ValueError(f"flydsl_flash_attn_func: unsupported kv_cache_layout={kv_cache_layout}")
+
+
+def _logical_kv_from_pages(
+    k_pages: torch.Tensor,
+    v_pages: torch.Tensor,
+    kv_cache_layout: str,
+    kv_len: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if kv_cache_layout in ("linear", "linear3d"):
+        kb = k_pages.reshape(-1, k_pages.shape[-2], k_pages.shape[-1])
+        vb = v_pages.reshape(-1, v_pages.shape[-2], v_pages.shape[-1])
+    elif kv_cache_layout == "vectorized":
+        kb = (
+            k_pages.permute(0, 3, 1, 2, 4)
+            .contiguous()
+            .reshape(-1, k_pages.shape[1], k_pages.shape[2] * k_pages.shape[4])
+        )
+        vb = v_pages.permute(0, 2, 4, 1, 3).contiguous().reshape(-1, v_pages.shape[1], v_pages.shape[3])
+    else:
+        raise ValueError(f"flydsl_flash_attn_func: unsupported kv_cache_layout={kv_cache_layout}")
+    return kb[:kv_len].contiguous(), vb[:kv_len].contiguous()
+
+
+def _materialize_paged_kv_for_fallback(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    cu_seqlens_q: Optional[torch.Tensor],
+    kv_indptr: Optional[torch.Tensor],
+    kv_indices: Optional[torch.Tensor],
+    kv_last_page_lens: Optional[torch.Tensor],
+    block_table: Optional[torch.Tensor],
+    seqlen_k: Optional[torch.Tensor],
+    kv_cache_layout: str,
+    kv_lookup_table: str,
+) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[int]]:
+    """Temporary host-side ABI bridge until a native paged-KV FlyDSL kernel exists."""
+    page_size = _paged_kv_page_size(k, kv_cache_layout)
+    dense_q = q.dim() == 4
+    batch = q.shape[0] if dense_q else int(cu_seqlens_q.numel() - 1)
+
+    k_batches: list[torch.Tensor] = []
+    v_batches: list[torch.Tensor] = []
+    kv_lens: list[int] = []
+    for b in range(batch):
+        if kv_lookup_table == "vllm":
+            if block_table is None or seqlen_k is None:
+                raise ValueError("flydsl_flash_attn_func: vllm paged KV requires block_table and seqlen_k")
+            kv_len = int(seqlen_k[b].item())
+            page_ids = block_table[b, : _ceil_div(kv_len, page_size)].to(device=k.device, dtype=torch.long)
+        elif kv_lookup_table == "sglang":
+            if kv_indptr is None or kv_indices is None:
+                raise ValueError("flydsl_flash_attn_func: sglang paged KV requires kv_indptr and kv_indices")
+            start = int(kv_indptr[b].item())
+            end = int(kv_indptr[b + 1].item())
+            page_ids = kv_indices[start:end].to(device=k.device, dtype=torch.long)
+            if kv_last_page_lens is None:
+                kv_len = int(page_ids.numel()) * page_size
+            else:
+                kv_len = (int(page_ids.numel()) - 1) * page_size + int(kv_last_page_lens[b].item())
+        else:
+            raise ValueError(f"flydsl_flash_attn_func: unsupported kv_lookup_table={kv_lookup_table}")
+        kb, vb = _logical_kv_from_pages(k[page_ids], v[page_ids], kv_cache_layout, kv_len)
+        k_batches.append(kb)
+        v_batches.append(vb)
+        kv_lens.append(kv_len)
+
+    if dense_q:
+        if len(set(kv_lens)) != 1:
+            raise ValueError("flydsl_flash_attn_func: dense paged-KV fallback requires equal seqlen_k per batch")
+        return torch.stack(k_batches, dim=0), torch.stack(v_batches, dim=0), None, kv_lens[0]
+
+    cu_kv = [0]
+    for kv_len in kv_lens:
+        cu_kv.append(cu_kv[-1] + kv_len)
+    cu_seqlens_kv = torch.tensor(cu_kv, dtype=torch.int32, device=q.device)
+    return torch.cat(k_batches, dim=0), torch.cat(v_batches, dim=0), cu_seqlens_kv, max(kv_lens)
+
+
 # ── build-cache helpers ────────────────────────────────────────────────────
 
 
@@ -176,6 +268,16 @@ def flydsl_flash_attn_func(
     # Whether per-batch Sq and Skv can differ. Dense mode infers this from shapes;
     # varlen mode requires it explicitly to choose the correct build variant.
     cross_seqlen: Optional[bool] = None,
+    # Paged KV cache ABI (interface only for now; paged FlyDSL kernel support is
+    # wired in a future implementation). When provided, k/v are physical KV cache
+    # tensors and lookup-table metadata describes logical sequence order.
+    kv_indptr: Optional[torch.Tensor] = None,
+    kv_indices: Optional[torch.Tensor] = None,
+    kv_last_page_lens: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
+    seqlen_k: Optional[torch.Tensor] = None,
+    kv_cache_layout: str = "linear",
+    kv_lookup_table: str = "vllm",
     # Split-K (gfx950 only, seq_len >= 384, D=128, bf16/f16).
     num_kv_splits: int = 1,
     # Output tensor; allocated if None.
@@ -200,6 +302,17 @@ def flydsl_flash_attn_func(
         k: Key tensor. Dense: ``[B, Skv, Hkv, D]``.
            Varlen: ``[total_kv, Hkv, D]``.
         v: Value tensor, same shape as k.
+           Paged KV cache (future ABI): physical K/V cache tensors. Supported
+           ``kv_cache_layout`` values:
+           - ``linear``: 4D paged K/V, ``[NumBlocks, PageSize, NumKVHeads, HeadDim]``.
+           - ``linear3d``: page_size=1 special case,
+             ``[NumBlocks, NumKVHeads, HeadDim]``.
+           - ``vectorized``: aiter-style 5D K/V, where
+             ``K = [NumBlocks, NumKVHeads, HeadDim / kVectorSize, PageSize, kVectorSize]``
+             and
+             ``V = [NumBlocks, NumKVHeads, PageSize / kVectorSize, HeadDim, kVectorSize]``.
+             Here ``kVectorSize = 16 / element_size`` (bf16/fp16: 8, fp8: 16);
+             page_size and head_dim must be divisible by it.
         causal: Bottom-right aligned causal mask when True.
         num_kv_heads: KV head count for GQA/MQA; defaults to q num_heads (MHA).
         cu_seqlens_q: Int32 ``[B+1]`` cumulative Q token counts (varlen).
@@ -209,6 +322,10 @@ def flydsl_flash_attn_func(
             seqlen_q != seqlen_kv per batch.
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
+        kv_indptr / kv_indices: SGLang-style 1D page table metadata.
+        block_table / seqlen_k: vLLM-style 2D block table metadata.
+        kv_last_page_lens: Per-batch valid token count in the final KV page.
+        kv_lookup_table: ``"sglang"`` or ``"vllm"``.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=128, bf16/f16, seq>=384).
         out: Optional pre-allocated output tensor (same shape/dtype as q).
         waves_per_eu: Kernel occupancy hint.
@@ -230,6 +347,75 @@ def flydsl_flash_attn_func(
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share device; got {q.device}/{k.device}/{v.device}")
     if q.dtype != k.dtype or q.dtype != v.dtype:
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
+
+    paged_kv = any(x is not None for x in (kv_indptr, kv_indices, kv_last_page_lens, block_table, seqlen_k))
+    if paged_kv:
+        if kv_cache_layout not in ("linear", "linear3d", "vectorized"):
+            raise ValueError(f"flydsl_flash_attn_func: unsupported kv_cache_layout={kv_cache_layout}")
+        if kv_lookup_table not in ("vllm", "sglang"):
+            raise ValueError(f"flydsl_flash_attn_func: unsupported kv_lookup_table={kv_lookup_table}")
+        # Future native paged-KV FlyDSL kernel call shape:
+        # return flydsl_flash_attn_paged_func(
+        #     q,
+        #     k,
+        #     v,
+        #     cu_seqlens_q=cu_seqlens_q,
+        #     kv_indptr=kv_indptr,
+        #     kv_indices=kv_indices,
+        #     kv_last_page_lens=kv_last_page_lens,
+        #     block_table=block_table,
+        #     seqlen_k=seqlen_k,
+        #     max_seqlen_q=max_seqlen_q,
+        #     max_seqlen_kv=max_seqlen_kv,
+        #     kv_cache_layout=kv_cache_layout,
+        #     kv_lookup_table=kv_lookup_table,
+        #     out=out,
+        #     stream=stream,
+        #     # plus kernel build options as needed:
+        #     # waves_per_eu=waves_per_eu,
+        #     # daz=daz,
+        #     # dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+        #     # dualwave_swp_setprio=dualwave_swp_setprio,
+        #     # dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+        #     # debug_counts=debug_counts,
+        # )
+        #
+        # Temporary bridge: materialize the logical K/V sequence from the physical
+        # paged cache, then call the existing dense/varlen FlyDSL kernels.
+        k_logical, v_logical, fallback_cu_kv, fallback_max_kv = _materialize_paged_kv_for_fallback(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            kv_indptr=kv_indptr,
+            kv_indices=kv_indices,
+            kv_last_page_lens=kv_last_page_lens,
+            block_table=block_table,
+            seqlen_k=seqlen_k,
+            kv_cache_layout=kv_cache_layout,
+            kv_lookup_table=kv_lookup_table,
+        )
+        return flydsl_flash_attn_func(
+            q,
+            k_logical,
+            v_logical,
+            causal=causal,
+            num_kv_heads=num_kv_heads,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=fallback_cu_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=fallback_max_kv,
+            cross_seqlen=True if fallback_cu_kv is not None else cross_seqlen,
+            num_kv_splits=num_kv_splits,
+            out=out,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+            debug_counts=debug_counts,
+            stream=stream,
+        )
 
     dtype_str = _dtype_str(q)
     varlen = cu_seqlens_q is not None
