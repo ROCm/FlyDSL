@@ -76,10 +76,10 @@ def _get_layernorm_configs():
             configs.append((int(m_s), int(n_s), dt))
     else:
         configs = [
-            (64, 256, "f32"),    # f32 aligned
-            (32, 128, "f16"),    # f16 aligned
-            (64, 2000, "f32"),   # unaligned tail handling
-            (16, 512, "bf16"),   # bf16 small shape
+            (64, 256, "f32"),  # f32 aligned
+            (32, 128, "f16"),  # f16 aligned
+            (64, 2000, "f32"),  # unaligned tail handling
+            (16, 512, "bf16"),  # bf16 small shape
             (64, 8192, "bf16"),  # bf16 fast-path N with small M
         ]
     return configs
@@ -217,7 +217,9 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     stream = torch.cuda.current_stream()
 
     if is_smooth:
-        compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, beta_dev, xscale_dev, output_dev, yscale_dev, M, stream)
+        compiled_fn = flyc.compile(
+            launch_fn, input_dev, gamma_dev, beta_dev, xscale_dev, output_dev, yscale_dev, M, stream
+        )
 
         def kernel_launch():
             compiled_fn(input_dev, gamma_dev, beta_dev, xscale_dev, output_dev, yscale_dev, M, stream)
