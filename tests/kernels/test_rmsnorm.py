@@ -15,9 +15,9 @@ RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma
 
 import os
 
-import flydsl.compiler as flyc
 import pytest
 
+import flydsl.compiler as flyc
 from kernels.rmsnorm_kernel import (
     build_fused_add_rmsnorm_dynamicquant_module,
     build_fused_add_rmsnorm_module,

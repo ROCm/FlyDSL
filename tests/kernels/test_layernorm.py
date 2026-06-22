@@ -15,9 +15,9 @@ LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 
 import os
 
-import flydsl.compiler as flyc
 import pytest
 
+import flydsl.compiler as flyc
 from kernels.layernorm_kernel import (
     build_fused_add_layernorm_dynamicquant_module,
     build_fused_add_layernorm_module,
