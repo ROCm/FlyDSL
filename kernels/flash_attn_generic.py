@@ -118,6 +118,7 @@ def build_flash_attn_func_module_primary(
     num_kv_heads=None,
     cu_seqlens_q=None,
     cu_seqlens_kv=None,
+    cross_seqlen=False,
     dualwave_swp_lazy_rescale=True,
     dualwave_swp_setprio=True,
     dualwave_swp_debug_lazy_counts=False,
@@ -146,16 +147,7 @@ def build_flash_attn_func_module_primary(
     # (gfx950 D=128 bf16/f16) is built for the outermost call only; dense routing
     # uses `_routes_dense_to_dualwave`, and packed/varlen always uses DUALWAVE_SWP.
     _dualwave_swp_launch = None
-    # FLYDSL_DISABLE_DUALWAVE_SWP=1 forces the generic fallback (used to validate
-    # the generic kernel on gfx950 hardware).
-    _dualwave_swp_disabled = os.environ.get("FLYDSL_DISABLE_DUALWAVE_SWP", "0") == "1"
-    if (
-        block_m is None
-        and head_dim == 128
-        and dtype_str in ("bf16", "f16")
-        and gpu_arch.startswith("gfx950")
-        and not _dualwave_swp_disabled
-    ):
+    if block_m is None and head_dim == 128 and dtype_str in ("bf16", "f16") and gpu_arch.startswith("gfx950"):
         try:
             from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
 
@@ -171,8 +163,13 @@ def build_flash_attn_func_module_primary(
                 dualwave_swp_setprio=dualwave_swp_setprio,
                 dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
                 dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-                # Non-None cu_seqlens_q builds the packed/varlen kernel variant.
+                # QKV varlen (packed cu_seqlens). Non-None cu_seqlens_q -> build the
+                # varlen kernel variant; the runtime tensors are captured here and
+                # forwarded into the dualwave launch by _wrap_with_dualwave_swp below.
                 varlen=(cu_seqlens_q is not None),
+                # Emit the extra v_s_1 causal mask needed for seqlen_q != seqlen_kv
+                # (bottom-right). Off by default so self-attention keeps its schedule.
+                cross_seqlen=cross_seqlen,
             )
         except Exception as _dualwave_swp_err:
             import sys
@@ -218,8 +215,25 @@ def build_flash_attn_func_module_primary(
                 "QKV varlen (cu_seqlens) is only supported on the gfx950 DUALWAVE_SWP "
                 "path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)"
             )
+
+        def _fallback_no_diff_kv(*args, **kwargs):
+            # seq_len_kv (cross-length attention) is a gfx950 DUALWAVE_SWP feature;
+            # the generic fallback is self-attention only. Drop an equal seq_len_kv,
+            # reject a differing one with a clear error.
+            skv = kwargs.pop("seq_len_kv", None)
+            S_int = _extract_seq_len(args, kwargs)
+            if skv is not None and S_int is not None and int(skv) != S_int:
+                raise NotImplementedError(
+                    "seq_len_kv != seq_len (cross-length attention) is only supported on the "
+                    "gfx950 DUALWAVE_SWP path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)."
+                )
+            return _fallback(*args, **kwargs)
+
+        if hasattr(_fallback, "compile"):
+            _fallback_no_diff_kv.compile = _fallback.compile
+
         if _dualwave_swp_launch is None:
-            dispatched = _fallback
+            dispatched = _fallback_no_diff_kv
         else:
 
             def _dualwave_swp_dispatch(*args, **kwargs):
@@ -236,6 +250,15 @@ def build_flash_attn_func_module_primary(
                 # cu_seqlens captured at build time are forwarded here.
                 if cu_seqlens_q is not None:
                     return _dualwave_swp_launch(*args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs)
+                skv = kwargs.get("seq_len_kv", None)
+                if skv is not None:
+                    S_int = _extract_seq_len(args, kwargs)
+                    try:
+                        cross_len = S_int is None or int(skv) != S_int
+                    except (TypeError, ValueError):
+                        cross_len = True
+                    if cross_len:
+                        return _dualwave_swp_launch(*args, **kwargs)
                 # A dense call carrying a DUALWAVE_SWP-only kwarg cannot use the
                 # generic launcher (different signature), so it stays on DUALWAVE_SWP.
                 # Check key presence, not value (an explicit `debug_counts=None` still
@@ -244,7 +267,7 @@ def build_flash_attn_func_module_primary(
                     return _dualwave_swp_launch(*args, **kwargs)
                 if _routes_dense_to_dualwave(_extract_batch(args, kwargs), _extract_seq_len(args, kwargs)):
                     return _dualwave_swp_launch(*args, **kwargs)
-                return _fallback(*args, **kwargs)
+                return _fallback_no_diff_kv(*args, **kwargs)
 
             if hasattr(_fallback, "compile"):
                 _dualwave_swp_dispatch.compile = _fallback.compile
@@ -271,6 +294,7 @@ def build_flash_attn_func_module_primary(
             daz=daz,
             path_tag=path_tag,
             num_kv_heads=num_kv_heads,
+            cross_seqlen=cross_seqlen,
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
             dualwave_swp_setprio=dualwave_swp_setprio,
             dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
@@ -290,6 +314,7 @@ def build_flash_attn_func_module_primary(
             daz=daz,
             path_tag=path_tag,
             num_kv_heads=num_kv_heads,
+            cross_seqlen=cross_seqlen,
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
             dualwave_swp_setprio=dualwave_swp_setprio,
             dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
