@@ -108,7 +108,7 @@ def c_shuffle_epilog(
     precompute_row: Callable | None = None,
     store_pair: Callable,
     # Optional: called once after all n_reps_shuffle col_pair stores for a given
-    # row finish, with (row_local, row, row_ctx). Used by D-flag C-1 fused gemm2
+    # row finish, with (row_local, row, row_ctx). Used by token-level-sync fused gemm2
     # to fire the device-scope cross-CTA atomic + cross-card per-token flag once
     # the row's tile_n SLC stores are issued. None preserves baseline behaviour.
     after_row_stores: Callable | None = None,
