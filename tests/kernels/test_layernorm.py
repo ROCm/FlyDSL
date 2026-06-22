@@ -15,6 +15,7 @@ LayerNorm(x) = (x - mean) / sqrt(var + eps) * gamma + beta
 
 import os
 
+import flydsl.compiler as flyc
 import pytest
 
 from kernels.layernorm_kernel import (
@@ -75,15 +76,19 @@ def _get_layernorm_configs():
             configs.append((int(m_s), int(n_s), dt))
     else:
         configs = [
-            # (64, 256, "f32"),     # Aligned
-            # (128, 1024, "f32"),   # Aligned
-            # (32, 128, "f16"),     # Aligned
-            # (64, 2000, "f32"),    # Unaligned (tail handling)
-            # (16, 512, "bf16"),    # BF16
-            # (1024, 8192, "bf16"), # BF16
-            (32768, 8192, "bf16"),
+            (64, 256, "f32"),    # f32 aligned
+            (32, 128, "f16"),    # f16 aligned
+            (64, 2000, "f32"),   # unaligned tail handling
+            (16, 512, "bf16"),   # bf16 small shape
+            (64, 8192, "bf16"),  # bf16 fast-path N with small M
         ]
     return configs
+
+
+def _get_layernorm_large_configs():
+    return [
+        (32768, 8192, "bf16"),
+    ]
 
 
 def run_test(M: int, N: int, dtype: str = "f32"):
@@ -121,9 +126,10 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
+    compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, beta_dev, output_dev, M, stream)
 
     def kernel_launch():
-        launch_fn(input_dev, gamma_dev, beta_dev, output_dev, M, stream=stream)
+        compiled_fn(input_dev, gamma_dev, beta_dev, output_dev, M, stream)
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()
@@ -210,11 +216,17 @@ def run_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
 
-    def kernel_launch():
-        if is_smooth:
-            launch_fn(input_dev, gamma_dev, beta_dev, xscale_dev, output_dev, yscale_dev, M, stream=stream)
-        else:
-            launch_fn(input_dev, gamma_dev, beta_dev, output_dev, yscale_dev, M, stream=stream)
+    if is_smooth:
+        compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, beta_dev, xscale_dev, output_dev, yscale_dev, M, stream)
+
+        def kernel_launch():
+            compiled_fn(input_dev, gamma_dev, beta_dev, xscale_dev, output_dev, yscale_dev, M, stream)
+
+    else:
+        compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, beta_dev, output_dev, yscale_dev, M, stream)
+
+        def kernel_launch():
+            compiled_fn(input_dev, gamma_dev, beta_dev, output_dev, yscale_dev, M, stream)
 
     kernel_launch()
     torch.cuda.synchronize()
@@ -301,9 +313,20 @@ def run_fused_add_test(M: int, N: int, dtype: str = "f32"):
 
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
+    compiled_fn = flyc.compile(
+        launch_fn,
+        input_dev,
+        residual_dev,
+        gamma_dev,
+        beta_dev,
+        output_dev,
+        residual_out_dev,
+        M,
+        stream,
+    )
 
     def kernel_launch():
-        launch_fn(input_dev, residual_dev, gamma_dev, beta_dev, output_dev, residual_out_dev, M, stream=stream)
+        compiled_fn(input_dev, residual_dev, gamma_dev, beta_dev, output_dev, residual_out_dev, M, stream)
 
     kernel_launch()
     torch.cuda.synchronize()
@@ -407,9 +430,23 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
 
-    def kernel_launch():
-        if is_smooth:
-            launch_fn(
+    if is_smooth:
+        compiled_fn = flyc.compile(
+            launch_fn,
+            input_dev,
+            residual_dev,
+            gamma_dev,
+            beta_dev,
+            xscale_dev,
+            output_dev,
+            residual_out_dev,
+            yscale_dev,
+            M,
+            stream,
+        )
+
+        def kernel_launch():
+            compiled_fn(
                 input_dev,
                 residual_dev,
                 gamma_dev,
@@ -419,10 +456,25 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
                 residual_out_dev,
                 yscale_dev,
                 M,
-                stream=stream,
+                stream,
             )
-        else:
-            launch_fn(
+
+    else:
+        compiled_fn = flyc.compile(
+            launch_fn,
+            input_dev,
+            residual_dev,
+            gamma_dev,
+            beta_dev,
+            output_dev,
+            residual_out_dev,
+            yscale_dev,
+            M,
+            stream,
+        )
+
+        def kernel_launch():
+            compiled_fn(
                 input_dev,
                 residual_dev,
                 gamma_dev,
@@ -431,7 +483,7 @@ def run_fused_add_quant_test(M: int, N: int, dtype: str, *, is_smooth: bool):
                 residual_out_dev,
                 yscale_dev,
                 M,
-                stream=stream,
+                stream,
             )
 
     kernel_launch()
@@ -689,6 +741,17 @@ def test_layernorm():
     # Ensure a non-zero exit code on failure for shell wrappers.
     if failures != 0:
         raise SystemExit(1)
+
+
+@pytest.mark.large_shape
+def test_layernorm_large_shape():
+    print("=" * 80)
+    print("Running LayerNorm Large Shape Tests")
+    print("=" * 80)
+
+    for M, N, dtype in _get_layernorm_large_configs():
+        ok, _ = run_test(M, N, dtype)
+        assert ok
 
 
 def test_fused_add_layernorm():
