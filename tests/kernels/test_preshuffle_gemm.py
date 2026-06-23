@@ -72,6 +72,20 @@ def run_torch(a, b, scale_a, scale_b, bias=None, dtype=torch.float32):
     return c.to(dtype)
 
 
+def _per_1x32_mxfp8_quant(x):
+    """MXFP8 (e4m3fn) per-1x32 E8M0 block quant. Returns (x_q fp8 [.,K], scale uint8 [.,K/32])."""
+    fp8_max = float(torch.finfo(DTYPE_FP8).max)
+    shp = x.shape
+    xf = x.contiguous().view(-1, 32).float()
+    amax = torch.amax(torch.abs(xf), dim=-1).clamp_min(1e-30)
+    scale_e8m0 = fp4_utils.f32_to_e8m0(amax / fp8_max)
+    scale_f32 = fp4_utils.e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
+    xq = (xf / scale_f32.view(-1, 1)).clamp(-fp8_max, fp8_max).to(DTYPE_FP8)
+    xq = xq.view(shp).contiguous()
+    scale = scale_e8m0.view(*shp[:-1], shp[-1] // 32).view(torch.uint8).contiguous()
+    return xq, scale
+
+
 @pytest.mark.parametrize("in_dtype", ["fp8", "int8", "int4", "bf16"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
@@ -574,6 +588,134 @@ def test_mfma_a6w4_flyc_preshuffle(
     tflops = (2 * M * N * K) / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"[flyc] W4A6 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    [
+        (256, 256, 256, 128, 128, 128),  # baseline (even m/n, tile_k=128)
+        (64, 4096, 512, 64, 128, 128),
+        (256, 256, 512, 128, 128, 256),  # tile_k=256 (multi-128-tile per compute_tile)
+        (128, 64, 512, 64, 64, 256),  # tile_n=64 (num_acc_n=1, runtime n-half)
+        (128, 256, 512, 16, 128, 512),  # tile_m=16 (m_repeat=1, runtime m-half)
+        pytest.param(1024, 8192, 8192, 64, 128, 128, marks=pytest.mark.large_shape),
+        pytest.param(4096, 4096, 8192, 128, 256, 128, marks=pytest.mark.large_shape),
+        pytest.param(4096, 4096, 8192, 128, 256, 256, marks=pytest.mark.large_shape),
+        pytest.param(5120, 5120, 8192, 128, 256, 128, marks=pytest.mark.large_shape),
+    ],
+)
+def test_mfma_mxfp8_flyc_preshuffle(
+    out_dtype,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    *,
+    lds_stage: int = DEFAULT_LDS_STAGE,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+):
+    """MXFP8 (E4M3) A x MXFP8 (E4M3) B with per-1x32 E8M0 scale applied inside the
+    MFMA (mfma_scale_f32_16x16x128_f8f6f4, cbsz=blgp=0) - gfx950 only.
+
+    Unlike plain fp8 (identity MFMA scale + per-token f32 epilogue scale), mxfp8
+    feeds the real per-32 block scale into the MFMA. The E8M0 scale is host-shuffled
+    with the same shuffle_scale_w4 layout the fp4 path uses; B uses the fp8
+    shuffle_weight(16,16) preshuffle.
+    """
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"mxfp8 GEMM requires gfx950, got {get_rocm_arch()}")
+
+    print("=" * 80)
+    print(f"MFMA MXFP8 (MX 1x32 scale) GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
+    print("=" * 80)
+
+    launch_fn = compile_preshuffle_gemm_a8(
+        M=M,
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        in_dtype="mxfp8",
+        out_dtype=out_dtype,
+        lds_stage=lds_stage,
+    )
+
+    device = torch.device("cuda")
+    M_align_32 = (M + 31) // 32 * 32
+    N_align_32 = (N + 31) // 32 * 32
+
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
+    a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
+    b_fp32_padded = torch.zeros(N_align_32, K, device=device, dtype=torch.float32)
+    a_fp32_padded[:M] = a_fp32
+    b_fp32_padded[:N] = b_fp32
+
+    # A: MXFP8, row-major fp8 codes (A goes through LDS in-kernel; no data shuffle).
+    a_q_pad, scale_a_orig = _per_1x32_mxfp8_quant(a_fp32_padded)
+    a_q = a_q_pad[:M].contiguous()
+    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig.view(torch.uint8), 1, False)
+
+    # B: MXFP8, shuffle_weight(16,16) (fp8 preshuffle); scale shuffle_scale_w4.
+    b_q_pad, scale_b_orig = _per_1x32_mxfp8_quant(b_fp32_padded)
+    b_q = b_q_pad[:N].contiguous()
+    b_shuffled = shuffle_weight(b_q, layout=(16, 16))
+    scale_b = fp4_utils.shuffle_scale_w4(scale_b_orig.view(torch.uint8), 1, False)
+
+    # Reference: full MX dequant matmul (unshuffled natural scales).
+    saf = fp4_utils.e8m0_to_f32(scale_a_orig[:M].view(torch.uint8)).repeat_interleave(32, dim=1)
+    sbf = fp4_utils.e8m0_to_f32(scale_b_orig[:N].view(torch.uint8)).repeat_interleave(32, dim=1)
+    c_ref = torch.mm(a_q.float() * saf, (b_q.float() * sbf).T).to(torch.float32)
+
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
+    _dummy_bias = torch.empty(0, dtype=torch_out_dtype, device=device)
+
+    def _i8(t):
+        return t.view(torch.int8) if "float8" in str(t.dtype) else t
+
+    def _mx_args(c, a, b, sa, sb):
+        return (
+            c.contiguous().view(-1),
+            _i8(a).contiguous().view(-1),
+            _i8(b).contiguous().view(-1),
+            sa.contiguous().view(-1),
+            sb.contiguous().view(-1),
+            _dummy_bias,
+            M,
+            N,
+            torch.cuda.current_stream(),
+        )
+
+    compiled_fn = flyc.compile(launch_fn, *_mx_args(c_out, a_q, b_shuffled, scale_a, scale_b))
+
+    def launch_kernel(c, a, b, sa, sb):
+        compiled_fn(*_mx_args(c, a, b, sa, sb))
+
+    _, us = run_perftest(
+        launch_kernel,
+        c_out,
+        a_q,
+        b_shuffled,
+        scale_a,
+        scale_b,
+        num_iters=max(2, int(bench_iters)),
+        num_warmup=int(bench_warmup),
+    )
+    torch.cuda.synchronize()
+
+    assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+
+    # A and B are 1 B/elem fp8; scales are K//32 bytes per row.
+    bytes_moved = M * K + N * K + (M * N) * 2 + (M + N) * (K // 32)
+    tflops = (2 * M * N * K) / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"[flyc] MXFP8 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 if __name__ == "__main__":
