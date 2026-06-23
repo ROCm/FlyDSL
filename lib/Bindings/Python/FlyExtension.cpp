@@ -72,12 +72,26 @@ struct IntTupleAttrBuilder {
     } else if (args.is_none()) {
       return IntTupleAttr::getLeafNone(ctx);
     } else {
-      if (!nb::hasattr(args, "_CAPIPtr")) {
-        throw std::invalid_argument("Expected I32, got: " +
+      if (!nb::hasattr(args, MLIR_PYTHON_CAPI_PTR_ATTR)) {
+        throw std::invalid_argument("Expected I32/I64, got: " +
+                                    std::string(nb::str(nb::type_name(args)).c_str()));
+      }
+      // A dynamic int_tuple leaf must be an i32/i64 MLIR Value (the op operands
+      // are constrained to AnyTypeOf<[I32, I64]>). Validate strictly and carry the
+      // value's actual width into the attr leaf.
+      auto capsule = nb::cast<nb::capsule>(args.attr(MLIR_PYTHON_CAPI_PTR_ATTR));
+      MlirValue mlirVal = mlirPythonCapsuleToValue(capsule.ptr());
+      if (mlirValueIsNull(mlirVal)) {
+        throw std::invalid_argument("Dynamic int_tuple leaf must be an MLIR Value, got: " +
+                                    std::string(nb::str(nb::type_name(args)).c_str()));
+      }
+      auto intTy = dyn_cast<IntegerType>(unwrap(mlirVal).getType());
+      if (!intTy || (intTy.getWidth() != 32 && intTy.getWidth() != 64)) {
+        throw std::invalid_argument("Dynamic int_tuple leaf must be an i32 or i64 value, got: " +
                                     std::string(nb::str(nb::type_name(args)).c_str()));
       }
       dyncElems.push_back(args);
-      return IntTupleAttr::get(IntAttr::getDynamic(ctx));
+      return IntTupleAttr::get(IntAttr::getDynamic(ctx, intTy.getWidth()));
     }
   }
 };
