@@ -643,6 +643,7 @@ def test_mfma_mxfp8_flyc_preshuffle(
         in_dtype="mxfp8",
         out_dtype=out_dtype,
         lds_stage=lds_stage,
+        k_batch=1,  # non-split correctness/perf (run_perftest doesn't re-zero C)
     )
 
     device = torch.device("cuda")
@@ -716,6 +717,54 @@ def test_mfma_mxfp8_flyc_preshuffle(
     tflops = (2 * M * N * K) / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"[flyc] MXFP8 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+@pytest.mark.parametrize("k_batch", [2, 4])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    [
+        (128, 128, 2048, 128, 128, 256),  # K-heavy, tile-light: split-K helps
+        (256, 256, 4096, 128, 256, 256),
+    ],
+)
+def test_mfma_mxfp8_splitk_flyc_preshuffle(M, N, K, tile_m, tile_n, tile_k, k_batch):
+    """In-kernel split-K (k_batch) for mxfp8: grid z = k_batch, each CTA computes a
+    K-slice and packed-bf16-atomic-adds into a PRE-ZEROED C. A/B/scales are passed
+    in FULL (un-sliced) — the CTA reads its slice via the k_base offset."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"mxfp8 GEMM requires gfx950, got {get_rocm_arch()}")
+    if K % k_batch != 0 or (K // k_batch) % 256 != 0:
+        pytest.skip(f"K/k_batch must be a multiple of 256, got K={K} k_batch={k_batch}")
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    a = torch.randn(M, K, device=device)
+    b = torch.randn(N, K, device=device)
+    a_q, sa = _per_1x32_mxfp8_quant(a)
+    b_q, sb = _per_1x32_mxfp8_quant(b)
+    saf = fp4_utils.e8m0_to_f32(sa.view(torch.uint8)).repeat_interleave(32, dim=1)
+    sbf = fp4_utils.e8m0_to_f32(sb.view(torch.uint8)).repeat_interleave(32, dim=1)
+    c_ref = torch.mm(a_q.float() * saf, (b_q.float() * sbf).T).to(torch.float32)
+
+    a_i8 = a_q.view(torch.int8).contiguous().view(-1)
+    b_in = shuffle_weight(b_q.view(torch.int8).contiguous(), layout=(16, 16)).view(-1)
+    sa_in = fp4_utils.shuffle_scale_w4(sa.view(torch.uint8), 1, False).reshape(-1)
+    sb_in = fp4_utils.shuffle_scale_w4(sb.view(torch.uint8), 1, False).reshape(-1)
+    bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+
+    launch_fn = compile_preshuffle_gemm_a8(
+        M=M, N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+        in_dtype="mxfp8", out_dtype="bf16", k_batch=k_batch,
+    )
+    c = torch.zeros(M, N, device=device, dtype=torch.bfloat16)
+    args = (c.view(-1), a_i8, b_in, sa_in, sb_in, bias, M, N, torch.cuda.current_stream())
+    # flyc.compile also executes once; re-zero C before the single measured run
+    # because split-K ACCUMULATES into C with atomics (not idempotent stores).
+    compiled = flyc.compile(launch_fn, *args)
+    c.zero_()
+    compiled(*args)
+    torch.cuda.synchronize()
+    assert verify_output(c.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
 
 if __name__ == "__main__":

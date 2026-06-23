@@ -1,7 +1,8 @@
 """Preshuffle GEMM kernel using the @flyc.kernel API."""
 
 import functools
-from typing import Optional
+import os
+from typing import Optional, Union
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -110,6 +111,55 @@ def _get_preload(tile_m, tile_n, tile_k):
     return _TILE_PRELOAD_TABLE.get((int(tile_m), int(tile_n), int(tile_k)), _TILE_PRELOAD_DEFAULT)
 
 
+def _device_cu_count(default: int = 256) -> int:
+    """CU count of the current device (gfx950 = 256). ``CU_NUM`` env overrides."""
+    env = os.environ.get("CU_NUM")
+    if env:
+        return int(env)
+    try:
+        import torch
+
+        return int(torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count)
+    except Exception:
+        return default
+
+
+def k_batch_candidates(K: int, tile_k: int):
+    """Valid split-K factors for a (K, tile_k): K/kb must be a multiple of both 256
+    (shuffle_scale_w4) and tile_k. Use as the autotune search space for k_batch."""
+    out = [1]
+    for kb in (2, 3, 4, 5, 6, 8, 12, 16):
+        if K % kb == 0 and (K // kb) % 256 == 0 and (K // kb) % int(tile_k) == 0:
+            out.append(kb)
+    return out
+
+
+def select_k_batch(M, N, K, tile_m, tile_n, tile_k, in_dtype, *, cu: Optional[int] = None) -> int:
+    """(A) Heuristic split-K selection (the default for in_dtype='mxfp8').
+
+    Split-K only helps when the output is *tile-light* — few M/N output tiles, so
+    the GPU's CUs are underused — while K is large enough to split. We add z-grid
+    parallelism to bring the active block count up toward the CU count. Returns 1
+    (no split) for tile-heavy shapes, non-mxfp8 dtypes, or unknown M (runtime M).
+
+    NOTE: a returned k_batch>1 makes the kernel ACCUMULATE into C via atomics, so
+    the caller MUST zero-initialise C. (k_batch==1 keeps plain overwrite stores.)
+    Pass an explicit integer k_batch to override this heuristic (e.g. autotune).
+    """
+    if in_dtype != "mxfp8" or int(M) <= 0:
+        return 1
+    if cu is None:
+        cu = _device_cu_count()
+    n_tiles = ((int(M) + int(tile_m) - 1) // int(tile_m)) * (int(N) // int(tile_n))
+    if n_tiles <= 0 or n_tiles >= cu:
+        return 1
+    target = cu // n_tiles  # how much extra parallelism we want
+    for kb in (8, 4, 2):
+        if kb <= target and K % kb == 0 and (K // kb) % 256 == 0 and (K // kb) % int(tile_k) == 0:
+            return kb
+    return 1
+
+
 @functools.lru_cache(maxsize=1024)
 def compile_preshuffle_gemm_a8(
     *,
@@ -129,6 +179,7 @@ def compile_preshuffle_gemm_a8(
     dvmem_preload: int = -1,
     epilogue: str = "none",  # "none", "bias", "bias_relu", "bias_silu", "bias_gelu"
     xcd_swizzle: int = 0,
+    k_batch: Union[int, str] = "auto",
 ):
     """Compile the preshuffle GEMM kernel using the @flyc.kernel API.
 
@@ -177,6 +228,11 @@ def compile_preshuffle_gemm_a8(
     # "fp8" which carries identity scale in the MFMA and a per-token f32 scale in the
     # epilogue. The DATA path is identical to fp8 (1 B/elem, full-32 B packs).
     is_mx_fp8 = in_dtype == "mxfp8"
+    # Resolve split-K selection early (used in KERNEL_NAME). k_batch="auto" (default)
+    # -> (A) select_k_batch heuristic; explicit int overrides (e.g. (B) autotune).
+    if k_batch == "auto":
+        k_batch = select_k_batch(M, N, K, tile_m, tile_n, tile_k, in_dtype)
+    k_batch = int(k_batch)
     # MX-scale family: fp4/fp6 (data in the f8f6f4 low half) + mxfp8 (full f8). All
     # share the per-32 E8M0 scale machinery (e8m0_shuffle host layout, scale chunk
     # loader, pipeline threading). `is_mx == is_fp4_or_fp6` for every pre-existing
@@ -203,6 +259,8 @@ def compile_preshuffle_gemm_a8(
         KERNEL_NAME += f"_ep_{epilogue}"
     if xcd_swizzle > 0:
         KERNEL_NAME += f"_xcd{xcd_swizzle}"
+    if int(k_batch) > 1:
+        KERNEL_NAME += f"_sk{k_batch}"
 
     tile_k_bytes = int(tile_k) * int(elem_bytes)
     # fp6 needs 32 B per lane per K=32 chunk (FP8-padded); fp4/fp8 use 16 B.
@@ -238,6 +296,29 @@ def compile_preshuffle_gemm_a8(
             raise NotImplementedError(f"mxfp8 requires tile_m=16 or a multiple of 32, got {tile_m}")
         if _nan != 1 and (_nan % 2) != 0:
             raise NotImplementedError(f"mxfp8 requires tile_n=64 or a multiple of 128, got {tile_n}")
+
+    # ── In-kernel split-K (k_batch): grid z = k_batch; each CTA computes the
+    # K-slice [bz*_k_dim, (bz+1)*_k_dim) and ATOMICALLY adds its partial into a
+    # pre-zeroed C (packed bf16 fadd, like mixed_moe_gemm_2stage). A/B/scales are
+    # passed in full (un-sliced): the CTA reads its slice via a k_base offset on
+    # every global K address. The cshuffle epilogue is FORCED on (its LDS gather
+    # produces the contiguous-N fragments that packed bf16 atomics require); C
+    # must be zero-initialised by the caller. No fused bias.
+    # (k_batch was resolved from "auto" near is_mx_fp8 above.)
+    _is_splitk = k_batch > 1
+    if _is_splitk:
+        if int(K) % int(k_batch) != 0:
+            raise ValueError(f"K={K} must be divisible by k_batch={k_batch}")
+        _k_dim = int(K) // int(k_batch)
+        if _k_dim % int(tile_k) != 0:
+            raise ValueError(f"K/k_batch={_k_dim} must be divisible by tile_k={tile_k}")
+        if epilogue != "none":
+            raise NotImplementedError("split-K (k_batch>1) does not support a fused epilogue")
+        if int(lds_stage) != 2:
+            raise NotImplementedError("split-K (k_batch>1) requires lds_stage=2 (pingpong path)")
+        use_cshuffle_epilog = True  # packed bf16 atomic needs the cshuffle contiguous store
+    else:
+        _k_dim = int(K)
 
     mfma_i32_k32 = None
     if is_int8:
@@ -403,6 +484,11 @@ def compile_preshuffle_gemm_a8(
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
+        # split-K: this CTA's K-slice base (0 when k_batch==1). block_id("z") is read
+        # unconditionally (it's 0 for a z=1 grid) — reading it inside a const_expr
+        # branch mis-traced to a constant 0.
+        bz = gpu.block_id("z")
+        k_base_idx = bz * _k_dim if const_expr(_is_splitk) else 0
 
         bx, by = xcd_remap_bx_by(
             bx,
@@ -772,6 +858,8 @@ def compile_preshuffle_gemm_a8(
                 )
 
         def prefetch_a_to_lds(base_k, lds_buffer, *, a_elem_vec_pack_v, dma_a_tile_to_lds_fn):
+            if const_expr(_is_splitk):
+                base_k = k_base_idx + base_k
             base_k_div4 = base_k // 4 // a_elem_vec_pack_v
             dma_a_tile_to_lds_fn(
                 base_k_div4,
@@ -790,11 +878,15 @@ def compile_preshuffle_gemm_a8(
             )
 
         def prefetch_a_tile(base_k):
+            if const_expr(_is_splitk):
+                base_k = k_base_idx + base_k
             base_k_bytes = base_k * elem_bytes // a_elem_vec_pack
             base_k_div4 = base_k_bytes // 4
             return load_a_tile(base_k_div4)
 
         def prefetch_b_tile(base_k):
+            if const_expr(_is_splitk):
+                base_k = k_base_idx + base_k
             base_k_packed = base_k // b_elem_vec_pack if b_elem_vec_pack > 1 else base_k
             return load_b_tile(base_k_packed)
 
@@ -875,6 +967,8 @@ def compile_preshuffle_gemm_a8(
                 return a_scales, b_scales
 
             def load_fp4_scale_chunk(base_k):
+                if const_expr(_is_splitk):
+                    base_k = k_base_idx + base_k
                 return load_fp4_scales(base_k // fx.Index(_fp4_scale_chunk_k))
 
         # ── Compute tile (MFMA) ───────────────────────────────────────────
@@ -1197,7 +1291,16 @@ def compile_preshuffle_gemm_a8(
                     idx_out = row * c_n + col_g0
                     byte_off = idx_out * 2
                     e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
-                    if const_expr(e_vec == 4):
+                    if const_expr(_is_splitk):
+                        # split-K: accumulate into pre-zeroed C with packed bf16/f16
+                        # atomic fadd (2 contiguous N per op -> buffer_atomic_pk_add).
+                        fb = Vec(frag)
+                        _boff = byte_off.index_cast(fx.Int32.ir_type)
+                        _z = fx.Int32(0)
+                        for _p in range_constexpr(e_vec // 2):
+                            pair = Vec.from_elements([fb[2 * _p], fb[2 * _p + 1]], _out_dtype())
+                            rocdl.raw_ptr_buffer_atomic_fadd(pair, c_rsrc, _boff + fx.Int32(_p * 4), _z, _z)
+                    elif const_expr(e_vec == 4):
                         frag_i32x2 = Vec(frag).bitcast(fx.Int32)
                         buffer_ops.buffer_store(frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True)
                     else:
@@ -1734,10 +1837,10 @@ def compile_preshuffle_gemm_a8(
 
             final_accs = 1
             scales = 1
-            num_tiles = K // tile_k
+            num_tiles = _k_dim // tile_k
             if const_expr(_fp4_tilek128):
                 if const_expr((num_tiles % 2) == 1):
-                    c_k_main = K - tile_k
+                    c_k_main = _k_dim - tile_k
                     init_state = _pack_state(
                         accs,
                         _flatten_b_tile(b_tile0),
@@ -1802,7 +1905,7 @@ def compile_preshuffle_gemm_a8(
                         fp4_scale_half=0,
                     )
                 else:
-                    c_k_stop = K - (tile_k * 3)
+                    c_k_stop = _k_dim - (tile_k * 3)
                     init_state = _pack_state(
                         accs,
                         _flatten_b_tile(b_tile0),
@@ -1858,7 +1961,7 @@ def compile_preshuffle_gemm_a8(
                     )
                     b_tile_pong_ep = _unflatten_b_tile(bt_flat)
 
-                    last_k = fx.Index(K - tile_k)
+                    last_k = fx.Index(_k_dim - tile_k)
                     b_tile_ping = prefetch_b_tile(last_k)
                     if const_expr(use_async_copy):
                         prefetch_a_to_lds(
@@ -1897,7 +2000,7 @@ def compile_preshuffle_gemm_a8(
                         fp4_scale_half=1,
                     )
             elif const_expr((num_tiles % 2) == 1):
-                c_k_main = K - tile_k
+                c_k_main = _k_dim - tile_k
                 init_state = _pack_state(
                     accs,
                     _flatten_b_tile(b_tile0),
@@ -1961,7 +2064,7 @@ def compile_preshuffle_gemm_a8(
                     fp4_scales=fp4_scales_final,
                 )
             else:
-                c_k_stop = K - (tile_k * 3)
+                c_k_stop = _k_dim - (tile_k * 3)
                 init_state = _pack_state(
                     accs,
                     _flatten_b_tile(b_tile0),
@@ -2017,7 +2120,7 @@ def compile_preshuffle_gemm_a8(
                 )
                 b_tile_pong_ep = _unflatten_b_tile(bt_flat)
 
-                last_k = fx.Index(K - tile_k)
+                last_k = fx.Index(_k_dim - tile_k)
                 b_tile_ping = prefetch_b_tile(last_k)
                 if const_expr(use_async_copy):
                     prefetch_a_to_lds(
@@ -2130,7 +2233,7 @@ def compile_preshuffle_gemm_a8(
                     if const_expr(hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func"):
                         op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(fx.Int32.ir_type, _wpe)
         launcher.launch(
-            grid=(gx, gy, 1),
+            grid=(gx, gy, k_batch),
             block=(256, 1, 1),
             stream=stream,
         )
