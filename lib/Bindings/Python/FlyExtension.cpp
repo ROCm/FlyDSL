@@ -73,7 +73,7 @@ struct IntTupleAttrBuilder {
       return IntTupleAttr::getLeafNone(ctx);
     } else {
       if (!nb::hasattr(args, MLIR_PYTHON_CAPI_PTR_ATTR)) {
-        throw std::invalid_argument("Expected I32/I64, got: " +
+        throw std::invalid_argument("Expected int, tuple, None, or an i32/i64 MLIR Value, got: " +
                                     std::string(nb::str(nb::type_name(args)).c_str()));
       }
       // A dynamic int_tuple leaf must be an i32/i64 MLIR Value (the op operands
