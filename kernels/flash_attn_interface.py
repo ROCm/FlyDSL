@@ -168,12 +168,17 @@ def _build_paged(
     setprio: bool,
     enable_stagger: bool,
     num_kv_splits: int = 1,
+    varlen: bool = False,
 ):
     """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
 
     ``num_kv_splits > 1`` builds the paged + split-K variant (KV dimension split
     across grid_z = B*num_kv_splits workgroups + a combine pass), which fills the
     GPU for low-occupancy shapes (small B / few heads).
+
+    ``varlen=True`` builds the packed-Q (cu_seqlens) + paged-KV variant: Q/O are
+    ``[total_q, H, D]`` and K/V are the physical page cache, looked up via the
+    block table per kv-tile. Mutually exclusive with split-K.
     """
     from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
 
@@ -184,6 +189,7 @@ def _build_paged(
         dtype_str=dtype_str,
         num_kv_heads=num_kv_heads,
         paged=True,
+        varlen=varlen,
         num_kv_splits=num_kv_splits,
         cross_seqlen=cross_seqlen,
         waves_per_eu=waves_per_eu,
@@ -216,6 +222,9 @@ def _flydsl_flash_attn_paged(
     kv_indices: Optional[torch.Tensor],
     kv_last_page_lens: Optional[torch.Tensor],
     cu_seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_kv: Optional[torch.Tensor],
+    max_seqlen_q: Optional[int],
+    cross_seqlen: Optional[bool],
     num_kv_splits: int,
     out: Optional[torch.Tensor],
     waves_per_eu: int,
@@ -229,8 +238,10 @@ def _flydsl_flash_attn_paged(
 
     Supported config ONLY (anything else raises): linear cache layout
     [NumBlocks, PageSize=64, NumKVHeads, HeadDim], vLLM lookup (block_table +
-    seqlen_k), causal, dense 4D Q, D=128, dtype bf16/f16. Split-K (num_kv_splits>1)
-    is supported when D=128, dtype bf16/f16, and seq_len>=384.
+    seqlen_k), causal, D=128, dtype bf16/f16.
+    - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
+    - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
+      per kv-tile via block_table; split-K not supported (matches dense varlen).
     """
     if kv_cache_layout != "linear":
         raise NotImplementedError(
@@ -244,19 +255,33 @@ def _flydsl_flash_attn_paged(
         )
     if not causal:
         raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports causal=True only")
-    if cu_seqlens_q is not None:
-        raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports dense 4D Q only (no varlen)")
     if block_table is None or seqlen_k is None:
         raise ValueError("flydsl_flash_attn_func: native paged KV (vllm) requires block_table and seqlen_k")
-    if q.dim() != 4:
-        raise ValueError(f"flydsl_flash_attn_func: paged dense q must be 4D [B,Sq,H,D], got {q.dim()}D")
     if k.dim() != 4:
         raise ValueError(
             f"flydsl_flash_attn_func: linear paged K/V must be 4D [NumBlocks,PageSize,Hkv,D], got {k.dim()}D"
         )
 
+    varlen = cu_seqlens_q is not None
     dtype_str = _dtype_str(q)
-    B, Sq, H, D = q.shape
+    if varlen:
+        # Packed varlen Q: [total_q, H, D]. Per-batch ranges come from cu_seqlens
+        # inside the kernel; grid_y is sized by max_seqlen_q.
+        if cu_seqlens_kv is None:
+            raise ValueError("flydsl_flash_attn_func: varlen paged KV requires cu_seqlens_kv")
+        if max_seqlen_q is None:
+            raise ValueError("flydsl_flash_attn_func: varlen paged KV requires max_seqlen_q")
+        if num_kv_splits > 1:
+            raise NotImplementedError("flydsl_flash_attn_func: varlen paged KV does not support split-K")
+        if q.dim() != 3:
+            raise ValueError(f"flydsl_flash_attn_func: varlen paged q must be 3D [total_q,H,D], got {q.dim()}D")
+        _total_q, H, D = q.shape
+        B = cu_seqlens_q.numel() - 1
+        Sq = int(max_seqlen_q)
+    else:
+        if q.dim() != 4:
+            raise ValueError(f"flydsl_flash_attn_func: paged dense q must be 4D [B,Sq,H,D], got {q.dim()}D")
+        B, Sq, H, D = q.shape
     page_size = int(k.shape[1])
     Hkv = int(k.shape[2])
     if page_size != _PAGED_PAGE_SIZE:
@@ -273,9 +298,9 @@ def _flydsl_flash_attn_paged(
     if H % num_kv_heads != 0:
         raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
 
-    # Split-K (paged): split the KV dimension across grid_z = B*num_kv_splits workgroups
-    # + a combine pass. Fills the GPU for low-occupancy shapes (small B / few heads),
-    # where single-split paged underutilizes the device. Same eligibility as dense split-K.
+    # Split-K (paged, dense only): split the KV dimension across grid_z = B*num_kv_splits
+    # workgroups + a combine pass. Fills the GPU for low-occupancy shapes (small B / few
+    # heads), where single-split paged underutilizes the device.
     splitk = num_kv_splits > 1
     if splitk and (D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384):
         raise ValueError(
@@ -283,9 +308,13 @@ def _flydsl_flash_attn_paged(
             f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
         )
 
-    # Per-batch KV lengths differ in general → bottom-right cross-length masking.
+    # Per-batch KV lengths differ in general → bottom-right cross-length masking. Varlen
+    # paged always uses cross masking (per-batch seqlen_q/seqlen_kv come from cu_seqlens).
     skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
-    cross = skv != Sq
+    if varlen:
+        cross = bool(cross_seqlen) if cross_seqlen is not None else True
+    else:
+        cross = skv != Sq
     block_table_stride = int(block_table.shape[1])
     # Flatten so the kernel's flat row-major index addresses block_table correctly.
     block_table_i32 = (
@@ -307,6 +336,7 @@ def _flydsl_flash_attn_paged(
             setprio=dualwave_swp_setprio,
             enable_stagger=dualwave_swp_enable_stagger,
             num_kv_splits=int(num_kv_splits),
+            varlen=varlen,
         )
         if out is None:
             out = torch.empty_like(q)
@@ -320,6 +350,9 @@ def _flydsl_flash_attn_paged(
         v_flat = v.contiguous()
         o_flat = out.contiguous()
         kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
+        if varlen:
+            kwargs["cu_seqlens_q"] = cu_seqlens_q
+            kwargs["cu_seqlens_kv"] = cu_seqlens_kv
         if cross:
             kwargs["seq_len_kv"] = skv
         if splitk:
@@ -450,6 +483,9 @@ def flydsl_flash_attn_func(
             kv_indices=kv_indices,
             kv_last_page_lens=kv_last_page_lens,
             cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            cross_seqlen=cross_seqlen,
             num_kv_splits=num_kv_splits,
             out=out,
             waves_per_eu=waves_per_eu,
