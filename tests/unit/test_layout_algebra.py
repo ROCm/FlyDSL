@@ -420,6 +420,30 @@ def test_zipped_tiled_flat_product():
 
 
 # ==============================================================================
+# IntTupleLike ops on Layout (regression for issue #713)
+# ==============================================================================
+
+
+def test_int_tuple_like_ops_on_layout():
+    """`get_`/`take`/`select`/`group`/`coalesce` and `layout[i]` accept a Layout.
+
+    PR #552 added a non-permissive int-tuple coercion to these wrappers, which
+    wrongly tried to rebuild an int_tuple from a Layout value and crashed. A
+    Layout is a valid IntTupleLike and must pass through unchanged.
+    """
+
+    def build():
+        layout = fx.make_layout((128, 64), (1, 128))
+        assert str(layout[0].type) == "!fly.layout<128:1>"
+        assert str(fx.select(layout, [1, 0]).type) == "!fly.layout<(64,128):(128,1)>"
+        assert str(fx.take(layout, 0, 1).type) == "!fly.layout<128:1>"
+        assert str(fx.group(layout, 0, 2).type) == "!fly.layout<((128,64)):((1,128))>"
+        assert str(fx.coalesce(layout).type) == "!fly.layout<8192:1>"
+
+    _build_and_verify_ir("int_tuple_like_ops_on_layout", build, lambda ir: None)
+
+
+# ==============================================================================
 # Main
 # ==============================================================================
 

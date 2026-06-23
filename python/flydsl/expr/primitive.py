@@ -711,7 +711,7 @@ def get(int_tuple, mode):
 
 
 @dsl_loc_tracing
-@coerce_int_tuple_args("int_tuple")
+@coerce_int_tuple_args("int_tuple", permissive=True)
 def get_(int_tuple, mode):
     if isinstance(mode, int):
         mode = [mode]
@@ -719,19 +719,19 @@ def get_(int_tuple, mode):
 
 
 @dsl_loc_tracing
-@coerce_int_tuple_args("int_tuple")
+@coerce_int_tuple_args("int_tuple", permissive=True)
 def take(int_tuple, begin: int, end: int):
     return fly.take(int_tuple, begin=begin, end=end)
 
 
 @dsl_loc_tracing
-@coerce_int_tuple_args("int_tuple")
+@coerce_int_tuple_args("int_tuple", permissive=True)
 def select(int_tuple, indices):
     return fly.select(int_tuple, indices=indices)
 
 
 @dsl_loc_tracing
-@coerce_int_tuple_args("int_tuple")
+@coerce_int_tuple_args("int_tuple", permissive=True)
 def group(int_tuple, begin: int, end: int):
     return fly.group(int_tuple, begin=begin, end=end)
 

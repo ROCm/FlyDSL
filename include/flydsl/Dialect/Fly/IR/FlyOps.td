@@ -279,9 +279,9 @@ def Fly_Get1DCoordOp : Fly_Op<"get_1d_coord", [Pure, DeclareOpInterfaceMethods<I
 }
 
 def Fly_CoalesceOp : Fly_Op<"coalesce", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_LayoutLikeType:$layout, Optional<Fly_IntTuple>:$attr);
+  let arguments = (ins Fly_LayoutLikeType:$layout, Optional<Fly_IntTuple>:$pattern);
   let results = (outs Fly_LayoutLikeType:$result);
-  let assemblyFormat = "`(` $layout (`,` $attr^)? `)` attr-dict `:` functional-type(operands, results)";
+  let assemblyFormat = "`(` $layout (`,` $pattern^)? `)` attr-dict `:` functional-type(operands, results)";
 }
 def Fly_CompositionOp : Fly_Op<"composition", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
   let arguments = (ins Fly_LayoutLikeType:$outer, AnyTypeOf<[Fly_Layout, Fly_Tile]>:$inner);
