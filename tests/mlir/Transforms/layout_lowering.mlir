@@ -384,3 +384,43 @@ func.func @test_get_leaves_dynamic_only(%x: i32, %y: i64) -> (i32, i64) {
   %0:2 = fly.get_leaves(%t) {dynamicOnly = true} : (!fly.int_tuple<(4, ?, ?{i64})>) -> (i32, i64)
   return %0#0, %0#1 : i32, i64
 }
+
+// -----
+
+// === EqualOp Lowering: basis (scaled-basis / E<I>) leaves ===
+
+// equal on identical basis strides folds to true.
+// CHECK-LABEL: @test_equal_basis_same
+func.func @test_equal_basis_same() -> i1 {
+  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0, 1E1)>
+  // CHECK: %[[T:.*]] = arith.constant true
+  // CHECK: return %[[T]]
+  %r = fly.equal(%a, %a) : (!fly.int_tuple<(1E0, 1E1)>, !fly.int_tuple<(1E0, 1E1)>) -> i1
+  return %r : i1
+}
+
+// -----
+
+// equal on basis leaves with different modes folds to false (E0 != E1).
+// CHECK-LABEL: @test_equal_basis_diff_modes
+func.func @test_equal_basis_diff_modes() -> i1 {
+  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0)>
+  %b = fly.make_int_tuple() : () -> !fly.int_tuple<(1E1)>
+  // CHECK: %[[F:.*]] = arith.constant false
+  // CHECK: return %[[F]]
+  %r = fly.equal(%a, %b) : (!fly.int_tuple<(1E0)>, !fly.int_tuple<(1E1)>) -> i1
+  return %r : i1
+}
+
+// -----
+
+// a basis monomial never equals a plain integer leaf.
+// CHECK-LABEL: @test_equal_int_vs_basis
+func.func @test_equal_int_vs_basis() -> i1 {
+  %a = fly.make_int_tuple() : () -> !fly.int_tuple<(1)>
+  %b = fly.make_int_tuple() : () -> !fly.int_tuple<(1E0)>
+  // CHECK: %[[F:.*]] = arith.constant false
+  // CHECK: return %[[F]]
+  %r = fly.equal(%a, %b) : (!fly.int_tuple<(1)>, !fly.int_tuple<(1E0)>) -> i1
+  return %r : i1
+}

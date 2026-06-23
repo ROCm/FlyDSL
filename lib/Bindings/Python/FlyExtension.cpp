@@ -51,6 +51,18 @@ IntTupleAttr getProfileAttrFromType(Type ty) {
 
 } // namespace detail
 
+// Truthiness of a duck-type marker attribute. PyObject_IsTrue returns -1 and
+// leaves a pending Python exception (e.g. the marker is a property whose getter
+// raises); turn that into a propagated nanobind error instead of silently
+// treating it as false, which would mask the real failure.
+static bool isMarkerTruthy(nb::handle obj) {
+  int truth = PyObject_IsTrue(obj.ptr());
+  if (truth < 0) {
+    throw nb::python_error();
+  }
+  return truth == 1;
+}
+
 struct IntTupleAttrBuilder {
   MLIRContext *ctx;
   std::vector<nb::handle> dyncElems{};
@@ -71,10 +83,34 @@ struct IntTupleAttrBuilder {
       return IntTupleAttr::get(IntAttr::getStatic(ctx, cInt));
     } else if (args.is_none()) {
       return IntTupleAttr::getLeafNone(ctx);
+    } else if (nb::hasattr(args, "__fly_basis__") && isMarkerTruthy(args.attr("__fly_basis__"))) {
+      // Scaled-basis stride leaf (e.g. fx.E(0) -> 1E0), duck-typed on a truthy
+      // __fly_basis__ (Python truthiness, so a falsy marker is not mistaken for a
+      // basis). The marker is public, so re-validate the payload here:
+      // accept any sequence/iterable of modes, and reject negative modes (the
+      // assembly format cannot round-trip a negative E<mode>).
+      int32_t value = nb::cast<int32_t>(args.attr("value"));
+      SmallVector<int32_t> modes;
+      nb::object modesObj = args.attr("modes");
+      for (auto mode : modesObj) {
+        int32_t m = nb::cast<int32_t>(mode);
+        if (m < 0) {
+          throw std::invalid_argument(
+              "basis mode must be a non-negative int (the IntTuple assembly format "
+              "cannot round-trip a negative E<mode>), got " +
+              std::to_string(m));
+        }
+        modes.push_back(m);
+      }
+      return IntTupleAttr::get(BasisAttr::get(IntAttr::getStatic(ctx, value), modes));
     } else {
       if (!nb::hasattr(args, "_CAPIPtr")) {
-        throw std::invalid_argument("Expected I32, got: " +
-                                    std::string(nb::str(nb::type_name(args)).c_str()));
+        // Report the instance's *type* name. nb::type_name expects a type object,
+        // so calling it on an arbitrary instance (e.g. an object with a falsy
+        // __fly_basis__ marker) reinterprets that instance as a PyTypeObject and
+        // segfaults instead of raising; Py_TYPE(...)->tp_name is always valid.
+        throw std::invalid_argument(std::string("Expected I32, got: ") +
+                                    Py_TYPE(args.ptr())->tp_name);
       }
       dyncElems.push_back(args);
       return IntTupleAttr::get(IntAttr::getDynamic(ctx));
