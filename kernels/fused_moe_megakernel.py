@@ -15,7 +15,11 @@ the dispatch *kernel* is NOT launched — the dispatch logic lives inside the GE
 """
 from __future__ import annotations
 
+import functools
+import json
 import os
+import re
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -33,66 +37,105 @@ def _is_fp4(dt):
     return dt == torch.float4_e2m1fn_x2
 
 
-# ── Mega decode GEMM tile, TUNED at the interface (host side) ────────────────────────────────────
-# Keyed by the GEMM shape that's already in the ctor args -- (model_dim, inter_dim, quant) -- NOT a
-# network name.  Value: list of (mtpr_le, tile_m, tile_n); the decode persistent GEMM tile is the
-# smallest bucket whose mtpr_le >= the runtime max_tok_per_rank (mtpr = max(16, bs)).  Built by
-# sweeping bs1..512 x {tile_m}x{tile_n} (tests/kernels/bench ... --mega-tile-m/--mega-tile-n) and
-# keeping the lowest-latency tile per bucket.  An explicit caller tile always overrides this table.
-# Fallback (no entry): tile_m=64, tile_n=256 if inter%256==0 else 128.
-_MEGA_DECODE_TILE = {
-    # RE-SWEPT 2026-06-14 on the FIXED kernel (profiler GPU device-time, 8xMI355X, --from-bf16,
-    # tile_n=256 + XCD; baseline = aiter-tune / fp8-dispatch).  (The pre-2026-06-14 table was swept on
-    # the BROKEN kernel whose XCD remap skipped ~6/7 of the tiles -> invalid; see notes §1.)
-    # Lever: at small mtpr, tile_m=32 cuts the pad-row MFMA waste (decode packs only ~10-20 real tokens
-    # into a tile_m-row tile).  High-bs buckets were refreshed on 2026-06-18 over bs256..32768 x
-    # {32,64}x{128,256} using stage1-sweep profiler time; keep explicit buckets instead of relying on
-    # the "reuse largest bucket" fallback so compact/fixedslot both pick the measured winner.
-    # Value: list of (mtpr_le, tile_m, tile_n); pick the smallest bucket whose mtpr_le >= runtime mtpr.
-    # r1_v3: 64x128 wins bs256..8192; 64x256 narrowly wins bs16384+.
-    (7168, 2048, "a4w4"): [
-        (64, 32, 256),
-        (128, 64, 256),
-        (8192, 64, 128),
-        (32768, 64, 256),
-    ],
-    # v4_flash: 32x128 wins bs256; 64x256 wins bs512+ (XCD-enabled gx=8).
-    (4096, 2048, "a8w4"): [
-        (64, 32, 256),
-        (128, 64, 256),
-        (256, 32, 128),
-        (32768, 64, 256),
-    ],
-    # v4_pro: 64x128 wins fixedslot bs256..1024; 64x256 wins compact/high-bs.
-    # gx=12 keeps XCD disabled by correctness guard.
-    (7168, 3072, "a8w4"): [
-        (128, 32, 256),
-        (1024, 64, 128),
-        (32768, 64, 256),
-    ],
-}
+# ── Megastage1 default tile fallback ──────────────────────────────────────────────────────────────
+# Tuned tiles live in the FlyDSL JSON table below.  When a shape is intentionally
+# untuned, keep only the generic validated default instead of a second
+# hand-maintained host-side tune table.
+def _mega_default_tile(inter_dim):
+    return 64, (256 if (int(inter_dim) % 256 == 0) else 128)
 
 
-def _mega_decode_tile(model_dim, inter_dim, quant, mtpr):
-    """Return (tile_m, tile_n) for the decode persistent GEMM from the host-side tuned table, keyed by
-    the GEMM shape (model_dim, inter_dim, quant); fall back to the validated default (64, 256|128)
-    when no tuned bucket matches the shape."""
-    _tn_fallback = 256 if (int(inter_dim) % 256 == 0) else 128
-    buckets = _MEGA_DECODE_TILE.get((int(model_dim), int(inter_dim), quant))
-    if buckets:
-        for mtpr_le, tm, tn in sorted(buckets):
-            if int(mtpr) <= int(mtpr_le):
-                return int(tm), int(tn)
-        _, tm, tn = sorted(buckets)[-1]   # mtpr above the top bucket -> use the largest bucket's tile
-        return int(tm), int(tn)
-    return 64, _tn_fallback
+# ── Precise megastage1 tile, from the FlyDSL tune JSON (copied from aiter) ─────────────────────────
+# The single tuned source for megastage1: the best (tile_m, tile_n, tile_k,
+# waves_per_eu, use_async_copy) per per-rank token bucket, keyed by GEMM shape
+# (dtype, model_dim, inter_dim, expert[total], topk). Mirrors the gemm2+combine
+# ``GeometryTuningTable`` mechanism
+# (tuning_configs/flydsl_{arch}_{model}_{kernel}_ep{n}.json + bucket round-up).
+# Auto-selected only when the caller leaves the tile AUTO; an explicit tile
+# always wins.
+_MEGA_TUNING_DIR = Path(__file__).resolve().parent / "tuning_configs"
+# Megastage1 weights are always w4(fp4); the JSON ``dtype`` is the ACTIVATION quant.
+_MEGA_QUANT_TO_DTYPE = {"a4w4": "fp4", "a8w4": "fp8_ocp"}
+
+
+def _detect_gpu_model_name(device_index=0):
+    """GPU model substring (e.g. ``"mi355x"``) for tuning-file selection."""
+    try:
+        name = torch.cuda.get_device_properties(device_index).name.lower()
+    except Exception:  # noqa: BLE001
+        return None
+    m = re.search(r"\bmi\d+\w*", name)
+    return m.group(0) if m else None
+
+
+@functools.lru_cache(maxsize=8)
+def _load_mega_tuning_rows(ep_size: int, gpu_model):
+    """All ``megastage1`` rows from the best-matching MegaStage1 tune JSON
+    (``flydsl_*_MegaStage1_ep{n}.json``), preferring a ``gpu_model`` name match.
+    Returns a tuple of dicts (hashable cache value); ``()`` on any miss. Call
+    ``_load_mega_tuning_rows.cache_clear()`` after editing the JSON to reload."""
+    if not _MEGA_TUNING_DIR.is_dir():
+        return ()
+    suffix = f"_MegaStage1_ep{ep_size}.json"
+    cands = [p for p in _MEGA_TUNING_DIR.glob(f"flydsl_*{suffix}") if p.is_file()]
+    if not cands:
+        return ()
+    cands.sort(key=lambda p: (1 if (gpu_model and gpu_model in p.name) else 0, p.name),
+               reverse=True)
+    try:
+        with open(cands[0], "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return ()
+    return tuple(raw.get("megastage1", []))
+
+
+def _mega_tuned_tile(model_dim, inter_dim, experts, topk, quant, mtpr, ep_size, gpu_model):
+    """Precise megastage1 config from the FlyDSL tune JSON, keyed by GEMM shape;
+    the token bucket rounds up to the smallest ``num_tokens >= mtpr`` (largest on
+    overflow), mirroring the gemm2+combine ``GeometryTuningTable.lookup``. Returns
+    ``{tile_m, tile_n, tile_k, waves_per_eu, use_async_copy}`` or ``None`` on a
+    miss (caller then falls back to the generic default tile)."""
+    dtype = _MEGA_QUANT_TO_DTYPE.get(quant)
+    if dtype is None:
+        return None
+    rows = _load_mega_tuning_rows(int(ep_size), gpu_model)
+    if not rows:
+        return None
+
+    def _match(r):
+        try:
+            return (r.get("dtype") == dtype
+                    and int(r["model_dim"]) == int(model_dim)
+                    and int(r["inter_dim"]) == int(inter_dim)
+                    and int(r["expert"]) == int(experts)
+                    and int(r["topk"]) == int(topk))
+        except (KeyError, ValueError, TypeError):
+            return False
+
+    buckets = {int(r["num_tokens"]): r for r in rows if _match(r)}
+    if not buckets:
+        return None
+    if int(mtpr) in buckets:
+        chosen = buckets[int(mtpr)]
+    else:
+        ge = [k for k in buckets if k >= int(mtpr)]
+        chosen = buckets[min(ge)] if ge else buckets[max(buckets)]
+    return dict(
+        tile_m=int(chosen["tile_m"]),
+        tile_n=int(chosen["tile_n"]),
+        tile_k=int(chosen["tile_k"]),
+        waves_per_eu=int(chosen.get("waves_per_eu", 4)),
+        use_async_copy=bool(chosen.get("use_async_copy", True)),
+    )
 
 
 class FusedMoEMegaStage1:
     """Single-launch fused dispatch⊕GEMM megakernel (fixedslot decode strict-phase)."""
 
     def __init__(self, *, rank, world_size, model_dim, inter_dim, experts, topk,
-                 quant, w1, w1_scale, max_tok_per_rank, network=None, scheme="fixedslot",
+                 quant, w1, w1_scale, max_tok_per_rank, tune_tokens=None,
+                 network=None, scheme="fixedslot",
                  unit_size=-1, tile_n=-1, tile_k=256, warp_num_per_block=4,
                  waves_per_eu=4, use_async_copy=True, out_dtype="auto",
                  atom_contract=False, total_recv_buf=None):
@@ -148,21 +191,32 @@ class FusedMoEMegaStage1:
             assert not (self.atom_contract and self.compact), \
                 ("atom_contract uses the non-compact fixed-slot layout (disp idx 19 = srcmap); "
                  "set FUSED_MEGA_COMPACT_ATOM=1 to enable the compact+atom combo (GEMM WIP)")
-        # tile AUTO (default -1): an explicit caller tile_m(unit_size)/tile_n always wins; otherwise the
-        # host-side tuned table below is consulted by GEMM shape (model_dim, inter_dim, quant), all of
-        # which are ctor args -- no network name needed.  Safe fallback when the shape isn't tuned.
-        #   * prefill (handshake/进阶) -> 128x128 (large MFMA tile for the oversubscribed grid).
-        #   * decode (fixedslot/朴素)  -> _mega_decode_tile(): tuned (tile_m, tile_n) keyed by shape+quant+mtpr;
-        #     fallback tile_m=64, tile_n=256 when inter%256==0 (gx=inter/256 enables XCD swizzle), else 128.
-        # NOTE: the NAIVE scheme (fixedslot, incl. compact) ALWAYS uses decode tiles across ALL bs --
-        # it is the decode/strict-phase implementation.  The prefill 128x128 tile (gx=16) + the naive
-        # grid barrier do NOT co-reside -> deadlock at large bs; decode tiles (gx=8) stay co-resident.
-        _tm_t, _tn_t = _mega_decode_tile(int(model_dim), int(inter_dim), quant, int(max_tok_per_rank))
-        unit_size = int(unit_size) if int(unit_size) > 0 else _tm_t
-        tile_n = int(tile_n) if int(tile_n) > 0 else _tn_t
+        # tile AUTO (default -1): an explicit caller tile_m(unit_size)/tile_n always wins.
+        # Otherwise this is the single megastage1 tune entrypoint: read the precise
+        # FlyDSL JSON table keyed by shape + token bucket, then fall back to the
+        # generic validated default for intentionally untuned shapes.
+        tune_tokens = int(max_tok_per_rank if tune_tokens is None else tune_tokens)
+        _tuned = None
+        if int(unit_size) <= 0:
+            _tuned = _mega_tuned_tile(
+                model_dim, inter_dim, experts, topk, quant, tune_tokens,
+                world_size, _detect_gpu_model_name(rank))
+        if _tuned is not None:
+            unit_size = _tuned["tile_m"]
+            if int(tile_n) <= 0:
+                tile_n = _tuned["tile_n"]
+            # the bucket also carries the tuned tile_k / waves / async-copy
+            tile_k = _tuned["tile_k"]
+            waves_per_eu = _tuned["waves_per_eu"]
+            use_async_copy = _tuned["use_async_copy"]
+        else:
+            _tm_t, _tn_t = _mega_default_tile(int(inter_dim))
+            unit_size = int(unit_size) if int(unit_size) > 0 else _tm_t
+            tile_n = int(tile_n) if int(tile_n) > 0 else _tn_t
         self.unit_size = int(unit_size)
         self.tile_n = int(tile_n)
         self.mtpr = int(max_tok_per_rank)
+        self.tune_tokens = int(tune_tokens)
         # ── XCD swizzle (XCD-aware block swizzle for L2 locality on the MI355X multi-die). DEFAULT
         #    ON for decode (fixedslot): validated L2-reuse win (v4_flash 1.3x, r1_v3 1.7x at gx|8);
         #    the guard below auto-disables when cu % gx != 0 (e.g. v4_pro gx=12).  handshake (prefill)
