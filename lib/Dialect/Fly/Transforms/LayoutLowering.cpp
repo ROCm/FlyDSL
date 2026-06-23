@@ -1798,8 +1798,8 @@ public:
     if (coordTy.getAttr().isLeafStaticValue(-1)) {
       LayoutValueAdaptor thrValViewLayout =
           replaceLeafOuterLayout(layoutBuilder, fullLayoutAdaptor, thrValView);
-      Value fullPartitionView = MakeViewOp::create(rewriter, loc, iter, thrValViewLayout.getValue());
-      rewriter.replaceOp(op, fullPartitionView);
+      Value fullView = MakeViewOp::create(rewriter, loc, iter, thrValViewLayout.getValue());
+      rewriter.replaceOp(op, fullView);
       return success();
     }
 
