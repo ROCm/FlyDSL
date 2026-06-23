@@ -74,34 +74,6 @@ def _waitcnt_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
-# Dense seq_len routing thresholds (gfx950). The DUALWAVE_SWP pipeline pays a
-# fixed prologue/epilogue cost amortized over total work (batch * seq_len), not
-# seq_len alone -- so its crossover vs the generic kernel happens at a lower
-# seq_len for large batches. Mirrors the existing batch*seq M128/M256 selector.
-_DUALWAVE_MIN_DENSE_SEQ = 256  # B=1: dualwave wins from S=256 up
-_DUALWAVE_LARGE_BATCH = 8  # at B>=8 the crossover drops to...
-_DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH = 192  # ...S=192
-
-# DUALWAVE_SWP-only launch kwargs: a dense call passing any of these cannot use
-# the generic launcher (different signature) and must stay on DUALWAVE_SWP.
-_DUALWAVE_ONLY_KWARGS = frozenset({"stride_kv_n", "stride_q_n", "head_dim_runtime", "debug_counts", "workspace"})
-
-
-def _routes_dense_to_dualwave(batch, seq_len):
-    """Dense routing: True -> DUALWAVE_SWP, False -> generic fallback.
-
-    Batch-aware threshold (see notes above). A non-int seq_len routes to
-    DUALWAVE_SWP (it handles any length); packed/varlen and dualwave-only-kwarg
-    cases are decided by the caller before this is reached.
-    """
-    if not isinstance(seq_len, int):
-        return True
-    b = batch if isinstance(batch, int) else 1
-    if b >= _DUALWAVE_LARGE_BATCH:
-        return seq_len >= _DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH
-    return seq_len >= _DUALWAVE_MIN_DENSE_SEQ
-
-
 def build_flash_attn_func_module_primary(
     num_heads,
     head_dim,
@@ -170,12 +142,24 @@ def build_flash_attn_func_module_primary(
     K_SUB_N = 32
     WARP_SIZE = 64
 
-    # Both variants compute any seq_len >= 1 (the only correctness floor, enforced
-    # by `_guard_seqlen`); the dense seq_len routing is a perf policy. DUALWAVE_SWP
-    # (gfx950 D=128 bf16/f16) is built for the outermost call only; dense routing
-    # uses `_routes_dense_to_dualwave`, and packed/varlen always uses DUALWAVE_SWP.
+    # Arbitrary seq_len: the generic fallback handles any length (partial q/kv tiles
+    # via num_records bounds + padding masks); the DUALWAVE_SWP fast path handles
+    # seq_len >= 1.
+    _DUALWAVE_MIN_SEQ = 1
+
+    # DUALWAVE_SWP fast path (gfx950 D=128 bf16/f16): built for the outermost call;
+    # runtime dispatch needs seq_len >= 384 (any alignment, handled internally).
     _dualwave_swp_launch = None
-    if block_m is None and head_dim == 128 and dtype_str in ("bf16", "f16") and gpu_arch.startswith("gfx950"):
+    # FLYDSL_DISABLE_DUALWAVE_SWP=1 forces the generic fallback even on gfx950 D=128
+    # bf16/f16 (used to exercise/validate the generic kernel on gfx950 hardware).
+    _dualwave_swp_disabled = os.environ.get("FLYDSL_DISABLE_DUALWAVE_SWP", "0") == "1"
+    if (
+        block_m is None
+        and head_dim == 128
+        and dtype_str in ("bf16", "f16")
+        and gpu_arch.startswith("gfx950")
+        and not _dualwave_swp_disabled
+    ):
         try:
             from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
 
@@ -217,8 +201,14 @@ def build_flash_attn_func_module_primary(
             return None
 
     def _guard_seqlen(_dispatched):
-        """Enforce the only correctness floor (seq_len >= 1). A symbolic/non-int
-        seq_len is let through; dense routing is a perf policy, not a bound."""
+        """Reject seq_len values the kernel cannot compute correctly.
+
+        Both variants now handle arbitrary seq_len: the DUALWAVE_SWP fast path
+        for seq_len >= 384, and the generic fallback for any seq_len (partial
+        last q-tile via Q/O bounds, partial last kv-tile via bounded/clamped KV
+        loads + causal / non-causal padding masks). So the only constraint left
+        is seq_len >= 1. A symbolic / non-int seq_len is let through.
+        """
 
         def _guarded(*args, **kwargs):
             S_int = _extract_seq_len(args, kwargs)
@@ -230,14 +220,10 @@ def build_flash_attn_func_module_primary(
             _guarded.compile = _dispatched.compile
         return _guarded
 
-    def _extract_batch(args, kwargs):
-        B = args[4] if len(args) > 4 else kwargs.get("batch_size", None)
-        return B if isinstance(B, int) else 1
-
     def _wrap_with_dualwave_swp(_fallback):
-        """Route runtime shapes between DUALWAVE_SWP and the generic fallback, then
-        apply the seq_len guard at the outermost build (inner block_m-set builds are
-        guarded by their parent)."""
+        """Route eligible runtime shapes to DUALWAVE_SWP, then apply the seq_len
+        guard (only at the outermost, user-facing build; inner recursive builds
+        carry ``block_m`` set and are guarded by their parent)."""
         if cu_seqlens_q is not None and _dualwave_swp_launch is None:
             raise ValueError(
                 "QKV varlen (cu_seqlens) is only supported on the gfx950 DUALWAVE_SWP "
@@ -265,35 +251,18 @@ def build_flash_attn_func_module_primary(
         else:
 
             def _dualwave_swp_dispatch(*args, **kwargs):
-                # Optional launch args must be keyword: the generic and DUALWAVE_SWP
-                # launchers differ past the 6 required positionals (generic's 7th is
-                # `stream`; DUALWAVE_SWP's is `stride_kv_n`), so a 7th positional
-                # would silently mean different things once routing picks a path.
-                if len(args) > 6:
-                    raise TypeError(
-                        "flash_attn_func: pass only Q, K, V, O, batch_size, seq_len "
-                        "positionally; stream/stride_*/debug_counts/workspace by keyword."
-                    )
-                # Packed/varlen always uses DUALWAVE_SWP (no generic cu_seqlens path);
-                # cu_seqlens captured at build time are forwarded here.
-                if cu_seqlens_q is not None:
-                    return _dualwave_swp_launch(*args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs)
-                skv = kwargs.get("seq_len_kv", None)
-                if skv is not None:
-                    S_int = _extract_seq_len(args, kwargs)
-                    try:
-                        cross_len = S_int is None or int(skv) != S_int
-                    except (TypeError, ValueError):
-                        cross_len = True
-                    if cross_len:
-                        return _dualwave_swp_launch(*args, **kwargs)
-                # A dense call carrying a DUALWAVE_SWP-only kwarg cannot use the
-                # generic launcher (different signature), so it stays on DUALWAVE_SWP.
-                # Check key presence, not value (an explicit `debug_counts=None` still
-                # counts). Otherwise route by the batch-aware dense threshold.
-                if any(k in kwargs for k in _DUALWAVE_ONLY_KWARGS):
-                    return _dualwave_swp_launch(*args, **kwargs)
-                if _routes_dense_to_dualwave(_extract_batch(args, kwargs), _extract_seq_len(args, kwargs)):
+                # DUALWAVE_SWP handles non-aligned seq_len (partial last q-block +
+                # partial/odd kv-tile count) like the reference asm; only constraint
+                # is the pipeline depth minimum (seq_len >= 384).
+                S_int = _extract_seq_len(args, kwargs)
+                if S_int is not None and S_int >= _DUALWAVE_MIN_SEQ:
+                    # Varlen: forward the cu_seqlens captured at build time (S here
+                    # is max_seqlen, which sizes grid_y; per-batch ranges come from
+                    # cu_seqlens inside the kernel).
+                    if cu_seqlens_q is not None:
+                        return _dualwave_swp_launch(
+                            *args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs
+                        )
                     return _dualwave_swp_launch(*args, **kwargs)
                 return _fallback_no_diff_kv(*args, **kwargs)
 
@@ -322,7 +291,6 @@ def build_flash_attn_func_module_primary(
             daz=daz,
             path_tag=path_tag,
             num_kv_heads=num_kv_heads,
-            cross_seqlen=cross_seqlen,
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
             dualwave_swp_setprio=dualwave_swp_setprio,
             dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
@@ -342,7 +310,6 @@ def build_flash_attn_func_module_primary(
             daz=daz,
             path_tag=path_tag,
             num_kv_heads=num_kv_heads,
-            cross_seqlen=cross_seqlen,
             dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
             dualwave_swp_setprio=dualwave_swp_setprio,
             dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
@@ -596,13 +563,13 @@ def build_flash_attn_func_module_primary(
 
         # ---- Helper: global flat indices ----
         # Q/O are laid out with NUM_HEADS_Q heads; K/V with NUM_HEADS_KV.
+        # batch_idx*seq_len is folded into each tensor's descriptor base (see q/k/v/o_rsrc),
+        # so token indices are 0-based within the batch.
         def global_idx_q(token_idx, col):
-            token = batch_idx * seq_len_v + token_idx
-            return token * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + col
+            return token_idx * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + col
 
         def global_idx_kv(token_idx, col):
-            token = batch_idx * seq_len_v + token_idx
-            return token * STRIDE_TOKEN_KV + kv_head_idx * HEAD_DIM + col
+            return token_idx * STRIDE_TOKEN_KV + kv_head_idx * HEAD_DIM + col
 
         def _kv_row_clamp(row_idx):
             # Non-DMA KV loads use raw pointers (no hardware bounds), so clamp the
@@ -749,17 +716,27 @@ def build_flash_attn_func_module_primary(
                     lds_row = load_row_in_batch + row_offset
                     _v_store_to_lds(v_base, lds_row, vecs[batch])
 
-        # Per-batch num_records bound: rows >= seq_len read/write past this batch's
-        # region, so OOB loads return 0 and OOB stores drop (arbitrary-seqlen safe;
-        # aligned hot path unchanged). Same asm trick, used for K/V/Q loads + O-store.
-        _kv_nrec_bytes = _raw((batch_idx + fx.Index(1)) * seq_len_v * fx.Index(STRIDE_TOKEN_KV * 2))
-        _q_nrec_bytes = _raw((batch_idx + fx.Index(1)) * seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
-        q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=False, num_records_bytes=_q_nrec_bytes)
-        o_rsrc = buffer_ops.create_buffer_resource(O, max_size=False, num_records_bytes=_q_nrec_bytes)
+        # Per-batch descriptors: fold batch_idx*seq_len into each tensor's 48-bit base and
+        # bound num_records to ONE batch. Global indices are 0-based within the batch (see
+        # global_idx_q/kv + DMA global_row), so the 32-bit voffset and the int32 C-ABI
+        # shape field never see the whole-tensor numel (which can reach 2^31). OOB rows
+        # within the batch still read 0 / drop on store (arbitrary-seqlen safe).
+        _kv_nrec_bytes = _raw(seq_len_v * fx.Index(STRIDE_TOKEN_KV * 2))
+        _q_nrec_bytes = _raw(seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
+        _q_batch_byte_off = _raw(batch_idx * seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
+        _kv_batch_byte_off = _raw(batch_idx * seq_len_v * fx.Index(STRIDE_TOKEN_KV * 2))
+        q_rsrc = buffer_ops.create_buffer_resource(
+            Q, max_size=False, num_records_bytes=_q_nrec_bytes, base_byte_offset=_q_batch_byte_off
+        )
+        o_rsrc = buffer_ops.create_buffer_resource(
+            O, max_size=False, num_records_bytes=_q_nrec_bytes, base_byte_offset=_q_batch_byte_off
+        )
 
         # ---- DMA loading for K (buffer_load_dwordx4 ... lds) ----
         if const_expr(ENABLE_DMA):
-            k_rsrc = buffer_ops.create_buffer_resource(K, max_size=False, num_records_bytes=_kv_nrec_bytes)
+            k_rsrc = buffer_ops.create_buffer_resource(
+                K, max_size=False, num_records_bytes=_kv_nrec_bytes, base_byte_offset=_kv_batch_byte_off
+            )
             DMA_BYTES = 16  # buffer_load_dwordx4 = 16 bytes per lane
             DMA_BATCH_BYTES = BLOCK_SIZE * DMA_BYTES
             K_TILE_BYTES = BLOCK_N * K_STRIDE * 2
@@ -791,7 +768,7 @@ def build_flash_attn_func_module_primary(
                     xor_mask = (row_in_tile & fx.Index(0x7)) << fx.Index(4)
                     unsw_col_f16 = swiz_col_f16 ^ xor_mask
                     col_byte = unsw_col_f16 * 2
-                    global_row = batch_idx * seq_len_v + tile_start + row_in_tile
+                    global_row = tile_start + row_in_tile  # 0-based: batch base folded into k/v_rsrc
                     global_byte = (
                         global_row * fx.Index(STRIDE_TOKEN_KV * 2) + kv_head_idx * fx.Index(HEAD_DIM * 2) + col_byte
                     )
@@ -814,7 +791,9 @@ def build_flash_attn_func_module_primary(
 
         # ---- DMA loading for V (buffer_load_dwordx4 ... lds) ----
         if const_expr(ENABLE_DMA):
-            v_rsrc = buffer_ops.create_buffer_resource(V, max_size=False, num_records_bytes=_kv_nrec_bytes)
+            v_rsrc = buffer_ops.create_buffer_resource(
+                V, max_size=False, num_records_bytes=_kv_nrec_bytes, base_byte_offset=_kv_batch_byte_off
+            )
             V_TILE_BYTES = BLOCK_N * V_STRIDE * 2
             NUM_DMA_V = V_TILE_BYTES // DMA_BATCH_BYTES
             LANES_PER_V_ROW = HEAD_DIM * 2 // DMA_BYTES
@@ -836,7 +815,7 @@ def build_flash_attn_func_module_primary(
                     xor_mask = (row_in_tile & fx.Index(0x3)) << fx.Index(4)
                     unsw_col_f16 = swiz_col_f16 ^ xor_mask
                     col_byte = unsw_col_f16 * 2
-                    global_row = batch_idx * seq_len_v + tile_start + row_in_tile
+                    global_row = tile_start + row_in_tile  # 0-based: batch base folded into k/v_rsrc
                     global_byte = (
                         global_row * fx.Index(STRIDE_TOKEN_KV * 2) + kv_head_idx * fx.Index(HEAD_DIM * 2) + col_byte
                     )

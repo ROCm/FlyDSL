@@ -293,13 +293,15 @@ def _flydsl_flash_attn_paged(
         )
         if out is None:
             out = torch.empty_like(q)
-        q_flat = q.contiguous().reshape(-1)
-        # Paged K/V stay in natural shape (only the base pointer is used in-kernel via
-        # per-page descriptors); flattening a > 4 GiB cache to 1-D would overflow the
-        # int32 C-ABI shape field (numel can reach 2^31).
+        # All of Q/K/V/O stay in natural shape. The C-ABI packs each tensor dim as an
+        # int32, so a 1-D reshape(-1) overflows once numel reaches 2^31 (a > 4 GiB K/V
+        # cache, or a large Q/O at B*Sq*H*D). The paged kernel builds per-batch (Q/O) and
+        # per-page (K/V) descriptors from each tensor's base pointer, so only the strides
+        # (passed separately) and the natural shape are needed.
+        q_flat = q.contiguous()
         k_flat = k.contiguous()
         v_flat = v.contiguous()
-        o_flat = out.reshape(-1)
+        o_flat = out.contiguous()
         kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
         if cross:
             kwargs["seq_len_kv"] = skv
@@ -544,10 +546,14 @@ def flydsl_flash_attn_func(
         # ── allocate output ─────────────────────────────────────────────────
         if out is None:
             out = torch.empty_like(q)
-        q_flat = q.contiguous().reshape(-1)
-        k_flat = k.contiguous().reshape(-1)
-        v_flat = v.contiguous().reshape(-1)
-        o_flat = out.reshape(-1)
+        # Natural shape (no reshape(-1)): the C-ABI packs each tensor dim as int32, so a
+        # 1-D flatten overflows once numel reaches 2^31 (e.g. dense B*Sq*H*D). The kernels
+        # (dualwave + generic) build per-batch descriptors from each tensor's base pointer,
+        # so only the natural shape + strides are needed.
+        q_flat = q.contiguous()
+        k_flat = k.contiguous()
+        v_flat = v.contiguous()
+        o_flat = out.contiguous()
 
         # ── launch ──────────────────────────────────────────────────────────
         if splitk:
