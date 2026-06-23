@@ -3,7 +3,7 @@
 面向**节点内专家并行（EP）推理**的 MoE **stage-1**（dispatch → gate/up GEMM）融合算子。把生产基线的 5-kernel 流水（`量化 → dispatch → moe_sorting → scale-sort → group-GEMM`）压成 **一次 launch 的 2 个 kernel**：①（外部）激活量化；②一个「**dispatch ⊕ 持久 group-GEMM**」融合核（本文档主角）。
 
 - **入口（stage1）**：`kernels/fused_moe_megakernel.py::FusedMoEMegaStage1(scheme="fixedslot")`
-- **入口（端到端 stage1+stage2）**：`kernels/fused_moe_stage1_stage2.py::FusedMoEStage1Stage2`（§9）
+- **入口（端到端 stage1+stage2）**：`kernels/fused_moe_stage1_stage2.py::MegaMoE`（§9）
 - **kernel**：`kernels/fused_moe_gemm_2stage.py::compile_fused_moe_gemm1(fuse_dispatch="fixedslot", ...)`
 - **缓冲**：`kernels/ep_dispatch_groupmajor_op.py::FlyDSLDispatchGroupMajorOp`（只用其对称 / P2P 缓冲，不单独 launch dispatch kernel）
 - **正确性**：`bench_moe_intranode_stage1_groupgemm.py --mega --check-correctness`（逐行映射回源 token 后 vs ATOM 生产栈逐元素比对，见 §7）；端到端 `--full-e2e`（§9.6/§10）
@@ -160,7 +160,7 @@ dispatch 写下:  srcmap_em[recv_slot] = (k_slot<<24) | src_global          (src
                  padding 槽的 srcmap 由 block0 核内 sentinel 填(零额外 host 动作) —— 详见 §9.5
 ```
 
-> 端到端封装 `FusedMoEStage1Stage2`（§9）= stage1(atom 契约) ⊕ stage2(GEMM2+combine)，`forward` 内**零桥接、零冗余 dispatch**。**看不懂上面的映射？→ §9.2.1 有一个 2 卡/4 专家的小张量逐行演示**（srcmap / a2值 / a2 scale / _sti / _se_atom 怎么写怎么读）；逐项原理/适配方法见 §9。
+> 端到端封装 `MegaMoE`（§9）= stage1(atom 契约) ⊕ stage2(GEMM2+combine)，`forward` 内**零桥接、零冗余 dispatch**。**看不懂上面的映射？→ §9.2.1 有一个 2 卡/4 专家的小张量逐行演示**（srcmap / a2值 / a2 scale / _sti / _se_atom 怎么写怎么读）；逐项原理/适配方法见 §9。
 
 ---
 
@@ -425,9 +425,9 @@ MI355X 有 **8 个 XCD（chiplet），每个独立 L2**；硬件默认 `block i 
 
 > 本节是「stage1 怎么接 stage2」的权威说明：端到端封装、stage2 的输入契约、stage1 输出与之的**映射关系**、以及**每一个适配点的原理 + 适配方法**。
 
-### 9.0 端到端封装 `FusedMoEStage1Stage2`（零桥接）
+### 9.0 端到端封装 `MegaMoE`（零桥接）
 
-- **入口**：`kernels/fused_moe_stage1_stage2.py::FusedMoEStage1Stage2`，对外一个 `forward(x_q, scales, wts, topk_ids) -> bf16 [run_tokens, model_dim]`。
+- **入口**：`kernels/fused_moe_stage1_stage2.py::MegaMoE`，对外两个入口：`forward(x_q, scales, wts, topk_ids) -> bf16 [run_tokens, model_dim]`（前置量化）与 `forward_bf16(x_bf16, wts, topk_ids) -> bf16`（内部 per_1x32 量化，输出与 `forward` 逐位一致）。
 - **组成**：`stage1 = FusedMoEMegaStage1(atom_contract=True)` ⊕ `stage2 = FlyDSLMoeGemm2CombineOp`（GEMM2 epilogue 内联 combine Stage-1 P2P scatter + Stage-2/3）。
 - **零桥接（与 fixslot 同构）**:`forward` 内**只有**：① `stage1.forward`(1 个 megakernel launch);② `g2.run`(GEMM2+combine)。**无冗余 dispatch、无 host 数据搬运/适配**。两个关键之所以零桥接:
   - `total_recv`(combine 需要的 distinct-recv 计数)由 stage1 **megakernel 核内直接写进 combine op 的 buffer**(Plan A,§9.3),不再像历史那样为拿 fresh `total_recv` 额外跑一次 `comb_op.dispatch`。
@@ -635,7 +635,7 @@ GEMM2 硬编码 a2@logical,所以 combo 必须「compact dispatch(绕 4GB)+ GEMM
 
 ### 9.6 验证（精度逐位、零额外动作）
 
-- **`--full-e2e`(`FusedMoEStage1Stage2` 真链路)**:`mega-vs-baseline relL2 = 0.000`(逐位复刻生产 atom 路径)——v4_flash a8w4 bs 8/128/512/2048/4096/8192/16384、r1_v3 a4w4 bs 8/512/2048/8192,**6 个随机种子(0/1/42/123/7/999)全 0**;默认关(无 env)非紧凑路径不变。
+- **`--full-e2e`(`MegaMoE` 真链路)**:`mega-vs-baseline relL2 = 0.000`(逐位复刻生产 atom 路径)——v4_flash a8w4 bs 8/128/512/2048/4096/8192/16384、r1_v3 a4w4 bs 8/512/2048/8192,**6 个随机种子(0/1/42/123/7/999)全 0**;默认关(无 env)非紧凑路径不变。
 - **零额外动作**:combo `forward` 的额外动作 = 0(`total_recv` 核内、`tok_id_to_src` 一次性、padding gap-fill 核内);compact dispatch 自身的 `local_hist`/`local_cursor` 复位是其固有机制(非 combo 引入),与 fixslot 的 `total_recv.zero_` 同类。
 - **gemm2_combine 本体 bit-exact**:`test_profiler_moe_gemm2_combine.py --mode verify` 三网络 `out_tok`/`out_wts` abs/rel max=0。
 - **fp8 a2 跨 dtype 拷贝**(若上层手动搬 a2)必须走 `uint8` view(bitcast),直接赋值会数值 cast 损坏字节。
@@ -651,7 +651,7 @@ GEMM2 硬编码 a2@logical,所以 combo 必须「compact dispatch(绕 4GB)+ GEMM
 | 模式 | flag | 测什么 | mega / baseline |
 | --- | --- | --- | --- |
 | **stage1 性能扫** | `--stage1-sweep` | stage1(dispatch+gemm1)纯性能,全 bs | mega=单核;baseline=FlyDSL dispatch→aiter sort→aiter mxscale_sort→flydsl gemm1 |
-| **端到端** | `--full-e2e` | stage1+stage2 性能 + 精度 | mega=`FusedMoEStage1Stage2`;baseline=atom_fp8 全栈 |
+| **端到端** | `--full-e2e` | stage1+stage2 性能 + 精度 | mega=`MegaMoE`;baseline=atom_fp8 全栈 |
 | **stage1 正确性** | `--check-correctness`(+`--mega`) | 逐元素映射回源 token 对拍 | — |
 
 ### 10.2 计时标准 = `_profiler_ms`

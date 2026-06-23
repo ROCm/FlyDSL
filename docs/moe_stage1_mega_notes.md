@@ -31,7 +31,7 @@
     - **compact_ag dispatch**(`fused_moe_gemm_2stage.py:1646+`):`_sm` 已写(`:1857`);补 Plan A per-token distinct-dest dedup→dest_ctr + 跨PE recv-count→total_recv(照搬非紧凑 `:932-1003`,索引改 36-39)。
     - **GEMM1 a2-logical 写**:`precompute_row`(`:3984`)读 `lds_tid`=srcmap→logical 行,**已不依赖 static-tiles**,compact 直接可用(compact 下 sorted-row==dense-slot,`srcmap[bx_m+tx]` 有效)。
     - **facade**:去 `assert not(atom_contract and compact)`(`:131`);`forward` compact 时也返回 `_sti`(`:457`);combine `tok_id_to_src` 保持 identity。
-    - **FusedMoEStage1Stage2**:大 bs stage1 用 compact(atom_contract=True+compact 共存),stage2 接线不变。
+    - **MegaMoE**:大 bs stage1 用 compact(atom_contract=True+compact 共存),stage2 接线不变。
   - **★已落地(门控 `FUSED_MEGA_COMPACT_ATOM=1`,默认关,关闭时所有现有路径 byte-identical;已 py_compile + lint 过)**:
     - facade(`fused_moe_megakernel.py`):`_compact_atom` env 门控;开时跳过 assert、disp 表 `[19]=srcmap_em`/`[20]=_sw_atom`/`[36-39]=total_recv/dest_ctr/recv_num/p2p_recv_num`。
     - kernel compact_ag(`fused_moe_gemm_2stage.py`):`const_expr(_atom_contract)` 下加 Plan A per-token distinct-dest dedup→dest_ctr(写后、grid barrier 前)+ block0 跨PE recv-count→total_recv(done2 drain 后)。读 disp 36-39。
