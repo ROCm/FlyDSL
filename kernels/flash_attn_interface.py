@@ -167,8 +167,14 @@ def _build_paged(
     lazy_rescale: bool,
     setprio: bool,
     enable_stagger: bool,
+    num_kv_splits: int = 1,
 ):
-    """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True)."""
+    """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
+
+    ``num_kv_splits > 1`` builds the paged + split-K variant (KV dimension split
+    across grid_z = B*num_kv_splits workgroups + a combine pass), which fills the
+    GPU for low-occupancy shapes (small B / few heads).
+    """
     from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
 
     return build_flash_attn_dualwave_swp_module(
@@ -178,6 +184,7 @@ def _build_paged(
         dtype_str=dtype_str,
         num_kv_heads=num_kv_heads,
         paged=True,
+        num_kv_splits=num_kv_splits,
         cross_seqlen=cross_seqlen,
         waves_per_eu=waves_per_eu,
         daz=daz,
@@ -222,7 +229,8 @@ def _flydsl_flash_attn_paged(
 
     Supported config ONLY (anything else raises): linear cache layout
     [NumBlocks, PageSize=64, NumKVHeads, HeadDim], vLLM lookup (block_table +
-    seqlen_k), causal, dense 4D Q, D=128, dtype bf16/f16, num_kv_splits=1.
+    seqlen_k), causal, dense 4D Q, D=128, dtype bf16/f16. Split-K (num_kv_splits>1)
+    is supported when D=128, dtype bf16/f16, and seq_len>=384.
     """
     if kv_cache_layout != "linear":
         raise NotImplementedError(
@@ -236,8 +244,6 @@ def _flydsl_flash_attn_paged(
         )
     if not causal:
         raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports causal=True only")
-    if num_kv_splits > 1:
-        raise NotImplementedError("flydsl_flash_attn_func: native paged KV does not support split-K")
     if cu_seqlens_q is not None:
         raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports dense 4D Q only (no varlen)")
     if block_table is None or seqlen_k is None:
@@ -267,6 +273,16 @@ def _flydsl_flash_attn_paged(
     if H % num_kv_heads != 0:
         raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
 
+    # Split-K (paged): split the KV dimension across grid_z = B*num_kv_splits workgroups
+    # + a combine pass. Fills the GPU for low-occupancy shapes (small B / few heads),
+    # where single-split paged underutilizes the device. Same eligibility as dense split-K.
+    splitk = num_kv_splits > 1
+    if splitk and (D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384):
+        raise ValueError(
+            f"flydsl_flash_attn_func: paged split-K requires D=128, dtype bf16/f16, seq_len>=384; "
+            f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
+        )
+
     # Per-batch KV lengths differ in general → bottom-right cross-length masking.
     skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
     cross = skv != Sq
@@ -290,6 +306,7 @@ def _flydsl_flash_attn_paged(
             lazy_rescale=dualwave_swp_lazy_rescale,
             setprio=dualwave_swp_setprio,
             enable_stagger=dualwave_swp_enable_stagger,
+            num_kv_splits=int(num_kv_splits),
         )
         if out is None:
             out = torch.empty_like(q)
@@ -305,6 +322,10 @@ def _flydsl_flash_attn_paged(
         kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
         if cross:
             kwargs["seq_len_kv"] = skv
+        if splitk:
+            ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=D)
+            _ws = torch.empty(ws_elems, dtype=torch.float32, device=q.device)
+            kwargs["workspace"] = _ws
         exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
 
     return out
