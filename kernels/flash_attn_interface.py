@@ -267,24 +267,14 @@ def _flydsl_flash_attn_paged(
     if H % num_kv_heads != 0:
         raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
 
-    # The paged cache is addressed through a single buffer descriptor whose
-    # num_records is a 32-bit byte count, so the whole K (or V) cache must be
-    # < 4 GiB. (vLLM/SGLang shard the cache per layer well under this in practice.)
-    cache_bytes = k.numel() * k.element_size()
-    if cache_bytes > 0xFFFFFFFF:
-        raise ValueError(
-            f"flydsl_flash_attn_func: paged K cache is {cache_bytes} bytes, exceeding the 4 GiB "
-            f"limit of a 32-bit buffer descriptor; reduce NumBlocks/page padding or shard the cache"
-        )
-
     # Per-batch KV lengths differ in general → bottom-right cross-length masking.
     skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
     cross = skv != Sq
     block_table_stride = int(block_table.shape[1])
-    # Flatten to 1-D (like q/k/v/o) so the kernel's flat element index
-    # `batch_idx*block_table_stride + tile_idx` addresses it correctly; a 2-D
-    # buffer view resolves the index through its nested layout, not row-major.
-    block_table_i32 = (block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)).contiguous().reshape(-1)
+    # Flatten so the kernel's flat row-major index addresses block_table correctly.
+    block_table_i32 = (
+        block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)
+    ).contiguous().reshape(-1)
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
@@ -304,8 +294,11 @@ def _flydsl_flash_attn_paged(
         if out is None:
             out = torch.empty_like(q)
         q_flat = q.contiguous().reshape(-1)
-        k_flat = k.contiguous().reshape(-1)
-        v_flat = v.contiguous().reshape(-1)
+        # Paged K/V stay in natural shape (only the base pointer is used in-kernel via
+        # per-page descriptors); flattening a > 4 GiB cache to 1-D would overflow the
+        # int32 C-ABI shape field (numel can reach 2^31).
+        k_flat = k.contiguous()
+        v_flat = v.contiguous()
         o_flat = out.reshape(-1)
         kwargs = dict(block_table=block_table_i32, block_table_stride=block_table_stride, stream=launch_stream)
         if cross:
@@ -496,11 +489,6 @@ def flydsl_flash_attn_func(
         from kernels.flash_attn_gfx950 import dualwave_splitk_workspace_elems
 
         ws_elems = dualwave_splitk_workspace_elems(B, H, Sq, int(num_kv_splits), head_dim=D)
-        if ws_elems * 4 >= 0xFFFFFFFF:
-            raise ValueError(
-                f"flydsl_flash_attn_func: split-K workspace would exceed 4 GiB "
-                f"({ws_elems * 4} bytes); use fewer splits or a smaller shape"
-            )
 
     # ── build (cached) ──────────────────────────────────────────────────────
     debug_lazy = debug_counts is not None
