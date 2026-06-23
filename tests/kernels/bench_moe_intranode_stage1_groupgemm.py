@@ -1062,14 +1062,14 @@ def _run_stage2_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, ep
 
 def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr, topk,
                   run_tokens, mtpr, a_dtype, s1_out, w_kernel, scale_w1_1d, x_bf16, topk_ids, wts):
-    """Complete end-to-end: megav1 (production single-op FusedMoEStage1Stage2) vs ATOM baseline,
+    """Complete end-to-end: megav1 (production single-op MegaMoE) vs ATOM baseline,
     BOTH with fused stage-2 (compile_fused_moe_gemm2_combine), bf16 output.
 
       * precision : relL2 of each path's output vs a full-precision torch MoE oracle (must sit at
                     fp8/fp4 quant-noise floor, NOT ~1.0).  This is the correctness gate.
       * perf      : CUDAGraph device time of each FULL pipeline (stage1+stage2).
 
-    megav1  : fp8/fp4 act -> FusedMoEStage1Stage2.forward -> bf16   (Plan A: zero bridge dispatch).
+    megav1  : fp8/fp4 act -> MegaMoE.forward -> bf16   (Plan A: zero bridge dispatch).
     atom    : bf16 dispatch (dce) -> recv per-1x32 quant -> aiter sort -> mixed_moe_gemm1 -> a2
               -> fused GEMM2+combine (same op as mega) -> bf16.
     """
@@ -1077,7 +1077,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     import torch.nn.functional as _F
     from aiter import dtypes as _adt
     from aiter.ops.quant import per_1x32_mx_quant_hip
-    from kernels.fused_moe_stage1_stage2 import FusedMoEStage1Stage2
+    from kernels.fused_moe_stage1_stage2 import MegaMoE
     from kernels.mixed_moe_gemm2_combine_fused_op import FlyDSLMoeGemm2CombineOp
     from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
 
@@ -1139,7 +1139,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         return _all_mean(dev, _s.elapsed_time(_e) / _n)
 
     # ============ megav1: production single-op ============
-    moe = FusedMoEStage1Stage2(
+    moe = MegaMoE(
         rank=rank, world_size=world, model_dim=model_dim, inter_dim=inter_dim,
         experts=experts, topk=topk, quant=args.quant, w1=w_kernel, w1_scale=scale_w1_1d,
         w2=w2_kernel, w2_scale=w2_scale_1d, max_tok_per_rank=mtpr, network=args.network,
@@ -1151,6 +1151,20 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         _mega_out_holder["o"] = moe.forward(x_q, x_sc, wc, ic)
     _mega_body(); torch.cuda.synchronize(); ms.shmem_barrier_all()
     out_mega = _mega_out_holder["o"][:run_tokens].float().cpu().numpy().copy()
+
+    # ---- (opt) bf16-entry equivalence: MegaMoE.forward_bf16 (internal per_1x32 quant) must be
+    # bit-identical to the pre-quant forward.  Gated (FUSED_MEGA_CHECK_BF16ENTRY=1) so default perf
+    # path is untouched.  forward_bf16 == quantize() + forward(); quantize() uses the SAME
+    # per_1x32_mx_quant_hip call as x_q/x_sc above -> relL2 must be exactly 0. ----
+    if os.environ.get("FUSED_MEGA_CHECK_BF16ENTRY", "0") == "1":
+        _o_bf16 = moe.forward_bf16(x_bf16[:run_tokens].contiguous(), wc, ic)
+        torch.cuda.synchronize(); ms.shmem_barrier_all()
+        _o_bf16 = _o_bf16[:run_tokens].float().cpu().numpy().copy()
+        _eq = _relL2(out_mega, _o_bf16)
+        if rank == 0:
+            print(f"  [bf16-entry] forward_bf16 vs pre-quant forward: relL2={_eq:.3e} "
+                  f"-> {'IDENTICAL' if _eq == 0.0 else ('OK' if _eq < 1e-6 else 'MISMATCH')}",
+                  flush=True)
 
     # ============ ATOM baseline: bf16 dispatch -> recv-quant -> sort -> gemm1 -> fused stage2 ============
     bn = min(256, max(64, max_recv // 4)) if mtpr <= 128 else 256
@@ -2367,7 +2381,7 @@ def main():
                         "compile_fused_moe_gemm2_combine, compared to a full-precision torch "
                         "oracle (atom-driven) + mega-driven (needs --mega). Skips stage1 timing.")
     p.add_argument("--full-e2e", action="store_true",
-                   help="Complete e2e: megav1 (production FusedMoEStage1Stage2) vs ATOM baseline, "
+                   help="Complete e2e: megav1 (production MegaMoE) vs ATOM baseline, "
                         "BOTH fused stage-2 (compile_fused_moe_gemm2_combine), bf16 out.  CUDAGraph "
                         "perf + precision vs full-precision torch oracle.  (atom_contract caps at the "
                         "bs where the non-compact buffer hits the 4GB voffset wrap; use --stage1-sweep "

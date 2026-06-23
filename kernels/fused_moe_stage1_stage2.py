@@ -65,10 +65,10 @@ except Exception:  # noqa: BLE001
     _HAS_AITER_QUANT = False
 
 
-__all__ = ["FusedMoEStage1Stage2"]
+__all__ = ["MegaMoE"]
 
 
-class FusedMoEStage1Stage2:
+class MegaMoE:
     """端到端 EP-MoE 单算子（megav1 stage-1 ⊕ stage-2 GEMM2+combine）。
 
     Parameters
@@ -124,7 +124,7 @@ class FusedMoEStage1Stage2:
         assert quant in ("a8w4", "a4w4"), quant
         assert stage2_mode in ("fused", "nonfused"), stage2_mode
         if not _HAS_AITER_QUANT:
-            raise RuntimeError("FusedMoEStage1Stage2 needs aiter (per_1x32_mx_quant_hip)")
+            raise RuntimeError("MegaMoE needs aiter (per_1x32_mx_quant_hip)")
         if (max_tok_per_rank & (max_tok_per_rank - 1)) != 0:
             raise ValueError(f"max_tok_per_rank={max_tok_per_rank} must be a power of two")
         self.rank = int(rank)
@@ -235,6 +235,16 @@ class FusedMoEStage1Stage2:
             mq, msq = per_1x32_mx_quant_hip(x_bf16.contiguous(), quant_dtype=self._qd,
                                             scale_type=self._stp)
         return mq, msq.view(torch.uint8)
+
+    def forward_bf16(self, x_bf16, wts, topk_ids, *, stream=None, slice_output: bool = True):
+        """带量化的端到端入口：**bf16 激活进，bf16 combine 出**。
+
+        内部先用 ``per_1x32_mx_quant_hip``(经 ``self.quantize``)把 bf16 激活量化成
+        fp8/fp4 + e8m0 scale，再走与 ``forward`` 完全相同的两段 kernel。
+        """
+        x_q, scales = self.quantize(x_bf16)
+        return self.forward(x_q, scales, wts, topk_ids,
+                            stream=stream, slice_output=slice_output)
 
     def forward(self, x_q, scales, wts, topk_ids, *, stream=None, slice_output: bool = True):
         """端到端 MoE：fp8/fp4 量化激活 -> combine 后 bf16 输出。
