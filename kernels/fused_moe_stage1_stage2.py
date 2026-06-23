@@ -109,9 +109,9 @@ class FusedMoEStage1Stage2:
         tile_m: int = 32,
         tile_n: int = 128,
         tile_k: int = 256,
-        gemm2_tile_m: int = 32,
-        gemm2_tile_n: int = 128,
-        gemm2_tile_k: int = 256,
+        gemm2_tile_m: int = -1,
+        gemm2_tile_n: int = -1,
+        gemm2_tile_k: int = -1,
         gemm2_persist_m: int = -1,
         warp_num_per_block: int = 4,
         waves_per_eu: int = 4,
@@ -195,12 +195,21 @@ class FusedMoEStage1Stage2:
         # ---- stage-2 backend ----
         self._g2 = None
         if stage2_mode == "fused":
-            self._g2 = FlyDSLMoeGemm2CombineOp(
+            g2_kwargs = dict(
                 comb_cfg=self.comb_cfg, comb_op=self.comb_op, inter_dim=int(inter_dim),
-                tile_m=int(gemm2_tile_m), tile_n=int(gemm2_tile_n), tile_k=int(gemm2_tile_k),
-                persist_m=int(gemm2_persist_m), a_dtype=self.a2_dtype, b_dtype="fp4",
-                force_mode="stage1_only", xcd_swizzle=int(xcd_swizzle),
+                a_dtype=self.a2_dtype, b_dtype="fp4",
             )
+            # Only override FlyDSLMoeGemm2CombineOp's built-in tile/persist/xcd when a
+            # tuned gemm2 tile is supplied (gemm2_tile_m > 0). On a tune miss the
+            # caller (mega router) leaves these at -1, so the op keeps its own default
+            # behavior -- the mega path never overrides the gemm2+combine defaults.
+            if int(gemm2_tile_m) > 0:
+                g2_kwargs.update(
+                    tile_m=int(gemm2_tile_m), tile_n=int(gemm2_tile_n),
+                    tile_k=int(gemm2_tile_k), persist_m=int(gemm2_persist_m),
+                    xcd_swizzle=int(xcd_swizzle),
+                )
+            self._g2 = FlyDSLMoeGemm2CombineOp(**g2_kwargs)
         else:
             # 非融合（compile_mixed_moe_gemm2 + comb_op.combine）I/O 与融合等价（已确认：
             # 同一个 GEMM2 kernel，融合版只多 fused_p2p_scatter），但其精确接线（gemm2
