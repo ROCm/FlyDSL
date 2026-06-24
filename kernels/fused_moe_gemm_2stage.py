@@ -225,6 +225,12 @@ def compile_fused_moe_gemm1(
     overlap_gate: bool = False,
     rank: int = 0,
     experts_per_rank: int = 0,
+    # w1/w1_scale are ALWAYS indexed by the LOCAL expert id (0..epr-1): the caller passes only
+    # this rank's `experts_per_rank` weight rows (ATOM convention; ~world x smaller w1 footprint)
+    # instead of the full global [experts, ...] tensor.  This is the ONLY supported layout -- the
+    # global-w1 path is removed because for >4GB w1 (e.g. v4_pro 8.46GB) the 32-bit buffer
+    # num_records cap (0xFFFFFFFF) silently truncates experts beyond ~4GB, corrupting any rank
+    # whose experts live past that bound.  Mega-only kernel so no ATOM impact.
     # ---- FUSED megakernel (dispatch ⊕ GEMM in one launch) ----------------------------------
     # fuse_dispatch: "" (default, shipping path -- byte-identical, prologue not traced) |
     #   "fixedslot" (decode strict-phase: handshake-free fixed-slot dispatch prologue, then a
@@ -481,9 +487,12 @@ def compile_fused_moe_gemm1(
         _fz_gy = max(1, _cu_num // max(1, _fz_gx_static))
     _fuse_tag = f"_fz{fuse_dispatch}{fuse_npes}x{fuse_cap}x{fuse_topk}" if _fuse else ""
     _fuse_tag += ("_cptag" if _compact_ag else "_cpt") if _compact else ""
+    # w1/scale are LOCAL-indexed (expert offset + buffer bounds use experts_per_rank) -> epr MUST
+    # be in the disk-cache key so kernels for different local-expert counts never collide.
+    _w1l_tag = f"_w1l{experts_per_rank}"
     module_name = (
         f"mfma_fmoe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"
-        f"_t{tile_m}x{tile_n}x{tile_k}_{_pm_tag}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}{_ci_tag}{_dg_tag}{_dsv_tag}{_ras_tag}{_spt_tag}{_og_tag}{_is_tag}{_fuse_tag}_v35"
+        f"_t{tile_m}x{tile_n}x{tile_k}_{_pm_tag}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}{_ci_tag}{_dg_tag}{_dsv_tag}{_ras_tag}{_spt_tag}{_og_tag}{_is_tag}{_fuse_tag}{_w1l_tag}_v37"
     ).replace("-", "_")
 
     # -- LDS sizing --
@@ -1605,9 +1614,13 @@ def compile_fused_moe_gemm1(
             # W: [E*2*inter_dim, model_dim] gate portion -- N = inter_dim
             # Out: [tokens*topk, inter_dim]
 
+            # w1/scale buffers + layouts span only this rank's `experts_per_rank` experts (caller
+            # passes the LOCAL slice), and expert_off_idx below indexes by the LOCAL expert id.
+            assert experts_per_rank > 0, "fused gemm1 requires experts_per_rank>0 (local-w1 layout)"
+            _w_experts = experts_per_rank
             # B preshuffle layout: [E*2*inter_dim, model_dim]
             # Gate rows for expert e: [e*2*inter_dim, e*2*inter_dim + inter_dim)
-            c_n_total = arith.constant(experts * (2 * inter_dim), index=True)
+            c_n_total = arith.constant(_w_experts * (2 * inter_dim), index=True)
             b_layout = make_preshuffle_b_layout(
                 arith,
                 c_n=c_n_total,
@@ -1742,9 +1755,9 @@ def compile_fused_moe_gemm1(
 
             # W: [experts, 2*inter_dim, model_dim]; fp4 packs 2 elements per byte.
             w_nbytes_s1 = (
-                (experts * (2 * inter_dim) * model_dim) // 2
+                (_w_experts * (2 * inter_dim) * model_dim) // 2
                 if is_f4_b
-                else (experts * (2 * inter_dim) * model_dim * b_elem_bytes)
+                else (_w_experts * (2 * inter_dim) * model_dim * b_elem_bytes)
             )
             w_rsrc = buffer_ops.create_buffer_resource(arg_w, max_size=False, num_records_bytes=w_nbytes_s1)
 
@@ -1771,7 +1784,7 @@ def compile_fused_moe_gemm1(
             if const_expr(not is_f16_b):
                 c32 = arith.constant(32, index=True)
                 kblk_w = k_in / c32
-                mn_w = arith.constant(experts * (2 * inter_dim), index=True)
+                mn_w = arith.constant(_w_experts * (2 * inter_dim), index=True)
                 sw_nbytes_idx = mn_w * kblk_w
                 sw_nbytes_i32 = arith.index_cast(T.i32, sw_nbytes_idx)
                 sw_rsrc = buffer_ops.create_buffer_resource(
@@ -1795,7 +1808,7 @@ def compile_fused_moe_gemm1(
                 arg_expert_ids, max_size=False, num_records_bytes=eid_nbytes_i32
             )
             # bias: [experts, 2*inter_dim] f32 -> bytes = experts * 2*inter_dim * 4
-            bias_nbytes_s1 = experts * (2 * inter_dim) * 4
+            bias_nbytes_s1 = _w_experts * (2 * inter_dim) * 4
             bias_rsrc = (
                 buffer_ops.create_buffer_resource(arg_bias, max_size=False, num_records_bytes=bias_nbytes_s1)
                 if enable_bias
@@ -1880,7 +1893,9 @@ def compile_fused_moe_gemm1(
                 bx_m = arith.index_cast(ir.IndexType.get(), bx_m_i32)
                 blk_valid = arith.cmpi(CmpIPredicate.ult, _st_bx, arith.index_cast(T.i32, _total_m_tiles))
                 expert_i32 = _ef + arith.constant(_fz_rank * _fz_epr, type=T.i32)
-                expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
+                # w1/scale indexed by the LOCAL expert id (_ef in [0,epr)).
+                _e_w_i32 = _ef
+                expert_idx = arith.index_cast(ir.IndexType.get(), _e_w_i32)
                 exp_valid = arith.cmpi(CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32))
             else:
                 if const_expr(sparse_tiles):
@@ -1900,7 +1915,10 @@ def compile_fused_moe_gemm1(
                 else:
                     blk_valid = arith.cmpi(CmpIPredicate.ult, bx_m_i32, num_valid_i32)
                 expert_i32 = buffer_ops.buffer_load(expert_rsrc, bx, vec_width=1, dtype=T.i32)
-                expert_idx = arith.index_cast(ir.IndexType.get(), expert_i32)
+                # sorted_expert_ids carries GLOBAL ids here -> index w1/scale by the LOCAL id
+                # (global - rank*epr).
+                _e_w_i32 = arith.subi(expert_i32, arith.constant(_fz_rank * _fz_epr, type=T.i32))
+                expert_idx = arith.index_cast(ir.IndexType.get(), _e_w_i32)
                 exp_valid = arith.cmpi(CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32))
             def _moe_gemm1_body():
                 # Gate expert offset: first inter_dim rows of each expert's 2*inter_dim block
@@ -2028,7 +2046,7 @@ def compile_fused_moe_gemm1(
                 up_n_intra_list = []
                 up_n_blk_list = []
                 col_g_list = []
-                c_n0_static = experts * (2 * inter_dim) // 16
+                c_n0_static = _w_experts * (2 * inter_dim) // 16
                 layout_n_blk_intra = fx.make_layout((c_n0_static, 16), stride=(16, 1))
                 inter_idx = arith.constant(inter_dim, index=True)
 

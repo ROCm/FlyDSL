@@ -238,6 +238,9 @@ class FusedMoEMegaStage1:
                     f"lose output tiles; gx={_gx_g} gives no XCD-alignment benefit anyway.")
                 self._xcd = 0
 
+        # w1/w1_scale are this rank's `epr` expert rows ONLY (ATOM local convention; the gemm1
+        # kernel indexes by the LOCAL expert id).  The global-w1 path is removed -- it truncates
+        # at the 4GB buffer num_records cap for >4GB weights.
         self.w1 = w1.contiguous()
         self.w1_scale = w1_scale.contiguous()
 
