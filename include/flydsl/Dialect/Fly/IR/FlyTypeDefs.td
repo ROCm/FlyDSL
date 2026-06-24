@@ -354,9 +354,15 @@ def Fly_CopyOpUniversalAtomic : Fly_Type<"CopyOpUniversalAtomic", "universal_ato
   let assemblyFormat = "`<` $atomicOp `,` $valType (`,` $syncscope^)? `>`";
 
   let builders = [
+    TypeBuilderWithInferredContext<(ins "AtomicOpAttr":$atomicOp, "Type":$valType), [{
+      return $_get(atomicOp.getContext(), atomicOp, valType, StringAttr::get($_ctxt, "agent"));
+    }]>
+  ];
+
+  let builders = [
     TypeBuilderWithInferredContext<(ins "AtomicOpAttr":$atomicOp, "Type":$valType, "StringAttr":$syncscope), [{
       return $_get(atomicOp.getContext(), atomicOp, valType, syncscope);
-    }]>    
+    }]>
   ];
 }
 
