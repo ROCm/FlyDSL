@@ -366,6 +366,76 @@ MI355X 有 **8 个 XCD（chiplet），每个独立 L2**；硬件默认 `block i 
 - **r1_v3**：刷新 tile 后 bs256/512/1024 回到约持平或小赢；compact 高 bs 8192+ 明显赢（1.13–1.14×）。
 - **v4_pro**：gx=12 自动关 XCD；fixedslot 小 bs 仍有波动。bs1024–16384 的高 speedup 主要来自 baseline ATOM tile 异常慢，不能解读为 mega 绝对性能突增。
 
+### 6.1 端到端（stage1+stage2，routing-weight 修复后全 bs 扫描）
+
+口径：8×MI355X，a8w4，native topk（v4=6,r1_v3=8），CUDAGraph device-time，8 卡均值，**无任何 `FUSED_MEGA_*` env**（compact/fixedslot 按 buffer 大小自动切）。每个 bs 独立进程跑（避免 mori 对称堆跨配置累积爆堆）。`mega-vs-base` = megav1 与 ATOM 生产全栈输出的 relL2（均 `~1e-5`，纯 fp8 量化抖动，逐位级一致，全 PASS）。
+
+**列含义**：
+- **S1↑** = `s1_sp`：**stage1-only** speedup = baseline(dispatch→aiter sort→mxscale_sort→GEMM1) / megav1(单融合核 dispatch+GEMM1)，**不含 stage2**。
+- **E2E↑** = `e2e_sp`：**端到端**(stage1+stage2)speedup = baseline 全栈(上述 stage1 + GEMM2+combine) / megav1(MegaMoE 单算子)，含 GEMM2 doweight 加权 + combine。
+
+**r1_v3** (7168/2048/256, topk8)
+
+| bs | pass | mega-vs-base | mega ms | base ms | E2E↑ | S1↑ |
+| ---: | :--: | ---: | ---: | ---: | ---: | ---: |
+| 1 | ✅ | 8.6e-06 | 0.1290 | 0.1304 | 1.010 | 0.763 |
+| 4 | ✅ | 9.8e-05 | 0.1800 | 0.1989 | 1.105 | 1.039 |
+| 8 | ✅ | 7.0e-05 | 0.1971 | 0.2199 | 1.116 | 1.027 |
+| 16 | ✅ | 6.4e-05 | 0.2146 | 0.2334 | 1.088 | 1.049 |
+| 32 | ✅ | 6.7e-05 | 0.2191 | 0.2498 | 1.140 | 0.932 |
+| 64 | ✅ | 5.4e-05 | 0.2312 | 0.2696 | 1.166 | 1.146 |
+| 128 | ✅ | 4.8e-05 | 0.2646 | 0.3151 | 1.191 | 1.160 |
+| 256 | ✅ | 4.7e-05 | 0.3706 | 0.4056 | 1.094 | 1.066 |
+| 512 | ✅ | 3.9e-05 | 0.5349 | 0.5883 | 1.100 | 1.065 |
+| 1024 | ✅ | 4.3e-05 | 0.8880 | 1.0672 | 1.202 | 1.143 |
+| 2048 | ✅ | 4.2e-05 | 1.7633 | 1.7525 | 0.994 | 0.980 |
+| 4096 | ✅ | 4.2e-05 | 3.2640 | 3.2435 | 0.994 | 1.018 |
+| 8192 | ✅ | 4.2e-05 | 6.2066 | 6.3280 | 1.020 | 1.054 |
+| 16384 | — | int32 越界 | | | | |
+| 32768 | — | int32 越界 | | | | |
+
+**v4_flash** (4096/2048/256, topk6)
+
+| bs | pass | mega-vs-base | mega ms | base ms | E2E↑ | S1↑ |
+| ---: | :--: | ---: | ---: | ---: | ---: | ---: |
+| 1 | ✅ | 0.0e+00 | 0.0888 | 0.1062 | 1.196 | 1.165 |
+| 4 | ✅ | 4.6e-06 | 0.1059 | 0.1306 | 1.233 | 1.149 |
+| 8 | ✅ | 5.5e-05 | 0.1304 | 0.1472 | 1.129 | 1.182 |
+| 16 | ✅ | 4.5e-05 | 0.1304 | 0.1573 | 1.206 | 1.223 |
+| 32 | ✅ | 3.8e-05 | 0.1291 | 0.1638 | 1.269 | 1.315 |
+| 64 | ✅ | 3.1e-05 | 0.1459 | 0.1820 | 1.247 | 1.503 |
+| 128 | ✅ | 3.7e-05 | 0.1560 | 0.2184 | 1.401 | 1.396 |
+| 256 | ✅ | 3.4e-05 | 0.2111 | 0.2525 | 1.196 | 1.177 |
+| 512 | ✅ | 3.9e-05 | 0.2744 | 0.3397 | 1.238 | 1.263 |
+| 1024 | ✅ | 4.0e-05 | 0.4483 | 0.5288 | 1.180 | 1.246 |
+| 2048 | ✅ | 4.3e-05 | 0.7748 | 0.8911 | 1.150 | 1.149 |
+| 4096 | ✅ | 4.0e-05 | 1.5063 | 1.6335 | 1.084 | 1.105 |
+| 8192 | ✅ | 3.9e-05 | 2.8226 | 3.0859 | 1.093 | 1.204 |
+| 16384 | ✅ | 4.0e-05 | 5.3618 | 6.0794 | 1.134 | 1.255 |
+| 32768 | — | int32 越界 | | | | |
+
+**v4_pro** (7168/3072/384, topk6)
+
+| bs | pass | mega-vs-base | mega ms | base ms | E2E↑ | S1↑ |
+| ---: | :--: | ---: | ---: | ---: | ---: | ---: |
+| 1 | ✅ | 5.6e-05 | 0.1061 | 0.1351 | 1.274 | 1.302 |
+| 4 | ✅ | 2.9e-05 | 0.2206 | 0.2522 | 1.143 | 1.053 |
+| 8 | ✅ | 2.3e-05 | 0.2792 | 0.3084 | 1.105 | 1.046 |
+| 16 | ✅ | 2.4e-05 | 0.3399 | 0.3627 | 1.067 | 1.035 |
+| 32 | ✅ | 3.7e-05 | 0.3564 | 0.3832 | 1.075 | 1.057 |
+| 64 | ✅ | 3.8e-05 | 0.3673 | 0.4012 | 1.092 | 1.058 |
+| 128 | ✅ | 4.2e-05 | 0.3791 | 0.4376 | 1.154 | 1.128 |
+| 256 | ✅ | 4.1e-05 | 0.4645 | 0.5151 | 1.109 | 1.111 |
+| 512 | ✅ | 4.3e-05 | 0.6210 | 0.6770 | 1.090 | 1.076 |
+| 1024 | ✅ | 4.2e-05 | 0.9474 | 1.0553 | 1.114 | 1.073 |
+| 2048 | ✅ | 4.5e-05 | 1.7621 | 1.8993 | 1.078 | 0.965 |
+| 4096 | ✅ | 4.3e-05 | 3.2199 | 3.5684 | 1.108 | 1.046 |
+| 8192 | ✅ | 4.4e-05 | 6.0508 | 6.8521 | 1.132 | 1.090 |
+| 16384 | — | int32 越界 | | | | |
+| 32768 | — | int32 越界 | | | | |
+
+**结论**：加权修复在三网络全 bs 精度全 PASS（与生产栈逐位级一致）；端到端 megav1 普遍 **1.08–1.40×**（小/中 bs 最明显）。唯一缺口是 `bs≥16384`(r1_v3/v4_pro)、`bs=32768`(v4_flash) 的 **int32 越界**（32 位 buffer 描述符 4GB 寻址上限，需 buffer 寻址 64 位化才能解，与 fixedslot→compact 的 3GB 切换同根，见 §1.2 / §8）。
+
 ---
 
 ## 7. 正确性体系
@@ -445,7 +515,7 @@ stage2 `g2.run(a2, w2, a2_scale, w2_scale, sorted_token_ids, sorted_expert_ids, 
 | `sorted_expert_ids`(=`_se_atom`) | 每(sub-)tile 的**本地**专家 id | GEMM2 选 W2 |
 | `sorted_weights`/`wts_buf`(=`_sw_atom`) | 逻辑行 `t*topk+s` 的 routing 权重 | combine Stage-3 加权 |
 | `num_valid_ids`(=`_nv`) | 有效行数(tile-padded) | GEMM2/ combine 循环界 |
-| `total_recv`(combine op 内) | distinct recv token 数 | combine 循环界(scatter-back) |
+| `total_recv`(combine op 内) | distinct recv token 数 | combine 循环界(scatter-back,经 `_fx_trecv`);**注**:GEMM2 ghost-gate 走的是另一句柄 `_fx_out_total_recv`,mega 下被重指为常量 `max_recv`(见 §9.2 ghost-gate 一条) |
 | `tok_id_to_src` | recv 行 → 源 (dest_pe,dest_lid) | combine scatter dest;atom 下 = identity |
 
 **核心约束(决定一切适配)**:GEMM2 的 **a2 行号硬编码为 logical `t*topk+s`**,combine 的 scatter 靠 `sorted_token_ids` 的 `(t,s)` + `tok_id_to_src` 解。所以 stage1 必须产出「**a2@logical 行 + `_sti` 编码 `t=src_global,s=k_slot` + identity tis**」这套 **atom 契约**。
@@ -458,6 +528,7 @@ stage2 `g2.run(a2, w2, a2_scale, w2_scale, sorted_token_ids, sorted_expert_ids, 
 - **`_se_atom`= 本地专家 id**(32-row sub-tile 粒度);**`_sw_atom`= recv routing 权重写到逻辑行 `t*topk+s`**。
 - **identity tis**:`t=src_global=src_pe*mtpr+src_lid` → `dest_pe=t>>log2(mtpr)`、`dest_lid=t&(mtpr-1)`,正是源,故 `tok_id_to_src` 恒等。
 - **`total_recv` Plan A**(§9.3):核内算 distinct-recv,直接写 combine buffer。
+- **GEMM2 ghost-gate 边界 = `max_recv`(mega 自闭环,不碰共用 gemm2)**:共用 GEMM2 epilogue 用 `t < total_recv` 丢 padding 行。ATOM 契约里 `t` 是紧凑 recv 槽位 `[0,total_recv)`;但 mega Plan-A 的 `_sti` 编码 `t = src_global ∈ [0, npes*mtpr)`、padding sentinel `== npes*mtpr (= max_recv)`(§9.5)。若 gate 用 distinct-recv 计数当界,会误丢 `src_global ≥ total_recv` 的真实行(高位 dest rank → 输出清零)。修法:GEMM2 ghost-gate 读的 `comb_op._fx_out_total_recv` 在 `MegaMoE.__init__` 里被**重指到常量 `max_recv` buffer**,gate 变 `t < max_recv`(真实行全留、sentinel `==max_recv` 丢);`combine_no_stage1` 仍经 `_fx_trecv` 读真实 `total_recv`。**GEMM2 kernel / a2 布局 / 零桥接 identity-tis 全不动**(mega 从不调 `comb_op.dispatch`,`_fx_out_total_recv` 在 mega 里唯一消费者就是该 gate)。
 
 #### 9.2.1 小张量演示（一眼看懂 `srcmap` 怎么贯穿 stage1→stage2）
 

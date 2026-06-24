@@ -246,6 +246,10 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     w2_scale_1d = fp4_utils.e8m0_shuffle(w2_sr[_w2sl]).view(torch.uint8).contiguous().view(-1)
 
     # ---- full-precision oracle weights (pre-quant f32; w1 re-seeded to match _prepare) ----
+    # The f32 oracle w1_all is large (v4_pro: 63GB); return the caching allocator's reserve from
+    # _prepare's freed f32 intermediates to HIP so the contiguous alloc fits without fragmenting.
+    del w2_fp4, w2_sr
+    torch.cuda.empty_cache()
     _init = float(model_dim) ** -0.25
     torch.manual_seed(args.seed)
     _ = torch.randn((run_tokens, model_dim), device=dev, dtype=torch.float32)  # advance RNG like _prepare
@@ -283,9 +287,18 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         return _all_mean(dev, _s.elapsed_time(_e) / _n)
 
     # ============ megav1: production single-op ============
+    # MegaMoE consumes LOCAL w1: only THIS rank's `epr` expert rows of w1/w1_scale (ATOM
+    # production convention; the gemm1 kernel indexes by the LOCAL expert id).  w_kernel/scale
+    # are expert-major contiguous -> slice the flat byte range [rank*epr*per_expert :
+    # (rank+1)*epr*per_expert].  (Global w1 is NOT supported: for >4GB weights it truncates at
+    # the 32-bit buffer num_records cap.)
+    _wpe = w_kernel.numel() // experts          # per-expert uint8 elems (weight)
+    _spe = scale_w1_1d.numel() // experts       # per-expert uint8 elems (scale)
+    _w1_arg = w_kernel.reshape(-1)[rank * epr * _wpe:(rank + 1) * epr * _wpe].contiguous()
+    _w1s_arg = scale_w1_1d.reshape(-1)[rank * epr * _spe:(rank + 1) * epr * _spe].contiguous()
     moe = MegaMoE(
         rank=rank, world_size=world, model_dim=model_dim, inter_dim=inter_dim,
-        experts=experts, topk=topk, quant=args.quant, w1=w_kernel, w1_scale=scale_w1_1d,
+        experts=experts, topk=topk, quant=args.quant, w1=_w1_arg, w1_scale=_w1s_arg,
         w2=w2_kernel, w2_scale=w2_scale_1d, max_tok_per_rank=mtpr, network=args.network,
         gemm2_tile_m=tm2, gemm2_tile_n=tn2, gemm2_tile_k=tk2, stage2_mode="fused")
     torch.cuda.synchronize(); ms.shmem_barrier_all()
@@ -340,8 +353,12 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     bias_d = torch.empty((0,), device=dev, dtype=torch.float32)
     _qd = _adt.fp4x2 if _is_fp4 else _adt.fp8
     _stp = None if _is_fp4 else _adt.fp8_e8m0
+    # ATOM gemm1 indexes w1 by the LOCAL expert id (epr experts) -- matches its own gemm2 (local
+    # w2 + a_se_local) and real ATOM production.  Compiling with experts=experts (global) + global
+    # w1 truncates at the 4GB buffer num_records cap for >4GB weights (v4_pro 8.46GB), silently
+    # corrupting experts past ~4GB; bound to epr (<4GB) and feed the local w1 slice + a_se_local.
     gemm1 = compile_mixed_moe_gemm1(
-        model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk,
+        model_dim=model_dim, inter_dim=inter_dim, experts=epr, topk=topk,
         tile_m=tm, tile_n=tn1, tile_k=tk, doweight_stage1=False, a_dtype=a_dtype, b_dtype="fp4",
         out_dtype=s1_out, act="silu", waves_per_eu=int(args.waves_per_eu),
         use_async_copy=bool(args.async_copy))
@@ -368,13 +385,13 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         else:
             _a1q, _a1sp = per_1x32_mx_quant_hip(_bt[:trc].contiguous(), quant_dtype=_qd, scale_type=_stp)
         aiter.mxfp4_moe_sort_hip(a1s, _a1sp, a_st, a_nv, int(trc), int(model_dim))
-        # gemm1 indexes w1 (GLOBAL, all E experts) by a_se (GLOBAL from aiter) -> a2 correct.
-        gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_a1q), w_kernel, a1s.view(torch.uint8),
-              scale_w1_1d, a_st, a_se, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
+        # gemm1 AND gemm2 both index LOCAL: w1/w2 = this rank's epr experts, a_se_local (aiter gave
+        # GLOBAL ids).  Local w1 (<4GB) avoids the 4GB buffer truncation that global w1 hits.
+        a_se_local.copy_(a_se - rank * epr)
+        gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_a1q), _w1_arg, a1s.view(torch.uint8),
+              _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
               fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
               stream=fx.Stream(torch.cuda.current_stream()))
-        # gemm2 expects LOCAL expert ids (w2_kernel = this rank's epr experts); aiter gave GLOBAL.
-        a_se_local.copy_(a_se - rank * epr)
         _ret = g2a.run(a2=a2_e.view(-1), w2=w2_kernel, a2_scale=a2s_e, w2_scale=w2_scale_1d,
                        sorted_token_ids=a_st, sorted_expert_ids=a_se_local, sorted_weights=a_sw,
                        num_valid_ids=a_nv, cur_tok=run_tokens)
@@ -411,11 +428,11 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         aiter.moe_sorting_fwd(recv_topk[:trc], recv_wts[:trc], a_st, a_sw, a_se, a_nv, a_mbuf[:trc],
                               int(experts), int(tm), None, None, 0)
         aiter.mxfp4_moe_sort_hip(a1s, _rs[:trc].contiguous(), a_st, a_nv, int(trc), int(model_dim))
-        gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_rx[:trc]), w_kernel, a1s.view(torch.uint8),
-              scale_w1_1d, a_st, a_se, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
+        a_se_local.copy_(a_se - rank * epr)
+        gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_rx[:trc]), _w1_arg, a1s.view(torch.uint8),
+              _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
               fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
               stream=fx.Stream(torch.cuda.current_stream()))
-        a_se_local.copy_(a_se - rank * epr)
         # bridge fp8 dispatch routing -> bf16 combine op (atom's cost; megav1 has none via Plan A)
         dc.total_recv.copy_(dcf.total_recv)
         dc.shmem_tok_id_to_src.copy_(dcf.shmem_tok_id_to_src)
@@ -456,9 +473,11 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     _mega_ok = _rm_w < _floor
     _atom8_ok = _ra8_w < _floor
     # oracle sanity: if even the bf16 REFERENCE (atom-bf16, the most accurate path) is far from
-    # the torch oracle, the oracle itself is unreliable for this shape -- observed on v4_pro
-    # (7168/3072/384): relL2(*,torch)~1.09 for ALL impls while mega/atom agree to ~3e-5.  In that
-    # case gate on cross-impl agreement instead of the broken oracle.
+    # the torch oracle, the oracle is unreliable for this shape -> gate on cross-impl agreement.
+    # NOTE: the old v4_pro "~1.09 for ALL impls" was NOT an oracle problem -- it was the 4GB
+    # buffer num_records truncation of the GLOBAL w1 (8.46GB), which hit mega AND the atom
+    # baseline identically.  Now both index LOCAL w1 (<4GB) and all three match the oracle at the
+    # quant floor (~0.21); this guard should no longer trip for v4_pro.
     _oracle_broken = (_ra_w > _floor)
     # fp8 absorbs the activation noise so mega tracks the primary baseline bitwise (_rma~0);
     # fp4's coarse E2M1 step makes two VALID quantizations of the same (bit-identical) gemm
@@ -479,8 +498,9 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         aiter.moe_sorting_fwd(recv_topk[:trc], recv_wts[:trc], a_st, a_sw, a_se, a_nv, a_mbuf[:trc],
                               int(experts), int(tm), None, None, 0)
         aiter.mxfp4_moe_sort_hip(a1s, _rs[:trc].contiguous(), a_st, a_nv, int(trc), int(model_dim))
-        gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_rx[:trc]), w_kernel, a1s.view(torch.uint8),
-              scale_w1_1d, a_st, a_se, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
+        a_se_local.copy_(a_se - rank * epr)
+        gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_rx[:trc]), _w1_arg, a1s.view(torch.uint8),
+              _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
               fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
               stream=fx.Stream(torch.cuda.current_stream()))
 
