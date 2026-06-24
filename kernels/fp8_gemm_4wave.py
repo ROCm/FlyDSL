@@ -19,7 +19,10 @@ Optional B preshuffle uses the same on-disk layout as
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr import vector as _vector
+from flydsl.expr.typing import T as _T
 from kernels.fp8_gemm_utils import (
     G2SLoader,
     Mfma16x16x128,
@@ -33,6 +36,26 @@ from kernels.fp8_gemm_utils import (
     swizzle_128,
     wait_barrier,
 )
+
+
+class Mfma16x16x128AGPR(Mfma16x16x128):
+    """fp8 16x16x128 MFMA that pins the accumulator in AGPR via inline asm
+    (constraint `=a,v,v,0`), so the f32x4 accumulator accumulates in-place and
+    the compiler does not insert v_accvgpr_mov/read + s_nop to shuffle the
+    accumulator between AGPR slots (the dominant stall in the ssa-lowered path).
+    scale is left default (=0); the real per-token scale is applied in StoreC."""
+
+    def _do_mma(self, a, b, c):
+        a_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), a)
+        b_i32x8 = _vector.bitcast(_T.vec(8, _T.i32), b)
+        res_ty = _T.vec(4, _T.f32)
+        return _llvm.inline_asm(
+            res_ty,
+            [arith._to_raw(a_i32x8), arith._to_raw(b_i32x8), arith._to_raw(c)],
+            "v_mfma_f32_16x16x128_f8f6f4 $0, $1, $2, $0",
+            "=a,v,v,0",
+            has_side_effects=True,
+        )
 
 
 def _min(a, b):
@@ -62,7 +85,7 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     pid_n, intra_group_m = divmod(intra_group, group_size_m)
     pid_m = first_pid_m + intra_group_m
 
-    use_simple = (num_wg <= SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
+    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
     return (arith.select(use_simple, simple_m, pid_m), arith.select(use_simple, simple_n, pid_n))
 
 
@@ -161,7 +184,7 @@ def compile_fp8_gemm_4w(
                 lds_swz.append(swz)
             return lds_swz
 
-        mfma = Mfma16x16x128(N_TILES_A, N_TILES_B)
+        mfma = Mfma16x16x128AGPR(N_TILES_A, N_TILES_B)
 
         def _interleaved_cluster(
             lds_dst,
