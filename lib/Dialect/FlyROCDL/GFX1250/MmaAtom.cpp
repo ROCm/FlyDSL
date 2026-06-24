@@ -216,9 +216,9 @@ static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType
                                     Value b, Value c) {
   Value res;
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
-    res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b,
-                         /*modC=*/(uint16_t)0, c)
+    res = WmmaOp::create(builder, loc, accTy, a, b,
+                         /*modC=*/(uint16_t)0, c,
+                         /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsC) {
     res = WmmaOp::create(builder, loc, accTy, a, b,
