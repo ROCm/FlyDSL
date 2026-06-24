@@ -136,8 +136,8 @@ def store_acc_vec8_to_buffer(
 def _enable_expert_sched_mode():
     from flydsl._mlir.dialects import llvm as _llvm
 
-    # hwreg encoding: ID=26(SCHED_MODE), Offset=0, Size=2 -> 26 | (1<<11) = 2074
-    imm_val = arith.unwrap(arith.constant(2074, type=T.i32))
+    # hwreg encoding: ID=26(SCHED_MODE), Offset=0, Size=5 -> 26 | (4<<11) = 8218
+    imm_val = arith.unwrap(arith.constant(8218, type=T.i32))
     val_val = arith.unwrap(arith.constant(2, type=T.i32))
     _llvm.call_intrinsic(None, "llvm.amdgcn.s.setreg", [imm_val, val_val], [], [])
 
@@ -234,8 +234,8 @@ def compile_gemm_a8w8_blockscale(
         raise ValueError(
             f"out_dtype must be 'bf16', 'fp16', or 'f32', got {out_dtype!r}"
         )
-    if num_buffers not in (2, 3, 4):
-        raise ValueError(f"num_buffers must be 2, 3, or 4, got {num_buffers}")
+    if num_buffers not in (2, 3, 4, 5):
+        raise ValueError(f"num_buffers must be 2, 3, 4, or 5, got {num_buffers}")
     if tile_m % WMMA_M != 0:
         raise ValueError(f"tile_m must be a multiple of {WMMA_M}, got {tile_m}")
     if tile_n % WMMA_N != 0:
@@ -390,6 +390,7 @@ def compile_gemm_a8w8_blockscale(
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
+        # _enable_expert_sched_mode()
         tx = gpu.thread_id("x")
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
@@ -803,6 +804,15 @@ def compile_gemm_a8w8_blockscale(
         # Prologue + accs init live inside each variant branch.
         if const_expr(variant == "reg_preload"):
             # ───── reg_preload-only helpers ─────
+            def _wg_barrier():
+                # Same switch the manual variant uses: bare s_barrier (no LDS fences)
+                # when use_manual_barrier, else gpu.barrier() (barrier + acquire/release).
+                if const_expr(use_manual_barrier):
+                    rocdl.s_barrier_signal(-1)
+                    rocdl.s_barrier_wait(-1)
+                else:
+                    gpu.barrier()
+
             def _pack_state_experimental(accs_, a_, b_, cur_x_, cur_w_, pw):
                 return (
                     list(accs_)
@@ -979,25 +989,13 @@ def compile_gemm_a8w8_blockscale(
                     sc_x_base = sc * wmma_m_rep
                     sc_w_base = sc * wmma_n_rep
 
-                    wm0, wn0, idx0 = acc_coords[0]
-                    # rocdl.s_setprio(2)
-                    temp0 = issue_wmma_temp(sc, wm0, wn0)
-                    if const_expr(n_accs > 1):
-                        wm1, wn1, idx1 = acc_coords[1]
-                        temp1 = issue_wmma_temp(sc, wm1, wn1)
-                    # rocdl.s_setprio(0)
-
-                    if const_expr(n_accs == 1):
-                        wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-                    else:
-                        for i in range_constexpr(n_accs - wmma_pipeline_depth):
-                            wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-                            wm0, wn0, idx0 = wm1, wn1, idx1
-                            temp0 = temp1
-                            wm1, wn1, idx1 = acc_coords[i + wmma_pipeline_depth]
-                            temp1 = issue_wmma_temp(sc, wm1, wn1)
-                        wmma_with_scale(temp0, wm0, wn0, idx0, sc_x_base, sc_w_base)
-                        wmma_with_scale(temp1, wm1, wn1, idx1, sc_x_base, sc_w_base)
+                    # No manual fold-lag / WMMA software-pipeline: issue each WMMA
+                    # and fold it immediately, in acc_coords order. The 64
+                    # (WMMA -> scale-fma) chains are independent, so the coexec
+                    # scheduler is free to overlap them however it likes.
+                    for wm, wn, idx in acc_coords:
+                        temp = issue_wmma_temp(sc, wm, wn)
+                        wmma_with_scale(temp, wm, wn, idx, sc_x_base, sc_w_base)
 
                 return global_accs
 
@@ -1099,7 +1097,7 @@ def compile_gemm_a8w8_blockscale(
 
                     # Wait for tile compute_idx+1 to land in LDS.
                     tdm_ops.tensor_wait(MAIN_TDM_OUTSTANDING_EXPERIMENTAL)
-                    gpu.barrier()
+                    _wg_barrier()   # use_manual_barrier: bare s_barrier vs gpu.barrier()
 
                     # Pre-load tile compute_idx+1 into VGPRs.
                     # Double-buffer B: issue B's ds_read FIRST (as soon as the n+1
@@ -1185,14 +1183,32 @@ def compile_gemm_a8w8_blockscale(
                         accs, cur_a, cur_b, cur_x_raw, cur_w_raw
                     )
 
-                    tdm_ops.tensor_wait(0)
+                    # Lookahead drain wait: no new TDMs are issued in the drain,
+                    # so the outstanding tensorcnt decreases by _TDMS_PER_TILE_EXP
+                    # each iter. Step it down instead of a hard tensor_wait(0) so
+                    # early drain iters still overlap the in-flight TDMs. The
+                    # last drain iter naturally lands on 0. Mirrors the manual
+                    # drain's range_constexpr + cmpi immediate-select.
+                    for _t in range_constexpr(drain_iters):
+                        _is_t = arith.cmpi(
+                            arith.CmpIPredicate.eq, _drain_i,
+                            arith.constant(_t, type=T.index),
+                        )
+                        if _is_t:
+                            tdm_ops.tensor_wait(
+                                max(0, drain_iters - 1 - _t) * _TDMS_PER_TILE_EXP
+                            )
                     gpu.barrier()
 
                     next_compute_idx = arith.addi(cur_dci, one_i32_d)
                     next_buf_i32 = arith.remui(next_compute_idx, nb_const_i32_d)
 
+                    # Copy main loop: B-first split single-buffer refill.
+                    next_b = load_b_frags(next_buf_i32)
                     next_x_raw = ds_read_x_scales(next_buf_i32)
-                    cur_a, cur_b = load_operand_frags(next_buf_i32)
+                    next_a = load_a_frags(next_buf_i32)
+                    cur_a = next_a
+                    cur_b = next_b
                     cur_x_raw = next_x_raw
 
                     cur_w_raw = prefetch_w_raw
@@ -1304,7 +1320,7 @@ def compile_gemm_a8w8_blockscale(
                 tail_start_m = max(1, wmma_m_rep - tail_rows) if _skew else wmma_m_rep
                 _tail_shadows_left = 0
 
-                FOLD_LAG = 2
+                FOLD_LAG = 0  # no deferral: fold each WMMA's temp immediately (fma right after its wmma)
                 pending = []  # [(temp, s_cur, acc_idx)] awaiting their 4-fma fold
 
                 PF_RATE = 2
