@@ -261,8 +261,11 @@ def build_flash_attn_dualwave_swp_module(
     #       in-kernel (public fp8 V * v_descale) and PV run in bf16, fp8 P fed as bf16.
     #   FLYDSL_FP8_HIPREC=0 + FLYDSL_FP8_PV_FROMBF16=1 -> packed-fp8 PV via the proven
     #       bf16 V/P element order, with both operands converted to fp8 at the MMA.
-    #   FLYDSL_FP8_HIPREC=0 + FLYDSL_FP8_PV_NATIVE=1 -> experimental key-contiguous fp8 V
-    #       (currently below the fixed gate; kept only for layout debugging).
+    #   FLYDSL_FP8_HIPREC=0 + FLYDSL_FP8_PV_NATIVE=1 -> experimental true-fp8 no-round-trip
+    #       V path: raw fp8 V staged + read in the proven B-operand order, fed directly to
+    #       the fp8xfp8 PV MMA (no bf16 vt round-trip). Correct (passes the fixed dense fp8
+    #       gate, min_cos ~0.999); opt-in/experimental and slower than HIPREC because the
+    #       proven order uses two 32-bit LDS reads per pack (see _read_vtf_packs_fp8).
     if dtype_str == "fp8":
         _hiprec_env = os.environ.get("FLYDSL_FP8_HIPREC", "1") != "0"
         _native_env = os.environ.get("FLYDSL_FP8_PV_NATIVE", "0") == "1"
@@ -308,11 +311,15 @@ def build_flash_attn_dualwave_swp_module(
     # correctness bridge: it adds a bf16 round-trip + per-MMA conversion, so it is not
     # the throughput-optimal path.
     #
-    # _FP8_PV_NATIVE: experimental key-contiguous fp8 V staging (vtf, D-major: row D =
-    # BLOCK_N keys + 16B pad) read as 8 keys via a plain i64 load. It currently FAILS the
-    # fixed gate (min_cos ~0.886 nocausal, ~0.04 causal) due to a key/D layout-indexing
-    # defect in _stage_vtf_fp8 / _read_vtf_packs_fp8 -- not an fp8-P precision limit (host
-    # numerics of the same packing reach min_cos ~0.9996). Kept only for layout debugging.
+    # _FP8_PV_NATIVE: experimental true-fp8 no-round-trip V path. fp8 V is staged
+    # key-contiguous (vtf, D-major: row D = BLOCK_N keys + 16B pad) by _stage_vtf_fp8 and
+    # read by _read_vtf_packs_fp8 in the PROVEN mfma B(V) element order
+    # (key = 16*k_substep + 8*(n//4) + 4*(lane//32) + (n%4), d = 32*dc + lane%32) as two
+    # 32-bit LDS reads per pack, then fed raw to the fp8xfp8 PV MMA. This PASSES the fixed
+    # dense fp8 gate (min_cos ~0.999 nocausal and causal). It is opt-in/experimental and
+    # currently slower than HIPREC because the two-32-bit read adds an LDS-read bubble (the
+    # proven order is not 8 contiguous keys); an earlier contiguous 8-key i64 read gathered
+    # the wrong keys and capped this path at min_cos ~0.886 -- now fixed.
     # Both vt-based PV modes share the proven bf16 vt staging + transpose read below.
     _PV_USE_VT = _FP8_HIPREC_P or _FP8_PV_FROMBF16
     _VTF_PAD = 16
@@ -1193,26 +1200,38 @@ def build_flash_attn_dualwave_swp_module(
                     llvm.StoreOp(_raw(byte), p, alignment=1)
 
         def _read_vtf_packs_fp8(buf_id):
-            # Native fp8 PV read: 8 contiguous keys per pack = a plain i64 load (keys
-            # are contiguous in vtf). mfma_f32_32x32x16_fp8 B(V) thread layout:
-            # D = lane%32, k_group = lane//32 (8 keys); k_substep picks the 16-key
-            # block, dc the 32-D chunk. key_base = k_substep*16 + (lane//32)*8.
+            # Native fp8 PV read in the PROVEN mfma_f32_32x32x16_fp8 B(V) element order.
+            # The staged vtf is the identity layout vtf[d_col*_VTF_ROW + key] = V[key, d_col].
+            # The proven B-operand pack byte n (0..7) holds:
+            #     key = 16*k_substep + 8*(n//4) + 4*(lane//32) + (n%4)
+            #     d   = 32*dc + (lane%32)
+            # i.e. two runs of 4 contiguous keys, 8 keys apart, on one D-row -- the same
+            # element order the proven bf16 datapath produces (_read_vt_packs_bf16's two
+            # ds_read_b64_tr_b16 + the [0..7] shuffle). The keys in the second run
+            # (base+8..base+11) live in a different lane-group's region, so the read is two
+            # 32-bit loads 8 keys apart, assembled into the i64 pack -- NOT a single
+            # contiguous 8-key i64 load (that gathered the wrong keys and capped NATIVE at
+            # min_cos ~0.886). This order is what makes NATIVE pass the fixed fp8 gate
+            # (min_cos > 0.99 on the dense sweep); it was derived by composing the bf16
+            # staging/read/transpose layout and cross-checked against the FROMBF16 operand
+            # order.
             vtf_buf = buf_id * VTF_FP8_ELEMS
             packs = [[None] * D_CHUNKS for _ in range(4)]
             for dc in range_constexpr(D_CHUNKS):
                 for k_substep in range_constexpr(4):
-                    # mfma_f32_32x32x16_fp8 B(V) thread layout: D = lane%32 + dc*32
-                    # (N output chunk), the 8 contraction keys per lane-group start at
-                    # k_substep*16 + (lane//32)*8. This mapping is the best of the
-                    # principled variants tried (cos 0.944 vs 0.47-0.61) but is still
-                    # WRONG: it does not match the proven bf16 B-operand element order, so
-                    # this path caps at ~0.886. The residual is THIS layout defect, not
-                    # fp8-P precision. _FP8_PV_FROMBF16 is the correct path.
                     d_col = (lane % 32) + dc * 32
-                    key_base = k_substep * 16 + (lane // 32) * 8
-                    off = vtf_buf + d_col * _VTF_ROW + key_base
-                    p = buffer_ops.get_element_ptr(lds_vtf_base_ptr, byte_offset=fx.Int32(off), elem_type=T.i8)
-                    packs[k_substep][dc] = fx.Int64(llvm.LoadOp(T.i64, p, alignment=1).result)
+                    key_base = k_substep * 16 + (lane // 32) * 4
+                    row = vtf_buf + d_col * _VTF_ROW
+                    p_lo = buffer_ops.get_element_ptr(
+                        lds_vtf_base_ptr, byte_offset=fx.Int32(row + key_base), elem_type=T.i8
+                    )
+                    p_hi = buffer_ops.get_element_ptr(
+                        lds_vtf_base_ptr, byte_offset=fx.Int32(row + key_base + 8), elem_type=T.i8
+                    )
+                    lo = fx.Int32(llvm.LoadOp(T.i32, p_lo, alignment=1).result)
+                    hi = fx.Int32(llvm.LoadOp(T.i32, p_hi, alignment=1).result)
+                    pk = Vec.from_elements([lo, hi], fx.Int32).bitcast(fx.Int64)[0]
+                    packs[k_substep][dc] = fx.Int64(pk)
             return packs
 
         def _reduction_pair(v_f32):
