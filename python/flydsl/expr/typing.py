@@ -393,6 +393,8 @@ __all__ = [
     "TiledMma",
     "Stream",
     "Tuple3D",
+    "Basis",
+    "E",
     # Vector types
     "Vector",
     "ReductionOp",
@@ -675,15 +677,29 @@ class IntTuple(BuiltinDslType):
         return self.type.get_static_leaf_int
 
     @staticmethod
+    def _static_leaf_to_py(ty):
+        if ty.is_leaf_basis:
+            bt = ty.get_leaf_as_basis
+            return Basis(bt.value, list(bt.modes))
+        return ty.get_static_leaf_int
+
+    @staticmethod
+    def _dynamic_leaf_to_py(ty, value):
+        value = as_dsl_value(value)
+        if ty.is_leaf_basis:
+            return Basis(value, list(ty.get_leaf_as_basis.modes))
+        return value
+
+    @staticmethod
     def _static_to_py_value(ty):
         if ty.is_leaf:
-            return ty.get_static_leaf_int
+            return IntTuple._static_leaf_to_py(ty)
         return tuple(IntTuple._static_to_py_value(ty.at(i)) for i in range(ty.rank))
 
     def _rebuild_py_value(self, leaf_iter):
         if self.is_leaf:
             if self.is_static:
-                return self.get_static_leaf_int
+                return IntTuple._static_leaf_to_py(self.type)
             return next(leaf_iter)
         return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range(self.rank))
 
@@ -1247,6 +1263,54 @@ class Tuple3D:
 
     def __iter__(self):
         return iter((self.x, self.y, self.z))
+
+
+class Basis:
+    def __init__(self, value, modes):
+        if isinstance(value, Basis):
+            value = value.value
+        if isinstance(modes, int):
+            modes = [modes]
+
+        self.value = value
+        self.modes = modes
+
+    def __mul__(self, other):
+        if not isinstance(other, (int, Integer)):
+            raise TypeError(f"Basis multiplication requires int or Integer, got {type(other)}")
+        return Basis(self.value * other, self.modes)
+
+    __rmul__ = __mul__
+
+    def __eq__(self, other):
+        if not isinstance(other, Basis):
+            return False
+        return self.value == other.value and self.modes == other.modes
+
+    def __hash__(self):
+        return hash((self.value, tuple(self.modes)))
+
+    def __repr__(self):
+        return f"{self.value}" + "".join(f"E{m}" for m in self.modes)
+
+
+def E(*mode):
+    """Build a unit basis stride leaf ``E<modes>`` (scale=1).
+
+    Examples:
+        E()         -> 1       # fall back to scalar
+        E(0)        -> 1E0
+        E(0, 1)     -> 1E0E1
+        E([0, 1])   -> 1E0E1
+    """
+
+    if len(mode) == 1 and isinstance(mode[0], (list, tuple)):
+        mode = tuple(mode[0])
+    if not mode:
+        return 1
+    if any(isinstance(x, bool) or not isinstance(x, int) for x in mode):
+        raise TypeError(f"E modes must be ints, got {mode!r}")
+    return Basis(1, list(mode))
 
 
 # ═══════════════════════════════════════════════════════════════════════

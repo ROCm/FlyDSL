@@ -7,11 +7,13 @@ from functools import wraps
 from typing import overload
 
 from .._mlir import ir
+from .._mlir._mlir_libs._mlirDialectsFly import _Basis
 from .._mlir.dialects import arith as _arith
 from .._mlir.dialects import fly
 from .._mlir.dialects.fly import (
     AddressSpace,
     AtomicOp,
+    BasisType,
     CachePolicy,
     ComposedLayoutType,
     CoordSwizzleType,
@@ -49,6 +51,7 @@ __all__ = [
     "GemmTraversalOrder",
     # Types
     "IntTupleType",
+    "BasisType",
     "TileType",
     "LayoutType",
     "SwizzleType",
@@ -220,11 +223,10 @@ def _is_int_tuple_value(value):
 
 def _expand_int_tuple_leaves(value):
     from .numeric import Int32, Int64, Numeric
+    from .typing import Basis
 
     if _is_int_tuple_value(value):
         return _expand_int_tuple_leaves(value.to_py_value())
-    if isinstance(value, (list, tuple)):
-        return tuple(_expand_int_tuple_leaves(v) for v in value)
     # widen narrow dynamic ints to i32
     if isinstance(value, Numeric):
         if isinstance(value.value, ir.Value) and type(value).width < 32:
@@ -234,6 +236,10 @@ def _expand_int_tuple_leaves(value):
         return Int32(value).value
     if isinstance(value, ir.Value) and isinstance(value.type, ir.IndexType):
         return Int64(value).value
+    if isinstance(value, Basis):
+        return _Basis(_expand_int_tuple_leaves(value.value), value.modes)
+    if isinstance(value, (list, tuple)):
+        return tuple(_expand_int_tuple_leaves(v) for v in value)
     return value
 
 
@@ -538,11 +544,14 @@ def get_scalar(int_tuple):
         get_scalar(make_coord(tid)) -> Int32(tid)
         get_scalar(make_int_tuple(5)) -> 5
     """
+    from .typing import IntTuple
+
     if not _is_int_tuple_value(int_tuple):
         return int_tuple
-    if int_tuple.is_leaf and int_tuple.is_static:
-        return int_tuple.get_static_leaf_int
-    return fly.get_scalar(int_tuple)
+    leaf_ty = int_tuple.type
+    if leaf_ty.is_leaf and leaf_ty.is_static:
+        return IntTuple._static_leaf_to_py(leaf_ty)
+    return IntTuple._dynamic_leaf_to_py(leaf_ty, fly.get_scalar(int_tuple))
 
 
 @dsl_loc_tracing
@@ -557,9 +566,7 @@ def get_leaves(input, dynamic_only=False):
         get_leaves(make_coord(tid, 0)) -> (Int32(tid), 0)
         get_leaves(make_coord(tid, 0), dynamic_only=True) -> (Int32(tid),) # 0 is static, dropped
     """
-    if dynamic_only:
-        res_lists = fly.GetLeavesOp(input, dynamicOnly=True)
-        return tuple(res_lists.results)
+    from .typing import IntTuple
 
     def _walk_int_tuple_leaves(ty):
         if ty.is_leaf:
@@ -574,9 +581,10 @@ def get_leaves(input, dynamic_only=False):
     out = []
     for leaf_ty in _walk_int_tuple_leaves(ty):
         if leaf_ty.is_static:
-            out.append(leaf_ty.get_static_leaf_int)
+            if not dynamic_only:
+                out.append(IntTuple._static_leaf_to_py(leaf_ty))
         else:
-            out.append(next(dyn_iter))
+            out.append(IntTuple._dynamic_leaf_to_py(leaf_ty, next(dyn_iter)))
     return tuple(out)
 
 
