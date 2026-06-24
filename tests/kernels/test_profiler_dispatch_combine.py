@@ -142,6 +142,14 @@ def _op_zero_copy(op):
     return not bool(getattr(cfg, "use_external_inp_buf", True))
 
 
+# When the CLI explicitly pins the FlyDSL combine launch geometry, force it
+# onto every combine() call so profile/cudagraph sweeps actually exercise the
+# requested (block_num, warp_num_per_block) instead of silently falling back to
+# the op's tuning table. ``None`` => let the op resolve via its tuning table
+# (production behaviour). Set by :func:`_parse_args`.
+_FORCE_COMBINE_GEOM = None
+
+
 def _run_combine(op, ret, combine_dtype, **kwargs):
     """Mori-parity combine launcher.
 
@@ -155,7 +163,19 @@ def _run_combine(op, ret, combine_dtype, **kwargs):
         ``op.get_registered_combine_input_buffer(combine_dtype)`` before
         invoking ``combine``; the kernel runs ``skip_stage1=True`` and
         peers read that buffer on Stage 3.
+
+    When ``_FORCE_COMBINE_GEOM`` is set (CLI pinned the geometry) it is
+    injected as an explicit ``block_num``/``warp_num_per_block`` override for
+    the FlyDSL op only (mori keeps its own geometry); without it the op falls
+    back to its tuning table.
     """
+    if (
+        _FORCE_COMBINE_GEOM is not None
+        and isinstance(op, FlyDSLDispatchCombineIntraNodeOp)
+        and "block_num" not in kwargs
+    ):
+        kwargs["block_num"] = _FORCE_COMBINE_GEOM[0]
+        kwargs["warp_num_per_block"] = _FORCE_COMBINE_GEOM[1]
     src = _cast_dispatch_to_combine(ret[0], combine_dtype)
     if _op_zero_copy(op):
         # Mori-parity zero-copy caller contract: caller MUST pre-stage
@@ -2678,6 +2698,10 @@ def _worker(rank, world_size, args, master_port):
     ``--mode verify`` silently "pass" on real failures (problem 1).
     """
     setup_distributed(rank, world_size, master_port)
+    # Spawned workers re-import this module (fresh ``_FORCE_COMBINE_GEOM=None``);
+    # restore the CLI-pinned geometry from the args copy handed to the worker.
+    global _FORCE_COMBINE_GEOM
+    _FORCE_COMBINE_GEOM = getattr(args, "_force_combine_geom", None)
     exit_code = 0
     try:
         # CI sweep dispatch: one spawn cycle per (case, phase) pair, fed in
@@ -2719,10 +2743,10 @@ def _parse_args():
     p.add_argument("--hidden-dim", type=int, default=7168)
     p.add_argument("--num-experts-per-rank", type=int, default=32)
     p.add_argument("--k", type=int, default=8)
-    p.add_argument("--dispatch-block-num", type=int, default=128, help="FlyDSL dispatch-only block_num")
-    p.add_argument("--dispatch-warp-per-block", type=int, default=4, help="FlyDSL dispatch-only warp_per_block")
-    p.add_argument("--combine-block-num", type=int, default=128, help="FlyDSL combine-only block_num")
-    p.add_argument("--combine-warp-per-block", type=int, default=8, help="FlyDSL combine-only warp_per_block")
+    p.add_argument("--dispatch-block-num", type=int, default=None, help="FlyDSL dispatch-only block_num (default: op tuning table)")
+    p.add_argument("--dispatch-warp-per-block", type=int, default=None, help="FlyDSL dispatch-only warp_per_block (default: op tuning table)")
+    p.add_argument("--combine-block-num", type=int, default=None, help="FlyDSL combine-only block_num (default: op tuning table)")
+    p.add_argument("--combine-warp-per-block", type=int, default=None, help="FlyDSL combine-only warp_per_block (default: op tuning table)")
     p.add_argument(
         "--mori-block-num",
         type=int,
@@ -2886,7 +2910,33 @@ def _parse_args():
             "dtype changes without re-allocating shmem (mori parity)."
         ),
     )
-    return p.parse_args()
+    args = p.parse_args()
+
+    # Launch geometry: a ``None`` CLI value means "let the FlyDSL op resolve
+    # via its tuning table" (production behaviour). When the user explicitly
+    # pins BOTH block_num and warp_num_per_block, record it so every combine()
+    # call forces that geometry (otherwise profile/cudagraph sweeps silently
+    # fall back to the tuning table -- the op resolves geometry internally and
+    # the un-forwarded CLI value never reaches it).
+    # Stash on ``args`` (survives ``copy.copy`` into spawned workers, which
+    # re-import this module with a fresh ``_FORCE_COMBINE_GEOM = None``).
+    args._force_combine_geom = None
+    if args.combine_block_num is not None and args.combine_warp_per_block is not None:
+        args._force_combine_geom = (args.combine_block_num, args.combine_warp_per_block)
+    global _FORCE_COMBINE_GEOM
+    _FORCE_COMBINE_GEOM = args._force_combine_geom
+    # Backfill the cfg-level defaults consumed downstream as plain ints (these
+    # only act as the op's tier-3 fallback; the tuning table still wins unless
+    # the geometry was pinned above and forwarded as an explicit override).
+    if args.dispatch_block_num is None:
+        args.dispatch_block_num = 128
+    if args.dispatch_warp_per_block is None:
+        args.dispatch_warp_per_block = 4
+    if args.combine_block_num is None:
+        args.combine_block_num = 128
+    if args.combine_warp_per_block is None:
+        args.combine_warp_per_block = 8
+    return args
 
 
 def _spawn_one(ws, args, master_port):
