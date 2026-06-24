@@ -82,6 +82,8 @@ struct IntTupleAttrBuilder {
   }
 
   IntTupleAttr buildBasisLeaf(const PyBasis &basis) {
+    if (basis.modes.empty())
+      throw std::invalid_argument("Basis must have at least one mode");
     SmallVector<int32_t> modes(basis.modes.begin(), basis.modes.end());
     for (int32_t m : modes) {
       if (m < 0)

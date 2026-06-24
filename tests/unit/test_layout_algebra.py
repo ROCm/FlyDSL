@@ -481,23 +481,24 @@ def test_basis_dynamic_coefficient(frontend_only_jit):
 # ==============================================================================
 
 
-def test_int_tuple_like_ops_on_layout():
+def test_int_tuple_like_ops_on_layout(frontend_only_jit):
     """`get_`/`take`/`select`/`group`/`coalesce` and `layout[i]` accept a Layout.
 
-    PR #552 added a non-permissive int-tuple coercion to these wrappers, which
-    wrongly tried to rebuild an int_tuple from a Layout value and crashed. A
-    Layout is a valid IntTupleLike and must pass through unchanged.
+    Regression for issue #713: permissive int-tuple coercion must pass a Layout
+    value through unchanged instead of rebuilding it as an IntTuple.
     """
 
+    @flyc.jit
     def build():
         layout = fx.make_layout((128, 64), (1, 128))
+        assert str(fx.get_(layout, 0).type) == "!fly.layout<128:1>"
         assert str(layout[0].type) == "!fly.layout<128:1>"
         assert str(fx.select(layout, [1, 0]).type) == "!fly.layout<(64,128):(128,1)>"
         assert str(fx.take(layout, 0, 1).type) == "!fly.layout<128:1>"
         assert str(fx.group(layout, 0, 2).type) == "!fly.layout<((128,64)):((1,128))>"
         assert str(fx.coalesce(layout).type) == "!fly.layout<8192:1>"
 
-    _build_and_verify_ir("int_tuple_like_ops_on_layout", build, lambda ir: None)
+    build()
 
 
 # ==============================================================================

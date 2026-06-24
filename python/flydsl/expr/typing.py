@@ -1271,6 +1271,11 @@ class Basis:
             value = value.value
         if isinstance(modes, int):
             modes = [modes]
+        modes = list(modes)
+        if not modes:
+            raise ValueError("Basis requires at least one mode")
+        if any(isinstance(m, bool) or not isinstance(m, int) or m < 0 for m in modes):
+            raise ValueError(f"Basis modes must be non-negative ints, got {modes!r}")
 
         self.value = value
         self.modes = modes
@@ -1285,7 +1290,9 @@ class Basis:
     def __eq__(self, other):
         if not isinstance(other, Basis):
             return False
-        return self.value == other.value and self.modes == other.modes
+        if self.modes != other.modes:
+            return False
+        return self.value == other.value
 
     def __hash__(self):
         return hash((self.value, tuple(self.modes)))
@@ -1308,8 +1315,8 @@ def E(*mode):
         mode = tuple(mode[0])
     if not mode:
         return 1
-    if any(isinstance(x, bool) or not isinstance(x, int) for x in mode):
-        raise TypeError(f"E modes must be ints, got {mode!r}")
+    if any(isinstance(m, bool) or not isinstance(m, int) or m < 0 for m in mode):
+        raise TypeError(f"E modes must be non-negative ints, got {mode!r}")
     return Basis(1, list(mode))
 
 
