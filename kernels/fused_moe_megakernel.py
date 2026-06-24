@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 import re
 from pathlib import Path
 
@@ -138,16 +137,17 @@ class FusedMoEMegaStage1:
                  network=None, scheme="fixedslot",
                  unit_size=-1, tile_n=-1, tile_k=256, warp_num_per_block=4,
                  waves_per_eu=4, use_async_copy=True, out_dtype="auto",
-                 atom_contract=False, total_recv_buf=None):
+                 total_recv_buf=None):
         assert quant in ("a4w4", "a8w4")
         assert scheme == "fixedslot", f"scheme={scheme!r}: only 'fixedslot' supported (handshake removed)"
         assert out_dtype in ("auto", "f16", "fp8", "fp4"), out_dtype
         if experts % world_size != 0:
             raise ValueError(f"experts={experts} must divide world_size={world_size}")
         self.scheme = scheme
-        # atom_contract: emit a2 in the ATOM contract (value@logical token*topk+s via srcmap,
-        # scale@sorted) so stage2 gemm2+combine read it zero-adapt.  fixedslot only (A direct-read).
-        self.atom_contract = bool(atom_contract)
+        # The megakernel ALWAYS emits a2 in the ATOM contract (value@logical token*topk+s via
+        # srcmap, scale@sorted row) so stage2 gemm2+combine consume it zero-adapt; the GEMM is
+        # always compiled with atom_contract=True (an implementation detail, not user-configurable).
+        self.atom_contract = True
         # Plan A: stage-2 combine op's total_recv buffer; when given, the megakernel writes distinct
         # recv-count DIRECTLY into it (disp idx 21) so the unified op needs no host/device copy bridge.
         self._trecv_buf = total_recv_buf
@@ -178,19 +178,9 @@ class FusedMoEMegaStage1:
         # fixed-slot buffer would approach the 4GB wrap.  Buffer-size threshold (robust across shapes):
         _row_b = int(model_dim) if quant == "a8w4" else (int(model_dim) // 2)
         _max_buf = self.epr * world_size * int(max_tok_per_rank) * max(_row_b, int(inter_dim) * 2)
-        self.compact = (_max_buf >= 3_000_000_000
-                        or os.environ.get("FUSED_MEGA_FORCE_COMPACT", "0") == "1")
-        # ── compact+atom combo (large-bs e2e): compact DISPATCH (dense rx, dodges the 4GB input
-        # wrap) + GEMM1 writes the ATOM-LOGICAL a2 (stage2 unchanged).  GUARDED by env (DEFAULT OFF
-        # -> existing paths byte-identical) because the GEMM1 atom-output / compact-A-gather
-        # decoupling is still WIP (docs/moe_stage1_mega_notes.md 2026-06-16 续2).  When OFF, the
-        # historical assert stands (atom_contract requires non-compact).
-        self._compact_atom = bool(self.atom_contract and self.compact
-                                  and os.environ.get("FUSED_MEGA_COMPACT_ATOM", "0") == "1")
-        if not self._compact_atom:
-            assert not (self.atom_contract and self.compact), \
-                ("atom_contract uses the non-compact fixed-slot layout (disp idx 19 = srcmap); "
-                 "set FUSED_MEGA_COMPACT_ATOM=1 to enable the compact+atom combo (GEMM WIP)")
+        # Two layouts, switched purely by buffer size (no env): fixedslot below the wrap, compact
+        # above it.  Compact dispatch (dense rx) + GEMM1 atom-logical a2 output -> stage2 unchanged.
+        self.compact = _max_buf >= 3_000_000_000
         # tile AUTO (default -1): an explicit caller tile_m(unit_size)/tile_n always wins.
         # Otherwise this is the single megastage1 tune entrypoint: read the precise
         # FlyDSL JSON table keyed by shape + token bucket, then fall back to the
@@ -217,12 +207,10 @@ class FusedMoEMegaStage1:
         self.tile_n = int(tile_n)
         self.mtpr = int(max_tok_per_rank)
         self.tune_tokens = int(tune_tokens)
-        # ── XCD swizzle (XCD-aware block swizzle for L2 locality on the MI355X multi-die). DEFAULT
-        #    ON for decode (fixedslot): validated L2-reuse win (v4_flash 1.3x, r1_v3 1.7x at gx|8);
-        #    the guard below auto-disables when cu % gx != 0 (e.g. v4_pro gx=12).  handshake (prefill)
-        #    defaults OFF until P4 (xcd on the oversubscribed grid is unverified).  env override. ────
-        _xcd_default = 4
-        self._xcd = max(0, int(os.environ.get("FUSED_MEGA_XCD", str(_xcd_default))))
+        # ── XCD swizzle (XCD-aware block swizzle for L2 locality on the MI355X multi-die): validated
+        #    L2-reuse win (v4_flash 1.3x, r1_v3 1.7x at gx|8).  The guard below auto-disables it when
+        #    cu % gx != 0 (e.g. v4_pro gx=12), which is load-bearing for correctness. ────
+        self._xcd = 4
         # ── XCD swizzle CORRECTNESS GUARD ───────────────────────────────────────────────────────
         # The persistent swizzle remaps blocks across 8 XCDs assuming a grid_y of cu_num; it is
         # bit-exact AND fast when gx divides cu (gx in {8,16,32} -> clean 8-way grouping, big L2
@@ -245,7 +233,7 @@ class FusedMoEMegaStage1:
             if _cu_g % _gx_g != 0 or (8 % _gx_g) != 0:
                 import warnings
                 warnings.warn(
-                    f"FUSED_MEGA_XCD={self._xcd} DISABLED: gx={_gx_g} is not a divisor of 8 (or cu="
+                    f"XCD swizzle DISABLED: gx={_gx_g} is not a divisor of 8 (or cu="
                     f"{_cu_g} % gx != 0) -> XCD WGM group straddles XCD boundaries and would corrupt/"
                     f"lose output tiles; gx={_gx_g} gives no XCD-alignment benefit anyway.")
                 self._xcd = 0
@@ -291,15 +279,6 @@ class FusedMoEMegaStage1:
             if dist.is_initialized():
                 dist.barrier()
 
-        # Optional VGPR cap: the FUSED kernel carries the PERSISTENT GEMM's VGPR (=156 on gfx950),
-        # which lowers occupancy vs the non-persistent GEMM (=104).  rocprofv3 shows the decode loss
-        # is almost entirely this GEMM-phase occupancy penalty.  --amdgpu-num-vgpr=N (maxnreg) forces
-        # the allocator to fit N VGPR (spilling if needed) -> higher occupancy; sweep to find the
-        # spill-vs-occupancy sweet spot.  Env FUSED_MEGA_MAXNREG (0 = compiler default).
-        _maxnreg = int(os.environ.get("FUSED_MEGA_MAXNREG", "0"))
-        if _maxnreg > 0 and self.mega is not None:
-            self.mega.compile_hints["maxnreg"] = _maxnreg
-
         # ---- views into op buffers (A-input + raw A-scale + metadata the GEMM consumes) ----
         v = self.op._ll_views()
         self._rx = v["rx_em"]
@@ -315,35 +294,32 @@ class FusedMoEMegaStage1:
         _nf4 = out_dtype == "fp4"
         _nf8 = out_dtype == "fp8"
         self.out_is_quant = _nf4 or _nf8
-        # atom_contract: a2 value rows are the ATOM logical space token*topk+s, t=src_global in
+        # a2 value rows live in the ATOM logical space token*topk+s, t=src_global in
         # [0, npes*mtpr) -> rows = npes*mtpr*topk (compact gemm2 tiles via sorted_token_ids).
-        self._a2rows = (world_size * self.mtpr * topk) if self.atom_contract else self.nvm
+        self._a2rows = world_size * self.mtpr * topk
         if _nf4:
             self._out = torch.zeros((self._a2rows, inter_dim // 2), dtype=torch.uint8, device=self.dev)
         elif _nf8:
             self._out = torch.zeros((self._a2rows, inter_dim), dtype=torch.float8_e4m3fn, device=self.dev)
         else:
             self._out = torch.zeros((self._a2rows, 1, inter_dim), dtype=torch.float16, device=self.dev)
-        self._wts = torch.ones(self.nvm, dtype=torch.float32, device=self.dev)
         self._bias = torch.empty((0,), dtype=torch.float32, device=self.dev)
-        # atom_contract: the GEMM epilogue emits a COMPACT sorted_token_ids[compact_row] =
-        # (k<<24)|src_global into a dedicated [nvm] buffer (op.tile_row_base is per-TILE = max_blocks
-        # sized, too small for per-ROW).  static-tiles never reads this arg, so we pass it purely as
-        # the GEMM's sorted_token_ids output + stage2's sorted_token_ids input.
-        if self.atom_contract:
-            self._sti = torch.zeros(self.nvm, dtype=torch.int32, device=self.dev)
-            # stage2 gemm2 tiles at tile_m=32, but stage1 may compute at sort_block_m=64; the kernel
-            # emits sorted_expert_ids at 32-row SUB-TILE granularity -> need nvm/32 entries (vs
-            # op.sorted_expert_ids = nvm/sort_block_m, too small at tile_m=64).
-            self._se_atom = torch.zeros(self.nvm // 32 + 8, dtype=torch.int32, device=self.dev)
-            # combine wts_buf (f32, LOGICAL layout wts[t*topk+s], t=src_global via identity tis):
-            # the GEMM gathers recv wts_em -> gemm2_combine weights each token natively (atom
-            # contract, no host weight bridge).  zeroed once; only real (t,s) get written.
-            self._sw_atom = torch.zeros(world_size * self.mtpr * topk, dtype=torch.float32, device=self.dev)
-        else:
-            self._sti = None
-            self._se_atom = None
-            self._sw_atom = None
+        # The GEMM epilogue emits a COMPACT sorted_token_ids[compact_row] = (k<<24)|src_global into a
+        # dedicated [nvm] buffer (op.tile_row_base is per-TILE = max_blocks sized, too small for
+        # per-ROW); stage2 reads it as its sorted_token_ids input.
+        self._sti = torch.zeros(self.nvm, dtype=torch.int32, device=self.dev)
+        # stage2 gemm2 tiles at tile_m=32, but stage1 may compute at sort_block_m=64; the kernel
+        # emits sorted_expert_ids at 32-row SUB-TILE granularity -> need nvm/32 entries (vs
+        # op.sorted_expert_ids = nvm/sort_block_m, too small at tile_m=64).
+        self._se_atom = torch.zeros(self.nvm // 32 + 8, dtype=torch.int32, device=self.dev)
+        # combine wts_buf (f32, LOGICAL layout wts[t*topk+s], t=src_global via identity tis):
+        # the GEMM gathers recv wts_em -> gemm2_combine weights each token natively (no host weight
+        # bridge).  zeroed once; only real (t,s) get written.
+        self._sw_atom = torch.zeros(world_size * self.mtpr * topk, dtype=torch.float32, device=self.dev)
+        # sorted-row routing weights (f32, [nvm], parallel to _sti): the GEMM emits the same recv
+        # weight at the compact row so stage2's GEMM2 doweight epilogue (sorted_weights[row])
+        # produces the routing-WEIGHTED output that ATOM's production path expects.
+        self._wts_sorted = torch.zeros(self.nvm, dtype=torch.float32, device=self.dev)
         # e8m0 sorted-scale buffer (a2_scale): sized as the gemm epilogue's num_records
         # (padded_rows*padded_cols) + a 1-block slack; empty when out_dtype="f16".
         if self.out_is_quant:
@@ -382,24 +358,22 @@ class FusedMoEMegaStage1:
                         op.local_hist.data_ptr(), op.bigcnt.data_ptr(), op.p2p_bigcnt.data_ptr(),  # 29-31
                         op.cnt_done.data_ptr(), op.p2p_cnt_done.data_ptr(),           # 32-33
                         op.my_base.data_ptr(), op.local_cursor.data_ptr()]            # 34-35
-                if self._compact_atom:
-                    # compact+atom combo: compact_ag leaves idx 19/20 FREE (those are the non-ag
-                    # compact_base; combo forces all-gather).  The shared GEMM atom epilogue HARDCODES
-                    # disp[19]=LOCAL srcmap (k_slot<<24|src_global) and disp[20]=_sw_atom -> override
-                    # them here.  Plan A (total_recv/dest_ctr/recv_num) goes to NEW idx 36-39 (21/24 are
-                    # taken by compact_ag's gb_cnt/meta2).  The compact_ag prologue reads 36-39 iff
-                    # _atom_contract; the GEMM1 atom-output decoupling is still WIP (guarded OFF default).
-                    tbl[19] = op.srcmap_em.data_ptr()                 # 19 LOCAL srcmap (override compact_base)
-                    tbl[20] = self._sw_atom.data_ptr()               # 20 compact sorted_weights out
-                    tbl += [(self._trecv_buf if self._trecv_buf is not None else op.total_recv).data_ptr(),
-                            op.dest_ctr.data_ptr(),                  # 36 total_recv | 37 dest_ctr(local)
-                            op.recv_num.data_ptr(), op.p2p_recv_num.data_ptr(),  # 38 recv_num | 39 p2p_recv_num
-                            # 40 _sti out | 41 _se_atom out (SEPARATE from the A-gather _trb/_se args)
-                            self._sti.data_ptr(), self._se_atom.data_ptr()]
-            elif self.atom_contract:
-                # 19: LOCAL srcmap_em (this rank's recv (k_slot<<24)|src_global) -> the GEMM
-                # epilogue reads it to write a2 @ logical row.  Only on the non-compact path
-                # (atom_contract asserts non-compact); the kernel reads disp[19] iff _atom_contract.
+                # compact+atom: compact_ag leaves idx 19/20 FREE (those are the non-ag compact_base;
+                # the combo forces all-gather).  The shared GEMM atom epilogue HARDCODES disp[19]=LOCAL
+                # srcmap (k_slot<<24|src_global) and disp[20]=_sw_atom -> override them here.  Plan A
+                # (total_recv/dest_ctr/recv_num) goes to NEW idx 36-39 (21/24 are taken by compact_ag's
+                # gb_cnt/meta2).
+                tbl[19] = op.srcmap_em.data_ptr()                 # 19 LOCAL srcmap (override compact_base)
+                tbl[20] = self._sw_atom.data_ptr()               # 20 compact sorted_weights out
+                tbl += [(self._trecv_buf if self._trecv_buf is not None else op.total_recv).data_ptr(),
+                        op.dest_ctr.data_ptr(),                  # 36 total_recv | 37 dest_ctr(local)
+                        op.recv_num.data_ptr(), op.p2p_recv_num.data_ptr(),  # 38 recv_num | 39 p2p_recv_num
+                        # 40 _sti out | 41 _se_atom out (SEPARATE from the A-gather _trb/_se args)
+                        self._sti.data_ptr(), self._se_atom.data_ptr(),
+                        self._wts_sorted.data_ptr()]                     # 42 sorted-row weights out
+            else:
+                # fixedslot+atom.  idx 19: LOCAL srcmap_em (this rank's recv (k_slot<<24)|src_global)
+                # -> the GEMM epilogue reads it to write a2 @ logical row.
                 tbl += [op.srcmap_em.data_ptr(),                 # 19 LOCAL srcmap (k_slot<<24|src_global)
                         self._sw_atom.data_ptr(),                # 20 compact sorted_weights out
                         # Plan A: native total_recv (distinct recv) so stage2 combine needs no dce.dispatch.
@@ -407,7 +381,8 @@ class FusedMoEMegaStage1:
                         # else the facade's own buffer (standalone megav1).
                         (self._trecv_buf if self._trecv_buf is not None else op.total_recv).data_ptr(),
                         op.dest_ctr.data_ptr(),                              # 21 total_recv | 22 dest_ctr(local)
-                        op.recv_num.data_ptr(), op.p2p_recv_num.data_ptr()]  # 23 recv_num(local) | 24 p2p_recv_num
+                        op.recv_num.data_ptr(), op.p2p_recv_num.data_ptr(),  # 23 recv_num(local) | 24 p2p_recv_num
+                        self._wts_sorted.data_ptr()]                         # 25 sorted-row weights out
         self._disp = torch.tensor(tbl, dtype=torch.int64, device=self.dev)
         self._disp_host = torch.tensor(tbl, dtype=torch.int64)
 
@@ -435,22 +410,14 @@ class FusedMoEMegaStage1:
 
         # per-launch resets (in-graph; graph-safe memsets, ordered before the megakernel).
         pd_ptr = 0
-        if os.environ.get("FUSED_MEGA_PHASE_TS", "0") == "1":
-            # DIAG: in-kernel phase timestamps -> addr_payload_done (i64[16]); host reads + diffs.
-            # Enabled for fixedslot AND compact (the write-imbalance probe lives in compact_ag).
-            if not hasattr(self, "_phase_ts"):
-                self._phase_ts = torch.zeros(16, dtype=torch.int64, device=self.dev)
-            self._phase_ts.zero_()
-            pd_ptr = self._phase_ts.data_ptr()
-        if self.atom_contract:
-            # Plan A: total_recv accumulates in-kernel each launch -> zero first (graph-safe).
-            # dest_ctr / recv_num self-reset inside the kernel's recv-count signal.  Zero the SAME
-            # buffer the kernel writes (external combine-op buffer when bridged, else own).
-            (self._trecv_buf if self._trecv_buf is not None else self.op.total_recv).zero_()
-        # P-static: the GEMM reads ll_count via addr_expected_real to derive (expert,k) per tile.
+        # Plan A: total_recv accumulates in-kernel each launch -> zero first (graph-safe).
+        # dest_ctr / recv_num self-reset inside the kernel's recv-count signal.  Zero the SAME
+        # buffer the kernel writes (external combine-op buffer when bridged, else own).
+        (self._trecv_buf if self._trecv_buf is not None else self.op.total_recv).zero_()
+        # P-static: the GEMM reads ll_count via addr_expected_real to derive (expert,k) per tile
+        # (fixedslot static-tiles only).
         er_ptr = (self.op.ll_count.data_ptr()
-                  if (self.scheme == "fixedslot" and not self.compact
-                      and os.environ.get("FUSED_MEGA_STATIC_TILES", "1") != "0")
+                  if (self.scheme == "fixedslot" and not self.compact)
                   else 0)
         if self.compact:
             # compact all-gather: local_hist (count accumulator) + local_cursor (write cursor) must
@@ -462,22 +429,17 @@ class FusedMoEMegaStage1:
         # mask in-kernel from ll_count (k,count via the prefix scan), exactly like fixslot.  So the
         # stage1->stage2 hookup adds ZERO extra per-forward ops beyond compact dispatch's own resets.
         a_mat = self._agv(self._rx)
-        # compact+atom combo: compact still A-gathers via sparse_tiles (_trb) + expert (_se), so the
-        # sorted_token_ids/sorted_expert_ids ARGS MUST stay the compact tile metadata; the atom
-        # outputs (_sti/_se_atom) are emitted to SEPARATE buffers via disp idx 40/41.  Non-compact
-        # atom (static-tiles A-gather) leaves these args free -> emits in-place to _sti/_se_atom.
-        if self._compact_atom:
+        # compact still A-gathers via sparse_tiles (_trb) + expert (_se), so the sorted_token_ids/
+        # sorted_expert_ids ARGS MUST stay the compact tile metadata; the atom outputs (_sti/_se_atom)
+        # are emitted to SEPARATE buffers via disp idx 40/41.  Fixedslot's static-tiles A-gather leaves
+        # these args free -> emits in-place to _sti/_se_atom.
+        if self.compact:
             _sorted_arg = self._trb
             _se_arg = self._se
-            _wt_arg = self.op.wts_em
-        elif self.atom_contract:
+        else:
             _sorted_arg = self._sti
             _se_arg = self._se_atom
-            _wt_arg = self.op.wts_em
-        else:
-            _sorted_arg = self._trb
-            _se_arg = self._se
-            _wt_arg = self._wts
+        _wt_arg = self.op.wts_em
         self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
                   _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
                   fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
@@ -488,6 +450,7 @@ class FusedMoEMegaStage1:
                   fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
                   stream=stream)
         return dict(out=self._out, srcmap_em=self.op.srcmap_em, num_valid=self._nv,
-                    sorted_expert_ids=(self._se_atom if self.atom_contract else self._se),
+                    sorted_expert_ids=self._se_atom,
                     sorted_token_ids=self._sti, sorted_weights=self._sw_atom,
+                    sorted_weights_row=self._wts_sorted,
                     a2_scale=self._osd, impl="mega_" + self.scheme)

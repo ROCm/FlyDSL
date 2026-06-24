@@ -7,7 +7,7 @@
 封装的就是 ``tests/kernels/bench_moe_intranode_stage1_groupgemm.py::_run_stage2_e2e``
 里已验证（精度通过）的 **MEGA-ATOM NATIVE combine** 接线，不引入任何新机制：
 
-stage-1（``FusedMoEMegaStage1(atom_contract=True)``，一次 megakernel launch）产出
+stage-1（``FusedMoEMegaStage1``，一次 megakernel launch，恒输出 atom 契约 a2）产出
 atom 契约：``_out``（a2，value@logical ``t*topk+s``）、``_osd``（a2-scale@sorted）、
 ``_sti``（sorted_token_ids，编码 src_global=dest）、``_se_atom``（sorted_expert_ids）、
 ``_sw_atom``（combine 权重，logical 布局）。
@@ -166,13 +166,10 @@ class MegaMoE:
         self.comb_op = FlyDSLDispatchCombineIntraNodeOp(self.comb_cfg)
         torch.cuda.synchronize(); ms.shmem_barrier_all()
 
-        # ---- stage-1: megav1 单发核（atom 契约 a2）；total_recv_buf 指向 combine op 的 total_recv
-        # -> megakernel 原地写,forward 里无需任何 total_recv 拷贝 ----
-        # 大 bs(buffer≥3GB)下 facade 自动切 compact dispatch;atom_contract 默认与 compact 互斥
-        # (非紧凑 fixed-slot 的 4GB 输入墙)。设 env FUSED_MEGA_COMPACT_ATOM=1 开启 compact+atom 组合
-        # (compact dense rx 绕开 4GB 墙 + GEMM1 写 atom-logical a2,stage2 接线完全不变)。组合的
-        # GEMM1 atom-output/compact-A-gather 解耦仍 WIP(见 docs/moe_stage1_mega_notes.md 2026-06-16
-        # 续2),开关默认关 -> 关闭时大 bs 仍走非紧凑 atom(撞 4GB 墙)、行为不变。
+        # ---- stage-1: megav1 单发核（恒输出 atom 契约 a2）；total_recv_buf 指向 combine op 的
+        # total_recv -> megakernel 原地写,forward 里无需任何 total_recv 拷贝 ----
+        # 大 bs(buffer≥3GB)下 facade 自动切 compact dispatch（compact dense rx 绕开 4GB 输入墙 +
+        # GEMM1 写 atom-logical a2,stage2 接线完全不变）；小 bs 走 fixed-slot。两路对外 I/O 一致。
         self.stage1 = FusedMoEMegaStage1(
             rank=rank, world_size=world_size, model_dim=model_dim, inter_dim=inter_dim,
             experts=experts, topk=topk, quant=quant, w1=w1, w1_scale=w1_scale,
@@ -180,7 +177,7 @@ class MegaMoE:
             network=network, scheme=mega_scheme,
             unit_size=int(tile_m), tile_n=int(tile_n), tile_k=int(tile_k),
             warp_num_per_block=int(warp_num_per_block), waves_per_eu=int(waves_per_eu),
-            use_async_copy=bool(use_async_copy), out_dtype="auto", atom_contract=True,
+            use_async_copy=bool(use_async_copy), out_dtype="auto",
             total_recv_buf=self.comb_op.total_recv,
         )
         self.a2_dtype = self.stage1.a_dtype   # "fp8" | "fp4"  (== stage-1 out_dtype 'auto')
@@ -284,7 +281,7 @@ class MegaMoE:
                 a2_scale=self.stage1._osd, w2_scale=self.w2_scale,
                 sorted_token_ids=self.stage1._sti,
                 sorted_expert_ids=self.stage1._se_atom,
-                sorted_weights=self.stage1._wts,
+                sorted_weights=self.stage1._wts_sorted,
                 num_valid_ids=self.stage1._nv,
                 wts_buf=self.stage1._sw_atom,
                 cur_tok=run_tokens, stream=stream,
