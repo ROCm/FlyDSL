@@ -26,6 +26,7 @@ def reduce_add_kernel(
     A: fx.Tensor,
     Out: fx.Tensor,
     block_dim: fx.Constexpr[int],
+    syncscope: fx.Constexpr[int]
 ):
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
@@ -35,7 +36,7 @@ def reduce_add_kernel(
     tA = fx.logical_divide(tA, fx.make_layout(1, 1))
 
     loadAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Add, fx.Float32), fx.Float32)
+    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Add, fx.Float32, syncscope), fx.Float32)
 
     rA = fx.make_rmem_tensor(1, fx.Float32)
     fx.copy_atom_call(loadAtom, fx.slice(tA, (None, tid)), rA)
@@ -53,17 +54,18 @@ def reduce_add(
     n: fx.Int32,
     const_n: fx.Constexpr[int],
     block_dim: fx.Constexpr[int],
+    syncscope: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     grid_x = (n + block_dim - 1) // block_dim
-    reduce_add_kernel(A, Out, block_dim).launch(
+    reduce_add_kernel(A, Out, block_dim, syncscope).launch(
         grid=(grid_x, 1, 1),
         block=(block_dim, 1, 1),
         stream=stream,
     )
 
-
-def test_reduce_add_atomic():
+@pytest.mark.parametrize("syncscope", [fx.AtomicSyncScope.Agent, fx.AtomicSyncScope.System])
+def test_reduce_add_atomic(syncscope):
     BLOCK_DIM = 64
     N = BLOCK_DIM * 4
 
@@ -72,7 +74,7 @@ def test_reduce_add_atomic():
 
     stream = torch.cuda.Stream()
     tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=1)
-    reduce_add(tA, out_dev, N, N, BLOCK_DIM, stream=stream)
+    reduce_add(tA, out_dev, N, N, BLOCK_DIM, int(syncscope), stream=stream)
     torch.cuda.synchronize()
 
     expected = a_dev.sum()
@@ -86,6 +88,7 @@ def reduce_max_kernel(
     A: fx.Tensor,
     Out: fx.Tensor,
     block_dim: fx.Constexpr[int],
+    syncscope: fx.Constexpr[int]
 ):
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
@@ -95,7 +98,7 @@ def reduce_max_kernel(
     tA = fx.logical_divide(tA, fx.make_layout(1, 1))
 
     loadAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Max, fx.Float32), fx.Float32)
+    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Max, fx.Float32, syncscope), fx.Float32)
 
     rA = fx.make_rmem_tensor(1, fx.Float32)
     fx.copy_atom_call(loadAtom, fx.slice(tA, (None, tid)), rA)
@@ -113,17 +116,19 @@ def reduce_max(
     n: fx.Int32,
     const_n: fx.Constexpr[int],
     block_dim: fx.Constexpr[int],
+    syncscope: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
     grid_x = (n + block_dim - 1) // block_dim
-    reduce_max_kernel(A, Out, block_dim).launch(
+    reduce_max_kernel(A, Out, block_dim, syncscope).launch(
         grid=(grid_x, 1, 1),
         block=(block_dim, 1, 1),
         stream=stream,
     )
 
 
-def test_reduce_max_atomic():
+@pytest.mark.parametrize("syncscope", [fx.AtomicSyncScope.Agent, fx.AtomicSyncScope.System])
+def test_reduce_max_atomic(syncscope):
     BLOCK_DIM = 64
     N = BLOCK_DIM * 4
 
@@ -132,7 +137,7 @@ def test_reduce_max_atomic():
 
     stream = torch.cuda.Stream()
     tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=1)
-    reduce_max(tA, out_dev, N, N, BLOCK_DIM, stream=stream)
+    reduce_max(tA, out_dev, N, N, BLOCK_DIM, int(syncscope), stream=stream)
     torch.cuda.synchronize()
 
     expected = a_dev.max().item()
@@ -142,6 +147,7 @@ def test_reduce_max_atomic():
 
 
 if __name__ == "__main__":
-    test_reduce_add_atomic()
-    test_reduce_max_atomic()
+    for syncscope in [fx.AtomicSyncScope.Agent, fx.AtomicSyncScope.System]:
+        test_reduce_add_atomic(syncscope)
+        test_reduce_max_atomic(syncscope)
     print("ALL PASSED")
