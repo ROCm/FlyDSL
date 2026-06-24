@@ -78,10 +78,13 @@ class MegaMoE:
     quant
         ``"a8w4"``（激活 fp8 / 权重 fp4）或 ``"a4w4"``（均 fp4）。
     w1, w1_scale
-        gate/up 权重（fp4 packed）+ e8m0 scale，megav1 GEMM1 直接消费。
+        gate/up 权重（fp4 packed）+ e8m0 scale，megav1 GEMM1 直接消费。**仅本 rank 的
+        ``experts // world_size`` 个本地专家**（ATOM/EP 约定，GEMM1 按 local 专家号索引）；
+        不接受全局 ``experts`` 张量——既为省显存，也因 >4GB 权重会触发 32-bit buffer
+        ``num_records`` 截断。
     w2, w2_scale
-        down 权重（fp4 packed, ``shuffle_weight`` 后 1-D uint8）+ e8m0 scale，
-        stage-2 GEMM2 直接消费。
+        down 权重（fp4 packed, ``shuffle_weight`` 后 1-D uint8）+ e8m0 scale，stage-2 GEMM2
+        直接消费。同样**仅本 rank 的本地专家**。
     max_tok_per_rank
         每 rank 最大输入 token（dispatch/combine 缓冲上界）；须为 2 的幂（融合
         epilogue 用 shift/mask 解码 dest_enc）。
@@ -189,6 +192,21 @@ class MegaMoE:
         # 只在构造时设一次(combine 只读不写、megav1 不碰它)-> forward 里无需每步重设。
         self.comb_op.shmem_tok_id_to_src.copy_(
             torch.arange(self.max_recv, device=self.dev, dtype=torch.int32))
+        torch.cuda.synchronize(); ms.shmem_barrier_all()
+
+        # ---- fused GEMM2 ghost-gate 边界(mega 自闭环,不碰共用 gemm2 kernel) ----
+        # 共用 gemm2 epilogue 的 ghost gate 用 `t < total_recv` 丢 padding 行。ATOM 契约里
+        # t 是紧凑 recv 槽位 [0,total_recv);但 megav1 Plan-A 的 _sti 编码 t = src_global ∈
+        # [0, world*mtpr),padding sentinel == world*mtpr(== max_recv)。若 gate 用 distinct
+        # recv 计数当边界,会误丢 src_global>=total_recv 的真实行(高位 dest rank → 输出为 0)。
+        # gate 读的是 comb_op._fx_out_total_recv 句柄;而 combine_no_stage1 读真实计数走的是
+        # 另一句柄 _fx_trecv(同指 total_recv buffer),且 megav1 从不调用 comb_op.dispatch
+        # (_fx_out_total_recv 的唯一写者),故 _fx_out_total_recv 在 mega 里唯一消费者就是
+        # gemm2 ghost gate。这里把它重指到常量 max_recv:gate 变 `t < max_recv`,真实行全留、
+        # padding(==max_recv)丢;combine 仍读真实 total_recv。gemm2 kernel / a2 布局 / 零桥接均不动。
+        self._gemm2_gate_bound = torch.tensor(
+            [self.max_recv], dtype=torch.int32, device=self.dev)
+        self.comb_op._fx_out_total_recv = fx.Int64(self._gemm2_gate_bound.data_ptr())
         torch.cuda.synchronize(); ms.shmem_barrier_all()
 
         # ---- stage-2 backend ----
