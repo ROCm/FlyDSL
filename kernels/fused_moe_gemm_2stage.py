@@ -276,8 +276,8 @@ def compile_fused_moe_gemm1(
     sort_block_m = max(32, tile_m)
     # decode occupancy: more waves/block (e.g. 8 -> 8 waves/CU at 1 block/CU) hides the W-load latency
     # that leaves the persistent decode GEMM at ~7% MfmaUtil.  Capped by tile_n//32 (each wave owns
-    # >=32 of N).  Env FUSED_MEGA_WAVES (default 4) overrides for the sweep.
-    _waves_cap = int(os.environ.get("FUSED_MEGA_WAVES", "4"))
+    # >=32 of N).
+    _waves_cap = 4
     num_waves = min(_waves_cap, tile_n // 32)
     total_threads = num_waves * 64
     pack_M = 1 if tile_m < 32 else 2
@@ -422,11 +422,8 @@ def compile_fused_moe_gemm1(
     # write).  Avoids the remote count atomics + remote compact_base read (3-round) -> faster.  The
     # 3-round path is kept as a fallback (compact_allgather=False).
     _compact_ag = bool(_compact and compact_allgather)
-    _skip_gemm = bool(_fuse and os.environ.get("FUSED_MEGA_SKIP_GEMM", "0") == "1")  # DIAG: prologue/producer only
-    # DIAG: in-kernel phase timestamps (block0 lane0 s_memrealtime -> addr_payload_done[k] as i64).
-    # const_expr-gated -> fully DCE'd when off (zero production impact).  Host diffs consecutive
-    # ticks + scales to the cudagraph wall-clock total to get per-phase us.
-    _phase_ts = bool(_fuse_fs and os.environ.get("FUSED_MEGA_PHASE_TS", "0") == "1")
+    _skip_gemm = False
+    _phase_ts = False
     # atom_contract (megav1->stage2): logical-row a2 output via srcmap, A still expert-major direct.
     _atom_contract = bool(atom_contract and contiguous_io)
     # compact+atom combo: compact DISPATCH (dense rx) but atom-logical a2 OUTPUT.  A-gather stays
@@ -438,7 +435,7 @@ def compile_fused_moe_gemm1(
     # derives (expert,k) per tile by an on-the-fly readlane prefix-scan of ll_count[e] (cached), and
     # rows come straight from the static fixed-slot layout (e*cap + k*tile_m).  block0 then only
     # copies running->ll_count + resets + computes num_valid.  fixedslot (non-compact) only.
-    _static_tiles = bool(_fuse_fs and (not compact_dispatch) and os.environ.get("FUSED_MEGA_STATIC_TILES", "1") != "0")
+    _static_tiles = bool(_fuse_fs and (not compact_dispatch))
     _fz_gy = 0  # default so the xcd-swizzle closure ref below is bound even for non-fused builds
     if _fuse:
         # sorted (megav2) uses the DENSE atom-gemm1 tile layout (bx_m = bx*sort_block_m,
@@ -479,13 +476,9 @@ def compile_fused_moe_gemm1(
         # gy is the persistent (M-tile round-robin) dimension.  fixedslot (decode) is co-resident
         # (total = gx*gy <= cu_num) so its in-prologue arrival grid-barrier is deadlock-free;
         # handshake (prefill) has zero grid barriers in the producer/consumer phases and may
-        # oversubscribe.  Env override (FUSED_MEGA_GY) forces gy for sweeps.
-        # rocprofv3: the mega is SYNC-bound (5-6% occupancy); the earlier 128-block cap left
-        # HALF the GPU idle.  Default to gy = cu_num//gx so total ~= cu_num blocks (use all CUs,
-        # max GEMM M-parallelism for the compute that exists).  Env override for sweeps.
-        _fz_gy_cap = max(1, _cu_num // max(1, _fz_gx_static))
-        _fz_gy_env = int(os.environ.get("FUSED_MEGA_GY", "0"))
-        _fz_gy = _fz_gy_env if _fz_gy_env > 0 else _fz_gy_cap
+        # oversubscribe.  The mega is SYNC-bound (5-6% occupancy), so default gy = cu_num//gx
+        # => total ~= cu_num blocks (use all CUs, max GEMM M-parallelism for the compute that exists).
+        _fz_gy = max(1, _cu_num // max(1, _fz_gx_static))
     _fuse_tag = f"_fz{fuse_dispatch}{fuse_npes}x{fuse_cap}x{fuse_topk}" if _fuse else ""
     _fuse_tag += ("_cptag" if _compact_ag else "_cpt") if _compact else ""
     module_name = (
@@ -1914,13 +1907,23 @@ def compile_fused_moe_gemm1(
                 expert_off_idx = expert_idx * arith.constant(2 * inter_dim, index=True)
 
                 if const_expr(_atom_contract):
-                    # disp[20] = COMPACT sorted_weights output (f32, [nvm]); the epilogue gathers the
-                    # per-row routing weight (sorted_w_rsrc = recv wts_em[slot]) -> compact row so
-                    # stage2 combine applies it natively (atom contract, no host weight bridge).
+                    # disp[20] = combine wts_buf (f32, LOGICAL layout wts[t*topk+s]); the epilogue
+                    # gathers the per-row recv routing weight (sorted_w_rsrc = wts_em[slot]) at the
+                    # logical index so stage2's combine weight-scatter applies it natively.
                     _atom_sw_out_addr = buffer_ops.buffer_load(
                         buffer_ops.create_buffer_resource_from_addr(addr_disp),
                         arith.constant(20), vec_width=1, dtype=T.i64)
                     _atom_sw_out_rsrc = buffer_ops.create_buffer_resource_from_addr(_atom_sw_out_addr)
+                    # sorted-row routing weight output (f32, [nvm], parallel to sorted_token_ids):
+                    # stage2 GEMM2 doweight epilogue reads sorted_weights[row], so emit the SAME recv
+                    # weight at the compact row of _sti.  disp idx 42 (compact) / 25 (fixedslot).
+                    # MUST be bounded to nvm*4 bytes (== sorted_rsrc) so padding rows with
+                    # compact_row >= nvm drop their OOB store instead of clobbering neighbors.
+                    _wts_sorted_addr = buffer_ops.buffer_load(
+                        buffer_ops.create_buffer_resource_from_addr(addr_disp),
+                        arith.constant(42 if _ca else 25), vec_width=1, dtype=T.i64)
+                    _wts_sorted_rsrc = buffer_ops.create_buffer_resource_from_addr(
+                        _wts_sorted_addr, num_records_bytes=sorted_nbytes_i32)
 
                 # X loading -- KEY DIFFERENCE from stage2: X row = token_id only
                 x_load_bytes = 16
@@ -2934,9 +2937,12 @@ def compile_fused_moe_gemm1(
                                                   arith.constant(_fz_npes * _fz_mtpr, type=T.i32))
                             _ca_s = _tid_val >> arith.constant(24, type=T.i32)
                             _ca_logw = _ca_t * arith.constant(_fz_k, type=T.i32) + _ca_s
+                            _ca_wt = buffer_ops.buffer_load(sorted_w_rsrc, _tid_row, vec_width=1, dtype=T.f32)
+                            # sorted-row weight (stage2 doweight): real rows get the recv wt, padding 0.
+                            _ca_wt_sorted = arith.select(_ca_real, _ca_wt, arith.constant(0.0, type=T.f32))
+                            buffer_ops.buffer_store(_ca_wt_sorted, _wts_sorted_rsrc, _ca_row, offset_is_bytes=False)
                             _if_caw = scf.IfOp(_ca_real)
                             with ir.InsertionPoint(_if_caw.then_block):
-                                _ca_wt = buffer_ops.buffer_load(sorted_w_rsrc, _tid_row, vec_width=1, dtype=T.f32)
                                 buffer_ops.buffer_store(_ca_wt, _atom_sw_out_rsrc, _ca_logw, offset_is_bytes=False)
                                 scf.YieldOp([])
                         if const_expr(_atom_contract and _static_tiles and _fz_epr <= 64):
@@ -2953,16 +2959,17 @@ def compile_fused_moe_gemm1(
                             _sent_e = arith.constant(_fz_npes * _fz_mtpr, type=T.i32)
                             _sti_out_e = arith.select(_real_e, _tid_val, _sent_e)
                             buffer_ops.buffer_store(_sti_out_e, sorted_rsrc, _crow_e, offset_is_bytes=False)
-                            # combine wts_buf: the gemm2_combine weights each token by
-                            # wts_buf[t*topk+s] (t = decoded token id = src_global via identity tis),
-                            # i.e. the LOGICAL index = same as a2.  Write the recv routing weight
-                            # (wts_em[slot]) there for real rows.
+                            # The recv routing weight (sorted_w_rsrc = wts_em[slot]) feeds TWO sinks:
+                            #   * combine wts_buf at the LOGICAL index t*topk+s (real rows only), and
+                            #   * stage2 doweight at the SORTED row _crow_e (real rows, padding -> 0).
                             _t_we = _tid_val & arith.constant(0xFFFFFF, type=T.i32)
                             _s_we = _tid_val >> arith.constant(24, type=T.i32)
                             _log_we = _t_we * arith.constant(_fz_k, type=T.i32) + _s_we
+                            _wt_e = buffer_ops.buffer_load(sorted_w_rsrc, _tid_row, vec_width=1, dtype=T.f32)
+                            _wt_e_sorted = arith.select(_real_e, _wt_e, arith.constant(0.0, type=T.f32))
+                            buffer_ops.buffer_store(_wt_e_sorted, _wts_sorted_rsrc, _crow_e, offset_is_bytes=False)
                             _if_we = scf.IfOp(_real_e)
                             with ir.InsertionPoint(_if_we.then_block):
-                                _wt_e = buffer_ops.buffer_load(sorted_w_rsrc, _tid_row, vec_width=1, dtype=T.f32)
                                 buffer_ops.buffer_store(_wt_e, _atom_sw_out_rsrc, _log_we, offset_is_bytes=False)
                                 scf.YieldOp([])
                         scf.YieldOp([])
