@@ -939,7 +939,8 @@ struct PyCopyOpUniversalAtomicType : PyConcreteType<PyCopyOpUniversalAtomicType>
                                              wrap(CopyOpUniversalAtomicType::get(
                                                  atomicOpAttr, unwrap(valTypeObj), syncscopeAttr)));
         },
-        "atomic_op"_a, "val_type"_a, "syncscope"_a = "", nb::kw_only(), "context"_a = nb::none(),
+        "atomic_op"_a, "val_type"_a, "syncscope"_a = "agent", nb::kw_only(),
+        "context"_a = nb::none(),
         "Create a CopyOpUniversalAtomicType with atomic op and value type");
   }
 };

@@ -349,7 +349,7 @@ def Fly_CopyOpUniversalAtomic : Fly_Type<"CopyOpUniversalAtomic", "universal_ato
   let parameters = (ins
     "AtomicOpAttr":$atomicOp,
     "Type":$valType,
-    DefaultValuedParameter<"StringAttr", "StringAttr::get($_ctxt, \"\")">:$syncscope
+    DefaultValuedParameter<"StringAttr", "StringAttr::get($_ctxt, \"agent\")">:$syncscope
   );
   let assemblyFormat = "`<` $atomicOp `,` $valType (`,` $syncscope^)? `>`";
 
