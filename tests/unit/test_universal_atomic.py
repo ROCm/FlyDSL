@@ -22,12 +22,7 @@ if torch is None or not torch.cuda.is_available():
 
 
 @flyc.kernel
-def reduce_add_kernel(
-    A: fx.Tensor,
-    Out: fx.Tensor,
-    block_dim: fx.Constexpr[int],
-    syncscope: fx.Constexpr[int]
-):
+def reduce_add_kernel(A: fx.Tensor, Out: fx.Tensor, block_dim: fx.Constexpr[int], syncscope: fx.Constexpr[int]):
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
 
@@ -64,6 +59,7 @@ def reduce_add(
         stream=stream,
     )
 
+
 @pytest.mark.parametrize("syncscope", [fx.AtomicSyncScope.Agent, fx.AtomicSyncScope.System])
 def test_reduce_add_atomic(syncscope):
     BLOCK_DIM = 64
@@ -84,12 +80,7 @@ def test_reduce_add_atomic(syncscope):
 
 
 @flyc.kernel
-def reduce_max_kernel(
-    A: fx.Tensor,
-    Out: fx.Tensor,
-    block_dim: fx.Constexpr[int],
-    syncscope: fx.Constexpr[int]
-):
+def reduce_max_kernel(A: fx.Tensor, Out: fx.Tensor, block_dim: fx.Constexpr[int], syncscope: fx.Constexpr[int]):
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
 
