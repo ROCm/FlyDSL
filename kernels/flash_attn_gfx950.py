@@ -918,6 +918,19 @@ def build_flash_attn_dualwave_swp_module(
             base = ks * MFMA_LANE_K
             return q_vec.shuffle(q_vec, [base + i for i in range(MFMA_LANE_K)]).ir_value()
 
+        def _read_i32x8_lds(base_ptr, byte_row):
+            # Read 32 contiguous fp8 (= 8 i32 words) from `base_ptr` starting at byte offset
+            # `byte_row` -> one i32x8 wide-MMA operand. Shared by the wide V / K / P reads.
+            words = []
+            for w in range_constexpr(8):
+                p = buffer_ops.get_element_ptr(base_ptr, byte_offset=fx.Int32(byte_row + w * 4), elem_type=T.i8)
+                words.append(fx.Int32(llvm.LoadOp(T.i32, p, alignment=1).result))
+            return Vec.from_elements(words, fx.Int32).ir_value()
+
+        def _i64_to_i32x2(pack_i64):
+            # Split one i64 fp8 pack (8 fp8) into its 2 i32 words (lo, hi).
+            return Vec(Vec.from_elements([fx.Int64(pack_i64)], fx.Int64).bitcast(fx.Int32), (2,), fx.Int32)
+
         def _load_q_all_wide(q_row_in_block):
             # Wide QK Q operand: row m = lane%32; the wide MFMA holds, per lane, 32 CONTIGUOUS
             # head-dim values for the K-half (lane//32) of one wide step. head_dim=128 = 2 wide
@@ -950,17 +963,10 @@ def build_flash_attn_dualwave_swp_module(
 
             def _read_strip(key):
                 row = (key % 8) * SMEM_K_LINE_STRIDE + (key // 8) * D_128B_SIZE
-                packs = []
-                for ws in range_constexpr(HEAD_DIM // 64):
-                    base = k_base + row + ws * 64 + d_base
-                    words = []
-                    for w in range_constexpr(8):
-                        p = buffer_ops.get_element_ptr(
-                            lds_kv_base_ptr, byte_offset=fx.Int32(base + w * 4), elem_type=T.i8
-                        )
-                        words.append(fx.Int32(llvm.LoadOp(T.i32, p, alignment=1).result))
-                    packs.append(Vec.from_elements(words, fx.Int32).ir_value())
-                return packs
+                return [
+                    _read_i32x8_lds(lds_kv_base_ptr, k_base + row + ws * 64 + d_base)
+                    for ws in range_constexpr(HEAD_DIM // 64)
+                ]
 
             return (_read_strip(n_lo), _read_strip(n_hi))
 
@@ -1361,18 +1367,11 @@ def build_flash_attn_dualwave_swp_module(
             # K-half (keys 0..31 vs 32..63), lane%32 + dc*32 picks d_col. Returns one i32x8
             # (32 fp8) per dc.
             vtf_buf = buf_id * VTF_FP8_ELEMS
-            packs = [None] * D_CHUNKS
             key_base = (lane // 32) * 32  # K-half start
-            for dc in range_constexpr(D_CHUNKS):
-                d_col = (lane % 32) + dc * 32
-                row = vtf_buf + d_col * _VTF_ROW + key_base
-                # 32 contiguous fp8 = 8 i32 words.
-                words = []
-                for w in range_constexpr(8):
-                    p = buffer_ops.get_element_ptr(lds_vtf_base_ptr, byte_offset=fx.Int32(row + w * 4), elem_type=T.i8)
-                    words.append(fx.Int32(llvm.LoadOp(T.i32, p, alignment=1).result))
-                packs[dc] = Vec.from_elements(words, fx.Int32).ir_value()
-            return packs
+            return [
+                _read_i32x8_lds(lds_vtf_base_ptr, vtf_buf + ((lane % 32) + dc * 32) * _VTF_ROW + key_base)
+                for dc in range_constexpr(D_CHUNKS)
+            ]
 
         def _stage_p_fp8_wide(v_p_packs):
             # Stage the (post-rescale) cast P packs into the pf LDS scratch in identity
@@ -1384,12 +1383,8 @@ def build_flash_attn_dualwave_swp_module(
             row_base = q_local * fx.Index(_PF_ROW)
             half = (lane // 32) * 4
             for pks in range_constexpr(PV_K_STEPS):
-                lo_words = Vec(
-                    Vec.from_elements([fx.Int64(p_lo_packs[pks])], fx.Int64).bitcast(fx.Int32), (2,), fx.Int32
-                )
-                hi_words = Vec(
-                    Vec.from_elements([fx.Int64(p_hi_packs[pks])], fx.Int64).bitcast(fx.Int32), (2,), fx.Int32
-                )
+                lo_words = _i64_to_i32x2(p_lo_packs[pks])
+                hi_words = _i64_to_i32x2(p_hi_packs[pks])
                 for s in range_constexpr(8):
                     r = pks * 8 + s
                     key_lo = half + (r // 4) * 8 + (r % 4)
@@ -1413,11 +1408,7 @@ def build_flash_attn_dualwave_swp_module(
             # Returns one i32x8 (32 contiguous keys for this lane's query row).
             q_local = wave_id_uni * fx.Index(ROWS_PER_WAVE) + lane_mod_32
             row = q_local * fx.Index(_PF_ROW) + (lane // 32) * 32
-            words = []
-            for w in range_constexpr(8):
-                p = buffer_ops.get_element_ptr(lds_pf_base_ptr, byte_offset=fx.Int32(row + w * 4), elem_type=T.i8)
-                words.append(fx.Int32(llvm.LoadOp(T.i32, p, alignment=1).result))
-            return Vec.from_elements(words, fx.Int32).ir_value()
+            return _read_i32x8_lds(lds_pf_base_ptr, row)
 
         def _permlane32_swap_i32(x_i32):
             # Return this lane's value from lane^32 (swap the 32-lane halves) for an i32.
@@ -1446,22 +1437,26 @@ def build_flash_attn_dualwave_swp_module(
             # value), then pick own-vs-partner per (h_src==h).
             p_lo_packs, p_hi_packs = v_p_packs
             is_hi = ArithValue(fx.Int32(lane // 32) == fx.Int32(1))
+
+            def _sel(hi_val, lo_val):  # is_hi ? hi_val : lo_val
+                return fx.Int32(is_hi.select(_raw(fx.Int32(hi_val)), _raw(fx.Int32(lo_val))))
+
             words = []
             for pks in range_constexpr(PV_K_STEPS):
-                lo_w = Vec(Vec.from_elements([fx.Int64(p_lo_packs[pks])], fx.Int64).bitcast(fx.Int32), (2,), fx.Int32)
-                hi_w = Vec(Vec.from_elements([fx.Int64(p_hi_packs[pks])], fx.Int64).bitcast(fx.Int32), (2,), fx.Int32)
+                lo_w = _i64_to_i32x2(p_lo_packs[pks])
+                hi_w = _i64_to_i32x2(p_hi_packs[pks])
                 for d in range_constexpr(2):  # the 2 dwords (d) of this pack
                     # This dest lane's own strip value for dword d (h=0 -> lo, h=1 -> hi):
-                    own = fx.Int32(ArithValue(is_hi).select(_raw(fx.Int32(hi_w[d])), _raw(fx.Int32(lo_w[d]))))
+                    own = _sel(hi_w[d], lo_w[d])
                     # The +/-32 partner's SAME strip value (permute lo and hi separately so
                     # the partner contributes its lo (for h=0 dest) or hi (for h=1 dest)).
                     partner_lo = _permlane32_swap_i32(fx.Int32(lo_w[d]))
                     partner_hi = _permlane32_swap_i32(fx.Int32(hi_w[d]))
-                    partner = fx.Int32(ArithValue(is_hi).select(_raw(partner_hi), _raw(partner_lo)))
+                    partner = _sel(partner_hi, partner_lo)
                     # even dword g (h_src=0) and odd g (h_src=1). dest half h selects which is
                     # "own": h_src==h -> own, else partner.
-                    even = fx.Int32(ArithValue(is_hi).select(_raw(partner), _raw(own)))
-                    odd = fx.Int32(ArithValue(is_hi).select(_raw(own), _raw(partner)))
+                    even = _sel(partner, own)
+                    odd = _sel(own, partner)
                     words.append(even)
                     words.append(odd)
             return Vec.from_elements(words, fx.Int32).ir_value()
