@@ -766,12 +766,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     if [ "${GEMM_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_USE_ASYNC_COPY}" = "true" ]; then
       async_copy_flag="--use_async_copy"
     fi
-    # v2 async exposes global latency on small tiles; v2-sync beats v1-async
-    # there, so only use async for large tiles (tile_m >= 128).
-    if [ -n "${v2_flag}" ] && [ "${tile_m}" -lt 128 ]; then
-      async_copy_flag=""
-      async_copy_tag="sync_copy"
-    fi
     waves_per_eu="${shape_waves_per_eu:-${GEMM_WAVES_PER_EU}}"
     waves_per_eu_tag="${waves_per_eu}"
 

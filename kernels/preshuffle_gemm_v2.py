@@ -55,7 +55,6 @@ def compile_preshuffle_gemm_v2(
     else:
         layout_elem = Float8E4M3FN if is_gfx950 else Float8E4M3FNUZ
     out_elem_cls = BFloat16 if out_dtype == "bf16" else Float16
-    acc_elem_cls = Int32 if is_int8 else Float32
 
     # Tile geometry (tile_K_perm = K-elements grouped per MMA k-step)
     tile_K_perm = 128 if use_mfma_scale_128 else (64 if is_8bit else 32)
