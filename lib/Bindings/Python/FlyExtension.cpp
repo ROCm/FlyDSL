@@ -51,6 +51,11 @@ IntTupleAttr getProfileAttrFromType(Type ty) {
 
 } // namespace detail
 
+struct PyBasis {
+  nb::object value;
+  std::vector<int32_t> modes;
+};
+
 struct IntTupleAttrBuilder {
   MLIRContext *ctx;
   std::vector<nb::handle> dyncElems{};
@@ -58,6 +63,40 @@ struct IntTupleAttrBuilder {
   IntTupleAttrBuilder(MLIRContext *ctx) : ctx(ctx) {}
 
   void clear() { dyncElems.clear(); }
+
+  IntAttr dynamicIntFromValue(nb::handle handle, const char *what) {
+    auto typeName = [&] { return std::string(nb::str(nb::type_name(handle)).c_str()); };
+    if (!nb::hasattr(handle, MLIR_PYTHON_CAPI_PTR_ATTR))
+      throw std::invalid_argument(std::string(what) +
+                                  " must be an i32/i64 MLIR Value, got: " + typeName());
+    auto capsule = nb::cast<nb::capsule>(handle.attr(MLIR_PYTHON_CAPI_PTR_ATTR));
+    MlirValue mlirVal = mlirPythonCapsuleToValue(capsule.ptr());
+    if (mlirValueIsNull(mlirVal))
+      throw std::invalid_argument(std::string(what) + " must be an MLIR Value, got: " + typeName());
+    auto intTy = dyn_cast<IntegerType>(unwrap(mlirVal).getType());
+    if (!intTy || (intTy.getWidth() != 32 && intTy.getWidth() != 64))
+      throw std::invalid_argument(std::string(what) +
+                                  " must be an i32 or i64 value, got: " + typeName());
+    dyncElems.push_back(handle);
+    return IntAttr::getDynamic(ctx, intTy.getWidth());
+  }
+
+  IntTupleAttr buildBasisLeaf(const PyBasis &basis) {
+    if (basis.modes.empty())
+      throw std::invalid_argument("Basis must have at least one mode");
+    SmallVector<int32_t> modes(basis.modes.begin(), basis.modes.end());
+    for (int32_t m : modes) {
+      if (m < 0)
+        throw std::invalid_argument("Basis mode must be non-negative, got " + std::to_string(m));
+    }
+    // A static coefficient is a python int; a dynamic one is an i32/i64 MLIR Value.
+    nb::handle value = basis.value;
+    if (PyLong_Check(value.ptr()))
+      return IntTupleAttr::get(
+          BasisAttr::get(IntAttr::getStatic(ctx, PyLong_AsLong(value.ptr())), modes));
+    return IntTupleAttr::get(
+        BasisAttr::get(dynamicIntFromValue(value, "Basis coefficient"), modes));
+  }
 
   IntTupleAttr operator()(nb::handle args) {
     if (PyTuple_Check(args.ptr())) {
@@ -71,27 +110,10 @@ struct IntTupleAttrBuilder {
       return IntTupleAttr::get(IntAttr::getStatic(ctx, cInt));
     } else if (args.is_none()) {
       return IntTupleAttr::getLeafNone(ctx);
+    } else if (nb::isinstance<PyBasis>(args)) {
+      return buildBasisLeaf(nb::cast<const PyBasis &>(args));
     } else {
-      if (!nb::hasattr(args, MLIR_PYTHON_CAPI_PTR_ATTR)) {
-        throw std::invalid_argument("Expected int, tuple, None, or an i32/i64 MLIR Value, got: " +
-                                    std::string(nb::str(nb::type_name(args)).c_str()));
-      }
-      // A dynamic int_tuple leaf must be an i32/i64 MLIR Value (the op operands
-      // are constrained to AnyTypeOf<[I32, I64]>). Validate strictly and carry the
-      // value's actual width into the attr leaf.
-      auto capsule = nb::cast<nb::capsule>(args.attr(MLIR_PYTHON_CAPI_PTR_ATTR));
-      MlirValue mlirVal = mlirPythonCapsuleToValue(capsule.ptr());
-      if (mlirValueIsNull(mlirVal)) {
-        throw std::invalid_argument("Dynamic int_tuple leaf must be an MLIR Value, got: " +
-                                    std::string(nb::str(nb::type_name(args)).c_str()));
-      }
-      auto intTy = dyn_cast<IntegerType>(unwrap(mlirVal).getType());
-      if (!intTy || (intTy.getWidth() != 32 && intTy.getWidth() != 64)) {
-        throw std::invalid_argument("Dynamic int_tuple leaf must be an i32 or i64 value, got: " +
-                                    std::string(nb::str(nb::type_name(args)).c_str()));
-      }
-      dyncElems.push_back(args);
-      return IntTupleAttr::get(IntAttr::getDynamic(ctx, intTy.getWidth()));
+      return IntTupleAttr::get(dynamicIntFromValue(args, "Dynamic int_tuple leaf"));
     }
   }
 };
@@ -224,8 +246,37 @@ struct PyIntTupleType : PyConcreteType<PyIntTupleType> {
       assert(ty.isLeaf() && ty.isStatic());
       return ty.getAttr().getLeafAsInt().getValue();
     });
+    c.def_prop_ro("is_leaf_int",
+                  [](PyIntTupleType &self) { return self.toCppType().getAttr().isLeafInt(); });
+    c.def_prop_ro("is_leaf_basis",
+                  [](PyIntTupleType &self) { return self.toCppType().getAttr().isLeafBasis(); });
+    c.def_prop_ro("get_leaf_as_basis", [](PyIntTupleType &self) -> MlirType {
+      assert(self.toCppType().getAttr().isLeafBasis());
+      return wrap(BasisType::get(self.toCppType().getAttr().getLeafAsBasis()));
+    });
     c.def("at", [](PyIntTupleType &self, int32_t idx) -> MlirType {
       return wrap(self.toCppType().at(idx));
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// BasisType
+// ---------------------------------------------------------------------------
+struct PyBasisType : PyConcreteType<PyBasisType> {
+  FLYDSL_REGISTER_TYPE_BINDING(::mlir::fly::BasisType, "BasisType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_prop_ro("is_static",
+                  [](PyBasisType &self) { return self.toCppType().getAttr().isStatic(); });
+    c.def_prop_ro("value", [](PyBasisType &self) {
+      auto basis = self.toCppType().getAttr();
+      assert(basis.isStatic() && "basis coefficient is dynamic; no static value");
+      return cast<IntAttr>(basis.getValue()).getValue();
+    });
+    c.def_prop_ro("modes", [](PyBasisType &self) {
+      auto basis = self.toCppType().getAttr();
+      return std::vector<int32_t>(basis.getModes().begin(), basis.getModes().end());
     });
   }
 };
@@ -948,6 +999,21 @@ NB_MODULE(_mlirDialectsFly, m) {
       .def("size_in_bytes", &DLTensorAdaptor::getSizeInBytes, "Get total size in bytes");
 
   // -------------------------------------------------------------------------
+  // Internal Basis leaf marker: the Python Basis is converted into this at
+  // infer_int_tuple_type time so the int-tuple builder recognizes a basis leaf
+  // via nb::isinstance.
+  // -------------------------------------------------------------------------
+  nb::class_<PyBasis>(m, "_Basis")
+      .def(
+          "__init__",
+          [](PyBasis *self, nb::object value, std::vector<int32_t> modes) {
+            new (self) PyBasis{std::move(value), std::move(modes)};
+          },
+          "value"_a, "modes"_a)
+      .def_ro("value", &PyBasis::value)
+      .def_ro("modes", &PyBasis::modes);
+
+  // -------------------------------------------------------------------------
   // Module-level helper functions
   // -------------------------------------------------------------------------
   m.def(
@@ -981,6 +1047,7 @@ NB_MODULE(_mlirDialectsFly, m) {
   // Bind Fly dialect types (PyConcreteType pattern)
   // -------------------------------------------------------------------------
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyIntTupleType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyBasisType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyTileType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PyLayoutType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly::PySwizzleType::bind(m);
