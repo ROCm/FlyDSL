@@ -852,11 +852,6 @@ std::pair<IntTuple, IntTuple> intTupleZip2ByImpl(const IntTupleBuilder<IntTuple>
     assert(t.rank() == 2 && "intTupleZip2By expects rank-2 tuple at terminal");
     return {builder.at(t, 0), builder.at(t, 1)};
   }
-  // Canonicalize singleton guide wrappers so 1D profiles behave as leaf guides.
-  // This keeps zip2By robust after singleton unwrapping in product/divide type canonicalization.
-  if (guide.rank() == 1 && t.rank() == 2) {
-    return intTupleZip2ByImpl(builder, t, guide.at(0), noneValue);
-  }
   Collector firsts;
   Collector seconds;
 
