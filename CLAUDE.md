@@ -145,7 +145,7 @@ Use names from `python/flydsl/utils/env.py`; do not introduce alternate spelling
 | External LLVM/MLIR codegen | `FLYDSL_COMPILE_LLVM_DIR` (install prefix; enables external-binary final codegen, part of the JIT cache key) |
 | IR dumps | `FLYDSL_DUMP_IR`, `FLYDSL_DUMP_DIR` |
 | Runtime kind | `FLYDSL_RUNTIME_KIND` |
-| GPU arch hints | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION` |
+| GPU arch hints | `FLYDSL_GPU_ARCH`, `HSA_OVERRIDE_GFX_VERSION`, `FLYDSL_GPU_ARCH_FALLBACK` |
 | Debug info / pass diagnostics | `FLYDSL_DEBUG_ENABLE_DEBUG_INFO`, `FLYDSL_DEBUG_PRINT_AFTER_ALL`, `FLYDSL_DEBUG_AST_DIFF` |
 
 The JIT disk cache normally invalidates on kernel source and closure changes.

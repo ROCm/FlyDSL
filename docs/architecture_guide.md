@@ -393,7 +393,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 1. `FLYDSL_GPU_ARCH` env var
 2. `HSA_OVERRIDE_GFX_VERSION` env var (supports `9.4.2` → `gfx942` format)
 3. `rocm_agent_enumerator` system tool
-4. Default: `gfx942`
+4. No default. Fails unless `FLYDSL_GPU_ARCH_FALLBACK` is set (`1`, `true`, `yes`, or `on`).
 
 ---
 
