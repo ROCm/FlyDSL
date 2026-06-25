@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 FlyDSL Project Contributors
+
 """Common low-level device-memory helpers shared across kernels.
 
 Currently hosts the generic global-memory load API used by the paged-attention
