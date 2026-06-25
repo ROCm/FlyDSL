@@ -296,11 +296,14 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     _spe = scale_w1_1d.numel() // experts       # per-expert uint8 elems (scale)
     _w1_arg = w_kernel.reshape(-1)[rank * epr * _wpe:(rank + 1) * epr * _wpe].contiguous()
     _w1s_arg = scale_w1_1d.reshape(-1)[rank * epr * _spe:(rank + 1) * epr * _spe].contiguous()
+    _tm2_mega = int(args.mega_gemm2_tile_m) if int(getattr(args, "mega_gemm2_tile_m", -1)) > 0 else tm2
+    if _tm2_mega != tm2:
+        _info(rank, f"[full-e2e] DEBUG override MegaMoE gemm2_tile_m={_tm2_mega} (baseline stays {tm2})")
     moe = MegaMoE(
         rank=rank, world_size=world, model_dim=model_dim, inter_dim=inter_dim,
         experts=experts, topk=topk, quant=args.quant, w1=_w1_arg, w1_scale=_w1s_arg,
         w2=w2_kernel, w2_scale=w2_scale_1d, max_tok_per_rank=mtpr, network=args.network,
-        gemm2_tile_m=tm2, gemm2_tile_n=tn2, gemm2_tile_k=tk2, stage2_mode="fused")
+        gemm2_tile_m=_tm2_mega, gemm2_tile_n=tn2, gemm2_tile_k=tk2, stage2_mode="fused")
     torch.cuda.synchronize(); ms.shmem_barrier_all()
 
     _mega_out_holder = {}
@@ -486,6 +489,16 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     _match_ok = (_rma < 5e-2) or (_rm_w <= _ra8_w + 2e-2)
     ok = _match_ok and (_oracle_broken or (_mega_ok and _atom8_ok))
 
+    # Aggregate the per-rank torch-oracle gate across ALL ranks: each rank holds a DIFFERENT
+    # expert shard (epr experts) and reduces its OWN tokens vs its OWN torch oracle, so a
+    # per-shard bug can pass on rank0 yet fail on another rank.  Report the WORST rank and
+    # PASS only if EVERY rank passes.
+    _rm_w_max = _all_max(dev, _rm_w)
+    _ra8_w_max = _all_max(dev, _ra8_w)
+    _ra_w_max = _all_max(dev, _ra_w)
+    _rma_max = _all_max(dev, _rma)
+    _all_ok = _all_max(dev, 0.0 if ok else 1.0) < 0.5   # any failing rank -> all_ok False
+
     # ---- STAGE1-ONLY bodies (megav1 dispatch⊕GEMM1  vs  baseline fp8_dispatch -> sort -> GEMM1) ----
     def _mega_s1_body():
         moe.stage1.forward(x_q, wc, x_sc, ic)   # megav1 single-launch dispatch ⊕ GEMM1 -> a2
@@ -513,10 +526,10 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
 
     if rank == 0:
         _e2e_warn = "  [WARN torch-oracle unreliable for this shape: gated on mega-vs-baseline]" if _oracle_broken else ""
-        print(f"[FULL-E2E] {args.network} {args.quant} bs={run_tokens} seed={args.seed} -> {'PASS' if ok else 'FAIL'}{_e2e_warn}", flush=True)
-        print(f"  [precision vs WEIGHTED torch-oracle]  mega(prod)={_rm_w:.3e}  "
-              f"atom-fp8(baseline)={_ra8_w:.3e}  atom-bf16(ref)={_ra_w:.3e}  "
-              f"mega-vs-baseline={_rma:.3e}  (floor~{_floor})", flush=True)
+        print(f"[FULL-E2E] {args.network} {args.quant} bs={run_tokens} seed={args.seed} -> {'PASS' if _all_ok else 'FAIL'} (all {world} ranks){_e2e_warn}", flush=True)
+        print(f"  [precision vs WEIGHTED torch-oracle, MAX over {world} ranks]  mega(prod)={_rm_w_max:.3e}  "
+              f"atom-fp8(baseline)={_ra8_w_max:.3e}  atom-bf16(ref)={_ra_w_max:.3e}  "
+              f"mega-vs-baseline={_rma_max:.3e}  (floor~{_floor})", flush=True)
         print(f"  [perf STAGE1-only, ms]  baseline-fp8(dispatch->gemm1)={_t_atom_s1:.4f}  "
               f"megav1(dispatch+gemm1)={_t_mega_s1:.4f}  "
               f"speedup={(_t_atom_s1 / _t_mega_s1) if _t_mega_s1 > 0 else -1:.3f}", flush=True)
@@ -584,6 +597,9 @@ def main():
                    help="comma list of batch sizes to sweep for the single --network/--quant "
                         "(e.g. '256,2048,4096,8192'); overrides --tokens/--matrix.")
     p.add_argument("--json-out", type=str, default="")
+    p.add_argument("--mega-gemm2-tile-m", type=int, default=-1,
+                   help="debug: override ONLY MegaMoE's gemm2 tile_m (baseline unchanged). "
+                        "Used to reproduce the stage1 sort_block_m <-> gemm2 tile_m mismatch.")
     args = p.parse_args()
 
     rank = int(os.environ.get("RANK", "0"))
