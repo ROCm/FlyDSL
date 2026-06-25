@@ -37,6 +37,8 @@ def compile_preshuffle_gemm_v2(
     is_f16 = in_dtype == "fp16"
     is_bf16 = in_dtype == "bf16"
     is_f16_or_bf16 = is_f16 or is_bf16
+    # fp8/int8 are 1-byte element types sharing the narrow-MFMA scaffold; the
+    # per-token×per-channel f32 scale epilogue applies to both.
     is_8bit = is_fp8 or is_int8
     elem_bytes = 1 if is_8bit else 2
 
@@ -53,6 +55,7 @@ def compile_preshuffle_gemm_v2(
     else:
         layout_elem = Float8E4M3FN if is_gfx950 else Float8E4M3FNUZ
     out_elem_cls = BFloat16 if out_dtype == "bf16" else Float16
+    acc_elem_cls = Int32 if is_int8 else Float32
 
     # Tile geometry (tile_K_perm = K-elements grouped per MMA k-step)
     tile_K_perm = 128 if use_mfma_scale_128 else (64 if is_8bit else 32)
@@ -70,6 +73,7 @@ def compile_preshuffle_gemm_v2(
     num_a_loads = bytes_per_thread_a // a_load_bytes
     num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
+    # Async gmem->LDS DMA: one 16B buffer_load_lds per thread per chunk (== num_a_loads).
     a_async_load_bytes = 16
     num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
     num_gmem_loads = num_a_loads + num_b_loads
@@ -78,6 +82,9 @@ def compile_preshuffle_gemm_v2(
     else:
         dsrd_preload, dvmem_preload = (0, 0)
 
+    # Two separate LDS buffers (ping/pong) as distinct static globals so the
+    # compiler proves the async DMA dst (write_stage) and ds_read (read_stage)
+    # don't alias, avoiding a conservative vmcnt(0) before each ds_read.
     a_lds_elems = tile_m * tile_k
 
     @fx.struct
@@ -129,6 +136,7 @@ def compile_preshuffle_gemm_v2(
         thr_s2r = fx.make_tiled_copy_A(buf_copy, tiled_mma).get_slice(tid)
         thr_g2r_B = fx.make_tiled_copy_B(buf_copy, tiled_mma).get_slice(tid)
 
+        # LDS A views (ping/pong) with XOR swizzle to avoid bank conflicts.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         swz = fx.SwizzleType.get(4, 4, 3) if const_expr(is_8bit) else fx.SwizzleType.get(3, 3, 3)
 
@@ -143,7 +151,7 @@ def compile_preshuffle_gemm_v2(
 
         sA_stages = [_make_sA(lds.a0), _make_sA(lds.a1)]
 
-        # Partitions
+        # Partitions (per ping/pong stage; stage is compile-time)
         pA_g = thr_g2s.partition_S(tA)
         pA_s_stages = [thr_g2s.partition_D(s) for s in sA_stages]
         pA_s2r_stages = [thr_s2r.partition_S(s) for s in sA_stages]
@@ -165,21 +173,33 @@ def compile_preshuffle_gemm_v2(
 
         # ── Async gmem->LDS DMA (buffer_load_lds) for the A tile ──
         if const_expr(use_async_copy):
+            # Idiomatic layout-API DMA: fx.copy with a BufferCopyLDS atom. The LDS
+            # dest is a typed view derived from smem_ptr via add_offset (a GEP, not
+            # an int roundtrip), so alias analysis can disambiguate write_stage vs
+            # read_stage by constant offset and skip the conservative vmcnt(0)
+            # serialization before the ds_read.
             dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+            # copy_atom_call requires src.elem == dst.elem; the gmem A buffer is
+            # i8-typed, so alias the LDS dest as i8 too (byte-addressed). The src
+            # must be a FLAT 1D buffer tensor so the per-lane byte voffset maps
+            # directly (a 2D gA would mis-map the offset and fault).
             gA_flat = fx.rocdl.make_buffer_tensor(
                 fx.Tensor(fx.make_view(fx.get_iter(arg_a), fx.make_layout(65536 * K, 1))),
                 max_size=True,
             )
             gA_div = fx.logical_divide(gA_flat, fx.make_layout(1, 1))
-            sA_i8_ptr = [fx.recast_iter(Int8, lds.a0.ptr), fx.recast_iter(Int8, lds.a1.ptr)]
+            _i8_shared = fx.PointerType.get(Int8.ir_type, fx.AddressSpace.Shared, 512)
+            sA_i8_ptr = [fx.recast_iter(_i8_shared, lds.a0.ptr), fx.recast_iter(_i8_shared, lds.a1.ptr)]
             bx_m = bid_x * tile_m
             wave_id = tid // 64
             step_bytes = total_threads * a_async_load_bytes
             wave_stride_bytes = 64 * a_async_load_bytes
+            # Swizzle params (match SwizzleType on sA): XOR among 16B blocks of a row.
             k_blocks16_dma = (tile_k * elem_bytes) // 16
             elems_per_16b = 16 // elem_bytes
 
             def dma_a_to_lds(k_tile_val, stage):
+                # Wave-uniform LDS base for this stage; hardware spreads lanes (16B each).
                 wave_off = rocdl.readfirstlane(fx.Int32.ir_type, wave_id * wave_stride_bytes)
                 lds_ptr = fx.add_offset(sA_i8_ptr[stage], wave_off)
                 base_k = k_tile_val * tile_k
@@ -190,6 +210,8 @@ def compile_preshuffle_gemm_v2(
                     elem_idx = pos_bytes // elem_bytes
                     m = elem_idx // tile_k
                     k = elem_idx % tile_k
+                    # XOR-swizzle the gmem K-column to match the swizzled sA read
+                    # (16B-block XOR; self-inverse so the s2r read recovers A[m,k]).
                     k_swz = k ^ ((m % k_blocks16_dma) * elems_per_16b)
                     gmem_byte = ((bx_m + m) * K + base_k + k_swz) * elem_bytes
                     dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
@@ -315,6 +337,7 @@ def compile_preshuffle_gemm_v2(
             cur_frag_B = frag_B_stages[read_stage]
             do_next = read_next and next_k_val is not None
             if const_expr(use_async_copy):
+                # Issue async A DMA into write_stage + B loads, then compute on read_stage.
                 if const_expr(do_next):
                     dma_a_to_lds(next_k_val, write_stage)
                     fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
@@ -342,17 +365,22 @@ def compile_preshuffle_gemm_v2(
             gpu.barrier()
 
         # ── Prologue ──────────────────────────────────────────────
-        acc_zero = Vec.filled(acc_size, 0, Int32) if const_expr(is_int8) else Vec.filled(acc_size, 0.0, Float32)
         if const_expr(use_async_copy):
             dma_a_to_lds(fx.Int32(0), 0)
             fx.copy(buf_copy, pB_g[None, None, None, 0], frag_B_retile_stages[0])
-            frag_C.store(acc_zero)
+            if const_expr(is_int8):
+                frag_C.store(Vec.filled(acc_size, 0, Int32))
+            else:
+                frag_C.store(Vec.filled(acc_size, 0.0, Float32))
             rocdl.s_waitcnt(num_b_loads)
             gpu.barrier()
         else:
             fx.copy(buf_copy, pA_g[None, None, None, 0], frag_copy_A)
             fx.copy(buf_copy, pB_g[None, None, None, 0], frag_B_retile_stages[0])
-            frag_C.store(acc_zero)
+            if const_expr(is_int8):
+                frag_C.store(Vec.filled(acc_size, 0, Int32))
+            else:
+                frag_C.store(Vec.filled(acc_size, 0.0, Float32))
             fx.copy(uni_copy, frag_copy_A, pA_s_stages[0][None, None, None])
             gpu.barrier()
         rocdl.sched_barrier(0)
@@ -458,6 +486,7 @@ def compile_preshuffle_gemm_v2(
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 16, layout_elem))
             k_perm = fx.make_layout((4, 4, 2), (1, 8, 4))
         elif const_expr(is_int8):
+            # int8: i32-accumulating narrow MFMA (16x16x32 i8), grouped two-per-k-step
             mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 32, layout_elem, Int32))
             k_perm = fx.make_layout((8, 4, 2), (1, 16, 8))
         else:
