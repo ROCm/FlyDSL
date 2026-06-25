@@ -65,22 +65,49 @@ class S2RLoaderFp4:
         view = fx.make_view(i8_iter, fx.make_layout(16, 1))
         return view.load()
 
+    def _offset(self, i, step, preshuffled):
+        row = self.wave_idx * (self.n_tiles * 16) + i * 16 + self.lane_id % 16
+        col = (self.lane_id // 16) * 16 + step * 64
+        if const_expr(preshuffled):
+            return (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128
+        row_swz, col_swz = swizzle_128(row, col)
+        return row_swz * 128 + col_swz
+
     def load(self, lds_src, preshuffled=False):
         frag = []
         for i in range_constexpr(self.n_tiles):
             halves = []
-            row = self.wave_idx * (self.n_tiles * 16) + i * 16 + self.lane_id % 16
             for step in range_constexpr(2):
-                col = (self.lane_id // 16) * 16 + step * 64
-                if const_expr(preshuffled):
-                    offset = (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128
-                else:
-                    row_swz, col_swz = swizzle_128(row, col)
-                    offset = row_swz * 128 + col_swz
-                v = self._vec_load_16xf8(lds_src, offset)
+                v = self._vec_load_16xf8(lds_src, self._offset(i, step, preshuffled))
                 halves.append(v.bitcast(fx.Int32))  # i32x4, the K=128 MFMA operand
             frag.append(halves)  # [ksub0_i32x4, ksub1_i32x4]
         return frag
+
+    def load_one(self, lds_src, i, ksub, preshuffled=False):
+        """One i32x4 (tile i, K=128 sub-block ksub) -- the interleave granularity."""
+        v = self._vec_load_16xf8(lds_src, self._offset(i, ksub, preshuffled))
+        return v.bitcast(fx.Int32)
+
+
+def _g2s_thunks(g2s, dst, gl_off, n_steps):
+    """Module-level (so the @kernel AST rewriter doesn't turn the `range` into
+    scf.for): list of thunks, each issuing one g2s.load_one step."""
+    return [lambda s=s: g2s.load_one(dst, gl_off, s) for s in range(n_steps)]
+
+
+def _s2r_thunks(s2r, src, holder, n, pre):
+    """List of thunks, each issuing one s2r.load_one (tile i, ksub) into holder[i]."""
+    ts = []
+    for i in range(n):
+        for ks in range(_FP4_PACK):
+
+            def f(i=i, ks=ks):
+                if holder[i] is None:
+                    holder[i] = [None, None]
+                holder[i][ks] = s2r.load_one(src, i, ks, preshuffled=pre)
+
+            ts.append(f)
+    return ts
 
 
 def _min(a, b):
@@ -147,7 +174,7 @@ class Mfma16x16x128Fp4:
     def idx(self, i, j):
         return i * self.n_tiles_b + j
 
-    def call(self, a, b, c, sa, sb):
+    def call(self, a, b, c, sa, sb, interleave=None):
         """``sa`` / ``sb`` are lists (len n_groups) of packed-E8M0 i32 scales
         (4 sub-fields each, one full K=256 step for a 32-row pack-group).
 
@@ -162,6 +189,12 @@ class Mfma16x16x128Fp4:
         AMD encoding: low bit -> op_sel[lane], high bit (=ksub) -> op_sel_hi[lane].
         So op_sel=[i%2, j%2, 0], op_sel_hi=[ksub, ksub, 0]."""
         # a[i] / b[j] are [i32x4_ksub0, i32x4_ksub1] from S2RLoaderFp4.
+        # ``interleave`` is an optional list of zero-arg thunks (ds_read / buffer_load
+        # for the NEXT quad); one is issued after each MFMA so the load co-issues in
+        # the MFMA's execute shadow (fp4 MFMA: 4-cyc issue, ~16-cyc execute -> a
+        # ds_read/buffer_load fits free between MFMAs). Mirrors fp8 _interleaved_cluster.
+        thunks = list(interleave) if interleave else []
+        nth = [0]  # python-level counter (compile-time), not loop-carried
         for ksub in range_constexpr(_FP4_PACK):
             for i in range_constexpr(self.n_tiles_a):
                 a_op = a[i][ksub]
@@ -174,6 +207,12 @@ class Mfma16x16x128Fp4:
                     c[self.idx(i, j)] = self._mfma_agpr(
                         a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb
                     )
+                    if nth[0] < len(thunks):
+                        thunks[nth[0]]()
+                        nth[0] += 1
+        while nth[0] < len(thunks):
+            thunks[nth[0]]()
+            nth[0] += 1
         return c
 
     def _mfma_agpr(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
@@ -423,23 +462,40 @@ def compile_fp4_gemm_4w(
             # vmcnt(16) instead of dropping to vmcnt(8-13) waiting on scale.
             saR0_n, saR1_n, sbC0_n, sbC1_n = _load_scales(k + 1)
 
+            # Interleave each quad's MFMA with the data movement feeding the NEXT
+            # quad: thunks (g2s buffer_load + s2r ds_read) issued one-after-each-MFMA
+            # so they co-issue in the MFMA execute shadow (fp4 MFMA ~16-cyc execute /
+            # 4-cyc issue). Results land in holders consumed by the next quad.
+            _b1 = [None] * N_TILES_B
+            _a1 = [None] * N_TILES_A
+            _a0n = [None] * N_TILES_A
+            _b0n = [None] * N_TILES_B
+
             wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
-            a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * A_K_STEP)
-            b1_frag = b_s2r.load(b_cur1, preshuffled=True)
-            c00_frag = _do_quad(a0_frag, b0_frag, c00_frag, saR0, sbC0)
+            il = _g2s_thunks(a_g2s, a_cur0, A0_gl_offset + (k + 2) * A_K_STEP, N_TILES_A) + _s2r_thunks(
+                b_s2r, b_cur1, _b1, N_TILES_B, True
+            )
+            c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il)
+            b1_frag = _b1
 
-            b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * B_K_STEP)
-            a1_frag = a_s2r.load(a_cur1)
-            c01_frag = _do_quad(a0_frag, b1_frag, c01_frag, saR0, sbC1)
+            il = _g2s_thunks(b_g2s, b_cur0, B0_gl_offset + (k + 2) * B_K_STEP, N_TILES_A) + _s2r_thunks(
+                a_s2r, a_cur1, _a1, N_TILES_A, False
+            )
+            c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, saR0, sbC1, interleave=il)
+            a1_frag = _a1
 
             wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
-            b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * B_K_STEP)
-            a0n_frag = a_s2r.load(a_next0)
-            c10_frag = _do_quad(a1_frag, b0_frag, c10_frag, saR1, sbC0)
+            il = _g2s_thunks(b_g2s, b_cur1, B1_gl_offset + (k + 2) * B_K_STEP, N_TILES_A) + _s2r_thunks(
+                a_s2r, a_next0, _a0n, N_TILES_A, False
+            )
+            c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, saR1, sbC0, interleave=il)
+            a0n_frag = _a0n
 
-            a_g2s.load(a_cur1, A1_gl_offset + (k + 2) * A_K_STEP)
-            b0n_frag = b_s2r.load(b_next0, preshuffled=True)
-            c11_frag = _do_quad(a1_frag, b1_frag, c11_frag, saR1, sbC1)
+            il = _g2s_thunks(a_g2s, a_cur1, A1_gl_offset + (k + 2) * A_K_STEP, N_TILES_A) + _s2r_thunks(
+                b_s2r, b_next0, _b0n, N_TILES_B, True
+            )
+            c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, saR1, sbC1, interleave=il)
+            b0n_frag = _b0n
 
             a0_frag = a0n_frag
             b0_frag = b0n_frag
