@@ -716,7 +716,7 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
     v2_flag=""
     case "$dtype" in
-      fp8 | fp16 | bf16) v2_flag="--use_v2" ;;
+      fp8 | int8 | fp16 | bf16) v2_flag="--use_v2" ;;
     esac
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
     # shellcheck disable=SC2086 # v2_flag is intentionally unquoted (empty = omit)
@@ -755,10 +755,22 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
     shape_waves_per_eu="${8:-}"
 
+    # Route fp8/int8/fp16/bf16 async shapes to the layout-API v2 kernel.
+    v2_flag=""
+    case "$dtype" in
+      fp8 | int8 | fp16 | bf16) v2_flag="--use_v2" ;;
+    esac
+
     async_copy_flag=""
     async_copy_tag="async_copy"
     if [ "${GEMM_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_USE_ASYNC_COPY}" = "true" ]; then
       async_copy_flag="--use_async_copy"
+    fi
+    # v2 async exposes global latency on small tiles; v2-sync beats v1-async
+    # there, so only use async for large tiles (tile_m >= 128).
+    if [ -n "${v2_flag}" ] && [ "${tile_m}" -lt 128 ]; then
+      async_copy_flag=""
+      async_copy_tag="sync_copy"
     fi
     waves_per_eu="${shape_waves_per_eu:-${GEMM_WAVES_PER_EU}}"
     waves_per_eu_tag="${waves_per_eu}"

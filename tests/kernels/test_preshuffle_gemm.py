@@ -118,7 +118,7 @@ def test_mfma_a8_flyc_preshuffle(
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
     if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
         pytest.skip(f"async copy is not supported on {get_rocm_arch()}")
-    if use_v2 and in_dtype not in ("fp8", "fp16", "bf16"):
+    if use_v2 and in_dtype not in ("fp8", "int8", "fp16", "bf16"):
         pytest.skip(f"v2 kernel does not support {in_dtype}")
     print("=" * 80)
     print(f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
@@ -141,6 +141,7 @@ def test_mfma_a8_flyc_preshuffle(
             in_dtype=in_dtype,
             out_dtype=out_dtype,
             waves_per_eu=_wpe,
+            use_async_copy=bool(use_async_copy),
         )
     else:
         launch_fn = compile_preshuffle_gemm_a8(
