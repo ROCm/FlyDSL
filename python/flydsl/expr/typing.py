@@ -467,7 +467,7 @@ class Constexpr:
 
     @staticmethod
     def _is_supported_annotation(param) -> bool:
-        return param in (int, bool, float) or Constexpr._is_tuple_annotation(param)
+        return param in (int, bool, float, str) or Constexpr._is_tuple_annotation(param)
 
     @staticmethod
     def _scalar_cache_signature(value):
@@ -477,6 +477,8 @@ class Constexpr:
             return (int, value)
         if type(value) is float:
             return (float, value)
+        if type(value) is str:
+            return (str, value)
         return None
 
     @staticmethod
@@ -528,7 +530,7 @@ class Constexpr:
         if lambda_sig is not None:
             return lambda_sig
         raise TypeError(
-            "Constexpr values support only int, bool, float, tuples of those scalar values, "
+            "Constexpr values support only int, bool, float, str, tuples of those scalar values, "
             "and lambdas without free variables"
         )
 
@@ -537,7 +539,8 @@ class Constexpr:
             raise TypeError(f"{cls.__name__} cannot be re-parametrized")
         if not Constexpr._is_supported_annotation(param) and not Constexpr._is_callable_annotation(param):
             raise TypeError(
-                "Constexpr[...] supports only int, bool, float, tuple, or Callable annotations; " f"got {param!r}"
+                "Constexpr[...] supports only int, bool, float, str, tuple, or Callable annotations; "
+                f"got {param!r}"
             )
         cached = Constexpr._annotation_cache.get(param)
         if cached is not None:
@@ -610,7 +613,7 @@ class Constexpr:
                 if not isinstance(value, tuple):
                     raise TypeError(f"expects tuple, got {type(value).__name__}")
                 Constexpr.value_signature(value)
-            elif inner in (int, bool, float):
+            elif inner in (int, bool, float, str):
                 if type(value) is not inner:
                     raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
                 Constexpr.value_signature(value)
