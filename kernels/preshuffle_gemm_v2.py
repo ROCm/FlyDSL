@@ -50,12 +50,8 @@ def compile_preshuffle_gemm_v2(
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
     is_gfx950 = str(gpu_arch).startswith("gfx950")
-    # TODO: enable when CDNA4 MFMA_Scale works through layout API (fly.mma_atom_call)
-    use_mfma_scale_128 = False  # is_fp8 and is_gfx950
+    use_mfma_scale_128 = is_fp8 and is_gfx950 and (tile_k % 128 == 0)
     use_mfma_k32 = is_f16_or_bf16 and is_gfx950
-    if use_mfma_scale_128:
-        if tile_k % 128 != 0:
-            raise ValueError(f"tile_k must be divisible by 128 for gfx950 fp8, got {tile_k}")
 
     if is_f16:
         layout_elem = Float16
@@ -106,11 +102,21 @@ def compile_preshuffle_gemm_v2(
         arg_scale_b: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
-        tiled_mma: fx.TiledMma,
+        tiled_mma_arg: fx.TiledMma,
         tiled_copy_g2s: fx.TiledCopy,
     ):
         tid = fx.thread_idx.x
         bid_x, bid_y, _ = fx.block_idx
+
+        if const_expr(use_mfma_scale_128):
+            _scale_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
+            tiled_mma = fx.make_tiled_mma(
+                _scale_atom,
+                fx.make_layout((1, 4, 1), (0, 1, 0)),
+                fx.make_tile(None, None, fx.make_layout((32, 4), (1, 32))),
+            )
+        else:
+            tiled_mma = tiled_mma_arg
 
         gA = fx.rocdl.make_buffer_tensor(arg_a)
         gB = fx.rocdl.make_buffer_tensor(arg_b)
@@ -228,13 +234,10 @@ def compile_preshuffle_gemm_v2(
                     if const_expr(sche_i >= dswr_start - 1):
                         rocdl.sched_dswr(1)
             else:
-                # gfx950 path: distribute vmem/dsrd across MFMA slots
-                if const_expr(use_mfma_k32):
-                    element_k_per_mfma = 32
-                elif const_expr(is_fp8):
-                    element_k_per_mfma = 128  # mfma_scale_f32_16x16x128
+                if const_expr(use_mfma_scale_128):
+                    element_k_per_mfma = 128
                 else:
-                    element_k_per_mfma = 16
+                    element_k_per_mfma = 32
                 num_mfma_per_tile_k = tile_k // element_k_per_mfma
                 mfma_total = num_mfma_per_tile_k * m_repeat * mfma_group
                 dswr_tail = num_a_loads
@@ -328,8 +331,9 @@ def compile_preshuffle_gemm_v2(
             pipeline_stage(read_stage=0, next_k_val=fx.Int32(1))
             pipeline_stage(read_stage=1, read_next=False)
         else:
+            is_odd_tiles = (num_tiles % 2) == 1
             loop_start = fx.Index(0)
-            loop_end = fx.Index((num_tiles - 2) // 2)
+            loop_end = fx.Index((num_tiles - 1) // 2 if is_odd_tiles else (num_tiles - 2) // 2)
             loop_step = fx.Index(1)
             # Loop-carried values:
             #   bf16/f16: acc + B stage 0 (B alloca types don't match for SROA)
@@ -354,8 +358,11 @@ def compile_preshuffle_gemm_v2(
                     results = yield [frag_C.load(), frag_B_stages[0].load()]
                 frag_C.store(results[0])
                 frag_B_stages[0].store(results[1])
-            pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
-            pipeline_stage(read_stage=1, read_next=False)
+            if const_expr(is_odd_tiles):
+                pipeline_stage(read_stage=0, read_next=False)
+            else:
+                pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
+                pipeline_stage(read_stage=1, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
         if const_expr(is_fp8):
