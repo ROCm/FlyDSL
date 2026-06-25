@@ -89,7 +89,7 @@ def _is_pow2(x: int) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# PA decode shared helpers — copied verbatim from kernels/pa_decode_fp8.py
+# PA decode shared helpers — copied/adapted from kernels/pa_decode_fp8.py
 # so this module is self-contained and does not import from it.
 # ─────────────────────────────────────────────────────────────────────
 KV_BLOCK_SIZE = 1024  # physical page size (matches SP3 kBlockSize)
