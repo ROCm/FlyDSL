@@ -14,6 +14,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include "hip/hip_runtime.h"
@@ -40,8 +41,9 @@ extern "C" hipModule_t mgpuModuleLoad(void *data, size_t /*gpuBlobSize*/) {
 extern "C" hipModule_t mgpuModuleLoadJIT(void *data, int optLevel) {
   (void)data;
   (void)optLevel;
-  assert(false && "This function is not available in HIP.");
-  return nullptr;
+  fprintf(stderr, "[mgpuModuleLoadJIT] This function is not available in HIP.\n");
+  assert(false && "mgpuModuleLoadJIT is not available in HIP");
+  std::abort();
 }
 
 extern "C" void mgpuModuleUnload(hipModule_t module) {
