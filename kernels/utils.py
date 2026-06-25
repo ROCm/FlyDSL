@@ -74,19 +74,19 @@ def _ptr8_to_v4i32(ptr8_val):
     return llvm.bitcast(v4i32_ty, i128_val)
 
 
-def buffer_load(rsrc, soffset_bytes_i32, vec_width=4, *, is_scalar=False, dtype=None, cache_modifier=0):
+def buffer_load(rsrc, soffset_i32, vec_width=4, *, is_scalar=False, dtype=None, cache_modifier=0):
     """AMD buffer load, scalar (``s_buffer_load``) or vector (``buffer_load``).
 
     ``is_scalar`` selects the hardware path:
 
     * ``is_scalar=False`` (default) — vector-memory load (``buffer_load_dword[xN]``),
       one result per lane.  Delegates to :func:`flydsl.expr.buffer_ops.buffer_load`;
-      ``soffset_bytes_i32`` is interpreted as the per-lane *element* offset and
+      ``soffset_i32`` is interpreted as the per-lane *element* offset.
       ``dtype`` selects the element type.
 
     * ``is_scalar=True`` — scalar load (``s_buffer_load_dword[x4]``) via the
       ``llvm.amdgcn.s.buffer.load`` intrinsic, landing the result directly in an
-      SGPR shared across all lanes.  Requires ``soffset_bytes_i32`` to be
+      SGPR shared across all lanes.  Requires ``soffset_i32`` to be
       wave-uniform and expressed in *bytes*.  Saves the ``vmcnt(0)`` drain +
       ``readfirstlane`` the VMEM path imposes (frees VMEM queue slots and keeps
       the result off the VGPRs).  Only ``vec_width`` 1 (``i32``) and 4 (``<4 x i32>``)
@@ -94,8 +94,8 @@ def buffer_load(rsrc, soffset_bytes_i32, vec_width=4, *, is_scalar=False, dtype=
 
     Args:
         rsrc: buffer resource descriptor (``!llvm.ptr<8>``).
-        soffset_bytes_i32: wave-uniform byte offset (scalar) or per-lane element
-            offset (vector).
+        soffset_i32: per-lane element offset (vector path) or wave-uniform byte
+            offset (scalar path, ``is_scalar=True``).
         vec_width: number of 32-bit words / elements to load.
         is_scalar: route through ``s_buffer_load`` instead of ``buffer_load``.
         dtype: element type for the vector path (defaults to f32).
@@ -104,7 +104,7 @@ def buffer_load(rsrc, soffset_bytes_i32, vec_width=4, *, is_scalar=False, dtype=
     if not is_scalar:
         return buffer_ops.buffer_load(
             rsrc,
-            soffset_bytes_i32,
+            soffset_i32,
             vec_width=vec_width,
             dtype=dtype,
             cache_modifier=cache_modifier,
@@ -130,7 +130,7 @@ def buffer_load(rsrc, soffset_bytes_i32, vec_width=4, *, is_scalar=False, dtype=
         f"llvm.amdgcn.s.buffer.load.{suffix}",
         [
             _to_ir(rsrc_v4),
-            _to_ir(soffset_bytes_i32),
+            _to_ir(soffset_i32),
             _to_ir(cache_policy),
         ],
         [],
