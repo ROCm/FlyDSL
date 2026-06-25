@@ -8,7 +8,7 @@ class SyncScope:
     """LLVM target-neutral sync scopes.
 
     Target-specific scopes (e.g. AMDGPU ``agent`` / ``workgroup``) live in
-    `.expr.rocdl.enum.SyncScope``.
+    ``flydsl.expr.rocdl.enum.SyncScope``.
     """
 
     System = ""

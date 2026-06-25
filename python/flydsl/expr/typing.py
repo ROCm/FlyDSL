@@ -539,8 +539,7 @@ class Constexpr:
             raise TypeError(f"{cls.__name__} cannot be re-parametrized")
         if not Constexpr._is_supported_annotation(param) and not Constexpr._is_callable_annotation(param):
             raise TypeError(
-                "Constexpr[...] supports only int, bool, float, str, tuple, or Callable annotations; "
-                f"got {param!r}"
+                "Constexpr[...] supports only int, bool, float, str, tuple, or Callable annotations; " f"got {param!r}"
             )
         cached = Constexpr._annotation_cache.get(param)
         if cached is not None:
