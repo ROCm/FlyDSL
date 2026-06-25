@@ -143,17 +143,14 @@ def compile_preshuffle_gemm_v2(
             fx.PointerType.get(layout_elem.ir_type, fx.AddressSpace.Shared, 512),
             fx.get_dyn_shared(),
         )
-        if const_expr(is_fp8):
-            sA = fx.make_view(smem_ptr, fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)))
-        else:
-            swz = fx.SwizzleType.get(3, 3, 3)
-            sA = fx.make_view(
-                smem_ptr,
-                fx.make_composed_layout(
-                    fx.static(swz),
-                    fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)),
-                ),
-            )
+        swz = fx.SwizzleType.get(4, 4, 3) if const_expr(is_fp8) else fx.SwizzleType.get(3, 3, 3)
+        sA = fx.make_view(
+            smem_ptr,
+            fx.make_composed_layout(
+                fx.static(swz),
+                fx.make_ordered_layout((tile_m, tile_k, 2), (1, 0, 2)),
+            ),
+        )
 
         # Partitions
         pA_g = thr_g2s.partition_S(tA)
@@ -519,5 +516,8 @@ def compile_preshuffle_gemm_v2(
             smem=smem_bytes,
             stream=stream,
         )
+
+    if const_expr(is_f16_or_bf16 and num_acc_n <= 2):
+        launch_gemm.compile_hints["llvm_options"] = {"enable-post-misched": False}
 
     return launch_gemm
