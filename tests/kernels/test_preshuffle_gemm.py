@@ -34,6 +34,7 @@ from kernels.preshuffle_gemm import (  # noqa: E402
     compile_preshuffle_gemm_a8,
     compile_preshuffle_gemm_w4,
 )
+from kernels.preshuffle_gemm_v2 import compile_preshuffle_gemm_v2  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant, shuffle_weight  # noqa: E402
@@ -112,10 +113,13 @@ def test_mfma_a8_flyc_preshuffle(
     waves_per_eu: int = 0,
     dsrd_preload: int = 2,
     dvmem_preload: int = 2,
+    use_v2: bool = False,
 ):
     """Preshuffle GEMM using the @flyc.kernel / @flyc.jit API."""
     if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
         pytest.skip(f"async copy is not supported on {get_rocm_arch()}")
+    if use_v2 and in_dtype not in ("fp8", "fp16", "bf16"):
+        pytest.skip(f"v2 kernel does not support {in_dtype}")
     print("=" * 80)
     print(f"[flyc] MFMA {in_dtype.upper()} GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
     print("=" * 80)
@@ -127,22 +131,34 @@ def test_mfma_a8_flyc_preshuffle(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = compile_preshuffle_gemm_a8(
-        M=M,
-        N=N,
-        K=K,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        in_dtype=in_dtype,
-        out_dtype=out_dtype,
-        lds_stage=lds_stage,
-        use_cshuffle_epilog=bool(use_cshuffle_epilog),
-        use_async_copy=bool(use_async_copy),
-        dsrd_preload=int(dsrd_preload),
-        dvmem_preload=int(dvmem_preload),
-        waves_per_eu=_wpe,
-    )
+    if use_v2:
+        launch_fn = compile_preshuffle_gemm_v2(
+            N=N,
+            K=K,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            in_dtype=in_dtype,
+            out_dtype=out_dtype,
+            waves_per_eu=_wpe,
+        )
+    else:
+        launch_fn = compile_preshuffle_gemm_a8(
+            M=M,
+            N=N,
+            K=K,
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            in_dtype=in_dtype,
+            out_dtype=out_dtype,
+            lds_stage=lds_stage,
+            use_cshuffle_epilog=bool(use_cshuffle_epilog),
+            use_async_copy=bool(use_async_copy),
+            dsrd_preload=int(dsrd_preload),
+            dvmem_preload=int(dvmem_preload),
+            waves_per_eu=_wpe,
+        )
     print(
         f"✓ Kernel prepared (lds_stage={lds_stage}, async_copy={use_async_copy}, "
         f"waves_per_eu={_wpe}, dsrd_preload={dsrd_preload}, dvmem_preload={dvmem_preload})"
@@ -220,17 +236,15 @@ def test_mfma_a8_flyc_preshuffle(
     _dummy_bias = torch.empty(0, dtype=torch_out_dtype, device=a_q.device)
 
     def _gemm_args(c, a, b, sa, sb):
-        return (
+        head = (
             c.contiguous().view(-1),
             _as_i8(a.contiguous().view(-1)),
             _as_i8(b.contiguous().view(-1)),
             sa.contiguous().view(-1) if sa.numel() > 0 else sa,
             sb.contiguous().view(-1) if sb.numel() > 0 else sb,
-            _dummy_bias,
-            M,
-            N,
-            torch.cuda.current_stream(),
         )
+        bias = () if use_v2 else (_dummy_bias,)
+        return head + bias + (M, N, torch.cuda.current_stream())
 
     compiled_fn = flyc.compile(launch_fn, *_gemm_args(c_out_raw, a_q, b_input, sa_flat, sb_flat))
 
@@ -605,6 +619,9 @@ if __name__ == "__main__":
     parser.add_argument("--no_aiter_bench", action="store_false", dest="run_aiter_bench")
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
     parser.add_argument(
+        "--use_v2", action="store_true", default=False, help="Use the layout-API v2 kernel (fp8/fp16/bf16 only)."
+    )
+    parser.add_argument(
         "--wfp4", action="store_true", default=False, help="Run weight-fp4 (MXFP4) preshuffle GEMM test."
     )
     parser.add_argument(
@@ -655,6 +672,7 @@ if __name__ == "__main__":
                 run_aiter_bench=bool(args.run_aiter_bench),
                 use_cshuffle_epilog=bool(args.use_cshuffle_epilog),
                 waves_per_eu=int(args.waves_per_eu),
+                use_v2=bool(args.use_v2),
             )
         else:
             test_mfma_w4_flyc_preshuffle(
