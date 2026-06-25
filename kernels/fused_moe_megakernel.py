@@ -204,6 +204,12 @@ class FusedMoEMegaStage1:
             unit_size = int(unit_size) if int(unit_size) > 0 else _tm_t
             tile_n = int(tile_n) if int(tile_n) > 0 else _tn_t
         self.unit_size = int(unit_size)
+        # Expert row-padding / sorting granularity (== the GEMM1 M-tile, floored at the 32-row
+        # MFMA atom).  This is ALSO the granularity at which stage1 emits sorted_expert_ids
+        # (_se_atom): one entry per sort_block_m rows.  The facade threads this into stage2 gemm2
+        # (gemm2 reads expert_ids[bx_m // sort_block_m]) and asserts gemm2_tile_m | sort_block_m,
+        # so any gemm2 tile_m dividing it consumes the layout correctly.
+        self.sort_block_m = max(32, int(self.unit_size))
         self.tile_n = int(tile_n)
         self.mtpr = int(max_tok_per_rank)
         self.tune_tokens = int(tune_tokens)

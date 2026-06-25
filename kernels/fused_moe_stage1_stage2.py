@@ -212,9 +212,25 @@ class MegaMoE:
         # ---- stage-2 backend ----
         self._g2 = None
         if stage2_mode == "fused":
+            # Thread stage1's row-padding / sorted_expert_ids granularity into gemm2.  Stage1 emits
+            # _se_atom (sorted_expert_ids) ONE entry per sort_block_m rows, and gemm2 reads it as
+            # expert_ids[bx_m // sort_block_m]; the two MUST agree or gemm2 selects the wrong expert's
+            # W2 (silent garbage).  Previously gemm2 used its own default sort_block_m (== its tile_m,
+            # 32) which only matched stage1 when stage1's GEMM tile_m was 32 -> a tuned gemm2 tile_m=64
+            # produced corrupt output.  gemm2 also requires sort_block_m % tile_m == 0 (each tile_m tile
+            # stays within one expert), so the effective gemm2 tile_m must divide stage1's sort_block_m.
+            _s1_sbm = int(self.stage1.sort_block_m)
+            _eff_g2_tm = int(gemm2_tile_m) if int(gemm2_tile_m) > 0 else 32  # op default tile_m=32
+            if _s1_sbm % _eff_g2_tm != 0:
+                raise ValueError(
+                    f"gemm2 tile_m={_eff_g2_tm} does not divide stage1 sort_block_m={_s1_sbm} "
+                    f"(stage1 unit_size={self.stage1.unit_size}); each gemm2 tile_m tile must stay "
+                    f"within one expert's sort_block_m-padded rows.  Set gemm2_tile_m to a divisor of "
+                    f"{_s1_sbm} (e.g. 32), or raise stage1's tile_m so sort_block_m is a multiple of "
+                    f"{_eff_g2_tm}.")
             g2_kwargs = dict(
                 comb_cfg=self.comb_cfg, comb_op=self.comb_op, inter_dim=int(inter_dim),
-                a_dtype=self.a2_dtype, b_dtype="fp4",
+                a_dtype=self.a2_dtype, b_dtype="fp4", sort_block_m=_s1_sbm,
             )
             # Only override FlyDSLMoeGemm2CombineOp's built-in tile/persist/xcd when a
             # tuned gemm2 tile is supplied (gemm2_tile_m > 0). On a tune miss the

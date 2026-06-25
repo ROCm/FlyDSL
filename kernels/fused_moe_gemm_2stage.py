@@ -2994,26 +2994,27 @@ def compile_fused_moe_gemm1(
 
                 if const_expr(_atom_contract and _static_tiles and _fz_epr <= 64):
                     # static-tiles derives (expert,k) per compact tile in-GEMM and never writes
-                    # sorted_expert_ids; atom_contract stage2 gemm2 needs it to select W2.  stage2's
-                    # gemm2 tiles at tile_m=32, but this stage1 GEMM may compute at sort_block_m=64
-                    # -> emit the LOCAL expert id (_ef) at 32-ROW SUB-TILE granularity (sort_block_m//32
-                    # entries per compact tile) so se[sub_tile] is correct for BOTH 32-row halves.
-                    _nsub_se = const_expr(max(1, sort_block_m // 32))
+                    # sorted_expert_ids; atom_contract stage2 gemm2 needs it to select W2.  Emit the
+                    # LOCAL expert id (_ef) ONE entry per compact tile (== sort_block_m rows) at index
+                    # `bx`, matching gemm2's expert_ids[bx_m // sort_block_m] read.  The facade threads
+                    # stage1's sort_block_m into gemm2 and asserts gemm2_tile_m | sort_block_m, so this
+                    # lines up for ANY gemm2 tile_m dividing it (e.g. decode tile_m=32 under
+                    # sort_block_m=64, or prefill tile_m=64 under sort_block_m=64).  For sort_block_m=32
+                    # this is byte-identical to the previous per-32 sub-tile emission.
                     _tx0 = arith.cmpi(CmpIPredicate.eq, tx, arith.constant(0, index=True))
                     _if_se = scf.IfOp(_tx0)
                     with ir.InsertionPoint(_if_se.then_block):
                         _bx_i32_se = arith.index_cast(T.i32, bx)
-                        _se_base = _bx_i32_se * arith.constant(_nsub_se, type=T.i32)
-                        for _j in range_constexpr(_nsub_se):
-                            buffer_ops.buffer_store(
-                                _ef, expert_rsrc, _se_base + arith.constant(_j, type=T.i32),
-                                offset_is_bytes=False)
+                        buffer_ops.buffer_store(
+                            _ef, expert_rsrc, _bx_i32_se, offset_is_bytes=False)
                         scf.YieldOp([])
 
                 if const_expr(_ca):
                     # compact+atom: emit _se_atom (disp 41, SEPARATE from the _se A-gather arg) = LOCAL
-                    # expert id at 32-row sub-tile granularity (stage2 gemm2 selects W2 by local expert).
-                    _nsub_ca = const_expr(max(1, sort_block_m // 32))
+                    # expert id, ONE entry per compact tile (== sort_block_m rows) at index `bx`,
+                    # matching gemm2's expert_ids[bx_m // sort_block_m] read (facade threads sort_block_m
+                    # and asserts gemm2_tile_m | sort_block_m).  For sort_block_m=32 this is byte-identical
+                    # to the previous per-32 sub-tile emission.
                     _tx0_ca = arith.cmpi(CmpIPredicate.eq, tx, arith.constant(0, index=True))
                     _if_se_ca = scf.IfOp(_tx0_ca)
                     with ir.InsertionPoint(_if_se_ca.then_block):
@@ -3023,11 +3024,8 @@ def compile_fused_moe_gemm1(
                         _ca_se_rsrc = buffer_ops.create_buffer_resource_from_addr(_ca_se_addr)
                         _ca_le2 = expert_i32 - arith.constant(_fz_rank * _fz_epr, type=T.i32)
                         _bx_i32_ca = arith.index_cast(T.i32, bx)
-                        _se_base_ca = _bx_i32_ca * arith.constant(_nsub_ca, type=T.i32)
-                        for _jc in range_constexpr(_nsub_ca):
-                            buffer_ops.buffer_store(
-                                _ca_le2, _ca_se_rsrc, _se_base_ca + arith.constant(_jc, type=T.i32),
-                                offset_is_bytes=False)
+                        buffer_ops.buffer_store(
+                            _ca_le2, _ca_se_rsrc, _bx_i32_ca, offset_is_bytes=False)
                         scf.YieldOp([])
 
                 acc_gate = [acc_init] * num_acc_n * m_repeat
