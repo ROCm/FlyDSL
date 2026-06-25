@@ -88,7 +88,9 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
     return arith::DivUIOp::create(builder, loc, bits, eight);
   };
 
-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  // aux/cachepolicy bits for the raw buffer load/store (0=cached, 2=nt). Carried
+  // on the atom type so the layout-API copy can request non-temporal loads.
+  Value aux = arith::ConstantIntOp::create(builder, loc, getCacheModifier(), 32);
   ArrayAttr noAttrs;
 
   auto srcMemTy = srcTyArg ? dyn_cast<fly::MemRefType>(srcTyArg) : fly::MemRefType();
@@ -102,7 +104,7 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
     Value srcOff = bp.swizzleByteOffset(builder, loc);
 
     Value loaded = ROCDL::RawPtrBufferLoadOp::create(builder, loc, copyTy, srcRsrc, srcOff, soffset,
-                                                     zero, noAttrs, noAttrs, noAttrs);
+                                                     aux, noAttrs, noAttrs, noAttrs);
     if (resultTy && loaded.getType() != resultTy)
       loaded = LLVM::BitcastOp::create(builder, loc, resultTy, loaded);
     return loaded;
@@ -118,7 +120,7 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
     Value stored = src;
     if (stored.getType() != copyTy)
       stored = LLVM::BitcastOp::create(builder, loc, copyTy, stored);
-    ROCDL::RawPtrBufferStoreOp::create(builder, loc, stored, dstRsrc, dstOff, soffset, zero,
+    ROCDL::RawPtrBufferStoreOp::create(builder, loc, stored, dstRsrc, dstOff, soffset, aux,
                                        noAttrs, noAttrs, noAttrs);
     return stored;
   }
