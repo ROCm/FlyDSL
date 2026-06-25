@@ -1370,11 +1370,11 @@ def make_tile(*args):
     return static(tile_type)
 
 
-def _make_tile_or_layout(args):
-    if isinstance(args, ir.Value):
-        return args
-    if isinstance(args, int):
-        return make_layout(args, 1)
-    if isinstance(args, tuple):
-        return make_tile(*args)
-    raise ValueError(f"make_tile_or_layout: expected int, tuple, or Layout, got {type(args)}")
+def _make_tile_or_layout(arg):
+    if isinstance(arg, ir.Value):
+        return arg
+    if isinstance(arg, int):
+        return make_layout(arg, 1)
+    if isinstance(arg, (tuple, list)):
+        return make_tile(*arg)
+    raise ValueError(f"_make_tile_or_layout: expected int, tuple/list, or Layout, got {type(arg)}")
