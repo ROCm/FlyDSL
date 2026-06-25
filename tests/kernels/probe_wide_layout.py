@@ -32,14 +32,11 @@ def build():
     def probe(Abytes: fx.Tensor, Bbytes: fx.Tensor, OUT: fx.Tensor):
         # A/Bbytes: [64, 32] int8 operands (32 fp8/lane). OUT: [64, 16] f32 acc per lane.
         v16f32 = Vec.make_type(16, fx.Float32)
-        v8i32 = Vec.make_type(8, fx.Int32)
         lane = fx.Index(gpu.thread_idx.x) % fx.Index(WARP)
         Adiv = fx.logical_divide(fx.rocdl.make_buffer_tensor(Abytes), fx.make_layout(1, 1))
         Bdiv = fx.logical_divide(fx.rocdl.make_buffer_tensor(Bbytes), fx.make_layout(1, 1))
         Odiv = fx.logical_divide(fx.rocdl.make_buffer_tensor(OUT), fx.make_layout(1, 1))
         load_b = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
-        store32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
-        oreg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
         v4i32 = Vec.make_type(4, fx.Int32)
 
         # Load this lane's 32 B bytes (= 8 i32) as two v4i32 (lane*32 .. +16 bytes).
