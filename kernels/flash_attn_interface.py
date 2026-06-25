@@ -169,6 +169,7 @@ def _build_paged(
     enable_stagger: bool,
     num_kv_splits: int = 1,
     varlen: bool = False,
+    kv_cache_layout: str = "linear",
 ):
     """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
 
@@ -179,6 +180,9 @@ def _build_paged(
     ``varlen=True`` builds the packed-Q (cu_seqlens) + paged-KV variant: Q/O are
     ``[total_q, H, D]`` and K/V are the physical page cache, looked up via the
     block table per kv-tile. Mutually exclusive with split-K.
+
+    ``kv_cache_layout`` selects the physical page layout: "linear"
+    [NumBlocks,PageSize,Hkv,D] or "vectorized" (aiter 5D).
     """
     from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
 
@@ -192,6 +196,7 @@ def _build_paged(
         varlen=varlen,
         num_kv_splits=num_kv_splits,
         cross_seqlen=cross_seqlen,
+        kv_cache_layout=kv_cache_layout,
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=lazy_rescale,
@@ -243,9 +248,9 @@ def _flydsl_flash_attn_paged(
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
       per kv-tile via block_table; split-K not supported (matches dense varlen).
     """
-    if kv_cache_layout != "linear":
+    if kv_cache_layout not in ("linear", "vectorized"):
         raise NotImplementedError(
-            f"flydsl_flash_attn_func: native paged KV supports kv_cache_layout='linear' only, "
+            f"flydsl_flash_attn_func: native paged KV supports kv_cache_layout in ('linear','vectorized'), "
             f"got {kv_cache_layout!r}"
         )
     if kv_lookup_table != "vllm":
@@ -257,7 +262,14 @@ def _flydsl_flash_attn_paged(
         raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports causal=True only")
     if block_table is None or seqlen_k is None:
         raise ValueError("flydsl_flash_attn_func: native paged KV (vllm) requires block_table and seqlen_k")
-    if k.dim() != 4:
+    vectorized = kv_cache_layout == "vectorized"
+    if vectorized:
+        # aiter 5D: K [NumBlocks, Hkv, D/kVS, PageSize, kVS], V [NumBlocks, Hkv, PageSize/kVS, D, kVS].
+        if k.dim() != 5 or v.dim() != 5:
+            raise ValueError(
+                f"flydsl_flash_attn_func: vectorized paged K/V must be 5D, got K{k.dim()}D V{v.dim()}D"
+            )
+    elif k.dim() != 4:
         raise ValueError(
             f"flydsl_flash_attn_func: linear paged K/V must be 4D [NumBlocks,PageSize,Hkv,D], got {k.dim()}D"
         )
@@ -282,16 +294,25 @@ def _flydsl_flash_attn_paged(
         if q.dim() != 4:
             raise ValueError(f"flydsl_flash_attn_func: paged dense q must be 4D [B,Sq,H,D], got {q.dim()}D")
         B, Sq, H, D = q.shape
-    page_size = int(k.shape[1])
-    Hkv = int(k.shape[2])
+    if vectorized:
+        kvs = 16 // q.element_size()
+        Hkv = int(k.shape[1])
+        page_size = int(k.shape[3])
+        k_head_dim = int(k.shape[2]) * int(k.shape[4])  # (D/kVS) * kVS
+        if int(k.shape[4]) != kvs:
+            raise ValueError(f"flydsl_flash_attn_func: vectorized K last dim ({k.shape[4]}) must equal kVS={kvs}")
+    else:
+        page_size = int(k.shape[1])
+        Hkv = int(k.shape[2])
+        k_head_dim = int(k.shape[3])
     if page_size != _PAGED_PAGE_SIZE:
         raise NotImplementedError(
             f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
         )
     if D != 128:
         raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=128 only, got {D}")
-    if int(k.shape[3]) != D:
-        raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k.shape[3]}) must match q head_dim ({D})")
+    if k_head_dim != D:
+        raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
 
     if num_kv_heads is None:
         num_kv_heads = Hkv
@@ -337,6 +358,7 @@ def _flydsl_flash_attn_paged(
             enable_stagger=dualwave_swp_enable_stagger,
             num_kv_splits=int(num_kv_splits),
             varlen=varlen,
+            kv_cache_layout=kv_cache_layout,
         )
         if out is None:
             out = torch.empty_like(q)
