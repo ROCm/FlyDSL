@@ -20,11 +20,13 @@ from flydsl.expr.numeric import (
     Float16,
     Float32,
     Float64,
+    Int8,
     Int16,
     Int32,
     Numeric,
     Uint32,
 )
+from flydsl.expr.typing import Float32x4
 from flydsl.expr.vector import (
     ReductionOp,
     Vector,
@@ -906,5 +908,105 @@ class TestProtocol:
             ta = Vector(a, 8, Float32)
             h = hash(ta)
             assert isinstance(h, int)
+
+        _build_module(build)
+
+
+# ===========================================================================
+# K. Common vector type aliases (Float32x4, ...)
+# ===========================================================================
+
+
+class TestVectorAliases:
+    @staticmethod
+    def _assert_alias_ir_type(alias, shape, dtype):
+        vty = ir.VectorType(alias.ir_type)
+        assert tuple(vty.shape) == shape
+        assert Numeric.from_ir_type(vty.element_type) is dtype
+
+    def test_alias_is_specialized_subclass(self):
+        from flydsl.expr.typing import Float32x4
+
+        assert issubclass(Float32x4, Vector)
+
+        def build(_a):
+            self._assert_alias_ir_type(Float32x4, (4,), Float32)
+
+        _build_module(build)
+
+    def test_alias_exported_from_package(self):
+        import flydsl.expr as fx
+
+        assert fx.Float32x4 is Float32x4
+
+        def build(_a):
+            self._assert_alias_ir_type(fx.BFloat16x8, (8,), BFloat16)
+            self._assert_alias_ir_type(fx.Int8x16, (16,), Int8)
+
+        _build_module(build)
+
+    def test_make_type_matches_plain_vector(self):
+        from flydsl.expr.typing import Float16x8
+
+        def build(_a):
+            assert Float32x4.make_type(4, Float32) == Vector.make_type(4, Float32)
+            assert Float16x8.make_type(8, Float16) == Vector.make_type(8, Float16)
+
+        _build_module(build)
+
+    def test_construct_enforces_fixed_shape_and_dtype(self):
+        from flydsl.expr.typing import Float32x2
+
+        def build(_a):
+            vec = Float32x4.filled(4, 1.0, Float32)
+            assert isinstance(vec, Float32x4)
+            assert vec.dtype is Float32
+            assert vec.shape == (4,)
+            with pytest.raises(ValueError):
+                # value has 4 elements but the alias fixes the shape to (2,)
+                Float32x2(vec.ir_value())
+
+        _build_module(build)
+
+    def test_construct_from_scalar_splat(self):
+        from flydsl.expr.typing import Int8x16
+
+        def build(_a):
+            f32_vec = Float32x4(1.0)
+            assert isinstance(f32_vec, Float32x4)
+            assert f32_vec.dtype is Float32
+            assert f32_vec.shape == (4,)
+
+            i8_vec = Int8x16(7)
+            assert isinstance(i8_vec, Int8x16)
+            assert i8_vec.dtype is Int8
+            assert i8_vec.shape == (16,)
+
+        _build_module(build)
+
+    def test_construct_from_typed_list_elements(self):
+        from flydsl.expr.typing import Int32x4
+
+        def build(_a):
+            f32_vec = Float32x4([Float32(0.0), Float32(1.0), Float32(2.0), Float32(3.0)])
+            assert isinstance(f32_vec, Float32x4)
+            assert f32_vec.dtype is Float32
+            assert f32_vec.shape == (4,)
+
+            i32_vec = Int32x4([i for i in range(4)])
+            assert isinstance(i32_vec, Int32x4)
+            assert i32_vec.dtype is Int32
+            assert i32_vec.shape == (4,)
+
+        _build_module(build)
+
+    def test_construct_from_typed_tuple_elements(self):
+        from flydsl.expr.typing import Float16x8
+
+        def build(_a):
+            vec = Float16x8(tuple(Float16(i) for i in range(8)))
+            assert isinstance(vec, Float16x8)
+            assert vec.dtype is Float16
+            assert vec.shape == (8,)
 
         _build_module(build)
