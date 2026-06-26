@@ -218,7 +218,14 @@ def test_mfma_a8_flyc_preshuffle(
         b_packed = _pack_shuffled_int8_to_packed_int4_no_perm(b_shuffled)
 
     c_ref = run_torch(a_q, b_q, scale_a, scale_b, bias=None, dtype=torch.float32)
-    c_out_raw = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
+    # Allocate guard rows past M and fill with a sentinel (outputs are >= 0, so a
+    # negative sentinel never collides). For ragged M, blocks covering rows
+    # [M, grid_rows) must have their C stores dropped by the buffer descriptor;
+    # the guard rows must stay sentinel after the run (OOB check below).
+    grid_rows = ((M + tile_m - 1) // tile_m) * tile_m
+    oob_sentinel = torch.tensor(-8192.0, dtype=torch_out_dtype, device=device)
+    c_alloc = torch.full((grid_rows, N), oob_sentinel, dtype=torch_out_dtype, device=device)
+    c_out_raw = c_alloc[:M]
 
     b_input = b_packed if is_int4 else b_shuffled
     if scale_a is None:
@@ -270,6 +277,10 @@ def test_mfma_a8_flyc_preshuffle(
 
     assert verify_output(c_out_scaled, c_ref, rtol=0.1, atol=0.1)
 
+    guard = c_alloc[M:]
+    n_bad = int((guard != oob_sentinel).sum().item())
+    assert n_bad == 0, f"C store wrote {n_bad} element(s) past row M={M} (missing num_records bound)"
+
     if HAS_AITER and bool(run_aiter_bench) and (not is_int4) and (in_dtype in ("fp8", "int8")):
         print("-" * 40)
         print("Running Aiter Benchmark...")
@@ -305,6 +316,32 @@ def test_mfma_a8_flyc_preshuffle(
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+@pytest.mark.parametrize("in_dtype", ["fp8", "int8", "fp16", "bf16"])
+def test_v2_preshuffle_c_store_oob(in_dtype):
+    """v2 layout-API kernel must not load A / store C past row M for ragged M.
+
+    M=33 with tile_m=32 makes the last block span rows [32, 64); rows [33, 64)
+    are out of bounds and must be dropped by the A/C buffer descriptors. The
+    harness fills guard rows past M with a sentinel and asserts none were
+    overwritten (in addition to verifying the in-range output).
+    """
+    if get_rocm_arch() not in ("gfx942", "gfx950"):
+        pytest.skip(f"v2 preshuffle GEMM requires gfx942/gfx950, got {get_rocm_arch()}")
+    test_mfma_a8_flyc_preshuffle(
+        in_dtype,
+        M=33,
+        N=1024,
+        K=2048,
+        tile_m=32,
+        tile_n=64,
+        tile_k=512,
+        use_async_copy=False,
+        test_graph=False,
+        run_aiter_bench=False,
+        use_v2=True,
+    )
 
 
 @pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])

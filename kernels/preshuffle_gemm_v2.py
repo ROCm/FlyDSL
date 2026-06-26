@@ -111,9 +111,17 @@ def compile_preshuffle_gemm_v2(
         else:
             tiled_mma = tiled_mma_arg
 
-        gA = fx.rocdl.make_buffer_tensor(arg_a)
+        # Bound A (read) and C (store) to the actual M extent so blocks covering
+        # rows past M (ragged M) drop their OOB loads/stores at the descriptor
+        # instead of faulting / writing past the allocation. B and scales are
+        # exact-multiple in N and stay max_size.
+        gA = fx.rocdl.make_buffer_tensor(
+            arg_a, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes)
+        )
         gB = fx.rocdl.make_buffer_tensor(arg_b)
-        gC = fx.rocdl.make_buffer_tensor(arg_c)
+        gC = fx.rocdl.make_buffer_tensor(
+            arg_c, max_size=False, num_records_bytes=fx.Int64(i32_m) * fx.Int64(N) * fx.Int64(2)
+        )
 
         tA = fx.flat_divide(gA, fx.make_tile(tile_m, tile_k))[None, None, bid_x, None]
         tB = fx.flat_divide(gB, fx.make_tile(tile_n, tile_k))[None, None, bid_y, None]
