@@ -12,15 +12,12 @@ from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl.expr import arith, buffer_ops, const_expr, rocdl
 from flydsl.expr.typing import T
 
-# -- shape constants -----------------------------------------------------------
-# gemm1 (up/gate-proj) KIMI defaults: D_HIDDEN (K, contraction), D_INTER (output),
-# NE (#experts), TOPK. Per-shape values come from the compile args.
-NE_DEFAULT, K_DEFAULT, INTER_DEFAULT, TOPK_DEFAULT = 385, 7168, 512, 9
-# gemm2 (down-proj) KIMI defaults: contraction K = inter_dim; N_OUT = model_dim.
+# -- shape constants (KIMI defaults; per-shape values come from the compile args) --
+NE = 385  # #experts
+TOPK_DEFAULT = 9
+H_DEFAULT = 7168  # model_dim: gemm1 D_HIDDEN (contraction) / gemm2 N_OUT (output)
+INTER_DEFAULT = 512  # inter_dim: gemm1 D_INTER (output) / gemm2 D_INTER (contraction)
 MAX_M = 655360
-NE = 385
-K = 512
-N_OUT = 7168
 # tiling (BM-independent).
 BN = BK = 256
 KH_TILE = BK // 2  # 128 packed-fp4 bytes per K-tile
@@ -65,7 +62,7 @@ def num_n_blocks_for(n_out):
     return n_out // 256
 
 
-def kbs_per_expert_dw_for(n_out, k=K):
+def kbs_per_expert_dw_for(n_out, k=INTER_DEFAULT):
     return (n_out // 16 // 2) * kbs_stride_n0_dw_for(k)
 
 

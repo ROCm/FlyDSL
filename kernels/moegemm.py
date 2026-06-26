@@ -136,6 +136,53 @@ def gemm_mma(atoms, a_frag, b_frag, c_frag, opsel_a, opsel_b, sa, sb):
 
 
 # ===========================================================================
+# Shared A ds-read + per-J MMA cluster (used by both gemm bodies)
+# ===========================================================================
+def _issue_a_ds_read_dt(saq, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8, a_vals, a_frags):
+    """A ds-read for one slot: fp4 -> Vec4 i32 into a_frags; fp8 -> Vec8 i32 (two
+    halves 64B apart) into a_vals."""
+    base_ptr = _lds_base_ptr3(saq.get())
+    for k in range_constexpr(2):
+        for i in range_constexpr(kMChunks):
+            lds_row = lane_mod_16 + fx.Int32(i * 16)
+            row_off = fx.Int32(slot * slot_bytes) + lds_row * fx.Int32(KH_TILE_A)
+            if const_expr(is_f8):
+                mask = _lds_swizzle_mask_f8(lane_mod_16)
+                col0 = lane_div_16 * fx.Int32(16) + fx.Int32(k * 128)
+                col_lo = col0 ^ mask
+                col_hi = (col0 + fx.Int32(64)) ^ mask
+                lo = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_lo)))
+                hi = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_hi)))
+                a64 = Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64)
+                a_vals[i][k] = _raw(a64.bitcast(fx.Int32))
+            else:
+                mask = _lds_swizzle_mask(lane_mod_16)
+                lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
+                vec = llvm.load(T.vec(4, T.i32), _gep3(base_ptr, row_off + lds_col))
+                a_frags[i][k].store(Vec(vec))
+
+
+def _mma_one_j(J, in_b, sa, sb, bq_frags_kt, is_f8, cbsz_a, a_vals, a_frags, accm, c_frags, atoms):
+    """One J-cluster (4 scaled MFMAs). fp4 via gemm_mma; fp8 via the raw mfma_scale
+    intrinsic. mni=J//2; in_b (gate mode) is resolved by the caller."""
+    if const_expr(is_f8):
+        bJ0 = Vec(bq_frags_kt[J][0].load())
+        bJ1 = Vec(bq_frags_kt[J][1].load())
+        for osa, k, i in ((0, 0, 0), (1, 0, 1), (2, 1, 0), (3, 1, 1)):
+            bJ = bJ0 if k == 0 else bJ1
+            osb = (0 if k == 0 else 2) + in_b
+            accm[i][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                T.f32x4, [a_vals[i][k], bJ, accm[i][J], cbsz_a, 4, osa, sa, osb, sb]
+            )
+    else:
+        bJ0, bJ1 = bq_frags_kt[J][0], bq_frags_kt[J][1]
+        gemm_mma(atoms, a_frags[0][0], bJ0, c_frags[0][J], 0, 0 + in_b, sa, sb)
+        gemm_mma(atoms, a_frags[1][0], bJ0, c_frags[1][J], 1, 0 + in_b, sa, sb)
+        gemm_mma(atoms, a_frags[0][1], bJ1, c_frags[0][J], 2, 2 + in_b, sa, sb)
+        gemm_mma(atoms, a_frags[1][1], bJ1, c_frags[1][J], 3, 2 + in_b, sa, sb)
+
+
+# ===========================================================================
 # gemm1 (up/gate-proj)
 # ===========================================================================
 @flyc.jit
@@ -267,27 +314,7 @@ def _gemm1_body_v2(
                 )
 
     def issue_a_ds_read(slot):
-        # fp4 -> Vec4 i32 A fragment (fx.gemm); fp8 -> Vec8 i32 (two 16-K halves 64B
-        # apart) for the raw mfma_scale intrinsic.
-        base_ptr = _lds_base_ptr3(s_aq.get())
-        for k in range_constexpr(2):
-            for i in range_constexpr(kMChunks):
-                lds_row = lane_mod_16 + fx.Int32(i * 16)
-                row_off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * fx.Int32(KH_TILE_A)
-                if const_expr(is_f8_a):
-                    mask = _lds_swizzle_mask_f8(lane_mod_16)
-                    col0 = lane_div_16 * fx.Int32(16) + fx.Int32(k * 128)
-                    col_lo = col0 ^ mask
-                    col_hi = (col0 + fx.Int32(64)) ^ mask
-                    lo = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_lo)))
-                    hi = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_hi)))
-                    a64 = Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64)
-                    _a_vals[i][k] = _raw(a64.bitcast(fx.Int32))
-                else:
-                    mask = _lds_swizzle_mask(lane_mod_16)
-                    lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
-                    vec = llvm.load(T.vec(4, T.i32), _gep3(base_ptr, row_off + lds_col))
-                    _a_frags[i][k].store(Vec(vec))
+        _issue_a_ds_read_dt(s_aq, slot, BM * KH_TILE_A, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, _a_vals, _a_frags)
 
     def issue_a_scale_load():
         chunk_base = m_row // fx.Int32(32)
@@ -369,6 +396,7 @@ def _gemm1_body_v2(
     # fp4: A in fx.gemm fragments (refilled per K), C accumulates in place. fp8: A is
     # a per-iter Vec8 i32 (_a_vals), C a raw f32x4 accumulator (accm, zero-init).
     zero4 = Vec.filled(4, 0.0, fx.Float32)
+    _a_vals = _a_frags = _c_frags = accm = None
     if const_expr(is_f8_a):
         _a_vals = [[None, None] for _ in range(kMChunks)]
         accm = [[zero4 for _ in range(4)] for _ in range(kMChunks)]
@@ -402,9 +430,6 @@ def _gemm1_body_v2(
     # MMA: fp4 via fx.gemm (one per mfma); fp8 via the raw scaled-MFMA intrinsic.
     _scale_mma_atoms = scale_mma_atoms() if const_expr(not is_f8_a) else None
 
-    def _gemm_mma(a_frag, b_frag, c_frag, opsel_a, opsel_b, sa, sb):
-        gemm_mma(_scale_mma_atoms, a_frag, b_frag, c_frag, opsel_a, opsel_b, sa, sb)
-
     def mfma_cluster(stage, a_scale, J):
         # interleave: mni=J//2 (n0), in_b=J%2 (gate/up); separate: swapped.
         if const_expr(interleave):
@@ -413,21 +438,9 @@ def _gemm1_body_v2(
             mni, in_b = J % 2, J // 2
         sb = _raw(Vec(_bs_frags[stage][mni].load())[0])
         sa = a_scale[0]  # kSubBlocks == 1
-        if const_expr(is_f8_a):
-            bJ0 = Vec(_bq_frags[stage][J][0].load())
-            bJ1 = Vec(_bq_frags[stage][J][1].load())
-            for osa, k, i in ((0, 0, 0), (1, 0, 1), (2, 1, 0), (3, 1, 1)):
-                bJ = bJ0 if k == 0 else bJ1
-                osb = (0 if k == 0 else 2) + in_b
-                accm[i][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                    T.f32x4, [_a_vals[i][k], bJ, accm[i][J], cbsz_a, 4, osa, sa, osb, sb]
-                )
-        else:
-            bJ0, bJ1 = _bq_frags[stage][J][0], _bq_frags[stage][J][1]
-            _gemm_mma(_a_frags[0][0], bJ0, _c_frags[0][J], 0, 0 + in_b, sa, sb)
-            _gemm_mma(_a_frags[1][0], bJ0, _c_frags[1][J], 1, 0 + in_b, sa, sb)
-            _gemm_mma(_a_frags[0][1], bJ1, _c_frags[0][J], 2, 2 + in_b, sa, sb)
-            _gemm_mma(_a_frags[1][1], bJ1, _c_frags[1][J], 3, 2 + in_b, sa, sb)
+        _mma_one_j(
+            J, in_b, sa, sb, _bq_frags[stage], is_f8_a, cbsz_a, _a_vals, _a_frags, accm, _c_frags, _scale_mma_atoms
+        )
 
     # zero C (fp4 fragments accumulate in place thereafter; fp8 accm pre-init above).
     if const_expr(not is_f8_a):
@@ -735,6 +748,7 @@ def _gemm2_body_v2(
     ]
     # fp4: A in fx.gemm fragments. fp8: A a per-iter Vec8 i32, C a raw f32x4 (accm).
     zero4 = Vec.filled(4, 0.0, fx.Float32)
+    _a_vals = _a_frags = _c_frags = accm = None
     if const_expr(is_f8_a):
         _a_vals = [[None, None] for _ in range(kMChunks)]
         accm = [[zero4 for _ in range(4)] for _ in range(kMChunks)]
@@ -762,27 +776,8 @@ def _gemm2_body_v2(
                 _bs_frags[kt][mw],
             )
 
-    # A ds-read: fp4 -> Vec4 i32 fragment; fp8 -> Vec8 i32 (two halves 64B apart).
     def issue_a_ds_read(slot):
-        base_ptr = _lds_base_ptr3(saq.get())
-        for k in range_constexpr(2):
-            for i in range_constexpr(kMChunks):
-                lds_row = lane_mod_16 + fx.Int32(i * 16)
-                row_off = fx.Int32(slot * slot_bytes) + lds_row * fx.Int32(KH_TILE_A)
-                if const_expr(is_f8_a):
-                    mask = _lds_swizzle_mask_f8(lane_mod_16)
-                    col0 = lane_div_16 * fx.Int32(16) + fx.Int32(k * 128)
-                    col_lo = col0 ^ mask
-                    col_hi = (col0 + fx.Int32(64)) ^ mask
-                    lo = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_lo)))
-                    hi = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_hi)))
-                    a64 = Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64)
-                    _a_vals[i][k] = _raw(a64.bitcast(fx.Int32))
-                else:
-                    mask = _lds_swizzle_mask(lane_mod_16)
-                    lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
-                    vec = llvm.load(T.vec(4, T.i32), _gep3(base_ptr, row_off + lds_col))
-                    _a_frags[i][k].store(Vec(vec))
+        _issue_a_ds_read_dt(saq, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, _a_vals, _a_frags)
 
     def issue_a_load_lds(slot, kt):
         _issue_a_load_lds_dt(aq_rsrc, saq, slot, kt, m_row, wave, lane, is_f8_a, KH_TILE_A, K_BYTES)
@@ -794,21 +789,9 @@ def _gemm2_body_v2(
         for J in range_constexpr(4):
             mni, in_b = J // 2, J % 2
             sb = _raw(Vec(_bs_frags[kt][mni].load())[0])
-            if const_expr(is_f8_a):
-                bJ0 = Vec(_bq_frags[kt][J][0].load())
-                bJ1 = Vec(_bq_frags[kt][J][1].load())
-                for osa, k, i in ((0, 0, 0), (1, 0, 1), (2, 1, 0), (3, 1, 1)):
-                    bJ = bJ0 if k == 0 else bJ1
-                    osb = (0 if k == 0 else 2) + in_b
-                    accm[i][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                        T.f32x4, [_a_vals[i][k], bJ, accm[i][J], cbsz_a, 4, osa, sa, osb, sb]
-                    )
-            else:
-                bJ0, bJ1 = _bq_frags[kt][J][0], _bq_frags[kt][J][1]
-                gemm_mma(_scale_mma_atoms, _a_frags[0][0], bJ0, _c_frags[0][J], 0, 0 + in_b, sa, sb)
-                gemm_mma(_scale_mma_atoms, _a_frags[1][0], bJ0, _c_frags[1][J], 1, 0 + in_b, sa, sb)
-                gemm_mma(_scale_mma_atoms, _a_frags[0][1], bJ1, _c_frags[0][J], 2, 2 + in_b, sa, sb)
-                gemm_mma(_scale_mma_atoms, _a_frags[1][1], bJ1, _c_frags[1][J], 3, 2 + in_b, sa, sb)
+            _mma_one_j(
+                J, in_b, sa, sb, _bq_frags[kt], is_f8_a, cbsz_a, _a_vals, _a_frags, accm, _c_frags, _scale_mma_atoms
+            )
 
     # zero C (fp4 fragments accumulate in place; fp8 accm pre-init above).
     if const_expr(not is_f8_a):

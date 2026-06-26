@@ -28,14 +28,11 @@ from .moegemm import (
 from .utils import (
     BK,
     BN,
+    H_DEFAULT,
     INTER_DEFAULT,
-    K_DEFAULT,
     MAX_M,
-    N_OUT,
     NE,
-    NE_DEFAULT,
     TOPK_DEFAULT,
-    K,
     _global_ptr1,
     _raw,
     _udiv,
@@ -56,7 +53,7 @@ __all__ = [
 # ===========================================================================
 # gemm1 (up/gate-proj) compile
 # ===========================================================================
-def gemm1_grid(n_tokens, BM=32, NE=NE_DEFAULT, TOPK=TOPK_DEFAULT, INTER=INTER_DEFAULT):
+def gemm1_grid(n_tokens, BM=32, NE=NE, TOPK=TOPK_DEFAULT, INTER=INTER_DEFAULT):
     """Host-side grid size (BM=32 active-experts bound)."""
     active = min(n_tokens * TOPK, NE)
     max_m_blocks = (n_tokens * TOPK + active * (BM - 1) + BM - 1) // BM
@@ -67,9 +64,9 @@ def compile_gemm1_a4w4_port(
     BM=32,
     use_nt=True,
     inline_quant=False,
-    D_HIDDEN=K_DEFAULT,
+    D_HIDDEN=H_DEFAULT,
     D_INTER=INTER_DEFAULT,
-    NE=NE_DEFAULT,
+    NE=NE,
     TOPK=TOPK_DEFAULT,
     interleave=True,
     a_dtype="fp4",
@@ -200,10 +197,10 @@ def compile_gemm2_a4w4_port(
     BM=32,
     use_nt=False,
     NE=NE,
-    N_OUT=N_OUT,
+    N_OUT=H_DEFAULT,
     MAX_M=MAX_M,
     epilog="atomic",
-    D_INTER=K,
+    D_INTER=INTER_DEFAULT,
     D_INTER_REAL=None,
     a_dtype="fp4",
 ):
