@@ -1,17 +1,112 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Common low-level device-memory helpers shared across kernels.
+"""Common low-level helpers shared across kernels.
 
-Currently hosts the generic global-memory load API used by the paged-attention
-decode kernels.  Keep additions here small and broadly reusable.
+Hosts integer-arithmetic helpers (pow2 div/rem, cdiv) and the generic
+global-memory load API used by the paged-attention decode kernels.  Keep
+additions here small and broadly reusable.
 """
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import buffer_ops
+from flydsl.expr import arith, buffer_ops, const_expr, rocdl
 from flydsl.expr.typing import T
+
+
+def _rcp_f32(value):
+    return rocdl.rcp(T.f32, value)
+
+
+def _exp2_amdgcn_scalar(scalar_value):
+    """Direct ``llvm.amdgcn.exp2.f32`` intrinsic call on one f32 scalar.
+
+    The default ``fly_math.exp2`` lowering routes through ``__ocml_exp2_f32``,
+    which (for full IEEE range/subnormal correctness) expands at codegen time
+    into ``v_exp_f32 + v_ldexp_f32`` per element.  The amdgcn intrinsic compiles
+    to a single ``v_exp_f32``, matching what Gluon emits for its softmax.
+    Skipping ldexp is safe only when the operand is pre-clamped to the
+    fast-range (as PA softmax does via `safe_qk_max`/`safe_partition_max`).
+    """
+    raw = (
+        arith.unwrap(scalar_value)
+        if hasattr(scalar_value, "ir_value") or hasattr(scalar_value, "type")
+        else scalar_value
+    )
+    f32_ty = ir.F32Type.get()
+    return llvm.call_intrinsic(f32_ty, "llvm.amdgcn.exp2.f32", [raw], [], [])
+
+
+def _exp2_f32_fast(value):
+    """Compute 2^value (elementwise for vectors) via the amdgcn intrinsic,
+    avoiding the ``v_exp_f32 + v_ldexp_f32`` pair OCML lowering produces.
+    Requires pre-clamped inputs (see :func:`_exp2_amdgcn_scalar`)."""
+    from flydsl._mlir.dialects import vector as _vector_dialect
+
+    raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
+    ty = raw.type
+    if isinstance(ty, ir.VectorType):
+        n = ty.shape[0]
+        elems = []
+        for i in range(n):
+            scalar = _vector_dialect.extract(raw, static_position=[i], dynamic_position=[])
+            elems.append(_exp2_amdgcn_scalar(scalar))
+        return _vector_dialect.from_elements(ty, elems)
+    return _exp2_amdgcn_scalar(raw)
+
+
+def _cdiv(numer: int, denom: int) -> int:
+    return (numer + denom - 1) // denom
+
+
+def _pow2_shift(value: int) -> int:
+    assert value > 0 and (value & (value - 1)) == 0
+    return value.bit_length() - 1
+
+
+def _is_pow2(value: int) -> bool:
+    return value > 0 and (value & (value - 1)) == 0
+
+
+def _udiv_pow2(value, divisor: int):
+    return value >> fx.Int32(_pow2_shift(divisor))
+
+
+def _urem_pow2(value, divisor: int):
+    return value & fx.Int32(divisor - 1)
+
+
+def _udiv_const(value, divisor: int):
+    if const_expr(_is_pow2(divisor)):
+        return _udiv_pow2(value, divisor)
+    return value // fx.Int32(divisor)
+
+
+def _urem_const(value, divisor: int):
+    if const_expr(_is_pow2(divisor)):
+        return _urem_pow2(value, divisor)
+    return value % fx.Int32(divisor)
+
+
+def _maxnumf(a, b):
+    """Non-NaN-propagating max, equivalent to ``a.maximumf(b)`` for non-NaN
+    inputs but lowers to a single ``v_max_f32`` instead of the
+    ``v_max_f32 + v_cmp_o_f32 + s_nop 1 + v_cndmask`` chain that
+    ``arith.maximumf`` emits for IEEE 754 NaN-propagation semantics.
+
+    Safe for PA softmax: inputs are either finite or -inf (from masking),
+    never NaN.  Each call site saves ~3 instructions + a 1-cycle VCC->VALU
+    s_nop hazard in the cross-warp max chain.
+    """
+    return type(a)(arith.maxnumf(arith.unwrap(a), arith.unwrap(b)))
+
+
+def _unflatten_k(k_flat, qkhe_loop: int = 2):
+    # k_flat carries ``tloop * qkhe_loop * 2`` i64 scalars; recover tloop from
+    # its length so this helper needs no geometry constant.
+    n = qkhe_loop * 2
+    return [[k_flat[td * n + j] for j in range(n)] for td in range(len(k_flat) // n)]
 
 
 def extract_global_ptr(tensor):
@@ -110,7 +205,6 @@ def buffer_load(rsrc, soffset_i32, vec_width=4, *, is_scalar=False, dtype=None, 
             cache_modifier=cache_modifier,
         )
 
-    from flydsl.expr import arith
     from flydsl.expr.rocdl import _to_ir
 
     i32_ty = ir.IntegerType.get_signless(32)

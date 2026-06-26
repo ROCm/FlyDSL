@@ -42,7 +42,6 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import Int32, T
@@ -50,7 +49,17 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels import dpp_utils
 from kernels.kernels_common import get_warp_size
-from kernels.utils import global_load_i64x2, global_ptr_from_addr
+from kernels.utils import (
+    _exp2_f32_fast,
+    _is_pow2,
+    _maxnumf,
+    _rcp_f32,
+    _udiv_const,
+    _unflatten_k,
+    _urem_const,
+    global_load_i64x2,
+    global_ptr_from_addr,
+)
 
 _WORK_INFO_FIELDS = 8
 
@@ -82,10 +91,6 @@ def get_pa_metadata_info_v1(batch_size: int, num_head_k: int = 1, num_cu: int = 
         ((tile_cnt, 2), torch.int32),  # reduce_final_map
         ((max_split_tiles,), torch.int32),  # reduce_partial_map
     )
-
-
-def _is_pow2(x: int) -> bool:
-    return x > 0 and (x & (x - 1)) == 0
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -137,89 +142,11 @@ FP8_MAX = 240.0
 LOG2E = 1.4426950408889634
 
 
-def _pow2_shift(value: int) -> int:
-    assert value > 0 and (value & (value - 1)) == 0
-    return value.bit_length() - 1
-
-
-def _udiv_pow2(value, divisor: int):
-    return value >> fx.Int32(_pow2_shift(divisor))
-
-
-def _urem_pow2(value, divisor: int):
-    return value & fx.Int32(divisor - 1)
-
-
-def _udiv_const(value, divisor: int):
-    if const_expr(_is_pow2(divisor)):
-        return _udiv_pow2(value, divisor)
-    return value // fx.Int32(divisor)
-
-
-def _urem_const(value, divisor: int):
-    if const_expr(_is_pow2(divisor)):
-        return _urem_pow2(value, divisor)
-    return value % fx.Int32(divisor)
-
-
 def _compute_block_base_dw_i64(phys_block, block_stride, head_offset):
     phys_block_i64 = fx.Int64(phys_block)
     block_stride_i64 = fx.Int64(block_stride)
     head_offset_i64 = fx.Int64(head_offset)
     return (phys_block_i64 * block_stride_i64 + head_offset_i64) >> fx.Int64(2)
-
-
-def _rcp_f32(value):
-    return rocdl.rcp(T.f32, value)
-
-
-def _exp2_amdgcn_scalar(scalar_value):
-    """Direct ``llvm.amdgcn.exp2.f32`` intrinsic call on one f32 scalar.
-
-    The default ``fly_math.exp2`` lowering routes through ``__ocml_exp2_f32``,
-    which (for full IEEE range/subnormal correctness) expands at codegen time
-    into ``v_exp_f32 + v_ldexp_f32`` per element.  The amdgcn intrinsic compiles
-    to a single ``v_exp_f32``, matching what Gluon emits for its softmax.
-    Skipping ldexp is safe here because softmax inputs are pre-clamped via
-    `safe_qk_max`/`safe_partition_max` so the operand is in the fast-range.
-    """
-    raw = (
-        arith.unwrap(scalar_value)
-        if hasattr(scalar_value, "ir_value") or hasattr(scalar_value, "type")
-        else scalar_value
-    )
-    f32_ty = ir.F32Type.get()
-    return llvm.call_intrinsic(f32_ty, "llvm.amdgcn.exp2.f32", [raw], [], [])
-
-
-def _exp2_f32_fast(value):
-    """Compute 2^value (elementwise for vectors), using the amdgcn intrinsic
-    to avoid the ``v_exp_f32 + v_ldexp_f32`` pair OCML lowering produces."""
-    from flydsl._mlir.dialects import vector as _vector_dialect
-
-    raw = arith.unwrap(value) if hasattr(value, "ir_value") or hasattr(value, "type") else value
-    ty = raw.type
-    if isinstance(ty, ir.VectorType):
-        n = ty.shape[0]
-        elems = []
-        for i in range(n):
-            scalar = _vector_dialect.extract(raw, static_position=[i], dynamic_position=[])
-            elems.append(_exp2_amdgcn_scalar(scalar))
-        return _vector_dialect.from_elements(ty, elems)
-    return _exp2_amdgcn_scalar(raw)
-
-
-def _maxnumf(a, b):
-    """Non-NaN-propagating max, equivalent to ``a.maximumf(b)`` for non-NaN
-    inputs but lowers to a single ``v_max_f32`` instead of the
-    ``v_max_f32 + v_cmp_o_f32 + s_nop 1 + v_cndmask`` chain that
-    ``arith.maximumf`` emits for IEEE 754 NaN-propagation semantics.
-
-    Safe for PA softmax: inputs are either finite or -inf (from masking),
-    never NaN.  Each call site saves ~3 instructions + a 1-cycle VCC→VALU
-    s_nop hazard in the cross-warp max chain.
-    """
-    return type(a)(arith.maxnumf(arith.unwrap(a), arith.unwrap(b)))
 
 
 def _load_k_flat(
@@ -246,10 +173,6 @@ def _load_k_flat(
             k_flat.append(k2_words[1])
 
     return k_flat
-
-
-def _unflatten_k(k_flat, qkhe_loop: int = 2):
-    return [[k_flat[td * (qkhe_loop * 2) + j] for j in range(qkhe_loop * 2)] for td in range(TLOOP)]
 
 
 def _build_pa_thread_invariants(

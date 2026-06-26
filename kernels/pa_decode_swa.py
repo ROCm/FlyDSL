@@ -17,7 +17,16 @@ from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels import dpp_utils
-from kernels.utils import global_load_i32, global_load_i64x2, global_ptr_from_addr
+from kernels.utils import (
+    _cdiv,
+    _rcp_f32,
+    _udiv_const,
+    _unflatten_k,
+    _urem_const,
+    global_load_i32,
+    global_load_i64x2,
+    global_ptr_from_addr,
+)
 
 # ── Kernel geometry constants ────────────────────────────────────────
 KV_BLOCK_SIZE = 1024  # physical page size (matches SP3 kBlockSize)
@@ -53,10 +62,6 @@ LOG2E = 1.4426950408889634
 TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
 
 
-def _cdiv(numer: int, denom: int) -> int:
-    return (numer + denom - 1) // denom
-
-
 def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
     return _cdiv(query_length * query_group_size, MFMA_N)
 
@@ -65,44 +70,11 @@ def _get_sw_mtp_pair_offset(mtp_group_idx: int, mtp_subgroup_idx: int = 0) -> in
     return mtp_group_idx * MFMA_N + mtp_subgroup_idx * MFMA_N
 
 
-def _pow2_shift(value: int) -> int:
-    assert value > 0 and (value & (value - 1)) == 0
-    return value.bit_length() - 1
-
-
-def _is_pow2(value: int) -> bool:
-    return value > 0 and (value & (value - 1)) == 0
-
-
-def _udiv_pow2(value, divisor: int):
-    return value >> fx.Int32(_pow2_shift(divisor))
-
-
-def _urem_pow2(value, divisor: int):
-    return value & fx.Int32(divisor - 1)
-
-
-def _udiv_const(value, divisor: int):
-    if const_expr(_is_pow2(divisor)):
-        return _udiv_pow2(value, divisor)
-    return value // fx.Int32(divisor)
-
-
-def _urem_const(value, divisor: int):
-    if const_expr(_is_pow2(divisor)):
-        return _urem_pow2(value, divisor)
-    return value % fx.Int32(divisor)
-
-
 def _compute_block_base_dw_i64(phys_block, block_stride, head_offset):
     phys_block_i64 = fx.Int64(phys_block)
     block_stride_i64 = fx.Int64(block_stride)
     head_offset_i64 = fx.Int64(head_offset)
     return (phys_block_i64 * block_stride_i64 + head_offset_i64) >> fx.Int64(2)
-
-
-def _rcp_f32(value):
-    return rocdl.rcp(T.f32, value)
 
 
 def _exp2_f32_fast(value):
@@ -136,10 +108,6 @@ def _load_k_flat(
             k_flat.append(k2_words[1])
 
     return k_flat
-
-
-def _unflatten_k(k_flat, qkhe_loop: int = 2):
-    return [[k_flat[td * (qkhe_loop * 2) + j] for j in range(qkhe_loop * 2)] for td in range(TLOOP)]
 
 
 def _build_pa_thread_invariants(
