@@ -34,7 +34,15 @@ for _p in reversed(_PYTHON_CANDIDATES):
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2  # noqa: E402
-from tests.test_common import run_perftest, verify_output  # noqa: E402
+from tests.test_common import LAST_PERF_DIST, run_perftest, verify_output  # noqa: E402
+
+
+def _perf_p95_suffix():
+    """Return ' p95=<v> us' when a timed-loop distribution was captured, else ''."""
+    p95 = LAST_PERF_DIST.get("p95")
+    return f" p95={p95:.1f} us" if p95 is not None else ""
+
+
 from tests.utils import pertoken_quant, shuffle_scale_for_int4, shuffle_weight  # noqa: E402
 
 ARCH = get_rocm_arch()
@@ -798,7 +806,7 @@ def run_moe_stage1(
 
     print(
         f"FlyDSL MoE stage1[{in_dtype}]: "
-        f"{us:.1f} us, "
+        f"{us:.1f} us,{_perf_p95_suffix()} "
         f"{tflops:.2f} TFLOPS(logical, M={tokens*topk}), "
         f"{tbps:.3f} TB/s (doweight_stage1={doweight_stage1})"
     )
@@ -1560,7 +1568,7 @@ def run_moe_stage2(
     print(
         f"FlyDSL MoE stage2 [{kernel_name}] {in_dtype} {'reduce' if use_reduce else 'atomic'} | "
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
-        f"{us:.1f} us, {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
+        f"{us:.1f} us,{_perf_p95_suffix()} {tflops:.2f} TFLOPS, {tbps:.3f} TB/s"
     )
     # Optional compare vs aiter stage2.
     if compare_aiter_ck is None:
