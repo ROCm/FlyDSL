@@ -222,10 +222,6 @@ def _flydsl_flash_attn_paged(
     seqlen_k: Optional[torch.Tensor],
     max_seqlen_kv: Optional[int],
     kv_cache_layout: str,
-    kv_lookup_table: str,
-    kv_indptr: Optional[torch.Tensor],
-    kv_indices: Optional[torch.Tensor],
-    kv_last_page_lens: Optional[torch.Tensor],
     cu_seqlens_q: Optional[torch.Tensor],
     cu_seqlens_kv: Optional[torch.Tensor],
     max_seqlen_q: Optional[int],
@@ -252,11 +248,6 @@ def _flydsl_flash_attn_paged(
         raise NotImplementedError(
             f"flydsl_flash_attn_func: native paged KV supports kv_cache_layout in ('linear','vectorized'), "
             f"got {kv_cache_layout!r}"
-        )
-    if kv_lookup_table != "vllm":
-        raise NotImplementedError(
-            f"flydsl_flash_attn_func: native paged KV supports kv_lookup_table='vllm' only, "
-            f"got {kv_lookup_table!r}"
         )
     if not causal:
         raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports causal=True only")
@@ -405,16 +396,10 @@ def flydsl_flash_attn_func(
     # Whether per-batch Sq and Skv can differ. Dense mode infers this from shapes;
     # varlen mode requires it explicitly to choose the correct build variant.
     cross_seqlen: Optional[bool] = None,
-    # Paged KV cache ABI (interface only for now; paged FlyDSL kernel support is
-    # wired in a future implementation). When provided, k/v are physical KV cache
-    # tensors and lookup-table metadata describes logical sequence order.
-    kv_indptr: Optional[torch.Tensor] = None,
-    kv_indices: Optional[torch.Tensor] = None,
-    kv_last_page_lens: Optional[torch.Tensor] = None,
+    # Paged KV cache ABI: vLLM-style block_table + seqlen_k.
     block_table: Optional[torch.Tensor] = None,
     seqlen_k: Optional[torch.Tensor] = None,
     kv_cache_layout: str = "linear",
-    kv_lookup_table: str = "vllm",
     # Split-K (gfx950 only, seq_len >= 384, D=128, bf16/f16).
     num_kv_splits: int = 1,
     # Output tensor; allocated if None.
@@ -459,10 +444,7 @@ def flydsl_flash_attn_func(
             seqlen_q != seqlen_kv per batch.
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
-        kv_indptr / kv_indices: SGLang-style 1D page table metadata.
         block_table / seqlen_k: vLLM-style 2D block table metadata.
-        kv_last_page_lens: Per-batch valid token count in the final KV page.
-        kv_lookup_table: ``"sglang"`` or ``"vllm"``.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=128, bf16/f16, seq>=384).
         out: Optional pre-allocated output tensor (same shape/dtype as q).
         waves_per_eu: Kernel occupancy hint.
@@ -485,7 +467,7 @@ def flydsl_flash_attn_func(
     if q.dtype != k.dtype or q.dtype != v.dtype:
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
-    paged_kv = any(x is not None for x in (kv_indptr, kv_indices, kv_last_page_lens, block_table, seqlen_k))
+    paged_kv = any(x is not None for x in (block_table, seqlen_k))
     if paged_kv:
         return _flydsl_flash_attn_paged(
             q,
@@ -497,10 +479,6 @@ def flydsl_flash_attn_func(
             seqlen_k=seqlen_k,
             max_seqlen_kv=max_seqlen_kv,
             kv_cache_layout=kv_cache_layout,
-            kv_lookup_table=kv_lookup_table,
-            kv_indptr=kv_indptr,
-            kv_indices=kv_indices,
-            kv_last_page_lens=kv_last_page_lens,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             max_seqlen_q=max_seqlen_q,
