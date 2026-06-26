@@ -182,22 +182,13 @@ def build_flash_attn_dualwave_swp_module(
     DEFAULT_STRIDE_Q_N = NUM_HEADS_Q * HEAD_DIM
     DEFAULT_STRIDE_KV_N = NUM_HEADS_KV * HEAD_DIM
 
-    # LDS trait constants (gqa_d128_kernel_template.hpp §4-5). Interleaved
-    # double-buffer K0,V0,K1,V1; per-line stride = smem_linear_wave + padding
-    # (K: 520 bf16, V: 544 bf16); total LDS (2 K + 2 V) = 68096 B.
-    #
-    # ELEM_BYTES is the LDS/global element width in bytes. The 2-byte (bf16/f16)
-    # layout is the only one wired today; the constant replaces the former
-    # hard-coded ``BF16_BYTES = 2`` so the 1-byte (fp8) address math can be
-    # derived from the same expressions when the fp8 path is enabled.
+    # LDS layout: K/V ping-pong buffers share a 16B-aligned region.
+    # ELEM_BYTES keeps bf16/f16 and fp8 address math on one formula set.
     ELEM_BYTES = 1 if dtype_str == "fp8" else 2
     D_128B_SIZE = 128 // ELEM_BYTES  # elements per 128 B row (64 bf16 / 128 fp8)
     VEC_KV = 16 // ELEM_BYTES  # elements per 16 B ds_read/DMA pack (8 bf16 / 16 fp8)
-    # Lane-split granularity for the K/V DMA: how many lanes cover one N-row's D.
-    # This must stay 8 (a 128 B = D_128B_SIZE row is filled by 8 lanes x 16 B),
-    # INDEPENDENT of the per-lane element count (VEC_KV). For bf16 these coincide
-    # (both 8); for fp8 VEC_KV=16 but the lane-split is still 8 -- conflating them
-    # makes the DMA write (16-wide) inconsistent with the read gather (8-wide).
+    # K/V DMA always uses 8 lanes per 128B row; fp8 only changes elements per lane.
+    # Keeping this separate from VEC_KV preserves DMA/read layout agreement.
     LANE_SPLIT_KV = 8
     SMEM_LINEAR_WAVE = WARP_SIZE * 16 // ELEM_BYTES  # 64 * 8 = 512 bf16 per wave per "line"
     SMEM_N_PER_WAVE = SMEM_LINEAR_WAVE // D_128B_SIZE  # 8 KV rows per wave per line
@@ -219,17 +210,11 @@ def build_flash_attn_dualwave_swp_module(
         SMEM_K_TILE_ELEMS,  # V[0]=8320
         SMEM_K_TILE_ELEMS + DUALWAVE_SWP_KV_PER_BUFFER,
     )  # V[1]=25344
-    # u_rk DUALWAVE_SWP strides (per derived element strides for the 8-axis u_rk layout).
-    #   N-grp y-axis (axis 2)  : stride 256 bf16 (between v_s_lo and v_s_hi)
-    #   K-step axis (axes 4, 5): inner stride 16 (i_5 step), outer 4160 (i_4 d_rpt)
-    # n_strip=1 offset to v_s_hi. fp8 LDS is 2x denser (SMEM_LINEAR_WAVE doubled),
-    # so the second N-strip sits at 512 fp8 elems (vs 256 bf16); verified by NaN->0.
+    # u_rk strides: fp8 doubles the N-strip offset because LDS is 2x denser.
     DUALWAVE_SWP_URK_N_STRIP_STRIDE = 512 if dtype_str == "fp8" else 256
     DUALWAVE_SWP_URK_KSTEP_INNER = 16  # bf16 stride between consecutive K-steps within a d_rpt
-    # bf16/f16: head_dim=128 spans 2 d_rpt LDS arrays (D 0-63, 64-127), so K-steps
-    # 4-7 jump by a full array stride. fp8: D_128B_SIZE=128 -> the whole head_dim
-    # is ONE row (SMEM_D_RPT=1), so the 8 K-steps must walk linearly (ks*16); the
-    # array jump would read past the single fp8 row into uninitialized/V LDS.
+    # fp8 has one D row, so K steps must advance linearly instead of jumping
+    # to a second d_rpt array.
     if dtype_str == "fp8":
         DUALWAVE_SWP_URK_KSTEP_OUTER = 4 * DUALWAVE_SWP_URK_KSTEP_INNER  # 64 -> ks*16
     else:
@@ -255,17 +240,8 @@ def build_flash_attn_dualwave_swp_module(
     # 68096 B for the dual-wave software pipeline.
     _lds_elem_dtype = dtype_to_elem_type(dtype_str)
 
-    # fp8 PV precision mode selection. Exactly one mode is active for fp8 (the modes are
-    # mutually exclusive; invalid env combinations fail fast below). The selectors:
-    #   FLYDSL_FP8_HIPREC=1 (default) -> high-precision-P: fp8 V dequantized to bf16
-    #       in-kernel (public fp8 V * v_descale) and PV run in bf16, fp8 P fed as bf16.
-    #   FLYDSL_FP8_HIPREC=0 + FLYDSL_FP8_PV_FROMBF16=1 -> packed-fp8 PV via the proven
-    #       bf16 V/P element order, with both operands converted to fp8 at the MMA.
-    #   FLYDSL_FP8_HIPREC=0 + FLYDSL_FP8_PV_NATIVE=1 -> experimental true-fp8 no-round-trip
-    #       V path: raw fp8 V staged + read in the proven B-operand order, fed directly to
-    #       the fp8xfp8 PV MMA (no bf16 vt round-trip). Correct (passes the fixed dense fp8
-    #       gate, min_cos ~0.999); opt-in/experimental and slower than HIPREC because the
-    #       proven order uses two 32-bit LDS reads per pack (see _read_vtf_packs_fp8).
+    # fp8 PV mode is selected by mutually exclusive env flags.
+    # Default HIPREC dequantizes V to bf16; FROMBF16/NATIVE exercise packed fp8 PV.
     if dtype_str == "fp8":
         _hiprec_env = os.environ.get("FLYDSL_FP8_HIPREC", "1") != "0"
         _native_env = os.environ.get("FLYDSL_FP8_PV_NATIVE", "0") == "1"
@@ -284,10 +260,8 @@ def build_flash_attn_dualwave_swp_module(
         _FP8_HIPREC_P = False
         _FP8_PV_FROMBF16 = False
         _FP8_PV_NATIVE = False
-    # Wide-MMA PV (experimental, opt-in): use the 4x-wider mfma_scale_f32_32x32x64_f8f6f4
-    # (unit scale -> plain fp8xfp8) instead of 4x mfma_f32_32x32x16_fp8_fp8 per D-chunk.
-    # fp8-only and only for the fp8-operand PV modes (NATIVE / FROMBF16), since the wide
-    # atom needs fp8 A/B. Default off; default codegen byte-identical when unset.
+    # Optional wide fp8 PV uses one K=64 mfma_scale op instead of four narrow MFMAs.
+    # It requires fp8 P/V operands and is off by default.
     _FP8_WIDE_MMA = const_expr(
         dtype_str == "fp8"
         and os.environ.get("FLYDSL_FP8_WIDE_MMA", "0") == "1"
@@ -296,22 +270,11 @@ def build_flash_attn_dualwave_swp_module(
     # Wide V read: NATIVE-only path reading V directly in the 32x32x64 operand layout
     # (32 contiguous keys/lane) instead of 4 narrow i64 packs. On when wide MMA + NATIVE.
     _WIDE_VREAD = const_expr(_FP8_WIDE_MMA and _FP8_PV_NATIVE)
-    # P gather via in-register cross-lane shuffle (permlane32) instead of the LDS round-trip
-    # + barrier. Removes the per-cluster P-stage barrier that otherwise serializes the
-    # dual-wave pipeline, so the wide-MMA savings convert to wall-clock. Correctness is
-    # equal to the LDS path (min_cos 0.9993 nocausal + causal). Opt-in via
-    # FLYDSL_FP8_WIDE_PSHUF=1; default off, leaving the LDS P round-trip as the wide-path
-    # default.
+    # Wide P can gather by permlane32 instead of LDS, removing the P-stage barrier.
+    # Enabled only with FLYDSL_FP8_WIDE_PSHUF=1.
     _WIDE_PSHUF = const_expr(_WIDE_VREAD and os.environ.get("FLYDSL_FP8_WIDE_PSHUF", "0") == "1")
-    # Wide QK: run QK^T on the 4x-wider mfma_scale_f32_32x32x64_f8f6f4 (two wide MMAs over
-    # head_dim=128 = 2x K=64) instead of 8 narrow 32x32x16 MFMAs per N-strip. Q and K are both
-    # in registers/LDS (the easy operands, like V); each lane reads 32 contiguous head-dim
-    # values for its row(Q)/col(K). QK is native fp8 in EVERY fp8 PV mode (HIPREC/FROMBF16/
-    # NATIVE all run _mfma_acc_fp8_i64 for QK and only differ in PV), so wide QK is independent
-    # of the PV mode and the wide-V read -- it only needs the fp8 K LDS tile (always present)
-    # and the global fp8 Q. DEFAULT ON for fp8 (it strictly beats the prior narrow-QK fp8 path:
-    # +11.6% on the headline HIPREC default at identical correctness); set FLYDSL_FP8_WIDE_QK=0
-    # to opt out to the narrow QK path.
+    # Wide QK replaces eight narrow fp8 MFMAs with two K=64 MFMAs.
+    # It is independent of the PV mode and can be disabled with FLYDSL_FP8_WIDE_QK=0.
     _WIDE_QK = const_expr(dtype_str == "fp8" and os.environ.get("FLYDSL_FP8_WIDE_QK", "1") != "0")
     _EB_BF = 2
     _D128_BF = 128 // _EB_BF
@@ -331,25 +294,9 @@ def build_flash_attn_dualwave_swp_module(
     _URV_DC_AXIS1_BF = 32
     _URV_I5_BF = _D128_BF
 
-    # _FP8_PV_FROMBF16: packed-fp8 PV MMA reusing the proven bf16 V datapath. V is
-    # dequantized to bf16 into the vt LDS region and read by the proven
-    # _read_vt_packs_bf16 transpose, then both the V operand and the softmax
-    # probabilities P are quantized to fp8 in-register and fed to the fp8xfp8 PV MFMA.
-    # This guarantees the P (A) and V (B) operands share the proven element order by
-    # construction, so a genuine fp8xfp8 PV MMA passes the fixed gate. It is a
-    # correctness bridge: it adds a bf16 round-trip + per-MMA conversion, so it is not
-    # the throughput-optimal path.
-    #
-    # _FP8_PV_NATIVE: experimental true-fp8 no-round-trip V path. fp8 V is staged
-    # key-contiguous (vtf, D-major: row D = BLOCK_N keys + 16B pad) by _stage_vtf_fp8 and
-    # read by _read_vtf_packs_fp8 in the PROVEN mfma B(V) element order
-    # (key = 16*k_substep + 8*(n//4) + 4*(lane//32) + (n%4), d = 32*dc + lane%32) as two
-    # 32-bit LDS reads per pack, then fed raw to the fp8xfp8 PV MMA. This PASSES the fixed
-    # dense fp8 gate (min_cos ~0.999 nocausal and causal). It is opt-in/experimental and
-    # currently slower than HIPREC because the two-32-bit read adds an LDS-read bubble (the
-    # proven order is not 8 contiguous keys); an earlier contiguous 8-key i64 read gathered
-    # the wrong keys and capped this path at min_cos ~0.886 -- now fixed.
-    # Both vt-based PV modes share the proven bf16 vt staging + transpose read below.
+    # FROMBF16 and NATIVE are fp8 PV bring-up modes; HIPREC is the default.
+    # FROMBF16 reuses the proven bf16 order then quantizes at MMA time; NATIVE
+    # stages raw fp8 V in the proven B-operand order.
     _PV_USE_VT = _FP8_HIPREC_P or _FP8_PV_FROMBF16
     _VTF_PAD = 16
     _VTF_ROW = BLOCK_N + _VTF_PAD  # bytes per D-row: BLOCK_N keys contiguous + pad
@@ -364,11 +311,8 @@ def build_flash_attn_dualwave_swp_module(
             vt: fx.Array[fx.BFloat16, VT_BF16_TOTAL, 16]
 
     elif _FP8_PV_NATIVE:
-        # Wide PV (FLYDSL_FP8_WIDE_MMA): P must be re-laid out across lanes to the wide B
-        # operand layout (lane L, byte p -> key (L//32)*32 + p, for that lane's query row).
-        # P is mid-pipeline in registers, so stage it to an LDS scratch in identity layout
-        # pf[query_local*_PF_ROW + key] then wide-read it. _PF_ROW = BLOCK_N(64)+16 pad.
-        # One row block (BLOCK_M query rows) per stage; produced+consumed under a barrier.
+        # Wide PV stages P into identity-layout LDS scratch for the wide B operand.
+        # The scratch is produced and consumed under the surrounding barrier.
         _PF_ROW = BLOCK_N + 16
         _PF_FP8_ELEMS = BLOCK_M * _PF_ROW
 
@@ -490,10 +434,7 @@ def build_flash_attn_dualwave_swp_module(
         q_head_idx = h_kv_idx * GQA_GROUP_SIZE + group_id
         kv_head_idx = h_kv_idx
 
-        # Per-batch token ranges. Dense: batch_idx*seq_len. Varlen: read cumulative
-        # cu_seqlens_q / cu_seqlens_kv (int32 [B+1]) -> packed [cu[z], cu[z+1]).
-        # *_tok_base replace batch_idx*seq_len in addresses; *_tok_end bound
-        # num_records; seqlen_q/kv drive the OOB skip + masks/tiles.
+        # Token bases drive addresses; token ends bound descriptors and masks.
         if const_expr(VARLEN):
             # cu_seqlens read through the element-indexed Layout API + a 32-bit copy
             # atom (same idiom as Q/K/V/O views), not a raw buffer resource.
@@ -532,33 +473,23 @@ def build_flash_attn_dualwave_swp_module(
         kv_gmem_elem_offset = kv_tok_base * stride_kv_n_v + kv_head_idx * HEAD_DIM
 
         DMA_BYTES = 16
-        # Native fp8 QK uses the single fp8 K DMA (SMEM_D_RPT=1). The high-precision-P
-        # PV builds vt by an in-kernel fp8 V load (1 fp8 DMA) + a register dequant +
-        # LDS store, so its global memory traffic is still the single fp8 V load.
-        # vmcnt accounting counts the actual global loads issued.
+        # fp8 still issues one K DMA and one V load per tile; hiprec PV dequantizes
+        # V through registers into vt, so vmcnt tracks only real global loads.
         NUM_DMA_K = SMEM_D_RPT
         NUM_DMA_V = SMEM_D_RPT
 
-        # Copy atoms + element-indexed buffer-tensor views for Q/K/V/O, built once as
-        # straight-line SSA dominating the loop. num_records is bound to the END of
-        # this batch's region so OOB rows (partial last q-block / extra kv-tile) read 0
-        # and OOB stores drop (no fault); aligned seqlen is fully in-bounds, unchanged.
+        # Buffer views are bounded to the batch end so OOB reads return zero and
+        # stores drop; aligned cases stay fully in-bounds.
         q_nrec_bytes = _raw(q_tok_end * stride_q_n_v * ELEM_BYTES)
         kv_nrec_bytes = _raw(kv_tok_end * stride_kv_n_v * ELEM_BYTES)
-        # O is always 16-bit (bf16/f16) -- for the fp8 path Q/K/V are 1-byte but the
-        # output is bf16, so the O buffer's num_records must use the OUTPUT element
-        # size (2 B), not ELEM_BYTES (1 B for fp8). Using ELEM_BYTES would halve the
-        # O descriptor and silently drop every store past the midpoint (the upper
-        # wave-group's q rows -> zero output).
+        # fp8 Q/K/V are 1B but O is bf16; use the output element size for O bounds
+        # or upper-row stores are silently dropped.
         OUT_ELEM_BYTES = 2 if dtype_str == "fp8" else ELEM_BYTES
         o_nrec_bytes = _raw(q_tok_end * stride_q_n_v * OUT_ELEM_BYTES)
 
         def _make_buf_div(tensor, nrec_bytes):
-            # fp8: build the Q/K/V buffer view as i8-typed. The global->LDS DMA
-            # (BufferCopyLDS128b) is illegal with an fp8-typed source memref on
-            # current FlyROCDL (the dst is i8), and the i32 register loads read the
-            # byte buffer regardless of element type, so an i8 view serves both. For
-            # bf16/f16 keep the native element type. (recast the buffer iter to i8.)
+            # fp8 Q/K/V buffer views are i8-typed so DMA and register loads share one
+            # byte view; bf16/f16 keep native element types.
             bt = fx.rocdl.make_buffer_tensor(tensor, num_records_bytes=nrec_bytes)
             if const_expr(dtype_str == "fp8"):
                 it = fx.get_iter(bt)
@@ -580,17 +511,11 @@ def build_flash_attn_dualwave_swp_module(
         _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
         _o_store_reg = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
         _o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-        # fp8: type the global->LDS DMA dst as i8 (matches the i8 the DMA lowers the
-        # fp8 global src to); a fp8-typed shared memref makes BufferCopyLDS128b
-        # illegal. The K/V LDS reads are byte-addressed (i64 K-read, ds_read_tr8 V),
-        # independent of this element type.
+        # fp8 global->LDS DMA uses i8 destination typing; K/V LDS reads are byte-addressed.
         _dma_lds_dtype = fx.Int8 if dtype_str == "fp8" else elem_dtype
         _lds_ptr_ty = fx.PointerType.get(_dma_lds_dtype.ir_type, 2, DMA_BYTES)
-        # fp8 S-logit debug dump (FLYDSL_FP8_SDUMP=1): store raw post-QK logits to
-        # the DebugCounts (f32 scratch) buffer to read off the lane->(row,col) map.
-        # SDUMP: dump raw post-QK logits to the DebugCounts slot. FLYDSL_FP8_SDUMP=1
-        # is the fp8-only legacy gate; FLYDSL_SDUMP=1 enables it for ANY dtype (used to
-        # diff the fp8 vs bf16 QK accumulator cell-by-cell for the key-map analysis).
+        # Optional S-logit dump writes post-QK f32 logits into DebugCounts for layout
+        # debugging; FLYDSL_SDUMP also enables it outside fp8.
         _FP8_SDUMP = const_expr(
             (dtype_str == "fp8" and os.environ.get("FLYDSL_FP8_SDUMP", "0") == "1")
             or os.environ.get("FLYDSL_SDUMP", "0") == "1"
@@ -654,10 +579,7 @@ def build_flash_attn_dualwave_swp_module(
         d_bucket = lane_in_warp % LANE_SPLIT_KV
 
         c_neg_inf = fx.Float32(float("-inf"))
-        # c_neg_inf = fx.Float32(float(-1e30))
-        # Finite floor for the row-max: a fully-masked row (bottom-right causal,
-        # seqlen_q > seqlen_kv) has max == -inf; flooring it finite makes
-        # exp2(-inf - floor) == 0 (no NaN), so acc/l stay 0 and O is zeroed below.
+        # Fully masked rows get a finite max floor so exp2 stays zero and O is zero.
         c_neg_floor = fx.Float32(-3.0e38)
         c_zero_f = fx.Float32(0.0)
         head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
@@ -669,10 +591,8 @@ def build_flash_attn_dualwave_swp_module(
                 fastmath=fm_fast,
             )
         )
-        # fp8 logit scale: Q is fed raw to the QK MFMA (not pre-scaled), so the
-        # full q_descale*k_descale*sm_scale*log2e multiplies the fp32 logits after
-        # the MFMA. Descales are runtime shape-[1] fp32 tensors (placeholders on
-        # the bf16/f16 path, read only here under const_expr fp8).
+        # fp8 feeds raw Q/K into MFMA, so q/k descale and softmax scale multiply
+        # fp32 logits after QK. bf16/f16 placeholders are never read.
         if const_expr(dtype_str == "fp8"):
 
             def _load_scale_scalar(tensor):
@@ -716,10 +636,8 @@ def build_flash_attn_dualwave_swp_module(
         # contributing nothing; seq_len already yielding >= 4 tiles is unaffected.
         max_num_tiles = fx.Index(ArithValue(max_num_tiles < fx.Index(4)).select(fx.Index(4), max_num_tiles))
 
-        # Split-K tile range [split_t0, split_t_end). chunk is EVEN (preserves
-        # the K-buffer parity: K buf = tile % 2 fixed in prologue/loop) and at
-        # least 6. The pipeline needs >= 4 tiles, so a tail of < 4 tiles is
-        # folded into the previous split and the splits past it run empty.
+        # Split-K chunks are even to preserve K-buffer parity and at least 6 tiles.
+        # Tails smaller than the 4-tile pipeline are folded into the previous split.
         if const_expr(SPLITK):
             chunk = ((max_num_tiles + (NUM_KV_SPLITS - 1)) // NUM_KV_SPLITS + 1) // 2 * 2
             chunk = fx.Index(ArithValue(chunk < fx.Index(6)).select(fx.Index(6), chunk))
@@ -735,12 +653,9 @@ def build_flash_attn_dualwave_swp_module(
             split_t0 = 0
             split_t_end = max_num_tiles
 
-        # K-contraction half selected by lane_div_32 advances by MFMA_LANE_K (=8)
-        # head-dim elements -- the 32x32x16 MFMA holds 8 K-elements per lane for BOTH
-        # bf16 and fp8 (same geometry). bf16 VEC_KV==8==MFMA_LANE_K so this is
-        # byte-identical for bf16/f16; for fp8 VEC_KV==16 was wrong (it is the 16B
-        # DMA pack width, not the MFMA per-lane K count) and caused the QK key
-        # duplication / stride-2 / dropped-key placement bug.
+        # MFMA packs 8 K elements per lane for both bf16 and fp8.
+        # fp8 VEC_KV is the 16B DMA width, not the MFMA K count; using it here
+        # duplicates and drops QK keys.
         urk_base_per_lane = (
             (lane_mod_32 % 8) * SMEM_K_LINE_STRIDE + (lane_mod_32 // 8) * D_128B_SIZE + lane_div_32 * MFMA_LANE_K
         )
@@ -768,10 +683,8 @@ def build_flash_attn_dualwave_swp_module(
         def _fmax(a, b):
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
-        # MMA via the layout MMA atom (bf16/f16). For fp8, mma_atom_call_ssa hits a
-        # vector<8xf8>->i64 materialization that MLIR cannot legalize, so QK uses
-        # the raw rocdl OpView with scalar-i64 operands (8 packed fp8), the proven
-        # pattern from pa_decode (validated in mma_i64_validated.py).
+        # fp8 QK uses raw rocdl with scalar i64 operands because v8xf8
+        # materialization through mma_atom_call is not legalizable.
         _mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, elem_dtype))
 
         def _mfma_acc(a, b, c):
@@ -783,10 +696,8 @@ def build_flash_attn_dualwave_swp_module(
                 v16f32_type, _raw(a_i64), _raw(b_i64), _raw(c_v16), 0, 0, 0
             ).result
 
-        # K-element ordering of the 4 narrow i64 packs inside the wide i32x8 operand.
-        # The wide 32x32x64 MFMA's in-register K layout differs from 4x narrow 32x32x16;
-        # this permutation (env-swept during bring-up) selects which narrow pack maps to
-        # which K-quarter. Validated by the fixed fp8 correctness gate.
+        # _WIDE_PERM maps four narrow K packs into the wide MFMA K layout.
+        # The default permutation is the one validated by the fp8 gate.
         _WIDE_PERM = const_expr(tuple(int(c) for c in os.environ.get("FLYDSL_FP8_WIDE_PERM", "0123")))
 
         def _pack_i64x4_to_i32x8(p0, p1, p2, p3):
@@ -798,10 +709,8 @@ def build_flash_attn_dualwave_swp_module(
             return Vec.from_elements(ordered, fx.Int64).bitcast(fx.Int32)
 
         def _mfma_acc_fp8_wide(a_i32x8, b_i32x8, c_v16):
-            # 4x-wider fp8 PV: mfma_scale_f32_32x32x64_f8f6f4 with UNIT scale
-            # (0x7F7F7F7F = E8M0 2^0 = 1.0) -> plain fp8xfp8, no block scaling. a/b are
-            # i32x8 (32 fp8 = the K=64 contraction slice), acc is v16f32. This is the same
-            # instruction aiter's native fp8 ASM kernel uses (65536 MACs/op vs 16384).
+            # Wide fp8 PV uses mfma_scale with unit E8M0 scales, i32x8 operands,
+            # and the same native fp8 instruction family as aiter ASM.
             return rocdl.mfma_scale_f32_32x32x64_f8f6f4(
                 v16f32_type,
                 _raw(a_i32x8),
@@ -889,10 +798,8 @@ def build_flash_attn_dualwave_swp_module(
 
         def _scale_q_all(q_all_bf16):
             if const_expr(ELEM_BYTES == 1):
-                # fp8: Q is pre-quantized; do NOT upconvert/rescale it (fpext is
-                # invalid on fp8 vectors and rescaling would corrupt the e4m3
-                # operand). The combined q_descale*k_descale*sm_scale*log2e is
-                # applied to the fp32 logits after the QK MFMA instead.
+                # fp8 Q is already quantized; keep raw operands and apply combined
+                # q/k descale with softmax scale after the QK MFMA.
                 return q_all_bf16
             fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
             q_all_f32_op = llvm.FPExtOp(v64f32_type, _raw(q_all_bf16))
@@ -932,11 +839,8 @@ def build_flash_attn_dualwave_swp_module(
             return Vec(Vec.from_elements([fx.Int64(pack_i64)], fx.Int64).bitcast(fx.Int32), (2,), fx.Int32)
 
         def _load_q_all_wide(q_row_in_block):
-            # Wide QK Q operand: row m = lane%32; the wide MFMA holds, per lane, 32 CONTIGUOUS
-            # head-dim values for the K-half (lane//32) of one wide step. head_dim=128 = 2 wide
-            # steps (ws=0 -> D 0..63, ws=1 -> D 64..127), each K=64. Lane reads its 32 fp8
-            # (= two 128-bit loads, 256 bits) at D = ws*64 + (lane//32)*32. Returns 2 i32x8
-            # (one per ws).
+            # Wide QK Q reads 32 contiguous fp8 D values per lane and wide step.
+            # head_dim=128 gives two K=64 steps, selected by ws and lane//32.
             d_base = lane_div_32 * 32
             packs = []
             for ws in range_constexpr(HEAD_DIM // 64):
@@ -949,13 +853,8 @@ def build_flash_attn_dualwave_swp_module(
             return packs
 
         def _read_k_packs_fp8_wide(buf_id):
-            # Wide QK K operand from the K LDS tile. K-LDS address (derived + probe-checked):
-            #   addr(key, d) = (key%8)*SMEM_K_LINE_STRIDE + (key//8)*D_128B_SIZE + d
-            # The wide A(K) operand needs, per lane, 32 contiguous head-dim values for its key
-            # column n and K-half (lane//32), for each of the two N-strips (n and n+32). Key
-            # column n = lane%32 (lo strip) / lane%32 + 32 (hi strip); wide step ws picks the
-            # D-half (ws*64 + (lane//32)*32). Returns (k_lo, k_hi), each a list of (HEAD_DIM//64)
-            # i32x8 (32 fp8 contiguous in D).
+            # Wide QK K reads 32 contiguous D values for key lane%32 and lane%32+32.
+            # lane//32 selects the D half; each strip returns one i32x8 per wide step.
             k_base = _k_buf_base(buf_id)
             d_base = lane_div_32 * 32
             n_lo = lane_mod_32
@@ -1235,10 +1134,8 @@ def build_flash_attn_dualwave_swp_module(
                 _buffer_load_lds_128(k_div, lds_addr, src_elem, tile_start * stride_kv_n_v)
 
         def _async_load_v(tile_start, buf_id):
-            # fp8 hiprec PV: the V buffer fed to P*V is the bf16 dequant scratch, not
-            # the fp8 V in kv LDS. Stage it here -- same (tile_start, buf_id) and the
-            # same caller wait/barrier as the fp8 V load -- so vt[buf_id] mirrors the
-            # fp8 V double-buffer tile-for-tile BY CONSTRUCTION (no read-time guess).
+            # HIPREC/FROMBF16 use the bf16-dequant vt scratch for PV, staged under
+            # the same double-buffer tile schedule as the fp8 V load.
             if const_expr(_PV_USE_VT):
                 _stage_vt_dequant_fp8(tile_start, buf_id)
                 return
@@ -1258,22 +1155,15 @@ def build_flash_attn_dualwave_swp_module(
                 src_elem = kv_gmem_elem_offset + n_in_tile * stride_kv_n_v + global_d
                 _buffer_load_lds_128(v_div, lds_addr, src_elem, tile_start * stride_kv_n_v)
 
-        # High-precision-P PV: the fp8 V tile is dequantized to bf16 IN-KERNEL (from
-        # the public fp8 V + v_descale) and written into the vt LDS region laid out
-        # like the bf16 V tile, so the proven bf16 _read_vt_packs_bf16 + bf16 PV MMA
-        # apply unchanged. _stage_vt_dequant_fp8 loads each lane's 16 fp8 V elems from
-        # global, unpacks via cvt_pk_f32_fp8, scales by v_descale, truncates to bf16,
-        # and stores the two 8-wide bf16 d-halves into vt. (No host bf16 V scratch.)
+        # HIPREC dequantizes fp8 V*v_descale into a bf16 vt scratch in-kernel.
+        # That lets the proven bf16 V transpose read and bf16 PV MMA stay unchanged.
         if const_expr(_PV_USE_VT):
             _v_fp8_load64_atom = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
 
         def _stage_vt_dequant_fp8(tile_start, buf_id):
-            # In-kernel high-precision V: dequant the fp8 V tile to bf16 and write it
-            # into vt at the SAME positions the bf16 V staging used, so the proven
-            # _read_vt_packs_bf16 inverts it by construction. The bf16 staging's two
-            # d-iters cover D-halves 64 apart (global_d = d_bucket*8 + d*64), so we
-            # issue ONE 8-fp8 (64-bit) load per d-iter at that D offset -- NOT one
-            # contiguous 16-fp8 load (which would gather the wrong D columns).
+            # Dequantize fp8 V into the exact bf16 V staging positions.
+            # The two d-iters load 8 fp8 values at D offsets 64 apart; one contiguous
+            # 16-byte load would gather the wrong columns.
             vt_buf = buf_id * VT_BF16_ELEMS
             n_in_tile = n_in_warp * NUM_WAVES + wave_id
             for d in range_constexpr(_SDRPT_BF):
@@ -1289,17 +1179,12 @@ def build_flash_attn_dualwave_swp_module(
                     lo2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, False), (2,), fx.Float32)
                     hi2 = Vec(rocdl.cvt_pk_f32_fp8(Vec.make_type(2, fx.Float32), word, True), (2,), fx.Float32)
                     for e in (lo2[0], lo2[1], hi2[0], hi2[1]):
-                        # Both vt-based PV modes dequantize V (*v_descale) into bf16 vt.
-                        # HIPREC then runs a bf16 PV MMA; FROMBF16 re-quantizes the
-                        # dequantized V and P to fp8 inside _mma1_step_k. v_descale is
-                        # therefore already folded into the V operand for both -> no
-                        # inv_l v_descale fold for either.
+                        # vt-based PV modes already fold v_descale into bf16 vt, so no final
+                        # inv_l v_descale correction is needed for HIPREC or FROMBF16.
                         bf.append(fx.Float32(e) * _vd_fp8)
                 v8bf = _pack_v8_bf16(bf)  # v8 bf16 (ir value)
-                # The bf16 DMA (BufferCopyLDS128b) spread the 64 lanes' 16B writes
-                # across LDS automatically (lane L -> base + L*16B = L*8 bf16); the
-                # explicit register->LDS store must add that per-lane offset itself so
-                # the layout the _read_vt_packs_bf16 transpose expects is reproduced.
+                # Register->LDS stores must add the per-lane offset that the bf16 DMA
+                # path provided implicitly, preserving the transpose-read layout.
                 byte_off = (vt_buf + wave_id_uni * _VLS_BF + d * _SNRPT_BF * _VLS_BF + lane * _VEC_BF) * _EB_BF
                 lds_ptr = buffer_ops.get_element_ptr(lds_vt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
                 llvm.StoreOp(_raw(v8bf), lds_ptr, alignment=16)
@@ -1324,21 +1209,9 @@ def build_flash_attn_dualwave_swp_module(
                     llvm.StoreOp(_raw(byte), p, alignment=1)
 
         def _read_vtf_packs_fp8(buf_id):
-            # Native fp8 PV read in the PROVEN mfma_f32_32x32x16_fp8 B(V) element order.
-            # The staged vtf is the identity layout vtf[d_col*_VTF_ROW + key] = V[key, d_col].
-            # The proven B-operand pack byte n (0..7) holds:
-            #     key = 16*k_substep + 8*(n//4) + 4*(lane//32) + (n%4)
-            #     d   = 32*dc + (lane%32)
-            # i.e. two runs of 4 contiguous keys, 8 keys apart, on one D-row -- the same
-            # element order the proven bf16 datapath produces (_read_vt_packs_bf16's two
-            # ds_read_b64_tr_b16 + the [0..7] shuffle). The keys in the second run
-            # (base+8..base+11) live in a different lane-group's region, so the read is two
-            # 32-bit loads 8 keys apart, assembled into the i64 pack -- NOT a single
-            # contiguous 8-key i64 load (that gathered the wrong keys and capped NATIVE at
-            # min_cos ~0.886). This order is what makes NATIVE pass the fixed fp8 gate
-            # (min_cos > 0.99 on the dense sweep); it was derived by composing the bf16
-            # staging/read/transpose layout and cross-checked against the FROMBF16 operand
-            # order.
+            # Native fp8 PV reads V in the proven narrow B-operand order.
+            # Each pack is two 4-key runs separated by 8 keys; a single contiguous
+            # i64 load gathers the wrong keys and fails the fp8 gate.
             vtf_buf = buf_id * VTF_FP8_ELEMS
             packs = [[None] * D_CHUNKS for _ in range(4)]
             for dc in range_constexpr(D_CHUNKS):
@@ -1359,13 +1232,9 @@ def build_flash_attn_dualwave_swp_module(
             return packs
 
         def _read_vtf_packs_fp8_wide(buf_id):
-            # Wide PV V read for mfma_scale_f32_32x32x64_f8f6f4. Operand-oracle decode
-            # (.humanize/wide-mfma-oracle/LAYOUT_FINDINGS.md): lane L and lane L+32 feed the
-            # same output col n=L; each lane supplies 32 CONTIGUOUS keys (its K-half) for its
-            # D-column. The vtf staging is identity vtf[d_col*_VTF_ROW + key]=V[key,d_col],
-            # so each lane reads 32 contiguous keys from its d_col row: lane//32 picks the
-            # K-half (keys 0..31 vs 32..63), lane%32 + dc*32 picks d_col. Returns one i32x8
-            # (32 fp8) per dc.
+            # Wide PV V operand: each lane reads 32 contiguous keys from its D row.
+            # lane//32 chooses the key half; lane%32 + dc*32 chooses d_col.
+            # Returns one i32x8 fp8 operand per D chunk.
             vtf_buf = buf_id * VTF_FP8_ELEMS
             key_base = (lane // 32) * 32  # K-half start
             return [
@@ -1374,10 +1243,8 @@ def build_flash_attn_dualwave_swp_module(
             ]
 
         def _stage_p_fp8_wide(v_p_packs):
-            # Stage the (post-rescale) cast P packs into the pf LDS scratch in identity
-            # layout pf[query_local*_PF_ROW + key]. P packs: (p_lo_packs, p_hi_packs), each
-            # a list of PV_K_STEPS i64 (8 fp8 each). pack pks byte s -> r = pks*8 + s;
-            # narrow key map: key = (lane//32)*4 + (r//4)*8 + (r%4); hi strip adds 32.
+            # Stage post-rescale P into pf[query_local, key] identity layout for wide PV.
+            # The narrow key map supplies the byte positions for lo/hi strips.
             p_lo_packs, p_hi_packs = v_p_packs
             q_local = wave_id_uni * fx.Index(ROWS_PER_WAVE) + lane_mod_32
             row_base = q_local * fx.Index(_PF_ROW)
@@ -1414,27 +1281,18 @@ def build_flash_attn_dualwave_swp_module(
             # Return this lane's value from lane^32 (swap the 32-lane halves) for an i32.
             pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
             sw = rocdl.permlane32_swap(pair_ty, _raw(x_i32), _raw(x_i32), False, False)
-            # permlane32_swap(a,a) -> (result0, result1); with a==b the +/-32 partner's
-            # value is result[1] on low-half lanes and result[0] on high-half lanes (same
-            # convention the proven O-store _swap_halves relies on). Selecting per lane
-            # half is required: returning result[1] unconditionally feeds high-half lanes
-            # their OWN value, corrupting the K=32..63 half of every wide-P column.
+            # permlane32_swap(a,a) exposes the lane^32 value in a half-dependent slot.
+            # Selecting the wrong slot feeds high-half lanes their own value and corrupts
+            # the K=32..63 half.
             lo_res = llvm.extractvalue(T.i32, sw, [0])
             hi_res = llvm.extractvalue(T.i32, sw, [1])
             is_hi = ArithValue(fx.Int32(lane // 32) == fx.Int32(1))
             return fx.Int32(is_hi.select(lo_res, hi_res))
 
         def _read_p_fp8_wide_shuffle(v_p_packs):
-            # In-register wide B(P) gather (NO LDS / NO barrier). Operand-oracle: wide-lane
-            # dword g = 4 P values r=(g//2)*4..+3 from source half-lane (g%2): even dwords
-            # from this lane, odd from lane^32. lo strip feeds h=0 (lane//32==0), hi feeds
-            # h=1. Each i64 pack = 2 dwords (r=pks*8..3, r=pks*8+4..7) -> 4 dwords total
-            # across PV_K_STEPS=2 packs covering r=0..15.
-            # dest lane (h,q): dword g needs strip=h, from physical lane (h_src=g%2, q),
-            # dword d=g//2. strip = this dest's half (h=0->lo bytes are keys<32; h=1->hi).
-            # We permute lo/hi strips UNCONDITIONALLY (permlane swaps the literal register,
-            # so this lane gets lane^32's lo_w/hi_w respectively -- not its is_hi-selected
-            # value), then pick own-vs-partner per (h_src==h).
+            # In-register wide B(P) gather: each dword selects own vs lane^32 strip
+            # according to destination half, avoiding the LDS round-trip and barrier.
+            # The lo/hi strips must be permuted before that per-half selection.
             p_lo_packs, p_hi_packs = v_p_packs
             is_hi = ArithValue(fx.Int32(lane // 32) == fx.Int32(1))
 
@@ -1523,10 +1381,8 @@ def build_flash_attn_dualwave_swp_module(
         def _read_v_packs_for_buf(buf_id, urv_base, vt_tile_start=None):
             """Read all V packs from LDS buffer `buf_id` in DUALWAVE_SWP issue order."""
             if const_expr(_PV_USE_VT):
-                # vt[buf_id] was staged by _async_load_v(.., buf_id) for the matching
-                # tile, so just read it -- the tile correspondence is enforced at load
-                # time (vt_tile_start ignored here). For _FP8_PV_FROMBF16 the read also
-                # re-quantizes each proven-order V pack to a fp8 i64 operand.
+                # vt[buf_id] was staged for the matching tile; FROMBF16 also
+                # re-quantizes each proven-order V pack to fp8 here.
                 return _read_vt_packs_bf16(buf_id)
             if const_expr(_FP8_PV_NATIVE):
                 if const_expr(_WIDE_VREAD):
@@ -1742,10 +1598,8 @@ def build_flash_attn_dualwave_swp_module(
             else:
                 p_pk = v_p_hi[step - 2]
             if const_expr(_FP8_PV_FROMBF16):
-                # Quantize the proven-order v8 bf16 P operand to fp8 i64 once per step
-                # (V is quantized per dc below). This realizes a native fp8xfp8 PV MMA
-                # while reusing the proven bf16 P/V layout, so the A/B operands share
-                # element order by construction (packed-fp8-P precision suffices here).
+                # FROMBF16 quantizes proven-order bf16 P/V packs to fp8 at the MMA,
+                # preserving operand layout while exercising native fp8x fp8 PV.
                 p_pk_f8 = _v8bf16_to_fp8_i64(p_pk)
             for dc in range_constexpr(D_CHUNKS):
                 if const_expr(_FP8_PV_FROMBF16):
@@ -1760,10 +1614,8 @@ def build_flash_attn_dualwave_swp_module(
             return v_o
 
         def _mma1_wide(v_p, v_v, v_o):
-            # Wide PV: one mfma_scale_f32_32x32x64_f8f6f4 per D-chunk replaces the 4
-            # per-step 32x32x16 MFMAs. The 4 steps' P/V i64 fp8 packs concatenate into the
-            # K=64 operand in step order (the same K the 4 narrow steps accumulate); the
-            # fixed fp8 correctness gate validates that order end-to-end. fp8 P/V only.
+            # Wide PV replaces four narrow fp8 MFMAs with one K=64 MFMA per D chunk.
+            # Correctness validates that concatenated step order matches narrow PV.
             v_p_lo, v_p_hi = v_p
             # Match the narrow PV operand order: _mfma_acc_fp8_i64(A=V, B=P). So the wide
             # MFMA's A operand is V (32 contiguous keys/lane from the wide LDS read) and the
@@ -1848,10 +1700,8 @@ def build_flash_attn_dualwave_swp_module(
             return _fadd(lhs_sum, rhs_sum)
 
         def _cast_p(v_p):
-            # Wide PV: stage P to the pf LDS scratch here (raw per-r values available); the
-            # cluster's existing s_barrier after _cast_p makes it visible for the wide B read
-            # in _mma1_wide. The returned packs are unused by the wide path but kept so the
-            # caller's interface (and the narrow path) is unchanged.
+            # Wide PV stages P here; the existing barrier makes pf visible to _mma1_wide.
+            # Returned packs are kept for the narrow path and caller interface.
             lo_partial_list, hi_full = v_p
             p_lo_packs = []
             p_hi_packs = []
@@ -1945,10 +1795,9 @@ def build_flash_attn_dualwave_swp_module(
                 m_out = _anchor_scalar_f32(m_tile_max)
             return ([o0, o1, o2, o3], m_out, l_out, _v_vec32_to_p(vp_out))
 
-        # Split-K: empty splits (< 4 tiles) skip the pipeline, writing zeros below.
-        # Varlen: grid_y is sized for max_seqlen, so a q-block past this batch's
-        # seqlen_q has no rows -> skip (uniform across the WG, barriers stay balanced).
-        # VARLEN and SPLITK are mutually exclusive, so they share the one guard.
+        # Skip empty split-K workgroups and varlen q-blocks beyond seqlen_q.
+        # The guards are uniform across the workgroup, so barriers stay balanced.
+        # VARLEN and SPLITK are mutually exclusive.
         if const_expr(SPLITK):
             _split_if = _scf.IfOp(_raw(split_nonempty))
             _split_guard = _if_then(_split_if)
@@ -1969,10 +1818,8 @@ def build_flash_attn_dualwave_swp_module(
             q_row = q_start + q_row_in_block
             q_row_i32 = fx.Int32(q_row)
             if const_expr(_WIDE_QK):
-                # Wide QK reads its own Q operand (raw fp8) and never consumes the narrow
-                # q_all_scaled_bf16, so skip the narrow Q load/scale entirely on this path.
-                # The q_descale*k_descale*sm_scale*log2e is applied to the fp32 logits in
-                # _mma0_wide like the narrow fp8 path.
+                # Wide QK loads raw fp8 Q itself and applies q/k descale after MFMA.
+                # The narrow pre-scaled Q path is unused here.
                 q_all_wide = _load_q_all_wide(q_row_in_block)
             else:
                 q_all_bf16 = _load_q_all(q_row_in_block)
@@ -2098,10 +1945,8 @@ def build_flash_attn_dualwave_swp_module(
                     rocdl.s_setprio(1)
                 if const_expr(not _FP8_WIDE_MMA):
                     v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
-                # v_s_1 holds tile j_idx-2. For seqlen_q != seqlen_kv (cross_seqlen) a
-                # diagonal kv-tile can land on this slot, so mask it too (guarded ->
-                # no-op for fully kept tiles). Self-attention skips this entirely to
-                # preserve its schedule (the diagonal only ever hits v_s_0/epilogue).
+                # Cross-length causal can put a diagonal tile in v_s_1; mask it here.
+                # Self-attention skips this to keep the existing schedule.
                 if const_expr(CAUSAL and CROSS_SEQLEN):
                     v_s_1 = _causal_mask_prologue_if_needed(v_s_1, j_idx - 2, (j_idx - 1) * BLOCK_N)
                 else:
@@ -2438,17 +2283,14 @@ def build_flash_attn_dualwave_swp_module(
             # Epilogue C13 (compute): final P*V -> v_o holds the unnormalized output.
             v_o = _mma1(v_p_1, v_packs_e13, v_o)
 
-            # Normalize O by the softmax denominator (guarded so a zero l_row
-            # yields 0 instead of nan). Split-K also normalizes before the 16-bit
-            # pack (keeps |O_partial| ~ |V| so the mantissa is fully used); the
-            # combine kernel re-weights by w_s * l_s.
+            # Normalize by l_row; zero rows become zero instead of NaN.
+            # Split-K normalizes before packing so O_partial keeps useful mantissa
+            # range; the combine kernel later applies w_s*l_s.
             inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
             inv_l = ArithValue(fx.Float32(l_row) > c_zero_f).select(inv_l_rcp, c_zero_f)
             if const_expr(dtype_str == "fp8" and not _PV_USE_VT):
-                # native-vtf fp8 PV used raw fp8 V (= V / v_descale), so the PV
-                # accumulator is 1/v_descale too large; fold v_descale into the O scale.
-                # Both vt-based PV modes (HIPREC, FROMBF16) already dequanted V*v_descale
-                # into vt, so skip here.
+                # Native-vtf PV accumulates raw fp8 V, so fold v_descale into O scale.
+                # vt-based PV modes already dequantize V*v_descale into LDS.
                 inv_l = fx.Float32(_fmul(inv_l, _vd_fp8))
             _scale_o(v_o, inv_l)
 
@@ -2460,10 +2302,8 @@ def build_flash_attn_dualwave_swp_module(
             else:
                 rocdl.s_barrier()
 
-            # Store O back to global memory, 128b per store: a lane fuses its own
-            # 4-col half with its half-wave partner's 4 cols (permlane32_swap), so a
-            # store_group pair covers 8 contiguous cols -> 8 dwordx4 per wave
-            # instead of 16 dwordx2.
+            # 128b stores fuse this lane and its half-wave partner, so each pair
+            # covers 8 contiguous columns instead of two 64b stores.
             pair_i32_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
 
             def _o_pack_2dw(dc, store_group):
@@ -2524,10 +2364,8 @@ def build_flash_attn_dualwave_swp_module(
                 mrow_base = grid_z * NUM_HEADS_Q * seq_len_v * (HEAD_DIM // 2)
                 lrow_base = mrow_base + grid_z * NUM_HEADS_Q * seq_len_v
                 ml_row_idx = (split_z * NUM_HEADS_Q + q_head_idx) * seq_len_v + q_row
-                # The workspace is indexed directly by q_row and (unlike O) can't be
-                # num_records-bounded, so guard writes by q_row < seq_len (combine only
-                # reads s < seq_len). lane and lane+32 share q_row, so the half-wave
-                # permlane32_swap fuse applies to both equally; aligned: always true.
+                # Workspace writes cannot be bounded by num_records, so guard q_row.
+                # lane/lane+32 share q_row, so the half-wave store fuse stays valid.
                 _if_qrow = _scf.IfOp(_raw(ArithValue(q_row < seq_len_v)))
                 with _if_then(_if_qrow):
                     for dc in range_constexpr(D_CHUNKS):
