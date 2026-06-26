@@ -191,7 +191,8 @@ def warn_annotation_value_mismatch(param_name, annotation, actual_type, *, conte
     """
     warnings.warn(
         f"{context} parameter '{param_name}' is annotated as "
-        f"'{annotation.__name__}', but the argument resolves to '{actual_type.__name__}'. "
+        f"'{getattr(annotation, '__name__', repr(annotation))}', but the argument resolves to "
+        f"'{getattr(actual_type, '__name__', repr(actual_type))}'. "
         f"The annotation is not enforced; the actual value type is used.",
         stacklevel=3,
     )
@@ -213,10 +214,10 @@ def warn_invalid_annotations(sig, *, context):
             continue
         if isinstance(ann, DslType) or is_type_param_annotation(ann):
             continue
-        if issubclass(ann, SimpleNamespace):
+        if isinstance(ann, type) and issubclass(ann, SimpleNamespace):
             continue
-        ann_name = getattr(ann, "__name__", repr(ann))
         warnings.warn(
-            f"{context} parameter '{name}' is annotated as '{ann_name}', which is not " f"a DSL value type.",
+            f"{context} parameter '{name}' is annotated as '{getattr(ann, '__name__', repr(ann))}', which is not "
+            f"a DSL value type.",
             stacklevel=3,
         )

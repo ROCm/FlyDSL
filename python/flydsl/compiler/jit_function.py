@@ -1445,7 +1445,11 @@ class JitFunction:
                     # Per-call value/annotation consistency check.
                     for pname, dsl_type in zip(param_names, dsl_types):
                         ann = sig.parameters[pname].annotation
-                        if ann is not inspect.Parameter.empty and not issubclass(dsl_type, ann):
+                        if (
+                            ann is not inspect.Parameter.empty
+                            and isinstance(ann, type)
+                            and not issubclass(dsl_type, ann)
+                        ):
                             warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
                     has_user_stream = _ensure_stream_arg(jit_args)
                     ir_types = get_ir_types(jit_args)

@@ -493,7 +493,11 @@ class KernelFunction:
             ):
                 constexpr_values[param_name] = value
             else:
-                if annotation is not inspect.Parameter.empty and not isinstance(value, annotation):
+                if (
+                    annotation is not inspect.Parameter.empty
+                    and isinstance(annotation, type)
+                    and not isinstance(value, annotation)
+                ):
                     warn_annotation_value_mismatch(param_name, annotation, type(value), context="@kernel")
                 param_names.append(param_name)
                 param_values.append(value)
