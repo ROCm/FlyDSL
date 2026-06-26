@@ -93,6 +93,17 @@ def lds_load_b128_raw(lds_base_idx, byte_offset):
     return llvm_dialect.load(ir.VectorType.get([4], ir.IntegerType.get_signless(32)), ptr_val)
 
 
+def lds_load_b32_raw(lds_base_idx, byte_offset):
+    """Load 4 bytes (one i32) from LDS using a pre-extracted base index (raw LLVM).
+
+    Unlike :func:`lds_load_b128_raw`, this only requires 4-byte alignment, so it
+    suits scale layouts where consumed words sit at 4-byte (not 16-byte) granular
+    offsets (e.g. the 32x4 B-scale layout's one-i32-per-atom reads).
+    """
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    return llvm_dialect.load(ir.IntegerType.get_signless(32), ptr_val)
+
+
 def lds_transpose_load_raw(result_type, lds_base_idx, byte_offset):
     """Transpose-load 16 bytes from LDS using a pre-extracted base index."""
     from flydsl._mlir.dialects import rocdl as _rocdl

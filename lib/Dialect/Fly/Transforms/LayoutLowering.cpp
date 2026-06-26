@@ -1274,8 +1274,8 @@ public:
       return failure();
 
     std::optional<IntTupleAttr> profileAttr;
-    if (op.getAttr()) {
-      auto attrTy = dyn_cast<IntTupleType>(op.getAttr().getType());
+    if (op.getPattern()) {
+      auto attrTy = dyn_cast<IntTupleType>(op.getPattern().getType());
       if (attrTy)
         profileAttr = attrTy.getAttr();
     }

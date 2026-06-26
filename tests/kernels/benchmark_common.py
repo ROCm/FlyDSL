@@ -41,10 +41,10 @@ class PerfRow:
     aiter_gpu_us: Optional[float]
 
     @property
-    def speedup_aiter_vs_flydsl(self) -> Optional[float]:
+    def speedup_flydsl_vs_aiter(self) -> Optional[float]:
         if self.flydsl_gpu_us is None or self.aiter_gpu_us is None:
             return None
-        return self.flydsl_gpu_us / self.aiter_gpu_us
+        return self.aiter_gpu_us / self.flydsl_gpu_us
 
 
 def _fmt_us(x: Optional[float]) -> str:
@@ -57,7 +57,7 @@ def print_perf_table(rows: List[PerfRow]) -> None:
     print("=" * 100)
     print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'AIter(gpu us)':>14s} {'speedup':>10s}")
     for r in rows:
-        sp = r.speedup_aiter_vs_flydsl
+        sp = r.speedup_flydsl_vs_aiter
         sp_s = "-" if sp is None else f"{sp:,.2f}x"
         print(
             f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"
@@ -198,7 +198,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     if op == "layernorm":
         from kernels.layernorm_kernel import build_layernorm_module
 
-        m = build_layernorm_module(1, N, dtype)
+        m = build_layernorm_module(N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
@@ -209,7 +209,7 @@ def _bench_flydsl_torch(*, op: str, M: int, N: int, dtype: str, warmup: int, ite
     if op == "rmsnorm":
         from kernels.rmsnorm_kernel import build_rmsnorm_module
 
-        m = build_rmsnorm_module(1, N, dtype)
+        m = build_rmsnorm_module(N, dtype)
         exe = flydsl.compile(m)
         x = torch.randn((M, N), device="cuda", dtype=torch_dtype)
         gamma = torch.randn((N,), device="cuda", dtype=torch_dtype)
@@ -977,7 +977,7 @@ def main() -> None:
         print("=" * 100)
         print(f"{'op':10s} {'shape':18s} {'dtype':6s} {'FlyDSL(gpu us)':>14s} {'torch(gpu us)':>14s} {'speedup':>10s}")
         for r in wmma_rows:
-            sp = r.speedup_aiter_vs_flydsl
+            sp = r.speedup_flydsl_vs_aiter
             sp_s = "-" if sp is None else f"{sp:,.2f}x"
             print(
                 f"{r.op:10s} {r.shape:18s} {r.dtype:6s} {_fmt_us(r.flydsl_gpu_us):>14s} {_fmt_us(r.aiter_gpu_us):>14s} {sp_s:>10s}"

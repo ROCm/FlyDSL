@@ -19,6 +19,7 @@ from ..compiler.protocol import (
     peek_from_ptr,
     poke_into_ptr,
 )
+from .meta import dsl_loc_tracing
 from .primitive import add_offset
 from .typing import Array, Constexpr, Pointer
 
@@ -768,6 +769,7 @@ class Arena:
         self._offset = offset + nbytes
         return offset
 
+    @dsl_loc_tracing
     def allocate(self, storable_or_int, alignment=None):
         """Allocate a Storable type or raw bytes, returning ``Storage[T]``.
 

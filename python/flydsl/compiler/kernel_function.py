@@ -9,8 +9,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
+from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
+from .diagnostics import install_excepthook
 from .jit_argument import is_type_param_annotation, resolve_signature
 from .mlir_utils import convert_to_mlir_attr
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -117,69 +119,13 @@ def _attach_attrs(op, unit_attrs: Optional[List[str]], value_attrs: Optional[Dic
 # =============================================================================
 
 
-def get_source_location(depth: int = 2) -> Tuple[str, int, int]:
-    """Get source file location from call stack.
-
-    Args:
-        depth: Stack depth to look up (2 = caller's caller)
-
-    Returns:
-        Tuple of (filename, line, column)
-    """
-    frame = inspect.currentframe()
+def func_def_location(func: Callable, context=None) -> ir.Location:
+    """File location of *func*'s ``def`` line (the kernel/jit definition)."""
     try:
-        for _ in range(depth):
-            if frame is not None:
-                frame = frame.f_back
-        if frame is not None:
-            return (frame.f_code.co_filename, frame.f_lineno, 0)
-    finally:
-        del frame
-    return ("<unknown>", 0, 0)
-
-
-def create_file_location(filename: str, line: int, col: int = 0, context=None) -> ir.Location:
-    """Create an MLIR file location."""
-    ctx = context or ir.Context.current
-    return ir.Location.file(filename, line, col, context=ctx)
-
-
-def create_caller_location(depth: int = 2, context=None) -> ir.Location:
-    """Create an MLIR location from the caller's source position."""
-    filename, line, col = get_source_location(depth + 1)
-    return create_file_location(filename, line, col, context)
-
-
-class FuncLocationTracker:
-    """Track source locations for a Python function being traced."""
-
-    def __init__(self, func: Callable):
-        self._func = func
-        self._filename = inspect.getfile(func)
-        try:
-            self._source_lines, self._start_line = inspect.getsourcelines(func)
-        except (OSError, TypeError):
-            self._source_lines = []
-            self._start_line = 0
-
-    @property
-    def filename(self) -> str:
-        return self._filename
-
-    @property
-    def start_line(self) -> int:
-        return self._start_line
-
-    def get_func_location(self, context=None) -> ir.Location:
-        """Get location for the function definition."""
-        return create_file_location(self._filename, self._start_line, 0, context)
-
-    @contextmanager
-    def func_scope(self):
-        """Enter a location scope for this function."""
-        loc = self.get_func_location()
-        with loc:
-            yield loc
+        line = inspect.getsourcelines(func)[1]
+    except (OSError, TypeError):
+        line = 0
+    return file_location(inspect.getfile(func), line, 0, context)
 
 
 # =============================================================================
@@ -259,11 +205,9 @@ class CompilationContext:
         """Get compiler hints for the current thread, or empty dict."""
         return getattr(cls._compile_hints, "data", None) or {}
 
-    def __init__(self, func_tracker: Optional[FuncLocationTracker] = None):
+    def __init__(self):
         self.gpu_module_op = None
         self.kernel_counter = 0
-        self.func_tracker = func_tracker
-        self.kernel_trackers: Dict[str, FuncLocationTracker] = {}
         self.stream_arg = None
         self.link_libs: list = []
         self._link_libs_seen: set = set()
@@ -277,9 +221,9 @@ class CompilationContext:
 
     @classmethod
     @contextmanager
-    def create(cls, func_tracker: Optional[FuncLocationTracker] = None):
+    def create(cls):
         prev = getattr(cls._current, "value", None)
-        ctx = CompilationContext(func_tracker)
+        ctx = CompilationContext()
         cls._current.value = ctx
         try:
             yield ctx
@@ -297,14 +241,6 @@ class CompilationContext:
         kid = self.kernel_counter
         self.kernel_counter += 1
         return kid
-
-    def register_kernel_tracker(self, name: str, tracker: FuncLocationTracker):
-        """Register a location tracker for a kernel function."""
-        self.kernel_trackers[name] = tracker
-
-    def get_kernel_tracker(self, name: str) -> Optional[FuncLocationTracker]:
-        """Get the location tracker for a kernel function."""
-        return self.kernel_trackers.get(name)
 
 
 # =============================================================================
@@ -400,7 +336,7 @@ class KernelLauncher:
                     f"in kernel '{self._kernel_name}'"
                 )
 
-        launch_loc = create_caller_location(depth=2)
+        launch_loc = capture_user_location()
 
         kernel_operands = []
         for arg in self._kernel_args:
@@ -483,6 +419,7 @@ class KernelFunction:
     _current: Optional["KernelFunction"] = None
 
     def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
+        install_excepthook()
         # ASTRewriter.transform mutates `func.__code__` in place.  To preserve
         # the *pre-rewrite* code object (whose co_names / co_freevars still
         # reference helper callables that the rewriter inlines into IR ops),
@@ -507,7 +444,6 @@ class KernelFunction:
         self._name = name
         self._known_block_size = _validate_known_block_size(known_block_size)
         self._kernel_name: Optional[str] = None
-        self._location_tracker = FuncLocationTracker(func)
         self._shared_allocator = None
 
         full_sig = resolve_signature(self._func)
@@ -567,9 +503,7 @@ class KernelFunction:
         else:
             self._kernel_name = f"{self._func.__name__}_{kernel_id}"
 
-        ctx.register_kernel_tracker(self._kernel_name, self._location_tracker)
-
-        kernel_loc = self._location_tracker.get_func_location()
+        kernel_loc = func_def_location(self._func)
 
         self._shared_allocator = None
         KernelFunction._current = self
@@ -597,10 +531,12 @@ class KernelFunction:
                         idx += n
 
                     dsl_args.update(constexpr_values)
-                    if bound_self is not None:
-                        self._func(bound_self, **dsl_args)
-                    else:
-                        self._func(**dsl_args)
+                    # Bound the call-site boundary at the kernel body.
+                    with tracing_context(self._func):
+                        if bound_self is not None:
+                            self._func(bound_self, **dsl_args)
+                        else:
+                            self._func(**dsl_args)
                     gpu.ReturnOp([])
         finally:
             KernelFunction._current = None
@@ -624,7 +560,7 @@ class KernelFunction:
         if ctx is None:
             raise RuntimeError("@kernel can only be called inside @jit function")
 
-        call_loc = create_caller_location(depth=2)
+        call_loc = capture_user_location()
 
         bound_self = None
         if self._has_self_param:

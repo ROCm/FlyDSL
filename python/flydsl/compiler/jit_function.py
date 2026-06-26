@@ -21,17 +21,19 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
+from .diagnostics import DSLCompileError, diag_records_from_mlir_error, dsl_ir_diagnostics, install_excepthook
 from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
 from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
-    FuncLocationTracker,
     KernelFunction,
     create_gpu_module,
+    func_def_location,
     get_gpu_module_body,
 )
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
@@ -277,46 +279,6 @@ def _snapshot_refs(refs: List[Tuple[str, str, dict]], *, stable: bool) -> Dict[T
         if name in var_dict:
             out[(name, mod_name)] = _snapshot_global_value(var_dict[name], stable=stable)
     return out
-
-
-class FlyDSLCompileError(RuntimeError):
-    """Raised when an MLIR pass pipeline fails.
-
-    ``diagnostics`` carries the list of error-severity messages collected
-    during the failed ``pm.run()``.
-    """
-
-    def __init__(self, message: str, diagnostics: Optional[List[str]] = None):
-        self.diagnostics = diagnostics or []
-        if self.diagnostics:
-            full = message + "\nMLIR diagnostics:\n" + "\n".join(f"  - {d}" for d in self.diagnostics)
-        else:
-            full = message
-        super().__init__(full)
-
-
-@contextmanager
-def _mlir_diagnostics(ctx):
-    """Collect MLIR error diagnostics emitted during a ``with`` block.
-
-    Yields a list that the caller can inspect after the block.  Only
-    ``ERROR`` severity messages are captured; non-error diagnostics are
-    left to the default handler (returns ``False``).
-    """
-    diags: List[str] = []
-
-    def _handler(d):
-        if d.severity == ir.DiagnosticSeverity.ERROR:
-            diags.append(str(d))
-            return True
-        return False
-
-    handler = ctx.attach_diagnostic_handler(_handler)
-    try:
-        yield diags
-    finally:
-        if handler.attached:
-            handler.detach()
 
 
 def _flydsl_key() -> str:
@@ -781,11 +743,11 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm = PassManager.parse(pipeline)
     pm.enable_verifier(verifier)
     pm.enable_ir_printing(print_after_all=print_after_all)
-    with _mlir_diagnostics(module.context) as diags:
+    with dsl_ir_diagnostics(module.context) as diags:
         try:
             pm.run(module.operation)
         except Exception as exc:
-            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
+            raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
 class MlirCompiler:
@@ -793,7 +755,10 @@ class MlirCompiler:
     def compile(
         cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: Optional[list] = None
     ) -> ir.Module:
-        module.operation.verify()
+        try:
+            module.operation.verify()
+        except ir.MLIRError as exc:
+            raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
 
         backend = get_backend(arch=arch)
 
@@ -850,11 +815,11 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    with _mlir_diagnostics(module.context) as diags:
+                    with dsl_ir_diagnostics(module.context) as diags:
                         try:
                             pm.run(module.operation)
                         except Exception as exc:
-                            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
+                            raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
                     out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
@@ -1148,6 +1113,7 @@ def _build_call_state(sig, args_tuple, func_exe):
 
 class JitFunction:
     def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
+        install_excepthook()
         # Same rationale as KernelFunction._original_func: ASTRewriter.transform
         # mutates `func.__code__` in place, after which the JIT cache walker
         # (`_get_underlying_func`) can no longer see closure-captured helpers
@@ -1468,15 +1434,13 @@ class JitFunction:
                     param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
                     has_user_stream = _ensure_stream_arg(jit_args)
                     ir_types = get_ir_types(jit_args)
-                    loc = ir.Location.unknown(ctx)
+                    loc = func_def_location(self.func, ctx)
 
                     log().info(f"jit_args={jit_args}")
                     log().info(f"dsl_types={dsl_types}")
 
                     module = ir.Module.create(loc=loc)
                     module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
-
-                    func_tracker = FuncLocationTracker(self.func)
 
                     with ir.InsertionPoint(module.body), loc:
                         backend = get_backend()
@@ -1486,7 +1450,7 @@ class JitFunction:
                         func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
                         entry_block = func_op.add_entry_block()
 
-                        with CompilationContext.create(func_tracker) as comp_ctx:
+                        with CompilationContext.create() as comp_ctx:
                             comp_ctx.gpu_module_op = gpu_module
                             comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
 
@@ -1499,10 +1463,12 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
-                                if bound_self is not None:
-                                    self.func(bound_self, **named_args)
-                                else:
-                                    self.func(**named_args)
+                                # Bound the call-site boundary at the jit body.
+                                with tracing_context(self.func):
+                                    if bound_self is not None:
+                                        self.func(bound_self, **named_args)
+                                    else:
+                                        self.func(**named_args)
                                 func.ReturnOp([])
 
                     original_ir = module.operation.get_asm(enable_debug_info=True)

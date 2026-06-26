@@ -31,7 +31,7 @@ from .._mlir.dialects import arith as std_arith
 from .._mlir.dialects import llvm, rocdl
 from .._mlir.extras import types as T
 from ..runtime.device import is_rdna_arch
-from .meta import traced_op
+from .meta import dsl_loc_tracing
 
 
 def _get_buffer_flags(arch=None):
@@ -107,6 +107,7 @@ def _unwrap_value(value):
     return value
 
 
+@dsl_loc_tracing
 def _create_i32_constant(value: int) -> ir.Value:
     """Create i32 constant using standard MLIR arith dialect."""
     i32_type = T.i32()
@@ -117,6 +118,7 @@ def _create_i32_constant(value: int) -> ir.Value:
     return _unwrap_value(op.result)
 
 
+@dsl_loc_tracing
 def _create_i16_constant(value: int) -> ir.Value:
     """Create i16 constant using standard MLIR arith dialect."""
     i16_type = T.i16()
@@ -125,6 +127,7 @@ def _create_i16_constant(value: int) -> ir.Value:
     return _unwrap_value(op.result)
 
 
+@dsl_loc_tracing
 def _create_i64_constant(value: int) -> ir.Value:
     """Create i64 constant using standard MLIR arith dialect."""
     i64_type = T.i64()
@@ -133,6 +136,7 @@ def _create_i64_constant(value: int) -> ir.Value:
     return _unwrap_value(op.result)
 
 
+@dsl_loc_tracing
 def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     """Create an LLVM pointer from an integer or index value."""
     value = _unwrap_value(value)
@@ -143,6 +147,7 @@ def create_llvm_ptr(value, address_space: int = 0) -> ir.Value:
     return llvm.IntToPtrOp(ptr_type, value).result
 
 
+@dsl_loc_tracing
 def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     """Extract the base address of a fly.memref as an index value.
 
@@ -166,6 +171,7 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
     return _unwrap_value(std_arith.IndexCastOp(ir.IndexType.get(), i64_val).result)
 
 
+@dsl_loc_tracing
 def get_element_ptr(
     base_ptr,
     byte_offset: Union[int, ir.Value, None] = None,
@@ -234,6 +240,7 @@ class BufferResourceDescriptor:
         self.rsrc = rsrc
 
     @staticmethod
+    @dsl_loc_tracing
     def from_memref(
         memref_val: ir.Value,
         stride: int = 0,
@@ -337,6 +344,7 @@ class BufferResourceDescriptor:
         return BufferResourceDescriptor(rsrc)
 
 
+@dsl_loc_tracing
 def create_buffer_resource_from_addr(
     addr_i64: ir.Value,
     *,
@@ -382,7 +390,7 @@ def create_buffer_resource_from_addr(
     return rocdl.MakeBufferRsrcOp(rsrc_type, base_ptr, stride, num_records, flags).result
 
 
-@traced_op
+@dsl_loc_tracing
 def create_buffer_resource(
     memref_val: ir.Value,
     stride: int = 0,
@@ -420,7 +428,7 @@ def create_buffer_resource(
     return desc.rsrc
 
 
-@traced_op
+@dsl_loc_tracing
 def buffer_load(
     rsrc: ir.Value,
     offset: ir.Value,
@@ -516,7 +524,7 @@ def buffer_load(
     return load_op.result
 
 
-@traced_op
+@dsl_loc_tracing
 def buffer_store(
     data: ir.Value,
     rsrc: ir.Value,

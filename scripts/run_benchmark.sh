@@ -714,9 +714,15 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     set -- $shape
     IFS=$oldIFS
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
+    v2_flag=""
+    case "$dtype" in
+      fp8 | fp16 | bf16) v2_flag="--use_v2" ;;
+    esac
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
+    # shellcheck disable=SC2086 # v2_flag is intentionally unquoted (empty = omit)
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --in_dtype "$dtype" \
+      ${v2_flag} \
       --num_warmup 10 \
       --num_iters 100 \
       -M "$M" \
