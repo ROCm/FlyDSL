@@ -196,9 +196,10 @@ def compile_mxfp4_gemm(
                 fx.copy(dma_atom, src, dst)
 
         def _read16(base_iter, off_i32):
+            # ds_read_b128 straight into an i32[4] register fragment (no vec round-trip).
             t = fx.make_rmem_tensor(4, Int32)
             fx.copy(lds_copy, _lds_view(base_iter, off_i32), t)
-            return t.load().ir_value()
+            return t
 
         def read_a(parity):
             # Each lane's K=128 A operand = 16 B (k-group strides 16 B, 128-K half 64 B).
@@ -253,14 +254,13 @@ def compile_mxfp4_gemm(
         n_acc = m_chunks * num_acc_n
 
         def load_b(kt):
+            # buffer_load_dwordx4 straight into i32[4] register fragments.
             ops = []
             for ni in range_constexpr(num_acc_n):
                 for kh in range_constexpr(k_halves):
-                    ops.append(
-                        fly.copy_atom_call_ssa(
-                            [T.vec(4, T.i32)], b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, None]
-                        )
-                    )
+                    bf = fx.make_rmem_tensor(4, Int32)
+                    fx.copy_atom_call(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, None], bf)
+                    ops.append(bf)
             return ops
 
         def load_sc(chunk_kt):
@@ -297,34 +297,23 @@ def compile_mxfp4_gemm(
                 sa_v = [arith.shrui(_raw(v), sh) for v in sa_v]
                 sb_v = [arith.shrui(_raw(v), sh) for v in sb_v]
             # kh OUTERMOST: consecutive MFMAs write distinct accumulators (dense issue),
-            # spacing the per-acc accumulation dependency across the (mi,ni) grid.
-            # Each scaled MFMA = fx.gemm over rank-1 register fragments (one MmaAtomCall);
-            # A/B are vec<4xi32> and the e8m0 word rides scale_a=/scale_b=.
+            # spacing the per-acc accumulation dependency across the (mi,ni) grid. Each
+            # scaled MFMA = fx.gemm over the rank-1 i32[4] A/B fragments (one MmaAtomCall);
+            # the atom bitcasts to fp4 and the e8m0 word rides scale_a=/scale_b=.
             c_frags = [fx.make_rmem_tensor(4, Float32) for _ in range_constexpr(n_acc)]
             for idx in range_constexpr(n_acc):
                 c_frags[idx].store(Vec(accs[idx]))
             for kh in range_constexpr(k_halves):
-                a_frags = []
-                for mi in range_constexpr(m_chunks):
-                    af = fx.make_rmem_tensor(4, Int32)
-                    af.store(Vec(av[mi * k_halves + kh]))
-                    a_frags.append(af)
-                b_frags = []
-                for ni in range_constexpr(num_acc_n):
-                    bf = fx.make_rmem_tensor(4, Int32)
-                    bf.store(Vec(bv[ni * k_halves + kh]))
-                    b_frags.append(bf)
                 for ni in range_constexpr(num_acc_n):
                     np_i, in_b = ni // 2, ni % 2
                     for mi in range_constexpr(m_chunks):
                         mp_i, im = mi // 2, mi % 2
-                        idx = mi * num_acc_n + ni
-                        cf = c_frags[idx]
+                        cf = c_frags[mi * num_acc_n + ni]
                         fx.gemm(
                             scale_atoms[(kh * 2 + im, kh * 2 + in_b)],
                             cf,
-                            a_frags[mi],
-                            b_frags[ni],
+                            av[mi * k_halves + kh],
+                            bv[ni * k_halves + kh],
                             cf,
                             scale_a=sa_v[mp_i],
                             scale_b=sb_v[np_i],
