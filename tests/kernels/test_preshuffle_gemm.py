@@ -6,7 +6,7 @@
 """MFMA preshuffle GEMM tests (layout-API kernels).
 
 Kernel implementations live in `kernels/preshuffle_gemm.py` (fp8/int8/fp16/bf16)
-and `kernels/mxfp4_preshuffle_v2.py` (MXFP4). This file is the correctness +
+and `kernels/mxfp4_preshuffle.py` (MXFP4). This file is the correctness +
 perf harness.
 """
 
@@ -30,7 +30,7 @@ if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.mxfp4_preshuffle_v2 import compile_mxfp4_gemm_v2  # noqa: E402
+from kernels.mxfp4_preshuffle import compile_mxfp4_gemm  # noqa: E402
 from kernels.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
@@ -332,7 +332,7 @@ def test_mfma_w4_flyc_preshuffle(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = compile_mxfp4_gemm_v2(
+    launch_fn = compile_mxfp4_gemm(
         N=N,
         K=K,
         tile_m=tile_m,

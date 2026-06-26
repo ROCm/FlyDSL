@@ -47,7 +47,7 @@ def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves):
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
-def compile_mxfp4_gemm_v2(
+def compile_mxfp4_gemm(
     *,
     N: int,
     K: int,
