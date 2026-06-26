@@ -181,7 +181,7 @@ Where:
 
 ---
 
-## 3b. FlashAttention Forward (`kernels/flash_attn_generic.py`, `kernels/flash_attn_gfx950.py`)
+## 3b. FlashAttention Forward (`kernels/flash_attn_generic.py`, `kernels/flash_attn_gfx950.py`, `kernels/flash_attn_fp8_gfx950.py`)
 
 Dense FlashAttention forward. `build_flash_attn_func_module(num_heads, head_dim,
 causal=..., dtype_str=..., num_kv_heads=...)` is the public builder; on
@@ -349,7 +349,8 @@ What operation do you need?
 | `kernels/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
 | `kernels/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/flash_attn_generic.py` | FlashAttention generic fallback |
-| `kernels/flash_attn_gfx950.py` | FlashAttention gfx950 fast path |
+| `kernels/flash_attn_gfx950.py` | FlashAttention gfx950 bf16/f16 fast path |
+| `kernels/flash_attn_fp8_gfx950.py` | FlashAttention gfx950 fp8 dense fast path |
 | `kernels/layernorm_kernel.py` | LayerNorm (layout API) |
 | `kernels/rmsnorm_kernel.py` | RMSNorm (layout API) |
 | `kernels/softmax_kernel.py` | Softmax (layout API) |

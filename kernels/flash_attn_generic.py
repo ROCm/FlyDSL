@@ -150,7 +150,7 @@ def build_flash_attn_func_module_primary(
             raise ValueError(f"fp8 flash_attn requires head_dim == 128 (got {head_dim})")
         if cu_seqlens_q is not None or cu_seqlens_kv is not None:
             raise ValueError("fp8 flash_attn does not support varlen (cu_seqlens) yet")
-        from kernels.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
+        from kernels.flash_attn_fp8_gfx950 import build_flash_attn_dualwave_swp_module
 
         return build_flash_attn_dualwave_swp_module(
             num_heads=num_heads,

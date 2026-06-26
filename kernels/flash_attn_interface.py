@@ -33,13 +33,13 @@ from kernels.flash_attn_gfx950 import dualwave_splitk_workspace_elems  # noqa: F
 
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
-_DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16"}
+_DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn: "fp8"}
 
 
 def _dtype_str(t: torch.Tensor) -> str:
     s = _DTYPE_MAP.get(t.dtype)
     if s is None:
-        raise ValueError(f"flydsl_flash_attn_func only supports bf16/f16, got {t.dtype!r}")
+        raise ValueError(f"flydsl_flash_attn_func only supports bf16/f16/fp8, got {t.dtype!r}")
     return s
 
 
@@ -209,6 +209,7 @@ def _build_paged(
 
 # gfx950 dualwave paged-KV currently supports exactly one configuration.
 _PAGED_PAGE_SIZE = 64
+_PAGED_BT_LDS_SIZE = 2048
 
 
 def _flydsl_flash_attn_paged(
@@ -321,6 +322,15 @@ def _flydsl_flash_attn_paged(
     # Per-batch KV lengths differ in general → bottom-right cross-length masking. Varlen
     # paged always uses cross masking (per-batch seqlen_q/seqlen_kv come from cu_seqlens).
     skv = int(max_seqlen_kv) if max_seqlen_kv is not None else int(seqlen_k.max().item())
+    max_kv_pages = (skv + page_size - 1) // page_size
+    max_pages_per_split = (max_kv_pages + int(num_kv_splits) - 1) // int(num_kv_splits)
+    if max_pages_per_split > _PAGED_BT_LDS_SIZE:
+        max_supported_kv = _PAGED_BT_LDS_SIZE * int(num_kv_splits) * page_size
+        raise NotImplementedError(
+            f"flydsl_flash_attn_func: paged KV length {skv} exceeds block-table LDS window "
+            f"({_PAGED_BT_LDS_SIZE} pages/split, max_kv_len={max_supported_kv} for "
+            f"num_kv_splits={num_kv_splits}, page_size={page_size})"
+        )
     if varlen:
         cross = bool(cross_seqlen) if cross_seqlen is not None else True
     else:
@@ -400,6 +410,10 @@ def flydsl_flash_attn_func(
     kv_cache_layout: str = "linear",
     # Split-K (gfx950 only, seq_len >= 384, D=128, bf16/f16).
     num_kv_splits: int = 1,
+    # fp8 dense ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
     # Output tensor; allocated if None.
     out: Optional[torch.Tensor] = None,
     # Kernel build options.
@@ -444,7 +458,10 @@ def flydsl_flash_attn_func(
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
         block_table / seqlen_k: vLLM-style 2D block table metadata.
         num_kv_splits: Split-K factor (>1: gfx950 only, D=128, bf16/f16, seq>=384).
-        out: Optional pre-allocated output tensor (same shape/dtype as q).
+        q_descale / k_descale / v_descale: fp32 shape-[1] descales required
+            for dense fp8 e4m3fn inputs.
+        out: Optional pre-allocated output tensor. For fp8, output is bf16;
+            otherwise it has the same dtype as q.
         waves_per_eu: Kernel occupancy hint.
         daz: Enable denormals-are-zero.
         dualwave_swp_lazy_rescale: Enable lazy online softmax rescale.
@@ -455,7 +472,8 @@ def flydsl_flash_attn_func(
         stream: CUDA/HIP stream to launch on.
 
     Returns:
-        Output tensor with same shape and dtype as q.
+        Output tensor with the same shape as q. The dtype is bf16 for fp8
+        inputs, otherwise the same dtype as q.
     """
     # ── validation ──────────────────────────────────────────────────────────
     if not (q.is_cuda and k.is_cuda and v.is_cuda):
@@ -465,7 +483,10 @@ def flydsl_flash_attn_func(
     if q.dtype != k.dtype or q.dtype != v.dtype:
         raise ValueError(f"flydsl_flash_attn_func: q/k/v must share dtype; got {q.dtype}/{k.dtype}/{v.dtype}")
 
+    dtype_str = _dtype_str(q)
     paged_kv = any(x is not None for x in (block_table, seqlen_k))
+    if dtype_str == "fp8" and paged_kv:
+        raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support paged KV")
     if paged_kv:
         return _flydsl_flash_attn_paged(
             q,
@@ -491,8 +512,22 @@ def flydsl_flash_attn_func(
             stream=stream,
         )
 
-    dtype_str = _dtype_str(q)
     varlen = cu_seqlens_q is not None
+
+    if dtype_str == "fp8":
+        if varlen:
+            raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support varlen")
+        if num_kv_splits > 1:
+            raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support split-K")
+        if any(x is None for x in (q_descale, k_descale, v_descale)):
+            raise ValueError("flydsl_flash_attn_func: fp8 requires q_descale, k_descale, and v_descale")
+        for name, scale in (("q_descale", q_descale), ("k_descale", k_descale), ("v_descale", v_descale)):
+            if not scale.is_cuda:
+                raise ValueError(f"flydsl_flash_attn_func: {name} must be a CUDA tensor")
+            if scale.device != q.device:
+                raise ValueError(f"flydsl_flash_attn_func: {name} must be on {q.device}, got {scale.device}")
+            if scale.dtype != torch.float32 or scale.numel() != 1:
+                raise ValueError(f"flydsl_flash_attn_func: {name} must be a shape-[1] float32 tensor")
 
     if varlen and cu_seqlens_kv is None:
         raise ValueError("flydsl_flash_attn_func: cu_seqlens_kv required when cu_seqlens_q is given")
@@ -597,13 +632,26 @@ def flydsl_flash_attn_func(
 
         # ── allocate output ─────────────────────────────────────────────────
         if out is None:
-            out = torch.empty_like(q)
+            out_dtype = torch.bfloat16 if dtype_str == "fp8" else q.dtype
+            out = torch.empty(q.shape, dtype=out_dtype, device=q.device)
+        elif dtype_str == "fp8" and out.dtype != torch.bfloat16:
+            raise ValueError(f"flydsl_flash_attn_func: fp8 output must be bf16, got {out.dtype}")
+        elif dtype_str != "fp8" and out.dtype != q.dtype:
+            raise ValueError(f"flydsl_flash_attn_func: output dtype must match q dtype {q.dtype}, got {out.dtype}")
         # Keep natural shape; flattening can overflow int32 C-ABI dims.
         # Kernels rebuild per-batch descriptors from base pointers and strides.
-        q_flat = q.contiguous()
-        k_flat = k.contiguous()
-        v_flat = v.contiguous()
-        o_flat = out.contiguous()
+        if dtype_str == "fp8":
+            # The fp8 gfx950 module preserves the original dense ABI from 711.diff:
+            # flattened Q/K/V/O tensors plus descale kwargs.
+            q_flat = q.contiguous().view(-1)
+            k_flat = k.contiguous().view(-1)
+            v_flat = v.contiguous().view(-1)
+            o_flat = out.contiguous().view(-1)
+        else:
+            q_flat = q.contiguous()
+            k_flat = k.contiguous()
+            v_flat = v.contiguous()
+            o_flat = out.contiguous()
 
         # ── launch ──────────────────────────────────────────────────────────
         if splitk:
@@ -623,6 +671,8 @@ def flydsl_flash_attn_func(
                 kwargs["seq_len_kv"] = Skv
             if debug_lazy:
                 kwargs["debug_counts"] = debug_counts
+            if dtype_str == "fp8":
+                kwargs.update(q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
             exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
 
     return out
