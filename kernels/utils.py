@@ -8,7 +8,6 @@ data movement live in ``moegemm``; compile + launch in ``moe_dispatcher``.
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl._mlir.dialects import memref as memref_dialect
 from flydsl.expr import arith, buffer_ops, const_expr, rocdl
 from flydsl.expr.typing import T
 
@@ -88,9 +87,8 @@ def _lds_ptr3(base_i32, byte_off_i32):
     return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(fx.Int64(base_i32 + byte_off_i32)))
 
 
-def _lds_base_ptr3(lds_view):
-    """One ptr<3> for the LDS base; offsets via GEP."""
-    base_i32 = fx.Int32(memref_dialect.extract_aligned_pointer_as_index(lds_view))
+def _lds_base3(base_i32):
+    """ptr<3> for an LDS base address (i32); offsets via GEP."""
     return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(fx.Int64(base_i32)))
 
 

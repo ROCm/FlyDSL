@@ -16,8 +16,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from flydsl.expr.typing import Int8, T
 
 from .moegemm import (
     _gemm1_body_v2,
@@ -97,9 +96,9 @@ def compile_gemm1_a4w4_port(
     o_tag = "o8" if out_dtype == "fp8" else "o4"
     name_suffix = f"h{_K}_i{_INTER}_ne{_NE}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
 
-    allocator = SmemAllocator(None, arch="gfx950", global_sym_name=f"gemm1port_v2_smem_{name_suffix}")
-    lds_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_off + lds_bytes
+    @fx.struct
+    class SharedStorage:
+        buf: fx.Array[Int8, lds_bytes, 16]
 
     @flyc.kernel(name=f"gemm1_a4w4_port_{name_suffix}", known_block_size=[256, 1, 1])
     def gemm1_kernel(
@@ -121,13 +120,14 @@ def compile_gemm1_a4w4_port(
         bx_i32 = arith.index_cast(T.i32, bx)
         lane = tx_i32 % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
         cumsum0 = llvm.load(T.i32, _global_ptr1(arg_cumsum, fx.Int32(0)))
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(_N_OUT // 256)  # * NUM_N_BLOCKS
         if fx.Int32(bx_i32) < bound:
             _gemm1_body_v2(
-                allocator,
-                lds_off,
+                lds_base_i32,
                 arg_aq,
                 arg_ascale,
                 arg_bq,
@@ -166,12 +166,6 @@ def compile_gemm1_a4w4_port(
         arg_hidden: fx.Int64,
         stream: fx.Stream,
     ):
-        from flydsl.compiler.kernel_function import CompilationContext
-
-        ctx = CompilationContext.get_current()
-        allocator.finalized = False
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         grid_x = arith.index_cast(T.index, i32_grid)
         gemm1_kernel(
             arg_aq,
@@ -235,9 +229,9 @@ def compile_gemm2_a4w4_port(
     _tag = f"ne{NE}_h{N_OUT}_i{_K}_bm{BM}{'_nt' if use_nt else ''}_atomic{_atag}_v2"
     _name = f"gemm2_a4w4_port_{_tag}"
 
-    allocator = SmemAllocator(None, arch="gfx950", global_sym_name=f"gemm2port_v2_smem_{_tag}")
-    lds_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_off + _lds_bytes
+    @fx.struct
+    class SharedStorage:
+        buf: fx.Array[Int8, _lds_bytes, 16]
 
     @flyc.kernel(name=_name, known_block_size=[256, 1, 1])
     def gemm2_kernel(
@@ -263,7 +257,8 @@ def compile_gemm2_a4w4_port(
 
         _aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(BM * _K_BYTES)
         aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=_aq_num)
-        saq = SmemPtr(allocator.get_base(), lds_off, T.i8, shape=(_aStages * _slot_bytes,))
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
 
         # Preload the first kStages K-tiles (all tiles for the K_TILES<=2 fast path;
         # the prologue for the streaming path). slot == kt for the preload.
@@ -271,7 +266,7 @@ def compile_gemm2_a4w4_port(
             for slot in range_constexpr(kStages):
                 _issue_a_load_lds_dt(
                     aq_rsrc,
-                    saq,
+                    lds_base_i32,
                     slot,
                     slot,
                     m_row0,
@@ -293,8 +288,7 @@ def compile_gemm2_a4w4_port(
 
         if fx.Int32(bx_i32) < bound:
             _gemm2_body_v2(
-                allocator,
-                lds_off,
+                lds_base_i32,
                 arg_ascale,
                 arg_bq,
                 arg_bscale,
@@ -332,12 +326,6 @@ def compile_gemm2_a4w4_port(
         arg_out_scale: fx.Int64,
         stream: fx.Stream,
     ):
-        from flydsl.compiler.kernel_function import CompilationContext
-
-        ctx = CompilationContext.get_current()
-        allocator.finalized = False
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         grid_x = arith.index_cast(T.index, i32_max_m_blocks) * fx.Index(_num_n_blocks)
         gemm2_kernel(
             arg_aq,
