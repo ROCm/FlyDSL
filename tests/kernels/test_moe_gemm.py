@@ -85,6 +85,11 @@ from kernels.moe_gemm_2stage import (  # noqa: E402
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
 )
+from kernels.moe_sorting_kernel import moe_sorting_flydsl  # noqa: E402
+from kernels.mxfp4_moe_gemm_2stage import (  # noqa: E402
+    mxfp4_moe_gemm1,
+    mxfp4_moe_gemm2,
+)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1730,6 +1735,7 @@ def run_moe_stage2(
         "int4",
         "int4_bf16",
         pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
+        pytest.param("a8w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A8W4 requires gfx950+")),
     ],
 )
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
@@ -1796,6 +1802,12 @@ def test_moe_gemm_2stage(
             pytest.skip(f"{in_dtype} stage2 requires inter_dim >= 256 and tile_k2 >= 256, got {inter_dim}, {tile_k2}")
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
+        # The layout-API MXFP4 pipe (mxfp4_moe_gemm_2stage) is the BM32 atomic, opus-sort
+        # path: no reduce mode, and graph capture is out of scope here.
+        if bool(use_reduce):
+            pytest.skip(f"{in_dtype} layout-API pipe is atomic-only (no reduce mode)")
+        if bool(test_graph):
+            pytest.skip(f"{in_dtype} layout-API pipe: graph capture not covered")
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1820,6 +1832,26 @@ def test_moe_gemm_2stage(
     score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+
+    # a4w4 / a8w4 run the layout-API MXFP4 pipeline (opus sort -> gemm1 -> gemm2
+    # atomic), replacing the mixed_moe path; it fuses both stages + the topk
+    # reduction, so it bypasses run_moe_stage1 / run_moe_stage2.
+    if in_dtype in ("fp4", "a8w4"):
+        run_mxfp4_moe_2stage(
+            tokens=tokens,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype=in_dtype,
+            x_fp32=x_fp32,
+            w1_fp32=w1_fp32,
+            w2_fp32=w2_fp32,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            seed=seed,
+        )
+        return
 
     routing = build_routing_buffers(
         topk_ids=topk_ids,
@@ -1983,6 +2015,255 @@ def _per_1x32_mxfp8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     x_q = x_q.view(shape_orig).contiguous()
     scale_bytes = scale_e8m0.view(*shape_orig[:-1], shape_orig[-1] // 32).view(torch.uint8).contiguous()
     return x_q, scale_bytes
+
+
+# ---------------------------------------------------------------------------
+# Layout-API MXFP4 MoE pipeline (mxfp4_moe_gemm_2stage), opus-sort only.
+# Drives the a4w4 / a8w4 path of test_moe_gemm_2stage instead of mixed_moe:
+#   moe_sorting_flydsl (opus sort) -> gemm1 -> gemm2 (atomic scatter) -> bf16 out
+# gemm1 gathers from sorted_token_ids (& 0xFFFFFF); gemm2 scatters via atomic add
+# weighted by sorted_weights -- no fused-sort extras (m_indices / reverse_sorted).
+# ---------------------------------------------------------------------------
+def _mxfp4_shuffle_weight_a16w4(x, gate_up, NLane=16, KPack=16):
+    """CK a16w4 weight preshuffle (is_guinterleave path)."""
+    x_type = x.dtype
+    if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
+        x = x.view(torch.uint8)
+    E, N, K_pk = x.shape
+    if gate_up:
+        N = N // 2
+    KLane = 64 // NLane
+    N0 = N // NLane
+    K0 = K_pk // (KLane * KPack)
+    if gate_up:
+        x_ = x.view(E, 2, N0, NLane, K0, KLane, KPack).permute(0, 2, 1, 4, 5, 3, 6)
+    else:
+        x_ = x.view(E, N0, NLane, K0, KLane, KPack).permute(0, 1, 3, 4, 2, 5)
+    return x_.contiguous().view(*x.shape).contiguous().view(x_type)
+
+
+def _mxfp4_shuffle_scale_a16w4(src, E, gate_up):
+    """CK a16w4 e8m0 scale preshuffle (is_guinterleave path)."""
+    n_experts, k_ = src.shape
+    n_ = n_experts // E
+    K_Pack, N_Pack, N_Lane = 2, 2, 16
+    K_Lane = 64 // N_Lane
+    K1 = k_ // K_Pack // K_Lane
+    N1 = n_ // N_Lane // N_Pack
+    if gate_up:
+        s = src.view(E, N_Pack, N1, N_Lane, K1, K_Pack, K_Lane).permute(0, 2, 4, 6, 3, 5, 1)
+    else:
+        s = src.view(E, N1, N_Pack, N_Lane, K1, K_Pack, K_Lane).permute(0, 1, 4, 6, 3, 5, 2)
+    return s.contiguous().view(*src.shape).contiguous()
+
+
+def _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=32, BK=256):
+    """Torch reconstruction of moe_sort_scales: sort + CK-shuffle the e8m0 A-scale
+    by sorted row, exactly as gemm1 consumes it (opus gather: sti & 0xFFFFFF)."""
+    device = asc.device
+    MN_PACK = 2
+    K_PACK = BK // 128
+    C_M1 = BM // (16 * MN_PACK)
+    C_K1 = (H // 32) // (4 * K_PACK)
+    K_LANE, N_LANE = 4, 16
+    DWORDS_PER_CHUNK = C_M1 * C_K1 * K_LANE * N_LANE
+    n_chunks = max_sorted // BM
+    actual_sorted = int(cumsum[0].item())
+    actual_n_chunks = (actual_sorted + BM - 1) // BM
+    total_work = n_chunks * DWORDS_PER_CHUNK
+    sti_c = sti & 0x00FFFFFF
+    out = torch.zeros((total_work, 4), dtype=torch.uint8, device=device)
+    wid = torch.arange(total_work, device=device)
+    r = wid.clone()
+    n_lane = r % N_LANE
+    r //= N_LANE
+    k_lane = r % K_LANE
+    r //= K_LANE
+    ku = r % C_K1
+    r //= C_K1
+    mi = r % C_M1
+    r //= C_M1
+    chunk = r
+    valid_chunk = chunk < actual_n_chunks
+    M = asc.shape[0]
+    for ikxdl in range(K_PACK):
+        for im_a in range(MN_PACK):
+            sorted_row = chunk * BM + (mi * MN_PACK + im_a) * 16 + n_lane
+            rowok = (sorted_row < actual_sorted) & valid_chunk
+            srow = torch.clamp(sorted_row, max=max_sorted - 1)
+            stiv = sti_c[srow]
+            tid = torch.where((stiv < M) & rowok, stiv, torch.zeros_like(stiv))
+            k_idx = ku * K_PACK * 4 + ikxdl * 4 + k_lane
+            byte = asc[tid.long(), k_idx.long()]
+            out[:, ikxdl * MN_PACK + im_a] = torch.where(
+                rowok, byte, torch.zeros_like(byte)
+            )
+    return out.reshape(-1).contiguous()
+
+
+def _u8v(t):
+    return (
+        t.view(torch.uint8)
+        if (t is not None and t.element_size() == 1 and t.dtype != torch.uint8)
+        else t
+    )
+
+
+def run_mxfp4_moe_2stage(
+    *,
+    tokens,
+    model_dim,
+    inter_dim,
+    experts,
+    topk,
+    in_dtype,
+    x_fp32,
+    w1_fp32,
+    w2_fp32,
+    topk_ids,
+    topk_weights,
+    interleave=True,
+    seed=0,
+):
+    """Run the layout-API MXFP4 MoE (opus sort -> gemm1 -> gemm2 atomic) and verify
+    against an independent dequant-MoE reference. Returns the bf16 output."""
+    from tests.kernels.utils import fp4_utils
+
+    device = x_fp32.device
+    NE, H, INTER, TOPK = experts, model_dim, inter_dim, topk
+    BM = 32
+    is_f8 = in_dtype == "a8w4"
+
+    # weights (fp4) + CK a16w4 preshuffle
+    w1q, w1s = _per_1x32_fp4_quant(w1_fp32)
+    w2q, w2s = _per_1x32_fp4_quant(w2_fp32)
+    w1u8 = _u8v(_mxfp4_shuffle_weight_a16w4(w1q, gate_up=interleave))
+    w1sc = _u8v(_mxfp4_shuffle_scale_a16w4(w1s, NE, gate_up=interleave))
+    w2u8 = _u8v(_mxfp4_shuffle_weight_a16w4(w2q, gate_up=False))
+    w2sc = _u8v(_mxfp4_shuffle_scale_a16w4(w2s, NE, gate_up=False))
+
+    # opus sort (FlyDSL moe_sorting_kernel)
+    topk_ids_i32 = topk_ids.to(torch.int32)
+    topk_w_f32 = topk_weights.to(torch.float32)
+    max_padded = tokens * TOPK + NE * BM - TOPK
+    max_sorted = ((max_padded + BM - 1) // BM) * BM
+    sti = torch.empty(max_sorted, dtype=torch.int32, device=device)
+    swt = torch.empty(max_sorted, dtype=torch.float32, device=device)
+    sei = torch.empty(max_sorted // BM, dtype=torch.int32, device=device)
+    nv = torch.empty(2, dtype=torch.int32, device=device)
+    moe_buf = torch.empty((tokens, H), dtype=torch.bfloat16, device=device)
+    moe_sorting_flydsl(topk_ids_i32, topk_w_f32, sti, swt, sei, nv, moe_buf, NE, BM)
+    torch.cuda.synchronize()
+    cumsum = nv
+    n = int(cumsum[0].item())
+
+    # A quant (+ sorted/shuffled e8m0 A-scale)
+    hidden = x_fp32.to(torch.bfloat16)
+    if is_f8:
+        aq, asc = _per_1x32_mxfp8_quant(hidden)
+        aq = aq.view(torch.uint8).view(tokens, H).contiguous()
+    else:
+        aq, asc = _per_1x32_fp4_quant(hidden)
+        aq = aq.view(torch.uint8).view(tokens, H // 2).contiguous()
+    asc = asc.view(torch.uint8).view(tokens, H // 32).contiguous()
+    assh = _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=BM)
+
+    # gemm1 -> intermediate (fp4 / fp8) + shuffled scale
+    out_dtype = "fp8" if is_f8 else "fp4"
+    inter_cols = INTER if is_f8 else INTER // 2
+    isq = torch.zeros((max_sorted, inter_cols), device=device, dtype=torch.uint8)
+    isc_cols = INTER // 32
+    isr = (
+        (((max_sorted * ((2 * INTER) // 64) * 4) + isc_cols - 1) // isc_cols + 31)
+        // 32 * 32
+    )
+    iss = torch.zeros((isr, isc_cols), device=device, dtype=torch.uint8)
+    mxfp4_moe_gemm1(
+        a_quant=aq,
+        a_scale_sorted_shuffled=assh,
+        w1_u8=w1u8,
+        w1_scale_u8=w1sc,
+        sorted_expert_ids=sei,
+        cumsum_tensor=cumsum,
+        sorted_token_ids=sti,
+        inter_sorted_quant=isq,
+        inter_sorted_shuffled_scale=iss,
+        hidden_states=hidden,
+        n_tokens=tokens,
+        NE=NE,
+        D_HIDDEN=H,
+        D_INTER=INTER,
+        topk=TOPK,
+        BM=BM,
+        use_nt=True,
+        inline_quant=False,
+        interleave=interleave,
+        a_dtype=("fp8" if is_f8 else "fp4"),
+        out_dtype=out_dtype,
+    )
+    torch.cuda.synchronize()
+
+    # gemm2 (atomic): inter x w2 -> per-token weighted topk sum
+    out = torch.zeros((tokens, H), dtype=torch.bfloat16, device=device)
+    mxfp4_moe_gemm2(
+        inter_sorted_quant=isq,
+        inter_sorted_shuffled_scale=iss,
+        w2_u8=w2u8,
+        w2_scale_u8=w2sc,
+        sorted_expert_ids=sei,
+        cumsum_tensor=cumsum,
+        sorted_token_ids=sti,
+        sorted_weights=swt,
+        out=out,
+        M_logical=tokens,
+        max_sorted=max_sorted,
+        NE=NE,
+        D_HIDDEN=H,
+        D_INTER=INTER,
+        topk=TOPK,
+        BM=BM,
+        use_nt=False,
+        a_dtype=("fp8" if is_f8 else "fp4"),
+    )
+    torch.cuda.synchronize()
+
+    # reference: independent dequant MoE (opus gather: tok = sti & 0xFFFFFF)
+    if is_f8:
+        A = fp4_utils.fp8_e4m3_to_f32(aq.view(torch.float8_e4m3fn)).view(tokens, H)
+    else:
+        A = fp4_utils.mxfp4_to_f32(aq.view(torch.uint8)).view(tokens, H)
+    Asc = fp4_utils.e8m0_to_f32(asc.view(torch.uint8))
+    A = (A.view(tokens, H // 32, 32) * Asc.unsqueeze(-1)).view(tokens, H)
+    W1 = fp4_utils.mxfp4_to_f32(w1q.view(torch.uint8))
+    W1s = fp4_utils.e8m0_to_f32(w1s.view(torch.uint8)).view(NE, 2 * INTER, H // 32)
+    W1 = (W1.view(NE, 2 * INTER, H // 32, 32) * W1s.unsqueeze(-1)).view(NE, 2 * INTER, H)
+    W2 = fp4_utils.mxfp4_to_f32(w2q.view(torch.uint8))
+    W2s = fp4_utils.e8m0_to_f32(w2s.view(torch.uint8)).view(NE, H, INTER // 32)
+    W2 = (W2.view(NE, H, INTER // 32, 32) * W2s.unsqueeze(-1)).view(NE, H, INTER)
+
+    sti_c, sei_c, swt_c = sti[:n].cpu(), sei.cpu(), swt[:n].cpu()
+    ref = torch.zeros((tokens, H), dtype=torch.float32, device=device)
+    for r in range(n):
+        tok = int(sti_c[r].item()) & 0x00FFFFFF
+        if tok >= tokens:
+            continue
+        e = int(sei_c[r // BM].item())
+        gate = A[tok] @ W1[e, :INTER].T
+        up = A[tok] @ W1[e, INTER : 2 * INTER].T
+        inter_r = torch.nn.functional.silu(gate) * up
+        ref[tok] += (inter_r @ W2[e].T) * float(swt_c[r].item())
+
+    cos = torch.nn.functional.cosine_similarity(
+        ref.reshape(-1), out.float().reshape(-1), dim=0
+    ).item()
+    thr = 0.95 if is_f8 else 0.85
+    logging.info(
+        "[mxfp4 moe %s %s] cos=%.4f n=%d (model_dim=%d inter=%d E=%d topk=%d)",
+        in_dtype, "il" if interleave else "sep", cos, n, model_dim, inter_dim, experts, topk,
+    )
+    assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+    assert cos > thr, f"{in_dtype} cos={cos:.4f} <= {thr}"
+    return out
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
