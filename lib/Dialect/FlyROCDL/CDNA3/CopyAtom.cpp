@@ -88,8 +88,7 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
     return arith::DivUIOp::create(builder, loc, bits, eight);
   };
 
-  // aux/cachepolicy bits for the raw buffer load/store (0=cached, 2=nt). Carried
-  // on the atom type so the layout-API copy can request non-temporal loads.
+  // raw buffer load/store cachepolicy (0=cached, 2=nt)
   Value aux = arith::ConstantIntOp::create(builder, loc, getCacheModifier(), 32);
   ArrayAttr noAttrs;
 
@@ -120,8 +119,8 @@ FailureOr<Value> CopyOpCDNA3BufferCopyType::emitAtomCallSSA(OpBuilder &builder, 
     Value stored = src;
     if (stored.getType() != copyTy)
       stored = LLVM::BitcastOp::create(builder, loc, copyTy, stored);
-    ROCDL::RawPtrBufferStoreOp::create(builder, loc, stored, dstRsrc, dstOff, soffset, aux,
-                                       noAttrs, noAttrs, noAttrs);
+    ROCDL::RawPtrBufferStoreOp::create(builder, loc, stored, dstRsrc, dstOff, soffset, aux, noAttrs,
+                                       noAttrs, noAttrs);
     return stored;
   }
 

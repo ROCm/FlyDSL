@@ -755,7 +755,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
     shape_waves_per_eu="${8:-}"
 
-    # Route fp8/int8/fp16/bf16 async shapes to the layout-API v2 kernel.
     v2_flag=""
     case "$dtype" in
       fp8 | int8 | fp16 | bf16) v2_flag="--use_v2" ;;

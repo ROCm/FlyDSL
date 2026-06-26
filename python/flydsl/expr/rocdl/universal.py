@@ -17,20 +17,10 @@ from ..typing import Int16, Int32, Int64, Tensor
 
 
 def BufferCopy(bit_size, cache_modifier=0):
-    """Create a CDNA3 buffer copy atom.
-
-    Args:
-        bit_size: copy width in bits.
-        cache_modifier: aux/cachepolicy bits forwarded to the raw buffer
-            load/store (0 = default cached, 2 = non-temporal / nt).
-
-    Current atom state:
-    - `soffset` (`i32`), default zero
-    """
+    """Create a CDNA3 buffer copy atom (cache_modifier: 0=cached, 2=nt)."""
     return CopyOpCDNA3BufferCopyType.get(bit_size, cache_modifier)
 
 
-# BufferCopy aliases for convenience (optional cache_modifier: 0=cached, 2=nt)
 BufferCopy8b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(8, cache_modifier)
 BufferCopy16b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(16, cache_modifier)
 BufferCopy32b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(32, cache_modifier)

@@ -9,9 +9,7 @@ include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 def FlyROCDL_CopyOpBufferCopy : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopy", "cdna3.buffer_copy",[]> {
   let parameters = (ins
     "int32_t":$bitSize,
-    // aux/cache-policy bits forwarded to the rocdl raw buffer load/store
-    // `cachepolicy` operand. 0 = default (cached); 2 = non-temporal (nt). Mirrors
-    // the raw buffer_load `cache_modifier` so the layout-API copy can express nt.
+    // raw buffer load/store cachepolicy: 0 = cached, 2 = non-temporal (nt)
     DefaultValuedParameter<"int32_t", "0">:$cacheModifier
   );
   let assemblyFormat = "`<` $bitSize (`,` `cache` `=` $cacheModifier^)? `>`";
