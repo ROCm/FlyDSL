@@ -60,14 +60,14 @@ def : Pat<(Fly_CosizeOp Fly_CoordTensor:$tensor),
           (Fly_CosizeOp (Fly_GetLayoutOp $tensor))>;
 
 // CoalesceOp patterns
-def : Pat<(Fly_CoalesceOp Fly_ComposedLayout:$layout, $attr),
+def : Pat<(Fly_CoalesceOp Fly_ComposedLayout:$layout, $pattern),
           (Fly_MakeComposedLayoutOp (Fly_ComposedGetInnerOp $layout),
                                     (Fly_ComposedGetOffsetOp $layout),
-                                    (Fly_CoalesceOp (Fly_ComposedGetOuterOp $layout), $attr))>;
-def : Pat<(Fly_CoalesceOp Fly_MemRef:$memref, $attr),
-          (Fly_MakeViewOp (Fly_GetIterOp $memref), (Fly_CoalesceOp (Fly_GetLayoutOp $memref), $attr))>;
-def : Pat<(Fly_CoalesceOp Fly_CoordTensor:$tensor, $attr),
-          (Fly_MakeViewOp (Fly_GetIterOp $tensor), (Fly_CoalesceOp (Fly_GetLayoutOp $tensor), $attr))>;
+                                    (Fly_CoalesceOp (Fly_ComposedGetOuterOp $layout), $pattern))>;
+def : Pat<(Fly_CoalesceOp Fly_MemRef:$memref, $pattern),
+          (Fly_MakeViewOp (Fly_GetIterOp $memref), (Fly_CoalesceOp (Fly_GetLayoutOp $memref), $pattern))>;
+def : Pat<(Fly_CoalesceOp Fly_CoordTensor:$tensor, $pattern),
+          (Fly_MakeViewOp (Fly_GetIterOp $tensor), (Fly_CoalesceOp (Fly_GetLayoutOp $tensor), $pattern))>;
 
 // CompositionOp patterns
 def : Pat<(Fly_CompositionOp Fly_ComposedLayout:$layout, $inner),

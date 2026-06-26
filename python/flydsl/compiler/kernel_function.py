@@ -12,6 +12,7 @@ from .._mlir.dialects import arith, gpu
 from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
+from .diagnostics import install_excepthook
 from .jit_argument import is_type_param_annotation, resolve_signature
 from .mlir_utils import convert_to_mlir_attr
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -418,6 +419,7 @@ class KernelFunction:
     _current: Optional["KernelFunction"] = None
 
     def __init__(self, func: Callable, some_args=None, name: Optional[str] = None, known_block_size=None):
+        install_excepthook()
         # ASTRewriter.transform mutates `func.__code__` in place.  To preserve
         # the *pre-rewrite* code object (whose co_names / co_freevars still
         # reference helper callables that the rewriter inlines into IR ops),
