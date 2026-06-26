@@ -257,9 +257,7 @@ def _flydsl_flash_attn_paged(
     if vectorized:
         # aiter 5D: K [NumBlocks, Hkv, D/kVS, PageSize, kVS], V [NumBlocks, Hkv, PageSize/kVS, D, kVS].
         if k.dim() != 5 or v.dim() != 5:
-            raise ValueError(
-                f"flydsl_flash_attn_func: vectorized paged K/V must be 5D, got K{k.dim()}D V{v.dim()}D"
-            )
+            raise ValueError(f"flydsl_flash_attn_func: vectorized paged K/V must be 5D, got K{k.dim()}D V{v.dim()}D")
     elif k.dim() != 4:
         raise ValueError(
             f"flydsl_flash_attn_func: linear paged K/V must be 4D [NumBlocks,PageSize,Hkv,D], got {k.dim()}D"
@@ -330,8 +328,8 @@ def _flydsl_flash_attn_paged(
     block_table_stride = int(block_table.shape[1])
     # Flatten so the kernel's flat row-major index addresses block_table correctly.
     block_table_i32 = (
-        block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)
-    ).contiguous().reshape(-1)
+        (block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)).contiguous().reshape(-1)
+    )
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
