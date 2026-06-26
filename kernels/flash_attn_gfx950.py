@@ -1208,16 +1208,19 @@ def build_flash_attn_dualwave_swp_module(
             """KV padding mask for a non-64-aligned kv length (asm seq-mask): set
             any score whose ABSOLUTE key column >= seq_len to -inf.
 
-            The element->column map is identical to the causal mask: for s_lo
-            element r the absolute key column is
-                kv_tile_start + lane_div_32*4 + thr_r,    thr_r = (r//4)*8 + (r%4)
-            and s_hi (n_strip=1) adds W_N=32. We keep iff col < seq_len.
+            The element->column map matches the causal mask: col = kv_tile_start +
+            lane_div_32*lane_n_off + thr_r, s_hi (n_strip=1) adds W_N=32. Vectorized's
+            K-read n-permute lands P 8-consecutive-n, so thr_r and lane_n_off differ.
             """
             s_lo, s_hi = v_s_lists
+            _lane_n_off = 8 if KV_VECTORIZED else 4
             kv_tile_start = tile_idx * BLOCK_N
-            col_base = fx.Int32(kv_tile_start) + fx.Int32(lane_div_32) * fx.Int32(4)
+            col_base = fx.Int32(kv_tile_start) + fx.Int32(lane_div_32) * fx.Int32(_lane_n_off)
             for r in range_constexpr(16):
-                thr = (r // 4) * 8 + (r % 4)
+                if const_expr(KV_VECTORIZED):
+                    thr = (r // 8) * 16 + (r % 8)
+                else:
+                    thr = (r // 4) * 8 + (r % 4)
                 col_lo = col_base + fx.Int32(thr)
                 col_hi = col_lo + fx.Int32(32)
                 s_lo[r] = ArithValue(col_lo < seqlen_kv_i32).select(s_lo[r], c_neg_inf)

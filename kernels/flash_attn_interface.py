@@ -250,8 +250,6 @@ def _flydsl_flash_attn_paged(
             f"flydsl_flash_attn_func: native paged KV supports kv_cache_layout in ('linear','vectorized'), "
             f"got {kv_cache_layout!r}"
         )
-    if not causal:
-        raise NotImplementedError("flydsl_flash_attn_func: native paged KV supports causal=True only")
     if block_table is None or seqlen_k is None:
         raise ValueError("flydsl_flash_attn_func: native paged KV (vllm) requires block_table and seqlen_k")
     vectorized = kv_cache_layout == "vectorized"
