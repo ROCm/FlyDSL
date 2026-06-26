@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
-"""Basic helpers for the layout-API MXFP4 MoE gemm (``moegemm`` + ``moe_dispatcher``).
-
-The dtype-agnostic *basics* shared by gemm1 (up/gate-proj) and gemm2 (down-proj):
-shape constants, K-derived scale-layout size formulas, the raw pointer/LDS helpers,
-and the e8m0 / SwiGLU quant math. The MMA + the A/B data-movement live in
-``moegemm``; the compile + launch dispatch lives in ``moe_dispatcher``.
+"""Basics for the layout-API MXFP4 MoE gemm: shape constants, K-derived size
+formulas, raw pointer/LDS helpers, and the e8m0 / SwiGLU quant math. The MMA + A/B
+data movement live in ``moegemm``; compile + launch in ``moe_dispatcher``.
 """
 
 import flydsl.expr as fx

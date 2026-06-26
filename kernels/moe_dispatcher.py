@@ -1,26 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
-"""Compile + launch dispatch for the layout-API MXFP4 MoE gemm (2-stage), opus-sort.
+"""Compile + launch dispatch for the layout-API MXFP4 MoE gemm (BM32, opus-sort).
 
-This is the public entry point for the MXFP4 a4w4 / a8w4 MoE surface. It consumes
-the standard (opus-style) sort contract emitted by ``moe_sorting_kernel`` --
-``sorted_token_ids`` packed ``(topk<<24)|token_id`` with sentinel ``(topk<<24)|M``
--- and needs NO fused-sort extras:
+Public entry point for the a4w4 / a8w4 surface. Consumes the opus sort contract
+from ``moe_sorting_kernel`` (``sorted_token_ids`` = (topk<<24)|token_id, sentinel
+(topk<<24)|M); no fused-sort extras. gemm2's atomic epilogue scatters into the
+pre-zeroed output, so there is no reverse-permutation dependency.
 
-  * gemm1 gathers its A rows straight from ``sorted_token_ids & 0xFFFFFF`` (padding
-    rows carry M -> the buffer-bounds load returns 0).
-  * gemm2 uses the atomic bf16 epilogue, scattering per sorted row into the output
-    via ``global.atomic.fadd`` weighted by ``sorted_weights`` -- so there is no
-    inverse-permutation (``reverse_sorted``) dependency.
-
-The two ``compile_*`` builders wrap the device bodies in ``moegemm`` with the
-``@flyc.kernel`` / ``@flyc.jit`` launch plumbing; the dtype-agnostic basics come
-from ``utils``.
-
-Covered surface (BM=32):
-  * gemm1: a4w4 + a8w4 (fp8 act), interleave + separated gate, nt/cached B-load,
-    out fp4 / fp8.
-  * gemm2: atomic epilog, a4w4 + a8w4 (fp8 intermediate).
+The ``compile_*`` builders wrap the ``moegemm`` device bodies (@flyc.jit) in the
+@flyc.kernel entry + @flyc.jit launch; basics come from ``utils``.
 """
 
 import flydsl.compiler as flyc
@@ -87,8 +75,7 @@ def compile_gemm1_a4w4_port(
     a_dtype="fp4",
     out_dtype="fp4",
 ):
-    # use_nt IS the B-load cache policy (v1's `b_aux = 2 if use_nt else 0`;
-    # tuned config BM32_NT vs BM32_CACHED): True -> nt (decode), False -> cached.
+    # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
     b_nontemporal = use_nt
     if (BM, inline_quant) != (32, False):
         raise AssertionError(
@@ -281,8 +268,8 @@ def compile_gemm2_a4w4_port(
         aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=_aq_num)
         saq = SmemPtr(allocator.get_base(), lds_off, T.i8, shape=(_aStages * _slot_bytes,))
 
-        # Preload the first kStages K-tiles (== ALL tiles for the K_TILES<=2 fast
-        # path; == prologue for the streaming path). slot == kt for the preload.
+        # Preload the first kStages K-tiles (all tiles for the K_TILES<=2 fast path;
+        # the prologue for the streaming path). slot == kt for the preload.
         def _issue_all_a_loads(m_row0):
             for slot in range_constexpr(kStages):
                 _issue_a_load_lds_dt(
