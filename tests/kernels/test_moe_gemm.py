@@ -79,6 +79,10 @@ from kernels.mixed_moe_gemm_2stage import (  # noqa: E402
     compile_mixed_moe_gemm1,
     compile_mixed_moe_gemm2,
 )
+from kernels.moe_dispatcher import (  # noqa: E402
+    mxfp4_moe_gemm1,
+    mxfp4_moe_gemm2,
+)
 from kernels.moe_gemm_2stage import (  # noqa: E402
     MoeGemm2Mode,
     compile_moe_gemm1,
@@ -86,10 +90,6 @@ from kernels.moe_gemm_2stage import (  # noqa: E402
     compile_moe_gemm2_ex,
 )
 from kernels.moe_sorting_kernel import moe_sorting_flydsl  # noqa: E402
-from kernels.mxfp4_moe_gemm_2stage import (  # noqa: E402
-    mxfp4_moe_gemm1,
-    mxfp4_moe_gemm2,
-)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1802,7 +1802,7 @@ def test_moe_gemm_2stage(
             pytest.skip(f"{in_dtype} stage2 requires inter_dim >= 256 and tile_k2 >= 256, got {inter_dim}, {tile_k2}")
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
-        # The layout-API MXFP4 pipe (mxfp4_moe_gemm_2stage) is the BM32 atomic, opus-sort
+        # The layout-API MXFP4 pipe (moe_dispatcher) is the BM32 atomic, opus-sort
         # path: no reduce mode, and graph capture is out of scope here.
         if bool(use_reduce):
             pytest.skip(f"{in_dtype} layout-API pipe is atomic-only (no reduce mode)")
@@ -2018,7 +2018,7 @@ def _per_1x32_mxfp8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 # ---------------------------------------------------------------------------
-# Layout-API MXFP4 MoE pipeline (mxfp4_moe_gemm_2stage), opus-sort only.
+# Layout-API MXFP4 MoE pipeline (moe_dispatcher), opus-sort only.
 # Drives the a4w4 / a8w4 path of test_moe_gemm_2stage instead of mixed_moe:
 #   moe_sorting_flydsl (opus sort) -> gemm1 -> gemm2 (atomic scatter) -> bf16 out
 # gemm1 gathers from sorted_token_ids (& 0xFFFFFF); gemm2 scatters via atomic add
