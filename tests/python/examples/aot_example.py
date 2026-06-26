@@ -32,7 +32,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.preshuffle_gemm_v2 import compile_preshuffle_gemm_v2  # noqa: E402
+from kernels.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 
 
 def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
@@ -207,7 +207,7 @@ def compile_one_config(
 
     t0 = time.time()
     try:
-        launch_fn = compile_preshuffle_gemm_v2(
+        launch_fn = compile_preshuffle_gemm(
             N=N,
             K=K,
             tile_m=tile_m,
@@ -235,7 +235,7 @@ def test_bad_tile_error():
         M, N, K, tile_m, tile_n, tile_k = cfg
         shape_str = f"M={M} N={N} K={K} tile=({tile_m},{tile_n},{tile_k})"
         try:
-            compile_preshuffle_gemm_v2(
+            compile_preshuffle_gemm(
                 N=N,
                 K=K,
                 tile_m=tile_m,

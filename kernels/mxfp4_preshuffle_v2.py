@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MXFP4 preshuffle GEMM (layout API): MXFP4 (E2M1) A x MXFP4 B with per-32 E8M0
-block scales consumed inside a scaled 16x16x128 MFMA (no epilogue scale).
+"""MXFP4 (E2M1) / W4A6 (E2M3 A) preshuffle GEMM, per-32 E8M0 scales consumed inside a
+scaled 16x16x128 MFMA. Data layout matches ``tests/kernels/utils/fp4_utils`` (CK weight
+preshuffle ``shuffle_weight_w4(.,16)`` + ``shuffle_scale_w4``).
 
-Faithful plain-GEMM port of the proven aiter layout-API MXFP4 kernels
-(``mxfp4_moe_layout`` / ``mxfp4_gemm2_v2``). Data layout (CK weight preshuffle via
-``shuffle_weight_w4(.,16)`` + ``shuffle_scale_w4``, A packed 2 codes/byte) matches
-``tests/kernels/utils/fp4_utils``.
-
-Core mechanism (the unlock vs a raw-intrinsic port):
-  * Pre-build the 16 ``(opsel_a, opsel_b)`` ``MFMA_Scale(16,16,128, Float4E2M1FN)``
-    atoms (opsel is a TYPE param). cbsz/blgp(=4 for fp4) are inferred from the elem type.
-  * One scaled MFMA = ``fx.gemm(atom, c, a, b, c, scale_a=sa, scale_b=sb)`` over
-    rank-1 register fragments; the per-32 E8M0 scale word rides ``scale_a=/scale_b=``
-    and ``opsel`` selects which of the 4 packed E8M0 bytes (2 K-halves x 2 m|n).
+fp4 runs the MMA via ``fx.gemm`` over rank-1 register fragments: the per-32 E8M0 word
+rides ``scale_a=/scale_b=`` and the ``(opsel_a, opsel_b)`` atom selects the packed byte.
+fp6 keeps the raw intrinsic (its FP8-padded vec<8xi32> A can't bitcast to the E2M3 atom's
+vec<6xi32>).
 """
 
 from typing import Optional
@@ -25,20 +19,18 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
 from flydsl._mlir.dialects import vector as _vector
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import BFloat16, Float4E2M1FN, Float16, Float32, Int8, T
+from flydsl.expr.typing import BFloat16, Float4E2M1FN, Float16, Float32, Int8, Int32, T
 from flydsl.expr.typing import Vector as Vec
 
 
 def _raw(v):
-    """Unwrap an fx value to a raw ir.Value."""
     if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
         return v.ir_value()
     return v
 
 
 def _scale_mma_atoms():
-    """All 16 (opselA, opselB) scaled-MFMA atoms (opsel is a type param -> one atom
-    per pair, built once at trace time). cbsz/blgp(=4 fp4) inferred from Float4E2M1FN."""
+    """16 (opsel_a, opsel_b) scaled-MFMA atoms (opsel is a type param)."""
     return {
         (osa, osb): fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, Float4E2M1FN, opsel_a=osa, opsel_b=osb))
         for osa in range(4)
@@ -46,41 +38,15 @@ def _scale_mma_atoms():
     }
 
 
-def _gemm_mma(atoms, a_frag, b_frag, c_frag, opsel_a, opsel_b, sa, sb):
-    """One scaled MFMA via fx.gemm over rank-1 register fragments (-> one MmaAtomCall);
-    C accumulates in place (d == c); per-32 e8m0 scales ride scale_a=/scale_b=."""
-    fx.gemm(atoms[(opsel_a, opsel_b)], c_frag, a_frag, b_frag, c_frag, scale_a=sa, scale_b=sb)
-
-
 def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves):
     """Layout view over the CK-preshuffled B weight for one N-row tile (i32 units).
-
-    ``row_elems`` = logical N-row; uniform per-(wave) base = readfirstlane(row*KH4)
-    (KH4 = K_HALF//4 i32 col stride). i32 strides: klane[0,4)->64, nlane[0,16)->4,
-    K_tile->k_halves*256 (one tile = k_halves 128-K blocks), half[0,k_halves)->256,
-    kpack4[0,4)->1. Index [lane//16, lane%16, kt, half, None] -> i32<4:1> (16B = 32 fp4)."""
+    Index [lane//16, lane%16, kt, half, None] -> i32<4:1> (16B = 32 fp4)."""
     col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(arith.ExtUIOp(T.i64, _raw(col_base)).result)
     base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_bq_addr) + off_i64 * fx.Int64(4))
     shape = (4, 16, k_tiles, k_halves, 4)
     view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, (64, 4, k_halves * 256, 256, 1))))
-    return fx.rocdl.make_buffer_tensor(view, max_size=False)
-
-
-def _aq_view(arg_aq_addr, bx_m, KH4, k_tiles, k_halves, m_chunks):
-    """Layout view over row-major (M, K/2-byte) MXFP4 A -> the 16x16x128 MFMA A
-    operand as i32<4:1> (16B = 32 fp4) per (m-chunk, k-half), avoiding sub-byte
-    f4 register fragments (which the rmem-SSA promotion can't handle). Index
-    ``view[lane%16, lane//16, kt, kh, mi, None]``. i32 strides: row(lane%16)->KH4,
-    kgroup(lane//16)->4, kt->32, kh->16, m_chunk->16*KH4, kpack4->1."""
-    row_base = rocdl.readfirstlane(T.i32, _raw(bx_m) * fx.Int32(KH4))
-    i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
-    off_i64 = fx.Int64(arith.ExtUIOp(T.i64, _raw(row_base)).result)
-    base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_aq_addr) + off_i64 * fx.Int64(4))
-    shape = (16, 4, k_tiles, k_halves, m_chunks, 4)
-    stride = (KH4, 4, 32, 16, 16 * KH4, 1)
-    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, stride)))
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
@@ -99,15 +65,11 @@ def compile_mxfp4_gemm_v2(
     dvmem_preload: int = -1,
     use_async_copy: bool = False,
 ):
-    """Compile MXFP4 (A4W4) / W4A6 preshuffle GEMM (layout API) ->
-    fn(C, A, B, scale_a, scale_b, bias, M, N, stream).
+    """Compile MXFP4 (A4W4) / W4A6 preshuffle GEMM -> fn(C, A, B, scale_a, scale_b, bias, M, N, stream).
 
-    a_dtype="fp4": MXFP4 (E2M1) A, packed 2 codes/byte (16 B = 32 codes per MFMA op).
-    a_dtype="fp6": MXFP6 (E2M3) A, FP8-padded packed FP6 -- 32 B per K=32 chunk
-        (24 B packed codes + 8 B zero pad); that 32-B chunk is the MFMA A operand
-        (cbsz=2, low 24 B used). B is MXFP4 either way.
-    B: CK-preshuffled MXFP4 (shuffle_weight_w4(.,16)); scale_a/scale_b: e8m0
-    (shuffle_scale_w4); C: (M, N) out_dtype. bias unused (parity).
+    a_dtype="fp4": MXFP4 (E2M1) A, 2 codes/byte. a_dtype="fp6": MXFP6 (E2M3) A,
+    FP8-padded (32 B per K=32 chunk, cbsz=2). B is CK-preshuffled MXFP4 either way;
+    scale_a/scale_b are e8m0; C is (M, N) out_dtype; bias unused (parity).
     """
     if a_dtype not in ("fp4", "fp6"):
         raise ValueError(f"a_dtype must be 'fp4' or 'fp6', got {a_dtype!r}")
@@ -123,20 +85,16 @@ def compile_mxfp4_gemm_v2(
     KH4 = K_HALF // 4
     K_TILES = K // BK
     k_halves = BK // 128  # 16x16x128 MFMA k-steps per K-tile
-    # e8m0 scale chunks are 256-K granular while B is 128-K granular; a tile_k=128
-    # tile is half a scale chunk, so tiles_per_chunk consecutive K-tiles share one
-    # scale word (the lower/upper 16b select the 128-K half, like v1's fp4_scale_half).
+    # e8m0 scale chunks are 256-K granular, B is 128-K granular: tiles_per_chunk
+    # consecutive K-tiles share one scale word (upper/lower 16b select the 128-K half).
     tiles_per_chunk = 256 // BK  # 1 for tile_k=256, 2 for tile_k=128
     m_chunks = BM // 16
     num_acc_n = (BN // 4) // 16  # 16-col n-subblocks per wave
-    # e8m0 scale strides (i32/dword units), per fp4_utils shuffle_scale_w4.
-    _scale_chunk_dw = (K // 32 // 4 // 2) * 64
+    _scale_chunk_dw = (K // 32 // 4 // 2) * 64  # e8m0 strides (dwords), per shuffle_scale_w4
     _scale_k0_dw = 64
 
-    # LDS A tile (row-major [m][col]): loaded once per K-tile by all 256 threads
-    # (cooperative), shared by the 4 N-waves -> removes the 4x redundant A gmem reads
-    # that dominate the no-LDS version. fp4 packs 2 codes/byte (BK//2 bytes/K-tile-row);
-    # fp6 is FP8-padded 32 B per K=32 chunk (BK bytes/K-tile-row).
+    # Cooperative LDS A tile (row-major [m][col]) shared by the 4 N-waves -> no 4x
+    # redundant A gmem reads. fp4 = 2 codes/byte; fp6 = FP8-padded 32 B per K=32 chunk.
     a_row_bytes = K if is_fp6 else K // 2  # A bytes per full M-row
     cbsz_a = 2 if is_fp6 else 4  # MFMA A format: cbsz=2 (E2M3) / cbsz=4 (E2M1)
     A_ROW_B = BK if is_fp6 else BK // 2  # A bytes per row in a K-tile
@@ -146,19 +104,14 @@ def compile_mxfp4_gemm_v2(
     n_pairs = max(1, num_acc_n // 2)
     m_pairs = max(1, m_chunks // 2)
 
-    # ── Scheduler counts (sched_group_barrier interleave, ported from v1/v2-fp8).
-    sched_mfma_total = k_halves * m_chunks * num_acc_n  # MFMAs per loop iter
+    # Scheduler counts (sched_group_barrier interleave), per loop iter.
+    sched_mfma_total = k_halves * m_chunks * num_acc_n
     sched_num_ds_load = m_chunks * k_halves  # A LDS reads/thread (read_a)
-    sched_num_gmem = n_coop + num_acc_n * k_halves + m_pairs + n_pairs  # vmem loads (A coop + B + scales)
+    sched_num_gmem = n_coop + num_acc_n * k_halves + m_pairs + n_pairs  # A coop + B + scales
     sched_num_a_dswr = 0 if use_async_copy else n_coop  # A LDS writes/thread (none for DMA)
 
-    # Policy: the sched-group-barrier interleave only helps lean (num_acc_n<=2)
-    # tiles, where too few MFMAs hide the load latency; on fat tiles it serializes
-    # and regresses. When on, preload ALL loads up front (issue every vmem/ds_read
-    # before the MFMA stream) — partial spreads measured worse on this loop shape.
-    # fp6 reads 2x the A bytes/tile from LDS; the up-front-preload scheduler then
-    # over-serializes the longer ds_read stream and regresses even on lean tiles, so
-    # leave the compiler's own scheduler to overlap them.
+    # The interleave only helps lean (num_acc_n<=2) tiles; on fat tiles it serializes.
+    # fp6's longer ds_read stream over-serializes under the up-front preload, so leave it off.
     if enable_scheduler is None:
         enable_scheduler = (num_acc_n <= 2) and not is_fp6
     if dsrd_preload < 0:
@@ -181,8 +134,10 @@ def compile_mxfp4_gemm_v2(
         arg_bias: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
-        tiled_mma: fx.TiledMma,
     ):
+        if const_expr(not is_fp6):
+            scale_atoms = _scale_mma_atoms()
+
         tid = fx.thread_idx.x
         bid_x, bid_y, _ = fx.block_idx
         wave = rocdl.readfirstlane(T.i32, fx.Int32(tid) // fx.Int32(64))
@@ -192,12 +147,10 @@ def compile_mxfp4_gemm_v2(
         bx_m = bid_x * fx.Int32(BM)
         by_n = bid_y * fx.Int32(BN)
 
-        # ── A: cooperative gmem->LDS (row-major [m][col]) then ds_read the MFMA
-        # operands (shared across the 4 N-waves -> no 4x redundant A gmem reads).
+        # A: cooperative gmem->LDS then ds_read the MFMA operands. Bound to the actual
+        # M rows so blocks past M read OOB -> 0 instead of faulting (ragged M).
         a_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
         _i8g = fx.PointerType.get(T.i8, address_space=fx.AddressSpace.Global, alignment=16)
-        # Bound A to the ACTUAL M rows (a_row_bytes/row): a block covering rows past M
-        # then reads OOB -> 0 (vs faulting on unmapped memory for M < tile_m).
         a_nrec = fx.Int64(i32_m) * fx.Int64(a_row_bytes)
         a_flat = fx.rocdl.make_buffer_tensor(
             fx.Tensor(fx.make_view(fx.inttoptr(_i8g, fx.Int64(arg_a)), fx.make_layout(65536 * a_row_bytes, 1))),
@@ -206,31 +159,51 @@ def compile_mxfp4_gemm_v2(
         )
         a_flat_div = fx.logical_divide(a_flat, fx.make_layout(1, 1))
         lds = fx.SharedAllocator().allocate(SharedA).peek()
-        _ptr3 = ir.Type.parse("!llvm.ptr<3>")
+        # A-LDS modeled as i32 (16B = 4 i32): fx.copy is dtype-agnostic, only the MMA
+        # cares about sub-byte semantics. Store + fp4 read go through fx.copy.
+        sA0_i32 = fx.recast_iter(Int32, lds.a0.ptr)
         lds_base0 = fx.Int32(fx.ptrtoint(lds.a0.ptr))
         lds_db = fx.Int32(fx.ptrtoint(lds.a1.ptr)) - lds_base0  # ping/pong byte stride
+        lds_db_i32 = lds_db // fx.Int32(4)
+        lds_copy = fx.make_copy_atom(fx.UniversalCopy128b(), Int32)
+        _ptr3 = ir.Type.parse("!llvm.ptr<3>")
 
-        def _base_of(parity):  # parity in {0,1} (runtime) -> LDS base
-            return lds_base0 + parity * lds_db
+        def _iter_of(parity):  # parity in {0,1} (runtime) -> i32 LDS iterator
+            return fx.add_offset(sA0_i32, parity * lds_db_i32)
 
-        def _lds_p(base, byte_off):
-            return llvm.inttoptr(_ptr3, _raw(fx.Int64(base + byte_off)))
+        def _lds_p_byte(parity, off_i32):  # raw ptr<3> for the fp6 ds_read_b128 (no coalescing)
+            byte = lds_base0 + parity * lds_db + off_i32 * fx.Int32(4)
+            return llvm.inttoptr(_ptr3, _raw(fx.Int64(byte)))
 
-        def coop_load_a(kt, base):  # cooperative gmem A tile -> LDS (row-major)
+        def _lds_view(base_iter, off_i32):
+            return fx.make_view(fx.add_offset(base_iter, off_i32), fx.make_layout(4, 1))
+
+        # fp6 sync A-LDS: XOR-swizzle each 16B unit to kill ds_read bank conflicts.
+        # In i32 units the byte XOR (col ^= (row%kb16)*16) becomes col_i32 ^ ((row%kb16)*4).
+        swz_a = is_fp6 and (not use_async_copy)
+        kb16 = A_ROW_B // 16
+        A_ROW_I32 = A_ROW_B // 4
+
+        def _swz_off(row, col_byte):  # col_byte is a multiple of 4 -> i32 offset
+            col_i32 = col_byte // fx.Int32(4)
+            row_term = row * fx.Int32(A_ROW_I32)
+            if const_expr(not swz_a):
+                return row_term + col_i32
+            return row_term + (col_i32 ^ ((row % fx.Int32(kb16)) * fx.Int32(4)))
+
+        def coop_load_a(kt, base_iter):
             base_k_byte = kt * fx.Int32(A_ROW_B)
             for i in range_constexpr(n_coop):
                 lin = (fx.Int32(i * 256) + fx.Int32(tid)) * fx.Int32(16)
                 row = lin // fx.Int32(A_ROW_B)
                 col = lin % fx.Int32(A_ROW_B)
                 gmem_byte = (bx_m + row) * fx.Int32(a_row_bytes) + base_k_byte + col
-                v = fly.copy_atom_call_ssa([T.vec(4, T.i32)], a_copy, a_flat_div[None, gmem_byte])
-                llvm.store(_raw(v), _lds_p(base, lin))
+                reg = fx.make_rmem_tensor(4, Int32)
+                fx.copy_atom_call(a_copy, a_flat_div[None, gmem_byte], reg)
+                fx.copy(lds_copy, reg, _lds_view(base_iter, _swz_off(row, col)))
 
-        # ── Async A: direct gmem->LDS DMA (buffer_load_lds), no register stage. Same
-        # row-major LDS layout as coop_load_a (lane L -> base + L*16 by hardware), so
-        # read_a is unchanged. Issued AFTER the B/scale vmem loads so the in-order
-        # vmcnt drain that the MFMAs force on B does NOT also drain this DMA -> it
-        # overlaps the MFMAs (then a single s_waitcnt(0) before the barrier).
+        # Async A: direct gmem->LDS DMA (buffer_load_lds), same row-major LDS layout as
+        # coop_load_a. Issued after the B/scale loads so it overlaps the MFMAs.
         if const_expr(use_async_copy):
             dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
             _i8s = fx.PointerType.get(Int8.ir_type, fx.AddressSpace.Shared, 512)
@@ -251,33 +224,33 @@ def compile_mxfp4_gemm_v2(
                 src = fx.slice(a_flat_div, (None, gmem_byte))
                 fx.copy(dma_atom, src, dst)
 
-        def read_a(base):
-            # fp4: each lane's K=128 MFMA A operand is 16 B (32 codes); k-group (lane//16)
-            # strides 16 B, the 128-K half strides 64 B. fp6: the operand is one 32-B
-            # FP8-padded chunk (32 codes); k-group strides 32 B, the 128-K half 128 B.
+        def _read16(base_iter, off_i32):
+            t = fx.make_rmem_tensor(4, Int32)
+            fx.copy(lds_copy, _lds_view(base_iter, off_i32), t)
+            return t.load().ir_value()
+
+        def read_a(parity):
+            # fp4: lane's K=128 A operand = 16 B (k-group strides 16 B, 128-K half 64 B).
+            # fp6: one 32-B FP8-padded chunk (k-group 32 B, 128-K half 128 B).
+            base_iter = _iter_of(parity)
             av = []
             for mi in range_constexpr(m_chunks):
                 for kh in range_constexpr(k_halves):
                     if const_expr(is_fp6):
-                        off = (
-                            (fx.Int32(mi * 16) + lane_mod_16) * fx.Int32(A_ROW_B)
-                            + fx.Int32(kh * 128)
-                            + lane_div_16 * fx.Int32(32)
-                        )
-                        # Two clean 16 B ds_read_b128 into consecutive regs (low 24 B is
-                        # the FP6 operand, top 8 B is the storage zero pad). A single
-                        # vec<8xi32> load instead lets the backend coalesce fragment
-                        # tails via ds_read2_b64 -> v_mov spam that stalls the MFMAs.
-                        lo = llvm.load(T.vec(4, T.i32), _lds_p(base, off))
-                        hi = llvm.load(T.vec(4, T.i32), _lds_p(base, off + fx.Int32(16)))
+                        row_a = fx.Int32(mi * 16) + lane_mod_16
+                        col_a = fx.Int32(kh * 128) + lane_div_16 * fx.Int32(32)
+                        # Raw ds_read_b128 pair: the layout-API read coalesces these into
+                        # ds_read2_b64 (v_mov spam, ~30% regression on lean fp6 tiles).
+                        lo = llvm.load(T.vec(4, T.i32), _lds_p_byte(parity, _swz_off(row_a, col_a)))
+                        hi = llvm.load(T.vec(4, T.i32), _lds_p_byte(parity, _swz_off(row_a, col_a + fx.Int32(16))))
                         av.append(_vector.shuffle(lo, hi, [0, 1, 2, 3, 4, 5, 6, 7]))
                     else:
                         off = (
-                            (fx.Int32(mi * 16) + lane_mod_16) * fx.Int32(A_ROW_B)
-                            + fx.Int32(kh * 64)
-                            + lane_div_16 * fx.Int32(16)
+                            (fx.Int32(mi * 16) + lane_mod_16) * fx.Int32(A_ROW_I32)
+                            + fx.Int32(kh * 16)
+                            + lane_div_16 * fx.Int32(4)
                         )
-                        av.append(llvm.load(T.vec(4, T.i32), _lds_p(base, off)))
+                        av.append(_read16(base_iter, off))
             return av
 
         n_col_base = by_n + wave * fx.Int32(BN // 4)
@@ -287,11 +260,8 @@ def compile_mxfp4_gemm_v2(
         b_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
         bs_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
-        # e8m0 scales: flat buffers based at the ALLOCATION START, bounded to the real
-        # size, so a block covering rows past M reads OOB -> 0. (The earlier per-m-pair
-        # base-pointer advance put the base itself past the allocation for M < tile_m,
-        # which num_records can't protect -> HIP illegal access.) The m-pair/n-pair +
-        # lane + chunk offset is folded into the access (i32/dword units).
+        # e8m0 scales: flat buffers based at the allocation start, bounded to the real
+        # size (so rows past M read OOB -> 0); m/n-pair + lane + chunk offset folded in.
         _i32g = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
         _sc_layout = fx.make_layout(1 << 28, 1)
         a_sc_nrec = fx.Int64((i32_m + fx.Int32(31)) // fx.Int32(32)) * fx.Int64(_scale_chunk_dw) * fx.Int64(4)
@@ -319,21 +289,14 @@ def compile_mxfp4_gemm_v2(
         b_sc_base = [(nsb + fx.Int32(np)) * fx.Int32(_scale_chunk_dw) for np in range_constexpr(n_pairs)]
         sc_lane = lane_div_16 * fx.Int32(16) + lane_mod_16
 
-        # ── Accumulators + 2-stage software pipeline: prefetch tile k+1's A/B/scale
-        # operands (carried as loop state) while the MFMAs compute tile k, hiding
-        # global-load latency. Operands carried UNPADDED (vec<4xi32>/<1xi32>) to keep
-        # VGPR pressure down; padded to vec<8xi32> only at the MFMA.
         mfma_ty = T.vec(4, T.f32)
         n_acc = m_chunks * num_acc_n
 
         def _pad8(v4):
-            # fp4 MFMA reads only the low 16B; widen vec<4xi32>->vec<8xi32> with a
-            # single shuffle (upper half is don't-care) instead of an 8-elem rebuild,
-            # so almost no VALU is interspersed with the MFMAs.
+            # Widen vec<4xi32>->vec<8xi32> via one shuffle (upper half don't-care).
             return _vector.shuffle(v4, v4, [0, 1, 2, 3, 4, 5, 6, 7])
 
         def load_b(kt):
-            # B weight packs for K-tile kt (gmem, not wave-redundant).
             ops = []
             for ni in range_constexpr(num_acc_n):
                 for kh in range_constexpr(k_halves):
@@ -345,13 +308,9 @@ def compile_mxfp4_gemm_v2(
             return ops
 
         def load_sc(chunk_kt):
-            # e8m0 scales for one 256-K scale chunk (shared by tiles_per_chunk K-tiles;
-            # the 128-K half is selected at the MFMA via the runtime scale_shift). Returns
-            # (sa, sb) i32 scale words per m-pair / n-pair.
+            # (sa, sb) e8m0 words per m-pair / n-pair for one 256-K chunk. readfirstlane
+            # the uniform base+chunk into an SGPR soffset; only sc_lane is per-lane voffset.
             koff = chunk_kt * fx.Int32(_scale_k0_dw)
-            # readfirstlane the uniform (m-pair base + chunk) part so it lands in an SGPR
-            # soffset; only sc_lane is the per-lane voffset. Base stays at arg_scale, so
-            # num_records still protects OOB (no pointer advance).
             sa = [
                 Vec(
                     fly.copy_atom_call_ssa(
@@ -375,49 +334,76 @@ def compile_mxfp4_gemm_v2(
             return sa, sb
 
         def compute(accs, av, bv, sa_v, sb_v, scale_shift=None):
-            # tile_k=128: two 128-K tiles share one 256-K scale word; logical-shift the
-            # word so the active 128-K half lands in the low bytes opsel (kh*2+im, kh=0)
-            # reads. tile_k=256 (scale_shift=None) keeps both halves (kh in {0,1}).
+            # tile_k=128: two 128-K tiles share one 256-K word -> shift the active half
+            # into the low bytes the opsel reads. tile_k=256 (scale_shift=None) keeps both.
             if const_expr(scale_shift is not None):
                 sh = _raw(scale_shift)
                 sa_v = [arith.shrui(_raw(v), sh) for v in sa_v]
                 sb_v = [arith.shrui(_raw(v), sh) for v in sb_v]
-            # kh OUTERMOST so consecutive MFMAs write distinct accumulators (independent
-            # -> dense MFMA issue); the per-acc kh accumulation dependency is spaced by
-            # all (mi,ni) MFMAs, hiding the MFMA latency. Widen operands ONCE per kh
-            # (reused across the mi/ni grid) to keep VALU out of the MFMA stream.
-            for kh in range_constexpr(k_halves):
-                # fp6 A is already a 32-B (vec<8xi32>) operand; fp4 A is 16 B widened to
-                # vec<8xi32> (upper half don't-care). B (MXFP4) is always widened.
-                if const_expr(is_fp6):
+            # kh OUTERMOST: consecutive MFMAs write distinct accumulators (dense issue),
+            # spacing the per-acc accumulation dependency across the (mi,ni) grid.
+            if const_expr(is_fp6):
+                # fp6 raw path: A is a 32-B vec<8xi32>; B (MXFP4) widened to vec<8xi32>.
+                for kh in range_constexpr(k_halves):
                     av8 = [av[mi * k_halves + kh] for mi in range_constexpr(m_chunks)]
-                else:
-                    av8 = [_pad8(av[mi * k_halves + kh]) for mi in range_constexpr(m_chunks)]
-                bv8 = [_pad8(bv[ni * k_halves + kh]) for ni in range_constexpr(num_acc_n)]
+                    bv8 = [_pad8(bv[ni * k_halves + kh]) for ni in range_constexpr(num_acc_n)]
+                    for ni in range_constexpr(num_acc_n):
+                        np_i, in_b = ni // 2, ni % 2
+                        for mi in range_constexpr(m_chunks):
+                            mp_i, im = mi // 2, mi % 2
+                            idx = mi * num_acc_n + ni
+                            accs[idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
+                                mfma_ty,
+                                [
+                                    av8[mi],
+                                    bv8[ni],
+                                    accs[idx],
+                                    cbsz_a,
+                                    4,
+                                    kh * 2 + im,
+                                    sa_v[mp_i],
+                                    kh * 2 + in_b,
+                                    sb_v[np_i],
+                                ],
+                            )
+                return accs
+
+            # fp4: each scaled MFMA = fx.gemm over rank-1 register fragments (one
+            # MmaAtomCall). A/B are vec<4xi32>; the e8m0 word rides scale_a=/scale_b=.
+            c_frags = [fx.make_rmem_tensor(4, Float32) for _ in range_constexpr(n_acc)]
+            for idx in range_constexpr(n_acc):
+                c_frags[idx].store(Vec(accs[idx]))
+            for kh in range_constexpr(k_halves):
+                a_frags = []
+                for mi in range_constexpr(m_chunks):
+                    af = fx.make_rmem_tensor(4, Int32)
+                    af.store(Vec(av[mi * k_halves + kh]))
+                    a_frags.append(af)
+                b_frags = []
+                for ni in range_constexpr(num_acc_n):
+                    bf = fx.make_rmem_tensor(4, Int32)
+                    bf.store(Vec(bv[ni * k_halves + kh]))
+                    b_frags.append(bf)
                 for ni in range_constexpr(num_acc_n):
                     np_i, in_b = ni // 2, ni % 2
                     for mi in range_constexpr(m_chunks):
                         mp_i, im = mi // 2, mi % 2
                         idx = mi * num_acc_n + ni
-                        accs[idx] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
-                            mfma_ty,
-                            [
-                                av8[mi],
-                                bv8[ni],
-                                accs[idx],
-                                cbsz_a,
-                                4,
-                                kh * 2 + im,
-                                sa_v[mp_i],
-                                kh * 2 + in_b,
-                                sb_v[np_i],
-                            ],
+                        cf = c_frags[idx]
+                        fx.gemm(
+                            scale_atoms[(kh * 2 + im, kh * 2 + in_b)],
+                            cf,
+                            a_frags[mi],
+                            b_frags[ni],
+                            cf,
+                            scale_a=sa_v[mp_i],
+                            scale_b=sb_v[np_i],
                         )
+            for idx in range_constexpr(n_acc):
+                accs[idx] = c_frags[idx].load().ir_value()
             return accs
 
-        # ── Scheduler hints: constrain the post-RA scheduler to interleave the
-        # MFMAs with the A-coop/B/scale vmem loads, A LDS reads (read_a), and A
-        # LDS writes (coop_load_a) — spreads load latency across the MFMA stream.
+        # Scheduler hints: interleave the MFMAs with the vmem loads + A LDS read/writes.
         def build_scheduler(numer, denom):
             if const_expr(denom <= 0):
                 return []
@@ -481,21 +467,15 @@ def compile_mxfp4_gemm_v2(
 
         accs_init = [Vec.filled(4, 0.0, Float32).ir_value() for _ in range_constexpr(n_acc)]
 
-        # Double-buffered cooperative LDS-A: prefetch tile iv+1's A into the OTHER LDS
-        # buffer while the MFMAs compute tile iv (A from LDS, B/scales per-tile). At our
-        # 3-wave occupancy the B/scale latency is already hidden, so register-prefetching
-        # B (v1's 2-wave lever) only adds VGPR pressure and regresses the peak.
+        # Double-buffered LDS-A: prefetch tile iv+1's A into the other buffer while the
+        # MFMAs compute tile iv. B/scales are loaded per-tile (latency hidden at 3 waves).
         if const_expr(use_async_copy):
             dma_a_to_lds(fx.Int32(0), fx.Int32(0))
             rocdl.s_waitcnt(0)
         else:
-            coop_load_a(fx.Int32(0), _base_of(fx.Int32(0)))
+            coop_load_a(fx.Int32(0), _iter_of(fx.Int32(0)))
         gpu.barrier()
-        # 1 tile/iter ping-pong. tile_k=256: one K-tile = one 256-K scale chunk. tile_k=128:
-        # two consecutive K-tiles share one 256-K chunk (chunk_kt = kt // tiles_per_chunk);
-        # the active 128-K half is selected at the MFMA via the runtime scale_shift. (A
-        # 2-tiles/iter variant with compile-time halves measured slower: the shared scale
-        # regs lengthen VGPR live ranges and drop occupancy.)
+        # 1 tile/iter ping-pong; tile_k=128 shares a 256-K scale chunk across 2 K-tiles.
         for iv, state in range(fx.Index(0), fx.Index(K_TILES), fx.Index(1), init=accs_init):
             accs = list(state)
             kt = fx.Int32(iv)
@@ -506,8 +486,8 @@ def compile_mxfp4_gemm_v2(
             chunk_kt = kt if tiles_per_chunk == 1 else kt // fx.Int32(tiles_per_chunk)
             scale_shift = None if tiles_per_chunk == 1 else (kt % fx.Int32(tiles_per_chunk)) * fx.Int32(16)
             if const_expr(not use_async_copy):
-                coop_load_a(pf_kt, _base_of(nxt))  # prefetch A tile iv+1 -> LDS
-            av = read_a(_base_of(cur))
+                coop_load_a(pf_kt, _iter_of(nxt))  # prefetch A tile iv+1 -> LDS
+            av = read_a(cur)
             bv = load_b(kt)
             sa_v, sb_v = load_sc(chunk_kt)
             if const_expr(use_async_copy):
@@ -521,12 +501,8 @@ def compile_mxfp4_gemm_v2(
             results = yield accs
         accs = results
 
-        # ── Epilogue: manual C store whose (row,col) matches the B/scale n-layout
-        # (MFMA 16x16 C: lane l -> col = base + l%16, rows = m*16 + (l//16)*4 + ii).
-        # No per-token scale (MX scale already folded into the accumulator).
-        # Bound C to the ACTUAL M rows (out_elem is 2 bytes): when M < tile_m (or M not
-        # a multiple of tile_m) the block covers padding rows whose stores must be dropped
-        # by the descriptor, else they write past the allocation (HIP illegal access).
+        # Epilogue: manual C store (MFMA 16x16 C: lane l -> col base+l%16, row m*16+
+        # (l//16)*4+ii). MX scale already folded in. Bound to actual M rows (ragged M).
         c_nrec = fx.Int64(i32_m) * fx.Int64(N) * fx.Int64(2)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, max_size=False, num_records_bytes=c_nrec)
         col_w = by_n + wave * fx.Int32(BN // 4) + lane_mod_16
@@ -559,12 +535,6 @@ def compile_mxfp4_gemm_v2(
         b_addr = fx.Int64(fx.ptrtoint(fx.get_iter(arg_b)))
         sa_addr = fx.Int64(fx.ptrtoint(fx.get_iter(arg_scale_a)))
         sb_addr = fx.Int64(fx.ptrtoint(fx.get_iter(arg_scale_b)))
-        mma_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, Float4E2M1FN))
-        tiled_mma = fx.make_tiled_mma(
-            mma_atom,
-            fx.make_layout((1, 4, 1), (0, 1, 0)),
-            fx.make_tile(None, None, fx.make_layout((32, 4), (1, 32))),
-        )
         M_max = 65536
         arg_c_2d = fx.Tensor(fx.make_view(fx.get_iter(arg_c), fx.make_layout((M_max, N), (N, 1))))
         gx = (i32_m + (BM - 1)) // BM
@@ -578,7 +548,6 @@ def compile_mxfp4_gemm_v2(
             arg_bias,
             i32_m,
             i32_n,
-            tiled_mma,
             value_attrs={"rocdl.waves_per_eu": waves_per_eu},
         ).launch(grid=(gx, gy, 1), block=(256, 1, 1), stream=stream)
 

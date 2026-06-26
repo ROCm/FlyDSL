@@ -104,7 +104,7 @@ def _get_preload(tile_m, tile_n, tile_k):
     return _TILE_PRELOAD_TABLE.get((int(tile_m), int(tile_n), int(tile_k)), _TILE_PRELOAD_DEFAULT)
 
 
-def compile_preshuffle_gemm_v2(
+def compile_preshuffle_gemm(
     *,
     N: int,
     K: int,

@@ -713,15 +713,9 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     set -- $shape
     IFS=$oldIFS
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
-    v2_flag=""
-    case "$dtype" in
-      fp8 | int8 | fp16 | bf16) v2_flag="--use_v2" ;;
-    esac
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
-    # shellcheck disable=SC2086 # v2_flag is intentionally unquoted (empty = omit)
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --in_dtype "$dtype" \
-      ${v2_flag} \
       --num_warmup 10 \
       --num_iters 100 \
       -M "$M" \
@@ -753,11 +747,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     IFS=$oldIFS
     dtype=$1; M=$2; N=$3; K=$4; tile_m=$5; tile_n=$6; tile_k=$7
     shape_waves_per_eu="${8:-}"
-
-    v2_flag=""
-    case "$dtype" in
-      fp8 | int8 | fp16 | bf16) v2_flag="--use_v2" ;;
-    esac
 
     async_copy_flag=""
     async_copy_tag="async_copy"
@@ -903,11 +892,9 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
     dtype="fp4"
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
-    # fp4 sync -> layout-API v2 (matches/beats v1; async fp4 stays on v1 below).
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --wfp4 \
       --in_dtype fp4 \
-      --use_v2 \
       --num_warmup 10 \
       --num_iters 100 \
       -M "$M" \

@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""MFMA preshuffle GEMM tests (layout-API v2 kernels).
+"""MFMA preshuffle GEMM tests (layout-API kernels).
 
-Kernel implementations live in `kernels/preshuffle_gemm_v2.py` (fp8/int8/fp16/bf16)
+Kernel implementations live in `kernels/preshuffle_gemm.py` (fp8/int8/fp16/bf16)
 and `kernels/mxfp4_preshuffle_v2.py` (MXFP4 / W4A6). This file is the correctness +
 perf harness.
 """
@@ -31,7 +31,7 @@ if _PYFLYDSL_SRC not in sys.path:
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.mxfp4_preshuffle_v2 import compile_mxfp4_gemm_v2  # noqa: E402
-from kernels.preshuffle_gemm_v2 import compile_preshuffle_gemm_v2  # noqa: E402
+from kernels.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant, shuffle_weight  # noqa: E402
@@ -120,7 +120,7 @@ def test_mfma_a8_flyc_preshuffle(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = compile_preshuffle_gemm_v2(
+    launch_fn = compile_preshuffle_gemm(
         N=N,
         K=K,
         tile_m=tile_m,
@@ -579,9 +579,6 @@ if __name__ == "__main__":
     parser.add_argument("--no_aiter_bench", action="store_false", dest="run_aiter_bench")
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
     parser.add_argument(
-        "--use_v2", action="store_true", default=False, help="Deprecated no-op (all paths now use the v2 kernels)."
-    )
-    parser.add_argument(
         "--wfp4", action="store_true", default=False, help="Run weight-fp4 (MXFP4) preshuffle GEMM test."
     )
     parser.add_argument(
@@ -685,7 +682,7 @@ def test_cudagraph_capture_preshuffle(in_dtype):
     _dummy_bias = torch.empty(0, dtype=torch.bfloat16, device=device)
 
     # Compile kernel
-    launch_fn = compile_preshuffle_gemm_v2(
+    launch_fn = compile_preshuffle_gemm(
         N=N,
         K=K,
         tile_m=tile_m,
@@ -802,7 +799,7 @@ def test_fused_epilogue_correctness(epilogue):
     sb_flat = torch.empty(0, dtype=torch.float32, device=device)
     c_out = torch.zeros(M, N, dtype=torch_out_dtype, device=device)
 
-    launch_fn = compile_preshuffle_gemm_v2(
+    launch_fn = compile_preshuffle_gemm(
         N=N,
         K=K,
         tile_m=tile_m,
