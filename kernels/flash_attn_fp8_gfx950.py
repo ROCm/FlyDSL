@@ -108,7 +108,7 @@ def dualwave_splitk_workspace_elems(batch_size, num_heads, seq_len, num_kv_split
     return rows * (head_dim // 2) + 2 * rows
 
 
-def build_flash_attn_dualwave_swp_module(
+def build_flash_attn_dualwave_swp_fp8_module(
     num_heads,
     head_dim,
     causal=True,
@@ -345,7 +345,7 @@ def build_flash_attn_dualwave_swp_module(
         raise ValueError("varlen is not supported together with num_kv_splits > 1")
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
-    def flash_attn_dualwave_swp_gfx950_kernel(
+    def flash_attn_dualwave_swp_fp8_gfx950_kernel(
         Q: fx.Tensor,
         K: fx.Tensor,
         V: fx.Tensor,
@@ -2560,7 +2560,7 @@ def build_flash_attn_dualwave_swp_module(
             if const_expr(daz)
             else None
         )
-        flash_attn_dualwave_swp_gfx950_kernel(
+        flash_attn_dualwave_swp_fp8_gfx950_kernel(
             Q,
             K,
             V,
