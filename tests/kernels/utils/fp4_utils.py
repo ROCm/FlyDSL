@@ -742,7 +742,7 @@ def fp6_e2m3_to_f32(x_unpacked: Tensor) -> Tensor:
 
 
 def per_1x32_f6_quant(x):
-    """Per-1x32 MXFP6 (E2M3) quant of the A operand for compile_preshuffle_gemm_a6w4.
+    """Per-1x32 MXFP6 (E2M3) quant of the A operand for compile_mxfp4_gemm_v2(a_dtype="fp6").
 
     Returns:
       a_pad:      (M, K) uint8 - FP8-padded packed FP6 (24 B codes + 8 B zero

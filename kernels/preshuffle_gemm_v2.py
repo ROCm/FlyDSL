@@ -8,11 +8,100 @@ from typing import Optional
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import const_expr, gpu, math, range_constexpr, rocdl, vector
 from flydsl.expr.typing import BFloat16, Float8E4M3FN, Float8E4M3FNUZ, Float16, Float32, Int8, Int32, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
-from kernels.preshuffle_gemm import _get_preload
+
+# (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k); ported from v1.
+_TILE_PRELOAD_TABLE = {
+    # (tile_m, tile_n, tile_k): (dsrd_preload, dvmem_preload)
+    # ── tile_m = 16 ──
+    (16, 64, 256): (2, 2),
+    (16, 64, 512): (8, 8),
+    (16, 128, 256): (2, 2),
+    (16, 128, 512): (2, 2),
+    (16, 192, 256): (2, 2),
+    (16, 256, 256): (2, 2),
+    (16, 256, 512): (2, 2),
+    (16, 512, 256): (2, 2),
+    # ── tile_m = 32 ──
+    (32, 64, 128): (6, 6),
+    (32, 64, 256): (6, 6),
+    (32, 64, 512): (2, 2),
+    (32, 128, 128): (6, 6),
+    (32, 128, 256): (6, 6),
+    (32, 192, 128): (6, 6),
+    (32, 192, 256): (6, 6),
+    (32, 256, 128): (6, 6),
+    (32, 256, 256): (6, 6),
+    # ── tile_m = 48 ──
+    (48, 64, 128): (8, 8),
+    (48, 64, 256): (2, 2),
+    (48, 128, 256): (6, 6),
+    (48, 192, 256): (6, 6),
+    (48, 256, 256): (6, 6),
+    # ── tile_m = 64 ──
+    (64, 64, 128): (4, 4),
+    (64, 64, 256): (4, 4),
+    (64, 128, 128): (8, 8),
+    (64, 128, 256): (8, 8),
+    (64, 192, 128): (8, 8),
+    (64, 192, 256): (8, 8),
+    (64, 256, 64): (8, 8),
+    (64, 256, 128): (8, 8),
+    (64, 256, 256): (8, 8),
+    # ── tile_m = 80 ──
+    (80, 64, 256): (4, 4),
+    (80, 128, 256): (8, 8),
+    (80, 192, 256): (8, 8),
+    (80, 256, 256): (8, 8),
+    # ── tile_m = 96 ──
+    (96, 64, 128): (6, 6),
+    (96, 64, 256): (6, 6),
+    (96, 128, 128): (8, 8),
+    (96, 128, 256): (6, 6),
+    (96, 192, 128): (8, 8),
+    (96, 192, 256): (8, 8),
+    (96, 256, 128): (8, 8),
+    (96, 256, 256): (8, 8),
+    # ── tile_m = 112 ──
+    (112, 64, 256): (8, 8),
+    (112, 128, 256): (4, 4),
+    (112, 192, 256): (8, 8),
+    (112, 256, 256): (8, 8),
+    # ── tile_m = 128 ──
+    (128, 64, 128): (6, 6),
+    (128, 64, 256): (8, 8),
+    (128, 128, 64): (4, 4),
+    (128, 128, 128): (8, 8),
+    (128, 128, 256): (4, 4),
+    (128, 192, 128): (8, 8),
+    (128, 192, 256): (8, 8),
+    (128, 256, 128): (6, 6),
+    (128, 256, 256): (4, 4),
+    # ── tile_m = 160 ──
+    (160, 192, 128): (8, 8),
+    # ── tile_m = 192 ──
+    (192, 64, 128): (6, 6),
+    (192, 128, 128): (6, 6),
+    # ── tile_m = 224 ──
+    (224, 64, 128): (4, 4),
+    (224, 128, 128): (6, 6),
+    (224, 192, 128): (6, 6),
+    # ── tile_m = 256 ──
+    (256, 64, 128): (4, 4),
+    (256, 128, 128): (6, 6),
+    (256, 192, 128): (6, 6),
+    (256, 256, 128): (4, 4),
+}
+
+_TILE_PRELOAD_DEFAULT = (0, 0)
+
+
+def _get_preload(tile_m, tile_n, tile_k):
+    """Look up (dsrd_preload, dvmem_preload) from the tile table."""
+    return _TILE_PRELOAD_TABLE.get((int(tile_m), int(tile_n), int(tile_k)), _TILE_PRELOAD_DEFAULT)
 
 
 def compile_preshuffle_gemm_v2(
@@ -24,13 +113,27 @@ def compile_preshuffle_gemm_v2(
     tile_k: int,
     in_dtype: str = "fp8",
     out_dtype: str = "bf16",
+    epilogue: str = "none",  # "none", "bias", "bias_relu", "bias_silu", "bias_gelu"
     waves_per_eu: Optional[int] = None,
     enable_scheduler: bool = True,
     use_async_copy: bool = False,
 ):
-    """Compile preshuffle GEMM (layout API, fp8/int8/fp16/bf16) -> fn(C, A, B, scale_a, scale_b, M, N, stream)."""
+    """Compile preshuffle GEMM (layout API, fp8/int8/fp16/bf16).
+
+    Signature: fn(C, A, B, scale_a, scale_b, bias, M, N, stream). bias is the fused
+    epilogue bias (per-N, out_dtype); unused when epilogue == "none".
+    """
     if in_dtype not in ("fp8", "int8", "fp16", "bf16"):
         raise ValueError(f"in_dtype must be fp8/int8/fp16/bf16, got {in_dtype!r}")
+    if tile_k <= 0 or K % tile_k != 0:
+        raise ValueError(f"tile_k must be a positive divisor of K; got tile_k={tile_k}, K={K}")
+    if epilogue not in ("none", "bias", "bias_relu", "bias_silu", "bias_gelu"):
+        raise ValueError(f"epilogue must be none/bias/bias_relu/bias_silu/bias_gelu, got {epilogue!r}")
+    _has_epilogue = epilogue != "none"
+    _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
+    _has_relu = epilogue == "bias_relu"
+    _has_silu = epilogue == "bias_silu"
+    _has_gelu = epilogue == "bias_gelu"
 
     is_fp8 = in_dtype == "fp8"
     is_int8 = in_dtype == "int8"
@@ -39,6 +142,10 @@ def compile_preshuffle_gemm_v2(
     is_f16_or_bf16 = is_f16 or is_bf16
     is_8bit = is_fp8 or is_int8
     elem_bytes = 1 if is_8bit else 2
+
+    # The async gmem->LDS DMA (buffer_load_lds 128b) only lowers for 8-bit inputs.
+    if use_async_copy and not is_8bit:
+        raise ValueError("use_async_copy is only supported for 8-bit inputs (fp8/int8)")
 
     gpu_arch = get_rocm_arch()
     is_gfx942 = str(gpu_arch).startswith("gfx942")
@@ -70,8 +177,6 @@ def compile_preshuffle_gemm_v2(
     num_a_loads = bytes_per_thread_a // a_load_bytes
     num_b_loads = (tile_n * tile_k * elem_bytes) // total_threads // 16
     num_ds_load = (tile_m * tile_k * elem_bytes) // 64 // 16  # A LDS reads per wave
-    a_async_load_bytes = 16
-    num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
     num_gmem_loads = num_a_loads + num_b_loads
     if is_8bit and is_gfx950:
         dsrd_preload, dvmem_preload = _get_preload(tile_m, tile_n, tile_k)
@@ -93,6 +198,7 @@ def compile_preshuffle_gemm_v2(
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
         tiled_mma_arg: fx.TiledMma,
@@ -174,16 +280,19 @@ def compile_preshuffle_gemm_v2(
         # ── Async gmem->LDS DMA (buffer_load_lds) for the A tile ──
         if const_expr(use_async_copy):
             dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+            # Bound to the real M extent (like the sync gA) so ragged-M blocks DMA-read
+            # OOB rows as 0 instead of faulting past the allocation.
             gA_flat = fx.rocdl.make_buffer_tensor(
                 fx.Tensor(fx.make_view(fx.get_iter(arg_a), fx.make_layout(65536 * K, 1))),
-                max_size=True,
+                max_size=False,
+                num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes),
             )
             gA_div = fx.logical_divide(gA_flat, fx.make_layout(1, 1))
             sA_i8_ptr = [fx.recast_iter(Int8, lds.a0.ptr), fx.recast_iter(Int8, lds.a1.ptr)]
             bx_m = bid_x * tile_m
             wave_id = tid // 64
-            step_bytes = total_threads * a_async_load_bytes
-            wave_stride_bytes = 64 * a_async_load_bytes
+            step_bytes = total_threads * a_load_bytes
+            wave_stride_bytes = 64 * a_load_bytes
             k_blocks16_dma = (tile_k * elem_bytes) // 16
             elems_per_16b = 16 // elem_bytes
 
@@ -191,10 +300,10 @@ def compile_preshuffle_gemm_v2(
                 wave_off = rocdl.readfirstlane(fx.Int32.ir_type, wave_id * wave_stride_bytes)
                 lds_ptr = fx.add_offset(sA_i8_ptr[stage], wave_off)
                 base_k = k_tile_val * tile_k
-                for i in range_constexpr(num_a_async_loads):
+                for i in range_constexpr(num_a_loads):
                     if const_expr(i > 0):
                         lds_ptr = fx.add_offset(lds_ptr, step_bytes)
-                    pos_bytes = i * total_threads * a_async_load_bytes + tid * a_async_load_bytes
+                    pos_bytes = i * total_threads * a_load_bytes + tid * a_load_bytes
                     elem_idx = pos_bytes // elem_bytes
                     m = elem_idx // tile_k
                     k = elem_idx % tile_k
@@ -318,6 +427,14 @@ def compile_preshuffle_gemm_v2(
             rocdl.sched_barrier(0)
 
         # ── Pipeline stage (double-buffered B via split fragments) ─
+        def mma_kloop(read_stage, cur_frag_B):
+            # s2r the A tile then issue the MMAs. K=128/K=32 (1 atom): flat k_iters → ki;
+            # K=16 gfx942 (2 atoms): (None, ki).
+            for ki in range_constexpr(k_iters):
+                fx.copy(uni_copy, pA_s2r_stages[read_stage][None, None, ki], frag_A_retile[None, None, ki])
+                k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
+                fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
+
         def pipeline_stage(read_stage, next_k_val=None, read_next=True):
             write_stage = read_stage ^ 1
             cur_frag_B = frag_B_stages[read_stage]
@@ -326,10 +443,7 @@ def compile_preshuffle_gemm_v2(
                 if const_expr(do_next):
                     dma_a_to_lds(next_k_val, write_stage)
                     fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
-                for ki in range_constexpr(k_iters):
-                    fx.copy(uni_copy, pA_s2r_stages[read_stage][None, None, ki], frag_A_retile[None, None, ki])
-                    k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
-                    fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
+                mma_kloop(read_stage, cur_frag_B)
                 if const_expr(enable_scheduler):
                     hot_loop_scheduler()
                 if const_expr(do_next):
@@ -339,11 +453,7 @@ def compile_preshuffle_gemm_v2(
             if const_expr(do_next):
                 fx.copy(buf_copy, pA_g[None, None, None, next_k_val], frag_copy_A)
                 fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
-            for ki in range_constexpr(k_iters):
-                fx.copy(uni_copy, pA_s2r_stages[read_stage][None, None, ki], frag_A_retile[None, None, ki])
-                # K=128/K=32 (1 atom): flat k_iters → ki; K=16 gfx942 (2 atoms): (None, ki)
-                k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
-                fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
+            mma_kloop(read_stage, cur_frag_B)
             fx.copy(uni_copy, frag_copy_A, pA_s_stages[write_stage][None, None, None])
             if const_expr(enable_scheduler):
                 hot_loop_scheduler()
@@ -389,8 +499,13 @@ def compile_preshuffle_gemm_v2(
                 pipeline_stage(read_stage=1, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
-        if const_expr(is_8bit):
-            # FP8/INT8: per-row(scale_a) × per-col(scale_b) scaling applied inline before store
+        # Fast path: f16/bf16 with no fused epilogue → vectorized truncate + copy.
+        # Otherwise (8-bit scaling and/or fused bias+activation) build the output
+        # element-wise so per-column bias and the activation can be applied.
+        if const_expr(not is_8bit and not _has_epilogue):
+            frag_C_out.store(Vec(frag_C.load()).to(out_elem_cls))
+            fx.copy(buf_copy_out, frag_C_retile, pC_g)
+        else:
             bx_m = gpu.block_id("x") * tile_m
             by_n = gpu.block_id("y") * tile_n
             wave_id = gpu.thread_id("x") // 64
@@ -399,32 +514,67 @@ def compile_preshuffle_gemm_v2(
             lane_mod_16 = lane_id % 16
             n_tile_base = wave_id * n_per_wave
 
-            # Scale buffer tensors + scalar copy atom
-            scale_a_buf = fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True)
-            scale_b_buf = fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True)
-            scale_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-            scale_reg_lay = fx.make_layout(1, 1)
-            scale_a_div = fx.logical_divide(scale_a_buf, fx.make_layout(1, 1))
-            scale_b_div = fx.logical_divide(scale_b_buf, fx.make_layout(1, 1))
+            if const_expr(is_8bit):
+                # FP8/INT8: per-row(scale_a) × per-col(scale_b) scaling applied inline.
+                scale_a_buf = fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True)
+                scale_b_buf = fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True)
+                scale_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+                scale_reg_lay = fx.make_layout(1, 1)
+                scale_a_div = fx.logical_divide(scale_a_buf, fx.make_layout(1, 1))
+                scale_b_div = fx.logical_divide(scale_b_buf, fx.make_layout(1, 1))
 
-            def load_scale(div_tensor, index):
-                r = fx.make_rmem_tensor(scale_reg_lay, fx.Float32)
-                fx.copy_atom_call(scale_copy, fx.slice(div_tensor, (None, fx.Int32(index))), r)
-                return Vec(fx.memref_load_vec(r))[0]
+                def load_scale(div_tensor, index):
+                    r = fx.make_rmem_tensor(scale_reg_lay, fx.Float32)
+                    fx.copy_atom_call(scale_copy, fx.slice(div_tensor, (None, fx.Int32(index))), r)
+                    return Vec(fx.memref_load_vec(r))[0]
 
-            # Load per-column scales: 1 scalar per N-block
-            s_b_vals = [
-                load_scale(scale_b_div, by_n + n_tile_base + ni * 16 + lane_mod_16) for ni in range_constexpr(num_acc_n)
-            ]
-            # Load per-row scales: 1 scalar per row per thread
-            s_a_vals = [
-                [load_scale(scale_a_div, bx_m + mi * 16 + lane_div_16 * 4 + ii) for ii in range_constexpr(4)]
-                for mi in range_constexpr(m_repeat)
-            ]
+                # Per-column scales (1/N-block) and per-row scales (1/row/thread).
+                s_b_vals = [
+                    load_scale(scale_b_div, by_n + n_tile_base + ni * 16 + lane_mod_16)
+                    for ni in range_constexpr(num_acc_n)
+                ]
+                s_a_vals = [
+                    [load_scale(scale_a_div, bx_m + mi * 16 + lane_div_16 * 4 + ii) for ii in range_constexpr(4)]
+                    for mi in range_constexpr(m_repeat)
+                ]
 
-            # Build scaled accumulator inline
+            # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
+            if const_expr(_has_bias):
+                bias_buf = fx.rocdl.make_buffer_tensor(arg_bias, max_size=True)
+                bias_copy = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
+                bias_div = fx.logical_divide(bias_buf, fx.make_layout(1, 1))
+
+                def load_bias(index):
+                    r = fx.make_rmem_tensor(fx.make_layout(1, 1), out_elem_cls)
+                    fx.copy_atom_call(bias_copy, fx.slice(bias_div, (None, fx.Int32(index))), r)
+                    return fx.Float32(Vec(fx.memref_load_vec(r))[0])
+
+                bias_vals = [load_bias(by_n + n_tile_base + ni * 16 + lane_mod_16) for ni in range_constexpr(num_acc_n)]
+
+            def apply_activation(val_s):
+                # ReLU/SiLU/GeLU ported from v1: maximumf for relu; exp+rcp for silu;
+                # tanh-approx gelu expanded through a non-positive exponent (no overflow).
+                if const_expr(_has_relu):
+                    return fx.Float32(val_s).maximumf(fx.Float32(0.0))
+                if const_expr(_has_silu):
+                    exp_neg = math.exp(val_s * fx.Float32(-1.0))
+                    return val_s * (fx.Float32(1.0) / (fx.Float32(1.0) + exp_neg))
+                if const_expr(_has_gelu):
+                    half_f32 = fx.Float32(0.5)
+                    one_f32 = fx.Float32(1.0)
+                    zero_f32 = fx.Float32(0.0)
+                    two_f32 = fx.Float32(2.0)
+                    x3 = val_s * val_s * val_s
+                    y = fx.Float32(0.7978845608) * (val_s + fx.Float32(0.044715) * x3)
+                    abs_y = fx.Float32(y).maximumf(zero_f32 - y)
+                    e_neg2abs = math.exp(fx.Float32(-2.0) * abs_y)
+                    denom = one_f32 + e_neg2abs
+                    numerator = (y > zero_f32).select(two_f32, two_f32 * e_neg2abs)
+                    return half_f32 * val_s * (numerator * (one_f32 / denom))
+                return val_s
+
             acc_vec = Vec(frag_C.load())
-            scaled_elems = []
+            out_elems = []
             for mi in range_constexpr(m_repeat):
                 for ni in range_constexpr(num_acc_n):
                     for ii in range_constexpr(4):
@@ -432,16 +582,17 @@ def compile_preshuffle_gemm_v2(
                         val = acc_vec[idx]
                         if const_expr(is_int8):
                             val = val.to(Float32)
-                        s_a = s_a_vals[mi][ii]
-                        scaled_val = (val * s_a) * s_b_vals[ni]
-                        scaled_elems.append(scaled_val.to(out_elem_cls))
+                        if const_expr(is_8bit):
+                            val_s = (val * s_a_vals[mi][ii]) * s_b_vals[ni]
+                        else:
+                            val_s = val
+                        if const_expr(_has_bias):
+                            val_s = val_s + bias_vals[ni]
+                        val_s = apply_activation(val_s)
+                        out_elems.append(val_s.to(out_elem_cls))
 
-            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), scaled_elems)
+            out_vec = vector.from_elements(T.vec(acc_size, out_elem_cls.ir_type), out_elems)
             frag_C_out.store(out_vec)
-            fx.copy(buf_copy_out, frag_C_retile, pC_g)
-        else:
-            # f16/bf16: truncate + vectorized fx.copy
-            frag_C_out.store(Vec(frag_C.load()).to(out_elem_cls))
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
 
     # ── Host launcher ─────────────────────────────────────────────
@@ -452,6 +603,7 @@ def compile_preshuffle_gemm_v2(
         arg_b: fx.Tensor,
         arg_scale_a: fx.Tensor,
         arg_scale_b: fx.Tensor,
+        arg_bias: fx.Tensor,
         i32_m: fx.Int32,
         i32_n: fx.Int32,
         stream: fx.Stream,
@@ -523,6 +675,7 @@ def compile_preshuffle_gemm_v2(
             preshuffle_B,
             arg_scale_a,
             arg_scale_b,
+            arg_bias,
             i32_m,
             i32_n,
             tiled_mma,

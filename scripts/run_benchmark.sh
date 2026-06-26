@@ -111,7 +111,6 @@ fp8,5120,5120,8320,64,256,128
 fp8,9728,8192,8320,64,256,128
 fp8,8192,8192,8192,128,256,128
 int8,9728,8192,8320,64,256,128
-int4,9728,8192,8320,64,256,128
 bf16,5120,5120,8320,64,256,128
 '
 
@@ -904,9 +903,11 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
     dtype="fp4"
     log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
+    # fp4 sync -> layout-API v2 (matches/beats v1; async fp4 stays on v1 below).
     if python3 tests/kernels/test_preshuffle_gemm.py \
       --wfp4 \
       --in_dtype fp4 \
+      --use_v2 \
       --num_warmup 10 \
       --num_iters 100 \
       -M "$M" \

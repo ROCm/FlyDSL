@@ -32,7 +32,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm_a8  # noqa: E402
+from kernels.preshuffle_gemm_v2 import compile_preshuffle_gemm_v2  # noqa: E402
 
 
 def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
@@ -41,7 +41,7 @@ def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
 
     is_low_prec = in_dtype not in ("fp16", "bf16")
     a_dtype = torch.int8 if is_low_prec else (torch.float16 if in_dtype == "fp16" else torch.bfloat16)
-    b_elems = (N * K) // 2 if in_dtype == "int4" else N * K
+    b_elems = N * K
 
     prev = os.environ.get("COMPILE_ONLY")
     os.environ["COMPILE_ONLY"] = "1"
@@ -52,6 +52,7 @@ def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):
             torch.zeros(b_elems, dtype=torch.int8 if is_low_prec else a_dtype),
             torch.zeros(M, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
             torch.zeros(N, dtype=torch.float32) if is_low_prec else torch.empty(0, dtype=torch.float32),
+            torch.empty(0, dtype=torch.float16),
             M,
             N,
             0,
@@ -85,8 +86,7 @@ def run_and_verify(
     a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
     b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)
 
-    is_int4 = in_dtype == "int4"
-    is_int8 = (in_dtype == "int8") or is_int4
+    is_int8 = in_dtype == "int8"
     is_f16_or_bf16 = in_dtype in ("fp16", "bf16")
 
     if is_f16_or_bf16:
@@ -98,27 +98,12 @@ def run_and_verify(
     else:
         quant_dtype = torch.int8 if is_int8 else DTYPE_FP8
         a_q, scale_a = pertoken_quant(a_fp32, quant_dtype=quant_dtype)
-        if is_int4:
-            b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=torch.int8, dtypeMax=7)
-        else:
-            b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=quant_dtype)
+        b_q, scale_b = pertoken_quant(b_fp32_t, quant_dtype=quant_dtype)
 
     a_q = a_q.contiguous()
     b_q = b_q.contiguous()
     b_shuffled = shuffle_weight(b_q, layout=(16, 16))
-
-    if is_int4:
-        flat = b_shuffled.contiguous().view(-1).to(torch.int16)
-        assert flat.numel() % 8 == 0
-        u = (flat & 0xF).to(torch.uint8).view(-1, 8)
-        out = torch.empty((u.shape[0], 4), device=u.device, dtype=torch.uint8)
-        out[:, 0] = u[:, 0] | (u[:, 4] << 4)
-        out[:, 1] = u[:, 1] | (u[:, 5] << 4)
-        out[:, 2] = u[:, 2] | (u[:, 6] << 4)
-        out[:, 3] = u[:, 3] | (u[:, 7] << 4)
-        b_input = out.view(-1).to(torch.int8)
-    else:
-        b_input = b_shuffled
+    b_input = b_shuffled
 
     c_out = torch.zeros((M, N), dtype=torch.float16, device=device)
 
@@ -139,6 +124,7 @@ def run_and_verify(
         _as_i8(b_input.contiguous().view(-1)),
         sa_flat,
         sb_flat,
+        torch.empty(0, dtype=torch.float16, device=device),
         M,
         N,
         stream,
@@ -207,7 +193,6 @@ def compile_one_config(
     tile_n: int,
     tile_k: int,
     in_dtype: str = "fp8",
-    lds_stage: int = 2,
     run_kernel: bool = False,
 ) -> dict:
     """Compile one preshuffle GEMM configuration.
@@ -222,15 +207,13 @@ def compile_one_config(
 
     t0 = time.time()
     try:
-        launch_fn = compile_preshuffle_gemm_a8(
-            M=M,
+        launch_fn = compile_preshuffle_gemm_v2(
             N=N,
             K=K,
             tile_m=tile_m,
             tile_n=tile_n,
             tile_k=tile_k,
             in_dtype=in_dtype,
-            lds_stage=lds_stage,
         )
         if run_kernel:
             run_and_verify(launch_fn, M, N, K, in_dtype)
@@ -252,8 +235,7 @@ def test_bad_tile_error():
         M, N, K, tile_m, tile_n, tile_k = cfg
         shape_str = f"M={M} N={N} K={K} tile=({tile_m},{tile_n},{tile_k})"
         try:
-            compile_preshuffle_gemm_a8(
-                M=M,
+            compile_preshuffle_gemm_v2(
                 N=N,
                 K=K,
                 tile_m=tile_m,
@@ -283,15 +265,8 @@ def main():
         "--in_dtype",
         type=str,
         default="both",
-        choices=list(DTYPE_PRESETS.keys()) + ["fp16", "bf16", "int4"],
+        choices=list(DTYPE_PRESETS.keys()) + ["fp16", "bf16"],
         help="Input data type(s): 'both' compiles fp8+int8 (default: both)",
-    )
-    parser.add_argument(
-        "--lds_stage",
-        type=int,
-        default=2,
-        choices=[1, 2],
-        help="LDS pipeline stages (default: 2)",
     )
     parser.add_argument(
         "--run_kernel",
@@ -318,7 +293,6 @@ def main():
     print("=" * 72)
     print(f"  Preset:       {args.preset} ({len(configs)} shapes x {len(dtypes)} dtypes = {total_jobs} jobs)")
     print(f"  in_dtype:     {dtypes}")
-    print(f"  lds_stage:    {args.lds_stage}")
     print(f"  Cache dir:    {cache_dir}")
     print(f"  Target arch:  {arch}")
     print(f"  run_kernel:   {args.run_kernel}")
@@ -342,7 +316,6 @@ def main():
                 tile_n=tile_n,
                 tile_k=tile_k,
                 in_dtype=dt,
-                lds_stage=args.lds_stage,
                 run_kernel=args.run_kernel,
             )
             results.append(r)
