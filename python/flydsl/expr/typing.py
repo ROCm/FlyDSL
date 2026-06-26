@@ -131,6 +131,16 @@ def as_dsl_value(value, exemplar=None):
             return exemplar(value)
         if isinstance(exemplar, Numeric):
             return type(exemplar)(value)
+        # Prefer an *instance*-level reconstruction hook when present: it lets
+        # wrappers whose logical type is not fully captured by the MLIR type
+        # (e.g. Vector's multi-dim shape, flattened to vector<NxTy> in IR) copy
+        # their Python-side metadata from the exemplar instance instead of
+        # re-deriving it from the lossy MLIR type. Without this, a value carried
+        # across an scf region boundary (for/while/if) is rebuilt from the bare
+        # block-argument ir.Value and loses e.g. shape (4,1) -> (4,).
+        inst_ctor = getattr(exemplar, "__reconstruct_from_ir_value__", None)
+        if inst_ctor is not None:
+            return inst_ctor(value)
         ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
         if ctor is not None:
             try:
@@ -1537,6 +1547,18 @@ class Vector(ArithValue):
     @classmethod
     def __construct_from_ir_values__(cls, values):
         return cls(values[0])
+
+    def __reconstruct_from_ir_value__(self, value):
+        """Rebuild this Vector around a new ``ir.Value`` (e.g. an scf.for/while/if
+        block argument) while preserving the Python-side logical shape and dtype.
+
+        The MLIR value is always a flat ``vector<NxTy>``, so the multi-dim shape
+        (e.g. ``(4,1)``) only lives on this Python object. When a Vector is
+        carried across a control-flow region boundary it must be reconstructed
+        from the bare block-argument value; copying ``self._shape``/``self._dtype``
+        here keeps the shape stable instead of collapsing to ``(N,)``.
+        """
+        return Vector(value, self._shape, self._dtype)
 
     def to(self, dtype: Type[Numeric]) -> "Vector":
         if dtype is ir.Value:
