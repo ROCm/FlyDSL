@@ -171,8 +171,7 @@ def compile_preshuffle_gemm_v2(
                 max_size=True,
             )
             gA_div = fx.logical_divide(gA_flat, fx.make_layout(1, 1))
-            _i8_shared = fx.PointerType.get(Int8.ir_type, fx.AddressSpace.Shared, 512)
-            sA_i8_ptr = [fx.recast_iter(_i8_shared, lds.a0.ptr), fx.recast_iter(_i8_shared, lds.a1.ptr)]
+            sA_i8_ptr = [fx.recast_iter(Int8, lds.a0.ptr), fx.recast_iter(Int8, lds.a1.ptr)]
             bx_m = bid_x * tile_m
             wave_id = tid // 64
             step_bytes = total_threads * a_async_load_bytes
