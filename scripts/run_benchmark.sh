@@ -143,20 +143,11 @@ FP8_GEMM_8WAVE_ROWSCALE_SHAPES='
 8192,8192,8192,256,256,0
 '
 
-# FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
+# FP4 GEMM shapes (kernels/fp4_gemm_4wave.py, gfx950 only): "M,N,K"
+# The 4-wave kernel runs its native BLOCK_M=BLOCK_N=256, BLOCK_K=256 config.
 GEMM_FP4_SHAPES='
-8192,8192,8192,64,128,256
-8192,8192,8192,64,256,256
-8192,8192,8192,128,256,256
-8192,8192,8192,128,256,128
-'
-
-# Async FP4 GEMM shapes:
-# "M,N,K,tile_m,tile_n,tile_k[,waves_per_eu]"
-GEMM_FP4_SHAPES_ASYNC='
-
-8192,8192,8192,128,256,128,2
-8192,8192,8192,128,256,256,2
+8192,8192,8192
+16384,16384,16384
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -871,7 +862,8 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     done
   fi
 
-  # FP4 GEMM (gfx950 only)
+  # FP4 GEMM (kernels/fp4_gemm_4wave.py, gfx950 only); native 256x256x256 config
+  tile_m=256; tile_n=256; tile_k=256
   for shape in $GEMM_FP4_SHAPES; do
     [ -z "$shape" ] && continue
     oldIFS=$IFS
@@ -879,36 +871,31 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
     set -- $shape
     IFS=$oldIFS
-    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
+    M=$1; N=$2; K=$3
     dtype="fp4"
-    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
-    if python3 tests/kernels/test_preshuffle_gemm.py \
-      --wfp4 \
-      --in_dtype fp4 \
+    gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+    log="${BENCH_LOG_DIR}/fp4_gemm_4wave_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
+    if python3 tests/kernels/test_fp4_gemm_4wave.py \
       --num_warmup 10 \
       --num_iters 100 \
       -M "$M" \
       -N "$N" \
       -K "$K" \
       --tile_m "$tile_m" \
-      --tile_n "$tile_n" \
-      --tile_k "$tile_k" >"${log}" 2>&1; then
+      --tile_n "$tile_n" >"${log}" 2>&1; then
       # Check if test was skipped due to architecture
-      if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
-        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      if grep -q "requires gfx950\|Skipping\|Skipped" "${log}"; then
+        _emit_row "gemm_fp4" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
-        row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
+        row="$(_py_parse_and_emit gemm_fp4 "${gemm_shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"
       fi
     else
       # Skip gracefully on unsupported architectures or missing features
-      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
-        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      if grep -q "requires gfx950\|gfx950\|Skipped\|not supported" "${log}" 2>/dev/null; then
+        _emit_row "gemm_fp4" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         FAIL_COUNT=$((FAIL_COUNT + 1))
         echo "gemm fp4 failed. Log: ${log}" >&2
@@ -918,64 +905,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
   done
 
-  # FP4 GEMM async problem sizes (gfx950 only)
-  GEMM_FP4_USE_ASYNC_COPY="${GEMM_FP4_USE_ASYNC_COPY:-1}"
-  GEMM_FP4_WAVES_PER_EU="${GEMM_FP4_WAVES_PER_EU:-2}"
-
-  for shape in $GEMM_FP4_SHAPES_ASYNC; do
-    [ -z "$shape" ] && continue
-    oldIFS=$IFS
-    IFS=,
-    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
-    set -- $shape
-    IFS=$oldIFS
-    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
-    shape_waves_per_eu="${7:-}"
-    dtype="fp4"
-
-    async_copy_flag=""
-    async_copy_tag="async_copy"
-    if [ "${GEMM_FP4_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_FP4_USE_ASYNC_COPY}" = "true" ]; then
-      async_copy_flag="--use_async_copy"
-    fi
-    waves_per_eu="${shape_waves_per_eu:-${GEMM_FP4_WAVES_PER_EU}}"
-    waves_per_eu_tag="${waves_per_eu}"
-
-    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
-    if python3 tests/kernels/test_preshuffle_gemm.py \
-      --wfp4 \
-      --in_dtype fp4 \
-      --num_warmup 10 \
-      --num_iters 100 \
-      -M "$M" \
-      -N "$N" \
-      -K "$K" \
-      --tile_m "$tile_m" \
-      --tile_n "$tile_n" \
-      --tile_k "$tile_k" \
-      ${async_copy_flag} \
-      --waves_per_eu "${waves_per_eu}" >"${log}" 2>&1; then
-      if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
-        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
-      else
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
-        row="$(_py_parse_and_emit gemm_fp4_async "${gemm_shape_tag}" "${dtype}" "${log}")"
-        set -- $row
-        _emit_row "$1" "$2" "$3" "$4" "$5"
-      fi
-    else
-      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
-        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
-      else
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "gemm fp4 async failed. Log: ${log}" >&2
-        _show_fail_log "${log}" "gemm_fp4_async"
-      fi
-    fi
-  done
 fi
 
 # MoE (CDNA only — uses MFMA)

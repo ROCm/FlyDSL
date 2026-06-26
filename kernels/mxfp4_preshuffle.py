@@ -101,9 +101,11 @@ def compile_mxfp4_gemm(
     sched_num_gmem = n_coop + num_acc_n * k_halves + m_pairs + n_pairs  # A coop + B + scales
     sched_num_a_dswr = 0 if use_async_copy else n_coop  # A LDS writes/thread (none for DMA)
 
-    # The interleave only helps lean (num_acc_n<=2) tiles; on fat tiles it serializes.
+    # The interleave helps lean (num_acc_n<=2) tiles always, and fat tiles when the A
+    # fill is an async gmem->LDS DMA (the explicit drain otherwise exposes its latency);
+    # on fat *sync* tiles it serializes the ds_write/ds_read stream.
     if enable_scheduler is None:
-        enable_scheduler = num_acc_n <= 2
+        enable_scheduler = num_acc_n <= 2 or use_async_copy
     if dsrd_preload < 0:
         dsrd_preload = sched_num_ds_load
     if dvmem_preload < 0:
