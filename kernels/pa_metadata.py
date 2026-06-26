@@ -93,10 +93,7 @@ def get_pa_metadata_info_v1(batch_size: int, num_head_k: int = 1, num_cu: int = 
     )
 
 
-# ─────────────────────────────────────────────────────────────────────
-# PA decode shared helpers — copied/adapted from kernels/pa_decode_fp8.py
-# so this module is self-contained and does not import from it.
-# ─────────────────────────────────────────────────────────────────────
+# ── PA decode geometry + helpers (shared math lives in kernels/utils.py) ──
 KV_BLOCK_SIZE = 1024  # physical page size (matches SP3 kBlockSize)
 
 KV_COMPUTE_BLOCK = 256  # tile size (matches SP3 kTileKV)
@@ -1081,15 +1078,11 @@ def compile_pa_metadata_v1(
             kvend0 = _num_part(c0)  # partitions in batch 0 (cumulative kv end)
             remain0 = _remain_for_cid(cid)
 
-            # State vector (11 i32):
-            #  0 cid, 1 batch, 2 kvblk, 3 nsplit, 4 num_works,
-            #  5 pidx, 6 kvbeg, 7 kvend, 8 remain,
-            #  9 last_reduce_indptr (lri), 10 global_reduce_tile_idx (grt)
-            # cid + num_works persist across kheads; lri + grt reset per khead
-            # (matches the original, which overwrites reduce_* per khead).
-            # State (11 i32), loop-carried through the scf.while the rewriter
-            # emits from the Python `while` below.  cid + num_works persist
-            # across kheads; lri + grt reset per khead.
+            # State (11 i32), loop-carried through the scf.while emitted from the
+            # Python `while` below:
+            #  0 cid, 1 batch, 2 kvblk, 3 nsplit, 4 num_works, 5 pidx,
+            #  6 kvbeg, 7 kvend, 8 remain, 9 last_reduce_indptr, 10 global_reduce_tile_idx
+            # cid + num_works persist across kheads; lri + grt reset per khead.
             cid_ = cid
             batch_ = c0
             kvblk_ = c0
@@ -1565,10 +1558,7 @@ def compile_pa_decode_metadata(
         work_start = vector.extract(work_bounds, static_position=[0], dynamic_position=[])
         work_end = vector.extract(work_bounds, static_position=[1], dynamic_position=[])
 
-        # ════════════════════════════════════════════════════════════
-        # Outer work loop — iterate over assigned work items
-        # Each work item = one (batch, kv_head_range, kv_page_range)
-        # ════════════════════════════════════════════════════════════
+        # Outer work loop — each work item = one (batch, kv_head_range, kv_page_range)
         _work_start_idx = fx.Index(arith.unwrap(work_start))
         _work_end_idx = fx.Index(arith.unwrap(work_end))
         _work_step = arith.index(1)
@@ -1668,14 +1658,10 @@ def compile_pa_decode_metadata(
                 vhe_loop=_VHELOOP,
             )
 
-            # ════════════════════════════════════════════════════════
-            # Inner KV loop — one CTA processes one 256-token sub-tile
-            # across all 1024-token physical blocks in the work item.
-            # Below: MTP groups loop is nested INSIDE the KV loop so that
-            # K and V are loaded once per physical block and reused across
-            # all MTP groups.  Q is hoisted out of the KV loop (loaded once
-            # per work item, kept in registers).
-            # ════════════════════════════════════════════════════════
+            # Inner KV loop — one CTA processes one 256-token sub-tile across all
+            # 1024-token physical blocks.  MTP groups loop is nested INSIDE so K/V
+            # load once per physical block and are reused; Q is hoisted out (loaded
+            # once per work item, kept in registers).
             def _unwrap(v):
                 return v.ir_value() if hasattr(v, "ir_value") else v
 
@@ -1860,12 +1846,7 @@ def compile_pa_decode_metadata(
                 for _ in range(_mtp_groups)
             ]
 
-            # ════════════════════════════════════════════════════════
-            # KV outer loop — iterate over physical blocks in this work
-            # item.  MTP processing happens INSIDE the loop body so that
-            # K and V are loaded once per block and reused across all
-            # MTP groups.
-            # ════════════════════════════════════════════════════════
+            # KV outer loop over physical blocks (MTP processing nested inside).
             for ib, state in range(
                 _loop_start_g,
                 _loop_stop_g,
