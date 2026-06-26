@@ -589,6 +589,12 @@ def build_flash_attn_func_module_primary(
         # turn this into a dynamic dispatch and lose `kv_head_idx`.
         kv_head_idx = q_head_idx if GQA_GROUP_SIZE == 1 else q_head_idx // GQA_GROUP_SIZE
 
+        # Non-DMA KV loads use raw k_ptr/v_ptr; fold the per-batch element
+        # offset so 0-based global_idx_kv reads this batch (DMA path uses k/v_rsrc).
+        _kv_ptr_batch_off = batch_idx * seq_len_v * fx.Index(STRIDE_TOKEN_KV)
+        k_ptr = buffer_ops.get_element_ptr(k_ptr, _kv_ptr_batch_off, elem_type=elem_type)
+        v_ptr = buffer_ops.get_element_ptr(v_ptr, _kv_ptr_batch_off, elem_type=elem_type)
+
         # ---- Cooperative load decomposition ----
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
         load_lane_in_row = tid % THREADS_PER_ROW_LOAD
