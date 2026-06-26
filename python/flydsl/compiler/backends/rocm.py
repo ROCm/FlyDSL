@@ -3,7 +3,7 @@
 
 from typing import List, Tuple
 
-from ...runtime.device import get_rocm_arch, is_rdna_arch
+from ...runtime.device import get_rocm_arch, get_rocm_toolkit_path, is_rdna_arch
 from ...utils import env
 from .base import BaseBackend, GPUTarget
 
@@ -90,7 +90,9 @@ class RocmBackend(BaseBackend):
                 else []
             ),
         ]
-        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"}}'
+        toolkit_path = get_rocm_toolkit_path() or ""
+        toolkit_opt = f" toolkit={toolkit_path}" if toolkit_path else ""
+        binary_fragment = f'gpu-module-to-binary{{format=fatbin opts="{" ".join(bin_cli_opts)}"{toolkit_opt}}}'
         return [*pre_binary_fragments, *binary_prep_fragments], binary_fragment
 
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
