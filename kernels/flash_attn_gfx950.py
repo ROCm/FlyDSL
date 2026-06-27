@@ -401,7 +401,7 @@ def build_flash_attn_dualwave_swp_module(
             # 64-tile maps to PAGES_PER_TILE entries; the LDS window is indexed by page.
             def _load_block_table_to_lds():
                 seg_page0 = split_t0 * PAGES_PER_TILE
-                num_total_pages = num_kv_tiles * PAGES_PER_TILE
+                num_total_pages = (seqlen_kv_v + PAGE_SIZE - 1) // PAGE_SIZE
                 segment_pages = (split_t_end - split_t0) * PAGES_PER_TILE
                 for pass_id in range_constexpr(PAGED_BT_LDS_SIZE // BLOCK_SIZE):
                     local_page = tid + fx.Index(pass_id * BLOCK_SIZE)
@@ -418,22 +418,83 @@ def build_flash_attn_dualwave_swp_module(
                             page_id_i32 = _raw(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
                             llvm.StoreOp(page_id_i32, dst)
 
-            def _load_page_id_lds(page_idx):
-                local_page = page_idx - split_t0 * fx.Index(PAGES_PER_TILE)
+            def _load_page_id_lds(tile_idx):
+                local_page = (tile_idx - split_t0) * fx.Index(PAGES_PER_TILE)
+                src = buffer_ops.get_element_ptr(
+                    lds_bt_base_ptr, byte_offset=_raw(fx.Int32(local_page * fx.Index(4))), elem_type=T.i8
+                )
+                if const_expr(PAGES_PER_TILE == 1):
+                    return llvm.LoadOp(T.i32, src).result
+                return llvm.LoadOp(v4i32_type, src, alignment=16).result
+
+            def _finish_page_id(v):
+                rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+                if const_expr(PAGES_PER_TILE == 1):
+                    v = rocdl.readfirstlane(T.i32, v)
+                    return fx.Index(fx.Int32(v))
+                ids = Vec(v, (4,), fx.Int32)
+                return [fx.Index(fx.Int32(rocdl.readfirstlane(T.i32, ids[s]))) for s in range_constexpr(4)]
+
+            def _load_v_page_id_lds(tile_idx):
+                if const_expr(not (KV_VECTORIZED and PAGES_PER_TILE > 1)):
+                    return _load_page_id_lds(tile_idx)
+                local_page = (tile_idx - split_t0) * fx.Index(PAGES_PER_TILE) + wave_id_uni // fx.Index(2)
                 src = buffer_ops.get_element_ptr(
                     lds_bt_base_ptr, byte_offset=_raw(fx.Int32(local_page * fx.Index(4))), elem_type=T.i8
                 )
                 return llvm.LoadOp(T.i32, src).result
 
-            def _finish_page_id(v):
+            def _load_k_page_id_lds(tile_idx):
+                if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
+                    local_page0 = (tile_idx - split_t0) * fx.Index(PAGES_PER_TILE)
+                    _src_ni = (lane_in_warp & 3) | ((lane_in_warp & 8) >> 1) | ((lane_in_warp & 4) << 1) | (
+                        lane_in_warp & ~15
+                    )
+                    local_page = local_page0 + _src_ni // fx.Index(PAGE_SIZE)
+                    src = buffer_ops.get_element_ptr(
+                        lds_bt_base_ptr, byte_offset=_raw(fx.Int32(local_page * fx.Index(4))), elem_type=T.i8
+                    )
+                    return llvm.LoadOp(T.i32, src).result
+                return _load_page_id_lds(tile_idx)
+
+            def _finish_scalar_page_id(v):
                 rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
                 v = rocdl.readfirstlane(T.i32, v)
                 return fx.Index(fx.Int32(v))
 
-            def _finish_page_ids(vs):
-                # One s_waitcnt for a batch of pending page-id ds_reads, then broadcast.
-                rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-                return [fx.Index(fx.Int32(rocdl.readfirstlane(T.i32, v))) for v in vs]
+            def _finish_v_page_id(v):
+                if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
+                    return _finish_scalar_page_id(v)
+                return _finish_page_id(v)
+
+            def _finish_k_page_id(v):
+                if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
+                    rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+                    return fx.Int32(v)
+                return _finish_page_id(v)
+
+            def _append_page_id_args(args, page_id):
+                if const_expr(PAGES_PER_TILE == 1):
+                    args.append(page_id)
+                else:
+                    for s in range_constexpr(PAGES_PER_TILE):
+                        args.append(page_id[s])
+
+            def _page_id_from_args(args, idx):
+                if const_expr(PAGES_PER_TILE == 1):
+                    return args[idx]
+                return [args[idx + s] for s in range_constexpr(PAGES_PER_TILE)]
+
+            def _append_v_page_id_args(args, page_id):
+                if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
+                    args.append(page_id)
+                else:
+                    _append_page_id_args(args, page_id)
+
+            def _v_page_id_from_args(args, idx):
+                if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
+                    return args[idx]
+                return _page_id_from_args(args, idx)
 
         DMA_BYTES = 16
         NUM_DMA_K = SMEM_D_RPT
@@ -504,6 +565,7 @@ def build_flash_attn_dualwave_swp_module(
                 return fx.logical_divide(fx.make_view(buf_ptr, _page_layout), fx.make_layout(1, 1))
 
             if const_expr(KV_VECTORIZED):
+                _k_cache_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
                 # Vectorized V is global-transposed, so gather (n,d) elements and rebuild
                 # linear-V LDS bytes for the existing ds_read_tr path.
                 _v_base_i64 = fx.Int64(fx.ptrtoint(_v_iter))
@@ -955,13 +1017,25 @@ def build_flash_attn_dualwave_swp_module(
                 )
             return rocdl.readfirstlane(T.i32, _raw(fx.Int32(lds_addr)))
 
-        def _async_load_page_id(tile_start, page_id_override=None, subpage=0):
+        def _async_load_page_id(tile_start, page_id_override=None):
             if const_expr(PAGED):
                 if const_expr(page_id_override is not None):
                     return page_id_override
-                page_idx = (tile_start // fx.Index(BLOCK_N)) * fx.Index(PAGES_PER_TILE) + fx.Index(subpage)
-                return _finish_page_id(_load_page_id_lds(page_idx))
+                tile_idx = tile_start // fx.Index(BLOCK_N)
+                return _finish_page_id(_load_page_id_lds(tile_idx))
             return fx.Index(0)
+
+        def _async_load_k_page_id(tile_start):
+            if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
+                tile_idx = tile_start // fx.Index(BLOCK_N)
+                return _finish_k_page_id(_load_k_page_id_lds(tile_idx))
+            return _async_load_page_id(tile_start)
+
+        def _async_load_v_page_id(tile_start):
+            if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
+                tile_idx = tile_start // fx.Index(BLOCK_N)
+                return _finish_scalar_page_id(_load_v_page_id_lds(tile_idx))
+            return _async_load_page_id(tile_start)
 
         def _k_dma_inner(src_div, src_base, soffset, buf_id, k_dma_m0, page_row_off):
             # page_row_off shifts the global row to a within-page row (0 for ps64).
@@ -986,17 +1060,41 @@ def build_flash_attn_dualwave_swp_module(
                     src_elem = src_base + (n_in_tile - page_row_off) * stride_kv_n_v + global_d
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
 
+        def _k_dma_inner_wavegroup_ps16(page_id, soffset, buf_id, k_dma_m0):
+            page_stride = fx.Int32(PAGE_SIZE) * stride_kv_n
+            for d in range_constexpr(NUM_DMA_K):
+                oct_idx = wave_id_uni * (WARP_SIZE * NUM_DMA_K) + d * WARP_SIZE + lane_in_warp
+                lds_addr = k_dma_m0[buf_id][d]
+                _ni = oct_idx % BLOCK_N
+                _dg = oct_idx // BLOCK_N
+                _src_ni = (_ni & 3) | ((_ni & 8) >> 1) | ((_ni & 4) << 1) | (_ni & ~15)
+                page_sel = _src_ni // fx.Index(PAGE_SIZE)
+                page_ni = _src_ni - page_sel * fx.Index(PAGE_SIZE)
+                within_page = fx.Int32(
+                    kv_head_idx * (HEAD_DIM // KV_VEC_SIZE) * PAGE_SIZE * KV_VEC_SIZE
+                    + _dg * PAGE_SIZE * KV_VEC_SIZE
+                    + page_ni * KV_VEC_SIZE
+                )
+                page_off = ArithValue(_raw(page_id)) * _raw(page_stride)
+                voffset_elems = ArithValue(page_off) + _raw(within_page)
+                voffset_bytes = fx.Int32(ArithValue(voffset_elems) * _raw(fx.Int32(BF16_BYTES)))
+                lds_ptr = buffer_ops.create_llvm_ptr(fx.Int32(lds_addr), address_space=3)
+                rocdl.raw_ptr_buffer_load_lds(
+                    _k_cache_rsrc,
+                    lds_ptr,
+                    fx.Int32(DMA_BYTES),
+                    voffset_bytes,
+                    fx.Int32(0),
+                    fx.Int32(0),
+                    fx.Int32(0),
+                )
+
         # Per-lane subpage = lane_in_warp // PAGE_SIZE: for ps16 a 64-tile spans 4
         # physical pages; each pass loads one subpage's rows (masked by lane) from its
         # own per-page descriptor, writing each lane's natural LDS slot. ps64: 1 pass.
         _lane_subpage = fx.Index(lane_in_warp) // fx.Index(PAGE_SIZE)
 
-        def _subpage_dma(tile_start, base_iter, base_iter_ty, align, inner_fn, src_base, soffset, buf_id, dma_m0):
-            # Read all sub-page ids first (one s_waitcnt) and build their descriptors,
-            # then issue the masked passes back-to-back so the async DMAs overlap.
-            page0 = (tile_start // fx.Index(BLOCK_N)) * fx.Index(PAGES_PER_TILE)
-            raw_ids = [_load_page_id_lds(page0 + fx.Index(s)) for s in range_constexpr(PAGES_PER_TILE)]
-            page_ids = _finish_page_ids(raw_ids)
+        def _subpage_dma(page_ids, base_iter, base_iter_ty, align, inner_fn, src_base, soffset, buf_id, dma_m0):
             src_divs = [_make_page_view(base_iter, base_iter_ty, align, pid) for pid in page_ids]
             for s in range_constexpr(PAGES_PER_TILE):
                 with _if_then(_scf.IfOp(_raw(ArithValue(_lane_subpage == fx.Index(s))))):
@@ -1011,9 +1109,15 @@ def build_flash_attn_dualwave_swp_module(
                     raise ValueError("_async_load_k requires page_id when PAGED=True")
                 src_div = _make_page_view(_k_iter, _k_iter_ty, _k_align, page_id)
                 _k_dma_inner(src_div, src_base, soffset, buf_id, k_dma_m0, 0)
+            elif const_expr(KV_VECTORIZED):
+                if const_expr(page_id is None):
+                    raise ValueError("_async_load_k requires page_id when PAGED=True")
+                _k_dma_inner_wavegroup_ps16(page_id, soffset, buf_id, k_dma_m0)
             else:
+                if const_expr(page_id is None):
+                    raise ValueError("_async_load_k requires page_id when PAGED=True")
                 _subpage_dma(
-                    tile_start, _k_iter, _k_iter_ty, _k_align, _k_dma_inner, src_base, soffset, buf_id, k_dma_m0
+                    page_id, _k_iter, _k_iter_ty, _k_align, _k_dma_inner, src_base, soffset, buf_id, k_dma_m0
                 )
 
         def _v_dma_inner(src_div, src_base, soffset, buf_id, v_dma_m0, page_row_off):
@@ -1036,6 +1140,19 @@ def build_flash_attn_dualwave_swp_module(
                     src_elem = src_base + (n_in_tile - page_row_off) * stride_kv_n_v + global_d
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
 
+        def _v_dma_inner_wavegroup_ps16(src_div, src_base, soffset, buf_id):
+            v_lds_byte_base = lds_kv_base_idx + _v_buf_base(buf_id) * BF16_BYTES
+            page_group = wave_id_uni // fx.Index(2)
+            wave_in_group = wave_id_uni % fx.Index(2)
+            no = lane_div_32
+            for d in range_constexpr(NUM_DMA_V):
+                d_col = (wave_in_group * fx.Index(NUM_DMA_V) + fx.Index(d)) * fx.Index(32) + lane_mod_32
+                block = page_group * fx.Index(D_CHUNKS) + wave_in_group * fx.Index(NUM_DMA_V) + fx.Index(d)
+                lds_elem = block * fx.Index(SMEM_LINEAR_WAVE)
+                lds_addr = v_lds_byte_base + lds_elem * BF16_BYTES
+                src_elem = _vec_v_elem(no * fx.Index(KV_VEC_SIZE), d_col)
+                _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
+
         def _async_load_v(tile_start, buf_id, v_dma_m0, page_id=None):
             src_base, soffset = _kv_tile_addr(tile_start)
             if const_expr(not PAGED):
@@ -1045,9 +1162,16 @@ def build_flash_attn_dualwave_swp_module(
                     raise ValueError("_async_load_v requires page_id when PAGED=True")
                 src_div = _make_page_view(_v_iter, _v_iter_ty, _v_align, page_id)
                 _v_dma_inner(src_div, src_base, soffset, buf_id, v_dma_m0, 0)
+            elif const_expr(KV_VECTORIZED):
+                if const_expr(page_id is None):
+                    raise ValueError("_async_load_v requires page_id when PAGED=True")
+                src_div = _make_page_view(_v_iter, _v_iter_ty, _v_align, page_id)
+                _v_dma_inner_wavegroup_ps16(src_div, src_base, soffset, buf_id)
             else:
+                if const_expr(page_id is None):
+                    raise ValueError("_async_load_v requires page_id when PAGED=True")
                 _subpage_dma(
-                    tile_start, _v_iter, _v_iter_ty, _v_align, _v_dma_inner, src_base, soffset, buf_id, v_dma_m0
+                    page_id, _v_iter, _v_iter_ty, _v_align, _v_dma_inner, src_base, soffset, buf_id, v_dma_m0
                 )
 
         def _reduction_pair(v_f32):
@@ -1099,6 +1223,25 @@ def build_flash_attn_dualwave_swp_module(
             """Read all V packs from LDS buffer `buf_id` in DUALWAVE_SWP issue order."""
             v_base = _v_buf_base(buf_id)
             if const_expr(KV_VECTORIZED):
+                if const_expr(PAGES_PER_TILE > 1):
+                    v_addr_base = v_base + lane * KV_VEC_SIZE
+                    v_base_ptr = buffer_ops.get_element_ptr(
+                        lds_kv_base_ptr, byte_offset=_raw(fx.Int32(v_addr_base * BF16_BYTES)), elem_type=T.i8
+                    )
+
+                    def _read_v8f16_off_ps16(const_off):
+                        ptr = buffer_ops.get_element_ptr(
+                            v_base_ptr, byte_offset=_raw(fx.Int32(const_off * BF16_BYTES)), elem_type=T.i8
+                        )
+                        return llvm.LoadOp(mfma_pack_type, ptr, alignment=16).result
+
+                    packs = [[None] * D_CHUNKS for _ in range(4)]
+                    for dc in range_constexpr(D_CHUNKS):
+                        for k_substep in range_constexpr(4):
+                            const_off = (k_substep * D_CHUNKS + dc) * SMEM_LINEAR_WAVE
+                            packs[k_substep][dc] = _read_v8f16_off_ps16(const_off)
+                    return packs
+
                 # Padded V-LDS NO-major layout: elem(n,d) = (d//8)*544 + (n//8)*64 + (d%8)*8 + n%8.
                 # P is already 8-consecutive-n, so each P*V pack becomes one aligned v8f16 load.
                 _lm = lane_mod_32
@@ -1487,7 +1630,7 @@ def build_flash_attn_dualwave_swp_module(
 
             # Prologue: load K tile split_t0 -> LDS buf0, wait, and sync the workgroup.
             if const_expr(PAGED):
-                _pro_k0_pid = _async_load_page_id(split_t0 * BLOCK_N)
+                _pro_k0_pid = _async_load_k_page_id(split_t0 * BLOCK_N)
                 _async_load_k(split_t0 * BLOCK_N, 0, k_dma_m0=_k_dma_m0, page_id=_pro_k0_pid)
             else:
                 _async_load_k(split_t0 * BLOCK_N, 0, k_dma_m0=_k_dma_m0)
@@ -1505,9 +1648,9 @@ def build_flash_attn_dualwave_swp_module(
 
             # Pipeline ahead: prefetch K tile1 (buf1) + V tile0 (buf0) as background
             if const_expr(PAGED):
-                _pro_k1_pid = _async_load_page_id((split_t0 + 1) * BLOCK_N)
+                _pro_k1_pid = _async_load_k_page_id((split_t0 + 1) * BLOCK_N)
                 _async_load_k((split_t0 + 1) * BLOCK_N, 1, k_dma_m0=_k_dma_m0, page_id=_pro_k1_pid)
-                _pro_v0_pid = _async_load_page_id(split_t0 * BLOCK_N)
+                _pro_v0_pid = _async_load_v_page_id(split_t0 * BLOCK_N)
                 _async_load_v(split_t0 * BLOCK_N, 0, page_id=_pro_v0_pid, v_dma_m0=_v_dma_m0)
             else:
                 _async_load_k((split_t0 + 1) * BLOCK_N, 1, k_dma_m0=_k_dma_m0)
@@ -1526,10 +1669,9 @@ def build_flash_attn_dualwave_swp_module(
 
             # Prologue scores + first softmax pass for KV tile 0
             if const_expr(PAGED):
-                _pro_k2_pid_lds = _load_page_id_lds((split_t0 + 2))
+                _pro_k2_pid_lds = _load_k_page_id_lds((split_t0 + 2))
+                rocdl.sched_barrier(0)
             v_s_0 = _mma0(v_k)
-            rocdl.sched_barrier(0)
-
             if const_expr(CAUSAL):
                 if const_expr(SPLITK):
                     v_s_0 = _causal_mask_prologue_if_needed(v_s_0, split_t0, (split_t0 + 1) * BLOCK_N)
@@ -1552,7 +1694,7 @@ def build_flash_attn_dualwave_swp_module(
             # Hoist the K tile-2 prefetch address prep (page-id read + view + addr math,
             # no side effects) before this barrier so it overlaps the prologue softmax;
             # the side-effecting buffer_load_lds still fires after the barrier.
-            _pro_k2_pid = _finish_page_id(_pro_k2_pid_lds) if const_expr(PAGED) else fx.Index(0)
+            _pro_k2_pid = _finish_k_page_id(_pro_k2_pid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -1565,7 +1707,8 @@ def build_flash_attn_dualwave_swp_module(
 
             # Prefetch K tile 2 into buf0, keeping the K double-buffer one step ahead
             if const_expr(PAGED):
-                _init_v_pid_lds = _load_page_id_lds(loop_lb - fx.Index(2))
+                _init_v_pid_lds = _load_v_page_id_lds(loop_lb - fx.Index(2))
+                rocdl.sched_barrier(0)
                 _async_load_k((split_t0 + 2) * BLOCK_N, 0, k_dma_m0=_k_dma_m0, page_id=_pro_k2_pid)
             else:
                 _async_load_k((split_t0 + 2) * BLOCK_N, 0, k_dma_m0=_k_dma_m0)
@@ -1577,10 +1720,10 @@ def build_flash_attn_dualwave_swp_module(
             for _ in range_constexpr(D_CHUNKS):
                 init_args.append(c_zero_v16f32)
             init_args.append(_v_pair_to_vec32(v_p_0))
-            # Carry the next iteration's Cluster-0 V page id; step-2 makes next (j'-2) == j.
+            # Carry the next iteration's Cluster-0 V page ids; step-2 makes next (j'-2) == j.
             # Seed with the first Cluster-0 tile, loop_lb - 2.
             if const_expr(PAGED):
-                init_args.append(_finish_page_id(_init_v_pid_lds))
+                _append_v_page_id_args(init_args, _finish_v_page_id(_init_v_pid_lds))
             loop_results = init_args
             v_pid_arg_idx = 3 + D_CHUNKS
             for j, loop_args in range(
@@ -1594,7 +1737,7 @@ def build_flash_attn_dualwave_swp_module(
                 v_o = [loop_args[2 + i] for i in range_constexpr(D_CHUNKS)]
                 v_p_0 = _v_vec32_to_pair(loop_args[2 + D_CHUNKS])
                 if const_expr(PAGED):
-                    _cur_v_pid = loop_args[v_pid_arg_idx]
+                    _cur_v_pid = _v_page_id_from_args(loop_args, v_pid_arg_idx)
                 j_idx = j
 
                 # Cluster 0: prefetch V buf1 and read resident K for MMA0.
@@ -1615,7 +1758,8 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 1 (compute): MMA0 -> v_s_1; finish v_p_0's 2nd-half exp2,
                 # sum into l_row, cast to bf16 for P*V.
                 if const_expr(PAGED):
-                    _c2_kpid_lds = _load_page_id_lds(j_idx)
+                    _c2_kpid_lds = _load_k_page_id_lds(j_idx)
+                rocdl.sched_barrier(0)
                 v_s_1 = _mma0(v_k)
                 v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
                 tile_sum_a = _attn_sum(v_p_0)
@@ -1627,7 +1771,7 @@ def build_flash_attn_dualwave_swp_module(
                 # Hoist Cluster 2's K-DMA address prep (page-id read + view + addr math,
                 # no side effects) before this barrier so it overlaps Cluster 1 compute;
                 # the side-effecting buffer_load_lds still fires in Cluster 2.
-                _c2_kpid = _finish_page_id(_c2_kpid_lds) if const_expr(PAGED) else fx.Index(0)
+                _c2_kpid = _finish_k_page_id(_c2_kpid_lds) if const_expr(PAGED) else fx.Index(0)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
@@ -1650,7 +1794,8 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 3 (compute): first P*V step + row max of v_s_1, lazy
                 # rescale, remaining 3 P*V steps, sub row + 1st-half exp2 of v_s_1.
                 if const_expr(PAGED):
-                    _c4_vpid_lds = _load_page_id_lds(j_idx - 1)
+                    _c4_vpid_lds = _load_v_page_id_lds(j_idx - 1)
+                rocdl.sched_barrier(0)
                 if const_expr(DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(1)
                 v_o = _mma1_step_k(0, v_p_0, v_v, v_o)
@@ -1689,7 +1834,7 @@ def build_flash_attn_dualwave_swp_module(
                 # Hoist Cluster 4's V-DMA address prep (page-id read + view + addr math,
                 # no side effects) to before this barrier so it overlaps Cluster 3's
                 # compute; the side-effecting buffer_load_lds still fires in Cluster 4.
-                _c4_vpid = _finish_page_id(_c4_vpid_lds) if const_expr(PAGED) else fx.Index(0)
+                _c4_vpid = _finish_v_page_id(_c4_vpid_lds) if const_expr(PAGED) else fx.Index(0)
                 # sched_barrier(0): compiler scheduling fence (mask 0 = nothing
                 # crosses), pinning s_setprio(0) and the closing s_barrier at the
                 # cluster boundary. Emits no ISA; the real sync is s_barrier().
@@ -1715,7 +1860,8 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 5 (compute, mirror of C1): MMA0 -> v_s_0; finish v_p_1's
                 # 2nd-half exp2, sum into l_row, cast to bf16.
                 if const_expr(PAGED):
-                    _c6_kpid_lds = _load_page_id_lds(j_idx + 1)
+                    _c6_kpid_lds = _load_k_page_id_lds(j_idx + 1)
+                rocdl.sched_barrier(0)
                 v_s_0 = _mma0(v_k)
                 v_p_1 = _attn_exp2_slice(v_p_1, 16, 16)
                 tile_sum_b = _attn_sum(v_p_1)
@@ -1726,7 +1872,7 @@ def build_flash_attn_dualwave_swp_module(
                 _sched_barrier_pairs(10, 5, 3)
                 # Hoist Cluster 6's K-DMA address prep before this barrier (overlaps
                 # Cluster 5 compute); the buffer_load_lds still fires in Cluster 6.
-                _c6_kpid = _finish_page_id(_c6_kpid_lds) if const_expr(PAGED) else fx.Index(0)
+                _c6_kpid = _finish_k_page_id(_c6_kpid_lds) if const_expr(PAGED) else fx.Index(0)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
@@ -1757,7 +1903,8 @@ def build_flash_attn_dualwave_swp_module(
                 # Cluster 7 (compute, mirror of C3 for v_p_1/v_s_0): closes the iter,
                 # yield_args carries (m_row, l_row, v_o, packed v_p_0) to the next.
                 if const_expr(PAGED):
-                    _next_v_pid_lds = _load_page_id_lds(j_idx)
+                    _next_v_pid_lds = _load_v_page_id_lds(j_idx)
+                rocdl.sched_barrier(0)
                 if const_expr(DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(1)
                 v_v = v_packs_b
@@ -1785,18 +1932,18 @@ def build_flash_attn_dualwave_swp_module(
                 _sched_barrier_exp_pairs(6, 3, 4)
                 if const_expr(DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(0)
-                # Cross-iteration V page-id prefetch: read the page_id the NEXT iteration's
+                # Cross-iteration V page-id prefetch: read page ids the NEXT iteration's
                 # Cluster 0 needs (its tile (j'-2) == j) BEFORE this barrier, so the LDS
                 # ds_read is hoisted out of the next iteration's memory cluster.
                 if const_expr(PAGED):
-                    _next_v_pid = _finish_page_id(_next_v_pid_lds)
+                    _next_v_pid = _finish_v_page_id(_next_v_pid_lds)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
 
                 yield_args = [m_row, l_row] + v_o + [_v_pair_to_vec32(v_p_0)]
                 if const_expr(PAGED):
-                    yield_args.append(_next_v_pid)
+                    _append_v_page_id_args(yield_args, _next_v_pid)
                 loop_results = yield yield_args
 
             # Epilogue: drain the pipeline for the final tiles the loop left in
@@ -1806,10 +1953,10 @@ def build_flash_attn_dualwave_swp_module(
             l_row = loop_results[1]
             v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
             v_p_0 = _v_vec32_to_pair(loop_results[2 + D_CHUNKS])
-            # Reuse the carried V page id for epilogue C0 (max_m3).
+            # Reuse the carried V page ids for epilogue C0 (max_m3).
             # Its ds_read already ran in the loop's final Cluster 7.
             if const_expr(PAGED):
-                _ec0_v_pid = loop_results[v_pid_arg_idx]
+                _ec0_v_pid = _v_page_id_from_args(loop_results, v_pid_arg_idx)
 
             # Tile indices for the last three tiles handled by the epilogue.
             max_m3 = split_t_end - 3
@@ -1834,7 +1981,8 @@ def build_flash_attn_dualwave_swp_module(
 
             # Epilogue C1 (compute): MMA0 -> v_s_1; finish v_p_0 softmax (like C1).
             if const_expr(PAGED):
-                _ec2_kpid_lds = _load_page_id_lds(max_m1)
+                _ec2_kpid_lds = _load_k_page_id_lds(max_m1)
+            rocdl.sched_barrier(0)
             v_s_1 = _mma0(v_k)
             v_p_0 = _attn_exp2_slice(v_p_0, 16, 16)
             tile_sum_e1 = _attn_sum(v_p_0)
@@ -1845,7 +1993,7 @@ def build_flash_attn_dualwave_swp_module(
             _sched_barrier_pairs(10, 5, 5)
             # Hoist Epilogue C2's K-DMA address prep before this barrier (overlaps C1
             # compute); the buffer_load_lds still fires in C2.
-            _ec2_kpid = _finish_page_id(_ec2_kpid_lds) if const_expr(PAGED) else fx.Index(0)
+            _ec2_kpid = _finish_k_page_id(_ec2_kpid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -1874,7 +2022,8 @@ def build_flash_attn_dualwave_swp_module(
 
             # Epilogue C3 (compute): full P*V + unconditional rescale
             if const_expr(PAGED):
-                _ec4_vpid_lds = _load_page_id_lds(max_m2)
+                _ec4_vpid_lds = _load_v_page_id_lds(max_m2)
+            rocdl.sched_barrier(0)
             if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(1)
             v_o = _mma1(v_p_0, v_packs_e3, v_o)
@@ -1894,7 +2043,7 @@ def build_flash_attn_dualwave_swp_module(
                 rocdl.s_setprio(0)
             # Hoist Epilogue C4's V-DMA address prep before this barrier (overlaps C3
             # compute); the buffer_load_lds still fires in C4.
-            _ec4_vpid = _finish_page_id(_ec4_vpid_lds) if const_expr(PAGED) else fx.Index(0)
+            _ec4_vpid = _finish_v_page_id(_ec4_vpid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
@@ -1946,7 +2095,8 @@ def build_flash_attn_dualwave_swp_module(
 
             # Epilogue C7 (compute, mirror of C3): full P*V + unconditional rescale.
             if const_expr(PAGED):
-                _ec8_vpid_lds = _load_page_id_lds(max_m1)
+                _ec8_vpid_lds = _load_v_page_id_lds(max_m1)
+            rocdl.sched_barrier(0)
             if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(1)
             v_o = _mma1(v_p_1, v_packs_e7, v_o)
@@ -1965,7 +2115,7 @@ def build_flash_attn_dualwave_swp_module(
                 rocdl.s_setprio(0)
             # Hoist Epilogue C8's V-DMA address prep before this barrier (overlaps C7
             # compute); the buffer_load_lds still fires in C8.
-            _ec8_vpid = _finish_page_id(_ec8_vpid_lds) if const_expr(PAGED) else fx.Index(0)
+            _ec8_vpid = _finish_v_page_id(_ec8_vpid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
             rocdl.sched_barrier(0)
