@@ -170,6 +170,7 @@ def _build_paged(
     num_kv_splits: int = 1,
     varlen: bool = False,
     kv_cache_layout: str = "linear",
+    page_size: int = 64,
 ):
     """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
 
@@ -197,6 +198,7 @@ def _build_paged(
         num_kv_splits=num_kv_splits,
         cross_seqlen=cross_seqlen,
         kv_cache_layout=kv_cache_layout,
+        page_size=page_size,
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=lazy_rescale,
@@ -207,8 +209,8 @@ def _build_paged(
 
 # ── paged-KV native path ────────────────────────────────────────────────────
 
-# gfx950 dualwave paged-KV currently supports exactly one configuration.
-_PAGED_PAGE_SIZE = 64
+# gfx950 dualwave paged-KV page sizes: a kv-tile (64 rows) spans 64//page_size pages.
+_PAGED_PAGE_SIZES = (16, 64)
 _PAGED_BT_LDS_SIZE = 2048
 
 
@@ -293,9 +295,9 @@ def _flydsl_flash_attn_paged(
         page_size = int(k.shape[1])
         Hkv = int(k.shape[2])
         k_head_dim = int(k.shape[3])
-    if page_size != _PAGED_PAGE_SIZE:
+    if page_size not in _PAGED_PAGE_SIZES:
         raise NotImplementedError(
-            f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
+            f"flydsl_flash_attn_func: native paged KV supports page_size in {_PAGED_PAGE_SIZES}, got {page_size}"
         )
     if D != 128:
         raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=128 only, got {D}")
@@ -356,6 +358,7 @@ def _flydsl_flash_attn_paged(
             num_kv_splits=int(num_kv_splits),
             varlen=varlen,
             kv_cache_layout=kv_cache_layout,
+            page_size=page_size,
         )
         if out is None:
             out = torch.empty_like(q)

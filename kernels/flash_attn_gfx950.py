@@ -106,6 +106,7 @@ def build_flash_attn_dualwave_swp_module(
     cross_seqlen=False,
     paged=False,
     kv_cache_layout="linear",
+    page_size=64,
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=128 bf16/f16 on gfx950.
 
@@ -141,6 +142,12 @@ def build_flash_attn_dualwave_swp_module(
     # Match existing flash_attn_generic BLOCK_M=256 path for layout compatibility.
     BLOCK_M = 256
     BLOCK_N = 64
+    # A kv-tile (BLOCK_N rows) spans PAGES_PER_TILE physical pages; ps64 -> 1 page
+    # per tile (codegen unchanged), ps16 -> 4 sub-pages DMA'd with per-page bases.
+    PAGE_SIZE = int(page_size) if PAGED else BLOCK_N
+    if PAGED and (BLOCK_N % PAGE_SIZE != 0 or PAGE_SIZE not in (16, 64)):
+        raise ValueError(f"paged page_size must be 16 or 64 and divide BLOCK_N={BLOCK_N}, got {PAGE_SIZE}")
+    PAGES_PER_TILE = BLOCK_N // PAGE_SIZE
     BLOCK_N_OUT = 64  # single sub-tile per outer iter (=BLOCK_N)
     BLOCK_N_OUT // BLOCK_N
     K_SUB_N = 32  # MFMA W_N
@@ -390,27 +397,31 @@ def build_flash_attn_dualwave_swp_module(
             _bt_v1i32 = Vec.make_type(1, fx.Int32)
             kv_head_elem_offset = kv_head_idx * HEAD_DIM
 
+            # block_table is page-granular (one entry per physical page). With ps16 a
+            # 64-tile maps to PAGES_PER_TILE entries; the LDS window is indexed by page.
             def _load_block_table_to_lds():
-                segment_tiles = split_t_end - split_t0
+                seg_page0 = split_t0 * PAGES_PER_TILE
+                num_total_pages = num_kv_tiles * PAGES_PER_TILE
+                segment_pages = (split_t_end - split_t0) * PAGES_PER_TILE
                 for pass_id in range_constexpr(PAGED_BT_LDS_SIZE // BLOCK_SIZE):
-                    local_tile = tid + fx.Index(pass_id * BLOCK_SIZE)
-                    with _if_then(_scf.IfOp(_raw(ArithValue(local_tile < segment_tiles)))):
-                        tile_idx = split_t0 + local_tile
-                        byte_off = _raw(fx.Int32(local_tile * fx.Index(4)))
+                    local_page = tid + fx.Index(pass_id * BLOCK_SIZE)
+                    with _if_then(_scf.IfOp(_raw(ArithValue(local_page < segment_pages)))):
+                        page_idx = seg_page0 + local_page
+                        byte_off = _raw(fx.Int32(local_page * fx.Index(4)))
                         dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
                         llvm.StoreOp(_raw(fx.Int32(0)), dst)
-                        with _if_then(_scf.IfOp(_raw(ArithValue(tile_idx < num_kv_tiles)))):
-                            row_idx = batch_idx * block_table_stride_v + tile_idx
+                        with _if_then(_scf.IfOp(_raw(ArithValue(page_idx < num_total_pages)))):
+                            row_idx = batch_idx * block_table_stride_v + page_idx
                             v = fly.copy_atom_call_ssa(
                                 [_bt_v1i32], _bt_atom, fx.slice(_bt_div, (None, fx.Int32(row_idx)))
                             )
                             page_id_i32 = _raw(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
                             llvm.StoreOp(page_id_i32, dst)
 
-            def _load_page_id_lds(tile_idx):
-                local_tile = tile_idx - split_t0
+            def _load_page_id_lds(page_idx):
+                local_page = page_idx - split_t0 * fx.Index(PAGES_PER_TILE)
                 src = buffer_ops.get_element_ptr(
-                    lds_bt_base_ptr, byte_offset=_raw(fx.Int32(local_tile * fx.Index(4))), elem_type=T.i8
+                    lds_bt_base_ptr, byte_offset=_raw(fx.Int32(local_page * fx.Index(4))), elem_type=T.i8
                 )
                 return llvm.LoadOp(T.i32, src).result
 
@@ -418,6 +429,11 @@ def build_flash_attn_dualwave_swp_module(
                 rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
                 v = rocdl.readfirstlane(T.i32, v)
                 return fx.Index(fx.Int32(v))
+
+            def _finish_page_ids(vs):
+                # One s_waitcnt for a batch of pending page-id ds_reads, then broadcast.
+                rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
+                return [fx.Index(fx.Int32(rocdl.readfirstlane(T.i32, v))) for v in vs]
 
         DMA_BYTES = 16
         NUM_DMA_K = SMEM_D_RPT
@@ -463,7 +479,10 @@ def build_flash_attn_dualwave_swp_module(
             _v_iter = fx.get_iter(V)
             _v_align = _v_iter.alignment
             _v_iter_ty = _v_iter.type
-            _page_elems = fx.Index(BLOCK_N) * stride_kv_n_v
+            # One physical page is PAGE_SIZE rows (== BLOCK_N for ps64); num_records
+            # bounds a single page so a 64-tile spanning PAGES_PER_TILE pages is read
+            # as PAGES_PER_TILE separate per-page descriptors.
+            _page_elems = fx.Index(PAGE_SIZE) * stride_kv_n_v
             _page_byte_stride = _page_elems * fx.Index(BF16_BYTES)
             _page_nrec_bytes = fx.Int64(_page_byte_stride)
             _page_layout = fx.make_layout(fx.Int32(_page_elems), fx.Int32(1))
@@ -494,9 +513,10 @@ def build_flash_attn_dualwave_swp_module(
                     return buffer_ops.create_buffer_resource_from_addr(addr, num_records_bytes=_raw(_page_nrec_bytes))
 
                 def _vec_v_elem(n, d):
-                    # within-page offset of V[n][d] in [Hkv, PageSize/kVS, D, kVS]
+                    # within-page offset of V[n][d] in [Hkv, PageSize/kVS, D, kVS];
+                    # n is the within-page row (PAGE_SIZE rows per physical page).
                     return (
-                        kv_head_idx * (BLOCK_N // KV_VEC_SIZE) * HEAD_DIM * KV_VEC_SIZE
+                        kv_head_idx * (PAGE_SIZE // KV_VEC_SIZE) * HEAD_DIM * KV_VEC_SIZE
                         + (n // KV_VEC_SIZE) * HEAD_DIM * KV_VEC_SIZE
                         + d * KV_VEC_SIZE
                         + (n % KV_VEC_SIZE)
@@ -935,21 +955,16 @@ def build_flash_attn_dualwave_swp_module(
                 )
             return rocdl.readfirstlane(T.i32, _raw(fx.Int32(lds_addr)))
 
-        def _async_load_page_id(tile_start, page_id_override=None):
+        def _async_load_page_id(tile_start, page_id_override=None, subpage=0):
             if const_expr(PAGED):
                 if const_expr(page_id_override is not None):
                     return page_id_override
-                return _finish_page_id(_load_page_id_lds(tile_start // fx.Index(BLOCK_N)))
+                page_idx = (tile_start // fx.Index(BLOCK_N)) * fx.Index(PAGES_PER_TILE) + fx.Index(subpage)
+                return _finish_page_id(_load_page_id_lds(page_idx))
             return fx.Index(0)
 
-        def _async_load_k(tile_start, buf_id, k_dma_m0, page_id=None):
-            src_base, soffset = _kv_tile_addr(tile_start)
-            if const_expr(PAGED):
-                if const_expr(page_id is None):
-                    raise ValueError("_async_load_k requires page_id when PAGED=True")
-                src_div = _make_page_view(_k_iter, _k_iter_ty, _k_align, page_id)
-            else:
-                src_div = k_div
+        def _k_dma_inner(src_div, src_base, soffset, buf_id, k_dma_m0, page_row_off):
+            # page_row_off shifts the global row to a within-page row (0 for ps64).
             if const_expr(KV_VECTORIZED):
                 # Copy vectorized K into native K-LDS [d//8, n, d%8] with coalesced writes.
                 # Apply sigma(n) during DMA so the hot K read uses plain lane%32 indexing.
@@ -959,25 +974,49 @@ def build_flash_attn_dualwave_swp_module(
                     _ni = oct_idx % BLOCK_N
                     _dg = oct_idx // BLOCK_N
                     _src_ni = (_ni & 3) | ((_ni & 8) >> 1) | ((_ni & 4) << 1) | (_ni & ~15)
-                    src_oct = _dg * BLOCK_N + _src_ni
-                    src_elem = kv_head_idx * (HEAD_DIM // KV_VEC_SIZE) * BLOCK_N * KV_VEC_SIZE + src_oct * KV_VEC_SIZE
+                    _page_ni = _src_ni - page_row_off
+                    src_oct = _dg * PAGE_SIZE + _page_ni
+                    src_elem = kv_head_idx * (HEAD_DIM // KV_VEC_SIZE) * PAGE_SIZE * KV_VEC_SIZE + src_oct * KV_VEC_SIZE
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
             else:
                 for d in range_constexpr(NUM_DMA_K):
                     lds_addr = k_dma_m0[buf_id][d]
                     n_in_tile = n_in_warp * NUM_WAVES + wave_id
                     global_d = d_bucket * VEC_KV + (d * D_128B_SIZE)
-                    src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
+                    src_elem = src_base + (n_in_tile - page_row_off) * stride_kv_n_v + global_d
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
 
-        def _async_load_v(tile_start, buf_id, v_dma_m0, page_id=None):
+        # Per-lane subpage = lane_in_warp // PAGE_SIZE: for ps16 a 64-tile spans 4
+        # physical pages; each pass loads one subpage's rows (masked by lane) from its
+        # own per-page descriptor, writing each lane's natural LDS slot. ps64: 1 pass.
+        _lane_subpage = fx.Index(lane_in_warp) // fx.Index(PAGE_SIZE)
+
+        def _subpage_dma(tile_start, base_iter, base_iter_ty, align, inner_fn, src_base, soffset, buf_id, dma_m0):
+            # Read all sub-page ids first (one s_waitcnt) and build their descriptors,
+            # then issue the masked passes back-to-back so the async DMAs overlap.
+            page0 = (tile_start // fx.Index(BLOCK_N)) * fx.Index(PAGES_PER_TILE)
+            raw_ids = [_load_page_id_lds(page0 + fx.Index(s)) for s in range_constexpr(PAGES_PER_TILE)]
+            page_ids = _finish_page_ids(raw_ids)
+            src_divs = [_make_page_view(base_iter, base_iter_ty, align, pid) for pid in page_ids]
+            for s in range_constexpr(PAGES_PER_TILE):
+                with _if_then(_scf.IfOp(_raw(ArithValue(_lane_subpage == fx.Index(s))))):
+                    inner_fn(src_divs[s], src_base, soffset, buf_id, dma_m0, s * PAGE_SIZE)
+
+        def _async_load_k(tile_start, buf_id, k_dma_m0, page_id=None):
             src_base, soffset = _kv_tile_addr(tile_start)
-            if const_expr(PAGED):
+            if const_expr(not PAGED):
+                _k_dma_inner(k_div, src_base, soffset, buf_id, k_dma_m0, 0)
+            elif const_expr(PAGES_PER_TILE == 1):
                 if const_expr(page_id is None):
-                    raise ValueError("_async_load_v requires page_id when PAGED=True")
-                src_div = _make_page_view(_v_iter, _v_iter_ty, _v_align, page_id)
+                    raise ValueError("_async_load_k requires page_id when PAGED=True")
+                src_div = _make_page_view(_k_iter, _k_iter_ty, _k_align, page_id)
+                _k_dma_inner(src_div, src_base, soffset, buf_id, k_dma_m0, 0)
             else:
-                src_div = v_div
+                _subpage_dma(
+                    tile_start, _k_iter, _k_iter_ty, _k_align, _k_dma_inner, src_base, soffset, buf_id, k_dma_m0
+                )
+
+        def _v_dma_inner(src_div, src_base, soffset, buf_id, v_dma_m0, page_row_off):
             if const_expr(KV_VECTORIZED):
                 # Copy vectorized V into padded wave rows; lane maps to no=lane//8,
                 # d_local=lane%8. NO-major order keeps ds_read_b128 bank-friendly.
@@ -987,15 +1026,29 @@ def build_flash_attn_dualwave_swp_module(
                     d_local = lane_in_warp % SMEM_N_PER_WAVE
                     d_col = row * SMEM_N_PER_WAVE + d_local
                     lds_addr = v_dma_m0[buf_id][d]
-                    src_elem = _vec_v_elem(no * KV_VEC_SIZE, d_col)
+                    src_elem = _vec_v_elem(no * KV_VEC_SIZE - page_row_off, d_col)
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
             else:
                 for d in range_constexpr(NUM_DMA_V):
                     lds_addr = v_dma_m0[buf_id][d]
                     n_in_tile = n_in_warp * NUM_WAVES + wave_id
                     global_d = d_bucket * VEC_KV + (d * D_128B_SIZE)
-                    src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
+                    src_elem = src_base + (n_in_tile - page_row_off) * stride_kv_n_v + global_d
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
+
+        def _async_load_v(tile_start, buf_id, v_dma_m0, page_id=None):
+            src_base, soffset = _kv_tile_addr(tile_start)
+            if const_expr(not PAGED):
+                _v_dma_inner(v_div, src_base, soffset, buf_id, v_dma_m0, 0)
+            elif const_expr(PAGES_PER_TILE == 1):
+                if const_expr(page_id is None):
+                    raise ValueError("_async_load_v requires page_id when PAGED=True")
+                src_div = _make_page_view(_v_iter, _v_iter_ty, _v_align, page_id)
+                _v_dma_inner(src_div, src_base, soffset, buf_id, v_dma_m0, 0)
+            else:
+                _subpage_dma(
+                    tile_start, _v_iter, _v_iter_ty, _v_align, _v_dma_inner, src_base, soffset, buf_id, v_dma_m0
+                )
 
         def _reduction_pair(v_f32):
             v_i32 = _bitcast_i32(v_f32)
