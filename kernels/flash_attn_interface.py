@@ -171,6 +171,8 @@ def _build_paged(
     varlen: bool = False,
     kv_cache_layout: str = "linear",
     page_size: int = 64,
+    k_idx_resource_stride_bytes: int = 0,
+    k_idx_scale: int = 0,
 ):
     """Build (and cache) a paged-KV launcher (gfx950 DUALWAVE_SWP, paged=True).
 
@@ -199,6 +201,8 @@ def _build_paged(
         cross_seqlen=cross_seqlen,
         kv_cache_layout=kv_cache_layout,
         page_size=page_size,
+        k_idx_resource_stride_bytes=k_idx_resource_stride_bytes,
+        k_idx_scale=k_idx_scale,
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=lazy_rescale,
@@ -304,6 +308,23 @@ def _flydsl_flash_attn_paged(
     if k_head_dim != D:
         raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
 
+    k_idx_resource_stride_bytes = 0
+    k_idx_scale = 0
+    if vectorized and page_size == 16:
+        page_stride_bytes = int(k.stride(0)) * q.element_size()
+        k_idx_resource_stride_bytes = max(
+            d for d in range(1, min(page_stride_bytes, 0x3FFF) + 1) if page_stride_bytes % d == 0
+        )
+        k_idx_scale = page_stride_bytes // k_idx_resource_stride_bytes
+        max_supported_num_blocks = ((1 << 32) - 1) // k_idx_scale + 1
+        if int(k.shape[0]) > max_supported_num_blocks:
+            raise NotImplementedError(
+                f"flydsl_flash_attn_func: vectorized p16 K cache has {int(k.shape[0])} blocks, "
+                f"but idxen buffer addressing supports at most {max_supported_num_blocks} blocks "
+                f"(page_stride_bytes={page_stride_bytes}, resource_stride_bytes={k_idx_resource_stride_bytes}, "
+                f"idx_scale={k_idx_scale})"
+            )
+
     if num_kv_heads is None:
         num_kv_heads = Hkv
     if H % num_kv_heads != 0:
@@ -359,6 +380,8 @@ def _flydsl_flash_attn_paged(
             varlen=varlen,
             kv_cache_layout=kv_cache_layout,
             page_size=page_size,
+            k_idx_resource_stride_bytes=k_idx_resource_stride_bytes,
+            k_idx_scale=k_idx_scale,
         )
         if out is None:
             out = torch.empty_like(q)

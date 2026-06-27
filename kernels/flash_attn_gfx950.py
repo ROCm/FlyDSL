@@ -107,6 +107,8 @@ def build_flash_attn_dualwave_swp_module(
     paged=False,
     kv_cache_layout="linear",
     page_size=64,
+    k_idx_resource_stride_bytes=0,
+    k_idx_scale=0,
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=128 bf16/f16 on gfx950.
 
@@ -470,7 +472,7 @@ def build_flash_attn_dualwave_swp_module(
             def _finish_k_page_id(v):
                 if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
                     rocdl.s_waitcnt(_LGKMCNT_0_ONLY)
-                    return fx.Int32(v)
+                    return fx.Int32(ArithValue(_raw(fx.Int32(v))) * _raw(fx.Int32(k_idx_scale)))
                 return _finish_page_id(v)
 
             def _append_page_id_args(args, page_id):
@@ -565,7 +567,7 @@ def build_flash_attn_dualwave_swp_module(
                 return fx.logical_divide(fx.make_view(buf_ptr, _page_layout), fx.make_layout(1, 1))
 
             if const_expr(KV_VECTORIZED):
-                _k_cache_rsrc = buffer_ops.create_buffer_resource(K, max_size=True)
+                _k_cache_rsrc = buffer_ops.create_buffer_resource(K, stride=k_idx_resource_stride_bytes, max_size=True)
                 # Vectorized V is global-transposed, so gather (n,d) elements and rebuild
                 # linear-V LDS bytes for the existing ds_read_tr path.
                 _v_base_i64 = fx.Int64(fx.ptrtoint(_v_iter))
@@ -1061,7 +1063,6 @@ def build_flash_attn_dualwave_swp_module(
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
 
         def _k_dma_inner_wavegroup_ps16(page_id, soffset, buf_id, k_dma_m0):
-            page_stride = fx.Int32(PAGE_SIZE) * stride_kv_n
             for d in range_constexpr(NUM_DMA_K):
                 oct_idx = wave_id_uni * (WARP_SIZE * NUM_DMA_K) + d * WARP_SIZE + lane_in_warp
                 lds_addr = k_dma_m0[buf_id][d]
@@ -1075,18 +1076,15 @@ def build_flash_attn_dualwave_swp_module(
                     + _dg * PAGE_SIZE * KV_VEC_SIZE
                     + page_ni * KV_VEC_SIZE
                 )
-                page_off = ArithValue(_raw(page_id)) * _raw(page_stride)
-                voffset_elems = ArithValue(page_off) + _raw(within_page)
-                voffset_bytes = fx.Int32(ArithValue(voffset_elems) * _raw(fx.Int32(BF16_BYTES)))
-                lds_ptr = buffer_ops.create_llvm_ptr(fx.Int32(lds_addr), address_space=3)
-                rocdl.raw_ptr_buffer_load_lds(
-                    _k_cache_rsrc,
-                    lds_ptr,
-                    fx.Int32(DMA_BYTES),
-                    voffset_bytes,
-                    fx.Int32(0),
-                    fx.Int32(0),
-                    fx.Int32(0),
+                idx_vgpr = page_id
+                off_vgpr = fx.Int32(ArithValue(_raw(within_page)) * _raw(fx.Int32(BF16_BYTES)))
+                vaddr_pair = Vec.from_elements([idx_vgpr, off_vgpr], fx.Int32).ir_value()
+                llvm.inline_asm(
+                    ir.Type.parse("!llvm.void"),
+                    [_raw(fx.Int32(lds_addr)), vaddr_pair, _raw(_k_cache_rsrc)],
+                    "s_mov_b32 m0, $0\n\tbuffer_load_dwordx4 $1, $2, 0 idxen offen lds",
+                    "s,v,s,~{memory}",
+                    has_side_effects=True,
                 )
 
         # Per-lane subpage = lane_in_warp // PAGE_SIZE: for ps16 a 64-tile spans 4
