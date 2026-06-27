@@ -3187,6 +3187,7 @@ def pa_decode_ps_launch(
     )
 
     from aiter.ops.attention import pa_reduce_v1
+
     pa_reduce_v1(
         partial_output=partial_output[query_length:],
         partial_lse=partial_lse[query_length:],

@@ -10,6 +10,7 @@
 | **RMSNorm** | `build_rmsnorm_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | LDS-cached 3-pass pipeline |
 | **Softmax** | `build_softmax_module(M, N, dtype)` | Layout API (`@flyc.kernel`) | f32, f16, bf16 | Online softmax, adaptive block size |
 | **GEMM** | `compile_preshuffle_gemm_a8(...)` | `@flyc.kernel` | fp8, int8, int4, fp16, bf16, fp4 | Preshuffle B, ping-pong LDS, MFMA 16x16 |
+| **FlashAttention** | `build_flash_attn_func_module(...)` | `@flyc.kernel` | bf16, f16 (any arch); fp8 e4m3fn (gfx950, D=128, dense) | Dual-wave SWP fwd, GQA/MQA, causal, descale ABI |
 
 > **Note on API styles**: All kernels use the `@flyc.kernel`/`@flyc.jit` API from `flydsl.compiler` and `flydsl.expr` (`python/flydsl/`).
 
@@ -180,6 +181,48 @@ Where:
 
 ---
 
+## 3b. FlashAttention Forward (`kernels/flash_attn_generic.py`, `kernels/flash_attn_gfx950.py`, `kernels/flash_attn_fp8_gfx950.py`)
+
+Dense FlashAttention forward. `build_flash_attn_func_module(num_heads, head_dim,
+causal=..., dtype_str=..., num_kv_heads=...)` is the public builder; on
+gfx950 + `head_dim == 128` it routes to the dual-wave software-pipelined fast path
+(`build_flash_attn_dualwave_swp_module`), otherwise to the generic fallback.
+Supports MHA and GQA/MQA (`num_kv_heads <= num_heads`), causal and non-causal,
+arbitrary sequence length, and (bf16/f16) packed varlen + split-K.
+
+### fp8 (e4m3fn) forward
+
+| Property | Value |
+|---|---|
+| Arch / shape | gfx950 (CDNA4) only; `head_dim == 128`; dense only |
+| Inputs | **pre-quantized** Q/K/V in `torch.float8_e4m3fn` (OCP e4m3fn, not fnuz); no in-kernel quantization |
+| Descales | per-tensor shape-`[1]` fp32 `q_descale`, `k_descale`, `v_descale` (launch kwargs) |
+| Math | QK on native `mfma_f32_32x32x16_fp8_fp8`, with `q_descale*k_descale*sm_scale` on fp32 logits; fp32 online softmax; PV applies `v_descale`; **fp32 accumulation** throughout |
+| Output | `bf16` only |
+| Unsupported (rejected with a clear error) | fp8 split-K (`num_kv_splits > 1`) and fp8 packed varlen (`cu_seqlens`) |
+
+The PV path dequantizes fp8 V to bf16 in-kernel and accumulates P*V in bf16, keeping
+the softmax probabilities at high precision. Build/launch example:
+
+```python
+from kernels.flash_attn_generic import build_flash_attn_func_module
+
+exe = build_flash_attn_func_module(num_heads=H, head_dim=128, causal=False,
+                                   dtype_str="fp8", num_kv_heads=H_kv)
+# Q/K/V are e4m3fn [B,S,H,D]; O is bf16; descales are shape-[1] fp32.
+exe(q_fp8.view(-1), k_fp8.view(-1), v_fp8.view(-1), o_bf16.view(-1), B, S,
+    q_descale=q_descale, k_descale=k_descale, v_descale=v_descale)
+```
+
+Reproduce the fp8 correctness sweep and the FlyDSL-fp8 vs aiter-ASM-fp8 comparison:
+
+```bash
+python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --warmup 3 --iters 3
+python3 tests/kernels/test_flash_attn_fwd.py --dtype fp8 --compare --warmup 10 --iters 50
+```
+
+---
+
 ## 4. Shared Utilities
 
 ### 4.1 Reduction Helpers (`kernels/kernels_common.py`)
@@ -306,7 +349,8 @@ What operation do you need?
 | `kernels/mixed_moe_gemm_2stage.py` | Mixed-precision MoE GEMM |
 | `kernels/pa_decode_fp8.py` | Paged attention decode (FP8) |
 | `kernels/flash_attn_generic.py` | FlashAttention generic fallback |
-| `kernels/flash_attn_gfx950.py` | FlashAttention gfx950 fast path |
+| `kernels/flash_attn_gfx950.py` | FlashAttention gfx950 bf16/f16 fast path |
+| `kernels/flash_attn_fp8_gfx950.py` | FlashAttention gfx950 fp8 dense fast path |
 | `kernels/layernorm_kernel.py` | LayerNorm (layout API) |
 | `kernels/rmsnorm_kernel.py` | RMSNorm (layout API) |
 | `kernels/softmax_kernel.py` | Softmax (layout API) |
