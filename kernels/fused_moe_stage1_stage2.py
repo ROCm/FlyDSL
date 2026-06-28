@@ -123,6 +123,7 @@ class MegaMoE:
         block_num: Optional[int] = None,
         stage2_mode: str = "fused",
         xcd_swizzle: int = 0,
+        gemm2_tile_table: Optional[dict] = None,
     ):
         assert quant in ("a8w4", "a4w4"), quant
         assert stage2_mode in ("fused", "nonfused"), stage2_mode
@@ -228,9 +229,34 @@ class MegaMoE:
                     f"within one expert's sort_block_m-padded rows.  Set gemm2_tile_m to a divisor of "
                     f"{_s1_sbm} (e.g. 32), or raise stage1's tile_m so sort_block_m is a multiple of "
                     f"{_eff_g2_tm}.")
+            # Default走config (symmetric with gemm1, which auto-reads its
+            # MegaStage1 tune JSON): when the caller does not pass an explicit
+            # gemm2_tile_table, auto-load the per-M tuned tiles from the FlyDSL
+            # MegaGemm2 tune JSON, keyed by GEMM2 shape (LOCAL experts/rank). On
+            # any miss the loader returns None -> the op keeps its single default
+            # tile (graceful fallback). The op also clamps tile_m to a divisor of
+            # sort_block_m at run time, so a stale/larger tile can never crash.
+            if gemm2_tile_table is None:
+                try:
+                    from .fused_moe_megakernel import (
+                        _mega_gemm2_tuned_table, _detect_gpu_model_name)
+                    gemm2_tile_table = _mega_gemm2_tuned_table(
+                        int(model_dim), int(inter_dim),
+                        int(self.experts) // int(self.world_size), int(topk),
+                        int(self.world_size), _detect_gpu_model_name(int(self.rank)))
+                    if int(self.rank) == 0:
+                        print(f"[MegaGemm2] auto-config tile table "
+                              f"(sort_block_m={_s1_sbm}): "
+                              f"{'<miss -> default tile>' if not gemm2_tile_table else gemm2_tile_table}",
+                              flush=True)
+                except Exception as _e:  # noqa: BLE001 -- fallback to default tile
+                    gemm2_tile_table = None
             g2_kwargs = dict(
                 comb_cfg=self.comb_cfg, comb_op=self.comb_op, inter_dim=int(inter_dim),
                 a_dtype=self.a2_dtype, b_dtype="fp4", sort_block_m=_s1_sbm,
+                # per-M tuned gemm2 tile table (run-time tile pick by run_tokens);
+                # tile_m clamped to a divisor of sort_block_m by the op (_clamp_tile_m).
+                gemm2_tile_table=gemm2_tile_table,
             )
             # Only override FlyDSLMoeGemm2CombineOp's built-in tile/persist/xcd when a
             # tuned gemm2 tile is supplied (gemm2_tile_m > 0). On a tune miss the
@@ -319,6 +345,7 @@ class MegaMoE:
                 num_valid_ids=self.stage1._nv,
                 wts_buf=self.stage1._sw_atom,
                 cur_tok=run_tokens, stream=stream,
+                run_tokens=run_tokens,
             )
             out_tok = ret[0] if isinstance(ret, (tuple, list)) else ret
         else:  # pragma: no cover - guarded in __init__
