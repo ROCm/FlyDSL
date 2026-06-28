@@ -122,6 +122,20 @@ def _global_ptr1(arg, byte_off_i32):
     return _gep1(_global_base_ptr1(arg), byte_off_i32)
 
 
+def _global_typed_ptr(arg, elem_ty, align=4):
+    """Typed global fx.Pointer over a raw i64 device address; index in ELEMENTS
+    (ptr[i] / ptr[i] = v), not bytes."""
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
+    return fx.inttoptr(ptr_ty, _raw(fx.Int64(arg)))
+
+
+def _lds_typed_ptr(base_i32, elem_ty, align=4):
+    """Typed LDS (Shared) fx.Pointer over an i32 LDS base address; index in ELEMENTS
+    (ptr[i] / ptr[i] = v), not bytes."""
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
+    return fx.inttoptr(ptr_ty, fx.Int32(base_i32))
+
+
 def _lds_swizzle_mask(row):
     """lds_swizzle_mask<ROW_BYTES=BK/2=128>(row) = (row & 14) << 3 (fp4 A tile)."""
     return (row & fx.Int32(14)) << fx.Int32(3)

@@ -29,11 +29,12 @@ from .utils import (
     _gep1,
     _gep3,
     _global_base_ptr1,
-    _global_ptr1,
+    _global_typed_ptr,
     _lds_base3,
     _lds_dma_dst,
     _lds_swizzle_mask,
     _lds_swizzle_mask_f8,
+    _lds_typed_ptr,
     _raw,
     _silu_mul_batch,
     _udiv,
@@ -237,7 +238,8 @@ def _gemm1_body_v2(
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
     n_block_idx = bx_i32 % fx.Int32(NUM_N_BLOCKS)
     m_block_idx = bx_i32 // fx.Int32(NUM_N_BLOCKS)
-    e = rocdl.readfirstlane(T.i32, llvm.load(T.i32, _global_ptr1(arg_eids, m_block_idx * fx.Int32(4))))
+    eids_ptr = _global_typed_ptr(arg_eids, T.i32)
+    e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
     m_row = m_block_idx * fx.Int32(BM)
 
     lane_div_16 = lane // fx.Int32(16)
@@ -257,13 +259,14 @@ def _gemm1_body_v2(
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // fx.Int32(lanes_per_row)
     mask24_i32 = arith.constant(0xFFFFFF, type=T.i32)
+    sti_ptr = _global_typed_ptr(arg_sti, T.i32)
     cached_actual_row = []
     for sub in range_constexpr(kSubBlocks):
         for h in range_constexpr(am):
             idx = m_row + wave * fx.Int32(BM // 4) + fx.Int32(sub * 8 + h * rows_per_call) + a_lane_row
             cached_actual_row.append(
                 arith.andi(
-                    llvm.load(T.i32, _global_ptr1(arg_sti, idx * fx.Int32(4))),
+                    _raw(sti_ptr[idx]),
                     mask24_i32,
                 )
             )
@@ -487,7 +490,7 @@ def _gemm1_body_v2(
 
     # epilog: cshuffle -> SwiGLU -> fp4 + e8m0 requant (raw math)
     wave_n = wave
-    lds_acc_ptr = _lds_base3(lds_acc_base)
+    lds_acc_fptr = _lds_typed_ptr(lds_acc_base, T.f32)
 
     # accumulators: fp4 from C fragments, fp8 from accm.
     if const_expr(is_f8_a):
@@ -507,10 +510,7 @@ def _gemm1_body_v2(
             lds_col = (fx.Int32(128) + col_local) if is_up else col_local
             for v in range_constexpr(4):
                 idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + lds_col
-                llvm.StoreOp(
-                    _raw(fx.Float32(_acc(i, J, v))),
-                    _gep3(lds_acc_ptr, idx * fx.Int32(4)),
-                )
+                lds_acc_fptr[idx] = fx.Float32(_acc(i, J, v))
 
     gpu.barrier()
 
@@ -535,10 +535,10 @@ def _gemm1_body_v2(
             col_in_grp = fx.Int32(8) * kk + fx.Int32(ee)
             gate_col = wave_grp * fx.Int32(32) + col_in_grp
             up_col = fx.Int32(128) + gate_col
-            gate_off = (row_local * fx.Int32(BN) + gate_col) * fx.Int32(4)
-            up_off = (row_local * fx.Int32(BN) + up_col) * fx.Int32(4)
-            gate_vs[ee] = fx.Float32(llvm.load(T.f32, _gep3(lds_acc_ptr, gate_off)))
-            up_vs[ee] = fx.Float32(llvm.load(T.f32, _gep3(lds_acc_ptr, up_off)))
+            gate_idx = row_local * fx.Int32(BN) + gate_col
+            up_idx = row_local * fx.Int32(BN) + up_col
+            gate_vs[ee] = fx.Float32(lds_acc_fptr[gate_idx])
+            up_vs[ee] = fx.Float32(lds_acc_fptr[up_idx])
         result = _silu_mul_batch(gate_vs, up_vs)
 
         local_max = _fabs_f32(result[0])
@@ -687,7 +687,8 @@ def _gemm2_body_v2(
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
     m_block_idx = _udiv(bx_i32, _num_n_blocks)
     n_block_idx = bx_i32 - m_block_idx * fx.Int32(_num_n_blocks)
-    e = rocdl.readfirstlane(T.i32, llvm.load(T.i32, _global_ptr1(arg_eids, m_block_idx * fx.Int32(4))))
+    eids_ptr = _global_typed_ptr(arg_eids, T.i32)
+    e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
     m_row = m_block_idx * fx.Int32(BM)
 
     lane_div_16 = lane // fx.Int32(16)
@@ -873,6 +874,7 @@ def _atomic_bf16_epilog(
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
     lds_base = _lds_base3(lds_acc_base)
+    lds_base_fptr = _lds_typed_ptr(lds_acc_base, T.f32)
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
     m_lane = tx_i32 // fx.Int32(32)
@@ -902,7 +904,7 @@ def _atomic_bf16_epilog(
             vec = Vec(accm[i][J])
             for v in range_constexpr(4):
                 idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + col
-                llvm.StoreOp(_raw(vec[v]), _gep3(lds_base, idx * fx.Int32(4)))
+                lds_base_fptr[idx] = fx.Float32(vec[v])
 
     gpu.barrier()
 
