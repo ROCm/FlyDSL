@@ -65,6 +65,7 @@ class FlyDSLMoeGemm2CombineOp:
         xcd_swizzle: int = 0,
         use_token_flag_sync: bool = False,
         doweight_fused: bool = True,
+        gemm2_tile_table: dict | None = None,
     ):
         self.comb_cfg    = comb_cfg
         self.comb_op     = comb_op
@@ -94,9 +95,74 @@ class FlyDSLMoeGemm2CombineOp:
         else:
             self._out_dtype_str = "bf16" if comb_cfg.data_type == torch.bfloat16 else "f16"
 
+        # Per-tile JIT caches: the gemm2 kernel bakes (tile_m,tile_n,tile_k) as
+        # compile-time constants, so to mirror aiter's per-M tile selection we
+        # compile/cache one kernel per distinct tile and pick by run_tokens at
+        # run(). The heavy comb_op shmem is shared across tiles (only the gemm2
+        # kernel binary varies) -> no extra symmetric-heap cost.
+        self._launch_by_tile = {}
+        self._compiled_by_tile = {}
+        # Optional {pow2_token: (tile_m, tile_n, tile_k)} table (built host-side
+        # from aiter get_2stage_cfgs by the caller, cktile buckets pre-aligned
+        # to the nearest FlyDSL bucket). None -> always use the default tile.
+        self._tile_table = dict(gemm2_tile_table) if gemm2_tile_table else None
+        # When a per-M table is active, the sorted_expert_ids fed by stage1 are
+        # laid out at a FIXED block (MegaMoE: 32). gemm2 must read at that block
+        # (its tile_m only sub-tiles within it), so pin sort_block_m=32 instead
+        # of the default (sort_block_m<=0 -> kernel assumes == tile_m, which
+        # mismatches stage1 once tile_m != 32). tile_m in the table is already
+        # clamped to a divisor of 32 by the builder.
+        if self._tile_table is not None and int(sort_block_m) <= 0:
+            self.sort_block_m = 32
+        # Back-compat single-tile handles (unused when a table is active).
         self._launch_fn = None
         self._compiled = None
         self._alloc_dummy_tensors()
+
+    @staticmethod
+    def _next_pow2(n: int) -> int:
+        n = int(n)
+        if n <= 1:
+            return 1
+        return 1 << (n - 1).bit_length()
+
+    def _clamp_tile_m(self, tm):
+        """Safety net: gemm2 sub-tiles the stage1 sorted_expert_ids blocks, so
+        tile_m MUST divide self.sort_block_m or the kernel reads the wrong
+        expert's W2 (silent garbage) / trips the _ensure_launch_fn assert. If a
+        (mis)built table ever hands us a tile_m that does not divide it, halve
+        tile_m down to the nearest power-of-two divisor (floored at 16) instead
+        of crashing. No-op when sort_block_m<=0 (kernel assumes == tile_m)."""
+        sbm = int(self.sort_block_m)
+        if sbm <= 0:
+            return int(tm)
+        tm = int(tm)
+        if tm > sbm:
+            tm = sbm
+        while tm > 16 and (sbm % tm) != 0:
+            tm //= 2
+        return tm
+
+    def _select_tile(self, run_tokens):
+        """Pick (tile_m, tile_n, tile_k) for this forward's run_tokens via the
+        host-static table (nextPow2 bucket, clamped to the table's range),
+        mirroring aiter's get_2stage_cfgs(get_padded_M(token_num)). Falls back
+        to the ctor default tile when no table or no run_tokens is given. The
+        chosen tile_m is always clamped to a divisor of sort_block_m (safety)."""
+        if not self._tile_table or run_tokens is None:
+            return (self._clamp_tile_m(self.tile_m), self.tile_n, self.tile_k)
+        keys = sorted(self._tile_table)
+        b = self._next_pow2(run_tokens)
+        if b < keys[0]:
+            b = keys[0]
+        elif b > keys[-1]:
+            b = keys[-1]
+        if b not in self._tile_table:
+            # nearest bucket >= b, else largest
+            ge = [k for k in keys if k >= b]
+            b = ge[0] if ge else keys[-1]
+        tm, tn, tk = self._tile_table[b]
+        return (self._clamp_tile_m(tm), int(tn), int(tk))
 
     def _alloc_dummy_tensors(self):
         """Pre-allocate all placeholder tensors at ctor time (torch.zeros /
@@ -145,6 +211,7 @@ class FlyDSLMoeGemm2CombineOp:
         cur_tok: Optional[int] = None,
         bias: Optional[torch.Tensor] = None,
         stream: Optional[torch.cuda.Stream] = None,
+        run_tokens: Optional[int] = None,
     ):
         """Run the fused GEMM2+combine.
 
@@ -168,11 +235,29 @@ class FlyDSLMoeGemm2CombineOp:
             cur_tok=cur_tok,
             bias=bias,
             stream=stream,
+            run_tokens=run_tokens,
         )
 
-    def _ensure_launch_fn(self):
-        if self._launch_fn is not None:
-            return
+    def _ensure_launch_fn(self, tile=None):
+        """Build (once) and return the launch_fn for ``tile`` (defaults to the
+        ctor tile). Cached per distinct (tile_m,tile_n,tile_k)."""
+        if tile is None:
+            tile = (self.tile_m, self.tile_n, self.tile_k)
+        tile = tuple(int(v) for v in tile)
+        # Divisibility contract: gemm2 sub-tiles the sorted_expert_ids blocks,
+        # so tile_m must divide the real sort block (the granularity stage1
+        # emitted sorted_expert_ids at). sort_block_m<=0 => kernel assumes
+        # == tile_m (always OK). Catch mismatches early with a clear error
+        # instead of silently producing garbage (the 0.22 gsm8k failure mode).
+        if int(self.sort_block_m) > 0 and (int(self.sort_block_m) % tile[0]) != 0:
+            raise ValueError(
+                f"FlyDSLMoeGemm2CombineOp: gemm2 tile_m={tile[0]} must divide "
+                f"sort_block_m={self.sort_block_m} (stage1 sorted_expert_ids block). "
+                f"Pick tile_m in divisors of {self.sort_block_m}."
+            )
+        lf = self._launch_by_tile.get(tile)
+        if lf is not None:
+            return lf
         comb_cfg = self.comb_cfg
         # Plan B writes into shmem_comb_inp_tok's [0, mt*k) sub-range; k <= npes
         # keeps it in-bounds (mt*k <= mr).
@@ -182,12 +267,12 @@ class FlyDSLMoeGemm2CombineOp:
                 f"FlyDSLMoeGemm2CombineOp (Plan B) requires k <= npes; "
                 f"got k={k}, npes={comb_cfg.world_size}."
             )
-        self._launch_fn = compile_fused_moe_gemm2_combine(
+        lf = compile_fused_moe_gemm2_combine(
             model_dim=comb_cfg.hidden_dim,
             inter_dim=self.inter_dim,
             experts=comb_cfg.num_experts_per_rank,
             topk=k,
-            tile_m=self.tile_m, tile_n=self.tile_n, tile_k=self.tile_k,
+            tile_m=tile[0], tile_n=tile[1], tile_k=tile[2],
             persist_m=self.persist_m,
             sort_block_m=self.sort_block_m,
             b_nt=self.b_nt,
@@ -200,12 +285,19 @@ class FlyDSLMoeGemm2CombineOp:
             use_token_flag_sync=self.use_token_flag_sync,
             doweight_fused=self.doweight_fused,
         )
+        self._launch_by_tile[tile] = lf
+        return lf
 
     def _run_stage1_only(self, *, a2, w2, a2_scale, w2_scale,
                          sorted_token_ids, sorted_expert_ids, sorted_weights,
-                         num_valid_ids, wts_buf=None, cur_tok=None, bias=None, stream=None):
+                         num_valid_ids, wts_buf=None, cur_tok=None, bias=None, stream=None,
+                         run_tokens=None):
         """fused GEMM2 (epilogue P2P scatter) + combine_no_stage1 (Stage 2/3)."""
-        self._ensure_launch_fn()
+        # Per-M tile selection (aiter-aligned: key on the un-expanded forward
+        # token count, NOT the topk-expanded gemm rows). Host-static per
+        # cudagraph capture -> the chosen kernel is baked into each graph.
+        tile = self._select_tile(run_tokens)
+        launch_fn = self._ensure_launch_fn(tile)
 
         comb_cfg = self.comb_cfg
         comb_op  = self.comb_op
@@ -258,16 +350,18 @@ class FlyDSLMoeGemm2CombineOp:
             comb_op._fx_p2p_comb_flag,
             comb_op._fx_out_total_recv,
         )
-        if self._compiled is None:
-            self._compiled = flyc.compile(
-                self._launch_fn,
+        compiled = self._compiled_by_tile.get(tile)
+        if compiled is None:
+            compiled = flyc.compile(
+                launch_fn,
                 *common_args,
                 fx.Int32(tokens_in), fx.Int32(n_in), fx.Int32(k_in),
                 fx.Int32(size_expert_ids),
                 s_fx,
             )
+            self._compiled_by_tile[tile] = compiled
         else:
-            self._compiled(
+            compiled(
                 *common_args,
                 tokens_in, n_in, k_in, size_expert_ids,
                 s_fx,
