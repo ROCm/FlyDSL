@@ -97,6 +97,17 @@ def _gep3(base_ptr, byte_off_i32):
     return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
 
 
+def _lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
+    """LDS dst view (one unit elem at i32-byte addr base_i32+byte_off_i32) for a
+    buffer_load_lds DMA. align=16 for the 128b chunk, 4 for 32b chunks. Gotcha: FlyDSL's
+    AddressSpace.Shared is the LDS space (enum value 2, NOT LLVM addrspace 3)."""
+    if elem_ty is None:
+        elem_ty = T.i32
+    lds_ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
+    lds_ptr = fx.inttoptr(lds_ptr_ty, fx.Int32(base_i32 + byte_off_i32))
+    return fx.make_view(lds_ptr, fx.make_layout(1, 1))
+
+
 def _global_base_ptr1(addr_i64):
     """One ptr<1> base from a raw i64 device address (bare data_ptr() kernarg)."""
     return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), _raw(fx.Int64(addr_i64)))

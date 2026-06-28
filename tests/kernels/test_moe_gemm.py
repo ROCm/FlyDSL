@@ -2178,7 +2178,7 @@ def run_mxfp4_moe_2stage(
         // 32 * 32
     )
     iss = torch.zeros((isr, isc_cols), device=device, dtype=torch.uint8)
-    mxfp4_moe_gemm1(
+    _g1_kwargs = dict(
         a_quant=aq,
         a_scale_sorted_shuffled=assh,
         w1_u8=w1u8,
@@ -2201,11 +2201,12 @@ def run_mxfp4_moe_2stage(
         a_dtype=("fp8" if is_f8 else "fp4"),
         out_dtype=out_dtype,
     )
+    mxfp4_moe_gemm1(**_g1_kwargs)
     torch.cuda.synchronize()
 
     # gemm2 (atomic): inter x w2 -> per-token weighted topk sum
     out = torch.zeros((tokens, H), dtype=torch.bfloat16, device=device)
-    mxfp4_moe_gemm2(
+    _g2_kwargs = dict(
         inter_sorted_quant=isq,
         inter_sorted_shuffled_scale=iss,
         w2_u8=w2u8,
@@ -2225,6 +2226,7 @@ def run_mxfp4_moe_2stage(
         use_nt=False,
         a_dtype=("fp8" if is_f8 else "fp4"),
     )
+    mxfp4_moe_gemm2(**_g2_kwargs)
     torch.cuda.synchronize()
 
     # reference: independent dequant MoE (opus gather: tok = sti & 0xFFFFFF)
@@ -2263,6 +2265,20 @@ def run_mxfp4_moe_2stage(
     )
     assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
     assert cos > thr, f"{in_dtype} cos={cos:.4f} <= {thr}"
+
+    # Optional perf measurement for the layout-API MXFP4 pipe (no built-in bench
+    # otherwise). Enable with MXFP4_BENCH=1. Times gemm1 and gemm2 launches
+    # independently; reports us so a candidate can be compared per-shape.
+    if os.environ.get("MXFP4_BENCH"):
+        _bi = int(os.environ.get("MXFP4_BENCH_ITERS", "50"))
+        _bw = int(os.environ.get("MXFP4_BENCH_WARMUP", "10"))
+        _, us1 = run_perftest(lambda: mxfp4_moe_gemm1(**_g1_kwargs), num_iters=_bi, num_warmup=_bw)
+        _, us2 = run_perftest(lambda: mxfp4_moe_gemm2(**_g2_kwargs), num_iters=_bi, num_warmup=_bw)
+        print(
+            f"[mxfp4 bench {in_dtype} {'il' if interleave else 'sep'}] "
+            f"gemm1 {us1:.2f} us, gemm2 {us2:.2f} us, total {us1 + us2:.2f} us "
+            f"(tokens={tokens} model_dim={model_dim} inter={inter_dim} E={experts} topk={topk})"
+        )
     return out
 
 

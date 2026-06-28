@@ -64,3 +64,5 @@ Thumbs.db
 # Sphinx documentation build
 docs/_build/
 python/flydsl/_mlir
+
+.humanize*

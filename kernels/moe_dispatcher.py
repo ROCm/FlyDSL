@@ -265,7 +265,8 @@ def compile_gemm2_a4w4_port(
         def _issue_all_a_loads(m_row0):
             for slot in range_constexpr(kStages):
                 _issue_a_load_lds_dt(
-                    aq_rsrc,
+                    arg_aq,
+                    _aq_num,
                     lds_base_i32,
                     slot,
                     slot,
@@ -302,6 +303,7 @@ def compile_gemm2_a4w4_port(
                 lane,
                 wave,
                 aq_rsrc,
+                arg_aq,
                 use_nt=use_nt,
                 NE=NE,
                 N_OUT=N_OUT,
