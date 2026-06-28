@@ -129,6 +129,59 @@ def _mega_tuned_tile(model_dim, inter_dim, experts, topk, quant, mtpr, ep_size, 
     )
 
 
+@functools.lru_cache(maxsize=8)
+def _load_mega_gemm2_rows(ep_size: int, gpu_model):
+    """All ``megagemm2`` rows from the best-matching MegaGemm2 tune JSON
+    (``flydsl_*_MegaGemm2_ep{n}.json``), preferring a ``gpu_model`` name match.
+    Returns a tuple of dicts; ``()`` on any miss. Symmetric with
+    ``_load_mega_tuning_rows`` (gemm1). Call ``.cache_clear()`` after editing."""
+    if not _MEGA_TUNING_DIR.is_dir():
+        return ()
+    suffix = f"_MegaGemm2_ep{ep_size}.json"
+    cands = [p for p in _MEGA_TUNING_DIR.glob(f"flydsl_*{suffix}") if p.is_file()]
+    if not cands:
+        return ()
+    cands.sort(key=lambda p: (1 if (gpu_model and gpu_model in p.name) else 0, p.name),
+               reverse=True)
+    try:
+        with open(cands[0], "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return ()
+    return tuple(raw.get("megagemm2", []))
+
+
+def _mega_gemm2_tuned_table(model_dim, inter_dim, experts, topk, ep_size, gpu_model):
+    """Per-M fused gemm2 tile table ``{num_tokens: (tile_m,tile_n,tile_k)}`` from
+    the FlyDSL MegaGemm2 tune JSON, keyed by GEMM2 shape. ``experts`` is the
+    LOCAL per-rank expert count (how the gemm2 tiles were tuned). Returns the
+    dict, or ``None`` on a miss so the op falls back to its single default tile.
+    RAW tiles -- the op clamps tile_m to a divisor of sort_block_m at run time.
+    Default entry point for ``MegaMoE`` (no env gate; mirrors gemm1's auto-tune)."""
+    rows = _load_mega_gemm2_rows(int(ep_size), gpu_model)
+    if not rows:
+        return None
+
+    def _match(r):
+        try:
+            return (int(r["model_dim"]) == int(model_dim)
+                    and int(r["inter_dim"]) == int(inter_dim)
+                    and int(r["expert"]) == int(experts)
+                    and int(r["topk"]) == int(topk))
+        except (KeyError, ValueError, TypeError):
+            return False
+
+    table = {}
+    for r in rows:
+        if _match(r):
+            try:
+                table[int(r["num_tokens"])] = (
+                    int(r["tile_m"]), int(r["tile_n"]), int(r["tile_k"]))
+            except (KeyError, ValueError):
+                continue
+    return table or None
+
+
 class FusedMoEMegaStage1:
     """Single-launch fused dispatch⊕GEMM megakernel (fixedslot decode strict-phase)."""
 
