@@ -8,13 +8,6 @@ from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
 
 from .moegemm import (
-    gemm1_body_v2,
-    gemm2_body_v2,
-    issue_a_load_lds_dt,
-    lds_bytes_for,
-)
-from .tensor_shim import _run_compiled as run_compiled
-from .utils import (
     BK,
     BN,
     H_DEFAULT,
@@ -22,13 +15,18 @@ from .utils import (
     MAX_M,
     NE,
     TOPK_DEFAULT,
+    gemm1_body_v2,
+    gemm2_body_v2,
     global_typed_ptr,
+    issue_a_load_lds_dt,
     k_tiles_total_for,
     kStages,
+    lds_bytes_for,
     num_n_blocks_for,
     raw,
     udiv,
 )
+from .tensor_shim import _run_compiled as run_compiled
 
 __all__ = [
     "compile_gemm1_a4w4_port",

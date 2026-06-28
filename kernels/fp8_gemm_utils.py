@@ -6,10 +6,9 @@ from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr.arith import _to_raw as raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-
-from .utils import raw
 
 
 def preshuffle_b(b_t):
