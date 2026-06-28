@@ -123,20 +123,20 @@ def issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane
     halves 64B apart) into a_vals."""
     for k in range_constexpr(2):
         for i in range_constexpr(kMChunks):
-            lds_row = lane_mod_16 + fx.Int32(i * 16)
-            row_off = fx.Int32(slot * slot_bytes) + lds_row * fx.Int32(KH_TILE_A)
+            lds_row = lane_mod_16 + i * 16
+            row_off = fx.Int32(slot * slot_bytes) + lds_row * KH_TILE_A
             if const_expr(is_f8):
                 mask = lds_swizzle_mask_f8(lane_mod_16)
-                col0 = lane_div_16 * fx.Int32(16) + fx.Int32(k * 128)
+                col0 = lane_div_16 * 16 + k * 128
                 col_lo = col0 ^ mask
-                col_hi = (col0 + fx.Int32(64)) ^ mask
+                col_hi = (col0 + 64) ^ mask
                 lo = Vec(lds_vec_load(s_aq_base, row_off + col_lo, Vec.make_type(2, fx.Int64), fx.Int64, align=16))
                 hi = Vec(lds_vec_load(s_aq_base, row_off + col_hi, Vec.make_type(2, fx.Int64), fx.Int64, align=16))
                 a64 = Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64)
                 a_vals[i][k] = raw(a64.bitcast(fx.Int32))
             else:
                 mask = lds_swizzle_mask(lane_mod_16)
-                lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
+                lds_col = (lane_div_16 * 16 + k * 64) ^ mask
                 vec = lds_vec_load(s_aq_base, row_off + lds_col, Vec.make_type(4, fx.Int32), fx.Int32, align=16)
                 a_frags[i][k].store(Vec(vec))
 
@@ -213,14 +213,14 @@ def gemm1_body_v2(
     K_G2_BYTES = INTER // out_pack  # output intermediate row stride (fp4 INTER/2, fp8 INTER)
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
-    n_block_idx = bx_i32 % fx.Int32(NUM_N_BLOCKS)
-    m_block_idx = bx_i32 // fx.Int32(NUM_N_BLOCKS)
+    n_block_idx = bx_i32 % NUM_N_BLOCKS
+    m_block_idx = bx_i32 // NUM_N_BLOCKS
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
     e = rocdl.readfirstlane(T.i32, raw(eids_ptr[m_block_idx]))
-    m_row = m_block_idx * fx.Int32(BM)
+    m_row = m_block_idx * BM
 
-    lane_div_16 = lane // fx.Int32(16)
-    lane_mod_16 = lane % fx.Int32(16)
+    lane_div_16 = lane // 16
+    lane_mod_16 = lane % 16
 
     # LDS base offsets (i8): s_aq | s_asc contiguous; lds_acc (f32) unions the region.
     s_aq_base = lds_base_i32
@@ -231,13 +231,13 @@ def gemm1_body_v2(
     # carry token_id==M (OOB) so the bounds-checked buffer_load_lds returns 0.
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
-    a_lane_row = lane // fx.Int32(lanes_per_row)
+    a_lane_row = lane // lanes_per_row
     mask24_i32 = arith.constant(0xFFFFFF, type=T.i32)
     sti_ptr = global_typed_ptr(arg_sti, T.i32)
     cached_actual_row = []
     for sub in range_constexpr(kSubBlocks):
         for h in range_constexpr(am):
-            idx = m_row + wave * fx.Int32(BM // 4) + fx.Int32(sub * 8 + h * rows_per_call) + a_lane_row
+            idx = m_row + wave * (BM // 4) + (sub * 8 + h * rows_per_call) + a_lane_row
             cached_actual_row.append(
                 arith.andi(
                     raw(sti_ptr[idx]),
@@ -247,11 +247,11 @@ def gemm1_body_v2(
 
     # B-scale n-pack words (gate/up split differs by gate mode).
     if const_expr(interleave):
-        mni_base = n_block_idx * fx.Int32(BN // 32) + wave * fx.Int32(BN // 128)
-        np_list = [mni_base, mni_base + fx.Int32(1)]
+        mni_base = n_block_idx * (BN // 32) + wave * (BN // 128)
+        np_list = [mni_base, mni_base + 1]
     else:
-        np_gate = n_block_idx * fx.Int32(BN // 64) + wave
-        np_list = [np_gate, np_gate + fx.Int32(N_OUT // 64)]
+        np_gate = n_block_idx * (BN // 64) + wave
+        np_list = [np_gate, np_gate + N_OUT // 64]
 
     # A-gather global->LDS DMA: per-lane data-dependent src (no fold), bounds reproduce
     # aq_rsrc (i32_ntok*K_BYTES) so OOB padded rows load 0.
@@ -263,24 +263,24 @@ def gemm1_body_v2(
         align=16,
         elem_bytes=4,
         fold=False,
-        num_records_bytes=i32_ntok * fx.Int32(K_BYTES),
+        num_records_bytes=i32_ntok * K_BYTES,
     )
 
     def issue_a_load_lds(slot, kt):
         # lane L -> LDS[base+L*16]; fp8 splits each 8-row sub into `am` row-groups.
-        lane_col = (lane % fx.Int32(lanes_per_row)) * fx.Int32(16)
+        lane_col = (lane % lanes_per_row) * 16
         base_i32 = s_aq_base
         for sub in range_constexpr(kSubBlocks):
             for h in range_constexpr(am):
-                lds_row = wave * fx.Int32(BM // 4) + fx.Int32(sub * 8 + h * rows_per_call)
+                lds_row = wave * (BM // 4) + (sub * 8 + h * rows_per_call)
                 mask = (
                     lds_swizzle_mask_f8(lds_row + a_lane_row)
                     if const_expr(is_f8_a)
                     else lds_swizzle_mask(lds_row + a_lane_row)
                 )
                 voffset = (lane_col ^ mask) + cached_actual_row[sub * am + h] * fx.Int32(K_BYTES)
-                off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * fx.Int32(KH_TILE_A)
-                v_e = (voffset + fx.Int32(kt * KH_TILE_A)) // fx.Int32(4)  # per-lane i32-elem index
+                off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
+                v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
                 fx.copy(
                     a_gather_atom,
                     a_gather_src[v_e, None],
@@ -298,33 +298,33 @@ def gemm1_body_v2(
     def issue_a_scale_load():
         # global->LDS DMA: raw 16B + 3x4B chunking. Per-chunk dword base folded into the
         # src view (readfirstlane -> VGPR voffset); per-lane index is the slice coord.
-        chunk_base = m_row // fx.Int32(32)
-        v16_e = (wave * fx.Int32(64) + lane) * fx.Int32(4)  # 16B chunk: per-lane i32-elem
-        v4_e = wave * fx.Int32(64) + lane  # 4B chunk: per-lane i32-elem
+        chunk_base = m_row // 32
+        v16_e = (wave * 64 + lane) * 4  # 16B chunk: per-lane i32-elem
+        v4_e = wave * 64 + lane  # 4B chunk: per-lane i32-elem
         asc_base = s_asc_base
         for sub in range_constexpr(kSubBlocks):
-            base_dw = (chunk_base + fx.Int32(sub)) * fx.Int32(kAS_per_chunk_dw)  # s_chunk/4
+            base_dw = (chunk_base + sub) * kAS_per_chunk_dw  # s_chunk/4
             lds_sub = sub * kAS_per_chunk_dw * 4
             src16 = flat_buffer_view(arg_ascale, base_dw, T.i32, align=16, elem_bytes=4)
             fx.copy(
                 asc_dma128,
                 src16[v16_e, None],
-                lds_dma_dst(asc_base, lds_sub + wave * fx.Int32(1024), elem_ty=T.i32, align=16),
+                lds_dma_dst(asc_base, lds_sub + wave * 1024, elem_ty=T.i32, align=16),
             )
             for d in range_constexpr(3):
                 byte_off = 4096 + d * 1024
-                src4 = flat_buffer_view(arg_ascale, base_dw + fx.Int32(byte_off // 4), T.i32, align=16, elem_bytes=4)
+                src4 = flat_buffer_view(arg_ascale, base_dw + byte_off // 4, T.i32, align=16, elem_bytes=4)
                 fx.copy(
                     asc_dma32,
                     src4[v4_e, None],
-                    lds_dma_dst(asc_base, lds_sub + byte_off + wave * fx.Int32(256), elem_ty=T.i32, align=4),
+                    lds_dma_dst(asc_base, lds_sub + byte_off + wave * 256, elem_ty=T.i32, align=4),
                 )
 
     def issue_a_scale_ds_read(kt):
         asc_ptr = lds_typed_ptr(s_asc_base, T.i32)
         out = []
         for sub in range_constexpr(kSubBlocks):
-            lds_dw = fx.Int32(sub * kAS_per_chunk_dw) + fx.Int32(kt * 64) + lane_div_16 * fx.Int32(16) + lane_mod_16
+            lds_dw = fx.Int32(sub * kAS_per_chunk_dw) + kt * 64 + lane_div_16 * 16 + lane_mod_16
             out.append(asc_ptr[lds_dw])
         return out
 
@@ -339,11 +339,11 @@ def gemm1_body_v2(
     # B-load view per j-tile; gate mode only changes which N-row `col` maps to.
     def make_bq_view_for_jtile(j):
         if const_expr(interleave):
-            col = n_block_idx * fx.Int32(BN) + wave * fx.Int32(BN // 4) + fx.Int32(j * 16)
+            col = n_block_idx * BN + wave * (BN // 4) + j * 16
         else:
-            tile_il = n_block_idx * fx.Int32(16) + wave * fx.Int32(4) + fx.Int32(j)
-            col = ((tile_il & fx.Int32(1)) * fx.Int32(N0_HALF) + (tile_il >> fx.Int32(1))) * fx.Int32(16)
-        return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_TOTAL)
+            tile_il = n_block_idx * 16 + wave * 4 + j
+            col = ((tile_il & 1) * N0_HALF + (tile_il >> 1)) * 16
+        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL)
 
     bq_views = [make_bq_view_for_jtile(j) for j in range_constexpr(4)]
 
@@ -351,7 +351,7 @@ def gemm1_body_v2(
     bscale_views = [
         bscale_view(
             arg_bscale,
-            e * fx.Int32(kBS_per_expert_dw) + np_list[mw] * fx.Int32(kBS_stride_n0_dw),
+            e * kBS_per_expert_dw + np_list[mw] * kBS_stride_n0_dw,
             K_TILES_TOTAL,
             k0_stride_dw=kBS_stride_k0_dw,
         )
@@ -471,29 +471,29 @@ def gemm1_body_v2(
         return acc_vecs[i][J][v]
 
     for i in range_constexpr(kMChunks):
-        row_base = fx.Int32(i * 16) + lane_div_16 * fx.Int32(4)
+        row_base = fx.Int32(i * 16) + lane_div_16 * 4
         for J in range_constexpr(4):
             is_up = (J % 2) == 1
             J_local = J // 2
-            col_local = wave_n * fx.Int32(32) + fx.Int32(J_local * 16) + lane_mod_16
-            lds_col = (fx.Int32(128) + col_local) if is_up else col_local
+            col_local = wave_n * 32 + J_local * 16 + lane_mod_16
+            lds_col = (128 + col_local) if is_up else col_local
             for v in range_constexpr(4):
-                idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + lds_col
+                idx = (row_base + v) * BN + lds_col
                 lds_acc_fptr[idx] = fx.Float32(acc(i, J, v))
 
     gpu.barrier()
 
     tx_i32 = arith.index_cast(T.i32, gpu.thread_id("x"))
-    m_lane = tx_i32 // fx.Int32(16)
-    n_lane = tx_i32 % fx.Int32(16)
-    wave_grp = n_lane // fx.Int32(4)
-    kk = n_lane % fx.Int32(4)
+    m_lane = tx_i32 // 16
+    n_lane = tx_i32 % 16
+    wave_grp = n_lane // 4
+    kk = n_lane % 4
 
     # Output store via fx.copy (BufferCopy32b nt) over an i32-element view; wave-uniform
     # row base folded into the view base, per-lane part is the slice index (VGPR voffset).
     out_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(2), fx.Int32)  # nt i32 store
     out_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-    aqout_view = flat_buffer_view(arg_aqout, m_row * fx.Int32(K_G2_BYTES // 4), T.i32, align=4, elem_bytes=4)
+    aqout_view = flat_buffer_view(arg_aqout, m_row * (K_G2_BYTES // 4), T.i32, align=4, elem_bytes=4)
     scales_per_mr = [None] * kMChunks
 
     for mr in range_constexpr(kMChunks):
@@ -501,11 +501,11 @@ def gemm1_body_v2(
         gate_vs = [None] * 8
         up_vs = [None] * 8
         for ee in range_constexpr(8):
-            col_in_grp = fx.Int32(8) * kk + fx.Int32(ee)
-            gate_col = wave_grp * fx.Int32(32) + col_in_grp
-            up_col = fx.Int32(128) + gate_col
-            gate_idx = row_local * fx.Int32(BN) + gate_col
-            up_idx = row_local * fx.Int32(BN) + up_col
+            col_in_grp = 8 * kk + ee
+            gate_col = wave_grp * 32 + col_in_grp
+            up_col = 128 + gate_col
+            gate_idx = row_local * BN + gate_col
+            up_idx = row_local * BN + up_col
             gate_vs[ee] = fx.Float32(lds_acc_fptr[gate_idx])
             up_vs[ee] = fx.Float32(lds_acc_fptr[up_idx])
         result = silu_mul_batch(gate_vs, up_vs)
@@ -521,7 +521,7 @@ def gemm1_body_v2(
 
         qscale_raw = raw(qscale)
         # byte position of this lane's 8 elems (fp8 doubles it; row stride is INTER).
-        byte_pos_fp4 = n_block_idx * fx.Int32(BN // 4) + wave_grp * fx.Int32(16) + kk * fx.Int32(4)
+        byte_pos_fp4 = n_block_idx * (BN // 4) + wave_grp * 16 + kk * 4
         if const_expr(is_f8_out):
             # 8 f32 -> 8 fp8: lo holds elems 0..3, hi 4..7 (2 fp8 per cvt half).
             v2i16 = T.vec(2, T.i16)
@@ -533,13 +533,13 @@ def gemm1_body_v2(
             hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, raw(result[6]), raw(result[7]), qscale_raw, 1)
             # i32-elem off; uniform m_row part already in view base. lo at off, hi at
             # off+1 (each vec2xi16 = one i32 word, bitcast for the i32 atom).
-            elem_off = row_local * fx.Int32(K_G2_BYTES // 4) + (byte_pos_fp4 // fx.Int32(2))
+            elem_off = row_local * (K_G2_BYTES // 4) + (byte_pos_fp4 // 2)
             lo_i32 = Vec(lo).bitcast(fx.Int32)
             hi_i32 = Vec(hi).bitcast(fx.Int32)
             fx.memref_store_vec(Vec.filled(1, lo_i32[0], fx.Int32), out_reg)
             fx.copy(out_copy_atom, out_reg, aqout_view[elem_off, None])
             fx.memref_store_vec(Vec.filled(1, hi_i32[0], fx.Int32), out_reg)
-            fx.copy(out_copy_atom, out_reg, aqout_view[elem_off + fx.Int32(1), None])
+            fx.copy(out_copy_atom, out_reg, aqout_view[elem_off + 1, None])
         else:
             packed_i32 = raw(fx.Int32(0))
             for w in range_constexpr(4):
@@ -551,7 +551,7 @@ def gemm1_body_v2(
                     qscale_raw,
                     w,
                 )
-            elem_off = row_local * fx.Int32(K_G2_BYTES // 4) + (byte_pos_fp4 // fx.Int32(4))
+            elem_off = row_local * (K_G2_BYTES // 4) + (byte_pos_fp4 // 4)
             fx.memref_store_vec(Vec.filled(1, fx.Int32(packed_i32), fx.Int32), out_reg)
             fx.copy(out_copy_atom, out_reg, aqout_view[elem_off, None])
 
@@ -559,18 +559,18 @@ def gemm1_body_v2(
     # wave-uniform byte base folded into the view base, per-lane part is the slice index.
     asc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.Int16)
     asc_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int16)
-    if kk == fx.Int32(0):
-        ku = n_block_idx >> fx.Int32(1)
-        ikxdl = n_block_idx & fx.Int32(1)
+    if kk == 0:
+        ku = n_block_idx >> 1
+        ikxdl = n_block_idx & 1
         for sub in range_constexpr(kSubBlocks):
-            chunk = m_block_idx * fx.Int32(kSubBlocks) + fx.Int32(sub)
+            chunk = m_block_idx * kSubBlocks + sub
             # uniform i16 base = (chunk*OUT_AS_PER_CHUNK_DW + ku*64)*2 + ikxdl
-            base_i16 = (chunk * fx.Int32(OUT_AS_PER_CHUNK_DW) + ku * fx.Int32(64)) * fx.Int32(2) + ikxdl
+            base_i16 = (chunk * OUT_AS_PER_CHUNK_DW + ku * 64) * 2 + ikxdl
             asc_view = flat_buffer_view(arg_ascaleout, base_i16, T.i16, align=2, elem_bytes=2)
-            pair_i32 = scales_per_mr[sub * 2 + 0] | (scales_per_mr[sub * 2 + 1] << fx.Int32(8))
+            pair_i32 = scales_per_mr[sub * 2 + 0] | (scales_per_mr[sub * 2 + 1] << 8)
             pair_i16 = arith.TruncIOp(T.i16, raw(pair_i32)).result
             # per-lane i16 offset = (wave_grp*16 + m_lane)*2
-            asc_off = (wave_grp * fx.Int32(16) + m_lane) * fx.Int32(2)
+            asc_off = (wave_grp * 16 + m_lane) * 2
             fx.memref_store_vec(Vec.filled(1, fx.Int16(pair_i16), fx.Int16), asc_reg)
             fx.copy(asc_copy_atom, asc_reg, asc_view[asc_off, None])
 
@@ -589,20 +589,20 @@ def issue_a_load_lds_dt(arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wave
     am = 2 if is_f8 else 1  # row-group calls per 8-row wave (fp8 4 rows/call)
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
-    a_lane_row = lane // fx.Int32(lanes_per_row)
-    lane_col = (lane % fx.Int32(lanes_per_row)) * fx.Int32(16)
+    a_lane_row = lane // lanes_per_row
+    lane_col = (lane % lanes_per_row) * 16
     base_i32 = s_aq_base
     atom = lds_dma_atom_128()
     src = flat_buffer_view(arg_aq, None, T.i32, align=16, elem_bytes=4, fold=False, num_records_bytes=aq_num_records)
     for h in range_constexpr(am):
-        lds_row = wave * fx.Int32(BM // 4) + fx.Int32(h * rows_per_call)
+        lds_row = wave * (BM // 4) + h * rows_per_call
         mask = (
             lds_swizzle_mask_f8(lds_row + a_lane_row) if const_expr(is_f8) else lds_swizzle_mask(lds_row + a_lane_row)
         )
         car = m_row + lds_row + a_lane_row  # direct sorted row
-        voffset = (lane_col ^ mask) + car * fx.Int32(K_BYTES)
-        off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * fx.Int32(KH_TILE_A)
-        v_e = (voffset + fx.Int32(kt * KH_TILE_A)) // fx.Int32(4)  # per-lane i32-elem index
+        voffset = (lane_col ^ mask) + car * K_BYTES
+        off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
+        v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
         fx.copy(atom, src[v_e, None], lds_dma_dst(base_i32, off, elem_ty=T.i32, align=16))
 
 
@@ -651,25 +651,25 @@ def gemm2_body_v2(
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
     m_block_idx = udiv(bx_i32, num_n_blocks)
-    n_block_idx = bx_i32 - m_block_idx * fx.Int32(num_n_blocks)
+    n_block_idx = bx_i32 - m_block_idx * num_n_blocks
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
     e = rocdl.readfirstlane(T.i32, raw(eids_ptr[m_block_idx]))
-    m_row = m_block_idx * fx.Int32(BM)
+    m_row = m_block_idx * BM
 
-    lane_div_16 = lane // fx.Int32(16)
-    lane_mod_16 = lane % fx.Int32(16)
+    lane_div_16 = lane // 16
+    lane_mod_16 = lane % 16
 
     # A-scale buffer resource + uniform base (A-scale load stays raw).
     asc_per_mb = (BM // 32) * kAS_per_chunk_dw * 4
     asc_num = arith.index_cast(T.index, raw(i32_max_m_blocks)) * fx.Index(asc_per_mb)
     ascale_rsrc = buffer_ops.create_buffer_resource_from_addr(raw(fx.Int64(arg_ascale)), num_records_bytes=asc_num)
-    a_scale_s_base = rocdl.readfirstlane(T.i32, (m_row // fx.Int32(32)) * fx.Int32(kAS_per_chunk_dw) * fx.Int32(4))
-    v_voff_scale = ((lane_div_16 * fx.Int32(16)) + lane_mod_16) * fx.Int32(4)
+    a_scale_s_base = rocdl.readfirstlane(T.i32, (m_row // 32) * kAS_per_chunk_dw * 4)
+    v_voff_scale = ((lane_div_16 * 16) + lane_mod_16) * 4
 
     def load_a_scale_tile(kt):
         return buffer_ops.buffer_load(
             ascale_rsrc,
-            (v_voff_scale + fx.Int32(kt * 256)) // fx.Int32(4),
+            (v_voff_scale + kt * 256) // 4,
             vec_width=1,
             dtype=T.i32,
             soffset_bytes=a_scale_s_base,
@@ -683,16 +683,16 @@ def gemm2_body_v2(
     bs_copy_atom = bscale_copy_atom()
 
     def make_bq_view(j):
-        col = n_block_idx * fx.Int32(BN) + wave * fx.Int32(BN // 4) + fx.Int32(j * 16)
-        return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_TOTAL)
+        col = n_block_idx * BN + wave * (BN // 4) + j * 16
+        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL)
 
     bq_views = [make_bq_view(j) for j in range_constexpr(4)]
 
-    mni_base = n_block_idx * fx.Int32(BN // 16 // 2) + wave * fx.Int32(BN // 64 // 2)
+    mni_base = n_block_idx * (BN // 16 // 2) + wave * (BN // 64 // 2)
     bscale_views = [
         bscale_view(
             arg_bscale,
-            e * fx.Int32(kbs_per_expert_dw) + (mni_base + fx.Int32(mw)) * fx.Int32(kBS_stride_n0_dw),
+            e * kbs_per_expert_dw + (mni_base + mw) * kBS_stride_n0_dw,
             K_TILES_TOTAL,
             k0_stride_dw=kBS_stride_k0_dw,
         )
@@ -828,14 +828,14 @@ def atomic_bf16_epilog(
 ):
     kMChunks = kmchunks(BM)
     M_REPS = BM // 8  # BM32: 4, BM16: 2
-    lane_div_16 = lane // fx.Int32(16)
-    lane_mod_16 = lane % fx.Int32(16)
+    lane_div_16 = lane // 16
+    lane_mod_16 = lane % 16
     lds_base_fptr = lds_typed_ptr(lds_acc_base, T.f32)
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
-    m_lane = tx_i32 // fx.Int32(32)
-    n_lane = tx_i32 % fx.Int32(32)
-    col_start = n_lane * fx.Int32(2)
+    m_lane = tx_i32 // 32
+    n_lane = tx_i32 % 32
+    col_start = n_lane * 2
     stids_base = global_base_ptr1(arg_stids)
     sweights_base = global_base_ptr1(arg_sweights)
     out_base = global_base_ptr1(arg_out)
@@ -845,21 +845,21 @@ def atomic_bf16_epilog(
     packed = []
     weight = []
     for mr in range_constexpr(M_REPS):
-        sorted_pos = m_row + fx.Int32(mr * 8) + m_lane
-        packed.append(llvm.load(T.i32, gep1(stids_base, sorted_pos * fx.Int32(4)), invariant=True))
-        weight.append(llvm.load(T.f32, gep1(sweights_base, sorted_pos * fx.Int32(4)), invariant=True))
+        sorted_pos = m_row + mr * 8 + m_lane
+        packed.append(llvm.load(T.i32, gep1(stids_base, sorted_pos * 4), invariant=True))
+        weight.append(llvm.load(T.f32, gep1(sweights_base, sorted_pos * 4), invariant=True))
 
     # pre-store fence+barrier (HIP run_one __syncthreads() before the epilog).
     gpu.barrier()
 
     # write accm -> lds_acc cshuffle (scalar f32 stores, as HIP does)
     for i in range_constexpr(kMChunks):
-        row_base = fx.Int32(i * 16) + lane_div_16 * fx.Int32(4)
+        row_base = fx.Int32(i * 16) + lane_div_16 * 4
         for J in range_constexpr(4):
-            col = wave * fx.Int32(64) + fx.Int32(J * 16) + lane_mod_16
+            col = wave * 64 + J * 16 + lane_mod_16
             vec = Vec(accm[i][J])
             for v in range_constexpr(4):
-                idx = (row_base + fx.Int32(v)) * fx.Int32(BN) + col
+                idx = (row_base + v) * BN + col
                 lds_base_fptr[idx] = fx.Float32(vec[v])
 
     gpu.barrier()
@@ -869,15 +869,13 @@ def atomic_bf16_epilog(
         row_in_block = fx.Int32(mr * 8) + m_lane
         token_id = packed[mr] & fx.Int32(0x00FFFFFF)
         if token_id < i32_M:
-            row_base_addr = token_id * fx.Int32(N_OUT) + n_block_idx * fx.Int32(BN) + col_start
+            row_base_addr = token_id * N_OUT + n_block_idx * BN + col_start
             for s in range_constexpr(4):
                 # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
-                idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
-                v2 = Vec(
-                    lds_vec_load(lds_acc_base, idx0 * fx.Int32(4), Vec.make_type(2, fx.Float32), fx.Float32, align=8)
-                )
+                idx0 = row_in_block * BN + col_start + s * 64
+                v2 = Vec(lds_vec_load(lds_acc_base, idx0 * 4, Vec.make_type(2, fx.Float32), fx.Float32, align=8))
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
-                off = (row_base_addr + fx.Int32(s * 64)) * fx.Int32(2)  # bf16 byte off
+                off = (row_base_addr + s * 64) * 2  # bf16 byte off
                 out_ptr = gep1(out_base, off)
                 llvm.AtomicRMWOp(
                     llvm.AtomicBinOp.fadd,

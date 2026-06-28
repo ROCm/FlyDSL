@@ -127,12 +127,12 @@ def lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
 
 def lds_swizzle_mask(row):
     """lds_swizzle_mask<ROW_BYTES=BK/2=128>(row) = (row & 14) << 3 (fp4 A tile)."""
-    return (row & fx.Int32(14)) << fx.Int32(3)
+    return (row & 14) << 3
 
 
 def lds_swizzle_mask_f8(row):
     """lds_swizzle_mask<ROW_BYTES=256>(row) = (row & 15) << 4 (fp8 A tile)."""
-    return (row & fx.Int32(15)) << fx.Int32(4)
+    return (row & 15) << 4
 
 
 # -- e8m0 / SwiGLU quant math -------------------------------------------------
@@ -153,8 +153,8 @@ def e8m0_from_amax(amax_f32, dtype_max=6.0):
     """(e8m0_i32, quant_scale_f32) = ceil_pow2(amax/dtype_max) clamped to 254.
     dtype_max is the output format's max magnitude (fp4 e2m1 = 6, fp8 e4m3 = 448)."""
     wi = fx.Int32(raw(amax_f32 * fx.Float32(1.0 / dtype_max)).bitcast(T.i32))
-    bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
+    bexp = (wi + 0x7FFFFF).shrui(fx.Int32(23)) & 0xFF
     lt = arith.cmpi(arith.CmpIPredicate.ult, raw(bexp), raw(fx.Int32(254)))
     e8m0 = fx.Int32(arith.select(lt, raw(bexp), raw(fx.Int32(254))))
-    qscale = fx.Float32(raw(e8m0 << fx.Int32(23)).bitcast(T.f32))
+    qscale = fx.Float32(raw(e8m0 << 23).bitcast(T.f32))
     return e8m0, qscale
