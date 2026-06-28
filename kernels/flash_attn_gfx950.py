@@ -141,8 +141,6 @@ def build_flash_attn_dualwave_swp_module(
     # Match existing flash_attn_generic BLOCK_M=256 path for layout compatibility.
     BLOCK_M = 256
     BLOCK_N = 64
-    BLOCK_N_OUT = 64  # single sub-tile per outer iter (=BLOCK_N)
-    BLOCK_N_OUT // BLOCK_N
     K_SUB_N = 32  # MFMA W_N
     WARP_SIZE = 64
     NUM_WAVES = 8  # BLOCK_M / 32
@@ -229,7 +227,7 @@ def build_flash_attn_dualwave_swp_module(
         class SharedStorage:
             kv: fx.Array[_lds_elem_dtype, LDS_KV_TOTAL_SIZE, 16]
 
-    # DUALWAVE_SWP lazy-rescale threshold (line 374)
+    # DUALWAVE_SWP lazy-rescale threshold (m_tile_max - m_row gap before rescale).
     DUALWAVE_SWP_RESCALE_THRESHOLD = 8.0
 
     # Enable / disable individual DUALWAVE_SWP optimizations via builder parameters.
@@ -277,8 +275,7 @@ def build_flash_attn_dualwave_swp_module(
         fm_fast = fx.arith.FastMathFlags.fast
         v4i32_type = Vec.make_type(4, fx.Int32)
         v4f16_type = Vec.make_type(4, elem_dtype)
-        v8f16_type = Vec.make_type(8, elem_dtype)
-        mfma_pack_type = v8f16_type
+        mfma_pack_type = Vec.make_type(8, elem_dtype)
 
         _MFMA_MASK = 0x008
         _VALU_MASK = 0x002
@@ -565,12 +562,10 @@ def build_flash_attn_dualwave_swp_module(
             fx.memref_store_vec(pack_i32_vec, _o_store_reg_128)
             fx.copy(_store_atom_128, _o_store_reg_128, fx.slice(o_div, (None, fx.Int32(elem_index))))
 
-        lane_in_warp = tid % WARP_SIZE
-        n_in_warp = lane_in_warp // VEC_KV
-        d_bucket = lane_in_warp % VEC_KV
+        n_in_warp = lane // VEC_KV
+        d_bucket = lane % VEC_KV
 
         c_neg_inf = fx.Float32(float("-inf"))
-        # c_neg_inf = fx.Float32(float(-1e30))
         # Finite floor for the row-max: a fully-masked row (bottom-right causal,
         # seqlen_q > seqlen_kv) has max == -inf; flooring it finite makes
         # exp2(-inf - floor) == 0 (no NaN), so acc/l stay 0 and O is zeroed below.
@@ -903,7 +898,7 @@ def build_flash_attn_dualwave_swp_module(
         def _k_dma_m0_base(buf_id, d):
             k_lds_byte_base = lds_kv_base_idx + _k_buf_base(buf_id) * BF16_BYTES
             if const_expr(KV_VECTORIZED):
-                oct_idx = wave_id_uni * (WARP_SIZE * NUM_DMA_K) + d * WARP_SIZE + lane_in_warp
+                oct_idx = wave_id_uni * (WARP_SIZE * NUM_DMA_K) + d * WARP_SIZE + lane
                 lds_addr = k_lds_byte_base + oct_idx * (KV_VEC_SIZE * BF16_BYTES)
             else:
                 lds_addr = (
@@ -917,7 +912,7 @@ def build_flash_attn_dualwave_swp_module(
             v_lds_byte_base = lds_kv_base_idx + _v_buf_base(buf_id) * BF16_BYTES
             if const_expr(KV_VECTORIZED):
                 row = wave_id_uni * NUM_DMA_V + d
-                lds_elem = row * VEC_V_ROW_STRIDE + lane_in_warp * KV_VEC_SIZE
+                lds_elem = row * VEC_V_ROW_STRIDE + lane * KV_VEC_SIZE
                 lds_addr = v_lds_byte_base + lds_elem * BF16_BYTES
             else:
                 lds_addr = (
@@ -946,7 +941,7 @@ def build_flash_attn_dualwave_swp_module(
                 # Copy vectorized K into native K-LDS [d//8, n, d%8] with coalesced writes.
                 # Apply sigma(n) during DMA so the hot K read uses plain lane%32 indexing.
                 for d in range_constexpr(NUM_DMA_K):
-                    oct_idx = wave_id_uni * (WARP_SIZE * NUM_DMA_K) + d * WARP_SIZE + lane_in_warp
+                    oct_idx = wave_id_uni * (WARP_SIZE * NUM_DMA_K) + d * WARP_SIZE + lane
                     lds_addr = k_dma_m0[buf_id][d]
                     _ni = oct_idx % BLOCK_N
                     _dg = oct_idx // BLOCK_N
@@ -975,8 +970,8 @@ def build_flash_attn_dualwave_swp_module(
                 # d_local=lane%8. NO-major order keeps ds_read_b128 bank-friendly.
                 for d in range_constexpr(NUM_DMA_V):
                     row = wave_id_uni * NUM_DMA_V + d
-                    no = lane_in_warp // SMEM_N_PER_WAVE
-                    d_local = lane_in_warp % SMEM_N_PER_WAVE
+                    no = lane // SMEM_N_PER_WAVE
+                    d_local = lane % SMEM_N_PER_WAVE
                     d_col = row * SMEM_N_PER_WAVE + d_local
                     lds_addr = v_dma_m0[buf_id][d]
                     src_elem = _vec_v_elem(no * KV_VEC_SIZE, d_col)
@@ -2333,6 +2328,43 @@ def build_flash_attn_dualwave_swp_module(
         },
     }
 
+    def _resolve_args(
+        O, seq_len, stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
+        workspace, cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride,
+    ):  # noqa: E741
+        """Fill in the dense/non-paged defaults shared by _launch and _compile.
+
+        - seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
+        - Dense launches still pass valid tensors for the (unused) cu_seqlens slots;
+          the kernel only reads them under const_expr(VARLEN). Use O as a placeholder.
+        - BlockTable is only read under const_expr(PAGED); use O as a placeholder
+          otherwise. block_table_stride defaults to 0 (unused without paging).
+        """
+        if stride_kv_n is None:
+            stride_kv_n = DEFAULT_STRIDE_KV_N
+        if stride_q_n is None:
+            stride_q_n = DEFAULT_STRIDE_Q_N
+        if head_dim_runtime is None:
+            head_dim_runtime = HEAD_DIM
+        if seq_len_kv is None:
+            seq_len_kv = seq_len
+        if SPLITK:
+            if workspace is None:
+                raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
+            debug_counts = workspace
+        if debug_counts is None:
+            debug_counts = O
+        if cu_seqlens_q is None:
+            cu_seqlens_q = O
+        if cu_seqlens_kv is None:
+            cu_seqlens_kv = O
+        if block_table is None:
+            block_table = O
+        if block_table_stride is None:
+            block_table_stride = 0
+        return (stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
+                cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride)
+
     def _launch(
         Q,
         K,
@@ -2353,33 +2385,11 @@ def build_flash_attn_dualwave_swp_module(
         block_table_stride=None,
         stream=None,
     ):
-        if stride_kv_n is None:
-            stride_kv_n = DEFAULT_STRIDE_KV_N
-        if stride_q_n is None:
-            stride_q_n = DEFAULT_STRIDE_Q_N
-        if head_dim_runtime is None:
-            head_dim_runtime = HEAD_DIM
-        # seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
-        if seq_len_kv is None:
-            seq_len_kv = seq_len
-        if SPLITK:
-            if workspace is None:
-                raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
-            debug_counts = workspace
-        if debug_counts is None:
-            debug_counts = O
-        # Dense launches still pass valid tensors for the (unused) cu_seqlens slots;
-        # the kernel only reads them under const_expr(VARLEN). Use O as a placeholder.
-        if cu_seqlens_q is None:
-            cu_seqlens_q = O
-        if cu_seqlens_kv is None:
-            cu_seqlens_kv = O
-        # BlockTable is only read under const_expr(PAGED); use O as a placeholder
-        # otherwise. block_table_stride defaults to 0 (unused without paging).
-        if block_table is None:
-            block_table = O
-        if block_table_stride is None:
-            block_table_stride = 0
+        (stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
+         cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride) = _resolve_args(
+            O, seq_len, stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
+            workspace, cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride,
+        )
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             if stream is None:
                 return launch_flash_attn_dualwave_swp(
@@ -2438,28 +2448,11 @@ def build_flash_attn_dualwave_swp_module(
         block_table_stride=None,
         stream=None,
     ):
-        if stride_kv_n is None:
-            stride_kv_n = DEFAULT_STRIDE_KV_N
-        if stride_q_n is None:
-            stride_q_n = DEFAULT_STRIDE_Q_N
-        if head_dim_runtime is None:
-            head_dim_runtime = HEAD_DIM
-        if seq_len_kv is None:
-            seq_len_kv = seq_len
-        if SPLITK:
-            if workspace is None:
-                raise ValueError("num_kv_splits > 1 requires a fp32 workspace (see dualwave_splitk_workspace_elems)")
-            debug_counts = workspace
-        if debug_counts is None:
-            debug_counts = O
-        if cu_seqlens_q is None:
-            cu_seqlens_q = O
-        if cu_seqlens_kv is None:
-            cu_seqlens_kv = O
-        if block_table is None:
-            block_table = O
-        if block_table_stride is None:
-            block_table_stride = 0
+        (stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
+         cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride) = _resolve_args(
+            O, seq_len, stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
+            workspace, cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride,
+        )
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             return flyc.compile(
                 launch_flash_attn_dualwave_swp,
