@@ -278,7 +278,6 @@ def build_flash_attn_dualwave_swp_module(
         v4i32_type = Vec.make_type(4, fx.Int32)
         v4f16_type = Vec.make_type(4, elem_dtype)
         v8f16_type = Vec.make_type(8, elem_dtype)
-        v16f32_type = Vec.make_type(16, fx.Float32)
         mfma_pack_type = v8f16_type
 
         _MFMA_MASK = 0x008
@@ -512,10 +511,8 @@ def build_flash_attn_dualwave_swp_module(
             k_div = _make_rebased_view(fx.get_iter(K), _kv_batch_byte_off, _kv_nrec_bytes, _kv_layout)
             v_div = _make_rebased_view(fx.get_iter(V), _kv_batch_byte_off, _kv_nrec_bytes, _kv_layout)
         _load_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
-        _store_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
         _store_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
         _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
-        _o_store_reg = fx.make_rmem_tensor(fx.make_layout(2, 1), fx.Int32)
         _o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
         _lds_ptr_ty = fx.PointerType.get(elem_dtype.ir_type, 2, DMA_BYTES)
         if const_expr(SPLITK):
@@ -562,11 +559,6 @@ def build_flash_attn_dualwave_swp_module(
             dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
             src = fx.slice(src_div, (None, fx.Int32(src_elem)))
             fx.copy(_dma_atom, src, dst, soffset=fx.Int32(soffset_elems))
-
-        def _buffer_store_64(pack_i32_vec, elem_index):
-            """64-bit register->global store (buffer_store_dwordx2) into O."""
-            fx.memref_store_vec(pack_i32_vec, _o_store_reg)
-            fx.copy(_store_atom_64, _o_store_reg, fx.slice(o_div, (None, fx.Int32(elem_index))))
 
         def _buffer_store_128(pack_i32_vec, elem_index):
             """128-bit register->global store (buffer_store_dwordx4) into O."""
@@ -664,11 +656,28 @@ def build_flash_attn_dualwave_swp_module(
         def _fmax(a, b):
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
-        # MMA via the layout MMA atom
-        _mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, elem_dtype))
+        # Score (S=Q·Kᵀ) and output (O=P·V) MMAs both go through the TiledMMA
+        # fragment + fx.gemm model. The atom is MFMA(32,32,16); fx.gemm emits the
+        # v_mfma_f32_32x32x16 with the accumulator on AGPR, so the K/V S2R swizzle
+        # that produces the v8 a/b packs and the Q register packs are unchanged —
+        # only the call wrapper differs. A/B/C are carried as SSA register vectors
+        # (v8 pack / v16 acc); we round-trip them through rmem fragments so fx.gemm
+        # owns the single-step matmul while the scores / P stay SSA for the existing
+        # mask / softmax / anchor / online-rescale path.
+        _tiled_mma_32x32x16 = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, elem_dtype))
+        _tiled_mma_32x32x16 = fx.make_tiled_mma(_tiled_mma_32x32x16, fx.make_layout((1, 1, 1), (0, 0, 0)))
 
-        def _mfma_acc(a, b, c):
-            return fly.mma_atom_call_ssa([v16f32_type], _mma_atom, a, b, c)
+        def _frag_gemm(a_pack, b_pack, c_acc):
+            """One MFMA(32,32,16) step via fx.gemm: v8 a-pack × v8 b-pack into a
+            v16f32 accumulator, all carried as SSA register vectors."""
+            frag_a = fx.make_rmem_tensor(fx.make_layout(MFMA_LANE_K, 1), elem_dtype)
+            frag_b = fx.make_rmem_tensor(fx.make_layout(MFMA_LANE_K, 1), elem_dtype)
+            frag_c = fx.make_rmem_tensor(fx.make_layout(16, 1), fx.Float32)
+            fx.memref_store_vec(Vec(a_pack), frag_a)
+            fx.memref_store_vec(Vec(b_pack), frag_b)
+            fx.memref_store_vec(Vec(c_acc, (16,), fx.Float32), frag_c)
+            fx.gemm(_tiled_mma_32x32x16, frag_c, frag_a, frag_b, frag_c)
+            return fx.memref_load_vec(frag_c)
 
         def _sched_barrier_pairs(pairs, valu_cnt, group):
             """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups."""
@@ -783,23 +792,6 @@ def build_flash_attn_dualwave_swp_module(
                 has_side_effects=True,
             )
             return llvm.extractvalue(T.i32, ret, [2]), llvm.extractvalue(T.i32, ret, [3])
-
-        def _anchor_pair(v_s):
-            lo, hi = v_s
-            lo_ir = _raw(lo)
-            hi_ir = _raw(hi)
-            ret_ty = ir.Type.parse("!llvm.struct<(vector<16xf32>, vector<16xf32>)>")
-            ret = llvm.inline_asm(
-                ret_ty,
-                [lo_ir, hi_ir],
-                "",
-                "=v,=v,0,1",
-                has_side_effects=True,
-            )
-            return (
-                llvm.extractvalue(lo_ir.type, ret, [0]),
-                llvm.extractvalue(hi_ir.type, ret, [1]),
-            )
 
         def _anchor_v_p(v_p):
             p_lo, p_hi = v_p
@@ -1096,8 +1088,8 @@ def build_flash_attn_dualwave_swp_module(
             v_s_hi = c_zero_v16f32
             for ks in range_constexpr(K_STEPS_QK):
                 q_pack = _get_q_pack(q_all_scaled_bf16, ks)
-                v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo)
-                v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi)
+                v_s_lo = _frag_gemm(k_lo[ks], q_pack, v_s_lo)
+                v_s_hi = _frag_gemm(k_hi[ks], q_pack, v_s_hi)
             return (v_s_lo, v_s_hi)
 
         def _causal_mask_inplace(v_s, tile_idx):
@@ -1263,7 +1255,7 @@ def build_flash_attn_dualwave_swp_module(
             else:
                 p_pk = v_p_hi[step - 2]
             for dc in range_constexpr(D_CHUNKS):
-                v_o[dc] = _mfma_acc(v_pk[dc], p_pk, v_o[dc])
+                v_o[dc] = _frag_gemm(v_pk[dc], p_pk, v_o[dc])
             return v_o
 
         def _mma1(v_p, v_v, v_o):
