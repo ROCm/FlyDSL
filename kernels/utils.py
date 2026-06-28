@@ -6,7 +6,7 @@ helpers, e8m0 + SwiGLU quant math. MMA + data movement live in ``moegemm``."""
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, rocdl
+from flydsl.expr import buffer_ops, const_expr, rocdl
 from flydsl.expr.typing import T
 
 # -- shape constants (KIMI defaults; per-shape values come from the compile args) --
@@ -76,7 +76,7 @@ def raw(v):
 
 def udiv(a, c):
     cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.divui(raw(a), raw(cc)))
+    return fx.Int32(a) // cc
 
 
 def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
@@ -154,7 +154,6 @@ def e8m0_from_amax(amax_f32, dtype_max=6.0):
     dtype_max is the output format's max magnitude (fp4 e2m1 = 6, fp8 e4m3 = 448)."""
     wi = fx.Int32(raw(amax_f32 * fx.Float32(1.0 / dtype_max)).bitcast(T.i32))
     bexp = (wi + 0x7FFFFF).shrui(fx.Int32(23)) & 0xFF
-    lt = arith.cmpi(arith.CmpIPredicate.ult, raw(bexp), raw(fx.Int32(254)))
-    e8m0 = fx.Int32(arith.select(lt, raw(bexp), raw(fx.Int32(254))))
+    e8m0 = (bexp < 254).select(bexp, fx.Int32(254))
     qscale = fx.Float32(raw(e8m0 << 23).bitcast(T.f32))
     return e8m0, qscale

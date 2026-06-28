@@ -6,7 +6,7 @@ fp4 A rides fx.gemm fragments; fp8 A (a8w4) the raw mfma_scale intrinsic (cbsz=0
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Float4E2M1FN, T
 from flydsl.expr.typing import Vector as Vec
 
@@ -63,7 +63,7 @@ def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL):
     (klane,nlane)/K-tile/half/kpack4 layout axes. Slice -> i32<4:1> (16B=32 fp4)."""
     col_base = rocdl.readfirstlane(T.i32, raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
-    off_i64 = fx.Int64(arith.ExtUIOp(T.i64, raw(col_base)).result)
+    off_i64 = fx.Int64(col_base)
     base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_bq) + off_i64 * fx.Int64(4))
     # i32 strides: klane[0,4)->64, nlane[0,16)->4, K_tile->512, half[0,2)->256, kpack4->1
     shape = (4, 16, K_TILES_TOTAL, 2, 4)
@@ -76,7 +76,7 @@ def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64):
     base + (klane,nlane)/K-tile layout axes. Slice -> i32<1:1> scale word."""
     base_dw = rocdl.readfirstlane(T.i32, raw(base_dw))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
-    off_i64 = fx.Int64(arith.ExtUIOp(T.i64, raw(base_dw)).result)
+    off_i64 = fx.Int64(base_dw)
     base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_bscale) + off_i64 * fx.Int64(4))
     shape = (4, 16, K_TILES_TOTAL, 1)
     stride = (16, 1, k0_stride_dw, 1)
@@ -477,7 +477,7 @@ def gemm1_body_v2(
 
     gpu.barrier()
 
-    tx_i32 = arith.index_cast(T.i32, gpu.thread_id("x"))
+    tx_i32 = fx.Int32(gpu.thread_id("x"))
     m_lane = tx_i32 // 16
     n_lane = tx_i32 % 16
     wave_grp = n_lane // 4
@@ -562,10 +562,10 @@ def gemm1_body_v2(
             base_i16 = (chunk * OUT_AS_PER_CHUNK_DW + ku * 64) * 2 + ikxdl
             asc_view = flat_buffer_view(arg_ascaleout, base_i16, T.i16, align=2, elem_bytes=2)
             pair_i32 = scales_per_mr[sub * 2 + 0] | (scales_per_mr[sub * 2 + 1] << 8)
-            pair_i16 = arith.TruncIOp(T.i16, raw(pair_i32)).result
+            pair_i16 = fx.Int16(pair_i32)
             # per-lane i16 offset = (wave_grp*16 + m_lane)*2
             asc_off = (wave_grp * 16 + m_lane) * 2
-            fx.memref_store_vec(Vec.filled(1, fx.Int16(pair_i16), fx.Int16), asc_reg)
+            fx.memref_store_vec(Vec.filled(1, pair_i16, fx.Int16), asc_reg)
             fx.copy(asc_copy_atom, asc_reg, asc_view[asc_off, None])
 
 
@@ -655,7 +655,7 @@ def gemm2_body_v2(
 
     # A-scale buffer resource + uniform base (A-scale load stays raw).
     asc_per_mb = (BM // 32) * kAS_per_chunk_dw * 4
-    asc_num = arith.index_cast(T.index, raw(i32_max_m_blocks)) * fx.Index(asc_per_mb)
+    asc_num = fx.Index(i32_max_m_blocks) * fx.Index(asc_per_mb)
     ascale_rsrc = buffer_ops.create_buffer_resource_from_addr(raw(fx.Int64(arg_ascale)), num_records_bytes=asc_num)
     a_scale_s_base = rocdl.readfirstlane(T.i32, (m_row // 32) * kAS_per_chunk_dw * 4)
     v_voff_scale = ((lane_div_16 * 16) + lane_mod_16) * 4
@@ -737,7 +737,7 @@ def gemm2_body_v2(
     def issue_a_ds_read(slot):
         issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags)
 
-    aq_num_records = arith.index_cast(T.index, raw(i32_max_m_blocks)) * fx.Index(BM * K_BYTES)
+    aq_num_records = fx.Index(i32_max_m_blocks) * fx.Index(BM * K_BYTES)
 
     def issue_a_load_lds(slot, kt):
         issue_a_load_lds_dt(arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wave, lane, is_f8_a, KH_TILE_A, K_BYTES)
