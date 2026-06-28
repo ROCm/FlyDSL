@@ -19,6 +19,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr.typing import Float4E2M1FN, T
 from flydsl.expr.typing import Vector as Vec
 
+from .fp8_gemm_utils import flat_buffer_view, lds_dma_atom_128
 from .utils import (
     BK,
     BN,
@@ -99,33 +100,6 @@ def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64):
     stride = (16, 1, k0_stride_dw, 1)
     view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, stride)))
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
-
-
-# global->LDS DMA atom shared by A-gather (16B = 32 fp4 / 16 fp8) and the 16B A-scale chunk.
-def _lds_dma_atom_128():
-    return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
-
-
-def _flat_buf_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
-    """One flat i<elem>-element buffer-tensor view (make_layout((1,1),(1,1))); slice
-    `view[off, None]` -> an i<elem><1:1> word for one fx.copy.
-
-    fold=True (the affine views): readfirstlane-fold the wave-uniform `base_elems` into
-    the descriptor base -> VGPR voffset (NOT a per-lane pointer waterfall); max_size bounds.
-    fold=False (A-gather): src offset is fully per-lane/data-dependent so base stays at
-    `arg`, the full offset is the slice coord, and num_records_bytes reproduces the raw
-    descriptor so OOB padded rows (token==M) still buffer-load 0 (OOB-zero preserved)."""
-    ptr_ty = fx.PointerType.get(elem_ty, address_space=fx.AddressSpace.Global, alignment=align)
-    if fold:
-        base = rocdl.readfirstlane(T.i32, _raw(base_elems))
-        off_i64 = fx.Int64(arith.ExtUIOp(T.i64, _raw(base)).result)
-        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg) + off_i64 * fx.Int64(elem_bytes))
-    else:
-        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg))
-    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout((1, 1), (1, 1))))
-    if num_records_bytes is not None:
-        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
-    return fx.rocdl.make_buffer_tensor(view, max_size=True)
 
 
 def bq_frag_tmpl(view):
@@ -310,8 +284,8 @@ def _gemm1_body_v2(
 
     # A-gather global->LDS DMA: per-lane data-dependent src (no fold), bounds reproduce
     # aq_rsrc (i32_ntok*K_BYTES) so OOB padded rows load 0.
-    _a_gather_atom = _lds_dma_atom_128()
-    _a_gather_src = _flat_buf_view(
+    _a_gather_atom = lds_dma_atom_128()
+    _a_gather_src = flat_buffer_view(
         arg_aq, None, T.i32, align=16, elem_bytes=4, fold=False,
         num_records_bytes=i32_ntok * fx.Int32(K_BYTES),
     )
@@ -342,7 +316,7 @@ def _gemm1_body_v2(
             s_aq_base, slot, BM * KH_TILE_A, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, _a_vals, _a_frags
         )
 
-    _asc_dma128 = _lds_dma_atom_128()
+    _asc_dma128 = lds_dma_atom_128()
     _asc_dma32 = fx.make_copy_atom(fx.rocdl.BufferCopyLDS32b(), 32)  # 4B A-scale chunk
 
     def issue_a_scale_load():
@@ -355,7 +329,7 @@ def _gemm1_body_v2(
         for sub in range_constexpr(kSubBlocks):
             base_dw = (chunk_base + fx.Int32(sub)) * fx.Int32(kAS_per_chunk_dw)  # s_chunk/4
             lds_sub = sub * kAS_per_chunk_dw * 4
-            src16 = _flat_buf_view(arg_ascale, base_dw, T.i32, align=16, elem_bytes=4)
+            src16 = flat_buffer_view(arg_ascale, base_dw, T.i32, align=16, elem_bytes=4)
             fx.copy(
                 _asc_dma128,
                 src16[v16_e, None],
@@ -363,7 +337,7 @@ def _gemm1_body_v2(
             )
             for d in range_constexpr(3):
                 byte_off = 4096 + d * 1024
-                src4 = _flat_buf_view(arg_ascale, base_dw + fx.Int32(byte_off // 4), T.i32, align=16, elem_bytes=4)
+                src4 = flat_buffer_view(arg_ascale, base_dw + fx.Int32(byte_off // 4), T.i32, align=16, elem_bytes=4)
                 fx.copy(
                     _asc_dma32,
                     src4[v4_e, None],
@@ -551,7 +525,7 @@ def _gemm1_body_v2(
     # row base folded into the view base, per-lane part is the slice index (VGPR voffset).
     _out_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(2), fx.Int32)  # nt i32 store
     _out_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
-    _aqout_view = _flat_buf_view(arg_aqout, m_row * fx.Int32(K_G2_BYTES // 4), T.i32, align=4, elem_bytes=4)
+    _aqout_view = flat_buffer_view(arg_aqout, m_row * fx.Int32(K_G2_BYTES // 4), T.i32, align=4, elem_bytes=4)
     scales_per_mr = [None] * kMChunks
 
     for mr in range_constexpr(kMChunks):
@@ -626,7 +600,7 @@ def _gemm1_body_v2(
             chunk = m_block_idx * fx.Int32(kSubBlocks) + fx.Int32(sub)
             # uniform i16 base = (chunk*OUT_AS_PER_CHUNK_DW + ku*64)*2 + ikxdl
             base_i16 = (chunk * fx.Int32(OUT_AS_PER_CHUNK_DW) + ku * fx.Int32(64)) * fx.Int32(2) + ikxdl
-            asc_view = _flat_buf_view(arg_ascaleout, base_i16, T.i16, align=2, elem_bytes=2)
+            asc_view = flat_buffer_view(arg_ascaleout, base_i16, T.i16, align=2, elem_bytes=2)
             pair_i32 = scales_per_mr[sub * 2 + 0] | (scales_per_mr[sub * 2 + 1] << fx.Int32(8))
             pair_i16 = arith.TruncIOp(T.i16, _raw(pair_i32)).result
             # per-lane i16 offset = (wave_grp*16 + m_lane)*2
@@ -655,8 +629,8 @@ def _issue_a_load_lds_dt(arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wav
     a_lane_row = lane // fx.Int32(lanes_per_row)
     lane_col = (lane % fx.Int32(lanes_per_row)) * fx.Int32(16)
     base_i32 = s_aq_base
-    atom = _lds_dma_atom_128()
-    src = _flat_buf_view(arg_aq, None, T.i32, align=16, elem_bytes=4, fold=False, num_records_bytes=aq_num_records)
+    atom = lds_dma_atom_128()
+    src = flat_buffer_view(arg_aq, None, T.i32, align=16, elem_bytes=4, fold=False, num_records_bytes=aq_num_records)
     for h in range_constexpr(am):
         lds_row = wave * fx.Int32(BM // 4) + fx.Int32(h * rows_per_call)
         mask = (

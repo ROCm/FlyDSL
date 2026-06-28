@@ -6,7 +6,10 @@ from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
+
+from .utils import _raw
 
 
 def preshuffle_b(b_t):
@@ -40,6 +43,43 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
     return fx.Tensor(fx.make_view(iter_f8, fx.get_layout(t_i8)))
 
 
+def lds_dma_atom_128():
+    """BufferCopyLDS128b copy-atom (one 128b = 16B global->LDS DMA chunk).
+
+    Single source of truth for the 128b global->LDS DMA atom shared by ``G2SLoader``
+    (fp8 A/B tile loads) and the MoE A-gather / 16B A-scale chunk loads in moegemm.
+    """
+    return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+
+
+def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
+    """One flat i<elem>-element buffer-tensor view (``make_layout((1,1),(1,1))``) over a
+    RAW i64 device address ``arg``; slice ``view[off, None]`` -> an i<elem><1:1> word for
+    one ``fx.copy``.
+
+    Single source of truth for the "flat buffer-tensor view from a raw address" idiom
+    (used by moegemm's A-gather/A-scale/output/output-scale data movement). This differs
+    from ``StoreC``'s ``logical_divide(make_buffer_tensor(typed_buf), layout(1,1))`` path,
+    which starts from an already-typed kernel-arg buffer (no inttoptr, no fold).
+
+    fold=True (the affine views): readfirstlane-fold the wave-uniform ``base_elems`` into
+    the descriptor base -> VGPR voffset (NOT a per-lane pointer waterfall); max_size bounds.
+    fold=False (data-dependent gather): src offset is fully per-lane so base stays at
+    ``arg``, the full offset is the slice coord, and ``num_records_bytes`` reproduces the
+    raw descriptor so OOB padded rows still buffer-load 0 (OOB-zero preserved)."""
+    ptr_ty = fx.PointerType.get(elem_ty, address_space=fx.AddressSpace.Global, alignment=align)
+    if fold:
+        base = fx.rocdl.readfirstlane(T.i32, _raw(base_elems))
+        off_i64 = fx.Int64(arith.ExtUIOp(T.i64, _raw(base)).result)
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg) + off_i64 * fx.Int64(elem_bytes))
+    else:
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg))
+    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout((1, 1), (1, 1))))
+    if num_records_bytes is not None:
+        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
+    return fx.rocdl.make_buffer_tensor(view, max_size=True)
+
+
 def swizzle_128(row, col):
     offset = row * 128 + col
     swizzle = ((offset % (16 * 128)) >> 8) << 4
@@ -67,7 +107,7 @@ def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
 
 class G2SLoader:
     def __init__(self, gl_src, gl_offsets, n_load_steps, lds_dtype, wave_id):
-        self.g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+        self.g2lds_atom = lds_dma_atom_128()
         self.LdsPtr_t = fx.PointerType.get(lds_dtype, 2, 512)
         self.gl_src = gl_src
         self.gl_offsets = gl_offsets
