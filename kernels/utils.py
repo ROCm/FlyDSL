@@ -21,7 +21,6 @@ KH_TILE = BK // 2  # 128 packed-fp4 bytes per K-tile
 kStages = 2
 kBS_stride_k0_dw = 64  # e8m0 scale-layout K-independent stride
 LOG2E = 1.4426950408889634
-_PTR3 = "!llvm.ptr<3>"
 
 
 # -- K-derived sizes (parametrized over the contraction dim K = inter_dim) -----
@@ -68,24 +67,19 @@ def kmchunks(BM):
 
 
 # -- raw / pointer / LDS helpers ----------------------------------------------
-def _raw(v):
+def raw(v):
     """Unwrap an fx value to a raw ir.Value for raw llvm/arith ops."""
     if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
         return v.ir_value()
     return v
 
 
-def _udiv(a, c):
+def udiv(a, c):
     cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(arith.divui(_raw(a), _raw(cc)))
+    return fx.Int32(arith.divui(raw(a), raw(cc)))
 
 
-def _lds_ptr3(base_i32, byte_off_i32):
-    """ptr<3> = inttoptr(i64(base_i32 + byte_off_i32))."""
-    return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(fx.Int64(base_i32 + byte_off_i32)))
-
-
-def _lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
+def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
     """LDS dst view for a buffer_load_lds DMA (align 16 for 128b, 4 for 32b chunks).
     Gotcha: FlyDSL AddressSpace.Shared = LDS (enum 2, NOT LLVM addrspace 3)."""
     if elem_ty is None:
@@ -95,72 +89,72 @@ def _lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
     return fx.make_view(lds_ptr, fx.make_layout(1, 1))
 
 
-def _global_base_ptr1(addr_i64):
+def global_base_ptr1(addr_i64):
     """One ptr<1> base from a raw i64 device address (bare data_ptr() kernarg)."""
-    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), _raw(fx.Int64(addr_i64)))
+    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), raw(fx.Int64(addr_i64)))
 
 
-def _gep1(base_ptr, byte_off_i32):
+def gep1(base_ptr, byte_off_i32):
     """getelementptr i8, base_ptr, byte_off_i32  (ptr<1>)."""
-    return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
+    return buffer_ops.get_element_ptr(base_ptr, byte_offset=raw(byte_off_i32), elem_type=T.i8)
 
 
-def _global_ptr1(arg, byte_off_i32):
-    return _gep1(_global_base_ptr1(arg), byte_off_i32)
+def global_ptr1(arg, byte_off_i32):
+    return gep1(global_base_ptr1(arg), byte_off_i32)
 
 
-def _global_typed_ptr(arg, elem_ty, align=4):
+def global_typed_ptr(arg, elem_ty, align=4):
     """Typed global fx.Pointer over a raw i64 device address; index in ELEMENTS
     (ptr[i] / ptr[i] = v), not bytes."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
-    return fx.inttoptr(ptr_ty, _raw(fx.Int64(arg)))
+    return fx.inttoptr(ptr_ty, raw(fx.Int64(arg)))
 
 
-def _lds_typed_ptr(base_i32, elem_ty, align=4):
+def lds_typed_ptr(base_i32, elem_ty, align=4):
     """Typed LDS (Shared) fx.Pointer over an i32 LDS base address; index in ELEMENTS
     (ptr[i] / ptr[i] = v), not bytes."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
     return fx.inttoptr(ptr_ty, fx.Int32(base_i32))
 
 
-def _lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
+def lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
     """Typed LDS ds-read at BYTE offset from the i32 LDS base; mirrors raw
     llvm.load(result_type, gep_i8(base, off)). result_type may be vector or scalar."""
     elem_ir_ty = elem_ty.ir_type if hasattr(elem_ty, "ir_type") else elem_ty
-    ptr = _lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
+    ptr = lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
     return fx.ptr_load(ptr, result_type=result_type)
 
 
-def _lds_swizzle_mask(row):
+def lds_swizzle_mask(row):
     """lds_swizzle_mask<ROW_BYTES=BK/2=128>(row) = (row & 14) << 3 (fp4 A tile)."""
     return (row & fx.Int32(14)) << fx.Int32(3)
 
 
-def _lds_swizzle_mask_f8(row):
+def lds_swizzle_mask_f8(row):
     """lds_swizzle_mask<ROW_BYTES=256>(row) = (row & 15) << 4 (fp8 A tile)."""
     return (row & fx.Int32(15)) << fx.Int32(4)
 
 
 # -- e8m0 / SwiGLU quant math -------------------------------------------------
-def _silu_mul_batch(gs, us):
+def silu_mul_batch(gs, us):
     """silu(g)*u via exp2/rcp (matches HIP silu_mul_fast)."""
-    e = [fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(-LOG2E)))) for g in gs]
-    sig = [fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + ei))) for ei in e]
+    e = [fx.Float32(rocdl.exp2(T.f32, raw(g * fx.Float32(-LOG2E)))) for g in gs]
+    sig = [fx.Float32(rocdl.rcp(T.f32, raw(fx.Float32(1.0) + ei))) for ei in e]
     return [gs[i] * sig[i] * us[i] for i in range(len(gs))]
 
 
-def _fabs_f32(x):
+def fabs_f32(x):
     """fabsf via sign-bit clear (FlyDSL has no arith.absf)."""
-    abs_bits = _raw(x).bitcast(T.i32) & _raw(fx.Int32(0x7FFFFFFF))
+    abs_bits = raw(x).bitcast(T.i32) & raw(fx.Int32(0x7FFFFFFF))
     return fx.Float32(abs_bits.bitcast(T.f32))
 
 
-def _e8m0_from_amax(amax_f32, dtype_max=6.0):
+def e8m0_from_amax(amax_f32, dtype_max=6.0):
     """(e8m0_i32, quant_scale_f32) = ceil_pow2(amax/dtype_max) clamped to 254.
     dtype_max is the output format's max magnitude (fp4 e2m1 = 6, fp8 e4m3 = 448)."""
-    wi = fx.Int32(_raw(amax_f32 * fx.Float32(1.0 / dtype_max)).bitcast(T.i32))
+    wi = fx.Int32(raw(amax_f32 * fx.Float32(1.0 / dtype_max)).bitcast(T.i32))
     bexp = (wi + fx.Int32(0x7FFFFF)).shrui(fx.Int32(23)) & fx.Int32(0xFF)
-    lt = arith.cmpi(arith.CmpIPredicate.ult, _raw(bexp), _raw(fx.Int32(254)))
-    e8m0 = fx.Int32(arith.select(lt, _raw(bexp), _raw(fx.Int32(254))))
-    qscale = fx.Float32(_raw(e8m0 << fx.Int32(23)).bitcast(T.f32))
+    lt = arith.cmpi(arith.CmpIPredicate.ult, raw(bexp), raw(fx.Int32(254)))
+    e8m0 = fx.Int32(arith.select(lt, raw(bexp), raw(fx.Int32(254))))
+    qscale = fx.Float32(raw(e8m0 << fx.Int32(23)).bitcast(T.f32))
     return e8m0, qscale

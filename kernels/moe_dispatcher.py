@@ -19,10 +19,10 @@ from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
 
 from .moegemm import (
-    _gemm1_body_v2,
-    _gemm2_body_v2,
-    _issue_a_load_lds_dt,
-    _lds_bytes_for,
+    gemm1_body_v2,
+    gemm2_body_v2,
+    issue_a_load_lds_dt,
+    lds_bytes_for,
 )
 from .utils import (
     BK,
@@ -32,12 +32,12 @@ from .utils import (
     MAX_M,
     NE,
     TOPK_DEFAULT,
-    _global_ptr1,
-    _raw,
-    _udiv,
+    global_ptr1,
     k_tiles_total_for,
     kStages,
     num_n_blocks_for,
+    raw,
+    udiv,
 )
 
 __all__ = [
@@ -82,19 +82,19 @@ def compile_gemm1_a4w4_port(
     if out_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"out_dtype must be 'fp4' or 'fp8', got {out_dtype!r}")
 
-    _K, _INTER, _NE = D_HIDDEN, D_INTER, NE
-    assert _K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {_K}"
-    _N_OUT = 2 * _INTER
-    assert _N_OUT % BN == 0, f"2*D_INTER (N_OUT) must be a multiple of {BN}, got {_N_OUT}"
+    K, INTER, NE = D_HIDDEN, D_INTER, NE
+    assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
+    N_OUT = 2 * INTER
+    assert N_OUT % BN == 0, f"2*D_INTER (N_OUT) must be a multiple of {BN}, got {N_OUT}"
 
-    _KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = _lds_bytes_for(_K // BK, _KH_TILE_A)  # K_TILES_TOTAL
+    KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
+    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A)  # K_TILES_TOTAL
 
     gu_tag = "il" if interleave else "sep"
     bnt_tag = "nt" if b_nontemporal else "cached"
     a_tag = "a8" if a_dtype == "fp8" else "a4"
     o_tag = "o8" if out_dtype == "fp8" else "o4"
-    name_suffix = f"h{_K}_i{_INTER}_ne{_NE}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
+    name_suffix = f"h{K}_i{INTER}_ne{NE}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
 
     @fx.struct
     class SharedStorage:
@@ -122,11 +122,11 @@ def compile_gemm1_a4w4_port(
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
-        cumsum0 = llvm.load(T.i32, _global_ptr1(arg_cumsum, fx.Int32(0)))
+        cumsum0 = llvm.load(T.i32, global_ptr1(arg_cumsum, fx.Int32(0)))
         total_m_blocks = cumsum0 // fx.Int32(BM)
-        bound = total_m_blocks * fx.Int32(_N_OUT // 256)  # * NUM_N_BLOCKS
+        bound = total_m_blocks * fx.Int32(N_OUT // 256)  # * NUM_N_BLOCKS
         if fx.Int32(bx_i32) < bound:
-            _gemm1_body_v2(
+            gemm1_body_v2(
                 lds_base_i32,
                 arg_aq,
                 arg_ascale,
@@ -141,9 +141,9 @@ def compile_gemm1_a4w4_port(
                 wave,
                 i32_ntok,
                 total_m_blocks,
-                K=_K,
-                INTER=_INTER,
-                NE=_NE,
+                K=K,
+                INTER=INTER,
+                NE=NE,
                 interleave=interleave,
                 b_nontemporal=b_nontemporal,
                 a_dtype=a_dtype,
@@ -214,26 +214,26 @@ def compile_gemm2_a4w4_port(
         )
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
-    _K = D_INTER
-    assert _K % BK == 0, f"D_INTER (gemm2 contraction K = inter_dim) must be a multiple of {BK}, got {_K}"
-    _is_f8 = a_dtype == "fp8"
-    _KH_TILE_A = BK // (1 if _is_f8 else 2)  # A LDS K-tile bytes (fp8 256, fp4 128)
-    _K_BYTES = _K // (1 if _is_f8 else 2)  # A row stride bytes (fp8 K, fp4 K//2)
-    _slot_bytes = BM * _KH_TILE_A
-    _K_TILES_TOTAL = k_tiles_total_for(_K)
-    _aStages = kStages if _K_TILES_TOTAL <= kStages else 3
-    _lds_bytes = max(BM * BN * 4, _aStages * _slot_bytes)
-    _num_n_blocks = num_n_blocks_for(N_OUT)
+    K = D_INTER
+    assert K % BK == 0, f"D_INTER (gemm2 contraction K = inter_dim) must be a multiple of {BK}, got {K}"
+    is_f8 = a_dtype == "fp8"
+    KH_TILE_A = BK // (1 if is_f8 else 2)  # A LDS K-tile bytes (fp8 256, fp4 128)
+    K_BYTES = K // (1 if is_f8 else 2)  # A row stride bytes (fp8 K, fp4 K//2)
+    slot_bytes = BM * KH_TILE_A
+    K_TILES_TOTAL = k_tiles_total_for(K)
+    aStages = kStages if K_TILES_TOTAL <= kStages else 3
+    lds_bytes = max(BM * BN * 4, aStages * slot_bytes)
+    num_n_blocks = num_n_blocks_for(N_OUT)
 
-    _atag = "_a8" if _is_f8 else ""
-    _tag = f"ne{NE}_h{N_OUT}_i{_K}_bm{BM}{'_nt' if use_nt else ''}_atomic{_atag}_v2"
-    _name = f"gemm2_a4w4_port_{_tag}"
+    atag = "_a8" if is_f8 else ""
+    tag = f"ne{NE}_h{N_OUT}_i{K}_bm{BM}{'_nt' if use_nt else ''}_atomic{atag}_v2"
+    name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
     class SharedStorage:
-        buf: fx.Array[Int8, _lds_bytes, 16]
+        buf: fx.Array[Int8, lds_bytes, 16]
 
-    @flyc.kernel(name=_name, known_block_size=[256, 1, 1])
+    @flyc.kernel(name=name, known_block_size=[256, 1, 1])
     def gemm2_kernel(
         arg_aq: fx.Int64,
         arg_ascale: fx.Int64,
@@ -255,40 +255,40 @@ def compile_gemm2_a4w4_port(
         lane = tx_i32 % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
 
-        _aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(BM * _K_BYTES)
-        aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=_aq_num)
+        aq_num = arith.index_cast(T.index, raw(i32_max_m_blocks)) * fx.Index(BM * K_BYTES)
+        aq_rsrc = buffer_ops.create_buffer_resource_from_addr(raw(fx.Int64(arg_aq)), num_records_bytes=aq_num)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
 
         # Preload the first kStages K-tiles (all tiles for the K_TILES<=2 fast path;
         # the prologue for the streaming path). slot == kt for the preload.
-        def _issue_all_a_loads(m_row0):
+        def issue_all_a_loads(m_row0):
             for slot in range_constexpr(kStages):
-                _issue_a_load_lds_dt(
+                issue_a_load_lds_dt(
                     arg_aq,
-                    _aq_num,
+                    aq_num,
                     lds_base_i32,
                     slot,
                     slot,
                     m_row0,
                     wave,
                     lane,
-                    _is_f8,
-                    _KH_TILE_A,
-                    _K_BYTES,
+                    is_f8,
+                    KH_TILE_A,
+                    K_BYTES,
                 )
 
         # One-shot grid (atomic). Issue A->LDS BEFORE the cumsum load so the HBM
         # latency overlaps the cumsum + bound check (A->LDS depends only on bx/lane).
-        _issue_all_a_loads(_udiv(bx_i32, _num_n_blocks) * fx.Int32(BM))
+        issue_all_a_loads(udiv(bx_i32, num_n_blocks) * fx.Int32(BM))
         rocdl.sched_barrier(0)
 
-        cumsum0 = llvm.load(T.i32, _global_ptr1(arg_cumsum, fx.Int32(0)))
-        total_m_blocks = _udiv(cumsum0, BM)
-        bound = total_m_blocks * fx.Int32(_num_n_blocks)
+        cumsum0 = llvm.load(T.i32, global_ptr1(arg_cumsum, fx.Int32(0)))
+        total_m_blocks = udiv(cumsum0, BM)
+        bound = total_m_blocks * fx.Int32(num_n_blocks)
 
         if fx.Int32(bx_i32) < bound:
-            _gemm2_body_v2(
+            gemm2_body_v2(
                 lds_base_i32,
                 arg_ascale,
                 arg_bq,
@@ -307,8 +307,8 @@ def compile_gemm2_a4w4_port(
                 use_nt=use_nt,
                 NE=NE,
                 N_OUT=N_OUT,
-                D_INTER=_K,
-                aStages=_aStages,
+                D_INTER=K,
+                aStages=aStages,
                 a_dtype=a_dtype,
             )
 
@@ -328,7 +328,7 @@ def compile_gemm2_a4w4_port(
         arg_out_scale: fx.Int64,
         stream: fx.Stream,
     ):
-        grid_x = arith.index_cast(T.index, i32_max_m_blocks) * fx.Index(_num_n_blocks)
+        grid_x = arith.index_cast(T.index, i32_max_m_blocks) * fx.Index(num_n_blocks)
         gemm2_kernel(
             arg_aq,
             arg_ascale,
@@ -350,11 +350,11 @@ def compile_gemm2_a4w4_port(
 # ===========================================================================
 # launcher cache + dispatch (compile once per config, fast-dispatch after)
 # ===========================================================================
-_G1_CACHE = {}
-_G2_CACHE = {}
+G1_CACHE = {}
+G2_CACHE = {}
 
 
-def _run_compiled(exe, args):
+def run_compiled(exe, args):
     """First call: flyc.compile (compiles + executes + caches the CompiledFunction)
     on ``exe._cf``. Subsequent calls: fast dispatch via the cached function."""
     cf = getattr(exe, "_cf", None)
@@ -363,7 +363,7 @@ def _run_compiled(exe, args):
         return
     try:
         cf = flyc.compile(exe, *args)
-        exe._cf = cf
+        exe.cf = cf
     except Exception:
         # JitFunction.__call__ leaks ir.Context on compile failure; clean up so a
         # later call doesn't take the wrong (no-CompilationContext) code path.
@@ -375,9 +375,9 @@ def _run_compiled(exe, args):
         raise
 
 
-def _get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype):
+def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype):
     key = (BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype)
-    launch = _G1_CACHE.get(key)
+    launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
             BM=BM,
@@ -391,13 +391,13 @@ def _get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a
             a_dtype=a_dtype,
             out_dtype=out_dtype,
         )
-        _G1_CACHE[key] = launch
+        G1_CACHE[key] = launch
     return launch
 
 
-def _get_g2(BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype):
+def get_g2(BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype):
     key = (BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype)
-    launch = _G2_CACHE.get(key)
+    launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
             BM=BM,
@@ -409,7 +409,7 @@ def _get_g2(BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype):
             D_INTER_REAL=D_INTER_REAL,
             a_dtype=a_dtype,
         )
-        _G2_CACHE[key] = launch
+        G2_CACHE[key] = launch
     return launch
 
 
@@ -446,9 +446,9 @@ def mxfp4_moe_gemm1(
     """
     import torch
 
-    launch = _get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype)
+    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype)
     grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
-    _run_compiled(
+    run_compiled(
         launch,
         (
             a_quant.data_ptr(),
@@ -500,10 +500,10 @@ def mxfp4_moe_gemm2(
     """
     import torch
 
-    launch = _get_g2(BM, use_nt, NE, D_HIDDEN, "atomic", D_INTER, D_INTER_REAL, a_dtype)
+    launch = get_g2(BM, use_nt, NE, D_HIDDEN, "atomic", D_INTER, D_INTER_REAL, a_dtype)
     max_m_blocks = (max_sorted + BM - 1) // BM
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
-    _run_compiled(
+    run_compiled(
         launch,
         (
             inter_sorted_quant.data_ptr(),
