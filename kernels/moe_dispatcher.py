@@ -1,20 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
-"""Compile + launch dispatch for the layout-API MXFP4 MoE gemm (BM32, opus-sort).
-
-Public entry point for the a4w4 / a8w4 surface. Consumes the opus sort contract
-from ``moe_sorting_kernel`` (``sorted_token_ids`` = (topk<<24)|token_id, sentinel
-(topk<<24)|M); no fused-sort extras. gemm2's atomic epilogue scatters into the
-pre-zeroed output, so there is no reverse-permutation dependency.
-
-The ``compile_*`` builders wrap the ``moegemm`` device bodies (@flyc.jit) in the
-@flyc.kernel entry + @flyc.jit launch; basics come from ``utils``.
-"""
+"""Compile + launch dispatch for the layout-API MXFP4 MoE gemm (BM32, opus-sort); a4w4/a8w4 entry point."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
 
@@ -24,6 +13,7 @@ from .moegemm import (
     issue_a_load_lds_dt,
     lds_bytes_for,
 )
+from .tensor_shim import _run_compiled as run_compiled
 from .utils import (
     BK,
     BN,
@@ -32,7 +22,7 @@ from .utils import (
     MAX_M,
     NE,
     TOPK_DEFAULT,
-    global_ptr1,
+    global_typed_ptr,
     k_tiles_total_for,
     kStages,
     num_n_blocks_for,
@@ -49,9 +39,7 @@ __all__ = [
 ]
 
 
-# ===========================================================================
-# gemm1 (up/gate-proj) compile
-# ===========================================================================
+# ---- gemm1 (up/gate-proj) compile ----
 def gemm1_grid(n_tokens, BM=32, NE=NE, TOPK=TOPK_DEFAULT, INTER=INTER_DEFAULT):
     """Host-side grid size (BM=32 active-experts bound)."""
     active = min(n_tokens * TOPK, NE)
@@ -122,7 +110,7 @@ def compile_gemm1_a4w4_port(
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
-        cumsum0 = llvm.load(T.i32, global_ptr1(arg_cumsum, fx.Int32(0)))
+        cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
         total_m_blocks = cumsum0 // fx.Int32(BM)
         bound = total_m_blocks * fx.Int32(N_OUT // 256)  # * NUM_N_BLOCKS
         if fx.Int32(bx_i32) < bound:
@@ -184,9 +172,7 @@ def compile_gemm1_a4w4_port(
     return launch_gemm1
 
 
-# ===========================================================================
-# gemm2 (down-proj) compile
-# ===========================================================================
+# ---- gemm2 (down-proj) compile ----
 def compile_gemm2_a4w4_port(
     BM=32,
     use_nt=False,
@@ -198,11 +184,7 @@ def compile_gemm2_a4w4_port(
     D_INTER_REAL=None,
     a_dtype="fp4",
 ):
-    """Compile the gemm2 a4w4 layout-API down-proj. Only (BM=32, epilog="atomic") is
-    supported; D_INTER (= contraction K = inter_dim) must be a multiple of BK(256)
-    (512 keeps the fully-unrolled fast path; >512 uses the streaming K-loop).
-    a_dtype="fp8" reads an mxfp8 intermediate (gemm1 out_dtype="fp8"). The
-    D_INTER_REAL pad-tail (unpadded non-256-aligned shards) is not supported."""
+    """Compile the gemm2 a4w4 down-proj; only (BM=32, atomic) supported, D_INTER a multiple of BK(256)."""
     if (BM, epilog) != (32, "atomic"):
         raise AssertionError(
             f"mxfp4_moe_gemm2 supports only (BM=32, epilog='atomic'); " f"got (BM={BM}, epilog={epilog})"
@@ -260,8 +242,7 @@ def compile_gemm2_a4w4_port(
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
 
-        # Preload the first kStages K-tiles (all tiles for the K_TILES<=2 fast path;
-        # the prologue for the streaming path). slot == kt for the preload.
+        # Preload the first kStages K-tiles (all tiles for the K_TILES<=2 fast path; else the prologue).
         def issue_all_a_loads(m_row0):
             for slot in range_constexpr(kStages):
                 issue_a_load_lds_dt(
@@ -278,12 +259,11 @@ def compile_gemm2_a4w4_port(
                     K_BYTES,
                 )
 
-        # One-shot grid (atomic). Issue A->LDS BEFORE the cumsum load so the HBM
-        # latency overlaps the cumsum + bound check (A->LDS depends only on bx/lane).
+        # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
         issue_all_a_loads(udiv(bx_i32, num_n_blocks) * fx.Int32(BM))
         rocdl.sched_barrier(0)
 
-        cumsum0 = llvm.load(T.i32, global_ptr1(arg_cumsum, fx.Int32(0)))
+        cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
         total_m_blocks = udiv(cumsum0, BM)
         bound = total_m_blocks * fx.Int32(num_n_blocks)
 
@@ -347,32 +327,9 @@ def compile_gemm2_a4w4_port(
     return launch_gemm2
 
 
-# ===========================================================================
-# launcher cache + dispatch (compile once per config, fast-dispatch after)
-# ===========================================================================
+# ---- launcher cache + dispatch (compile once per config, fast-dispatch after) ----
 G1_CACHE = {}
 G2_CACHE = {}
-
-
-def run_compiled(exe, args):
-    """First call: flyc.compile (compiles + executes + caches the CompiledFunction)
-    on ``exe._cf``. Subsequent calls: fast dispatch via the cached function."""
-    cf = getattr(exe, "_cf", None)
-    if cf is not None:
-        cf(*args)
-        return
-    try:
-        cf = flyc.compile(exe, *args)
-        exe.cf = cf
-    except Exception:
-        # JitFunction.__call__ leaks ir.Context on compile failure; clean up so a
-        # later call doesn't take the wrong (no-CompilationContext) code path.
-        try:
-            while ir.Context.current is not None:
-                ir.Context.current.__exit__(None, None, None)
-        except Exception:
-            pass
-        raise
 
 
 def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype):
@@ -438,33 +395,26 @@ def mxfp4_moe_gemm1(
     out_dtype="fp4",
     stream=None,
 ):
-    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4 / MXFP8, sorted layout).
-
-    Buffers are pre-allocated by the caller. w1_u8 / w1_scale_u8 must be uint8
-    views. ``sorted_token_ids`` is the opus-sort output (gemm1 masks it to the
-    token id internally).
-    """
+    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller."""
     import torch
 
     launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype)
     grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
     run_compiled(
         launch,
-        (
-            a_quant.data_ptr(),
-            a_scale_sorted_shuffled.data_ptr(),
-            w1_u8.data_ptr(),
-            w1_scale_u8.data_ptr(),
-            sorted_expert_ids.data_ptr(),
-            cumsum_tensor.data_ptr(),
-            sorted_token_ids.data_ptr(),
-            n_tokens,
-            grid,
-            inter_sorted_quant.data_ptr(),
-            inter_sorted_shuffled_scale.data_ptr(),
-            hidden_states.data_ptr(),
-            torch.cuda.current_stream() if stream is None else stream,
-        ),
+        a_quant.data_ptr(),
+        a_scale_sorted_shuffled.data_ptr(),
+        w1_u8.data_ptr(),
+        w1_scale_u8.data_ptr(),
+        sorted_expert_ids.data_ptr(),
+        cumsum_tensor.data_ptr(),
+        sorted_token_ids.data_ptr(),
+        n_tokens,
+        grid,
+        inter_sorted_quant.data_ptr(),
+        inter_sorted_shuffled_scale.data_ptr(),
+        hidden_states.data_ptr(),
+        torch.cuda.current_stream() if stream is None else stream,
     )
     return inter_sorted_quant, inter_sorted_shuffled_scale
 
@@ -492,12 +442,7 @@ def mxfp4_moe_gemm2(
     D_INTER_REAL=None,
     stream=None,
 ):
-    """Stage-2 down-proj gemm (atomic bf16 epilog): scatters per sorted row into
-    ``out`` via weighted ``global.atomic.fadd`` (opus-sort only, no reverse_sorted).
-
-    ``out`` MUST be pre-zeroed ([M, D_HIDDEN] bf16) -- the opus sort zeroes its
-    ``moe_buf`` for exactly this accumulation.
-    """
+    """Stage-2 down-proj gemm (atomic bf16 epilog): weighted atomic.fadd into pre-zeroed out (opus-sort only)."""
     import torch
 
     launch = get_g2(BM, use_nt, NE, D_HIDDEN, "atomic", D_INTER, D_INTER_REAL, a_dtype)
@@ -505,20 +450,18 @@ def mxfp4_moe_gemm2(
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
     run_compiled(
         launch,
-        (
-            inter_sorted_quant.data_ptr(),
-            inter_sorted_shuffled_scale.data_ptr(),
-            w2_u8.data_ptr(),
-            w2_scale_u8.data_ptr(),
-            sorted_expert_ids.data_ptr(),
-            cumsum_tensor.data_ptr(),
-            sorted_token_ids.data_ptr(),
-            sorted_weights.data_ptr(),
-            M_logical,
-            max_m_blocks,
-            out.data_ptr(),
-            out_scale.data_ptr(),
-            torch.cuda.current_stream() if stream is None else stream,
-        ),
+        inter_sorted_quant.data_ptr(),
+        inter_sorted_shuffled_scale.data_ptr(),
+        w2_u8.data_ptr(),
+        w2_scale_u8.data_ptr(),
+        sorted_expert_ids.data_ptr(),
+        cumsum_tensor.data_ptr(),
+        sorted_token_ids.data_ptr(),
+        sorted_weights.data_ptr(),
+        M_logical,
+        max_m_blocks,
+        out.data_ptr(),
+        out_scale.data_ptr(),
+        torch.cuda.current_stream() if stream is None else stream,
     )
     return out

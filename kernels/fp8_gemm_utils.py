@@ -28,10 +28,7 @@ def divmod(a: int, b: int) -> tuple[int, int]:
 
 
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
-    # max_size=False with no num_records_bytes: cosize(layout) becomes a
-    # runtime expression because TensorAdaptor defaults to layout-dynamic
-    # memref (post #554), so the descriptor adapts to the actual tensor
-    # extent and no longer bakes the first-call's shape into IR.
+    # max_size=False without num_records_bytes: descriptor adapts to the actual extent (no shape baked into IR).
     t_i8 = fx.rocdl.make_buffer_tensor(arg_i8, max_size=False)
     iter_i8 = fx.get_iter(t_i8)
     f8_buf_ptr_ty = fx.PointerType.get(
@@ -44,29 +41,12 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
 
 
 def lds_dma_atom_128():
-    """BufferCopyLDS128b copy-atom (one 128b = 16B global->LDS DMA chunk).
-
-    Single source of truth for the 128b global->LDS DMA atom shared by ``G2SLoader``
-    (fp8 A/B tile loads) and the MoE A-gather / 16B A-scale chunk loads in moegemm.
-    """
+    """BufferCopyLDS128b copy-atom (16B global->LDS DMA chunk), shared by G2SLoader + moegemm."""
     return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
 
 
 def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
-    """One flat i<elem>-element buffer-tensor view (``make_layout((1,1),(1,1))``) over a
-    RAW i64 device address ``arg``; slice ``view[off, None]`` -> an i<elem><1:1> word for
-    one ``fx.copy``.
-
-    Single source of truth for the "flat buffer-tensor view from a raw address" idiom
-    (used by moegemm's A-gather/A-scale/output/output-scale data movement). This differs
-    from ``StoreC``'s ``logical_divide(make_buffer_tensor(typed_buf), layout(1,1))`` path,
-    which starts from an already-typed kernel-arg buffer (no inttoptr, no fold).
-
-    fold=True (the affine views): readfirstlane-fold the wave-uniform ``base_elems`` into
-    the descriptor base -> VGPR voffset (NOT a per-lane pointer waterfall); max_size bounds.
-    fold=False (data-dependent gather): src offset is fully per-lane so base stays at
-    ``arg``, the full offset is the slice coord, and ``num_records_bytes`` reproduces the
-    raw descriptor so OOB padded rows still buffer-load 0 (OOB-zero preserved)."""
+    """Flat i<elem> buffer-tensor view over a RAW i64 address; fold=True folds the wave-uniform base to a VGPR voffset, fold=False keeps a per-lane offset + num_records_bytes for OOB-zero."""
     ptr_ty = fx.PointerType.get(elem_ty, address_space=fx.AddressSpace.Global, alignment=align)
     if fold:
         base = fx.rocdl.readfirstlane(T.i32, raw(base_elems))
@@ -182,9 +162,7 @@ class StoreC:
         self.c_idx_fn = c_idx_fn
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
-        # Exact byte counts from compile-time shape (BF16 C output, FP32 scales).
-        # ``num_records_bytes`` is required when ``max_size=False`` -- see
-        # ``make_buffer_tensor`` docstring for the silent-OOB rationale.
+        # Exact byte counts from compile-time shape; num_records_bytes required when max_size=False (silent-OOB).
         c_nbytes = c_rows * c_cols * 2  # BFloat16 = 2 bytes
         sa_nbytes = c_rows * 4  # Float32 row-wise scale
         sb_nbytes = c_cols * 4  # Float32 col-wise scale

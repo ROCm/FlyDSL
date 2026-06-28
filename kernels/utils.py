@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
-"""Basics for the layout-API MXFP4 MoE gemm: shape/size constants, pointer/LDS
-helpers, e8m0 + SwiGLU quant math. MMA + data movement live in ``moegemm``."""
+"""Basics for the layout-API MXFP4 MoE gemm: shape/size constants, pointer/LDS helpers, e8m0+SwiGLU math."""
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -80,8 +79,7 @@ def udiv(a, c):
 
 
 def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
-    """LDS dst view for a buffer_load_lds DMA (align 16 for 128b, 4 for 32b chunks).
-    Gotcha: FlyDSL AddressSpace.Shared = LDS (enum 2, NOT LLVM addrspace 3)."""
+    """LDS dst view for buffer_load_lds DMA; gotcha: FlyDSL AddressSpace.Shared = LDS (enum 2, not addrspace 3)."""
     if elem_ty is None:
         elem_ty = T.i32
     lds_ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
@@ -99,27 +97,20 @@ def gep1(base_ptr, byte_off_i32):
     return buffer_ops.get_element_ptr(base_ptr, byte_offset=raw(byte_off_i32), elem_type=T.i8)
 
 
-def global_ptr1(arg, byte_off_i32):
-    return gep1(global_base_ptr1(arg), byte_off_i32)
-
-
 def global_typed_ptr(arg, elem_ty, align=4):
-    """Typed global fx.Pointer over a raw i64 device address; index in ELEMENTS
-    (ptr[i] / ptr[i] = v), not bytes."""
+    """Typed global fx.Pointer over a raw i64 device address; index in ELEMENTS (ptr[i]), not bytes."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
     return fx.inttoptr(ptr_ty, raw(fx.Int64(arg)))
 
 
 def lds_typed_ptr(base_i32, elem_ty, align=4):
-    """Typed LDS (Shared) fx.Pointer over an i32 LDS base address; index in ELEMENTS
-    (ptr[i] / ptr[i] = v), not bytes."""
+    """Typed LDS (Shared) fx.Pointer over an i32 LDS base; index in ELEMENTS (ptr[i]), not bytes."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
     return fx.inttoptr(ptr_ty, fx.Int32(base_i32))
 
 
 def lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
-    """Typed LDS ds-read at BYTE offset from the i32 LDS base; mirrors raw
-    llvm.load(result_type, gep_i8(base, off)). result_type may be vector or scalar."""
+    """Typed LDS ds-read at a BYTE offset from the i32 LDS base; mirrors raw llvm.load (vector or scalar)."""
     elem_ir_ty = elem_ty.ir_type if hasattr(elem_ty, "ir_type") else elem_ty
     ptr = lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
     return fx.ptr_load(ptr, result_type=result_type)
@@ -150,8 +141,7 @@ def fabs_f32(x):
 
 
 def e8m0_from_amax(amax_f32, dtype_max=6.0):
-    """(e8m0_i32, quant_scale_f32) = ceil_pow2(amax/dtype_max) clamped to 254.
-    dtype_max is the output format's max magnitude (fp4 e2m1 = 6, fp8 e4m3 = 448)."""
+    """(e8m0_i32, quant_scale_f32) = ceil_pow2(amax/dtype_max) clamped to 254 (dtype_max: fp4=6, fp8=448)."""
     wi = fx.Int32(raw(amax_f32 * fx.Float32(1.0 / dtype_max)).bitcast(T.i32))
     bexp = (wi + 0x7FFFFF).shrui(fx.Int32(23)) & 0xFF
     e8m0 = (bexp < 254).select(bexp, fx.Int32(254))
