@@ -87,16 +87,6 @@ def _lds_ptr3(base_i32, byte_off_i32):
     return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(fx.Int64(base_i32 + byte_off_i32)))
 
 
-def _lds_base3(base_i32):
-    """ptr<3> for an LDS base address (i32); offsets via GEP."""
-    return llvm.inttoptr(ir.Type.parse(_PTR3), _raw(fx.Int64(base_i32)))
-
-
-def _gep3(base_ptr, byte_off_i32):
-    """getelementptr i8, base_ptr, byte_off_i32  (ptr<3>)."""
-    return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
-
-
 def _lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
     """LDS dst view (one unit elem at i32-byte addr base_i32+byte_off_i32) for a
     buffer_load_lds DMA. align=16 for the 128b chunk, 4 for 32b chunks. Gotcha: FlyDSL's
@@ -134,6 +124,21 @@ def _lds_typed_ptr(base_i32, elem_ty, align=4):
     (ptr[i] / ptr[i] = v), not bytes."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
     return fx.inttoptr(ptr_ty, fx.Int32(base_i32))
+
+
+def _lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
+    """Typed LDS ds-read at BYTE offset ``byte_off_i32`` from the i32 LDS base.
+
+    Mirrors a raw ``llvm.load(result_type, gep_i8(base, byte_off))``: add the
+    BYTE offset to the i32 LDS base address, build a typed Shared pointer of the
+    scalar element type ``elem_ty`` at that byte address, then ``ptr_load`` with
+    the (vector or scalar) ``result_type``. Same load instruction / byte offset
+    as the raw GEP+load. ``result_type`` may be an ``ir.Type`` (e.g.
+    ``Vec.make_type(...)``) or a Numeric subclass; ``elem_ty`` is the scalar
+    Numeric element type and ``align`` the natural alignment of the result."""
+    elem_ir_ty = elem_ty.ir_type if hasattr(elem_ty, "ir_type") else elem_ty
+    ptr = _lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
+    return fx.ptr_load(ptr, result_type=result_type)
 
 
 def _lds_swizzle_mask(row):

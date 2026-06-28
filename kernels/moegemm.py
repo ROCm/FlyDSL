@@ -27,14 +27,13 @@ from .utils import (
     _e8m0_from_amax,
     _fabs_f32,
     _gep1,
-    _gep3,
     _global_base_ptr1,
     _global_typed_ptr,
-    _lds_base3,
     _lds_dma_dst,
     _lds_swizzle_mask,
     _lds_swizzle_mask_f8,
     _lds_typed_ptr,
+    _lds_vec_load,
     _raw,
     _silu_mul_batch,
     _udiv,
@@ -141,7 +140,6 @@ def gemm_mma(atoms, a_frag, b_frag, c_frag, opsel_a, opsel_b, sa, sb):
 def _issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8, a_vals, a_frags):
     """A ds-read for one slot: fp4 -> Vec4 i32 into a_frags; fp8 -> Vec8 i32 (two
     halves 64B apart) into a_vals."""
-    base_ptr = _lds_base3(s_aq_base)
     for k in range_constexpr(2):
         for i in range_constexpr(kMChunks):
             lds_row = lane_mod_16 + fx.Int32(i * 16)
@@ -151,14 +149,14 @@ def _issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lan
                 col0 = lane_div_16 * fx.Int32(16) + fx.Int32(k * 128)
                 col_lo = col0 ^ mask
                 col_hi = (col0 + fx.Int32(64)) ^ mask
-                lo = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_lo)))
-                hi = Vec(llvm.load(T.vec(2, T.i64), _gep3(base_ptr, row_off + col_hi)))
+                lo = Vec(_lds_vec_load(s_aq_base, row_off + col_lo, Vec.make_type(2, fx.Int64), fx.Int64, align=16))
+                hi = Vec(_lds_vec_load(s_aq_base, row_off + col_hi, Vec.make_type(2, fx.Int64), fx.Int64, align=16))
                 a64 = Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64)
                 a_vals[i][k] = _raw(a64.bitcast(fx.Int32))
             else:
                 mask = _lds_swizzle_mask(lane_mod_16)
                 lds_col = (lane_div_16 * fx.Int32(16) + fx.Int32(k * 64)) ^ mask
-                vec = llvm.load(T.vec(4, T.i32), _gep3(base_ptr, row_off + lds_col))
+                vec = _lds_vec_load(s_aq_base, row_off + lds_col, Vec.make_type(4, fx.Int32), fx.Int32, align=16)
                 a_frags[i][k].store(Vec(vec))
 
 
@@ -347,11 +345,11 @@ def _gemm1_body_v2(
                 )
 
     def issue_a_scale_ds_read(kt):
-        base_ptr = _lds_base3(s_asc_base)
+        asc_ptr = _lds_typed_ptr(s_asc_base, T.i32)
         out = []
         for sub in range_constexpr(kSubBlocks):
             lds_dw = fx.Int32(sub * kAS_per_chunk_dw) + fx.Int32(kt * 64) + lane_div_16 * fx.Int32(16) + lane_mod_16
-            out.append(llvm.load(T.i32, _gep3(base_ptr, lds_dw * fx.Int32(4))))
+            out.append(asc_ptr[lds_dw])
         return out
 
     # B load: CK preshuffle as an fx.make_layout view over bq. The descriptor base
@@ -873,7 +871,6 @@ def _atomic_bf16_epilog(
     M_REPS = BM // 8  # BM32: 4, BM16: 2
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
-    lds_base = _lds_base3(lds_acc_base)
     lds_base_fptr = _lds_typed_ptr(lds_acc_base, T.f32)
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
@@ -917,7 +914,9 @@ def _atomic_bf16_epilog(
             for s in range_constexpr(4):
                 # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
                 idx0 = row_in_block * fx.Int32(BN) + col_start + fx.Int32(s * 64)
-                v2 = Vec(llvm.load(T.vec(2, T.f32), _gep3(lds_base, idx0 * fx.Int32(4))))
+                v2 = Vec(
+                    _lds_vec_load(lds_acc_base, idx0 * fx.Int32(4), Vec.make_type(2, fx.Float32), fx.Float32, align=8)
+                )
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 off = (row_base_addr + fx.Int32(s * 64)) * fx.Int32(2)  # bf16 byte off
                 out_ptr = _gep1(out_base, off)
