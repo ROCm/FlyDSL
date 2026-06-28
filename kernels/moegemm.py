@@ -1,16 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
-"""Layout-API MXFP4 MoE GEMM device bodies (BM32, gemm1 up/gate + gemm2 down).
-
-The BM32 core is shared: same CK-preshuffled B weight + e8m0 scale layout and the
-same scaled 16x16x128 fp4 MFMA opsel. Holds the layout-API B / B-scale primitives
-(copy atoms, views, fragment templates, MFMA_Scale atoms, gemm_mma), the A-side
-LDS loaders, both gemm bodies, and the atomic-bf16 epilogue. Basics come from
-``utils``; compile + launch from ``moe_dispatcher``.
-
-fp4 A rides fx.gemm register fragments; fp8 A (a8w4) the raw mfma_scale intrinsic
-(cbsz=0). C accumulates in place (fx.gemm d == c).
-"""
+"""Layout-API MXFP4 MoE GEMM device bodies (BM32): gemm1 up/gate + gemm2 down.
+fp4 A rides fx.gemm fragments; fp8 A (a8w4) the raw mfma_scale intrinsic (cbsz=0)."""
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -56,9 +47,7 @@ kSubBlocks = 1
 kMChunks = 2  # BM // 16; also the gemm1 epilog row-rep count
 
 
-# ===========================================================================
-# Shared layout-API primitives (B / B-scale data movement + scaled MFMA)
-# ===========================================================================
+# ---- Shared layout-API primitives (B / B-scale data movement + scaled MFMA) ----
 def b_copy_atom(nontemporal):
     """BufferCopy128b (4x i32 = one 128b weight chunk). nt rides cache_modifier."""
     return fx.make_copy_atom(fx.rocdl.BufferCopy128b(2 if nontemporal else 0), 32)
@@ -70,13 +59,8 @@ def bscale_copy_atom():
 
 
 def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL):
-    """Layout view over the preshuffled B weight for one N-row tile.
-
-    Base = readfirstlane(row_elems * KH4) is uniform per wave (KH4 = K_HALF//4);
-    per-lane (klane,nlane)/K-tile/half/kpack4 are layout axes -> VGPR voffset (not
-    a divergent-pointer waterfall). view[lane//16, lane%16, kt, half, None] is an
-    i32<4:1> (16B = 32 fp4) slice.
-    """
+    """Layout view over preshuffled B for one N-row tile: uniform per-wave base +
+    (klane,nlane)/K-tile/half/kpack4 layout axes. Slice -> i32<4:1> (16B=32 fp4)."""
     col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(arith.ExtUIOp(T.i64, _raw(col_base)).result)
@@ -88,9 +72,8 @@ def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL):
 
 
 def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64):
-    """Layout view over the e8m0 B-scale for one n-pack word. base_dw is the uniform
-    per-wave dword base; per-lane (klane,nlane)/K-tile are layout axes.
-    view[lane//16, lane%16, kt, None] is an i32<1:1> scale word."""
+    """Layout view over e8m0 B-scale for one n-pack word: uniform per-wave dword
+    base + (klane,nlane)/K-tile layout axes. Slice -> i32<1:1> scale word."""
     base_dw = rocdl.readfirstlane(T.i32, _raw(base_dw))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(arith.ExtUIOp(T.i64, _raw(base_dw)).result)
@@ -112,8 +95,8 @@ def bscale_frag_tmpl(view):
 
 
 def scale_mma_atoms():
-    """The 16 (opselA,opselB) scaled-MFMA atoms (opsel is a type param -> one atom
-    per pair); cbsz/blgp(=4 for fp4) inferred from Float4E2M1FN."""
+    """16 (opselA,opselB) scaled-MFMA atoms (opsel is a type param); cbsz/blgp=4
+    for fp4 inferred from Float4E2M1FN."""
     return {
         (osa, osb): fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, Float4E2M1FN, opsel_a=osa, opsel_b=osb))
         for osa in range(4)
@@ -134,9 +117,7 @@ def gemm_mma(atoms, a_frag, b_frag, c_frag, opsel_a, opsel_b, sa, sb):
     )
 
 
-# ===========================================================================
-# Shared A ds-read + per-J MMA cluster (used by both gemm bodies)
-# ===========================================================================
+# ---- Shared A ds-read + per-J MMA cluster (used by both gemm bodies) ----
 def _issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8, a_vals, a_frags):
     """A ds-read for one slot: fp4 -> Vec4 i32 into a_frags; fp8 -> Vec8 i32 (two
     halves 64B apart) into a_vals."""
@@ -180,9 +161,7 @@ def _mma_one_j(J, in_b, sa, sb, bq_frags_kt, is_f8, cbsz_a, a_vals, a_frags, acc
         gemm_mma(atoms, a_frags[1][1], bJ1, c_frags[1][J], 3, 2 + in_b, sa, sb)
 
 
-# ===========================================================================
-# gemm1 (up/gate-proj)
-# ===========================================================================
+# ---- gemm1 (up/gate-proj) ----
 @flyc.jit
 def _gemm1_body_v2(
     lds_base_i32,
@@ -250,9 +229,8 @@ def _gemm1_body_v2(
     s_asc_base = lds_base_i32 + fx.Int32(kAStages * BM * KH_TILE_A)
     lds_acc_base = lds_base_i32
 
-    # A-gather rows: buffer_load_lds fills 64*16B/wave (fp4 8 rows x 128B, fp8 4 rows
-    # x 256B). Row = sorted_token_ids & 0xFFFFFF (drop topk high byte); pad rows carry
-    # token_id==M (OOB) so the bounds-checked load returns 0.
+    # A-gather rows: row = sorted_token_ids & 0xFFFFFF (drop topk high byte); pad rows
+    # carry token_id==M (OOB) so the bounds-checked buffer_load_lds returns 0.
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // fx.Int32(lanes_per_row)
@@ -352,11 +330,8 @@ def _gemm1_body_v2(
             out.append(asc_ptr[lds_dw])
         return out
 
-    # B load: CK preshuffle as an fx.make_layout view over bq. The descriptor base
-    # MUST stay uniform per wave (folding the per-lane part in makes make_buffer_tensor
-    # emit a per-lane WATERFALL, ~14x slower), so the base is the uniform col offset
-    # and the per-lane (klane,nlane) are layout axes -> a VGPR voffset at copy time.
-    # nt/cached rides on the copy atom's cache_modifier (2=nt/0=cached).
+    # B load: CK-preshuffle layout view over bq. Descriptor base MUST stay uniform per
+    # wave (per-lane fold -> make_buffer_tensor WATERFALL, ~14x slower); base = col off.
     KH4 = K_HALF // 4  # i32 stride for the col axis
     _b_copy_atom = b_copy_atom(b_nontemporal)
     _bs_copy_atom = bscale_copy_atom()
@@ -560,9 +535,8 @@ def _gemm1_body_v2(
             hi = _raw(Vec.filled(2, 0, fx.Int16))
             hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, _raw(result[4]), _raw(result[5]), qscale_raw, 0)
             hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, _raw(result[6]), _raw(result[7]), qscale_raw, 1)
-            # i32-element offset = (row_local*K_G2_BYTES + byte_pos_fp4*2)//4; the
-            # uniform m_row*K_G2_BYTES//4 is already in the view base. lo at off, hi
-            # at off+1 (each a vec2xi16 = one i32 word, bitcast for the i32 atom).
+            # i32-elem off; uniform m_row part already in view base. lo at off, hi at
+            # off+1 (each vec2xi16 = one i32 word, bitcast for the i32 atom).
             elem_off = row_local * fx.Int32(K_G2_BYTES // 4) + (byte_pos_fp4 // fx.Int32(2))
             lo_i32 = Vec(lo).bitcast(fx.Int32)
             hi_i32 = Vec(hi).bitcast(fx.Int32)
@@ -612,13 +586,10 @@ def _lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE):
     return max(s_aq_bytes + s_asc_bytes, lds_acc_bytes)
 
 
-# ===========================================================================
-# gemm2 (down-proj)
-# ===========================================================================
+# ---- gemm2 (down-proj) ----
 def _issue_a_load_lds_dt(arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wave, lane, is_f8, KH_TILE_A, K_BYTES):
-    """A->LDS for one K-tile via global->LDS DMA. gemm2 A is the already-sorted
-    intermediate (row = sorted row directly, no gather). Per-lane data-dependent src
-    (no fold); bounds reproduce aq_rsrc (i32_max_m_blocks*BM*K_BYTES) so OOB-zero is kept."""
+    """A->LDS for one K-tile via global->LDS DMA; gemm2 A is the already-sorted row
+    (no gather). Bounds reproduce aq_rsrc so OOB-zero is kept."""
     am = 2 if is_f8 else 1  # row-group calls per 8-row wave (fp8 4 rows/call)
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
@@ -850,9 +821,7 @@ def _gemm2_body_v2(
     )
 
 
-# ===========================================================================
-# Atomic bf16 epilogue (shared store path; gemm2 down-proj)
-# ===========================================================================
+# ---- Atomic bf16 epilogue (shared store path; gemm2 down-proj) ----
 def _atomic_bf16_epilog(
     lds_acc_base,
     accm,

@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
-"""Basics for the layout-API MXFP4 MoE gemm: shape constants, K-derived size
-formulas, raw pointer/LDS helpers, and the e8m0 / SwiGLU quant math. The MMA + A/B
-data movement live in ``moegemm``; compile + launch in ``moe_dispatcher``.
-"""
+"""Basics for the layout-API MXFP4 MoE gemm: shape/size constants, pointer/LDS
+helpers, e8m0 + SwiGLU quant math. MMA + data movement live in ``moegemm``."""
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -88,9 +86,8 @@ def _lds_ptr3(base_i32, byte_off_i32):
 
 
 def _lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
-    """LDS dst view (one unit elem at i32-byte addr base_i32+byte_off_i32) for a
-    buffer_load_lds DMA. align=16 for the 128b chunk, 4 for 32b chunks. Gotcha: FlyDSL's
-    AddressSpace.Shared is the LDS space (enum value 2, NOT LLVM addrspace 3)."""
+    """LDS dst view for a buffer_load_lds DMA (align 16 for 128b, 4 for 32b chunks).
+    Gotcha: FlyDSL AddressSpace.Shared = LDS (enum 2, NOT LLVM addrspace 3)."""
     if elem_ty is None:
         elem_ty = T.i32
     lds_ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
@@ -127,15 +124,8 @@ def _lds_typed_ptr(base_i32, elem_ty, align=4):
 
 
 def _lds_vec_load(base_i32, byte_off_i32, result_type, elem_ty, align=4):
-    """Typed LDS ds-read at BYTE offset ``byte_off_i32`` from the i32 LDS base.
-
-    Mirrors a raw ``llvm.load(result_type, gep_i8(base, byte_off))``: add the
-    BYTE offset to the i32 LDS base address, build a typed Shared pointer of the
-    scalar element type ``elem_ty`` at that byte address, then ``ptr_load`` with
-    the (vector or scalar) ``result_type``. Same load instruction / byte offset
-    as the raw GEP+load. ``result_type`` may be an ``ir.Type`` (e.g.
-    ``Vec.make_type(...)``) or a Numeric subclass; ``elem_ty`` is the scalar
-    Numeric element type and ``align`` the natural alignment of the result."""
+    """Typed LDS ds-read at BYTE offset from the i32 LDS base; mirrors raw
+    llvm.load(result_type, gep_i8(base, off)). result_type may be vector or scalar."""
     elem_ir_ty = elem_ty.ir_type if hasattr(elem_ty, "ir_type") else elem_ty
     ptr = _lds_typed_ptr(fx.Int32(base_i32) + byte_off_i32, elem_ir_ty, align=align)
     return fx.ptr_load(ptr, result_type=result_type)
