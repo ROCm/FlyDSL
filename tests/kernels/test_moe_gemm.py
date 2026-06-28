@@ -2095,18 +2095,12 @@ def _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=32, BK=25
             tid = torch.where((stiv < M) & rowok, stiv, torch.zeros_like(stiv))
             k_idx = ku * K_PACK * 4 + ikxdl * 4 + k_lane
             byte = asc[tid.long(), k_idx.long()]
-            out[:, ikxdl * MN_PACK + im_a] = torch.where(
-                rowok, byte, torch.zeros_like(byte)
-            )
+            out[:, ikxdl * MN_PACK + im_a] = torch.where(rowok, byte, torch.zeros_like(byte))
     return out.reshape(-1).contiguous()
 
 
 def _u8v(t):
-    return (
-        t.view(torch.uint8)
-        if (t is not None and t.element_size() == 1 and t.dtype != torch.uint8)
-        else t
-    )
+    return t.view(torch.uint8) if (t is not None and t.element_size() == 1 and t.dtype != torch.uint8) else t
 
 
 def run_mxfp4_moe_2stage(
@@ -2173,10 +2167,7 @@ def run_mxfp4_moe_2stage(
     inter_cols = INTER if is_f8 else INTER // 2
     isq = torch.zeros((max_sorted, inter_cols), device=device, dtype=torch.uint8)
     isc_cols = INTER // 32
-    isr = (
-        (((max_sorted * ((2 * INTER) // 64) * 4) + isc_cols - 1) // isc_cols + 31)
-        // 32 * 32
-    )
+    isr = (((max_sorted * ((2 * INTER) // 64) * 4) + isc_cols - 1) // isc_cols + 31) // 32 * 32
     iss = torch.zeros((isr, isc_cols), device=device, dtype=torch.uint8)
     _g1_kwargs = dict(
         a_quant=aq,
@@ -2255,13 +2246,18 @@ def run_mxfp4_moe_2stage(
         inter_r = torch.nn.functional.silu(gate) * up
         ref[tok] += (inter_r @ W2[e].T) * float(swt_c[r].item())
 
-    cos = torch.nn.functional.cosine_similarity(
-        ref.reshape(-1), out.float().reshape(-1), dim=0
-    ).item()
+    cos = torch.nn.functional.cosine_similarity(ref.reshape(-1), out.float().reshape(-1), dim=0).item()
     thr = 0.95 if is_f8 else 0.85
     logging.info(
         "[mxfp4 moe %s %s] cos=%.4f n=%d (model_dim=%d inter=%d E=%d topk=%d)",
-        in_dtype, "il" if interleave else "sep", cos, n, model_dim, inter_dim, experts, topk,
+        in_dtype,
+        "il" if interleave else "sep",
+        cos,
+        n,
+        model_dim,
+        inter_dim,
+        experts,
+        topk,
     )
     assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
     assert cos > thr, f"{in_dtype} cos={cos:.4f} <= {thr}"

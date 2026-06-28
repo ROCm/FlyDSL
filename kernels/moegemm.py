@@ -32,7 +32,6 @@ from .utils import (
     _global_ptr1,
     _lds_base3,
     _lds_dma_dst,
-    _lds_ptr3,
     _lds_swizzle_mask,
     _lds_swizzle_mask_f8,
     _raw,
@@ -244,12 +243,7 @@ def _gemm1_body_v2(
     lane_div_16 = lane // fx.Int32(16)
     lane_mod_16 = lane % fx.Int32(16)
 
-    # buffer resources (A-gather + scales)
-    aq_num_records = arith.index_cast(T.index, _raw(i32_ntok * fx.Int32(K_BYTES)))
-    aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=aq_num_records)
     _asc_per_mb = max(BM // 32, 1) * kAS_per_chunk_dw * 4
-    ascale_num = arith.index_cast(T.index, _raw(i32_total_m_blocks)) * fx.Index(_asc_per_mb)
-    ascale_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_ascale)), num_records_bytes=ascale_num)
 
     # LDS base offsets (i8): s_aq | s_asc contiguous; lds_acc (f32) unions the region.
     s_aq_base = lds_base_i32
@@ -286,7 +280,12 @@ def _gemm1_body_v2(
     # aq_rsrc (i32_ntok*K_BYTES) so OOB padded rows load 0.
     _a_gather_atom = lds_dma_atom_128()
     _a_gather_src = flat_buffer_view(
-        arg_aq, None, T.i32, align=16, elem_bytes=4, fold=False,
+        arg_aq,
+        None,
+        T.i32,
+        align=16,
+        elem_bytes=4,
+        fold=False,
         num_records_bytes=i32_ntok * fx.Int32(K_BYTES),
     )
 
@@ -554,7 +553,6 @@ def _gemm1_body_v2(
         qscale_raw = _raw(qscale)
         # byte position of this lane's 8 elems (fp8 doubles it; row stride is INTER).
         byte_pos_fp4 = n_block_idx * fx.Int32(BN // 4) + wave_grp * fx.Int32(16) + kk * fx.Int32(4)
-        out_row = m_row + row_local
         if const_expr(is_f8_out):
             # 8 f32 -> 8 fp8: lo holds elems 0..3, hi 4..7 (2 fp8 per cvt half).
             v2i16 = T.vec(2, T.i16)
