@@ -232,18 +232,12 @@ def gemm1_body_v2(
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // lanes_per_row
-    mask24_i32 = arith.constant(0xFFFFFF, type=T.i32)
     sti_ptr = global_typed_ptr(arg_sti, T.i32)
     cached_actual_row = []
     for sub in range_constexpr(kSubBlocks):
         for h in range_constexpr(am):
             idx = m_row + wave * (BM // 4) + (sub * 8 + h * rows_per_call) + a_lane_row
-            cached_actual_row.append(
-                arith.andi(
-                    raw(sti_ptr[idx]),
-                    mask24_i32,
-                )
-            )
+            cached_actual_row.append(sti_ptr[idx] & 0xFFFFFF)
 
     # B-scale n-pack words (gate/up split differs by gate mode).
     if const_expr(interleave):
@@ -278,7 +272,7 @@ def gemm1_body_v2(
                     if const_expr(is_f8_a)
                     else lds_swizzle_mask(lds_row + a_lane_row)
                 )
-                voffset = (lane_col ^ mask) + cached_actual_row[sub * am + h] * fx.Int32(K_BYTES)
+                voffset = (lane_col ^ mask) + cached_actual_row[sub * am + h] * K_BYTES
                 off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
                 v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
                 fx.copy(
