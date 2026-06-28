@@ -27,7 +27,7 @@ Scales: ``shuffle_scale_w4(scale, 1, False)``.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr import buffer_ops as _buffer_ops
 from flydsl.expr.typing import Vector as Vec
@@ -151,30 +151,19 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
 
 
 # ── FP4 scaled MFMA ──────────────────────────────────────────────────────────
-_FP4_CBSZ = 4
-_FP4_BLGP = 4
 _FP4_PACK = 2  # pack_M = pack_N = pack_K = 2
 
 
-def _split_i32x8(v):
-    return v.shuffle(v, [0, 1, 2, 3]), v.shuffle(v, [4, 5, 6, 7])
-
-
-def _pack_fp4_operand(i32x4):
-    """i32x4 (16 B = K=128 fp4) -> a128 i32x8 = (i64_0, i64_1, 0, 0)."""
-    i64x2 = i32x4.bitcast(fx.Int64)
-    z = fx.Int64(0)
-    return Vec.from_elements([i64x2[0], i64x2[1], z, z], fx.Int64).bitcast(fx.Int32)
-
-
 class Mfma16x16x128Fp4:
-    """fp4 16x16x128 scaled MFMA. ``call_one`` runs the two K=128 fp4 sub-blocks
-    packed into the 32-byte S2R operand, accumulating into one f32x4 acc.
+    """fp4 16x16x128 scaled MFMA via ``mma_atom_call_ssa`` (no inline asm).
 
-    a/b operands are i32x8 (the full 256-fp4 K-step, two K=128 sub-blocks).
-    sa/sb are i32 packed-E8M0 scales (4 e8m0 each); opsel selects the field
-    ``k_sub * pack + tile_in_pair`` where tile_in_pair = i % pack / j % pack.
-    """
+    opsel varies per sub-tile (it byte-selects the packed-E8M0 scale) but is
+    compile-time per atom, so we pre-build one ``MFMA_Scale(16,16,128, Float4E2M1FN,
+    opsel_a, opsel_b)`` atom per combo and pick it per (ksub, i, j) with
+    ``opsel_a = ksub*2 + i%pack`` / ``opsel_b = ksub*2 + j%pack`` (matches the hand
+    asm's ``op_sel:[i%2,j%2,0] op_sel_hi:[ksub,ksub,0]``). The E8M0 i32 rides on the
+    atom's scale_a/scale_b state. a[i]/b[j] are ``[i32x4_ksub0, i32x4_ksub1]`` from
+    S2RLoaderFp4. The f32x4 acc stays in arch-VGPR here, so no AGPR pin is needed."""
 
     def __init__(self, n_tiles_a, n_tiles_b):
         assert n_tiles_a % _FP4_PACK == 0 and n_tiles_b % _FP4_PACK == 0
@@ -182,7 +171,11 @@ class Mfma16x16x128Fp4:
         self.zero_value = Vec.filled(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
-        self.res_ty = Vec.make_type(4, fx.Float32)
+        self._atoms = {
+            (oa, ob): fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float4E2M1FN, opsel_a=oa, opsel_b=ob))
+            for oa in range(4)
+            for ob in range(4)
+        }
 
     def idx(self, i, j):
         return i * self.n_tiles_b + j
@@ -191,21 +184,14 @@ class Mfma16x16x128Fp4:
         """``sa`` / ``sb`` are lists (len n_groups) of packed-E8M0 i32 scales
         (4 sub-fields each, one full K=256 step for a 32-row pack-group).
 
-        The accumulator is PINNED IN AGPR via inline asm (constraint ``=a,...,0``),
-        mirroring fp8's Mfma16x16x128AGPR. The plain ssa-lowered mfma_scale let the
-        compiler spill accumulators to arch VGPR and shuffle them with
-        v_accvgpr_mov/read (ISA: 1679 such ops, arch VGPR -> 256, scale spilled).
-        Pinning keeps the f32x4 acc in-place in AGPR -> arch VGPR drops, no spill.
-
-        opsel is a COMPILE-TIME byte-select baked into the asm string:
-          opsel_a = ksub*2 + (i%2), opsel_b = ksub*2 + (j%2).
-        AMD encoding: low bit -> op_sel[lane], high bit (=ksub) -> op_sel_hi[lane].
-        So op_sel=[i%2, j%2, 0], op_sel_hi=[ksub, ksub, 0]."""
-        # a[i] / b[j] are [i32x4_ksub0, i32x4_ksub1] from S2RLoaderFp4.
+        Traversal mirrors the hand kernel exactly: ksub (K=128 sub-block) outer,
+        then (i, j) over the M/N sub-tiles. Each (ksub, i, j) selects the atom
+        with ``opsel_a = ksub*2 + i%pack`` / ``opsel_b = ksub*2 + j%pack`` and
+        sets that atom's ``scale_a`` / ``scale_b`` state to the group's packed
+        E8M0 i32 (the opsel byte-selects the right E8M0 field inside the i32)."""
         # ``interleave`` is an optional list of zero-arg thunks (ds_read / buffer_load
         # for the NEXT quad); one is issued after each MFMA so the load co-issues in
-        # the MFMA's execute shadow (fp4 MFMA: 4-cyc issue, ~16-cyc execute -> a
-        # ds_read/buffer_load fits free between MFMAs). Mirrors fp8 _interleaved_cluster.
+        # the MFMA's execute shadow. Mirrors fp8 _interleaved_cluster.
         thunks = list(interleave) if interleave else []
         nth = [0]  # python-level counter (compile-time), not loop-carried
         for ksub in range_constexpr(_FP4_PACK):
@@ -217,7 +203,7 @@ class Mfma16x16x128Fp4:
                     b_op = b[j][ksub]
                     sb_v = sb[j // _FP4_PACK]
                     jb = j % _FP4_PACK
-                    c[self.idx(i, j)] = self._mfma_agpr(a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb)
+                    c[self.idx(i, j)] = self._mfma(a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb)
                     if nth[0] < len(thunks):
                         thunks[nth[0]]()
                         nth[0] += 1
@@ -226,24 +212,9 @@ class Mfma16x16x128Fp4:
             nth[0] += 1
         return c
 
-    def _mfma_agpr(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
-        # Build the op_sel / op_sel_hi suffix (compile-time). op_sel[2]/hi[2]=0.
-        opsel = f"op_sel:[{ia},{jb},0]"
-        opsel_hi = f"op_sel_hi:[{ksub},{ksub},0]"
-        asm = "v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, $0, $3, $4 " f"{opsel} {opsel_hi} cbsz:4 blgp:4"
-        return _llvm.inline_asm(
-            self.res_ty,
-            [
-                arith._to_raw(a_op),
-                arith._to_raw(b_op),
-                arith._to_raw(sa_v),
-                arith._to_raw(sb_v),
-                arith._to_raw(acc),
-            ],
-            asm,
-            "=a,v,v,v,v,0",
-            has_side_effects=True,
-        )
+    def _mfma(self, a_op, b_op, acc, sa_v, sb_v, ksub, ia, jb):
+        atom = self._atoms[(ksub * 2 + ia, ksub * 2 + jb)].set_value({"scale_a": sa_v, "scale_b": sb_v})
+        return fly_dialect.mma_atom_call_ssa([self.accum_type], atom, a_op, b_op, acc)
 
 
 class ScaleLoader:
