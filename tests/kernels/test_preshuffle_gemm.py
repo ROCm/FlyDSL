@@ -108,8 +108,13 @@ def test_mfma_a8_flyc_preshuffle(
     waves_per_eu: int = 0,
 ):
     """Preshuffle GEMM using the layout-API v2 kernel (fp8/int8/fp16/bf16)."""
-    if use_async_copy and get_rocm_arch() not in ("gfx942", "gfx950"):
-        pytest.skip(f"async copy is not supported on {get_rocm_arch()}")
+    if use_async_copy and get_rocm_arch() != "gfx950":
+        # The layout-API kernel builds the buffer_load_lds source descriptor from a
+        # global (.p8.p1) make.buffer.rsrc. LLVM's CDNA3 (gfx942) backend cannot
+        # legalize that into buffer_load_lds ("Do not know how to expand this
+        # operator's operand!"), while CDNA4 (gfx950) handles it. Restrict async
+        # copy to gfx950 until the gfx942 codegen path is supported.
+        pytest.skip(f"async copy (buffer_load_lds) is only supported on gfx950, not {get_rocm_arch()}")
     if use_async_copy and in_dtype not in ("fp8", "int8"):
         pytest.skip("async copy (buffer_load_lds) only supports 8-bit inputs (fp8/int8)")
     print("=" * 80)
