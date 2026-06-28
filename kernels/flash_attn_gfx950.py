@@ -2315,9 +2315,19 @@ def build_flash_attn_dualwave_swp_module(
     }
 
     def _resolve_args(
-        O, seq_len, stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
-        workspace, cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride,
-    ):  # noqa: E741
+        O,  # noqa: E741
+        seq_len,
+        stride_kv_n,
+        stride_q_n,
+        head_dim_runtime,
+        debug_counts,
+        seq_len_kv,
+        workspace,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        block_table,
+        block_table_stride,
+    ):
         """Fill in the dense/non-paged defaults shared by _launch and _compile.
 
         - seq_len_kv defaults to seq_len (self-attention / equal Q,KV lengths).
@@ -2348,8 +2358,17 @@ def build_flash_attn_dualwave_swp_module(
             block_table = O
         if block_table_stride is None:
             block_table_stride = 0
-        return (stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
-                cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride)
+        return (
+            stride_kv_n,
+            stride_q_n,
+            head_dim_runtime,
+            debug_counts,
+            seq_len_kv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            block_table_stride,
+        )
 
     def _launch(
         Q,
@@ -2371,10 +2390,29 @@ def build_flash_attn_dualwave_swp_module(
         block_table_stride=None,
         stream=None,
     ):
-        (stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
-         cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride) = _resolve_args(
-            O, seq_len, stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
-            workspace, cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride,
+        (
+            stride_kv_n,
+            stride_q_n,
+            head_dim_runtime,
+            debug_counts,
+            seq_len_kv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            block_table_stride,
+        ) = _resolve_args(
+            O,
+            seq_len,
+            stride_kv_n,
+            stride_q_n,
+            head_dim_runtime,
+            debug_counts,
+            seq_len_kv,
+            workspace,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            block_table_stride,
         )
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             if stream is None:
@@ -2434,10 +2472,29 @@ def build_flash_attn_dualwave_swp_module(
         block_table_stride=None,
         stream=None,
     ):
-        (stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
-         cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride) = _resolve_args(
-            O, seq_len, stride_kv_n, stride_q_n, head_dim_runtime, debug_counts, seq_len_kv,
-            workspace, cu_seqlens_q, cu_seqlens_kv, block_table, block_table_stride,
+        (
+            stride_kv_n,
+            stride_q_n,
+            head_dim_runtime,
+            debug_counts,
+            seq_len_kv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            block_table_stride,
+        ) = _resolve_args(
+            O,
+            seq_len,
+            stride_kv_n,
+            stride_q_n,
+            head_dim_runtime,
+            debug_counts,
+            seq_len_kv,
+            workspace,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            block_table,
+            block_table_stride,
         )
         with CompilationContext.compile_hints(_dualwave_swp_compile_hints):
             return flyc.compile(
