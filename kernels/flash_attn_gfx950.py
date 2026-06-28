@@ -532,17 +532,14 @@ def build_flash_attn_dualwave_swp_module(
                 )
 
         def _ws_store_f32(f32_val, local_elem_index, rsrc):
-            """32-bit f32 store into a per-split-z workspace region via raw buffer descriptor."""
             f32_ir = _raw(fx.Float32(f32_val))
             buffer_ops.buffer_store(f32_ir, rsrc, _raw(fx.Int32(local_elem_index)))
 
         def _ws_store_quad_i32(dwords, local_elem_index, rsrc):
-            """128-bit i32x4 store (buffer_store_dwordx4) into a per-split-z workspace region."""
             vec_ir = Vec.from_elements([fx.Int32(v) for v in dwords], fx.Int32).ir_value()
             buffer_ops.buffer_store(vec_ir, rsrc, _raw(fx.Int32(local_elem_index)))
 
         def _buffer_load_128(elem_index):
-            """128-bit global->register load (buffer_load_dwordx4) from Q."""
             return fly.copy_atom_call_ssa([v4i32_type], _load_atom_128, fx.slice(q_div, (None, fx.Int32(elem_index))))
 
         def _buffer_load_lds_128(src_div, lds_byte_addr, src_elem, soffset_elems):
@@ -558,7 +555,6 @@ def build_flash_attn_dualwave_swp_module(
             fx.copy(_dma_atom, src, dst, soffset=fx.Int32(soffset_elems))
 
         def _buffer_store_128(pack_i32_vec, elem_index):
-            """128-bit register->global store (buffer_store_dwordx4) into O."""
             fx.memref_store_vec(pack_i32_vec, _o_store_reg_128)
             fx.copy(_store_atom_128, _o_store_reg_128, fx.slice(o_div, (None, fx.Int32(elem_index))))
 
@@ -766,7 +762,7 @@ def build_flash_attn_dualwave_swp_module(
             return _raw(ArithValue(value).bitcast(fx.Float32.ir_type))
 
         def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
-            """DUALWAVE_SWP pair mask asm: 2 compares followed by 2 cndmasks."""
+            """Pair mask asm: 2 v_cmp_lt_i32 compares then 2 v_cndmask to -inf."""
             asm_str = (
                 f"v_cmp_lt_i32_e64 $0, $6, {int(thr_x)}\n\t"
                 f"v_cmp_lt_i32_e64 $1, $6, {int(thr_y)}\n\t"
@@ -993,7 +989,7 @@ def build_flash_attn_dualwave_swp_module(
             return _bitcast_f32(lhs_i32), _bitcast_f32(rhs_i32)
 
         def _async_load_k_from_lds_to_vgpr(buf_id, urk_base):
-            """Read all 16 K MFMA packs from LDS buffer `buf_id` (DUALWAVE_SWP u_rk)."""
+            """Read all 16 K MFMA packs from LDS buffer `buf_id` (u_rk swizzle)."""
             k_base = _k_buf_base(buf_id)
             k_lo = [None] * K_STEPS_QK
             k_hi = [None] * K_STEPS_QK
@@ -1030,7 +1026,7 @@ def build_flash_attn_dualwave_swp_module(
             return (k_lo, k_hi)
 
         def _read_v_packs_for_buf(buf_id, urv_base):
-            """Read all V packs from LDS buffer `buf_id` in DUALWAVE_SWP issue order."""
+            """Read all V packs from LDS buffer `buf_id` in issue order (u_rv swizzle)."""
             v_base = _v_buf_base(buf_id)
             if const_expr(KV_VECTORIZED):
                 # Padded V-LDS NO-major layout: elem(n,d) = (d//8)*544 + (n//8)*64 + (d%8)*8 + n%8.
@@ -1088,7 +1084,7 @@ def build_flash_attn_dualwave_swp_module(
             return (v_s_lo, v_s_hi)
 
         def _causal_mask_inplace(v_s, tile_idx):
-            """Apply causal mask using DUALWAVE_SWP inline-asm attn_mask_vec2_imm (DUALWAVE_SWP u_rk path)."""
+            """Causal mask via the inline-asm _attn_mask_vec2_imm pairs (u_rk path)."""
             s_lo, s_hi = v_s
             kv_tile_start = tile_idx * BLOCK_N
             kv_start_i32 = fx.Int32(kv_tile_start)
@@ -1483,9 +1479,7 @@ def build_flash_attn_dualwave_swp_module(
                 m_row_pro = _fmax(m_row_pro, c_neg_floor)
             v_s_0 = _attn_sub_row(v_s_0, m_row_pro)
             v_p_0 = _attn_exp2_slice(v_s_0, 0, 16)
-            # Hoist the K tile-2 prefetch address prep (page-id read + view + addr math,
-            # no side effects) before this barrier so it overlaps the prologue softmax;
-            # the side-effecting buffer_load_lds still fires after the barrier.
+            # Hoist the K tile-2 prefetch address prep before the barrier (see Cluster 2).
             _pro_k2_pid = _finish_page_id(_pro_k2_pid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -1620,13 +1614,10 @@ def build_flash_attn_dualwave_swp_module(
                 _sched_barrier_exp_pairs(6, 3, 2)
                 if const_expr(DUALWAVE_SWP_SETPRIO):
                     rocdl.s_setprio(0)
-                # Hoist Cluster 4's V-DMA address prep (page-id read + view + addr math,
-                # no side effects) to before this barrier so it overlaps Cluster 3's
-                # compute; the side-effecting buffer_load_lds still fires in Cluster 4.
+                # Hoist next cluster's V-DMA address prep before the barrier (see Cluster 2).
                 _c4_vpid = _finish_page_id(_c4_vpid_lds) if const_expr(PAGED) else fx.Index(0)
-                # sched_barrier(0): compiler scheduling fence (mask 0 = nothing
-                # crosses), pinning s_setprio(0) and the closing s_barrier at the
-                # cluster boundary. Emits no ISA; the real sync is s_barrier().
+                # sched_barrier(0) = compiler scheduling fence (mask 0, no ISA): pins
+                # s_setprio(0) and the closing s_barrier at the cluster boundary.
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
                 rocdl.sched_barrier(0)
@@ -1658,8 +1649,7 @@ def build_flash_attn_dualwave_swp_module(
                 v_p_1 = _anchor_v_p(v_p_1)
                 _sched_barrier_exp_pairs(6, 3, 3)
                 _sched_barrier_pairs(10, 5, 3)
-                # Hoist Cluster 6's K-DMA address prep before this barrier (overlaps
-                # Cluster 5 compute); the buffer_load_lds still fires in Cluster 6.
+                # Hoist next cluster's K-DMA address prep before the barrier (see Cluster 2).
                 _c6_kpid = _finish_page_id(_c6_kpid_lds) if const_expr(PAGED) else fx.Index(0)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
@@ -1733,9 +1723,8 @@ def build_flash_attn_dualwave_swp_module(
                     yield_args.append(_next_v_pid)
                 loop_results = yield yield_args
 
-            # Epilogue: drain the pipeline for the final tiles the loop left in
-            # flight. Mirrors the main-loop clusters but with no further
-            # prefetch-ahead. Unpack the loop-carried state:
+            # Epilogue: drain the final tiles left in flight. Mirrors the main-loop
+            # clusters with no further prefetch-ahead. Unpack the loop-carried state:
             m_row = loop_results[0]
             l_row = loop_results[1]
             v_o = [loop_results[2 + i] for i in range_constexpr(D_CHUNKS)]
@@ -1777,8 +1766,7 @@ def build_flash_attn_dualwave_swp_module(
             v_p_0 = _anchor_v_p(v_p_0)
             _sched_barrier_exp_pairs(6, 3, 5)
             _sched_barrier_pairs(10, 5, 5)
-            # Hoist Epilogue C2's K-DMA address prep before this barrier (overlaps C1
-            # compute); the buffer_load_lds still fires in C2.
+            # Hoist next cluster's K-DMA address prep before the barrier (see main loop).
             _ec2_kpid = _finish_page_id(_ec2_kpid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -1826,8 +1814,7 @@ def build_flash_attn_dualwave_swp_module(
 
             if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(0)
-            # Hoist Epilogue C4's V-DMA address prep before this barrier (overlaps C3
-            # compute); the buffer_load_lds still fires in C4.
+            # Hoist next cluster's V-DMA address prep before the barrier (see main loop).
             _ec4_vpid = _finish_page_id(_ec4_vpid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
@@ -1897,8 +1884,7 @@ def build_flash_attn_dualwave_swp_module(
             v_o = _anchor_v_o(v_o)
             if const_expr(DUALWAVE_SWP_SETPRIO):
                 rocdl.s_setprio(0)
-            # Hoist Epilogue C8's V-DMA address prep before this barrier (overlaps C7
-            # compute); the buffer_load_lds still fires in C8.
+            # Hoist next cluster's V-DMA address prep before the barrier (see main loop).
             _ec8_vpid = _finish_page_id(_ec8_vpid_lds) if const_expr(PAGED) else fx.Index(0)
             rocdl.sched_barrier(0)
             rocdl.s_barrier()
