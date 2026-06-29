@@ -32,7 +32,7 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 # Bump when generated kernel shape changes.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v7-combine-wide-u16"
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v8-combine-batched-kload"
 
 # Stage-3 switches from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
@@ -521,6 +521,13 @@ def make_combine_kernel(
     # Contract (enforced by op-layer ``_check_config``):
     #   fp8_direct_cast=True  =>  data_type == torch.bfloat16
     #   fp8_direct_cast=True  =>  enable_std_moe == False
+    # zero_copy always implies skip_stage1 (op layer hard-wires
+    # ``skip_stage1=bool(zero_copy)``): under zero-copy the caller pre-stages
+    # tokens into the symmetric ``shmem_comb_inp`` buffer, so the kernel never
+    # copies local input -> symmetric memory. Stage 1 therefore only has two
+    # reachable shapes: ``skip_stage1`` (zc=True or fused) and the zc=False
+    # P2P remote write.
+    assert not zero_copy or skip_stage1, "zero_copy requires skip_stage1"
     _xfer_bf16_to_fp8 = fp8_direct_cast
     _transport_dtype = torch.float8_e4m3fn if _xfer_bf16_to_fp8 else data_type
 
@@ -746,14 +753,24 @@ def make_combine_kernel(
         global_warp_num = block_num * warp_num_per_block
         grid_thread_id = bid * (warp_num_per_block * 64) + tid  # Stage 2 only
 
-        # Predicated buffer_load: returns 0 (i32) when vld_flag is false.
-        # Defined as a nested function so the AST rewriter lowers the
-        # Python ``if`` to ``scf.if`` for every call site.
+        # Masked buffer_load: returns 0 (i32) when vld_flag is false.
         def _maybe_load(rsrc, offset, vld_flag, **kwargs):
-            result = arith.constant(0, type=T.i32())
-            if vld_flag:
-                result = buffer_load(rsrc, offset, **kwargs)
-            return result
+            # Unconditional load + post-hoc mask, NOT scf.if.
+            #
+            # Invalid k-slots are pre-clamped to a safe self-slot address
+            # (safe_pe=rank, safe_dtok=0) so the read never faults. Issuing the
+            # load unconditionally keeps all k per-expert reads in one basic
+            # block, letting the backend batch them behind a SINGLE
+            # ``s_waitcnt vmcnt(0)`` (mori-style k-way memory-level parallelism).
+            #
+            # The previous ``if vld_flag: result = load`` form placed each load
+            # in its own predicated region whose yielded select forced a
+            # ``s_waitcnt vmcnt(0)`` after every load -> the k xGMI peer reads
+            # were serialised (k x read latency), which dominated the small/
+            # medium-bs zero-copy combine gap vs mori.
+            raw = buffer_load(rsrc, offset, **kwargs)
+            zero_i32 = arith.constant(0, type=T.i32())
+            return arith.select(vld_flag, raw, zero_i32)
 
 
         _r_trecv = create_buffer_resource_from_addr(addr_inp_total_recv)
@@ -897,60 +914,6 @@ def make_combine_kernel(
                     wt_src_addr = arith.unwrap(addr_inp_wts) + _to_i64(recv_tok_id) * weight_bytes
                     rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
                     rsrc_wt_dst = create_buffer_resource_from_addr(wt_dest_addr)
-                    if lane < wt_n_i32:
-                        wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
-                        buffer_store(wt_val, rsrc_wt_dst, lane)
-
-        elif const_expr(zero_copy):
-            # Stage 1 zero-copy: each rank writes post-expert tokens into
-            # its OWN ``shmem_comb_inp[recv_tok_id]`` slot; peers read them
-            # cross-device in Stage 3.
-            dual_end_aligned = (n_chunks // 128) * 128
-            for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
-                # Mixed-mode (bf16->fp8): src bf16 stride, dst fp8 stride.
-                src_tok_addr = addr_inp_tok + _to_i64(recv_tok_id) * inp_nbytes
-                dst_tok_addr = addr_shmem_tok + _to_i64(recv_tok_id) * nbytes
-                rsrc_src = create_buffer_resource_from_addr(src_tok_addr)
-                rsrc_dst = create_buffer_resource_from_addr(dst_tok_addr)
-                if const_expr(_xfer_bf16_to_fp8):
-                    # Wire-fp8: load 2 bf16 i32 -> ExtF v4f32 ->
-                    # cvt_pk_fp8_f32 x2 -> store 1 fp8 i32.
-                    _v4bf16_a = T.VectorType.get([4], T.bf16())
-                    _v4f32_a = T.VectorType.get([4], T.f32())
-                    _i32t_a = T.i32()
-                    for elem_off in range(lane, n_i32, 64):
-                        bf_pair = buffer_load(rsrc_src, elem_off * 2, vec_width=2, dtype=T.i32())
-                        v4f = vector.bitcast(_v4bf16_a, bf_pair).extf(_v4f32_a)
-                        f0 = vector.extract(v4f, static_position=[0])
-                        f1 = vector.extract(v4f, static_position=[1])
-                        f2 = vector.extract(v4f, static_position=[2])
-                        f3 = vector.extract(v4f, static_position=[3])
-                        zi = arith.constant(0, type=_i32t_a)
-                        lo = cvt_pk_fp8_f32(res=_i32t_a, src_a=f0, src_b=f1, old=zi, word_sel=False)
-                        fp8_i32 = cvt_pk_fp8_f32(res=_i32t_a, src_a=f2, src_b=f3, old=lo, word_sel=True)
-                        buffer_store(fp8_i32, rsrc_dst, elem_off)
-                else:
-                    # Same-dtype 4-i32 vector copy.
-                    if const_expr(dual_end_aligned >= 128):
-                        for chunk_idx in range(lane, dual_end_aligned, 128):
-                            chunk_i32_off = chunk_idx * 4
-                            chunk_i32_off_alt = (chunk_idx + 64) * 4
-                            vec_a = buffer_load(rsrc_src, chunk_i32_off, vec_width=4, dtype=T.i32())
-                            vec_b = buffer_load(rsrc_src, chunk_i32_off_alt, vec_width=4, dtype=T.i32())
-                            buffer_store(vec_a, rsrc_dst, chunk_i32_off)
-                            buffer_store(vec_b, rsrc_dst, chunk_i32_off_alt)
-                    if const_expr(dual_end_aligned < n_chunks):
-                        for chunk_idx in range(lane + dual_end_aligned, n_chunks, 64):
-                            chunk_i32_off = chunk_idx * 4
-                            vec_a = buffer_load(rsrc_src, chunk_i32_off, vec_width=4, dtype=T.i32())
-                            buffer_store(vec_a, rsrc_dst, chunk_i32_off)
-
-            if const_expr(enable_weights):
-                for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
-                    wt_src_addr = arith.unwrap(addr_inp_wts) + _to_i64(recv_tok_id) * weight_bytes
-                    wt_dst_addr = arith.unwrap(addr_shmem_wts) + _to_i64(recv_tok_id) * weight_bytes
-                    rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
-                    rsrc_wt_dst = create_buffer_resource_from_addr(wt_dst_addr)
                     if lane < wt_n_i32:
                         wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
                         buffer_store(wt_val, rsrc_wt_dst, lane)
