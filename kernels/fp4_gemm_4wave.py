@@ -42,6 +42,8 @@ from kernels.fp8_gemm_utils import (
     wait_barrier,
 )
 
+_N_WAVES = 4  # block is always 256 threads -> 4 waves (compile-time constant)
+
 
 class _Buf:
     """LDS sub-buffer handle over the ONE contiguous LDS array.
@@ -113,9 +115,16 @@ class G2SLoaderAsm:
         self.wave_id = wave_id
         self.n_waves = fx.block_dim.x // 64
 
-    def _lds_base_sgpr(self, lds_dst, step):
-        step_off = self.wave_id * 1024 + step * (self.n_waves * 1024)
-        lds_base = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(step_off)
+    @property
+    def _step_stride(self):
+        # m0 (LDS byte) advance between consecutive steps of one load. Must be a
+        # Python int (baked into the asm string), so use the compile-time wave count
+        # (block is always 256 -> 4 waves) rather than the runtime block_dim value.
+        return _N_WAVES * 1024
+
+    def _lds_base_sgpr(self, lds_dst):
+        # Step-0 LDS byte base (wave-uniform). Later steps add _step_stride to m0.
+        lds_base = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(self.wave_id * 1024)
         return _uniform_i32(lds_base)
 
     def _voffset(self, step):
@@ -126,13 +135,23 @@ class G2SLoaderAsm:
         return arith._to_raw(fx.Int32(self.gl_offsets[step]))
 
     def _emit(self, lds_dst, k_offset, step):
-        m0 = self._lds_base_sgpr(lds_dst, step)
+        # m0 idiom (gcnasm async_copy): set m0 once for step 0, then advance it with
+        # s_add for later steps instead of recomputing readfirstlane+s_mov per step.
+        # The N_TILES steps of one load are issued back-to-back (interleaved into one
+        # MFMA cluster, in order), so the m0 add-chain stays coherent; s_add m0 is
+        # volatile inline-asm so the compiler can't reorder across it. Cuts the
+        # per-step v_readfirstlane (32->8/main-loop) and turns s_mov into s_add,
+        # freeing scalar-issue slots so the MFMAs pack tighter (toward cyc/mfma 16).
         voff = self._voffset(step)
         soff = _uniform_i32(k_offset)  # scalar soffset (K-step), folded by hardware
-        # No s_nop after the m0 write: these loads are interleaved between MFMAs,
-        # so the MFMA in the shadow already covers the m0 write->use hazard latency.
-        asm = "s_mov_b32 m0, $0\nbuffer_load_dwordx4 $1, $2, $3 offen lds"
-        _asm_void([m0, voff, self.rsrc, soff], asm, "s,v,s,s")
+        stride = self._step_stride
+        if step == 0:
+            m0 = self._lds_base_sgpr(lds_dst)
+            asm = "s_mov_b32 m0, $0\nbuffer_load_dwordx4 $1, $2, $3 offen lds"
+            _asm_void([m0, voff, self.rsrc, soff], asm, "s,v,s,s")
+        else:
+            asm = f"s_add_u32 m0, {stride}, m0\nbuffer_load_dwordx4 $0, $1, $2 offen lds"
+            _asm_void([voff, self.rsrc, soff], asm, "v,s,s")
 
     def load(self, lds_dst, k_offset):
         for step in range_constexpr(self.n_load_steps):
