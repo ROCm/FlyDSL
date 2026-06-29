@@ -4,10 +4,11 @@
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.expr import _to_raw as _raw
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Int8, T
 
-from .moegemm import (
+from .mxmoe_gemm_v2 import (
     BK,
     BN,
     H_DEFAULT,
@@ -19,12 +20,8 @@ from .moegemm import (
     gemm2_body_v2,
     global_typed_ptr,
     issue_a_load_lds_dt,
-    k_tiles_total_for,
     kStages,
     lds_bytes_for,
-    num_n_blocks_for,
-    raw,
-    udiv,
 )
 from .tensor_shim import _run_compiled as run_compiled
 
@@ -200,10 +197,10 @@ def compile_gemm2_a4w4_port(
     KH_TILE_A = BK // (1 if is_f8 else 2)  # A LDS K-tile bytes (fp8 256, fp4 128)
     K_BYTES = K // (1 if is_f8 else 2)  # A row stride bytes (fp8 K, fp4 K//2)
     slot_bytes = BM * KH_TILE_A
-    K_TILES_TOTAL = k_tiles_total_for(K)
+    K_TILES_TOTAL = K // BK
     aStages = kStages if K_TILES_TOTAL <= kStages else 3
     lds_bytes = max(BM * BN * 4, aStages * slot_bytes)
-    num_n_blocks = num_n_blocks_for(N_OUT)
+    num_n_blocks = N_OUT // 256
 
     atag = "_a8" if is_f8 else ""
     tag = f"ne{NE}_h{N_OUT}_i{K}_bm{BM}{'_nt' if use_nt else ''}_atomic{atag}_v2"
@@ -235,8 +232,8 @@ def compile_gemm2_a4w4_port(
         lane = tx_i32 % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
 
-        aq_num = arith.index_cast(T.index, raw(i32_max_m_blocks)) * fx.Index(BM * K_BYTES)
-        aq_rsrc = buffer_ops.create_buffer_resource_from_addr(raw(fx.Int64(arg_aq)), num_records_bytes=aq_num)
+        aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(BM * K_BYTES)
+        aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=aq_num)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
 
@@ -258,11 +255,11 @@ def compile_gemm2_a4w4_port(
                 )
 
         # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
-        issue_all_a_loads(udiv(bx_i32, num_n_blocks) * fx.Int32(BM))
+        issue_all_a_loads((bx_i32 // num_n_blocks) * fx.Int32(BM))
         rocdl.sched_barrier(0)
 
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
-        total_m_blocks = udiv(cumsum0, BM)
+        total_m_blocks = cumsum0 // BM
         bound = total_m_blocks * fx.Int32(num_n_blocks)
 
         if fx.Int32(bx_i32) < bound:
