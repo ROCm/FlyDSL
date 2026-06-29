@@ -244,7 +244,15 @@ def compile_preshuffle_gemm(
         thr_g2r_B = fx.make_tiled_copy_B(buf_copy, tiled_mma).get_slice(tid)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        swz = fx.SwizzleType.get(4, 4, 3) if const_expr(is_8bit) else fx.SwizzleType.get(3, 3, 3)
+        # A-LDS swizzle. For 8-bit, match the async DMA's swizzle_xor16
+        # (k ^ ((m % (tile_k//16)) * 16)) so use_async_copy reads back what it wrote:
+        # get(b, 4, b) with b = log2(tile_k//16).
+        if const_expr(is_8bit):
+            k_blocks16 = (tile_k * elem_bytes) // 16
+            swz_bits = k_blocks16.bit_length() - 1  # log2
+            swz = fx.SwizzleType.get(swz_bits, 4, swz_bits)
+        else:
+            swz = fx.SwizzleType.get(3, 3, 3)
 
         def _make_sA(arr):
             return fx.make_view(
