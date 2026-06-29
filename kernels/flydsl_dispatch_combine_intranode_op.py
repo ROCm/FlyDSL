@@ -33,7 +33,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.runtime.device import get_rocm_arch
 
-from .dispatch_combine_intranode_kernel import (
+from .flydsl_dispatch_combine_intranode_kernel import (
     make_combine_jit,
     make_dispatch_jit,
 )
@@ -320,19 +320,14 @@ class FlyDSLDispatchCombineConfig:
     num_experts_per_rank: int
     num_experts_per_token: int
     data_type: torch.dtype = torch.bfloat16
-    # Per-phase launch geometry. These are DEFAULTS only: dispatch()/combine()
-    # accept per-call block_num/warp_num_per_block overrides, and the op caches
-    # a separate kernel specialization per geometry on the same shmem buffers
-    # (geometry does not affect buffer sizing).
+    # Per-phase launch geometry DEFAULTS; dispatch()/combine() accept per-call
+    # overrides (cached as separate specializations on the same buffers).
     dispatch_warp_num_per_block: int = _DEFAULT_DISPATCH_WARP_NUM
     dispatch_block_num: int = _DEFAULT_DISPATCH_BLOCK_NUM
     combine_warp_num_per_block: int = _DEFAULT_COMBINE_WARP_NUM
     combine_block_num: int = _DEFAULT_COMBINE_BLOCK_NUM
-    # Per-shape geometry lookup (resolution order: explicit arg > tuning_table
-    # > *_block_num/*_warp_num defaults). When not supplied, the op auto-loads
-    # it on construction from the tuning JSON in ``mega_moe_tuning_config/``, resolved
-    # by (arch, model, kernel=IntraNode, ep=world_size) or pinned via
-    # ``tuning_config_path``. A miss silently keeps the static defaults.
+    # Per-shape geometry lookup (explicit arg > tuning_table > defaults),
+    # auto-loaded from mega_moe_tuning_config/ (or tuning_config_path).
     tuning_table: Optional[GeometryTuningTable] = None
     tuning_config_path: Optional[str] = None
     gpu_model: Optional[str] = None
@@ -450,14 +445,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # Dispatch (encode) and combine (decode, Stage 3) must agree on this.
         self._effective_max_recv = config.effective_max_recv
 
-        # Launch-time JIT caches (mori parity): each ``op.dispatch(input)``
-        # / ``op.combine(input)`` picks a specialization by ``input.dtype``.
-        # Launch geometry ``(block_num, warp_num_per_block)`` is also part of
-        # every key so one op (= one set of shmem buffers) can hold multiple
-        # geometry specializations selected per-call; geometry does NOT affect
-        # buffer sizing. Combine cache key additionally includes
-        # ``(zero_copy, enable_weights, fp8_direct_cast)`` because those
-        # switches affect codegen.
+        # Launch-time JIT caches (mori parity): keyed by input.dtype + launch
+        # geometry (one op holds multiple geometry specializations on the same
+        # buffers); combine also keys on (zero_copy, enable_weights, fp8_dc).
         self._disp_jit_cache: Dict[Tuple[torch.dtype, int, int], Any] = {}
         self._disp_compiled_cache: Dict[Tuple[torch.dtype, int, int], Any] = {}
         self._comb_jit_cache: Dict[Tuple[torch.dtype, bool, bool, bool, int, int], Any] = {}
@@ -629,10 +619,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 "quant_type='fp8_direct_cast' is not supported with "
                 "enable_std_moe=True (asymmetric I/O dtypes not yet wired)"
             )
-        # zero_copy (use_external_inp_buf=False) skips Stage 1, which is
-        # exactly where the bf16->fp8 cast lives, so fp8_direct_cast and
-        # zero_copy are mutually exclusive.  Both are static cfg, so reject
-        # the combination here instead of on the first combine() call.
+        # zero_copy skips Stage 1 (where the bf16->fp8 cast lives), so it is
+        # mutually exclusive with fp8_direct_cast; reject up-front.
         if cfg.quant_type == "fp8_direct_cast" and cfg.zero_copy:
             raise ValueError(
                 "quant_type='fp8_direct_cast' is incompatible with "
@@ -981,11 +969,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
             # ``disp_grid_bar`` is intentionally NOT reset; the kernel
             # uses an ``atomic_add`` ticket to derive each launch's epoch.
 
-        # _std_args layout MUST match the trailing 8 ``addr_*`` params
-        # of ``dispatch_launch`` in order:
-        #   shmem_tok, shmem_idx, shmem_tok_id_to_src, out_packed_recv_x,
-        #   out_packed_recv_count, out_packed_recv_src_info,
-        #   out_disp_tok_map, disp_grid_bar.
+        # _std_args layout MUST match the trailing 8 ``addr_*`` params of
+        # ``dispatch_launch`` (shmem tok/idx/tok_id_to_src + out_* + disp_grid_bar).
         _std_args = (
             self._fx_out_tok,
             self._fx_out_idx,
@@ -1060,11 +1045,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         out_idx = self.shmem_disp_out_idx.view(mr, k)
         out_scales = None
         if cfg.scale_bytes > 0:
-            # Mirror caller's scales layout: typed (fp32/fp16/bf16) or
-            # uint8 byte-stream view, both must round-trip out of the
-            # int8 shmem buffer with the same dtype + per-row dim.
-            # ``scales`` is guaranteed non-None here (all-or-none input
-            # contract enforced in _check_dispatch_inputs).
+            # Mirror caller's scales layout (typed or uint8 byte-stream) so it
+            # round-trips out of the int8 shmem buffer. scales is non-None here.
             out_scales = self.shmem_out_scales[: mr * cfg.scale_bytes].view(scales.dtype).view(mr, scales.shape[1])
 
         result = (out_tok, out_wts, out_scales, out_idx, self.total_recv)
@@ -1146,9 +1128,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # fp8_direct_cast fires only when both the cfg knob is set AND
         # the launch dtype is bf16 (mori UseFp8DirectCast parity).
         fp8_dc = cfg.quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
-        # NOTE: the static zero_copy + fp8_direct_cast conflict is rejected
-        # up-front in _check_config(); only the per-call buffer-pointer
-        # contract is validated here.
+        # NOTE: the zero_copy+fp8_dc conflict is rejected up-front in
+        # _check_config(); only the per-call buffer-pointer contract here.
         if zero_copy and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
             # Zero-copy contract: peers read ``shmem_comb_inp_tok``;
             # any other pointer = silent correctness bug.
@@ -1318,9 +1299,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # fp8_direct_cast fires only when cfg asks for it AND caller
         # passes bf16.
         fp8_dc = cfg.quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
-        # ``input`` is unread under skip_stage1; a Python-level fp8 cast
-        # here would still sit on the cudagraph critical path, so the
-        # fused caller is expected to have CV-casted in GEMM2 epilogue.
+        # ``input`` is unread under skip_stage1; the fused caller is expected
+        # to have CV-casted to fp8 in the GEMM2 epilogue.
         if fp8_dc and input.dtype != torch.float8_e4m3fn:
             inp_c = input.to(torch.float8_e4m3fn).contiguous()
         else:
@@ -1374,7 +1354,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         no_s1_key = (c_dtype, bool(enable_weights), bn, wpb)
 
         if no_s1_key not in self._comb_no_s1_fn:
-            from .dispatch_combine_intranode_kernel import make_combine_jit
+            from .flydsl_dispatch_combine_intranode_kernel import make_combine_jit
 
             self._comb_no_s1_fn[no_s1_key] = make_combine_jit(
                 rank=cfg.rank,
