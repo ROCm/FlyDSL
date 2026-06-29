@@ -542,7 +542,7 @@ if "pytest" in sys.modules:
 
 import mori.shmem as ms  # noqa: E402
 
-from kernels.dispatch_combine_intranode_op import (  # noqa: E402
+from kernels.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
@@ -1582,7 +1582,7 @@ def _decode_tok_id_to_src(tis, total_recv, max_tok_per_rank):
     """Decode ``tok_id_to_src[:total_recv]`` -> (src_pe, src_lid) tensors.
 
     The kernel encodes each recv slot as ``src_pe * max_tok_per_rank + src_lid``
-    (see dispatch_combine_intranode_kernel.py).  Only the first
+    (see flydsl_dispatch_combine_intranode_kernel.py).  Only the first
     ``total_recv`` entries are valid; tail entries carry leftover bytes.
     """
     enc = tis[:total_recv].to(torch.int64)
