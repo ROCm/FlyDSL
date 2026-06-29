@@ -1023,158 +1023,31 @@ def build_flash_attn_func_module_primary(
                     q_start_i32 = fx.Int32(q_start)
                     max_kv_col_i32 = kv_start_i32 + fx.Int32(BLOCK_N - 1)
                     tile_needs_mask = max_kv_col_i32 > q_start_i32
-                    s_raw_lo_0 = s_raw_lo[0]
-                    s_raw_lo_1 = s_raw_lo[1]
-                    s_raw_lo_2 = s_raw_lo[2]
-                    s_raw_lo_3 = s_raw_lo[3]
-                    s_raw_lo_4 = s_raw_lo[4]
-                    s_raw_lo_5 = s_raw_lo[5]
-                    s_raw_lo_6 = s_raw_lo[6]
-                    s_raw_lo_7 = s_raw_lo[7]
-                    s_raw_lo_8 = s_raw_lo[8]
-                    s_raw_lo_9 = s_raw_lo[9]
-                    s_raw_lo_10 = s_raw_lo[10]
-                    s_raw_lo_11 = s_raw_lo[11]
-                    s_raw_lo_12 = s_raw_lo[12]
-                    s_raw_lo_13 = s_raw_lo[13]
-                    s_raw_lo_14 = s_raw_lo[14]
-                    s_raw_lo_15 = s_raw_lo[15]
-                    s_raw_hi_0 = s_raw_hi[0]
-                    s_raw_hi_1 = s_raw_hi[1]
-                    s_raw_hi_2 = s_raw_hi[2]
-                    s_raw_hi_3 = s_raw_hi[3]
-                    s_raw_hi_4 = s_raw_hi[4]
-                    s_raw_hi_5 = s_raw_hi[5]
-                    s_raw_hi_6 = s_raw_hi[6]
-                    s_raw_hi_7 = s_raw_hi[7]
-                    s_raw_hi_8 = s_raw_hi[8]
-                    s_raw_hi_9 = s_raw_hi[9]
-                    s_raw_hi_10 = s_raw_hi[10]
-                    s_raw_hi_11 = s_raw_hi[11]
-                    s_raw_hi_12 = s_raw_hi[12]
-                    s_raw_hi_13 = s_raw_hi[13]
-                    s_raw_hi_14 = s_raw_hi[14]
-                    s_raw_hi_15 = s_raw_hi[15]
-
+                    # NOTE: concise causal-mask form (112 hand-unrolled lines -> a loop).
+                    # This currently FAILS at compile time:
+                    #   "state variable 's_raw_lo' is list, not an MLIR Value"
+                    # Root cause (suspected FlyDSL defect): `tile_needs_mask` is a runtime
+                    # value, so this is a dynamic `if` (scf.if). The if-rewriter can carry a
+                    # reassigned *named scalar* MLIR value out of the branch, but NOT a
+                    # reassigned *list* local. The original 112-line unroll only existed to
+                    # work around this by carrying 16+16 named scalars. Kept here as a repro
+                    # so the rewriter can be fixed to carry list-typed locals (flatten to
+                    # per-element yields), after which this is the intended form.
                     if tile_needs_mask:
                         lane_off_i32 = lane_div_32_i32 * fx.Int32(4)
-                        kv_col_lo_0 = kv_start_i32 + lane_off_i32 + fx.Int32(0)
-                        s_raw_lo_0 = ArithValue(kv_col_lo_0 > q_row_i32).select(c_neg_inf, s_raw_lo_0)
-                        s_raw_hi_0 = ArithValue(kv_col_lo_0 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_0
-                        )
-                        kv_col_lo_1 = kv_start_i32 + lane_off_i32 + fx.Int32(1)
-                        s_raw_lo_1 = ArithValue(kv_col_lo_1 > q_row_i32).select(c_neg_inf, s_raw_lo_1)
-                        s_raw_hi_1 = ArithValue(kv_col_lo_1 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_1
-                        )
-                        kv_col_lo_2 = kv_start_i32 + lane_off_i32 + fx.Int32(2)
-                        s_raw_lo_2 = ArithValue(kv_col_lo_2 > q_row_i32).select(c_neg_inf, s_raw_lo_2)
-                        s_raw_hi_2 = ArithValue(kv_col_lo_2 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_2
-                        )
-                        kv_col_lo_3 = kv_start_i32 + lane_off_i32 + fx.Int32(3)
-                        s_raw_lo_3 = ArithValue(kv_col_lo_3 > q_row_i32).select(c_neg_inf, s_raw_lo_3)
-                        s_raw_hi_3 = ArithValue(kv_col_lo_3 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_3
-                        )
-                        kv_col_lo_4 = kv_start_i32 + lane_off_i32 + fx.Int32(8)
-                        s_raw_lo_4 = ArithValue(kv_col_lo_4 > q_row_i32).select(c_neg_inf, s_raw_lo_4)
-                        s_raw_hi_4 = ArithValue(kv_col_lo_4 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_4
-                        )
-                        kv_col_lo_5 = kv_start_i32 + lane_off_i32 + fx.Int32(9)
-                        s_raw_lo_5 = ArithValue(kv_col_lo_5 > q_row_i32).select(c_neg_inf, s_raw_lo_5)
-                        s_raw_hi_5 = ArithValue(kv_col_lo_5 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_5
-                        )
-                        kv_col_lo_6 = kv_start_i32 + lane_off_i32 + fx.Int32(10)
-                        s_raw_lo_6 = ArithValue(kv_col_lo_6 > q_row_i32).select(c_neg_inf, s_raw_lo_6)
-                        s_raw_hi_6 = ArithValue(kv_col_lo_6 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_6
-                        )
-                        kv_col_lo_7 = kv_start_i32 + lane_off_i32 + fx.Int32(11)
-                        s_raw_lo_7 = ArithValue(kv_col_lo_7 > q_row_i32).select(c_neg_inf, s_raw_lo_7)
-                        s_raw_hi_7 = ArithValue(kv_col_lo_7 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_7
-                        )
-                        kv_col_lo_8 = kv_start_i32 + lane_off_i32 + fx.Int32(16)
-                        s_raw_lo_8 = ArithValue(kv_col_lo_8 > q_row_i32).select(c_neg_inf, s_raw_lo_8)
-                        s_raw_hi_8 = ArithValue(kv_col_lo_8 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_8
-                        )
-                        kv_col_lo_9 = kv_start_i32 + lane_off_i32 + fx.Int32(17)
-                        s_raw_lo_9 = ArithValue(kv_col_lo_9 > q_row_i32).select(c_neg_inf, s_raw_lo_9)
-                        s_raw_hi_9 = ArithValue(kv_col_lo_9 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_9
-                        )
-                        kv_col_lo_10 = kv_start_i32 + lane_off_i32 + fx.Int32(18)
-                        s_raw_lo_10 = ArithValue(kv_col_lo_10 > q_row_i32).select(c_neg_inf, s_raw_lo_10)
-                        s_raw_hi_10 = ArithValue(kv_col_lo_10 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_10
-                        )
-                        kv_col_lo_11 = kv_start_i32 + lane_off_i32 + fx.Int32(19)
-                        s_raw_lo_11 = ArithValue(kv_col_lo_11 > q_row_i32).select(c_neg_inf, s_raw_lo_11)
-                        s_raw_hi_11 = ArithValue(kv_col_lo_11 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_11
-                        )
-                        kv_col_lo_12 = kv_start_i32 + lane_off_i32 + fx.Int32(24)
-                        s_raw_lo_12 = ArithValue(kv_col_lo_12 > q_row_i32).select(c_neg_inf, s_raw_lo_12)
-                        s_raw_hi_12 = ArithValue(kv_col_lo_12 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_12
-                        )
-                        kv_col_lo_13 = kv_start_i32 + lane_off_i32 + fx.Int32(25)
-                        s_raw_lo_13 = ArithValue(kv_col_lo_13 > q_row_i32).select(c_neg_inf, s_raw_lo_13)
-                        s_raw_hi_13 = ArithValue(kv_col_lo_13 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_13
-                        )
-                        kv_col_lo_14 = kv_start_i32 + lane_off_i32 + fx.Int32(26)
-                        s_raw_lo_14 = ArithValue(kv_col_lo_14 > q_row_i32).select(c_neg_inf, s_raw_lo_14)
-                        s_raw_hi_14 = ArithValue(kv_col_lo_14 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_14
-                        )
-                        kv_col_lo_15 = kv_start_i32 + lane_off_i32 + fx.Int32(27)
-                        s_raw_lo_15 = ArithValue(kv_col_lo_15 > q_row_i32).select(c_neg_inf, s_raw_lo_15)
-                        s_raw_hi_15 = ArithValue(kv_col_lo_15 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                            c_neg_inf, s_raw_hi_15
-                        )
-
-                    s_raw_lo = [
-                        s_raw_lo_0,
-                        s_raw_lo_1,
-                        s_raw_lo_2,
-                        s_raw_lo_3,
-                        s_raw_lo_4,
-                        s_raw_lo_5,
-                        s_raw_lo_6,
-                        s_raw_lo_7,
-                        s_raw_lo_8,
-                        s_raw_lo_9,
-                        s_raw_lo_10,
-                        s_raw_lo_11,
-                        s_raw_lo_12,
-                        s_raw_lo_13,
-                        s_raw_lo_14,
-                        s_raw_lo_15,
-                    ]
-                    s_raw_hi = [
-                        s_raw_hi_0,
-                        s_raw_hi_1,
-                        s_raw_hi_2,
-                        s_raw_hi_3,
-                        s_raw_hi_4,
-                        s_raw_hi_5,
-                        s_raw_hi_6,
-                        s_raw_hi_7,
-                        s_raw_hi_8,
-                        s_raw_hi_9,
-                        s_raw_hi_10,
-                        s_raw_hi_11,
-                        s_raw_hi_12,
-                        s_raw_hi_13,
-                        s_raw_hi_14,
-                        s_raw_hi_15,
-                    ]
+                        s_raw_lo = [
+                            ArithValue(
+                                kv_start_i32 + lane_off_i32 + fx.Int32((r // 4) * 8 + (r % 4)) > q_row_i32
+                            ).select(c_neg_inf, s_raw_lo[r])
+                            for r in range_constexpr(16)
+                        ]
+                        s_raw_hi = [
+                            ArithValue(
+                                kv_start_i32 + lane_off_i32 + fx.Int32((r // 4) * 8 + (r % 4)) + fx.Int32(K_SUB_N)
+                                > q_row_i32
+                            ).select(c_neg_inf, s_raw_hi[r])
+                            for r in range_constexpr(16)
+                        ]
                 else:
                     # Non-causal KV padding mask: keys with absolute column >= seq_len
                     # -> -inf, so OOB KV (0 or duplicated row) doesn't leak into softmax.
