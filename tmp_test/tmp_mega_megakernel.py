@@ -299,10 +299,15 @@ class FusedMoEMegaStage1:
         # this validates the scheduler-gate plumbing on copied production code.
         import os as _os
         self._tmp_overlap_gate = _os.environ.get("FLYDSL_TMP_OVERLAP_GATE", "0") == "1"
-        self._payload_done = (
-            torch.zeros(self.epr, dtype=torch.int32, device=self.dev)
-            if self._tmp_overlap_gate else None
-        )
+        # NOTE: the consumer gate reads the dispatch op's SYMMETRIC buffer (self.op.payload_done,
+        # zeroed per-launch in forward()), not a private tensor.  The earlier private
+        # self._payload_done allocated here was never read by the kernel -> removed (dead).
+        # Dynamic claim scheduler (FLYDSL_TMP_SCHED): the op allocates the claim buffers; the kernel
+        # is compiled with sched=True; forward() zeros the per-launch claim state.  Default off.
+        self._tmp_sched = _os.environ.get("FLYDSL_TMP_SCHED", "0") == "1"
+        # Fixed disp-table base for the scheduler ptrs (must be set BEFORE compile, which reads it;
+        # the disp table is built later in __init__ and appends the ptrs at this base, idx 50..58).
+        self._SCHED_DISP_BASE = 50
 
         # ---- compile the megakernel (serialize compile across ranks to bound peak memory) ----
         # Always PERSISTENT: the persistent round-robin GEMM covers all occupied tiles regardless
@@ -319,6 +324,7 @@ class FusedMoEMegaStage1:
                     atom_contract=self.atom_contract,
                     sparse_tiles=True, persist_m=-1,
                     overlap_gate=self._tmp_overlap_gate,
+                    sched=self._tmp_sched, sched_disp_base=self._SCHED_DISP_BASE,
                     raw_a_scale=True, xcd_swizzle=self._xcd,
                     fuse_dispatch=scheme, fuse_npes=world_size, fuse_topk=topk,
                     fuse_cap=self.cap, fuse_mtpr=self.mtpr,
@@ -442,6 +448,23 @@ class FusedMoEMegaStage1:
                 # TMP-COPY scheduler overlap gate: idx 26 = p2p payload_done peer table (sender bumps
                 # DEST rank's payload_done[le] cross-PE).  Appended only on the fixedslot+atom path.
                 tbl += [op.p2p_payload_done.data_ptr()]              # 26 p2p payload_done
+        # ---- dynamic claim scheduler pointers (FLYDSL_TMP_SCHED) ----
+        # Appended at a FIXED base (50) for BOTH compact and fixedslot layouts (their tables end at
+        # 43 / 26), so the kernel reads disp[50..58] regardless of dispatch path.  Pad with 0 up to base.
+        if self._tmp_sched:
+            while len(tbl) < self._SCHED_DISP_BASE:
+                tbl.append(0)
+            tbl += [
+                op.l1_ready.data_ptr(),        # 50 l1_ready (local view: consumer reads this rank's)
+                op.p2p_l1_ready.data_ptr(),    # 51 p2p l1_ready (producer bumps DEST tile's, cross-PE)
+                op.tile_expected.data_ptr(),   # 52 tile_expected (block0 fills from count all-gather)
+                op.g1_claim.data_ptr(),        # 53 g1_claim (one-winner GEMM1 tile claim)
+                op.l2_ready.data_ptr(),        # 54 l2_ready (GEMM1-done mask)
+                op.g2_claim.data_ptr(),        # 55 g2_claim (one-winner GEMM2 tile claim)
+                op.sched_cursor.data_ptr(),    # 56 sched_cursor (global route claim cursor)
+                op.sched_done.data_ptr(),      # 57 sched_done (completed-tile counter)
+                op.block_claim.data_ptr(),     # 58 block_claim (per-block won-tile scratch)
+            ]
         self._disp = torch.tensor(tbl, dtype=torch.int64, device=self.dev)
         self._disp_host = torch.tensor(tbl, dtype=torch.int64)
 
@@ -480,7 +503,7 @@ class FusedMoEMegaStage1:
         # TMP-COPY scheduler overlap gate: consumer reads THIS rank's op.payload_done (symmetric
         # buffer local view); senders bump the DEST rank's view via the idx-26 peer table.  Zero
         # per launch (graph-safe memset).
-        if self._tmp_overlap_gate:
+        if self._tmp_overlap_gate or self._tmp_sched:
             self.op.payload_done.zero_()
             pd_ptr = self.op.payload_done.data_ptr()
         # Plan A: total_recv accumulates in-kernel each launch -> zero first (graph-safe).
@@ -494,7 +517,7 @@ class FusedMoEMegaStage1:
                   else 0)
         # TMP-COPY overlap gate: the consumer reads expected_real=ll_count[le]; compact_ag also
         # populates ll_count (block0 post-CMP), so route er_ptr there when the gate is on.
-        if self._tmp_overlap_gate:
+        if self._tmp_overlap_gate or self._tmp_sched:
             er_ptr = self.op.ll_count.data_ptr()
         if self.compact:
             # compact all-gather: local_hist (count accumulator) + local_cursor (write cursor) must
@@ -505,6 +528,17 @@ class FusedMoEMegaStage1:
         # NOTE compact+atom combo: NO per-launch srcmap reset needed -- the GEMM derives the padding
         # mask in-kernel from ll_count (k,count via the prefix scan), exactly like fixslot.  So the
         # stage1->stage2 hookup adds ZERO extra per-forward ops beyond compact dispatch's own resets.
+        # Dynamic claim scheduler: zero the per-launch claim state (graph-safe memsets).  l1_ready,
+        # claim cursors/winner arrays and the completion counter must start clean each launch;
+        # tile_expected is overwritten by block0 from the count all-gather, so it needs no reset.
+        if self._tmp_sched:
+            self.op.l1_ready.zero_()
+            self.op.g1_claim.zero_()
+            self.op.l2_ready.zero_()
+            self.op.g2_claim.zero_()
+            self.op.sched_cursor.zero_()
+            self.op.sched_done.zero_()
+            self.op.block_claim.zero_()
         a_mat = self._agv(self._rx)
         # compact still A-gathers via sparse_tiles (_trb) + expert (_se), so the sorted_token_ids/
         # sorted_expert_ids ARGS MUST stay the compact tile metadata; the atom outputs (_sti/_se_atom)

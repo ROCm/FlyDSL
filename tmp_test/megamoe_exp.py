@@ -65,7 +65,7 @@ except Exception:  # noqa: BLE001
     _HAS_AITER_QUANT = False
 
 
-__all__ = ["MegaMoE"]
+__all__ = ["MegaMoEExp"]
 
 
 class MegaMoEExp:

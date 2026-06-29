@@ -224,6 +224,12 @@ def compile_fused_moe_gemm1(
     diag_scale_valu: bool = False,
     raw_a_scale: bool = False,
     overlap_gate: bool = False,
+    # dynamic claim scheduler (tmp_mega.py worker/claim model): single-launch, barrier-free persistent
+    # loop that claims dispatch routes + ready GEMM tiles.  Scheduler buffer ptrs are read from the
+    # disp pointer-table starting at sched_disp_base (l1_ready@base, p2p_l1_ready@+1, tile_expected@+2,
+    # g1_claim@+3, l2_ready@+4, g2_claim@+5, sched_cursor@+6, sched_done@+7, block_claim@+8).
+    sched: bool = False,
+    sched_disp_base: int = 50,
     rank: int = 0,
     experts_per_rank: int = 0,
     # w1/w1_scale are ALWAYS indexed by the LOCAL expert id (0..epr-1): the caller passes only
@@ -399,6 +405,7 @@ def compile_fused_moe_gemm1(
     _dsv_tag = "_dsv" if diag_scale_valu else ""
     _ras_tag = "_ras" if raw_a_scale else ""
     _og_tag = f"_og{rank}x{experts_per_rank}" if overlap_gate else ""
+    _sched_tag = f"_sched{sched_disp_base}" if sched else ""
     # CK-style hot-loop interleave (DEFAULT mode 3): prescribe sched_group_barrier so this
     # phase's B(VMEM)/A(DS) loads interleave into the MFMA stream at R MFMAs/load, hiding
     # load latency under compute (lifts MFMA util; ~2-3% GEMM, ~1-2% e2e at large bs, bit-exact).
@@ -429,7 +436,8 @@ def compile_fused_moe_gemm1(
     # write).  Avoids the remote count atomics + remote compact_base read (3-round) -> faster.  The
     # 3-round path is kept as a fallback (compact_allgather=False).
     _compact_ag = bool(_compact and compact_allgather)
-    _skip_gemm = False
+    # diagnostic: skip the consumer GEMM (times dispatch prologue + producer only).
+    _skip_gemm = os.environ.get("FLYDSL_TMP_SKIP_GEMM", "0") == "1"
     _phase_ts = os.environ.get("FLYDSL_TMP_PHASE_TS", "0") == "1"
     # TMP-COPY scheduler overlap gate diagnostic: skip the per-expert spin (no hang) so we can
     # read back payload_done vs ll_count cardinality on multi-GPU.
@@ -501,7 +509,7 @@ def compile_fused_moe_gemm1(
     _w1l_tag = f"_w1l{experts_per_rank}"
     module_name = (
         f"tmpcopy_mfma_fmoe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"
-        f"_t{tile_m}x{tile_n}x{tile_k}_{_pm_tag}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}{_ci_tag}{_dg_tag}{_dsv_tag}{_ras_tag}{_spt_tag}{_og_tag}{_is_tag}{_fuse_tag}{_w1l_tag}_v37"
+        f"_t{tile_m}x{tile_n}x{tile_k}_{_pm_tag}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}{_ci_tag}{_dg_tag}{_dsv_tag}{_ras_tag}{_spt_tag}{_og_tag}{_sched_tag}{_is_tag}{_fuse_tag}{_w1l_tag}_v37"
     ).replace("-", "_")
 
     # -- LDS sizing --
@@ -1299,8 +1307,13 @@ def compile_fused_moe_gemm1(
                     _a_trecv = _dpa(36); _a_dctr = _dpa(37)
                     _a_rnum = _dpa(38); _p_rnum = _dpa(39)
                 # TMP-COPY scheduler overlap gate: idx 43 = p2p payload_done peer table.
-                if const_expr(overlap_gate):
+                if const_expr(overlap_gate or sched):
                     _p_pd = _dpa(43)
+                # dynamic claim scheduler: bind tile_expected (block0 fills it from the count
+                # all-gather; the GEMM1 claim reads payload_done[e] >= tile_expected[ci]).
+                if const_expr(sched):
+                    _a_texp = _dpa(sched_disp_base + 2)
+                    _p_l1 = _dpa(sched_disp_base + 1)   # p2p l1_ready (producer bumps DEST tile)
 
                 _tid = fx.thread_idx.x
                 _lane = _tid & 63
@@ -1439,6 +1452,8 @@ def compile_fused_moe_gemm1(
                     _r_trb = _crfa(_a_trb)
                     _r_nv = _crfa(_a_nv)
                     _r_cnt = _crfa(_a_cnt)
+                    if const_expr(sched):
+                        _r_texp = _crfa(_a_texp)   # tile_expected[ci] high-water
                     # compact+atom: block0 sentinel-fills ONLY the tile-pad GAP slots of THIS rank's
                     # srcmap (real slots are P2P-written by peers in PHASE-2; gaps are never written).
                     # In-kernel (no host memset) + only <tile_m/expert slots -> the GEMM reads srcmap
@@ -1458,6 +1473,16 @@ def compile_fused_moe_gemm1(
                             _ci = _acc + _t
                             buffer_ops.buffer_store(_se_val, _r_se, _ci)
                             buffer_ops.buffer_store(_ebase + _t * _ctm, _r_trb, _ci)
+                            if const_expr(sched):
+                                # rows IN this tile = min(tile_m, cnt - t*tile_m).  The GEMM1 claim
+                                # waits l1_ready[ci] (per-tile arrival count) >= this.  Per-tile (not
+                                # per-expert high-water) is required: peers write contiguous per-sender
+                                # ranges that arrive out-of-order, so a per-expert count can't tell
+                                # which tile's specific slots are filled.
+                                _rows_left = _cnt - _t * _ctm
+                                _rit = arith.select(
+                                    arith.cmpi(CmpIPredicate.slt, _ctm, _rows_left), _ctm, _rows_left)
+                                buffer_ops.buffer_store(_rit, _r_texp, _ci)
                         if _lane == 0:
                             buffer_ops.buffer_store(_cnt, _r_cnt, _le2)
                         if const_expr(_atom_contract):
@@ -1543,17 +1568,27 @@ def compile_fused_moe_gemm1(
                     # drains the wave's payload stores; system release makes them visible BEFORE the
                     # signal, so a consumer observing payload_done[le] can safely read rx_em rows even
                     # with the global cross-PE#2 barrier removed.
-                    if const_expr(overlap_gate):
+                    if const_expr(overlap_gate or sched):
                         rocdl.s_waitcnt(0)
                         _epk.fence_system_release()
                         if _lane == 0:
                             if _do_pub:
-                                _le_pub = _expert % _c_epr
-                                _pd_remote = buffer_ops.buffer_load(
-                                    _crfa(_p_pd), _dest_pe, vec_width=1, dtype=T.i64)
-                                _ = _epk.atomic_add_system(
-                                    _pd_remote + _epk._to_i64(_le_pub) * arith.constant(4, type=T.i64),
-                                    arith.constant(1))
+                                if const_expr(overlap_gate):
+                                    _le_pub = _expert % _c_epr
+                                    _pd_remote = buffer_ops.buffer_load(
+                                        _crfa(_p_pd), _dest_pe, vec_width=1, dtype=T.i64)
+                                    _ = _epk.atomic_add_system(
+                                        _pd_remote + _epk._to_i64(_le_pub) * arith.constant(4, type=T.i64),
+                                        arith.constant(1))
+                                if const_expr(sched):
+                                    # bump the DEST's per-tile l1_ready[ci], ci = dense_slot // tile_m
+                                    # (tile-padded dense layout -> slot//tile_m is the compact tile id).
+                                    _ci_pub = _slot // arith.constant(_fz_tile_m)
+                                    _l1_remote = buffer_ops.buffer_load(
+                                        _crfa(_p_l1), _dest_pe, vec_width=1, dtype=T.i64)
+                                    _ = _epk.atomic_add_system(
+                                        _l1_remote + _epk._to_i64(_ci_pub) * arith.constant(4, type=T.i64),
+                                        arith.constant(1))
 
                 # ---- Plan A (compact+atom combo): per-token distinct-dest dedup -> dest_ctr.
                 # ★ROOT-CAUSE FIX: the original lane0-only GLOBAL-atomic dedup hammered dest_ctr[npes]
@@ -1636,7 +1671,7 @@ def compile_fused_moe_gemm1(
                     # / ll_count are already published via `meta` (after cross-PE#1 count all-gather), so
                     # GEMM can start now; the per-expert payload_done gate handles cross-PE payload
                     # arrival.  block0 still runs cross-PE#2 + recv-count above (total_recv for stage2).
-                    if const_expr(not overlap_gate):
+                    if const_expr(not (overlap_gate or sched)):
                         mori_shmem.int32_wait_until_greater_than(_a_meta2, _e0m2)
                     _epk.fence_agent_acquire()
                 fx.barrier()
@@ -1890,7 +1925,12 @@ def compile_fused_moe_gemm1(
             _c_sbm_p = arith.constant(sort_block_m, index=True)
             _num_valid_idx = arith.index_cast(ir.IndexType.get(), num_valid_i32)
             _total_m_tiles = (_num_valid_idx + _c_sbm_p - _c1_p) / _c_sbm_p
-            _tiles_per_block = (_total_m_tiles + _c_cu_p - _c1_p) / _c_cu_p
+            if const_expr(sched):
+                # dynamic claim: each block claims unique tiles off the global cursor; worst case one
+                # block claims ALL tiles, so bound the loop by total_m_tiles (exhausted iters no-op).
+                _tiles_per_block = _total_m_tiles
+            else:
+                _tiles_per_block = (_total_m_tiles + _c_cu_p - _c1_p) / _c_cu_p
             if const_expr(_skip_gemm):
                 _tiles_per_block = arith.constant(0, index=True)  # DIAG: skip consumer GEMM (time prologue+producer)
             if const_expr(_static_tiles and _fz_epr <= 64):
@@ -1913,13 +1953,44 @@ def compile_fused_moe_gemm1(
                     _st_pre = arith.select(
                         arith.cmpi(CmpIPredicate.sgt, _st_lane, arith.constant(_stj, type=T.i32)),
                         _st_pre + _st_sj, _st_pre)
+            if const_expr(sched):
+                # dynamic claim scheduler resources (read ptrs from the disp table).
+                _rdisp_c = buffer_ops.create_buffer_resource_from_addr(addr_disp)
+                _sc_addr = buffer_ops.buffer_load(_rdisp_c, arith.constant(sched_disp_base + 6),
+                                                  vec_width=1, dtype=T.i64)   # sched_cursor
+                _bclaim_addr = buffer_ops.buffer_load(_rdisp_c, arith.constant(sched_disp_base + 8),
+                                                      vec_width=1, dtype=T.i64)   # block_claim[bid]
+                _r_bclaim = buffer_ops.create_buffer_resource_from_addr(_bclaim_addr)
+                _r_texp_c = buffer_ops.create_buffer_resource_from_addr(
+                    buffer_ops.buffer_load(_rdisp_c, arith.constant(sched_disp_base + 2),
+                                           vec_width=1, dtype=T.i64))            # tile_expected
+                _l1_addr_c = buffer_ops.buffer_load(_rdisp_c, arith.constant(sched_disp_base + 0),
+                                                    vec_width=1, dtype=T.i64)    # l1_ready (local view)
+                _sched_gdx = arith.index_cast(T.i32, gpu.grid_dim.x)
+                _sched_bid = arith.index_cast(T.i32, bx_persist) * _sched_gdx + arith.index_cast(T.i32, by)
+                _sched_bid_idx = arith.index_cast(ir.IndexType.get(), _sched_bid)
+                _sched_ntiles_i32 = arith.index_cast(T.i32, _total_m_tiles)
+                _tx_i32_c = arith.index_cast(T.i32, tx)
+                _is_tid0_c = arith.cmpi(CmpIPredicate.eq, _tx_i32_c, arith.constant(0, type=T.i32))
             _for_persist = scf.ForOp(_c0_p, _tiles_per_block, _c1_p)
             _for_ip = ir.InsertionPoint(_for_persist.body)
             _for_ip.__enter__()
             _mi_p = _for_persist.induction_variable
-            # Strided round-robin: CTA k does tiles {k, k+grid_y, ...} (adjacent CTAs hit adjacent
-            # tiles -> per-wave B L2 reuse).
-            bx = bx_persist + _mi_p * _c_cu_p
+            if const_expr(sched):
+                # claim a UNIQUE tile id off the global cursor (tid0 only), broadcast block-wide via
+                # block_claim[bid] + barrier.  ci >= num_tiles => exhausted (this iter no-ops).
+                _ifc = scf.IfOp(_is_tid0_c)
+                with ir.InsertionPoint(_ifc.then_block):
+                    _ci_old = _epk.atomic_add_agent(_sc_addr, arith.constant(1, type=T.i32))
+                    buffer_ops.buffer_store(_ci_old, _r_bclaim, _sched_bid_idx)
+                    scf.YieldOp([])
+                gpu.barrier()
+                _ci_i32 = buffer_ops.buffer_load(_r_bclaim, _sched_bid_idx, vec_width=1, dtype=T.i32)
+                bx = arith.index_cast(ir.IndexType.get(), _ci_i32)
+            else:
+                # Strided round-robin: CTA k does tiles {k, k+grid_y, ...} (adjacent CTAs hit adjacent
+                # tiles -> per-wave B L2 reuse).
+                bx = bx_persist + _mi_p * _c_cu_p
             if const_expr(_static_tiles and _fz_epr <= 64):
                 # P-static: derive (expert, k) for compact tile bx via readlane prefix-scan (no se/trb).
                 _st_bx = arith.index_cast(T.i32, bx)
@@ -1945,6 +2016,19 @@ def compile_fused_moe_gemm1(
                 _e_w_i32 = _ef
                 expert_idx = arith.index_cast(ir.IndexType.get(), _e_w_i32)
                 exp_valid = arith.cmpi(CmpIPredicate.ult, expert_i32, arith.constant(experts, type=T.i32))
+                if const_expr(sched):
+                    # per-tile readiness: spin until ALL senders' rows for this tile's expert have
+                    # landed (payload_done[e] >= tile_expected[ci]); replaces the global cross-PE#2
+                    # payload barrier -> tiles whose payload arrived early run while others still land.
+                    _texp_v = buffer_ops.buffer_load(_r_texp_c, _st_bx, vec_width=1, dtype=T.i32)
+                    _l1_addr_ci = _l1_addr_c + _epk._to_i64(_st_bx) * arith.constant(4, type=T.i64)
+                    _ifrdy = scf.IfOp(blk_valid)
+                    with ir.InsertionPoint(_ifrdy.then_block):
+                        _epk.fence_system_acquire()
+                        mori_shmem.int32_wait_until_greater_than(
+                            _l1_addr_ci, arith.subi(_texp_v, arith.constant(1, type=T.i32)))
+                        _epk.fence_system_acquire()
+                        scf.YieldOp([])
             else:
                 if const_expr(sparse_tiles):
                     # sparse fixed-slot layout: per-tile row base = tile_row_base[bx]

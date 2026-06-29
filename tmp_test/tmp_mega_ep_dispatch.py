@@ -158,6 +158,32 @@ class FlyDSLDispatchGroupMajorOp:
         # sender bumps the DEST rank's payload_done[le] (cross-PE) after writing the token; the
         # receiver's GEMM gate spins payload_done[le] >= ll_count[le].  Zeroed per launch.
         self.payload_done = self._sym((self.epr,), torch.int32)
+        # ---- dynamic claim scheduler buffers (FLYDSL_TMP_SCHED) — tmp_mega.py worker/claim model ----
+        # Ported from the standalone demo (dynamic_megamoe_dispatch_kernel): a single-launch,
+        # barrier-free persistent loop where every block claims dispatch routes (sched cursor) +
+        # claims ready GEMM tiles (g1_claim/g2_claim, winner=old 0).  Buffers (gated; small):
+        #   sched_cursor : global route cursor (agent atomic) for dynamic dispatch claim
+        #   l1_ready[nt] : per-TILE cross-PE payload-arrival count (symmetric; sender bumps dest's)
+        #   tile_expected[nt] : per-tile expected row count (block0 fills from the count all-gather)
+        #   g1_claim[nt] / g2_claim[nt] : one-winner GEMM1 / GEMM2 tile claim (agent atomic)
+        #   l2_ready[nt] : GEMM1-done mask per tile (consumed by GEMM2 claim)
+        #   block_claim[nblk] : per-block scratch holding the tile this block won this iter
+        #   sched_done : completed-tile counter (loop termination: done == num_tiles)
+        import os as _os_sched
+        self._sched = _os_sched.environ.get("FLYDSL_TMP_SCHED", "0") == "1"
+        self.sched_cursor = self.l1_ready = self.tile_expected = None
+        self.g1_claim = self.l2_ready = self.g2_claim = None
+        self.block_claim = self.sched_done = None
+        if self._sched:
+            _nt = int(self.max_blocks)                     # upper bound on GEMM tiles
+            self.l1_ready = self._sym((_nt,), torch.int32)                                  # cross-PE
+            self.tile_expected = torch.zeros(_nt, dtype=torch.int32, device=self._dev)
+            self.g1_claim = torch.zeros(_nt, dtype=torch.int32, device=self._dev)
+            self.l2_ready = torch.zeros(_nt, dtype=torch.int32, device=self._dev)
+            self.g2_claim = torch.zeros(_nt, dtype=torch.int32, device=self._dev)
+            self.sched_cursor = torch.zeros(1, dtype=torch.int32, device=self._dev)
+            self.sched_done = torch.zeros(1, dtype=torch.int32, device=self._dev)
+            self.block_claim = torch.zeros(1024, dtype=torch.int32, device=self._dev)  # >= any grid nblk
         # ---- compact (naive count-first) buffers ----
         # compact_base[le] = dense prefix-sum base (tile_m-padded) for local expert le; symmetric so
         # senders read the DEST's base to place payload precisely.  done2c = the COUNT cross-PE
@@ -225,6 +251,10 @@ class FlyDSLDispatchGroupMajorOp:
         self.p2p_srcmap_em = self._p2p_table(self.srcmap_em)
         self.p2p_recv_num = self._p2p_table(self.recv_num)   # Plan A: cross-PE recv-count signal target
         self.p2p_payload_done = self._p2p_table(self.payload_done)  # TMP-COPY scheduler overlap gate
+        if getattr(self, "_sched", False):
+            # l1_ready is the only cross-PE claim buffer (sender bumps the DEST tile's arrival count);
+            # claims/cursor/done are LOCAL (agent scope) so they need no P2P table.
+            self.p2p_l1_ready = self._p2p_table(self.l1_ready)
         if self.compact:
             self.p2p_compact_base = self._p2p_table(self.compact_base)
             self.p2p_done2c = self._p2p_table(self.done2c)
