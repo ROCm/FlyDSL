@@ -86,8 +86,13 @@ def clean(line: str) -> str:
 
 
 def _num(cell: str) -> Optional[float]:
+    """Parse a numeric cell to float, or None if it isn't one.
+
+    Thousands separators are tolerated so the AIter sweep's ``1,264.1`` cells
+    parse the same way as the plain ``3.938`` cells in the raw results table.
+    """
     try:
-        return float(cell)
+        return float(cell.replace(",", ""))
     except ValueError:
         return None
 
@@ -188,7 +193,10 @@ def parse_log(text: str, regression_pct: float = DEFAULT_REGRESSION_PCT) -> list
         if rec is None:
             rec = Record(op=op, shape=shape, dtype=dtype, metric=unit, value=cur, status="ok")
             records[_key(op, shape, dtype)] = rec
-        # The comparison block is authoritative for the current value + metric.
+        # The comparison block fixes the metric (unit) and supplies the current
+        # value only when the raw table didn't already have one. When the raw
+        # table did report a value it wins (raw and comparison are emitted from
+        # the same run, so they agree on the number).
         rec.metric = unit
         if rec.value is None:
             rec.value = cur
@@ -204,13 +212,6 @@ def parse_log(text: str, regression_pct: float = DEFAULT_REGRESSION_PCT) -> list
             rec.vs_tag = {"tag": current_base, "baseline": bl.baseline, "ratio": bl.ratio, "delta_pct": bl.delta_pct}
 
     return list(records.values())
-
-
-def _num_comma(cell: str) -> Optional[float]:
-    try:
-        return float(cell.replace(",", ""))
-    except ValueError:
-        return None
 
 
 def parse_aiter_compare(text: str) -> list[Record]:
@@ -248,7 +249,7 @@ def parse_aiter_compare(text: str) -> list[Record]:
             metric="speedup",
             value=sp,
             status="ok" if sp is not None else "missing",
-            extra={"flydsl_us": _num_comma(m["fly"]), "aiter_us": _num_comma(m["ait"]), "baseline": "aiter"},
+            extra={"flydsl_us": _num(m["fly"]), "aiter_us": _num(m["ait"]), "baseline": "aiter"},
         )
     return list(out.values())
 

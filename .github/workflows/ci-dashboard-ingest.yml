@@ -46,10 +46,11 @@ jobs:
           set -euo pipefail
           OUT="${RUNNER_TEMP}/dashboard-data"
           mkdir -p "$OUT"
-          # Seed the merge from whatever is already published (public raw; 404 -> fresh start).
+          # Seed the merge from the published history (public raw; 404 -> fresh start).
+          # Only history.json is accumulated across runs; runs.json is a fresh
+          # snapshot ingest.py rewrites every time, so it is not seeded here.
           base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${DATA_BRANCH}"
           curl -fsSL "$base/history.json" -o "$OUT/history.json" || echo "no existing history.json fetched (first run or unreachable) — starting fresh"
-          curl -fsSL "$base/runs.json"    -o "$OUT/runs.json"    || true
           python3 .github/dashboard/ingest/ingest.py \
             --repo "$GITHUB_REPOSITORY" \
             --max-runs "$MAX_RUNS" \

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -108,7 +109,10 @@ def resolve_pr(repo: str, run: dict) -> int | None:
     for p in cands:
         if (p.get("head") or {}).get("sha") == sha:
             return p.get("number")
-    return cands[0]["number"] if cands else None
+    # No candidate's head SHA matches this run: the run's commit is not (any
+    # longer) the head of a PR on that branch. Returning a guessed cands[0]
+    # would mislabel every record with the wrong PR number, so leave it unset.
+    return None
 
 
 def ingest_run(repo: str, run: dict, regression_pct: float) -> tuple[list[dict], dict]:
@@ -200,8 +204,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--regression-pct", type=float, default=parse_bench.DEFAULT_REGRESSION_PCT)
     args = ap.parse_args(argv)
 
-    import os
-
     hist_path = args.history_file or os.path.join(args.out_dir, "history.json")
     runs_path = args.runs_file or os.path.join(args.out_dir, "runs.json")
 
@@ -216,19 +218,22 @@ def main(argv: list[str] | None = None) -> int:
         summaries.append(summary)
         tag = f"#{summary['pr']}" if summary["pr"] else summary["branch"]
         print(
-            f"  run {run['id']} {tag}: {len(recs)} records " f"({len([j for j in summary['jobs']])} bench jobs)",
+            f"  run {run['id']} {tag}: {len(recs)} records ({len(summary['jobs'])} bench jobs)",
             file=sys.stderr,
         )
 
     existing = []
     if os.path.exists(hist_path):
-        existing = json.load(open(hist_path)).get("records", [])
+        with open(hist_path, encoding="utf-8") as fh:
+            existing = json.load(fh).get("records", [])
     merged = merge_history(existing, all_records, args.history_days)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     os.makedirs(args.out_dir, exist_ok=True)
-    json.dump({"schema": 1, "updated": now, "repo": args.repo, "records": merged}, open(hist_path, "w"), indent=1)
-    json.dump({"schema": 1, "updated": now, "repo": args.repo, "runs": summaries}, open(runs_path, "w"), indent=1)
+    with open(hist_path, "w", encoding="utf-8") as fh:
+        json.dump({"schema": 1, "updated": now, "repo": args.repo, "records": merged}, fh, indent=1)
+    with open(runs_path, "w", encoding="utf-8") as fh:
+        json.dump({"schema": 1, "updated": now, "repo": args.repo, "runs": summaries}, fh, indent=1)
     print(f"history: {len(merged)} records -> {hist_path}", file=sys.stderr)
     print(f"runs: {len(summaries)} -> {runs_path}", file=sys.stderr)
     return 0
