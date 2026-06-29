@@ -104,6 +104,30 @@ def lds_load_b32_raw(lds_base_idx, byte_offset):
     return llvm_dialect.load(ir.IntegerType.get_signless(32), ptr_val)
 
 
+def lds_atomic_store_b32_raw(lds_base_idx, byte_offset, value, ordering):
+    """Atomic i32 store to LDS with the given ordering (workgroup scope).
+
+    Used for cross-wave producer/consumer flags: a release store orders the
+    prior plain LDS data writes before the flag becomes visible to other waves.
+    """
+    from flydsl.utils.smem_allocator import get_op_result_or_value as _gv
+
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    llvm_dialect.store(_gv(value), ptr_val, ordering=ordering, syncscope="workgroup", alignment=4)
+
+
+def lds_atomic_load_b32_raw(lds_base_idx, byte_offset, ordering):
+    """Atomic i32 load from LDS with the given ordering (workgroup scope).
+
+    An acquire load ensures subsequent plain LDS reads observe the data writes
+    that the matching release store ordered before the flag.
+    """
+    ptr_val = _raw_lds_ptr(lds_base_idx, byte_offset)
+    return llvm_dialect.load(
+        ir.IntegerType.get_signless(32), ptr_val, ordering=ordering, syncscope="workgroup", alignment=4
+    )
+
+
 def lds_transpose_load_raw(result_type, lds_base_idx, byte_offset):
     """Transpose-load 16 bytes from LDS using a pre-extracted base index."""
     from flydsl._mlir.dialects import rocdl as _rocdl
