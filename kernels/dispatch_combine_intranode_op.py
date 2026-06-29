@@ -62,23 +62,16 @@ _DEFAULT_COMBINE_WARP_NUM = 8
 
 logger = logging.getLogger(__name__)
 
-# Directory holding the rich per-shape tuning JSONs written by this module
-# (schema: ``flydsl_{arch}_{model}_{kernel}_ep{n}.json``).
-_TUNING_CONFIGS_DIR = Path(__file__).resolve().parent / "tuning_configs"
+# Per-shape tuning JSONs (schema: flydsl_{arch}_{model}_{kernel}_ep{n}.json).
+_TUNING_CONFIGS_DIR = Path(__file__).resolve().parent / "mega_moe_tuning_config"
 
 
 @dataclass
 class GeometryTuningTable:
-    """Per-shape launch-geometry lookup, used only when ``dispatch()`` /
-    ``combine()`` are called without explicit ``block_num`` /
-    ``warp_num_per_block``.
-
-    Maps a per-rank token-count bucket (dispatch: ``input.shape[0]``;
-    combine: ``cur_tok``) to ``(block_num, warp_num_per_block)``. Lookup
-    rounds up to the smallest bucket ``>=`` the runtime count; a count above
-    every bucket reuses the largest (mori parity). Geometry does not affect
-    buffer sizing, so all entries share one op's buffers.
-    """
+    """Per-shape token-count -> (block_num, warp_num_per_block) lookup, used when
+    dispatch()/combine() get no explicit geometry. Rounds up to the smallest
+    bucket >= count (largest on overflow, mori parity); geometry does not affect
+    buffer sizing."""
 
     dispatch: Dict[int, Tuple[int, int]] = field(default_factory=dict)
     combine: Dict[int, Tuple[int, int]] = field(default_factory=dict)
@@ -96,18 +89,10 @@ class GeometryTuningTable:
     def from_tuning_file(
         cls, path, *, dtype, hidden_dim, zero_copy, topk=None, local_expert_num=None, combine_dtype="bf16"
     ):
-        """Build a per-op table from a multi-shape tuning JSON, filtered to
-        this op's shape:
-
-        - dispatch by ``(dtype, hidden_dim[, topk, local_expert_num])``;
-          ``dtype`` is the real dispatch dtype (``"fp4"`` / ``"fp8_ocp"`` /
-          ``"bf16"``).
-        - combine by ``(combine_dtype, hidden_dim[, topk, local_expert_num],
-          zero_copy)``; combine geometry is independent of the dispatch dtype
-          (combine input is always bf16 in the sweeps).
-
-        Empty-phase table (=> cfg defaults) when no rule matches.
-        """
+        """Build a per-op table from a multi-shape tuning JSON, filtered to this
+        op's shape: dispatch by (dtype, hidden_dim[, topk, local_expert_num]),
+        combine by (combine_dtype, hidden_dim[, topk, local_expert_num],
+        zero_copy). Empty table => cfg defaults."""
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
@@ -157,9 +142,8 @@ def _device_cu_count(device_index):
 
 
 def _check_block_num_resident(phase, block_num):
-    """Guard the grid-wide-barrier occupancy deadlock: the phase-ending
-    barrier needs all blocks co-resident, so ``block_num > #CU`` can spin-wait
-    forever when surplus blocks are never scheduled. Hard-cap at ``#CU``."""
+    """Hard-cap block_num at #CU: the phase-ending grid-wide barrier needs all
+    blocks co-resident, so block_num > #CU risks a spin-wait deadlock."""
     num_cu = _device_cu_count(torch.cuda.current_device())
     if block_num > num_cu:
         raise ValueError(
@@ -171,11 +155,8 @@ def _check_block_num_resident(phase, block_num):
 
 
 def _resolve_launch_geometry(phase, block_num, warp_num_per_block, table, num_tokens, default_bn, default_wpb):
-    """Three-tier geometry resolution: (1) explicit per-call override,
-    (2) ``table`` lookup by token count, (3) cfg default.
-
-    The explicit override must pass BOTH values together (or neither), and
-    both must be ``> 0``."""
+    """Geometry resolution: explicit per-call override > table lookup by token
+    count > cfg default. Explicit override needs BOTH values (>0) or neither."""
     has_bn = block_num is not None
     has_wpb = warp_num_per_block is not None
     if has_bn != has_wpb:
@@ -208,8 +189,7 @@ def _resolve_launch_geometry(phase, block_num, warp_num_per_block, table, num_to
     return geom
 
 
-# Maps a torch dtype to the tuning-file ``dtype`` string (sweep naming;
-# fp8_ocp == OCP E4M3 == torch.float8_e4m3fn).
+# torch dtype -> tuning-file ``dtype`` string (fp8_ocp == OCP E4M3).
 _TUNING_DTYPE_NAME = {
     torch.float4_e2m1fn_x2: "fp4",
     torch.float8_e4m3fn: "fp8_ocp",
@@ -238,12 +218,9 @@ def _detect_gpu_model(device_index=0):
 
 
 def resolve_tuning_config_path(ep_size, *, kernel_type="IntraNode", gpu_arch=None, gpu_model=None):
-    """Locate the FlyDSL tuning JSON for this ``(arch, model, kernel, ep)``.
-
-    Naming written by this module: ``flydsl_{arch}_{model}_{kernel}_ep{n}.json``.
-    Prefers an exact arch+model match, then arch, then any file with the same
-    ``{kernel}_ep{n}`` suffix. Returns ``None`` when nothing matches (caller
-    then falls back to the static cfg defaults)."""
+    """Locate the tuning JSON for (arch, model, kernel, ep), named
+    flydsl_{arch}_{model}_{kernel}_ep{n}.json. Prefers arch+model, then arch,
+    then any matching suffix; None when nothing matches."""
     if not _TUNING_CONFIGS_DIR.is_dir():
         return None
     if gpu_arch is None:
@@ -270,12 +247,9 @@ def resolve_tuning_config_path(ep_size, *, kernel_type="IntraNode", gpu_arch=Non
 
 
 def build_geometry_tuning_table_for_config(cfg, path=None):
-    """Build a :class:`GeometryTuningTable` for ``cfg``'s exact shape.
-
-    ``path`` is the rich tuning JSON; when omitted it is auto-resolved via
-    :func:`resolve_tuning_config_path` using ``cfg.world_size`` as ep size.
-    Returns ``None`` when no file is found or neither phase yields a rule (so
-    the caller keeps the static cfg defaults)."""
+    """Build a :class:`GeometryTuningTable` for ``cfg``'s shape. ``path`` is the
+    tuning JSON (auto-resolved from ``cfg.world_size`` when omitted); None when
+    no file or matching rule is found."""
     if path is None:
         path = resolve_tuning_config_path(cfg.world_size, gpu_model=getattr(cfg, "gpu_model", None))
     if path is None or not Path(path).is_file():
@@ -356,7 +330,7 @@ class FlyDSLDispatchCombineConfig:
     combine_block_num: int = _DEFAULT_COMBINE_BLOCK_NUM
     # Per-shape geometry lookup (resolution order: explicit arg > tuning_table
     # > *_block_num/*_warp_num defaults). When not supplied, the op auto-loads
-    # it on construction from the tuning JSON in ``tuning_configs/``, resolved
+    # it on construction from the tuning JSON in ``mega_moe_tuning_config/``, resolved
     # by (arch, model, kernel=IntraNode, ep=world_size) or pinned via
     # ``tuning_config_path``. A miss silently keeps the static defaults.
     tuning_table: Optional[GeometryTuningTable] = None
@@ -528,22 +502,18 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._fx_disp_grid_bar = fx.Int64(self.disp_grid_bar.data_ptr())
         self._fx_disp_out_wts = fx.Int64(self.shmem_disp_out_wts.data_ptr())
 
-        # Lazy skip_stage1 variant for the fused GEMM2+combine path.
-        # Key includes dtype + launch geometry (block_num, warp_num_per_block)
-        # so a runtime dtype/geometry switch picks a fresh specialization.
+        # Lazy skip_stage1 variant (fused GEMM2+combine). Key includes dtype +
+        # launch geometry so a dtype/geometry switch gets a fresh specialization.
         self._comb_no_s1_fn: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
         self._comb_no_s1_compiled: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
 
-        # Geometry actually launched by the last dispatch()/combine() call
-        # (introspection / test hook; None until the first call).
+        # Geometry launched by the last dispatch()/combine() (test hook).
         self._last_dispatch_geom: Optional[Tuple[int, int]] = None
         self._last_combine_geom: Optional[Tuple[int, int]] = None
 
     def load_tuning_config(self, path=None):
         """Build and attach the geometry tuning table for this op's shape.
-        ``path`` pins a file; when omitted it is auto-resolved from
-        ``tuning_configs/``. Returns the table, or ``None`` on a miss (the op
-        then keeps its static defaults)."""
+        ``path`` pins a file (else auto-resolved); None on a miss."""
         self.cfg.tuning_table = build_geometry_tuning_table_for_config(self.cfg, path)
         return self.cfg.tuning_table
 
@@ -973,11 +943,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         """Intranode dispatch.
 
         ``block_num`` / ``warp_num_per_block`` override the launch geometry
-        for this call (default: ``cfg.dispatch_block_num`` /
-        ``cfg.dispatch_warp_num_per_block``). Geometry does not affect shmem
-        buffer sizing, so different values reuse the same buffers and only
-        trigger a new kernel JIT specialization.
-        """
+        (default cfg.dispatch_*); geometry does not affect buffer sizing, only
+        the kernel JIT specialization."""
         self._check_dispatch_inputs(input, weights, scales, indices, packed_recv_x)
         cfg = self.cfg
         d_dtype = input.dtype
@@ -1165,12 +1132,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         ``ValueError``.
 
         ``block_num`` / ``warp_num_per_block`` override the launch geometry
-        for this call (default: ``cfg.combine_block_num`` /
-        ``cfg.combine_warp_num_per_block``). Geometry does not affect shmem
-        buffer sizing, so different values reuse the same buffers and only
-        add a new kernel JIT specialization. The zero-copy switch is still
-        frozen by ``self.cfg``; rebuild the op to change it.
-        """
+        (default cfg.combine_*); geometry only adds a JIT specialization. The
+        zero-copy switch is frozen by ``self.cfg``."""
         self._check_combine_inputs(input, weights, indices, packed_recv_x)
         cfg = self.cfg
         stream = torch.cuda.current_stream()
