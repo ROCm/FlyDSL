@@ -37,6 +37,7 @@ from .._mlir.dialects.fly import (
     has_none,
 )
 from .._mlir.extras import types as T
+from .enum import SyncScope
 from .meta import dsl_loc_tracing, dsl_wrap_result
 
 __all__ = [
@@ -200,14 +201,24 @@ UniversalCopy32b = lambda: CopyOpUniversalCopyType.get(32)
 UniversalCopy64b = lambda: CopyOpUniversalCopyType.get(64)
 UniversalCopy128b = lambda: CopyOpUniversalCopyType.get(128)
 
-UniversalAtomic = lambda atomic_op, val_type: CopyOpUniversalAtomicType.get(int(atomic_op), val_type.ir_type)
-UniversalAtomicAdd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Add), val_type.ir_type)
-UniversalAtomicMax = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Max), val_type.ir_type)
-UniversalAtomicMin = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Min), val_type.ir_type)
-UniversalAtomicAnd = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.And), val_type.ir_type)
-UniversalAtomicOr = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Or), val_type.ir_type)
-UniversalAtomicInc = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Inc), val_type.ir_type)
-UniversalAtomicDec = lambda val_type: CopyOpUniversalAtomicType.get(int(AtomicOp.Dec), val_type.ir_type)
+
+def UniversalAtomic(atomic_op, val_type, syncscope=SyncScope.System):
+    """Create a target-neutral atomic copy atom.
+
+    ``syncscope`` is the LLVM atomicrmw sync scope string. It defaults to
+    ``SyncScope.System``, i.e. the system scope.  Use ``fx.SyncScope`` /
+    ``fx.rocdl.SyncScope`` for the target-specific values.
+    """
+    return CopyOpUniversalAtomicType.get(int(atomic_op), val_type.ir_type, syncscope)
+
+
+UniversalAtomicAdd = lambda val_type, syncscope=SyncScope.System: UniversalAtomic(AtomicOp.Add, val_type, syncscope)
+UniversalAtomicMax = lambda val_type, syncscope=SyncScope.System: UniversalAtomic(AtomicOp.Max, val_type, syncscope)
+UniversalAtomicMin = lambda val_type, syncscope=SyncScope.System: UniversalAtomic(AtomicOp.Min, val_type, syncscope)
+UniversalAtomicAnd = lambda val_type, syncscope=SyncScope.System: UniversalAtomic(AtomicOp.And, val_type, syncscope)
+UniversalAtomicOr = lambda val_type, syncscope=SyncScope.System: UniversalAtomic(AtomicOp.Or, val_type, syncscope)
+UniversalAtomicInc = lambda val_type, syncscope=SyncScope.System: UniversalAtomic(AtomicOp.Inc, val_type, syncscope)
+UniversalAtomicDec = lambda val_type, syncscope=SyncScope.System: UniversalAtomic(AtomicOp.Dec, val_type, syncscope)
 
 UniversalFMA = lambda ty: MmaOpUniversalFMAType.get(ty.ir_type)
 
