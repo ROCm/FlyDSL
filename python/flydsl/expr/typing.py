@@ -2022,27 +2022,27 @@ class Array:
 # ===========================================================================
 
 
-def VectorAlias(dtype: Type[Numeric], lanes: int):
+def VectorAlias(alias_dtype: Type[Numeric], lanes: int):
     expected_shape = (lanes,)
 
-    def __init__(self, value, shape=None, dtype_=None):
+    def __init__(self, value, shape=None, dtype=None):
         if shape is not None and Vector._canonical_shape(shape) != expected_shape:
             raise ValueError(f"{type(self).__name__} expects shape {expected_shape}, got {shape}")
-        if dtype_ is not None and dtype_ is not dtype:
-            raise ValueError(f"{type(self).__name__} expects dtype {dtype.__name__}, got {dtype_.__name__}")
+        if dtype is not None and dtype is not alias_dtype:
+            raise ValueError(f"{type(self).__name__} expects dtype {alias_dtype.__name__}, got {dtype.__name__}")
         if isinstance(value, (int, float, bool, Numeric)):
-            value = Vector.filled(expected_shape, value, dtype)
+            value = Vector.filled(expected_shape, value, alias_dtype)
         elif isinstance(value, (list, tuple)):
-            value = Vector.from_elements(value)
-        Vector.__init__(self, value, expected_shape, dtype)
+            value = Vector.from_elements(value, alias_dtype)
+        Vector.__init__(self, value, expected_shape, alias_dtype)
 
     return type(
-        f"{dtype.__name__}x{lanes}",
+        f"{alias_dtype.__name__}x{lanes}",
         (Vector,),
         {
             "__module__": Vector.__module__,
             "__init__": __init__,
-            "ir_type": lazy_classattr(lambda: Vector.make_type(lanes, dtype)),
+            "ir_type": lazy_classattr(lambda: Vector.make_type(lanes, alias_dtype)),
         },
     )
 
@@ -2159,6 +2159,7 @@ __all__ += [
     "BFloat16x2",
     "BFloat16x4",
     "BFloat16x8",
+    "BFloat16x16",
     "Float4E2M1FNx2",
     "Float4E2M1FNx4",
     "Float4E2M1FNx8",
@@ -2198,11 +2199,14 @@ __all__ += [
     "Float16x2",
     "Float16x4",
     "Float16x8",
+    "Float16x16",
     "Float32x1",
     "Float32x2",
     "Float32x4",
+    "Float32x8",
     "Float64x1",
     "Float64x2",
+    "Float64x4",
     "Int4x2",
     "Int4x4",
     "Int4x8",
@@ -2217,11 +2221,14 @@ __all__ += [
     "Int16x2",
     "Int16x4",
     "Int16x8",
+    "Int16x16",
     "Int32x1",
     "Int32x2",
     "Int32x4",
+    "Int32x8",
     "Int64x1",
     "Int64x2",
+    "Int64x4",
     "Int128x1",
     "Uint8x1",
     "Uint8x2",
@@ -2232,10 +2239,13 @@ __all__ += [
     "Uint16x2",
     "Uint16x4",
     "Uint16x8",
+    "Uint16x16",
     "Uint32x1",
     "Uint32x2",
     "Uint32x4",
+    "Uint32x8",
     "Uint64x1",
     "Uint64x2",
+    "Uint64x4",
     "Uint128x1",
 ]

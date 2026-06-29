@@ -965,6 +965,17 @@ class TestVectorAliases:
             with pytest.raises(ValueError):
                 # value has 4 elements but the alias fixes the shape to (2,)
                 Float32x2(vec.ir_value())
+            with pytest.raises(ValueError):
+                Float32x4(vec.ir_value(), dtype=Float16)
+
+        _build_module(build)
+
+    def test_construct_accepts_matching_dtype_keyword(self):
+        def build(_a):
+            vec = Float32x4(Vector.filled(4, 1.0, Float32).ir_value(), dtype=Float32)
+            assert isinstance(vec, Float32x4)
+            assert vec.dtype is Float32
+            assert vec.shape == (4,)
 
         _build_module(build)
 
@@ -997,6 +1008,22 @@ class TestVectorAliases:
             assert isinstance(i32_vec, Int32x4)
             assert i32_vec.dtype is Int32
             assert i32_vec.shape == (4,)
+
+        _build_module(build)
+
+    def test_construct_from_literal_list_uses_alias_dtype(self):
+        from flydsl.expr.typing import Int8x16
+
+        def build(_a):
+            f32_vec = Float32x4([0, 1, 2, 3])
+            assert isinstance(f32_vec, Float32x4)
+            assert f32_vec.dtype is Float32
+            assert f32_vec.shape == (4,)
+
+            i8_vec = Int8x16([i for i in range(16)])
+            assert isinstance(i8_vec, Int8x16)
+            assert i8_vec.dtype is Int8
+            assert i8_vec.shape == (16,)
 
         _build_module(build)
 
