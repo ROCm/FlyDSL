@@ -13,6 +13,7 @@ from .mxmoe_gemm_v2 import (
     BN,
     H_DEFAULT,
     INTER_DEFAULT,
+    INTER_MAX_DEFAULT,
     MAX_M,
     NE,
     TOPK_DEFAULT,
@@ -171,35 +172,30 @@ def compile_gemm2_a4w4_port(
     N_OUT=H_DEFAULT,
     MAX_M=MAX_M,
     epilog="atomic",
-    D_INTER=INTER_DEFAULT,
+    INTER_MAX=INTER_MAX_DEFAULT,
     D_INTER_REAL=None,
     a_dtype="fp4",
 ):
-    """Compile the gemm2 a4w4 down-proj; only (BM=32, atomic) supported, D_INTER a multiple of BK(256)."""
+    """Compile the gemm2 a4w4 down-proj; only (BM=32, atomic) supported. inter_dim is a runtime arg
+    (a multiple of BK=256, <= INTER_MAX); INTER_MAX caps the compile-time B-view / LDS bounds."""
     if (BM, epilog) != (32, "atomic"):
         raise AssertionError(
             f"mxfp4_moe_gemm2 supports only (BM=32, epilog='atomic'); " f"got (BM={BM}, epilog={epilog})"
         )
-    if D_INTER_REAL is not None and D_INTER_REAL != D_INTER:
-        raise AssertionError(
-            f"mxfp4_moe_gemm2 does not support D_INTER_REAL padding "
-            f"(D_INTER_REAL={D_INTER_REAL}, D_INTER={D_INTER})"
-        )
+    if D_INTER_REAL is not None:
+        raise AssertionError(f"mxfp4_moe_gemm2 does not support D_INTER_REAL padding (D_INTER_REAL={D_INTER_REAL})")
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
-    K = D_INTER
-    assert K % BK == 0, f"D_INTER (gemm2 contraction K = inter_dim) must be a multiple of {BK}, got {K}"
+    assert INTER_MAX % BK == 0, f"INTER_MAX must be a multiple of {BK}, got {INTER_MAX}"
     is_f8 = a_dtype == "fp8"
     KH_TILE_A = BK // (1 if is_f8 else 2)  # A LDS K-tile bytes (fp8 256, fp4 128)
-    K_BYTES = K // (1 if is_f8 else 2)  # A row stride bytes (fp8 K, fp4 K//2)
     slot_bytes = BM * KH_TILE_A
-    K_TILES_TOTAL = K // BK
-    aStages = kStages if K_TILES_TOTAL <= kStages else 3
+    aStages = 3  # runtime K-loop: triple-buffered A LDS (handles both K_TILES==2 and larger)
     lds_bytes = max(BM * BN * 4, aStages * slot_bytes)
     num_n_blocks = N_OUT // 256
 
     atag = "_a8" if is_f8 else ""
-    tag = f"h{N_OUT}_i{K}_bm{BM}{'_nt' if use_nt else ''}_atomic{atag}_v2"
+    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_atomic{atag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -218,6 +214,7 @@ def compile_gemm2_a4w4_port(
         arg_sweights: fx.Int64,
         i32_M: fx.Int32,
         i32_max_m_blocks: fx.Int32,
+        i32_inter: fx.Int32,
         arg_out: fx.Int64,
         arg_out_scale: fx.Int64,  # unused (atomic epilog); kept for signature parity
     ):
@@ -228,12 +225,13 @@ def compile_gemm2_a4w4_port(
         lane = tx_i32 % fx.Int32(64)
         wave = rocdl.readfirstlane(T.i32, tx_i32 // fx.Int32(64))
 
-        aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(BM * K_BYTES)
+        k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)  # A row stride bytes (runtime)
+        aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(fx.Int32(BM) * k_bytes)
         aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=aq_num)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
 
-        # Preload the first kStages K-tiles (all tiles for the K_TILES<=2 fast path; else the prologue).
+        # Preload the first kStages K-tiles (the streaming prologue).
         def issue_all_a_loads(m_row0):
             for slot in range_constexpr(kStages):
                 issue_a_load_lds_dt(
@@ -247,7 +245,7 @@ def compile_gemm2_a4w4_port(
                     lane,
                     is_f8,
                     KH_TILE_A,
-                    K_BYTES,
+                    k_bytes,
                 )
 
         # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
@@ -275,9 +273,10 @@ def compile_gemm2_a4w4_port(
                 wave,
                 aq_rsrc,
                 arg_aq,
+                i32_inter,
                 use_nt=use_nt,
                 N_OUT=N_OUT,
-                D_INTER=K,
+                INTER_MAX=INTER_MAX,
                 aStages=aStages,
                 a_dtype=a_dtype,
             )
@@ -294,6 +293,7 @@ def compile_gemm2_a4w4_port(
         arg_sweights: fx.Int64,
         i32_M: fx.Int32,
         i32_max_m_blocks: fx.Int32,
+        i32_inter: fx.Int32,
         arg_out: fx.Int64,
         arg_out_scale: fx.Int64,
         stream: fx.Stream,
@@ -310,6 +310,7 @@ def compile_gemm2_a4w4_port(
             arg_sweights,
             i32_M,
             i32_max_m_blocks,
+            i32_inter,
             arg_out,
             arg_out_scale,
         ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
@@ -342,9 +343,10 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out
     return launch
 
 
-def get_g2(BM, use_nt, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype):
-    # NE does not enter the compiled gemm2 kernel; not a cache-key dim.
-    key = (BM, use_nt, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype)
+def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype):
+    # NE / inter_dim do not enter the compiled gemm2 kernel (inter_dim is a runtime arg); the only
+    # contraction-shape key is the compile-time cap INTER_MAX.
+    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype)
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
@@ -352,7 +354,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype):
             use_nt=use_nt,
             N_OUT=D_HIDDEN,
             epilog=epilog,
-            D_INTER=D_INTER,
+            INTER_MAX=INTER_MAX,
             D_INTER_REAL=D_INTER_REAL,
             a_dtype=a_dtype,
         )
@@ -435,7 +437,11 @@ def mxfp4_moe_gemm2(
     """Stage-2 down-proj gemm (atomic bf16 epilog): weighted atomic.fadd into pre-zeroed out (opus-sort only)."""
     import torch
 
-    launch = get_g2(BM, use_nt, D_HIDDEN, "atomic", D_INTER, D_INTER_REAL, a_dtype)
+    if D_INTER_REAL is not None and D_INTER_REAL != D_INTER:
+        raise AssertionError(f"D_INTER_REAL padding unsupported (D_INTER_REAL={D_INTER_REAL}, D_INTER={D_INTER})")
+    launch = get_g2(BM, use_nt, D_HIDDEN, "atomic", INTER_MAX_DEFAULT, None, a_dtype)
+    if D_INTER > INTER_MAX_DEFAULT:
+        raise AssertionError(f"D_INTER ({D_INTER}) exceeds compile cap INTER_MAX ({INTER_MAX_DEFAULT})")
     max_m_blocks = (max_sorted + BM - 1) // BM
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
     run_compiled(
@@ -450,6 +456,7 @@ def mxfp4_moe_gemm2(
         sorted_weights.data_ptr(),
         M_logical,
         max_m_blocks,
+        D_INTER,
         out.data_ptr(),
         out_scale.data_ptr(),
         torch.cuda.current_stream() if stream is None else stream,
