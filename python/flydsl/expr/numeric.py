@@ -57,7 +57,7 @@ class NumericMeta(type):
         def _extract_to_ir_values(self):
             return [self.ir_value()]
 
-        def _construct_from_ir_values(cls, values):
+        def _construct_from_ir_values(cls, values, exemplar=None):
             return cls(values[0])
 
         inferred_np = np_dtype if np_dtype is not None else _infer_np_dtype(width, signed, name)
