@@ -559,7 +559,9 @@ def compile_preshuffle_gemm(
                     fx.copy_atom_call(bias_copy, fx.slice(bias_div, (None, fx.Int32(index))), r)
                     return fx.Float32(Vec(fx.memref_load_vec(r))[0])
 
-                bias_vals = [load_bias(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16) for ni in range_constexpr(num_acc_n)]
+                bias_vals = [
+                    load_bias(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16) for ni in range_constexpr(num_acc_n)
+                ]
 
             def apply_activation(val_s):
                 # ReLU/SiLU/GeLU ported from v1: maximumf for relu; exp+rcp for silu;
