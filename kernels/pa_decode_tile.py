@@ -146,12 +146,10 @@ def compile_pa_decode_tile(
     sS_bytes = M * TILE_TOK * f32
     sP_off = sS_off + sS_bytes
     sP_bytes = M * TILE_TOK * 1  # fp8
-    # sOp kept separate from sScore (not aliased): that lets us drop the barrier
-    # after the accumulate (the next iter's QK/PV-stage barriers order sOp reuse),
-    # trading 8KB LDS for one fewer barrier — barriers, not LDS, bound this kernel.
-    sOp_off = sP_off + sP_bytes
-    sOp_bytes = M * HEAD * f32
-    sO_off = sOp_off + sOp_bytes
+    # The running output is register-resident (loop-carried PV C-fragment), so
+    # there is no per-tile sOp partial in LDS; sO is only epilogue scratch (the
+    # final accumulator is staged here once for the row-major output write).
+    sO_off = sP_off + sP_bytes
     sO_bytes = M * HEAD * f32
     sM_off = sO_off + sO_bytes
     sL_off = sM_off + M * f32
@@ -304,10 +302,11 @@ def compile_pa_decode_tile(
         fx.copy(copy_q, thr_copy_q.partition_S(sQ_v), thr_copy_q.retile(frag_Q), pred=None)
 
         # ── init running softmax state (row-owner lanes 0..15) ──
+        # The output accumulator O is register-resident (loop-carried), so only
+        # the scalar m/l running state lives in LDS here.
         if tid < arith.constant(M, type=T.i32):
             _st1(sM_off, tid, NEG_INF)
             _st1(sL_off, tid, ZERO_F)
-            _st_row(sO_off, tid, Vec.filled(HEAD, 0.0, fx.Float32))
         gpu.barrier()
 
         # This CTA only walks its partition's slice of the TILE_TOK-blocks, so the
@@ -342,6 +341,7 @@ def compile_pa_decode_tile(
         VHE_CHUNKS = 2
         VHE_SIZE = HEAD // VHE_CHUNKS
         tmpl_Op = fx.make_rmem_tensor(fx.make_layout((M, VHE_SIZE), (VHE_SIZE, 1)), fx.Float32)
+        OP_ELEMS = M * VHE_SIZE // (NWARP * WAVE)  # PV C-fragment elements/lane/chunk (probed = 4)
 
         c_TILE_TOK = arith.constant(TILE_TOK, type=T.i32)
 
@@ -353,7 +353,11 @@ def compile_pa_decode_tile(
             phys = fx.Int32(_load_i32(bt_gp, seq * max_blocks_per_seq + page))
             return phys, within // c_TILE_TOK, tok0
 
-        for tt in range(loop_start, loop_end, arith.index(1)):
+        # O is carried in registers across tiles (one VHE_CHUNKS-list of PV
+        # C-fragment vectors), rescaled by the softmax correction each tile.
+        o_zero = Vec.filled(OP_ELEMS, 0.0, fx.Float32)
+        for tt, ostate in range(loop_start, loop_end, arith.index(1), init=[o_zero, o_zero]):
+            o_acc = [ostate[0], ostate[1]]
             tt_i32 = fx.Int32(arith.index_cast(T.i32, tt))
             phys, within_tile, tok0 = _tile_coords(tt_i32)
 
@@ -366,7 +370,6 @@ def compile_pa_decode_tile(
             thr_copy_p = tcopy_p.get_slice(tid)
             thr_copy_v = tcopy_v.get_slice(tid)
             thr_copy_s = tcopy_s.get_slice(tid)
-            thr_copy_o = tcopy_o.get_slice(tid)
 
             # ---- K tile [TILE_TOK, HEAD] from page `phys` (4 warps split tokens) ----
             k_page = fx.slice(key_buf, (phys, kv_h, None, None))  # [block_size, HEAD]
@@ -473,29 +476,41 @@ def compile_pa_decode_tile(
             frag_P = thr_mma_pv_l.make_fragment_A(tmpl_P)
             fx.copy(copy_p, thr_copy_p.partition_S(sP_v), thr_copy_p.retile(frag_P), pred=None)
 
-            # ---- PV, loop-tiled over head-dim chunks (V was prefetched above) ----
+            # ---- PV with register-resident O accumulate (no LDS round-trip) ----
+            # O_new = O_old * corr + P·V per head-dim chunk; corr = exp2(m_old-m_new)
+            # is per-row.  Probed PV C-fragment: vec element v of lane L holds row
+            # m = (L%64//16)*4 + v, so corr_s[v] = corr[m_base + v].  Done element-
+            # wise (Vec*Vec broadcasts to an outer product here).  No barrier after
+            # PV: O is in registers and the next iter's QK/phase2 barriers order
+            # any sS/sP reuse (sOp is gone).
+            m_base_pv = (lane // c16) * arith.constant(4, type=T.i32)
+            corr_s = [_ld1(sCorr_off, m_base_pv + arith.constant(v, type=T.i32)) for v in range_constexpr(OP_ELEMS)]
             for vh in range_constexpr(VHE_CHUNKS):
                 frag_Op = thr_mma_pv_l.make_fragment_C(tmpl_Op)  # [16, VHE_SIZE]
                 frag_Op.fill(0.0)
                 fx.gemm(tiled_mma_pv, frag_Op, frag_P, frag_Vs[vh], frag_Op)
-                # write this head-dim chunk into sOp[:, vh*VHE_SIZE : +VHE_SIZE]
-                sOp_chunk = _view(
-                    arith.constant(sOp_off + vh * VHE_SIZE * 4, type=T.i32),
-                    fx.Float32,
-                    fx.make_layout((M, VHE_SIZE), (HEAD, 1)),
-                    4,
+                op = frag_Op.load()
+                oo = o_acc[vh]
+                o_acc[vh] = Vec.from_elements(
+                    [oo[v] * corr_s[v] + op[v] for v in range_constexpr(OP_ELEMS)], dtype=fx.Float32
                 )
-                fx.copy(copy_c, thr_copy_o.retile(frag_Op), thr_copy_o.partition_D(sOp_chunk), pred=None)
-            gpu.barrier()
+            results = yield [o_acc[0], o_acc[1]]
+        o_final = results
 
-            # ---- accumulate into running output (row-owner): O = O*corr + Op ----
-            # No barrier after this: sOp/sScore are not aliased, and the next
-            # iteration's QK-stage + PV-stage barriers order any reuse of sO/sOp.
-            if tid < arith.constant(M, type=T.i32):
-                corr = _ld1(sCorr_off, tid)
-                o_v = _ld_row(sO_off, tid, HEAD)
-                op_v = _ld_row(sOp_off, tid, HEAD)
-                _st_row(sO_off, tid, o_v * Vec.from_elements([corr], dtype=fx.Float32).broadcast_to(HEAD) + op_v)
+        # ── stage the register-resident O accumulator to sO (row-major) so the
+        # epilogue can read whole rows and write the output as before ──
+        thr_copy_o_e = tcopy_o.get_slice(tid)
+        for vh in range_constexpr(VHE_CHUNKS):
+            frag_Oe = tiled_mma_pv.get_slice(tid).make_fragment_C(tmpl_Op)
+            frag_Oe.store(o_final[vh])
+            sO_chunk = _view(
+                arith.constant(sO_off + vh * VHE_SIZE * 4, type=T.i32),
+                fx.Float32,
+                fx.make_layout((M, VHE_SIZE), (HEAD, 1)),
+                4,
+            )
+            fx.copy(copy_c, thr_copy_o_e.retile(frag_Oe), thr_copy_o_e.partition_D(sO_chunk), pred=None)
+        gpu.barrier()
 
         # ── epilogue (row-owner, real query rows) ──
         if tid < arith.constant(GS, type=T.i32):
