@@ -158,6 +158,37 @@ class FlyDSLDispatchGroupMajorOp:
         # sender bumps the DEST rank's payload_done[le] (cross-PE) after writing the token; the
         # receiver's GEMM gate spins payload_done[le] >= ll_count[le].  Zeroed per launch.
         self.payload_done = self._sym((self.epr,), torch.int32)
+        # ---- dynamic claim scheduler buffers (FLYDSL_TMP_SCHED) — tmp_mega.py worker/claim model ----
+        # Ported from the standalone demo (dynamic_megamoe_dispatch_kernel): a single-launch,
+        # barrier-free persistent loop where every block claims dispatch routes (sched cursor) +
+        # claims ready GEMM tiles (g1_claim/g2_claim, winner=old 0).  Buffers (gated; small):
+        #   sched_cursor : global route cursor (agent atomic) for dynamic dispatch claim
+        #   l1_ready[nt] : per-TILE cross-PE payload-arrival count (symmetric; sender bumps dest's)
+        #   tile_expected[nt] : per-tile expected row count (block0 fills from the count all-gather)
+        #   g1_claim[nt] / g2_claim[nt] : one-winner GEMM1 / GEMM2 tile claim (agent atomic)
+        #   l2_ready[nt] : GEMM1-done mask per tile (consumed by GEMM2 claim)
+        #   block_claim[nblk] : per-block scratch holding the tile this block won this iter
+        #   sched_done : completed-tile counter (loop termination: done == num_tiles)
+        # The dynamic claim scheduler is the single production path -> these buffers are ALWAYS
+        # allocated (no env gate).  l1_ready is the only cross-PE buffer (sender bumps the DEST
+        # tile's arrival count); the rest are LOCAL (agent-scope claim/cursor/done/mask).
+        _nt = int(self.max_blocks)                     # upper bound on GEMM tiles
+        # Per-N-column claim cursors: each N-column (block_idx.x) drains its OWN cursor so that EVERY
+        # column independently covers all M-tiles (gx>1 correctness; a single shared cursor would hand
+        # each M-tile to one column only -> 1/gx of N computed).  _NCOL_MAX bounds the launched gx for
+        # both GEMM1 (N over inter_dim) and GEMM2 (N over model_dim); 256 covers any practical tile_n.
+        _NCOL_MAX = 256
+        self.l1_ready = self._sym((_nt,), torch.int32)                                  # cross-PE
+        self.tile_expected = torch.zeros(_nt, dtype=torch.int32, device=self._dev)
+        # g1_claim repurposed: per-M-tile GEMM1 N-completion counter (counts the gx1 N-blocks that
+        # finished a tile; on reaching gx1 the tile's l2_ready is set so GEMM2 can consume it).
+        self.g1_claim = torch.zeros(_nt, dtype=torch.int32, device=self._dev)
+        self.l2_ready = torch.zeros(_nt, dtype=torch.int32, device=self._dev)
+        # g2_claim repurposed: per-N-column GEMM2 claim cursor (mirrors sched_cursor for GEMM2).
+        self.g2_claim = torch.zeros(_NCOL_MAX, dtype=torch.int32, device=self._dev)
+        self.sched_cursor = torch.zeros(_NCOL_MAX, dtype=torch.int32, device=self._dev)  # GEMM1 per-column
+        self.sched_done = torch.zeros(1, dtype=torch.int32, device=self._dev)
+        self.block_claim = torch.zeros(1024, dtype=torch.int32, device=self._dev)  # >= any grid nblk
         # ---- compact (naive count-first) buffers ----
         # compact_base[le] = dense prefix-sum base (tile_m-padded) for local expert le; symmetric so
         # senders read the DEST's base to place payload precisely.  done2c = the COUNT cross-PE
@@ -224,7 +255,9 @@ class FlyDSLDispatchGroupMajorOp:
         self.p2p_wts_em = self._p2p_table(self.wts_em)
         self.p2p_srcmap_em = self._p2p_table(self.srcmap_em)
         self.p2p_recv_num = self._p2p_table(self.recv_num)   # Plan A: cross-PE recv-count signal target
-        self.p2p_payload_done = self._p2p_table(self.payload_done)  # TMP-COPY scheduler overlap gate
+        # l1_ready is the only cross-PE claim buffer (sender bumps the DEST tile's arrival count);
+        # claims/cursor/done are LOCAL (agent scope) so they need no P2P table.
+        self.p2p_l1_ready = self._p2p_table(self.l1_ready)
         if self.compact:
             self.p2p_compact_base = self._p2p_table(self.compact_base)
             self.p2p_done2c = self._p2p_table(self.done2c)

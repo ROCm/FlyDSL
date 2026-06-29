@@ -157,7 +157,15 @@ class FusedMoEMegaStage1:
                  network=None, scheme="fixedslot",
                  unit_size=-1, tile_n=-1, tile_k=256, warp_num_per_block=4,
                  waves_per_eu=4, use_async_copy=True, out_dtype="auto",
-                 total_recv_buf=None):
+                 total_recv_buf=None,
+                 # ---- M2b: merged single-launch GEMM2 phase ----
+                 # When fuse_gemm2 is True, GEMM2 (down-proj) + the combine Stage-1 P2P scatter run
+                 # inside this SAME megakernel launch (a second persistent phase pipelined with
+                 # GEMM1 via l2_ready).  Requires w2/w2_scale + the combine op (for its P2P tables).
+                 fuse_gemm2=False, w2=None, w2_scale=None, comb_op=None,
+                 gemm2_tile_m=32, gemm2_tile_n=128, gemm2_tile_k=256,
+                 gemm2_persist_m=4, gemm2_b_nt=2, gemm2_xcd_swizzle=0,
+                 gemm2_doweight=True):
         assert quant in ("a4w4", "a8w4")
         assert scheme == "fixedslot", f"scheme={scheme!r}: only 'fixedslot' supported (handshake removed)"
         assert out_dtype in ("auto", "f16", "fp8", "fp4"), out_dtype
@@ -201,13 +209,6 @@ class FusedMoEMegaStage1:
         # Two layouts, switched purely by buffer size (no env): fixedslot below the wrap, compact
         # above it.  Compact dispatch (dense rx) + GEMM1 atom-logical a2 output -> stage2 unchanged.
         self.compact = _max_buf >= 3_000_000_000
-        # TMP-COPY overlap experiment: force the compact_allgather path (which already computes
-        # global per-expert counts EARLY via cross-PE#1) so the barrier-free per-expert overlap can
-        # derive loop bounds without the post-barrier post-pass.  Compact is also the large-bs path,
-        # matching where compute is big enough to hide the xGMI floor.
-        import os as _os_c
-        if _os_c.environ.get("FLYDSL_TMP_FORCE_COMPACT", "0") == "1":
-            self.compact = True
         # tile AUTO (default -1): an explicit caller tile_m(unit_size)/tile_n always wins.
         # Otherwise this is the single megastage1 tune entrypoint: read the precise
         # FlyDSL JSON table keyed by shape + token bucket, then fall back to the
@@ -292,17 +293,71 @@ class FusedMoEMegaStage1:
         # symmetric grid barrier (1 writer / N readers -> no 256-way atomic-RMW storm).
         self._meta = torch.zeros(1, dtype=torch.int32, device=self.dev)
 
-        # TMP-COPY experiment: scheduler per-expert overlap gate.  When enabled, the copied GEMM1
-        # is compiled with overlap_gate=True (consumer spins payload_done[le] >= ll_count[le]-1
-        # before running the tile's GEMM body) and the dispatch prologue publishes payload_done.
-        # The global meta barrier is KEPT (correctness), so single-GPU output stays bit-exact;
-        # this validates the scheduler-gate plumbing on copied production code.
-        import os as _os
-        self._tmp_overlap_gate = _os.environ.get("FLYDSL_TMP_OVERLAP_GATE", "0") == "1"
-        self._payload_done = (
-            torch.zeros(self.epr, dtype=torch.int32, device=self.dev)
-            if self._tmp_overlap_gate else None
-        )
+        # Dynamic claim scheduler: the single production consumer path.  The dispatch op always
+        # allocates the claim buffers; the kernel is compiled with the scheduler on; forward() zeros
+        # the per-launch claim state.  Fixed disp-table base for the scheduler ptrs (must be set
+        # BEFORE compile, which reads it; the disp table is built later in __init__ and appends the
+        # ptrs at this base, idx 50..58).
+        self._SCHED_DISP_BASE = 50
+
+        # ---- M2b merged GEMM2 phase config (compile-time) ----
+        self.fuse_gemm2 = bool(fuse_gemm2)
+        self.comb_op = comb_op
+        if self.fuse_gemm2:
+            if w2 is None or w2_scale is None or comb_op is None:
+                raise ValueError("fuse_gemm2=True requires w2, w2_scale, and comb_op.")
+            # GEMM2 indexes W2 by LOCAL expert id (epr rows); keep contiguous like w1.
+            self.w2 = w2.contiguous()
+            self.w2_scale = w2_scale.contiguous()
+            # GEMM2 tiles thread through; gemm2 tile_m must divide stage1's sort_block_m so each
+            # gemm2 tile stays within one expert's sort_block_m-padded rows.
+            self._g2_tile_m = int(gemm2_tile_m)
+            self._g2_tile_n = int(gemm2_tile_n)
+            self._g2_tile_k = int(gemm2_tile_k)
+            self._g2_persist_m = int(gemm2_persist_m)
+            self._g2_b_nt = int(gemm2_b_nt)
+            # XCD swizzle is INCOMPATIBLE with the merged single-launch grid: grid_x = max(gx1, gx2),
+            # but each phase's XCD remap derives _gx from its own N-extent (gx1 for GEMM1, gx2 for
+            # GEMM2) != grid_dim.x, which corrupts the (bx_persist, by) remap.  Disable both XCD
+            # swizzles on the fused path (perf-only; correctness-load-bearing here).
+            self._xcd = 0
+            self._g2_xcd = 0
+            self._g2_doweight = bool(gemm2_doweight)
+            if self.sort_block_m % self._g2_tile_m != 0:
+                raise ValueError(
+                    f"gemm2_tile_m={self._g2_tile_m} must divide stage1 sort_block_m="
+                    f"{self.sort_block_m}.")
+            if model_dim % self._g2_tile_n != 0:
+                raise ValueError(f"model_dim={model_dim} must be divisible by gemm2_tile_n="
+                                 f"{self._g2_tile_n}.")
+            if inter_dim % self._g2_tile_k != 0:
+                raise ValueError(f"inter_dim={inter_dim} must be divisible by gemm2_tile_k="
+                                 f"{self._g2_tile_k}.")
+            # fused_p2p_scatter cfg (Plan B): (npes, rank, max_tok, enable_weights=False,
+            # experts_per_token=topk, fp8_cast).  Weights are applied by GEMM2's doweight epilogue
+            # (gemm2_doweight) or the later combine, NOT P2P-scattered -> enable_weights=False.
+            # GEMM2 output is bf16 (no fp8 direct-cast on this path).
+            self._g2_out_dtype = "bf16"
+            self._g2_fused_cfg = (int(world_size), int(rank), int(max_tok_per_rank),
+                                  False, int(topk), False)
+            # GEMM2 local-combine fallback out (unused under fused_p2p_scatter; the launcher
+            # signature still needs a valid tensor).  Allocated once (cudagraph-safe).
+            self._g2_out_dummy = torch.zeros(1, dtype=torch.bfloat16, device=self.dev)
+            _g2_kw = dict(
+                fuse_gemm2=True,
+                gemm2_tile_m=self._g2_tile_m, gemm2_tile_n=self._g2_tile_n,
+                gemm2_tile_k=self._g2_tile_k, gemm2_out_dtype=self._g2_out_dtype,
+                gemm2_persist_m=self._g2_persist_m,
+                gemm2_sort_block_m=int(self.sort_block_m),
+                gemm2_b_nt=self._g2_b_nt, gemm2_xcd_swizzle=self._g2_xcd,
+                gemm2_fused_p2p_scatter=self._g2_fused_cfg,
+                gemm2_use_token_flag_sync=False,
+                gemm2_doweight=self._g2_doweight,
+            )
+        else:
+            self.w2 = None
+            self.w2_scale = None
+            _g2_kw = dict(fuse_gemm2=False)
 
         # ---- compile the megakernel (serialize compile across ranks to bound peak memory) ----
         # Always PERSISTENT: the persistent round-robin GEMM covers all occupied tiles regardless
@@ -318,13 +373,14 @@ class FusedMoEMegaStage1:
                     use_cshuffle_epilog=None, contiguous_io=True, dedup_gather=False,
                     atom_contract=self.atom_contract,
                     sparse_tiles=True, persist_m=-1,
-                    overlap_gate=self._tmp_overlap_gate,
+                    sched_disp_base=self._SCHED_DISP_BASE,
                     raw_a_scale=True, xcd_swizzle=self._xcd,
                     fuse_dispatch=scheme, fuse_npes=world_size, fuse_topk=topk,
                     fuse_cap=self.cap, fuse_mtpr=self.mtpr,
                     fuse_scale_dim=self.scale_dim, fuse_scale_type_size=1,
                     rank=rank, experts_per_rank=self.epr, compact_dispatch=self.compact,
-                    compact_allgather=True)
+                    compact_allgather=True,
+                    **_g2_kw)
             if dist.is_initialized():
                 dist.barrier()
 
@@ -346,12 +402,6 @@ class FusedMoEMegaStage1:
         # a2 value rows live in the ATOM logical space token*topk+s, t=src_global in
         # [0, npes*mtpr) -> rows = npes*mtpr*topk (compact gemm2 tiles via sorted_token_ids).
         self._a2rows = world_size * self.mtpr * topk
-        # Path-2 substep A (FLYDSL_TMP_GROUPA2): a2 written EXPERT-MAJOR -> rows index the sparse/
-        # compact slot space (up to num_valid_max), not the logical t*topk+s space.  Size the buffer
-        # to num_valid_max so expert-major rows never OOB.  a2 content (valid rows) is unchanged.
-        import os as _os_a2
-        if _os_a2.environ.get("FLYDSL_TMP_GROUPA2", "0") == "1":
-            self._a2rows = max(self._a2rows, int(self.nvm))
         if _nf4:
             self._out = torch.zeros((self._a2rows, inter_dim // 2), dtype=torch.uint8, device=self.dev)
         elif _nf8:
@@ -426,7 +476,7 @@ class FusedMoEMegaStage1:
                         # 40 _sti out | 41 _se_atom out (SEPARATE from the A-gather _trb/_se args)
                         self._sti.data_ptr(), self._se_atom.data_ptr(),
                         self._wts_sorted.data_ptr(),                     # 42 sorted-row weights out
-                        op.p2p_payload_done.data_ptr()]                  # 43 p2p payload_done (overlap gate)
+                        0]                                               # 43 dead: overlap gate superseded by l1_ready sched (never read, base=50)
             else:
                 # fixedslot+atom.  idx 19: LOCAL srcmap_em (this rank's recv (k_slot<<24)|src_global)
                 # -> the GEMM epilogue reads it to write a2 @ logical row.
@@ -439,9 +489,26 @@ class FusedMoEMegaStage1:
                         op.dest_ctr.data_ptr(),                              # 21 total_recv | 22 dest_ctr(local)
                         op.recv_num.data_ptr(), op.p2p_recv_num.data_ptr(),  # 23 recv_num(local) | 24 p2p_recv_num
                         self._wts_sorted.data_ptr()]                         # 25 sorted-row weights out
-                # TMP-COPY scheduler overlap gate: idx 26 = p2p payload_done peer table (sender bumps
-                # DEST rank's payload_done[le] cross-PE).  Appended only on the fixedslot+atom path.
-                tbl += [op.p2p_payload_done.data_ptr()]              # 26 p2p payload_done
+                # idx 26 was the TMP-COPY overlap gate (p2p payload_done peer table); superseded by
+                # the l1_ready dynamic-claim scheduler and never read (kernel reads only base=50+).
+                tbl += [0]                                          # 26 dead: p2p payload_done removed
+        # ---- dynamic claim scheduler pointers (FLYDSL_TMP_SCHED) ----
+        # Appended at a FIXED base (50) for BOTH compact and fixedslot layouts (their tables end at
+        # 43 / 26), so the kernel reads disp[50..58] regardless of dispatch path.  Pad with 0 up to base.
+        if True:
+            while len(tbl) < self._SCHED_DISP_BASE:
+                tbl.append(0)
+            tbl += [
+                op.l1_ready.data_ptr(),        # 50 l1_ready (local view: consumer reads this rank's)
+                op.p2p_l1_ready.data_ptr(),    # 51 p2p l1_ready (producer bumps DEST tile's, cross-PE)
+                op.tile_expected.data_ptr(),   # 52 tile_expected (block0 fills from count all-gather)
+                op.g1_claim.data_ptr(),        # 53 g1_claim (one-winner GEMM1 tile claim)
+                op.l2_ready.data_ptr(),        # 54 l2_ready (GEMM1-done mask)
+                op.g2_claim.data_ptr(),        # 55 g2_claim (one-winner GEMM2 tile claim)
+                op.sched_cursor.data_ptr(),    # 56 sched_cursor (global route claim cursor)
+                op.sched_done.data_ptr(),      # 57 sched_done (completed-tile counter)
+                op.block_claim.data_ptr(),     # 58 block_claim (per-block won-tile scratch)
+            ]
         self._disp = torch.tensor(tbl, dtype=torch.int64, device=self.dev)
         self._disp_host = torch.tensor(tbl, dtype=torch.int64)
 
@@ -468,34 +535,16 @@ class FusedMoEMegaStage1:
         # disp table holds ONLY fixed op/p2p pointers, built once in __init__.
 
         # per-launch resets (in-graph; graph-safe memsets, ordered before the megakernel).
+        # addr_payload_done is unused on the single scheduler path (the legacy per-expert gate /
+        # phase-ts diagnostics are removed) -> pass 0.
         pd_ptr = 0
-        # TMP-COPY experiment: per-phase s_memrealtime timestamps (block0 lane0 writes i64 ticks
-        # to phase-ts buffer[k]).  Enabled via FLYDSL_TMP_PHASE_TS=1 (matches the copied GEMM
-        # builder's const_expr gate).  Only the fixedslot non-compact path emits all phases.
-        import os as _os
-        if _os.environ.get("FLYDSL_TMP_PHASE_TS", "0") == "1":
-            if getattr(self, "_pts_buf", None) is None:
-                self._pts_buf = torch.zeros(16, dtype=torch.int64, device=self.dev)
-            pd_ptr = self._pts_buf.data_ptr()
-        # TMP-COPY scheduler overlap gate: consumer reads THIS rank's op.payload_done (symmetric
-        # buffer local view); senders bump the DEST rank's view via the idx-26 peer table.  Zero
-        # per launch (graph-safe memset).
-        if self._tmp_overlap_gate:
-            self.op.payload_done.zero_()
-            pd_ptr = self.op.payload_done.data_ptr()
         # Plan A: total_recv accumulates in-kernel each launch -> zero first (graph-safe).
         # dest_ctr / recv_num self-reset inside the kernel's recv-count signal.  Zero the SAME
         # buffer the kernel writes (external combine-op buffer when bridged, else own).
         (self._trecv_buf if self._trecv_buf is not None else self.op.total_recv).zero_()
-        # P-static: the GEMM reads ll_count via addr_expected_real to derive (expert,k) per tile
-        # (fixedslot static-tiles only).
-        er_ptr = (self.op.ll_count.data_ptr()
-                  if (self.scheme == "fixedslot" and not self.compact)
-                  else 0)
-        # TMP-COPY overlap gate: the consumer reads expected_real=ll_count[le]; compact_ag also
-        # populates ll_count (block0 post-CMP), so route er_ptr there when the gate is on.
-        if self._tmp_overlap_gate:
-            er_ptr = self.op.ll_count.data_ptr()
+        # addr_expected_real = ll_count: P-static (fixedslot) derives (expert,k) per tile from it, and
+        # block0 fills tile_expected from it; compact_ag also populates ll_count (block0 post-CMP).
+        er_ptr = self.op.ll_count.data_ptr()
         if self.compact:
             # compact all-gather: local_hist (count accumulator) + local_cursor (write cursor) must
             # start at 0 each launch (in-graph memset, CUDAGraph-safe; bigcnt is overwritten by the
@@ -505,6 +554,16 @@ class FusedMoEMegaStage1:
         # NOTE compact+atom combo: NO per-launch srcmap reset needed -- the GEMM derives the padding
         # mask in-kernel from ll_count (k,count via the prefix scan), exactly like fixslot.  So the
         # stage1->stage2 hookup adds ZERO extra per-forward ops beyond compact dispatch's own resets.
+        # Dynamic claim scheduler: zero the per-launch claim state (graph-safe memsets).  l1_ready,
+        # claim cursors/winner arrays and the completion counter must start clean each launch;
+        # tile_expected is overwritten by block0 from the count all-gather, so it needs no reset.
+        self.op.l1_ready.zero_()
+        self.op.g1_claim.zero_()
+        self.op.l2_ready.zero_()
+        self.op.g2_claim.zero_()
+        self.op.sched_cursor.zero_()
+        self.op.sched_done.zero_()
+        self.op.block_claim.zero_()
         a_mat = self._agv(self._rx)
         # compact still A-gathers via sparse_tiles (_trb) + expert (_se), so the sorted_token_ids/
         # sorted_expert_ids ARGS MUST stay the compact tile metadata; the atom outputs (_sti/_se_atom)
@@ -517,15 +576,41 @@ class FusedMoEMegaStage1:
             _sorted_arg = self._sti
             _se_arg = self._se_atom
         _wt_arg = self.op.wts_em
-        self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
-                  _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
-                  fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
-                  fx.Int32(self.max_blocks),
-                  fx.Int64(pd_ptr), fx.Int64(er_ptr),
-                  fx.Int64(self._disp.data_ptr()), fx.Int32(cur_tok),
-                  fx.Int64(xc.data_ptr()), fx.Int64(ic.data_ptr()),
-                  fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
-                  stream=stream)
+        if self.fuse_gemm2:
+            # M2b: merged GEMM2 phase args.  GEMM2 reads the ATOM-contract sorted tables
+            # (_sti / _se_atom / _wts_sorted) the GEMM1 phase produced, a2 from self._out (HBM),
+            # and the combine op's P2P scatter tables.  i32 scalars are GEMM2 semantics:
+            #   tokens_in = max_recv (world*mtpr; drives the epilogue row-valid early-exit),
+            #   n_in = model_dim, k_in = inter_dim, size_expert_ids = _se_atom row count.
+            _max_recv = self.world_size * self.mtpr
+            co = self.comb_op
+            self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
+                      _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
+                      fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
+                      fx.Int32(self.max_blocks),
+                      fx.Int64(pd_ptr), fx.Int64(er_ptr),
+                      fx.Int64(self._disp.data_ptr()), fx.Int32(cur_tok),
+                      fx.Int64(xc.data_ptr()), fx.Int64(ic.data_ptr()),
+                      fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
+                      # ---- GEMM2 phase ----
+                      self.w2, self.w2_scale, self._g2_out_dummy,
+                      self._sti, self._se_atom, self._wts_sorted,
+                      co._fx_tis, co._fx_p2p_comb_inp,
+                      fx.Int64(self._sw_atom.data_ptr()), co._fx_p2p_comb_inp_wts,
+                      co._fx_local_counter, co._fx_p2p_comb_flag, co._fx_out_total_recv,
+                      fx.Int32(_max_recv), fx.Int32(self.model_dim), fx.Int32(self.inter_dim),
+                      fx.Int32(self._se_atom.numel()),
+                      stream=stream)
+        else:
+            self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
+                      _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
+                      fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
+                      fx.Int32(self.max_blocks),
+                      fx.Int64(pd_ptr), fx.Int64(er_ptr),
+                      fx.Int64(self._disp.data_ptr()), fx.Int32(cur_tok),
+                      fx.Int64(xc.data_ptr()), fx.Int64(ic.data_ptr()),
+                      fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
+                      stream=stream)
         return dict(out=self._out, srcmap_em=self.op.srcmap_em, num_valid=self._nv,
                     sorted_expert_ids=self._se_atom,
                     sorted_token_ids=self._sti, sorted_weights=self._sw_atom,

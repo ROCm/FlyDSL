@@ -9,7 +9,6 @@ tables, and xdev barrier.
 """
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 import torch
@@ -82,12 +81,9 @@ class FlyDSLMoeGemm2CombineOp:
         self.b_dtype     = b_dtype
         self.xcd_swizzle = xcd_swizzle
         self.use_token_flag_sync = bool(use_token_flag_sync)
-        # MegaMoE.forward consumes only combine_no_stage1's token output. The
-        # combine kernel reports out_wts separately but does not apply them to
-        # out_tok, so the fused GEMM2 epilogue must apply routing weights by
-        # default. The env var remains as a debugging override.
-        if os.getenv("FLYDSL_MEGA_STAGE2_DOWEIGHT_FUSED"):
-            doweight_fused = os.getenv("FLYDSL_MEGA_STAGE2_DOWEIGHT_FUSED") == "1"
+        # MegaMoE.forward consumes only combine_no_stage1's token output. The combine kernel reports
+        # out_wts separately but does not apply them to out_tok, so the fused GEMM2 epilogue always
+        # applies routing weights.
         self.doweight_fused = bool(doweight_fused)
 
         # fp8_direct_cast: GEMM2 epilogue casts + 1B/elem P2P scatters inline,
@@ -233,10 +229,6 @@ class FlyDSLMoeGemm2CombineOp:
         # HBM. Safe because every (tok_id, j) in [0, total_recv*k) is fully
         # overwritten by some rank (standard MoE routing sends all k experts);
         # token dropout would instead need a Stage-3 validity mask, not a zero.
-        if os.getenv("FLYDSL_MEGA_CLEAR_COMB_INPUT", "0") == "1":
-            comb_op.shmem_comb_inp_tok.zero_()
-            comb_op.shmem_comb_inp_wts.zero_()
-            comb_op.barrier()
 
         # Default weight source is shmem_disp_out_wts (f32[max_recv*k], indexed
         # as wts[t*k + s]). A caller-supplied wts_buf must keep the same layout.
