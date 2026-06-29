@@ -6,6 +6,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
+from flydsl.expr import _to_raw as _raw
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Float4E2M1FN, T
 from flydsl.expr.typing import Vector as Vec
@@ -26,52 +27,7 @@ kBS_stride_k0_dw = 64  # e8m0 scale-layout K-independent stride
 LOG2E = 1.4426950408889634
 
 
-# -- K-derived sizes (parametrized over the contraction dim K = inter_dim) -----
-def k_half_for(k):
-    return k // 2  # packed-fp4 bytes along K (KIMI: 256)
-
-
-def k_tiles_total_for(k):
-    return k // BK  # KIMI: 2
-
-
-def kunroll_for(k):
-    return k_tiles_total_for(k) - kStages  # streaming main-loop trip count
-
-
-def kbs_stride_n0_dw_for(k):
-    return ((k // 32) // 4 // 2) * 64  # KIMI: 128
-
-
-def kas_per_chunk_dw_for(k):
-    return ((k // 32) // 4 // 2) * 64  # KIMI: 128
-
-
-def num_n_blocks_for(n_out):
-    return n_out // 256  # N_OUT % 256 == 0
-
-
-def kbs_per_expert_dw_for(n_out, k=INTER_DEFAULT):
-    return (n_out // 16 // 2) * kbs_stride_n0_dw_for(k)
-
-
-def kmchunks(BM):
-    return 1 if const_expr(BM == 16) else BM // 16
-
-
-# -- raw / pointer / LDS helpers ----------------------------------------------
-def raw(v):
-    """Unwrap an fx value to a raw ir.Value for raw llvm/arith ops."""
-    if not isinstance(v, ir.Value) and hasattr(v, "ir_value"):
-        return v.ir_value()
-    return v
-
-
-def udiv(a, c):
-    cc = fx.Int32(c) if isinstance(c, int) else c
-    return fx.Int32(a) // cc
-
-
+# -- pointer / LDS helpers ----------------------------------------------------
 def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
     """LDS dst view for buffer_load_lds DMA; gotcha: FlyDSL AddressSpace.Shared = LDS (enum 2, not addrspace 3)."""
     if elem_ty is None:
@@ -83,18 +39,18 @@ def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
 
 def global_base_ptr1(addr_i64):
     """One ptr<1> base from a raw i64 device address (bare data_ptr() kernarg)."""
-    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), raw(fx.Int64(addr_i64)))
+    return llvm.inttoptr(ir.Type.parse("!llvm.ptr<1>"), _raw(fx.Int64(addr_i64)))
 
 
 def gep1(base_ptr, byte_off_i32):
     """getelementptr i8, base_ptr, byte_off_i32  (ptr<1>)."""
-    return buffer_ops.get_element_ptr(base_ptr, byte_offset=raw(byte_off_i32), elem_type=T.i8)
+    return buffer_ops.get_element_ptr(base_ptr, byte_offset=_raw(byte_off_i32), elem_type=T.i8)
 
 
 def global_typed_ptr(arg, elem_ty, align=4):
     """Typed global fx.Pointer over a raw i64 device address; index in ELEMENTS (ptr[i]), not bytes."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
-    return fx.inttoptr(ptr_ty, raw(fx.Int64(arg)))
+    return fx.inttoptr(ptr_ty, _raw(fx.Int64(arg)))
 
 
 def lds_typed_ptr(base_i32, elem_ty, align=4):
@@ -123,23 +79,23 @@ def lds_swizzle_mask_f8(row):
 # -- e8m0 / SwiGLU quant math -------------------------------------------------
 def silu_mul_batch(gs, us):
     """silu(g)*u via exp2/rcp (matches HIP silu_mul_fast)."""
-    e = [fx.Float32(rocdl.exp2(T.f32, raw(g * fx.Float32(-LOG2E)))) for g in gs]
-    sig = [fx.Float32(rocdl.rcp(T.f32, raw(fx.Float32(1.0) + ei))) for ei in e]
+    e = [fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(-LOG2E)))) for g in gs]
+    sig = [fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + ei))) for ei in e]
     return [gs[i] * sig[i] * us[i] for i in range(len(gs))]
 
 
 def fabs_f32(x):
     """fabsf via sign-bit clear (FlyDSL has no arith.absf)."""
-    abs_bits = raw(x).bitcast(T.i32) & raw(fx.Int32(0x7FFFFFFF))
+    abs_bits = _raw(x).bitcast(T.i32) & _raw(fx.Int32(0x7FFFFFFF))
     return fx.Float32(abs_bits.bitcast(T.f32))
 
 
 def e8m0_from_amax(amax_f32, dtype_max=6.0):
     """(e8m0_i32, quant_scale_f32) = ceil_pow2(amax/dtype_max) clamped to 254 (dtype_max: fp4=6, fp8=448)."""
-    wi = fx.Int32(raw(amax_f32 * fx.Float32(1.0 / dtype_max)).bitcast(T.i32))
+    wi = fx.Int32(_raw(amax_f32 * fx.Float32(1.0 / dtype_max)).bitcast(T.i32))
     bexp = (wi + 0x7FFFFF).shrui(fx.Int32(23)) & 0xFF
     e8m0 = (bexp < 254).select(bexp, fx.Int32(254))
-    qscale = fx.Float32(raw(e8m0 << 23).bitcast(T.f32))
+    qscale = fx.Float32(_raw(e8m0 << 23).bitcast(T.f32))
     return e8m0, qscale
 
 
@@ -163,7 +119,7 @@ def bscale_copy_atom():
 
 def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL):
     """Layout view over preshuffled B for one N-row tile; slice -> i32<4:1> (16B=32 fp4)."""
-    col_base = rocdl.readfirstlane(T.i32, raw(row_elems) * fx.Int32(KH4))
+    col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(col_base)
     base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_bq) + off_i64 * fx.Int64(4))
@@ -175,7 +131,7 @@ def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL):
 
 def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64):
     """Layout view over e8m0 B-scale for one n-pack word; slice -> i32<1:1> scale word."""
-    base_dw = rocdl.readfirstlane(T.i32, raw(base_dw))
+    base_dw = rocdl.readfirstlane(T.i32, _raw(base_dw))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(base_dw)
     base_iter = fx.inttoptr(i32_ptr_ty, fx.Int64(arg_bscale) + off_i64 * fx.Int64(4))
@@ -232,7 +188,7 @@ def issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane
                 lo = Vec(lds_vec_load(s_aq_base, row_off + col_lo, Vec.make_type(2, fx.Int64), fx.Int64, align=16))
                 hi = Vec(lds_vec_load(s_aq_base, row_off + col_hi, Vec.make_type(2, fx.Int64), fx.Int64, align=16))
                 a64 = Vec.from_elements([lo[0], lo[1], hi[0], hi[1]], fx.Int64)
-                a_vals[i][k] = raw(a64.bitcast(fx.Int32))
+                a_vals[i][k] = _raw(a64.bitcast(fx.Int32))
             else:
                 mask = lds_swizzle_mask(lane_mod_16)
                 lds_col = (lane_div_16 * 16 + k * 64) ^ mask
@@ -313,7 +269,7 @@ def gemm1_body_v2(
     n_block_idx = bx_i32 % NUM_N_BLOCKS
     m_block_idx = bx_i32 // NUM_N_BLOCKS
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
-    e = rocdl.readfirstlane(T.i32, raw(eids_ptr[m_block_idx]))
+    e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
     m_row = m_block_idx * BM
 
     lane_div_16 = lane // 16
@@ -493,7 +449,7 @@ def gemm1_body_v2(
             mni, in_b = J // 2, J % 2
         else:
             mni, in_b = J % 2, J // 2
-        sb = raw(Vec(bs_frags[stage][mni].load())[0])
+        sb = _raw(Vec(bs_frags[stage][mni].load())[0])
         sa = a_scale[0]  # kSubBlocks == 1
         mma_one_j(J, in_b, sa, sb, bq_frags[stage], is_f8_a, cbsz_a, a_vals, a_frags, accm, c_frags, mma_atoms)
 
@@ -603,18 +559,18 @@ def gemm1_body_v2(
         e8m0, qscale = e8m0_from_amax(local_max, out_max)
         scales_per_mr[mr] = e8m0
 
-        qscale_raw = raw(qscale)
+        qscale_raw = _raw(qscale)
         # byte position of this lane's 8 elems (fp8 doubles it; row stride is INTER).
         byte_pos_fp4 = n_block_idx * (BN // 4) + wave_grp * 16 + kk * 4
         if const_expr(is_f8_out):
             # 8 f32 -> 8 fp8: lo holds elems 0..3, hi 4..7 (2 fp8 per cvt half).
             v2i16 = T.vec(2, T.i16)
-            lo = raw(Vec.filled(2, 0, fx.Int16))
-            lo = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, lo, raw(result[0]), raw(result[1]), qscale_raw, 0)
-            lo = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, lo, raw(result[2]), raw(result[3]), qscale_raw, 1)
-            hi = raw(Vec.filled(2, 0, fx.Int16))
-            hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, raw(result[4]), raw(result[5]), qscale_raw, 0)
-            hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, raw(result[6]), raw(result[7]), qscale_raw, 1)
+            lo = _raw(Vec.filled(2, 0, fx.Int16))
+            lo = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, lo, _raw(result[0]), _raw(result[1]), qscale_raw, 0)
+            lo = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, lo, _raw(result[2]), _raw(result[3]), qscale_raw, 1)
+            hi = _raw(Vec.filled(2, 0, fx.Int16))
+            hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, _raw(result[4]), _raw(result[5]), qscale_raw, 0)
+            hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, _raw(result[6]), _raw(result[7]), qscale_raw, 1)
             # i32-elem off (uniform m_row in view base); lo at off, hi at off+1 (each vec2xi16 = one i32).
             elem_off = row_local * (K_G2_BYTES // 4) + (byte_pos_fp4 // 2)
             lo_i32 = Vec(lo).bitcast(fx.Int32)
@@ -624,13 +580,13 @@ def gemm1_body_v2(
             fx.memref_store_vec(Vec.filled(1, hi_i32[0], fx.Int32), out_reg)
             fx.copy(out_copy_atom, out_reg, aqout_view[elem_off + 1, None])
         else:
-            packed_i32 = raw(fx.Int32(0))
+            packed_i32 = _raw(fx.Int32(0))
             for w in range_constexpr(4):
                 packed_i32 = rocdl.cvt_scalef32_pk_fp4_f32(
                     T.i32,
                     packed_i32,
-                    raw(result[2 * w]),
-                    raw(result[2 * w + 1]),
+                    _raw(result[2 * w]),
+                    _raw(result[2 * w + 1]),
                     qscale_raw,
                     w,
                 )
@@ -721,20 +677,21 @@ def gemm2_body_v2(
     cbsz_a = 0 if is_f8_a else 4
     # K-derived sizes (parametrized over contraction K = inter_dim = D_INTER).
     K = D_INTER
-    K_HALF = k_half_for(K)
-    K_TILES_TOTAL = k_tiles_total_for(K)
-    kUnroll = kunroll_for(K)
-    kAS_per_chunk_dw = kas_per_chunk_dw_for(K)
-    kBS_stride_n0_dw = kbs_stride_n0_dw_for(K)
-    kbs_per_expert_dw = kbs_per_expert_dw_for(N_OUT, K)
-    num_n_blocks = num_n_blocks_for(N_OUT)
+    kc = (K // 32) // 4 // 2
+    K_HALF = K // 2
+    K_TILES_TOTAL = K // BK
+    kUnroll = K_TILES_TOTAL - kStages
+    kAS_per_chunk_dw = kc * 64
+    kBS_stride_n0_dw = kc * 64
+    kbs_per_expert_dw = (N_OUT // 16 // 2) * kBS_stride_n0_dw
+    num_n_blocks = N_OUT // 256
     KH4 = K_HALF // 4
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
-    m_block_idx = udiv(bx_i32, num_n_blocks)
+    m_block_idx = bx_i32 // num_n_blocks
     n_block_idx = bx_i32 - m_block_idx * num_n_blocks
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
-    e = rocdl.readfirstlane(T.i32, raw(eids_ptr[m_block_idx]))
+    e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
     m_row = m_block_idx * BM
 
     lane_div_16 = lane // 16
@@ -743,7 +700,7 @@ def gemm2_body_v2(
     # A-scale buffer resource + uniform base (A-scale load stays raw).
     asc_per_mb = (BM // 32) * kAS_per_chunk_dw * 4
     asc_num = fx.Index(i32_max_m_blocks) * fx.Index(asc_per_mb)
-    ascale_rsrc = buffer_ops.create_buffer_resource_from_addr(raw(fx.Int64(arg_ascale)), num_records_bytes=asc_num)
+    ascale_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_ascale)), num_records_bytes=asc_num)
     a_scale_s_base = rocdl.readfirstlane(T.i32, (m_row // 32) * kAS_per_chunk_dw * 4)
     v_voff_scale = ((lane_div_16 * 16) + lane_mod_16) * 4
 
@@ -834,7 +791,7 @@ def gemm2_body_v2(
         # opsel (gemm2 has no gate/up split): mni=J//2, in_b=J%2.
         for J in range_constexpr(4):
             mni, in_b = J // 2, J % 2
-            sb = raw(Vec(bs_frags[kt][mni].load())[0])
+            sb = _raw(Vec(bs_frags[kt][mni].load())[0])
             mma_one_j(J, in_b, sa, sb, bq_frags[kt], is_f8_a, cbsz_a, a_vals, a_frags, accm, c_frags, mma_atoms)
 
     # zero C (fp4 fragments accumulate in place; fp8 accm pre-init above).
@@ -905,7 +862,7 @@ def atomic_bf16_epilog(
     BM,
     N_OUT,
 ):
-    kMChunks = kmchunks(BM)
+    kMChunks = BM // 16
     M_REPS = BM // 8  # BM32: 4, BM16: 2
     lane_div_16 = lane // 16
     lane_mod_16 = lane % 16
@@ -958,7 +915,7 @@ def atomic_bf16_epilog(
                 llvm.AtomicRMWOp(
                     llvm.AtomicBinOp.fadd,
                     out_ptr,
-                    raw(pk),
+                    _raw(pk),
                     llvm.AtomicOrdering.monotonic,
                     syncscope="agent",
                     alignment=4,

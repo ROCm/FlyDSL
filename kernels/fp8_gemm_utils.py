@@ -40,7 +40,7 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
 
 
 def lds_dma_atom_128():
-    """BufferCopyLDS128b copy-atom (16B global->LDS DMA chunk), shared by G2SLoader + moegemm."""
+    """BufferCopyLDS128b copy-atom (16B global->LDS DMA chunk), shared by G2SLoader + mxmoe_gemm_v2."""
     return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
 
 
