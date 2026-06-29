@@ -49,7 +49,6 @@ def compile_gemm1_a4w4_port(
     D_HIDDEN=H_DEFAULT,
     D_INTER=INTER_DEFAULT,
     NE=NE,
-    TOPK=TOPK_DEFAULT,
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
@@ -328,7 +327,8 @@ G2_CACHE = {}
 
 
 def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype):
-    key = (BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype)
+    # topk is host-grid-only (gemm1_grid); it does not enter the compiled kernel, so it is not a cache-key dim.
+    key = (BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, interleave, a_dtype, out_dtype)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
@@ -338,7 +338,6 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_
             D_HIDDEN=D_HIDDEN,
             D_INTER=D_INTER,
             NE=NE,
-            TOPK=topk,
             interleave=interleave,
             a_dtype=a_dtype,
             out_dtype=out_dtype,
