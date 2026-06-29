@@ -1243,5 +1243,82 @@ def test_multi_case_set(case_set_name: str) -> None:
         raise ValueError(f"Unsupported case set: {case_set_name}")
 
 
+# ---------------------------------------------------------------------------
+# Tile-programming reference (kernels/pa_decode_tile.py)
+#
+# Validates the readable, correctness-first tile-programming reimplementation of
+# the PA decode math against `reference_masked_attention`, for the minimal slice
+# it supports: per-tensor fp8 K/V, query_length=1, no kv-varlen, no sliding
+# window.  The reference kernel consumes f16 K/V holding the fp8 codes (see its
+# module docstring), so we fp8-quantize then cast the codes to f16 here.
+# ---------------------------------------------------------------------------
+def _run_pa_decode_tile_case(num_kv_heads: int, group_size: int, context_len: int, num_seqs: int) -> float:
+    from kernels.pa_decode_tile import pa_decode_tile
+
+    setup_seed(0)
+    dev = "cuda"
+    num_q_heads = num_kv_heads * group_size
+    head_dim = 128
+    block_size = 1024
+    max_blocks = (context_len + block_size - 1) // block_size
+    num_blocks = num_seqs * max_blocks
+    k_scale = v_scale = 0.04
+
+    query = (torch.randn(num_seqs, num_q_heads, head_dim, device=dev, dtype=torch.float16) * 0.3).contiguous()
+    k_f = torch.randn(num_blocks, num_kv_heads, block_size, head_dim, device=dev) * 0.3
+    v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
+    # fp8-quantize K/V (e4m3fnuz, the format gfx942 fp8 MMA consumes); the kernel
+    # multiplies by the per-tensor scale to dequantize.
+    key_cache = (k_f / k_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
+    value_cache = (v_f / v_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
+
+    block_tables = torch.zeros(num_seqs, max_blocks, dtype=torch.int32, device=dev)
+    for s in range(num_seqs):
+        for b in range(max_blocks):
+            block_tables[s, b] = s * max_blocks + b
+    context_lengths = torch.full((num_seqs,), context_len, dtype=torch.int32, device=dev)
+
+    output = torch.zeros(num_seqs, num_q_heads, head_dim, device=dev, dtype=torch.float16)
+    pa_decode_tile(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        block_tables,
+        context_lengths,
+        key_scale=k_scale,
+        value_scale=v_scale,
+    )
+    torch.cuda.synchronize()
+
+    kc = key_cache.to(torch.float32) * k_scale
+    vc = value_cache.to(torch.float32) * v_scale
+    refs = []
+    for s in range(num_seqs):
+        keys = torch.empty(context_len, num_kv_heads, head_dim, device=dev)
+        vals = torch.empty(context_len, num_kv_heads, head_dim, device=dev)
+        for t in range(context_len):
+            phys = int(block_tables[s, t // block_size].item())
+            within = t % block_size
+            keys[t] = kc[phys, :, within, :]
+            vals[t] = vc[phys, :, :, within]
+        q = query[s].unsqueeze(0).to(torch.float32)  # [1, num_q_heads, head_dim]
+        refs.append(
+            reference_masked_attention(q, keys, vals, 1.0 / head_dim**0.5, torch.float16, is_causal=True).squeeze(0)
+        )
+    ref = torch.stack(refs)
+    return (output.to(torch.float32) - ref.to(torch.float32)).abs().max().item()
+
+
+@pytest.mark.parametrize("num_kv_heads,group_size", [(1, 8), (1, 16), (2, 8)])
+@pytest.mark.parametrize("context_len", [1027, 256, 17])
+def test_pa_decode_tile_reference(num_kv_heads: int, group_size: int, context_len: int) -> None:
+    # fp8 (e4m3) Q and P quantization limit accuracy; the error averages down with
+    # context length (~1e-2 at ctx=17, ~1e-3 at ctx=1027), so use an fp8-appropriate
+    # tolerance rather than the f16-era 5e-3.
+    max_diff = _run_pa_decode_tile_case(num_kv_heads, group_size, context_len, num_seqs=3)
+    assert max_diff <= 1e-2, f"tile PA decode max diff {max_diff:.3e} exceeds tolerance"
+
+
 if __name__ == "__main__":
     sliding_window_accuracy_test()
