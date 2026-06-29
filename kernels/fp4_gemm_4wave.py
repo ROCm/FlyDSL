@@ -634,18 +634,20 @@ def compile_fp4_gemm_4w(
         wait_barrier((3 * N_TILES_A) + (3 * N_TILES_B))
         b0_frag = b_s2r.load(b_cur0, preshuffled=True)
 
-        # Step-0 scale (consumed in iter 0); each iter prefetches step k+1.
-        saR0, saR1, sbC0, sbC1 = _load_scales(0)
+        # DEPTH-2 scale prefetch: load step 0 (used iter 0) AND step 1 (the next),
+        # carried as (sc_cur, sc_nxt). Each iter prefetches step k+2 at the END of
+        # the step. This pulls the scale buffer_loads out of the FIFO window right
+        # before the binding wait_barrier (vs depth-1 which issued them at the step
+        # top, occupying ~8 vmcnt slots ahead of the binding g2s and forcing a tight
+        # count). With the scale moved late, the nan boundary rises and we run
+        # wait_barrier(16) to keep more g2s in flight.
+        sc_cur0 = _load_scales(0)
+        sc_nxt0 = _load_scales(1)
 
-        # Main-loop wait_barrier vmcnt. Both g2s AND scale are now inline-asm, so the
-        # compiler can't see any buffer_load and uses our literal vmcnt verbatim (it
-        # no longer recomputes/merges it). The count must therefore account for the
-        # in-flight scale VMEM too: scale is a depth-1 prefetch (8 loads = 2*n_ga +
-        # 2*n_gb issued at the top of each step, consumed next iter), which are
-        # allowed to stay in flight. Empirically the nan boundary is 11 (>=11 lets a
-        # not-yet-complete g2s LDS write be read -> nan at large K); 8 keeps a 2-slot
-        # safety margin. (A depth-2 scale prefetch would let this relax toward 16.)
-        _MAIN_VMCNT = 2 * (N_TILES_A // _FP4_PACK) + 2 * (N_TILES_B // _FP4_PACK)
+        # Main-loop wait_barrier vmcnt. Both g2s and scale are inline-asm so the
+        # compiler uses our literal vmcnt verbatim. With depth-2 end-of-step scale,
+        # 16 keeps the binding g2s safe while leaving more g2s in flight.
+        _MAIN_VMCNT = 16
 
         # ---- Main K-loop as scf.for, unrolled by 2 ------------------------------
         # Why scf.for (not range_constexpr full unroll): fully unrolling all 30 main
@@ -662,10 +664,17 @@ def compile_fp4_gemm_4w(
         def _one_step(kc, a0f, b0f, sc, accs, bufs):
             # bufs = (a_cur0, a_cur1, a_next0, a_next1, b_cur0, b_cur1, b_next0, b_next1)
             ac0, ac1, an0, an1, bc0, bc1, bn0, bn1 = bufs
-            saR0, saR1, sbC0, sbC1 = sc
+            # DEPTH-2 scale: sc = (sc_cur, sc_nxt). Consume sc_cur (scale[kc], loaded
+            # two steps ago), prefetch scale[kc+2] at the END of the step (after all
+            # g2s), and rotate -> next step gets (sc_nxt, new). Issuing the scale at
+            # the step END (not the top) keeps it OUT of the FIFO window right before
+            # the binding wait_barrier, so the nan-boundary vmcnt rises (scale no
+            # longer occupies ~8 slots ahead of the binding g2s) -> we can run
+            # wait_barrier(16) and keep more g2s in flight.
+            sc_cur, sc_nxt = sc
+            saR0, saR1, sbC0, sbC1 = sc_cur
             c00f, c01f, c10f, c11f = accs
             kc_i = fx.Int32(kc)  # Int32 for scale load_step (matches lane_off Int32)
-            saR0_n, saR1_n, sbC0_n, sbC1_n = _load_scales_rt(kc_i + 1)
 
             _b1 = [None] * N_TILES_B
             _a1 = [None] * N_TILES_A
@@ -699,8 +708,11 @@ def compile_fp4_gemm_4w(
             c11f = mfma.call(a1f, b1f, c11f, saR1, sbC1, interleave=il)
             b0nf = _b0n
 
+            # Prefetch scale[kc+2] at the END (after all g2s of this step).
+            sc_new = _load_scales_rt(kc_i + 2)
+
             new_bufs = (an0, an1, ac0, ac1, bn0, bn1, bc0, bc1)  # swap cur<->next
-            return a0nf, b0nf, (saR0_n, saR1_n, sbC0_n, sbC1_n), (c00f, c01f, c10f, c11f), new_bufs
+            return a0nf, b0nf, (sc_nxt, sc_new), (c00f, c01f, c10f, c11f), new_bufs
 
         bufs0 = (a_cur0, a_cur1, a_next0, a_next1, b_cur0, b_cur1, b_next0, b_next1)
         n_a = 2 * N_TILES_A
@@ -709,7 +721,7 @@ def compile_fp4_gemm_4w(
         n_ga = N_TILES_A // _FP4_PACK  # scale groups per A-scale (=len(saR0))
         n_gb = N_TILES_B // _FP4_PACK
 
-        def _flat_sc(sc4):
+        def _flat_sc1(sc4):
             # sc4 = (saR0, saR1, sbC0, sbC1); each is a list of n_g i32
             out = []
             for s in sc4:
@@ -717,7 +729,7 @@ def compile_fp4_gemm_4w(
                     out.append(_R(v))
             return out
 
-        def _unflat_sc(flat):
+        def _unflat_sc1(flat):
             o = 0
             saR0 = list(flat[o : o + n_ga])
             o += n_ga
@@ -729,11 +741,19 @@ def compile_fp4_gemm_4w(
             o += n_gb
             return saR0, saR1, sbC0, sbC1
 
-        n_sc = 2 * n_ga + 2 * n_gb
+        n_sc1 = 2 * n_ga + 2 * n_gb  # one scale group (4 lists)
+        n_sc = 2 * n_sc1  # depth-2: carry (sc_cur, sc_nxt)
+
+        def _flat_sc(sc):  # sc = (sc_cur, sc_nxt)
+            return _flat_sc1(sc[0]) + _flat_sc1(sc[1])
+
+        def _unflat_sc(flat):
+            return (_unflat_sc1(flat[:n_sc1]), _unflat_sc1(flat[n_sc1:]))
+
         init_state = (
             _flat_frag(a0_frag)
             + _flat_frag(b0_frag)
-            + _flat_sc((saR0, saR1, sbC0, sbC1))
+            + _flat_sc((sc_cur0, sc_nxt0))
             + [_R(x) for x in c00_frag]
             + [_R(x) for x in c01_frag]
             + [_R(x) for x in c10_frag]
@@ -779,7 +799,10 @@ def compile_fp4_gemm_4w(
         off += n_a
         b0_frag = _unflat_frag(state[off : off + n_b], N_TILES_B)
         off += n_b
-        saR0, saR1, sbC0, sbC1 = _unflat_sc(state[off : off + n_sc])
+        # depth-2 carry: sc_cur = scale[K_ITERS-2] (tail step 1), sc_nxt =
+        # scale[K_ITERS-1] (tail step 2, already prefetched -- no extra load).
+        sc_cur, sc_nxt = _unflat_sc(state[off : off + n_sc])
+        saR0, saR1, sbC0, sbC1 = sc_cur
         off += n_sc
         c00_frag = list(state[off : off + N_ACCUMS])
         off += N_ACCUMS
@@ -807,8 +830,8 @@ def compile_fp4_gemm_4w(
         b_cur0, b_next0 = b_next0, b_cur0
         b_cur1, b_next1 = b_next1, b_cur1
 
-        # Tail step K_ITERS - 1.
-        saR0, saR1, sbC0, sbC1 = _load_scales(K_ITERS - 1)
+        # Tail step K_ITERS - 1 (scale = sc_nxt, already prefetched in the loop).
+        saR0, saR1, sbC0, sbC1 = sc_nxt
         wait_barrier(0)
         b1_frag = b_s2r.load(b_cur1, preshuffled=True)
         a1_frag = a_s2r.load(a_cur1)
