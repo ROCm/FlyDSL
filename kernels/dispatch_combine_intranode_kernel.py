@@ -32,7 +32,7 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 # Bump when generated kernel shape changes.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v8-combine-batched-kload"
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v6-combine-batched-kload"
 
 # Stage-3 switches from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
@@ -46,19 +46,10 @@ def _to_i64(v):
 
 
 def _wave_uniform_i64(addr):
-    """Broadcast a wave-uniform i64 address to SGPR via ``readfirstlane`` so
-    ``create_buffer_resource_from_addr`` emits a *uniform* buffer descriptor.
-
-    A buffer descriptor built from a per-lane VGPR address forces the AMDGPU
-    backend to emit a per-op waterfall loop (readfirstlane x4 + saveexec +
-    execnz). Besides the raw instruction cost, that exec-masked control flow is
-    a scheduling barrier: the combine Stage-3 gather issues k per-expert loads
-    that the waterfall then serialises, throttling memory-level parallelism on
-    the reduction reads. Forcing the (genuinely warp-uniform) source base into
-    SGPR removes the waterfall and lets the k loads stay in flight together.
-
-    Caller must guarantee ``addr`` is warp-uniform with lane 0 active.
-    """
+    """Broadcast a wave-uniform i64 address to SGPR (readfirstlane) so the buffer
+    descriptor is uniform. A per-lane (VGPR) descriptor forces an AMDGPU waterfall
+    loop that serialises the k-way Stage-3 gather; this keeps the k loads in flight.
+    Caller must guarantee ``addr`` is warp-uniform."""
     v = arith.unwrap(addr)
     c32 = arith.unwrap(arith.constant(32, type=T.i64()))
     lo = arith.trunci(T.i32(), v)
@@ -755,19 +746,11 @@ def make_combine_kernel(
 
         # Masked buffer_load: returns 0 (i32) when vld_flag is false.
         def _maybe_load(rsrc, offset, vld_flag, **kwargs):
-            # Unconditional load + post-hoc mask, NOT scf.if.
-            #
-            # Invalid k-slots are pre-clamped to a safe self-slot address
-            # (safe_pe=rank, safe_dtok=0) so the read never faults. Issuing the
-            # load unconditionally keeps all k per-expert reads in one basic
-            # block, letting the backend batch them behind a SINGLE
-            # ``s_waitcnt vmcnt(0)`` (mori-style k-way memory-level parallelism).
-            #
-            # The previous ``if vld_flag: result = load`` form placed each load
-            # in its own predicated region whose yielded select forced a
-            # ``s_waitcnt vmcnt(0)`` after every load -> the k xGMI peer reads
-            # were serialised (k x read latency), which dominated the small/
-            # medium-bs zero-copy combine gap vs mori.
+            # Unconditional load + post-hoc mask (NOT scf.if): invalid k-slots
+            # are pre-clamped to a safe self-slot so the read never faults.
+            # Keeping all k loads in one basic block lets the backend batch them
+            # behind a SINGLE s_waitcnt (mori k-way MLP); the old predicated form
+            # forced an s_waitcnt after every load, serialising the k peer reads.
             raw = buffer_load(rsrc, offset, **kwargs)
             zero_i32 = arith.constant(0, type=T.i32())
             return arith.select(vld_flag, raw, zero_i32)
@@ -1083,22 +1066,14 @@ def make_combine_kernel(
                     else:
                         expert_tok_off = _to_i64(safe_pe * max_tok_per_rank + tok_id) * nbytes
                         expert_tok_addr = arith.unwrap(addr_shmem_tok + expert_tok_off)
-                    # The per-expert source base is warp-uniform (decoded from
-                    # tok_map[tok_id]); force it to SGPR so the k reduction loads
-                    # do not each spawn a per-lane buffer waterfall (which both
-                    # adds instructions and serialises the k-way gather).
+                    # Warp-uniform per-expert base -> SGPR (no per-lane waterfall
+                    # on the k-way gather; see _wave_uniform_i64).
                     expert_rsrcs.append(create_buffer_resource_from_addr(_wave_uniform_i64(expert_tok_addr)))
                     expert_vlds.append(vld_k)
 
-            # Stage 3 write-back is parameterised by ``U`` (unroll factor):
-            #   _accum_step(ec_abs, U) emits U sub-loads per k-slot
-            #     (soffset 0, 256, ..., (U-1)*256 B), reduces across k
-            #     via _accum_experts, writes U sub-stores. Under
-            #     _xfer_bf16_to_fp8 the output stride doubles (512 B).
-            #   _accum_loop(end, U) walks [0, end) in steps of U*64 i32
-            #     entries; for U>1 a step=64 tail covers the remainder.
-            # ``U`` is selected from partition size and warp_num_per_block
-            # (the wpb<16 gate avoids the 1024-threads/block occupancy cliff).
+            # Stage 3 write-back, unroll factor ``U``: _accum_step emits U
+            # sub-loads/k-slot, reduces across k, writes U sub-stores;
+            # _accum_loop walks [0, end) in steps of U*64 with a step=64 tail.
             def _accum_step(ec_abs, U):
                 vals = [[] for _ in range(U)]
                 for k_slot in range_constexpr(experts_per_token):
@@ -1142,11 +1117,9 @@ def make_combine_kernel(
             rem_hdim = n_elems - hdim_off
             eff_end = arith.select(rem_hdim < hdim_per_warp, rem_hdim, hdim_per_warp)
             if _S3_WIDE_PATH_THRESHOLD_I32 < hdim_per_warp:
-                # Wide path keeps U=4/2 memory-level parallelism at ALL warp
-                # counts. The legacy ``warp_num_per_block < 16`` gate dropped to
-                # U=1 at 1024-thread blocks fearing an occupancy cliff, but U=4
-                # combine VGPR stays low enough to keep >=1 block/CU resident, so
-                # 16 warps/block (the best geometry at large bs) keeps full MLP.
+                # Wide path keeps U=4/2 MLP at all warp counts: U=4 combine VGPR
+                # stays low enough for >=1 block/CU, so 16 warps/block (best at
+                # large bs) keeps full memory-level parallelism.
                 if const_expr(n_i32 % 256 == 0):
                     if (hdim_per_warp % 256) < 1:
                         _accum_loop(eff_end, 4)
@@ -1157,10 +1130,8 @@ def make_combine_kernel(
             else:
                 _accum_loop(eff_end, 1)
 
-        # Stage 3b: weight accumulation. Each warp handles one output
-        # token; lanes 0..k-1 read one k-slot's weight from
-        # ``shmem_comb_inp_wts`` (or peer-side under zero-copy), f32-sum
-        # across the k slots and write ``shmem_comb_out_wts``.
+        # Stage 3b: weight accumulation. Each warp does one output token;
+        # lanes 0..k-1 f32-sum the k-slot weights -> shmem_comb_out_wts.
         if const_expr(enable_weights):
             rsrc_out_wts = create_buffer_resource_from_addr(addr_out_shmem_wts)
             for wt_tok_id in range(global_warp_id, cur_rank_num_token, global_warp_num):
@@ -1181,9 +1152,8 @@ def make_combine_kernel(
                             wt_safe_dtok = arith.select(wt_vld, wt_dtok, 0)
                             wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
                             wt_src_off = _to_i64(wt_safe_dtok) * weight_bytes
-                            # Warp-uniform per-expert base -> SGPR descriptor
-                            # (drop the per-lane buffer waterfall on the
-                            # k-way weight gather; see _wave_uniform_i64).
+                            # Warp-uniform base -> SGPR (no per-lane waterfall;
+                            # see _wave_uniform_i64).
                             wt_rsrc = create_buffer_resource_from_addr(_wave_uniform_i64(wt_pe_base + wt_src_off))
                         else:
                             wt_src_off = _to_i64(wt_safe_pe * max_tok_per_rank + wt_tok_id) * weight_bytes
