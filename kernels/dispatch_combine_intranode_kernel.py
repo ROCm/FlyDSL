@@ -35,7 +35,7 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 # Bump when generated kernel shape changes.
-_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v6-combine-uniform-read"
+_DISPATCH_COMBINE_JIT_SCHEMA_VERSION = "v7-combine-wide-u16"
 
 # Stage-3 switches from narrow step=64 to wide step=128/256 above this threshold.
 _S3_WIDE_PATH_THRESHOLD_I32 = 895
@@ -837,6 +837,7 @@ def make_combine_kernel(
                 result = buffer_load(rsrc, offset, **kwargs)
             return result
 
+
         _r_trecv = create_buffer_resource_from_addr(addr_inp_total_recv)
         _r_xdb_flag = create_buffer_resource_from_addr(addr_xdb_flag)
         _r_tis = create_buffer_resource_from_addr(addr_inp_shmem_tok_id_to_src)
@@ -1287,7 +1288,12 @@ def make_combine_kernel(
             rem_hdim = n_elems - hdim_off
             eff_end = arith.select(rem_hdim < hdim_per_warp, rem_hdim, hdim_per_warp)
             if _S3_WIDE_PATH_THRESHOLD_I32 < hdim_per_warp:
-                if const_expr(n_i32 % 256 == 0 and warp_num_per_block < 16):
+                # Wide path keeps U=4/2 memory-level parallelism at ALL warp
+                # counts. The legacy ``warp_num_per_block < 16`` gate dropped to
+                # U=1 at 1024-thread blocks fearing an occupancy cliff, but U=4
+                # combine VGPR stays low enough to keep >=1 block/CU resident, so
+                # 16 warps/block (the best geometry at large bs) keeps full MLP.
+                if const_expr(n_i32 % 256 == 0):
                     if (hdim_per_warp % 256) < 1:
                         _accum_loop(eff_end, 4)
                     else:

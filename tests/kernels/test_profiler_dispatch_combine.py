@@ -630,7 +630,7 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.dispatch_warp_num_per_block,
         block_num=block_num if block_num is not None else cfg.dispatch_block_num,
         gpu_per_node=world_size,
-        zero_copy=cfg.zero_copy,
+        use_external_inp_buf=not cfg.zero_copy,
         quant_type=cfg.quant_type,
         # ``max_total_recv_tokens`` is intentionally NOT forwarded to
         # mori unless the cap equals the worst-case ws*M (effectively
@@ -2239,6 +2239,19 @@ def run_profiler(rank, world_size, args):
         print(f"{'='*65}", flush=True)
         print("[profiler] building FlyDSL...", flush=True)
     op_fly = FlyDSLDispatchCombineIntraNodeOp(cfg)
+    # When the CLI pins launch geometry, drop the auto-loaded tuning table so
+    # cfg.dispatch_block_num / cfg.combine_block_num (from --dispatch-block-num /
+    # --combine-block-num) drive BOTH dispatch and combine resolution. Otherwise
+    # the table shadows the CLI in the profile/cudagraph path and geometry
+    # sweeps silently collapse to the tuned values.
+    if getattr(args, "_force_dispatch_geom", None) or getattr(args, "_force_combine_geom", None):
+        op_fly.cfg.tuning_table = None
+        if rank == 0:
+            print(
+                f"[geometry] CLI-pinned: dispatch={cfg.dispatch_block_num}/"
+                f"{cfg.dispatch_warp_num_per_block} combine={cfg.combine_block_num}/"
+                f"{cfg.combine_warp_num_per_block} (tuning table disabled)"
+            )
 
     # Mori reference op.  Constructed whenever it can act as a verify
     # oracle (dtype supported, not std-MoE) — independent of
@@ -2923,6 +2936,9 @@ def _parse_args():
     args._force_combine_geom = None
     if args.combine_block_num is not None and args.combine_warp_per_block is not None:
         args._force_combine_geom = (args.combine_block_num, args.combine_warp_per_block)
+    args._force_dispatch_geom = None
+    if args.dispatch_block_num is not None and args.dispatch_warp_per_block is not None:
+        args._force_dispatch_geom = (args.dispatch_block_num, args.dispatch_warp_per_block)
     global _FORCE_COMBINE_GEOM
     _FORCE_COMBINE_GEOM = args._force_combine_geom
     # Backfill the cfg-level defaults consumed downstream as plain ints (these
