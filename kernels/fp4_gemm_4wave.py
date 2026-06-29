@@ -27,6 +27,7 @@ Scales: ``shuffle_scale_w4(scale, 1, False)``.
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import arith, const_expr, range_constexpr
 from flydsl.expr import buffer_ops as _buffer_ops
@@ -34,14 +35,111 @@ from flydsl.expr import rocdl as _rocdl
 from flydsl.expr.typing import T as _T
 from flydsl.expr.typing import Vector as Vec
 from kernels.fp8_gemm_utils import (
-    G2SLoader,
     ceildiv,
     compute_global_swizzle,
     divmod,
-    make_fp8_buffer_tensor,
     swizzle_128,
     wait_barrier,
 )
+
+
+class _Buf:
+    """LDS sub-buffer handle over the ONE contiguous LDS array.
+
+    Holds the shared base pointer plus this buffer's compile-time byte offset
+    SEPARATELY (not pre-added). Keeping the buffer offset as an int lets the ds_read
+    path build the address as ``(base + dynamic_swizzle) + const(buffer_off+tile)``
+    so the constant outer GEP folds into the ds_read 16-bit offset: field. (Pre-adding
+    buffer_off into .ptr made the dynamic swizzle the outermost term -> ptrtoint +
+    int-add -> unfoldable, leaving ~24 address VGPRs materialized.)
+
+    ``.ptr`` (base + buffer_off) is still provided for G2SLoaderAsm, which needs the
+    actual per-buffer LDS base for m0.
+    """
+
+    def __init__(self, base_ptr, byte_off):
+        self.base_ptr = base_ptr
+        self.byte_off = byte_off
+
+    @property
+    def ptr(self):
+        return fx.add_offset(self.base_ptr, self.byte_off)
+
+
+_gep = _buffer_ops.get_element_ptr
+
+
+def _lds_ptr_t():
+    return _ir.Type.parse("!llvm.ptr<3>")
+
+
+def _asm_void(operands, asm_string, constraints):
+    """Side-effecting void inline asm (LLVM sees no memory op -> no waitcnt added)."""
+    _llvm.inline_asm(None, operands, asm_string, constraints, has_side_effects=True)
+
+
+def _uniform_i32(value):
+    """Cast to i32 and force a wave-uniform SGPR value for scalar inline-asm operands."""
+    raw = arith._to_raw(value) if not isinstance(value, _ir.Value) else value
+    if raw.type != _T.i32:
+        raw = arith._to_raw(fx.Int32(raw))
+    return _rocdl.readfirstlane(_T.i32, raw)
+
+
+class G2SLoaderAsm:
+    """Global->LDS DMA via INLINE-ASM ``buffer_load_dwordx4 ... lds`` instead of the
+    BufferCopyLDS128b copy atom.
+
+    Mirrors the mla_fwd_decode trick: with the 8 LDS buffers merged into ONE
+    symbol (so ds_read cross-buffer offsets fold into the 16-bit imm), LLVM can no
+    longer prove the g2s LDS writes don't alias the ds_reads, and would insert a
+    spurious ``s_waitcnt vmcnt(0)`` before every ds_read. Emitting the load as
+    opaque inline asm means LLVM sees no LDS write at all, so it adds no drain --
+    vmcnt ordering is managed entirely by our explicit ``wait_barrier`` (which is
+    itself inline-asm ``s_waitcnt vmcnt(N); s_barrier``). The inline-asm
+    buffer_load IS still counted toward vmcnt by hardware, so the manual counts in
+    wait_barrier stay correct.
+
+    Each ``buffer_load_dwordx4 vN, rsrc, soffset offen lds`` writes 16 bytes to the
+    LDS address in m0; m0 holds the per-step LDS byte base (wave-uniform via
+    readfirstlane), the per-lane swizzle is the voffset VGPR (loop-invariant), and
+    the K-step offset is the scalar soffset operand (hardware-free add).
+    """
+
+    def __init__(self, rsrc, gl_offsets, n_load_steps, wave_id):
+        self.rsrc = arith._to_raw(rsrc)
+        self.gl_offsets = gl_offsets
+        self.n_load_steps = n_load_steps
+        self.wave_id = wave_id
+        self.n_waves = fx.block_dim.x // 64
+
+    def _lds_base_sgpr(self, lds_dst, step):
+        step_off = self.wave_id * 1024 + step * (self.n_waves * 1024)
+        lds_base = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(step_off)
+        return _uniform_i32(lds_base)
+
+    def _voffset(self, step):
+        # Per-lane global byte offset = swizzle only (loop-invariant). The K-step
+        # offset is NOT added here -- it goes in the buffer instruction's scalar
+        # soffset field (hardware-free add), so voffset is a constant VGPR reused
+        # across all K iterations instead of an `v_add k_offset` every step.
+        return arith._to_raw(fx.Int32(self.gl_offsets[step]))
+
+    def _emit(self, lds_dst, k_offset, step):
+        m0 = self._lds_base_sgpr(lds_dst, step)
+        voff = self._voffset(step)
+        soff = _uniform_i32(k_offset)  # scalar soffset (K-step), folded by hardware
+        # No s_nop after the m0 write: these loads are interleaved between MFMAs,
+        # so the MFMA in the shadow already covers the m0 write->use hazard latency.
+        asm = "s_mov_b32 m0, $0\nbuffer_load_dwordx4 $1, $2, $3 offen lds"
+        _asm_void([m0, voff, self.rsrc, soff], asm, "s,v,s,s")
+
+    def load(self, lds_dst, k_offset):
+        for step in range_constexpr(self.n_load_steps):
+            self._emit(lds_dst, k_offset, step)
+
+    def load_one(self, lds_dst, k_offset, step):
+        self._emit(lds_dst, k_offset, step)
 
 
 class S2RLoaderFp4:
@@ -58,15 +156,41 @@ class S2RLoaderFp4:
         self.wave_idx = wave_idx
         self.n_tiles = n_tiles
 
-    def _vec_load_16xf8(self, lds_src, offset):
-        off_tup = fx.make_int_tuple(offset)
-        ptr_off = fx.add_offset(lds_src.ptr, off_tup)
-        i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
-        view = fx.make_view(i8_iter, fx.make_layout(16, 1))
-        return view.load()
+    def _vec_load_16xf8(self, lds_src, dyn_offset, const_offset):
+        # Plain LLVM ds_read (NOT inline-asm). The single-symbol LDS layout would
+        # normally make the compiler insert an s_waitcnt vmcnt(0) drain before each
+        # ds_read (it can't prove the g2s global->LDS DMA writes don't alias) -- but
+        # because g2s is now inline-asm (G2SLoaderAsm), the LDS WRITE is invisible to
+        # the compiler, so no drain is emitted. And being a REAL LDS load, the
+        # compiler tracks it with fine-grained lgkmcnt (matching the 8-symbol
+        # baseline's sync) instead of the conservative per-MFMA VMEM vmcnt it would
+        # insert for an opaque inline-asm block.
+        #
+        # Address folding: the per-lane vaddr VGPR carries only the DYNAMIC part
+        # (symbol base + 64KB-window half + lane swizzle); the constant (buffer +
+        # tile) byte offset folds into the ds_read 16-bit offset: immediate via the
+        # inttoptr + GEP(static) below. ds offset is 16-bit (max 0xFFFF=64KB) but the
+        # 8 buffers span 0x1d800 (>64KB), so split into two windows: buffers 0-3
+        # (base+0) and 4-7 (base+0x10000). imm = buffer_off - window_base + tile*2048
+        # stays <= 0xc000+0x1800 = 0xd800 < 0xFFFF. The window base (0 or 0x10000) is
+        # the only buffer-dependent term left in the dynamic vaddr, so all 8 buffers
+        # collapse to 2 base VGPRs per (operand, step) -- 4 total in the hot loop.
+        total_off = lds_src.byte_off + const_offset
+        window_base = (total_off // 0x10000) * 0x10000
+        imm = total_off - window_base
+        assert 0 <= imm <= 0xFFFF
+        vaddr = fx.Int32(fx.ptrtoint(lds_src.base_ptr)) + fx.Int32(window_base + dyn_offset)
+        lds_ptr = _llvm.inttoptr(_lds_ptr_t(), arith._to_raw(vaddr))
+        if imm != 0:
+            lds_ptr = _gep(lds_ptr, static_byte_offset=imm)
+        vec4_i32 = _ir.VectorType.get([4], fx.Int32.ir_type)
+        raw = _llvm.LoadOp(vec4_i32, lds_ptr, alignment=16).result
+        return Vec(raw)
 
-    def _offset(self, i, step, preshuffled):
-        row = self.wave_idx * (self.n_tiles * 16) + i * 16 + self.lane_id % 16
+    def _dyn_offset(self, step, preshuffled):
+        # Lane-dependent part (tile i=0); the per-tile i*2048 is added as a constant.
+        # Verified: _offset(i,step) - _offset(0,step) == i*2048 on both paths.
+        row = self.wave_idx * (self.n_tiles * 16) + self.lane_id % 16
         col = (self.lane_id // 16) * 16 + step * 64
         if const_expr(preshuffled):
             return (row // 8) * 1024 + (row % 8) * 16 + (col // 16) * 128
@@ -78,14 +202,16 @@ class S2RLoaderFp4:
         for i in range_constexpr(self.n_tiles):
             halves = []
             for step in range_constexpr(2):
-                v = self._vec_load_16xf8(lds_src, self._offset(i, step, preshuffled))
+                dyn = self._dyn_offset(step, preshuffled)
+                v = self._vec_load_16xf8(lds_src, dyn, i * 2048)
                 halves.append(v.bitcast(fx.Int32))  # i32x4, the K=128 MFMA operand
             frag.append(halves)  # [ksub0_i32x4, ksub1_i32x4]
         return frag
 
     def load_one(self, lds_src, i, ksub, preshuffled=False):
         """One i32x4 (tile i, K=128 sub-block ksub) -- the interleave granularity."""
-        v = self._vec_load_16xf8(lds_src, self._offset(i, ksub, preshuffled))
+        dyn = self._dyn_offset(ksub, preshuffled)
+        v = self._vec_load_16xf8(lds_src, dyn, i * 2048)
         return v.bitcast(fx.Int32)
 
 
@@ -219,9 +345,7 @@ class Mfma16x16x128Fp4:
                     b_op = b[j][ksub]
                     sb_v = sb[j // _FP4_PACK]
                     jb = j % _FP4_PACK
-                    c[self.idx(i, j)] = self._mfma_agpr(
-                        a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb
-                    )
+                    c[self.idx(i, j)] = self._mfma_agpr(a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb)
                     if nth[0] < len(thunks):
                         thunks[nth[0]]()
                         nth[0] += 1
@@ -234,10 +358,7 @@ class Mfma16x16x128Fp4:
         # Build the op_sel / op_sel_hi suffix (compile-time). op_sel[2]/hi[2]=0.
         opsel = f"op_sel:[{ia},{jb},0]"
         opsel_hi = f"op_sel_hi:[{ksub},{ksub},0]"
-        asm = (
-            "v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, $0, $3, $4 "
-            f"{opsel} {opsel_hi} cbsz:4 blgp:4"
-        )
+        asm = "v_mfma_scale_f32_16x16x128_f8f6f4 $0, $1, $2, $0, $3, $4 " f"{opsel} {opsel_hi} cbsz:4 blgp:4"
         return _llvm.inline_asm(
             self.res_ty,
             [
@@ -367,32 +488,41 @@ def compile_fp4_gemm_4w(
     a_lds_size = LDS_BLOCK_M * BLOCK_K_BYTES
     b_lds_size = LDS_BLOCK_N * BLOCK_K_BYTES
 
+    # One contiguous LDS array (single static `make_ptr` -> single `@__shared_alloc`
+    # symbol), NOT 8 independent leaf fields. With one base symbol every cross-buffer
+    # offset is a compile-time constant against the same pointer, so the compiler
+    # folds it into the 16-bit ds_read offset: field instead of materializing ~24
+    # per-(buffer,tile) address VGPRs (252 -> ~228 arch VGPR). The catch: a single
+    # LDS symbol breaks the compiler's alias analysis between the g2s global->LDS DMA
+    # writes and the ds_reads, so it would insert a spurious `s_waitcnt vmcnt(0)`
+    # before every ds_read -- which is why g2s uses inline-asm buffer_load (see
+    # G2SLoaderAsm) so LLVM sees no LDS write and emits no drain.
+    assert a_lds_size == b_lds_size
+    _lds_buf = a_lds_size  # 16KB; 8 buffers laid out contiguously
+
     @fx.struct
     class SharedStorage:
-        A_lds_cur_0: fx.Array[fx.Int8, a_lds_size, 16]
-        A_lds_cur_1: fx.Array[fx.Int8, a_lds_size, 16]
-        A_lds_next_0: fx.Array[fx.Int8, a_lds_size, 16]
-        A_lds_next_1: fx.Array[fx.Int8, a_lds_size, 16]
-        B_lds_cur_0: fx.Array[fx.Int8, b_lds_size, 16]
-        B_lds_cur_1: fx.Array[fx.Int8, b_lds_size, 16]
-        B_lds_next_0: fx.Array[fx.Int8, b_lds_size, 16]
-        B_lds_next_1: fx.Array[fx.Int8, b_lds_size, 16]
+        all_lds: fx.Array[fx.Int8, 8 * _lds_buf, 16]
 
     @flyc.kernel
     def kernel_gemm(
         A: fx.Tensor, B_T: fx.Tensor, C: fx.Tensor, A_scale: fx.Tensor, B_scale: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
     ):
-        I8_IR_t = fx.Int8.ir_type
-
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        a_cur0 = lds.A_lds_cur_0
-        a_cur1 = lds.A_lds_cur_1
-        a_next0 = lds.A_lds_next_0
-        a_next1 = lds.A_lds_next_1
-        b_cur0 = lds.B_lds_cur_0
-        b_cur1 = lds.B_lds_cur_1
-        b_next0 = lds.B_lds_next_0
-        b_next1 = lds.B_lds_next_1
+        # 8 buffers as compile-time offsets off ONE base pointer (single symbol).
+        _base_ptr = lds.all_lds.ptr
+
+        def _buf(idx):
+            return _Buf(_base_ptr, idx * _lds_buf)
+
+        a_cur0 = _buf(0)
+        a_cur1 = _buf(1)
+        a_next0 = _buf(2)
+        a_next1 = _buf(3)
+        b_cur0 = _buf(4)
+        b_cur1 = _buf(5)
+        b_next0 = _buf(6)
+        b_next1 = _buf(7)
 
         lane_id = fx.thread_idx.x % 64
         wave_id = fx.thread_idx.x // 64
@@ -416,11 +546,6 @@ def compile_fp4_gemm_4w(
         # B is preshuffled (16,16): one N-16 row-block spans 2*1024 bytes per
         # K-step (same constant fp8_gemm_4wave uses for b_preshuffled).
         B_K_STEP = 2 * 1024
-
-        gA = make_fp8_buffer_tensor(A, I8_IR_t)
-        gB = make_fp8_buffer_tensor(B_T, I8_IR_t)
-        ga_div = fx.logical_divide(gA, fx.make_layout(1, 1))
-        gb_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
         mfma = Mfma16x16x128Fp4(N_TILES_A, N_TILES_B)
 
@@ -463,8 +588,12 @@ def compile_fp4_gemm_4w(
         gl_off_a = compute_global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, preshuffled=False)
         gl_off_b = compute_global_swizzle(lane_id, wave_id, K_BYTES, N_LDS_ROUNDS, preshuffled=True)
 
-        a_g2s = G2SLoader(ga_div, gl_off_a, N_TILES_A, I8_IR_t, wave_id)
-        b_g2s = G2SLoader(gb_div, gl_off_b, N_TILES_B, I8_IR_t, wave_id)
+        # Inline-asm g2s (see G2SLoaderAsm): needs the raw buffer resource. Build it
+        # once from the i8 buffer tensor (max_size OOB check; all addresses in-bounds).
+        a_rsrc = _buffer_ops.create_buffer_resource(A, max_size=True)
+        b_rsrc = _buffer_ops.create_buffer_resource(B_T, max_size=True)
+        a_g2s = G2SLoaderAsm(a_rsrc, gl_off_a, N_TILES_A, wave_id)
+        b_g2s = G2SLoaderAsm(b_rsrc, gl_off_b, N_TILES_B, wave_id)
         a_s2r = S2RLoaderFp4(wave_i, N_TILES_A)
         b_s2r = S2RLoaderFp4(wave_j, N_TILES_B)
         store_c = StoreCFp4(C, c_m, c_n, mfma.idx, N_TILES_A, N_TILES_B, mn_aligned=mn_aligned)
@@ -526,28 +655,20 @@ def compile_fp4_gemm_4w(
             b1_off = fx.Int32(B1_gl_offset) + bk
 
             wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
-            il = _g2s_thunks(a_g2s, ac0, a0_off, N_TILES_A) + _s2r_thunks(
-                b_s2r, bc1, _b1, N_TILES_B, True
-            )
+            il = _g2s_thunks(a_g2s, ac0, a0_off, N_TILES_A) + _s2r_thunks(b_s2r, bc1, _b1, N_TILES_B, True)
             c00f = mfma.call(a0f, b0f, c00f, saR0, sbC0, interleave=il)
             b1f = _b1
 
-            il = _g2s_thunks(b_g2s, bc0, b0_off, N_TILES_A) + _s2r_thunks(
-                a_s2r, ac1, _a1, N_TILES_A, False
-            )
+            il = _g2s_thunks(b_g2s, bc0, b0_off, N_TILES_A) + _s2r_thunks(a_s2r, ac1, _a1, N_TILES_A, False)
             c01f = mfma.call(a0f, b1f, c01f, saR0, sbC1, interleave=il)
             a1f = _a1
 
             wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
-            il = _g2s_thunks(b_g2s, bc1, b1_off, N_TILES_A) + _s2r_thunks(
-                a_s2r, an0, _a0n, N_TILES_A, False
-            )
+            il = _g2s_thunks(b_g2s, bc1, b1_off, N_TILES_A) + _s2r_thunks(a_s2r, an0, _a0n, N_TILES_A, False)
             c10f = mfma.call(a1f, b0f, c10f, saR1, sbC0, interleave=il)
             a0nf = _a0n
 
-            il = _g2s_thunks(a_g2s, ac1, a1_off, N_TILES_A) + _s2r_thunks(
-                b_s2r, bn0, _b0n, N_TILES_B, True
-            )
+            il = _g2s_thunks(a_g2s, ac1, a1_off, N_TILES_A) + _s2r_thunks(b_s2r, bn0, _b0n, N_TILES_B, True)
             c11f = mfma.call(a1f, b1f, c11f, saR1, sbC1, interleave=il)
             b0nf = _b0n
 
@@ -571,10 +692,14 @@ def compile_fp4_gemm_4w(
 
         def _unflat_sc(flat):
             o = 0
-            saR0 = list(flat[o : o + n_ga]); o += n_ga
-            saR1 = list(flat[o : o + n_ga]); o += n_ga
-            sbC0 = list(flat[o : o + n_gb]); o += n_gb
-            sbC1 = list(flat[o : o + n_gb]); o += n_gb
+            saR0 = list(flat[o : o + n_ga])
+            o += n_ga
+            saR1 = list(flat[o : o + n_ga])
+            o += n_ga
+            sbC0 = list(flat[o : o + n_gb])
+            o += n_gb
+            sbC1 = list(flat[o : o + n_gb])
+            o += n_gb
             return saR0, saR1, sbC0, sbC1
 
         n_sc = 2 * n_ga + 2 * n_gb
@@ -589,13 +714,20 @@ def compile_fp4_gemm_4w(
         )
         for kk, state in range(0, K_ITERS - 2, 2, init=init_state):
             off = 0
-            a0f = _unflat_frag(state[off : off + n_a], N_TILES_A); off += n_a
-            b0f = _unflat_frag(state[off : off + n_b], N_TILES_B); off += n_b
-            sc = _unflat_sc(state[off : off + n_sc]); off += n_sc
-            c00f = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
-            c01f = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
-            c10f = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
-            c11f = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
+            a0f = _unflat_frag(state[off : off + n_a], N_TILES_A)
+            off += n_a
+            b0f = _unflat_frag(state[off : off + n_b], N_TILES_B)
+            off += n_b
+            sc = _unflat_sc(state[off : off + n_sc])
+            off += n_sc
+            c00f = list(state[off : off + N_ACCUMS])
+            off += N_ACCUMS
+            c01f = list(state[off : off + N_ACCUMS])
+            off += N_ACCUMS
+            c10f = list(state[off : off + N_ACCUMS])
+            off += N_ACCUMS
+            c11f = list(state[off : off + N_ACCUMS])
+            off += N_ACCUMS
             accs = (c00f, c01f, c10f, c11f)
 
             # step kk
@@ -616,13 +748,20 @@ def compile_fp4_gemm_4w(
 
         # unpack final state back into the named vars the tail uses
         off = 0
-        a0_frag = _unflat_frag(state[off : off + n_a], N_TILES_A); off += n_a
-        b0_frag = _unflat_frag(state[off : off + n_b], N_TILES_B); off += n_b
-        saR0, saR1, sbC0, sbC1 = _unflat_sc(state[off : off + n_sc]); off += n_sc
-        c00_frag = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
-        c01_frag = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
-        c10_frag = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
-        c11_frag = list(state[off : off + N_ACCUMS]); off += N_ACCUMS
+        a0_frag = _unflat_frag(state[off : off + n_a], N_TILES_A)
+        off += n_a
+        b0_frag = _unflat_frag(state[off : off + n_b], N_TILES_B)
+        off += n_b
+        saR0, saR1, sbC0, sbC1 = _unflat_sc(state[off : off + n_sc])
+        off += n_sc
+        c00_frag = list(state[off : off + N_ACCUMS])
+        off += N_ACCUMS
+        c01_frag = list(state[off : off + N_ACCUMS])
+        off += N_ACCUMS
+        c10_frag = list(state[off : off + N_ACCUMS])
+        off += N_ACCUMS
+        c11_frag = list(state[off : off + N_ACCUMS])
+        off += N_ACCUMS
 
         # Tail step K_ITERS - 2 (scale carried from loop's last prefetch).
         wait_barrier((2 * N_TILES_A) + (2 * N_TILES_B))
