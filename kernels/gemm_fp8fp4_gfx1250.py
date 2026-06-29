@@ -7,6 +7,7 @@ per-channel fp32 scales applied in the epilogue (``scale_mode="ptpc"``).
 """
 
 import functools
+import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -404,16 +405,26 @@ def compile_fp8fp4_gemm(
     COMPUTE_SCHEDULE_FP4_QUADRANT = "fp4_quadrant"
     COMPUTE_SCHEDULE_FP8_QUADRANT = "fp8_quadrant"
     COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE = "fp8_deep_pipeline"
+    COMPUTE_SCHEDULE_FP8_WARP_PP = "fp8_warp_pp"
 
-    fp8_deep_pipeline_eligible = (
+    _fp8_deep_base = (
         data_format in ("fp8", "a8w4")
         and tile_m == 256
         and tile_n == 256
         and tile_k == 128
-        and m_warp == 2
-        and n_warp == 2
         and num_buffers == 4
         and out_dtype == "bf16"
+    )
+    fp8_deep_pipeline_eligible = _fp8_deep_base and m_warp == 2 and n_warp == 2
+    # occ=2 warp-pp (8-wave, 2x4/4x2): reuses the deep emit at occupancy 2.
+    # Opt-in via FLYDSL_WARP_PP=1 (FLYDSL_DEEP_OCC2 = legacy alias); occ=1 unchanged.
+    fp8_warp_pp_eligible = (
+        _fp8_deep_base
+        and (m_warp, n_warp) in ((2, 4), (4, 2))
+        and (
+            os.environ.get("FLYDSL_WARP_PP", "0") == "1"
+            or os.environ.get("FLYDSL_DEEP_OCC2", "0") == "1"
+        )
     )
 
     def _pick_compute_schedule_kind():
@@ -426,6 +437,8 @@ def compile_fp8fp4_gemm(
         # A8W4 (FP8 act + FP4 weight) shares FP8's accumulator layout and operand
         # path, so it reuses the FP8 schedules.
         if data_format in ("fp8", "a8w4"):
+            if fp8_warp_pp_eligible:
+                return COMPUTE_SCHEDULE_FP8_WARP_PP
             if fp8_deep_pipeline_eligible:
                 return COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
             return COMPUTE_SCHEDULE_FP8_QUADRANT
@@ -435,7 +448,13 @@ def compile_fp8fp4_gemm(
     use_row_major_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
     use_fp4_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
-    use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
+    use_fp8_warp_pp_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_WARP_PP
+    # The warp-pp path reuses the deep-pipeline emit infrastructure at occ=2.
+    use_fp8_deep_pipeline_schedule = compute_schedule_kind in (
+        COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE,
+        COMPUTE_SCHEDULE_FP8_WARP_PP,
+    )
+    _fp8_warp_pp = use_fp8_warp_pp_schedule
     use_row_major_k_prefetch = wmma_m_rep == 1 and k_wmma_steps > 1
     _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
     _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
@@ -454,6 +473,7 @@ def compile_fp8fp4_gemm(
             COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING,
             COMPUTE_SCHEDULE_FP8_QUADRANT,
             COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE,
+            COMPUTE_SCHEDULE_FP8_WARP_PP,
             COMPUTE_SCHEDULE_FP4_QUADRANT,
         )
     use_ws_tdm_split_signal_overlap = (
@@ -1450,9 +1470,9 @@ def compile_fp8fp4_gemm(
                             global_wn,
                             a_frags[wm_local],
                             b_frags[wn_local],
-                            a_scales,
-                            b_scales,
-                        )
+                        a_scales,
+                        b_scales,
+                    )
 
             def _emit_group(wm_base, wn_base, a_frags, b_frags, a_scales, b_scales, emit_filler_now=False):
                 _emit_group_rows(
@@ -1650,10 +1670,76 @@ def compile_fp8fp4_gemm(
             _pair_loads = _fp8_pair_a_loads
             _two_pair_loads = _fp8_pair_a_loads + _fp8_pair_b_loads
 
+            def _emit_ks_occ2(ks, is_last_ks, scale_pair):
+                # Incremental low-liveness occ=2 emit (_fp8_wm_pairs x _fp8_wn_pairs
+                # 2x2 panels). Keep the SMALLER pair-dim resident (it is reused across
+                # the other), and STREAM the larger dim pair-by-pair with 1-ahead
+                # prefetch, so only ~(small_dim + 2) operand pairs are live at once.
+                # The earlier "load-all-then-burst" form kept every A and B fragment
+                # live simultaneously and spilled 76 VGPR in the steady-state loop
+                # (round-8); streaming keeps register pressure under the occ=2 budget
+                # while still issuing long WMMA runs. Per-WMMA dscnt waits are left to
+                # the backend (it tracks operand readiness); explicit wait-tuning is a
+                # later step once the spill is gone.
+                _n_panels = _fp8_wm_pairs * _fp8_wn_pairs
+
+                def _callbacks(pidx):
+                    if const_expr(is_last_ks and late_compute_callback is not None and pidx == _n_panels - 2):
+                        rocdl.sched_barrier(0)
+                        late_compute_callback()
+
+                def _callbacks_post(pidx):
+                    if const_expr(ks == 0 and mid_compute_callback is not None and pidx == 0):
+                        rocdl.sched_barrier(0)
+                        mid_compute_callback()
+
+                if const_expr(_fp8_wm_pairs >= _fp8_wn_pairs):
+                    # keep all B pairs resident; stream A one pair at a time
+                    # (just-in-time; at occ=2 the sibling wave hides the load latency,
+                    # so no per-wave prefetch-ahead is needed and liveness stays low).
+                    b_all = [load_b_pair(j, ks) for j in range_constexpr(_fp8_wn_pairs)]
+                    _pidx = 0
+                    for i in range_constexpr(_fp8_wm_pairs):
+                        if const_expr(i == 0 and ks == 0 and a0_prefetch is not None and len(a0_prefetch) == _fp8_pair_wm):
+                            a_cur = list(a0_prefetch)
+                        else:
+                            a_cur = load_a_pair(i, ks)
+                        for j in range_constexpr(_fp8_wn_pairs):
+                            _callbacks(_pidx)
+                            emit_panel_2x2(i, j, a_cur, b_all[j], scale_pair)
+                            _callbacks_post(_pidx)
+                            _pidx = _pidx + 1
+                else:
+                    # keep all A pairs resident; stream B one pair at a time
+                    if const_expr(ks == 0 and a0_prefetch is not None and len(a0_prefetch) == _fp8_pair_wm):
+                        a_all = [list(a0_prefetch)]
+                    else:
+                        a_all = [load_a_pair(0, ks)]
+                    for i in range_constexpr(_fp8_wm_pairs):
+                        if const_expr(i >= 1):
+                            a_all.append(load_a_pair(i, ks))
+                    _pidx = 0
+                    for j in range_constexpr(_fp8_wn_pairs):
+                        b_cur = load_b_pair(j, ks)
+                        for i in range_constexpr(_fp8_wm_pairs):
+                            _callbacks(_pidx)
+                            emit_panel_2x2(i, j, a_all[i], b_cur, scale_pair)
+                            _callbacks_post(_pidx)
+                            _pidx = _pidx + 1
+
+                if const_expr(is_last_ks and emit_filler is not None):
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
                 a_scales, b_scales = _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks)
                 scale_pair = (a_scales, b_scales)
+
+                if const_expr(_fp8_warp_pp):
+                    # occ=2 emit: low-liveness incremental panels (see _emit_ks_occ2).
+                    _emit_ks_occ2(ks, is_last_ks, scale_pair)
+                    continue
 
                 b0 = load_b_pair(0, ks)
                 if const_expr(ks == 0 and a0_prefetch is not None and len(a0_prefetch) == _fp8_pair_wm):
@@ -1810,6 +1896,17 @@ def compile_fp8fp4_gemm(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_fp8_deep_pipeline():
+            if const_expr(_fp8_warp_pp):
+                # Clean-burst sched hint matching _emit_ks_occ2: all LDS reads, then
+                # the full uninterrupted WMMA burst.
+                _occ2_loads = _fp8_scale_loads + _fp8_wn_pairs * _fp8_pair_b_loads + _fp8_wm_pairs * _fp8_pair_a_loads
+                _occ2_wmma = _fp8_wm_pairs * _fp8_wn_pairs * _fp8_pair_wm * _fp8_pair_wn
+                for _ks in range_constexpr(k_wmma_steps):
+                    rocdl.sched_dsrd(_occ2_loads)
+                    rocdl.sched_mfma(_occ2_wmma)
+                rocdl.sched_barrier(0)
+                return
+
             def _sched_panel_2x2(prefetch_loads=0):
                 if const_expr(prefetch_loads > 0):
                     rocdl.sched_mfma(_fp8_pair_wn)
