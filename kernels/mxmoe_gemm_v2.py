@@ -233,9 +233,9 @@ def gemm1_body_v2(
     wave,
     i32_ntok,
     i32_total_m_blocks,
+    i32_inter,
     *,
     K,
-    INTER,
     interleave,
     b_nontemporal,
     a_dtype,
@@ -258,12 +258,14 @@ def gemm1_body_v2(
     K_TILES_TOTAL = K // BK
     kUnroll = K_TILES_TOTAL - kStages
     kAS_per_chunk_dw = kc * 64
-    kBS_stride_n0_dw = kc * 64
-    N_OUT = 2 * INTER
-    kBS_per_expert_dw = (N_OUT // 16 // 2) * kBS_stride_n0_dw
-    NUM_N_BLOCKS = N_OUT // 256
-    OUT_AS_PER_CHUNK_DW = ((INTER // 32) // 4 // 2) * 64
-    K_G2_BYTES = INTER // out_pack  # output intermediate row stride (fp4 INTER/2, fp8 INTER)
+    kBS_stride_n0_dw = kc * 64  # hidden-K-derived (compile-time)
+    # INTER (inter_dim) is the gemm1 N-output dim; runtime via i32_inter (no K-loop dependency).
+    INTER_rt = fx.Int32(i32_inter)
+    N_OUT = INTER_rt * fx.Int32(2)
+    kBS_per_expert_dw = (N_OUT // fx.Int32(32)) * fx.Int32(kBS_stride_n0_dw)  # (N_OUT//16//2)*stride
+    NUM_N_BLOCKS = N_OUT // fx.Int32(256)
+    OUT_AS_PER_CHUNK_DW = (INTER_rt // fx.Int32(256)) * fx.Int32(64)  # ((INTER//32)//4//2)*64
+    K_G2_BYTES = INTER_rt // fx.Int32(out_pack)  # output row stride (fp4 INTER/2, fp8 INTER)
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
     n_block_idx = bx_i32 % NUM_N_BLOCKS
@@ -297,7 +299,7 @@ def gemm1_body_v2(
         np_list = [mni_base, mni_base + 1]
     else:
         np_gate = n_block_idx * (BN // 64) + wave
-        np_list = [np_gate, np_gate + N_OUT // 64]
+        np_list = [np_gate, np_gate + N_OUT // fx.Int32(64)]
 
     # A-gather global->LDS DMA: per-lane src (no fold); aq_rsrc bounds make OOB padded rows load 0.
     a_gather_atom = lds_dma_atom_128()
@@ -377,7 +379,7 @@ def gemm1_body_v2(
     b_catom = b_copy_atom(b_nontemporal)
     bs_copy_atom = bscale_copy_atom()
 
-    N0_HALF = N_OUT // 32  # separate-mode gate/up column split
+    N0_HALF = N_OUT // fx.Int32(32)  # separate-mode gate/up column split
 
     # B-load view per j-tile; gate mode only changes which N-row `col` maps to.
     def make_bq_view_for_jtile(j):

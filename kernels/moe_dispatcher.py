@@ -48,7 +48,6 @@ def compile_gemm1_a4w4_port(
     use_nt=True,
     inline_quant=False,
     D_HIDDEN=H_DEFAULT,
-    D_INTER=INTER_DEFAULT,
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
@@ -64,19 +63,17 @@ def compile_gemm1_a4w4_port(
     if out_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"out_dtype must be 'fp4' or 'fp8', got {out_dtype!r}")
 
-    K, INTER = D_HIDDEN, D_INTER
+    K = D_HIDDEN  # contraction (compile-time); inter_dim (N-output) is the runtime i32_inter arg
     assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
-    N_OUT = 2 * INTER
-    assert N_OUT % BN == 0, f"2*D_INTER (N_OUT) must be a multiple of {BN}, got {N_OUT}"
 
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A)  # K_TILES_TOTAL
+    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A)  # K_TILES_TOTAL (inter-independent)
 
     gu_tag = "il" if interleave else "sep"
     bnt_tag = "nt" if b_nontemporal else "cached"
     a_tag = "a8" if a_dtype == "fp8" else "a4"
     o_tag = "o8" if out_dtype == "fp8" else "o4"
-    name_suffix = f"h{K}_i{INTER}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
+    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
 
     @fx.struct
     class SharedStorage:
@@ -92,6 +89,7 @@ def compile_gemm1_a4w4_port(
         arg_cumsum: fx.Int64,
         arg_sti: fx.Int64,
         i32_ntok: fx.Int32,
+        i32_inter: fx.Int32,
         arg_aqout: fx.Int64,
         arg_ascaleout: fx.Int64,
         arg_hidden: fx.Int64,
@@ -106,7 +104,8 @@ def compile_gemm1_a4w4_port(
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
         total_m_blocks = cumsum0 // fx.Int32(BM)
-        bound = total_m_blocks * fx.Int32(N_OUT // 256)  # * NUM_N_BLOCKS
+        num_n_blocks = (fx.Int32(i32_inter) * fx.Int32(2)) // fx.Int32(256)  # NUM_N_BLOCKS = N_OUT//256
+        bound = total_m_blocks * num_n_blocks
         if fx.Int32(bx_i32) < bound:
             gemm1_body_v2(
                 lds_base_i32,
@@ -123,8 +122,8 @@ def compile_gemm1_a4w4_port(
                 wave,
                 i32_ntok,
                 total_m_blocks,
+                i32_inter,
                 K=K,
-                INTER=INTER,
                 interleave=interleave,
                 b_nontemporal=b_nontemporal,
                 a_dtype=a_dtype,
@@ -142,6 +141,7 @@ def compile_gemm1_a4w4_port(
         arg_sti: fx.Int64,
         i32_ntok: fx.Int32,
         i32_grid: fx.Int32,
+        i32_inter: fx.Int32,
         arg_aqout: fx.Int64,
         arg_ascaleout: fx.Int64,
         arg_hidden: fx.Int64,
@@ -157,6 +157,7 @@ def compile_gemm1_a4w4_port(
             arg_cumsum,
             arg_sti,
             i32_ntok,
+            i32_inter,
             arg_aqout,
             arg_ascaleout,
             arg_hidden,
@@ -323,10 +324,10 @@ G1_CACHE = {}
 G2_CACHE = {}
 
 
-def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out_dtype):
-    # NE/topk are host-only (NE: gemm1_grid active-expert cap; topk: grid sizing); neither enters the
-    # compiled kernel, so neither is a cache-key dim.
-    key = (BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out_dtype)
+def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype):
+    # inter_dim (gemm1 N-output) is a runtime arg; NE/topk are host-only (NE: gemm1_grid active-expert
+    # cap; topk: grid sizing). None of the three enters the compiled kernel, so none is a cache-key dim.
+    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
@@ -334,7 +335,6 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out
             use_nt=use_nt,
             inline_quant=inline_quant,
             D_HIDDEN=D_HIDDEN,
-            D_INTER=D_INTER,
             interleave=interleave,
             a_dtype=a_dtype,
             out_dtype=out_dtype,
@@ -390,7 +390,7 @@ def mxfp4_moe_gemm1(
     """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller."""
     import torch
 
-    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out_dtype)
+    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype)
     grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
     run_compiled(
         launch,
@@ -403,6 +403,7 @@ def mxfp4_moe_gemm1(
         sorted_token_ids.data_ptr(),
         n_tokens,
         grid,
+        D_INTER,
         inter_sorted_quant.data_ptr(),
         inter_sorted_shuffled_scale.data_ptr(),
         hidden_states.data_ptr(),
