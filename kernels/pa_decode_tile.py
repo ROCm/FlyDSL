@@ -196,8 +196,6 @@ def compile_pa_decode_tile(
         v_scale_f = fx.Float32(value_scale)
         NEG_INF = fx.Float32(float("-inf"))
         ZERO_F = fx.Float32(0.0)
-        # float iota over a warp's token slice (float compares avoid int-signedness issues)
-        iota_w = Vec.from_elements([arith.constant(float(c), type=T.f32) for c in range_constexpr(TOK_PER_WARP)])
 
         # ── LDS views ──
         # One i8 blob carved into typed views via byte-offset pointers.  The
@@ -395,19 +393,9 @@ def compile_pa_decode_tile(
             frag_S.fill(0.0)
             fx.gemm(tiled_mma_qk, frag_S, frag_Q, frag_K, frag_S)
 
-            # softmax bookkeeping shared by the max reduction and phase 2.
-            # lane l (<16) of warp w owns query row l, token cols [w*TPW : +TPW].
+            # softmax bookkeeping.  warp w owns query-row token cols [w*TPW : +TPW].
             col0 = warp * arith.constant(TOK_PER_WARP, type=T.i32)
             n_valid_loc = (context_len - tok0 - col0).to(fx.Float32)  # valid cols in this warp's slice
-            mask = iota_w < Vec.from_elements([n_valid_loc], dtype=fx.Float32).broadcast_to(TOK_PER_WARP)
-            neg_inf_w = Vec.filled(TOK_PER_WARP, float("-inf"), fx.Float32)
-            # byte offset of this warp's score / prob slice for query row = lane
-            s_slice_off = arith.constant(sS_off, type=T.i32) + (
-                lane * arith.constant(TILE_TOK, type=T.i32) + col0
-            ) * arith.constant(4, type=T.i32)
-            p_slice_off = arith.constant(sP_off, type=T.i32) + (
-                lane * arith.constant(TILE_TOK, type=T.i32) + col0
-            ) * arith.constant(1, type=T.i32)
 
             # ---- register-resident per-warp max (DPP), no score read-back ----
             # Probed 4-warp C-fragment layout: vec index v of lane L (warp w) holds
@@ -448,23 +436,35 @@ def compile_pa_decode_tile(
             fx.copy(copy_c, thr_copy_s.retile(frag_S), thr_copy_s.partition_D(sS_v), pred=None)
             gpu.barrier()
 
-            # phase 2: global max -> exp -> per-warp local sum, write fp8 P slice.
-            # P (in [0,1]) is quantized to fp8 by *FP8_MAX (dequant 1/FP8_MAX folds
-            # into the epilogue).  The local sum uses the f32 probs, so the softmax
-            # denominator stays accurate.
-            if lane < arith.constant(M, type=T.i32):
-                row_scale = scale_qk * _ld1(sQscale_off, lane)
-                m_old = _ld1(sM_off, lane)
-                tile_max = _ld_lw_row(sLmax_off, lane).reduce(ReductionOp.MAX)
-                m_new = m_old.maximumf(tile_max)
-                s_w = _view(s_slice_off, fx.Float32, fx.make_layout(TOK_PER_WARP, 1), 4).load() * row_scale
-                s_w = mask.select(s_w, neg_inf_w)
-                p_w = (s_w - Vec.from_elements([m_new], dtype=fx.Float32).broadcast_to(TOK_PER_WARP)).exp2()
-                _st_words(p_slice_off, _f32_to_fp8_words(p_w * Vec.filled(TOK_PER_WARP, FP8_MAX, fx.Float32)))
-                _st_lw(sLsum_off, lane, warp, p_w.reduce(ReductionOp.ADD))
+            # phase 2 (distributed over all 64 lanes: 4 lanes/row × 16 tokens each
+            # instead of one row-owner doing 64).  global max -> exp -> fp8 P pack;
+            # the 16-token partial sums are combined across the 4 sub-lanes by
+            # shuffle_xor(16,32) so the row sum matches the row-owner result.
+            # P (in [0,1]) quantized to fp8 by *FP8_MAX (1/FP8_MAX folds into epilogue).
+            row2 = lane - (lane // c16) * c16  # query row (lane % 16)
+            sub2 = lane // c16  # token sub-group 0..3 within this warp's 64
+            sub_tok0 = sub2 * c16  # token offset within the warp slice
+            row_scale = scale_qk * _ld1(sQscale_off, row2)
+            m_old = _ld1(sM_off, row2)
+            m_new = m_old.maximumf(_ld_lw_row(sLmax_off, row2).reduce(ReductionOp.MAX))
+            base2 = row2 * arith.constant(TILE_TOK, type=T.i32) + col0 + sub_tok0
+            s_off2 = arith.constant(sS_off, type=T.i32) + base2 * arith.constant(4, type=T.i32)
+            p_off2 = arith.constant(sP_off, type=T.i32) + base2 * arith.constant(1, type=T.i32)
+            iota16 = Vec.from_elements([arith.constant(float(i), type=T.f32) for i in range_constexpr(16)])
+            nvalid16 = n_valid_loc - fx.Int32(sub_tok0).to(fx.Float32)
+            mask16 = iota16 < Vec.from_elements([nvalid16], dtype=fx.Float32).broadcast_to(16)
+            s16 = _view(s_off2, fx.Float32, fx.make_layout(16, 1), 4).load() * row_scale
+            s16 = mask16.select(s16, Vec.filled(16, float("-inf"), fx.Float32))
+            p16 = (s16 - Vec.from_elements([m_new], dtype=fx.Float32).broadcast_to(16)).exp2()
+            _st_words(p_off2, _f32_to_fp8_words(p16 * Vec.filled(16, FP8_MAX, fx.Float32)))
+            psum = p16.reduce(ReductionOp.ADD)
+            for sh in (16, 32):
+                psum = psum + psum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+            if lane < arith.constant(M, type=T.i32):  # sub-lane 0 writes the combined row state
+                _st_lw(sLsum_off, row2, warp, psum)
                 if warp == arith.constant(0, type=T.i32):
-                    _st1(sM_off, lane, m_new)
-                    _st1(sCorr_off, lane, Vec.from_elements([m_old - m_new], dtype=fx.Float32).exp2()[0])
+                    _st1(sM_off, row2, m_new)
+                    _st1(sCorr_off, row2, Vec.from_elements([m_old - m_new], dtype=fx.Float32).exp2()[0])
             gpu.barrier()
 
             # phase 3: merge per-warp sums into the running denominator
