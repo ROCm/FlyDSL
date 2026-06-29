@@ -48,7 +48,6 @@ def compile_gemm1_a4w4_port(
     inline_quant=False,
     D_HIDDEN=H_DEFAULT,
     D_INTER=INTER_DEFAULT,
-    NE=NE,
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
@@ -64,7 +63,7 @@ def compile_gemm1_a4w4_port(
     if out_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"out_dtype must be 'fp4' or 'fp8', got {out_dtype!r}")
 
-    K, INTER, NE = D_HIDDEN, D_INTER, NE
+    K, INTER = D_HIDDEN, D_INTER
     assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
     N_OUT = 2 * INTER
     assert N_OUT % BN == 0, f"2*D_INTER (N_OUT) must be a multiple of {BN}, got {N_OUT}"
@@ -76,7 +75,7 @@ def compile_gemm1_a4w4_port(
     bnt_tag = "nt" if b_nontemporal else "cached"
     a_tag = "a8" if a_dtype == "fp8" else "a4"
     o_tag = "o8" if out_dtype == "fp8" else "o4"
-    name_suffix = f"h{K}_i{INTER}_ne{NE}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
+    name_suffix = f"h{K}_i{INTER}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
 
     @fx.struct
     class SharedStorage:
@@ -125,7 +124,6 @@ def compile_gemm1_a4w4_port(
                 total_m_blocks,
                 K=K,
                 INTER=INTER,
-                NE=NE,
                 interleave=interleave,
                 b_nontemporal=b_nontemporal,
                 a_dtype=a_dtype,
@@ -170,7 +168,6 @@ def compile_gemm1_a4w4_port(
 def compile_gemm2_a4w4_port(
     BM=32,
     use_nt=False,
-    NE=NE,
     N_OUT=H_DEFAULT,
     MAX_M=MAX_M,
     epilog="atomic",
@@ -202,7 +199,7 @@ def compile_gemm2_a4w4_port(
     num_n_blocks = N_OUT // 256
 
     atag = "_a8" if is_f8 else ""
-    tag = f"ne{NE}_h{N_OUT}_i{K}_bm{BM}{'_nt' if use_nt else ''}_atomic{atag}_v2"
+    tag = f"h{N_OUT}_i{K}_bm{BM}{'_nt' if use_nt else ''}_atomic{atag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -279,7 +276,6 @@ def compile_gemm2_a4w4_port(
                 aq_rsrc,
                 arg_aq,
                 use_nt=use_nt,
-                NE=NE,
                 N_OUT=N_OUT,
                 D_INTER=K,
                 aStages=aStages,
@@ -326,9 +322,10 @@ G1_CACHE = {}
 G2_CACHE = {}
 
 
-def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype):
-    # topk is host-grid-only (gemm1_grid); it does not enter the compiled kernel, so it is not a cache-key dim.
-    key = (BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, interleave, a_dtype, out_dtype)
+def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out_dtype):
+    # NE/topk are host-only (NE: gemm1_grid active-expert cap; topk: grid sizing); neither enters the
+    # compiled kernel, so neither is a cache-key dim.
+    key = (BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out_dtype)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
@@ -337,7 +334,6 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_
             inline_quant=inline_quant,
             D_HIDDEN=D_HIDDEN,
             D_INTER=D_INTER,
-            NE=NE,
             interleave=interleave,
             a_dtype=a_dtype,
             out_dtype=out_dtype,
@@ -346,14 +342,14 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_
     return launch
 
 
-def get_g2(BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype):
-    key = (BM, use_nt, NE, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype)
+def get_g2(BM, use_nt, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype):
+    # NE does not enter the compiled gemm2 kernel; not a cache-key dim.
+    key = (BM, use_nt, D_HIDDEN, epilog, D_INTER, D_INTER_REAL, a_dtype)
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
             BM=BM,
             use_nt=use_nt,
-            NE=NE,
             N_OUT=D_HIDDEN,
             epilog=epilog,
             D_INTER=D_INTER,
@@ -392,7 +388,7 @@ def mxfp4_moe_gemm1(
     """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller."""
     import torch
 
-    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, NE, topk, interleave, a_dtype, out_dtype)
+    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, D_INTER, interleave, a_dtype, out_dtype)
     grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
     run_compiled(
         launch,
@@ -439,7 +435,7 @@ def mxfp4_moe_gemm2(
     """Stage-2 down-proj gemm (atomic bf16 epilog): weighted atomic.fadd into pre-zeroed out (opus-sort only)."""
     import torch
 
-    launch = get_g2(BM, use_nt, NE, D_HIDDEN, "atomic", D_INTER, D_INTER_REAL, a_dtype)
+    launch = get_g2(BM, use_nt, D_HIDDEN, "atomic", D_INTER, D_INTER_REAL, a_dtype)
     max_m_blocks = (max_sorted + BM - 1) // BM
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
     run_compiled(
