@@ -2539,9 +2539,56 @@ class MemRefLoadVecOpLowering : public OpRewritePattern<MemRefLoadVecOp> {
 public:
   using OpRewritePattern<MemRefLoadVecOp>::OpRewritePattern;
 
+  LogicalResult lowerCoordTensor1D(MemRefLoadVecOp op, CoordTensorType coordTensorTy,
+                                   PatternRewriter &rewriter) const {
+    Location loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+
+    auto resVecTy = dyn_cast<VectorType>(op.getResult().getType());
+    if (!resVecTy)
+      return failure();
+
+    // Only a plain LinearLayout is supported, matching the MemRefType path; ComposedLayout
+    // (swizzle/offset) is not handled yet.
+    auto linearLayout = dyn_cast<LayoutAttr>(coordTensorTy.getLayout());
+    if (!linearLayout)
+      return failure();
+
+    IntTupleBuilder<IntTupleAttr> attrBuilder(ctx);
+
+    IntTupleAttr shapeAttr = linearLayout.getShape();
+    if (!shapeAttr.isStatic())
+      return failure();
+    int64_t size = resVecTy.getNumElements();
+
+    auto elemTy = dyn_cast<IntegerType>(resVecTy.getElementType());
+    if (!elemTy)
+      return failure();
+
+    Value result = arith::ConstantOp::create(rewriter, loc, rewriter.getZeroAttr(resVecTy));
+    for (int64_t i = 0; i < size; ++i) {
+      Value coord = MakeIntTupleOp::create(
+          rewriter, loc, IntTupleType::get(attrBuilder.materializeConstantLeaf(i)), ValueRange{});
+      Value idx = MemRefLoadOp::create(rewriter, loc, op.getMemref(), coord);
+      Value scalar = GetScalarOp::create(rewriter, loc, idx);
+      auto scalarTy = cast<IntegerType>(scalar.getType());
+      if (scalarTy.getWidth() < elemTy.getWidth())
+        scalar = arith::ExtSIOp::create(rewriter, loc, elemTy, scalar).getResult();
+      else if (scalarTy.getWidth() > elemTy.getWidth())
+        scalar = arith::TruncIOp::create(rewriter, loc, elemTy, scalar).getResult();
+      result = vector::InsertOp::create(rewriter, loc, scalar, result, i);
+    }
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+
   LogicalResult matchAndRewrite(MemRefLoadVecOp op, PatternRewriter &rewriter) const override {
     Location loc = op.getLoc();
     auto *ctx = rewriter.getContext();
+
+    if (auto coordTensorTy = dyn_cast<CoordTensorType>(op.getMemref().getType()))
+      return lowerCoordTensor1D(op, coordTensorTy, rewriter);
+
     auto memrefTy = dyn_cast<fly::MemRefType>(op.getMemref().getType());
     if (!memrefTy)
       return failure();

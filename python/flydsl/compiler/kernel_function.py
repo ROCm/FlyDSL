@@ -12,7 +12,7 @@ from .._mlir.dialects import arith, gpu
 from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.typing import Constexpr
 from .ast_rewriter import ASTRewriter
-from .diagnostics import install_excepthook
+from .diagnostics import install_excepthook, warn_annotation_value_mismatch, warn_invalid_annotations
 from .jit_argument import is_type_param_annotation, resolve_signature
 from .mlir_utils import convert_to_mlir_attr
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -455,6 +455,9 @@ class KernelFunction:
         else:
             self._sig = full_sig
 
+        # Definition-time annotation validity check (once per function, signature-only).
+        warn_invalid_annotations(self._sig, context="@kernel")
+
     @classmethod
     def get_current(cls) -> Optional["KernelFunction"]:
         return cls._current
@@ -485,11 +488,17 @@ class KernelFunction:
         for param_name, value in bound.arguments.items():
             param = sig.parameters[param_name]
             annotation = param.annotation
-            if annotation is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(annotation):
-                constexpr_values[param_name] = value
-            elif annotation is not inspect.Parameter.empty and is_type_param_annotation(annotation):
+            if annotation is not inspect.Parameter.empty and (
+                Constexpr.is_constexpr_annotation(annotation) or is_type_param_annotation(annotation)
+            ):
                 constexpr_values[param_name] = value
             else:
+                if (
+                    annotation is not inspect.Parameter.empty
+                    and isinstance(annotation, type)
+                    and not isinstance(value, annotation)
+                ):
+                    warn_annotation_value_mismatch(param_name, annotation, type(value), context="@kernel")
                 param_names.append(param_name)
                 param_values.append(value)
 

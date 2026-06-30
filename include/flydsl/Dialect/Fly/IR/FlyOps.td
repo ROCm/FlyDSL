@@ -478,7 +478,7 @@ def Fly_MemRefAllocaOp : Fly_Op<"memref.alloca", []> {
   let results = (outs Fly_MemRef:$result);
 }
 def Fly_MemRefLoadVecOp : Fly_Op<"memref.load_vec", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_MemRef:$memref); 
+  let arguments = (ins Fly_TensorLikeType:$memref);
   let results = (outs AnyType:$result);
 }
 def Fly_MemRefStoreVecOp : Fly_Op<"memref.store_vec", []> {

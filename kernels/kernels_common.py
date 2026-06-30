@@ -53,7 +53,7 @@ def validate_moe_dtypes(a_dtype: str, b_dtype: str) -> None:
 def dtype_to_elem_type(dtype_str: str):
     """Map a dtype string to its FlyDSL numeric type.
 
-    Supported: 'f32', 'f16', 'bf16'.
+    Supported: 'f32', 'f16', 'bf16', 'fp8' (OCP e4m3fn, not the fnuz variant).
     """
     if dtype_str == "f32":
         return fx.Float32
@@ -61,7 +61,9 @@ def dtype_to_elem_type(dtype_str: str):
         return fx.Float16
     if dtype_str == "bf16":
         return fx.BFloat16
-    raise ValueError(f"unsupported dtype: {dtype_str!r} (expected 'f32', 'f16', or 'bf16')")
+    if dtype_str == "fp8":
+        return fx.Float8E4M3FN
+    raise ValueError(f"unsupported dtype: {dtype_str!r} (expected 'f32', 'f16', 'bf16', or 'fp8')")
 
 
 def get_warp_size(arch=None):

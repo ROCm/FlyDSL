@@ -14,7 +14,7 @@ the 8-buffer LDS pipeline ping-pong are kept as direct arithmetic to
 preserve the original kernel's interleaved-cluster scheduling.
 
 Optional B preshuffle uses the same on-disk layout as
-``preshuffle_gemm_v2`` / ``shuffle_weight((16, 16))``.
+``preshuffle_gemm`` / ``shuffle_weight((16, 16))``.
 """
 
 import flydsl.compiler as flyc

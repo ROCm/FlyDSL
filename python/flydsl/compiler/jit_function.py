@@ -26,7 +26,14 @@ from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
-from .diagnostics import DSLCompileError, diag_records_from_mlir_error, dsl_ir_diagnostics, install_excepthook
+from .diagnostics import (
+    DSLCompileError,
+    diag_records_from_mlir_error,
+    dsl_ir_diagnostics,
+    install_excepthook,
+    warn_annotation_value_mismatch,
+    warn_invalid_annotations,
+)
 from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
 from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
@@ -1212,6 +1219,9 @@ class JitFunction:
             self._sig = full_sig
         self._backend_target = get_backend().target  # frozen dataclass, stable
 
+        # Definition-time annotation validity check (once per function, signature-only).
+        warn_invalid_annotations(self._sig, context="@jit")
+
     def _ensure_cache_manager(self, owner_cls=None):
         if self.manager_key is not None and self._manager_owner_cls is owner_cls:
             return
@@ -1432,6 +1442,15 @@ class JitFunction:
             else:
                 with _create_mlir_context() as ctx, _hints_ctx:
                     param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+                    # Per-call value/annotation consistency check.
+                    for pname, dsl_type in zip(param_names, dsl_types):
+                        ann = sig.parameters[pname].annotation
+                        if (
+                            ann is not inspect.Parameter.empty
+                            and isinstance(ann, type)
+                            and not issubclass(dsl_type, ann)
+                        ):
+                            warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
                     has_user_stream = _ensure_stream_arg(jit_args)
                     ir_types = get_ir_types(jit_args)
                     loc = func_def_location(self.func, ctx)

@@ -10,7 +10,6 @@ import functools
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr import math as fly_math
@@ -18,6 +17,16 @@ from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels import dpp_utils
+from kernels.utils import (
+    cdiv,
+    global_load_i32,
+    global_load_i64x2,
+    global_ptr_from_addr,
+    rcp_f32,
+    udiv_const,
+    unflatten_k,
+    urem_const,
+)
 
 # ── Kernel geometry constants ────────────────────────────────────────
 KV_BLOCK_SIZE = 1024  # physical page size (matches SP3 kBlockSize)
@@ -53,45 +62,12 @@ LOG2E = 1.4426950408889634
 TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
 
 
-def _cdiv(numer: int, denom: int) -> int:
-    return (numer + denom - 1) // denom
-
-
 def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
-    return _cdiv(query_length * query_group_size, MFMA_N)
+    return cdiv(query_length * query_group_size, MFMA_N)
 
 
 def _get_sw_mtp_pair_offset(mtp_group_idx: int, mtp_subgroup_idx: int = 0) -> int:
     return mtp_group_idx * MFMA_N + mtp_subgroup_idx * MFMA_N
-
-
-def _pow2_shift(value: int) -> int:
-    assert value > 0 and (value & (value - 1)) == 0
-    return value.bit_length() - 1
-
-
-def _is_pow2(value: int) -> bool:
-    return value > 0 and (value & (value - 1)) == 0
-
-
-def _udiv_pow2(value, divisor: int):
-    return value >> fx.Int32(_pow2_shift(divisor))
-
-
-def _urem_pow2(value, divisor: int):
-    return value & fx.Int32(divisor - 1)
-
-
-def _udiv_const(value, divisor: int):
-    if const_expr(_is_pow2(divisor)):
-        return _udiv_pow2(value, divisor)
-    return value // fx.Int32(divisor)
-
-
-def _urem_const(value, divisor: int):
-    if const_expr(_is_pow2(divisor)):
-        return _urem_pow2(value, divisor)
-    return value % fx.Int32(divisor)
 
 
 def _compute_block_base_dw_i64(phys_block, block_stride, head_offset):
@@ -99,29 +75,6 @@ def _compute_block_base_dw_i64(phys_block, block_stride, head_offset):
     block_stride_i64 = fx.Int64(block_stride)
     head_offset_i64 = fx.Int64(head_offset)
     return (phys_block_i64 * block_stride_i64 + head_offset_i64) >> fx.Int64(2)
-
-
-def _extract_global_ptr(tensor):
-    from flydsl._mlir.dialects import fly as _fly
-
-    raw = tensor.ir_value() if hasattr(tensor, "ir_value") and not isinstance(tensor, ir.Value) else tensor
-    ptr_type = ir.Type.parse("!llvm.ptr<1>")
-    return _fly.extract_aligned_pointer_as_index(ptr_type, raw)
-
-
-def _global_load_i64x2(global_ptr, byte_offset_i64):
-    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset_i64), elem_type=T.i8)
-    return llvm.LoadOp(T.i64x2, ptr, alignment=16).result
-
-
-def _global_load_i32(global_ptr, elem_offset_i32):
-    byte_offset_i64 = fx.Int64(elem_offset_i32) * fx.Int64(4)
-    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=byte_offset_i64, elem_type=T.i8)
-    return llvm.LoadOp(T.i32, ptr, alignment=4).result
-
-
-def _rcp_f32(value):
-    return rocdl.rcp(T.f32, value)
 
 
 def _exp2_f32_fast(value):
@@ -147,7 +100,7 @@ def _load_k_flat(
         kbo_dw = kbo * c_tok_stride_dw
         for qkhe in range_constexpr(qkhe_loop):
             ka_dw = k_block_base_dw_i64 + fx.Int64(kbo_dw + k_he_off_dw[qkhe])
-            k2 = _global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4))
+            k2 = global_load_i64x2(k_global_ptr, ka_dw * fx.Int64(4))
             if const_expr(sched_vmem_after_load):
                 rocdl.sched_barrier(rocdl.mask_vmem_rd)
             k2_words = fx.Vector(k2)
@@ -155,10 +108,6 @@ def _load_k_flat(
             k_flat.append(k2_words[1])
 
     return k_flat
-
-
-def _unflatten_k(k_flat, qkhe_loop: int = 2):
-    return [[k_flat[td * (qkhe_loop * 2) + j] for j in range(qkhe_loop * 2)] for td in range(TLOOP)]
 
 
 def _build_pa_thread_invariants(
@@ -249,24 +198,24 @@ def _compute_sw_mtp_group_state(
         lane_pair = lane_pair_raw
     else:
         lane_pair = arith.select(lane_pair_raw < c_total_pairs, lane_pair_raw, c_pair_max)
-    qi_raw = _udiv_const(lane_pair, query_group_size)
+    qi_raw = udiv_const(lane_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_val = qi_raw
     else:
         qi_val = arith.select(qi_raw < c_ql_m1, qi_raw, c_ql_m1)
-    qhi_pos = _urem_const(lane_pair, query_group_size)
+    qhi_pos = urem_const(lane_pair, query_group_size)
 
     lqh_pair_raw = local_qhead_idx + fx.Int32(g_off)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lqh_pair = lqh_pair_raw
     else:
         lqh_pair = arith.select(lqh_pair_raw < c_total_pairs, lqh_pair_raw, c_pair_max)
-    lqi_raw = _udiv_const(lqh_pair, query_group_size)
+    lqi_raw = udiv_const(lqh_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_for_q = lqi_raw
     else:
         qi_for_q = arith.select(lqi_raw < c_ql_m1, lqi_raw, c_ql_m1)
-    local_qhead_idx_for_q = _urem_const(lqh_pair, query_group_size)
+    local_qhead_idx_for_q = urem_const(lqh_pair, query_group_size)
     return qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q
 
 
@@ -356,7 +305,7 @@ def _finish_q_fragments(
             c_one_f,
         )
     )
-    inv_query_scale = _rcp_f32(query_scale_lane)
+    inv_query_scale = rcp_f32(query_scale_lane)
     q_words = []
     for q_f32 in q_f32_chunks:
         p = q_f32 * inv_query_scale
@@ -465,7 +414,7 @@ def _finish_sw_mtp_subgroup_q_fragments(
 def _normalize_pa_output(running_sum, outs, zero_f, vhe_loop: int = 2):
     one_f = fx.Float32(1.0).ir_value()
     safe_sum = arith.select(running_sum > zero_f, running_sum, one_f)
-    inv_sum = _rcp_f32(safe_sum)
+    inv_sum = rcp_f32(safe_sum)
     normalized_outs = []
     for vhe in range_constexpr(vhe_loop):
         normalized_outs.append(outs[vhe] * vector.broadcast(T.f32x4, inv_sum))
@@ -580,7 +529,7 @@ def _make_pa_phase_helpers(
                 else:
                     va_dw_delta = vhead_elem_dw[vhe] + (v_token_in_block >> fx.Int32(2))
                 va_byte = (v_block_base_dw + fx.Int64(va_dw_delta)) * fx.Int64(4)
-                v_i64x2 = _global_load_i64x2(v_global_ptr, va_byte)
+                v_i64x2 = global_load_i64x2(v_global_ptr, va_byte)
                 rocdl.sched_barrier(rocdl.mask_vmem_rd)
                 vhe_data.append(v_i64x2)
             v_results.append(vhe_data)
@@ -764,7 +713,7 @@ def _make_pa_phase_helpers(
                 v_max_global = v_max_global.maximumf(w_vmax)
             v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
-            norm_factor = _rcp_f32(v_max_safe_scaled)
+            norm_factor = rcp_f32(v_max_safe_scaled)
             prob_scale = my_warp_rescale
             v_correction = v_max_scaled * part_to_new
             for td in range_constexpr(TLOOP):
@@ -837,7 +786,7 @@ def get_sw_max_context_partition_num(
     if sliding_window <= 0:
         return 0
     window_token_count = sliding_window + query_length
-    return _cdiv(window_token_count - 1, context_partition_size) + 1
+    return cdiv(window_token_count - 1, context_partition_size) + 1
 
 
 @functools.lru_cache(maxsize=256)
@@ -864,10 +813,11 @@ def compile_pa_decode_sw_reduce(
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
     def pa_decode_sw_reduce_kernel(
-        output_ptr: fx.Tensor,
-        exp_sums_ptr: fx.Tensor,
-        max_logits_ptr: fx.Tensor,
-        logits_ptr: fx.Tensor,
+        # Raw-pointer kernargs: bare i64 data_ptr() (strides are explicit args).
+        output_ptr: fx.Int64,
+        exp_sums_ptr: fx.Int64,
+        max_logits_ptr: fx.Int64,
+        logits_ptr: fx.Int64,
         stride_output_bs: Int32,
         stride_output_len: Int32,
         stride_output_kv_head: Int32,
@@ -892,10 +842,10 @@ def compile_pa_decode_sw_reduce(
             part_weights_lds = SmemPtr(smem_base, part_weights_off, T.f32, shape=(max_context_partition_num,))
             part_weights_lds.get()
 
-        out_rsrc = buffer_ops.create_buffer_resource(output_ptr, max_size=True)
-        es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
-        ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
-        logits_rsrc = buffer_ops.create_buffer_resource(logits_ptr, max_size=True)
+        out_rsrc = buffer_ops.create_buffer_resource_from_addr(output_ptr)
+        es_rsrc = buffer_ops.create_buffer_resource_from_addr(exp_sums_ptr)
+        ml_rsrc = buffer_ops.create_buffer_resource_from_addr(max_logits_ptr)
+        logits_rsrc = buffer_ops.create_buffer_resource_from_addr(logits_ptr)
 
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
@@ -1000,7 +950,7 @@ def compile_pa_decode_sw_reduce(
                 global_exp_sum,
                 c_one_f,
             )
-            inv_global_exp_sum = _rcp_f32(safe_global_exp_sum)
+            inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
             weight_local = scaled_sum * inv_global_exp_sum
             weight_local_i32 = arith.bitcast(T.i32, arith.unwrap(weight_local))
 
@@ -1070,7 +1020,7 @@ def compile_pa_decode_sw_reduce(
                 global_exp_sum,
                 c_one_f,
             )
-            inv_global_exp_sum = _rcp_f32(safe_global_exp_sum)
+            inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
 
             for chunk_base in range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
@@ -1112,8 +1062,8 @@ def compile_pa_decode_sw_reduce(
                 part_logits = fx.Float32(part_logits_bf16)
                 acc = acc + part_logits * weight
 
-        query_idx = _udiv_const(eqgs_idx, query_group_size)
-        group_idx = _urem_const(eqgs_idx, query_group_size)
+        query_idx = udiv_const(eqgs_idx, query_group_size)
+        group_idx = urem_const(eqgs_idx, query_group_size)
         out_off = (
             batch_idx * stride_output_bs
             + query_idx * stride_output_len
@@ -1131,10 +1081,10 @@ def compile_pa_decode_sw_reduce(
 
     @flyc.jit
     def launch_pa_decode_sw_reduce(
-        output,
-        exp_sums,
-        max_logits,
-        logits,
+        output: fx.Int64,
+        exp_sums: fx.Int64,
+        max_logits: fx.Int64,
+        logits: fx.Int64,
         stride_output_bs,
         stride_output_len,
         stride_output_kv_head,
@@ -1246,17 +1196,18 @@ def compile_pa_decode_sw(
 
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
     def pa_decode_sw_kernel(
-        exp_sums_ptr: fx.Tensor,  # [batch, kv_heads, max_parts, eqgs] f32
-        max_logits_ptr: fx.Tensor,  # [batch, kv_heads, max_parts, eqgs] f32
-        tmp_out_ptr: fx.Tensor,  # [batch, kv_heads, max_parts, eqgs, head_size] bf16
-        out_ptr: fx.Tensor,  # [batch, query_length, kv_heads, query_group_size, head_size] bf16
-        query_ptr: fx.Tensor,
-        key_cache_ptr: fx.Tensor,
-        value_cache_ptr: fx.Tensor,
-        block_tables_ptr: fx.Tensor,  # [batch, max_blocks_per_seq] i32
-        context_lengths_ptr: fx.Tensor,
-        key_scale_ptr: fx.Tensor,
-        value_scale_ptr: fx.Tensor,
+        # Raw-pointer kernargs: bare i64 data_ptr() (strides are explicit args).
+        exp_sums_ptr: fx.Int64,  # [batch, kv_heads, max_parts, eqgs] f32
+        max_logits_ptr: fx.Int64,  # [batch, kv_heads, max_parts, eqgs] f32
+        tmp_out_ptr: fx.Int64,  # [batch, kv_heads, max_parts, eqgs, head_size] bf16
+        out_ptr: fx.Int64,  # [batch, query_length, kv_heads, query_group_size, head_size] bf16
+        query_ptr: fx.Int64,
+        key_cache_ptr: fx.Int64,
+        value_cache_ptr: fx.Int64,
+        block_tables_ptr: fx.Int64,  # [batch, max_blocks_per_seq] i32
+        context_lengths_ptr: fx.Int64,
+        key_scale_ptr: fx.Int64,
+        value_scale_ptr: fx.Int64,
         stride_q_seq: Int32,
         stride_q_head: Int32,
         stride_k_block: Int32,
@@ -1281,26 +1232,26 @@ def compile_pa_decode_sw(
         tid = fx.Int32(gpu.thread_id("x"))
         batch_idx = fx.Int32(gpu.block_id("x"))
         grid_y = fx.Int32(gpu.block_id("y"))
-        kv_h = _udiv_const(grid_y, _mtp_groups)
-        mtp_group_from_grid = _urem_const(grid_y, _mtp_groups)
+        kv_h = udiv_const(grid_y, _mtp_groups)
+        mtp_group_from_grid = urem_const(grid_y, _mtp_groups)
         partition_idx = fx.Int32(gpu.block_id("z"))
-        cl_global_ptr = _extract_global_ptr(context_lengths_ptr)
-        context_len = _global_load_i32(cl_global_ptr, batch_idx)
+        cl_global_ptr = global_ptr_from_addr(context_lengths_ptr)
+        context_len = global_load_i32(cl_global_ptr, batch_idx)
         lane16id = tid & 15
         rowid = (tid >> 4) & 3
         warp_id = fx.Int32(tid >> fx.Int32(6))
 
-        q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
-        k_global_ptr = _extract_global_ptr(key_cache_ptr)
-        v_global_ptr = _extract_global_ptr(value_cache_ptr)
+        q_rsrc = buffer_ops.create_buffer_resource_from_addr(query_ptr)
+        k_global_ptr = global_ptr_from_addr(key_cache_ptr)
+        v_global_ptr = global_ptr_from_addr(value_cache_ptr)
 
-        bt_global_ptr = _extract_global_ptr(block_tables_ptr)
-        es_rsrc = buffer_ops.create_buffer_resource(exp_sums_ptr, max_size=True)
-        ml_rsrc = buffer_ops.create_buffer_resource(max_logits_ptr, max_size=True)
-        to_rsrc = buffer_ops.create_buffer_resource(tmp_out_ptr, max_size=True)
-        out_rsrc = buffer_ops.create_buffer_resource(out_ptr, max_size=True)
-        ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
-        vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
+        bt_global_ptr = global_ptr_from_addr(block_tables_ptr)
+        es_rsrc = buffer_ops.create_buffer_resource_from_addr(exp_sums_ptr)
+        ml_rsrc = buffer_ops.create_buffer_resource_from_addr(max_logits_ptr)
+        to_rsrc = buffer_ops.create_buffer_resource_from_addr(tmp_out_ptr)
+        out_rsrc = buffer_ops.create_buffer_resource_from_addr(out_ptr)
+        ks_rsrc = buffer_ops.create_buffer_resource_from_addr(key_scale_ptr)
+        vs_rsrc = buffer_ops.create_buffer_resource_from_addr(value_scale_ptr)
 
         q_scale_val = 1.0
         if const_expr(per_token_kv):
@@ -1516,7 +1467,7 @@ def compile_pa_decode_sw(
                 tile_token_offset_local = tile_block_split_idx * c_cps
                 tile_kv_seq_start = tile_seq_partition_idx * c_bs + tile_token_offset_local
                 tile_bt_off = batch_idx * stride_bt_seq + tile_seq_partition_idx
-                tile_phys_block = _global_load_i32(bt_global_ptr, tile_bt_off)
+                tile_phys_block = global_load_i32(bt_global_ptr, tile_bt_off)
                 return tile_token_offset_local, tile_kv_seq_start, tile_context_len, tile_phys_block
 
             def _load_tile(tile_metadata, tile_scale_scalars):
@@ -1541,7 +1492,7 @@ def compile_pa_decode_sw(
                 )
                 _store_vmax_warp(tile_kv_seq_start, seq_end=tile_context_len)
                 return (
-                    _unflatten_k(tile_k_flat, qkhe_loop=_QKHELOOP),
+                    unflatten_k(tile_k_flat, qkhe_loop=_QKHELOOP),
                     tile_v_ops,
                     tile_kv_seq_start,
                     tile_context_len,
@@ -1643,17 +1594,17 @@ def compile_pa_decode_sw(
 
     @flyc.jit
     def launch_pa_decode_sw(
-        es: fx.Tensor,
-        ml: fx.Tensor,
-        to: fx.Tensor,
-        out: fx.Tensor,
-        q: fx.Tensor,
-        kc: fx.Tensor,
-        vc: fx.Tensor,
-        bt: fx.Tensor,
-        cl: fx.Tensor,
-        ks: fx.Tensor,
-        vs: fx.Tensor,
+        es: fx.Int64,
+        ml: fx.Int64,
+        to: fx.Int64,
+        out: fx.Int64,
+        q: fx.Int64,
+        kc: fx.Int64,
+        vc: fx.Int64,
+        bt: fx.Int64,
+        cl: fx.Int64,
+        ks: fx.Int64,
+        vs: fx.Int64,
         s_q_seq: Int32,
         s_q_head: Int32,
         s_k_block: Int32,

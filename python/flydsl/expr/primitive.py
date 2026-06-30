@@ -1256,7 +1256,9 @@ def memref_alloca(memref_type, layout):
 def memref_load_vec(memref):
     from .typing import Vector
 
-    return Vector(fly.memref_load_vec(memref), memref.shape.to_py_value(), memref.dtype)
+    # A CoordTensor has no element type, so let Vector infer the dtype from the IR result type.
+    dtype = None if isinstance(memref.type, CoordTensorType) else memref.dtype
+    return Vector(fly.memref_load_vec(memref), memref.shape.unpack(), dtype)
 
 
 @dsl_loc_tracing
