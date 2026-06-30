@@ -135,7 +135,7 @@ def as_dsl_value(value, exemplar=None):
         ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
         if ctor is not None:
             try:
-                return ctor([value])
+                return ctor([value], exemplar)
             except Exception:
                 raise ValueError(f"failed to construct {type(exemplar)} from {value}")
 
@@ -580,7 +580,7 @@ class Constexpr:
         return result
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         if values:
             raise ValueError(f"{cls.__name__} expects 0 ir.Values, got {len(values)}")
         if not cls.is_specialized:
@@ -648,7 +648,7 @@ class BuiltinDslType(ir.Value):
         return f"{type(self).__name__}<{super().__str__()}>"
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         return cls(values[0])
 
     def __extract_to_ir_values__(self):
@@ -1249,7 +1249,7 @@ class Stream:
         return [(ctypes.c_void_p, fill)]
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         return Stream(values[0])
 
     def __extract_to_ir_values__(self):
@@ -1542,7 +1542,9 @@ class Vector(ArithValue):
         return [self]
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
+        if isinstance(exemplar, cls):
+            return cls(values[0], exemplar._shape, exemplar._dtype)
         return cls(values[0])
 
     def to(self, dtype: Type[Numeric]) -> "Vector":
@@ -1941,7 +1943,7 @@ class Array:
             return self._ptr_value
 
         @classmethod
-        def __construct_from_ir_values__(cls, values):
+        def __construct_from_ir_values__(cls, values, exemplar=None):
             if len(values) != 1:
                 raise ValueError(f"{cls.__name__} expects 1 ir.Value, got {len(values)}")
             return cls(values[0])
