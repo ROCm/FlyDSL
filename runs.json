@@ -1,1 +1,2334 @@
-{"schema":1,"updated":"2026-06-11T08:21:00Z","repo":"ROCm/FlyDSL","note":"Seed snapshot for first paint only \u2014 a single most-recent sample per series. Full history lives out-of-tree on the ci-dashboard-data branch, which the page fetches at runtime and always prefers.","runs":[{"run_id":27333023154,"pr":675,"commit":"ac01cd136d2a26a3c010b897a0e3aa2c85bfd3bc","branch":"ci/perf-dashboard","event":"pull_request","title":"ci: add CI performance dashboard at /ci-dashboard","status":"completed","conclusion":"action_required","url":"https://github.com/ROCm/FlyDSL/actions/runs/27333023154","created_at":"2026-06-11T08:07:30Z","updated_at":"2026-06-11T08:07:30Z","actor":"jhinpan","jobs":[]},{"run_id":27331783731,"pr":675,"commit":"70e322f25efed5ff3d54026d95fb8031869cbb84","branch":"ci/perf-dashboard","event":"pull_request","title":"ci: add CI performance dashboard at /ci-dashboard","status":"completed","conclusion":"action_required","url":"https://github.com/ROCm/FlyDSL/actions/runs/27331783731","created_at":"2026-06-11T07:43:15Z","updated_at":"2026-06-11T07:43:15Z","actor":"jhinpan","jobs":[]},{"run_id":27330797353,"pr":674,"commit":"39928e4d5af484fd9d567da61a7e2ea7de1b9191","branch":"fix/jit-cache-key-fastpath","event":"pull_request","title":"[Opt] Memoize JitArgument/DslType isinstance in JIT cache-key hot path","status":"in_progress","conclusion":null,"url":"https://github.com/ROCm/FlyDSL/actions/runs/27330797353","created_at":"2026-06-11T07:23:01Z","updated_at":"2026-06-11T07:43:27Z","actor":"coderfeli","jobs":[{"runner":"linux-flydsl-mi355-1","arch":"gfx950","status":"in_progress","conclusion":null,"started_at":"2026-06-11T07:43:26Z","completed_at":null,"url":"https://github.com/ROCm/FlyDSL/actions/runs/27330797353/job/80742635886"},{"runner":"linux-flydsl-mi325-1","arch":"gfx942","status":"in_progress","conclusion":null,"started_at":"2026-06-11T07:25:41Z","completed_at":null,"url":"https://github.com/ROCm/FlyDSL/actions/runs/27330797353/job/80742635906"},{"runner":"linux-flydsl-navi-2","arch":"gfx1201","status":"completed","conclusion":"success","started_at":"2026-06-11T07:24:01Z","completed_at":"2026-06-11T07:49:53Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27330797353/job/80742635938"}]},{"run_id":27327956458,"pr":673,"commit":"553a956c672f457dcb075af484b5bef415365894","branch":"revert-7160959c","event":"pull_request","title":"Revert \"[Refactor] Harden and speed up the JIT cache-key computation \u2026","status":"completed","conclusion":"failure","url":"https://github.com/ROCm/FlyDSL/actions/runs/27327956458","created_at":"2026-06-11T06:19:16Z","updated_at":"2026-06-11T07:27:15Z","actor":"xudoyuan","jobs":[{"runner":"linux-flydsl-mi325-1","arch":"gfx942","status":"completed","conclusion":"success","started_at":"2026-06-11T06:20:39Z","completed_at":"2026-06-11T07:27:14Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27327956458/job/80733349129"},{"runner":"linux-flydsl-mi355-1","arch":"gfx950","status":"completed","conclusion":"failure","started_at":"2026-06-11T06:42:08Z","completed_at":"2026-06-11T06:52:36Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27327956458/job/80733349130"},{"runner":"linux-flydsl-navi-2","arch":"gfx1201","status":"completed","conclusion":"success","started_at":"2026-06-11T06:20:24Z","completed_at":"2026-06-11T06:35:50Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27327956458/job/80733349166"}]},{"run_id":27327065199,"pr":670,"commit":"035c2d4734bb928c25609d3c93c1f25f4be4821b","branch":"perf/fa-gfx950-ostore-dwordx4","event":"pull_request","title":"[Perf] flash_attn gfx950: dwordx4 O stores + flash-decoding split-K","status":"completed","conclusion":"action_required","url":"https://github.com/ROCm/FlyDSL/actions/runs/27327065199","created_at":"2026-06-11T05:57:47Z","updated_at":"2026-06-11T05:57:47Z","actor":"jhinpan","jobs":[]},{"run_id":27320785834,"pr":657,"commit":"ff51da7e46ec7d95839bf89469e832942ed98dec","branch":"enh/hotspot-kernel-filter","event":"pull_request","title":"enh(hotspot_analyzer): add --kernel filter for CSV metadata matching","status":"completed","conclusion":"action_required","url":"https://github.com/ROCm/FlyDSL/actions/runs/27320785834","created_at":"2026-06-11T02:58:40Z","updated_at":"2026-06-11T02:58:40Z","actor":"Arist12","jobs":[]},{"run_id":27320785721,"pr":656,"commit":"6497db8a66211834165c5b776f616c9b0fcb86d9","branch":"enh/perftest-events-timing","event":"pull_request","title":"enh(test_common): add profiler-safe HIP-event timing path to run_perftest","status":"completed","conclusion":"action_required","url":"https://github.com/ROCm/FlyDSL/actions/runs/27320785721","created_at":"2026-06-11T02:58:40Z","updated_at":"2026-06-11T02:58:40Z","actor":"Arist12","jobs":[]},{"run_id":27317400244,"pr":null,"commit":"f423c0036ae5bea843b8e85a31fc92fb4fdbeee7","branch":"main","event":"push","title":"[Docs] Onboarding notebooks (2/n): layout algebra (#665)","status":"completed","conclusion":"success","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317400244","created_at":"2026-06-11T01:21:32Z","updated_at":"2026-06-11T02:14:00Z","actor":"coderfeli","jobs":[{"runner":"linux-flydsl-mi355-1","arch":"gfx950","status":"completed","conclusion":"success","started_at":"2026-06-11T01:23:54Z","completed_at":"2026-06-11T02:13:59Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317400244/job/80701083409"},{"runner":"linux-flydsl-mi325-1","arch":"gfx942","status":"completed","conclusion":"success","started_at":"2026-06-11T01:23:54Z","completed_at":"2026-06-11T02:09:15Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317400244/job/80701083411"},{"runner":"linux-flydsl-navi-2","arch":"gfx1201","status":"completed","conclusion":"success","started_at":"2026-06-11T01:23:52Z","completed_at":"2026-06-11T01:47:33Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317400244/job/80701083423"}]},{"run_id":27317327058,"pr":null,"commit":"b9810951f85df82d4eea3eb691df1ef423c37b91","branch":"main","event":"push","title":"[Feat] Fuse TopKGatingSoftmax and MoE Sorting kernels (#582)","status":"completed","conclusion":"cancelled","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317327058","created_at":"2026-06-11T01:19:36Z","updated_at":"2026-06-11T01:22:24Z","actor":"coderfeli","jobs":[{"runner":"linux-flydsl-mi355-1","arch":"gfx950","status":"completed","conclusion":"cancelled","started_at":"2026-06-11T01:20:44Z","completed_at":"2026-06-11T01:21:49Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317327058/job/80700769979"},{"runner":"linux-flydsl-mi325-1","arch":"gfx942","status":"completed","conclusion":"cancelled","started_at":"2026-06-11T01:20:42Z","completed_at":"2026-06-11T01:21:36Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317327058/job/80700769991"},{"runner":"linux-flydsl-navi-2","arch":"gfx1201","status":"completed","conclusion":"cancelled","started_at":"2026-06-11T01:20:29Z","completed_at":"2026-06-11T01:22:23Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27317327058/job/80700769996"}]},{"run_id":27280390572,"pr":null,"commit":"3e7f66e713c72b03cefddf3bb1cb26f8992288d4","branch":"main","event":"push","title":"[Opt] Speed up CompiledFunction fast dispatch for changing args (#672)","status":"completed","conclusion":"success","url":"https://github.com/ROCm/FlyDSL/actions/runs/27280390572","created_at":"2026-06-10T13:39:46Z","updated_at":"2026-06-10T14:36:09Z","actor":"coderfeli","jobs":[{"runner":"linux-flydsl-mi355-1","arch":"gfx950","status":"completed","conclusion":"success","started_at":"2026-06-10T13:41:46Z","completed_at":"2026-06-10T14:36:08Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27280390572/job/80573213736"},{"runner":"linux-flydsl-mi325-1","arch":"gfx942","status":"completed","conclusion":"success","started_at":"2026-06-10T13:41:44Z","completed_at":"2026-06-10T14:24:39Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27280390572/job/80573213883"},{"runner":"linux-flydsl-navi-2","arch":"gfx1201","status":"completed","conclusion":"success","started_at":"2026-06-10T13:41:36Z","completed_at":"2026-06-10T13:57:41Z","url":"https://github.com/ROCm/FlyDSL/actions/runs/27280390572/job/80573213898"}]}]}
+{
+ "schema": 1,
+ "updated": "2026-06-30T11:13:32Z",
+ "repo": "ROCm/FlyDSL",
+ "runs": [
+  {
+   "run_id": 28439967158,
+   "pr": null,
+   "commit": "a7e7f845cec681ef42d6531ee4a17198a28705f5",
+   "branch": "main",
+   "event": "push",
+   "title": "ci: restore CI performance dashboard (gh-pages, lean main) + README b\u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439967158",
+   "created_at": "2026-06-30T11:10:53Z",
+   "updated_at": "2026-06-30T11:11:52Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T11:11:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439967158/job/84275341460"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T11:11:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439967158/job/84275341461"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T11:11:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439967158/job/84275341470"
+    }
+   ]
+  },
+  {
+   "run_id": 28439310249,
+   "pr": 753,
+   "commit": "04ccd742dcb0a5681ae679ab2eab66cf14b54a00",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439310249",
+   "created_at": "2026-06-30T10:58:42Z",
+   "updated_at": "2026-06-30T10:59:25Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:59:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439310249/job/84273055700"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:59:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439310249/job/84273055717"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:59:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439310249/job/84273055723"
+    }
+   ]
+  },
+  {
+   "run_id": 28439027191,
+   "pr": null,
+   "commit": "a4d8b0f07423cef7fafcb9e75e540e929566fd26",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Add FallbackLocations rewriter for bare-op source locations (#777)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439027191",
+   "created_at": "2026-06-30T10:53:15Z",
+   "updated_at": "2026-06-30T11:11:23Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T10:54:46Z",
+     "completed_at": "2026-06-30T11:11:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439027191/job/84272157856"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T10:54:46Z",
+     "completed_at": "2026-06-30T11:11:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439027191/job/84272157874"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T10:54:18Z",
+     "completed_at": "2026-06-30T11:10:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439027191/job/84272157911"
+    }
+   ]
+  },
+  {
+   "run_id": 28436777263,
+   "pr": 778,
+   "commit": "2ac2953a22393e213ed65b5716a3e2d9b867d9ab",
+   "branch": "move-kernel-helpers-to-framework",
+   "event": "pull_request",
+   "title": "refactor: move scalar buffer_load and maxnumf into the FlyDSL framework",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436777263",
+   "created_at": "2026-06-30T10:11:18Z",
+   "updated_at": "2026-06-30T10:12:02Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T10:12:37Z",
+     "completed_at": "2026-06-30T11:02:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436777263/job/84264647054"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:12:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436777263/job/84264647065"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:12:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436777263/job/84264647070"
+    }
+   ]
+  },
+  {
+   "run_id": 28436155502,
+   "pr": 772,
+   "commit": "75e6577f5294ebdf51cda491d12354ec229a0a3c",
+   "branch": "yanbo/combine_perf_tuning",
+   "event": "pull_request",
+   "title": "[Feat]: Add dispatch & combine tuning configuration",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436155502",
+   "created_at": "2026-06-30T10:00:28Z",
+   "updated_at": "2026-06-30T10:32:01Z",
+   "actor": "yanboshao",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:32:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436155502/job/84268272816"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:33:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436155502/job/84268272826"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T10:32:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28436155502/job/84268272831"
+    }
+   ]
+  },
+  {
+   "run_id": 28434421265,
+   "pr": 772,
+   "commit": "b04c850a3941b2806d638086db3bfb8679ea6dfc",
+   "branch": "yanbo/combine_perf_tuning",
+   "event": "pull_request",
+   "title": "[Feat]: Add dispatch & combine tuning configuration",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28434421265",
+   "created_at": "2026-06-30T09:29:54Z",
+   "updated_at": "2026-06-30T10:31:11Z",
+   "actor": "yanboshao",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T09:31:29Z",
+     "completed_at": "2026-06-30T10:00:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28434421265/job/84256973487"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T09:32:06Z",
+     "completed_at": "2026-06-30T10:00:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28434421265/job/84256973564"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T09:30:57Z",
+     "completed_at": "2026-06-30T10:00:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28434421265/job/84256973598"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T10:01:30Z",
+     "completed_at": "2026-06-30T10:31:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28434421265/job/84262583208"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T10:01:26Z",
+     "completed_at": "2026-06-30T10:24:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28434421265/job/84262583309"
+    }
+   ]
+  },
+  {
+   "run_id": 28431608608,
+   "pr": 753,
+   "commit": "29233a1bfa009d6eb03830390cbe5478168b3bc2",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28431608608",
+   "created_at": "2026-06-30T08:40:25Z",
+   "updated_at": "2026-06-30T08:43:25Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 28430210077,
+   "pr": 776,
+   "commit": "a22dd0d1338c98f71e5b93bedf1afc0814c94723",
+   "branch": "pa-decode-deterministic-reduce",
+   "event": "pull_request",
+   "title": "[pa] Deterministic split-partition reduce for PS decode",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077",
+   "created_at": "2026-06-30T08:14:47Z",
+   "updated_at": "2026-06-30T08:15:21Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T08:16:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077/job/84242992244"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T08:28:50Z",
+     "completed_at": "2026-06-30T09:14:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077/job/84242992261"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T08:17:37Z",
+     "completed_at": "2026-06-30T09:25:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077/job/84242992263"
+    }
+   ]
+  },
+  {
+   "run_id": 28429439356,
+   "pr": null,
+   "commit": "3f5846bfcd28f8eb1b2e8ddfbb3082e7eadedbee",
+   "branch": "main",
+   "event": "push",
+   "title": "perf(pa): Raw-pointer kernargs and decode kernel refactor (#741)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28429439356",
+   "created_at": "2026-06-30T08:00:41Z",
+   "updated_at": "2026-06-30T10:53:16Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T08:02:01Z",
+     "completed_at": "2026-06-30T10:53:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28429439356/job/84240486219"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T08:04:15Z",
+     "completed_at": "2026-06-30T09:02:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28429439356/job/84240486225"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T08:02:24Z",
+     "completed_at": "2026-06-30T09:24:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28429439356/job/84240486228"
+    }
+   ]
+  },
+  {
+   "run_id": 28428948126,
+   "pr": 741,
+   "commit": "0fe87fa50d8c0afc34a2e06e4364ddfb31929997",
+   "branch": "worktree-pa_ps_per_token_kv",
+   "event": "pull_request",
+   "title": "perf(pa): Raw-pointer kernargs and decode kernel refactor",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126",
+   "created_at": "2026-06-30T07:51:18Z",
+   "updated_at": "2026-06-30T08:15:45Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T08:01:33Z",
+     "completed_at": "2026-06-30T08:59:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126/job/84238803770"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-06-30T08:15:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126/job/84238803774"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T07:52:20Z",
+     "completed_at": "2026-06-30T08:57:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126/job/84238803776"
+    }
+   ]
+  },
+  {
+   "run_id": 28428582579,
+   "pr": 777,
+   "commit": "239be40eb58c8fe23cd36a66dbdcfa434d4ffa38",
+   "branch": "pr/fallback-locations",
+   "event": "pull_request",
+   "title": "[Enh] Add FallbackLocations rewriter for bare-op source locations",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579",
+   "created_at": "2026-06-30T07:44:14Z",
+   "updated_at": "2026-06-30T07:45:17Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-06-30T07:45:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677256"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T07:45:32Z",
+     "completed_at": "2026-06-30T08:49:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677262"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T07:45:45Z",
+     "completed_at": "2026-06-30T08:41:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677263"
+    }
+   ]
+  },
+  {
+   "run_id": 28428258000,
+   "pr": null,
+   "commit": "b0e8647f7fe753c9ae3308cf8b281ceb4c74cef4",
+   "branch": "main",
+   "event": "push",
+   "title": "Fix pipeline (#768)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428258000",
+   "created_at": "2026-06-30T07:37:51Z",
+   "updated_at": "2026-06-30T08:01:11Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T07:39:39Z",
+     "completed_at": "2026-06-30T08:01:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428258000/job/84236647865"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T07:42:00Z",
+     "completed_at": "2026-06-30T08:01:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428258000/job/84236647936"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T07:39:04Z",
+     "completed_at": "2026-06-30T08:00:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428258000/job/84236647937"
+    }
+   ]
+  },
+  {
+   "run_id": 28426290976,
+   "pr": 772,
+   "commit": "e2c0ec9369f79efbb366824a87504c5b221dc242",
+   "branch": "yanbo/combine_perf_tuning",
+   "event": "pull_request",
+   "title": "[Feat]: Add dispatch & combine tuning configuration",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28426290976",
+   "created_at": "2026-06-30T06:58:39Z",
+   "updated_at": "2026-06-30T09:07:16Z",
+   "actor": "yanboshao",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T07:07:42Z",
+     "completed_at": "2026-06-30T07:32:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28426290976/job/84230265682"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-30T07:00:57Z",
+     "completed_at": "2026-06-30T07:48:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28426290976/job/84230265692"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T07:01:01Z",
+     "completed_at": "2026-06-30T08:03:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28426290976/job/84230265702"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T08:25:06Z",
+     "completed_at": "2026-06-30T09:07:15Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28426290976/job/84240805927"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T08:14:56Z",
+     "completed_at": "2026-06-30T08:47:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28426290976/job/84240806069"
+    }
+   ]
+  },
+  {
+   "run_id": 28425968738,
+   "pr": null,
+   "commit": "c255cd478b55a8190bd45803366162b134620ccc",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Support memref_load_vec on coord_tensor 1d (#766)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738",
+   "created_at": "2026-06-30T06:51:46Z",
+   "updated_at": "2026-06-30T07:38:20Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T06:53:47Z",
+     "completed_at": "2026-06-30T07:38:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738/job/84229226567"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T07:32:06Z",
+     "completed_at": "2026-06-30T07:38:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738/job/84229226633"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T06:53:37Z",
+     "completed_at": "2026-06-30T07:38:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738/job/84229226679"
+    }
+   ]
+  },
+  {
+   "run_id": 28425102269,
+   "pr": 776,
+   "commit": "cbb69ed6f507423b02dd5673ef1c1206e72fd180",
+   "branch": "pa-decode-deterministic-reduce",
+   "event": "pull_request",
+   "title": "[pa] Deterministic split-partition reduce for PS decode",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269",
+   "created_at": "2026-06-30T06:32:15Z",
+   "updated_at": "2026-06-30T08:16:06Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T06:50:25Z",
+     "completed_at": "2026-06-30T08:00:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269/job/84226459230"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T07:38:26Z",
+     "completed_at": "2026-06-30T08:15:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269/job/84226459233"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T06:34:20Z",
+     "completed_at": "2026-06-30T07:24:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269/job/84226459244"
+    }
+   ]
+  },
+  {
+   "run_id": 28424467431,
+   "pr": 733,
+   "commit": "e1781eb5c2e00207351e51ed8e1e710853a01e94",
+   "branch": "jiacao/conv2d-implicit-mfma",
+   "event": "pull_request",
+   "title": "Add implicit-MFMA conv kernels: bf16 conv2d, bf16 & FP8 8-wave conv3d",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424467431",
+   "created_at": "2026-06-30T06:17:24Z",
+   "updated_at": "2026-06-30T06:18:50Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 28424299968,
+   "pr": 764,
+   "commit": "70f447cb3d6baa85d77eef80c0545a0ec3bca2f5",
+   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
+   "event": "pull_request",
+   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968",
+   "created_at": "2026-06-30T06:13:28Z",
+   "updated_at": "2026-06-30T07:30:06Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T06:20:49Z",
+     "completed_at": "2026-06-30T07:30:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968/job/84223949999"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T06:41:11Z",
+     "completed_at": "2026-06-30T07:07:30Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968/job/84223950011"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T06:15:42Z",
+     "completed_at": "2026-06-30T07:10:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968/job/84223950018"
+    }
+   ]
+  },
+  {
+   "run_id": 28424240942,
+   "pr": null,
+   "commit": "3552f11d804b56b24d54bd8bae9e044b6b84035c",
+   "branch": "main",
+   "event": "push",
+   "title": "Fix loop-carried Vector losing multi-dim shape (issue #734) (#759)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942",
+   "created_at": "2026-06-30T06:12:06Z",
+   "updated_at": "2026-06-30T06:52:14Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-30T06:14:27Z",
+     "completed_at": "2026-06-30T06:40:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942/job/84223763305"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T06:14:37Z",
+     "completed_at": "2026-06-30T06:40:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942/job/84223763334"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T06:13:52Z",
+     "completed_at": "2026-06-30T06:52:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942/job/84223763369"
+    }
+   ]
+  },
+  {
+   "run_id": 28423380429,
+   "pr": 764,
+   "commit": "eb5bf5a10275bbfe69dce5d8c49ae41ef173a526",
+   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
+   "event": "pull_request",
+   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429",
+   "created_at": "2026-06-30T05:51:05Z",
+   "updated_at": "2026-06-30T06:14:05Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-30T05:53:34Z",
+     "completed_at": "2026-06-30T06:10:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429/job/84221122410"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T05:53:35Z",
+     "completed_at": "2026-06-30T06:13:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429/job/84221122421"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T05:53:22Z",
+     "completed_at": "2026-06-30T06:14:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429/job/84221122437"
+    }
+   ]
+  },
+  {
+   "run_id": 28422506855,
+   "pr": 764,
+   "commit": "ae21dbd2de071bb05439488e642c71a308c8c8ff",
+   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
+   "event": "pull_request",
+   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422506855",
+   "created_at": "2026-06-30T05:28:34Z",
+   "updated_at": "2026-06-30T05:51:41Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T05:30:42Z",
+     "completed_at": "2026-06-30T05:51:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422506855/job/84218538868"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T05:30:34Z",
+     "completed_at": "2026-06-30T05:51:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422506855/job/84218538873"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T05:30:42Z",
+     "completed_at": "2026-06-30T05:51:33Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422506855/job/84218538883"
+    }
+   ]
+  },
+  {
+   "run_id": 28422483077,
+   "pr": 764,
+   "commit": "25e751f508e45991e2b207ba36e8e8ef44e2301f",
+   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
+   "event": "pull_request",
+   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422483077",
+   "created_at": "2026-06-30T05:27:54Z",
+   "updated_at": "2026-06-30T05:28:49Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
+  {
+   "run_id": 28422360616,
+   "pr": 772,
+   "commit": "f1c73b8ef350d65786a00165a5b9b88ba4888e03",
+   "branch": "yanbo/combine_perf_tuning",
+   "event": "pull_request",
+   "title": "[Feat]: Add dispatch & combine tuning configuration",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422360616",
+   "created_at": "2026-06-30T05:24:42Z",
+   "updated_at": "2026-06-30T06:13:45Z",
+   "actor": "yanboshao",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T05:26:49Z",
+     "completed_at": "2026-06-30T06:03:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422360616/job/84218017537"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T05:26:50Z",
+     "completed_at": "2026-06-30T06:13:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422360616/job/84218017540"
+    }
+   ]
+  },
+  {
+   "run_id": 28422329865,
+   "pr": 772,
+   "commit": "f1c73b8ef350d65786a00165a5b9b88ba4888e03",
+   "branch": "yanbo/combine_perf_tuning",
+   "event": "pull_request",
+   "title": "[Feat]: Add dispatch & combine tuning configuration",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28422329865",
+   "created_at": "2026-06-30T05:23:56Z",
+   "updated_at": "2026-06-30T05:24:57Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
+  {
+   "run_id": 28421017483,
+   "pr": 737,
+   "commit": "c54f3b82d367a6c6f2814beb0592615f785b3e4b",
+   "branch": "ci/restore-perf-dashboard",
+   "event": "pull_request",
+   "title": "ci: restore CI performance dashboard (gh-pages, lean main) + README badges",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28421017483",
+   "created_at": "2026-06-30T04:48:16Z",
+   "updated_at": "2026-06-30T06:00:58Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T04:57:59Z",
+     "completed_at": "2026-06-30T05:10:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28421017483/job/84214973569"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T04:58:08Z",
+     "completed_at": "2026-06-30T05:46:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28421017483/job/84214973583"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T04:58:13Z",
+     "completed_at": "2026-06-30T06:00:57Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28421017483/job/84214973589"
+    }
+   ]
+  },
+  {
+   "run_id": 28417099550,
+   "pr": 768,
+   "commit": "e968d3b0d1a36aa4a50069fdd0aaca4f84a2b5b3",
+   "branch": "fix_pipeline",
+   "event": "pull_request",
+   "title": "Fix pipeline",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28417099550",
+   "created_at": "2026-06-30T02:56:05Z",
+   "updated_at": "2026-06-30T04:02:38Z",
+   "actor": "solinzby1",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T03:00:55Z",
+     "completed_at": "2026-06-30T03:59:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28417099550/job/84202305482"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T02:58:11Z",
+     "completed_at": "2026-06-30T04:02:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28417099550/job/84202305483"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T03:26:42Z",
+     "completed_at": "2026-06-30T03:41:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28417099550/job/84202305504"
+    }
+   ]
+  },
+  {
+   "run_id": 28416965017,
+   "pr": null,
+   "commit": "dba10c168f71a33f41ac0851bc793e8f29f211da",
+   "branch": "ci/restore-perf-dashboard",
+   "event": "pull_request",
+   "title": "ci: restore CI performance dashboard (gh-pages, lean main) + README badges",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28416965017",
+   "created_at": "2026-06-30T02:52:08Z",
+   "updated_at": "2026-06-30T03:52:23Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T02:56:33Z",
+     "completed_at": "2026-06-30T03:26:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28416965017/job/84202210079"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T03:00:55Z",
+     "completed_at": "2026-06-30T03:48:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28416965017/job/84202210097"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T02:57:22Z",
+     "completed_at": "2026-06-30T03:52:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28416965017/job/84202210101"
+    }
+   ]
+  },
+  {
+   "run_id": 28416869701,
+   "pr": null,
+   "commit": "c59a97239c8c1e015afb3ce8ae9c515df6bdd160",
+   "branch": "jiacao/conv2d-implicit-mfma",
+   "event": "pull_request",
+   "title": "Add implicit-MFMA conv kernels: bf16 conv2d, bf16 & FP8 8-wave conv3d",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28416869701",
+   "created_at": "2026-06-30T02:49:16Z",
+   "updated_at": "2026-06-30T02:50:12Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 28412606907,
+   "pr": null,
+   "commit": "215e22e31ef7329ecd026fae39085fe59ec8f1fa",
+   "branch": "fix_pipeline",
+   "event": "pull_request",
+   "title": "Fix pipeline",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412606907",
+   "created_at": "2026-06-30T00:49:37Z",
+   "updated_at": "2026-06-30T01:59:24Z",
+   "actor": "solinzby1",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T00:51:56Z",
+     "completed_at": "2026-06-30T01:59:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412606907/job/84188774757"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T00:51:36Z",
+     "completed_at": "2026-06-30T01:41:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412606907/job/84188774776"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T00:51:28Z",
+     "completed_at": "2026-06-30T01:20:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412606907/job/84188774784"
+    }
+   ]
+  },
+  {
+   "run_id": 28412028908,
+   "pr": null,
+   "commit": "f0c9dfb11a328f9728bc13f1165259c09c6dac43",
+   "branch": "fix_pipeline",
+   "event": "pull_request",
+   "title": "Fix pipeline",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908",
+   "created_at": "2026-06-30T00:33:27Z",
+   "updated_at": "2026-06-30T00:50:05Z",
+   "actor": "solinzby1",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T00:35:05Z",
+     "completed_at": "2026-06-30T00:50:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908/job/84186950657"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-30T00:35:04Z",
+     "completed_at": "2026-06-30T00:50:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908/job/84186950663"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T00:34:56Z",
+     "completed_at": "2026-06-30T00:47:29Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908/job/84186950672"
+    }
+   ]
+  },
+  {
+   "run_id": 28406751693,
+   "pr": null,
+   "commit": "e5cdc5dc055f50a336bf09cd2956a50b1dfcff84",
+   "branch": "ci/restore-perf-dashboard",
+   "event": "pull_request",
+   "title": "ci: restore CI performance dashboard (gh-pages, lean main) + README badges",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28406751693",
+   "created_at": "2026-06-29T22:25:55Z",
+   "updated_at": "2026-06-30T02:38:08Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28406058508,
+   "pr": null,
+   "commit": "55982341d98e82deb7623da380b4116dd813119c",
+   "branch": "ci/restore-perf-dashboard",
+   "event": "pull_request",
+   "title": "ci: restore CI performance dashboard (gh-pages, lean main) + README badges",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28406058508",
+   "created_at": "2026-06-29T22:11:29Z",
+   "updated_at": "2026-06-29T22:11:29Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28379877863,
+   "pr": 766,
+   "commit": "a391c23b672109e6936f873a969e73ac099d18a0",
+   "branch": "pr/enh-memref_load_vec",
+   "event": "pull_request",
+   "title": "[Enh] Support memref_load_vec on coord_tensor 1d",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28379877863",
+   "created_at": "2026-06-29T14:34:56Z",
+   "updated_at": "2026-06-29T16:18:29Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T14:36:13Z",
+     "completed_at": "2026-06-29T15:54:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28379877863/job/84079477485"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T16:05:35Z",
+     "completed_at": "2026-06-29T16:18:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28379877863/job/84079477515"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T14:36:13Z",
+     "completed_at": "2026-06-29T15:20:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28379877863/job/84079477609"
+    }
+   ]
+  },
+  {
+   "run_id": 28376182636,
+   "pr": 753,
+   "commit": "2956a2966f270227d6daab927c75079fdab4b54d",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28376182636",
+   "created_at": "2026-06-29T13:37:55Z",
+   "updated_at": "2026-06-30T08:28:19Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T07:41:19Z",
+     "completed_at": "2026-06-30T08:28:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28376182636/job/84236792250"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T15:53:29Z",
+     "completed_at": "2026-06-29T16:04:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28376182636/job/84236793022"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T13:39:14Z",
+     "completed_at": "2026-06-29T14:54:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28376182636/job/84236816474"
+    }
+   ]
+  },
+  {
+   "run_id": 28375001108,
+   "pr": 764,
+   "commit": "e03ce3feb13ce57997fbbd312eb4fa49a239b437",
+   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
+   "event": "pull_request",
+   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28375001108",
+   "created_at": "2026-06-29T13:18:57Z",
+   "updated_at": "2026-06-29T15:53:05Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T15:41:40Z",
+     "completed_at": "2026-06-29T15:53:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28375001108/job/84062501260"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T13:20:58Z",
+     "completed_at": "2026-06-29T14:10:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28375001108/job/84062501393"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T13:22:17Z",
+     "completed_at": "2026-06-29T14:33:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28375001108/job/84062501538"
+    }
+   ]
+  },
+  {
+   "run_id": 28370694048,
+   "pr": 763,
+   "commit": "0aff374129c48f1855eae3a4759048880718d5ec",
+   "branch": "repro/dynamic-if-list-carry-fa-generic",
+   "event": "pull_request",
+   "title": "[repro] flash_attn_generic: concise causal-mask loop trips dynamic-if\u2026",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28370694048",
+   "created_at": "2026-06-29T12:05:02Z",
+   "updated_at": "2026-06-29T15:40:47Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T15:27:05Z",
+     "completed_at": "2026-06-29T15:40:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28370694048/job/84047594992"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-29T12:06:25Z",
+     "completed_at": "2026-06-29T12:35:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28370694048/job/84047595015"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-29T12:06:24Z",
+     "completed_at": "2026-06-29T13:02:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28370694048/job/84047595033"
+    }
+   ]
+  },
+  {
+   "run_id": 28369692158,
+   "pr": null,
+   "commit": "93579ae5803189053e905b789f8a7726a8db9e38",
+   "branch": "main",
+   "event": "push",
+   "title": "Add common VectorType alias (#762)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28369692158",
+   "created_at": "2026-06-29T11:46:51Z",
+   "updated_at": "2026-06-29T15:26:07Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T11:48:35Z",
+     "completed_at": "2026-06-29T13:02:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28369692158/job/84044260619"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T15:10:45Z",
+     "completed_at": "2026-06-29T15:26:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28369692158/job/84044260645"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T11:48:38Z",
+     "completed_at": "2026-06-29T12:32:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28369692158/job/84044260676"
+    }
+   ]
+  },
+  {
+   "run_id": 28359073022,
+   "pr": null,
+   "commit": "aa76384f0cc584a01e568569a868d17bf76ddd38",
+   "branch": "jiacao/conv2d-implicit-mfma",
+   "event": "pull_request",
+   "title": "Add implicit-MFMA conv kernels: bf16 conv2d, bf16 & FP8 8-wave conv3d",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28359073022",
+   "created_at": "2026-06-29T08:32:35Z",
+   "updated_at": "2026-06-29T08:33:53Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 28358816280,
+   "pr": 759,
+   "commit": "c5d1b5f499505a2ba8c3f236ab9bd4308aec7064",
+   "branch": "fix_issue734",
+   "event": "pull_request",
+   "title": "Fix loop-carried Vector losing multi-dim shape (issue #734)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280",
+   "created_at": "2026-06-29T08:27:45Z",
+   "updated_at": "2026-06-29T15:10:39Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T08:29:06Z",
+     "completed_at": "2026-06-29T10:22:47Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280/job/84008404196"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T14:25:46Z",
+     "completed_at": "2026-06-29T15:10:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280/job/84008404202"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T08:29:13Z",
+     "completed_at": "2026-06-29T10:02:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280/job/84008404211"
+    }
+   ]
+  },
+  {
+   "run_id": 28358561640,
+   "pr": 762,
+   "commit": "58747d83a2e20e66b49afaaba2f968f44c6a52b9",
+   "branch": "pr/vec-alias",
+   "event": "pull_request",
+   "title": "Add common VectorType alias",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358561640",
+   "created_at": "2026-06-29T08:22:57Z",
+   "updated_at": "2026-06-29T14:25:12Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T08:24:39Z",
+     "completed_at": "2026-06-29T09:59:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358561640/job/84007520650"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T08:24:38Z",
+     "completed_at": "2026-06-29T10:19:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358561640/job/84007520684"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T08:24:30Z",
+     "completed_at": "2026-06-29T14:25:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358561640/job/84007520756"
+    }
+   ]
+  },
+  {
+   "run_id": 28358095782,
+   "pr": null,
+   "commit": "a9067856ef2ece836c334cce0a691094d1b9e458",
+   "branch": "pr/vec-alias",
+   "event": "pull_request",
+   "title": "Add common VectorType alias",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782",
+   "created_at": "2026-06-29T08:14:04Z",
+   "updated_at": "2026-06-29T08:23:25Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T08:16:04Z",
+     "completed_at": "2026-06-29T08:23:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782/job/84006006706"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T08:15:58Z",
+     "completed_at": "2026-06-29T08:23:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782/job/84006006733"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T08:15:50Z",
+     "completed_at": "2026-06-29T08:23:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782/job/84006006756"
+    }
+   ]
+  },
+  {
+   "run_id": 28355406632,
+   "pr": 762,
+   "commit": "58747d83a2e20e66b49afaaba2f968f44c6a52b9",
+   "branch": "pr/vec-alias",
+   "event": "pull_request",
+   "title": "Add common VectorType alias",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632",
+   "created_at": "2026-06-29T07:20:33Z",
+   "updated_at": "2026-06-29T08:14:37Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T07:29:55Z",
+     "completed_at": "2026-06-29T08:14:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632/job/83997258328"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T07:30:00Z",
+     "completed_at": "2026-06-29T08:14:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632/job/83997258354"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T07:22:08Z",
+     "completed_at": "2026-06-29T08:01:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632/job/83997258362"
+    }
+   ]
+  },
+  {
+   "run_id": 28354679213,
+   "pr": null,
+   "commit": "1468b2651a54a0a64a72b687666ec5b984cd6b96",
+   "branch": "pr/vec-alias",
+   "event": "pull_request",
+   "title": "Add common VectorType alias",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213",
+   "created_at": "2026-06-29T07:05:45Z",
+   "updated_at": "2026-06-29T07:21:08Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T07:06:37Z",
+     "completed_at": "2026-06-29T07:21:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213/job/83994978036"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T07:12:44Z",
+     "completed_at": "2026-06-29T07:20:46Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213/job/83994978041"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-29T07:06:50Z",
+     "completed_at": "2026-06-29T07:21:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213/job/83994978051"
+    }
+   ]
+  },
+  {
+   "run_id": 28323813672,
+   "pr": 761,
+   "commit": "b2c0e12f4c7df3668b04b172c38049cb1af348c6",
+   "branch": "rlcr/gemm-fxgemm-perf",
+   "event": "pull_request",
+   "title": "fp8 8wave preshuffle: per-N-block fx.gemm fragments reach hand parity",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323813672",
+   "created_at": "2026-06-28T13:29:51Z",
+   "updated_at": "2026-06-29T05:13:43Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-29T04:07:59Z",
+     "completed_at": "2026-06-29T05:13:42Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323813672/job/83974863089"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T13:31:54Z",
+     "completed_at": "2026-06-28T14:18:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323813672/job/83974863589"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T13:39:24Z",
+     "completed_at": "2026-06-28T13:50:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323813672/job/83974877116"
+    }
+   ]
+  },
+  {
+   "run_id": 28323558092,
+   "pr": 753,
+   "commit": "392e377f4daf75aac8ba03ea3d9b588fcb54cdd9",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323558092",
+   "created_at": "2026-06-28T13:19:55Z",
+   "updated_at": "2026-06-28T14:26:03Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T13:21:59Z",
+     "completed_at": "2026-06-28T14:08:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323558092/job/83909695224"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T13:21:59Z",
+     "completed_at": "2026-06-28T14:26:02Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323558092/job/83909695239"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T13:24:10Z",
+     "completed_at": "2026-06-28T13:39:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323558092/job/83909695244"
+    }
+   ]
+  },
+  {
+   "run_id": 28323069688,
+   "pr": null,
+   "commit": "22fc9fa8c4883ea1c8b1bf5854aa46849b870ce4",
+   "branch": "rlcr/gemm-fxgemm-perf",
+   "event": "pull_request",
+   "title": "fp8 8wave preshuffle: per-N-block fx.gemm fragments reach hand parity",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323069688",
+   "created_at": "2026-06-28T13:01:14Z",
+   "updated_at": "2026-06-28T13:30:20Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T13:02:52Z",
+     "completed_at": "2026-06-28T13:30:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323069688/job/83908384260"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T13:13:38Z",
+     "completed_at": "2026-06-28T13:23:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323069688/job/83908384261"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T13:02:54Z",
+     "completed_at": "2026-06-28T13:30:19Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28323069688/job/83908384264"
+    }
+   ]
+  },
+  {
+   "run_id": 28322975223,
+   "pr": 753,
+   "commit": "82323d212c0a5f58488d46b9f78a4cf6c9e7e33b",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322975223",
+   "created_at": "2026-06-28T12:57:45Z",
+   "updated_at": "2026-06-28T13:20:24Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:59:51Z",
+     "completed_at": "2026-06-28T13:20:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322975223/job/83908153642"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T13:00:10Z",
+     "completed_at": "2026-06-28T13:20:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322975223/job/83908153645"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T13:02:07Z",
+     "completed_at": "2026-06-28T13:13:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322975223/job/83908153647"
+    }
+   ]
+  },
+  {
+   "run_id": 28322802760,
+   "pr": null,
+   "commit": "40f7fcc9028b87cd39a2bffb295909cf927c37ab",
+   "branch": "rlcr/gemm-fxgemm-perf",
+   "event": "pull_request",
+   "title": "fp8 8wave preshuffle: per-N-block fx.gemm fragments reach hand parity",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322802760",
+   "created_at": "2026-06-28T12:50:46Z",
+   "updated_at": "2026-06-28T13:01:33Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:52:23Z",
+     "completed_at": "2026-06-28T13:01:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322802760/job/83907682946"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:55:42Z",
+     "completed_at": "2026-06-28T13:01:32Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322802760/job/83907682950"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:52:37Z",
+     "completed_at": "2026-06-28T13:01:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322802760/job/83907682951"
+    }
+   ]
+  },
+  {
+   "run_id": 28322606588,
+   "pr": 753,
+   "commit": "e6b43ad4355de674b9e8be19a121e5448dcdc482",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322606588",
+   "created_at": "2026-06-28T12:42:54Z",
+   "updated_at": "2026-06-28T12:58:18Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:44:43Z",
+     "completed_at": "2026-06-28T12:58:13Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322606588/job/83907148220"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:44:43Z",
+     "completed_at": "2026-06-28T12:58:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322606588/job/83907148234"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T12:44:35Z",
+     "completed_at": "2026-06-28T12:55:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322606588/job/83907148280"
+    }
+   ]
+  },
+  {
+   "run_id": 28322479529,
+   "pr": 753,
+   "commit": "288bb8cee519b87f726fbce98ba57262ced34703",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322479529",
+   "created_at": "2026-06-28T12:37:59Z",
+   "updated_at": "2026-06-28T12:43:13Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:39:28Z",
+     "completed_at": "2026-06-28T12:43:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322479529/job/83906804228"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:39:28Z",
+     "completed_at": "2026-06-28T12:43:10Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322479529/job/83906804229"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:39:15Z",
+     "completed_at": "2026-06-28T12:43:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322479529/job/83906804230"
+    }
+   ]
+  },
+  {
+   "run_id": 28321656986,
+   "pr": 753,
+   "commit": "50b89d04bd129adb0532c342d0988fb9ec4d85aa",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986",
+   "created_at": "2026-06-28T12:05:13Z",
+   "updated_at": "2026-06-28T12:38:28Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T12:06:05Z",
+     "completed_at": "2026-06-28T12:17:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986/job/83904578194"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:06:18Z",
+     "completed_at": "2026-06-28T12:38:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986/job/83904578199"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T12:06:16Z",
+     "completed_at": "2026-06-28T12:38:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986/job/83904578206"
+    }
+   ]
+  },
+  {
+   "run_id": 28321645839,
+   "pr": 760,
+   "commit": "9fcc7646ee960b92b593f68d4ce5bc01d6df99a3",
+   "branch": "rlcr/fa-fxcopy-main",
+   "event": "pull_request",
+   "title": "feat(flash-attn-gfx950): express QK+PV MMA via the fx.gemm layout API",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839",
+   "created_at": "2026-06-28T12:04:47Z",
+   "updated_at": "2026-06-28T13:15:05Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T12:06:18Z",
+     "completed_at": "2026-06-28T13:15:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839/job/83904577111"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T12:06:20Z",
+     "completed_at": "2026-06-28T12:56:56Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839/job/83904577113"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T12:18:04Z",
+     "completed_at": "2026-06-28T12:30:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839/job/83904577124"
+    }
+   ]
+  },
+  {
+   "run_id": 28321527055,
+   "pr": null,
+   "commit": "9c842b1dbfb037f0e72046ede338db86bb325487",
+   "branch": "rlcr/gemm-fxgemm-perf",
+   "event": "pull_request",
+   "title": "fp8 8wave preshuffle: per-N-block fx.gemm fragments reach hand parity",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321527055",
+   "created_at": "2026-06-28T12:00:21Z",
+   "updated_at": "2026-06-28T12:01:23Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 28320989610,
+   "pr": null,
+   "commit": "6a14fb7c564658fab110cc06ba16349c301a2e09",
+   "branch": "rlcr/fa-fxcopy-main",
+   "event": "pull_request",
+   "title": "feat(flash-attn-gfx950): express QK+PV MMA via the fx.gemm layout API",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28320989610",
+   "created_at": "2026-06-28T11:38:43Z",
+   "updated_at": "2026-06-28T11:39:49Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 28319794541,
+   "pr": 753,
+   "commit": "c81b0c7dd3a73d651c2d94354cf5ef3fd6e59262",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541",
+   "created_at": "2026-06-28T10:50:08Z",
+   "updated_at": "2026-06-28T11:38:07Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T10:51:40Z",
+     "completed_at": "2026-06-28T11:37:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541/job/83899639258"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-28T10:51:36Z",
+     "completed_at": "2026-06-28T11:38:06Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541/job/83899639259"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T10:50:55Z",
+     "completed_at": "2026-06-28T11:02:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541/job/83899639264"
+    }
+   ]
+  },
+  {
+   "run_id": 28317341459,
+   "pr": 753,
+   "commit": "2d4f39b433aaea83f81e771897df600e7f9cbba9",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459",
+   "created_at": "2026-06-28T09:04:41Z",
+   "updated_at": "2026-06-28T09:54:54Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-28T09:07:21Z",
+     "completed_at": "2026-06-28T09:54:53Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459/job/83893042979"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T09:07:20Z",
+     "completed_at": "2026-06-28T09:52:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459/job/83893042989"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T09:06:38Z",
+     "completed_at": "2026-06-28T09:17:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459/job/83893043005"
+    }
+   ]
+  },
+  {
+   "run_id": 28316771241,
+   "pr": 753,
+   "commit": "7a7304d8c91dafcea71759cbdfb0732385320e07",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241",
+   "created_at": "2026-06-28T08:39:55Z",
+   "updated_at": "2026-06-28T09:05:10Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T08:40:50Z",
+     "completed_at": "2026-06-28T09:05:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241/job/83891451957"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T08:40:42Z",
+     "completed_at": "2026-06-28T08:51:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241/job/83891451962"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-06-28T08:40:54Z",
+     "completed_at": "2026-06-28T09:05:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241/job/83891451992"
+    }
+   ]
+  },
+  {
+   "run_id": 28315758501,
+   "pr": null,
+   "commit": "f5c50f45334cba1136c6c47598b336898d228678",
+   "branch": "main",
+   "event": "push",
+   "title": "Port fp4 gemm to new api and remove original preshuffle gemm (#754)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28315758501",
+   "created_at": "2026-06-28T07:55:57Z",
+   "updated_at": "2026-06-28T08:58:58Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T07:57:29Z",
+     "completed_at": "2026-06-28T08:58:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28315758501/job/83888608417"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T07:57:31Z",
+     "completed_at": "2026-06-28T08:41:44Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28315758501/job/83888608423"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T07:56:52Z",
+     "completed_at": "2026-06-28T08:19:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28315758501/job/83888608434"
+    }
+   ]
+  },
+  {
+   "run_id": 28313890627,
+   "pr": 754,
+   "commit": "2e5c0555d7c9e417c1a07c867f5c3e836acd12e1",
+   "branch": "extend_v2_gemm",
+   "event": "pull_request",
+   "title": "Extend v2 gemm",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28313890627",
+   "created_at": "2026-06-28T06:31:50Z",
+   "updated_at": "2026-06-28T07:49:28Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T06:33:10Z",
+     "completed_at": "2026-06-28T06:58:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28313890627/job/83883508378"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T06:33:18Z",
+     "completed_at": "2026-06-28T07:49:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28313890627/job/83883508379"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-28T06:41:35Z",
+     "completed_at": "2026-06-28T07:42:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28313890627/job/83883508382"
+    }
+   ]
+  },
+  {
+   "run_id": 28277396399,
+   "pr": null,
+   "commit": "5cb28f6c9056389d6d32d98541618f5fd515d836",
+   "branch": "main",
+   "event": "push",
+   "title": "[gfx1250] Add cluster launch support with TDM multicast bandwidth tes\u2026",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277396399",
+   "created_at": "2026-06-27T03:34:31Z",
+   "updated_at": "2026-06-27T04:40:41Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-27T03:38:39Z",
+     "completed_at": "2026-06-27T03:52:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277396399/job/83786756540"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-27T03:36:52Z",
+     "completed_at": "2026-06-27T04:40:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277396399/job/83786756543"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-27T03:36:53Z",
+     "completed_at": "2026-06-27T04:24:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277396399/job/83786756544"
+    }
+   ]
+  },
+  {
+   "run_id": 28277183296,
+   "pr": null,
+   "commit": "2ff3dcb533f4500bf846de4db25a8c7dde4e2ad5",
+   "branch": "extend_v2_gemm",
+   "event": "pull_request",
+   "title": "Extend v2 gemm",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277183296",
+   "created_at": "2026-06-27T03:25:11Z",
+   "updated_at": "2026-06-27T04:28:50Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-27T03:26:33Z",
+     "completed_at": "2026-06-27T04:28:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277183296/job/83786103684"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-06-27T03:26:33Z",
+     "completed_at": "2026-06-27T03:50:28Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277183296/job/83786103687"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-27T03:26:25Z",
+     "completed_at": "2026-06-27T03:37:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28277183296/job/83786103692"
+    }
+   ]
+  }
+ ]
+}
