@@ -7,11 +7,9 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import _to_raw as _raw
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Float4E2M1FN, T
 from flydsl.expr.typing import Vector as Vec
-
-from .fp8_gemm_utils import flat_buffer_view, lds_dma_atom_128
 
 # -- shape constants (KIMI defaults; per-shape values come from the compile args) --
 NE = 385  # #experts
@@ -51,6 +49,21 @@ def global_typed_ptr(arg, elem_ty, align=4):
     """Typed global fx.Pointer over a raw i64 device address; index in ELEMENTS (ptr[i]), not bytes."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
     return fx.inttoptr(ptr_ty, _raw(fx.Int64(arg)))
+
+
+def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
+    """Flat i<elem> buffer-tensor view over a RAW i64 address; fold=True folds the wave-uniform base to a VGPR voffset, fold=False keeps a per-lane offset + num_records_bytes for OOB-zero."""
+    ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
+    if fold:
+        base = fx.rocdl.readfirstlane(T.i32, _raw(base_elems))
+        off_i64 = fx.Int64(arith.ExtUIOp(T.i64, _raw(base)).result)
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg) + off_i64 * fx.Int64(elem_bytes))
+    else:
+        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg))
+    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout((1, 1), (1, 1))))
+    if num_records_bytes is not None:
+        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
+    return fx.rocdl.make_buffer_tensor(view, max_size=True)
 
 
 def lds_typed_ptr(base_i32, elem_ty, align=4):
@@ -107,6 +120,11 @@ kMChunks = 2  # BM // 16; also the gemm1 epilog row-rep count
 
 
 # ---- Shared layout-API primitives (B / B-scale data movement + scaled MFMA) ----
+def lds_dma_atom_128():
+    """BufferCopyLDS128b copy-atom (16B global->LDS DMA chunk)."""
+    return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+
+
 def b_copy_atom(nontemporal):
     """BufferCopy128b (4x i32 = one 128b weight chunk). nt rides cache_modifier."""
     return fx.make_copy_atom(fx.rocdl.BufferCopy128b(2 if nontemporal else 0), 32)

@@ -3,11 +3,9 @@
 
 import flydsl.expr as fx
 from flydsl._mlir.dialects import fly as fly_dialect
-from flydsl._mlir.dialects import llvm as llvm
+from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.expr import arith, const_expr, range_constexpr
-from flydsl.expr.arith import _to_raw as raw
-from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 
@@ -27,7 +25,10 @@ def divmod(a: int, b: int) -> tuple[int, int]:
 
 
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
-    # max_size=False without num_records_bytes: descriptor adapts to the actual extent (no shape baked into IR).
+    # max_size=False with no num_records_bytes: cosize(layout) becomes a
+    # runtime expression because TensorAdaptor defaults to layout-dynamic
+    # memref (post #554), so the descriptor adapts to the actual tensor
+    # extent and no longer bakes the first-call's shape into IR.
     t_i8 = fx.rocdl.make_buffer_tensor(arg_i8, max_size=False)
     iter_i8 = fx.get_iter(t_i8)
     f8_buf_ptr_ty = fx.PointerType.get(
@@ -37,26 +38,6 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
     )
     iter_f8 = fx.recast_iter(f8_buf_ptr_ty, iter_i8)
     return fx.Tensor(fx.make_view(iter_f8, fx.get_layout(t_i8)))
-
-
-def lds_dma_atom_128():
-    """BufferCopyLDS128b copy-atom (16B global->LDS DMA chunk), shared by G2SLoader + mxmoe_gemm_v2."""
-    return fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
-
-
-def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
-    """Flat i<elem> buffer-tensor view over a RAW i64 address; fold=True folds the wave-uniform base to a VGPR voffset, fold=False keeps a per-lane offset + num_records_bytes for OOB-zero."""
-    ptr_ty = fx.PointerType.get(elem_ty, address_space=fx.AddressSpace.Global, alignment=align)
-    if fold:
-        base = fx.rocdl.readfirstlane(T.i32, raw(base_elems))
-        off_i64 = fx.Int64(arith.ExtUIOp(T.i64, raw(base)).result)
-        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg) + off_i64 * fx.Int64(elem_bytes))
-    else:
-        base_iter = fx.inttoptr(ptr_ty, fx.Int64(arg))
-    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout((1, 1), (1, 1))))
-    if num_records_bytes is not None:
-        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
-    return fx.rocdl.make_buffer_tensor(view, max_size=True)
 
 
 def swizzle_128(row, col):
@@ -86,7 +67,7 @@ def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
 
 class G2SLoader:
     def __init__(self, gl_src, gl_offsets, n_load_steps, lds_dtype, wave_id):
-        self.g2lds_atom = lds_dma_atom_128()
+        self.g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
         self.LdsPtr_t = fx.PointerType.get(lds_dtype, 2, 512)
         self.gl_src = gl_src
         self.gl_offsets = gl_offsets
@@ -94,7 +75,7 @@ class G2SLoader:
         self.wave_id = wave_id
         self.n_waves = fx.block_dim.x // 64
 
-    def lds_dst_at(self, lds_dst, step):
+    def _lds_dst_at(self, lds_dst, step):
         step_off = self.wave_id * 1024 + step * (self.n_waves * 1024)
         base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr))
         sum_i32 = base_i32 + fx.Int32(step_off)
@@ -104,12 +85,12 @@ class G2SLoader:
     def load(self, lds_dst, k_offset):
         for step in range_constexpr(self.n_load_steps):
             src = fx.slice(self.gl_src, (None, fx.Int32(self.gl_offsets[step])))
-            dst = self.lds_dst_at(lds_dst, step)
+            dst = self._lds_dst_at(lds_dst, step)
             fx.copy(self.g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
 
     def load_one(self, lds_dst, k_offset, step):
         src = fx.slice(self.gl_src, (None, fx.Int32(self.gl_offsets[step])))
-        dst = self.lds_dst_at(lds_dst, step)
+        dst = self._lds_dst_at(lds_dst, step)
         fx.copy(self.g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
 
 
@@ -124,7 +105,7 @@ class S2RLoader:
         self.wave_idx = wave_idx
         self.n_tiles = n_tiles
 
-    def vec_load_16xf8(self, lds_src, offset):
+    def _vec_load_16xf8(self, lds_src, offset):
         off_tup = fx.make_int_tuple(offset)
         ptr_off = fx.add_offset(lds_src.ptr, off_tup)
         i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
@@ -143,13 +124,13 @@ class S2RLoader:
                 else:
                     row_swz, col_swz = swizzle_128(row, col)
                     offset = row_swz * 128 + col_swz
-                v = self.vec_load_16xf8(lds_src, offset)
+                v = self._vec_load_16xf8(lds_src, offset)
                 halves.append(v.bitcast(fx.Int32))
             frag.append(pack_i32x4_i32x8(halves[0], halves[1]))
         return frag
 
     def load_one(self, lds_src, lds_offset):
-        v = self.vec_load_16xf8(lds_src, lds_offset)
+        v = self._vec_load_16xf8(lds_src, lds_offset)
         return v.bitcast(fx.Int32)
 
 
@@ -161,7 +142,9 @@ class StoreC:
         self.c_idx_fn = c_idx_fn
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
-        # Exact byte counts from compile-time shape; num_records_bytes required when max_size=False (silent-OOB).
+        # Exact byte counts from compile-time shape (BF16 C output, FP32 scales).
+        # ``num_records_bytes`` is required when ``max_size=False`` -- see
+        # ``make_buffer_tensor`` docstring for the silent-OOB rationale.
         c_nbytes = c_rows * c_cols * 2  # BFloat16 = 2 bytes
         sa_nbytes = c_rows * 4  # Float32 row-wise scale
         sb_nbytes = c_cols * 4  # Float32 col-wise scale
@@ -179,24 +162,24 @@ class StoreC:
         self.reg_f32_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
         self.reg_bf16_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.BFloat16)
 
-    def load_scale_vec4(self, row):
+    def _load_scale_vec4(self, row):
         fx.copy(self.scale_atom_4, fx.slice(self.sa_div, (None, fx.Int32(row))), self.reg_f32_4)
         return Vec(fx.memref_load_vec(self.reg_f32_4))
 
-    def load_scale_scalar(self, col):
+    def _load_scale_scalar(self, col):
         fx.copy(self.scale_atom_1, fx.slice(self.sb_div, (None, fx.Int32(col))), self.reg_f32_1)
         return Vec(fx.memref_load_vec(self.reg_f32_1))[0]
 
-    def store_bf16(self, value_bf16, c_index):
+    def _store_bf16(self, value_bf16, c_index):
         fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), self.reg_bf16_1)
         fx.copy(self.out_atom_1, self.reg_bf16_1, fx.slice(self.c_div, (None, fx.Int32(c_index))))
 
     def store(self, c_frag, base_row, base_col):
         a_scales = [
-            self.load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4) for i in range_constexpr(self.n_tiles_a)
+            self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4) for i in range_constexpr(self.n_tiles_a)
         ]
         b_scales = [
-            self.load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)
+            self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)
         ]
         for ti in range_constexpr(self.n_tiles_a):
             row = base_row + ti * 16 + (self.lane_id // 16) * 4
@@ -208,11 +191,11 @@ class StoreC:
                 for i in range_constexpr(4):
                     scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
                     c_index = (row + i) * self.c_cols + col
-                    self.store_bf16(scaled, arith.select(col_valid, c_index, oob))
+                    self._store_bf16(scaled, arith.select(col_valid, c_index, oob))
 
 
 def wait_barrier(count):
-    llvm.inline_asm(
+    _llvm.inline_asm(
         res=None,
         operands_=[],
         asm_string=f"s_waitcnt vmcnt({count})\ns_barrier",
@@ -232,7 +215,7 @@ class Mfma16x16x128:
     def idx(self, i, j):
         return i * self.n_tiles_b + j
 
-    def do_mma(self, a, b, c):
+    def _do_mma(self, a, b, c):
         return fly_dialect.mma_atom_call_ssa([self.accum_type], self.atom, a, b, c)
 
     def call(self, a, b, c):
@@ -242,10 +225,10 @@ class Mfma16x16x128:
 
         for i in range_constexpr(self.n_tiles_a):
             for j in range_constexpr(self.n_tiles_b):
-                c[self.idx(i, j)] = self.do_mma(a[i], b[j], c[self.idx(i, j)])
+                c[self.idx(i, j)] = self._do_mma(a[i], b[j], c[self.idx(i, j)])
         return c
 
     def call_one(self, a, b, c, i, j):
         assert i < self.n_tiles_a and j < self.n_tiles_b
 
-        return self.do_mma(a[i], b[j], c[self.idx(i, j)])
+        return self._do_mma(a[i], b[j], c[self.idx(i, j)])
