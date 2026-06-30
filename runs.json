@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-06-30T21:07:01Z",
+ "updated": "2026-06-30T21:09:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28475730255,
+   "run_id": 28475887697,
    "pr": 780,
+   "commit": "67ba219dd137541e51e2238f8090650429b7aede",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475887697",
+   "created_at": "2026-06-30T21:06:27Z",
+   "updated_at": "2026-06-30T21:07:24Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28475871542,
+   "pr": null,
+   "commit": "b88ebab813dc25e38711ce8b83cac8737882f279",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475871542",
+   "created_at": "2026-06-30T21:06:11Z",
+   "updated_at": "2026-06-30T21:06:44Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28475730255,
+   "pr": null,
    "commit": "e54c5a296d4daa1386e71aa18168fdbd05426730",
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
@@ -2147,92 +2177,6 @@
      "started_at": "2026-06-28T12:39:15Z",
      "completed_at": "2026-06-28T12:43:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28322479529/job/83906804230"
-    }
-   ]
-  },
-  {
-   "run_id": 28321656986,
-   "pr": 753,
-   "commit": "50b89d04bd129adb0532c342d0988fb9ec4d85aa",
-   "branch": "mxfp4-moe-gemm",
-   "event": "pull_request",
-   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986",
-   "created_at": "2026-06-28T12:05:13Z",
-   "updated_at": "2026-06-28T12:38:28Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T12:06:05Z",
-     "completed_at": "2026-06-28T12:17:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986/job/83904578194"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-28T12:06:18Z",
-     "completed_at": "2026-06-28T12:38:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986/job/83904578199"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-28T12:06:16Z",
-     "completed_at": "2026-06-28T12:38:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321656986/job/83904578206"
-    }
-   ]
-  },
-  {
-   "run_id": 28321645839,
-   "pr": 760,
-   "commit": "9fcc7646ee960b92b593f68d4ce5bc01d6df99a3",
-   "branch": "rlcr/fa-fxcopy-main",
-   "event": "pull_request",
-   "title": "feat(flash-attn-gfx950): express QK+PV MMA via the fx.gemm layout API",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839",
-   "created_at": "2026-06-28T12:04:47Z",
-   "updated_at": "2026-06-28T13:15:05Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T12:06:18Z",
-     "completed_at": "2026-06-28T13:15:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839/job/83904577111"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T12:06:20Z",
-     "completed_at": "2026-06-28T12:56:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839/job/83904577113"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T12:18:04Z",
-     "completed_at": "2026-06-28T12:30:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839/job/83904577124"
     }
    ]
   }
