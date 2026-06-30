@@ -132,8 +132,14 @@ def test_resolve_pr_cache_avoids_second_gh_call(monkeypatch):
 # --------------------------------------------------------------------------- #
 def _rec(run_id, runner, op, shape, dtype, metric, value, ts):
     return {
-        "run_id": run_id, "runner": runner, "op": op, "shape": shape,
-        "dtype": dtype, "metric": metric, "value": value, "ts": ts,
+        "run_id": run_id,
+        "runner": runner,
+        "op": op,
+        "shape": shape,
+        "dtype": dtype,
+        "metric": metric,
+        "value": value,
+        "ts": ts,
     }
 
 
