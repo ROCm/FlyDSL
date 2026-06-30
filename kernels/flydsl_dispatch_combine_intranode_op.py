@@ -295,10 +295,13 @@ class FlyDSLDispatchCombineConfig:
     num_experts_per_rank: int
     num_experts_per_token: int
     data_type: torch.dtype = torch.bfloat16
-    default_dispatch_warp_num_per_block: int = _DEFAULT_DISPATCH_WARP_NUM
-    default_dispatch_block_num: int = _DEFAULT_DISPATCH_BLOCK_NUM
-    default_combine_warp_num_per_block: int = _DEFAULT_COMBINE_WARP_NUM
-    default_combine_block_num: int = _DEFAULT_COMBINE_BLOCK_NUM
+    # User-pinned launch geometry, resolved ONCE per op (not per call):
+    # pinned value (block_num+warp must be set together) > tuning table >
+    # ``default_*`` fallback above. None => not pinned.
+    dispatch_block_num: Optional[int] = None
+    dispatch_warp_num_per_block: Optional[int] = None
+    combine_block_num: Optional[int] = None
+    combine_warp_num_per_block: Optional[int] = None
     tuning_table: Optional[GeometryTuningTable] = None
     tuning_config_path: Optional[str] = None
     scale_dim: int = 0
@@ -608,19 +611,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"positive, got ({cfg.scale_dim}, {cfg.scale_type_size})"
             )
 
-        if cfg.default_dispatch_warp_num_per_block <= 0:
-            raise ValueError(
-                f"default_dispatch_warp_num_per_block must be positive, got {cfg.default_dispatch_warp_num_per_block}"
-            )
-        if cfg.default_dispatch_block_num <= 0:
-            raise ValueError(f"default_dispatch_block_num must be positive, got {cfg.default_dispatch_block_num}")
-        if cfg.default_combine_warp_num_per_block <= 0:
-            raise ValueError(
-                f"default_combine_warp_num_per_block must be positive, got {cfg.default_combine_warp_num_per_block}"
-            )
-        if cfg.default_combine_block_num <= 0:
-            raise ValueError(f"default_combine_block_num must be positive, got {cfg.default_combine_block_num}")
-
         # expert_id (= dest_pe * experts_per_rank + local) must fit i32.
         total_experts = cfg.world_size * cfg.num_experts_per_rank
         if total_experts > (1 << 31) - 1:
@@ -832,24 +822,21 @@ class FlyDSLDispatchCombineIntraNodeOp:
         scales,
         indices,
         packed_recv_x=None,
-        block_num=None,
-        warp_num_per_block=None,
     ):
-        """Intranode dispatch. ``block_num`` / ``warp_num_per_block`` override the
-        launch geometry (default cfg.default_dispatch_*) and only add a JIT
-        specialization; buffer sizing is unaffected."""
+        """Intranode dispatch. Launch geometry is resolved from cfg:
+        cfg.dispatch_block_num/warp (user-pinned) > tuning table > default."""
         self._check_dispatch_inputs(input, weights, scales, indices, packed_recv_x)
         cfg = self.cfg
         d_dtype = input.dtype
         inp_cur_tok = input.shape[0]
         bn, wpb = _resolve_launch_geometry(
             "dispatch",
-            block_num,
-            warp_num_per_block,
+            cfg.dispatch_block_num,
+            cfg.dispatch_warp_num_per_block,
             cfg.tuning_table,
             inp_cur_tok,
-            cfg.default_dispatch_block_num,
-            cfg.default_dispatch_warp_num_per_block,
+            _DEFAULT_DISPATCH_BLOCK_NUM,
+            _DEFAULT_DISPATCH_WARP_NUM,
         )
         _check_block_num_resident("dispatch", bn)
         disp_key = (d_dtype, bn, wpb)
@@ -984,13 +971,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
         indices,
         packed_recv_x=None,
         cur_tok=None,
-        block_num=None,
-        warp_num_per_block=None,
     ):
         """Intranode combine. ``input.dtype`` selects the kernel specialization.
         Zero-copy mode requires the caller to write into the buffer from
-        ``get_registered_combine_input_buffer()`` first. ``block_num`` /
-        ``warp_num_per_block`` override the launch geometry (JIT spec only)."""
+        ``get_registered_combine_input_buffer()`` first. Launch geometry is
+        resolved from cfg (combine pin > tuning table > default)."""
         self._check_combine_inputs(input, weights, indices, packed_recv_x)
         cfg = self.cfg
         stream = torch.cuda.current_stream()
@@ -1032,12 +1017,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # Resolve geometry on cur_tok, not input.shape[0] (ws*M under zero_copy).
         bn, wpb = _resolve_launch_geometry(
             "combine",
-            block_num,
-            warp_num_per_block,
+            cfg.combine_block_num,
+            cfg.combine_warp_num_per_block,
             cfg.tuning_table,
             _cur_tok,
-            cfg.default_combine_block_num,
-            cfg.default_combine_warp_num_per_block,
+            _DEFAULT_COMBINE_BLOCK_NUM,
+            _DEFAULT_COMBINE_WARP_NUM,
         )
         _check_block_num_resident("combine", bn)
 
@@ -1127,8 +1112,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         packed_recv_x=None,
         cur_tok=None,
         enable_weights: bool = True,
-        block_num=None,
-        warp_num_per_block=None,
     ):
         """Skip-Stage1 combine (reserved for fused GEMM2+combine; gated by
         ``_ENABLE_COMBINE_NO_STAGE1``). Runs Stage 2+3 only; caller must have
@@ -1174,12 +1157,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         bn, wpb = _resolve_launch_geometry(
             "combine",
-            block_num,
-            warp_num_per_block,
+            cfg.combine_block_num,
+            cfg.combine_warp_num_per_block,
             cfg.tuning_table,
             _cur_tok,
-            cfg.default_combine_block_num,
-            cfg.default_combine_warp_num_per_block,
+            _DEFAULT_COMBINE_BLOCK_NUM,
+            _DEFAULT_COMBINE_WARP_NUM,
         )
         _check_block_num_resident("combine", bn)
 
