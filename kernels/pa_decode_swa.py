@@ -18,14 +18,14 @@ from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels import dpp_utils
 from kernels.utils import (
-    _cdiv,
-    _rcp_f32,
-    _udiv_const,
-    _unflatten_k,
-    _urem_const,
+    cdiv,
     global_load_i32,
     global_load_i64x2,
     global_ptr_from_addr,
+    rcp_f32,
+    udiv_const,
+    unflatten_k,
+    urem_const,
 )
 
 # ── Kernel geometry constants ────────────────────────────────────────
@@ -63,7 +63,7 @@ TILES_PER_BLOCK = KV_BLOCK_SIZE // KV_COMPUTE_BLOCK  # 4
 
 
 def _get_sw_mtp_group_count(query_length: int, query_group_size: int) -> int:
-    return _cdiv(query_length * query_group_size, MFMA_N)
+    return cdiv(query_length * query_group_size, MFMA_N)
 
 
 def _get_sw_mtp_pair_offset(mtp_group_idx: int, mtp_subgroup_idx: int = 0) -> int:
@@ -198,24 +198,24 @@ def _compute_sw_mtp_group_state(
         lane_pair = lane_pair_raw
     else:
         lane_pair = arith.select(lane_pair_raw < c_total_pairs, lane_pair_raw, c_pair_max)
-    qi_raw = _udiv_const(lane_pair, query_group_size)
+    qi_raw = udiv_const(lane_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_val = qi_raw
     else:
         qi_val = arith.select(qi_raw < c_ql_m1, qi_raw, c_ql_m1)
-    qhi_pos = _urem_const(lane_pair, query_group_size)
+    qhi_pos = urem_const(lane_pair, query_group_size)
 
     lqh_pair_raw = local_qhead_idx + fx.Int32(g_off)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lqh_pair = lqh_pair_raw
     else:
         lqh_pair = arith.select(lqh_pair_raw < c_total_pairs, lqh_pair_raw, c_pair_max)
-    lqi_raw = _udiv_const(lqh_pair, query_group_size)
+    lqi_raw = udiv_const(lqh_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_for_q = lqi_raw
     else:
         qi_for_q = arith.select(lqi_raw < c_ql_m1, lqi_raw, c_ql_m1)
-    local_qhead_idx_for_q = _urem_const(lqh_pair, query_group_size)
+    local_qhead_idx_for_q = urem_const(lqh_pair, query_group_size)
     return qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q
 
 
@@ -305,7 +305,7 @@ def _finish_q_fragments(
             c_one_f,
         )
     )
-    inv_query_scale = _rcp_f32(query_scale_lane)
+    inv_query_scale = rcp_f32(query_scale_lane)
     q_words = []
     for q_f32 in q_f32_chunks:
         p = q_f32 * inv_query_scale
@@ -414,7 +414,7 @@ def _finish_sw_mtp_subgroup_q_fragments(
 def _normalize_pa_output(running_sum, outs, zero_f, vhe_loop: int = 2):
     one_f = fx.Float32(1.0).ir_value()
     safe_sum = arith.select(running_sum > zero_f, running_sum, one_f)
-    inv_sum = _rcp_f32(safe_sum)
+    inv_sum = rcp_f32(safe_sum)
     normalized_outs = []
     for vhe in range_constexpr(vhe_loop):
         normalized_outs.append(outs[vhe] * vector.broadcast(T.f32x4, inv_sum))
@@ -713,7 +713,7 @@ def _make_pa_phase_helpers(
                 v_max_global = v_max_global.maximumf(w_vmax)
             v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
-            norm_factor = _rcp_f32(v_max_safe_scaled)
+            norm_factor = rcp_f32(v_max_safe_scaled)
             prob_scale = my_warp_rescale
             v_correction = v_max_scaled * part_to_new
             for td in range_constexpr(TLOOP):
@@ -786,7 +786,7 @@ def get_sw_max_context_partition_num(
     if sliding_window <= 0:
         return 0
     window_token_count = sliding_window + query_length
-    return _cdiv(window_token_count - 1, context_partition_size) + 1
+    return cdiv(window_token_count - 1, context_partition_size) + 1
 
 
 @functools.lru_cache(maxsize=256)
@@ -950,7 +950,7 @@ def compile_pa_decode_sw_reduce(
                 global_exp_sum,
                 c_one_f,
             )
-            inv_global_exp_sum = _rcp_f32(safe_global_exp_sum)
+            inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
             weight_local = scaled_sum * inv_global_exp_sum
             weight_local_i32 = arith.bitcast(T.i32, arith.unwrap(weight_local))
 
@@ -1020,7 +1020,7 @@ def compile_pa_decode_sw_reduce(
                 global_exp_sum,
                 c_one_f,
             )
-            inv_global_exp_sum = _rcp_f32(safe_global_exp_sum)
+            inv_global_exp_sum = rcp_f32(safe_global_exp_sum)
 
             for chunk_base in range(0, max_context_partition_num, block_threads):
                 chunk_size = min(block_threads, max_context_partition_num - chunk_base)
@@ -1062,8 +1062,8 @@ def compile_pa_decode_sw_reduce(
                 part_logits = fx.Float32(part_logits_bf16)
                 acc = acc + part_logits * weight
 
-        query_idx = _udiv_const(eqgs_idx, query_group_size)
-        group_idx = _urem_const(eqgs_idx, query_group_size)
+        query_idx = udiv_const(eqgs_idx, query_group_size)
+        group_idx = urem_const(eqgs_idx, query_group_size)
         out_off = (
             batch_idx * stride_output_bs
             + query_idx * stride_output_len
@@ -1232,8 +1232,8 @@ def compile_pa_decode_sw(
         tid = fx.Int32(gpu.thread_id("x"))
         batch_idx = fx.Int32(gpu.block_id("x"))
         grid_y = fx.Int32(gpu.block_id("y"))
-        kv_h = _udiv_const(grid_y, _mtp_groups)
-        mtp_group_from_grid = _urem_const(grid_y, _mtp_groups)
+        kv_h = udiv_const(grid_y, _mtp_groups)
+        mtp_group_from_grid = urem_const(grid_y, _mtp_groups)
         partition_idx = fx.Int32(gpu.block_id("z"))
         cl_global_ptr = global_ptr_from_addr(context_lengths_ptr)
         context_len = global_load_i32(cl_global_ptr, batch_idx)
@@ -1492,7 +1492,7 @@ def compile_pa_decode_sw(
                 )
                 _store_vmax_warp(tile_kv_seq_start, seq_end=tile_context_len)
                 return (
-                    _unflatten_k(tile_k_flat, qkhe_loop=_QKHELOOP),
+                    unflatten_k(tile_k_flat, qkhe_loop=_QKHELOOP),
                     tile_v_ops,
                     tile_kv_seq_start,
                     tile_context_len,

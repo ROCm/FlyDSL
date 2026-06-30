@@ -31,17 +31,17 @@ from kernels import dpp_utils
 from kernels.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.pa_metadata import compile_pa_decode_metadata
 from kernels.utils import (
-    _cdiv,
-    _exp2_f32_fast,
-    _maxnumf,
-    _rcp_f32,
-    _udiv_const,
-    _unflatten_k,
-    _urem_const,
     buffer_load,
+    cdiv,
+    exp2_f32_fast,
     global_load_i32,
     global_load_i64x2,
     global_ptr_from_addr,
+    maxnumf,
+    rcp_f32,
+    udiv_const,
+    unflatten_k,
+    urem_const,
 )
 
 # ── Kernel geometry constants ────────────────────────────────────────
@@ -188,24 +188,24 @@ def _compute_mtp_group_state(
         lane_pair = lane_pair_raw
     else:
         lane_pair = arith.select(lane_pair_raw < c_total_pairs, lane_pair_raw, c_pair_max)
-    qi_raw = _udiv_const(lane_pair, query_group_size)
+    qi_raw = udiv_const(lane_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_val = qi_raw
     else:
         qi_val = arith.select(qi_raw < c_ql_m1, qi_raw, c_ql_m1)
-    qhi_pos = _urem_const(lane_pair, query_group_size)
+    qhi_pos = urem_const(lane_pair, query_group_size)
 
     lqh_pair_raw = local_qhead_idx + fx.Int32(g_off)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         lqh_pair = lqh_pair_raw
     else:
         lqh_pair = arith.select(lqh_pair_raw < c_total_pairs, lqh_pair_raw, c_pair_max)
-    lqi_raw = _udiv_const(lqh_pair, query_group_size)
+    lqi_raw = udiv_const(lqh_pair, query_group_size)
     if const_expr((query_length * query_group_size) % MFMA_N == 0):
         qi_for_q = lqi_raw
     else:
         qi_for_q = arith.select(lqi_raw < c_ql_m1, lqi_raw, c_ql_m1)
-    local_qhead_idx_for_q = _urem_const(lqh_pair, query_group_size)
+    local_qhead_idx_for_q = urem_const(lqh_pair, query_group_size)
     return qi_val, qhi_pos, qi_for_q, local_qhead_idx_for_q
 
 
@@ -284,10 +284,10 @@ def _finish_q_fragments(
         q_abs_i32 = q_i32 & abs_mask
         q_abs = q_abs_i32.bitcast(fx.Float32)
         chunk_max = q_abs.reduce("max")
-        local_max = _maxnumf(local_max, chunk_max)
+        local_max = maxnumf(local_max, chunk_max)
 
     for sh in [8, 4, 2, 1]:
-        local_max = _maxnumf(local_max, dpp_utils.dpp_xor_f32(local_max, sh))
+        local_max = maxnumf(local_max, dpp_utils.dpp_xor_f32(local_max, sh))
     query_scale_lane = fx.Float32(
         arith.select(
             local_max > c_zero_f,
@@ -295,7 +295,7 @@ def _finish_q_fragments(
             c_one_f,
         )
     )
-    inv_query_scale = _rcp_f32(query_scale_lane)
+    inv_query_scale = rcp_f32(query_scale_lane)
     q_words = []
     for q_f32 in q_f32_chunks:
         p = q_f32 * inv_query_scale
@@ -399,7 +399,7 @@ def _finish_mtp_group_q_fragments(
 def _normalize_pa_output(running_sum, outs, zero_f):
     one_f = fx.Float32(1.0).ir_value()
     safe_sum = arith.select(running_sum > zero_f, running_sum, one_f)
-    inv_sum = _rcp_f32(safe_sum)
+    inv_sum = rcp_f32(safe_sum)
     inv_sum_vec = vector.broadcast(T.f32x4, inv_sum)
     return [out * inv_sum_vec for out in outs]
 
@@ -480,9 +480,9 @@ def _make_pa_phase_helpers(
                         vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
                         vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = _maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
+                v_max_warp = maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
-                v_max_warp = _maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                v_max_warp = maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
             vector.store(
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
                 softmax_lds_f32,
@@ -544,9 +544,9 @@ def _make_pa_phase_helpers(
             if const_expr(kv_tok_base is not None):
                 logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, neg_inf)
                 d_out[td] = logits_vec
-            qk_max = _maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
+            qk_max = maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
-            qk_max = _maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+            qk_max = maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         vector.store(
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
             softmax_lds_f32,
@@ -562,14 +562,14 @@ def _make_pa_phase_helpers(
         partition_sum = zero_f
         max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
         for w in range_constexpr(NUM_WARPS):
-            partition_max = _maxnumf(partition_max, max_vec[w])
+            partition_max = maxnumf(partition_max, max_vec[w])
 
-        new_rmax = _maxnumf(rmax, partition_max)
+        new_rmax = maxnumf(rmax, partition_max)
         safe_eff_max = arith.select(partition_max > neg_inf, new_rmax, zero_f) if const_expr(needs_mask) else new_rmax
         local_exp_sum = zero_f
         for td in range_constexpr(TLOOP):
             diff_vec = fx.Vector(d_out[td]) - vector.broadcast(T.f32x4, arith.unwrap(safe_eff_max))
-            p_vec = _exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
+            p_vec = exp2_f32_fast(diff_vec * vector.broadcast(T.f32x4, arith.unwrap(fx.Float32(LOG2E))))
             local_exp_sum = local_exp_sum + fx.Vector(p_vec).reduce("add")
             d_out[td] = p_vec
         for sh in [32, 16]:
@@ -582,11 +582,11 @@ def _make_pa_phase_helpers(
         if const_expr(needs_mask):
             accum_scale = arith.select(
                 rmax > neg_inf,
-                _exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()),
+                exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value()),
                 zero_f,
             )
         else:
-            accum_scale = _exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
+            accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         gpu.barrier()
         sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
@@ -607,10 +607,10 @@ def _make_pa_phase_helpers(
             vmax_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_vmax_rd_offs[0]]))
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
-                v_max_global = _maxnumf(v_max_global, w_vmax)
+                v_max_global = maxnumf(v_max_global, w_vmax)
             v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
-            norm_factor = _rcp_f32(v_max_safe_scaled)
+            norm_factor = rcp_f32(v_max_safe_scaled)
             v_correction = v_max_scaled
             _vec_norm_p = arith.unwrap(norm_factor)
             for td in range_constexpr(TLOOP):
@@ -896,14 +896,14 @@ def get_recommended_splits(
     """
     if sliding_window > 0:
         window_token_count = sliding_window + query_length
-        return _cdiv(window_token_count - 1, context_partition_size) + 1
+        return cdiv(window_token_count - 1, context_partition_size) + 1
 
     props = torch.cuda.get_device_properties(torch.device("cuda"))
     # Reference uses occupancy = 2 (see `get_occupancy()` in the Gluon module).
     occupancy = 2
     num_sm = props.multi_processor_count * occupancy
     denom = max(1, num_sequences * num_kv_heads * split_kv_blocks)
-    n = _cdiv(num_sm, denom) * split_kv_blocks
+    n = cdiv(num_sm, denom) * split_kv_blocks
     return max(4, min(n, 8))
 
 
@@ -929,7 +929,7 @@ def _pa_small_block_load_k_flat(
     """Load K data for one warp's 64-token slice of a 256-token partition.
 
     Returns ``k_flat`` (a list of ``TLOOP * qkhe_loop * 2`` i64 scalars) compatible
-    with ``_unflatten_k`` and downstream MFMA invocations.
+    with ``unflatten_k`` and downstream MFMA invocations.
     """
     c_he_stride_dw = fx.Int32(block_size * FP8_ELEMS_16B // 4)
     c_tok_stride_dw = fx.Int32(FP8_ELEMS_16B // 4)
@@ -1532,7 +1532,7 @@ def compile_pa_decode_ps(
             # END of the previous iteration).  K's VMEM latency overlaps prev
             # iter's PV MFMA; V's latency overlaps the entire next iter QK +
             # softmax compute before PV consumes it.
-            k_ops = _unflatten_k(k_flat, qkhe_loop=_QKHELOOP)
+            k_ops = unflatten_k(k_flat, qkhe_loop=_QKHELOOP)
             v_results = _unflatten_v_results(v_flat, vhe_loop=_VHELOOP)
 
             # Stage this iter's K/V scale (prefetched last iter, latency hidden).
