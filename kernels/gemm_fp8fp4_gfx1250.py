@@ -418,15 +418,12 @@ def compile_fp8fp4_gemm(
         and out_dtype == "bf16"
     )
     fp8_deep_pipeline_eligible = _fp8_deep_base and m_warp == 2 and n_warp == 2
-    # occ=2 warp-pp (8-wave, 2x4/4x2): reuses the deep emit at occupancy 2.
-    # Opt-in via FLYDSL_WARP_PP=1 (FLYDSL_DEEP_OCC2 = legacy alias); occ=1 unchanged.
+    # occ=2 warp-pp (8-wave, 2x4/4x2): reuses the deep emit at occupancy 2. Opt-in
+    # via FLYDSL_WARP_PP=1 while it is experimental; occ=1 default path unchanged.
     fp8_warp_pp_eligible = (
         _fp8_deep_base
         and (m_warp, n_warp) in ((2, 4), (4, 2))
-        and (
-            os.environ.get("FLYDSL_WARP_PP", "0") == "1"
-            or os.environ.get("FLYDSL_DEEP_OCC2", "0") == "1"
-        )
+        and os.environ.get("FLYDSL_WARP_PP", "0") == "1"
     )
 
     def _pick_compute_schedule_kind():
@@ -471,6 +468,14 @@ def compile_fp8fp4_gemm(
         _wpp_flag_alloc.ptr = 16  # a_ready @0, a_consumed @4 (i32, + pad)
     _WPP_OFF_READY = 0
     _WPP_OFF_CONSUMED = 4
+    # Anti-phase drift: how many K-tiles group0 may lead group1. The WAR spin
+    # becomes `a_consumed >= gen - _WPP_DRIFT`. SAFETY: drift>0 is only correct if
+    # the shared-A buffer outlives the lead, i.e. (num_buffers - pre_loaded) > drift.
+    # With pre_loaded=num_buffers-1 the slack is 0, so _WPP_DRIFT MUST stay 0 (the
+    # validated same-phase 2a). To enable real drift (2b), first create A-buffer
+    # slack (reduce pre_loaded by _WPP_DRIFT, or give A its own deeper ring) AND
+    # re-validate on GPU. Do NOT raise this without that change.
+    _WPP_DRIFT = 0
     use_row_major_k_prefetch = wmma_m_rep == 1 and k_wmma_steps > 1
     _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
     _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
@@ -2508,7 +2513,14 @@ def compile_fp8fp4_gemm(
             _if = scf.IfOp(arith.unwrap(rocdl.wave_id() < fx.Int32(_wpp_grp_count)), [], has_else=True)
             with ir.InsertionPoint(_if.then_block):
                 _wpp_intra_barrier("wpp_g0", 1)
-                _wpp_spin_ge(_WPP_OFF_CONSUMED, gen_i32)
+                # WAR: group0 must not overwrite a buffer group1 still needs. With
+                # _WPP_DRIFT==0 this is a_consumed>=gen (same-phase); drift>0 loosens
+                # it (only safe with A-buffer slack -- see _WPP_DRIFT note).
+                if const_expr(_WPP_DRIFT > 0):
+                    _war_thr = arith.subi(gen_i32, fx.Int32(_WPP_DRIFT))
+                else:
+                    _war_thr = gen_i32
+                _wpp_spin_ge(_WPP_OFF_CONSUMED, _war_thr)
                 lds_atomic_store_b32_raw(
                     _wpp_fidx, arith.index(_WPP_OFF_READY), gen_p1_i32, llvm.AtomicOrdering.release
                 )
