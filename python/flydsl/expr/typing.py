@@ -48,6 +48,7 @@ from .numeric import (
     as_numeric,
 )
 from .primitive import *
+from .utils import lazy_classattr
 from .utils.arith import (
     ArithValue,
     _to_raw,
@@ -134,7 +135,7 @@ def as_dsl_value(value, exemplar=None):
         ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
         if ctor is not None:
             try:
-                return ctor([value])
+                return ctor([value], exemplar)
             except Exception:
                 raise ValueError(f"failed to construct {type(exemplar)} from {value}")
 
@@ -579,7 +580,7 @@ class Constexpr:
         return result
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         if values:
             raise ValueError(f"{cls.__name__} expects 0 ir.Values, got {len(values)}")
         if not cls.is_specialized:
@@ -647,7 +648,7 @@ class BuiltinDslType(ir.Value):
         return f"{type(self).__name__}<{super().__str__()}>"
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         return cls(values[0])
 
     def __extract_to_ir_values__(self):
@@ -712,6 +713,10 @@ class IntTuple(BuiltinDslType):
         leaves = get_leaves(self, dynamic_only=True)
         leaf_iter = iter(leaves)
         return self._rebuild_py_value(leaf_iter)
+
+    @dsl_loc_tracing
+    def unpack(self):
+        return self.to_py_value()
 
     @dsl_loc_tracing
     def __getitem__(self, mode):
@@ -1034,7 +1039,7 @@ class Tensor(BuiltinDslType):
 
     @dsl_loc_tracing
     def load(self):
-        return Vector(memref_load_vec(self), self.shape.to_py_value(), self.dtype)
+        return memref_load_vec(self)
 
     @dsl_loc_tracing
     def store(self, vector):
@@ -1244,7 +1249,7 @@ class Stream:
         return [(ctypes.c_void_p, fill)]
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         return Stream(values[0])
 
     def __extract_to_ir_values__(self):
@@ -1408,9 +1413,9 @@ class Vector(ArithValue):
         vty = ir.VectorType(value.type)
         if shape is None:
             shape = tuple(vty.shape)
+        if dtype is None:
             dtype = Numeric.from_ir_type(vty.element_type)
-        elif dtype is None:
-            dtype = Numeric.from_ir_type(vty.element_type)
+
         shape = self._canonical_shape(shape)
         if not all(isinstance(dim, int) for dim in self._flatten_static(shape)):
             raise ValueError("dynamic vector shape is not supported")
@@ -1443,7 +1448,9 @@ class Vector(ArithValue):
 
     @staticmethod
     def _canonical_shape(shape):
-        return (shape,) if isinstance(shape, int) else tuple(shape)
+        if isinstance(shape, int):
+            return (shape,)
+        return tuple(Vector._canonical_shape(dim) if isinstance(dim, (tuple, list)) else dim for dim in shape)
 
     @staticmethod
     def _flatten_static(value):
@@ -1535,7 +1542,9 @@ class Vector(ArithValue):
         return [self]
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
+        if isinstance(exemplar, cls):
+            return cls(values[0], exemplar._shape, exemplar._dtype)
         return cls(values[0])
 
     def to(self, dtype: Type[Numeric]) -> "Vector":
@@ -1566,12 +1575,17 @@ class Vector(ArithValue):
 
     def _wrap_op_result(self, result, shape):
         if isinstance(result, ir.Value) and isinstance(result.type, ir.VectorType):
-            return Vector(result, shape, Numeric.from_ir_type(result.type.element_type))
+            return Vector(result, shape, self._result_dtype(result.type.element_type))
         if isinstance(result, Numeric):
             return result
         if isinstance(result, ir.Value):
-            return Numeric.from_ir_type(result.type)(result)
+            return self._result_dtype(result.type)(result)
         return result
+
+    def _result_dtype(self, elem_type) -> Type[Numeric]:
+        if self._dtype.ir_type == elem_type:
+            return self._dtype
+        return Numeric.from_ir_type(elem_type)
 
     def _apply_op(self, method_name, op, other, flip=False):
         lhs = self
@@ -1929,7 +1943,7 @@ class Array:
             return self._ptr_value
 
         @classmethod
-        def __construct_from_ir_values__(cls, values):
+        def __construct_from_ir_values__(cls, values, exemplar=None):
             if len(values) != 1:
                 raise ValueError(f"{cls.__name__} expects 1 ir.Value, got {len(values)}")
             return cls(values[0])
@@ -2003,3 +2017,237 @@ class Array:
         )
         cls._cache[cache_key] = array_type
         return array_type
+
+
+# ===========================================================================
+# Vector aliases
+# ===========================================================================
+
+
+def VectorAlias(alias_dtype: Type[Numeric], lanes: int):
+    expected_shape = (lanes,)
+
+    def __init__(self, value, shape=None, dtype=None):
+        if shape is not None and Vector._canonical_shape(shape) != expected_shape:
+            raise ValueError(f"{type(self).__name__} expects shape {expected_shape}, got {shape}")
+        if dtype is not None and dtype is not alias_dtype:
+            raise ValueError(f"{type(self).__name__} expects dtype {alias_dtype.__name__}, got {dtype.__name__}")
+        if isinstance(value, (int, float, bool, Numeric)):
+            value = Vector.filled(expected_shape, value, alias_dtype)
+        elif isinstance(value, (list, tuple)):
+            value = Vector.from_elements(value, alias_dtype)
+        Vector.__init__(self, value, expected_shape, alias_dtype)
+
+    return type(
+        f"{alias_dtype.__name__}x{lanes}",
+        (Vector,),
+        {
+            "__module__": Vector.__module__,
+            "__init__": __init__,
+            "ir_type": lazy_classattr(lambda: Vector.make_type(lanes, alias_dtype)),
+        },
+    )
+
+
+Float4E2M1FNx2 = VectorAlias(Float4E2M1FN, 2)
+Float4E2M1FNx4 = VectorAlias(Float4E2M1FN, 4)
+Float4E2M1FNx8 = VectorAlias(Float4E2M1FN, 8)
+Float4E2M1FNx16 = VectorAlias(Float4E2M1FN, 16)
+Float4E2M1FNx32 = VectorAlias(Float4E2M1FN, 32)
+
+Float8E4M3x1 = VectorAlias(Float8E4M3, 1)
+Float8E4M3x2 = VectorAlias(Float8E4M3, 2)
+Float8E4M3x4 = VectorAlias(Float8E4M3, 4)
+Float8E4M3x8 = VectorAlias(Float8E4M3, 8)
+Float8E4M3x16 = VectorAlias(Float8E4M3, 16)
+
+Float8E4M3B11FNUZx1 = VectorAlias(Float8E4M3B11FNUZ, 1)
+Float8E4M3B11FNUZx2 = VectorAlias(Float8E4M3B11FNUZ, 2)
+Float8E4M3B11FNUZx4 = VectorAlias(Float8E4M3B11FNUZ, 4)
+Float8E4M3B11FNUZx8 = VectorAlias(Float8E4M3B11FNUZ, 8)
+Float8E4M3B11FNUZx16 = VectorAlias(Float8E4M3B11FNUZ, 16)
+
+Float8E4M3FNx1 = VectorAlias(Float8E4M3FN, 1)
+Float8E4M3FNx2 = VectorAlias(Float8E4M3FN, 2)
+Float8E4M3FNx4 = VectorAlias(Float8E4M3FN, 4)
+Float8E4M3FNx8 = VectorAlias(Float8E4M3FN, 8)
+Float8E4M3FNx16 = VectorAlias(Float8E4M3FN, 16)
+
+Float8E4M3FNUZx1 = VectorAlias(Float8E4M3FNUZ, 1)
+Float8E4M3FNUZx2 = VectorAlias(Float8E4M3FNUZ, 2)
+Float8E4M3FNUZx4 = VectorAlias(Float8E4M3FNUZ, 4)
+Float8E4M3FNUZx8 = VectorAlias(Float8E4M3FNUZ, 8)
+Float8E4M3FNUZx16 = VectorAlias(Float8E4M3FNUZ, 16)
+
+Float8E5M2x1 = VectorAlias(Float8E5M2, 1)
+Float8E5M2x2 = VectorAlias(Float8E5M2, 2)
+Float8E5M2x4 = VectorAlias(Float8E5M2, 4)
+Float8E5M2x8 = VectorAlias(Float8E5M2, 8)
+Float8E5M2x16 = VectorAlias(Float8E5M2, 16)
+
+Float8E8M0FNUx1 = VectorAlias(Float8E8M0FNU, 1)
+Float8E8M0FNUx2 = VectorAlias(Float8E8M0FNU, 2)
+Float8E8M0FNUx4 = VectorAlias(Float8E8M0FNU, 4)
+Float8E8M0FNUx8 = VectorAlias(Float8E8M0FNU, 8)
+Float8E8M0FNUx16 = VectorAlias(Float8E8M0FNU, 16)
+
+BFloat16x1 = VectorAlias(BFloat16, 1)
+BFloat16x2 = VectorAlias(BFloat16, 2)
+BFloat16x4 = VectorAlias(BFloat16, 4)
+BFloat16x8 = VectorAlias(BFloat16, 8)
+BFloat16x16 = VectorAlias(BFloat16, 16)
+
+Float16x1 = VectorAlias(Float16, 1)
+Float16x2 = VectorAlias(Float16, 2)
+Float16x4 = VectorAlias(Float16, 4)
+Float16x8 = VectorAlias(Float16, 8)
+Float16x16 = VectorAlias(Float16, 16)
+
+Float32x1 = VectorAlias(Float32, 1)
+Float32x2 = VectorAlias(Float32, 2)
+Float32x4 = VectorAlias(Float32, 4)
+Float32x8 = VectorAlias(Float32, 8)
+Float64x1 = VectorAlias(Float64, 1)
+Float64x2 = VectorAlias(Float64, 2)
+Float64x4 = VectorAlias(Float64, 4)
+
+Int4x2 = VectorAlias(Int4, 2)
+Int4x4 = VectorAlias(Int4, 4)
+Int4x8 = VectorAlias(Int4, 8)
+Int4x16 = VectorAlias(Int4, 16)
+Int4x32 = VectorAlias(Int4, 32)
+Int8x1 = VectorAlias(Int8, 1)
+Int8x2 = VectorAlias(Int8, 2)
+Int8x4 = VectorAlias(Int8, 4)
+Int8x8 = VectorAlias(Int8, 8)
+Int8x16 = VectorAlias(Int8, 16)
+Int16x1 = VectorAlias(Int16, 1)
+Int16x2 = VectorAlias(Int16, 2)
+Int16x4 = VectorAlias(Int16, 4)
+Int16x8 = VectorAlias(Int16, 8)
+Int16x16 = VectorAlias(Int16, 16)
+
+Int32x1 = VectorAlias(Int32, 1)
+Int32x2 = VectorAlias(Int32, 2)
+Int32x4 = VectorAlias(Int32, 4)
+Int32x8 = VectorAlias(Int32, 8)
+Int64x1 = VectorAlias(Int64, 1)
+Int64x2 = VectorAlias(Int64, 2)
+Int64x4 = VectorAlias(Int64, 4)
+Int128x1 = VectorAlias(Int128, 1)
+
+Uint8x1 = VectorAlias(Uint8, 1)
+Uint8x2 = VectorAlias(Uint8, 2)
+Uint8x4 = VectorAlias(Uint8, 4)
+Uint8x8 = VectorAlias(Uint8, 8)
+Uint8x16 = VectorAlias(Uint8, 16)
+Uint16x1 = VectorAlias(Uint16, 1)
+Uint16x2 = VectorAlias(Uint16, 2)
+Uint16x4 = VectorAlias(Uint16, 4)
+Uint16x8 = VectorAlias(Uint16, 8)
+Uint16x16 = VectorAlias(Uint16, 16)
+Uint32x1 = VectorAlias(Uint32, 1)
+Uint32x2 = VectorAlias(Uint32, 2)
+Uint32x4 = VectorAlias(Uint32, 4)
+Uint32x8 = VectorAlias(Uint32, 8)
+Uint64x1 = VectorAlias(Uint64, 1)
+Uint64x2 = VectorAlias(Uint64, 2)
+Uint64x4 = VectorAlias(Uint64, 4)
+Uint128x1 = VectorAlias(Uint128, 1)
+
+__all__ += [
+    "VectorAlias",
+    "BFloat16x1",
+    "BFloat16x2",
+    "BFloat16x4",
+    "BFloat16x8",
+    "BFloat16x16",
+    "Float4E2M1FNx2",
+    "Float4E2M1FNx4",
+    "Float4E2M1FNx8",
+    "Float4E2M1FNx16",
+    "Float4E2M1FNx32",
+    "Float8E4M3x1",
+    "Float8E4M3x2",
+    "Float8E4M3x4",
+    "Float8E4M3x8",
+    "Float8E4M3x16",
+    "Float8E4M3B11FNUZx1",
+    "Float8E4M3B11FNUZx2",
+    "Float8E4M3B11FNUZx4",
+    "Float8E4M3B11FNUZx8",
+    "Float8E4M3B11FNUZx16",
+    "Float8E4M3FNx1",
+    "Float8E4M3FNx2",
+    "Float8E4M3FNx4",
+    "Float8E4M3FNx8",
+    "Float8E4M3FNx16",
+    "Float8E4M3FNUZx1",
+    "Float8E4M3FNUZx2",
+    "Float8E4M3FNUZx4",
+    "Float8E4M3FNUZx8",
+    "Float8E4M3FNUZx16",
+    "Float8E5M2x1",
+    "Float8E5M2x2",
+    "Float8E5M2x4",
+    "Float8E5M2x8",
+    "Float8E5M2x16",
+    "Float8E8M0FNUx1",
+    "Float8E8M0FNUx2",
+    "Float8E8M0FNUx4",
+    "Float8E8M0FNUx8",
+    "Float8E8M0FNUx16",
+    "Float16x1",
+    "Float16x2",
+    "Float16x4",
+    "Float16x8",
+    "Float16x16",
+    "Float32x1",
+    "Float32x2",
+    "Float32x4",
+    "Float32x8",
+    "Float64x1",
+    "Float64x2",
+    "Float64x4",
+    "Int4x2",
+    "Int4x4",
+    "Int4x8",
+    "Int4x16",
+    "Int4x32",
+    "Int8x1",
+    "Int8x2",
+    "Int8x4",
+    "Int8x8",
+    "Int8x16",
+    "Int16x1",
+    "Int16x2",
+    "Int16x4",
+    "Int16x8",
+    "Int16x16",
+    "Int32x1",
+    "Int32x2",
+    "Int32x4",
+    "Int32x8",
+    "Int64x1",
+    "Int64x2",
+    "Int64x4",
+    "Int128x1",
+    "Uint8x1",
+    "Uint8x2",
+    "Uint8x4",
+    "Uint8x8",
+    "Uint8x16",
+    "Uint16x1",
+    "Uint16x2",
+    "Uint16x4",
+    "Uint16x8",
+    "Uint16x16",
+    "Uint32x1",
+    "Uint32x2",
+    "Uint32x4",
+    "Uint32x8",
+    "Uint64x1",
+    "Uint64x2",
+    "Uint64x4",
+    "Uint128x1",
+]
