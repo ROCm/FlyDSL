@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-06-30T14:18:19Z",
+ "updated": "2026-06-30T14:32:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -344,19 +344,19 @@
    "branch": "pa-decode-deterministic-reduce",
    "event": "pull_request",
    "title": "[pa] Deterministic split-partition reduce for PS decode",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077",
    "created_at": "2026-06-30T08:14:47Z",
-   "updated_at": "2026-06-30T08:15:21Z",
+   "updated_at": "2026-06-30T14:30:45Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-06-30T08:16:44Z",
+     "started_at": "2026-06-30T14:30:44Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077/job/84242992244"
     },
@@ -473,20 +473,20 @@
    "branch": "pr/fallback-locations",
    "event": "pull_request",
    "title": "[Enh] Add FallbackLocations rewriter for bare-op source locations",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579",
    "created_at": "2026-06-30T07:44:14Z",
-   "updated_at": "2026-06-30T14:16:43Z",
+   "updated_at": "2026-06-30T14:30:09Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-06-30T14:16:42Z",
-     "completed_at": null,
+     "completed_at": "2026-06-30T14:30:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677256"
     },
     {
