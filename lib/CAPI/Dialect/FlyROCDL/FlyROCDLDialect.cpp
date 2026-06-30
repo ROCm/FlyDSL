@@ -12,6 +12,7 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(FlyROCDL, fly_rocdl, mlir::fly_rocdl::FlyR
 
 void mlirRegisterFlyToROCDLConversionPass(void) { mlir::registerFlyToROCDLConversionPass(); }
 void mlirRegisterFlyROCDLClusterAttrPass(void) { mlir::registerFlyROCDLClusterAttrPass(); }
+void mlirRegisterFlyROCDLArgInRegPass(void) { mlir::registerFlyROCDLArgInRegPass(); }
 
 void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
   unwrap(registry)->insert<mlir::fly_rocdl::FlyROCDLDialect>();
@@ -20,4 +21,5 @@ void flydsl_register_rocdl_dialects(MlirDialectRegistry registry) {
 void flydsl_register_rocdl_passes(void) {
   mlirRegisterFlyToROCDLConversionPass();
   mlirRegisterFlyROCDLClusterAttrPass();
+  mlirRegisterFlyROCDLArgInRegPass();
 }

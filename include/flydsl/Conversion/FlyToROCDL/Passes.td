@@ -28,3 +28,18 @@ def FlyROCDLClusterAttrPass : Pass<"fly-rocdl-cluster-attr"> {
     "LLVM::LLVMDialect"
   ];
 }
+
+def FlyROCDLArgInRegPass : Pass<"fly-rocdl-arg-inreg"> {
+  let summary = "Mark kernel arguments as inreg for SGPR preloading";
+  let description = [{
+    Adds the `llvm.inreg` attribute to all arguments of `llvm.func` ops
+    marked with `rocdl.kernel`, hinting the firmware to preload kernel
+    arguments into user SGPRs so the kernel does not need to s_load its
+    arguments from memory.
+
+    Run inside `gpu.module(...)` after `convert-gpu-to-rocdl`.
+  }];
+  let dependentDialects = [
+    "LLVM::LLVMDialect"
+  ];
+}

@@ -27,6 +27,7 @@
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
 #define GEN_PASS_DEF_FLYROCDLCLUSTERATTRPASS
+#define GEN_PASS_DEF_FLYROCDLARGINREGPASS
 #include "flydsl/Conversion/FlyToROCDL/Passes.h.inc"
 } // namespace mlir
 
@@ -909,6 +910,31 @@ public:
 
       func.setPassthroughAttr(ArrayAttr::get(ctx, passthroughAttrs));
       func->removeAttr("rocdl.cluster_dims");
+    });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// FlyROCDLArgInRegPass — mark all kernel arguments as inreg so the firmware
+// preloads them into SGPRs.  Run inside gpu.module() AFTER convert-gpu-to-rocdl.
+// ---------------------------------------------------------------------------
+class FlyROCDLArgInRegPass
+    : public mlir::impl::FlyROCDLArgInRegPassBase<FlyROCDLArgInRegPass> {
+public:
+  using mlir::impl::FlyROCDLArgInRegPassBase<
+      FlyROCDLArgInRegPass>::FlyROCDLArgInRegPassBase;
+
+  void runOnOperation() override {
+    getOperation()->walk([&](LLVM::LLVMFuncOp func) {
+      if (!func->hasAttr("rocdl.kernel"))
+        return;
+
+      MLIRContext *ctx = func.getContext();
+      auto inRegAttrName = StringAttr::get(ctx, "llvm.inreg");
+      auto unitAttr = UnitAttr::get(ctx);
+
+      for (unsigned i = 0; i < func.getNumArguments(); ++i)
+        func.setArgAttr(i, inRegAttrName, unitAttr);
     });
   }
 };

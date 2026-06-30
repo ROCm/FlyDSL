@@ -73,7 +73,9 @@ class RocmBackend(BaseBackend):
             "canonicalize",
             f"gpu.module(convert-scf-to-cf,cse,"
             f"convert-gpu-to-rocdl{{chipset={chip} index-bitwidth=0 runtime=HIP use-bare-ptr-memref-call-conv=true}},"
-            f"fly-rocdl-cluster-attr)",
+            f"fly-rocdl-cluster-attr"
+            f",fly-rocdl-arg-inreg"
+            f")",
         ]
         binary_prep_fragments = [
             f"rocdl-attach-target{{{self._format_pass_opts(rocdl_opts)}}}",
