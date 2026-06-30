@@ -142,14 +142,6 @@ def _op_zero_copy(op):
     return not bool(getattr(cfg, "use_external_inp_buf", True))
 
 
-# When the CLI explicitly pins the FlyDSL combine launch geometry, force it
-# onto every combine() call so profile/cudagraph sweeps actually exercise the
-# requested (block_num, warp_num_per_block) instead of silently falling back to
-# the op's tuning table. ``None`` => let the op resolve via its tuning table
-# (production behaviour). Set by :func:`_parse_args`.
-_FORCE_COMBINE_GEOM = None
-
-
 def _run_combine(op, ret, combine_dtype, **kwargs):
     """Mori-parity combine launcher.
 
@@ -163,19 +155,7 @@ def _run_combine(op, ret, combine_dtype, **kwargs):
         ``op.get_registered_combine_input_buffer(combine_dtype)`` before
         invoking ``combine``; the kernel runs ``skip_stage1=True`` and
         peers read that buffer on Stage 3.
-
-    When ``_FORCE_COMBINE_GEOM`` is set (CLI pinned the geometry) it is
-    injected as an explicit ``block_num``/``warp_num_per_block`` override for
-    the FlyDSL op only (mori keeps its own geometry); without it the op falls
-    back to its tuning table.
     """
-    if (
-        _FORCE_COMBINE_GEOM is not None
-        and isinstance(op, FlyDSLDispatchCombineIntraNodeOp)
-        and "block_num" not in kwargs
-    ):
-        kwargs["block_num"] = _FORCE_COMBINE_GEOM[0]
-        kwargs["warp_num_per_block"] = _FORCE_COMBINE_GEOM[1]
     src = _cast_dispatch_to_combine(ret[0], combine_dtype)
     if _op_zero_copy(op):
         # Mori-parity zero-copy caller contract: caller MUST pre-stage
@@ -543,6 +523,10 @@ if "pytest" in sys.modules:
 import mori.shmem as ms  # noqa: E402
 
 from kernels.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
+    _DEFAULT_COMBINE_BLOCK_NUM,
+    _DEFAULT_COMBINE_WARP_NUM,
+    _DEFAULT_DISPATCH_BLOCK_NUM,
+    _DEFAULT_DISPATCH_WARP_NUM,
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
@@ -627,8 +611,8 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
         num_experts_per_token=cfg.num_experts_per_token,
-        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.default_dispatch_warp_num_per_block,
-        block_num=block_num if block_num is not None else cfg.default_dispatch_block_num,
+        warp_num_per_block=warp_per_block if warp_per_block is not None else _DEFAULT_DISPATCH_WARP_NUM,
+        block_num=block_num if block_num is not None else _DEFAULT_DISPATCH_BLOCK_NUM,
         gpu_per_node=world_size,
         use_external_inp_buf=not cfg.zero_copy,
         quant_type=cfg.quant_type,
@@ -2128,10 +2112,10 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         num_experts_per_token=k,
         data_type=_dtype,
-        default_dispatch_warp_num_per_block=args.dispatch_warp_per_block,
-        default_dispatch_block_num=args.dispatch_block_num,
-        default_combine_warp_num_per_block=args.combine_warp_per_block,
-        default_combine_block_num=args.combine_block_num,
+        dispatch_block_num=args.dispatch_block_num,
+        dispatch_warp_num_per_block=args.dispatch_warp_per_block,
+        combine_block_num=args.combine_block_num,
+        combine_warp_num_per_block=args.combine_warp_per_block,
         zero_copy=args.zero_copy,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
@@ -2141,8 +2125,14 @@ def run_profiler(rank, world_size, args):
         max_token_type_size=_user_mtt,
     )
 
-    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.default_dispatch_block_num
-    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.default_dispatch_warp_num_per_block
+    mori_bn = (
+        args.mori_block_num if args.mori_block_num > 0 else (cfg.dispatch_block_num or _DEFAULT_DISPATCH_BLOCK_NUM)
+    )
+    mori_wpb = (
+        args.mori_warp_per_block
+        if args.mori_warp_per_block > 0
+        else (cfg.dispatch_warp_num_per_block or _DEFAULT_DISPATCH_WARP_NUM)
+    )
     meta = dict(
         world_size=world_size,
         max_tokens=cur_tok,
@@ -2151,10 +2141,10 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         warmup=args.warmup,
         iters=args.iters,
-        flydsl_dispatch_block_num=cfg.default_dispatch_block_num,
-        flydsl_dispatch_warp_per_block=cfg.default_dispatch_warp_num_per_block,
-        flydsl_combine_block_num=cfg.default_combine_block_num,
-        flydsl_combine_warp_per_block=cfg.default_combine_warp_num_per_block,
+        flydsl_dispatch_block_num=cfg.dispatch_block_num or _DEFAULT_DISPATCH_BLOCK_NUM,
+        flydsl_dispatch_warp_per_block=cfg.dispatch_warp_num_per_block or _DEFAULT_DISPATCH_WARP_NUM,
+        flydsl_combine_block_num=cfg.combine_block_num or _DEFAULT_COMBINE_BLOCK_NUM,
+        flydsl_combine_warp_per_block=cfg.combine_warp_num_per_block or _DEFAULT_COMBINE_WARP_NUM,
         mori_block_num=mori_bn,
         mori_warp_per_block=mori_wpb,
         zero_copy=cfg.zero_copy,
@@ -2175,19 +2165,11 @@ def run_profiler(rank, world_size, args):
         print(f"{'='*65}", flush=True)
         print("[profiler] building FlyDSL...", flush=True)
     op_fly = FlyDSLDispatchCombineIntraNodeOp(cfg)
-    # When the CLI pins launch geometry, drop the auto-loaded tuning table so
-    # cfg.default_dispatch_block_num / cfg.default_combine_block_num (from --dispatch-block-num /
-    # --combine-block-num) drive BOTH dispatch and combine resolution. Otherwise
-    # the table shadows the CLI in the profile/cudagraph path and geometry
-    # sweeps silently collapse to the tuned values.
-    if getattr(args, "_force_dispatch_geom", None) or getattr(args, "_force_combine_geom", None):
-        op_fly.cfg.tuning_table = None
-        if rank == 0:
-            print(
-                f"[geometry] CLI-pinned: dispatch={cfg.default_dispatch_block_num}/"
-                f"{cfg.default_dispatch_warp_num_per_block} combine={cfg.default_combine_block_num}/"
-                f"{cfg.default_combine_warp_num_per_block} (tuning table disabled)"
-            )
+    if rank == 0 and (cfg.dispatch_block_num or cfg.combine_block_num):
+        print(
+            f"[geometry] CLI-pinned: dispatch={cfg.dispatch_block_num or 'tuning'} "
+            f"combine={cfg.combine_block_num or 'tuning'}"
+        )
 
     # Mori reference op.  Constructed whenever it can act as a verify
     # oracle (dtype supported, not std-MoE) — independent of
@@ -2200,8 +2182,8 @@ def run_profiler(rank, world_size, args):
     if _want_mori:
         mori_bn = args.mori_block_num if args.mori_block_num > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
-        bn_str = mori_bn if mori_bn else cfg.default_dispatch_block_num
-        wpb_str = mori_wpb if mori_wpb else cfg.default_dispatch_warp_num_per_block
+        bn_str = mori_bn if mori_bn else _DEFAULT_DISPATCH_BLOCK_NUM
+        wpb_str = mori_wpb if mori_wpb else _DEFAULT_DISPATCH_WARP_NUM
         if rank == 0:
             print(
                 f"[profiler] building mori ref (block_num={bn_str}, warp_per_block={wpb_str}) "
@@ -2642,10 +2624,6 @@ def _worker(rank, world_size, args, master_port):
     ``--mode verify`` silently "pass" on real failures (problem 1).
     """
     setup_distributed(rank, world_size, master_port)
-    # Spawned workers re-import this module (fresh ``_FORCE_COMBINE_GEOM=None``);
-    # restore the CLI-pinned geometry from the args copy handed to the worker.
-    global _FORCE_COMBINE_GEOM
-    _FORCE_COMBINE_GEOM = getattr(args, "_force_combine_geom", None)
     exit_code = 0
     try:
         # CI sweep dispatch: one spawn cycle per (case, phase) pair, fed in
@@ -2868,33 +2846,6 @@ def _parse_args():
     )
     args = p.parse_args()
 
-    # Launch geometry: a ``None`` CLI value means "let the FlyDSL op resolve
-    # via its tuning table" (production behaviour). When the user explicitly
-    # pins BOTH block_num and warp_num_per_block, record it so every combine()
-    # call forces that geometry (otherwise profile/cudagraph sweeps silently
-    # fall back to the tuning table -- the op resolves geometry internally and
-    # the un-forwarded CLI value never reaches it).
-    # Stash on ``args`` (survives ``copy.copy`` into spawned workers, which
-    # re-import this module with a fresh ``_FORCE_COMBINE_GEOM = None``).
-    args._force_combine_geom = None
-    if args.combine_block_num is not None and args.combine_warp_per_block is not None:
-        args._force_combine_geom = (args.combine_block_num, args.combine_warp_per_block)
-    args._force_dispatch_geom = None
-    if args.dispatch_block_num is not None and args.dispatch_warp_per_block is not None:
-        args._force_dispatch_geom = (args.dispatch_block_num, args.dispatch_warp_per_block)
-    global _FORCE_COMBINE_GEOM
-    _FORCE_COMBINE_GEOM = args._force_combine_geom
-    # Backfill the cfg-level defaults consumed downstream as plain ints (these
-    # only act as the op's tier-3 fallback; the tuning table still wins unless
-    # the geometry was pinned above and forwarded as an explicit override).
-    if args.dispatch_block_num is None:
-        args.dispatch_block_num = 128
-    if args.dispatch_warp_per_block is None:
-        args.dispatch_warp_per_block = 4
-    if args.combine_block_num is None:
-        args.combine_block_num = 128
-    if args.combine_warp_per_block is None:
-        args.combine_warp_per_block = 8
     return args
 
 
