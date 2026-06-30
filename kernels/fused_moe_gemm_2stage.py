@@ -429,7 +429,6 @@ def compile_fused_moe_gemm1(
     # 3-round path is kept as a fallback (compact_allgather=False).
     _compact_ag = bool(_compact and compact_allgather)
     _skip_gemm = False
-    _phase_ts = False
     # atom_contract (megav1->stage2): logical-row a2 output via srcmap, A still expert-major direct.
     _atom_contract = bool(atom_contract and contiguous_io)
     # compact+atom combo: compact DISPATCH (dense rx) but atom-logical a2 OUTPUT.  A-gather stays
@@ -792,16 +791,6 @@ def compile_fused_moe_gemm1(
                 _r_idx = _crfa(_a_idx)
                 _r_wts = _crfa(_a_wts)
 
-                # DIAG phase timestamps: block0 lane0 writes s_memrealtime ticks to
-                # addr_payload_done[k] (i64).  const_expr-gated -> DCE when off.
-                def _ts(_k):
-                    if const_expr(_phase_ts):
-                        if _gwid == 0:
-                            if _lane == 0:
-                                buffer_ops.buffer_store(rocdl.s_memrealtime(),
-                                                        _crfa(addr_payload_done), arith.constant(_k))
-                _ts(0)  # dispatch entry
-
                 # NOTE: no initial GB1 — payload writes are independent (peer atomics), so they need
                 # no "all blocks started" sync.  The launch epoch (for the cross-PE done signal) is
                 # derived at the FIRST grid barrier (the post-write barrier below).  This removes one
@@ -891,7 +880,6 @@ def compile_fused_moe_gemm1(
                             _va = buffer_ops.buffer_load(_rsrc_src, _co, vec_width=4, dtype=T.i32)
                             buffer_ops.buffer_store(_va, _rsrc_dst, _co)
 
-                _ts(1)  # after payload write (block0's own write done)
                 # ---- post-write ARRIVAL (N->1; only block0 waits) — NOT a symmetric grid barrier ----
                 # Persistent-kernel philosophy: no whole-grid full sync.  Each block, after its warps
                 # finish writing (CTA-internal fx.barrier), snapshots meta_flag (= L-1, stable because
@@ -916,18 +904,15 @@ def compile_fused_moe_gemm1(
                     _tg2 = ((arith.ArithValue(_gb1now, signed=False) - _one2b) // _bn + _one2b) * _bn
                     mori_shmem.int64_wait_until_equals(_a_gb1, _tg2)
                     _epk.fence_agent_acquire()
-                    _ts(4)  # after local grid-arrival wait (all LOCAL blocks wrote + arrived)
                     _epoch_i32 = arith.trunci(T.i32, arith.unwrap(_tg2 // _bn))
                     # cross-PE done-barrier (my writes flushed to peers; wait peers')
                     _epk.fence_system_release()
                     for _dpe in range(_lane, _fz_npes, 64):
                         _d2 = buffer_ops.buffer_load(_crfa(_p_done2), _dpe, vec_width=1, dtype=T.i64)
                         _epk.store_i32_system(_d2, arith.constant(_fz_rank), _epoch_i32)
-                    _ts(5)  # after publishing my done2 epoch to peers
                     for _spe in range(_lane, _fz_npes, 64):
                         mori_shmem.int32_wait_until_equals(_a_done2 + _epk._to_i64(_spe) * 4, _epoch_i32)
                     _epk.fence_system_acquire()
-                    _ts(2)  # after cross-PE done-barrier (peers' payload visible)
                     # ---- Plan A: cross-PE recv-count signal -> total_recv (distinct recv) ----
                     # mirrors sorted path / standard dispatch: signal each peer recv_num[rank] =
                     # dest_ctr[peer]+1, then accumulate total_recv += (peer_signal - 1).  recv_num
@@ -946,7 +931,6 @@ def compile_fused_moe_gemm1(
                             _ = _epk.atomic_add_system(_a_trecv, _sv - arith.constant(1))
                             buffer_ops.buffer_store(arith.constant(0), _crfa(_a_dctr), _spe)
                         _epk.fence_system_acquire()
-                        _ts(6)  # after Plan-A recv-count handshake (atom_contract only)
                     # post-pass: emit ONLY occupied tiles compactly + fold count reset
                     _r_run = _crfa(_a_run)
                     _r_se = _crfa(_a_se)
@@ -992,7 +976,6 @@ def compile_fused_moe_gemm1(
                             _cnt2 = buffer_ops.buffer_load(_r_run, _lei, vec_width=1, dtype=T.i32)
                             buffer_ops.buffer_store(_cnt2, _r_cnt, _lei)
                             buffer_ops.buffer_store(arith.constant(0), _r_run, _lei)
-                    _ts(7)  # after postpass metadata (num_valid/ll_count[/se/trb]) is built
                     if const_expr(_static_tiles and _fz_epr <= 64):
                         # nv/ll_count are intra-GPU => AGENT release suffices for the GEMM blocks (they
                         # read the peer payload via their own agent-acquire from HBM, not via this fence).
@@ -1016,7 +999,6 @@ def compile_fused_moe_gemm1(
                     mori_shmem.int32_wait_until_greater_than(_a_meta, _e0_i32)
                     _epk.fence_agent_acquire()
                 fx.barrier()
-                _ts(3)  # dispatch prologue done (metadata ready) -> GEMM starts after this
 
             # ============================================================================
             # FUSED megakernel — NAIVE COMPACT (count-first, no preset cap).  Same strict-phase as
@@ -1295,14 +1277,6 @@ def compile_fused_moe_gemm1(
                 _c_te = arith.constant(_fz_total_experts)
                 _c_te_sz = _fz_total_experts
 
-                def _ts(_k):  # DIAG phase ts (block0 lane0 -> addr_payload_done[k] i64); DCE when off
-                    if const_expr(_phase_ts):
-                        if _gwid == 0:
-                            if _lane == 0:
-                                buffer_ops.buffer_store(rocdl.s_memrealtime(),
-                                                        _crfa(addr_payload_done), arith.constant(_k))
-                _ts(0)  # compact dispatch entry
-
                 _e0 = arith.constant(0)
                 _e0m2 = arith.constant(0)
                 if _tid == 0:
@@ -1340,7 +1314,6 @@ def compile_fused_moe_gemm1(
                         _ = _epk.atomic_add_agent(_a_lh + _epk._to_i64(_e) * 4, _hv)
                 rocdl.s_waitcnt(0)
                 fx.barrier()
-                _ts(1)  # after PHASE-0 local count
                 if _tid == 0:
                     _epk.fence_agent_release()
                     _epk.atomic_add_agent(_a_gb1, arith.constant(1, type=T.i64))
@@ -1375,7 +1348,6 @@ def compile_fused_moe_gemm1(
                     for _s in range(_lane, _fz_npes, 64):
                         mori_shmem.int32_wait_until_equals(_a_cd + _epk._to_i64(_s) * 4, _epoch_i32)
                     _epk.fence_system_acquire()
-                    _ts(5)  # after PUB all-gather + cnt_done handshake (cross-PE#1); CMP+metadata follows
                     _r_bc = _crfa(_a_bc)
                     _r_mb = _crfa(_a_mb)
                     # Reduce bigcnt[npes*te] -> cs[ge] (total) + sp[ge] (sender<rank prefix) into LDS,
@@ -1450,7 +1422,6 @@ def compile_fused_moe_gemm1(
                     mori_shmem.int32_wait_until_greater_than(_a_meta, _e0)
                     _epk.fence_agent_acquire()
                 fx.barrier()
-                _ts(2)  # after all-gather (cross-PE#1) + my_base/metadata ready
 
                 # ---- PHASE-2: strict write to my_base[ge] + LOCAL cursor (no remote base read) ----
                 _r_mb2 = _crfa(_a_mb)
@@ -1545,7 +1516,6 @@ def compile_fused_moe_gemm1(
                         if arith.cmpi(CmpIPredicate.sgt, _hv2, arith.constant(0)):
                             _ = _epk.atomic_add_agent(_a_dctr + _epk._to_i64(_e2) * 4, _hv2)
 
-                _ts(3)  # after PHASE-2 payload write
                 # ---- write grid-arrival (gb_cnt) + cross-PE#2 (done2) + payload-ready flag ----
                 rocdl.s_waitcnt(0)
                 fx.barrier()
@@ -1558,7 +1528,6 @@ def compile_fused_moe_gemm1(
                     _tgw = ((arith.ArithValue(_gbcnow, signed=False) - _one2b) // _bn + _one2b) * _bn
                     mori_shmem.int64_wait_until_equals(_a_gbc, _tgw)
                     _epk.fence_agent_acquire()
-                    _ts(6)  # after grid-arrival wait (all LOCAL blocks done writing); cross-PE drain follows
                     _epochw_i32 = arith.trunci(T.i32, arith.unwrap(_tgw // _bn))
                     _epk.fence_system_release()
                     for _dpe in range(_lane, _fz_npes, 64):
@@ -1585,7 +1554,6 @@ def compile_fused_moe_gemm1(
                             _ = _epk.atomic_add_system(_a_trecv, _sv - arith.constant(1))
                             buffer_ops.buffer_store(arith.constant(0), _crfa(_a_dctr), _spe2)
                         _epk.fence_system_acquire()
-                    _ts(4)  # after cross-PE#2 (payload visible) -> dispatch done, GEMM starts
                     _epk.fence_agent_release()
                     buffer_ops.buffer_store(_epochw_i32, _crfa(_a_meta2), arith.constant(0))
                 if _tid == 0:
