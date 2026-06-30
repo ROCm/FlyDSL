@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-06-30T13:04:23Z",
+ "updated": "2026-06-30T14:18:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -430,11 +430,11 @@
    "branch": "worktree-pa_ps_per_token_kv",
    "event": "pull_request",
    "title": "perf(pa): Raw-pointer kernargs and decode kernel refactor",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126",
    "created_at": "2026-06-30T07:51:18Z",
-   "updated_at": "2026-06-30T08:15:45Z",
+   "updated_at": "2026-06-30T14:16:11Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -449,10 +449,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-06-30T08:15:37Z",
-     "completed_at": null,
+     "completed_at": "2026-06-30T14:16:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126/job/84238803774"
     },
     {
@@ -473,19 +473,19 @@
    "branch": "pr/fallback-locations",
    "event": "pull_request",
    "title": "[Enh] Add FallbackLocations rewriter for bare-op source locations",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579",
    "created_at": "2026-06-30T07:44:14Z",
-   "updated_at": "2026-06-30T07:45:17Z",
+   "updated_at": "2026-06-30T14:16:43Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-06-30T07:45:17Z",
+     "started_at": "2026-06-30T14:16:42Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677256"
     },
