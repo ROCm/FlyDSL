@@ -449,8 +449,11 @@ def build_flash_attn_dualwave_swp_module(
             def _load_k_page_id_lds(tile_idx):
                 if const_expr(KV_VECTORIZED and PAGES_PER_TILE > 1):
                     local_page0 = (tile_idx - split_t0) * fx.Index(PAGES_PER_TILE)
-                    _src_ni = (lane_in_warp & 3) | ((lane_in_warp & 8) >> 1) | ((lane_in_warp & 4) << 1) | (
-                        lane_in_warp & ~15
+                    _src_ni = (
+                        (lane_in_warp & 3)
+                        | ((lane_in_warp & 8) >> 1)
+                        | ((lane_in_warp & 4) << 1)
+                        | (lane_in_warp & ~15)
                     )
                     local_page = local_page0 + _src_ni // fx.Index(PAGE_SIZE)
                     src = buffer_ops.get_element_ptr(
@@ -1114,9 +1117,7 @@ def build_flash_attn_dualwave_swp_module(
             else:
                 if const_expr(page_id is None):
                     raise ValueError("_async_load_k requires page_id when PAGED=True")
-                _subpage_dma(
-                    page_id, _k_iter, _k_iter_ty, _k_align, _k_dma_inner, src_base, soffset, buf_id, k_dma_m0
-                )
+                _subpage_dma(page_id, _k_iter, _k_iter_ty, _k_align, _k_dma_inner, src_base, soffset, buf_id, k_dma_m0)
 
         def _v_dma_inner(src_div, src_base, soffset, buf_id, v_dma_m0, page_row_off):
             if const_expr(KV_VECTORIZED):
@@ -1168,9 +1169,7 @@ def build_flash_attn_dualwave_swp_module(
             else:
                 if const_expr(page_id is None):
                     raise ValueError("_async_load_v requires page_id when PAGED=True")
-                _subpage_dma(
-                    page_id, _v_iter, _v_iter_ty, _v_align, _v_dma_inner, src_base, soffset, buf_id, v_dma_m0
-                )
+                _subpage_dma(page_id, _v_iter, _v_iter_ty, _v_align, _v_dma_inner, src_base, soffset, buf_id, v_dma_m0)
 
         def _reduction_pair(v_f32):
             v_i32 = _bitcast_i32(v_f32)
