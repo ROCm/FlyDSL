@@ -9,9 +9,13 @@ on:
     branches:
       - main
 
-# Serialize deploys so two pushes can't race the gh-pages force-push.
+# Keep one in-flight run per event type: a newer push supersedes an older one
+# (cancel-in-progress) so they can't race the gh-pages force-push. The group is
+# qualified by event_name + ref so a PR's build never cancels an in-progress
+# main/ci_dashboard deploy (only push events actually deploy; see the deploy
+# step's `if`), and pushes to main vs ci_dashboard don't cancel each other.
 concurrency:
-  group: gh-pages-deploy
+  group: gh-pages-deploy-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

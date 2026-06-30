@@ -53,9 +53,19 @@ def gh_text(path: str) -> str:
     return out.stdout
 
 
-def list_runs(repo: str, workflow: str, max_runs: int, branch: str = "main") -> list[dict]:
-    """Most recent runs of the benchmark workflow on *branch*, newest first (paginates past 100)."""
-    qs = f"branch={branch}&per_page={min(max_runs, 100)}"
+def list_runs(repo: str, workflow: str, max_runs: int, branch: str | None = None) -> list[dict]:
+    """Most recent runs of the benchmark workflow, newest first (paginates past 100).
+
+    By default *branch* is None, so runs from ALL branches are returned — both
+    push-to-main runs and pull_request runs (whose head_branch is the PR's source
+    branch). This is what lets ``resolve_pr`` attach a PR number to PR runs and
+    feed the dashboard's per-PR view; filtering by ``branch=main`` would hide
+    every PR run and make that resolution dead code. Pass an explicit *branch* to
+    restrict (e.g. main-only history).
+    """
+    qs = f"per_page={min(max_runs, 100)}"
+    if branch:
+        qs = f"branch={branch}&{qs}"
     if max_runs <= 100:
         data = gh(f"repos/{repo}/actions/workflows/{workflow}/runs?{qs}")
         return data.get("workflow_runs", [])[:max_runs]
@@ -200,6 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--history-file", default=None, help="default <out-dir>/history.json")
     ap.add_argument("--runs-file", default=None, help="default <out-dir>/runs.json")
     ap.add_argument("--max-runs", type=int, default=40, help="runs to scan for live board")
+    ap.add_argument(
+        "--branch",
+        default=None,
+        help="restrict to a single branch (default: all branches, so PR runs are included)",
+    )
     ap.add_argument("--history-days", type=int, default=90)
     ap.add_argument("--regression-pct", type=float, default=parse_bench.DEFAULT_REGRESSION_PCT)
     args = ap.parse_args(argv)
@@ -207,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     hist_path = args.history_file or os.path.join(args.out_dir, "history.json")
     runs_path = args.runs_file or os.path.join(args.out_dir, "runs.json")
 
-    runs = list_runs(args.repo, args.workflow, args.max_runs)
+    runs = list_runs(args.repo, args.workflow, args.max_runs, branch=args.branch)
     print(f"scanning {len(runs)} runs of {args.workflow} in {args.repo}", file=sys.stderr)
 
     all_records: list[dict] = []

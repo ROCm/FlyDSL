@@ -194,6 +194,34 @@ def test_runner_of_matches_known_box_and_rejects_unknown():
     assert ingest.runner_of("") is None
 
 
+# --------------------------------------------------------------------------- #
+# list_runs — default scans all branches (so PR runs are included)
+# --------------------------------------------------------------------------- #
+def test_list_runs_default_does_not_filter_by_branch(monkeypatch):
+    seen = {}
+
+    def fake_gh(path, paginate=False):
+        seen["path"] = path
+        return {"workflow_runs": [{"id": 1, "event": "pull_request"}, {"id": 2, "event": "push"}]}
+
+    monkeypatch.setattr(ingest, "gh", fake_gh)
+    runs = ingest.list_runs("ROCm/FlyDSL", "flydsl.yaml", max_runs=40)
+    assert "branch=" not in seen["path"]  # no branch filter -> PR runs included
+    assert [r["id"] for r in runs] == [1, 2]
+
+
+def test_list_runs_explicit_branch_filters(monkeypatch):
+    seen = {}
+
+    def fake_gh(path, paginate=False):
+        seen["path"] = path
+        return {"workflow_runs": []}
+
+    monkeypatch.setattr(ingest, "gh", fake_gh)
+    ingest.list_runs("ROCm/FlyDSL", "flydsl.yaml", max_runs=40, branch="main")
+    assert "branch=main" in seen["path"]
+
+
 if __name__ == "__main__":
     import pytest
 
