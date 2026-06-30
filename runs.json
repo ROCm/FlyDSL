@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-06-30T17:04:25Z",
+ "updated": "2026-06-30T18:11:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28465852005,
+   "pr": 780,
+   "commit": "877f08ff33ff659772b5e20db158e5415dfb2c3a",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28465852005",
+   "created_at": "2026-06-30T18:08:50Z",
+   "updated_at": "2026-06-30T18:10:06Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28465837778,
+   "pr": null,
+   "commit": "10456f97fba55b9baadd0f1b613e7604e46fefff",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28465837778",
+   "created_at": "2026-06-30T18:08:35Z",
+   "updated_at": "2026-06-30T18:09:06Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
   {
    "run_id": 28457354713,
    "pr": 779,
@@ -2203,92 +2233,6 @@
      "started_at": "2026-06-28T10:50:55Z",
      "completed_at": "2026-06-28T11:02:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541/job/83899639264"
-    }
-   ]
-  },
-  {
-   "run_id": 28317341459,
-   "pr": 753,
-   "commit": "2d4f39b433aaea83f81e771897df600e7f9cbba9",
-   "branch": "mxfp4-moe-gemm",
-   "event": "pull_request",
-   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459",
-   "created_at": "2026-06-28T09:04:41Z",
-   "updated_at": "2026-06-28T09:54:54Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-06-28T09:07:21Z",
-     "completed_at": "2026-06-28T09:54:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459/job/83893042979"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T09:07:20Z",
-     "completed_at": "2026-06-28T09:52:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459/job/83893042989"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T09:06:38Z",
-     "completed_at": "2026-06-28T09:17:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28317341459/job/83893043005"
-    }
-   ]
-  },
-  {
-   "run_id": 28316771241,
-   "pr": 753,
-   "commit": "7a7304d8c91dafcea71759cbdfb0732385320e07",
-   "branch": "mxfp4-moe-gemm",
-   "event": "pull_request",
-   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241",
-   "created_at": "2026-06-28T08:39:55Z",
-   "updated_at": "2026-06-28T09:05:10Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-28T08:40:50Z",
-     "completed_at": "2026-06-28T09:05:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241/job/83891451957"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T08:40:42Z",
-     "completed_at": "2026-06-28T08:51:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241/job/83891451962"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-28T08:40:54Z",
-     "completed_at": "2026-06-28T09:05:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28316771241/job/83891451992"
     }
    ]
   }
