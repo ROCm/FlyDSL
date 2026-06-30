@@ -1,20 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Python wrapper for the FlyDSL intra-node DispatchCombine op.
-
-Mori-parity surface: symmetric I/O. ``quant_type='fp8_direct_cast'``
-keeps caller dtype bf16 but switches wire dtype to fp8 (mori
-``UseFp8DirectCast``). Optional caps ``max_total_recv_tokens`` and
-``max_token_type_size`` shrink / re-target shmem allocation.
-
-Buffer-sizing drift from mori: ``shmem_comb_inp_{tok,wts}`` stay at
-worst-case ``ws * M`` even when the recv cap shrinks, because combine
-Stage 1 P2P-scatters into slot ``rank * M + dest_lid`` with
-``dest_lid in [0, M)`` -- shrinking would OOB-write. Dispatch-side
-buffers (indexed by ``dest_tok_id``) DO shrink with the cap.
-"""
-
 from __future__ import annotations
 
 import functools
@@ -38,8 +24,7 @@ from .flydsl_dispatch_combine_intranode_kernel import (
     make_dispatch_jit,
 )
 
-# Supported token dtypes; reject outside this set at wrapper construction
-# rather than failing deep in JIT codegen.
+# Reject unsupported token dtypes at construction, not deep in JIT codegen.
 _SUPPORTED_TOK_DTYPES = (
     torch.bfloat16,
     torch.float32,
@@ -68,10 +53,8 @@ _TUNING_CONFIGS_DIR = Path(__file__).resolve().parent / "mega_moe_tuning_config"
 
 @dataclass
 class GeometryTuningTable:
-    """Per-shape token-count -> (block_num, warp_num_per_block) lookup, used when
-    dispatch()/combine() get no explicit geometry. Rounds up to the smallest
-    bucket >= count (largest on overflow, mori parity); geometry does not affect
-    buffer sizing."""
+    """Per-shape token-count -> (block_num, warp_num_per_block) lookup; rounds up
+    to the smallest bucket >= count (largest on overflow, mori parity)."""
 
     dispatch: Dict[int, Tuple[int, int]] = field(default_factory=dict)
     combine: Dict[int, Tuple[int, int]] = field(default_factory=dict)
@@ -90,9 +73,7 @@ class GeometryTuningTable:
         cls, path, *, dtype, hidden_dim, zero_copy, topk=None, local_expert_num=None, combine_dtype="bf16"
     ):
         """Build a per-op table from a multi-shape tuning JSON, filtered to this
-        op's shape: dispatch by (dtype, hidden_dim[, topk, local_expert_num]),
-        combine by (combine_dtype, hidden_dim[, topk, local_expert_num],
-        zero_copy). Empty table => cfg defaults."""
+        op's shape; empty table => cfg defaults."""
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
@@ -124,8 +105,7 @@ class GeometryTuningTable:
         )
 
     def lookup(self, phase, num_tokens):
-        """Smallest bucket ``>= num_tokens``; on overflow the largest bucket
-        (mori parity); ``None`` only when the phase table is empty."""
+        """Smallest bucket >= num_tokens (largest on overflow); None if empty."""
         tbl = self.dispatch if phase == "dispatch" else self.combine
         if not tbl:
             return None
@@ -200,7 +180,6 @@ _TUNING_DTYPE_NAME = {
 
 
 def dtype_to_tuning_name(dt):
-    """torch dtype -> tuning-file ``dtype`` key (e.g. ``"fp4"``)."""
     try:
         return _TUNING_DTYPE_NAME[dt]
     except KeyError:
@@ -218,9 +197,6 @@ def _detect_gpu_model(device_index=0):
 
 
 def resolve_tuning_config_path(ep_size, *, kernel_type="IntraNode", gpu_arch=None, gpu_model=None):
-    """Locate the tuning JSON for (arch, model, kernel, ep), named
-    flydsl_{arch}_{model}_{kernel}_ep{n}.json. Prefers arch+model, then arch,
-    then any matching suffix; None when nothing matches."""
     if not _TUNING_CONFIGS_DIR.is_dir():
         return None
     if gpu_arch is None:
@@ -247,11 +223,10 @@ def resolve_tuning_config_path(ep_size, *, kernel_type="IntraNode", gpu_arch=Non
 
 
 def build_geometry_tuning_table_for_config(cfg, path=None):
-    """Build a :class:`GeometryTuningTable` for ``cfg``'s shape. ``path`` is the
-    tuning JSON (auto-resolved from ``cfg.world_size`` when omitted); None when
-    no file or matching rule is found."""
+    """Build a :class:`GeometryTuningTable` for ``cfg``'s shape (tuning JSON
+    auto-resolved from ``cfg.world_size`` when ``path`` omitted); None on miss."""
     if path is None:
-        path = resolve_tuning_config_path(cfg.world_size, gpu_model=getattr(cfg, "gpu_model", None))
+        path = resolve_tuning_config_path(cfg.world_size)
     if path is None or not Path(path).is_file():
         return None
     try:
@@ -320,30 +295,18 @@ class FlyDSLDispatchCombineConfig:
     num_experts_per_rank: int
     num_experts_per_token: int
     data_type: torch.dtype = torch.bfloat16
-    # Per-phase launch geometry DEFAULTS; dispatch()/combine() accept per-call
-    # overrides (cached as separate specializations on the same buffers).
-    dispatch_warp_num_per_block: int = _DEFAULT_DISPATCH_WARP_NUM
-    dispatch_block_num: int = _DEFAULT_DISPATCH_BLOCK_NUM
-    combine_warp_num_per_block: int = _DEFAULT_COMBINE_WARP_NUM
-    combine_block_num: int = _DEFAULT_COMBINE_BLOCK_NUM
-    # Per-shape geometry lookup (explicit arg > tuning_table > defaults),
-    # auto-loaded from mega_moe_tuning_config/ (or tuning_config_path).
+    default_dispatch_warp_num_per_block: int = _DEFAULT_DISPATCH_WARP_NUM
+    default_dispatch_block_num: int = _DEFAULT_DISPATCH_BLOCK_NUM
+    default_combine_warp_num_per_block: int = _DEFAULT_COMBINE_WARP_NUM
+    default_combine_block_num: int = _DEFAULT_COMBINE_BLOCK_NUM
     tuning_table: Optional[GeometryTuningTable] = None
     tuning_config_path: Optional[str] = None
-    gpu_model: Optional[str] = None
     scale_dim: int = 0
     scale_type_size: int = 0
     enable_std_moe: bool = False
     zero_copy: bool = False
     quant_type: str = "none"
-    # Cap on total receive tokens across peers (mori ``maxTotalRecvTokens``).
-    # ``0`` => worst-case ``ws * M``. Per-rank slots = ``ceil(cap/ws)``
-    # clamped to ``M``. Over-cap tokens fold into the dup-sentinel path
-    # (no OOB) but are silently dropped.
     max_total_recv_tokens: int = 0
-    # Per-element upper bound in bytes for shmem allocation (mori
-    # ``maxTokenTypeSize``). ``0`` derives from ``data_type``; set to
-    # keep one op alive across dtype switches without re-alloc.
     max_token_type_size: int = 0
 
     @property
@@ -368,15 +331,10 @@ class FlyDSLDispatchCombineConfig:
 
     @property
     def max_recv(self):
-        """Worst-case ``ws * M`` -- kernel sentinel encoding and
-        sender-side ``atomic_add`` allocation use this regardless of
-        ``max_total_recv_tokens``."""
         return self.world_size * self.max_num_inp_token_per_rank
 
     @property
     def effective_max_recv_per_rank(self):
-        """Per-sender slot share on each dest PE (mori
-        ``MaxNumTokensToRecvPerRank``)."""
         if self.max_total_recv_tokens <= 0:
             return self.max_num_inp_token_per_rank
         per_rank = (self.max_total_recv_tokens + self.world_size - 1) // self.world_size
@@ -404,11 +362,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
     def __init__(self, config):
         self.cfg = config
-        # Validate BEFORE GPU alloc so misconfigs raise ValueError, not
-        # an opaque HIP/MLIR error.
         self._check_config()
-        # Auto-load the geometry tuning table unless one was supplied; a miss
-        # silently keeps the static defaults.
         if config.tuning_table is None:
             self.load_tuning_config(config.tuning_config_path)
         self._dev = torch.device("cuda", config.rank)
@@ -445,16 +399,12 @@ class FlyDSLDispatchCombineIntraNodeOp:
         # Dispatch (encode) and combine (decode, Stage 3) must agree on this.
         self._effective_max_recv = config.effective_max_recv
 
-        # Launch-time JIT caches (mori parity): keyed by input.dtype + launch
-        # geometry (one op holds multiple geometry specializations on the same
-        # buffers); combine also keys on (zero_copy, enable_weights, fp8_dc).
         self._disp_jit_cache: Dict[Tuple[torch.dtype, int, int], Any] = {}
         self._disp_compiled_cache: Dict[Tuple[torch.dtype, int, int], Any] = {}
         self._comb_jit_cache: Dict[Tuple[torch.dtype, bool, bool, bool, int, int], Any] = {}
         self._comb_compiled_cache: Dict[Tuple[torch.dtype, bool, bool, bool, int, int], Any] = {}
 
-        # Start at 1: a zero-init flag would satisfy the first
-        # ``wait_until_equals(slot, 0)`` immediately and skip the sync.
+        # Start at 1: a zero flag would satisfy the first wait and skip the sync.
         self._xdev_flag = torch.ones(1, dtype=torch.int64, device=self._dev)
 
         self._fx_out_tok = fx.Int64(self.shmem_disp_out_tok.data_ptr())
@@ -492,18 +442,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._fx_disp_grid_bar = fx.Int64(self.disp_grid_bar.data_ptr())
         self._fx_disp_out_wts = fx.Int64(self.shmem_disp_out_wts.data_ptr())
 
-        # Lazy skip_stage1 variant (fused GEMM2+combine). Key includes dtype +
-        # launch geometry so a dtype/geometry switch gets a fresh specialization.
         self._comb_no_s1_fn: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
         self._comb_no_s1_compiled: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
 
-        # Geometry launched by the last dispatch()/combine() (test hook).
-        self._last_dispatch_geom: Optional[Tuple[int, int]] = None
-        self._last_combine_geom: Optional[Tuple[int, int]] = None
-
     def load_tuning_config(self, path=None):
-        """Build and attach the geometry tuning table for this op's shape.
-        ``path`` pins a file (else auto-resolved); None on a miss."""
+        """Build and attach the geometry tuning table for this op's shape."""
         self.cfg.tuning_table = build_geometry_tuning_table_for_config(self.cfg, path)
         return self.cfg.tuning_table
 
@@ -512,10 +455,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         npes = cfg.world_size
         k = cfg.num_experts_per_token
         mt = cfg.max_num_inp_token_per_rank
-        # Two recv-slot caps:
-        #   mr       = effective dispatch-side cap (shrinks with user cap)
-        #   mr_worst = ws * M (combine-input cap, cannot shrink because
-        #              Stage 1 indexes slot ``rank * M + dest_lid``).
         mr = cfg.effective_max_recv
         mr_worst = cfg.max_recv
 
@@ -524,9 +463,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         tok_i16_mr_worst = (mr_worst * tb_max + 1) // 2
         tok_i16_mt = (mt * tb_max + 1) // 2
 
-        # All shmem buffers below are P2P-accessed by peers except
-        # ``shmem_comb_out_{tok,wts}`` (local-only; kept on the shmem
-        # heap for mori layout parity).
         self.shmem_disp_out_tok = mori_shmem_create_tensor((tok_i16_mr,), torch.int16)
         self.shmem_disp_out_wts = mori_shmem_create_tensor((mr * k,), torch.float32)
         self.shmem_disp_out_idx = mori_shmem_create_tensor((mr * k,), torch.int32)
@@ -535,14 +471,16 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self.shmem_tok_off = mori_shmem_create_tensor((1,), torch.int32)
         self.shmem_recv_tok_num = mori_shmem_create_tensor((npes,), torch.int32)
         self.shmem_tok_id_to_src = mori_shmem_create_tensor((mr,), torch.int32)
+        # TODO(perf): layout optimization -- combine input is sized ws*M
+        # (sparse sender_rank*M+dest_lid slots); could tighten to
+        # effective_max_recv with a compact-layout rework.
         self.shmem_comb_inp_tok = mori_shmem_create_tensor((tok_i16_mr_worst,), torch.int16)
         self.shmem_comb_inp_wts = mori_shmem_create_tensor((mr_worst * k,), torch.float32)
         self.shmem_comb_out_tok = mori_shmem_create_tensor((tok_i16_mt,), torch.int16)
         self.shmem_comb_out_wts = mori_shmem_create_tensor((mt * k,), torch.float32)
         self.shmem_xdev_bar_mem = mori_shmem_create_tensor((npes,), torch.int64)
 
-        # shmem_malloc is uninitialized; zero the buffers combine reads
-        # so degenerate (unwritten) slots are harmless.
+        # shmem_malloc is uninitialized; zero what combine reads.
         self.shmem_tok_id_to_src.zero_()
         self.shmem_comb_inp_tok.zero_()
         self.shmem_comb_inp_wts.zero_()
@@ -557,14 +495,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         if cfg.enable_std_moe:
             epr = cfg.num_experts_per_rank
-            # Expert-side capacity is independent of max_total_recv_tokens
-            # (mori treats them as separate dims).
             max_tok_per_expert = cfg.max_recv
             self.packed_recv_count = torch.zeros(epr, dtype=torch.int32, device=self._dev)
             self.packed_recv_src_info = torch.zeros(epr * max_tok_per_expert, dtype=torch.int32, device=self._dev)
             self.disp_tok_to_ep_slot_map = torch.full((mr * k,), -1, dtype=torch.int64, device=self._dev)
-            # i64 ticket counter for the StdMoE Phase 4 in-kernel grid
-            # barrier; never host-reset, i64 prevents wraparound.
             self.disp_grid_bar = torch.zeros(1, dtype=torch.int64, device=self._dev)
         else:
             self.packed_recv_count = torch.zeros(1, dtype=torch.int32, device=self._dev)
@@ -572,8 +506,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
             self.disp_tok_to_ep_slot_map = torch.zeros(1, dtype=torch.int64, device=self._dev)
             self.disp_grid_bar = torch.zeros(1, dtype=torch.int64, device=self._dev)
 
-    # Config / runtime contract checks: fail fast on misuse instead of
-    # OOB-writing or aborting deep in JIT codegen.
     def _check_config(self):
         """Static check of ``self.cfg``; runs before any GPU alloc."""
         cfg = self.cfg
@@ -599,8 +531,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
             raise ValueError(f"num_experts_per_rank must be positive, got {cfg.num_experts_per_rank}")
         if cfg.num_experts_per_token <= 0:
             raise ValueError(f"num_experts_per_token must be positive, got {cfg.num_experts_per_token}")
-        # k <= 64 is a hard kernel constraint (``ballot`` only covers
-        # 64 warp lanes).
+        # k <= 64: ballot only covers 64 warp lanes.
         if cfg.num_experts_per_token > 64:
             raise ValueError(f"num_experts_per_token={cfg.num_experts_per_token} exceeds the warp-lane budget (64)")
 
@@ -612,15 +543,13 @@ class FlyDSLDispatchCombineIntraNodeOp:
             raise ValueError(
                 f"quant_type='fp8_direct_cast' requires data_type=bfloat16 " f"(external dtype), got {cfg.data_type}"
             )
-        # std-MoE Stage 1/3 uses ``_weighted_accum_experts`` which has
-        # not been retrofitted for asymmetric I/O dtypes.
+
         if cfg.quant_type == "fp8_direct_cast" and cfg.enable_std_moe:
             raise NotImplementedError(
                 "quant_type='fp8_direct_cast' is not supported with "
                 "enable_std_moe=True (asymmetric I/O dtypes not yet wired)"
             )
-        # zero_copy skips Stage 1 (where the bf16->fp8 cast lives), so it is
-        # mutually exclusive with fp8_direct_cast; reject up-front.
+
         if cfg.quant_type == "fp8_direct_cast" and cfg.zero_copy:
             raise ValueError(
                 "quant_type='fp8_direct_cast' is incompatible with "
@@ -628,8 +557,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 "skips Stage 1 where the bf16->fp8 cast lives."
             )
 
-        # Kernel streams 16 B (v4i32) per lane; one stride check on
-        # ``token_bytes`` covers both Stage 1 reads and Stage 3 writes.
         if cfg.token_bytes % _TOK_BYTES_ALIGN != 0:
             raise ValueError(
                 f"token row bytes ({cfg.token_bytes}) must be a multiple of "
@@ -637,8 +564,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"({cfg.hidden_dim}) and data_type ({cfg.data_type})"
             )
 
-        # max_total_recv_tokens: 0 disables; positive values must give
-        # every rank >= 1 slot; over-cap is clamped to the worst case.
+        # max_total_recv_tokens: 0 disables; >0 needs every rank >= 1 slot.
         if cfg.max_total_recv_tokens < 0:
             raise ValueError(f"max_total_recv_tokens must be non-negative, got {cfg.max_total_recv_tokens}")
         if cfg.max_total_recv_tokens > 0:
@@ -660,8 +586,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                     stacklevel=2,
                 )
 
-        # max_token_type_size: 0 disables; otherwise must cover the
-        # dispatch element size.
+        # max_token_type_size: 0 disables; else must cover the dispatch elem size.
         if cfg.max_token_type_size < 0:
             raise ValueError(f"max_token_type_size must be non-negative, got {cfg.max_token_type_size}")
         if cfg.max_token_type_size > 0:
@@ -683,17 +608,20 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"positive, got ({cfg.scale_dim}, {cfg.scale_type_size})"
             )
 
-        if cfg.dispatch_warp_num_per_block <= 0:
-            raise ValueError(f"dispatch_warp_num_per_block must be positive, got {cfg.dispatch_warp_num_per_block}")
-        if cfg.dispatch_block_num <= 0:
-            raise ValueError(f"dispatch_block_num must be positive, got {cfg.dispatch_block_num}")
-        if cfg.combine_warp_num_per_block <= 0:
-            raise ValueError(f"combine_warp_num_per_block must be positive, got {cfg.combine_warp_num_per_block}")
-        if cfg.combine_block_num <= 0:
-            raise ValueError(f"combine_block_num must be positive, got {cfg.combine_block_num}")
+        if cfg.default_dispatch_warp_num_per_block <= 0:
+            raise ValueError(
+                f"default_dispatch_warp_num_per_block must be positive, got {cfg.default_dispatch_warp_num_per_block}"
+            )
+        if cfg.default_dispatch_block_num <= 0:
+            raise ValueError(f"default_dispatch_block_num must be positive, got {cfg.default_dispatch_block_num}")
+        if cfg.default_combine_warp_num_per_block <= 0:
+            raise ValueError(
+                f"default_combine_warp_num_per_block must be positive, got {cfg.default_combine_warp_num_per_block}"
+            )
+        if cfg.default_combine_block_num <= 0:
+            raise ValueError(f"default_combine_block_num must be positive, got {cfg.default_combine_block_num}")
 
-        # expert_id = dest_pe * num_experts_per_rank + local_expert_id
-        # must fit i32 (used by the kernel's ``divui`` decoding).
+        # expert_id (= dest_pe * experts_per_rank + local) must fit i32.
         total_experts = cfg.world_size * cfg.num_experts_per_rank
         if total_experts > (1 << 31) - 1:
             raise ValueError(
@@ -701,8 +629,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 "exceeds int32 range"
             )
 
-        # LDS budget pre-flight (clearer error than the equivalent JIT-time
-        # capacity failure).
         self._check_lds_capacity()
 
     def _check_lds_capacity(self):
@@ -711,8 +637,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         cfg = self.cfg
 
-        # Mirror ``make_combine_jit``'s layout: two 8B-aligned i64[npes]
-        # tables (tokens + weights), arena padded to 128 B.
+        # Mirror make_combine_jit's LDS layout: two 8B-aligned i64[npes] tables.
         def _align(p, a):
             return (p + a - 1) // a * a
 
@@ -746,7 +671,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         self._check_tensor_device("weights", weights)
         self._check_tensor_device("indices", indices)
 
-        # input: (cur_tok, hidden_dim) or (cur_tok, hidden_dim//2) for fp4.
         if input.dim() != 2:
             raise ValueError(f"input must be 2-D (cur_tok, hidden_dim), got shape {tuple(input.shape)}")
         cur_tok = input.shape[0]
@@ -755,9 +679,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"input rows={cur_tok} exceeds cfg.max_num_inp_token_per_rank="
                 f"{cfg.max_num_inp_token_per_rank} (would OOB-write into shmem)"
             )
-        # Launch-time dtype (mori parity): ``input.dtype`` is not tied
-        # to ``cfg.data_type``; any supported dtype that fits the shmem
-        # allocation budget is accepted.
+        # input.dtype is the launch-time dtype, not tied to cfg.data_type.
         if input.dtype not in _SUPPORTED_TOK_DTYPES:
             raise ValueError(f"input.dtype={input.dtype} not in supported set {_SUPPORTED_TOK_DTYPES}")
         expected_hdim = _token_view_dim_for(input.dtype, cfg.hidden_dim)
@@ -766,8 +688,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"input.shape[1]={input.shape[1]} != expected {expected_hdim} "
                 f"(hidden_dim={cfg.hidden_dim}, dtype={input.dtype})"
             )
-        # Per-row payload must fit ``max_token_bytes``; bump
-        # ``cfg.max_token_type_size`` when mixing dtypes.
         inp_token_bytes = _token_bytes_for(input.dtype, cfg.hidden_dim)
         if inp_token_bytes > cfg.max_token_bytes:
             raise ValueError(
@@ -776,7 +696,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"set cfg.max_token_type_size to cover the largest dtype the op handles."
             )
 
-        # weights: (cur_tok, k) f32.
         if weights.dim() != 2:
             raise ValueError(f"weights must be 2-D (cur_tok, k), got shape {tuple(weights.shape)}")
         if weights.shape != (cur_tok, cfg.num_experts_per_token):
@@ -786,7 +705,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         if weights.dtype != torch.float32:
             raise ValueError(f"weights.dtype={weights.dtype} must be torch.float32")
 
-        # indices: (cur_tok, k); wrapper casts to int32 below.
         if indices.dim() != 2:
             raise ValueError(f"indices must be 2-D (cur_tok, k), got shape {tuple(indices.shape)}")
         if indices.shape != (cur_tok, cfg.num_experts_per_token):
@@ -796,9 +714,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
         if indices.dtype not in (torch.int32, torch.int64):
             raise ValueError(f"indices.dtype={indices.dtype} must be int32 or int64")
 
-        # scales: all-or-none contract -- pass either all three
-        # (scales tensor + cfg.scale_dim>0 + cfg.scale_type_size>0) or
-        # none. Mixed states cause silent OOB / dropped writes.
+        # scales all-or-none: tensor + scale_dim>0 + scale_type_size>0, or none.
         scales_configured = cfg.scale_bytes > 0
         if (scales is not None) != scales_configured:
             raise ValueError(
@@ -822,7 +738,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                     f"{cfg.scale_bytes}B per row"
                 )
 
-        # packed_recv_x: only meaningful under StdMoE.
         if packed_recv_x is not None:
             self._check_tensor_device("packed_recv_x", packed_recv_x)
             if not cfg.enable_std_moe:
@@ -838,14 +753,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
         cfg = self.cfg
         self._check_tensor_device("input", input)
 
-        # Combine input is the dispatch out_tok buffer reshaped to
-        # (cur_rank_num_token, hidden_or_packed); leading dim varies,
-        # hidden_dim must match the configured one.
         if input.dim() != 2:
             raise ValueError(f"combine input must be 2-D, got shape {tuple(input.shape)}")
         if strict_input_dtype and input.dtype not in _SUPPORTED_TOK_DTYPES:
             raise ValueError(f"combine input.dtype={input.dtype} not in supported set {_SUPPORTED_TOK_DTYPES}")
-        # Launch-time dtype (mori parity); row-stride derived from input.dtype.
         view_dtype = (
             input.dtype
             if strict_input_dtype
@@ -894,10 +805,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 raise ValueError("packed_recv_x is only consumed when cfg.enable_std_moe=True")
 
     def _get_dispatch_jit(self, d_dtype, block_num, warp_num_per_block):
-        """Lazy-jit a dispatch kernel specialized to ``d_dtype`` (mori
-        parity); cache key also includes the launch geometry so multiple
-        ``(block_num, warp_num_per_block)`` specializations coexist on one op.
-        flyc.compile second-stage cache is keyed the same way."""
         key = (d_dtype, block_num, warp_num_per_block)
         if key not in self._disp_jit_cache:
             cfg = self.cfg
@@ -928,11 +835,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
         block_num=None,
         warp_num_per_block=None,
     ):
-        """Intranode dispatch.
-
-        ``block_num`` / ``warp_num_per_block`` override the launch geometry
-        (default cfg.dispatch_*); geometry does not affect buffer sizing, only
-        the kernel JIT specialization."""
+        """Intranode dispatch. ``block_num`` / ``warp_num_per_block`` override the
+        launch geometry (default cfg.default_dispatch_*) and only add a JIT
+        specialization; buffer sizing is unaffected."""
         self._check_dispatch_inputs(input, weights, scales, indices, packed_recv_x)
         cfg = self.cfg
         d_dtype = input.dtype
@@ -943,14 +848,11 @@ class FlyDSLDispatchCombineIntraNodeOp:
             warp_num_per_block,
             cfg.tuning_table,
             inp_cur_tok,
-            cfg.dispatch_block_num,
-            cfg.dispatch_warp_num_per_block,
+            cfg.default_dispatch_block_num,
+            cfg.default_dispatch_warp_num_per_block,
         )
         _check_block_num_resident("dispatch", bn)
-        self._last_dispatch_geom = (bn, wpb)
         disp_key = (d_dtype, bn, wpb)
-        # Stash dispatch input count for ``combine()``'s default
-        # ``cur_tok`` (mori ``args.curRankNumToken``).
         self._last_inp_cur_tok = inp_cur_tok
         stream = torch.cuda.current_stream()
         inp_c = input if input.is_contiguous() else input.contiguous()
@@ -966,11 +868,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         if cfg.enable_std_moe:
             self.packed_recv_count.zero_()
-            # ``disp_grid_bar`` is intentionally NOT reset; the kernel
-            # uses an ``atomic_add`` ticket to derive each launch's epoch.
 
-        # _std_args layout MUST match the trailing 8 ``addr_*`` params of
-        # ``dispatch_launch`` (shmem tok/idx/tok_id_to_src + out_* + disp_grid_bar).
         _std_args = (
             self._fx_out_tok,
             self._fx_out_idx,
@@ -1033,8 +931,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 stream,
             )
 
-        # Match the allocation size in ``_alloc_buffers``. Output view
-        # uses the launch-time dtype, not ``cfg.data_type``.
         mr = cfg.effective_max_recv
         k = cfg.num_experts_per_token
 
@@ -1045,8 +941,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         out_idx = self.shmem_disp_out_idx.view(mr, k)
         out_scales = None
         if cfg.scale_bytes > 0:
-            # Mirror caller's scales layout (typed or uint8 byte-stream) so it
-            # round-trips out of the int8 shmem buffer. scales is non-None here.
             out_scales = self.shmem_out_scales[: mr * cfg.scale_bytes].view(scales.dtype).view(mr, scales.shape[1])
 
         result = (out_tok, out_wts, out_scales, out_idx, self.total_recv)
@@ -1059,12 +953,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         return result
 
     def _get_combine_jit(self, c_dtype, zero_copy, enable_weights_flag, fp8_dc, block_num, warp_num_per_block):
-        """Lazy-jit a combine kernel specialized to the launch-time
-        ``(c_dtype, zero_copy, enable_weights, fp8_direct_cast)`` tuple plus
-        the launch geometry ``(block_num, warp_num_per_block)`` so multiple
-        geometries coexist on one op. Zero-copy hard-wires
-        ``skip_stage1=True`` -- the caller has already staged into
-        ``shmem_comb_inp_tok``."""
+        """Lazy-jit a combine kernel specialized to the launch-time dtype/flags +
+        geometry. Zero-copy hard-wires skip_stage1 (caller pre-staged)."""
         key = (c_dtype, bool(zero_copy), bool(enable_weights_flag), bool(fp8_dc), block_num, warp_num_per_block)
         if key not in self._comb_jit_cache:
             cfg = self.cfg
@@ -1080,10 +970,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 enable_weights=bool(enable_weights_flag),
                 enable_std_moe=cfg.enable_std_moe,
                 zero_copy=bool(zero_copy),
-                # Zero-copy => caller pre-staged tokens into
-                # shmem_comb_inp_tok; skip_stage1 removes the kernel's
-                # Stage 1 token copy (weight copy is still emitted so
-                # Stage 3b can read via recv_tok_id).
+                # Zero-copy: tokens pre-staged, skip Stage 1 token copy (weights still emitted).
                 skip_stage1=bool(zero_copy),
                 fp8_direct_cast=bool(fp8_dc),
                 max_recv=self._effective_max_recv,
@@ -1100,39 +987,22 @@ class FlyDSLDispatchCombineIntraNodeOp:
         block_num=None,
         warp_num_per_block=None,
     ):
-        """Intranode combine entry point.
-
-        ``input.dtype`` selects the kernel specialization at launch time
-        (mori parity); the JIT cache is keyed by
-        ``(input.dtype, zero_copy, enable_weights, fp8_direct_cast,
-        block_num, warp_num_per_block)``.
-
-        Zero-copy mode (``cfg.zero_copy=True``) requires the caller to
-        write into the buffer returned by
-        ``get_registered_combine_input_buffer(combine_dtype)`` before
-        invoking ``combine()``; passing a non-shmem tensor raises
-        ``ValueError``.
-
-        ``block_num`` / ``warp_num_per_block`` override the launch geometry
-        (default cfg.combine_*); geometry only adds a JIT specialization. The
-        zero-copy switch is frozen by ``self.cfg``."""
+        """Intranode combine. ``input.dtype`` selects the kernel specialization.
+        Zero-copy mode requires the caller to write into the buffer from
+        ``get_registered_combine_input_buffer()`` first. ``block_num`` /
+        ``warp_num_per_block`` override the launch geometry (JIT spec only)."""
         self._check_combine_inputs(input, weights, indices, packed_recv_x)
         cfg = self.cfg
         stream = torch.cuda.current_stream()
 
         c_dtype = input.dtype
         zero_copy = cfg.zero_copy
-        # combine_no_stage1 is the only entry point exposing weight-free
-        # combines today; this path always carries weights.
         enable_weights_flag = True
-        # fp8_direct_cast fires only when both the cfg knob is set AND
-        # the launch dtype is bf16 (mori UseFp8DirectCast parity).
+        # fp8_direct_cast fires only when cfg asks AND launch dtype is bf16.
         fp8_dc = cfg.quant_type == "fp8_direct_cast" and c_dtype == torch.bfloat16
-        # NOTE: the zero_copy+fp8_dc conflict is rejected up-front in
-        # _check_config(); only the per-call buffer-pointer contract here.
+        # Zero-copy contract: peers read shmem_comb_inp_tok; any other pointer is
+        # a silent correctness bug.
         if zero_copy and input.data_ptr() != self.shmem_comb_inp_tok.data_ptr():
-            # Zero-copy contract: peers read ``shmem_comb_inp_tok``;
-            # any other pointer = silent correctness bug.
             raise ValueError(
                 "zero_copy mode requires the caller to write into the buffer "
                 "returned by op.get_registered_combine_input_buffer(combine_dtype). "
@@ -1142,9 +1012,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         inp_c = input if input.is_contiguous() else input.contiguous()
 
-        # cur_tok = Stage 3 iteration bound. Defaults to the last
-        # dispatch()'s input count; callers bypassing dispatch (fused
-        # GEMM2+combine) must pass it explicitly.
+        # cur_tok defaults to the last dispatch()'s input count.
         if cur_tok is None:
             stashed = getattr(self, "_last_inp_cur_tok", None)
             if stashed is None:
@@ -1161,26 +1029,23 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 f"cur_tok={_cur_tok} out of range " f"[0, max_num_inp_token_per_rank={cfg.max_num_inp_token_per_rank}]"
             )
 
-        # Resolve geometry on the real per-rank token count (cur_tok), not
-        # input.shape[0] which under zero_copy is the ws*M staging buffer.
+        # Resolve geometry on cur_tok, not input.shape[0] (ws*M under zero_copy).
         bn, wpb = _resolve_launch_geometry(
             "combine",
             block_num,
             warp_num_per_block,
             cfg.tuning_table,
             _cur_tok,
-            cfg.combine_block_num,
-            cfg.combine_warp_num_per_block,
+            cfg.default_combine_block_num,
+            cfg.default_combine_warp_num_per_block,
         )
         _check_block_num_resident("combine", bn)
-        self._last_combine_geom = (bn, wpb)
 
         wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
 
         _prx_ref = None
         if fp8_dc and packed_recv_x is not None:
-            # std-MoE expert-major buffer is bf16 upstream but Stage 1
-            # reads fp8; cast here (independent from main input path).
+            # std-MoE expert-major buffer is bf16 upstream but Stage 1 reads fp8.
             _prx_ref = packed_recv_x.view(torch.bfloat16).to(torch.float8_e4m3fn).contiguous()
             prx_ptr = _prx_ref.data_ptr()
         else:
@@ -1251,9 +1116,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         return out_tok, out_wts
 
-    # Gated reserved API: only the fused GEMM2+combine path on
-    # ``yanbo/fused_gemm2_combine`` meets the pre-populated-buffer
-    # contract.
+    # Gated reserved API: only the fused GEMM2+combine path is contract-safe.
     _ENABLE_COMBINE_NO_STAGE1 = False
 
     def combine_no_stage1(
@@ -1267,21 +1130,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
         block_num=None,
         warp_num_per_block=None,
     ):
-        """Skip-Stage1 combine (reserved for fused GEMM2+combine path).
-
-        Runs only Stage 2 + Stage 3; the upstream fused kernel must have
-        populated ``shmem_comb_inp[_wts]``. Gated by
-        ``_ENABLE_COMBINE_NO_STAGE1``.
-
-        ``enable_weights=True`` keeps the Stage 1 weight scatter + Stage 3b
-        in combine (upstream GEMM2 16B writes get dropped under IPC
-        contention). ``False`` DCEs both weight steps (~3-5 us savings).
-
-        Caller-owned contract:
-          - ``shmem_comb_inp_tok`` holds every consumed token;
-          - ``shmem_comb_inp_wts`` holds matching weights when enabled;
-          - ``cur_tok`` matches the real receive count.
-        """
+        """Skip-Stage1 combine (reserved for fused GEMM2+combine; gated by
+        ``_ENABLE_COMBINE_NO_STAGE1``). Runs Stage 2+3 only; caller must have
+        populated ``shmem_comb_inp[_wts]`` and pass a matching ``cur_tok``.
+        ``enable_weights=False`` DCEs the weight steps (~3-5 us savings)."""
         if not type(self)._ENABLE_COMBINE_NO_STAGE1:
             raise NotImplementedError(
                 "combine_no_stage1 is reserved for the fused GEMM2+combine "
@@ -1290,27 +1142,19 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 "after auditing the upstream IPC-ordering contract."
             )
 
-        # Kernel does not read ``input`` (Stage 1 bypassed); only check
-        # shape/device, relax strict dtype contract.
+        # Stage 1 bypassed: kernel never reads input, so relax the dtype check.
         self._check_combine_inputs(input, weights, indices, packed_recv_x, strict_input_dtype=False)
         cfg = self.cfg
         stream = torch.cuda.current_stream()
 
-        # fp8_direct_cast fires only when cfg asks for it AND caller
-        # passes bf16.
         fp8_dc = cfg.quant_type == "fp8_direct_cast" and input.dtype == torch.bfloat16
-        # ``input`` is unread under skip_stage1; the fused caller is expected
-        # to have CV-casted to fp8 in the GEMM2 epilogue.
         if fp8_dc and input.dtype != torch.float8_e4m3fn:
             inp_c = input.to(torch.float8_e4m3fn).contiguous()
         else:
             inp_c = input if input.is_contiguous() else input.contiguous()
-        # Wire dtype is fp8 under fp8_direct_cast even when caller
-        # passes bf16; otherwise track input dtype.
         c_dtype = torch.float8_e4m3fn if fp8_dc else input.dtype
 
-        # ``input`` is a placeholder under skip_stage1 so cur_tok cannot
-        # be inferred from its shape: explicit > stashed > error.
+        # input is a placeholder here, so cur_tok cannot come from its shape.
         if cur_tok is not None:
             _cur_tok = cur_tok
         else:
@@ -1334,11 +1178,10 @@ class FlyDSLDispatchCombineIntraNodeOp:
             warp_num_per_block,
             cfg.tuning_table,
             _cur_tok,
-            cfg.combine_block_num,
-            cfg.combine_warp_num_per_block,
+            cfg.default_combine_block_num,
+            cfg.default_combine_warp_num_per_block,
         )
         _check_block_num_resident("combine", bn)
-        self._last_combine_geom = (bn, wpb)
 
         wts_ptr = self.shmem_disp_out_wts.data_ptr() if weights is None else weights.data_ptr()
 
@@ -1349,8 +1192,6 @@ class FlyDSLDispatchCombineIntraNodeOp:
         else:
             prx_ptr = packed_recv_x.data_ptr() if packed_recv_x is not None else 0
 
-        # Key includes dtype + launch geometry so a runtime dtype/geometry
-        # switch picks a fresh specialization instead of the first-seen kernel.
         no_s1_key = (c_dtype, bool(enable_weights), bn, wpb)
 
         if no_s1_key not in self._comb_no_s1_fn:
@@ -1370,8 +1211,7 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 zero_copy=cfg.zero_copy,
                 skip_stage1=True,
                 fp8_direct_cast=bool(fp8_dc),
-                # Must match dispatch's encoding stride so tok_map
-                # sentinel + (peer_pe, dest_lid) decode line up.
+                # Must match dispatch's encoding stride so tok_map decode lines up.
                 max_recv=self._effective_max_recv,
             )
 
@@ -1439,12 +1279,8 @@ class FlyDSLDispatchCombineIntraNodeOp:
         return self.shmem_tok_id_to_src[:n].clone()
 
     def get_registered_combine_input_buffer(self, dtype=None, hidden_dim=-1):
-        """Return ``shmem_comb_inp_tok`` viewed as ``dtype`` (mori parity).
-
-        In zero-copy mode the caller MUST write into this view before
-        ``op.combine(...)``; the kernel skips Stage 1 and peers read
-        this buffer directly.
-        """
+        """Return ``shmem_comb_inp_tok`` viewed as ``dtype``; in zero-copy mode the
+        caller MUST write into this view before ``op.combine(...)``."""
         cfg = self.cfg
         dt = dtype if dtype is not None else cfg.data_type
         if dt not in _SUPPORTED_TOK_DTYPES:

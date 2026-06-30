@@ -627,8 +627,8 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
         num_experts_per_token=cfg.num_experts_per_token,
-        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.dispatch_warp_num_per_block,
-        block_num=block_num if block_num is not None else cfg.dispatch_block_num,
+        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.default_dispatch_warp_num_per_block,
+        block_num=block_num if block_num is not None else cfg.default_dispatch_block_num,
         gpu_per_node=world_size,
         use_external_inp_buf=not cfg.zero_copy,
         quant_type=cfg.quant_type,
@@ -2098,70 +2098,6 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
     return all_pass
 
 
-def _verify_tuning(op_fly, inp, wts, scales, idx, packed_recv_x, cfg, cur_tok, rank, comb_dtype):
-    """Assert launch-geometry resolution: explicit arg > tuning config >
-    default. Compares the geometry the op *actually* launched
-    (``op._last_{dispatch,combine}_geom``) against the expectation computed
-    independently from the table. Returns True/False (all ranks must agree)."""
-    tbl = cfg.tuning_table
-    checks = []  # (passed, message)
-
-    def _chk(label, got, expected, extra):
-        passed = got == expected
-        checks.append(
-            (
-                passed,
-                f"{'OK' if passed else 'FAIL'} {label} {got} {extra}" + ("" if passed else f", expected {expected}"),
-            )
-        )
-
-    def _expect(phase, dflt):
-        hit = tbl.lookup(phase, cur_tok) if tbl is not None else None
-        return (hit, "config") if hit is not None else (dflt, "default")
-
-    exp_disp, src_disp = _expect("dispatch", (cfg.dispatch_block_num, cfg.dispatch_warp_num_per_block))
-    exp_comb, src_comb = _expect("combine", (cfg.combine_block_num, cfg.combine_warp_num_per_block))
-
-    _dkw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
-    _ckw = dict(packed_recv_x=packed_recv_x) if packed_recv_x is not None else {}
-
-    def _round(disp_kw, comb_kw):
-        _safe_op_reset(op_fly)
-        ms.shmem_barrier_all()
-        ret = op_fly.dispatch(inp, wts, scales, idx, **disp_kw, **_dkw)
-        torch.cuda.synchronize()
-        _run_combine(op_fly, ret, comb_dtype, **comb_kw, **_ckw)
-        torch.cuda.synchronize()
-        ms.shmem_barrier_all()
-        return op_fly._last_dispatch_geom, op_fly._last_combine_geom
-
-    # Tier 2/3: no per-call geometry -> config (if rule) else default.
-    got_disp, got_comb = _round({}, {})
-    _chk("dispatch geom", got_disp, exp_disp, f"(source={src_disp}, num_tokens={cur_tok})")
-    _chk("combine geom", got_comb, exp_comb, f"(source={src_comb}, num_tokens={cur_tok})")
-
-    # Tier 1: explicit per-call override must win, with a resident-safe
-    # geometry distinct from the resolved one.
-    ov = (64 if exp_disp[0] != 64 else 80, 8 if exp_disp[1] != 8 else 4)
-    ovkw = dict(block_num=ov[0], warp_num_per_block=ov[1])
-    got_disp_ov, got_comb_ov = _round(ovkw, ovkw)
-    _chk("dispatch override", got_disp_ov, ov, f"beats {src_disp}")
-    _chk("combine override", got_comb_ov, ov, f"beats {src_comb}")
-
-    ok = all(p for p, _ in checks)
-    if rank == 0:
-        for _, msg in checks:
-            print(f"[verify-tuning] {msg}")
-        if tbl is not None:
-            print(
-                f"[verify-tuning] tuning_table LOADED, dispatch_rules={len(tbl.dispatch)}, "
-                f"combine_rules={len(tbl.combine)}"
-            )
-        else:
-            print("[verify-tuning] tuning_table EMPTY (defaults)")
-    return _global_reduce_all_pass(ok, rank)
-
-
 # --- Main entry ---
 def run_profiler(rank, world_size, args):
     dev = torch.device("cuda", rank)
@@ -2192,10 +2128,10 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         num_experts_per_token=k,
         data_type=_dtype,
-        dispatch_warp_num_per_block=args.dispatch_warp_per_block,
-        dispatch_block_num=args.dispatch_block_num,
-        combine_warp_num_per_block=args.combine_warp_per_block,
-        combine_block_num=args.combine_block_num,
+        default_dispatch_warp_num_per_block=args.dispatch_warp_per_block,
+        default_dispatch_block_num=args.dispatch_block_num,
+        default_combine_warp_num_per_block=args.combine_warp_per_block,
+        default_combine_block_num=args.combine_block_num,
         zero_copy=args.zero_copy,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
@@ -2205,8 +2141,8 @@ def run_profiler(rank, world_size, args):
         max_token_type_size=_user_mtt,
     )
 
-    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.dispatch_block_num
-    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.dispatch_warp_num_per_block
+    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.default_dispatch_block_num
+    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.default_dispatch_warp_num_per_block
     meta = dict(
         world_size=world_size,
         max_tokens=cur_tok,
@@ -2215,10 +2151,10 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         warmup=args.warmup,
         iters=args.iters,
-        flydsl_dispatch_block_num=cfg.dispatch_block_num,
-        flydsl_dispatch_warp_per_block=cfg.dispatch_warp_num_per_block,
-        flydsl_combine_block_num=cfg.combine_block_num,
-        flydsl_combine_warp_per_block=cfg.combine_warp_num_per_block,
+        flydsl_dispatch_block_num=cfg.default_dispatch_block_num,
+        flydsl_dispatch_warp_per_block=cfg.default_dispatch_warp_num_per_block,
+        flydsl_combine_block_num=cfg.default_combine_block_num,
+        flydsl_combine_warp_per_block=cfg.default_combine_warp_num_per_block,
         mori_block_num=mori_bn,
         mori_warp_per_block=mori_wpb,
         zero_copy=cfg.zero_copy,
@@ -2240,7 +2176,7 @@ def run_profiler(rank, world_size, args):
         print("[profiler] building FlyDSL...", flush=True)
     op_fly = FlyDSLDispatchCombineIntraNodeOp(cfg)
     # When the CLI pins launch geometry, drop the auto-loaded tuning table so
-    # cfg.dispatch_block_num / cfg.combine_block_num (from --dispatch-block-num /
+    # cfg.default_dispatch_block_num / cfg.default_combine_block_num (from --dispatch-block-num /
     # --combine-block-num) drive BOTH dispatch and combine resolution. Otherwise
     # the table shadows the CLI in the profile/cudagraph path and geometry
     # sweeps silently collapse to the tuned values.
@@ -2248,9 +2184,9 @@ def run_profiler(rank, world_size, args):
         op_fly.cfg.tuning_table = None
         if rank == 0:
             print(
-                f"[geometry] CLI-pinned: dispatch={cfg.dispatch_block_num}/"
-                f"{cfg.dispatch_warp_num_per_block} combine={cfg.combine_block_num}/"
-                f"{cfg.combine_warp_num_per_block} (tuning table disabled)"
+                f"[geometry] CLI-pinned: dispatch={cfg.default_dispatch_block_num}/"
+                f"{cfg.default_dispatch_warp_num_per_block} combine={cfg.default_combine_block_num}/"
+                f"{cfg.default_combine_warp_num_per_block} (tuning table disabled)"
             )
 
     # Mori reference op.  Constructed whenever it can act as a verify
@@ -2264,8 +2200,8 @@ def run_profiler(rank, world_size, args):
     if _want_mori:
         mori_bn = args.mori_block_num if args.mori_block_num > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
-        bn_str = mori_bn if mori_bn else cfg.dispatch_block_num
-        wpb_str = mori_wpb if mori_wpb else cfg.dispatch_warp_num_per_block
+        bn_str = mori_bn if mori_bn else cfg.default_dispatch_block_num
+        wpb_str = mori_wpb if mori_wpb else cfg.default_dispatch_warp_num_per_block
         if rank == 0:
             print(
                 f"[profiler] building mori ref (block_num={bn_str}, warp_per_block={wpb_str}) "
@@ -2413,11 +2349,6 @@ def run_profiler(rank, world_size, args):
     meta["combine_dtype"] = str(_comb_dtype)
     if rank == 0:
         print(f"[setup] per-rank total_recv = {total_recv_per_rank} tokens; " f"token bytes = {cfg.token_bytes}")
-
-    # Geometry-resolution gate: assert explicit arg > tuning config > default
-    # is honored at launch, then return (no timing).
-    if args.mode == "verify-tuning":
-        return _verify_tuning(op_fly, inp, wts, scales, idx, packed_recv_x, cfg, cur_tok, rank, _comb_dtype)
 
     # profile+eager needs an external warmup; the other three combos
     # warm up inside their own functions.
@@ -2822,14 +2753,12 @@ def _parse_args():
     # behaviour, only adds a mori reference to the timing tables.
     p.add_argument(
         "--mode",
-        choices=["profile", "bench", "verify-tuning"],
+        choices=["profile", "bench"],
         default="profile",
         help=(
             "timing measurement: profile=torch.profiler (default); "
             "bench=CUDA event timing. Both modes embed an accuracy "
-            "check at the start of every run. verify-tuning=assert the "
-            "launch-geometry resolution (explicit arg > tuning config > "
-            "default) is honored; no timing."
+            "check at the start of every run."
         ),
     )
     p.add_argument("--cudagraph", action="store_true", help="use CUDAGraph capture+replay (default: eager)")
