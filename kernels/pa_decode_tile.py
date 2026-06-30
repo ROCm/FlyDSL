@@ -426,6 +426,15 @@ def compile_pa_decode_tile(
             v_page = fx.slice(val_buf, (phys, kv_h, None, None))  # [HEAD, block_size]
             v_hsplit = fx.zipped_divide(v_page, (VHE_SIZE, TILE_TOK))  # [(VHE,TILE), (HEAD/VHE, blk/TILE)]
 
+            # ---- hoist V loads BEFORE QK so their DMA hides behind QK + softmax
+            # (production loads V early too); consumed by the PV loop below. ----
+            frag_Vs = []
+            for vh in range_constexpr(VHE_CHUNKS):
+                bV = fx.slice(v_hsplit, (None, (vh, within_tile)))  # [VHE_SIZE, TILE_TOK]
+                fV = thr_mma_pv_l.make_fragment_B(bV)
+                fx.copy(copy_kv, thr_copy_v.partition_S(bV), thr_copy_v.retile(fV), pred=None)
+                frag_Vs.append(fV)
+
             # ---- QK in TLOOP chunks: NCHUNK small fx.gemm -> f32x4/lane (frag_Ks prefetched) ----
             frag_Ss = []
             for a in range_constexpr(NCHUNK):
@@ -511,12 +520,9 @@ def compile_pa_decode_tile(
             m_base_pv = (lane // c16) * arith.constant(4, type=T.i32)
             corr_s = [_ld1(sCorr_off, m_base_pv + arith.constant(v, type=T.i32)) for v in range_constexpr(OP_ELEMS)]
             for vh in range_constexpr(VHE_CHUNKS):
-                bV = fx.slice(v_hsplit, (None, (vh, within_tile)))  # [VHE_SIZE, TILE_TOK]
-                frag_V = thr_mma_pv_l.make_fragment_B(bV)
-                fx.copy(copy_kv, thr_copy_v.partition_S(bV), thr_copy_v.retile(frag_V), pred=None)
                 frag_Op = thr_mma_pv_l.make_fragment_C(tmpl_Op)  # [16, VHE_SIZE]
                 frag_Op.fill(0.0)
-                fx.gemm(tiled_mma_pv, frag_Op, frag_P, frag_V, frag_Op)
+                fx.gemm(tiled_mma_pv, frag_Op, frag_P, frag_Vs[vh], frag_Op)
                 op = frag_Op.load()
                 oo = o_acc[vh]
                 o_acc[vh] = Vec.from_elements(
