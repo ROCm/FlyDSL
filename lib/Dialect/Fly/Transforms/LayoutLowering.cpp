@@ -2140,7 +2140,6 @@ public:
     if (srcRank != dstRank)
       return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
-
     if (pred && predLayoutAttr.rank() == srcRank - 1) {
       LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);
       LayoutAttr unitAttr = LayoutAttr::get(ctx, IntTupleAttr::getLeafStatic(ctx, 1),
