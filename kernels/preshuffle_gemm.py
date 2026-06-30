@@ -249,6 +249,11 @@ def compile_preshuffle_gemm(
         # get(b, 4, b) with b = log2(tile_k//16).
         if const_expr(is_8bit):
             k_blocks16 = (tile_k * elem_bytes) // 16
+            if k_blocks16 <= 0 or (k_blocks16 & (k_blocks16 - 1)) != 0:
+                raise ValueError(
+                    f"Unsupported tile_k for 8-bit LDS swizzle: tile_k={tile_k}, elem_bytes={elem_bytes} (k_blocks16={k_blocks16}); "
+                    "expected tile_k*elem_bytes to be a positive multiple of 16 with (tile_k*elem_bytes/16) a power of two."
+                )
             swz_bits = k_blocks16.bit_length() - 1  # log2
             swz = fx.SwizzleType.get(swz_bits, 4, swz_bits)
         else:
