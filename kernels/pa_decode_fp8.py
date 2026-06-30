@@ -31,13 +31,11 @@ from kernels import dpp_utils
 from kernels.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.pa_metadata import compile_pa_decode_metadata
 from kernels.utils import (
-    buffer_load,
     cdiv,
     exp2_f32_fast,
     global_load_i32,
     global_load_i64x2,
     global_ptr_from_addr,
-    maxnumf,
     rcp_f32,
     udiv_const,
     unflatten_k,
@@ -284,10 +282,10 @@ def _finish_q_fragments(
         q_abs_i32 = q_i32 & abs_mask
         q_abs = q_abs_i32.bitcast(fx.Float32)
         chunk_max = q_abs.reduce("max")
-        local_max = maxnumf(local_max, chunk_max)
+        local_max = fx.maxnumf(local_max, chunk_max)
 
     for sh in [8, 4, 2, 1]:
-        local_max = maxnumf(local_max, dpp_utils.dpp_xor_f32(local_max, sh))
+        local_max = fx.maxnumf(local_max, dpp_utils.dpp_xor_f32(local_max, sh))
     query_scale_lane = fx.Float32(
         arith.select(
             local_max > c_zero_f,
@@ -480,9 +478,9 @@ def _make_pa_phase_helpers(
                         vs_i = vector.extract(vs, static_position=[i], dynamic_position=[])
                         vs_i = arith.select(kv_tok < seq_end, vs_i, zero_f)
                         vs = vector.insert(vs_i, vs, static_position=[i], dynamic_position=[])
-                v_max_warp = maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
+                v_max_warp = fx.maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
-                v_max_warp = maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+                v_max_warp = fx.maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
             vector.store(
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
                 softmax_lds_f32,
@@ -544,9 +542,9 @@ def _make_pa_phase_helpers(
             if const_expr(kv_tok_base is not None):
                 logits_vec = _apply_token_mask_vec(logits_vec, td, kv_tok_base, causal_bound, neg_inf)
                 d_out[td] = logits_vec
-            qk_max = maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
+            qk_max = fx.maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
-            qk_max = maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+            qk_max = fx.maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
         vector.store(
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
             softmax_lds_f32,
@@ -562,9 +560,9 @@ def _make_pa_phase_helpers(
         partition_sum = zero_f
         max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
         for w in range_constexpr(NUM_WARPS):
-            partition_max = maxnumf(partition_max, max_vec[w])
+            partition_max = fx.maxnumf(partition_max, max_vec[w])
 
-        new_rmax = maxnumf(rmax, partition_max)
+        new_rmax = fx.maxnumf(rmax, partition_max)
         safe_eff_max = arith.select(partition_max > neg_inf, new_rmax, zero_f) if const_expr(needs_mask) else new_rmax
         local_exp_sum = zero_f
         for td in range_constexpr(TLOOP):
@@ -607,7 +605,7 @@ def _make_pa_phase_helpers(
             vmax_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_vmax_rd_offs[0]]))
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
-                v_max_global = maxnumf(v_max_global, w_vmax)
+                v_max_global = fx.maxnumf(v_max_global, w_vmax)
             v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX).ir_value()
             v_max_safe_scaled = v_max_scaled + fx.Float32(1e-8 / FP8_MAX).ir_value()
             norm_factor = rcp_f32(v_max_safe_scaled)
@@ -1324,10 +1322,10 @@ def compile_pa_decode_ps(
             # all kernel stalls) and the downstream readfirstlane.
             if const_expr(block_size == 64):
                 bt_elem_off = batch_idx * stride_bt_seq + partition_block_base + warp_id
-                phys_blocks = buffer_load(bt_rsrc, bt_elem_off * fx.Int32(4), vec_width=1, is_scalar=True)
+                phys_blocks = buffer_ops.buffer_load(bt_rsrc, bt_elem_off, vec_width=1, is_scalar=True)
             else:
                 bt_elem_off = batch_idx * stride_bt_seq + partition_block_base + warp_id * fx.Int32(TLOOP)
-                phys_blocks = buffer_load(bt_rsrc, bt_elem_off * fx.Int32(4), vec_width=TLOOP, is_scalar=True)
+                phys_blocks = buffer_ops.buffer_load(bt_rsrc, bt_elem_off, vec_width=TLOOP, is_scalar=True)
             return phys_blocks
 
         def _pa_small_block_store_phys_blocks_to_lds(phys_block_vec):

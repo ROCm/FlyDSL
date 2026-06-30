@@ -70,10 +70,6 @@ def urem_const(value, divisor: int):
     return value % fx.Int32(divisor)
 
 
-def maxnumf(a, b):
-    return type(a)(arith.maxnumf(arith.unwrap(a), arith.unwrap(b)))
-
-
 def unflatten_k(k_flat, qkhe_loop: int = 2):
     n = qkhe_loop * 2
     return [[k_flat[td * n + j] for j in range(n)] for td in range(len(k_flat) // n)]
@@ -103,49 +99,3 @@ def global_load_i64x2(global_ptr, byte_offset_i64):
 
 def global_load_i32(global_ptr, elem_offset_i32):
     return global_load(global_ptr, fx.Int64(elem_offset_i32) * fx.Int64(4), T.i32, alignment=4)
-
-
-def ptr8_to_v4i32(ptr8_val):
-    from flydsl.expr.rocdl import _to_ir
-
-    i128_ty = ir.IntegerType.get_signless(128)
-    v4i32_ty = ir.VectorType.get([4], ir.IntegerType.get_signless(32))
-    i128_val = llvm.ptrtoint(i128_ty, _to_ir(ptr8_val))
-    return llvm.bitcast(v4i32_ty, i128_val)
-
-
-def buffer_load(rsrc, soffset_i32, vec_width=4, *, is_scalar=False, dtype=None, cache_modifier=0):
-    if not is_scalar:
-        return buffer_ops.buffer_load(
-            rsrc,
-            soffset_i32,
-            vec_width=vec_width,
-            dtype=dtype,
-            cache_modifier=cache_modifier,
-        )
-
-    from flydsl.expr.rocdl import _to_ir
-
-    i32_ty = ir.IntegerType.get_signless(32)
-    if vec_width == 1:
-        result_type = i32_ty
-        suffix = "i32"
-    elif vec_width == 4:
-        result_type = ir.VectorType.get([4], i32_ty)
-        suffix = "v4i32"
-    else:
-        raise ValueError(f"buffer_load(is_scalar=True): unsupported vec_width={vec_width}")
-
-    rsrc_v4 = ptr8_to_v4i32(rsrc)
-    cache_policy = arith.constant(cache_modifier, type=T.i32)
-    return llvm.call_intrinsic(
-        result_type,
-        f"llvm.amdgcn.s.buffer.load.{suffix}",
-        [
-            _to_ir(rsrc_v4),
-            _to_ir(soffset_i32),
-            _to_ir(cache_policy),
-        ],
-        [],
-        [],
-    )

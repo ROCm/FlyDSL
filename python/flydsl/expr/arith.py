@@ -24,6 +24,7 @@ __all__ = [
     "index",  # Deprecated: will be removed in a future release
     "index_cast",  # Deprecated: will be removed in a future release
     "int_to_fp",
+    "maxnumf",
     "shli",
     "sitofp",
     "trunc_f",
@@ -82,3 +83,21 @@ def cmpf(predicate, lhs, rhs, **kwargs):
         An ``i1`` comparison result.
     """
     return _mlir_arith.cmpf(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
+
+
+@dsl_loc_tracing
+def maxnumf(a, b, **kwargs):
+    """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``).
+
+    Accepts DSL numeric types (Float32, Vector, ...) and preserves the DSL type of ``a`` so the
+    result can be chained with further DSL operations (e.g. ``.shuffle_xor(...)``).
+    """
+    from .numeric import Numeric
+    from .typing import Vector
+
+    result = _mlir_arith.maxnumf(_to_raw(a), _to_raw(b), **kwargs)
+    if isinstance(a, Vector):
+        return Vector(result)
+    if isinstance(a, Numeric):
+        return Numeric.from_ir_type(result.type)(result)
+    return result
