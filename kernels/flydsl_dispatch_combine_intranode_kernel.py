@@ -50,8 +50,8 @@ _SLC_CACHE = 2
 
 def _wave_uniform_i64(addr):
     v = fx.Uint64(addr)
-    lo = readfirstlane(T.i32(), fx.Uint32(v))            # low 32 bits
-    hi = readfirstlane(T.i32(), fx.Uint32(v >> 32))      # high 32 bits (unsigned shift)
+    lo = readfirstlane(T.i32(), fx.Uint32(v))  # low 32 bits
+    hi = readfirstlane(T.i32(), fx.Uint32(v >> 32))  # high 32 bits (unsigned shift)
     return (fx.Uint64(hi) << 32) | fx.Uint64(lo)
 
 
@@ -284,7 +284,7 @@ def make_dispatch_kernel(
             if lane == 0:
                 buffer_store(fx.Int32(0), _r_tok_off, 0)
 
-        # Phase 4: ConvertDispatchOutput (StdMoE). 
+        # Phase 4: ConvertDispatchOutput (StdMoE).
         if const_expr(enable_std_moe):
             fx.barrier()
             if tid == 0:
@@ -773,10 +773,7 @@ def make_combine_kernel(
             # ``addr_comb_bar``; makes Stage 1 P2P writes visible.
             fence_system_acquire()
             buffer_store(fx.Int32(0), _r_comb_bar, 0)
-            xdb_remote_addr = (
-                buffer_load(_r_p2p_xdb, grid_thread_id, vec_width=1, dtype=T.i64())
-                + fx.Int64(rank) * 8
-            )
+            xdb_remote_addr = buffer_load(_r_p2p_xdb, grid_thread_id, vec_width=1, dtype=T.i64()) + fx.Int64(rank) * 8
             store_i64_global_system(xdb_remote_addr, xdb_cur_flag)
 
         if grid_thread_id == 0:

@@ -2687,10 +2687,24 @@ def _parse_args():
     p.add_argument("--hidden-dim", type=int, default=7168)
     p.add_argument("--num-experts-per-rank", type=int, default=32)
     p.add_argument("--k", type=int, default=8)
-    p.add_argument("--dispatch-block-num", type=int, default=None, help="FlyDSL dispatch-only block_num (default: op tuning table)")
-    p.add_argument("--dispatch-warp-per-block", type=int, default=None, help="FlyDSL dispatch-only warp_per_block (default: op tuning table)")
-    p.add_argument("--combine-block-num", type=int, default=None, help="FlyDSL combine-only block_num (default: op tuning table)")
-    p.add_argument("--combine-warp-per-block", type=int, default=None, help="FlyDSL combine-only warp_per_block (default: op tuning table)")
+    p.add_argument(
+        "--dispatch-block-num", type=int, default=None, help="FlyDSL dispatch-only block_num (default: op tuning table)"
+    )
+    p.add_argument(
+        "--dispatch-warp-per-block",
+        type=int,
+        default=None,
+        help="FlyDSL dispatch-only warp_per_block (default: op tuning table)",
+    )
+    p.add_argument(
+        "--combine-block-num", type=int, default=None, help="FlyDSL combine-only block_num (default: op tuning table)"
+    )
+    p.add_argument(
+        "--combine-warp-per-block",
+        type=int,
+        default=None,
+        help="FlyDSL combine-only warp_per_block (default: op tuning table)",
+    )
     p.add_argument(
         "--mori-block-num",
         type=int,
