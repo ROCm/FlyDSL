@@ -342,6 +342,17 @@ def compile_pa_decode_tile(
         # layout is read by make_fragment_*, no real storage is consumed.
         tmpl_S = fx.make_rmem_tensor(fx.make_layout((TILE_TOK, M), (M, 1)), fx.Float32)  # [token, qhead]
         tmpl_P = fx.make_rmem_tensor(fx.make_layout((M, TILE_TOK), (TILE_TOK, 1)), FP8)
+        # QK in TLOOP chunks of TOK_CHUNK tokens: each small fx.gemm yields a f32x4
+        # C-fragment, so the softmax processes 4 scores at a time (scores stay in
+        # AGPR, VGPR peak low) — matching pa_decode_ps_kernel's TLOOP.
+        TOK_CHUNK = NWARP * MFMA_MNK  # 64
+        NCHUNK = TILE_TOK // TOK_CHUNK  # 4
+        tmpl_S_c = fx.make_rmem_tensor(fx.make_layout((TOK_CHUNK, M), (M, 1)), fx.Float32)
+        # compile-time per-chunk token offsets (token = a*TOK_CHUNK + base + r)
+        _ct = [
+            Vec.from_elements([arith.constant(float(a * TOK_CHUNK + r), type=T.f32) for r in range_constexpr(4)])
+            for a in range_constexpr(NCHUNK)
+        ]
         # P·V is loop-tiled over head-dim (like the production VHELOOP): each step
         # computes O[:, vh*VHE_SIZE : +VHE_SIZE], shrinking the live V operand and
         # PV accumulator instead of materializing the full [16, HEAD] at once.
@@ -359,6 +370,37 @@ def compile_pa_decode_tile(
             within = tok0 - page * block_size
             phys = fx.Int32(_load_i32(bt_gp, seq * max_blocks_per_seq + page))
             return phys, within // c_TILE_TOK, tok0
+
+        # ── cross-iteration K prefetch: NCHUNK persistent A sub-fragments ──
+        # frag_Ks[a] holds tile tt's a-th 64-token block during iteration tt; the
+        # prologue loads tile 0 and each iteration prefetches tt+1's blocks right
+        # after the QK gemms consume them, so K's DMA overlaps softmax + PV.
+        num_tiles_m1 = num_tiles - arith.constant(1, type=T.i32)
+
+        def _load_K_block(frag, tile_phys, tile_within, a, thr_copy_k):
+            kp = fx.slice(key_buf, (tile_phys, kv_h, None, None))  # [block_size, HEAD]
+            bK_t = fx.slice(fx.zipped_divide(kp, (TILE_TOK, HEAD)), (None, tile_within))  # [256, HEAD]
+            bK_a = fx.slice(fx.zipped_divide(bK_t, (TOK_CHUNK, HEAD)), (None, a))  # [64, HEAD]
+            fx.copy(copy_kv, thr_copy_k.partition_S(bK_a), thr_copy_k.retile(frag), pred=None)
+
+        start_safe = arith.select(part_start < num_tiles, part_start, num_tiles_m1)
+        phys0, wt0, _ = _tile_coords(start_safe)
+        _thr_ck0 = tcopy_k.get_slice(tid)
+        _thr_mqk0 = tiled_mma_qk.get_slice(tid)
+        frag_Ks = []
+        for a in range_constexpr(NCHUNK):
+            bK0 = fx.slice(
+                fx.zipped_divide(
+                    fx.slice(
+                        fx.zipped_divide(fx.slice(key_buf, (phys0, kv_h, None, None)), (TILE_TOK, HEAD)), (None, wt0)
+                    ),
+                    (TOK_CHUNK, HEAD),
+                ),
+                (None, a),
+            )
+            fK = _thr_mqk0.make_fragment_A(bK0)
+            _load_K_block(fK, phys0, wt0, a, _thr_ck0)
+            frag_Ks.append(fK)
 
         # O is carried in registers across tiles (one VHE_CHUNKS-list of PV
         # C-fragment vectors), rescaled by the softmax correction each tile.
@@ -378,64 +420,69 @@ def compile_pa_decode_tile(
             thr_copy_v = tcopy_v.get_slice(tid)
             thr_copy_p8 = tcopy_p8.get_slice(tid)
 
-            # ---- K tile [TILE_TOK, HEAD] (A operand; 4 warps split tokens = M) ----
-            k_page = fx.slice(key_buf, (phys, kv_h, None, None))  # [block_size, HEAD]
-            bK = fx.slice(fx.zipped_divide(k_page, (TILE_TOK, HEAD)), (None, within_tile))
-            frag_K = thr_mma_qk_l.make_fragment_A(bK)
-            fx.copy(copy_kv, thr_copy_k.partition_S(bK), thr_copy_k.retile(frag_K), pred=None)
-
-            # ---- prefetch V (overlap its global DMA with QK + softmax compute) ----
+            # V page (loaded per-chunk in the PV loop, NOT hoisted, to spare VGPR for
+            # the K prefetch — pa_decode_ps_kernel likewise prefetches K and loads V
+            # in place).
             v_page = fx.slice(val_buf, (phys, kv_h, None, None))  # [HEAD, block_size]
             v_hsplit = fx.zipped_divide(v_page, (VHE_SIZE, TILE_TOK))  # [(VHE,TILE), (HEAD/VHE, blk/TILE)]
-            frag_Vs = []
-            for vh in range_constexpr(VHE_CHUNKS):
-                bV = fx.slice(v_hsplit, (None, (vh, within_tile)))  # [VHE_SIZE, TILE_TOK]
-                fV = thr_mma_pv_l.make_fragment_B(bV)
-                fx.copy(copy_kv, thr_copy_v.partition_S(bV), thr_copy_v.retile(fV), pred=None)
-                frag_Vs.append(fV)
 
-            # ---- QK: D[token, qhead] = K(A) . Q(B)ᵀ ----
-            frag_S = thr_mma_qk_l.make_fragment_C(tmpl_S)
-            frag_S.fill(0.0)
-            fx.gemm(tiled_mma_qk, frag_S, frag_K, frag_Q, frag_S)
+            # ---- QK in TLOOP chunks: NCHUNK small fx.gemm -> f32x4/lane (frag_Ks prefetched) ----
+            frag_Ss = []
+            for a in range_constexpr(NCHUNK):
+                frag_S_a = thr_mma_qk_l.make_fragment_C(tmpl_S_c)
+                frag_S_a.fill(0.0)
+                fx.gemm(tiled_mma_qk, frag_S_a, frag_Ks[a], frag_Q, frag_S_a)
+                frag_Ss.append(frag_S_a)
 
-            # ---- register-resident softmax over M = token (cheap: 2 shuffle offsets) ----
-            # Probed token=M C-fragment: vec v of lane L holds qhead n = L%16 and
-            # token = (v//4)*64 + warp*16 + (L%64//16)*4 + (v%4).  Each lane owns ONE
-            # qhead, so reductions are a register reduce over its 16 tokens then
-            # shuffle_xor(16,32) across the 4 lanes of the qhead's group-in-warp;
-            # the 4 warps are unioned in LDS sLmax/sLsum[qhead, warp].  Scores stay
-            # in registers (no sS).
+            # prefetch next tile's K blocks into frag_Ks (the gemms above consumed them);
+            # overlaps the softmax + PV below, consumed by the next iteration's QK.
+            tt1 = tt_i32 + arith.constant(1, type=T.i32)
+            tt1c = arith.select(tt1 < part_end, tt1, num_tiles_m1)
+            phys1, wt1, _ = _tile_coords(tt1c)
+            for a in range_constexpr(NCHUNK):
+                _load_K_block(frag_Ks[a], phys1, wt1, a, thr_copy_k)
+
+            # ---- register-resident softmax over M = token, 4 scores at a time ----
+            # Each lane owns ONE qhead (= lane%16); reduce its tokens with a register
+            # reduce + shuffle_xor(16,32) (2 offsets).  Scores stay in AGPR (chunk
+            # fragments); the mask is a cheap scalar threshold (token = a*64 + base + r
+            # < n_valid  <=>  (a*64+r) < n_valid - base).
             c16 = arith.constant(16, type=T.i32)
             c_w = arith.constant(WAVE, type=T.i32)
             qh = lane - (lane // c16) * c16  # qhead = lane % 16
             l16g = lane // c16  # 0..3 lane-group within the warp
-            sv = frag_S.load()
+            scale = scale_qk * _ld1(sQscale_off, qh)  # per-qhead positive score scale
             n_valid_tile = (context_len - tok0).to(fx.Float32)
             base_tok_f = fx.Int32(warp * c16 + l16g * arith.constant(4, type=T.i32)).to(fx.Float32)
-            const_tok = Vec.from_elements(
-                [arith.constant(float((v // 4) * 64 + (v % 4)), type=T.f32) for v in range_constexpr(16)]
-            )
-            local_n = const_tok + Vec.from_elements([base_tok_f], dtype=fx.Float32).broadcast_to(16)
-            nvalid_b = Vec.from_elements([n_valid_tile], dtype=fx.Float32).broadcast_to(16)
-            sv_masked = (local_n < nvalid_b).select(sv, Vec.filled(16, float("-inf"), fx.Float32))
-            scale = scale_qk * _ld1(sQscale_off, qh)  # per-qhead positive score scale
-            # per-warp max for this qhead: register reduce + cross-lane (in-warp) shuffle
-            pm = sv_masked.reduce(ReductionOp.MAX)
+            thr = Vec.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
+            neg4 = Vec.filled(4, float("-inf"), fx.Float32)
+
+            def _masked_chunk(a):  # 4 masked scores for the a-th 64-token block
+                return (_ct[a] < thr).select(frag_Ss[a].load(), neg4)
+
+            # pass 1: per-warp max for this qhead
+            pm = fx.Float32(float("-inf"))
+            for a in range_constexpr(NCHUNK):
+                pm = pm.maximumf(_masked_chunk(a).reduce(ReductionOp.MAX))
             for sh in (16, 32):
                 pm = pm.maximumf(pm.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
             if l16g == arith.constant(0, type=T.i32):  # one lane per (qhead, warp)
                 _st_lw(sLmax_off, qh, warp, pm * scale)
             gpu.barrier()
 
-            # global max over warps -> exp -> fp8 P pack (-> sP transposed) -> sum
+            # pass 2: global max over warps -> exp -> fp8 P pack (-> sP) -> sum
             m_old = _ld1(sM_off, qh)
             m_new = m_old.maximumf(_ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
-            P = (sv_masked * scale - Vec.from_elements([m_new], dtype=fx.Float32).broadcast_to(16)).exp2()
-            frag_P8 = fx.make_fragment_like(frag_S, FP8)
-            frag_P8.store(_f32_to_fp8_words(P * Vec.filled(16, FP8_MAX, fx.Float32)).bitcast(FP8))
+            m_new_b = Vec.from_elements([m_new], dtype=fx.Float32).broadcast_to(4)
+            ls = fx.Float32(0.0)
+            words = []
+            for a in range_constexpr(NCHUNK):
+                Pa = (_masked_chunk(a) * scale - m_new_b).exp2()
+                ls = ls + Pa.reduce(ReductionOp.ADD)
+                words.append(_f32_to_fp8_words(Pa * Vec.filled(4, FP8_MAX, fx.Float32))[0])
+            frag_P8 = fx.make_fragment_like(thr_mma_qk_l.make_fragment_C(tmpl_S), FP8)
+            frag_P8.store(Vec.from_elements(words, dtype=fx.Int32).bitcast(FP8))
             fx.copy(copy_p8, thr_copy_p8.retile(frag_P8), thr_copy_p8.partition_D(sP_T_v), pred=None)
-            ls = P.reduce(ReductionOp.ADD)
             for sh in (16, 32):
                 ls = ls + ls.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
             if l16g == arith.constant(0, type=T.i32):
@@ -464,9 +511,12 @@ def compile_pa_decode_tile(
             m_base_pv = (lane // c16) * arith.constant(4, type=T.i32)
             corr_s = [_ld1(sCorr_off, m_base_pv + arith.constant(v, type=T.i32)) for v in range_constexpr(OP_ELEMS)]
             for vh in range_constexpr(VHE_CHUNKS):
+                bV = fx.slice(v_hsplit, (None, (vh, within_tile)))  # [VHE_SIZE, TILE_TOK]
+                frag_V = thr_mma_pv_l.make_fragment_B(bV)
+                fx.copy(copy_kv, thr_copy_v.partition_S(bV), thr_copy_v.retile(frag_V), pred=None)
                 frag_Op = thr_mma_pv_l.make_fragment_C(tmpl_Op)  # [16, VHE_SIZE]
                 frag_Op.fill(0.0)
-                fx.gemm(tiled_mma_pv, frag_Op, frag_P, frag_Vs[vh], frag_Op)
+                fx.gemm(tiled_mma_pv, frag_Op, frag_P, frag_V, frag_Op)
                 op = frag_Op.load()
                 oo = o_acc[vh]
                 o_acc[vh] = Vec.from_elements(
