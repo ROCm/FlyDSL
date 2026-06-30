@@ -393,9 +393,7 @@ def make_combine_kernel(
     ``npes * max_tok_per_rank``; tighter when max_total_recv_tokens set).
     """
     # Contract (op-layer _check_config): fp8_direct_cast => data_type==bf16 and
-    # not enable_std_moe. zero_copy always implies skip_stage1 (caller pre-stages
-    # into shmem_comb_inp), so Stage 1 has only skip_stage1 and zc=False shapes.
-    assert not zero_copy or skip_stage1, "zero_copy requires skip_stage1"
+    # not enable_std_moe. skip_stage1 and zero_copy are independent switches.
     _xfer_bf16_to_fp8 = fp8_direct_cast
     _transport_dtype = torch.float8_e4m3fn if _xfer_bf16_to_fp8 else data_type
 
@@ -616,41 +614,40 @@ def make_combine_kernel(
         # shmem_tok_id_to_src[recv_tok_id].
         n_chunks = nbytes // 16  # 16-byte (4-i32) vector chunks per token
 
-        if const_expr(skip_stage1):
+        if const_expr(zero_copy):
+            # Zero-copy: token copy removed (caller pre-staged into shmem_comb_inp);
+            # weight copy kept so Stage 3b reads shmem_comb_inp_wts[recv_tok_id].
             if const_expr(enable_weights):
-                if const_expr(zero_copy):
-                    # Zero-copy skip-Stage1: token copy removed, weight copy kept
-                    # so Stage 3b reads shmem_comb_inp_wts[recv_tok_id].
-                    for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
-                        wt_src_addr = arith.unwrap(addr_inp_wts) + fx.Int64(recv_tok_id) * weight_bytes
-                        wt_dst_addr = arith.unwrap(addr_shmem_wts) + fx.Int64(recv_tok_id) * weight_bytes
-                        rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
-                        rsrc_wt_dst = create_buffer_resource_from_addr(wt_dst_addr)
-                        if lane < wt_n_i32:
-                            wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
-                            buffer_store(wt_val, rsrc_wt_dst, lane)
-                else:
-                    # Weight-only Stage 1 (fused_gemm2_combine): weight scatter off
-                    # the heavy token-write fabric.
-                    for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
-                        dest_tok_enc = buffer_load(_r_tis, recv_tok_id, vec_width=1, dtype=T.i32())
-                        if const_expr(_log2_max_tok is not None):
-                            dest_pe = dest_tok_enc >> _log2_max_tok
-                            dest_lid = dest_tok_enc & _mask_max_tok
-                        else:
-                            dest_pe = dest_tok_enc // max_tok_per_rank
-                            dest_lid = dest_tok_enc % max_tok_per_rank
-                        wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
-                        wt_dest_off = fx.Int64(rank * max_tok_per_rank + dest_lid) * weight_bytes
-                        wt_dest_addr = arith.unwrap(wt_pe_base) + wt_dest_off
-                        wt_src_addr = arith.unwrap(addr_inp_wts) + fx.Int64(recv_tok_id) * weight_bytes
-                        rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
-                        rsrc_wt_dst = create_buffer_resource_from_addr(wt_dest_addr)
-                        if lane < wt_n_i32:
-                            wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
-                            buffer_store(wt_val, rsrc_wt_dst, lane)
-            else:
-                pass
+                for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
+                    wt_src_addr = arith.unwrap(addr_inp_wts) + fx.Int64(recv_tok_id) * weight_bytes
+                    wt_dst_addr = arith.unwrap(addr_shmem_wts) + fx.Int64(recv_tok_id) * weight_bytes
+                    rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
+                    rsrc_wt_dst = create_buffer_resource_from_addr(wt_dst_addr)
+                    if lane < wt_n_i32:
+                        wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
+                        buffer_store(wt_val, rsrc_wt_dst, lane)
+        elif const_expr(skip_stage1):
+            # Weight-only Stage 1 (fused_gemm2_combine): weight scatter off the
+            # heavy token-write fabric. (Currently unreachable: skip_stage1 raises
+            # above; kept for the future fused path.)
+            if const_expr(enable_weights):
+                for recv_tok_id in range(global_warp_id, total_recv, global_warp_num):
+                    dest_tok_enc = buffer_load(_r_tis, recv_tok_id, vec_width=1, dtype=T.i32())
+                    if const_expr(_log2_max_tok is not None):
+                        dest_pe = dest_tok_enc >> _log2_max_tok
+                        dest_lid = dest_tok_enc & _mask_max_tok
+                    else:
+                        dest_pe = dest_tok_enc // max_tok_per_rank
+                        dest_lid = dest_tok_enc % max_tok_per_rank
+                    wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                    wt_dest_off = fx.Int64(rank * max_tok_per_rank + dest_lid) * weight_bytes
+                    wt_dest_addr = arith.unwrap(wt_pe_base) + wt_dest_off
+                    wt_src_addr = arith.unwrap(addr_inp_wts) + fx.Int64(recv_tok_id) * weight_bytes
+                    rsrc_wt_src = create_buffer_resource_from_addr(wt_src_addr)
+                    rsrc_wt_dst = create_buffer_resource_from_addr(wt_dest_addr)
+                    if lane < wt_n_i32:
+                        wt_val = buffer_load(rsrc_wt_src, lane, vec_width=1, dtype=T.i32())
+                        buffer_store(wt_val, rsrc_wt_dst, lane)
         elif const_expr(enable_std_moe):
             # Stage 1 StdMoE: weighted-reduce k packed_recv_x partials, scatter the
             # merged token to dest PE's shmem_comb_inp.

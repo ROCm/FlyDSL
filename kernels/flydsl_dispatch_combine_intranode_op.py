@@ -957,8 +957,9 @@ class FlyDSLDispatchCombineIntraNodeOp:
                 enable_weights=bool(enable_weights_flag),
                 enable_std_moe=cfg.enable_std_moe,
                 zero_copy=bool(zero_copy),
-                # Zero-copy: tokens pre-staged, skip Stage 1 token copy (weights still emitted).
-                skip_stage1=bool(zero_copy),
+                # skip_stage1 is now independent of zero_copy (mutually exclusive);
+                # the regular combine() path never skips Stage 1.
+                skip_stage1=False,
                 fp8_direct_cast=bool(fp8_dc),
                 max_recv=self._effective_max_recv,
             )
