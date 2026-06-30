@@ -142,9 +142,11 @@ def compile_pa_decode_tile(
     f32 = 4
     sQ_off = 0
     sQ_bytes = M * HEAD * 1  # fp8
-    sS_off = sQ_off + sQ_bytes
-    sS_bytes = M * TILE_TOK * f32
-    sP_off = sS_off + sS_bytes
+    # No sS: with the token=M orientation the softmax reduces over M (tokens) with
+    # cheap shuffle_xor(16,32), so scores stay in the QK C-fragment.  Only the fp8
+    # probabilities sP are staged to LDS — stored transposed to [qhead, token] for
+    # the PV A operand.
+    sP_off = sQ_off + sQ_bytes
     sP_bytes = M * TILE_TOK * 1  # fp8
     # The running output is register-resident (loop-carried PV C-fragment), so
     # there is no per-tile sOp partial in LDS; sO is only epilogue scratch (the
@@ -252,14 +254,19 @@ def compile_pa_decode_tile(
 
         # whole-tile views (for tiled copies)
         sQ_v = _view(arith.constant(sQ_off, type=T.i32), FP8, fx.make_layout((M, HEAD), (HEAD, 1)), 1)
-        sS_v = _view(arith.constant(sS_off, type=T.i32), fx.Float32, fx.make_layout((M, TILE_TOK), (TILE_TOK, 1)), 4)
+        # sP holds the fp8 probabilities as [qhead, token] (PV A operand).  The QK
+        # C-fragment is [token, qhead]; the frag→sP store uses the transposed view
+        # sP_T (shape [token, qhead], strides (1, TILE_TOK)) so it lands as
+        # [qhead, token] for PV to read directly.
         sP_v = _view(arith.constant(sP_off, type=T.i32), FP8, fx.make_layout((M, TILE_TOK), (TILE_TOK, 1)), 1)
+        sP_T_v = _view(arith.constant(sP_off, type=T.i32), FP8, fx.make_layout((TILE_TOK, M), (1, TILE_TOK)), 1)
 
-        # ── MMA atoms: two 4-warp fp8 tiled MMAs (layout (1,4,1) = 4 warps along N) ──
-        # QK splits the TILE_TOK tokens across the 4 warps (N = token);
-        # PV splits the HEAD output dims across the 4 warps (N = head_dim).
+        # ── MMA atoms (production token=M orientation) ──
+        # QK: D[token, qhead] = K(A) · Q(B)ᵀ, tiled (NWARP,1,1) splits tokens (M)
+        # across the 4 warps — so the softmax reduces over M (tokens) cheaply.
+        # PV: O[qhead, head_dim], tiled (1,NWARP,1) splits head_dim (N).
         mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(MFMA_MNK, MFMA_MNK, MFMA_K, FP8))
-        tiled_mma_qk = fx.make_tiled_mma(mma_atom, fx.make_layout((1, NWARP, 1), (0, 1, 0)))
+        tiled_mma_qk = fx.make_tiled_mma(mma_atom, fx.make_layout((NWARP, 1, 1), (1, 0, 0)))
         tiled_mma_pv = fx.make_tiled_mma(mma_atom, fx.make_layout((1, NWARP, 1), (0, 1, 0)))
         thr_mma_qk = tiled_mma_qk.thr_slice(tid)
 
@@ -293,10 +300,11 @@ def compile_pa_decode_tile(
                 _st1(sQscale_off, tid, ZERO_F)
         gpu.barrier()
 
+        # Q is the B operand now (D[token,qhead] = K·Qᵀ); replicated across warps.
         copy_q = fx.make_copy_atom(fx.UniversalCopy64b(), FP8)
-        thr_copy_q = fx.make_tiled_copy_A(copy_q, tiled_mma_qk).get_slice(tid)
+        thr_copy_q = fx.make_tiled_copy_B(copy_q, tiled_mma_qk).get_slice(tid)
         tmpl_Q = fx.make_rmem_tensor(fx.make_layout((M, HEAD), (HEAD, 1)), FP8)
-        frag_Q = thr_mma_qk.make_fragment_A(tmpl_Q)
+        frag_Q = thr_mma_qk.make_fragment_B(tmpl_Q)
         fx.copy(copy_q, thr_copy_q.partition_S(sQ_v), thr_copy_q.retile(frag_Q), pred=None)
 
         # ── init running softmax state (row-owner lanes 0..15) ──
@@ -322,16 +330,17 @@ def compile_pa_decode_tile(
 
         copy_kv = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), FP8)  # fp8 K/V global -> reg
         copy_p = fx.make_copy_atom(fx.UniversalCopy64b(), FP8)  # fp8 P LDS -> reg
+        copy_p8 = fx.make_copy_atom(fx.UniversalCopy8b(), FP8)  # fp8 P C-frag -> LDS
         copy_c = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-        tcopy_k = fx.make_tiled_copy_B(copy_kv, tiled_mma_qk)  # K: token-split across warps
-        tcopy_p = fx.make_tiled_copy_A(copy_p, tiled_mma_pv)  # P: replicated across warps
-        tcopy_v = fx.make_tiled_copy_B(copy_kv, tiled_mma_pv)  # V: head-dim-split across warps
-        tcopy_s = fx.make_tiled_copy_C(copy_c, tiled_mma_qk)  # scores -> sS
-        tcopy_o = fx.make_tiled_copy_C(copy_c, tiled_mma_pv)  # PV out -> sOp
+        tcopy_k = fx.make_tiled_copy_A(copy_kv, tiled_mma_qk)  # K(A): token-split across warps
+        tcopy_p = fx.make_tiled_copy_A(copy_p, tiled_mma_pv)  # P(A): replicated across warps
+        tcopy_v = fx.make_tiled_copy_B(copy_kv, tiled_mma_pv)  # V(B): head-dim-split across warps
+        tcopy_p8 = fx.make_tiled_copy_C(copy_p8, tiled_mma_qk)  # fp8 P frag -> sP (transposed)
+        tcopy_o = fx.make_tiled_copy_C(copy_c, tiled_mma_pv)  # PV out -> sO (epilogue)
 
         # Shape templates (default addrspace) for the MMA fragments; only their
         # layout is read by make_fragment_*, no real storage is consumed.
-        tmpl_S = fx.make_rmem_tensor(fx.make_layout((M, TILE_TOK), (TILE_TOK, 1)), fx.Float32)
+        tmpl_S = fx.make_rmem_tensor(fx.make_layout((TILE_TOK, M), (M, 1)), fx.Float32)  # [token, qhead]
         tmpl_P = fx.make_rmem_tensor(fx.make_layout((M, TILE_TOK), (TILE_TOK, 1)), FP8)
         # P·V is loop-tiled over head-dim (like the production VHELOOP): each step
         # computes O[:, vh*VHE_SIZE : +VHE_SIZE], shrinking the live V operand and
@@ -367,18 +376,15 @@ def compile_pa_decode_tile(
             thr_copy_k = tcopy_k.get_slice(tid)
             thr_copy_p = tcopy_p.get_slice(tid)
             thr_copy_v = tcopy_v.get_slice(tid)
-            thr_copy_s = tcopy_s.get_slice(tid)
+            thr_copy_p8 = tcopy_p8.get_slice(tid)
 
-            # ---- K tile [TILE_TOK, HEAD] from page `phys` (4 warps split tokens) ----
+            # ---- K tile [TILE_TOK, HEAD] (A operand; 4 warps split tokens = M) ----
             k_page = fx.slice(key_buf, (phys, kv_h, None, None))  # [block_size, HEAD]
             bK = fx.slice(fx.zipped_divide(k_page, (TILE_TOK, HEAD)), (None, within_tile))
-            frag_K = thr_mma_qk_l.make_fragment_B(bK)
+            frag_K = thr_mma_qk_l.make_fragment_A(bK)
             fx.copy(copy_kv, thr_copy_k.partition_S(bK), thr_copy_k.retile(frag_K), pred=None)
 
             # ---- prefetch V (overlap its global DMA with QK + softmax compute) ----
-            # V depends only on (phys, kv_h), known here, so issue its loads now and
-            # let the latency hide behind the QK MMA + softmax that follow (the
-            # production kernel software-pipelines K/V loads the same way).
             v_page = fx.slice(val_buf, (phys, kv_h, None, None))  # [HEAD, block_size]
             v_hsplit = fx.zipped_divide(v_page, (VHE_SIZE, TILE_TOK))  # [(VHE,TILE), (HEAD/VHE, blk/TILE)]
             frag_Vs = []
@@ -388,83 +394,55 @@ def compile_pa_decode_tile(
                 fx.copy(copy_kv, thr_copy_v.partition_S(bV), thr_copy_v.retile(fV), pred=None)
                 frag_Vs.append(fV)
 
-            # ---- QK: S = Q . Kᵀ  -> scores[16, TILE_TOK] (per-warp [16,64]) ----
+            # ---- QK: D[token, qhead] = K(A) . Q(B)ᵀ ----
             frag_S = thr_mma_qk_l.make_fragment_C(tmpl_S)
             frag_S.fill(0.0)
-            fx.gemm(tiled_mma_qk, frag_S, frag_Q, frag_K, frag_S)
+            fx.gemm(tiled_mma_qk, frag_S, frag_K, frag_Q, frag_S)
 
-            # softmax bookkeeping.  warp w owns query-row token cols [w*TPW : +TPW].
-            col0 = warp * arith.constant(TOK_PER_WARP, type=T.i32)
-            n_valid_loc = (context_len - tok0 - col0).to(fx.Float32)  # valid cols in this warp's slice
-
-            # ---- register-resident per-warp max (DPP), no score read-back ----
-            # Probed 4-warp C-fragment layout: vec index v of lane L (warp w) holds
-            #   row m = (L%64//16)*4 + v%4,  GLOBAL token n = (v//4)*64 + w*16 + L%16.
-            # The 4 warps own interleaved 16-token strips (NOT contiguous blocks),
-            # so the mask uses the true global token index vs the tile's valid count
-            # (context_len - tok0).  Reduce over a warp's tokens without staging
-            # scores back through LDS: register-max across the 4 N-atoms (v//4),
-            # then shuffle_xor(1,2,4,8) across the 16-lane group (L%16).  The 4
-            # warps' partials are unioned by the cross-warp max in phase 2.  The
-            # positive per-row scale (scale_qk * q_scale[row]) is applied after.
+            # ---- register-resident softmax over M = token (cheap: 2 shuffle offsets) ----
+            # Probed token=M C-fragment: vec v of lane L holds qhead n = L%16 and
+            # token = (v//4)*64 + warp*16 + (L%64//16)*4 + (v%4).  Each lane owns ONE
+            # qhead, so reductions are a register reduce over its 16 tokens then
+            # shuffle_xor(16,32) across the 4 lanes of the qhead's group-in-warp;
+            # the 4 warps are unioned in LDS sLmax/sLsum[qhead, warp].  Scores stay
+            # in registers (no sS).
             c16 = arith.constant(16, type=T.i32)
+            c_w = arith.constant(WAVE, type=T.i32)
+            qh = lane - (lane // c16) * c16  # qhead = lane % 16
+            l16g = lane // c16  # 0..3 lane-group within the warp
             sv = frag_S.load()
-            lane16 = lane - (lane // c16) * c16
-            tok_base_f = fx.Int32(warp * c16 + lane16).to(fx.Float32)
             n_valid_tile = (context_len - tok0).to(fx.Float32)
-            const_n = Vec.from_elements([arith.constant(float((v // 4) * 64), type=T.f32) for v in range_constexpr(16)])
-            local_n = const_n + Vec.from_elements([tok_base_f], dtype=fx.Float32).broadcast_to(16)
+            base_tok_f = fx.Int32(warp * c16 + l16g * arith.constant(4, type=T.i32)).to(fx.Float32)
+            const_tok = Vec.from_elements(
+                [arith.constant(float((v // 4) * 64 + (v % 4)), type=T.f32) for v in range_constexpr(16)]
+            )
+            local_n = const_tok + Vec.from_elements([base_tok_f], dtype=fx.Float32).broadcast_to(16)
             nvalid_b = Vec.from_elements([n_valid_tile], dtype=fx.Float32).broadcast_to(16)
             sv_masked = (local_n < nvalid_b).select(sv, Vec.filled(16, float("-inf"), fx.Float32))
-            c_w = arith.constant(WAVE, type=T.i32)
-            pm = []
-            for r in range_constexpr(4):
-                pmr = sv_masked[r]
-                for a in range_constexpr(1, 4):
-                    pmr = pmr.maximumf(sv_masked[r + a * 4])
-                for sh in (1, 2, 4, 8):
-                    pmr = pmr.maximumf(pmr.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-                pm.append(pmr)
-            # one lane per 16-group writes its group's 4 rows' scaled max
-            m_base = (lane // c16) * arith.constant(4, type=T.i32)
-            if lane16 == arith.constant(0, type=T.i32):
-                for r in range_constexpr(4):
-                    rr = m_base + arith.constant(r, type=T.i32)
-                    _st_lw(sLmax_off, rr, warp, pm[r] * scale_qk * _ld1(sQscale_off, rr))
-
-            # ---- stage scores to sS for the fp8 P pack (phase 2 reads them) ----
-            fx.copy(copy_c, thr_copy_s.retile(frag_S), thr_copy_s.partition_D(sS_v), pred=None)
+            scale = scale_qk * _ld1(sQscale_off, qh)  # per-qhead positive score scale
+            # per-warp max for this qhead: register reduce + cross-lane (in-warp) shuffle
+            pm = sv_masked.reduce(ReductionOp.MAX)
+            for sh in (16, 32):
+                pm = pm.maximumf(pm.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
+            if l16g == arith.constant(0, type=T.i32):  # one lane per (qhead, warp)
+                _st_lw(sLmax_off, qh, warp, pm * scale)
             gpu.barrier()
 
-            # phase 2 (distributed over all 64 lanes: 4 lanes/row × 16 tokens each
-            # instead of one row-owner doing 64).  global max -> exp -> fp8 P pack;
-            # the 16-token partial sums are combined across the 4 sub-lanes by
-            # shuffle_xor(16,32) so the row sum matches the row-owner result.
-            # P (in [0,1]) quantized to fp8 by *FP8_MAX (1/FP8_MAX folds into epilogue).
-            row2 = lane - (lane // c16) * c16  # query row (lane % 16)
-            sub2 = lane // c16  # token sub-group 0..3 within this warp's 64
-            sub_tok0 = sub2 * c16  # token offset within the warp slice
-            row_scale = scale_qk * _ld1(sQscale_off, row2)
-            m_old = _ld1(sM_off, row2)
-            m_new = m_old.maximumf(_ld_lw_row(sLmax_off, row2).reduce(ReductionOp.MAX))
-            base2 = row2 * arith.constant(TILE_TOK, type=T.i32) + col0 + sub_tok0
-            s_off2 = arith.constant(sS_off, type=T.i32) + base2 * arith.constant(4, type=T.i32)
-            p_off2 = arith.constant(sP_off, type=T.i32) + base2 * arith.constant(1, type=T.i32)
-            iota16 = Vec.from_elements([arith.constant(float(i), type=T.f32) for i in range_constexpr(16)])
-            nvalid16 = n_valid_loc - fx.Int32(sub_tok0).to(fx.Float32)
-            mask16 = iota16 < Vec.from_elements([nvalid16], dtype=fx.Float32).broadcast_to(16)
-            s16 = _view(s_off2, fx.Float32, fx.make_layout(16, 1), 4).load() * row_scale
-            s16 = mask16.select(s16, Vec.filled(16, float("-inf"), fx.Float32))
-            p16 = (s16 - Vec.from_elements([m_new], dtype=fx.Float32).broadcast_to(16)).exp2()
-            _st_words(p_off2, _f32_to_fp8_words(p16 * Vec.filled(16, FP8_MAX, fx.Float32)))
-            psum = p16.reduce(ReductionOp.ADD)
+            # global max over warps -> exp -> fp8 P pack (-> sP transposed) -> sum
+            m_old = _ld1(sM_off, qh)
+            m_new = m_old.maximumf(_ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
+            P = (sv_masked * scale - Vec.from_elements([m_new], dtype=fx.Float32).broadcast_to(16)).exp2()
+            frag_P8 = fx.make_fragment_like(frag_S, FP8)
+            frag_P8.store(_f32_to_fp8_words(P * Vec.filled(16, FP8_MAX, fx.Float32)).bitcast(FP8))
+            fx.copy(copy_p8, thr_copy_p8.retile(frag_P8), thr_copy_p8.partition_D(sP_T_v), pred=None)
+            ls = P.reduce(ReductionOp.ADD)
             for sh in (16, 32):
-                psum = psum + psum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-            if lane < arith.constant(M, type=T.i32):  # sub-lane 0 writes the combined row state
-                _st_lw(sLsum_off, row2, warp, psum)
+                ls = ls + ls.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
+            if l16g == arith.constant(0, type=T.i32):
+                _st_lw(sLsum_off, qh, warp, ls)
                 if warp == arith.constant(0, type=T.i32):
-                    _st1(sM_off, row2, m_new)
-                    _st1(sCorr_off, row2, Vec.from_elements([m_old - m_new], dtype=fx.Float32).exp2()[0])
+                    _st1(sM_off, qh, m_new)
+                    _st1(sCorr_off, qh, Vec.from_elements([m_old - m_new], dtype=fx.Float32).exp2()[0])
             gpu.barrier()
 
             # phase 3: merge per-warp sums into the running denominator
