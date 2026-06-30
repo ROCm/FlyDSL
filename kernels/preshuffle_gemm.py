@@ -244,9 +244,6 @@ def compile_preshuffle_gemm(
         thr_g2r_B = fx.make_tiled_copy_B(buf_copy, tiled_mma).get_slice(tid)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        # A-LDS swizzle. For 8-bit, match the async DMA's swizzle_xor16
-        # (k ^ ((m % (tile_k//16)) * 16)) so use_async_copy reads back what it wrote:
-        # get(b, 4, b) with b = log2(tile_k//16).
         if const_expr(is_8bit):
             k_blocks16 = (tile_k * elem_bytes) // 16
             if k_blocks16 <= 0 or (k_blocks16 & (k_blocks16 - 1)) != 0:
@@ -540,10 +537,6 @@ def compile_preshuffle_gemm(
                     fx.copy_atom_call(scale_copy, fx.slice(div_tensor, (None, fx.Int32(index))), r)
                     return Vec(fx.memref_load_vec(r))[0]
 
-                # Per-column scales (1/N-block) and per-row scales (1/row/thread).
-                # The 4 waves tile N interleaved at 16-col granularity (wave layout
-                # (1,4,1) over the 16-wide MMA N atom), so N-block ni of this wave
-                # lives at column (ni*num_waves + wave_id)*16, NOT wave_id*n_per_wave+ni*16.
                 s_b_vals = [
                     load_scale(scale_b_div, by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)
                     for ni in range_constexpr(num_acc_n)
@@ -592,11 +585,6 @@ def compile_preshuffle_gemm(
 
             acc_vec = Vec(frag_C.load())
             out_elems = []
-            # frag_C registers are ordered N-MAJOR: idx = ni*(m_repeat*4) + mi*4 + ii
-            # (per-atom 4 values fastest, then the m_repeat M-blocks, then the
-            # num_acc_n N-blocks). Iterate registers linearly so acc[p] is read and
-            # out_vec[p] is written in place (store stays self-consistent), and derive
-            # (mi, ni, ii) from that N-major order to pick the right per-row/col scales.
             for p in range_constexpr(acc_size):
                 ni = p // (m_repeat * 4)
                 mi = (p // 4) % m_repeat
