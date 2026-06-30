@@ -1,9 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Whole-operator performance harness for the **serial** (aiter mori) MoE chain
-and the **fused** ``mega_moe`` kernel, written to the ``comm-op-bench`` skill
-(``testscript-SKILL.md``).
+"""Self-contained **accuracy + performance** bench for the fused ``mega_moe``
+operator (``FlyDSLMegaMoEIntraNodeOp.fp8_fp4_mega_moe``), merging the former
+``test_mega_moe_accuracy_multigpu.py`` (correctness) and
+``test_mega_moe_op_perf.py`` (timing) into ONE file with NO same-directory
+imports -- only ``torch`` + the op + ``mori`` (and ``aiter`` for the serial
+baseline) need be importable.  Ship/run this single file standalone.
+
+Each run reports, per (mode x cudagraph) cell:
+  * ACCURACY (fused): relL2 of ``y`` vs a full-precision f32 torch oracle
+    (bench_moe_intranode_stage1_groupgemm.py methodology -- TRUE pre-quant bf16
+    activations + TRUE f32 weights, NO quant noise reproduced), reduced with
+    MAX across ranks; PASS = relL2 <= ``--acc-floor`` (default 0.30, the a8w4
+    mxfp4-weight quant floor).  Computed only for ``--phase full``.
+  * PERF: E2E (and kernel, in profile mode) device time for the fused op and
+    the serial baseline, plus the serial/fused speedup.
 
 Timing methodology (ported from the production benchmark
 ``bench_moe_intranode_stage1_groupgemm.py`` ``_cg_time``): each measured cell
@@ -51,8 +63,8 @@ Launch (inside the ROCm container, >= 2x gfx950)::
            MEGA_MOE_FUSE_COMBINE=1 MEGA_MOE_DISPATCH_OVERLAP=1 \\
            MEGA_MOE_NUM_SMS=512
 
-    # bench + eager (closest to production E2E)
-    HIP_VISIBLE_DEVICES=0,1 python3 tests/kernels/test_mega_moe_op_perf.py \\
+    # bench + eager (accuracy + perf, closest to production E2E)
+    HIP_VISIBLE_DEVICES=0,1 python3 tests/kernels/bench_mega_moe.py \\
         --op both --mode bench
 
     # bench + cudagraph
@@ -79,6 +91,7 @@ import os
 import sys
 import tempfile
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -89,6 +102,246 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if _ROOT in sys.path:
     sys.path.remove(_ROOT)
 sys.path.insert(0, _ROOT)
+
+
+# ===========================================================================
+# Inlined helpers -- this file is SELF-CONTAINED so it can be shipped/run on
+# its own (only ``torch`` + the op-under-test ``kernels.mega_moe_intranode_op``
+# + mori/aiter need be importable).  These are copied verbatim from the sibling
+# test modules; keep in sync with the originals if those ever change:
+#   * fp4 / e8m0 MX quant utils  <- tests/kernels/utils/fp4_utils.py
+#   * per_1x32_mxfp4_quant       <- tests/kernels/test_mega_moe_l1_gemm.py
+#   * per_token_cast_to_fp8      <- tests/kernels/test_mega_moe_dispatch.py
+#   * shuffle_weight             <- tests/utils.py
+# (The serial worker deliberately keeps using aiter's OWN fp4_utils /
+# shuffle_weight; only the fused worker consumes these inlined copies.)
+# ===========================================================================
+_FP8_E8M0 = getattr(torch, "float8_e8m0fnu", torch.uint8)
+_FP4X2 = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
+_EBITS_F32, _MBITS_F32 = 8, 23
+_F32_EXP_BIAS = (1 << (_EBITS_F32 - 1)) - 1
+
+
+def _n_ones(n: int) -> int:
+    return (1 << n) - 1
+
+
+def _down_size(size):
+    assert size[-1] % 2 == 0, f"{size} last dim not divisible by two"
+    return (*size[:-1], size[-1] // 2)
+
+
+def _pack_uint4(uint8_data) -> torch.Tensor:
+    shape = uint8_data.shape
+    assert shape[-1] % 2 == 0
+    uint8_data = uint8_data.contiguous().view(-1)
+    return (uint8_data[1::2] << 4 | uint8_data[::2]).view(_down_size(shape))
+
+
+def _f32_to_floatx_unpacked(x: torch.Tensor, ebits: int, mbits: int) -> torch.Tensor:
+    """FP32 -> sub-byte float (encoding in the LSBs), no NaN/inf support.
+    Adapted from torchao custom_fp_utils; used here for FP4 (ebits=2, mbits=1)."""
+    assert x.dtype == torch.float
+    assert 1 + ebits + mbits <= 8
+
+    exp_bias = _n_ones(ebits - 1)
+    max_int = _n_ones(ebits + mbits)
+    sign_mask = 1 << (ebits + mbits)
+    magic_adder = _n_ones(_MBITS_F32 - mbits - 1)
+    max_normal = 2 ** (_n_ones(ebits) - exp_bias) * (_n_ones(mbits + 1) / (2**mbits))
+    min_normal = 2 ** (1 - exp_bias)
+    denorm_exp = (_F32_EXP_BIAS - exp_bias) + (_MBITS_F32 - mbits) + 1
+    denorm_mask_int = denorm_exp << _MBITS_F32
+    denorm_mask_float = torch.tensor(denorm_mask_int, dtype=torch.int32).view(torch.float32)
+
+    x = x.view(torch.int32)
+    sign = x & 0x80000000
+    x = x ^ sign
+    x = x.view(torch.float)
+
+    saturate_mask = x >= max_normal
+    denormal_mask = torch.logical_and(torch.logical_not(saturate_mask), x < min_normal)
+    normal_mask = torch.logical_not(torch.logical_or(saturate_mask, denormal_mask))
+
+    denormal_x = x + denorm_mask_float
+    denormal_x = denormal_x.view(torch.int32)
+    denormal_x -= denorm_mask_int
+    denormal_x = denormal_x.to(torch.uint8)
+
+    normal_x = x.view(torch.int32)
+    mant_odd = (normal_x >> (_MBITS_F32 - mbits)) & 1
+    val_to_add = ((exp_bias - _F32_EXP_BIAS) << _MBITS_F32) + magic_adder
+    normal_x += val_to_add
+    normal_x += mant_odd
+    normal_x = normal_x >> (_MBITS_F32 - mbits)
+    normal_x = normal_x.to(torch.uint8)
+
+    x = torch.full_like(x, max_int, dtype=torch.uint8)
+    x = torch.where(denormal_mask, denormal_x, x)
+    x = torch.where(normal_mask, normal_x, x)
+
+    sign_lp = sign >> (_MBITS_F32 + _EBITS_F32 - mbits - ebits)
+    sign_lp = sign_lp.to(torch.uint8)
+    sign_lp = sign_lp & sign_mask
+    x = x | sign_lp
+    return x.to(torch.uint8)
+
+
+def f32_to_mxfp4(x):
+    x = _f32_to_floatx_unpacked(x.float(), 2, 1)
+    x = _pack_uint4(x)
+    return x.view(_FP4X2)
+
+
+def f32_to_e8m0(x):
+    u32 = x.view(torch.int32)
+    exponent = ((u32 >> 23) & 0xFF).view(torch.uint32).to(torch.uint8)
+    nan_case = exponent == 0xFF
+    round_case = ((u32 & 0x400000) > 0) & (
+        ((u32 & 0x200000) > 0) | ((u32 & 0x1FFFFF) > 0) | (exponent > 0))
+    exponent[round_case] += 1
+    exponent[nan_case] = 0xFF
+    return exponent.view(_FP8_E8M0)
+
+
+def e8m0_to_f32(scale_e8m0_biased):
+    scale_e8m0_biased = scale_e8m0_biased.view(torch.uint8)
+    zero_case = scale_e8m0_biased == 0
+    nan_case = scale_e8m0_biased == 0xFF
+    scale_f32 = scale_e8m0_biased.to(torch.int32) << 23
+    scale_f32[zero_case] = 0x00400000
+    scale_f32[nan_case] = 0x7F800001
+    return scale_f32.view(torch.float32)
+
+
+def e8m0_shuffle(scale):
+    if scale is None:
+        return scale
+    if scale.dtype == torch.float32:
+        return scale
+    assert scale.ndim == 2, "scale must be a 2D tensor"
+    m, n = scale.shape
+    scale_padded = torch.empty(
+        (m + 255) // 256 * 256, (n + 7) // 8 * 8,
+        dtype=scale.dtype, device=scale.device)
+    scale_padded[:m, :n] = scale
+    scale = scale_padded
+    sm, sn = scale.shape
+    scale = scale.view(sm // 32, 2, 16, sn // 8, 2, 4)
+    scale = scale.permute(0, 3, 5, 2, 4, 1).contiguous()
+    return scale.view(sm, sn)
+
+
+def _ceil_to_ue8m0(x: torch.Tensor) -> torch.Tensor:
+    bits = x.abs().float().view(torch.int32)
+    exp = ((bits >> 23) & 0xFF) + (bits & 0x7FFFFF).bool().int()
+    return (exp.clamp(1, 254) << 23).view(torch.float32)
+
+
+def _pack_ue8m0_to_int(sf: torch.Tensor) -> torch.Tensor:
+    assert sf.size(-1) % 4 == 0
+    u8 = (sf.view(torch.int32) >> 23).to(torch.uint8).contiguous()
+    return u8.view(torch.int32)
+
+
+def per_token_cast_to_fp8(x: torch.Tensor, gran_k: int = 32):
+    """[m, n] -> (fp8 [m, n], packed-ue8m0 int32 SF [m, n // 128]), K-major."""
+    m, n = x.shape
+    assert n % gran_k == 0
+    xv = x.view(m, n // gran_k, gran_k)
+    amax = xv.abs().float().amax(dim=2).clamp(1e-4)
+    sf = _ceil_to_ue8m0(amax / 448.0)
+    x_fp8 = (xv * (1.0 / sf.unsqueeze(2))).to(torch.float8_e4m3fn).view(m, n).contiguous()
+    return x_fp8, _pack_ue8m0_to_int(sf)
+
+
+def per_1x32_mxfp4_quant(x: torch.Tensor):
+    """[..., K] f32 -> (x_fp4 packed [..., K//2], scale_e8m0 uint8 [..., K//32])."""
+    F4E2M1_MAX = 6.0
+    dtype_max = 2.0 ** int(torch.log2(torch.tensor(F4E2M1_MAX)).item())
+    shape = x.shape
+    xb = x.contiguous().view(-1, 32).float()
+    amax = torch.amax(torch.abs(xb), dim=-1)
+    scale_e8m0 = f32_to_e8m0(amax / dtype_max)
+    scale_f32 = e8m0_to_f32(scale_e8m0)
+    y_fp4 = f32_to_mxfp4(xb / scale_f32.view(-1, 1))
+    y_fp4 = y_fp4.view(*shape[:-1], -1)
+    scale = scale_e8m0.view(*shape[:-1], shape[-1] // 32).view(torch.uint8)
+    return y_fp4, scale
+
+
+def shuffle_weight(x: torch.Tensor, layout=(16, 16), use_int4=False) -> torch.Tensor:
+    x_type = x.dtype
+    if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
+        x = x.view(torch.uint8)
+    IN, IK = layout
+    BK = IK * 2
+    K = 16 // x.element_size() if not use_int4 else 32
+    BN = IN
+    assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} == {x.shape[-2] % BN}"
+    assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} == {x.shape[-1] % BK}"
+    x_ = x
+    x_ = x_.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
+    x_ = x_.permute(0, 1, 3, 4, 2, 5)
+    x_ = x_.contiguous()
+    x_ = x_.view(*x.shape)
+    x_ = x_.view(x_type)
+    x_.is_shuffled = True
+    return x_
+
+
+# ===========================================================================
+# Accuracy helpers: deterministic per-GLOBAL-expert weights (so every rank can
+# rebuild any expert's f32 weights for its oracle), a full-precision f32 torch
+# oracle, and the host-side float64 relL2 -- all mirroring
+# bench_moe_intranode_stage1_groupgemm.py + the accuracy test.
+# ===========================================================================
+def _gen_w1(global_e, N, hidden, device):
+    g = torch.Generator(device=device).manual_seed(10000 + global_e)
+    return torch.randn((N, hidden), generator=g, device=device, dtype=torch.float32) * 0.3
+
+
+def _gen_w2(global_e, hidden, ih, device):
+    g = torch.Generator(device=device).manual_seed(20000 + global_e)
+    return torch.randn((hidden, ih), generator=g, device=device, dtype=torch.float32) * 0.3
+
+
+def _relL2(a, b):
+    """relative L2 on host in float64: ||a-b||_2 / ||b||_2 (bench _relL2)."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    n = float(((a - b) ** 2).sum())
+    d = float((b ** 2).sum())
+    return (n / d) ** 0.5 if d > 0 else -1.0
+
+
+def _fused_relL2(y, x_bf16, ti, tw, *, N, hidden, ih, topk, device):
+    """relL2 of the kernel output ``y`` vs a full-precision f32 torch oracle
+    built from TRUE pre-quant bf16 activations + TRUE f32 weights (per-global-
+    expert), routing-WEIGHTED reduce -- the kernel's total quant floor."""
+    import torch.nn.functional as F
+    x32 = x_bf16.float()
+    n_tok = x32.shape[0]
+    oracle = torch.zeros(n_tok, hidden, device=device, dtype=torch.float32)
+    til = ti.long()
+    twf = tw.float()
+    w1c, w2c = {}, {}
+    for k in range(topk):
+        ek = til[:, k]
+        for e in torch.unique(ek).tolist():
+            if e < 0:
+                continue
+            rows = (ek == e).nonzero().flatten()
+            xr = x32[rows]
+            if e not in w1c:
+                w1c[e] = _gen_w1(e, N, hidden, device)
+                w2c[e] = _gen_w2(e, hidden, ih, device)
+            w1e = w1c[e]
+            a1 = F.silu(xr @ w1e[:ih].t()) * (xr @ w1e[ih:].t())
+            oracle[rows] += twf[rows, k:k + 1] * (a1 @ w2c[e].t())
+    y_np = y.float().cpu().numpy()
+    orc_np = oracle.cpu().numpy()
+    return _relL2(y_np, orc_np)
 
 
 # ===========================================================================
@@ -409,11 +662,9 @@ def _fused_worker(rank, world_size, args, out_path):
     from kernels.mega_moe_intranode_op import (
         MegaMoEIntraNodeConfig, FlyDSLMegaMoEIntraNodeOp,
     )
-    from tests.kernels.test_mega_moe_dispatch import per_token_cast_to_fp8
-    from tests.kernels.test_mega_moe_l1_gemm import per_1x32_mxfp4_quant
-    from tests.kernels.utils import fp4_utils
-    from tests.utils import shuffle_weight
     from torch.profiler import record_function
+    # per_token_cast_to_fp8 / per_1x32_mxfp4_quant / e8m0_shuffle / shuffle_weight
+    # are inlined at module scope above (this file is self-contained).
 
     os.environ.update(dict(
         LOCAL_RANK=str(rank), RANK=str(rank), WORLD_SIZE=str(world_size),
@@ -430,7 +681,7 @@ def _fused_worker(rank, world_size, args, out_path):
     def _prep_weight(w_f32):
         w_fp4, w_scale_u8 = per_1x32_mxfp4_quant(w_f32)
         w_sh = shuffle_weight(w_fp4.view(torch.uint8), layout=(16, 16)).contiguous()
-        w_ck = fp4_utils.e8m0_shuffle(w_scale_u8).contiguous().view(torch.int32)
+        w_ck = e8m0_shuffle(w_scale_u8).contiguous().view(torch.int32)
         return (w_sh, w_ck)
 
     result = {}
@@ -466,8 +717,18 @@ def _fused_worker(rank, world_size, args, out_path):
         #   full     : + L2 GEMM + combine (writes y)
         phase = getattr(args, "phase", "full")
         _plc = torch.zeros((1,), dtype=torch.int8, device=device)
-        _l1_real = lambda: _prep_weight(torch.randn(args.epr * N, args.hidden, device=device) * 0.3)
-        _l2_real = lambda: _prep_weight(torch.randn(args.epr * args.hidden, args.ih, device=device) * 0.3)
+        # Deterministic per-GLOBAL-expert weights (this rank owns experts
+        # [rank*epr, (rank+1)*epr)); keyed by global id so the f32 oracle can
+        # rebuild ANY expert's weights for the accuracy check.
+        def _l1_real():
+            w = torch.cat([_gen_w1(rank * args.epr + e, N, args.hidden, device)
+                           for e in range(args.epr)], dim=0)
+            return _prep_weight(w)
+
+        def _l2_real():
+            w = torch.cat([_gen_w2(rank * args.epr + e, args.hidden, args.ih, device)
+                           for e in range(args.epr)], dim=0)
+            return _prep_weight(w)
         if phase == "dispatch":
             l1, l2 = (_plc, _plc), (_plc, _plc)
         elif phase == "l1":
@@ -496,6 +757,23 @@ def _fused_worker(rank, world_size, args, out_path):
             rank, world_size, args, op_tag="fused",
             eager_step=_one, profile_step=_one_tagged,
             capture_step=_one, host_barrier=_host_barrier_ctx)
+
+        # ---- accuracy: relL2 vs full-precision f32 oracle (full phase only;
+        #      `y` holds the last timed run's output) ----
+        if phase == "full":
+            try:
+                rl_local = _fused_relL2(
+                    y[:args.tokens], x[:args.tokens], ti, tw,
+                    N=N, hidden=args.hidden, ih=args.ih, topk=args.topk, device=device)
+            except Exception as _e:  # noqa: BLE001
+                rl_local = -1.0
+            per = [torch.zeros(1, device=device) for _ in range(world_size)]
+            dist.all_gather(per, torch.tensor([float(rl_local)], device=device))
+            rls = [float(t.item()) for t in per]
+            if rank == 0 and result:
+                result["acc_rell2_per_rank"] = rls
+                result["acc_floor"] = float(args.acc_floor)
+                result["acc_pass"] = all(0 <= v <= args.acc_floor for v in rls)
         op.destroy()
     finally:
         if rank == 0 and result:
@@ -690,6 +968,10 @@ def _parse_args():
                    help="expert-load imbalance: 0 = balanced random routing (default); "
                         ">0 adds a Zipf-like per-expert popularity bias to the gating "
                         "scores so a few experts capture most tokens (tail-effect test)")
+    p.add_argument("--acc-floor", type=float,
+                   default=float(os.environ.get("MEGA_MOE_ACC_FLOOR", "0.30")),
+                   help="fused accuracy gate: PASS if relL2 vs the f32 oracle <= this "
+                        "(a8w4 mxfp4-weight quant floor; default 0.30). Only --phase full.")
     return p.parse_args()
 
 
@@ -708,14 +990,27 @@ def main():
             f"mode={args.mode}+{exec_tag} (warmup={args.warmup} iters={args.iters})")
 
     serial = fused = {}
-    tmpdir = tempfile.mkdtemp(prefix="test_mega_moe_op_perf_")
+    tmpdir = tempfile.mkdtemp(prefix="bench_mega_moe_")
     if args.op in ("serial", "both"):
         serial = _spawn(_serial_worker, world_size, args, os.path.join(tmpdir, "serial.json"))
     if args.op in ("fused", "both"):
         fused = _spawn(_fused_worker, world_size, args, os.path.join(tmpdir, "fused.json"))
 
-    print(f"\n=== mega_moe op perf: {args.mode}+{exec_tag} ===")
+    print(f"\n=== mega_moe accuracy + perf: {args.mode}+{exec_tag} ===")
     print(f"  {geom}")
+    # ---- accuracy (fused, relL2 vs f32 oracle) ----
+    if fused.get("acc_rell2_per_rank") is not None:
+        rls = fused["acc_rell2_per_rank"]
+        floor = fused.get("acc_floor", args.acc_floor)
+        npass = sum(0 <= v <= floor for v in rls)
+        verdict = "PASS" if fused.get("acc_pass") else "FAIL"
+        per = "  ".join(f"r{r}={v:.4e}" for r, v in enumerate(rls))
+        print(f"  [accuracy fused]  relL2 max={max(rls):.4e} floor={floor:.2f}  "
+              f"{verdict}  ({npass}/{len(rls)} cards)")
+        print(f"      per-rank relL2: {per}")
+    elif args.op in ("fused", "both") and args.phase != "full":
+        print(f"  [accuracy fused]  skipped (--phase {args.phase}; needs full)")
+    # ---- perf ----
     _print_cell("serial", serial)
     _print_cell("fused", fused)
     ts = serial.get("e2e_us")
