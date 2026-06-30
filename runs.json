@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-06-30T15:13:17Z",
+ "updated": "2026-06-30T15:39:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
    "event": "pull_request",
    "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28441548730",
    "created_at": "2026-06-30T11:40:13Z",
-   "updated_at": "2026-06-30T11:41:34Z",
+   "updated_at": "2026-06-30T15:34:39Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -29,10 +29,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-06-30T11:41:34Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-06-30T15:10:51Z",
+     "completed_at": "2026-06-30T15:34:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28441548730/job/84280730689"
     },
     {
@@ -96,11 +96,11 @@
    "branch": "mxfp4-moe-gemm",
    "event": "pull_request",
    "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439310249",
    "created_at": "2026-06-30T10:58:42Z",
-   "updated_at": "2026-06-30T10:59:25Z",
+   "updated_at": "2026-06-30T15:35:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -124,9 +124,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-06-30T10:59:25Z",
+     "started_at": "2026-06-30T15:35:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28439310249/job/84273055723"
     }
