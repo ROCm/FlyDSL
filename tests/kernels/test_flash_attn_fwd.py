@@ -51,14 +51,17 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG: dict = {
     "dualwave_swp_enable_stagger": True,
 }
 
-# (batch, seq_len, num_heads, num_kv_heads, head_dim, num_kv_splits)
+# (batch, seq_len, num_heads, num_kv_heads, head_dim or (qk_head_dim, v_head_dim), num_kv_splits)
 # num_kv_heads == num_heads -> MHA; num_kv_heads < num_heads -> GQA/MQA.
 # num_kv_splits > 1 -> split-K path (gfx950 DUALWAVE_SWP only, seq_len >= 384, D=128).
 DEFAULT_CONFIGS = [
     # set1
     (16, 8192, 64, 64, 128, 1),
     (16, 8192, 64, 8, 128, 1),
+    (1, 8192, 64, 64, 128, 1),
     (2, 1024, 64, 64, 128, 1),
+    (1, 8192, 64, 64, (192, 128), 1),  # asymmetric qk=192, v=128
+    (2, 1024, 64, 64, (192, 128), 1),  # asymmetric small
     # set2
     (8, 128, 64, 64, 128, 1),
     (8, 256, 64, 64, 128, 1),
@@ -159,6 +162,19 @@ def _short_label(value):
     return label if len(label) <= 24 else label[:21] + "..."
 
 
+def _split_head_dims(head_dim):
+    if isinstance(head_dim, (tuple, list)):
+        if len(head_dim) != 2:
+            raise ValueError(f"head_dim tuple/list must be (qk_head_dim, v_head_dim), got {head_dim!r}")
+        return int(head_dim[0]), int(head_dim[1])
+    return int(head_dim), int(head_dim)
+
+
+def _head_dim_label(head_dim) -> str:
+    qk_head_dim, v_head_dim = _split_head_dims(head_dim)
+    return str(qk_head_dim) if qk_head_dim == v_head_dim else f"{qk_head_dim}x{v_head_dim}"
+
+
 def _extra_case_from_config(row):
     seqlen_q, seqlen_kv, batch, nh, nh_kv, hd, kv_splits = row
     if seqlen_kv is None:
@@ -221,9 +237,10 @@ def pytorch_ref_attention(q, k, v, causal=True):
 def pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=True):
     """Compute reference attention in Q chunks to avoid large SDPA workspaces."""
     B, H, S, D = q_t.shape
+    D_V = v_t.shape[-1]
     max_score_elems = 1024 * 1024 * 1024  # 1 GiB → larger chunks, fewer kernel launches
     chunk_size = max(1, min(S, max_score_elems // max(B * H * S, 1)))
-    out = torch.empty((B, H, S, D), device=q_t.device, dtype=torch.float32)
+    out = torch.empty((B, H, S, D_V), device=q_t.device, dtype=torch.float32)
     k_trans = k_t.transpose(-1, -2).contiguous()
     scale = 1.0 / math.sqrt(D)
     key_idx = torch.arange(S, device=q_t.device).view(1, 1, 1, S)
@@ -245,7 +262,7 @@ def pytorch_ref_attention_chunked(q_t, k_t, v_t, causal=True):
 def pytorch_ref_attention_qkv_diff(q, k, v, causal=True):
     """Reference for seqlen_q != seqlen_kv with a BOTTOM-RIGHT aligned causal mask.
 
-    q: [B,Sq,H,D]; k,v: [B,Skv,Hkv,D]. Row r keeps keys [0, r+delta] with
+    q: [B,Sq,H,D_QK]; k: [B,Skv,Hkv,D_QK]; v: [B,Skv,Hkv,D_V]. Row r keeps keys [0, r+delta] with
     delta = Skv - Sq (so the mask hugs the bottom-right corner); an all-masked
     row outputs 0. Chunked over Q to bound the score matrix memory.
     """
@@ -259,11 +276,12 @@ def pytorch_ref_attention_qkv_diff(q, k, v, causal=True):
         k_t = k_t.repeat_interleave(rep, dim=1)
         v_t = v_t.repeat_interleave(rep, dim=1)
     B, H, Sq, D = q_t.shape
+    D_V = v_t.shape[-1]
     Skv = k_t.shape[2]
     delta = Skv - Sq
     scale = 1.0 / math.sqrt(D)
     k_trans = k_t.transpose(-1, -2).contiguous()
-    out = torch.empty((B, H, Sq, D), device=q_t.device, dtype=torch.float32)
+    out = torch.empty((B, H, Sq, D_V), device=q_t.device, dtype=torch.float32)
     chunk = max(1, min(Sq, (64 * 1024 * 1024) // max(B * H * Skv, 1)))
     key_idx = torch.arange(Skv, device=q_t.device).view(1, 1, 1, Skv)
     for s0 in range(0, Sq, chunk):
@@ -534,6 +552,7 @@ def _build_attn_inputs_for_config(
     varlen_seqlens_kv,
     num_heads,
     head_dim,
+    v_head_dim,
     num_kv_heads,
     dtype,
     use_block_table,
@@ -543,6 +562,7 @@ def _build_attn_inputs_for_config(
 ):
     device = "cuda"
     H, D, H_KV = num_heads, head_dim, num_kv_heads
+    D_V = int(v_head_dim) if v_head_dim is not None else D
     varlen = varlen_seqlens_q is not None
 
     if varlen:
@@ -574,7 +594,7 @@ def _build_attn_inputs_for_config(
         else:
             kv_cache = None
             k_t = torch.empty(total_kv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-            v_t = torch.empty(total_kv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+            v_t = torch.empty(total_kv, H_KV, D_V, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
         return {
             "varlen": True,
             "B": B,
@@ -615,7 +635,7 @@ def _build_attn_inputs_for_config(
     else:
         kv_cache = None
         k_t = torch.empty(B, Skv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
-        v_t = torch.empty(B, Skv, H_KV, D, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
+        v_t = torch.empty(B, Skv, H_KV, D_V, dtype=dtype, device=device).uniform_(*UNIFORM_RANGE)
 
     if trigger_lazy_else:
         q_t.fill_(1.0)
@@ -652,9 +672,10 @@ def _build_attn_inputs_for_config(
 def _compute_reference_from_inputs(inputs, num_heads, head_dim, dtype, causal, seqlen_q, seqlen_kv):
     H, D = num_heads, head_dim
     q_t, k_t, v_t = inputs["q_t"], inputs["k_t"], inputs["v_t"]
+    D_V = int(v_t.shape[-1])
 
     if inputs["varlen"]:
-        ref_t = torch.empty(inputs["total_q"], H, D, dtype=dtype, device=q_t.device)
+        ref_t = torch.empty(inputs["total_q"], H, D_V, dtype=dtype, device=q_t.device)
         cuq, cukv = inputs["cuq"], inputs["cukv"]
         vl_q, vl_kv = inputs["vl_q"], inputs["vl_kv"]
         for b in range(inputs["B"]):
@@ -696,6 +717,7 @@ def _precompute_paged_kv_inputs_and_ref(
     varlen_seqlens_kv,
     num_heads,
     head_dim,
+    v_head_dim,
     num_kv_heads,
     dtype,
     causal,
@@ -704,6 +726,8 @@ def _precompute_paged_kv_inputs_and_ref(
     kv_cache_layout,
     trigger_lazy_else=False,
 ):
+    if v_head_dim is not None and int(v_head_dim) != int(head_dim):
+        return None, None, {"skip": True, "skip_reason": "paged KV requires symmetric QK/V head dims"}
     invalid_layout = _validate_kv_cache_layout(kv_cache_layout, page_size, head_dim, dtype)
     if invalid_layout is not None:
         return None, None, {"skip": True, "skip_reason": invalid_layout}
@@ -716,6 +740,7 @@ def _precompute_paged_kv_inputs_and_ref(
         varlen_seqlens_kv=varlen_seqlens_kv,
         num_heads=num_heads,
         head_dim=head_dim,
+        v_head_dim=v_head_dim,
         num_kv_heads=num_kv_heads,
         dtype=dtype,
         causal=causal,
@@ -826,14 +851,15 @@ def _cfg_kw():
     )
 
 
-def _flops(Sq, Skv, H, D, B, causal):
+def _flops(Sq, Skv, H, D, B, causal, v_head_dim=None):
     """Compute FLOPs for one config (bottom-right causal or non-causal)."""
+    D_V = D if v_head_dim is None else int(v_head_dim)
     delta = Skv - Sq
     if causal:
         valid = sum(min(max(r + delta + 1, 0), Skv) for r in range(Sq))
     else:
         valid = Sq * Skv
-    return 4.0 * valid * D * H * B
+    return 2.0 * valid * (D + D_V) * H * B
 
 
 def _acc_metric(o_f32, ref_f32, D, compare_mode=False):
@@ -873,6 +899,7 @@ def run_attn_config(
     varlen_seqlens_q=None,
     varlen_seqlens_kv=None,
     num_kv_heads=None,
+    v_head_dim=None,
     num_kv_splits=1,
     seed=DEFAULT_SEED,
     dtype_str="bf16",
@@ -916,16 +943,22 @@ def run_attn_config(
     if num_kv_heads is None:
         num_kv_heads = num_heads
     H, D, H_KV = num_heads, head_dim, num_kv_heads
+    D_V = int(v_head_dim) if v_head_dim is not None else D
     debug_lazy = FLASH_ATTN_FUNC_KERNEL_CONFIG["dualwave_swp_debug_lazy_counts"]
 
+    if D != D_V and (D, D_V) != (192, 128):
+        return {"skip": True}
+
     if use_block_table:
+        if D != D_V:
+            return {"skip": True, "skip_reason": "paged KV requires symmetric QK/V head dims"}
         invalid_layout = _validate_kv_cache_layout(kv_cache_layout, page_size, D, dtype)
         if invalid_layout is not None:
             return {"skip": True, "skip_reason": invalid_layout}
 
     # ── split-K early-exit guard (mirrors run_splitk_config logic) ───────────
     if splitk:
-        if D != 128 or dtype_str not in ("bf16", "f16") or (seqlen_q is not None and seqlen_q < 384):
+        if D != D_V or D != 128 or dtype_str not in ("bf16", "f16") or (seqlen_q is not None and seqlen_q < 384):
             return {"skip": True}
 
     if use_block_table and (precomputed_inputs is None or precomputed_ref is None):
@@ -941,6 +974,7 @@ def run_attn_config(
             varlen_seqlens_kv=varlen_seqlens_kv,
             num_heads=H,
             head_dim=D,
+            v_head_dim=D_V,
             num_kv_heads=H_KV,
             dtype=dtype,
             use_block_table=use_block_table,
@@ -968,7 +1002,7 @@ def run_attn_config(
     kv_cache = precomputed_inputs["kv_cache"]
 
     debug_counts = torch.zeros(2, dtype=torch.float32, device=device) if debug_lazy else None
-    o_t = torch.zeros_like(q_t)
+    o_t = torch.zeros((*q_t.shape[:-1], D_V), dtype=q_t.dtype, device=q_t.device)
 
     # ── kernel launch ────────────────────────────────────────────────────────
     try:
@@ -1034,7 +1068,7 @@ def run_attn_config(
     if precomputed_ref is not None:
         ref_t = precomputed_ref
     elif varlen:
-        ref_t = torch.empty(total_q, H, D, dtype=dtype, device=device)
+        ref_t = torch.empty(total_q, H, D_V, dtype=dtype, device=device)
         for b in range(B):
             qb = q_t[cuq[b] : cuq[b + 1]].unsqueeze(0).float()
             kb = k_t[cukv[b] : cukv[b + 1]].unsqueeze(0).float()
@@ -1048,7 +1082,7 @@ def run_attn_config(
 
     o_f32 = o_t.contiguous().reshape(-1).float()
     ref_f32 = ref_t.contiguous().reshape(-1).float()
-    max_err, min_cos, passed = _acc_metric(o_f32, ref_f32, D, compare_mode=compare_mode)
+    max_err, min_cos, passed = _acc_metric(o_f32, ref_f32, D_V, compare_mode=compare_mode)
     mean_err = (o_f32 - ref_f32).abs().mean().item()
     results["max_err"] = max_err
     results["mean_err"] = mean_err
@@ -1064,7 +1098,7 @@ def run_attn_config(
     if verbose:
         o_flat = o_t.reshape(-1)
         ref_flat = ref_t.reshape(-1)
-        tag = f"B={B} Sq={Sq} H={H} D={D}"
+        tag = f"B={B} Sq={Sq} H={H} D={_head_dim_label((D, D_V))}"
         rm = compute_md5(o_flat)
         rm2 = compute_md5(ref_flat)
         print(f"  [{tag}] result_md5 = {rm}")
@@ -1082,9 +1116,9 @@ def run_attn_config(
     # ── benchmark ────────────────────────────────────────────────────────────
     try:
         if varlen:
-            flops = sum(_flops(vl_q[b], vl_kv[b], H, D, 1, causal) for b in range(B))
+            flops = sum(_flops(vl_q[b], vl_kv[b], H, D, 1, causal, D_V) for b in range(B))
         else:
-            flops = _flops(Sq, Skv, H, D, B, causal)
+            flops = _flops(Sq, Skv, H, D, B, causal, D_V)
 
         def kernel_fn():
             if use_block_table and kv_cache is not None:
@@ -1157,6 +1191,7 @@ def run_aiter_bench(
     seed=DEFAULT_SEED,
     backend="ck",
     num_kv_heads=None,
+    v_head_dim=None,
     precomputed_ref=None,
     seqlen_kv=None,
     varlen_seqlens_q=None,
@@ -1179,6 +1214,7 @@ def run_aiter_bench(
     torch.cuda.empty_cache()
 
     H, D = nheads, head_dim
+    D_V = int(v_head_dim) if v_head_dim is not None else D
     H_KV = num_kv_heads if num_kv_heads is not None else H
     if varlen:
         vl_q = list(varlen_seqlens_q)
@@ -1195,10 +1231,10 @@ def run_aiter_bench(
         cu_kv_t = torch.tensor(cukv, dtype=torch.int32, device="cuda")
         q_pack = torch.empty(total_q, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
         k_pack = torch.empty(total_kv, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
-        v_pack = torch.empty(total_kv, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+        v_pack = torch.empty(total_kv, H_KV, D_V, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
         q = torch.zeros(B, S, H, D, dtype=dtype, device="cuda")
         k = torch.zeros(B, Skv, H_KV, D, dtype=dtype, device="cuda")
-        v = torch.zeros(B, Skv, H_KV, D, dtype=dtype, device="cuda")
+        v = torch.zeros(B, Skv, H_KV, D_V, dtype=dtype, device="cuda")
         for b in range(B):
             q[b, : vl_q[b]] = q_pack[cuq[b] : cuq[b + 1]]
             k[b, : vl_kv[b]] = k_pack[cukv[b] : cukv[b + 1]]
@@ -1208,7 +1244,7 @@ def run_aiter_bench(
         cu_q_t = cu_kv_t = None
         q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
         k = torch.empty(B, Skv, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
-        v = torch.empty(B, Skv, H_KV, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
+        v = torch.empty(B, Skv, H_KV, D_V, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
     softmax_scale = 1.0 / math.sqrt(D)
 
     if backend == "ck":
@@ -1273,7 +1309,7 @@ def run_aiter_bench(
     if precomputed_ref is not None:
         ref = precomputed_ref
     elif varlen:
-        ref = torch.empty(total_q, H, D, dtype=dtype, device="cuda")
+        ref = torch.empty(total_q, H, D_V, dtype=dtype, device="cuda")
         for b in range(B):
             qb = q_pack[cuq[b] : cuq[b + 1]].unsqueeze(0).float()
             kb = k_pack[cukv[b] : cukv[b + 1]].unsqueeze(0).float()
@@ -1286,7 +1322,7 @@ def run_aiter_bench(
         )
         ref = ref_fn(q.float(), k.float(), v.float(), causal=causal).to(dtype)
     if varlen:
-        out_cmp = torch.empty(total_q, H, D, dtype=out.dtype, device="cuda")
+        out_cmp = torch.empty(total_q, H, D_V, dtype=out.dtype, device="cuda")
         for b in range(B):
             out_cmp[cuq[b] : cuq[b + 1]] = out[b, : vl_q[b]]
     else:
@@ -1312,9 +1348,9 @@ def run_aiter_bench(
 
         _, us = run_perftest(bench_fn, num_iters=iters, num_warmup=warmup)
         if varlen:
-            flops = sum(_flops(vl_q[b], vl_kv[b], H, D, 1, causal) for b in range(B))
+            flops = sum(_flops(vl_q[b], vl_kv[b], H, D, 1, causal, D_V) for b in range(B))
         else:
-            flops = _flops(S, Skv, H, D, B, causal)
+            flops = _flops(S, Skv, H, D, B, causal, D_V)
         results["us"] = us
         results["tflops"] = flops / (us * 1e-6) / 1e12
     except Exception as e:
@@ -2172,7 +2208,7 @@ def _print_grouped_avgs(rows, tag_fn, print_avg_fn):
 
 _KV_LAYOUT_W = 24
 _CFG_HDR = (
-    f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>4s} "
+    f"{'B':>4s} {'S':>6s} {'H':>4s} {'Hkv':>4s} {'D':>7s} "
     f"{'dtype':>5s} {'causal':>8s} {'kv_sp':>5s} {'KVLayout':<{_KV_LAYOUT_W}s}"
 )
 _CFG_W = len(_CFG_HDR)
@@ -2191,7 +2227,10 @@ def _kv_layout_label(path, page_size):
 def _fmt_cfg(cfg):
     """Format config tuple (B, S, H, Hkv, D, dtype, causal, kv_sp, KVLayout)."""
     B, S, H, Hkv, D, dt, cs, ksp, kv_layout = cfg
-    return f"{B:>4d} {S:>6d} {H:>4d} {Hkv:>4d} {D:>4d} " f"{dt:>5s} {cs:>8s} {ksp:>5d} {kv_layout:<{_KV_LAYOUT_W}s}"
+    return (
+        f"{B:>4d} {S:>6d} {H:>4d} {Hkv:>4d} {_head_dim_label(D):>7s} "
+        f"{dt:>5s} {cs:>8s} {ksp:>5d} {kv_layout:<{_KV_LAYOUT_W}s}"
+    )
 
 
 def _fmt_normal_row(cfg, path, status, r):
@@ -2209,13 +2248,16 @@ def _fmt_normal_row(cfg, path, status, r):
 
 
 _EXTRA_HDR = (
-    f"  {'Sq':<24} {'Skv':<24} {'H':>4} {'Hkv':>4} {'D':>4} " f"{'dtype':>6} {'causal':>8} {'Path':<{_PATH_W}s}"
+    f"  {'Sq':<24} {'Skv':<24} {'H':>4} {'Hkv':>4} {'D':>7} " f"{'dtype':>6} {'causal':>8} {'Path':<{_PATH_W}s}"
 )
 _EXTRA_W = len(_EXTRA_HDR)
 
 
 def _fmt_extra_prefix(sq, skv, nh, nh_kv, hd, dtype_key, causal_tag, path=""):
-    return f"  {sq:<24} {skv:<24} {nh:>4} {nh_kv:>4} {hd:>4} " f"{dtype_key:>6} {causal_tag:>8} {path:<{_PATH_W}s}"
+    return (
+        f"  {sq:<24} {skv:<24} {nh:>4} {nh_kv:>4} {_head_dim_label(hd):>7} "
+        f"{dtype_key:>6} {causal_tag:>8} {path:<{_PATH_W}s}"
+    )
 
 
 def _fmt_extra_cmp_row(sq, skv, nh, nh_kv, hd, dtype_key, causal_tag, path, fly_r, ck_r):
@@ -2264,6 +2306,12 @@ def main():
         help="KV head count for GQA/MQA. Default = num_heads (MHA). " "Requires num_heads %% num_kv_heads == 0.",
     )
     parser.add_argument("--head_dim", type=int, default=None)
+    parser.add_argument(
+        "--v_head_dim",
+        type=int,
+        default=None,
+        help="V/O head dimension. Defaults to --head_dim; use with --head_dim 192 --v_head_dim 128 for D192x128.",
+    )
     parser.add_argument(
         "--num_kv_splits",
         type=int,
@@ -2391,15 +2439,18 @@ def main():
     dtypes_to_test = [args.dtype] if args.dtype else ["bf16", "fp16"]
     causals_to_test = [args.causal] if args.causal is not None else [True, False]
 
-    if args.batch or args.seq_len or args.num_heads or args.head_dim or args.num_kv_heads:
+    if args.batch or args.seq_len or args.num_heads or args.head_dim or args.v_head_dim or args.num_kv_heads:
         nh_single = args.num_heads or 8
+        qk_head_dim = args.head_dim or 128
+        v_head_dim = args.v_head_dim if args.v_head_dim is not None else qk_head_dim
+        head_dim_cfg = qk_head_dim if qk_head_dim == v_head_dim else (qk_head_dim, v_head_dim)
         configs = [
             (
                 args.batch or 1,
                 args.seq_len or 128,
                 nh_single,
                 args.num_kv_heads if args.num_kv_heads is not None else nh_single,
-                args.head_dim or 128,
+                head_dim_cfg,
                 args.num_kv_splits,
             )
         ]
@@ -2446,6 +2497,7 @@ def main():
             for causal in causals_to_test:
                 for batch, seq_len, nh, nh_kv_default, hd, cfg_kv_splits in configs:
                     causal_tag = "causal" if causal else "nocausal"
+                    qk_hd, v_hd = _split_head_dims(hd)
                     # CLI --num_kv_heads / --num_kv_splits (if set) override the per-config default.
                     nh_kv = args.num_kv_heads if args.num_kv_heads is not None else nh_kv_default
                     kv_splits = args.num_kv_splits if args.num_kv_splits > 1 else cfg_kv_splits
@@ -2472,7 +2524,8 @@ def main():
                                 varlen_seqlens_q=None,
                                 varlen_seqlens_kv=None,
                                 num_heads=nh,
-                                head_dim=hd,
+                                head_dim=qk_hd,
+                                v_head_dim=v_hd,
                                 num_kv_heads=nh_kv,
                                 dtype=dtype,
                                 causal=causal,
@@ -2492,13 +2545,13 @@ def main():
                             else:
                                 # All three use the same seed -> same Q/K/V -> identical reference.
                                 setup_seed(args.seed)
-                                _q = torch.empty(batch, seq_len, nh, hd, dtype=dtype, device="cuda").uniform_(
+                                _q = torch.empty(batch, seq_len, nh, qk_hd, dtype=dtype, device="cuda").uniform_(
                                     *UNIFORM_RANGE
                                 )
-                                _k = torch.empty(batch, seq_len, nh_kv, hd, dtype=dtype, device="cuda").uniform_(
+                                _k = torch.empty(batch, seq_len, nh_kv, qk_hd, dtype=dtype, device="cuda").uniform_(
                                     *UNIFORM_RANGE
                                 )
-                                _v = torch.empty(batch, seq_len, nh_kv, hd, dtype=dtype, device="cuda").uniform_(
+                                _v = torch.empty(batch, seq_len, nh_kv, v_hd, dtype=dtype, device="cuda").uniform_(
                                     *UNIFORM_RANGE
                                 )
                                 shared_ref = pytorch_ref_attention(
@@ -2510,11 +2563,13 @@ def main():
                             if dtype_str == "fp8":
                                 if args.block_table:
                                     raise ValueError("fp8 flash_attn does not support --block-table")
+                                if qk_hd != v_hd:
+                                    raise ValueError("fp8 flash_attn does not support asymmetric QK/V head dims")
                                 fly_r = run_fp8_config(
                                     batch,
                                     seq_len,
                                     nh,
-                                    hd,
+                                    qk_hd,
                                     causal,
                                     warmup=args.warmup,
                                     iters=args.iters,
@@ -2526,7 +2581,7 @@ def main():
                             else:
                                 fly_r = run_attn_config(
                                     nh,
-                                    hd,
+                                    qk_hd,
                                     dtype,
                                     causal,
                                     args.warmup,
@@ -2534,6 +2589,7 @@ def main():
                                     batch=batch,
                                     seqlen_q=seq_len,
                                     num_kv_heads=nh_kv,
+                                    v_head_dim=v_hd,
                                     num_kv_splits=kv_splits,
                                     seed=args.seed,
                                     dtype_str=dtype_str,
@@ -2554,7 +2610,7 @@ def main():
                                 batch,
                                 seq_len,
                                 nh,
-                                hd,
+                                qk_hd,
                                 causal,
                                 warmup=args.warmup,
                                 iters=args.iters,
@@ -2566,7 +2622,7 @@ def main():
                                 batch,
                                 seq_len,
                                 nh,
-                                hd,
+                                qk_hd,
                                 causal,
                                 warmup=args.warmup,
                                 iters=args.iters,
@@ -2579,7 +2635,7 @@ def main():
                                 precomputed_inputs,
                                 shared_ref,
                                 nh,
-                                hd,
+                                qk_hd,
                                 dtype,
                                 causal,
                                 warmup=args.warmup,
@@ -2591,7 +2647,7 @@ def main():
                                 batch,
                                 seq_len,
                                 nh,
-                                hd,
+                                qk_hd,
                                 dtype,
                                 causal,
                                 warmup=args.warmup,
@@ -2599,13 +2655,14 @@ def main():
                                 seed=args.seed,
                                 backend="ck",
                                 num_kv_heads=nh_kv,
+                                v_head_dim=v_hd,
                                 precomputed_ref=shared_ref,
                             )
                             asm_r = run_aiter_bench(
                                 batch,
                                 seq_len,
                                 nh,
-                                hd,
+                                qk_hd,
                                 dtype,
                                 causal,
                                 warmup=args.warmup,
@@ -2613,6 +2670,7 @@ def main():
                                 seed=args.seed,
                                 backend="asm",
                                 num_kv_heads=nh_kv,
+                                v_head_dim=v_hd,
                                 precomputed_ref=shared_ref,
                             )
                         rows.append((cfg, fly_r, ck_r, asm_r))
@@ -2689,6 +2747,7 @@ def main():
                         nh = case["nh"]
                         nh_kv_eff = args.num_kv_heads if args.num_kv_heads is not None else case["nh_kv"]
                         hd = case["hd"]
+                        qk_hd, v_hd = _split_head_dims(hd)
                         kv_splits = case.get("kv_splits", 1)
                         kwargs = dict(case["kwargs"])
                         for kv_cache_layout, path in paged_kv_paths:
@@ -2713,7 +2772,8 @@ def main():
                                     varlen_seqlens_q=kwargs.get("varlen_seqlens_q"),
                                     varlen_seqlens_kv=kwargs.get("varlen_seqlens_kv"),
                                     num_heads=nh,
-                                    head_dim=hd,
+                                    head_dim=qk_hd,
+                                    v_head_dim=v_hd,
                                     num_kv_heads=nh_kv_eff,
                                     dtype=dtype,
                                     causal=causal,
@@ -2740,12 +2800,13 @@ def main():
                             try:
                                 fly_r = run_attn_config(
                                     nh,
-                                    hd,
+                                    qk_hd,
                                     dtype,
                                     causal,
                                     args.warmup,
                                     args.iters,
                                     num_kv_heads=nh_kv_eff,
+                                    v_head_dim=v_hd,
                                     num_kv_splits=kv_splits,
                                     seed=args.seed,
                                     dtype_str=dtype_str,
@@ -2769,7 +2830,7 @@ def main():
                                     precomputed_inputs,
                                     shared_ref,
                                     nh,
-                                    hd,
+                                    qk_hd,
                                     dtype,
                                     causal,
                                     args.warmup,
@@ -2780,7 +2841,7 @@ def main():
                                     kwargs.get("batch", 1),
                                     kwargs.get("seqlen_q", max(kwargs.get("varlen_seqlens_q", [1]))),
                                     nh,
-                                    hd,
+                                    qk_hd,
                                     dtype,
                                     causal,
                                     args.warmup,
@@ -2788,6 +2849,7 @@ def main():
                                     seed=args.seed,
                                     backend="ck",
                                     num_kv_heads=nh_kv_eff,
+                                    v_head_dim=v_hd,
                                     seqlen_kv=kwargs.get("seqlen_kv"),
                                     varlen_seqlens_q=kwargs.get("varlen_seqlens_q"),
                                     varlen_seqlens_kv=kwargs.get("varlen_seqlens_kv"),
@@ -2852,6 +2914,7 @@ def main():
             for causal in causals_to_test:
                 for batch, seq_len, nh, nh_kv_default, hd, cfg_kv_splits in configs:
                     causal_tag = "causal" if causal else "nocausal"
+                    qk_hd, v_hd = _split_head_dims(hd)
                     # CLI --num_kv_heads / --num_kv_splits (if set) override the per-config default.
                     nh_kv = args.num_kv_heads if args.num_kv_heads is not None else nh_kv_default
                     kv_splits = args.num_kv_splits if args.num_kv_splits > 1 else cfg_kv_splits
@@ -2879,7 +2942,8 @@ def main():
                                         varlen_seqlens_q=None,
                                         varlen_seqlens_kv=None,
                                         num_heads=nh,
-                                        head_dim=hd,
+                                        head_dim=qk_hd,
+                                        v_head_dim=v_hd,
                                         num_kv_heads=nh_kv,
                                         dtype=dtype,
                                         causal=causal,
@@ -2899,7 +2963,7 @@ def main():
 
                             r = run_attn_config(
                                 nh,
-                                hd,
+                                qk_hd,
                                 dtype,
                                 causal,
                                 args.warmup,
@@ -2907,6 +2971,7 @@ def main():
                                 batch=batch,
                                 seqlen_q=seq_len,
                                 num_kv_heads=nh_kv,
+                                v_head_dim=v_hd,
                                 num_kv_splits=kv_splits,
                                 seed=args.seed,
                                 dtype_str=dtype_str,
@@ -2987,6 +3052,7 @@ def main():
                         nh = case["nh"]
                         nh_kv_eff = args.num_kv_heads if args.num_kv_heads is not None else case["nh_kv"]
                         hd = case["hd"]
+                        qk_hd, v_hd = _split_head_dims(hd)
                         kv_splits = case.get("kv_splits", 1)
                         kwargs = dict(case["kwargs"])
                         for kv_cache_layout, path in paged_kv_paths:
@@ -3013,7 +3079,8 @@ def main():
                                             varlen_seqlens_q=kwargs.get("varlen_seqlens_q"),
                                             varlen_seqlens_kv=kwargs.get("varlen_seqlens_kv"),
                                             num_heads=nh,
-                                            head_dim=hd,
+                                            head_dim=qk_hd,
+                                            v_head_dim=v_hd,
                                             num_kv_heads=nh_kv_eff,
                                             dtype=dtype,
                                             causal=causal,
@@ -3045,11 +3112,13 @@ def main():
                                 if dtype_str == "fp8":
                                     if args.block_table:
                                         raise ValueError("fp8 flash_attn does not support --block-table")
+                                    if qk_hd != v_hd:
+                                        raise ValueError("fp8 flash_attn does not support asymmetric QK/V head dims")
                                     r = run_fp8_config(
                                         kwargs.get("batch", 1),
                                         kwargs.get("seqlen_q", max(kwargs.get("varlen_seqlens_q", [seq_len]))),
                                         nh,
-                                        hd,
+                                        qk_hd,
                                         causal,
                                         warmup=args.warmup,
                                         iters=args.iters,
@@ -3061,12 +3130,13 @@ def main():
                                 else:
                                     r = run_attn_config(
                                         nh,
-                                        hd,
+                                        qk_hd,
                                         dtype,
                                         causal,
                                         args.warmup,
                                         args.iters,
                                         num_kv_heads=nh_kv_eff,
+                                        v_head_dim=v_hd,
                                         num_kv_splits=kv_splits,
                                         seed=args.seed,
                                         dtype_str=dtype_str,

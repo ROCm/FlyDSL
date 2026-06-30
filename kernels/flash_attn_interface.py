@@ -23,6 +23,7 @@ Key features vs calling build_* directly:
 from __future__ import annotations
 
 import functools
+import os
 from typing import Optional
 
 import torch
@@ -34,6 +35,15 @@ from kernels.flash_attn_gfx950 import dualwave_splitk_workspace_elems  # noqa: F
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
 _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn: "fp8"}
+_HD192X128_BUILDER_ENV = "FLYDSL_FLASH_ATTN_192X128_BUILDER"
+_HD192X128_BUILDER_DEFAULT = "0"
+
+
+def _hd192x128_builder_choice() -> str:
+    choice = os.getenv(_HD192X128_BUILDER_ENV, _HD192X128_BUILDER_DEFAULT).strip()
+    if choice not in ("0", "1"):
+        raise ValueError(f"{_HD192X128_BUILDER_ENV} must be '0' or '1', got {choice!r}")
+    return choice
 
 
 def _dtype_str(t: torch.Tensor) -> str:
@@ -67,8 +77,37 @@ def _build_dense(
     setprio: bool,
     debug_lazy_counts: bool,
     enable_stagger: bool,
+    v_head_dim: int = None,
+    hd192x128_builder: str = _HD192X128_BUILDER_DEFAULT,
 ):
     """Build (and cache) a dense-mode launcher via the generic dispatch."""
+    _v_head_dim = head_dim if v_head_dim is None else v_head_dim
+    if (head_dim, _v_head_dim) == (192, 128):
+        if hd192x128_builder == "0":
+            from kernels.flash_attn_gfx950_192x128_v1 import build_flash_attn_dualwave_swp_module
+        elif hd192x128_builder == "1":
+            from kernels.flash_attn_gfx950_192x128_v2 import (
+                build_flash_attn_192x128_module as build_flash_attn_dualwave_swp_module,
+            )
+        else:
+            raise ValueError(f"unsupported 192x128 builder choice: {hd192x128_builder!r}")
+
+        return build_flash_attn_dualwave_swp_module(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            v_head_dim=_v_head_dim,
+            causal=causal,
+            dtype_str=dtype_str,
+            num_kv_heads=num_kv_heads,
+            cross_seqlen=cross_seqlen,
+            waves_per_eu=waves_per_eu,
+            daz=daz,
+            dualwave_swp_lazy_rescale=lazy_rescale,
+            dualwave_swp_setprio=setprio,
+            dualwave_swp_debug_lazy_counts=debug_lazy_counts,
+            dualwave_swp_enable_stagger=enable_stagger,
+        )
+
     from kernels.flash_attn_generic import build_flash_attn_func_module
 
     return build_flash_attn_func_module(
@@ -583,21 +622,26 @@ def flydsl_flash_attn_func(
         Hkv = k.shape[2]
         cross = Sq != Skv if cross_seqlen is None else bool(cross_seqlen)
 
+    # V/O may be narrower than Q/K for the asymmetric 192x128 dense path.
+    D_V = int(v.shape[-1])
+
     if num_kv_heads is None:
         num_kv_heads = Hkv
     if H % num_kv_heads != 0:
         raise ValueError(f"flydsl_flash_attn_func: num_heads ({H}) must be divisible by num_kv_heads ({num_kv_heads})")
     if D < 64 or D % 32 != 0:
         raise ValueError(f"flydsl_flash_attn_func: head_dim ({D}) must be >= 64 and a multiple of 32")
+    if D != D_V and (D, D_V) != (192, 128):
+        raise ValueError(f"flydsl_flash_attn_func: unsupported asymmetric head dims ({D}, {D_V})")
 
     splitk = num_kv_splits > 1
 
     # ── split-K eligibility guard (SKIP analogous to run_splitk_config) ────
     if splitk:
-        if D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384:
+        if D != D_V or D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384:
             raise ValueError(
-                f"flydsl_flash_attn_func: split-K requires D=128, dtype bf16/f16, seq_len>=384; "
-                f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
+                f"flydsl_flash_attn_func: split-K requires D=V=128, dtype bf16/f16, seq_len>=384; "
+                f"got D={D}, V={D_V}, dtype={dtype_str}, seq_len={Sq}"
             )
         from kernels.flash_attn_gfx950 import dualwave_splitk_workspace_elems
 
@@ -643,6 +687,7 @@ def flydsl_flash_attn_func(
                 num_heads=H,
                 num_kv_heads=num_kv_heads,
                 head_dim=D,
+                v_head_dim=D_V,
                 causal=causal,
                 dtype_str=dtype_str,
                 cross_seqlen=cross,
@@ -652,12 +697,15 @@ def flydsl_flash_attn_func(
                 setprio=dualwave_swp_setprio,
                 debug_lazy_counts=debug_lazy,
                 enable_stagger=dualwave_swp_enable_stagger,
+                hd192x128_builder=(
+                    _hd192x128_builder_choice() if (D, D_V) == (192, 128) else _HD192X128_BUILDER_DEFAULT
+                ),
             )
 
         # ── allocate output ─────────────────────────────────────────────────
         if out is None:
             out_dtype = torch.bfloat16 if dtype_str == "fp8" else q.dtype
-            out = torch.empty(q.shape, dtype=out_dtype, device=q.device)
+            out = torch.empty((*q.shape[:-1], D_V), dtype=out_dtype, device=q.device)
         elif dtype_str == "fp8" and out.dtype != torch.bfloat16:
             raise ValueError(f"flydsl_flash_attn_func: fp8 output must be bf16, got {out.dtype}")
         elif dtype_str != "fp8" and out.dtype != q.dtype:
@@ -671,6 +719,11 @@ def flydsl_flash_attn_func(
             k_flat = k.contiguous().view(-1)
             v_flat = v.contiguous().view(-1)
             o_flat = out.contiguous().view(-1)
+        elif (D, D_V) == (192, 128):
+            q_flat = q.contiguous().reshape(-1)
+            k_flat = k.contiguous().reshape(-1)
+            v_flat = v.contiguous().reshape(-1)
+            o_flat = out.reshape(-1)
         else:
             q_flat = q.contiguous()
             k_flat = k.contiguous()
