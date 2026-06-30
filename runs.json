@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-06-30T19:18:08Z",
+ "updated": "2026-06-30T21:07:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28466385289,
+   "run_id": 28475730255,
    "pr": 780,
+   "commit": "e54c5a296d4daa1386e71aa18168fdbd05426730",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475730255",
+   "created_at": "2026-06-30T21:03:50Z",
+   "updated_at": "2026-06-30T21:04:35Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28466385289,
+   "pr": null,
    "commit": "705d959e12383291721a3beed1fb142a328a808a",
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
@@ -2220,21 +2235,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321645839/job/83904577124"
     }
    ]
-  },
-  {
-   "run_id": 28321527055,
-   "pr": null,
-   "commit": "9c842b1dbfb037f0e72046ede338db86bb325487",
-   "branch": "rlcr/gemm-fxgemm-perf",
-   "event": "pull_request",
-   "title": "fp8 8wave preshuffle: per-N-block fx.gemm fragments reach hand parity",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28321527055",
-   "created_at": "2026-06-28T12:00:21Z",
-   "updated_at": "2026-06-28T12:01:23Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
