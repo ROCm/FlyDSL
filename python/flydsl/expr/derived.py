@@ -5,9 +5,9 @@
 from .._mlir.dialects import fly
 from .._mlir.dialects._fly_enum_gen import MmaOperand
 from .meta import dsl_loc_tracing
-from .numeric import Boolean, Numeric
+from .numeric import Numeric
 from .primitive import *
-from .typing import Int8, Layout, Tensor, TiledCopy, TiledMma
+from .typing import Layout, Tensor, TiledCopy, TiledMma
 
 __all__ = [
     # Tiled Operation
@@ -88,7 +88,6 @@ def make_rmem_tensor(shape_or_layout, dtype):
     """Creates a tensor in register memory with the specified layout/shape and data type.
 
     If shape_or_layout is a shape, it is converted to a layout with column-major ordering.
-    Booleans are canonically stored as Int8.
 
     Examples:
         tensor = make_rmem_tensor(8, fx.Float32)
@@ -96,14 +95,13 @@ def make_rmem_tensor(shape_or_layout, dtype):
     """
     if not (isinstance(dtype, type) and issubclass(dtype, Numeric)):
         raise TypeError(f"dtype must be a Numeric subclass, but got {dtype!r}")
-    elem_ty = dtype.ir_type if dtype is not Boolean else Int8.ir_type
 
     if not isinstance(shape_or_layout, Layout):
         layout = make_ordered_layout(shape_or_layout, 0)
     else:
         layout = shape_or_layout
 
-    tensorTy = fly.MemRefType.get(elem_ty, layout.type, fly.AddressSpace.Register)
+    tensorTy = fly.MemRefType.get(dtype.ir_type, layout.type, fly.AddressSpace.Register)
     return memref_alloca(tensorTy, layout=layout)
 
 
