@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-06-30T18:14:01Z",
+ "updated": "2026-06-30T18:21:05Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28465852005,
+   "run_id": 28466385289,
    "pr": 780,
+   "commit": "705d959e12383291721a3beed1fb142a328a808a",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28466385289",
+   "created_at": "2026-06-30T18:17:51Z",
+   "updated_at": "2026-06-30T18:18:49Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28466297535,
+   "pr": null,
+   "commit": "67bdb81be0c7e114e0d2c11aa1fdd225b65a2830",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28466297535",
+   "created_at": "2026-06-30T18:16:20Z",
+   "updated_at": "2026-06-30T18:17:56Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28465852005,
+   "pr": null,
    "commit": "877f08ff33ff659772b5e20db158e5415dfb2c3a",
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
@@ -2177,64 +2207,6 @@
    "updated_at": "2026-06-28T12:01:23Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 28320989610,
-   "pr": null,
-   "commit": "6a14fb7c564658fab110cc06ba16349c301a2e09",
-   "branch": "rlcr/fa-fxcopy-main",
-   "event": "pull_request",
-   "title": "feat(flash-attn-gfx950): express QK+PV MMA via the fx.gemm layout API",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28320989610",
-   "created_at": "2026-06-28T11:38:43Z",
-   "updated_at": "2026-06-28T11:39:49Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 28319794541,
-   "pr": 753,
-   "commit": "c81b0c7dd3a73d651c2d94354cf5ef3fd6e59262",
-   "branch": "mxfp4-moe-gemm",
-   "event": "pull_request",
-   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541",
-   "created_at": "2026-06-28T10:50:08Z",
-   "updated_at": "2026-06-28T11:38:07Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T10:51:40Z",
-     "completed_at": "2026-06-28T11:37:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541/job/83899639258"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-06-28T10:51:36Z",
-     "completed_at": "2026-06-28T11:38:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541/job/83899639259"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-28T10:50:55Z",
-     "completed_at": "2026-06-28T11:02:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28319794541/job/83899639264"
-    }
-   ]
   }
  ]
 }
