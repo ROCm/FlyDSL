@@ -32,7 +32,142 @@ __all__ = [
     "gemm1_grid",
     "mxfp4_moe_gemm1",
     "mxfp4_moe_gemm2",
+    "select_pipe_config",
 ]
+
+
+# ---- aiter-tuned per-token config dispatch (the dominant perf lever) ----
+# Source: aiter *_tuned_fmoe.csv best row per token (.humanize/kernel-agent/aiter-tuned-config-map.md).
+# Keyed by MoE family signature (model_dim, inter_dim, experts) -> {tokens: (block_m, epilog)}.
+# block_m is the CSV `block_m` column (sort/compute tile); epilog is the CSV stage2 mode
+# ('atomic' or 'reduce'). The selector clamps block_m to the currently-supported {32,64}
+# (BM128 is a follow-on; see select_pipe_config) and nearest-rounds an unlisted token count.
+#
+# The #1 lever is stage2 atomic-vs-reduce: reduce for the high-expert small-inter families
+# (DSV3 E257, Kimi/DSV4 E384) where atomic collapses under heavy per-token contention; atomic
+# for the low-expert large-inter GPT-OSS family. block_m tracks the CSV 32/64/128 column.
+#
+# Each value is (block_m_csv, epilog_csv). Only stage2 epilog + block_m are dispatched here; the
+# finer s1/s2 knobs (bnt/persist/xcd4/kw/kb) are separate follow-on wiring.
+_AITER_PIPE_TABLE = {
+    # DeepSeekV3 fp4 (7168/256/E257/k9) — reduce-dominant for our kernel. The CSV picks atomic at
+    # 2048/16384/32768, but those CSV rows rely on persist+sbm128 (unimplemented here); measured
+    # cold, reduce beats atomic at every one of those tokens for our current feature set (e.g.
+    # 32768: reduce comb 1408 vs atomic 814). block_m tracks the CSV column clamped to <=64, except
+    # tok=256 where BM32 reduce measured faster than BM64.
+    (7168, 256, 257): {
+        1: (32, "atomic"),
+        2: (32, "reduce"),
+        4: (32, "reduce"),
+        8: (32, "reduce"),
+        16: (32, "reduce"),
+        32: (32, "reduce"),
+        64: (32, "reduce"),
+        128: (64, "reduce"),
+        256: (32, "reduce"),
+        512: (64, "reduce"),
+        1024: (64, "reduce"),
+        2048: (64, "reduce"),
+        4096: (64, "reduce"),
+        8192: (64, "reduce"),
+        16384: (64, "reduce"),
+        32768: (64, "reduce"),
+    },
+    # KimiK2 fp4 (7168/256/E384/k8) — reduce-dominant for our kernel. The CSV uses atomic below
+    # 16384 (with bnt2/persist), but measured cold reduce beats atomic at every token for our
+    # feature set (e.g. 32768: reduce 1169 vs atomic 651; 256: 106 vs 26). BM32 reduce is fastest
+    # <=1024, BM64 reduce >=2048.
+    (7168, 256, 384): {
+        1: (32, "atomic"),
+        2: (32, "atomic"),
+        4: (32, "atomic"),
+        8: (32, "atomic"),
+        16: (32, "reduce"),
+        32: (32, "reduce"),
+        64: (32, "reduce"),
+        128: (32, "reduce"),
+        256: (32, "reduce"),
+        512: (32, "reduce"),
+        1024: (32, "reduce"),
+        2048: (64, "reduce"),
+        4096: (64, "reduce"),
+        8192: (64, "reduce"),
+        16384: (64, "reduce"),
+        32768: (64, "reduce"),
+    },
+    # DeepSeekV4 a8w4 (7168/512/E384/k6) — reduce-dominant for our kernel. The CSV uses atomic at
+    # large-M (with sbm128/persist), but measured cold reduce beats even atomic-BM64 at every token
+    # for our feature set (e.g. 32768: reduce 1426 vs atomic-BM64 1187). BM32 reduce fastest
+    # <=1024, BM64 reduce >=2048.
+    (7168, 512, 384): {
+        1: (32, "reduce"),
+        2: (32, "reduce"),
+        4: (32, "reduce"),
+        8: (32, "reduce"),
+        16: (32, "reduce"),
+        32: (32, "reduce"),
+        64: (32, "reduce"),
+        128: (32, "reduce"),
+        256: (32, "reduce"),
+        512: (32, "reduce"),
+        1024: (32, "reduce"),
+        2048: (64, "reduce"),
+        4096: (64, "reduce"),
+        8192: (64, "reduce"),
+        16384: (64, "reduce"),
+        32768: (64, "reduce"),
+        131072: (64, "reduce"),
+    },
+    # GPT-OSS (3072/3072/E128/k4) swiglu — atomic-dominant (large inter=3072 => few tokens/expert
+    # row => low atomic contention, so atomic does NOT collapse here). BM64 atomic measured fastest
+    # at every token (e.g. 32768: BM64 2524 vs BM32 2203, already >= CSV target 1943); reduce is
+    # ~parity at mid tokens. Keep atomic throughout to protect the already-at/above-target large-M
+    # rows.
+    (3072, 3072, 128): {
+        256: (64, "atomic"),
+        512: (64, "atomic"),
+        1024: (64, "atomic"),
+        2048: (64, "atomic"),
+        4096: (64, "atomic"),
+        8192: (64, "atomic"),
+        16384: (64, "atomic"),
+        32768: (64, "atomic"),
+    },
+}
+
+
+def _nearest_token_key(tok_map, tokens):
+    """Pick the table token bucket nearest (<=) the requested token count; fall back to the min key."""
+    keys = sorted(tok_map)
+    chosen = keys[0]
+    for k in keys:
+        if k <= tokens:
+            chosen = k
+        else:
+            break
+    return chosen
+
+
+def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=False):
+    """Host-side per-(shape, token) config picker from the aiter tuned map.
+
+    Returns (BM, epilog) for the v2 pipe. ``epilog`` in {'atomic','reduce'} is the #1 perf lever
+    (reduce for high-expert small-inter contention; atomic for low-expert large-inter). ``BM`` is
+    the CSV block_m clamped to the currently-supported compute tiles: 128 -> 64 unless
+    ``allow_bm128`` (BM128 compute tile is a follow-on / Milestone C). Unlisted families fall back
+    to the current default (BM=32, atomic); unlisted token counts snap to the nearest lower bucket.
+    """
+    fam = _AITER_PIPE_TABLE.get((model_dim, inter_dim, experts))
+    if fam is None:
+        return 32, "atomic"
+    bm_csv, epilog = fam[_nearest_token_key(fam, tokens)]
+    if bm_csv >= 128 and not allow_bm128:
+        bm = 64  # BM128 compute tile not yet enabled; use the largest supported tile.
+    else:
+        bm = bm_csv
+    if bm not in (32, 64, 128):
+        bm = 32
+    return bm, epilog
 
 
 # ---- gemm1 (up/gate-proj) compile ----

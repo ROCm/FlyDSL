@@ -2144,9 +2144,20 @@ def run_mxfp4_moe_2stage(
 
     device = x_fp32.device
     NE, H, INTER, TOPK = experts, model_dim, inter_dim, topk
-    # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
-    # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
-    BM = int(os.environ.get("MXFP4_BM", "32"))
+    # Per-(shape, token) CSV dispatch (MXFP4_DISPATCH=1): auto-select (BM, epilog) from the
+    # aiter tuned map (kernels.moe_dispatcher.select_pipe_config) -- the dominant perf lever
+    # (stage2 atomic-vs-reduce + block_m). It OVERRIDES MXFP4_BM and the use_reduce arg; leave
+    # MXFP4_DISPATCH unset for manual measurement (env BM + explicit use_reduce, unchanged).
+    if os.environ.get("MXFP4_DISPATCH") == "1":
+        from kernels.moe_dispatcher import select_pipe_config
+
+        _allow_bm128 = os.environ.get("MXFP4_ALLOW_BM128") == "1"
+        BM, _epilog_sel = select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=_allow_bm128)
+        use_reduce = _epilog_sel == "reduce"
+    else:
+        # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
+        # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
+        BM = int(os.environ.get("MXFP4_BM", "32"))
     assert BM in (32, 64), f"MXFP4_BM must be 32 or 64, got {BM}"
     # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
     # Default SBM==BM (byte-identical). SBM must be a multiple of BM (SBM//BM compute blocks per
