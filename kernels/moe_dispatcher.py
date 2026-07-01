@@ -285,8 +285,11 @@ def compile_gemm1_a4w4_port(
 
     # k_wave (intra-block K-slice): split the K contraction across k_wave cooperating waves within
     # the 256-thread (4-wave) block; each wave accumulates its K-slice, then the k_wave partials are
-    # reduced in LDS before the shared silu+quant epilogue. Guards mirror aiter: K%k_wave==0,
-    # <=4 waves used for N (num_n_waves=4//k_wave >= 1), and the k_wave reduction slabs fit LDS.
+    # reduced in LDS before the shared silu+quant epilogue. Guards: k_wave in {1,2,4} (<=4 waves so
+    # num_n_waves=4//k_wave >= 1 -> <=256 threads, well under the 512 cap); K%k_wave==0; the k_wave
+    # per-K-wave A regions + reduction slabs fit LDS (gfx950 160KB). (aiter's literal 4*tile_n<=tile_k
+    # scratch guard is for its per-group reduction; this port reduces full [BM,BN] slabs sized below.)
+    LDS_LIMIT = 160 * 1024  # gfx950
     if k_wave not in (1, 2, 4):
         raise AssertionError(f"k_wave must be in {{1,2,4}} (4-wave block), got {k_wave}")
     if k_wave > 1:
@@ -296,13 +299,11 @@ def compile_gemm1_a4w4_port(
             raise AssertionError("k_wave>1 requires interleave gate mode")
         if (K // BK) % k_wave != 0:
             raise AssertionError(f"K/BK ({K // BK}) must be divisible by k_wave ({k_wave})")
-        # 4*tile_n <= tile_k: effective per-N-wave tile_n = BN//num_n_waves = BN*k_wave//4.
-        eff_tile_n = (BN * k_wave) // 4
-        if 4 * eff_tile_n > BK:
-            raise AssertionError(f"k_wave reduce scratch: 4*tile_n ({4 * eff_tile_n}) > tile_k ({BK})")
 
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
     lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM, k_wave=k_wave)  # K_TILES_TOTAL (inter-independent)
+    if lds_bytes > LDS_LIMIT:
+        raise AssertionError(f"k_wave LDS {lds_bytes} > {LDS_LIMIT} (BM={BM}, k_wave={k_wave})")
 
     gu_tag = "il" if interleave else "sep"
     bnt_tag = "nt" if b_nontemporal else "cached"

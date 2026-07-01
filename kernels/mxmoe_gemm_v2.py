@@ -399,9 +399,10 @@ def gemm1_body_v2(
             return fx.Int32(kt) + kw_kt_base
         return kt
 
-    # LDS base offsets (i8): s_aq | s_asc contiguous; lds_acc (f32) unions the region.
+    # LDS base offsets (i8): s_aq | s_asc contiguous; lds_acc (f32) unions the region. With k_wave>1
+    # the A staging holds k_wave per-K-wave regions, so s_asc sits past ALL of them (kw=1: unchanged).
     s_aq_base = lds_base_i32
-    s_asc_base = lds_base_i32 + fx.Int32(kAStages * BM * KH_TILE_A)
+    s_asc_base = lds_base_i32 + fx.Int32(k_wave * kAStages * BM * KH_TILE_A)
     lds_acc_base = lds_base_i32
 
     # A-gather rows: row = sorted_token_ids & 0xFFFFFF; pad rows are OOB so buffer_load_lds returns 0.
