@@ -3,7 +3,8 @@
 Supports FP4 (E2M1), FP8 (E4M3) and A8W4 (FP8 activation + FP4 weight),
 selected via ``data_format="fp4"|"fp8"|"a8w4"``. Scales are either E8M0
 block scales applied in-MMA (``scale_mode="mxscale"``) or per-token/
-per-channel fp32 scales applied in the epilogue (``scale_mode="ptpc"``).
+per-channel fp32 scales applied in the epilogue (``scale_mode="ptpc"``),
+with FP8 fp32 block scales available as ``scale_mode="blockscale"``.
 """
 
 import functools
@@ -91,13 +92,16 @@ def compile_fp8fp4_gemm(
     expert_sched_mode: bool = True,
     atomic_barrier_enable: bool = False,
     ascale_load_path: str = "vgpr",
+    scale_block_k: int = 128,
+    scale_block_n: int = 128,
 ):
     """Compile an FP4/FP8/A8W4 GEMM kernel with TDM async copy.
 
     Args:
         data_format: "fp4" (E2M1), "fp8" (E4M3), or "a8w4" (FP8 act + FP4 weight).
-        scale_mode: "mxscale" (E8M0 block scale via V_WMMA_SCALE) or "ptpc"
-            (per-token sa[M] / per-channel sb[N] fp32, applied in the epilogue).
+        scale_mode: "mxscale" (E8M0 block scale via V_WMMA_SCALE), "ptpc"
+            (per-token sa[M] / per-channel sb[N] fp32, applied in the epilogue),
+            or "blockscale" (fp32 A[M,K//128] and B[N//128,K//128] scales).
 
     Data layout:
         A: [M, K_packed] uint8 (FP4: K_packed=K//2, FP8: K_packed=K)
@@ -108,6 +112,7 @@ def compile_fp8fp4_gemm(
                 in 32x4 packed layout
         mxscale scale_B: [N//32, (K//128)*128] uint8 E8M0 in 32x4 packed layout
         ptpc:    scale_A [M], scale_B [N] fp32
+        blockscale scale_A [M, K//128] fp32, scale_B [N//128, K//128] fp32
 
     Returns a JitFunction:
         launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, M, N, lda, ldc, stream)
@@ -115,16 +120,25 @@ def compile_fp8fp4_gemm(
     """
     if data_format not in ("fp4", "fp8", "a8w4"):
         raise ValueError(f"data_format must be 'fp4', 'fp8', or 'a8w4', got {data_format!r}")
-    if scale_mode not in ("mxscale", "ptpc"):
-        raise ValueError(f"scale_mode must be 'mxscale' or 'ptpc', got {scale_mode!r}")
+    if scale_mode not in ("mxscale", "ptpc", "blockscale"):
+        raise ValueError(f"scale_mode must be 'mxscale', 'ptpc', or 'blockscale', got {scale_mode!r}")
     if scale_mode == "ptpc" and data_format not in ("fp8", "a8w4"):
         raise ValueError("scale_mode='ptpc' currently only supports data_format='fp8' or 'a8w4'")
+    if scale_mode == "blockscale":
+        if data_format != "fp8":
+            raise ValueError("scale_mode='blockscale' currently only supports data_format='fp8'")
+        if scale_block_k != WMMA_K or scale_block_n != 128:
+            raise ValueError("scale_mode='blockscale' requires scale_block_k=128 and scale_block_n=128")
+        if ascale_load_path != "vgpr":
+            raise ValueError("scale_mode='blockscale' only supports ascale_load_path='vgpr'")
     if ascale_load_path not in ("vgpr", "shuffled_tdm"):
         raise ValueError(f"ascale_load_path must be 'vgpr' or 'shuffled_tdm', got {ascale_load_path!r}")
 
     is_fp4 = data_format == "fp4"
     is_a8w4 = data_format == "a8w4"
     is_ptpc = scale_mode == "ptpc"
+    is_mxscale = scale_mode == "mxscale"
+    is_blockscale = scale_mode == "blockscale"
 
     if out_dtype not in ("f32", "bf16", "f16"):
         raise ValueError(f"out_dtype must be 'f32', 'bf16', or 'f16', got {out_dtype!r}")
@@ -175,6 +189,7 @@ def compile_fp8fp4_gemm(
     K_packed_a = K // PACK_FACTOR_A
     K_packed_b = K // PACK_FACTOR_B
     K_scale = K // SCALE_BLOCK
+    K_blockscale = K // scale_block_k
     split_k_chunk = K // split_k
 
     if K % tile_k != 0:
@@ -210,6 +225,10 @@ def compile_fp8fp4_gemm(
             f"mxscale 32x4 B-scale requires N%32==0, tile_n%32==0, tile_k%128==0; "
             f"got N={N}, tile_n={tile_n}, tile_k={tile_k}"
         )
+    if is_blockscale and (K % scale_block_k != 0 or N % scale_block_n != 0):
+        raise ValueError(
+            f"blockscale requires K%{scale_block_k}==0 and N%{scale_block_n}==0; got K={K}, N={N}"
+        )
 
     num_k_tiles = split_k_chunk // tile_k
     if num_k_tiles < num_buffers:
@@ -228,7 +247,6 @@ def compile_fp8fp4_gemm(
 
     # mxscale carries per-K-block scales; ptpc has no K-loop scale (per-token/
     # per-channel fp32 applied in the epilogue).
-    is_mxscale = not is_ptpc
     use_ascale_vgpr = is_mxscale and ascale_load_path == "vgpr"
     use_ascale_shuffled_tdm = is_mxscale and ascale_load_path == "shuffled_tdm"
 
@@ -422,6 +440,8 @@ def compile_fp8fp4_gemm(
     )
 
     def _pick_compute_schedule_kind():
+        if is_blockscale:
+            return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
         # Quadrant: split B left/right, compute the 4 quadrants to widen the
@@ -441,18 +461,20 @@ def compile_fp8fp4_gemm(
     use_fp4_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
-    use_row_major_k_prefetch = wmma_m_rep == 1 and k_wmma_steps > 1
+    use_row_major_k_prefetch = (not is_blockscale) and wmma_m_rep == 1 and k_wmma_steps > 1
     _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
     _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
     use_row_major_late_signal = use_row_major_k_prefetch
 
+    use_vgpr_scale_prefetch = use_ascale_vgpr or is_blockscale
+
     # A-scale VGPR-ring prefetch depth (K-tiles ahead).  Deeper K tiles expose
     # more latency to hide; depth 4 improves the small-M row-major large-K path
-    if use_ascale_vgpr and use_row_major_streaming_schedule:
+    if use_vgpr_scale_prefetch and use_row_major_streaming_schedule:
         _bvs_D = 4 if num_buffers >= 4 else 3
     else:
         _bvs_D = 1
-    _bvs_active = use_ascale_vgpr
+    _bvs_active = use_vgpr_scale_prefetch
 
     if is_mxscale:
         assert compute_schedule_kind in (
@@ -558,7 +580,23 @@ def compile_fp8fp4_gemm(
                         out[start + c] = rv[c]
             return out
 
+        def _load_contig_f32(rsrc, base_idx, n):
+            out = [None] * n
+            _chunks = _vec_chunks(n)
+            for _ci in range_constexpr(len(_chunks)):
+                start, w = _chunks[_ci]
+                off = arith.index_cast(T.i32, base_idx + arith.index(start))
+                r = buffer_ops.buffer_load(rsrc, off, vec_width=w, dtype=T.f32)
+                if const_expr(w == 1):
+                    out[start] = r
+                else:
+                    rv = fx.Vector(r)
+                    for c in range_constexpr(w):
+                        out[start + c] = rv[c]
+            return out
+
         _scale_identity_i32 = arith.constant(0x7F7F7F7F, type=T.i32)
+        _vs_tile_a = k_wmma_steps * ascale_load
 
         if const_expr(use_ascale_vgpr):
             # A-scale VGPR path: read scale_A[M, K//32] directly from its row-major layout.
@@ -572,7 +610,6 @@ def compile_fp8fp4_gemm(
             _ascale_row0 = blk_m + warp_m_base + lane16
             if const_expr(ascale_opsel):
                 _ascale_row0 = _ascale_row0 + lane_kgrp * arith.index(ascale_half * WMMA_M)
-            _vs_tile_a = k_wmma_steps * ascale_load
 
             def _load_contig_i32_guarded_row(row, n, soff):
                 row_valid = row < m_idx
@@ -614,6 +651,57 @@ def compile_fp8fp4_gemm(
                 return list(if_op.results)
 
             _bvs_prefetch = _load_ascale
+
+        if const_expr(is_blockscale):
+            _blockscale_as_rsrc = buffer_ops.create_buffer_resource(
+                arg_a_scale,
+                max_size=False,
+                num_records_bytes=m_idx * arith.index(K_blockscale * 4),
+            )
+            _blockscale_bs_rsrc = buffer_ops.create_buffer_resource(
+                arg_b_scale,
+                max_size=False,
+                num_records_bytes=(N // scale_block_n) * K_blockscale * 4,
+            )
+            _blockscale_row0 = blk_m + warp_m_base + lane16
+
+            def _load_blockscale_ascale_row(row, n, k_block_base):
+                row_valid = row < m_idx
+                if_op = scf.IfOp(row_valid, [T.f32] * n, has_else=True)
+                with ir.InsertionPoint(if_op.then_block):
+                    vals = _load_contig_f32(
+                        _blockscale_as_rsrc,
+                        row * arith.index(K_blockscale) + k_block_base,
+                        n,
+                    )
+                    scf.YieldOp([arith.unwrap(v) for v in vals])
+                with ir.InsertionPoint(if_op.else_block):
+                    scf.YieldOp([arith.unwrap(arith.constant(0.0, type=T.f32)) for _ in range(n)])
+                return list(if_op.results)
+
+            def _load_blockscale_ascale(k_base):
+                k_block_base = k_base // arith.index(scale_block_k)
+                vals = [None] * _vs_tile_a
+                for wm in range_constexpr(wmma_m_rep):
+                    row = _blockscale_row0 + arith.index(wm * WMMA_M)
+                    ks_vals = _load_blockscale_ascale_row(row, k_wmma_steps, k_block_base)
+                    for ks in range_constexpr(k_wmma_steps):
+                        vals[ks * ascale_load + wm] = ks_vals[ks]
+                return vals
+
+            def _load_blockscale_bscale(k_base):
+                k_block_base = k_base // arith.index(scale_block_k)
+                vals = [None] * (k_wmma_steps * wmma_n_rep)
+                for wn in range_constexpr(wmma_n_rep):
+                    n_col = blk_n + warp_n_base + arith.index(wn * WMMA_N_EFF)
+                    n_block = n_col // arith.index(scale_block_n)
+                    base = n_block * arith.index(K_blockscale) + k_block_base
+                    ks_vals = _load_contig_f32(_blockscale_bs_rsrc, base, k_wmma_steps)
+                    for ks in range_constexpr(k_wmma_steps):
+                        vals[ks * wmma_n_rep + wn] = ks_vals[ks]
+                return vals
+
+            _bvs_prefetch = _load_blockscale_ascale
 
         # Runtime leading-dim strides (strided A/C). Dense callers pass lda == K,
         # ldc == N for byte-identical addressing. A's stride is in packed elements.
@@ -958,25 +1046,34 @@ def compile_fp8fp4_gemm(
 
         # Current tile's VGPR-path A-scales, ordered [k_wmma_step][M-rep].
         _vgpr_scale_box = [None]
+        _blockscale_b_scale_box = [None]
 
         def _set_vgpr_a_scales(scale_k_base, pf_a_scales):
-            if const_expr(use_ascale_vgpr):
+            if const_expr(use_vgpr_scale_prefetch):
                 if const_expr(pf_a_scales is not None):
                     _vgpr_scale_box[0] = pf_a_scales
                 else:
                     rocdl.sched_barrier(0)
                     _vgpr_scale_box[0] = _bvs_prefetch(scale_k_base)
 
+        def _set_blockscale_b_scales(scale_k_base):
+            if const_expr(is_blockscale):
+                _blockscale_b_scale_box[0] = _load_blockscale_bscale(scale_k_base)
+
         def _load_a_scale_vgpr(ks):
             pf_a = _vgpr_scale_box[0]
             return pf_a[ks * ascale_load : (ks + 1) * ascale_load]
+
+        def _load_b_scale_blockscale(ks):
+            pf_b = _blockscale_b_scale_box[0]
+            return pf_b[ks * wmma_n_rep : (ks + 1) * wmma_n_rep]
 
         def _load_b_scale_lds(bs_buf, bs_block0, ks):
             """Load 32x4 B-scale from LDS (mxscale only; ptpc reads no K-loop B-scale)."""
             return load_bs32_bscale(bs_buf, bs_block0, ks)
 
         def _load_a_scale_operand(as_buf, as_bases, ks):
-            if const_expr(use_ascale_vgpr):
+            if const_expr(use_ascale_vgpr or is_blockscale):
                 return _load_a_scale_vgpr(ks)
             return _load_a_scale_lds(as_buf, as_bases, ks)
 
@@ -985,6 +1082,8 @@ def compile_fp8fp4_gemm(
             if const_expr(is_ptpc):
                 return None, None
             a = _load_a_scale_operand(as_buf, as_bases, ks)
+            if const_expr(is_blockscale):
+                return a, _load_b_scale_blockscale(ks)
             b = _load_b_scale_lds(bs_buf, bs_bases, ks)
             return a, b
 
@@ -1060,6 +1159,21 @@ def compile_fp8fp4_gemm(
                     scaleBType=a_opsel,
                 )
 
+        def _emit_raw_fp8_wmma(accs, wm, wn, a_frag, b_frag):
+            idx = wm * wmma_n_rep + wn
+            accs[idx] = rocdl.wmma_f32_16x16x128_fp8_fp8(T.vec(8, T.f32), b_frag, a_frag, accs[idx])
+
+        def _apply_blockscale(global_accs, block_accs, a_scales, b_scales):
+            out = list(global_accs)
+            for wm in range_constexpr(wmma_m_rep):
+                a_scale = fx.Float32(a_scales[wm])
+                for wn in range_constexpr(wmma_n_rep):
+                    idx = wm * wmma_n_rep + wn
+                    scale = a_scale * fx.Float32(b_scales[wn])
+                    scale_vec = fx.Vector.from_elements([scale] * ACC_VEC_SIZE, fx.Float32)
+                    out[idx] = fx.fma(fx.Vector(block_accs[idx]), scale_vec, fx.Vector(out[idx])).ir_value()
+            return out
+
         def _a_streaming_compute(
             accs,
             a_buf,
@@ -1123,6 +1237,49 @@ def compile_fp8fp4_gemm(
                 next_result = _load_b_and_scales(nb_buf, nb_bases, nas_buf, nas_bases, nbs_buf, nbs_bases, n_ks)
                 return accs, next_result
             return accs
+
+        def compute_tile_blockscale(
+            accs_in,
+            lds_a,
+            lds_b,
+            lds_as,
+            lds_bs,
+            emit_filler=None,
+            mid_compute_callback=None,
+            late_compute_callback=None,
+            scale_k_base=None,
+            pf_a_scales=None,
+        ):
+            current_accs = list(accs_in)
+            _set_vgpr_a_scales(scale_k_base, pf_a_scales)
+            _set_blockscale_b_scales(scale_k_base)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
+
+            for ks in range_constexpr(k_wmma_steps):
+                block_accs = [acc_zero] * n_accs
+                b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                a_scales, b_scales = _scales_for_emit(lds_as, None, lds_bs, None, ks)
+                a_frags = [load_a_frag(a_buf, a_bases[wm], ks) for wm in range_constexpr(wmma_m_rep)]
+                rocdl.s_wait_dscnt(0)
+
+                for wm in range_constexpr(wmma_m_rep):
+                    for wn in range_constexpr(wmma_n_rep):
+                        _emit_raw_fp8_wmma(block_accs, wm, wn, a_frags[wm], b_frags[wn])
+                    if const_expr(ks == 0 and wm == 0 and mid_compute_callback is not None):
+                        rocdl.sched_barrier(0)
+                        mid_compute_callback()
+
+                current_accs = _apply_blockscale(current_accs, block_accs, a_scales, b_scales)
+
+                if const_expr(ks == k_wmma_steps - 1 and late_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    late_compute_callback()
+                if const_expr(ks == k_wmma_steps - 1 and emit_filler is not None):
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
+            return current_accs
 
         # ── Compute on one LDS buffer ──
         def compute_tile(
@@ -1763,6 +1920,13 @@ def compile_fp8fp4_gemm(
                     rocdl.sched_dsrd(wmma_n_rep * _b_loads_per_frag + _scale_dsrd)
             rocdl.sched_barrier(0)
 
+        def hot_loop_scheduler_blockscale():
+            _ds_loads = wmma_n_rep * _b_frag_loads_per_wn + wmma_m_rep * DS_LOADS_PER_A_FRAG
+            for _ks in range_constexpr(k_wmma_steps):
+                rocdl.sched_dsrd(_ds_loads)
+                rocdl.sched_mfma(n_accs)
+            rocdl.sched_barrier(0)
+
         def hot_loop_scheduler_fp4_quadrant():
             _a_all_loads = wmma_m_rep * DS_LOADS_PER_A_FRAG
             _a_scale_loads = _a_scale_ds
@@ -1865,6 +2029,19 @@ def compile_fp8fp4_gemm(
             scale_k_base=None,
             pf_a_scales=None,
         ):
+            if const_expr(is_blockscale):
+                return compute_tile_blockscale(
+                    accs_in,
+                    lds_a,
+                    lds_b,
+                    lds_as,
+                    lds_bs,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback,
+                    late_compute_callback=late_compute_callback,
+                    scale_k_base=scale_k_base,
+                    pf_a_scales=pf_a_scales,
+                )
             if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT):
                 return compute_tile_fp4_quadrant(
                     accs_in,
@@ -1918,7 +2095,9 @@ def compile_fp8fp4_gemm(
             )
 
         def hot_loop_scheduler_scheduled():
-            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT):
+            if const_expr(is_blockscale):
+                hot_loop_scheduler_blockscale()
+            elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT):
                 hot_loop_scheduler_fp4_quadrant()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
                 hot_loop_scheduler_fp8_deep_pipeline()
@@ -2115,10 +2294,10 @@ def compile_fp8fp4_gemm(
             SmemPtr(arena_base_ptr, stage_b_data_off[i], elem_ty_lds, shape=(lds_b_data_f16,))
             for i in range_constexpr(num_buffers)
         ]
-        if const_expr(is_ptpc):
-            # PTPC applies sa*sb in the epilogue from global memory: no scale LDS.
+        if const_expr(not is_mxscale):
+            # PTPC and blockscale do not use scale LDS.
             # Alias the scale stage handles to A/B so the shared plumbing stays valid;
-            # for PTPC they are never written (no scale TDM) or read.
+            # they are never written by scale TDM.
             stages_as = stages_a
             stages_bs = stages_b
         else:
@@ -2200,8 +2379,8 @@ def compile_fp8fp4_gemm(
 
         desc_a_init = make_desc_a(stages_a_mem[0], split_k_base)
         desc_b_init = make_desc_b(stages_b_mem[0], split_k_base)
-        if const_expr(is_ptpc):
-            # No scale TDM for PTPC: alias the scale descriptors/addresses to A/B.
+        if const_expr(not is_mxscale):
+            # No scale TDM: alias the scale descriptors/addresses to A/B.
             # Scale waves are predicated off, so these selections are never issued.
             stages_as_lds_addr = stages_a_lds_addr
             stages_bs_lds_addr = stages_b_lds_addr
@@ -2223,7 +2402,7 @@ def compile_fp8fp4_gemm(
         adv_as_i32 = fx.Int32(as32_lds_row_stride if use_ascale_shuffled_tdm else tile_k // SCALE_BLOCK * wmma_m_rep)
         adv_bs_i32 = fx.Int32(bs32_lds_row_stride if is_mxscale else tile_k // SCALE_BLOCK * b_scale_load_rep)
 
-        _drop_scale_waves = is_ptpc
+        _drop_scale_waves = not is_mxscale
         if const_expr(use_ascale_shuffled_tdm):
             _active_wave_limit = min(num_warps, 4)
         elif const_expr(use_ascale_vgpr):
@@ -2378,6 +2557,13 @@ def compile_fp8fp4_gemm(
 
                 for buf_idx in range_constexpr(num_buffers):
                     load_stage = (buf_idx + num_buffers - 1) % num_buffers
+                    _cur_kb = None
+                    if const_expr(is_blockscale):
+                        _cur_kb = (
+                            split_k_base
+                            + loop_iter * arith.index(num_buffers * tile_k)
+                            + arith.index(buf_idx * tile_k)
+                        )
 
                     addr_box = [cur_addr_lo]
                     sec_box = [cur_sec_lo] if secondary_scale_tdm else None
@@ -2426,6 +2612,7 @@ def compile_fp8fp4_gemm(
                         mid_compute_callback=_mid_tdm_ws,
                         late_compute_callback=_late_tdm_ws_fence_signal,
                         a0_prefetch=a0_prefetch,
+                        scale_k_base=_cur_kb,
                         pf_a_scales=_cur_a,
                     )
                     cur_addr_lo = addr_box[0]
@@ -2482,7 +2669,8 @@ def compile_fp8fp4_gemm(
 
         def _bvs_tail_scales():
             if const_expr(_bvs_active):
-                return None, _bvs_tail_ring.pop(0)
+                kb = _bvs_tail_kb() if const_expr(is_blockscale) else None
+                return kb, _bvs_tail_ring.pop(0)
             return _bvs_tail_kb(), None
 
         if const_expr(_bvs_active):
@@ -2618,6 +2806,8 @@ def compile_fp8fp4_gemm(
         expert_sched_mode,
         atomic_barrier_enable,
         ascale_load_path,
+        scale_block_k,
+        scale_block_n,
         _row_major_k_prefetch_depth,
         _bvs_D,
     )
@@ -2696,6 +2886,11 @@ def compile_a8w4_gemm(**kw):
     return compile_fp8fp4_gemm(data_format="a8w4", scale_mode="mxscale", **kw)
 
 
+def compile_blockscale_gemm(**kw):
+    kw.pop("data_format", None)
+    return compile_fp8fp4_gemm(data_format="fp8", scale_mode="blockscale", **kw)
+
+
 def compile_ptpc_gemm(
     *,
     N: int = 0,
@@ -2756,5 +2951,6 @@ __all__ = [
     "compile_mxfp4_gemm",
     "compile_mxfp8_gemm",
     "compile_a8w4_gemm",
+    "compile_blockscale_gemm",
     "compile_ptpc_gemm",
 ]
