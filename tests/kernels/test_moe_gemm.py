@@ -2158,7 +2158,7 @@ def run_mxfp4_moe_2stage(
         # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
         # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
         BM = int(os.environ.get("MXFP4_BM", "32"))
-    assert BM in (32, 64), f"MXFP4_BM must be 32 or 64, got {BM}"
+    assert BM in (16, 32, 64, 128), f"MXFP4_BM must be in {{16,32,64,128}}, got {BM}"
     # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
     # Default SBM==BM (byte-identical). SBM must be a multiple of BM (SBM//BM compute blocks per
     # SBM sort block). MXFP4_SBM env override.

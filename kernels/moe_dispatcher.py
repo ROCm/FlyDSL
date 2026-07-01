@@ -197,9 +197,9 @@ def compile_gemm1_a4w4_port(
         SBM = BM
     # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
     b_nontemporal = use_nt
-    if BM not in (32, 64) or inline_quant:
+    if BM not in (16, 32, 64, 128) or inline_quant:
         raise AssertionError(
-            f"mxfp4_moe_gemm1 supports only (BM in {{32,64}}, inline_quant=False); "
+            f"mxfp4_moe_gemm1 supports only (BM in {{16,32,64,128}}, inline_quant=False); "
             f"got (BM={BM}, inline_quant={inline_quant})"
         )
     if SBM % BM != 0:
@@ -347,9 +347,9 @@ def compile_gemm2_a4w4_port(
     None -> SBM==BM (byte-identical). Otherwise SBM must be a multiple of BM."""
     if SBM is None:
         SBM = BM
-    if BM not in (32, 64) or epilog not in ("atomic", "reduce"):
+    if BM not in (16, 32, 64, 128) or epilog not in ("atomic", "reduce"):
         raise AssertionError(
-            f"mxfp4_moe_gemm2 supports only (BM in {{32,64}}, epilog in {{'atomic','reduce'}}); "
+            f"mxfp4_moe_gemm2 supports only (BM in {{16,32,64,128}}, epilog in {{'atomic','reduce'}}); "
             f"got (BM={BM}, epilog={epilog})"
         )
     if SBM % BM != 0:
