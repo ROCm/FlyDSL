@@ -72,8 +72,22 @@ __all__ = [
 ]
 
 
-def dsl_math_wrap_result(fn):
-    accepts_fastmath = "fastmath" in inspect.signature(fn).parameters
+def dsl_math_wrap_result(fn=None, *, exemplar=None):
+    """Wrap raw builder results back into DSL ``Numeric`` / ``Vector`` values.
+
+    The DSL type of the result is shaped after an *exemplar* operand:
+
+    - ``exemplar=None`` (default): the first positional argument is the
+      exemplar. This fits the ``x``-first math builders (``exp(x)``, ...).
+    - ``exemplar="<name>"``: the argument bound to that parameter name is the
+      exemplar. Use this for builders whose first argument is not the operand,
+      e.g. ``cmpi(predicate, lhs, rhs)`` -> ``exemplar="lhs"``.
+    """
+    if fn is None:
+        return lambda f: dsl_math_wrap_result(f, exemplar=exemplar)
+
+    sig = inspect.signature(fn)
+    accepts_fastmath = "fastmath" in sig.parameters
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -84,7 +98,14 @@ def dsl_math_wrap_result(fn):
             if ambient is not None:
                 kwargs["fastmath"] = ambient
 
-        first = args[0] if args else None
+        if exemplar is None:
+            first = args[0] if args else None
+        else:
+            try:
+                bound = sig.bind_partial(*args, **kwargs)
+                first = bound.arguments.get(exemplar)
+            except TypeError:
+                first = kwargs.get(exemplar)
         is_vector = isinstance(first, Vector)
         is_numeric = isinstance(first, Numeric)
 

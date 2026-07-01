@@ -64,7 +64,7 @@ from .typing import as_ir_value
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result
+@dsl_math_wrap_result(exemplar="lhs")
 def cmpi(predicate, lhs, rhs, **kwargs):
     """Integer comparison accepting DSL numeric types (Int32, ArithValue, etc.).
 
@@ -80,7 +80,7 @@ def cmpi(predicate, lhs, rhs, **kwargs):
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result
+@dsl_math_wrap_result(exemplar="lhs")
 def cmpf(predicate, lhs, rhs, **kwargs):
     """Floating-point comparison accepting DSL numeric types.
 
