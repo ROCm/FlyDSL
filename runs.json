@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-07-01T06:33:51Z",
+ "updated": "2026-07-01T06:41:44Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28498714232,
+   "pr": 783,
+   "commit": "85e416198d6955ff722563d3ae0068abfcd539b3",
+   "branch": "feat/autotune-cache-key-restore",
+   "event": "pull_request",
+   "title": "autotune: harden cache key + add restore_value (#770, 1/5)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498714232",
+   "created_at": "2026-07-01T06:39:53Z",
+   "updated_at": "2026-07-01T06:39:53Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28498692582,
+   "pr": 782,
+   "commit": "0f222d547114249d7410475b891e785b1ca25a17",
+   "branch": "rlcr/pshuf-fp8-regr",
+   "event": "pull_request",
+   "title": "[Fix] preshuffle_gemm: wire xcd_swizzle + fix xcd_remap_bx_by (recover #754 async regression)",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498692582",
+   "created_at": "2026-07-01T06:39:21Z",
+   "updated_at": "2026-07-01T06:40:10Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 28498395176,
+   "pr": 764,
+   "commit": "5f41e321b3c695c9398569dfbe4962a009e5c583",
+   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
+   "event": "pull_request",
+   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498395176",
+   "created_at": "2026-07-01T06:32:47Z",
+   "updated_at": "2026-07-01T06:33:31Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T06:33:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498395176/job/84469751687"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-01T06:34:17Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498395176/job/84469751689"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T06:33:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498395176/job/84469751695"
+    }
+   ]
+  },
   {
    "run_id": 28498335727,
    "pr": null,
@@ -10,13 +83,41 @@
    "branch": "main",
    "event": "push",
    "title": "refactor: move scalar buffer_load and maxnumf into the FlyDSL framewo\u2026",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498335727",
    "created_at": "2026-07-01T06:31:27Z",
-   "updated_at": "2026-07-01T06:31:45Z",
+   "updated_at": "2026-07-01T06:32:21Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T06:32:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498335727/job/84469577683"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T06:32:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498335727/job/84469577689"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-01T06:33:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498335727/job/84469577767"
+    }
+   ]
   },
   {
    "run_id": 28498262298,
@@ -2048,135 +2149,6 @@
      "started_at": "2026-06-29T08:24:30Z",
      "completed_at": "2026-06-29T14:25:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358561640/job/84007520756"
-    }
-   ]
-  },
-  {
-   "run_id": 28358095782,
-   "pr": null,
-   "commit": "a9067856ef2ece836c334cce0a691094d1b9e458",
-   "branch": "pr/vec-alias",
-   "event": "pull_request",
-   "title": "Add common VectorType alias",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782",
-   "created_at": "2026-06-29T08:14:04Z",
-   "updated_at": "2026-06-29T08:23:25Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T08:16:04Z",
-     "completed_at": "2026-06-29T08:23:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782/job/84006006706"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T08:15:58Z",
-     "completed_at": "2026-06-29T08:23:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782/job/84006006733"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T08:15:50Z",
-     "completed_at": "2026-06-29T08:23:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358095782/job/84006006756"
-    }
-   ]
-  },
-  {
-   "run_id": 28355406632,
-   "pr": 762,
-   "commit": "58747d83a2e20e66b49afaaba2f968f44c6a52b9",
-   "branch": "pr/vec-alias",
-   "event": "pull_request",
-   "title": "Add common VectorType alias",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632",
-   "created_at": "2026-06-29T07:20:33Z",
-   "updated_at": "2026-06-29T08:14:37Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T07:29:55Z",
-     "completed_at": "2026-06-29T08:14:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632/job/83997258328"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T07:30:00Z",
-     "completed_at": "2026-06-29T08:14:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632/job/83997258354"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-29T07:22:08Z",
-     "completed_at": "2026-06-29T08:01:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28355406632/job/83997258362"
-    }
-   ]
-  },
-  {
-   "run_id": 28354679213,
-   "pr": null,
-   "commit": "1468b2651a54a0a64a72b687666ec5b984cd6b96",
-   "branch": "pr/vec-alias",
-   "event": "pull_request",
-   "title": "Add common VectorType alias",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213",
-   "created_at": "2026-06-29T07:05:45Z",
-   "updated_at": "2026-06-29T07:21:08Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T07:06:37Z",
-     "completed_at": "2026-06-29T07:21:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213/job/83994978036"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T07:12:44Z",
-     "completed_at": "2026-06-29T07:20:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213/job/83994978041"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-29T07:06:50Z",
-     "completed_at": "2026-06-29T07:21:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28354679213/job/83994978051"
     }
    ]
   }
