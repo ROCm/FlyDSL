@@ -2118,9 +2118,14 @@ def run_mxfp4_moe_2stage(
     topk_weights,
     interleave=True,
     seed=0,
+    act="silu",
+    swiglu_limit=0.0,
 ):
     """Run the layout-API MXFP4 MoE (opus sort -> gemm1 -> gemm2 atomic) and verify
-    against an independent dequant-MoE reference. Returns the bf16 output."""
+    against an independent dequant-MoE reference. Returns the bf16 output.
+
+    ``act`` selects the gemm1 stage1 activation ("silu" default or "swiglu"); ``swiglu_limit``
+    is the swiglu gate/up clamp (0 -> main's default 7.0). The torch reference below mirrors it."""
     from tests.kernels.utils import fp4_utils
 
     device = x_fp32.device
@@ -2191,6 +2196,8 @@ def run_mxfp4_moe_2stage(
         interleave=interleave,
         a_dtype=("fp8" if is_f8 else "fp4"),
         out_dtype=out_dtype,
+        act=act,
+        swiglu_limit=swiglu_limit,
         n_sorted_padded=n,
     )
     mxfp4_moe_gemm1(**_g1_kwargs)
@@ -2236,6 +2243,18 @@ def run_mxfp4_moe_2stage(
     W2s = fp4_utils.e8m0_to_f32(w2s.view(torch.uint8)).view(NE, H, INTER // 32)
     W2 = (W2.view(NE, H, INTER // 32, 32) * W2s.unsqueeze(-1)).view(NE, H, INTER)
 
+    # Activation reference: mirrors kernels/mxmoe_gemm_v2.py {silu,swiglu}_mul_batch (= main's
+    # mixed_moe_gemm_2stage). swiglu(g,u)=g*sigmoid(alpha*g)*(u+1) with g<=limit, -limit<=u<=limit
+    # (limit defaults to 7.0 when swiglu_limit==0); silu is silu(g)*u (unclamped).
+    def _act(gate, up):
+        if act == "swiglu":
+            alpha = 1.702
+            lim = float(swiglu_limit) if swiglu_limit != 0 else 7.0
+            g = gate.clamp(max=lim)
+            u = up.clamp(min=-lim, max=lim)
+            return g * torch.sigmoid(alpha * g) * (u + 1.0)
+        return torch.nn.functional.silu(gate) * up
+
     sti_c, sei_c, swt_c = sti[:n].cpu(), sei.cpu(), swt[:n].cpu()
     ref = torch.zeros((tokens, H), dtype=torch.float32, device=device)
     for r in range(n):
@@ -2245,15 +2264,16 @@ def run_mxfp4_moe_2stage(
         e = int(sei_c[r // BM].item())
         gate = A[tok] @ W1[e, :INTER].T
         up = A[tok] @ W1[e, INTER : 2 * INTER].T
-        inter_r = torch.nn.functional.silu(gate) * up
+        inter_r = _act(gate, up)
         ref[tok] += (inter_r @ W2[e].T) * float(swt_c[r].item())
 
     cos = torch.nn.functional.cosine_similarity(ref.reshape(-1), out.float().reshape(-1), dim=0).item()
     thr = 0.95 if is_f8 else 0.85
     logging.info(
-        "[mxfp4 moe %s %s] cos=%.4f n=%d (model_dim=%d inter=%d E=%d topk=%d)",
+        "[mxfp4 moe %s %s act=%s] cos=%.4f n=%d (model_dim=%d inter=%d E=%d topk=%d)",
         in_dtype,
         "il" if interleave else "sep",
+        act,
         cos,
         n,
         model_dim,

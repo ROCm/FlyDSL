@@ -51,6 +51,8 @@ def compile_gemm1_a4w4_port(
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
+    act="silu",
+    swiglu_limit=0.0,
 ):
     # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
     b_nontemporal = use_nt
@@ -62,6 +64,8 @@ def compile_gemm1_a4w4_port(
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     if out_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"out_dtype must be 'fp4' or 'fp8', got {out_dtype!r}")
+    if act not in ("silu", "swiglu"):
+        raise AssertionError(f"act must be 'silu' or 'swiglu', got {act!r}")
 
     K = D_HIDDEN  # contraction (compile-time); inter_dim (N-output) is the runtime i32_inter arg
     assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
@@ -73,7 +77,10 @@ def compile_gemm1_a4w4_port(
     bnt_tag = "nt" if b_nontemporal else "cached"
     a_tag = "a8" if a_dtype == "fp8" else "a4"
     o_tag = "o8" if out_dtype == "fp8" else "o4"
-    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}_v2"
+    # act tag empty for the default silu variant so its kernel name/IR stays byte-identical (AC-3);
+    # swiglu is a distinct compile-time variant (limit folded into the name).
+    act_tag = "" if act == "silu" else f"_swiglu{swiglu_limit:g}"
+    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}_v2"
 
     @fx.struct
     class SharedStorage:
@@ -128,6 +135,8 @@ def compile_gemm1_a4w4_port(
                 b_nontemporal=b_nontemporal,
                 a_dtype=a_dtype,
                 out_dtype=out_dtype,
+                act=act,
+                swiglu_limit=swiglu_limit,
             )
 
     @flyc.jit
@@ -327,10 +336,11 @@ G1_CACHE = {}
 G2_CACHE = {}
 
 
-def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype):
+def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act="silu", swiglu_limit=0.0):
     # inter_dim (gemm1 N-output) is a runtime arg; NE/topk are host-only (NE: gemm1_grid active-expert
     # cap; topk: grid sizing). None of the three enters the compiled kernel, so none is a cache-key dim.
-    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype)
+    # act/swiglu_limit are compile-time (folded into the epilog), so both are cache-key dims.
+    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
@@ -341,6 +351,8 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype):
             interleave=interleave,
             a_dtype=a_dtype,
             out_dtype=out_dtype,
+            act=act,
+            swiglu_limit=swiglu_limit,
         )
         G1_CACHE[key] = launch
     return launch
@@ -388,6 +400,8 @@ def mxfp4_moe_gemm1(
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
+    act="silu",
+    swiglu_limit=0.0,
     n_sorted_padded=None,
     stream=None,
 ):
@@ -400,7 +414,7 @@ def mxfp4_moe_gemm1(
     """
     import torch
 
-    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype)
+    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit)
     if n_sorted_padded is None:
         grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
     else:

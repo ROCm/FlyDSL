@@ -78,11 +78,30 @@ def lds_swizzle_mask_f8(row):
 
 
 # -- e8m0 / SwiGLU quant math -------------------------------------------------
+SWIGLU_ALPHA = 1.702
+
+
 def silu_mul_batch(gs, us):
     """silu(g)*u via exp2/rcp (matches HIP silu_mul_fast)."""
     e = [fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(-LOG2E)))) for g in gs]
     sig = [fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + ei))) for ei in e]
     return [gs[i] * sig[i] * us[i] for i in range(len(gs))]
+
+
+def swiglu_mul_batch(gs, us, swiglu_limit=0.0):
+    """swiglu(g,u) = g*sigmoid(alpha*g)*(u+1) via exp2/rcp; mirrors main mixed_moe swiglu.
+
+    Clamp g<=limit and -limit<=u<=limit before the activation (limit defaults to 7.0 when
+    swiglu_limit==0, matching main's _swiglu_mul_vec4).
+    """
+    limit = float(swiglu_limit) if swiglu_limit != 0 else 7.0
+    lim = fx.Float32(limit)
+    neg_lim = fx.Float32(-limit)
+    gs = [g.minimumf(lim) for g in gs]
+    us = [u.minimumf(lim).maximumf(neg_lim) for u in us]
+    e = [fx.Float32(rocdl.exp2(T.f32, _raw(g * fx.Float32(SWIGLU_ALPHA * -LOG2E)))) for g in gs]
+    sig = [fx.Float32(rocdl.rcp(T.f32, _raw(fx.Float32(1.0) + ei))) for ei in e]
+    return [gs[i] * sig[i] * (us[i] + fx.Float32(1.0)) for i in range(len(gs))]
 
 
 def fabs_f32(x):
@@ -240,6 +259,8 @@ def gemm1_body_v2(
     b_nontemporal,
     a_dtype,
     out_dtype,
+    act="silu",
+    swiglu_limit=0.0,
 ):
     # A dtype: only the A path differs; fp8 uses raw mfma_scale (cbsz=0), fp4 the fx.gemm path.
     is_f8_a = a_dtype == "fp8"
@@ -550,7 +571,10 @@ def gemm1_body_v2(
             up_idx = row_local * BN + up_col
             gate_vs[ee] = fx.Float32(lds_acc_fptr[gate_idx])
             up_vs[ee] = fx.Float32(lds_acc_fptr[up_idx])
-        result = silu_mul_batch(gate_vs, up_vs)
+        if const_expr(act == "swiglu"):
+            result = swiglu_mul_batch(gate_vs, up_vs, swiglu_limit)
+        else:
+            result = silu_mul_batch(gate_vs, up_vs)
 
         local_max = fabs_f32(result[0])
         for ee in range_constexpr(1, 8):
