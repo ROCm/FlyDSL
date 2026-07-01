@@ -312,7 +312,15 @@ def gemm1_body_v2(
     swiglu_limit=0.0,
     SBM=None,
     k_wave=1,
+    BN=BN,
 ):
+    # BN (fused gate|up N-tile) is a compile-time cache-key dim in {64, 256}. BN=256 (default) is the
+    # original fused SwiGLU tile ([gate 0..127][up 128..255], split at BN/2=128) and is compile-gated
+    # to emit byte-identical IR. BN=64 (split at BN/2=32) yields N_OUT//64 = 4x more N-blocks (block-
+    # count coverage for tiny-M) and pairs with k_wave to keep the K reduction busy. Only these two
+    # values are supported (the requant/scale partitions are specialized to each).
+    if BN not in (64, 256):
+        raise AssertionError(f"BN must be in {{64, 256}}, got {BN}")
     # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
     # SBM==BM (default) -> byte-identical single-block-per-sort-block behavior. SBM>BM (a
     # multiple) packs SBM//BM compute blocks into one SBM sort block that all share one expert:
@@ -362,7 +370,7 @@ def gemm1_body_v2(
     INTER_rt = fx.Int32(i32_inter)
     N_OUT = INTER_rt * fx.Int32(2)
     kBS_per_expert_dw = (N_OUT // fx.Int32(32)) * fx.Int32(kBS_stride_n0_dw)  # (N_OUT//16//2)*stride
-    NUM_N_BLOCKS = N_OUT // fx.Int32(256)
+    NUM_N_BLOCKS = N_OUT // fx.Int32(BN)
     OUT_AS_PER_CHUNK_DW = (INTER_rt // fx.Int32(256)) * fx.Int32(64)  # ((INTER//32)//4//2)*64
     K_G2_BYTES = INTER_rt // fx.Int32(out_pack)  # output row stride (fp4 INTER/2, fp8 INTER)
 
@@ -755,6 +763,13 @@ def gemm1_body_v2(
     wave_grp = n_lane // 4
     kk = n_lane % 4
 
+    # Requant partition: the column-group covered by a thread is `n_lane` (gate cols n_lane*8..+7,
+    # since wave_grp*32 + 8*kk == n_lane*8). There are (BN//2)//8 = BN//16 gate col-groups, so the
+    # valid threads are n_lane < BN//16 (BN=256 -> all 16; BN=64 -> 4 == wave_grp 0). The gate/up
+    # split is at BN//2. BN=256 keeps the exact literal expressions (byte-identical); BN<256 predicates
+    # the aqout/ascaleout stores on n_lane so the shrunk tile never writes a neighbouring n_block.
+    N_COL_GROUPS = BN // 16  # gate col-groups (BN=256:16, BN=64:4)
+
     # Output store via fx.copy (BufferCopy32b nt) over an i32 view; wave-uniform row base in view base.
     out_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(2), fx.Int32)  # nt i32 store
     out_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
@@ -767,8 +782,12 @@ def gemm1_body_v2(
         up_vs = [None] * 8
         for ee in range_constexpr(8):
             col_in_grp = 8 * kk + ee
-            gate_col = wave_grp * 32 + col_in_grp
-            up_col = 128 + gate_col
+            if const_expr(BN == 256):
+                gate_col = wave_grp * 32 + col_in_grp  # == n_lane*8 + ee (byte-identical literal)
+                up_col = 128 + gate_col
+            else:
+                gate_col = n_lane * 8 + ee
+                up_col = fx.Int32(BN // 2) + gate_col
             gate_idx = row_local * BN + gate_col
             up_idx = row_local * BN + up_col
             gate_vs[ee] = fx.Float32(lds_acc_fptr[gate_idx])
@@ -788,8 +807,13 @@ def gemm1_body_v2(
         scales_per_mr[mr] = e8m0
 
         qscale_raw = _raw(qscale)
-        # byte position of this lane's 8 elems (fp8 doubles it; row stride is INTER).
-        byte_pos_fp4 = n_block_idx * (BN // 4) + wave_grp * 16 + kk * 4
+        # byte position of this lane's 8 elems (fp8 doubles it; row stride is INTER). n_block covers
+        # BN//4 output bytes; within the block wave_grp*16 + kk*4 == n_lane*4 (linear INTER tiling,
+        # BN-independent). BN=256 keeps the literal form (byte-identical).
+        if const_expr(BN == 256):
+            byte_pos_fp4 = n_block_idx * (BN // 4) + wave_grp * 16 + kk * 4
+        else:
+            byte_pos_fp4 = n_block_idx * (BN // 4) + n_lane * 4
         if const_expr(is_f8_out):
             # 8 f32 -> 8 fp8: lo holds elems 0..3, hi 4..7 (2 fp8 per cvt half).
             v2i16 = T.vec(2, T.i16)
@@ -820,14 +844,38 @@ def gemm1_body_v2(
                 )
             elem_off = row_local * (K_G2_BYTES // 4) + (byte_pos_fp4 // 4)
             fx.memref_store_vec(Vec.filled(1, fx.Int32(packed_i32), fx.Int32), out_reg)
-            fx.copy(out_copy_atom, out_reg, aqout_view[elem_off, None])
+            if const_expr(BN == 256):
+                fx.copy(out_copy_atom, out_reg, aqout_view[elem_off, None])
+            else:
+                # BN<256: only n_lane < BN//16 col-groups are in this shrunk tile; other threads
+                # would address a neighbouring n_block, so predicate the store (device scf.if).
+                if n_lane < fx.Int32(N_COL_GROUPS):
+                    fx.copy(out_copy_atom, out_reg, aqout_view[elem_off, None])
 
     # ascaleout store via fx.copy (BufferCopy16b) over an i16 view; wave-uniform byte base in view base.
     asc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.Int16)
     asc_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int16)
-    if kk == 0:
-        ku = n_block_idx >> 1
-        ikxdl = n_block_idx & 1
+    # ascaleout physical layout is a pure function of the ABSOLUTE 32-INTER-col scale group
+    #   g = n_block_idx*(BN//64) + wave_grp   (each stored e8m0 owns 32 INTER cols)
+    # -> gemm2 K-tile ku = g//8, i16-half ikxdl = (g>>2)&1, dword-lane group = g&3 (BN-independent,
+    # so the OUTPUT is byte-identical to BN=256 regardless of gemm1's tiling). BN=256: g = 4*nb+wg
+    # reduces ku,ikxdl,lane-group to the original literals (byte-identical). BN=64: BN//2 = 32 INTER
+    # cols = exactly ONE scale group per n_block, so only wave_grp==0 is a valid store (wave_grp>=1
+    # addresses cols outside this block) and g == n_block_idx.
+    if const_expr(BN == 256):
+        store_scale = kk == 0
+    else:
+        store_scale = (kk == 0) and (wave_grp == fx.Int32(0))
+    if store_scale:
+        if const_expr(BN == 256):
+            ku = n_block_idx >> 1
+            ikxdl = n_block_idx & 1
+            lane_grp = wave_grp
+        else:
+            g = n_block_idx  # wave_grp==0 here; (BN//64)==1 so g == n_block_idx
+            ku = g >> 3
+            ikxdl = (g >> 2) & 1
+            lane_grp = g & 3
         if const_expr(is_bm16):
             # BM16: this block owns 32-row chunk == m_block_idx and fills only row-group 0
             # (rg1 half is unused padding gemm2 never reads). One 16-row scale -> byte0 of the
@@ -836,7 +884,7 @@ def gemm1_body_v2(
             base_i16 = (chunk * OUT_AS_PER_CHUNK_DW + ku * 64) * 2 + ikxdl
             asc_view = flat_buffer_view(arg_ascaleout, base_i16, T.i16, align=2, elem_bytes=2)
             pair_i16 = fx.Int16(scales_per_mr[0])
-            asc_off = (wave_grp * 16 + m_lane) * 2
+            asc_off = (lane_grp * 16 + m_lane) * 2
             fx.memref_store_vec(Vec.filled(1, pair_i16, fx.Int16), asc_reg)
             fx.copy(asc_copy_atom, asc_reg, asc_view[asc_off, None])
         else:
@@ -847,16 +895,17 @@ def gemm1_body_v2(
                 asc_view = flat_buffer_view(arg_ascaleout, base_i16, T.i16, align=2, elem_bytes=2)
                 pair_i32 = scales_per_mr[sub * 2 + 0] | (scales_per_mr[sub * 2 + 1] << 8)
                 pair_i16 = fx.Int16(pair_i32)
-                # per-lane i16 offset = (wave_grp*16 + m_lane)*2
-                asc_off = (wave_grp * 16 + m_lane) * 2
+                # per-lane i16 offset = (lane_grp*16 + m_lane)*2
+                asc_off = (lane_grp * 16 + m_lane) * 2
                 fx.memref_store_vec(Vec.filled(1, pair_i16, fx.Int16), asc_reg)
                 fx.copy(asc_copy_atom, asc_reg, asc_view[asc_off, None])
 
 
-def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE, BM=BM, k_wave=1):
+def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE, BM=BM, k_wave=1, BN=BN):
     # BM16 gathers one full 32-row scale chunk per 16-block (rg0-only); >=32 uses BM//32 chunks.
     # k_wave>1: each K-wave group has its OWN A-staging region (k_wave x), the scale chunk stays
     # shared (one copy, all K-tiles), and the cshuffle acc region holds k_wave partial slabs.
+    # BN sizes the cshuffle slab ([BM, BN] f32); BN=64 shrinks it 4x vs BN=256.
     kScaleSubBlocks = 1 if BM < 32 else BM // 32
     s_aq_bytes = k_wave * kAStages * BM * KH_TILE_A  # per-K-wave A regions (kw=1: unchanged)
     s_asc_bytes = kScaleSubBlocks * K_TILES_TOTAL * 256

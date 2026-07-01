@@ -2192,6 +2192,9 @@ def run_mxfp4_moe_2stage(
     # k_wave (intra-block K-slice) gemm1 override for measurement (MXFP4_KW env; default 1).
     KWAVE = int(os.environ.get("MXFP4_KW", "1"))
     assert KWAVE in (1, 2, 4), f"MXFP4_KW must be in {{1,2,4}}, got {KWAVE}"
+    # BN (gemm1 fused gate|up N-tile) override for measurement (MXFP4_BN env; default 256).
+    BNARG = int(os.environ.get("MXFP4_BN", "256"))
+    assert BNARG in (64, 256), f"MXFP4_BN must be in {{64,256}}, got {BNARG}"
     # persist (aiter `_persist`): gemm2 launches a fixed cu_num-wide grid and grid-strides over the
     # padded sort blocks. Set by dispatch above, or MXFP4_PERSIST=1 manually; MXFP4_CU_NUM overrides
     # the fixed grid size.
@@ -2269,6 +2272,7 @@ def run_mxfp4_moe_2stage(
         swiglu_limit=swiglu_limit,
         SBM=SBM,
         k_wave=KWAVE,
+        BN=BNARG,
         n_sorted_padded=n,
     )
     mxfp4_moe_gemm1(**_g1_kwargs)

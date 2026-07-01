@@ -258,6 +258,7 @@ def compile_gemm1_a4w4_port(
     swiglu_limit=0.0,
     SBM=None,
     k_wave=1,
+    BN=BN,
 ):
     # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
     # None -> SBM==BM (byte-identical). Otherwise SBM must be a multiple of BM (SBM//BM compute
@@ -299,9 +300,28 @@ def compile_gemm1_a4w4_port(
             raise AssertionError("k_wave>1 requires interleave gate mode")
         if (K // BK) % k_wave != 0:
             raise AssertionError(f"K/BK ({K // BK}) must be divisible by k_wave ({k_wave})")
+    # BN (fused gate|up N-tile) in {64, 256}. BN=64 gives N_OUT//64 = 4x more N-blocks for tiny-M
+    # block-count coverage. In interleave mode each N-wave must hold >=2 j-tiles (a gate+up pair):
+    # NJ = (BN//num_n_waves)//16 must be even, i.e. BN//num_n_waves >= 32. num_n_waves = 4//k_wave, so
+    # BN=64 requires num_n_waves <= 2 -> k_wave in {2,4} (nnw=1 for the k_wave=4 tiny-M fix). BN=64 +
+    # k_wave=1 (nnw=4 -> 16 cols/wave = 1 j-tile, no gate/up pair) is not expressible in this scheme.
+    if BN not in (64, 256):
+        raise AssertionError(f"BN must be in {{64, 256}}, got {BN}")
+    if BN != 256:
+        if not interleave:
+            raise AssertionError("BN != 256 requires interleave gate mode")
+        if a_dtype != "fp4":
+            raise AssertionError("BN != 256 is fp4-only (fp8 A path not ported)")
+        num_n_waves = 4 // k_wave
+        nj = (BN // num_n_waves) // 16
+        if nj < 2 or nj % 2 != 0:
+            raise AssertionError(
+                f"BN={BN} with k_wave={k_wave} (num_n_waves={num_n_waves}) yields NJ={nj}; each N-wave "
+                f"needs an even NJ>=2 (gate+up pair). BN=64 needs k_wave in {{2,4}}."
+            )
 
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM, k_wave=k_wave)  # K_TILES_TOTAL (inter-independent)
+    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM, k_wave=k_wave, BN=BN)  # K_TILES_TOTAL (inter-independent)
     if lds_bytes > LDS_LIMIT:
         raise AssertionError(f"k_wave LDS {lds_bytes} > {LDS_LIMIT} (BM={BM}, k_wave={k_wave})")
 
@@ -316,7 +336,9 @@ def compile_gemm1_a4w4_port(
     sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
     # kw tag empty at k_wave=1 so the default variant keeps its byte-identical kernel name (AC-3).
     kw_tag = "" if k_wave == 1 else f"_kw{k_wave}"
-    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}{kw_tag}_v2"
+    # bn tag empty at BN=256 so the default variant keeps its byte-identical kernel name (AC-3).
+    bn_tag = "" if BN == 256 else f"_bn{BN}"
+    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}{kw_tag}{bn_tag}_v2"
 
     @fx.struct
     class SharedStorage:
@@ -347,7 +369,7 @@ def compile_gemm1_a4w4_port(
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
         total_m_blocks = cumsum0 // fx.Int32(BM)
-        num_n_blocks = (fx.Int32(i32_inter) * fx.Int32(2)) // fx.Int32(256)  # NUM_N_BLOCKS = N_OUT//256
+        num_n_blocks = (fx.Int32(i32_inter) * fx.Int32(2)) // fx.Int32(BN)  # NUM_N_BLOCKS = N_OUT//BN
         bound = total_m_blocks * num_n_blocks
         if fx.Int32(bx_i32) < bound:
             gemm1_body_v2(
@@ -376,6 +398,7 @@ def compile_gemm1_a4w4_port(
                 swiglu_limit=swiglu_limit,
                 SBM=SBM,
                 k_wave=k_wave,
+                BN=BN,
             )
 
     @flyc.jit
@@ -644,17 +667,29 @@ G2_CACHE = {}
 
 
 def get_g1(
-    BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act="silu", swiglu_limit=0.0, SBM=None, k_wave=1
+    BM,
+    use_nt,
+    inline_quant,
+    D_HIDDEN,
+    interleave,
+    a_dtype,
+    out_dtype,
+    act="silu",
+    swiglu_limit=0.0,
+    SBM=None,
+    k_wave=1,
+    BN=BN,
 ):
     # inter_dim (gemm1 N-output) is a runtime arg; NE/topk are host-only (NE: gemm1_grid active-expert
     # cap; topk: grid sizing). None of the three enters the compiled kernel, so none is a cache-key dim.
     # act/swiglu_limit are compile-time (folded into the epilog), so both are cache-key dims.
     # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
     # k_wave (intra-block K-slice) is a compile-time cache-key dim; k_wave==1 is the byte-identical
-    # default variant.
+    # default variant. BN (fused gate|up N-tile) is a compile-time cache-key dim; BN==256 is the
+    # byte-identical default variant.
     if SBM is None:
         SBM = BM
-    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave)
+    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave, BN)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
@@ -669,6 +704,7 @@ def get_g1(
             swiglu_limit=swiglu_limit,
             SBM=SBM,
             k_wave=k_wave,
+            BN=BN,
         )
         G1_CACHE[key] = launch
     return launch
@@ -732,6 +768,7 @@ def mxfp4_moe_gemm1(
     swiglu_limit=0.0,
     SBM=None,
     k_wave=1,
+    BN=BN,
     n_sorted_padded=None,
     stream=None,
 ):
@@ -750,10 +787,21 @@ def mxfp4_moe_gemm1(
     import torch
 
     launch = get_g1(
-        BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM=SBM, k_wave=k_wave
+        BM,
+        use_nt,
+        inline_quant,
+        D_HIDDEN,
+        interleave,
+        a_dtype,
+        out_dtype,
+        act,
+        swiglu_limit,
+        SBM=SBM,
+        k_wave=k_wave,
+        BN=BN,
     )
     sbm = SBM or BM
-    num_n_blocks = (2 * D_INTER) // 256
+    num_n_blocks = (2 * D_INTER) // BN
     if n_sorted_padded is None:
         # E-based worst-case grid: sort padding is per SBM (the sort unit); the compute grid is
         # in BM blocks (padded_rows // BM). SBM==BM reduces to the original gemm1_grid.
