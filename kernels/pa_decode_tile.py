@@ -346,13 +346,19 @@ def compile_pa_decode_tile(
 
         c_TILE_TOK = arith.constant(TILE_TOK, type=T.i32)
 
-        # (phys page, sub-tile index, token offset) for tile index `tt_i32`.
-        def _tile_coords(tt_i32):
+        # (sub-tile index, token offset, block-table page) for tile `tt_i32` — all
+        # cheap arithmetic, NO global load.  The `phys` page pointer is a separate
+        # global load (`_load_phys`) that is carried across the loop (like K) so it
+        # stays off the per-tile critical path (it otherwise serialises the V/K
+        # address computation behind a ~600cyc block-table load).
+        def _coords_no_phys(tt_i32):
             tok0 = tt_i32 * c_TILE_TOK
             page = tok0 // block_size
             within = tok0 - page * block_size
-            phys = fx.Int32(global_load_i32(bt_gp, seq * max_blocks_per_seq + page))
-            return phys, within // c_TILE_TOK, tok0
+            return within // c_TILE_TOK, tok0, page
+
+        def _load_phys(page):
+            return fx.Int32(global_load_i32(bt_gp, seq * max_blocks_per_seq + page))
 
         # ── raw dwordx4 K load (A operand) ──
         # Lane (lane16, rgroup) feeds A row m=lane16 = token (a*64 + warp*16 +
@@ -400,20 +406,22 @@ def compile_pa_decode_tile(
                 ops.extend([w[0], w[1]])
             return ops  # NVOPS i64, token[rgroup*64 : +64] of this head
 
-        # ── prologue: prefetch the first tile's K into registers ──
+        # ── prologue: prefetch the first tile's K + its block-table phys page ──
         num_tiles_m1 = num_tiles - arith.constant(1, type=T.i32)
         start_safe = arith.select(part_start < num_tiles, part_start, num_tiles_m1)
-        p0_phys, p0_wt, _ = _tile_coords(start_safe)
+        p0_wt, _, p0_page = _coords_no_phys(start_safe)
+        p0_phys = _load_phys(p0_page)
         k_pf0 = _k_ops_flat(p0_phys, p0_wt)
 
         # O is carried in registers across tiles (one VHE_CHUNKS-list of PV
         # C-fragment vectors), rescaled by the softmax correction each tile.
         o_zero = Vec.filled(OP_ELEMS, 0.0, fx.Float32)
-        for tt, ostate in range(loop_start, loop_end, arith.index(1), init=[o_zero, o_zero, *k_pf0]):
+        for tt, ostate in range(loop_start, loop_end, arith.index(1), init=[o_zero, o_zero, *k_pf0, p0_phys]):
             o_acc = [ostate[0], ostate[1]]
             k_cur = [ostate[2 + i] for i in range_constexpr(NKOPS)]  # this tile's prefetched K
+            phys = ostate[2 + NKOPS]  # this tile's block-table page (prefetched last iter)
             tt_i32 = fx.Int32(arith.index_cast(T.i32, tt))
-            phys, within_tile, tok0 = _tile_coords(tt_i32)
+            within_tile, tok0, _ = _coords_no_phys(tt_i32)
 
             # Thread slices must be (re)created inside the loop: the ThrCopy/
             # ThrMma python subclass is stripped back to its TiledCopy/TiledMma
@@ -437,11 +445,12 @@ def compile_pa_decode_tile(
                     acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_cur[a * 4 + s], q_ops[s], acc, 0, 0, 0])
                 frag_Ss.append(fx.Vector(acc))
 
-            # prefetch next tile's K (the MFMAs above consumed k_cur); the loads
-            # overlap the softmax + PV below and are yielded as the next iter's k_cur.
+            # prefetch next tile's K + phys page (the MFMAs above consumed k_cur);
+            # the loads overlap the softmax + PV below and become next iter's state.
             tt1 = tt_i32 + arith.constant(1, type=T.i32)
             tt1c = arith.select(tt1 < part_end, tt1, num_tiles_m1)
-            p1_phys, p1_wt, _ = _tile_coords(tt1c)
+            p1_wt, _, p1_page = _coords_no_phys(tt1c)
+            p1_phys = _load_phys(p1_page)
             k_next = _k_ops_flat(p1_phys, p1_wt)
 
             # ---- register-resident softmax over M = token, 4 scores at a time ----
@@ -528,7 +537,7 @@ def compile_pa_decode_tile(
                 o_acc[vh] = Vec.from_elements(
                     [oo[v] * corr_s[v] + op[v] for v in range_constexpr(OP_ELEMS)], dtype=fx.Float32
                 )
-            results = yield [o_acc[0], o_acc[1], *k_next]
+            results = yield [o_acc[0], o_acc[1], *k_next, p1_phys]
         o_final = results
 
         # ── stage the register-resident O accumulator to sO (row-major) so the
