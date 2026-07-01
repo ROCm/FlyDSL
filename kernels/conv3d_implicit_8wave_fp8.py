@@ -1,10 +1,7 @@
-"""Implicit 3D convolution using CDNA4 FP8 (E4M3FN) 16x16x128 MFMA.
+"""8-wave double-buffered implicit-GEMM conv3d (FP8, CDNA4 only).
 
-Drop-in companion to the BF16 ``conv3d_implicit_8wave`` kernel with the same
-interface: takes BF16 ``x`` (N, C, D, H, W) and BF16 ``weight``
-(K, C, T, R, S), packs them once to FP8 (NDHWC activation / KTRSC weight), runs
-the 8-wave MFMA conv with a software-pipelined main loop + optional split-K, and
-returns BF16. Numerically matches ``x.to(float8_e4m3fn)`` / ``weight.to(...)``.
+x: (N, C, D, H, W) bf16 NCDHW, weight: (K, C, T, R, S) bf16 KCTRS.
+Returns (N, K, Do, Ho, Wo) bf16. Requires gfx95x; C%128==0, CRS%128==0, NPQ%128==0.
 """
 
 import functools

@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Implicit-GEMM conv3d using the 8-wave double-buffered BF16 MFMA pipeline.
+"""8-wave double-buffered implicit-GEMM conv3d (BF16).
 
-128×128×32 tile, 2×4 wave layout, software-pipelined double-buffered
-prologue/main-loop/epilogue, split-K, bias, stride/padding.
-
-Input/weight convention (public API):
-  x      : (N, C, D, H, W)  bf16  NCDHW
-  weight : (K, C, T, R, S)  bf16  KCTRS
-
-Internally the kernel works in NDHWC activation / K(TRS·C) weight layout
-(im2col-free per-thread gather into LDS).
+x: (N, C, D, H, W) bf16 NCDHW, weight: (K, C, T, R, S) bf16 KCTRS.
+Returns (N, K, Do, Ho, Wo) bf16. Supports stride, padding, bias, and split-K.
 """
 
 import functools
