@@ -15,12 +15,21 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from flydsl.runtime.device import get_rocm_arch
 from kernels.conv3d_implicit_8wave import conv3d_implicit_8wave
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
+_ARCH = get_rocm_arch()
+# mfma_f32_16x16x32_bf16 is only available on CDNA4 (gfx95x)
+_skip_non_cdna4 = pytest.mark.skipif(
+    not (isinstance(_ARCH, str) and _ARCH.startswith("gfx95")),
+    reason=f"conv3d 8-wave BF16 needs mfma_f32_16x16x32_bf16 (CDNA4 gfx95x), got {_ARCH}",
+)
+
 
 # (N, C, T, H, W, K), kernel 3x3x3. Covers stride/padding and tile-tail paths.
+@_skip_non_cdna4
 @pytest.mark.parametrize(
     "n,c,t,h,w,k,stride,padding",
     [
