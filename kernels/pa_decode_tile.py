@@ -95,6 +95,17 @@ def _load_i32(global_ptr, elem_offset_i32):
     return llvm.LoadOp(T.i32, ptr, alignment=4).result
 
 
+def _gload_i64x2(global_ptr, byte_offset_i32):
+    """Raw 128-bit (``dwordx4``) global load of 16 fp8 as an ``i64x2`` vector.
+
+    Loading K straight to registers with the widest transaction (matching the
+    production ``pa_decode_ps_kernel``'s ``_load_k_flat``) instead of through a
+    ``make_tiled_copy_A`` fragment, which the MFMA atom layout caps at 64-bit
+    (``buffer_load_dwordx2``)."""
+    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset_i32), elem_type=T.i8)
+    return llvm.LoadOp(T.i64x2, ptr, alignment=16).result
+
+
 MFMA_MNK = 16  # M = N = 16 for the MMA atom
 MFMA_K = 32  # fp8 MFMA contracts K = 32 per instruction (mfma_f32_16x16x32_fp8_fp8)
 WAVE = 64
@@ -253,7 +264,6 @@ def compile_pa_decode_tile(
             _view(byte_off, fx.Int32, fx.make_layout(words.shape[0], 1), 4).store(words)
 
         # whole-tile views (for tiled copies)
-        sQ_v = _view(arith.constant(sQ_off, type=T.i32), FP8, fx.make_layout((M, HEAD), (HEAD, 1)), 1)
         # sP holds the fp8 probabilities as [qhead, token] (PV A operand).  The QK
         # C-fragment is [token, qhead]; the frag→sP store uses the transposed view
         # sP_T (shape [token, qhead], strides (1, TILE_TOK)) so it lands as
@@ -268,7 +278,6 @@ def compile_pa_decode_tile(
         mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(MFMA_MNK, MFMA_MNK, MFMA_K, FP8))
         tiled_mma_qk = fx.make_tiled_mma(mma_atom, fx.make_layout((NWARP, 1, 1), (1, 0, 0)))
         tiled_mma_pv = fx.make_tiled_mma(mma_atom, fx.make_layout((1, NWARP, 1), (0, 1, 0)))
-        thr_mma_qk = tiled_mma_qk.thr_slice(tid)
 
         # ── Stage 0: stage this (seq, kv_head)'s GS query rows into LDS sQ.
         # Row tid (< GS) holds q-head kv_h*GS + tid; rows [GS, 16) are zero
@@ -300,12 +309,24 @@ def compile_pa_decode_tile(
                 _st1(sQscale_off, tid, ZERO_F)
         gpu.barrier()
 
-        # Q is the B operand now (D[token,qhead] = K·Qᵀ); replicated across warps.
-        copy_q = fx.make_copy_atom(fx.UniversalCopy64b(), FP8)
-        thr_copy_q = fx.make_tiled_copy_B(copy_q, tiled_mma_qk).get_slice(tid)
-        tmpl_Q = fx.make_rmem_tensor(fx.make_layout((M, HEAD), (HEAD, 1)), FP8)
-        frag_Q = thr_mma_qk.make_fragment_B(tmpl_Q)
-        fx.copy(copy_q, thr_copy_q.partition_S(sQ_v), thr_copy_q.retile(frag_Q), pred=None)
+        # Q is the B operand (D[token,qhead] = K·Qᵀ), read raw from sQ as fp8 i64
+        # operands for the raw-MFMA QK below (replicated across warps, constant
+        # across tiles → read once, held in registers).  Lane (lane16, rgroup)
+        # feeds MMA column n=lane16 (qhead) with the K=32 contraction quarter
+        # rgroup; QK sums over the full head_dim, so we are free to pick the
+        # head→k_step permutation that makes each lane's slice head[rgroup*32:+32]
+        # contiguous (one dwordx4 pair) as long as K uses the same mapping.
+        c16 = arith.constant(16, type=T.i32)
+        lane16 = lane - (lane // c16) * c16  # qhead / token index within the 16-atom
+        rgroup = lane // c16  # 0..3: which head-quarter (K=32 group) this lane feeds
+        q_ops = _view(
+            arith.constant(sQ_off, type=T.i32)
+            + lane16 * arith.constant(HEAD, type=T.i32)
+            + rgroup * arith.constant(32, type=T.i32),
+            fx.Int64,
+            fx.make_layout(4, 1),
+            8,
+        ).load()  # 4 fp8 i64 operands = head[rgroup*32 : +32] of qhead=lane16
 
         # ── init running softmax state (row-owner lanes 0..15) ──
         # The output accumulator O is register-resident (loop-carried), so only
@@ -325,14 +346,13 @@ def compile_pa_decode_tile(
         loop_start = fx.Index(arith.unwrap(part_start))
         loop_end = fx.Index(arith.unwrap(part_end))
 
-        key_buf = fx.rocdl.make_buffer_tensor(key_cache_ptr)
+        kg = _global_ptr(key_cache_ptr)  # raw addrspace(1) ptr for dwordx4 K loads
         val_buf = fx.rocdl.make_buffer_tensor(value_cache_ptr)
 
-        copy_kv = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), FP8)  # fp8 K/V global -> reg
+        copy_kv = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), FP8)  # fp8 V global -> reg
         copy_p = fx.make_copy_atom(fx.UniversalCopy64b(), FP8)  # fp8 P LDS -> reg
         copy_p8 = fx.make_copy_atom(fx.UniversalCopy8b(), FP8)  # fp8 P C-frag -> LDS
         copy_c = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-        tcopy_k = fx.make_tiled_copy_A(copy_kv, tiled_mma_qk)  # K(A): token-split across warps
         tcopy_p = fx.make_tiled_copy_A(copy_p, tiled_mma_pv)  # P(A): replicated across warps
         tcopy_v = fx.make_tiled_copy_B(copy_kv, tiled_mma_pv)  # V(B): head-dim-split across warps
         tcopy_p8 = fx.make_tiled_copy_C(copy_p8, tiled_mma_qk)  # fp8 P frag -> sP (transposed)
@@ -347,7 +367,6 @@ def compile_pa_decode_tile(
         # AGPR, VGPR peak low) — matching pa_decode_ps_kernel's TLOOP.
         TOK_CHUNK = NWARP * MFMA_MNK  # 64
         NCHUNK = TILE_TOK // TOK_CHUNK  # 4
-        tmpl_S_c = fx.make_rmem_tensor(fx.make_layout((TOK_CHUNK, M), (M, 1)), fx.Float32)
         # compile-time per-chunk token offsets (token = a*TOK_CHUNK + base + r)
         _ct = [
             Vec.from_elements([arith.constant(float(a * TOK_CHUNK + r), type=T.f32) for r in range_constexpr(4)])
@@ -371,42 +390,45 @@ def compile_pa_decode_tile(
             phys = fx.Int32(_load_i32(bt_gp, seq * max_blocks_per_seq + page))
             return phys, within // c_TILE_TOK, tok0
 
-        # ── cross-iteration K prefetch: NCHUNK persistent A sub-fragments ──
-        # frag_Ks[a] holds tile tt's a-th 64-token block during iteration tt; the
-        # prologue loads tile 0 and each iteration prefetches tt+1's blocks right
-        # after the QK gemms consume them, so K's DMA overlaps softmax + PV.
+        # ── raw dwordx4 K load (A operand) ──
+        # Lane (lane16, rgroup) feeds A row m=lane16 = token (a*64 + warp*16 +
+        # lane16) with head[rgroup*32 : +32] — the same contiguous slice / head→
+        # k_step permutation as q_ops, loaded straight to registers as two i64x2
+        # (128-bit) transactions instead of the make_tiled_copy_A fragment the
+        # MFMA atom layout caps at 64-bit.
+        c32 = arith.constant(32, type=T.i32)
+        cHEAD = arith.constant(HEAD, type=T.i32)
+
+        def _k_ops(phys, within_tile, a):
+            token = within_tile * c_TILE_TOK + arith.constant(a * TOK_CHUNK, type=T.i32) + warp * c16 + lane16
+            base = ((phys * n_kv + kv_h) * block_size + token) * cHEAD + rgroup * c32
+            w0 = fx.Vector(_gload_i64x2(kg, base))  # head[rgroup*32 : +16] -> k_step 0,1
+            w1 = fx.Vector(_gload_i64x2(kg, base + arith.constant(16, type=T.i32)))  # +16:+32 -> k_step 2,3
+            return [w0[0], w0[1], w1[0], w1[1]]
+
+        # All NCHUNK chunks' K as one flat list of NCHUNK*4 i64 operands — carried
+        # through the scf.for iter_args so tile tt+1's K prefetch overlaps tt's
+        # softmax + PV (cross-iteration pipelining, like pa_decode_ps_kernel).
+        NKOPS = NCHUNK * 4
+
+        def _k_ops_flat(phys, within_tile):
+            flat = []
+            for a in range_constexpr(NCHUNK):
+                flat.extend(_k_ops(phys, within_tile, a))
+            return flat
+
+        # ── prologue: prefetch the first tile's K into registers ──
         num_tiles_m1 = num_tiles - arith.constant(1, type=T.i32)
-
-        def _load_K_block(frag, tile_phys, tile_within, a, thr_copy_k):
-            kp = fx.slice(key_buf, (tile_phys, kv_h, None, None))  # [block_size, HEAD]
-            bK_t = fx.slice(fx.zipped_divide(kp, (TILE_TOK, HEAD)), (None, tile_within))  # [256, HEAD]
-            bK_a = fx.slice(fx.zipped_divide(bK_t, (TOK_CHUNK, HEAD)), (None, a))  # [64, HEAD]
-            fx.copy(copy_kv, thr_copy_k.partition_S(bK_a), thr_copy_k.retile(frag), pred=None)
-
         start_safe = arith.select(part_start < num_tiles, part_start, num_tiles_m1)
-        phys0, wt0, _ = _tile_coords(start_safe)
-        _thr_ck0 = tcopy_k.get_slice(tid)
-        _thr_mqk0 = tiled_mma_qk.get_slice(tid)
-        frag_Ks = []
-        for a in range_constexpr(NCHUNK):
-            bK0 = fx.slice(
-                fx.zipped_divide(
-                    fx.slice(
-                        fx.zipped_divide(fx.slice(key_buf, (phys0, kv_h, None, None)), (TILE_TOK, HEAD)), (None, wt0)
-                    ),
-                    (TOK_CHUNK, HEAD),
-                ),
-                (None, a),
-            )
-            fK = _thr_mqk0.make_fragment_A(bK0)
-            _load_K_block(fK, phys0, wt0, a, _thr_ck0)
-            frag_Ks.append(fK)
+        p0_phys, p0_wt, _ = _tile_coords(start_safe)
+        k_pf0 = _k_ops_flat(p0_phys, p0_wt)
 
         # O is carried in registers across tiles (one VHE_CHUNKS-list of PV
         # C-fragment vectors), rescaled by the softmax correction each tile.
         o_zero = Vec.filled(OP_ELEMS, 0.0, fx.Float32)
-        for tt, ostate in range(loop_start, loop_end, arith.index(1), init=[o_zero, o_zero]):
+        for tt, ostate in range(loop_start, loop_end, arith.index(1), init=[o_zero, o_zero, *k_pf0]):
             o_acc = [ostate[0], ostate[1]]
+            k_cur = [ostate[2 + i] for i in range_constexpr(NKOPS)]  # this tile's prefetched K
             tt_i32 = fx.Int32(arith.index_cast(T.i32, tt))
             phys, within_tile, tok0 = _tile_coords(tt_i32)
 
@@ -415,14 +437,11 @@ def compile_pa_decode_tile(
             # base when a value is captured across the scf.for region boundary.
             thr_mma_qk_l = tiled_mma_qk.get_slice(tid)
             thr_mma_pv_l = tiled_mma_pv.get_slice(tid)
-            thr_copy_k = tcopy_k.get_slice(tid)
             thr_copy_p = tcopy_p.get_slice(tid)
             thr_copy_v = tcopy_v.get_slice(tid)
             thr_copy_p8 = tcopy_p8.get_slice(tid)
 
-            # V page (loaded per-chunk in the PV loop, NOT hoisted, to spare VGPR for
-            # the K prefetch — pa_decode_ps_kernel likewise prefetches K and loads V
-            # in place).
+            # V page (hoisted below so its DMA hides behind QK + softmax).
             v_page = fx.slice(val_buf, (phys, kv_h, None, None))  # [HEAD, block_size]
             v_hsplit = fx.zipped_divide(v_page, (VHE_SIZE, TILE_TOK))  # [(VHE,TILE), (HEAD/VHE, blk/TILE)]
 
@@ -435,21 +454,24 @@ def compile_pa_decode_tile(
                 fx.copy(copy_kv, thr_copy_v.partition_S(bV), thr_copy_v.retile(fV), pred=None)
                 frag_Vs.append(fV)
 
-            # ---- QK in TLOOP chunks: NCHUNK small fx.gemm -> f32x4/lane (frag_Ks prefetched) ----
+            # ---- QK in TLOOP chunks: NCHUNK raw MFMAs -> f32x4/lane ----
+            # Each chunk accumulates the 4 head-quarter k_steps (this tile's
+            # prefetched k_cur) into one f32x4 C-fragment (D[token, qhead]); the raw
+            # dwordx4 K feeds the same MFMA the old fx.gemm wrapped, so the C layout
+            # — and thus the softmax / P-pack / PV below — is unchanged.
             frag_Ss = []
             for a in range_constexpr(NCHUNK):
-                frag_S_a = thr_mma_qk_l.make_fragment_C(tmpl_S_c)
-                frag_S_a.fill(0.0)
-                fx.gemm(tiled_mma_qk, frag_S_a, frag_Ks[a], frag_Q, frag_S_a)
-                frag_Ss.append(frag_S_a)
+                acc = arith.constant_vector(0.0, T.f32x4)
+                for s in range_constexpr(4):
+                    acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [k_cur[a * 4 + s], q_ops[s], acc, 0, 0, 0])
+                frag_Ss.append(fx.Vector(acc))
 
-            # prefetch next tile's K blocks into frag_Ks (the gemms above consumed them);
-            # overlaps the softmax + PV below, consumed by the next iteration's QK.
+            # prefetch next tile's K (the MFMAs above consumed k_cur); the loads
+            # overlap the softmax + PV below and are yielded as the next iter's k_cur.
             tt1 = tt_i32 + arith.constant(1, type=T.i32)
             tt1c = arith.select(tt1 < part_end, tt1, num_tiles_m1)
-            phys1, wt1, _ = _tile_coords(tt1c)
-            for a in range_constexpr(NCHUNK):
-                _load_K_block(frag_Ks[a], phys1, wt1, a, thr_copy_k)
+            p1_phys, p1_wt, _ = _tile_coords(tt1c)
+            k_next = _k_ops_flat(p1_phys, p1_wt)
 
             # ---- register-resident softmax over M = token, 4 scores at a time ----
             # Each lane owns ONE qhead (= lane%16); reduce its tokens with a register
@@ -467,7 +489,7 @@ def compile_pa_decode_tile(
             neg4 = Vec.filled(4, float("-inf"), fx.Float32)
 
             def _masked_chunk(a):  # 4 masked scores for the a-th 64-token block
-                return (_ct[a] < thr).select(frag_Ss[a].load(), neg4)
+                return (_ct[a] < thr).select(frag_Ss[a], neg4)
 
             # pass 1: per-warp max for this qhead
             pm = fx.Float32(float("-inf"))
@@ -528,7 +550,7 @@ def compile_pa_decode_tile(
                 o_acc[vh] = Vec.from_elements(
                     [oo[v] * corr_s[v] + op[v] for v in range_constexpr(OP_ELEMS)], dtype=fx.Float32
                 )
-            results = yield [o_acc[0], o_acc[1]]
+            results = yield [o_acc[0], o_acc[1], *k_next]
         o_final = results
 
         # ── stage the register-resident O accumulator to sO (row-major) so the
