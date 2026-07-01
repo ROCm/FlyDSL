@@ -70,41 +70,11 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr
+from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.vector import ReductionOp
-
-
-def _global_ptr(tensor):
-    """Aligned addrspace(1) pointer for raw scalar loads from a global tensor."""
-    from flydsl._mlir.dialects import fly as _fly
-
-    raw = tensor.ir_value() if hasattr(tensor, "ir_value") and not isinstance(tensor, ir.Value) else tensor
-    return _fly.extract_aligned_pointer_as_index(ir.Type.parse("!llvm.ptr<1>"), raw)
-
-
-def _load_i32(global_ptr, elem_offset_i32):
-    """Load one *signless* i32 element. Plain tensor indexing of an int32 memref
-    yields si32, which neither composes with signless arith ops nor lowers
-    through llvm.load — so int metadata is read with this raw load instead."""
-    byte_off = fx.Int64(elem_offset_i32) * fx.Int64(4)
-    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=byte_off, elem_type=T.i8)
-    return llvm.LoadOp(T.i32, ptr, alignment=4).result
-
-
-def _gload_i64x2(global_ptr, byte_offset_i32):
-    """Raw 128-bit (``dwordx4``) global load of 16 fp8 as an ``i64x2`` vector.
-
-    Loading K straight to registers with the widest transaction (matching the
-    production ``pa_decode_ps_kernel``'s ``_load_k_flat``) instead of through a
-    ``make_tiled_copy_A`` fragment, which the MFMA atom layout caps at 64-bit
-    (``buffer_load_dwordx2``)."""
-    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset_i32), elem_type=T.i8)
-    return llvm.LoadOp(T.i64x2, ptr, alignment=16).result
-
+from kernels.utils import extract_global_ptr, global_load_i32, global_load_i64x2
 
 MFMA_MNK = 16  # M = N = 16 for the MMA atom
 MFMA_K = 32  # fp8 MFMA contracts K = 32 per instruction (mfma_f32_16x16x32_fp8_fp8)
@@ -199,8 +169,8 @@ def compile_pa_decode_tile(
         part = fx.Int32(gpu.block_id("z"))  # context partition handled by this CTA
         n_kv = num_q_heads // arith.constant(GS, type=T.i32)  # num_kv_heads
 
-        context_len = fx.Int32(_load_i32(_global_ptr(context_lengths_ptr), seq))
-        bt_gp = _global_ptr(block_tables_ptr)
+        context_len = fx.Int32(global_load_i32(extract_global_ptr(context_lengths_ptr), seq))
+        bt_gp = extract_global_ptr(block_tables_ptr)
 
         # ── per-CTA scalar constants ──
         # softmax_scale and key_scale fold into the score tile; log2e folds into
@@ -346,7 +316,7 @@ def compile_pa_decode_tile(
         loop_start = fx.Index(arith.unwrap(part_start))
         loop_end = fx.Index(arith.unwrap(part_end))
 
-        kg = _global_ptr(key_cache_ptr)  # raw addrspace(1) ptr for dwordx4 K loads
+        kg = extract_global_ptr(key_cache_ptr)  # raw addrspace(1) ptr for dwordx4 K loads
         val_buf = fx.rocdl.make_buffer_tensor(value_cache_ptr)
 
         copy_kv = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), FP8)  # fp8 V global -> reg
@@ -387,7 +357,7 @@ def compile_pa_decode_tile(
             tok0 = tt_i32 * c_TILE_TOK
             page = tok0 // block_size
             within = tok0 - page * block_size
-            phys = fx.Int32(_load_i32(bt_gp, seq * max_blocks_per_seq + page))
+            phys = fx.Int32(global_load_i32(bt_gp, seq * max_blocks_per_seq + page))
             return phys, within // c_TILE_TOK, tok0
 
         # ── raw dwordx4 K load (A operand) ──
@@ -402,8 +372,8 @@ def compile_pa_decode_tile(
         def _k_ops(phys, within_tile, a):
             token = within_tile * c_TILE_TOK + arith.constant(a * TOK_CHUNK, type=T.i32) + warp * c16 + lane16
             base = ((phys * n_kv + kv_h) * block_size + token) * cHEAD + rgroup * c32
-            w0 = fx.Vector(_gload_i64x2(kg, base))  # head[rgroup*32 : +16] -> k_step 0,1
-            w1 = fx.Vector(_gload_i64x2(kg, base + arith.constant(16, type=T.i32)))  # +16:+32 -> k_step 2,3
+            w0 = fx.Vector(global_load_i64x2(kg, base))  # head[rgroup*32 : +16] -> k_step 0,1
+            w1 = fx.Vector(global_load_i64x2(kg, base + arith.constant(16, type=T.i32)))  # +16:+32 -> k_step 2,3
             return [w0[0], w0[1], w1[0], w1[1]]
 
         # All NCHUNK chunks' K as one flat list of NCHUNK*4 i64 operands — carried
