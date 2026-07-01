@@ -42,6 +42,7 @@ _ods_mfma_f32_16x16x16f16 = mfma_f32_16x16x16f16
 _ods_mfma_f32_16x16x16bf16_1k = globals().get("mfma_f32_16x16x16bf16_1k", None)
 _ods_mfma_f32_16x16x32_fp8_fp8 = mfma_f32_16x16x32_fp8_fp8
 _ods_mfma_i32_16x16x32_i8 = mfma_i32_16x16x32_i8
+_ods_mfma_i32_16x16x64_i8 = globals().get("mfma_i32_16x16x64_i8", None)
 _ods_mfma_f32_16x16x32_f16 = globals().get("mfma_f32_16x16x32_f16", None)
 _ods_mfma_f32_16x16x32_bf16 = globals().get("mfma_f32_16x16x32_bf16", None)
 _ods_mfma_scale_f32_16x16x128_f8f6f4 = globals().get("mfma_scale_f32_16x16x128_f8f6f4", None) or globals().get(
@@ -154,6 +155,14 @@ def mfma_f32_16x16x32_fp8_fp8(result_type, operands):
 def mfma_i32_16x16x32_i8(result_type, operands):
     a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
     return _ods_mfma_i32_16x16x32_i8(result_type, a, b, c, cbsz, abid, blgp).result
+
+
+@dsl_loc_tracing
+def mfma_i32_16x16x64_i8(result_type, operands):
+    if _ods_mfma_i32_16x16x64_i8 is None:
+        raise AttributeError("ROCDL op not found: mfma_i32_16x16x64_i8 (gfx950+)")
+    a, b, c, cbsz, abid, blgp = _split_mfma_operands(operands)
+    return _ods_mfma_i32_16x16x64_i8(result_type, a, b, c, cbsz, abid, blgp).result
 
 
 @dsl_loc_tracing

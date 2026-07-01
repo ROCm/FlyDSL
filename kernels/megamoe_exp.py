@@ -1,1 +1,0 @@
-../tmp_test/megamoe_exp.py

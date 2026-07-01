@@ -17,6 +17,7 @@ import argparse
 import logging
 import os
 import sys
+from typing import Tuple
 
 import pytest
 import torch
@@ -32,8 +33,8 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.moe_gemm_2stage import compile_moe_reduction  # noqa: E402
-from tests.test_common import run_perftest, verify_output  # noqa: E402
+from kernels.moe_gemm_2stage import compile_moe_reduction
+from tests.test_common import verify_output, run_perftest
 
 logging.basicConfig(level=logging.INFO)
 
@@ -61,7 +62,9 @@ def run_reduce_test(
         f"use_mask={use_mask}, dtype={dtype_str} ==="
     )
 
-    reduce_exe = compile_moe_reduction(topk=topk, model_dim=model_dim, dtype_str=dtype_str, use_mask=use_mask)
+    reduce_exe = compile_moe_reduction(
+        topk=topk, model_dim=model_dim, dtype_str=dtype_str, use_mask=use_mask
+    )
 
     X = torch.randn(tokens, topk, model_dim, device=device, dtype=dtype)
     Y = torch.empty(tokens, model_dim, device=device, dtype=dtype)
@@ -77,12 +80,8 @@ def run_reduce_test(
         reduce_exe(x, y, mask, tokens, stream)
 
     _, us = run_perftest(
-        launch,
-        Y,
-        X,
-        valid_mask,
-        num_iters=num_iters,
-        num_warmup=num_warmup,
+        launch, Y, X, valid_mask,
+        num_iters=num_iters, num_warmup=num_warmup,
     )
     torch.cuda.synchronize()
 
@@ -101,17 +100,13 @@ def run_reduce_test(
     print(f"[FlyDSL reduce] {us:.1f} us, Bandwidth: {bw_gb_s:.2f} GB/s")
 
     if compare_torch:
-
         def launch_torch(y, x_ref):
             torch.sum(x_ref, dim=1, out=y)
 
         Y_torch = torch.empty_like(Y)
         _, us_torch = run_perftest(
-            launch_torch,
-            Y_torch,
-            X_ref,
-            num_iters=num_iters,
-            num_warmup=num_warmup,
+            launch_torch, Y_torch, X_ref,
+            num_iters=num_iters, num_warmup=num_warmup,
         )
         torch.cuda.synchronize()
         bw_torch = bytes_moved / 1e9 / (us_torch / 1e6)
