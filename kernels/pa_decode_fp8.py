@@ -2105,9 +2105,8 @@ def pa_decode_ps_launch(
 
     from kernels.pa_metadata import pa_ps_reduce
 
-    # Deterministic FlyDSL reduce replaces aiter pa_reduce_v1/mla_reduce_v1, whose
-    # cross-workgroup combine has a concurrency race (non-deterministic output on
-    # identical partials → the flaky test_pa NaN). Same partial layout / reduce maps.
+    # Deterministic FlyDSL reduce replaces the racy aiter pa_reduce_v1/mla_reduce_v1
+    # (root cause of the flaky test_pa NaN). Same partial layout / reduce maps.
     pa_ps_reduce(
         partial_output=partial_output[query_length:],
         partial_lse=partial_lse[query_length:],
@@ -2118,6 +2117,7 @@ def pa_decode_ps_launch(
         final_output=output,
         num_query_heads=num_query_heads,
         head_size=int(query.shape[-1]),
+        stream=s,
     )
 
     return "ps_split_reduce"

@@ -2118,35 +2118,22 @@ def compile_pa_decode_metadata(
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────
-# Deterministic split-partition reduce (drop-in replacement for aiter
-# ``pa_reduce_v1`` / ``mla_reduce_v1`` on the FlyDSL PS decode path).
+# Deterministic split-partition reduce; drop-in replacement for the racy aiter
+# ``pa_reduce_v1`` / ``mla_reduce_v1`` on the PS decode path (root cause of the
+# flaky ``test_pa`` NaN). Each output element is combined by exactly one thread,
+# serially via online softmax (out = Σ_s w_s·o_s / Σ_s w_s, w_s = exp(lse_s − max)).
+# The per-split LSE is a per-(row, head) scalar shared by all head_size lanes, so
+# the combine is thread-independent — no atomics/cross-thread reduction → bit-exact.
 #
-# ``mla_reduce_v1`` is a HIP kernel whose cross-workgroup combine has a
-# concurrency race: called twice on bit-identical partials it returns different
-# output ~4% of the time, occasionally producing ~10x errors and rarely garbage
-# (the flaky ``test_pa`` NaN). This kernel removes the race: each output element
-# is produced by exactly one thread that combines all of its group's splits
-# serially via online softmax. Because the per-split LSE is a per-(row, head)
-# scalar shared by every head_size lane, the combine is fully thread-independent
-# — no atomics, no cross-thread reduction → bit-deterministic.
-#
-# Partial layout (already produced by ``compile_pa_decode_metadata``; the caller
-# passes the ``[query_length:]`` slices, mirroring the old pa_reduce_v1 call):
-#   partial_output f32 : rows of [1, num_query_heads, head_size], row stride
-#                        ``stride_po_row = num_query_heads * head_size``; each
-#                        split partial is already normalized by its local denom.
-#   partial_lse    f32 : rows of [1, num_query_heads, 1], row stride
-#                        ``stride_pl_row = num_query_heads``; value =
-#                        running_max + log(running_sum).
-# Reduce maps (from get_pa_metadata / get_pa_metadata_v1):
-#   reduce_indptr      [batch+1] : group g splits = slots [indptr[g], indptr[g+1]).
-#   reduce_final_map   [batch,2] : group g → final output row range (qo_start, qo_end).
-#   reduce_partial_map [..]      : slot → partial row base (in the sliced buffer).
-# Combine: out = Σ_s w_s·o_s / Σ_s w_s,  w_s = exp(lse_s − max_s lse_s).
-# Direct (non-split) outputs are already final; their reduce groups are empty
-# (indptr delta 0) and are skipped, leaving those rows untouched.
-# ──────────────────────────────────────────────────────────────────────────
+# Inputs (from compile_pa_decode_metadata / get_pa_metadata; caller passes the
+# ``[query_length:]`` slices, mirroring the old pa_reduce_v1 call):
+#   partial_output f32 : row [num_query_heads, head_size], stride stride_po_row;
+#                        each split already normalized by its local denom.
+#   partial_lse    f32 : row [num_query_heads], stride stride_pl_row; = max + log(sum).
+#   reduce_indptr [batch+1]: group g splits = slots [indptr[g], indptr[g+1]).
+#   reduce_final_map [batch,2]: group g → final output row range.
+#   reduce_partial_map: slot → partial row base (in the sliced buffer).
+# Direct (non-split) outputs have empty groups (indptr delta 0) and are skipped.
 @functools.lru_cache(maxsize=64)
 def compile_pa_ps_reduce(
     *,
