@@ -587,29 +587,6 @@ typename LayoutBuilder<Layout>::IntTuple layoutCosize(LayoutBuilder<Layout> &bui
 
 namespace detail {
 
-// Coalesce a (shape, stride) into an equivalent flattened, mode-merged form.
-//
-// keepBoundary selects between two variants that differ ONLY in how a trailing
-// size-1 mode is handled:
-//
-//   keepBoundary == false (default): a trailing size-1 mode is dropped/collapsed
-//   to the canonical 1:0. The result reproduces the layout function only WITHIN
-//   the original domain [0, size). This is the form every ordinary caller wants,
-//   and it preserves the invariant that size-1 modes carry stride 0.
-//
-//   keepBoundary == true: a trailing size-1 mode is kept as a size-2 sentinel
-//   mode (retaining its stride) instead of being dropped. This deliberately
-//   extends the layout so it also maps coordinates PAST the original size
-//   correctly ("run off the end"), rather than only within [0, size). That
-//   extended-domain behavior is required by composition when the right operand's
-//   domain is larger than this layout's size: the extra factor must land on the
-//   sentinel mode instead of being mistaken for contiguous stride-1 storage.
-//
-// keepBoundary is an internal detail used only by composition (via
-// coalesceXWithProfile); it must NOT be enabled for general coalescing, since
-// callers that assume a size-1 mode outside the domain would then observe a
-// different index. Leaving it false keeps every other caller's semantics and the
-// size-1/stride-0 canonicalization exactly as before.
 template <class IntTuple>
 std::pair<IntTuple, IntTuple> coalesceImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple shape,
                                            IntTuple stride, bool keepBoundary = false) {
@@ -689,10 +666,6 @@ std::pair<IntTuple, IntTuple> coalesceImpl(const IntTupleBuilder<IntTuple> &buil
   return {builder.makeTuple(resultShape), builder.makeTuple(resultStride)};
 }
 
-// Boundary-preserving coalesce applied at the terminals described by `profile`.
-// At each leaf of `profile` the layout is coalesced with keepBoundary=true so the
-// extended-domain mapping survives; non-leaf profile modes recurse structurally.
-// Used by composition to prepare its left operand.
 template <class IntTuple>
 std::pair<IntTuple, IntTuple> coalesceXWithProfile(const IntTupleBuilder<IntTuple> &builder,
                                                    IntTuple shape, IntTuple stride,
