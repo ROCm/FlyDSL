@@ -67,6 +67,7 @@ assert LDG_A_COUNT == 1 and LDG_B_COUNT == 1
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+
 def _run_compiled(exe, *args):
     cf = getattr(exe, "_cf", None)
     if cf is None:
@@ -199,6 +200,7 @@ def _prep_weight(w, k, r, s, c):
 # ---------------------------------------------------------------------------
 # Core kernel
 # ---------------------------------------------------------------------------
+
 
 @functools.lru_cache(maxsize=64)
 def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=False, splitk=1):
@@ -557,6 +559,7 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
 # Split-K heuristic
 # ---------------------------------------------------------------------------
 
+
 def _choose_splitk(npq, crs, k, device):
     forced = os.environ.get("CONV2D_8W_SPLITK")
     if forced is not None:
@@ -565,7 +568,7 @@ def _choose_splitk(npq, crs, k, device):
     grid_n = (k + TILE_N - 1) // TILE_N
     base = grid_m * grid_n
     k_tiles = crs // TILE_K
-    if npq < 4096 or k_tiles < 16:
+    if npq < 16384 or k_tiles < 16:
         return 1
     if k % TILE_N != 0 or npq % TILE_M != 0:
         return 1
@@ -573,10 +576,7 @@ def _choose_splitk(npq, crs, k, device):
         num_cu = torch.cuda.get_device_properties(device).multi_processor_count
     except Exception:
         num_cu = 256
-    # Only split when the grid is severely block-starved (< half the CUs).
-    # Atomic fadd overhead makes split-K costly; prefer it only when the base
-    # grid would otherwise leave most CUs idle.
-    if base >= num_cu // 2:
+    if base >= num_cu // 4:
         return 1
     sk = min(4, max(1, num_cu // base), k_tiles)
     while sk > 1 and k_tiles % sk != 0:
@@ -587,6 +587,7 @@ def _choose_splitk(npq, crs, k, device):
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def conv2d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None):
     """Implicit-GEMM conv2d (8-wave bf16).
@@ -635,11 +636,7 @@ def conv2d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None
         y = torch.empty((npq, k), device=x.device, dtype=torch.bfloat16)
 
     has_bias = bias is not None
-    bias_arg = (
-        bias.to(torch.float32).contiguous()
-        if has_bias
-        else torch.empty(1, device=x.device, dtype=torch.float32)
-    )
+    bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
     exe = compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias, sk)
     _run_compiled(exe, y, x_nhwc, w_packed, bias_arg, launch_stream)
