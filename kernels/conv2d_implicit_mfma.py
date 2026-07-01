@@ -8,7 +8,6 @@ Returns (N, K, Ho, Wo) bf16. Supports stride, padding, bias, and split-K.
 """
 
 import functools
-import os
 import weakref
 
 import torch
@@ -554,9 +553,6 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
 
 
 def _choose_splitk(npq, crs, k, device):
-    forced = os.environ.get("CONV2D_8W_SPLITK")
-    if forced is not None:
-        return max(1, int(forced))
     grid_m = (npq + TILE_M - 1) // TILE_M
     grid_n = (k + TILE_N - 1) // TILE_N
     base = grid_m * grid_n
