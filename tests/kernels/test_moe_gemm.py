@@ -1801,10 +1801,8 @@ def test_moe_gemm_2stage(
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
         # The layout-API MXFP4 pipe (moe_dispatcher) supports the BM32 atomic (default) and
-        # reduce (non-atomic accumulate + EP valid_mask) opus-sort paths; graph capture is
-        # out of scope here.
-        if bool(test_graph):
-            pytest.skip(f"{in_dtype} layout-API pipe: graph capture not covered")
+        # reduce (non-atomic accumulate + EP valid_mask) opus-sort paths, plus HIP/CUDA graph
+        # capture+replay via run_mxfp4_moe_2stage(test_graph=True) (capture-safe E-based grid).
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1849,6 +1847,7 @@ def test_moe_gemm_2stage(
             seed=seed,
             use_reduce=bool(use_reduce),
             use_valid_mask=bool(use_valid_mask),
+            test_graph=bool(test_graph),
         )
         return
 
@@ -2121,6 +2120,7 @@ def run_mxfp4_moe_2stage(
     swiglu_limit=0.0,
     use_reduce=False,
     use_valid_mask=False,
+    test_graph=False,
 ):
     """Run the layout-API MXFP4 MoE (opus sort -> gemm1 -> gemm2) and verify against an
     independent dequant-MoE reference. Returns the bf16 output.
@@ -2131,7 +2131,15 @@ def run_mxfp4_moe_2stage(
     ``use_reduce`` selects the gemm2 reduce (non-atomic) epilog: gemm2 writes each (token,topk)
     slot to a [tokens*topk, H] intermediate, then this driver reduces over topk (applying the EP
     valid_mask when ``use_valid_mask``), mirroring main's accumulate=False path + get_topk_valid_mask.
-    ``use_valid_mask`` is only meaningful in reduce mode."""
+    ``use_valid_mask`` is only meaningful in reduce mode.
+
+    ``test_graph`` additionally captures the gemm1+gemm2 launches into a HIP/CUDA graph and
+    replays it (correctness + timing). The captured launches use the capture-safe worst-case
+    E-based grid (``n_sorted_padded=None``): the grid does not depend on the host-read padded
+    token count, so no host read / sync occurs during capture and a replay after an input change
+    stays correct (the kernels re-derive ``total_m_blocks`` from ``cumsum[0]`` on-device and
+    over-launched blocks early-exit). The eager fast path keeps the M2 bounded grid
+    (``n_sorted_padded=n``)."""
     from tests.kernels.utils import fp4_utils
 
     device = x_fp32.device
@@ -2241,14 +2249,18 @@ def run_mxfp4_moe_2stage(
     mxfp4_moe_gemm2(**_g2_kwargs)
     torch.cuda.synchronize()
 
-    if use_reduce:
+    def _reduce_host(g2_out):
         # host reduce over topk (main _MoeGemm2ReduceWrapper + get_topk_valid_mask semantics):
         # X[t, k, :] masked by valid_mask[t, k] (EP mask; expert_mask=None -> all ones), then summed.
-        X = gemm2_out.view(tokens, TOPK, H)
+        # This host reshape+sum is a host prologue/epilogue: it is NOT captured in the device graph.
+        X = g2_out.view(tokens, TOPK, H)
         if use_valid_mask:
             valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).to(device)
             X = X * valid_mask.view(tokens, TOPK, 1).to(dtype=X.dtype)
-        out = torch.sum(X.to(torch.float32), dim=1).to(torch.bfloat16)
+        return torch.sum(X.to(torch.float32), dim=1).to(torch.bfloat16)
+
+    if use_reduce:
+        out = _reduce_host(gemm2_out)
     else:
         out = gemm2_out
 
@@ -2307,6 +2319,107 @@ def run_mxfp4_moe_2stage(
     assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
     assert cos > thr, f"{in_dtype} cos={cos:.4f} <= {thr}"
 
+    # ---- HIP/CUDA graph capture + replay correctness (test_graph) ----
+    # Capture-safe launch: the gemm1/gemm2 grid is the worst-case E-based bound
+    # (n_sorted_padded=None) so it does NOT depend on the host-read padded token count -> no host
+    # read / sync inside capture, and a replay after an input change stays correct (kernels
+    # re-derive total_m_blocks from cumsum[0] on-device; over-launched blocks early-exit). The
+    # reduce host reshape+sum stays OUTSIDE the graph (host epilogue).
+    if test_graph:
+        _g1_graph = dict(_g1_kwargs)
+        _g1_graph["n_sorted_padded"] = None  # E-based grid, capture-safe
+        _g2_graph = dict(_g2_kwargs)
+        _g2_graph["n_sorted_padded"] = None
+
+        def _pipe_graph():
+            mxfp4_moe_gemm1(**_g1_graph)
+            mxfp4_moe_gemm2(**_g2_graph)
+
+        # snapshot the captured gemm1 A-inputs so the perf pass below runs on the original input.
+        aq_orig = aq.clone()
+        assh_orig = assh.clone()
+        hidden_orig = hidden.clone()
+
+        # Capture into a graph after a warmup (side-stream), then replay.
+        cap_stream = torch.cuda.Stream()
+        cap_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(cap_stream):
+            _pipe_graph()
+        torch.cuda.current_stream().wait_stream(cap_stream)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            _pipe_graph()
+
+        def _replay_out():
+            isq.zero_()
+            gemm2_out.zero_()
+            graph.replay()
+            torch.cuda.synchronize()
+            return _reduce_host(gemm2_out) if use_reduce else gemm2_out
+
+        out_g = _replay_out()
+        cos_g = torch.nn.functional.cosine_similarity(ref.reshape(-1), out_g.float().reshape(-1), dim=0).item()
+        logging.info(
+            "[mxfp4 moe %s %s graph replay] cos=%.4f (reduce=%s mask=%s)",
+            in_dtype,
+            "il" if interleave else "sep",
+            cos_g,
+            use_reduce,
+            use_valid_mask,
+        )
+        assert verify_output(out_g.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+        assert cos_g > thr, f"{in_dtype} graph cos={cos_g:.4f} <= {thr}"
+
+        # Replay reused across an input change: mutate the captured gemm1 A-input in place (new
+        # tokens, same routing/sort buffers), recompute the reference, replay the SAME graph, and
+        # verify the new output tracks the new input (proves capture is reused, not stale-baked).
+        x2_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * float(x_fp32.std())
+        hidden2 = x2_fp32.to(torch.bfloat16)
+        if is_f8:
+            aq2, asc2 = _per_1x32_mxfp8_quant(hidden2)
+            aq2 = aq2.view(torch.uint8).view(tokens, H).contiguous()
+        else:
+            aq2, asc2 = _per_1x32_fp4_quant(hidden2)
+            aq2 = aq2.view(torch.uint8).view(tokens, H // 2).contiguous()
+        asc2 = asc2.view(torch.uint8).view(tokens, H // 32).contiguous()
+        assh2 = _mxfp4_a_scale_sorted_shuffled(asc2, sti, cumsum, max_sorted, H, BM=BM)
+        aq.copy_(aq2)
+        assh.copy_(assh2)
+        hidden.copy_(hidden2)
+        out_g2 = _replay_out()
+
+        # reference for the mutated input (same routing/experts/weights, new A).
+        if is_f8:
+            A2 = fp4_utils.fp8_e4m3_to_f32(aq2.view(torch.float8_e4m3fn)).view(tokens, H)
+        else:
+            A2 = fp4_utils.mxfp4_to_f32(aq2.view(torch.uint8)).view(tokens, H)
+        A2sc = fp4_utils.e8m0_to_f32(asc2.view(torch.uint8))
+        A2 = (A2.view(tokens, H // 32, 32) * A2sc.unsqueeze(-1)).view(tokens, H)
+        ref2 = torch.zeros((tokens, H), dtype=torch.float32, device=device)
+        for r in range(n):
+            tok = int(sti_c[r].item()) & 0x00FFFFFF
+            if tok >= tokens:
+                continue
+            e = int(sei_c[r // BM].item())
+            gate = A2[tok] @ W1[e, :INTER].T
+            up = A2[tok] @ W1[e, INTER : 2 * INTER].T
+            inter_r = _act(gate, up)
+            ref2[tok] += (inter_r @ W2[e].T) * float(swt_c[r].item())
+        cos_g2 = torch.nn.functional.cosine_similarity(ref2.reshape(-1), out_g2.float().reshape(-1), dim=0).item()
+        logging.info(
+            "[mxfp4 moe %s %s graph replay-after-input-change] cos=%.4f",
+            in_dtype,
+            "il" if interleave else "sep",
+            cos_g2,
+        )
+        assert verify_output(out_g2.to(torch.float32), ref2, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+        assert cos_g2 > thr, f"{in_dtype} graph(after input change) cos={cos_g2:.4f} <= {thr}"
+        # restore the captured buffers to the original input for the perf pass below.
+        aq.copy_(aq_orig)
+        assh.copy_(assh_orig)
+        hidden.copy_(hidden_orig)
+
     # Perf measurement for the layout-API MXFP4 pipe. The fused pipe bypasses
     # run_moe_stage1 / run_moe_stage2, so it must emit the standard
     # "FlyDSL MoE stage1[...]" / "FlyDSL MoE stage2 [...]" lines itself so that
@@ -2316,8 +2429,11 @@ def run_mxfp4_moe_2stage(
     # for both the standard lines and the optional MXFP4_BENCH detail line.
     _bi = int(os.environ.get("MXFP4_BENCH_ITERS", "20"))
     _bw = int(os.environ.get("MXFP4_BENCH_WARMUP", "5"))
-    _, us1 = run_perftest(lambda: mxfp4_moe_gemm1(**_g1_kwargs), num_iters=_bi, num_warmup=_bw)
-    _, us2 = run_perftest(lambda: mxfp4_moe_gemm2(**_g2_kwargs), num_iters=_bi, num_warmup=_bw)
+    # Eager perf: M2 bounded grid (n_sorted_padded=n). Graph perf: capture-safe E-based grid.
+    _p1_kwargs = _g1_graph if test_graph else _g1_kwargs
+    _p2_kwargs = _g2_graph if test_graph else _g2_kwargs
+    _, us1 = run_perftest(lambda: mxfp4_moe_gemm1(**_p1_kwargs), num_iters=_bi, num_warmup=_bw, testGraph=test_graph)
+    _, us2 = run_perftest(lambda: mxfp4_moe_gemm2(**_p2_kwargs), num_iters=_bi, num_warmup=_bw, testGraph=test_graph)
 
     # --- stage1 line (same FLOPS/bytes accounting as run_moe_stage1 for fp4/a8w4) ---
     active_experts = min(experts, tokens * topk)
