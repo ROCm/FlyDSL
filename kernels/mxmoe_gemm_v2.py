@@ -611,7 +611,9 @@ def gemm1_body_v2(
             # col maps to inter = col mod INTER. Only emitted under has_pad (default byte-identical; AC-3).
             gate_span_p = (BN // 2) // num_n_waves
             if const_expr(interleave):
-                logical_inter = n_block_idx * fx.Int32(BN // 2) + wave_n * fx.Int32(gate_span_p) + fx.Int32((j // 2) * 16)
+                logical_inter = (
+                    n_block_idx * fx.Int32(BN // 2) + wave_n * fx.Int32(gate_span_p) + fx.Int32((j // 2) * 16)
+                )
             else:
                 logical_inter = col % INTER_rt
             # Fully-pad tile (its 16 inter cols are all >= INTER_real, since INTER_real is 16-aligned):
