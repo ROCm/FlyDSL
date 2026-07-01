@@ -53,7 +53,13 @@ def compile_gemm1_a4w4_port(
     out_dtype="fp4",
     act="silu",
     swiglu_limit=0.0,
+    SBM=None,
 ):
+    # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
+    # None -> SBM==BM (byte-identical). Otherwise SBM must be a multiple of BM (SBM//BM compute
+    # blocks per SBM sort block, all sharing one expert).
+    if SBM is None:
+        SBM = BM
     # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
     b_nontemporal = use_nt
     if BM not in (32, 64) or inline_quant:
@@ -61,6 +67,8 @@ def compile_gemm1_a4w4_port(
             f"mxfp4_moe_gemm1 supports only (BM in {{32,64}}, inline_quant=False); "
             f"got (BM={BM}, inline_quant={inline_quant})"
         )
+    if SBM % BM != 0:
+        raise AssertionError(f"SBM ({SBM}) must be a multiple of BM ({BM})")
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     if out_dtype not in ("fp4", "fp8"):
@@ -81,7 +89,9 @@ def compile_gemm1_a4w4_port(
     # act tag empty for the default silu variant so its kernel name/IR stays byte-identical (AC-3);
     # swiglu is a distinct compile-time variant (limit folded into the name).
     act_tag = "" if act == "silu" else f"_swiglu{swiglu_limit:g}"
-    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}_v2"
+    # sbm tag empty when SBM==BM so the default variant keeps its byte-identical kernel name.
+    sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
+    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}_v2"
 
     @fx.struct
     class SharedStorage:
@@ -139,6 +149,7 @@ def compile_gemm1_a4w4_port(
                 out_dtype=out_dtype,
                 act=act,
                 swiglu_limit=swiglu_limit,
+                SBM=SBM,
             )
 
     @flyc.jit
@@ -188,18 +199,26 @@ def compile_gemm2_a4w4_port(
     D_INTER_REAL=None,
     a_dtype="fp4",
     topk=1,
+    SBM=None,
 ):
     """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
     atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
     per (token,topk) slot; host reduces over topk), mirroring main's accumulate=False path.
     BM in {32,64} (per-launch parameter). inter_dim is a runtime arg (a multiple of BK=256,
     <= INTER_MAX); INTER_MAX caps the compile-time B-view / LDS bounds. topk enters the reduce
-    output-row index (compile-time)."""
+    output-row index (compile-time).
+
+    SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
+    None -> SBM==BM (byte-identical). Otherwise SBM must be a multiple of BM."""
+    if SBM is None:
+        SBM = BM
     if BM not in (32, 64) or epilog not in ("atomic", "reduce"):
         raise AssertionError(
             f"mxfp4_moe_gemm2 supports only (BM in {{32,64}}, epilog in {{'atomic','reduce'}}); "
             f"got (BM={BM}, epilog={epilog})"
         )
+    if SBM % BM != 0:
+        raise AssertionError(f"SBM ({SBM}) must be a multiple of BM ({BM})")
     use_reduce = epilog == "reduce"
     if D_INTER_REAL is not None:
         raise AssertionError(f"mxfp4_moe_gemm2 does not support D_INTER_REAL padding (D_INTER_REAL={D_INTER_REAL})")
@@ -216,7 +235,9 @@ def compile_gemm2_a4w4_port(
     atag = "_a8" if is_f8 else ""
     # atomic tag unchanged (byte-identical default); reduce is a distinct variant (topk folded in).
     etag = "atomic" if not use_reduce else f"reduce_tk{topk}"
-    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}_v2"
+    # sbm tag empty when SBM==BM so the default variant keeps its byte-identical kernel name.
+    sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
+    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -304,6 +325,7 @@ def compile_gemm2_a4w4_port(
                 a_dtype=a_dtype,
                 use_reduce=use_reduce,
                 topk=topk,
+                SBM=SBM,
             )
 
     @flyc.jit
@@ -351,11 +373,14 @@ G1_CACHE = {}
 G2_CACHE = {}
 
 
-def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act="silu", swiglu_limit=0.0):
+def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act="silu", swiglu_limit=0.0, SBM=None):
     # inter_dim (gemm1 N-output) is a runtime arg; NE/topk are host-only (NE: gemm1_grid active-expert
     # cap; topk: grid sizing). None of the three enters the compiled kernel, so none is a cache-key dim.
     # act/swiglu_limit are compile-time (folded into the epilog), so both are cache-key dims.
-    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit)
+    # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
+    if SBM is None:
+        SBM = BM
+    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
@@ -368,17 +393,21 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, a
             out_dtype=out_dtype,
             act=act,
             swiglu_limit=swiglu_limit,
+            SBM=SBM,
         )
         G1_CACHE[key] = launch
     return launch
 
 
-def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=1):
+def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=1, SBM=None):
     # NE / inter_dim do not enter the compiled gemm2 kernel (inter_dim is a runtime arg); the only
     # contraction-shape key is the compile-time cap INTER_MAX. epilog + topk are compile-time
     # (reduce folds topk into the output-row index); atomic ignores topk.
+    # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
+    if SBM is None:
+        SBM = BM
     topk_key = topk if epilog == "reduce" else 1
-    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk_key)
+    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk_key, SBM)
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
@@ -390,6 +419,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=
             D_INTER_REAL=D_INTER_REAL,
             a_dtype=a_dtype,
             topk=topk_key,
+            SBM=SBM,
         )
         G2_CACHE[key] = launch
     return launch
@@ -420,6 +450,7 @@ def mxfp4_moe_gemm1(
     out_dtype="fp4",
     act="silu",
     swiglu_limit=0.0,
+    SBM=None,
     n_sorted_padded=None,
     stream=None,
 ):
@@ -437,11 +468,16 @@ def mxfp4_moe_gemm1(
     """
     import torch
 
-    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit)
+    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM=SBM)
+    sbm = SBM or BM
+    num_n_blocks = (2 * D_INTER) // 256
     if n_sorted_padded is None:
-        grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
+        # E-based worst-case grid: sort padding is per SBM (the sort unit); the compute grid is
+        # in BM blocks (padded_rows // BM). SBM==BM reduces to the original gemm1_grid.
+        active = min(n_tokens * topk, NE)
+        padded_rows = ((n_tokens * topk + active * (sbm - 1) + sbm - 1) // sbm) * sbm
+        grid = (padded_rows // BM) * num_n_blocks
     else:
-        num_n_blocks = (2 * D_INTER) // 256
         grid = (n_sorted_padded // BM) * num_n_blocks
     run_compiled(
         launch,
@@ -485,6 +521,7 @@ def mxfp4_moe_gemm2(
     a_dtype="fp4",
     D_INTER_REAL=None,
     epilog="atomic",
+    SBM=None,
     n_sorted_padded=None,
     stream=None,
 ):
@@ -502,7 +539,7 @@ def mxfp4_moe_gemm2(
 
     if D_INTER_REAL is not None and D_INTER_REAL != D_INTER:
         raise AssertionError(f"D_INTER_REAL padding unsupported (D_INTER_REAL={D_INTER_REAL}, D_INTER={D_INTER})")
-    launch = get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX_DEFAULT, None, a_dtype, topk=topk)
+    launch = get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX_DEFAULT, None, a_dtype, topk=topk, SBM=SBM)
     if D_INTER > INTER_MAX_DEFAULT:
         raise AssertionError(f"D_INTER ({D_INTER}) exceeds compile cap INTER_MAX ({INTER_MAX_DEFAULT})")
     max_m_blocks = (max_sorted + BM - 1) // BM

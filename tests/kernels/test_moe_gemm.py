@@ -2148,6 +2148,11 @@ def run_mxfp4_moe_2stage(
     # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
     BM = int(os.environ.get("MXFP4_BM", "32"))
     assert BM in (32, 64), f"MXFP4_BM must be 32 or 64, got {BM}"
+    # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
+    # Default SBM==BM (byte-identical). SBM must be a multiple of BM (SBM//BM compute blocks per
+    # SBM sort block). MXFP4_SBM env override.
+    SBM = int(os.environ.get("MXFP4_SBM", str(BM)))
+    assert SBM % BM == 0, f"MXFP4_SBM ({SBM}) must be a multiple of MXFP4_BM ({BM})"
     is_f8 = in_dtype == "a8w4"
 
     # weights (fp4) + CK a16w4 preshuffle
@@ -2161,14 +2166,15 @@ def run_mxfp4_moe_2stage(
     # opus sort (FlyDSL moe_sorting_kernel)
     topk_ids_i32 = topk_ids.to(torch.int32)
     topk_w_f32 = topk_weights.to(torch.float32)
-    max_padded = tokens * TOPK + NE * BM - TOPK
-    max_sorted = ((max_padded + BM - 1) // BM) * BM
+    # Sort padding is per SBM (the sort unit); sei holds one expert id per SBM block.
+    max_padded = tokens * TOPK + NE * SBM - TOPK
+    max_sorted = ((max_padded + SBM - 1) // SBM) * SBM
     sti = torch.empty(max_sorted, dtype=torch.int32, device=device)
     swt = torch.empty(max_sorted, dtype=torch.float32, device=device)
-    sei = torch.empty(max_sorted // BM, dtype=torch.int32, device=device)
+    sei = torch.empty(max_sorted // SBM, dtype=torch.int32, device=device)
     nv = torch.empty(2, dtype=torch.int32, device=device)
     moe_buf = torch.empty((tokens, H), dtype=torch.bfloat16, device=device)
-    moe_sorting_flydsl(topk_ids_i32, topk_w_f32, sti, swt, sei, nv, moe_buf, NE, BM)
+    moe_sorting_flydsl(topk_ids_i32, topk_w_f32, sti, swt, sei, nv, moe_buf, NE, SBM)
     torch.cuda.synchronize()
     cumsum = nv
     n = int(cumsum[0].item())
@@ -2218,6 +2224,7 @@ def run_mxfp4_moe_2stage(
         out_dtype=out_dtype,
         act=act,
         swiglu_limit=swiglu_limit,
+        SBM=SBM,
         n_sorted_padded=n,
     )
     mxfp4_moe_gemm1(**_g1_kwargs)
@@ -2250,6 +2257,7 @@ def run_mxfp4_moe_2stage(
         use_nt=False,
         a_dtype=("fp8" if is_f8 else "fp4"),
         epilog=epilog,
+        SBM=SBM,
         n_sorted_padded=n,
     )
     mxfp4_moe_gemm2(**_g2_kwargs)
@@ -2302,7 +2310,7 @@ def run_mxfp4_moe_2stage(
         tok = int(sti_c[r].item()) & 0x00FFFFFF
         if tok >= tokens:
             continue
-        e = int(sei_c[r // BM].item())
+        e = int(sei_c[r // SBM].item())
         gate = A[tok] @ W1[e, :INTER].T
         up = A[tok] @ W1[e, INTER : 2 * INTER].T
         inter_r = _act(gate, up)
@@ -2407,7 +2415,7 @@ def run_mxfp4_moe_2stage(
             tok = int(sti_c[r].item()) & 0x00FFFFFF
             if tok >= tokens:
                 continue
-            e = int(sei_c[r // BM].item())
+            e = int(sei_c[r // SBM].item())
             gate = A2[tok] @ W1[e, :INTER].T
             up = A2[tok] @ W1[e, INTER : 2 * INTER].T
             inter_r = _act(gate, up)

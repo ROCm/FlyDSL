@@ -270,7 +270,14 @@ def gemm1_body_v2(
     out_dtype,
     act="silu",
     swiglu_limit=0.0,
+    SBM=None,
 ):
+    # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
+    # SBM==BM (default) -> byte-identical single-block-per-sort-block behavior. SBM>BM (a
+    # multiple) packs SBM//BM compute blocks into one SBM sort block that all share one expert:
+    # the expert id is looked up at sei[(m_block_idx*BM)//SBM] instead of sei[m_block_idx].
+    if SBM is None:
+        SBM = BM
     # BM-derived constants (module BM=32 default; BM=64 doubles rows/block).
     kMChunks = BM // 16  # 16-row MFMA row-groups (BM32: 2, BM64: 4)
     kSubBlocks = BM // 32  # 32-row A-scale chunks / scale-register groups (BM32: 1, BM64: 2)
@@ -299,12 +306,18 @@ def gemm1_body_v2(
     OUT_AS_PER_CHUNK_DW = (INTER_rt // fx.Int32(256)) * fx.Int32(64)  # ((INTER//32)//4//2)*64
     K_G2_BYTES = INTER_rt // fx.Int32(out_pack)  # output row stride (fp4 INTER/2, fp8 INTER)
 
-    # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
+    # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
+    # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
+    # emitted identically to the pre-sbm path).
     n_block_idx = bx_i32 % NUM_N_BLOCKS
     m_block_idx = bx_i32 // NUM_N_BLOCKS
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
-    e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
-    m_row = m_block_idx * BM
+    if const_expr(SBM == BM):
+        e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
+        m_row = m_block_idx * BM
+    else:
+        m_row = m_block_idx * BM
+        e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_row // fx.Int32(SBM)]))
 
     lane_div_16 = lane // 16
     lane_mod_16 = lane % 16
@@ -726,7 +739,13 @@ def gemm2_body_v2(
     a_dtype,
     use_reduce=False,
     topk=1,
+    SBM=None,
 ):
+    # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
+    # SBM==BM (default) is byte-identical. SBM>BM packs SBM//BM compute blocks per SBM sort block;
+    # the expert id is looked up at sei[(m_block_idx*BM)//SBM] instead of sei[m_block_idx].
+    if SBM is None:
+        SBM = BM
     aStages = aStages
     kMChunks = BM // 16  # 16-row MFMA row-groups (BM32: 2, BM64: 4)
     kSubBlocks = BM // 32  # 32-row A-scale chunks / scale-register groups (BM32: 1, BM64: 2)
@@ -748,12 +767,18 @@ def gemm2_body_v2(
     KH4 = K_rt // fx.Int32(8)  # i32 col stride (= K_HALF//4)
     K_TILES_MAX = INTER_MAX // BK
 
-    # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[m_block_idx]
+    # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
+    # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
+    # emitted identically to the pre-sbm path).
     m_block_idx = bx_i32 // num_n_blocks
     n_block_idx = bx_i32 - m_block_idx * num_n_blocks
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
-    e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
-    m_row = m_block_idx * BM
+    if const_expr(SBM == BM):
+        e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_block_idx]))
+        m_row = m_block_idx * BM
+    else:
+        m_row = m_block_idx * BM
+        e = rocdl.readfirstlane(T.i32, _raw(eids_ptr[m_row // fx.Int32(SBM)]))
 
     lane_div_16 = lane // 16
     lane_mod_16 = lane % 16
@@ -925,6 +950,7 @@ def gemm2_body_v2(
         N_OUT,
         use_reduce=use_reduce,
         topk=topk,
+        SBM=SBM,
     )
 
 
@@ -945,7 +971,10 @@ def atomic_bf16_epilog(
     *,
     use_reduce=False,
     topk=1,
+    SBM=None,
 ):
+    if SBM is None:
+        SBM = BM
     kMChunks = BM // 16
     M_REPS = BM // 8  # BM32: 4, BM16: 2
     lane_div_16 = lane // 16
@@ -986,12 +1015,13 @@ def atomic_bf16_epilog(
     # read back + weighted store. atomic: fadd into out[token_id] (per-token accumulate).
     # reduce: plain non-atomic store into out[token_id*topk + s] (unique per (token,topk) slot;
     # host reduces over topk). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
-    # ``if token_id < i32_M`` gates out padding rows (sentinel token_id == M). BM<=32 keeps the
-    # legacy plain-Python ``if`` (byte-identical: the store body always traces; the OOB padding-row
-    # write lands in allocator slack and never faulted). BM>=64 promotes the guard to a real device
-    # ``scf.if`` so the padding-row store is genuinely skipped: at BM64 the padding stride is large
-    # enough that the unguarded OOB atomic write hit an illegal address (a8w4/small-token).
-    guard_padding = BM >= 64
+    # ``if token_id < i32_M`` gates out padding rows (sentinel token_id == M). The default
+    # (SBM==BM and BM<=32) keeps the legacy plain-Python ``if`` (byte-identical: the store body
+    # always traces; the OOB padding-row write lands in allocator slack and never faulted).
+    # BM>=64 or SBM>BM promotes the guard to a real device ``scf.if`` so the padding-row store is
+    # genuinely skipped: at those the padding stride is large enough that the unguarded OOB atomic
+    # write hit an illegal address (a8w4/small-token; sbm-decoupled padding).
+    guard_padding = BM >= 64 or SBM != BM
 
     def store_one_mr(mr):
         row_in_block = fx.Int32(mr * 8) + m_lane
