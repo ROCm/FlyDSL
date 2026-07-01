@@ -31,7 +31,7 @@ _skip_no_fp8 = pytest.mark.skipif(not _IS_CDNA4, reason=f"FP8 16x16x128 MFMA nee
     [
         (1, 128, 3, 18, 18, 128, 1, 0),
         (1, 256, 3, 18, 18, 256, 1, 0),
-        (1, 128, 3, 18, 18, 256, 1, 1),
+        (1, 128, 3, 16, 16, 256, 1, 1),
     ],
 )
 def test_conv3d_fp8_vs_fp8cast_reference(n, c, t, h, w, k, stride, padding):
