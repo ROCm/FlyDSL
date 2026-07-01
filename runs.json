@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-01T10:36:56Z",
+ "updated": "2026-07-01T10:42:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -330,11 +330,11 @@
    "branch": "pa-decode-deterministic-reduce",
    "event": "pull_request",
    "title": "[pa] Deterministic split-partition reduce for PS decode",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28500895694",
    "created_at": "2026-07-01T07:25:22Z",
-   "updated_at": "2026-07-01T10:26:07Z",
+   "updated_at": "2026-07-01T10:40:03Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -358,10 +358,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T10:26:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T10:40:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28500895694/job/84477803189"
     }
    ]
