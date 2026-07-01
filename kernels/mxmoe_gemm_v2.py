@@ -466,8 +466,19 @@ def gemm1_body_v2(
         # One 32-row A-scale group per kSubBlock (its register holds row-groups 2*sub, 2*sub+1).
         for sub in range_constexpr(kSubBlocks):
             mma_one_j(
-                J, in_b, a_scale[sub], sb, bq_frags[stage], is_f8_a, cbsz_a,
-                a_vals, a_frags, accm, c_frags, mma_atoms, i0=2 * sub,
+                J,
+                in_b,
+                a_scale[sub],
+                sb,
+                bq_frags[stage],
+                is_f8_a,
+                cbsz_a,
+                a_vals,
+                a_frags,
+                accm,
+                c_frags,
+                mma_atoms,
+                i0=2 * sub,
             )
 
     # zero C (fp4 fragments accumulate in place thereafter; fp8 accm pre-init above).
@@ -815,8 +826,19 @@ def gemm2_body_v2(
             sb = _raw(Vec(bsf[mni].load())[0])
             for sub in range_constexpr(kSubBlocks):
                 mma_one_j(
-                    J, in_b, sa[sub], sb, bqf, is_f8_a, cbsz_a,
-                    a_vals, a_frags, accm, c_frags, mma_atoms, i0=2 * sub,
+                    J,
+                    in_b,
+                    sa[sub],
+                    sb,
+                    bqf,
+                    is_f8_a,
+                    cbsz_a,
+                    a_vals,
+                    a_frags,
+                    accm,
+                    c_frags,
+                    mma_atoms,
+                    i0=2 * sub,
                 )
 
     # zero C (fp4 fragments accumulate in place; fp8 accm pre-init above).

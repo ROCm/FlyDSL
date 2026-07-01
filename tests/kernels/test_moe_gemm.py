@@ -2125,7 +2125,10 @@ def run_mxfp4_moe_2stage(
 
     device = x_fp32.device
     NE, H, INTER, TOPK = experts, model_dim, inter_dim, topk
-    BM = 32
+    # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
+    # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
+    BM = int(os.environ.get("MXFP4_BM", "32"))
+    assert BM in (32, 64), f"MXFP4_BM must be 32 or 64, got {BM}"
     is_f8 = in_dtype == "a8w4"
 
     # weights (fp4) + CK a16w4 preshuffle

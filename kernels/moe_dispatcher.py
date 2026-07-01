@@ -183,8 +183,7 @@ def compile_gemm2_a4w4_port(
     (a multiple of BK=256, <= INTER_MAX); INTER_MAX caps the compile-time B-view / LDS bounds."""
     if BM not in (32, 64) or epilog != "atomic":
         raise AssertionError(
-            f"mxfp4_moe_gemm2 supports only (BM in {{32,64}}, epilog='atomic'); "
-            f"got (BM={BM}, epilog={epilog})"
+            f"mxfp4_moe_gemm2 supports only (BM in {{32,64}}, epilog='atomic'); " f"got (BM={BM}, epilog={epilog})"
         )
     if D_INTER_REAL is not None:
         raise AssertionError(f"mxfp4_moe_gemm2 does not support D_INTER_REAL padding (D_INTER_REAL={D_INTER_REAL})")
