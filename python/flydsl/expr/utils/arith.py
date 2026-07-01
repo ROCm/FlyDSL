@@ -144,6 +144,22 @@ _ARITH_OPS = {
 }
 
 
+def _default_fastmath():
+    """Op-level fast-math for DSL float ops, gated on the ``fast_fp_math`` compile hint.
+
+    Default OFF (FastMathFlags.none / strict IEEE). When a kernel is compiled with
+    ``fast_fp_math=True`` (e.g. ``flyc.compile[{"fast_fp_math": True}]``), every DSL
+    float op gets FastMathFlags.fast (reassoc,nnan,ninf,nsz,arcp,contract,afn) so the
+    backend can contract FMAs / reassociate — the op-level analogue of clang
+    ``-ffast-math``. The same hint also drives the function/target-level fast attr in
+    the ROCm backend, so one switch turns on both.
+    """
+    from ...compiler.kernel_function import CompilationContext  # lazy: avoid circular import
+
+    hints = CompilationContext.get_compile_hints()
+    return arith.FastMathFlags.fast if hints.get("fast_fp_math") else arith.FastMathFlags.none
+
+
 @dsl_loc_tracing
 def _binary_op(self, other, op):
     other = _coerce_other(self, other)
@@ -153,23 +169,23 @@ def _binary_op(self, other, op):
     if op in _ARITH_OPS:
         float_fn, int_fn = _ARITH_OPS[op]
         if self.is_float:
-            return float_fn(self, other)
+            return float_fn(self, other, fastmath=_default_fastmath())
         return int_fn(self, other)
 
     if op == "div":
         if self.is_float:
-            return arith.divf(self, other)
+            return arith.divf(self, other, fastmath=_default_fastmath())
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
             return arith.divui(self, other)
         fp_ty = T.f64() if et.width > 32 else T.f32()
         lhs = int_to_fp(self, self.signed, fp_ty)
         rhs = int_to_fp(other, other.signed, fp_ty)
-        return arith.divf(lhs, rhs)
+        return arith.divf(lhs, rhs, fastmath=_default_fastmath())
 
     if op == "floordiv":
         if self.is_float:
-            q = arith.divf(self, other)
+            q = arith.divf(self, other, fastmath=_default_fastmath())
             return math.floor(q)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
@@ -180,7 +196,7 @@ def _binary_op(self, other, op):
 
     if op == "mod":
         if self.is_float:
-            return arith.remf(self, other)
+            return arith.remf(self, other, fastmath=_default_fastmath())
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
             return arith.remui(self, other)
@@ -293,7 +309,7 @@ def _neg_op(self):
     if self.type == T.bool():
         raise TypeError("negation is not supported for boolean type")
     if self.is_float:
-        return arith.negf(self)
+        return arith.negf(self, fastmath=_default_fastmath())
     c0 = arith_const(0, self.type)
     return arith.subi(c0, self)
 
@@ -425,8 +441,8 @@ class ArithValue(ir.Value):
 
     @dsl_loc_tracing
     def maximumf(self, other):
-        """Float maximum (NaN-propagating)."""
-        return arith.maximumf(self, _to_raw(other))
+        """Float maximum (NaN-propagating), op-level fast-math gated on fast_fp_math hint."""
+        return arith.maximumf(self, _to_raw(other), fastmath=_default_fastmath())
 
     @dsl_loc_tracing
     def rsqrt(self, *, fastmath=None):
