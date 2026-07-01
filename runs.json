@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-01T09:26:13Z",
+ "updated": "2026-07-01T09:31:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -506,19 +506,19 @@
    "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
    "event": "pull_request",
    "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498395176",
    "created_at": "2026-07-01T06:32:47Z",
-   "updated_at": "2026-07-01T06:33:31Z",
+   "updated_at": "2026-07-01T09:25:53Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T06:33:31Z",
+     "started_at": "2026-07-01T09:25:52Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498395176/job/84469751687"
     },
@@ -807,11 +807,11 @@
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
    "title": "[Feat]: Add dispatch & combine tuning configuration",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635",
    "created_at": "2026-07-01T02:51:55Z",
-   "updated_at": "2026-07-01T08:58:10Z",
+   "updated_at": "2026-07-01T09:30:12Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -844,19 +844,19 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T08:58:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:28:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84493331104"
     },
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T08:57:45Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:30:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84493331144"
     }
    ]
