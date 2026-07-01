@@ -1,0 +1,1252 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CuTe Layout Algebra Reference for FlyDSL &mdash; FlyDSL 0.2.2 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=000c92bf"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="_static/copybutton.js?v=f281be69"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="FlyDSL Python DSL" href="api/dsl.html" />
+    <link rel="prev" title="Testing &amp; Benchmarking Guide" href="testing_benchmarking_guide.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            FlyDSL
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#install-from-pypi">Install from PyPI</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#build-from-source">Build from source</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#step-1-build-llvm-mlir">Step 1: Build LLVM/MLIR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#step-2-build-flydsl">Step 2: Build FlyDSL</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#step-3-install-flydsl">Step 3: Install FlyDSL</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#verify-installation">Verify Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#a-minimal-vector-add-kernel">A Minimal Vector Add Kernel</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#key-concepts">Key Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#compilation-pipeline">Compilation Pipeline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#aot-pre-compilation">AOT Pre-compilation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="architecture_guide.html">Architecture &amp; Compilation Pipeline Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#project-structure">1. Project Structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#architecture">2. Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#compilation-pipeline">3. Compilation Pipeline</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#high-level-flow">3.1 High-Level Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#pipeline-stages-in-detail">3.2 Pipeline Stages in Detail</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#jit-compilation-flow">3.3 JIT Compilation Flow</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#key-abstractions">4. Key Abstractions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#flyc-jit-host-launcher">4.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> — Host Launcher</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#flyc-kernel-gpu-kernel">4.2 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — GPU Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#kernellauncher">4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#jitcfunction">4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#dsltype-jitargument-protocols">4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> Protocols</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#astrewriter">4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#environment-variables">5. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#compilation-options-flydsl-compile">5.1 Compilation Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#debug-options-flydsl-debug">5.2 Debug Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#runtime-options-flydsl-runtime">5.3 Runtime Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="architecture_guide.html#architecture-detection-priority">5.4 Architecture Detection Priority</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#target-hardware">6. Target Hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#ir-dump-workflow">7. IR Dump Workflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="architecture_guide.html#source-files">8. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="layout_system_guide.html">Layout Algebra Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#core-types">1. Core Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#inttuple-patterns">IntTuple Patterns</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#construction">2. Construction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#python-api-via-flydsl-expr">Python API (via <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#coordinate-mapping">3. Coordinate Mapping</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#crd2idx-coordinate-to-index"><code class="docutils literal notranslate"><span class="pre">crd2idx</span></code> — Coordinate to Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#idx2crd-index-to-coordinate-inverse"><code class="docutils literal notranslate"><span class="pre">idx2crd</span></code> — Index to Coordinate (inverse)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#query-operations">4. Query Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#layout-algebra">5. Layout Algebra</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#composition-composition-a-b">5.1 Composition: <code class="docutils literal notranslate"><span class="pre">composition(A,</span> <span class="pre">B)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#complement-complement-tiler-target-size">5.2 Complement: <code class="docutils literal notranslate"><span class="pre">complement(tiler,</span> <span class="pre">target_size)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#coalesce-coalesce-layout">5.3 Coalesce: <code class="docutils literal notranslate"><span class="pre">coalesce(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#right-inverse-right-inverse-layout">5.4 Right Inverse: <code class="docutils literal notranslate"><span class="pre">right_inverse(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#recast-layout-recast-layout-layout-old-bits-new-bits">5.5 Recast Layout: <code class="docutils literal notranslate"><span class="pre">recast_layout(layout,</span> <span class="pre">old_bits,</span> <span class="pre">new_bits)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#product-operations">6. Product Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#divide-operations">7. Divide Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#structural-operations">8. Structural Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#select-int-tuple-indices"><code class="docutils literal notranslate"><span class="pre">select(int_tuple,</span> <span class="pre">indices)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#group-int-tuple-begin-end"><code class="docutils literal notranslate"><span class="pre">group(int_tuple,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#append-base-elem-prepend-base-elem"><code class="docutils literal notranslate"><span class="pre">append(base,</span> <span class="pre">elem)</span></code> / <code class="docutils literal notranslate"><span class="pre">prepend(base,</span> <span class="pre">elem)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#zip-lhs-rhs"><code class="docutils literal notranslate"><span class="pre">zip(lhs,</span> <span class="pre">rhs)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#slice-src-coord"><code class="docutils literal notranslate"><span class="pre">slice(src,</span> <span class="pre">coord)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#memref-view-copy-operations">9. MemRef / View / Copy Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#memref-operations">MemRef Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#view-and-offset">View and Offset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#copy-atoms-and-tiled-copies">Copy Atoms and Tiled Copies</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#copy-atom-types">Copy Atom Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#id1">Construction</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#thread-slicing-and-partitioning">Thread Slicing and Partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#execution">Execution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#introspection">Introspection</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#nested-hierarchical-layouts">10. Nested / Hierarchical Layouts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#inttuple-arithmetic">11. IntTuple Arithmetic</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#printf-debugging">12. Printf Debugging</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#decision-tree">13. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#source-files">14. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel Authoring Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#basic-kernel-pattern">1. Basic Kernel Pattern</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#flyc-kernel-flyc-jit">1.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> + <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#how-it-works">1.2 How It Works</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#parameter-types">2. Parameter Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-tensor">2.1 <code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-constexpr-t">2.2 <code class="docutils literal notranslate"><span class="pre">fx.Constexpr[T]</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-int32">2.3 <code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-stream">2.4 <code class="docutils literal notranslate"><span class="pre">fx.Stream</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#custom-argument-types">2.5 Custom Argument Types</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#thread-block-hierarchy">3. Thread / Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#expression-api-flydsl-expr">4. Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#arithmetic-and-numeric-types">4.1 Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#vector-values-vector">4.2 Vector Values (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#buffer-operations-fx-buffer-ops">4.3 Buffer Operations (<code class="docutils literal notranslate"><span class="pre">fx.buffer_ops</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#rocm-intrinsics-fx-rocdl">4.4 ROCm Intrinsics (<code class="docutils literal notranslate"><span class="pre">fx.rocdl</span></code>)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#high-level-helpers">High-Level Helpers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#instruction-scheduling-barriers">Instruction Scheduling Barriers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#math-intrinsics">Math Intrinsics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#low-level-ops">Low-Level Ops</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#gpu-operations-fx-gpu">4.5 GPU Operations (<code class="docutils literal notranslate"><span class="pre">fx.gpu</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#control-flow">5. Control Flow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#python-loops">5.1 Python Loops</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#const-expr">5.2 <code class="docutils literal notranslate"><span class="pre">const_expr()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#shared-memory-lds">6. Shared Memory (LDS)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#smemallocator">6.1 <code class="docutils literal notranslate"><span class="pre">SmemAllocator</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#finalizing-lds-allocation">6.2 Finalizing LDS Allocation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#lds-capacity">6.3 LDS Capacity</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#launch-configuration">7. Launch Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#kernellauncher-launch">7.1 <code class="docutils literal notranslate"><span class="pre">KernelLauncher.launch()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#dynamic-grid-block-dimensions">7.2 Dynamic Grid/Block Dimensions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#compilation-caching">9. Compilation &amp; Caching</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#automatic-caching">9.1 Automatic Caching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#cache-invalidation">9.2 Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#disk-cache-invalidation">9.3 Disk Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#compile-only-mode">9.4 Compile-Only Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#debugging">10. Debugging</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#dumping-ir">10.1 Dumping IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#printing-ir">10.2 Printing IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#ast-diff">10.3 AST Diff</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#complete-example-preshuffle-gemm">11. Complete Example: Preshuffle GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#decision-tree">12. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#source-files">13. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Pre-built Kernel Library Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#normalization-kernels">1. Normalization Kernels</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#layernorm-kernels-layernorm-kernel-py">1.1 LayerNorm (<code class="docutils literal notranslate"><span class="pre">kernels/layernorm_kernel.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#rmsnorm-kernels-rmsnorm-kernel-py">1.2 RMSNorm (<code class="docutils literal notranslate"><span class="pre">kernels/rmsnorm_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#softmax-kernel">2. Softmax Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#softmax-kernels-softmax-kernel-py">2.1 Softmax (<code class="docutils literal notranslate"><span class="pre">kernels/softmax_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#gemm-kernel">3. GEMM Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#preshuffle-gemm-kernels-preshuffle-gemm-py">3.1 Preshuffle GEMM (<code class="docutils literal notranslate"><span class="pre">kernels/preshuffle_gemm.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#b-flashattention-forward-kernels-flash-attn-generic-py-kernels-flash-attn-gfx950-py-kernels-flash-attn-fp8-gfx950-py">3b. FlashAttention Forward (<code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_generic.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_gfx950.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_fp8_gfx950.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#fp8-e4m3fn-forward">fp8 (e4m3fn) forward</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#shared-utilities">4. Shared Utilities</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#reduction-helpers-kernels-kernels-common-py">4.1 Reduction Helpers (<code class="docutils literal notranslate"><span class="pre">kernels/kernels_common.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#mfma-epilogues-kernels-mfma-epilogues-py">4.2 MFMA Epilogues (<code class="docutils literal notranslate"><span class="pre">kernels/mfma_epilogues.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#preshuffle-pipeline-kernels-mfma-preshuffle-pipeline-py">4.3 Preshuffle Pipeline (<code class="docutils literal notranslate"><span class="pre">kernels/mfma_preshuffle_pipeline.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#layout-coordinate-helpers">4.4 Layout Coordinate Helpers</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#kernel-api-comparison">5. Kernel API Comparison</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#new-api-gemm">New API (GEMM)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#kernel-decision-tree">6. Kernel Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#source-files">7. Source Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#test-files">8. Test Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="testing_benchmarking_guide.html">Testing &amp; Benchmarking Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#test-categories">1. Test Categories</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#mlir-lit-tests-tests-mlir">1.1 MLIR Lit Tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#python-tests-tests-python">1.2 Python Tests (<code class="docutils literal notranslate"><span class="pre">tests/python/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#gpu-kernel-tests-tests-kernels">1.3 GPU Kernel Tests (<code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#aot-examples-tests-python-examples">1.4 AOT Examples (<code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#test-runner-scripts">2. Test Runner Scripts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#scripts-run-tests-sh">2.1 <code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#scripts-run-benchmark-sh">2.2 <code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#pytest-configuration">3. Pytest Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#tests-conftest-py">3.1 <code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#performance-measurement">4. Performance Measurement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#tests-test-common-py">4.1 <code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#tests-kernels-benchmark-common-py">4.2 <code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#compilation-utilities-tests-utils-py">5. Compilation Utilities (<code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#compile-to-hsaco"><code class="docutils literal notranslate"><span class="pre">compile_to_hsaco()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#weight-utilities">Weight Utilities</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#writing-new-tests">6. Writing New Tests</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#pyir-test-pattern-no-gpu">6.1 PyIR Test Pattern (No GPU)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#gpu-kernel-test-pattern-new-api">6.2 GPU Kernel Test Pattern (New API)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#benchmark-test-pattern">6.3 Benchmark Test Pattern</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#gemm-test-cli-arguments">7. GEMM Test CLI Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#test-configuration-via-environment-variables">8. Test Configuration via Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#ir-dump-workflow">9. IR Dump Workflow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#via-mlircompiler">Via <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#dedicated-ir-dump-script">Dedicated IR Dump Script</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#source-files">10. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">CuTe Layout Algebra Reference for FlyDSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#overview">1. Overview</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#what-is-the-cute-layout-algebra">1.1 What is the CuTe Layout Algebra?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#flydsl-as-an-amd-implementation">1.2 FlyDSL as an AMD Implementation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#layout-algebra-fundamentals">2. Layout Algebra Fundamentals</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#core-types">2.1 Core Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#query-operations">2.2 Query Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#coordinate-mapping">2.3 Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#layout-algebra-operations">2.4 Layout Algebra Operations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#composition">Composition</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#complement">Complement</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#coalesce">Coalesce</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#products">Products</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#divides">Divides</a></li>
+<li class="toctree-l4"><a class="reference internal" href="#partitioning-utilities">Partitioning Utilities</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#flydsl-kernel-development">3. FlyDSL Kernel Development</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#thread-and-block-hierarchy">4. Thread and Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#tensor-creation-and-memory">5. Tensor Creation and Memory</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#tensor-construction">5.1 Tensor Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#memory-hierarchy">5.2 Memory Hierarchy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#swizzling-bank-conflict-avoidance">5.3 Swizzling (Bank Conflict Avoidance)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#data-movement">6. Data Movement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#copy-atoms-and-tiled-copies">6.1 Copy Atoms and Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#buffer-loads-amd-specific">6.2 Buffer Loads (AMD-specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#compute-operations-mfma">7. Compute Operations (MFMA)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#compilation-and-execution">9. Compilation and Execution</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#compilation-pipeline">9.1 Compilation Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#environment-variables">9.2 Environment Variables</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#complete-example-gemm-with-layout-algebra">10. Complete Example: GEMM with Layout Algebra</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#references">11. References</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#cute-layout-algebra-bsd-3-clause">CuTe Layout Algebra (BSD-3-Clause)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#flydsl-source-files">FlyDSL Source Files</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">FlyDSL Python DSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/dsl.html#module-flydsl">Core Module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/dsl.html#expression-api-flydsl-expr">Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-construction">Layout Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-inspection">Layout Inspection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-algebra">Layout Algebra</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-products-divides">Layout Products &amp; Divides</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#coordinate-mapping">Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#memory-operations">Memory Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#copy-gemm">Copy &amp; GEMM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#derived-tiled-operations-flydsl-expr-derived">Derived Tiled Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.derived</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#type-annotations">Type Annotations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#gpu-intrinsics-flydsl-expr-gpu">GPU Intrinsics (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.gpu</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#arithmetic-and-numeric-types">Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#vector-values-flydsl-expr-typing-vector">Vector Values (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.typing.Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#buffer-operations-flydsl-expr-buffer-ops">Buffer Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.buffer_ops</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#rocdl-operations-flydsl-expr-rocdl">ROCDL Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.rocdl</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api/dsl.html#compiler-api-flydsl-compiler">Compiler API (<code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler &amp; Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#flyc-kernel-and-flyc-jit"><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#compilation-flow">Compilation Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#tensor-arguments">Tensor Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#buffer-operations">Buffer Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#rocdl-operations">ROCDL Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#fly-opt-cli">fly-opt CLI</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Pre-built Kernels</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#gemm-kernels">GEMM Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#moe-mixture-of-experts-kernels">MoE (Mixture-of-Experts) Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#paged-attention">Paged Attention</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#normalization">Normalization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#softmax">Softmax</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#reduction">Reduction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#utilities">Utilities</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/index.html">Tutorials</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="tutorials/basic_usage.html">Basic Usage</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#setting-up-the-environment">Setting Up the Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#understanding-layouts">Understanding Layouts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#defining-a-kernel">Defining a Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#launching-kernels">Launching Kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="tutorials/kernel_development.html">Kernel Development</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#tiled-copies">Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#shared-memory-lds">Shared Memory (LDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#performance-optimization">Performance Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#reference-implementations">Reference Implementations</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">FlyDSL</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">CuTe Layout Algebra Reference for FlyDSL</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/cute_layout_algebra_guide.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="cute-layout-algebra-reference-for-flydsl">
+<h1>CuTe Layout Algebra Reference for FlyDSL<a class="headerlink" href="#cute-layout-algebra-reference-for-flydsl" title="Link to this heading"></a></h1>
+<blockquote>
+<div><p>FlyDSL implements the CuTe layout algebra for AMD GPUs. This guide covers the mathematical foundations of the layout algebra and how FlyDSL exposes them through its Python API.</p>
+</div></blockquote>
+<p>The CuTe layout algebra was introduced in the <a class="reference external" href="https://github.com/NVIDIA/cutlass">CUTLASS</a> C++ library under BSD-3-Clause license (<code class="docutils literal notranslate"><span class="pre">include/cute/</span></code>). FlyDSL adopts the same algebraic framework — shapes, strides, coordinate mappings, products, and divides — and provides a Python API targeting AMD ROCm/HIP GPUs via MLIR.</p>
+<hr class="docutils" />
+<section id="overview">
+<h2>1. Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h2>
+<section id="what-is-the-cute-layout-algebra">
+<h3>1.1 What is the CuTe Layout Algebra?<a class="headerlink" href="#what-is-the-cute-layout-algebra" title="Link to this heading"></a></h3>
+<p>The CuTe layout algebra is a mathematical framework for describing multidimensional data layouts as compositions of shapes, strides, and coordinate transformations. It provides:</p>
+<ul class="simple">
+<li><p><strong>Layouts</strong> as first-class objects: a pair <code class="docutils literal notranslate"><span class="pre">(Shape,</span> <span class="pre">Stride)</span></code> that maps logical coordinates to physical offsets</p></li>
+<li><p><strong>Algebraic operations</strong>: composition, complement, products, and divides that transform layouts while preserving correctness</p></li>
+<li><p><strong>Tiling and partitioning</strong>: systematic decomposition of data across threads, warps/wavefronts, and blocks</p></li>
+</ul>
+<p>The algebra is defined in the C++ headers of CUTLASS (BSD-3-Clause):</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — Layout type, shape/stride types, core operations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/tensor.hpp</span></code> — Tensor type (pointer + layout)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/algorithm/</span></code> — Copy, GEMM, and other algorithmic building blocks</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">include/cute/numeric/integral_constant.hpp</span></code> — Compile-time integer constants</p></li>
+</ul>
+<p>A pure-Python reference implementation also exists in PyTorch:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">torch/distributed/_pycute/layout.py</span></code> — Layout class with all algebra operations</p></li>
+</ul>
+</section>
+<section id="flydsl-as-an-amd-implementation">
+<h3>1.2 FlyDSL as an AMD Implementation<a class="headerlink" href="#flydsl-as-an-amd-implementation" title="Link to this heading"></a></h3>
+<p>FlyDSL implements the CuTe layout algebra for AMD GPUs through the Fly MLIR dialect:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Aspect</p></th>
+<th class="head"><p>CuTe C++ (CUTLASS)</p></th>
+<th class="head"><p>FlyDSL</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Language</strong></p></td>
+<td><p>C++ templates</p></td>
+<td><p>Python + MLIR emission</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Hardware</strong></p></td>
+<td><p>NVIDIA CUDA GPUs</p></td>
+<td><p>AMD ROCm/HIP GPUs</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>IR backend</strong></p></td>
+<td><p>C++ templates → CUDA/PTX</p></td>
+<td><p>Fly MLIR dialect → ROCDL → HSACO</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Kernel model</strong></p></td>
+<td><p>C++ kernel functions</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> + <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Memory model</strong></p></td>
+<td><p>GMEM → SMEM → RMEM</p></td>
+<td><p>GMEM → LDS → VGPR</p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Compilation</strong></p></td>
+<td><p>nvcc / CUTLASS build</p></td>
+<td><p>Python → MLIR → ROCDL → HSACO binary</p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Wave/Warp size</strong></p></td>
+<td><p>32 threads (warp)</p></td>
+<td><p>64 threads (wavefront)</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<hr class="docutils" />
+<section id="layout-algebra-fundamentals">
+<h2>2. Layout Algebra Fundamentals<a class="headerlink" href="#layout-algebra-fundamentals" title="Link to this heading"></a></h2>
+<section id="core-types">
+<h3>2.1 Core Types<a class="headerlink" href="#core-types" title="Link to this heading"></a></h3>
+<p>A <strong>Layout</strong> is defined by a pair <code class="docutils literal notranslate"><span class="pre">(Shape,</span> <span class="pre">Stride)</span></code>:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Concept</p></th>
+<th class="head"><p>Mathematical Definition</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Shape</strong></p></td>
+<td><p>Tuple of positive integers describing dimensions</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_shape(M,</span> <span class="pre">N)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Stride</strong></p></td>
+<td><p>Tuple of integers describing step sizes per dimension</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_stride(s0,</span> <span class="pre">s1)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Layout</strong></p></td>
+<td><p>Pair <code class="docutils literal notranslate"><span class="pre">(Shape,</span> <span class="pre">Stride)</span></code> defining a coordinate → index mapping</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_layout(shape,</span> <span class="pre">stride)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Coord</strong></p></td>
+<td><p>Tuple of integers identifying a position in logical space</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.make_coord(i,</span> <span class="pre">j)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">Layout&lt;Shape,</span> <span class="pre">Stride&gt;</span></code> template class.</p>
+</div></blockquote>
+<p><strong>FlyDSL example:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">shape</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_shape</span><span class="p">(</span><span class="mi">128</span><span class="p">,</span> <span class="mi">64</span><span class="p">)</span>
+<span class="n">stride</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_stride</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">128</span><span class="p">)</span>    <span class="c1"># Column-major</span>
+<span class="n">layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="n">shape</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span>
+<span class="n">coord</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_coord</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="mi">5</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="query-operations">
+<h3>2.2 Query Operations<a class="headerlink" href="#query-operations" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Formula</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>size</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">product(shape)</span></code> — total number of elements</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.size(layout)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>cosize</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">max(index)</span> <span class="pre">+</span> <span class="pre">1</span></code> — size of the codomain</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.cosize(layout)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>rank</strong></p></td>
+<td><p>Number of modes (top-level dimensions)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.rank(layout)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>size of mode i</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">shape[i]</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.get(fx.get_shape(layout),</span> <span class="pre">i)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">size()</span></code>, <code class="docutils literal notranslate"><span class="pre">cosize()</span></code>, <code class="docutils literal notranslate"><span class="pre">rank()</span></code> functions.</p>
+</div></blockquote>
+</section>
+<section id="coordinate-mapping">
+<h3>2.3 Coordinate Mapping<a class="headerlink" href="#coordinate-mapping" title="Link to this heading"></a></h3>
+<p>The fundamental operation of a layout is mapping a logical coordinate to a physical index:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">index</span> <span class="o">=</span> <span class="n">crd2idx</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span> <span class="o">=</span> <span class="n">dot</span><span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>For a layout <code class="docutils literal notranslate"><span class="pre">L</span> <span class="pre">=</span> <span class="pre">((S0,</span> <span class="pre">S1),</span> <span class="pre">(d0,</span> <span class="pre">d1))</span></code> and coordinate <code class="docutils literal notranslate"><span class="pre">(c0,</span> <span class="pre">c1)</span></code>:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">index</span> <span class="o">=</span> <span class="n">c0</span> <span class="o">*</span> <span class="n">d0</span> <span class="o">+</span> <span class="n">c1</span> <span class="o">*</span> <span class="n">d1</span>
+</pre></div>
+</div>
+<p>The inverse operation recovers a coordinate from a linear index:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">coord</span> <span class="o">=</span> <span class="n">idx2crd</span><span class="p">(</span><span class="n">index</span><span class="p">,</span> <span class="n">shape</span><span class="p">,</span> <span class="n">stride</span><span class="p">)</span>
+</pre></div>
+</div>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Definition</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>crd2idx</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">coord</span> <span class="pre">→</span> <span class="pre">index</span> <span class="pre">=</span> <span class="pre">sum(c_i</span> <span class="pre">*</span> <span class="pre">d_i)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.crd2idx(coord,</span> <span class="pre">layout)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>idx2crd</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">index</span> <span class="pre">→</span> <span class="pre">coord</span></code> (successive div/mod by shape elements)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.idx2crd(idx,</span> <span class="pre">layout)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">crd2idx()</span></code>, <code class="docutils literal notranslate"><span class="pre">idx2crd()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="layout-algebra-operations">
+<h3>2.4 Layout Algebra Operations<a class="headerlink" href="#layout-algebra-operations" title="Link to this heading"></a></h3>
+<p>All operations below are defined mathematically in the CuTe algebra and implemented in FlyDSL with identical semantics.</p>
+<section id="composition">
+<h4>Composition<a class="headerlink" href="#composition" title="Link to this heading"></a></h4>
+<p>Given layouts <code class="docutils literal notranslate"><span class="pre">A</span> <span class="pre">=</span> <span class="pre">(S_A,</span> <span class="pre">d_A)</span></code> and <code class="docutils literal notranslate"><span class="pre">B</span> <span class="pre">=</span> <span class="pre">(S_B,</span> <span class="pre">d_B)</span></code>, the composition <code class="docutils literal notranslate"><span class="pre">A</span> <span class="pre">∘</span> <span class="pre">B</span></code> creates a new layout where B’s indices are fed through A:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>(A ∘ B)(c) = A(B(c))
+</pre></div>
+</div>
+<p>FlyDSL: <code class="docutils literal notranslate"><span class="pre">fx.composition(A,</span> <span class="pre">B)</span></code></p>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">composition()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="complement">
+<h4>Complement<a class="headerlink" href="#complement" title="Link to this heading"></a></h4>
+<p>The complement of layout <code class="docutils literal notranslate"><span class="pre">A</span></code> with respect to a codomain size <code class="docutils literal notranslate"><span class="pre">M</span></code> produces a layout <code class="docutils literal notranslate"><span class="pre">B</span></code> such that <code class="docutils literal notranslate"><span class="pre">(A,</span> <span class="pre">B)</span></code> together cover <code class="docutils literal notranslate"><span class="pre">[0,</span> <span class="pre">M)</span></code>:</p>
+<p>FlyDSL: <code class="docutils literal notranslate"><span class="pre">fx.complement(layout,</span> <span class="pre">cotarget)</span></code></p>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">complement()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="coalesce">
+<h4>Coalesce<a class="headerlink" href="#coalesce" title="Link to this heading"></a></h4>
+<p>Merges adjacent modes with compatible strides into a single mode, producing a simplified but functionally equivalent layout:</p>
+<p>FlyDSL: <code class="docutils literal notranslate"><span class="pre">fx.coalesce(layout)</span></code></p>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">coalesce()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="products">
+<h4>Products<a class="headerlink" href="#products" title="Link to this heading"></a></h4>
+<p>Products combine two layouts to create higher-rank layouts. They differ in how the result modes are organized:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Product</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Logical Product</strong></p></td>
+<td><p>Append B’s modes as new outer modes of A</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.logical_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Zipped Product</strong></p></td>
+<td><p>Like logical, but zip inner modes together</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.zipped_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Tiled Product</strong></p></td>
+<td><p>Like logical, but group by tile</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.tiled_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Flat Product</strong></p></td>
+<td><p>Flatten all result modes</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.flat_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Raked Product</strong></p></td>
+<td><p>Interleave A and B elements (raked distribution)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.raked_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Blocked Product</strong></p></td>
+<td><p>Block A elements together, then B (blocked distribution)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.blocked_product(A,</span> <span class="pre">B)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">logical_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">zipped_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">tiled_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">flat_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">raked_product()</span></code>, <code class="docutils literal notranslate"><span class="pre">blocked_product()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="divides">
+<h4>Divides<a class="headerlink" href="#divides" title="Link to this heading"></a></h4>
+<p>Divides decompose a layout by a tiler, creating a hierarchical layout with “tile” and “remainder” modes:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Divide</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>Logical Divide</strong></p></td>
+<td><p>Split A by tiler, keep full mode hierarchy</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.logical_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Zipped Divide</strong></p></td>
+<td><p>Like logical, but zip tile modes</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.zipped_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>Tiled Divide</strong></p></td>
+<td><p>Like logical, but group by tile</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.tiled_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Flat Divide</strong></p></td>
+<td><p>Flatten tile and remainder modes</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.flat_divide(A,</span> <span class="pre">tiler)</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/layout.hpp</span></code> — <code class="docutils literal notranslate"><span class="pre">logical_divide()</span></code>, <code class="docutils literal notranslate"><span class="pre">zipped_divide()</span></code>, <code class="docutils literal notranslate"><span class="pre">tiled_divide()</span></code>, <code class="docutils literal notranslate"><span class="pre">flat_divide()</span></code>.</p>
+</div></blockquote>
+</section>
+<section id="partitioning-utilities">
+<h4>Partitioning Utilities<a class="headerlink" href="#partitioning-utilities" title="Link to this heading"></a></h4>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>local_partition</strong></p></td>
+<td><p>Partition a layout among threads/tiles</p></td>
+<td><p><em>Not yet implemented</em> — use <code class="docutils literal notranslate"><span class="pre">zipped_divide</span></code> + <code class="docutils literal notranslate"><span class="pre">slice</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>local_tile</strong></p></td>
+<td><p>Extract a tile from a layout</p></td>
+<td><p><em>Not yet implemented</em> — use <code class="docutils literal notranslate"><span class="pre">zipped_divide</span></code> + <code class="docutils literal notranslate"><span class="pre">slice</span></code></p></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<div><p><strong>Reference:</strong> <code class="docutils literal notranslate"><span class="pre">include/cute/algorithm/</span></code> — <code class="docutils literal notranslate"><span class="pre">local_partition.hpp</span></code>, <code class="docutils literal notranslate"><span class="pre">local_tile.hpp</span></code>. FlyDSL does not expose these as single functions; use <code class="docutils literal notranslate"><span class="pre">fx.zipped_divide()</span></code> + <code class="docutils literal notranslate"><span class="pre">fx.slice()</span></code> to achieve equivalent results.</p>
+</div></blockquote>
+</section>
+</section>
+</section>
+<hr class="docutils" />
+<section id="flydsl-kernel-development">
+<h2>3. FlyDSL Kernel Development<a class="headerlink" href="#flydsl-kernel-development" title="Link to this heading"></a></h2>
+<p>FlyDSL kernels are defined using <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> for GPU device functions and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> for host-side launch wrappers:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel</span><span class="p">(</span>
+    <span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+    <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+    <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+    <span class="n">block_dim</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span>
+<span class="p">):</span>
+    <span class="n">tid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">thread_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="n">bid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">block_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="c1"># Kernel body — use layout algebra here</span>
+    <span class="o">...</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">launch</span><span class="p">(</span>
+    <span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span>
+    <span class="n">n</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Int32</span><span class="p">,</span>
+    <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">),</span>
+<span class="p">):</span>
+    <span class="n">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span> <span class="n">block_dim</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span>
+        <span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="n">grid_x</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="n">block_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">,</span>
+    <span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>Key elements:</strong></p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> decorator compiles the function body into GPU IR via AST rewriting</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> decorator wraps a host-side function that constructs and launches kernels</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code> denotes a GPU tensor argument</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Constexpr[int]</span></code> denotes a compile-time constant (affects cache key)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code> denotes a dynamic int32 argument</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fx.Stream</span></code> denotes a GPU stream argument</p></li>
+</ul>
+</section>
+<hr class="docutils" />
+<section id="thread-and-block-hierarchy">
+<h2>4. Thread and Block Hierarchy<a class="headerlink" href="#thread-and-block-hierarchy" title="Link to this heading"></a></h2>
+<p>GPU kernels organize threads into a hierarchy of blocks and grids. FlyDSL provides direct access to thread/block indices:</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Concept</p></th>
+<th class="head"><p>FlyDSL API</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Thread index</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.thread_idx.x</span></code></p></td>
+<td><p>Thread index within block</p></td>
+</tr>
+<tr class="row-odd"><td><p>Block index</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.block_idx.x</span></code></p></td>
+<td><p>Block index within grid</p></td>
+</tr>
+<tr class="row-even"><td><p>Block dimension</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fx.block_dim.x</span></code></p></td>
+<td><p>Number of threads per block</p></td>
+</tr>
+</tbody>
+</table>
+<p>Supported dimensions: <code class="docutils literal notranslate"><span class="pre">.x</span></code>, <code class="docutils literal notranslate"><span class="pre">.y</span></code>, <code class="docutils literal notranslate"><span class="pre">.z</span></code>.</p>
+<p><strong>Hardware mapping (NVIDIA → AMD):</strong></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>NVIDIA Concept</p></th>
+<th class="head"><p>AMD Concept</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Warp (32 threads)</p></td>
+<td><p>Wavefront (64 threads)</p></td>
+<td><p>Fundamental SIMD unit</p></td>
+</tr>
+<tr class="row-odd"><td><p>Thread Block</p></td>
+<td><p>Workgroup</p></td>
+<td><p>Cooperative thread group</p></td>
+</tr>
+<tr class="row-even"><td><p>SM (Streaming Multiprocessor)</p></td>
+<td><p>CU (Compute Unit)</p></td>
+<td><p>Processing unit</p></td>
+</tr>
+<tr class="row-odd"><td><p>Tensor Core (HMMA/GMMA)</p></td>
+<td><p>MFMA (Matrix Fused Multiply-Add)</p></td>
+<td><p>Matrix math unit</p></td>
+</tr>
+<tr class="row-even"><td><p>CUDA Core</p></td>
+<td><p>Shader Processor</p></td>
+<td><p>Scalar ALU</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<hr class="docutils" />
+<section id="tensor-creation-and-memory">
+<h2>5. Tensor Creation and Memory<a class="headerlink" href="#tensor-creation-and-memory" title="Link to this heading"></a></h2>
+<section id="tensor-construction">
+<h3>5.1 Tensor Construction<a class="headerlink" href="#tensor-construction" title="Link to this heading"></a></h3>
+<p>FlyDSL provides tensor operations with layout-aware partitioning:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Create a buffer tensor from a tensor argument (AMD buffer descriptor)</span>
+<span class="n">A</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">A</span><span class="p">)</span>
+
+<span class="c1"># Partition by block, then by thread. A second logical_divide is required before</span>
+<span class="c1"># slice(..., (None, tid)) so coord rank matches layout shape/stride rank.</span>
+<span class="n">tA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">logical_divide</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="n">block_dim</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">tA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">tA</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+<span class="n">tA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">logical_divide</span><span class="p">(</span><span class="n">tA</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">tA_thr</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">tA</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">tid</span><span class="p">))</span>
+
+<span class="c1"># Allocate register memrefs / copy_atom_call: see docs/quickstart.rst or examples/01-vectorAdd.py</span>
+</pre></div>
+</div>
+</section>
+<section id="memory-hierarchy">
+<h3>5.2 Memory Hierarchy<a class="headerlink" href="#memory-hierarchy" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Level</p></th>
+<th class="head"><p>NVIDIA</p></th>
+<th class="head"><p>AMD</p></th>
+<th class="head"><p>Typical Size</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Global Memory (GMEM)</p></td>
+<td><p>Global Memory</p></td>
+<td><p>Global Memory (HBM)</p></td>
+<td><p>GBs</p></td>
+</tr>
+<tr class="row-odd"><td><p>Shared/Local Memory</p></td>
+<td><p>SMEM (48–228 KB)</p></td>
+<td><p>LDS (64–160 KB)</p></td>
+<td><p>Per-CU</p></td>
+</tr>
+<tr class="row-even"><td><p>Register File</p></td>
+<td><p>RMEM (256 KB/SM)</p></td>
+<td><p>VGPR (512 KB/CU)</p></td>
+<td><p>Per-thread</p></td>
+</tr>
+<tr class="row-odd"><td><p>L2 Cache</p></td>
+<td><p>L2 Cache</p></td>
+<td><p>L2 Cache</p></td>
+<td><p>MBs</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>LDS allocation in FlyDSL:</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">flydsl.utils.smem_allocator</span><span class="w"> </span><span class="kn">import</span> <span class="n">SmemAllocator</span>
+
+<span class="n">allocator</span> <span class="o">=</span> <span class="n">SmemAllocator</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">arch</span><span class="o">=</span><span class="s2">&quot;gfx942&quot;</span><span class="p">)</span>
+<span class="n">lds_gen</span> <span class="o">=</span> <span class="n">allocator</span><span class="o">.</span><span class="n">allocate_array</span><span class="p">(</span><span class="n">T</span><span class="o">.</span><span class="n">f16</span><span class="p">(),</span> <span class="n">num_elems</span><span class="o">=</span><span class="mi">128</span><span class="o">*</span><span class="mi">64</span><span class="p">)</span>
+<span class="n">allocator</span><span class="o">.</span><span class="n">finalize</span><span class="p">()</span>
+
+<span class="n">base</span> <span class="o">=</span> <span class="n">allocator</span><span class="o">.</span><span class="n">get_base</span><span class="p">()</span>
+<span class="n">lds_ptr</span> <span class="o">=</span> <span class="n">lds_gen</span><span class="p">(</span><span class="n">base</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="swizzling-bank-conflict-avoidance">
+<h3>5.3 Swizzling (Bank Conflict Avoidance)<a class="headerlink" href="#swizzling-bank-conflict-avoidance" title="Link to this heading"></a></h3>
+<p>Swizzling remaps addresses to avoid bank conflicts in shared/local memory. FlyDSL does not provide a built-in swizzle function; kernels implement XOR-based swizzling manually using arithmetic ops:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># XOR-based swizzle at 16-byte granularity (manual implementation)</span>
+<span class="n">col_swizzled</span> <span class="o">=</span> <span class="n">col_bytes</span> <span class="o">^</span> <span class="p">((</span><span class="n">row</span> <span class="o">%</span> <span class="n">k_blocks16</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="mi">4</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>The pattern XORs the row index into the column address at 16-byte boundaries, distributing accesses across LDS banks.</p>
+</section>
+</section>
+<hr class="docutils" />
+<section id="data-movement">
+<h2>6. Data Movement<a class="headerlink" href="#data-movement" title="Link to this heading"></a></h2>
+<section id="copy-atoms-and-tiled-copies">
+<h3>6.1 Copy Atoms and Tiled Copies<a class="headerlink" href="#copy-atoms-and-tiled-copies" title="Link to this heading"></a></h3>
+<p>FlyDSL uses the CuTe copy abstraction: a <strong>copy atom</strong> defines a single thread’s copy capability, and a <strong>tiled copy</strong> distributes the atom across all threads:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">copy_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_copy_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">BufferCopy128b</span><span class="p">(),</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+
+<span class="c1"># Create tiled copy via raked product</span>
+<span class="n">thr_layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">4</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">val_layout</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">1</span><span class="p">,</span> <span class="mi">8</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">layout_thr_val</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">raked_product</span><span class="p">(</span><span class="n">thr_layout</span><span class="p">,</span> <span class="n">val_layout</span><span class="p">)</span>
+<span class="n">tile_mn</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">8</span><span class="p">)</span>
+<span class="n">tiled_copy</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">layout_thr_val</span><span class="p">,</span> <span class="n">tile_mn</span><span class="p">)</span>
+
+<span class="c1"># Get thread slice</span>
+<span class="n">thr_copy</span> <span class="o">=</span> <span class="n">tiled_copy</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+<span class="n">src_partition</span> <span class="o">=</span> <span class="n">thr_copy</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">src_tensor</span><span class="p">)</span>
+<span class="n">dst_partition</span> <span class="o">=</span> <span class="n">thr_copy</span><span class="o">.</span><span class="n">partition_D</span><span class="p">(</span><span class="n">dst_tensor</span><span class="p">)</span>
+
+<span class="c1"># Execute copy</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">src_partition</span><span class="p">,</span> <span class="n">dst_partition</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="buffer-loads-amd-specific">
+<h3>6.2 Buffer Loads (AMD-specific)<a class="headerlink" href="#buffer-loads-amd-specific" title="Link to this heading"></a></h3>
+<p>AMD GPUs provide buffer load instructions for efficient global memory access. FlyDSL exposes these via the <code class="docutils literal notranslate"><span class="pre">rocdl</span></code> submodule:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">A_buf</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">A</span><span class="p">)</span>
+
+<span class="c1"># Use buffer copy atoms for efficient memory access</span>
+<span class="n">copy_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_copy_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">BufferCopy128b</span><span class="p">(),</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+<hr class="docutils" />
+<section id="compute-operations-mfma">
+<h2>7. Compute Operations (MFMA)<a class="headerlink" href="#compute-operations-mfma" title="Link to this heading"></a></h2>
+<p>AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyDSL provides direct access to MFMA intrinsics:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">mma_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_mma_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">MFMA</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">))</span>
+<span class="n">tiled_mma</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_mma</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">)))</span>
+
+<span class="c1"># Block-level tensor views bA, bB, bC (e.g. after zipped_divide + slice by block)</span>
+<span class="n">thr_mma</span> <span class="o">=</span> <span class="n">tiled_mma</span><span class="o">.</span><span class="n">thr_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+<span class="n">frag_A</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_A</span><span class="p">(</span><span class="n">bA</span><span class="p">)</span>
+<span class="n">frag_B</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_B</span><span class="p">(</span><span class="n">bB</span><span class="p">)</span>
+<span class="n">frag_C</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_C</span><span class="p">(</span><span class="n">bC</span><span class="p">)</span>
+<span class="n">fx</span><span class="o">.</span><span class="n">gemm</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">,</span> <span class="n">frag_A</span><span class="p">,</span> <span class="n">frag_B</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">)</span>
+</pre></div>
+</div>
+<p><strong>MFMA instruction reference (AMD CDNA):</strong></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Instruction</p></th>
+<th class="head"><p>Data Type</p></th>
+<th class="head"><p>M×N×K</p></th>
+<th class="head"><p>Architecture</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_f32_16x16x16f16</span></code></p></td>
+<td><p>FP16</p></td>
+<td><p>16×16×16</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_f32_16x16x32_fp8_fp8</span></code></p></td>
+<td><p>FP8</p></td>
+<td><p>16×16×32</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_i32_16x16x32_i8</span></code></p></td>
+<td><p>INT8</p></td>
+<td><p>16×16×32</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_f32_32x32x8f16</span></code></p></td>
+<td><p>FP16</p></td>
+<td><p>32×32×8</p></td>
+<td><p>GFX942+</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">mfma_scale_x128</span></code></p></td>
+<td><p>MXFP4</p></td>
+<td><p>16×16×128</p></td>
+<td><p>GFX950</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>K64-byte micro-step pattern (2× K32 per step):</strong></p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">ku</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">tile_k_bytes</span> <span class="o">//</span> <span class="mi">64</span><span class="p">):</span>
+    <span class="n">a_val</span> <span class="o">=</span> <span class="n">lds_load_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>   <span class="c1"># Load A from LDS</span>
+    <span class="n">b_val</span> <span class="o">=</span> <span class="n">load_b_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>     <span class="c1"># Load B from GMEM</span>
+    <span class="n">c_acc</span> <span class="o">=</span> <span class="n">rocdl</span><span class="o">.</span><span class="n">mfma_f32_16x16x32_fp8_fp8</span><span class="p">(</span><span class="n">a_val</span><span class="p">,</span> <span class="n">b_val</span><span class="p">,</span> <span class="n">c_acc</span><span class="p">)</span>
+    <span class="c1"># second half</span>
+    <span class="n">a_val2</span> <span class="o">=</span> <span class="n">lds_load_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+    <span class="n">b_val2</span> <span class="o">=</span> <span class="n">load_b_pack_k32</span><span class="p">(</span><span class="o">...</span><span class="p">)</span>
+    <span class="n">c_acc</span> <span class="o">=</span> <span class="n">rocdl</span><span class="o">.</span><span class="n">mfma_f32_16x16x32_fp8_fp8</span><span class="p">(</span><span class="n">a_val2</span><span class="p">,</span> <span class="n">b_val2</span><span class="p">,</span> <span class="n">c_acc</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="synchronization">
+<h2>8. Synchronization<a class="headerlink" href="#synchronization" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>FlyDSL API</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gpu.barrier()</span></code></p></td>
+<td><p>Workgroup-level barrier (equivalent to <code class="docutils literal notranslate"><span class="pre">__syncthreads</span></code>)</p></td>
+</tr>
+</tbody>
+</table>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">fx</span><span class="o">.</span><span class="n">gpu</span><span class="o">.</span><span class="n">barrier</span><span class="p">()</span>
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="compilation-and-execution">
+<h2>9. Compilation and Execution<a class="headerlink" href="#compilation-and-execution" title="Link to this heading"></a></h2>
+<section id="compilation-pipeline">
+<h3>9.1 Compilation Pipeline<a class="headerlink" href="#compilation-pipeline" title="Link to this heading"></a></h3>
+<p>FlyDSL compiles Python → MLIR IR → ROCDL dialect → HSACO binary:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="c1"># Define kernel and launch wrapper</span>
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="o">...</span><span class="p">):</span>
+    <span class="o">...</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">launch</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span> <span class="o">...</span><span class="p">,</span>
+           <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">)):</span>
+    <span class="n">my_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span> <span class="o">...</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span>
+        <span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="o">...</span><span class="p">),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="o">...</span><span class="p">),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">,</span>
+    <span class="p">)</span>
+
+<span class="c1"># Call the jit function — compilation happens automatically on first call</span>
+<span class="n">launch</span><span class="p">(</span><span class="n">A_torch</span><span class="p">,</span> <span class="n">B_torch</span><span class="p">,</span> <span class="n">C_torch</span><span class="p">,</span> <span class="o">...</span><span class="p">,</span> <span class="n">stream</span><span class="o">=</span><span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">Stream</span><span class="p">())</span>
+</pre></div>
+</div>
+</section>
+<section id="environment-variables">
+<h3>9.2 Environment Variables<a class="headerlink" href="#environment-variables" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_BACKEND=rocm</span></code></p></td>
+<td><p>Compile backend id</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ARCH</span></code></p></td>
+<td><p>Target architecture (e.g., <code class="docutils literal notranslate"><span class="pre">gfx942</span></code>, <code class="docutils literal notranslate"><span class="pre">gfx950</span></code>)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_IR=1</span></code></p></td>
+<td><p>Dump intermediate MLIR IR</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_DIR=/path</span></code></p></td>
+<td><p>IR dump location</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">COMPILE_ONLY=1</span></code></p></td>
+<td><p>Skip execution, compile only</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_ENABLE_CACHE=0</span></code></p></td>
+<td><p>Disable disk cache (auto-invalidates on source changes; only needed for C++ pass or non-closure helper changes)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_CACHE_DIR=/path</span></code></p></td>
+<td><p>Cache directory (default: <code class="docutils literal notranslate"><span class="pre">~/.flydsl/cache/</span></code>)</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+<hr class="docutils" />
+<section id="complete-example-gemm-with-layout-algebra">
+<h2>10. Complete Example: GEMM with Layout Algebra<a class="headerlink" href="#complete-example-gemm-with-layout-algebra" title="Link to this heading"></a></h2>
+<p>This example matches <code class="docutils literal notranslate"><span class="pre">examples/03-tiledMma.py</span></code>: zipped divide and block slice, then
+<code class="docutils literal notranslate"><span class="pre">tiled_copy_*</span></code> + <code class="docutils literal notranslate"><span class="pre">thr_copy.retile</span></code> + <code class="docutils literal notranslate"><span class="pre">fx.copy</span></code> into fragments, <code class="docutils literal notranslate"><span class="pre">fx.gemm</span></code>, and copy out.
+(Use <code class="docutils literal notranslate"><span class="pre">thr_mma.make_fragment_*</span></code> on the block tiles <code class="docutils literal notranslate"><span class="pre">bA</span></code>/<code class="docutils literal notranslate"><span class="pre">bB</span></code>/<code class="docutils literal notranslate"><span class="pre">bC</span></code> directly—not
+<code class="docutils literal notranslate"><span class="pre">make_fragment_*</span></code> on <code class="docutils literal notranslate"><span class="pre">partition_*</span></code> outputs.)</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="n">block_m</span><span class="p">,</span> <span class="n">block_n</span><span class="p">,</span> <span class="n">block_k</span> <span class="o">=</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">64</span><span class="p">,</span> <span class="mi">8</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">gemm_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">):</span>
+    <span class="n">tid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">thread_idx</span><span class="o">.</span><span class="n">x</span>
+    <span class="n">bid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">block_idx</span><span class="o">.</span><span class="n">x</span>
+
+    <span class="n">tileA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="n">block_m</span><span class="p">,</span> <span class="n">block_k</span><span class="p">)</span>
+    <span class="n">tileB</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="n">block_n</span><span class="p">,</span> <span class="n">block_k</span><span class="p">)</span>
+    <span class="n">tileC</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tile</span><span class="p">(</span><span class="n">block_m</span><span class="p">,</span> <span class="n">block_n</span><span class="p">)</span>
+
+    <span class="n">A</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">A</span><span class="p">)</span>
+    <span class="n">B</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">B</span><span class="p">)</span>
+    <span class="n">C</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">make_buffer_tensor</span><span class="p">(</span><span class="n">C</span><span class="p">)</span>
+
+    <span class="n">bA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_divide</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">tileA</span><span class="p">)</span>
+    <span class="n">bB</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_divide</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">tileB</span><span class="p">)</span>
+    <span class="n">bC</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">zipped_divide</span><span class="p">(</span><span class="n">C</span><span class="p">,</span> <span class="n">tileC</span><span class="p">)</span>
+
+    <span class="n">bA</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">bA</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+    <span class="n">bB</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">bB</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+    <span class="n">bC</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">slice</span><span class="p">(</span><span class="n">bC</span><span class="p">,</span> <span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">bid</span><span class="p">))</span>
+
+    <span class="n">mma_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_mma_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">MFMA</span><span class="p">(</span><span class="mi">16</span><span class="p">,</span> <span class="mi">16</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">))</span>
+    <span class="n">tiled_mma</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_mma</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_layout</span><span class="p">((</span><span class="mi">2</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">)))</span>
+    <span class="n">thr_mma</span> <span class="o">=</span> <span class="n">tiled_mma</span><span class="o">.</span><span class="n">thr_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+
+    <span class="n">copy_atom</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_copy_atom</span><span class="p">(</span><span class="n">fx</span><span class="o">.</span><span class="n">rocdl</span><span class="o">.</span><span class="n">BufferCopy32b</span><span class="p">(),</span> <span class="n">fx</span><span class="o">.</span><span class="n">Float32</span><span class="p">)</span>
+    <span class="n">tiled_copy_A</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_A</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+    <span class="n">tiled_copy_B</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_B</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+    <span class="n">tiled_copy_C</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">make_tiled_copy_C</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">tiled_mma</span><span class="p">)</span>
+
+    <span class="n">thr_copy_A</span> <span class="o">=</span> <span class="n">tiled_copy_A</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+    <span class="n">thr_copy_B</span> <span class="o">=</span> <span class="n">tiled_copy_B</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+    <span class="n">thr_copy_C</span> <span class="o">=</span> <span class="n">tiled_copy_C</span><span class="o">.</span><span class="n">get_slice</span><span class="p">(</span><span class="n">tid</span><span class="p">)</span>
+
+    <span class="n">copy_src_A</span> <span class="o">=</span> <span class="n">thr_copy_A</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">bA</span><span class="p">)</span>
+    <span class="n">copy_src_B</span> <span class="o">=</span> <span class="n">thr_copy_B</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">bB</span><span class="p">)</span>
+    <span class="n">copy_dst_C</span> <span class="o">=</span> <span class="n">thr_copy_C</span><span class="o">.</span><span class="n">partition_S</span><span class="p">(</span><span class="n">bC</span><span class="p">)</span>
+
+    <span class="n">frag_A</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_A</span><span class="p">(</span><span class="n">bA</span><span class="p">)</span>
+    <span class="n">frag_B</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_B</span><span class="p">(</span><span class="n">bB</span><span class="p">)</span>
+    <span class="n">frag_C</span> <span class="o">=</span> <span class="n">thr_mma</span><span class="o">.</span><span class="n">make_fragment_C</span><span class="p">(</span><span class="n">bC</span><span class="p">)</span>
+
+    <span class="n">copy_frag_A</span> <span class="o">=</span> <span class="n">thr_copy_A</span><span class="o">.</span><span class="n">retile</span><span class="p">(</span><span class="n">frag_A</span><span class="p">)</span>
+    <span class="n">copy_frag_B</span> <span class="o">=</span> <span class="n">thr_copy_B</span><span class="o">.</span><span class="n">retile</span><span class="p">(</span><span class="n">frag_B</span><span class="p">)</span>
+    <span class="n">copy_frag_C</span> <span class="o">=</span> <span class="n">thr_copy_C</span><span class="o">.</span><span class="n">retile</span><span class="p">(</span><span class="n">frag_C</span><span class="p">)</span>
+
+    <span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">copy_src_A</span><span class="p">,</span> <span class="n">copy_frag_A</span><span class="p">,</span> <span class="n">pred</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+    <span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">copy_src_B</span><span class="p">,</span> <span class="n">copy_frag_B</span><span class="p">,</span> <span class="n">pred</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+
+    <span class="n">fx</span><span class="o">.</span><span class="n">gemm</span><span class="p">(</span><span class="n">mma_atom</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">,</span> <span class="n">frag_A</span><span class="p">,</span> <span class="n">frag_B</span><span class="p">,</span> <span class="n">frag_C</span><span class="p">)</span>
+
+    <span class="n">fx</span><span class="o">.</span><span class="n">copy</span><span class="p">(</span><span class="n">copy_atom</span><span class="p">,</span> <span class="n">copy_frag_C</span><span class="p">,</span> <span class="n">copy_dst_C</span><span class="p">,</span> <span class="n">pred</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">tiledMma</span><span class="p">(</span><span class="n">A</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">B</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">C</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+             <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">)):</span>
+    <span class="n">gemm_kernel</span><span class="p">(</span><span class="n">A</span><span class="p">,</span> <span class="n">B</span><span class="p">,</span> <span class="n">C</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span><span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>See <code class="docutils literal notranslate"><span class="pre">examples/03-tiledMma.py</span></code> for the runnable script, and <code class="docutils literal notranslate"><span class="pre">kernels/preshuffle_gemm.py</span></code>
+for a production-quality GEMM implementation.</p>
+</section>
+<hr class="docutils" />
+<section id="references">
+<h2>11. References<a class="headerlink" href="#references" title="Link to this heading"></a></h2>
+<section id="cute-layout-algebra-bsd-3-clause">
+<h3>CuTe Layout Algebra (BSD-3-Clause)<a class="headerlink" href="#cute-layout-algebra-bsd-3-clause" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>C++ headers:</strong> <a class="reference external" href="https://github.com/NVIDIA/cutlass/tree/main/include/cute">CUTLASS <code class="docutils literal notranslate"><span class="pre">include/cute/</span></code></a></p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">layout.hpp</span></code> — Layout type, all algebra operations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">tensor.hpp</span></code> — Tensor type (pointer + layout)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">algorithm/</span></code> — Copy, GEMM, partitioning algorithms</p></li>
+</ul>
+</li>
+<li><p><strong>GTC presentations:</strong> “CuTe: A Layout Algebra for CUTLASS” — mathematical foundations and design rationale</p></li>
+<li><p><strong>PyCute reference:</strong> <code class="docutils literal notranslate"><span class="pre">torch/distributed/_pycute/layout.py</span></code> — pure-Python layout algebra (open source, PyTorch)</p></li>
+</ul>
+</section>
+<section id="flydsl-source-files">
+<h3>FlyDSL Source Files<a class="headerlink" href="#flydsl-source-files" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/</span></code> — Layout algebra and expression API (<code class="docutils literal notranslate"><span class="pre">primitive.py</span></code>, <code class="docutils literal notranslate"><span class="pre">derived.py</span></code>, etc.)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/rocdl/</span></code> — ROCDL-specific operations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/</span></code> — JIT compilation pipeline (<code class="docutils literal notranslate"><span class="pre">kernel_function.py</span></code>, <code class="docutils literal notranslate"><span class="pre">jit_function.py</span></code>)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/utils/smem_allocator.py</span></code> — SmemAllocator</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/01-vectorAdd.py</span></code> — VecAdd example with layout algebra</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/02-tiledCopy.py</span></code> — Tiled copy example</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">examples/03-tiledMma.py</span></code> — Tiled MFMA GEMM example</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">kernels/preshuffle_gemm.py</span></code> — Production GEMM implementation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">kernels/preshuffle_gemm_flyc.py</span></code> — GEMM using <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> API</p></li>
+</ul>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="testing_benchmarking_guide.html" class="btn btn-neutral float-left" title="Testing &amp; Benchmarking Guide" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="api/dsl.html" class="btn btn-neutral float-right" title="FlyDSL Python DSL" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, Advanced Micro Devices, Inc..</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,501 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tutorials &mdash; FlyDSL 0.2.2 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../_static/documentation_options.js?v=000c92bf"></script>
+      <script src="../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../_static/copybutton.js?v=f281be69"></script>
+    <script src="../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Basic Usage" href="basic_usage.html" />
+    <link rel="prev" title="Pre-built Kernels" href="../api/kernels.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../index.html" class="icon icon-home">
+            FlyDSL
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#install-from-pypi">Install from PyPI</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#build-from-source">Build from source</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#step-1-build-llvm-mlir">Step 1: Build LLVM/MLIR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#step-2-build-flydsl">Step 2: Build FlyDSL</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../installation.html#step-3-install-flydsl">Step 3: Install FlyDSL</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#verify-installation">Verify Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../installation.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quick Start</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#a-minimal-vector-add-kernel">A Minimal Vector Add Kernel</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#key-concepts">Key Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#compilation-pipeline">Compilation Pipeline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#aot-pre-compilation">AOT Pre-compilation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../architecture_guide.html">Architecture &amp; Compilation Pipeline Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#project-structure">1. Project Structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#architecture">2. Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#compilation-pipeline">3. Compilation Pipeline</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#high-level-flow">3.1 High-Level Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#pipeline-stages-in-detail">3.2 Pipeline Stages in Detail</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#jit-compilation-flow">3.3 JIT Compilation Flow</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#key-abstractions">4. Key Abstractions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#flyc-jit-host-launcher">4.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> — Host Launcher</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#flyc-kernel-gpu-kernel">4.2 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — GPU Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#kernellauncher">4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#jitcfunction">4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#dsltype-jitargument-protocols">4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> Protocols</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#astrewriter">4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#environment-variables">5. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#compilation-options-flydsl-compile">5.1 Compilation Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#debug-options-flydsl-debug">5.2 Debug Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#runtime-options-flydsl-runtime">5.3 Runtime Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../architecture_guide.html#architecture-detection-priority">5.4 Architecture Detection Priority</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#target-hardware">6. Target Hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#ir-dump-workflow">7. IR Dump Workflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../architecture_guide.html#source-files">8. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../layout_system_guide.html">Layout Algebra Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#core-types">1. Core Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#inttuple-patterns">IntTuple Patterns</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#construction">2. Construction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#python-api-via-flydsl-expr">Python API (via <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#coordinate-mapping">3. Coordinate Mapping</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#crd2idx-coordinate-to-index"><code class="docutils literal notranslate"><span class="pre">crd2idx</span></code> — Coordinate to Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#idx2crd-index-to-coordinate-inverse"><code class="docutils literal notranslate"><span class="pre">idx2crd</span></code> — Index to Coordinate (inverse)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#query-operations">4. Query Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#layout-algebra">5. Layout Algebra</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#composition-composition-a-b">5.1 Composition: <code class="docutils literal notranslate"><span class="pre">composition(A,</span> <span class="pre">B)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#complement-complement-tiler-target-size">5.2 Complement: <code class="docutils literal notranslate"><span class="pre">complement(tiler,</span> <span class="pre">target_size)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#coalesce-coalesce-layout">5.3 Coalesce: <code class="docutils literal notranslate"><span class="pre">coalesce(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#right-inverse-right-inverse-layout">5.4 Right Inverse: <code class="docutils literal notranslate"><span class="pre">right_inverse(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#recast-layout-recast-layout-layout-old-bits-new-bits">5.5 Recast Layout: <code class="docutils literal notranslate"><span class="pre">recast_layout(layout,</span> <span class="pre">old_bits,</span> <span class="pre">new_bits)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#product-operations">6. Product Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#divide-operations">7. Divide Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#structural-operations">8. Structural Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#select-int-tuple-indices"><code class="docutils literal notranslate"><span class="pre">select(int_tuple,</span> <span class="pre">indices)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#group-int-tuple-begin-end"><code class="docutils literal notranslate"><span class="pre">group(int_tuple,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#append-base-elem-prepend-base-elem"><code class="docutils literal notranslate"><span class="pre">append(base,</span> <span class="pre">elem)</span></code> / <code class="docutils literal notranslate"><span class="pre">prepend(base,</span> <span class="pre">elem)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#zip-lhs-rhs"><code class="docutils literal notranslate"><span class="pre">zip(lhs,</span> <span class="pre">rhs)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#slice-src-coord"><code class="docutils literal notranslate"><span class="pre">slice(src,</span> <span class="pre">coord)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#memref-view-copy-operations">9. MemRef / View / Copy Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#memref-operations">MemRef Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#view-and-offset">View and Offset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../layout_system_guide.html#copy-atoms-and-tiled-copies">Copy Atoms and Tiled Copies</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#copy-atom-types">Copy Atom Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#id1">Construction</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#thread-slicing-and-partitioning">Thread Slicing and Partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#execution">Execution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../layout_system_guide.html#introspection">Introspection</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#nested-hierarchical-layouts">10. Nested / Hierarchical Layouts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#inttuple-arithmetic">11. IntTuple Arithmetic</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#printf-debugging">12. Printf Debugging</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#decision-tree">13. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../layout_system_guide.html#source-files">14. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../kernel_authoring_guide.html">Kernel Authoring Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#basic-kernel-pattern">1. Basic Kernel Pattern</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#flyc-kernel-flyc-jit">1.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> + <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#how-it-works">1.2 How It Works</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#parameter-types">2. Parameter Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-tensor">2.1 <code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-constexpr-t">2.2 <code class="docutils literal notranslate"><span class="pre">fx.Constexpr[T]</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-int32">2.3 <code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#fx-stream">2.4 <code class="docutils literal notranslate"><span class="pre">fx.Stream</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#custom-argument-types">2.5 Custom Argument Types</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#thread-block-hierarchy">3. Thread / Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#expression-api-flydsl-expr">4. Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#arithmetic-and-numeric-types">4.1 Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#vector-values-vector">4.2 Vector Values (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#buffer-operations-fx-buffer-ops">4.3 Buffer Operations (<code class="docutils literal notranslate"><span class="pre">fx.buffer_ops</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#rocm-intrinsics-fx-rocdl">4.4 ROCm Intrinsics (<code class="docutils literal notranslate"><span class="pre">fx.rocdl</span></code>)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#high-level-helpers">High-Level Helpers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#instruction-scheduling-barriers">Instruction Scheduling Barriers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#math-intrinsics">Math Intrinsics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../kernel_authoring_guide.html#low-level-ops">Low-Level Ops</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#gpu-operations-fx-gpu">4.5 GPU Operations (<code class="docutils literal notranslate"><span class="pre">fx.gpu</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#control-flow">5. Control Flow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#python-loops">5.1 Python Loops</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#const-expr">5.2 <code class="docutils literal notranslate"><span class="pre">const_expr()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#shared-memory-lds">6. Shared Memory (LDS)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#smemallocator">6.1 <code class="docutils literal notranslate"><span class="pre">SmemAllocator</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#finalizing-lds-allocation">6.2 Finalizing LDS Allocation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#lds-capacity">6.3 LDS Capacity</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#launch-configuration">7. Launch Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#kernellauncher-launch">7.1 <code class="docutils literal notranslate"><span class="pre">KernelLauncher.launch()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#dynamic-grid-block-dimensions">7.2 Dynamic Grid/Block Dimensions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#compilation-caching">9. Compilation &amp; Caching</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#automatic-caching">9.1 Automatic Caching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#cache-invalidation">9.2 Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#disk-cache-invalidation">9.3 Disk Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#compile-only-mode">9.4 Compile-Only Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#debugging">10. Debugging</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#dumping-ir">10.1 Dumping IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#printing-ir">10.2 Printing IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../kernel_authoring_guide.html#ast-diff">10.3 AST Diff</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#complete-example-preshuffle-gemm">11. Complete Example: Preshuffle GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#decision-tree">12. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../kernel_authoring_guide.html#source-files">13. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../prebuilt_kernels_guide.html">Pre-built Kernel Library Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#normalization-kernels">1. Normalization Kernels</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#layernorm-kernels-layernorm-kernel-py">1.1 LayerNorm (<code class="docutils literal notranslate"><span class="pre">kernels/layernorm_kernel.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#rmsnorm-kernels-rmsnorm-kernel-py">1.2 RMSNorm (<code class="docutils literal notranslate"><span class="pre">kernels/rmsnorm_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#softmax-kernel">2. Softmax Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#softmax-kernels-softmax-kernel-py">2.1 Softmax (<code class="docutils literal notranslate"><span class="pre">kernels/softmax_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#gemm-kernel">3. GEMM Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#preshuffle-gemm-kernels-preshuffle-gemm-py">3.1 Preshuffle GEMM (<code class="docutils literal notranslate"><span class="pre">kernels/preshuffle_gemm.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#b-flashattention-forward-kernels-flash-attn-generic-py-kernels-flash-attn-gfx950-py-kernels-flash-attn-fp8-gfx950-py">3b. FlashAttention Forward (<code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_generic.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_gfx950.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_fp8_gfx950.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#fp8-e4m3fn-forward">fp8 (e4m3fn) forward</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#shared-utilities">4. Shared Utilities</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#reduction-helpers-kernels-kernels-common-py">4.1 Reduction Helpers (<code class="docutils literal notranslate"><span class="pre">kernels/kernels_common.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#mfma-epilogues-kernels-mfma-epilogues-py">4.2 MFMA Epilogues (<code class="docutils literal notranslate"><span class="pre">kernels/mfma_epilogues.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#preshuffle-pipeline-kernels-mfma-preshuffle-pipeline-py">4.3 Preshuffle Pipeline (<code class="docutils literal notranslate"><span class="pre">kernels/mfma_preshuffle_pipeline.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#layout-coordinate-helpers">4.4 Layout Coordinate Helpers</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#kernel-api-comparison">5. Kernel API Comparison</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../prebuilt_kernels_guide.html#new-api-gemm">New API (GEMM)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#kernel-decision-tree">6. Kernel Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#source-files">7. Source Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../prebuilt_kernels_guide.html#test-files">8. Test Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../testing_benchmarking_guide.html">Testing &amp; Benchmarking Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#test-categories">1. Test Categories</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#mlir-lit-tests-tests-mlir">1.1 MLIR Lit Tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#python-tests-tests-python">1.2 Python Tests (<code class="docutils literal notranslate"><span class="pre">tests/python/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#gpu-kernel-tests-tests-kernels">1.3 GPU Kernel Tests (<code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#aot-examples-tests-python-examples">1.4 AOT Examples (<code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#test-runner-scripts">2. Test Runner Scripts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#scripts-run-tests-sh">2.1 <code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#scripts-run-benchmark-sh">2.2 <code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#pytest-configuration">3. Pytest Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#tests-conftest-py">3.1 <code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#performance-measurement">4. Performance Measurement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#tests-test-common-py">4.1 <code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#tests-kernels-benchmark-common-py">4.2 <code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#compilation-utilities-tests-utils-py">5. Compilation Utilities (<code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#compile-to-hsaco"><code class="docutils literal notranslate"><span class="pre">compile_to_hsaco()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#weight-utilities">Weight Utilities</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#writing-new-tests">6. Writing New Tests</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#pyir-test-pattern-no-gpu">6.1 PyIR Test Pattern (No GPU)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#gpu-kernel-test-pattern-new-api">6.2 GPU Kernel Test Pattern (New API)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#benchmark-test-pattern">6.3 Benchmark Test Pattern</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#gemm-test-cli-arguments">7. GEMM Test CLI Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#test-configuration-via-environment-variables">8. Test Configuration via Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#ir-dump-workflow">9. IR Dump Workflow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#via-mlircompiler">Via <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="../testing_benchmarking_guide.html#dedicated-ir-dump-script">Dedicated IR Dump Script</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../testing_benchmarking_guide.html#source-files">10. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../cute_layout_algebra_guide.html">CuTe Layout Algebra Reference for FlyDSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#overview">1. Overview</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#what-is-the-cute-layout-algebra">1.1 What is the CuTe Layout Algebra?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#flydsl-as-an-amd-implementation">1.2 FlyDSL as an AMD Implementation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#layout-algebra-fundamentals">2. Layout Algebra Fundamentals</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#core-types">2.1 Core Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#query-operations">2.2 Query Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#coordinate-mapping">2.3 Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#layout-algebra-operations">2.4 Layout Algebra Operations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#composition">Composition</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#complement">Complement</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#coalesce">Coalesce</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#products">Products</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#divides">Divides</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../cute_layout_algebra_guide.html#partitioning-utilities">Partitioning Utilities</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#flydsl-kernel-development">3. FlyDSL Kernel Development</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#thread-and-block-hierarchy">4. Thread and Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#tensor-creation-and-memory">5. Tensor Creation and Memory</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#tensor-construction">5.1 Tensor Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#memory-hierarchy">5.2 Memory Hierarchy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#swizzling-bank-conflict-avoidance">5.3 Swizzling (Bank Conflict Avoidance)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#data-movement">6. Data Movement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#copy-atoms-and-tiled-copies">6.1 Copy Atoms and Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#buffer-loads-amd-specific">6.2 Buffer Loads (AMD-specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#compute-operations-mfma">7. Compute Operations (MFMA)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#compilation-and-execution">9. Compilation and Execution</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#compilation-pipeline">9.1 Compilation Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#environment-variables">9.2 Environment Variables</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#complete-example-gemm-with-layout-algebra">10. Complete Example: GEMM with Layout Algebra</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../cute_layout_algebra_guide.html#references">11. References</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#cute-layout-algebra-bsd-3-clause">CuTe Layout Algebra (BSD-3-Clause)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../cute_layout_algebra_guide.html#flydsl-source-files">FlyDSL Source Files</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../api/dsl.html">FlyDSL Python DSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/dsl.html#module-flydsl">Core Module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/dsl.html#expression-api-flydsl-expr">Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-construction">Layout Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-inspection">Layout Inspection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-algebra">Layout Algebra</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#layout-products-divides">Layout Products &amp; Divides</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#coordinate-mapping">Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#memory-operations">Memory Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#copy-gemm">Copy &amp; GEMM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#derived-tiled-operations-flydsl-expr-derived">Derived Tiled Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.derived</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#type-annotations">Type Annotations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#gpu-intrinsics-flydsl-expr-gpu">GPU Intrinsics (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.gpu</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#arithmetic-and-numeric-types">Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#vector-values-flydsl-expr-typing-vector">Vector Values (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.typing.Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#buffer-operations-flydsl-expr-buffer-ops">Buffer Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.buffer_ops</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../api/dsl.html#rocdl-operations-flydsl-expr-rocdl">ROCDL Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.rocdl</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../api/dsl.html#compiler-api-flydsl-compiler">Compiler API (<code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../api/compiler.html">Compiler &amp; Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#flyc-kernel-and-flyc-jit"><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#compilation-flow">Compilation Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#tensor-arguments">Tensor Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#buffer-operations">Buffer Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#rocdl-operations">ROCDL Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/compiler.html#fly-opt-cli">fly-opt CLI</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../api/kernels.html">Pre-built Kernels</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#gemm-kernels">GEMM Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#moe-mixture-of-experts-kernels">MoE (Mixture-of-Experts) Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#paged-attention">Paged Attention</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#normalization">Normalization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#softmax">Softmax</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#reduction">Reduction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../api/kernels.html#utilities">Utilities</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Tutorials</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="basic_usage.html">Basic Usage</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="basic_usage.html#setting-up-the-environment">Setting Up the Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="basic_usage.html#understanding-layouts">Understanding Layouts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="basic_usage.html#defining-a-kernel">Defining a Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="basic_usage.html#launching-kernels">Launching Kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="basic_usage.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_development.html">Kernel Development</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_development.html#tiled-copies">Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_development.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_development.html#shared-memory-lds">Shared Memory (LDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_development.html#performance-optimization">Performance Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_development.html#reference-implementations">Reference Implementations</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../index.html">FlyDSL</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Tutorials</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../_sources/tutorials/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="tutorials">
+<h1>Tutorials<a class="headerlink" href="#tutorials" title="Link to this heading"></a></h1>
+<div class="toctree-wrapper compound">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="basic_usage.html">Basic Usage</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="basic_usage.html#setting-up-the-environment">Setting Up the Environment</a></li>
+<li class="toctree-l2"><a class="reference internal" href="basic_usage.html#understanding-layouts">Understanding Layouts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="basic_usage.html#defining-a-kernel">Defining a Kernel</a></li>
+<li class="toctree-l2"><a class="reference internal" href="basic_usage.html#launching-kernels">Launching Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="basic_usage.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_development.html">Kernel Development</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="kernel_development.html#tiled-copies">Tiled Copies</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_development.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_development.html#shared-memory-lds">Shared Memory (LDS)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_development.html#performance-optimization">Performance Optimization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_development.html#reference-implementations">Reference Implementations</a></li>
+</ul>
+</li>
+</ul>
+</div>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="../api/kernels.html" class="btn btn-neutral float-left" title="Pre-built Kernels" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="basic_usage.html" class="btn btn-neutral float-right" title="Basic Usage" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, Advanced Micro Devices, Inc..</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

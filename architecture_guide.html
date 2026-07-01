@@ -1,0 +1,1173 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Architecture &amp; Compilation Pipeline Guide &mdash; FlyDSL 0.2.2 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=000c92bf"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="_static/copybutton.js?v=f281be69"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Layout Algebra Guide" href="layout_system_guide.html" />
+    <link rel="prev" title="Quick Start" href="quickstart.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            FlyDSL
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Getting Started</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#prerequisites">Prerequisites</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#install-from-pypi">Install from PyPI</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#build-from-source">Build from source</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#step-1-build-llvm-mlir">Step 1: Build LLVM/MLIR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#step-2-build-flydsl">Step 2: Build FlyDSL</a></li>
+<li class="toctree-l3"><a class="reference internal" href="installation.html#step-3-install-flydsl">Step 3: Install FlyDSL</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#verify-installation">Verify Installation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="installation.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#a-minimal-vector-add-kernel">A Minimal Vector Add Kernel</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#key-concepts">Key Concepts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#compilation-pipeline">Compilation Pipeline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#aot-pre-compilation">AOT Pre-compilation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="quickstart.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Guides</span></p>
+<ul class="current">
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Architecture &amp; Compilation Pipeline Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#project-structure">1. Project Structure</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#architecture">2. Architecture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#compilation-pipeline">3. Compilation Pipeline</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#high-level-flow">3.1 High-Level Flow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pipeline-stages-in-detail">3.2 Pipeline Stages in Detail</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#jit-compilation-flow">3.3 JIT Compilation Flow</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#key-abstractions">4. Key Abstractions</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#flyc-jit-host-launcher">4.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> — Host Launcher</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#flyc-kernel-gpu-kernel">4.2 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — GPU Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#kernellauncher">4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#jitcfunction">4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="#dsltype-jitargument-protocols">4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> Protocols</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#astrewriter">4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#environment-variables">5. Environment Variables</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#compilation-options-flydsl-compile">5.1 Compilation Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#debug-options-flydsl-debug">5.2 Debug Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#runtime-options-flydsl-runtime">5.3 Runtime Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#architecture-detection-priority">5.4 Architecture Detection Priority</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="#target-hardware">6. Target Hardware</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#ir-dump-workflow">7. IR Dump Workflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#source-files">8. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="layout_system_guide.html">Layout Algebra Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#core-types">1. Core Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#inttuple-patterns">IntTuple Patterns</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#construction">2. Construction</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#python-api-via-flydsl-expr">Python API (via <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#coordinate-mapping">3. Coordinate Mapping</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#crd2idx-coordinate-to-index"><code class="docutils literal notranslate"><span class="pre">crd2idx</span></code> — Coordinate to Index</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#idx2crd-index-to-coordinate-inverse"><code class="docutils literal notranslate"><span class="pre">idx2crd</span></code> — Index to Coordinate (inverse)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#example">Example</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#query-operations">4. Query Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#layout-algebra">5. Layout Algebra</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#composition-composition-a-b">5.1 Composition: <code class="docutils literal notranslate"><span class="pre">composition(A,</span> <span class="pre">B)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#complement-complement-tiler-target-size">5.2 Complement: <code class="docutils literal notranslate"><span class="pre">complement(tiler,</span> <span class="pre">target_size)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#coalesce-coalesce-layout">5.3 Coalesce: <code class="docutils literal notranslate"><span class="pre">coalesce(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#right-inverse-right-inverse-layout">5.4 Right Inverse: <code class="docutils literal notranslate"><span class="pre">right_inverse(layout)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#recast-layout-recast-layout-layout-old-bits-new-bits">5.5 Recast Layout: <code class="docutils literal notranslate"><span class="pre">recast_layout(layout,</span> <span class="pre">old_bits,</span> <span class="pre">new_bits)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#product-operations">6. Product Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#divide-operations">7. Divide Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#structural-operations">8. Structural Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#select-int-tuple-indices"><code class="docutils literal notranslate"><span class="pre">select(int_tuple,</span> <span class="pre">indices)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#group-int-tuple-begin-end"><code class="docutils literal notranslate"><span class="pre">group(int_tuple,</span> <span class="pre">begin,</span> <span class="pre">end)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#append-base-elem-prepend-base-elem"><code class="docutils literal notranslate"><span class="pre">append(base,</span> <span class="pre">elem)</span></code> / <code class="docutils literal notranslate"><span class="pre">prepend(base,</span> <span class="pre">elem)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#zip-lhs-rhs"><code class="docutils literal notranslate"><span class="pre">zip(lhs,</span> <span class="pre">rhs)</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#slice-src-coord"><code class="docutils literal notranslate"><span class="pre">slice(src,</span> <span class="pre">coord)</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#memref-view-copy-operations">9. MemRef / View / Copy Operations</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#memref-operations">MemRef Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#view-and-offset">View and Offset</a></li>
+<li class="toctree-l3"><a class="reference internal" href="layout_system_guide.html#copy-atoms-and-tiled-copies">Copy Atoms and Tiled Copies</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#copy-atom-types">Copy Atom Types</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#id1">Construction</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#thread-slicing-and-partitioning">Thread Slicing and Partitioning</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#execution">Execution</a></li>
+<li class="toctree-l4"><a class="reference internal" href="layout_system_guide.html#introspection">Introspection</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#nested-hierarchical-layouts">10. Nested / Hierarchical Layouts</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#inttuple-arithmetic">11. IntTuple Arithmetic</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#printf-debugging">12. Printf Debugging</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#decision-tree">13. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="layout_system_guide.html#source-files">14. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="kernel_authoring_guide.html">Kernel Authoring Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#basic-kernel-pattern">1. Basic Kernel Pattern</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#flyc-kernel-flyc-jit">1.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> + <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#how-it-works">1.2 How It Works</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#parameter-types">2. Parameter Types</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-tensor">2.1 <code class="docutils literal notranslate"><span class="pre">fx.Tensor</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-constexpr-t">2.2 <code class="docutils literal notranslate"><span class="pre">fx.Constexpr[T]</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-int32">2.3 <code class="docutils literal notranslate"><span class="pre">fx.Int32</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#fx-stream">2.4 <code class="docutils literal notranslate"><span class="pre">fx.Stream</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#custom-argument-types">2.5 Custom Argument Types</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#thread-block-hierarchy">3. Thread / Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#expression-api-flydsl-expr">4. Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#arithmetic-and-numeric-types">4.1 Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#vector-values-vector">4.2 Vector Values (<code class="docutils literal notranslate"><span class="pre">Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#buffer-operations-fx-buffer-ops">4.3 Buffer Operations (<code class="docutils literal notranslate"><span class="pre">fx.buffer_ops</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#rocm-intrinsics-fx-rocdl">4.4 ROCm Intrinsics (<code class="docutils literal notranslate"><span class="pre">fx.rocdl</span></code>)</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#high-level-helpers">High-Level Helpers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#instruction-scheduling-barriers">Instruction Scheduling Barriers</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#math-intrinsics">Math Intrinsics</a></li>
+<li class="toctree-l4"><a class="reference internal" href="kernel_authoring_guide.html#low-level-ops">Low-Level Ops</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#gpu-operations-fx-gpu">4.5 GPU Operations (<code class="docutils literal notranslate"><span class="pre">fx.gpu</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#control-flow">5. Control Flow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#python-loops">5.1 Python Loops</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#const-expr">5.2 <code class="docutils literal notranslate"><span class="pre">const_expr()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#shared-memory-lds">6. Shared Memory (LDS)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#smemallocator">6.1 <code class="docutils literal notranslate"><span class="pre">SmemAllocator</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#finalizing-lds-allocation">6.2 Finalizing LDS Allocation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#lds-capacity">6.3 LDS Capacity</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#launch-configuration">7. Launch Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#kernellauncher-launch">7.1 <code class="docutils literal notranslate"><span class="pre">KernelLauncher.launch()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#dynamic-grid-block-dimensions">7.2 Dynamic Grid/Block Dimensions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#compilation-caching">9. Compilation &amp; Caching</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#automatic-caching">9.1 Automatic Caching</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#cache-invalidation">9.2 Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#disk-cache-invalidation">9.3 Disk Cache Invalidation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#compile-only-mode">9.4 Compile-Only Mode</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#debugging">10. Debugging</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#dumping-ir">10.1 Dumping IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#printing-ir">10.2 Printing IR</a></li>
+<li class="toctree-l3"><a class="reference internal" href="kernel_authoring_guide.html#ast-diff">10.3 AST Diff</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#complete-example-preshuffle-gemm">11. Complete Example: Preshuffle GEMM</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#decision-tree">12. Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="kernel_authoring_guide.html#source-files">13. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="prebuilt_kernels_guide.html">Pre-built Kernel Library Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#normalization-kernels">1. Normalization Kernels</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#layernorm-kernels-layernorm-kernel-py">1.1 LayerNorm (<code class="docutils literal notranslate"><span class="pre">kernels/layernorm_kernel.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#rmsnorm-kernels-rmsnorm-kernel-py">1.2 RMSNorm (<code class="docutils literal notranslate"><span class="pre">kernels/rmsnorm_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#softmax-kernel">2. Softmax Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#softmax-kernels-softmax-kernel-py">2.1 Softmax (<code class="docutils literal notranslate"><span class="pre">kernels/softmax_kernel.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#gemm-kernel">3. GEMM Kernel</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#preshuffle-gemm-kernels-preshuffle-gemm-py">3.1 Preshuffle GEMM (<code class="docutils literal notranslate"><span class="pre">kernels/preshuffle_gemm.py</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#b-flashattention-forward-kernels-flash-attn-generic-py-kernels-flash-attn-gfx950-py-kernels-flash-attn-fp8-gfx950-py">3b. FlashAttention Forward (<code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_generic.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_gfx950.py</span></code>, <code class="docutils literal notranslate"><span class="pre">kernels/flash_attn_fp8_gfx950.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#fp8-e4m3fn-forward">fp8 (e4m3fn) forward</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#shared-utilities">4. Shared Utilities</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#reduction-helpers-kernels-kernels-common-py">4.1 Reduction Helpers (<code class="docutils literal notranslate"><span class="pre">kernels/kernels_common.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#mfma-epilogues-kernels-mfma-epilogues-py">4.2 MFMA Epilogues (<code class="docutils literal notranslate"><span class="pre">kernels/mfma_epilogues.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#preshuffle-pipeline-kernels-mfma-preshuffle-pipeline-py">4.3 Preshuffle Pipeline (<code class="docutils literal notranslate"><span class="pre">kernels/mfma_preshuffle_pipeline.py</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#layout-coordinate-helpers">4.4 Layout Coordinate Helpers</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#kernel-api-comparison">5. Kernel API Comparison</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="prebuilt_kernels_guide.html#new-api-gemm">New API (GEMM)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#kernel-decision-tree">6. Kernel Decision Tree</a></li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#source-files">7. Source Files</a></li>
+<li class="toctree-l2"><a class="reference internal" href="prebuilt_kernels_guide.html#test-files">8. Test Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="testing_benchmarking_guide.html">Testing &amp; Benchmarking Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#quick-reference">Quick Reference</a></li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#test-categories">1. Test Categories</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#mlir-lit-tests-tests-mlir">1.1 MLIR Lit Tests (<code class="docutils literal notranslate"><span class="pre">tests/mlir/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#python-tests-tests-python">1.2 Python Tests (<code class="docutils literal notranslate"><span class="pre">tests/python/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#gpu-kernel-tests-tests-kernels">1.3 GPU Kernel Tests (<code class="docutils literal notranslate"><span class="pre">tests/kernels/</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#aot-examples-tests-python-examples">1.4 AOT Examples (<code class="docutils literal notranslate"><span class="pre">tests/python/examples/</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#test-runner-scripts">2. Test Runner Scripts</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#scripts-run-tests-sh">2.1 <code class="docutils literal notranslate"><span class="pre">scripts/run_tests.sh</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#scripts-run-benchmark-sh">2.2 <code class="docutils literal notranslate"><span class="pre">scripts/run_benchmark.sh</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#pytest-configuration">3. Pytest Configuration</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#tests-conftest-py">3.1 <code class="docutils literal notranslate"><span class="pre">tests/conftest.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#performance-measurement">4. Performance Measurement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#tests-test-common-py">4.1 <code class="docutils literal notranslate"><span class="pre">tests/test_common.py</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#tests-kernels-benchmark-common-py">4.2 <code class="docutils literal notranslate"><span class="pre">tests/kernels/benchmark_common.py</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#compilation-utilities-tests-utils-py">5. Compilation Utilities (<code class="docutils literal notranslate"><span class="pre">tests/utils.py</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#compile-to-hsaco"><code class="docutils literal notranslate"><span class="pre">compile_to_hsaco()</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#weight-utilities">Weight Utilities</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#writing-new-tests">6. Writing New Tests</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#pyir-test-pattern-no-gpu">6.1 PyIR Test Pattern (No GPU)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#gpu-kernel-test-pattern-new-api">6.2 GPU Kernel Test Pattern (New API)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#benchmark-test-pattern">6.3 Benchmark Test Pattern</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#gemm-test-cli-arguments">7. GEMM Test CLI Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#test-configuration-via-environment-variables">8. Test Configuration via Environment Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#ir-dump-workflow">9. IR Dump Workflow</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#via-mlircompiler">Via <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code></a></li>
+<li class="toctree-l3"><a class="reference internal" href="testing_benchmarking_guide.html#dedicated-ir-dump-script">Dedicated IR Dump Script</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="testing_benchmarking_guide.html#source-files">10. Source Files</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="cute_layout_algebra_guide.html">CuTe Layout Algebra Reference for FlyDSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#overview">1. Overview</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#what-is-the-cute-layout-algebra">1.1 What is the CuTe Layout Algebra?</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#flydsl-as-an-amd-implementation">1.2 FlyDSL as an AMD Implementation</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#layout-algebra-fundamentals">2. Layout Algebra Fundamentals</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#core-types">2.1 Core Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#query-operations">2.2 Query Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#coordinate-mapping">2.3 Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#layout-algebra-operations">2.4 Layout Algebra Operations</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="cute_layout_algebra_guide.html#composition">Composition</a></li>
+<li class="toctree-l4"><a class="reference internal" href="cute_layout_algebra_guide.html#complement">Complement</a></li>
+<li class="toctree-l4"><a class="reference internal" href="cute_layout_algebra_guide.html#coalesce">Coalesce</a></li>
+<li class="toctree-l4"><a class="reference internal" href="cute_layout_algebra_guide.html#products">Products</a></li>
+<li class="toctree-l4"><a class="reference internal" href="cute_layout_algebra_guide.html#divides">Divides</a></li>
+<li class="toctree-l4"><a class="reference internal" href="cute_layout_algebra_guide.html#partitioning-utilities">Partitioning Utilities</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#flydsl-kernel-development">3. FlyDSL Kernel Development</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#thread-and-block-hierarchy">4. Thread and Block Hierarchy</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#tensor-creation-and-memory">5. Tensor Creation and Memory</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#tensor-construction">5.1 Tensor Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#memory-hierarchy">5.2 Memory Hierarchy</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#swizzling-bank-conflict-avoidance">5.3 Swizzling (Bank Conflict Avoidance)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#data-movement">6. Data Movement</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#copy-atoms-and-tiled-copies">6.1 Copy Atoms and Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#buffer-loads-amd-specific">6.2 Buffer Loads (AMD-specific)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#compute-operations-mfma">7. Compute Operations (MFMA)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#synchronization">8. Synchronization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#compilation-and-execution">9. Compilation and Execution</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#compilation-pipeline">9.1 Compilation Pipeline</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#environment-variables">9.2 Environment Variables</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#complete-example-gemm-with-layout-algebra">10. Complete Example: GEMM with Layout Algebra</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cute_layout_algebra_guide.html#references">11. References</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#cute-layout-algebra-bsd-3-clause">CuTe Layout Algebra (BSD-3-Clause)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="cute_layout_algebra_guide.html#flydsl-source-files">FlyDSL Source Files</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="api/dsl.html">FlyDSL Python DSL</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/dsl.html#module-flydsl">Core Module</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/dsl.html#expression-api-flydsl-expr">Expression API (<code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-construction">Layout Construction</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-inspection">Layout Inspection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-algebra">Layout Algebra</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#layout-products-divides">Layout Products &amp; Divides</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#coordinate-mapping">Coordinate Mapping</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#memory-operations">Memory Operations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#copy-gemm">Copy &amp; GEMM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#derived-tiled-operations-flydsl-expr-derived">Derived Tiled Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.derived</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#type-annotations">Type Annotations</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#gpu-intrinsics-flydsl-expr-gpu">GPU Intrinsics (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.gpu</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#arithmetic-and-numeric-types">Arithmetic and Numeric Types</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#vector-values-flydsl-expr-typing-vector">Vector Values (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.typing.Vector</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#buffer-operations-flydsl-expr-buffer-ops">Buffer Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.buffer_ops</span></code>)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="api/dsl.html#rocdl-operations-flydsl-expr-rocdl">ROCDL Operations (<code class="docutils literal notranslate"><span class="pre">flydsl.expr.rocdl</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="api/dsl.html#compiler-api-flydsl-compiler">Compiler API (<code class="docutils literal notranslate"><span class="pre">flydsl.compiler</span></code>)</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api/compiler.html">Compiler &amp; Pipeline</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#flyc-kernel-and-flyc-jit"><code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#compilation-flow">Compilation Flow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#tensor-arguments">Tensor Arguments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#buffer-operations">Buffer Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#rocdl-operations">ROCDL Operations</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/compiler.html#fly-opt-cli">fly-opt CLI</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api/kernels.html">Pre-built Kernels</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#gemm-kernels">GEMM Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#moe-mixture-of-experts-kernels">MoE (Mixture-of-Experts) Kernels</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#paged-attention">Paged Attention</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#normalization">Normalization</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#softmax">Softmax</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#reduction">Reduction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/kernels.html#utilities">Utilities</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Tutorials</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="tutorials/index.html">Tutorials</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="tutorials/basic_usage.html">Basic Usage</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#setting-up-the-environment">Setting Up the Environment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#understanding-layouts">Understanding Layouts</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#defining-a-kernel">Defining a Kernel</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#launching-kernels">Launching Kernels</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/basic_usage.html#next-steps">Next Steps</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="tutorials/kernel_development.html">Kernel Development</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#tiled-copies">Tiled Copies</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#mfma-instructions">MFMA Instructions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#shared-memory-lds">Shared Memory (LDS)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#performance-optimization">Performance Optimization</a></li>
+<li class="toctree-l3"><a class="reference internal" href="tutorials/kernel_development.html#reference-implementations">Reference Implementations</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">FlyDSL</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Architecture &amp; Compilation Pipeline Guide</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/architecture_guide.md.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="architecture-compilation-pipeline-guide">
+<h1>Architecture &amp; Compilation Pipeline Guide<a class="headerlink" href="#architecture-compilation-pipeline-guide" title="Link to this heading"></a></h1>
+<blockquote>
+<div><p>FlyDSL project structure, compilation stages, key abstractions, and configuration.</p>
+</div></blockquote>
+<section id="quick-reference">
+<h2>Quick Reference<a class="headerlink" href="#quick-reference" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Component</p></th>
+<th class="head"><p>Description</p></th>
+<th class="head"><p>Key File</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><strong>FlyDSL</strong></p></td>
+<td><p>Python DSL front-end for authoring GPU kernels</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>FlyDSL Compiler</strong></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> / <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — trace-based JIT compiler</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>FlyDSL Expr</strong></p></td>
+<td><p>DSL expression ops (arith, vector, gpu, buffer, rocdl)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>Fly Dialect</strong></p></td>
+<td><p>Flexible Layout IR — MLIR dialect with layout algebra</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><strong>MlirCompiler</strong></p></td>
+<td><p>End-to-end MLIR pass pipeline (DSL → binary)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_function.py</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><strong>JITCFunction</strong></p></td>
+<td><p>MLIR ExecutionEngine wrapper for JIT execution</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_executor.py</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<hr class="docutils" />
+<section id="project-structure">
+<h2>1. Project Structure<a class="headerlink" href="#project-structure" title="Link to this heading"></a></h2>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>FlyDSL/
+├── include/flydsl/                   # C++ dialect headers
+│   └── Dialect/
+│       ├── Fly/                      # Fly layout dialect
+│       │   ├── IR/
+│       │   │   ├── FlyDialect.td     # Dialect declaration (name = &quot;fly&quot;)
+│       │   │   ├── FlyOps.td         # Layout ops (make_shape, crd2idx, composition, ...)
+│       │   │   ├── FlyTypeDefs.td    # Custom types (!fly.int_tuple, !fly.layout, ...)
+│       │   │   ├── FlyAttrDefs.td    # Attributes
+│       │   │   └── FlyInterfaces.td  # Op interfaces
+│       │   └── Transforms/
+│       │       ├── Passes.td         # Pass declarations (fly-layout-lowering, etc.)
+│       │       └── LayoutLowering.td # Layout lowering pass
+│       └── FlyROCDL/                 # FlyROCDL dialect (copy/MMA atoms)
+│           └── IR/
+│               ├── Dialect.td        # FlyROCDL dialect declaration
+│               ├── CopyAtom.td       # Copy atom ops
+│               └── MmaAtom.td        # MMA atom ops
+│
+├── lib/                              # C++ dialect implementation
+│   ├── Dialect/Fly/                  # Fly dialect ops, type inference, lowering
+│   ├── Dialect/FlyROCDL/             # FlyROCDL dialect implementation
+│   ├── Conversion/                   # Dialect conversion passes
+│   └── Transforms/                   # Optimization passes
+│
+├── python/flydsl/                    # Python DSL package
+│   ├── __init__.py                   # Package version
+│   ├── compiler/
+│   │   ├── __init__.py               # Public API: jit, kernel, from_dlpack
+│   │   ├── jit_function.py           # @jit decorator, MlirCompiler, JitCacheManager
+│   │   ├── kernel_function.py        # @kernel decorator, KernelFunction, KernelLauncher
+│   │   ├── jit_executor.py           # JITCFunction (ExecutionEngine wrapper)
+│   │   ├── jit_argument.py           # Argument conversion (Tensor, Stream, Int32)
+│   │   ├── ast_rewriter.py           # AST rewriting for Python control flow → MLIR
+│   │   └── protocol.py              # DslType / JitArgument protocols
+│   ├── expr/
+│   │   ├── __init__.py               # Public expr API
+│   │   ├── typing.py                 # Types (T.f32, Tensor, Stream, Constexpr)
+│   │   ├── numeric.py                # DSL numeric types (Float32, Int32, ...)
+│   │   ├── primitive.py              # Primitive operations (layout algebra, copy, gemm)
+│   │   ├── derived.py                # Derived types (CopyAtom, MmaAtom, TiledCopy)
+│   │   ├── arith.py                  # Arithmetic dialect ops
+│   │   ├── vector.py                 # Vector dialect ops
+│   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
+│   │   ├── buffer_ops.py             # Buffer / memory operations
+│   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
+│   ├── runtime/
+│   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
+│   └── utils/
+│       ├── env.py                    # EnvManager — typed environment config
+│       ├── logger.py                 # Logging utilities
+│       └── smem_allocator.py         # SmemAllocator for LDS management
+│
+├── examples/                         # Runnable examples
+│   ├── 01-vectorAdd.py               # Vector addition with layout algebra
+│   ├── 02-tiledCopy.py               # Tiled copy with partitioned tensors
+│   ├── 03-tiledMma.py                # Tiled MMA (GEMM) with MFMA atoms
+│   └── 04-preshuffle_gemm.py         # Preshuffle GEMM end-to-end example
+│
+├── kernels/                          # Production GPU kernels
+│   ├── preshuffle_gemm.py            # GEMM (preshuffle layout)
+│   ├── blockscale_preshuffle_gemm.py # Blockscale GEMM
+│   ├── hgemm_splitk.py               # FP16 GEMM split-K
+│   ├── moe_gemm_2stage.py            # MoE GEMM (2-stage gate/up + reduce)
+│   ├── moe_blockscale_2stage.py      # MoE Blockscale GEMM
+│   ├── mixed_moe_gemm_2stage.py      # Mixed-precision MoE GEMM
+│   ├── pa_decode_fp8.py              # Paged attention decode (FP8)
+│   ├── flash_attn_generic.py         # FlashAttention generic fallback
+│   ├── flash_attn_gfx950.py          # FlashAttention gfx950 fast path
+│   ├── layernorm_kernel.py           # LayerNorm (layout API)
+│   ├── rmsnorm_kernel.py             # RMSNorm (layout API)
+│   ├── softmax_kernel.py             # Softmax (layout API)
+│   ├── fused_rope_cache_kernel.py    # Fused RoPE + KV cache
+│   ├── custom_all_reduce.py          # Multi-GPU all-reduce
+│   ├── rdna_f16_gemm.py              # RDNA FP16 GEMM
+│   ├── rdna_fp8_preshuffle_gemm.py   # RDNA FP8 GEMM
+│   ├── gemm_common_gfx1250.py        # GFX1250 GEMM common
+│   ├── gemm_fp8fp4_gfx1250.py        # GFX1250 FP8/FP4 GEMM
+│   ├── wmma_gemm_gfx1250.py          # GFX1250 WMMA GEMM
+│   ├── mfma_epilogues.py             # MFMA epilogue helpers
+│   ├── mfma_preshuffle_pipeline.py   # Preshuffle helpers for MFMA kernels
+│   ├── pipeline_utils.py             # Pipeline utility helpers
+│   ├── kernels_common.py             # Common kernel utilities
+│   └── tensor_shim.py                # GTensor/STensor abstraction
+│
+├── tests/
+│   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
+│   ├── kernels/                      # GPU kernel tests + benchmarks
+│   ├── python/                       # Python-based tests (examples, AOT)
+│   ├── unit/                         # Unit tests (streams, async, etc.)
+│   ├── conftest.py                   # Pytest fixtures
+│   ├── test_common.py                # Shared test utilities
+│   └── utils.py                      # Compilation helpers
+│
+└── scripts/                          # Build and test helpers
+    ├── build.sh                      # Build FlyDSL (CMake + ninja)
+    ├── build_llvm.sh                 # Build MLIR from ROCm llvm-project
+    ├── run_tests.sh                  # Run GEMM test suite
+    ├── run_benchmark.sh              # Run benchmarks
+    └── dumpir.sh                     # Dump intermediate IR
+</pre></div>
+</div>
+</section>
+<hr class="docutils" />
+<section id="architecture">
+<h2>2. Architecture<a class="headerlink" href="#architecture" title="Link to this heading"></a></h2>
+<p>The user-facing API lives in <code class="docutils literal notranslate"><span class="pre">python/flydsl/</span></code>. Kernel authors use <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> and <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> decorators with expression operations from <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code>:</p>
+<ul class="simple">
+<li><p><strong>Traces</strong> Python functions via AST rewriting and execution</p></li>
+<li><p><strong>Generates</strong> Fly dialect ops + standard MLIR dialects (gpu, arith, scf, memref, vector, rocdl)</p></li>
+<li><p><strong>Compiles</strong> through the <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code> pass pipeline (Fly → ROCDL → LLVM → HSACO)</p></li>
+<li><p><strong>Caches</strong> compiled kernels to disk for fast re-use</p></li>
+<li><p><strong>Executes</strong> via MLIR ExecutionEngine</p></li>
+</ul>
+<p>The Fly dialect (<code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/</span></code>) provides the MLIR-level layout algebra (composition, product, divide, coordinate mapping). Python DSL operations in <code class="docutils literal notranslate"><span class="pre">flydsl.expr</span></code> lower to Fly dialect ops during tracing, which are then compiled through the <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code> pipeline.</p>
+</section>
+<hr class="docutils" />
+<section id="compilation-pipeline">
+<h2>3. Compilation Pipeline<a class="headerlink" href="#compilation-pipeline" title="Link to this heading"></a></h2>
+<section id="high-level-flow">
+<h3>3.1 High-Level Flow<a class="headerlink" href="#high-level-flow" title="Link to this heading"></a></h3>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>Python Function (@flyc.kernel / @flyc.jit)
+        │
+        ▼  AST Rewriting
+   Transformed Python Function
+        │
+        ▼  Tracing (execution inside MLIR Context)
+   MLIR Module (fly, gpu, arith, scf, memref, vector dialects)
+        │
+        ▼  MlirCompiler.compile()
+   ┌────────────────────────────────────────────────────────┐
+   │ Stage A — pre_binary_fragments  (Fly → ROCDL)          │
+   │   fly-rewrite-func-signature                           │
+   │   fly-canonicalize                                     │
+   │   fly-layout-lowering                                  │
+   │   fly-int-swizzle-simplify                             │
+   │   canonicalize                                         │
+   │   fly-convert-atom-call-to-ssa-form                    │
+   │   fly-promote-regmem-to-vectorssa                      │
+   │   convert-fly-to-rocdl                                 │
+   │   canonicalize                                         │
+   │   gpu.module(convert-scf-to-cf, cse,                   │
+   │              convert-gpu-to-rocdl{chipset=gfxNNN ...}, │
+   │              fly-rocdl-cluster-attr)                   │
+   ├────────────────────────────────────────────────────────┤
+   │ Stage B — binary_prep_fragments  (→ LLVM)              │
+   │   rocdl-attach-target{chip=gfxNNN ...}                 │
+   │   convert-scf-to-cf                                    │
+   │   convert-cf-to-llvm                                   │
+   │   gpu-to-llvm{use-bare-pointers-...=true}              │
+   │   convert-vector-to-llvm                               │
+   │   convert-arith-to-llvm                                │
+   │   convert-func-to-llvm                                 │
+   │   reconcile-unrealized-casts                           │
+   │   ensure-debug-info-scope-on-llvm-func  (optional)     │
+   ├────────────────────────────────────────────────────────┤
+   │ Stage C — binary_fragment                              │
+   │   gpu-module-to-binary{format=fatbin opts=&quot;...&quot;}       │
+   └────────────────────────────────────────────────────────┘
+        │
+        ▼
+   JITCFunction (ExecutionEngine)
+</pre></div>
+</div>
+</section>
+<section id="pipeline-stages-in-detail">
+<h3>3.2 Pipeline Stages in Detail<a class="headerlink" href="#pipeline-stages-in-detail" title="Link to this heading"></a></h3>
+<p>The pipeline is built by <code class="docutils literal notranslate"><span class="pre">RocmBackend._pipeline_parts()</span></code> in
+<code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/backends/rocm.py</span></code>. The orchestrator
+<code class="docutils literal notranslate"><span class="pre">_pipeline_fragments_for_mode()</span></code> in <code class="docutils literal notranslate"><span class="pre">jit_function.py</span></code> decides whether to run
+the pipeline as a single combined pass list (<code class="docutils literal notranslate"><span class="pre">pipeline_fragments()</span></code>) or split
+it for external LLVM codegen (<code class="docutils literal notranslate"><span class="pre">external_binary_pipeline_fragments()</span></code>). External
+mode runs Stages A and B with the bundled MLIR runtime, then invokes the
+external LLVM toolchain only for Stage C (<code class="docutils literal notranslate"><span class="pre">gpu-module-to-binary</span></code>).</p>
+<p><strong>Stage A — <code class="docutils literal notranslate"><span class="pre">pre_binary_fragments</span></code></strong> (Fly dialect → ROCDL lowering)</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>#</p></th>
+<th class="head"><p>Pass</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>1</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-rewrite-func-signature</span></code></p></td>
+<td><p>Rewrite DSL types at function and SCF control-flow boundaries; lowers <code class="docutils literal notranslate"><span class="pre">IntTuple</span></code> / <code class="docutils literal notranslate"><span class="pre">Layout</span></code> / <code class="docutils literal notranslate"><span class="pre">ComposedLayout</span></code> / <code class="docutils literal notranslate"><span class="pre">CoordTensor</span></code> / <code class="docutils literal notranslate"><span class="pre">MemRef</span></code> to packed LLVM struct types and reconstructs them in the body via constructor ops.</p></td>
+</tr>
+<tr class="row-odd"><td><p>2</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-canonicalize</span></code></p></td>
+<td><p>FlyDSL-specific canonicalization (folds <code class="docutils literal notranslate"><span class="pre">!fly.layout</span></code> algebra when shapes are static).</p></td>
+</tr>
+<tr class="row-even"><td><p>3</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-layout-lowering</span></code></p></td>
+<td><p>Lowers layout algebra (<code class="docutils literal notranslate"><span class="pre">fly.crd2idx</span></code>, partitions, divides) to concrete <code class="docutils literal notranslate"><span class="pre">arith</span></code> + <code class="docutils literal notranslate"><span class="pre">vector</span></code> ops.</p></td>
+</tr>
+<tr class="row-odd"><td><p>4</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-int-swizzle-simplify</span></code></p></td>
+<td><p>Algebraically simplifies the swizzle-shaped arith sequences emitted by <code class="docutils literal notranslate"><span class="pre">applySwizzle</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p>5</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">canonicalize</span></code></p></td>
+<td><p>Standard MLIR canonicalization (constant folding, etc.).</p></td>
+</tr>
+<tr class="row-odd"><td><p>6</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-convert-atom-call-to-ssa-form</span></code></p></td>
+<td><p>Converts <code class="docutils literal notranslate"><span class="pre">copy_atom_call</span></code> / <code class="docutils literal notranslate"><span class="pre">mma_atom_call</span></code> to their SSA counterparts; promotes register tensors to vector SSA values.</p></td>
+</tr>
+<tr class="row-even"><td><p>7</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fly-promote-regmem-to-vectorssa</span></code></p></td>
+<td><p>Promotes <code class="docutils literal notranslate"><span class="pre">fly.make_ptr(register)</span></code> memory semantics to vector SSA values (requires #6).</p></td>
+</tr>
+<tr class="row-odd"><td><p>8</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-fly-to-rocdl</span></code></p></td>
+<td><p>Lowers remaining Fly ops to MLIR upstream + ROCDL dialects (copy atoms → <code class="docutils literal notranslate"><span class="pre">rocdl.buffer_load/store</span></code>, MMA atoms → <code class="docutils literal notranslate"><span class="pre">rocdl.mfma.*</span></code>).</p></td>
+</tr>
+<tr class="row-even"><td><p>9</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">canonicalize</span></code></p></td>
+<td><p>Second canonicalization round after ROCDL lowering.</p></td>
+</tr>
+<tr class="row-odd"><td><p>10</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpu.module(convert-scf-to-cf,</span> <span class="pre">cse,</span> <span class="pre">convert-gpu-to-rocdl{chipset=gfxNNN</span> <span class="pre">...},</span> <span class="pre">fly-rocdl-cluster-attr)</span></code></p></td>
+<td><p>Inside the GPU module: SCF→CF, CSE, GPU intrinsics→ROCDL, then <code class="docutils literal notranslate"><span class="pre">fly-rocdl-cluster-attr</span></code> injects <code class="docutils literal notranslate"><span class="pre">amdgpu-cluster-dims</span></code> into the <code class="docutils literal notranslate"><span class="pre">llvm.func</span></code> <code class="docutils literal notranslate"><span class="pre">passthrough</span></code>.</p></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Stage B — <code class="docutils literal notranslate"><span class="pre">binary_prep_fragments</span></code></strong> (LLVM lowering, host + kernel)</p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>#</p></th>
+<th class="head"><p>Pass</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>11</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">rocdl-attach-target{chip=gfxNNN</span> <span class="pre">...}</span></code></p></td>
+<td><p>Attaches <code class="docutils literal notranslate"><span class="pre">#rocdl.target&lt;chip=gfxNNN&gt;</span></code> (plus <code class="docutils literal notranslate"><span class="pre">fast</span></code>/<code class="docutils literal notranslate"><span class="pre">unsafe-math</span></code>/<code class="docutils literal notranslate"><span class="pre">wave64</span></code> options) to the GPU module for codegen.</p></td>
+</tr>
+<tr class="row-odd"><td><p>12</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-scf-to-cf</span></code></p></td>
+<td><p>Host-side SCF → ControlFlow.</p></td>
+</tr>
+<tr class="row-even"><td><p>13</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-cf-to-llvm</span></code></p></td>
+<td><p>ControlFlow → LLVM dialect.</p></td>
+</tr>
+<tr class="row-odd"><td><p>14</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpu-to-llvm{use-bare-pointers-for-host=true</span> <span class="pre">use-bare-pointers-for-kernels=true}</span></code></p></td>
+<td><p>GPU types and host launcher → LLVM.</p></td>
+</tr>
+<tr class="row-even"><td><p>15</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-vector-to-llvm</span></code></p></td>
+<td><p>Vector → LLVM.</p></td>
+</tr>
+<tr class="row-odd"><td><p>16</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-arith-to-llvm</span></code></p></td>
+<td><p>Arith → LLVM.</p></td>
+</tr>
+<tr class="row-even"><td><p>17</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">convert-func-to-llvm</span></code></p></td>
+<td><p>Func → LLVM.</p></td>
+</tr>
+<tr class="row-odd"><td><p>18</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">reconcile-unrealized-casts</span></code></p></td>
+<td><p>Final cast cleanup.</p></td>
+</tr>
+</tbody>
+</table>
+<p>When <code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1</span></code>, Stage B appends
+<code class="docutils literal notranslate"><span class="pre">ensure-debug-info-scope-on-llvm-func{emission-kind=LineTablesOnly}</span></code> after
+<code class="docutils literal notranslate"><span class="pre">reconcile-unrealized-casts</span></code> and before Stage C.</p>
+<p><strong>Stage C — <code class="docutils literal notranslate"><span class="pre">binary_fragment</span></code></strong></p>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>#</p></th>
+<th class="head"><p>Pass</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>19</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">gpu-module-to-binary{format=fatbin</span> <span class="pre">opts=&quot;...&quot;}</span></code></p></td>
+<td><p>Invokes the LLVM AMDGPU backend and emits an HSA fatbin.</p></td>
+</tr>
+</tbody>
+</table>
+<p><code class="docutils literal notranslate"><span class="pre">gpu-kernel-outlining</span></code> is no longer a pass in the runtime pipeline — kernel
+outlining happens during Python tracing, when <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> emits
+<code class="docutils literal notranslate"><span class="pre">gpu.func</span></code> ops directly into a <code class="docutils literal notranslate"><span class="pre">gpu.container_module</span></code>.</p>
+</section>
+<section id="jit-compilation-flow">
+<h3>3.3 JIT Compilation Flow<a class="headerlink" href="#jit-compilation-flow" title="Link to this heading"></a></h3>
+<p>When a <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> function is called:</p>
+<ol class="arabic simple">
+<li><p><strong>Cache check</strong> — look up by argument type signature (in-memory → disk)</p></li>
+<li><p><strong>AST rewriting</strong> — <code class="docutils literal notranslate"><span class="pre">ASTRewriter.transform</span></code> converts Python <code class="docutils literal notranslate"><span class="pre">for</span></code>/<code class="docutils literal notranslate"><span class="pre">if</span></code> to MLIR <code class="docutils literal notranslate"><span class="pre">scf.for</span></code>/<code class="docutils literal notranslate"><span class="pre">scf.if</span></code></p></li>
+<li><p><strong>MLIR module creation</strong> — sets up <code class="docutils literal notranslate"><span class="pre">gpu.container_module</span></code> with target</p></li>
+<li><p><strong>Argument conversion</strong> — <code class="docutils literal notranslate"><span class="pre">convert_to_jit_arguments</span></code> maps Python args to IR types</p></li>
+<li><p><strong>Function tracing</strong> — execute transformed function body to generate MLIR ops</p></li>
+<li><p><strong>GPU kernel emission</strong> — <code class="docutils literal notranslate"><span class="pre">&#64;kernel</span></code> calls emit <code class="docutils literal notranslate"><span class="pre">gpu.func</span></code> into <code class="docutils literal notranslate"><span class="pre">gpu.module</span></code></p></li>
+<li><p><strong>Pipeline compilation</strong> — <code class="docutils literal notranslate"><span class="pre">MlirCompiler.compile()</span></code> runs the full pass pipeline</p></li>
+<li><p><strong>Execution</strong> — <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code> wraps MLIR ExecutionEngine for invoking the compiled code</p></li>
+<li><p><strong>Cache store</strong> — compiled function is serialized to disk for future runs</p></li>
+</ol>
+</section>
+</section>
+<hr class="docutils" />
+<section id="key-abstractions">
+<h2>4. Key Abstractions<a class="headerlink" href="#key-abstractions" title="Link to this heading"></a></h2>
+<section id="flyc-jit-host-launcher">
+<h3>4.1 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> — Host Launcher<a class="headerlink" href="#flyc-jit-host-launcher" title="Link to this heading"></a></h3>
+<p>Decorates a Python function as a JIT-compiled host launcher:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">flyc</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">flydsl.expr</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">fx</span>
+
+<span class="nd">@flyc</span><span class="o">.</span><span class="n">jit</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">launch</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">n</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span>
+           <span class="n">stream</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">Stream</span><span class="p">(</span><span class="kc">None</span><span class="p">)):</span>
+    <span class="n">my_kernel</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="n">n</span><span class="p">)</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span><span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="n">n</span> <span class="o">//</span> <span class="mi">256</span><span class="p">,),</span> <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,),</span> <span class="n">stream</span><span class="o">=</span><span class="n">stream</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Key behaviors:</p>
+<ul class="simple">
+<li><p>First call triggers compilation; subsequent calls with the same type signature use cached binary</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Constexpr[T]</span></code> parameters become compile-time constants (affect cache key)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Tensor</span></code> parameters map to memref descriptors via DLPack</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">Stream</span></code> parameters pass CUDA/HIP stream to the GPU runtime</p></li>
+<li><p>When called inside an existing MLIR context, acts as a normal function (composable)</p></li>
+</ul>
+</section>
+<section id="flyc-kernel-gpu-kernel">
+<h3>4.2 <code class="docutils literal notranslate"><span class="pre">&#64;flyc.kernel</span></code> — GPU Kernel<a class="headerlink" href="#flyc-kernel-gpu-kernel" title="Link to this heading"></a></h3>
+<p>Decorates a Python function as a GPU kernel:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="nd">@flyc</span><span class="o">.</span><span class="n">kernel</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">my_kernel</span><span class="p">(</span><span class="n">a</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">b</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span> <span class="n">n</span><span class="p">:</span> <span class="n">fx</span><span class="o">.</span><span class="n">Constexpr</span><span class="p">[</span><span class="nb">int</span><span class="p">]):</span>
+    <span class="n">tid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">gpu</span><span class="o">.</span><span class="n">thread_id</span><span class="p">(</span><span class="s2">&quot;x&quot;</span><span class="p">)</span>
+    <span class="n">bid</span> <span class="o">=</span> <span class="n">fx</span><span class="o">.</span><span class="n">gpu</span><span class="o">.</span><span class="n">block_id</span><span class="p">(</span><span class="s2">&quot;x&quot;</span><span class="p">)</span>
+    <span class="c1"># ... kernel body ...</span>
+</pre></div>
+</div>
+<p>Key behaviors:</p>
+<ul class="simple">
+<li><p>Can only be called inside a <code class="docutils literal notranslate"><span class="pre">&#64;flyc.jit</span></code> function</p></li>
+<li><p>Calling returns a <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code> — you must call <code class="docutils literal notranslate"><span class="pre">.launch()</span></code> to emit the launch op</p></li>
+<li><p>Supports <code class="docutils literal notranslate"><span class="pre">Constexpr[T]</span></code> for compile-time specialization</p></li>
+<li><p>Emits a <code class="docutils literal notranslate"><span class="pre">gpu.func</span></code> with <code class="docutils literal notranslate"><span class="pre">gpu.kernel</span></code> attribute into the <code class="docutils literal notranslate"><span class="pre">gpu.module</span></code></p></li>
+</ul>
+</section>
+<section id="kernellauncher">
+<h3>4.3 <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code><a class="headerlink" href="#kernellauncher" title="Link to this heading"></a></h3>
+<p>Returned by calling a <code class="docutils literal notranslate"><span class="pre">&#64;kernel</span></code> function. Use <code class="docutils literal notranslate"><span class="pre">.launch()</span></code> to configure and emit the GPU launch:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">launcher</span> <span class="o">=</span> <span class="n">my_kernel</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">,</span> <span class="mi">1024</span><span class="p">)</span>
+<span class="n">launcher</span><span class="o">.</span><span class="n">launch</span><span class="p">(</span>
+    <span class="n">grid</span><span class="o">=</span><span class="p">(</span><span class="n">num_blocks</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span>
+    <span class="n">block</span><span class="o">=</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span>
+    <span class="n">smem</span><span class="o">=</span><span class="n">shared_mem_bytes</span><span class="p">,</span>
+    <span class="n">stream</span><span class="o">=</span><span class="n">stream_value</span><span class="p">,</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="jitcfunction">
+<h3>4.4 <code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code><a class="headerlink" href="#jitcfunction" title="Link to this heading"></a></h3>
+<p>Wraps MLIR’s <code class="docutils literal notranslate"><span class="pre">ExecutionEngine</span></code> for JIT execution:</p>
+<ul class="simple">
+<li><p>Thread-safe with lazy engine initialization</p></li>
+<li><p>Serializable (pickle) for disk caching</p></li>
+<li><p>Supports packed calling convention via <code class="docutils literal notranslate"><span class="pre">ctypes</span></code></p></li>
+<li><p>Provides <code class="docutils literal notranslate"><span class="pre">.print_ir()</span></code> for debugging compiled/original IR</p></li>
+</ul>
+</section>
+<section id="dsltype-jitargument-protocols">
+<h3>4.5 <code class="docutils literal notranslate"><span class="pre">DslType</span></code> / <code class="docutils literal notranslate"><span class="pre">JitArgument</span></code> Protocols<a class="headerlink" href="#dsltype-jitargument-protocols" title="Link to this heading"></a></h3>
+<p>Extensible type system for mapping Python values to MLIR:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># DslType protocol — for values used inside kernel/jit functions</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">DslType</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__construct_from_ir_values__</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">values</span><span class="p">:</span> <span class="n">List</span><span class="p">[</span><span class="n">ir</span><span class="o">.</span><span class="n">Value</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="s2">&quot;DslType&quot;</span><span class="p">:</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__extract_to_ir_values__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">ir</span><span class="o">.</span><span class="n">Value</span><span class="p">]:</span> <span class="o">...</span>
+
+<span class="c1"># JitArgument protocol — for values passed at the host boundary</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">JitArgument</span><span class="p">(</span><span class="n">Protocol</span><span class="p">):</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_ir_types__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">ir</span><span class="o">.</span><span class="n">Type</span><span class="p">]:</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_c_pointers__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">List</span><span class="p">[</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_void_p</span><span class="p">]:</span> <span class="o">...</span>
+</pre></div>
+</div>
+<p>Built-in types: <code class="docutils literal notranslate"><span class="pre">Tensor</span></code>, <code class="docutils literal notranslate"><span class="pre">Stream</span></code>, <code class="docutils literal notranslate"><span class="pre">Int32</span></code>, <code class="docutils literal notranslate"><span class="pre">Constexpr[T]</span></code></p>
+<p>Register custom types:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">flydsl.compiler</span><span class="w"> </span><span class="kn">import</span> <span class="n">JitArgumentRegistry</span>
+
+<span class="nd">@JitArgumentRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">MyPythonType</span><span class="p">,</span> <span class="n">dsl_type</span><span class="o">=</span><span class="n">MyDslType</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">MyJitArg</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_ir_types__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> <span class="o">...</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">__get_c_pointers__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span> <span class="o">...</span>
+</pre></div>
+</div>
+</section>
+<section id="astrewriter">
+<h3>4.6 <code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code><a class="headerlink" href="#astrewriter" title="Link to this heading"></a></h3>
+<p>Transforms Python control flow to MLIR ops at the AST level:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">for</span> <span class="pre">i</span> <span class="pre">in</span> <span class="pre">range(n)</span></code> → <code class="docutils literal notranslate"><span class="pre">scf.for</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">for</span> <span class="pre">i</span> <span class="pre">in</span> <span class="pre">range_constexpr(n)</span></code> → compile-time unrolled loop</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">if</span> <span class="pre">condition</span></code> → <code class="docutils literal notranslate"><span class="pre">scf.if</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">const_expr(value)</span></code> → compile-time constant</p></li>
+</ul>
+</section>
+</section>
+<hr class="docutils" />
+<section id="environment-variables">
+<h2>5. Environment Variables<a class="headerlink" href="#environment-variables" title="Link to this heading"></a></h2>
+<section id="compilation-options-flydsl-compile">
+<h3>5.1 Compilation Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_*</span></code>)<a class="headerlink" href="#compilation-options-flydsl-compile" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_COMPILE_OPT_LEVEL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">2</span></code></p></td>
+<td><p>Optimization level (0–3)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">COMPILE_ONLY</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p>If <code class="docutils literal notranslate"><span class="pre">1</span></code>, compile without creating an executor. Returns <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ARCH</span></code></p></td>
+<td><p>auto-detect</p></td>
+<td><p>Override target GPU architecture (e.g., <code class="docutils literal notranslate"><span class="pre">gfx942</span></code>, <code class="docutils literal notranslate"><span class="pre">gfx950</span></code>).</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="debug-options-flydsl-debug">
+<h3>5.2 Debug Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_*</span></code>)<a class="headerlink" href="#debug-options-flydsl-debug" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_IR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Dump intermediate IR at each pipeline stage.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_DIR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">~/.flydsl/debug</span></code></p></td>
+<td><p>Directory for IR dumps.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_DUMP_ASM</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Dump final AMD ISA assembly.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_AST_DIFF</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Print AST diff during rewrite.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_PRINT_ORIGIN_IR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Print origin IR before compilation.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_PRINT_AFTER_ALL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Print IR after each MLIR pass.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_DEBUG_INFO</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">false</span></code></p></td>
+<td><p>Generate debug info in compiled code.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_VERIFIER</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Verify IR module.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_LOG_LEVEL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">WARNING</span></code></p></td>
+<td><p>Logging level (DEBUG, INFO, WARNING, ERROR).</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="runtime-options-flydsl-runtime">
+<h3>5.3 Runtime Options (<code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_*</span></code>)<a class="headerlink" href="#runtime-options-flydsl-runtime" title="Link to this heading"></a></h3>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Variable</p></th>
+<th class="head"><p>Default</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_CACHE_DIR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">~/.flydsl/cache</span></code></p></td>
+<td><p>Directory for caching compiled kernels.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_RUNTIME_ENABLE_CACHE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">true</span></code></p></td>
+<td><p>Enable kernel disk caching (in-memory cache is always active).</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="architecture-detection-priority">
+<h3>5.4 Architecture Detection Priority<a class="headerlink" href="#architecture-detection-priority" title="Link to this heading"></a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">get_rocm_arch()</span></code> in <code class="docutils literal notranslate"><span class="pre">runtime/device.py</span></code> checks in order:</p>
+<ol class="arabic simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">FLYDSL_GPU_ARCH</span></code> env var</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">HSA_OVERRIDE_GFX_VERSION</span></code> env var (supports <code class="docutils literal notranslate"><span class="pre">9.4.2</span></code> → <code class="docutils literal notranslate"><span class="pre">gfx942</span></code> format)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">rocm_agent_enumerator</span></code> system tool</p></li>
+<li><p>Default: <code class="docutils literal notranslate"><span class="pre">gfx942</span></code></p></li>
+</ol>
+</section>
+</section>
+<hr class="docutils" />
+<section id="target-hardware">
+<h2>6. Target Hardware<a class="headerlink" href="#target-hardware" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Architecture</p></th>
+<th class="head"><p>GPU</p></th>
+<th class="head"><p>LDS per CU</p></th>
+<th class="head"><p>Notes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gfx942</span></code></p></td>
+<td><p>MI300A / MI300X</p></td>
+<td><p>64 KB</p></td>
+<td><p>CDNA 3, primary development target</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">gfx950</span></code></p></td>
+<td><p>MI350 / MI355X</p></td>
+<td><p>160 KB</p></td>
+<td><p>CDNA 4, larger LDS</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gfx1201</span></code></p></td>
+<td><p>Radeon AI PRO R9700</p></td>
+<td><p>64 KB</p></td>
+<td><p>RDNA 4</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">gfx1250</span></code></p></td>
+<td><p>—</p></td>
+<td><p>320 KB</p></td>
+<td><p>GFX12, wave32, WMMA, TDM ops</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">gfx90a</span></code></p></td>
+<td><p>MI250X</p></td>
+<td><p>64 KB</p></td>
+<td><p>CDNA 2 (verified platform)</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+<hr class="docutils" />
+<section id="ir-dump-workflow">
+<h2>7. IR Dump Workflow<a class="headerlink" href="#ir-dump-workflow" title="Link to this heading"></a></h2>
+<p>Enable with <code class="docutils literal notranslate"><span class="pre">FLYDSL_DUMP_IR=1</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nv">FLYDSL_DUMP_IR</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">FLYDSL_DUMP_DIR</span><span class="o">=</span>./dumps<span class="w"> </span>python<span class="w"> </span>test_my_kernel.py
+</pre></div>
+</div>
+<p>Produces numbered dump files (exact pass count tracks <code class="docutils literal notranslate"><span class="pre">RocmBackend._pipeline_parts()</span></code>):</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>dumps/my_func_name/
+├── 00_origin.mlir
+├── 01_fly_rewrite_func_signature.mlir
+├── 02_fly_canonicalize.mlir
+├── 03_fly_layout_lowering.mlir
+├── 04_fly_int_swizzle_simplify.mlir
+├── 05_canonicalize.mlir
+├── 06_fly_convert_atom_call_to_ssa_form.mlir
+├── 07_fly_promote_regmem_to_vectorssa.mlir
+├── 08_convert_fly_to_rocdl.mlir
+├── 09_canonicalize.mlir
+├── 10_convert_scf_to_cf_cse_convert_gpu_to_rocdl.mlir
+│                                      # also runs fly-rocdl-cluster-attr
+├── 11_rocdl_attach_target.mlir
+├── 12_convert_scf_to_cf.mlir
+├── 13_convert_cf_to_llvm.mlir
+├── 14_gpu_to_llvm.mlir
+├── 15_convert_vector_to_llvm.mlir
+├── 16_convert_arith_to_llvm.mlir
+├── 17_convert_func_to_llvm.mlir
+├── 18_reconcile_unrealized_casts.mlir
+├── 19_gpu_module_to_binary.mlir
+├── 20_llvm_ir.ll
+└── 21_final_isa.s                    # AMD ISA assembly (best-effort)
+</pre></div>
+</div>
+<p>If <code class="docutils literal notranslate"><span class="pre">FLYDSL_DEBUG_ENABLE_DEBUG_INFO=1</span></code>, the debug-info pass adds an extra
+numbered dump before <code class="docutils literal notranslate"><span class="pre">gpu_module_to_binary</span></code>.</p>
+</section>
+<hr class="docutils" />
+<section id="source-files">
+<h2>8. Source Files<a class="headerlink" href="#source-files" title="Link to this heading"></a></h2>
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>File</p></th>
+<th class="head"><p>Description</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_function.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;jit</span></code> decorator, <code class="docutils literal notranslate"><span class="pre">MlirCompiler</span></code>, <code class="docutils literal notranslate"><span class="pre">JitCacheManager</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/kernel_function.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">&#64;kernel</span></code> decorator, <code class="docutils literal notranslate"><span class="pre">KernelFunction</span></code>, <code class="docutils literal notranslate"><span class="pre">KernelLauncher</span></code>, <code class="docutils literal notranslate"><span class="pre">CompilationContext</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_executor.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">JITCFunction</span></code> — ExecutionEngine wrapper</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/jit_argument.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">JitArgumentRegistry</span></code>, <code class="docutils literal notranslate"><span class="pre">TensorAdaptor</span></code>, <code class="docutils literal notranslate"><span class="pre">from_dlpack</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/ast_rewriter.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ASTRewriter</span></code> — Python AST → MLIR control flow</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/compiler/protocol.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">get_ir_types</span></code>, <code class="docutils literal notranslate"><span class="pre">extract_to_ir_values</span></code>, <code class="docutils literal notranslate"><span class="pre">construct_from_ir_values</span></code> protocols</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/typing.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Types</span></code> (<code class="docutils literal notranslate"><span class="pre">T</span></code>), <code class="docutils literal notranslate"><span class="pre">Tensor</span></code>, <code class="docutils literal notranslate"><span class="pre">Stream</span></code>, <code class="docutils literal notranslate"><span class="pre">Constexpr</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/primitive.py</span></code></p></td>
+<td><p>Layout algebra primitives (make_shape, crd2idx, copy, gemm)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/derived.py</span></code></p></td>
+<td><p>Derived types (<code class="docutils literal notranslate"><span class="pre">CopyAtom</span></code>, <code class="docutils literal notranslate"><span class="pre">MmaAtom</span></code>, <code class="docutils literal notranslate"><span class="pre">TiledCopy</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/expr/numeric.py</span></code></p></td>
+<td><p>DSL numeric types (Float32, Int32, …)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/utils/env.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">EnvManager</span></code> — typed environment variable configuration</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">python/flydsl/runtime/device.py</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">get_rocm_arch()</span></code> GPU detection</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/IR/FlyOps.td</span></code></p></td>
+<td><p>Fly dialect op definitions</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">include/flydsl/Dialect/Fly/Transforms/Passes.td</span></code></p></td>
+<td><p>Pass declarations (fly-layout-lowering, etc.)</p></td>
+</tr>
+</tbody>
+</table>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="quickstart.html" class="btn btn-neutral float-left" title="Quick Start" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="layout_system_guide.html" class="btn btn-neutral float-right" title="Layout Algebra Guide" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024-2026, Advanced Micro Devices, Inc..</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>
