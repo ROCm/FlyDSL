@@ -154,6 +154,12 @@ _AITER_PIPE_TABLE = {
 }
 
 
+def _norm_sbm(SBM, BM):
+    """Resolve SBM (sort_block_m): None -> SBM==BM (byte-identical). Both stages / the cache key
+    and the compile path share this normalization so None and BM map to the same variant."""
+    return BM if SBM is None else SBM
+
+
 def _nearest_token_key(tok_map, tokens):
     """Pick the table token bucket nearest (<=) the requested token count; fall back to the min key."""
     keys = sorted(tok_map)
@@ -270,7 +276,6 @@ def gemm1_grid(n_tokens, BM=32, NE=NE, TOPK=TOPK_DEFAULT, INTER=INTER_DEFAULT):
 def compile_gemm1_a4w4_port(
     BM=32,
     use_nt=True,
-    inline_quant=False,
     D_HIDDEN=H_DEFAULT,
     interleave=True,
     a_dtype="fp4",
@@ -282,17 +287,13 @@ def compile_gemm1_a4w4_port(
     BN=BN,
 ):
     # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
-    # None -> SBM==BM (byte-identical). Otherwise SBM must be a multiple of BM (SBM//BM compute
+    # None -> SBM==BM (byte-identical); otherwise SBM must be a multiple of BM (SBM//BM compute
     # blocks per SBM sort block, all sharing one expert).
-    if SBM is None:
-        SBM = BM
+    SBM = _norm_sbm(SBM, BM)
     # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
     b_nontemporal = use_nt
-    if BM not in (16, 32, 64, 128) or inline_quant:
-        raise AssertionError(
-            f"mxfp4_moe_gemm1 supports only (BM in {{16,32,64,128}}, inline_quant=False); "
-            f"got (BM={BM}, inline_quant={inline_quant})"
-        )
+    if BM not in (16, 32, 64, 128):
+        raise AssertionError(f"mxfp4_moe_gemm1 supports only BM in {{16,32,64,128}}, got BM={BM}")
     if SBM % BM != 0:
         raise AssertionError(f"SBM ({SBM}) must be a multiple of BM ({BM})")
     if a_dtype not in ("fp4", "fp8"):
@@ -466,7 +467,6 @@ def compile_gemm2_a4w4_port(
     MAX_M=MAX_M,
     epilog="atomic",
     INTER_MAX=INTER_MAX_DEFAULT,
-    D_INTER_REAL=None,
     a_dtype="fp4",
     topk=1,
     SBM=None,
@@ -481,9 +481,8 @@ def compile_gemm2_a4w4_port(
     output-row index (compile-time).
 
     SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
-    None -> SBM==BM (byte-identical). Otherwise SBM must be a multiple of BM."""
-    if SBM is None:
-        SBM = BM
+    None -> SBM==BM (byte-identical); otherwise SBM must be a multiple of BM."""
+    SBM = _norm_sbm(SBM, BM)
     if BM not in (16, 32, 64, 128) or epilog not in ("atomic", "reduce"):
         raise AssertionError(
             f"mxfp4_moe_gemm2 supports only (BM in {{16,32,64,128}}, epilog in {{'atomic','reduce'}}); "
@@ -492,8 +491,6 @@ def compile_gemm2_a4w4_port(
     if SBM % BM != 0:
         raise AssertionError(f"SBM ({SBM}) must be a multiple of BM ({BM})")
     use_reduce = epilog == "reduce"
-    if D_INTER_REAL is not None:
-        raise AssertionError(f"mxfp4_moe_gemm2 does not support D_INTER_REAL padding (D_INTER_REAL={D_INTER_REAL})")
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     assert INTER_MAX % BK == 0, f"INTER_MAX must be a multiple of {BK}, got {INTER_MAX}"
@@ -690,7 +687,6 @@ G2_CACHE = {}
 def get_g1(
     BM,
     use_nt,
-    inline_quant,
     D_HIDDEN,
     interleave,
     a_dtype,
@@ -708,15 +704,13 @@ def get_g1(
     # k_wave (intra-block K-slice) is a compile-time cache-key dim; k_wave==1 is the byte-identical
     # default variant. BN (fused gate|up N-tile) is a compile-time cache-key dim; BN==256 is the
     # byte-identical default variant.
-    if SBM is None:
-        SBM = BM
-    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave, BN)
+    SBM = _norm_sbm(SBM, BM)
+    key = (BM, use_nt, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave, BN)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
             BM=BM,
             use_nt=use_nt,
-            inline_quant=inline_quant,
             D_HIDDEN=D_HIDDEN,
             interleave=interleave,
             a_dtype=a_dtype,
@@ -731,18 +725,17 @@ def get_g1(
     return launch
 
 
-def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=1, SBM=None, persist=False, cu_num=0):
+def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, persist=False, cu_num=0):
     # NE / inter_dim do not enter the compiled gemm2 kernel (inter_dim is a runtime arg); the only
     # contraction-shape key is the compile-time cap INTER_MAX. epilog + topk are compile-time
     # (reduce folds topk into the output-row index); atomic ignores topk.
     # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
     # persist (+ cu_num, the fixed-grid size) are compile-time cache-key dims; persist=False is the
     # byte-identical one-shot-grid variant.
-    if SBM is None:
-        SBM = BM
+    SBM = _norm_sbm(SBM, BM)
     topk_key = topk if epilog == "reduce" else 1
     cu_key = cu_num if persist else 0
-    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk_key, SBM, persist, cu_key)
+    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk_key, SBM, persist, cu_key)
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
@@ -751,7 +744,6 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=
             N_OUT=D_HIDDEN,
             epilog=epilog,
             INTER_MAX=INTER_MAX,
-            D_INTER_REAL=D_INTER_REAL,
             a_dtype=a_dtype,
             topk=topk_key,
             SBM=SBM,
@@ -781,7 +773,6 @@ def mxfp4_moe_gemm1(
     topk,
     BM=32,
     use_nt=False,
-    inline_quant=False,
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
@@ -810,7 +801,6 @@ def mxfp4_moe_gemm1(
     launch = get_g1(
         BM,
         use_nt,
-        inline_quant,
         D_HIDDEN,
         interleave,
         a_dtype,
@@ -821,7 +811,7 @@ def mxfp4_moe_gemm1(
         k_wave=k_wave,
         BN=BN,
     )
-    sbm = SBM or BM
+    sbm = _norm_sbm(SBM, BM)
     num_n_blocks = (2 * D_INTER) // BN
     if n_sorted_padded is None:
         # E-based worst-case grid: sort padding is per SBM (the sort unit); the compute grid is
@@ -871,7 +861,6 @@ def mxfp4_moe_gemm2(
     BM=32,
     use_nt=False,
     a_dtype="fp4",
-    D_INTER_REAL=None,
     epilog="atomic",
     SBM=None,
     persist=False,
@@ -897,8 +886,6 @@ def mxfp4_moe_gemm2(
     """
     import torch
 
-    if D_INTER_REAL is not None and D_INTER_REAL != D_INTER:
-        raise AssertionError(f"D_INTER_REAL padding unsupported (D_INTER_REAL={D_INTER_REAL}, D_INTER={D_INTER})")
     if persist and cu_num <= 0:
         cu_num = _get_cu_num()
     launch = get_g2(
@@ -907,7 +894,6 @@ def mxfp4_moe_gemm2(
         D_HIDDEN,
         epilog,
         INTER_MAX_DEFAULT,
-        None,
         a_dtype,
         topk=topk,
         SBM=SBM,

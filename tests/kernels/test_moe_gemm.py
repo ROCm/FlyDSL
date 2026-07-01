@@ -2269,7 +2269,6 @@ def run_mxfp4_moe_2stage(
         # m-blocks per expert at large tokens), so caching the weights in L2 is a
         # large win on compute-bound shapes (matches base's b_nt=0 for stage1).
         use_nt=False,
-        inline_quant=False,
         interleave=interleave,
         a_dtype=("fp8" if is_f8 else "fp4"),
         out_dtype=out_dtype,
