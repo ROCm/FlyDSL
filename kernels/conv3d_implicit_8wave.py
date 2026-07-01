@@ -183,9 +183,7 @@ def _ncdhw_to_ndhwc(x, stream):
 
 
 @functools.lru_cache(maxsize=64)
-def compile_conv3d_implicit_8wave(
-    n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1
-):
+def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1):
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (w + 2 * pw - kw) // sw + 1

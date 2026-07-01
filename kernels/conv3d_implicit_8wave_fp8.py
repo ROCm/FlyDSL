@@ -84,12 +84,8 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
 
     @flyc.kernel(known_block_size=[PACK_TR_THREADS, 1, 1])
     def pack_x_kernel(out: fx.Tensor, x: fx.Tensor):
-        out_rsrc = buffer_ops.create_buffer_resource(
-            out, max_size=False, num_records_bytes=total_bytes
-        )
-        x_rsrc = buffer_ops.create_buffer_resource(
-            x, max_size=False, num_records_bytes=total_bytes * 2
-        )
+        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
+        x_rsrc = buffer_ops.create_buffer_resource(x, max_size=False, num_records_bytes=total_bytes * 2)
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[elem_ty, PACK_TR_TILE * PACK_TR_LDS_S, 16]).peek()
 
@@ -142,7 +138,9 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
             valid = arith.andi(ss < dhw, cc < c)
             store_if = scf.IfOp(valid, results_=[], has_else=False)
             with ir.InsertionPoint(store_if.then_block):
-                scalars = [lds_load_scalar((cv + j) * PACK_TR_LDS_S + rs).to(fx.Float32) for j in range_constexpr(PACK_TR_VEC)]
+                scalars = [
+                    lds_load_scalar((cv + j) * PACK_TR_LDS_S + rs).to(fx.Float32) for j in range_constexpr(PACK_TR_VEC)
+                ]
                 lo0 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[0], scalars[1], fx.Int32(0), False)
                 p0 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[2], scalars[3], lo0, True)
                 lo1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[4], scalars[5], fx.Int32(0), False)
@@ -174,12 +172,8 @@ def compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw):
 
     @flyc.kernel(known_block_size=[PACK_BLOCK_THREADS, 1, 1])
     def pack_w_kernel(out: fx.Tensor, weight: fx.Tensor):
-        out_rsrc = buffer_ops.create_buffer_resource(
-            out, max_size=False, num_records_bytes=total_bytes
-        )
-        w_rsrc = buffer_ops.create_buffer_resource(
-            weight, max_size=False, num_records_bytes=total_bytes * 2
-        )
+        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
+        w_rsrc = buffer_ops.create_buffer_resource(weight, max_size=False, num_records_bytes=total_bytes * 2)
 
         pack_idx = fx.block_idx.x * PACK_BLOCK_THREADS + fx.thread_idx.x
         if pack_idx < fx.Index(total_packs):
@@ -192,8 +186,12 @@ def compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw):
             src_base = (k_idx * c + c_base) * trs + trs_idx
             v0 = buffer_ops.buffer_load(w_rsrc, src_base, vec_width=1, dtype=fx.BFloat16).extf(T.f32)
             v1 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(trs), vec_width=1, dtype=fx.BFloat16).extf(T.f32)
-            v2 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(2 * trs), vec_width=1, dtype=fx.BFloat16).extf(T.f32)
-            v3 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(3 * trs), vec_width=1, dtype=fx.BFloat16).extf(T.f32)
+            v2 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(2 * trs), vec_width=1, dtype=fx.BFloat16).extf(
+                T.f32
+            )
+            v3 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(3 * trs), vec_width=1, dtype=fx.BFloat16).extf(
+                T.f32
+            )
             lo = fx.rocdl.cvt_pk_fp8_f32(T.i32, v0, v1, fx.Int32(0), False)
             packed = fx.rocdl.cvt_pk_fp8_f32(T.i32, v2, v3, lo, True)
             buffer_ops.buffer_store(packed, out_rsrc, pack_idx * 4, offset_is_bytes=True)
@@ -289,9 +287,7 @@ def compile_conv3d_implicit_8wave_fp8(
         def barrier():
             # Wait for the in-flight global->LDS copies (vmcnt) and LDS reads
             # (lgkmcnt) of this stage before the next stage reuses the buffers.
-            llvm.InlineAsmOp(
-                None, [], "s_waitcnt vmcnt(0) lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True
-            )
+            llvm.InlineAsmOp(None, [], "s_waitcnt vmcnt(0) lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
 
         def a_lds_off(stage, row, col):
             return (fx.Index(stage) * TILE_M + row) * TILE_K + col
@@ -385,7 +381,7 @@ def compile_conv3d_implicit_8wave_fp8(
             fx.rocdl.sched_mfma(1)
             return out
 
-        # ---- software-pipelined main loop ---- 
+        # ---- software-pipelined main loop ----
         stage = 0
         next_stage = 1
         g2s_full_tile(stage, k_off)
@@ -435,21 +431,11 @@ def compile_conv3d_implicit_8wave_fp8(
 
         def store_half_pair(acc0, acc1, m_half):
             for wm in range_constexpr(QM_STEPS):
-                row_base = (
-                    m_offset
-                    + m_half * HALF_M
-                    + wave_m * (HALF_M // WAVE_M)
-                    + wm * MFMA_M
-                    + c_m_vec
-                )
+                row_base = m_offset + m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + c_m_vec
                 for n_half in range_constexpr(2):
                     acc = acc0 if const_expr(n_half == 0) else acc1
                     for wn in range_constexpr(QN_STEPS):
-                        col = (
-                            n_offset
-                            + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N)
-                            + c_n
-                        )
+                        col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N) + c_n
                         # Under split-K the partial sums accumulate atomically into
                         # FP32; bias is a single per-output add left to the host
                         # post-pass (adding it per z-slice would scale it by splitk).
@@ -612,12 +598,12 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
 
     sk = _resolve_splitk(splitk, npq, crs, k, x.device)
     use_splitk = sk > 1
-    y = torch.zeros((npq, k), device=x.device, dtype=torch.float32) if use_splitk else torch.empty(
-        (npq, k), device=x.device, dtype=torch.bfloat16
+    y = (
+        torch.zeros((npq, k), device=x.device, dtype=torch.float32)
+        if use_splitk
+        else torch.empty((npq, k), device=x.device, dtype=torch.bfloat16)
     )
-    exe = compile_conv3d_implicit_8wave_fp8(
-        n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk
-    )
+    exe = compile_conv3d_implicit_8wave_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
     _run_compiled(
         exe,
         flyc.from_torch_tensor(y.view(-1)),
