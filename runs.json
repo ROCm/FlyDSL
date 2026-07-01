@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-01T13:18:35Z",
+ "updated": "2026-07-01T16:12:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28527184320,
+   "pr": 792,
+   "commit": "754a8ba1ede475af1afcbe69c9b8abe6e986904c",
+   "branch": "fix/cdna3-bf16-32x32x8-mfma",
+   "event": "pull_request",
+   "title": "[Fix] Lower CDNA3 32x32x8 BF16 MFMA",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320",
+   "created_at": "2026-07-01T15:03:02Z",
+   "updated_at": "2026-07-01T15:17:32Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-01T15:04:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320/job/84566888433"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-01T15:04:57Z",
+     "completed_at": "2026-07-01T16:01:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320/job/84566888456"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-01T15:17:31Z",
+     "completed_at": "2026-07-01T15:31:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320/job/84566888529"
+    }
+   ]
+  },
+  {
+   "run_id": 28527076463,
+   "pr": 791,
+   "commit": "b5a061496b69f4698a9366b209dd05b877ef73d2",
+   "branch": "rlcr/pshuf-scale-vec",
+   "event": "pull_request",
+   "title": "[Perf] preshuffle_gemm: vectorize scale_a epilogue load (4x32b -> 1x128b)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463",
+   "created_at": "2026-07-01T15:01:20Z",
+   "updated_at": "2026-07-01T15:03:42Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-01T15:03:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463/job/84566633829"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-01T15:03:42Z",
+     "completed_at": "2026-07-01T16:00:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463/job/84566633842"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-01T15:03:22Z",
+     "completed_at": "2026-07-01T15:17:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463/job/84566633848"
+    }
+   ]
+  },
   {
    "run_id": 28514385226,
    "pr": 789,
@@ -1950,92 +2036,6 @@
      "started_at": "2026-06-30T08:14:56Z",
      "completed_at": "2026-06-30T08:47:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28426290976/job/84240806069"
-    }
-   ]
-  },
-  {
-   "run_id": 28425968738,
-   "pr": null,
-   "commit": "c255cd478b55a8190bd45803366162b134620ccc",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Support memref_load_vec on coord_tensor 1d (#766)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738",
-   "created_at": "2026-06-30T06:51:46Z",
-   "updated_at": "2026-06-30T07:38:20Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T06:53:47Z",
-     "completed_at": "2026-06-30T07:38:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738/job/84229226567"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T07:32:06Z",
-     "completed_at": "2026-06-30T07:38:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738/job/84229226633"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T06:53:37Z",
-     "completed_at": "2026-06-30T07:38:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425968738/job/84229226679"
-    }
-   ]
-  },
-  {
-   "run_id": 28425102269,
-   "pr": null,
-   "commit": "cbb69ed6f507423b02dd5673ef1c1206e72fd180",
-   "branch": "pa-decode-deterministic-reduce",
-   "event": "pull_request",
-   "title": "[pa] Deterministic split-partition reduce for PS decode",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269",
-   "created_at": "2026-06-30T06:32:15Z",
-   "updated_at": "2026-06-30T08:16:06Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T06:50:25Z",
-     "completed_at": "2026-06-30T08:00:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269/job/84226459230"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T07:38:26Z",
-     "completed_at": "2026-06-30T08:15:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269/job/84226459233"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T06:34:20Z",
-     "completed_at": "2026-06-30T07:24:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269/job/84226459244"
     }
    ]
   }
