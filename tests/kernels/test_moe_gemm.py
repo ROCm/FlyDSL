@@ -2144,7 +2144,10 @@ def run_mxfp4_moe_2stage(
 
     device = x_fp32.device
     NE, H, INTER, TOPK = experts, model_dim, inter_dim, topk
-    BM = 32
+    # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
+    # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
+    BM = int(os.environ.get("MXFP4_BM", "32"))
+    assert BM in (32, 64), f"MXFP4_BM must be 32 or 64, got {BM}"
     is_f8 = in_dtype == "a8w4"
 
     # weights (fp4) + CK a16w4 preshuffle
@@ -2205,7 +2208,10 @@ def run_mxfp4_moe_2stage(
         D_INTER=INTER,
         topk=TOPK,
         BM=BM,
-        use_nt=True,
+        # gemm1 B is CACHED (nt off): stage1 has heavy cross-m-block B-reuse (many
+        # m-blocks per expert at large tokens), so caching the weights in L2 is a
+        # large win on compute-bound shapes (matches base's b_nt=0 for stage1).
+        use_nt=False,
         inline_quant=False,
         interleave=interleave,
         a_dtype=("fp8" if is_f8 else "fp4"),

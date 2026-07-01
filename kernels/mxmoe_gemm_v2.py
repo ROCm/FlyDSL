@@ -119,11 +119,11 @@ def e8m0_from_amax(amax_f32, dtype_max=6.0):
     return e8m0, qscale
 
 
-# BM32: the single supported variant (both gemm1 and gemm2).
+# BM is a per-launch parameter (32 default, 64 supported); the bodies derive
+# kMChunks = BM//16 (16-row MFMA row-groups) and kSubBlocks = BM//32 (32-row
+# A-scale chunks / scale-register groups) from it. BM=32 stays byte-identical.
 BM = 32
 kAStages = 3
-kSubBlocks = 1
-kMChunks = 2  # BM // 16; also the gemm1 epilog row-rep count
 
 
 # ---- Shared layout-API primitives (B / B-scale data movement + scaled MFMA) ----
@@ -194,7 +194,9 @@ def gemm_mma(atoms, a_frag, b_frag, c_frag, opsel_a, opsel_b, sa, sb):
 
 
 # ---- Shared A ds-read + per-J MMA cluster (used by both gemm bodies) ----
-def issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8, a_vals, a_frags):
+def issue_a_ds_read_dt(
+    s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8, a_vals, a_frags, kMChunks
+):
     """A ds-read for one slot: fp4 -> Vec4 i32 into a_frags; fp8 -> Vec8 i32 into a_vals."""
     for k in range_constexpr(2):
         for i in range_constexpr(kMChunks):
@@ -216,12 +218,18 @@ def issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane
                 a_frags[i][k].store(Vec(vec))
 
 
-def mma_one_j(J, in_b, sa, sb, bq_frags_kt, is_f8, cbsz_a, a_vals, a_frags, accm, c_frags, atoms):
-    """One J-cluster (4 scaled MFMAs): fp4 via gemm_mma, fp8 via the raw mfma_scale intrinsic."""
+def mma_one_j(J, in_b, sa, sb, bq_frags_kt, is_f8, cbsz_a, a_vals, a_frags, accm, c_frags, atoms, i0=0):
+    """One J-cluster (4 scaled MFMAs) for one 32-row A-scale group: row-groups i0, i0+1.
+
+    ``sa`` is the A-scale register for the 32-row group (its 4 bytes = 2 k-halves x 2
+    row-groups, picked by opsel_a 0..3). ``i0`` is the first of this group's two 16-row
+    row-groups (BM32: i0=0 only; BM64: i0 in {0,2}). fp4 via gemm_mma, fp8 via raw mfma_scale.
+    """
     if const_expr(is_f8):
         bJ0 = Vec(bq_frags_kt[J][0].load())
         bJ1 = Vec(bq_frags_kt[J][1].load())
-        for osa, k, i in ((0, 0, 0), (1, 0, 1), (2, 1, 0), (3, 1, 1)):
+        for osa, k, di in ((0, 0, 0), (1, 0, 1), (2, 1, 0), (3, 1, 1)):
+            i = i0 + di
             bJ = bJ0 if k == 0 else bJ1
             osb = (0 if k == 0 else 2) + in_b
             accm[i][J] = rocdl.mfma_scale_f32_16x16x128_f8f6f4(
@@ -229,10 +237,10 @@ def mma_one_j(J, in_b, sa, sb, bq_frags_kt, is_f8, cbsz_a, a_vals, a_frags, accm
             )
     else:
         bJ0, bJ1 = bq_frags_kt[J][0], bq_frags_kt[J][1]
-        gemm_mma(atoms, a_frags[0][0], bJ0, c_frags[0][J], 0, 0 + in_b, sa, sb)
-        gemm_mma(atoms, a_frags[1][0], bJ0, c_frags[1][J], 1, 0 + in_b, sa, sb)
-        gemm_mma(atoms, a_frags[0][1], bJ1, c_frags[0][J], 2, 2 + in_b, sa, sb)
-        gemm_mma(atoms, a_frags[1][1], bJ1, c_frags[1][J], 3, 2 + in_b, sa, sb)
+        gemm_mma(atoms, a_frags[i0 + 0][0], bJ0, c_frags[i0 + 0][J], 0, 0 + in_b, sa, sb)
+        gemm_mma(atoms, a_frags[i0 + 1][0], bJ0, c_frags[i0 + 1][J], 1, 0 + in_b, sa, sb)
+        gemm_mma(atoms, a_frags[i0 + 0][1], bJ1, c_frags[i0 + 0][J], 2, 2 + in_b, sa, sb)
+        gemm_mma(atoms, a_frags[i0 + 1][1], bJ1, c_frags[i0 + 1][J], 3, 2 + in_b, sa, sb)
 
 
 # ---- gemm1 (up/gate-proj) ----
@@ -254,6 +262,7 @@ def gemm1_body_v2(
     i32_total_m_blocks,
     i32_inter,
     *,
+    BM,
     K,
     interleave,
     b_nontemporal,
@@ -262,6 +271,9 @@ def gemm1_body_v2(
     act="silu",
     swiglu_limit=0.0,
 ):
+    # BM-derived constants (module BM=32 default; BM=64 doubles rows/block).
+    kMChunks = BM // 16  # 16-row MFMA row-groups (BM32: 2, BM64: 4)
+    kSubBlocks = BM // 32  # 32-row A-scale chunks / scale-register groups (BM32: 1, BM64: 2)
     # A dtype: only the A path differs; fp8 uses raw mfma_scale (cbsz=0), fp4 the fx.gemm path.
     is_f8_a = a_dtype == "fp8"
     # out dtype: only the epilogue requant/pack/store differs.
@@ -269,7 +281,6 @@ def gemm1_body_v2(
     out_max = 448.0 if is_f8_out else 6.0  # e4m3 / e2m1 max
     out_pack = 1 if is_f8_out else 2
     a_pack = 1 if is_f8_a else 2
-    am = 2 // a_pack  # A row-group calls per 8-row sub (fp8=2, fp4=1)
     KH_TILE_A = BK // a_pack  # A bytes/K-tile row in LDS (fp8=256, fp4=128)
     cbsz_a = 0 if is_f8_a else 4  # mfma A-format (fp8=0, fp4=4)
     # K-/INTER-derived sizes (compile-time ints).
@@ -307,12 +318,13 @@ def gemm1_body_v2(
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // lanes_per_row
+    rows_per_wave = BM // 4  # rows each wave gathers (BM32: 8, BM64: 16)
+    n_row_groups = rows_per_wave // rows_per_call  # DMA calls/wave (fp4: BM/32; fp8: BM/16)
     sti_ptr = global_typed_ptr(arg_sti, T.i32)
     cached_actual_row = []
-    for sub in range_constexpr(kSubBlocks):
-        for h in range_constexpr(am):
-            idx = m_row + wave * (BM // 4) + (sub * 8 + h * rows_per_call) + a_lane_row
-            cached_actual_row.append(sti_ptr[idx] & 0xFFFFFF)
+    for g in range_constexpr(n_row_groups):
+        idx = m_row + wave * rows_per_wave + g * rows_per_call + a_lane_row
+        cached_actual_row.append(sti_ptr[idx] & 0xFFFFFF)
 
     # B-scale n-pack words (gate/up split differs by gate mode).
     if const_expr(interleave):
@@ -335,29 +347,28 @@ def gemm1_body_v2(
     )
 
     def issue_a_load_lds(slot, kt):
-        # lane L -> LDS[base+L*16]; fp8 splits each 8-row sub into `am` row-groups.
+        # lane L -> LDS[base+L*16]; each wave gathers rows_per_wave rows in rows_per_call chunks.
         lane_col = (lane % lanes_per_row) * 16
         base_i32 = s_aq_base
-        for sub in range_constexpr(kSubBlocks):
-            for h in range_constexpr(am):
-                lds_row = wave * (BM // 4) + (sub * 8 + h * rows_per_call)
-                mask = (
-                    lds_swizzle_mask_f8(lds_row + a_lane_row)
-                    if const_expr(is_f8_a)
-                    else lds_swizzle_mask(lds_row + a_lane_row)
-                )
-                voffset = (lane_col ^ mask) + cached_actual_row[sub * am + h] * K_BYTES
-                off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
-                v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
-                fx.copy(
-                    a_gather_atom,
-                    a_gather_src[v_e, None],
-                    lds_dma_dst(base_i32, off, elem_ty=T.i32, align=16),
-                )
+        for g in range_constexpr(n_row_groups):
+            lds_row = wave * rows_per_wave + g * rows_per_call
+            mask = (
+                lds_swizzle_mask_f8(lds_row + a_lane_row)
+                if const_expr(is_f8_a)
+                else lds_swizzle_mask(lds_row + a_lane_row)
+            )
+            voffset = (lane_col ^ mask) + cached_actual_row[g] * K_BYTES
+            off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
+            v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
+            fx.copy(
+                a_gather_atom,
+                a_gather_src[v_e, None],
+                lds_dma_dst(base_i32, off, elem_ty=T.i32, align=16),
+            )
 
     def issue_a_ds_read(slot):
         issue_a_ds_read_dt(
-            s_aq_base, slot, BM * KH_TILE_A, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags
+            s_aq_base, slot, BM * KH_TILE_A, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags, kMChunks
         )
 
     asc_dma128 = lds_dma_atom_128()
@@ -473,8 +484,23 @@ def gemm1_body_v2(
         else:
             mni, in_b = J % 2, J // 2
         sb = _raw(Vec(bs_frags[stage][mni].load())[0])
-        sa = a_scale[0]  # kSubBlocks == 1
-        mma_one_j(J, in_b, sa, sb, bq_frags[stage], is_f8_a, cbsz_a, a_vals, a_frags, accm, c_frags, mma_atoms)
+        # One 32-row A-scale group per kSubBlock (its register holds row-groups 2*sub, 2*sub+1).
+        for sub in range_constexpr(kSubBlocks):
+            mma_one_j(
+                J,
+                in_b,
+                a_scale[sub],
+                sb,
+                bq_frags[stage],
+                is_f8_a,
+                cbsz_a,
+                a_vals,
+                a_frags,
+                accm,
+                c_frags,
+                mma_atoms,
+                i0=2 * sub,
+            )
 
     # zero C (fp4 fragments accumulate in place thereafter; fp8 accm pre-init above).
     if const_expr(not is_f8_a):
@@ -639,7 +665,8 @@ def gemm1_body_v2(
             fx.copy(asc_copy_atom, asc_reg, asc_view[asc_off, None])
 
 
-def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE):
+def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE, BM=BM):
+    kSubBlocks = BM // 32
     s_aq_bytes = kAStages * BM * KH_TILE_A  # fp8 A tile is 2x (256B vs 128B)
     s_asc_bytes = kSubBlocks * K_TILES_TOTAL * 256
     lds_acc_bytes = BM * BN * 4
@@ -647,18 +674,21 @@ def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE):
 
 
 # ---- gemm2 (down-proj) ----
-def issue_a_load_lds_dt(arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wave, lane, is_f8, KH_TILE_A, K_BYTES):
+def issue_a_load_lds_dt(
+    arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wave, lane, is_f8, KH_TILE_A, K_BYTES, BM=BM
+):
     """A->LDS DMA for one K-tile; gemm2 A is the already-sorted row, OOB-zero via aq_rsrc bounds."""
-    am = 2 if is_f8 else 1  # row-group calls per 8-row wave (fp8 4 rows/call)
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // lanes_per_row
+    rows_per_wave = BM // 4  # rows each wave loads (BM32: 8, BM64: 16)
+    n_row_groups = rows_per_wave // rows_per_call
     lane_col = (lane % lanes_per_row) * 16
     base_i32 = s_aq_base
     atom = lds_dma_atom_128()
     src = flat_buffer_view(arg_aq, None, T.i32, align=16, elem_bytes=4, fold=False, num_records_bytes=aq_num_records)
-    for h in range_constexpr(am):
-        lds_row = wave * (BM // 4) + h * rows_per_call
+    for g in range_constexpr(n_row_groups):
+        lds_row = wave * rows_per_wave + g * rows_per_call
         mask = (
             lds_swizzle_mask_f8(lds_row + a_lane_row) if const_expr(is_f8) else lds_swizzle_mask(lds_row + a_lane_row)
         )
@@ -688,6 +718,7 @@ def gemm2_body_v2(
     arg_aq,
     i32_inter,
     *,
+    BM,
     use_nt,
     N_OUT,
     INTER_MAX,
@@ -697,6 +728,8 @@ def gemm2_body_v2(
     topk=1,
 ):
     aStages = aStages
+    kMChunks = BM // 16  # 16-row MFMA row-groups (BM32: 2, BM64: 4)
+    kSubBlocks = BM // 32  # 32-row A-scale chunks / scale-register groups (BM32: 1, BM64: 2)
     # A dtype: fp4 (gemm1 fp4-out) or fp8 (mxfp8); only the A path differs.
     is_f8_a = a_dtype == "fp8"
     a_pack = 1 if is_f8_a else 2
@@ -733,13 +766,19 @@ def gemm2_body_v2(
     v_voff_scale = ((lane_div_16 * 16) + lane_mod_16) * 4
 
     def load_a_scale_tile(kt):
-        return buffer_ops.buffer_load(
-            ascale_rsrc,
-            (v_voff_scale + kt * 256) // 4,
-            vec_width=1,
-            dtype=T.i32,
-            soffset_bytes=a_scale_s_base,
-        )
+        # One i32 A-scale register per 32-row chunk (kSubBlocks); chunk sub at sub*kAS_per_chunk_dw dwords.
+        out = []
+        for sub in range_constexpr(kSubBlocks):
+            out.append(
+                buffer_ops.buffer_load(
+                    ascale_rsrc,
+                    (v_voff_scale + kt * 256) // 4 + sub * kAS_per_chunk_dw,
+                    vec_width=1,
+                    dtype=T.i32,
+                    soffset_bytes=a_scale_s_base,
+                )
+            )
+        return out
 
     s_aq_base = lds_base_i32
     lds_acc_base = lds_base_i32  # f32 acc unions the A-tile region
@@ -793,21 +832,40 @@ def gemm2_body_v2(
         return bqf, bsf
 
     def issue_a_ds_read(slot):
-        issue_a_ds_read_dt(s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags)
+        issue_a_ds_read_dt(
+            s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags, kMChunks
+        )
 
     aq_num_records = fx.Index(i32_max_m_blocks) * fx.Index(fx.Int32(BM) * K_BYTES)
 
     def issue_a_load_lds(slot, kt):
-        issue_a_load_lds_dt(arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wave, lane, is_f8_a, KH_TILE_A, K_BYTES)
+        issue_a_load_lds_dt(
+            arg_aq, aq_num_records, s_aq_base, slot, kt, m_row, wave, lane, is_f8_a, KH_TILE_A, K_BYTES, BM=BM
+        )
 
     mma_atoms = scale_mma_atoms() if const_expr(not is_f8_a) else None
 
     def mfma_cluster(bqf, bsf, sa):
-        # opsel (gemm2 has no gate/up split): mni=J//2, in_b=J%2.
+        # opsel (gemm2 has no gate/up split): mni=J//2, in_b=J%2. sa is a per-32-row-chunk list.
         for J in range_constexpr(4):
             mni, in_b = J // 2, J % 2
             sb = _raw(Vec(bsf[mni].load())[0])
-            mma_one_j(J, in_b, sa, sb, bqf, is_f8_a, cbsz_a, a_vals, a_frags, accm, c_frags, mma_atoms)
+            for sub in range_constexpr(kSubBlocks):
+                mma_one_j(
+                    J,
+                    in_b,
+                    sa[sub],
+                    sb,
+                    bqf,
+                    is_f8_a,
+                    cbsz_a,
+                    a_vals,
+                    a_frags,
+                    accm,
+                    c_frags,
+                    mma_atoms,
+                    i0=2 * sub,
+                )
 
     # zero C (fp4 fragments accumulate in place; fp8 accm pre-init above).
     if const_expr(not is_f8_a):

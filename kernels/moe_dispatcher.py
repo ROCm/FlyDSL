@@ -56,9 +56,10 @@ def compile_gemm1_a4w4_port(
 ):
     # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
     b_nontemporal = use_nt
-    if (BM, inline_quant) != (32, False):
+    if BM not in (32, 64) or inline_quant:
         raise AssertionError(
-            f"mxfp4_moe_gemm1 supports only (BM=32, inline_quant=False); " f"got (BM={BM}, inline_quant={inline_quant})"
+            f"mxfp4_moe_gemm1 supports only (BM in {{32,64}}, inline_quant=False); "
+            f"got (BM={BM}, inline_quant={inline_quant})"
         )
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
@@ -71,7 +72,7 @@ def compile_gemm1_a4w4_port(
     assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
 
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A)  # K_TILES_TOTAL (inter-independent)
+    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM)  # K_TILES_TOTAL (inter-independent)
 
     gu_tag = "il" if interleave else "sep"
     bnt_tag = "nt" if b_nontemporal else "cached"
@@ -130,6 +131,7 @@ def compile_gemm1_a4w4_port(
                 i32_ntok,
                 total_m_blocks,
                 i32_inter,
+                BM=BM,
                 K=K,
                 interleave=interleave,
                 b_nontemporal=b_nontemporal,
@@ -190,11 +192,12 @@ def compile_gemm2_a4w4_port(
     """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
     atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
     per (token,topk) slot; host reduces over topk), mirroring main's accumulate=False path.
-    inter_dim is a runtime arg (a multiple of BK=256, <= INTER_MAX); INTER_MAX caps the
-    compile-time B-view / LDS bounds. topk enters the reduce output-row index (compile-time)."""
-    if BM != 32 or epilog not in ("atomic", "reduce"):
+    BM in {32,64} (per-launch parameter). inter_dim is a runtime arg (a multiple of BK=256,
+    <= INTER_MAX); INTER_MAX caps the compile-time B-view / LDS bounds. topk enters the reduce
+    output-row index (compile-time)."""
+    if BM not in (32, 64) or epilog not in ("atomic", "reduce"):
         raise AssertionError(
-            f"mxfp4_moe_gemm2 supports only (BM=32, epilog in {{'atomic','reduce'}}); "
+            f"mxfp4_moe_gemm2 supports only (BM in {{32,64}}, epilog in {{'atomic','reduce'}}); "
             f"got (BM={BM}, epilog={epilog})"
         )
     use_reduce = epilog == "reduce"
@@ -264,6 +267,7 @@ def compile_gemm2_a4w4_port(
                     is_f8,
                     KH_TILE_A,
                     k_bytes,
+                    BM=BM,
                 )
 
         # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
@@ -292,6 +296,7 @@ def compile_gemm2_a4w4_port(
                 aq_rsrc,
                 arg_aq,
                 i32_inter,
+                BM=BM,
                 use_nt=use_nt,
                 N_OUT=N_OUT,
                 INTER_MAX=INTER_MAX,
@@ -408,7 +413,7 @@ def mxfp4_moe_gemm1(
     D_INTER,
     topk,
     BM=32,
-    use_nt=True,
+    use_nt=False,
     inline_quant=False,
     interleave=True,
     a_dtype="fp4",
@@ -419,6 +424,11 @@ def mxfp4_moe_gemm1(
     stream=None,
 ):
     """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller.
+
+    ``use_nt`` is the B-weight load cache policy (False -> cached, True -> non-temporal).
+    Default False: stage1 reuses each expert's weights across many m-blocks (large tokens
+    give many m-blocks per expert), so caching B in L2 is a large win on compute-bound
+    shapes and matches base's stage1 (``b_nt=0``). nt only helps when there is no reuse.
 
     ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
     moe_sorting sync). When given, the launch grid is bounded to the real work
