@@ -2164,6 +2164,10 @@ def run_mxfp4_moe_2stage(
     # SBM sort block). MXFP4_SBM env override.
     SBM = int(os.environ.get("MXFP4_SBM", str(BM)))
     assert SBM % BM == 0, f"MXFP4_SBM ({SBM}) must be a multiple of MXFP4_BM ({BM})"
+    # persist (aiter `_persist`): gemm2 launches a fixed cu_num-wide grid and grid-strides over the
+    # padded sort blocks. MXFP4_PERSIST=1 enables it; MXFP4_CU_NUM overrides the fixed grid size.
+    persist = os.environ.get("MXFP4_PERSIST") == "1"
+    cu_num = int(os.environ.get("MXFP4_CU_NUM", "0"))
     is_f8 = in_dtype == "a8w4"
 
     # weights (fp4) + CK a16w4 preshuffle
@@ -2269,6 +2273,8 @@ def run_mxfp4_moe_2stage(
         a_dtype=("fp8" if is_f8 else "fp4"),
         epilog=epilog,
         SBM=SBM,
+        persist=persist,
+        cu_num=cu_num,
         n_sorted_padded=n,
     )
     mxfp4_moe_gemm2(**_g2_kwargs)

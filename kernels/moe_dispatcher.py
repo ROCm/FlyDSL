@@ -5,7 +5,8 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import _to_raw as _raw
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import Int8, T
 
 from .mxmoe_gemm_v2 import (
@@ -34,6 +35,21 @@ __all__ = [
     "mxfp4_moe_gemm2",
     "select_pipe_config",
 ]
+
+
+def _get_cu_num() -> int:
+    """CU count for the persistent-m fixed grid (env CU_NUM override, else device props)."""
+    import os
+
+    env = os.environ.get("CU_NUM")
+    if env:
+        return int(env)
+    try:
+        import torch
+
+        return int(torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count)
+    except Exception:
+        return 304
 
 
 # ---- aiter-tuned per-token config dispatch (the dominant perf lever) ----
@@ -335,6 +351,8 @@ def compile_gemm2_a4w4_port(
     a_dtype="fp4",
     topk=1,
     SBM=None,
+    persist=False,
+    cu_num=0,
 ):
     """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
     atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
@@ -372,7 +390,12 @@ def compile_gemm2_a4w4_port(
     etag = "atomic" if not use_reduce else f"reduce_tk{topk}"
     # sbm tag empty when SBM==BM so the default variant keeps its byte-identical kernel name.
     sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
-    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}_v2"
+    # persist tag empty for the default one-shot grid (byte-identical); persist folds cu_num into
+    # the name (the fixed grid size is a distinct variant).
+    if persist and cu_num <= 0:
+        raise AssertionError(f"persist=True requires cu_num>0, got {cu_num}")
+    persist_tag = "" if not persist else f"_persist_cu{cu_num}"
+    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -426,15 +449,10 @@ def compile_gemm2_a4w4_port(
                     BM=BM,
                 )
 
-        # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
-        issue_all_a_loads((bx_i32 // num_n_blocks) * fx.Int32(BM))
-        rocdl.sched_barrier(0)
-
-        cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
-        total_m_blocks = cumsum0 // BM
-        bound = total_m_blocks * fx.Int32(num_n_blocks)
-
-        if fx.Int32(bx_i32) < bound:
+        # One (m_block, n_block) unit of work for a synthesized block index `unit_bx`: preload the
+        # A prologue for its m_row then run the body. Non-persist calls this once with the launched
+        # bx (byte-identical); persist calls it per grid-strided m-tile.
+        def run_unit(unit_bx):
             gemm2_body_v2(
                 lds_base_i32,
                 arg_ascale,
@@ -446,7 +464,7 @@ def compile_gemm2_a4w4_port(
                 i32_M,
                 i32_max_m_blocks,
                 arg_out,
-                bx_i32,
+                unit_bx,
                 lane,
                 wave,
                 aq_rsrc,
@@ -462,6 +480,40 @@ def compile_gemm2_a4w4_port(
                 topk=topk,
                 SBM=SBM,
             )
+
+        if const_expr(not persist):
+            # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
+            issue_all_a_loads((bx_i32 // num_n_blocks) * fx.Int32(BM))
+            rocdl.sched_barrier(0)
+
+            cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
+            total_m_blocks = cumsum0 // BM
+            bound = total_m_blocks * fx.Int32(num_n_blocks)
+
+            if fx.Int32(bx_i32) < bound:
+                run_unit(bx_i32)
+        else:
+            # Persistent-m grid: a fixed grid of cu_num*num_n_blocks blocks. The launched block
+            # index encodes (m_tile0 in [0,cu_num), n_block); each block grid-strides over m-tiles
+            # with stride cu_num, looping [m_tile0, m_tile0+cu_num, ...) < total_m_blocks. Cuts
+            # launch/tail overhead and improves large-M occupancy (aiter `_persist`).
+            m_tile0 = bx_i32 // fx.Int32(num_n_blocks)
+            n_block = bx_i32 - m_tile0 * fx.Int32(num_n_blocks)
+            c_stride = fx.Int32(cu_num)
+
+            cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
+            total_m_blocks = cumsum0 // BM
+            # ceil((total_m_blocks - m_tile0) / cu_num), clamped to 0 when m_tile0 >= total_m_blocks.
+            diff = total_m_blocks - m_tile0
+            rem = (diff > fx.Int32(0)).select(diff, fx.Int32(0))
+            n_iters = (rem + c_stride - fx.Int32(1)) // c_stride
+            for _it in range(fx.Index(0), ArithValue(_raw(n_iters)).index_cast(T.index), fx.Index(1)):
+                m_block = m_tile0 + fx.Int32(_it) * c_stride
+                unit_bx = m_block * fx.Int32(num_n_blocks) + n_block
+                issue_all_a_loads(m_block * fx.Int32(BM))
+                rocdl.sched_barrier(0)
+                if fx.Int32(m_block) < total_m_blocks:
+                    run_unit(unit_bx)
 
     @flyc.jit
     def launch_gemm2(
@@ -534,15 +586,18 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, a
     return launch
 
 
-def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=1, SBM=None):
+def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=1, SBM=None, persist=False, cu_num=0):
     # NE / inter_dim do not enter the compiled gemm2 kernel (inter_dim is a runtime arg); the only
     # contraction-shape key is the compile-time cap INTER_MAX. epilog + topk are compile-time
     # (reduce folds topk into the output-row index); atomic ignores topk.
     # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
+    # persist (+ cu_num, the fixed-grid size) are compile-time cache-key dims; persist=False is the
+    # byte-identical one-shot-grid variant.
     if SBM is None:
         SBM = BM
     topk_key = topk if epilog == "reduce" else 1
-    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk_key, SBM)
+    cu_key = cu_num if persist else 0
+    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk_key, SBM, persist, cu_key)
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
@@ -555,6 +610,8 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=
             a_dtype=a_dtype,
             topk=topk_key,
             SBM=SBM,
+            persist=persist,
+            cu_num=cu_key,
         )
         G2_CACHE[key] = launch
     return launch
@@ -657,6 +714,8 @@ def mxfp4_moe_gemm2(
     D_INTER_REAL=None,
     epilog="atomic",
     SBM=None,
+    persist=False,
+    cu_num=0,
     n_sorted_padded=None,
     stream=None,
 ):
@@ -669,16 +728,40 @@ def mxfp4_moe_gemm2(
     moe_sorting sync). When given, the launch grid is bounded to ``(n_sorted_padded // BM) *
     num_n_blocks`` (real work) while ``max_m_blocks`` (from ``max_sorted``) still sizes the kernel's
     A/scale buffer resources. Falls back to the full ``max_sorted`` grid if None.
+
+    ``persist`` (aiter `_persist`): launch a fixed grid of ``cu_num`` m-slots (times num_n_blocks);
+    each block grid-strides over the padded sort blocks (stride cu_num), looping over multiple
+    m-tiles. Cuts launch/tail overhead and improves large-M occupancy. The launched
+    ``i32_grid_blocks`` becomes ``cu_num`` (the fixed m-slot count) instead of the per-m-tile block
+    count. ``max_m_blocks`` still sizes the A/scale buffer resources. Default OFF (byte-identical).
     """
     import torch
 
     if D_INTER_REAL is not None and D_INTER_REAL != D_INTER:
         raise AssertionError(f"D_INTER_REAL padding unsupported (D_INTER_REAL={D_INTER_REAL}, D_INTER={D_INTER})")
-    launch = get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX_DEFAULT, None, a_dtype, topk=topk, SBM=SBM)
+    if persist and cu_num <= 0:
+        cu_num = _get_cu_num()
+    launch = get_g2(
+        BM,
+        use_nt,
+        D_HIDDEN,
+        epilog,
+        INTER_MAX_DEFAULT,
+        None,
+        a_dtype,
+        topk=topk,
+        SBM=SBM,
+        persist=persist,
+        cu_num=cu_num,
+    )
     if D_INTER > INTER_MAX_DEFAULT:
         raise AssertionError(f"D_INTER ({D_INTER}) exceeds compile cap INTER_MAX ({INTER_MAX_DEFAULT})")
     max_m_blocks = (max_sorted + BM - 1) // BM
-    grid_blocks = max_m_blocks if n_sorted_padded is None else (n_sorted_padded // BM)
+    if persist:
+        # Fixed grid: cu_num m-slots (x num_n_blocks blocks); each block loops over its m-tiles.
+        grid_blocks = cu_num
+    else:
+        grid_blocks = max_m_blocks if n_sorted_padded is None else (n_sorted_padded // BM)
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
     run_compiled(
         launch,
