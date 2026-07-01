@@ -155,8 +155,16 @@ def bscale_copy_atom():
     return fx.make_copy_atom(fx.rocdl.BufferCopy32b(0), 32)
 
 
-def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL):
-    """Layout view over preshuffled B for one N-row tile; slice -> i32<4:1> (16B=32 fp4)."""
+def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL, num_records_bytes=None):
+    """Layout view over preshuffled B for one N-row tile; slice -> i32<4:1> (16B=32 fp4).
+
+    ``num_records_bytes`` (OOB pad-skip): when set (has_pad), the per-16N-tile buffer resource is
+    sized to the REAL K extent so the fully-pad 128-K ``half`` loads of the tail tile go OOB -> 0
+    (no HBM fetch), saving weight bandwidth. The K axis (K_tile stride 512 i32) is K-major and the
+    ``half`` stride (256 i32) exceeds every within-half sub-offset (klane 3*64 + nlane 15*4 + 3 =
+    255), so cutting num_records at a half boundary zeros exactly the fully-pad half and leaves the
+    partial-pad half (host zero-filled) intact -- a clean per-half cut. None -> max_size=False
+    (cosize, byte-identical default; AC-3)."""
     col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(col_base)
@@ -164,11 +172,18 @@ def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL):
     # i32 strides: klane[0,4)->64, nlane[0,16)->4, K_tile->512, half[0,2)->256, kpack4->1
     shape = (4, 16, K_TILES_TOTAL, 2, 4)
     view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, (64, 4, 512, 256, 1))))
+    if num_records_bytes is not None:
+        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
-def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64):
-    """Layout view over e8m0 B-scale for one n-pack word; slice -> i32<1:1> scale word."""
+def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64, num_records_bytes=None):
+    """Layout view over e8m0 B-scale for one n-pack word; slice -> i32<1:1> scale word.
+
+    ``num_records_bytes`` (OOB pad-skip): sized to the 256-K-aligned real extent (scale is 256-K
+    granular: K_tile stride k0_stride_dw dw > within-tile max klane 3*16 + nlane 15 = 63, so the cut
+    is per-256-K-tile). Only WHOLE fully-pad 256-K tiles are skipped; a sub-256 pad keeps its tile
+    (host zero-fill). None -> max_size=False (byte-identical default; AC-3)."""
     base_dw = rocdl.readfirstlane(T.i32, _raw(base_dw))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(base_dw)
@@ -176,6 +191,8 @@ def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64):
     shape = (4, 16, K_TILES_TOTAL, 1)
     stride = (16, 1, k0_stride_dw, 1)
     view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, stride)))
+    if num_records_bytes is not None:
+        return fx.rocdl.make_buffer_tensor(view, num_records_bytes=num_records_bytes)
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
@@ -301,6 +318,7 @@ def gemm1_body_v2(
     i32_ntok,
     i32_total_m_blocks,
     i32_inter,
+    i32_kpad,
     *,
     BM,
     K,
@@ -310,6 +328,7 @@ def gemm1_body_v2(
     out_dtype,
     act="silu",
     swiglu_limit=0.0,
+    has_pad=False,
     SBM=None,
     k_wave=1,
     BN=BN,
@@ -373,6 +392,22 @@ def gemm1_body_v2(
     NUM_N_BLOCKS = N_OUT // fx.Int32(BN)
     OUT_AS_PER_CHUNK_DW = (INTER_rt // fx.Int32(256)) * fx.Int32(64)  # ((INTER//32)//4//2)*64
     K_G2_BYTES = INTER_rt // fx.Int32(out_pack)  # output row stride (fp4 INTER/2, fp8 INTER)
+
+    # OOB pad-skip num_records (has_pad only): K = D_HIDDEN is the padded contraction; the trailing
+    # i32_kpad columns are zero pad. Size the per-16N-tile B-weight resource to the REAL K so the
+    # fully-pad 128-K halves of the tail tile buffer-load OOB -> 0 (no HBM fetch). K_real = K - kpad.
+    #   weight: 128-K-col ``half`` granular. halves_with_real = ceil(K_real/128); each half occupies
+    #   the ``half`` stride (256 i32 = 1024 bytes). bq_num = halves_with_real * 1024.
+    # B-scale is NOT shrunk: it is 256-K-tile granular (bscale K_tile stride > within-tile span) and
+    # host-padded to a 256-K multiple (mirrors aiter scale_k_padded); a sub-256 pad (GPT-OSS 192)
+    # leaves ceil(K_real/256) == ceil(K/256) tiles, so shrinking saves 0 scale loads and risks
+    # reading OOB into the host-padded-but-valid 256-aligned scale (garbage e8m0 -> NaN). Weight is
+    # the dominant bandwidth term. has_pad=False -> None (max_size=False, byte-identical default; AC-3).
+    bq_num_records = None
+    if const_expr(has_pad):
+        K_real = fx.Int32(K) - fx.Int32(i32_kpad)
+        halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
+        bq_num_records = halves_real * fx.Int32(1024)
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
     # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
@@ -554,7 +589,7 @@ def gemm1_body_v2(
         else:
             tile_il = n_block_idx * 16 + wave * 4 + j
             col = ((tile_il & 1) * N0_HALF + (tile_il >> 1)) * 16
-        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL)
+        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL, num_records_bytes=bq_num_records)
 
     bq_views = [make_bq_view_for_jtile(j) for j in range_constexpr(NJ)]
 
@@ -967,6 +1002,7 @@ def gemm2_body_v2(
     aq_rsrc,
     arg_aq,
     i32_inter,
+    i32_kpad,
     *,
     BM,
     use_nt,
@@ -976,6 +1012,7 @@ def gemm2_body_v2(
     a_dtype,
     use_reduce=False,
     topk=1,
+    has_pad=False,
     SBM=None,
 ):
     # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
@@ -1009,6 +1046,19 @@ def gemm2_body_v2(
     num_n_blocks = N_OUT // 256
     KH4 = K_rt // fx.Int32(8)  # i32 col stride (= K_HALF//4)
     K_TILES_MAX = INTER_MAX // BK
+
+    # OOB pad-skip num_records (has_pad only): K = inter_dim is the padded contraction; the trailing
+    # i32_kpad columns are zero pad. Size the per-16N-tile B-weight resource to the REAL K so the
+    # fully-pad 128-K weight halves buffer-load OOB -> 0 (no HBM fetch). Weight is the dominant
+    # bandwidth term; B-scale is NOT shrunk (256-K granular + host 256-align, sub-256 pad saves 0 and
+    # risks NaN -- see gemm1_body_v2). Same geometry as gemm1 (see bq_view docstring):
+    #   weight: halves_with_real = ceil(K_real/128), 1024 bytes/half.
+    # has_pad=False -> None (max_size=False, byte-identical default; AC-3).
+    bq_num_records = None
+    if const_expr(has_pad):
+        K_real = K_rt - fx.Int32(i32_kpad)
+        halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
+        bq_num_records = halves_real * fx.Int32(1024)
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
     # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
@@ -1059,7 +1109,7 @@ def gemm2_body_v2(
 
     def make_bq_view(j):
         col = n_block_idx * BN + wave * (BN // 4) + j * 16
-        return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_MAX)
+        return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_MAX, num_records_bytes=bq_num_records)
 
     bq_views = [make_bq_view(j) for j in range_constexpr(4)]
 
