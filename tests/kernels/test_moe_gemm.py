@@ -2197,17 +2197,23 @@ def run_mxfp4_moe_2stage(
             w1_fp32[:, :, real_H:gq] = 0.0  # partial-pad remainder in a kept half -> host zero
             w1_fp32[:, :, gq:] = wpad_fill  # fully-pad halves -> OOB-skipped (garbage ok)
         if inter_dim_pad:
-            # gemm1 N-output (2*INTER, gate|up interleaved halves): the pad-N weight ROWS of w1 (inter
-            # [real_INTER, INTER) of each half) produce ONLY pad-N output columns, which gemm1's N-skip
-            # drops (their weight loads OOB -> 0, output written as 0). Since real_INTER is 16-aligned,
-            # EVERY 16-N tile in the pad range is fully pad and fully dropped, so these rows may take the
-            # garbage fill: a correct output then proves the N-skip never fetches them (the intermediate
-            # pad cols stay 0 regardless, which gemm2's kept partial-pad K-half needs -- see below).
-            w1_fp32[:, real_INTER:INTER, :] = wpad_fill  # gate half pad-N rows -> N-skip drops
-            w1_fp32[:, INTER + real_INTER :, :] = wpad_fill  # up half pad-N rows -> N-skip drops
-            gk = (real_INTER + 127) // 128 * 128  # first fully-pad 128-K w2 col
-            w2_fp32[:, :, real_INTER:gk] = 0.0  # partial-pad remainder -> host zero
-            w2_fp32[:, :, gk:] = wpad_fill  # fully-pad halves -> OOB-skipped (garbage ok)
+            # gemm1 N-output pad-skip. w1 is [E, 2*INTER, K] with fused gate|up halves; the pad-N weight
+            # ROWS -- inter [real_INTER, INTER) of the gate half AND [INTER+real_INTER, 2*INTER) of the up
+            # half -- produce ONLY pad-N intermediate columns, which gemm1's N-skip drops (their weight
+            # loads OOB -> 0, intermediate written as 0). Since real_INTER is 16-aligned, EVERY 16-N tile
+            # in the pad range is fully pad and fully dropped -> these w1 rows take the garbage fill under
+            # ``garbage_pad`` (1e30). A correct output then PROVES the N-skip never fetches them: the
+            # kernel intermediate pad cols stay 0 regardless of the garbage.
+            #
+            # For the REFERENCE (full-INTER `inter_r @ W2[e].T`, no skip) to match, the garbage in the
+            # reference intermediate pad cols must be annihilated by a ZERO w2 contraction there -- so the
+            # pad-K cols of w2 (inter [real_INTER, INTER)) are held at 0 here (structural, NOT garbage).
+            # This is why the N-skip garbage test keeps w2 pad-K = 0 (the w2 K-pad *garbage* variant is a
+            # SEPARATE concern covered by the model_dim_pad / gemm2 K-skip path). The kernel gemm2 also
+            # OOB-K-skips these zeroed cols, so both paths compute the real-INTER GEMM.
+            w1_fp32[:, real_INTER:INTER, :] = wpad_fill  # gate-half pad-N rows -> gemm1 N-skip drops
+            w1_fp32[:, INTER + real_INTER :, :] = wpad_fill  # up-half pad-N rows -> gemm1 N-skip drops
+            w2_fp32[:, :, real_INTER:] = 0.0  # w2 pad-K contraction cols: structural 0 (ref annihilates)
     # Per-(shape, token) CSV dispatch (MXFP4_DISPATCH=1): auto-select (BM, epilog, bm_stage1,
     # persist) from the aiter tuned map (kernels.moe_dispatcher.select_pipe_config) -- the dominant
     # perf lever (stage2 atomic-vs-reduce + block_m), plus the stage1-only BM128 tile and gemm2
@@ -2413,6 +2419,12 @@ def run_mxfp4_moe_2stage(
             return g * torch.sigmoid(alpha * g) * (u + 1.0)
         return torch.nn.functional.silu(gate) * up
 
+    # Reference over the REAL (unpadded) inter extent. With inter_dim_pad the pad-N w1 rows may hold
+    # garbage (--garbage_pad): the kernel N-skips them (0 intermediate there), and the real GEMM never
+    # includes them -- so the reference must exclude them too (slicing to rI). This keeps the reference
+    # finite regardless of the pad-N garbage magnitude (a full-INTER reference would overflow act on the
+    # huge pad rows). inter_dim_pad==0 -> rI == INTER (byte-identical full-INTER reference).
+    rI = INTER - inter_dim_pad
     sti_c, sei_c, swt_c = sti[:n].cpu(), sei.cpu(), swt[:n].cpu()
     ref = torch.zeros((tokens, H), dtype=torch.float32, device=device)
     for r in range(n):
@@ -2420,10 +2432,10 @@ def run_mxfp4_moe_2stage(
         if tok >= tokens:
             continue
         e = int(sei_c[r // SBM].item())
-        gate = A[tok] @ W1[e, :INTER].T
-        up = A[tok] @ W1[e, INTER : 2 * INTER].T
+        gate = A[tok] @ W1[e, :rI].T
+        up = A[tok] @ W1[e, INTER : INTER + rI].T
         inter_r = _act(gate, up)
-        ref[tok] += (inter_r @ W2[e].T) * float(swt_c[r].item())
+        ref[tok] += (inter_r @ W2[e, :, :rI].T) * float(swt_c[r].item())
 
     cos = torch.nn.functional.cosine_similarity(ref.reshape(-1), out.float().reshape(-1), dim=0).item()
     thr = 0.95 if is_f8 else 0.85

@@ -602,14 +602,16 @@ def gemm1_body_v2(
             col = ((tile_il & 1) * N0_HALF + (tile_il >> 1)) * 16
         nrec = bq_num_records
         if const_expr(has_pad):
-            # This 16-N tile's LOGICAL inter col base. interleave: gate cols [0,BN//2) and up cols
-            # [BN//2,BN) of each 256-block both map to inter [n_block*(BN//2), +BN//2); the base is
-            # n_block*(BN//2) + (col_in_block mod (BN//2)) where col_in_block = wave_n*(BN//nnw)+j*16.
-            # separate: gate/up split at INTER -> col mod INTER. Only emitted under has_pad, so the
-            # default variant's `col` expression above is byte-identical to the pre-N-skip body (AC-3).
+            # This 16-N tile's LOGICAL inter col base. interleave: gate/up is selected by j PARITY
+            # (in_b=J%2, mfma_cluster), and the tile's n0 index is J//2 -- so a gate tile (j even) and
+            # its sibling up tile (j+1, odd) map to the SAME logical inter col. Matching the cshuffle
+            # (col_local = wave_n*gate_span + (J//2)*16, gate_span=(BN//2)//num_n_waves), the logical
+            # inter base is n_block*(BN//2) + wave_n*gate_span + (j//2)*16. Both members of a gate|up
+            # pair share it, so they are skipped consistently. separate: gate/up split at INTER, tile
+            # col maps to inter = col mod INTER. Only emitted under has_pad (default byte-identical; AC-3).
+            gate_span_p = (BN // 2) // num_n_waves
             if const_expr(interleave):
-                col_in_block = wave_n * (BN // num_n_waves) + j * 16
-                logical_inter = n_block_idx * fx.Int32(BN // 2) + (col_in_block % fx.Int32(BN // 2))
+                logical_inter = n_block_idx * fx.Int32(BN // 2) + wave_n * fx.Int32(gate_span_p) + fx.Int32((j // 2) * 16)
             else:
                 logical_inter = col % INTER_rt
             # Fully-pad tile (its 16 inter cols are all >= INTER_real, since INTER_real is 16-aligned):
