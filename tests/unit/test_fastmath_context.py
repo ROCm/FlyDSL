@@ -21,15 +21,17 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import func
 from flydsl.expr.numeric import Float32, Int32
 
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
-
 try:
     import torch
 except ImportError:
     torch = None
 
-if torch is None or not torch.cuda.is_available():
-    pytest.skip("CUDA/ROCm not available", allow_module_level=True)
+# GPU gating is applied per-test via ``requires_gpu``; the ``l0_backend_agnostic``
+# IR-string tests below build IR without a device and must run on non-GPU runners.
+requires_gpu = pytest.mark.skipif(
+    torch is None or not torch.cuda.is_available(),
+    reason="CUDA/ROCm not available",
+)
 
 
 def _build(build_fn, arg_types):
@@ -212,6 +214,9 @@ def _arith_lines(ir_text, needle):
     return [ln.strip() for ln in ir_text.splitlines() if needle in ln and ln.strip().startswith("%")]
 
 
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@requires_gpu
 def test_no_hint_only_block_scope_applies():
     """Without a kernel hint, kernel-level ops carry no flag, but an inner
     ``with fx.fastmath`` block still applies (block is independent of kernel)."""
@@ -222,6 +227,9 @@ def test_no_hint_only_block_scope_applies():
     assert all("fastmath" not in ln for ln in _arith_lines(ir_text, "arith.addf"))
 
 
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@requires_gpu
 def test_kernel_level_fastmath_and_scope_overrides():
     hinted = flyc.compile[{"fastmath": "fast"}](_fm_launch_hinted)
     ir_text = _source_ir(hinted)
@@ -237,6 +245,9 @@ def test_kernel_level_fastmath_and_scope_overrides():
     assert "fastmath" not in exps[1]  # explicit op-level "none" override
 
 
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@requires_gpu
 def test_hint_changes_cache_key():
     """The fastmath hint must be part of the cache key (rides _hints_)."""
     _fm_launch_hinted._ensure_sig()

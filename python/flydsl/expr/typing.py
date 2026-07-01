@@ -57,6 +57,7 @@ from .utils.arith import (
     fp_to_int,
     int_to_fp,
     int_to_int,
+    resolve_fastmath,
 )
 
 

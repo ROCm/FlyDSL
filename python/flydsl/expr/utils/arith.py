@@ -28,7 +28,9 @@ def _normalize_fastmath(flags):
         return None
     if isinstance(flags, str):
         return flags
-    if isinstance(flags, (list, tuple, set, frozenset)):
+    if isinstance(flags, (set, frozenset)):
+        return ",".join(sorted(str(f) for f in flags))
+    if isinstance(flags, (list, tuple)):
         return ",".join(str(f) for f in flags)
     return str(flags)
 
