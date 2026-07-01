@@ -2186,7 +2186,10 @@ def run_mxfp4_moe_2stage(
         D_INTER=INTER,
         topk=TOPK,
         BM=BM,
-        use_nt=True,
+        # gemm1 B is CACHED (nt off): stage1 has heavy cross-m-block B-reuse (many
+        # m-blocks per expert at large tokens), so caching the weights in L2 is a
+        # large win on compute-bound shapes (matches base's b_nt=0 for stage1).
+        use_nt=False,
         inline_quant=False,
         interleave=interleave,
         a_dtype=("fp8" if is_f8 else "fp4"),

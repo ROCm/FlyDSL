@@ -383,7 +383,7 @@ def mxfp4_moe_gemm1(
     D_INTER,
     topk,
     BM=32,
-    use_nt=True,
+    use_nt=False,
     inline_quant=False,
     interleave=True,
     a_dtype="fp4",
@@ -392,6 +392,11 @@ def mxfp4_moe_gemm1(
     stream=None,
 ):
     """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller.
+
+    ``use_nt`` is the B-weight load cache policy (False -> cached, True -> non-temporal).
+    Default False: stage1 reuses each expert's weights across many m-blocks (large tokens
+    give many m-blocks per expert), so caching B in L2 is a large win on compute-bound
+    shapes and matches base's stage1 (``b_nt=0``). nt only helps when there is no reuse.
 
     ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
     moe_sorting sync). When given, the launch grid is bounded to the real work
