@@ -141,6 +141,11 @@ def compile_fp8fp4_gemm(
     if use_cluster:
         if cluster_m * cluster_n > 16:
             raise ValueError(f"cluster_m * cluster_n must be <= 16, got {cluster_m}*{cluster_n}")
+        if (N // tile_n) % cluster_n != 0:
+            raise ValueError(
+                f"cluster_n={cluster_n} must divide N/tile_n={N // tile_n} "
+                f"(N={N}, tile_n={tile_n}): gfx1250 does not support partial clusters"
+            )
     effective_waves_per_eu = waves_per_eu
 
     num_warps = m_warp * n_warp
@@ -2325,7 +2330,10 @@ def compile_fp8fp4_gemm(
             active_addr_lo = addr_box[0]
         _bvs_tail_seed = []
         _bvs_tail_issue_start = loop_iters * num_buffers
-        if const_expr(_bvs_active):
+        _bvs_ra = []
+
+        def _issue_bvs_initial_prefetch():
+            nonlocal _bvs_tail_seed, _bvs_tail_issue_start, _bvs_ra
             _bvs_initial_depth = _bvs_D if loop_iters > 0 else min(_bvs_D, num_k_tiles)
             _bvs_pf = [_bvs_prefetch(split_k_base + arith.index(_d * tile_k)) for _d in range(_bvs_initial_depth)]
             if const_expr(loop_iters > 0):
@@ -2334,7 +2342,13 @@ def compile_fp8fp4_gemm(
                 _bvs_tail_seed = list(_bvs_pf)
                 _bvs_tail_issue_start = _bvs_initial_depth
 
+        if const_expr(_bvs_active and not use_cluster):
+            _issue_bvs_initial_prefetch()
+
         _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
+
+        if const_expr(_bvs_active and use_cluster):
+            _issue_bvs_initial_prefetch()
 
         # Main loop — acc_mixed style: fence at top, TDM_load mid-compute.
         # This overlaps TDM DMA with the remaining WMMA instructions,
