@@ -30,7 +30,7 @@ if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.mxfp4_preshuffle import compile_mxfp4_gemm  # noqa: E402
+from kernels.mxfp4_preshuffle import compile_mxfp4_gemm, compile_mxfp6_gemm  # noqa: E402
 from kernels.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
@@ -325,7 +325,6 @@ def test_mfma_w4_flyc_preshuffle(
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     waves_per_eu: int = 0,
-    use_async_copy: bool = False,
 ):
     """FP4 (MXFP4) preshuffle GEMM (layout-API v2) — gfx950 only."""
     if get_rocm_arch() != "gfx950":
@@ -347,9 +346,8 @@ def test_mfma_w4_flyc_preshuffle(
         tile_k=tile_k,
         out_dtype=out_dtype,
         waves_per_eu=_wpe,
-        use_async_copy=bool(use_async_copy),
     )
-    print(f"✓ Compiled (async_copy={use_async_copy}, waves_per_eu={_wpe})")
+    print(f"✓ Compiled (waves_per_eu={_wpe})")
 
     device = torch.device("cuda")
     M_align_32 = (M + 31) // 32 * 32
@@ -435,6 +433,131 @@ def test_mfma_w4_flyc_preshuffle(
     tflops = flops / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
     print(f"[flyc] Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+# ── W4A6: MXFP6 (E2M3) A × MXFP4 (E2M1) B ─────────────────────────────────
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    [
+        (64, 8192, 8192, 64, 128, 128),
+        (32, 8192, 8192, 32, 128, 256),
+        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
+        pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
+        pytest.param(256, 4096, 14336, 128, 256, 256, marks=pytest.mark.large_shape),
+    ],
+)
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+def test_mfma_a6w4_preshuffle(
+    out_dtype,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    *,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    waves_per_eu: int = 0,
+):
+    """W4A6: MXFP6 (E2M3) A × MXFP4 (E2M1) B preshuffle GEMM — gfx950 only."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP6/FP4 GEMM requires gfx950, got {get_rocm_arch()}")
+
+    print("=" * 80)
+    print(f"MFMA W4A6 (MXFP6 A × MXFP4 B) GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
+    print("=" * 80)
+
+    _wpe = int(waves_per_eu) if waves_per_eu else 0
+    _wpe = None if _wpe <= 0 else _wpe
+    launch_fn = compile_mxfp6_gemm(
+        N=N,
+        K=K,
+        M_hint=M,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        out_dtype=out_dtype,
+        waves_per_eu=_wpe,
+    )
+    print(f"✓ Compiled (waves_per_eu={_wpe})")
+
+    device = torch.device("cuda")
+    M_align_32 = (M + 31) // 32 * 32
+    N_align_32 = (N + 31) // 32 * 32
+
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
+    a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
+    b_fp32_padded = torch.zeros(N_align_32, K, device=device, dtype=torch.float32)
+    a_fp32_padded[:M] = a_fp32
+    b_fp32_padded[:N] = b_fp32
+
+    # A: MXFP6 E2M3, FP8-padded (1 byte/code).
+    a_pad, scale_a_orig, a_unpacked = fp4_utils.per_1x32_f6_quant(a_fp32_padded)
+    a_codes = a_pad[:M]
+    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+
+    # B: MXFP4 E2M1, identical to test_mfma_w4_flyc_preshuffle.
+    b_q, scale_b, _ = fp4_utils.per_1x32_f4_quant(b_fp32_padded)
+    b_q = b_q[:N]
+    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
+
+    # Reference: dequant(A) @ dequant(B).T in fp32.
+    a_deq = fp4_utils.fp6_e2m3_to_f32(a_unpacked) * fp4_utils.e8m0_to_f32(scale_a_orig[:M].repeat_interleave(32, dim=1))
+    b_deq = fp4_utils.mxfp4_to_f32(b_q) * fp4_utils.e8m0_to_f32(scale_b[:N].repeat_interleave(32, dim=1))
+    c_ref = torch.mm(a_deq, b_deq.T).to(torch.float32)
+
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
+    _dummy_bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+
+    def _to_bytes(t):
+        return t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)
+
+    def _a6w4_args(c, a, b, sa, sb):
+        return (
+            c.contiguous().view(-1),
+            _to_bytes(a).contiguous().view(-1),
+            _to_bytes(b).contiguous().view(-1),
+            _to_bytes(sa).contiguous().view(-1),
+            _to_bytes(sb).contiguous().view(-1),
+            _dummy_bias,
+            M,
+            N,
+            torch.cuda.current_stream(),
+        )
+
+    compiled_fn = flyc.compile(launch_fn, *_a6w4_args(c_out, a_codes, b_shuffled, scale_a, scale_b_shuffled))
+
+    def launch_kernel(c, a, b, sa, sb):
+        compiled_fn(*_a6w4_args(c, a, b, sa, sb))
+
+    bench_iters = max(2, int(bench_iters))
+    _, us = run_perftest(
+        launch_kernel,
+        c_out,
+        a_codes,
+        b_shuffled,
+        scale_a,
+        scale_b_shuffled,
+        num_iters=bench_iters,
+        num_warmup=int(bench_warmup),
+    )
+    torch.cuda.synchronize()
+
+    assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+
+    # A: 1 byte/code (FP8-padded); B: 0.5 byte/code (MXFP4).
+    bytes_moved = M * K + (N * K) // 2 + M * N * 2 + (M + N) * (K // 32)
+    tflops = (2 * M * N * K) / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"[flyc] W4A6 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
 if __name__ == "__main__":
@@ -611,7 +734,7 @@ def test_cudagraph_capture_preshuffle(in_dtype):
     # ── Verify ──
     max_diff = (ref - graph_result).abs().max().item()
     assert graph_result.abs().max().item() > 0, (
-        f"CUDAGraph replay produced all zeros — kernel was NOT captured! " f"ref max={ref.abs().max().item():.4f}"
+        f"CUDAGraph replay produced all zeros — kernel was NOT captured! ref max={ref.abs().max().item():.4f}"
     )
     assert torch.allclose(ref, graph_result, atol=1e-2), (
         f"CUDAGraph result mismatch: max_diff={max_diff:.6f}, "
@@ -699,7 +822,7 @@ def test_fused_epilogue_correctness(epilogue):
     # error is bounded by ~K * eps_bf16 ~ 8192 * 2^-7 ~= 64 ULP. We use
     # rtol=0.05 (5%) and atol=2.0 (covers small-magnitude outputs).
     assert not torch.isnan(c_out).any(), (
-        f"Epilogue {epilogue}: kernel produced NaN(s) " f"(count={int(torch.isnan(c_out).sum().item())})"
+        f"Epilogue {epilogue}: kernel produced NaN(s) (count={int(torch.isnan(c_out).sum().item())})"
     )
     assert not torch.isinf(c_out).any(), f"Epilogue {epilogue}: kernel produced Inf(s)"
     atol = 2.0
