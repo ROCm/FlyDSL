@@ -539,11 +539,9 @@ def compile_preshuffle_gemm(
 
             if const_expr(is_8bit):
                 # FP8/INT8: per-row(scale_a) × per-col(scale_b) scaling applied inline.
-                scale_a_buf = fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True)
                 scale_b_buf = fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True)
                 scale_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
                 scale_reg_lay = fx.make_layout(1, 1)
-                scale_a_div = fx.logical_divide(scale_a_buf, fx.make_layout(1, 1))
                 scale_b_div = fx.logical_divide(scale_b_buf, fx.make_layout(1, 1))
 
                 def load_scale(div_tensor, index):
@@ -555,8 +553,15 @@ def compile_preshuffle_gemm(
                     load_scale(scale_b_div, by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)
                     for ni in range_constexpr(num_acc_n)
                 ]
+                # scale_a: the 4 contiguous per-row scales per mi (base is 4-aligned) load as
+                # one 128b buffer_load instead of 4×32b — matches the reference load count.
+                scale_a_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
                 s_a_vals = [
-                    [load_scale(scale_a_div, bx_m + mi * 16 + lane_div_16 * 4 + ii) for ii in range_constexpr(4)]
+                    Vec(
+                        fx.buffer_ops.buffer_load(
+                            scale_a_rsrc, fx.Int32(bx_m + mi * 16 + lane_div_16 * 4), vec_width=4, dtype=T.f32
+                        )
+                    ).bitcast(fx.Float32)
                     for mi in range_constexpr(m_repeat)
                 ]
 
