@@ -1789,8 +1789,6 @@ def test_moe_gemm_2stage(
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16 (W4A16)")
     if in_dtype in ("fp4", "a8w4"):
-        if bool(use_valid_mask):
-            pytest.skip(f"{in_dtype} does not support valid_mask")
         if out_s not in ("f16", "fp16", "half"):
             pytest.skip(f"{in_dtype} only supports f16 output")
         if group_size > 0:
@@ -1802,10 +1800,9 @@ def test_moe_gemm_2stage(
             pytest.skip(f"{in_dtype} stage2 requires inter_dim >= 256 and tile_k2 >= 256, got {inter_dim}, {tile_k2}")
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
-        # The layout-API MXFP4 pipe (moe_dispatcher) is the BM32 atomic, opus-sort
-        # path: no reduce mode, and graph capture is out of scope here.
-        if bool(use_reduce):
-            pytest.skip(f"{in_dtype} layout-API pipe is atomic-only (no reduce mode)")
+        # The layout-API MXFP4 pipe (moe_dispatcher) supports the BM32 atomic (default) and
+        # reduce (non-atomic accumulate + EP valid_mask) opus-sort paths; graph capture is
+        # out of scope here.
         if bool(test_graph):
             pytest.skip(f"{in_dtype} layout-API pipe: graph capture not covered")
     device = torch.device("cuda")
@@ -1850,6 +1847,8 @@ def test_moe_gemm_2stage(
             topk_ids=topk_ids,
             topk_weights=topk_weights,
             seed=seed,
+            use_reduce=bool(use_reduce),
+            use_valid_mask=bool(use_valid_mask),
         )
         return
 
@@ -2120,12 +2119,19 @@ def run_mxfp4_moe_2stage(
     seed=0,
     act="silu",
     swiglu_limit=0.0,
+    use_reduce=False,
+    use_valid_mask=False,
 ):
-    """Run the layout-API MXFP4 MoE (opus sort -> gemm1 -> gemm2 atomic) and verify
-    against an independent dequant-MoE reference. Returns the bf16 output.
+    """Run the layout-API MXFP4 MoE (opus sort -> gemm1 -> gemm2) and verify against an
+    independent dequant-MoE reference. Returns the bf16 output.
 
     ``act`` selects the gemm1 stage1 activation ("silu" default or "swiglu"); ``swiglu_limit``
-    is the swiglu gate/up clamp (0 -> main's default 7.0). The torch reference below mirrors it."""
+    is the swiglu gate/up clamp (0 -> main's default 7.0). The torch reference below mirrors it.
+
+    ``use_reduce`` selects the gemm2 reduce (non-atomic) epilog: gemm2 writes each (token,topk)
+    slot to a [tokens*topk, H] intermediate, then this driver reduces over topk (applying the EP
+    valid_mask when ``use_valid_mask``), mirroring main's accumulate=False path + get_topk_valid_mask.
+    ``use_valid_mask`` is only meaningful in reduce mode."""
     from tests.kernels.utils import fp4_utils
 
     device = x_fp32.device
@@ -2203,8 +2209,13 @@ def run_mxfp4_moe_2stage(
     mxfp4_moe_gemm1(**_g1_kwargs)
     torch.cuda.synchronize()
 
-    # gemm2 (atomic): inter x w2 -> per-token weighted topk sum
-    out = torch.zeros((tokens, H), dtype=torch.bfloat16, device=device)
+    # gemm2: atomic -> per-token weighted topk sum into [tokens, H]; reduce -> non-atomic store into
+    # [tokens*topk, H] then host reduce over topk (with EP valid_mask), mirroring main accumulate=False.
+    epilog = "reduce" if use_reduce else "atomic"
+    if use_reduce:
+        gemm2_out = torch.zeros((tokens * TOPK, H), dtype=torch.bfloat16, device=device)
+    else:
+        gemm2_out = torch.zeros((tokens, H), dtype=torch.bfloat16, device=device)
     _g2_kwargs = dict(
         inter_sorted_quant=isq,
         inter_sorted_shuffled_scale=iss,
@@ -2214,7 +2225,7 @@ def run_mxfp4_moe_2stage(
         cumsum_tensor=cumsum,
         sorted_token_ids=sti,
         sorted_weights=swt,
-        out=out,
+        out=gemm2_out,
         M_logical=tokens,
         max_sorted=max_sorted,
         NE=NE,
@@ -2224,10 +2235,22 @@ def run_mxfp4_moe_2stage(
         BM=BM,
         use_nt=False,
         a_dtype=("fp8" if is_f8 else "fp4"),
+        epilog=epilog,
         n_sorted_padded=n,
     )
     mxfp4_moe_gemm2(**_g2_kwargs)
     torch.cuda.synchronize()
+
+    if use_reduce:
+        # host reduce over topk (main _MoeGemm2ReduceWrapper + get_topk_valid_mask semantics):
+        # X[t, k, :] masked by valid_mask[t, k] (EP mask; expert_mask=None -> all ones), then summed.
+        X = gemm2_out.view(tokens, TOPK, H)
+        if use_valid_mask:
+            valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).to(device)
+            X = X * valid_mask.view(tokens, TOPK, 1).to(dtype=X.dtype)
+        out = torch.sum(X.to(torch.float32), dim=1).to(torch.bfloat16)
+    else:
+        out = gemm2_out
 
     # reference: independent dequant MoE (opus gather: tok = sti & 0xFFFFFF)
     if is_f8:
@@ -2335,7 +2358,7 @@ def run_mxfp4_moe_2stage(
     bytes2 += _w2_elems // 32  # per-block e8m0 w2 scale
     tbps2 = float("nan") if us2 <= 0 else bytes2 / 1e12 / (us2 / 1e6)
     print(
-        f"FlyDSL MoE stage2 [moe_gemm2] {in_dtype} atomic | "
+        f"FlyDSL MoE stage2 [moe_gemm2] {in_dtype} {epilog} | "
         f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
         f"{us2:.1f} us, {tflops2:.2f} TFLOPS, {tbps2:.3f} TB/s"
     )
