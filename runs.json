@@ -1,11 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-07-01T16:47:10Z",
+ "updated": "2026-07-01T16:55:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28533233505,
+   "run_id": 28533870938,
    "pr": 780,
+   "commit": "85f9e54b3756fafbad0b76ed1be441dab96e002a",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533870938",
+   "created_at": "2026-07-01T16:54:33Z",
+   "updated_at": "2026-07-01T16:55:03Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28533709835,
+   "pr": null,
+   "commit": "5f225b02ec5df29707270bbb0ca67955abba2f7b",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835",
+   "created_at": "2026-07-01T16:51:46Z",
+   "updated_at": "2026-07-01T16:54:52Z",
+   "actor": "amd-satre",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T16:54:02Z",
+     "completed_at": "2026-07-01T16:54:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835/job/84589852855"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T16:54:02Z",
+     "completed_at": "2026-07-01T16:54:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835/job/84589852868"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T16:53:53Z",
+     "completed_at": "2026-07-01T16:54:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835/job/84589852873"
+    }
+   ]
+  },
+  {
+   "run_id": 28533233505,
+   "pr": null,
    "commit": "856128d9766793a860ce9cb2fab4bfce28a8c61b",
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
@@ -1848,64 +1906,6 @@
      "started_at": "2026-06-30T10:01:26Z",
      "completed_at": "2026-06-30T10:24:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28434421265/job/84262583309"
-    }
-   ]
-  },
-  {
-   "run_id": 28431608608,
-   "pr": 753,
-   "commit": "29233a1bfa009d6eb03830390cbe5478168b3bc2",
-   "branch": "mxfp4-moe-gemm",
-   "event": "pull_request",
-   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28431608608",
-   "created_at": "2026-06-30T08:40:25Z",
-   "updated_at": "2026-06-30T08:43:25Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 28430210077,
-   "pr": null,
-   "commit": "a22dd0d1338c98f71e5b93bedf1afc0814c94723",
-   "branch": "pa-decode-deterministic-reduce",
-   "event": "pull_request",
-   "title": "[pa] Deterministic split-partition reduce for PS decode",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077",
-   "created_at": "2026-06-30T08:14:47Z",
-   "updated_at": "2026-06-30T14:42:04Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T14:30:44Z",
-     "completed_at": "2026-06-30T14:42:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077/job/84242992244"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T08:28:50Z",
-     "completed_at": "2026-06-30T09:14:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077/job/84242992261"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T08:17:37Z",
-     "completed_at": "2026-06-30T09:25:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28430210077/job/84242992263"
     }
    ]
   }
