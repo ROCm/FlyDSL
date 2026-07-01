@@ -180,13 +180,20 @@ _STAGE1_BM128_MIN_TOK = {
 }
 
 # persist (aiter `_persist`, gemm2 fixed-grid grid-stride): ON for the high-expert large-M reduce
-# rows (DSV3/Kimi/DSV4) where it cuts launch/tail overhead and lifts large-M occupancy (F2:
+# rows (DSV3/Kimi fp4) where it cuts launch/tail overhead and lifts large-M occupancy (F2:
 # +5-17%); OFF for GPT-OSS (E128 large-inter — no benefit, keep the byte-identical one-shot grid).
 # Keyed by family signature -> min token count to enable gemm2 persist.
+#
+# NOTE: the a8w4/fp8-A gemm2 persist path is a KNOWN-BROKEN F2 combo (produces cos=0 at large M,
+# reproduces on rlcr/moe-persist-sbm alone — the multi-iteration grid-stride corrupts the fp8-A
+# accumulator/LDS state). The fp4 persist path is correct at all tokens (validated to 32768).
+# The dispatcher therefore enables persist ONLY for the fp4 families; DeepSeekV4 (a8w4, sig
+# (7168,512,384)) is deliberately excluded. The knob stays manually selectable (MXFP4_PERSIST=1)
+# but a8w4+persist is guarded fail-fast in compile_gemm2_a4w4_port so it can never silently ship
+# garbage. Re-add DSV4 here once the fp8-A persist path is fixed.
 _PERSIST_MIN_TOK = {
     (7168, 256, 257): 4096,  # DeepSeekV3 fp4
     (7168, 256, 384): 4096,  # KimiK2 fp4
-    (7168, 512, 384): 4096,  # DeepSeekV4 a8w4
 }
 
 
@@ -204,8 +211,9 @@ def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=
       large M (``_STAGE1_BM128_MIN_TOK``) when ``allow_bm128``, else == ``BM``. When
       ``bm_stage1 != BM`` the caller must use SBM = lcm(bm_stage1, BM) (=128) as the shared sort
       unit so both stages agree on padding / expert-id lookup.
-    * ``persist`` -- enable the gemm2 persistent-m grid for the high-expert large-M families
-      (``_PERSIST_MIN_TOK``); OFF for GPT-OSS (byte-identical one-shot grid).
+    * ``persist`` -- enable the gemm2 persistent-m grid for the high-expert large-M fp4 families
+      (``_PERSIST_MIN_TOK``, DSV3/Kimi); OFF for GPT-OSS (byte-identical one-shot grid) and for the
+      a8w4/fp8-A families (the fp8-A persist path is a known-broken F2 combo; see _PERSIST_MIN_TOK).
 
     Unlisted families fall back to the current default (BM=32, atomic, bm_stage1=32, persist=off);
     unlisted token counts snap to the nearest lower bucket.
@@ -438,6 +446,14 @@ def compile_gemm2_a4w4_port(
     # the name (the fixed grid size is a distinct variant).
     if persist and cu_num <= 0:
         raise AssertionError(f"persist=True requires cu_num>0, got {cu_num}")
+    if persist and is_f8:
+        # KNOWN-BROKEN F2 combo: the fp8-A gemm2 persist multi-iteration grid-stride corrupts the
+        # accumulator/LDS state and yields cos=0 at large M (reproduces on rlcr/moe-persist-sbm
+        # alone). fp4 persist is correct. Fail fast rather than silently shipping garbage.
+        raise AssertionError(
+            "a8w4/fp8-A gemm2 persist is not supported (known-broken F2 path: cos=0 at large M). "
+            "Use persist only with a_dtype='fp4', or run a8w4 with persist=False."
+        )
     persist_tag = "" if not persist else f"_persist_cu{cu_num}"
     tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
