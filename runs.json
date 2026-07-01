@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-01T07:30:00Z",
+ "updated": "2026-07-01T07:48:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28502006554,
+   "pr": 784,
+   "commit": "ceb73da774d7bd842ef960ae0db5f685920c7d70",
+   "branch": "pr/fix-coalesce-x",
+   "event": "pull_request",
+   "title": "[Fix] Add coalesceX to keep layout boundary",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502006554",
+   "created_at": "2026-07-01T07:46:49Z",
+   "updated_at": "2026-07-01T07:47:51Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 28501962700,
+   "pr": 783,
+   "commit": "6f3351f54902e6422a3ac4bca012306f45a3954a",
+   "branch": "feat/autotune-cache-key-restore",
+   "event": "pull_request",
+   "title": "[1/5] autotune: harden cache key + add restore_value (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28501962700",
+   "created_at": "2026-07-01T07:45:57Z",
+   "updated_at": "2026-07-01T07:45:57Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 28501035207,
    "pr": null,
@@ -10,13 +40,41 @@
    "branch": "main",
    "event": "push",
    "title": "fix: fix gf1250 naming style (#787)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28501035207",
    "created_at": "2026-07-01T07:28:05Z",
-   "updated_at": "2026-07-01T07:29:06Z",
+   "updated_at": "2026-07-01T07:29:43Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T07:29:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28501035207/job/84478408035"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T07:29:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28501035207/job/84478408038"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T07:29:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28501035207/job/84478408046"
+    }
+   ]
   },
   {
    "run_id": 28500895694,
@@ -87,9 +145,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T07:23:41Z",
+     "started_at": "2026-07-01T07:47:53Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28500742391/job/84477409343"
     },
@@ -141,38 +199,38 @@
    "branch": "pr/fix-coalesce-x",
    "event": "pull_request",
    "title": "[Fix] Add coalesceX to keep layout boundary",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28499471421",
    "created_at": "2026-07-01T06:56:21Z",
-   "updated_at": "2026-07-01T06:57:22Z",
+   "updated_at": "2026-07-01T07:47:19Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-01T06:57:22Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T07:29:31Z",
+     "completed_at": "2026-07-01T07:47:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28499471421/job/84473269935"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-01T06:57:22Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T07:29:52Z",
+     "completed_at": "2026-07-01T07:47:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28499471421/job/84473269956"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-01T06:57:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T07:46:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28499471421/job/84473269958"
     }
    ]
@@ -252,7 +310,7 @@
   },
   {
    "run_id": 28498714232,
-   "pr": 783,
+   "pr": null,
    "commit": "85e416198d6955ff722563d3ae0068abfcd539b3",
    "branch": "feat/autotune-cache-key-restore",
    "event": "pull_request",
@@ -2009,64 +2067,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412606907/job/84188774784"
     }
    ]
-  },
-  {
-   "run_id": 28412028908,
-   "pr": null,
-   "commit": "f0c9dfb11a328f9728bc13f1165259c09c6dac43",
-   "branch": "fix_pipeline",
-   "event": "pull_request",
-   "title": "Fix pipeline",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908",
-   "created_at": "2026-06-30T00:33:27Z",
-   "updated_at": "2026-06-30T00:50:05Z",
-   "actor": "solinzby1",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T00:35:05Z",
-     "completed_at": "2026-06-30T00:50:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908/job/84186950657"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T00:35:04Z",
-     "completed_at": "2026-06-30T00:50:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908/job/84186950663"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T00:34:56Z",
-     "completed_at": "2026-06-30T00:47:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28412028908/job/84186950672"
-    }
-   ]
-  },
-  {
-   "run_id": 28406751693,
-   "pr": null,
-   "commit": "e5cdc5dc055f50a336bf09cd2956a50b1dfcff84",
-   "branch": "ci/restore-perf-dashboard",
-   "event": "pull_request",
-   "title": "ci: restore CI performance dashboard (gh-pages, lean main) + README badges",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28406751693",
-   "created_at": "2026-06-29T22:25:55Z",
-   "updated_at": "2026-06-30T02:38:08Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
