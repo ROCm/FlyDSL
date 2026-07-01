@@ -3,7 +3,7 @@
 
 import inspect
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -11,6 +11,7 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.typing import Constexpr
+from ..expr.utils.arith import fastmath as fastmath_ctx
 from .ast_rewriter import ASTRewriter
 from .diagnostics import install_excepthook, warn_annotation_value_mismatch, warn_invalid_annotations
 from .jit_argument import is_type_param_annotation, resolve_signature
@@ -540,8 +541,11 @@ class KernelFunction:
                         idx += n
 
                     dsl_args.update(constexpr_values)
+
+                    fastmath_flag = CompilationContext.get_compile_hints().get("fastmath")
+                    fastmath_scope = fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
                     # Bound the call-site boundary at the kernel body.
-                    with tracing_context(self._func):
+                    with tracing_context(self._func), fastmath_scope:
                         if bound_self is not None:
                             self._func(bound_self, **dsl_args)
                         else:
