@@ -12,6 +12,7 @@ Usage:
     pred = fx.isnan(x)
 """
 
+import inspect
 from functools import wraps
 
 from .._mlir import ir
@@ -19,6 +20,7 @@ from .._mlir.dialects import math
 from .meta import dsl_loc_tracing
 from .numeric import Numeric
 from .typing import as_ir_value
+from .utils.arith import current_fastmath
 
 __all__ = [
     "absf",
@@ -71,9 +73,16 @@ __all__ = [
 
 
 def dsl_math_wrap_result(fn):
+    accepts_fastmath = "fastmath" in inspect.signature(fn).parameters
+
     @wraps(fn)
     def wrapper(*args, **kwargs):
         from .typing import Vector
+
+        if accepts_fastmath and kwargs.get("fastmath") is None:
+            ambient = current_fastmath()
+            if ambient is not None:
+                kwargs["fastmath"] = ambient
 
         first = args[0] if args else None
         is_vector = isinstance(first, Vector)

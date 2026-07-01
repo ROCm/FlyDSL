@@ -2,12 +2,56 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import builtins
+import contextlib
+import threading
 from functools import partialmethod
 
 from ..._mlir import ir
 from ..._mlir.dialects import arith, math
 from ..._mlir.extras import types as T
 from ..meta import dsl_loc_tracing
+
+# --------------------------------------------------------------------------- #
+# Ambient fastmath context (thread-local)
+# --------------------------------------------------------------------------- #
+_fm_tls = threading.local()
+
+
+def _normalize_fastmath(flags):
+    """Normalize a fastmath spec to a value the MLIR ``fastmath=`` arg accepts.
+
+    Accepts a single flag (``arith.FastMathFlags``, ``str``), a combined
+    ``FastMathFlags`` value (via ``|``), an iterable of flags (combined
+    comma-separated), or ``None``.
+    """
+    if flags is None:
+        return None
+    if isinstance(flags, str):
+        return flags
+    if isinstance(flags, (list, tuple, set, frozenset)):
+        return ",".join(str(f) for f in flags)
+    return str(flags)
+
+
+def current_fastmath():
+    """Return the ambient fastmath flags set by ``fastmath(...)``, or ``None``."""
+    return getattr(_fm_tls, "value", None)
+
+
+def resolve_fastmath(explicit):
+    """Pick the effective fastmath: explicit arg wins over ambient context."""
+    return explicit if explicit is not None else current_fastmath()
+
+
+@contextlib.contextmanager
+def fastmath(flags):
+    """Apply *flags* to floating-point ops built inside the ``with`` block."""
+    prev = getattr(_fm_tls, "value", None)
+    _fm_tls.value = _normalize_fastmath(flags)
+    try:
+        yield
+    finally:
+        _fm_tls.value = prev
 
 
 def element_type(ty) -> ir.Type:
@@ -77,8 +121,8 @@ def fp_to_fp(src, res_elem_type):
         return src
     res_type = recast_type(src.type, res_elem_type)
     if res_elem_type.width > src_elem_type.width:
-        return arith.extf(res_type, src)
-    return arith.truncf(res_type, src)
+        return arith.extf(res_type, src, fastmath=current_fastmath())
+    return arith.truncf(res_type, src, fastmath=current_fastmath())
 
 
 @dsl_loc_tracing
@@ -150,27 +194,29 @@ def _binary_op(self, other, op):
     if other is NotImplemented:
         return NotImplemented
 
+    fm = current_fastmath()
+
     if op in _ARITH_OPS:
         float_fn, int_fn = _ARITH_OPS[op]
         if self.is_float:
-            return float_fn(self, other)
+            return float_fn(self, other, fastmath=fm)
         return int_fn(self, other)
 
     if op == "div":
         if self.is_float:
-            return arith.divf(self, other)
+            return arith.divf(self, other, fastmath=fm)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
             return arith.divui(self, other)
         fp_ty = T.f64() if et.width > 32 else T.f32()
         lhs = int_to_fp(self, self.signed, fp_ty)
         rhs = int_to_fp(other, other.signed, fp_ty)
-        return arith.divf(lhs, rhs)
+        return arith.divf(lhs, rhs, fastmath=fm)
 
     if op == "floordiv":
         if self.is_float:
-            q = arith.divf(self, other)
-            return math.floor(q)
+            q = arith.divf(self, other, fastmath=fm)
+            return math.floor(q, fastmath=fm)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
             return arith.divui(self, other)
@@ -180,7 +226,7 @@ def _binary_op(self, other, op):
 
     if op == "mod":
         if self.is_float:
-            return arith.remf(self, other)
+            return arith.remf(self, other, fastmath=fm)
         et = element_type(self.type)
         if isinstance(et, ir.IndexType):
             return arith.remui(self, other)
@@ -232,7 +278,7 @@ def _comparison_op(self, other, predicate):
         return NotImplemented
 
     if self.is_float:
-        return arith.cmpf(_CMP_FLOAT_PRED[predicate], self, other)
+        return arith.cmpf(_CMP_FLOAT_PRED[predicate], self, other, fastmath=current_fastmath())
     if self.signed is not False:
         return arith.cmpi(_CMP_INT_SIGNED[predicate], self, other)
     return arith.cmpi(_CMP_INT_UNSIGNED[predicate], self, other)
@@ -277,14 +323,15 @@ def _pow_op(self, other, reverse=False):
         return NotImplemented
     if reverse:
         self, other = other, self
+    fm = current_fastmath()
     if self.is_float and other.is_float:
-        return math.powf(self, other)
+        return math.powf(self, other, fastmath=fm)
     if self.is_float and not other.is_float:
-        return math.fpowi(self, other)
+        return math.fpowi(self, other, fastmath=fm)
     if not self.is_float and other.is_float:
         fp_ty = element_type(other.type)
         lhs = int_to_fp(self, self.signed, fp_ty)
-        return math.powf(lhs, other)
+        return math.powf(lhs, other, fastmath=fm)
     return math.ipowi(self, other)
 
 
@@ -293,7 +340,7 @@ def _neg_op(self):
     if self.type == T.bool():
         raise TypeError("negation is not supported for boolean type")
     if self.is_float:
-        return arith.negf(self)
+        return arith.negf(self, fastmath=current_fastmath())
     c0 = arith_const(0, self.type)
     return arith.subi(c0, self)
 
@@ -384,14 +431,14 @@ class ArithValue(ir.Value):
         return arith.SelectOp(_to_raw(self), true_value, false_value).result
 
     @dsl_loc_tracing
-    def extf(self, target_type):
+    def extf(self, target_type, *, fastmath=None):
         """Extend float precision (e.g. bf16 → f32)."""
-        return arith.ExtFOp(target_type, self).result
+        return arith.extf(target_type, self, fastmath=resolve_fastmath(fastmath))
 
     @dsl_loc_tracing
-    def truncf(self, target_type):
+    def truncf(self, target_type, *, fastmath=None):
         """Truncate float precision (e.g. f32 → bf16)."""
-        return arith.TruncFOp(target_type, self).result
+        return arith.truncf(target_type, self, fastmath=resolve_fastmath(fastmath))
 
     @dsl_loc_tracing
     def extui(self, target_type):
@@ -421,26 +468,26 @@ class ArithValue(ir.Value):
     @dsl_loc_tracing
     def addf(self, other, *, fastmath=None):
         """Float add with optional fastmath flags."""
-        return arith.addf(self, _to_raw(other), fastmath=fastmath)
+        return arith.addf(self, _to_raw(other), fastmath=resolve_fastmath(fastmath))
 
     @dsl_loc_tracing
-    def maximumf(self, other):
+    def maximumf(self, other, *, fastmath=None):
         """Float maximum (NaN-propagating)."""
-        return arith.maximumf(self, _to_raw(other))
+        return arith.maximumf(self, _to_raw(other), fastmath=resolve_fastmath(fastmath))
 
     @dsl_loc_tracing
     def rsqrt(self, *, fastmath=None):
         """Reciprocal square root: 1/sqrt(self)."""
         from ..._mlir.dialects import math as _math
 
-        return _math.rsqrt(self, fastmath=fastmath)
+        return _math.rsqrt(self, fastmath=resolve_fastmath(fastmath))
 
     @dsl_loc_tracing
     def exp2(self, *, fastmath=None):
         """Base-2 exponential: 2^self."""
         from ..._mlir.dialects import math as _math
 
-        return _math.exp2(self, fastmath=fastmath)
+        return _math.exp2(self, fastmath=resolve_fastmath(fastmath))
 
     @dsl_loc_tracing
     def shuffle_xor(self, offset, width):
