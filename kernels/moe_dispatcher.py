@@ -257,6 +257,7 @@ def compile_gemm1_a4w4_port(
     act="silu",
     swiglu_limit=0.0,
     SBM=None,
+    k_wave=1,
 ):
     # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
     # None -> SBM==BM (byte-identical). Otherwise SBM must be a multiple of BM (SBM//BM compute
@@ -282,8 +283,26 @@ def compile_gemm1_a4w4_port(
     K = D_HIDDEN  # contraction (compile-time); inter_dim (N-output) is the runtime i32_inter arg
     assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
 
+    # k_wave (intra-block K-slice): split the K contraction across k_wave cooperating waves within
+    # the 256-thread (4-wave) block; each wave accumulates its K-slice, then the k_wave partials are
+    # reduced in LDS before the shared silu+quant epilogue. Guards mirror aiter: K%k_wave==0,
+    # <=4 waves used for N (num_n_waves=4//k_wave >= 1), and the k_wave reduction slabs fit LDS.
+    if k_wave not in (1, 2, 4):
+        raise AssertionError(f"k_wave must be in {{1,2,4}} (4-wave block), got {k_wave}")
+    if k_wave > 1:
+        if a_dtype != "fp4":
+            raise AssertionError("k_wave>1 is fp4-only (fp8 A path not ported)")
+        if not interleave:
+            raise AssertionError("k_wave>1 requires interleave gate mode")
+        if (K // BK) % k_wave != 0:
+            raise AssertionError(f"K/BK ({K // BK}) must be divisible by k_wave ({k_wave})")
+        # 4*tile_n <= tile_k: effective per-N-wave tile_n = BN//num_n_waves = BN*k_wave//4.
+        eff_tile_n = (BN * k_wave) // 4
+        if 4 * eff_tile_n > BK:
+            raise AssertionError(f"k_wave reduce scratch: 4*tile_n ({4 * eff_tile_n}) > tile_k ({BK})")
+
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM)  # K_TILES_TOTAL (inter-independent)
+    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM, k_wave=k_wave)  # K_TILES_TOTAL (inter-independent)
 
     gu_tag = "il" if interleave else "sep"
     bnt_tag = "nt" if b_nontemporal else "cached"
@@ -294,7 +313,9 @@ def compile_gemm1_a4w4_port(
     act_tag = "" if act == "silu" else f"_swiglu{swiglu_limit:g}"
     # sbm tag empty when SBM==BM so the default variant keeps its byte-identical kernel name.
     sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
-    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}_v2"
+    # kw tag empty at k_wave=1 so the default variant keeps its byte-identical kernel name (AC-3).
+    kw_tag = "" if k_wave == 1 else f"_kw{k_wave}"
+    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}{kw_tag}_v2"
 
     @fx.struct
     class SharedStorage:
@@ -353,6 +374,7 @@ def compile_gemm1_a4w4_port(
                 act=act,
                 swiglu_limit=swiglu_limit,
                 SBM=SBM,
+                k_wave=k_wave,
             )
 
     @flyc.jit
@@ -620,14 +642,18 @@ G1_CACHE = {}
 G2_CACHE = {}
 
 
-def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act="silu", swiglu_limit=0.0, SBM=None):
+def get_g1(
+    BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act="silu", swiglu_limit=0.0, SBM=None, k_wave=1
+):
     # inter_dim (gemm1 N-output) is a runtime arg; NE/topk are host-only (NE: gemm1_grid active-expert
     # cap; topk: grid sizing). None of the three enters the compiled kernel, so none is a cache-key dim.
     # act/swiglu_limit are compile-time (folded into the epilog), so both are cache-key dims.
     # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
+    # k_wave (intra-block K-slice) is a compile-time cache-key dim; k_wave==1 is the byte-identical
+    # default variant.
     if SBM is None:
         SBM = BM
-    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM)
+    key = (BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
@@ -641,6 +667,7 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, a
             act=act,
             swiglu_limit=swiglu_limit,
             SBM=SBM,
+            k_wave=k_wave,
         )
         G1_CACHE[key] = launch
     return launch
@@ -703,6 +730,7 @@ def mxfp4_moe_gemm1(
     act="silu",
     swiglu_limit=0.0,
     SBM=None,
+    k_wave=1,
     n_sorted_padded=None,
     stream=None,
 ):
@@ -720,7 +748,9 @@ def mxfp4_moe_gemm1(
     """
     import torch
 
-    launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM=SBM)
+    launch = get_g1(
+        BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM=SBM, k_wave=k_wave
+    )
     sbm = SBM or BM
     num_n_blocks = (2 * D_INTER) // 256
     if n_sorted_padded is None:

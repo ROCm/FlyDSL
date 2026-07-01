@@ -311,6 +311,7 @@ def gemm1_body_v2(
     act="silu",
     swiglu_limit=0.0,
     SBM=None,
+    k_wave=1,
 ):
     # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
     # SBM==BM (default) -> byte-identical single-block-per-sort-block behavior. SBM>BM (a
@@ -330,6 +331,14 @@ def gemm1_body_v2(
     is_bm16 = BM < 32
     rg_off = 0  # BM16 always maps its single 16-row group to scale row-group 0
     kScaleSubBlocks = 1 if is_bm16 else kSubBlocks  # 32-row scale chunks to gather/read
+    # k_wave (intra-block K-slice): repartition the block's 4 waves as num_n_waves x k_wave.
+    # k_wave=1 -> num_n_waves=4, wave_n=wave, wave_k=0, NJ=4: byte-identical to the pre-kwave body.
+    # k_wave>1 -> num_n_waves=4//k_wave waves cover BN (each NJ=4*k_wave//... = (BN/num_n_waves)/16
+    # J-tiles), and each of the k_wave K-wave groups processes klen=K/k_wave of the contraction;
+    # partials are reduced in LDS before the shared silu+quant epilogue.
+    NWAVES = 4  # 256-thread block = 4 waves
+    num_n_waves = NWAVES // k_wave
+    NJ = (BN // num_n_waves) // 16  # J-tiles per N-wave (kw1:4, kw2:8, kw4:16)
     # A dtype: only the A path differs; fp8 uses raw mfma_scale (cbsz=0), fp4 the fx.gemm path.
     is_f8_a = a_dtype == "fp8"
     # out dtype: only the epilogue requant/pack/store differs.
@@ -344,7 +353,9 @@ def gemm1_body_v2(
     K_HALF = K // 2
     K_BYTES = K // a_pack  # a_quant row stride in bytes (= K_HALF for fp4)
     K_TILES_TOTAL = K // BK
-    kUnroll = K_TILES_TOTAL - kStages
+    # k_wave: each K-wave group runs only KT_PER_KW = K_TILES_TOTAL//k_wave tiles (kw=1: all tiles).
+    KT_PER_KW = K_TILES_TOTAL // k_wave
+    kUnroll = KT_PER_KW - kStages
     kAS_per_chunk_dw = kc * 64
     kBS_stride_n0_dw = kc * 64  # hidden-K-derived (compile-time)
     # INTER (inter_dim) is the gemm1 N-output dim; runtime via i32_inter (no K-loop dependency).
@@ -371,6 +382,23 @@ def gemm1_body_v2(
     lane_div_16 = lane // 16
     lane_mod_16 = lane % 16
 
+    # k_wave partition of the wave index. kw=1: wave_n=wave and every k_wave-derived expression
+    # below is compile-time skipped so the emitted IR is byte-identical to the pre-kwave body.
+    if const_expr(k_wave > 1):
+        wave_n = wave % fx.Int32(num_n_waves)
+        wave_k = rocdl.readfirstlane(T.i32, wave // fx.Int32(num_n_waves))
+        kw_kt_base = rocdl.readfirstlane(T.i32, wave_k * fx.Int32(KT_PER_KW))  # first ABSOLUTE K-tile
+    else:
+        wave_n = wave
+        wave_k = None
+        kw_kt_base = None
+
+    def kt_abs_of(kt):
+        # ABSOLUTE K-tile for A/B indexing; identity (no emitted op) at kw=1.
+        if const_expr(k_wave > 1):
+            return fx.Int32(kt) + kw_kt_base
+        return kt
+
     # LDS base offsets (i8): s_aq | s_asc contiguous; lds_acc (f32) unions the region.
     s_aq_base = lds_base_i32
     s_asc_base = lds_base_i32 + fx.Int32(kAStages * BM * KH_TILE_A)
@@ -380,33 +408,39 @@ def gemm1_body_v2(
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // lanes_per_row
-    rows_per_wave = BM // 4  # rows each wave gathers (BM32: 8, BM64: 16)
-    # BM16 fp4: rows_per_wave(4) < rows_per_call(8), so the contiguous 4-wave block scheme can't
-    # cover a full DMA call. Instead ``gather_nwaves`` = BM//rows_per_call waves each do one call
-    # (BM16 fp4: waves 0,1 gather rows [0,8),[8,16); waves 2,3 idle). BM>=32 keeps rows_per_wave
-    # >= rows_per_call so the original per-wave block scheme (n_row_groups>=1) is byte-identical.
+    # k_wave: only the num_n_waves waves of each K-wave group cooperate on that group's A-slice, so
+    # the cooperative-gather partition uses num_n_waves (=4 at kw=1) and wave_n (=wave at kw=1).
+    rows_per_wave = BM // num_n_waves  # rows each wave gathers (kw1 BM32: 8; kw4 BM16: 16)
+    # rows_per_wave(4) < rows_per_call(8) triggers the round-robin partial-wave scheme (BM16 fp4 at
+    # kw1). BM>=32 (kw1) keeps rows_per_wave >= rows_per_call so the original per-wave block scheme
+    # (n_row_groups>=1) is byte-identical.
     partial_wave_gather = rows_per_wave < rows_per_call
     if const_expr(partial_wave_gather):
         # BM16 fp4: only BM//rows_per_call (=2) distinct calls exist; wraps waves round-robin so
         # waves 0,2 gather rows [0,8) and waves 1,3 gather rows [8,16) (waves 2,3 redundantly
         # re-load the same rows -- harmless, no OOB LDS write, and avoids a device wave predicate).
         n_gather_calls = BM // rows_per_call  # 2 for BM16 fp4
-        gather_base_row = (wave % fx.Int32(n_gather_calls)) * rows_per_call
+        gather_base_row = (wave_n % fx.Int32(n_gather_calls)) * rows_per_call
         n_row_groups = 1
     else:
-        gather_base_row = wave * rows_per_wave
-        n_row_groups = rows_per_wave // rows_per_call  # DMA calls/wave (fp4: BM/32; fp8: BM/16)
+        gather_base_row = wave_n * rows_per_wave
+        n_row_groups = rows_per_wave // rows_per_call  # DMA calls/wave
     sti_ptr = global_typed_ptr(arg_sti, T.i32)
     cached_actual_row = []
     for g in range_constexpr(n_row_groups):
         idx = m_row + gather_base_row + g * rows_per_call + a_lane_row
         cached_actual_row.append(sti_ptr[idx] & 0xFFFFFF)
 
-    # B-scale n-pack words (gate/up split differs by gate mode).
+    # B-scale n-pack words (gate/up split differs by gate mode). Per N-wave span = BN//num_n_waves
+    # cols = (BN//num_n_waves)//32 n-pack words; NJ//2 n-pack words per wave (mni in [0,NJ//2)).
+    # kw=1: num_n_waves=4, NJ=4 -> mni_base = n_block_idx*(BN//32)+wave*(BN//128); np_list=[b,b+1].
     if const_expr(interleave):
-        mni_base = n_block_idx * (BN // 32) + wave * (BN // 128)
-        np_list = [mni_base, mni_base + 1]
+        np_per_wave = (BN // num_n_waves) // 32
+        mni_base = n_block_idx * (BN // 32) + wave_n * np_per_wave
+        np_list = [mni_base + p for p in range_constexpr(NJ // 2)]
     else:
+        if const_expr(k_wave > 1):
+            raise AssertionError("k_wave>1 is only supported in interleave gate mode")
         np_gate = n_block_idx * (BN // 64) + wave
         np_list = [np_gate, np_gate + N_OUT // fx.Int32(64)]
 
@@ -422,10 +456,20 @@ def gemm1_body_v2(
         num_records_bytes=i32_ntok * K_BYTES,
     )
 
+    # Per-K-wave A-LDS region: each K-wave group stages its own K-slice of A. kw=1 -> no offset
+    # (s_aq_base_kw is s_aq_base, byte-identical); kw>1 offsets by one A staging area per K-wave.
+    a_stage_bytes = kAStages * BM * KH_TILE_A
+    if const_expr(k_wave > 1):
+        s_aq_base_kw = s_aq_base + wave_k * fx.Int32(a_stage_bytes)
+    else:
+        s_aq_base_kw = s_aq_base
+
     def issue_a_load_lds(slot, kt):
         # lane L -> LDS[base+L*16]; each wave gathers rows_per_wave rows in rows_per_call chunks.
+        # ``kt`` is the K-wave-LOCAL K-tile; the absolute K-tile into A global adds kw_kt_base.
         lane_col = (lane % lanes_per_row) * 16
-        base_i32 = s_aq_base
+        base_i32 = s_aq_base_kw
+        kt_abs = kt_abs_of(kt)
         for g in range_constexpr(n_row_groups):
             lds_row = gather_base_row + g * rows_per_call
             mask = (
@@ -435,7 +479,7 @@ def gemm1_body_v2(
             )
             voffset = (lane_col ^ mask) + cached_actual_row[g] * K_BYTES
             off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
-            v_e = (voffset + kt * KH_TILE_A) // 4  # per-lane i32-elem index
+            v_e = (voffset + kt_abs * KH_TILE_A) // 4  # per-lane i32-elem index
             fx.copy(
                 a_gather_atom,
                 a_gather_src[v_e, None],
@@ -444,7 +488,7 @@ def gemm1_body_v2(
 
     def issue_a_ds_read(slot):
         issue_a_ds_read_dt(
-            s_aq_base, slot, BM * KH_TILE_A, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags, kMChunks
+            s_aq_base_kw, slot, BM * KH_TILE_A, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags, kMChunks
         )
 
     asc_dma128 = lds_dma_atom_128()
@@ -476,10 +520,13 @@ def gemm1_body_v2(
                 )
 
     def issue_a_scale_ds_read(kt):
+        # ``kt`` is the K-wave-LOCAL K-tile; the shared scale chunk holds all K-tiles, so the read
+        # uses the ABSOLUTE tile (identity at kw=1 -> byte-identical).
         asc_ptr = lds_typed_ptr(s_asc_base, T.i32)
+        kt_abs = kt_abs_of(kt)
         out = []
         for sub in range_constexpr(kScaleSubBlocks):
-            lds_dw = fx.Int32(sub * kAS_per_chunk_dw) + kt * 64 + lane_div_16 * 16 + lane_mod_16
+            lds_dw = fx.Int32(sub * kAS_per_chunk_dw) + kt_abs * 64 + lane_div_16 * 16 + lane_mod_16
             out.append(asc_ptr[lds_dw])
         return out
 
@@ -490,18 +537,19 @@ def gemm1_body_v2(
 
     N0_HALF = N_OUT // fx.Int32(32)  # separate-mode gate/up column split
 
-    # B-load view per j-tile; gate mode only changes which N-row `col` maps to.
+    # B-load view per j-tile; gate mode only changes which N-row `col` maps to. Per N-wave span =
+    # BN//num_n_waves cols (NJ j-tiles). kw=1: num_n_waves=4 -> wave_n*(BN//4), NJ=4 (byte-identical).
     def make_bq_view_for_jtile(j):
         if const_expr(interleave):
-            col = n_block_idx * BN + wave * (BN // 4) + j * 16
+            col = n_block_idx * BN + wave_n * (BN // num_n_waves) + j * 16
         else:
             tile_il = n_block_idx * 16 + wave * 4 + j
             col = ((tile_il & 1) * N0_HALF + (tile_il >> 1)) * 16
         return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL)
 
-    bq_views = [make_bq_view_for_jtile(j) for j in range_constexpr(4)]
+    bq_views = [make_bq_view_for_jtile(j) for j in range_constexpr(NJ)]
 
-    # B-scale view per n-pack word (shared layout primitive).
+    # B-scale view per n-pack word (shared layout primitive); NJ//2 words per wave (2 at kw=1).
     bscale_views = [
         bscale_view(
             arg_bscale,
@@ -509,45 +557,52 @@ def gemm1_body_v2(
             K_TILES_TOTAL,
             k0_stride_dw=kBS_stride_k0_dw,
         )
-        for mw in range_constexpr(2)
+        for mw in range_constexpr(NJ // 2)
     ]
 
     # B fragments: i32<4:1> (16B = 32 fp4), per-stage (kStages) prefetch double-buffer.
     frag_tmpl = bq_frag_tmpl(bq_views[0])  # i32<4:1>
     bq_frags = [
-        [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
+        [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(NJ)]
         for _ in range_constexpr(kStages)
     ]
     # fp4: A in fx.gemm fragments, C accumulates in place. fp8: A a per-iter Vec8 i32, C a raw f32x4.
     zero4 = Vec.filled(4, 0.0, fx.Float32)
     a_vals = a_frags = c_frags = accm = None
     if const_expr(is_f8_a):
+        if const_expr(k_wave > 1):
+            raise AssertionError("k_wave>1 is fp4-only (fp8 A path not ported)")
         a_vals = [[None, None] for _ in range(kMChunks)]
         accm = [[zero4 for _ in range(4)] for _ in range(kMChunks)]
     else:
         a_frags = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(kMChunks)]
         c_frags = [
-            [fx.make_fragment_like(frag_tmpl, dtype=fx.Float32.ir_type) for _ in range_constexpr(4)]
+            [fx.make_fragment_like(frag_tmpl, dtype=fx.Float32.ir_type) for _ in range_constexpr(NJ)]
             for _ in range_constexpr(kMChunks)
         ]
     # B-scale fragments: i32<1:1>, per-stage double-buffer like _bq_frags.
     bs_frag_tmpl = bscale_frag_tmpl(bscale_views[0])  # i32<1:1>
-    bs_frags = [[fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(kStages)]
+    bs_frags = [
+        [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(NJ // 2)] for _ in range_constexpr(kStages)
+    ]
 
     def issue_b_load_j(stage, K_C, j):
+        # ``K_C`` is the K-wave-LOCAL K-tile; B indexes the ABSOLUTE tile (identity at kw=1).
         view = bq_views[j]
+        kc_abs = kt_abs_of(K_C)
         for half in range_constexpr(2):
             fx.copy(
                 b_catom,
-                view[lane_div_16, lane_mod_16, K_C, half, None],
+                view[lane_div_16, lane_mod_16, kc_abs, half, None],
                 bq_frags[stage][j][half],
             )
 
     def issue_b_scale_load(stage, K_C):
-        for mw in range_constexpr(2):
+        kc_abs = kt_abs_of(K_C)
+        for mw in range_constexpr(NJ // 2):
             fx.copy(
                 bs_copy_atom,
-                bscale_views[mw][lane_div_16, lane_mod_16, K_C, None],
+                bscale_views[mw][lane_div_16, lane_mod_16, kc_abs, None],
                 bs_frags[stage][mw],
             )
 
@@ -603,14 +658,14 @@ def gemm1_body_v2(
     # zero C (fp4 fragments accumulate in place thereafter; fp8 accm pre-init above).
     if const_expr(not is_f8_a):
         for i in range_constexpr(kMChunks):
-            for J in range_constexpr(4):
+            for J in range_constexpr(NJ):
                 c_frags[i][J].store(zero4)
 
-    # prologue: stages 0,1
+    # prologue: stages 0,1 (K-wave-local tiles; A/B loads add kw_kt_base internally)
     issue_a_scale_load()
     for K_C in range_constexpr(kStages):
         issue_a_load_lds(K_C, K_C)
-        for j in range_constexpr(4):
+        for j in range_constexpr(NJ):
             issue_b_load_j(K_C, K_C, j)
         issue_b_scale_load(K_C, K_C)
 
@@ -624,7 +679,7 @@ def gemm1_body_v2(
         issue_a_ds_read(read_slot)
         asc_cur = issue_a_scale_ds_read(K_C - kStages)
         issue_a_load_lds(write_slot, K_C)
-        for J in range_constexpr(4):
+        for J in range_constexpr(NJ):
             rocdl.sched_barrier(0)
             rocdl.s_setprio(1)
             mfma_cluster(slot_b, asc_cur, J)
@@ -634,42 +689,64 @@ def gemm1_body_v2(
             rocdl.sched_barrier(0)
         issue_b_scale_load(slot_b, K_C)
 
-    # drain: last kStages
+    # drain: last kStages of this K-wave group
     for S in range_constexpr(kStages):
-        kt = K_TILES_TOTAL - kStages + S
+        kt = KT_PER_KW - kStages + S
         gpu.barrier()
         issue_a_ds_read(kt % kAStages)
         asc_cur = issue_a_scale_ds_read(kt)
-        for J in range_constexpr(4):
+        for J in range_constexpr(NJ):
             mfma_cluster(kt % kStages, asc_cur, J)
 
     gpu.barrier()
 
-    # epilog: cshuffle -> SwiGLU -> fp4 + e8m0 requant (raw math)
-    wave_n = wave
+    # epilog: cshuffle -> (k_wave LDS reduce) -> SwiGLU -> fp4 + e8m0 requant (raw math)
+    # cshuffle slab is [BM, BN] f32. With k_wave>1 each K-wave writes its partial into its OWN slab
+    # (wave_k * BM*BN); a reduction then sums the k_wave slabs into slab 0, which the requant reads
+    # (unchanged). kw=1: wave_k=0, single slab, no reduce -> byte-identical.
+    slab_elems = BM * BN  # f32 elems per cshuffle slab
     lds_acc_fptr = lds_typed_ptr(lds_acc_base, T.f32)
 
-    # accumulators: fp4 from C fragments, fp8 from accm.
+    # accumulators: fp4 from C fragments, fp8 from accm. (NJ tiles per N-wave.)
     if const_expr(is_f8_a):
-        acc_vecs = [[Vec(accm[i][J]) for J in range(4)] for i in range(kMChunks)]
+        acc_vecs = [[Vec(accm[i][J]) for J in range(NJ)] for i in range(kMChunks)]
     else:
-        acc_vecs = [[Vec(c_frags[i][J].load()) for J in range(4)] for i in range(kMChunks)]
+        acc_vecs = [[Vec(c_frags[i][J].load()) for J in range(NJ)] for i in range(kMChunks)]
 
     def acc(i, J, v):
         return acc_vecs[i][J][v]
 
+    # cshuffle: J//2 selects the 16-col n0 tile, J%2 gate(0)/up(1). Per-N-wave the NJ tiles span
+    # BN//num_n_waves gate cols (+ same for up). gate col base = wave_n*(BN//num_n_waves)//2
+    # (gate occupies [0, BN//2), up [BN//2, BN)). kw=1: num_n_waves=4 -> wave_n*32 (byte-identical).
+    gate_span = (BN // 2) // num_n_waves  # gate cols this N-wave covers
     for i in range_constexpr(kMChunks):
         row_base = fx.Int32(i * 16) + lane_div_16 * 4
-        for J in range_constexpr(4):
+        for J in range_constexpr(NJ):
             is_up = (J % 2) == 1
             J_local = J // 2
-            col_local = wave_n * 32 + J_local * 16 + lane_mod_16
-            lds_col = (128 + col_local) if is_up else col_local
+            col_local = wave_n * gate_span + J_local * 16 + lane_mod_16
+            lds_col = ((BN // 2) + col_local) if is_up else col_local
             for v in range_constexpr(4):
                 idx = (row_base + v) * BN + lds_col
+                if const_expr(k_wave > 1):
+                    idx = idx + wave_k * fx.Int32(slab_elems)  # this K-wave's partial slab
                 lds_acc_fptr[idx] = fx.Float32(acc(i, J, v))
 
     gpu.barrier()
+
+    # k_wave reduce: sum the k_wave partial slabs into slab 0. All 256 threads cooperatively cover
+    # the [BM, BN] slab (slab_elems / 256 elems per thread).
+    if const_expr(k_wave > 1):
+        tid_red = lane + wave * fx.Int32(64)  # 0..255
+        per_thread = slab_elems // 256
+        for e in range_constexpr(per_thread):
+            eidx = tid_red + fx.Int32(e * 256)
+            s = fx.Float32(lds_acc_fptr[eidx])
+            for g in range_constexpr(1, k_wave):
+                s = s + fx.Float32(lds_acc_fptr[fx.Int32(g * slab_elems) + eidx])
+            lds_acc_fptr[eidx] = s
+        gpu.barrier()
 
     tx_i32 = fx.Int32(gpu.thread_id("x"))
     m_lane = tx_i32 // 16
@@ -775,12 +852,14 @@ def gemm1_body_v2(
                 fx.copy(asc_copy_atom, asc_reg, asc_view[asc_off, None])
 
 
-def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE, BM=BM):
+def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE, BM=BM, k_wave=1):
     # BM16 gathers one full 32-row scale chunk per 16-block (rg0-only); >=32 uses BM//32 chunks.
+    # k_wave>1: each K-wave group has its OWN A-staging region (k_wave x), the scale chunk stays
+    # shared (one copy, all K-tiles), and the cshuffle acc region holds k_wave partial slabs.
     kScaleSubBlocks = 1 if BM < 32 else BM // 32
-    s_aq_bytes = kAStages * BM * KH_TILE_A  # fp8 A tile is 2x (256B vs 128B)
+    s_aq_bytes = k_wave * kAStages * BM * KH_TILE_A  # per-K-wave A regions (kw=1: unchanged)
     s_asc_bytes = kScaleSubBlocks * K_TILES_TOTAL * 256
-    lds_acc_bytes = BM * BN * 4
+    lds_acc_bytes = k_wave * BM * BN * 4  # k_wave partial cshuffle slabs (kw=1: unchanged)
     return max(s_aq_bytes + s_asc_bytes, lds_acc_bytes)
 
 
