@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-01T16:55:59Z",
+ "updated": "2026-07-01T16:57:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
    "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533870938",
    "created_at": "2026-07-01T16:54:33Z",
-   "updated_at": "2026-07-01T16:55:03Z",
+   "updated_at": "2026-07-01T16:55:40Z",
    "actor": "amd-satre",
    "jobs": []
   },
