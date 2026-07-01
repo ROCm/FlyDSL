@@ -388,11 +388,13 @@ def compile_gemm1_a4w4_port(
         i32_ntok,
         i32_inter,
         i32_kpad,
+        i32_npad,
     ):
         # Shared kernel body for both has_pad variants (@flyc.jit so the @flyc.kernel AST rewriter
-        # recurses into its scf `if` dispatch, like gemm1_body_v2). i32_kpad is fx.Int32(0) (compile-
-        # time constant, no kernarg) in the default variant -> has_pad=False folds the pad math away
-        # (byte-identical; AC-3). Only the has_pad variant threads a runtime kpad kernarg.
+        # recurses into its scf `if` dispatch, like gemm1_body_v2). i32_kpad (K/contraction pad) and
+        # i32_npad (N/inter-output pad) are fx.Int32(0) (compile-time constants, no kernarg) in the
+        # default variant -> has_pad=False folds the pad math away (byte-identical; AC-3). Only the
+        # has_pad variant threads the runtime kpad/npad kernargs.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
@@ -417,6 +419,7 @@ def compile_gemm1_a4w4_port(
                 total_m_blocks,
                 i32_inter,
                 i32_kpad,
+                i32_npad,
                 BM=BM,
                 K=K,
                 interleave=interleave,
@@ -470,6 +473,7 @@ def compile_gemm1_a4w4_port(
                 i32_ntok,
                 i32_inter,
                 fx.Int32(0),
+                fx.Int32(0),
             )
 
         @flyc.jit
@@ -519,6 +523,7 @@ def compile_gemm1_a4w4_port(
             i32_ntok: fx.Int32,
             i32_inter: fx.Int32,
             i32_kpad: fx.Int32,
+            i32_npad: fx.Int32,
             arg_aqout: fx.Int64,
             arg_ascaleout: fx.Int64,
             arg_hidden: fx.Int64,
@@ -545,6 +550,7 @@ def compile_gemm1_a4w4_port(
                 i32_ntok,
                 i32_inter,
                 i32_kpad,
+                i32_npad,
             )
 
         @flyc.jit
@@ -560,6 +566,7 @@ def compile_gemm1_a4w4_port(
             i32_grid: fx.Int32,
             i32_inter: fx.Int32,
             i32_kpad: fx.Int32,
+            i32_npad: fx.Int32,
             arg_aqout: fx.Int64,
             arg_ascaleout: fx.Int64,
             arg_hidden: fx.Int64,
@@ -577,6 +584,7 @@ def compile_gemm1_a4w4_port(
                 i32_ntok,
                 i32_inter,
                 i32_kpad,
+                i32_npad,
                 arg_aqout,
                 arg_ascaleout,
                 arg_hidden,
@@ -1045,6 +1053,7 @@ def mxfp4_moe_gemm1(
     BN=BN,
     n_sorted_padded=None,
     model_dim_pad=0,
+    inter_dim_pad=0,
     stream=None,
 ):
     """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller.
@@ -1054,6 +1063,13 @@ def mxfp4_moe_gemm1(
     kernel sizes the per-16N-tile B-weight buffer resource to the REAL K (= D_HIDDEN - model_dim_pad)
     so the fully-pad 128-K weight halves buffer-load OOB -> 0 (no HBM fetch). 0 -> byte-identical
     default (no pad kernarg).
+
+    ``inter_dim_pad`` (>0): D_INTER is the PADDED per-half inter (gemm1 N-output); the trailing
+    inter_dim_pad cols of EACH of the fused gate|up halves are pad. Enables the N-output pad-skip: a
+    16-N weight tile whose logical-inter base is >= (D_INTER - inter_dim_pad) has its buffer sized to
+    0 records so its weight loads OOB -> 0 (no HBM fetch, ~2*inter_dim_pad/N_OUT of the w1 N bytes).
+    Correctness-safe: pad-N output feeds gemm2's pad-K input, already OOB-skipped. Either pad>0
+    enables the shared has_pad variant; both fold to the byte-identical default at 0 (AC-3).
 
     ``use_nt`` is the B-weight load cache policy (False -> cached, True -> non-temporal).
     Default False: stage1 reuses each expert's weights across many m-blocks (large tokens
@@ -1067,7 +1083,7 @@ def mxfp4_moe_gemm1(
     """
     import torch
 
-    has_pad = model_dim_pad > 0
+    has_pad = model_dim_pad > 0 or inter_dim_pad > 0
     launch = get_g1(
         BM,
         use_nt,
@@ -1092,9 +1108,10 @@ def mxfp4_moe_gemm1(
         grid = (padded_rows // BM) * num_n_blocks
     else:
         grid = (n_sorted_padded // BM) * num_n_blocks
-    # has_pad variant threads the runtime i32_kpad kernarg (K = D_HIDDEN, so kpad = model_dim_pad)
-    # right after i32_inter, matching the launch signature; default has no such kernarg (AC-3).
-    pad_args = (int(model_dim_pad),) if has_pad else ()
+    # has_pad variant threads the runtime i32_kpad (K = D_HIDDEN, kpad = model_dim_pad) and i32_npad
+    # (N-output per-half inter pad = inter_dim_pad) kernargs right after i32_inter, matching the launch
+    # signature; default has no such kernargs (AC-3). Either pad may be 0 while the other is set.
+    pad_args = (int(model_dim_pad), int(inter_dim_pad)) if has_pad else ()
     run_compiled(
         launch,
         a_quant.data_ptr(),

@@ -2197,10 +2197,14 @@ def run_mxfp4_moe_2stage(
             w1_fp32[:, :, real_H:gq] = 0.0  # partial-pad remainder in a kept half -> host zero
             w1_fp32[:, :, gq:] = wpad_fill  # fully-pad halves -> OOB-skipped (garbage ok)
         if inter_dim_pad:
-            # gemm1 N-output (2*INTER, gate|up interleaved halves) pad is structural (zero): the pad
-            # inter cols of the intermediate must be 0 so gemm2's kept partial-pad K-half is correct.
-            w1_fp32[:, real_INTER:INTER, :] = 0.0  # gate half tail
-            w1_fp32[:, INTER + real_INTER :, :] = 0.0  # up half tail
+            # gemm1 N-output (2*INTER, gate|up interleaved halves): the pad-N weight ROWS of w1 (inter
+            # [real_INTER, INTER) of each half) produce ONLY pad-N output columns, which gemm1's N-skip
+            # drops (their weight loads OOB -> 0, output written as 0). Since real_INTER is 16-aligned,
+            # EVERY 16-N tile in the pad range is fully pad and fully dropped, so these rows may take the
+            # garbage fill: a correct output then proves the N-skip never fetches them (the intermediate
+            # pad cols stay 0 regardless, which gemm2's kept partial-pad K-half needs -- see below).
+            w1_fp32[:, real_INTER:INTER, :] = wpad_fill  # gate half pad-N rows -> N-skip drops
+            w1_fp32[:, INTER + real_INTER :, :] = wpad_fill  # up half pad-N rows -> N-skip drops
             gk = (real_INTER + 127) // 128 * 128  # first fully-pad 128-K w2 col
             w2_fp32[:, :, real_INTER:gk] = 0.0  # partial-pad remainder -> host zero
             w2_fp32[:, :, gk:] = wpad_fill  # fully-pad halves -> OOB-skipped (garbage ok)
@@ -2327,6 +2331,7 @@ def run_mxfp4_moe_2stage(
         BN=BNARG,
         n_sorted_padded=n,
         model_dim_pad=model_dim_pad,
+        inter_dim_pad=inter_dim_pad,
     )
     mxfp4_moe_gemm1(**_g1_kwargs)
     torch.cuda.synchronize()

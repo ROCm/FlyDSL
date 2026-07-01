@@ -319,6 +319,7 @@ def gemm1_body_v2(
     i32_total_m_blocks,
     i32_inter,
     i32_kpad,
+    i32_npad,
     *,
     BM,
     K,
@@ -403,11 +404,21 @@ def gemm1_body_v2(
     # leaves ceil(K_real/256) == ceil(K/256) tiles, so shrinking saves 0 scale loads and risks
     # reading OOB into the host-padded-but-valid 256-aligned scale (garbage e8m0 -> NaN). Weight is
     # the dominant bandwidth term. has_pad=False -> None (max_size=False, byte-identical default; AC-3).
+    # N-skip (has_pad only): INTER_real = INTER - i32_npad is the real per-half (gate/up) inter extent.
+    # A 16-N weight tile whose logical-inter base is >= INTER_real produces only pad output -> its buffer
+    # is sized to 0 records (make_bq_view_for_jtile) so every weight load OOB -> 0 (no HBM fetch).
+    # Correctness-safe: pad-N output feeds gemm2's pad-K input, which gemm2 already OOB-skips, so zero
+    # (skipped) output there is fine and needs no epilogue change. The gate|up split is at BN//2 within
+    # each 256-wide block; a gate tile and its sibling up tile mapping to the same pad logical-inter col
+    # are skipped consistently (same INTER_real bound). Computed ONLY under const_expr(has_pad) so the
+    # default variant emits zero extra IR (byte-identical; AC-3).
     bq_num_records = None
+    INTER_real = None
     if const_expr(has_pad):
         K_real = fx.Int32(K) - fx.Int32(i32_kpad)
         halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
         bq_num_records = halves_real * fx.Int32(1024)
+        INTER_real = INTER_rt - fx.Int32(i32_npad)
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
     # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
@@ -589,7 +600,23 @@ def gemm1_body_v2(
         else:
             tile_il = n_block_idx * 16 + wave * 4 + j
             col = ((tile_il & 1) * N0_HALF + (tile_il >> 1)) * 16
-        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL, num_records_bytes=bq_num_records)
+        nrec = bq_num_records
+        if const_expr(has_pad):
+            # This 16-N tile's LOGICAL inter col base. interleave: gate cols [0,BN//2) and up cols
+            # [BN//2,BN) of each 256-block both map to inter [n_block*(BN//2), +BN//2); the base is
+            # n_block*(BN//2) + (col_in_block mod (BN//2)) where col_in_block = wave_n*(BN//nnw)+j*16.
+            # separate: gate/up split at INTER -> col mod INTER. Only emitted under has_pad, so the
+            # default variant's `col` expression above is byte-identical to the pre-N-skip body (AC-3).
+            if const_expr(interleave):
+                col_in_block = wave_n * (BN // num_n_waves) + j * 16
+                logical_inter = n_block_idx * fx.Int32(BN // 2) + (col_in_block % fx.Int32(BN // 2))
+            else:
+                logical_inter = col % INTER_rt
+            # Fully-pad tile (its 16 inter cols are all >= INTER_real, since INTER_real is 16-aligned):
+            # size its buffer to 0 records -> every weight load OOB -> 0 (no HBM fetch). Else keep the
+            # K-skip records. select(pred, then, else) is a cmp+cndmask, wave-uniform (n_block_idx/j).
+            nrec = (logical_inter < INTER_real).select(bq_num_records, fx.Int32(0))
+        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL, num_records_bytes=nrec)
 
     bq_views = [make_bq_view_for_jtile(j) for j in range_constexpr(NJ)]
 
