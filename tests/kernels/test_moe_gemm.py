@@ -2277,6 +2277,20 @@ def run_mxfp4_moe_2stage(
     else:
         g1_use_nt = False
 
+    # gemm2 B-weight (w2 down-proj) cache policy (reuse-aware), mirroring gemm1. Default cached
+    # (byte-identical). Under MXFP4_DISPATCH the dispatcher streams (non-temporal) when there is
+    # <=1 stage2 m-block per active expert (single-use w2 -> caching is pure overhead); caches when
+    # reuse exists (M large). MXFP4_G2_NT env (0/1) forces the policy for measurement.
+    _g2_nt_env = os.environ.get("MXFP4_G2_NT")
+    if _g2_nt_env is not None:
+        g2_use_nt = _g2_nt_env == "1"
+    elif os.environ.get("MXFP4_DISPATCH") == "1":
+        from kernels.moe_dispatcher import gemm2_use_nt
+
+        g2_use_nt = gemm2_use_nt(experts, topk, tokens, BM)
+    else:
+        g2_use_nt = False
+
     # weights (fp4) + CK a16w4 preshuffle
     w1q, w1s = _per_1x32_fp4_quant(w1_fp32)
     w2q, w2s = _per_1x32_fp4_quant(w2_fp32)
@@ -2385,7 +2399,13 @@ def run_mxfp4_moe_2stage(
         D_INTER=INTER,
         topk=TOPK,
         BM=BM,
-        use_nt=False,
+        # gemm2 B (w2) cache policy is reuse-aware (gemm2_use_nt): CACHED when stage2 has
+        # cross-m-block w2-reuse (many m-blocks per expert at large tokens); STREAMING
+        # (non-temporal) when there is <=1 m-block per expert (small/mid M, e.g. GPT-OSS
+        # M<=1024) so single-use w2 is not needlessly cache-allocated. MXFP4_G2_NT env forces
+        # the policy for measurement. Default stays cached (byte-identical) when dispatch is off
+        # or the reuse heuristic says cache.
+        use_nt=g2_use_nt,
         a_dtype=("fp8" if is_f8 else "fp4"),
         epilog=epilog,
         SBM=SBM,

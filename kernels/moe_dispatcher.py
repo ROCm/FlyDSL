@@ -35,6 +35,7 @@ __all__ = [
     "mxfp4_moe_gemm2",
     "select_pipe_config",
     "gemm1_use_nt",
+    "gemm2_use_nt",
 ]
 
 
@@ -289,6 +290,22 @@ def gemm1_use_nt(experts, topk, tokens, bm_stage1):
     rows_per_expert = (slots + active - 1) // active
     m_blocks_per_expert = (rows_per_expert + bm_stage1 - 1) // bm_stage1
     return m_blocks_per_expert <= 1
+
+
+def gemm2_use_nt(experts, topk, tokens, bm_stage2):
+    """Reuse-aware gemm2 B-weight (w2 down-proj) cache policy: True -> non-temporal, False -> cached.
+
+    Same reuse structure as gemm1: gemm2 streams the fp4 w2 weights per active expert across
+    that expert's m-blocks. When there is >1 stage2 m-block per active expert the w2 weights are
+    re-read across those blocks so caching them hot in L2 is the win (the shipped default,
+    ``use_nt=False``). When there is <=1 m-block per active expert (small/mid M, e.g. GPT-OSS
+    M<=1024) each expert's w2 is single-use: caching only allocates L2 lines that are never
+    re-hit while paying the non-streaming cost, so streaming (non-temporal) is faster at identical
+    HBM bytes. Reuse metric is identical to gemm1 (m-blocks per active expert), keyed on the
+    stage2 compute tile ``bm_stage2``. Evidence (GPT-OSS 3072/3072, E128, k4, M=128, gfx950):
+    gemm2 nt vs cached measured on identical-work harness -- see gptoss-gemm2-rootcause.md.
+    """
+    return gemm1_use_nt(experts, topk, tokens, bm_stage2)
 
 
 # ---- gemm1 (up/gate-proj) compile ----
