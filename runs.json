@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-01T11:11:54Z",
+ "updated": "2026-07-01T11:33:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28514385226,
+   "pr": 789,
+   "commit": "2a88a8fee3feb55fbb80860f4932eef87aa20b71",
+   "branch": "pr/enh-fmath-flag",
+   "event": "pull_request",
+   "title": "[Enh] Add finer FastMathFlag control",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226",
+   "created_at": "2026-07-01T11:31:37Z",
+   "updated_at": "2026-07-01T11:32:15Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 28513295408,
+   "pr": 789,
+   "commit": "f01ddc39da234e3e7ed8e174038cbc506ba4e8f9",
+   "branch": "pr/enh-fmath-flag",
+   "event": "pull_request",
+   "title": "[Enh] Add finer FastMathFlag control",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408",
+   "created_at": "2026-07-01T11:11:15Z",
+   "updated_at": "2026-07-01T11:32:09Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T11:23:08Z",
+     "completed_at": "2026-07-01T11:32:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408/job/84518968103"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T11:13:55Z",
+     "completed_at": "2026-07-01T11:32:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408/job/84518968106"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T11:13:58Z",
+     "completed_at": "2026-07-01T11:32:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408/job/84518968109"
+    }
+   ]
+  },
   {
    "run_id": 28513104625,
    "pr": null,
@@ -29,18 +87,18 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T11:09:14Z",
+     "started_at": "2026-07-01T11:10:07Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513104625/job/84518250401"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T11:09:14Z",
+     "started_at": "2026-07-01T11:10:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513104625/job/84518250424"
     }
@@ -87,10 +145,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T10:58:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T11:22:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28510618689/job/84510055954"
     },
     {
@@ -1950,64 +2008,6 @@
      "started_at": "2026-06-30T06:34:20Z",
      "completed_at": "2026-06-30T07:24:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28425102269/job/84226459244"
-    }
-   ]
-  },
-  {
-   "run_id": 28424467431,
-   "pr": 733,
-   "commit": "e1781eb5c2e00207351e51ed8e1e710853a01e94",
-   "branch": "jiacao/conv2d-implicit-mfma",
-   "event": "pull_request",
-   "title": "Add implicit-MFMA conv kernels: bf16 conv2d, bf16 & FP8 8-wave conv3d",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424467431",
-   "created_at": "2026-06-30T06:17:24Z",
-   "updated_at": "2026-06-30T06:18:50Z",
-   "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 28424299968,
-   "pr": 764,
-   "commit": "70f447cb3d6baa85d77eef80c0545a0ec3bca2f5",
-   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
-   "event": "pull_request",
-   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968",
-   "created_at": "2026-06-30T06:13:28Z",
-   "updated_at": "2026-06-30T07:30:06Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T06:20:49Z",
-     "completed_at": "2026-06-30T07:30:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968/job/84223949999"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T06:41:11Z",
-     "completed_at": "2026-06-30T07:07:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968/job/84223950011"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T06:15:42Z",
-     "completed_at": "2026-06-30T07:10:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968/job/84223950018"
     }
    ]
   }
