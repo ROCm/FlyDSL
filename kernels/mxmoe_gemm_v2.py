@@ -1016,27 +1016,38 @@ def atomic_bf16_epilog(
     # reduce: plain non-atomic store into out[token_id*topk + s] (unique per (token,topk) slot;
     # host reduces over topk). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
     # ``if token_id < i32_M`` gates out padding rows (sentinel token_id == M). The default
-    # (SBM==BM and BM<=32) keeps the legacy plain-Python ``if`` (byte-identical: the store body
-    # always traces; the OOB padding-row write lands in allocator slack and never faulted).
-    # BM>=64 or SBM>BM promotes the guard to a real device ``scf.if`` so the padding-row store is
-    # genuinely skipped: at those the padding stride is large enough that the unguarded OOB atomic
-    # write hit an illegal address (a8w4/small-token; sbm-decoupled padding).
-    guard_padding = BM >= 64 or SBM != BM
+    # (SBM==BM and BM<=32, atomic) keeps the legacy plain-Python ``if`` (byte-identical: the store
+    # body always traces; the OOB padding-row write lands in allocator slack and never faulted).
+    # BM>=64 or SBM>BM or reduce promotes the guard to a real device ``scf.if`` so the padding-row
+    # store is genuinely skipped: at those the OOB write hit an illegal address --
+    #   - BM>=64 / sbm-decoupled: larger padding stride (a8w4/small-token; sbm padding).
+    #   - reduce: the padding-row out_row = M*topk + slot overshoots the [tokens*topk, H] buffer by
+    #     up to ``topk`` rows (topk x the atomic overshoot), which faults at large-M (e.g. DSV3
+    #     32768*9): the exactly-sized 4GB reduce buffer has no allocator slack to absorb it.
+    guard_padding = BM >= 64 or SBM != BM or use_reduce
 
     def store_one_mr(mr):
         row_in_block = fx.Int32(mr * 8) + m_lane
         token_id = packed[mr] & fx.Int32(0x00FFFFFF)
         if const_expr(use_reduce):
-            out_row = token_id * fx.Int32(topk) + (packed[mr] >> fx.Int32(24))
+            # reduce out_row = token_id*topk + slot can reach tokens*topk (large-M, e.g. DSV3
+            # 32768*9); out_row*N_OUT*2 (bf16 byte off) then overflows i32. Compute the reduce
+            # element base in i64 so the store byte offset never wraps. (atomic out_row=token_id
+            # <= M keeps the i32 path byte-identical.)
+            out_row = fx.Int64(token_id * fx.Int32(topk) + (packed[mr] >> fx.Int32(24)))
+            row_base_addr = out_row * fx.Int64(N_OUT) + fx.Int64(n_block_idx * BN + col_start)
         else:
             out_row = token_id
-        row_base_addr = out_row * N_OUT + n_block_idx * BN + col_start
+            row_base_addr = out_row * N_OUT + n_block_idx * BN + col_start
         for s in range_constexpr(4):
             # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
             idx0 = row_in_block * BN + col_start + s * 64
             v2 = Vec(lds_vec_load(lds_acc_base, idx0 * 4, Vec.make_type(2, fx.Float32), fx.Float32, align=8))
             pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
-            off = (row_base_addr + s * 64) * 2  # bf16 byte off
+            if const_expr(use_reduce):
+                off = (row_base_addr + fx.Int64(s * 64)) * fx.Int64(2)  # bf16 byte off (i64)
+            else:
+                off = (row_base_addr + s * 64) * 2  # bf16 byte off
             out_ptr = gep1(out_base, off)
             if const_expr(use_reduce):
                 llvm.StoreOp(_raw(pk), out_ptr, alignment=4, nontemporal=True)
