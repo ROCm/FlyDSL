@@ -195,7 +195,7 @@ def _run_combine(op, ret, combine_dtype, **kwargs):
 #
 # Default shape for every case (unless overridden):
 #   world_size=8, k=8, num_experts_per_rank=32,
-#   block_num=80, warp_per_block=4 (FlyDSL defaults).
+#   dispatch 128/4, combine 128/8 block_num/warp_per_block (FlyDSL defaults).
 # ============================================================================
 CI_CASES = [
     {
@@ -522,7 +522,11 @@ if "pytest" in sys.modules:
 
 import mori.shmem as ms  # noqa: E402
 
-from kernels.dispatch_combine_intranode_op import (  # noqa: E402
+from kernels.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
+    _DEFAULT_COMBINE_BLOCK_NUM,
+    _DEFAULT_COMBINE_WARP_NUM,
+    _DEFAULT_DISPATCH_BLOCK_NUM,
+    _DEFAULT_DISPATCH_WARP_NUM,
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
@@ -607,8 +611,8 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
         num_experts_per_token=cfg.num_experts_per_token,
-        warp_num_per_block=warp_per_block if warp_per_block is not None else cfg.dispatch_warp_num_per_block,
-        block_num=block_num if block_num is not None else cfg.dispatch_block_num,
+        warp_num_per_block=warp_per_block if warp_per_block is not None else _DEFAULT_DISPATCH_WARP_NUM,
+        block_num=block_num if block_num is not None else _DEFAULT_DISPATCH_BLOCK_NUM,
         gpu_per_node=world_size,
         use_external_inp_buf=not cfg.zero_copy,
         quant_type=cfg.quant_type,
@@ -1562,7 +1566,7 @@ def _decode_tok_id_to_src(tis, total_recv, max_tok_per_rank):
     """Decode ``tok_id_to_src[:total_recv]`` -> (src_pe, src_lid) tensors.
 
     The kernel encodes each recv slot as ``src_pe * max_tok_per_rank + src_lid``
-    (see dispatch_combine_intranode_kernel.py).  Only the first
+    (see flydsl_dispatch_combine_intranode_kernel.py).  Only the first
     ``total_recv`` entries are valid; tail entries carry leftover bytes.
     """
     enc = tis[:total_recv].to(torch.int64)
@@ -2108,13 +2112,11 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         num_experts_per_token=k,
         data_type=_dtype,
-        warp_num_per_block=args.warp_per_block,
-        block_num=args.block_num,
-        dispatch_warp_num_per_block=args.dispatch_warp_per_block,
         dispatch_block_num=args.dispatch_block_num,
-        combine_warp_num_per_block=args.combine_warp_per_block,
+        dispatch_warp_num_per_block=args.dispatch_warp_per_block,
         combine_block_num=args.combine_block_num,
-        use_external_inp_buf=not args.zero_copy,
+        combine_warp_num_per_block=args.combine_warp_per_block,
+        zero_copy=args.zero_copy,
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,
@@ -2123,8 +2125,14 @@ def run_profiler(rank, world_size, args):
         max_token_type_size=_user_mtt,
     )
 
-    mori_bn = args.mori_block_num if args.mori_block_num > 0 else cfg.dispatch_block_num
-    mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else cfg.dispatch_warp_num_per_block
+    mori_bn = (
+        args.mori_block_num if args.mori_block_num > 0 else (cfg.dispatch_block_num or _DEFAULT_DISPATCH_BLOCK_NUM)
+    )
+    mori_wpb = (
+        args.mori_warp_per_block
+        if args.mori_warp_per_block > 0
+        else (cfg.dispatch_warp_num_per_block or _DEFAULT_DISPATCH_WARP_NUM)
+    )
     meta = dict(
         world_size=world_size,
         max_tokens=cur_tok,
@@ -2133,10 +2141,10 @@ def run_profiler(rank, world_size, args):
         num_experts_per_rank=args.num_experts_per_rank,
         warmup=args.warmup,
         iters=args.iters,
-        flydsl_dispatch_block_num=cfg.dispatch_block_num,
-        flydsl_dispatch_warp_per_block=cfg.dispatch_warp_num_per_block,
-        flydsl_combine_block_num=cfg.combine_block_num,
-        flydsl_combine_warp_per_block=cfg.combine_warp_num_per_block,
+        flydsl_dispatch_block_num=cfg.dispatch_block_num or _DEFAULT_DISPATCH_BLOCK_NUM,
+        flydsl_dispatch_warp_per_block=cfg.dispatch_warp_num_per_block or _DEFAULT_DISPATCH_WARP_NUM,
+        flydsl_combine_block_num=cfg.combine_block_num or _DEFAULT_COMBINE_BLOCK_NUM,
+        flydsl_combine_warp_per_block=cfg.combine_warp_num_per_block or _DEFAULT_COMBINE_WARP_NUM,
         mori_block_num=mori_bn,
         mori_warp_per_block=mori_wpb,
         zero_copy=cfg.zero_copy,
@@ -2157,6 +2165,11 @@ def run_profiler(rank, world_size, args):
         print(f"{'='*65}", flush=True)
         print("[profiler] building FlyDSL...", flush=True)
     op_fly = FlyDSLDispatchCombineIntraNodeOp(cfg)
+    if rank == 0 and (cfg.dispatch_block_num or cfg.combine_block_num):
+        print(
+            f"[geometry] CLI-pinned: dispatch={cfg.dispatch_block_num or 'tuning'} "
+            f"combine={cfg.combine_block_num or 'tuning'}"
+        )
 
     # Mori reference op.  Constructed whenever it can act as a verify
     # oracle (dtype supported, not std-MoE) — independent of
@@ -2169,8 +2182,8 @@ def run_profiler(rank, world_size, args):
     if _want_mori:
         mori_bn = args.mori_block_num if args.mori_block_num > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
-        bn_str = mori_bn if mori_bn else cfg.dispatch_block_num
-        wpb_str = mori_wpb if mori_wpb else cfg.dispatch_warp_num_per_block
+        bn_str = mori_bn if mori_bn else _DEFAULT_DISPATCH_BLOCK_NUM
+        wpb_str = mori_wpb if mori_wpb else _DEFAULT_DISPATCH_WARP_NUM
         if rank == 0:
             print(
                 f"[profiler] building mori ref (block_num={bn_str}, warp_per_block={wpb_str}) "
@@ -2652,12 +2665,24 @@ def _parse_args():
     p.add_argument("--hidden-dim", type=int, default=7168)
     p.add_argument("--num-experts-per-rank", type=int, default=32)
     p.add_argument("--k", type=int, default=8)
-    p.add_argument("--block-num", type=int, default=128)
-    p.add_argument("--warp-per-block", type=int, default=8)
-    p.add_argument("--dispatch-block-num", type=int, default=128, help="FlyDSL dispatch-only block_num")
-    p.add_argument("--dispatch-warp-per-block", type=int, default=4, help="FlyDSL dispatch-only warp_per_block")
-    p.add_argument("--combine-block-num", type=int, default=128, help="FlyDSL combine-only block_num")
-    p.add_argument("--combine-warp-per-block", type=int, default=8, help="FlyDSL combine-only warp_per_block")
+    p.add_argument(
+        "--dispatch-block-num", type=int, default=None, help="FlyDSL dispatch-only block_num (default: op tuning table)"
+    )
+    p.add_argument(
+        "--dispatch-warp-per-block",
+        type=int,
+        default=None,
+        help="FlyDSL dispatch-only warp_per_block (default: op tuning table)",
+    )
+    p.add_argument(
+        "--combine-block-num", type=int, default=None, help="FlyDSL combine-only block_num (default: op tuning table)"
+    )
+    p.add_argument(
+        "--combine-warp-per-block",
+        type=int,
+        default=None,
+        help="FlyDSL combine-only warp_per_block (default: op tuning table)",
+    )
     p.add_argument(
         "--mori-block-num",
         type=int,
@@ -2819,7 +2844,9 @@ def _parse_args():
             "dtype changes without re-allocating shmem (mori parity)."
         ),
     )
-    return p.parse_args()
+    args = p.parse_args()
+
+    return args
 
 
 def _spawn_one(ws, args, master_port):
