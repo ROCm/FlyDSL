@@ -568,10 +568,11 @@ typename LayoutBuilder<Layout>::IntTuple layoutCoshape(LayoutBuilder<Layout> &bu
   IntTuple stride = builder.getStride(layout);
   IntTuple one = builder.materializeConstantLeaf(1);
 
-  IntTuple m1Shapes =
-      intTupleTransformLeaf(builder, [&](IntTuple s) { return builder.sub(s, one); }, shape);
+  IntTuple m1Shapes = intTupleTransformLeaf(
+      builder, [&](IntTuple s) { return builder.sub(s, one); }, shape);
   IntTuple coCoord = intTupleInnerProduct(builder, m1Shapes, stride);
-  return intTupleTransformLeaf(builder, [&](IntTuple c) { return builder.add(c, one); }, coCoord);
+  return intTupleTransformLeaf(
+      builder, [&](IntTuple c) { return builder.add(c, one); }, coCoord);
 }
 
 template <class Layout>
@@ -589,7 +590,7 @@ namespace detail {
 
 template <class IntTuple>
 std::pair<IntTuple, IntTuple> coalesceImpl(const IntTupleBuilder<IntTuple> &builder, IntTuple shape,
-                                           IntTuple stride) {
+                                           IntTuple stride, bool keepBoundary = false) {
   SmallVector<IntTuple> flatShapeLeaves;
   SmallVector<IntTuple> flatStrideLeaves;
   intTupleFlattenToVector(builder, shape, flatShapeLeaves);
@@ -601,10 +602,18 @@ std::pair<IntTuple, IntTuple> coalesceImpl(const IntTupleBuilder<IntTuple> &buil
 
   if (flatRank == 1) {
     if (currShapeLeaf.isLeafStaticValue(1)) {
+      if (keepBoundary) {
+        // coalesce_x: preserve the boundary via a size-2 sentinel mode.
+        return {builder.materializeConstantLeaf(2), currStrideLeaf};
+      }
       return {builder.materializeConstantLeaf(1), builder.materializeConstantLeaf(0)};
     } else {
       return {shape, stride};
     }
+  }
+
+  if (keepBoundary && currShapeLeaf.isLeafStaticValue(1)) {
+    currShapeLeaf = builder.materializeConstantLeaf(2);
   }
 
   typename IntTupleBuilder<IntTuple>::ElemCollector resultShape;
@@ -651,6 +660,32 @@ std::pair<IntTuple, IntTuple> coalesceImpl(const IntTupleBuilder<IntTuple> &buil
   resultShape.reverse();
   resultStride.reverse();
   return {builder.makeTuple(resultShape), builder.makeTuple(resultStride)};
+}
+
+template <class IntTuple>
+std::pair<IntTuple, IntTuple> coalesceXWithProfile(const IntTupleBuilder<IntTuple> &builder,
+                                                   IntTuple shape, IntTuple stride,
+                                                   IntTuple profile) {
+  if (profile.isLeaf()) {
+    return coalesceImpl(builder, shape, stride, /*keepBoundary=*/true);
+  }
+
+  typename IntTupleBuilder<IntTuple>::ElemCollector newShapeElems;
+  typename IntTupleBuilder<IntTuple>::ElemCollector newStrideElems;
+
+  int32_t profileRank = profile.rank();
+  for (int i = 0; i < shape.rank(); ++i) {
+    if (i < profileRank) {
+      auto [cs, cd] = coalesceXWithProfile(builder, builder.at(shape, i), builder.at(stride, i),
+                                           builder.at(profile, i));
+      newShapeElems.push_back(cs);
+      newStrideElems.push_back(cd);
+    } else {
+      newShapeElems.push_back(builder.at(shape, i));
+      newStrideElems.push_back(builder.at(stride, i));
+    }
+  }
+  return {builder.makeTuple(newShapeElems), builder.makeTuple(newStrideElems)};
 }
 
 template <class IntTuple>
@@ -859,8 +894,9 @@ Layout layoutCoalesce(LayoutBuilder<Layout> &builder, Layout layout,
 
 template <class Layout>
 Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout, Layout innerLayout) {
-  auto [coalShape, coalStride] =
-      detail::coalesceImpl(builder, builder.getShape(outerLayout), builder.getStride(outerLayout));
+  auto coprofile = layoutCoprofile(builder, innerLayout);
+  auto [coalShape, coalStride] = detail::coalesceXWithProfile(
+      builder, builder.getShape(outerLayout), builder.getStride(outerLayout), coprofile);
   auto [retShape, retStride] =
       detail::compositionImpl(builder, coalShape, coalStride, builder.getShape(innerLayout),
                               builder.getStride(innerLayout));
@@ -882,12 +918,10 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
   int32_t tileRank = innerTileAttr.rank();
   for (int i = 0; i < lhsShape.rank(); ++i) {
     if (i < tileRank && !innerTileAttr.isNoneMode(i)) {
-      auto [coalShape, coalStride] =
-          detail::coalesceImpl(builder, builder.at(lhsShape, i), builder.at(lhsStride, i));
+      Layout subLayout = builder.makeLayout(builder.at(lhsShape, i), builder.at(lhsStride, i));
 
       auto tileElem = innerTileAttr.at(i);
       if (auto nestedTile = dyn_cast<TileAttr>(tileElem)) {
-        Layout subLayout = builder.makeLayout(coalShape, coalStride);
         Layout composed = layoutComposition(builder, subLayout, nestedTile);
         retShape.push_back(builder.getShape(composed));
         retStride.push_back(builder.getStride(composed));
@@ -901,10 +935,10 @@ Layout layoutComposition(LayoutBuilder<Layout> &builder, Layout outerLayout,
                   builder.materializeConstantLeaf(1)};
         };
         auto [rhsShape, rhsStride] = makeRhsPair();
-        auto [elemShape, elemStride] =
-            detail::compositionImpl(builder, coalShape, coalStride, rhsShape, rhsStride);
-        retShape.push_back(elemShape);
-        retStride.push_back(elemStride);
+        Layout rhsLayout = builder.makeLayout(rhsShape, rhsStride);
+        Layout composed = layoutComposition(builder, subLayout, rhsLayout);
+        retShape.push_back(builder.getShape(composed));
+        retStride.push_back(builder.getStride(composed));
       }
     } else {
       retShape.push_back(builder.at(lhsShape, i));
