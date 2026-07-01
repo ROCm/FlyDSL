@@ -1365,11 +1365,15 @@ Layout layoutZippedDivide(LayoutBuilder<Layout> &builder, Layout layout, TileAtt
 
   SmallVector<Attribute> guideElems;
   for (int i = 0; i < divisorTile.rank(); ++i) {
-    guideElems.push_back(IntTupleAttr::getLeafNone(ctx));
+    if (!divisorTile.isNoneMode(i)) {
+      guideElems.push_back(IntTupleAttr::getLeafStatic(ctx, 1));
+    } else {
+      guideElems.push_back(IntTupleAttr::getLeafNone(ctx));
+    }
   }
   IntTupleAttr guide = IntTupleAttr::get(ArrayAttr::get(ctx, guideElems));
-  IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalDiv), guide);
-  IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalDiv), guide);
+  IntTuple retShape = intTupleZip2By(builder, builder.getShape(logicalDiv), guide, 1);
+  IntTuple retStride = intTupleZip2By(builder, builder.getStride(logicalDiv), guide, 0);
   return builder.makeLayout(retShape, retStride);
 }
 
