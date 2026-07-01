@@ -5,7 +5,6 @@ Returns (N, K, Do, Ho, Wo) bf16. Requires gfx95x; C%128==0, CRS%128==0, NPQ%128=
 """
 
 import functools
-import os
 import weakref
 
 import torch
@@ -475,13 +474,6 @@ def _normalize_3(v):
 
 
 def _choose_splitk(npq, crs, k, device):
-    """Auto split-K dispatch: split the CRS reduction over grid.z only when the
-    base (grid_m * grid_n) grid is clearly block-starved and the reduction is deep
-    enough that the atomic + FP32->BF16 convert overhead is amortized. Prefers a
-    divisor of k_tiles. ``CONV3D_FP8_SPLITK`` overrides."""
-    forced = os.environ.get("CONV3D_FP8_SPLITK")
-    if forced is not None:
-        return max(1, int(forced))
     if npq % TILE_M != 0 or k % TILE_N != 0:  # atomic accumulation needs clean tiles
         return 1
     base = (npq // TILE_M) * (k // TILE_N)

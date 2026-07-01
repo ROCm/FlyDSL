@@ -8,7 +8,6 @@ Returns (N, K, Do, Ho, Wo) bf16. Supports stride, padding, bias, and split-K.
 """
 
 import functools
-import os
 import weakref
 
 import torch
@@ -554,12 +553,6 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
 
 
 def _choose_splitk(npq, crs, k, device):
-    """Auto split-K dispatch: split only when the base grid is block-starved
-    (small M / large crs); aim for ~4 waves of blocks, prefer a divisor of
-    k_tiles. CONV3D_8W_SPLITK overrides."""
-    forced = os.environ.get("CONV3D_8W_SPLITK")
-    if forced is not None:
-        return max(1, int(forced))
     grid_m = (npq + TILE_M - 1) // TILE_M
     grid_n = (k + TILE_N - 1) // TILE_N
     base = grid_m * grid_n
