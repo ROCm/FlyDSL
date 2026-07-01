@@ -234,11 +234,10 @@ def compile_pa_decode_tile(
             _view(byte_off, fx.Int32, fx.make_layout(words.shape[0], 1), 4).store(words)
 
         # whole-tile views (for tiled copies)
-        # sP holds the fp8 probabilities as [qhead, token] (PV A operand).  The QK
-        # C-fragment is [token, qhead]; the frag→sP store uses the transposed view
-        # sP_T (shape [token, qhead], strides (1, TILE_TOK)) so it lands as
-        # [qhead, token] for PV to read directly.
-        sP_v = _view(arith.constant(sP_off, type=T.i32), FP8, fx.make_layout((M, TILE_TOK), (TILE_TOK, 1)), 1)
+        # sP holds the fp8 probabilities as [qhead, token].  The QK C-fragment is
+        # [token, qhead]; the frag→sP store uses the transposed view sP_T (shape
+        # [token, qhead], strides (1, TILE_TOK)) so it lands as [qhead, token],
+        # which the raw PV P read (p_ops) then reads directly.
         sP_T_v = _view(arith.constant(sP_off, type=T.i32), FP8, fx.make_layout((TILE_TOK, M), (1, TILE_TOK)), 1)
 
         # ── MMA atoms (production token=M orientation) ──
@@ -317,21 +316,16 @@ def compile_pa_decode_tile(
         loop_end = fx.Index(arith.unwrap(part_end))
 
         kg = extract_global_ptr(key_cache_ptr)  # raw addrspace(1) ptr for dwordx4 K loads
-        val_buf = fx.rocdl.make_buffer_tensor(value_cache_ptr)
+        vg = extract_global_ptr(value_cache_ptr)  # raw addrspace(1) ptr for dwordx4 V loads
 
-        copy_kv = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), FP8)  # fp8 V global -> reg
-        copy_p = fx.make_copy_atom(fx.UniversalCopy64b(), FP8)  # fp8 P LDS -> reg
         copy_p8 = fx.make_copy_atom(fx.UniversalCopy8b(), FP8)  # fp8 P C-frag -> LDS
         copy_c = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-        tcopy_p = fx.make_tiled_copy_A(copy_p, tiled_mma_pv)  # P(A): replicated across warps
-        tcopy_v = fx.make_tiled_copy_B(copy_kv, tiled_mma_pv)  # V(B): head-dim-split across warps
         tcopy_p8 = fx.make_tiled_copy_C(copy_p8, tiled_mma_qk)  # fp8 P frag -> sP (transposed)
         tcopy_o = fx.make_tiled_copy_C(copy_c, tiled_mma_pv)  # PV out -> sO (epilogue)
 
         # Shape templates (default addrspace) for the MMA fragments; only their
         # layout is read by make_fragment_*, no real storage is consumed.
         tmpl_S = fx.make_rmem_tensor(fx.make_layout((TILE_TOK, M), (M, 1)), fx.Float32)  # [token, qhead]
-        tmpl_P = fx.make_rmem_tensor(fx.make_layout((M, TILE_TOK), (TILE_TOK, 1)), FP8)
         # QK in TLOOP chunks of TOK_CHUNK tokens: each small fx.gemm yields a f32x4
         # C-fragment, so the softmax processes 4 scores at a time (scores stay in
         # AGPR, VGPR peak low) — matching pa_decode_ps_kernel's TLOOP.
@@ -387,6 +381,25 @@ def compile_pa_decode_tile(
                 flat.extend(_k_ops(phys, within_tile, a))
             return flat
 
+        # ── raw dwordx4 V load (B operand) ──
+        # PV contracts over token, so (like QK's head permutation) the token→k_step
+        # mapping is free as long as V and P (p_ops) agree: lane (rgroup) takes the
+        # contiguous token slice [rgroup*64 : +64] for its head (vh*VHE_SIZE +
+        # warp*16 + lane16), loaded as 4× i64x2 (128-bit) = 8 k_step operands.  V is
+        # [head, token] with token innermost/contiguous, so the slice is one run.
+        c64 = arith.constant(64, type=T.i32)
+        NVOPS = TILE_TOK // MFMA_K  # 8 PV k_steps (256 tokens / K=32)
+
+        def _v_ops(phys, within_tile, vh):
+            head = arith.constant(vh * VHE_SIZE, type=T.i32) + warp * c16 + lane16
+            tokv = within_tile * c_TILE_TOK + rgroup * c64
+            base = ((phys * n_kv + kv_h) * cHEAD + head) * block_size + tokv
+            ops = []
+            for j in range_constexpr(NVOPS // 2):
+                w = fx.Vector(global_load_i64x2(vg, base + arith.constant(j * 16, type=T.i32)))
+                ops.extend([w[0], w[1]])
+            return ops  # NVOPS i64, token[rgroup*64 : +64] of this head
+
         # ── prologue: prefetch the first tile's K into registers ──
         num_tiles_m1 = num_tiles - arith.constant(1, type=T.i32)
         start_safe = arith.select(part_start < num_tiles, part_start, num_tiles_m1)
@@ -406,23 +419,11 @@ def compile_pa_decode_tile(
             # ThrMma python subclass is stripped back to its TiledCopy/TiledMma
             # base when a value is captured across the scf.for region boundary.
             thr_mma_qk_l = tiled_mma_qk.get_slice(tid)
-            thr_mma_pv_l = tiled_mma_pv.get_slice(tid)
-            thr_copy_p = tcopy_p.get_slice(tid)
-            thr_copy_v = tcopy_v.get_slice(tid)
             thr_copy_p8 = tcopy_p8.get_slice(tid)
 
-            # V page (hoisted below so its DMA hides behind QK + softmax).
-            v_page = fx.slice(val_buf, (phys, kv_h, None, None))  # [HEAD, block_size]
-            v_hsplit = fx.zipped_divide(v_page, (VHE_SIZE, TILE_TOK))  # [(VHE,TILE), (HEAD/VHE, blk/TILE)]
-
-            # ---- hoist V loads BEFORE QK so their DMA hides behind QK + softmax
-            # (production loads V early too); consumed by the PV loop below. ----
-            frag_Vs = []
-            for vh in range_constexpr(VHE_CHUNKS):
-                bV = fx.slice(v_hsplit, (None, (vh, within_tile)))  # [VHE_SIZE, TILE_TOK]
-                fV = thr_mma_pv_l.make_fragment_B(bV)
-                fx.copy(copy_kv, thr_copy_v.partition_S(bV), thr_copy_v.retile(fV), pred=None)
-                frag_Vs.append(fV)
+            # ---- hoist raw dwordx4 V loads BEFORE QK so their DMA hides behind QK
+            # + softmax (production loads V early too); consumed by the PV MMA. ----
+            v_ops = [_v_ops(phys, within_tile, vh) for vh in range_constexpr(VHE_CHUNKS)]
 
             # ---- QK in TLOOP chunks: NCHUNK raw MFMAs -> f32x4/lane ----
             # Each chunk accumulates the 4 head-quarter k_steps (this tile's
@@ -498,9 +499,15 @@ def compile_pa_decode_tile(
                 gsum = _ld_lw_row(sLsum_off, tid).reduce(ReductionOp.ADD)
                 _st1(sL_off, tid, _ld1(sL_off, tid) * _ld1(sCorr_off, tid) + gsum)
 
-            # ---- load P back as the A operand for P·V (replicated across warps) ----
-            frag_P = thr_mma_pv_l.make_fragment_A(tmpl_P)
-            fx.copy(copy_p, thr_copy_p.partition_S(sP_v), thr_copy_p.retile(frag_P), pred=None)
+            # ---- read P back as the A operand for P·V, raw (replicated across
+            # warps) — lane reads sP[qhead=lane16][token rgroup*64:+64] as NVOPS i64,
+            # the same permuted token slice v_ops uses so the raw PV MMA matches. ----
+            p_ops = _view(
+                arith.constant(sP_off, type=T.i32) + lane16 * c_TILE_TOK + rgroup * c64,
+                fx.Int64,
+                fx.make_layout(NVOPS, 1),
+                8,
+            ).load()
 
             # ---- PV with register-resident O accumulate (no LDS round-trip) ----
             # O_new = O_old * corr + P·V per head-dim chunk; corr = exp2(m_old-m_new)
@@ -508,14 +515,15 @@ def compile_pa_decode_tile(
             # m = (L%64//16)*4 + v, so corr_s[v] = corr[m_base + v].  Done element-
             # wise (Vec*Vec broadcasts to an outer product here).  No barrier after
             # PV: O is in registers and the next iter's QK/phase2 barriers order
-            # any sS/sP reuse (sOp is gone).
+            # any sS/sP reuse (sOp is gone).  Raw PV MMA: NVOPS k_steps accumulate
+            # into one f32x4 (this warp's [16 qhead, 16 head] output atom).
             m_base_pv = (lane // c16) * arith.constant(4, type=T.i32)
             corr_s = [_ld1(sCorr_off, m_base_pv + arith.constant(v, type=T.i32)) for v in range_constexpr(OP_ELEMS)]
             for vh in range_constexpr(VHE_CHUNKS):
-                frag_Op = thr_mma_pv_l.make_fragment_C(tmpl_Op)  # [16, VHE_SIZE]
-                frag_Op.fill(0.0)
-                fx.gemm(tiled_mma_pv, frag_Op, frag_P, frag_Vs[vh], frag_Op)
-                op = frag_Op.load()
+                acc = arith.constant_vector(0.0, T.f32x4)
+                for s in range_constexpr(NVOPS):
+                    acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [p_ops[s], v_ops[vh][s], acc, 0, 0, 0])
+                op = fx.Vector(acc)
                 oo = o_acc[vh]
                 o_acc[vh] = Vec.from_elements(
                     [oo[v] * corr_s[v] + op[v] for v in range_constexpr(OP_ELEMS)], dtype=fx.Float32
