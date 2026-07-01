@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-01T20:43:42Z",
+ "updated": "2026-07-01T20:54:06Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28546969199,
+   "pr": 733,
+   "commit": "3d1c45be5ac559fffd43cc7cc78387b0bed4c386",
+   "branch": "jiacao/conv2d-implicit-mfma",
+   "event": "pull_request",
+   "title": "conv2d: 8-wave double-buffered implicit-GEMM BF16 kernel",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546969199",
+   "created_at": "2026-07-01T20:51:24Z",
+   "updated_at": "2026-07-01T20:52:05Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
   {
    "run_id": 28546370209,
    "pr": 794,
@@ -10,37 +25,37 @@
    "branch": "jiacao/conv3d-implicit-8wave-fp8",
    "event": "pull_request",
    "title": "conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546370209",
    "created_at": "2026-07-01T20:40:35Z",
-   "updated_at": "2026-07-01T20:41:21Z",
+   "updated_at": "2026-07-01T20:52:05Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T20:41:21Z",
+     "started_at": "2026-07-01T20:42:12Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546370209/job/84632740595"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T20:41:21Z",
+     "started_at": "2026-07-01T20:52:04Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546370209/job/84632740653"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T20:41:21Z",
+     "started_at": "2026-07-01T20:42:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546370209/job/84632740678"
     }
@@ -48,43 +63,43 @@
   },
   {
    "run_id": 28546345661,
-   "pr": 733,
+   "pr": null,
    "commit": "7a405781f9d56cafacdfbffde2600d1fd4f4b6b6",
    "branch": "jiacao/conv2d-implicit-mfma",
    "event": "pull_request",
    "title": "conv2d: 8-wave double-buffered implicit-GEMM BF16 kernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546345661",
    "created_at": "2026-07-01T20:40:11Z",
-   "updated_at": "2026-07-01T20:41:19Z",
+   "updated_at": "2026-07-01T20:51:45Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-01T20:41:19Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T20:42:15Z",
+     "completed_at": "2026-07-01T20:51:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546345661/job/84632733236"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-01T20:41:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T20:51:44Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546345661/job/84632733244"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-01T20:41:19Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-01T20:42:10Z",
+     "completed_at": "2026-07-01T20:51:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546345661/job/84632733249"
     }
    ]
@@ -1855,21 +1870,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28465852005",
    "created_at": "2026-06-30T18:08:50Z",
    "updated_at": "2026-06-30T18:10:42Z",
-   "actor": "amd-satre",
-   "jobs": []
-  },
-  {
-   "run_id": 28465837778,
-   "pr": null,
-   "commit": "10456f97fba55b9baadd0f1b613e7604e46fefff",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28465837778",
-   "created_at": "2026-06-30T18:08:35Z",
-   "updated_at": "2026-06-30T18:09:06Z",
    "actor": "amd-satre",
    "jobs": []
   }
