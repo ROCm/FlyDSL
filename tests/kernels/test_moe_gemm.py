@@ -2262,14 +2262,64 @@ def run_mxfp4_moe_2stage(
     assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
     assert cos > thr, f"{in_dtype} cos={cos:.4f} <= {thr}"
 
-    # Optional perf measurement for the layout-API MXFP4 pipe (no built-in bench
-    # otherwise). Enable with MXFP4_BENCH=1. Times gemm1 and gemm2 launches
-    # independently; reports us so a candidate can be compared per-shape.
+    # Perf measurement for the layout-API MXFP4 pipe. The fused pipe bypasses
+    # run_moe_stage1 / run_moe_stage2, so it must emit the standard
+    # "FlyDSL MoE stage1[...]" / "FlyDSL MoE stage2 [...]" lines itself so that
+    # scripts/run_benchmark.sh scrapes fp4/a8w4 like every other MoE dtype.
+    # gemm1 (2*inter cols) == mixed_moe stage1; gemm2 (atomic) == stage2. Times
+    # the two launches once here (the pipe's only timing pass) and reuses the us
+    # for both the standard lines and the optional MXFP4_BENCH detail line.
+    _bi = int(os.environ.get("MXFP4_BENCH_ITERS", "20"))
+    _bw = int(os.environ.get("MXFP4_BENCH_WARMUP", "5"))
+    _, us1 = run_perftest(lambda: mxfp4_moe_gemm1(**_g1_kwargs), num_iters=_bi, num_warmup=_bw)
+    _, us2 = run_perftest(lambda: mxfp4_moe_gemm2(**_g2_kwargs), num_iters=_bi, num_warmup=_bw)
+
+    # --- stage1 line (same FLOPS/bytes accounting as run_moe_stage1 for fp4/a8w4) ---
+    active_experts = min(experts, tokens * topk)
+    # fp4: x=4b,w=4b ; a8w4: x=8b,w=4b. Both are the fp4 weight-shuffle path.
+    _x_bits = 8 if is_f8 else 4
+    _w_bits = 4
+    _x_elems1 = tokens * model_dim
+    _w_elems1 = active_experts * (2 * inter_dim) * model_dim
+    flops1 = 2 * tokens * topk * (2 * inter_dim) * model_dim
+    tflops1 = float("nan") if us1 <= 0 else flops1 / (us1 / 1e6) / 1e12
+    bytes1 = 0
+    bytes1 += (_x_elems1 * _x_bits) // 8  # x
+    bytes1 += (_w_elems1 * _w_bits) // 8  # w1
+    bytes1 += tokens * topk * inter_dim * 2  # out fp16 (logical, post-silu)
+    bytes1 += _x_elems1 // 32  # per-1x32 E8M0 x scale
+    bytes1 += _w_elems1 // 32  # per-1x32 E8M0 w1 scale
+    tbps1 = float("nan") if us1 <= 0 else bytes1 / 1e12 / (us1 / 1e6)
+    print(
+        f"FlyDSL MoE stage1[{in_dtype}]: "
+        f"{us1:.1f} us, "
+        f"{tflops1:.2f} TFLOPS(logical, M={tokens*topk}), "
+        f"{tbps1:.3f} TB/s (doweight_stage1=False)"
+    )
+
+    # --- stage2 line (atomic; same FLOPS/bytes accounting as run_moe_stage2) ---
+    # a2/w2 bits and per-block e8m0 scales; out is fp16 (itemsize 2).
+    _a2_bits = 8 if is_f8 else 4
+    _w2_bits = 4
+    _a2_elems = tokens * topk * inter_dim
+    _w2_elems = active_experts * model_dim * inter_dim
+    flops2 = 2 * tokens * topk * model_dim * inter_dim
+    tflops2 = float("nan") if us2 <= 0 else flops2 / (us2 / 1e6) / 1e12
+    bytes2 = 0
+    bytes2 += (_a2_elems * _a2_bits) // 8  # a2
+    bytes2 += (_w2_elems * _w2_bits) // 8  # w2
+    bytes2 += tokens * model_dim * 2  # out fp16
+    bytes2 += _a2_elems // 32  # per-block e8m0 a2 scale
+    bytes2 += _w2_elems // 32  # per-block e8m0 w2 scale
+    tbps2 = float("nan") if us2 <= 0 else bytes2 / 1e12 / (us2 / 1e6)
+    print(
+        f"FlyDSL MoE stage2 [moe_gemm2] {in_dtype} atomic | "
+        f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
+        f"{us2:.1f} us, {tflops2:.2f} TFLOPS, {tbps2:.3f} TB/s"
+    )
+
+    # Optional extra detail (raw gemm1/gemm2 us) preserved for MXFP4_BENCH callers.
     if os.environ.get("MXFP4_BENCH"):
-        _bi = int(os.environ.get("MXFP4_BENCH_ITERS", "50"))
-        _bw = int(os.environ.get("MXFP4_BENCH_WARMUP", "10"))
-        _, us1 = run_perftest(lambda: mxfp4_moe_gemm1(**_g1_kwargs), num_iters=_bi, num_warmup=_bw)
-        _, us2 = run_perftest(lambda: mxfp4_moe_gemm2(**_g2_kwargs), num_iters=_bi, num_warmup=_bw)
         print(
             f"[mxfp4 bench {in_dtype} {'il' if interleave else 'sep'}] "
             f"gemm1 {us1:.2f} us, gemm2 {us2:.2f} us, total {us1 + us2:.2f} us "
