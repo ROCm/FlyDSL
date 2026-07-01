@@ -685,7 +685,7 @@
    "local_expert_num": 48,
    "zero_copy": false,
    "num_tokens": 8,
-   "block_num": 128,
+   "block_num": 64,
    "warp_num_per_block": 4
   },
   {
@@ -695,7 +695,7 @@
    "local_expert_num": 48,
    "zero_copy": false,
    "num_tokens": 16,
-   "block_num": 128,
+   "block_num": 64,
    "warp_num_per_block": 8
   },
   {
@@ -715,7 +715,7 @@
    "local_expert_num": 48,
    "zero_copy": false,
    "num_tokens": 64,
-   "block_num": 256,
+   "block_num": 128,
    "warp_num_per_block": 8
   },
   {
@@ -725,7 +725,7 @@
    "local_expert_num": 48,
    "zero_copy": false,
    "num_tokens": 128,
-   "block_num": 256,
+   "block_num": 128,
    "warp_num_per_block": 16
   },
   {
@@ -735,8 +735,38 @@
    "local_expert_num": 48,
    "zero_copy": false,
    "num_tokens": 256,
-   "block_num": 256,
+   "block_num": 128,
    "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 6,
+   "local_expert_num": 48,
+   "zero_copy": false,
+   "num_tokens": 512,
+   "block_num": 128,
+   "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 6,
+   "local_expert_num": 48,
+   "zero_copy": false,
+   "num_tokens": 1024,
+   "block_num": 128,
+   "warp_num_per_block": 8
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 6,
+   "local_expert_num": 48,
+   "zero_copy": false,
+   "num_tokens": 2048,
+   "block_num": 256,
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -746,7 +776,7 @@
    "zero_copy": false,
    "num_tokens": 4096,
    "block_num": 256,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -756,7 +786,7 @@
    "zero_copy": false,
    "num_tokens": 8192,
    "block_num": 256,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -776,7 +806,7 @@
    "zero_copy": true,
    "num_tokens": 8,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -786,7 +816,7 @@
    "zero_copy": true,
    "num_tokens": 16,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -796,7 +826,7 @@
    "zero_copy": true,
    "num_tokens": 32,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -806,7 +836,7 @@
    "zero_copy": true,
    "num_tokens": 64,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -816,7 +846,7 @@
    "zero_copy": true,
    "num_tokens": 128,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -826,7 +856,37 @@
    "zero_copy": true,
    "num_tokens": 256,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 4
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 6,
+   "local_expert_num": 48,
+   "zero_copy": true,
+   "num_tokens": 512,
+   "block_num": 64,
+   "warp_num_per_block": 4
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 6,
+   "local_expert_num": 48,
+   "zero_copy": true,
+   "num_tokens": 1024,
+   "block_num": 64,
+   "warp_num_per_block": 4
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 6,
+   "local_expert_num": 48,
+   "zero_copy": true,
+   "num_tokens": 2048,
+   "block_num": 64,
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -846,7 +906,7 @@
    "zero_copy": true,
    "num_tokens": 8192,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -876,7 +936,7 @@
    "zero_copy": false,
    "num_tokens": 16,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -885,7 +945,7 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 32,
-   "block_num": 128,
+   "block_num": 64,
    "warp_num_per_block": 8
   },
   {
@@ -895,7 +955,7 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 64,
-   "block_num": 256,
+   "block_num": 64,
    "warp_num_per_block": 8
   },
   {
@@ -905,7 +965,7 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 128,
-   "block_num": 256,
+   "block_num": 128,
    "warp_num_per_block": 16
   },
   {
@@ -915,8 +975,38 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 256,
+   "block_num": 128,
+   "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 4096,
+   "topk": 6,
+   "local_expert_num": 32,
+   "zero_copy": false,
+   "num_tokens": 512,
+   "block_num": 128,
+   "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 4096,
+   "topk": 6,
+   "local_expert_num": 32,
+   "zero_copy": false,
+   "num_tokens": 1024,
    "block_num": 256,
    "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 4096,
+   "topk": 6,
+   "local_expert_num": 32,
+   "zero_copy": false,
+   "num_tokens": 2048,
+   "block_num": 256,
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -926,7 +1016,7 @@
    "zero_copy": false,
    "num_tokens": 4096,
    "block_num": 256,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -936,7 +1026,7 @@
    "zero_copy": false,
    "num_tokens": 8192,
    "block_num": 256,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -956,7 +1046,7 @@
    "zero_copy": true,
    "num_tokens": 8,
    "block_num": 64,
-   "warp_num_per_block": 4
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -966,7 +1056,7 @@
    "zero_copy": true,
    "num_tokens": 16,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -976,7 +1066,7 @@
    "zero_copy": true,
    "num_tokens": 32,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -985,8 +1075,8 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 64,
-   "block_num": 128,
-   "warp_num_per_block": 8
+   "block_num": 64,
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -995,8 +1085,8 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 16
+   "block_num": 64,
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -1006,7 +1096,37 @@
    "zero_copy": true,
    "num_tokens": 256,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 4096,
+   "topk": 6,
+   "local_expert_num": 32,
+   "zero_copy": true,
+   "num_tokens": 512,
+   "block_num": 64,
+   "warp_num_per_block": 4
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 4096,
+   "topk": 6,
+   "local_expert_num": 32,
+   "zero_copy": true,
+   "num_tokens": 1024,
+   "block_num": 64,
+   "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 4096,
+   "topk": 6,
+   "local_expert_num": 32,
+   "zero_copy": true,
+   "num_tokens": 2048,
+   "block_num": 64,
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -1026,7 +1146,7 @@
    "zero_copy": true,
    "num_tokens": 8192,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -1265,7 +1385,7 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 8,
-   "block_num": 128,
+   "block_num": 64,
    "warp_num_per_block": 4
   },
   {
@@ -1275,7 +1395,7 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 16,
-   "block_num": 128,
+   "block_num": 64,
    "warp_num_per_block": 8
   },
   {
@@ -1285,7 +1405,7 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 32,
-   "block_num": 256,
+   "block_num": 128,
    "warp_num_per_block": 8
   },
   {
@@ -1296,7 +1416,7 @@
    "zero_copy": false,
    "num_tokens": 64,
    "block_num": 256,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -1306,7 +1426,7 @@
    "zero_copy": false,
    "num_tokens": 128,
    "block_num": 256,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -1315,8 +1435,8 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 256,
-   "block_num": 256,
-   "warp_num_per_block": 16
+   "block_num": 128,
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -1325,8 +1445,8 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 512,
-   "block_num": 256,
-   "warp_num_per_block": 8
+   "block_num": 128,
+   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -1335,8 +1455,8 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 1024,
-   "block_num": 256,
-   "warp_num_per_block": 8
+   "block_num": 128,
+   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -1346,7 +1466,7 @@
    "zero_copy": false,
    "num_tokens": 2048,
    "block_num": 256,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -1355,6 +1475,16 @@
    "local_expert_num": 32,
    "zero_copy": false,
    "num_tokens": 4096,
+   "block_num": 256,
+   "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 8,
+   "local_expert_num": 32,
+   "zero_copy": false,
+   "num_tokens": 8192,
    "block_num": 256,
    "warp_num_per_block": 16
   },
@@ -1376,7 +1506,7 @@
    "zero_copy": true,
    "num_tokens": 8,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -1386,7 +1516,7 @@
    "zero_copy": true,
    "num_tokens": 16,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -1396,7 +1526,7 @@
    "zero_copy": true,
    "num_tokens": 32,
    "block_num": 64,
-   "warp_num_per_block": 16
+   "warp_num_per_block": 8
   },
   {
    "dtype": "bf16",
@@ -1405,8 +1535,8 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 64,
-   "block_num": 128,
-   "warp_num_per_block": 8
+   "block_num": 64,
+   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -1415,8 +1545,8 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 8
+   "block_num": 64,
+   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -1426,7 +1556,7 @@
    "zero_copy": true,
    "num_tokens": 256,
    "block_num": 64,
-   "warp_num_per_block": 8
+   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -1435,7 +1565,7 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 512,
-   "block_num": 128,
+   "block_num": 64,
    "warp_num_per_block": 16
   },
   {
@@ -1445,8 +1575,8 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 1024,
-   "block_num": 128,
-   "warp_num_per_block": 4
+   "block_num": 64,
+   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -1455,7 +1585,7 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 2048,
-   "block_num": 128,
+   "block_num": 64,
    "warp_num_per_block": 16
   },
   {
@@ -1465,6 +1595,16 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 4096,
+   "block_num": 64,
+   "warp_num_per_block": 16
+  },
+  {
+   "dtype": "bf16",
+   "hidden_dim": 7168,
+   "topk": 8,
+   "local_expert_num": 32,
+   "zero_copy": true,
+   "num_tokens": 8192,
    "block_num": 64,
    "warp_num_per_block": 16
   }
