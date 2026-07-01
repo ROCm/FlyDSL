@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-01T07:48:45Z",
+ "updated": "2026-07-01T07:53:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "pr/fix-coalesce-x",
    "event": "pull_request",
    "title": "[Fix] Add coalesceX to keep layout boundary",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502006554",
    "created_at": "2026-07-01T07:46:49Z",
-   "updated_at": "2026-07-01T07:47:51Z",
+   "updated_at": "2026-07-01T07:48:28Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T07:48:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502006554/job/84481574634"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T07:48:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502006554/job/84481574647"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T07:48:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502006554/job/84481574654"
+    }
+   ]
   },
   {
    "run_id": 28501962700,
@@ -364,10 +392,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T06:34:17Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T07:51:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498395176/job/84469751689"
     },
     {
