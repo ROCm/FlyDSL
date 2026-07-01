@@ -54,9 +54,10 @@ def compile_gemm1_a4w4_port(
 ):
     # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
     b_nontemporal = use_nt
-    if (BM, inline_quant) != (32, False):
+    if BM not in (32, 64) or inline_quant:
         raise AssertionError(
-            f"mxfp4_moe_gemm1 supports only (BM=32, inline_quant=False); " f"got (BM={BM}, inline_quant={inline_quant})"
+            f"mxfp4_moe_gemm1 supports only (BM in {{32,64}}, inline_quant=False); "
+            f"got (BM={BM}, inline_quant={inline_quant})"
         )
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
@@ -67,7 +68,7 @@ def compile_gemm1_a4w4_port(
     assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
 
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A)  # K_TILES_TOTAL (inter-independent)
+    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM)  # K_TILES_TOTAL (inter-independent)
 
     gu_tag = "il" if interleave else "sep"
     bnt_tag = "nt" if b_nontemporal else "cached"
@@ -123,6 +124,7 @@ def compile_gemm1_a4w4_port(
                 i32_ntok,
                 total_m_blocks,
                 i32_inter,
+                BM=BM,
                 K=K,
                 interleave=interleave,
                 b_nontemporal=b_nontemporal,
@@ -179,9 +181,10 @@ def compile_gemm2_a4w4_port(
 ):
     """Compile the gemm2 a4w4 down-proj; only (BM=32, atomic) supported. inter_dim is a runtime arg
     (a multiple of BK=256, <= INTER_MAX); INTER_MAX caps the compile-time B-view / LDS bounds."""
-    if (BM, epilog) != (32, "atomic"):
+    if BM not in (32, 64) or epilog != "atomic":
         raise AssertionError(
-            f"mxfp4_moe_gemm2 supports only (BM=32, epilog='atomic'); " f"got (BM={BM}, epilog={epilog})"
+            f"mxfp4_moe_gemm2 supports only (BM in {{32,64}}, epilog='atomic'); "
+            f"got (BM={BM}, epilog={epilog})"
         )
     if D_INTER_REAL is not None:
         raise AssertionError(f"mxfp4_moe_gemm2 does not support D_INTER_REAL padding (D_INTER_REAL={D_INTER_REAL})")
@@ -247,6 +250,7 @@ def compile_gemm2_a4w4_port(
                     is_f8,
                     KH_TILE_A,
                     k_bytes,
+                    BM=BM,
                 )
 
         # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
@@ -275,6 +279,7 @@ def compile_gemm2_a4w4_port(
                 aq_rsrc,
                 arg_aq,
                 i32_inter,
+                BM=BM,
                 use_nt=use_nt,
                 N_OUT=N_OUT,
                 INTER_MAX=INTER_MAX,
