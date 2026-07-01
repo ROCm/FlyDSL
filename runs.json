@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-01T06:45:39Z",
+ "updated": "2026-07-01T06:55:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28499346319,
+   "pr": 782,
+   "commit": "445fc7cea06ef567e0622ba2892ca3e2b56fb3b2",
+   "branch": "rlcr/pshuf-fp8-regr",
+   "event": "pull_request",
+   "title": "[Fix] preshuffle_gemm: wire xcd_swizzle + fix xcd_remap_bx_by (recover #754 async regression)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28499346319",
+   "created_at": "2026-07-01T06:53:46Z",
+   "updated_at": "2026-07-01T06:54:33Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 28499314587,
+   "pr": 782,
+   "commit": "66c7a8512cc06830ea9dbb66f779a971646271d4",
+   "branch": "rlcr/pshuf-fp8-regr",
+   "event": "pull_request",
+   "title": "[Fix] preshuffle_gemm: wire xcd_swizzle + fix xcd_remap_bx_by (recover #754 async regression)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28499314587",
+   "created_at": "2026-07-01T06:53:03Z",
+   "updated_at": "2026-07-01T06:53:58Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 28498835955,
    "pr": 784,
@@ -2063,64 +2093,6 @@
      "started_at": "2026-06-29T11:48:38Z",
      "completed_at": "2026-06-29T12:32:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28369692158/job/84044260676"
-    }
-   ]
-  },
-  {
-   "run_id": 28359073022,
-   "pr": null,
-   "commit": "aa76384f0cc584a01e568569a868d17bf76ddd38",
-   "branch": "jiacao/conv2d-implicit-mfma",
-   "event": "pull_request",
-   "title": "Add implicit-MFMA conv kernels: bf16 conv2d, bf16 & FP8 8-wave conv3d",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28359073022",
-   "created_at": "2026-06-29T08:32:35Z",
-   "updated_at": "2026-06-29T08:33:53Z",
-   "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 28358816280,
-   "pr": 759,
-   "commit": "c5d1b5f499505a2ba8c3f236ab9bd4308aec7064",
-   "branch": "fix_issue734",
-   "event": "pull_request",
-   "title": "Fix loop-carried Vector losing multi-dim shape (issue #734)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280",
-   "created_at": "2026-06-29T08:27:45Z",
-   "updated_at": "2026-06-29T15:10:39Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-29T08:29:06Z",
-     "completed_at": "2026-06-29T10:22:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280/job/84008404196"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-29T14:25:46Z",
-     "completed_at": "2026-06-29T15:10:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280/job/84008404202"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-29T08:29:13Z",
-     "completed_at": "2026-06-29T10:02:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28358816280/job/84008404211"
     }
    ]
   }
