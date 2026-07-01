@@ -196,11 +196,23 @@ _PERSIST_MIN_TOK = {
     (7168, 256, 384): 4096,  # KimiK2 fp4
 }
 
+# ---- tiny-M gemm1 BN=64 + k_wave=4 dispatch (evidence: bn64-kw4.md) ----
+# The high-expert small-inter fp4 families (DSV3 E257, Kimi E384; inter=256 -> N_OUT=512) are
+# block-count bound at tiny M: with BN=256 there are only N_OUT//256 = 2 N-blocks, so few blocks
+# cover the GPU. BN=64 gives N_OUT//64 = 8 N-blocks (4x coverage) and pairs with k_wave=4 (nnw=1)
+# to keep the K reduction busy -> DSV3 fp4 m=2 gemm1 ~1.5x (7.99 vs 12.58us). The coverage win ends
+# by m~=4 (enough M-blocks to fill the GPU), so BN=256+kw1 otherwise. Keyed by family signature ->
+# max token count (inclusive) to enable BN=64+kw4. gemm2 is BN-independent (unchanged).
+_TINYM_BN64_MAX_TOK = {
+    (7168, 256, 257): 2,  # DeepSeekV3 fp4
+    (7168, 256, 384): 2,  # KimiK2 fp4
+}
+
 
 def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=False):
     """Host-side per-(shape, token) config picker from the aiter tuned map.
 
-    Returns ``(BM, epilog, bm_stage1, persist)`` for the v2 pipe:
+    Returns ``(BM, epilog, bm_stage1, persist, bn, k_wave)`` for the v2 pipe:
 
     * ``BM`` -- the stage2/compute tile, the CSV block_m clamped to the currently-supported
       compute tiles <=64 (128 -> 64). BM128 is a stage1-only lever (it regresses stage2), so the
@@ -214,14 +226,17 @@ def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=
     * ``persist`` -- enable the gemm2 persistent-m grid for the high-expert large-M fp4 families
       (``_PERSIST_MIN_TOK``, DSV3/Kimi); OFF for GPT-OSS (byte-identical one-shot grid) and for the
       a8w4/fp8-A families (the fp8-A persist path is a known-broken F2 combo; see _PERSIST_MIN_TOK).
+    * ``bn, k_wave`` -- the gemm1 fused gate|up N-tile and intra-block K-slice. (64, 4) for the
+      high-expert small-inter fp4 families at tiny M (``_TINYM_BN64_MAX_TOK``, block-count bound),
+      (256, 1) otherwise (the shipped default, byte-identical).
 
-    Unlisted families fall back to the current default (BM=32, atomic, bm_stage1=32, persist=off);
-    unlisted token counts snap to the nearest lower bucket.
+    Unlisted families fall back to the current default (BM=32, atomic, bm_stage1=32, persist=off,
+    bn=256, k_wave=1); unlisted token counts snap to the nearest lower bucket.
     """
     sig = (model_dim, inter_dim, experts)
     fam = _AITER_PIPE_TABLE.get(sig)
     if fam is None:
-        return 32, "atomic", 32, False
+        return 32, "atomic", 32, False, 256, 1
     bm_csv, epilog = fam[_nearest_token_key(fam, tokens)]
     # stage2/compute tile: BM128 is stage1-only -> stage2 caps at 64.
     bm = 64 if bm_csv >= 128 else bm_csv
@@ -235,7 +250,13 @@ def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=
     # persist: high-expert large-M families only.
     p_min = _PERSIST_MIN_TOK.get(sig)
     persist = p_min is not None and tokens >= p_min
-    return bm, epilog, bm_stage1, persist
+    # tiny-M gemm1: BN=64 + k_wave=4 for the block-count-bound high-expert fp4 families at m<=2.
+    t_max = _TINYM_BN64_MAX_TOK.get(sig)
+    if t_max is not None and tokens <= t_max:
+        bn, k_wave = 64, 4
+    else:
+        bn, k_wave = 256, 1
+    return bm, epilog, bm_stage1, persist, bn, k_wave
 
 
 # ---- gemm1 (up/gate-proj) compile ----

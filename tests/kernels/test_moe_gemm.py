@@ -2169,7 +2169,7 @@ def run_mxfp4_moe_2stage(
         from kernels.moe_dispatcher import select_pipe_config
 
         _allow_bm128 = os.environ.get("MXFP4_ALLOW_BM128") == "1"
-        BM, _epilog_sel, BM_S1, persist = select_pipe_config(
+        BM, _epilog_sel, BM_S1, persist, _bn_sel, _kw_sel = select_pipe_config(
             model_dim, inter_dim, experts, topk, tokens, allow_bm128=_allow_bm128
         )
         use_reduce = _epilog_sel == "reduce"
@@ -2189,11 +2189,16 @@ def run_mxfp4_moe_2stage(
     SBM = int(os.environ.get("MXFP4_SBM", str(_sbm_default)))
     assert SBM % BM == 0, f"MXFP4_SBM ({SBM}) must be a multiple of BM ({BM})"
     assert SBM % BM_S1 == 0, f"MXFP4_SBM ({SBM}) must be a multiple of BM_S1 ({BM_S1})"
-    # k_wave (intra-block K-slice) gemm1 override for measurement (MXFP4_KW env; default 1).
-    KWAVE = int(os.environ.get("MXFP4_KW", "1"))
+    # k_wave (intra-block K-slice) + BN (fused gate|up N-tile) gemm1 tiles. The dispatcher picks
+    # (BN=64, k_wave=4) for the block-count-bound high-expert fp4 families at tiny M, (256, 1)
+    # otherwise. An explicit MXFP4_KW / MXFP4_BN env always overrides (manual measurement).
+    if os.environ.get("MXFP4_DISPATCH") == "1":
+        KWAVE = int(os.environ.get("MXFP4_KW", str(_kw_sel)))
+        BNARG = int(os.environ.get("MXFP4_BN", str(_bn_sel)))
+    else:
+        KWAVE = int(os.environ.get("MXFP4_KW", "1"))
+        BNARG = int(os.environ.get("MXFP4_BN", "256"))
     assert KWAVE in (1, 2, 4), f"MXFP4_KW must be in {{1,2,4}}, got {KWAVE}"
-    # BN (gemm1 fused gate|up N-tile) override for measurement (MXFP4_BN env; default 256).
-    BNARG = int(os.environ.get("MXFP4_BN", "256"))
     assert BNARG in (64, 256), f"MXFP4_BN must be in {{64,256}}, got {BNARG}"
     # persist (aiter `_persist`): gemm2 launches a fixed cu_num-wide grid and grid-strides over the
     # padded sort blocks. Set by dispatch above, or MXFP4_PERSIST=1 manually; MXFP4_CU_NUM overrides
