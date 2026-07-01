@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-01T11:33:19Z",
+ "updated": "2026-07-01T11:48:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226",
    "created_at": "2026-07-01T11:31:37Z",
-   "updated_at": "2026-07-01T11:32:15Z",
+   "updated_at": "2026-07-01T11:32:52Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-01T11:33:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226/job/84522554393"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-01T11:32:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226/job/84522554397"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-01T11:33:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226/job/84522554410"
+    }
+   ]
   },
   {
    "run_id": 28513295408,
@@ -68,19 +96,19 @@
    "branch": "main",
    "event": "push",
    "title": "[pa] Deterministic split-partition reduce for PS decode (#776)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513104625",
    "created_at": "2026-07-01T11:07:50Z",
-   "updated_at": "2026-07-01T11:09:14Z",
+   "updated_at": "2026-07-01T11:33:30Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T11:09:14Z",
+     "started_at": "2026-07-01T11:33:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513104625/job/84518250397"
     },
@@ -126,20 +154,20 @@
    "branch": "mxfp4-moe-gemm",
    "event": "pull_request",
    "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28510618689",
    "created_at": "2026-07-01T10:21:48Z",
-   "updated_at": "2026-07-01T10:58:10Z",
+   "updated_at": "2026-07-01T11:45:15Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T10:24:11Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T11:45:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28510618689/job/84510055936"
     },
     {
@@ -154,10 +182,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T10:24:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T11:35:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28510618689/job/84510055955"
     }
    ]
