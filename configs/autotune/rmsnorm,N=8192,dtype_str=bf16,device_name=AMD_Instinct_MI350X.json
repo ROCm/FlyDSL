@@ -1,0 +1,11 @@
+{
+  "config": {
+    "BLOCK_THREADS": 512
+  },
+  "device_name": "AMD_Instinct_MI350X",
+  "name": "rmsnorm",
+  "spec": {
+    "N": 8192,
+    "dtype_str": "bf16"
+  }
+}
