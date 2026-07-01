@@ -2156,30 +2156,42 @@ def run_mxfp4_moe_2stage(
 
     device = x_fp32.device
     NE, H, INTER, TOPK = experts, model_dim, inter_dim, topk
-    # Per-(shape, token) CSV dispatch (MXFP4_DISPATCH=1): auto-select (BM, epilog) from the
-    # aiter tuned map (kernels.moe_dispatcher.select_pipe_config) -- the dominant perf lever
-    # (stage2 atomic-vs-reduce + block_m). It OVERRIDES MXFP4_BM and the use_reduce arg; leave
-    # MXFP4_DISPATCH unset for manual measurement (env BM + explicit use_reduce, unchanged).
+    # Per-(shape, token) CSV dispatch (MXFP4_DISPATCH=1): auto-select (BM, epilog, bm_stage1,
+    # persist) from the aiter tuned map (kernels.moe_dispatcher.select_pipe_config) -- the dominant
+    # perf lever (stage2 atomic-vs-reduce + block_m), plus the stage1-only BM128 tile and gemm2
+    # persist. It OVERRIDES MXFP4_BM / use_reduce / MXFP4_PERSIST; leave MXFP4_DISPATCH unset for
+    # manual measurement (env BM + explicit use_reduce + MXFP4_PERSIST, unchanged).
+    # BM_S1 is the gemm1 compute tile; BM is the gemm2/compute tile (may differ when the dispatcher
+    # picks a stage1-only BM128). SBM (sort padding unit) must be a multiple of both.
+    persist = os.environ.get("MXFP4_PERSIST") == "1"
+    cu_num = int(os.environ.get("MXFP4_CU_NUM", "0"))
     if os.environ.get("MXFP4_DISPATCH") == "1":
         from kernels.moe_dispatcher import select_pipe_config
 
         _allow_bm128 = os.environ.get("MXFP4_ALLOW_BM128") == "1"
-        BM, _epilog_sel = select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=_allow_bm128)
+        BM, _epilog_sel, BM_S1, persist = select_pipe_config(
+            model_dim, inter_dim, experts, topk, tokens, allow_bm128=_allow_bm128
+        )
         use_reduce = _epilog_sel == "reduce"
     else:
         # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
         # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
+        # BM_S1 (stage1 tile) follows BM in the manual path (MXFP4_BM_STAGE1 optional override).
         BM = int(os.environ.get("MXFP4_BM", "32"))
+        BM_S1 = int(os.environ.get("MXFP4_BM_STAGE1", str(BM)))
     assert BM in (16, 32, 64, 128), f"MXFP4_BM must be in {{16,32,64,128}}, got {BM}"
-    # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
-    # Default SBM==BM (byte-identical). SBM must be a multiple of BM (SBM//BM compute blocks per
-    # SBM sort block). MXFP4_SBM env override.
-    SBM = int(os.environ.get("MXFP4_SBM", str(BM)))
-    assert SBM % BM == 0, f"MXFP4_SBM ({SBM}) must be a multiple of MXFP4_BM ({BM})"
+    assert BM_S1 in (16, 32, 64, 128), f"BM_S1 must be in {{16,32,64,128}}, got {BM_S1}"
+    # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tiles. It must
+    # be a multiple of BOTH stage tiles so each stage packs an integer number of compute blocks per
+    # sort block. Default SBM==BM (byte-identical when BM_S1==BM). MXFP4_SBM env override; when the
+    # stages differ (BM_S1!=BM), SBM defaults to lcm(BM_S1, BM) (=max here since both are 2-powers).
+    _sbm_default = BM if BM_S1 == BM else max(BM, BM_S1)
+    SBM = int(os.environ.get("MXFP4_SBM", str(_sbm_default)))
+    assert SBM % BM == 0, f"MXFP4_SBM ({SBM}) must be a multiple of BM ({BM})"
+    assert SBM % BM_S1 == 0, f"MXFP4_SBM ({SBM}) must be a multiple of BM_S1 ({BM_S1})"
     # persist (aiter `_persist`): gemm2 launches a fixed cu_num-wide grid and grid-strides over the
-    # padded sort blocks. MXFP4_PERSIST=1 enables it; MXFP4_CU_NUM overrides the fixed grid size.
-    persist = os.environ.get("MXFP4_PERSIST") == "1"
-    cu_num = int(os.environ.get("MXFP4_CU_NUM", "0"))
+    # padded sort blocks. Set by dispatch above, or MXFP4_PERSIST=1 manually; MXFP4_CU_NUM overrides
+    # the fixed grid size.
     is_f8 = in_dtype == "a8w4"
 
     # weights (fp4) + CK a16w4 preshuffle
@@ -2215,7 +2227,8 @@ def run_mxfp4_moe_2stage(
         aq, asc = _per_1x32_fp4_quant(hidden)
         aq = aq.view(torch.uint8).view(tokens, H // 2).contiguous()
     asc = asc.view(torch.uint8).view(tokens, H // 32).contiguous()
-    assh = _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=BM)
+    # A-scale shuffle layout is tied to the stage1 compute tile (gemm1 consumes it) -> BM_S1.
+    assh = _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=BM_S1)
 
     # gemm1 -> intermediate (fp4 / fp8) + shuffled scale
     out_dtype = "fp8" if is_f8 else "fp4"
@@ -2240,7 +2253,7 @@ def run_mxfp4_moe_2stage(
         D_HIDDEN=H,
         D_INTER=INTER,
         topk=TOPK,
-        BM=BM,
+        BM=BM_S1,
         # gemm1 B is CACHED (nt off): stage1 has heavy cross-m-block B-reuse (many
         # m-blocks per expert at large tokens), so caching the weights in L2 is a
         # large win on compute-bound shapes (matches base's b_nt=0 for stage1).
@@ -2426,7 +2439,7 @@ def run_mxfp4_moe_2stage(
             aq2, asc2 = _per_1x32_fp4_quant(hidden2)
             aq2 = aq2.view(torch.uint8).view(tokens, H // 2).contiguous()
         asc2 = asc2.view(torch.uint8).view(tokens, H // 32).contiguous()
-        assh2 = _mxfp4_a_scale_sorted_shuffled(asc2, sti, cumsum, max_sorted, H, BM=BM)
+        assh2 = _mxfp4_a_scale_sorted_shuffled(asc2, sti, cumsum, max_sorted, H, BM=BM_S1)
         aq.copy_(aq2)
         assh.copy_(assh2)
         hidden.copy_(hidden2)

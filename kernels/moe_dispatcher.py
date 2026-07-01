@@ -63,8 +63,10 @@ def _get_cu_num() -> int:
 # (DSV3 E257, Kimi/DSV4 E384) where atomic collapses under heavy per-token contention; atomic
 # for the low-expert large-inter GPT-OSS family. block_m tracks the CSV 32/64/128 column.
 #
-# Each value is (block_m_csv, epilog_csv). Only stage2 epilog + block_m are dispatched here; the
-# finer s1/s2 knobs (bnt/persist/xcd4/kw/kb) are separate follow-on wiring.
+# Each value is (block_m_csv, epilog_csv). stage2 epilog + block_m come from this table; the
+# stage1-only BM128 tile and gemm2 persist are layered on top per-family (see
+# _STAGE1_BM128_MIN_TOK / _PERSIST_MIN_TOK and select_pipe_config). The remaining finer knobs
+# (bnt/xcd4/kw/kb) are separate follow-on wiring.
 _AITER_PIPE_TABLE = {
     # DeepSeekV3 fp4 (7168/256/E257/k9) — reduce-dominant for our kernel. The CSV picks atomic at
     # 2048/16384/32768, but those CSV rows rely on persist+sbm128 (unimplemented here); measured
@@ -164,26 +166,68 @@ def _nearest_token_key(tok_map, tokens):
     return chosen
 
 
+# ---- stage1-only BM128 + persist wiring (evidence: aiter-tuned-config-map.md) ----
+# The high-expert small-inter families (DSV3 E257, Kimi/DSV4 E384) run the aiter CSV stage1 at
+# tile_m=128 (``t128x...``) from ~4096 tokens up while their stage2 stays at tile_m=64 with
+# sbm128 (BM128 regresses stage2/GPT-OSS per F1 — it is a stage1-only lever). We give gemm1 a
+# BM128 compute tile and keep gemm2 at its measured-optimal <=64 tile; the shared sort unit
+# becomes SBM=lcm(bm_stage1, bm_stage2)=128 so both stages agree on padding/expert-id lookup.
+# Keyed by family signature -> min token count to enable stage1 BM128. Gated by allow_bm128.
+_STAGE1_BM128_MIN_TOK = {
+    (7168, 256, 257): 4096,  # DeepSeekV3 fp4
+    (7168, 256, 384): 4096,  # KimiK2 fp4
+    (7168, 512, 384): 4096,  # DeepSeekV4 a8w4
+}
+
+# persist (aiter `_persist`, gemm2 fixed-grid grid-stride): ON for the high-expert large-M reduce
+# rows (DSV3/Kimi/DSV4) where it cuts launch/tail overhead and lifts large-M occupancy (F2:
+# +5-17%); OFF for GPT-OSS (E128 large-inter — no benefit, keep the byte-identical one-shot grid).
+# Keyed by family signature -> min token count to enable gemm2 persist.
+_PERSIST_MIN_TOK = {
+    (7168, 256, 257): 4096,  # DeepSeekV3 fp4
+    (7168, 256, 384): 4096,  # KimiK2 fp4
+    (7168, 512, 384): 4096,  # DeepSeekV4 a8w4
+}
+
+
 def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=False):
     """Host-side per-(shape, token) config picker from the aiter tuned map.
 
-    Returns (BM, epilog) for the v2 pipe. ``epilog`` in {'atomic','reduce'} is the #1 perf lever
-    (reduce for high-expert small-inter contention; atomic for low-expert large-inter). ``BM`` is
-    the CSV block_m clamped to the currently-supported compute tiles: 128 -> 64 unless
-    ``allow_bm128`` (BM128 compute tile is a follow-on / Milestone C). Unlisted families fall back
-    to the current default (BM=32, atomic); unlisted token counts snap to the nearest lower bucket.
+    Returns ``(BM, epilog, bm_stage1, persist)`` for the v2 pipe:
+
+    * ``BM`` -- the stage2/compute tile, the CSV block_m clamped to the currently-supported
+      compute tiles <=64 (128 -> 64). BM128 is a stage1-only lever (it regresses stage2), so the
+      stage2 tile never exceeds 64 here.
+    * ``epilog`` in {'atomic','reduce'} -- the #1 perf lever (reduce for high-expert small-inter
+      contention; atomic for low-expert large-inter).
+    * ``bm_stage1`` -- the gemm1 compute tile: 128 for the high-expert small-inter families at
+      large M (``_STAGE1_BM128_MIN_TOK``) when ``allow_bm128``, else == ``BM``. When
+      ``bm_stage1 != BM`` the caller must use SBM = lcm(bm_stage1, BM) (=128) as the shared sort
+      unit so both stages agree on padding / expert-id lookup.
+    * ``persist`` -- enable the gemm2 persistent-m grid for the high-expert large-M families
+      (``_PERSIST_MIN_TOK``); OFF for GPT-OSS (byte-identical one-shot grid).
+
+    Unlisted families fall back to the current default (BM=32, atomic, bm_stage1=32, persist=off);
+    unlisted token counts snap to the nearest lower bucket.
     """
-    fam = _AITER_PIPE_TABLE.get((model_dim, inter_dim, experts))
+    sig = (model_dim, inter_dim, experts)
+    fam = _AITER_PIPE_TABLE.get(sig)
     if fam is None:
-        return 32, "atomic"
+        return 32, "atomic", 32, False
     bm_csv, epilog = fam[_nearest_token_key(fam, tokens)]
-    if bm_csv >= 128 and not allow_bm128:
-        bm = 64  # BM128 compute tile not yet enabled; use the largest supported tile.
-    else:
-        bm = bm_csv
-    if bm not in (32, 64, 128):
+    # stage2/compute tile: BM128 is stage1-only -> stage2 caps at 64.
+    bm = 64 if bm_csv >= 128 else bm_csv
+    if bm not in (32, 64):
         bm = 32
-    return bm, epilog
+    # stage1 tile: BM128 for the listed high-expert families at large M (allow_bm128-gated).
+    bm_stage1 = bm
+    s1_min = _STAGE1_BM128_MIN_TOK.get(sig)
+    if allow_bm128 and s1_min is not None and tokens >= s1_min:
+        bm_stage1 = 128
+    # persist: high-expert large-M families only.
+    p_min = _PERSIST_MIN_TOK.get(sig)
+    persist = p_min is not None and tokens >= p_min
+    return bm, epilog, bm_stage1, persist
 
 
 # ---- gemm1 (up/gate-proj) compile ----
