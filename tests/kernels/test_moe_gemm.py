@@ -1776,6 +1776,9 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    real_model_dim: Optional[int] = None,
+    real_inter_dim: Optional[int] = None,
+    garbage_pad: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
 
@@ -1848,6 +1851,9 @@ def test_moe_gemm_2stage(
             use_reduce=bool(use_reduce),
             use_valid_mask=bool(use_valid_mask),
             test_graph=bool(test_graph),
+            real_model_dim=real_model_dim,
+            real_inter_dim=real_inter_dim,
+            garbage_pad=bool(garbage_pad),
         )
         return
 
@@ -2133,6 +2139,9 @@ def run_mxfp4_moe_2stage(
     use_reduce=False,
     use_valid_mask=False,
     test_graph=False,
+    real_model_dim=None,
+    real_inter_dim=None,
+    garbage_pad=False,
 ):
     """Run the layout-API MXFP4 MoE (opus sort -> gemm1 -> gemm2) and verify against an
     independent dequant-MoE reference. Returns the bf16 output.
@@ -2156,6 +2165,45 @@ def run_mxfp4_moe_2stage(
 
     device = x_fp32.device
     NE, H, INTER, TOPK = experts, model_dim, inter_dim, topk
+
+    # ---- runtime pad (weight-OOB pad-skip) test setup ----------------------------------------
+    # real_model_dim / real_inter_dim < the (padded) model_dim / inter_dim map to the has_pad kernel
+    # variant. The padded region is host zero-filled (structurally 0) so it contributes nothing; the
+    # kernel's weight-OOB skip drops the fully-pad 128-K weight halves (bandwidth saving). We ZERO the
+    # padded columns/rows of the fp32 tensors BEFORE quant so the quantized weights are exactly 0 there
+    # (0*anything=0, algebraically exact for mx-quant GEMM). The reference is then over the FULL tensors
+    # (zeros in the pad contribute nothing, matching a real-dim GEMM). ``garbage_pad`` writes a large
+    # value (1e30) into the padded region instead: the OOB skip / host-zero-scale must still yield the
+    # correct output (proves the pad region is never read into the accumulation).
+    model_dim_pad = 0 if real_model_dim is None else (H - int(real_model_dim))
+    inter_dim_pad = 0 if real_inter_dim is None else (INTER - int(real_inter_dim))
+    assert model_dim_pad >= 0 and inter_dim_pad >= 0, "real dims must be <= padded dims"
+    if model_dim_pad or inter_dim_pad:
+        real_H = H - model_dim_pad
+        real_INTER = INTER - inter_dim_pad
+        # A / intermediate / non-contraction weight pads are ALWAYS zero (structural pad the kernel
+        # multiplies but that contributes 0). Only the WEIGHT CONTRACTION-pad regions -- the fully-pad
+        # 128-K weight halves the OOB skip DROPS (w1 model_dim-tail for gemm1, w2 inter-tail for gemm2)
+        # -- take the garbage fill under ``garbage_pad`` (1e30): a correct output then proves the OOB
+        # skip never fetches them into the accumulation. (A sub-128 pad remainder within a KEPT half is
+        # still host-zero -- garbage there WOULD corrupt, so it stays 0; the OOB skip only covers the
+        # fully-pad halves, which is exactly what we poison.)
+        wpad_fill = 1e30 if garbage_pad else 0.0
+        if model_dim_pad:
+            x_fp32[:, real_H:] = 0.0
+            w2_fp32[:, real_H:, :] = 0.0  # gemm2 output-row pad (model_dim), structural
+            # gemm1 contraction-pad: only the fully-pad 128-col-aligned tail halves get garbage.
+            gq = (real_H + 127) // 128 * 128  # first fully-pad 128-K weight col
+            w1_fp32[:, :, real_H:gq] = 0.0  # partial-pad remainder in a kept half -> host zero
+            w1_fp32[:, :, gq:] = wpad_fill  # fully-pad halves -> OOB-skipped (garbage ok)
+        if inter_dim_pad:
+            # gemm1 N-output (2*INTER, gate|up interleaved halves) pad is structural (zero): the pad
+            # inter cols of the intermediate must be 0 so gemm2's kept partial-pad K-half is correct.
+            w1_fp32[:, real_INTER:INTER, :] = 0.0  # gate half tail
+            w1_fp32[:, INTER + real_INTER :, :] = 0.0  # up half tail
+            gk = (real_INTER + 127) // 128 * 128  # first fully-pad 128-K w2 col
+            w2_fp32[:, :, real_INTER:gk] = 0.0  # partial-pad remainder -> host zero
+            w2_fp32[:, :, gk:] = wpad_fill  # fully-pad halves -> OOB-skipped (garbage ok)
     # Per-(shape, token) CSV dispatch (MXFP4_DISPATCH=1): auto-select (BM, epilog, bm_stage1,
     # persist) from the aiter tuned map (kernels.moe_dispatcher.select_pipe_config) -- the dominant
     # perf lever (stage2 atomic-vs-reduce + block_m), plus the stage1-only BM128 tile and gemm2
@@ -2278,6 +2326,7 @@ def run_mxfp4_moe_2stage(
         k_wave=KWAVE,
         BN=BNARG,
         n_sorted_padded=n,
+        model_dim_pad=model_dim_pad,
     )
     mxfp4_moe_gemm1(**_g1_kwargs)
     torch.cuda.synchronize()
@@ -2313,6 +2362,7 @@ def run_mxfp4_moe_2stage(
         persist=persist,
         cu_num=cu_num,
         n_sorted_padded=n,
+        inter_dim_pad=inter_dim_pad,
     )
     mxfp4_moe_gemm2(**_g2_kwargs)
     torch.cuda.synchronize()
@@ -3100,9 +3150,26 @@ if __name__ == "__main__":
         help="Group size for W4A16 groupwise scale (-1 = per-row, 32 = group_size=32).",
     )
 
+    # Runtime pad (weight-OOB pad-skip): REAL (unpadded) dims; -dim carries the PADDED dims.
+    parser.add_argument(
+        "--real_dim",
+        type=_str2tuple_dim,
+        default=None,
+        help="Real (unpadded) 'model_dim,inter_dim' for the has_pad weight-OOB skip (e.g. GPT-OSS "
+        "'2880,2880' with -dim 3072,3072). Default None = no pad (byte-identical default variant).",
+    )
+    parser.add_argument(
+        "--garbage_pad",
+        action="store_true",
+        default=False,
+        help="Write 1e30 into the fully-pad weight-contraction halves the OOB skip drops (proves the "
+        "skip never fetches them). Only meaningful with --real_dim.",
+    )
+
     args = parser.parse_args()
 
     model_dim, inter_dim = args.dim
+    real_model_dim, real_inter_dim = args.real_dim if args.real_dim is not None else (None, None)
 
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
@@ -3151,6 +3218,9 @@ if __name__ == "__main__":
                 use_reduce=use_reduce,
                 use_valid_mask=bool(args.use_valid_mask),
                 test_graph=bool(args.test_graph),
+                real_model_dim=real_model_dim,
+                real_inter_dim=real_inter_dim,
+                garbage_pad=bool(args.garbage_pad),
             )
         except pytest.skip.Exception as e:
             print(f"[skip] {dt} reduce={use_reduce}: {e}")
