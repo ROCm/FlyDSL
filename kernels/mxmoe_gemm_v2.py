@@ -5,7 +5,7 @@
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import llvm, scf
 from flydsl.expr import _to_raw as _raw
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Float4E2M1FN, T
@@ -986,30 +986,47 @@ def atomic_bf16_epilog(
     # read back + weighted store. atomic: fadd into out[token_id] (per-token accumulate).
     # reduce: plain non-atomic store into out[token_id*topk + s] (unique per (token,topk) slot;
     # host reduces over topk). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
-    for mr in range_constexpr(M_REPS):
+    # ``if token_id < i32_M`` gates out padding rows (sentinel token_id == M). BM<=32 keeps the
+    # legacy plain-Python ``if`` (byte-identical: the store body always traces; the OOB padding-row
+    # write lands in allocator slack and never faulted). BM>=64 promotes the guard to a real device
+    # ``scf.if`` so the padding-row store is genuinely skipped: at BM64 the padding stride is large
+    # enough that the unguarded OOB atomic write hit an illegal address (a8w4/small-token).
+    guard_padding = BM >= 64
+
+    def store_one_mr(mr):
         row_in_block = fx.Int32(mr * 8) + m_lane
         token_id = packed[mr] & fx.Int32(0x00FFFFFF)
-        if token_id < i32_M:
+        if const_expr(use_reduce):
+            out_row = token_id * fx.Int32(topk) + (packed[mr] >> fx.Int32(24))
+        else:
+            out_row = token_id
+        row_base_addr = out_row * N_OUT + n_block_idx * BN + col_start
+        for s in range_constexpr(4):
+            # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
+            idx0 = row_in_block * BN + col_start + s * 64
+            v2 = Vec(lds_vec_load(lds_acc_base, idx0 * 4, Vec.make_type(2, fx.Float32), fx.Float32, align=8))
+            pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
+            off = (row_base_addr + s * 64) * 2  # bf16 byte off
+            out_ptr = gep1(out_base, off)
             if const_expr(use_reduce):
-                out_row = token_id * fx.Int32(topk) + (packed[mr] >> fx.Int32(24))
+                llvm.StoreOp(_raw(pk), out_ptr, alignment=4, nontemporal=True)
             else:
-                out_row = token_id
-            row_base_addr = out_row * N_OUT + n_block_idx * BN + col_start
-            for s in range_constexpr(4):
-                # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
-                idx0 = row_in_block * BN + col_start + s * 64
-                v2 = Vec(lds_vec_load(lds_acc_base, idx0 * 4, Vec.make_type(2, fx.Float32), fx.Float32, align=8))
-                pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
-                off = (row_base_addr + s * 64) * 2  # bf16 byte off
-                out_ptr = gep1(out_base, off)
-                if const_expr(use_reduce):
-                    llvm.StoreOp(_raw(pk), out_ptr, alignment=4, nontemporal=True)
-                else:
-                    llvm.AtomicRMWOp(
-                        llvm.AtomicBinOp.fadd,
-                        out_ptr,
-                        _raw(pk),
-                        llvm.AtomicOrdering.monotonic,
-                        syncscope="agent",
-                        alignment=4,
-                    )
+                llvm.AtomicRMWOp(
+                    llvm.AtomicBinOp.fadd,
+                    out_ptr,
+                    _raw(pk),
+                    llvm.AtomicOrdering.monotonic,
+                    syncscope="agent",
+                    alignment=4,
+                )
+
+    for mr in range_constexpr(M_REPS):
+        token_id = packed[mr] & fx.Int32(0x00FFFFFF)
+        if const_expr(guard_padding):
+            _if_valid = scf.IfOp(_raw(token_id < i32_M))
+            with ir.InsertionPoint(_if_valid.then_block):
+                store_one_mr(mr)
+                scf.YieldOp([])
+        else:
+            if token_id < i32_M:
+                store_one_mr(mr)
