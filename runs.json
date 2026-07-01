@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-01T10:42:00Z",
+ "updated": "2026-07-01T11:09:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28513104625,
+   "pr": null,
+   "commit": "56849698b361f41e2bb9c0483767e7d380f00cbc",
+   "branch": "main",
+   "event": "push",
+   "title": "[pa] Deterministic split-partition reduce for PS decode (#776)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513104625",
+   "created_at": "2026-07-01T11:07:50Z",
+   "updated_at": "2026-07-01T11:08:37Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 28513053616,
+   "pr": null,
+   "commit": "22536e9d40bc5f1d7ee28baa39df6b53386b09b1",
+   "branch": "main",
+   "event": "push",
+   "title": "[Fix] Add coalesceX to keep layout boundary (#784)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513053616",
+   "created_at": "2026-07-01T11:06:54Z",
+   "updated_at": "2026-07-01T11:07:52Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 28510618689,
    "pr": 753,
@@ -10,11 +40,11 @@
    "branch": "mxfp4-moe-gemm",
    "event": "pull_request",
    "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28510618689",
    "created_at": "2026-07-01T10:21:48Z",
-   "updated_at": "2026-07-01T10:23:24Z",
+   "updated_at": "2026-07-01T10:58:10Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -29,9 +59,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T10:23:24Z",
+     "started_at": "2026-07-01T10:58:10Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28510618689/job/84510055954"
     },
@@ -53,38 +83,38 @@
    "branch": "main",
    "event": "push",
    "title": "R1: wire xcd_swizzle into preshuffle_gemm + fix xcd_remap_bx_by (#782)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261",
    "created_at": "2026-07-01T10:00:55Z",
-   "updated_at": "2026-07-01T10:01:50Z",
+   "updated_at": "2026-07-01T11:07:28Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-01T10:01:50Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-01T10:41:25Z",
+     "completed_at": "2026-07-01T10:58:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261/job/84506143389"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-01T10:02:36Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T11:07:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261/job/84506143398"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-01T10:02:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T11:07:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261/job/84506143450"
     }
    ]
@@ -441,7 +471,7 @@
   },
   {
    "run_id": 28499471421,
-   "pr": 784,
+   "pr": null,
    "commit": "a9bb190efd1dbb90ef9c957fb185135a21d6436d",
    "branch": "pr/fix-coalesce-x",
    "event": "pull_request",
@@ -542,7 +572,7 @@
   },
   {
    "run_id": 28498835955,
-   "pr": 784,
+   "pr": null,
    "commit": "2b5fdc90c19eb87ee683276fca19ade13984f981",
    "branch": "pr/fix-coalesce-x",
    "event": "pull_request",
@@ -1535,7 +1565,7 @@
   },
   {
    "run_id": 28430210077,
-   "pr": 776,
+   "pr": null,
    "commit": "a22dd0d1338c98f71e5b93bedf1afc0814c94723",
    "branch": "pa-decode-deterministic-reduce",
    "event": "pull_request",
@@ -1854,7 +1884,7 @@
   },
   {
    "run_id": 28425102269,
-   "pr": 776,
+   "pr": null,
    "commit": "cbb69ed6f507423b02dd5673ef1c1206e72fd180",
    "branch": "pa-decode-deterministic-reduce",
    "event": "pull_request",
@@ -1950,92 +1980,6 @@
      "started_at": "2026-06-30T06:15:42Z",
      "completed_at": "2026-06-30T07:10:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424299968/job/84223950018"
-    }
-   ]
-  },
-  {
-   "run_id": 28424240942,
-   "pr": null,
-   "commit": "3552f11d804b56b24d54bd8bae9e044b6b84035c",
-   "branch": "main",
-   "event": "push",
-   "title": "Fix loop-carried Vector losing multi-dim shape (issue #734) (#759)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942",
-   "created_at": "2026-06-30T06:12:06Z",
-   "updated_at": "2026-06-30T06:52:14Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-06-30T06:14:27Z",
-     "completed_at": "2026-06-30T06:40:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942/job/84223763305"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T06:14:37Z",
-     "completed_at": "2026-06-30T06:40:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942/job/84223763334"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T06:13:52Z",
-     "completed_at": "2026-06-30T06:52:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28424240942/job/84223763369"
-    }
-   ]
-  },
-  {
-   "run_id": 28423380429,
-   "pr": 764,
-   "commit": "eb5bf5a10275bbfe69dce5d8c49ae41ef173a526",
-   "branch": "cleanup/flash-attn-generic-arith-to-flydsl",
-   "event": "pull_request",
-   "title": "flash_attn_generic: replace raw arith.* FP ops with FlyDSL-typed fast\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429",
-   "created_at": "2026-06-30T05:51:05Z",
-   "updated_at": "2026-06-30T06:14:05Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-06-30T05:53:34Z",
-     "completed_at": "2026-06-30T06:10:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429/job/84221122410"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T05:53:35Z",
-     "completed_at": "2026-06-30T06:13:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429/job/84221122421"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T05:53:22Z",
-     "completed_at": "2026-06-30T06:14:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28423380429/job/84221122437"
     }
    ]
   }
