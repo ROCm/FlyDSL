@@ -2057,17 +2057,26 @@ def _mxfp4_shuffle_scale_a16w4(src, E, gate_up):
 
 def _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=32, BK=256):
     """Torch reconstruction of moe_sort_scales: sort + CK-shuffle the e8m0 A-scale
-    by sorted row, exactly as gemm1 consumes it (opus gather: sti & 0xFFFFFF)."""
+    by sorted row, exactly as gemm1 consumes it (opus gather: sti & 0xFFFFFF).
+
+    BM16: the MFMA-scale layout is 32-row-chunk granular (opsel_a is a compile-time immediate),
+    so each 16-row compute block owns a full 32-row scale chunk and uses only row-group 0 (im_a=0)
+    -- the im_a=1 half is zero padding the kernel never reads. CHUNK_ROWS=32 (scale granularity),
+    one chunk per 16-block (n_chunks = max_sorted//16, chunk c holds sorted rows [c*16, c*16+16)).
+    BM>=32: CHUNK_ROWS==BM, MN_PACK 16-groups per chunk (unchanged)."""
     device = asc.device
+    is_bm16 = BM < 32
+    CHUNK_ROWS = 32 if is_bm16 else BM  # scale-chunk row granularity (always 32-row groups of 2)
     MN_PACK = 2
     K_PACK = BK // 128
-    C_M1 = BM // (16 * MN_PACK)
+    C_M1 = CHUNK_ROWS // (16 * MN_PACK)
     C_K1 = (H // 32) // (4 * K_PACK)
     K_LANE, N_LANE = 4, 16
     DWORDS_PER_CHUNK = C_M1 * C_K1 * K_LANE * N_LANE
-    n_chunks = max_sorted // BM
+    block_rows = 16 if is_bm16 else BM  # compute-block rows per scale chunk
+    n_chunks = max_sorted // block_rows
     actual_sorted = int(cumsum[0].item())
-    actual_n_chunks = (actual_sorted + BM - 1) // BM
+    actual_n_chunks = (actual_sorted + block_rows - 1) // block_rows
     total_work = n_chunks * DWORDS_PER_CHUNK
     sti_c = sti & 0x00FFFFFF
     out = torch.zeros((total_work, 4), dtype=torch.uint8, device=device)
@@ -2086,7 +2095,10 @@ def _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=32, BK=25
     M = asc.shape[0]
     for ikxdl in range(K_PACK):
         for im_a in range(MN_PACK):
-            sorted_row = chunk * BM + (mi * MN_PACK + im_a) * 16 + n_lane
+            # BM16: only im_a==0 (row-group 0) carries the block's 16 rows; im_a==1 is padding.
+            if is_bm16 and im_a == 1:
+                continue
+            sorted_row = chunk * block_rows + (mi * MN_PACK + im_a) * 16 + n_lane
             rowok = (sorted_row < actual_sorted) & valid_chunk
             srow = torch.clamp(sorted_row, max=max_sorted - 1)
             stiv = sti_c[srow]
@@ -2158,7 +2170,7 @@ def run_mxfp4_moe_2stage(
         # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
         # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
         BM = int(os.environ.get("MXFP4_BM", "32"))
-    assert BM in (32, 64), f"MXFP4_BM must be 32 or 64, got {BM}"
+    assert BM in (16, 32, 64, 128), f"MXFP4_BM must be in {{16,32,64,128}}, got {BM}"
     # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
     # Default SBM==BM (byte-identical). SBM must be a multiple of BM (SBM//BM compute blocks per
     # SBM sort block). MXFP4_SBM env override.
