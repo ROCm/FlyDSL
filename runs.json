@@ -1,11 +1,41 @@
 {
  "schema": 1,
- "updated": "2026-07-01T16:35:05Z",
+ "updated": "2026-07-01T16:38:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28532495528,
+   "run_id": 28532875277,
    "pr": 780,
+   "commit": "1f5c7f493e5631a9a38b0f6a257a0a64bf662687",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28532875277",
+   "created_at": "2026-07-01T16:36:58Z",
+   "updated_at": "2026-07-01T16:37:08Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28532789313,
+   "pr": null,
+   "commit": "6c184f32d19f96a16fa791d15b6e54ebcd1dac2e",
+   "branch": "feat/mxfp6-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28532789313",
+   "created_at": "2026-07-01T16:35:26Z",
+   "updated_at": "2026-07-01T16:37:08Z",
+   "actor": "amd-satre",
+   "jobs": []
+  },
+  {
+   "run_id": 28532495528,
+   "pr": null,
    "commit": "45f6c627b57029b3b5dddca95d4fb81be0bc00d8",
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
@@ -1904,92 +1934,6 @@
      "started_at": "2026-06-30T08:02:24Z",
      "completed_at": "2026-06-30T09:24:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28429439356/job/84240486228"
-    }
-   ]
-  },
-  {
-   "run_id": 28428948126,
-   "pr": 741,
-   "commit": "0fe87fa50d8c0afc34a2e06e4364ddfb31929997",
-   "branch": "worktree-pa_ps_per_token_kv",
-   "event": "pull_request",
-   "title": "perf(pa): Raw-pointer kernargs and decode kernel refactor",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126",
-   "created_at": "2026-06-30T07:51:18Z",
-   "updated_at": "2026-06-30T14:16:11Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T08:01:33Z",
-     "completed_at": "2026-06-30T08:59:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126/job/84238803770"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-06-30T08:15:37Z",
-     "completed_at": "2026-06-30T14:16:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126/job/84238803774"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T07:52:20Z",
-     "completed_at": "2026-06-30T08:57:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428948126/job/84238803776"
-    }
-   ]
-  },
-  {
-   "run_id": 28428582579,
-   "pr": 777,
-   "commit": "239be40eb58c8fe23cd36a66dbdcfa434d4ffa38",
-   "branch": "pr/fallback-locations",
-   "event": "pull_request",
-   "title": "[Enh] Add FallbackLocations rewriter for bare-op source locations",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579",
-   "created_at": "2026-06-30T07:44:14Z",
-   "updated_at": "2026-06-30T14:30:09Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T14:16:42Z",
-     "completed_at": "2026-06-30T14:30:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677256"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T07:45:32Z",
-     "completed_at": "2026-06-30T08:49:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677262"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T07:45:45Z",
-     "completed_at": "2026-06-30T08:41:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28428582579/job/84237677263"
     }
    ]
   }
