@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Implicit-GEMM conv2d using the 8-wave double-buffered BF16 MFMA pipeline.
+"""8-wave double-buffered implicit-GEMM conv2d (BF16).
 
-128×128×32 tile, 2×4 wave layout, software-pipelined double-buffered
-prologue/main-loop/epilogue, split-K, bias, stride/padding.
-
-Input/weight convention (public API):
-  x      : (N, C, H, W)  bf16  NCHW
-  weight : (K, C, R, S)  bf16  KCRS
-
-Internally the kernel works in NHWC activation / K(RS·C) weight layout
-(im2col-free per-thread gather into LDS).
+x: (N, C, H, W) bf16 NCHW, weight: (K, C, R, S) bf16 KCRS.
+Returns (N, K, Ho, Wo) bf16. Supports stride, padding, bias, and split-K.
 """
 
 import functools
@@ -28,7 +21,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
 # ---------------------------------------------------------------------------
-# Tile / wave constants  (identical to conv3d_implicit_8wave)
+# Tile / wave constants
 # ---------------------------------------------------------------------------
 TILE_M = 128
 TILE_N = 128
@@ -78,7 +71,7 @@ def _run_compiled(exe, *args):
 
 
 # ---------------------------------------------------------------------------
-# NCHW → NHWC transpose kernel  (2-D; mirrors conv3d's NCDHW→NDHWC version)
+# NCHW → NHWC transpose kernel
 # ---------------------------------------------------------------------------
 TR_TILE = 64
 TR_VEC = 8
@@ -376,7 +369,7 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
             rocdl.sched_mfma(1)
             return out
 
-        # ---- Interleaved compute + LDS-prefetch phases (same as conv3d) ----
+        # ---- Interleaved compute + LDS-prefetch phases ----
         def phase_b_prefetch(read_stage, a0_0, a0_1, b0_0, acc):
             out = [v for v in acc]
             out[0] = mfma_one(a0_0, b0_0, out[0])
