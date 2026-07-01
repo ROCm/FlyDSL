@@ -522,6 +522,7 @@ def make_identity_layout(shape):
 
 
 @dsl_loc_tracing
+@coerce_int_tuple_args("iter", permissive=True)
 def make_view(iter, layout):
     return fly.make_view(iter, layout)
 

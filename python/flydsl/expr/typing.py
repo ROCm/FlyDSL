@@ -733,6 +733,26 @@ class Tile(BuiltinDslType):
     def rank(self) -> int:
         return self.type.rank
 
+    @dsl_loc_tracing
+    def unpack(self):
+        """Return the value on each mode, mirroring ``IntTuple.unpack``.
+
+        Int modes become Python ints, layout modes become ``Layout`` values, and
+        nested modes become tuples.
+        """
+
+        def to_py_value(ty):
+            ty = ty.maybe_downcast()
+            if isinstance(ty, LayoutType):
+                return static(ty)
+            if not isinstance(ty, TileType):
+                return IntTuple._static_to_py_value(ty)
+            if ty.is_leaf:
+                return to_py_value(ty.at(0))
+            return tuple(to_py_value(ty.at(i)) for i in range(ty.rank))
+
+        return to_py_value(self.type)
+
 
 @ir.register_value_caster(LayoutType.static_typeid, replace=True)
 class Layout(BuiltinDslType):

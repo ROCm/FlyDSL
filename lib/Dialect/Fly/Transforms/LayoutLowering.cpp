@@ -2140,6 +2140,20 @@ public:
     if (srcRank != dstRank)
       return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
 
+    if (pred && predLayoutAttr.rank() == srcRank - 1) {
+      LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);
+      LayoutAttr unitAttr = LayoutAttr::get(ctx, IntTupleAttr::getLeafStatic(ctx, 1),
+                                            IntTupleAttr::getLeafStatic(ctx, 0));
+      Value unitLayout = builder.materializeConstantLayout(unitAttr).getValue();
+      Value predLayoutVal = GetLayoutOp::create(rewriter, loc, pred);
+      Value newPredLayout =
+          PrependOp::create(rewriter, loc, predLayoutVal, unitLayout, IntegerAttr());
+      Value predIter = GetIterOp::create(rewriter, loc, pred);
+      pred = MakeViewOp::create(rewriter, loc, predIter, newPredLayout);
+      predMemRefTy = cast<fly::MemRefType>(pred.getType());
+      predLayoutAttr = getLayoutAttr(predMemRefTy.getLayout());
+    }
+
     if (srcRank == 1) {
       if (srcLayoutAttr.getShape().isLeaf()) {
         Value srcDecomposition = DecompositionOp::create(rewriter, loc, src);
