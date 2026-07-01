@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-01T21:51:42Z",
+ "updated": "2026-07-01T22:32:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,20 +10,20 @@
    "branch": "jiacao/conv3d-implicit-8wave-fp8",
    "event": "pull_request",
    "title": "conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28547092641",
    "created_at": "2026-07-01T20:53:38Z",
-   "updated_at": "2026-07-01T21:08:15Z",
+   "updated_at": "2026-07-01T22:30:48Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T20:55:43Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T22:30:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28547092641/job/84635311081"
     },
     {
@@ -53,20 +53,20 @@
    "branch": "jiacao/conv2d-implicit-mfma",
    "event": "pull_request",
    "title": "conv2d: 8-wave double-buffered implicit-GEMM BF16 kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546969199",
    "created_at": "2026-07-01T20:51:24Z",
-   "updated_at": "2026-07-01T20:54:28Z",
+   "updated_at": "2026-07-01T22:31:04Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T20:53:28Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T22:31:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546969199/job/84634860294"
     },
     {
@@ -1744,30 +1744,21 @@
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
    "title": "[Feat]: Add dispatch & combine tuning configuration",
-   "status": "completed",
-   "conclusion": "cancelled",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635",
    "created_at": "2026-07-01T02:51:55Z",
-   "updated_at": "2026-07-01T09:30:12Z",
+   "updated_at": "2026-07-01T22:25:22Z",
    "actor": "yanboshao",
    "jobs": [
     {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T02:53:53Z",
-     "completed_at": "2026-07-01T03:58:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84445020190"
-    },
-    {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T02:53:44Z",
-     "completed_at": "2026-07-01T08:54:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84445020202"
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-01T22:25:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84650275595"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -1776,25 +1767,16 @@
      "conclusion": "success",
      "started_at": "2026-07-01T02:53:52Z",
      "completed_at": "2026-07-01T03:38:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84445020211"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84650295177"
     },
     {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T08:58:09Z",
-     "completed_at": "2026-07-01T09:28:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84493331104"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
+     "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
      "status": "completed",
      "conclusion": "success",
-     "started_at": "2026-07-01T08:57:45Z",
-     "completed_at": "2026-07-01T09:30:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84493331144"
+     "started_at": "2026-07-01T02:53:53Z",
+     "completed_at": "2026-07-01T03:58:36Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84650296517"
     }
    ]
   },
