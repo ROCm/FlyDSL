@@ -1526,13 +1526,22 @@ def build_flash_attn_func_module_primary(
         },
     }
 
+    # Attach hints to the jit function itself so they are part of the disk cache key
+    # (jit_function: cache key includes self.compile_hints) and are auto-pushed into the
+    # compilation context during tracing/codegen. This is what makes fast_fp_math=True/False
+    # produce distinct cache entries instead of colliding.
+    launch_flash_attn_generic.compile_hints = {
+        **launch_flash_attn_generic.compile_hints,
+        **_fmha_compile_hints,
+    }
+
     def _launch(*args, **kwargs):
-        with CompilationContext.compile_hints(_fmha_compile_hints):
-            return launch_flash_attn_generic(*args, **kwargs)
+        return launch_flash_attn_generic(*args, **kwargs)
 
     def _compile(Q, K, V, O, batch_size, seq_len, stream=None):  # noqa: E741
-        with CompilationContext.compile_hints(_fmha_compile_hints):
-            return flyc.compile(launch_flash_attn_generic, Q, K, V, O, batch_size, seq_len, fx.Stream(stream))
+        return flyc.compile[_fmha_compile_hints](
+            launch_flash_attn_generic, Q, K, V, O, batch_size, seq_len, fx.Stream(stream)
+        )
 
     _launch.compile = _compile
 
