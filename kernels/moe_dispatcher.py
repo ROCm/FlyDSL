@@ -294,12 +294,15 @@ def compile_gemm2_a4w4_port(
         arg_sweights: fx.Int64,
         i32_M: fx.Int32,
         i32_max_m_blocks: fx.Int32,
+        i32_grid_blocks: fx.Int32,
         i32_inter: fx.Int32,
         arg_out: fx.Int64,
         arg_out_scale: fx.Int64,
         stream: fx.Stream,
     ):
-        grid_x = arith.index_cast(T.index, i32_max_m_blocks) * fx.Index(num_n_blocks)
+        # i32_max_m_blocks sizes the A/scale buffer resources (kernel body); i32_grid_blocks bounds
+        # the launch to the actual padded sorted-token m-blocks (avoids empty blocks at small tokens).
+        grid_x = arith.index_cast(T.index, i32_grid_blocks) * fx.Index(num_n_blocks)
         gemm2_kernel(
             arg_aq,
             arg_ascale,
@@ -385,13 +388,24 @@ def mxfp4_moe_gemm1(
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
+    n_sorted_padded=None,
     stream=None,
 ):
-    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller."""
+    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller.
+
+    ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
+    moe_sorting sync). When given, the launch grid is bounded to the real work
+    ``(n_sorted_padded // BM) * num_n_blocks`` instead of the worst-case E-based bound, avoiding
+    empty blocks at small token counts. Falls back to the worst-case ``gemm1_grid`` bound if None.
+    """
     import torch
 
     launch = get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype)
-    grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
+    if n_sorted_padded is None:
+        grid = gemm1_grid(n_tokens, BM, NE=NE, TOPK=topk, INTER=D_INTER)
+    else:
+        num_n_blocks = (2 * D_INTER) // 256
+        grid = (n_sorted_padded // BM) * num_n_blocks
     run_compiled(
         launch,
         a_quant.data_ptr(),
@@ -433,9 +447,16 @@ def mxfp4_moe_gemm2(
     use_nt=False,
     a_dtype="fp4",
     D_INTER_REAL=None,
+    n_sorted_padded=None,
     stream=None,
 ):
-    """Stage-2 down-proj gemm (atomic bf16 epilog): weighted atomic.fadd into pre-zeroed out (opus-sort only)."""
+    """Stage-2 down-proj gemm (atomic bf16 epilog): weighted atomic.fadd into pre-zeroed out (opus-sort only).
+
+    ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
+    moe_sorting sync). When given, the launch grid is bounded to ``(n_sorted_padded // BM) *
+    num_n_blocks`` (real work) while ``max_m_blocks`` (from ``max_sorted``) still sizes the kernel's
+    A/scale buffer resources. Falls back to the full ``max_sorted`` grid if None.
+    """
     import torch
 
     if D_INTER_REAL is not None and D_INTER_REAL != D_INTER:
@@ -444,6 +465,7 @@ def mxfp4_moe_gemm2(
     if D_INTER > INTER_MAX_DEFAULT:
         raise AssertionError(f"D_INTER ({D_INTER}) exceeds compile cap INTER_MAX ({INTER_MAX_DEFAULT})")
     max_m_blocks = (max_sorted + BM - 1) // BM
+    grid_blocks = max_m_blocks if n_sorted_padded is None else (n_sorted_padded // BM)
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
     run_compiled(
         launch,
@@ -457,6 +479,7 @@ def mxfp4_moe_gemm2(
         sorted_weights.data_ptr(),
         M_logical,
         max_m_blocks,
+        grid_blocks,
         D_INTER,
         out.data_ptr(),
         out_scale.data_ptr(),

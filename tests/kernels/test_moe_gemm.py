@@ -2191,6 +2191,7 @@ def run_mxfp4_moe_2stage(
         interleave=interleave,
         a_dtype=("fp8" if is_f8 else "fp4"),
         out_dtype=out_dtype,
+        n_sorted_padded=n,
     )
     mxfp4_moe_gemm1(**_g1_kwargs)
     torch.cuda.synchronize()
@@ -2216,6 +2217,7 @@ def run_mxfp4_moe_2stage(
         BM=BM,
         use_nt=False,
         a_dtype=("fp8" if is_f8 else "fp4"),
+        n_sorted_padded=n,
     )
     mxfp4_moe_gemm2(**_g2_kwargs)
     torch.cuda.synchronize()
