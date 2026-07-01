@@ -1,4 +1,13 @@
 # FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL)
+
+<div align="center" id="badges">
+
+[![CI](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml)
+[![Benchmark](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl.yaml)
+[![Dashboard](https://img.shields.io/badge/Performance-Dashboard-blue)](https://rocm.github.io/FlyDSL/ci-dashboard/)
+
+</div>
+
 > A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling. 
 
 FlyDSL is the **Python front‑end** of the project: a *Flexible Layout Python DSL* for expressing
@@ -383,7 +392,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Quantization** | `test_quant.py` | Quantization utilities |
 
 **Verified Platforms**:
-*   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), AMD MI450 (gfx1250), Radeon AI PRO R9700 (gfx1201)
+*   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), gfx1250, Radeon AI PRO R9700 (gfx1201)
 *   Linux / ROCm 6.x, 7.x
 
 ## 🙏 Acknowledgements

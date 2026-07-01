@@ -854,24 +854,24 @@ def run_pa_decode_ps_test(
         context_partition_size,
         query_length,
     )
-    flydsl_exp_sums = None
-    flydsl_max_logits = None
-    flydsl_temporary_output = None
-    if sliding_window > 0:
-        intermediate_shape = (
-            batch_size,
-            num_kv_heads,
-            max_context_partition_num,
-            query_length * (num_query_heads // num_kv_heads),
-        )
-        flydsl_exp_sums = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
-        flydsl_max_logits = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
-        flydsl_temporary_output = torch.empty(
-            *intermediate_shape,
-            head_size,
-            dtype=reference_output.dtype,
-            device=device,
-        )
+    # Preallocate the FlyDSL intermediate buffers (partial exp-sums / max-logits /
+    # output) unconditionally so CUDA-graph capture works for every path, not just
+    # the sliding-window one (the small-block / metadata launchers reject in-kernel
+    # allocation under graph capture).
+    intermediate_shape = (
+        batch_size,
+        num_kv_heads,
+        max_context_partition_num,
+        query_length * (num_query_heads // num_kv_heads),
+    )
+    flydsl_exp_sums = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
+    flydsl_max_logits = torch.empty(intermediate_shape, dtype=torch.float32, device=device)
+    flydsl_temporary_output = torch.empty(
+        *intermediate_shape,
+        head_size,
+        dtype=reference_output.dtype,
+        device=device,
+    )
 
     def flydsl_ps_call() -> None:
         run_flydsl_ps(

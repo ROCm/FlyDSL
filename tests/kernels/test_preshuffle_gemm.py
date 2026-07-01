@@ -148,8 +148,8 @@ def test_mfma_a8_flyc_preshuffle(
         elem_bytes = 1
 
     device = torch.device("cuda")
-    a_fp32 = torch.rand(M, K, device=device, dtype=torch.float32)
-    b_fp32_t = torch.rand(N, K, device=device, dtype=torch.float32)
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32_t = torch.randn(N, K, device=device, dtype=torch.float32)
 
     is_int8 = in_dtype == "int8"
 
