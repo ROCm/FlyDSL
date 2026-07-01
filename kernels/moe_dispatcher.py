@@ -34,6 +34,7 @@ __all__ = [
     "mxfp4_moe_gemm1",
     "mxfp4_moe_gemm2",
     "select_pipe_config",
+    "gemm1_use_nt",
 ]
 
 
@@ -263,6 +264,31 @@ def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=
     else:
         bn, k_wave = 256, 1
     return bm, epilog, bm_stage1, persist, bn, k_wave
+
+
+def gemm1_use_nt(experts, topk, tokens, bm_stage1):
+    """Reuse-aware gemm1 B-weight cache policy: True -> non-temporal (stream), False -> cached.
+
+    gemm1 is HBM-bound on the fp4 w1 weights. When there is >1 stage1 m-block per active
+    expert the weights are re-read across those blocks, so caching them hot in L2 is the win
+    (the shipped default, ``use_nt=False``). When there is <=1 m-block per expert (small/mid
+    M) each expert's weights are single-use, so caching only allocates L2 lines that are never
+    re-hit (measured L2 hit ~3% either way) while paying the non-streaming cost; streaming
+    (non-temporal) is then faster at identical HBM bytes.
+
+    Reuse metric = m-blocks per active expert = ceil((tokens*topk)/active) / bm_stage1, where
+    active = min(tokens*topk, experts). nt when that is <=1. Evidence (GPT-OSS 3072/3072,
+    E128, k4, gfx950): M=128 gemm1 208->181us, M=1024 217->192us (nt wins, <=1 block/expert);
+    M=2048 236->249us, M=4096 309->385us (cached wins, reuse). Byte-identical: only flips the
+    B-load coherence flag, HBM read bytes unchanged (605 vs 617 MB EA0 proxy).
+    """
+    slots = tokens * topk
+    active = min(slots, experts)
+    if active <= 0:
+        return False
+    rows_per_expert = (slots + active - 1) // active
+    m_blocks_per_expert = (rows_per_expert + bm_stage1 - 1) // bm_stage1
+    return m_blocks_per_expert <= 1
 
 
 # ---- gemm1 (up/gate-proj) compile ----

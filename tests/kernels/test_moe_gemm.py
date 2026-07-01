@@ -2263,6 +2263,20 @@ def run_mxfp4_moe_2stage(
     # the fixed grid size.
     is_f8 = in_dtype == "a8w4"
 
+    # gemm1 B-weight cache policy (reuse-aware). Default cached (byte-identical). Under
+    # MXFP4_DISPATCH the dispatcher streams (non-temporal) when there is <=1 stage1 m-block
+    # per active expert (single-use weights, no L2 reuse -> caching is pure overhead); it caches
+    # when reuse exists (M large). MXFP4_G1_NT env (0/1) forces the policy for measurement.
+    _g1_nt_env = os.environ.get("MXFP4_G1_NT")
+    if _g1_nt_env is not None:
+        g1_use_nt = _g1_nt_env == "1"
+    elif os.environ.get("MXFP4_DISPATCH") == "1":
+        from kernels.moe_dispatcher import gemm1_use_nt
+
+        g1_use_nt = gemm1_use_nt(experts, topk, tokens, BM_S1)
+    else:
+        g1_use_nt = False
+
     # weights (fp4) + CK a16w4 preshuffle
     w1q, w1s = _per_1x32_fp4_quant(w1_fp32)
     w2q, w2s = _per_1x32_fp4_quant(w2_fp32)
@@ -2323,10 +2337,15 @@ def run_mxfp4_moe_2stage(
         D_INTER=INTER,
         topk=TOPK,
         BM=BM_S1,
-        # gemm1 B is CACHED (nt off): stage1 has heavy cross-m-block B-reuse (many
-        # m-blocks per expert at large tokens), so caching the weights in L2 is a
-        # large win on compute-bound shapes (matches base's b_nt=0 for stage1).
-        use_nt=False,
+        # gemm1 B cache policy is reuse-aware (gemm1_use_nt): CACHED when stage1 has
+        # cross-m-block B-reuse (many m-blocks per expert at large tokens) so the weights
+        # stay hot in L2; STREAMING (non-temporal) when there is <=1 m-block per expert
+        # (small/mid M, e.g. GPT-OSS M<=1024) so single-use weights are not needlessly
+        # cache-allocated. Measured: GPT-OSS M=128 gemm1 208->181us (-13%) at identical
+        # HBM bytes; crossover at m-blocks/expert==1 (nt regresses at M>=2048). MXFP4_G1_NT
+        # env forces the policy for measurement. Default stays cached (byte-identical) when
+        # dispatch is off or the reuse heuristic says cache.
+        use_nt=g1_use_nt,
         interleave=interleave,
         a_dtype=("fp8" if is_f8 else "fp4"),
         out_dtype=out_dtype,
