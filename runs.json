@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-01T09:11:43Z",
+ "updated": "2026-07-01T09:26:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,9 +20,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-01T09:06:16Z",
+     "started_at": "2026-07-01T09:14:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28506246857/job/84495583213"
     },
@@ -171,10 +171,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T08:04:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:16:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502006554/job/84481574654"
     }
    ]
@@ -211,10 +211,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T07:54:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:13:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28501035207/job/84478408035"
     },
     {
@@ -229,10 +229,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T08:04:11Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:14:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28501035207/job/84478408046"
     }
    ]
@@ -254,19 +254,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T08:04:16Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:14:08Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28500895694/job/84477803185"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T07:54:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:13:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28500895694/job/84477803186"
     },
     {
@@ -297,19 +297,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T08:07:44Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:17:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28500742391/job/84477409336"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T07:47:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:13:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28500742391/job/84477409343"
     },
     {
@@ -635,20 +635,20 @@
    "branch": "cleanup/gfx1250-doc-references",
    "event": "pull_request",
    "title": "[Docs] Refer to gfx1250 by arch name only in docs and comments",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498229605",
    "created_at": "2026-07-01T06:29:09Z",
-   "updated_at": "2026-07-01T09:10:26Z",
+   "updated_at": "2026-07-01T09:24:44Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-01T09:10:25Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T09:24:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28498229605/job/84469218386"
     },
     {
