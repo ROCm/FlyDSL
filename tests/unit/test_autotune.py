@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-from flydsl.autotune import Autotuner, Config, _normalize_strides, autotune
+from flydsl.autotune import Autotuner, Config, _normalize_strides, autotune, autotune_builder
 
 
 @pytest.fixture(autouse=True)
@@ -359,6 +359,338 @@ def test_autotune_decorator_wraps_into_autotuner():
     assert tuned.restore_value == ["a"]
     assert tuned.reset_to_zero == ["out"]
     assert [c.kwargs["BLOCK"] for c in tuned.configs] == [128]
+
+
+# ── builder mode + two-track default ─────────────────────────────────────
+def _bench_run_all(call, warmup, rep):
+    # deterministic fake do_bench: run once, return a constant time
+    call()
+    return 1.0
+
+
+def test_builder_mode_rebuilds_per_config():
+    """build_fn is called once per config; the returned fn is what runs."""
+    built = []
+
+    def build_fn(config, a, out, **kw):
+        block = config.kwargs["BLOCK"]
+        built.append(block)
+
+        def launch(a, out, **kw):
+            out._data[0] = float(block)  # record which build ran
+
+        return launch
+
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn,
+        do_bench_fn=_bench_run_all,
+    )
+    a = FakeTensor((8,))
+    out = FakeTensor((1,))
+    t(a, out)
+    # both configs built + benchmarked exactly once
+    assert sorted(built) == [64, 128]
+    # arg_names inferred from build_fn with leading 'config' stripped
+    assert t.arg_names[:2] == ["a", "out"]
+
+
+def test_builder_mode_caches_built_modules():
+    """Re-running the same (key, config) does not rebuild."""
+    n_builds = {"n": 0}
+
+    def build_fn(config, a, out, **kw):
+        n_builds["n"] += 1
+        return lambda a, out, **kw: None
+
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn,
+        do_bench_fn=_bench_run_all,
+    )
+    a, out = FakeTensor((8,)), FakeTensor((1,))
+    t(a, out)  # tune: builds once
+    t(a, out)  # cached best: reuses build
+    assert n_builds["n"] == 1
+
+
+def test_default_skips_search(monkeypatch):
+    """With a default heuristic and FLYDSL_AUTOTUNE off, no benchmarking runs."""
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    benched = {"n": 0}
+
+    def bench(call, warmup, rep):
+        benched["n"] += 1
+        call()
+        return 1.0
+
+    ran = {"block": None}
+
+    def build_fn(config, a, out, **kw):
+        return lambda a, out, **kw: ran.__setitem__("block", config.kwargs["BLOCK"])
+
+    def default(a, out, **kw):
+        return Config(BLOCK=999)
+
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn,
+        default=default,
+        do_bench_fn=bench,
+    )
+    t(FakeTensor((8,)), FakeTensor((1,)))
+    assert benched["n"] == 0  # no search
+    assert ran["block"] == 999  # heuristic default was used
+
+
+def test_default_forced_search_with_env(monkeypatch):
+    """FLYDSL_AUTOTUNE=1 forces the full search even when a default exists."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    benched = {"n": 0}
+
+    def bench(call, warmup, rep):
+        benched["n"] += 1
+        call()
+        return 1.0
+
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64), Config(BLOCK=128)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn_noop,
+        default=lambda a, out, **kw: Config(BLOCK=64),
+        do_bench_fn=bench,
+    )
+    t(FakeTensor((8,)), FakeTensor((1,)))
+    assert benched["n"] == 2  # both configs searched
+
+
+def build_fn_noop(config, a, out, **kw):
+    return lambda a, out, **kw: None
+
+
+def test_filter_call_kwargs_drops_build_only_kwargs():
+    """Builder-only kwargs (e.g. dtype_str) must not reach the launch fn."""
+
+    def build_fn(config, a, out, dtype_str="bf16", **kw):
+        # launch fn only accepts a, out — not dtype_str
+        def launch(a, out):
+            pass
+
+        return launch
+
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn,
+        default=lambda a, out, **kw: Config(BLOCK=64),
+        do_bench_fn=_bench_run_all,
+    )
+    # dtype_str would raise TypeError if not filtered out before the launch call
+    t(FakeTensor((8,)), FakeTensor((1,)), dtype_str="f16")
+
+
+def test_tuning_enabled_env(monkeypatch):
+    from flydsl.autotune import _tuning_enabled
+
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    assert _tuning_enabled() is False
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
+    assert _tuning_enabled() is False
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    assert _tuning_enabled() is True
+
+
+# ── autotune_builder (one-call adoption) ─────────────────────────────────
+def _make_builder(**over):
+    """A fake-kernel autotune_builder: build() records which config ran into the
+    output tensor's [0] slot; specialize keys on N + dtype_str."""
+    built = over.pop("_built_log", [])
+
+    def build(N, dtype_str, BLOCK=0):
+        built.append((N, dtype_str, BLOCK))
+
+        def launch(a, out, dtype_str="bf16", stream=None):
+            out._data[0] = float(BLOCK)
+
+        return launch
+
+    def specialize(a, out, dtype_str="bf16", stream=None):
+        return {"N": a.shape[-1], "dtype_str": dtype_str}
+
+    kw = dict(
+        name="fakeop",
+        build=build,
+        specialize=specialize,
+        configs=lambda N, dtype_str: [Config(BLOCK=64), Config(BLOCK=128)],
+        default=lambda N, dtype_str: Config(BLOCK=7),
+        structural=("BLOCK",),
+        warmup=1,
+        rep=1,
+    )
+    kw.update(over)
+    t = autotune_builder(**kw)
+    return t, built
+
+
+def test_builder_default_runs_without_search(monkeypatch):
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    t, built = _make_builder()
+    a, out = FakeTensor((16, 512)), FakeTensor((1,))
+    t(a, out, dtype_str="bf16")
+    assert out._data[0] == 7.0  # heuristic default's BLOCK
+    assert built == [(512, "bf16", 7)]  # built once, from the default
+
+
+def test_builder_search_sweeps_space(monkeypatch, tmp_path):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    t, built = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    a, out = FakeTensor((16, 512)), FakeTensor((1,))
+    t(a, out, dtype_str="bf16")
+    swept = sorted(b for _, _, b in built)
+    assert swept == [64, 128]  # both configs from get_all_configs were built
+
+
+def test_builder_scalar_enters_key():
+    """dtype_str is build-only but must change the cache key (bug: scalars that
+    change codegen without changing shape were dropped from the key)."""
+    t, _ = _make_builder()
+    a = FakeTensor((16, 512))
+    k_bf16 = t.tuner._make_key((), {"a": a, "out": FakeTensor((1,)), "dtype_str": "bf16"})
+    k_f16 = t.tuner._make_key((), {"a": a, "out": FakeTensor((1,)), "dtype_str": "f16"})
+    assert k_bf16 != k_f16
+
+
+def test_builder_requires_name():
+    """Builder mode must carry a distinct cache name (else tuners collide on
+    unknown.json)."""
+    t, _ = _make_builder(name="softmax")
+    assert t.tuner.name == "softmax"
+    assert t.tuner._cache_file.name == "softmax.json"
+    # empty / missing name must be rejected (else tuners collide on unknown.json)
+    with pytest.raises(ValueError):
+        _make_builder(name="")
+
+
+def test_builder_positional_scalar_rejected(monkeypatch):
+    """A build-only scalar (dtype_str) passed positionally is rejected up front
+    (codex#1: silently binding it to the wrong launch slot is worse)."""
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+
+    def build(N, dtype_str, BLOCK=0):
+        return lambda a, out, stream=None: None
+
+    def specialize(a, out, dtype_str="bf16", stream=None):
+        return {"N": a.shape[-1], "dtype_str": dtype_str}
+
+    t = autotune_builder(
+        name="op",
+        build=build,
+        specialize=specialize,
+        configs=lambda N, dtype_str: [Config(BLOCK=1)],
+        default=lambda N, dtype_str: Config(BLOCK=1),
+        structural=("BLOCK",),
+        warmup=1,
+        rep=1,
+    )
+    # dtype_str keyword: fine.
+    t(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="f16")
+    # dtype_str positional (5th arg): rejected with a clear error.
+    with pytest.raises(TypeError, match="by keyword"):
+        t(FakeTensor((16, 512)), FakeTensor((1,)), "f16")
+
+
+def test_builder_build_cache_ignores_compiler_hints(monkeypatch, tmp_path):
+    """configs differing only in waves_per_eu must build the module once, not
+    once per hint (C1: build cache was over-keyed on repr(config))."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    n_build = {"n": 0}
+
+    def build(N, dtype_str, BLOCK=0):
+        n_build["n"] += 1
+        return lambda a, out, stream=None: None
+
+    def specialize(a, out, dtype_str="bf16", stream=None):
+        return {"N": a.shape[-1], "dtype_str": dtype_str}
+
+    # 3 configs, same BLOCK, differing only in waves_per_eu.
+    space = [Config(BLOCK=64, waves_per_eu=w) for w in (None, 1, 2)]
+    t = autotune_builder(
+        name="op",
+        build=build,
+        specialize=specialize,
+        configs=lambda N, dtype_str: space,
+        structural=("BLOCK",),
+        warmup=1,
+        rep=1,
+        do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1],
+    )
+    t(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="bf16")
+    assert n_build["n"] == 1, f"rebuilt {n_build['n']}x for hint-only variants (should be 1)"
+
+
+def test_run_with_hints_sets_and_restores_compile_hints():
+    """_run_with_hints must set fn.compile_hints during the call (so the hint
+    enters the JIT cache key) and restore it after (no cross-config leak)."""
+
+    class FakeJit:
+        def __init__(self):
+            self.compile_hints = {}
+            self.seen = None
+
+        def __call__(self, *a, **k):
+            self.seen = dict(self.compile_hints)
+
+    # No compiler bindings needed: with hints present, _run_with_hints imports
+    # CompilationContext, so skip when the compiled bindings are absent.
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    fn = FakeJit()
+    t = _make_tuner(fn=lambda a, out, **kw: None, configs=[Config(BLOCK=1)])
+    t._run_with_hints(fn, Config(BLOCK=1, waves_per_eu=2).compiler_opts(), (), {})
+    assert fn.seen == {"waves_per_eu": 2}  # in the cache-key dict during compile
+    assert fn.compile_hints == {}  # restored afterward
+
+
+def test_cache_dir_change_does_not_serve_stale_config(tmp_path, monkeypatch):
+    """Switching FLYDSL_AUTOTUNE_CACHE_DIR must drop the in-memory config tuned
+    under the old dir. The fake tune picks BLOCK=64; the default is BLOCK=7.
+    After switching to an empty dir with tuning OFF, the call must fall to the
+    default (7) — proving the stale dir-A best (64) was cleared, not served."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "A"))
+
+    # 1. Force a tune into dir A -> in-memory best BLOCK=64.
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    t, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    out = FakeTensor((1,))
+    t(FakeTensor((16, 512)), out, dtype_str="bf16")
+    assert out._data[0] == 64.0  # tuned config in memory
+
+    # 2. Switch to empty dir B, tuning OFF: stale in-memory best must be dropped,
+    #    so this serves the heuristic default (7), not dir-A's 64.
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "B"))
+    out2 = FakeTensor((1,))
+    t(FakeTensor((16, 512)), out2, dtype_str="bf16")
+    assert out2._data[0] == 7.0, "served a stale in-memory config from the old cache dir"
 
 
 if __name__ == "__main__":

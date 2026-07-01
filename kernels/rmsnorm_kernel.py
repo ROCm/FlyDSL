@@ -28,6 +28,11 @@ BLOCK_THREADS = 256
 WARP_SIZE = get_warp_size()
 VEC_WIDTH = 8
 
+# N at or below this routes to the small-N kernel, whose block geometry is
+# derived analytically and ignores BLOCK_THREADS. Single source of truth so the
+# autotune config space (rmsnorm_config) stays in sync.
+SMALL_N_THRESHOLD = 2048
+
 
 def _make_reduction_storage(red_slots: int):
     @fx.struct
@@ -110,20 +115,27 @@ def _quant_dtype_max(dtype_str: str) -> float:
     raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
 
 
-def build_rmsnorm_module(N: int, dtype_str: str):
-    if N <= 2048:
+def build_rmsnorm_module(N: int, dtype_str: str, BLOCK_THREADS: int = BLOCK_THREADS):
+    if N <= SMALL_N_THRESHOLD:
         return _build_rmsnorm_large_m_small_n_module(N, dtype_str)
 
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
+    # BLOCK_THREADS is the block size (threads per row-block). It is a build-time
+    # structural knob: it sizes the shared reduction storage, the vectorized
+    # tile stride, and the launch block dim, so it is baked into the module
+    # rather than passed as a jit Constexpr. Autotune (builder mode) rebuilds
+    # this module per candidate BLOCK_THREADS. `known_block_size` is required
+    # on AMDGPU once the block exceeds 256.
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    _kernel_kwargs = {} if BLOCK_THREADS <= 256 else {"known_block_size": [BLOCK_THREADS, 1, 1]}
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
-    @flyc.kernel
+    @flyc.kernel(**_kernel_kwargs)
     def rmsnorm_kernel(
         Input: fx.Tensor,
         Gamma: fx.Tensor,
