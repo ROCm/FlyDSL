@@ -114,6 +114,26 @@ def test_maxnumf_vector():
 
 
 @pytest.mark.l0_backend_agnostic
+def test_maxnumf_vector_preserves_shape():
+    """A Vector operand's logical shape/dtype must survive (not collapse to the flat shape)."""
+    from flydsl.expr.typing import Vector
+
+    def build(x):
+        vtype = ir.VectorType.get([4], ir.F32Type.get())
+        splat = _raw_arith.ConstantOp(
+            vtype,
+            ir.DenseElementsAttr.get_splat(vtype, ir.FloatAttr.get(ir.F32Type.get(), 1.0)),
+        ).result
+        v = Vector(splat, (2, 2), Float32)
+        y = fly_arith.maxnumf(v, v)
+        assert isinstance(y, Vector), f"expected Vector, got {type(y).__name__}"
+        assert tuple(y.shape) == (2, 2), f"expected shape (2, 2), got {tuple(y.shape)}"
+        assert y.dtype is Float32, f"expected Float32 dtype, got {y.dtype}"
+
+    _build_module(build)
+
+
+@pytest.mark.l0_backend_agnostic
 def test_maxnumf_raw_value_passthrough():
     """Raw ir.Value input should NOT be wrapped in a Numeric."""
 

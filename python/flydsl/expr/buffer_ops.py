@@ -470,8 +470,8 @@ def buffer_load(
         is_scalar: Emit a uniform/SGPR scalar load (llvm.amdgcn.s.buffer.load) instead of the
                       vector buffer load. Use only for wave-uniform addresses to route through the
                       SMEM cache and land the result directly in SGPRs. Restricted to vec_width 1 or 4;
-                      the result element type is always i32 (raw dwords), and dtype/mask/soffset_bytes
-                      are ignored.
+                      dtype is forced to i32 (the result is raw i32 dwords). mask and soffset_bytes
+                      are not supported in this mode and raise ValueError if provided.
 
     Returns:
         Loaded data (scalar or vector depending on vec_width)
@@ -488,6 +488,8 @@ def buffer_load(
     if is_scalar:
         if vec_width not in (1, 4):
             raise ValueError(f"buffer_load(is_scalar=True): unsupported vec_width={vec_width}")
+        if mask is not None or soffset_bytes is not None:
+            raise ValueError("buffer_load(is_scalar=True) does not support mask or soffset_bytes")
         dtype = T.i32()
     # Default dtype to f32
     elif dtype is None:

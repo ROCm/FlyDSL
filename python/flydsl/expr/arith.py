@@ -97,7 +97,7 @@ def maxnumf(a, b, **kwargs):
 
     result = _mlir_arith.maxnumf(_to_raw(a), _to_raw(b), **kwargs)
     if isinstance(a, Vector):
-        return Vector(result)
+        return Vector(result, a.shape, a.dtype)
     if isinstance(a, Numeric):
         return Numeric.from_ir_type(result.type)(result)
     return result
