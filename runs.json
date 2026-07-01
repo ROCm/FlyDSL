@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-07-01T20:32:12Z",
+ "updated": "2026-07-01T20:41:33Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28542880366,
+   "run_id": 28546275177,
    "pr": 794,
-   "commit": "62ee8c19a020b4b85b12e3df97b74241f61aca98",
+   "commit": "dd08dfa09f0b6aae18ac9486505273f4d542e1d3",
    "branch": "jiacao/conv3d-implicit-8wave-fp8",
    "event": "pull_request",
    "title": "conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel",
    "status": "in_progress",
    "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28546275177",
+   "created_at": "2026-07-01T20:38:52Z",
+   "updated_at": "2026-07-01T20:39:36Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 28542880366,
+   "pr": null,
+   "commit": "62ee8c19a020b4b85b12e3df97b74241f61aca98",
+   "branch": "jiacao/conv3d-implicit-8wave-fp8",
+   "event": "pull_request",
+   "title": "conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28542880366",
    "created_at": "2026-07-01T19:36:22Z",
-   "updated_at": "2026-07-01T19:39:04Z",
+   "updated_at": "2026-07-01T20:39:23Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
@@ -38,10 +53,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-01T19:39:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-01T20:39:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28542880366/job/84621175562"
     }
    ]
@@ -1799,21 +1814,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28456926502",
    "created_at": "2026-06-30T15:42:16Z",
    "updated_at": "2026-06-30T15:49:07Z",
-   "actor": "sjfeng1999",
-   "jobs": []
-  },
-  {
-   "run_id": 28456627907,
-   "pr": null,
-   "commit": "812dd75cf8311679235177f7ed37d5cc57f7f974",
-   "branch": "pr/enh-example",
-   "event": "pull_request",
-   "title": "Add boundary check on example01, make it target-neutral",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28456627907",
-   "created_at": "2026-06-30T15:37:36Z",
-   "updated_at": "2026-06-30T15:38:58Z",
    "actor": "sjfeng1999",
    "jobs": []
   }
