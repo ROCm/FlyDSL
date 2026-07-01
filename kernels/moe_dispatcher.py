@@ -185,13 +185,19 @@ def compile_gemm2_a4w4_port(
     INTER_MAX=INTER_MAX_DEFAULT,
     D_INTER_REAL=None,
     a_dtype="fp4",
+    topk=1,
 ):
-    """Compile the gemm2 a4w4 down-proj; only (BM=32, atomic) supported. inter_dim is a runtime arg
-    (a multiple of BK=256, <= INTER_MAX); INTER_MAX caps the compile-time B-view / LDS bounds."""
-    if (BM, epilog) != (32, "atomic"):
+    """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
+    atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
+    per (token,topk) slot; host reduces over topk), mirroring main's accumulate=False path.
+    inter_dim is a runtime arg (a multiple of BK=256, <= INTER_MAX); INTER_MAX caps the
+    compile-time B-view / LDS bounds. topk enters the reduce output-row index (compile-time)."""
+    if BM != 32 or epilog not in ("atomic", "reduce"):
         raise AssertionError(
-            f"mxfp4_moe_gemm2 supports only (BM=32, epilog='atomic'); " f"got (BM={BM}, epilog={epilog})"
+            f"mxfp4_moe_gemm2 supports only (BM=32, epilog in {{'atomic','reduce'}}); "
+            f"got (BM={BM}, epilog={epilog})"
         )
+    use_reduce = epilog == "reduce"
     if D_INTER_REAL is not None:
         raise AssertionError(f"mxfp4_moe_gemm2 does not support D_INTER_REAL padding (D_INTER_REAL={D_INTER_REAL})")
     if a_dtype not in ("fp4", "fp8"):
@@ -205,7 +211,9 @@ def compile_gemm2_a4w4_port(
     num_n_blocks = N_OUT // 256
 
     atag = "_a8" if is_f8 else ""
-    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_atomic{atag}_v2"
+    # atomic tag unchanged (byte-identical default); reduce is a distinct variant (topk folded in).
+    etag = "atomic" if not use_reduce else f"reduce_tk{topk}"
+    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -289,6 +297,8 @@ def compile_gemm2_a4w4_port(
                 INTER_MAX=INTER_MAX,
                 aStages=aStages,
                 a_dtype=a_dtype,
+                use_reduce=use_reduce,
+                topk=topk,
             )
 
     @flyc.jit
@@ -358,10 +368,12 @@ def get_g1(BM, use_nt, inline_quant, D_HIDDEN, interleave, a_dtype, out_dtype, a
     return launch
 
 
-def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype):
+def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk=1):
     # NE / inter_dim do not enter the compiled gemm2 kernel (inter_dim is a runtime arg); the only
-    # contraction-shape key is the compile-time cap INTER_MAX.
-    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype)
+    # contraction-shape key is the compile-time cap INTER_MAX. epilog + topk are compile-time
+    # (reduce folds topk into the output-row index); atomic ignores topk.
+    topk_key = topk if epilog == "reduce" else 1
+    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype, topk_key)
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
@@ -372,6 +384,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, D_INTER_REAL, a_dtype):
             INTER_MAX=INTER_MAX,
             D_INTER_REAL=D_INTER_REAL,
             a_dtype=a_dtype,
+            topk=topk_key,
         )
         G2_CACHE[key] = launch
     return launch
@@ -461,10 +474,14 @@ def mxfp4_moe_gemm2(
     use_nt=False,
     a_dtype="fp4",
     D_INTER_REAL=None,
+    epilog="atomic",
     n_sorted_padded=None,
     stream=None,
 ):
-    """Stage-2 down-proj gemm (atomic bf16 epilog): weighted atomic.fadd into pre-zeroed out (opus-sort only).
+    """Stage-2 down-proj gemm. epilog='atomic' (default): weighted atomic.fadd into pre-zeroed out
+    [tokens, H] (opus-sort only). epilog='reduce': non-atomic weighted store into
+    out[token_id*topk + slot] of a [tokens*topk, H] buffer (host reduces over topk, applying any
+    EP valid_mask). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
 
     ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
     moe_sorting sync). When given, the launch grid is bounded to ``(n_sorted_padded // BM) *
@@ -475,7 +492,7 @@ def mxfp4_moe_gemm2(
 
     if D_INTER_REAL is not None and D_INTER_REAL != D_INTER:
         raise AssertionError(f"D_INTER_REAL padding unsupported (D_INTER_REAL={D_INTER_REAL}, D_INTER={D_INTER})")
-    launch = get_g2(BM, use_nt, D_HIDDEN, "atomic", INTER_MAX_DEFAULT, None, a_dtype)
+    launch = get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX_DEFAULT, None, a_dtype, topk=topk)
     if D_INTER > INTER_MAX_DEFAULT:
         raise AssertionError(f"D_INTER ({D_INTER}) exceeds compile cap INTER_MAX ({INTER_MAX_DEFAULT})")
     max_m_blocks = (max_sorted + BM - 1) // BM

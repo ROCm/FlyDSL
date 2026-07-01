@@ -693,6 +693,8 @@ def gemm2_body_v2(
     INTER_MAX,
     aStages,
     a_dtype,
+    use_reduce=False,
+    topk=1,
 ):
     aStages = aStages
     # A dtype: fp4 (gemm1 fp4-out) or fp8 (mxfp8); only the A path differs.
@@ -863,6 +865,8 @@ def gemm2_body_v2(
         i32_M,
         BM,
         N_OUT,
+        use_reduce=use_reduce,
+        topk=topk,
     )
 
 
@@ -880,6 +884,9 @@ def atomic_bf16_epilog(
     i32_M,
     BM,
     N_OUT,
+    *,
+    use_reduce=False,
+    topk=1,
 ):
     kMChunks = BM // 16
     M_REPS = BM // 8  # BM32: 4, BM16: 2
@@ -918,12 +925,18 @@ def atomic_bf16_epilog(
 
     gpu.barrier()
 
-    # read back + weighted atomic add (token_id / weight prefetched above)
+    # read back + weighted store. atomic: fadd into out[token_id] (per-token accumulate).
+    # reduce: plain non-atomic store into out[token_id*topk + s] (unique per (token,topk) slot;
+    # host reduces over topk). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
     for mr in range_constexpr(M_REPS):
         row_in_block = fx.Int32(mr * 8) + m_lane
         token_id = packed[mr] & fx.Int32(0x00FFFFFF)
         if token_id < i32_M:
-            row_base_addr = token_id * N_OUT + n_block_idx * BN + col_start
+            if const_expr(use_reduce):
+                out_row = token_id * fx.Int32(topk) + (packed[mr] >> fx.Int32(24))
+            else:
+                out_row = token_id
+            row_base_addr = out_row * N_OUT + n_block_idx * BN + col_start
             for s in range_constexpr(4):
                 # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
                 idx0 = row_in_block * BN + col_start + s * 64
@@ -931,11 +944,14 @@ def atomic_bf16_epilog(
                 pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)
                 off = (row_base_addr + s * 64) * 2  # bf16 byte off
                 out_ptr = gep1(out_base, off)
-                llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.fadd,
-                    out_ptr,
-                    _raw(pk),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                )
+                if const_expr(use_reduce):
+                    llvm.StoreOp(_raw(pk), out_ptr, alignment=4, nontemporal=True)
+                else:
+                    llvm.AtomicRMWOp(
+                        llvm.AtomicBinOp.fadd,
+                        out_ptr,
+                        _raw(pk),
+                        llvm.AtomicOrdering.monotonic,
+                        syncscope="agent",
+                        alignment=4,
+                    )
