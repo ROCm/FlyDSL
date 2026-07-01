@@ -106,6 +106,7 @@ def test_mfma_a8_flyc_preshuffle(
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
     run_aiter_bench: bool = DEFAULT_RUN_AITER_BENCH,
     waves_per_eu: int = 0,
+    xcd_swizzle: int = 0,
 ):
     """Preshuffle GEMM using the layout-API v2 kernel (fp8/int8/fp16/bf16)."""
     if use_async_copy and get_rocm_arch() != "gfx950":
@@ -135,8 +136,9 @@ def test_mfma_a8_flyc_preshuffle(
         out_dtype=out_dtype,
         waves_per_eu=_wpe,
         use_async_copy=bool(use_async_copy),
+        xcd_swizzle=int(xcd_swizzle),
     )
-    print(f"✓ Kernel prepared (async_copy={use_async_copy}, waves_per_eu={_wpe})")
+    print(f"✓ Kernel prepared (async_copy={use_async_copy}, waves_per_eu={_wpe}, xcd_swizzle={int(xcd_swizzle)})")
 
     size_c = M * N
     size_a = M * K
@@ -458,6 +460,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_async_copy", action="store_true", default=False)
     parser.add_argument("--use_cshuffle_epilog", action="store_true", default=False)
     parser.add_argument("--waves_per_eu", type=int, default=0, choices=[0, 1, 2, 3, 4])
+    parser.add_argument("--xcd_swizzle", type=int, default=0, help="XCD L2-rasterization group size (0 = off).")
     parser.add_argument("--run_aiter_bench", action="store_true", default=DEFAULT_RUN_AITER_BENCH)
     parser.add_argument("--no_aiter_bench", action="store_false", dest="run_aiter_bench")
     parser.add_argument("--test_graph", "-tg", action="store_true", default=False)
@@ -485,6 +488,7 @@ if __name__ == "__main__":
                 bench_warmup=args.num_warmup,
                 run_aiter_bench=bool(args.run_aiter_bench),
                 waves_per_eu=int(args.waves_per_eu),
+                xcd_swizzle=int(args.xcd_swizzle),
             )
         else:
             test_mfma_w4_flyc_preshuffle(
