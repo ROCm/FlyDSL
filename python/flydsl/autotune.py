@@ -16,11 +16,7 @@ except ImportError:
 
 
 def _env_fingerprint() -> tuple:
-    """Cache-invalidating env vars, reusing the JIT's canonical list.
-
-    Returns a sorted ``((name, value), ...)`` tuple so two processes with the
-    same environment produce byte-for-byte identical keys.
-    """
+    """Sorted cache-invalidating env vars (reuses the JIT's canonical list)."""
     try:
         from .compiler.jit_function import _cache_invalidating_env_values
 
@@ -30,13 +26,8 @@ def _env_fingerprint() -> tuple:
 
 
 def _toolchain_fingerprint() -> str:
-    """Fingerprint of the FlyDSL compiler/runtime toolchain.
-
-    Reuses ``jit_function._flydsl_key()`` which already hashes all compiler
-    Python source, native libs, and ``flydsl.__version__``. Any change to the
-    codegen path invalidates stale tuned configs. Falls back to the package
-    version, then to an empty string, if the internal helper is unavailable.
-    """
+    """Hash of the compiler toolchain, so a codegen change invalidates old
+    configs. Reuses jit_function._flydsl_key(); falls back to the version."""
     try:
         from .compiler.jit_function import _flydsl_key
 
@@ -51,7 +42,7 @@ def _toolchain_fingerprint() -> str:
 
 
 def _device_fingerprint() -> str:
-    """Best-effort GPU arch/target string (e.g. 'gfx950'), '' if unavailable."""
+    """GPU arch string (e.g. 'gfx950'), or '' if unavailable."""
     try:
         from .runtime.device import get_rocm_arch
 
@@ -61,12 +52,8 @@ def _device_fingerprint() -> str:
 
 
 def _normalize_strides(t) -> tuple:
-    """Normalize a tensor's strides to {0, 1, other} buckets.
-
-    Exact stride numbers don't change the best config, but the *pattern*
-    (broadcast=0, contiguous=1, strided=other) does. Matches quack's
-    stride normalization so keys stay stable across value-equivalent layouts.
-    """
+    """Bucket strides to {0, 1, other}: the layout *pattern* (broadcast /
+    contiguous / strided) affects the best config, the exact numbers don't."""
     strides = getattr(t, "stride", None)
     if strides is None:
         return ()
@@ -192,12 +179,6 @@ class Autotuner:
         self._do_bench = do_bench_fn or do_bench
         self.cache: Dict[tuple, Config] = {}
 
-        # Toolchain + device fingerprints are process-constant; compute once and
-        # fold into every cache key so tuned configs don't leak across a
-        # compiler change or a different GPU arch.
-        self._toolchain_fp = _toolchain_fingerprint()
-        self._device_fp = _device_fingerprint()
-
         # Infer arg names from the underlying function
         if hasattr(fn, "func"):
             self.arg_names = list(inspect.signature(fn.func).parameters.keys())
@@ -215,15 +196,8 @@ class Autotuner:
         self._load_disk_cache()
 
     def _make_key(self, args, kwargs):
-        """Build cache key from key-arg values + all arg dtypes/strides,
-        specialized by GPU arch, toolchain fingerprint, and env.
-
-        The key axes mirror what Triton/quack fold in: shape/dtype (what to
-        specialize on), stride pattern (broadcast vs contiguous vs strided),
-        device arch, compiler-toolchain fingerprint, and cache-invalidating
-        env vars. A config tuned under one of these must not be reused under
-        another.
-        """
+        """Cache key over shape/dtype/stride + arch + toolchain + env. A config
+        tuned under any of these axes must not be reused under another."""
         sig_args = dict(zip(self.arg_names, args))
         sig_args.update(kwargs)
 
@@ -237,10 +211,8 @@ class Autotuner:
             else:
                 key_vals.append(v)
 
-        # Dtypes + normalized strides of tensor args for type/layout
-        # specialization. Sorted by arg name so semantically identical calls
-        # that pass tensor kwargs in a different order produce the same key
-        # (avoids duplicate tuning / cache files).
+        # Tensor dtypes + stride patterns, sorted so kwarg order doesn't change
+        # the key (else identical calls would tune twice).
         dtype_parts = []
         stride_parts = []
         for name, val in sig_args.items():
@@ -251,15 +223,20 @@ class Autotuner:
         key_vals.append(tuple(sorted(dtype_parts)))
         key_vals.append(tuple(sorted(stride_parts)))
 
-        # Environment / toolchain / device specialization
+        # Environment / toolchain / device specialization, all read live so a
+        # mid-process change (arch override, compiler env) can't reuse a config
+        # tuned under different conditions. _flydsl_key is lru_cached, so this is
+        # cheap. (_toolchain/_device fingerprints are functions, not frozen at
+        # construction — otherwise the device axis would go stale.)
         key_vals.append(("_env_", _env_fingerprint()))
-        key_vals.append(("_toolchain_", self._toolchain_fp))
-        key_vals.append(("_device_", self._device_fp))
+        key_vals.append(("_toolchain_", _toolchain_fingerprint()))
+        key_vals.append(("_device_", _device_fingerprint()))
 
         return tuple(str(v) for v in key_vals)
 
     def _reset_tensors(self, args, kwargs):
-        """Zero out tensors listed in reset_to_zero before benchmark."""
+        """Zero out reset_to_zero tensors before a run (each bench rep and the
+        real post-tune / cache-hit call)."""
         if not self.reset_to_zero:
             return
         sig_args = dict(zip(self.arg_names, args))
@@ -270,16 +247,10 @@ class Autotuner:
                 t.zero_()
 
     def _snapshot_tensors(self, args, kwargs):
-        """Clone tensors listed in restore_value so they can be restored
-        before every benchmark rep.
-
-        Autotuning runs the *same* kernel dozens of times. If a kernel writes
-        its output in place or accumulates into an input (e.g. fused-add
-        rmsnorm, where output overlaps the residual/input buffers), the second
-        rep sees data the first rep already mutated — so the timing and the
-        winning config are chosen on corrupted state. Snapshotting once and
-        restoring before each rep keeps every measurement on identical inputs.
-        """
+        """Clone restore_value tensors so each bench rep starts from pristine
+        inputs. Without this, an in-place / accumulating kernel would mutate its
+        own inputs across reps and the winning config would be chosen on
+        corrupted data."""
         if not self.restore_value:
             return {}
         sig_args = dict(zip(self.arg_names, args))
@@ -310,15 +281,17 @@ class Autotuner:
         merged_kwargs.update(config.all_kwargs())
         compiler_opts = config.compiler_opts()
 
-        # Snapshot restore_value tensors once, *before* any rep has run, so we
-        # always restore from pristine inputs (see _snapshot_tensors).
+        # Snapshot once before any rep runs, so restores are from pristine input.
         snapshot = self._snapshot_tensors(args, merged_kwargs)
 
         def kernel_call():
-            if config.pre_hook:
-                config.pre_hook(merged_kwargs)
+            # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
+            # hook that sets up state (incl. mutating a tensor) isn't clobbered
+            # by the restore. (Matches Triton: pre_hook runs on clean inputs.)
             self._restore_tensors(snapshot)
             self._reset_tensors(args, merged_kwargs)
+            if config.pre_hook:
+                config.pre_hook(merged_kwargs)
             if self.pre_hook:
                 self.pre_hook(merged_kwargs)
             self._run_with_hints(compiler_opts, args, merged_kwargs)
@@ -328,18 +301,13 @@ class Autotuner:
         try:
             return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
         finally:
-            # Leave the caller's tensors as the kernel would have left them on a
-            # single clean run: restore inputs, then run once more.
+            # Leave the caller's tensors as a single clean run would.
             if snapshot:
                 self._restore_tensors(snapshot)
 
     def _run_with_hints(self, compiler_opts, args, kwargs):
-        """Run the kernel function with optional compiler hints.
-
-        The ``CompilationContext`` import is deferred so the autotuner core
-        (Config, key, restore_value) stays importable and unit-testable without
-        the compiled ``flydsl._mlir`` bindings when no compiler hints are used.
-        """
+        """Run the kernel with optional compiler hints. Import is deferred so
+        the core stays importable without the compiled bindings when unused."""
         if compiler_opts:
             from .compiler.kernel_function import CompilationContext
 
@@ -349,14 +317,9 @@ class Autotuner:
             self.fn(*args, **kwargs)
 
     def _run_config(self, config, args, kwargs):
-        """Run the chosen config as a real (non-benchmark) call.
-
-        reset_to_zero is re-applied here so the user-visible call behaves like a
-        single clean run: an accumulate-into-zero kernel must start from zero,
-        not from whatever the benchmark reps (or a previous cached call) left
-        behind. restore_value tensors are already left pristine by _bench_one's
-        finally-restore, so they need no action here.
-        """
+        """Run the chosen config as a real (non-benchmark) call. Re-applies
+        reset_to_zero so cache hits and the post-tune run behave like a single
+        clean run (restore_value tensors are already restored by _bench_one)."""
         merged = dict(kwargs)
         merged.update(config.all_kwargs())
         self._reset_tensors(args, merged)
@@ -430,13 +393,12 @@ def autotune(
             ...
 
     Args:
-        restore_value: names of tensor args that the kernel mutates in place
-            (output overlaps input, or accumulation). They are snapshotted and
-            restored before every benchmark rep so each config is measured on
-            identical inputs. Required for correctness when tuning any in-place
-            kernel (e.g. fused-add rmsnorm).
-        reset_to_zero: names of tensor args to zero before each rep (for
-            accumulate-into-zero kernels).
+        restore_value: tensor args the kernel mutates in place (output overlaps
+            input, or accumulation). Snapshotted and restored before each bench
+            rep so every config is measured on identical inputs. Required when
+            tuning any in-place kernel (e.g. fused-add rmsnorm).
+        reset_to_zero: tensor args to zero before each rep (accumulate-into-zero
+            kernels).
     """
 
     def decorator(fn):

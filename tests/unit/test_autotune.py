@@ -6,7 +6,7 @@
 Covers the parts that must be correct before any real kernel adopts @autotune:
   - Config serialization / kwargs / compiler-opts split
   - Cache-key axes: shape, dtype, stride pattern, device, toolchain, env
-  - restore_value snapshot/restore (the in-place correctness soul)
+  - restore_value snapshot/restore (in-place correctness)
   - reset_to_zero
   - config pruning
   - disk-cache round-trip
@@ -151,13 +151,29 @@ def test_key_contains_device_toolchain_env_axes():
     assert "_device_" in joined
 
 
-def test_key_varies_with_toolchain_fingerprint():
+def test_key_varies_with_toolchain_fingerprint(monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
     t = _make_tuner()
     a = FakeTensor((8, 8))
     k1 = t._make_key((a, a), {})
-    t._toolchain_fp = "a-different-fingerprint"
+    # read live per key, so a toolchain change mid-process invalidates the key
+    monkeypatch.setattr(at, "_toolchain_fingerprint", lambda: "a-different-fingerprint")
     k2 = t._make_key((a, a), {})
     assert k1 != k2
+
+
+def test_key_varies_with_device_fingerprint(monkeypatch):
+    import importlib
+
+    at = importlib.import_module("flydsl.autotune")
+    t = _make_tuner()
+    a = FakeTensor((8, 8))
+    k1 = t._make_key((a, a), {})
+    monkeypatch.setattr(at, "_device_fingerprint", lambda: "gfx_other")
+    k2 = t._make_key((a, a), {})
+    assert k1 != k2  # arch is a real key axis, read live (not frozen at construction)
 
 
 def test_key_varies_with_env_fingerprint(monkeypatch):
@@ -190,7 +206,7 @@ def test_key_insensitive_to_kwarg_order():
     assert k1 == k2
 
 
-# ── restore_value (correctness soul) ─────────────────────────────────────
+# ── restore_value (in-place correctness) ────────────────────────────────
 def test_restore_value_restores_between_reps():
     """A kernel that mutates its input in place must see pristine inputs on
     every rep. We record the input's first element at kernel entry across reps;
