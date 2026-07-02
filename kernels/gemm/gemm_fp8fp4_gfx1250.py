@@ -7,7 +7,6 @@ per-channel fp32 scales applied in the epilogue (``scale_mode="ptpc"``).
 """
 
 import functools
-import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -23,8 +22,6 @@ from kernels.common.utils import align_up as _align_up
 from kernels.gemm.gemm_common_gfx1250 import (
     extract_lds_base_idx,
     get_lds_memref,
-    lds_atomic_load_b32_raw,
-    lds_atomic_store_b32_raw,
     lds_load_b32_raw,
     lds_load_b128_raw,
     pipeline_fence,
@@ -327,24 +324,7 @@ def compile_fp8fp4_gemm(
     stage_layout.ptr = stage_b_scale_rel_off + lds_b_scale_bytes
     stage_bytes = _align_up(stage_layout.ptr, 128)
 
-    # occ=2 warp-pp eligibility: checked early so pre_loaded can differ by version.
-    # FLYDSL_WARP_PP=1 -> v1 (drift=1, WAR spin); =2 -> v2 (golden-style setprio, no WAR).
-    _wpp_env = os.environ.get("FLYDSL_WARP_PP", "0")
-    _wpp_geom = (
-        data_format in ("fp8", "a8w4")
-        and tile_m == 256
-        and tile_n == 256
-        and tile_k == 128
-        and num_buffers == 4
-        and out_dtype == "bf16"
-        and (m_warp, n_warp) in ((2, 4), (4, 2))
-    )
-    _wpp_active = _wpp_geom and _wpp_env in ("1", "2")
-    _wpp_v2 = _wpp_geom and _wpp_env == "2"
-    # v1: drift=1 reduces pre_loaded so A-buffer outlives the inter-group lead.
-    # v2: no cross-K-tile drift (both groups same K-tile); pre_loaded stays at num_buffers-1.
-    _WPP_DRIFT = 1 if (_wpp_active and not _wpp_v2) else 0
-    pre_loaded = num_buffers - 1 - _WPP_DRIFT
+    pre_loaded = num_buffers - 1
     loop_iters = (num_k_tiles - pre_loaded) // num_buffers
     _tail_start = loop_iters * num_buffers
     extra = num_k_tiles - _tail_start - pre_loaded
@@ -420,34 +400,28 @@ def compile_fp8fp4_gemm(
     COMPUTE_SCHEDULE_FP4_QUADRANT = "fp4_quadrant"
     COMPUTE_SCHEDULE_FP8_QUADRANT = "fp8_quadrant"
     COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE = "fp8_deep_pipeline"
-    COMPUTE_SCHEDULE_FP8_WARP_PP = "fp8_warp_pp"
-    # v2: golden-style per-sub-round setprio ping-pong, no WAR spin, no cross-K-tile drift.
-    COMPUTE_SCHEDULE_FP8_WARP_PP_V2 = "fp8_warp_pp_v2"
 
-    _fp8_deep_base = (
+    fp8_deep_pipeline_eligible = (
         data_format in ("fp8", "a8w4")
         and tile_m == 256
         and tile_n == 256
         and tile_k == 128
+        and m_warp == 2
+        and n_warp == 2
         and num_buffers == 4
         and out_dtype == "bf16"
     )
-    fp8_deep_pipeline_eligible = _fp8_deep_base and m_warp == 2 and n_warp == 2
-    # occ=2 warp-pp v1 (FLYDSL_WARP_PP=1): drift-based, WAR spin.
-    # occ=2 warp-pp v2 (FLYDSL_WARP_PP=2): golden setprio, no WAR, no drift.
-    fp8_warp_pp_eligible = _fp8_deep_base and (m_warp, n_warp) in ((2, 4), (4, 2)) and _wpp_env == "1"
-    fp8_warp_pp_v2_eligible = _fp8_deep_base and (m_warp, n_warp) in ((2, 4), (4, 2)) and _wpp_env == "2"
 
     def _pick_compute_schedule_kind():
         if wmma_m_rep % 2 != 0 or wmma_n_rep % 2 != 0 or n_accs < 8:
             return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
+        # Quadrant: split B left/right, compute the 4 quadrants to widen the
+        # LDS-load-to-WMMA distance. FP4/FP8 differ only in per-format wait tuning.
         if is_fp4:
             return COMPUTE_SCHEDULE_FP4_QUADRANT
+        # A8W4 (FP8 act + FP4 weight) shares FP8's accumulator layout and operand
+        # path, so it reuses the FP8 schedules.
         if data_format in ("fp8", "a8w4"):
-            if fp8_warp_pp_v2_eligible:
-                return COMPUTE_SCHEDULE_FP8_WARP_PP_V2
-            if fp8_warp_pp_eligible:
-                return COMPUTE_SCHEDULE_FP8_WARP_PP
             if fp8_deep_pipeline_eligible:
                 return COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
             return COMPUTE_SCHEDULE_FP8_QUADRANT
@@ -457,33 +431,7 @@ def compile_fp8fp4_gemm(
     use_row_major_streaming_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
     use_fp4_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP4_QUADRANT
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
-    use_fp8_warp_pp_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_WARP_PP
-    use_fp8_warp_pp_v2_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_WARP_PP_V2
-    # Both warp-pp variants reuse the deep-pipeline emit infrastructure (occ=2 geometry,
-    # same LDS layout, TDM wave-spec). v2 also gets its own compute_tile and scheduler.
-    use_fp8_deep_pipeline_schedule = compute_schedule_kind in (
-        COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE,
-        COMPUTE_SCHEDULE_FP8_WARP_PP,
-        COMPUTE_SCHEDULE_FP8_WARP_PP_V2,
-    )
-    _fp8_warp_pp = use_fp8_warp_pp_schedule
-    _fp8_warp_pp_v2 = use_fp8_warp_pp_v2_schedule
-    # _wpp_active covers both v1 and v2; assert consistency.
-    assert (_fp8_warp_pp or _fp8_warp_pp_v2) == _wpp_active, (_fp8_warp_pp, _fp8_warp_pp_v2, _wpp_active)
-    _wpp_grp_count = num_warps // 2
-    # LDS flags for cross-group WAR (a_ready / a_consumed). 
-    _wpp_flag_alloc = None
-    if _fp8_warp_pp or _fp8_warp_pp_v2:
-        _wpp_flag_alloc = SmemAllocator(
-            None, arch=gpu_arch, global_sym_name=f"warp_pp_flags_{tile_m}x{tile_n}x{tile_k}_{m_warp}x{n_warp}"
-        )
-        _wpp_flag_alloc.ptr = 16  # a_ready @0, a_consumed @4 (i32, + pad)
-    _WPP_OFF_READY = 0
-    _WPP_OFF_CONSUMED = 4
-    # _WPP_DRIFT (anti-phase lead in K-tiles) is defined early next to pre_loaded: the
-    # A-buffer slack is created by reducing the prefetch distance pre_loaded by drift so
-    # the shared-A slot outlives the lead, (num_buffers - pre_loaded) = 1 + drift. The WAR
-    # spin uses `a_consumed >= gen - _WPP_DRIFT` (see _wpp_loop_fence below).
+    use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
     use_row_major_k_prefetch = wmma_m_rep == 1 and k_wmma_steps > 1
     _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
     _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
@@ -501,9 +449,7 @@ def compile_fp8fp4_gemm(
         assert compute_schedule_kind in (
             COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING,
             COMPUTE_SCHEDULE_FP8_QUADRANT,
-            COMPUTE_SCHEDULE_FP8_WARP_PP_V2,
             COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE,
-            COMPUTE_SCHEDULE_FP8_WARP_PP,
             COMPUTE_SCHEDULE_FP4_QUADRANT,
         )
     use_ws_tdm_split_signal_overlap = (
@@ -703,27 +649,6 @@ def compile_fp8fp4_gemm(
                 tensor_shape=(N // 16, K_packed_b * 16),
                 strides=(K_packed_b * 16, 1),
                 tile_shape=(tile_n // 16, packed_tile_k_b * 16),
-                elem_bytes=1,
-                pad_interval=0,
-                pad_amount=0,
-                num_warps=tdm_desc_num_warps,
-                workgroup_mask=b_mcast_mask,
-                atomic_barrier_enable=atomic_barrier_enable,
-                early_timeout=True,
-            )
-
-        # warp-pp: load the N-lower (n_half=0) or N-upper (n_half=1) half of B; the
-        # two halves are owned by group0/group1. memref must point at that half's LDS.
-        def make_desc_b_half(memref, k_base, n_half):
-            k_packed_off = k_base // arith.index(PACK_FACTOR_B)
-            n_block = blk_n // arith.index(16) + arith.index(n_half * (tile_n // 2 // 16))
-            return tdm_ops.make_tensor_descriptor_2d(
-                global_ptr=arg_b,
-                lds_memref=memref,
-                global_offset=(n_block, k_packed_off * arith.index(16)),
-                tensor_shape=(N // 16, K_packed_b * 16),
-                strides=(K_packed_b * 16, 1),
-                tile_shape=(tile_n // 2 // 16, packed_tile_k_b * 16),
                 elem_bytes=1,
                 pad_interval=0,
                 pad_amount=0,
@@ -1521,9 +1446,9 @@ def compile_fp8fp4_gemm(
                             global_wn,
                             a_frags[wm_local],
                             b_frags[wn_local],
-                        a_scales,
-                        b_scales,
-                    )
+                            a_scales,
+                            b_scales,
+                        )
 
             def _emit_group(wm_base, wn_base, a_frags, b_frags, a_scales, b_scales, emit_filler_now=False):
                 _emit_group_rows(
@@ -1721,76 +1646,10 @@ def compile_fp8fp4_gemm(
             _pair_loads = _fp8_pair_a_loads
             _two_pair_loads = _fp8_pair_a_loads + _fp8_pair_b_loads
 
-            def _emit_ks_occ2(ks, is_last_ks, scale_pair):
-                # Incremental low-liveness occ=2 emit (_fp8_wm_pairs x _fp8_wn_pairs
-                # 2x2 panels). Keep the SMALLER pair-dim resident (it is reused across
-                # the other), and STREAM the larger dim pair-by-pair with 1-ahead
-                # prefetch, so only ~(small_dim + 2) operand pairs are live at once.
-                # The earlier "load-all-then-burst" form kept every A and B fragment
-                # live simultaneously and spilled 76 VGPR in the steady-state loop
-                # (round-8); streaming keeps register pressure under the occ=2 budget
-                # while still issuing long WMMA runs. Per-WMMA dscnt waits are left to
-                # the backend (it tracks operand readiness); explicit wait-tuning is a
-                # later step once the spill is gone.
-                _n_panels = _fp8_wm_pairs * _fp8_wn_pairs
-
-                def _callbacks(pidx):
-                    if const_expr(is_last_ks and late_compute_callback is not None and pidx == _n_panels - 2):
-                        rocdl.sched_barrier(0)
-                        late_compute_callback()
-
-                def _callbacks_post(pidx):
-                    if const_expr(ks == 0 and mid_compute_callback is not None and pidx == 0):
-                        rocdl.sched_barrier(0)
-                        mid_compute_callback()
-
-                if const_expr(_fp8_wm_pairs >= _fp8_wn_pairs):
-                    # keep all B pairs resident; stream A one pair at a time
-                    # (just-in-time; at occ=2 the sibling wave hides the load latency,
-                    # so no per-wave prefetch-ahead is needed and liveness stays low).
-                    b_all = [load_b_pair(j, ks) for j in range_constexpr(_fp8_wn_pairs)]
-                    _pidx = 0
-                    for i in range_constexpr(_fp8_wm_pairs):
-                        if const_expr(i == 0 and ks == 0 and a0_prefetch is not None and len(a0_prefetch) == _fp8_pair_wm):
-                            a_cur = list(a0_prefetch)
-                        else:
-                            a_cur = load_a_pair(i, ks)
-                        for j in range_constexpr(_fp8_wn_pairs):
-                            _callbacks(_pidx)
-                            emit_panel_2x2(i, j, a_cur, b_all[j], scale_pair)
-                            _callbacks_post(_pidx)
-                            _pidx = _pidx + 1
-                else:
-                    # keep all A pairs resident; stream B one pair at a time
-                    if const_expr(ks == 0 and a0_prefetch is not None and len(a0_prefetch) == _fp8_pair_wm):
-                        a_all = [list(a0_prefetch)]
-                    else:
-                        a_all = [load_a_pair(0, ks)]
-                    for i in range_constexpr(_fp8_wm_pairs):
-                        if const_expr(i >= 1):
-                            a_all.append(load_a_pair(i, ks))
-                    _pidx = 0
-                    for j in range_constexpr(_fp8_wn_pairs):
-                        b_cur = load_b_pair(j, ks)
-                        for i in range_constexpr(_fp8_wm_pairs):
-                            _callbacks(_pidx)
-                            emit_panel_2x2(i, j, a_all[i], b_cur, scale_pair)
-                            _callbacks_post(_pidx)
-                            _pidx = _pidx + 1
-
-                if const_expr(is_last_ks and emit_filler is not None):
-                    rocdl.sched_barrier(0)
-                    emit_filler()
-
             for ks in range_constexpr(k_wmma_steps):
                 is_last_ks = ks == k_wmma_steps - 1
                 a_scales, b_scales = _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks)
                 scale_pair = (a_scales, b_scales)
-
-                if const_expr(_fp8_warp_pp):
-                    # occ=2 emit: low-liveness incremental panels (see _emit_ks_occ2).
-                    _emit_ks_occ2(ks, is_last_ks, scale_pair)
-                    continue
 
                 b0 = load_b_pair(0, ks)
                 if const_expr(ks == 0 and a0_prefetch is not None and len(a0_prefetch) == _fp8_pair_wm):
@@ -1947,17 +1806,6 @@ def compile_fp8fp4_gemm(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_fp8_deep_pipeline():
-            if const_expr(_fp8_warp_pp):
-                # Clean-burst sched hint matching _emit_ks_occ2: all LDS reads, then
-                # the full uninterrupted WMMA burst.
-                _occ2_loads = _fp8_scale_loads + _fp8_wn_pairs * _fp8_pair_b_loads + _fp8_wm_pairs * _fp8_pair_a_loads
-                _occ2_wmma = _fp8_wm_pairs * _fp8_wn_pairs * _fp8_pair_wm * _fp8_pair_wn
-                for _ks in range_constexpr(k_wmma_steps):
-                    rocdl.sched_dsrd(_occ2_loads)
-                    rocdl.sched_mfma(_occ2_wmma)
-                rocdl.sched_barrier(0)
-                return
-
             def _sched_panel_2x2(prefetch_loads=0):
                 if const_expr(prefetch_loads > 0):
                     rocdl.sched_mfma(_fp8_pair_wn)
@@ -1994,142 +1842,6 @@ def compile_fp8fp4_gemm(
                 _sched_panel_2x2()
                 _sched_panel_2x2()
             rocdl.sched_barrier(0)
-
-        # ─────────────────────────────────────────────────────────────────────
-        # warp-pp v2: golden-style per-sub-round setprio ping-pong
-        # ─────────────────────────────────────────────────────────────────────
-        def compute_tile_fp8_warp_pp_v2(
-            accs_in,
-            lds_a,
-            lds_b,
-            lds_as,
-            lds_bs,
-            emit_filler=None,
-            mid_compute_callback=None,
-            late_compute_callback=None,
-            a0_prefetch=None,
-            scale_k_base=None,
-            pf_a_scales=None,
-        ):
-            """occ=2 compute tile with golden-style sub-round setprio interleaving.
-
-            Each K-step is split into wm_pair sub-rounds:
-              [B all upfront] → for each wm_pair: [A JIT] + setprio(0) + wait +
-              setprio(1) + [8 WMMA] + setprio(0)
-
-            Both groups (g0/g1) compute the SAME K-tile independently (different
-            N bands).  No cross-group WAR, no drift.  The hardware SIMD scheduler
-            creates natural sub-round stagger because the per-group named barriers
-            fire at slightly different times (g0 contains the A/scale loader wave
-            and thus exits its tensorcnt wait marginally first).
-            setprio(1/0) then amplifies and locks in the ping-pong.
-            """
-            current_accs = list(accs_in)
-            _set_vgpr_a_scales(scale_k_base, pf_a_scales)
-            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
-            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
-            if const_expr(is_mxscale):
-                as_buf, as_bases = _precompute_as32_bases(lds_as)
-                bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
-            else:
-                as_buf, as_bases = lds_as, None
-                bs_buf, bs_bases = lds_bs, None
-
-            def load_a_pair_v2(wm_pair, ks):
-                wm_base = wm_pair * _fp8_pair_wm
-                return [
-                    load_a_frag(a_buf, a_bases[wm_base + wm_local], ks)
-                    for wm_local in range_constexpr(_fp8_pair_wm)
-                ]
-
-            def load_b_pair_v2(wn_pair, ks):
-                wn_base = wn_pair * _fp8_pair_wn
-                return [
-                    load_b_frag(b_buf, b_bases, wn_base + wn_local, ks)
-                    for wn_local in range_constexpr(_fp8_pair_wn)
-                ]
-
-            def emit_panel_v2(wm_pair, wn_pair, a_pair, b_pair, scale_pair):
-                """2×2 WMMA panel: same as compute_tile_fp8_deep_pipeline.emit_panel_2x2."""
-                a_scales, b_scales = scale_pair
-                wm_base = wm_pair * _fp8_pair_wm
-                wn_base = wn_pair * _fp8_pair_wn
-                for wm_row in range_constexpr(_fp8_pair_wm):
-                    for wn_local in range_constexpr(_fp8_pair_wn):
-                        _emit_wmma(
-                            current_accs,
-                            wm_base + wm_row,
-                            wn_base + wn_local,
-                            a_pair[wm_row],
-                            b_pair[wn_local],
-                            a_scales,
-                            b_scales,
-                        )
-
-            for ks in range_constexpr(k_wmma_steps):
-                is_last_ks = ks == k_wmma_steps - 1
-                a_scales, b_scales = _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks)
-                scale_pair = (a_scales, b_scales)
-
-                # --- Phase 1: pre-load ALL B pairs (small, kept resident) ---
-                b_all = [load_b_pair_v2(j, ks) for j in range_constexpr(_fp8_wn_pairs)]
-
-                # --- Phase 2: for each wm_pair, JIT A then ping-pong WMMA ---
-                for i in range_constexpr(_fp8_wm_pairs):
-                    if const_expr(i == 0 and ks == 0 and a0_prefetch is not None
-                                  and len(a0_prefetch) == _fp8_pair_wm):
-                        a_cur = list(a0_prefetch)
-                    else:
-                        a_cur = load_a_pair_v2(i, ks)
-
-                    # Yield: "I'm loading A, sibling may WMMA now."
-                    rocdl.s_setprio(0)
-                    # Wait for this A pair (B is already absorbed after _fp8_pair_b_loads
-                    # × wn_pairs cycles, well within the A load window).
-                    rocdl.s_wait_dscnt(0)
-
-                    # Take SIMD for WMMA burst on this wm-sub-round.
-                    rocdl.s_setprio(1)
-                    for j in range_constexpr(_fp8_wn_pairs):
-                        if const_expr(is_last_ks and i == _fp8_wm_pairs - 2
-                                      and j == _fp8_wn_pairs - 1
-                                      and late_compute_callback is not None):
-                            rocdl.sched_barrier(0)
-                            late_compute_callback()
-                        if const_expr(ks == 0 and i == 0 and j == 0
-                                      and mid_compute_callback is not None):
-                            rocdl.sched_barrier(0)
-                            mid_compute_callback()
-                        emit_panel_v2(i, j, a_cur, b_all[j], scale_pair)
-
-                    # Yield: done with this wm burst, let sibling load its A.
-                    rocdl.s_setprio(0)
-
-                if const_expr(is_last_ks and emit_filler is not None):
-                    rocdl.sched_barrier(0)
-                    emit_filler()
-
-            return current_accs
-
-        def hot_loop_scheduler_fp8_warp_pp_v2():
-            """Per-sub-round sched hints for warp-pp v2.
-
-            Mirrors the compute_tile_fp8_warp_pp_v2 structure:
-              B+scale loads (upfront) → for each wm_pair: A loads + WMMA burst.
-            No sched_dsrd+sched_mfma bulk hint that would force all loads before
-            all WMMAs (that killed the ping-pong in v1).
-            """
-            _b_scale_loads = _fp8_scale_loads + _fp8_wn_pairs * _fp8_pair_b_loads
-            _a_loads = _fp8_pair_a_loads
-            _wmma_per_wmpair = _fp8_wn_pairs * _fp8_pair_wm * _fp8_pair_wn  # = 8
-            for _ks in range_constexpr(k_wmma_steps):
-                rocdl.sched_dsrd(_b_scale_loads)
-                for _i in range_constexpr(_fp8_wm_pairs):
-                    rocdl.sched_dsrd(_a_loads)
-                    rocdl.sched_mfma(_wmma_per_wmpair)
-            rocdl.sched_barrier(0)
-
-        # ─────────────────────────────────────────────────────────────────────
 
         def compute_tile_scheduled(
             accs_in,
@@ -2183,20 +1895,6 @@ def compile_fp8fp4_gemm(
                     scale_k_base=scale_k_base,
                     pf_a_scales=pf_a_scales,
                 )
-            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_WARP_PP_V2):
-                return compute_tile_fp8_warp_pp_v2(
-                    accs_in,
-                    lds_a,
-                    lds_b,
-                    lds_as,
-                    lds_bs,
-                    emit_filler=emit_filler,
-                    mid_compute_callback=mid_compute_callback,
-                    late_compute_callback=late_compute_callback,
-                    a0_prefetch=a0_prefetch,
-                    scale_k_base=scale_k_base,
-                    pf_a_scales=pf_a_scales,
-                )
             return compute_tile(
                 accs_in,
                 lds_a,
@@ -2215,8 +1913,6 @@ def compile_fp8fp4_gemm(
                 hot_loop_scheduler_fp4_quadrant()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
                 hot_loop_scheduler_fp8_deep_pipeline()
-            elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_WARP_PP_V2):
-                hot_loop_scheduler_fp8_warp_pp_v2()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
                 hot_loop_scheduler_fp8_quadrant()
             else:
@@ -2431,15 +2127,6 @@ def compile_fp8fp4_gemm(
         stages_as_mem = [stages_as[i].get() for i in range_constexpr(num_buffers)]
         stages_bs_mem = [stages_bs[i].get() for i in range_constexpr(num_buffers)]
 
-        # warp-pp: B1 (N-upper half) LDS sub-region starts 128 N-rows into B.
-        if const_expr(_fp8_warp_pp):
-            _b1_byte_off = (tile_n // 2) * packed_tile_k_b
-            stages_b1 = [
-                SmemPtr(arena_base_ptr, stage_b_data_off[i] + _b1_byte_off, elem_ty_lds, shape=(lds_b_data_f16 // 2,))
-                for i in range_constexpr(num_buffers)
-            ]
-            stages_b1_mem = [stages_b1[i].get() for i in range_constexpr(num_buffers)]
-
         stages_a_idx = [extract_lds_base_idx(stages_a[i]) for i in range_constexpr(num_buffers)]
         stages_b_idx = [extract_lds_base_idx(stages_b[i]) for i in range_constexpr(num_buffers)]
         stages_as_idx = [extract_lds_base_idx(stages_as[i]) for i in range_constexpr(num_buffers)]
@@ -2492,27 +2179,18 @@ def compile_fp8fp4_gemm(
         # Precompute LDS addresses for TDM descriptor switching
         stages_a_lds_addr = []
         stages_b_lds_addr = []
-        stages_b1_lds_addr = []
         stages_as_lds_addr = []
         stages_bs_lds_addr = []
         for i in range_constexpr(num_buffers):
             stages_a_lds_addr.append(_dg0_lane(make_desc_a(stages_a_mem[i], arith.index(0)), 1))
-            if const_expr(_fp8_warp_pp):
-                stages_b_lds_addr.append(_dg0_lane(make_desc_b_half(stages_b_mem[i], arith.index(0), 0), 1))
-                stages_b1_lds_addr.append(_dg0_lane(make_desc_b_half(stages_b1_mem[i], arith.index(0), 1), 1))
-            else:
-                stages_b_lds_addr.append(_dg0_lane(make_desc_b(stages_b_mem[i], arith.index(0)), 1))
+            stages_b_lds_addr.append(_dg0_lane(make_desc_b(stages_b_mem[i], arith.index(0)), 1))
             if const_expr(use_ascale_shuffled_tdm):
                 stages_as_lds_addr.append(_dg0_lane(make_desc_as(stages_as_mem[i], arith.index(0)), 1))
             if const_expr(is_mxscale):
                 stages_bs_lds_addr.append(_dg0_lane(make_desc_bs(stages_bs_mem[i], arith.index(0)), 1))
 
         desc_a_init = make_desc_a(stages_a_mem[0], split_k_base)
-        if const_expr(_fp8_warp_pp):
-            desc_b_init = make_desc_b_half(stages_b_mem[0], split_k_base, 0)
-            desc_b1_init = make_desc_b_half(stages_b1_mem[0], split_k_base, 1)
-        else:
-            desc_b_init = make_desc_b(stages_b_mem[0], split_k_base)
+        desc_b_init = make_desc_b(stages_b_mem[0], split_k_base)
         if const_expr(is_ptpc):
             # No scale TDM for PTPC: alias the scale descriptors/addresses to A/B.
             # Scale waves are predicated off, so these selections are never issued.
@@ -2543,15 +2221,7 @@ def compile_fp8fp4_gemm(
             _active_wave_limit = min(num_warps, 3)
         else:
             _active_wave_limit = 2 if _drop_scale_waves else 4
-        if const_expr(_fp8_warp_pp):
-            # loaders = {0:A, 1:B0, 2:As, 3:Bs} in group0 + {5:B1} in group1.
-            active_pred_const = arith.select(
-                tdm_wave_id < fx.Int32(_active_wave_limit),
-                fx.Int32(1),
-                arith.select(tdm_wave_id == fx.Int32(5), fx.Int32(1), fx.Int32(0)),
-            )
-        else:
-            active_pred_const = arith.select(tdm_wave_id < fx.Int32(_active_wave_limit), fx.Int32(1), fx.Int32(0))
+        active_pred_const = arith.select(tdm_wave_id < fx.Int32(_active_wave_limit), fx.Int32(1), fx.Int32(0))
 
         def _select4(values):
             return _select_wave_tdm_value(values[0], values[1], values[2], values[3])
@@ -2569,21 +2239,13 @@ def compile_fp8fp4_gemm(
                 )
                 for i in range_constexpr(num_buffers)
             ]
-            addr_lo = _select4(_desc_lanes(descs, 2))
-            addr_hi = _select4(_desc_lanes(descs, 3))
-            dgroup1 = _select4([desc.dgroup1 for desc in descs])
-            adv = _select4(advs)
-            if const_expr(_fp8_warp_pp):
-                # wave5 loads B1 (N-upper half) — overlay it onto the 4-way result.
-                is_b1 = tdm_wave_id == fx.Int32(5)
-                active_stages = [
-                    arith.select(is_b1, stages_b1_lds_addr[i], active_stages[i]) for i in range_constexpr(num_buffers)
-                ]
-                addr_lo = arith.select(is_b1, _dg0_lane(desc_b1_init, 2), addr_lo)
-                addr_hi = arith.select(is_b1, _dg0_lane(desc_b1_init, 3), addr_hi)
-                dgroup1 = arith.select(is_b1, desc_b1_init.dgroup1, dgroup1)
-                adv = arith.select(is_b1, adv_b_i32, adv)
-            return (active_stages, addr_lo, addr_hi, dgroup1, adv)
+            return (
+                active_stages,
+                _select4(_desc_lanes(descs, 2)),
+                _select4(_desc_lanes(descs, 3)),
+                _select4([desc.dgroup1 for desc in descs]),
+                _select4(advs),
+            )
 
         if const_expr(use_ascale_shuffled_tdm):
             _tdm_stage_sel = (stages_a_lds_addr, stages_b_lds_addr, stages_as_lds_addr, stages_bs_lds_addr)
@@ -2634,88 +2296,6 @@ def compile_fp8fp4_gemm(
         def _pipeline_fence_signal(outstanding=0):
             pipeline_fence_signal(outstanding=outstanding, use_cluster=use_cluster)
 
-        # ---- warp-pp per-group anti-phase fence (main loop only) ----
-        if const_expr(_fp8_warp_pp or _fp8_warp_pp_v2):
-            _wpp_fb = SmemPtr(_wpp_flag_alloc.get_base(), 0, T.i32, shape=(4,))
-            _wpp_fidx = extract_lds_base_idx(_wpp_fb)
-            _wpp_i32 = ir.IntegerType.get_signless(32)
-            if rocdl.wave_id() == fx.Int32(0):
-                lds_atomic_store_b32_raw(
-                    _wpp_fidx, arith.index(_WPP_OFF_READY), fx.Int32(0), llvm.AtomicOrdering.release
-                )
-                lds_atomic_store_b32_raw(
-                    _wpp_fidx, arith.index(_WPP_OFF_CONSUMED), fx.Int32(0), llvm.AtomicOrdering.release
-                )
-
-        def _wpp_intra_barrier(sym, wait_id):
-            p = llvm.mlir_addressof(llvm.PointerType.get(3), sym)
-            rocdl.s_barrier_join(p)
-            rocdl.s_barrier_signal_var(p, _wpp_grp_count)
-            rocdl.s_barrier_wait(wait_id)
-
-        def _wpp_spin_ge(off, thr_i32):
-            init = lds_atomic_load_b32_raw(_wpp_fidx, arith.index(off), llvm.AtomicOrdering.acquire)
-            wl = scf.WhileOp([_wpp_i32], [init])
-            cb = ir.Block.create_at_start(wl.before, [_wpp_i32])
-            bb = ir.Block.create_at_start(wl.after, [_wpp_i32])
-            with ir.InsertionPoint(cb):
-                cur = cb.arguments[0]
-                cond = arith.cmpi(arith.CmpIPredicate.slt, cur, thr_i32)
-                scf.ConditionOp(arith.unwrap(cond), [cur])
-            with ir.InsertionPoint(bb):
-                scf.YieldOp([lds_atomic_load_b32_raw(_wpp_fidx, arith.index(off), llvm.AtomicOrdering.acquire)])
-
-        def _wpp_loop_fence(gen_i32, gen_p1_i32):
-            # gen_i32 = current compute K-tile (0-based, monotonic). Per-group:
-            # group0 publishes shared A/As/Bs readiness (a_ready) and WAR-waits on
-            # a_consumed before its mid-TDM overwrites; group1 publishes a_consumed
-            # and waits a_ready. Ordering rides on the atomic flags (release/acquire).
-            tdm_ops.tensor_wait(_fence_outstanding)
-            _if = scf.IfOp(arith.unwrap(rocdl.wave_id() < fx.Int32(_wpp_grp_count)), [], has_else=True)
-            with ir.InsertionPoint(_if.then_block):
-                _wpp_intra_barrier("wpp_g0", 1)
-                # WAR: group0 must not overwrite a buffer group1 still needs. With
-                # _WPP_DRIFT==0 this is a_consumed>=gen (same-phase); drift>0 loosens
-                # it (only safe with A-buffer slack -- see _WPP_DRIFT note).
-                if const_expr(_WPP_DRIFT > 0):
-                    _war_thr = arith.subi(gen_i32, arith.constant(_WPP_DRIFT, type=T.i32))
-                else:
-                    _war_thr = gen_i32
-                _wpp_spin_ge(_WPP_OFF_CONSUMED, _war_thr)
-                lds_atomic_store_b32_raw(
-                    _wpp_fidx, arith.index(_WPP_OFF_READY), gen_p1_i32, llvm.AtomicOrdering.release
-                )
-                scf.YieldOp([])
-            with ir.InsertionPoint(_if.else_block):
-                _wpp_intra_barrier("wpp_g1", 2)
-                lds_atomic_store_b32_raw(
-                    _wpp_fidx, arith.index(_WPP_OFF_CONSUMED), gen_i32, llvm.AtomicOrdering.release
-                )
-                _wpp_spin_ge(_WPP_OFF_READY, gen_p1_i32)
-                scf.YieldOp([])
-
-        def _wpp_loop_fence_v2(gen_i32, gen_p1_i32):
-            tdm_ops.tensor_wait(_fence_outstanding)
-            if const_expr(use_cluster):
-                cluster.cluster_signal_once_per_wg()
-            _if = scf.IfOp(arith.unwrap(rocdl.wave_id() < fx.Int32(_wpp_grp_count)), [], has_else=True)
-            with ir.InsertionPoint(_if.then_block):
-                _wpp_intra_barrier("wpp_g0", 1)
-                _wpp_spin_ge(_WPP_OFF_CONSUMED, gen_i32)
-                lds_atomic_store_b32_raw(
-                    _wpp_fidx, arith.index(_WPP_OFF_READY), gen_p1_i32, llvm.AtomicOrdering.release
-                )
-                scf.YieldOp([])
-            with ir.InsertionPoint(_if.else_block):
-                _wpp_intra_barrier("wpp_g1", 2)
-                lds_atomic_store_b32_raw(
-                    _wpp_fidx, arith.index(_WPP_OFF_CONSUMED), gen_i32, llvm.AtomicOrdering.release
-                )
-                _wpp_spin_ge(_WPP_OFF_READY, gen_p1_i32)
-                scf.YieldOp([])
-            if const_expr(use_cluster):
-                cluster.cluster_wait()
-
         def _issue_active_tdm(load_stage, addr_box, k_prefetch=None, sec_box=None):
             dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[load_stage], addr_box[0], active_addr_hi)
             tdm_ops.tensor_load_2d(tdm_ops.TDMDescriptor2D(dg0, active_dgroup1))
@@ -2750,11 +2330,11 @@ def compile_fp8fp4_gemm(
                 _bvs_tail_seed = list(_bvs_pf)
                 _bvs_tail_issue_start = _bvs_initial_depth
 
-        _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (pre_loaded - 1))
+        _pipeline_fence(outstanding=TDM_LOADS_PER_STEP * (num_buffers - 2))
 
         # Main loop — acc_mixed style: fence at top, TDM_load mid-compute.
         # This overlaps TDM DMA with the remaining WMMA instructions,
-        _fence_outstanding = TDM_LOADS_PER_STEP * (pre_loaded - 1)
+        _fence_outstanding = TDM_LOADS_PER_STEP * (num_buffers - 2)
 
         if const_expr(loop_iters > 0 and use_tdm_late_signal_overlap):
             _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -2779,7 +2359,7 @@ def compile_fp8fp4_gemm(
                     _state_off = _ra0 + _bvs_D * _vs_tile_a
 
                 for buf_idx in range_constexpr(num_buffers):
-                    load_stage = (buf_idx + pre_loaded) % num_buffers
+                    load_stage = (buf_idx + num_buffers - 1) % num_buffers
 
                     addr_box = [cur_addr_lo]
                     sec_box = [cur_sec_lo] if secondary_scale_tdm else None
@@ -2794,18 +2374,9 @@ def compile_fp8fp4_gemm(
                     ):
                         _issue_active_tdm(_ls, _ab, k_prefetch=_k_off, sec_box=_sb)
 
-                    if const_expr(_fp8_warp_pp_v2 or _fp8_warp_pp):
-                        _wpp_gen_idx = loop_iter * arith.index(num_buffers) + arith.index(buf_idx)
-                        _wpp_gen_i32 = arith.index_cast(T.i32, _wpp_gen_idx)
-                        _wpp_gen_p1_i32 = arith.index_cast(T.i32, _wpp_gen_idx + arith.index(1))
-                        if const_expr(_fp8_warp_pp_v2):
-                            _wpp_loop_fence_v2(_wpp_gen_i32, _wpp_gen_p1_i32)
-                        else:
-                            _wpp_loop_fence(_wpp_gen_i32, _wpp_gen_p1_i32)
-                    else:
-                        if const_expr(not use_tdm_late_signal_overlap):
-                            _pipeline_fence_signal(outstanding=_fence_outstanding)
-                        pipeline_fence_wait(use_cluster=use_cluster)
+                    if const_expr(not use_tdm_late_signal_overlap):
+                        _pipeline_fence_signal(outstanding=_fence_outstanding)
+                    pipeline_fence_wait(use_cluster=use_cluster)
 
                     _late_tdm_ws_fence_signal = None
                     if const_expr(use_tdm_late_signal_overlap):
@@ -3051,17 +2622,6 @@ def compile_fp8fp4_gemm(
         with ir.InsertionPoint(ctx.gpu_module_body):
             arena_alloc.finalized = False
             arena_alloc.finalize()
-            if const_expr(_fp8_warp_pp or _fp8_warp_pp_v2):
-                _wpp_flag_alloc.finalized = False
-                _wpp_flag_alloc.finalize()
-            if const_expr(_fp8_warp_pp or _fp8_warp_pp_v2):
-                for _wpp_sym in ("wpp_g0", "wpp_g1"):
-                    llvm.GlobalOp(
-                        ir.Type.parse('!llvm.target<"amdgcn.named.barrier", 0>'),
-                        _wpp_sym,
-                        ir.Attribute.parse("#llvm.linkage<internal>"),
-                        addr_space=3,
-                    )
 
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = N // tile_n
