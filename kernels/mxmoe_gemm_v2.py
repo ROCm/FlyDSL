@@ -1046,34 +1046,18 @@ def gemm2_body_v2(
     topk=1,
     has_pad=False,
     SBM=None,
-    g2_kstages=1,
-    g2_bhoist=False,
-    g2_ascale_pf=False,
+    g2_kstages=2,
+    g2_bhoist=True,
+    g2_ascale_pf=True,
 ):
-    # g2_ascale_pf (opt-in, default False = byte-identical): with the 2-stage B pipeline
-    # (g2_kstages==2), prefetch the A-scale ONE K-tile ahead into scf.for-carried register(s) instead
-    # of loading it synchronously at the loop head. The default loop issues load_a_scale_tile(kt) and
-    # consumes it in the SAME iteration's mfma_cluster, so the ISA emits `buffer_load_dword` immediately
-    # followed by `s_waitcnt vmcnt(0)` gating the first MFMA on the full VMEM latency of that single
-    # scale dword (and, because it is the newest load, forcing a drain of the freshly-issued B prefetch
-    # too). aiter's cktile gemm2 prefetches its A-scale a K-block ahead into a register (ping/pong) and
-    # never stalls the MFMA on the scale return; this matches that pattern. The scale is `kScaleSubBlocks`
-    # i32 register(s) carried through scf.for state, prologue-loaded for tile 0. No-op unless
-    # g2_kstages==2. (deepdiff lever C; gemm2-mem-pattern-align.md.)
-    # g2_bhoist (opt-in, default False = byte-identical): with the 2-stage B pipeline (g2_kstages==2),
-    # issue the NEXT-tile B weight+scale prefetch BEFORE the per-iteration LDS barrier instead of after.
-    # B is a GMEM->register stream with no LDS dependency, so the barrier (which only guards the A LDS
-    # ring) does not order it. Hoisting the weight loads above the barrier puts them into the VMEM queue
-    # before the block synchronizes, so the long-latency weight fetch overlaps the barrier wait. ATT
-    # (gemm2-att-analysis.md) shows the barrier absorbs ~11% of stall cycles as per-wave VMEM-latency
-    # imbalance; front-loading the weight stream shrinks that exposure. No-op unless g2_kstages==2.
-    # g2_kstages (B-weight software-pipeline depth over the K-loop):
-    #   1 (default) -> synchronous B load per K-tile (byte-identical to pre-change; AC-3).
-    #   2 -> B weight + B-scale prefetched ONE K-tile ahead into per-stage register fragments carried
-    #        as scf.for loop state (double-buffer). The MFMA consumes stage kt%2 while the next tile's
-    #        B is loading into stage (kt+1)%2, with sched_barrier/s_setprio fencing the MFMA chain from
-    #        the B vmem loads -- mirrors gemm1_body_v2's kStages=2 prefetch pipeline. gemm2 is
-    #        HBM-weight-bound, so keeping the next weight load in flight hides load latency.
+    # gemm2 K-loop perf knobs (all default ON), no-op unless g2_kstages==2:
+    #   g2_kstages   2 -> B weight + B-scale prefetched one K-tile ahead into scf.for-carried
+    #                register fragments (double-buffer); 1 -> synchronous per-tile B load.
+    #   g2_bhoist    issue the next-tile B prefetch above the per-iteration LDS barrier (B is a
+    #                GMEM->register stream, not ordered by the A-LDS barrier) so the weight fetch
+    #                overlaps the barrier wait.
+    #   g2_ascale_pf prefetch the A-scale one K-tile ahead into a carried register so the MFMA does
+    #                not stall on its VMEM latency at the loop head.
     if g2_kstages not in (1, 2):
         raise AssertionError(f"g2_kstages must be 1 or 2, got {g2_kstages}")
     # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
@@ -1318,7 +1302,7 @@ def gemm2_body_v2(
         return n
 
     if const_expr(g2_kstages == 1):
-        # -- Default: 1-deep pipe, synchronous B load per K-tile (byte-identical; AC-3). --
+        # -- 1-deep pipe: synchronous B load per K-tile. --
         for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_c_carry()):
             store_c_carry(state)
             kt_rt = fx.Int32(kt_iv)
@@ -1334,18 +1318,15 @@ def gemm2_body_v2(
         store_c_carry(results)
     else:
         # -- 2-stage B software pipeline: B weight + B-scale prefetched one K-tile ahead. --
-        # Rotating single-buffer model (the runtime scf.for cannot index a python stage list by the
-        # runtime kt, so instead of a kt%2 slot we ALWAYS consume the carried "current" B and ALWAYS
-        # prefetch the next tile's B into the same fragments, threading the prefetched VALUES through
-        # scf.for state so this iteration's prefetch becomes next iteration's current. The C carry is
-        # extended with the B-weight (i32x4) + B-scale (i32x1) fragment values. Prologue loads tile 0.
+        # Rotating single-buffer: the runtime scf.for cannot index a python stage list by the runtime
+        # kt, so we always consume the carried "current" B and prefetch the next tile's B into the same
+        # fragments, threading the prefetched VALUES through scf.for state (this iteration's prefetch
+        # becomes next iteration's current). Prologue loads tile 0.
         cur_bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
         cur_bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
         nxt_bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
         nxt_bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
-        # A-scale prefetch (g2_ascale_pf): carry the CURRENT tile's A-scale as i32<1:1> fragment(s)
-        # (one per 32-row scale chunk, kScaleSubBlocks) through scf.for state, prefetching the next
-        # tile's into the same fragments -- same rotating-single-buffer model as the B carry above.
+        # g2_ascale_pf: carry the A-scale through scf.for state, same rotating-buffer model as B.
         cur_saf = nxt_saf = None
         if const_expr(g2_ascale_pf):
             cur_saf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(kScaleSubBlocks)]
@@ -1436,8 +1417,6 @@ def gemm2_body_v2(
         for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_carry()):
             store_carry(state)
             kt_rt = fx.Int32(kt_iv)
-            # g2_bhoist: issue the next-tile B weight+scale loads BEFORE the LDS barrier so the
-            # weight fetch overlaps the barrier wait (B is register-streamed, not LDS-ordered).
             if const_expr(g2_bhoist):
                 prefetch_next_b(kt_rt)
             gpu.barrier()
@@ -1445,17 +1424,14 @@ def gemm2_body_v2(
             nxt_a = kt_rt + fx.Int32(kStages)
             if nxt_a < K_TILES_RT:
                 issue_a_load_lds(nxt_a % fx.Int32(aStagesC), nxt_a)
-            # A-scale: prefetched from the carry (g2_ascale_pf) so it is already resident at the MFMA,
-            # or loaded synchronously here (default) -- the latter emits the buffer_load_dword + vmcnt(0)
-            # stall at the loop head that gates the MFMA on the scale's full VMEM latency.
+            # A-scale from the prefetch carry (g2_ascale_pf) or loaded synchronously here.
             if const_expr(g2_ascale_pf):
                 sa = [_raw(Vec(cur_saf[sub].load())[0]) for sub in range_constexpr(kScaleSubBlocks)]
             else:
                 sa = load_a_scale_tile(kt_rt)
             if const_expr(not g2_bhoist):
                 prefetch_next_b(kt_rt)
-            # Fence the MFMA chain from the B vmem loads so the next-tile loads ride ahead of compute
-            # (mirrors gemm1's main-loop sched_barrier/s_setprio fencing).
+            # Fence the MFMA chain from the B vmem loads so the next-tile loads ride ahead of compute.
             rocdl.sched_barrier(0)
             rocdl.s_setprio(1)
             mfma_cluster(cur_bqf, cur_bsf, sa)

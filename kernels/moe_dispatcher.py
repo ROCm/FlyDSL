@@ -2,6 +2,8 @@
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
 """Compile + launch dispatch for the layout-API MXFP4 MoE gemm (BM32, opus-sort); a4w4/a8w4 entry point."""
 
+import os
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import _to_raw as _raw
@@ -640,15 +642,12 @@ def compile_gemm1_a4w4_port(
 def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
     """DSL port of ck_tile GemmSpatiallyLocalTilePartitioner<>::GetOutputTileIndex.
 
-    Grouped 2D rasterization mapping a 1D block index -> (idx_M0, idx_N0) tile coords so that
-    consecutive block ids stay spatially local in the M0xN0 tile grid (Morton-like), spreading
-    concurrently-scheduled blocks' weight fetches across HBM channels WITHOUT any XCD awareness.
+    Grouped 2D rasterization mapping a 1D block index -> (m_block_idx, n_block_idx) so consecutive
+    block ids stay spatially local in the M0xN0 tile grid, spreading concurrently-scheduled blocks'
+    weight fetches across HBM channels (portable, XCD-count-independent). Bijection over [0, M0*N0).
 
-    block_1d_id, M0 : runtime fx.Int32 (M0 = total_m_blocks). N0, group_num, m01 : compile-time
-    Python ints (N0 = num_n_blocks). This mirrors gemm_tile_partitioner.hpp:274-360 exactly (the
-    M0==1 / N0==1 degenerate cases are irrelevant here: N0=num_n_blocks>1, M0 runtime>=1; at
-    group_num==m01==1 the arithmetic reduces to the naive linear map, matching aiter's shipped
-    config). Returns (m_block_idx, n_block_idx) as fx.Int32.
+    block_1d_id, M0 : runtime fx.Int32 (M0 = total_m_blocks). N0 (= num_n_blocks), group_num, m01 :
+    compile-time Python ints.
     """
     gn = fx.Int32(group_num)
     n0 = fx.Int32(N0)
@@ -723,42 +722,27 @@ def compile_gemm2_a4w4_port(
     if SBM % BM != 0:
         raise AssertionError(f"SBM ({SBM}) must be a multiple of BM ({BM})")
     use_reduce = epilog == "reduce"
-    # g2_kstages: B-weight software-pipeline depth over the gemm2 K-loop. Default (None) resolves from
-    # env MXFP4_G2_KSTAGES (1 = current synchronous B load, byte-identical default; 2 = B prefetched
-    # one K-tile ahead into double-buffered register fragments). Explicit arg overrides the env.
+    # gemm2 perf knobs (all default ON; env vars are optional overrides, explicit args win):
+    #   g2_kstages   2 = B weight+scale prefetched one K-tile ahead into double-buffered register
+    #                    fragments (1 = synchronous per-tile load).
+    #   g2_bhoist    issue the next-tile B prefetch above the per-iteration LDS barrier so the weight
+    #                fetch overlaps the barrier wait (no-op unless g2_kstages==2).
+    #   g2_ascale_pf prefetch the A-scale one K-tile ahead so the MFMA never stalls on it (no-op
+    #                unless g2_kstages==2).
+    #   g2_spart     aiter-style GemmSpatiallyLocalTilePartitioner block->(m,n) remap for HBM channel
+    #                balance, encoded GroupNum*100+M01 (402 = GroupNum4,M01=2); 0 = naive linear grid.
     if g2_kstages is None:
-        import os
-
-        g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "1"))
+        g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "2"))
     if g2_kstages not in (1, 2):
         raise AssertionError(f"g2_kstages must be 1 or 2, got {g2_kstages}")
-    # g2_bhoist: opt-in reorder that issues the next-tile B weight/scale prefetch above the
-    # per-iteration LDS barrier (only meaningful with g2_kstages==2). Default (None) resolves from
-    # env MXFP4_G2_BHOIST (0 = byte-identical default; 1 = hoist). Explicit arg overrides the env.
     if g2_bhoist is None:
-        import os
-
-        g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "0") == "1"
+        g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "1") == "1"
     g2_bhoist = bool(g2_bhoist)
-    # g2_ascale_pf: opt-in A-scale prefetch one K-tile ahead (only meaningful with g2_kstages==2).
-    # Default (None) resolves from env MXFP4_G2_ASCALE_PF (0 = byte-identical default; 1 = prefetch).
     if g2_ascale_pf is None:
-        import os
-
-        g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "0") == "1"
+        g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "1") == "1"
     g2_ascale_pf = bool(g2_ascale_pf)
-    # g2_spart: opt-in aiter-style GemmSpatiallyLocalTilePartitioner block->(m,n) remap for the
-    # one-shot grid (the portable, XCD-count-INDEPENDENT channel-balance mechanism aiter's cktile
-    # gemm2 uses; ck_tile GemmSpatiallyLocalTilePartitioner<shape,GroupNum,M01>, see
-    # gemm2-spatial-partitioner.md). Encoded as GroupNum*100+M01 (e.g. 402 = GroupNum4,M01=2);
-    # default (None/0) = off = byte-identical naive m-major linear grid. NOTE: aiter's shipped
-    # instances use GroupNum=1,M01=1 which mathematically DEGENERATES to the exact naive linear map,
-    # so non-trivial (GroupNum,M01) are swept here to actually rebalance channels. Explicit arg
-    # overrides the env MXFP4_G2_SPART.
     if g2_spart is None:
-        import os
-
-        g2_spart = int(os.environ.get("MXFP4_G2_SPART", "0"))
+        g2_spart = int(os.environ.get("MXFP4_G2_SPART", "402"))
     g2_spart = int(g2_spart)
     g2_group_num = g2_spart // 100 if g2_spart > 0 else 0
     g2_m01 = g2_spart % 100 if g2_spart > 0 else 0
@@ -795,14 +779,10 @@ def compile_gemm2_a4w4_port(
     # pad tag empty when has_pad=False so the default keeps its byte-identical kernel name AND no
     # i32_kpad kernarg (AC-3). has_pad=True adds the runtime pad kernarg + weight-OOB pad-skip.
     pad_tag = "_pad" if has_pad else ""
-    # kstages tag empty when g2_kstages==1 so the default variant keeps its byte-identical kernel name
-    # (AC-3); the 2-stage B pipeline is a distinct variant.
+    # perf-knob kernel-name tags (empty when off -> distinct kernel per knob combination).
     ks_tag = "" if g2_kstages == 1 else f"_g2ks{g2_kstages}"
-    # bhoist tag empty by default (byte-identical kernel name); only appended when the reorder is on.
     bh_tag = "_bhoist" if g2_bhoist else ""
-    # ascale-prefetch tag empty by default (byte-identical); only appended when the prefetch is on.
     apf_tag = "_apf" if g2_ascale_pf else ""
-    # spart tag empty by default (byte-identical); only appended when the partitioner remap is on.
     spart_tag = f"_spart{g2_group_num}x{g2_m01}" if g2_spart > 0 else ""
     tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}{bh_tag}{apf_tag}{spart_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
@@ -899,7 +879,8 @@ def compile_gemm2_a4w4_port(
             )
 
         if const_expr(not persist and g2_spart <= 0):
-            # One-shot grid (atomic): issue A->LDS before the cumsum load so HBM latency overlaps the bound check.
+            # One-shot grid, naive linear block->(m,n): issue A->LDS before the cumsum load so HBM
+            # latency overlaps the bound check.
             issue_all_a_loads((bx_i32 // num_n_blocks) * fx.Int32(BM))
             rocdl.sched_barrier(0)
 
@@ -910,12 +891,9 @@ def compile_gemm2_a4w4_port(
             if fx.Int32(bx_i32) < bound:
                 run_unit(bx_i32)
         elif const_expr(not persist):
-            # One-shot grid with aiter GemmSpatiallyLocalTilePartitioner block->(m,n) remap
-            # (g2_spart>0). The partitioner needs M0=total_m_blocks (runtime), so the cumsum must be
-            # read FIRST -> this path loses the default's A-prologue/cumsum overlap (same tradeoff as
-            # the xcd path). The remap is a bijection over [0, M0*N0): every (m,n) tile is still
-            # computed exactly once, by a different physical block, so concurrently-scheduled blocks'
-            # weight fetches spread across HBM channels. XCD-count-INDEPENDENT (no hardcoded 8).
+            # One-shot grid with the spatial-partitioner block->(m,n) remap (g2_spart>0). Needs
+            # M0=total_m_blocks (runtime) so the cumsum is read FIRST, trading the naive path's
+            # A-prologue/cumsum overlap for HBM channel balance.
             cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
             total_m_blocks = cumsum0 // BM
             bound = total_m_blocks * fx.Int32(num_n_blocks)
@@ -1180,20 +1158,12 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
     SBM = _norm_sbm(SBM, BM)
     topk_key = topk if epilog == "reduce" else 1
     cu_key = cu_num if persist else 0
-    # g2_kstages (B-pipeline depth) is a compile-time cache-key dim; resolve from env here so it enters
-    # the key (env MXFP4_G2_KSTAGES; default 1 = byte-identical). Explicit compile_gemm2 arg still wins.
-    import os
-
-    g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "1"))
-    # g2_bhoist (B-prefetch-above-barrier reorder) is a compile-time cache-key dim; default 0 =
-    # byte-identical. Only meaningful with g2_kstages==2. Explicit compile_gemm2 arg still wins.
-    g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "0") == "1"
-    # g2_ascale_pf (A-scale prefetch) is a compile-time cache-key dim; default 0 = byte-identical.
-    # Only meaningful with g2_kstages==2. Explicit compile_gemm2 arg still wins.
-    g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "0") == "1"
-    # g2_spart (aiter spatial-partitioner block->(m,n) remap) is a compile-time cache-key dim;
-    # default 0 = byte-identical one-shot linear grid. Explicit compile_gemm2 arg still wins.
-    g2_spart = int(os.environ.get("MXFP4_G2_SPART", "0"))
+    # gemm2 perf knobs enter the compile cache key; defaults are ON (env vars are optional overrides),
+    # matching compile_gemm2_a4w4_port. See its docstring/comments for what each knob does.
+    g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "2"))
+    g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "1") == "1"
+    g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "1") == "1"
+    g2_spart = int(os.environ.get("MXFP4_G2_SPART", "402"))
     # has_pad is a compile-time cache-key dim; has_pad=False is the byte-identical default variant.
     key = (
         BM,
