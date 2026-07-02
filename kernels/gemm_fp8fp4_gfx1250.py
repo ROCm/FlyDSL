@@ -474,16 +474,10 @@ def compile_fp8fp4_gemm(
     _fp8_warp_pp_v2 = use_fp8_warp_pp_v2_schedule
     # _wpp_active covers both v1 and v2; assert consistency.
     assert (_fp8_warp_pp or _fp8_warp_pp_v2) == _wpp_active, (_fp8_warp_pp, _fp8_warp_pp_v2, _wpp_active)
-    # warp-pp anti-phase: split 8 waves into group0 (wave<grp) and group1. group0
-    # loads+publishes shared A/As/Bs (+ its B0) and computes its N-half; group1
-    # loads its B1, waits group0's shared data via an LDS atomic flag, and computes
-    # its N-half. Monotonic LDS flags (a_ready forward, a_consumed WAR) let the two
-    # groups run a bounded number of K-tiles apart -> anti-phase drift.
     _wpp_grp_count = num_warps // 2
-    # v1 only: LDS flags for cross-group WAR (a_ready / a_consumed).
-    # v2 has no WAR and allocates no flag storage.
+    # LDS flags for cross-group WAR (a_ready / a_consumed). 
     _wpp_flag_alloc = None
-    if _fp8_warp_pp:
+    if _fp8_warp_pp or _fp8_warp_pp_v2:
         _wpp_flag_alloc = SmemAllocator(
             None, arch=gpu_arch, global_sym_name=f"warp_pp_flags_{tile_m}x{tile_n}x{tile_k}_{m_warp}x{n_warp}"
         )
@@ -2645,7 +2639,7 @@ def compile_fp8fp4_gemm(
             pipeline_fence_signal(outstanding=outstanding, use_cluster=use_cluster)
 
         # ---- warp-pp per-group anti-phase fence (main loop only) ----
-        if const_expr(_fp8_warp_pp):
+        if const_expr(_fp8_warp_pp or _fp8_warp_pp_v2):
             _wpp_fb = SmemPtr(_wpp_flag_alloc.get_base(), 0, T.i32, shape=(4,))
             _wpp_fidx = extract_lds_base_idx(_wpp_fb)
             _wpp_i32 = ir.IntegerType.get_signless(32)
@@ -2704,20 +2698,27 @@ def compile_fp8fp4_gemm(
                 _wpp_spin_ge(_WPP_OFF_READY, gen_p1_i32)
                 scf.YieldOp([])
 
-        def _wpp_loop_fence_v2():
-            # v2 fence: tensorcnt drain + per-group named barrier only.
-            # No WAR spin: both groups compute the same K-tile with pre_loaded=3
-            # (standard ring, no drift), so TDM writes never alias compute reads.
-            # The staggered barrier fire times (g0 = A-loader exits tensorcnt first)
-            # seed the natural phase offset that setprio(1/0) then locks in.
+        def _wpp_loop_fence_v2(gen_i32, gen_p1_i32):
             tdm_ops.tensor_wait(_fence_outstanding)
+            if const_expr(use_cluster):
+                cluster.cluster_signal_once_per_wg()
             _if = scf.IfOp(arith.unwrap(rocdl.wave_id() < fx.Int32(_wpp_grp_count)), [], has_else=True)
             with ir.InsertionPoint(_if.then_block):
                 _wpp_intra_barrier("wpp_g0", 1)
+                _wpp_spin_ge(_WPP_OFF_CONSUMED, gen_i32)
+                lds_atomic_store_b32_raw(
+                    _wpp_fidx, arith.index(_WPP_OFF_READY), gen_p1_i32, llvm.AtomicOrdering.release
+                )
                 scf.YieldOp([])
             with ir.InsertionPoint(_if.else_block):
                 _wpp_intra_barrier("wpp_g1", 2)
+                lds_atomic_store_b32_raw(
+                    _wpp_fidx, arith.index(_WPP_OFF_CONSUMED), gen_i32, llvm.AtomicOrdering.release
+                )
+                _wpp_spin_ge(_WPP_OFF_READY, gen_p1_i32)
                 scf.YieldOp([])
+            if const_expr(use_cluster):
+                cluster.cluster_wait()
 
         def _issue_active_tdm(load_stage, addr_box, k_prefetch=None, sec_box=None):
             dg0 = _pack_dg0(active_pred_const, active_stage_lds_addr[load_stage], addr_box[0], active_addr_hi)
@@ -2797,14 +2798,14 @@ def compile_fp8fp4_gemm(
                     ):
                         _issue_active_tdm(_ls, _ab, k_prefetch=_k_off, sec_box=_sb)
 
-                    if const_expr(_fp8_warp_pp_v2):
-                        _wpp_loop_fence_v2()
-                    elif const_expr(_fp8_warp_pp):
+                    if const_expr(_fp8_warp_pp_v2 or _fp8_warp_pp):
                         _wpp_gen_idx = loop_iter * arith.index(num_buffers) + arith.index(buf_idx)
-                        _wpp_loop_fence(
-                            arith.index_cast(T.i32, _wpp_gen_idx),
-                            arith.index_cast(T.i32, _wpp_gen_idx + arith.index(1)),
-                        )
+                        _wpp_gen_i32 = arith.index_cast(T.i32, _wpp_gen_idx)
+                        _wpp_gen_p1_i32 = arith.index_cast(T.i32, _wpp_gen_idx + arith.index(1))
+                        if const_expr(_fp8_warp_pp_v2):
+                            _wpp_loop_fence_v2(_wpp_gen_i32, _wpp_gen_p1_i32)
+                        else:
+                            _wpp_loop_fence(_wpp_gen_i32, _wpp_gen_p1_i32)
                     else:
                         if const_expr(not use_tdm_late_signal_overlap):
                             _pipeline_fence_signal(outstanding=_fence_outstanding)
@@ -3054,7 +3055,7 @@ def compile_fp8fp4_gemm(
         with ir.InsertionPoint(ctx.gpu_module_body):
             arena_alloc.finalized = False
             arena_alloc.finalize()
-            if const_expr(_fp8_warp_pp):
+            if const_expr(_fp8_warp_pp or _fp8_warp_pp_v2):
                 _wpp_flag_alloc.finalized = False
                 _wpp_flag_alloc.finalize()
             if const_expr(_fp8_warp_pp or _fp8_warp_pp_v2):
