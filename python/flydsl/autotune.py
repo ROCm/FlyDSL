@@ -62,6 +62,52 @@ def _device_fingerprint() -> str:
         return ""
 
 
+def _device_name() -> str:
+    """Human-readable device name for offline filenames (e.g.
+    'AMD_Instinct_MI300X'); falls back to the arch string."""
+    name = ""
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                # current device, not 0 — correct under mixed/multi-GPU processes.
+                name = torch.cuda.get_device_name(torch.cuda.current_device())
+        except Exception:
+            name = ""
+    return (name or _device_fingerprint() or "unknown").replace(" ", "_")
+
+
+def _offline_config_dir():
+    """Committed offline-config tree (FLYDSL_AUTOTUNE_CONFIG_DIR), or None.
+
+    The aiter/SGLang "offline" model: tune once, commit, look up at serving with
+    no search. Portable, human-named artifacts — unlike the machine-local
+    fingerprint scratch cache (FLYDSL_AUTOTUNE_CACHE_DIR)."""
+    d = os.environ.get("FLYDSL_AUTOTUNE_CONFIG_DIR")
+    return Path(d) if d else None
+
+
+def _safe_component(value) -> str:
+    """Map a filename component to strict ASCII [A-Za-z0-9._-] so no shape/name/
+    device value can inject a ',' / '=' delimiter or a path separator."""
+    safe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    return "".join(c if c in safe else "_" for c in str(value))
+
+
+def offline_config_filename(name, spec, device_name=None):
+    """SGLang-style filename-as-key: ``name,k1=v1,...,device_name=X.json``.
+
+    ``spec`` is the sequence of (axis, value) pairs from the tuner's key (shape +
+    build-only scalars like dtype). The filename fully identifies the config, so
+    a downstream engine resolves it by reconstructing the name."""
+    if device_name is None:
+        device_name = _device_name()
+    parts = [_safe_component(name)]
+    for k, v in spec:
+        parts.append(f"{_safe_component(k)}={_safe_component(v)}")
+    parts.append(f"device_name={_safe_component(device_name)}")
+    return ",".join(parts) + ".json"
+
+
 def _normalize_strides(t) -> tuple:
     """Bucket strides to {0, 1, other}: the layout *pattern* (broadcast /
     contiguous / strided) affects the best config, the exact numbers don't."""
@@ -446,14 +492,22 @@ class Autotuner:
         if not force and key in self.cache:
             return self._run_config(self.cache[key], key, args, kwargs)
 
-        # 2. Two-track heuristic: unless tuning is explicitly requested, take
+        # 2. Committed offline artifact (aiter/SGLang model): no search, portable
+        #    across identical GPUs. Validated before use (see _load_offline_config).
+        if not force:
+            cfg = self._load_offline_config(args, kwargs)
+            if cfg is not None:
+                self.cache[key] = cfg
+                return self._run_config(cfg, key, args, kwargs)
+
+        # 3. Two-track heuristic: unless tuning is explicitly requested, take
         #    the analytic default and skip the search entirely (zero-search
         #    normal run). Mirrors Triton @heuristics / quack get_default.
         if not force and self.default is not None:
             cfg = self.default(*args, **kwargs)
             return self._run_config(cfg, key, args, kwargs)
 
-        # 3. Full search: benchmark every config, pick fastest, cache. configs
+        # 4. Full search: benchmark every config, pick fastest, cache. configs
         #    may be a callable(*args) -> [Config] to build the space per shape.
         configs = self.configs(*args, **kwargs) if callable(self.configs) else self.configs
         configs = self._prune(configs, args, kwargs)
@@ -475,8 +529,106 @@ class Autotuner:
 
         self.cache[key] = best_config
         self._save_disk_cache()
+        self._emit_offline_config(best_config, args, kwargs)
 
         return self._run_config(best_config, key, args, kwargs)
+
+    # --- Offline config artifacts (aiter/SGLang model) ---
+    def _offline_spec(self, args, kwargs):
+        """The (axis, value) spec dict for this call, or None if offline mode is
+        off. Reuses key_fn so the offline key == the tuning key axes, and passes
+        values through JSON so the in-memory spec compares equal to the one
+        reloaded from disk (e.g. a tuple becomes a list on both sides)."""
+        if _offline_config_dir() is None or self.key_fn is None:
+            return None
+        try:
+            raw = dict(self.key_fn(*args, **kwargs))
+            return json.loads(json.dumps(raw))  # normalize to JSON types
+        except Exception as e:
+            # Offline mode is configured but the spec isn't JSON-serializable
+            # (e.g. an Enum/torch.dtype axis) — warn rather than silently
+            # disabling the offline path for this op.
+            print(f"[autotune] WARNING: offline disabled for {self.name}: spec not JSON-serializable ({e})")
+            return None
+
+    def _offline_path(self, args, kwargs):
+        spec = self._offline_spec(args, kwargs)
+        if spec is None:
+            return None
+        cfg_dir = _offline_config_dir()
+        path = cfg_dir / offline_config_filename(self.name, spec.items())
+        # Sanitized components can't escape, but confirm anyway.
+        if path.parent.resolve() != cfg_dir.resolve():
+            return None
+        return cfg_dir, path, spec
+
+    def _load_offline_config(self, args, kwargs):
+        """Load + validate a committed offline Config, or None on a genuine miss.
+        A file that exists but is corrupt or describes a different call is warned
+        about and ignored, so a broken artifact can't silently mis-serve."""
+        resolved = self._offline_path(args, kwargs)
+        if resolved is None:
+            return None
+        _, path, spec = resolved
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except Exception as e:
+            print(f"[autotune] WARNING: offline config {path.name} unreadable ({e}); ignoring")
+            return None
+        if not isinstance(data, dict):
+            print(f"[autotune] WARNING: offline config {path.name} is not an object; ignoring")
+            return None
+        required = ("name", "spec", "device_name", "config")
+        missing = [f for f in required if f not in data]
+        if missing:
+            print(f"[autotune] WARNING: offline config {path.name} missing {missing}; ignoring")
+            return None
+        # Validate every axis against this call. Any malformed field (e.g. a
+        # non-dict spec) is a mismatch to ignore, never an exception to escape.
+        expected = {"name": self.name, "spec": spec, "device_name": _device_name()}
+        for field, want in expected.items():
+            got = data[field]
+            if got != want:
+                print(f"[autotune] WARNING: offline config {path.name} {field} {got!r}!={want!r}; ignoring")
+                return None
+        # The config body must be a non-empty dict and, in builder mode, carry
+        # the structural knobs — otherwise an empty/partial "config": {} would
+        # load a bare Config and silently run build_fn's *default* knob value.
+        cfg_body = data["config"]
+        if not isinstance(cfg_body, dict) or not cfg_body:
+            print(f"[autotune] WARNING: offline config {path.name} has an empty/invalid config; ignoring")
+            return None
+        if self.structural:
+            missing_knobs = [k for k in self.structural if k not in cfg_body]
+            if missing_knobs:
+                print(f"[autotune] WARNING: offline config {path.name} missing structural {missing_knobs}; ignoring")
+                return None
+        try:
+            return Config.from_dict(cfg_body)
+        except Exception as e:
+            print(f"[autotune] WARNING: offline config {path.name} malformed ({e}); ignoring")
+            return None
+
+    def _emit_offline_config(self, config, args, kwargs):
+        """Write the tuned Config as a self-describing committed artifact."""
+        resolved = self._offline_path(args, kwargs)
+        if resolved is None:
+            return
+        cfg_dir, path, spec = resolved
+        payload = {
+            "name": self.name,
+            "spec": spec,  # already JSON-normalized by _offline_spec
+            "device_name": _device_name(),
+            "config": config.to_dict(),
+        }
+        try:
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            print(f"[autotune] wrote offline config {path.name}")
+        except Exception as e:
+            print(f"[autotune] failed to write offline config: {e}")
 
     # --- Disk cache ---
     def _load_disk_cache(self):
@@ -612,8 +764,11 @@ def autotune_builder(
             cache dir, so each needs a distinct name).
         build: build(**spec, **structural_knobs) -> launch callable.
         specialize: specialize(*args, **kwargs) -> dict of the build/lookup axes
-            (shape + build-only scalars). Its items become the cache key, so a
-            scalar like dtype_str can't be silently dropped from the key.
+            (shape + build-only scalars). Its items become the cache key AND the
+            offline filename, so it must (a) include every axis the best config
+            depends on — an omitted axis silently collides in the offline tree —
+            and (b) use JSON-scalar values (str/int/float/bool; tuples are ok,
+            stored as lists) so an emitted artifact matches on later lookup.
         configs / default: called as configs(**spec) / default(**spec).
         structural: config kwarg names passed to build() (vs compiler hints,
             which flow through Config.compiler_opts()).

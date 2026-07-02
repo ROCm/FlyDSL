@@ -11,6 +11,7 @@ Verifies the two-track builder-mode autotuner end to end:
   - the tuned result is cached (a second call does not re-tune)
 """
 
+import json
 import os
 
 import pytest
@@ -96,6 +97,59 @@ def test_rmsnorm_autotuned_search_and_cache(tmp_path, monkeypatch):
     err2 = (out2.float() - ref).abs().max().item()
     assert err2 < 2e-2, f"cached run max_err={err2}"
     assert n_bench["n"] == 0, "second call re-tuned instead of using the cache"
+
+
+def test_rmsnorm_offline_emit_and_lookup(tmp_path, monkeypatch):
+    """Forced tune emits a committed offline artifact; a normal run then serves
+    from it (no search), proven by hooking the offline loader + benchmark."""
+    M, N = 4096, 8192
+    cfg_dir = tmp_path / "configs"
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(cfg_dir))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "cache"))
+
+    torch.manual_seed(0)
+    x = torch.randn(M, N, device="cuda").to(torch.bfloat16)
+    g = torch.rand(N, device="cuda").to(torch.bfloat16)
+    ref = _reference(x, g)
+    s = torch.cuda.current_stream()
+
+    # 1. Force a tune -> emits offline config.
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    out = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
+    rmsnorm_autotuned(x, g, out, M, dtype_str="bf16", stream=s)
+    torch.cuda.synchronize()
+    emitted = list(cfg_dir.glob("rmsnorm,N=8192,dtype_str=bf16,device_name=*.json"))
+    assert emitted, f"no offline config emitted in {cfg_dir}"
+
+    # 2. Tuning OFF, empty in-memory + fresh scratch cache -> must use offline.
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "cache_fresh"))
+    rmsnorm_autotuned.tuner.cache.clear()
+    got = {"cfg": None}
+    benched = {"n": 0}
+    orig_load, orig_bench = rmsnorm_autotuned.tuner._load_offline_config, rmsnorm_autotuned.tuner._bench_one
+
+    def hooked_load(a, k):
+        cfg = orig_load(a, k)
+        got["cfg"] = cfg
+        return cfg
+
+    monkeypatch.setattr(rmsnorm_autotuned.tuner, "_load_offline_config", hooked_load)
+    monkeypatch.setattr(
+        rmsnorm_autotuned.tuner,
+        "_bench_one",
+        lambda *a, **k: (benched.__setitem__("n", benched["n"] + 1), orig_bench(*a, **k))[1],
+    )
+    out2 = torch.empty(M, N, device="cuda", dtype=torch.bfloat16)
+    rmsnorm_autotuned(x, g, out2, M, dtype_str="bf16", stream=s)
+    torch.cuda.synchronize()
+    assert (out2.float() - ref).abs().max().item() < 2e-2
+    assert benched["n"] == 0  # no search
+    # Prove offline was the actual SOURCE (not a None->default fallback): the
+    # loader returned a real Config carrying the tuned BLOCK_THREADS.
+    assert got["cfg"] is not None and "BLOCK_THREADS" in got["cfg"].kwargs
+    emitted_block = json.loads(emitted[0].read_text())["config"]["BLOCK_THREADS"]
+    assert got["cfg"].kwargs["BLOCK_THREADS"] == emitted_block
 
 
 if __name__ == "__main__":

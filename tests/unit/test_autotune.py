@@ -693,5 +693,208 @@ def test_cache_dir_change_does_not_serve_stale_config(tmp_path, monkeypatch):
     assert out2._data[0] == 7.0, "served a stale in-memory config from the old cache dir"
 
 
+# ── offline artifacts (aiter/SGLang model) ───────────────────────────────
+def test_offline_filename_is_key_and_sanitized():
+    from flydsl.autotune import offline_config_filename
+
+    name = offline_config_filename("op", [("N", 8192), ("dtype_str", "bf16")], device_name="AMD MI300X")
+    assert name == "op,N=8192,dtype_str=bf16,device_name=AMD_MI300X.json"
+    # injection is neutralized: no raw delimiters / path separators survive
+    evil = offline_config_filename("../x", [("N", "1,dtype_str=y")], device_name="a/b")
+    assert "/" not in evil and evil.count(".json") == 1
+
+
+def _write_offline(cfg_dir, spec_items, config, name="fakeop", device=None, raw=None):
+    """Write an offline artifact; returns its path. `raw` overrides the payload."""
+    from flydsl.autotune import _device_name, offline_config_filename
+
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    device = device or _device_name()
+    path = cfg_dir / offline_config_filename(name, spec_items, device_name=device)
+    payload = (
+        raw
+        if raw is not None
+        else {
+            "name": name,
+            "spec": dict(spec_items),
+            "device_name": device,
+            "config": config,
+        }
+    )
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_offline_emit_then_served_is_the_offline_config(tmp_path, monkeypatch):
+    """Prove the OFFLINE config is what serves — not the heuristic default.
+
+    The fake build writes the chosen BLOCK into out[0]. Forced tune picks BLOCK=64
+    (first config, equal timings); the default is BLOCK=7. A fresh tuner with
+    tuning OFF and a *separate* scratch cache dir must produce 64, so we know the
+    value came from the committed artifact, not the default and not disk cache."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "cfg"))
+
+    # 1. Force a tune -> emits the artifact (BLOCK=64).
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "scratch1"))
+    t, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    t(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="bf16")
+    payload = json.loads(next((tmp_path / "cfg").glob("*.json")).read_text())
+    assert payload["spec"] == {"N": 512, "dtype_str": "bf16"}
+    assert payload["config"]["BLOCK"] == 64
+
+    # 2. Fresh tuner, tuning OFF, SEPARATE scratch dir (so a disk-cache hit can't
+    #    masquerade as an offline hit), and no benchmarking allowed.
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "scratch2"))
+    t2, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    n = {"bench": 0}
+    orig = t2.tuner._bench_one
+    t2.tuner._bench_one = lambda *a, **k: (n.__setitem__("bench", n["bench"] + 1), orig(*a, **k))[1]
+    out = FakeTensor((1,))
+    t2(FakeTensor((16, 512)), out, dtype_str="bf16")
+    assert n["bench"] == 0  # no search
+    assert out._data[0] == 64.0  # served the OFFLINE config (64), not default (7)
+
+
+def test_offline_stale_artifact_rejected(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    # filename matches N=512, but content claims N=4096 (stale / hand-edited)
+    _write_offline(
+        tmp_path / "cfg",
+        [("N", 512), ("dtype_str", "bf16")],
+        {"BLOCK": 1},
+        raw={
+            "name": "fakeop",
+            "spec": {"N": 4096, "dtype_str": "bf16"},
+            "device_name": __import__("flydsl.autotune", fromlist=["_device_name"])._device_name(),
+            "config": {"BLOCK": 1},
+        },
+    )
+    t, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    out = FakeTensor((1,))
+    t(FakeTensor((16, 512)), out, dtype_str="bf16")
+    assert "ignoring" in capsys.readouterr().out  # rejected
+    assert out._data[0] == 7.0  # fell back to default (BLOCK=7), not the stale config
+
+
+def test_offline_malformed_spec_does_not_crash(tmp_path, monkeypatch, capsys):
+    """spec=null (present but not a dict) must warn + fall back, never raise."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    _write_offline(
+        tmp_path / "cfg",
+        [("N", 512), ("dtype_str", "bf16")],
+        None,
+        raw={
+            "name": "fakeop",
+            "spec": None,
+            "device_name": __import__("flydsl.autotune", fromlist=["_device_name"])._device_name(),
+            "config": {"BLOCK": 1},
+        },
+    )
+    t, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    out = FakeTensor((1,))
+    t(FakeTensor((16, 512)), out, dtype_str="bf16")  # must not raise
+    assert "ignoring" in capsys.readouterr().out
+    assert out._data[0] == 7.0  # default fallback
+
+
+def test_offline_empty_config_rejected(tmp_path, monkeypatch, capsys):
+    """A matching artifact with an empty/partial config must be rejected, not
+    served (else builder mode silently runs build_fn's default structural knob).
+    The fake build's structural knob is BLOCK; an empty config lacks it."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    _write_offline(
+        tmp_path / "cfg",
+        [("N", 512), ("dtype_str", "bf16")],
+        {},  # empty config body
+        raw={
+            "name": "fakeop",
+            "spec": {"N": 512, "dtype_str": "bf16"},
+            "device_name": __import__("flydsl.autotune", fromlist=["_device_name"])._device_name(),
+            "config": {},
+        },
+    )
+    t, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    out = FakeTensor((1,))
+    t(FakeTensor((16, 512)), out, dtype_str="bf16")
+    assert "ignoring" in capsys.readouterr().out
+    assert out._data[0] == 7.0  # fell back to default (BLOCK=7), not the empty artifact
+
+
+def test_offline_corrupt_and_missing_fields(tmp_path, monkeypatch, capsys):
+    from flydsl.autotune import _device_name, offline_config_filename
+
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    fname = offline_config_filename("fakeop", [("N", 512), ("dtype_str", "bf16")], device_name=_device_name())
+    # unparseable JSON
+    (cfg / fname).write_text("{ not json")
+    t, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    t(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="bf16")
+    assert "unreadable" in capsys.readouterr().out
+    # present file, missing required fields
+    (cfg / fname).write_text(json.dumps({"config": {"BLOCK": 1}}))
+    t2, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    t2(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="bf16")
+    assert "missing" in capsys.readouterr().out
+
+
+def test_offline_tuple_spec_round_trips(tmp_path, monkeypatch):
+    """A spec value that JSON turns into a list (tuple) must still self-match on
+    lookup — the artifact must not reject its own emitted config."""
+
+    def build(N, tile, BLOCK=0):
+        return lambda a, out, stream=None: out._data.__setitem__(0, float(BLOCK))
+
+    def specialize(a, out, stream=None):
+        return {"N": a.shape[-1], "tile": (16, 32)}
+
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "s1"))
+    mk = dict(
+        name="op",
+        build=build,
+        specialize=specialize,
+        configs=lambda N, tile: [Config(BLOCK=5)],
+        default=lambda N, tile: Config(BLOCK=9),
+        structural=("BLOCK",),
+        warmup=1,
+        rep=1,
+        do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1],
+    )
+    autotune_builder(**mk)(FakeTensor((8, 512)), FakeTensor((1,)))
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "s2"))
+    out = FakeTensor((1,))
+    autotune_builder(**mk)(FakeTensor((8, 512)), out)
+    assert out._data[0] == 5.0  # offline (5) served, not default (9)
+
+
+def test_offline_force_bypasses_and_reemits(tmp_path, monkeypatch):
+    """FLYDSL_AUTOTUNE=1 must ignore an existing offline artifact, re-benchmark,
+    and re-emit — not short-circuit on the committed config."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "s1"))
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    t, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    t(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="bf16")  # emits artifact
+
+    # Force again with a fresh scratch dir: must still benchmark (not serve offline).
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "s2"))
+    t2, _ = _make_builder(do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1])
+    n = {"bench": 0}
+    orig = t2.tuner._bench_one
+    t2.tuner._bench_one = lambda *a, **k: (n.__setitem__("bench", n["bench"] + 1), orig(*a, **k))[1]
+    t2(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="bf16")
+    assert n["bench"] > 0  # force bypassed the offline artifact
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
