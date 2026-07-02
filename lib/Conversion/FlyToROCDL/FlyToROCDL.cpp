@@ -915,8 +915,9 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// FlyROCDLArgInRegPass — mark all kernel arguments as inreg so the firmware
-// preloads them into SGPRs.  Run inside gpu.module() AFTER convert-gpu-to-rocdl.
+// FlyROCDLArgInRegPass — mark kernel arguments as inreg for kernels that
+// opt in via the `fly.arg_inreg` unit attribute on the function.
+// Run inside gpu.module() AFTER convert-gpu-to-rocdl.
 // ---------------------------------------------------------------------------
 class FlyROCDLArgInRegPass
     : public mlir::impl::FlyROCDLArgInRegPassBase<FlyROCDLArgInRegPass> {
@@ -926,7 +927,7 @@ public:
 
   void runOnOperation() override {
     getOperation()->walk([&](LLVM::LLVMFuncOp func) {
-      if (!func->hasAttr("rocdl.kernel"))
+      if (!func->hasAttr("fly.arg_inreg"))
         return;
 
       MLIRContext *ctx = func.getContext();
@@ -935,6 +936,8 @@ public:
 
       for (unsigned i = 0; i < func.getNumArguments(); ++i)
         func.setArgAttr(i, inRegAttrName, unitAttr);
+
+      func->removeAttr("fly.arg_inreg");
     });
   }
 };

@@ -33,9 +33,12 @@ def FlyROCDLArgInRegPass : Pass<"fly-rocdl-arg-inreg"> {
   let summary = "Mark kernel arguments as inreg for SGPR preloading";
   let description = [{
     Adds the `llvm.inreg` attribute to all arguments of `llvm.func` ops
-    marked with `rocdl.kernel`, hinting the firmware to preload kernel
-    arguments into user SGPRs so the kernel does not need to s_load its
-    arguments from memory.
+    that carry the `fly.arg_inreg` marker attribute, hinting the firmware
+    to preload kernel arguments into user SGPRs.
+
+    Kernels opt in by attaching `fly.arg_inreg` as a unit attribute on
+    the `gpu.func` (which `convert-gpu-to-rocdl` copies to `llvm.func`).
+    The marker is consumed (removed) by this pass.
 
     Run inside `gpu.module(...)` after `convert-gpu-to-rocdl`.
   }];
