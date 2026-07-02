@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-02T13:01:20Z",
+ "updated": "2026-07-02T15:29:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28596539965,
+   "pr": 753,
+   "commit": "5856379dd435ddffa9d065e4f6f768c482bab999",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28596539965",
+   "created_at": "2026-07-02T14:09:29Z",
+   "updated_at": "2026-07-02T15:27:12Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-02T14:10:35Z",
+     "completed_at": "2026-07-02T14:24:00Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28596539965/job/84793517077"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-02T14:10:43Z",
+     "completed_at": "2026-07-02T15:27:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28596539965/job/84793517157"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-02T14:10:43Z",
+     "completed_at": "2026-07-02T15:00:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28596539965/job/84793517196"
+    }
+   ]
+  },
   {
    "run_id": 28573175142,
    "pr": 753,
@@ -1501,21 +1544,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502910554",
    "created_at": "2026-07-01T08:04:14Z",
    "updated_at": "2026-07-01T08:04:14Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28502801154,
-   "pr": null,
-   "commit": "b7b3c257863ef547ffbd04993d38d7957889172c",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502801154",
-   "created_at": "2026-07-01T08:02:07Z",
-   "updated_at": "2026-07-01T08:02:07Z",
    "actor": "jhinpan",
    "jobs": []
   }
