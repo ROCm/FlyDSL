@@ -1,8 +1,83 @@
 {
  "schema": 1,
- "updated": "2026-07-02T18:51:33Z",
+ "updated": "2026-07-02T21:45:01Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28616216288,
+   "pr": 788,
+   "commit": "92406ee720d1e79bc03e6a4da3885d54153becbd",
+   "branch": "feat/autotune-ci-guard",
+   "event": "pull_request",
+   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28616216288",
+   "created_at": "2026-07-02T19:29:03Z",
+   "updated_at": "2026-07-02T19:29:03Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28616144596,
+   "pr": 786,
+   "commit": "e7edf3b3d8da6d248f7eb3011be0e69a02a86221",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28616144596",
+   "created_at": "2026-07-02T19:27:43Z",
+   "updated_at": "2026-07-02T19:27:43Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28615695231,
+   "pr": null,
+   "commit": "b5c2305c9964af36b76814c0c279f19d677e4eb4",
+   "branch": "feat/autotune-ci-guard",
+   "event": "pull_request",
+   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28615695231",
+   "created_at": "2026-07-02T19:19:35Z",
+   "updated_at": "2026-07-02T19:19:35Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28615595967,
+   "pr": null,
+   "commit": "5e2cda0ad3c95199e52943734741e3dd9ae5e799",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28615595967",
+   "created_at": "2026-07-02T19:17:44Z",
+   "updated_at": "2026-07-02T19:17:44Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28615458485,
+   "pr": 785,
+   "commit": "1bc2ee720f0fdd9fe7846999184212d4c3251dc3",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28615458485",
+   "created_at": "2026-07-02T19:15:11Z",
+   "updated_at": "2026-07-02T19:15:11Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 28596539965,
    "pr": 753,
@@ -91,7 +166,7 @@
   },
   {
    "run_id": 28572147298,
-   "pr": 788,
+   "pr": null,
    "commit": "1c55a7fba348aa4c95a242f5bf76daa4dcca95f5",
    "branch": "feat/autotune-ci-guard",
    "event": "pull_request",
@@ -106,7 +181,7 @@
   },
   {
    "run_id": 28572112570,
-   "pr": 786,
+   "pr": null,
    "commit": "689f570b5c1ffb498b416e77c9e0636b38849f46",
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
@@ -121,7 +196,7 @@
   },
   {
    "run_id": 28572093768,
-   "pr": 785,
+   "pr": null,
    "commit": "95ea14766874e0a91f0b1cd14e4f2163e5a11956",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -1443,109 +1518,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261/job/84506143450"
     }
    ]
-  },
-  {
-   "run_id": 28506246857,
-   "pr": 753,
-   "commit": "d818a91b54faaff7f38de96628b1b1066a0d425e",
-   "branch": "mxfp4-moe-gemm",
-   "event": "pull_request",
-   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28506246857",
-   "created_at": "2026-07-01T09:04:41Z",
-   "updated_at": "2026-07-01T10:22:18Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T09:14:19Z",
-     "completed_at": "2026-07-01T10:22:17Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28506246857/job/84495583213"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T09:07:08Z",
-     "completed_at": "2026-07-01T10:17:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28506246857/job/84495583220"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T09:06:16Z",
-     "completed_at": "2026-07-01T10:21:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28506246857/job/84495583224"
-    }
-   ]
-  },
-  {
-   "run_id": 28503477734,
-   "pr": null,
-   "commit": "d9f1e149f39bf6808066045c9c40b89cfb819e52",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28503477734",
-   "created_at": "2026-07-01T08:14:45Z",
-   "updated_at": "2026-07-01T08:14:45Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28503459986,
-   "pr": null,
-   "commit": "5f21d98942f97eb0c687f7bfead5457d8cdcf1fc",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28503459986",
-   "created_at": "2026-07-01T08:14:26Z",
-   "updated_at": "2026-07-01T08:14:26Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28503348143,
-   "pr": null,
-   "commit": "554ce325510ecac94644413a121d2d5b965da938",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28503348143",
-   "created_at": "2026-07-01T08:12:26Z",
-   "updated_at": "2026-07-01T08:12:26Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28502910554,
-   "pr": null,
-   "commit": "9fcb683368c622a85183ef40e17c89bae56f811e",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28502910554",
-   "created_at": "2026-07-01T08:04:14Z",
-   "updated_at": "2026-07-01T08:04:14Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
