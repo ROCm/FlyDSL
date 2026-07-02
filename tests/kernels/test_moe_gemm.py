@@ -79,12 +79,17 @@ from kernels.mixed_moe_gemm_2stage import (  # noqa: E402
     compile_mixed_moe_gemm1,
     compile_mixed_moe_gemm2,
 )
+from kernels.moe_dispatcher import (  # noqa: E402
+    mxfp4_moe_gemm1,
+    mxfp4_moe_gemm2,
+)
 from kernels.moe_gemm_2stage import (  # noqa: E402
     MoeGemm2Mode,
     compile_moe_gemm1,
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
 )
+from kernels.moe_sorting_kernel import moe_sorting_flydsl  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1730,6 +1735,7 @@ def run_moe_stage2(
         "int4",
         "int4_bf16",
         pytest.param("fp4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="FP4 requires gfx950+")),
+        pytest.param("a8w4", marks=pytest.mark.skipif("gfx95" not in ARCH, reason="A8W4 requires gfx950+")),
     ],
 )
 @pytest.mark.parametrize("out_dtype", ["f16", "bf16", "f32"], ids=["out_f16", "out_bf16", "out_f32"])
@@ -1770,6 +1776,9 @@ def test_moe_gemm_2stage(
     init_scale: float = 1.0,
     skip_ref: bool = False,
     w_fp4_kernel: bool = False,
+    real_model_dim: Optional[int] = None,
+    real_inter_dim: Optional[int] = None,
+    garbage_pad: bool = False,
 ):
     """Single 2-stage test: gemm1 -> quantize -> gemm2, with routing built once.
 
@@ -1783,8 +1792,6 @@ def test_moe_gemm_2stage(
     if group_size > 0 and in_dtype != "int4_bf16":
         pytest.skip("groupwise scale only applies to int4_bf16 (W4A16)")
     if in_dtype in ("fp4", "a8w4"):
-        if bool(use_valid_mask):
-            pytest.skip(f"{in_dtype} does not support valid_mask")
         if out_s not in ("f16", "fp16", "half"):
             pytest.skip(f"{in_dtype} only supports f16 output")
         if group_size > 0:
@@ -1796,6 +1803,9 @@ def test_moe_gemm_2stage(
             pytest.skip(f"{in_dtype} stage2 requires inter_dim >= 256 and tile_k2 >= 256, got {inter_dim}, {tile_k2}")
         if tile_m < 32 or tile_m % 32 != 0:
             pytest.skip(f"{in_dtype} requires tile_m % 32 == 0 and tile_m >= 32, got {tile_m}")
+        # The layout-API MXFP4 pipe (moe_dispatcher) supports the BM32 atomic (default) and
+        # reduce (non-atomic accumulate + EP valid_mask) opus-sort paths, plus HIP/CUDA graph
+        # capture+replay via run_mxfp4_moe_2stage(test_graph=True) (capture-safe E-based grid).
     device = torch.device("cuda")
     # torch.manual_seed(int(seed))
 
@@ -1820,6 +1830,32 @@ def test_moe_gemm_2stage(
     score = torch.rand((tokens, experts), device=device, dtype=torch.float32)
     topk_vals, topk_ids = torch.topk(score, k=topk, dim=1)
     topk_weights = torch.softmax(topk_vals, dim=1).to(torch.float32)
+
+    # a4w4 / a8w4 run the layout-API MXFP4 pipeline (opus sort -> gemm1 -> gemm2
+    # atomic), replacing the mixed_moe path; it fuses both stages + the topk
+    # reduction, so it bypasses run_moe_stage1 / run_moe_stage2.
+    if in_dtype in ("fp4", "a8w4"):
+        run_mxfp4_moe_2stage(
+            tokens=tokens,
+            model_dim=model_dim,
+            inter_dim=inter_dim,
+            experts=experts,
+            topk=topk,
+            in_dtype=in_dtype,
+            x_fp32=x_fp32,
+            w1_fp32=w1_fp32,
+            w2_fp32=w2_fp32,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            seed=seed,
+            use_reduce=bool(use_reduce),
+            use_valid_mask=bool(use_valid_mask),
+            test_graph=bool(test_graph),
+            real_model_dim=real_model_dim,
+            real_inter_dim=real_inter_dim,
+            garbage_pad=bool(garbage_pad),
+        )
+        return
 
     routing = build_routing_buffers(
         topk_ids=topk_ids,
@@ -1983,6 +2019,661 @@ def _per_1x32_mxfp8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     x_q = x_q.view(shape_orig).contiguous()
     scale_bytes = scale_e8m0.view(*shape_orig[:-1], shape_orig[-1] // 32).view(torch.uint8).contiguous()
     return x_q, scale_bytes
+
+
+# ---------------------------------------------------------------------------
+# Layout-API MXFP4 MoE pipeline (moe_dispatcher), opus-sort only.
+# Drives the a4w4 / a8w4 path of test_moe_gemm_2stage instead of mixed_moe:
+#   moe_sorting_flydsl (opus sort) -> gemm1 -> gemm2 (atomic scatter) -> bf16 out
+# gemm1 gathers from sorted_token_ids (& 0xFFFFFF); gemm2 scatters via atomic add
+# weighted by sorted_weights -- no fused-sort extras (m_indices / reverse_sorted).
+# ---------------------------------------------------------------------------
+def _mxfp4_shuffle_weight_a16w4(x, gate_up, NLane=16, KPack=16):
+    """CK a16w4 weight preshuffle (is_guinterleave path)."""
+    x_type = x.dtype
+    if hasattr(torch, "float4_e2m1fn_x2") and x_type == torch.float4_e2m1fn_x2:
+        x = x.view(torch.uint8)
+    E, N, K_pk = x.shape
+    if gate_up:
+        N = N // 2
+    KLane = 64 // NLane
+    N0 = N // NLane
+    K0 = K_pk // (KLane * KPack)
+    if gate_up:
+        x_ = x.view(E, 2, N0, NLane, K0, KLane, KPack).permute(0, 2, 1, 4, 5, 3, 6)
+    else:
+        x_ = x.view(E, N0, NLane, K0, KLane, KPack).permute(0, 1, 3, 4, 2, 5)
+    return x_.contiguous().view(*x.shape).contiguous().view(x_type)
+
+
+def _mxfp4_shuffle_scale_a16w4(src, E, gate_up):
+    """CK a16w4 e8m0 scale preshuffle (is_guinterleave path)."""
+    n_experts, k_ = src.shape
+    n_ = n_experts // E
+    K_Pack, N_Pack, N_Lane = 2, 2, 16
+    K_Lane = 64 // N_Lane
+    K1 = k_ // K_Pack // K_Lane
+    N1 = n_ // N_Lane // N_Pack
+    if gate_up:
+        s = src.view(E, N_Pack, N1, N_Lane, K1, K_Pack, K_Lane).permute(0, 2, 4, 6, 3, 5, 1)
+    else:
+        s = src.view(E, N1, N_Pack, N_Lane, K1, K_Pack, K_Lane).permute(0, 1, 4, 6, 3, 5, 2)
+    return s.contiguous().view(*src.shape).contiguous()
+
+
+def _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=32, BK=256):
+    """Torch reconstruction of moe_sort_scales: sort + CK-shuffle the e8m0 A-scale
+    by sorted row, exactly as gemm1 consumes it (opus gather: sti & 0xFFFFFF).
+
+    BM16: the MFMA-scale layout is 32-row-chunk granular (opsel_a is a compile-time immediate),
+    so each 16-row compute block owns a full 32-row scale chunk and uses only row-group 0 (im_a=0)
+    -- the im_a=1 half is zero padding the kernel never reads. CHUNK_ROWS=32 (scale granularity),
+    one chunk per 16-block (n_chunks = max_sorted//16, chunk c holds sorted rows [c*16, c*16+16)).
+    BM>=32: CHUNK_ROWS==BM, MN_PACK 16-groups per chunk (unchanged)."""
+    device = asc.device
+    is_bm16 = BM < 32
+    CHUNK_ROWS = 32 if is_bm16 else BM  # scale-chunk row granularity (always 32-row groups of 2)
+    MN_PACK = 2
+    K_PACK = BK // 128
+    C_M1 = CHUNK_ROWS // (16 * MN_PACK)
+    C_K1 = (H // 32) // (4 * K_PACK)
+    K_LANE, N_LANE = 4, 16
+    DWORDS_PER_CHUNK = C_M1 * C_K1 * K_LANE * N_LANE
+    block_rows = 16 if is_bm16 else BM  # compute-block rows per scale chunk
+    n_chunks = max_sorted // block_rows
+    actual_sorted = int(cumsum[0].item())
+    actual_n_chunks = (actual_sorted + block_rows - 1) // block_rows
+    total_work = n_chunks * DWORDS_PER_CHUNK
+    sti_c = sti & 0x00FFFFFF
+    out = torch.zeros((total_work, 4), dtype=torch.uint8, device=device)
+    wid = torch.arange(total_work, device=device)
+    r = wid.clone()
+    n_lane = r % N_LANE
+    r //= N_LANE
+    k_lane = r % K_LANE
+    r //= K_LANE
+    ku = r % C_K1
+    r //= C_K1
+    mi = r % C_M1
+    r //= C_M1
+    chunk = r
+    valid_chunk = chunk < actual_n_chunks
+    M = asc.shape[0]
+    for ikxdl in range(K_PACK):
+        for im_a in range(MN_PACK):
+            # BM16: only im_a==0 (row-group 0) carries the block's 16 rows; im_a==1 is padding.
+            if is_bm16 and im_a == 1:
+                continue
+            sorted_row = chunk * block_rows + (mi * MN_PACK + im_a) * 16 + n_lane
+            rowok = (sorted_row < actual_sorted) & valid_chunk
+            srow = torch.clamp(sorted_row, max=max_sorted - 1)
+            stiv = sti_c[srow]
+            tid = torch.where((stiv < M) & rowok, stiv, torch.zeros_like(stiv))
+            k_idx = ku * K_PACK * 4 + ikxdl * 4 + k_lane
+            byte = asc[tid.long(), k_idx.long()]
+            out[:, ikxdl * MN_PACK + im_a] = torch.where(rowok, byte, torch.zeros_like(byte))
+    return out.reshape(-1).contiguous()
+
+
+def _u8v(t):
+    return t.view(torch.uint8) if (t is not None and t.element_size() == 1 and t.dtype != torch.uint8) else t
+
+
+def run_mxfp4_moe_2stage(
+    *,
+    tokens,
+    model_dim,
+    inter_dim,
+    experts,
+    topk,
+    in_dtype,
+    x_fp32,
+    w1_fp32,
+    w2_fp32,
+    topk_ids,
+    topk_weights,
+    interleave=True,
+    seed=0,
+    act="silu",
+    swiglu_limit=0.0,
+    use_reduce=False,
+    use_valid_mask=False,
+    test_graph=False,
+    real_model_dim=None,
+    real_inter_dim=None,
+    garbage_pad=False,
+):
+    """Run the layout-API MXFP4 MoE (opus sort -> gemm1 -> gemm2) and verify against an
+    independent dequant-MoE reference. Returns the bf16 output.
+
+    ``act`` selects the gemm1 stage1 activation ("silu" default or "swiglu"); ``swiglu_limit``
+    is the swiglu gate/up clamp (0 -> main's default 7.0). The torch reference below mirrors it.
+
+    ``use_reduce`` selects the gemm2 reduce (non-atomic) epilog: gemm2 writes each (token,topk)
+    slot to a [tokens*topk, H] intermediate, then this driver reduces over topk (applying the EP
+    valid_mask when ``use_valid_mask``), mirroring main's accumulate=False path + get_topk_valid_mask.
+    ``use_valid_mask`` is only meaningful in reduce mode.
+
+    ``test_graph`` additionally captures the gemm1+gemm2 launches into a HIP/CUDA graph and
+    replays it (correctness + timing). The captured launches use the capture-safe worst-case
+    E-based grid (``n_sorted_padded=None``): the grid does not depend on the host-read padded
+    token count, so no host read / sync occurs during capture and a replay after an input change
+    stays correct (the kernels re-derive ``total_m_blocks`` from ``cumsum[0]`` on-device and
+    over-launched blocks early-exit). The eager fast path keeps the M2 bounded grid
+    (``n_sorted_padded=n``)."""
+    from tests.kernels.utils import fp4_utils
+
+    device = x_fp32.device
+    NE, H, INTER, TOPK = experts, model_dim, inter_dim, topk
+
+    # ---- runtime pad (weight-OOB pad-skip) test setup ----------------------------------------
+    # real_model_dim / real_inter_dim < the (padded) model_dim / inter_dim map to the has_pad kernel
+    # variant. The padded region is host zero-filled (structurally 0) so it contributes nothing; the
+    # kernel's weight-OOB skip drops the fully-pad 128-K weight halves (bandwidth saving). We ZERO the
+    # padded columns/rows of the fp32 tensors BEFORE quant so the quantized weights are exactly 0 there
+    # (0*anything=0, algebraically exact for mx-quant GEMM). The reference is then over the FULL tensors
+    # (zeros in the pad contribute nothing, matching a real-dim GEMM). ``garbage_pad`` writes a large
+    # value (1e30) into the padded region instead: the OOB skip / host-zero-scale must still yield the
+    # correct output (proves the pad region is never read into the accumulation).
+    model_dim_pad = 0 if real_model_dim is None else (H - int(real_model_dim))
+    inter_dim_pad = 0 if real_inter_dim is None else (INTER - int(real_inter_dim))
+    assert model_dim_pad >= 0 and inter_dim_pad >= 0, "real dims must be <= padded dims"
+    if model_dim_pad or inter_dim_pad:
+        real_H = H - model_dim_pad
+        real_INTER = INTER - inter_dim_pad
+        # A / intermediate / non-contraction weight pads are ALWAYS zero (structural pad the kernel
+        # multiplies but that contributes 0). Only the WEIGHT CONTRACTION-pad regions -- the fully-pad
+        # 128-K weight halves the OOB skip DROPS (w1 model_dim-tail for gemm1, w2 inter-tail for gemm2)
+        # -- take the garbage fill under ``garbage_pad`` (1e30): a correct output then proves the OOB
+        # skip never fetches them into the accumulation. (A sub-128 pad remainder within a KEPT half is
+        # still host-zero -- garbage there WOULD corrupt, so it stays 0; the OOB skip only covers the
+        # fully-pad halves, which is exactly what we poison.)
+        wpad_fill = 1e30 if garbage_pad else 0.0
+        if model_dim_pad:
+            x_fp32[:, real_H:] = 0.0
+            # gemm2 output-row pad (model_dim = gemm2 N): the N-skip DROPS the fully-pad 16-N w2 output
+            # tiles (col >= real_H, real_H is 16-aligned) -> their weight loads OOB -> 0 (never fetched).
+            # These output columns are unused (sliced off by the real_H reference), so they take the
+            # garbage fill under ``garbage_pad`` (1e30). A correct cos over the :real_H slice then PROVES
+            # the N-skip never fetched the garbage w2 rows into the accumulation.
+            w2_fp32[:, real_H:, :] = wpad_fill
+            # gemm1 contraction-pad: only the fully-pad 128-col-aligned tail halves get garbage.
+            gq = (real_H + 127) // 128 * 128  # first fully-pad 128-K weight col
+            w1_fp32[:, :, real_H:gq] = 0.0  # partial-pad remainder in a kept half -> host zero
+            w1_fp32[:, :, gq:] = wpad_fill  # fully-pad halves -> OOB-skipped (garbage ok)
+        if inter_dim_pad:
+            # gemm1 N-output pad-skip. w1 is [E, 2*INTER, K] with fused gate|up halves; the pad-N weight
+            # ROWS -- inter [real_INTER, INTER) of the gate half AND [INTER+real_INTER, 2*INTER) of the up
+            # half -- produce ONLY pad-N intermediate columns, which gemm1's N-skip drops (their weight
+            # loads OOB -> 0, intermediate written as 0). Since real_INTER is 16-aligned, EVERY 16-N tile
+            # in the pad range is fully pad and fully dropped -> these w1 rows take the garbage fill under
+            # ``garbage_pad`` (1e30). A correct output then PROVES the N-skip never fetches them: the
+            # kernel intermediate pad cols stay 0 regardless of the garbage.
+            #
+            # For the REFERENCE (full-INTER `inter_r @ W2[e].T`, no skip) to match, the garbage in the
+            # reference intermediate pad cols must be annihilated by a ZERO w2 contraction there -- so the
+            # pad-K cols of w2 (inter [real_INTER, INTER)) are held at 0 here (structural, NOT garbage).
+            # This is why the N-skip garbage test keeps w2 pad-K = 0 (the w2 K-pad *garbage* variant is a
+            # SEPARATE concern covered by the model_dim_pad / gemm2 K-skip path). The kernel gemm2 also
+            # OOB-K-skips these zeroed cols, so both paths compute the real-INTER GEMM.
+            w1_fp32[:, real_INTER:INTER, :] = wpad_fill  # gate-half pad-N rows -> gemm1 N-skip drops
+            w1_fp32[:, INTER + real_INTER :, :] = wpad_fill  # up-half pad-N rows -> gemm1 N-skip drops
+            w2_fp32[:, :, real_INTER:] = 0.0  # w2 pad-K contraction cols: structural 0 (ref annihilates)
+    # Per-(shape, token) CSV dispatch (MXFP4_DISPATCH=1): auto-select (BM, epilog, bm_stage1,
+    # persist) from the aiter tuned map (kernels.moe_dispatcher.select_pipe_config) -- the dominant
+    # perf lever (stage2 atomic-vs-reduce + block_m), plus the stage1-only BM128 tile and gemm2
+    # persist. It OVERRIDES MXFP4_BM / use_reduce / MXFP4_PERSIST; leave MXFP4_DISPATCH unset for
+    # manual measurement (env BM + explicit use_reduce + MXFP4_PERSIST, unchanged).
+    # BM_S1 is the gemm1 compute tile; BM is the gemm2/compute tile (may differ when the dispatcher
+    # picks a stage1-only BM128). SBM (sort padding unit) must be a multiple of both.
+    persist = os.environ.get("MXFP4_PERSIST") == "1"
+    cu_num = int(os.environ.get("MXFP4_CU_NUM", "0"))
+    if os.environ.get("MXFP4_DISPATCH") == "1":
+        from kernels.moe_dispatcher import select_pipe_config
+
+        _allow_bm128 = os.environ.get("MXFP4_ALLOW_BM128") == "1"
+        BM, _epilog_sel, BM_S1, persist, _bn_sel, _kw_sel = select_pipe_config(
+            model_dim, inter_dim, experts, topk, tokens, allow_bm128=_allow_bm128
+        )
+        use_reduce = _epilog_sel == "reduce"
+    else:
+        # BM block-m for the layout-API pipe (32 default; 64 doubles rows/block, raising
+        # per-B-load MFMA density on small-token / small-K shapes). MXFP4_BM env override.
+        # BM_S1 (stage1 tile) follows BM in the manual path (MXFP4_BM_STAGE1 optional override).
+        BM = int(os.environ.get("MXFP4_BM", "32"))
+        BM_S1 = int(os.environ.get("MXFP4_BM_STAGE1", str(BM)))
+    assert BM in (16, 32, 64, 128), f"MXFP4_BM must be in {{16,32,64,128}}, got {BM}"
+    assert BM_S1 in (16, 32, 64, 128), f"BM_S1 must be in {{16,32,64,128}}, got {BM_S1}"
+    # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tiles. It must
+    # be a multiple of BOTH stage tiles so each stage packs an integer number of compute blocks per
+    # sort block. Default SBM==BM (byte-identical when BM_S1==BM). MXFP4_SBM env override; when the
+    # stages differ (BM_S1!=BM), SBM defaults to lcm(BM_S1, BM) (=max here since both are 2-powers).
+    _sbm_default = BM if BM_S1 == BM else max(BM, BM_S1)
+    SBM = int(os.environ.get("MXFP4_SBM", str(_sbm_default)))
+    assert SBM % BM == 0, f"MXFP4_SBM ({SBM}) must be a multiple of BM ({BM})"
+    assert SBM % BM_S1 == 0, f"MXFP4_SBM ({SBM}) must be a multiple of BM_S1 ({BM_S1})"
+    # k_wave (intra-block K-slice) + BN (fused gate|up N-tile) gemm1 tiles. The dispatcher picks
+    # (BN=64, k_wave=4) for the block-count-bound high-expert fp4 families at tiny M, (256, 1)
+    # otherwise. An explicit MXFP4_KW / MXFP4_BN env always overrides (manual measurement).
+    if os.environ.get("MXFP4_DISPATCH") == "1":
+        KWAVE = int(os.environ.get("MXFP4_KW", str(_kw_sel)))
+        BNARG = int(os.environ.get("MXFP4_BN", str(_bn_sel)))
+    else:
+        KWAVE = int(os.environ.get("MXFP4_KW", "1"))
+        BNARG = int(os.environ.get("MXFP4_BN", "256"))
+    assert KWAVE in (1, 2, 4), f"MXFP4_KW must be in {{1,2,4}}, got {KWAVE}"
+    assert BNARG in (64, 256), f"MXFP4_BN must be in {{64,256}}, got {BNARG}"
+    # persist (aiter `_persist`): gemm2 launches a fixed cu_num-wide grid and grid-strides over the
+    # padded sort blocks. Set by dispatch above, or MXFP4_PERSIST=1 manually; MXFP4_CU_NUM overrides
+    # the fixed grid size.
+    is_f8 = in_dtype == "a8w4"
+
+    # gemm1 B-weight cache policy (reuse-aware). Default cached (byte-identical). Under
+    # MXFP4_DISPATCH the dispatcher streams (non-temporal) when there is <=1 stage1 m-block
+    # per active expert (single-use weights, no L2 reuse -> caching is pure overhead); it caches
+    # when reuse exists (M large). MXFP4_G1_NT env (0/1) forces the policy for measurement.
+    _g1_nt_env = os.environ.get("MXFP4_G1_NT")
+    if _g1_nt_env is not None:
+        g1_use_nt = _g1_nt_env == "1"
+    elif os.environ.get("MXFP4_DISPATCH") == "1":
+        from kernels.moe_dispatcher import gemm1_use_nt
+
+        g1_use_nt = gemm1_use_nt(experts, topk, tokens, BM_S1)
+    else:
+        g1_use_nt = False
+
+    # gemm2 B-weight (w2 down-proj) cache policy (reuse-aware), mirroring gemm1. Default cached
+    # (byte-identical). Under MXFP4_DISPATCH the dispatcher streams (non-temporal) when there is
+    # <=1 stage2 m-block per active expert (single-use w2 -> caching is pure overhead); caches when
+    # reuse exists (M large). MXFP4_G2_NT env (0/1) forces the policy for measurement.
+    _g2_nt_env = os.environ.get("MXFP4_G2_NT")
+    if _g2_nt_env is not None:
+        g2_use_nt = _g2_nt_env == "1"
+    elif os.environ.get("MXFP4_DISPATCH") == "1":
+        from kernels.moe_dispatcher import gemm2_use_nt
+
+        g2_use_nt = gemm2_use_nt(experts, topk, tokens, BM)
+    else:
+        g2_use_nt = False
+
+    # weights (fp4) + CK a16w4 preshuffle
+    w1q, w1s = _per_1x32_fp4_quant(w1_fp32)
+    w2q, w2s = _per_1x32_fp4_quant(w2_fp32)
+    w1u8 = _u8v(_mxfp4_shuffle_weight_a16w4(w1q, gate_up=interleave))
+    w1sc = _u8v(_mxfp4_shuffle_scale_a16w4(w1s, NE, gate_up=interleave))
+    w2u8 = _u8v(_mxfp4_shuffle_weight_a16w4(w2q, gate_up=False))
+    w2sc = _u8v(_mxfp4_shuffle_scale_a16w4(w2s, NE, gate_up=False))
+
+    # opus sort (FlyDSL moe_sorting_kernel)
+    topk_ids_i32 = topk_ids.to(torch.int32)
+    topk_w_f32 = topk_weights.to(torch.float32)
+    # Sort padding is per SBM (the sort unit); sei holds one expert id per SBM block.
+    max_padded = tokens * TOPK + NE * SBM - TOPK
+    max_sorted = ((max_padded + SBM - 1) // SBM) * SBM
+    sti = torch.empty(max_sorted, dtype=torch.int32, device=device)
+    swt = torch.empty(max_sorted, dtype=torch.float32, device=device)
+    sei = torch.empty(max_sorted // SBM, dtype=torch.int32, device=device)
+    nv = torch.empty(2, dtype=torch.int32, device=device)
+    moe_buf = torch.empty((tokens, H), dtype=torch.bfloat16, device=device)
+    moe_sorting_flydsl(topk_ids_i32, topk_w_f32, sti, swt, sei, nv, moe_buf, NE, SBM)
+    torch.cuda.synchronize()
+    cumsum = nv
+    n = int(cumsum[0].item())
+
+    # A quant (+ sorted/shuffled e8m0 A-scale)
+    hidden = x_fp32.to(torch.bfloat16)
+    if is_f8:
+        aq, asc = _per_1x32_mxfp8_quant(hidden)
+        aq = aq.view(torch.uint8).view(tokens, H).contiguous()
+    else:
+        aq, asc = _per_1x32_fp4_quant(hidden)
+        aq = aq.view(torch.uint8).view(tokens, H // 2).contiguous()
+    asc = asc.view(torch.uint8).view(tokens, H // 32).contiguous()
+    # A-scale shuffle layout is tied to the stage1 compute tile (gemm1 consumes it) -> BM_S1.
+    assh = _mxfp4_a_scale_sorted_shuffled(asc, sti, cumsum, max_sorted, H, BM=BM_S1)
+
+    # gemm1 -> intermediate (fp4 / fp8) + shuffled scale
+    out_dtype = "fp8" if is_f8 else "fp4"
+    inter_cols = INTER if is_f8 else INTER // 2
+    isq = torch.zeros((max_sorted, inter_cols), device=device, dtype=torch.uint8)
+    isc_cols = INTER // 32
+    isr = (((max_sorted * ((2 * INTER) // 64) * 4) + isc_cols - 1) // isc_cols + 31) // 32 * 32
+    iss = torch.zeros((isr, isc_cols), device=device, dtype=torch.uint8)
+    _g1_kwargs = dict(
+        a_quant=aq,
+        a_scale_sorted_shuffled=assh,
+        w1_u8=w1u8,
+        w1_scale_u8=w1sc,
+        sorted_expert_ids=sei,
+        cumsum_tensor=cumsum,
+        sorted_token_ids=sti,
+        inter_sorted_quant=isq,
+        inter_sorted_shuffled_scale=iss,
+        hidden_states=hidden,
+        n_tokens=tokens,
+        NE=NE,
+        D_HIDDEN=H,
+        D_INTER=INTER,
+        topk=TOPK,
+        BM=BM_S1,
+        # gemm1 B cache policy is reuse-aware (gemm1_use_nt): CACHED when stage1 has
+        # cross-m-block B-reuse (many m-blocks per expert at large tokens) so the weights
+        # stay hot in L2; STREAMING (non-temporal) when there is <=1 m-block per expert
+        # (small/mid M, e.g. GPT-OSS M<=1024) so single-use weights are not needlessly
+        # cache-allocated. Measured: GPT-OSS M=128 gemm1 208->181us (-13%) at identical
+        # HBM bytes; crossover at m-blocks/expert==1 (nt regresses at M>=2048). MXFP4_G1_NT
+        # env forces the policy for measurement. Default stays cached (byte-identical) when
+        # dispatch is off or the reuse heuristic says cache.
+        use_nt=g1_use_nt,
+        interleave=interleave,
+        a_dtype=("fp8" if is_f8 else "fp4"),
+        out_dtype=out_dtype,
+        act=act,
+        swiglu_limit=swiglu_limit,
+        SBM=SBM,
+        k_wave=KWAVE,
+        BN=BNARG,
+        n_sorted_padded=n,
+        model_dim_pad=model_dim_pad,
+        inter_dim_pad=inter_dim_pad,
+    )
+    mxfp4_moe_gemm1(**_g1_kwargs)
+    torch.cuda.synchronize()
+
+    # gemm2: atomic -> per-token weighted topk sum into [tokens, H]; reduce -> non-atomic store into
+    # [tokens*topk, H] then host reduce over topk (with EP valid_mask), mirroring main accumulate=False.
+    epilog = "reduce" if use_reduce else "atomic"
+    if use_reduce:
+        gemm2_out = torch.zeros((tokens * TOPK, H), dtype=torch.bfloat16, device=device)
+    else:
+        gemm2_out = torch.zeros((tokens, H), dtype=torch.bfloat16, device=device)
+    _g2_kwargs = dict(
+        inter_sorted_quant=isq,
+        inter_sorted_shuffled_scale=iss,
+        w2_u8=w2u8,
+        w2_scale_u8=w2sc,
+        sorted_expert_ids=sei,
+        cumsum_tensor=cumsum,
+        sorted_token_ids=sti,
+        sorted_weights=swt,
+        out=gemm2_out,
+        M_logical=tokens,
+        max_sorted=max_sorted,
+        NE=NE,
+        D_HIDDEN=H,
+        D_INTER=INTER,
+        topk=TOPK,
+        BM=BM,
+        # gemm2 B (w2) cache policy is reuse-aware (gemm2_use_nt): CACHED when stage2 has
+        # cross-m-block w2-reuse (many m-blocks per expert at large tokens); STREAMING
+        # (non-temporal) when there is <=1 m-block per expert (small/mid M, e.g. GPT-OSS
+        # M<=1024) so single-use w2 is not needlessly cache-allocated. MXFP4_G2_NT env forces
+        # the policy for measurement. Default stays cached (byte-identical) when dispatch is off
+        # or the reuse heuristic says cache.
+        use_nt=g2_use_nt,
+        a_dtype=("fp8" if is_f8 else "fp4"),
+        epilog=epilog,
+        SBM=SBM,
+        persist=persist,
+        cu_num=cu_num,
+        n_sorted_padded=n,
+        inter_dim_pad=inter_dim_pad,
+        model_dim_pad=model_dim_pad,
+    )
+    mxfp4_moe_gemm2(**_g2_kwargs)
+    torch.cuda.synchronize()
+
+    def _reduce_host(g2_out):
+        # host reduce over topk (main _MoeGemm2ReduceWrapper + get_topk_valid_mask semantics):
+        # X[t, k, :] masked by valid_mask[t, k] (EP mask; expert_mask=None -> all ones), then summed.
+        # This host reshape+sum is a host prologue/epilogue: it is NOT captured in the device graph.
+        X = g2_out.view(tokens, TOPK, H)
+        if use_valid_mask:
+            valid_mask = get_topk_valid_mask(topk_ids, expert_mask=None).to(device)
+            X = X * valid_mask.view(tokens, TOPK, 1).to(dtype=X.dtype)
+        return torch.sum(X.to(torch.float32), dim=1).to(torch.bfloat16)
+
+    if use_reduce:
+        out = _reduce_host(gemm2_out)
+    else:
+        out = gemm2_out
+
+    # reference: independent dequant MoE (opus gather: tok = sti & 0xFFFFFF)
+    if is_f8:
+        A = fp4_utils.fp8_e4m3_to_f32(aq.view(torch.float8_e4m3fn)).view(tokens, H)
+    else:
+        A = fp4_utils.mxfp4_to_f32(aq.view(torch.uint8)).view(tokens, H)
+    Asc = fp4_utils.e8m0_to_f32(asc.view(torch.uint8))
+    A = (A.view(tokens, H // 32, 32) * Asc.unsqueeze(-1)).view(tokens, H)
+    W1 = fp4_utils.mxfp4_to_f32(w1q.view(torch.uint8))
+    W1s = fp4_utils.e8m0_to_f32(w1s.view(torch.uint8)).view(NE, 2 * INTER, H // 32)
+    W1 = (W1.view(NE, 2 * INTER, H // 32, 32) * W1s.unsqueeze(-1)).view(NE, 2 * INTER, H)
+    W2 = fp4_utils.mxfp4_to_f32(w2q.view(torch.uint8))
+    W2s = fp4_utils.e8m0_to_f32(w2s.view(torch.uint8)).view(NE, H, INTER // 32)
+    W2 = (W2.view(NE, H, INTER // 32, 32) * W2s.unsqueeze(-1)).view(NE, H, INTER)
+
+    # Activation reference: mirrors kernels/mxmoe_gemm_v2.py {silu,swiglu}_mul_batch (= main's
+    # mixed_moe_gemm_2stage). swiglu(g,u)=g*sigmoid(alpha*g)*(u+1) with g<=limit, -limit<=u<=limit
+    # (limit defaults to 7.0 when swiglu_limit==0); silu is silu(g)*u (unclamped).
+    def _act(gate, up):
+        if act == "swiglu":
+            alpha = 1.702
+            lim = float(swiglu_limit) if swiglu_limit != 0 else 7.0
+            g = gate.clamp(max=lim)
+            u = up.clamp(min=-lim, max=lim)
+            return g * torch.sigmoid(alpha * g) * (u + 1.0)
+        return torch.nn.functional.silu(gate) * up
+
+    # Reference over the REAL (unpadded) inter extent. With inter_dim_pad the pad-N w1 rows may hold
+    # garbage (--garbage_pad): the kernel N-skips them (0 intermediate there), and the real GEMM never
+    # includes them -- so the reference must exclude them too (slicing to rI). This keeps the reference
+    # finite regardless of the pad-N garbage magnitude (a full-INTER reference would overflow act on the
+    # huge pad rows). inter_dim_pad==0 -> rI == INTER (byte-identical full-INTER reference).
+    rI = INTER - inter_dim_pad
+    # gemm2 N-skip: the pad model_dim output columns [rH, H) are unused (their w2 rows may hold garbage
+    # under --garbage_pad; the N-skip drops them). Reference over the REAL model_dim extent (:rH) and
+    # compare the same slice of the kernel output -> a correct cos PROVES the garbage was never fetched.
+    # model_dim_pad==0 -> rH == H (byte-identical full-H reference/compare).
+    rH = H - model_dim_pad
+    sti_c, sei_c, swt_c = sti[:n].cpu(), sei.cpu(), swt[:n].cpu()
+    ref = torch.zeros((tokens, rH), dtype=torch.float32, device=device)
+    for r in range(n):
+        tok = int(sti_c[r].item()) & 0x00FFFFFF
+        if tok >= tokens:
+            continue
+        e = int(sei_c[r // SBM].item())
+        gate = A[tok] @ W1[e, :rI].T
+        up = A[tok] @ W1[e, INTER : INTER + rI].T
+        inter_r = _act(gate, up)
+        ref[tok] += (inter_r @ W2[e, :rH, :rI].T) * float(swt_c[r].item())
+
+    out = out[:, :rH]
+    cos = torch.nn.functional.cosine_similarity(ref.reshape(-1), out.float().reshape(-1), dim=0).item()
+    thr = 0.95 if is_f8 else 0.85
+    logging.info(
+        "[mxfp4 moe %s %s act=%s] cos=%.4f n=%d (model_dim=%d inter=%d E=%d topk=%d)",
+        in_dtype,
+        "il" if interleave else "sep",
+        act,
+        cos,
+        n,
+        model_dim,
+        inter_dim,
+        experts,
+        topk,
+    )
+    assert verify_output(out.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+    assert cos > thr, f"{in_dtype} cos={cos:.4f} <= {thr}"
+
+    # ---- HIP/CUDA graph capture + replay correctness (test_graph) ----
+    # Capture-safe launch: the gemm1/gemm2 grid is the worst-case E-based bound
+    # (n_sorted_padded=None) so it does NOT depend on the host-read padded token count -> no host
+    # read / sync inside capture, and a replay after an input change stays correct (kernels
+    # re-derive total_m_blocks from cumsum[0] on-device; over-launched blocks early-exit). The
+    # reduce host reshape+sum stays OUTSIDE the graph (host epilogue).
+    if test_graph:
+        _g1_graph = dict(_g1_kwargs)
+        _g1_graph["n_sorted_padded"] = None  # E-based grid, capture-safe
+        _g2_graph = dict(_g2_kwargs)
+        _g2_graph["n_sorted_padded"] = None
+
+        def _pipe_graph():
+            mxfp4_moe_gemm1(**_g1_graph)
+            mxfp4_moe_gemm2(**_g2_graph)
+
+        # snapshot the captured gemm1 A-inputs so the perf pass below runs on the original input.
+        aq_orig = aq.clone()
+        assh_orig = assh.clone()
+        hidden_orig = hidden.clone()
+
+        # Capture into a graph after a warmup (side-stream), then replay.
+        cap_stream = torch.cuda.Stream()
+        cap_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(cap_stream):
+            _pipe_graph()
+        torch.cuda.current_stream().wait_stream(cap_stream)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            _pipe_graph()
+
+        def _replay_out():
+            isq.zero_()
+            gemm2_out.zero_()
+            graph.replay()
+            torch.cuda.synchronize()
+            return _reduce_host(gemm2_out) if use_reduce else gemm2_out
+
+        out_g = _replay_out()[:, :rH]
+        cos_g = torch.nn.functional.cosine_similarity(ref.reshape(-1), out_g.float().reshape(-1), dim=0).item()
+        logging.info(
+            "[mxfp4 moe %s %s graph replay] cos=%.4f (reduce=%s mask=%s)",
+            in_dtype,
+            "il" if interleave else "sep",
+            cos_g,
+            use_reduce,
+            use_valid_mask,
+        )
+        assert verify_output(out_g.to(torch.float32), ref, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+        assert cos_g > thr, f"{in_dtype} graph cos={cos_g:.4f} <= {thr}"
+
+        # Replay reused across an input change: mutate the captured gemm1 A-input in place (new
+        # tokens, same routing/sort buffers), recompute the reference, replay the SAME graph, and
+        # verify the new output tracks the new input (proves capture is reused, not stale-baked).
+        x2_fp32 = torch.randn((tokens, model_dim), device=device, dtype=torch.float32) * float(x_fp32.std())
+        hidden2 = x2_fp32.to(torch.bfloat16)
+        if is_f8:
+            aq2, asc2 = _per_1x32_mxfp8_quant(hidden2)
+            aq2 = aq2.view(torch.uint8).view(tokens, H).contiguous()
+        else:
+            aq2, asc2 = _per_1x32_fp4_quant(hidden2)
+            aq2 = aq2.view(torch.uint8).view(tokens, H // 2).contiguous()
+        asc2 = asc2.view(torch.uint8).view(tokens, H // 32).contiguous()
+        assh2 = _mxfp4_a_scale_sorted_shuffled(asc2, sti, cumsum, max_sorted, H, BM=BM_S1)
+        aq.copy_(aq2)
+        assh.copy_(assh2)
+        hidden.copy_(hidden2)
+        out_g2 = _replay_out()
+
+        # reference for the mutated input (same routing/experts/weights, new A).
+        if is_f8:
+            A2 = fp4_utils.fp8_e4m3_to_f32(aq2.view(torch.float8_e4m3fn)).view(tokens, H)
+        else:
+            A2 = fp4_utils.mxfp4_to_f32(aq2.view(torch.uint8)).view(tokens, H)
+        A2sc = fp4_utils.e8m0_to_f32(asc2.view(torch.uint8))
+        A2 = (A2.view(tokens, H // 32, 32) * A2sc.unsqueeze(-1)).view(tokens, H)
+        ref2 = torch.zeros((tokens, rH), dtype=torch.float32, device=device)
+        for r in range(n):
+            tok = int(sti_c[r].item()) & 0x00FFFFFF
+            if tok >= tokens:
+                continue
+            e = int(sei_c[r // SBM].item())
+            gate = A2[tok] @ W1[e, :rI].T
+            up = A2[tok] @ W1[e, INTER : INTER + rI].T
+            inter_r = _act(gate, up)
+            ref2[tok] += (inter_r @ W2[e, :rH, :rI].T) * float(swt_c[r].item())
+        out_g2 = out_g2[:, :rH]
+        cos_g2 = torch.nn.functional.cosine_similarity(ref2.reshape(-1), out_g2.float().reshape(-1), dim=0).item()
+        logging.info(
+            "[mxfp4 moe %s %s graph replay-after-input-change] cos=%.4f",
+            in_dtype,
+            "il" if interleave else "sep",
+            cos_g2,
+        )
+        assert verify_output(out_g2.to(torch.float32), ref2, rtol=0.5, atol=0.5, logits_diff_threshold=1)
+        assert cos_g2 > thr, f"{in_dtype} graph(after input change) cos={cos_g2:.4f} <= {thr}"
+        # restore the captured buffers to the original input for the perf pass below.
+        aq.copy_(aq_orig)
+        assh.copy_(assh_orig)
+        hidden.copy_(hidden_orig)
+
+    # Perf measurement for the layout-API MXFP4 pipe. The fused pipe bypasses
+    # run_moe_stage1 / run_moe_stage2, so it must emit the standard
+    # "FlyDSL MoE stage1[...]" / "FlyDSL MoE stage2 [...]" lines itself so that
+    # scripts/run_benchmark.sh scrapes fp4/a8w4 like every other MoE dtype.
+    # gemm1 (2*inter cols) == mixed_moe stage1; gemm2 (atomic) == stage2. Times
+    # the two launches once here (the pipe's only timing pass) and reuses the us
+    # for both the standard lines and the optional MXFP4_BENCH detail line.
+    _bi = int(os.environ.get("MXFP4_BENCH_ITERS", "20"))
+    _bw = int(os.environ.get("MXFP4_BENCH_WARMUP", "5"))
+    # Eager perf: M2 bounded grid (n_sorted_padded=n). Graph perf: capture-safe E-based grid.
+    _p1_kwargs = _g1_graph if test_graph else _g1_kwargs
+    _p2_kwargs = _g2_graph if test_graph else _g2_kwargs
+    _, us1 = run_perftest(lambda: mxfp4_moe_gemm1(**_p1_kwargs), num_iters=_bi, num_warmup=_bw, testGraph=test_graph)
+    _, us2 = run_perftest(lambda: mxfp4_moe_gemm2(**_p2_kwargs), num_iters=_bi, num_warmup=_bw, testGraph=test_graph)
+
+    # --- stage1 line (same FLOPS/bytes accounting as run_moe_stage1 for fp4/a8w4) ---
+    active_experts = min(experts, tokens * topk)
+    # fp4: x=4b,w=4b ; a8w4: x=8b,w=4b. Both are the fp4 weight-shuffle path.
+    _x_bits = 8 if is_f8 else 4
+    _w_bits = 4
+    _x_elems1 = tokens * model_dim
+    _w_elems1 = active_experts * (2 * inter_dim) * model_dim
+    flops1 = 2 * tokens * topk * (2 * inter_dim) * model_dim
+    tflops1 = float("nan") if us1 <= 0 else flops1 / (us1 / 1e6) / 1e12
+    bytes1 = 0
+    bytes1 += (_x_elems1 * _x_bits) // 8  # x
+    bytes1 += (_w_elems1 * _w_bits) // 8  # w1
+    bytes1 += tokens * topk * inter_dim * 2  # out fp16 (logical, post-silu)
+    bytes1 += _x_elems1 // 32  # per-1x32 E8M0 x scale
+    bytes1 += _w_elems1 // 32  # per-1x32 E8M0 w1 scale
+    tbps1 = float("nan") if us1 <= 0 else bytes1 / 1e12 / (us1 / 1e6)
+    print(
+        f"FlyDSL MoE stage1[{in_dtype}]: "
+        f"{us1:.1f} us, "
+        f"{tflops1:.2f} TFLOPS(logical, M={tokens*topk}), "
+        f"{tbps1:.3f} TB/s (doweight_stage1=False)"
+    )
+
+    # --- stage2 line (atomic; same FLOPS/bytes accounting as run_moe_stage2) ---
+    # a2/w2 bits and per-block e8m0 scales; out is fp16 (itemsize 2).
+    _a2_bits = 8 if is_f8 else 4
+    _w2_bits = 4
+    _a2_elems = tokens * topk * inter_dim
+    _w2_elems = active_experts * model_dim * inter_dim
+    flops2 = 2 * tokens * topk * model_dim * inter_dim
+    tflops2 = float("nan") if us2 <= 0 else flops2 / (us2 / 1e6) / 1e12
+    bytes2 = 0
+    bytes2 += (_a2_elems * _a2_bits) // 8  # a2
+    bytes2 += (_w2_elems * _w2_bits) // 8  # w2
+    bytes2 += tokens * model_dim * 2  # out fp16
+    bytes2 += _a2_elems // 32  # per-block e8m0 a2 scale
+    bytes2 += _w2_elems // 32  # per-block e8m0 w2 scale
+    tbps2 = float("nan") if us2 <= 0 else bytes2 / 1e12 / (us2 / 1e6)
+    print(
+        f"FlyDSL MoE stage2 [moe_gemm2] {in_dtype} {epilog} | "
+        f"{model_dim}x{inter_dim}, E={experts}, K={topk}, M_eff={tokens*topk} | "
+        f"{us2:.1f} us, {tflops2:.2f} TFLOPS, {tbps2:.3f} TB/s"
+    )
+
+    # Optional extra detail (raw gemm1/gemm2 us) preserved for MXFP4_BENCH callers.
+    if os.environ.get("MXFP4_BENCH"):
+        print(
+            f"[mxfp4 bench {in_dtype} {'il' if interleave else 'sep'}] "
+            f"gemm1 {us1:.2f} us, gemm2 {us2:.2f} us, total {us1 + us2:.2f} us "
+            f"(tokens={tokens} model_dim={model_dim} inter={inter_dim} E={experts} topk={topk})"
+        )
+    return out
 
 
 # Test Helpers for MoE GEMM2 Mode Comparison
@@ -2528,9 +3219,26 @@ if __name__ == "__main__":
         help="Group size for W4A16 groupwise scale (-1 = per-row, 32 = group_size=32).",
     )
 
+    # Runtime pad (weight-OOB pad-skip): REAL (unpadded) dims; -dim carries the PADDED dims.
+    parser.add_argument(
+        "--real_dim",
+        type=_str2tuple_dim,
+        default=None,
+        help="Real (unpadded) 'model_dim,inter_dim' for the has_pad weight-OOB skip (e.g. GPT-OSS "
+        "'2880,2880' with -dim 3072,3072). Default None = no pad (byte-identical default variant).",
+    )
+    parser.add_argument(
+        "--garbage_pad",
+        action="store_true",
+        default=False,
+        help="Write 1e30 into the fully-pad weight-contraction halves the OOB skip drops (proves the "
+        "skip never fetches them). Only meaningful with --real_dim.",
+    )
+
     args = parser.parse_args()
 
     model_dim, inter_dim = args.dim
+    real_model_dim, real_inter_dim = args.real_dim if args.real_dim is not None else (None, None)
 
     tile_n2 = int(args.tile_n2) if args.tile_n2 is not None else int(args.tile_n) * 2
     tile_k2 = int(args.tile_k2) if args.tile_k2 is not None else args.tile_k
@@ -2551,32 +3259,40 @@ if __name__ == "__main__":
         if (not bool(use_reduce)) and bool(args.use_valid_mask):
             print("[skip] valid_mask is only used in reduce mode (atomic ignores it)")
             return
-        test_moe_gemm_2stage(
-            tokens=int(args.tokenNum),
-            model_dim=int(model_dim),
-            inter_dim=int(inter_dim),
-            experts=int(args.expert),
-            topk=int(args.topk),
-            tile_m=int(args.tile_m),
-            tile_n1=int(args.tile_n),
-            tile_k1=int(args.tile_k),
-            tile_n2=tile_n2,
-            tile_k2=tile_k2,
-            doweight_stage1=bool(args.doweight_stage1),
-            in_dtype=dt,
-            out_dtype=str(args.out_dtype),
-            group_size=int(args.group_size),
-            seed=int(args.seed),
-            num_iters=int(args.num_iters),
-            num_warmup=int(args.num_warmup),
-            moe_sort_mode=args.moe_sort_mode,
-            compare_aiter_ck=args.compare_aiter_ck,
-            skip_ref=bool(args.skip_ref),
-            w_fp4_kernel=args.wfp4,
-            use_reduce=use_reduce,
-            use_valid_mask=bool(args.use_valid_mask),
-            test_graph=bool(args.test_graph),
-        )
+        # pytest.skip() raises Skipped; under __main__ (no pytest session) that would
+        # crash the runner. Treat an unsupported combo as a printed skip, not a failure.
+        try:
+            test_moe_gemm_2stage(
+                tokens=int(args.tokenNum),
+                model_dim=int(model_dim),
+                inter_dim=int(inter_dim),
+                experts=int(args.expert),
+                topk=int(args.topk),
+                tile_m=int(args.tile_m),
+                tile_n1=int(args.tile_n),
+                tile_k1=int(args.tile_k),
+                tile_n2=tile_n2,
+                tile_k2=tile_k2,
+                doweight_stage1=bool(args.doweight_stage1),
+                in_dtype=dt,
+                out_dtype=str(args.out_dtype),
+                group_size=int(args.group_size),
+                seed=int(args.seed),
+                num_iters=int(args.num_iters),
+                num_warmup=int(args.num_warmup),
+                moe_sort_mode=args.moe_sort_mode,
+                compare_aiter_ck=args.compare_aiter_ck,
+                skip_ref=bool(args.skip_ref),
+                w_fp4_kernel=args.wfp4,
+                use_reduce=use_reduce,
+                use_valid_mask=bool(args.use_valid_mask),
+                test_graph=bool(args.test_graph),
+                real_model_dim=real_model_dim,
+                real_inter_dim=real_inter_dim,
+                garbage_pad=bool(args.garbage_pad),
+            )
+        except pytest.skip.Exception as e:
+            print(f"[skip] {dt} reduce={use_reduce}: {e}")
 
     # Run 2-stage (gemm1 -> quantize -> gemm2) aiter-style test/benchmark.
     # Expand "all" to all supported dtypes.

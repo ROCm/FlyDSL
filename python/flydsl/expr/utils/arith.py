@@ -429,6 +429,11 @@ class ArithValue(ir.Value):
         return arith.maximumf(self, _to_raw(other))
 
     @dsl_loc_tracing
+    def minimumf(self, other):
+        """Float minimum (NaN-propagating)."""
+        return arith.minimumf(self, _to_raw(other))
+
+    @dsl_loc_tracing
     def rsqrt(self, *, fastmath=None):
         """Reciprocal square root: 1/sqrt(self)."""
         from ..._mlir.dialects import math as _math
