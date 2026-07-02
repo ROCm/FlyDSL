@@ -73,7 +73,7 @@ def compute_mcast_masks(local_x, local_y, cluster_m: int, cluster_n: int):
     """Compute MCAST workgroup_mask values for A and B matrices.
 
     Hardware flat WG index within a cluster uses X-inner ordering
-    (MI400 Shader Programming, TTMP6 layout, section 3.5.5.1):
+    (gfx1250 Shader Programming, TTMP6 layout, section 3.5.5.1):
 
         flat_wg_id = wg_x + wg_y * nwg_x = local_x + local_y * cluster_m
 

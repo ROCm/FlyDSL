@@ -486,7 +486,7 @@ def main():
         print(f"ERROR: TDM benchmark requires gfx1250, got {arch}", file=sys.stderr)
         sys.exit(1)
 
-    # MI450: 8 XCDs × 256 CUs = 2048 CUs total
+    # gfx1250: 8 XCDs × 256 CUs = 2048 CUs total
     grid_sizes = [(4, 4), (8, 8), (16, 16), (32, 32), (32, 64), (64, 64), (64, 128), (128, 128), (256, 128), (256, 256)]
     # Multicast mode: square grids only (fewer combos, cleaner comparison)
     mcast_grid_sizes = [(8, 8), (16, 16), (32, 32), (64, 64), (128, 128)]

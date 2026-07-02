@@ -2115,3 +2115,198 @@ def compile_pa_decode_metadata(
         "kernel": pa_decode_metadata_kenrel,
         "allocator": allocator,
     }
+
+
+# Deterministic split-partition reduce; drop-in replacement for the racy aiter
+# ``pa_reduce_v1`` / ``mla_reduce_v1`` on the PS decode path (root cause of the
+# flaky ``test_pa`` NaN). Each output element is combined by exactly one thread,
+# serially via online softmax (out = Σ_s w_s·o_s / Σ_s w_s, w_s = exp(lse_s − max)).
+# The per-split LSE is a per-(row, head) scalar shared by all head_size lanes, so
+# the combine is thread-independent — no atomics/cross-thread reduction → bit-exact.
+#
+# Inputs (from compile_pa_decode_metadata / get_pa_metadata; caller passes the
+# ``[query_length:]`` slices, mirroring the old pa_reduce_v1 call):
+#   partial_output f32 : row [num_query_heads, head_size], stride stride_po_row;
+#                        each split already normalized by its local denom.
+#   partial_lse    f32 : row [num_query_heads], stride stride_pl_row; = max + log(sum).
+#   reduce_indptr [batch+1]: group g splits = slots [indptr[g], indptr[g+1]).
+#   reduce_final_map [batch,2]: group g → final output row range.
+#   reduce_partial_map: slot → partial row base (in the sliced buffer).
+# Direct (non-split) outputs have empty groups (indptr delta 0) and are skipped.
+@functools.lru_cache(maxsize=64)
+def compile_pa_ps_reduce(
+    *,
+    query_length: int,
+    num_query_heads: int,
+    head_size: int,
+    output_dtype_str: str,
+):
+    block_threads = head_size
+    assert 0 < block_threads <= 1024, "head_size must fit in one workgroup"
+
+    @flyc.kernel(known_block_size=(block_threads, 1, 1))
+    def pa_ps_reduce_kernel(
+        final_output_ptr: fx.Tensor,
+        partial_output_ptr: fx.Tensor,
+        partial_lse_ptr: fx.Tensor,
+        reduce_indptr_ptr: fx.Tensor,
+        reduce_final_map_ptr: fx.Tensor,
+        reduce_partial_map_ptr: fx.Tensor,
+        stride_out_seq: Int32,
+        stride_out_head: Int32,
+        stride_po_row: Int32,  # num_query_heads * head_size
+        stride_pl_row: Int32,  # num_query_heads
+    ):
+        tid = fx.Int32(gpu.thread_id("x"))
+        g = fx.Int32(gpu.block_id("x"))
+        qhead = fx.Int32(gpu.block_id("y"))
+        qi = fx.Int32(gpu.block_id("z"))
+
+        out_rsrc = buffer_ops.create_buffer_resource(final_output_ptr, max_size=True)
+        po_rsrc = buffer_ops.create_buffer_resource(partial_output_ptr, max_size=True)
+        pl_rsrc = buffer_ops.create_buffer_resource(partial_lse_ptr, max_size=True)
+        rip_rsrc = buffer_ops.create_buffer_resource(reduce_indptr_ptr, max_size=True)
+        rfm_rsrc = buffer_ops.create_buffer_resource(reduce_final_map_ptr, max_size=True)
+        rpm_rsrc = buffer_ops.create_buffer_resource(reduce_partial_map_ptr, max_size=True)
+
+        c_zero_f = fx.Float32(0.0)
+        c_one_f = fx.Float32(1.0)
+        c_neg_inf = fx.Float32(float("-inf"))
+        c_log2e = fx.Float32(LOG2E)
+        c_head = fx.Int32(head_size)
+
+        lo = buffer_ops.buffer_load(rip_rsrc, g, vec_width=1, dtype=T.i32)
+        hi = buffer_ops.buffer_load(rip_rsrc, g + fx.Int32(1), vec_width=1, dtype=T.i32)
+
+        # Empty group (direct / padding) → nothing to combine; leave row untouched.
+        if hi > lo:
+            qo_start = buffer_ops.buffer_load(rfm_rsrc, g * fx.Int32(2), vec_width=1, dtype=T.i32)
+            out_row = qo_start + qi
+
+            # Online-softmax combine over the group's splits (dynamic count).
+            # State = (running_max, running_denom, running_acc), per-thread.
+            for _s, st in fx.range(
+                fx.Index(arith.unwrap(lo)),
+                fx.Index(arith.unwrap(hi)),
+                1,
+                init=[c_neg_inf, c_zero_f, c_zero_f],
+            ):
+                m = fx.Float32(st[0])
+                denom = fx.Float32(st[1])
+                acc = fx.Float32(st[2])
+                slot = fx.Int32(_s)
+                prow = buffer_ops.buffer_load(rpm_rsrc, slot, vec_width=1, dtype=T.i32) + qi
+                lse = buffer_ops.buffer_load(pl_rsrc, prow * stride_pl_row + qhead, vec_width=1, dtype=T.f32)
+                v = buffer_ops.buffer_load(
+                    po_rsrc, prow * stride_po_row + qhead * c_head + tid, vec_width=1, dtype=T.f32
+                )
+                m_new = m.maximumf(lse)
+                scale_old = exp2_f32_fast((m - m_new) * c_log2e)
+                w = exp2_f32_fast((lse - m_new) * c_log2e)
+                denom_new = denom * scale_old + w
+                acc_new = acc * scale_old + v * w
+                results = yield [m_new, denom_new, acc_new]
+
+            denom_f = fx.Float32(results[1])
+            acc_f = fx.Float32(results[2])
+            safe_denom = arith.select(denom_f > c_zero_f, denom_f, c_one_f)
+            out_acc = acc_f * rcp_f32(safe_denom)
+
+            out_off = out_row * stride_out_seq + qhead * stride_out_head + tid
+            if const_expr(output_dtype_str == "f32"):
+                out_val = out_acc
+            elif const_expr(output_dtype_str == "f16"):
+                out_val = out_acc.to(fx.Float16)
+            else:
+                out_val = out_acc.to(fx.BFloat16)
+            buffer_ops.buffer_store(out_val, out_rsrc, out_off)
+
+    @flyc.jit
+    def launch_pa_ps_reduce(
+        final_output,
+        partial_output,
+        partial_lse,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+        stride_out_seq,
+        stride_out_head,
+        stride_po_row,
+        stride_pl_row,
+        num_groups,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        pa_ps_reduce_kernel(
+            final_output,
+            partial_output,
+            partial_lse,
+            reduce_indptr,
+            reduce_final_map,
+            reduce_partial_map,
+            stride_out_seq,
+            stride_out_head,
+            stride_po_row,
+            stride_pl_row,
+        ).launch(
+            grid=(num_groups, num_query_heads, query_length),
+            block=(block_threads, 1, 1),
+            stream=stream,
+        )
+
+    return {"launch": launch_pa_ps_reduce, "kernel": pa_ps_reduce_kernel}
+
+
+_PA_PS_REDUCE_DTYPE_STR = {
+    torch.float32: "f32",
+    torch.float16: "f16",
+    torch.bfloat16: "bf16",
+}
+
+
+def pa_ps_reduce(
+    *,
+    partial_output: torch.Tensor,
+    partial_lse: torch.Tensor,
+    reduce_indptr: torch.Tensor,
+    reduce_final_map: torch.Tensor,
+    reduce_partial_map: torch.Tensor,
+    max_seqlen_q: int,
+    final_output: torch.Tensor,
+    num_query_heads: int,
+    head_size: int,
+    stream=None,
+) -> None:
+    """Deterministic drop-in replacement for ``aiter.pa_reduce_v1`` on the PS path.
+
+    ``partial_output`` / ``partial_lse`` must already be the ``[query_length:]``
+    slices (same as the old pa_reduce_v1 call site). One reduce group is launched
+    per batch tile; empty groups (``reduce_indptr`` delta 0 — direct outputs) skip
+    in-kernel, so passing ``reduce_indptr.numel() - 1`` groups needs no host sync.
+    """
+    num_groups = reduce_indptr.numel() - 1
+    stride_po_row = num_query_heads * head_size
+    stride_pl_row = num_query_heads
+    out_dtype_str = _PA_PS_REDUCE_DTYPE_STR[final_output.dtype]
+    compiled = compile_pa_ps_reduce(
+        query_length=int(max_seqlen_q),
+        num_query_heads=int(num_query_heads),
+        head_size=int(head_size),
+        output_dtype_str=out_dtype_str,
+    )
+    kwargs = {}
+    if stream is not None:
+        kwargs["stream"] = stream
+    compiled["launch"](
+        final_output,
+        partial_output,
+        partial_lse,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+        int(final_output.stride(0)),
+        int(final_output.stride(1)),
+        stride_po_row,
+        stride_pl_row,
+        num_groups,
+        **kwargs,
+    )
