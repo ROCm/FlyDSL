@@ -1,8 +1,83 @@
 {
  "schema": 1,
- "updated": "2026-07-02T01:22:16Z",
+ "updated": "2026-07-02T04:44:38Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28563853893,
+   "pr": 788,
+   "commit": "2bee1596b28bee34438eb6cd2d36bd3e63171ffa",
+   "branch": "feat/autotune-ci-guard",
+   "event": "pull_request",
+   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563853893",
+   "created_at": "2026-07-02T03:45:26Z",
+   "updated_at": "2026-07-02T03:45:26Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28563837421,
+   "pr": 786,
+   "commit": "6a93ad7d881c2ea81812e1c8359b2e11c6ae6186",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563837421",
+   "created_at": "2026-07-02T03:45:03Z",
+   "updated_at": "2026-07-02T03:45:03Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28563786073,
+   "pr": 785,
+   "commit": "62afefc7fc45936dd664424e4c4843c9e804141e",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563786073",
+   "created_at": "2026-07-02T03:43:36Z",
+   "updated_at": "2026-07-02T03:43:36Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28563689598,
+   "pr": 783,
+   "commit": "8ad064f9269d5bf50c3c7e17e07d3bb119739a3f",
+   "branch": "feat/autotune-cache-key-restore",
+   "event": "pull_request",
+   "title": "[1/5] autotune: harden cache key + add restore_value (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563689598",
+   "created_at": "2026-07-02T03:40:53Z",
+   "updated_at": "2026-07-02T03:40:53Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28561863969,
+   "pr": null,
+   "commit": "50a95c26a60944692d13f3172db25e93afc8c9d2",
+   "branch": "feat/autotune-cache-key-restore",
+   "event": "pull_request",
+   "title": "[1/5] autotune: harden cache key + add restore_value (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28561863969",
+   "created_at": "2026-07-02T02:49:48Z",
+   "updated_at": "2026-07-02T02:49:48Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 28553278699,
    "pr": 794,
@@ -1028,7 +1103,7 @@
   },
   {
    "run_id": 28503477734,
-   "pr": 788,
+   "pr": null,
    "commit": "d9f1e149f39bf6808066045c9c40b89cfb819e52",
    "branch": "feat/autotune-ci-guard",
    "event": "pull_request",
@@ -1043,7 +1118,7 @@
   },
   {
    "run_id": 28503459986,
-   "pr": 786,
+   "pr": null,
    "commit": "5f21d98942f97eb0c687f7bfead5457d8cdcf1fc",
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
@@ -1103,7 +1178,7 @@
   },
   {
    "run_id": 28502516050,
-   "pr": 785,
+   "pr": null,
    "commit": "0aa86e08e3754a7158ef5e61d79f3030da10e177",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -1161,7 +1236,7 @@
   },
   {
    "run_id": 28501962700,
-   "pr": 783,
+   "pr": null,
    "commit": "6f3351f54902e6422a3ac4bca012306f45a3954a",
    "branch": "feat/autotune-cache-key-restore",
    "event": "pull_request",
@@ -1777,183 +1852,6 @@
      "started_at": "2026-07-01T03:32:21Z",
      "completed_at": "2026-07-01T03:36:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28491514633/job/84449158366"
-    }
-   ]
-  },
-  {
-   "run_id": 28490151635,
-   "pr": 772,
-   "commit": "71afcae6c757f895521d96143cf50631106498c1",
-   "branch": "yanbo/combine_perf_tuning",
-   "event": "pull_request",
-   "title": "[Feat]: Add dispatch & combine tuning configuration",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635",
-   "created_at": "2026-07-01T02:51:55Z",
-   "updated_at": "2026-07-01T23:43:08Z",
-   "actor": "yanboshao",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T22:25:21Z",
-     "completed_at": "2026-07-01T22:38:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84650275595"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T02:53:52Z",
-     "completed_at": "2026-07-01T03:38:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84650295177"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T02:53:53Z",
-     "completed_at": "2026-07-01T03:58:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84650296517"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-01T22:39:39Z",
-     "completed_at": "2026-07-01T23:39:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84652340657"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T22:41:00Z",
-     "completed_at": "2026-07-01T23:43:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28490151635/job/84652340819"
-    }
-   ]
-  },
-  {
-   "run_id": 28475887697,
-   "pr": null,
-   "commit": "67ba219dd137541e51e2238f8090650429b7aede",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475887697",
-   "created_at": "2026-06-30T21:06:27Z",
-   "updated_at": "2026-06-30T23:08:35Z",
-   "actor": "amd-satre",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T21:08:41Z",
-     "completed_at": "2026-06-30T21:20:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475887697/job/84400532897"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T21:08:54Z",
-     "completed_at": "2026-06-30T22:53:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475887697/job/84400532918"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T21:08:57Z",
-     "completed_at": "2026-06-30T23:08:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475887697/job/84400532921"
-    }
-   ]
-  },
-  {
-   "run_id": 28475871542,
-   "pr": null,
-   "commit": "b88ebab813dc25e38711ce8b83cac8737882f279",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475871542",
-   "created_at": "2026-06-30T21:06:11Z",
-   "updated_at": "2026-06-30T21:06:44Z",
-   "actor": "amd-satre",
-   "jobs": []
-  },
-  {
-   "run_id": 28475730255,
-   "pr": null,
-   "commit": "e54c5a296d4daa1386e71aa18168fdbd05426730",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28475730255",
-   "created_at": "2026-06-30T21:03:50Z",
-   "updated_at": "2026-06-30T21:04:35Z",
-   "actor": "amd-satre",
-   "jobs": []
-  },
-  {
-   "run_id": 28466385289,
-   "pr": null,
-   "commit": "705d959e12383291721a3beed1fb142a328a808a",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28466385289",
-   "created_at": "2026-06-30T18:17:51Z",
-   "updated_at": "2026-06-30T19:15:53Z",
-   "actor": "amd-satre",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-06-30T18:20:48Z",
-     "completed_at": "2026-06-30T19:15:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28466385289/job/84367424687"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T18:20:45Z",
-     "completed_at": "2026-06-30T19:11:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28466385289/job/84367424727"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-06-30T18:20:19Z",
-     "completed_at": "2026-06-30T18:44:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28466385289/job/84367424735"
     }
    ]
   }
