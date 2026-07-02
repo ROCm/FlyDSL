@@ -177,6 +177,12 @@ jobs:
           docker exec flydsl_test bash -c "python3 -c 'import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Installed triton\", triton.__version__)'"
 
       - name: Run tests
+        # Autotune note: CI must NOT set FLYDSL_AUTOTUNE, so the autotuner never
+        # runs its (slow, noisy) benchmark search here — it exercises only the
+        # heuristic-default and offline-lookup paths. The GPU-free autotune unit
+        # tests (tests/unit/test_autotune*.py) and the committed-config
+        # regression guard run as part of tests/unit/ below. See
+        # docs/autotune_guide.md ("Do not tune in CI").
         run: |
           docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
 
