@@ -12,18 +12,21 @@ def make_tail_plan(num_buffers, pre_loaded, extra):
         pre_loaded:  stages already loaded and ready to compute (= num_buffers - 1).
         extra:       additional tiles that must be loaded in the tail.
     """
+    # Ring offset = prefetch distance = pre_loaded (load lands ``pre_loaded`` steps
+    # before its consume). When pre_loaded < num_buffers-1 (warp-pp anti-phase slack)
+    # the shared slot outlives the lead. compute_stage is simply the global tile's ring
+    # slot (i % num_buffers); both forms equal the old code at pre_loaded == num_buffers-1.
     steps = pre_loaded + extra
     plan = []
     for i in range(steps):
-        compute_stage = i if i < pre_loaded else (i - pre_loaded + num_buffers - 1) % num_buffers
-        load_stage = (i + num_buffers - 1) % num_buffers if i < extra else None
+        compute_stage = i % num_buffers
+        load_stage = (i + pre_loaded) % num_buffers if i < extra else None
         is_last = i == steps - 1
         if is_last:
             outstanding = -1
         else:
-            j = i + 1
-            next_compute = j if j < pre_loaded else (j - pre_loaded + num_buffers - 1) % num_buffers
-            outstanding = 2 * (num_buffers - 2) if (load_stage is not None and load_stage != next_compute) else 0
+            next_compute = (i + 1) % num_buffers
+            outstanding = 2 * (pre_loaded - 1) if (load_stage is not None and load_stage != next_compute) else 0
         plan.append((load_stage, compute_stage, outstanding))
     return plan
 
