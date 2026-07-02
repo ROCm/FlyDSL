@@ -1208,7 +1208,9 @@ def _bench_kernel_us_cudagraph(
     return _iqr_trimmed_median_us(latencies_us)
 
 
-def _bench_kernel_us(run_once, flush_cache=None, warmup=10, iters=50, post_run=None):
+def _bench_kernel_us(
+    run_once, flush_cache=None, warmup=10, iters=50, post_run=None, print_latencies=False, after_warmup=None
+):
     """Per-iter CUDA-event timer with optional pre-launch L2 flush + IQR-trimmed median."""
     if post_run is not None:
         post_run()
@@ -1218,6 +1220,9 @@ def _bench_kernel_us(run_once, flush_cache=None, warmup=10, iters=50, post_run=N
         if post_run is not None:
             post_run()
     torch.cuda.synchronize()
+    if after_warmup is not None:
+        after_warmup()
+        torch.cuda.synchronize()
 
     start_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
     end_ev = [torch.cuda.Event(enable_timing=True) for _ in range(iters)]
@@ -1233,6 +1238,10 @@ def _bench_kernel_us(run_once, flush_cache=None, warmup=10, iters=50, post_run=N
     torch.cuda.synchronize()
 
     latencies_us = [start_ev[i].elapsed_time(end_ev[i]) * 1e3 for i in range(iters)]
+    if print_latencies:
+        print("      Per-iter latency (us):")
+        for i, lat in enumerate(latencies_us):
+            print(f"        [{i:5d}] {lat:.3f}")
     return _iqr_trimmed_median_us(latencies_us)
 
 
@@ -1565,56 +1574,66 @@ def _run_benchmark(args):
     warp_tile_m = tile_m // args.m_warp
     warp_tile_n = tile_n // args.n_warp
     ascale_load_path = _select_ascale_load_path(M)
-    if is_ptpc:
-        # PTPC: fp8 A with fp32 per-token (sa[M]) / per-channel (sb[N]) scales, no scale preshuffle.
-        # B is fp8 (data_format="fp8") or FP4-packed 2-per-byte (data_format="a8w4").
-        K_packed_b = kernel_k // PACK_B
-        b_kind = "fp4 (a8w4)" if is_a8w4 else "fp8"
-        fill_spec = _parse_fill_mode(getattr(args, "fill_mode", "random"))
-        if fill_spec[0] == "const":
-            value = fill_spec[1]
-            fp8_byte = _fp8_e4m3fn_byte(value)
-            a_raw = torch.full((M, K), fp8_byte, dtype=torch.uint8)
-            b_raw = _fp4_e2m1_packed_fill(N, K, value) if is_a8w4 else torch.full((N, K), fp8_byte, dtype=torch.uint8)
-            # Neutral per-token/per-channel scales so the const output stays predictable.
-            a_scale = torch.ones(M, dtype=torch.float32)
-            b_scale = torch.ones(N, dtype=torch.float32)
-            if is_a8w4:
-                eff_b = _nearest_mxfp4_value(value)
-                b_note = f"fp4 B={eff_b:g}" + (f" (snapped from {value:g})" if eff_b != value else "")
+
+    def _build_gpu_inputs(fill_mode_str, verbose):
+        if is_ptpc:
+            # PTPC: fp8 A with fp32 per-token (sa[M]) / per-channel (sb[N]) scales, no scale preshuffle.
+            # B is fp8 (data_format="fp8") or FP4-packed 2-per-byte (data_format="a8w4").
+            K_packed_b = kernel_k // PACK_B
+            b_kind = "fp4 (a8w4)" if is_a8w4 else "fp8"
+            fill_spec = _parse_fill_mode(fill_mode_str)
+            if fill_spec[0] == "const":
+                value = fill_spec[1]
+                fp8_byte = _fp8_e4m3fn_byte(value)
+                a_raw = torch.full((M, K), fp8_byte, dtype=torch.uint8)
+                b_raw = (
+                    _fp4_e2m1_packed_fill(N, K, value) if is_a8w4 else torch.full((N, K), fp8_byte, dtype=torch.uint8)
+                )
+                # Neutral per-token/per-channel scales so the const output stays predictable.
+                a_scale = torch.ones(M, dtype=torch.float32)
+                b_scale = torch.ones(N, dtype=torch.float32)
+                if verbose:
+                    if is_a8w4:
+                        eff_b = _nearest_mxfp4_value(value)
+                        b_note = f"fp4 B={eff_b:g}" + (f" (snapped from {value:g})" if eff_b != value else "")
+                    else:
+                        b_note = "fp8 B"
+                    print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), {b_note}, sa=sb=1.0")
             else:
-                b_note = "fp8 B"
-            print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), {b_note}, sa=sb=1.0")
+                a_raw = random_fp8_data(M, K)
+                b_raw = fp4_utils.random_fp4_packed(N, K) if is_a8w4 else random_fp8_data(N, K)
+                a_scale = (0.5 + torch.rand(M, dtype=torch.float32)).contiguous()
+                b_scale = (0.5 + torch.rand(N, dtype=torch.float32)).contiguous()
+                if verbose:
+                    print(f"  Fill mode: random fp8 A / {b_kind} B, fp32 per-token/per-channel scales")
+            a_ = a_raw
+            b_ = b_raw
+            _validate_ab_inputs(a_, b_, problem_shape)
+            _expect_shape("A scale", a_scale, (kernel_m,))
+            _expect_shape("B scale", b_scale, (kernel_n,))
+            b_ = fp4_utils.preshuffle_b_16x16(b_, kernel_n, K_packed_b)
         else:
-            a_raw = random_fp8_data(M, K)
-            b_raw = fp4_utils.random_fp4_packed(N, K) if is_a8w4 else random_fp8_data(N, K)
-            a_scale = (0.5 + torch.rand(M, dtype=torch.float32)).contiguous()
-            b_scale = (0.5 + torch.rand(N, dtype=torch.float32)).contiguous()
-            print(f"  Fill mode: random fp8 A / {b_kind} B, fp32 per-token/per-channel scales")
-        a = a_raw
-        b = b_raw
-        _validate_ab_inputs(a, b, problem_shape)
-        _expect_shape("A scale", a_scale, (kernel_m,))
-        _expect_shape("B scale", b_scale, (kernel_n,))
-        b = fp4_utils.preshuffle_b_16x16(b, kernel_n, K_packed_b)
-    else:
-        a, b, a_scale, b_scale, fill_spec = _fill_mode_inputs(
-            M, N, K, data_format, getattr(args, "fill_mode", "random")
-        )
-        print(f"  Fill mode: {_fill_mode_label(fill_spec, data_format)}")
+            a_, b_, a_scale, b_scale, fill_spec = _fill_mode_inputs(M, N, K, data_format, fill_mode_str)
+            if verbose:
+                print(f"  Fill mode: {_fill_mode_label(fill_spec, data_format)}")
 
-        _validate_mxscale_inputs(a, b, a_scale, b_scale, problem_shape)
-        a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
-        b_scale = preshuffle_scale(b_scale)
+            _validate_mxscale_inputs(a_, b_, a_scale, b_scale, problem_shape)
+            a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
+            b_scale = preshuffle_scale(b_scale)
 
-        K_packed = kernel_k // PACK_B
-        b = fp4_utils.preshuffle_b_16x16(b, kernel_n, K_packed)
+            K_packed = kernel_k // PACK_B
+            b_ = fp4_utils.preshuffle_b_16x16(b_, kernel_n, K_packed)
 
-    a_gpu = a.cuda()
-    b_gpu = b.cuda()
-    as_gpu = a_scale.cuda()
-    bs_gpu = b_scale.cuda()
+        return a_.cuda(), b_.cuda(), a_scale.cuda(), b_scale.cuda()
+
+    a_gpu, b_gpu, as_gpu, bs_gpu = _build_gpu_inputs(getattr(args, "fill_mode", "random"), verbose=True)
     c_gpu = torch.zeros(kernel_m, kernel_n, dtype=torch_kernel_dtype, device="cuda")
+
+    warmup_fill_mode = getattr(args, "warmup_fill_mode", None)
+    warmup_inputs = None
+    if warmup_fill_mode is not None:
+        print(f"  Warmup fill mode: {warmup_fill_mode} (switches to --fill-mode data for timed iters)")
+        warmup_inputs = _build_gpu_inputs(warmup_fill_mode, verbose=False)
 
     print("\n[1/3] Compiling kernel...")
     t0 = time.perf_counter()
@@ -1730,6 +1749,22 @@ def _run_benchmark(args):
     def reset_bench_output():
         c_gpu.zero_()
 
+    after_warmup = None
+    if warmup_inputs is not None:
+        if use_graph:
+            print("      [WARNING: --warmup-fill-mode is ignored with --use-graph]")
+        else:
+            main_inputs = (a_gpu.clone(), b_gpu.clone(), as_gpu.clone(), bs_gpu.clone())
+
+            def _apply_inputs(inputs):
+                a_gpu.copy_(inputs[0])
+                b_gpu.copy_(inputs[1])
+                as_gpu.copy_(inputs[2])
+                bs_gpu.copy_(inputs[3])
+
+            _apply_inputs(warmup_inputs)
+            after_warmup = lambda: _apply_inputs(main_inputs)  # noqa: E731
+
     if use_graph:
         if graph_num_slots == 1:
             print(f"[2/3] Warming up ({args.warmup} iters) + bench via hot-cache hipGraph ({args.iters} replays)...")
@@ -1774,6 +1809,8 @@ def _run_benchmark(args):
             warmup=args.warmup,
             iters=args.iters,
             post_run=reset_bench_output if clear_output_each_run else None,
+            print_latencies=args.print_latencies,
+            after_warmup=after_warmup,
         )
 
     WMMA_K = 128
@@ -2033,6 +2070,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument(
+        "--warmup-fill-mode",
+        type=str,
+        default=None,
+        help="Fill mode (same syntax as --fill-mode, e.g. 'random' or a float const) to use only "
+        "during the warmup iters. Data is switched back to --fill-mode right before the timed "
+        "iters begin. Default: same as --fill-mode (no switch). Ignored with --use-graph.",
+    )
+    parser.add_argument(
+        "--print-latencies",
+        action="store_true",
+        default=False,
+        help="Print the raw per-iteration latency (us) from the CUDA event list before "
+        "IQR-trimming/median reduction. Non-graph benchmark path only.",
+    )
     parser.add_argument(
         "--no-flush-l2",
         action="store_true",
