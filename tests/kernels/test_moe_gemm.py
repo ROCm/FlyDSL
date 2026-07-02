@@ -2191,7 +2191,12 @@ def run_mxfp4_moe_2stage(
         wpad_fill = 1e30 if garbage_pad else 0.0
         if model_dim_pad:
             x_fp32[:, real_H:] = 0.0
-            w2_fp32[:, real_H:, :] = 0.0  # gemm2 output-row pad (model_dim), structural
+            # gemm2 output-row pad (model_dim = gemm2 N): the N-skip DROPS the fully-pad 16-N w2 output
+            # tiles (col >= real_H, real_H is 16-aligned) -> their weight loads OOB -> 0 (never fetched).
+            # These output columns are unused (sliced off by the real_H reference), so they take the
+            # garbage fill under ``garbage_pad`` (1e30). A correct cos over the :real_H slice then PROVES
+            # the N-skip never fetched the garbage w2 rows into the accumulation.
+            w2_fp32[:, real_H:, :] = wpad_fill
             # gemm1 contraction-pad: only the fully-pad 128-col-aligned tail halves get garbage.
             gq = (real_H + 127) // 128 * 128  # first fully-pad 128-K weight col
             w1_fp32[:, :, real_H:gq] = 0.0  # partial-pad remainder in a kept half -> host zero
@@ -2413,6 +2418,7 @@ def run_mxfp4_moe_2stage(
         cu_num=cu_num,
         n_sorted_padded=n,
         inter_dim_pad=inter_dim_pad,
+        model_dim_pad=model_dim_pad,
     )
     mxfp4_moe_gemm2(**_g2_kwargs)
     torch.cuda.synchronize()
@@ -2464,8 +2470,13 @@ def run_mxfp4_moe_2stage(
     # finite regardless of the pad-N garbage magnitude (a full-INTER reference would overflow act on the
     # huge pad rows). inter_dim_pad==0 -> rI == INTER (byte-identical full-INTER reference).
     rI = INTER - inter_dim_pad
+    # gemm2 N-skip: the pad model_dim output columns [rH, H) are unused (their w2 rows may hold garbage
+    # under --garbage_pad; the N-skip drops them). Reference over the REAL model_dim extent (:rH) and
+    # compare the same slice of the kernel output -> a correct cos PROVES the garbage was never fetched.
+    # model_dim_pad==0 -> rH == H (byte-identical full-H reference/compare).
+    rH = H - model_dim_pad
     sti_c, sei_c, swt_c = sti[:n].cpu(), sei.cpu(), swt[:n].cpu()
-    ref = torch.zeros((tokens, H), dtype=torch.float32, device=device)
+    ref = torch.zeros((tokens, rH), dtype=torch.float32, device=device)
     for r in range(n):
         tok = int(sti_c[r].item()) & 0x00FFFFFF
         if tok >= tokens:
@@ -2474,8 +2485,9 @@ def run_mxfp4_moe_2stage(
         gate = A[tok] @ W1[e, :rI].T
         up = A[tok] @ W1[e, INTER : INTER + rI].T
         inter_r = _act(gate, up)
-        ref[tok] += (inter_r @ W2[e, :, :rI].T) * float(swt_c[r].item())
+        ref[tok] += (inter_r @ W2[e, :rH, :rI].T) * float(swt_c[r].item())
 
+    out = out[:, :rH]
     cos = torch.nn.functional.cosine_similarity(ref.reshape(-1), out.float().reshape(-1), dim=0).item()
     thr = 0.95 if is_f8 else 0.85
     logging.info(
@@ -2532,7 +2544,7 @@ def run_mxfp4_moe_2stage(
             torch.cuda.synchronize()
             return _reduce_host(gemm2_out) if use_reduce else gemm2_out
 
-        out_g = _replay_out()
+        out_g = _replay_out()[:, :rH]
         cos_g = torch.nn.functional.cosine_similarity(ref.reshape(-1), out_g.float().reshape(-1), dim=0).item()
         logging.info(
             "[mxfp4 moe %s %s graph replay] cos=%.4f (reduce=%s mask=%s)",
@@ -2570,16 +2582,17 @@ def run_mxfp4_moe_2stage(
             A2 = fp4_utils.mxfp4_to_f32(aq2.view(torch.uint8)).view(tokens, H)
         A2sc = fp4_utils.e8m0_to_f32(asc2.view(torch.uint8))
         A2 = (A2.view(tokens, H // 32, 32) * A2sc.unsqueeze(-1)).view(tokens, H)
-        ref2 = torch.zeros((tokens, H), dtype=torch.float32, device=device)
+        ref2 = torch.zeros((tokens, rH), dtype=torch.float32, device=device)
         for r in range(n):
             tok = int(sti_c[r].item()) & 0x00FFFFFF
             if tok >= tokens:
                 continue
             e = int(sei_c[r // SBM].item())
-            gate = A2[tok] @ W1[e, :INTER].T
-            up = A2[tok] @ W1[e, INTER : 2 * INTER].T
+            gate = A2[tok] @ W1[e, :rI].T
+            up = A2[tok] @ W1[e, INTER : INTER + rI].T
             inter_r = _act(gate, up)
-            ref2[tok] += (inter_r @ W2[e].T) * float(swt_c[r].item())
+            ref2[tok] += (inter_r @ W2[e, :rH, :rI].T) * float(swt_c[r].item())
+        out_g2 = out_g2[:, :rH]
         cos_g2 = torch.nn.functional.cosine_similarity(ref2.reshape(-1), out_g2.float().reshape(-1), dim=0).item()
         logging.info(
             "[mxfp4 moe %s %s graph replay-after-input-change] cos=%.4f",

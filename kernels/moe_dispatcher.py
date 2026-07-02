@@ -725,11 +725,13 @@ def compile_gemm2_a4w4_port(
         i32_max_m_blocks,
         i32_inter,
         i32_kpad,
+        i32_npad,
     ):
         # Shared kernel body for both has_pad variants (@flyc.jit so the @flyc.kernel AST rewriter
-        # recurses into its scf `if` / grid-stride dispatch, like gemm2_body_v2). i32_kpad is
-        # fx.Int32(0) (compile-time constant, no kernarg) in the default variant -> has_pad=False
-        # folds the pad math away (byte-identical; AC-3). Only has_pad threads a runtime kpad kernarg.
+        # recurses into its scf `if` / grid-stride dispatch, like gemm2_body_v2). i32_kpad (K = inter
+        # contraction pad) and i32_npad (N = model_dim output pad) are fx.Int32(0) (compile-time
+        # constants, no kernarg) in the default variant -> has_pad=False folds the pad math away
+        # (byte-identical; AC-3). Only has_pad threads the runtime kpad/npad kernargs.
         k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)  # A row stride bytes (runtime)
         aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(fx.Int32(BM) * k_bytes)
         aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=aq_num)
@@ -776,6 +778,7 @@ def compile_gemm2_a4w4_port(
                 arg_aq,
                 i32_inter,
                 i32_kpad,
+                i32_npad,
                 BM=BM,
                 use_nt=use_nt,
                 N_OUT=N_OUT,
@@ -863,6 +866,7 @@ def compile_gemm2_a4w4_port(
                 i32_max_m_blocks,
                 i32_inter,
                 fx.Int32(0),
+                fx.Int32(0),
             )
 
         @flyc.jit
@@ -918,6 +922,7 @@ def compile_gemm2_a4w4_port(
             i32_max_m_blocks: fx.Int32,
             i32_inter: fx.Int32,
             i32_kpad: fx.Int32,
+            i32_npad: fx.Int32,
             arg_out: fx.Int64,
             arg_out_scale: fx.Int64,  # unused (atomic epilog); kept for signature parity
         ):
@@ -944,6 +949,7 @@ def compile_gemm2_a4w4_port(
                 i32_max_m_blocks,
                 i32_inter,
                 i32_kpad,
+                i32_npad,
             )
 
         @flyc.jit
@@ -961,6 +967,7 @@ def compile_gemm2_a4w4_port(
             i32_grid_blocks: fx.Int32,
             i32_inter: fx.Int32,
             i32_kpad: fx.Int32,
+            i32_npad: fx.Int32,
             arg_out: fx.Int64,
             arg_out_scale: fx.Int64,
             stream: fx.Stream,
@@ -979,6 +986,7 @@ def compile_gemm2_a4w4_port(
                 i32_max_m_blocks,
                 i32_inter,
                 i32_kpad,
+                i32_npad,
                 arg_out,
                 arg_out_scale,
             ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
@@ -1202,12 +1210,22 @@ def mxfp4_moe_gemm2(
     cu_num=0,
     n_sorted_padded=None,
     inter_dim_pad=0,
+    model_dim_pad=0,
     stream=None,
 ):
     """Stage-2 down-proj gemm. epilog='atomic' (default): weighted atomic.fadd into pre-zeroed out
     [tokens, H] (opus-sort only). epilog='reduce': non-atomic weighted store into
     out[token_id*topk + slot] of a [tokens*topk, H] buffer (host reduces over topk, applying any
     EP valid_mask). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
+
+    ``inter_dim_pad`` (>0): D_INTER is the PADDED inter (contraction K); the trailing inter_dim_pad
+    cols are host zero-pad. Enables the has_pad weight-OOB K-skip (fully-pad 128-K w2 halves load OOB
+    -> 0, no HBM fetch). ``model_dim_pad`` (>0): D_HIDDEN is the PADDED model_dim (gemm2 N-output); the
+    trailing model_dim_pad output columns are unused (sliced off by the real_model_dim reference).
+    Enables the N-output pad-skip: a 16-N w2 weight tile whose model_dim col base is >= (D_HIDDEN -
+    model_dim_pad) has its buffer sized to 0 records so its weight loads OOB -> 0 (no HBM fetch). PERF-
+    ONLY (the pad output cols are unused). Either pad>0 enables the shared has_pad variant; both fold to
+    the byte-identical default at 0 (AC-3).
 
     ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
     moe_sorting sync). When given, the launch grid is bounded to ``(n_sorted_padded // BM) *
@@ -1224,7 +1242,7 @@ def mxfp4_moe_gemm2(
 
     if persist and cu_num <= 0:
         cu_num = _get_cu_num()
-    has_pad = inter_dim_pad > 0
+    has_pad = inter_dim_pad > 0 or model_dim_pad > 0
     launch = get_g2(
         BM,
         use_nt,
@@ -1247,9 +1265,10 @@ def mxfp4_moe_gemm2(
     else:
         grid_blocks = max_m_blocks if n_sorted_padded is None else (n_sorted_padded // BM)
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
-    # has_pad variant threads the runtime i32_kpad kernarg (K = inter_dim, kpad = inter_dim_pad)
-    # right after i32_inter, matching the launch signature; default has no such kernarg (AC-3).
-    pad_args = (int(inter_dim_pad),) if has_pad else ()
+    # has_pad variant threads the runtime i32_kpad (K = inter_dim, kpad = inter_dim_pad) and i32_npad
+    # (N = model_dim output pad = model_dim_pad) kernargs right after i32_inter, matching the launch
+    # signature; default has no such kernargs (AC-3). Either pad may be 0 while the other is set.
+    pad_args = (int(inter_dim_pad), int(model_dim_pad)) if has_pad else ()
     run_compiled(
         launch,
         inter_sorted_quant.data_ptr(),

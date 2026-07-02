@@ -1034,6 +1034,7 @@ def gemm2_body_v2(
     arg_aq,
     i32_inter,
     i32_kpad,
+    i32_npad,
     *,
     BM,
     use_nt,
@@ -1085,11 +1086,20 @@ def gemm2_body_v2(
     # risks NaN -- see gemm1_body_v2). Same geometry as gemm1 (see bq_view docstring):
     #   weight: halves_with_real = ceil(K_real/128), 1024 bytes/half.
     # has_pad=False -> None (max_size=False, byte-identical default; AC-3).
+    # N-skip (has_pad only): N_real = N_OUT - i32_npad is the real model_dim output extent. gemm2's N
+    # dimension IS the model_dim output; its w2 N-tiles map 1:1 to model_dim output columns (make_bq_view
+    # `col`). A 16-N weight tile whose model_dim col base is >= N_real produces only pad output columns
+    # (unused -- sliced off by the real_model_dim reference), so its buffer is sized to 0 records -> every
+    # weight load OOB -> 0 (no HBM fetch). PERF-ONLY: the pad output columns are unused, so correctness
+    # holds even without the skip; this only drops the wasted w2 fetch. Computed ONLY under has_pad so the
+    # default variant emits zero extra IR (byte-identical; AC-3).
     bq_num_records = None
+    N_real = None
     if const_expr(has_pad):
         K_real = K_rt - fx.Int32(i32_kpad)
         halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
         bq_num_records = halves_real * fx.Int32(1024)
+        N_real = fx.Int32(N_OUT) - fx.Int32(i32_npad)
 
     # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
     # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
@@ -1140,7 +1150,14 @@ def gemm2_body_v2(
 
     def make_bq_view(j):
         col = n_block_idx * BN + wave * (BN // 4) + j * 16
-        return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_MAX, num_records_bytes=bq_num_records)
+        nrec = bq_num_records
+        if const_expr(has_pad):
+            # `col` IS this 16-N tile's model_dim output col base. Fully-pad tile (col >= N_real, and
+            # N_real is 16-aligned): size its buffer to 0 records -> every weight load OOB -> 0 (no HBM
+            # fetch). Else keep the K-skip records. select(pred, then, else) is a wave-uniform cmp+cndmask
+            # (n_block_idx/wave/j all uniform). Only emitted under has_pad (default byte-identical; AC-3).
+            nrec = (col < N_real).select(bq_num_records, fx.Int32(0))
+        return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_MAX, num_records_bytes=nrec)
 
     bq_views = [make_bq_view(j) for j in range_constexpr(4)]
 
