@@ -1047,7 +1047,15 @@ def gemm2_body_v2(
     has_pad=False,
     SBM=None,
     g2_kstages=1,
+    g2_bhoist=False,
 ):
+    # g2_bhoist (opt-in, default False = byte-identical): with the 2-stage B pipeline (g2_kstages==2),
+    # issue the NEXT-tile B weight+scale prefetch BEFORE the per-iteration LDS barrier instead of after.
+    # B is a GMEM->register stream with no LDS dependency, so the barrier (which only guards the A LDS
+    # ring) does not order it. Hoisting the weight loads above the barrier puts them into the VMEM queue
+    # before the block synchronizes, so the long-latency weight fetch overlaps the barrier wait. ATT
+    # (gemm2-att-analysis.md) shows the barrier absorbs ~11% of stall cycles as per-wave VMEM-latency
+    # imbalance; front-loading the weight stream shrinks that exposure. No-op unless g2_kstages==2.
     # g2_kstages (B-weight software-pipeline depth over the K-loop):
     #   1 (default) -> synchronous B load per K-tile (byte-identical to pre-change; AC-3).
     #   2 -> B weight + B-scale prefetched ONE K-tile ahead into per-stage register fragments carried
@@ -1371,15 +1379,7 @@ def gemm2_body_v2(
         issue_b_load_into(cur_bqf, cur_bsf, fx.Int32(0))
         rocdl.sched_barrier(0)
 
-        for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_carry()):
-            store_carry(state)
-            kt_rt = fx.Int32(kt_iv)
-            gpu.barrier()
-            issue_a_ds_read(kt_rt % fx.Int32(aStagesC))
-            nxt_a = kt_rt + fx.Int32(kStages)
-            if nxt_a < K_TILES_RT:
-                issue_a_load_lds(nxt_a % fx.Int32(aStagesC), nxt_a)
-            sa = load_a_scale_tile(kt_rt)
+        def prefetch_next_b(kt_rt):
             # Prefetch the NEXT tile's B (if it exists) into the prefetch fragments; if none, copy the
             # current values through so rotate_b_carry yields well-defined state (unused after loop).
             nxt_b = kt_rt + fx.Int32(1)
@@ -1391,6 +1391,22 @@ def gemm2_body_v2(
                         nxt_bqf[j][half].store(cur_bqf[j][half].load())
                 for mw in range_constexpr(2):
                     nxt_bsf[mw].store(cur_bsf[mw].load())
+
+        for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_carry()):
+            store_carry(state)
+            kt_rt = fx.Int32(kt_iv)
+            # g2_bhoist: issue the next-tile B weight+scale loads BEFORE the LDS barrier so the
+            # weight fetch overlaps the barrier wait (B is register-streamed, not LDS-ordered).
+            if const_expr(g2_bhoist):
+                prefetch_next_b(kt_rt)
+            gpu.barrier()
+            issue_a_ds_read(kt_rt % fx.Int32(aStagesC))
+            nxt_a = kt_rt + fx.Int32(kStages)
+            if nxt_a < K_TILES_RT:
+                issue_a_load_lds(nxt_a % fx.Int32(aStagesC), nxt_a)
+            sa = load_a_scale_tile(kt_rt)
+            if const_expr(not g2_bhoist):
+                prefetch_next_b(kt_rt)
             # Fence the MFMA chain from the B vmem loads so the next-tile loads ride ahead of compute
             # (mirrors gemm1's main-loop sched_barrier/s_setprio fencing).
             rocdl.sched_barrier(0)

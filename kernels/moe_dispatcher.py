@@ -651,6 +651,7 @@ def compile_gemm2_a4w4_port(
     cu_num=0,
     has_pad=False,
     g2_kstages=None,
+    g2_bhoist=None,
 ):
     """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
     atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
@@ -679,6 +680,14 @@ def compile_gemm2_a4w4_port(
         g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "1"))
     if g2_kstages not in (1, 2):
         raise AssertionError(f"g2_kstages must be 1 or 2, got {g2_kstages}")
+    # g2_bhoist: opt-in reorder that issues the next-tile B weight/scale prefetch above the
+    # per-iteration LDS barrier (only meaningful with g2_kstages==2). Default (None) resolves from
+    # env MXFP4_G2_BHOIST (0 = byte-identical default; 1 = hoist). Explicit arg overrides the env.
+    if g2_bhoist is None:
+        import os
+
+        g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "0") == "1"
+    g2_bhoist = bool(g2_bhoist)
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     assert INTER_MAX % BK == 0, f"INTER_MAX must be a multiple of {BK}, got {INTER_MAX}"
@@ -713,7 +722,9 @@ def compile_gemm2_a4w4_port(
     # kstages tag empty when g2_kstages==1 so the default variant keeps its byte-identical kernel name
     # (AC-3); the 2-stage B pipeline is a distinct variant.
     ks_tag = "" if g2_kstages == 1 else f"_g2ks{g2_kstages}"
-    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}_v2"
+    # bhoist tag empty by default (byte-identical kernel name); only appended when the reorder is on.
+    bh_tag = "_bhoist" if g2_bhoist else ""
+    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}{bh_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -803,6 +814,7 @@ def compile_gemm2_a4w4_port(
                 has_pad=has_pad,
                 SBM=SBM,
                 g2_kstages=g2_kstages,
+                g2_bhoist=g2_bhoist,
             )
 
         if const_expr(not persist):
@@ -1073,8 +1085,25 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
     import os
 
     g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "1"))
+    # g2_bhoist (B-prefetch-above-barrier reorder) is a compile-time cache-key dim; default 0 =
+    # byte-identical. Only meaningful with g2_kstages==2. Explicit compile_gemm2 arg still wins.
+    g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "0") == "1"
     # has_pad is a compile-time cache-key dim; has_pad=False is the byte-identical default variant.
-    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk_key, SBM, persist, cu_key, has_pad, g2_kstages)
+    key = (
+        BM,
+        use_nt,
+        D_HIDDEN,
+        epilog,
+        INTER_MAX,
+        a_dtype,
+        topk_key,
+        SBM,
+        persist,
+        cu_key,
+        has_pad,
+        g2_kstages,
+        g2_bhoist,
+    )
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
@@ -1090,6 +1119,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
             cu_num=cu_key,
             has_pad=has_pad,
             g2_kstages=g2_kstages,
+            g2_bhoist=g2_bhoist,
         )
         G2_CACHE[key] = launch
     return launch
