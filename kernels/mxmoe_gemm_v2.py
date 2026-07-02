@@ -1046,7 +1046,17 @@ def gemm2_body_v2(
     topk=1,
     has_pad=False,
     SBM=None,
+    g2_kstages=1,
 ):
+    # g2_kstages (B-weight software-pipeline depth over the K-loop):
+    #   1 (default) -> synchronous B load per K-tile (byte-identical to pre-change; AC-3).
+    #   2 -> B weight + B-scale prefetched ONE K-tile ahead into per-stage register fragments carried
+    #        as scf.for loop state (double-buffer). The MFMA consumes stage kt%2 while the next tile's
+    #        B is loading into stage (kt+1)%2, with sched_barrier/s_setprio fencing the MFMA chain from
+    #        the B vmem loads -- mirrors gemm1_body_v2's kStages=2 prefetch pipeline. gemm2 is
+    #        HBM-weight-bound, so keeping the next weight load in flight hides load latency.
+    if g2_kstages not in (1, 2):
+        raise AssertionError(f"g2_kstages must be 1 or 2, got {g2_kstages}")
     # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
     # SBM==BM (default) is byte-identical. SBM>BM packs SBM//BM compute blocks per SBM sort block;
     # the expert id is looked up at sei[(m_block_idx*BM)//SBM] instead of sei[m_block_idx].
@@ -1199,6 +1209,15 @@ def gemm2_body_v2(
             fx.copy(bs_copy_atom, bscale_views[mw][lane_div_16, lane_mod_16, kt_rt, None], bsf[mw])
         return bqf, bsf
 
+    def issue_b_load_into(bqf, bsf, kt_rt):
+        # Issue B-weight + B-scale vmem loads for K-tile ``kt_rt`` into the given (per-stage) fragments.
+        # Same loads as stream_b_tile but writing caller-owned fragments (the 2-stage prefetch buffers).
+        for j in range_constexpr(4):
+            for half in range_constexpr(2):
+                fx.copy(b_catom, bq_views[j][lane_div_16, lane_mod_16, kt_rt, half, None], bqf[j][half])
+        for mw in range_constexpr(2):
+            fx.copy(bs_copy_atom, bscale_views[mw][lane_div_16, lane_mod_16, kt_rt, None], bsf[mw])
+
     def issue_a_ds_read(slot):
         issue_a_ds_read_dt(
             s_aq_base, slot, slot_bytes, KH_TILE_A, lane_div_16, lane_mod_16, is_f8_a, a_vals, a_frags, kMChunks
@@ -1263,12 +1282,12 @@ def gemm2_body_v2(
     # Runtime-trip scf.for K-loop: stream A->LDS (triple-buffered) + B per tile; carry C / accm.
     aStagesC = aStages
 
-    def load_carry():
+    def load_c_carry():
         if const_expr(is_f8_a):
             return [accm[i][J] for i in range(kMChunks) for J in range(4)]
         return [c_frags[i][J].load() for i in range(kMChunks) for J in range(4)]
 
-    def store_carry(state):
+    def store_c_carry(state):
         n = 0
         for i in range_constexpr(kMChunks):
             for J in range_constexpr(4):
@@ -1277,20 +1296,110 @@ def gemm2_body_v2(
                 else:
                     c_frags[i][J].store(state[n])
                 n += 1
+        return n
 
-    for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_carry()):
-        store_carry(state)
-        kt_rt = fx.Int32(kt_iv)
-        gpu.barrier()
-        issue_a_ds_read(kt_rt % fx.Int32(aStagesC))
-        nxt = kt_rt + fx.Int32(kStages)
-        if nxt < K_TILES_RT:
-            issue_a_load_lds(nxt % fx.Int32(aStagesC), nxt)
-        bqf, bsf = stream_b_tile(kt_rt)
-        sa = load_a_scale_tile(kt_rt)
-        mfma_cluster(bqf, bsf, sa)
-        results = yield load_carry()
-    store_carry(results)
+    if const_expr(g2_kstages == 1):
+        # -- Default: 1-deep pipe, synchronous B load per K-tile (byte-identical; AC-3). --
+        for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_c_carry()):
+            store_c_carry(state)
+            kt_rt = fx.Int32(kt_iv)
+            gpu.barrier()
+            issue_a_ds_read(kt_rt % fx.Int32(aStagesC))
+            nxt = kt_rt + fx.Int32(kStages)
+            if nxt < K_TILES_RT:
+                issue_a_load_lds(nxt % fx.Int32(aStagesC), nxt)
+            bqf, bsf = stream_b_tile(kt_rt)
+            sa = load_a_scale_tile(kt_rt)
+            mfma_cluster(bqf, bsf, sa)
+            results = yield load_c_carry()
+        store_c_carry(results)
+    else:
+        # -- 2-stage B software pipeline: B weight + B-scale prefetched one K-tile ahead. --
+        # Rotating single-buffer model (the runtime scf.for cannot index a python stage list by the
+        # runtime kt, so instead of a kt%2 slot we ALWAYS consume the carried "current" B and ALWAYS
+        # prefetch the next tile's B into the same fragments, threading the prefetched VALUES through
+        # scf.for state so this iteration's prefetch becomes next iteration's current. The C carry is
+        # extended with the B-weight (i32x4) + B-scale (i32x1) fragment values. Prologue loads tile 0.
+        cur_bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
+        cur_bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
+        nxt_bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
+        nxt_bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
+
+        def load_b_carry():
+            # Flat list of the CURRENT (to-be-consumed) B-weight then B-scale fragment values.
+            out = []
+            for j in range_constexpr(4):
+                for half in range_constexpr(2):
+                    out.append(cur_bqf[j][half].load())
+            for mw in range_constexpr(2):
+                out.append(cur_bsf[mw].load())
+            return out
+
+        def store_b_carry(state, base):
+            n = base
+            for j in range_constexpr(4):
+                for half in range_constexpr(2):
+                    cur_bqf[j][half].store(state[n])
+                    n += 1
+            for mw in range_constexpr(2):
+                cur_bsf[mw].store(state[n])
+                n += 1
+            return n
+
+        def rotate_b_carry():
+            # Yield the PREFETCHED (next-tile) values so they become "current" next iteration.
+            out = []
+            for j in range_constexpr(4):
+                for half in range_constexpr(2):
+                    out.append(nxt_bqf[j][half].load())
+            for mw in range_constexpr(2):
+                out.append(nxt_bsf[mw].load())
+            return out
+
+        def load_carry():
+            return load_c_carry() + load_b_carry()
+
+        def store_carry(state):
+            base = store_c_carry(state)
+            store_b_carry(state, base)
+
+        def yield_carry():
+            return load_c_carry() + rotate_b_carry()
+
+        # Prologue: prefetch tile 0's B/B-scale into the "current" fragments (their VALUES enter the
+        # loop via init=load_carry()).
+        issue_b_load_into(cur_bqf, cur_bsf, fx.Int32(0))
+        rocdl.sched_barrier(0)
+
+        for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_carry()):
+            store_carry(state)
+            kt_rt = fx.Int32(kt_iv)
+            gpu.barrier()
+            issue_a_ds_read(kt_rt % fx.Int32(aStagesC))
+            nxt_a = kt_rt + fx.Int32(kStages)
+            if nxt_a < K_TILES_RT:
+                issue_a_load_lds(nxt_a % fx.Int32(aStagesC), nxt_a)
+            sa = load_a_scale_tile(kt_rt)
+            # Prefetch the NEXT tile's B (if it exists) into the prefetch fragments; if none, copy the
+            # current values through so rotate_b_carry yields well-defined state (unused after loop).
+            nxt_b = kt_rt + fx.Int32(1)
+            if nxt_b < K_TILES_RT:
+                issue_b_load_into(nxt_bqf, nxt_bsf, nxt_b)
+            else:
+                for j in range_constexpr(4):
+                    for half in range_constexpr(2):
+                        nxt_bqf[j][half].store(cur_bqf[j][half].load())
+                for mw in range_constexpr(2):
+                    nxt_bsf[mw].store(cur_bsf[mw].load())
+            # Fence the MFMA chain from the B vmem loads so the next-tile loads ride ahead of compute
+            # (mirrors gemm1's main-loop sched_barrier/s_setprio fencing).
+            rocdl.sched_barrier(0)
+            rocdl.s_setprio(1)
+            mfma_cluster(cur_bqf, cur_bsf, sa)
+            rocdl.s_setprio(0)
+            rocdl.sched_barrier(0)
+            results = yield yield_carry()
+        store_carry(results)
 
     # epilog: atomic bf16. fp8 reads accm; fp4 loads the C fragments.
     if const_expr(is_f8_a):

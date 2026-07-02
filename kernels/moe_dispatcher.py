@@ -650,6 +650,7 @@ def compile_gemm2_a4w4_port(
     persist=False,
     cu_num=0,
     has_pad=False,
+    g2_kstages=None,
 ):
     """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
     atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
@@ -669,6 +670,15 @@ def compile_gemm2_a4w4_port(
     if SBM % BM != 0:
         raise AssertionError(f"SBM ({SBM}) must be a multiple of BM ({BM})")
     use_reduce = epilog == "reduce"
+    # g2_kstages: B-weight software-pipeline depth over the gemm2 K-loop. Default (None) resolves from
+    # env MXFP4_G2_KSTAGES (1 = current synchronous B load, byte-identical default; 2 = B prefetched
+    # one K-tile ahead into double-buffered register fragments). Explicit arg overrides the env.
+    if g2_kstages is None:
+        import os
+
+        g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "1"))
+    if g2_kstages not in (1, 2):
+        raise AssertionError(f"g2_kstages must be 1 or 2, got {g2_kstages}")
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     assert INTER_MAX % BK == 0, f"INTER_MAX must be a multiple of {BK}, got {INTER_MAX}"
@@ -700,7 +710,10 @@ def compile_gemm2_a4w4_port(
     # pad tag empty when has_pad=False so the default keeps its byte-identical kernel name AND no
     # i32_kpad kernarg (AC-3). has_pad=True adds the runtime pad kernarg + weight-OOB pad-skip.
     pad_tag = "_pad" if has_pad else ""
-    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}_v2"
+    # kstages tag empty when g2_kstages==1 so the default variant keeps its byte-identical kernel name
+    # (AC-3); the 2-stage B pipeline is a distinct variant.
+    ks_tag = "" if g2_kstages == 1 else f"_g2ks{g2_kstages}"
+    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -789,6 +802,7 @@ def compile_gemm2_a4w4_port(
                 topk=topk,
                 has_pad=has_pad,
                 SBM=SBM,
+                g2_kstages=g2_kstages,
             )
 
         if const_expr(not persist):
@@ -1054,8 +1068,13 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
     SBM = _norm_sbm(SBM, BM)
     topk_key = topk if epilog == "reduce" else 1
     cu_key = cu_num if persist else 0
+    # g2_kstages (B-pipeline depth) is a compile-time cache-key dim; resolve from env here so it enters
+    # the key (env MXFP4_G2_KSTAGES; default 1 = byte-identical). Explicit compile_gemm2 arg still wins.
+    import os
+
+    g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "1"))
     # has_pad is a compile-time cache-key dim; has_pad=False is the byte-identical default variant.
-    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk_key, SBM, persist, cu_key, has_pad)
+    key = (BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk_key, SBM, persist, cu_key, has_pad, g2_kstages)
     launch = G2_CACHE.get(key)
     if launch is None:
         launch = compile_gemm2_a4w4_port(
@@ -1070,6 +1089,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
             persist=persist,
             cu_num=cu_key,
             has_pad=has_pad,
+            g2_kstages=g2_kstages,
         )
         G2_CACHE[key] = launch
     return launch
