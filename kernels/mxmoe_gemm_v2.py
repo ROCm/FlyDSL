@@ -1048,7 +1048,18 @@ def gemm2_body_v2(
     SBM=None,
     g2_kstages=1,
     g2_bhoist=False,
+    g2_ascale_pf=False,
 ):
+    # g2_ascale_pf (opt-in, default False = byte-identical): with the 2-stage B pipeline
+    # (g2_kstages==2), prefetch the A-scale ONE K-tile ahead into scf.for-carried register(s) instead
+    # of loading it synchronously at the loop head. The default loop issues load_a_scale_tile(kt) and
+    # consumes it in the SAME iteration's mfma_cluster, so the ISA emits `buffer_load_dword` immediately
+    # followed by `s_waitcnt vmcnt(0)` gating the first MFMA on the full VMEM latency of that single
+    # scale dword (and, because it is the newest load, forcing a drain of the freshly-issued B prefetch
+    # too). aiter's cktile gemm2 prefetches its A-scale a K-block ahead into a register (ping/pong) and
+    # never stalls the MFMA on the scale return; this matches that pattern. The scale is `kScaleSubBlocks`
+    # i32 register(s) carried through scf.for state, prologue-loaded for tile 0. No-op unless
+    # g2_kstages==2. (deepdiff lever C; gemm2-mem-pattern-align.md.)
     # g2_bhoist (opt-in, default False = byte-identical): with the 2-stage B pipeline (g2_kstages==2),
     # issue the NEXT-tile B weight+scale prefetch BEFORE the per-iteration LDS barrier instead of after.
     # B is a GMEM->register stream with no LDS dependency, so the barrier (which only guards the A LDS
@@ -1332,15 +1343,25 @@ def gemm2_body_v2(
         cur_bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
         nxt_bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
         nxt_bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
+        # A-scale prefetch (g2_ascale_pf): carry the CURRENT tile's A-scale as i32<1:1> fragment(s)
+        # (one per 32-row scale chunk, kScaleSubBlocks) through scf.for state, prefetching the next
+        # tile's into the same fragments -- same rotating-single-buffer model as the B carry above.
+        cur_saf = nxt_saf = None
+        if const_expr(g2_ascale_pf):
+            cur_saf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(kScaleSubBlocks)]
+            nxt_saf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(kScaleSubBlocks)]
 
         def load_b_carry():
-            # Flat list of the CURRENT (to-be-consumed) B-weight then B-scale fragment values.
+            # Flat list of the CURRENT (to-be-consumed) B-weight, B-scale then (opt) A-scale values.
             out = []
             for j in range_constexpr(4):
                 for half in range_constexpr(2):
                     out.append(cur_bqf[j][half].load())
             for mw in range_constexpr(2):
                 out.append(cur_bsf[mw].load())
+            if const_expr(g2_ascale_pf):
+                for sub in range_constexpr(kScaleSubBlocks):
+                    out.append(cur_saf[sub].load())
             return out
 
         def store_b_carry(state, base):
@@ -1352,6 +1373,10 @@ def gemm2_body_v2(
             for mw in range_constexpr(2):
                 cur_bsf[mw].store(state[n])
                 n += 1
+            if const_expr(g2_ascale_pf):
+                for sub in range_constexpr(kScaleSubBlocks):
+                    cur_saf[sub].store(state[n])
+                    n += 1
             return n
 
         def rotate_b_carry():
@@ -1362,7 +1387,16 @@ def gemm2_body_v2(
                     out.append(nxt_bqf[j][half].load())
             for mw in range_constexpr(2):
                 out.append(nxt_bsf[mw].load())
+            if const_expr(g2_ascale_pf):
+                for sub in range_constexpr(kScaleSubBlocks):
+                    out.append(nxt_saf[sub].load())
             return out
+
+        def issue_a_scale_load_into(saf, kt_rt):
+            # Issue the A-scale vmem load(s) for K-tile kt_rt into the given (per-stage) fragment(s).
+            sa = load_a_scale_tile(kt_rt)
+            for sub in range_constexpr(kScaleSubBlocks):
+                saf[sub].store(sa[sub])
 
         def load_carry():
             return load_c_carry() + load_b_carry()
@@ -1377,6 +1411,8 @@ def gemm2_body_v2(
         # Prologue: prefetch tile 0's B/B-scale into the "current" fragments (their VALUES enter the
         # loop via init=load_carry()).
         issue_b_load_into(cur_bqf, cur_bsf, fx.Int32(0))
+        if const_expr(g2_ascale_pf):
+            issue_a_scale_load_into(cur_saf, fx.Int32(0))
         rocdl.sched_barrier(0)
 
         def prefetch_next_b(kt_rt):
@@ -1385,12 +1421,17 @@ def gemm2_body_v2(
             nxt_b = kt_rt + fx.Int32(1)
             if nxt_b < K_TILES_RT:
                 issue_b_load_into(nxt_bqf, nxt_bsf, nxt_b)
+                if const_expr(g2_ascale_pf):
+                    issue_a_scale_load_into(nxt_saf, nxt_b)
             else:
                 for j in range_constexpr(4):
                     for half in range_constexpr(2):
                         nxt_bqf[j][half].store(cur_bqf[j][half].load())
                 for mw in range_constexpr(2):
                     nxt_bsf[mw].store(cur_bsf[mw].load())
+                if const_expr(g2_ascale_pf):
+                    for sub in range_constexpr(kScaleSubBlocks):
+                        nxt_saf[sub].store(cur_saf[sub].load())
 
         for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_carry()):
             store_carry(state)
@@ -1404,7 +1445,13 @@ def gemm2_body_v2(
             nxt_a = kt_rt + fx.Int32(kStages)
             if nxt_a < K_TILES_RT:
                 issue_a_load_lds(nxt_a % fx.Int32(aStagesC), nxt_a)
-            sa = load_a_scale_tile(kt_rt)
+            # A-scale: prefetched from the carry (g2_ascale_pf) so it is already resident at the MFMA,
+            # or loaded synchronously here (default) -- the latter emits the buffer_load_dword + vmcnt(0)
+            # stall at the loop head that gates the MFMA on the scale's full VMEM latency.
+            if const_expr(g2_ascale_pf):
+                sa = [_raw(Vec(cur_saf[sub].load())[0]) for sub in range_constexpr(kScaleSubBlocks)]
+            else:
+                sa = load_a_scale_tile(kt_rt)
             if const_expr(not g2_bhoist):
                 prefetch_next_b(kt_rt)
             # Fence the MFMA chain from the B vmem loads so the next-tile loads ride ahead of compute

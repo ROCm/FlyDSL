@@ -652,6 +652,7 @@ def compile_gemm2_a4w4_port(
     has_pad=False,
     g2_kstages=None,
     g2_bhoist=None,
+    g2_ascale_pf=None,
 ):
     """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
     atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
@@ -688,6 +689,13 @@ def compile_gemm2_a4w4_port(
 
         g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "0") == "1"
     g2_bhoist = bool(g2_bhoist)
+    # g2_ascale_pf: opt-in A-scale prefetch one K-tile ahead (only meaningful with g2_kstages==2).
+    # Default (None) resolves from env MXFP4_G2_ASCALE_PF (0 = byte-identical default; 1 = prefetch).
+    if g2_ascale_pf is None:
+        import os
+
+        g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "0") == "1"
+    g2_ascale_pf = bool(g2_ascale_pf)
     if a_dtype not in ("fp4", "fp8"):
         raise AssertionError(f"a_dtype must be 'fp4' or 'fp8', got {a_dtype!r}")
     assert INTER_MAX % BK == 0, f"INTER_MAX must be a multiple of {BK}, got {INTER_MAX}"
@@ -724,7 +732,9 @@ def compile_gemm2_a4w4_port(
     ks_tag = "" if g2_kstages == 1 else f"_g2ks{g2_kstages}"
     # bhoist tag empty by default (byte-identical kernel name); only appended when the reorder is on.
     bh_tag = "_bhoist" if g2_bhoist else ""
-    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}{bh_tag}_v2"
+    # ascale-prefetch tag empty by default (byte-identical); only appended when the prefetch is on.
+    apf_tag = "_apf" if g2_ascale_pf else ""
+    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}{bh_tag}{apf_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -815,6 +825,7 @@ def compile_gemm2_a4w4_port(
                 SBM=SBM,
                 g2_kstages=g2_kstages,
                 g2_bhoist=g2_bhoist,
+                g2_ascale_pf=g2_ascale_pf,
             )
 
         if const_expr(not persist):
@@ -1088,6 +1099,9 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
     # g2_bhoist (B-prefetch-above-barrier reorder) is a compile-time cache-key dim; default 0 =
     # byte-identical. Only meaningful with g2_kstages==2. Explicit compile_gemm2 arg still wins.
     g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "0") == "1"
+    # g2_ascale_pf (A-scale prefetch) is a compile-time cache-key dim; default 0 = byte-identical.
+    # Only meaningful with g2_kstages==2. Explicit compile_gemm2 arg still wins.
+    g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "0") == "1"
     # has_pad is a compile-time cache-key dim; has_pad=False is the byte-identical default variant.
     key = (
         BM,
@@ -1103,6 +1117,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
         has_pad,
         g2_kstages,
         g2_bhoist,
+        g2_ascale_pf,
     )
     launch = G2_CACHE.get(key)
     if launch is None:
@@ -1120,6 +1135,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
             has_pad=has_pad,
             g2_kstages=g2_kstages,
             g2_bhoist=g2_bhoist,
+            g2_ascale_pf=g2_ascale_pf,
         )
         G2_CACHE[key] = launch
     return launch
