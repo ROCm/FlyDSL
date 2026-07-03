@@ -24,6 +24,7 @@ from .._mlir.passmanager import PassManager
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
+from ..utils.kernel_info import parse_kernel_info
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
 from .diagnostics import (
@@ -664,6 +665,11 @@ def _dump_isa(*, dump_dir: Path, ctx: ir.Context, asm: str, verify: bool, stage_
         dump_dir.mkdir(parents=True, exist_ok=True)
         out = dump_dir / f"{stage_name}.s"
         out.write_text(isa_text, encoding="utf-8")
+
+        kernel_info = parse_kernel_info(isa_text)
+        if kernel_info:
+            print(f"[flydsl.compile] kernel info: {kernel_info}")
+
         return out
     except Exception as exc:
         log().debug(f"[dump_isa] failed: {exc}")
