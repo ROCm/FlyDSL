@@ -465,7 +465,13 @@ def gemm1_body_v2(
             )
             voffset = (lane_col ^ mask) + cached_actual_row[g] * K_BYTES
             off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
-            v_e = (voffset + kt_abs * KH_TILE_A) // 4  # per-lane i32-elem index
+            # v_e = (voffset + kt_abs*KH_TILE_A)//4. Both terms are multiples of 4
+            # (lane_col/mask multiples of 8; cached_row*K_BYTES a multiple of 128;
+            # KH_TILE_A=128), so split the divide: the voffset//4 part is loop-
+            # invariant and KH_TILE_A//4 is a compile-time constant. This hoists the
+            # per-tile signed-division dance (runtime K_BYTES makes voffset//4
+            # divisibility unprovable) out of the K loop -> only kt_abs*32 varies.
+            v_e = voffset // 4 + kt_abs * fx.Int32(KH_TILE_A // 4)  # per-lane i32-elem index
             fx.copy(
                 a_gather_atom,
                 a_gather_src[v_e, None],
