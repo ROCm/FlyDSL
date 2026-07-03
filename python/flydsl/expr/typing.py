@@ -45,6 +45,9 @@ from .numeric import (
     Uint32,
     Uint64,
     Uint128,
+    _coerce_operands,
+    _result_type_for_op,
+    _try_coerce_rhs,
     as_numeric,
 )
 from .primitive import *
@@ -1593,28 +1596,30 @@ class Vector(ArithValue):
     def with_signedness(self, signed):
         return ArithValue(self, signed)
 
-    def _wrap_op_result(self, result, shape):
+    def _wrap_op_result(self, result, shape, result_dtype):
         if isinstance(result, ir.Value) and isinstance(result.type, ir.VectorType):
-            return Vector(result, shape, self._result_dtype(result.type.element_type))
+            return Vector(result, shape, result_dtype)
         if isinstance(result, Numeric):
             return result
         if isinstance(result, ir.Value):
-            return self._result_dtype(result.type)(result)
+            return result_dtype(result)
         return result
-
-    def _result_dtype(self, elem_type) -> Type[Numeric]:
-        if self._dtype.ir_type == elem_type:
-            return self._dtype
-        return Numeric.from_ir_type(elem_type)
 
     def _apply_op(self, method_name, op, other, flip=False):
         lhs = self
         rhs = other
         shape = self.shape
+        promoted_dtype = self.dtype
         if isinstance(other, Vector):
             shape = self._infer_broadcast_shape(self.shape, other.shape)
             lhs = self.broadcast_to(shape)
             rhs = other.broadcast_to(shape)
+        else:
+            rhs_numeric = _try_coerce_rhs(rhs)
+            if rhs_numeric is None:
+                return NotImplemented
+            rhs = rhs_numeric
+        lhs, rhs, promoted_dtype = _coerce_operands(lhs, rhs, op=op)
         method = getattr(ArithValue, method_name)
         if flip:
             if isinstance(rhs, Vector):
@@ -1624,7 +1629,8 @@ class Vector(ArithValue):
                 result = getattr(ArithValue, reverse_name)(lhs, rhs)
         else:
             result = method(lhs, rhs)
-        return self._wrap_op_result(result, shape)
+        result_dtype = _result_type_for_op(op, promoted_dtype)
+        return self._wrap_op_result(result, shape, result_dtype)
 
     def apply_op(self, op, other, flip=False):
         method_name = _VECTOR_OP_METHODS.get(op)

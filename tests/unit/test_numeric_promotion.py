@@ -12,6 +12,8 @@ equal width; wider wins among same-sign; signed-can-represent rule for
 mixed-sign mixed-width).
 """
 
+import operator
+
 import pytest
 
 import flydsl.expr as fx
@@ -21,29 +23,35 @@ pytestmark = [pytest.mark.l1b_target_dialect]
 
 
 def _binop(lhs_ty, rhs_ty, op):
-    """Build two block-arg values of the requested DSL types and apply `op`.
 
-    Returns the resulting Numeric. We use block args so the operands are
-    genuinely dynamic ir.Values (not Python literals), which is the path
-    most kernel code hits.
-    """
     with Context() as ctx:
         ctx.allow_unregistered_dialects = True
         with Location.unknown(ctx):
             module = Module.create()
             from flydsl._mlir.dialects import func
-            from flydsl._mlir.ir import FunctionType
+            from flydsl._mlir.ir import FunctionType, VectorType
+
+            def _vec(t):
+                return VectorType.get([4], t.ir_type)
 
             with InsertionPoint(module.body):
-                f = func.FuncOp("k", FunctionType.get([lhs_ty.ir_type, rhs_ty.ir_type], []))
+                ftype = FunctionType.get([lhs_ty.ir_type, rhs_ty.ir_type, _vec(lhs_ty), _vec(rhs_ty)], [])
+                f = func.FuncOp("k", ftype)
                 entry = f.add_entry_block()
                 with InsertionPoint(entry):
                     a = lhs_ty(entry.arguments[0])
                     b = rhs_ty(entry.arguments[1])
-                    result = op(a, b)
+                    va = fx.Vector(entry.arguments[2], 4, lhs_ty)
+                    vb = fx.Vector(entry.arguments[3], 4, rhs_ty)
+                    scalar = op(a, b)
+                    vector = op(va, vb)
                     func.ReturnOp([])
             assert module.operation.verify()
-            return result
+    assert vector.dtype is scalar.dtype, (
+        f"vector/scalar dtype drift for {lhs_ty.__name__} {op.__name__} {rhs_ty.__name__}: "
+        f"vector -> {vector.dtype.__name__}, scalar -> {scalar.dtype.__name__}"
+    )
+    return scalar
 
 
 # Same-sign / same-width: must stay narrow (no auto-int32 promotion).
@@ -148,22 +156,7 @@ def test_float_wider_wins(a, b, expected):
 
 # Boolean arithmetic: bool + bool → Int32 (matches C++ "bool participates as int").
 def test_bool_plus_bool_widens_to_int32():
-    with Context() as ctx, Location.unknown(ctx):
-        ctx.allow_unregistered_dialects = True
-        module = Module.create()
-        from flydsl._mlir.dialects import func
-        from flydsl._mlir.ir import FunctionType
-
-        with InsertionPoint(module.body):
-            f = func.FuncOp("k", FunctionType.get([fx.Boolean.ir_type, fx.Boolean.ir_type], []))
-            entry = f.add_entry_block()
-            with InsertionPoint(entry):
-                a = fx.Boolean(entry.arguments[0])
-                b = fx.Boolean(entry.arguments[1])
-                r = a + b
-                func.ReturnOp([])
-        assert module.operation.verify()
-        assert r.dtype is fx.Int32
+    assert _binop(fx.Boolean, fx.Boolean, operator.add).dtype is fx.Int32
 
 
 # True division on integers: Python `/` lifts int/int to float.
@@ -184,3 +177,51 @@ def test_truediv_int_lifts_to_float(ty, expected):
 @pytest.mark.parametrize("ty", [fx.Int8, fx.Int32, fx.Int64, fx.Uint32, fx.Int128])
 def test_floordiv_int_stays_int(ty):
     assert _binop(ty, ty, lambda x, y: x // y).dtype is ty
+
+
+# ---------------------------------------------------------------------------
+# Broader operator coverage. Every case runs through `_binop`, which builds a
+# scalar pair and a vector pair and asserts they promote identically — so these
+# double as the Vector/Numeric result-type consistency checks.
+# ---------------------------------------------------------------------------
+
+# Representative pairs: same-sign, mixed-sign, and cross-kind mixing.
+_MIXED_PAIRS = [
+    (fx.Int8, fx.Int16),
+    (fx.Uint8, fx.Uint16),
+    (fx.Int32, fx.Uint32),
+    (fx.Int16, fx.Uint8),
+    (fx.Int64, fx.Uint32),
+    (fx.Int32, fx.Float32),
+    (fx.Float16, fx.Float32),
+]
+
+_MIXED_INT_PAIRS = [
+    (fx.Int8, fx.Int16),
+    (fx.Uint8, fx.Uint16),
+    (fx.Uint16, fx.Uint64),
+    (fx.Int32, fx.Uint32),
+    (fx.Int16, fx.Uint8),
+    (fx.Int64, fx.Uint32),
+]
+
+
+# Subtraction / multiplication promote exactly like addition (no override).
+@pytest.mark.parametrize("op", [operator.sub, operator.mul])
+@pytest.mark.parametrize("a,b", _MIXED_PAIRS)
+def test_sub_mul_promote_like_add(op, a, b):
+    assert _binop(a, b, op).dtype is _binop(a, b, operator.add).dtype
+
+
+# Integer mod / bitwise keep the usual integer promotion (no override).
+@pytest.mark.parametrize("op", [operator.mod, operator.and_, operator.or_, operator.xor])
+@pytest.mark.parametrize("a,b", _MIXED_INT_PAIRS)
+def test_int_mod_bitwise_promote_usual(op, a, b):
+    assert _binop(a, b, op).dtype is _binop(a, b, operator.add).dtype
+
+
+# Comparisons yield Boolean regardless of operand types.
+@pytest.mark.parametrize("op", [operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operator.ne])
+@pytest.mark.parametrize("a,b", _MIXED_PAIRS)
+def test_comparison_yields_boolean(op, a, b):
+    assert _binop(a, b, op).dtype is fx.Boolean

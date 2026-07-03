@@ -19,10 +19,10 @@ from flydsl.expr.numeric import (
     Boolean,
     Float16,
     Float32,
-    Float64,
     Int8,
     Int16,
     Int32,
+    Int64,
     Numeric,
     Uint32,
 )
@@ -315,72 +315,44 @@ class TestOperators:
 
 
 class TestTypePromotion:
-
-    def test_same_type(self):
-        assert Numeric.promote(Float32, Float32) is Float32
-
-    def test_f16_f32(self):
-        assert Numeric.promote(Float16, Float32) is Float32
-
-    def test_bf16_f32(self):
-        assert Numeric.promote(BFloat16, Float32) is Float32
-
-    def test_int_float(self):
-        """Int32 + Float32 → Float32."""
-        assert Numeric.promote(Int32, Float32) is Float32
-
-    def test_int_wider_than_float(self):
-        """Float16 + Int32 → Float32 (int width 32 > float width 16)."""
-        assert Numeric.promote(Float16, Int32) is Float32
-
-    def test_int_same_width_as_float(self):
-        """Float32 + Int32 → Float32 (same width, float wins)."""
-        assert Numeric.promote(Float32, Int32) is Float32
-
-    def test_int_narrower_than_float(self):
-        """Float32 + Int16 → Float32 (int is narrower)."""
-        assert Numeric.promote(Float32, Int16) is Float32
-
-    def test_int64_with_float32(self):
-        """Float32 + Int64 → Float64 (int width 64 > float width 32)."""
-        from flydsl.expr.numeric import Int64
-
-        assert Numeric.promote(Float32, Int64) is Float64
-
-    def test_f16_f64(self):
-        assert Numeric.promote(Float16, Float64) is Float64
-
     def test_promote_in_operator(self):
-        """Mixed-type vector ops require explicit .to() conversion (no auto-promote)."""
+        """Mixed-type vector ops auto-promote to a common dtype."""
 
         def build(a, b):
             ta = Vector(a, 8, Float16)
             tb = Vector(b, 8, Float32)
-            ta_f32 = ta.to(Float32)
-            result = ta_f32 + tb
+            result = ta + tb
             assert result.dtype is Float32
 
         ir_text = _build_module(build, [_vec_f16, _vec_f32])
         assert "arith.extf" in ir_text
         assert "arith.addf" in ir_text
 
-    def test_mixed_signed_unsigned_int(self):
-        """Int32 + Uint32 → Uint32 (unsigned wins at same width)."""
-        assert Numeric.promote(Int32, Uint32) is Uint32
-        assert Numeric.promote(Uint32, Int32) is Uint32
-
     def test_promote_bf16_scalar(self):
-        """BFloat16 tensor + scalar → explicit .to() needed for mixed-type ops."""
+        """BFloat16 tensor + scalar auto-promotes like scalar Numeric arithmetic."""
 
         def build(a):
             ta = Vector(a, 8, BFloat16)
-            ta_f32 = ta.to(Float32)
-            result = ta_f32 + 1.0
+            result = ta + 1.0
             assert result.dtype is Float32
 
         ir_text = _build_module(build, [_vec_bf16])
         assert "arith.extf" in ir_text
         assert "arith.addf" in ir_text
+
+    def test_promote_int32x4_int64x4(self):
+        """Regression for Int32x4 + Int64x4 producing mixed arith.addi operands."""
+
+        def build():
+            lhs = Vector.from_elements([Int32(1), Int32(2), Int32(3), Int32(4)])
+            rhs = Vector.from_elements([Int64(5), Int64(6), Int64(7), Int64(8)])
+            result = lhs + rhs
+            assert result.dtype is Int64
+
+        ir_text = _build_module(build, [])
+        assert "arith.extsi" in ir_text
+        assert "arith.addi" in ir_text
+        assert "vector<4xi64>" in ir_text
 
 
 # ===========================================================================
