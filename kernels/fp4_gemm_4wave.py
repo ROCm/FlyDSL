@@ -449,6 +449,16 @@ class ScaleLoaderLDS:
             self.wave_id * _SCALE_WAVE_BYTES__2048 + self.region_off
         )
 
+    def set_wave_base(self):
+        """Precompute the wave-uniform LDS base (lds_base + wave_id*2048 + region)
+        into an SGPR ONCE via a single readfirstlane. gather() then computes m0 =
+        wave_base_s + slot*8192 with scalar arithmetic, so the "s" constraint on m0
+        needs NO per-gather readfirstlane (was 4/iter: one per A/B gather per step)."""
+        wave_base = self._lds_base + fx.Int32(self.wave_id * _SCALE_WAVE_BYTES__2048 + self.region_off)
+        self._wave_base_s = _rocdl.readfirstlane(_T.i32, arith._to_raw(wave_base))
+        # soffset=0 as a wave-uniform SGPR (readfirstlane'd once, reused every gather).
+        self._soff0 = _uniform_i32(fx.Int32(0))
+
     def gather(self, kstep, slot, base_tile):
         """Issue ONE buffer_load_dwordx4...lds gathering all 4 blocks of this
         operand into scale-LDS ``slot``. ``base_tile`` = the M/N-half-0 base row
@@ -461,10 +471,10 @@ class ScaleLoaderLDS:
         grp = G + (self._blk // 2) * fx.Int32(4) + (self._blk % 2)
         i32_off = grp * fx.Int32(self.row_i32) + fx.Int32(kstep) * fx.Int32(64) + self._in16 * fx.Int32(4)
         voff = arith._to_raw(i32_off * fx.Int32(4))  # bytes
-        soff = _uniform_i32(fx.Int32(0))
-        m0 = _uniform_i32(self._slot_wave_byte(slot))
+        # m0 = precomputed wave base (SGPR) + slot*8192 (scalar): no readfirstlane.
+        m0 = arith._to_raw(fx.Int32(self._wave_base_s) + fx.Int32(slot) * fx.Int32(_SCALE_SLOT_BYTES__8192))
         asm = "s_mov_b32 m0, $0\nbuffer_load_dwordx4 $1, $2, $3 offen lds"
-        _asm_void([m0, voff, self.rsrc, soff], asm, "s,v,s,s")
+        _asm_void([m0, voff, self.rsrc, self._soff0], asm, "s,v,s,s")
 
     def read_half(self, slot, half):
         """Per-lane ds_read of ONE half (2 blocks) -> list[n_groups] of i32.
@@ -633,6 +643,10 @@ def compile_fp4_gemm_4w(
         _scale_base_ptr = lds.scale_lds.ptr
         a_scale_ld = ScaleLoaderLDS(A_scale, N_TILES_A__4, K, lane_id, wave_id, _scale_base_ptr, _SCALE_A_REGION)
         b_scale_ld = ScaleLoaderLDS(B_scale, N_TILES_B__4, K, lane_id, wave_id, _scale_base_ptr, _SCALE_B_REGION)
+        # Precompute each loader's wave-uniform LDS base into an SGPR once, so the
+        # per-gather m0 needs no readfirstlane (was 4/iter -> exposed ~19% in ATT).
+        a_scale_ld.set_wave_base()
+        b_scale_ld.set_wave_base()
 
         base_row = tile_i * BLOCK_M__256 + wave_i__0_1 * (N_TILES_A__4 * 16)
         base_col = tile_j * BLOCK_N__256 + wave_j__0_1 * (N_TILES_B__4 * 16)
