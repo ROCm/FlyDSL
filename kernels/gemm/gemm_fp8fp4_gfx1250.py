@@ -2221,7 +2221,11 @@ def compile_fp8fp4_gemm(
             _active_wave_limit = min(num_warps, 3)
         else:
             _active_wave_limit = 2 if _drop_scale_waves else 4
-        active_pred_const = arith.select(tdm_wave_id < fx.Int32(_active_wave_limit), fx.Int32(1), fx.Int32(0))
+        active_pred_const = (
+            fx.Int32(1)
+            if _active_wave_limit >= num_warps
+            else arith.select(tdm_wave_id < fx.Int32(_active_wave_limit), fx.Int32(1), fx.Int32(0))
+        )
 
         def _select4(values):
             return _select_wave_tdm_value(values[0], values[1], values[2], values[3])
