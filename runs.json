@@ -1,8 +1,124 @@
 {
  "schema": 1,
- "updated": "2026-07-03T05:46:29Z",
+ "updated": "2026-07-03T06:11:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28642077981,
+   "pr": 794,
+   "commit": "04def00770d882101f08426397de44525655ac58",
+   "branch": "jiacao/conv3d-implicit-8wave-fp8",
+   "event": "pull_request",
+   "title": "[Kernel] conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel(gfx950)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28642077981",
+   "created_at": "2026-07-03T06:10:08Z",
+   "updated_at": "2026-07-03T06:10:09Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 28641995716,
+   "pr": null,
+   "commit": "655f9b4d02dbacb906bdd500a76d436818692011",
+   "branch": "jiacao/conv2d-implicit-mfma",
+   "event": "pull_request",
+   "title": "[Kernel] conv2d: 8-wave double-buffered implicit-GEMM BF16 kernel(gfx950)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716",
+   "created_at": "2026-07-03T06:07:57Z",
+   "updated_at": "2026-07-03T06:08:59Z",
+   "actor": "jiacao-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-03T06:09:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716/job/84940186312"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-03T06:08:59Z",
+     "completed_at": "2026-07-03T06:10:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716/job/84940186321"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-03T06:08:59Z",
+     "completed_at": "2026-07-03T06:10:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716/job/84940186323"
+    }
+   ]
+  },
+  {
+   "run_id": 28641795603,
+   "pr": null,
+   "commit": "679173faa70ebfc1d92fb0eda8ce9a0de1687f6b",
+   "branch": "jiacao/conv3d-implicit-8wave-fp8",
+   "event": "pull_request",
+   "title": "[Kernel] conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel(gfx950)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641795603",
+   "created_at": "2026-07-03T06:03:05Z",
+   "updated_at": "2026-07-03T06:04:28Z",
+   "actor": "jiacao-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-03T06:04:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641795603/job/84939549524"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-03T06:04:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641795603/job/84939549544"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-03T06:04:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641795603/job/84939549563"
+    }
+   ]
+  },
+  {
+   "run_id": 28641169058,
+   "pr": 795,
+   "commit": "0c5f94cf87ef03b694db6338a32723b10eb64516",
+   "branch": "feat/rmsnorm-backward-769",
+   "event": "pull_request",
+   "title": "[rmsnorm] Add backward pass + forward store_rstd for training (PR 1/3, #769)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641169058",
+   "created_at": "2026-07-03T05:46:34Z",
+   "updated_at": "2026-07-03T05:46:34Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 28639459035,
    "pr": 789,
@@ -10,20 +126,20 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28639459035",
    "created_at": "2026-07-03T04:59:09Z",
-   "updated_at": "2026-07-03T05:00:49Z",
+   "updated_at": "2026-07-03T06:09:53Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-03T05:00:48Z",
-     "completed_at": null,
+     "completed_at": "2026-07-03T06:09:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28639459035/job/84932561511"
     },
     {
@@ -38,17 +154,17 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-03T05:00:48Z",
-     "completed_at": null,
+     "completed_at": "2026-07-03T06:05:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28639459035/job/84932561548"
     }
    ]
   },
   {
    "run_id": 28639158005,
-   "pr": 795,
+   "pr": null,
    "commit": "2d8cd30d2e67869ca2914ad5eca6d1fe9dd23945",
    "branch": "feat/rmsnorm-backward-769",
    "event": "pull_request",
@@ -685,7 +801,7 @@
   },
   {
    "run_id": 28553278699,
-   "pr": 794,
+   "pr": null,
    "commit": "e0bbfc059f1e516f753a26bc1305e8340cf4b305",
    "branch": "jiacao/conv3d-implicit-8wave-fp8",
    "event": "pull_request",
@@ -771,7 +887,7 @@
   },
   {
    "run_id": 28546969199,
-   "pr": 733,
+   "pr": null,
    "commit": "3d1c45be5ac559fffd43cc7cc78387b0bed4c386",
    "branch": "jiacao/conv2d-implicit-mfma",
    "event": "pull_request",
@@ -1344,178 +1460,6 @@
      "started_at": "2026-07-01T16:28:36Z",
      "completed_at": "2026-07-01T16:30:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28532305151/job/84584928925"
-    }
-   ]
-  },
-  {
-   "run_id": 28527184320,
-   "pr": 792,
-   "commit": "754a8ba1ede475af1afcbe69c9b8abe6e986904c",
-   "branch": "fix/cdna3-bf16-32x32x8-mfma",
-   "event": "pull_request",
-   "title": "[Fix] Lower CDNA3 32x32x8 BF16 MFMA",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320",
-   "created_at": "2026-07-01T15:03:02Z",
-   "updated_at": "2026-07-01T16:25:38Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T15:04:53Z",
-     "completed_at": "2026-07-01T16:25:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320/job/84566888433"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T15:04:57Z",
-     "completed_at": "2026-07-01T16:01:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320/job/84566888456"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T15:17:31Z",
-     "completed_at": "2026-07-01T15:31:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527184320/job/84566888529"
-    }
-   ]
-  },
-  {
-   "run_id": 28527076463,
-   "pr": 791,
-   "commit": "b5a061496b69f4698a9366b209dd05b877ef73d2",
-   "branch": "rlcr/pshuf-scale-vec",
-   "event": "pull_request",
-   "title": "[Perf] preshuffle_gemm: vectorize scale_a epilogue load (4x32b -> 1x128b)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463",
-   "created_at": "2026-07-01T15:01:20Z",
-   "updated_at": "2026-07-01T16:25:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T15:03:32Z",
-     "completed_at": "2026-07-01T16:25:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463/job/84566633829"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T15:03:42Z",
-     "completed_at": "2026-07-01T16:00:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463/job/84566633842"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T15:03:22Z",
-     "completed_at": "2026-07-01T15:17:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28527076463/job/84566633848"
-    }
-   ]
-  },
-  {
-   "run_id": 28514385226,
-   "pr": 789,
-   "commit": "2a88a8fee3feb55fbb80860f4932eef87aa20b71",
-   "branch": "pr/enh-fmath-flag",
-   "event": "pull_request",
-   "title": "[Enh] Add finer FastMathFlag control",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226",
-   "created_at": "2026-07-01T11:31:37Z",
-   "updated_at": "2026-07-01T12:29:48Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-01T11:33:46Z",
-     "completed_at": "2026-07-01T12:29:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226/job/84522554393"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T11:59:01Z",
-     "completed_at": "2026-07-01T12:11:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226/job/84522554397"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-01T11:33:45Z",
-     "completed_at": "2026-07-01T12:24:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28514385226/job/84522554410"
-    }
-   ]
-  },
-  {
-   "run_id": 28513295408,
-   "pr": 789,
-   "commit": "f01ddc39da234e3e7ed8e174038cbc506ba4e8f9",
-   "branch": "pr/enh-fmath-flag",
-   "event": "pull_request",
-   "title": "[Enh] Add finer FastMathFlag control",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408",
-   "created_at": "2026-07-01T11:11:15Z",
-   "updated_at": "2026-07-01T11:32:09Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T11:23:08Z",
-     "completed_at": "2026-07-01T11:32:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408/job/84518968103"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T11:13:55Z",
-     "completed_at": "2026-07-01T11:32:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408/job/84518968106"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T11:13:58Z",
-     "completed_at": "2026-07-01T11:32:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28513295408/job/84518968109"
     }
    ]
   }
