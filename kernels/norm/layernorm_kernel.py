@@ -15,11 +15,17 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch
-from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
+from kernels.common.kernels_common import dtype_to_elem_type, get_llvm_ptr, get_warp_size
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 KERNEL_NAME = "layernorm"
 
@@ -112,7 +118,7 @@ def _quant_dtype_max(dtype_str: str) -> float:
     raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
 
 
-def build_layernorm_module(N: int, dtype_str: str):
+def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, eps: float = EPS):
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
@@ -128,17 +134,26 @@ def build_layernorm_module(N: int, dtype_str: str):
         Gamma: fx.Tensor,
         Beta: fx.Tensor,
         Output: fx.Tensor,
+        Mean: fx.Tensor,
+        Rstd: fx.Tensor,
     ):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
         s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
+
+        if const_expr(store_stats):
+            Mean_buf = fx.rocdl.make_buffer_tensor(Mean)
+            Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
+            mean_div = fx.logical_divide(Mean_buf, fx.make_layout(1, 1))
+            rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+            stats_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
         # ── helpers: wave / block reduction ───────────────────────────────
         def wave_reduce_add(x):
@@ -237,6 +252,11 @@ def build_layernorm_module(N: int, dtype_str: str):
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
 
+            if const_expr(store_stats):
+                if tid == 0:
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, mean_div, bid, mean)
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rstd)
+
             g_cur = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, tid).to(fx.Float32)
             b_cur = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, beta_div, tid).to(fx.Float32)
 
@@ -305,6 +325,11 @@ def build_layernorm_module(N: int, dtype_str: str):
             sum_val, sumsq_val = block_reduce_add2(thread_sum, thread_sumsq)
             mean, rstd = compute_mean_rstd(sum_val, sumsq_val)
 
+            if const_expr(store_stats):
+                if tid == 0:
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, mean_div, bid, mean)
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rstd)
+
             # ── Pass 2: normalize + affine + store ───────────────────────
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
@@ -323,6 +348,28 @@ def build_layernorm_module(N: int, dtype_str: str):
                     _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
 
     # ── JIT host launcher ─────────────────────────────────────────────────
+    if store_stats:
+
+        @flyc.jit
+        def launch_layernorm(
+            Input: fx.Tensor,
+            Gamma: fx.Tensor,
+            Beta: fx.Tensor,
+            Output: fx.Tensor,
+            Mean: fx.Tensor,
+            Rstd: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            launcher = layernorm_kernel(Input, Gamma, Beta, Output, Mean, Rstd)
+            launcher.launch(
+                grid=(m_in, 1, 1),
+                block=(BLOCK_THREADS, 1, 1),
+                stream=stream,
+            )
+
+        return launch_layernorm
+
     @flyc.jit
     def launch_layernorm(
         Input: fx.Tensor,
@@ -332,7 +379,7 @@ def build_layernorm_module(N: int, dtype_str: str):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        launcher = layernorm_kernel(Input, Gamma, Beta, Output)
+        launcher = layernorm_kernel(Input, Gamma, Beta, Output, Gamma, Gamma)
         launcher.launch(
             grid=(m_in, 1, 1),
             block=(BLOCK_THREADS, 1, 1),
@@ -340,6 +387,193 @@ def build_layernorm_module(N: int, dtype_str: str):
         )
 
     return launch_layernorm
+
+
+def build_layernorm_bwd_module(N: int, dtype_str: str):
+    """Fused LayerNorm backward: grid=(M,), one block per row.
+
+    With x_hat = (x - mean)*rstd, wdy = dy*gamma:
+      c1 = mean_N(wdy) ; c2 = mean_N(wdy * x_hat)
+    Pass 2:
+      dx = (wdy - c1 - x_hat*c2) * rstd            -> DX (elem dtype);
+      dgamma_elem = dy * x_hat (fp32)              -> atomicAdd into DGamma[idx];
+      dbias_elem  = dy        (fp32)               -> atomicAdd into DBias[idx].
+    eps is baked into Rstd by the forward, so it is not needed here.
+
+    Perf follow-ups (deferred; correctness-complete as-is): generic scalar path
+    only — a vectorized fast path (mirroring the forward) and caching x/dy/gamma
+    between pass 1 and pass 2 would cut global traffic.
+    """
+    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
+    elem_bits = 32 if dtype_str == "f32" else 16
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
+
+    @flyc.kernel
+    def layernorm_bwd_kernel(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        DY: fx.Tensor,
+        Mean: fx.Tensor,
+        Rstd: fx.Tensor,
+        DX: fx.Tensor,
+        DGamma: fx.Tensor,
+        DBias: fx.Tensor,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        fm_fast = arith.FastMathFlags.fast
+        n_float = float(N)
+        c_zero_f = fx.Float32(0.0)
+
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
+        s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
+
+        def wave_reduce_add(x):
+            w = x
+            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
+                w = w.addf(peer, fastmath=fm_fast)
+            return w
+
+        def block_reduce_add2(val0, val1):
+            if const_expr(RED_SLOTS == 1):
+                return wave_reduce_add(val0), wave_reduce_add(val1)
+
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+
+            w0 = wave_reduce_add(val0)
+            w1 = wave_reduce_add(val1)
+
+            if lane == 0:
+                fx.memref_store(w0, s_sum, wave)
+                fx.memref_store(w1, s_sumsq, wave)
+            gpu.barrier()
+
+            if wave == 0:
+                in_range = lane < RED_SLOTS
+                lane_safe = in_range.select(lane, 0)
+                v0 = fx.memref_load(s_sum, lane_safe)
+                v1 = fx.memref_load(s_sumsq, lane_safe)
+                ww0 = in_range.select(v0, 0.0)
+                ww1 = in_range.select(v1, 0.0)
+                ww0 = wave_reduce_add(ww0)
+                ww1 = wave_reduce_add(ww1)
+
+                if lane == 0:
+                    fx.memref_store(ww0, s_sum, 0)
+                    fx.memref_store(ww1, s_sumsq, 0)
+            gpu.barrier()
+
+            return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
+
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+        DY_buf = fx.rocdl.make_buffer_tensor(DY)
+        Mean_buf = fx.rocdl.make_buffer_tensor(Mean)
+        Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
+        DX_buf = fx.rocdl.make_buffer_tensor(DX)
+
+        row_in = fx.slice(Input_buf, (bid, None))
+        row_dy = fx.slice(DY_buf, (bid, None))
+        row_dx = fx.slice(DX_buf, (bid, None))
+
+        copy_atom_s = fx.make_copy_atom(
+            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+            elem_bits,
+        )
+        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+
+        row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
+        dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
+        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+        dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
+        mean_div = fx.logical_divide(Mean_buf, fx.make_layout(1, 1))
+        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+
+        mean = _load_scalar(copy_atom_f32, fx.Float32, mean_div, bid)
+        rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
+
+        # Pass 1: c1 = mean(wdy) ; c2 = mean(wdy * x_hat)
+        thread_c1 = c_zero_f
+        thread_c2 = c_zero_f
+        for base in range_constexpr(0, N, BLOCK_THREADS):
+            idx = tid + base
+            is_valid = idx < N
+            idx_safe = is_valid.select(idx, 0)
+            x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
+            dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
+            g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
+            x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+            dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+            g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+            x_hat = (x - mean) * rstd
+            wdy = dy * g
+            thread_c1 = thread_c1 + is_valid.select(wdy, c_zero_f)
+            thread_c2 = thread_c2 + is_valid.select(wdy * x_hat, c_zero_f)
+
+        sum_c1, sum_c2 = block_reduce_add2(thread_c1, thread_c2)
+        c1 = sum_c1 / n_float
+        c2 = sum_c2 / n_float
+
+        # Pass 2: dx = (wdy - c1 - x_hat*c2) * rstd ; dgamma += dy*x_hat ; dbias += dy
+        for base in range_constexpr(0, N, BLOCK_THREADS):
+            idx = tid + base
+            if idx < N:
+                x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
+                dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx)
+                g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                x_hat = (x - mean) * rstd
+                wdy = dy * g
+                dx = (wdy - c1 - x_hat * c2) * rstd
+                dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
+                _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
+
+                dgamma = dy * x_hat
+                ptr_g = get_llvm_ptr(DGamma, idx, 4)
+                llvm.AtomicRMWOp(
+                    llvm.AtomicBinOp.fadd,
+                    ptr_g,
+                    dgamma.ir_value(),
+                    llvm.AtomicOrdering.monotonic,
+                    syncscope="agent",
+                    alignment=4,
+                )
+
+                ptr_b = get_llvm_ptr(DBias, idx, 4)
+                llvm.AtomicRMWOp(
+                    llvm.AtomicBinOp.fadd,
+                    ptr_b,
+                    dy.ir_value(),
+                    llvm.AtomicOrdering.monotonic,
+                    syncscope="agent",
+                    alignment=4,
+                )
+
+    @flyc.jit
+    def launch_layernorm_bwd(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        DY: fx.Tensor,
+        Mean: fx.Tensor,
+        Rstd: fx.Tensor,
+        DX: fx.Tensor,
+        DGamma: fx.Tensor,
+        DBias: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        launcher = layernorm_bwd_kernel(Input, Gamma, DY, Mean, Rstd, DX, DGamma, DBias)
+        launcher.launch(grid=(m_in, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    return launch_layernorm_bwd
 
 
 def build_fused_add_layernorm_module(N: int, dtype_str: str):
@@ -1334,3 +1568,128 @@ def build_fused_add_layernorm_smoothquant_module(
         is_smooth=True,
         quant_dtype_str=quant_dtype_str,
     )
+
+
+# =====================================================================
+# Python wrappers + autograd (quack-aligned). PR 3: plain layernorm.
+# =====================================================================
+if torch is not None:
+
+    def _torch_dtype_to_str(dt) -> str:
+        if dt == torch.float32:
+            return "f32"
+        if dt == torch.float16:
+            return "f16"
+        if dt == torch.bfloat16:
+            return "bf16"
+        raise ValueError(f"unsupported torch dtype: {dt}")
+
+    # Compiled-fn caches. Keys include device: a compiled function is bound to
+    # the device/context it was built on, so reusing it on another GPU faults.
+    # eps is a compile-time kernel constant, so it is part of the fwd key too.
+    _FWD_CACHE: dict = {}
+    _BWD_CACHE: dict = {}
+
+    def _get_fwd_compiled(x, weight, bias, out, mean, rstd, M, N, dtype_str, store_stats, eps, stream):
+        key = (N, dtype_str, store_stats, float(eps), x.device)
+        entry = _FWD_CACHE.get(key)
+        if entry is None:
+            launch_fn = build_layernorm_module(N, dtype_str, store_stats=store_stats, eps=eps)
+            if store_stats:
+                compiled = flyc.compile(launch_fn, x, weight, bias, out, mean, rstd, M, stream)
+            else:
+                compiled = flyc.compile(launch_fn, x, weight, bias, out, M, stream)
+            _FWD_CACHE[key] = compiled
+            entry = compiled
+        return entry
+
+    def layernorm_fwd(x, weight, bias, eps=EPS, store_stats=False):
+        """Forward LayerNorm. Returns (out, mean, rstd). eps is baked into the kernel."""
+        assert x.dim() == 2, "layernorm_fwd expects a 2D (M, N) input"
+        assert (
+            x.is_contiguous() and weight.is_contiguous() and bias.is_contiguous()
+        ), "layernorm_fwd expects contiguous inputs"
+        # The kernel reads x/weight/bias with a single elem dtype derived from x;
+        # a mismatch would silently bit-reinterpret weight/bias bytes.
+        assert (
+            x.dtype == weight.dtype == bias.dtype
+        ), f"x/weight/bias dtypes must match, got {x.dtype}/{weight.dtype}/{bias.dtype}"
+        M, N = x.shape
+        assert weight.shape[-1] == N and bias.shape[-1] == N, "weight/bias length must equal x last dim (N)"
+        out = torch.empty_like(x)
+        mean = torch.empty((M,), device=x.device, dtype=torch.float32) if store_stats else None
+        rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_stats else None
+        dtype_str = _torch_dtype_to_str(x.dtype)
+        # Bind compile + launch to the tensors' device so the compiled kernel and
+        # the stream belong to the right GPU/context (multi-GPU correctness).
+        with torch.cuda.device(x.device):
+            stream = torch.cuda.current_stream()
+            compiled = _get_fwd_compiled(x, weight, bias, out, mean, rstd, M, N, dtype_str, store_stats, eps, stream)
+            if store_stats:
+                compiled(x, weight, bias, out, mean, rstd, M, stream)
+            else:
+                compiled(x, weight, bias, out, M, stream)
+        return out, mean, rstd
+
+    def layernorm_bwd(x, weight, dout, mean, rstd, eps=EPS):
+        """Backward LayerNorm. Returns (dx, dweight, dbias) cast to weight dtype.
+
+        eps is not used directly here — it is already baked into `rstd`/`mean` by
+        the forward — but is accepted so callers can pass it symmetrically.
+        """
+        assert x.dim() == 2, "layernorm_bwd expects a 2D (M, N) input"
+        assert x.is_contiguous() and dout.is_contiguous(), "layernorm_bwd expects contiguous inputs"
+        assert (
+            x.dtype == weight.dtype == dout.dtype
+        ), f"x/weight/dout dtypes must match, got {x.dtype}/{weight.dtype}/{dout.dtype}"
+        M, N = x.shape
+        assert weight.shape[-1] == N, "weight length must equal x last dim (N)"
+        # mean/rstd are per-row fp32 stats saved by the forward; the kernel reads
+        # them with an fp32 copy atom, so a non-fp32 dtype would be misread.
+        assert mean.dtype == torch.float32 and rstd.dtype == torch.float32, "mean/rstd must be fp32"
+        dtype_str = _torch_dtype_to_str(x.dtype)
+        dx = torch.empty_like(x)
+        dweight = torch.zeros((N,), device=x.device, dtype=torch.float32)
+        dbias = torch.zeros((N,), device=x.device, dtype=torch.float32)
+        key = (N, dtype_str, x.device)
+        # Bind compile + launch to the tensors' device (multi-GPU correctness).
+        with torch.cuda.device(x.device):
+            stream = torch.cuda.current_stream()
+            compiled = _BWD_CACHE.get(key)
+            if compiled is None:
+                launch_fn = build_layernorm_bwd_module(N, dtype_str)
+                # flyc.compile executes the kernel once during tracing, which would
+                # accumulate into DGamma/DBias; zero them AFTER compiling.
+                compiled = flyc.compile(launch_fn, x, weight, dout, mean, rstd, dx, dweight, dbias, M, stream)
+                _BWD_CACHE[key] = compiled
+            dweight.zero_()
+            dbias.zero_()
+            compiled(x, weight, dout, mean, rstd, dx, dweight, dbias, M, stream)
+        return dx, dweight.to(weight.dtype), dbias.to(weight.dtype)
+
+    class LayerNormFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, weight, bias, eps):
+            need_grad = x.requires_grad or weight.requires_grad or bias.requires_grad
+            out, mean, rstd = layernorm_fwd(x, weight, bias, eps=eps, store_stats=need_grad)
+            ctx.save_for_backward(x, weight, mean, rstd)
+            ctx.eps = eps
+            return out
+
+        @staticmethod
+        def backward(ctx, dout):
+            x, weight, mean, rstd = ctx.saved_tensors
+            dx, dw, db = layernorm_bwd(x, weight, dout.contiguous(), mean, rstd, eps=ctx.eps)
+            return dx, dw, db, None
+
+    def layernorm(x, weight, bias, eps=EPS):
+        """Public entry: plain LayerNorm with autograd."""
+        assert weight is not None and bias is not None, "layernorm requires explicit weight and bias"
+        N = weight.shape[-1]
+        assert x.shape[-1] == N, f"x last dim {x.shape[-1]} != weight length {N}"
+        assert (
+            x.dtype == weight.dtype == bias.dtype
+        ), f"x/weight/bias dtypes must match, got {x.dtype}/{weight.dtype}/{bias.dtype}"
+        x_flat = x.reshape(-1, N)
+        out_flat = LayerNormFunction.apply(x_flat, weight, bias, eps)
+        return out_flat.reshape(x.shape)
