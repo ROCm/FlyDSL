@@ -400,6 +400,7 @@ def compile_fp8fp4_gemm(
     COMPUTE_SCHEDULE_FP4_QUADRANT = "fp4_quadrant"
     COMPUTE_SCHEDULE_FP8_QUADRANT = "fp8_quadrant"
     COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE = "fp8_deep_pipeline"
+    COMPUTE_SCHEDULE_FP8_COMPUTE_BOUND = "fp8_compute_bound"
 
     fp8_deep_pipeline_eligible = (
         data_format in ("fp8", "a8w4")
@@ -423,7 +424,7 @@ def compile_fp8fp4_gemm(
         # path, so it reuses the FP8 schedules.
         if data_format in ("fp8", "a8w4"):
             if fp8_deep_pipeline_eligible:
-                return COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
+                return COMPUTE_SCHEDULE_FP8_COMPUTE_BOUND # COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
             return COMPUTE_SCHEDULE_FP8_QUADRANT
         return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
 
@@ -450,6 +451,7 @@ def compile_fp8fp4_gemm(
             COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING,
             COMPUTE_SCHEDULE_FP8_QUADRANT,
             COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE,
+            COMPUTE_SCHEDULE_FP8_COMPUTE_BOUND,
             COMPUTE_SCHEDULE_FP4_QUADRANT,
         )
     use_ws_tdm_split_signal_overlap = (
@@ -1724,6 +1726,62 @@ def compile_fp8fp4_gemm(
 
             return current_accs
 
+        def compute_tile_fp8_compute_bound(
+            accs_in,
+            lds_a,
+            lds_b,
+            lds_as,
+            lds_bs,
+            emit_filler=None,
+            mid_compute_callback=None,
+            late_compute_callback=None,
+            a0_prefetch=None,
+            scale_k_base=None,
+            pf_a_scales=None,
+        ):
+            current_accs = list(accs_in)
+            _set_vgpr_a_scales(scale_k_base, pf_a_scales)
+            a_buf, a_bases = _precompute_a_lane_bases(lds_a)
+            b_buf, b_bases = _precompute_b_lane_bases(lds_b)
+            if const_expr(is_mxscale):
+                as_buf, as_bases = _precompute_as32_bases(lds_as)
+                bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
+            else:
+                as_buf, as_bases = lds_as, None
+                bs_buf, bs_bases = lds_bs, None  # ptpc: B-scale in epilogue, bases unused
+
+            for ks in range_constexpr(k_wmma_steps):
+                is_last_ks = ks == k_wmma_steps - 1
+                a_scales, b_scales = _scales_for_emit(as_buf, as_bases, bs_buf, bs_bases, ks)
+
+                # Wide batch: issue every A and B fragment load for this
+                # K-subtile before waiting on any of them
+                a_frags = [load_a_frag(a_buf, a_bases[wm], ks) for wm in range_constexpr(wmma_m_rep)]
+                b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+
+                if const_expr(ks == 0 and mid_compute_callback is not None):
+                    rocdl.sched_barrier(0)
+                    mid_compute_callback()
+
+                # Single coarse wait for the whole batch.
+                rocdl.s_wait_dscnt(0)
+
+                for wm in range_constexpr(wmma_m_rep):
+                    for wn in range_constexpr(wmma_n_rep):
+                        _emit_wmma(current_accs, wm, wn, a_frags[wm], b_frags[wn], a_scales, b_scales)
+
+                if const_expr(is_last_ks and late_compute_callback is not None):
+                    late_compute_callback()
+
+                if const_expr(is_last_ks and emit_filler is not None):
+                    rocdl.sched_barrier(0)
+                    emit_filler()
+
+            return current_accs
+
+        def hot_loop_scheduler_fp8_compute_bound():
+            pass
+
         def hot_loop_scheduler():
             if const_expr(use_row_major_k_prefetch):
                 _queue_depth = min(k_wmma_steps, _row_major_k_prefetch_depth + 1)
@@ -1895,6 +1953,20 @@ def compile_fp8fp4_gemm(
                     scale_k_base=scale_k_base,
                     pf_a_scales=pf_a_scales,
                 )
+            if const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_COMPUTE_BOUND):
+                return compute_tile_fp8_compute_bound(
+                    accs_in,
+                    lds_a,
+                    lds_b,
+                    lds_as,
+                    lds_bs,
+                    emit_filler=emit_filler,
+                    mid_compute_callback=mid_compute_callback,
+                    late_compute_callback=late_compute_callback,
+                    a0_prefetch=a0_prefetch,
+                    scale_k_base=scale_k_base,
+                    pf_a_scales=pf_a_scales,
+                )
             return compute_tile(
                 accs_in,
                 lds_a,
@@ -1913,6 +1985,8 @@ def compile_fp8fp4_gemm(
                 hot_loop_scheduler_fp4_quadrant()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE):
                 hot_loop_scheduler_fp8_deep_pipeline()
+            elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_COMPUTE_BOUND):
+                hot_loop_scheduler_fp8_compute_bound()
             elif const_expr(compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT):
                 hot_loop_scheduler_fp8_quadrant()
             else:
