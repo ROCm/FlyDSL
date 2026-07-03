@@ -37,6 +37,9 @@ _skip_non_cdna4 = pytest.mark.skipif(
         (1, 32, 9, 17, 17, 96, 1, 1),
         (2, 64, 6, 18, 18, 192, 1, 1),
         (1, 32, 10, 20, 20, 64, 2, 1),
+        # Partial K-tile: C=16 -> CRS=432, 432 % TILE_K(32) = 16 (masked).
+        (1, 16, 6, 16, 20, 16, 1, 1),
+        (1, 16, 4, 12, 16, 384, 1, 1),
     ],
 )
 def test_conv3d_vs_torch(n, c, t, h, w, k, stride, padding):

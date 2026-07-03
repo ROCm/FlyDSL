@@ -18,6 +18,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
+from kernels.tensor_shim import _run_compiled
 
 TILE_M = 128
 TILE_N = 128
@@ -50,15 +51,6 @@ LDG_A_COUNT = TILE_M * TILE_K // BLOCK_VECS
 LDG_B_COUNT = TILE_N * TILE_K // BLOCK_VECS
 LDS_A_SIZE = STAGES * TILE_M * TILE_K
 LDS_B_SIZE = STAGES * TILE_N * TILE_K
-
-
-def _run_compiled(exe, *args):
-    cf = getattr(exe, "_cf", None)
-    if cf is None:
-        cf = flyc.compile(exe, *args)
-        exe._cf = cf
-    else:
-        cf(*args)
 
 
 _WEIGHT_CACHE = {}
@@ -183,10 +175,9 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
     hw_o = ho * wo
     npq = n * dhw
     crs = c * kt * kh * kw
-    k_tiles = crs // TILE_K
+    k_tiles = (crs + TILE_K - 1) // TILE_K
 
     assert c % LDG_VEC == 0
-    assert crs % TILE_K == 0
     assert LDG_A_COUNT == 1 and LDG_B_COUNT == 1
 
     n_tail = k % TILE_N != 0
@@ -311,7 +302,8 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
             in_t = ot * st + kt_i - pt
             in_h = oh * sh + kh_i - ph
             in_w = ow * sw + kw_i - pw
-            valid = row_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+            k_valid = k_abs < fx.Index(crs)
+            valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
             g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
             g_off_i = arith.index_cast(T.i32, g_off)
             safe = arith.select(valid, g_off_i, arith.constant(0, type=T.i32))
@@ -488,12 +480,6 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
         acc11 = phase_compute(a1_0, a1_1, b1_0, acc11)
         rocdl.s_setprio(0)
 
-        # ---- epilogue: invalid (row/col tail) lanes are GUARDED out with scf.if
-        # (OOB-redirect is unreliable -- stores fault past the buffer, atomics
-        # serialize). Clean shapes (no tail) take the unguarded fast path.
-        from flydsl._mlir import ir
-        from flydsl._mlir.dialects import scf
-
         _row_chk = npq % TILE_M != 0
         _need_chk = _row_chk or n_tail
 
@@ -501,10 +487,10 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
             if const_expr(_row_chk and n_tail):
                 return arith.andi(row < fx.Index(npq), col < fx.Index(k))
             if const_expr(_row_chk):
-                rc = row < fx.Index(npq)
-                return arith.andi(rc, rc)
-            cc = col < fx.Index(k)
-            return arith.andi(cc, cc)
+                v = row < fx.Index(npq)
+                return arith.andi(v, v)
+            v = col < fx.Index(k)
+            return arith.andi(v, v)
 
         def store_quad(acc, m_half, n_half):
             for wm in range_constexpr(QM_STEPS):
@@ -519,16 +505,23 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
                         bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
                     for i in range_constexpr(MFMA_C_VALUES):
                         row = fx.Index(row_base + i)
-                        off = row * k + col
+                        off_sk = row * k + col
+
+                        if const_expr(n == 1):
+                            off_nk = col * dhw + row
+                        else:
+                            ni = row // dhw
+                            sp = row % dhw
+                            off_nk = ni * (k * dhw) + col * dhw + sp
 
                         def _emit():
                             if const_expr(use_splitk):
-                                off_b = arith.index_cast(T.i32, off * 4)
+                                off_b = arith.index_cast(T.i32, off_sk * 4)
                                 z0 = arith.constant(0, type=T.i32)
                                 rocdl.raw_ptr_buffer_atomic_fadd(a[i], y_rsrc, off_b, z0, z0)
                             else:
                                 cval = (a[i] + bias_val).to(elem_ty) if const_expr(has_bias) else a[i].to(elem_ty)
-                                buffer_ops.buffer_store(cval, y_rsrc, off)
+                                buffer_ops.buffer_store(cval, y_rsrc, off_nk)
 
                         if const_expr(_need_chk):
                             store_if = scf.IfOp(_valid_raw(row, col), results_=[], has_else=False)
@@ -556,13 +549,11 @@ def _choose_splitk(npq, crs, k, device):
     grid_m = (npq + TILE_M - 1) // TILE_M
     grid_n = (k + TILE_N - 1) // TILE_N
     base = grid_m * grid_n
-    k_tiles = crs // TILE_K
-    # Only split when the problem is non-trivial (atomic + f32-convert overhead
-    # would otherwise dominate), the reduction is deep enough to be worth
-    # splitting, and the base grid is clearly block-starved.
+    k_tiles = (crs + TILE_K - 1) // TILE_K
+
     if npq < 4096 or k_tiles < 16:
         return 1
-    if k % TILE_N != 0 or npq % TILE_M != 0:  # atomic OOB-redirect breaks on tails
+    if k % TILE_N != 0 or npq % TILE_M != 0 or crs % TILE_K != 0:  # atomic path needs clean tiles
         return 1
     try:
         num_cu = torch.cuda.get_device_properties(device).multi_processor_count
@@ -591,7 +582,7 @@ def conv3d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None
     crs = c * kt * kh * kw
 
     sk = _choose_splitk(npq, crs, k, x.device) if splitk is None else max(1, splitk)
-    k_tiles = crs // TILE_K
+    k_tiles = (crs + TILE_K - 1) // TILE_K
     while sk > 1 and k_tiles % sk != 0:
         sk -= 1
     use_splitk = sk > 1
@@ -603,7 +594,7 @@ def conv3d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None
     if use_splitk:
         y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
     else:
-        y = torch.empty((npq, k), device=x.device, dtype=torch.bfloat16)
+        y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
     has_bias = bias is not None
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
     exe = compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
@@ -612,5 +603,5 @@ def conv3d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None
         if has_bias:
             y = y + bias_arg.view(1, k)
         y = y.to(torch.bfloat16)
-    # (N*Do*Ho*Wo, K) -> (N, K, Do, Ho, Wo)
-    return y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3)
+        return y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3)
+    return y

@@ -16,6 +16,7 @@ from flydsl._mlir.dialects import llvm, scf
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.typing import T
 from kernels.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
+from kernels.tensor_shim import _run_compiled
 
 TILE_M = 128
 TILE_N = 128
@@ -56,15 +57,6 @@ PACK_TR_PAD = 8
 PACK_TR_LDS_S = PACK_TR_TILE + PACK_TR_PAD
 
 _WEIGHT_FP8_CACHE = {}
-
-
-def _run_compiled(exe, *args):
-    cf = getattr(exe, "_cf", None)
-    if cf is None:
-        cf = flyc.compile(exe, *args)
-        exe._cf = cf
-    else:
-        cf(*args)
 
 
 @functools.lru_cache(maxsize=64)
@@ -215,12 +207,9 @@ def compile_conv3d_implicit_8wave_fp8(
     hw_o = ho * wo
     npq = n * dhw
     crs = c * kt * kh * kw
-    k_tiles = crs // TILE_K
+    k_tiles = (crs + TILE_K - 1) // TILE_K
 
     assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
-    assert crs % TILE_K == 0, f"FP8 MFMA path needs CRS % {TILE_K} == 0, got CRS={crs}"
-    assert npq % TILE_M == 0, f"FP8 path needs NPQ % {TILE_M} == 0, got NPQ={npq}"
-    assert k % TILE_N == 0, f"FP8 path needs K % {TILE_N} == 0, got K={k}"
     assert k_tiles >= 1
 
     splitk = max(1, min(splitk, k_tiles))
@@ -229,8 +218,8 @@ def compile_conv3d_implicit_8wave_fp8(
     tiles_per_split = k_tiles // splitk
     use_splitk = splitk > 1
 
-    grid_m = npq // TILE_M
-    grid_n = k // TILE_N
+    grid_m = (npq + TILE_M - 1) // TILE_M
+    grid_n = (k + TILE_N - 1) // TILE_N
     elem_ty = fx.Float8E4M3FN
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
@@ -328,7 +317,8 @@ def compile_conv3d_implicit_8wave_fp8(
             in_t = ot * st + kt_i - pt
             in_h = oh * sh + kh_i - ph
             in_w = ow * sw + kw_i - pw
-            valid_data = row_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
+            k_valid = k_abs < fx.Index(crs)
+            valid_data = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
             g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
             g_elem_i = arith.index_cast(T.i32, g_elem)
             safe_elem = arith.select(valid_data, g_elem_i, arith.constant(x_num_records, type=T.i32))
@@ -432,6 +422,7 @@ def compile_conv3d_implicit_8wave_fp8(
                     acc = acc0 if const_expr(n_half == 0) else acc1
                     for wn in range_constexpr(QN_STEPS):
                         col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N) + c_n
+                        col_valid = col < fx.Index(k)
                         # Under split-K the partial sums accumulate atomically into
                         # FP32; bias is a single per-output add left to the host
                         # post-pass (adding it per z-slice would scale it by splitk).
@@ -442,13 +433,26 @@ def compile_conv3d_implicit_8wave_fp8(
                             row = row_base + i
                             out = acc_vec[i]
                             if const_expr(use_splitk):
-                                off_b = arith.index_cast(T.i32, (row * k + col) * 4)
-                                z0 = arith.constant(0, type=T.i32)
-                                fx.rocdl.raw_ptr_buffer_atomic_fadd(out, y_rsrc, off_b, z0, z0)
+                                # Atomics ignore hardware OOB suppression; guard explicitly.
+                                valid = arith.andi(col < fx.Index(k), row < fx.Index(npq))
+                                atom_if = scf.IfOp(valid, results_=[], has_else=False)
+                                with ir.InsertionPoint(atom_if.then_block):
+                                    off_b = arith.index_cast(T.i32, (row * k + col) * 4)
+                                    z0 = arith.constant(0, type=T.i32)
+                                    fx.rocdl.raw_ptr_buffer_atomic_fadd(out, y_rsrc, off_b, z0, z0)
+                                    scf.YieldOp([])
                             else:
                                 if const_expr(has_bias):
                                     out = out + bias_val
-                                buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, row * k + col)
+                                # NCDHW output[ni, col, sp]: ni*(k*dhw) + col*dhw + sp.
+                                # n==1 fast path: ni=0, sp=row, no integer division.
+                                if const_expr(n == 1):
+                                    off_ncdhw = col * dhw + row
+                                else:
+                                    ni = row // dhw
+                                    sp = row % dhw
+                                    off_ncdhw = ni * (k * dhw) + col * dhw + sp
+                                buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
 
         store_half_pair(acc00, acc01, 0)
         store_half_pair(acc10, acc11, 1)
@@ -474,30 +478,38 @@ def _normalize_3(v):
 
 
 def _choose_splitk(npq, crs, k, device):
-    if npq % TILE_M != 0 or k % TILE_N != 0:  # atomic accumulation needs clean tiles
+    if npq % TILE_M != 0 or k % TILE_N != 0 or crs % TILE_K != 0:
         return 1
     base = (npq // TILE_M) * (k // TILE_N)
-    k_tiles = crs // TILE_K
-    if npq < 4096 or k_tiles < 16:  # too small: atomic/convert overhead dominates
+    k_tiles = (crs + TILE_K - 1) // TILE_K
+    if npq < 4096 or k_tiles < 16:
         return 1
     try:
         num_cu = torch.cuda.get_device_properties(device).multi_processor_count
     except Exception:
         num_cu = 256
-    if base >= (3 * num_cu) // 4:  # base grid already (nearly) fills the machine
+    if base >= (3 * num_cu) // 4:
         return 1
-    sk = min(4, max(1, num_cu // base), k_tiles)  # aim to roughly fill the CUs
-    while sk > 1 and k_tiles % sk != 0:  # prefer a divisor (no overhang)
+    sk = min(4, max(1, num_cu // base), k_tiles)
+    while sk > 1 and k_tiles % sk != 0:
         sk -= 1
     return sk
 
 
 def _resolve_splitk(splitk, npq, crs, k, device):
     sk = _choose_splitk(npq, crs, k, device) if splitk is None else max(1, int(splitk))
-    k_tiles = crs // TILE_K
+    k_tiles = (crs + TILE_K - 1) // TILE_K
     sk = max(1, min(sk, k_tiles))
     while sk > 1 and k_tiles % sk != 0:
         sk -= 1
+    MAX_TILES_PER_SPLIT = 54
+    tiles_per_split = k_tiles // sk
+    if tiles_per_split > MAX_TILES_PER_SPLIT:
+        min_sk = (k_tiles + MAX_TILES_PER_SPLIT - 1) // MAX_TILES_PER_SPLIT
+        for candidate in range(min_sk, k_tiles + 1):
+            if k_tiles % candidate == 0 and k_tiles // candidate <= MAX_TILES_PER_SPLIT:
+                sk = candidate
+                break
     return sk
 
 
@@ -568,9 +580,6 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
     crs = c * kt * kh * kw
 
     assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
-    assert crs % TILE_K == 0, f"FP8 MFMA path needs CRS % {TILE_K} == 0, got CRS={crs}"
-    assert npq % TILE_M == 0, f"FP8 path needs NPQ % {TILE_M} == 0, got NPQ={npq}"
-    assert k % TILE_N == 0, f"FP8 path needs K % {TILE_N} == 0, got K={k}"
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
     x_arg = pack_activation_ncdhw_bf16_to_ndhwc_fp8(x, stream=launch_stream)
@@ -587,11 +596,10 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
 
     sk = _resolve_splitk(splitk, npq, crs, k, x.device)
     use_splitk = sk > 1
-    y = (
-        torch.zeros((npq, k), device=x.device, dtype=torch.float32)
-        if use_splitk
-        else torch.empty((npq, k), device=x.device, dtype=torch.bfloat16)
-    )
+    if use_splitk:
+        y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
+    else:
+        y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
     exe = compile_conv3d_implicit_8wave_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
     _run_compiled(
         exe,
@@ -605,7 +613,8 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
         if has_bias:
             y = y + bias_arg.view(1, k)
         y = y.to(torch.bfloat16)
-    return y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3)
+        return y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3)
+    return y
 
 
 __all__ = ["conv3d_implicit_8wave_fp8"]
