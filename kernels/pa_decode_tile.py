@@ -71,6 +71,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
+from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.vector import ReductionOp
@@ -278,7 +279,7 @@ def compile_pa_decode_tile(
                 absmax = fx.Float32(0.0)
                 for c in range_constexpr(NQCHUNK):
                     qc = _q_chunk(c)
-                    chunk_max = qc.maximumf(Vec.filled(QCHUNK, 0.0, fx.Float32) - qc).reduce(ReductionOp.MAX)
+                    chunk_max = fmath.absf(qc).reduce(ReductionOp.MAX)
                     absmax = absmax.maximumf(chunk_max)
                 # per-row symmetric fp8 quantization: q_scale = absmax / FP8_MAX
                 q_scale = absmax * fx.Float32(1.0 / FP8_MAX)
