@@ -95,20 +95,37 @@ def main():
     print(f"MFMA-covered: {cov} ({cov*100//span}%)   EXPOSED: {exp} ({exp*100//span}%)")
     print(f"cyc/mfma = {span/len(mfma):.2f}  (floor = {E})")
 
-    total_gap = exp or 1
+    # AUTHORITATIVE attribution via the per-instruction STALL field. Each ATT wave
+    # row is [cycle, issue_dur, STALL, total_dur, code_id]: r[2] is the cycles the
+    # instruction stalled (blocked issue / waited). This is ground truth -- it makes
+    # gap-geometry guessing (first-in-gap / longest-in-gap / occupancy-overlap) moot,
+    # all of which mislabeled non-blocking fill ops. Ops with stall==0 (ds_read_b128,
+    # s_add, ...) NEVER block the matrix unit no matter how they sit between MFMAs;
+    # only ops with real stall (s_barrier, s_waitcnt, buffer_load) do. Report stall by
+    # op, excluding the MFMAs' own execute stall (that is the floor, not exposure).
+    def label(cid):
+        t = code[cid][0].strip() if cid < len(code) else "?"
+        o = op_of(code, cid)
+        if o == "s_waitcnt":
+            v, l = "vmcnt" in t, "lgkmcnt" in t
+            return "s_waitcnt(vm+lgkm)" if v and l else "s_waitcnt(vmcnt)" if v else \
+                   "s_waitcnt(lgkmcnt)" if l else "s_waitcnt"
+        return o
 
-    def first_non_mfma(g0, g1):
-        for r in seg:
-            if g0 <= r[0] < g1 and not op_of(code, r[4]).startswith("v_mfma"):
-                return op_of(code, r[4])
-        return "idle"
-
-    attr = collections.Counter()
-    for g0, g1 in gaps:
-        attr[first_non_mfma(g0, g1)] += g1 - g0
-    print(f"\n== exposed gap cycles by blocking instruction ({len(gaps)} gaps, {total_gap} cyc) ==")
-    for o, c in attr.most_common(15):
-        print(f"  {c:6d} cyc ({c*100//total_gap:2d}%)  {o}")
+    stall = collections.Counter()
+    mfma_stall = 0
+    for r in seg:
+        o = op_of(code, r[4])
+        s = r[2] if len(r) > 2 else 0
+        if o.startswith("v_mfma"):
+            mfma_stall += s
+        elif s:
+            stall[label(r[4])] += s
+    tot_stall = sum(stall.values()) or 1
+    print(f"\n(mfma self execute-stall {mfma_stall} = the floor, excluded)")
+    print(f"== NON-MFMA stall cycles by instruction (authoritative, {tot_stall} cyc) ==")
+    for o, c in stall.most_common(15):
+        print(f"  {c:6d} cyc ({c*100//tot_stall:2d}%)  {o}")
 
 
 if __name__ == "__main__":

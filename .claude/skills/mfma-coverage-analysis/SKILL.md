@@ -1,6 +1,6 @@
 ---
 name: mfma-coverage-analysis
-description: From an ATT trace, find which hot-loop instructions are NOT hidden behind MFMA execution -- i.e. what is keeping cyc/mfma above the MFMA execute floor (16 for fp4, 32 for fp8 16x16x128). Models the matrix unit as a pipeline (next_free): an MFMA issuing after the unit is free exposes the idle gap, attributed to the first non-MFMA op in it. Use when a GEMM/attention kernel is MFMA-bound and you want to push cyc/mfma toward the floor, or the user asks "what isn't hidden behind MFMA", "哪些指令没被 mfma 掩盖", "暴露的指令", or which non-MFMA op is the biggest exposed stall.
+description: From an ATT trace, find which hot-loop instructions are NOT hidden behind MFMA execution -- i.e. what is keeping cyc/mfma above the MFMA execute floor (16 for fp4, 32 for fp8 16x16x128). Models the matrix unit as a pipeline (next_free) for the EXPOSED %, and ranks blockers by the authoritative per-instruction STALL field (ops with stall==0 never block). Use when a GEMM/attention kernel is MFMA-bound and you want to push cyc/mfma toward the floor, or the user asks "what isn't hidden behind MFMA", "哪些指令没被 mfma 掩盖", "暴露的指令", or which non-MFMA op is the biggest exposed stall.
 ---
 
 # MFMA Coverage Analysis
@@ -17,18 +17,28 @@ the unit becomes free:
 EXPOSED = sum of those idle gaps; shrink it toward 0 so cyc/mfma → EXEC (see
 [[feedback-mfma-bound-reduce-scalar-toward-cyc16]]).
 
-IMPORTANT — this REPLACES the older "union of `[issue, issue+EXEC)` windows" model,
-which **capped overlapping windows and so mislabeled shadow-hidden loads as exposed**
-(e.g. it blamed `ds_read_b128` for 33% when dense 8-cyc-apart MFMAs actually hid all
-of them; the next_free model correctly showed ds_read ~0% and the real blockers were
-`s_add` address arithmetic 34% + idle/s_waitcnt). If a load appears as a top exposed
-blocker, sanity-check it isn't just filling the natural MFMA issue cadence.
+`next_free` gives the total EXPOSED % (matrix-unit idle fraction). It REPLACES the
+older "union of `[issue, issue+EXEC)` windows" model, which capped overlapping
+windows and over-reported exposure.
 
-Attribute each exposed gap to the **first non-MFMA instruction in it** = what
-blocked the next MFMA from issuing on time. That ranks the real targets by cycles,
-which is very different from ranking by instruction *count* or by the generic ATT
-stall-type breakdown (a scalar op that issues alone for 1 cycle and an op that
-gates a 50-cycle VMEM wait look identical by count but not by exposed cycles).
+## Attribution: use the per-instruction STALL field, NOT gap geometry
+
+Each ATT wave row is `[cycle, issue_dur, STALL, total_dur, code_id]`. **`r[2]` is
+the authoritative stall** — the cycles that instruction actually blocked. Rank
+blockers by summed stall per op (excluding the MFMAs' own execute stall, which is
+the floor). Do NOT attribute by "which op sits in the idle gap" — every geometric
+heuristic tried (first-in-gap / longest-in-gap / occupancy-overlap) mislabeled
+non-blocking fill ops and gave contradictory answers on the SAME trace:
+
+- gap-geometry variously blamed `ds_read_b128` 33%, then `s_add` 34%, then
+  `buffer_load` 30% — all WRONG.
+- the stall field showed `ds_read_b128` and `s_add` have **stall == 0** (pure fill,
+  never block), and the real blockers were **s_barrier 39% + s_waitcnt(lgkmcnt) 35%
+  + buffer_load 11% + readfirstlane 7% + s_waitcnt(vmcnt) 5%**.
+
+So: an op that issues between MFMAs is only a problem if its `r[2]` stall > 0.
+s_waitcnt is split into vmcnt / lgkmcnt so you can see whether VMEM or LDS waits
+dominate (here: LDS/lgkmcnt, i.e. waiting on ds_read; VMEM already hidden).
 
 EXEC is the MFMA **execute** latency, NOT issue latency:
 - fp4 `mfma_scale_f32_16x16x128_f8f6f4` → **16**
@@ -51,25 +61,23 @@ bucketed by blocking instruction.
 
 ## Reading it
 
-- **A named instruction with high exposed cycles is the real target**, even if it
-  is a tiny fraction of the instruction count and not in the generic stall top-N.
-  Example (fp4_gemm_4wave, m0-incr commit, cyc/mfma 20.25, exposed 23%): the
-  biggest blocker was `buffer_load_dword` (scale) at 30% of exposed cycles — only
-  3.3% of instructions and absent from the stall-type top-25, yet the #1 thing
-  keeping cyc/mfma above 16. This reversed an earlier "scale load isn't worth it"
-  call that was based on the wrong (count / stall-type) metric.
-- **`idle` gaps** = pure latency stalls (waitcnt drain / dependency) with no issuing
-  instruction — usually not directly cuttable, attack the named buckets first.
-- `s_waitcnt` high → the wait itself gates; consider relaxing vmcnt/lgkmcnt or
-  moving the producing load earlier (deeper prefetch).
+- **Rank by the stall column (`r[2]`), not by count or by which op sits in a gap.**
+  An op with stall==0 is free no matter where it sits; only stall>0 ops block.
+- **s_barrier high** → the wave is waiting at the per-iter cross-wave sync (the
+  4 waves finish the iter at slightly different times). Structural for a fixed wave
+  count; not cuttable without changing sync granularity / wave layout.
+- **s_waitcnt(lgkmcnt) high** → waiting on LDS reads (ds_read). Move the producing
+  ds_read earlier / deepen the register prefetch so the value is ready.
+- **s_waitcnt(vmcnt) high** → waiting on VMEM (global/g2s/scale gather). Deepen the
+  VMEM prefetch or relax the vmcnt bound.
+- **buffer_load / readfirstlane with stall** → the load's own issue stalled, or the
+  v→s readfirstlane serialized; precompute wave-uniform values once (SGPR).
 
 ## Caveats
 
 - Uses one wave file (se0_sm0_sl0_wv0.json by default). Different waves are
   equivalent repeats; pass `--wave` to check another.
-- The "first non-MFMA in gap" heuristic attributes the whole gap to one op; a gap
-  containing a producer + its consumer is charged to the producer. Good enough to
-  rank targets, not exact per-op liveness.
-- Data structures: instruction record = `[cycle, dur, _, _, code_id]`; code_id ->
-  `code.json["code"][cid][0]` is the asm text. (See att-hotloop-benchmark for the
-  complementary barrier-window cyc/mfma summary.)
+- Row schema: `[cycle, issue_dur, STALL, total_dur, code_id]`. `r[2]` (stall) is the
+  authoritative blocking metric; `code.json["code"][cid][0]` is the asm text. The
+  `next_free` pass gives EXPOSED %; the stall column gives the per-op ranking. (See
+  att-hotloop-benchmark for the complementary barrier-window cyc/mfma summary.)
