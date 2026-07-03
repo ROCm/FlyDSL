@@ -72,23 +72,30 @@ def main():
     if not mfma:
         print("no MFMA in window")
         return
-    covered = []
-    for c in mfma:
-        if covered and c <= covered[-1][1]:
-            covered[-1][1] = max(covered[-1][1], c + E)
+
+    # next_free model (matrix-unit pipeline): each MFMA occupies ONE E-cycle execute
+    # slot, but slots pipeline -- consecutive MFMAs can ISSUE < E apart and still both
+    # be hidden (the unit stays busy). Track next_free = when the matrix unit frees.
+    #   - issue t <= next_free : hidden (co-issued in the shadow); slot advances +E
+    #   - issue t >  next_free : the unit was IDLE for (t - next_free) -> EXPOSED
+    # This fixes the older union-of-[issue,issue+E) model, which capped overlapping
+    # windows and so mislabeled shadow-hidden loads (dense 8-cyc-apart MFMAs) as
+    # exposed. Blame each exposed gap on the first non-MFMA op issuing inside it.
+    next_free = mfma[0]
+    gaps = []
+    for t in mfma:
+        if t > next_free:
+            gaps.append((next_free, t))
+            next_free = t + E
         else:
-            covered.append([c, c + E])
-    cov = sum(b - a for a, b in covered)
+            next_free = next_free + E
+    exp = sum(b - a for a, b in gaps)
+    cov = span - exp
     print(f"\nsegment [{lo},{hi})  span={span}  mfma={len(mfma)}  exec={E}")
-    print(f"MFMA-covered: {cov} ({cov*100//span}%)   EXPOSED: {span-cov} ({(span-cov)*100//span}%)")
+    print(f"MFMA-covered: {cov} ({cov*100//span}%)   EXPOSED: {exp} ({exp*100//span}%)")
     print(f"cyc/mfma = {span/len(mfma):.2f}  (floor = {E})")
 
-    gaps = []
-    for i in range(len(covered) - 1):
-        g0, g1 = covered[i][1], covered[i + 1][0]
-        if g1 > g0:
-            gaps.append((g0, g1))
-    total_gap = sum(b - a for a, b in gaps) or 1
+    total_gap = exp or 1
 
     def first_non_mfma(g0, g1):
         for r in seg:

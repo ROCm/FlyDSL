@@ -1,18 +1,28 @@
 ---
 name: mfma-coverage-analysis
-description: From an ATT trace, find which hot-loop instructions are NOT hidden behind MFMA execution -- i.e. what is keeping cyc/mfma above the MFMA execute floor (16 for fp4, 32 for fp8 16x16x128). Tiles each MFMA's execute window, finds the exposed gaps, and attributes each gap's cycles to the instruction that blocked the next MFMA. Use when a GEMM/attention kernel is MFMA-bound and you want to push cyc/mfma toward the floor, or the user asks "what isn't hidden behind MFMA", "哪些指令没被 mfma 掩盖", "暴露的指令", or which non-MFMA op is the biggest exposed stall.
+description: From an ATT trace, find which hot-loop instructions are NOT hidden behind MFMA execution -- i.e. what is keeping cyc/mfma above the MFMA execute floor (16 for fp4, 32 for fp8 16x16x128). Models the matrix unit as a pipeline (next_free): an MFMA issuing after the unit is free exposes the idle gap, attributed to the first non-MFMA op in it. Use when a GEMM/attention kernel is MFMA-bound and you want to push cyc/mfma toward the floor, or the user asks "what isn't hidden behind MFMA", "哪些指令没被 mfma 掩盖", "暴露的指令", or which non-MFMA op is the biggest exposed stall.
 ---
 
 # MFMA Coverage Analysis
 
-## The model (user-validated)
+## The model (user-validated, next_free pipeline)
 
-Each MFMA occupies a fixed **execute window** of EXEC cycles from its issue cycle.
-Back-to-back MFMAs tile `[c, c+EXEC)` windows; while the matrix unit is busy, any
-co-issued scalar / VMEM / LDS instruction is *free* (hidden in the shadow). Cycles
-**outside** the union of those windows are EXPOSED — the matrix unit idles, so
-`cyc/mfma > EXEC`. The goal of MFMA-bound optimization is to shrink the exposed
-fraction toward 0 so cyc/mfma → EXEC (see [[feedback-mfma-bound-reduce-scalar-toward-cyc16]]).
+The matrix unit is a PIPELINE: each MFMA occupies ONE EXEC-cycle execute slot, but
+consecutive MFMAs can **issue < EXEC apart** and still both be hidden (dense fp4
+MFMAs issue ~8 cyc apart yet each execute-slot is 16). Track `next_free` = the cycle
+the unit becomes free:
+- MFMA issues at `t <= next_free` → hidden (co-issued in the shadow); `next_free += EXEC`
+- MFMA issues at `t >  next_free` → the unit was IDLE for `t - next_free` → **EXPOSED**
+
+EXPOSED = sum of those idle gaps; shrink it toward 0 so cyc/mfma → EXEC (see
+[[feedback-mfma-bound-reduce-scalar-toward-cyc16]]).
+
+IMPORTANT — this REPLACES the older "union of `[issue, issue+EXEC)` windows" model,
+which **capped overlapping windows and so mislabeled shadow-hidden loads as exposed**
+(e.g. it blamed `ds_read_b128` for 33% when dense 8-cyc-apart MFMAs actually hid all
+of them; the next_free model correctly showed ds_read ~0% and the real blockers were
+`s_add` address arithmetic 34% + idle/s_waitcnt). If a load appears as a top exposed
+blocker, sanity-check it isn't just filling the natural MFMA issue cadence.
 
 Attribute each exposed gap to the **first non-MFMA instruction in it** = what
 blocked the next MFMA from issuing on time. That ranks the real targets by cycles,
