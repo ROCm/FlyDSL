@@ -204,6 +204,16 @@ def _fm_launch_hinted(stream: fx.Stream = fx.Stream(None)):
     _fm_kernel().launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
 
 
+@flyc.jit
+def _fm_launch_fast_fp(stream: fx.Stream = fx.Stream(None)):
+    _fm_kernel().launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+
+
+@flyc.jit
+def _fm_launch_fast_fp_explicit_fastmath(stream: fx.Stream = fx.Stream(None)):
+    _fm_kernel().launch(grid=(1, 1, 1), block=(32, 1, 1), stream=stream)
+
+
 def _source_ir(launch_fn):
     launch_fn(stream=torch.cuda.current_stream())
     assert launch_fn._mem_cache, "expected at least one cached compilation"
@@ -243,6 +253,35 @@ def test_kernel_level_fastmath_and_scope_overrides():
     exps = _arith_lines(ir_text, "math.exp")  # [0]=exp(z), [1]=exp(x,none)
     assert "fastmath<fast>" in exps[0]  # inherits kernel-level
     assert "fastmath" not in exps[1]  # explicit op-level "none" override
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@requires_gpu
+def test_fast_fp_math_defaults_kernel_fastmath_context():
+    hinted = flyc.compile[{"fast_fp_math": True}](_fm_launch_fast_fp)
+    ir_text = _source_ir(hinted)
+
+    muls = _arith_lines(ir_text, "arith.mulf")
+    assert "fastmath<fast>" in muls[0]
+    assert "fastmath<contract>" in muls[1]
+    assert all("fastmath<fast>" in ln for ln in _arith_lines(ir_text, "arith.addf"))
+
+
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+@requires_gpu
+def test_explicit_fastmath_hint_overrides_fast_fp_math_default():
+    hinted = flyc.compile[{"fast_fp_math": True, "fastmath": "contract"}](
+        _fm_launch_fast_fp_explicit_fastmath
+    )
+    ir_text = _source_ir(hinted)
+
+    muls = _arith_lines(ir_text, "arith.mulf")
+    assert "fastmath<contract>" in muls[0]
+    assert "fastmath<contract>" in muls[1]
+    assert all("fastmath<contract>" in ln for ln in _arith_lines(ir_text, "arith.addf"))
+    assert "fastmath<fast>" not in ir_text
 
 
 @pytest.mark.l2_device

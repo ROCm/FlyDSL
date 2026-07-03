@@ -41,6 +41,7 @@ from .kernel_function import (
     CompilationContext,
     KernelFunction,
     create_gpu_module,
+    effective_fastmath_hint,
     func_def_location,
     get_gpu_module_body,
 )
@@ -1483,7 +1484,7 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
-                                fastmath_flag = CompilationContext.get_compile_hints().get("fastmath")
+                                fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
                                 fastmath_scope = (
                                     fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
                                 )

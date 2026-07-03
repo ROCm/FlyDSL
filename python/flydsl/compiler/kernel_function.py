@@ -244,6 +244,15 @@ class CompilationContext:
         return kid
 
 
+def effective_fastmath_hint(hints: dict):
+    """Resolve the ambient fastmath hint for traced JIT/kernel bodies."""
+    if "fastmath" in hints:
+        return hints["fastmath"]
+    if hints.get("fast_fp_math"):
+        return "fast"
+    return None
+
+
 # =============================================================================
 # Kernel Launcher
 # =============================================================================
@@ -542,7 +551,7 @@ class KernelFunction:
 
                     dsl_args.update(constexpr_values)
 
-                    fastmath_flag = CompilationContext.get_compile_hints().get("fastmath")
+                    fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
                     fastmath_scope = fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
                     # Bound the call-site boundary at the kernel body.
                     with tracing_context(self._func), fastmath_scope:
