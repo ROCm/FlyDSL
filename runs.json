@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-03T08:45:53Z",
+ "updated": "2026-07-03T08:50:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28649455151,
+   "pr": 796,
+   "commit": "0b86c92874698cc31992bc6ed2042df76744f0c1",
+   "branch": "worktree-triton-style-occupancy-info",
+   "event": "pull_request",
+   "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151",
+   "created_at": "2026-07-03T08:48:36Z",
+   "updated_at": "2026-07-03T08:49:14Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 28649199391,
    "pr": 796,
@@ -10,38 +25,38 @@
    "branch": "worktree-triton-style-occupancy-info",
    "event": "pull_request",
    "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391",
    "created_at": "2026-07-03T08:43:34Z",
-   "updated_at": "2026-07-03T08:44:33Z",
+   "updated_at": "2026-07-03T08:48:54Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-03T08:44:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-03T08:48:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052931"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-03T08:44:39Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-03T08:45:45Z",
+     "completed_at": "2026-07-03T08:48:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052940"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-03T08:44:39Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-03T08:45:47Z",
+     "completed_at": "2026-07-03T08:48:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052941"
     }
    ]
@@ -1559,49 +1574,6 @@
    "updated_at": "2026-07-01T16:55:40Z",
    "actor": "amd-satre",
    "jobs": []
-  },
-  {
-   "run_id": 28533709835,
-   "pr": null,
-   "commit": "5f225b02ec5df29707270bbb0ca67955abba2f7b",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835",
-   "created_at": "2026-07-01T16:51:46Z",
-   "updated_at": "2026-07-01T16:54:52Z",
-   "actor": "amd-satre",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T16:54:02Z",
-     "completed_at": "2026-07-01T16:54:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835/job/84589852855"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T16:54:02Z",
-     "completed_at": "2026-07-01T16:54:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835/job/84589852868"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T16:53:53Z",
-     "completed_at": "2026-07-01T16:54:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835/job/84589852873"
-    }
-   ]
   }
  ]
 }
