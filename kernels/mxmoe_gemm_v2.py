@@ -14,9 +14,9 @@ from flydsl.expr.typing import Vector as Vec
 # shape constants (KIMI defaults; per-shape values come from the compile args)
 NE = 385  # #experts
 TOPK_DEFAULT = 9
-H_DEFAULT = 7168  # model_dim: gemm1 D_HIDDEN (contraction) / gemm2 N_OUT (output)
 INTER_DEFAULT = 512  # inter_dim: gemm1 D_INTER (output) / gemm2 D_INTER (contraction)
 INTER_MAX_DEFAULT = 8192  # compile-time cap for runtime inter_dim (gemm2 B-view / LDS bounds)
+HIDDEN_MAX_DEFAULT = 8192  # compile-time cap for runtime model_dim/hidden (gemm1 B-view / A-scale LDS)
 MAX_M = 655360
 BN = BK = 256
 KH_TILE = BK // 2  # 128 packed-fp4 bytes per K-tile
@@ -299,11 +299,12 @@ def gemm1_body_v2(
     i32_ntok,
     i32_total_m_blocks,
     i32_inter,
+    i32_hidden,
     i32_kpad,
     i32_npad,
     *,
     BM,
-    K,
+    HIDDEN_MAX,
     interleave,
     b_nontemporal,
     a_dtype,
@@ -338,18 +339,18 @@ def gemm1_body_v2(
     a_pack = 1 if is_f8_a else 2
     KH_TILE_A = BK // a_pack  # A bytes/K-tile row in LDS (fp8=256, fp4=128)
     cbsz_a = 0 if is_f8_a else 4  # mfma A-format (fp8=0, fp4=4)
-    # K-/INTER-derived sizes (compile-time ints).
-    kc = (K // 32) // 4 // 2
-    K_HALF = K // 2
-    K_BYTES = K // a_pack  # a_quant row stride in bytes (= K_HALF for fp4)
-    K_TILES_TOTAL = K // BK
-    KT_PER_KW = K_TILES_TOTAL // k_wave  # tiles per K-wave group (kw=1: all tiles)
-    kUnroll = KT_PER_KW - kStages
-    kAS_per_chunk_dw = kc * 64
-    kBS_stride_n0_dw = kc * 64  # hidden-K-derived (compile-time)
+    # Contraction K = model_dim/hidden is runtime (i32_hidden); HIDDEN_MAX caps the B-view / A-scale-LDS bounds. kc == K_TILES (BK=256): (K//32)//4//2 == K//256.
+    K_rt = fx.Int32(i32_hidden)
+    K_BYTES = K_rt // fx.Int32(a_pack)  # a_quant row stride bytes (= K_HALF for fp4, runtime)
+    kc_rt = K_rt // fx.Int32(256)  # (K//32)//4//2 == K_TILES
+    K_TILES_RT = K_rt // fx.Int32(BK)  # runtime K-tile trip count
+    KT_PER_KW_RT = K_TILES_RT // fx.Int32(k_wave)  # tiles per K-wave group (kw=1: all tiles)
+    kAS_per_chunk_dw = kc_rt * fx.Int32(64)
+    kBS_stride_n0_dw = kc_rt * fx.Int32(64)  # hidden-K-derived (runtime)
+    K_TILES_MAX = HIDDEN_MAX // BK  # compile-time B-view / A-scale-LDS bound
     INTER_rt = fx.Int32(i32_inter)  # gemm1 N-output dim (runtime)
     N_OUT = INTER_rt * fx.Int32(2)
-    kBS_per_expert_dw = (N_OUT // fx.Int32(32)) * fx.Int32(kBS_stride_n0_dw)  # (N_OUT//16//2)*stride
+    kBS_per_expert_dw = (N_OUT // fx.Int32(32)) * kBS_stride_n0_dw  # (N_OUT//16//2)*stride
     NUM_N_BLOCKS = N_OUT // fx.Int32(BN)
     OUT_AS_PER_CHUNK_DW = (INTER_rt // fx.Int32(256)) * fx.Int32(64)  # ((INTER//32)//4//2)*64
     K_G2_BYTES = INTER_rt // fx.Int32(out_pack)  # output row stride (fp4 INTER/2, fp8 INTER)
@@ -358,7 +359,7 @@ def gemm1_body_v2(
     bq_num_records = None
     INTER_real = None
     if const_expr(has_pad):
-        K_real = fx.Int32(K) - fx.Int32(i32_kpad)
+        K_real = K_rt - fx.Int32(i32_kpad)
         halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
         bq_num_records = halves_real * fx.Int32(1024)
         INTER_real = INTER_rt - fx.Int32(i32_npad)
@@ -381,7 +382,7 @@ def gemm1_body_v2(
     if const_expr(k_wave > 1):
         wave_n = wave % fx.Int32(num_n_waves)
         wave_k = rocdl.readfirstlane(T.i32, wave // fx.Int32(num_n_waves))
-        kw_kt_base = rocdl.readfirstlane(T.i32, wave_k * fx.Int32(KT_PER_KW))  # first ABSOLUTE K-tile
+        kw_kt_base = rocdl.readfirstlane(T.i32, wave_k * KT_PER_KW_RT)  # first ABSOLUTE K-tile
     else:
         wave_n = wave
         wave_k = None
@@ -514,7 +515,7 @@ def gemm1_body_v2(
         return out
 
     # B load: CK-preshuffle view over bq; base MUST stay wave-uniform (per-lane fold -> WATERFALL ~14x).
-    KH4 = K_HALF // 4  # i32 stride for the col axis
+    KH4 = K_rt // fx.Int32(8)  # i32 stride for the col axis (= K_HALF//4)
     b_catom = b_copy_atom(b_nontemporal)
     bs_copy_atom = bscale_copy_atom()
 
@@ -538,7 +539,7 @@ def gemm1_body_v2(
             else:
                 logical_inter = col % INTER_rt
             nrec = (logical_inter < INTER_real).select(bq_num_records, fx.Int32(0))
-        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL, num_records_bytes=nrec)
+        return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_MAX, num_records_bytes=nrec)
 
     bq_views = [make_bq_view_for_jtile(j) for j in range_constexpr(NJ)]
 
@@ -547,17 +548,17 @@ def gemm1_body_v2(
         bscale_view(
             arg_bscale,
             e * kBS_per_expert_dw + np_list[mw] * kBS_stride_n0_dw,
-            K_TILES_TOTAL,
+            K_TILES_MAX,
             k0_stride_dw=kBS_stride_k0_dw,
         )
         for mw in range_constexpr(NJ // 2)
     ]
 
-    # B fragments: i32<4:1> (16B = 32 fp4), per-stage (kStages) prefetch double-buffer.
+    # B fragments: i32<4:1> (16B = 32 fp4). Two fixed sets (CUR consumed, NXT prefetched) double-buffered via scf.for loop-carry (indices stay Python-const 0/1 under the runtime trip).
     frag_tmpl = bq_frag_tmpl(bq_views[0])  # i32<4:1>
     bq_frags = [
         [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(NJ)]
-        for _ in range_constexpr(kStages)
+        for _ in range_constexpr(2)
     ]
     # fp4: A in fx.gemm fragments (C in place). fp8: A per-iter Vec8 i32, C raw f32x4.
     zero4 = Vec.filled(4, 0.0, fx.Float32)
@@ -573,11 +574,10 @@ def gemm1_body_v2(
             [fx.make_fragment_like(frag_tmpl, dtype=fx.Float32.ir_type) for _ in range_constexpr(NJ)]
             for _ in range_constexpr(kMChunks)
         ]
-    # B-scale fragments: i32<1:1>, per-stage double-buffer like bq_frags.
+    # B-scale fragments: i32<1:1>, two fixed sets (CUR/NXT) like bq_frags.
     bs_frag_tmpl = bscale_frag_tmpl(bscale_views[0])  # i32<1:1>
-    bs_frags = [
-        [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(NJ // 2)] for _ in range_constexpr(kStages)
-    ]
+    bs_frags = [[fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(NJ // 2)] for _ in range_constexpr(2)]
+    CUR, NXT = 0, 1  # fixed fragment-set indices (compile-time constant)
 
     def issue_b_load_j(stage, K_C, j):
         # ``K_C`` is the K-wave-LOCAL K-tile; B indexes the ABSOLUTE tile (identity at kw=1).
@@ -653,42 +653,71 @@ def gemm1_body_v2(
             for J in range_constexpr(NJ):
                 c_frags[i][J].store(zero4)
 
-    # prologue: stages 0,1 (K-wave-local tiles; A/B loads add kw_kt_base internally)
+    # B carry helpers: snapshot set `stage`'s B / B-scale fragment values to SSA (survive scf.for) and restore them into the fragments.
+    def b_snapshot(stage):
+        vals = [bq_frags[stage][j][half].load() for j in range(NJ) for half in range(2)]
+        vals += [bs_frags[stage][mw].load() for mw in range(NJ // 2)]
+        return vals
+
+    def b_restore(stage, vals):
+        n = 0
+        for j in range_constexpr(NJ):
+            for half in range_constexpr(2):
+                bq_frags[stage][j][half].store(vals[n])
+                n += 1
+        for mw in range_constexpr(NJ // 2):
+            bs_frags[stage][mw].store(vals[n])
+            n += 1
+
+    def load_carry():
+        if const_expr(is_f8_a):
+            return [accm[i][J] for i in range(kMChunks) for J in range(NJ)]
+        return [c_frags[i][J].load() for i in range(kMChunks) for J in range(NJ)]
+
+    def store_carry(state):
+        n = 0
+        for i in range_constexpr(kMChunks):
+            for J in range_constexpr(NJ):
+                if const_expr(is_f8_a):
+                    accm[i][J] = state[n]
+                else:
+                    c_frags[i][J].store(state[n])
+                n += 1
+
+    # prologue: stage the first kStages A-tiles into triple-buffered A LDS, and prefetch tile 0's B / B-scale into the CUR set (one-stage-ahead).
     issue_a_scale_load()
     for K_C in range_constexpr(kStages):
         issue_a_load_lds(K_C, K_C)
-        for j in range_constexpr(NJ):
-            issue_b_load_j(K_C, K_C, j)
-        issue_b_scale_load(K_C, K_C)
+    for j in range_constexpr(NJ):
+        issue_b_load_j(CUR, fx.Int32(0), j)
+    issue_b_scale_load(CUR, fx.Int32(0))
 
-    # main loop; sched_barrier/s_setprio fence the mfma chain from the B loads.
-    for OFFSET in range_constexpr(kUnroll):
-        K_C = kStages + OFFSET
-        read_slot = OFFSET % kAStages
-        write_slot = K_C % kAStages
-        slot_b = OFFSET % kStages
+    # Runtime-trip scf.for over KT_PER_KW_RT tiles: carry C/accm + tile kt's prefetched B/B-scale (CUR); each iter ds-reads A tile kt, streams A tile kt+kStages, prefetches tile kt+1 into NXT (loads overlap tile kt's MMA), carries NXT in as CUR. sched_barrier/s_setprio fence the mfma chain from the B loads.
+    nC = kMChunks * NJ
+    for kt_iv, state in range(fx.Index(0), fx.Index(KT_PER_KW_RT), fx.Index(1), init=load_carry() + b_snapshot(CUR)):
+        store_carry(state[:nC])
+        b_restore(CUR, state[nC:])
+        kt_rt = fx.Int32(kt_iv)
         gpu.barrier()
-        issue_a_ds_read(read_slot)
-        asc_cur = issue_a_scale_ds_read(K_C - kStages)
-        issue_a_load_lds(write_slot, K_C)
+        issue_a_ds_read(kt_rt % fx.Int32(kAStages))
+        asc_cur = issue_a_scale_ds_read(kt_rt)
+        nxt = kt_rt + fx.Int32(kStages)
+        if nxt < KT_PER_KW_RT:
+            issue_a_load_lds(nxt % fx.Int32(kAStages), nxt)
+        # Prefetch tile kt+1's B into NXT (overlaps tile kt's MMA); clamp to the last valid tile so the final iter's unconsumed prefetch never reads past the real (HIDDEN_MAX-sized view) weight.
+        kt_p1 = kt_rt + fx.Int32(1)
+        nxt_b = fx.Int32((kt_p1 < KT_PER_KW_RT).select(kt_p1, KT_PER_KW_RT - fx.Int32(1)))
         for J in range_constexpr(NJ):
             rocdl.sched_barrier(0)
             rocdl.s_setprio(1)
-            mfma_cluster(slot_b, asc_cur, J)
+            mfma_cluster(CUR, asc_cur, J)
             rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
-            issue_b_load_j(slot_b, K_C, J)
+            issue_b_load_j(NXT, nxt_b, J)
             rocdl.sched_barrier(0)
-        issue_b_scale_load(slot_b, K_C)
-
-    # drain: last kStages of this K-wave group
-    for S in range_constexpr(kStages):
-        kt = KT_PER_KW - kStages + S
-        gpu.barrier()
-        issue_a_ds_read(kt % kAStages)
-        asc_cur = issue_a_scale_ds_read(kt)
-        for J in range_constexpr(NJ):
-            mfma_cluster(kt % kStages, asc_cur, J)
+        issue_b_scale_load(NXT, nxt_b)
+        results = yield load_carry() + b_snapshot(NXT)
+    store_carry(results[:nC])
 
     gpu.barrier()
 
@@ -924,12 +953,12 @@ def gemm2_body_v2(
     aq_rsrc,
     arg_aq,
     i32_inter,
+    i32_hidden,
     i32_kpad,
     i32_npad,
     *,
     BM,
     use_nt,
-    N_OUT,
     INTER_MAX,
     aStages,
     a_dtype,
@@ -965,8 +994,10 @@ def gemm2_body_v2(
     K_TILES_RT = K_rt // fx.Int32(BK)  # runtime K-tile trip count
     kAS_per_chunk_dw = kc_rt * fx.Int32(64)
     kBS_stride_n0_dw = kc_rt * fx.Int32(64)
-    kbs_per_expert_dw = fx.Int32(N_OUT // 16 // 2) * kBS_stride_n0_dw
-    num_n_blocks = N_OUT // 256
+    # N_OUT = model_dim/hidden is the gemm2 output N dim; runtime via i32_hidden (no K-loop dependency).
+    N_OUT_rt = fx.Int32(i32_hidden)
+    kbs_per_expert_dw = (N_OUT_rt // fx.Int32(32)) * kBS_stride_n0_dw  # (N_OUT//16//2)*stride
+    num_n_blocks = N_OUT_rt // fx.Int32(256)
     KH4 = K_rt // fx.Int32(8)  # i32 col stride (= K_HALF//4)
     K_TILES_MAX = INTER_MAX // BK
 
@@ -977,7 +1008,7 @@ def gemm2_body_v2(
         K_real = K_rt - fx.Int32(i32_kpad)
         halves_real = (K_real + fx.Int32(127)) // fx.Int32(128)
         bq_num_records = halves_real * fx.Int32(1024)
-        N_real = fx.Int32(N_OUT) - fx.Int32(i32_npad)
+        N_real = N_OUT_rt - fx.Int32(i32_npad)
 
     # block -> (m_block_idx, n_block_idx); e = sorted_expert_ids[SBM-padded sort block] (SBM==BM: sort_block==m_block_idx).
     m_block_idx = bx_i32 // num_n_blocks
@@ -1029,7 +1060,7 @@ def gemm2_body_v2(
         if const_expr(has_pad):
             # N-skip: fully-pad-N tile (col >= 16-aligned N_real) -> 0 records so weight loads OOB -> 0.
             nrec = (col < N_real).select(bq_num_records, fx.Int32(0))
-        return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_MAX, num_records_bytes=nrec)
+        return bq_view(arg_bq, e * N_OUT_rt + col, KH4, K_TILES_MAX, num_records_bytes=nrec)
 
     bq_views = [make_bq_view(j) for j in range_constexpr(4)]
 
@@ -1305,7 +1336,7 @@ def gemm2_body_v2(
         lane,
         i32_M,
         BM,
-        N_OUT,
+        N_OUT_rt,
         use_reduce=use_reduce,
         topk=topk,
         SBM=SBM,

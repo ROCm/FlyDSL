@@ -14,7 +14,7 @@ from flydsl.expr.typing import Int8, T
 from .mxmoe_gemm_v2 import (
     BK,
     BN,
-    H_DEFAULT,
+    HIDDEN_MAX_DEFAULT,
     INTER_DEFAULT,
     INTER_MAX_DEFAULT,
     MAX_M,
@@ -224,7 +224,7 @@ def gemm1_grid(n_tokens, BM=32, NE=NE, TOPK=TOPK_DEFAULT, INTER=INTER_DEFAULT):
 def compile_gemm1_a4w4_port(
     BM=32,
     use_nt=True,
-    D_HIDDEN=H_DEFAULT,
+    HIDDEN_MAX=HIDDEN_MAX_DEFAULT,
     interleave=True,
     a_dtype="fp4",
     out_dtype="fp4",
@@ -249,10 +249,10 @@ def compile_gemm1_a4w4_port(
     if act not in ("silu", "swiglu"):
         raise AssertionError(f"act must be 'silu' or 'swiglu', got {act!r}")
 
-    K = D_HIDDEN  # contraction (compile-time); inter_dim (N-output) is the runtime i32_inter arg
-    assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
+    # Contraction K = model_dim/hidden is a runtime arg (multiple of BK=256, <= HIDDEN_MAX which caps the B-view / A-scale-LDS bounds); K%k_wave / K%BK checks are host-side in mxfp4_moe_gemm1.
+    assert HIDDEN_MAX % BK == 0, f"HIDDEN_MAX must be a multiple of {BK}, got {HIDDEN_MAX}"
 
-    # k_wave (intra-block K-slice) guards: k_wave in {1,2,4}, K%k_wave==0, per-K-wave A + slabs fit LDS.
+    # k_wave (intra-block K-slice) guards: k_wave in {1,2,4}, K%k_wave==0 (host-side), per-K-wave A + slabs fit LDS (sized by K_TILES_MAX).
     LDS_LIMIT = 160 * 1024  # gfx950
     if k_wave not in (1, 2, 4):
         raise AssertionError(f"k_wave must be in {{1,2,4}} (4-wave block), got {k_wave}")
@@ -261,8 +261,8 @@ def compile_gemm1_a4w4_port(
             raise AssertionError("k_wave>1 is fp4-only (fp8 A path not ported)")
         if not interleave:
             raise AssertionError("k_wave>1 requires interleave gate mode")
-        if (K // BK) % k_wave != 0:
-            raise AssertionError(f"K/BK ({K // BK}) must be divisible by k_wave ({k_wave})")
+        if (HIDDEN_MAX // BK) % k_wave != 0:
+            raise AssertionError(f"HIDDEN_MAX/BK ({HIDDEN_MAX // BK}) must be divisible by k_wave ({k_wave})")
     # BN (fused gate|up N-tile) in {64,256}; BN=64 needs interleave, fp4, and an even NJ>=2 (gate+up pair) -> k_wave in {2,4}.
     if BN not in (64, 256):
         raise AssertionError(f"BN must be in {{64, 256}}, got {BN}")
@@ -280,7 +280,9 @@ def compile_gemm1_a4w4_port(
             )
 
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM, k_wave=k_wave, BN=BN)  # inter-independent
+    lds_bytes = lds_bytes_for(
+        HIDDEN_MAX // BK, KH_TILE_A, BM=BM, k_wave=k_wave, BN=BN
+    )  # K_TILES_MAX sizes A LDS (inter-independent)
     if lds_bytes > LDS_LIMIT:
         raise AssertionError(f"k_wave LDS {lds_bytes} > {LDS_LIMIT} (BM={BM}, k_wave={k_wave})")
 
@@ -294,7 +296,9 @@ def compile_gemm1_a4w4_port(
     kw_tag = "" if k_wave == 1 else f"_kw{k_wave}"
     bn_tag = "" if BN == 256 else f"_bn{BN}"
     pad_tag = "_pad" if has_pad else ""  # has_pad adds the runtime pad kernarg + weight-OOB pad-skip
-    name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}{kw_tag}{bn_tag}{pad_tag}_v2"
+    name_suffix = (
+        f"hmax{HIDDEN_MAX}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}{kw_tag}{bn_tag}{pad_tag}_v2"
+    )
 
     @fx.struct
     class SharedStorage:
@@ -316,6 +320,7 @@ def compile_gemm1_a4w4_port(
         wave,
         i32_ntok,
         i32_inter,
+        i32_hidden,
         i32_kpad,
         i32_npad,
     ):
@@ -343,10 +348,11 @@ def compile_gemm1_a4w4_port(
                 i32_ntok,
                 total_m_blocks,
                 i32_inter,
+                i32_hidden,
                 i32_kpad,
                 i32_npad,
                 BM=BM,
-                K=K,
+                HIDDEN_MAX=HIDDEN_MAX,
                 interleave=interleave,
                 b_nontemporal=b_nontemporal,
                 a_dtype=a_dtype,
@@ -372,6 +378,7 @@ def compile_gemm1_a4w4_port(
             arg_sti: fx.Int64,
             i32_ntok: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             arg_aqout: fx.Int64,
             arg_ascaleout: fx.Int64,
             arg_hidden: fx.Int64,
@@ -397,6 +404,7 @@ def compile_gemm1_a4w4_port(
                 wave,
                 i32_ntok,
                 i32_inter,
+                i32_hidden,
                 fx.Int32(0),
                 fx.Int32(0),
             )
@@ -413,6 +421,7 @@ def compile_gemm1_a4w4_port(
             i32_ntok: fx.Int32,
             i32_grid: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             arg_aqout: fx.Int64,
             arg_ascaleout: fx.Int64,
             arg_hidden: fx.Int64,
@@ -429,6 +438,7 @@ def compile_gemm1_a4w4_port(
                 arg_sti,
                 i32_ntok,
                 i32_inter,
+                i32_hidden,
                 arg_aqout,
                 arg_ascaleout,
                 arg_hidden,
@@ -447,6 +457,7 @@ def compile_gemm1_a4w4_port(
             arg_sti: fx.Int64,
             i32_ntok: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             i32_kpad: fx.Int32,
             i32_npad: fx.Int32,
             arg_aqout: fx.Int64,
@@ -474,6 +485,7 @@ def compile_gemm1_a4w4_port(
                 wave,
                 i32_ntok,
                 i32_inter,
+                i32_hidden,
                 i32_kpad,
                 i32_npad,
             )
@@ -490,6 +502,7 @@ def compile_gemm1_a4w4_port(
             i32_ntok: fx.Int32,
             i32_grid: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             i32_kpad: fx.Int32,
             i32_npad: fx.Int32,
             arg_aqout: fx.Int64,
@@ -508,6 +521,7 @@ def compile_gemm1_a4w4_port(
                 arg_sti,
                 i32_ntok,
                 i32_inter,
+                i32_hidden,
                 i32_kpad,
                 i32_npad,
                 arg_aqout,
@@ -563,7 +577,7 @@ def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
 def compile_gemm2_a4w4_port(
     BM=32,
     use_nt=False,
-    N_OUT=H_DEFAULT,
+    HIDDEN_MAX=HIDDEN_MAX_DEFAULT,
     MAX_M=MAX_M,
     epilog="atomic",
     INTER_MAX=INTER_MAX_DEFAULT,
@@ -616,7 +630,8 @@ def compile_gemm2_a4w4_port(
     slot_bytes = BM * KH_TILE_A
     aStages = 3  # runtime K-loop: triple-buffered A LDS (handles both K_TILES==2 and larger)
     lds_bytes = max(BM * BN * 4, aStages * slot_bytes)
-    num_n_blocks = N_OUT // 256
+    # N_OUT = model_dim/hidden is a runtime arg (i32_hidden); num_n_blocks = N_OUT//256 is computed runtime in the body/launch (HIDDEN_MAX only caps host checks).
+    assert HIDDEN_MAX % BK == 0, f"HIDDEN_MAX must be a multiple of {BK}, got {HIDDEN_MAX}"
 
     # Kernel-name tags empty on the default so its name/IR stays byte-identical (each variant distinct).
     atag = "_a8" if is_f8 else ""
@@ -636,7 +651,7 @@ def compile_gemm2_a4w4_port(
     bh_tag = "_bhoist" if g2_bhoist else ""
     apf_tag = "_apf" if g2_ascale_pf else ""
     spart_tag = f"_spart{g2_group_num}x{g2_m01}" if g2_spart > 0 else ""
-    tag = f"h{N_OUT}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}{bh_tag}{apf_tag}{spart_tag}_v2"
+    tag = f"hmax{HIDDEN_MAX}_imax{INTER_MAX}_bm{BM}{'_nt' if use_nt else ''}_{etag}{atag}{sbm_tag}{persist_tag}{pad_tag}{ks_tag}{bh_tag}{apf_tag}{spart_tag}_v2"
     name = f"gemm2_a4w4_port_{tag}"
 
     @fx.struct
@@ -660,10 +675,12 @@ def compile_gemm2_a4w4_port(
         i32_M,
         i32_max_m_blocks,
         i32_inter,
+        i32_hidden,
         i32_kpad,
         i32_npad,
     ):
         # Shared body for both has_pad variants (@flyc.jit -> rewriter recurses scf if / grid-stride); default passes i32_kpad/i32_npad=0 (no kernarg), folding pad math away.
+        num_n_blocks = fx.Int32(i32_hidden) // fx.Int32(256)  # N_OUT//256 runtime (i32_hidden = model_dim)
         k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)  # A row stride bytes (runtime)
         aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(fx.Int32(BM) * k_bytes)
         aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=aq_num)
@@ -707,11 +724,11 @@ def compile_gemm2_a4w4_port(
                 aq_rsrc,
                 arg_aq,
                 i32_inter,
+                i32_hidden,
                 i32_kpad,
                 i32_npad,
                 BM=BM,
                 use_nt=use_nt,
-                N_OUT=N_OUT,
                 INTER_MAX=INTER_MAX,
                 aStages=aStages,
                 a_dtype=a_dtype,
@@ -784,6 +801,7 @@ def compile_gemm2_a4w4_port(
             i32_M: fx.Int32,
             i32_max_m_blocks: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             arg_out: fx.Int64,
             arg_out_scale: fx.Int64,  # unused (atomic epilog); kept for signature parity
         ):
@@ -809,6 +827,7 @@ def compile_gemm2_a4w4_port(
                 i32_M,
                 i32_max_m_blocks,
                 i32_inter,
+                i32_hidden,
                 fx.Int32(0),
                 fx.Int32(0),
             )
@@ -827,12 +846,14 @@ def compile_gemm2_a4w4_port(
             i32_max_m_blocks: fx.Int32,
             i32_grid_blocks: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             arg_out: fx.Int64,
             arg_out_scale: fx.Int64,
             stream: fx.Stream,
         ):
-            # i32_max_m_blocks sizes the buffer resources; i32_grid_blocks bounds the launch to real m-blocks.
-            grid_x = arith.index_cast(T.index, i32_grid_blocks) * fx.Index(num_n_blocks)
+            # i32_max_m_blocks sizes buffer resources; i32_grid_blocks bounds the launch to real m-blocks; num_n_blocks = N_OUT//256 runtime.
+            num_n_blocks = arith.index_cast(T.index, _raw(fx.Int32(i32_hidden) // fx.Int32(256)))
+            grid_x = arith.index_cast(T.index, i32_grid_blocks) * num_n_blocks
             gemm2_kernel(
                 arg_aq,
                 arg_ascale,
@@ -845,6 +866,7 @@ def compile_gemm2_a4w4_port(
                 i32_M,
                 i32_max_m_blocks,
                 i32_inter,
+                i32_hidden,
                 arg_out,
                 arg_out_scale,
             ).launch(grid=(grid_x, 1, 1), block=(256, 1, 1), stream=stream)
@@ -864,6 +886,7 @@ def compile_gemm2_a4w4_port(
             i32_M: fx.Int32,
             i32_max_m_blocks: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             i32_kpad: fx.Int32,
             i32_npad: fx.Int32,
             arg_out: fx.Int64,
@@ -891,6 +914,7 @@ def compile_gemm2_a4w4_port(
                 i32_M,
                 i32_max_m_blocks,
                 i32_inter,
+                i32_hidden,
                 i32_kpad,
                 i32_npad,
             )
@@ -909,13 +933,15 @@ def compile_gemm2_a4w4_port(
             i32_max_m_blocks: fx.Int32,
             i32_grid_blocks: fx.Int32,
             i32_inter: fx.Int32,
+            i32_hidden: fx.Int32,
             i32_kpad: fx.Int32,
             i32_npad: fx.Int32,
             arg_out: fx.Int64,
             arg_out_scale: fx.Int64,
             stream: fx.Stream,
         ):
-            grid_x = arith.index_cast(T.index, i32_grid_blocks) * fx.Index(num_n_blocks)
+            num_n_blocks = arith.index_cast(T.index, _raw(fx.Int32(i32_hidden) // fx.Int32(256)))
+            grid_x = arith.index_cast(T.index, i32_grid_blocks) * num_n_blocks
             gemm2_kernel(
                 arg_aq,
                 arg_ascale,
@@ -928,6 +954,7 @@ def compile_gemm2_a4w4_port(
                 i32_M,
                 i32_max_m_blocks,
                 i32_inter,
+                i32_hidden,
                 i32_kpad,
                 i32_npad,
                 arg_out,
@@ -945,7 +972,7 @@ G2_CACHE = {}
 def get_g1(
     BM,
     use_nt,
-    D_HIDDEN,
+    HIDDEN_MAX,
     interleave,
     a_dtype,
     out_dtype,
@@ -956,15 +983,15 @@ def get_g1(
     BN=BN,
     has_pad=False,
 ):
-    # Cache key = the compile-time dims (inter_dim/NE/topk are runtime or host-only, not keyed).
+    # Cache key = compile-time dims only; inter_dim + model_dim/hidden are runtime (HIDDEN_MAX caps K), NE/topk host-only.
     SBM = _norm_sbm(SBM, BM)
-    key = (BM, use_nt, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave, BN, has_pad)
+    key = (BM, use_nt, HIDDEN_MAX, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave, BN, has_pad)
     launch = G1_CACHE.get(key)
     if launch is None:
         launch = compile_gemm1_a4w4_port(
             BM=BM,
             use_nt=use_nt,
-            D_HIDDEN=D_HIDDEN,
+            HIDDEN_MAX=HIDDEN_MAX,
             interleave=interleave,
             a_dtype=a_dtype,
             out_dtype=out_dtype,
@@ -979,8 +1006,10 @@ def get_g1(
     return launch
 
 
-def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, persist=False, cu_num=0, has_pad=False):
-    # Cache key = compile-time dims (inter_dim runtime; INTER_MAX caps it). topk keyed only for reduce.
+def get_g2(
+    BM, use_nt, HIDDEN_MAX, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, persist=False, cu_num=0, has_pad=False
+):
+    # Cache key = compile-time dims; inter_dim + model_dim/hidden runtime (INTER_MAX/HIDDEN_MAX cap them), topk keyed only for reduce.
     SBM = _norm_sbm(SBM, BM)
     topk_key = topk if epilog == "reduce" else 1
     cu_key = cu_num if persist else 0
@@ -992,7 +1021,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
     key = (
         BM,
         use_nt,
-        D_HIDDEN,
+        HIDDEN_MAX,
         epilog,
         INTER_MAX,
         a_dtype,
@@ -1011,7 +1040,7 @@ def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, p
         launch = compile_gemm2_a4w4_port(
             BM=BM,
             use_nt=use_nt,
-            N_OUT=D_HIDDEN,
+            HIDDEN_MAX=HIDDEN_MAX,
             epilog=epilog,
             INTER_MAX=INTER_MAX,
             a_dtype=a_dtype,
@@ -1071,10 +1100,17 @@ def mxfp4_moe_gemm1(
     import torch
 
     has_pad = model_dim_pad > 0 or inter_dim_pad > 0
+    # model_dim/hidden (contraction K) is a runtime arg; validate it host-side (K is not compile-time).
+    if D_HIDDEN % BK != 0:
+        raise AssertionError(f"D_HIDDEN (K) must be a multiple of {BK}, got {D_HIDDEN}")
+    if D_HIDDEN > HIDDEN_MAX_DEFAULT:
+        raise AssertionError(f"D_HIDDEN ({D_HIDDEN}) exceeds compile cap HIDDEN_MAX ({HIDDEN_MAX_DEFAULT})")
+    if k_wave > 1 and (D_HIDDEN // BK) % k_wave != 0:
+        raise AssertionError(f"D_HIDDEN/BK ({D_HIDDEN // BK}) must be divisible by k_wave ({k_wave})")
     launch = get_g1(
         BM,
         use_nt,
-        D_HIDDEN,
+        HIDDEN_MAX_DEFAULT,
         interleave,
         a_dtype,
         out_dtype,
@@ -1108,6 +1144,7 @@ def mxfp4_moe_gemm1(
         n_tokens,
         grid,
         D_INTER,
+        D_HIDDEN,
         *pad_args,
         inter_sorted_quant.data_ptr(),
         inter_sorted_shuffled_scale.data_ptr(),
@@ -1159,10 +1196,15 @@ def mxfp4_moe_gemm2(
     if persist and cu_num <= 0:
         cu_num = _get_cu_num()
     has_pad = inter_dim_pad > 0 or model_dim_pad > 0
+    # model_dim/hidden (gemm2 N-output) is a runtime arg; validate host-side (not compile-time).
+    if D_HIDDEN % 256 != 0:
+        raise AssertionError(f"D_HIDDEN (N_OUT) must be a multiple of 256, got {D_HIDDEN}")
+    if D_HIDDEN > HIDDEN_MAX_DEFAULT:
+        raise AssertionError(f"D_HIDDEN ({D_HIDDEN}) exceeds compile cap HIDDEN_MAX ({HIDDEN_MAX_DEFAULT})")
     launch = get_g2(
         BM,
         use_nt,
-        D_HIDDEN,
+        HIDDEN_MAX_DEFAULT,
         epilog,
         INTER_MAX_DEFAULT,
         a_dtype,
@@ -1197,6 +1239,7 @@ def mxfp4_moe_gemm2(
         max_m_blocks,
         grid_blocks,
         D_INTER,
+        D_HIDDEN,
         *pad_args,
         out.data_ptr(),
         out_scale.data_ptr(),
