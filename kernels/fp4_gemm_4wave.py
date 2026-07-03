@@ -122,10 +122,20 @@ class G2SLoaderAsm:
         # (block is always 256 -> 4 waves) rather than the runtime block_dim value.
         return _N_WAVES__4 * 1024
 
+    def set_wave_base(self, base_ptr):
+        # Precompute the wave-uniform LDS base (ptrtoint(base) + wave_id*1024) into an
+        # SGPR ONCE. _lds_base_sgpr then adds the per-buffer compile-time byte_off with
+        # scalar arithmetic, so the step-0 m0 needs NO per-load readfirstlane (was 8/
+        # iter: the m0 base came from wave_id, a VGPR, forcing readfirstlane).
+        wb = fx.Int32(fx.ptrtoint(base_ptr)) + fx.Int32(self.wave_id * 1024)
+        self._wave_base_s = _rocdl.readfirstlane(_T.i32, arith._to_raw(wb))
+
     def _lds_base_sgpr(self, lds_dst):
-        # Step-0 LDS byte base (wave-uniform). Later steps add _step_stride to m0.
-        lds_base = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(self.wave_id * 1024)
-        return _uniform_i32(lds_base)
+        # Step-0 LDS byte base (wave-uniform) = precomputed wave base (SGPR) + this
+        # buffer's compile-time byte_off. Scalar -> no readfirstlane. Later steps add
+        # _step_stride to m0.
+        m0 = fx.Int32(self._wave_base_s) + fx.Int32(lds_dst.byte_off)
+        return arith._to_raw(m0)
 
     def _voffset(self, step):
         # Per-lane global byte offset = swizzle only (loop-invariant). The K-step
@@ -689,6 +699,10 @@ def compile_fp4_gemm_4w(
         b_rsrc = _buffer_ops.create_buffer_resource(B_T, max_size=True) # why???
         a_g2s = G2SLoaderAsm(a_rsrc, gl_off_a, N_TILES_A__4, wave_id)
         b_g2s = G2SLoaderAsm(b_rsrc, gl_off_b, N_TILES_B__4, wave_id)
+        # Precompute the g2s wave-uniform LDS base into SGPR once (all 8 buffers share
+        # _base_ptr; per-buffer byte_off is compile-time) -> no per-load readfirstlane.
+        a_g2s.set_wave_base(_base_ptr)
+        b_g2s.set_wave_base(_base_ptr)
         a_s2r = S2RLoaderFp4(wave_i__0_1, N_TILES_A__4)
         b_s2r = S2RLoaderFp4(wave_j__0_1, N_TILES_B__4)
         store_c = StoreCFp4(C, c_m, c_n, mfma.idx, N_TILES_A__4, N_TILES_B__4, mn_aligned=mn_aligned)
