@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-03T16:12:45Z",
+ "updated": "2026-07-03T16:27:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -111,20 +111,20 @@
    "branch": "worktree-llvm-pass-pipeline",
    "event": "pull_request",
    "title": "feat(compiler): Add custom LLVM pass pipeline and plugin support to JIT",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28653177354",
    "created_at": "2026-07-03T09:59:24Z",
-   "updated_at": "2026-07-03T16:11:41Z",
+   "updated_at": "2026-07-03T16:25:35Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-03T16:11:41Z",
-     "completed_at": null,
+     "completed_at": "2026-07-03T16:25:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28653177354/job/84976159353"
     },
     {
@@ -197,11 +197,11 @@
    "branch": "mxfp4-moe-gemm",
    "event": "pull_request",
    "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28651223271",
    "created_at": "2026-07-03T09:21:54Z",
-   "updated_at": "2026-07-03T09:23:10Z",
+   "updated_at": "2026-07-03T16:25:43Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -216,9 +216,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-03T09:23:10Z",
+     "started_at": "2026-07-03T16:25:42Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28651223271/job/84969693523"
     },
