@@ -684,36 +684,26 @@ def pa_decode_tile(
     query_group_size = num_q_heads // num_kv_heads
     max_blocks_per_seq = block_tables.shape[1]
 
-    # Choose the number of context partitions (grid.z).  Split only enough to fill
-    # the GPU: when batch*kv_heads already covers the CUs, extra partitions just add
-    # partial-write/read traffic and hurt (so high batch -> few partitions).  Also
-    # don't split finer than ~512 tokens.  Bucket to powers of two to bound JIT
-    # recompiles, and bound by block-table capacity (no device sync).
-    try:
-        from aiter.jit.utils.chip_info import get_cu_num
+    # Choose the number of context partitions (grid.z) via the same recommender
+    # production uses (mirrors aiter's Gluon `get_recommended_splits`, assuming
+    # occupancy=2): scales purely off (batch, kv_heads), clamped to [4, 8],
+    # deliberately oversubscribing the CUs at high batch — a single coarse CTA
+    # per sequence (NP=1) only reaches ~1.6 waves/SIMD vs the ~3 the hardware
+    # holds. Clamp to the block-table's tile count so we never split finer than
+    # one 256-token compute block.
+    #
+    # NOTE: this recommender is tuned for production's persistent worklist
+    # scheduler (dynamic load-balancing across CTAs), not this kernel's static
+    # per-partition split. A direct NP sweep on this kernel found it 4-11%
+    # slower than a bespoke heuristic across b8..b128 (ctx16384) — its [4, 8]
+    # floor overshoots this kernel's measured sweet spot (NP=3 at high batch;
+    # NP=2/4/8 are measured local traps). Kept anyway for consistency with the
+    # production recommender rather than a second bespoke formula.
+    from kernels.pa_decode_fp8 import get_recommended_splits
 
-        num_cus = int(get_cu_num())
-    except Exception:
-        num_cus = 304
     ctx_max = max_blocks_per_seq * block_size
-    base_ctas = max(1, num_seqs * num_kv_heads)
     num_tiles = max(1, ctx_max // 256)  # 256-token compute blocks per sequence
-    # Two pressures on the partition count (grid.z):
-    #  - npart_by_occ: enough partitions to fill the CUs at LOW batch (>=1 CTA/CU).
-    #  - npart_by_gran: even at HIGH batch (base_ctas >= CUs) keep the per-CTA work
-    #    fine enough (~24 tiles/partition) so the grid oversubscribes the CUs like
-    #    production's persistent scheduler — one coarse CTA per sequence (NP=1)
-    #    only reaches ~1.6 waves/SIMD and leaves 2/3 of the occupancy empty; a few
-    #    partitions push it toward the ~3 waves/SIMD the hardware holds (measured
-    #    b128 ctx16384 -11%, b96 -26%, b256 -16%, no regression at low batch).
-    npart_by_occ = (num_cus + base_ctas - 1) // base_ctas
-    npart_by_gran = (num_tiles + 23) // 24
-    npart_by_ctx = num_tiles  # don't split finer than ~1 compute block
-    npart_want = max(1, min(max(npart_by_occ, npart_by_gran), npart_by_ctx))
-    num_partitions = 1
-    for cand in (1, 2, 3, 4, 6, 8, 16, 32, 64):
-        if cand <= npart_want:
-            num_partitions = cand
+    num_partitions = max(1, min(get_recommended_splits(num_seqs, num_kv_heads), num_tiles))
     GS = query_group_size
 
     compiled = compile_pa_decode_tile(
