@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-03T01:03:17Z",
+ "updated": "2026-07-03T03:50:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28634562835,
+   "pr": 753,
+   "commit": "2a991b46a86a9a3b08fc1428ed55274a25b483ed",
+   "branch": "mxfp4-moe-gemm",
+   "event": "pull_request",
+   "title": "feat(moe): layout-API MXFP4 (a4w4/a8w4) MoE gemm",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28634562835",
+   "created_at": "2026-07-03T02:32:19Z",
+   "updated_at": "2026-07-03T03:48:53Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-03T02:33:54Z",
+     "completed_at": "2026-07-03T03:20:40Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28634562835/job/84918239485"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-03T02:33:54Z",
+     "completed_at": "2026-07-03T03:48:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28634562835/job/84918239498"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-03T02:33:45Z",
+     "completed_at": "2026-07-03T02:50:04Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28634562835/job/84918239689"
+    }
+   ]
+  },
   {
    "run_id": 28616216288,
    "pr": 788,
@@ -1473,49 +1516,6 @@
      "started_at": "2026-07-01T10:24:09Z",
      "completed_at": "2026-07-01T11:35:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28510618689/job/84510055955"
-    }
-   ]
-  },
-  {
-   "run_id": 28509474261,
-   "pr": null,
-   "commit": "cfb4273bec00184b37609660a06c962f0c2c7365",
-   "branch": "main",
-   "event": "push",
-   "title": "R1: wire xcd_swizzle into preshuffle_gemm + fix xcd_remap_bx_by (#782)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261",
-   "created_at": "2026-07-01T10:00:55Z",
-   "updated_at": "2026-07-01T11:07:28Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-01T10:41:25Z",
-     "completed_at": "2026-07-01T10:58:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261/job/84506143389"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T10:02:36Z",
-     "completed_at": "2026-07-01T11:07:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261/job/84506143398"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-01T10:02:39Z",
-     "completed_at": "2026-07-01T11:07:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28509474261/job/84506143450"
     }
    ]
   }
