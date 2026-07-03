@@ -685,25 +685,30 @@ def pa_decode_tile(
     max_blocks_per_seq = block_tables.shape[1]
 
     # Choose the number of context partitions (grid.z) via the same recommender
-    # production uses (mirrors aiter's Gluon `get_recommended_splits`, assuming
-    # occupancy=2): scales purely off (batch, kv_heads), clamped to [4, 8],
-    # deliberately oversubscribing the CUs at high batch — a single coarse CTA
-    # per sequence (NP=1) only reaches ~1.6 waves/SIMD vs the ~3 the hardware
-    # holds. Clamp to the block-table's tile count so we never split finer than
-    # one 256-token compute block.
+    # production uses directly (mirrors aiter's Gluon `get_recommended_splits`,
+    # assuming occupancy=2): scales purely off (batch, kv_heads), clamped to
+    # [4, 8], deliberately oversubscribing the CUs at high batch — a single
+    # coarse CTA per sequence (NP=1) only reaches ~1.6 waves/SIMD vs the ~3 the
+    # hardware holds.
     #
-    # NOTE: this recommender is tuned for production's persistent worklist
-    # scheduler (dynamic load-balancing across CTAs), not this kernel's static
-    # per-partition split. A direct NP sweep on this kernel found it 4-11%
-    # slower than a bespoke heuristic across b8..b128 (ctx16384) — its [4, 8]
-    # floor overshoots this kernel's measured sweet spot (NP=3 at high batch;
-    # NP=2/4/8 are measured local traps). Kept anyway for consistency with the
-    # production recommender rather than a second bespoke formula.
+    # NOTE: unlike the tile's earlier bespoke heuristic, this does NOT clamp to
+    # the block-table's tile count, so short contexts can get more partitions
+    # than there are 256-token compute blocks. That's safe — `scf.for` gives a
+    # partition whose tile range starts past `num_tiles` zero iterations (a
+    # harmless empty (m=-inf, l=0) contribution to the reduce) rather than
+    # undefined behavior — but it costs real launch + reduce-kernel overhead
+    # for genuinely tiny contexts (measured b=1 ctx=256, 1 real tile: +15%
+    # from the wasted CTAs/reduce work; b=3 ctx=1024, 4 tiles: +1.3%). This
+    # recommender is also tuned for production's persistent worklist scheduler
+    # (dynamic load-balancing across CTAs), not this kernel's static
+    # per-partition split — a direct NP sweep on this kernel found it 4-11%
+    # slower than a bespoke heuristic across b8..b128 (ctx16384) because its
+    # [4, 8] floor overshoots this kernel's measured sweet spot (NP=3 at high
+    # batch; NP=2/4/8 are measured local traps). Kept anyway for consistency
+    # with the production recommender rather than a second bespoke formula.
     from kernels.pa_decode_fp8 import get_recommended_splits
 
-    ctx_max = max_blocks_per_seq * block_size
-    num_tiles = max(1, ctx_max // 256)  # 256-token compute blocks per sequence
-    num_partitions = max(1, min(get_recommended_splits(num_seqs, num_kv_heads), num_tiles))
+    num_partitions = get_recommended_splits(num_seqs, num_kv_heads)
     GS = query_group_size
 
     compiled = compile_pa_decode_tile(
