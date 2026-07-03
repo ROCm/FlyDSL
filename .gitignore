@@ -65,38 +65,10 @@ Thumbs.db
 docs/_build/
 python/flydsl/_mlir
 
-*.hsaco
-core
-core.gpu
-*.mlir
-*.ll
-*.out
-*.bc
-*.stderr
-*.stdout
-
-# Profiler / ATT trace outputs and packaged traces
-*.zip
-profiler_traces/
-profiler_traces_grid/
-.rocprofv3/
-resource_inspect/*_dump/
-resource_inspect/aiter_*/
-resource_inspect/bm16_*/
-
-# Agent / tooling scratch
-.agents/
-codexhook.sh
-
-# Scratch / WIP experiments and handoff notes (not for tracking)
-experiments/
-handoff.md
-handoff_moe_gemm1.md
-handoff_fp4_scale.md
-resource_inspect/snapshots/
-scripts/run_bf16_gemm_att.sh
-
 # Benchmark/accuracy CSVs emitted by tests/kernels harnesses
 fmha_perf_*.csv
 run_pa_decode_ps_test.*.csv
 .humanize/
+
+# rocprofv3 raw counter/trace output
+.rocprofv3/
