@@ -149,11 +149,7 @@ def bscale_copy_atom():
 
 
 def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL, num_records_bytes=None):
-    """Layout view over preshuffled B for one N-row tile; slice -> i32<4:1> (16B=32 fp4).
-
-    num_records_bytes (has_pad OOB pad-skip): size the per-16N-tile buffer to the REAL K so fully-pad
-    128-K halves load OOB -> 0 (clean per-half cut: half stride 256 i32 > within-half max 255).
-    None -> max_size=False (cosize, byte-identical default; AC-3)."""
+    """Layout view over preshuffled B for one N-row tile; slice -> i32<4:1> (16B=32 fp4). num_records_bytes (has_pad pad-skip) sizes to REAL K; None -> max_size=False byte-identical default."""
     col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(col_base)
@@ -167,10 +163,7 @@ def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL, num_records_bytes=None):
 
 
 def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64, num_records_bytes=None):
-    """Layout view over e8m0 B-scale for one n-pack word; slice -> i32<1:1> scale word.
-
-    num_records_bytes (has_pad OOB pad-skip): size to the 256-K-aligned real extent (per-256-K-tile
-    cut). None -> max_size=False (byte-identical default; AC-3)."""
+    """Layout view over e8m0 B-scale for one n-pack word; slice -> i32<1:1> scale word. num_records_bytes (has_pad pad-skip) sizes to real extent; None -> max_size=False byte-identical default."""
     base_dw = rocdl.readfirstlane(T.i32, _raw(base_dw))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(base_dw)
@@ -243,11 +236,7 @@ def issue_a_ds_read_dt(
 def mma_one_j(
     J, in_b, sa, sb, bq_frags_kt, is_f8, cbsz_a, a_vals, a_frags, accm, c_frags, atoms, i0=0, single_rg=False, rg_off=0
 ):
-    """One J-cluster (4 scaled MFMAs) for a 32-row A-scale group (row-groups i0, i0+1); fp4 gemm_mma / fp8 raw mfma_scale.
-
-    sa: 32-row A-scale reg (opsel_a 0..3 picks k-half x row-group byte). i0: first 16-row group (BM32:0; BM64:{0,2}).
-    single_rg (BM16): single 16-row group sharing sa with sibling block; rg_off (m_block_idx&1) picks its byte, 2 MFMAs only.
-    """
+    """One J-cluster (4 scaled MFMAs) for a 32-row A-scale group (row-groups i0, i0+1); fp4 gemm_mma / fp8 raw mfma_scale. sa: 32-row A-scale reg. single_rg (BM16): single 16-row group, rg_off picks its byte, 2 MFMAs."""
     if const_expr(single_rg):
         if const_expr(is_f8):
             bJ0 = Vec(bq_frags_kt[J][0].load())
@@ -465,12 +454,7 @@ def gemm1_body_v2(
             )
             voffset = (lane_col ^ mask) + cached_actual_row[g] * K_BYTES
             off = fx.Int32(slot * (BM * KH_TILE_A)) + lds_row * KH_TILE_A
-            # v_e = (voffset + kt_abs*KH_TILE_A)//4. Both terms are multiples of 4
-            # (lane_col/mask multiples of 8; cached_row*K_BYTES a multiple of 128;
-            # KH_TILE_A=128), so split the divide: the voffset//4 part is loop-
-            # invariant and KH_TILE_A//4 is a compile-time constant. This hoists the
-            # per-tile signed-division dance (runtime K_BYTES makes voffset//4
-            # divisibility unprovable) out of the K loop -> only kt_abs*32 varies.
+            # split divide: hoist loop-invariant voffset//4 out of K loop (KH_TILE_A//4 const), only kt_abs*32 varies.
             v_e = voffset // 4 + kt_abs * fx.Int32(KH_TILE_A // 4)  # per-lane i32-elem index
             fx.copy(
                 a_gather_atom,
@@ -761,11 +745,7 @@ def gemm1_body_v2(
                     guard_stream=True,
                 )
     else:
-        # fp8: accm is raw f32x4 SSA (cannot escape an scf.if), so the tail stays a rolled scf.for.
-        # UNROLL is a multiple of kAStages, so full_tiles%kAStages==0 -> the first tail slot is 0
-        # (read) / kStages%kAStages (write). Carry both slots as loop values that advance +1 with a
-        # cheap compare-select wrap, so the tail *selects* the slot instead of re-doing the runtime
-        # (full_tiles+kt_iv)%kAStages divide (the s_mul_hi_i32 0x55555556 dance) every iteration.
+        # fp8: accm raw f32x4 SSA (cannot escape scf.if) so tail stays a rolled scf.for; carry slots as +1-with-wrap loop values to avoid the per-iter %kAStages divide.
         rs0 = fx.Int32(0)
         ws0 = fx.Int32(kStages % kAStages)
         nSlots = len(results)
@@ -1233,8 +1213,6 @@ def gemm2_body_v2(
                 c_frags[i][J].store(zero4)
 
     # Runtime-trip scf.for K-loop: stream A->LDS (triple-buffered) + B per tile; carry C / accm.
-    aStagesC = aStages
-
     def load_c_carry():
         if const_expr(is_f8_a):
             return [accm[i][J] for i in range(kMChunks) for J in range(4)]
@@ -1257,10 +1235,10 @@ def gemm2_body_v2(
             store_c_carry(state)
             kt_rt = fx.Int32(kt_iv)
             gpu.barrier()
-            issue_a_ds_read(kt_rt % fx.Int32(aStagesC))
+            issue_a_ds_read(kt_rt % fx.Int32(aStages))
             nxt = kt_rt + fx.Int32(kStages)
             if nxt < K_TILES_RT:
-                issue_a_load_lds(nxt % fx.Int32(aStagesC), nxt)
+                issue_a_load_lds(nxt % fx.Int32(aStages), nxt)
             bqf, bsf = stream_b_tile(kt_rt)
             sa = load_a_scale_tile(kt_rt)
             mfma_cluster(bqf, bsf, sa)
@@ -1364,10 +1342,10 @@ def gemm2_body_v2(
             if const_expr(g2_bhoist):
                 prefetch_next_b(kt_rt)
             gpu.barrier()
-            issue_a_ds_read(kt_rt % fx.Int32(aStagesC))
+            issue_a_ds_read(kt_rt % fx.Int32(aStages))
             nxt_a = kt_rt + fx.Int32(kStages)
             if nxt_a < K_TILES_RT:
-                issue_a_load_lds(nxt_a % fx.Int32(aStagesC), nxt_a)
+                issue_a_load_lds(nxt_a % fx.Int32(aStages), nxt_a)
             # A-scale from the prefetch carry (g2_ascale_pf) or loaded synchronously here.
             if const_expr(g2_ascale_pf):
                 sa = [_raw(Vec(cur_saf[sub].load())[0]) for sub in range_constexpr(kScaleSubBlocks)]

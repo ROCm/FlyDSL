@@ -166,13 +166,7 @@ _TINYM_BN64_MAX_TOK = {
 
 
 def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=False):
-    """Host-side per-(shape,token) config picker -> (BM, epilog, bm_stage1, persist, bn, k_wave).
-
-    BM: stage2 tile (CSV block_m clamped <=64). epilog in {'atomic','reduce'}. bm_stage1: 128 for
-    _STAGE1_BM128_MIN_TOK families (allow_bm128; caller uses SBM=128) else BM. persist: fp4 large-M
-    (_PERSIST_MIN_TOK). bn,k_wave: (64,4) for _TINYM_BN64_MAX_TOK else (256,1). Unlisted families ->
-    default (32,'atomic',32,False,256,1); unlisted tokens snap to the nearest lower bucket.
-    """
+    """Host-side per-(shape,token) config picker -> (BM, epilog, bm_stage1, persist, bn, k_wave); unlisted families -> default (32,'atomic',32,False,256,1)."""
     sig = (model_dim, inter_dim, experts)
     fam = _AITER_PIPE_TABLE.get(sig)
     if fam is None:
@@ -196,9 +190,7 @@ def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=
 
 
 def gemm1_use_nt(experts, topk, tokens, bm_stage1):
-    """Reuse-aware gemm1 B-weight cache policy: nt (stream) when <=1 m-block per active expert
-    (single-use weights), else cached (reuse across blocks). Metric = ceil(slots/active)/bm_stage1.
-    """
+    """Reuse-aware gemm1 B-weight cache policy: nt (stream) when <=1 m-block per active expert, else cached."""
     slots = tokens * topk
     active = min(slots, experts)
     if active <= 0:
@@ -534,9 +526,7 @@ def compile_gemm1_a4w4_port(
 
 # ---- gemm2 (down-proj) compile ----
 def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
-    """ck_tile GemmSpatiallyLocalTilePartitioner::GetOutputTileIndex: 1D block id -> spatially-local
-    (m_block_idx, n_block_idx), bijection over [0,M0*N0). block_1d_id/M0 runtime; N0/group_num/m01 compile-time ints.
-    """
+    """ck_tile GemmSpatiallyLocalTilePartitioner::GetOutputTileIndex: 1D block id -> spatially-local (m_block_idx, n_block_idx). block_1d_id/M0 runtime; N0/group_num/m01 compile-time."""
     gn = fx.Int32(group_num)
     n0 = fx.Int32(N0)
     m01c = fx.Int32(m01)
@@ -592,9 +582,7 @@ def compile_gemm2_a4w4_port(
     g2_ascale_pf=None,
     g2_spart=None,
 ):
-    """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) weighted atomic-fadd; 'reduce'
-    non-atomic store into out[token_id*topk+slot] (host reduces over topk). inter_dim runtime
-    (multiple of BK, <= INTER_MAX). SBM: None -> SBM==BM (byte-identical), else a multiple of BM."""
+    """Compile gemm2 a4w4 down-proj; epilog 'atomic' (weighted atomic-fadd) or 'reduce' (store into out[token_id*topk+slot]). inter_dim runtime; SBM None -> SBM==BM byte-identical."""
     SBM = _norm_sbm(SBM, BM)
     if BM not in (16, 32, 64, 128) or epilog not in ("atomic", "reduce"):
         raise AssertionError(
@@ -1090,13 +1078,7 @@ def mxfp4_moe_gemm1(
     inter_dim_pad=0,
     stream=None,
 ):
-    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers caller-allocated.
-
-    model_dim_pad>0 (K contraction pad) / inter_dim_pad>0 (per-half N-output pad) enable the has_pad
-    weight-OOB pad-skip variant (fully-pad weight tiles load OOB -> 0); both 0 -> byte-identical default.
-    use_nt: B cache policy (False cached default -> reuse across m-blocks; True nt for no reuse).
-    n_sorted_padded (cumsum[0]): bounds the grid to real work; None -> worst-case gemm1_grid.
-    """
+    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted). model_dim_pad/inter_dim_pad>0 enable has_pad pad-skip (both 0 -> byte-identical); n_sorted_padded bounds the grid (None -> worst case)."""
     import torch
 
     has_pad = model_dim_pad > 0 or inter_dim_pad > 0
@@ -1183,14 +1165,7 @@ def mxfp4_moe_gemm2(
     model_dim_pad=0,
     stream=None,
 ):
-    """Stage-2 down-proj gemm. epilog='atomic' (default): weighted atomic.fadd into pre-zeroed
-    out[tokens,H]. epilog='reduce': non-atomic store into out[token_id*topk+slot] (host reduces topk).
-
-    inter_dim_pad>0 (K contraction pad) / model_dim_pad>0 (N-output pad) enable the has_pad weight-OOB
-    pad-skip (fully-pad w2 tiles load OOB -> 0; N-skip is PERF-ONLY); both 0 -> byte-identical default.
-    n_sorted_padded (cumsum[0]) bounds the grid to real work (max_sorted still sizes buffers); None -> full.
-    persist (aiter `_persist`): fixed cu_num m-slot grid, each block grid-strides m-tiles. Default OFF.
-    """
+    """Stage-2 down-proj gemm; epilog 'atomic' (weighted atomic.fadd) or 'reduce' (store into out[token_id*topk+slot]). inter_dim_pad/model_dim_pad>0 enable has_pad pad-skip (both 0 -> byte-identical); persist = fixed cu_num m-slot grid (default OFF)."""
     import torch
 
     if persist and cu_num <= 0:
