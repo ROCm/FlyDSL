@@ -692,16 +692,9 @@ def gemm1_body_v2(
         issue_b_load_j(CUR, fx.Int32(0), j)
     issue_b_scale_load(CUR, fx.Int32(0))
 
-    # One K-tile body (compile-time-constant A-LDS slots + B double-buffer index): ds-read A tile
-    # kt, stream A tile kt+kStages (guarded), and prefetch tile kt+1's B/B-scale into the opposite
-    # buffer while tile kt's MMAs run. `cur_buf`/`nxt_buf` are Python-const (0/1) so no runtime mod
-    # and no runtime slot-multiply is emitted; this restores the compile-time straight-line schedule
-    # (cross-tile load/MMA overlap) that the tile-by-tile rolled loop lost. Runtime-guarded pieces:
-    #   need_stream (kt+kStages < KT): drop the A-stream past the last tile.
-    #   nxt_b: clamp the tile+1 B prefetch to the last valid tile (view is HIDDEN_MAX-sized).
+    # One K-tile body; const_slots -> Python-const A-slots/B-buffers (no runtime mod) restore the compile-time schedule.
     def process_tile(kt_rt, read_slot, write_slot, cur_buf, nxt_buf, *, const_slots, guard_stream):
         gpu.barrier()
-        # const_slots: read/write slots are Python ints -> constant LDS offsets (no runtime mod/multiply).
         issue_a_ds_read(read_slot if const_expr(const_slots) else kt_rt % fx.Int32(kAStages))
         asc_cur = issue_a_scale_ds_read(kt_rt)
         nxt = kt_rt + fx.Int32(kStages)
@@ -723,12 +716,7 @@ def gemm1_body_v2(
             rocdl.sched_barrier(0)
         issue_b_scale_load(nxt_buf, nxt_b)
 
-    # Fixed-factor unroll of the runtime K-loop. UNROLL = LCM(kAStages, 2): a multiple of kAStages so
-    # every A-LDS slot (kt%kAStages, (kt+kStages)%kAStages) is a compile-time constant across the group,
-    # and even so the B double-buffer parity returns to CUR at each group boundary (carry stays CUR-only).
-    # Outer trip = KT/UNROLL is runtime (model_dim stays runtime); a runtime remainder loop handles the
-    # tail < UNROLL tiles with the original (slot-mod) body. All full-group tiles keep kt+kStages<KT
-    # because kStages < UNROLL and the remainder owns the last UNROLL tiles.
+    # Fixed-factor unroll UNROLL=LCM(kAStages,2): A-slots const + B parity back to CUR per group; trip stays runtime.
     UNROLL = kAStages * 2 if (kAStages % 2) else kAStages  # 6 for kAStages=3
     nC = kMChunks * NJ
     n_full = rocdl.readfirstlane(T.i32, (KT_PER_KW_RT // fx.Int32(UNROLL)))
@@ -752,11 +740,7 @@ def gemm1_body_v2(
     # Remainder: the last (KT % UNROLL) tiles.
     rem = KT_PER_KW_RT - full_tiles
     if const_expr(not is_f8_a):
-        # fp4: C accumulates in place in register-memory fragments (a side effect that survives an
-        # scf.if), so statically unroll the tail and per-tile runtime-guard it (i < rem). full_tiles
-        # is a multiple of UNROLL (hence of kAStages), so tile full_tiles+i keeps the constant A-slot
-        # i%kAStages / B-buffer i%2 -- the fast, mod-free body -- across the whole tail (guard_stream
-        # drops the past-the-end A-stream on the final tiles).
+        # fp4: C accumulates in place (survives scf.if) -> unroll the tail, per-tile guard (i < rem), slots const.
         store_carry(results[:nC])
         b_restore(CUR, results[nC:])
         for i in range_constexpr(UNROLL - 1):
