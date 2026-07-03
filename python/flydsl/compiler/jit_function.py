@@ -1016,7 +1016,7 @@ class MlirCompiler:
 
         llvm_ir = _extract_llvm_ir(module)
         if llvm_ir is None:
-            raise FlyDSLCompileError(
+            raise DSLCompileError(
                 "llvm_pass_pipeline is set but the device LLVM IR could not be extracted from the gpu.module."
             )
 
@@ -1063,7 +1063,7 @@ class MlirCompiler:
 
         llvm_ir = _extract_llvm_ir(module)
         if llvm_ir is None:
-            raise FlyDSLCompileError(
+            raise DSLCompileError(
                 "llvm_codegen_* is set but the device LLVM IR could not be extracted from the gpu.module."
             )
 
