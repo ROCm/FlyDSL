@@ -626,7 +626,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str):
     return launch_rmsnorm_bwd
 
 
-def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
+def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
@@ -643,18 +643,24 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
         Gamma: fx.Tensor,
         Output: fx.Tensor,
         ResidualOut: fx.Tensor,
+        Rstd: fx.Tensor,
     ):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
         elem_dtype = dtype_to_elem_type(dtype_str)
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
         n_float = float(N)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
         s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
+
+        if const_expr(store_rstd):
+            Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
+            rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+            rstd_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
         def wave_reduce_add(x):
             w = x
@@ -751,6 +757,10 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
+            if const_expr(store_rstd):
+                if tid == 0:
+                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+
             # Pass 2: normalize + gamma + store (reuse cached added values)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
@@ -809,6 +819,10 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
+            if const_expr(store_rstd):
+                if tid == 0:
+                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
@@ -820,6 +834,28 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
                     _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
 
+    if store_rstd:
+
+        @flyc.jit
+        def launch_fused_add_rmsnorm(
+            Input: fx.Tensor,
+            ResidualIn: fx.Tensor,
+            Gamma: fx.Tensor,
+            Output: fx.Tensor,
+            ResidualOut: fx.Tensor,
+            Rstd: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            launcher = fused_add_rmsnorm_kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Rstd)
+            launcher.launch(
+                grid=(m_in, 1, 1),
+                block=(BLOCK_THREADS, 1, 1),
+                stream=stream,
+            )
+
+        return launch_fused_add_rmsnorm
+
     @flyc.jit
     def launch_fused_add_rmsnorm(
         Input: fx.Tensor,
@@ -830,7 +866,7 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        launcher = fused_add_rmsnorm_kernel(Input, ResidualIn, Gamma, Output, ResidualOut)
+        launcher = fused_add_rmsnorm_kernel(Input, ResidualIn, Gamma, Output, ResidualOut, Gamma)
         launcher.launch(
             grid=(m_in, 1, 1),
             block=(BLOCK_THREADS, 1, 1),
@@ -838,6 +874,177 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
         )
 
     return launch_fused_add_rmsnorm
+
+
+def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str):
+    """Fused-add / prenorm RMSNorm backward: grid=(M,), one block per row.
+
+    Inputs: Added (= residual_out from fwd), Gamma, DY (= dout), DResidualOut
+    (grad flowing into residual_out from downstream), Rstd.
+
+    With a_hat = Added*rstd, wdy = dy*gamma, c1 = mean_N(a_hat*wdy):
+      d_added = (wdy - a_hat*c1) * rstd          (gradient through the norm)
+      total   = d_added + dresidual_out_elem     (downstream residual grad)
+    Since added = x + residual_in, dx == dresidual == total unconditionally, so
+    the kernel writes `total` to DX only; the python wrapper returns dx as both
+    grads (aliased). dweight = sum_rows(dy * a_hat) (fp32 atomicAdd).
+
+    eps is baked into Rstd by the forward, so it is not needed here.
+
+    DResidualOut is ALWAYS a real tensor: the python wrapper passes a zero
+    tensor when the caller has no downstream residual grad (pure-norm case).
+    This keeps the kernel branch-free wrt None.
+
+    Perf follow-ups (deferred; correctness-complete): generic scalar path only —
+    a vectorized fast path + caching between passes would cut global traffic.
+    """
+    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
+    elem_bits = 32 if dtype_str == "f32" else 16
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
+
+    @flyc.kernel
+    def fused_add_rmsnorm_bwd_kernel(
+        Added: fx.Tensor,
+        Gamma: fx.Tensor,
+        DY: fx.Tensor,
+        DResidualOut: fx.Tensor,
+        Rstd: fx.Tensor,
+        DX: fx.Tensor,
+        DWeight: fx.Tensor,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        fm_fast = arith.FastMathFlags.fast
+        n_float = float(N)
+        c_zero_f = fx.Float32(0.0)
+
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
+
+        def wave_reduce_add(x):
+            w = x
+            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
+                w = w.addf(peer, fastmath=fm_fast)
+            return w
+
+        def block_reduce_add(val):
+            if const_expr(RED_SLOTS == 1):
+                return wave_reduce_add(val)
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            w = wave_reduce_add(val)
+            if lane == 0:
+                fx.memref_store(w, s_red, wave)
+            gpu.barrier()
+            if wave == 0:
+                in_range = lane < RED_SLOTS
+                lane_safe = in_range.select(lane, 0)
+                v = fx.memref_load(s_red, lane_safe)
+                ww = in_range.select(v, c_zero_f)
+                ww = wave_reduce_add(ww)
+                if lane == 0:
+                    fx.memref_store(ww, s_red, 0)
+            gpu.barrier()
+            return fx.memref_load(s_red, 0)
+
+        Added_buf = fx.rocdl.make_buffer_tensor(Added)
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+        DY_buf = fx.rocdl.make_buffer_tensor(DY)
+        DResidualOut_buf = fx.rocdl.make_buffer_tensor(DResidualOut)
+        Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
+        DX_buf = fx.rocdl.make_buffer_tensor(DX)
+
+        row_added = fx.slice(Added_buf, (bid, None))
+        row_dy = fx.slice(DY_buf, (bid, None))
+        row_dres_out = fx.slice(DResidualOut_buf, (bid, None))
+        row_dx = fx.slice(DX_buf, (bid, None))
+
+        copy_atom_s = fx.make_copy_atom(
+            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+            elem_bits,
+        )
+        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+
+        added_div = fx.logical_divide(row_added, fx.make_layout(1, 1))
+        dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
+        dres_out_div = fx.logical_divide(row_dres_out, fx.make_layout(1, 1))
+        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+        dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
+        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+
+        rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
+
+        # Pass 1: c1 = mean( a_hat * wdy ) = mean( (added*rstd) * (dy*gamma) )
+        thread_acc = c_zero_f
+        for base in range_constexpr(0, N, BLOCK_THREADS):
+            idx = tid + base
+            is_valid = idx < N
+            idx_safe = is_valid.select(idx, 0)
+            a_e = _load_scalar(copy_atom_s, elem_dtype, added_div, idx_safe)
+            dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
+            g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
+            a = a_e if dtype_str == "f32" else a_e.to(fx.Float32)
+            dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+            g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+            a_hat = a * rstd
+            wdy = dy * g
+            prod = a_hat * wdy
+            thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
+
+        sum_prod = block_reduce_add(thread_acc)
+        c1 = sum_prod / n_float
+
+        # Pass 2: d_added = (wdy - a_hat*c1) * rstd ; total = d_added + dres_out
+        #         store total -> DX and DResidual ; dw = dy*a_hat (atomicAdd fp32)
+        for base in range_constexpr(0, N, BLOCK_THREADS):
+            idx = tid + base
+            if idx < N:
+                a_e = _load_scalar(copy_atom_s, elem_dtype, added_div, idx)
+                dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx)
+                g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                dres_out_e = _load_scalar(copy_atom_s, elem_dtype, dres_out_div, idx)
+                a = a_e if dtype_str == "f32" else a_e.to(fx.Float32)
+                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                dres_out = dres_out_e if dtype_str == "f32" else dres_out_e.to(fx.Float32)
+                a_hat = a * rstd
+                wdy = dy * g
+                d_added = (wdy - a_hat * c1) * rstd
+                total = d_added + dres_out
+                total_e = total if dtype_str == "f32" else total.to(elem_dtype)
+                _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, total_e)
+
+                dw = dy * a_hat
+                ptr = get_llvm_ptr(DWeight, idx, 4)
+                llvm.AtomicRMWOp(
+                    llvm.AtomicBinOp.fadd,
+                    ptr,
+                    dw.ir_value(),
+                    llvm.AtomicOrdering.monotonic,
+                    syncscope="agent",
+                    alignment=4,
+                )
+
+    @flyc.jit
+    def launch_fused_add_rmsnorm_bwd(
+        Added: fx.Tensor,
+        Gamma: fx.Tensor,
+        DY: fx.Tensor,
+        DResidualOut: fx.Tensor,
+        Rstd: fx.Tensor,
+        DX: fx.Tensor,
+        DWeight: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        launcher = fused_add_rmsnorm_bwd_kernel(Added, Gamma, DY, DResidualOut, Rstd, DX, DWeight)
+        launcher.launch(grid=(m_in, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    return launch_fused_add_rmsnorm_bwd
 
 
 def _build_rmsnorm_quant_module(
@@ -1709,4 +1916,135 @@ if torch is not None:
         assert x.shape[-1] == N, f"x last dim {x.shape[-1]} != weight length {N}"
         x_flat = x.reshape(-1, N)
         out_flat = RMSNormFunction.apply(x_flat, weight, eps)
+        return out_flat.reshape(x.shape)
+
+    # -----------------------------------------------------------------
+    # Fused-add / prenorm RMSNorm wrappers + autograd (PR 2).
+    # -----------------------------------------------------------------
+    _FUSED_ADD_FWD_CACHE: dict = {}
+    _FUSED_ADD_BWD_CACHE: dict = {}
+
+    def _get_fused_add_fwd_compiled(x, residual, weight, out, residual_out, rstd, M, N, dtype_str, store_rstd, eps, stream):
+        key = (N, dtype_str, store_rstd, float(eps), x.device)
+        entry = _FUSED_ADD_FWD_CACHE.get(key)
+        if entry is None:
+            launch_fn = build_fused_add_rmsnorm_module(N, dtype_str, store_rstd=store_rstd, eps=eps)
+            if store_rstd:
+                compiled = flyc.compile(launch_fn, x, residual, weight, out, residual_out, rstd, M, stream)
+            else:
+                compiled = flyc.compile(launch_fn, x, residual, weight, out, residual_out, M, stream)
+            _FUSED_ADD_FWD_CACHE[key] = compiled
+            entry = compiled
+        return entry
+
+    def fused_add_rmsnorm_fwd(x, residual, weight, eps=EPS, store_rstd=False):
+        """Forward fused-add RMSNorm. Returns (out, residual_out, rstd).
+
+        residual_out = x + residual ; out = residual_out * rstd * weight.
+        eps is baked into the kernel.
+        """
+        assert x.dim() == 2, "fused_add_rmsnorm_fwd expects a 2D (M, N) input"
+        assert (
+            x.is_contiguous() and residual.is_contiguous() and weight.is_contiguous()
+        ), "fused_add_rmsnorm_fwd expects contiguous inputs"
+        assert x.shape == residual.shape, "x and residual must have the same shape"
+        # The kernel reads x/residual/weight with a single elem dtype derived from x;
+        # a mismatch would silently bit-reinterpret residual/weight bytes.
+        assert (
+            x.dtype == residual.dtype == weight.dtype
+        ), f"x/residual/weight dtypes must match, got {x.dtype}/{residual.dtype}/{weight.dtype}"
+        M, N = x.shape
+        out = torch.empty_like(x)
+        residual_out = torch.empty_like(x)
+        rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
+        dtype_str = _torch_dtype_to_str(x.dtype)
+        with torch.cuda.device(x.device):
+            stream = torch.cuda.current_stream()
+            compiled = _get_fused_add_fwd_compiled(
+                x, residual, weight, out, residual_out, rstd, M, N, dtype_str, store_rstd, eps, stream
+            )
+            if store_rstd:
+                compiled(x, residual, weight, out, residual_out, rstd, M, stream)
+            else:
+                compiled(x, residual, weight, out, residual_out, M, stream)
+        return out, residual_out, rstd
+
+    def fused_add_rmsnorm_bwd(added, weight, dout, rstd, dresidual_out=None, eps=EPS):
+        """Backward fused-add RMSNorm. Returns (dx, dresidual, dw).
+
+        `added` is the residual_out saved by the forward. Because added = x +
+        residual_in, dx == dresidual unconditionally, so the kernel computes it
+        once and this returns dx aliased as dresidual (no second buffer/store).
+        dresidual_out is the downstream grad flowing into residual_out; when None
+        it is treated as zero (a zero tensor is passed to the branch-free
+        kernel). eps is already baked into `rstd`.
+        """
+        assert added.dim() == 2, "fused_add_rmsnorm_bwd expects a 2D (M, N) input"
+        assert added.is_contiguous() and dout.is_contiguous(), "fused_add_rmsnorm_bwd expects contiguous inputs"
+        assert (
+            added.dtype == weight.dtype == dout.dtype
+        ), f"added/weight/dout dtypes must match, got {added.dtype}/{weight.dtype}/{dout.dtype}"
+        if dresidual_out is not None:
+            assert dresidual_out.is_contiguous(), "fused_add_rmsnorm_bwd expects contiguous dresidual_out"
+            assert dresidual_out.dtype == added.dtype, "dresidual_out dtype must match added"
+        M, N = added.shape
+        dtype_str = _torch_dtype_to_str(added.dtype)
+        if dresidual_out is None:
+            dresidual_out = torch.zeros_like(added)
+        dx = torch.empty_like(added)
+        dweight = torch.zeros((N,), device=added.device, dtype=torch.float32)
+        key = (N, dtype_str, added.device)
+        with torch.cuda.device(added.device):
+            stream = torch.cuda.current_stream()
+            compiled = _FUSED_ADD_BWD_CACHE.get(key)
+            if compiled is None:
+                launch_fn = build_fused_add_rmsnorm_bwd_module(N, dtype_str)
+                # flyc.compile executes the kernel once during tracing, which would
+                # accumulate into DWeight; zero it AFTER compiling.
+                compiled = flyc.compile(
+                    launch_fn, added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream
+                )
+                _FUSED_ADD_BWD_CACHE[key] = compiled
+            dweight.zero_()
+            compiled(added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
+        # dx == dresidual by construction; return dx as both (aliased).
+        return dx, dx, dweight.to(weight.dtype)
+
+    class FusedAddRMSNormFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, residual, weight, eps, prenorm):
+            need_grad = x.requires_grad or residual.requires_grad or weight.requires_grad
+            out, residual_out, rstd = fused_add_rmsnorm_fwd(x, residual, weight, eps=eps, store_rstd=need_grad)
+            ctx.save_for_backward(residual_out, weight, rstd)
+            ctx.eps = eps
+            ctx.prenorm = prenorm
+            if prenorm:
+                return out, residual_out
+            return out
+
+        @staticmethod
+        def backward(ctx, dout, *args):
+            added, weight, rstd = ctx.saved_tensors
+            dresidual_out = args[0].contiguous() if ctx.prenorm else None
+            dx, dresidual, dw = fused_add_rmsnorm_bwd(
+                added, weight, dout.contiguous(), rstd, dresidual_out=dresidual_out, eps=ctx.eps
+            )
+            return dx, dresidual, dw, None, None
+
+    def fused_add_rmsnorm(x, residual, weight, eps=EPS, prenorm=True):
+        """Public entry: fused-add (prenorm) RMSNorm with autograd.
+
+        residual_out = x + residual ; out = rmsnorm(residual_out) * weight.
+        prenorm=True (training-relevant) returns (out, residual_out).
+        """
+        assert weight is not None, "fused_add_rmsnorm requires an explicit weight"
+        N = weight.shape[-1]
+        assert x.shape[-1] == N, f"x last dim {x.shape[-1]} != weight length {N}"
+        assert x.shape == residual.shape, "x and residual must have the same shape"
+        x_flat = x.reshape(-1, N)
+        residual_flat = residual.reshape(-1, N)
+        if prenorm:
+            out_flat, residual_out_flat = FusedAddRMSNormFunction.apply(x_flat, residual_flat, weight, eps, True)
+            return out_flat.reshape(x.shape), residual_out_flat.reshape(x.shape)
+        out_flat = FusedAddRMSNormFunction.apply(x_flat, residual_flat, weight, eps, False)
         return out_flat.reshape(x.shape)
