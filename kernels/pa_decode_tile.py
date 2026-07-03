@@ -253,22 +253,51 @@ def compile_pa_decode_tile(
         # padding (the MMA atom is 16 wide; padded rows are never stored).  LDS
         # staging handles any group size cleanly (a 16-row global window would
         # not be tile-aligned when GS < 16).
+        #
+        # Loaded in QCHUNK=8-element (128-bit / dwordx4) raw chunks rather than
+        # one monolithic HEAD-wide load: a single wide `.load()` followed by the
+        # absmax-reduce + rescale keeps the full 128-wide f32 vector live across
+        # both, which under this kernel's AGPR pressure the backend finds
+        # cheaper to scalarize into 128x global_load_ushort than to materialize
+        # as one contiguous vector register range. Chunking bounds the live
+        # range to QCHUNK f32 at a time, so each chunk lowers to a real
+        # global_load_dwordx4 (two passes: max-reduce, then rescale+pack, each
+        # over the same 16 chunks — the row is only 256B so reloading it costs
+        # nothing next to the K/V traffic and happens once per CTA, not per tile).
+        qg = extract_global_ptr(query_ptr)
+        QCHUNK = 8  # f16 elements per 128-bit chunk
+        NQCHUNK = HEAD // QCHUNK
+
         if tid < arith.constant(M, type=T.i32):
             if tid < arith.constant(GS, type=T.i32):
                 qh0 = kv_h * arith.constant(GS, type=T.i32) + tid
-                row_elem = (seq * num_q_heads + qh0) * arith.constant(HEAD, type=T.i32)
-                q_iter = fx.add_offset(fx.get_iter(query_ptr), fx.make_int_tuple(row_elem))
-                q_row = fx.Tensor(fx.make_view(q_iter, fx.make_layout(HEAD, 1))).load().to(fx.Float32)
+                row_byte0 = (seq * num_q_heads + qh0) * arith.constant(HEAD * 2, type=T.i32)  # f16 = 2B/elem
+
+                def _q_chunk(c):
+                    off = row_byte0 + arith.constant(c * QCHUNK * 2, type=T.i32)
+                    return fx.Vector(global_load_i64x2(qg, off)).bitcast(fx.Float16).to(fx.Float32)
+
+                # pass 1: chunked absmax
+                absmax = fx.Float32(0.0)
+                for c in range_constexpr(NQCHUNK):
+                    qc = _q_chunk(c)
+                    chunk_max = qc.maximumf(Vec.filled(QCHUNK, 0.0, fx.Float32) - qc).reduce(ReductionOp.MAX)
+                    absmax = absmax.maximumf(chunk_max)
                 # per-row symmetric fp8 quantization: q_scale = absmax / FP8_MAX
-                absmax = q_row.maximumf(Vec.filled(HEAD, 0.0, fx.Float32) - q_row).reduce(ReductionOp.MAX)
                 q_scale = absmax * fx.Float32(1.0 / FP8_MAX)
                 inv = fx.Float32(1.0) / q_scale.maximumf(fx.Float32(1e-20))
-                q_scaled = q_row * Vec.from_elements([inv], dtype=fx.Float32).broadcast_to(HEAD)
-                # store fp8 bytes as i32 words (the fp8 tiled-copy reads them back)
-                _st_words(
-                    arith.constant(sQ_off, type=T.i32) + tid * arith.constant(HEAD, type=T.i32),
-                    _f32_to_fp8_words(q_scaled),
-                )
+                inv_b = Vec.from_elements([inv], dtype=fx.Float32).broadcast_to(QCHUNK)
+
+                # pass 2: rescale + fp8-pack, one chunk at a time (store fp8 bytes
+                # as i32 words; the fp8 tiled-copy reads them back).
+                for c in range_constexpr(NQCHUNK):
+                    q_scaled_chunk = _q_chunk(c) * inv_b
+                    _st_words(
+                        arith.constant(sQ_off, type=T.i32)
+                        + tid * arith.constant(HEAD, type=T.i32)
+                        + arith.constant(c * QCHUNK, type=T.i32),
+                        _f32_to_fp8_words(q_scaled_chunk),
+                    )
                 _st1(sQscale_off, tid, q_scale)
             else:
                 _st_words(
