@@ -692,32 +692,92 @@ def gemm1_body_v2(
         issue_b_load_j(CUR, fx.Int32(0), j)
     issue_b_scale_load(CUR, fx.Int32(0))
 
-    # Runtime-trip scf.for over KT_PER_KW_RT tiles: carry C/accm + tile kt's prefetched B/B-scale (CUR); each iter ds-reads A tile kt, streams A tile kt+kStages, prefetches tile kt+1 into NXT (loads overlap tile kt's MMA), carries NXT in as CUR. sched_barrier/s_setprio fence the mfma chain from the B loads.
-    nC = kMChunks * NJ
-    for kt_iv, state in range(fx.Index(0), fx.Index(KT_PER_KW_RT), fx.Index(1), init=load_carry() + b_snapshot(CUR)):
-        store_carry(state[:nC])
-        b_restore(CUR, state[nC:])
-        kt_rt = fx.Int32(kt_iv)
+    # One K-tile body (compile-time-constant A-LDS slots + B double-buffer index): ds-read A tile
+    # kt, stream A tile kt+kStages (guarded), and prefetch tile kt+1's B/B-scale into the opposite
+    # buffer while tile kt's MMAs run. `cur_buf`/`nxt_buf` are Python-const (0/1) so no runtime mod
+    # and no runtime slot-multiply is emitted; this restores the compile-time straight-line schedule
+    # (cross-tile load/MMA overlap) that the tile-by-tile rolled loop lost. Runtime-guarded pieces:
+    #   need_stream (kt+kStages < KT): drop the A-stream past the last tile.
+    #   nxt_b: clamp the tile+1 B prefetch to the last valid tile (view is HIDDEN_MAX-sized).
+    def process_tile(kt_rt, read_slot, write_slot, cur_buf, nxt_buf, *, const_slots, guard_stream):
         gpu.barrier()
-        issue_a_ds_read(kt_rt % fx.Int32(kAStages))
+        # const_slots: read/write slots are Python ints -> constant LDS offsets (no runtime mod/multiply).
+        issue_a_ds_read(read_slot if const_expr(const_slots) else kt_rt % fx.Int32(kAStages))
         asc_cur = issue_a_scale_ds_read(kt_rt)
         nxt = kt_rt + fx.Int32(kStages)
-        if nxt < KT_PER_KW_RT:
-            issue_a_load_lds(nxt % fx.Int32(kAStages), nxt)
-        # Prefetch tile kt+1's B into NXT (overlaps tile kt's MMA); clamp to the last valid tile so the final iter's unconsumed prefetch never reads past the real (HIDDEN_MAX-sized view) weight.
+        # guard_stream: drop the A-stream of tile kt+kStages once it runs past the last tile (tail).
+        if const_expr(guard_stream):
+            if nxt < KT_PER_KW_RT:
+                issue_a_load_lds(write_slot if const_expr(const_slots) else nxt % fx.Int32(kAStages), nxt)
+        else:
+            issue_a_load_lds(write_slot, nxt)
         kt_p1 = kt_rt + fx.Int32(1)
         nxt_b = fx.Int32((kt_p1 < KT_PER_KW_RT).select(kt_p1, KT_PER_KW_RT - fx.Int32(1)))
         for J in range_constexpr(NJ):
             rocdl.sched_barrier(0)
             rocdl.s_setprio(1)
-            mfma_cluster(CUR, asc_cur, J)
+            mfma_cluster(cur_buf, asc_cur, J)
             rocdl.s_setprio(0)
             rocdl.sched_barrier(0)
-            issue_b_load_j(NXT, nxt_b, J)
+            issue_b_load_j(nxt_buf, nxt_b, J)
             rocdl.sched_barrier(0)
-        issue_b_scale_load(NXT, nxt_b)
-        results = yield load_carry() + b_snapshot(NXT)
-    store_carry(results[:nC])
+        issue_b_scale_load(nxt_buf, nxt_b)
+
+    # Fixed-factor unroll of the runtime K-loop. UNROLL = LCM(kAStages, 2): a multiple of kAStages so
+    # every A-LDS slot (kt%kAStages, (kt+kStages)%kAStages) is a compile-time constant across the group,
+    # and even so the B double-buffer parity returns to CUR at each group boundary (carry stays CUR-only).
+    # Outer trip = KT/UNROLL is runtime (model_dim stays runtime); a runtime remainder loop handles the
+    # tail < UNROLL tiles with the original (slot-mod) body. All full-group tiles keep kt+kStages<KT
+    # because kStages < UNROLL and the remainder owns the last UNROLL tiles.
+    UNROLL = kAStages * 2 if (kAStages % 2) else kAStages  # 6 for kAStages=3
+    nC = kMChunks * NJ
+    n_full = rocdl.readfirstlane(T.i32, (KT_PER_KW_RT // fx.Int32(UNROLL)))
+    full_tiles = n_full * fx.Int32(UNROLL)
+
+    # Bulk: unrolled groups of UNROLL tiles (all slots/buffers Python-const). Carry C/accm + CUR B.
+    for grp_iv, state in range(fx.Index(0), fx.Index(n_full), fx.Index(1), init=load_carry() + b_snapshot(CUR)):
+        store_carry(state[:nC])
+        b_restore(CUR, state[nC:])
+        grp_base = fx.Int32(grp_iv) * fx.Int32(UNROLL)
+        for u in range_constexpr(UNROLL):
+            kt_rt = grp_base + fx.Int32(u)
+            read_slot = u % kAStages
+            write_slot = (u + kStages) % kAStages
+            cur_buf = u % 2
+            nxt_buf = (u + 1) % 2
+            # bulk tiles are always in-range (remainder owns the last UNROLL tiles) -> no stream guard.
+            process_tile(kt_rt, read_slot, write_slot, cur_buf, nxt_buf, const_slots=True, guard_stream=False)
+        results = yield load_carry() + b_snapshot(CUR)  # UNROLL even -> next tile's B back in CUR
+
+    # Remainder: the last (KT % UNROLL) tiles.
+    rem = KT_PER_KW_RT - full_tiles
+    if const_expr(not is_f8_a):
+        # fp4: C accumulates in place in register-memory fragments (a side effect that survives an
+        # scf.if), so statically unroll the tail and per-tile runtime-guard it (i < rem). full_tiles
+        # is a multiple of UNROLL (hence of kAStages), so tile full_tiles+i keeps the constant A-slot
+        # i%kAStages / B-buffer i%2 -- the fast, mod-free body -- across the whole tail (guard_stream
+        # drops the past-the-end A-stream on the final tiles).
+        store_carry(results[:nC])
+        b_restore(CUR, results[nC:])
+        for i in range_constexpr(UNROLL - 1):
+            if fx.Int32(i) < rem:
+                process_tile(
+                    full_tiles + fx.Int32(i),
+                    i % kAStages,
+                    (i + kStages) % kAStages,
+                    i % 2,
+                    (i + 1) % 2,
+                    const_slots=True,
+                    guard_stream=True,
+                )
+    else:
+        # fp8: accm is carried SSA (cannot escape an scf.if), so keep the rolled scf.for tail (slot-mod).
+        for kt_iv, state in range(fx.Index(0), fx.Index(rem), fx.Index(1), init=results):
+            store_carry(state[:nC])
+            b_restore(CUR, state[nC:])
+            process_tile(full_tiles + fx.Int32(kt_iv), 0, 0, CUR, NXT, const_slots=False, guard_stream=True)
+            results = yield load_carry() + b_snapshot(NXT)
+        store_carry(results[:nC])
 
     gpu.barrier()
 
