@@ -233,19 +233,16 @@ def compile_pa_decode_tile(
         def _st_words(byte_off, words):
             _view(byte_off, fx.Int32, fx.make_layout(words.shape[0], 1), 4).store(words)
 
-        # whole-tile views (for tiled copies)
-        # sP holds the fp8 probabilities as [qhead, token].  The QK C-fragment is
-        # [token, qhead]; the frag→sP store uses the transposed view sP_T (shape
-        # [token, qhead], strides (1, TILE_TOK)) so it lands as [qhead, token],
-        # which the raw PV P read (p_ops) then reads directly.
-        sP_T_v = _view(arith.constant(sP_off, type=T.i32), FP8, fx.make_layout((TILE_TOK, M), (1, TILE_TOK)), 1)
+        # sP holds the fp8 probabilities as [qhead, token] (qhead stride TILE_TOK,
+        # token stride 1); each lane writes its own (qhead, token) slice directly
+        # (raw i32-word store, see the softmax loop) and the raw PV P read (p_ops)
+        # reads it back with the same layout.
 
         # ── MMA atoms (production token=M orientation) ──
         # QK: D[token, qhead] = K(A) · Q(B)ᵀ, tiled (NWARP,1,1) splits tokens (M)
         # across the 4 warps — so the softmax reduces over M (tokens) cheaply.
         # PV: O[qhead, head_dim], tiled (1,NWARP,1) splits head_dim (N).
         mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(MFMA_MNK, MFMA_MNK, MFMA_K, FP8))
-        tiled_mma_qk = fx.make_tiled_mma(mma_atom, fx.make_layout((NWARP, 1, 1), (1, 0, 0)))
         tiled_mma_pv = fx.make_tiled_mma(mma_atom, fx.make_layout((1, NWARP, 1), (0, 1, 0)))
 
         # ── Stage 0: stage this (seq, kv_head)'s GS query rows into LDS sQ.
@@ -347,14 +344,9 @@ def compile_pa_decode_tile(
         kg = extract_global_ptr(key_cache_ptr)  # raw addrspace(1) ptr for dwordx4 K loads
         vg = extract_global_ptr(value_cache_ptr)  # raw addrspace(1) ptr for dwordx4 V loads
 
-        copy_p8 = fx.make_copy_atom(fx.UniversalCopy8b(), FP8)  # fp8 P C-frag -> LDS
         copy_c = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-        tcopy_p8 = fx.make_tiled_copy_C(copy_p8, tiled_mma_qk)  # fp8 P frag -> sP (transposed)
         tcopy_o = fx.make_tiled_copy_C(copy_c, tiled_mma_pv)  # PV out -> sO (epilogue)
 
-        # Shape templates (default addrspace) for the MMA fragments; only their
-        # layout is read by make_fragment_*, no real storage is consumed.
-        tmpl_S = fx.make_rmem_tensor(fx.make_layout((TILE_TOK, M), (M, 1)), fx.Float32)  # [token, qhead]
         # QK in TLOOP chunks of TOK_CHUNK tokens: each small fx.gemm yields a f32x4
         # C-fragment, so the softmax processes 4 scores at a time (scores stay in
         # AGPR, VGPR peak low) — matching pa_decode_ps_kernel's TLOOP.
@@ -452,12 +444,6 @@ def compile_pa_decode_tile(
             tt_i32 = fx.Int32(arith.index_cast(T.i32, tt))
             within_tile, tok0, cur_page = _coords_no_phys(tt_i32)
 
-            # Thread slices must be (re)created inside the loop: the ThrCopy/
-            # ThrMma python subclass is stripped back to its TiledCopy/TiledMma
-            # base when a value is captured across the scf.for region boundary.
-            thr_mma_qk_l = tiled_mma_qk.get_slice(tid)
-            thr_copy_p8 = tcopy_p8.get_slice(tid)
-
             # ---- hoist raw dwordx4 V loads BEFORE QK so their DMA hides behind QK
             # + softmax (production loads V early too); consumed by the PV MMA. ----
             v_ops = [_v_ops(phys, within_tile, vh) for vh in range_constexpr(VHE_CHUNKS)]
@@ -523,14 +509,18 @@ def compile_pa_decode_tile(
             m_new = m_old.maximumf(_ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
             m_new_b = Vec.from_elements([m_new], dtype=fx.Float32).broadcast_to(4)
             ls = fx.Float32(0.0)
-            words = []
+            # raw i32-word store straight to sP[qhead][token_base:+4] (fp8, 1B/elem):
+            # the packed word's 4 fp8 lanes are exactly the 4 consecutive tokens this
+            # lane owns in chunk `a` (token_base = a*TOK_CHUNK + warp*16 + l16g*4), so
+            # a direct store replaces the make_fragment_C/tiled_copy_C round trip.
+            base4 = arith.constant(4, type=T.i32)
             for a in range_constexpr(NCHUNK):
                 Pa = (_masked_chunk(a) * scale - m_new_b).exp2()
                 ls = ls + Pa.reduce(ReductionOp.ADD)
-                words.append(_f32_to_fp8_words(Pa * Vec.filled(4, FP8_MAX, fx.Float32))[0])
-            frag_P8 = fx.make_fragment_like(thr_mma_qk_l.make_fragment_C(tmpl_S), FP8)
-            frag_P8.store(Vec.from_elements(words, dtype=fx.Int32).bitcast(FP8))
-            fx.copy(copy_p8, thr_copy_p8.retile(frag_P8), thr_copy_p8.partition_D(sP_T_v), pred=None)
+                word = _f32_to_fp8_words(Pa * Vec.filled(4, FP8_MAX, fx.Float32))[0]
+                token_base = arith.constant(a * TOK_CHUNK, type=T.i32) + warp * c16 + l16g * base4
+                p_off = arith.constant(sP_off, type=T.i32) + qh * c_TILE_TOK + token_base
+                _view(p_off, fx.Int32, fx.make_layout(1, 1), 4).store(Vec.from_elements([word], dtype=fx.Int32))
             for sh in (16, 32):
                 ls = ls + ls.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
             if l16g == arith.constant(0, type=T.i32):
