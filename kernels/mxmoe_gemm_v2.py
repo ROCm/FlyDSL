@@ -11,14 +11,13 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr.typing import Float4E2M1FN, T
 from flydsl.expr.typing import Vector as Vec
 
-# -- shape constants (KIMI defaults; per-shape values come from the compile args) --
+# shape constants (KIMI defaults; per-shape values come from the compile args)
 NE = 385  # #experts
 TOPK_DEFAULT = 9
 H_DEFAULT = 7168  # model_dim: gemm1 D_HIDDEN (contraction) / gemm2 N_OUT (output)
 INTER_DEFAULT = 512  # inter_dim: gemm1 D_INTER (output) / gemm2 D_INTER (contraction)
 INTER_MAX_DEFAULT = 8192  # compile-time cap for runtime inter_dim (gemm2 B-view / LDS bounds)
 MAX_M = 655360
-# tiling (BM-independent).
 BN = BK = 256
 KH_TILE = BK // 2  # 128 packed-fp4 bytes per K-tile
 kStages = 2
@@ -28,7 +27,7 @@ LOG2E = 1.4426950408889634
 
 # -- pointer / LDS helpers ----------------------------------------------------
 def lds_dma_dst(base_i32, byte_off_i32, elem_ty=None, align=16):
-    """LDS dst view for buffer_load_lds DMA; gotcha: FlyDSL AddressSpace.Shared = LDS (enum 2, not addrspace 3)."""
+    """LDS dst view for buffer_load_lds DMA (AddressSpace.Shared = LDS enum 2, not addrspace 3)."""
     if elem_ty is None:
         elem_ty = T.i32
     lds_ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Shared, align)
@@ -59,7 +58,7 @@ def lds_typed_ptr(base_i32, elem_ty, align=4):
 
 
 def flat_buffer_view(arg, base_elems, elem_ty, *, align, elem_bytes, fold=True, num_records_bytes=None):
-    """Flat i<elem> buffer-tensor view over a RAW i64 address; fold=True folds the wave-uniform base to a VGPR voffset, fold=False keeps a per-lane offset + num_records_bytes for OOB-zero."""
+    """Flat buffer-tensor view over a RAW i64 addr; fold=True folds wave-uniform base to a VGPR voffset, fold=False keeps per-lane offset + num_records_bytes for OOB-zero."""
     ptr_ty = fx.PointerType.get(elem_ty, fx.AddressSpace.Global, align)
     if fold:
         base = fx.rocdl.readfirstlane(T.i32, _raw(base_elems))
@@ -107,11 +106,7 @@ def silu_mul_batch(gs, us):
 
 
 def swiglu_mul_batch(gs, us, swiglu_limit=0.0):
-    """swiglu(g,u) = g*sigmoid(alpha*g)*(u+1) via exp2/rcp; mirrors main mixed_moe swiglu.
-
-    Clamp g<=limit and -limit<=u<=limit before the activation (limit defaults to 7.0 when
-    swiglu_limit==0, matching main's _swiglu_mul_vec4).
-    """
+    """swiglu(g,u)=g*sigmoid(alpha*g)*(u+1); clamp g<=limit, -limit<=u<=limit (limit 7.0 when swiglu_limit==0)."""
     limit = float(swiglu_limit) if swiglu_limit != 0 else 7.0
     lim = fx.Float32(limit)
     neg_lim = fx.Float32(-limit)
@@ -137,9 +132,7 @@ def e8m0_from_amax(amax_f32, dtype_max=6.0):
     return e8m0, qscale
 
 
-# BM is a per-launch parameter (32 default, 64 supported); the bodies derive
-# kMChunks = BM//16 (16-row MFMA row-groups) and kSubBlocks = BM//32 (32-row
-# A-scale chunks / scale-register groups) from it. BM=32 stays byte-identical.
+# BM per-launch (default 32): bodies derive kMChunks=BM//16 (MFMA row-groups), kSubBlocks=BM//32.
 BM = 32
 kAStages = 3
 
@@ -158,13 +151,9 @@ def bscale_copy_atom():
 def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL, num_records_bytes=None):
     """Layout view over preshuffled B for one N-row tile; slice -> i32<4:1> (16B=32 fp4).
 
-    ``num_records_bytes`` (OOB pad-skip): when set (has_pad), the per-16N-tile buffer resource is
-    sized to the REAL K extent so the fully-pad 128-K ``half`` loads of the tail tile go OOB -> 0
-    (no HBM fetch), saving weight bandwidth. The K axis (K_tile stride 512 i32) is K-major and the
-    ``half`` stride (256 i32) exceeds every within-half sub-offset (klane 3*64 + nlane 15*4 + 3 =
-    255), so cutting num_records at a half boundary zeros exactly the fully-pad half and leaves the
-    partial-pad half (host zero-filled) intact -- a clean per-half cut. None -> max_size=False
-    (cosize, byte-identical default; AC-3)."""
+    num_records_bytes (has_pad OOB pad-skip): size the per-16N-tile buffer to the REAL K so fully-pad
+    128-K halves load OOB -> 0 (clean per-half cut: half stride 256 i32 > within-half max 255).
+    None -> max_size=False (cosize, byte-identical default; AC-3)."""
     col_base = rocdl.readfirstlane(T.i32, _raw(row_elems) * fx.Int32(KH4))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(col_base)
@@ -180,10 +169,8 @@ def bq_view(arg_bq, row_elems, KH4, K_TILES_TOTAL, num_records_bytes=None):
 def bscale_view(arg_bscale, base_dw, K_TILES_TOTAL, k0_stride_dw=64, num_records_bytes=None):
     """Layout view over e8m0 B-scale for one n-pack word; slice -> i32<1:1> scale word.
 
-    ``num_records_bytes`` (OOB pad-skip): sized to the 256-K-aligned real extent (scale is 256-K
-    granular: K_tile stride k0_stride_dw dw > within-tile max klane 3*16 + nlane 15 = 63, so the cut
-    is per-256-K-tile). Only WHOLE fully-pad 256-K tiles are skipped; a sub-256 pad keeps its tile
-    (host zero-fill). None -> max_size=False (byte-identical default; AC-3)."""
+    num_records_bytes (has_pad OOB pad-skip): size to the 256-K-aligned real extent (per-256-K-tile
+    cut). None -> max_size=False (byte-identical default; AC-3)."""
     base_dw = rocdl.readfirstlane(T.i32, _raw(base_dw))
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=4)
     off_i64 = fx.Int64(base_dw)
@@ -256,16 +243,10 @@ def issue_a_ds_read_dt(
 def mma_one_j(
     J, in_b, sa, sb, bq_frags_kt, is_f8, cbsz_a, a_vals, a_frags, accm, c_frags, atoms, i0=0, single_rg=False, rg_off=0
 ):
-    """One J-cluster (4 scaled MFMAs) for one 32-row A-scale group: row-groups i0, i0+1.
+    """One J-cluster (4 scaled MFMAs) for a 32-row A-scale group (row-groups i0, i0+1); fp4 gemm_mma / fp8 raw mfma_scale.
 
-    ``sa`` is the A-scale register for the 32-row group (its 4 bytes = 2 k-halves x 2
-    row-groups, picked by opsel_a 0..3). ``i0`` is the first of this group's two 16-row
-    row-groups (BM32: i0=0 only; BM64: i0 in {0,2}). fp4 via gemm_mma, fp8 via raw mfma_scale.
-
-    ``single_rg`` (BM16): this compute block holds a single 16-row group but shares a 32-row
-    A-scale register with the sibling BM16 block. ``rg_off`` (0/1 = m_block_idx&1) selects which
-    row-group byte of ``sa`` this block's group maps to (opsel_a = k_half*2 + rg_off), emitting
-    only 2 MFMAs (one per k-half) into row-group i0.
+    sa: 32-row A-scale reg (opsel_a 0..3 picks k-half x row-group byte). i0: first 16-row group (BM32:0; BM64:{0,2}).
+    single_rg (BM16): single 16-row group sharing sa with sibling block; rg_off (m_block_idx&1) picks its byte, 2 MFMAs only.
     """
     if const_expr(single_rg):
         if const_expr(is_f8):
@@ -334,43 +315,24 @@ def gemm1_body_v2(
     k_wave=1,
     BN=BN,
 ):
-    # BN (fused gate|up N-tile) is a compile-time cache-key dim in {64, 256}. BN=256 (default) is the
-    # original fused SwiGLU tile ([gate 0..127][up 128..255], split at BN/2=128) and is compile-gated
-    # to emit byte-identical IR. BN=64 (split at BN/2=32) yields N_OUT//64 = 4x more N-blocks (block-
-    # count coverage for tiny-M) and pairs with k_wave to keep the K reduction busy. Only these two
-    # values are supported (the requant/scale partitions are specialized to each).
+    # BN (fused gate|up N-tile) in {64,256}: 256 fused SwiGLU tile (split 128); 64 = 4x N-blocks (tiny-M).
     if BN not in (64, 256):
         raise AssertionError(f"BN must be in {{64, 256}}, got {BN}")
-    # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
-    # SBM==BM (default) -> byte-identical single-block-per-sort-block behavior. SBM>BM (a
-    # multiple) packs SBM//BM compute blocks into one SBM sort block that all share one expert:
-    # the expert id is looked up at sei[(m_block_idx*BM)//SBM] instead of sei[m_block_idx].
+    # SBM (sort padding unit) >= BM; SBM==BM default byte-identical, SBM>BM packs SBM//BM blocks/sort-block.
     if SBM is None:
         SBM = BM
-    # BM-derived constants (module BM=32 default; BM=64 doubles rows/block).
     kMChunks = BM // 16  # 16-row MFMA row-groups (BM32: 2, BM64: 4)
     kSubBlocks = BM // 32  # 32-row A-scale chunks / scale-register groups (BM32: 1, BM64: 2)
-    # BM16: a single 16-row compute block. The MFMA-scale opsel_a (which row-group byte of the
-    # scale word) is a compile-time immediate, so a BM16 block cannot select its row-group at
-    # runtime. Instead each BM16 block OWNS a full 32-row scale chunk (chunk == m_block_idx) and
-    # always uses row-group 0 (rg_off=0, compile-time); the chunk's second 16-row half is unused
-    # padding. The host packs the input/intermediate A-scale to match (32-row chunk per 16-block,
-    # rg0-only). kScaleSubBlocks=1 (one 32-row chunk gathered/read per BM16 block).
+    # BM16: single 16-row block owns a 32-row scale chunk (chunk==m_block_idx, rg0-only, 2nd half pad).
     is_bm16 = BM < 32
     rg_off = 0  # BM16 always maps its single 16-row group to scale row-group 0
     kScaleSubBlocks = 1 if is_bm16 else kSubBlocks  # 32-row scale chunks to gather/read
-    # k_wave (intra-block K-slice): repartition the block's 4 waves as num_n_waves x k_wave.
-    # k_wave=1 -> num_n_waves=4, wave_n=wave, wave_k=0, NJ=4: byte-identical to the pre-kwave body.
-    # k_wave>1 -> num_n_waves=4//k_wave waves cover BN (each NJ=4*k_wave//... = (BN/num_n_waves)/16
-    # J-tiles), and each of the k_wave K-wave groups processes klen=K/k_wave of the contraction;
-    # partials are reduced in LDS before the shared silu+quant epilogue.
+    # k_wave (intra-block K-slice): 4 waves as num_n_waves x k_wave (kw=1 byte-identical; kw>1 LDS-reduced).
     NWAVES = 4  # 256-thread block = 4 waves
     num_n_waves = NWAVES // k_wave
     NJ = (BN // num_n_waves) // 16  # J-tiles per N-wave (kw1:4, kw2:8, kw4:16)
-    # A dtype: only the A path differs; fp8 uses raw mfma_scale (cbsz=0), fp4 the fx.gemm path.
-    is_f8_a = a_dtype == "fp8"
-    # out dtype: only the epilogue requant/pack/store differs.
-    is_f8_out = out_dtype == "fp8"
+    is_f8_a = a_dtype == "fp8"  # fp8 uses raw mfma_scale (cbsz=0); fp4 the fx.gemm path
+    is_f8_out = out_dtype == "fp8"  # only the epilogue requant/pack/store differs
     out_max = 448.0 if is_f8_out else 6.0  # e4m3 / e2m1 max
     out_pack = 1 if is_f8_out else 2
     a_pack = 1 if is_f8_a else 2
@@ -381,37 +343,18 @@ def gemm1_body_v2(
     K_HALF = K // 2
     K_BYTES = K // a_pack  # a_quant row stride in bytes (= K_HALF for fp4)
     K_TILES_TOTAL = K // BK
-    # k_wave: each K-wave group runs only KT_PER_KW = K_TILES_TOTAL//k_wave tiles (kw=1: all tiles).
-    KT_PER_KW = K_TILES_TOTAL // k_wave
+    KT_PER_KW = K_TILES_TOTAL // k_wave  # tiles per K-wave group (kw=1: all tiles)
     kUnroll = KT_PER_KW - kStages
     kAS_per_chunk_dw = kc * 64
     kBS_stride_n0_dw = kc * 64  # hidden-K-derived (compile-time)
-    # INTER (inter_dim) is the gemm1 N-output dim; runtime via i32_inter (no K-loop dependency).
-    INTER_rt = fx.Int32(i32_inter)
+    INTER_rt = fx.Int32(i32_inter)  # gemm1 N-output dim (runtime)
     N_OUT = INTER_rt * fx.Int32(2)
     kBS_per_expert_dw = (N_OUT // fx.Int32(32)) * fx.Int32(kBS_stride_n0_dw)  # (N_OUT//16//2)*stride
     NUM_N_BLOCKS = N_OUT // fx.Int32(BN)
     OUT_AS_PER_CHUNK_DW = (INTER_rt // fx.Int32(256)) * fx.Int32(64)  # ((INTER//32)//4//2)*64
     K_G2_BYTES = INTER_rt // fx.Int32(out_pack)  # output row stride (fp4 INTER/2, fp8 INTER)
 
-    # OOB pad-skip num_records (has_pad only): K = D_HIDDEN is the padded contraction; the trailing
-    # i32_kpad columns are zero pad. Size the per-16N-tile B-weight resource to the REAL K so the
-    # fully-pad 128-K halves of the tail tile buffer-load OOB -> 0 (no HBM fetch). K_real = K - kpad.
-    #   weight: 128-K-col ``half`` granular. halves_with_real = ceil(K_real/128); each half occupies
-    #   the ``half`` stride (256 i32 = 1024 bytes). bq_num = halves_with_real * 1024.
-    # B-scale is NOT shrunk: it is 256-K-tile granular (bscale K_tile stride > within-tile span) and
-    # host-padded to a 256-K multiple (mirrors aiter scale_k_padded); a sub-256 pad (GPT-OSS 192)
-    # leaves ceil(K_real/256) == ceil(K/256) tiles, so shrinking saves 0 scale loads and risks
-    # reading OOB into the host-padded-but-valid 256-aligned scale (garbage e8m0 -> NaN). Weight is
-    # the dominant bandwidth term. has_pad=False -> None (max_size=False, byte-identical default; AC-3).
-    # N-skip (has_pad only): INTER_real = INTER - i32_npad is the real per-half (gate/up) inter extent.
-    # A 16-N weight tile whose logical-inter base is >= INTER_real produces only pad output -> its buffer
-    # is sized to 0 records (make_bq_view_for_jtile) so every weight load OOB -> 0 (no HBM fetch).
-    # Correctness-safe: pad-N output feeds gemm2's pad-K input, which gemm2 already OOB-skips, so zero
-    # (skipped) output there is fine and needs no epilogue change. The gate|up split is at BN//2 within
-    # each 256-wide block; a gate tile and its sibling up tile mapping to the same pad logical-inter col
-    # are skipped consistently (same INTER_real bound). Computed ONLY under const_expr(has_pad) so the
-    # default variant emits zero extra IR (byte-identical; AC-3).
+    # has_pad OOB pad-skip (const_expr-gated): K-skip sizes each 16N B-weight buffer to REAL K (fully-pad halves load 0); N-skip zeros fully-pad-inter tiles. B-scale NOT shrunk.
     bq_num_records = None
     INTER_real = None
     if const_expr(has_pad):
@@ -420,9 +363,7 @@ def gemm1_body_v2(
         bq_num_records = halves_real * fx.Int32(1024)
         INTER_real = INTER_rt - fx.Int32(i32_npad)
 
-    # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
-    # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
-    # emitted identically to the pre-sbm path).
+    # block -> (m_block_idx, n_block_idx); e = sorted_expert_ids[SBM-padded sort block] (SBM==BM: sort_block==m_block_idx).
     n_block_idx = bx_i32 % NUM_N_BLOCKS
     m_block_idx = bx_i32 // NUM_N_BLOCKS
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
@@ -436,8 +377,7 @@ def gemm1_body_v2(
     lane_div_16 = lane // 16
     lane_mod_16 = lane % 16
 
-    # k_wave partition of the wave index. kw=1: wave_n=wave and every k_wave-derived expression
-    # below is compile-time skipped so the emitted IR is byte-identical to the pre-kwave body.
+    # k_wave partition of the wave index (kw=1: wave_n=wave, everything below compile-time skipped).
     if const_expr(k_wave > 1):
         wave_n = wave % fx.Int32(num_n_waves)
         wave_k = rocdl.readfirstlane(T.i32, wave // fx.Int32(num_n_waves))
@@ -453,8 +393,7 @@ def gemm1_body_v2(
             return fx.Int32(kt) + kw_kt_base
         return kt
 
-    # LDS base offsets (i8): s_aq | s_asc contiguous; lds_acc (f32) unions the region. With k_wave>1
-    # the A staging holds k_wave per-K-wave regions, so s_asc sits past ALL of them (kw=1: unchanged).
+    # LDS base offsets (i8): s_aq | s_asc contiguous; lds_acc (f32) unions the region (kw>1: s_asc past all A regions).
     s_aq_base = lds_base_i32
     s_asc_base = lds_base_i32 + fx.Int32(k_wave * kAStages * BM * KH_TILE_A)
     lds_acc_base = lds_base_i32
@@ -463,17 +402,12 @@ def gemm1_body_v2(
     lanes_per_row = KH_TILE_A // 16  # 8 (fp4) / 16 (fp8)
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // lanes_per_row
-    # k_wave: only the num_n_waves waves of each K-wave group cooperate on that group's A-slice, so
-    # the cooperative-gather partition uses num_n_waves (=4 at kw=1) and wave_n (=wave at kw=1).
+    # k_wave: each K-wave group's num_n_waves waves (=4/wave_n=wave at kw=1) cooperate on its A-slice.
     rows_per_wave = BM // num_n_waves  # rows each wave gathers (kw1 BM32: 8; kw4 BM16: 16)
-    # rows_per_wave(4) < rows_per_call(8) triggers the round-robin partial-wave scheme (BM16 fp4 at
-    # kw1). BM>=32 (kw1) keeps rows_per_wave >= rows_per_call so the original per-wave block scheme
-    # (n_row_groups>=1) is byte-identical.
+    # rows_per_wave < rows_per_call -> round-robin partial-wave scheme (BM16 fp4 kw1); else byte-identical per-wave blocks.
     partial_wave_gather = rows_per_wave < rows_per_call
     if const_expr(partial_wave_gather):
-        # BM16 fp4: only BM//rows_per_call (=2) distinct calls exist; wraps waves round-robin so
-        # waves 0,2 gather rows [0,8) and waves 1,3 gather rows [8,16) (waves 2,3 redundantly
-        # re-load the same rows -- harmless, no OOB LDS write, and avoids a device wave predicate).
+        # BM16 fp4: BM//rows_per_call (=2) calls wrapped round-robin (waves 2,3 re-load, harmless).
         n_gather_calls = BM // rows_per_call  # 2 for BM16 fp4
         gather_base_row = (wave_n % fx.Int32(n_gather_calls)) * rows_per_call
         n_row_groups = 1
@@ -486,9 +420,7 @@ def gemm1_body_v2(
         idx = m_row + gather_base_row + g * rows_per_call + a_lane_row
         cached_actual_row.append(sti_ptr[idx] & 0xFFFFFF)
 
-    # B-scale n-pack words (gate/up split differs by gate mode). Per N-wave span = BN//num_n_waves
-    # cols = (BN//num_n_waves)//32 n-pack words; NJ//2 n-pack words per wave (mni in [0,NJ//2)).
-    # kw=1: num_n_waves=4, NJ=4 -> mni_base = n_block_idx*(BN//32)+wave*(BN//128); np_list=[b,b+1].
+    # B-scale n-pack words (gate/up split by gate mode); NJ//2 words per wave (mni in [0,NJ//2)).
     if const_expr(interleave):
         np_per_wave = (BN // num_n_waves) // 32
         mni_base = n_block_idx * (BN // 32) + wave_n * np_per_wave
@@ -511,8 +443,7 @@ def gemm1_body_v2(
         num_records_bytes=i32_ntok * K_BYTES,
     )
 
-    # Per-K-wave A-LDS region: each K-wave group stages its own K-slice of A. kw=1 -> no offset
-    # (s_aq_base_kw is s_aq_base, byte-identical); kw>1 offsets by one A staging area per K-wave.
+    # Per-K-wave A-LDS region (kw=1: s_aq_base_kw == s_aq_base, byte-identical).
     a_stage_bytes = kAStages * BM * KH_TILE_A
     if const_expr(k_wave > 1):
         s_aq_base_kw = s_aq_base + wave_k * fx.Int32(a_stage_bytes)
@@ -520,8 +451,7 @@ def gemm1_body_v2(
         s_aq_base_kw = s_aq_base
 
     def issue_a_load_lds(slot, kt):
-        # lane L -> LDS[base+L*16]; each wave gathers rows_per_wave rows in rows_per_call chunks.
-        # ``kt`` is the K-wave-LOCAL K-tile; the absolute K-tile into A global adds kw_kt_base.
+        # lane L -> LDS[base+L*16]; kt is K-wave-LOCAL (A global adds kw_kt_base).
         lane_col = (lane % lanes_per_row) * 16
         base_i32 = s_aq_base_kw
         kt_abs = kt_abs_of(kt)
@@ -551,8 +481,7 @@ def gemm1_body_v2(
 
     def issue_a_scale_load():
         # global->LDS DMA: 16B + 3x4B chunks; per-chunk dword base folded to a VGPR voffset.
-        # BM16: each 16-block owns a 32-row chunk (chunk == m_block_idx); BM>=32: chunk == m_row//32.
-        chunk_base = m_block_idx if const_expr(is_bm16) else m_row // 32
+        chunk_base = m_block_idx if const_expr(is_bm16) else m_row // 32  # BM16: chunk==m_block_idx
         v16_e = (wave * 64 + lane) * 4  # 16B chunk: per-lane i32-elem
         v4_e = wave * 64 + lane  # 4B chunk: per-lane i32-elem
         asc_base = s_asc_base
@@ -575,8 +504,7 @@ def gemm1_body_v2(
                 )
 
     def issue_a_scale_ds_read(kt):
-        # ``kt`` is the K-wave-LOCAL K-tile; the shared scale chunk holds all K-tiles, so the read
-        # uses the ABSOLUTE tile (identity at kw=1 -> byte-identical).
+        # kt is K-wave-LOCAL; the shared scale chunk holds all K-tiles so read the ABSOLUTE tile.
         asc_ptr = lds_typed_ptr(s_asc_base, T.i32)
         kt_abs = kt_abs_of(kt)
         out = []
@@ -592,8 +520,7 @@ def gemm1_body_v2(
 
     N0_HALF = N_OUT // fx.Int32(32)  # separate-mode gate/up column split
 
-    # B-load view per j-tile; gate mode only changes which N-row `col` maps to. Per N-wave span =
-    # BN//num_n_waves cols (NJ j-tiles). kw=1: num_n_waves=4 -> wave_n*(BN//4), NJ=4 (byte-identical).
+    # B-load view per j-tile (gate mode picks which N-row col maps to; kw=1: wave_n*(BN//4), NJ=4 byte-identical).
     def make_bq_view_for_jtile(j):
         if const_expr(interleave):
             col = n_block_idx * BN + wave_n * (BN // num_n_waves) + j * 16
@@ -602,13 +529,7 @@ def gemm1_body_v2(
             col = ((tile_il & 1) * N0_HALF + (tile_il >> 1)) * 16
         nrec = bq_num_records
         if const_expr(has_pad):
-            # This 16-N tile's LOGICAL inter col base. interleave: gate/up is selected by j PARITY
-            # (in_b=J%2, mfma_cluster), and the tile's n0 index is J//2 -- so a gate tile (j even) and
-            # its sibling up tile (j+1, odd) map to the SAME logical inter col. Matching the cshuffle
-            # (col_local = wave_n*gate_span + (J//2)*16, gate_span=(BN//2)//num_n_waves), the logical
-            # inter base is n_block*(BN//2) + wave_n*gate_span + (j//2)*16. Both members of a gate|up
-            # pair share it, so they are skipped consistently. separate: gate/up split at INTER, tile
-            # col maps to inter = col mod INTER. Only emitted under has_pad (default byte-identical; AC-3).
+            # N-skip: fully-pad LOGICAL-inter tile (>= 16-aligned INTER_real; gate|up pair shares it) -> 0 records.
             gate_span_p = (BN // 2) // num_n_waves
             if const_expr(interleave):
                 logical_inter = (
@@ -616,15 +537,12 @@ def gemm1_body_v2(
                 )
             else:
                 logical_inter = col % INTER_rt
-            # Fully-pad tile (its 16 inter cols are all >= INTER_real, since INTER_real is 16-aligned):
-            # size its buffer to 0 records -> every weight load OOB -> 0 (no HBM fetch). Else keep the
-            # K-skip records. select(pred, then, else) is a cmp+cndmask, wave-uniform (n_block_idx/j).
             nrec = (logical_inter < INTER_real).select(bq_num_records, fx.Int32(0))
         return bq_view(arg_bq, e * N_OUT + col, KH4, K_TILES_TOTAL, num_records_bytes=nrec)
 
     bq_views = [make_bq_view_for_jtile(j) for j in range_constexpr(NJ)]
 
-    # B-scale view per n-pack word (shared layout primitive); NJ//2 words per wave (2 at kw=1).
+    # B-scale view per n-pack word; NJ//2 words per wave (2 at kw=1).
     bscale_views = [
         bscale_view(
             arg_bscale,
@@ -641,7 +559,7 @@ def gemm1_body_v2(
         [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(NJ)]
         for _ in range_constexpr(kStages)
     ]
-    # fp4: A in fx.gemm fragments, C accumulates in place. fp8: A a per-iter Vec8 i32, C a raw f32x4.
+    # fp4: A in fx.gemm fragments (C in place). fp8: A per-iter Vec8 i32, C raw f32x4.
     zero4 = Vec.filled(4, 0.0, fx.Float32)
     a_vals = a_frags = c_frags = accm = None
     if const_expr(is_f8_a):
@@ -655,7 +573,7 @@ def gemm1_body_v2(
             [fx.make_fragment_like(frag_tmpl, dtype=fx.Float32.ir_type) for _ in range_constexpr(NJ)]
             for _ in range_constexpr(kMChunks)
         ]
-    # B-scale fragments: i32<1:1>, per-stage double-buffer like _bq_frags.
+    # B-scale fragments: i32<1:1>, per-stage double-buffer like bq_frags.
     bs_frag_tmpl = bscale_frag_tmpl(bscale_views[0])  # i32<1:1>
     bs_frags = [
         [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(NJ // 2)] for _ in range_constexpr(kStages)
@@ -692,8 +610,7 @@ def gemm1_body_v2(
             mni, in_b = J % 2, J // 2
         sb = _raw(Vec(bs_frags[stage][mni].load())[0])
         if const_expr(is_bm16):
-            # BM16: single 16-row group; its scale byte is row-group (m_block_idx&1) of the shared
-            # 32-row register a_scale[0].
+            # BM16: single 16-row group; scale byte is row-group (m_block_idx&1) of shared reg a_scale[0].
             mma_one_j(
                 J,
                 in_b,
@@ -712,7 +629,7 @@ def gemm1_body_v2(
                 rg_off=rg_off,
             )
             return
-        # One 32-row A-scale group per kSubBlock (its register holds row-groups 2*sub, 2*sub+1).
+        # One 32-row A-scale group per kSubBlock (reg holds row-groups 2*sub, 2*sub+1).
         for sub in range_constexpr(kSubBlocks):
             mma_one_j(
                 J,
@@ -744,7 +661,7 @@ def gemm1_body_v2(
             issue_b_load_j(K_C, K_C, j)
         issue_b_scale_load(K_C, K_C)
 
-    # main loop. sched_barrier/s_setprio fence the mfma chain from the B loads (closes the small-M gap).
+    # main loop; sched_barrier/s_setprio fence the mfma chain from the B loads.
     for OFFSET in range_constexpr(kUnroll):
         K_C = kStages + OFFSET
         read_slot = OFFSET % kAStages
@@ -775,10 +692,7 @@ def gemm1_body_v2(
 
     gpu.barrier()
 
-    # epilog: cshuffle -> (k_wave LDS reduce) -> SwiGLU -> fp4 + e8m0 requant (raw math)
-    # cshuffle slab is [BM, BN] f32. With k_wave>1 each K-wave writes its partial into its OWN slab
-    # (wave_k * BM*BN); a reduction then sums the k_wave slabs into slab 0, which the requant reads
-    # (unchanged). kw=1: wave_k=0, single slab, no reduce -> byte-identical.
+    # epilog: cshuffle -> (kw>1 LDS reduce into slab 0) -> SwiGLU -> fp4 + e8m0 requant (kw=1 byte-identical).
     slab_elems = BM * BN  # f32 elems per cshuffle slab
     lds_acc_fptr = lds_typed_ptr(lds_acc_base, T.f32)
 
@@ -791,9 +705,7 @@ def gemm1_body_v2(
     def acc(i, J, v):
         return acc_vecs[i][J][v]
 
-    # cshuffle: J//2 selects the 16-col n0 tile, J%2 gate(0)/up(1). Per-N-wave the NJ tiles span
-    # BN//num_n_waves gate cols (+ same for up). gate col base = wave_n*(BN//num_n_waves)//2
-    # (gate occupies [0, BN//2), up [BN//2, BN)). kw=1: num_n_waves=4 -> wave_n*32 (byte-identical).
+    # cshuffle: J//2 = 16-col n0 tile, J%2 = gate(0)/up(1); gate [0,BN//2), up [BN//2,BN) (kw=1: wave_n*32).
     gate_span = (BN // 2) // num_n_waves  # gate cols this N-wave covers
     for i in range_constexpr(kMChunks):
         row_base = fx.Int32(i * 16) + lane_div_16 * 4
@@ -810,8 +722,7 @@ def gemm1_body_v2(
 
     gpu.barrier()
 
-    # k_wave reduce: sum the k_wave partial slabs into slab 0. All 256 threads cooperatively cover
-    # the [BM, BN] slab (slab_elems / 256 elems per thread).
+    # k_wave reduce: 256 threads cooperatively sum the k_wave partial slabs into slab 0.
     if const_expr(k_wave > 1):
         tid_red = lane + wave * fx.Int32(64)  # 0..255
         per_thread = slab_elems // 256
@@ -829,11 +740,7 @@ def gemm1_body_v2(
     wave_grp = n_lane // 4
     kk = n_lane % 4
 
-    # Requant partition: the column-group covered by a thread is `n_lane` (gate cols n_lane*8..+7,
-    # since wave_grp*32 + 8*kk == n_lane*8). There are (BN//2)//8 = BN//16 gate col-groups, so the
-    # valid threads are n_lane < BN//16 (BN=256 -> all 16; BN=64 -> 4 == wave_grp 0). The gate/up
-    # split is at BN//2. BN=256 keeps the exact literal expressions (byte-identical); BN<256 predicates
-    # the aqout/ascaleout stores on n_lane so the shrunk tile never writes a neighbouring n_block.
+    # Requant partition: thread covers gate col-group n_lane (< BN//16 valid); BN<256 predicates the stores (BN=256 byte-identical).
     N_COL_GROUPS = BN // 16  # gate col-groups (BN=256:16, BN=64:4)
 
     # Output store via fx.copy (BufferCopy32b nt) over an i32 view; wave-uniform row base in view base.
@@ -873,15 +780,13 @@ def gemm1_body_v2(
         scales_per_mr[mr] = e8m0
 
         qscale_raw = _raw(qscale)
-        # byte position of this lane's 8 elems (fp8 doubles it; row stride is INTER). n_block covers
-        # BN//4 output bytes; within the block wave_grp*16 + kk*4 == n_lane*4 (linear INTER tiling,
-        # BN-independent). BN=256 keeps the literal form (byte-identical).
+        # byte position of this lane's 8 elems (linear INTER tiling; BN=256 keeps the literal form).
         if const_expr(BN == 256):
             byte_pos_fp4 = n_block_idx * (BN // 4) + wave_grp * 16 + kk * 4
         else:
             byte_pos_fp4 = n_block_idx * (BN // 4) + n_lane * 4
         if const_expr(is_f8_out):
-            # 8 f32 -> 8 fp8: lo holds elems 0..3, hi 4..7 (2 fp8 per cvt half).
+            # 8 f32 -> 8 fp8: lo = elems 0..3, hi = 4..7 (2 fp8 per cvt half).
             v2i16 = T.vec(2, T.i16)
             lo = _raw(Vec.filled(2, 0, fx.Int16))
             lo = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, lo, _raw(result[0]), _raw(result[1]), qscale_raw, 0)
@@ -889,7 +794,7 @@ def gemm1_body_v2(
             hi = _raw(Vec.filled(2, 0, fx.Int16))
             hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, _raw(result[4]), _raw(result[5]), qscale_raw, 0)
             hi = rocdl.cvt_scalef32_pk_fp8_f32(v2i16, hi, _raw(result[6]), _raw(result[7]), qscale_raw, 1)
-            # i32-elem off (uniform m_row in view base); lo at off, hi at off+1 (each vec2xi16 = one i32).
+            # lo at off, hi at off+1 (each vec2xi16 = one i32).
             elem_off = row_local * (K_G2_BYTES // 4) + (byte_pos_fp4 // 2)
             lo_i32 = Vec(lo).bitcast(fx.Int32)
             hi_i32 = Vec(hi).bitcast(fx.Int32)
@@ -913,21 +818,14 @@ def gemm1_body_v2(
             if const_expr(BN == 256):
                 fx.copy(out_copy_atom, out_reg, aqout_view[elem_off, None])
             else:
-                # BN<256: only n_lane < BN//16 col-groups are in this shrunk tile; other threads
-                # would address a neighbouring n_block, so predicate the store (device scf.if).
+                # BN<256: predicate the store so shrunk-tile threads don't write a neighbouring n_block.
                 if n_lane < fx.Int32(N_COL_GROUPS):
                     fx.copy(out_copy_atom, out_reg, aqout_view[elem_off, None])
 
     # ascaleout store via fx.copy (BufferCopy16b) over an i16 view; wave-uniform byte base in view base.
     asc_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.Int16)
     asc_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int16)
-    # ascaleout physical layout is a pure function of the ABSOLUTE 32-INTER-col scale group
-    #   g = n_block_idx*(BN//64) + wave_grp   (each stored e8m0 owns 32 INTER cols)
-    # -> gemm2 K-tile ku = g//8, i16-half ikxdl = (g>>2)&1, dword-lane group = g&3 (BN-independent,
-    # so the OUTPUT is byte-identical to BN=256 regardless of gemm1's tiling). BN=256: g = 4*nb+wg
-    # reduces ku,ikxdl,lane-group to the original literals (byte-identical). BN=64: BN//2 = 32 INTER
-    # cols = exactly ONE scale group per n_block, so only wave_grp==0 is a valid store (wave_grp>=1
-    # addresses cols outside this block) and g == n_block_idx.
+    # ascaleout layout keys on ABSOLUTE scale group g = n_block_idx*(BN//64)+wave_grp -> ku=g//8, ikxdl=(g>>2)&1, lane-grp=g&3 (BN-independent; BN=64: only wave_grp==0 stores).
     if const_expr(BN == 256):
         store_scale = kk == 0
     else:
@@ -943,9 +841,7 @@ def gemm1_body_v2(
             ikxdl = (g >> 2) & 1
             lane_grp = g & 3
         if const_expr(is_bm16):
-            # BM16: this block owns 32-row chunk == m_block_idx and fills only row-group 0
-            # (rg1 half is unused padding gemm2 never reads). One 16-row scale -> byte0 of the
-            # i16 pair (byte1 = pad 0). gemm2 reads only rg0 (opsel 0,2).
+            # BM16: block owns chunk==m_block_idx, fills only rg0 (16-row scale -> byte0, byte1 pad 0).
             chunk = m_block_idx
             base_i16 = (chunk * OUT_AS_PER_CHUNK_DW + ku * 64) * 2 + ikxdl
             asc_view = flat_buffer_view(arg_ascaleout, base_i16, T.i16, align=2, elem_bytes=2)
@@ -968,14 +864,11 @@ def gemm1_body_v2(
 
 
 def lds_bytes_for(K_TILES_TOTAL, KH_TILE_A=KH_TILE, BM=BM, k_wave=1, BN=BN):
-    # BM16 gathers one full 32-row scale chunk per 16-block (rg0-only); >=32 uses BM//32 chunks.
-    # k_wave>1: each K-wave group has its OWN A-staging region (k_wave x), the scale chunk stays
-    # shared (one copy, all K-tiles), and the cshuffle acc region holds k_wave partial slabs.
-    # BN sizes the cshuffle slab ([BM, BN] f32); BN=64 shrinks it 4x vs BN=256.
+    # A staging (k_wave per-K-wave regions) + shared scale chunk, unioned with the k_wave cshuffle slabs.
     kScaleSubBlocks = 1 if BM < 32 else BM // 32
-    s_aq_bytes = k_wave * kAStages * BM * KH_TILE_A  # per-K-wave A regions (kw=1: unchanged)
+    s_aq_bytes = k_wave * kAStages * BM * KH_TILE_A
     s_asc_bytes = kScaleSubBlocks * K_TILES_TOTAL * 256
-    lds_acc_bytes = k_wave * BM * BN * 4  # k_wave partial cshuffle slabs (kw=1: unchanged)
+    lds_acc_bytes = k_wave * BM * BN * 4
     return max(s_aq_bytes + s_asc_bytes, lds_acc_bytes)
 
 
@@ -988,9 +881,7 @@ def issue_a_load_lds_dt(
     rows_per_call = 64 // lanes_per_row  # 8 (fp4) / 4 (fp8)
     a_lane_row = lane // lanes_per_row
     rows_per_wave = BM // 4  # rows each wave loads (BM32: 8, BM64: 16)
-    # BM16 fp4: rows_per_wave(4) < rows_per_call(8) -> BM//rows_per_call (=2) waves each do one
-    # call; waves are wrapped round-robin so 2,3 redundantly re-load rows 0-15 (no OOB LDS write).
-    # BM>=32 keeps the original per-wave contiguous block scheme (byte-identical).
+    # BM16 fp4: partial-wave round-robin (waves 2,3 re-load, harmless); BM>=32 byte-identical per-wave blocks.
     partial_wave_gather = rows_per_wave < rows_per_call
     if const_expr(partial_wave_gather):
         n_gather_calls = BM // rows_per_call
@@ -1050,37 +941,24 @@ def gemm2_body_v2(
     g2_bhoist=True,
     g2_ascale_pf=True,
 ):
-    # gemm2 K-loop perf knobs (all default ON), no-op unless g2_kstages==2:
-    #   g2_kstages   2 -> B weight + B-scale prefetched one K-tile ahead into scf.for-carried
-    #                register fragments (double-buffer); 1 -> synchronous per-tile B load.
-    #   g2_bhoist    issue the next-tile B prefetch above the per-iteration LDS barrier (B is a
-    #                GMEM->register stream, not ordered by the A-LDS barrier) so the weight fetch
-    #                overlaps the barrier wait.
-    #   g2_ascale_pf prefetch the A-scale one K-tile ahead into a carried register so the MFMA does
-    #                not stall on its VMEM latency at the loop head.
+    # gemm2 K-loop perf knobs (default ON, no-op unless g2_kstages==2): kstages=2 double-buffers B weight+scale one tile ahead; bhoist issues that prefetch above the LDS barrier; ascale_pf prefetches A-scale one tile ahead.
     if g2_kstages not in (1, 2):
         raise AssertionError(f"g2_kstages must be 1 or 2, got {g2_kstages}")
-    # SBM (sort_block_m) is the moe_sorting padding unit; BM (=tile_m) is the compute tile.
-    # SBM==BM (default) is byte-identical. SBM>BM packs SBM//BM compute blocks per SBM sort block;
-    # the expert id is looked up at sei[(m_block_idx*BM)//SBM] instead of sei[m_block_idx].
+    # SBM (sort padding unit) >= BM (compute tile); SBM==BM default byte-identical (see gemm1_body_v2).
     if SBM is None:
         SBM = BM
-    aStages = aStages
     kMChunks = BM // 16  # 16-row MFMA row-groups (BM32: 2, BM64: 4)
     kSubBlocks = BM // 32  # 32-row A-scale chunks / scale-register groups (BM32: 1, BM64: 2)
-    # BM16: single 16-row block owning a full 32-row scale chunk (chunk == m_block_idx, rg0-only,
-    # rg_off=0 compile-time) -- mirrors gemm1. See gemm1_body_v2 for the rationale (opsel_a is a
-    # compile-time immediate).
+    # BM16: single 16-row block owning a 32-row scale chunk (chunk==m_block_idx, rg0-only); mirrors gemm1.
     is_bm16 = BM < 32
     rg_off = 0
     kScaleSubBlocks = 1 if is_bm16 else kSubBlocks
-    # A dtype: fp4 (gemm1 fp4-out) or fp8 (mxfp8); only the A path differs.
-    is_f8_a = a_dtype == "fp8"
+    is_f8_a = a_dtype == "fp8"  # only the A path differs
     a_pack = 1 if is_f8_a else 2
     KH_TILE_A = BK // a_pack
     slot_bytes = BM * KH_TILE_A
     cbsz_a = 0 if is_f8_a else 4
-    # Contraction K = inter_dim is runtime (i32_inter); INTER_MAX caps compile-time view/fragment bounds.
+    # Contraction K = inter_dim runtime (i32_inter); INTER_MAX caps compile-time view/fragment bounds.
     K_rt = fx.Int32(i32_inter)
     K_BYTES = K_rt // fx.Int32(a_pack)  # A row stride bytes (runtime)
     kc_rt = K_rt // fx.Int32(256)  # (K//32)//4//2
@@ -1092,20 +970,7 @@ def gemm2_body_v2(
     KH4 = K_rt // fx.Int32(8)  # i32 col stride (= K_HALF//4)
     K_TILES_MAX = INTER_MAX // BK
 
-    # OOB pad-skip num_records (has_pad only): K = inter_dim is the padded contraction; the trailing
-    # i32_kpad columns are zero pad. Size the per-16N-tile B-weight resource to the REAL K so the
-    # fully-pad 128-K weight halves buffer-load OOB -> 0 (no HBM fetch). Weight is the dominant
-    # bandwidth term; B-scale is NOT shrunk (256-K granular + host 256-align, sub-256 pad saves 0 and
-    # risks NaN -- see gemm1_body_v2). Same geometry as gemm1 (see bq_view docstring):
-    #   weight: halves_with_real = ceil(K_real/128), 1024 bytes/half.
-    # has_pad=False -> None (max_size=False, byte-identical default; AC-3).
-    # N-skip (has_pad only): N_real = N_OUT - i32_npad is the real model_dim output extent. gemm2's N
-    # dimension IS the model_dim output; its w2 N-tiles map 1:1 to model_dim output columns (make_bq_view
-    # `col`). A 16-N weight tile whose model_dim col base is >= N_real produces only pad output columns
-    # (unused -- sliced off by the real_model_dim reference), so its buffer is sized to 0 records -> every
-    # weight load OOB -> 0 (no HBM fetch). PERF-ONLY: the pad output columns are unused, so correctness
-    # holds even without the skip; this only drops the wasted w2 fetch. Computed ONLY under has_pad so the
-    # default variant emits zero extra IR (byte-identical; AC-3).
+    # has_pad OOB pad-skip (const_expr-gated, as gemm1): K-skip sizes 16N B-weight buffer to REAL K; N-skip zeros fully-pad-N w2 tiles (col >= N_real=N_OUT-npad; PERF-ONLY). B-scale NOT shrunk.
     bq_num_records = None
     N_real = None
     if const_expr(has_pad):
@@ -1114,9 +979,7 @@ def gemm2_body_v2(
         bq_num_records = halves_real * fx.Int32(1024)
         N_real = fx.Int32(N_OUT) - fx.Int32(i32_npad)
 
-    # block -> (m_block_idx, n_block_idx) ; e = sorted_expert_ids[sort_block] where the sort block
-    # is the SBM-padded block this compute block falls into (SBM==BM: sort_block == m_block_idx,
-    # emitted identically to the pre-sbm path).
+    # block -> (m_block_idx, n_block_idx); e = sorted_expert_ids[SBM-padded sort block] (SBM==BM: sort_block==m_block_idx).
     m_block_idx = bx_i32 // num_n_blocks
     n_block_idx = bx_i32 - m_block_idx * num_n_blocks
     eids_ptr = global_typed_ptr(arg_eids, T.i32)
@@ -1130,8 +993,7 @@ def gemm2_body_v2(
     lane_div_16 = lane // 16
     lane_mod_16 = lane % 16
 
-    # A-scale buffer resource + uniform base (A-scale load stays raw).
-    # BM16: one 32-row chunk per 16-block (chunk == m_block_idx). BM>=32: BM//32 chunks at m_row//32.
+    # A-scale buffer resource + uniform base (raw load); chunk = m_block_idx (BM16) else m_row//32.
     asc_per_mb = fx.Int32(kScaleSubBlocks) * kAS_per_chunk_dw * fx.Int32(4)
     asc_num = fx.Index(i32_max_m_blocks) * fx.Index(asc_per_mb)
     ascale_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_ascale)), num_records_bytes=asc_num)
@@ -1165,10 +1027,7 @@ def gemm2_body_v2(
         col = n_block_idx * BN + wave * (BN // 4) + j * 16
         nrec = bq_num_records
         if const_expr(has_pad):
-            # `col` IS this 16-N tile's model_dim output col base. Fully-pad tile (col >= N_real, and
-            # N_real is 16-aligned): size its buffer to 0 records -> every weight load OOB -> 0 (no HBM
-            # fetch). Else keep the K-skip records. select(pred, then, else) is a wave-uniform cmp+cndmask
-            # (n_block_idx/wave/j all uniform). Only emitted under has_pad (default byte-identical; AC-3).
+            # N-skip: fully-pad-N tile (col >= 16-aligned N_real) -> 0 records so weight loads OOB -> 0.
             nrec = (col < N_real).select(bq_num_records, fx.Int32(0))
         return bq_view(arg_bq, e * fx.Int32(N_OUT) + col, KH4, K_TILES_MAX, num_records_bytes=nrec)
 
@@ -1201,25 +1060,20 @@ def gemm2_body_v2(
             for _ in range_constexpr(kMChunks)
         ]
 
+    def issue_b_load_into(bqf, bsf, kt_rt):
+        # Issue B-weight + B-scale vmem loads for K-tile kt_rt into the given (per-stage) fragments.
+        for j in range_constexpr(4):
+            for half in range_constexpr(2):
+                fx.copy(b_catom, bq_views[j][lane_div_16, lane_mod_16, kt_rt, half, None], bqf[j][half])
+        for mw in range_constexpr(2):
+            fx.copy(bs_copy_atom, bscale_views[mw][lane_div_16, lane_mod_16, kt_rt, None], bsf[mw])
+
     def stream_b_tile(kt_rt):
-        # One K-tile of B / B-scale into fresh per-iter fragments (B streamed, not register-resident).
+        # Fresh per-iter fragments (B streamed, not register-resident) then issue_b_load_into.
         bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
         bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
-        for j in range_constexpr(4):
-            for half in range_constexpr(2):
-                fx.copy(b_catom, bq_views[j][lane_div_16, lane_mod_16, kt_rt, half, None], bqf[j][half])
-        for mw in range_constexpr(2):
-            fx.copy(bs_copy_atom, bscale_views[mw][lane_div_16, lane_mod_16, kt_rt, None], bsf[mw])
+        issue_b_load_into(bqf, bsf, kt_rt)
         return bqf, bsf
-
-    def issue_b_load_into(bqf, bsf, kt_rt):
-        # Issue B-weight + B-scale vmem loads for K-tile ``kt_rt`` into the given (per-stage) fragments.
-        # Same loads as stream_b_tile but writing caller-owned fragments (the 2-stage prefetch buffers).
-        for j in range_constexpr(4):
-            for half in range_constexpr(2):
-                fx.copy(b_catom, bq_views[j][lane_div_16, lane_mod_16, kt_rt, half, None], bqf[j][half])
-        for mw in range_constexpr(2):
-            fx.copy(bs_copy_atom, bscale_views[mw][lane_div_16, lane_mod_16, kt_rt, None], bsf[mw])
 
     def issue_a_ds_read(slot):
         issue_a_ds_read_dt(
@@ -1236,7 +1090,7 @@ def gemm2_body_v2(
     mma_atoms = scale_mma_atoms() if const_expr(not is_f8_a) else None
 
     def mfma_cluster(bqf, bsf, sa):
-        # opsel (gemm2 has no gate/up split): mni=J//2, in_b=J%2. sa is a per-32-row-chunk list.
+        # opsel (no gate/up split): mni=J//2, in_b=J%2; sa is a per-32-row-chunk list.
         for J in range_constexpr(4):
             mni, in_b = J // 2, J % 2
             sb = _raw(Vec(bsf[mni].load())[0])
@@ -1302,7 +1156,7 @@ def gemm2_body_v2(
         return n
 
     if const_expr(g2_kstages == 1):
-        # -- 1-deep pipe: synchronous B load per K-tile. --
+        # 1-deep pipe: synchronous B load per K-tile.
         for kt_iv, state in range(fx.Index(0), fx.Index(K_TILES_RT), fx.Index(1), init=load_c_carry()):
             store_c_carry(state)
             kt_rt = fx.Int32(kt_iv)
@@ -1317,11 +1171,7 @@ def gemm2_body_v2(
             results = yield load_c_carry()
         store_c_carry(results)
     else:
-        # -- 2-stage B software pipeline: B weight + B-scale prefetched one K-tile ahead. --
-        # Rotating single-buffer: the runtime scf.for cannot index a python stage list by the runtime
-        # kt, so we always consume the carried "current" B and prefetch the next tile's B into the same
-        # fragments, threading the prefetched VALUES through scf.for state (this iteration's prefetch
-        # becomes next iteration's current). Prologue loads tile 0.
+        # 2-stage B pipeline: consume carried "current" B, prefetch next tile into the same fragments via scf.for state.
         cur_bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
         cur_bsf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(2)]
         nxt_bqf = [[fx.make_fragment_like(frag_tmpl) for _ in range_constexpr(2)] for _ in range_constexpr(4)]
@@ -1333,7 +1183,7 @@ def gemm2_body_v2(
             nxt_saf = [fx.make_fragment_like(bs_frag_tmpl) for _ in range_constexpr(kScaleSubBlocks)]
 
         def load_b_carry():
-            # Flat list of the CURRENT (to-be-consumed) B-weight, B-scale then (opt) A-scale values.
+            # Flat CURRENT (to-consume) B-weight, B-scale, then (opt) A-scale values.
             out = []
             for j in range_constexpr(4):
                 for half in range_constexpr(2):
@@ -1361,7 +1211,7 @@ def gemm2_body_v2(
             return n
 
         def rotate_b_carry():
-            # Yield the PREFETCHED (next-tile) values so they become "current" next iteration.
+            # Yield the PREFETCHED (next-tile) values -> become "current" next iteration.
             out = []
             for j in range_constexpr(4):
                 for half in range_constexpr(2):
@@ -1374,7 +1224,7 @@ def gemm2_body_v2(
             return out
 
         def issue_a_scale_load_into(saf, kt_rt):
-            # Issue the A-scale vmem load(s) for K-tile kt_rt into the given (per-stage) fragment(s).
+            # A-scale vmem load(s) for K-tile kt_rt into the given (per-stage) fragment(s).
             sa = load_a_scale_tile(kt_rt)
             for sub in range_constexpr(kScaleSubBlocks):
                 saf[sub].store(sa[sub])
@@ -1389,16 +1239,14 @@ def gemm2_body_v2(
         def yield_carry():
             return load_c_carry() + rotate_b_carry()
 
-        # Prologue: prefetch tile 0's B/B-scale into the "current" fragments (their VALUES enter the
-        # loop via init=load_carry()).
+        # Prologue: prefetch tile 0's B/B-scale into "current" (VALUES enter via init=load_carry()).
         issue_b_load_into(cur_bqf, cur_bsf, fx.Int32(0))
         if const_expr(g2_ascale_pf):
             issue_a_scale_load_into(cur_saf, fx.Int32(0))
         rocdl.sched_barrier(0)
 
         def prefetch_next_b(kt_rt):
-            # Prefetch the NEXT tile's B (if it exists) into the prefetch fragments; if none, copy the
-            # current values through so rotate_b_carry yields well-defined state (unused after loop).
+            # Prefetch NEXT tile's B; if none, copy current through (rotate_b_carry state, unused after loop).
             nxt_b = kt_rt + fx.Int32(1)
             if nxt_b < K_TILES_RT:
                 issue_b_load_into(nxt_bqf, nxt_bsf, nxt_b)
@@ -1431,7 +1279,7 @@ def gemm2_body_v2(
                 sa = load_a_scale_tile(kt_rt)
             if const_expr(not g2_bhoist):
                 prefetch_next_b(kt_rt)
-            # Fence the MFMA chain from the B vmem loads so the next-tile loads ride ahead of compute.
+            # Fence the MFMA chain from the B vmem loads (next-tile loads ride ahead of compute).
             rocdl.sched_barrier(0)
             rocdl.s_setprio(1)
             mfma_cluster(cur_bqf, cur_bsf, sa)
@@ -1499,7 +1347,7 @@ def atomic_bf16_epilog(
     sweights_base = global_base_ptr1(arg_sweights)
     out_base = global_base_ptr1(arg_out)
 
-    # Prefetch sorted_token_ids / sorted_weights (invariant) so their latency overlaps the stores+barriers.
+    # Prefetch sorted_token_ids / sorted_weights (invariant); latency overlaps stores+barriers.
     packed = []
     weight = []
     for mr in range_constexpr(M_REPS):
@@ -1522,35 +1370,21 @@ def atomic_bf16_epilog(
 
     gpu.barrier()
 
-    # read back + weighted store. atomic: fadd into out[token_id] (per-token accumulate).
-    # reduce: plain non-atomic store into out[token_id*topk + s] (unique per (token,topk) slot;
-    # host reduces over topk). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
-    # ``if token_id < i32_M`` gates out padding rows (sentinel token_id == M). The default
-    # (SBM==BM and BM<=32, atomic) keeps the legacy plain-Python ``if`` (byte-identical: the store
-    # body always traces; the OOB padding-row write lands in allocator slack and never faulted).
-    # BM>=64 or SBM>BM or reduce promotes the guard to a real device ``scf.if`` so the padding-row
-    # store is genuinely skipped: at those the OOB write hit an illegal address --
-    #   - BM>=64 / sbm-decoupled: larger padding stride (a8w4/small-token; sbm padding).
-    #   - reduce: the padding-row out_row = M*topk + slot overshoots the [tokens*topk, H] buffer by
-    #     up to ``topk`` rows (topk x the atomic overshoot), which faults at large-M (e.g. DSV3
-    #     32768*9): the exactly-sized 4GB reduce buffer has no allocator slack to absorb it.
+    # read back + weighted store (atomic: fadd out[token_id]; reduce: store out[token_id*topk+slot]); token_id<i32_M gates padding: default plain-if (byte-identical), else device scf.if (their OOB write faults).
     guard_padding = BM >= 64 or SBM != BM or use_reduce
 
     def store_one_mr(mr):
         row_in_block = fx.Int32(mr * 8) + m_lane
         token_id = packed[mr] & fx.Int32(0x00FFFFFF)
         if const_expr(use_reduce):
-            # reduce out_row = token_id*topk + slot can reach tokens*topk (large-M, e.g. DSV3
-            # 32768*9); out_row*N_OUT*2 (bf16 byte off) then overflows i32. Compute the reduce
-            # element base in i64 so the store byte offset never wraps. (atomic out_row=token_id
-            # <= M keeps the i32 path byte-identical.)
+            # reduce out_row can reach tokens*topk (large-M) so compute the element base in i64 (atomic i32 path byte-identical).
             out_row = fx.Int64(token_id * fx.Int32(topk) + (packed[mr] >> fx.Int32(24)))
             row_base_addr = out_row * fx.Int64(N_OUT) + fx.Int64(n_block_idx * BN + col_start)
         else:
             out_row = token_id
             row_base_addr = out_row * N_OUT + n_block_idx * BN + col_start
         for s in range_constexpr(4):
-            # adjacent ee=0,1 are contiguous -> one <2xf32> load (as HIP vectorizes)
+            # adjacent ee=0,1 contiguous -> one <2xf32> load (as HIP vectorizes)
             idx0 = row_in_block * BN + col_start + s * 64
             v2 = Vec(lds_vec_load(lds_acc_base, idx0 * 4, Vec.make_type(2, fx.Float32), fx.Float32, align=8))
             pk = Vec.from_elements([v2[0] * weight[mr], v2[1] * weight[mr]], fx.Float32).to(fx.BFloat16)

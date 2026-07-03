@@ -43,8 +43,6 @@ __all__ = [
 
 def _get_cu_num() -> int:
     """CU count for the persistent-m fixed grid (env CU_NUM override, else device props)."""
-    import os
-
     env = os.environ.get("CU_NUM")
     if env:
         return int(env)
@@ -56,27 +54,9 @@ def _get_cu_num() -> int:
         return 304
 
 
-# ---- aiter-tuned per-token config dispatch (the dominant perf lever) ----
-# Source: aiter *_tuned_fmoe.csv best row per token (.humanize/kernel-agent/aiter-tuned-config-map.md).
-# Keyed by MoE family signature (model_dim, inter_dim, experts) -> {tokens: (block_m, epilog)}.
-# block_m is the CSV `block_m` column (sort/compute tile); epilog is the CSV stage2 mode
-# ('atomic' or 'reduce'). The selector clamps block_m to the currently-supported {32,64}
-# (BM128 is a follow-on; see select_pipe_config) and nearest-rounds an unlisted token count.
-#
-# The #1 lever is stage2 atomic-vs-reduce: reduce for the high-expert small-inter families
-# (DSV3 E257, Kimi/DSV4 E384) where atomic collapses under heavy per-token contention; atomic
-# for the low-expert large-inter GPT-OSS family. block_m tracks the CSV 32/64/128 column.
-#
-# Each value is (block_m_csv, epilog_csv). stage2 epilog + block_m come from this table; the
-# stage1-only BM128 tile and gemm2 persist are layered on top per-family (see
-# _STAGE1_BM128_MIN_TOK / _PERSIST_MIN_TOK and select_pipe_config). The remaining finer knobs
-# (bnt/xcd4/kw/kb) are separate follow-on wiring.
+# aiter-tuned dispatch: family (model_dim,inter_dim,experts) -> {tokens: (block_m_csv, epilog)}; select_pipe_config clamps block_m to {32,64}, snaps tokens. (aiter-tuned-config-map.md)
 _AITER_PIPE_TABLE = {
-    # DeepSeekV3 fp4 (7168/256/E257/k9) — reduce-dominant for our kernel. The CSV picks atomic at
-    # 2048/16384/32768, but those CSV rows rely on persist+sbm128 (unimplemented here); measured
-    # cold, reduce beats atomic at every one of those tokens for our current feature set (e.g.
-    # 32768: reduce comb 1408 vs atomic 814). block_m tracks the CSV column clamped to <=64, except
-    # tok=256 where BM32 reduce measured faster than BM64.
+    # DeepSeekV3 fp4 (7168/256/E257/k9) — reduce-dominant cold at every token; BM clamped <=64.
     (7168, 256, 257): {
         1: (32, "atomic"),
         2: (32, "reduce"),
@@ -95,10 +75,7 @@ _AITER_PIPE_TABLE = {
         16384: (64, "reduce"),
         32768: (64, "reduce"),
     },
-    # KimiK2 fp4 (7168/256/E384/k8) — reduce-dominant for our kernel. The CSV uses atomic below
-    # 16384 (with bnt2/persist), but measured cold reduce beats atomic at every token for our
-    # feature set (e.g. 32768: reduce 1169 vs atomic 651; 256: 106 vs 26). BM32 reduce is fastest
-    # <=1024, BM64 reduce >=2048.
+    # KimiK2 fp4 (7168/256/E384/k8) — reduce-dominant cold; atomic only <=8 tokens, BM32<=1024 else BM64.
     (7168, 256, 384): {
         1: (32, "atomic"),
         2: (32, "atomic"),
@@ -117,10 +94,7 @@ _AITER_PIPE_TABLE = {
         16384: (64, "reduce"),
         32768: (64, "reduce"),
     },
-    # DeepSeekV4 a8w4 (7168/512/E384/k6) — reduce-dominant for our kernel. The CSV uses atomic at
-    # large-M (with sbm128/persist), but measured cold reduce beats even atomic-BM64 at every token
-    # for our feature set (e.g. 32768: reduce 1426 vs atomic-BM64 1187). BM32 reduce fastest
-    # <=1024, BM64 reduce >=2048.
+    # DeepSeekV4 a8w4 (7168/512/E384/k6) — reduce-dominant cold at every token; BM32<=1024 else BM64.
     (7168, 512, 384): {
         1: (32, "reduce"),
         2: (32, "reduce"),
@@ -140,11 +114,7 @@ _AITER_PIPE_TABLE = {
         32768: (64, "reduce"),
         131072: (64, "reduce"),
     },
-    # GPT-OSS (3072/3072/E128/k4) swiglu — atomic-dominant (large inter=3072 => few tokens/expert
-    # row => low atomic contention, so atomic does NOT collapse here). BM64 atomic measured fastest
-    # at every token (e.g. 32768: BM64 2524 vs BM32 2203, already >= CSV target 1943); reduce is
-    # ~parity at mid tokens. Keep atomic throughout to protect the already-at/above-target large-M
-    # rows.
+    # GPT-OSS (3072/3072/E128/k4) swiglu — atomic-dominant (large inter -> low contention); BM64 atomic fastest.
     (3072, 3072, 128): {
         256: (64, "atomic"),
         512: (64, "atomic"),
@@ -159,8 +129,7 @@ _AITER_PIPE_TABLE = {
 
 
 def _norm_sbm(SBM, BM):
-    """Resolve SBM (sort_block_m): None -> SBM==BM (byte-identical). Both stages / the cache key
-    and the compile path share this normalization so None and BM map to the same variant."""
+    """Resolve SBM (sort_block_m): None -> SBM==BM (byte-identical); shared by cache key + compile path."""
     return BM if SBM is None else SBM
 
 
@@ -176,43 +145,20 @@ def _nearest_token_key(tok_map, tokens):
     return chosen
 
 
-# ---- stage1-only BM128 + persist wiring (evidence: aiter-tuned-config-map.md) ----
-# The high-expert small-inter families (DSV3 E257, Kimi/DSV4 E384) run the aiter CSV stage1 at
-# tile_m=128 (``t128x...``) from ~4096 tokens up while their stage2 stays at tile_m=64 with
-# sbm128 (BM128 regresses stage2/GPT-OSS per F1 — it is a stage1-only lever). We give gemm1 a
-# BM128 compute tile and keep gemm2 at its measured-optimal <=64 tile; the shared sort unit
-# becomes SBM=lcm(bm_stage1, bm_stage2)=128 so both stages agree on padding/expert-id lookup.
-# Keyed by family signature -> min token count to enable stage1 BM128. Gated by allow_bm128.
+# stage1-only BM128: family sig -> min tokens for a gemm1 BM128 tile (SBM=128, gemm2 stays <=64); allow_bm128-gated.
 _STAGE1_BM128_MIN_TOK = {
     (7168, 256, 257): 4096,  # DeepSeekV3 fp4
     (7168, 256, 384): 4096,  # KimiK2 fp4
     (7168, 512, 384): 4096,  # DeepSeekV4 a8w4
 }
 
-# persist (aiter `_persist`, gemm2 fixed-grid grid-stride): ON for the high-expert large-M reduce
-# rows (DSV3/Kimi fp4) where it cuts launch/tail overhead and lifts large-M occupancy (F2:
-# +5-17%); OFF for GPT-OSS (E128 large-inter — no benefit, keep the byte-identical one-shot grid).
-# Keyed by family signature -> min token count to enable gemm2 persist.
-#
-# NOTE: the a8w4/fp8-A gemm2 persist path is a KNOWN-BROKEN F2 combo (produces cos=0 at large M,
-# reproduces on rlcr/moe-persist-sbm alone — the multi-iteration grid-stride corrupts the fp8-A
-# accumulator/LDS state). The fp4 persist path is correct at all tokens (validated to 32768).
-# The dispatcher therefore enables persist ONLY for the fp4 families; DeepSeekV4 (a8w4, sig
-# (7168,512,384)) is deliberately excluded. The knob stays manually selectable (MXFP4_PERSIST=1)
-# but a8w4+persist is guarded fail-fast in compile_gemm2_a4w4_port so it can never silently ship
-# garbage. Re-add DSV4 here once the fp8-A persist path is fixed.
+# persist (aiter `_persist`): family sig -> min tokens; fp4 only (fp8-A persist known-broken, fail-fast in compile).
 _PERSIST_MIN_TOK = {
     (7168, 256, 257): 4096,  # DeepSeekV3 fp4
     (7168, 256, 384): 4096,  # KimiK2 fp4
 }
 
-# ---- tiny-M gemm1 BN=64 + k_wave=4 dispatch (evidence: bn64-kw4.md) ----
-# The high-expert small-inter fp4 families (DSV3 E257, Kimi E384; inter=256 -> N_OUT=512) are
-# block-count bound at tiny M: with BN=256 there are only N_OUT//256 = 2 N-blocks, so few blocks
-# cover the GPU. BN=64 gives N_OUT//64 = 8 N-blocks (4x coverage) and pairs with k_wave=4 (nnw=1)
-# to keep the K reduction busy -> DSV3 fp4 m=2 gemm1 ~1.5x (7.99 vs 12.58us). The coverage win ends
-# by m~=4 (enough M-blocks to fill the GPU), so BN=256+kw1 otherwise. Keyed by family signature ->
-# max token count (inclusive) to enable BN=64+kw4. gemm2 is BN-independent (unchanged).
+# tiny-M gemm1 BN=64+k_wave=4: family sig -> max tokens for block-count-bound fp4 families (bn64-kw4.md).
 _TINYM_BN64_MAX_TOK = {
     (7168, 256, 257): 2,  # DeepSeekV3 fp4
     (7168, 256, 384): 2,  # KimiK2 fp4
@@ -220,47 +166,27 @@ _TINYM_BN64_MAX_TOK = {
 
 
 def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=False):
-    """Host-side per-(shape, token) config picker from the aiter tuned map.
+    """Host-side per-(shape,token) config picker -> (BM, epilog, bm_stage1, persist, bn, k_wave).
 
-    Returns ``(BM, epilog, bm_stage1, persist, bn, k_wave)`` for the v2 pipe:
-
-    * ``BM`` -- the stage2/compute tile, the CSV block_m clamped to the currently-supported
-      compute tiles <=64 (128 -> 64). BM128 is a stage1-only lever (it regresses stage2), so the
-      stage2 tile never exceeds 64 here.
-    * ``epilog`` in {'atomic','reduce'} -- the #1 perf lever (reduce for high-expert small-inter
-      contention; atomic for low-expert large-inter).
-    * ``bm_stage1`` -- the gemm1 compute tile: 128 for the high-expert small-inter families at
-      large M (``_STAGE1_BM128_MIN_TOK``) when ``allow_bm128``, else == ``BM``. When
-      ``bm_stage1 != BM`` the caller must use SBM = lcm(bm_stage1, BM) (=128) as the shared sort
-      unit so both stages agree on padding / expert-id lookup.
-    * ``persist`` -- enable the gemm2 persistent-m grid for the high-expert large-M fp4 families
-      (``_PERSIST_MIN_TOK``, DSV3/Kimi); OFF for GPT-OSS (byte-identical one-shot grid) and for the
-      a8w4/fp8-A families (the fp8-A persist path is a known-broken F2 combo; see _PERSIST_MIN_TOK).
-    * ``bn, k_wave`` -- the gemm1 fused gate|up N-tile and intra-block K-slice. (64, 4) for the
-      high-expert small-inter fp4 families at tiny M (``_TINYM_BN64_MAX_TOK``, block-count bound),
-      (256, 1) otherwise (the shipped default, byte-identical).
-
-    Unlisted families fall back to the current default (BM=32, atomic, bm_stage1=32, persist=off,
-    bn=256, k_wave=1); unlisted token counts snap to the nearest lower bucket.
+    BM: stage2 tile (CSV block_m clamped <=64). epilog in {'atomic','reduce'}. bm_stage1: 128 for
+    _STAGE1_BM128_MIN_TOK families (allow_bm128; caller uses SBM=128) else BM. persist: fp4 large-M
+    (_PERSIST_MIN_TOK). bn,k_wave: (64,4) for _TINYM_BN64_MAX_TOK else (256,1). Unlisted families ->
+    default (32,'atomic',32,False,256,1); unlisted tokens snap to the nearest lower bucket.
     """
     sig = (model_dim, inter_dim, experts)
     fam = _AITER_PIPE_TABLE.get(sig)
     if fam is None:
         return 32, "atomic", 32, False, 256, 1
     bm_csv, epilog = fam[_nearest_token_key(fam, tokens)]
-    # stage2/compute tile: BM128 is stage1-only -> stage2 caps at 64.
-    bm = 64 if bm_csv >= 128 else bm_csv
+    bm = 64 if bm_csv >= 128 else bm_csv  # stage2 tile caps at 64 (BM128 is stage1-only)
     if bm not in (32, 64):
         bm = 32
-    # stage1 tile: BM128 for the listed high-expert families at large M (allow_bm128-gated).
     bm_stage1 = bm
     s1_min = _STAGE1_BM128_MIN_TOK.get(sig)
     if allow_bm128 and s1_min is not None and tokens >= s1_min:
         bm_stage1 = 128
-    # persist: high-expert large-M families only.
     p_min = _PERSIST_MIN_TOK.get(sig)
     persist = p_min is not None and tokens >= p_min
-    # tiny-M gemm1: BN=64 + k_wave=4 for the block-count-bound high-expert fp4 families at m<=2.
     t_max = _TINYM_BN64_MAX_TOK.get(sig)
     if t_max is not None and tokens <= t_max:
         bn, k_wave = 64, 4
@@ -270,20 +196,8 @@ def select_pipe_config(model_dim, inter_dim, experts, topk, tokens, allow_bm128=
 
 
 def gemm1_use_nt(experts, topk, tokens, bm_stage1):
-    """Reuse-aware gemm1 B-weight cache policy: True -> non-temporal (stream), False -> cached.
-
-    gemm1 is HBM-bound on the fp4 w1 weights. When there is >1 stage1 m-block per active
-    expert the weights are re-read across those blocks, so caching them hot in L2 is the win
-    (the shipped default, ``use_nt=False``). When there is <=1 m-block per expert (small/mid
-    M) each expert's weights are single-use, so caching only allocates L2 lines that are never
-    re-hit (measured L2 hit ~3% either way) while paying the non-streaming cost; streaming
-    (non-temporal) is then faster at identical HBM bytes.
-
-    Reuse metric = m-blocks per active expert = ceil((tokens*topk)/active) / bm_stage1, where
-    active = min(tokens*topk, experts). nt when that is <=1. Evidence (GPT-OSS 3072/3072,
-    E128, k4, gfx950): M=128 gemm1 208->181us, M=1024 217->192us (nt wins, <=1 block/expert);
-    M=2048 236->249us, M=4096 309->385us (cached wins, reuse). Byte-identical: only flips the
-    B-load coherence flag, HBM read bytes unchanged (605 vs 617 MB EA0 proxy).
+    """Reuse-aware gemm1 B-weight cache policy: nt (stream) when <=1 m-block per active expert
+    (single-use weights), else cached (reuse across blocks). Metric = ceil(slots/active)/bm_stage1.
     """
     slots = tokens * topk
     active = min(slots, experts)
@@ -295,18 +209,7 @@ def gemm1_use_nt(experts, topk, tokens, bm_stage1):
 
 
 def gemm2_use_nt(experts, topk, tokens, bm_stage2):
-    """Reuse-aware gemm2 B-weight (w2 down-proj) cache policy: True -> non-temporal, False -> cached.
-
-    Same reuse structure as gemm1: gemm2 streams the fp4 w2 weights per active expert across
-    that expert's m-blocks. When there is >1 stage2 m-block per active expert the w2 weights are
-    re-read across those blocks so caching them hot in L2 is the win (the shipped default,
-    ``use_nt=False``). When there is <=1 m-block per active expert (small/mid M, e.g. GPT-OSS
-    M<=1024) each expert's w2 is single-use: caching only allocates L2 lines that are never
-    re-hit while paying the non-streaming cost, so streaming (non-temporal) is faster at identical
-    HBM bytes. Reuse metric is identical to gemm1 (m-blocks per active expert), keyed on the
-    stage2 compute tile ``bm_stage2``. Evidence (GPT-OSS 3072/3072, E128, k4, M=128, gfx950):
-    gemm2 nt vs cached measured on identical-work harness -- see gptoss-gemm2-rootcause.md.
-    """
+    """Reuse-aware gemm2 w2 cache policy; identical reuse metric to gemm1, keyed on bm_stage2."""
     return gemm1_use_nt(experts, topk, tokens, bm_stage2)
 
 
@@ -332,12 +235,9 @@ def compile_gemm1_a4w4_port(
     BN=BN,
     has_pad=False,
 ):
-    # SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
-    # None -> SBM==BM (byte-identical); otherwise SBM must be a multiple of BM (SBM//BM compute
-    # blocks per SBM sort block, all sharing one expert).
+    # SBM (sort padding unit): None -> SBM==BM (byte-identical); else a multiple of BM.
     SBM = _norm_sbm(SBM, BM)
-    # use_nt IS the B-load cache policy: True -> non-temporal, False -> cached.
-    b_nontemporal = use_nt
+    b_nontemporal = use_nt  # B-load cache policy: True -> non-temporal, False -> cached
     if BM not in (16, 32, 64, 128):
         raise AssertionError(f"mxfp4_moe_gemm1 supports only BM in {{16,32,64,128}}, got BM={BM}")
     if SBM % BM != 0:
@@ -352,12 +252,7 @@ def compile_gemm1_a4w4_port(
     K = D_HIDDEN  # contraction (compile-time); inter_dim (N-output) is the runtime i32_inter arg
     assert K % BK == 0, f"D_HIDDEN (K) must be a multiple of {BK}, got {K}"
 
-    # k_wave (intra-block K-slice): split the K contraction across k_wave cooperating waves within
-    # the 256-thread (4-wave) block; each wave accumulates its K-slice, then the k_wave partials are
-    # reduced in LDS before the shared silu+quant epilogue. Guards: k_wave in {1,2,4} (<=4 waves so
-    # num_n_waves=4//k_wave >= 1 -> <=256 threads, well under the 512 cap); K%k_wave==0; the k_wave
-    # per-K-wave A regions + reduction slabs fit LDS (gfx950 160KB). (aiter's literal 4*tile_n<=tile_k
-    # scratch guard is for its per-group reduction; this port reduces full [BM,BN] slabs sized below.)
+    # k_wave (intra-block K-slice) guards: k_wave in {1,2,4}, K%k_wave==0, per-K-wave A + slabs fit LDS.
     LDS_LIMIT = 160 * 1024  # gfx950
     if k_wave not in (1, 2, 4):
         raise AssertionError(f"k_wave must be in {{1,2,4}} (4-wave block), got {k_wave}")
@@ -368,11 +263,7 @@ def compile_gemm1_a4w4_port(
             raise AssertionError("k_wave>1 requires interleave gate mode")
         if (K // BK) % k_wave != 0:
             raise AssertionError(f"K/BK ({K // BK}) must be divisible by k_wave ({k_wave})")
-    # BN (fused gate|up N-tile) in {64, 256}. BN=64 gives N_OUT//64 = 4x more N-blocks for tiny-M
-    # block-count coverage. In interleave mode each N-wave must hold >=2 j-tiles (a gate+up pair):
-    # NJ = (BN//num_n_waves)//16 must be even, i.e. BN//num_n_waves >= 32. num_n_waves = 4//k_wave, so
-    # BN=64 requires num_n_waves <= 2 -> k_wave in {2,4} (nnw=1 for the k_wave=4 tiny-M fix). BN=64 +
-    # k_wave=1 (nnw=4 -> 16 cols/wave = 1 j-tile, no gate/up pair) is not expressible in this scheme.
+    # BN (fused gate|up N-tile) in {64,256}; BN=64 needs interleave, fp4, and an even NJ>=2 (gate+up pair) -> k_wave in {2,4}.
     if BN not in (64, 256):
         raise AssertionError(f"BN must be in {{64, 256}}, got {BN}")
     if BN != 256:
@@ -389,27 +280,20 @@ def compile_gemm1_a4w4_port(
             )
 
     KH_TILE_A = BK // (1 if a_dtype == "fp8" else 2)
-    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM, k_wave=k_wave, BN=BN)  # K_TILES_TOTAL (inter-independent)
+    lds_bytes = lds_bytes_for(K // BK, KH_TILE_A, BM=BM, k_wave=k_wave, BN=BN)  # inter-independent
     if lds_bytes > LDS_LIMIT:
         raise AssertionError(f"k_wave LDS {lds_bytes} > {LDS_LIMIT} (BM={BM}, k_wave={k_wave})")
 
+    # Kernel-name tags empty on the default so its name/IR stays byte-identical (each non-default is a distinct variant).
     gu_tag = "il" if interleave else "sep"
     bnt_tag = "nt" if b_nontemporal else "cached"
     a_tag = "a8" if a_dtype == "fp8" else "a4"
     o_tag = "o8" if out_dtype == "fp8" else "o4"
-    # act tag empty for the default silu variant so its kernel name/IR stays byte-identical (AC-3);
-    # swiglu is a distinct compile-time variant (limit folded into the name).
     act_tag = "" if act == "silu" else f"_swiglu{swiglu_limit:g}"
-    # sbm tag empty when SBM==BM so the default variant keeps its byte-identical kernel name.
     sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
-    # kw tag empty at k_wave=1 so the default variant keeps its byte-identical kernel name (AC-3).
     kw_tag = "" if k_wave == 1 else f"_kw{k_wave}"
-    # bn tag empty at BN=256 so the default variant keeps its byte-identical kernel name (AC-3).
     bn_tag = "" if BN == 256 else f"_bn{BN}"
-    # pad tag empty when has_pad=False so the default variant keeps its byte-identical kernel name
-    # AND has no i32_kpad kernarg (AC-3). has_pad=True is a distinct compile variant that adds the
-    # runtime pad kernarg + weight-OOB pad-skip.
-    pad_tag = "_pad" if has_pad else ""
+    pad_tag = "_pad" if has_pad else ""  # has_pad adds the runtime pad kernarg + weight-OOB pad-skip
     name_suffix = f"h{K}_bm{BM}_{bnt_tag}_{gu_tag}_{a_tag}{o_tag}{act_tag}{sbm_tag}{kw_tag}{bn_tag}{pad_tag}_v2"
 
     @fx.struct
@@ -435,16 +319,12 @@ def compile_gemm1_a4w4_port(
         i32_kpad,
         i32_npad,
     ):
-        # Shared kernel body for both has_pad variants (@flyc.jit so the @flyc.kernel AST rewriter
-        # recurses into its scf `if` dispatch, like gemm1_body_v2). i32_kpad (K/contraction pad) and
-        # i32_npad (N/inter-output pad) are fx.Int32(0) (compile-time constants, no kernarg) in the
-        # default variant -> has_pad=False folds the pad math away (byte-identical; AC-3). Only the
-        # has_pad variant threads the runtime kpad/npad kernargs.
+        # Shared body for both has_pad variants (@flyc.jit -> rewriter recurses the scf if); default passes i32_kpad/i32_npad=0 (no kernarg), folding pad math away.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_base_i32 = fx.Int32(fx.ptrtoint(lds.buf.ptr))
         cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
         total_m_blocks = cumsum0 // fx.Int32(BM)
-        num_n_blocks = (fx.Int32(i32_inter) * fx.Int32(2)) // fx.Int32(BN)  # NUM_N_BLOCKS = N_OUT//BN
+        num_n_blocks = (fx.Int32(i32_inter) * fx.Int32(2)) // fx.Int32(BN)  # N_OUT // BN
         bound = total_m_blocks * num_n_blocks
         if fx.Int32(bx_i32) < bound:
             gemm1_body_v2(
@@ -640,14 +520,8 @@ def compile_gemm1_a4w4_port(
 
 # ---- gemm2 (down-proj) compile ----
 def _spart_output_tile_index(block_1d_id, M0, N0, group_num, m01):
-    """DSL port of ck_tile GemmSpatiallyLocalTilePartitioner<>::GetOutputTileIndex.
-
-    Grouped 2D rasterization mapping a 1D block index -> (m_block_idx, n_block_idx) so consecutive
-    block ids stay spatially local in the M0xN0 tile grid, spreading concurrently-scheduled blocks'
-    weight fetches across HBM channels (portable, XCD-count-independent). Bijection over [0, M0*N0).
-
-    block_1d_id, M0 : runtime fx.Int32 (M0 = total_m_blocks). N0 (= num_n_blocks), group_num, m01 :
-    compile-time Python ints.
+    """ck_tile GemmSpatiallyLocalTilePartitioner::GetOutputTileIndex: 1D block id -> spatially-local
+    (m_block_idx, n_block_idx), bijection over [0,M0*N0). block_1d_id/M0 runtime; N0/group_num/m01 compile-time ints.
     """
     gn = fx.Int32(group_num)
     n0 = fx.Int32(N0)
@@ -704,15 +578,9 @@ def compile_gemm2_a4w4_port(
     g2_ascale_pf=None,
     g2_spart=None,
 ):
-    """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) does per-token weighted
-    atomic-fadd; epilog='reduce' does a non-atomic store into out[token_id*topk + slot] (unique
-    per (token,topk) slot; host reduces over topk), mirroring main's accumulate=False path.
-    BM in {32,64} (per-launch parameter). inter_dim is a runtime arg (a multiple of BK=256,
-    <= INTER_MAX); INTER_MAX caps the compile-time B-view / LDS bounds. topk enters the reduce
-    output-row index (compile-time).
-
-    SBM (sort_block_m) is the moe_sorting padding unit, decoupled from the compute tile BM.
-    None -> SBM==BM (byte-identical); otherwise SBM must be a multiple of BM."""
+    """Compile the gemm2 a4w4 down-proj. epilog='atomic' (default) weighted atomic-fadd; 'reduce'
+    non-atomic store into out[token_id*topk+slot] (host reduces over topk). inter_dim runtime
+    (multiple of BK, <= INTER_MAX). SBM: None -> SBM==BM (byte-identical), else a multiple of BM."""
     SBM = _norm_sbm(SBM, BM)
     if BM not in (16, 32, 64, 128) or epilog not in ("atomic", "reduce"):
         raise AssertionError(
@@ -722,15 +590,7 @@ def compile_gemm2_a4w4_port(
     if SBM % BM != 0:
         raise AssertionError(f"SBM ({SBM}) must be a multiple of BM ({BM})")
     use_reduce = epilog == "reduce"
-    # gemm2 perf knobs (all default ON; env vars are optional overrides, explicit args win):
-    #   g2_kstages   2 = B weight+scale prefetched one K-tile ahead into double-buffered register
-    #                    fragments (1 = synchronous per-tile load).
-    #   g2_bhoist    issue the next-tile B prefetch above the per-iteration LDS barrier so the weight
-    #                fetch overlaps the barrier wait (no-op unless g2_kstages==2).
-    #   g2_ascale_pf prefetch the A-scale one K-tile ahead so the MFMA never stalls on it (no-op
-    #                unless g2_kstages==2).
-    #   g2_spart     aiter-style GemmSpatiallyLocalTilePartitioner block->(m,n) remap for HBM channel
-    #                balance, encoded GroupNum*100+M01 (402 = GroupNum4,M01=2); 0 = naive linear grid.
+    # gemm2 perf knobs (default ON; env override, explicit arg wins): kstages=2 double-buffers B one tile ahead; bhoist hoists that prefetch above the LDS barrier; ascale_pf prefetches A-scale; spart = SpatiallyLocalTilePartitioner remap GroupNum*100+M01 (402; 0=naive).
     if g2_kstages is None:
         g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "2"))
     if g2_kstages not in (1, 2):
@@ -758,28 +618,20 @@ def compile_gemm2_a4w4_port(
     lds_bytes = max(BM * BN * 4, aStages * slot_bytes)
     num_n_blocks = N_OUT // 256
 
+    # Kernel-name tags empty on the default so its name/IR stays byte-identical (each variant distinct).
     atag = "_a8" if is_f8 else ""
-    # atomic tag unchanged (byte-identical default); reduce is a distinct variant (topk folded in).
     etag = "atomic" if not use_reduce else f"reduce_tk{topk}"
-    # sbm tag empty when SBM==BM so the default variant keeps its byte-identical kernel name.
     sbm_tag = "" if SBM == BM else f"_sbm{SBM}"
-    # persist tag empty for the default one-shot grid (byte-identical); persist folds cu_num into
-    # the name (the fixed grid size is a distinct variant).
     if persist and cu_num <= 0:
         raise AssertionError(f"persist=True requires cu_num>0, got {cu_num}")
     if persist and is_f8:
-        # KNOWN-BROKEN F2 combo: the fp8-A gemm2 persist multi-iteration grid-stride corrupts the
-        # accumulator/LDS state and yields cos=0 at large M (reproduces on rlcr/moe-persist-sbm
-        # alone). fp4 persist is correct. Fail fast rather than silently shipping garbage.
+        # fp8-A gemm2 persist is a known-broken F2 combo (cos=0 at large M); fail fast.
         raise AssertionError(
             "a8w4/fp8-A gemm2 persist is not supported (known-broken F2 path: cos=0 at large M). "
             "Use persist only with a_dtype='fp4', or run a8w4 with persist=False."
         )
     persist_tag = "" if not persist else f"_persist_cu{cu_num}"
-    # pad tag empty when has_pad=False so the default keeps its byte-identical kernel name AND no
-    # i32_kpad kernarg (AC-3). has_pad=True adds the runtime pad kernarg + weight-OOB pad-skip.
-    pad_tag = "_pad" if has_pad else ""
-    # perf-knob kernel-name tags (empty when off -> distinct kernel per knob combination).
+    pad_tag = "_pad" if has_pad else ""  # has_pad adds the runtime pad kernarg + weight-OOB pad-skip
     ks_tag = "" if g2_kstages == 1 else f"_g2ks{g2_kstages}"
     bh_tag = "_bhoist" if g2_bhoist else ""
     apf_tag = "_apf" if g2_ascale_pf else ""
@@ -811,11 +663,7 @@ def compile_gemm2_a4w4_port(
         i32_kpad,
         i32_npad,
     ):
-        # Shared kernel body for both has_pad variants (@flyc.jit so the @flyc.kernel AST rewriter
-        # recurses into its scf `if` / grid-stride dispatch, like gemm2_body_v2). i32_kpad (K = inter
-        # contraction pad) and i32_npad (N = model_dim output pad) are fx.Int32(0) (compile-time
-        # constants, no kernarg) in the default variant -> has_pad=False folds the pad math away
-        # (byte-identical; AC-3). Only has_pad threads the runtime kpad/npad kernargs.
+        # Shared body for both has_pad variants (@flyc.jit -> rewriter recurses scf if / grid-stride); default passes i32_kpad/i32_npad=0 (no kernarg), folding pad math away.
         k_bytes = fx.Int32(i32_inter) // fx.Int32(1 if is_f8 else 2)  # A row stride bytes (runtime)
         aq_num = arith.index_cast(T.index, _raw(i32_max_m_blocks)) * fx.Index(fx.Int32(BM) * k_bytes)
         aq_rsrc = buffer_ops.create_buffer_resource_from_addr(_raw(fx.Int64(arg_aq)), num_records_bytes=aq_num)
@@ -840,9 +688,7 @@ def compile_gemm2_a4w4_port(
                     BM=BM,
                 )
 
-        # One (m_block, n_block) unit of work for a synthesized block index `unit_bx`: preload the
-        # A prologue for its m_row then run the body. Non-persist calls this once with the launched
-        # bx (byte-identical); persist calls it per grid-strided m-tile.
+        # One (m_block, n_block) unit for a synthesized unit_bx; non-persist calls once, persist per m-tile.
         def run_unit(unit_bx):
             gemm2_body_v2(
                 lds_base_i32,
@@ -879,8 +725,7 @@ def compile_gemm2_a4w4_port(
             )
 
         if const_expr(not persist and g2_spart <= 0):
-            # One-shot grid, naive linear block->(m,n): issue A->LDS before the cumsum load so HBM
-            # latency overlaps the bound check.
+            # One-shot naive linear block->(m,n): issue A->LDS before the cumsum load (latency overlap).
             issue_all_a_loads((bx_i32 // num_n_blocks) * fx.Int32(BM))
             rocdl.sched_barrier(0)
 
@@ -891,9 +736,7 @@ def compile_gemm2_a4w4_port(
             if fx.Int32(bx_i32) < bound:
                 run_unit(bx_i32)
         elif const_expr(not persist):
-            # One-shot grid with the spatial-partitioner block->(m,n) remap (g2_spart>0). Needs
-            # M0=total_m_blocks (runtime) so the cumsum is read FIRST, trading the naive path's
-            # A-prologue/cumsum overlap for HBM channel balance.
+            # One-shot with spatial-partitioner remap (g2_spart>0): needs M0=total_m_blocks so cumsum is read FIRST.
             cumsum0 = global_typed_ptr(arg_cumsum, T.i32)[0]
             total_m_blocks = cumsum0 // BM
             bound = total_m_blocks * fx.Int32(num_n_blocks)
@@ -907,10 +750,7 @@ def compile_gemm2_a4w4_port(
                 rocdl.sched_barrier(0)
                 run_unit(unit_bx)
         else:
-            # Persistent-m grid: a fixed grid of cu_num*num_n_blocks blocks. The launched block
-            # index encodes (m_tile0 in [0,cu_num), n_block); each block grid-strides over m-tiles
-            # with stride cu_num, looping [m_tile0, m_tile0+cu_num, ...) < total_m_blocks. Cuts
-            # launch/tail overhead and improves large-M occupancy (aiter `_persist`).
+            # Persistent-m: fixed cu_num*num_n_blocks grid; each block grid-strides m-tiles by cu_num (aiter `_persist`).
             m_tile0 = bx_i32 // fx.Int32(num_n_blocks)
             n_block = bx_i32 - m_tile0 * fx.Int32(num_n_blocks)
             c_stride = fx.Int32(cu_num)
@@ -991,8 +831,7 @@ def compile_gemm2_a4w4_port(
             arg_out_scale: fx.Int64,
             stream: fx.Stream,
         ):
-            # i32_max_m_blocks sizes the A/scale buffer resources (kernel body); i32_grid_blocks bounds
-            # the launch to the actual padded sorted-token m-blocks (avoids empty blocks at small tokens).
+            # i32_max_m_blocks sizes the buffer resources; i32_grid_blocks bounds the launch to real m-blocks.
             grid_x = arith.index_cast(T.index, i32_grid_blocks) * fx.Index(num_n_blocks)
             gemm2_kernel(
                 arg_aq,
@@ -1117,16 +956,8 @@ def get_g1(
     BN=BN,
     has_pad=False,
 ):
-    # inter_dim (gemm1 N-output) is a runtime arg; NE/topk are host-only (NE: gemm1_grid active-expert
-    # cap; topk: grid sizing). None of the three enters the compiled kernel, so none is a cache-key dim.
-    # act/swiglu_limit are compile-time (folded into the epilog), so both are cache-key dims.
-    # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
-    # k_wave (intra-block K-slice) is a compile-time cache-key dim; k_wave==1 is the byte-identical
-    # default variant. BN (fused gate|up N-tile) is a compile-time cache-key dim; BN==256 is the
-    # byte-identical default variant.
+    # Cache key = the compile-time dims (inter_dim/NE/topk are runtime or host-only, not keyed).
     SBM = _norm_sbm(SBM, BM)
-    # has_pad is a compile-time cache-key dim; has_pad=False is the byte-identical default variant
-    # (no i32_kpad kernarg). has_pad=True is a distinct variant with the runtime pad kernarg.
     key = (BM, use_nt, D_HIDDEN, interleave, a_dtype, out_dtype, act, swiglu_limit, SBM, k_wave, BN, has_pad)
     launch = G1_CACHE.get(key)
     if launch is None:
@@ -1149,22 +980,15 @@ def get_g1(
 
 
 def get_g2(BM, use_nt, D_HIDDEN, epilog, INTER_MAX, a_dtype, topk=1, SBM=None, persist=False, cu_num=0, has_pad=False):
-    # NE / inter_dim do not enter the compiled gemm2 kernel (inter_dim is a runtime arg); the only
-    # contraction-shape key is the compile-time cap INTER_MAX. epilog + topk are compile-time
-    # (reduce folds topk into the output-row index); atomic ignores topk.
-    # SBM (sort_block_m) is a compile-time cache-key dim; None means SBM==BM (byte-identical variant).
-    # persist (+ cu_num, the fixed-grid size) are compile-time cache-key dims; persist=False is the
-    # byte-identical one-shot-grid variant.
+    # Cache key = compile-time dims (inter_dim runtime; INTER_MAX caps it). topk keyed only for reduce.
     SBM = _norm_sbm(SBM, BM)
     topk_key = topk if epilog == "reduce" else 1
     cu_key = cu_num if persist else 0
-    # gemm2 perf knobs enter the compile cache key; defaults are ON (env vars are optional overrides),
-    # matching compile_gemm2_a4w4_port. See its docstring/comments for what each knob does.
+    # gemm2 perf knobs enter the key; defaults ON (env override), matching compile_gemm2_a4w4_port.
     g2_kstages = int(os.environ.get("MXFP4_G2_KSTAGES", "2"))
     g2_bhoist = os.environ.get("MXFP4_G2_BHOIST", "1") == "1"
     g2_ascale_pf = os.environ.get("MXFP4_G2_ASCALE_PF", "1") == "1"
     g2_spart = int(os.environ.get("MXFP4_G2_SPART", "402"))
-    # has_pad is a compile-time cache-key dim; has_pad=False is the byte-identical default variant.
     key = (
         BM,
         use_nt,
@@ -1237,30 +1061,12 @@ def mxfp4_moe_gemm1(
     inter_dim_pad=0,
     stream=None,
 ):
-    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers pre-allocated by caller.
+    """Stage-1 up/gate gemm: A_q x w1 -> inter (packed MXFP4/MXFP8, sorted); buffers caller-allocated.
 
-    ``model_dim_pad`` (>0): D_HIDDEN is the PADDED model_dim (contraction K); the trailing
-    model_dim_pad columns are host zero-pad. Enables the has_pad weight-OOB pad-skip variant, whose
-    kernel sizes the per-16N-tile B-weight buffer resource to the REAL K (= D_HIDDEN - model_dim_pad)
-    so the fully-pad 128-K weight halves buffer-load OOB -> 0 (no HBM fetch). 0 -> byte-identical
-    default (no pad kernarg).
-
-    ``inter_dim_pad`` (>0): D_INTER is the PADDED per-half inter (gemm1 N-output); the trailing
-    inter_dim_pad cols of EACH of the fused gate|up halves are pad. Enables the N-output pad-skip: a
-    16-N weight tile whose logical-inter base is >= (D_INTER - inter_dim_pad) has its buffer sized to
-    0 records so its weight loads OOB -> 0 (no HBM fetch, ~2*inter_dim_pad/N_OUT of the w1 N bytes).
-    Correctness-safe: pad-N output feeds gemm2's pad-K input, already OOB-skipped. Either pad>0
-    enables the shared has_pad variant; both fold to the byte-identical default at 0 (AC-3).
-
-    ``use_nt`` is the B-weight load cache policy (False -> cached, True -> non-temporal).
-    Default False: stage1 reuses each expert's weights across many m-blocks (large tokens
-    give many m-blocks per expert), so caching B in L2 is a large win on compute-bound
-    shapes and matches base's stage1 (``b_nt=0``). nt only helps when there is no reuse.
-
-    ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
-    moe_sorting sync). When given, the launch grid is bounded to the real work
-    ``(n_sorted_padded // BM) * num_n_blocks`` instead of the worst-case E-based bound, avoiding
-    empty blocks at small token counts. Falls back to the worst-case ``gemm1_grid`` bound if None.
+    model_dim_pad>0 (K contraction pad) / inter_dim_pad>0 (per-half N-output pad) enable the has_pad
+    weight-OOB pad-skip variant (fully-pad weight tiles load OOB -> 0); both 0 -> byte-identical default.
+    use_nt: B cache policy (False cached default -> reuse across m-blocks; True nt for no reuse).
+    n_sorted_padded (cumsum[0]): bounds the grid to real work; None -> worst-case gemm1_grid.
     """
     import torch
 
@@ -1282,16 +1088,13 @@ def mxfp4_moe_gemm1(
     sbm = _norm_sbm(SBM, BM)
     num_n_blocks = (2 * D_INTER) // BN
     if n_sorted_padded is None:
-        # E-based worst-case grid: sort padding is per SBM (the sort unit); the compute grid is
-        # in BM blocks (padded_rows // BM). SBM==BM reduces to the original gemm1_grid.
+        # E-based worst-case grid: sort padding per SBM, compute grid in BM blocks (SBM==BM -> gemm1_grid).
         active = min(n_tokens * topk, NE)
         padded_rows = ((n_tokens * topk + active * (sbm - 1) + sbm - 1) // sbm) * sbm
         grid = (padded_rows // BM) * num_n_blocks
     else:
         grid = (n_sorted_padded // BM) * num_n_blocks
-    # has_pad variant threads the runtime i32_kpad (K = D_HIDDEN, kpad = model_dim_pad) and i32_npad
-    # (N-output per-half inter pad = inter_dim_pad) kernargs right after i32_inter, matching the launch
-    # signature; default has no such kernargs (AC-3). Either pad may be 0 while the other is set.
+    # has_pad threads the runtime i32_kpad (model_dim_pad) + i32_npad (inter_dim_pad) after i32_inter.
     pad_args = (int(model_dim_pad), int(inter_dim_pad)) if has_pad else ()
     run_compiled(
         launch,
@@ -1343,30 +1146,13 @@ def mxfp4_moe_gemm2(
     model_dim_pad=0,
     stream=None,
 ):
-    """Stage-2 down-proj gemm. epilog='atomic' (default): weighted atomic.fadd into pre-zeroed out
-    [tokens, H] (opus-sort only). epilog='reduce': non-atomic weighted store into
-    out[token_id*topk + slot] of a [tokens*topk, H] buffer (host reduces over topk, applying any
-    EP valid_mask). Mirrors main mixed_moe_gemm_2stage accumulate=True/False.
+    """Stage-2 down-proj gemm. epilog='atomic' (default): weighted atomic.fadd into pre-zeroed
+    out[tokens,H]. epilog='reduce': non-atomic store into out[token_id*topk+slot] (host reduces topk).
 
-    ``inter_dim_pad`` (>0): D_INTER is the PADDED inter (contraction K); the trailing inter_dim_pad
-    cols are host zero-pad. Enables the has_pad weight-OOB K-skip (fully-pad 128-K w2 halves load OOB
-    -> 0, no HBM fetch). ``model_dim_pad`` (>0): D_HIDDEN is the PADDED model_dim (gemm2 N-output); the
-    trailing model_dim_pad output columns are unused (sliced off by the real_model_dim reference).
-    Enables the N-output pad-skip: a 16-N w2 weight tile whose model_dim col base is >= (D_HIDDEN -
-    model_dim_pad) has its buffer sized to 0 records so its weight loads OOB -> 0 (no HBM fetch). PERF-
-    ONLY (the pad output cols are unused). Either pad>0 enables the shared has_pad variant; both fold to
-    the byte-identical default at 0 (AC-3).
-
-    ``n_sorted_padded`` is the actual padded sorted-token count (cumsum[0], host-read after the
-    moe_sorting sync). When given, the launch grid is bounded to ``(n_sorted_padded // BM) *
-    num_n_blocks`` (real work) while ``max_m_blocks`` (from ``max_sorted``) still sizes the kernel's
-    A/scale buffer resources. Falls back to the full ``max_sorted`` grid if None.
-
-    ``persist`` (aiter `_persist`): launch a fixed grid of ``cu_num`` m-slots (times num_n_blocks);
-    each block grid-strides over the padded sort blocks (stride cu_num), looping over multiple
-    m-tiles. Cuts launch/tail overhead and improves large-M occupancy. The launched
-    ``i32_grid_blocks`` becomes ``cu_num`` (the fixed m-slot count) instead of the per-m-tile block
-    count. ``max_m_blocks`` still sizes the A/scale buffer resources. Default OFF (byte-identical).
+    inter_dim_pad>0 (K contraction pad) / model_dim_pad>0 (N-output pad) enable the has_pad weight-OOB
+    pad-skip (fully-pad w2 tiles load OOB -> 0; N-skip is PERF-ONLY); both 0 -> byte-identical default.
+    n_sorted_padded (cumsum[0]) bounds the grid to real work (max_sorted still sizes buffers); None -> full.
+    persist (aiter `_persist`): fixed cu_num m-slot grid, each block grid-strides m-tiles. Default OFF.
     """
     import torch
 
@@ -1390,14 +1176,12 @@ def mxfp4_moe_gemm2(
         raise AssertionError(f"D_INTER ({D_INTER}) exceeds compile cap INTER_MAX ({INTER_MAX_DEFAULT})")
     max_m_blocks = (max_sorted + BM - 1) // BM
     if persist:
-        # Fixed grid: cu_num m-slots (x num_n_blocks blocks); each block loops over its m-tiles.
+        # Fixed grid: cu_num m-slots; each block loops over its m-tiles.
         grid_blocks = cu_num
     else:
         grid_blocks = max_m_blocks if n_sorted_padded is None else (n_sorted_padded // BM)
     out_scale = out  # unused by the atomic epilog; any valid device ptr is fine
-    # has_pad variant threads the runtime i32_kpad (K = inter_dim, kpad = inter_dim_pad) and i32_npad
-    # (N = model_dim output pad = model_dim_pad) kernargs right after i32_inter, matching the launch
-    # signature; default has no such kernargs (AC-3). Either pad may be 0 while the other is set.
+    # has_pad threads the runtime i32_kpad (inter_dim_pad) + i32_npad (model_dim_pad) after i32_inter.
     pad_args = (int(inter_dim_pad), int(model_dim_pad)) if has_pad else ()
     run_compiled(
         launch,
