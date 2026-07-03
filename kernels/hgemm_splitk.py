@@ -13,7 +13,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, memref, scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
-from flydsl.expr.typing import T
+from flydsl.expr.typing import T, as_ir_value
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SMEM_CAPACITY_MAP, SmemAllocator, SmemPtr
 from kernels.tensor_shim import GTensor, STensor, _run_compiled, get_dtype_in_kernel
@@ -298,7 +298,7 @@ def compile_hgemm_kernel(
             # zero c if current block is the first block
             is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
             cond_ks0 = arith.cmpi(arith.CmpIPredicate.eq, ks_idx, fx.Index(0))
-            cond_ks0_if = scf.IfOp(cond_ks0, results_=[], has_else=False)
+            cond_ks0_if = scf.IfOp(as_ir_value(cond_ks0), results_=[], has_else=False)
             with ir.InsertionPoint(cond_ks0_if.then_block):
                 zero_vec = vector.broadcast(T.vec(LDG_VEC_SIZE, dtype_), c_zero_d)
                 for i in range_constexpr(LDG_REG_C_COUNT):
@@ -310,7 +310,7 @@ def compile_hgemm_kernel(
                     if const_expr(HAS_BIAS):
                         init_vec = BIAS_.vec_load((n_offset + n_local_idx,), LDG_VEC_SIZE)
                     cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, row_idx, fx.Index(m))
-                    cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
+                    cond_boundary_if = scf.IfOp(as_ir_value(cond_boundary), results_=[], has_else=False)
                     with ir.InsertionPoint(cond_boundary_if.then_block):
                         bytes_offset = C_.linear_offset((row_idx, n_offset + n_local_idx))
                         bytes_offset_i32 = arith.index_cast(T.i32, bytes_offset)
@@ -325,7 +325,7 @@ def compile_hgemm_kernel(
                         scf.YieldOp([])
                 gpu.barrier()
                 # trigger signal when zeroc is done by the first arrived block
-                is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
+                is_t0_cond_if = scf.IfOp(as_ir_value(is_t0_cond), results_=[], has_else=False)
                 with ir.InsertionPoint(is_t0_cond_if.then_block):
                     signal_ptr = get_llvm_ptr(signal, signal_idx, 4)
                     llvm.InlineAsmOp(
@@ -342,7 +342,7 @@ def compile_hgemm_kernel(
         def split_k_barrier():
             # spin-wait until signal triggered
             is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
-            is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
+            is_t0_cond_if = scf.IfOp(as_ir_value(is_t0_cond), results_=[], has_else=False)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
                 init_cur = arith.constant(0, type=T.i32)
                 w = scf.WhileOp([T.i32], [init_cur])
@@ -367,7 +367,7 @@ def compile_hgemm_kernel(
             rocdl.sched_barrier(0)
             gpu.barrier()
             # clean semaphore and signal if this is the last block within split-k group
-            is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
+            is_t0_cond_if = scf.IfOp(as_ir_value(is_t0_cond), results_=[], has_else=False)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
                 semaphore_ptr = get_llvm_ptr(semaphore, signal_idx, 4)
                 arrive_idx = llvm.AtomicRMWOp(
@@ -379,7 +379,7 @@ def compile_hgemm_kernel(
                     alignment=4,
                 ).result
                 cond_ksl = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(arrive_idx), fx.Index(SPLIT_K - 1))
-                cond_ksl_if = scf.IfOp(cond_ksl, results_=[], has_else=False)
+                cond_ksl_if = scf.IfOp(as_ir_value(cond_ksl), results_=[], has_else=False)
                 with ir.InsertionPoint(cond_ksl_if.then_block):
                     semaphore_[signal_idx] = arith.constant(0, type=T.i32)
                     signal_[signal_idx] = arith.constant(0, type=T.i32)
@@ -682,7 +682,7 @@ def compile_hgemm_kernel(
                 m_global_idx = m_offset + m_local_idx
                 n_global_idx = n_offset + n_local_idx
                 cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
-                cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
+                cond_boundary_if = scf.IfOp(as_ir_value(cond_boundary), results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     pk_val = cs_.vec_load((0, m_local_idx, n_local_idx), LDG_VEC_SIZE)
                     for ksi in range_constexpr(1, BLOCK_K_WARPS):
@@ -713,7 +713,7 @@ def compile_hgemm_kernel(
                 n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
                 cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
-                cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
+                cond_boundary_if = scf.IfOp(as_ir_value(cond_boundary), results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     vec = cs_.vec_load((0, m_local_idx, n_local_idx), LDG_VEC_SIZE)
                     for ksi in range_constexpr(1, BLOCK_K_WARPS):
