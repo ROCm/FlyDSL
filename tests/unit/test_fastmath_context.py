@@ -272,9 +272,7 @@ def test_fast_fp_math_defaults_kernel_fastmath_context():
 @pytest.mark.rocm_lower
 @requires_gpu
 def test_explicit_fastmath_hint_overrides_fast_fp_math_default():
-    hinted = flyc.compile[{"fast_fp_math": True, "fastmath": "contract"}](
-        _fm_launch_fast_fp_explicit_fastmath
-    )
+    hinted = flyc.compile[{"fast_fp_math": True, "fastmath": "contract"}](_fm_launch_fast_fp_explicit_fastmath)
     ir_text = _source_ir(hinted)
 
     muls = _arith_lines(ir_text, "arith.mulf")
