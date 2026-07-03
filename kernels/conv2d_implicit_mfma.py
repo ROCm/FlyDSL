@@ -18,6 +18,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
+from kernels.tensor_shim import _run_compiled
 
 # ---------------------------------------------------------------------------
 # Tile / wave constants
@@ -54,20 +55,6 @@ LDS_A_SIZE = STAGES * TILE_M * TILE_K
 LDS_B_SIZE = STAGES * TILE_N * TILE_K
 
 assert LDG_A_COUNT == 1 and LDG_B_COUNT == 1
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-
-def _run_compiled(exe, *args):
-    cf = getattr(exe, "_cf", None)
-    if cf is None:
-        cf = flyc.compile(exe, *args)
-        exe._cf = cf
-    else:
-        cf(*args)
-
 
 # ---------------------------------------------------------------------------
 # NCHW → NHWC transpose kernel
