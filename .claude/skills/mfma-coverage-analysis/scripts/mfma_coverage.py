@@ -95,18 +95,17 @@ def main():
     print(f"MFMA-covered: {cov} ({cov*100//span}%)   EXPOSED: {exp} ({exp*100//span}%)")
     print(f"cyc/mfma = {span/len(mfma):.2f}  (floor = {E})")
 
-    # Attribute the EXPOSED cycles (matrix unit idle) to instructions. Two facts:
-    #   1. Row = [cycle, issue_dur, STALL(r[2]), total_dur, code_id]. r[2] is the real
-    #      per-instruction stall. Ops with stall==0 (ds_read_b128, s_add) NEVER block.
-    #   2. A stall only COUNTS AS EXPOSED for the cycles the matrix unit was actually
-    #      idle -- i.e. the stall interval [cycle, cycle+stall) intersected with a
-    #      next_free GAP. A stall that overlaps MFMA execute is hidden (the pipe is
-    #      busy). (MFMAs issue ~8 cyc apart but each execute-slot is 16, so several
-    #      overlapping executes keep the unit busy well past any single [issue,issue+16);
-    #      using the next_free gaps as the "idle" mask handles this correctly.)
-    # Whatever exposed cycles are NOT covered by any stalling instruction are PURE IDLE
-    # (scheduling gaps / dependency slack, not a single op's fault) -- usually the top
-    # bucket, and the target for tighter MFMA packing rather than cutting one op.
+    # OCCUPANCY attribution: for every EXPOSED cycle (matrix unit idle), credit it to
+    # whatever instruction was occupying the issue port then. Each non-MFMA instruction
+    # occupies [its issue, next instruction's issue) -- i.e. its issue_dur PLUS any
+    # stall (r[2]); we do NOT separate issue vs stall, we just ask "while the matrix
+    # unit sat idle, which op was on the port?". Intersect each op's occupancy span
+    # with the next_free idle gaps and sum. This tiles the whole EXPOSED window with no
+    # gaps (every idle cycle has an owner), so the ranking directly says: to push
+    # cyc/mfma toward the floor, which non-MFMA ops must be REMOVED / SHRUNK from
+    # between the MFMAs. (Stall-vs-issue and who-"blocks" views were dropped -- what
+    # matters for MFMA-bound speedup is total occupancy stealing issue bandwidth.)
+    # Row = [cycle, issue_dur, stall, total_dur, code_id].
     def label(cid):
         t = code[cid][0].strip() if cid < len(code) else "?"
         o = op_of(code, cid)
@@ -124,20 +123,19 @@ def main():
             tot += min(g1, b) - max(g0, a)
         return tot
 
-    stall = collections.Counter()
-    for r in seg:
-        if op_of(code, r[4]).startswith("v_mfma") or len(r) < 3 or r[2] <= 0:
-            continue
-        e = gap_overlap(r[0], r[0] + r[2])
-        if e > 0:
-            stall[label(r[4])] += e
-    named = sum(stall.values())
-    pure_idle = exp - named
+    ni = [r for r in seg if not op_of(code, r[4]).startswith("v_mfma")]
+    ni.sort(key=lambda r: r[0])
+    occ = collections.Counter()
+    for i, r in enumerate(ni):
+        nxt = ni[i + 1][0] if i + 1 < len(ni) else hi
+        c = gap_overlap(r[0], nxt)
+        if c:
+            occ[label(r[4])] += c
     total = exp or 1
-    print(f"\n== EXPOSED {exp} cyc attributed (stall interval ∩ idle gap) ==")
-    print(f"  {pure_idle:6d} cyc ({pure_idle*100//total:2d}%)  <pure-idle: scheduling/dependency slack>")
-    for o, c in stall.most_common(15):
-        print(f"  {c:6d} cyc ({c*100//total:2d}%)  {o}")
+    print(f"\n== EXPOSED {exp} cyc ({exp*100/span:.1f}% of全局) by occupying instruction ==")
+    print(f"  {'cyc':>6} {'%exp':>5} {'%all':>5}  op")
+    for o, c in occ.most_common(18):
+        print(f"  {c:>6} {c*100//total:>4d}% {c*100/span:>4.1f}%  {o}")
 
 
 if __name__ == "__main__":
