@@ -192,6 +192,7 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   DISPATCH_MFMA_SSA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
   DISPATCH_MFMA_SSA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
   DISPATCH_MFMA_SSA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
+  DISPATCH_MFMA_SSA(32, 8, elemTyA.isBF16(), mfma_f32_32x32x8bf16_1k)
   DISPATCH_MFMA_SSA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
   DISPATCH_MFMA_SSA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
   DISPATCH_MFMA_SSA(16, 32, elemTyA.isBF16(), mfma_f32_16x16x32_bf16)
