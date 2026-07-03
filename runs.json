@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-03T13:00:53Z",
+ "updated": "2026-07-03T15:26:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127",
    "created_at": "2026-07-03T10:43:39Z",
-   "updated_at": "2026-07-03T10:45:07Z",
+   "updated_at": "2026-07-03T15:24:14Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -72,9 +72,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-03T10:45:07Z",
+     "started_at": "2026-07-03T15:24:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/84983390437"
     },
@@ -313,20 +313,20 @@
    "branch": "worktree-triton-style-occupancy-info",
    "event": "pull_request",
    "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151",
    "created_at": "2026-07-03T08:48:36Z",
-   "updated_at": "2026-07-03T09:23:05Z",
+   "updated_at": "2026-07-03T15:23:40Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-03T09:23:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-03T15:23:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151/job/84963904684"
     },
     {
