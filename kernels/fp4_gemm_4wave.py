@@ -334,7 +334,7 @@ class Mfma16x16x128Fp4:
     def idx(self, i, j):
         return i * self.n_tiles_b + j
 
-    def call(self, a, b, c, sa, sb, interleave=None):
+    def call(self, a, b, c, sa, sb, interleave=None, interleave_stride=1):
         """``sa`` / ``sb`` are lists (len n_groups) of packed-E8M0 i32 scales
         (4 sub-fields each, one full K=256 step for a 32-row pack-group).
 
@@ -355,6 +355,7 @@ class Mfma16x16x128Fp4:
         # ds_read/buffer_load fits free between MFMAs). Mirrors fp8 _interleaved_cluster.
         thunks = list(interleave) if interleave else []
         nth = [0]  # python-level counter (compile-time), not loop-carried
+        mth = [0]  # MFMA counter, for spacing thunks every `interleave_stride` MFMAs
         for ksub in range_constexpr(_FP4_PACK):
             for i in range_constexpr(self.n_tiles_a):
                 a_op = a[i][ksub]
@@ -365,9 +366,13 @@ class Mfma16x16x128Fp4:
                     sb_v = sb[j // _FP4_PACK]
                     jb = j % _FP4_PACK
                     c[self.idx(i, j)] = self._mfma_agpr(a_op, b_op, c[self.idx(i, j)], sa_v, sb_v, ksub, ia, jb)
-                    if nth[0] < len(thunks):
+                    # Issue a thunk only every `interleave_stride` MFMAs so a load gets
+                    # >1 MFMA execute-shadow to hide behind (vs bunched after the first
+                    # few MFMAs). Spreads buffer_load/ds_read across the quad.
+                    if nth[0] < len(thunks) and (mth[0] % interleave_stride) == 0:
                         thunks[nth[0]]()
                         nth[0] += 1
+                    mth[0] += 1
         while nth[0] < len(thunks):
             thunks[nth[0]]()
             nth[0] += 1
@@ -655,14 +660,6 @@ def compile_fp4_gemm_4w(
                 lambda: b_scale_ld.gather(k, slot, base_col),
             ]
 
-        def _read_scales(kstep):
-            """Per-lane scale read for K-step ``kstep`` -> (saR0,saR1,sbC0,sbC1),
-            each list[n_groups] of i32 (same shape the MFMA consumes)."""
-            slot = _slot(kstep)
-            saR0, saR1 = a_scale_ld.read(slot)
-            sbC0, sbC1 = b_scale_ld.read(slot)
-            return (saR0, saR1, sbC0, sbC1)
-
         # Accumulators: 2x2 64x64 quadrants per wave.
         c00_frag = [mfma.zero_value] * N_ACCUMS__16
         c01_frag = [mfma.zero_value] * N_ACCUMS__16
@@ -682,12 +679,15 @@ def compile_fp4_gemm_4w(
         b_s2r = S2RLoaderFp4(wave_j__0_1, N_TILES_B__4)
         store_c = StoreCFp4(C, c_m, c_n, mfma.idx, N_TILES_A__4, N_TILES_B__4, mn_aligned=mn_aligned)
 
-        # Prologue. Scale gathers for step 0/1 go FIRST (before the 32 g2s) so they
+        # Prologue. Scale gathers for step 0/1/2 go FIRST (before the 32 g2s) so they
         # are the OLDEST outstanding VMEM -- the main loop's wait_barrier(17) then
         # drains them naturally (vs issuing them last, where vmcnt(17) can't reach
         # them past the 32 newer g2s -> step-0 read got un-landed LDS -> big-K nan).
+        # DEPTH-3: scale[0] feeds the initial VGPR carry, scale[1]/scale[2] are read
+        # (into carry) during step 0/1; step kc then gathers scale[kc+3].
         _gather_scales(0, _slot(0))
         _gather_scales(1, _slot(1))
+        _gather_scales(2, _slot(2))
 
         a_g2s.load(a_cur0, A0_gl_offset + 0 * A_K_STEP) # 4个load.
         b_g2s.load(b_cur0, B0_gl_offset + 0 * B_K_STEP) # 4个...
@@ -706,6 +706,13 @@ def compile_fp4_gemm_4w(
         a0_frag = a_s2r.load(a_cur0)
         wait_barrier((3 * N_TILES_A__4) + (3 * N_TILES_B__4))
         b0_frag = b_s2r.load(b_cur0, preshuffled=True)
+
+        # Initial VGPR scale carry = scale[0] (gathered first in prologue, landed by
+        # the barriers above). The loop carries scale[kc] in VGPR; each step reads
+        # scale[kc+1] in the MFMA shadow. saR0/saR1/sbC0/sbC1 each list[n_groups] i32.
+        sc0_saR0, sc0_saR1 = a_scale_ld.read(_slot(0))
+        sc0_sbC0, sc0_sbC1 = b_scale_ld.read(_slot(0))
+        sc0 = (sc0_saR0, sc0_saR1, sc0_sbC0, sc0_sbC1)
 
 
         # Main-loop wait_barrier vmcnt. g2s and scale gathers are inline-asm so the
@@ -727,14 +734,32 @@ def compile_fp4_gemm_4w(
         # ``buf`` arg names below are fixed (cur0/cur1/next0/next1); a single step
         # mutates which physical buffer is "cur" via the pointer-pair swap, so the
         # step body is parameterized by the current pointer set passed in.
-        def _one_step(kc, a0f, b0f, accs, bufs):
+        def _read_scale_thunks(kc_idx, holder):
+            """4 thunks, each doing one half-read of scale[kc_idx] into holder
+            (holder = [saR0, saR1, sbC0, sbC1]). Co-issued in an MFMA shadow so the
+            read of NEXT step's scale is fully hidden (no exposed lgkmcnt at loop top;
+            scale lives in VGPR carry)."""
+            s = _slot(kc_idx)
+
+            def _r(dst, ld, half, _s=s):
+                holder[dst] = ld.read_half(_s, half)
+
+            return [
+                lambda: _r(0, a_scale_ld, 0),
+                lambda: _r(1, a_scale_ld, 1),
+                lambda: _r(2, b_scale_ld, 0),
+                lambda: _r(3, b_scale_ld, 1),
+            ]
+
+        def _one_step(kc, a0f, b0f, sc, accs, bufs):
             # bufs = (a_cur0, a_cur1, a_next0, a_next1, b_cur0, b_cur1, b_next0, b_next1)
             ac0, ac1, an0, an1, bc0, bc1, bn0, bn1 = bufs
-            # DEPTH-2 scale: scale[kc] was gathered into slot kc%3 two steps ago; its
-            # dwordx4...lds is the oldest outstanding VMEM, so the first wait_barrier
-            # (vmcnt) lets the ds_read below see landed LDS. scale[kc+2] is gathered at
-            # the END (after all g2s), into slot (kc+2)%3 -- distinct from kc%3 and
-            # (kc+1)%3, so the in-flight read[kc]/read[kc+1] don't alias the write.
+            # DEPTH-3 scale + VGPR carry: ``sc`` = scale[kc] ALREADY in VGPR (read in
+            # the prior step's MFMA shadow), so there is NO scale ds_read / lgkmcnt
+            # wait at the top of this step. This step (a) reads scale[kc+1] into the
+            # next carry inside the MFMA shadow, and (b) gathers scale[kc+3] (depth-3,
+            # so scale[kc+1] -- gathered at step kc-2 -- is landed at the barrier here).
+            saR0, saR1, sbC0, sbC1 = sc
             c00f, c01f, c10f, c11f = accs
             kc_i = fx.Int32(kc)
 
@@ -742,9 +767,7 @@ def compile_fp4_gemm_4w(
             _a1 = [None] * N_TILES_A__4
             _a0n = [None] * N_TILES_A__4
             _b0n = [None] * N_TILES_B__4
-            # This step prefetches K-step (kc+2). g2s offsets fully in Int32
-            # (A*_gl_offset is Index; kc_i is the Int32 loop var), so arith.addi
-            # operands match. a*_off = base + (kc+2)*A_K_STEP.
+            # This step prefetches K-step (kc+2) for g2s. a*_off = base + (kc+2)*STEP.
             ak = (kc_i + fx.Int32(2)) * fx.Int32(A_K_STEP)
             bk = (kc_i + fx.Int32(2)) * fx.Int32(B_K_STEP)
             a0_off = fx.Int32(A0_gl_offset) + ak
@@ -752,43 +775,32 @@ def compile_fp4_gemm_4w(
             b0_off = fx.Int32(B0_gl_offset) + bk
             b1_off = fx.Int32(B1_gl_offset) + bk
 
+            # Next-step scale carry: read scale[kc+1] in the MFMA shadow (4 thunks).
+            _scn = [None, None, None, None]  # saR0, saR1, sbC0, sbC1 for kc+1
+            _rd_scn = _read_scale_thunks(kc_i + 1, _scn)
+            # Scale[kc+3] gather (depth-3), co-issued in the MFMA shadow (2 thunks).
+            # Clamp to K_ITERS-1: the last loop step would gather scale[K_ITERS] (OOB
+            # -> memory fault); the clamped extra gather re-reads scale[K_ITERS-1]
+            # into the same slot (idempotent, its result is never consumed).
+            _gk = _min(kc_i + fx.Int32(3), fx.Int32(K_ITERS - 1))
+            _sc_gather = _gather_scale_thunks(_gk, _slot(_gk))
+
             wait_barrier(_MAIN_VMCNT)
-            # Scale ds_read, split by half so half-1 hides in the c00/c01 MFMA shadow:
-            # half-0 (saR0/sbC0) feeds c00/c01 now; half-1 (saR1/sbC1) is only needed
-            # by c10/c11 (two MFMA clusters later), so issue it as thunks in c00/c01.
-            sc_slot = _slot(kc_i)
-            saR0 = a_scale_ld.read_half(sc_slot, 0)
-            sbC0 = b_scale_ld.read_half(sc_slot, 0)
-            _saR1 = [None]
-            _sbC1 = [None]
-
-            def _rd_saR1(_s=sc_slot):
-                _saR1[0] = a_scale_ld.read_half(_s, 1)
-
-            def _rd_sbC1(_s=sc_slot):
-                _sbC1[0] = b_scale_ld.read_half(_s, 1)
-
-            # Both half-1 reads go in c00's shadow: c00 needs only half-0; sbC1 is
-            # needed by c01 (next MFMA) and saR1 by c10, so both must be ready after
-            # c00's execute window. c00 has 16 MFMAs -> plenty of shadow for 4 ds_read.
             il = (
                 _g2s_thunks(a_g2s, ac0, a0_off, N_TILES_A__4)
                 + _s2r_thunks(b_s2r, bc1, _b1, N_TILES_B__4, True)
-                + [_rd_saR1, _rd_sbC1]
+                + _rd_scn[:2]
             )
-            c00f = mfma.call(a0f, b0f, c00f, saR0, sbC0, interleave=il)
+            c00f = mfma.call(a0f, b0f, c00f, saR0, sbC0, interleave=il, interleave_stride=2)
             b1f = _b1
-            sbC1 = _sbC1[0]
 
-            il = _g2s_thunks(b_g2s, bc0, b0_off, N_TILES_A__4) + _s2r_thunks(a_s2r, ac1, _a1, N_TILES_A__4, False)
-            c01f = mfma.call(a0f, b1f, c01f, saR0, sbC1, interleave=il)
+            il = (
+                _g2s_thunks(b_g2s, bc0, b0_off, N_TILES_A__4)
+                + _s2r_thunks(a_s2r, ac1, _a1, N_TILES_A__4, False)
+                + _rd_scn[2:]
+            )
+            c01f = mfma.call(a0f, b1f, c01f, saR0, sbC1, interleave=il, interleave_stride=2)
             a1f = _a1
-            saR1 = _saR1[0]
-
-            # Scale[kc+2] gather thunks: co-issue in the MFMA shadow (appended after
-            # this step's g2s so their order stays late, but now hidden vs the old
-            # end-of-step back-to-back pair). One gather per the last two MFMA calls.
-            _sc_gather = _gather_scale_thunks(kc_i + 2, _slot(kc_i + 2))
 
             wait_barrier(_MAIN_VMCNT)
             il = (
@@ -796,7 +808,7 @@ def compile_fp4_gemm_4w(
                 + _s2r_thunks(a_s2r, an0, _a0n, N_TILES_A__4, False)
                 + _sc_gather[:1]
             )
-            c10f = mfma.call(a1f, b0f, c10f, saR1, sbC0, interleave=il)
+            c10f = mfma.call(a1f, b0f, c10f, saR1, sbC0, interleave=il, interleave_stride=2)
             a0nf = _a0n
 
             il = (
@@ -804,22 +816,38 @@ def compile_fp4_gemm_4w(
                 + _s2r_thunks(b_s2r, bn0, _b0n, N_TILES_B__4, True)
                 + _sc_gather[1:]
             )
-            c11f = mfma.call(a1f, b1f, c11f, saR1, sbC1, interleave=il)
+            c11f = mfma.call(a1f, b1f, c11f, saR1, sbC1, interleave=il, interleave_stride=2)
             b0nf = _b0n
 
+            sc_next = (_scn[0], _scn[1], _scn[2], _scn[3])
             new_bufs = (an0, an1, ac0, ac1, bn0, bn1, bc0, bc1)  # swap cur<->next
-            return a0nf, b0nf, (c00f, c01f, c10f, c11f), new_bufs
+            return a0nf, b0nf, sc_next, (c00f, c01f, c10f, c11f), new_bufs
 
         bufs0 = (a_cur0, a_cur1, a_next0, a_next1, b_cur0, b_cur1, b_next0, b_next1)
         n_a = 2 * N_TILES_A__4
         n_b = 2 * N_TILES_B__4
+        n_ga = N_TILES_A__4 // _FP4_PACK  # scale groups per A half (=len(saR0))
+        n_gb = N_TILES_B__4 // _FP4_PACK
+        n_sc = 2 * n_ga + 2 * n_gb  # sc = (saR0,saR1,sbC0,sbC1) flattened
         _R = arith._to_raw
 
-        # Scale is no longer loop-carried (it lives in triple-buffered LDS slots
-        # indexed by kc%3); carry = a0/b0 fragments + the 4 accumulator groups.
+        def _flat_sc(sc):
+            saR0, saR1, sbC0, sbC1 = sc
+            return [_R(v) for v in saR0] + [_R(v) for v in saR1] + [_R(v) for v in sbC0] + [_R(v) for v in sbC1]
+
+        def _unflat_sc(flat):
+            o = 0
+            saR0 = list(flat[o : o + n_ga]); o += n_ga
+            saR1 = list(flat[o : o + n_ga]); o += n_ga
+            sbC0 = list(flat[o : o + n_gb]); o += n_gb
+            sbC1 = list(flat[o : o + n_gb]); o += n_gb
+            return (saR0, saR1, sbC0, sbC1)
+
+        # Carry = a0/b0 fragments + VGPR scale carry (scale[kc]) + 4 accumulator groups.
         init_state = (
             _flat_frag(a0_frag)
             + _flat_frag(b0_frag)
+            + _flat_sc(sc0)
             + [_R(x) for x in c00_frag]
             + [_R(x) for x in c01_frag]
             + [_R(x) for x in c10_frag]
@@ -831,6 +859,8 @@ def compile_fp4_gemm_4w(
             off += n_a
             b0f = _unflat_frag(state[off : off + n_b], N_TILES_B__4)
             off += n_b
+            sc = _unflat_sc(state[off : off + n_sc])
+            off += n_sc
             c00f = list(state[off : off + N_ACCUMS__16])
             off += N_ACCUMS__16
             c01f = list(state[off : off + N_ACCUMS__16])
@@ -842,13 +872,14 @@ def compile_fp4_gemm_4w(
             accs = (c00f, c01f, c10f, c11f)
 
             # step kk
-            a0f, b0f, accs, bufs = _one_step(kk, a0f, b0f, accs, bufs0)
+            a0f, b0f, sc, accs, bufs = _one_step(kk, a0f, b0f, sc, accs, bufs0)
             # step kk+1 (pointers swapped once; swap again -> back to bufs0 at exit)
-            a0f, b0f, accs, bufs = _one_step(kk + 1, a0f, b0f, accs, bufs)
+            a0f, b0f, sc, accs, bufs = _one_step(kk + 1, a0f, b0f, sc, accs, bufs)
 
             new_state = (
                 _flat_frag(a0f)
                 + _flat_frag(b0f)
+                + _flat_sc(sc)
                 + [_R(x) for x in accs[0]]
                 + [_R(x) for x in accs[1]]
                 + [_R(x) for x in accs[2]]
@@ -862,9 +893,9 @@ def compile_fp4_gemm_4w(
         off += n_a
         b0_frag = _unflat_frag(state[off : off + n_b], N_TILES_B__4)
         off += n_b
-        # depth-2: scale[K_ITERS-2] / scale[K_ITERS-1] were gathered into LDS slots
-        # (K_ITERS-2)%3 / (K_ITERS-1)%3 during the loop's last iteration; read each
-        # from its slot after the wait_barrier that drains its gather (below).
+        # VGPR carry at loop exit = scale[K_ITERS-2] (each iter advances sc by 2).
+        sc = _unflat_sc(state[off : off + n_sc])
+        off += n_sc
         c00_frag = list(state[off : off + N_ACCUMS__16])
         off += N_ACCUMS__16
         c01_frag = list(state[off : off + N_ACCUMS__16])
@@ -874,17 +905,20 @@ def compile_fp4_gemm_4w(
         c11_frag = list(state[off : off + N_ACCUMS__16])
         off += N_ACCUMS__16
 
-        # Tail step K_ITERS - 2 (scale carried from loop's last prefetch).
-        # INTERLEAVED like the main loop: the b1/a1 ds_reads are issued as thunks in
-        # the shadow of the c00 MFMA cluster (c00 only needs a0/b0, already loaded),
-        # and the next-step a0'/b0' ds_reads in the c10 shadow -- so the LDS-read
-        # latency hides behind MFMA instead of being a serial stall.
+        # Tail step K_ITERS - 2: scale[K_ITERS-2] is the carried VGPR sc (no read).
+        # Read scale[K_ITERS-1] into the next carry in the c00 MFMA shadow.
+        saR0, saR1, sbC0, sbC1 = sc
+        _scn = [None, None, None, None]
+        _rd_scn = _read_scale_thunks(fx.Int32(K_ITERS - 1), _scn)
         _b1 = [None] * N_TILES_B__4
         _a1 = [None] * N_TILES_A__4
         wait_barrier((2 * N_TILES_A__4) + (2 * N_TILES_B__4))
-        saR0, saR1, sbC0, sbC1 = _read_scales(fx.Int32(K_ITERS - 2))
-        il = _s2r_thunks(b_s2r, b_cur1, _b1, N_TILES_B__4, True) + _s2r_thunks(a_s2r, a_cur1, _a1, N_TILES_A__4, False)
-        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il)
+        il = (
+            _s2r_thunks(b_s2r, b_cur1, _b1, N_TILES_B__4, True)
+            + _s2r_thunks(a_s2r, a_cur1, _a1, N_TILES_A__4, False)
+            + _rd_scn
+        )
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il, interleave_stride=2)
         b1_frag = _b1
         a1_frag = _a1
         c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, saR0, sbC1)
@@ -892,7 +926,7 @@ def compile_fp4_gemm_4w(
         _b0n = [None] * N_TILES_B__4
         wait_barrier((1 * N_TILES_A__4) + (1 * N_TILES_B__4))
         il = _s2r_thunks(a_s2r, a_next0, _a0n, N_TILES_A__4, False) + _s2r_thunks(b_s2r, b_next0, _b0n, N_TILES_B__4, True)
-        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, saR1, sbC0, interleave=il)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, saR1, sbC0, interleave=il, interleave_stride=2)
         c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, saR1, sbC1)
         a0_frag = _a0n
         b0_frag = _b0n
@@ -902,14 +936,13 @@ def compile_fp4_gemm_4w(
         b_cur0, b_next0 = b_next0, b_cur0
         b_cur1, b_next1 = b_next1, b_cur1
 
-        # Tail step K_ITERS - 1 (scale gathered in the loop into slot (K_ITERS-1)%3).
-        # Last step, no g2s prefetch; interleave the b1/a1 ds_reads into c00's shadow.
+        # Tail step K_ITERS - 1: scale[K_ITERS-1] read into the carry above.
         _b1 = [None] * N_TILES_B__4
         _a1 = [None] * N_TILES_A__4
         wait_barrier(0)
-        saR0, saR1, sbC0, sbC1 = _read_scales(fx.Int32(K_ITERS - 1))
+        saR0, saR1, sbC0, sbC1 = (_scn[0], _scn[1], _scn[2], _scn[3])
         il = _s2r_thunks(b_s2r, b_cur1, _b1, N_TILES_B__4, True) + _s2r_thunks(a_s2r, a_cur1, _a1, N_TILES_A__4, False)
-        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il)
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag, saR0, sbC0, interleave=il, interleave_stride=2)
         b1_frag = _b1
         a1_frag = _a1
         c01_frag = mfma.call(a0_frag, b1_frag, c01_frag, saR0, sbC1)
