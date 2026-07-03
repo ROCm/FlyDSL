@@ -1,5 +1,5 @@
 ---
-name: mfma-coverage-analysis
+name: 4wave-mfma-coverage-analysis
 description: From an ATT trace, find which hot-loop instructions are NOT hidden behind MFMA execution -- i.e. what is keeping cyc/mfma above the MFMA execute floor (16 for fp4, 32 for fp8 16x16x128). Models the matrix unit as a pipeline (next_free) for the EXPOSED cycles, then tiles those idle cycles by OCCUPYING instruction (issue_dur + stall, intersected with the idle gaps) so the ranking says which non-MFMA ops steal issue bandwidth between MFMAs. Reports %exp and %all. Use when a GEMM/attention kernel is MFMA-bound and you want to push cyc/mfma toward the floor, or the user asks "what isn't hidden behind MFMA", "哪些指令没被 mfma 掩盖", "暴露的指令", or which non-MFMA op is the biggest exposed stall.
 ---
 

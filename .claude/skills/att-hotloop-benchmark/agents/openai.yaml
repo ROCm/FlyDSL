@@ -1,4 +1,0 @@
-interface:
-  display_name: "ATT Hotloop Benchmark"
-  short_description: "Measure ATT barrier-window hot-loop cycles"
-  default_prompt: "Use $att-hotloop-benchmark to capture ATT and report hot-loop cycles for a FlyDSL kernel."
