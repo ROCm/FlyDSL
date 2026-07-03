@@ -32,7 +32,13 @@ kept in f32, so the denominator stays accurate; only the matmul operands are fp8
 Layouts (simple / logical, NOT the production preshuffle layout):
 
 * ``query``        ``[num_seqs, num_q_heads, head_dim]``                 f16/bf16
-* ``key_cache``    ``[num_blocks, num_kv_heads, block_size, head_dim]``   fp8 e4m3fnuz
+* ``key_cache``    ``[num_blocks, num_kv_heads, head_dim // 32, block_size, 32]``  fp8 e4m3fnuz
+                   (K stored with the head-quarter as the outer axis and token
+                    as the next-innermost, so that a wave's raw dwordx4 loads --
+                    which put adjacent lanes on adjacent tokens, not adjacent
+                    head-dim elements, per the MFMA A-operand's fixed lane roles
+                    -- land on contiguous, coalesced addresses instead of a
+                    ``head_dim``-byte stride per token)
 * ``value_cache``  ``[num_blocks, num_kv_heads, head_dim, block_size]``   fp8 e4m3fnuz
                    (V stored transposed so it is already the ``[N, K]`` operand
                     the MMA wants for ``P @ V``)
@@ -382,18 +388,37 @@ def compile_pa_decode_tile(
         def _load_phys(page):
             return fx.Int32(global_load_i32(bt_gp, seq * max_blocks_per_seq + page))
 
-        # ── raw dwordx4 K load (A operand) ──
+        # ── raw dwordx4 K load (A operand), BLOCKED layout ──
         # Lane (lane16, rgroup) feeds A row m=lane16 = token (a*64 + warp*16 +
         # lane16) with head[rgroup*32 : +32] — the same contiguous slice / head→
         # k_step permutation as q_ops, loaded straight to registers as two i64x2
         # (128-bit) transactions instead of the make_tiled_copy_A fragment the
         # MFMA atom layout caps at 64-bit.
+        #
+        # key_cache_ptr uses a BLOCKED layout, NOT the plain PA
+        # [num_blocks,num_kv_heads,block_size,HEAD] layout:
+        # [num_blocks, num_kv_heads, HEAD//32, block_size, 32] (fp8, 1B/elem) — the
+        # 32-byte head-quarter is the innermost/contiguous run per token, and
+        # consecutive tokens for a FIXED head-quarter are 32B apart. This exists
+        # because the plain layout puts head_dim (128B) innermost, so adjacent
+        # lanes (which own adjacent TOKENS, not adjacent head-dim slices, per the
+        # MFMA-fixed lane roles below) land 128B apart per global_load_i64x2 --
+        # confirmed via ATT trace + address-pattern analysis to be the dominant
+        # stall (~58% of all cycles) from poor cross-lane coalescing, matching
+        # production's own preshuffled/blocked K cache
+        # (`key_cache.permute(0,1,3,2,4)` in test_pa.py's small-block harness,
+        # which achieves a 16B adjacent-lane stride). Re-laying the axes so the
+        # head-quarter is outermost and token is next-innermost makes adjacent
+        # lanes (adjacent tokens, fixed head-quarter) exactly 32B apart --
+        # contiguous, coalesced multi-lane loads -- while keeping each lane's own
+        # 32B slice contiguous for the two i64x2 (w0/w1) reads below.
         c32 = arith.constant(32, type=T.i32)
         cHEAD = arith.constant(HEAD, type=T.i32)
+        c_nhgroup = arith.constant(HEAD // 32, type=T.i32)
 
         def _k_ops(phys, within_tile, a):
             token = within_tile * c_TILE_TOK + arith.constant(a * TOK_CHUNK, type=T.i32) + warp * c16 + lane16
-            base = ((phys * n_kv + kv_h) * block_size + token) * cHEAD + rgroup * c32
+            base = (((phys * n_kv + kv_h) * c_nhgroup + rgroup) * block_size + token) * c32
             w0 = fx.Vector(global_load_i64x2(kg, base))  # head[rgroup*32 : +16] -> k_step 0,1
             w1 = fx.Vector(global_load_i64x2(kg, base + arith.constant(16, type=T.i32)))  # +16:+32 -> k_step 2,3
             return [w0[0], w0[1], w1[0], w1[1]]
@@ -707,8 +732,8 @@ def pa_decode_tile(
 ) -> None:
     """Host entry point. See module docstring for the expected tensor layouts."""
     num_seqs, num_q_heads, head_dim = query.shape
-    num_blocks, num_kv_heads, block_size, _hd = key_cache.shape
-    assert _hd == head_dim
+    num_blocks, num_kv_heads, num_hgroups, block_size, hgroup_width = key_cache.shape
+    assert num_hgroups * hgroup_width == head_dim and hgroup_width == 32
     query_group_size = num_q_heads // num_kv_heads
     max_blocks_per_seq = block_tables.shape[1]
 

@@ -1269,8 +1269,16 @@ def _run_pa_decode_tile_case(num_kv_heads: int, group_size: int, context_len: in
     v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
     # fp8-quantize K/V (e4m3fnuz, the format gfx942 fp8 MMA consumes); the kernel
     # multiplies by the per-tensor scale to dequantize.
-    key_cache = (k_f / k_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
+    key_cache_plain = (k_f / k_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
     value_cache = (v_f / v_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
+    # kernel expects K in the BLOCKED layout [blocks,kv,head//32,block_size,32]
+    # (see kernels/pa_decode_tile.py module docstring); relayout once here, same
+    # as production relayouts K at quantization time (not per decode call).
+    key_cache = (
+        key_cache_plain.view(num_blocks, num_kv_heads, block_size, head_dim // 32, 32)
+        .permute(0, 1, 3, 2, 4)
+        .contiguous()
+    )
 
     block_tables = torch.zeros(num_seqs, max_blocks, dtype=torch.int32, device=dev)
     for s in range(num_seqs):
@@ -1291,7 +1299,7 @@ def _run_pa_decode_tile_case(num_kv_heads: int, group_size: int, context_len: in
     )
     torch.cuda.synchronize()
 
-    kc = key_cache.to(torch.float32) * k_scale
+    kc = key_cache_plain.to(torch.float32) * k_scale
     vc = value_cache.to(torch.float32) * v_scale
     refs = []
     for s in range(num_seqs):
