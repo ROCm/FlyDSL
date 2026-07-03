@@ -14,14 +14,15 @@ compiler-computed resource-usage summary as a comment block, e.g.::
 
 This is only emitted when the target machine is built with ``AsmVerbose``
 on. FlyDSL's ROCDL serializer (``mlir/lib/Target/LLVM/ROCDL/Target.cpp``,
-``SerializeGPUModuleBase::getTargetOptions()``) enables it, so
-``jit_function._dump_isa``'s ``.s`` output always carries this block.
+``SerializeGPUModuleBase::getTargetOptions()``) supports enabling it via
+``-asm-verbose`` in ``gpu-module-to-binary``'s ``opts`` argument, which
+``jit_function._dump_isa`` passes so its ``.s`` output carries this block.
 
 This module parses that block into a plain dict, so callers don't have to
 re-derive occupancy/register usage from device properties themselves.
 """
 
-from typing import Dict, Optional
+from typing import Dict
 
 KERNEL_INFO_HEADER = "; Kernel info:"
 
@@ -48,9 +49,3 @@ def parse_kernel_info(isa_text: str) -> Dict[str, str]:
         key, _, value = line.partition(":")
         info[key.strip()] = value.strip()
     return info
-
-
-def get_occupancy(isa_text: str) -> Optional[int]:
-    """Convenience accessor for the ``Occupancy`` field, as an int."""
-    value = parse_kernel_info(isa_text).get("Occupancy")
-    return int(value) if value is not None else None

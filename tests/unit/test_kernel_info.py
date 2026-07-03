@@ -5,7 +5,7 @@
 
 import pytest
 
-from flydsl.utils.kernel_info import get_occupancy, parse_kernel_info
+from flydsl.utils.kernel_info import parse_kernel_info
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
 
@@ -47,8 +47,3 @@ def test_parse_kernel_info_extracts_all_fields():
 
 def test_parse_kernel_info_missing_block_returns_empty():
     assert parse_kernel_info("no kernel info here") == {}
-
-
-def test_get_occupancy():
-    assert get_occupancy(SAMPLE_ISA) == 8
-    assert get_occupancy("nothing") is None
