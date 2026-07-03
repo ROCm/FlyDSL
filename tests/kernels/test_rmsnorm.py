@@ -907,6 +907,55 @@ def test_rmsnorm_autograd():
         raise SystemExit(1)
 
 
+def test_rmsnorm_eps_honored():
+    """eps must be baked into the kernel, not silently replaced by the module EPS."""
+    print("=" * 80)
+    print("Running RMSNorm eps-honored Test")
+    print("=" * 80)
+    torch.manual_seed(0)
+    M, N = 32, 256
+    x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+    w = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
+
+    for eps in (1e-5, 1e-6, 1e-2):
+        y = rmsnorm(x, w, eps=eps)
+        ref = x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + eps) * w
+        err = (y - ref).abs().max().item()
+        print(f"  eps={eps:g}: max err vs torch ref = {err:.3e}")
+        assert err < 1e-4, f"eps={eps} not honored (err={err})"
+
+    # A non-default eps must actually change the output (guards silent-ignore regressions).
+    diff = (rmsnorm(x, w, eps=1e-2) - rmsnorm(x, w, eps=1e-6)).abs().max().item()
+    print(f"  eps 1e-2 vs 1e-6 output diff = {diff:.3e} (must be > 0)")
+    assert diff > 0, "eps appears to be ignored"
+    print("  -> PASSED")
+
+
+@pytest.mark.multi_gpu
+def test_rmsnorm_multi_gpu():
+    """Compiled-fn cache must not reuse a device-0 kernel on device 1 (would fault)."""
+    print("=" * 80)
+    print("Running RMSNorm multi-GPU Test")
+    print("=" * 80)
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    torch.manual_seed(0)
+    N = 256
+    for dev in ("cuda:0", "cuda:1"):
+        x = torch.randn((16, N), device=dev, dtype=DTYPE_FP32, requires_grad=True)
+        w = torch.rand((N,), device=dev, dtype=DTYPE_FP32, requires_grad=True)
+        dy = torch.randn((16, N), device=dev, dtype=DTYPE_FP32)
+        y = rmsnorm(x, w)
+        y.backward(dy)
+        torch.cuda.synchronize(dev)
+        ref = x.detach() / torch.sqrt((x.detach() ** 2).mean(1, keepdim=True) + EPS) * w.detach()
+        err = (y.detach() - ref).abs().max().item()
+        print(f"  {dev}: out err={err:.3e}, dx finite={torch.isfinite(x.grad).all().item()}")
+        assert err < 1e-4 and torch.isfinite(x.grad).all()
+    print("  -> PASSED")
+
+
 @pytest.mark.large_shape
 def test_rmsnorm_large_shape():
     print("=" * 80)
@@ -1137,6 +1186,8 @@ if __name__ == "__main__":
     test_rmsnorm()
     test_rmsnorm_backward()
     test_rmsnorm_autograd()
+    test_rmsnorm_eps_honored()
+    test_rmsnorm_multi_gpu()
     test_rmsnorm_dynamicquant()
     test_rmsnorm_smoothquant()
     test_fused_add_rmsnorm()

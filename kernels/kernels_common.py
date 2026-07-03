@@ -13,12 +13,30 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import arith as _std_arith
 from flydsl._mlir.dialects import builtin
+from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import gpu as _gpu
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import scf as _scf
-from flydsl.expr import buffer_ops
+from flydsl.expr import arith as _expr_arith
+from flydsl.expr import buffer_ops, const_expr
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
+
+
+def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
+    """Build a global (address-space 1) ``!llvm.ptr`` at ``ptr + offset*dtype_bytes``.
+
+    Shared home for the LLVM-ptr arithmetic used by atomic/global accesses
+    (previously duplicated in hgemm_splitk.py and rmsnorm_kernel.py).
+    """
+    if ptr_type is None:
+        ptr_type = ir.Type.parse("!llvm.ptr<1>")
+    base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, ptr)
+    base_ptr = _llvm.PtrToIntOp(T.i64, base_ptr).result
+    byte_offset = _expr_arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
+    llvm_ptr = _llvm.AddOp(base_ptr, byte_offset, _llvm.IntegerOverflowFlags(0)).result
+    llvm_ptr = _llvm.IntToPtrOp(ptr_type, llvm_ptr).result
+    return llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
 
 
 @contextmanager
