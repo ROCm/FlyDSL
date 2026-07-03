@@ -449,7 +449,7 @@ def compile_fp8fp4_gemm(
         # path, so it reuses the FP8 schedules.
         if data_format in ("fp8", "a8w4"):
             if fp8_deep_pipeline_eligible:
-                return COMPUTE_SCHEDULE_FP8_COMPUTE_BOUND # COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
+                return COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
             return COMPUTE_SCHEDULE_FP8_QUADRANT
         return COMPUTE_SCHEDULE_ROW_MAJOR_STREAMING
 
