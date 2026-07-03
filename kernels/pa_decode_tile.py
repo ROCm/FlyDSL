@@ -39,9 +39,12 @@ Layouts (simple / logical, NOT the production preshuffle layout):
                     head-dim elements, per the MFMA A-operand's fixed lane roles
                     -- land on contiguous, coalesced addresses instead of a
                     ``head_dim``-byte stride per token)
-* ``value_cache``  ``[num_blocks, num_kv_heads, head_dim, block_size]``   fp8 e4m3fnuz
-                   (V stored transposed so it is already the ``[N, K]`` operand
-                    the MMA wants for ``P @ V``)
+* ``value_cache``  ``[num_blocks, num_kv_heads, head_dim // 16, block_size // 64, 16, 64]``  fp8 e4m3fnuz
+                   (V blocked the same way as K, by (head // 16, token // 64),
+                    so adjacent lanes -- which own adjacent HEAD values for PV's
+                    B operand -- are a contiguous 64B apart instead of a
+                    ``block_size``-byte stride, while each lane's own 64-token
+                    run stays contiguous)
 * ``block_tables`` ``[num_seqs, max_blocks_per_seq]``                    int32
 * ``context_lengths`` ``[num_seqs]``                                     int32
 * ``output``       ``[num_seqs, num_q_heads, head_dim]``                 f16
@@ -158,8 +161,8 @@ def compile_pa_decode_tile(
         psum_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, GS]   row sum
         pout_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, GS, HEAD] numerator
         query_ptr: fx.Tensor,  # [num_seqs, num_q_heads, HEAD]
-        key_cache_ptr: fx.Tensor,  # [num_blocks, num_kv_heads, block_size, HEAD]
-        value_cache_ptr: fx.Tensor,  # [num_blocks, num_kv_heads, HEAD, block_size]
+        key_cache_ptr: fx.Tensor,  # [num_blocks, num_kv_heads, HEAD//32, block_size, 32] (blocked, see module docstring)
+        value_cache_ptr: fx.Tensor,  # [num_blocks, num_kv_heads, HEAD//16, block_size//64, 16, 64] (blocked)
         block_tables_ptr: fx.Tensor,  # [num_seqs, max_blocks_per_seq]
         context_lengths_ptr: fx.Tensor,  # [num_seqs]
         key_scale: fx.Float32,
@@ -413,7 +416,6 @@ def compile_pa_decode_tile(
         # contiguous, coalesced multi-lane loads -- while keeping each lane's own
         # 32B slice contiguous for the two i64x2 (w0/w1) reads below.
         c32 = arith.constant(32, type=T.i32)
-        cHEAD = arith.constant(HEAD, type=T.i32)
         c_nhgroup = arith.constant(HEAD // 32, type=T.i32)
 
         def _k_ops(phys, within_tile, a):
@@ -434,24 +436,42 @@ def compile_pa_decode_tile(
                 flat.extend(_k_ops(phys, within_tile, a))
             return flat
 
-        # ── raw dwordx4 V load (B operand) ──
+        # ── raw dwordx4 V load (B operand), BLOCKED layout ──
         # PV contracts over token, so (like QK's head permutation) the token→k_step
         # mapping is free as long as V and P (p_ops) agree: lane (rgroup) takes the
         # contiguous token slice [rgroup*64 : +64] for its head (vh*VHE_SIZE +
-        # warp*16 + lane16), loaded as 4× i64x2 (128-bit) = 8 k_step operands.  V is
-        # [head, token] with token innermost/contiguous, so the slice is one run.
+        # warp*16 + lane16), loaded as 4× i64x2 (128-bit) = 8 k_step operands.
+        #
+        # value_cache_ptr uses a BLOCKED layout (same coalescing motivation as K,
+        # see its comment above): [num_blocks, num_kv_heads, HEAD//16,
+        # block_size//64, 16, 64] (fp8, 1B/elem) instead of the plain transposed
+        # [num_blocks,num_kv_heads,HEAD,block_size] -- adjacent lanes own adjacent
+        # HEAD values (lane16), so the plain layout's `block_size`-byte stride
+        # per lane (e.g. 1024B) is even worse than K's. Grouping by (head//16,
+        # token//64) with head-within-group (16, = lane16 exactly, since
+        # vh*VHE_SIZE and warp*16 are both multiples of 16) major and the
+        # 64-token run minor makes adjacent lanes exactly 64B apart -- and each
+        # lane's own 64-token run stays contiguous for its four i64x2 reads.
+        # head_group = vh*4+warp needs no runtime div/mod (VHE_SIZE=64 and 16
+        # both divide warp*16 and vh*VHE_SIZE evenly); token_group similarly
+        # combines within_tile (compile-time-loop-driven tile index) and rgroup.
         c64 = arith.constant(64, type=T.i32)
         NVOPS = TILE_TOK // MFMA_K  # 8 PV k_steps (256 tokens / K=32)
+        c_nhgroup16 = arith.constant(HEAD // 16, type=T.i32)
+        c_tokgroups_per_tile = arith.constant(TILE_TOK // 64, type=T.i32)
+        ntokgroup64 = block_size // c64
 
         def _v_ops(phys, within_tile, vh):
-            head = arith.constant(vh * VHE_SIZE, type=T.i32) + warp * c16 + lane16
-            tokv = within_tile * c_TILE_TOK + rgroup * c64
-            base = ((phys * n_kv + kv_h) * cHEAD + head) * block_size + tokv
+            head_group = arith.constant((vh * VHE_SIZE) // 16, type=T.i32) + warp
+            token_group = within_tile * c_tokgroups_per_tile + rgroup
+            base = (
+                (((phys * n_kv + kv_h) * c_nhgroup16 + head_group) * ntokgroup64 + token_group) * c16 + lane16
+            ) * c64
             ops = []
             for j in range_constexpr(NVOPS // 2):
                 w = fx.Vector(global_load_i64x2(vg, base + arith.constant(j * 16, type=T.i32)))
                 ops.extend([w[0], w[1]])
-            return ops  # NVOPS i64, token[rgroup*64 : +64] of this head
+            return ops  # NVOPS i64, the 64-token contiguous run for this head
 
         # ── prologue: prefetch the first tile's K + its block-table phys page ──
         num_tiles_m1 = num_tiles - arith.constant(1, type=T.i32)
