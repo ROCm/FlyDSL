@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-03T15:58:57Z",
+ "updated": "2026-07-03T16:01:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "pr/chained-comparison",
    "event": "pull_request",
    "title": "[Enh] Support chained comparison",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655653736",
    "created_at": "2026-07-03T10:48:37Z",
-   "updated_at": "2026-07-03T15:45:54Z",
+   "updated_at": "2026-07-03T15:59:55Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -38,10 +38,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-03T15:45:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-03T15:59:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655653736/job/84984066868"
     }
    ]
@@ -154,11 +154,11 @@
    "branch": "pr/vector-numeric-promotion-single",
    "event": "pull_request",
    "title": "[Fix] Consistent promotion rules for Vector and Numeric",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28652854500",
    "created_at": "2026-07-03T09:53:07Z",
-   "updated_at": "2026-07-03T09:54:20Z",
+   "updated_at": "2026-07-03T16:00:33Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -182,9 +182,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-03T09:54:20Z",
+     "started_at": "2026-07-03T16:00:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28652854500/job/84975030829"
     }
