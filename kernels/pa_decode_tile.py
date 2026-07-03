@@ -697,11 +697,21 @@ def pa_decode_tile(
         num_cus = 304
     ctx_max = max_blocks_per_seq * block_size
     base_ctas = max(1, num_seqs * num_kv_heads)
+    num_tiles = max(1, ctx_max // 256)  # 256-token compute blocks per sequence
+    # Two pressures on the partition count (grid.z):
+    #  - npart_by_occ: enough partitions to fill the CUs at LOW batch (>=1 CTA/CU).
+    #  - npart_by_gran: even at HIGH batch (base_ctas >= CUs) keep the per-CTA work
+    #    fine enough (~24 tiles/partition) so the grid oversubscribes the CUs like
+    #    production's persistent scheduler — one coarse CTA per sequence (NP=1)
+    #    only reaches ~1.6 waves/SIMD and leaves 2/3 of the occupancy empty; a few
+    #    partitions push it toward the ~3 waves/SIMD the hardware holds (measured
+    #    b128 ctx16384 -11%, b96 -26%, b256 -16%, no regression at low batch).
     npart_by_occ = (num_cus + base_ctas - 1) // base_ctas
-    npart_by_ctx = max(1, ctx_max // 256)  # don't split finer than ~1 compute block
-    npart_want = max(1, min(npart_by_occ, npart_by_ctx))
+    npart_by_gran = (num_tiles + 23) // 24
+    npart_by_ctx = num_tiles  # don't split finer than ~1 compute block
+    npart_want = max(1, min(max(npart_by_occ, npart_by_gran), npart_by_ctx))
     num_partitions = 1
-    for cand in (1, 2, 4, 8, 16, 32, 64):
+    for cand in (1, 2, 3, 4, 6, 8, 16, 32, 64):
         if cand <= npart_want:
             num_partitions = cand
     GS = query_group_size
