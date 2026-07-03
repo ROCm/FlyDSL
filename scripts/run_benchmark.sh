@@ -69,11 +69,30 @@ LAYERNORM_SHAPES='
 RMSNORM_SHAPES='
 32768,8192,bf16
 '
-# FlashAttention shapes: "batch,seq_len,num_heads,head_dim,dtype,causal"
+# FlashAttention shapes:
+#   preferred: "batch,seq_len,num_heads,num_kv_heads,head_dim,dtype,causal"
+#   legacy:    "batch,seq_len,num_heads,head_dim,dtype,causal" (num_kv_heads=num_heads)
 DEFAULT_FLASH_ATTN_FUNC_SHAPES='
-32,8192,8,128,bf16,true
-16,8192,16,128,bf16,true
-4,8192,64,128,bf16,true
+32,8192,8,8,128,bf16,true
+16,8192,16,16,128,bf16,true
+4,8192,64,64,128,bf16,true
+4,8192,64,8,128,bf16,true
+1,64,4,4,128,bf16,true
+1,64,4,4,128,bf16,false
+1,30,4,4,128,bf16,true
+1,30,4,4,128,bf16,false
+1,1,4,4,128,bf16,true
+1,1,4,4,128,bf16,false
+2,7,4,4,128,bf16,true
+2,7,4,4,128,bf16,false
+3,31,3,3,128,bf16,true
+3,31,3,3,128,bf16,false
+5,33,5,5,128,bf16,true
+5,33,5,5,128,bf16,false
+5,63,7,7,128,bf16,true
+5,63,7,7,128,bf16,false
+3,65,3,3,128,bf16,true
+3,65,3,3,128,bf16,false
 '
 FLASH_ATTN_FUNC_SHAPES="${FLASH_ATTN_FUNC_SHAPES:-${DEFAULT_FLASH_ATTN_FUNC_SHAPES}}"
 # MLA decode shapes: "batch,ctx_len" (DeepSeek MLA, fp8 Q/KV, nh=128).
@@ -92,7 +111,6 @@ fp8,5120,5120,8320,64,256,128
 fp8,9728,8192,8320,64,256,128
 fp8,8192,8192,8192,128,256,128
 int8,9728,8192,8320,64,256,128
-int4,9728,8192,8320,64,256,128
 bf16,5120,5120,8320,64,256,128
 '
 
@@ -125,20 +143,11 @@ FP8_GEMM_8WAVE_ROWSCALE_SHAPES='
 8192,8192,8192,256,256,0
 '
 
-# FP4 GEMM shapes (requires --wfp4, gfx950 only): "M,N,K,tile_m,tile_n,tile_k"
+# FP4 GEMM shapes (kernels/fp4_gemm_4wave.py, gfx950 only): "M,N,K"
+# The 4-wave kernel runs its native BLOCK_M=BLOCK_N=256, BLOCK_K=256 config.
 GEMM_FP4_SHAPES='
-8192,8192,8192,64,128,256
-8192,8192,8192,64,256,256
-8192,8192,8192,128,256,256
-8192,8192,8192,128,256,128
-'
-
-# Async FP4 GEMM shapes:
-# "M,N,K,tile_m,tile_n,tile_k[,waves_per_eu]"
-GEMM_FP4_SHAPES_ASYNC='
-
-8192,8192,8192,128,256,128,2
-8192,8192,8192,128,256,256,2
+8192,8192,8192
+16384,16384,16384
 '
 
 # MoE shapes: "tokens,model_dim,inter_dim,experts,topk,tile_m,tile_n,tile_k,tile_n2,tile_k2"
@@ -451,11 +460,14 @@ if tbps is None or tflops is None:
         tflops = float(m.group(1))
         tbps = float(m.group(2))
 
-# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s"
+# Softmax/Norm-style: "Kernel avg time: X ms" + "Bandwidth: Y GB/s".
+# Use the FIRST match: the base op (softmax/layernorm/rmsnorm) is benchmarked
+# first, so any later "Bandwidth:" lines come from fused/quant variants printed
+# by the same test (e.g. test_layernorm.py also runs fused_add/dynamicquant/
+# smoothquant). Taking the last match reported the slow scalar smoothquant path
+# as "layernorm" (~1.69 vs the real ~5.6 TB/s base).
 if tbps is None:
-    m_bw = None
-    for m_bw in re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt):
-        pass
+    m_bw = next(re.finditer(r"Bandwidth:\s*([0-9.]+)\s*GB/s", txt), None)
     if m_bw:
         tbps = float(m_bw.group(1)) / 1000.0
 
@@ -606,7 +618,14 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
     set -- $shape
     IFS=$oldIFS
-    batch=$1; seq_len=$2; heads=$3; head_dim=$4; dtype=$5; causal=$6
+    batch=$1; seq_len=$2; heads=$3
+    if [ "$#" -ge 7 ]; then
+      kv_heads=$4; head_dim=$5; dtype=$6; causal=$7
+    else
+      # Backward-compatible legacy format:
+      #   batch,seq_len,num_heads,head_dim,dtype,causal
+      kv_heads=$heads; head_dim=$4; dtype=$5; causal=$6
+    fi
     causal_flag="--causal"
     causal_tag="causal"
     case "${causal}" in
@@ -615,11 +634,12 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
         causal_tag="nocausal"
         ;;
     esac
-    log="${BENCH_LOG_DIR}/flash_attn_B${batch}_S${seq_len}_H${heads}_D${head_dim}_${dtype}_${causal_tag}.log"
-    if python3 tests/kernels/test_flash_attn_func.py \
+    log="${BENCH_LOG_DIR}/flash_attn_B${batch}_S${seq_len}_H${heads}_Hkv${kv_heads}_D${head_dim}_${dtype}_${causal_tag}.log"
+    if python3 tests/kernels/test_flash_attn_fwd.py \
       --batch "$batch" \
       --seq_len "$seq_len" \
       --num_heads "$heads" \
+      --num_kv_heads "$kv_heads" \
       --head_dim "$head_dim" \
       --dtype "$dtype" \
       "${causal_flag}" \
@@ -631,7 +651,7 @@ if [ "${RUN_FLASH_ATTN}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
       echo "flash_attn failed. Log: ${log}" >&2
       _show_fail_log "${log}" "flash_attn"
     fi
-    shape_tag="B${batch}S${seq_len}H${heads}D${head_dim}_${causal_tag}"
+    shape_tag="B${batch}S${seq_len}H${heads}Hkv${kv_heads}D${head_dim}_${causal_tag}"
     row="$(_py_parse_and_emit flash_attn "${shape_tag}" "${dtype}" "${log}")"
     set -- $row
     _emit_row "$1" "$2" "$3" "$4" "$5"
@@ -842,7 +862,8 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     done
   fi
 
-  # FP4 GEMM (gfx950 only)
+  # FP4 GEMM (kernels/fp4_gemm_4wave.py, gfx950 only); native 256x256x256 config
+  tile_m=256; tile_n=256; tile_k=256
   for shape in $GEMM_FP4_SHAPES; do
     [ -z "$shape" ] && continue
     oldIFS=$IFS
@@ -850,36 +871,31 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
     set -- $shape
     IFS=$oldIFS
-    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
+    M=$1; N=$2; K=$3
     dtype="fp4"
-    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
-    if python3 tests/kernels/test_preshuffle_gemm.py \
-      --wfp4 \
-      --in_dtype fp4 \
+    gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
+    log="${BENCH_LOG_DIR}/fp4_gemm_4wave_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}.log"
+    if python3 tests/kernels/test_fp4_gemm_4wave.py \
       --num_warmup 10 \
       --num_iters 100 \
       -M "$M" \
       -N "$N" \
       -K "$K" \
       --tile_m "$tile_m" \
-      --tile_n "$tile_n" \
-      --tile_k "$tile_k" >"${log}" 2>&1; then
+      --tile_n "$tile_n" >"${log}" 2>&1; then
       # Check if test was skipped due to architecture
-      if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
-        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      if grep -q "requires gfx950\|Skipping\|Skipped" "${log}"; then
+        _emit_row "gemm_fp4" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
-        row="$(_py_parse_and_emit gemm "${gemm_shape_tag}" "${dtype}" "${log}")"
+        row="$(_py_parse_and_emit gemm_fp4 "${gemm_shape_tag}" "${dtype}" "${log}")"
         set -- $row
         _emit_row "$1" "$2" "$3" "$4" "$5"
       fi
     else
       # Skip gracefully on unsupported architectures or missing features
-      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}"
-        _emit_row "gemm" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
+      if grep -q "requires gfx950\|gfx950\|Skipped\|not supported" "${log}" 2>/dev/null; then
+        _emit_row "gemm_fp4" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
       else
         FAIL_COUNT=$((FAIL_COUNT + 1))
         echo "gemm fp4 failed. Log: ${log}" >&2
@@ -889,64 +905,6 @@ if [ "${RUN_PRESHUFFLE_GEMM}" -eq 1 ] && [ "${IS_CDNA}" = "true" ]; then
     fi
   done
 
-  # FP4 GEMM async problem sizes (gfx950 only)
-  GEMM_FP4_USE_ASYNC_COPY="${GEMM_FP4_USE_ASYNC_COPY:-1}"
-  GEMM_FP4_WAVES_PER_EU="${GEMM_FP4_WAVES_PER_EU:-2}"
-
-  for shape in $GEMM_FP4_SHAPES_ASYNC; do
-    [ -z "$shape" ] && continue
-    oldIFS=$IFS
-    IFS=,
-    # shellcheck disable=SC2086 # intentional word-splitting on IFS=,
-    set -- $shape
-    IFS=$oldIFS
-    M=$1; N=$2; K=$3; tile_m=$4; tile_n=$5; tile_k=$6
-    shape_waves_per_eu="${7:-}"
-    dtype="fp4"
-
-    async_copy_flag=""
-    async_copy_tag="async_copy"
-    if [ "${GEMM_FP4_USE_ASYNC_COPY}" = "1" ] || [ "${GEMM_FP4_USE_ASYNC_COPY}" = "true" ]; then
-      async_copy_flag="--use_async_copy"
-    fi
-    waves_per_eu="${shape_waves_per_eu:-${GEMM_FP4_WAVES_PER_EU}}"
-    waves_per_eu_tag="${waves_per_eu}"
-
-    log="${BENCH_LOG_DIR}/preshuffle_gemm_${M}x${N}x${K}_${dtype}_t${tile_m}x${tile_n}x${tile_k}_${async_copy_tag}_${waves_per_eu_tag}.log"
-    if python3 tests/kernels/test_preshuffle_gemm.py \
-      --wfp4 \
-      --in_dtype fp4 \
-      --num_warmup 10 \
-      --num_iters 100 \
-      -M "$M" \
-      -N "$N" \
-      -K "$K" \
-      --tile_m "$tile_m" \
-      --tile_n "$tile_n" \
-      --tile_k "$tile_k" \
-      ${async_copy_flag} \
-      --waves_per_eu "${waves_per_eu}" >"${log}" 2>&1; then
-      if grep -q "Skipping FP4 GEMM test\|Skipped" "${log}"; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
-        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
-      else
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
-        row="$(_py_parse_and_emit gemm_fp4_async "${gemm_shape_tag}" "${dtype}" "${log}")"
-        set -- $row
-        _emit_row "$1" "$2" "$3" "$4" "$5"
-      fi
-    else
-      if grep -q "gfx950\|invalid choice\|Skipped\|not supported" "${log}" 2>/dev/null; then
-        gemm_shape_tag="${M}x${N}x${K}_tile${tile_m}x${tile_n}x${tile_k}_${waves_per_eu}tg"
-        _emit_row "gemm_fp4_async" "${gemm_shape_tag}" "${dtype}" "skip" "skip"
-      else
-        FAIL_COUNT=$((FAIL_COUNT + 1))
-        echo "gemm fp4 async failed. Log: ${log}" >&2
-        _show_fail_log "${log}" "gemm_fp4_async"
-      fi
-    fi
-  done
 fi
 
 # MoE (CDNA only — uses MFMA)

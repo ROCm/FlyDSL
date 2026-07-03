@@ -41,6 +41,7 @@ from ..._mlir.dialects import (
 )
 from .. import arith, vector
 from ..arith import _to_raw as _raw
+from ..meta import dsl_loc_tracing
 from ..typing import T
 from ..utils.arith import ArithValue as _ArithValue
 
@@ -198,6 +199,7 @@ def _i32_const(v: int) -> ir.Value:
 # ---------------------------------------------------------------------------
 
 
+@dsl_loc_tracing
 def make_tensor_descriptor_2d(
     global_ptr,
     lds_memref,
@@ -215,6 +217,8 @@ def make_tensor_descriptor_2d(
     lds_byte_offset=None,
     for_store: bool = False,
     atomic_barrier_enable: bool = False,
+    early_timeout: bool = False,
+    oob_outer_bound=None,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -237,7 +241,8 @@ def make_tensor_descriptor_2d(
         lds_memref:    The LDS memref value (already the correct buffer slot).
         global_offset: (outer_idx, inner_idx) as MLIR index values.
         tensor_shape:  (outer_size, inner_size) as Python ints.
-        strides:       (outer_stride, inner_stride) as Python ints.
+        strides:       (outer_stride, inner_stride); inner is a Python int, outer
+                       may be an int or a runtime i32/index Value (strided A/C).
         tile_shape:    (outer_tile, inner_tile) as Python ints.
         elem_bytes:    Element size in bytes (2 for f16/bf16, 4 for f32).
         pad_interval:  Padding interval in elements (0 to disable).
@@ -260,6 +265,24 @@ def make_tensor_descriptor_2d(
                        relying on TDM atomic-barrier semantics; this helper keeps
                        the encoded atomic-barrier address at zero, so all
                        participating waves must agree on that protocol.
+        early_timeout: Set the descriptor's early-timeout bit [21]. This is a
+                       multicast-load knob (1 = GL1 returns to the requesters
+                       present when GL2 data arrives, latecomers re-broadcast;
+                       default 0 = standard wider-merge timeout).
+        oob_outer_bound: Optional runtime outer-dim global extent (e.g. real M for
+                       a row-major A/C) for non-tile-aligned outer dims. When given,
+                       ``tensor_dim1`` is set to the tile-start-relative remaining
+                       extent ``max(0, oob_outer_bound - (outer_off + warp_off_outer))``
+                       while ``tile_dim1`` is left at the full per-warp tile, so the
+                       partial last tile exceeds the tensor bound and the HW
+                       OOB-handles the overhang. On the validated eng-sample a
+                       regular-D# load issues no global fetch for the OOB rows
+                       (fault-safe) and zero-fills them in LDS. Store-side OOB via
+                       this field is HW-context dependent and not relied upon by
+                       callers (see flydsl_fp8_perf/m_pad_oob/FINDINGS.md). Accepts a
+                       Python int or an i32/index ir.Value. None (default) keeps
+                       tensor_dim1 == tile_dim1 (OOB off) — byte-identical to the
+                       original path.
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -270,6 +293,23 @@ def make_tensor_descriptor_2d(
     outer_stride, inner_stride = strides
     outer_tile, inner_tile = tile_shape
     outer_off, inner_off = global_offset
+
+    # outer_stride may be a compile-time int or a runtime i32/index Value (strided
+    # A/C). Normalise to an index value for address math and remember if runtime.
+    if isinstance(outer_stride, int):
+        outer_stride_idx = arith.index(outer_stride)
+        outer_stride_is_runtime = False
+    else:
+        os_val = outer_stride.ir_value() if hasattr(outer_stride, "ir_value") else outer_stride
+        if not isinstance(os_val, ir.Value):
+            raise TypeError(f"outer stride must be int or i32/index ir.Value, got {type(outer_stride).__name__}")
+        if isinstance(os_val.type, ir.IndexType):
+            outer_stride_idx = _ArithValue(os_val)
+        elif isinstance(os_val.type, ir.IntegerType) and os_val.type.width == 32:
+            outer_stride_idx = arith.index_cast(T.index, os_val)
+        else:
+            raise TypeError(f"outer stride ir.Value must be index or i32, got {os_val.type}")
+        outer_stride_is_runtime = True
 
     # -- Warp distribution --
     warps_per_dim, block_per_warp = compute_warp_distribution(
@@ -300,9 +340,9 @@ def make_tensor_descriptor_2d(
     a_raw = global_ptr.__extract_to_ir_values__()[0]
     glb_ptr = _fly_d.extract_aligned_pointer_as_index(glb_ptr_type, a_raw)
     glb_base_i64 = _ArithValue(llvm_dialect.ptrtoint(i64, glb_ptr))
-    glb_elem_off = (outer_off + warp_off_outer) * arith.index(outer_stride) + (
-        inner_off + warp_off_inner
-    ) * arith.index(inner_stride)
+    glb_elem_off = (outer_off + warp_off_outer) * outer_stride_idx + (inner_off + warp_off_inner) * arith.index(
+        inner_stride
+    )
     glb_byte_off = glb_elem_off * arith.index(elem_bytes)
     glb_byte_off_i64 = arith.index_cast(T.i64, glb_byte_off)
     glb_addr_i64 = glb_base_i64 + glb_byte_off_i64
@@ -368,12 +408,13 @@ def make_tensor_descriptor_2d(
 
     # sgpr0: config bitfields
     _abe = 1 if atomic_barrier_enable else 0
+    _early_timeout = 1 if early_timeout else 0
     g1_s0_upper = (
         (data_size_code << 16)  # data_size [17:16]
         | (_abe << 18)  # atomic_barrier_enable
         | (0 << 19)  # iterate_enable
         | (pad_enable << 20)  # pad_enable
-        | (0 << 21)  # early_timeout
+        | (_early_timeout << 21)  # early_timeout
         | (enc_interval << 22)  # pad_interval [24:22]
         | (enc_amount << 25)  # pad_amount [31:25]
     )
@@ -389,23 +430,59 @@ def make_tensor_descriptor_2d(
     # sgpr1: atomic_barrier_addr[15:0]=0 | tensor_dim0_lo[31:16]
     g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
 
-    # sgpr2: tensor_dim0_hi[15:0] | tensor_dim1_lo[31:16]
-    g1_s2 = arith.constant(
-        ((tdim0 >> 16) & 0xFFFF) | ((tdim1 & 0xFFFF) << 16),
-        type=T.i32,
-    )
+    if oob_outer_bound is None:
+        # Compile-time tensor_dim1 == tile extent: OOB checking off.
+        # sgpr2: tensor_dim0_hi[15:0] | tensor_dim1_lo[31:16]
+        g1_s2 = arith.constant(
+            ((tdim0 >> 16) & 0xFFFF) | ((tdim1 & 0xFFFF) << 16),
+            type=T.i32,
+        )
+        # sgpr3: tensor_dim1_hi[15:0] | tile_dim0[31:16]
+        g1_s3 = arith.constant(
+            ((tdim1 >> 16) & 0xFFFF) | (tile_d0 << 16),
+            type=T.i32,
+        )
+    else:
+        # Runtime tensor_dim1 = max(0, oob_outer_bound - (outer_off + warp_off_outer)),
+        # tile-start-relative (the descriptor's global address already includes the
+        # tile/warp start). tile_dim1 (sgpr4) stays the full per-warp tile, so the
+        # partial last tile exceeds the tensor bound and the HW OOB-handles the
+        # overhang. tensor_dim0 (innermost) and the tile dims stay compile-time.
+        if isinstance(oob_outer_bound, int):
+            ob_i32 = arith.constant(oob_outer_bound, type=T.i32)
+        else:
+            ob_i32 = oob_outer_bound.ir_value() if hasattr(oob_outer_bound, "ir_value") else oob_outer_bound
+            if not isinstance(ob_i32, ir.Value):
+                raise TypeError(
+                    f"oob_outer_bound must be int or i32/index ir.Value, got {type(oob_outer_bound).__name__}"
+                )
+            if isinstance(ob_i32.type, ir.IndexType):
+                ob_i32 = arith.index_cast(T.i32, ob_i32)
+            elif not (isinstance(ob_i32.type, ir.IntegerType) and ob_i32.type.width == 32):
+                raise TypeError(f"oob_outer_bound ir.Value must be index or i32, got {ob_i32.type}")
+        start_i32 = arith.index_cast(T.i32, outer_off + warp_off_outer)
+        tdim1_rt = arith.maxsi(arith.subi(ob_i32, start_i32), arith.constant(0, type=T.i32))
+        c16 = arith.constant(16, type=T.i32)
+        c_mask16 = arith.constant(0xFFFF, type=T.i32)
+        # sgpr2: tensor_dim0_hi[15:0] (const) | tensor_dim1_lo[31:16] (runtime)
+        g1_s2 = arith.ori(
+            arith.constant((tdim0 >> 16) & 0xFFFF, type=T.i32),
+            arith.shli(arith.andi(tdim1_rt, c_mask16), c16),
+        )
+        # sgpr3: tensor_dim1_hi[15:0] (runtime) | tile_dim0[31:16] (const)
+        g1_s3 = arith.ori(
+            arith.andi(arith.shrui(tdim1_rt, c16), c_mask16),
+            arith.constant(tile_d0 << 16, type=T.i32),
+        )
 
-    # sgpr3: tensor_dim1_hi[15:0] | tile_dim0[31:16]
-    g1_s3 = arith.constant(
-        ((tdim1 >> 16) & 0xFFFF) | (tile_d0 << 16),
-        type=T.i32,
-    )
-
-    # sgpr4: tile_dim1[15:0] | tile_dim2[31:16]=0
+    # sgpr4: tile_dim1[15:0] | tile_dim2[31:16]=0  (always the full per-warp tile)
     g1_s4 = arith.constant(tile_d1 & 0xFFFF, type=T.i32)
 
     # sgpr5: tensor_dim0_stride (low 32 bits) — stride of outermost dim
-    g1_s5 = arith.constant(stride0 & 0xFFFFFFFF, type=T.i32)
+    if outer_stride_is_runtime:
+        g1_s5 = arith.index_cast(T.i32, outer_stride_idx)
+    else:
+        g1_s5 = arith.constant(stride0 & 0xFFFFFFFF, type=T.i32)
 
     # sgpr6-7: for 2D, no higher-dim strides
     g1_s6 = arith.constant(0, type=T.i32)
@@ -419,6 +496,7 @@ def make_tensor_descriptor_2d(
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
 
 
+@dsl_loc_tracing
 def make_tensor_gather_descriptor(
     global_ptr,
     lds_memref,
@@ -619,6 +697,7 @@ def make_tensor_gather_descriptor(
     )
 
 
+@dsl_loc_tracing
 def make_tensor_gather_dgroup0(
     global_ptr,
     lds_memref,
@@ -664,6 +743,7 @@ def make_tensor_gather_dgroup0(
     return vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
 
 
+@dsl_loc_tracing
 def tensor_load_gather(
     desc: TDMGatherDescriptor,
     cache_policy: int = 0,
@@ -688,6 +768,7 @@ def tensor_load_gather(
     )
 
 
+@dsl_loc_tracing
 def tensor_store_gather(
     desc: TDMGatherDescriptor,
     cache_policy: int = 0,
@@ -736,6 +817,7 @@ def _replace_dgroup0_addr_lo(dgroup0, new_addr_lo):
     ).result
 
 
+@dsl_loc_tracing
 def update_tensor_descriptor_2d_addr_lo(
     desc: TDMDescriptor2D,
     new_addr_lo,
@@ -776,6 +858,7 @@ def update_tensor_descriptor_2d_addr_lo(
     )
 
 
+@dsl_loc_tracing
 def update_tensor_gather_descriptor_addr_lo(
     desc: TDMGatherDescriptor,
     new_addr_lo,
@@ -838,6 +921,7 @@ _TDM_ADDR_HI_MASK = 0x3FFFFFFF  # bits [29:0]
 _TDM_ADDR_HI_FLAG_MASK = 0xC0000000  # bits [31:30]
 
 
+@dsl_loc_tracing
 def add_addr_with_carry(base_addr_lo, base_addr_hi, delta_i32):
     """Carry-safe ``(base_lo, base_hi) += delta`` for TDM descriptor lanes 2/3.
 
@@ -908,6 +992,7 @@ def _replace_dgroup0_addr_lo_hi(dgroup0, new_addr_lo, new_addr_hi):
     ).result
 
 
+@dsl_loc_tracing
 def update_tensor_descriptor_2d_addr_lo_hi(
     desc: TDMDescriptor2D,
     new_addr_lo,
@@ -926,6 +1011,7 @@ def update_tensor_descriptor_2d_addr_lo_hi(
     )
 
 
+@dsl_loc_tracing
 def update_tensor_gather_descriptor_addr_lo_hi(
     desc: TDMGatherDescriptor,
     new_addr_lo,
@@ -940,6 +1026,7 @@ def update_tensor_gather_descriptor_addr_lo_hi(
     )
 
 
+@dsl_loc_tracing
 def update_tensor_descriptor_2d_addr64(
     desc: TDMDescriptor2D,
     base_addr_lo,
@@ -971,6 +1058,7 @@ def update_tensor_descriptor_2d_addr64(
     return update_tensor_descriptor_2d_addr_lo_hi(desc, new_lo, new_hi)
 
 
+@dsl_loc_tracing
 def update_tensor_gather_descriptor_addr64(
     desc: TDMGatherDescriptor,
     base_addr_lo,
@@ -994,6 +1082,7 @@ def _zero_dgroup_v8i32():
     return vector.from_elements(T.vec(8, T.i32), [z, z, z, z, z, z, z, z])
 
 
+@dsl_loc_tracing
 def tensor_load_2d(
     desc: TDMDescriptor2D,
     cache_policy: int = 0,
@@ -1017,6 +1106,7 @@ def tensor_load_2d(
     rocdl.tensor_load_to_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
 
 
+@dsl_loc_tracing
 def tensor_store_2d(
     desc: TDMDescriptor2D,
     cache_policy: int = 0,
@@ -1036,6 +1126,7 @@ def tensor_store_2d(
     rocdl.tensor_store_from_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
 
 
+@dsl_loc_tracing
 def tensor_wait(count: int = 0) -> None:
     """Wait for outstanding TDM tensor operations.
 
@@ -1056,6 +1147,7 @@ PREFETCH_SCOPE_SE = 8  # SE scope = L2 cache
 PREFETCH_SCOPE_DEVICE = 16  # Device scope
 
 
+@dsl_loc_tracing
 def l2_prefetch_tile(
     global_ptr,
     global_offset: Tuple,

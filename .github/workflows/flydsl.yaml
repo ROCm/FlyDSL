@@ -350,7 +350,7 @@ jobs:
           docker rm flydsl_test
 
   # ---------------------------------------------------------------------------
-  # Multi-GPU allreduce tests: ONLY for 8-GPU runners.
+  # Multi-GPU communication operator tests: ONLY for 8-GPU runners.
   # Runs on BOTH linux-flydsl-mi325-8 AND linux-flydsl-mi355-8 independently.
   # Triggered when PR has label "multi-gpu" (added by a maintainer), or when
   # the workflow is manually dispatched.
@@ -358,7 +358,7 @@ jobs:
   # ---------------------------------------------------------------------------
   multi-gpu:
     needs: test
-    name: Multi-GPU AllReduce Tests (${{ matrix.runners }})
+    name: Multi-GPU Communication Operator Tests (${{ matrix.runners }})
     timeout-minutes: 120
     env:
       # Keep checkout independent of runner-local git-cache rewrites.
@@ -453,10 +453,8 @@ jobs:
         timeout-minutes: 15
         run: |
           docker exec flydsl_test bash -c "
-            apt-get install -y libpci-dev libibverbs-dev &&
-            rm -rf /tmp/mori &&
-            git clone --depth 1 --recursive --shallow-submodules https://github.com/ROCm/mori.git /tmp/mori &&
-            cd /tmp/mori && python3 -m pip install . &&
+            apt-get install -y libpci-dev libibverbs-dev libgrpc++1.51 libgrpc29 &&
+            python3 -m pip install amd_mori &&
             MORI_PRECOMPILE=1 python3 -c 'import mori'
           "
 
@@ -467,6 +465,18 @@ jobs:
             cd /flydsl-test
             python3 -m pytest tests/kernels/test_flydsl_shmem.py \
               -m multi_gpu -v --no-header --tb=short
+          "
+
+      - name: Run multi-GPU dispatch/combine CI sweep (8-GPU, accuracy + cudagraph perf)
+        timeout-minutes: 30
+        run: |
+          docker exec flydsl_test bash -c "
+            cd /flydsl-test &&
+            python tests/kernels/test_profiler_dispatch_combine.py \
+              --ci-sweep \
+              --world-size 8 \
+              --port 29503 \
+              --output-dir /tmp/flydsl_ci_sweep
           "
 
       - name: Run multi-GPU allreduce tests

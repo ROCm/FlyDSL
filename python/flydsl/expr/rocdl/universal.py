@@ -16,21 +16,20 @@ from ..primitive import cosize, get_iter, get_layout, get_scalar, make_ptr, make
 from ..typing import Int16, Int32, Int64, Tensor
 
 
-def BufferCopy(bit_size):
-    """Create a CDNA3 buffer copy atom.
+def BufferCopy(bit_size, cache_modifier=0):
+    """Create a CDNA3 buffer copy atom (cache_modifier: 0=cached, 2=nt).
 
     Current atom state:
     - `soffset` (`i32`), default zero
     """
-    return CopyOpCDNA3BufferCopyType.get(bit_size)
+    return CopyOpCDNA3BufferCopyType.get(bit_size, cache_modifier)
 
 
-# BufferCopy aliases for convenience
-BufferCopy8b = lambda: CopyOpCDNA3BufferCopyType.get(8)
-BufferCopy16b = lambda: CopyOpCDNA3BufferCopyType.get(16)
-BufferCopy32b = lambda: CopyOpCDNA3BufferCopyType.get(32)
-BufferCopy64b = lambda: CopyOpCDNA3BufferCopyType.get(64)
-BufferCopy128b = lambda: CopyOpCDNA3BufferCopyType.get(128)
+BufferCopy8b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(8, cache_modifier)
+BufferCopy16b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(16, cache_modifier)
+BufferCopy32b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(32, cache_modifier)
+BufferCopy64b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(64, cache_modifier)
+BufferCopy128b = lambda cache_modifier=0: CopyOpCDNA3BufferCopyType.get(128, cache_modifier)
 
 
 def BufferCopyLDS(bit_size):
@@ -76,7 +75,20 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
     return MmaOpCDNA3_MFMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
 
 
-def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
+def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
+    """Create an arch-appropriate WMMA atom.
+
+    Supported kwargs (gfx11 integer paths only — iu8 / iu4):
+        sign_a (bool, default False): treat A operand as signed.
+        sign_b (bool, default False): treat B operand as signed.
+        clamp  (bool, default False): saturate integer accumulator.
+    These are forwarded verbatim to MmaOpGFX11_WMMAType.get(); the ROCDL
+    intrinsic's verify() will reject them on fp16/bf16 paths.
+    The gfx12 (RDNA4) path does not expose these knobs yet and will raise
+    if any are passed as True.
+    Future WMMA ops for new architectures should extend kwargs here rather
+    than growing the positional signature.
+    """
     ty_ab = elem_ty_ab.ir_type if hasattr(elem_ty_ab, "ir_type") else elem_ty_ab
     if elem_ty_acc is None:
         ty_acc = ir.F32Type.get()
@@ -90,11 +102,13 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
 
     arch = (get_rocm_arch() or "").lower()
     if arch.startswith("gfx11"):
-        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+        return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
     if arch.startswith("gfx12"):
+        if any(kwargs.get(k) for k in ("sign_a", "sign_b", "clamp")):
+            raise ValueError("sign_a/sign_b/clamp are not supported on the gfx12 (RDNA4) WMMA path yet")
         return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
     raise ValueError(
-        f"WMMA is not available on target arch {arch!r}; " "supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
+        f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
     )
 
 

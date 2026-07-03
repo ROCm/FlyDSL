@@ -15,9 +15,28 @@ Usage:
 
 from .._mlir.dialects.arith import *  # noqa: F401,F403
 
+__all__ = [
+    "ArithValue",  # Deprecated: will be removed in a future release
+    "_to_raw",  # Deprecated: will be removed in a future release
+    "andi",
+    "constant",
+    "constant_vector",
+    "index",  # Deprecated: will be removed in a future release
+    "index_cast",  # Deprecated: will be removed in a future release
+    "int_to_fp",
+    "maxnumf",
+    "shli",
+    "sitofp",
+    "trunc_f",
+    "unwrap",  # Deprecated: will be removed in a future release
+    "xori",
+    "cmpi",
+    "cmpf",
+]
+
 # Override star-import cmpi/cmpf to accept Numeric types (Int32, etc.)
 from .._mlir.dialects import arith as _mlir_arith
-from .meta import traced_op
+from .meta import dsl_loc_tracing
 from .utils.arith import (  # noqa: F401
     ArithValue,
     _to_raw,
@@ -36,7 +55,7 @@ from .utils.arith import (  # noqa: F401
 )
 
 
-@traced_op
+@dsl_loc_tracing
 def cmpi(predicate, lhs, rhs, **kwargs):
     """Integer comparison accepting DSL numeric types (Int32, ArithValue, etc.).
 
@@ -51,7 +70,7 @@ def cmpi(predicate, lhs, rhs, **kwargs):
     return _mlir_arith.cmpi(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
 
 
-@traced_op
+@dsl_loc_tracing
 def cmpf(predicate, lhs, rhs, **kwargs):
     """Floating-point comparison accepting DSL numeric types.
 
@@ -64,3 +83,21 @@ def cmpf(predicate, lhs, rhs, **kwargs):
         An ``i1`` comparison result.
     """
     return _mlir_arith.cmpf(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
+
+
+@dsl_loc_tracing
+def maxnumf(a, b, **kwargs):
+    """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``).
+
+    Accepts DSL numeric types (Float32, Vector, ...) and preserves the DSL type of ``a`` so the
+    result can be chained with further DSL operations (e.g. ``.shuffle_xor(...)``).
+    """
+    from .numeric import Numeric
+    from .typing import Vector
+
+    result = _mlir_arith.maxnumf(_to_raw(a), _to_raw(b), **kwargs)
+    if isinstance(a, Vector):
+        return Vector(result, a.shape, a.dtype)
+    if isinstance(a, Numeric):
+        return Numeric.from_ir_type(result.type)(result)
+    return result

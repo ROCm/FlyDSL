@@ -20,7 +20,8 @@ from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects._fly_enum_gen import AddressSpace
 from ..compiler.protocol import dsl_align_of, dsl_size_of
-from .numeric import Uint8
+from .meta import dsl_loc_tracing
+from .numeric import Numeric, Uint8
 from .primitive import get_dyn_shared, make_ptr
 from .struct import (
     Arena,
@@ -33,15 +34,27 @@ from .struct import (
 )
 from .typing import Array, PointerType, Tuple3D
 
-thread_id = gpu.thread_id
-block_id = gpu.block_id
+
+@dsl_loc_tracing
+def thread_id(*args, **kwargs):
+    return gpu.thread_id(*args, **kwargs)
+
+
+@dsl_loc_tracing
+def block_id(*args, **kwargs):
+    return gpu.block_id(*args, **kwargs)
+
+
+@dsl_loc_tracing
+def barrier(*args, **kwargs):
+    return gpu.barrier(*args, **kwargs)
+
 
 thread_idx = Tuple3D(gpu.thread_id)
 block_idx = Tuple3D(gpu.block_id)
 block_dim = Tuple3D(gpu.block_dim)
 grid_dim = Tuple3D(gpu.grid_dim)
 
-barrier = gpu.barrier
 
 _int = int
 
@@ -103,7 +116,10 @@ class SharedAllocator(Arena):
             )
         return self._base
 
+    @dsl_loc_tracing
     def allocate(self, storable_or_int, alignment=None):
+        if isinstance(storable_or_int, Numeric) and not isinstance(storable_or_int.value, ir.Value):
+            storable_or_int = int(storable_or_int.value)
         if not self._static:
             return super().allocate(storable_or_int, alignment)
         return self._allocate_static(storable_or_int, alignment)

@@ -414,7 +414,7 @@ with ir.InsertionPoint(comp_ctx.gpu_module_body):
 | `gfx942` (MI300X) | 64 KB |
 | `gfx950` (MI350/MI355X) | 160 KB |
 | `gfx1201` (Radeon AI PRO R9700) | 64 KB |
-| `gfx1250` (MI450) | 320 KB |
+| `gfx1250` | 320 KB |
 
 ---
 
@@ -618,7 +618,7 @@ Writing a new kernel?
 | `python/flydsl/expr/vector.py` | Vector dialect operations |
 | `python/flydsl/expr/gpu.py` | GPU operations (thread_id, barrier, ...) |
 | `python/flydsl/expr/buffer_ops.py` | AMD buffer load/store operations |
-| `python/flydsl/expr/rocdl.py` | ROCm dialect intrinsics |
+| `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
 | `python/flydsl/utils/smem_allocator.py` | `SmemAllocator`, `SmemPtr`, LDS management |
 | `kernels/preshuffle_gemm.py` | Preshuffle GEMM kernel example |

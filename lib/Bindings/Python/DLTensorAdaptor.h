@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 FlyDSL Project Contributors
 
+#pragma once
+
 #include "mlir-c/Bindings/Python/Interop.h"
 #include "mlir-c/IR.h"
 #include "mlir-c/Support.h"
@@ -18,8 +20,7 @@
 #include "dlpack/dlpack.h"
 
 #include <cstdint>
-#include <cstring>
-#include <optional>
+#include <string>
 #include <vector>
 
 namespace nb = nanobind;
@@ -45,40 +46,8 @@ inline MLIRContext *getCurrentContext() {
 }
 
 class DLTensorAdaptor {
-private:
-  struct DimInfo {
-    int64_t dimSize = 0;
-    int32_t divisibility = 1;
-    bool isDynamic = false;
-
-    DimInfo() = default;
-    DimInfo(int64_t dimSize) : dimSize(dimSize), divisibility(dimSize) {}
-
-    DimInfo &setDynamic(int32_t divisibility = 1) {
-      isDynamic = true;
-      this->divisibility = divisibility;
-      return *this;
-    }
-
-    IntTupleAttr getIntAttr(MLIRContext *ctx_, bool use32bitDynamic = false) const {
-      if (isDynamic) {
-        return IntTupleAttr::getLeafDynamic(ctx_, use32bitDynamic ? 32 : 64, divisibility);
-      } else {
-        return IntTupleAttr::getLeafStatic(ctx_, dimSize);
-      }
-    }
-  };
-
-  struct MemRefDescriptor {
-    MLIRContext *bindingCtx = nullptr;
-    Type memrefType = nullptr;
-    void *dataPtr = nullptr;
-    std::vector<char> layoutBuffer;
-  };
-
 public:
-  DLTensorAdaptor(nb::object dlpackCapsule, std::optional<int32_t> alignment, bool use32BitStride)
-      : dlpackCapsule_(dlpackCapsule), use32BitStride_(use32BitStride) {
+  DLTensorAdaptor(nb::object dlpackCapsule) : dlpackCapsule_(dlpackCapsule) {
     DLManagedTensor *managed =
         static_cast<DLManagedTensor *>(PyCapsule_GetPointer(dlpackCapsule.ptr(), "dltensor"));
     if (!managed) {
@@ -86,43 +55,38 @@ public:
     }
     tensor_ = &managed->dl_tensor;
 
-    // Calculate element size in bytes (minimum 1 byte)
-    int32_t bitsPerElem = tensor_->dtype.bits * tensor_->dtype.lanes;
-    int32_t bytesPerElem = (bitsPerElem + 7) / 8;
-
-    // Set alignment: use provided value or default to element size
-    alignment_ = alignment.value_or(bytesPerElem);
-    if (alignment_ < 1) {
-      throw std::runtime_error("Alignment must be at least 1");
-    }
-
     ndim_ = tensor_->ndim;
     if (ndim_ == 0) {
       throw std::runtime_error("DLTensor must have at least one dimension");
     }
-
-    shape_.resize(ndim_);
-    stride_.resize(ndim_);
-    for (int i = 0; i < ndim_; ++i) {
-      shape_[i] = DimInfo(tensor_->shape[i]);
-    }
-    for (int i = 0; i < ndim_; ++i) {
-      stride_[i] = DimInfo(tensor_->strides[i]);
+    shape_.assign(tensor_->shape, tensor_->shape + ndim_);
+    if (tensor_->strides) {
+      stride_.assign(tensor_->strides, tensor_->strides + ndim_);
+    } else {
+      // DLPack: NULL strides denotes a row-major compact tensor. Strides are in
+      // *elements* (not bytes): last dim is 1, each earlier dim the product of
+      // the trailing shapes.
+      stride_.resize(ndim_);
+      int64_t s = 1;
+      for (int i = ndim_ - 1; i >= 0; --i) {
+        stride_[i] = s;
+        s *= shape_[i];
+      }
     }
   }
 
   nb::tuple getShape() const {
     nb::list result;
-    for (const auto &s : shape_) {
-      result.append(nb::int_(s.dimSize));
+    for (int64_t s : shape_) {
+      result.append(nb::int_(s));
     }
     return nb::tuple(result);
   }
 
   nb::tuple getStride() const {
     nb::list result;
-    for (const auto &s : stride_) {
-      result.append(nb::int_(s.dimSize));
+    for (int64_t s : stride_) {
+      result.append(nb::int_(s));
     }
     return nb::tuple(result);
   }
@@ -133,11 +97,23 @@ public:
 
   int64_t getSizeInBytes() const {
     int64_t numElements = 1;
-    for (const auto &s : shape_) {
-      numElements *= s.dimSize;
+    for (int64_t s : shape_) {
+      numElements *= s;
     }
-    int64_t bitsPerElem = tensor_->dtype.bits * tensor_->dtype.lanes;
-    return (numElements * bitsPerElem + 7) / 8;
+    return (numElements * getElementBits() + 7) / 8;
+  }
+
+  // Element width in bits (bits * lanes), kept at bit granularity so sub-byte
+  // types (e.g. fp4 / i4) describe their true width when fed to MemRefSpec.
+  // Context-free.
+  int32_t getElementBits() const { return tensor_->dtype.bits * tensor_->dtype.lanes; }
+
+  // dlpack dtype as (code, bits, lanes): a context-free hashable id a frontend
+  // can use as a cache discriminator without ingesting the capsule again.
+  nb::tuple getDtypeId() const {
+    return nb::make_tuple(static_cast<int>(tensor_->dtype.code),
+                          static_cast<int>(tensor_->dtype.bits),
+                          static_cast<int>(tensor_->dtype.lanes));
   }
 
   int getAddressSpace() const {
@@ -159,7 +135,7 @@ public:
     }
   }
 
-  Type getElementType() {
+  Type getDtype() {
     DLDataType dtype = tensor_->dtype;
     MLIRContext *ctx = getCurrentContext();
 
@@ -176,9 +152,9 @@ public:
         throw std::runtime_error("Unsupported float bit width: " + std::to_string(dtype.bits));
       }
     case kDLInt:
-      return IntegerType::get(ctx, dtype.bits, IntegerType::Signed);
+      return IntegerType::get(ctx, dtype.bits);
     case kDLUInt:
-      return IntegerType::get(ctx, dtype.bits, IntegerType::Unsigned);
+      return IntegerType::get(ctx, dtype.bits);
     case kDLBfloat:
       return BFloat16Type::get(ctx);
     case kDLBool:
@@ -207,176 +183,12 @@ public:
     }
   }
 
-  void buildMemRefDesc() {
-    MLIRContext *ctx = getCurrentContext();
-    if (!isMemrefStale_ && memrefDesc_.bindingCtx == ctx) {
-      return;
-    }
-    SmallVector<Attribute> shapeLeaves, strideLeaves;
-    shapeLeaves.resize(ndim_);
-    strideLeaves.resize(ndim_);
-
-    size_t shapeDyncCount = 0;
-    size_t strideDyncCount = 0;
-    for (int i = 0; i < ndim_; ++i) {
-      shapeLeaves[i] = shape_[i].getIntAttr(ctx, true);
-      strideLeaves[i] = stride_[i].getIntAttr(ctx, use32BitStride_);
-
-      if (shape_[i].isDynamic)
-        shapeDyncCount++;
-      if (stride_[i].isDynamic)
-        strideDyncCount++;
-    }
-
-    IntTupleAttr shapeAttr, strideAttr;
-    if (shapeLeaves.size() == 1) {
-      shapeAttr = cast<IntTupleAttr>(shapeLeaves[0]);
-    } else {
-      shapeAttr = IntTupleAttr::get(ArrayAttr::get(ctx, shapeLeaves));
-    }
-    if (strideLeaves.size() == 1) {
-      strideAttr = cast<IntTupleAttr>(strideLeaves[0]);
-    } else {
-      strideAttr = IntTupleAttr::get(ArrayAttr::get(ctx, strideLeaves));
-    }
-
-    LayoutAttr layoutAttr = LayoutAttr::get(ctx, shapeAttr, strideAttr);
-
-    AddressSpaceAttr addrSpaceAttr = AddressSpaceAttr::get(ctx, AddressSpace::Global);
-
-    assert(alignment_ > 0 && "alignment must be positive");
-    AlignAttr alignAttr = AlignAttr::get(ctx, alignment_);
-
-    memrefDesc_.memrefType =
-        fly::MemRefType::get(getElementType(), addrSpaceAttr, layoutAttr, alignAttr);
-
-    memrefDesc_.dataPtr =
-        static_cast<void *>(static_cast<char *>(tensor_->data) + tensor_->byte_offset);
-
-    size_t strideElemSize = use32BitStride_ ? sizeof(int32_t) : sizeof(int64_t);
-    size_t layoutSize = shapeDyncCount * sizeof(int32_t) + strideDyncCount * strideElemSize;
-
-    if (layoutSize > 0) {
-      memrefDesc_.layoutBuffer.resize(layoutSize);
-      char *ptr = memrefDesc_.layoutBuffer.data();
-
-      for (int i = 0; i < ndim_; ++i) {
-        if (shape_[i].isDynamic) {
-          int32_t val = static_cast<int32_t>(shape_[i].dimSize);
-          std::memcpy(ptr, &val, sizeof(int32_t));
-          ptr += sizeof(int32_t);
-        }
-      }
-      for (int i = 0; i < ndim_; ++i) {
-        if (stride_[i].isDynamic) {
-          if (use32BitStride_) {
-            int32_t val = static_cast<int32_t>(stride_[i].dimSize);
-            std::memcpy(ptr, &val, sizeof(int32_t));
-            ptr += sizeof(int32_t);
-          } else {
-            int64_t val = stride_[i].dimSize;
-            std::memcpy(ptr, &val, sizeof(int64_t));
-            ptr += sizeof(int64_t);
-          }
-        }
-      }
-    }
-
-    memrefDesc_.bindingCtx = ctx;
-    isMemrefStale_ = false;
-  }
-
-  MlirType getMemRefType() {
-    if (isMemrefStale_) {
-      throw std::runtime_error("Memref descriptor is stale");
-    }
-    return wrap(memrefDesc_.memrefType);
-  }
-
-  nb::list getCPointers() const {
-    if (isMemrefStale_) {
-      throw std::runtime_error("Memref descriptor is stale");
-    }
-    nb::list result;
-    result.append(nb::int_(reinterpret_cast<intptr_t>(&memrefDesc_.dataPtr)));
-    if (!memrefDesc_.layoutBuffer.empty()) {
-      result.append(nb::int_(reinterpret_cast<intptr_t>(memrefDesc_.layoutBuffer.data())));
-    }
-    return result;
-  }
-
-  DLTensorAdaptor &markLayoutDynamic(int leadingDim = -1, int divisibility = 1) {
-    int ndim_ = static_cast<int>(shape_.size());
-    if (leadingDim == -1) {
-      for (int i = 0; i < ndim_; ++i) {
-        if (stride_[i].dimSize == 1) {
-          if (leadingDim != -1) {
-            throw std::runtime_error("Multiple dimensions have stride 1");
-          }
-          leadingDim = i;
-        }
-      }
-    }
-    if (leadingDim < 0 || leadingDim >= ndim_) {
-      throw std::runtime_error("Cannot determine leading dimension");
-    }
-    if (stride_[leadingDim].dimSize != 1) {
-      throw std::runtime_error("Leading dimension must have stride 1");
-    }
-
-    isMemrefStale_ = true;
-    for (int i = 0; i < ndim_; ++i) {
-      shape_[i].setDynamic();
-    }
-    for (int i = 0; i < ndim_; ++i) {
-      if (i != leadingDim) {
-        stride_[i].setDynamic(divisibility);
-      }
-    }
-    return *this;
-  }
-
-  // Each dim is encoded as a single signed int (no nested tuples) to keep
-  // the number of Python objects to ~2N + a couple of containers:
-  //   static  → dimSize          (>= 0)
-  //   dynamic → -divisibility    (<= -1; divisibility >= 1 invariant)
-  nb::tuple getCacheSignature() const {
-    auto encode = [](const DimInfo &dim) {
-      return dim.isDynamic ? -dim.divisibility : dim.dimSize;
-    };
-    nb::object shapeTuple = nb::steal(PyTuple_New(static_cast<Py_ssize_t>(shape_.size())));
-    for (size_t i = 0; i < shape_.size(); ++i) {
-      PyTuple_SET_ITEM(shapeTuple.ptr(), static_cast<Py_ssize_t>(i),
-                       PyLong_FromLongLong(encode(shape_[i])));
-    }
-    nb::object strideTuple = nb::steal(PyTuple_New(static_cast<Py_ssize_t>(stride_.size())));
-    for (size_t i = 0; i < stride_.size(); ++i) {
-      PyTuple_SET_ITEM(strideTuple.ptr(), static_cast<Py_ssize_t>(i),
-                       PyLong_FromLongLong(encode(stride_[i])));
-    }
-    return nb::make_tuple(alignment_, use32BitStride_, shapeTuple, strideTuple);
-  }
-
-  DLTensorAdaptor &use32BitStride(bool use32BitStride) {
-    if (use32BitStride_ == use32BitStride) {
-      return *this;
-    }
-    isMemrefStale_ = true;
-    use32BitStride_ = use32BitStride;
-    return *this;
-  }
-
 private:
   nb::object dlpackCapsule_;
-  int32_t alignment_;
-  bool use32BitStride_;
-
-  DLTensor *tensor_;
-  int32_t ndim_;
-  std::vector<DimInfo> shape_;
-  std::vector<DimInfo> stride_;
-  MemRefDescriptor memrefDesc_;
-  bool isMemrefStale_{true};
+  DLTensor *tensor_ = nullptr;
+  int32_t ndim_ = 0;
+  std::vector<int64_t> shape_;
+  std::vector<int64_t> stride_;
 };
 
 } // namespace mlir::fly::utils

@@ -63,7 +63,7 @@ FlyDSL/
 │   │   ├── vector.py                 # Vector dialect ops
 │   │   ├── gpu.py                    # GPU dialect ops (thread_idx, block_idx, barrier)
 │   │   ├── buffer_ops.py             # Buffer / memory operations
-│   │   └── rocdl.py                  # ROCm-specific intrinsics
+│   │   └── rocdl/                    # ROCm-specific intrinsics (MFMA/WMMA, buffer, TDM, cluster)
 │   ├── runtime/
 │   │   └── device.py                 # get_rocm_arch() — GPU architecture detection
 │   └── utils/
@@ -85,7 +85,8 @@ FlyDSL/
 │   ├── moe_blockscale_2stage.py      # MoE Blockscale GEMM
 │   ├── mixed_moe_gemm_2stage.py      # Mixed-precision MoE GEMM
 │   ├── pa_decode_fp8.py              # Paged attention decode (FP8)
-│   ├── flash_attn_func.py            # FlashAttention
+│   ├── flash_attn_generic.py         # FlashAttention generic fallback
+│   ├── flash_attn_gfx950.py          # FlashAttention gfx950 fast path
 │   ├── layernorm_kernel.py           # LayerNorm (layout API)
 │   ├── rmsnorm_kernel.py             # RMSNorm (layout API)
 │   ├── softmax_kernel.py             # Softmax (layout API)
@@ -403,7 +404,7 @@ Transforms Python control flow to MLIR ops at the AST level:
 | `gfx942` | MI300A / MI300X | 64 KB | CDNA 3, primary development target |
 | `gfx950` | MI350 / MI355X | 160 KB | CDNA 4, larger LDS |
 | `gfx1201` | Radeon AI PRO R9700 | 64 KB | RDNA 4 |
-| `gfx1250` | MI450 | 320 KB | GFX12, wave32, WMMA, TDM ops |
+| `gfx1250` | — | 320 KB | GFX12, wave32, WMMA, TDM ops |
 | `gfx90a` | MI250X | 64 KB | CDNA 2 (verified platform) |
 
 ---

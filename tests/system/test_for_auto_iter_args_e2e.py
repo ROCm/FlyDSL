@@ -26,7 +26,7 @@ if not torch.cuda.is_available():
 
 def _make_out_tensor(n=1, dtype=torch.int32):
     t = torch.zeros(n, device="cuda", dtype=dtype)
-    return t, flyc.from_dlpack(t).mark_layout_dynamic(leading_dim=0, divisibility=1)
+    return t, flyc.from_torch_tensor(t).mark_layout_dynamic(leading_dim=0, divisibility=1)
 
 
 # ── Case 1: single accumulator ───────────────────────────────────────────────

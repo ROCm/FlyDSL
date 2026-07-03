@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-import ctypes
 from itertools import chain
 from types import SimpleNamespace
-from typing import List, Protocol, runtime_checkable
+from typing import Callable, List, Protocol, Tuple, runtime_checkable
 
 from .._mlir import ir
 
@@ -12,15 +11,15 @@ from .._mlir import ir
 @runtime_checkable
 class DslType(Protocol):
     @classmethod
-    def __construct_from_ir_values__(cls, values: List[ir.Value]) -> "DslType": ...
+    def __construct_from_ir_values__(cls, values: List[ir.Value], exemplar: "DslType | None" = None) -> "DslType": ...
     def __extract_to_ir_values__(self) -> List[ir.Value]: ...
 
 
 @runtime_checkable
 class JitArgument(Protocol):
     def __get_ir_types__(self) -> List[ir.Type]: ...
-    def __get_c_pointers__(self) -> List[ctypes.c_void_p]: ...
     def __cache_signature__(self) -> object: ...
+    def __c_abi_spec__(self) -> List[Tuple[type, Callable]]: ...
 
 
 @runtime_checkable
@@ -65,14 +64,15 @@ def cache_signature(obj) -> object:
     )
 
 
-def get_c_pointers(obj) -> List[ctypes.c_void_p]:
-    if hasattr(obj, "__get_c_pointers__"):
-        return obj.__get_c_pointers__()
-    if isinstance(obj, SimpleNamespace):
-        return list(chain.from_iterable(get_c_pointers(v) for v in vars(obj).values()))
-    if isinstance(obj, (tuple, list)):
-        return list(chain.from_iterable(get_c_pointers(x) for x in obj))
-    raise TypeError(f"Cannot derive C pointers from {obj}")
+def c_abi_spec(obj) -> List[Tuple[type, Callable]]:
+    if hasattr(obj, "__c_abi_spec__"):
+        return obj.__c_abi_spec__()
+    # TODO: support SimpleNamespace / tuple / list here?
+    # if isinstance(obj, SimpleNamespace):
+    #     return list(chain.from_iterable(c_abi_spec(v) for v in vars(obj).values()))
+    # if isinstance(obj, (tuple, list)):
+    #     return list(chain.from_iterable(c_abi_spec(x) for x in obj))
+    raise TypeError(f"Cannot derive C-ABI spec for {obj!r}: type {type(obj).__name__}.")
 
 
 def extract_to_ir_values(obj) -> List[ir.Value]:
@@ -100,7 +100,8 @@ def construct_from_ir_values(dsl_type, args, values: List[ir.Value]) -> DslType:
             raise ValueError(f"SimpleNamespace expected {cursor} ir.Values, got {len(values)}")
         return SimpleNamespace(**rebuilt)
     if hasattr(dsl_type, "__construct_from_ir_values__"):
-        return dsl_type.__construct_from_ir_values__(values)
+        exemplar = args if not isinstance(args, type) else None
+        return dsl_type.__construct_from_ir_values__(values, exemplar)
     if isinstance(dsl_type, (tuple, list)):
         elems = []
         for ty, arg in zip(dsl_type, args, strict=True):

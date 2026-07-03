@@ -18,6 +18,15 @@ FlyDSL is a Python DSL and MLIR-based compiler for writing high-performance GPU 
 **Target GPU**: gfx942 (MI300X, CDNA3), gfx950 (MI350, CDNA4)
 **Python**: 3.12, ROCm 7.2
 
+**Scope (read this first)**: This skill is the **reference** — the full layout-algebra API
+surface, per-op tables, MFMA/copy-atom catalogs, environment variables, and an exhaustive
+troubleshooting list. Reach for it to *look something up* while writing or reviewing kernel
+code. If instead you want a *guided, step-by-step procedure* that turns a kernel requirement
+into a finished, tested kernel (classify -> skeleton -> compute -> control flow -> test), use
+the **flydsl-tile-programming** skill, which is the wizard companion to this reference. For
+diagnosing a kernel that already compiles but produces NaN/inf/wrong results, use the
+**debug-flydsl-kernel** skill.
+
 ---
 
 ## 1. Architecture and Compilation
@@ -46,7 +55,7 @@ Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages
 - `python/flydsl/expr/derived.py` - CopyAtom, MmaAtom, TiledCopy, TiledMma wrappers
 - `python/flydsl/expr/gpu.py` - GPU operations (thread_idx, block_idx, barrier)
 - `python/flydsl/expr/buffer_ops.py` - AMD buffer load/store intrinsics
-- `python/flydsl/expr/rocdl.py` - MFMA and other ROCm intrinsics
+- `python/flydsl/expr/rocdl/` - MFMA/WMMA and other ROCm intrinsics (package: cdna4, cluster, inline_asm, tdm_ops, universal)
 - `python/flydsl/utils/smem_allocator.py` - LDS (shared memory) management
 - `kernels/` - Pre-built kernels (preshuffle_gemm.py, layernorm, softmax, rmsnorm)
 

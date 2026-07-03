@@ -9,7 +9,6 @@ import os
 import pickle
 import pkgutil
 import tempfile
-import threading
 import time
 import types
 from collections import namedtuple
@@ -22,23 +21,33 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..utils import env, log
 from ..utils.kernel_info import parse_kernel_info
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
+from .diagnostics import (
+    DSLCompileError,
+    diag_records_from_mlir_error,
+    dsl_ir_diagnostics,
+    install_excepthook,
+    warn_annotation_value_mismatch,
+    warn_invalid_annotations,
+)
 from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
-from .jit_executor import CompiledArtifact
+from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
-    FuncLocationTracker,
     KernelFunction,
     create_gpu_module,
+    func_def_location,
     get_gpu_module_body,
 )
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import (
     JitArgument,
+    c_abi_spec,
     cache_signature,
     construct_from_ir_values,
     get_ir_types,
@@ -112,15 +121,13 @@ def _create_mlir_context(*, load_dialects=True):
 _NOT_IN_BASELINE = object()
 
 
-# Environment variables that influence code generation. Their current values
-# enter the hot cache key so cross-process / cross-config artifacts don't collide.
+# Environment variables that influence code generation *independently of the
+# resolved GPUTarget*. Their current values enter the hot cache key so
+# cross-process / cross-config artifacts don't collide.
 _CACHE_INVALIDATING_ENV_VARS = (
     "FLYDSL_COMPILE_OPT_LEVEL",
     "FLYDSL_COMPILE_BACKEND",
     "FLYDSL_COMPILE_LLVM_DIR",
-    "ARCH",
-    "FLYDSL_GPU_ARCH",
-    "HSA_OVERRIDE_GFX_VERSION",
     "FLYDSL_DEBUG_ENABLE_DEBUG_INFO",
     "FLYDSL_EXTRA_SOURCE_DIRS",
     "FLYDSL_COMPILE_LLVM_PASS_PIPELINE",
@@ -287,46 +294,6 @@ def _snapshot_refs(refs: List[Tuple[str, str, dict]], *, stable: bool) -> Dict[T
     return out
 
 
-class FlyDSLCompileError(RuntimeError):
-    """Raised when an MLIR pass pipeline fails.
-
-    ``diagnostics`` carries the list of error-severity messages collected
-    during the failed ``pm.run()``.
-    """
-
-    def __init__(self, message: str, diagnostics: Optional[List[str]] = None):
-        self.diagnostics = diagnostics or []
-        if self.diagnostics:
-            full = message + "\nMLIR diagnostics:\n" + "\n".join(f"  - {d}" for d in self.diagnostics)
-        else:
-            full = message
-        super().__init__(full)
-
-
-@contextmanager
-def _mlir_diagnostics(ctx):
-    """Collect MLIR error diagnostics emitted during a ``with`` block.
-
-    Yields a list that the caller can inspect after the block.  Only
-    ``ERROR`` severity messages are captured; non-error diagnostics are
-    left to the default handler (returns ``False``).
-    """
-    diags: List[str] = []
-
-    def _handler(d):
-        if d.severity == ir.DiagnosticSeverity.ERROR:
-            diags.append(str(d))
-            return True
-        return False
-
-    handler = ctx.attach_diagnostic_handler(_handler)
-    try:
-        yield diags
-    finally:
-        if handler.attached:
-            handler.detach()
-
-
 def _flydsl_key() -> str:
     extra = list(EXTRA_SOURCE_DIRS)
     env_extra = os.environ.get("FLYDSL_EXTRA_SOURCE_DIRS", "")
@@ -419,9 +386,13 @@ def _use_external_binary_codegen() -> bool:
 
 def _get_underlying_func(obj):
     if isinstance(obj, KernelFunction):
-        return obj._func
+        # Prefer the pre-AST-rewrite func: its closure / co_names still
+        # reference helper callables, which is what the cache-key dependency
+        # collector needs to walk to detect helper source changes.  Fallback
+        # to `_func` for older KernelFunction instances without the field.
+        return getattr(obj, "_original_func", obj._func)
     if isinstance(obj, JitFunction):
-        return obj.func
+        return getattr(obj, "_original_func", obj.func)
     if isinstance(obj, types.MethodType):
         return obj.__func__
     if isinstance(obj, types.FunctionType):
@@ -844,11 +815,11 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm = PassManager.parse(pipeline)
     pm.enable_verifier(verifier)
     pm.enable_ir_printing(print_after_all=print_after_all)
-    with _mlir_diagnostics(module.context) as diags:
+    with dsl_ir_diagnostics(module.context) as diags:
         try:
             pm.run(module.operation)
         except Exception as exc:
-            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
+            raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
 class MlirCompiler:
@@ -856,7 +827,10 @@ class MlirCompiler:
     def compile(
         cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: Optional[list] = None
     ) -> ir.Module:
-        module.operation.verify()
+        try:
+            module.operation.verify()
+        except ir.MLIRError as exc:
+            raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
 
         backend = get_backend(arch=arch)
 
@@ -924,11 +898,11 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    with _mlir_diagnostics(module.context) as diags:
+                    with dsl_ir_diagnostics(module.context) as diags:
                         try:
                             pm.run(module.operation)
                         except Exception as exc:
-                            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
+                            raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
                     out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
@@ -1277,8 +1251,6 @@ def _build_call_state(sig, args_tuple, func_exe):
     Resolves each parameter's JitArgument type using the same registry as
     convert_to_jit_arguments, then asks it for a reusable slot specification.
     This ensures a single source of truth for argument packing.
-
-    Returns a CallState, or None if any parameter can't be fast-pathed.
     """
 
     slot_specs = []
@@ -1299,28 +1271,15 @@ def _build_call_state(sig, args_tuple, func_exe):
         arg = args_tuple[i]
 
         jit_arg_type = _resolve_jit_arg_type(arg, annotation)
-        if jit_arg_type is None or not hasattr(jit_arg_type, "_reusable_slot_spec"):
-            return None
+        if jit_arg_type is None:
+            raise TypeError(
+                f"@flyc.jit argument {param_name!r} of type {type(arg).__name__} is not a "
+                f"registered JitArgument type and cannot be packed for host dispatch."
+            )
 
-        spec = jit_arg_type._reusable_slot_spec(arg)
-        if spec is None:
-            return None
-
-        # A spec is either (ctype, extract) or a list of such tuples for
-        # multi-slot ABIs (e.g. dynamic-memref tensors with a layout buffer).
-        slot_list = spec if isinstance(spec, list) else [spec]
-
-        for ctype, extract in slot_list:
-            # Scalar slots: extract(arg) -> value.  Buffer slots:
-            # extract(arg, storage) writes in place.
-            try:
-                if hasattr(ctype, "value"):
-                    extract(arg)
-                else:
-                    extract(arg, ctype())
-            except (AttributeError, TypeError):
-                return None
-            slot_specs.append((i, ctype, extract))
+        inst = arg if isinstance(arg, jit_arg_type) else jit_arg_type(arg)
+        for ctype, fill in c_abi_spec(inst):
+            slot_specs.append((i, ctype, fill))
 
     # Auto-stream: NULL ptr selects HIP default stream when no user stream arg.
     if not has_user_stream:
@@ -1329,62 +1288,27 @@ def _build_call_state(sig, args_tuple, func_exe):
     return CallState(slot_specs, func_exe)
 
 
-class CallState:
-    """Pre-allocated state for fast kernel dispatch.
-
-    Built from JitArgument types' _reusable_slot_spec protocol — the same
-    types used by convert_to_jit_arguments for the full DLPack path.
-
-    Pre-allocates typed ctypes storage and a packed pointer array at init
-    time.  On each call, only updates .value on existing storage objects —
-    no ctypes object allocation, no pointer()/cast() calls.  Uses
-    thread-local storage for thread safety.
-    """
-
-    __slots__ = ("_func_exe", "_spec", "_tls")
-
-    def __init__(self, slot_specs, func_exe):
-        self._func_exe = func_exe
-        self._spec = slot_specs  # list of (arg_idx, ctype, extract_fn)
-        self._tls = threading.local()
-
-    def _init_buffers(self):
-        n_ptrs = len(self._spec)
-        packed = (ctypes.c_void_p * n_ptrs)()
-        storages = []
-        updaters = []
-
-        for packed_idx, (arg_idx, ctype, extract) in enumerate(self._spec):
-            # ctype(0) works for scalar ctypes; array ctypes need zero-arg ctor.
-            try:
-                s = ctype(0)
-            except TypeError:
-                s = ctype()
-            packed[packed_idx] = ctypes.addressof(s)
-            storages.append(s)
-            if extract is not None:
-                is_scalar = hasattr(s, "value")
-                updaters.append((arg_idx, s, extract, is_scalar))
-
-        self._tls.packed = packed
-        self._tls.updaters = updaters
-        self._tls._storages = storages
-
-    def __call__(self, args_tuple):
-        if not hasattr(self._tls, "packed"):
-            self._init_buffers()
-
-        for arg_idx, storage, extract, is_scalar in self._tls.updaters:
-            if is_scalar:
-                storage.value = extract(args_tuple[arg_idx])
-            else:
-                extract(args_tuple[arg_idx], storage)
-
-        return self._func_exe(self._tls.packed)
-
-
 class JitFunction:
     def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
+        install_excepthook()
+        # Same rationale as KernelFunction._original_func: ASTRewriter.transform
+        # mutates `func.__code__` in place, after which the JIT cache walker
+        # (`_get_underlying_func`) can no longer see closure-captured helpers
+        # via the original co_names / co_freevars.  Snapshot the pre-rewrite
+        # func here so the walker can recover those references.
+        import types as _types
+
+        _orig_code = func.__code__
+        self._original_func = _types.FunctionType(
+            _orig_code,
+            func.__globals__,
+            name=func.__name__,
+            argdefs=func.__defaults__,
+            closure=func.__closure__,
+        )
+        self._original_func.__kwdefaults__ = func.__kwdefaults__
+        self._original_func.__qualname__ = func.__qualname__
+        self._original_func.__module__ = func.__module__
         self.func = ASTRewriter.transform(func)
         self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
@@ -1464,6 +1388,9 @@ class JitFunction:
         else:
             self._sig = full_sig
         self._backend_target = get_backend().target  # frozen dataclass, stable
+
+        # Definition-time annotation validity check (once per function, signature-only).
+        warn_invalid_annotations(self._sig, context="@jit")
 
     def _ensure_cache_manager(self, owner_cls=None):
         if self.manager_key is not None and self._manager_owner_cls is owner_cls:
@@ -1652,26 +1579,13 @@ class JitFunction:
             if env.compile.compile_only:
                 return None
             # Build CallState via JitArgument registry (same dispatch as compile path)
-            try:
-                state = _build_call_state(
-                    sig,
-                    args_tuple,
-                    cached_func._get_func_exe(),
-                )
-            except Exception:
-                state = None
-            if state is not None:
-                self._call_state_cache[cache_key] = state
-                return state(args_tuple)
-
-            # Fallback: run through DLPack (should not happen for static layout)
-            log().warning("CallState build failed on cache hit, falling back to DLPack path")
-            if not hasattr(self, "_cached_ctx"):
-                self._cached_ctx = _create_mlir_context()
-            with self._cached_ctx:
-                _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
-                _ensure_stream_arg(jit_args)
-                return cached_func(*jit_args)
+            state = _build_call_state(
+                sig,
+                args_tuple,
+                cached_func._get_func_exe(),
+            )
+            self._call_state_cache[cache_key] = state
+            return state(args_tuple)
 
         if run_only:
             cdir = getattr(self.cache_manager, "cache_dir", None)
@@ -1713,17 +1627,24 @@ class JitFunction:
             else:
                 with _create_mlir_context() as ctx, _hints_ctx:
                     param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+                    # Per-call value/annotation consistency check.
+                    for pname, dsl_type in zip(param_names, dsl_types):
+                        ann = sig.parameters[pname].annotation
+                        if (
+                            ann is not inspect.Parameter.empty
+                            and isinstance(ann, type)
+                            and not issubclass(dsl_type, ann)
+                        ):
+                            warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
                     has_user_stream = _ensure_stream_arg(jit_args)
                     ir_types = get_ir_types(jit_args)
-                    loc = ir.Location.unknown(ctx)
+                    loc = func_def_location(self.func, ctx)
 
                     log().info(f"jit_args={jit_args}")
                     log().info(f"dsl_types={dsl_types}")
 
                     module = ir.Module.create(loc=loc)
                     module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
-
-                    func_tracker = FuncLocationTracker(self.func)
 
                     with ir.InsertionPoint(module.body), loc:
                         backend = get_backend()
@@ -1733,7 +1654,7 @@ class JitFunction:
                         func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
                         entry_block = func_op.add_entry_block()
 
-                        with CompilationContext.create(func_tracker) as comp_ctx:
+                        with CompilationContext.create() as comp_ctx:
                             comp_ctx.gpu_module_op = gpu_module
                             comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
 
@@ -1746,10 +1667,12 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
-                                if bound_self is not None:
-                                    self.func(bound_self, **named_args)
-                                else:
-                                    self.func(**named_args)
+                                # Bound the call-site boundary at the jit body.
+                                with tracing_context(self.func):
+                                    if bound_self is not None:
+                                        self.func(bound_self, **named_args)
+                                    else:
+                                        self.func(**named_args)
                                 func.ReturnOp([])
 
                     original_ir = module.operation.get_asm(enable_debug_info=True)
@@ -1812,28 +1735,16 @@ class JitFunction:
             print(f"[flydsl] COMPILE_ONLY=1, compilation succeeded (arch={get_backend().target.arch})")
             return None
 
-        # Build CallState so subsequent calls skip DLPack. The in-process
-        # CompiledArtifact cache above owns the ExecutionEngine/code object,
-        # so the function pointer remains valid even when disk cache is off.
-        try:
-            state = _build_call_state(
-                sig,
-                args_tuple,
-                compiled_func._get_func_exe(),
-            )
-        except Exception:
-            state = None
-        if state is not None:
-            self._call_state_cache[cache_key] = state
-            return state(args_tuple)
-
-        # Fallback: run through DLPack
-        if not hasattr(self, "_cached_ctx"):
-            self._cached_ctx = _create_mlir_context()
-        with self._cached_ctx:
-            _, jit_args, _, _ = convert_to_jit_arguments(sig, bound)
-            _ensure_stream_arg(jit_args)
-            return compiled_func(*jit_args)
+        # The in-process CompiledArtifact cache above owns the ExecutionEngine/
+        # code object, so the function pointer remains valid even when disk
+        # cache is off.
+        state = _build_call_state(
+            sig,
+            args_tuple,
+            compiled_func._get_func_exe(),
+        )
+        self._call_state_cache[cache_key] = state
+        return state(args_tuple)
 
 
 def _ensure_stream_arg(jit_args: list) -> bool:
@@ -1966,12 +1877,6 @@ def _compile_impl(func, *args) -> CompiledFunction:
     call_state = jf._call_state_cache.get(cache_key)
     if call_state is None:
         call_state = _build_call_state(sig, args_tuple, artifact._get_func_exe())
-    if call_state is None:
-        raise RuntimeError(
-            "flyc.compile(): failed to build CallState.  "
-            "One or more argument types do not support the fast dispatch path "
-            "(missing _reusable_slot_spec)."
-        )
 
     return CompiledFunction(call_state, artifact)
 

@@ -14,7 +14,7 @@ from flydsl.runtime.device import get_rocm_arch
 from .._mlir import ir
 from .._mlir.dialects import gpu
 from .._mlir.dialects import vector as _vector
-from .meta import traced_op
+from .meta import dsl_loc_tracing
 from .numeric import (
     BFloat16,
     Boolean,
@@ -37,14 +37,18 @@ from .numeric import (
     Int16,
     Int32,
     Int64,
+    Int128,
     Integer,
     Numeric,
     Uint8,
     Uint16,
     Uint32,
     Uint64,
+    Uint128,
+    as_numeric,
 )
 from .primitive import *
+from .utils import lazy_classattr
 from .utils.arith import (
     ArithValue,
     _to_raw,
@@ -54,6 +58,97 @@ from .utils.arith import (
     int_to_fp,
     int_to_int,
 )
+
+
+def as_ir_value(value, *, keep_static=False):
+    """Convert any DslType value into a raw ``ir.Value``
+
+    This is the *canonical* "DSL -> ir.Value" converter. Body code that
+    needs to feed an MLIR builder should call this explicitly per argument.
+
+    Behavior summary:
+      - ``None``                                    -> ``None``
+      - ``ir.Value``                                -> returned unchanged
+      - ``Numeric`` holding a Python literal, when
+        ``keep_static=True``                        -> returned unchanged
+        ``keep_static=False``                       -> promoted via ``as_numeric(value).ir_value()``
+      - ``tuple`` / ``list``                        -> recursed, shape preserved
+      - object with ``__extract_to_ir_values__``    -> single value extracted; multi-value returns a list
+      - ``bool`` / ``int`` / ``float``              -> promoted via ``as_numeric(value).ir_value()``
+      - object with ``ir_value()``                  -> called as a fallback
+      - anything else                               -> returned unchanged
+    """
+    if value is None:
+        return None
+    if isinstance(value, ir.Value):
+        return value
+    if keep_static and isinstance(value, Numeric) and not isinstance(value.value, ir.Value):
+        return value
+    if isinstance(value, tuple):
+        return tuple(as_ir_value(v, keep_static=keep_static) for v in value)
+    if isinstance(value, list):
+        return [as_ir_value(v, keep_static=keep_static) for v in value]
+    if hasattr(value, "__extract_to_ir_values__"):
+        values = value.__extract_to_ir_values__()
+        if len(values) == 1:
+            return values[0]
+        return values
+    if isinstance(value, (bool, int, float)):
+        return as_numeric(value).ir_value()
+    if hasattr(value, "ir_value"):
+        return value.ir_value()
+    return value
+
+
+def as_dsl_value(value, exemplar=None):
+    """Wrap a raw ``ir.Value`` back into a DSL value. This is the inverse
+    of :func:`as_ir_value` (``ir.Value -> DslType``).
+
+    ``exemplar`` is an optional *type template* describing how to wrap ``value``:
+      - a DslType class                         -> constructed directly via ``exemplar(value)``
+      - a DslType instance                      -> ``type(exemplar)(value)``
+
+    Behavior summary (mirrors the branches of :func:`as_ir_value`):
+      - ``None``                                    -> ``None``
+      - ``tuple`` / ``list``                        -> recursed, shape preserved,
+        paired element-wise with ``exemplar`` (a non-sequence ``exemplar`` is
+        broadcast to every element)
+      - with no usable ``exemplar``: a ``value`` already satisfying the
+        ``DslType`` protocol is returned unchanged; a bare scalar ``ir.Value``
+        is dispatched by ``value.type`` via ``Numeric.from_ir_type``; any other
+        non-``ir.Value`` is returned unchanged.
+
+    Raises ``TypeError`` when a bare ``ir.Value`` cannot be wrapped into any DSL
+    value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (tuple, list)):
+        exemplars = exemplar if isinstance(exemplar, (tuple, list)) else [exemplar] * len(value)
+        return type(value)(as_dsl_value(v, ex) for v, ex in zip(value, exemplars))
+
+    if exemplar is not None and isinstance(value, ir.Value):
+        if isclass(exemplar):
+            return exemplar(value)
+        if isinstance(exemplar, Numeric):
+            return type(exemplar)(value)
+        ctor = getattr(type(exemplar), "__construct_from_ir_values__", None)
+        if ctor is not None:
+            try:
+                return ctor([value], exemplar)
+            except Exception:
+                raise ValueError(f"failed to construct {type(exemplar)} from {value}")
+
+    from ..compiler.protocol import DslType
+
+    if isinstance(value, DslType):
+        return value
+    if not isinstance(value, ir.Value):
+        return value
+    try:
+        return Numeric.from_ir_type(value.type)(value)
+    except Exception as e:
+        raise TypeError(f"as_dsl_value cannot wrap ir.Value of type {value.type!s} into a DSL value") from e
 
 
 def _vec(n: int, elem: ir.Type) -> ir.Type:
@@ -165,6 +260,10 @@ class Types:
     def i64x2(self) -> ir.Type:
         return _vec(2, Int64.ir_type)
 
+    @property
+    def i128(self) -> ir.Type:
+        return Int128.ir_type
+
     # ---- Float scalars & vectors ----
     @property
     def f16(self) -> ir.Type:
@@ -248,6 +347,9 @@ __all__ = [
     "Types",
     "T",
     "default_f8_type",
+    # DSL utilities
+    "as_ir_value",
+    "as_dsl_value",
     "is_generic_address_space",
     "is_target_address_space",
     # DSL value types
@@ -272,11 +374,13 @@ __all__ = [
     "Int16",
     "Int32",
     "Int64",
+    "Int128",
     "Index",
     "Uint8",
     "Uint16",
     "Uint32",
     "Uint64",
+    "Uint128",
     "Constexpr",
     "IntTuple",
     "Layout",
@@ -290,6 +394,8 @@ __all__ = [
     "TiledMma",
     "Stream",
     "Tuple3D",
+    "Basis",
+    "E",
     # Vector types
     "Vector",
     "ReductionOp",
@@ -362,7 +468,7 @@ class Constexpr:
 
     @staticmethod
     def _is_supported_annotation(param) -> bool:
-        return param in (int, bool, float) or Constexpr._is_tuple_annotation(param)
+        return param in (int, bool, float, str) or Constexpr._is_tuple_annotation(param)
 
     @staticmethod
     def _scalar_cache_signature(value):
@@ -372,6 +478,8 @@ class Constexpr:
             return (int, value)
         if type(value) is float:
             return (float, value)
+        if type(value) is str:
+            return (str, value)
         return None
 
     @staticmethod
@@ -423,7 +531,7 @@ class Constexpr:
         if lambda_sig is not None:
             return lambda_sig
         raise TypeError(
-            "Constexpr values support only int, bool, float, tuples of those scalar values, "
+            "Constexpr values support only int, bool, float, str, tuples of those scalar values, "
             "and lambdas without free variables"
         )
 
@@ -432,7 +540,7 @@ class Constexpr:
             raise TypeError(f"{cls.__name__} cannot be re-parametrized")
         if not Constexpr._is_supported_annotation(param) and not Constexpr._is_callable_annotation(param):
             raise TypeError(
-                "Constexpr[...] supports only int, bool, float, tuple, or Callable annotations; " f"got {param!r}"
+                "Constexpr[...] supports only int, bool, float, str, tuple, or Callable annotations; " f"got {param!r}"
             )
         cached = Constexpr._annotation_cache.get(param)
         if cached is not None:
@@ -472,7 +580,7 @@ class Constexpr:
         return result
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         if values:
             raise ValueError(f"{cls.__name__} expects 0 ir.Values, got {len(values)}")
         if not cls.is_specialized:
@@ -490,8 +598,7 @@ class Constexpr:
     def __get_ir_types__(cls):
         return []
 
-    @classmethod
-    def __get_c_pointers__(cls):
+    def __c_abi_spec__(self):
         return []
 
     @classmethod
@@ -506,7 +613,7 @@ class Constexpr:
                 if not isinstance(value, tuple):
                     raise TypeError(f"expects tuple, got {type(value).__name__}")
                 Constexpr.value_signature(value)
-            elif inner in (int, bool, float):
+            elif inner in (int, bool, float, str):
                 if type(value) is not inner:
                     raise TypeError(f"expects {inner.__name__}, got {type(value).__name__}")
                 Constexpr.value_signature(value)
@@ -541,7 +648,7 @@ class BuiltinDslType(ir.Value):
         return f"{type(self).__name__}<{super().__str__()}>"
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         return cls(values[0])
 
     def __extract_to_ir_values__(self):
@@ -573,36 +680,51 @@ class IntTuple(BuiltinDslType):
         return self.type.get_static_leaf_int
 
     @staticmethod
+    def _static_leaf_to_py(ty):
+        if ty.is_leaf_basis:
+            bt = ty.get_leaf_as_basis
+            return Basis(bt.value, list(bt.modes))
+        return ty.get_static_leaf_int
+
+    @staticmethod
+    def _dynamic_leaf_to_py(ty, value):
+        value = as_dsl_value(value)
+        if ty.is_leaf_basis:
+            return Basis(value, list(ty.get_leaf_as_basis.modes))
+        return value
+
+    @staticmethod
     def _static_to_py_value(ty):
         if ty.is_leaf:
-            return ty.get_static_leaf_int
+            return IntTuple._static_leaf_to_py(ty)
         return tuple(IntTuple._static_to_py_value(ty.at(i)) for i in range(ty.rank))
 
     def _rebuild_py_value(self, leaf_iter):
         if self.is_leaf:
             if self.is_static:
-                return self.get_static_leaf_int
-            val = next(leaf_iter)
-            width = ir.IntegerType(val.type).width
-            wrapper = Int64 if width == 64 else Int32
-            return wrapper(val)
-        return tuple(IntTuple(get_(self, i))._rebuild_py_value(leaf_iter) for i in range(self.rank))
+                return IntTuple._static_leaf_to_py(self.type)
+            return next(leaf_iter)
+        return tuple(get_(self, i)._rebuild_py_value(leaf_iter) for i in range(self.rank))
 
-    @traced_op
-    def to_py_value(self, loc=None, ip=None):
+    @dsl_loc_tracing
+    def to_py_value(self):
         if self.is_static:
             return IntTuple._static_to_py_value(self.type)
-        leaves = get_leaves(self, dynamic_only=True, loc=loc, ip=ip)
+        leaves = get_leaves(self, dynamic_only=True)
         leaf_iter = iter(leaves)
         return self._rebuild_py_value(leaf_iter)
 
-    @traced_op
-    def __getitem__(self, mode, loc=None, ip=None):
+    @dsl_loc_tracing
+    def unpack(self):
+        return self.to_py_value()
+
+    @dsl_loc_tracing
+    def __getitem__(self, mode):
         if isinstance(mode, int):
             mode = [mode]
         if self.rank <= mode[0]:
             raise IndexError(f"Index {mode[0]} out of range for int tuple with rank {self.rank}")
-        return get_(self, mode, loc=loc, ip=ip)
+        return get_(self, mode)
 
 
 @ir.register_value_caster(TileType.static_typeid, replace=True)
@@ -610,6 +732,26 @@ class Tile(BuiltinDslType):
     @property
     def rank(self) -> int:
         return self.type.rank
+
+    @dsl_loc_tracing
+    def unpack(self):
+        """Return the value on each mode, mirroring ``IntTuple.unpack``.
+
+        Int modes become Python ints, layout modes become ``Layout`` values, and
+        nested modes become tuples.
+        """
+
+        def to_py_value(ty):
+            ty = ty.maybe_downcast()
+            if isinstance(ty, LayoutType):
+                return static(ty)
+            if not isinstance(ty, TileType):
+                return IntTuple._static_to_py_value(ty)
+            if ty.is_leaf:
+                return to_py_value(ty.at(0))
+            return tuple(to_py_value(ty.at(i)) for i in range(ty.rank))
+
+        return to_py_value(self.type)
 
 
 @ir.register_value_caster(LayoutType.static_typeid, replace=True)
@@ -639,44 +781,44 @@ class Layout(BuiltinDslType):
         return self.type.is_static_stride
 
     @property
-    @traced_op
-    def shape(self, loc=None, ip=None) -> IntTuple:
-        return get_shape(self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def shape(self) -> IntTuple:
+        return get_shape(self)
 
     @property
-    @traced_op
-    def stride(self, loc=None, ip=None) -> IntTuple:
-        return get_stride(self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def stride(self) -> IntTuple:
+        return get_stride(self)
 
-    @traced_op
-    def __getitem__(self, mode, loc=None, ip=None):
+    @dsl_loc_tracing
+    def __getitem__(self, mode):
         if isinstance(mode, int):
             mode = [mode]
         if self.rank <= mode[0]:
             raise IndexError(f"Index {mode[0]} out of range for layout with rank {self.rank}")
-        return get_(self, mode, loc=loc, ip=ip)
+        return get_(self, mode)
 
-    @traced_op
-    def __call__(self, *coord, loc=None, ip=None):
+    @dsl_loc_tracing
+    def __call__(self, *coord):
         if not isinstance(coord, IntTuple):
-            coord = make_int_tuple(coord, loc=loc, ip=ip)
+            coord = make_int_tuple(coord)
 
         if has_none(coord):
-            return slice(self, coord, loc=loc, ip=ip)
+            return slice(self, coord)
         else:
-            return crd2idx(coord, self, loc=loc, ip=ip)
+            return crd2idx(coord, self)
 
-    @traced_op
-    def get_hier_coord(self, index, loc=None, ip=None):
-        return idx2crd(index, self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def get_hier_coord(self, index):
+        return idx2crd(index, self)
 
-    @traced_op
-    def get_flat_coord(self, index, loc=None, ip=None):
-        return get_flat_coord(index, self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def get_flat_coord(self, index):
+        return get_flat_coord(index, self)
 
-    @traced_op
-    def get_1d_coord(self, index, loc=None, ip=None):
-        return get_1d_coord(index, self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def get_1d_coord(self, index):
+        return get_1d_coord(index, self)
 
 
 @ir.register_value_caster(SwizzleType.static_typeid, replace=True)
@@ -756,37 +898,37 @@ class ComposedLayout(BuiltinDslType):
         raise TypeError("ComposedLayout doesn't have a meaningful stride")
 
     @property
-    @traced_op
-    def inner(self, loc=None, ip=None):
-        return composed_get_inner(self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def inner(self):
+        return composed_get_inner(self)
 
     @property
-    @traced_op
-    def offset(self, loc=None, ip=None) -> IntTuple:
-        return composed_get_offset(self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def offset(self) -> IntTuple:
+        return composed_get_offset(self)
 
     @property
-    @traced_op
-    def outer(self, loc=None, ip=None) -> "Layout | ComposedLayout":
-        return composed_get_outer(self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def outer(self) -> "Layout | ComposedLayout":
+        return composed_get_outer(self)
 
-    @traced_op
-    def __getitem__(self, mode, loc=None, ip=None):
+    @dsl_loc_tracing
+    def __getitem__(self, mode):
         if isinstance(mode, int):
             mode = [mode]
         if self.rank <= mode[0]:
             raise IndexError(f"Index {mode[0]} out of range for composed layout with rank {self.rank}")
-        return get_(self, mode, loc=loc, ip=ip)
+        return get_(self, mode)
 
-    @traced_op
-    def __call__(self, *coord, loc=None, ip=None):
+    @dsl_loc_tracing
+    def __call__(self, *coord):
         if not isinstance(coord, IntTuple):
-            coord = make_int_tuple(coord, loc=loc, ip=ip)
+            coord = make_int_tuple(coord)
 
         if has_none(coord):
-            return slice(self, coord, loc=loc, ip=ip)
+            return slice(self, coord)
         else:
-            return crd2idx(coord, self, loc=loc, ip=ip)
+            return crd2idx(coord, self)
 
 
 @ir.register_value_caster(PointerType.static_typeid, replace=True)
@@ -815,39 +957,39 @@ class Pointer(BuiltinDslType):
     def alignment(self):
         return self.type.alignment
 
-    @traced_op
-    def load(self, loc=None, ip=None):
-        return ptr_load(self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def load(self):
+        return ptr_load(self)
 
-    @traced_op
-    def store(self, value, loc=None, ip=None):
+    @dsl_loc_tracing
+    def store(self, value):
         if isinstance(value, (bool, int, float)):
             value = self.element_type(value)
-        return ptr_store(value, self, loc=loc, ip=ip)
+        return ptr_store(value, self)
 
-    @traced_op
-    def __getitem__(self, offset, loc=None, ip=None):
-        return (self + offset).load(loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def __getitem__(self, offset):
+        return (self + offset).load()
 
-    @traced_op
-    def __setitem__(self, offset, value, loc=None, ip=None):
-        (self + offset).store(value, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def __setitem__(self, offset, value):
+        (self + offset).store(value)
 
-    @traced_op
-    def __add__(self, offset, loc=None, ip=None):
-        return add_offset(self, offset, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def __add__(self, offset):
+        return add_offset(self, offset)
 
     __radd__ = __add__
 
-    @traced_op
-    def __sub__(self, offset, loc=None, ip=None):
+    @dsl_loc_tracing
+    def __sub__(self, offset):
         if isinstance(offset, ir.Value) and not isinstance(offset, ArithValue):
-            offset = ArithValue(offset, loc=loc, ip=ip)
-        return add_offset(self, -offset, loc=loc, ip=ip)
+            offset = ArithValue(offset)
+        return add_offset(self, -offset)
 
-    @traced_op
-    def view(self, layout, loc=None, ip=None):
-        return make_view(self, layout, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def view(self, layout):
+        return make_view(self, layout)
 
 
 @ir.register_value_caster(MemRefType.static_typeid, replace=True)
@@ -895,38 +1037,38 @@ class Tensor(BuiltinDslType):
     def stride(self) -> IntTuple:
         return self.layout.stride
 
-    @traced_op
-    def __getitem__(self, coord, loc=None, ip=None):
+    @dsl_loc_tracing
+    def __getitem__(self, coord):
         if not isinstance(coord, IntTuple):
-            coord = make_int_tuple(coord, loc=loc, ip=ip)
+            coord = make_int_tuple(coord)
 
         if has_none(coord):
-            return slice(self, coord, loc=loc, ip=ip)
+            return slice(self, coord)
         else:
-            return memref_load(self, coord, loc=loc, ip=ip)
+            return memref_load(self, coord)
 
-    @traced_op
-    def __setitem__(self, coord, value, loc=None, ip=None):
+    @dsl_loc_tracing
+    def __setitem__(self, coord, value):
         if not isinstance(coord, IntTuple):
-            coord = make_int_tuple(coord, loc=loc, ip=ip)
+            coord = make_int_tuple(coord)
 
         if has_none(coord):
-            self.__getitem__(coord, loc=loc, ip=ip).store(value, loc=loc, ip=ip)
+            self.__getitem__(coord).store(value)
         else:
-            memref_store(value, self, coord, loc=loc, ip=ip)
+            memref_store(value, self, coord)
 
-    @traced_op
-    def load(self, loc=None, ip=None):
-        return Vector(memref_load_vec(self, loc=loc, ip=ip), self.shape.to_py_value(), self.dtype)
+    @dsl_loc_tracing
+    def load(self):
+        return memref_load_vec(self)
 
-    @traced_op
-    def store(self, vector, loc=None, ip=None):
-        return memref_store_vec(vector, self, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def store(self, vector):
+        return memref_store_vec(vector, self)
 
-    @traced_op
-    def fill(self, value, loc=None, ip=None):
-        filled_vec = full(self.shape.to_py_value(), value, self.dtype, loc=loc, ip=ip)
-        return self.store(filled_vec, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def fill(self, value):
+        filled_vec = full(self.shape.to_py_value(), value, self.dtype)
+        return self.store(filled_vec)
 
 
 @ir.register_value_caster(CopyAtomType.static_typeid, replace=True)
@@ -956,18 +1098,18 @@ class CopyAtom(BuiltinDslType):
         return static(self.type.tv_layout_ref)
 
     @overload
-    def set_value(self, field: str, value, loc=None, ip=None): ...
+    def set_value(self, field: str, value): ...
     @overload
-    def set_value(self, field: dict, loc=None, ip=None): ...
+    def set_value(self, field: dict): ...
 
-    @traced_op
-    def set_value(self, field, value=None, loc=None, ip=None):
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
-                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+                result = atom_set_value(result, k, v)
             return result
-        return atom_set_value(self, field, value, loc=loc, ip=ip)
+        return atom_set_value(self, field, value)
 
 
 @ir.register_value_caster(MmaAtomType.static_typeid, replace=True)
@@ -997,18 +1139,18 @@ class MmaAtom(BuiltinDslType):
         return static(self.type.tv_layout_c)
 
     @overload
-    def set_value(self, field: str, value, loc=None, ip=None): ...
+    def set_value(self, field: str, value): ...
     @overload
-    def set_value(self, field: dict, loc=None, ip=None): ...
+    def set_value(self, field: dict): ...
 
-    @traced_op
-    def set_value(self, field, value=None, loc=None, ip=None):
+    @dsl_loc_tracing
+    def set_value(self, field, value=None):
         if isinstance(field, dict):
             result = self
             for k, v in field.items():
-                result = atom_set_value(result, k, v, loc=loc, ip=ip)
+                result = atom_set_value(result, k, v)
             return result
-        return atom_set_value(self, field, value, loc=loc, ip=ip)
+        return atom_set_value(self, field, value)
 
 
 @ir.register_value_caster(TiledCopyType.static_typeid, replace=True)
@@ -1080,17 +1222,17 @@ class TiledMma(BuiltinDslType):
     def thr_slice(self, thr_idx):
         return self.get_slice(thr_idx)
 
-    @traced_op
-    def make_fragment_A(self, a: Tensor, *, stages=None, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.A, self, a, stages=stages, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def make_fragment_A(self, a: Tensor, *, stages=None):
+        return mma_make_fragment(MmaOperand.A, self, a, stages=stages)
 
-    @traced_op
-    def make_fragment_B(self, b: Tensor, *, stages=None, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.B, self, b, stages=stages, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def make_fragment_B(self, b: Tensor, *, stages=None):
+        return mma_make_fragment(MmaOperand.B, self, b, stages=stages)
 
-    @traced_op
-    def make_fragment_C(self, c: Tensor, *, stages=None, loc=None, ip=None):
-        return mma_make_fragment(MmaOperand.C, self, c, stages=stages, loc=loc, ip=ip)
+    @dsl_loc_tracing
+    def make_fragment_C(self, c: Tensor, *, stages=None):
+        return mma_make_fragment(MmaOperand.C, self, c, stages=stages)
 
 
 class Stream:
@@ -1105,38 +1247,29 @@ class Stream:
 
     def __init__(self, value=None):
         self.value = value
-        self._stream_storage = None
 
     def __get_ir_types__(self):
         return [gpu.AsyncTokenType.get()]
 
-    def __get_c_pointers__(self):
-        if isinstance(self.value, int):
-            self._stream_storage = ctypes.c_void_p(self.value)
-        elif self.value is None:
-            self._stream_storage = ctypes.c_void_p(0)
-        else:
-            self._stream_storage = ctypes.c_void_p(self.value.cuda_stream)
-        return [ctypes.cast(ctypes.pointer(self._stream_storage), ctypes.c_void_p)]
-
     def __cache_signature__(self):
         return (type(self),)
 
-    @staticmethod
-    def _extract_stream_value(arg):
-        raw = arg.value if isinstance(arg, Stream) else arg
-        if raw is None:
-            return 0
-        elif isinstance(raw, int):
-            return raw
-        return raw.cuda_stream
+    def __c_abi_spec__(self):
+        def fill(a, s):
+            raw = a.value if hasattr(a, "_is_stream_param") else a
+            if raw is None:
+                s.value = 0
+            elif isinstance(raw, int):
+                s.value = raw
+            elif hasattr(raw, "cuda_stream"):
+                s.value = raw.cuda_stream
+            else:
+                raise ValueError(f"invalid stream value: {raw}")
+
+        return [(ctypes.c_void_p, fill)]
 
     @classmethod
-    def _reusable_slot_spec(cls, arg):
-        return ctypes.c_void_p, cls._extract_stream_value
-
-    @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         return Stream(values[0])
 
     def __extract_to_ir_values__(self):
@@ -1150,11 +1283,68 @@ class Tuple3D:
 
     def __getattr__(self, name):
         if name in ("x", "y", "z"):
-            return self.dtype(self.factory(name))
+            from .meta import capture_user_location
+
+            return self.dtype(self.factory(name, loc=capture_user_location()))
         raise AttributeError(name)
 
     def __iter__(self):
         return iter((self.x, self.y, self.z))
+
+
+class Basis:
+    def __init__(self, value, modes):
+        if isinstance(value, Basis):
+            value = value.value
+        if isinstance(modes, int):
+            modes = [modes]
+        modes = list(modes)
+        if not modes:
+            raise ValueError("Basis requires at least one mode")
+        if any(isinstance(m, bool) or not isinstance(m, int) or m < 0 for m in modes):
+            raise ValueError(f"Basis modes must be non-negative ints, got {modes!r}")
+
+        self.value = value
+        self.modes = modes
+
+    def __mul__(self, other):
+        if not isinstance(other, (int, Integer)):
+            raise TypeError(f"Basis multiplication requires int or Integer, got {type(other)}")
+        return Basis(self.value * other, self.modes)
+
+    __rmul__ = __mul__
+
+    def __eq__(self, other):
+        if not isinstance(other, Basis):
+            return False
+        if self.modes != other.modes:
+            return False
+        return self.value == other.value
+
+    def __hash__(self):
+        return hash((self.value, tuple(self.modes)))
+
+    def __repr__(self):
+        return f"{self.value}" + "".join(f"E{m}" for m in self.modes)
+
+
+def E(*mode):
+    """Build a unit basis stride leaf ``E<modes>`` (scale=1).
+
+    Examples:
+        E()         -> 1       # fall back to scalar
+        E(0)        -> 1E0
+        E(0, 1)     -> 1E0E1
+        E([0, 1])   -> 1E0E1
+    """
+
+    if len(mode) == 1 and isinstance(mode[0], (list, tuple)):
+        mode = tuple(mode[0])
+    if not mode:
+        return 1
+    if any(isinstance(m, bool) or not isinstance(m, int) or m < 0 for m in mode):
+        raise TypeError(f"E modes must be non-negative ints, got {mode!r}")
+    return Basis(1, list(mode))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1243,9 +1433,9 @@ class Vector(ArithValue):
         vty = ir.VectorType(value.type)
         if shape is None:
             shape = tuple(vty.shape)
+        if dtype is None:
             dtype = Numeric.from_ir_type(vty.element_type)
-        elif dtype is None:
-            dtype = Numeric.from_ir_type(vty.element_type)
+
         shape = self._canonical_shape(shape)
         if not all(isinstance(dim, int) for dim in self._flatten_static(shape)):
             raise ValueError("dynamic vector shape is not supported")
@@ -1278,7 +1468,9 @@ class Vector(ArithValue):
 
     @staticmethod
     def _canonical_shape(shape):
-        return (shape,) if isinstance(shape, int) else tuple(shape)
+        if isinstance(shape, int):
+            return (shape,)
+        return tuple(Vector._canonical_shape(dim) if isinstance(dim, (tuple, list)) else dim for dim in shape)
 
     @staticmethod
     def _flatten_static(value):
@@ -1370,10 +1562,12 @@ class Vector(ArithValue):
         return [self]
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
+        if isinstance(exemplar, cls):
+            return cls(values[0], exemplar._shape, exemplar._dtype)
         return cls(values[0])
 
-    def to(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
+    def to(self, dtype: Type[Numeric]) -> "Vector":
         if dtype is ir.Value:
             return self
         if not isclass(dtype) or not issubclass(dtype, Numeric):
@@ -1384,16 +1578,16 @@ class Vector(ArithValue):
         src_float = getattr(src_dtype, "is_float", False)
         dst_float = getattr(dtype, "is_float", False)
         if src_float and dst_float:
-            res = fp_to_fp(self, dtype.ir_type, loc=loc, ip=ip)
+            res = fp_to_fp(self, dtype.ir_type)
         elif src_float:
-            res = fp_to_int(self, dtype.signed, dtype.ir_type, loc=loc, ip=ip)
+            res = fp_to_int(self, dtype.signed, dtype.ir_type)
         elif dst_float:
-            res = int_to_fp(self, src_dtype.signed, dtype.ir_type, loc=loc, ip=ip)
+            res = int_to_fp(self, src_dtype.signed, dtype.ir_type)
         else:
-            res = int_to_int(self, dtype, loc=loc, ip=ip)
+            res = int_to_int(self, dtype)
         return Vector(res, self._shape, dtype)
 
-    def ir_value(self, *, loc=None, ip=None):
+    def ir_value(self):
         return self
 
     def with_signedness(self, signed):
@@ -1401,129 +1595,135 @@ class Vector(ArithValue):
 
     def _wrap_op_result(self, result, shape):
         if isinstance(result, ir.Value) and isinstance(result.type, ir.VectorType):
-            return Vector(result, shape, Numeric.from_ir_type(result.type.element_type))
+            return Vector(result, shape, self._result_dtype(result.type.element_type))
         if isinstance(result, Numeric):
             return result
         if isinstance(result, ir.Value):
-            return Numeric.from_ir_type(result.type)(result)
+            return self._result_dtype(result.type)(result)
         return result
 
-    def _apply_op(self, method_name, op, other, flip=False, *, loc=None, ip=None):
+    def _result_dtype(self, elem_type) -> Type[Numeric]:
+        if self._dtype.ir_type == elem_type:
+            return self._dtype
+        return Numeric.from_ir_type(elem_type)
+
+    def _apply_op(self, method_name, op, other, flip=False):
         lhs = self
         rhs = other
         shape = self.shape
         if isinstance(other, Vector):
             shape = self._infer_broadcast_shape(self.shape, other.shape)
-            lhs = self.broadcast_to(shape, loc=loc, ip=ip)
-            rhs = other.broadcast_to(shape, loc=loc, ip=ip)
+            lhs = self.broadcast_to(shape)
+            rhs = other.broadcast_to(shape)
         method = getattr(ArithValue, method_name)
         if flip:
             if isinstance(rhs, Vector):
-                result = method(rhs, lhs, loc=loc, ip=ip)
+                result = method(rhs, lhs)
             else:
                 reverse_name = _VECTOR_REVERSE_OP_METHODS.get(method_name, method_name)
-                result = getattr(ArithValue, reverse_name)(lhs, rhs, loc=loc, ip=ip)
+                result = getattr(ArithValue, reverse_name)(lhs, rhs)
         else:
-            result = method(lhs, rhs, loc=loc, ip=ip)
+            result = method(lhs, rhs)
         return self._wrap_op_result(result, shape)
 
-    def apply_op(self, op, other, flip=False, *, loc=None, ip=None):
+    def apply_op(self, op, other, flip=False):
         method_name = _VECTOR_OP_METHODS.get(op)
         if method_name is None:
             raise NotImplementedError(f"Vector.apply_op does not support {op}")
-        return self._apply_op(method_name, op, other, flip=flip, loc=loc, ip=ip)
+        return self._apply_op(method_name, op, other, flip=flip)
 
-    def __add__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.add, other, loc=loc, ip=ip)
+    def __add__(self, other):
+        return self.apply_op(operator.add, other)
 
-    def __radd__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.add, other, flip=True, loc=loc, ip=ip)
+    def __radd__(self, other):
+        return self.apply_op(operator.add, other, flip=True)
 
-    def __sub__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.sub, other, loc=loc, ip=ip)
+    def __sub__(self, other):
+        return self.apply_op(operator.sub, other)
 
-    def __rsub__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.sub, other, flip=True, loc=loc, ip=ip)
+    def __rsub__(self, other):
+        return self.apply_op(operator.sub, other, flip=True)
 
-    def __mul__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mul, other, loc=loc, ip=ip)
+    def __mul__(self, other):
+        return self.apply_op(operator.mul, other)
 
-    def __rmul__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mul, other, flip=True, loc=loc, ip=ip)
+    def __rmul__(self, other):
+        return self.apply_op(operator.mul, other, flip=True)
 
-    def __truediv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.truediv, other, loc=loc, ip=ip)
+    def __truediv__(self, other):
+        return self.apply_op(operator.truediv, other)
 
-    def __rtruediv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.truediv, other, flip=True, loc=loc, ip=ip)
+    def __rtruediv__(self, other):
+        return self.apply_op(operator.truediv, other, flip=True)
 
-    def __floordiv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.floordiv, other, loc=loc, ip=ip)
+    def __floordiv__(self, other):
+        return self.apply_op(operator.floordiv, other)
 
-    def __rfloordiv__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.floordiv, other, flip=True, loc=loc, ip=ip)
+    def __rfloordiv__(self, other):
+        return self.apply_op(operator.floordiv, other, flip=True)
 
-    def __mod__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mod, other, loc=loc, ip=ip)
+    def __mod__(self, other):
+        return self.apply_op(operator.mod, other)
 
-    def __rmod__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.mod, other, flip=True, loc=loc, ip=ip)
+    def __rmod__(self, other):
+        return self.apply_op(operator.mod, other, flip=True)
 
-    def __pow__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.pow, other, loc=loc, ip=ip)
+    def __pow__(self, other):
+        return self.apply_op(operator.pow, other)
 
-    def __rpow__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.pow, other, flip=True, loc=loc, ip=ip)
+    def __rpow__(self, other):
+        return self.apply_op(operator.pow, other, flip=True)
 
-    def __lshift__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.lshift, other, loc=loc, ip=ip)
+    def __lshift__(self, other):
+        return self.apply_op(operator.lshift, other)
 
-    def __rlshift__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.lshift, other, flip=True, loc=loc, ip=ip)
+    def __rlshift__(self, other):
+        return self.apply_op(operator.lshift, other, flip=True)
 
-    def __rshift__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.rshift, other, loc=loc, ip=ip)
+    def __rshift__(self, other):
+        return self.apply_op(operator.rshift, other)
 
-    def __rrshift__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.rshift, other, flip=True, loc=loc, ip=ip)
+    def __rrshift__(self, other):
+        return self.apply_op(operator.rshift, other, flip=True)
 
-    def __and__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.and_, other, loc=loc, ip=ip)
+    def __and__(self, other):
+        return self.apply_op(operator.and_, other)
 
-    def __rand__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.and_, other, flip=True, loc=loc, ip=ip)
+    def __rand__(self, other):
+        return self.apply_op(operator.and_, other, flip=True)
 
-    def __or__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.or_, other, loc=loc, ip=ip)
+    def __or__(self, other):
+        return self.apply_op(operator.or_, other)
 
-    def __ror__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.or_, other, flip=True, loc=loc, ip=ip)
+    def __ror__(self, other):
+        return self.apply_op(operator.or_, other, flip=True)
 
-    def __xor__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.xor, other, loc=loc, ip=ip)
+    def __xor__(self, other):
+        return self.apply_op(operator.xor, other)
 
-    def __rxor__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.xor, other, flip=True, loc=loc, ip=ip)
+    def __rxor__(self, other):
+        return self.apply_op(operator.xor, other, flip=True)
 
-    def __lt__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.lt, other, loc=loc, ip=ip)
+    def __lt__(self, other):
+        return self.apply_op(operator.lt, other)
 
-    def __le__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.le, other, loc=loc, ip=ip)
+    def __le__(self, other):
+        return self.apply_op(operator.le, other)
 
-    def __gt__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.gt, other, loc=loc, ip=ip)
+    def __gt__(self, other):
+        return self.apply_op(operator.gt, other)
 
-    def __ge__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.ge, other, loc=loc, ip=ip)
+    def __ge__(self, other):
+        return self.apply_op(operator.ge, other)
 
-    def __eq__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.eq, other, loc=loc, ip=ip)
+    def __eq__(self, other):
+        return self.apply_op(operator.eq, other)
 
-    def __ne__(self, other, *, loc=None, ip=None):
-        return self.apply_op(operator.ne, other, loc=loc, ip=ip)
+    def __ne__(self, other):
+        return self.apply_op(operator.ne, other)
 
-    def reduce(self, op, init_val=None, reduction_profile=None, *, fastmath=None, loc=None, ip=None):
+    @dsl_loc_tracing
+    def reduce(self, op, init_val=None, reduction_profile=None, *, fastmath=None):
         is_fp = self._dtype.is_float
         signed = getattr(self._dtype, "signed", True)
         kind = _resolve_combining_kind(op, is_fp, signed)
@@ -1533,24 +1733,25 @@ class Vector(ArithValue):
             kwargs["fastmath"] = fastmath
         if init_val is not None:
             if isinstance(init_val, Numeric):
-                init_val = init_val.ir_value(loc=loc, ip=ip)
+                init_val = init_val.ir_value()
             kwargs["acc"] = _to_raw(init_val)
-        res = _vector.reduction(et, kind, self, loc=loc, ip=ip, **kwargs)
+        res = _vector.reduction(et, kind, self, **kwargs)
         return self._dtype(res)
 
     @staticmethod
-    def _coerce_element(element, dtype: Type[Numeric], *, loc=None, ip=None):
+    def _coerce_element(element, dtype: Type[Numeric]):
         if isinstance(element, (int, float, bool)):
             return dtype(element)
         if isinstance(element, Numeric):
-            return element.to(dtype, loc=loc, ip=ip)
+            return element.to(dtype)
         if isinstance(element, ir.Value):
-            return Numeric.from_ir_type(element.type)(element).to(dtype, loc=loc, ip=ip)
+            return Numeric.from_ir_type(element.type)(element).to(dtype)
         if hasattr(element, "ir_value"):
-            value = element.ir_value(loc=loc, ip=ip)
-            return Numeric.from_ir_type(value.type)(value).to(dtype, loc=loc, ip=ip)
+            value = element.ir_value()
+            return Numeric.from_ir_type(value.type)(value).to(dtype)
         raise ValueError(f"expected numeric vector element, got {type(element)}")
 
+    @dsl_loc_tracing
     def __getitem__(self, idx):
         if idx is None:
             return self
@@ -1592,28 +1793,29 @@ class Vector(ArithValue):
             return self._build_result(res, res_shape, row_major=True)
         raise TypeError(f"unsupported index type: {type(idx)}")
 
-    def _build_result(self, value, shape, *, row_major=False, loc=None, ip=None) -> "Vector":
+    def _build_result(self, value, shape, *, row_major=False) -> "Vector":
         shape = self._canonical_shape(shape)
         flat_ty = self.make_type(shape, self._dtype)
-        flat_value = _vector.shape_cast(flat_ty, value, loc=loc, ip=ip)
+        flat_value = _vector.shape_cast(flat_ty, value)
         return Vector(flat_value, shape, self._dtype)
 
-    def reshape(self, shape, *, loc=None, ip=None) -> "Vector":
+    def reshape(self, shape) -> "Vector":
         shape = self._canonical_shape(shape)
         if self.numel != self._numel_from_shape(shape):
             raise ValueError(f"expected reshaped size to match: {self._shape} -> {shape}")
         return Vector(self, shape, self._dtype)
 
-    def broadcast_to(self, target_shape, *, loc=None, ip=None) -> "Vector":
+    @dsl_loc_tracing
+    def broadcast_to(self, target_shape) -> "Vector":
         target_shape = self._canonical_shape(target_shape)
         if self._shape == target_shape:
             return self
         src_flat_shape = self._flatten_static(self._shape)
         target_flat_shape = self._flatten_static(target_shape)
         if self.numel == 1:
-            scalar = self[0].ir_value(loc=loc, ip=ip)
+            scalar = self[0].ir_value()
             target_ty = self.make_type(target_shape, self._dtype)
-            res = _vector.broadcast(target_ty, scalar, loc=loc, ip=ip)
+            res = _vector.broadcast(target_ty, scalar)
             return Vector(res, target_shape, self._dtype)
         if len(src_flat_shape) > len(target_flat_shape):
             raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
@@ -1622,25 +1824,28 @@ class Vector(ArithValue):
             if src_dim != dst_dim and src_dim != 1:
                 raise ValueError(f"cannot broadcast shape {self._shape} to {target_shape}")
         src_ty = ir.VectorType.get(padded_src, self._dtype.ir_type)
-        src = _vector.shape_cast(src_ty, self, loc=loc, ip=ip)
+        src = _vector.shape_cast(src_ty, self)
         target_ty_nd = ir.VectorType.get(target_flat_shape, self._dtype.ir_type)
-        res = _vector.broadcast(target_ty_nd, src, loc=loc, ip=ip)
-        return self._build_result(res, target_shape, row_major=True, loc=loc, ip=ip)
+        res = _vector.broadcast(target_ty_nd, src)
+        return self._build_result(res, target_shape, row_major=True)
 
-    def bitcast(self, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
+    @dsl_loc_tracing
+    def bitcast(self, dtype: Type[Numeric]) -> "Vector":
         src_bits = self.numel * self._dtype.width
         dst_count = src_bits // dtype.width
         dst_vec_ty = ir.VectorType.get([dst_count], dtype.ir_type)
-        res = _vector.BitCastOp(dst_vec_ty, self, loc=loc, ip=ip).result
+        res = _vector.BitCastOp(dst_vec_ty, self).result
         return Vector(res, (dst_count,), dtype)
 
-    def shuffle(self, other, mask, *, loc=None, ip=None) -> "Vector":
+    @dsl_loc_tracing
+    def shuffle(self, other, mask) -> "Vector":
         other_val = other if not isinstance(other, Vector) else ir.Value(other)
-        res = _vector.shuffle(self, other_val, mask, loc=loc, ip=ip)
+        res = _vector.shuffle(self, other_val, mask)
         return Vector(res, (len(mask),), self._dtype)
 
     @classmethod
-    def from_elements(cls, elements, dtype: Type[Numeric] | None = None, *, loc=None, ip=None) -> "Vector":
+    @dsl_loc_tracing
+    def from_elements(cls, elements, dtype: Type[Numeric] | None = None) -> "Vector":
         elements = list(elements)
         if not elements:
             raise ValueError("Vector.from_elements requires at least one element")
@@ -1651,86 +1856,89 @@ class Vector(ArithValue):
             elif isinstance(first, ir.Value):
                 dtype = Numeric.from_ir_type(first.type)
             elif hasattr(first, "ir_value"):
-                dtype = Numeric.from_ir_type(first.ir_value(loc=loc, ip=ip).type)
+                dtype = Numeric.from_ir_type(first.ir_value().type)
             else:
                 dtype = type(Numeric.from_python_value(first))
         vec_ty = cls.make_type(len(elements), dtype)
-        raw_elements = [_to_raw(cls._coerce_element(element, dtype, loc=loc, ip=ip)) for element in elements]
-        res = _vector.from_elements(vec_ty, raw_elements, loc=loc, ip=ip)
+        raw_elements = [_to_raw(cls._coerce_element(element, dtype)) for element in elements]
+        res = _vector.from_elements(vec_ty, raw_elements)
         return cls(res, (len(elements),), dtype)
 
     @classmethod
-    def load(cls, result_type, memref, indices, *, loc=None, ip=None) -> "Vector":
+    @dsl_loc_tracing
+    def load(cls, result_type, memref, indices) -> "Vector":
         vty = ir.VectorType(result_type)
         dtype = Numeric.from_ir_type(vty.element_type)
         raw_indices = []
         for index in indices:
             if isinstance(index, int):
-                index = Index(index, loc=loc, ip=ip)
+                index = Index(index)
             elif not isinstance(index, ir.Value) and not hasattr(index, "ir_value"):
-                index = Index(index, loc=loc, ip=ip)
+                index = Index(index)
             raw_indices.append(_to_raw(index))
-        res = _vector.LoadOp(result_type, _to_raw(memref), raw_indices, loc=loc, ip=ip).result
+        res = _vector.LoadOp(result_type, _to_raw(memref), raw_indices).result
         return cls(res, tuple(vty.shape), dtype)
 
-    def store(self, memref, indices, *, alignment=None, loc=None, ip=None):
+    @dsl_loc_tracing
+    def store(self, memref, indices, *, alignment=None):
         raw_indices = []
         for index in indices:
             if isinstance(index, int):
-                index = Index(index, loc=loc, ip=ip)
+                index = Index(index)
             elif not isinstance(index, ir.Value) and not hasattr(index, "ir_value"):
-                index = Index(index, loc=loc, ip=ip)
+                index = Index(index)
             raw_indices.append(_to_raw(index))
         kwargs = {}
         if alignment is not None:
             kwargs["alignment"] = alignment
-        return _vector.store(_to_raw(self), _to_raw(memref), raw_indices, loc=loc, ip=ip, **kwargs)
+        return _vector.store(_to_raw(self), _to_raw(memref), raw_indices, **kwargs)
 
     @classmethod
-    def filled(cls, shape, fill_value, dtype: Type[Numeric], *, loc=None, ip=None) -> "Vector":
+    @dsl_loc_tracing
+    def filled(cls, shape, fill_value, dtype: Type[Numeric]) -> "Vector":
         shape = cls._canonical_shape(shape)
         n = cls._numel_from_shape(shape)
         if isinstance(fill_value, (int, float, bool)):
             fill_value = dtype(fill_value)
         elif isinstance(fill_value, Numeric):
-            fill_value = fill_value.to(dtype, loc=loc, ip=ip)
+            fill_value = fill_value.to(dtype)
         else:
             raise ValueError(f"expected numeric fill_value, got {type(fill_value)}")
         vec_ty = cls.make_type(n, dtype)
-        val = _vector.broadcast(vec_ty, fill_value.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+        val = _vector.broadcast(vec_ty, fill_value.ir_value())
         return cls(val, shape, dtype)
 
     @classmethod
-    def filled_like(cls, template: "Vector", fill_value, dtype=None, *, loc=None, ip=None) -> "Vector":
+    def filled_like(cls, template: "Vector", fill_value, dtype=None) -> "Vector":
         if dtype is None:
             dtype = template.dtype
-        return cls.filled(template.shape, fill_value, dtype, loc=loc, ip=ip)
+        return cls.filled(template.shape, fill_value, dtype)
 
     @classmethod
-    def zeros_like(cls, template: "Vector", dtype=None, *, loc=None, ip=None) -> "Vector":
+    def zeros_like(cls, template: "Vector", dtype=None) -> "Vector":
         if dtype is None:
             dtype = template.dtype
-        return cls.filled(template.shape, 0.0 if dtype.is_float else 0, dtype, loc=loc, ip=ip)
+        return cls.filled(template.shape, 0.0 if dtype.is_float else 0, dtype)
 
 
-def full(shape, fill_value, dtype: Type[Numeric], *, loc=None, ip=None) -> Vector:
-    return Vector.filled(shape, fill_value, dtype, loc=loc, ip=ip)
+def full(shape, fill_value, dtype: Type[Numeric]) -> Vector:
+    return Vector.filled(shape, fill_value, dtype)
 
 
-def full_like(a: Vector, fill_value, dtype=None, *, loc=None, ip=None) -> Vector:
-    return Vector.filled_like(a, fill_value, dtype, loc=loc, ip=ip)
+def full_like(a: Vector, fill_value, dtype=None) -> Vector:
+    return Vector.filled_like(a, fill_value, dtype)
 
 
-def empty_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
-    return Vector.filled_like(a, 0, dtype, loc=loc, ip=ip)
+def empty_like(a: Vector, dtype=None) -> Vector:
+    return Vector.filled_like(a, 0, dtype)
 
 
-def ones_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
-    return Vector.filled_like(a, 1, dtype, loc=loc, ip=ip)
+def ones_like(a: Vector, dtype=None) -> Vector:
+    return Vector.filled_like(a, 1, dtype)
 
 
-def zeros_like(a: Vector, dtype=None, *, loc=None, ip=None) -> Vector:
-    return Vector.zeros_like(a, dtype, loc=loc, ip=ip)
+def zeros_like(a: Vector, dtype=None) -> Vector:
+    return Vector.zeros_like(a, dtype)
 
 
 class Array:
@@ -1755,7 +1963,7 @@ class Array:
             return self._ptr_value
 
         @classmethod
-        def __construct_from_ir_values__(cls, values):
+        def __construct_from_ir_values__(cls, values, exemplar=None):
             if len(values) != 1:
                 raise ValueError(f"{cls.__name__} expects 1 ir.Value, got {len(values)}")
             return cls(values[0])
@@ -1781,16 +1989,16 @@ class Array:
         def __poke_into_ptr__(cls, ptr, value):
             raise NotImplementedError(f"{cls.__name__} does not support __poke_into_ptr__ yet")
 
-        @traced_op
-        def __getitem__(self, offset, loc=None, ip=None):
-            return self.ptr.__getitem__(offset, loc=loc, ip=ip)
+        @dsl_loc_tracing
+        def __getitem__(self, offset):
+            return self.ptr.__getitem__(offset)
 
-        @traced_op
-        def __setitem__(self, offset, value, loc=None, ip=None):
-            self.ptr.__setitem__(offset, value, loc=loc, ip=ip)
+        @dsl_loc_tracing
+        def __setitem__(self, offset, value):
+            self.ptr.__setitem__(offset, value)
 
-        def view(self, layout, *, loc=None, ip=None):
-            return make_view(self._ptr_value, layout, loc=loc, ip=ip)
+        def view(self, layout):
+            return make_view(self._ptr_value, layout)
 
     def __class_getitem__(cls, params):
         if not isinstance(params, tuple):
@@ -1829,3 +2037,237 @@ class Array:
         )
         cls._cache[cache_key] = array_type
         return array_type
+
+
+# ===========================================================================
+# Vector aliases
+# ===========================================================================
+
+
+def VectorAlias(alias_dtype: Type[Numeric], lanes: int):
+    expected_shape = (lanes,)
+
+    def __init__(self, value, shape=None, dtype=None):
+        if shape is not None and Vector._canonical_shape(shape) != expected_shape:
+            raise ValueError(f"{type(self).__name__} expects shape {expected_shape}, got {shape}")
+        if dtype is not None and dtype is not alias_dtype:
+            raise ValueError(f"{type(self).__name__} expects dtype {alias_dtype.__name__}, got {dtype.__name__}")
+        if isinstance(value, (int, float, bool, Numeric)):
+            value = Vector.filled(expected_shape, value, alias_dtype)
+        elif isinstance(value, (list, tuple)):
+            value = Vector.from_elements(value, alias_dtype)
+        Vector.__init__(self, value, expected_shape, alias_dtype)
+
+    return type(
+        f"{alias_dtype.__name__}x{lanes}",
+        (Vector,),
+        {
+            "__module__": Vector.__module__,
+            "__init__": __init__,
+            "ir_type": lazy_classattr(lambda: Vector.make_type(lanes, alias_dtype)),
+        },
+    )
+
+
+Float4E2M1FNx2 = VectorAlias(Float4E2M1FN, 2)
+Float4E2M1FNx4 = VectorAlias(Float4E2M1FN, 4)
+Float4E2M1FNx8 = VectorAlias(Float4E2M1FN, 8)
+Float4E2M1FNx16 = VectorAlias(Float4E2M1FN, 16)
+Float4E2M1FNx32 = VectorAlias(Float4E2M1FN, 32)
+
+Float8E4M3x1 = VectorAlias(Float8E4M3, 1)
+Float8E4M3x2 = VectorAlias(Float8E4M3, 2)
+Float8E4M3x4 = VectorAlias(Float8E4M3, 4)
+Float8E4M3x8 = VectorAlias(Float8E4M3, 8)
+Float8E4M3x16 = VectorAlias(Float8E4M3, 16)
+
+Float8E4M3B11FNUZx1 = VectorAlias(Float8E4M3B11FNUZ, 1)
+Float8E4M3B11FNUZx2 = VectorAlias(Float8E4M3B11FNUZ, 2)
+Float8E4M3B11FNUZx4 = VectorAlias(Float8E4M3B11FNUZ, 4)
+Float8E4M3B11FNUZx8 = VectorAlias(Float8E4M3B11FNUZ, 8)
+Float8E4M3B11FNUZx16 = VectorAlias(Float8E4M3B11FNUZ, 16)
+
+Float8E4M3FNx1 = VectorAlias(Float8E4M3FN, 1)
+Float8E4M3FNx2 = VectorAlias(Float8E4M3FN, 2)
+Float8E4M3FNx4 = VectorAlias(Float8E4M3FN, 4)
+Float8E4M3FNx8 = VectorAlias(Float8E4M3FN, 8)
+Float8E4M3FNx16 = VectorAlias(Float8E4M3FN, 16)
+
+Float8E4M3FNUZx1 = VectorAlias(Float8E4M3FNUZ, 1)
+Float8E4M3FNUZx2 = VectorAlias(Float8E4M3FNUZ, 2)
+Float8E4M3FNUZx4 = VectorAlias(Float8E4M3FNUZ, 4)
+Float8E4M3FNUZx8 = VectorAlias(Float8E4M3FNUZ, 8)
+Float8E4M3FNUZx16 = VectorAlias(Float8E4M3FNUZ, 16)
+
+Float8E5M2x1 = VectorAlias(Float8E5M2, 1)
+Float8E5M2x2 = VectorAlias(Float8E5M2, 2)
+Float8E5M2x4 = VectorAlias(Float8E5M2, 4)
+Float8E5M2x8 = VectorAlias(Float8E5M2, 8)
+Float8E5M2x16 = VectorAlias(Float8E5M2, 16)
+
+Float8E8M0FNUx1 = VectorAlias(Float8E8M0FNU, 1)
+Float8E8M0FNUx2 = VectorAlias(Float8E8M0FNU, 2)
+Float8E8M0FNUx4 = VectorAlias(Float8E8M0FNU, 4)
+Float8E8M0FNUx8 = VectorAlias(Float8E8M0FNU, 8)
+Float8E8M0FNUx16 = VectorAlias(Float8E8M0FNU, 16)
+
+BFloat16x1 = VectorAlias(BFloat16, 1)
+BFloat16x2 = VectorAlias(BFloat16, 2)
+BFloat16x4 = VectorAlias(BFloat16, 4)
+BFloat16x8 = VectorAlias(BFloat16, 8)
+BFloat16x16 = VectorAlias(BFloat16, 16)
+
+Float16x1 = VectorAlias(Float16, 1)
+Float16x2 = VectorAlias(Float16, 2)
+Float16x4 = VectorAlias(Float16, 4)
+Float16x8 = VectorAlias(Float16, 8)
+Float16x16 = VectorAlias(Float16, 16)
+
+Float32x1 = VectorAlias(Float32, 1)
+Float32x2 = VectorAlias(Float32, 2)
+Float32x4 = VectorAlias(Float32, 4)
+Float32x8 = VectorAlias(Float32, 8)
+Float64x1 = VectorAlias(Float64, 1)
+Float64x2 = VectorAlias(Float64, 2)
+Float64x4 = VectorAlias(Float64, 4)
+
+Int4x2 = VectorAlias(Int4, 2)
+Int4x4 = VectorAlias(Int4, 4)
+Int4x8 = VectorAlias(Int4, 8)
+Int4x16 = VectorAlias(Int4, 16)
+Int4x32 = VectorAlias(Int4, 32)
+Int8x1 = VectorAlias(Int8, 1)
+Int8x2 = VectorAlias(Int8, 2)
+Int8x4 = VectorAlias(Int8, 4)
+Int8x8 = VectorAlias(Int8, 8)
+Int8x16 = VectorAlias(Int8, 16)
+Int16x1 = VectorAlias(Int16, 1)
+Int16x2 = VectorAlias(Int16, 2)
+Int16x4 = VectorAlias(Int16, 4)
+Int16x8 = VectorAlias(Int16, 8)
+Int16x16 = VectorAlias(Int16, 16)
+
+Int32x1 = VectorAlias(Int32, 1)
+Int32x2 = VectorAlias(Int32, 2)
+Int32x4 = VectorAlias(Int32, 4)
+Int32x8 = VectorAlias(Int32, 8)
+Int64x1 = VectorAlias(Int64, 1)
+Int64x2 = VectorAlias(Int64, 2)
+Int64x4 = VectorAlias(Int64, 4)
+Int128x1 = VectorAlias(Int128, 1)
+
+Uint8x1 = VectorAlias(Uint8, 1)
+Uint8x2 = VectorAlias(Uint8, 2)
+Uint8x4 = VectorAlias(Uint8, 4)
+Uint8x8 = VectorAlias(Uint8, 8)
+Uint8x16 = VectorAlias(Uint8, 16)
+Uint16x1 = VectorAlias(Uint16, 1)
+Uint16x2 = VectorAlias(Uint16, 2)
+Uint16x4 = VectorAlias(Uint16, 4)
+Uint16x8 = VectorAlias(Uint16, 8)
+Uint16x16 = VectorAlias(Uint16, 16)
+Uint32x1 = VectorAlias(Uint32, 1)
+Uint32x2 = VectorAlias(Uint32, 2)
+Uint32x4 = VectorAlias(Uint32, 4)
+Uint32x8 = VectorAlias(Uint32, 8)
+Uint64x1 = VectorAlias(Uint64, 1)
+Uint64x2 = VectorAlias(Uint64, 2)
+Uint64x4 = VectorAlias(Uint64, 4)
+Uint128x1 = VectorAlias(Uint128, 1)
+
+__all__ += [
+    "VectorAlias",
+    "BFloat16x1",
+    "BFloat16x2",
+    "BFloat16x4",
+    "BFloat16x8",
+    "BFloat16x16",
+    "Float4E2M1FNx2",
+    "Float4E2M1FNx4",
+    "Float4E2M1FNx8",
+    "Float4E2M1FNx16",
+    "Float4E2M1FNx32",
+    "Float8E4M3x1",
+    "Float8E4M3x2",
+    "Float8E4M3x4",
+    "Float8E4M3x8",
+    "Float8E4M3x16",
+    "Float8E4M3B11FNUZx1",
+    "Float8E4M3B11FNUZx2",
+    "Float8E4M3B11FNUZx4",
+    "Float8E4M3B11FNUZx8",
+    "Float8E4M3B11FNUZx16",
+    "Float8E4M3FNx1",
+    "Float8E4M3FNx2",
+    "Float8E4M3FNx4",
+    "Float8E4M3FNx8",
+    "Float8E4M3FNx16",
+    "Float8E4M3FNUZx1",
+    "Float8E4M3FNUZx2",
+    "Float8E4M3FNUZx4",
+    "Float8E4M3FNUZx8",
+    "Float8E4M3FNUZx16",
+    "Float8E5M2x1",
+    "Float8E5M2x2",
+    "Float8E5M2x4",
+    "Float8E5M2x8",
+    "Float8E5M2x16",
+    "Float8E8M0FNUx1",
+    "Float8E8M0FNUx2",
+    "Float8E8M0FNUx4",
+    "Float8E8M0FNUx8",
+    "Float8E8M0FNUx16",
+    "Float16x1",
+    "Float16x2",
+    "Float16x4",
+    "Float16x8",
+    "Float16x16",
+    "Float32x1",
+    "Float32x2",
+    "Float32x4",
+    "Float32x8",
+    "Float64x1",
+    "Float64x2",
+    "Float64x4",
+    "Int4x2",
+    "Int4x4",
+    "Int4x8",
+    "Int4x16",
+    "Int4x32",
+    "Int8x1",
+    "Int8x2",
+    "Int8x4",
+    "Int8x8",
+    "Int8x16",
+    "Int16x1",
+    "Int16x2",
+    "Int16x4",
+    "Int16x8",
+    "Int16x16",
+    "Int32x1",
+    "Int32x2",
+    "Int32x4",
+    "Int32x8",
+    "Int64x1",
+    "Int64x2",
+    "Int64x4",
+    "Int128x1",
+    "Uint8x1",
+    "Uint8x2",
+    "Uint8x4",
+    "Uint8x8",
+    "Uint8x16",
+    "Uint16x1",
+    "Uint16x2",
+    "Uint16x4",
+    "Uint16x8",
+    "Uint16x16",
+    "Uint32x1",
+    "Uint32x2",
+    "Uint32x4",
+    "Uint32x8",
+    "Uint64x1",
+    "Uint64x2",
+    "Uint64x4",
+    "Uint128x1",
+]

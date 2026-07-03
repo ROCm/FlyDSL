@@ -12,6 +12,8 @@ TODO: Remove these inline asm wrappers once upstream MLIR adds proper ROCDL
 dialect ops for v_cvt_off_f32_i4 and v_cvt_pk_bf16_f32.
 """
 
+from ..meta import dsl_loc_tracing
+
 
 def _to_ir(v):
     """Coerce DSL Numeric to ir.Value if needed."""
@@ -22,6 +24,7 @@ def _to_ir(v):
     return v
 
 
+@dsl_loc_tracing
 def cvt_off_f32_i4(src_i32, byte_sel=None):
     """gfx9xx: v_cvt_off_f32_i4 — convert low nibble (bits[3:0]) to f32.
 
@@ -49,6 +52,7 @@ def cvt_off_f32_i4(src_i32, byte_sel=None):
     )
 
 
+@dsl_loc_tracing
 def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
     """gfx950: v_cvt_pk_bf16_f32 vdst, vsrc0, vsrc1.
 
@@ -64,30 +68,4 @@ def cvt_pk_bf16_f32(src_a_f32, src_b_f32):
         "v_cvt_pk_bf16_f32 $0, $1, $2",
         "=v,v,v",
         has_side_effects=False,
-    )
-
-
-def s_prefetch_inst_burst(num_pages: int = 10, page_bytes: int = 4096):
-    """gfx1250: prefetch ``num_pages`` cache lines of instructions ahead of PC.
-
-    Sets HW_REG_WAVE_MODE bit 8 (allow s_prefetch) then issues
-    ``s_prefetch_inst_pc_rel offset, s0, 31`` for ``offset = 0, page_bytes,
-    2*page_bytes, ...``.  Used by GEMM kernels to warm the I-cache before the
-    main loop starts so the first few iterations don't stall on instruction
-    fetch.
-
-    Wraps the inline-asm sequence so callers do not need to import the raw
-    ``llvm`` dialect.
-    """
-    from ..._mlir.dialects import llvm as _llvm
-
-    lines = ["s_setreg_imm32_b32 hwreg(HW_REG_WAVE_MODE, 8, 1), 1"]
-    for pg in range(num_pages):
-        lines.append(f"s_prefetch_inst_pc_rel {pg * page_bytes}, s0, 31")
-    _llvm.inline_asm(
-        None,
-        [],
-        "\n".join(lines),
-        "",
-        has_side_effects=True,
     )

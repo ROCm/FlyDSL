@@ -34,7 +34,8 @@ def test_backend_descriptors_are_loaded_from_selected_backend_list():
 
     assert "foreach(_backend ${FLYDSL_BACKENDS})" in text
     assert 'include("${CMAKE_CURRENT_LIST_DIR}/backends/${_backend}.cmake")' in text
-    assert 'set(FLYDSL_BACKENDS_TUPLE "(${_backends_joined})")' in text
+    assert "add_compile_definitions(FLYDSL_BACKEND_COUNT=${_n_backends})" in text
+    assert "add_compile_definitions(FLYDSL_BACKEND_${_backend_index}=${_backend})" in text
 
 
 def test_future_backend_descriptor_is_opt_in(tmp_path):

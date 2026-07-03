@@ -131,9 +131,9 @@ def _bench_fp8_gemm(
         sa_flat = sa.contiguous().view(-1)
         sb_flat = sb.contiguous().view(-1)
         if static_weight_scale:
-            b_flat = flyc.from_dlpack(b_flat)
-            sa_flat = flyc.from_dlpack(sa_flat)
-            sb_flat = flyc.from_dlpack(sb_flat)
+            b_flat = flyc.from_torch_tensor(b_flat)
+            sa_flat = flyc.from_torch_tensor(sa_flat)
+            sb_flat = flyc.from_torch_tensor(sb_flat)
         return (
             _as_i8(a).contiguous().view(-1),
             b_flat,
@@ -204,6 +204,7 @@ def _bench_fp8_gemm(
         pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
         pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
         pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
+        pytest.param(16384, 16384, 16384, 256, 256, marks=pytest.mark.large_shape, id="16384x16384x16384"),
     ],
 )
 @pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
@@ -226,6 +227,7 @@ def test_fp8_gemm_4wave(M, N, K, tile_m, tile_n, preshuffle_b):
         pytest.param(5120, 5120, 8320, 256, 256, id="5120x5120x8320"),
         pytest.param(8192, 8192, 8192, 256, 256, marks=pytest.mark.large_shape, id="8192x8192x8192"),
         pytest.param(9728, 8192, 8320, 256, 256, marks=pytest.mark.large_shape, id="9728x8192x8320"),
+        pytest.param(16384, 16384, 16384, 256, 256, marks=pytest.mark.large_shape, id="16384x16384x16384"),
     ],
 )
 @pytest.mark.parametrize("preshuffle_b", [False, True], ids=["rowmajor", "preshuffle_b"])
