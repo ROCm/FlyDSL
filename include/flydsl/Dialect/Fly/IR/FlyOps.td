@@ -97,7 +97,7 @@ def Fly_MakeViewOp : Fly_Op<"make_view", [Pure, DeclareOpInterfaceMethods<InferT
 }
 
 def Fly_MakeFragmentLikeOp : Fly_Op<"make_fragment_like", [Pure, DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins AnyTypeOf<[Fly_Layout, Fly_MemRef]>:$src, OptionalAttr<TypeAttr>:$dtype);
+  let arguments = (ins AnyTypeOf<[Fly_Layout, Fly_MemRef, Fly_CoordTensor]>:$src, OptionalAttr<TypeAttr>:$dtype);
   let results = (outs Fly_MemRef:$result);
   let assemblyFormat = "`(` $src (`,` $dtype^)? `)` attr-dict `:` functional-type(operands, results)";
 }
@@ -478,7 +478,7 @@ def Fly_MemRefAllocaOp : Fly_Op<"memref.alloca", []> {
   let results = (outs Fly_MemRef:$result);
 }
 def Fly_MemRefLoadVecOp : Fly_Op<"memref.load_vec", [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
-  let arguments = (ins Fly_MemRef:$memref); 
+  let arguments = (ins Fly_TensorLikeType:$memref);
   let results = (outs AnyType:$result);
 }
 def Fly_MemRefStoreVecOp : Fly_Op<"memref.store_vec", []> {

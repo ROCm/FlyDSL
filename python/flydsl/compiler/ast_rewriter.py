@@ -14,7 +14,7 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
-from ..expr.meta import capture_user_location
+from ..expr.meta import capture_user_location, file_location
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 
@@ -1480,3 +1480,157 @@ class CanonicalizeWhile(Transformer):
             dispatch_stmt = ast.fix_missing_locations(dispatch_stmt)
 
             return [before_func, after_func, dispatch_stmt]
+
+
+@ASTRewriter.register
+class FallbackLocations(Transformer):
+    """Source-location fallback for bare MLIR ops.
+
+    Wraps every user statement with ``with _flydsl_loc(__file__, line, col):``
+    so bare MLIR ops emitted during tracing inherit the correct source line.
+
+    Without this pass, ops that don't pass an explicit ``loc=`` kwarg and aren't
+    built by an ``@dsl_loc_tracing`` primitive fall back to ``Location.current``,
+    which during tracing is the kernel ``def`` line. That aggregates every bare
+    op to the ``@flyc.kernel`` decorator line in ATT trace output (the Pattern-5
+    hotspot-mapping artifact).
+
+    This is a *floor*: decorated primitives re-capture a precise line+column
+    call-site chain inside their own ``with`` scope, and ops with an explicit
+    ``loc=`` are unaffected (explicit ``loc=`` beats ``Location.current``).
+
+    Recurses into bodies of compound statements (``for``, ``while``, ``if``,
+    ``with``, ``try``) so each inner statement gets its own location. Skips
+    nested ``FunctionDef`` / ``AsyncFunctionDef`` / ``ClassDef`` and rewriter-
+    generated nodes (``_ASTREWRITE_MARKER``).
+
+    Gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO`` (the same env var that turns on
+    DWARF emission downstream); a no-op otherwise so production pays nothing.
+
+    Registered last so it only wraps user statements left after the other
+    rewriters have run.
+    """
+
+    def __init__(self, context, first_lineno):
+        super().__init__(context, first_lineno)
+        self._enabled = env.debug.enable_debug_info
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _flydsl_loc(filename, line, col=0):
+        # Floor location for un-decorated (bare) MLIR ops written directly in a
+        # kernel/jit body. Decorated primitives override this via their own
+        # capture_user_location() scope; ops with an explicit loc= are unaffected.
+        with file_location(filename, line, col):
+            yield
+
+    @classmethod
+    def rewrite_globals(cls):
+        return {"_flydsl_loc": cls._flydsl_loc}
+
+    def _abs_line(self, node):
+        return self.first_lineno + node.lineno
+
+    @staticmethod
+    def _is_loc_with(stmt):
+        if not isinstance(stmt, ast.With):
+            return False
+        for item in stmt.items:
+            ce = item.context_expr
+            if isinstance(ce, ast.Call) and isinstance(ce.func, ast.Name) and ce.func.id == "_flydsl_loc":
+                return True
+        return False
+
+    def _wrap(self, stmt):
+        if not self._enabled:
+            return stmt
+        if not hasattr(stmt, "lineno") or stmt.lineno is None:
+            return stmt
+        # Nested def/class are traced separately or run as plain Python.
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return stmt
+        # Don't double-wrap an existing _flydsl_loc with.
+        if self._is_loc_with(stmt):
+            return stmt
+        with_stmt = ast.With(
+            items=[
+                ast.withitem(
+                    context_expr=ast.Call(
+                        func=ast.Name("_flydsl_loc", ctx=ast.Load()),
+                        args=[
+                            ast.Constant(self.context.filename),
+                            ast.Constant(self._abs_line(stmt)),
+                            ast.Constant(getattr(stmt, "col_offset", 0)),
+                        ],
+                        keywords=[],
+                    ),
+                    optional_vars=None,
+                )
+            ],
+            body=[stmt],
+            type_comment=None,
+        )
+        return ast.copy_location(with_stmt, stmt)
+
+    def _wrap_block(self, stmts):
+        out = []
+        for s in stmts:
+            visited = self.visit(s)
+            if isinstance(visited, list):
+                out.extend(self._wrap(x) for x in visited)
+            elif visited is not None:
+                out.append(self._wrap(visited))
+        return out
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        if not self._enabled:
+            return node
+        if getattr(node, _ASTREWRITE_MARKER, None) is not None:
+            return node
+        node.body = self._wrap_block(node.body)
+        return node
+
+    def visit_AsyncFunctionDef(self, node):
+        return self.visit_FunctionDef(node)
+
+    def visit_For(self, node: ast.For):
+        node.body = self._wrap_block(node.body)
+        if node.orelse:
+            node.orelse = self._wrap_block(node.orelse)
+        return node
+
+    def visit_AsyncFor(self, node):
+        return self.visit_For(node)
+
+    def visit_While(self, node: ast.While):
+        node.body = self._wrap_block(node.body)
+        if node.orelse:
+            node.orelse = self._wrap_block(node.orelse)
+        return node
+
+    def visit_If(self, node: ast.If):
+        node.body = self._wrap_block(node.body)
+        if node.orelse:
+            node.orelse = self._wrap_block(node.orelse)
+        return node
+
+    def visit_With(self, node: ast.With):
+        # Already-wrapped _flydsl_loc blocks are idempotent: don't recurse and
+        # re-wrap their single inner statement.
+        if self._is_loc_with(node):
+            return node
+        node.body = self._wrap_block(node.body)
+        return node
+
+    def visit_AsyncWith(self, node):
+        return self.visit_With(node)
+
+    def visit_Try(self, node: ast.Try):
+        node.body = self._wrap_block(node.body)
+        for handler in node.handlers:
+            handler.body = self._wrap_block(handler.body)
+        if node.orelse:
+            node.orelse = self._wrap_block(node.orelse)
+        if node.finalbody:
+            node.finalbody = self._wrap_block(node.finalbody)
+        return node

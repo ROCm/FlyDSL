@@ -14,6 +14,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <dlfcn.h>
 #include <vector>
 
 #include "hip/hip_runtime.h"
@@ -68,60 +69,49 @@ extern "C" void mgpuLaunchClusterKernel(hipFunction_t function, intptr_t cluster
                                         intptr_t blockY, intptr_t blockZ, int32_t smem,
                                         hipStream_t stream, void **params, void **extra,
                                         size_t /*paramsCount*/) {
-#ifdef hipLaunchAttributeClusterDimension
-  hipLaunchAttribute attrs[1];
-  attrs[0].id = hipLaunchAttributeClusterDimension;
-  attrs[0].value.clusterDim.x = static_cast<unsigned>(clusterX);
-  attrs[0].value.clusterDim.y = static_cast<unsigned>(clusterY);
-  attrs[0].value.clusterDim.z = static_cast<unsigned>(clusterZ);
+  // Resolve hipDrvLaunchKernelEx at runtime via dlsym so that the same
+  // shared library works across HIP versions (required for wheel builds).
+  // Mirrors Triton's approach: triton/third_party/amd/backend/driver.c.
+  using LaunchKernelExFn =
+      hipError_t (*)(const HIP_LAUNCH_CONFIG *, hipFunction_t, void **, void **);
+  static auto launchKernelEx =
+      reinterpret_cast<LaunchKernelExFn>(dlsym(RTLD_DEFAULT, "hipDrvLaunchKernelEx"));
 
-  HIP_LAUNCH_CONFIG config{};
-  config.gridDimX = static_cast<unsigned>(gridX);
-  config.gridDimY = static_cast<unsigned>(gridY);
-  config.gridDimZ = static_cast<unsigned>(gridZ);
-  config.blockDimX = static_cast<unsigned>(blockX);
-  config.blockDimY = static_cast<unsigned>(blockY);
-  config.blockDimZ = static_cast<unsigned>(blockZ);
-  config.sharedMemBytes = static_cast<unsigned>(smem);
-  config.hStream = stream;
-  config.attrs = attrs;
-  config.numAttrs = 1;
+  if (launchKernelEx) {
+    hipLaunchAttribute attrs[1];
+    // hipLaunchAttributeClusterDimension == 4, hardcoded to avoid a
+    // compile-time dependency on HIP headers that define the enum value.
+    attrs[0].id = static_cast<hipLaunchAttributeID>(4);
+    auto *clusterDims = reinterpret_cast<unsigned *>(attrs[0].value.pad);
+    clusterDims[0] = static_cast<unsigned>(clusterX);
+    clusterDims[1] = static_cast<unsigned>(clusterY);
+    clusterDims[2] = static_cast<unsigned>(clusterZ);
 
-  hipError_t err = hipDrvLaunchKernelEx(&config, function, params, extra);
-  if (err == hipSuccess)
-    return;
+    HIP_LAUNCH_CONFIG config{};
+    config.gridDimX = static_cast<unsigned>(gridX);
+    config.gridDimY = static_cast<unsigned>(gridY);
+    config.gridDimZ = static_cast<unsigned>(gridZ);
+    config.blockDimX = static_cast<unsigned>(blockX);
+    config.blockDimY = static_cast<unsigned>(blockY);
+    config.blockDimZ = static_cast<unsigned>(blockZ);
+    config.sharedMemBytes = static_cast<unsigned>(smem);
+    config.hStream = stream;
+    config.attrs = attrs;
+    config.numAttrs = 1;
 
-  const bool requestedRealCluster = (clusterX > 1) || (clusterY > 1) || (clusterZ > 1);
-  if (requestedRealCluster) {
-    fprintf(stderr,
-            "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-            "for requested cluster=(%ld,%ld,%ld); not falling back to "
-            "hipModuleLaunchKernel.\n",
-            static_cast<int>(err), static_cast<long>(clusterX), static_cast<long>(clusterY),
-            static_cast<long>(clusterZ));
-    HIP_REPORT_IF_ERROR(err);
-    return;
+    HIP_REPORT_IF_ERROR(launchKernelEx(&config, function, params, extra));
+  } else {
+    if ((clusterX > 1) || (clusterY > 1) || (clusterZ > 1)) {
+      fprintf(stderr,
+              "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
+              "hipDrvLaunchKernelEx is unavailable; "
+              "falling back to hipModuleLaunchKernel.\n",
+              static_cast<long>(clusterX), static_cast<long>(clusterY),
+              static_cast<long>(clusterZ));
+    }
+    HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
+                                              smem, stream, params, extra));
   }
-
-  fprintf(stderr,
-          "[mgpuLaunchClusterKernel] hipDrvLaunchKernelEx failed (err=%d) "
-          "for cluster=(1,1,1); falling back to hipModuleLaunchKernel.\n",
-          static_cast<int>(err));
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
-                                            smem, stream, params, extra));
-#else
-  // Cluster launch not supported by this HIP version; ignore cluster dims
-  // and fall back to regular kernel launch.
-  if ((clusterX > 1) || (clusterY > 1) || (clusterZ > 1)) {
-    fprintf(stderr,
-            "[mgpuLaunchClusterKernel] cluster=(%ld,%ld,%ld) requested but "
-            "hipLaunchAttributeClusterDimension is not available in this HIP "
-            "version; falling back to hipModuleLaunchKernel.\n",
-            static_cast<long>(clusterX), static_cast<long>(clusterY), static_cast<long>(clusterZ));
-  }
-  HIP_REPORT_IF_ERROR(hipModuleLaunchKernel(function, gridX, gridY, gridZ, blockX, blockY, blockZ,
-                                            smem, stream, params, extra));
-#endif
 }
 
 extern "C" hipStream_t mgpuStreamCreate() {
