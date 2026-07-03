@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-03T08:50:08Z",
+ "updated": "2026-07-03T09:07:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28650330710,
+   "pr": 613,
+   "commit": "f4862d66f5ee53c73a5c31172cedf53e32402fca",
+   "branch": "worktree-llvm-pass-pipeline",
+   "event": "pull_request",
+   "title": "feat(compiler): Add custom LLVM pass pipeline and plugin support to JIT",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28650330710",
+   "created_at": "2026-07-03T09:05:16Z",
+   "updated_at": "2026-07-03T09:06:02Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 28649455151,
    "pr": 796,
@@ -10,17 +25,45 @@
    "branch": "worktree-triton-style-occupancy-info",
    "event": "pull_request",
    "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151",
    "created_at": "2026-07-03T08:48:36Z",
-   "updated_at": "2026-07-03T08:49:14Z",
+   "updated_at": "2026-07-03T08:49:51Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-03T08:49:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151/job/84963904684"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-03T08:50:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151/job/84963904728"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-03T08:50:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151/job/84963904763"
+    }
+   ]
   },
   {
    "run_id": 28649199391,
-   "pr": 796,
+   "pr": null,
    "commit": "64f5e47867a1883a846a2156128a68f360693b63",
    "branch": "worktree-triton-style-occupancy-info",
    "event": "pull_request",
@@ -63,7 +106,7 @@
   },
   {
    "run_id": 28648981198,
-   "pr": 796,
+   "pr": null,
    "commit": "6a3ecca8e1adfeaa4e8f2293b3113ed82dbfc0b2",
    "branch": "worktree-triton-style-occupancy-info",
    "event": "pull_request",
@@ -1558,21 +1601,6 @@
    "created_at": "2026-07-01T18:30:38Z",
    "updated_at": "2026-07-01T18:32:00Z",
    "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 28533870938,
-   "pr": 780,
-   "commit": "85f9e54b3756fafbad0b76ed1be441dab96e002a",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533870938",
-   "created_at": "2026-07-01T16:54:33Z",
-   "updated_at": "2026-07-01T16:55:40Z",
-   "actor": "amd-satre",
    "jobs": []
   }
  ]
