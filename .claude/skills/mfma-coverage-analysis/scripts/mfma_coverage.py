@@ -95,14 +95,18 @@ def main():
     print(f"MFMA-covered: {cov} ({cov*100//span}%)   EXPOSED: {exp} ({exp*100//span}%)")
     print(f"cyc/mfma = {span/len(mfma):.2f}  (floor = {E})")
 
-    # AUTHORITATIVE attribution via the per-instruction STALL field. Each ATT wave
-    # row is [cycle, issue_dur, STALL, total_dur, code_id]: r[2] is the cycles the
-    # instruction stalled (blocked issue / waited). This is ground truth -- it makes
-    # gap-geometry guessing (first-in-gap / longest-in-gap / occupancy-overlap) moot,
-    # all of which mislabeled non-blocking fill ops. Ops with stall==0 (ds_read_b128,
-    # s_add, ...) NEVER block the matrix unit no matter how they sit between MFMAs;
-    # only ops with real stall (s_barrier, s_waitcnt, buffer_load) do. Report stall by
-    # op, excluding the MFMAs' own execute stall (that is the floor, not exposure).
+    # Attribute the EXPOSED cycles (matrix unit idle) to instructions. Two facts:
+    #   1. Row = [cycle, issue_dur, STALL(r[2]), total_dur, code_id]. r[2] is the real
+    #      per-instruction stall. Ops with stall==0 (ds_read_b128, s_add) NEVER block.
+    #   2. A stall only COUNTS AS EXPOSED for the cycles the matrix unit was actually
+    #      idle -- i.e. the stall interval [cycle, cycle+stall) intersected with a
+    #      next_free GAP. A stall that overlaps MFMA execute is hidden (the pipe is
+    #      busy). (MFMAs issue ~8 cyc apart but each execute-slot is 16, so several
+    #      overlapping executes keep the unit busy well past any single [issue,issue+16);
+    #      using the next_free gaps as the "idle" mask handles this correctly.)
+    # Whatever exposed cycles are NOT covered by any stalling instruction are PURE IDLE
+    # (scheduling gaps / dependency slack, not a single op's fault) -- usually the top
+    # bucket, and the target for tighter MFMA packing rather than cutting one op.
     def label(cid):
         t = code[cid][0].strip() if cid < len(code) else "?"
         o = op_of(code, cid)
@@ -112,20 +116,28 @@ def main():
                    "s_waitcnt(lgkmcnt)" if l else "s_waitcnt"
         return o
 
+    def gap_overlap(a, b):
+        tot = 0
+        for g0, g1 in gaps:
+            if g1 <= a or g0 >= b:
+                continue
+            tot += min(g1, b) - max(g0, a)
+        return tot
+
     stall = collections.Counter()
-    mfma_stall = 0
     for r in seg:
-        o = op_of(code, r[4])
-        s = r[2] if len(r) > 2 else 0
-        if o.startswith("v_mfma"):
-            mfma_stall += s
-        elif s:
-            stall[label(r[4])] += s
-    tot_stall = sum(stall.values()) or 1
-    print(f"\n(mfma self execute-stall {mfma_stall} = the floor, excluded)")
-    print(f"== NON-MFMA stall cycles by instruction (authoritative, {tot_stall} cyc) ==")
+        if op_of(code, r[4]).startswith("v_mfma") or len(r) < 3 or r[2] <= 0:
+            continue
+        e = gap_overlap(r[0], r[0] + r[2])
+        if e > 0:
+            stall[label(r[4])] += e
+    named = sum(stall.values())
+    pure_idle = exp - named
+    total = exp or 1
+    print(f"\n== EXPOSED {exp} cyc attributed (stall interval ∩ idle gap) ==")
+    print(f"  {pure_idle:6d} cyc ({pure_idle*100//total:2d}%)  <pure-idle: scheduling/dependency slack>")
     for o, c in stall.most_common(15):
-        print(f"  {c:6d} cyc ({c*100//tot_stall:2d}%)  {o}")
+        print(f"  {c:6d} cyc ({c*100//total:2d}%)  {o}")
 
 
 if __name__ == "__main__":

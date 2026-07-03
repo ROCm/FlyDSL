@@ -1,6 +1,6 @@
 ---
 name: mfma-coverage-analysis
-description: From an ATT trace, find which hot-loop instructions are NOT hidden behind MFMA execution -- i.e. what is keeping cyc/mfma above the MFMA execute floor (16 for fp4, 32 for fp8 16x16x128). Models the matrix unit as a pipeline (next_free) for the EXPOSED %, and ranks blockers by the authoritative per-instruction STALL field (ops with stall==0 never block). Use when a GEMM/attention kernel is MFMA-bound and you want to push cyc/mfma toward the floor, or the user asks "what isn't hidden behind MFMA", "哪些指令没被 mfma 掩盖", "暴露的指令", or which non-MFMA op is the biggest exposed stall.
+description: From an ATT trace, find which hot-loop instructions are NOT hidden behind MFMA execution -- i.e. what is keeping cyc/mfma above the MFMA execute floor (16 for fp4, 32 for fp8 16x16x128). Models the matrix unit as a pipeline (next_free) for the EXPOSED %, then attributes exposed cycles by per-instruction STALL field intersected with the idle gaps (stall==0 ops and MFMA-hidden stall never count); the uncovered remainder is pure-idle scheduling slack. Use when a GEMM/attention kernel is MFMA-bound and you want to push cyc/mfma toward the floor, or the user asks "what isn't hidden behind MFMA", "哪些指令没被 mfma 掩盖", "暴露的指令", or which non-MFMA op is the biggest exposed stall.
 ---
 
 # MFMA Coverage Analysis
@@ -21,20 +21,29 @@ EXPOSED = sum of those idle gaps; shrink it toward 0 so cyc/mfma → EXEC (see
 older "union of `[issue, issue+EXEC)` windows" model, which capped overlapping
 windows and over-reported exposure.
 
-## Attribution: use the per-instruction STALL field, NOT gap geometry
+## Attribution: STALL field ∩ idle gap (both filters matter)
 
 Each ATT wave row is `[cycle, issue_dur, STALL, total_dur, code_id]`. **`r[2]` is
-the authoritative stall** — the cycles that instruction actually blocked. Rank
-blockers by summed stall per op (excluding the MFMAs' own execute stall, which is
-the floor). Do NOT attribute by "which op sits in the idle gap" — every geometric
-heuristic tried (first-in-gap / longest-in-gap / occupancy-overlap) mislabeled
-non-blocking fill ops and gave contradictory answers on the SAME trace:
+the authoritative per-instruction stall.** Attribute EXPOSED cycles with TWO filters:
 
-- gap-geometry variously blamed `ds_read_b128` 33%, then `s_add` 34%, then
-  `buffer_load` 30% — all WRONG.
-- the stall field showed `ds_read_b128` and `s_add` have **stall == 0** (pure fill,
-  never block), and the real blockers were **s_barrier 39% + s_waitcnt(lgkmcnt) 35%
-  + buffer_load 11% + readfirstlane 7% + s_waitcnt(vmcnt) 5%**.
+1. **Only stall>0 ops block.** Ops with stall==0 (`ds_read_b128`, `s_add`) are pure
+   fill between MFMAs and never block — do NOT attribute by "which op sits in the
+   gap" (first/longest/occupancy geometry all mislabeled fill and gave contradictory
+   answers on the same trace: ds_read 33%, then s_add 34%, then buffer_load 30% — all wrong).
+2. **Only the part of the stall overlapping a next_free GAP counts as exposed.** A
+   stall that overlaps MFMA execute is HIDDEN (the pipe is busy). Because MFMAs issue
+   ~8 cyc apart but each execute-slot is 16, several overlapping executes keep the
+   unit busy well past any single `[issue,issue+16)`; intersecting with the next_free
+   idle gaps handles this. (Skipping this over-reported lgkmcnt: raw stall 976 →
+   true-exposed 504.)
+
+Whatever exposed cycles no stalling instruction covers = **PURE IDLE** (scheduling /
+dependency slack, not one op's fault) — usually the TOP bucket.
+
+Example (fp4_gemm_4wave, cyc/mfma 18.73, EXPOSED 14% = 6344 cyc): **pure-idle 72% +
+s_barrier 15% + s_waitcnt(lgkmcnt) 7% + buffer_load 3% + s_waitcnt(vmcnt) 0%.** The
+biggest lever is packing MFMAs tighter (pure-idle), not cutting any single op; the
+per-op stalls are small once MFMA-hidden cycles are removed.
 
 So: an op that issues between MFMAs is only a problem if its `r[2]` stall > 0.
 s_waitcnt is split into vmcnt / lgkmcnt so you can see whether VMEM or LDS waits
@@ -56,13 +65,18 @@ python3 .claude/skills/mfma-coverage-analysis/scripts/mfma_coverage.py \
     <dispatch_dir> --range 219000,245000 --exec 16
 ```
 
-Output: MFMA-covered %, EXPOSED %, cyc/mfma vs floor, and the exposed-gap cycles
-bucketed by blocking instruction.
+Output: MFMA-covered %, EXPOSED %, cyc/mfma vs floor, then the exposed cycles split
+into pure-idle + per-op (stall ∩ idle-gap) buckets.
 
 ## Reading it
 
-- **Rank by the stall column (`r[2]`), not by count or by which op sits in a gap.**
-  An op with stall==0 is free no matter where it sits; only stall>0 ops block.
+- **pure-idle top** → the matrix unit is idle with NO stalling instruction there;
+  it's scheduling/dependency slack. Attack by packing MFMAs tighter (spread thunks
+  differently, interleave_stride, deepen prefetch so operands are ready earlier),
+  NOT by cutting one op. This is usually the biggest bucket once stalls are filtered.
+- **Rank named ops by the stall column (`r[2]`) ∩ idle gap**, not by count or by which
+  op sits in a gap. An op with stall==0 is free; a stall overlapping MFMA execute is
+  hidden. Only stall>0 ∩ idle-gap cycles are real exposure.
 - **s_barrier high** → the wave is waiting at the per-iter cross-wave sync (the
   4 waves finish the iter at slightly different times). Structural for a fixed wave
   count; not cuttable without changing sync granularity / wave layout.
