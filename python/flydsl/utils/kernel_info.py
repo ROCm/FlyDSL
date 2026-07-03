@@ -21,7 +21,7 @@ This module parses that block into a plain dict, so callers don't have to
 re-derive occupancy/register usage from device properties themselves.
 """
 
-from typing import Dict
+from typing import Dict, Optional
 
 KERNEL_INFO_HEADER = "; Kernel info:"
 
@@ -48,3 +48,9 @@ def parse_kernel_info(isa_text: str) -> Dict[str, str]:
         key, _, value = line.partition(":")
         info[key.strip()] = value.strip()
     return info
+
+
+def get_occupancy(isa_text: str) -> Optional[int]:
+    """Convenience accessor for the ``Occupancy`` field, as an int."""
+    value = parse_kernel_info(isa_text).get("Occupancy")
+    return int(value) if value is not None else None
