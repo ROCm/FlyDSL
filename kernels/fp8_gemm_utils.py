@@ -47,10 +47,10 @@ def swizzle_128(row, col):
     return swizzled_offset // 128, swizzled_offset % 128
 
 
-def compute_global_swizzle(lane_id, wave_id, K, n_rounds__4, preshuffled):
+def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
     offsets = []
     n_waves = fx.block_dim.x // 64
-    for round in range_constexpr(n_rounds__4):
+    for round in range_constexpr(n_rounds):
         if const_expr(preshuffled):
             row = lane_id % 8 + wave_id * 8 + round * (n_waves * 8)
             col = (lane_id // 8) * 16
