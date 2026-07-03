@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-03T08:35:42Z",
+ "updated": "2026-07-03T08:45:53Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28649199391,
+   "pr": 796,
+   "commit": "64f5e47867a1883a846a2156128a68f360693b63",
+   "branch": "worktree-triton-style-occupancy-info",
+   "event": "pull_request",
+   "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391",
+   "created_at": "2026-07-03T08:43:34Z",
+   "updated_at": "2026-07-03T08:44:33Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-03T08:44:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052931"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-03T08:44:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052940"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-03T08:44:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052941"
+    }
+   ]
+  },
+  {
+   "run_id": 28648981198,
+   "pr": 796,
+   "commit": "6a3ecca8e1adfeaa4e8f2293b3113ed82dbfc0b2",
+   "branch": "worktree-triton-style-occupancy-info",
+   "event": "pull_request",
+   "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28648981198",
+   "created_at": "2026-07-03T08:39:22Z",
+   "updated_at": "2026-07-03T08:43:53Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-03T08:40:35Z",
+     "completed_at": "2026-07-03T08:43:34Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28648981198/job/84962385250"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-03T08:41:14Z",
+     "completed_at": "2026-07-03T08:43:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28648981198/job/84962385254"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-03T08:41:09Z",
+     "completed_at": "2026-07-03T08:43:52Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28648981198/job/84962385257"
+    }
+   ]
+  },
   {
    "run_id": 28644870089,
    "pr": 753,
@@ -1516,36 +1602,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533709835/job/84589852873"
     }
    ]
-  },
-  {
-   "run_id": 28533233505,
-   "pr": null,
-   "commit": "856128d9766793a860ce9cb2fab4bfce28a8c61b",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28533233505",
-   "created_at": "2026-07-01T16:43:21Z",
-   "updated_at": "2026-07-01T16:44:09Z",
-   "actor": "amd-satre",
-   "jobs": []
-  },
-  {
-   "run_id": 28532875277,
-   "pr": null,
-   "commit": "1f5c7f493e5631a9a38b0f6a257a0a64bf662687",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28532875277",
-   "created_at": "2026-07-01T16:36:58Z",
-   "updated_at": "2026-07-01T16:38:20Z",
-   "actor": "amd-satre",
-   "jobs": []
   }
  ]
 }
