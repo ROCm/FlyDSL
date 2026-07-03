@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-03T16:01:39Z",
+ "updated": "2026-07-03T16:12:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -111,19 +111,19 @@
    "branch": "worktree-llvm-pass-pipeline",
    "event": "pull_request",
    "title": "feat(compiler): Add custom LLVM pass pipeline and plugin support to JIT",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28653177354",
    "created_at": "2026-07-03T09:59:24Z",
-   "updated_at": "2026-07-03T10:00:56Z",
+   "updated_at": "2026-07-03T16:11:41Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-03T10:00:56Z",
+     "started_at": "2026-07-03T16:11:41Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28653177354/job/84976159353"
     },
@@ -154,11 +154,11 @@
    "branch": "pr/vector-numeric-promotion-single",
    "event": "pull_request",
    "title": "[Fix] Consistent promotion rules for Vector and Numeric",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28652854500",
    "created_at": "2026-07-03T09:53:07Z",
-   "updated_at": "2026-07-03T16:00:33Z",
+   "updated_at": "2026-07-03T16:10:56Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -182,10 +182,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-03T16:00:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-03T16:10:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28652854500/job/84975030829"
     }
    ]
