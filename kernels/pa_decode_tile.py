@@ -450,7 +450,7 @@ def compile_pa_decode_tile(
             k_cur = [ostate[2 + i] for i in range_constexpr(NKOPS)]  # this tile's prefetched K
             phys = ostate[2 + NKOPS]  # this tile's block-table page (prefetched last iter)
             tt_i32 = fx.Int32(arith.index_cast(T.i32, tt))
-            within_tile, tok0, _ = _coords_no_phys(tt_i32)
+            within_tile, tok0, cur_page = _coords_no_phys(tt_i32)
 
             # Thread slices must be (re)created inside the loop: the ThrCopy/
             # ThrMma python subclass is stripped back to its TiledCopy/TiledMma
@@ -476,10 +476,18 @@ def compile_pa_decode_tile(
 
             # prefetch next tile's K + phys page (the MFMAs above consumed k_cur);
             # the loads overlap the softmax + PV below and become next iter's state.
+            # `page = tok0 // block_size` only advances once every
+            # `block_size // TILE_TOK` tiles (the kernel's own addressing already
+            # requires block_size to be a multiple of TILE_TOK, so it advances by
+            # at most 1 per tile) — skip the reload on the common case where the
+            # next tile shares this tile's page (a real conditional, not
+            # arith.select, so the global_load_i32 genuinely doesn't execute).
             tt1 = tt_i32 + arith.constant(1, type=T.i32)
             tt1c = arith.select(tt1 < part_end, tt1, num_tiles_m1)
             p1_wt, _, p1_page = _coords_no_phys(tt1c)
-            p1_phys = _load_phys(p1_page)
+            p1_phys = phys
+            if p1_page != cur_page:
+                p1_phys = _load_phys(p1_page)
             k_next = _k_ops_flat(p1_phys, p1_wt)
 
             # ---- register-resident softmax over M = token, 4 scores at a time ----
