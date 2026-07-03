@@ -761,12 +761,27 @@ def gemm1_body_v2(
                     guard_stream=True,
                 )
     else:
-        # fp8: accm is carried SSA (cannot escape an scf.if), so keep the rolled scf.for tail (slot-mod).
-        for kt_iv, state in range(fx.Index(0), fx.Index(rem), fx.Index(1), init=results):
+        # fp8: accm is raw f32x4 SSA (cannot escape an scf.if), so the tail stays a rolled scf.for.
+        # UNROLL is a multiple of kAStages, so full_tiles%kAStages==0 -> the first tail slot is 0
+        # (read) / kStages%kAStages (write). Carry both slots as loop values that advance +1 with a
+        # cheap compare-select wrap, so the tail *selects* the slot instead of re-doing the runtime
+        # (full_tiles+kt_iv)%kAStages divide (the s_mul_hi_i32 0x55555556 dance) every iteration.
+        rs0 = fx.Int32(0)
+        ws0 = fx.Int32(kStages % kAStages)
+        nSlots = len(results)
+        for kt_iv, state in range(fx.Index(0), fx.Index(rem), fx.Index(1), init=results + [rs0, ws0]):
             store_carry(state[:nC])
-            b_restore(CUR, state[nC:])
-            process_tile(full_tiles + fx.Int32(kt_iv), 0, 0, CUR, NXT, const_slots=False, guard_stream=True)
-            results = yield load_carry() + b_snapshot(NXT)
+            b_restore(CUR, state[nC:nSlots])
+            read_slot = state[nSlots]
+            write_slot = state[nSlots + 1]
+            process_tile(
+                full_tiles + fx.Int32(kt_iv), read_slot, write_slot, CUR, NXT, const_slots=True, guard_stream=True
+            )
+            rs1 = read_slot + fx.Int32(1)
+            ws1 = write_slot + fx.Int32(1)
+            rs_next = (rs1 == fx.Int32(kAStages)).select(fx.Int32(0), rs1)
+            ws_next = (ws1 == fx.Int32(kAStages)).select(fx.Int32(0), ws1)
+            results = yield load_carry() + b_snapshot(NXT) + [rs_next, ws_next]
         store_carry(results[:nC])
 
     gpu.barrier()
