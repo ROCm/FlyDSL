@@ -459,7 +459,8 @@ def compile_fp8fp4_gemm(
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
     use_row_major_k_prefetch = (not is_blockscale) and wmma_m_rep == 1 and k_wmma_steps > 1
-    _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
+    use_blockscale_k_prefetch = is_blockscale and wmma_m_rep == 1 and k_wmma_steps > 1
+    _row_major_k_prefetch_depth = 2 if (use_row_major_k_prefetch or use_blockscale_k_prefetch) else 1
     _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
     use_row_major_late_signal = use_row_major_k_prefetch
 
@@ -1254,6 +1255,43 @@ def compile_fp8fp4_gemm(
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
 
+            if const_expr(use_blockscale_k_prefetch):
+                def _load_bundle_bs(ks):
+                    b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                    a_frag = load_a_frag(a_buf, a_bases[0], ks)
+                    return a_frag, b_frags
+
+                preload_depth = min(k_wmma_steps, _row_major_k_prefetch_depth + 1)
+                bundle_queue = [_load_bundle_bs(pre_ks) for pre_ks in range_constexpr(preload_depth)]
+                next_ks = preload_depth
+                for ks in range_constexpr(k_wmma_steps):
+                    is_last_ks = ks == k_wmma_steps - 1
+                    a_frag, b_frags = bundle_queue.pop(0)
+                    rocdl.s_wait_dscnt(len(bundle_queue) * _row_major_k_prefetch_bundle_ds)
+
+                    if const_expr(is_last_ks and late_compute_callback is not None):
+                        rocdl.sched_barrier(0)
+                        late_compute_callback()
+                    if const_expr(is_last_ks and emit_filler is not None):
+                        rocdl.sched_barrier(0)
+                        emit_filler()
+
+                    a_scales, b_scales = _scales_for_emit(lds_as, None, lds_bs, None, ks)
+                    block_accs = [acc_zero] * n_accs
+                    for wn in range_constexpr(wmma_n_rep):
+                        _emit_raw_fp8_wmma(block_accs, 0, wn, a_frag, b_frags[wn])
+                    current_accs = _apply_blockscale(current_accs, block_accs, a_scales, b_scales)
+
+                    if const_expr(ks == 0 and mid_compute_callback is not None):
+                        rocdl.sched_barrier(0)
+                        mid_compute_callback()
+
+                    if const_expr(next_ks < k_wmma_steps):
+                        bundle_queue.append(_load_bundle_bs(next_ks))
+                        next_ks += 1
+
+                return current_accs
+
             for ks in range_constexpr(k_wmma_steps):
                 block_accs = [acc_zero] * n_accs
                 b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
@@ -1975,6 +2013,17 @@ def compile_fp8fp4_gemm(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_blockscale():
+            if const_expr(use_blockscale_k_prefetch):
+                _queue_depth = min(k_wmma_steps, _row_major_k_prefetch_depth + 1)
+                for _ks in range_constexpr(k_wmma_steps):
+                    if const_expr(_ks == 0):
+                        rocdl.sched_dsrd(_row_major_k_prefetch_bundle_ds * _queue_depth)
+                    elif const_expr(_ks + _queue_depth <= k_wmma_steps):
+                        rocdl.sched_dsrd(_row_major_k_prefetch_bundle_ds)
+                    rocdl.sched_mfma(wmma_n_rep)
+                rocdl.sched_barrier(0)
+                return
+
             _ds_loads = wmma_n_rep * _b_frag_loads_per_wn + wmma_m_rep * DS_LOADS_PER_A_FRAG
             for _ks in range_constexpr(k_wmma_steps):
                 rocdl.sched_dsrd(_ds_loads)
