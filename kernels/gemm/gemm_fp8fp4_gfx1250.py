@@ -227,9 +227,7 @@ def compile_fp8fp4_gemm(
             f"got N={N}, tile_n={tile_n}, tile_k={tile_k}"
         )
     if is_blockscale and (K % scale_block_k != 0 or N % scale_block_n != 0):
-        raise ValueError(
-            f"blockscale requires K%{scale_block_k}==0 and N%{scale_block_n}==0; got K={K}, N={N}"
-        )
+        raise ValueError(f"blockscale requires K%{scale_block_k}==0 and N%{scale_block_n}==0; got K={K}, N={N}")
 
     num_k_tiles = split_k_chunk // tile_k
     if num_k_tiles < num_buffers:
@@ -689,11 +687,34 @@ def compile_fp8fp4_gemm(
             def _load_blockscale_bscale(k_base):
                 k_block_base = k_base // arith.index(scale_block_k)
                 vals = [None] * (k_wmma_steps * wmma_n_rep)
+                b_wmmas_per_scale = scale_block_n // WMMA_N_EFF
+
+                def _load_bscale_block(n_block):
+                    base = n_block * arith.index(K_blockscale) + k_block_base
+                    return _load_contig_f32(_blockscale_bs_rsrc, base, k_wmma_steps)
+
+                if const_expr(tile_n % scale_block_n == 0 and scale_block_n % warp_tile_n == 0):
+                    n_block = (blk_n + warp_n_base) // arith.index(scale_block_n)
+                    ks_vals = _load_bscale_block(n_block)
+                    for wn in range_constexpr(wmma_n_rep):
+                        for ks in range_constexpr(k_wmma_steps):
+                            vals[ks * wmma_n_rep + wn] = ks_vals[ks]
+                    return vals
+
+                if const_expr(tile_n % scale_block_n == 0 and warp_tile_n % scale_block_n == 0):
+                    n_block0 = (blk_n + warp_n_base) // arith.index(scale_block_n)
+                    for nb in range_constexpr(warp_tile_n // scale_block_n):
+                        ks_vals = _load_bscale_block(n_block0 + arith.index(nb))
+                        for local_wn in range_constexpr(b_wmmas_per_scale):
+                            wn = nb * b_wmmas_per_scale + local_wn
+                            for ks in range_constexpr(k_wmma_steps):
+                                vals[ks * wmma_n_rep + wn] = ks_vals[ks]
+                    return vals
+
                 for wn in range_constexpr(wmma_n_rep):
                     n_col = blk_n + warp_n_base + arith.index(wn * WMMA_N_EFF)
                     n_block = n_col // arith.index(scale_block_n)
-                    base = n_block * arith.index(K_blockscale) + k_block_base
-                    ks_vals = _load_contig_f32(_blockscale_bs_rsrc, base, k_wmma_steps)
+                    ks_vals = _load_bscale_block(n_block)
                     for ks in range_constexpr(k_wmma_steps):
                         vals[ks * wmma_n_rep + wn] = ks_vals[ks]
                 return vals
@@ -1260,6 +1281,7 @@ def compile_fp8fp4_gemm(
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
 
             if const_expr(use_blockscale_k_prefetch):
+
                 def _load_bundle_bs(ks):
                     b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
                     a_frag = load_a_frag(a_buf, a_bases[0], ks)
@@ -2619,9 +2641,7 @@ def compile_fp8fp4_gemm(
                     _cur_kb = None
                     if const_expr(is_blockscale):
                         _cur_kb = (
-                            split_k_base
-                            + loop_iter * arith.index(num_buffers * tile_k)
-                            + arith.index(buf_idx * tile_k)
+                            split_k_base + loop_iter * arith.index(num_buffers * tile_k) + arith.index(buf_idx * tile_k)
                         )
 
                     addr_box = [cur_addr_lo]
