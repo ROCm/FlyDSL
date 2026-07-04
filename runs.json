@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-04T07:22:34Z",
+ "updated": "2026-07-04T08:45:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,29 +10,29 @@
    "branch": "jiacao/conv2d-implicit-mfma",
    "event": "pull_request",
    "title": "[Kernel] conv2d: 8-wave double-buffered implicit-GEMM BF16 kernel(gfx950)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28698289733",
    "created_at": "2026-07-04T06:52:33Z",
-   "updated_at": "2026-07-04T06:54:05Z",
+   "updated_at": "2026-07-04T08:43:46Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-04T06:55:19Z",
-     "completed_at": null,
+     "completed_at": "2026-07-04T07:58:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28698289733/job/85111831753"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-04T06:54:05Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-04T07:25:02Z",
+     "completed_at": "2026-07-04T08:43:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28698289733/job/85111831755"
     },
     {
