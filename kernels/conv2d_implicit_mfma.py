@@ -14,11 +14,9 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from kernels.tensor_shim import _run_compiled
 
 # ---------------------------------------------------------------------------
 # Tile / wave constants
@@ -50,11 +48,10 @@ assert QM_STEPS == 2 and QN_STEPS == 1
 LDG_VEC = 8
 BLOCK_VECS = LDG_VEC * BLOCK_THREADS
 LDG_A_COUNT = TILE_M * TILE_K // BLOCK_VECS  # 1
-LDG_B_COUNT = TILE_N * TILE_K // BLOCK_VECS  # 1
 LDS_A_SIZE = STAGES * TILE_M * TILE_K
 LDS_B_SIZE = STAGES * TILE_N * TILE_K
 
-assert LDG_A_COUNT == 1 and LDG_B_COUNT == 1
+assert LDG_A_COUNT == 1
 
 # ---------------------------------------------------------------------------
 # NCHW → NHWC transpose kernel
@@ -77,8 +74,8 @@ def _compile_transpose_nchw_nhwc(n, c, hw):
 
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
-        in_rsrc = buffer_ops.create_buffer_resource(inp, max_size=True)
-        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=True)
+        in_rsrc = buffer_ops.create_buffer_resource(inp)
+        out_rsrc = buffer_ops.create_buffer_resource(out)
         lds_alloc = fx.SharedAllocator(static=False)
         lds = lds_alloc.allocate(fx.Array[elem_ty, TR_TILE * _TR_LDS_S, 16]).peek()
 
@@ -114,8 +111,8 @@ def _compile_transpose_nchw_nhwc(n, c, hw):
             cc = c0 + rc
             ss = hw0 + sv
             valid = (cc < c) & (ss < hw)
-            g = arith.index_cast(T.i32, in_base + cc * hw + ss)
-            safe = arith.select(valid, g, arith.constant(0, type=T.i32))
+            g = fx.Int32(in_base + cc * hw + ss)
+            safe = arith.select(valid, g, fx.Int32(0))
             v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=TR_VEC, dtype=elem_ty)
             lds_store_vec8(rc * _TR_LDS_S + sv, v)
 
@@ -129,13 +126,11 @@ def _compile_transpose_nchw_nhwc(n, c, hw):
             ss = hw0 + rs
             cc = c0 + cv
             scalars = [lds_load_scalar((cv + j) * _TR_LDS_S + rs) for j in range_constexpr(TR_VEC)]
-            vv = Vec.from_elements(scalars, dtype=elem_ty)
-            valid = arith.andi(ss < hw, cc < c)
-            store_if = scf.IfOp(valid, results_=[], has_else=False)
-            with ir.InsertionPoint(store_if.then_block):
-                go = arith.index_cast(T.i32, out_base + ss * c + cc)
+            vv = fx.Vector.from_elements(scalars, dtype=elem_ty)
+            valid = (ss < hw) & (cc < c)
+            if valid:
+                go = fx.Int32(out_base + ss * c + cc)
                 buffer_ops.buffer_store(vv, out_rsrc, go)
-                scf.YieldOp([])
 
     @flyc.jit
     def launch_transpose(out: fx.Tensor, inp: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -156,7 +151,7 @@ def _nchw_to_nhwc(x, stream):
         return x.permute(0, 2, 3, 1).contiguous()
     out = torch.empty((n, h, w, c), device=x.device, dtype=x.dtype)
     exe = _compile_transpose_nchw_nhwc(n, c, hw)
-    _run_compiled(exe, out, x, torch.cuda.current_stream() if stream is None else stream)
+    exe(out, x, torch.cuda.current_stream() if stream is None else stream)
     return out
 
 
@@ -196,11 +191,7 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
 
-    if (k % TILE_N != 0) or (npq % TILE_M != 0):
-        splitk = 1
     splitk = max(1, min(splitk, k_tiles))
-    while k_tiles % splitk != 0:
-        splitk -= 1
     tiles_per_split = k_tiles // splitk
     use_splitk = splitk > 1
 
@@ -210,19 +201,18 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv2d_8wave_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
-        x_rsrc = buffer_ops.create_buffer_resource(x, max_size=True)
-        w_rsrc = buffer_ops.create_buffer_resource(weight, max_size=True)
-        y_rsrc = buffer_ops.create_buffer_resource(y, max_size=True)
+        x_rsrc = buffer_ops.create_buffer_resource(x)
+        w_rsrc = buffer_ops.create_buffer_resource(weight)
+        y_rsrc = buffer_ops.create_buffer_resource(y)
         if const_expr(has_bias):
-            bias_rsrc = buffer_ops.create_buffer_resource(bias, max_size=True)
+            bias_rsrc = buffer_ops.create_buffer_resource(bias)
 
         lds_alloc = fx.SharedAllocator(static=False)
         a_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_A_SIZE, 16]).peek()
         b_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_B_SIZE, 16]).peek()
 
         tid = fx.thread_idx.x
-        pid = fx.block_idx.x
-        m_offset = pid * TILE_M
+        m_offset = fx.block_idx.x * TILE_M
         n_offset = fx.block_idx.y * TILE_N
         if const_expr(use_splitk):
             k_off = fx.block_idx.z * (tiles_per_split * TILE_K)
@@ -241,18 +231,18 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
         c_m_vec = lane // MFMA_N * MFMA_C_VALUES
         c_n = lane % MFMA_N
 
-        acc0 = arith.constant_vector(0.0, T.vec(MFMA_C_VALUES, T.f32))
-        acc00 = [acc0 for _ in range_constexpr(N_SUB)]
-        acc01 = [acc0 for _ in range_constexpr(N_SUB)]
-        acc10 = [acc0 for _ in range_constexpr(N_SUB)]
-        acc11 = [acc0 for _ in range_constexpr(N_SUB)]
-
         Vec = fx.Vector
 
         class Vec8Ty:
             ir_type = Vec.make_type(8, elem_ty)
 
-        zero8 = arith.constant_vector(0.0, Vec8Ty.ir_type)
+        acc0 = Vec.filled(MFMA_C_VALUES, 0.0, fx.Float32)
+        acc00 = [acc0 for _ in range_constexpr(N_SUB)]
+        acc01 = [acc0 for _ in range_constexpr(N_SUB)]
+        acc10 = [acc0 for _ in range_constexpr(N_SUB)]
+        acc11 = [acc0 for _ in range_constexpr(N_SUB)]
+
+        zero8 = Vec.filled(8, 0.0, elem_ty)
 
         def barrier(vmcnt=0, lgkmcnt=None):
             waits = []
@@ -312,8 +302,8 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
             in_w = ow * sw + si - pw
             valid = row_valid & in_range(in_h, h) & in_range(in_w, w)
             g_off = ((n_idx * h + in_h) * w + in_w) * c + cc
-            g_off_i = arith.index_cast(T.i32, g_off)
-            safe = arith.select(valid, g_off_i, arith.constant(0, type=T.i32))
+            g_off_i = fx.Int32(g_off)
+            safe = arith.select(valid, g_off_i, fx.Int32(0))
             raw = buffer_ops.buffer_load(x_rsrc, safe, vec_width=8, dtype=elem_ty)
             return (raw, valid, local_m * TILE_K + local_k)
 
@@ -322,10 +312,10 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
             local_n = linear // TILE_K
             local_k = linear % TILE_K
             col = n_offset + fx.Index(local_n)
-            g_off = arith.index_cast(T.i32, col * crs + (fx.Index(k_base) + fx.Index(local_k)))
+            g_off = fx.Int32(col * crs + (fx.Index(k_base) + fx.Index(local_k)))
             if const_expr(n_tail):
                 col_valid = col < fx.Index(k)
-                safe = arith.select(col_valid, g_off, arith.constant(0, type=T.i32))
+                safe = arith.select(col_valid, g_off, fx.Int32(0))
                 raw = buffer_ops.buffer_load(w_rsrc, safe, vec_width=8, dtype=elem_ty)
                 return (raw, col_valid, local_n * TILE_K + local_k)
             raw = buffer_ops.buffer_load(w_rsrc, g_off, vec_width=8, dtype=elem_ty)
@@ -495,9 +485,9 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
                     col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N + c_n)
                     a = Vec(acc[wm * QN_STEPS + wn])
                     if const_expr(has_bias and not use_splitk):
-                        col_i = arith.index_cast(T.i32, col)
+                        col_i = fx.Int32(col)
                         if const_expr(n_tail):
-                            col_i = arith.select(col < fx.Index(k), col_i, arith.constant(0, type=T.i32))
+                            col_i = arith.select(col < fx.Index(k), col_i, fx.Int32(0))
                         bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
                     for i in range_constexpr(MFMA_C_VALUES):
                         row = fx.Index(row_base + i)
@@ -505,18 +495,16 @@ def compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias=
 
                         def _emit():
                             if const_expr(use_splitk):
-                                off_b = arith.index_cast(T.i32, off * 4)
-                                z0 = arith.constant(0, type=T.i32)
+                                off_b = fx.Int32(off * 4)
+                                z0 = fx.Int32(0)
                                 rocdl.raw_ptr_buffer_atomic_fadd(a[i], y_rsrc, off_b, z0, z0)
                             else:
                                 cval = (a[i] + bias_val).to(elem_ty) if const_expr(has_bias) else a[i].to(elem_ty)
                                 buffer_ops.buffer_store(cval, y_rsrc, off)
 
                         if const_expr(_need_chk):
-                            store_if = scf.IfOp(_valid_raw(row, col), results_=[], has_else=False)
-                            with ir.InsertionPoint(store_if.then_block):
+                            if _valid_raw(row, col):
                                 _emit()
-                                scf.YieldOp([])
                         else:
                             _emit()
 
@@ -615,7 +603,7 @@ def conv2d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
 
     exe = compile_conv2d_implicit_8wave(n, c, h, w, k, r, s, sh, sw, ph, pw, has_bias, sk)
-    _run_compiled(exe, y, x_nhwc, w_packed, bias_arg, launch_stream)
+    exe(y, x_nhwc, w_packed, bias_arg, launch_stream)
 
     if use_splitk:
         if has_bias:
