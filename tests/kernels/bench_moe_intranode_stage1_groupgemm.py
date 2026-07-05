@@ -221,8 +221,8 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     import torch.nn.functional as _F
     from aiter import dtypes as _adt
     from aiter.ops.quant import per_1x32_mx_quant_hip
-    from kernels.fused_moe_stage1_stage2 import MegaMoE
-    from kernels.fused_moe_stage1_stage2 import FlyDSLMoeGemm2CombineOp
+    from kernels.mega_moe import MegaMoE
+    from kernels.mega_moe import MegaMoeStage2
     from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
 
     def _relL2(a, b):
@@ -365,9 +365,9 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         tile_m=tm, tile_n=tn1, tile_k=tk, doweight_stage1=False, a_dtype=a_dtype, b_dtype="fp4",
         out_dtype=s1_out, act="silu", waves_per_eu=int(args.waves_per_eu),
         use_async_copy=bool(args.async_copy))
-    g2a = FlyDSLMoeGemm2CombineOp(comb_cfg=cfg_a, comb_op=dc, inter_dim=inter_dim,
-                                  tile_m=tm2, tile_n=tn2, tile_k=tk2, persist_m=-1,
-                                  a_dtype=s1_out, b_dtype="fp4", force_mode="stage1_only")
+    g2a = MegaMoeStage2(comb_cfg=cfg_a, comb_op=dc, inter_dim=inter_dim,
+                        tile_m=tm2, tile_n=tn2, tile_k=tk2, persist_m=-1,
+                        a_dtype=s1_out, b_dtype="fp4", force_mode="stage1_only")
 
     _atom_out_holder = {}
     def _atom_body():

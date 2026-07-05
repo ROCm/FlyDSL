@@ -22,12 +22,12 @@ op（`forward(x_bf16,...)` 内部量化 → bf16 输出）。
   - `FlyDSLDispatchCombineIntraNodeOp.__init__` 末尾：当 `enable_group_major=True` 时创建
     `self._gm = FlyDSLDispatchGroupMajorOp(...)`，并 `self._gm.total_recv = self.total_recv`
     统一计数。`enable_group_major=False`（默认）路径**完全不变**。
-- `kernels/fused_moe_stage1_stage2.py`（由 361 行扩到 ~1160 行）
+- `kernels/mega_moe.py`（合并文件；原名 `fused_moe_stage1_stage2.py`，后重命名 + 英文注释精简）
   - 并入 megastage1/megagemm2 调优表助手（`_mega_*` / `_detect_gpu_model_name`）。
   - 内联 `compile_fused_moe_gemm2_combine`（薄 builder，转调 `compile_mixed_moe_gemm2` +
     `fused_p2p_scatter`）。
-  - 并入 `FlyDSLMoeGemm2CombineOp`（stage-2 gemm2+combine op；新增 back-compat `force_mode`）。
-  - 并入 `FusedMoEMegaStage1`（stage-1 驱动），改为**使用 `comm_op._gm`**，不再自建 dispatch op。
+  - 并入 `MegaMoeStage2`（stage-2 gemm2+combine op；原 `FlyDSLMoeGemm2CombineOp`；back-compat `force_mode`）。
+  - 并入 `MegaMoeStage1`（stage-1 驱动；原 `FusedMoEMegaStage1`），改为**使用 `comm_op._gm`**，不再自建 dispatch op。
   - 新增 `_resolve_stage1_config()`：把 tile / compact / xcd 解析前置（供 comm op 建 `_gm`）。
   - `MegaMoE`：新增 `enable_fused_stage1 / enable_fused_stage2`（init 固定，非融合暂占位）；
     `forward(x_bf16, wts, topk_ids)` 内部量化为主入口，`forward_prequant(x_q, scales, ...)`
@@ -40,18 +40,18 @@ op（`forward(x_bf16,...)` 内部量化 → bf16 输出）。
 - `kernels/mixed_moe_gemm2_combine_fused_op.py`
 
 调用方更新：
-- `tests/kernels/bench_moe_intranode_stage1_groupgemm.py`：`FlyDSLMoeGemm2CombineOp` import 改指
-  `kernels.fused_moe_stage1_stage2`；megav1 调用 `moe.forward` → `moe.forward_prequant`。
-- `tests/kernels/test_profiler_moe_gemm2_combine.py`：`FlyDSLMoeGemm2CombineOp` import 路径更新。
+- `tests/kernels/bench_moe_intranode_stage1_groupgemm.py`：`MegaMoE` / `MegaMoeStage2` import 改指
+  `kernels.mega_moe`；megav1 调用 `moe.forward` → `moe.forward_prequant`。
+- `tests/kernels/test_profiler_moe_gemm2_combine.py`：`MegaMoeStage2` import 路径更新。
 
 ## 对象关系（改动后）
 
 ```
-MegaMoE (fused_moe_stage1_stage2.py)                 # 唯一对外 op
+MegaMoE (mega_moe.py)                                # 唯一对外 op
   ├── FlyDSLDispatchCombineIntraNodeOp (comb_op)     # 唯一 symmetric buffer owner
   │      └── comb_op._gm = FlyDSLDispatchGroupMajorOp # group-major dispatch buffers
-  ├── FusedMoEMegaStage1 (stage1, 用 comb_op._gm)     # compile_fused_moe_gemm1
-  └── FlyDSLMoeGemm2CombineOp (stage2)                # compile_fused_moe_gemm2_combine
+  ├── MegaMoeStage1 (stage1, 用 comb_op._gm)          # compile_fused_moe_gemm1
+  └── MegaMoeStage2 (stage2)                          # compile_fused_moe_gemm2_combine
 ```
 
 ## 行为保持（关键，用于判断迁移是否等价）
@@ -77,9 +77,9 @@ MegaMoE (fused_moe_stage1_stage2.py)                 # 唯一对外 op
 - [x] 删除 4 个文件
 - [x] 更新 bench/test import 与调用
 - [x] 全 `kernels/` `python -m compileall` 通过；无残留失效 import
+- [x] **端到端精度验证**（8 卡 gfx950 / MI355X，容器 `yanbo_discom`）——全 PASS，见「验证结果」。
 
 尚未做 / 后续：
-- [ ] **端到端精度验证**（需 8 卡 gfx950，见下）——本次开发机为 gfx942 且无容器访问，未跑。
 - [ ] 非融合分支（`enable_fused_stage1/2=False`）仅占位 `NotImplementedError`，未接线。
 - [ ] dispatch 布局**运行时切换** + payload/scale "保留大块+双 view" 复用：本期按 init 固定
       mode、只实际使用 group-major；运行时切换留待后续。
@@ -87,21 +87,59 @@ MegaMoE (fused_moe_stage1_stage2.py)                 # 唯一对外 op
       `a_scale_one=True`）+ `shuffle_weight_a16w4(gate_up=True)` + scale 交织 + facade XCD-guard
       gx 公式改 interleave 版；未做。
 
-## 迁移到目标环境后必须做的验证
+## 验证结果（已在 8 卡 gfx950 / MI355X 完成）
 
-开发环境无法跑（gfx942 + 无容器）。到 gfx950 / 8 卡环境后，在容器内 `FlyDSL` 目录：
+环境：容器 `yanbo_discom`（ROCm 7.0.2 / HIP 7.0），`/home/yashao/FlyDSL`，8×MI355X（gfx950）。
 
-1. 标准 dispatch+combine 零回归（`enable_group_major=False` 路径）：
-   跑 `tests/kernels/test_profiler_dispatch_combine.py`（按其实际入口 / torchrun）。
-2. megav1 端到端正确性 gate（融合路径，fixedslot 与 compact 两路）：
+### 环境准备（迁移到新机时的必做步骤）
+
+1. **重建 FlyDSL 原生扩展**：`mega_moe_v1` 分支的 C++ 绑定（`FlyExtension.cpp` 的 `_Basis`）比镜像旧构建新，
+   直接 import 会报 `cannot import name '_Basis'`。需重建：
    ```
-   torchrun --standalone --nproc_per_node=8 \
-     tests/kernels/bench_moe_intranode_stage1_groupgemm.py \
-     --network v4_flash --quant a8w4 --bs-list 64,2048,4096,8192
+   bash scripts/build.sh -j64 && pip install -e .
    ```
-   期望每个 shape 打印 `[FULL-E2E] ... -> PASS (all 8 ranks)`。
-   精度判据：mega 输出相对 fp32 torch oracle 的 relL2 落在量化地板内
-   （fp4≈0.32 / fp8≈0.25），且与 ATOM-fp8 基线一致。
+   （`build.sh` 会移除 editable 的 `python/flydsl/_mlir` 软链，构建后 `pip install -e .` 重建软链。）
+2. **aiter 版本**：bench 与 MegaMoE 依赖 `aiter.moe_sorting_fwd / mxfp4_moe_sort_hip` 与
+   `aiter.ops.quant.per_1x32_mx_quant_hip`。这些符号在 aiter `main` 上**已被移除**；需用带这些符号的版本
+   （本次用 ATOM 分支 `ep_fix`：`ROCm/aiter` base `ef114b0d4` + cherry-pick PR#3377「flydsl moe EP reduce
+   masked gather」）。该 aiter 为 rocm7.2/triton3.6 而构建，在 discom（triton 3.4）需设
+   `AITER_USE_SYSTEM_TRITON=1`（把 gluon 的 triton 版本硬错误降级为警告；gluon attention kernel 与 MoE 无关）。
+3. **对称堆**：bs≥4096 的 group-major buffer 超出默认 4GB 静态堆，需 `MORI_SHMEM_HEAP_SIZE=40G`。
+
+### 1. 标准 dispatch+combine 零回归（`enable_group_major=False`）—— PASS
+
+```
+AITER_USE_SYSTEM_TRITON=1 MORI_SHMEM_HEAP_SIZE=40G \
+  python tests/kernels/test_profiler_dispatch_combine.py --ci-sweep
+```
+结果：`>>> ALL PASS (accuracy across 19 cases) <<<`（19/19 verify PASS + profile ok，含 bf16 / fp8 /
+fp4 / std_moe / zero_copy / recv_cap / mixed-dispatch 等；每 case 均 `ALL PASS (global across 8 ranks)`）。
+
+### 2. megav1 端到端正确性 gate（融合路径，fixedslot 与 compact 由 buffer 大小自动选择）—— PASS
+
+```
+AITER_USE_SYSTEM_TRITON=1 MORI_SHMEM_HEAP_SIZE=40G torchrun --standalone --nproc_per_node=8 \
+  tests/kernels/bench_moe_intranode_stage1_groupgemm.py \
+  --network v4_flash --quant a8w4 --bs-list 64,2048,4096,8192
+```
+每个 shape 均 `[FULL-E2E] ... -> PASS (all 8 ranks)`：
+
+| quant | bs   | mega relL2 | atom-fp8 baseline | mega-vs-baseline | floor | e2e speedup |
+|-------|------|-----------|-------------------|------------------|-------|-------------|
+| a8w4  | 64   | 0.2077    | 0.2077            | 4.2e-5           | 0.25  | 1.26x       |
+| a8w4  | 2048 | 0.2074    | 0.2074            | 4.3e-5           | 0.25  | 1.16x       |
+| a8w4  | 4096 | 0.2073    | 0.2073            | 4.1e-5           | 0.25  | 1.05x       |
+| a8w4  | 8192 | 0.2073    | 0.2073            | 4.1e-5           | 0.25  | 1.09x       |
+| a4w4  | 64   | 0.2948    | 0.3009            | 8.6e-2           | 0.32  | —           |
+| a4w4  | 2048 | 0.2945    | 0.3002            | 8.6e-2           | 0.32  | —           |
+| a4w4  | 4096 | 0.2943    | 0.3001            | 8.6e-2           | 0.32  | —           |
+| a4w4  | 8192 | 0.2943    | 0.3000            | 8.6e-2           | 0.32  | —           |
+
+a8w4：mega 与 baseline 逐比特级一致（差 ~4e-5），均在地板 0.25 内。
+a4w4（fp4）：mega（~0.294）优于 baseline（~0.300），均在地板 0.32 内；mega-vs-baseline ~8.6e-2 属 fp4
+E2M1 粗步长下两次合法量化的正常发散（gate 用「mega ≤ baseline+0.02」判定，符合文档预期）。
+
+## 头号风险（若 bench FAIL，优先排查）
 
 ## 头号风险（若 bench FAIL，优先排查）
 

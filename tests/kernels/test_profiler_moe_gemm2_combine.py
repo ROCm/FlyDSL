@@ -114,16 +114,16 @@ except Exception:  # noqa: BLE001
     fp4_utils = None  # type: ignore[assignment]
 
 try:
-    from kernels.fused_moe_stage1_stage2 import (  # type: ignore
-        FlyDSLMoeGemm2CombineOp,
+    from kernels.mega_moe import (  # type: ignore
+        MegaMoeStage2,
     )
     # Module-level READY=False means the file is in place but the kernel
     # implementation isn't wired up; the test gracefully skips the fused
     # path instead of erroring.
-    HAS_FUSED_OP = bool(getattr(FlyDSLMoeGemm2CombineOp, "READY", False))
-    _FUSED_IMPORT_ERR = "" if HAS_FUSED_OP else "FlyDSLMoeGemm2CombineOp.READY = False (kernel not yet wired)"
+    HAS_FUSED_OP = bool(getattr(MegaMoeStage2, "READY", False))
+    _FUSED_IMPORT_ERR = "" if HAS_FUSED_OP else "MegaMoeStage2.READY = False (kernel not yet wired)"
 except Exception as _e:  # noqa: BLE001
-    FlyDSLMoeGemm2CombineOp = None
+    MegaMoeStage2 = None
     HAS_FUSED_OP = False
     _FUSED_IMPORT_ERR = repr(_e)
 
@@ -2064,7 +2064,7 @@ def run_acceptance(rank, world_size, args):
 
     fused_op = None
     if HAS_FUSED_OP and args.bench_op in ("fused", "both"):
-        fused_op = FlyDSLMoeGemm2CombineOp(
+        fused_op = MegaMoeStage2(
             comb_cfg=cfg,
             comb_op=disp_op,
             inter_dim=args.inter_dim,

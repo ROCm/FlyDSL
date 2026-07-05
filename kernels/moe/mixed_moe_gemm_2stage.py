@@ -4177,7 +4177,7 @@ def compile_mixed_moe_gemm2(
                 # so no cross-card atomic is needed; combine (skip_stage1) then
                 # reduces locally over (tok_id*k + j). Requires s == j_global
                 # (else slots collide) and k <= npes (mt*k <= mr); both asserted
-                # by FlyDSLMoeGemm2CombineOp's ctor. Weights are scattered
+                # by MegaMoeStage2's ctor. Weights are scattered
                 # separately by combine_no_stage1, not here.
                 if const_expr(_fp2p_enabled):
                     _c_log2_max_tok = arith.constant(int(_fp2p_log2_max_tok))

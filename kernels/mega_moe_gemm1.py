@@ -4,7 +4,7 @@
 # ============================================================================
 # FUSED-OPERATOR stage1 GEMM for the MoE megakernel ONLY (`compile_fused_moe_gemm1`,
 # module-name prefix `mfma_fmoe1_...`).  This is the dispatch⊕GEMM builder consumed by
-# `FusedMoEMegaStage1` (single launch).  The legacy baseline GEMM lives separately in
+# `MegaMoeStage1` (single launch).  The legacy baseline GEMM lives separately in
 # `mixed_moe_gemm_2stage.py` (used by the ATOM perf baseline in the bench).
 # ============================================================================
 
@@ -48,8 +48,6 @@ from kernels.mfma_epilogues import c_shuffle_epilog
 from kernels.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
-    lds_store_4b_xor16,
-    lds_store_8b_xor16,
     lds_store_16b_xor16,
     make_preshuffle_b_layout,
     make_preshuffle_scale_layout,
@@ -3902,7 +3900,7 @@ def compile_fused_moe_gemm1(
         # Fused launcher.  addr_payload_done/addr_expected_real are 0 for fixedslot (strict-phase,
         # no gate) and the real per-expert buffers for handshake (overlap_gate).
         @flyc.jit
-        def launch_mixed_moe_gemm1(
+        def launch_fused_moe_gemm1(
             arg_out: fx.Tensor, arg_x: fx.Tensor, arg_w: fx.Tensor, arg_scale_x: fx.Tensor,
             arg_scale_w: fx.Tensor, arg_sorted_token_ids: fx.Tensor, arg_expert_ids: fx.Tensor,
             arg_sorted_weights: fx.Tensor, arg_max_token_ids: fx.Tensor, arg_bias: fx.Tensor,
@@ -3921,7 +3919,7 @@ def compile_fused_moe_gemm1(
                          addr_in_idx=addr_in_idx, addr_in_wts=addr_in_wts, addr_in_sc=addr_in_sc)
     elif overlap_gate:
         @flyc.jit
-        def launch_mixed_moe_gemm1(
+        def launch_fused_moe_gemm1(
             arg_out: fx.Tensor, arg_x: fx.Tensor, arg_w: fx.Tensor, arg_scale_x: fx.Tensor,
             arg_scale_w: fx.Tensor, arg_sorted_token_ids: fx.Tensor, arg_expert_ids: fx.Tensor,
             arg_sorted_weights: fx.Tensor, arg_max_token_ids: fx.Tensor, arg_bias: fx.Tensor,
@@ -3935,7 +3933,7 @@ def compile_fused_moe_gemm1(
                          i32_size_expert_ids_in, addr_payload_done, addr_expected_real, stream)
     else:
         @flyc.jit
-        def launch_mixed_moe_gemm1(
+        def launch_fused_moe_gemm1(
             arg_out: fx.Tensor, arg_x: fx.Tensor, arg_w: fx.Tensor, arg_scale_x: fx.Tensor,
             arg_scale_w: fx.Tensor, arg_sorted_token_ids: fx.Tensor, arg_expert_ids: fx.Tensor,
             arg_sorted_weights: fx.Tensor, arg_max_token_ids: fx.Tensor, arg_bias: fx.Tensor,
@@ -3951,8 +3949,8 @@ def compile_fused_moe_gemm1(
     # compiled kernel).  lds_total_bytes = real per-block LDS AFTER the waves_per_eu floor (what
     # bounds occupancy -> the gate input); lds_data_bytes = pre-floor DATA LDS; lds_scale_bytes =
     # the raw_a_scale scale-LDS staging region (0 when pre-swizzled).
-    launch_mixed_moe_gemm1.lds_total_bytes = int(_lds_total_bytes)
-    launch_mixed_moe_gemm1.lds_data_bytes = int(_lds_data_bytes)
-    launch_mixed_moe_gemm1.lds_scale_bytes = int(_lds_scale_bytes)
-    launch_mixed_moe_gemm1.raw_a_scale = bool(raw_a_scale)
-    return launch_mixed_moe_gemm1
+    launch_fused_moe_gemm1.lds_total_bytes = int(_lds_total_bytes)
+    launch_fused_moe_gemm1.lds_data_bytes = int(_lds_data_bytes)
+    launch_fused_moe_gemm1.lds_scale_bytes = int(_lds_scale_bytes)
+    launch_fused_moe_gemm1.raw_a_scale = bool(raw_a_scale)
+    return launch_fused_moe_gemm1
