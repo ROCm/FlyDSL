@@ -114,7 +114,7 @@ except Exception:  # noqa: BLE001
     fp4_utils = None  # type: ignore[assignment]
 
 try:
-    from kernels.mixed_moe_gemm2_combine_fused_op import (  # type: ignore
+    from kernels.fused_moe_stage1_stage2 import (  # type: ignore
         FlyDSLMoeGemm2CombineOp,
     )
     # Module-level READY=False means the file is in place but the kernel

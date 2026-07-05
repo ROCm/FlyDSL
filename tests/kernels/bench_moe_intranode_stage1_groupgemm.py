@@ -222,7 +222,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     from aiter import dtypes as _adt
     from aiter.ops.quant import per_1x32_mx_quant_hip
     from kernels.fused_moe_stage1_stage2 import MegaMoE
-    from kernels.mixed_moe_gemm2_combine_fused_op import FlyDSLMoeGemm2CombineOp
+    from kernels.fused_moe_stage1_stage2 import FlyDSLMoeGemm2CombineOp
     from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
 
     def _relL2(a, b):
@@ -308,7 +308,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
 
     _mega_out_holder = {}
     def _mega_body():
-        _mega_out_holder["o"] = moe.forward(x_q, x_sc, wc, ic)
+        _mega_out_holder["o"] = moe.forward_prequant(x_q, x_sc, wc, ic)
     _mega_body(); torch.cuda.synchronize(); ms.shmem_barrier_all()
     out_mega = _mega_out_holder["o"][:run_tokens].float().cpu().numpy().copy()
 
