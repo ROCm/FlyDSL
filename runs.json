@@ -1,8 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-07-05T14:20:39Z",
+ "updated": "2026-07-05T15:46:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28744144062,
+   "pr": 772,
+   "commit": "626cf33dfe4b6bc880542b6c8ff01f20c0f02950",
+   "branch": "yanbo/combine_perf_tuning",
+   "event": "pull_request",
+   "title": "[Feat]: Add dispatch & combine tuning configuration",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28744144062",
+   "created_at": "2026-07-05T14:33:26Z",
+   "updated_at": "2026-07-05T15:38:49Z",
+   "actor": "yanboshao",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-05T14:34:55Z",
+     "completed_at": "2026-07-05T14:48:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28744144062/job/85232119070"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-05T14:35:09Z",
+     "completed_at": "2026-07-05T15:37:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28744144062/job/85232119073"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-05T14:35:09Z",
+     "completed_at": "2026-07-05T15:20:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28744144062/job/85232119097"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-05T15:38:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28744144062/job/85236739345"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-05T15:38:12Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28744144062/job/85236739346"
+    }
+   ]
+  },
   {
    "run_id": 28741802936,
    "pr": null,
@@ -1501,21 +1562,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563786073",
    "created_at": "2026-07-02T03:43:36Z",
    "updated_at": "2026-07-02T03:43:36Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28563689598,
-   "pr": null,
-   "commit": "8ad064f9269d5bf50c3c7e17e07d3bb119739a3f",
-   "branch": "feat/autotune-cache-key-restore",
-   "event": "pull_request",
-   "title": "[1/5] autotune: harden cache key + add restore_value (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563689598",
-   "created_at": "2026-07-02T03:40:53Z",
-   "updated_at": "2026-07-02T03:40:53Z",
    "actor": "jhinpan",
    "jobs": []
   }
