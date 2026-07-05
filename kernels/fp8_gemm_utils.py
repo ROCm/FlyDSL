@@ -2,10 +2,9 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, const_expr, range_constexpr
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 
 
@@ -207,7 +206,6 @@ def wait_barrier(count):
 class Mfma16x16x128:
     def __init__(self, n_tiles_a, n_tiles_b):
         self.atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-        self.accum_type = Vec.make_type(4, fx.Float32)
         self.zero_value = Vec.filled(4, 0.0, fx.Float32)
         self.n_tiles_a = n_tiles_a
         self.n_tiles_b = n_tiles_b
@@ -215,18 +213,41 @@ class Mfma16x16x128:
     def idx(self, i, j):
         return i * self.n_tiles_b + j
 
-    def _do_mma(self, a, b, c):
-        return fly_dialect.mma_atom_call_ssa([self.accum_type], self.atom, a, b, c)
+    def _make_operand_frag(self, value):
+        frag = fx.make_rmem_tensor(8, fx.Int32)
+        frag.store(Vec(value))
+        return frag
 
-    def call(self, a, b, c):
+    def _make_accum_frag(self, value):
+        frag = fx.make_rmem_tensor(4, fx.Float32)
+        frag.store(Vec(value))
+        return frag
+
+    def _do_mma(self, a, b, c):
+        a_frag = self._make_operand_frag(a)
+        b_frag = self._make_operand_frag(b)
+        c_frag = self._make_accum_frag(c)
+        fx.gemm(self.atom, c_frag, a_frag, b_frag, c_frag)
+        return c_frag.load().ir_value()
+
+    def call(self, a, b, c, *, with_priority_barrier=True):
         assert len(a) == self.n_tiles_a
         assert len(b) == self.n_tiles_b
         assert len(c) == self.n_tiles_a * self.n_tiles_b
 
+        a_frags = [self._make_operand_frag(a[idx]) for idx in range_constexpr(self.n_tiles_a)]
+        b_frags = [self._make_operand_frag(b[idx]) for idx in range_constexpr(self.n_tiles_b)]
+        c_frags = [self._make_accum_frag(c[idx]) for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
+        if const_expr(with_priority_barrier):
+            rocdl.s_setprio(1)
         for i in range_constexpr(self.n_tiles_a):
             for j in range_constexpr(self.n_tiles_b):
-                c[self.idx(i, j)] = self._do_mma(a[i], b[j], c[self.idx(i, j)])
-        return c
+                cf = c_frags[self.idx(i, j)]
+                fx.gemm(self.atom, cf, a_frags[i], b_frags[j], cf)
+        if const_expr(with_priority_barrier):
+            rocdl.s_setprio(0)
+            rocdl.s_barrier()
+        return [c_frags[idx].load().ir_value() for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
 
     def call_one(self, a, b, c, i, j):
         assert i < self.n_tiles_a and j < self.n_tiles_b

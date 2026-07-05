@@ -138,36 +138,24 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
             a_g2s.load(a_next1, A1_gl_offset + (k + 1) * BLOCK_K)
             rocdl.s_barrier()
 
-            rocdl.s_setprio(1)
             c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
-            rocdl.s_setprio(0)
-            rocdl.s_barrier()
 
             b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
             b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * B_K_STEP)
             rocdl.s_barrier()
 
-            rocdl.s_setprio(1)
             c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
-            rocdl.s_setprio(0)
-            rocdl.s_barrier()
 
             a1_frag = a_s2r.load(a_cur1)
             a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * BLOCK_K)
             rocdl.s_barrier()
 
-            rocdl.s_setprio(1)
             c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
-            rocdl.s_setprio(0)
-            rocdl.s_barrier()
 
             b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * B_K_STEP)
             wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
 
-            rocdl.s_setprio(1)
             c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
-            rocdl.s_setprio(0)
-            rocdl.s_barrier()
 
             # Swap cur and next
             a_cur0, a_next0 = a_next0, a_cur0
@@ -181,18 +169,12 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
         a0_frag = a_s2r.load(a_cur0)
         rocdl.s_barrier()
 
-        rocdl.s_setprio(1)
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
-        rocdl.s_setprio(0)
-        rocdl.s_barrier()
 
         b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
-        rocdl.s_setprio(1)
         c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
-        rocdl.s_setprio(0)
-        rocdl.s_barrier()
 
         a1_frag = a_s2r.load(a_cur1)
         # Main loop prefetches a_next1 one step behind; issue the final
@@ -200,18 +182,12 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
         a_g2s.load(a_next1, A1_gl_offset + (K_ITERS - 1) * BLOCK_K)
         rocdl.s_barrier()
 
-        rocdl.s_setprio(1)
         c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
-        rocdl.s_setprio(0)
-        rocdl.s_barrier()
 
         b0_frag = b_s2r.load(b_next0, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
-        rocdl.s_setprio(1)
         c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
-        rocdl.s_setprio(0)
-        rocdl.s_barrier()
         # Swap cur and next
         a_cur0, a_next0 = a_next0, a_cur0
         a_cur1, a_next1 = a_next1, a_cur1
@@ -223,25 +199,19 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
         a0_frag = a_s2r.load(a_cur0)
         wait_barrier(0)
 
-        rocdl.s_setprio(1)
         c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
-        rocdl.s_setprio(0)
-        rocdl.s_barrier()
 
         b1_frag = b_s2r.load(b_cur1, preshuffled=b_preshuffled)
         rocdl.s_barrier()
 
-        rocdl.s_setprio(1)
         c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
-        rocdl.s_setprio(0)
-        rocdl.s_barrier()
 
         a1_frag = a_s2r.load(a_cur1)
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
-        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, with_priority_barrier=False)
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, with_priority_barrier=False)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 
