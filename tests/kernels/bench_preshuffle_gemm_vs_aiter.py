@@ -104,11 +104,14 @@ def _run_one_shape(idx, args):
     aiter_pg.fx.ptrtoint = _shim_ptrtoint
 
     # Repo kernel: origin/main exposes compile_preshuffle_gemm; older branches
-    # (pre-#754 rename) exposed compile_preshuffle_gemm_a8. Neither honors the
-    # aiter-fork-only lds_stage / cshuffle knobs.
+    # (pre-#754 rename) exposed compile_preshuffle_gemm_a8. The cshuffle knob stays
+    # aiter-fork-only; lds_stage is honored iff the repo kernel accepts it.
+    import inspect
+
     import kernels.preshuffle_gemm as repo_pg
 
     repo_compile = getattr(repo_pg, "compile_preshuffle_gemm", None) or repo_pg.compile_preshuffle_gemm_a8
+    _repo_has_lds = "lds_stage" in inspect.signature(repo_compile).parameters
 
     cfg = SHAPES[idx]
     M, N, K = cfg["M"], cfg["N"], cfg["K"]
@@ -142,7 +145,8 @@ def _run_one_shape(idx, args):
             torch.cuda.current_stream(),
         )
 
-    # --- compile both sides ---
+    # --- compile both sides (same lds on both) ---
+    _repo_lds_kw = {"lds_stage": cfg["lds"]} if _repo_has_lds else {}
     repo_fn = repo_compile(
         N=N,
         K=K,
@@ -154,6 +158,7 @@ def _run_one_shape(idx, args):
         waves_per_eu=cfg["wpe"],
         use_async_copy=bool(cfg["asy"]),
         xcd_swizzle=cfg["xcd"],
+        **_repo_lds_kw,
     )
     aiter_fn = aiter_pg.compile_preshuffle_gemm_a8(
         N=N,

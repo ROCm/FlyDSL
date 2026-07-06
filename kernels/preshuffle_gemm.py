@@ -119,6 +119,7 @@ def compile_preshuffle_gemm(
     enable_scheduler: bool = True,
     use_async_copy: bool = False,
     xcd_swizzle: int = 0,
+    lds_stage: int = 2,
 ):
     """Compile preshuffle GEMM (layout API, fp8/int8/fp16/bf16).
 
@@ -131,6 +132,8 @@ def compile_preshuffle_gemm(
         raise ValueError(f"tile_k must be a positive divisor of K; got tile_k={tile_k}, K={K}")
     if epilogue not in ("none", "bias", "bias_relu", "bias_silu", "bias_gelu"):
         raise ValueError(f"epilogue must be none/bias/bias_relu/bias_silu/bias_gelu, got {epilogue!r}")
+    if lds_stage not in (1, 2):
+        raise ValueError(f"lds_stage must be 1 or 2, got {lds_stage}")
     _has_epilogue = epilogue != "none"
     _has_bias = epilogue in ("bias", "bias_relu", "bias_silu", "bias_gelu")
     _has_relu = epilogue == "bias_relu"
@@ -187,10 +190,21 @@ def compile_preshuffle_gemm(
 
     a_lds_elems = tile_m * tile_k
 
-    @fx.struct
-    class SharedStorage:
-        a0: fx.Array[layout_elem, a_lds_elems, 16]
-        a1: fx.Array[layout_elem, a_lds_elems, 16]
+    # lds_stage == 1 keeps a single A buffer (half the LDS): each tile reads it,
+    # then a barrier + overwrite stages the next tile into the same buffer. lds_stage
+    # == 2 is the classic ping-pong (a0/a1) that needs only one barrier per tile.
+    if lds_stage == 1:
+
+        @fx.struct
+        class SharedStorage:
+            a0: fx.Array[layout_elem, a_lds_elems, 16]
+
+    else:
+
+        @fx.struct
+        class SharedStorage:
+            a0: fx.Array[layout_elem, a_lds_elems, 16]
+            a1: fx.Array[layout_elem, a_lds_elems, 16]
 
     # ── Kernel ────────────────────────────────────────────────────────
     @flyc.kernel
@@ -280,7 +294,10 @@ def compile_preshuffle_gemm(
                 ),
             )
 
-        sA_stages = [_make_sA(lds.a0), _make_sA(lds.a1)]
+        if const_expr(lds_stage == 1):
+            sA_stages = [_make_sA(lds.a0)]
+        else:
+            sA_stages = [_make_sA(lds.a0), _make_sA(lds.a1)]
 
         # Partitions
         pA_g = thr_g2s.partition_S(tA)
@@ -313,7 +330,10 @@ def compile_preshuffle_gemm(
                 num_records_bytes=fx.Int64(i32_m) * fx.Int64(K) * fx.Int64(elem_bytes),
             )
             gA_div = fx.logical_divide(gA_flat, fx.make_layout(1, 1))
-            sA_i8_ptr = [fx.recast_iter(Int8, lds.a0.ptr), fx.recast_iter(Int8, lds.a1.ptr)]
+            if const_expr(lds_stage == 1):
+                sA_i8_ptr = [fx.recast_iter(Int8, lds.a0.ptr)]
+            else:
+                sA_i8_ptr = [fx.recast_iter(Int8, lds.a0.ptr), fx.recast_iter(Int8, lds.a1.ptr)]
             bx_m = bid_x * tile_m
             wave_id = tid // 64
             step_bytes = total_threads * a_load_bytes
@@ -452,23 +472,43 @@ def compile_preshuffle_gemm(
             rocdl.sched_barrier(0)
 
         # ── Pipeline stage (double-buffered B via split fragments) ─
-        def mma_kloop(read_stage, cur_frag_B):
+        def mma_kloop(a_stage, cur_frag_B):
             # s2r the A tile then issue the MMAs. K=128/K=32 (1 atom): flat k_iters → ki;
-            # K=16 gfx942 (2 atoms): (None, ki).
+            # K=16 gfx942 (2 atoms): (None, ki). a_stage is the LDS A buffer index
+            # (always 0 for lds_stage == 1, ping-pong read_stage for lds_stage == 2).
             for ki in range_constexpr(k_iters):
-                fx.copy(uni_copy, pA_s2r_stages[read_stage][None, None, ki], frag_A_retile[None, None, ki])
+                fx.copy(uni_copy, pA_s2r_stages[a_stage][None, None, ki], frag_A_retile[None, None, ki])
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
                 fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
 
         def pipeline_stage(read_stage, next_k_val=None, read_next=True):
+            # read_stage selects the B register double-buffer (always ping-pong). The A
+            # LDS buffer is single (index 0) for lds_stage == 1 and ping-pong for == 2.
             write_stage = read_stage ^ 1
+            a_read = 0 if lds_stage == 1 else read_stage
+            a_write = 0 if lds_stage == 1 else write_stage
             cur_frag_B = frag_B_stages[read_stage]
             do_next = read_next and next_k_val is not None
             if const_expr(use_async_copy):
+                if const_expr(lds_stage == 1):
+                    # Single buffer: prefetch next B to reg, compute (reads buf 0), then
+                    # barrier so all waves finish reading before the async DMA overwrites it.
+                    if const_expr(do_next):
+                        fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
+                    mma_kloop(a_read, cur_frag_B)
+                    if const_expr(do_next):
+                        gpu.barrier()
+                        dma_a_to_lds(next_k_val, a_write)
+                    if const_expr(enable_scheduler):
+                        hot_loop_scheduler()
+                    if const_expr(do_next):
+                        rocdl.s_waitcnt(num_b_loads)
+                    gpu.barrier()
+                    return
                 if const_expr(do_next):
-                    dma_a_to_lds(next_k_val, write_stage)
+                    dma_a_to_lds(next_k_val, a_write)
                     fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
-                mma_kloop(read_stage, cur_frag_B)
+                mma_kloop(a_read, cur_frag_B)
                 if const_expr(enable_scheduler):
                     hot_loop_scheduler()
                 if const_expr(do_next):
@@ -478,12 +518,16 @@ def compile_preshuffle_gemm(
             if const_expr(do_next):
                 fx.copy(buf_copy, pA_g[None, None, None, next_k_val], frag_copy_A)
                 fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
-            mma_kloop(read_stage, cur_frag_B)
+            mma_kloop(a_read, cur_frag_B)
+            # lds_stage == 1: barrier so all waves finish reading the single buffer before
+            # the reg→LDS overwrite below.
+            if const_expr(lds_stage == 1 and do_next):
+                gpu.barrier()
             # On the tail stage (do_next=False) frag_copy_A is stale and no later stage
-            # reads write_stage, so the A→LDS write and its barrier are dead — skip them
+            # reads a_write, so the A→LDS write and its barrier are dead — skip them
             # (matches aiter's tail; removes the extra ds_write + barrier).
             if const_expr(do_next):
-                fx.copy(uni_copy, frag_copy_A, pA_s_stages[write_stage][None, None, None])
+                fx.copy(uni_copy, frag_copy_A, pA_s_stages[a_write][None, None, None])
             if const_expr(enable_scheduler):
                 hot_loop_scheduler()
             if const_expr(do_next):
@@ -505,24 +549,67 @@ def compile_preshuffle_gemm(
             gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ── Main tile loop: 2-tile/iter ping-pong, mirroring aiter ────
-        # A middle scf.for runs 2 tiles/iter; the tail is peeled straight-line (odd: 1
-        # tile, even: 2). tile j is staged in LDS buffer j % 2, so read_stage = k % 2.
-        # num_tiles 1/2 fall out of this with loop_end == 0.
-        is_odd_tiles = (num_tiles % 2) == 1
-        tail = 1 if is_odd_tiles else 2
-        loop_end = (num_tiles - tail) // 2
-        if const_expr(loop_end > 0):
-            for iv, state in range(0, loop_end, 1, init=[frag_C.load()]):
-                frag_C.store(state[0])
-                k_base = fx.Int32(iv * 2)
+        # ── Main tile loop ────────────────────────────────────────────
+        if const_expr(lds_stage == 1):
+            # 1-tile/iter, mirroring aiter's single-LDS-buffer pipeline. B can't be
+            # picked by a runtime stage index, so the next tile's B fragment rides the
+            # scf.for loop-carried state alongside the accumulator. Halving the in-body
+            # operand liveness vs the 2-tile unroll is the point (register pressure).
+            # Runs tiles 0..num_tiles-2; the last tile is the shared final MMA below.
+            frag_Bc = frag_B_stages[0]  # B consumed by this iter's MMA
+            frag_Bp = frag_B_stages[1]  # B prefetched for the next iter
+            frag_Bp_retile = frag_B_retile_stages[1]
+            if const_expr(num_tiles > 1):
+                for iv, state in range(0, num_tiles - 1, 1, init=[frag_C.load(), frag_Bc.load()]):
+                    frag_C.store(state[0])
+                    frag_Bc.store(state[1])
+                    k_next = fx.Int32(iv + 1)
+                    if const_expr(not use_async_copy):
+                        fx.copy(buf_copy, pA_g[None, None, None, k_next], frag_copy_A)
+                    fx.copy(buf_copy, pB_g[None, None, None, k_next], frag_Bp_retile)
+                    mma_kloop(0, frag_Bc)
+                    gpu.barrier()  # single buffer: all reads done before overwrite
+                    if const_expr(use_async_copy):
+                        dma_a_to_lds(k_next, 0)
+                    else:
+                        fx.copy(uni_copy, frag_copy_A, pA_s_stages[0][None, None, None])
+                    if const_expr(enable_scheduler):
+                        hot_loop_scheduler()
+                    if const_expr(use_async_copy):
+                        rocdl.s_waitcnt(num_b_loads)
+                    gpu.barrier()
+                    results = yield [frag_C.load(), frag_Bp.load()]
+                frag_C.store(results[0])
+                frag_Bc.store(results[1])
+        else:
+            # 2-tile/iter ping-pong (lds_stage == 2): middle loop runs 2 tiles/iter, the
+            # tail is peeled straight-line (odd: 1 tile, even: 2). tile j stages in LDS
+            # buffer j % 2 → read_stage = j % 2. num_tiles 1/2 → loop_end == 0.
+            is_odd_tiles = (num_tiles % 2) == 1
+            tail = 1 if is_odd_tiles else 2
+            loop_end = (num_tiles - tail) // 2
+
+            def two_tiles(k_base):
                 pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
                 pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
-                results = yield [frag_C.load()]
-            frag_C.store(results)
-        k_tail0 = num_tiles - tail  # first tile handled by the peeled tail
-        for j in range_constexpr(tail - 1):
-            pipeline_stage(read_stage=(k_tail0 + j) % 2, next_k_val=fx.Int32(k_tail0 + j + 1))
+
+            # Async: fully unroll so the backend overlaps tile k+1's prefetch with tile
+            # k's MFMAs (matches aiter's backend-unrolled ISA); a rolled scf.for
+            # serializes on loop-carried frag_C at the backedge, ~2% slower. Sync copy is
+            # critical-path-bound, gains nothing from unrolling and pays I-cache cost, so
+            # it keeps the rolled loop.
+            if const_expr(loop_end > 0 and use_async_copy):
+                for iv in range_constexpr(loop_end):
+                    two_tiles(fx.Int32(iv * 2))
+            elif const_expr(loop_end > 0):
+                for iv, state in range(0, loop_end, 1, init=[frag_C.load()]):
+                    frag_C.store(state[0])
+                    two_tiles(fx.Int32(iv * 2))
+                    results = yield [frag_C.load()]
+                frag_C.store(results)
+            k_tail0 = num_tiles - tail  # first tile handled by the peeled tail
+            for j in range_constexpr(tail - 1):
+                pipeline_stage(read_stage=(k_tail0 + j) % 2, next_k_val=fx.Int32(k_tail0 + j + 1))
 
         # ── Epilogue-operand loads (scale_a / scale_b / bias) ─────────
         # Issued BEFORE the final MMA so the buffer_loads overlap the last tile's MMAs
@@ -584,7 +671,11 @@ def compile_preshuffle_gemm(
             s_a_vals, s_b_vals, bias_vals = load_epi_operands()
 
         # Final MMA stage — overlaps the epilogue-operand loads when issued above.
-        pipeline_stage(read_stage=(num_tiles - 1) % 2, read_next=False)
+        if const_expr(lds_stage == 1):
+            # lds=1: last tile's A is resident in buf 0 and its B in frag_B_stages[0].
+            mma_kloop(0, frag_B_stages[0])
+        else:
+            pipeline_stage(read_stage=(num_tiles - 1) % 2, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
         if const_expr(not is_8bit and not _has_epilogue):
