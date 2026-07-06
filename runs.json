@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-06T07:59:43Z",
+ "updated": "2026-07-06T08:06:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28777012220,
+   "pr": 789,
+   "commit": "8cfa63cb442413a0aca9f840030b3b82e707c090",
+   "branch": "pr/enh-fmath-flag",
+   "event": "pull_request",
+   "title": "[Enh] Add finer FastMathFlag control",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28777012220",
+   "created_at": "2026-07-06T08:05:16Z",
+   "updated_at": "2026-07-06T08:05:22Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 28776905197,
+   "pr": 789,
+   "commit": "80f74fa8aa0b31fb2daa0a7335b8f749f8d7ad15",
+   "branch": "pr/enh-fmath-flag",
+   "event": "pull_request",
+   "title": "[Enh] Add finer FastMathFlag control",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28776905197",
+   "created_at": "2026-07-06T08:03:19Z",
+   "updated_at": "2026-07-06T08:05:18Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 28775789693,
    "pr": null,
@@ -96,20 +126,20 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28769798050",
    "created_at": "2026-07-06T05:24:51Z",
-   "updated_at": "2026-07-06T07:38:05Z",
+   "updated_at": "2026-07-06T08:04:18Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-06T07:38:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T08:04:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28769798050/job/85312653895"
     },
     {
@@ -139,21 +169,21 @@
    "branch": "pr/fix-jit-cache-key-recursion",
    "event": "pull_request",
    "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496",
    "created_at": "2026-07-06T05:01:55Z",
-   "updated_at": "2026-07-06T07:57:50Z",
+   "updated_at": "2026-07-06T08:02:46Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-06T07:38:04Z",
-     "completed_at": "2026-07-06T07:57:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85315241391"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-06T08:02:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85322863854"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -162,7 +192,7 @@
      "conclusion": "success",
      "started_at": "2026-07-06T05:06:58Z",
      "completed_at": "2026-07-06T05:31:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85315242459"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85322891369"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -171,7 +201,7 @@
      "conclusion": "success",
      "started_at": "2026-07-06T05:03:18Z",
      "completed_at": "2026-07-06T06:01:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85315258661"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85322892338"
     }
    ]
   },
@@ -1756,36 +1786,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28570479320",
    "created_at": "2026-07-02T06:34:30Z",
    "updated_at": "2026-07-02T06:34:30Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28570321925,
-   "pr": null,
-   "commit": "e96dad577ea92ba7db7036ee32d6c0c446d76b05",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28570321925",
-   "created_at": "2026-07-02T06:31:06Z",
-   "updated_at": "2026-07-02T06:31:06Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28570118272,
-   "pr": null,
-   "commit": "58e9931eef75e8d6d448331b6deb84749caa09fb",
-   "branch": "feat/autotune-cache-key-restore",
-   "event": "pull_request",
-   "title": "[1/5] autotune: harden cache key + add restore_value (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28570118272",
-   "created_at": "2026-07-02T06:26:38Z",
-   "updated_at": "2026-07-02T06:26:38Z",
    "actor": "jhinpan",
    "jobs": []
   }
