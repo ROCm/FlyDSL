@@ -27,9 +27,6 @@ __all__ = [
     "index_cast",  # Deprecated: will be removed in a future release
     "int_to_fp",
     "maxnumf",
-    "minnumf",
-    "maximumf",
-    "minimumf",
     "shli",
     "sitofp",
     "trunc_f",
@@ -52,19 +49,16 @@ from .utils.arith import (  # noqa: F401
     index,
     index_cast,
     int_to_fp,
-    select,
     shli,
     sitofp,
     trunc_f,
     unwrap,
     xori,
 )
-from .math import dsl_math_wrap_result
 from .typing import as_ir_value
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result(exemplar="lhs")
 def cmpi(predicate, lhs, rhs, **kwargs):
     """Integer comparison accepting DSL numeric types (Int32, ArithValue, etc.).
 
@@ -74,13 +68,12 @@ def cmpi(predicate, lhs, rhs, **kwargs):
         rhs: Right-hand operand.
 
     Returns:
-        A ``Boolean`` (scalar) or ``Vector(Boolean)`` comparison result.
+        An ``i1`` comparison result.
     """
     return arith.cmpi(predicate, as_ir_value(lhs), as_ir_value(rhs), **kwargs)
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result(exemplar="lhs")
 def cmpf(predicate, lhs, rhs, **kwargs):
     """Floating-point comparison accepting DSL numeric types.
 
@@ -90,30 +83,24 @@ def cmpf(predicate, lhs, rhs, **kwargs):
         rhs: Right-hand operand.
 
     Returns:
-        A ``Boolean`` (scalar) or ``Vector(Boolean)`` comparison result.
+        An ``i1`` comparison result.
     """
     return arith.cmpf(predicate, as_ir_value(lhs), as_ir_value(rhs), **kwargs)
 
 
 @dsl_loc_tracing
-@dsl_math_wrap_result
-def maximumf(lhs, rhs, *, fastmath=None):
-    return arith.maximumf(as_ir_value(lhs), as_ir_value(rhs), fastmath=fastmath)
+def maxnumf(a, b, **kwargs):
+    """Floating-point maximum, returning the non-NaN operand when one input is NaN (libm ``fmax``).
 
+    Accepts DSL numeric types (Float32, Vector, ...) and preserves the DSL type of ``a`` so the
+    result can be chained with further DSL operations (e.g. ``.shuffle_xor(...)``).
+    """
+    from .numeric import Numeric
+    from .typing import Vector
 
-@dsl_loc_tracing
-@dsl_math_wrap_result
-def minimumf(lhs, rhs, *, fastmath=None):
-    return arith.minimumf(as_ir_value(lhs), as_ir_value(rhs), fastmath=fastmath)
-
-
-@dsl_loc_tracing
-@dsl_math_wrap_result
-def maxnumf(lhs, rhs, *, fastmath=None):
-    return arith.maxnumf(as_ir_value(lhs), as_ir_value(rhs), fastmath=fastmath)
-
-
-@dsl_loc_tracing
-@dsl_math_wrap_result
-def minnumf(lhs, rhs, *, fastmath=None):
-    return arith.minnumf(as_ir_value(lhs), as_ir_value(rhs), fastmath=fastmath)
+    result = arith.maxnumf(as_ir_value(a), as_ir_value(b), **kwargs)
+    if isinstance(a, Vector):
+        return Vector(result, a.shape, a.dtype)
+    if isinstance(a, Numeric):
+        return Numeric.from_ir_type(result.type)(result)
+    return result
