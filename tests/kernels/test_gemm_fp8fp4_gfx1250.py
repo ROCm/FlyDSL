@@ -889,7 +889,7 @@ def test_mxscale_bscale_32x4(data_format, M, N, K, tile_n, tile_k, n_warp, num_b
     )
 
 
-@pytest.mark.parametrize("M", [1, 7, 16, 33, 64, 128, 256])
+@pytest.mark.parametrize("M", [1, 7, 16, 33, 64, 65, 100, 127, 128, 129, 192, 255, 256, 257, 384, 500, 1000, 2048])
 @pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
 def test_blockscale_fp8_ragged_m(M, out_dtype):
     _run_gemm_test(
@@ -1644,6 +1644,7 @@ _RAGGED_M_CLUSTER_CONFIGS = [
     ("ptpc", "fp8"),
     ("ptpc", "a8w4"),
     ("mxscale", "fp8"),
+    ("blockscale", "fp8"),
 ]
 _RAGGED_M_CLUSTER_TM256_VALUES = [100, 300, 512, 600, 700, 1024]
 
@@ -1694,7 +1695,7 @@ def test_ptpc_fp8_gemm_splitk_ragged_m_cluster(M, split_k):
     )
 
 
-@pytest.mark.parametrize("scale_mode", ["ptpc", "mxscale"])
+@pytest.mark.parametrize("scale_mode", ["ptpc", "mxscale", "blockscale"])
 @pytest.mark.parametrize("cluster_m,cluster_n", _RAGGED_M_CLUSTERS)
 @pytest.mark.parametrize("M", _RAGGED_M_CLUSTER_TM256_VALUES)
 def test_gemm_ragged_m_cluster_tm256(M, cluster_m, cluster_n, scale_mode):
