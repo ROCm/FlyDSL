@@ -11,12 +11,10 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, scf
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.typing import T
 from kernels.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
-from kernels.tensor_shim import _run_compiled
 
 TILE_M = 128
 TILE_N = 128
@@ -109,8 +107,8 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
             cc = c0 + rc
             ss = s0 + sv
             valid = (cc < c) & (ss < dhw)
-            g = arith.index_cast(T.i32, in_base + cc * dhw + ss)
-            safe = arith.select(valid, g, arith.constant(0, type=T.i32))
+            g = fx.Int32(in_base + cc * dhw + ss)
+            safe = arith.select(valid, g, fx.Int32(0))
             v = buffer_ops.buffer_load(x_rsrc, safe, vec_width=PACK_TR_VEC, dtype=elem_ty)
             lds_store_vec8(rc * PACK_TR_LDS_S + sv, v)
 
@@ -123,9 +121,8 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
             cv = (lin % PACK_TR_VPL) * PACK_TR_VEC
             ss = s0 + rs
             cc = c0 + cv
-            valid = arith.andi(ss < dhw, cc < c)
-            store_if = scf.IfOp(valid, results_=[], has_else=False)
-            with ir.InsertionPoint(store_if.then_block):
+            valid = (ss < dhw) & (cc < c)
+            if valid:
                 scalars = [
                     lds_load_scalar((cv + j) * PACK_TR_LDS_S + rs).to(fx.Float32) for j in range_constexpr(PACK_TR_VEC)
                 ]
@@ -133,10 +130,9 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
                 p0 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[2], scalars[3], lo0, True)
                 lo1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[4], scalars[5], fx.Int32(0), False)
                 p1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[6], scalars[7], lo1, True)
-                packed = Vec.from_elements([p0, p1], fx.Int32)
+                packed = fx.Vector.from_elements([p0, p1], fx.Int32)
                 byte_off = out_base + ss * c + cc
                 buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
-                scf.YieldOp([])
 
     @flyc.jit
     def launch(out: fx.Tensor, x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -320,8 +316,8 @@ def compile_conv3d_implicit_8wave_fp8(
             k_valid = k_abs < fx.Index(crs)
             valid_data = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
             g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
-            g_elem_i = arith.index_cast(T.i32, g_elem)
-            safe_elem = arith.select(valid_data, g_elem_i, arith.constant(x_num_records, type=T.i32))
+            g_elem_i = fx.Int32(g_elem)
+            safe_elem = arith.select(valid_data, g_elem_i, fx.Int32(x_num_records))
             copy_g2s(x_div, a_lds, lds_elem, safe_elem)
 
         def g2s_b_half(stage, n_half, k_base):
@@ -331,7 +327,7 @@ def compile_conv3d_implicit_8wave_fp8(
             col = n_offset + fx.Index(n_half * HALF_N) + local_n
             lds_elem = b_lds_off(stage, fx.Index(n_half * HALF_N) + local_n, local_k)
             g_elem = col * crs + (fx.Index(k_base) + fx.Index(local_k))
-            g_elem_i = arith.index_cast(T.i32, g_elem)
+            g_elem_i = fx.Int32(g_elem)
             copy_g2s(w_div, b_lds, lds_elem, g_elem_i)
 
         def g2s_full_tile(stage, k_base):
@@ -434,13 +430,11 @@ def compile_conv3d_implicit_8wave_fp8(
                             out = acc_vec[i]
                             if const_expr(use_splitk):
                                 # Atomics ignore hardware OOB suppression; guard explicitly.
-                                valid = arith.andi(col < fx.Index(k), row < fx.Index(npq))
-                                atom_if = scf.IfOp(valid, results_=[], has_else=False)
-                                with ir.InsertionPoint(atom_if.then_block):
-                                    off_b = arith.index_cast(T.i32, (row * k + col) * 4)
-                                    z0 = arith.constant(0, type=T.i32)
+                                valid = (col < fx.Index(k)) & (row < fx.Index(npq))
+                                if valid:
+                                    off_b = fx.Int32((row * k + col) * 4)
+                                    z0 = fx.Int32(0)
                                     fx.rocdl.raw_ptr_buffer_atomic_fadd(out, y_rsrc, off_b, z0, z0)
-                                    scf.YieldOp([])
                             else:
                                 if const_expr(has_bias):
                                     out = out + bias_val
@@ -523,8 +517,7 @@ def pack_activation_ncdhw_bf16_to_ndhwc_fp8(x: torch.Tensor, stream=None) -> tor
         return x.to(torch.float8_e4m3fn).permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
     out = torch.empty((out_numel,), device=x.device, dtype=torch.int8)
     exe = compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width)
-    _run_compiled(
-        exe,
+    exe(
         flyc.from_torch_tensor(out),
         flyc.from_torch_tensor(x.contiguous()),
         torch.cuda.current_stream() if stream is None else stream,
@@ -540,8 +533,7 @@ def pack_weight_kctrs_bf16_to_ktrsc_fp8(weight: torch.Tensor, stream=None) -> to
     out_numel = k * c * kt * kh * kw
     out = torch.empty((out_numel,), device=weight.device, dtype=torch.int8)
     exe = compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw)
-    _run_compiled(
-        exe,
+    exe(
         flyc.from_torch_tensor(out),
         flyc.from_torch_tensor(weight.contiguous()),
         torch.cuda.current_stream() if stream is None else stream,
@@ -601,8 +593,7 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
     else:
         y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
     exe = compile_conv3d_implicit_8wave_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
-    _run_compiled(
-        exe,
+    exe(
         flyc.from_torch_tensor(y.view(-1)),
         flyc.from_torch_tensor(x_arg),
         flyc.from_torch_tensor(w_arg),
