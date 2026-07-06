@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-06T06:02:55Z",
+ "updated": "2026-07-06T06:13:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -182,20 +182,20 @@
    "branch": "main",
    "event": "push",
    "title": "Refactor/fp8 8wave fx gemm call (#802)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788",
    "created_at": "2026-07-06T04:36:22Z",
-   "updated_at": "2026-07-06T04:38:08Z",
+   "updated_at": "2026-07-06T06:10:15Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-06T04:38:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T06:10:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788/job/85296386219"
     },
     {
