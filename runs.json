@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-06T04:34:39Z",
+ "updated": "2026-07-06T04:48:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28768450220,
+   "pr": 803,
+   "commit": "f26b7d471276c280974b5b16614b000250aa13f7",
+   "branch": "pr/fix-jit-cache-key-recursion",
+   "event": "pull_request",
+   "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220",
+   "created_at": "2026-07-06T04:46:34Z",
+   "updated_at": "2026-07-06T04:47:13Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-06T04:47:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306736"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-06T04:47:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306744"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-06T04:47:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306752"
+    }
+   ]
+  },
+  {
+   "run_id": 28768114788,
+   "pr": null,
+   "commit": "780f0f2942af605bdf68d1a4f2b220f84ed461da",
+   "branch": "main",
+   "event": "push",
+   "title": "Refactor/fp8 8wave fx gemm call (#802)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788",
+   "created_at": "2026-07-06T04:36:22Z",
+   "updated_at": "2026-07-06T04:38:08Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T04:38:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788/job/85296386219"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T04:37:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788/job/85296386225"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T04:38:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788/job/85296386240"
+    }
+   ]
+  },
   {
    "run_id": 28765771123,
    "pr": 798,
@@ -1560,36 +1646,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28568259274",
    "created_at": "2026-07-02T05:43:20Z",
    "updated_at": "2026-07-02T05:43:20Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28567472723,
-   "pr": null,
-   "commit": "76051d6dc6f0f317c293493931e74f377213b7bf",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28567472723",
-   "created_at": "2026-07-02T05:23:11Z",
-   "updated_at": "2026-07-02T05:23:11Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28567395744,
-   "pr": null,
-   "commit": "2533f41c88c763678adbab4161e10a29b7607d02",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28567395744",
-   "created_at": "2026-07-02T05:21:15Z",
-   "updated_at": "2026-07-02T05:21:15Z",
    "actor": "jhinpan",
    "jobs": []
   }
