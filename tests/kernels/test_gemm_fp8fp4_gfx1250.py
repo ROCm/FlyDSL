@@ -140,8 +140,8 @@ def _random_mxscale_inputs(M: int, N: int, K: int, data_format: str):
 
 def _random_blockscale_inputs(M: int, N: int, K: int):
     a, b = _random_ab_inputs(M, N, K, "fp8")
-    a_scale = (0.5 + torch.rand(M, K // BLOCKSCALE_K, dtype=torch.float32)).contiguous()
-    b_scale = (0.5 + torch.rand(N // BLOCKSCALE_N, K // BLOCKSCALE_K, dtype=torch.float32)).contiguous()
+    a_scale = fp4_utils.random_e8m0(M, K // BLOCKSCALE_K)
+    b_scale = fp4_utils.random_e8m0(N // BLOCKSCALE_N, K // BLOCKSCALE_K)
     return a, b, a_scale, b_scale
 
 
@@ -228,12 +228,14 @@ def reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K):
 def reference_blockscale_gemm(a, b, a_scale, b_scale, M, N, K):
     a_f32 = fp4_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K]
     b_f32 = fp4_utils.fp8_e4m3_to_f32(b.view(torch.uint8))[:N, :K]
+    a_sc = fp4_utils.e8m0_to_f32(a_scale.view(torch.uint8))
+    b_sc = fp4_utils.e8m0_to_f32(b_scale.view(torch.uint8))
     out = torch.zeros(M, N, dtype=torch.float32)
     for ks in range(K // BLOCKSCALE_K):
         k0 = ks * BLOCKSCALE_K
         raw = torch.matmul(a_f32[:, k0 : k0 + BLOCKSCALE_K], b_f32[:, k0 : k0 + BLOCKSCALE_K].T)
-        b_sc = b_scale[:, ks].repeat_interleave(BLOCKSCALE_N)[:N]
-        out += raw * a_scale[:M, ks].view(M, 1) * b_sc.view(1, N)
+        b_sc_ks = b_sc[:, ks].repeat_interleave(BLOCKSCALE_N)[:N]
+        out += raw * a_sc[:M, ks].view(M, 1) * b_sc_ks.view(1, N)
     return out
 
 
@@ -421,8 +423,6 @@ def _run_gemm_test(
         raise ValueError(f"unsupported scale_mode={scale_mode!r}")
     if scale_mode == "ptpc" and data_format not in ("fp8", "a8w4"):
         raise ValueError(f"scale_mode='ptpc' only supports data_format='fp8' or 'a8w4', got {data_format!r}")
-    if scale_mode == "blockscale" and data_format != "fp8":
-        raise ValueError(f"scale_mode='blockscale' only supports data_format='fp8', got {data_format!r}")
 
     is_mxscale = scale_mode == "mxscale"
     is_ptpc = scale_mode == "ptpc"
@@ -876,9 +876,11 @@ def test_blockscale_fp8_ragged_m(M, out_dtype):
     [
         (32, 2, 128),
         (64, 2, 128),
+        (96, 3, 384),
         (128, 2, 256),
         (192, 3, 384),
         (256, 4, 512),
+        (384, 4, 768),
     ],
 )
 def test_blockscale_fp8_bscale_n_blocks(tile_n, n_warp, N):
@@ -899,7 +901,7 @@ def test_blockscale_fp8_bscale_n_blocks(tile_n, n_warp, N):
     )
 
 
-@pytest.mark.parametrize("tile_k", [128, 256, 512])
+@pytest.mark.parametrize("tile_k", [128, 256, 512, 1024, 2048])
 def test_blockscale_fp8_k_scale_vector_load(tile_k):
     _run_gemm_test(
         "blockscale",
@@ -1656,8 +1658,6 @@ def _run_benchmark(args):
     if K % SCALE_BLOCK != 0:
         raise ValueError(f"K={K} must be divisible by SCALE_BLOCK={SCALE_BLOCK}")
     scale_mode = getattr(args, "scale_mode", "mxscale")
-    if scale_mode == "blockscale" and (K % BLOCKSCALE_K != 0 or N % BLOCKSCALE_N != 0):
-        raise ValueError(f"blockscale requires K%{BLOCKSCALE_K}==0 and N%{BLOCKSCALE_N}==0")
 
     problem_shape = _get_problem_shape(data_format, M, N, K, tile_m, tile_n, tile_k, args.split_k)
     kernel_m = problem_shape["M"]
@@ -1672,8 +1672,6 @@ def _run_benchmark(args):
     is_blockscale = scale_mode == "blockscale"
     if is_ptpc and data_format not in ("fp8", "a8w4"):
         raise ValueError(f"scale_mode='ptpc' only supports data_format='fp8' or 'a8w4', got {data_format!r}")
-    if is_blockscale and data_format != "fp8":
-        raise ValueError(f"scale_mode='blockscale' only supports data_format='fp8', got {data_format!r}")
     # split_k atomic-adds at output precision (bf16/f16).
     kernel_out_dtype = args.out_dtype
     torch_kernel_dtype = _DT[kernel_out_dtype]
@@ -1760,14 +1758,14 @@ def _run_benchmark(args):
                 fp8_byte = _fp8_e4m3fn_byte(value)
                 a_ = torch.full((M, K), fp8_byte, dtype=torch.uint8)
                 b_ = torch.full((N, K), fp8_byte, dtype=torch.uint8)
-                a_scale = torch.ones(M, K // BLOCKSCALE_K, dtype=torch.float32)
-                b_scale = torch.ones(N // BLOCKSCALE_N, K // BLOCKSCALE_K, dtype=torch.float32)
+                a_scale = torch.full((M, K // BLOCKSCALE_K), 127, dtype=torch.uint8)
+                b_scale = torch.full((N // BLOCKSCALE_N, K // BLOCKSCALE_K), 127, dtype=torch.uint8)
                 if verbose:
-                    print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), fp32 block scales=1.0")
+                    print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), E8M0 block scales byte=127 (=1.0)")
             else:
                 a_, b_, a_scale, b_scale = _random_blockscale_inputs(M, N, K)
                 if verbose:
-                    print("  Fill mode: random fp8 A/B, fp32 block scales")
+                    print("  Fill mode: random fp8 A/B, E8M0 block scales")
             _validate_blockscale_inputs(a_, b_, a_scale, b_scale, problem_shape)
             b_ = fp4_utils.preshuffle_b_16x16(b_, kernel_n, kernel_k)
         else:
@@ -1818,6 +1816,7 @@ def _run_benchmark(args):
         )
     elif is_blockscale:
         launch_fn = compile_blockscale_gemm(
+            data_format=data_format,
             N=kernel_n,
             K=kernel_k,
             tile_m=tile_m,
@@ -2020,7 +2019,7 @@ def _run_benchmark(args):
     if is_ptpc:
         bytes_scale = (kernel_m + kernel_n) * 4
     elif is_blockscale:
-        bytes_scale = (kernel_m + kernel_n // BLOCKSCALE_N) * (kernel_k // BLOCKSCALE_K) * 4
+        bytes_scale = (kernel_m + kernel_n // BLOCKSCALE_N) * (kernel_k // BLOCKSCALE_K)
     else:
         bytes_scale = (kernel_m + kernel_n) * problem_shape["K_scale"]
     bytes_d = kernel_m * kernel_n * elem_bytes_d
@@ -2217,7 +2216,7 @@ if __name__ == "__main__":
         default="mxscale",
         choices=["mxscale", "ptpc", "blockscale"],
         help="Scale organization: 'mxscale' (E8M0), 'ptpc' (fp32 per-token/per-channel), "
-        "or 'blockscale' (fp32 128x128 block scales for FP8).",
+        "or 'blockscale' (E8M0 128x128 block scales for FP8).",
     )
     parser.add_argument("-M", type=int, default=1024)
     parser.add_argument("-N", type=int, default=1024)
@@ -2309,8 +2308,6 @@ if __name__ == "__main__":
 
     if args.scale_mode in ("ptpc", "blockscale") and args.verify_graph:
         raise SystemExit(f"--scale-mode {args.scale_mode} does not support --verify-graph")
-    if args.scale_mode == "blockscale" and args.data_format != "fp8":
-        raise SystemExit("--scale-mode blockscale requires --data-format fp8")
 
     def _run_correctness_test():
         """Run the functional test (computes a reference and asserts correctness)."""
@@ -2336,7 +2333,7 @@ if __name__ == "__main__":
         elif args.scale_mode == "blockscale":
             _run_gemm_test(
                 "blockscale",
-                "fp8",
+                args.data_format,
                 args.M,
                 args.N,
                 args.K,
