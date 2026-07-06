@@ -36,7 +36,7 @@ def _detect_scale_kind(x: torch.Tensor, scale: torch.Tensor | None) -> str:
 def _logical_k(x: torch.Tensor, kind: str) -> int:
     """Return the logical K dim (unpacked) given the detected scale kind."""
     k = int(x.shape[-1])
-    return k * 2 if kind == "mxfp4" else k
+    return k * 2 if kind == "mxfp4" else k  # mxfp6/mxfp8/scalar: 1 byte per element
 
 
 def _dequant_mxfp4_per_1x32(x_fp4: torch.Tensor, scale_e8m0: torch.Tensor) -> torch.Tensor:
@@ -73,6 +73,27 @@ def _dequant_mxfp8_per_1x32(x_fp8: torch.Tensor, scale_e8m0: torch.Tensor) -> to
     return x_f32.view(*x_fp8.shape[:-1], logical_k)
 
 
+def _dequant_mxfp6_per_1x32(x_fp6: torch.Tensor, scale_e8m0: torch.Tensor) -> torch.Tensor:
+    """Dequantize MXFP6-E2M3 codes with per-1x32 E8M0 block scales to fp32.
+
+    x_fp6: uint8 tensor where the low 6 bits of each byte are the E2M3 code
+           (the ``a_unpacked`` layout returned by ``per_1x32_f6_quant``).
+    scale_e8m0: uint8 tensor, one byte per 32-element K block.
+    """
+    from tests.kernels.utils.fp4_utils import e8m0_to_f32, fp6_e2m3_to_f32
+
+    shape = x_fp6.shape
+    logical_k = int(shape[-1])
+    if logical_k % 32 != 0:
+        raise ValueError(f"MXFP6 logical K must be divisible by 32, got {logical_k}")
+
+    x_flat = x_fp6.reshape(-1, logical_k)
+    s_flat = scale_e8m0.view(torch.uint8).reshape(-1, logical_k // 32)
+    decoded = fp6_e2m3_to_f32(x_flat)  # [N, K] float32
+    scales_f32 = e8m0_to_f32(s_flat).repeat_interleave(32, dim=1)  # [N, K] float32
+    return (decoded * scales_f32).view(shape)
+
+
 def _dequant(x: torch.Tensor, scale: torch.Tensor | None, kind: str) -> torch.Tensor:
     """Unified fp32 dequantization driven by the detected ``kind``.
 
@@ -84,6 +105,8 @@ def _dequant(x: torch.Tensor, scale: torch.Tensor | None, kind: str) -> torch.Te
         return _dequant_mxfp4_per_1x32(x, scale)
     if kind == "mxfp8":
         return _dequant_mxfp8_per_1x32(x, scale)
+    if kind == "mxfp6":
+        return _dequant_mxfp6_per_1x32(x, scale)
     x_f32 = x.to(torch.float32)
     return x_f32 if scale is None else x_f32 * scale
 
@@ -172,6 +195,7 @@ def torch_moe_gemm2(
     doweight_stage2: bool,
     group_size: int = -1,
     scale_w2_groups: torch.Tensor | None = None,
+    a2_kind: str | None = None,
 ) -> torch.Tensor:
     """Return [tokens, model_dim] fp32.
 
@@ -185,17 +209,22 @@ def torch_moe_gemm2(
         group_size: -1 for per-row scale (uses scale_w2), >0 for group-wise scale.
         scale_w2_groups: Group-wise scale tensor of shape [E, inter_dim//group_size, model_dim] (Opt 0 layout).
                          Required when group_size > 0; ignored otherwise.
+        a2_kind: Override auto-detection of the A2 format. Use ``"mxfp6"`` when
+                 passing MXFP6-E2M3 unpacked codes (low-6-bit uint8 per element).
+                 When ``None`` the kind is inferred from the tensor dtype/shape.
     """
     assert a2_q.is_cuda and w2_q.is_cuda
     tokens, topk = topk_ids.shape
 
     # Independent per-1x32 block-scale detection for a2 and w2; see
     # ``_detect_scale_kind`` for the classification rules.
-    a_kind = _detect_scale_kind(a2_q, scale_a2)
+    # a2_kind may be passed explicitly when auto-detection is ambiguous (e.g.
+    # mxfp6 and mxfp8 share the same byte-per-element ratio).
+    a_kind = a2_kind or _detect_scale_kind(a2_q, scale_a2)
     w_kind = _detect_scale_kind(w2_q, scale_w2)
 
     inter_dim = _logical_k(a2_q, a_kind)
-    if a_kind in ("mxfp4", "mxfp8"):
+    if a_kind in ("mxfp4", "mxfp8", "mxfp6"):
         if a2_q.dim() == 2:
             a2_q = a2_q.view(tokens, topk, -1)
             scale_a2 = scale_a2.view(tokens, topk, -1)
