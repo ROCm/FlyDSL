@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-06T05:04:52Z",
+ "updated": "2026-07-06T06:02:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28769798050,
+   "pr": 789,
+   "commit": "f1181f514e34139576fa5d4e12e0aa49fa53bfef",
+   "branch": "pr/enh-fmath-flag",
+   "event": "pull_request",
+   "title": "[Enh] Add finer FastMathFlag control",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28769798050",
+   "created_at": "2026-07-06T05:24:51Z",
+   "updated_at": "2026-07-06T05:31:31Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T05:31:30Z",
+     "completed_at": "2026-07-06T05:46:12Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28769798050/job/85301224712"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-06T05:26:48Z",
+     "completed_at": "2026-07-06T05:59:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28769798050/job/85301224718"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T05:26:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28769798050/job/85301224730"
+    }
+   ]
+  },
   {
    "run_id": 28768961496,
    "pr": 803,
@@ -10,38 +53,38 @@
    "branch": "pr/fix-jit-cache-key-recursion",
    "event": "pull_request",
    "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496",
    "created_at": "2026-07-06T05:01:55Z",
-   "updated_at": "2026-07-06T05:02:41Z",
+   "updated_at": "2026-07-06T06:01:14Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-06T05:02:41Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T05:06:58Z",
+     "completed_at": "2026-07-06T05:31:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85298817728"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-06T05:02:41Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-06T05:03:18Z",
+     "completed_at": "2026-07-06T06:00:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85298817738"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-06T05:02:41Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T05:03:18Z",
+     "completed_at": "2026-07-06T06:01:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85298817749"
     }
    ]
@@ -158,19 +201,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T04:37:47Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T05:06:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788/job/85296386225"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T04:38:01Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T05:27:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788/job/85296386240"
     }
    ]
@@ -1687,21 +1730,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28569386184",
    "created_at": "2026-07-02T06:10:01Z",
    "updated_at": "2026-07-02T06:10:01Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28568330570,
-   "pr": null,
-   "commit": "7010de617c61710bb5390c8a6882a410a47a6431",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28568330570",
-   "created_at": "2026-07-02T05:45:08Z",
-   "updated_at": "2026-07-02T05:45:08Z",
    "actor": "jhinpan",
    "jobs": []
   }
