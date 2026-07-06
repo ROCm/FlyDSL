@@ -757,6 +757,37 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
+def _iter_gpu_kernel_funcs(module: ir.Module):
+    """Yield the ``gpu.func`` kernel ops inside every ``gpu.module`` of *module*."""
+    for top in module.body.operations:
+        if top.operation.name != "gpu.module":
+            continue
+        for op in top.regions[0].blocks[0].operations:
+            if op.operation.name == "gpu.func":
+                yield op
+
+
+def _apply_occupancy_compile_hints(module: ir.Module) -> None:
+    """Lower occupancy compile-hints onto the kernel as ROCDL function attributes.
+
+    ``waves_per_eu`` only affects codegen when it is set as the
+    ``rocdl.waves_per_eu`` gpu.func attribute (which ``convert-gpu-to-rocdl``
+    turns into the LLVM ``amdgpu-waves-per-eu`` function attribute). Threading it
+    through ``gpu-module-to-binary opts=`` is silently ignored by the AMDGPU
+    backend, so the autotuner's ``Config(waves_per_eu=...)`` would otherwise be a
+    no-op. A value of 0 / None means "leave it to the compiler".
+    """
+    from .kernel_function import CompilationContext
+
+    wpe = CompilationContext.get_compile_hints().get("waves_per_eu")
+    if not wpe:
+        return
+    with module.context:
+        attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), int(wpe))
+        for func_op in _iter_gpu_kernel_funcs(module):
+            func_op.attributes["rocdl.waves_per_eu"] = attr
+
+
 class MlirCompiler:
     @classmethod
     def compile(
@@ -770,6 +801,7 @@ class MlirCompiler:
         backend = get_backend(arch=arch)
 
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
+        _apply_occupancy_compile_hints(module)
         cfg = _pipeline_fragments_for_mode(backend)
         fragments = cfg.fragments
         pre_binary_fragments = cfg.pre_binary

@@ -16,7 +16,7 @@ from kernels.rmsnorm_kernel import SMALL_N_THRESHOLD
 # span both the <=256 (no known_block_size) and >256 (needs known_block_size)
 # regimes so the tuner can trade occupancy against per-thread work.
 _BLOCK_THREADS_CHOICES = (128, 256, 512, 1024)
-_WAVES_PER_EU_CHOICES = (0, 1, 2)  # 0 == leave to the compiler
+_WAVES_PER_EU_CHOICES = (0, 1, 2)  # 0 == leave to the compiler; nonzero lowers to the rocdl.waves_per_eu func attr
 
 
 def _elem_bits(dtype_str: str) -> int:
