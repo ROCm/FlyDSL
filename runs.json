@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-06T10:00:20Z",
+ "updated": "2026-07-06T10:50:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,33 +14,33 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224",
    "created_at": "2026-07-06T09:23:28Z",
-   "updated_at": "2026-07-06T09:58:10Z",
+   "updated_at": "2026-07-06T10:25:13Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-06T09:58:18Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T09:58:57Z",
+     "completed_at": "2026-07-06T10:34:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85344011133"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-06T09:58:18Z",
+     "started_at": "2026-07-06T10:21:05Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85344011176"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-06T09:58:18Z",
+     "started_at": "2026-07-06T10:25:12Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85344011208"
     }
@@ -117,29 +117,29 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28779389287",
    "created_at": "2026-07-06T08:49:09Z",
-   "updated_at": "2026-07-06T08:51:16Z",
+   "updated_at": "2026-07-06T10:48:05Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T08:50:23Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T10:21:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28779389287/job/85331187903"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T08:50:24Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T10:48:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28779389287/job/85331187910"
     },
     {
@@ -228,10 +228,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T09:43:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T10:48:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28775789693/job/85341253573"
     },
     {
