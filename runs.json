@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-06T13:42:18Z",
+ "updated": "2026-07-06T13:44:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -139,11 +139,11 @@
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
    "title": "[Feat]: Add dispatch & combine tuning configuration",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224",
    "created_at": "2026-07-06T09:23:28Z",
-   "updated_at": "2026-07-06T12:50:50Z",
+   "updated_at": "2026-07-06T13:40:53Z",
    "actor": "yanboshao",
    "jobs": [
     {
@@ -176,10 +176,10 @@
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T12:50:49Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T13:40:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85375121876"
     },
     {
