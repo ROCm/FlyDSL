@@ -210,8 +210,8 @@ def compile_fp8_gemm_8w(*, K: int, BLOCK_M: int = 256, BLOCK_N: int = 256, b_pre
         rocdl.s_barrier()
 
         rocdl.s_setprio(1)
-        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, with_priority_barrier=False)
-        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, with_priority_barrier=False)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag, set_prio=False)
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag, set_prio=False)
         rocdl.s_setprio(0)
         rocdl.s_barrier()
 

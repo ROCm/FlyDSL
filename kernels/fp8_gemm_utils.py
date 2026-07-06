@@ -230,7 +230,7 @@ class Mfma16x16x128:
         fx.gemm(self.atom, c_frag, a_frag, b_frag, c_frag)
         return c_frag.load().ir_value()
 
-    def call(self, a, b, c, *, with_priority_barrier=True):
+    def call(self, a, b, c, *, set_prio=True):
         assert len(a) == self.n_tiles_a
         assert len(b) == self.n_tiles_b
         assert len(c) == self.n_tiles_a * self.n_tiles_b
@@ -238,13 +238,13 @@ class Mfma16x16x128:
         a_frags = [self._make_operand_frag(a[idx]) for idx in range_constexpr(self.n_tiles_a)]
         b_frags = [self._make_operand_frag(b[idx]) for idx in range_constexpr(self.n_tiles_b)]
         c_frags = [self._make_accum_frag(c[idx]) for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
-        if const_expr(with_priority_barrier):
+        if const_expr(set_prio):
             rocdl.s_setprio(1)
         for i in range_constexpr(self.n_tiles_a):
             for j in range_constexpr(self.n_tiles_b):
                 cf = c_frags[self.idx(i, j)]
                 fx.gemm(self.atom, cf, a_frags[i], b_frags[j], cf)
-        if const_expr(with_priority_barrier):
+        if const_expr(set_prio):
             rocdl.s_setprio(0)
             rocdl.s_barrier()
         return [c_frags[idx].load().ir_value() for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
