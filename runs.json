@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-06T16:29:09Z",
+ "updated": "2026-07-06T18:32:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28812695484,
+   "pr": 783,
+   "commit": "7074a7d7c2c1ecbf097bf9a01879f4c9768b2982",
+   "branch": "feat/autotune-cache-key-restore",
+   "event": "pull_request",
+   "title": "[1/5] autotune: harden cache key + add restore_value (#770)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28812695484",
+   "created_at": "2026-07-06T18:05:21Z",
+   "updated_at": "2026-07-06T18:09:33Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T18:09:28Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28812695484/job/85444942319"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T18:09:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28812695484/job/85444942336"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T18:09:19Z",
+     "completed_at": "2026-07-06T18:22:08Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28812695484/job/85444942365"
+    }
+   ]
+  },
+  {
+   "run_id": 28809429959,
+   "pr": 794,
+   "commit": "04fff72c2da425bacbf4436f35a5523dc00109a7",
+   "branch": "jiacao/conv3d-implicit-8wave-fp8",
+   "event": "pull_request",
+   "title": "[Kernel] conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel(gfx950)",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28809429959",
+   "created_at": "2026-07-06T17:10:30Z",
+   "updated_at": "2026-07-06T18:28:24Z",
+   "actor": "jiacao-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T17:12:25Z",
+     "completed_at": "2026-07-06T17:26:39Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28809429959/job/85433490228"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T17:12:33Z",
+     "completed_at": "2026-07-06T18:11:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28809429959/job/85433490232"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T17:12:33Z",
+     "completed_at": "2026-07-06T18:28:22Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28809429959/job/85433490386"
+    }
+   ]
+  },
   {
    "run_id": 28791264711,
    "pr": 806,
@@ -143,16 +229,16 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224",
    "created_at": "2026-07-06T09:23:28Z",
-   "updated_at": "2026-07-06T16:15:01Z",
+   "updated_at": "2026-07-06T18:09:35Z",
    "actor": "yanboshao",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T16:15:01Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T18:00:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85421605374"
     },
     {
@@ -172,6 +258,24 @@
      "started_at": "2026-07-06T10:25:12Z",
      "completed_at": "2026-07-06T12:48:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85421606154"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T18:09:35Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85443256212"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-06T18:01:40Z",
+     "completed_at": "2026-07-06T18:22:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85443256241"
     }
    ]
   },
@@ -878,7 +982,7 @@
   },
   {
    "run_id": 28698144154,
-   "pr": 794,
+   "pr": null,
    "commit": "8dac7c52f3d732cc323133d390e10ab23deb988b",
    "branch": "jiacao/conv3d-implicit-8wave-fp8",
    "event": "pull_request",
@@ -1945,36 +2049,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28573175142/job/84715639324"
     }
    ]
-  },
-  {
-   "run_id": 28572147298,
-   "pr": null,
-   "commit": "1c55a7fba348aa4c95a242f5bf76daa4dcca95f5",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28572147298",
-   "created_at": "2026-07-02T07:09:38Z",
-   "updated_at": "2026-07-02T07:09:38Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28572112570,
-   "pr": null,
-   "commit": "689f570b5c1ffb498b416e77c9e0636b38849f46",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28572112570",
-   "created_at": "2026-07-02T07:08:55Z",
-   "updated_at": "2026-07-02T07:08:55Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
