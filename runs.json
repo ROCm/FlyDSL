@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-06T08:20:57Z",
+ "updated": "2026-07-06T08:51:28Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28779389287,
+   "pr": 789,
+   "commit": "e05702c22b3e3c55c37595d6dced9796810a63f5",
+   "branch": "pr/enh-fmath-flag",
+   "event": "pull_request",
+   "title": "[Enh] Add finer FastMathFlag control",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28779389287",
+   "created_at": "2026-07-06T08:49:09Z",
+   "updated_at": "2026-07-06T08:49:16Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 28777012220,
    "pr": 789,
@@ -10,29 +25,29 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28777012220",
    "created_at": "2026-07-06T08:05:16Z",
-   "updated_at": "2026-07-06T08:06:01Z",
+   "updated_at": "2026-07-06T08:49:10Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-06T08:08:47Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T08:43:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28777012220/job/85323419185"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-06T08:06:01Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T08:49:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28777012220/job/85323419227"
     },
     {
@@ -1799,21 +1814,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28570518766",
    "created_at": "2026-07-02T06:35:20Z",
    "updated_at": "2026-07-02T06:35:20Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28570479320,
-   "pr": null,
-   "commit": "e369703f453eb87118f5289d38e3895bfaec15d4",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28570479320",
-   "created_at": "2026-07-02T06:34:30Z",
-   "updated_at": "2026-07-02T06:34:30Z",
    "actor": "jhinpan",
    "jobs": []
   }
