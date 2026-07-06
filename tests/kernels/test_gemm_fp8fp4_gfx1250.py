@@ -428,6 +428,7 @@ def _run_gemm_test(
     lda_extra=0,
     ldc_extra=0,
     ascale_lda_extra=0,
+    ascale_layout="row_major",
     return_launch_fn=False,
 ):
     """Shared correctness body for mxscale, PTPC, and blockscale GEMM variants."""
@@ -460,12 +461,12 @@ def _run_gemm_test(
 
     if is_mxscale and ascale_load_path is None:
         ascale_load_path = _select_ascale_load_path(M)
-    ascale_stride_supported = is_blockscale or (is_mxscale and ascale_load_path == "vgpr")
-    if ascale_lda_extra and not ascale_stride_supported:
-        raise ValueError(
-            "ascale_lda_extra only applies to blockscale or mxscale ascale_load_path='vgpr' "
-            f"(got scale_mode={scale_mode!r}, ascale_load_path={ascale_load_path!r})"
-        )
+    if ascale_layout not in ("row_major", "col_major"):
+        raise ValueError(f"ascale_layout must be 'row_major' or 'col_major', got {ascale_layout!r}")
+    if ascale_layout == "col_major" and not is_blockscale:
+        raise ValueError("ascale_layout='col_major' only applies to blockscale")
+    if ascale_lda_extra and not is_blockscale:
+        raise ValueError(f"ascale_lda_extra only applies to blockscale (got scale_mode={scale_mode!r})")
     tdm_store_enabled = split_k == 1
 
     num_k_tiles = local_k // tile_k
@@ -511,14 +512,13 @@ def _run_gemm_test(
         run_attrs.append(f"ascale={ascale_load_path}")
     if is_blockscale:
         run_attrs.append("blockscale=128x128")
+        run_attrs.append(f"ascale={ascale_layout}")
     if lda_extra:
         run_attrs.append(f"lda={kernel_k + lda_extra}")
     if ldc_extra:
         run_attrs.append(f"ldc={kernel_n + ldc_extra}")
     if ascale_lda_extra:
-        run_attrs.append(
-            f"lda_scale={(kernel_k // SCALE_BLOCK if is_mxscale else kernel_k // BLOCKSCALE_K) + ascale_lda_extra}"
-        )
+        run_attrs.append(f"ascale_stride_pad=+{ascale_lda_extra}")
     run_attrs.append("preshuffle")
     attr_str = ", " + ", ".join(run_attrs) if run_attrs else ""
     print(
@@ -530,22 +530,28 @@ def _run_gemm_test(
     lda = kernel_k + lda_extra
     ldc = kernel_n + ldc_extra
 
-    lda_scale = None
-    if ascale_stride_supported:
-        ascale_cols = kernel_k // SCALE_BLOCK if is_mxscale else kernel_k // BLOCKSCALE_K
-        lda_scale = ascale_cols + ascale_lda_extra
+    stride_ascale_m = None
+    stride_ascale_k = None
 
     if is_mxscale:
         _validate_mxscale_inputs(a, b, a_scale, b_scale, problem_shape)
         a = _with_strided_a(a, problem_shape, lda)
         a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
-        if ascale_load_path == "vgpr":
-            a_scale = _with_strided_a_scale(a_scale, ascale_cols, lda_scale)
         b_scale = preshuffle_scale(b_scale)
     elif is_blockscale:
         _validate_blockscale_inputs(a, b, a_scale, b_scale, problem_shape)
         a = _with_strided_a(a, problem_shape, lda)
-        a_scale = _with_strided_a_scale(a_scale, ascale_cols, lda_scale)
+        ascale_cols = kernel_k // BLOCKSCALE_K
+        if ascale_layout == "col_major":
+            # M-contiguous: store [K//128, M(+pad)] row-major; addr(m,kb)=m*1 + kb*stride_k.
+            a_scale_t = a_scale.t().contiguous()
+            stride_ascale_m = 1
+            stride_ascale_k = kernel_m + ascale_lda_extra
+            a_scale = _with_strided_a_scale(a_scale_t, kernel_m, stride_ascale_k)
+        else:
+            stride_ascale_m = ascale_cols + ascale_lda_extra
+            a_scale = _with_strided_a_scale(a_scale, ascale_cols, stride_ascale_m)
+            stride_ascale_k = 1
     else:
         _validate_ab_inputs(a, b, problem_shape)
         _expect_shape("A scale", a_scale, (kernel_m,))
@@ -586,6 +592,7 @@ def _run_gemm_test(
         compile_kwargs["scale_block_k"] = BLOCKSCALE_K
         compile_kwargs["scale_block_n"] = BLOCKSCALE_N
         compile_kwargs["ascale_load_path"] = "vgpr"
+        compile_kwargs["ascale_layout"] = ascale_layout
         launch_fn = compile_blockscale_gemm(**compile_kwargs)
     else:
         launch_fn = compile_ptpc_gemm(**compile_kwargs)
@@ -609,13 +616,10 @@ def _run_gemm_test(
         lda,
         ldc,
     ]
-    if not is_ptpc:
-        lda_scale_arg = (
-            lda_scale
-            if ascale_stride_supported
-            else (kernel_k // SCALE_BLOCK if is_mxscale else kernel_k // BLOCKSCALE_K)
-        )
-        compile_args.append(lda_scale_arg)
+    if is_blockscale:
+        # blockscale takes two runtime A-scale strides (m, k); mxscale/ptpc take none.
+        compile_args.append(stride_ascale_m)
+        compile_args.append(stride_ascale_k)
     compile_args.append(torch.cuda.current_stream())
     flyc.compile(*compile_args)
     torch.cuda.synchronize()
@@ -891,7 +895,9 @@ def test_mxscale_bscale_32x4(data_format, M, N, K, tile_n, tile_k, n_warp, num_b
 
 @pytest.mark.parametrize("M", [1, 7, 16, 33, 64, 65, 100, 127, 128, 129, 192, 255, 256, 257, 384, 500, 1000, 2048])
 @pytest.mark.parametrize("out_dtype", ["bf16", "f32"])
-def test_blockscale_fp8_ragged_m(M, out_dtype):
+@pytest.mark.parametrize("ascale_layout", ["row_major", "col_major"])
+def test_blockscale_fp8_ragged_m(M, out_dtype, ascale_layout):
+    """Ragged-M OOB across both A-scale layouts (col_major exercises inner-OOB mask)."""
     _run_gemm_test(
         "blockscale",
         "fp8",
@@ -906,6 +912,7 @@ def test_blockscale_fp8_ragged_m(M, out_dtype):
         4,
         out_dtype=out_dtype,
         l2_prefetch_distance=0,
+        ascale_layout=ascale_layout,
     )
 
 
@@ -921,7 +928,9 @@ def test_blockscale_fp8_ragged_m(M, out_dtype):
         (384, 4, 768),
     ],
 )
-def test_blockscale_fp8_bscale_n_blocks(tile_n, n_warp, N):
+@pytest.mark.parametrize("ascale_layout", ["row_major", "col_major"])
+def test_blockscale_fp8_bscale_n_blocks(tile_n, n_warp, N, ascale_layout):
+    """B-scale N-block coverage across small tile_m (16) and both A-scale layouts."""
     _run_gemm_test(
         "blockscale",
         "fp8",
@@ -936,6 +945,7 @@ def test_blockscale_fp8_bscale_n_blocks(tile_n, n_warp, N):
         2,
         out_dtype="bf16",
         l2_prefetch_distance=0,
+        ascale_layout=ascale_layout,
     )
 
 
@@ -944,11 +954,15 @@ def test_blockscale_fp8_bscale_n_blocks(tile_n, n_warp, N):
     [
         (128, 32, 128),
         (256, 32, 128),
+        (384, 32, 128),
         (512, 32, 128),
+        (768, 16, 128),
         (1024, 16, 128),
     ],
 )
-def test_blockscale_fp8_k_scale_vector_load(tile_k, tile_m, tile_n):
+@pytest.mark.parametrize("ascale_layout", ["row_major", "col_major"])
+def test_blockscale_fp8_k_scale_vector_load(tile_k, tile_m, tile_n, ascale_layout):
+    """Multi-K-step scale load across tile_k=128..1024 (incl. non-pow2) both layouts."""
     _run_gemm_test(
         "blockscale",
         "fp8",
@@ -963,6 +977,29 @@ def test_blockscale_fp8_k_scale_vector_load(tile_k, tile_m, tile_n):
         2,
         out_dtype="bf16",
         l2_prefetch_distance=0,
+        ascale_layout=ascale_layout,
+    )
+
+
+@pytest.mark.parametrize("tile_m,m_warp", [(16, 1), (32, 2), (64, 2), (96, 3), (128, 2), (256, 2)])
+@pytest.mark.parametrize("ascale_layout", ["row_major", "col_major"])
+def test_blockscale_fp8_tile_m_sweep(tile_m, m_warp, ascale_layout):
+    """A-scale M-rep coverage (tile_m=16..256, wmma_m_rep 1/2/3/16) both layouts."""
+    _run_gemm_test(
+        "blockscale",
+        "fp8",
+        tile_m * 2,
+        256,
+        512,
+        tile_m,
+        128,
+        128,
+        m_warp,
+        2,
+        num_buffers=2,
+        out_dtype="bf16",
+        l2_prefetch_distance=0,
+        ascale_layout=ascale_layout,
     )
 
 
@@ -1174,7 +1211,6 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     b_flat = b_gpu.contiguous()
     as_flat = as_gpu.contiguous()
     bs_flat = bs_gpu.contiguous()
-    lda_scale = K // SCALE_BLOCK
     compiled_exe = flyc.compile(
         launch_fn,
         c_flat,
@@ -1186,14 +1222,13 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         N,
         K,
         N,
-        lda_scale,
         torch.cuda.current_stream(),
     )
 
     # Resolve stream lazily inside the launch closure so graph capture sees
     # the active capture stream rather than a stream bound before capture.
     def launch():
-        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, lda_scale, torch.cuda.current_stream())
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, torch.cuda.current_stream())
 
     # ── Eager run (reference) ──
     c_gpu.zero_()
@@ -1482,12 +1517,13 @@ def test_gemm_strided(scale_mode, data_format, lda_extra, ldc_extra):
     )
 
 
-@pytest.mark.parametrize("scale_mode", ["mxscale", "blockscale"])
+@pytest.mark.parametrize("ascale_layout", ["row_major", "col_major"])
 @pytest.mark.parametrize("ascale_lda_extra", [16, 64])
-def test_ascale_strided(scale_mode, ascale_lda_extra):
-    """Strided A-scale: data backed by a wider row pitch, passed via runtime lda_scale."""
+def test_ascale_strided(ascale_lda_extra, ascale_layout):
+    """Blockscale strided A-scale: outer (runtime) stride padded — K-column pitch
+    for row_major, M pitch for col_major."""
     _run_gemm_test(
-        scale_mode,
+        "blockscale",
         "fp8",
         128,
         256,
@@ -1499,8 +1535,38 @@ def test_ascale_strided(scale_mode, ascale_lda_extra):
         2,
         num_buffers=4,
         out_dtype="bf16",
-        ascale_load_path="vgpr" if scale_mode == "mxscale" else None,
         ascale_lda_extra=ascale_lda_extra,
+        ascale_layout=ascale_layout,
+    )
+
+
+@pytest.mark.parametrize(
+    "tile_m, tile_n, K, tile_k, num_buffers",
+    [
+        (256, 256, 512, 128, 4),
+        (128, 128, 1024, 256, 2),
+    ],
+)
+@pytest.mark.parametrize("M", [256, 200])
+def test_blockscale_ascale_col_major(M, tile_m, tile_n, K, tile_k, num_buffers):
+    """Blockscale col_major (M-contiguous) A-scale: numeric match vs row_major ref.
+
+    M=200 exercises the partial-M inner-OOB masking path.
+    """
+    _run_gemm_test(
+        "blockscale",
+        "fp8",
+        M,
+        tile_n,
+        K,
+        tile_m,
+        tile_n,
+        tile_k,
+        2,
+        2,
+        num_buffers=num_buffers,
+        out_dtype="bf16",
+        ascale_layout="col_major",
     )
 
 
@@ -1760,6 +1826,8 @@ def _run_benchmark(args):
     print(f"  Shape: M={M}, N={N}, K={K}")
     print(f"  Tile: ({tile_m}, {tile_n}, {tile_k}), warps=({args.m_warp}x{args.n_warp})")
     print(f"  Buffers={args.num_buffers}, out={args.out_dtype}, inst_prefetch={args.inst_prefetch}")
+    if args.scale_mode == "blockscale":
+        print(f"  A-scale layout: {getattr(args, 'ascale_layout', 'row_major')}")
     if args.warmup < 0:
         raise ValueError(f"--warmup must be >= 0, got {args.warmup}")
     if args.iters <= 0:
@@ -1841,6 +1909,9 @@ def _run_benchmark(args):
                     print("  Fill mode: random fp8 A/B, E8M0 block scales")
             _validate_blockscale_inputs(a_, b_, a_scale, b_scale, problem_shape)
             b_ = fp4_utils.preshuffle_b_16x16(b_, kernel_n, kernel_k)
+            if getattr(args, "ascale_layout", "row_major") == "col_major":
+                # M-contiguous [K//128, M] row-major; addr(m,kb)=m*1 + kb*M.
+                a_scale = a_scale.t().contiguous()
         else:
             a_, b_, a_scale, b_scale, fill_spec = _fill_mode_inputs(M, N, K, data_format, fill_mode_str)
             if verbose:
@@ -1909,6 +1980,7 @@ def _run_benchmark(args):
             atomic_barrier_enable=args.atomic_barrier_enable,
             scale_block_k=BLOCKSCALE_K,
             scale_block_n=BLOCKSCALE_N,
+            ascale_layout=getattr(args, "ascale_layout", "row_major"),
         )
     else:
         launch_fn = compile_mxscale_gemm(
@@ -1933,7 +2005,14 @@ def _run_benchmark(args):
             ascale_load_path=ascale_load_path,
         )
 
-    lda_scale = None if is_ptpc else (kernel_k // BLOCKSCALE_K if is_blockscale else kernel_k // SCALE_BLOCK)
+    # blockscale takes two runtime A-scale strides; mxscale/ptpc take none.
+    if is_blockscale:
+        if getattr(args, "ascale_layout", "row_major") == "col_major":
+            ascale_stride_args = [1, kernel_m]  # (stride_m=1, stride_k=M)
+        else:
+            ascale_stride_args = [kernel_k // BLOCKSCALE_K, 1]  # (stride_m, stride_k)
+    else:
+        ascale_stride_args = []
     compile_args = [
         launch_fn,
         c_gpu,
@@ -1945,17 +2024,25 @@ def _run_benchmark(args):
         kernel_n,
         kernel_k,
         kernel_n,
+        *ascale_stride_args,
+        torch.cuda.current_stream(),
     ]
-    if not is_ptpc:
-        compile_args.append(lda_scale)
-    compile_args.append(torch.cuda.current_stream())
     compiled_exe = flyc.compile(*compile_args)
 
     def run_one(c_, a_, b_, as_, bs_):
-        run_args = [c_, a_, b_, as_, bs_, kernel_m, kernel_n, kernel_k, kernel_n]
-        if not is_ptpc:
-            run_args.append(lda_scale)
-        run_args.append(torch.cuda.current_stream())
+        run_args = [
+            c_,
+            a_,
+            b_,
+            as_,
+            bs_,
+            kernel_m,
+            kernel_n,
+            kernel_k,
+            kernel_n,
+            *ascale_stride_args,
+            torch.cuda.current_stream(),
+        ]
         compiled_exe(*run_args)
 
     c_gpu.zero_()
@@ -2203,7 +2290,6 @@ def _run_graph_verify(args):
     b_flat = b_gpu.contiguous()
     as_flat = as_gpu.contiguous()
     bs_flat = bs_gpu.contiguous()
-    lda_scale = kernel_k // SCALE_BLOCK
     compiled_exe = flyc.compile(
         launch_fn,
         c_flat,
@@ -2215,7 +2301,6 @@ def _run_graph_verify(args):
         kernel_n,
         kernel_k,
         kernel_n,
-        lda_scale,
         torch.cuda.current_stream(),
     )
 
@@ -2230,7 +2315,6 @@ def _run_graph_verify(args):
             kernel_n,
             kernel_k,
             kernel_n,
-            lda_scale,
             torch.cuda.current_stream(),
         )
 
@@ -2290,6 +2374,13 @@ if __name__ == "__main__":
         choices=["mxscale", "ptpc", "blockscale"],
         help="Scale organization: 'mxscale' (E8M0), 'ptpc' (fp32 per-token/per-channel), "
         "or 'blockscale' (E8M0 128x128 block scales for FP8).",
+    )
+    parser.add_argument(
+        "--ascale-layout",
+        type=str,
+        default="row_major",
+        choices=["row_major", "col_major"],
+        help="blockscale A-scale layout: 'row_major' [M,K//128] or 'col_major' " "(M-contiguous, aligned A-scale TDM).",
     )
     parser.add_argument("-M", type=int, default=1024)
     parser.add_argument("-N", type=int, default=1024)
@@ -2424,6 +2515,7 @@ if __name__ == "__main__":
                 inst_prefetch=args.inst_prefetch,
                 waves_per_eu=args.waves_per_eu,
                 expert_sched_mode=args.expert_sched_mode,
+                ascale_layout=args.ascale_layout,
             )
         else:
             _run_gemm_test(
