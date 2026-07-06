@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-06T04:04:03Z",
+ "updated": "2026-07-06T04:34:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -348,20 +348,20 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127",
    "created_at": "2026-07-03T10:43:39Z",
-   "updated_at": "2026-07-06T03:41:51Z",
+   "updated_at": "2026-07-06T04:33:24Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T03:41:51Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T04:33:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/85291056581"
     },
     {
