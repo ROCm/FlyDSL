@@ -669,7 +669,7 @@ def compile_fp8fp4_gemm(
                 words = []
                 off = byte_off
                 bytes_needed = n
-                while bytes_needed > 0:
+                while const_expr(bytes_needed > 0):
                     if const_expr(bytes_needed > 4):
                         raw = fx.Vector(lds_load_b128_raw(lds_buf, off))
                         words.extend(raw[i] for i in range(4))

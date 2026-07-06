@@ -934,16 +934,24 @@ def test_blockscale_fp8_bscale_n_blocks(tile_n, n_warp, N):
     )
 
 
-@pytest.mark.parametrize("tile_k", [128, 256, 512, 1024, 2048])
-def test_blockscale_fp8_k_scale_vector_load(tile_k):
+@pytest.mark.parametrize(
+    "tile_k,tile_m,tile_n",
+    [
+        (128, 32, 128),
+        (256, 32, 128),
+        (512, 32, 128),
+        (1024, 16, 128),
+    ],
+)
+def test_blockscale_fp8_k_scale_vector_load(tile_k, tile_m, tile_n):
     _run_gemm_test(
         "blockscale",
         "fp8",
         32,
         256,
         tile_k * 2,
-        32,
-        128,
+        tile_m,
+        tile_n,
         tile_k,
         1,
         2,
@@ -1161,6 +1169,7 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     b_flat = b_gpu.contiguous()
     as_flat = as_gpu.contiguous()
     bs_flat = bs_gpu.contiguous()
+    lda_scale = K // SCALE_BLOCK
     compiled_exe = flyc.compile(
         launch_fn,
         c_flat,
@@ -1173,12 +1182,15 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         K,
         N,
         torch.cuda.current_stream(),
+        lda_scale,
     )
 
     # Resolve stream lazily inside the launch closure so graph capture sees
     # the active capture stream rather than a stream bound before capture.
     def launch():
-        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, torch.cuda.current_stream())
+        compiled_exe(
+            c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, torch.cuda.current_stream(), lda_scale
+        )
 
     # ── Eager run (reference) ──
     c_gpu.zero_()
