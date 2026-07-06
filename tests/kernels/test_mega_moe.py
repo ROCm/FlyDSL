@@ -30,6 +30,7 @@ import sys
 
 import torch
 import torch.distributed as dist
+from torch.profiler import ProfilerActivity, profile, record_function
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, "../.."))
@@ -118,6 +119,91 @@ def _all_min_int(dev, val: int) -> int:
     t = torch.tensor([int(val)], device=dev)
     dist.all_reduce(t, op=dist.ReduceOp.MIN)
     return int(t.item())
+
+
+# ============================= torch.profiler timing (opt-in via --profile) =============================
+# Optional per-kernel profiling of the CUDAGraph-captured bodies. The default timing stays the
+# lightweight cuda-event `_cg_time`; --profile additionally dumps a chrome trace + per-kernel GPU
+# time table (rank0) and the cross-rank E2E replay time, ported from test_profiler_moe_gemm2_combine.
+def _make_profiler(active_iters: int, prof_warmup: int = 5):
+    return profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=False, with_stack=False,
+        schedule=torch.profiler.schedule(wait=1, warmup=prof_warmup, active=active_iters, repeat=1),
+    )
+
+
+def _kernel_table_from_trace(trace_path: str, op_tag: str, active_iters: int, skip_first: int):
+    """Aggregate per-kernel GPU us/replay + E2E replay us from a chrome trace (valid window only)."""
+    with open(trace_path) as f:
+        tr = json.load(f)
+    ev = tr["traceEvents"]
+    kernel_events = [e for e in ev if e.get("cat") == "kernel"]
+    cg_label = f"{op_tag}::cudagraph_replay"
+    cg = sorted([e for e in ev
+                 if e.get("cat") == "gpu_user_annotation" and cg_label in e.get("name", "")],
+                key=lambda e: e["ts"])[-active_iters:]
+    cg = cg[skip_first:]
+    valid = max(1, len(cg))
+    if cg:
+        t0 = cg[0]["ts"]; t1 = cg[-1]["ts"] + cg[-1]["dur"]
+        win = [e for e in kernel_events if t0 <= e["ts"] <= t1]
+        e2e = sum(e["dur"] for e in cg) / valid
+    else:
+        win = kernel_events; e2e = 0.0
+    agg: dict = {}
+    for e in win:
+        n = e.get("name", "?"); a = agg.setdefault(n, [0, 0.0])
+        a[0] += 1; a[1] += e["dur"]
+    rows = sorted([(n, c / valid, tot / valid) for n, (c, tot) in agg.items()],
+                  key=lambda r: r[2], reverse=True)
+    return rows, e2e, valid
+
+
+def _profile_body(body, dc_op, op_tag, args, rank, world, dev, out_dir, meta):
+    """Capture `body` into a CUDAGraph (same sequence as _cg_time), replay under torch.profiler,
+    dump chrome trace, and print (rank0) a per-kernel GPU table + cross-rank E2E replay time."""
+    ms.shmem_barrier_all()
+    body(); torch.cuda.synchronize(); ms.shmem_barrier_all()   # eager warmup (jit)
+    _cap = torch.cuda.Stream(); g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g, stream=_cap):
+        body()
+    for _ in range(10):
+        g.replay()
+    torch.cuda.synchronize()
+
+    iters = max(1, int(args.iters)); prof_warmup = 5; skip_first = min(5, iters - 1) if iters > 1 else 0
+    total_steps = 1 + prof_warmup + iters
+    with _make_profiler(active_iters=iters, prof_warmup=prof_warmup) as prof:
+        for _ in range(total_steps):
+            with record_function(f"{op_tag}::cudagraph_replay"):
+                g.replay()
+            prof.step()
+
+    os.makedirs(out_dir, exist_ok=True)
+    trace_path = os.path.join(out_dir, f"{op_tag}_rank{rank}_trace.json")
+    prof.export_chrome_trace(trace_path)
+    rows, e2e, valid = _kernel_table_from_trace(trace_path, op_tag, iters, skip_first)
+
+    # reduce E2E replay across ranks
+    loc = torch.tensor([e2e], dtype=torch.float64, device=dev)
+    s = loc.clone(); dist.all_reduce(s, op=dist.ReduceOp.SUM)
+    mx = loc.clone(); dist.all_reduce(mx, op=dist.ReduceOp.MAX)
+    mn = loc.clone(); dist.all_reduce(mn, op=dist.ReduceOp.MIN)
+    if rank == 0:
+        sep = "=" * 80
+        print(f"\n{sep}")
+        print(f"  PROFILE {op_tag}  EP={world}  bs={meta.get('tokens')}  "
+              f"net={meta.get('network')}  quant={meta.get('quant')}  ({valid} valid iters)")
+        print(f"  E2E replay us/iter (avg/min/max across {world} ranks): "
+              f"{s.item()/world:.1f} / {mn.item():.1f} / {mx.item():.1f}")
+        print(f"  {'kernel (rank0)':<52}{'calls/it':>9}{'gpu us/it':>11}")
+        print(f"  {'-'*72}")
+        for n, calls, us in rows[:12]:
+            nm = n if len(n) <= 50 else n[:47] + "..."
+            print(f"  {nm:<52}{calls:>9.2f}{us:>11.2f}")
+        print(sep, flush=True)
+    return {"e2e_us_avg": s.item() / world, "e2e_us_max": mx.item()}
 
 
 def _chunked_fp4_quant(x):
@@ -298,16 +384,26 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     _tm2_mega = int(args.mega_gemm2_tile_m) if int(getattr(args, "mega_gemm2_tile_m", -1)) > 0 else tm2
     if _tm2_mega != tm2:
         _info(rank, f"[full-e2e] DEBUG override MegaMoE gemm2_tile_m={_tm2_mega} (baseline stays {tm2})")
+    _s1_fused = bool(args.mega_stage1_fused)
+    _s2_fused = bool(args.mega_stage2_fused)
+    if rank == 0 and not (_s1_fused and _s2_fused):
+        _info(rank, f"[full-e2e] MegaMoE modes: stage1_fused={_s1_fused} stage2_fused={_s2_fused}")
     moe = MegaMoE(
         rank=rank, world_size=world, model_dim=model_dim, inter_dim=inter_dim,
         experts=experts, topk=topk, quant=args.quant, w1=_w1_arg, w1_scale=_w1s_arg,
         w2=w2_kernel, w2_scale=w2_scale_1d, max_tok_per_rank=mtpr, network=args.network,
-        gemm2_tile_m=_tm2_mega, gemm2_tile_n=tn2, gemm2_tile_k=tk2, enable_fused_stage2=True)
+        gemm2_tile_m=_tm2_mega, gemm2_tile_n=tn2, gemm2_tile_k=tk2,
+        enable_fused_stage1=_s1_fused, enable_fused_stage2=_s2_fused)
     torch.cuda.synchronize(); ms.shmem_barrier_all()
 
     _mega_out_holder = {}
     def _mega_body():
-        _mega_out_holder["o"] = moe.forward_prequant(x_q, x_sc, wc, ic)
+        # fused stage-1 consumes pre-quantized x_q (quant outside the timed body); non-fused stage-1
+        # bf16-dispatches, so it takes the bf16 input via forward().
+        if _s1_fused:
+            _mega_out_holder["o"] = moe.forward_prequant(x_q, x_sc, wc, ic)
+        else:
+            _mega_out_holder["o"] = moe.forward(x_bf16[:run_tokens].contiguous(), wc, ic)
     _mega_body(); torch.cuda.synchronize(); ms.shmem_barrier_all()
     out_mega = _mega_out_holder["o"][:run_tokens].float().cpu().numpy().copy()
 
@@ -520,9 +616,23 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     #           stream=fx.Stream(torch.cuda.current_stream()))
 
     # ============================= 11. perf (CUDAGraph) =============================
-    _t_mega = _cg_time(_mega_body, moe.comb_op)              # megav1 e2e (stage1+stage2)
-    _t_atom8 = _cg_time(_atom_fp8_body, dc)                  # baseline e2e (fp8 dispatch)
-    _t_atom = _cg_time(_atom_body, dc)                       # reference e2e (bf16 dispatch)
+    # Measurement is EITHER torch.profiler OR cuda-event, mutually exclusive (mirrors
+    # test_profiler_moe_gemm2_combine.py's `--mode profile` vs `--mode bench`). --profile dumps
+    # per-kernel GPU tables + chrome traces (E2E from the profiler trace); default uses the
+    # lightweight cuda-event `_cg_time`. Both feed the same _t_* (ms) into the report below.
+    if getattr(args, "profile", False):
+        _pmeta = dict(tokens=run_tokens, network=args.network, quant=args.quant)
+        _pdir = getattr(args, "profile_dir", "") or "/tmp/mega_prof"
+        _tag = f"{args.network}_{args.quant}_bs{run_tokens}"
+        _pm = _profile_body(_mega_body, moe.comb_op, f"mega_{_tag}", args, rank, world, dev, _pdir, _pmeta)
+        _pa8 = _profile_body(_atom_fp8_body, dc, f"atomfp8_{_tag}", args, rank, world, dev, _pdir, _pmeta)
+        _pa = _profile_body(_atom_body, dc, f"atombf16_{_tag}", args, rank, world, dev, _pdir, _pmeta)
+        _t_mega, _t_atom8, _t_atom = (_pm["e2e_us_avg"] / 1e3,
+                                      _pa8["e2e_us_avg"] / 1e3, _pa["e2e_us_avg"] / 1e3)
+    else:
+        _t_mega = _cg_time(_mega_body, moe.comb_op)          # megav1 e2e (stage1+stage2)
+        _t_atom8 = _cg_time(_atom_fp8_body, dc)              # baseline e2e (fp8 dispatch)
+        _t_atom = _cg_time(_atom_body, dc)                   # reference e2e (bf16 dispatch)
     # _t_mega_s1 = _cg_time(_mega_s1_body, moe.comb_op)        # megav1 STAGE1-only
     # _t_atom_s1 = _cg_time(_atom_s1_body, dcf)                # baseline STAGE1-only (fp8 dispatch->gemm1)
 
@@ -537,7 +647,8 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         # print(f"  [perf STAGE1-only, ms]  baseline-fp8(dispatch->gemm1)={_t_atom_s1:.4f}  "
         #       f"megav1(dispatch+gemm1)={_t_mega_s1:.4f}  "
         #       f"speedup={(_t_atom_s1 / _t_mega_s1) if _t_mega_s1 > 0 else -1:.3f}", flush=True)
-        print(f"  [perf E2E (stage1+fused-stage2), ms]  baseline-fp8={_t_atom8:.4f}  "
+        _timer = "profiler-e2e" if getattr(args, "profile", False) else "cuda-event"
+        print(f"  [perf E2E (stage1+fused-stage2), ms | {_timer}]  baseline-fp8={_t_atom8:.4f}  "
               f"megav1={_t_mega:.4f}  speedup={(_t_atom8 / _t_mega) if _t_mega > 0 else -1:.3f}  "
               f"| ref bf16-dispatch baseline={_t_atom:.4f}  (out=bf16)", flush=True)
     return dict(network=args.network, quant=args.quant, tokens=run_tokens,
@@ -603,6 +714,16 @@ def main():
     p.add_argument("--mega-gemm2-tile-m", type=int, default=-1,
                    help="debug: override ONLY MegaMoE's gemm2 tile_m (baseline unchanged). "
                         "Used to reproduce the stage1 sort_block_m <-> gemm2 tile_m mismatch.")
+    p.add_argument("--mega-stage1-fused", action=argparse.BooleanOptionalAction, default=True,
+                   help="MegaMoE stage-1 fused (megakernel) vs non-fused (bf16 dispatch+sort+gemm1).")
+    p.add_argument("--mega-stage2-fused", action=argparse.BooleanOptionalAction, default=True,
+                   help="MegaMoE stage-2 fused (gemm2+combine) vs non-fused (gemm2 + separate combine).")
+    p.add_argument("--profile", action="store_true",
+                   help="measure with torch.profiler instead of cuda-event (mutually exclusive): "
+                        "dump chrome trace + per-kernel GPU table + E2E replay time. Default is the "
+                        "lightweight cuda-event timing.")
+    p.add_argument("--profile-dir", type=str, default="/tmp/mega_prof",
+                   help="output dir for --profile chrome traces (default /tmp/mega_prof).")
     args = p.parse_args()
 
     rank = int(os.environ.get("RANK", "0"))

@@ -38,17 +38,19 @@ import flydsl.expr as fx
 import mori.shmem as ms
 
 from .mega_moe_gemm1 import compile_fused_moe_gemm1
-from .mixed_moe_gemm_2stage import compile_mixed_moe_gemm2
+from .mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
 from .dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
 
 try:
+    import aiter
     from aiter import dtypes as _adt
     from aiter.ops.quant import per_1x32_mx_quant_hip
     _HAS_AITER_QUANT = True
 except Exception:  # noqa: BLE001
+    aiter = None
     _adt = None
     per_1x32_mx_quant_hip = None
     _HAS_AITER_QUANT = False
@@ -925,9 +927,20 @@ class MegaMoeStage1:
 class MegaMoE:
     """End-to-end EP-MoE single operator (a full MoE layer).
 
-    ``enable_fused_stage1`` / ``enable_fused_stage2`` pick the fused/non-fused path
-    at init. Only the fused path is wired for now; the non-fused branch is a stub
-    (NotImplementedError).
+    ``enable_fused_stage1`` / ``enable_fused_stage2`` pick fused vs non-fused per stage at init:
+      * stage-1 fused    : single-launch dispatch + GEMM1 megakernel (``MegaMoeStage1``).
+      * stage-1 non-fused: bf16 dispatch (comb_op) + moe_sorting + ``compile_mixed_moe_gemm1``
+                           (requires ``forward(x_bf16, ...)``; ``forward_prequant`` is fused-only).
+      * stage-2 fused    : fused GEMM2 (in-epilogue P2P scatter) + ``combine_no_stage1`` (MegaMoeStage2).
+      * stage-2 non-fused: standalone ``compile_mixed_moe_gemm2`` + separate ``comb_op.combine``.
+
+    Supported combos: (fused, fused), (non-fused, non-fused), (non-fused, fused). The
+    (fused stage-1, non-fused stage-2) combo is rejected at init: the fused stage-1 bypasses
+    ``dispatch()`` and only establishes the ``combine_no_stage1`` handoff (identity tok_id_to_src
+    + total_recv), not the full dispatch bookkeeping (shmem_disp_out_idx / disp_tok_map / per-token
+    flags) that the STANDARD ``combine`` (used by a non-fused stage-2) needs for its Stage-1
+    gather+scatter. (The a2/_sti layout itself is fine -- a standalone GEMM2 decodes
+    ``t = sti & 0xFFFFFF = src_global``; the mismatch is purely at the combine boundary.)
     """
 
     def __init__(
@@ -980,21 +993,27 @@ class MegaMoE:
         self.mtpr = int(max_tok_per_rank)
         self.enable_fused_stage1 = bool(enable_fused_stage1)
         self.enable_fused_stage2 = bool(enable_fused_stage2)
+        # The blocker is the COMBINE boundary, not the a2 layout: the standalone GEMM2 masks
+        # t = sti & 0xFFFFFF = src_global and writes gemm2_out[src_global] fine, so it CAN consume
+        # fused stage-1's a2/_sti. But the fused stage-1 megakernel bypasses dispatch() and only sets
+        # up the combine_no_stage1 handoff (tok_id_to_src=identity + total_recv) -- NOT the full
+        # dispatch bookkeeping (shmem_disp_out_idx / disp_tok_map / per-token flags) that the STANDARD
+        # comb_op.combine's Stage-1 gather+scatter reads. Fused stage-2 sidesteps this (its GEMM2
+        # epilogue P2P-scatters directly, combine_no_stage1 only reduces); a non-fused stage-2 would
+        # feed the standard combine fused stage-1's stale dispatch tables -> wrong result. Disallow.
+        if self.enable_fused_stage1 and not self.enable_fused_stage2:
+            raise ValueError(
+                "enable_fused_stage1=True with enable_fused_stage2=False is unsupported: the fused "
+                "stage-1 sets up only the combine_no_stage1 handoff (identity tok_id_to_src + "
+                "total_recv), not the dispatch bookkeeping the standard combine needs for a non-fused "
+                "stage-2. Supported combos: (fused,fused), (non-fused,non-fused), (non-fused,fused). "
+                "Set enable_fused_stage1=False for a non-fused stage-2.")
         self.dev = torch.device("cuda", rank)
         self._is_fp4 = (quant == "a4w4")
         self._qd = _adt.fp4x2 if self._is_fp4 else _adt.fp8
         self._stp = None if self._is_fp4 else _adt.fp8_e8m0
 
-        if not self.enable_fused_stage1:
-            raise NotImplementedError(
-                "enable_fused_stage1=False (non-fused stage1: dispatch + moe_sorting + "
-                "compile_mixed_moe_gemm1) is not yet wired; use enable_fused_stage1=True.")
-        if not self.enable_fused_stage2:
-            raise NotImplementedError(
-                "enable_fused_stage2=False (non-fused stage2: compile_mixed_moe_gemm2 + "
-                "comb_op.combine) is not yet wired; use enable_fused_stage2=True.")
-
-        # Resolve stage-1 tile / layout (needed BEFORE the combine op allocs group-major).
+        # Resolve stage-1 tile / layout (tiles used by both fused & non-fused gemm1; compact sizing).
         self._s1cfg = _resolve_stage1_config(
             model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=topk,
             quant=quant, max_tok_per_rank=max_tok_per_rank, world_size=world_size,
@@ -1002,19 +1021,16 @@ class MegaMoE:
             tile_k=int(tile_k), waves_per_eu=int(waves_per_eu),
             use_async_copy=bool(use_async_copy))
         self.a2_dtype = self._s1cfg["a_dtype"]  # "fp8" | "fp4"
+        self.mega_scheme = mega_scheme
 
-        # Unified stage-2 combine op + group-major dispatch buffers (one op).
-        try:
-            _cu = int(torch.cuda.get_device_properties(self.dev).multi_processor_count)
-        except Exception:  # noqa: BLE001
-            _cu = 256
+        # Combine op (bf16). group-major dispatch buffers only for the fused stage-1 megakernel;
+        # the non-fused stage-1 uses the op's standard (token-major) bf16 dispatch instead.
         self.comb_cfg = FlyDSLDispatchCombineConfig(
             rank=rank, world_size=world_size, hidden_dim=model_dim,
             max_num_inp_token_per_rank=self.mtpr, num_experts_per_rank=self.epr,
             num_experts_per_token=topk, data_type=torch.bfloat16,
             scale_dim=0, scale_type_size=0, enable_std_moe=False,
-            # group-major (fused stage-1) dispatch buffers owned by this op:
-            enable_group_major=True,
+            enable_group_major=self.enable_fused_stage1,
             gm_data_type=self._s1cfg["data_type"],
             gm_unit_size=self._s1cfg["unit_size"],
             gm_scale_dim=self._s1cfg["scale_dim"],
@@ -1025,65 +1041,196 @@ class MegaMoE:
         self.comb_op = FlyDSLDispatchCombineIntraNodeOp(self.comb_cfg)
         torch.cuda.synchronize(); ms.shmem_barrier_all()
 
-        # stage-1: fused dispatch + GEMM1 (uses comb_op._gm buffers).
-        self.stage1 = MegaMoeStage1(
-            comm_op=self.comb_op, cfg=self._s1cfg,
-            rank=rank, world_size=world_size, model_dim=model_dim, inter_dim=inter_dim,
-            experts=experts, topk=topk, quant=quant, w1=w1, w1_scale=w1_scale,
-            max_tok_per_rank=max_tok_per_rank, scheme=mega_scheme,
-            warp_num_per_block=int(warp_num_per_block), out_dtype="auto")
-
         self.w2 = w2 if w2.is_contiguous() else w2.contiguous()
         self.w2_scale = w2_scale if w2_scale.is_contiguous() else w2_scale.contiguous()
         self.max_recv = world_size * self.mtpr
-        # megav1 _sti encodes src_global=dest -> combine tok_id_to_src is identity;
-        # set once at construction (combine reads, stage1 never touches it).
-        self.comb_op.shmem_tok_id_to_src.copy_(
-            torch.arange(self.max_recv, device=self.dev, dtype=torch.int32))
-        torch.cuda.synchronize(); ms.shmem_barrier_all()
 
-        # fused GEMM2 ghost-gate boundary = constant max_recv (mega self-contained):
-        # gemm2 reads comb_op._fx_out_total_recv; repointing it to max_recv keeps all
-        # real rows (src_global in [0, npes*mtpr)) and drops padding (==max_recv).
-        # combine_no_stage1 still reads the real total_recv via _fx_trecv.
-        self._gemm2_gate_bound = torch.tensor(
-            [self.max_recv], dtype=torch.int32, device=self.dev)
-        self.comb_op._fx_out_total_recv = fx.Int64(self._gemm2_gate_bound.data_ptr())
-        torch.cuda.synchronize(); ms.shmem_barrier_all()
+        # ---- stage-1 ----
+        if self.enable_fused_stage1:
+            # Fused dispatch + GEMM1 megakernel (uses comb_op._gm buffers).
+            self.stage1 = MegaMoeStage1(
+                comm_op=self.comb_op, cfg=self._s1cfg,
+                rank=rank, world_size=world_size, model_dim=model_dim, inter_dim=inter_dim,
+                experts=experts, topk=topk, quant=quant, w1=w1, w1_scale=w1_scale,
+                max_tok_per_rank=max_tok_per_rank, scheme=mega_scheme,
+                warp_num_per_block=int(warp_num_per_block), out_dtype="auto")
+            self.sort_block_m = int(self.stage1.sort_block_m)
+            # megav1 _sti encodes src_global=dest -> combine tok_id_to_src is identity (const).
+            self.comb_op.shmem_tok_id_to_src.copy_(
+                torch.arange(self.max_recv, device=self.dev, dtype=torch.int32))
+            torch.cuda.synchronize(); ms.shmem_barrier_all()
+        else:
+            # Non-fused stage-1: bf16 dispatch (comb_op) + aiter moe_sorting + compile_mixed_moe_gemm1.
+            self.stage1 = None
+            self._build_nonfused_stage1(w1, w1_scale)
+            torch.cuda.synchronize(); ms.shmem_barrier_all()
 
-        # stage-2 backend (fused GEMM2 + combine).
-        _s1_sbm = int(self.stage1.sort_block_m)
-        _eff_g2_tm = int(gemm2_tile_m) if int(gemm2_tile_m) > 0 else 32  # op default tile_m=32
-        if _s1_sbm % _eff_g2_tm != 0:
-            raise ValueError(
-                f"gemm2 tile_m={_eff_g2_tm} does not divide stage1 sort_block_m={_s1_sbm} "
-                f"(stage1 unit_size={self.stage1.unit_size}); set gemm2_tile_m to a divisor "
-                f"of {_s1_sbm} (e.g. 32), or raise stage1's tile_m.")
-        if gemm2_tile_table is None:
-            try:
-                gemm2_tile_table = _mega_gemm2_tuned_table(
-                    int(model_dim), int(inter_dim),
-                    int(self.experts) // int(self.world_size), int(topk),
-                    int(self.world_size), _detect_gpu_model_name(int(self.rank)))
-                if int(self.rank) == 0:
-                    print(f"[MegaGemm2] auto-config tile table "
-                          f"(sort_block_m={_s1_sbm}): "
-                          f"{'<miss -> default tile>' if not gemm2_tile_table else gemm2_tile_table}",
-                          flush=True)
-            except Exception:  # noqa: BLE001 -- fallback to default tile
-                gemm2_tile_table = None
-        g2_kwargs = dict(
-            comb_cfg=self.comb_cfg, comb_op=self.comb_op, inter_dim=int(inter_dim),
-            a_dtype=self.a2_dtype, b_dtype="fp4", sort_block_m=_s1_sbm,
-            gemm2_tile_table=gemm2_tile_table,
-        )
-        if int(gemm2_tile_m) > 0:
-            g2_kwargs.update(
-                tile_m=int(gemm2_tile_m), tile_n=int(gemm2_tile_n),
-                tile_k=int(gemm2_tile_k), persist_m=int(gemm2_persist_m),
+        # ---- stage-2 ----
+        _s1_sbm = int(self.sort_block_m)
+        if self.enable_fused_stage2:
+            # fused GEMM2 ghost-gate = constant max_recv (megav1 self-contained; relies on the
+            # fused stage-1's identity routing). For non-fused stage-1 the op keeps real total_recv.
+            if self.enable_fused_stage1:
+                self._gemm2_gate_bound = torch.tensor(
+                    [self.max_recv], dtype=torch.int32, device=self.dev)
+                self.comb_op._fx_out_total_recv = fx.Int64(self._gemm2_gate_bound.data_ptr())
+                torch.cuda.synchronize(); ms.shmem_barrier_all()
+            _eff_g2_tm = int(gemm2_tile_m) if int(gemm2_tile_m) > 0 else 32  # op default tile_m=32
+            if _s1_sbm % _eff_g2_tm != 0:
+                raise ValueError(
+                    f"gemm2 tile_m={_eff_g2_tm} does not divide stage1 sort_block_m={_s1_sbm}; "
+                    f"set gemm2_tile_m to a divisor of {_s1_sbm} (e.g. 32).")
+            if gemm2_tile_table is None:
+                try:
+                    gemm2_tile_table = _mega_gemm2_tuned_table(
+                        int(model_dim), int(inter_dim),
+                        int(self.experts) // int(self.world_size), int(topk),
+                        int(self.world_size), _detect_gpu_model_name(int(self.rank)))
+                    if int(self.rank) == 0:
+                        print(f"[MegaGemm2] auto-config tile table (sort_block_m={_s1_sbm}): "
+                              f"{'<miss -> default tile>' if not gemm2_tile_table else gemm2_tile_table}",
+                              flush=True)
+                except Exception:  # noqa: BLE001 -- fallback to default tile
+                    gemm2_tile_table = None
+            # persist_m / xcd_swizzle are per-launch scalars, ORTHOGONAL to the tile table (which
+            # only holds (tile_m,tile_n,tile_k)). Forward them unconditionally so tuning them does
+            # NOT require also pinning tile_m (which would clobber the tune table's optimal prefill
+            # tile_m=64). tile_m/n/k stay conditional -> only an explicit gemm2_tile_m>0 overrides
+            # the table. (gemm2_persist_m=-1 is the "unset" sentinel -> keep MegaMoeStage2 default.)
+            g2_kwargs = dict(
+                comb_cfg=self.comb_cfg, comb_op=self.comb_op, inter_dim=int(inter_dim),
+                a_dtype=self.a2_dtype, b_dtype="fp4", sort_block_m=_s1_sbm,
+                gemm2_tile_table=gemm2_tile_table,
                 xcd_swizzle=int(xcd_swizzle),
             )
-        self._g2 = MegaMoeStage2(**g2_kwargs)
+            if int(gemm2_persist_m) > 0:
+                g2_kwargs["persist_m"] = int(gemm2_persist_m)
+            if int(gemm2_tile_m) > 0:
+                g2_kwargs.update(
+                    tile_m=int(gemm2_tile_m), tile_n=int(gemm2_tile_n), tile_k=int(gemm2_tile_k))
+            self._g2 = MegaMoeStage2(**g2_kwargs)
+        else:
+            # Non-fused stage-2: standalone compile_mixed_moe_gemm2 + comb_op.combine.
+            self._g2 = None
+            self._build_nonfused_stage2(
+                int(gemm2_tile_m), int(gemm2_tile_n), int(gemm2_tile_k), int(gemm2_persist_m))
+
+    # ------------------------------------------------------------------ non-fused stage-1
+    def _build_nonfused_stage1(self, w1, w1_scale):
+        """Buffers + gemm1 for the non-fused stage-1 (bf16 dispatch -> moe_sorting -> GEMM1)."""
+        dev, epr, topk = self.dev, self.epr, self.topk
+        model_dim, inter_dim, experts = self.model_dim, self.inter_dim, self.experts
+        max_recv = self.max_recv
+        tm, tn1, tk = 32, 128, 256
+        self._nf_tm = tm
+        self.sort_block_m = max(32, tm)
+        _max_pad = max_recv * topk + experts * tm
+        _max_blocks = (_max_pad + tm - 1) // tm
+        self._nf_max_blocks = _max_blocks
+        _scaleN_pad = ((model_dim // 32 + 7) // 8) * 8
+        self._nf_a_st = torch.empty(_max_pad, dtype=torch.int32, device=dev)
+        self._nf_a_sw = torch.empty(_max_pad, dtype=torch.float32, device=dev)
+        self._nf_a_se = torch.empty(_max_blocks, dtype=torch.int32, device=dev)
+        self._nf_a_se_local = torch.empty(_max_blocks, dtype=torch.int32, device=dev)
+        self._nf_a_nv = torch.zeros(2, dtype=torch.int32, device=dev)
+        self._nf_a_mbuf = torch.empty((max_recv, model_dim), dtype=torch.float16, device=dev)
+        self._nf_a1s = torch.empty(((_max_pad + 31) // 32 * 32, _scaleN_pad),
+                                   dtype=_adt.fp8_e8m0, device=dev)
+        self._nf_recv_topk = torch.empty((max_recv, topk), dtype=torch.int32, device=dev)
+        self._nf_sentinel = torch.full((max_recv, topk), experts, dtype=torch.int32, device=dev)
+        if self._is_fp4:
+            self._nf_a2 = torch.zeros((max_recv * topk, inter_dim // 2), dtype=torch.uint8, device=dev)
+        else:
+            self._nf_a2 = torch.zeros((max_recv * topk, inter_dim), dtype=torch.float8_e4m3fn, device=dev)
+        _sbm = self.sort_block_m
+        _pr = ((_max_blocks * _sbm + 255) // 256) * 256
+        _pc = (((inter_dim // 32) + 7) // 8) * 8
+        self._nf_a2s = torch.zeros(_pr * _pc + inter_dim, dtype=torch.uint8, device=dev)
+        self._nf_bias = torch.empty((0,), dtype=torch.float32, device=dev)
+        self._nf_w1 = w1.contiguous()
+        self._nf_w1s = w1_scale.contiguous()
+        self._nf_gemm1 = compile_mixed_moe_gemm1(
+            model_dim=model_dim, inter_dim=inter_dim, experts=epr, topk=topk,
+            tile_m=tm, tile_n=tn1, tile_k=tk, doweight_stage1=False,
+            a_dtype=self.a2_dtype, b_dtype="fp4", out_dtype=self.a2_dtype,
+            act="silu", waves_per_eu=4, use_async_copy=True)
+        self._nf_trc = None  # cached total_recv (fixed routing) so forward stays CUDAGraph-safe
+
+    def _run_nonfused_stage1(self, x_bf16, wc, ic) -> "Stage1Output":
+        """bf16 dispatch (comb_op) -> recv-quant -> moe_sorting -> GEMM1 -> Stage1Output."""
+        epr, rank, topk = self.epr, self.rank, self.topk
+        model_dim, inter_dim, experts = self.model_dim, self.inter_dim, self.experts
+        max_recv, tm = self.max_recv, self._nf_tm
+        self._nf_a2.zero_()
+        self.comb_op.total_recv.zero_()
+        _bt, _ow, _, _oidx, _ = self.comb_op.dispatch(x_bf16, wc, None, ic)
+        if self._nf_trc is None:
+            self._nf_trc = max(1, int(self.comb_op.total_recv.item()))
+        trc = self._nf_trc
+        _oi = _oidx[:trc].to(torch.int32)
+        _loc = (_oi >= rank * epr) & (_oi < (rank + 1) * epr)
+        self._nf_recv_topk[:trc].copy_(torch.where(_loc, _oi, self._nf_sentinel[:trc]))
+        aiter.moe_sorting_fwd(self._nf_recv_topk[:trc], _ow[:trc], self._nf_a_st, self._nf_a_sw,
+                              self._nf_a_se, self._nf_a_nv, self._nf_a_mbuf[:trc],
+                              int(experts), int(tm), None, None, 0)
+        if self._is_fp4:
+            _a1q, _a1sp = per_1x32_mx_quant_hip(_bt[:trc].contiguous(), quant_dtype=self._qd)
+        else:
+            _a1q, _a1sp = per_1x32_mx_quant_hip(_bt[:trc].contiguous(), quant_dtype=self._qd,
+                                                scale_type=self._stp)
+        aiter.mxfp4_moe_sort_hip(self._nf_a1s, _a1sp, self._nf_a_st, self._nf_a_nv,
+                                 int(trc), int(model_dim))
+        self._nf_a_se_local.copy_(self._nf_a_se - rank * epr)
+        a_mat = _a1q.view(torch.uint8) if self.a2_dtype == "fp4" else _a1q
+        self._nf_gemm1(self._nf_a2.view(max_recv, topk, self._nf_a2.shape[-1]), a_mat,
+                       self._nf_w1, self._nf_a1s.view(torch.uint8), self._nf_w1s,
+                       self._nf_a_st, self._nf_a_se_local, self._nf_a_sw, self._nf_a_nv,
+                       self._nf_bias, self._nf_a2s, fx.Int32(trc),
+                       fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(self._nf_max_blocks)),
+                       stream=fx.Stream(torch.cuda.current_stream()))
+        return Stage1Output(
+            a2=self._nf_a2, a2_scale=self._nf_a2s,
+            sorted_token_ids=self._nf_a_st, sorted_expert_ids=self._nf_a_se_local,
+            sorted_weights=self._nf_a_sw, num_valid_ids=self._nf_a_nv,
+            wts_buf=None)  # None -> combine uses shmem_disp_out_wts (written by the bf16 dispatch)
+
+    # ------------------------------------------------------------------ non-fused stage-2
+    def _build_nonfused_stage2(self, g2_tm, g2_tn, g2_tk, g2_pm):
+        """Standalone GEMM2 (compile_mixed_moe_gemm2, doweight, token-level accumulate) + buffer."""
+        tm2 = g2_tm if g2_tm > 0 else 32
+        tn2 = g2_tn if g2_tn > 0 else 128
+        tk2 = g2_tk if g2_tk > 0 else 256
+        pm = g2_pm if g2_pm > 0 else -1
+        sbm = int(self.sort_block_m)
+        if sbm % tm2 != 0:
+            raise ValueError(f"gemm2 tile_m={tm2} must divide sort_block_m={sbm}")
+        self._nfg2_exe = compile_mixed_moe_gemm2(
+            model_dim=self.model_dim, inter_dim=self.inter_dim, experts=self.epr, topk=self.topk,
+            tile_m=tm2, tile_n=tn2, tile_k=tk2, doweight_stage2=True,
+            a_dtype=self.a2_dtype, b_dtype="fp4", out_dtype="bf16",
+            accumulate=True, persist_m=pm, sort_block_m=sbm)
+        self._nfg2_out = torch.zeros(self.max_recv, self.model_dim, dtype=torch.bfloat16, device=self.dev)
+        self._nfg2_bias = torch.empty((0,), dtype=torch.float32, device=self.dev)
+        self._nfg2_blocks = (self.max_recv * self.topk + self.experts * sbm + sbm - 1) // sbm
+        self._nfg2_c = {}
+
+    def _run_nonfused_stage2(self, s1, run_tokens):
+        """GEMM2 -> gemm2_out; then comb_op.combine (standard, does the Stage-1 scatter)."""
+        self._nfg2_out.zero_()
+        _ga = (self._nfg2_out, s1.a2.view(-1), self.w2, s1.a2_scale, self.w2_scale,
+               s1.sorted_token_ids, s1.sorted_expert_ids, s1.sorted_weights, s1.num_valid_ids,
+               self._nfg2_bias, self.max_recv, self.model_dim, self.inter_dim,
+               int(self._nfg2_blocks), torch.cuda.current_stream())
+        if self._nfg2_c.get("c") is None:
+            self._nfg2_c["c"] = flyc.compile(self._nfg2_exe, *_ga)
+        else:
+            self._nfg2_c["c"](*_ga)
+        _idx = self.comb_op.shmem_disp_out_idx.view(self.max_recv, self.topk)
+        # wts_buf None (non-fused stage-1) -> combine reads shmem_disp_out_wts; fused stage-1 hands a
+        # flat [max_recv*topk] buffer -> combine wants [max_recv, topk].
+        _w = None if s1.wts_buf is None else s1.wts_buf.view(self.max_recv, self.topk)
+        _r = self.comb_op.combine(self._nfg2_out, _w, _idx, cur_tok=run_tokens)
+        return _r[0] if isinstance(_r, (tuple, list)) else _r
 
     def quantize(self, x_bf16):
         """Quantize bf16 activation -> (fp8/fp4 payload, e8m0 scale as uint8)."""
@@ -1094,45 +1241,64 @@ class MegaMoE:
                                             scale_type=self._stp)
         return mq, msq.view(torch.uint8)
 
-    def forward(self, x_bf16, wts, topk_ids, *, stream=None, slice_output: bool = True):
-        """Full MoE layer: bf16 activation in -> internal quantize -> stage1 ->
-        stage2 -> bf16 out."""
-        x_q, scales = self.quantize(x_bf16)
-        return self.forward_prequant(x_q, scales, wts, topk_ids,
-                                     stream=stream, slice_output=slice_output)
-
-    # bf16 in, bf16 out; primary entry.
-    forward_bf16 = forward
-
-    def forward_prequant(self, x_q, scales, wts, topk_ids, *, stream=None, slice_output: bool = True):
-        """Pre-quantized entry (fp8/fp4 + e8m0 scale in, bf16 out)."""
-        run_tokens = int(x_q.shape[0])
-        if run_tokens > self.mtpr:
-            raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
-        wc = wts.contiguous()
-        ic = topk_ids.to(torch.int32).contiguous()
-
-        # stage-1: fused dispatch + GEMM1 (writes combine op's total_recv + a2).
-        s1 = self.stage1.forward(x_q, wc, scales, ic, stream=stream)
-
-        # stage-2: fused GEMM2 + combine (consumes the stage-1 handoff contract).
-        ret = self._g2.run(
-            a2=s1.a2.view(-1), w2=self.w2,
-            a2_scale=s1.a2_scale, w2_scale=self.w2_scale,
-            sorted_token_ids=s1.sorted_token_ids,
-            sorted_expert_ids=s1.sorted_expert_ids,
-            sorted_weights=s1.sorted_weights,
-            num_valid_ids=s1.num_valid_ids,
-            wts_buf=s1.wts_buf,
-            cur_tok=run_tokens, stream=stream,
-            run_tokens=run_tokens,
-        )
-        out_tok = ret[0] if isinstance(ret, (tuple, list)) else ret
+    def _run_stage2(self, s1, run_tokens, stream, slice_output):
+        """stage-2 (fused MegaMoeStage2 or non-fused gemm2+combine) -> bf16 out."""
+        if self.enable_fused_stage2:
+            ret = self._g2.run(
+                a2=s1.a2.view(-1), w2=self.w2,
+                a2_scale=s1.a2_scale, w2_scale=self.w2_scale,
+                sorted_token_ids=s1.sorted_token_ids,
+                sorted_expert_ids=s1.sorted_expert_ids,
+                sorted_weights=s1.sorted_weights,
+                num_valid_ids=s1.num_valid_ids,
+                wts_buf=s1.wts_buf,
+                cur_tok=run_tokens, stream=stream,
+                run_tokens=run_tokens,
+            )
+            out_tok = ret[0] if isinstance(ret, (tuple, list)) else ret
+        else:
+            out_tok = self._run_nonfused_stage2(s1, run_tokens)
 
         if out_tok is None:
             cfg = self.comb_cfg
             out_tok = (self.comb_op.shmem_comb_out_tok.view(torch.int8)[: self.mtpr * cfg.token_bytes]
                        .view(cfg.data_type).view(self.mtpr, cfg.token_view_dim))
         return out_tok[:run_tokens] if slice_output else out_tok
+
+    def forward(self, x_bf16, wts, topk_ids, *, stream=None, slice_output: bool = True):
+        """Full MoE layer: bf16 activation in -> stage1 (fused or non-fused) -> stage2 -> bf16 out.
+
+        Fused stage-1 quantizes internally then runs the megakernel; non-fused stage-1 bf16-dispatches
+        then recv-quantizes + moe_sorting + GEMM1.
+        """
+        run_tokens = int(x_bf16.shape[0])
+        if run_tokens > self.mtpr:
+            raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
+        wc = wts.contiguous()
+        ic = topk_ids.to(torch.int32).contiguous()
+        if self.enable_fused_stage1:
+            x_q, scales = self.quantize(x_bf16[:run_tokens])
+            s1 = self.stage1.forward(x_q, wc, scales, ic, stream=stream)
+        else:
+            s1 = self._run_nonfused_stage1(x_bf16[:run_tokens].contiguous(), wc, ic)
+        return self._run_stage2(s1, run_tokens, stream, slice_output)
+
+    # bf16 in, bf16 out; primary entry.
+    forward_bf16 = forward
+
+    def forward_prequant(self, x_q, scales, wts, topk_ids, *, stream=None, slice_output: bool = True):
+        """Pre-quantized fast path (fp8/fp4 + e8m0 scale in). Requires fused stage-1 (which consumes
+        x_q directly); for non-fused stage-1 use ``forward(x_bf16, ...)`` (bf16 dispatch)."""
+        if not self.enable_fused_stage1:
+            raise ValueError(
+                "forward_prequant requires enable_fused_stage1=True (pre-quantized input feeds the "
+                "fused megakernel); use forward(x_bf16, ...) for the non-fused (bf16-dispatch) stage-1.")
+        run_tokens = int(x_q.shape[0])
+        if run_tokens > self.mtpr:
+            raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
+        wc = wts.contiguous()
+        ic = topk_ids.to(torch.int32).contiguous()
+        s1 = self.stage1.forward(x_q, wc, scales, ic, stream=stream)
+        return self._run_stage2(s1, run_tokens, stream, slice_output)
 
     __call__ = forward
