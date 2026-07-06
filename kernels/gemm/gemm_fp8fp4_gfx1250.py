@@ -118,10 +118,14 @@ def compile_fp8fp4_gemm(
             uint8 E8M0 — both row-major, no preshuffle.
 
     Returns a JitFunction:
-        launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, M, N, lda, ldc,
-                  stream, lda_scale=<dense default>)
+        ptpc:              launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale,
+                                      M, N, lda, ldc, stream)
+        mxscale/blockscale: launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale,
+                                       M, N, lda, ldc, lda_scale, stream)
     where lda/ldc are A/C runtime leading-dim strides in elements (dense: lda=K,
-    ldc=N), and lda_scale is the A-scale row stride in scale elements.
+    ldc=N), and lda_scale is the A-scale row stride in scale elements (dense:
+    K // 32 for mxscale, K // scale_block_k for blockscale). ptpc has no
+    per-K-block A-scale stride, so its launch_fn omits lda_scale entirely.
     """
     if data_format not in ("fp4", "fp8", "a8w4"):
         raise ValueError(f"data_format must be 'fp4', 'fp8', or 'a8w4', got {data_format!r}")
@@ -191,7 +195,6 @@ def compile_fp8fp4_gemm(
     scale_k_per_tile = tile_k // SCALE_BLOCK
     K_packed_a = K // PACK_FACTOR_A
     K_packed_b = K // PACK_FACTOR_B
-    K_scale = K // SCALE_BLOCK
     K_blockscale = K // scale_block_k
     split_k_chunk = K // split_k
 
@@ -2778,19 +2781,8 @@ def compile_fp8fp4_gemm(
         _bvs_D,
     )
 
-    @flyc.jit
-    def launch_mxscale_gemm(
-        arg_c: fx.Tensor,
-        arg_a: fx.Tensor,
-        arg_b: fx.Tensor,
-        arg_a_scale: fx.Tensor,
-        arg_b_scale: fx.Tensor,
-        i32_m: fx.Int32,
-        i32_n: fx.Int32,
-        i32_lda: fx.Int32,
-        i32_ldc: fx.Int32,
-        stream: fx.Stream,
-        i32_lda_scale: fx.Int32 = (K_blockscale if is_blockscale else K_scale),
+    def _emit_launch(
+        arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, i32_m, i32_n, i32_lda, i32_ldc, i32_lda_scale, stream
     ):
         _ = cache_tag
         ctx = CompilationContext.get_current()
@@ -2828,6 +2820,65 @@ def compile_fp8fp4_gemm(
             stream=stream,
             cluster=cluster_arg,
         )
+
+    if is_ptpc:
+
+        @flyc.jit
+        def launch_mxscale_gemm(
+            arg_c: fx.Tensor,
+            arg_a: fx.Tensor,
+            arg_b: fx.Tensor,
+            arg_a_scale: fx.Tensor,
+            arg_b_scale: fx.Tensor,
+            i32_m: fx.Int32,
+            i32_n: fx.Int32,
+            i32_lda: fx.Int32,
+            i32_ldc: fx.Int32,
+            stream: fx.Stream,
+        ):
+            _emit_launch(
+                arg_c,
+                arg_a,
+                arg_b,
+                arg_a_scale,
+                arg_b_scale,
+                i32_m,
+                i32_n,
+                i32_lda,
+                i32_ldc,
+                fx.Int32(1),
+                stream,
+            )
+
+    else:
+
+        @flyc.jit
+        def launch_mxscale_gemm(
+            arg_c: fx.Tensor,
+            arg_a: fx.Tensor,
+            arg_b: fx.Tensor,
+            arg_a_scale: fx.Tensor,
+            arg_b_scale: fx.Tensor,
+            i32_m: fx.Int32,
+            i32_n: fx.Int32,
+            i32_lda: fx.Int32,
+            i32_ldc: fx.Int32,
+            i32_lda_scale: fx.Int32,
+            stream: fx.Stream,
+        ):
+            _emit_launch(
+                arg_c,
+                arg_a,
+                arg_b,
+                arg_a_scale,
+                arg_b_scale,
+                i32_m,
+                i32_n,
+                i32_lda,
+                i32_ldc,
+                i32_lda_scale,
+                stream,
+            )
 
     if effective_expert_sched_mode:
         launch_mxscale_gemm.compile_hints["llvm_options"] = {

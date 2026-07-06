@@ -608,10 +608,15 @@ def _run_gemm_test(
         kernel_n,
         lda,
         ldc,
-        torch.cuda.current_stream(),
     ]
-    if ascale_lda_extra:
-        compile_args.append(lda_scale)
+    if not is_ptpc:
+        lda_scale_arg = (
+            lda_scale
+            if ascale_stride_supported
+            else (kernel_k // SCALE_BLOCK if is_mxscale else kernel_k // BLOCKSCALE_K)
+        )
+        compile_args.append(lda_scale_arg)
+    compile_args.append(torch.cuda.current_stream())
     flyc.compile(*compile_args)
     torch.cuda.synchronize()
 
@@ -1181,16 +1186,14 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
         N,
         K,
         N,
-        torch.cuda.current_stream(),
         lda_scale,
+        torch.cuda.current_stream(),
     )
 
     # Resolve stream lazily inside the launch closure so graph capture sees
     # the active capture stream rather than a stream bound before capture.
     def launch():
-        compiled_exe(
-            c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, torch.cuda.current_stream(), lda_scale
-        )
+        compiled_exe(c_flat, a_flat, b_flat, as_flat, bs_flat, M, N, K, N, lda_scale, torch.cuda.current_stream())
 
     # ── Eager run (reference) ──
     c_gpu.zero_()
@@ -1929,7 +1932,8 @@ def _run_benchmark(args):
             ascale_load_path=ascale_load_path,
         )
 
-    compiled_exe = flyc.compile(
+    lda_scale = None if is_ptpc else (kernel_k // BLOCKSCALE_K if is_blockscale else kernel_k // SCALE_BLOCK)
+    compile_args = [
         launch_fn,
         c_gpu,
         a_gpu,
@@ -1940,22 +1944,18 @@ def _run_benchmark(args):
         kernel_n,
         kernel_k,
         kernel_n,
-        torch.cuda.current_stream(),
-    )
+    ]
+    if not is_ptpc:
+        compile_args.append(lda_scale)
+    compile_args.append(torch.cuda.current_stream())
+    compiled_exe = flyc.compile(*compile_args)
 
     def run_one(c_, a_, b_, as_, bs_):
-        compiled_exe(
-            c_,
-            a_,
-            b_,
-            as_,
-            bs_,
-            kernel_m,
-            kernel_n,
-            kernel_k,
-            kernel_n,
-            torch.cuda.current_stream(),
-        )
+        run_args = [c_, a_, b_, as_, bs_, kernel_m, kernel_n, kernel_k, kernel_n]
+        if not is_ptpc:
+            run_args.append(lda_scale)
+        run_args.append(torch.cuda.current_stream())
+        compiled_exe(*run_args)
 
     c_gpu.zero_()
     run_one(c_gpu, a_gpu, b_gpu, as_gpu, bs_gpu)
@@ -2202,6 +2202,7 @@ def _run_graph_verify(args):
     b_flat = b_gpu.contiguous()
     as_flat = as_gpu.contiguous()
     bs_flat = bs_gpu.contiguous()
+    lda_scale = kernel_k // SCALE_BLOCK
     compiled_exe = flyc.compile(
         launch_fn,
         c_flat,
@@ -2213,6 +2214,7 @@ def _run_graph_verify(args):
         kernel_n,
         kernel_k,
         kernel_n,
+        lda_scale,
         torch.cuda.current_stream(),
     )
 
@@ -2227,6 +2229,7 @@ def _run_graph_verify(args):
             kernel_n,
             kernel_k,
             kernel_n,
+            lda_scale,
             torch.cuda.current_stream(),
         )
 
