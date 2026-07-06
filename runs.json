@@ -1,8 +1,96 @@
 {
  "schema": 1,
- "updated": "2026-07-06T01:07:42Z",
+ "updated": "2026-07-06T04:04:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28765771123,
+   "pr": 798,
+   "commit": "17d274090dbb2c68373091cc960c3b59d581ebcd",
+   "branch": "4wave_fp4_gemm_opt",
+   "event": "pull_request",
+   "title": "4wave fp4 gemm opt",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28765771123",
+   "created_at": "2026-07-06T03:26:19Z",
+   "updated_at": "2026-07-06T03:26:19Z",
+   "actor": "benenzhu",
+   "jobs": []
+  },
+  {
+   "run_id": 28765567378,
+   "pr": null,
+   "commit": "b296d89e90859ed3de873d47552e83f3ad779c26",
+   "branch": "4wave_fp4_gemm_opt",
+   "event": "pull_request",
+   "title": "4wave fp4 gemm opt",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28765567378",
+   "created_at": "2026-07-06T03:19:56Z",
+   "updated_at": "2026-07-06T03:19:56Z",
+   "actor": "benenzhu",
+   "jobs": []
+  },
+  {
+   "run_id": 28765399983,
+   "pr": null,
+   "commit": "88d532383214ba397b2124dd0f4df96a44e721fd",
+   "branch": "4wave_fp4_gemm_opt",
+   "event": "pull_request",
+   "title": "4wave fp4 gemm opt",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28765399983",
+   "created_at": "2026-07-06T03:14:50Z",
+   "updated_at": "2026-07-06T03:14:50Z",
+   "actor": "benenzhu",
+   "jobs": []
+  },
+  {
+   "run_id": 28764608170,
+   "pr": 802,
+   "commit": "613ea6b6007de7e8871d7044fc43f231b865534b",
+   "branch": "refactor/fp8-8wave-fx-gemm-call",
+   "event": "pull_request",
+   "title": "Refactor/fp8 8wave fx gemm call",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170",
+   "created_at": "2026-07-06T02:51:10Z",
+   "updated_at": "2026-07-06T04:02:27Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T02:52:24Z",
+     "completed_at": "2026-07-06T03:30:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170/job/85286370190"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T02:52:32Z",
+     "completed_at": "2026-07-06T03:44:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170/job/85286370191"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-06T02:52:37Z",
+     "completed_at": "2026-07-06T04:02:26Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170/job/85286370192"
+    }
+   ]
+  },
   {
    "run_id": 28744144062,
    "pr": 772,
@@ -260,13 +348,22 @@
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
    "title": "[Enh] Add finer FastMathFlag control",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127",
    "created_at": "2026-07-03T10:43:39Z",
-   "updated_at": "2026-07-03T15:45:12Z",
+   "updated_at": "2026-07-06T03:41:51Z",
    "actor": "sjfeng1999",
    "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-06T03:41:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/85291056581"
+    },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
@@ -274,16 +371,7 @@
      "conclusion": "success",
      "started_at": "2026-07-03T10:46:06Z",
      "completed_at": "2026-07-03T12:08:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/84983390401"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-03T15:24:13Z",
-     "completed_at": "2026-07-03T15:45:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/84983390437"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/85291056897"
     },
     {
      "runner": "linux-flydsl-mi325-1",
@@ -292,13 +380,13 @@
      "conclusion": "success",
      "started_at": "2026-07-03T10:46:06Z",
      "completed_at": "2026-07-03T11:41:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/84983390552"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/85291070002"
     }
    ]
   },
   {
    "run_id": 28654434827,
-   "pr": 798,
+   "pr": null,
    "commit": "112d21c7c49e881e10ccca29df382492194b61bf",
    "branch": "4wave_fp4_gemm_opt",
    "event": "pull_request",
@@ -1502,66 +1590,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28567395744",
    "created_at": "2026-07-02T05:21:15Z",
    "updated_at": "2026-07-02T05:21:15Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28567181905,
-   "pr": null,
-   "commit": "33d69e459f8a1f4c95f866950a8731d4acd27dc4",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28567181905",
-   "created_at": "2026-07-02T05:15:33Z",
-   "updated_at": "2026-07-02T05:15:33Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28563853893,
-   "pr": null,
-   "commit": "2bee1596b28bee34438eb6cd2d36bd3e63171ffa",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563853893",
-   "created_at": "2026-07-02T03:45:26Z",
-   "updated_at": "2026-07-02T03:45:26Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28563837421,
-   "pr": null,
-   "commit": "6a93ad7d881c2ea81812e1c8359b2e11c6ae6186",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563837421",
-   "created_at": "2026-07-02T03:45:03Z",
-   "updated_at": "2026-07-02T03:45:03Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28563786073,
-   "pr": null,
-   "commit": "62afefc7fc45936dd664424e4c4843c9e804141e",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28563786073",
-   "created_at": "2026-07-02T03:43:36Z",
-   "updated_at": "2026-07-02T03:43:36Z",
    "actor": "jhinpan",
    "jobs": []
   }
