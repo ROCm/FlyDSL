@@ -963,13 +963,8 @@ class MegaMoE:
         gemm2_tile_table: Optional[dict] = None,
         enable_fused_stage1: bool = True,
         enable_fused_stage2: bool = True,
-        stage2_mode: Optional[str] = None,
     ):
         assert quant in ("a8w4", "a4w4"), quant
-        # Back-compat: stage2_mode="fused"/"nonfused" maps to enable_fused_stage2.
-        if stage2_mode is not None:
-            assert stage2_mode in ("fused", "nonfused"), stage2_mode
-            enable_fused_stage2 = (stage2_mode == "fused")
         if not _HAS_AITER_QUANT:
             raise RuntimeError("MegaMoE needs aiter (per_1x32_mx_quant_hip)")
         if (max_tok_per_rank & (max_tok_per_rank - 1)) != 0:

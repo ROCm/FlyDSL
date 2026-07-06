@@ -18,8 +18,8 @@ Supports A8W4 (mxfp8 act) and A4W4 (mxfp4 act); compact/fixed-slot is auto-selec
 Run (8x MI355X)::
 
   MORI_SHMEM_HEAP_SIZE=40G torchrun --standalone --nproc_per_node=8 \
-    tests/kernels/bench_moe_intranode_stage1_groupgemm.py --network v4_pro --quant a8w4 \
-    --bs-list 2048,4096,8192 --iters 30 --warmup 8
+    tests/kernels/test_mega_moe.py --network v4_pro --quant a8w4 \
+    --bs-list 2048,4096,8192 --iters 30
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ _ROOT = os.path.abspath(os.path.join(_HERE, "../.."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
 import mori.shmem as ms  # noqa: E402
 
@@ -206,37 +207,37 @@ _E2M1_LUT = None
 
 def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr, topk,
                   run_tokens, mtpr, a_dtype, s1_out, w_kernel, scale_w1_1d, x_bf16, topk_ids, wts):
-    """Complete end-to-end: megav1 (production single-op MegaMoE) vs ATOM baseline,
-    BOTH with fused stage-2 (compile_fused_moe_gemm2_combine), bf16 output.
+    """End-to-end correctness + perf for one (network, quant, bs).
 
-      * precision : relL2 of each path's output vs a full-precision torch MoE oracle (must sit at
-                    fp8/fp4 quant-noise floor, NOT ~1.0).  This is the correctness gate.
-      * perf      : CUDAGraph device time of each FULL pipeline (stage1+stage2).
+    Compares three pipelines (all fused stage-2, bf16 output):
+      * megav1    : fp8/fp4 act -> MegaMoE -> bf16 (single op, Plan-A zero-bridge).
+      * atom-fp8  : fp8 dispatch -> sort -> gemm1 -> fused GEMM2+combine (primary baseline).
+      * atom-bf16 : bf16 dispatch -> recv-quant -> ... (accuracy reference / oracle sanity).
 
-    megav1  : fp8/fp4 act -> MegaMoE.forward -> bf16   (Plan A: zero bridge dispatch).
-    atom    : bf16 dispatch (dce) -> recv per-1x32 quant -> aiter sort -> mixed_moe_gemm1 -> a2
-              -> fused GEMM2+combine (same op as mega) -> bf16.
+    Gate: each path's relL2 vs an f32 torch oracle must sit at the quant floor (not ~1.0).
+    Perf: CUDAGraph device time of the full stage1+stage2 pipeline.
     """
     import numpy as _np
     import torch.nn.functional as _F
     from aiter import dtypes as _adt
     from aiter.ops.quant import per_1x32_mx_quant_hip
     from kernels.mega_moe import MegaMoE
-    from kernels.mega_moe import MegaMoeStage2
-    from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1
+    from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
 
     def _relL2(a, b):
         a = _np.asarray(a, dtype=_np.float64); b = _np.asarray(b, dtype=_np.float64)
         n = float(((a - b) ** 2).sum()); d = float((b ** 2).sum())
         return (n / d) ** 0.5 if d > 0 else -1.0
 
+    # ============================= 1. config / shapes =============================
     _is_fp4 = (s1_out == "fp4")
     max_recv = world * mtpr
-    tm, tn1, tk = 32, 128, 256
-    tm2, tn2, tk2 = 32, 128, 256
+    tm, tn1, tk = 32, 128, 256          # ATOM gemm1 tile
+    tm2, tn2, tk2 = 32, 128, 256        # ATOM/mega gemm2 tile
     _agv = (lambda t: t.view(torch.uint8)) if a_dtype == "fp4" else (lambda t: t)
 
-    # ---- W2 (down proj): MX-FP4 via the proven W1 pipeline, replicated cross-rank (same seed) ----
+    # ===================== 2. weights: W2 (down-proj) + f32 oracle =====================
+    # W2: MX-FP4 via the same W1 pipeline, replicated cross-rank (same seed).
     torch.manual_seed(args.seed + 4242)
     w2_f32 = (torch.randn((experts * model_dim, inter_dim), device=dev, dtype=torch.float32)
               * (float(inter_dim) ** -0.25))
@@ -245,9 +246,8 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     w2_kernel = shuffle_weight(w2_fp4[_w2sl]).view(torch.uint8).contiguous().view(-1)
     w2_scale_1d = fp4_utils.e8m0_shuffle(w2_sr[_w2sl]).view(torch.uint8).contiguous().view(-1)
 
-    # ---- full-precision oracle weights (pre-quant f32; w1 re-seeded to match _prepare) ----
-    # The f32 oracle w1_all is large (v4_pro: 63GB); return the caching allocator's reserve from
-    # _prepare's freed f32 intermediates to HIP so the contiguous alloc fits without fragmenting.
+    # Pre-quant f32 oracle weights (w1 re-seeded to match _prepare). w1_all is large
+    # (v4_pro ~63GB) -> empty_cache first so the contiguous alloc fits without fragmenting.
     del w2_fp4, w2_sr
     torch.cuda.empty_cache()
     _init = float(model_dim) ** -0.25
@@ -256,10 +256,10 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     w1_all = (torch.randn((experts, 2 * inter_dim, model_dim), device=dev, dtype=torch.float32) * _init)
     w2_all = w2_f32.view(experts, model_dim, inter_dim)
 
+    # ============================= 3. inputs (quantized activation) =============================
     wc = wts[:run_tokens].contiguous()
     ic = topk_ids[:run_tokens].to(torch.int32).contiguous()
-
-    # quantized activation (production: stage-1 input is fp8/fp4 + e8m0 scale)
+    # production stage-1 input: fp8/fp4 payload + e8m0 scale
     if _is_fp4:
         x_q, x_sc = per_1x32_mx_quant_hip(x_bf16[:run_tokens].contiguous(), quant_dtype=_adt.fp4x2)
     else:
@@ -267,8 +267,9 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
                                           quant_dtype=_adt.fp8, scale_type=_adt.fp8_e8m0)
     x_sc = x_sc.view(torch.uint8)
 
-    # ---- CUDAGraph timing helper (test_profiler pattern: warmup -> barrier -> capture ->
-    #      back-to-back replay with ONLY torch.cuda.synchronize, NEVER shmem_barrier in the loop) ----
+    # ============================= 4. CUDAGraph timing helper =============================
+    # warmup -> barrier -> capture -> back-to-back replay (only cuda.synchronize in the loop,
+    # NEVER shmem_barrier inside the replay loop).
     def _cg_time(body, dc_op):
         ms.shmem_barrier_all()
         body(); torch.cuda.synchronize(); ms.shmem_barrier_all()   # warmup (jit)
@@ -286,12 +287,10 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         _e.record(); torch.cuda.synchronize()
         return _all_mean(dev, _s.elapsed_time(_e) / _n)
 
-    # ============ megav1: production single-op ============
-    # MegaMoE consumes LOCAL w1: only THIS rank's `epr` expert rows of w1/w1_scale (ATOM
-    # production convention; the gemm1 kernel indexes by the LOCAL expert id).  w_kernel/scale
-    # are expert-major contiguous -> slice the flat byte range [rank*epr*per_expert :
-    # (rank+1)*epr*per_expert].  (Global w1 is NOT supported: for >4GB weights it truncates at
-    # the 32-bit buffer num_records cap.)
+    # ============================= 5. megav1 (MegaMoE single op) =============================
+    # MegaMoE consumes LOCAL w1: this rank's `epr` expert rows only (gemm1 indexes by local
+    # expert id). w_kernel/scale are expert-major contiguous -> slice the flat byte range.
+    # (Global w1 unsupported: >4GB weights truncate at the 32-bit buffer num_records cap.)
     _wpe = w_kernel.numel() // experts          # per-expert uint8 elems (weight)
     _spe = scale_w1_1d.numel() // experts       # per-expert uint8 elems (scale)
     _w1_arg = w_kernel.reshape(-1)[rank * epr * _wpe:(rank + 1) * epr * _wpe].contiguous()
@@ -303,7 +302,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
         rank=rank, world_size=world, model_dim=model_dim, inter_dim=inter_dim,
         experts=experts, topk=topk, quant=args.quant, w1=_w1_arg, w1_scale=_w1s_arg,
         w2=w2_kernel, w2_scale=w2_scale_1d, max_tok_per_rank=mtpr, network=args.network,
-        gemm2_tile_m=_tm2_mega, gemm2_tile_n=tn2, gemm2_tile_k=tk2, stage2_mode="fused")
+        gemm2_tile_m=_tm2_mega, gemm2_tile_n=tn2, gemm2_tile_k=tk2, enable_fused_stage2=True)
     torch.cuda.synchronize(); ms.shmem_barrier_all()
 
     _mega_out_holder = {}
@@ -312,8 +311,7 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     _mega_body(); torch.cuda.synchronize(); ms.shmem_barrier_all()
     out_mega = _mega_out_holder["o"][:run_tokens].float().cpu().numpy().copy()
 
-    # ============ ATOM baseline: bf16 dispatch -> recv-quant -> sort -> gemm1 -> fused stage2 ============
-    bn = min(256, max(64, max_recv // 4)) if mtpr <= 128 else 256
+    # ============ 6. ATOM-bf16 baseline: bf16 dispatch -> recv-quant -> sort -> gemm1 -> fused stage2 ============
     cfg_a = FlyDSLDispatchCombineConfig(
         rank=rank, world_size=world, hidden_dim=model_dim, max_num_inp_token_per_rank=mtpr,
         num_experts_per_rank=epr, num_experts_per_token=topk, data_type=torch.bfloat16,
@@ -339,10 +337,8 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     a_nv = torch.zeros(2, dtype=torch.int32, device=dev)
     a_mbuf = torch.empty((max_recv, model_dim), dtype=torch.float16, device=dev)
     a1s = torch.empty(((_max_pad + 31) // 32 * 32, _scaleN_pad), dtype=_adt.fp8_e8m0, device=dev)
-    # WEIGHTED baseline (production parity): MegaMoE's GEMM2 doweight epilogue now applies the real
-    # routing weights (stage1._wts_sorted), so out_tok is the routing-WEIGHTED top-k reduce.  The atom
-    # baseline MUST use the SAME real weights or mega-vs-baseline collapses to a topk constant.  The
-    # harness routes with uniform wts=1/topk (see _prepare), so the real per-(t,s) weight is 1/topk.
+    # WEIGHTED baseline (production parity): GEMM2's doweight epilogue applies the real routing
+    # weights, so the baseline must use the SAME weights. Harness routes uniformly -> 1/topk.
     recv_wts = torch.full((max_recv, topk), 1.0 / topk, device=dev, dtype=torch.float32)
     recv_topk = torch.empty((max_recv, topk), dtype=torch.int32, device=dev)
     _sentinel = torch.full((trc, topk), experts, dtype=torch.int32, device=dev)
@@ -356,26 +352,40 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     bias_d = torch.empty((0,), device=dev, dtype=torch.float32)
     _qd = _adt.fp4x2 if _is_fp4 else _adt.fp8
     _stp = None if _is_fp4 else _adt.fp8_e8m0
-    # ATOM gemm1 indexes w1 by the LOCAL expert id (epr experts) -- matches its own gemm2 (local
-    # w2 + a_se_local) and real ATOM production.  Compiling with experts=experts (global) + global
-    # w1 truncates at the 4GB buffer num_records cap for >4GB weights (v4_pro 8.46GB), silently
-    # corrupting experts past ~4GB; bound to epr (<4GB) and feed the local w1 slice + a_se_local.
+    # ATOM gemm1 indexes w1 by LOCAL expert id (epr experts), matching its gemm2 (local w2 +
+    # a_se_local). Global w1 would truncate at the 4GB buffer cap for >4GB weights.
     gemm1 = compile_mixed_moe_gemm1(
         model_dim=model_dim, inter_dim=inter_dim, experts=epr, topk=topk,
         tile_m=tm, tile_n=tn1, tile_k=tk, doweight_stage1=False, a_dtype=a_dtype, b_dtype="fp4",
         out_dtype=s1_out, act="silu", waves_per_eu=int(args.waves_per_eu),
         use_async_copy=bool(args.async_copy))
-    g2a = MegaMoeStage2(comb_cfg=cfg_a, comb_op=dc, inter_dim=inter_dim,
-                        tile_m=tm2, tile_n=tn2, tile_k=tk2, persist_m=-1,
-                        a_dtype=s1_out, b_dtype="fp4", force_mode="stage1_only")
+    # SEPARATE stage-2 (ATOM-faithful): FlyDSL gemm2 (compile_mixed_moe_gemm2, doweight in gemm2,
+    # accumulate -> token-level out) + FlyDSL dc.combine (mirrors test_profiler_moe_gemm2_combine
+    # _baseline_chain). No fused gemm2+combine.
+    _g2exe = compile_mixed_moe_gemm2(
+        model_dim=model_dim, inter_dim=inter_dim, experts=epr, topk=topk,
+        tile_m=tm2, tile_n=tn2, tile_k=tk2, doweight_stage2=True,
+        a_dtype=s1_out, b_dtype="fp4", out_dtype="bf16",
+        accumulate=True, persist_m=-1, sort_block_m=_sbm)
+    _g2out = torch.zeros(max_recv, model_dim, dtype=torch.bfloat16, device=dev)
+    _g2c = {}
+
+    def _run_gemm2_sep():
+        _g2out.zero_()
+        _ga = (_g2out, a2_e.view(-1), w2_kernel, a2s_e, w2_scale_1d,
+               a_st, a_se_local, a_sw, a_nv, bias_d,
+               max_recv, model_dim, inter_dim, int(_max_blocks),
+               torch.cuda.current_stream())
+        if _g2c.get("c") is None:
+            _g2c["c"] = flyc.compile(_g2exe, *_ga)
+        else:
+            _g2c["c"](*_ga)
 
     _atom_out_holder = {}
     def _atom_body():
         # LIVE routing each replay (dispatch in-chain -> recv_topk recomputed from THIS dispatch's
         # output; a stale snapshot would desync sort vs combine -> xdev-barrier deadlock).
         a2_e.zero_()
-        dc.shmem_comb_inp_tok.zero_(); dc.shmem_comb_inp_wts.zero_()
-        dc.shmem_comb_out_tok.zero_(); dc.shmem_comb_out_wts.zero_()
         dc.total_recv.zero_()
         _bt, _, _, _oidx, _ = dc.dispatch(x_bf16[:run_tokens].contiguous(), wc, None, ic)
         _oi = _oidx[:trc].to(torch.int32)
@@ -395,36 +405,43 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
               _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
               fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
               stream=fx.Stream(torch.cuda.current_stream()))
-        _ret = g2a.run(a2=a2_e.view(-1), w2=w2_kernel, a2_scale=a2s_e, w2_scale=w2_scale_1d,
-                       sorted_token_ids=a_st, sorted_expert_ids=a_se_local, sorted_weights=a_sw,
-                       num_valid_ids=a_nv, cur_tok=run_tokens)
-        _atom_out_holder["o"] = _ret[0] if isinstance(_ret, (tuple, list)) else _ret
+        _run_gemm2_sep()                              # FlyDSL gemm2 (separate) -> _g2out [max_recv, model_dim]
+        _r = dc.combine(_g2out, None, _oidx)          # FlyDSL combine (separate)
+        _atom_out_holder["o"] = _r[0] if isinstance(_r, (tuple, list)) else _r
     _atom_body(); torch.cuda.synchronize(); ms.shmem_barrier_all()
     _ao = _atom_out_holder["o"]
     out_atom = _ao[:run_tokens].float().cpu().numpy().copy()
 
-    # ============ ATOM-FP8 baseline (PRODUCTION): fp8 dispatch -> sort -> gemm1 -> fused stage2 ============
-    # quant to fp8 -> fp8_dispatch (carries e8m0 scale, NO recv-quant) -> moe_sorting -> mxscale_sort
-    # -> gemm1 -> a2 -> fused GEMM2+combine.  fp8 dispatch is light (1B/elem) -> fair vs megav1.
-    # combine still needs a bf16 op (gemm2 emits bf16); reuse `dc` (bf16) with total_recv/tis copied
-    # from the fp8 dispatch op (atom's bridge; megav1 removes it via Plan A).
+    # ============ 7. ATOM-fp8 baseline (PRODUCTION): fp8 dispatch -> sort -> gemm1 -> fused stage2 ============
+    # fp8 dispatch carries the e8m0 scale (NO recv-quant), 1B/elem -> fair vs megav1. combine still
+    # needs a bf16 op (gemm2 emits bf16): reuse `dc` with total_recv/tis bridged from the fp8 op
+    # (atom's bridge; megav1 removes it via Plan A).
     _scale_mx_blocks = model_dim // 32
     cfg_fp8 = FlyDSLDispatchCombineConfig(
         rank=rank, world_size=world, hidden_dim=model_dim, max_num_inp_token_per_rank=mtpr,
         num_experts_per_rank=epr, num_experts_per_token=topk,
         data_type=(torch.float4_e2m1fn_x2 if _is_fp4 else torch.float8_e4m3fn),
         scale_dim=_scale_mx_blocks,
-        scale_type_size=1, enable_std_moe=False)
+        scale_type_size=1, enable_std_moe=False,
+        # combine emits bf16 gemm2_out -> size shmem buffers for the largest dtype (bf16=2B/elem).
+        max_token_type_size=2)
     dcf = FlyDSLDispatchCombineIntraNodeOp(cfg_fp8)
     torch.cuda.synchronize(); ms.shmem_barrier_all()
 
     _atom8_holder = {}
     def _atom_fp8_body():
+        # ATOM fp8 path: quantize (in-body) -> fp8 dispatch (dcf) -> gemm1 -> FlyDSL gemm2 (separate)
+        # -> FlyDSL combine (dcf).  Quant is inside the timed body (production: quantize BEFORE the
+        # fp8 dispatch), symmetric with the bf16 path's recv-side quant.
         a2_e.zero_()
-        dc.shmem_comb_inp_tok.zero_(); dc.shmem_comb_inp_wts.zero_()
-        dc.shmem_comb_out_tok.zero_(); dc.shmem_comb_out_wts.zero_()
         dcf.total_recv.zero_()
-        _rx, _, _rs, _oidx, _ = dcf.dispatch(x_q, wc, x_sc, ic)   # fp8 dispatch (+ e8m0 scale)
+        if _is_fp4:
+            _xq, _xsc = per_1x32_mx_quant_hip(x_bf16[:run_tokens].contiguous(), quant_dtype=_qd)
+        else:
+            _xq, _xsc = per_1x32_mx_quant_hip(x_bf16[:run_tokens].contiguous(),
+                                              quant_dtype=_qd, scale_type=_stp)
+        _xsc = _xsc.view(torch.uint8)
+        _rx, _, _rs, _oidx, _ = dcf.dispatch(_xq, wc, _xsc, ic)   # fp8 dispatch (+ e8m0 scale)
         _oi = _oidx[:trc].to(torch.int32)
         _loc = (_oi >= rank * epr) & (_oi < (rank + 1) * epr)
         recv_topk[:trc].copy_(torch.where(_loc, _oi, _sentinel))
@@ -436,18 +453,14 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
               _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
               fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
               stream=fx.Stream(torch.cuda.current_stream()))
-        # bridge fp8 dispatch routing -> bf16 combine op (atom's cost; megav1 has none via Plan A)
-        dc.total_recv.copy_(dcf.total_recv)
-        dc.shmem_tok_id_to_src.copy_(dcf.shmem_tok_id_to_src)
-        _ret = g2a.run(a2=a2_e.view(-1), w2=w2_kernel, a2_scale=a2s_e, w2_scale=w2_scale_1d,
-                       sorted_token_ids=a_st, sorted_expert_ids=a_se_local, sorted_weights=a_sw,
-                       num_valid_ids=a_nv, cur_tok=run_tokens)
-        _atom8_holder["o"] = _ret[0] if isinstance(_ret, (tuple, list)) else _ret
+        _run_gemm2_sep()                              # FlyDSL gemm2 (separate) -> _g2out
+        _r = dcf.combine(_g2out, None, _oidx)         # FlyDSL combine (separate, on fp8 dispatch op)
+        _atom8_holder["o"] = _r[0] if isinstance(_r, (tuple, list)) else _r
     _atom_fp8_body(); torch.cuda.synchronize(); ms.shmem_barrier_all()
     _a8 = _atom8_holder["o"]
     out_atom8 = _a8[:run_tokens].float().cpu().numpy().copy()
 
-    # ---- full-precision torch ORACLE (routing-WEIGHTED reduce: combine out_tok applies the weights) ----
+    # ===================== 8. f32 torch oracle (routing-WEIGHTED reduce) =====================
     x32 = x_bf16[:run_tokens].float(); ti = ic[:run_tokens].long()
     oracle_w = torch.zeros(run_tokens, model_dim, device=dev, dtype=torch.float32)
     wv = wc[:run_tokens].float()
@@ -462,36 +475,25 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
             oracle_w[rows] += wv[rows, k:k + 1] * _o2
     orw = oracle_w.cpu().numpy()
 
-    # Both mega and the atom baseline apply the real routing weights in the GEMM2 doweight epilogue,
-    # so out_tok is the routing-WEIGHTED reduce -> compare to the WEIGHTED oracle.  a8w4/a4w4 BOTH
-    # carry fp4 *weights*, so the e2e quant floor is dominated by fp4 (~0.20 a8w4 / ~0.30 a4w4), NOT
-    # the fp8/fp4 activation precision.
+    # ============================= 9. correctness gate =============================
+    # All paths apply routing weights in the GEMM2 doweight epilogue -> compare to the WEIGHTED
+    # oracle. The e2e floor is dominated by the fp4 *weights* (~0.20 a8w4 / ~0.30 a4w4).
     _rm_w = _relL2(out_mega, orw)         # mega(prod)
     _ra_w = _relL2(out_atom, orw)         # atom-bf16 (reference)
     _ra8_w = _relL2(out_atom8, orw)       # atom-fp8 (primary baseline)
     _rma = _relL2(out_mega, out_atom8)    # mega vs primary baseline (should be ~0)
     _floor = 0.32 if _is_fp4 else 0.25
-    # correctness gate: mega(prod) AND atom-fp8(primary baseline) both at the quant floor vs the
-    # WEIGHTED oracle, and they agree (same fused stage-2 on equivalent a2).
     _mega_ok = _rm_w < _floor
     _atom8_ok = _ra8_w < _floor
-    # oracle sanity: if even the bf16 REFERENCE (atom-bf16, the most accurate path) is far from
-    # the torch oracle, the oracle is unreliable for this shape -> gate on cross-impl agreement.
-    # NOTE: the old v4_pro "~1.09 for ALL impls" was NOT an oracle problem -- it was the 4GB
-    # buffer num_records truncation of the GLOBAL w1 (8.46GB), which hit mega AND the atom
-    # baseline identically.  Now both index LOCAL w1 (<4GB) and all three match the oracle at the
-    # quant floor (~0.21); this guard should no longer trip for v4_pro.
+    # oracle sanity: if even the most-accurate path (atom-bf16) is far from the oracle, the oracle
+    # is unreliable for this shape -> fall back to cross-impl agreement.
     _oracle_broken = (_ra_w > _floor)
-    # fp8 absorbs the activation noise so mega tracks the primary baseline bitwise (_rma~0);
-    # fp4's coarse E2M1 step makes two VALID quantizations of the same (bit-identical) gemm
-    # output diverge >5% (obs ~8.5%) even though mega is the MORE accurate side, so for fp4
-    # gate on accuracy vs the oracle: mega must be no worse than the baseline (+margin).
+    # fp8 tracks the baseline bitwise (_rma~0); fp4's coarse E2M1 makes two VALID quantizations
+    # diverge >5% (~8.5%), so for fp4 require mega no worse than the baseline (+margin).
     _match_ok = (_rma < 5e-2) or (_rm_w <= _ra8_w + 2e-2)
     ok = _match_ok and (_oracle_broken or (_mega_ok and _atom8_ok))
 
-    # Aggregate the per-rank torch-oracle gate across ALL ranks: each rank holds a DIFFERENT
-    # expert shard (epr experts) and reduces its OWN tokens vs its OWN torch oracle, so a
-    # per-shard bug can pass on rank0 yet fail on another rank.  Report the WORST rank and
+    # Aggregate across ALL ranks (each holds a different expert shard): report the WORST rank,
     # PASS only if EVERY rank passes.
     _rm_w_max = _all_max(dev, _rm_w)
     _ra8_w_max = _all_max(dev, _ra8_w)
@@ -499,47 +501,49 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     _rma_max = _all_max(dev, _rma)
     _all_ok = _all_max(dev, 0.0 if ok else 1.0) < 0.5   # any failing rank -> all_ok False
 
-    # ---- STAGE1-ONLY bodies (megav1 dispatch⊕GEMM1  vs  baseline fp8_dispatch -> sort -> GEMM1) ----
-    def _mega_s1_body():
-        moe.stage1.forward(x_q, wc, x_sc, ic)   # megav1 single-launch dispatch ⊕ GEMM1 -> a2
-    def _atom_s1_body():
-        a2_e.zero_(); dcf.total_recv.zero_()
-        _rx, _, _rs, _oidx, _ = dcf.dispatch(x_q, wc, x_sc, ic)   # fp8 dispatch
-        _oi = _oidx[:trc].to(torch.int32)
-        _loc = (_oi >= rank * epr) & (_oi < (rank + 1) * epr)
-        recv_topk[:trc].copy_(torch.where(_loc, _oi, _sentinel))
-        aiter.moe_sorting_fwd(recv_topk[:trc], recv_wts[:trc], a_st, a_sw, a_se, a_nv, a_mbuf[:trc],
-                              int(experts), int(tm), None, None, 0)
-        aiter.mxfp4_moe_sort_hip(a1s, _rs[:trc].contiguous(), a_st, a_nv, int(trc), int(model_dim))
-        a_se_local.copy_(a_se - rank * epr)
-        gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_rx[:trc]), _w1_arg, a1s.view(torch.uint8),
-              _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
-              fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
-              stream=fx.Stream(torch.cuda.current_stream()))
+    # ===================== 10. stage1-only bodies (dispatch+GEMM1) [DISABLED] =====================
+    # def _mega_s1_body():
+    #     moe.stage1.forward(x_q, wc, x_sc, ic)   # megav1 single-launch dispatch ⊕ GEMM1 -> a2
+    # def _atom_s1_body():
+    #     a2_e.zero_(); dcf.total_recv.zero_()
+    #     _rx, _, _rs, _oidx, _ = dcf.dispatch(x_q, wc, x_sc, ic)   # fp8 dispatch
+    #     _oi = _oidx[:trc].to(torch.int32)
+    #     _loc = (_oi >= rank * epr) & (_oi < (rank + 1) * epr)
+    #     recv_topk[:trc].copy_(torch.where(_loc, _oi, _sentinel))
+    #     aiter.moe_sorting_fwd(recv_topk[:trc], recv_wts[:trc], a_st, a_sw, a_se, a_nv, a_mbuf[:trc],
+    #                           int(experts), int(tm), None, None, 0)
+    #     aiter.mxfp4_moe_sort_hip(a1s, _rs[:trc].contiguous(), a_st, a_nv, int(trc), int(model_dim))
+    #     a_se_local.copy_(a_se - rank * epr)
+    #     gemm1(a2_e.view(max_recv, topk, a2_e.shape[-1]), _agv(_rx[:trc]), _w1_arg, a1s.view(torch.uint8),
+    #           _w1s_arg, a_st, a_se_local, a_sw, a_nv, bias_d, a2s_e, fx.Int32(trc),
+    #           fx.Int32(inter_dim * 2), fx.Int32(model_dim), fx.Int32(int(_max_blocks)),
+    #           stream=fx.Stream(torch.cuda.current_stream()))
 
-    # ---- perf (CUDAGraph) ----
+    # ============================= 11. perf (CUDAGraph) =============================
     _t_mega = _cg_time(_mega_body, moe.comb_op)              # megav1 e2e (stage1+stage2)
     _t_atom8 = _cg_time(_atom_fp8_body, dc)                  # baseline e2e (fp8 dispatch)
     _t_atom = _cg_time(_atom_body, dc)                       # reference e2e (bf16 dispatch)
-    _t_mega_s1 = _cg_time(_mega_s1_body, moe.comb_op)        # megav1 STAGE1-only
-    _t_atom_s1 = _cg_time(_atom_s1_body, dcf)                # baseline STAGE1-only (fp8 dispatch->gemm1)
+    # _t_mega_s1 = _cg_time(_mega_s1_body, moe.comb_op)        # megav1 STAGE1-only
+    # _t_atom_s1 = _cg_time(_atom_s1_body, dcf)                # baseline STAGE1-only (fp8 dispatch->gemm1)
 
+    # ============================= 12. report + return metrics =============================
     if rank == 0:
         _e2e_warn = "  [WARN torch-oracle unreliable for this shape: gated on mega-vs-baseline]" if _oracle_broken else ""
         print(f"[FULL-E2E] {args.network} {args.quant} bs={run_tokens} seed={args.seed} -> {'PASS' if _all_ok else 'FAIL'} (all {world} ranks){_e2e_warn}", flush=True)
         print(f"  [precision vs WEIGHTED torch-oracle, MAX over {world} ranks]  mega(prod)={_rm_w_max:.3e}  "
               f"atom-fp8(baseline)={_ra8_w_max:.3e}  atom-bf16(ref)={_ra_w_max:.3e}  "
               f"mega-vs-baseline={_rma_max:.3e}  (floor~{_floor})", flush=True)
-        print(f"  [perf STAGE1-only, ms]  baseline-fp8(dispatch->gemm1)={_t_atom_s1:.4f}  "
-              f"megav1(dispatch+gemm1)={_t_mega_s1:.4f}  "
-              f"speedup={(_t_atom_s1 / _t_mega_s1) if _t_mega_s1 > 0 else -1:.3f}", flush=True)
+        # [perf STAGE1-only] disabled
+        # print(f"  [perf STAGE1-only, ms]  baseline-fp8(dispatch->gemm1)={_t_atom_s1:.4f}  "
+        #       f"megav1(dispatch+gemm1)={_t_mega_s1:.4f}  "
+        #       f"speedup={(_t_atom_s1 / _t_mega_s1) if _t_mega_s1 > 0 else -1:.3f}", flush=True)
         print(f"  [perf E2E (stage1+fused-stage2), ms]  baseline-fp8={_t_atom8:.4f}  "
               f"megav1={_t_mega:.4f}  speedup={(_t_atom8 / _t_mega) if _t_mega > 0 else -1:.3f}  "
               f"| ref bf16-dispatch baseline={_t_atom:.4f}  (out=bf16)", flush=True)
     return dict(network=args.network, quant=args.quant, tokens=run_tokens,
                 full_e2e_mega_relL2=_rm_w, full_e2e_atom_fp8_relL2=_ra8_w, full_e2e_atom_bf16_relL2=_ra_w,
                 full_e2e_mega_vs_baseline=_rma,
-                s1_baseline_ms=_t_atom_s1, s1_mega_ms=_t_mega_s1,
+                # s1_baseline_ms=_t_atom_s1, s1_mega_ms=_t_mega_s1,  # stage1-only disabled
                 full_e2e_baseline_fp8_ms=_t_atom8, full_e2e_baseline_bf16_ms=_t_atom,
                 full_e2e_mega_ms=_t_mega, full_e2e_pass=ok)
 
@@ -584,7 +588,6 @@ def main():
     p.add_argument("--waves-per-eu", type=int, default=4)
     p.add_argument("--async-copy", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--iters", type=int, default=30)
-    p.add_argument("--warmup", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--n-seeds", type=int, default=1,
                    help="run EACH bs with N distinct seeds (seed, seed+1, ...) for random-data "

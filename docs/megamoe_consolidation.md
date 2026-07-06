@@ -29,9 +29,9 @@ op（`forward(x_bf16,...)` 内部量化 → bf16 输出）。
   - 并入 `MegaMoeStage2`（stage-2 gemm2+combine op；原 `FlyDSLMoeGemm2CombineOp`；back-compat `force_mode`）。
   - 并入 `MegaMoeStage1`（stage-1 驱动；原 `FusedMoEMegaStage1`），改为**使用 `comm_op._gm`**，不再自建 dispatch op。
   - 新增 `_resolve_stage1_config()`：把 tile / compact / xcd 解析前置（供 comm op 建 `_gm`）。
-  - `MegaMoE`：新增 `enable_fused_stage1 / enable_fused_stage2`（init 固定，非融合暂占位）；
+  - `MegaMoE`：新增 `enable_fused_stage1 / enable_fused_stage2`（均为 bool，init 固定，非融合暂占位）；
     `forward(x_bf16, wts, topk_ids)` 内部量化为主入口，`forward_prequant(x_q, scales, ...)`
-    为已量化快路径；`stage2_mode` 保留为 back-compat。
+    为已量化快路径。
 
 删除（内容已并入上面两文件）：
 - `kernels/ep_dispatch_groupmajor_op.py`
@@ -40,8 +40,8 @@ op（`forward(x_bf16,...)` 内部量化 → bf16 输出）。
 - `kernels/mixed_moe_gemm2_combine_fused_op.py`
 
 调用方更新：
-- `tests/kernels/bench_moe_intranode_stage1_groupgemm.py`：`MegaMoE` / `MegaMoeStage2` import 改指
-  `kernels.mega_moe`；megav1 调用 `moe.forward` → `moe.forward_prequant`。
+- `tests/kernels/test_mega_moe.py`（原名 `bench_moe_intranode_stage1_groupgemm.py`）：`MegaMoE` /
+  `MegaMoeStage2` import 改指 `kernels.mega_moe`；megav1 调用 `moe.forward` → `moe.forward_prequant`。
 - `tests/kernels/test_profiler_moe_gemm2_combine.py`：`MegaMoeStage2` import 路径更新。
 
 ## 对象关系（改动后）
@@ -119,7 +119,7 @@ fp4 / std_moe / zero_copy / recv_cap / mixed-dispatch 等；每 case 均 `ALL PA
 
 ```
 AITER_USE_SYSTEM_TRITON=1 MORI_SHMEM_HEAP_SIZE=40G torchrun --standalone --nproc_per_node=8 \
-  tests/kernels/bench_moe_intranode_stage1_groupgemm.py \
+  tests/kernels/test_mega_moe.py \
   --network v4_flash --quant a8w4 --bs-list 64,2048,4096,8192
 ```
 每个 shape 均 `[FULL-E2E] ... -> PASS (all 8 ranks)`：
