@@ -1,20 +1,20 @@
 {
  "schema": 1,
- "updated": "2026-07-06T04:48:23Z",
+ "updated": "2026-07-06T05:02:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28768450220,
+   "run_id": 28768891975,
    "pr": 803,
-   "commit": "f26b7d471276c280974b5b16614b000250aa13f7",
+   "commit": "9e7558a54af6f5132eb605b32b7b16cb153153e8",
    "branch": "pr/fix-jit-cache-key-recursion",
    "event": "pull_request",
    "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
    "status": "queued",
    "conclusion": null,
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220",
-   "created_at": "2026-07-06T04:46:34Z",
-   "updated_at": "2026-07-06T04:47:13Z",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975",
+   "created_at": "2026-07-06T04:59:57Z",
+   "updated_at": "2026-07-06T05:01:13Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -22,26 +22,69 @@
      "arch": "gfx942",
      "status": "queued",
      "conclusion": null,
-     "started_at": "2026-07-06T04:47:13Z",
+     "started_at": "2026-07-06T05:01:13Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306736"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975/job/85298675176"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "queued",
      "conclusion": null,
-     "started_at": "2026-07-06T04:47:13Z",
+     "started_at": "2026-07-06T05:01:13Z",
      "completed_at": null,
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306744"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975/job/85298675208"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
      "status": "queued",
      "conclusion": null,
-     "started_at": "2026-07-06T04:47:13Z",
+     "started_at": "2026-07-06T05:01:13Z",
      "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975/job/85298675217"
+    }
+   ]
+  },
+  {
+   "run_id": 28768450220,
+   "pr": 803,
+   "commit": "f26b7d471276c280974b5b16614b000250aa13f7",
+   "branch": "pr/fix-jit-cache-key-recursion",
+   "event": "pull_request",
+   "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220",
+   "created_at": "2026-07-06T04:46:34Z",
+   "updated_at": "2026-07-06T05:00:29Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-06T04:47:51Z",
+     "completed_at": "2026-07-06T05:00:11Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306736"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-06T04:47:13Z",
+     "completed_at": "2026-07-06T04:59:58Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306744"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-06T04:47:54Z",
+     "completed_at": "2026-07-06T05:00:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768450220/job/85297306752"
     }
    ]
@@ -1631,21 +1674,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28568317133",
    "created_at": "2026-07-02T05:44:46Z",
    "updated_at": "2026-07-02T05:44:46Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28568259274,
-   "pr": null,
-   "commit": "92fb1ba50b04ef9e4dc7285403c01f147113180d",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28568259274",
-   "created_at": "2026-07-02T05:43:20Z",
-   "updated_at": "2026-07-02T05:43:20Z",
    "actor": "jhinpan",
    "jobs": []
   }
