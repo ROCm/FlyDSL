@@ -12,9 +12,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.expr import arith as _arith
 from flydsl.expr.typing import T
 
@@ -672,6 +672,7 @@ def lds_load_pack_k32(
         return vector.extract(a_vec64, static_position=[0], dynamic_position=[])
 
 
+@flyc.jit
 def xcd_remap_bx_by(
     bx,
     by,
@@ -683,55 +684,38 @@ def xcd_remap_bx_by(
     xcd_swizzle: int,
     num_xcds: int = 8,
 ):
-    """Remap (bx, by) for L2-cache reuse via XCD swizzle.
-
-    No-op when ``xcd_swizzle <= 0``. Otherwise:
-      1. Linearize the original (bx, by) grid round-robin across ``num_xcds``
-         XCDs so that contiguous workgroup ids stay on the same XCD.
-      2. Re-tile that 1-D order with an M-major group of size ``xcd_swizzle``,
-         folding the tail group when ``gy`` does not divide evenly.
-
-    Designed to be called inside a ``@flyc.kernel`` immediately after::
-
-        bx = gpu.block_id("x")
-        by = gpu.block_id("y")
-        bx, by = xcd_remap_bx_by(bx, by, c_m, tile_m=..., tile_n=..., N=...,
-                                 xcd_swizzle=xcd_swizzle)
-
-    ``c_m`` is the dynamic ``fx.Index`` for runtime ``M``; ``tile_m``,
-    ``tile_n``, ``N`` and ``xcd_swizzle`` are compile-time Python ints.
-    """
     if xcd_swizzle <= 0:
         return bx, by
 
-    _c1 = fx.arith.constant(1, index=True)
-    _c_tm = fx.arith.constant(tile_m, index=True)
-    _gx = fx.arith.constant(N // tile_n, index=True)
-    _gy = (c_m + _c_tm - _c1) // _c_tm
+    # Keep the whole remap in i32 (grid dims fit): gpu.block_id yields index, so
+    # cast the block ids so every derived value (and both ternary branches) is i32.
+    bx = fx.Int32(bx)
+    by = fx.Int32(by)
 
-    _linear_id = bx * _gx + by
-    _num_wgs = _gx * _gy
+    gx = N // tile_n
+    gy = (c_m + tile_m - 1) // tile_m
 
-    _c_xcds = fx.arith.constant(num_xcds, index=True)
-    _q = _num_wgs // _c_xcds
-    _r = _num_wgs % _c_xcds
-    _xcd = _linear_id % _c_xcds
-    _in_xcd = _linear_id // _c_xcds
-    _xcd_lt_r = fx.arith.cmpi(CmpIPredicate.ult, _xcd, _r)
-    _clip = fx.arith.select(_xcd_lt_r, _xcd, _r)
-    _wgid = _xcd * _q + _clip + _in_xcd
+    linear_id = bx * gx + by
+    num_wgs = gx * gy
 
-    _c_wgm = fx.arith.constant(xcd_swizzle, index=True)
-    _num_wgid_in_group = _c_wgm * _gx
-    _group_id = _wgid // _num_wgid_in_group
-    _first_pid_m = _group_id * _c_wgm
-    _remaining_m = _gy - _first_pid_m
-    _cmp_m = fx.arith.cmpi(CmpIPredicate.ult, _remaining_m, _c_wgm)
-    _group_size_m = fx.arith.select(_cmp_m, _remaining_m, _c_wgm)
+    q = num_wgs // num_xcds
+    r = num_wgs % num_xcds
+    xcd = linear_id % num_xcds
+    in_xcd = linear_id // num_xcds
+    xcd_lt_r = xcd < r
+    clip = xcd if xcd_lt_r else r
+    wgid = xcd * q + clip + in_xcd
 
-    _wgid_in_group = _wgid % _num_wgid_in_group
-    new_bx = _first_pid_m + (_wgid_in_group % _group_size_m)
-    new_by = _wgid_in_group // _group_size_m
+    num_wgid_in_group = xcd_swizzle * gx
+    group_id = wgid // num_wgid_in_group
+    first_pid_m = group_id * xcd_swizzle
+    remaining_m = gy - first_pid_m
+    cmp_m = remaining_m < xcd_swizzle
+    group_size_m = remaining_m if cmp_m else fx.Int32(xcd_swizzle)
+
+    wgid_in_group = wgid % num_wgid_in_group
+    new_bx = first_pid_m + (wgid_in_group % group_size_m)
+    new_by = wgid_in_group // group_size_m
     return new_bx, new_by
 
 

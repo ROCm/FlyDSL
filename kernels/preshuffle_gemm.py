@@ -213,13 +213,14 @@ def compile_preshuffle_gemm(
             _bx, _by = xcd_remap_bx_by(
                 gpu.block_id("x"),
                 gpu.block_id("y"),
-                fx.Index(i32_m),
+                i32_m,
                 tile_m=tile_m,
                 tile_n=tile_n,
                 N=N,
                 xcd_swizzle=xcd_swizzle,
             )
-            bid_x, bid_y = Int32(_bx), Int32(_by)
+            # xcd_remap_bx_by already returns i32 (all-i32 remap); use directly.
+            bid_x, bid_y = _bx, _by
 
         if const_expr(use_mfma_scale_128):
             _scale_atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, layout_elem))
@@ -478,10 +479,15 @@ def compile_preshuffle_gemm(
                 fx.copy(buf_copy, pA_g[None, None, None, next_k_val], frag_copy_A)
                 fx.copy(buf_copy, pB_g[None, None, None, next_k_val], frag_B_retile_stages[write_stage])
             mma_kloop(read_stage, cur_frag_B)
-            fx.copy(uni_copy, frag_copy_A, pA_s_stages[write_stage][None, None, None])
+            # On the tail stage (do_next=False) frag_copy_A is stale and no later stage
+            # reads write_stage, so the A→LDS write and its barrier are dead — skip them
+            # (matches aiter's tail; removes the extra ds_write + barrier).
+            if const_expr(do_next):
+                fx.copy(uni_copy, frag_copy_A, pA_s_stages[write_stage][None, None, None])
             if const_expr(enable_scheduler):
                 hot_loop_scheduler()
-            gpu.barrier()
+            if const_expr(do_next):
+                gpu.barrier()
 
         # ── Prologue ──────────────────────────────────────────────
         acc_zero = Vec.filled(acc_size, 0, Int32) if const_expr(is_int8) else Vec.filled(acc_size, 0.0, Float32)
@@ -499,81 +505,94 @@ def compile_preshuffle_gemm(
             gpu.barrier()
         rocdl.sched_barrier(0)
 
-        # ── Main tile loop (scf.for with ping-pong) ──────────────
-        if const_expr(num_tiles == 1):
-            pipeline_stage(read_stage=0, read_next=False)
-        elif const_expr(num_tiles == 2):
-            pipeline_stage(read_stage=0, next_k_val=fx.Int32(1))
-            pipeline_stage(read_stage=1, read_next=False)
-        else:
-            # Ping-pong loop, 2 tiles/iter, acc-only carry; odd num_tiles → 1-stage tail
-            is_odd_tiles = (num_tiles % 2) == 1
-            loop_end = fx.Index((num_tiles - 1) // 2 if is_odd_tiles else (num_tiles - 2) // 2)
-            for iv, state in range(fx.Index(0), loop_end, fx.Index(1), init=[frag_C.load()]):
+        # ── Main tile loop: 2-tile/iter ping-pong, mirroring aiter ────
+        # A middle scf.for runs 2 tiles/iter; the tail is peeled straight-line (odd: 1
+        # tile, even: 2). tile j is staged in LDS buffer j % 2, so read_stage = k % 2.
+        # num_tiles 1/2 fall out of this with loop_end == 0.
+        is_odd_tiles = (num_tiles % 2) == 1
+        tail = 1 if is_odd_tiles else 2
+        loop_end = (num_tiles - tail) // 2
+        if const_expr(loop_end > 0):
+            for iv, state in range(0, loop_end, 1, init=[frag_C.load()]):
                 frag_C.store(state[0])
                 k_base = fx.Int32(iv * 2)
                 pipeline_stage(read_stage=0, next_k_val=k_base + fx.Int32(1))
                 pipeline_stage(read_stage=1, next_k_val=k_base + fx.Int32(2))
                 results = yield [frag_C.load()]
             frag_C.store(results)
-            if const_expr(is_odd_tiles):
-                pipeline_stage(read_stage=0, read_next=False)
-            else:
-                pipeline_stage(read_stage=0, next_k_val=fx.Int32(num_tiles - 1))
-                pipeline_stage(read_stage=1, read_next=False)
+        k_tail0 = num_tiles - tail  # first tile handled by the peeled tail
+        for j in range_constexpr(tail - 1):
+            pipeline_stage(read_stage=(k_tail0 + j) % 2, next_k_val=fx.Int32(k_tail0 + j + 1))
+
+        # ── Epilogue-operand loads (scale_a / scale_b / bias) ─────────
+        # Issued BEFORE the final MMA so the buffer_loads overlap the last tile's MMAs
+        # (as aiter does in its last compute_tile) — but only when the accumulator
+        # leaves VGPR headroom. At the register ceiling (largest-accumulator tiles)
+        # keeping these operands live across the final MMA spills, so there we load
+        # them after it (in the epilogue) instead.
+        bx_m = bid_x * tile_m
+        by_n = bid_y * tile_n
+        wave_id = gpu.thread_id("x") // 64
+        lane_id = gpu.thread_id("x") % 64
+        lane_div_16 = lane_id // 16
+        lane_mod_16 = lane_id % 16
+
+        def load_epi_operands():
+            s_a = s_b = bias = None
+            if const_expr(is_8bit):
+                # Per-row(scale_a) × per-col(scale_b) scaling, applied in the epilogue.
+                scale_b_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_b, max_size=True)
+                s_b = [
+                    fx.buffer_ops.buffer_load(
+                        scale_b_rsrc,
+                        fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
+                        vec_width=1,
+                        dtype=T.f32,
+                    )
+                    for ni in range_constexpr(num_acc_n)
+                ]
+                # 4 contiguous per-row scales per mi loaded as one 128b buffer_load (#791).
+                scale_a_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
+                s_a = [
+                    Vec(
+                        fx.buffer_ops.buffer_load(
+                            scale_a_rsrc, fx.Int32(bx_m + mi * 16 + lane_div_16 * 4), vec_width=4, dtype=T.f32
+                        )
+                    ).bitcast(fx.Float32)
+                    for mi in range_constexpr(m_repeat)
+                ]
+            if const_expr(_has_bias):
+                # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
+                bias_rsrc = fx.buffer_ops.create_buffer_resource(arg_bias, max_size=True)
+                bias_elem_ty = T.bf16 if out_dtype == "bf16" else T.f16
+                bias = [
+                    fx.Float32(
+                        fx.buffer_ops.buffer_load(
+                            bias_rsrc,
+                            fx.Int32(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16),
+                            vec_width=1,
+                            dtype=bias_elem_ty,
+                        )
+                    )
+                    for ni in range_constexpr(num_acc_n)
+                ]
+            return s_a, s_b, bias
+
+        overlap_epi_load = acc_size <= 64  # small enough accumulator to keep operands live over the MMA
+        s_a_vals = s_b_vals = bias_vals = None
+        if const_expr(overlap_epi_load):
+            s_a_vals, s_b_vals, bias_vals = load_epi_operands()
+
+        # Final MMA stage — overlaps the epilogue-operand loads when issued above.
+        pipeline_stage(read_stage=(num_tiles - 1) % 2, read_next=False)
 
         # ── Epilogue ─────────────────────────────────────────────
-        # Fast path: f16/bf16 with no fused epilogue → vectorized truncate + copy.
-        # Otherwise (8-bit scaling and/or fused bias+activation) build the output
-        # element-wise so per-column bias and the activation can be applied.
         if const_expr(not is_8bit and not _has_epilogue):
             frag_C_out.store(Vec(frag_C.load()).to(out_elem_cls))
             fx.copy(buf_copy_out, frag_C_retile, pC_g)
         else:
-            bx_m = bid_x * tile_m
-            by_n = bid_y * tile_n
-            wave_id = gpu.thread_id("x") // 64
-            lane_id = gpu.thread_id("x") % 64
-            lane_div_16 = lane_id // 16
-            lane_mod_16 = lane_id % 16
-
-            if const_expr(is_8bit):
-                # FP8/INT8: per-row(scale_a) × per-col(scale_b) scaling applied inline.
-                scale_a_buf = fx.rocdl.make_buffer_tensor(arg_scale_a, max_size=True)
-                scale_b_buf = fx.rocdl.make_buffer_tensor(arg_scale_b, max_size=True)
-                scale_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-                scale_reg_lay = fx.make_layout(1, 1)
-                scale_a_div = fx.logical_divide(scale_a_buf, fx.make_layout(1, 1))
-                scale_b_div = fx.logical_divide(scale_b_buf, fx.make_layout(1, 1))
-
-                def load_scale(div_tensor, index):
-                    r = fx.make_rmem_tensor(scale_reg_lay, fx.Float32)
-                    fx.copy_atom_call(scale_copy, fx.slice(div_tensor, (None, fx.Int32(index))), r)
-                    return Vec(fx.memref_load_vec(r))[0]
-
-                s_b_vals = [
-                    load_scale(scale_b_div, by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16)
-                    for ni in range_constexpr(num_acc_n)
-                ]
-                s_a_vals = [
-                    [load_scale(scale_a_div, bx_m + mi * 16 + lane_div_16 * 4 + ii) for ii in range_constexpr(4)]
-                    for mi in range_constexpr(m_repeat)
-                ]
-
-            # Per-column bias (out_dtype), one scalar per N-block, shared across rows.
-            if const_expr(_has_bias):
-                bias_buf = fx.rocdl.make_buffer_tensor(arg_bias, max_size=True)
-                bias_copy = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_elem_cls)
-                bias_div = fx.logical_divide(bias_buf, fx.make_layout(1, 1))
-
-                def load_bias(index):
-                    r = fx.make_rmem_tensor(fx.make_layout(1, 1), out_elem_cls)
-                    fx.copy_atom_call(bias_copy, fx.slice(bias_div, (None, fx.Int32(index))), r)
-                    return fx.Float32(Vec(fx.memref_load_vec(r))[0])
-
-                bias_vals = [
-                    load_bias(by_n + (ni * num_waves + wave_id) * 16 + lane_mod_16) for ni in range_constexpr(num_acc_n)
-                ]
+            if const_expr(not overlap_epi_load):
+                s_a_vals, s_b_vals, bias_vals = load_epi_operands()
 
             def apply_activation(val_s):
                 # ReLU/SiLU/GeLU ported from v1: maximumf for relu; exp+rcp for silu;
