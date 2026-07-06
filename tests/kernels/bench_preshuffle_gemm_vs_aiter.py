@@ -146,7 +146,9 @@ def _run_one_shape(idx, args):
         )
 
     # --- compile both sides (same lds on both) ---
-    _repo_lds_kw = {"lds_stage": cfg["lds"]} if _repo_has_lds else {}
+    _repo_lds = int(os.environ.get("REPO_LDS", cfg["lds"]))  # override repo-side lds only
+    _repo_asy = int(os.environ.get("REPO_ASY", cfg["asy"]))  # override repo-side async only
+    _repo_lds_kw = {"lds_stage": _repo_lds} if _repo_has_lds else {}
     repo_fn = repo_compile(
         N=N,
         K=K,
@@ -156,7 +158,7 @@ def _run_one_shape(idx, args):
         in_dtype="fp8",
         out_dtype="bf16",
         waves_per_eu=cfg["wpe"],
-        use_async_copy=bool(cfg["asy"]),
+        use_async_copy=bool(_repo_asy),
         xcd_swizzle=cfg["xcd"],
         **_repo_lds_kw,
     )
