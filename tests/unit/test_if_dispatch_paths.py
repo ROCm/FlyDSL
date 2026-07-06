@@ -4,6 +4,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import ast
+import types
 
 import pytest
 
@@ -11,6 +12,10 @@ from flydsl._mlir.dialects import arith, func
 from flydsl._mlir.ir import Context, FunctionType, InsertionPoint, IntegerType, Location, Module
 from flydsl.compiler.ast_rewriter import ASTRewriter, ReplaceIfWithDispatch, _collect_assigned_vars
 from flydsl.expr.numeric import Int32
+
+
+def _dynamic_chained_compare(x):
+    return Int32(0) <= x < Int32(8)
 
 
 def test_collect_assigned_vars_supports_tuple_and_augassign():
@@ -162,6 +167,31 @@ def test_scf_if_dispatch_dynamic_non_mlir_value_is_promoted():
                     state_values=(x,),
                 )
                 assert isinstance(out, Int32)
+
+
+def test_ast_rewrite_lowers_dynamic_chained_compare():
+    rewritten = types.FunctionType(
+        _dynamic_chained_compare.__code__,
+        dict(_dynamic_chained_compare.__globals__),
+        _dynamic_chained_compare.__name__,
+    )
+    ASTRewriter.transform(rewritten)
+
+    with Context(), Location.unknown():
+        module = Module.create()
+        i32 = IntegerType.get_signless(32)
+        i1 = IntegerType.get_signless(1)
+        with InsertionPoint(module.body):
+            f = func.FuncOp("test_dynamic_chained_compare", FunctionType.get([i32], [i1]))
+            entry = f.add_entry_block()
+            with InsertionPoint(entry):
+                out = rewritten(Int32(entry.arguments[0]))
+                func.ReturnOp([out.ir_value()])
+
+    assert module.operation.verify()
+    ir_text = str(module)
+    assert ir_text.count("arith.cmpi") >= 2
+    assert "arith.andi" in ir_text
 
 
 def test_ast_rewrite_keeps_semantics_for_static_bool():
