@@ -1252,15 +1252,25 @@ def test_multi_case_set(case_set_name: str) -> None:
 # window.  The reference kernel consumes f16 K/V holding the fp8 codes (see its
 # module docstring), so we fp8-quantize then cast the codes to f16 here.
 # ---------------------------------------------------------------------------
-def _run_pa_decode_tile_case(num_kv_heads: int, group_size: int, context_len: int, num_seqs: int) -> float:
+def _run_pa_decode_tile_case(
+    num_kv_heads: int, group_size: int, context_len: int, num_seqs: int, block_size: int
+) -> float:
     from kernels.pa_decode_tile import pa_decode_tile
 
     setup_seed(0)
     dev = "cuda"
     num_q_heads = num_kv_heads * group_size
     head_dim = 128
-    block_size = 1024
-    max_blocks = (context_len + block_size - 1) // block_size
+    # The kernel addresses K/V (and the block table) in whole 256-token compute
+    # tiles: even the last, partially-valid tile issues loads (masked out in
+    # softmax, not skipped) for its full 256-token span. block_size divides
+    # 256 evenly (16, 64), so block_tables must cover ceil(context_len/256)
+    # tiles' worth of pages, not just ceil(context_len/block_size) -- the
+    # latter under-allocates whenever context_len isn't a multiple of 256,
+    # causing an out-of-bounds block-table read for the padding tokens.
+    tile_tok = 256
+    num_tiles = (context_len + tile_tok - 1) // tile_tok
+    max_blocks = num_tiles * tile_tok // block_size
     num_blocks = num_seqs * max_blocks
     k_scale = v_scale = 0.04
 
@@ -1273,17 +1283,16 @@ def _run_pa_decode_tile_case(num_kv_heads: int, group_size: int, context_len: in
     value_cache_plain = (v_f / v_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
     # kernel expects K/V in the BLOCKED layouts (see kernels/pa_decode_tile.py
     # module docstring); relayout once here, same as production relayouts K/V
-    # at quantization time (not per decode call).
+    # at quantization time (not per decode call). K needs a real transpose
+    # (plain layout puts head_dim innermost); V's plain layout already has
+    # head_dim outer / block_size innermost, so splitting head_dim into
+    # (head_dim//16, 16) is a pure reshape, no permute needed.
     key_cache = (
         key_cache_plain.view(num_blocks, num_kv_heads, block_size, head_dim // 32, 32)
         .permute(0, 1, 3, 2, 4)
         .contiguous()
     )
-    value_cache = (
-        value_cache_plain.view(num_blocks, num_kv_heads, head_dim // 16, 16, block_size // 64, 64)
-        .permute(0, 1, 2, 4, 3, 5)
-        .contiguous()
-    )
+    value_cache = value_cache_plain.view(num_blocks, num_kv_heads, head_dim // 16, 16, block_size).contiguous()
 
     block_tables = torch.zeros(num_seqs, max_blocks, dtype=torch.int32, device=dev)
     for s in range(num_seqs):
@@ -1323,13 +1332,14 @@ def _run_pa_decode_tile_case(num_kv_heads: int, group_size: int, context_len: in
     return (output.to(torch.float32) - ref.to(torch.float32)).abs().max().item()
 
 
+@pytest.mark.parametrize("block_size", [16, 64])
 @pytest.mark.parametrize("num_kv_heads,group_size", [(1, 8), (1, 16), (2, 8)])
 @pytest.mark.parametrize("context_len", [1027, 256, 17])
-def test_pa_decode_tile_reference(num_kv_heads: int, group_size: int, context_len: int) -> None:
+def test_pa_decode_tile_reference(num_kv_heads: int, group_size: int, context_len: int, block_size: int) -> None:
     # fp8 (e4m3) Q and P quantization limit accuracy; the error averages down with
     # context length (~1e-2 at ctx=17, ~1e-3 at ctx=1027), so use an fp8-appropriate
     # tolerance rather than the f16-era 5e-3.
-    max_diff = _run_pa_decode_tile_case(num_kv_heads, group_size, context_len, num_seqs=3)
+    max_diff = _run_pa_decode_tile_case(num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size)
     assert max_diff <= 1e-2, f"tile PA decode max diff {max_diff:.3e} exceeds tolerance"
 
 

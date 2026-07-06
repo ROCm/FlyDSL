@@ -99,3 +99,9 @@ def global_load_i64x2(global_ptr, byte_offset_i64):
 
 def global_load_i32(global_ptr, elem_offset_i32):
     return global_load(global_ptr, fx.Int64(elem_offset_i32) * fx.Int64(4), T.i32, alignment=4)
+
+
+def global_store(global_ptr, byte_offset, value, *, alignment):
+    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset), elem_type=T.i8)
+    raw = value.ir_value() if hasattr(value, "ir_value") else value
+    llvm.StoreOp(raw, ptr, alignment=alignment)
