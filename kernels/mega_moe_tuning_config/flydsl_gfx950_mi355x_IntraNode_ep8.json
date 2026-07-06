@@ -14,26 +14,8 @@
    "hidden_dim": 7168,
    "topk": 6,
    "local_expert_num": 48,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
    "num_tokens": 8,
    "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "num_tokens": 16,
-   "block_num": 64,
    "warp_num_per_block": 4
   },
   {
@@ -77,27 +59,9 @@
    "hidden_dim": 7168,
    "topk": 6,
    "local_expert_num": 48,
-   "num_tokens": 4096,
-   "block_num": 128,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
    "num_tokens": 8192,
    "block_num": 128,
    "warp_num_per_block": 8
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
   },
   {
    "dtype": "fp4",
@@ -124,33 +88,6 @@
    "local_expert_num": 32,
    "num_tokens": 32,
    "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 64,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 256,
-   "block_num": 128,
    "warp_num_per_block": 4
   },
   {
@@ -176,15 +113,6 @@
    "hidden_dim": 3584,
    "topk": 8,
    "local_expert_num": 32,
-   "num_tokens": 4,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
    "num_tokens": 8,
    "block_num": 64,
    "warp_num_per_block": 4
@@ -214,42 +142,6 @@
    "local_expert_num": 32,
    "num_tokens": 64,
    "block_num": 256,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 512,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp4",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 1024,
-   "block_num": 128,
    "warp_num_per_block": 4
   },
   {
@@ -293,53 +185,8 @@
    "hidden_dim": 7168,
    "topk": 8,
    "local_expert_num": 32,
-   "num_tokens": 16,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp8_ocp",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
    "num_tokens": 32,
    "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp8_ocp",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 64,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp8_ocp",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp8_ocp",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "fp8_ocp",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 512,
-   "block_num": 128,
    "warp_num_per_block": 4
   },
   {
@@ -383,24 +230,6 @@
    "hidden_dim": 7168,
    "topk": 8,
    "local_expert_num": 32,
-   "num_tokens": 8,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 16,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
    "num_tokens": 32,
    "block_num": 128,
    "warp_num_per_block": 4
@@ -412,33 +241,6 @@
    "local_expert_num": 32,
    "num_tokens": 64,
    "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "num_tokens": 512,
-   "block_num": 128,
    "warp_num_per_block": 4
   },
   {
@@ -518,62 +320,8 @@
    "hidden_dim": 7168,
    "topk": 6,
    "local_expert_num": 48,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "num_tokens": 512,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "num_tokens": 1024,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "num_tokens": 2048,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
    "num_tokens": 4096,
    "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 4,
-   "block_num": 80,
    "warp_num_per_block": 4
   },
   {
@@ -619,42 +367,6 @@
    "local_expert_num": 32,
    "num_tokens": 128,
    "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 512,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 1024,
-   "block_num": 128,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "num_tokens": 2048,
-   "block_num": 128,
    "warp_num_per_block": 4
   },
   {
@@ -674,16 +386,6 @@
    "topk": 6,
    "local_expert_num": 48,
    "zero_copy": false,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": false,
    "num_tokens": 8,
    "block_num": 64,
    "warp_num_per_block": 4
@@ -704,39 +406,9 @@
    "topk": 6,
    "local_expert_num": 48,
    "zero_copy": false,
-   "num_tokens": 32,
-   "block_num": 128,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": false,
    "num_tokens": 64,
    "block_num": 128,
    "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": false,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": false,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -757,26 +429,6 @@
    "num_tokens": 1024,
    "block_num": 128,
    "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": false,
-   "num_tokens": 2048,
-   "block_num": 256,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": false,
-   "num_tokens": 4096,
-   "block_num": 256,
-   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -794,36 +446,6 @@
    "topk": 6,
    "local_expert_num": 48,
    "zero_copy": true,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": true,
-   "num_tokens": 8,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": true,
-   "num_tokens": 16,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": true,
    "num_tokens": 32,
    "block_num": 64,
    "warp_num_per_block": 4
@@ -847,36 +469,6 @@
    "num_tokens": 128,
    "block_num": 64,
    "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": true,
-   "num_tokens": 256,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": true,
-   "num_tokens": 512,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 6,
-   "local_expert_num": 48,
-   "zero_copy": true,
-   "num_tokens": 1024,
-   "block_num": 64,
-   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -914,26 +506,6 @@
    "topk": 6,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 8,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 16,
    "block_num": 64,
    "warp_num_per_block": 4
@@ -944,39 +516,9 @@
    "topk": 6,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 32,
-   "block_num": 64,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 64,
    "block_num": 64,
    "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",
@@ -1014,16 +556,6 @@
    "topk": 6,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 4096,
-   "block_num": 256,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 8192,
    "block_num": 256,
    "warp_num_per_block": 8
@@ -1034,47 +566,7 @@
    "topk": 6,
    "local_expert_num": 32,
    "zero_copy": true,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 8,
-   "block_num": 64,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 16,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": true,
    "num_tokens": 32,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 64,
    "block_num": 64,
    "warp_num_per_block": 4
   },
@@ -1095,26 +587,6 @@
    "local_expert_num": 32,
    "zero_copy": true,
    "num_tokens": 256,
-   "block_num": 64,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 512,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 4096,
-   "topk": 6,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 1024,
    "block_num": 64,
    "warp_num_per_block": 16
   },
@@ -1154,16 +626,6 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 8,
    "block_num": 64,
    "warp_num_per_block": 4
@@ -1204,36 +666,6 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 128,
-   "block_num": 256,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 256,
-   "block_num": 256,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 512,
-   "block_num": 256,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 1024,
    "block_num": 256,
    "warp_num_per_block": 16
@@ -1244,29 +676,9 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 2048,
-   "block_num": 128,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 4096,
    "block_num": 128,
    "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -1304,36 +716,6 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": true,
-   "num_tokens": 64,
-   "block_num": 128,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 128,
-   "block_num": 128,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
    "num_tokens": 512,
    "block_num": 128,
    "warp_num_per_block": 8
@@ -1344,39 +726,9 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": true,
-   "num_tokens": 1024,
-   "block_num": 128,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 2048,
-   "block_num": 128,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 3584,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
    "num_tokens": 4096,
    "block_num": 128,
    "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
   },
   {
    "dtype": "bf16",
@@ -1414,16 +766,6 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 64,
-   "block_num": 256,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 128,
    "block_num": 256,
    "warp_num_per_block": 8
@@ -1434,48 +776,8 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": false,
-   "num_tokens": 256,
-   "block_num": 128,
-   "warp_num_per_block": 8
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 512,
-   "block_num": 128,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
    "num_tokens": 1024,
    "block_num": 128,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 2048,
-   "block_num": 256,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": false,
-   "num_tokens": 4096,
-   "block_num": 256,
    "warp_num_per_block": 16
   },
   {
@@ -1494,26 +796,6 @@
    "topk": 8,
    "local_expert_num": 32,
    "zero_copy": true,
-   "num_tokens": 4,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 8,
-   "block_num": 64,
-   "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
    "num_tokens": 16,
    "block_num": 64,
    "warp_num_per_block": 4
@@ -1537,66 +819,6 @@
    "num_tokens": 64,
    "block_num": 64,
    "warp_num_per_block": 4
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 128,
-   "block_num": 64,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 256,
-   "block_num": 64,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 512,
-   "block_num": 64,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 1024,
-   "block_num": 64,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 2048,
-   "block_num": 64,
-   "warp_num_per_block": 16
-  },
-  {
-   "dtype": "bf16",
-   "hidden_dim": 7168,
-   "topk": 8,
-   "local_expert_num": 32,
-   "zero_copy": true,
-   "num_tokens": 4096,
-   "block_num": 64,
-   "warp_num_per_block": 16
   },
   {
    "dtype": "bf16",

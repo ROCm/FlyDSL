@@ -28,8 +28,6 @@ from flydsl.expr.rocdl import (
 )
 from flydsl.expr.typing import Stream
 from flydsl.expr.typing import Vector as Vec
-from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 
 from .communication_ops_utils import (
     atomic_add_global_at,
@@ -288,10 +286,10 @@ def make_dispatch_kernel(
         if const_expr(enable_std_moe):
             fx.barrier()
             if tid == 0:
-                _bn_i64 = fx.Int64(block_num)
-                _one_i64 = fx.Int64(1)
+                _bn_i64 = fx.Uint64(block_num)
+                _one_i64 = fx.Uint64(1)
                 _ticket_raw = atomic_add_global_at(addr_disp_grid_bar, _one_i64)
-                _ticket = arith.ArithValue(_ticket_raw, signed=False)
+                _ticket = fx.Uint64(_ticket_raw)
                 _target = (_ticket // _bn_i64 + _one_i64) * _bn_i64  # (epoch+1)*block_num
                 mori_shmem.int64_wait_until_equals(addr_disp_grid_bar, _target)
                 # Acquire fence pairs with the release atomic_add tickets; makes
@@ -530,20 +528,12 @@ def make_combine_kernel(
     weight_bytes = experts_per_token * 4 if enable_weights else 0
     wt_n_i32 = experts_per_token if enable_weights else 0
 
-    # LDS layout for P2P-base tables (i64[npes] tokens + optional weights);
-    # SmemAllocator.finalize() runs in the JIT launcher.
-    gpu_arch = get_rocm_arch()
-    allocator = SmemAllocator(None, arch=gpu_arch)
-    p2p_base_offset = allocator._align(allocator.ptr, 8)
-    p2p_base_size = npes * 8
-    allocator.ptr = p2p_base_offset + p2p_base_size
-
+    # Struct built via type() (not class annotations) because this module's
+    # `from __future__ import annotations` would stringify the fx.Array field types.
+    _lds_fields = {"p2p_bases": fx.Array[fx.Int64, npes, 16]}
     if enable_weights:
-        p2p_wt_base_offset = allocator._align(allocator.ptr, 8)
-        p2p_wt_base_size = npes * 8
-        allocator.ptr = p2p_wt_base_offset + p2p_wt_base_size
-
-    check_smem_capacity(allocator.ptr, gpu_arch)
+        _lds_fields["p2p_wt_bases"] = fx.Array[fx.Int64, npes, 16]
+    _SharedStorage = fx.struct(type("_SharedStorage", (), {"__annotations__": _lds_fields}))
 
     @flyc.kernel(known_block_size=[warp_num_per_block * 64, 1, 1])
     def ep_combine_intranode(
@@ -591,21 +581,19 @@ def make_combine_kernel(
         total_recv = buffer_load(_r_trecv, 0, vec_width=1, dtype=T.i32())
         xdb_cur_flag = buffer_load(_r_xdb_flag, 0, vec_width=1, dtype=T.i64())
 
-        base_ptr = allocator.get_base()
-        _lds_p2p_bases = SmemPtr(base_ptr, p2p_base_offset, T.i64(), shape=(npes,))
-        SmemPtr.get(_lds_p2p_bases)
+        _lds = fx.SharedAllocator().allocate(_SharedStorage).peek()
+        _lds_p2p_bases = _lds.p2p_bases.view(fx.make_layout(npes, 1))
 
         if lane < npes:
             p2p_base_addr = buffer_load(_r_p2p_comb, lane, vec_width=1, dtype=T.i64())
-            SmemPtr.store(_lds_p2p_bases, p2p_base_addr, [lane])
+            fx.memref_store(p2p_base_addr, _lds_p2p_bases, lane)
 
         if const_expr(enable_weights):
             _r_p2p_comb_wt = create_buffer_resource_from_addr(addr_p2p_wts)
-            _lds_p2p_wt_bases = SmemPtr(base_ptr, p2p_wt_base_offset, T.i64(), shape=(npes,))
-            SmemPtr.get(_lds_p2p_wt_bases)
+            _lds_p2p_wt_bases = _lds.p2p_wt_bases.view(fx.make_layout(npes, 1))
             if lane < npes:
                 p2p_wt_base_addr = buffer_load(_r_p2p_comb_wt, lane, vec_width=1, dtype=T.i64())
-                SmemPtr.store(_lds_p2p_wt_bases, p2p_wt_base_addr, [lane])
+                fx.memref_store(p2p_wt_base_addr, _lds_p2p_wt_bases, lane)
 
         fx.barrier()
 
@@ -639,7 +627,7 @@ def make_combine_kernel(
                     else:
                         dest_pe = dest_tok_enc // max_tok_per_rank
                         dest_lid = dest_tok_enc % max_tok_per_rank
-                    wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                    wt_pe_base = fx.memref_load(_lds_p2p_wt_bases, dest_pe)
                     wt_dest_off = fx.Int64(rank * max_tok_per_rank + dest_lid) * weight_bytes
                     wt_dest_addr = arith.unwrap(wt_pe_base) + wt_dest_off
                     wt_src_addr = arith.unwrap(addr_inp_wts) + fx.Int64(recv_tok_id) * weight_bytes
@@ -668,7 +656,7 @@ def make_combine_kernel(
                     dest_byte_off = fx.Int64(recv_tok_id) * nbytes
                     dest_tok_addr = arith.unwrap(addr_shmem_tok) + dest_byte_off
                 else:
-                    peer_base = SmemPtr.load(_lds_p2p_bases, [dest_pe])
+                    peer_base = fx.memref_load(_lds_p2p_bases, dest_pe)
                     dest_byte_off = fx.Int64(rank * max_tok_per_rank + dest_lid) * nbytes
                     dest_tok_addr = arith.unwrap(peer_base) + dest_byte_off
                 rsrc_dst = create_buffer_resource_from_addr(dest_tok_addr)
@@ -699,7 +687,7 @@ def make_combine_kernel(
                         wt_dest_off = fx.Int64(recv_tok_id) * weight_bytes
                         wt_dest_addr = arith.unwrap(addr_shmem_wts) + wt_dest_off
                     else:
-                        wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                        wt_pe_base = fx.memref_load(_lds_p2p_wt_bases, dest_pe)
                         wt_dest_off = fx.Int64(rank * max_tok_per_rank + dest_lid) * weight_bytes
                         wt_dest_addr = arith.unwrap(wt_pe_base) + wt_dest_off
                     wt_src_addr = arith.unwrap(addr_inp_wts) + fx.Int64(recv_tok_id) * weight_bytes
@@ -720,7 +708,7 @@ def make_combine_kernel(
                 else:
                     dest_pe = dest_tok_enc // max_tok_per_rank
                     dest_lid = dest_tok_enc % max_tok_per_rank
-                peer_base = SmemPtr.load(_lds_p2p_bases, [dest_pe])
+                peer_base = fx.memref_load(_lds_p2p_bases, dest_pe)
                 dest_off = fx.Int64(rank * max_tok_per_rank + dest_lid) * nbytes
                 dest_tok_addr = arith.unwrap(peer_base) + dest_off
                 src_tok_addr = addr_inp_tok + fx.Int64(recv_tok_id) * inp_nbytes  # inp_nbytes: bf16 under fp8_dc
@@ -748,7 +736,7 @@ def make_combine_kernel(
                             buffer_store(vec_a, rsrc_dst, chunk_i32_off)
 
                 if const_expr(enable_weights):
-                    wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [dest_pe])
+                    wt_pe_base = fx.memref_load(_lds_p2p_wt_bases, dest_pe)
                     wt_dest_off = fx.Int64(rank * max_tok_per_rank + dest_lid) * weight_bytes
                     wt_dest_addr = arith.unwrap(wt_pe_base) + wt_dest_off
                     wt_src_addr = arith.unwrap(addr_inp_wts) + fx.Int64(recv_tok_id) * weight_bytes
@@ -832,7 +820,7 @@ def make_combine_kernel(
                     if const_expr(zero_copy):
                         dtok_global = enc_k % max_recv
                         safe_dtok = vld_k.select(dtok_global, 0)
-                        peer_base = SmemPtr.load(_lds_p2p_bases, [safe_pe])
+                        peer_base = fx.memref_load(_lds_p2p_bases, safe_pe)
                         expert_tok_off = fx.Int64(safe_dtok) * nbytes
                         expert_tok_addr = arith.unwrap(peer_base) + expert_tok_off
                     else:
@@ -916,7 +904,7 @@ def make_combine_kernel(
                         if const_expr(zero_copy):
                             wt_dtok = wt_enc % max_recv
                             wt_safe_dtok = wt_vld.select(wt_dtok, 0)
-                            wt_pe_base = SmemPtr.load(_lds_p2p_wt_bases, [wt_safe_pe])
+                            wt_pe_base = fx.memref_load(_lds_p2p_wt_bases, wt_safe_pe)
                             wt_src_off = fx.Int64(wt_safe_dtok) * weight_bytes
                             wt_rsrc = create_buffer_resource_from_addr(_wave_uniform_i64(wt_pe_base + wt_src_off))
                         else:
@@ -930,7 +918,6 @@ def make_combine_kernel(
                     wt_out_off = wt_tok_id * experts_per_token + lane
                     buffer_store(wt_acc, rsrc_out_wts, wt_out_off)
 
-    ep_combine_intranode._allocator = allocator
     return ep_combine_intranode
 
 
@@ -1123,7 +1110,6 @@ def make_combine_jit(
     # See dispatch launcher for the ``str(torch.dtype)`` rationale.
     _key_data_type = str(data_type)
     _key_schema_version = _DISPATCH_COMBINE_JIT_SCHEMA_VERSION
-    _allocator = kernel._allocator
 
     @flyc.jit
     def combine_launch(
@@ -1163,13 +1149,6 @@ def make_combine_jit(
             _key_data_type,
             _key_schema_version,
         )
-        from flydsl.compiler.kernel_function import CompilationContext
-
-        _allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            _allocator.finalize()
-
         kernel(
             addr_inp_tok,
             addr_shmem_tok,

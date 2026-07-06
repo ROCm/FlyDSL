@@ -4,10 +4,9 @@
 from __future__ import annotations
 
 import functools
-import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -19,6 +18,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.runtime.device import get_rocm_arch
 
+from .communication_ops_utils import GeometryTuningTable
 from .flydsl_dispatch_combine_intranode_kernel import (
     make_combine_jit,
     make_dispatch_jit,
@@ -49,70 +49,6 @@ logger = logging.getLogger(__name__)
 
 # Per-shape tuning JSONs (schema: flydsl_{arch}_{model}_{kernel}_ep{n}.json).
 _TUNING_CONFIGS_DIR = Path(__file__).resolve().parent / "mega_moe_tuning_config"
-
-
-@dataclass
-class GeometryTuningTable:
-    """Per-shape token-count -> (block_num, warp_num_per_block) lookup; rounds up
-    to the smallest bucket >= count (largest on overflow, mori parity)."""
-
-    dispatch: Dict[int, Tuple[int, int]] = field(default_factory=dict)
-    combine: Dict[int, Tuple[int, int]] = field(default_factory=dict)
-
-    def __post_init__(self):
-        for phase, tbl in (("dispatch", self.dispatch), ("combine", self.combine)):
-            for n_tok, (bn, wpb) in tbl.items():
-                if bn <= 0 or wpb <= 0:
-                    raise ValueError(
-                        f"GeometryTuningTable.{phase}[{n_tok}] must be positive, "
-                        f"got block_num={bn}, warp_num_per_block={wpb}"
-                    )
-
-    @classmethod
-    def from_tuning_file(
-        cls, path, *, dtype, hidden_dim, zero_copy, topk=None, local_expert_num=None, combine_dtype="bf16"
-    ):
-        """Build a per-op table from a multi-shape tuning JSON, filtered to this
-        op's shape; empty table => cfg defaults."""
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-
-        def _match(r, want_dtype, need_zc):
-            if r.get("dtype") != want_dtype or int(r.get("hidden_dim", -1)) != hidden_dim:
-                return False
-            if topk is not None and "topk" in r and int(r["topk"]) != topk:
-                return False
-            if (
-                local_expert_num is not None
-                and "local_expert_num" in r
-                and int(r["local_expert_num"]) != local_expert_num
-            ):
-                return False
-            if need_zc and bool(r.get("zero_copy", False)) != bool(zero_copy):
-                return False
-            return True
-
-        def _build(rules, want_dtype, need_zc):
-            return {
-                int(r["num_tokens"]): (int(r["block_num"]), int(r["warp_num_per_block"]))
-                for r in rules
-                if _match(r, want_dtype, need_zc)
-            }
-
-        return cls(
-            dispatch=_build(raw.get("dispatch", []), dtype, need_zc=False),
-            combine=_build(raw.get("combine", []), combine_dtype, need_zc=True),
-        )
-
-    def lookup(self, phase, num_tokens):
-        """Smallest bucket >= num_tokens (largest on overflow); None if empty."""
-        tbl = self.dispatch if phase == "dispatch" else self.combine
-        if not tbl:
-            return None
-        if num_tokens in tbl:
-            return tbl[num_tokens]
-        candidates = [k for k in tbl if k >= num_tokens]
-        return tbl[min(candidates)] if candidates else tbl[max(tbl)]
 
 
 @functools.lru_cache(maxsize=None)
