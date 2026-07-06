@@ -183,18 +183,27 @@ def _load_mega_gemm2_rows(ep_size: int, gpu_model):
     return tuple(raw.get("megagemm2", []))
 
 
-def _mega_gemm2_tuned_table(model_dim, inter_dim, experts, topk, ep_size, gpu_model):
-    """Per-M fused gemm2 tile table ``{num_tokens: (tile_m, tile_n, tile_k)}`` from
-    the tune JSON, keyed by GEMM2 shape. ``experts`` is the LOCAL per-rank expert
-    count. Returns the dict, or ``None`` on a miss (op falls back to its default
-    tile). RAW tiles -- the op clamps tile_m to a divisor of sort_block_m at run
-    time. Default entry point for ``MegaMoE`` (no env gate)."""
+def _mega_gemm2_tuned_table(model_dim, inter_dim, experts, topk, ep_size, gpu_model,
+                            quant=None):
+    """Per-M fused gemm2 config table ``{num_tokens: {tile_m, tile_n, tile_k,
+    [xcd_swizzle], [persist_m], [b_nt]}}`` from the tune JSON, keyed by GEMM2 shape.
+    ``experts`` is the LOCAL per-rank expert count. Returns the dict, or ``None`` on a
+    miss (op falls back to its ctor defaults).
+
+    Tile is required per row; ``xcd_swizzle`` / ``persist_m`` / ``b_nt`` are OPTIONAL
+    (like aiter's kernel-name-encoded knobs) and only override the op ctor default when
+    present. RAW tiles -- the op clamps tile_m to a divisor of sort_block_m at run time.
+    ``quant`` ("a8w4"/"a4w4") filters rows by the row's ``dtype`` (the activation quant;
+    weights are always fp4); passing None keeps the legacy dtype-agnostic match."""
     rows = _load_mega_gemm2_rows(int(ep_size), gpu_model)
     if not rows:
         return None
+    want_dtype = _MEGA_QUANT_TO_DTYPE.get(quant) if quant is not None else None
 
     def _match(r):
         try:
+            if want_dtype is not None and r.get("dtype") != want_dtype:
+                return False
             return (int(r["model_dim"]) == int(model_dim)
                     and int(r["inter_dim"]) == int(inter_dim)
                     and int(r["expert"]) == int(experts)
@@ -206,10 +215,17 @@ def _mega_gemm2_tuned_table(model_dim, inter_dim, experts, topk, ep_size, gpu_mo
     for r in rows:
         if _match(r):
             try:
-                table[int(r["num_tokens"])] = (
-                    int(r["tile_m"]), int(r["tile_n"]), int(r["tile_k"]))
+                entry = {"tile_m": int(r["tile_m"]), "tile_n": int(r["tile_n"]),
+                         "tile_k": int(r["tile_k"])}
             except (KeyError, ValueError):
                 continue
+            for opt in ("xcd_swizzle", "persist_m", "b_nt"):  # optional per-bucket knobs
+                if r.get(opt) is not None:
+                    try:
+                        entry[opt] = int(r[opt])
+                    except (ValueError, TypeError):
+                        pass
+            table[int(r["num_tokens"])] = entry
     return table or None
 
 
@@ -329,7 +345,7 @@ class MegaMoeStage2:
         comb_op: FlyDSLDispatchCombineIntraNodeOp,
         inter_dim: int,
         tile_m: int = 32, tile_n: int = 128, tile_k: int = 128,
-        persist_m: int = 4,
+        persist_m: int = -1,   # <=0 -> persistent mode (grid_y=cu_num), the default; >0 = legacy N-tile
         sort_block_m: int = 0,
         b_nt: int = 2,
         a_dtype: str = "fp8",
@@ -373,14 +389,25 @@ class MegaMoeStage2:
         else:
             self._out_dtype_str = "bf16" if comb_cfg.data_type == torch.bfloat16 else "f16"
 
-        # Per-tile JIT caches: the gemm2 kernel bakes (tile_m,tile_n,tile_k) as
-        # compile-time constants, so we compile/cache one kernel per distinct tile
-        # and pick by run_tokens at run() (mirrors aiter's per-M selection). The
-        # heavy comb_op shmem is shared -> no extra symmetric-heap cost.
+        # Per-config JIT caches: the gemm2 kernel bakes (tile_m,tile_n,tile_k,persist_m,
+        # b_nt,xcd_swizzle) as compile-time constants, so we compile/cache one kernel per
+        # distinct config and pick by run_tokens at run() (mirrors aiter's per-M selection).
+        # The heavy comb_op shmem is shared -> no extra symmetric-heap cost.
         self._launch_by_tile = {}
         self._compiled_by_tile = {}
-        # Optional {pow2_token: (tile_m, tile_n, tile_k)} table; None -> default tile.
-        self._tile_table = dict(gemm2_tile_table) if gemm2_tile_table else None
+        # Optional {pow2_token: {tile_m,tile_n,tile_k,[xcd_swizzle],[persist_m],[b_nt]}}
+        # table; None -> ctor defaults. Legacy 3-tuple values are normalised to dicts.
+        if gemm2_tile_table:
+            self._tile_table = {}
+            for _tok, _v in dict(gemm2_tile_table).items():
+                if isinstance(_v, dict):
+                    self._tile_table[int(_tok)] = dict(_v)
+                else:  # legacy (tile_m, tile_n, tile_k)
+                    _tm, _tn, _tk = _v
+                    self._tile_table[int(_tok)] = {
+                        "tile_m": int(_tm), "tile_n": int(_tn), "tile_k": int(_tk)}
+        else:
+            self._tile_table = None
         # With a per-M table active, stage1 lays sorted_expert_ids at a FIXED block
         # (MegaMoE: 32). gemm2 must read at that block (tile_m only sub-tiles within
         # it), so pin sort_block_m=32 (default sort_block_m<=0 assumes == tile_m,
@@ -415,12 +442,15 @@ class MegaMoeStage2:
         return tm
 
     def _select_tile(self, run_tokens):
-        """Pick (tile_m, tile_n, tile_k) for this forward's run_tokens via the
-        host-static table (nextPow2 bucket, clamped to the table range), mirroring
-        aiter's get_2stage_cfgs. Falls back to the ctor tile when no table/tokens.
+        """Pick the full gemm2 config ``(tile_m, tile_n, tile_k, persist_m, b_nt,
+        xcd_swizzle)`` for this forward's run_tokens via the host-static table
+        (nextPow2 bucket, clamped to the table range), mirroring aiter's get_2stage_cfgs.
+        Per-bucket ``persist_m``/``b_nt``/``xcd_swizzle`` override the ctor default only
+        when present in the table row; tile falls back to the ctor tile with no table.
         The chosen tile_m is always clamped to a divisor of sort_block_m."""
         if not self._tile_table or run_tokens is None:
-            return (self._clamp_tile_m(self.tile_m), self.tile_n, self.tile_k)
+            return (self._clamp_tile_m(self.tile_m), self.tile_n, self.tile_k,
+                    self.persist_m, self.b_nt, self.xcd_swizzle)
         keys = sorted(self._tile_table)
         b = self._next_pow2(run_tokens)
         if b < keys[0]:
@@ -430,8 +460,13 @@ class MegaMoeStage2:
         if b not in self._tile_table:
             ge = [k for k in keys if k >= b]
             b = ge[0] if ge else keys[-1]
-        tm, tn, tk = self._tile_table[b]
-        return (self._clamp_tile_m(tm), int(tn), int(tk))
+        row = self._tile_table[b]
+        return (
+            self._clamp_tile_m(row["tile_m"]), int(row["tile_n"]), int(row["tile_k"]),
+            int(row.get("persist_m", self.persist_m)),
+            int(row.get("b_nt", self.b_nt)),
+            int(row.get("xcd_swizzle", self.xcd_swizzle)),
+        )
 
     def _alloc_dummy_tensors(self):
         """Pre-allocate placeholder tensors at ctor time (torch.zeros/empty inside
@@ -500,22 +535,25 @@ class MegaMoeStage2:
             run_tokens=run_tokens,
         )
 
-    def _ensure_launch_fn(self, tile=None):
-        """Build (once) and cache the launch_fn for ``tile`` (defaults to the ctor
-        tile), keyed by distinct (tile_m, tile_n, tile_k)."""
-        if tile is None:
-            tile = (self.tile_m, self.tile_n, self.tile_k)
-        tile = tuple(int(v) for v in tile)
+    def _ensure_launch_fn(self, cfg=None):
+        """Build (once) and cache the launch_fn for ``cfg`` (defaults to the ctor
+        config), keyed by distinct (tile_m, tile_n, tile_k, persist_m, b_nt, xcd_swizzle)
+        -- all baked as compile-time constants."""
+        if cfg is None:
+            cfg = (self.tile_m, self.tile_n, self.tile_k,
+                   self.persist_m, self.b_nt, self.xcd_swizzle)
+        cfg = tuple(int(v) for v in cfg)
+        tile_m, tile_n, tile_k, persist_m, b_nt, xcd_swizzle = cfg
         # Divisibility contract: tile_m must divide the real sort block stage1
         # emitted sorted_expert_ids at, else the kernel silently produces garbage.
         # sort_block_m<=0 => kernel assumes == tile_m (always OK).
-        if int(self.sort_block_m) > 0 and (int(self.sort_block_m) % tile[0]) != 0:
+        if int(self.sort_block_m) > 0 and (int(self.sort_block_m) % tile_m) != 0:
             raise ValueError(
-                f"MegaMoeStage2: gemm2 tile_m={tile[0]} must divide "
+                f"MegaMoeStage2: gemm2 tile_m={tile_m} must divide "
                 f"sort_block_m={self.sort_block_m} (stage1 sorted_expert_ids block). "
                 f"Pick tile_m in divisors of {self.sort_block_m}."
             )
-        lf = self._launch_by_tile.get(tile)
+        lf = self._launch_by_tile.get(cfg)
         if lf is not None:
             return lf
         comb_cfg = self.comb_cfg
@@ -532,20 +570,20 @@ class MegaMoeStage2:
             inter_dim=self.inter_dim,
             experts=comb_cfg.num_experts_per_rank,
             topk=k,
-            tile_m=tile[0], tile_n=tile[1], tile_k=tile[2],
-            persist_m=self.persist_m,
+            tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
+            persist_m=persist_m,
             sort_block_m=self.sort_block_m,
-            b_nt=self.b_nt,
+            b_nt=b_nt,
             a_dtype=self.a_dtype, b_dtype=self.b_dtype,
             out_dtype=self._out_dtype_str,
             rank=comb_cfg.rank, npes=comb_cfg.world_size,
             max_tok_per_rank=comb_cfg.max_num_inp_token_per_rank,
             experts_per_token=k,
-            xcd_swizzle=self.xcd_swizzle,
+            xcd_swizzle=xcd_swizzle,
             use_token_flag_sync=self.use_token_flag_sync,
             doweight_fused=self.doweight_fused,
         )
-        self._launch_by_tile[tile] = lf
+        self._launch_by_tile[cfg] = lf
         return lf
 
     def _run_stage1_only(self, *, a2, w2, a2_scale, w2_scale,
@@ -553,10 +591,10 @@ class MegaMoeStage2:
                          num_valid_ids, wts_buf=None, cur_tok=None, bias=None, stream=None,
                          run_tokens=None):
         """fused GEMM2 (epilogue P2P scatter) + combine_no_stage1 (Stage 2/3)."""
-        # Per-M tile selection keys on the un-expanded forward token count (NOT the
+        # Per-M config selection keys on the un-expanded forward token count (NOT the
         # topk-expanded gemm rows); host-static so the kernel is baked into each graph.
-        tile = self._select_tile(run_tokens)
-        launch_fn = self._ensure_launch_fn(tile)
+        cfg = self._select_tile(run_tokens)
+        launch_fn = self._ensure_launch_fn(cfg)
 
         comb_cfg = self.comb_cfg
         comb_op  = self.comb_op
@@ -608,7 +646,7 @@ class MegaMoeStage2:
             comb_op._fx_p2p_comb_flag,
             comb_op._fx_out_total_recv,
         )
-        compiled = self._compiled_by_tile.get(tile)
+        compiled = self._compiled_by_tile.get(cfg)
         if compiled is None:
             compiled = flyc.compile(
                 launch_fn,
@@ -617,7 +655,7 @@ class MegaMoeStage2:
                 fx.Int32(size_expert_ids),
                 s_fx,
             )
-            self._compiled_by_tile[tile] = compiled
+            self._compiled_by_tile[cfg] = compiled
         else:
             compiled(
                 *common_args,
@@ -1085,7 +1123,8 @@ class MegaMoE:
                     gemm2_tile_table = _mega_gemm2_tuned_table(
                         int(model_dim), int(inter_dim),
                         int(self.experts) // int(self.world_size), int(topk),
-                        int(self.world_size), _detect_gpu_model_name(int(self.rank)))
+                        int(self.world_size), _detect_gpu_model_name(int(self.rank)),
+                        quant=self.quant)
                     if int(self.rank) == 0:
                         print(f"[MegaGemm2] auto-config tile table (sort_block_m={_s1_sbm}): "
                               f"{'<miss -> default tile>' if not gemm2_tile_table else gemm2_tile_table}",
@@ -1096,7 +1135,8 @@ class MegaMoE:
             # only holds (tile_m,tile_n,tile_k)). Forward them unconditionally so tuning them does
             # NOT require also pinning tile_m (which would clobber the tune table's optimal prefill
             # tile_m=64). tile_m/n/k stay conditional -> only an explicit gemm2_tile_m>0 overrides
-            # the table. (gemm2_persist_m=-1 is the "unset" sentinel -> keep MegaMoeStage2 default.)
+            # the table. gemm2_persist_m<=0 (default -1) -> MegaMoeStage2's persistent mode
+            # (grid_y=cu_num, matches aiter's dsv4/EP gemm2 `_persist`); >0 opts into legacy N-tile.
             g2_kwargs = dict(
                 comb_cfg=self.comb_cfg, comb_op=self.comb_op, inter_dim=int(inter_dim),
                 a_dtype=self.a2_dtype, b_dtype="fp4", sort_block_m=_s1_sbm,
