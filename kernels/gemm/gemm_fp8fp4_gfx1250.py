@@ -118,8 +118,10 @@ def compile_fp8fp4_gemm(
             uint8 E8M0 — both row-major, no preshuffle.
 
     Returns a JitFunction:
-        launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, M, N, lda, ldc, stream)
-    where lda/ldc are A/C runtime leading-dim strides in elements (dense: lda=K, ldc=N).
+        launch_fn(arg_c, arg_a, arg_b, arg_a_scale, arg_b_scale, M, N, lda, ldc,
+                  stream, lda_scale=<dense default>)
+    where lda/ldc are A/C runtime leading-dim strides in elements (dense: lda=K,
+    ldc=N), and lda_scale is the A-scale row stride in scale elements.
     """
     if data_format not in ("fp4", "fp8", "a8w4"):
         raise ValueError(f"data_format must be 'fp4', 'fp8', or 'a8w4', got {data_format!r}")
@@ -536,6 +538,7 @@ def compile_fp8fp4_gemm(
         i32_n: fx.Int32,
         i32_lda: fx.Int32,
         i32_ldc: fx.Int32,
+        i32_lda_scale: fx.Int32,
     ):
         # Enable back-to-back WMMA issue (SCHED_MODE bit[4] = DISABLE_VALU_STALL)
         rocdl.disable_xdl_arb_stall()
@@ -599,13 +602,13 @@ def compile_fp8fp4_gemm(
 
         if const_expr(use_ascale_vgpr):
             # A-scale VGPR path: read scale_A[M, K//32] directly from its row-major layout.
-            _ascale_nbytes = m_idx * arith.index(K_scale)
+            _ascale_row_i32 = fx.Index(i32_lda_scale) / arith.index(4)
+            _ascale_nbytes = m_idx * fx.Index(i32_lda_scale)
             _ascale_rsrc = buffer_ops.create_buffer_resource(
                 arg_a_scale,
                 max_size=False,
                 num_records_bytes=_ascale_nbytes,
             )
-            _ascale_row_i32 = K_scale // 4
             _ascale_row0 = blk_m + warp_m_base + lane16
             if const_expr(ascale_opsel):
                 _ascale_row0 = _ascale_row0 + lane_kgrp * arith.index(ascale_half * WMMA_M)
@@ -616,7 +619,7 @@ def compile_fp8fp4_gemm(
                 with ir.InsertionPoint(if_op.then_block):
                     vals = _load_contig_i32(
                         _ascale_rsrc,
-                        row * arith.index(_ascale_row_i32),
+                        row * _ascale_row_i32,
                         n,
                         soff,
                     )
@@ -634,7 +637,7 @@ def compile_fp8fp4_gemm(
                     if const_expr(guarded):
                         ks_vals = _load_contig_i32_guarded_row(row, k_wmma_steps, soff)
                     else:
-                        vidx = row * arith.index(_ascale_row_i32)
+                        vidx = row * _ascale_row_i32
                         ks_vals = _load_contig_i32(_ascale_rsrc, vidx, k_wmma_steps, soff)
                     for ks in range_constexpr(k_wmma_steps):
                         vals[ks * ascale_load + i] = ks_vals[ks]
@@ -730,6 +733,8 @@ def compile_fp8fp4_gemm(
         else:
             lda_packed = fx.Index(i32_lda) / arith.index(PACK_FACTOR_A)
 
+        lda_scale_val = fx.Index(i32_lda_scale)
+
         n_stride = fx.Index(i32_ldc)
         c_nrec = m_idx * n_stride * arith.index(elem_bytes_d)
         c_rsrc = buffer_ops.create_buffer_resource(arg_c, num_records_bytes=c_nrec)
@@ -823,7 +828,7 @@ def compile_fp8fp4_gemm(
                     lds_memref=memref,
                     global_offset=(blk_m, col_off),
                     tensor_shape=(tile_m, K_blockscale),
-                    strides=(K_blockscale, 1),
+                    strides=(lda_scale_val, 1),
                     tile_shape=(tile_m, k_wmma_steps),
                     elem_bytes=1,
                     pad_interval=0,
@@ -2785,6 +2790,7 @@ def compile_fp8fp4_gemm(
         i32_lda: fx.Int32,
         i32_ldc: fx.Int32,
         stream: fx.Stream,
+        i32_lda_scale: fx.Int32 = (K_blockscale if is_blockscale else K_scale),
     ):
         _ = cache_tag
         ctx = CompilationContext.get_current()
@@ -2811,6 +2817,7 @@ def compile_fp8fp4_gemm(
             i32_n,
             i32_lda,
             i32_ldc,
+            i32_lda_scale,
             value_attrs={
                 "rocdl.waves_per_eu": effective_waves_per_eu,
                 "rocdl.cluster_dims": f"{cluster_m},{cluster_n},1" if const_expr(use_cluster) else None,

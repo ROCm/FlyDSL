@@ -392,6 +392,17 @@ def _with_strided_a(a: torch.Tensor, problem_shape: dict[str, int], lda: int) ->
     return a_strided
 
 
+def _with_strided_a_scale(a_scale: torch.Tensor, cols: int, lda_scale: int) -> torch.Tensor:
+    """Return A-scale backed by runtime lda_scale when it exceeds the logical column count."""
+    if a_scale.shape[1] != cols:
+        raise ValueError(f"A scale.shape={tuple(a_scale.shape)} expected {cols} columns")
+    if lda_scale == cols:
+        return a_scale
+    padded = torch.zeros(a_scale.shape[0], lda_scale, dtype=a_scale.dtype, device=a_scale.device)
+    padded[:, :cols] = a_scale
+    return padded
+
+
 def _run_gemm_test(
     scale_mode,
     data_format,
@@ -416,6 +427,7 @@ def _run_gemm_test(
     ascale_load_path=None,
     lda_extra=0,
     ldc_extra=0,
+    ascale_lda_extra=0,
     return_launch_fn=False,
 ):
     """Shared correctness body for mxscale, PTPC, and blockscale GEMM variants."""
@@ -448,6 +460,12 @@ def _run_gemm_test(
 
     if is_mxscale and ascale_load_path is None:
         ascale_load_path = _select_ascale_load_path(M)
+    ascale_stride_supported = is_blockscale or (is_mxscale and ascale_load_path == "vgpr")
+    if ascale_lda_extra and not ascale_stride_supported:
+        raise ValueError(
+            "ascale_lda_extra only applies to blockscale or mxscale ascale_load_path='vgpr' "
+            f"(got scale_mode={scale_mode!r}, ascale_load_path={ascale_load_path!r})"
+        )
     tdm_store_enabled = split_k == 1
 
     num_k_tiles = local_k // tile_k
@@ -497,6 +515,10 @@ def _run_gemm_test(
         run_attrs.append(f"lda={kernel_k + lda_extra}")
     if ldc_extra:
         run_attrs.append(f"ldc={kernel_n + ldc_extra}")
+    if ascale_lda_extra:
+        run_attrs.append(
+            f"lda_scale={(kernel_k // SCALE_BLOCK if is_mxscale else kernel_k // BLOCKSCALE_K) + ascale_lda_extra}"
+        )
     run_attrs.append("preshuffle")
     attr_str = ", " + ", ".join(run_attrs) if run_attrs else ""
     print(
@@ -508,14 +530,22 @@ def _run_gemm_test(
     lda = kernel_k + lda_extra
     ldc = kernel_n + ldc_extra
 
+    lda_scale = None
+    if ascale_stride_supported:
+        ascale_cols = kernel_k // SCALE_BLOCK if is_mxscale else kernel_k // BLOCKSCALE_K
+        lda_scale = ascale_cols + ascale_lda_extra
+
     if is_mxscale:
         _validate_mxscale_inputs(a, b, a_scale, b_scale, problem_shape)
         a = _with_strided_a(a, problem_shape, lda)
         a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
+        if ascale_load_path == "vgpr":
+            a_scale = _with_strided_a_scale(a_scale, ascale_cols, lda_scale)
         b_scale = preshuffle_scale(b_scale)
     elif is_blockscale:
         _validate_blockscale_inputs(a, b, a_scale, b_scale, problem_shape)
         a = _with_strided_a(a, problem_shape, lda)
+        a_scale = _with_strided_a_scale(a_scale, ascale_cols, lda_scale)
     else:
         _validate_ab_inputs(a, b, problem_shape)
         _expect_shape("A scale", a_scale, (kernel_m,))
@@ -567,7 +597,7 @@ def _run_gemm_test(
     as_flat = as_gpu.contiguous()
     bs_flat = bs_gpu.contiguous()
 
-    flyc.compile(
+    compile_args = [
         launch_fn,
         c_flat,
         a_flat,
@@ -579,7 +609,10 @@ def _run_gemm_test(
         lda,
         ldc,
         torch.cuda.current_stream(),
-    )
+    ]
+    if ascale_lda_extra:
+        compile_args.append(lda_scale)
+    flyc.compile(*compile_args)
     torch.cuda.synchronize()
 
     c_out = c_gpu[:M, :N].to(torch_out_dtype).cpu()
@@ -1434,6 +1467,28 @@ def test_gemm_strided(scale_mode, data_format, lda_extra, ldc_extra):
     )
 
 
+@pytest.mark.parametrize("scale_mode", ["mxscale", "blockscale"])
+@pytest.mark.parametrize("ascale_lda_extra", [16, 64])
+def test_ascale_strided(scale_mode, ascale_lda_extra):
+    """Strided A-scale: data backed by a wider row pitch, passed via runtime lda_scale."""
+    _run_gemm_test(
+        scale_mode,
+        "fp8",
+        128,
+        256,
+        512,
+        128,
+        256,
+        128,
+        2,
+        2,
+        num_buffers=4,
+        out_dtype="bf16",
+        ascale_load_path="vgpr" if scale_mode == "mxscale" else None,
+        ascale_lda_extra=ascale_lda_extra,
+    )
+
+
 @pytest.mark.parametrize("split_k", [2, 4])
 @pytest.mark.parametrize("data_format, out_dtype", [("fp8", "bf16"), ("fp8", "f32"), ("a8w4", "bf16")])
 def test_ptpc_gemm_splitk(data_format, split_k, out_dtype):
@@ -1761,7 +1816,9 @@ def _run_benchmark(args):
                 a_scale = torch.full((M, K // BLOCKSCALE_K), 127, dtype=torch.uint8)
                 b_scale = torch.full((N // BLOCKSCALE_N, K // BLOCKSCALE_K), 127, dtype=torch.uint8)
                 if verbose:
-                    print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), E8M0 block scales byte=127 (=1.0)")
+                    print(
+                        f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), E8M0 block scales byte=127 (=1.0)"
+                    )
             else:
                 a_, b_, a_scale, b_scale = _random_blockscale_inputs(M, N, K)
                 if verbose:
