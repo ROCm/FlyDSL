@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-06T05:02:52Z",
+ "updated": "2026-07-06T05:04:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28768961496,
+   "pr": 803,
+   "commit": "788070152c316e83628554119cde4bfbb4ad1258",
+   "branch": "pr/fix-jit-cache-key-recursion",
+   "event": "pull_request",
+   "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496",
+   "created_at": "2026-07-06T05:01:55Z",
+   "updated_at": "2026-07-06T05:02:41Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-06T05:02:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85298817728"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-06T05:02:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85298817738"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-06T05:02:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85298817749"
+    }
+   ]
+  },
   {
    "run_id": 28768891975,
    "pr": 803,
@@ -10,38 +53,38 @@
    "branch": "pr/fix-jit-cache-key-recursion",
    "event": "pull_request",
    "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975",
    "created_at": "2026-07-06T04:59:57Z",
-   "updated_at": "2026-07-06T05:01:13Z",
+   "updated_at": "2026-07-06T05:01:56Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-06T05:01:13Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T05:01:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975/job/85298675176"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-06T05:01:13Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T05:01:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975/job/85298675208"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-06T05:01:13Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T05:01:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768891975/job/85298675217"
     }
    ]
@@ -1659,21 +1702,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28568330570",
    "created_at": "2026-07-02T05:45:08Z",
    "updated_at": "2026-07-02T05:45:08Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28568317133,
-   "pr": null,
-   "commit": "f5adba9f567f10d431dfc538f6d4e01772ffcc23",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28568317133",
-   "created_at": "2026-07-02T05:44:46Z",
-   "updated_at": "2026-07-02T05:44:46Z",
    "actor": "jhinpan",
    "jobs": []
   }
