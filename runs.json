@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-06T07:54:56Z",
+ "updated": "2026-07-06T07:59:43Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -139,20 +139,20 @@
    "branch": "pr/fix-jit-cache-key-recursion",
    "event": "pull_request",
    "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496",
    "created_at": "2026-07-06T05:01:55Z",
-   "updated_at": "2026-07-06T07:38:05Z",
+   "updated_at": "2026-07-06T07:57:50Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-06T07:38:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-06T07:57:49Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496/job/85315241391"
     },
     {
