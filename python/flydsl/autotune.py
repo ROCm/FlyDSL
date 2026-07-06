@@ -287,7 +287,7 @@ class Autotuner:
         def kernel_call():
             # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
             # hook that sets up state (incl. mutating a tensor) isn't clobbered
-            # by the restore. (Matches Triton: pre_hook runs on clean inputs.)
+            # by the restore. Each benchmark rep starts from clean inputs.
             self._restore_tensors(snapshot)
             self._reset_tensors(args, merged_kwargs)
             if config.pre_hook:
