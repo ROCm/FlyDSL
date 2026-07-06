@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-06T09:18:38Z",
+ "updated": "2026-07-06T09:26:25Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28781375224,
+   "pr": 772,
+   "commit": "7397803890774c8fca2be807a55f50464c5ca1d5",
+   "branch": "yanbo/combine_perf_tuning",
+   "event": "pull_request",
+   "title": "[Feat]: Add dispatch & combine tuning configuration",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224",
+   "created_at": "2026-07-06T09:23:28Z",
+   "updated_at": "2026-07-06T09:23:29Z",
+   "actor": "yanboshao",
+   "jobs": []
+  },
   {
    "run_id": 28781004239,
    "pr": 772,
@@ -10,11 +25,11 @@
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
    "title": "[Feat]: Add dispatch & combine tuning configuration",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781004239",
    "created_at": "2026-07-06T09:17:24Z",
-   "updated_at": "2026-07-06T09:17:25Z",
+   "updated_at": "2026-07-06T09:23:30Z",
    "actor": "yanboshao",
    "jobs": []
   },
@@ -1846,21 +1861,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28571494733",
    "created_at": "2026-07-02T06:56:35Z",
    "updated_at": "2026-07-02T06:56:35Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28571478837,
-   "pr": null,
-   "commit": "8e7d1e83c031c556b9c963d9cdd22e2f30ed0c88",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28571478837",
-   "created_at": "2026-07-02T06:56:14Z",
-   "updated_at": "2026-07-02T06:56:14Z",
    "actor": "jhinpan",
    "jobs": []
   }
