@@ -45,7 +45,7 @@ DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
 DTYPE_BF16 = torch.bfloat16
 
-from kernels.custom_all_reduce import init_custom_ar, meta_size  # noqa: E402
+from kernels.comm.custom_all_reduce import init_custom_ar, meta_size  # noqa: E402
 
 # ============================================================================
 # Performance profiling utilities (copied from aiter/aiter/test_common.py)

@@ -522,7 +522,7 @@ if "pytest" in sys.modules:
 
 import mori.shmem as ms  # noqa: E402
 
-from kernels.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
+from kernels.comm.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
     _DEFAULT_COMBINE_BLOCK_NUM,
     _DEFAULT_COMBINE_WARP_NUM,
     _DEFAULT_DISPATCH_BLOCK_NUM,

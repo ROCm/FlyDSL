@@ -32,7 +32,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from kernels.moe_gemm_2stage import compile_moe_reduction  # noqa: E402
+from kernels.moe.moe_gemm_2stage import compile_moe_reduction  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)

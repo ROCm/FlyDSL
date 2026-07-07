@@ -18,7 +18,7 @@ import os
 
 import pytest
 
-from kernels.topk_gating_softmax_kernel import (
+from kernels.moe.topk_gating_softmax_kernel import (
     build_topk_gating_softmax_module,
 )
 from tests.kernels.benchmark_common import (

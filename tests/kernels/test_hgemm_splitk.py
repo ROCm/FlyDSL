@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.hgemm_splitk import hgemm_splitk_
+from kernels.gemm.hgemm_splitk import hgemm_splitk_
 from tests.test_common import run_perftest, verify_output
 
 logging.basicConfig(level=logging.INFO)

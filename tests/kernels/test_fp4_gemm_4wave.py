@@ -27,7 +27,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.fp4_gemm_4wave import compile_fp4_gemm_4w  # noqa: E402
+from kernels.gemm.fp4_gemm_4wave import compile_fp4_gemm_4w  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 

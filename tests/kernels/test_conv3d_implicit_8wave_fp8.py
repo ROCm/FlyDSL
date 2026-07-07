@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv3d_implicit_8wave_fp8 import conv3d_implicit_8wave_fp8
+from kernels.conv.conv3d_implicit_8wave_fp8 import conv3d_implicit_8wave_fp8
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
