@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Dual-wave, software-pipelined flash-attention kernel for gfx950 (D=128, bf16/fp16).
+"""Dual-wave, software-pipelined flash-attention kernel for gfx950 (D=64/128, bf16/fp16).
 
 The gfx950 fast path of FlyDSL flash attention: same math as the generic
 ``flash_attn_generic.py`` BLOCK_M=256 path, but with a hand-built software
 pipeline and two-wave-group time-multiplexing instead of the compiler schedule.
-Dispatched only when gpu_arch >= gfx950, head_dim == 128, dtype in (bf16, fp16),
+Dispatched only when gpu_arch >= gfx950, head_dim in (64, 128), dtype in (bf16, fp16),
 and (at runtime) seq_len >= 384. seq_len need NOT be a multiple of 256/64: a
 partial last q-block and a partial/odd kv-tile count are handled the same way as
 the hand-written reference asm (num_records bound on Q/K/V/O, tile count rounded
@@ -107,7 +107,7 @@ def build_flash_attn_dualwave_swp_module(
     paged=False,
     kv_cache_layout="linear",
 ):
-    """Build an DUALWAVE_SWP flash_attn launcher for D=128 bf16/f16 on gfx950.
+    """Build an DUALWAVE_SWP flash_attn launcher for D=64/128 bf16/f16 on gfx950.
 
     ``varlen`` builds the QKV variable-length (packed) variant: Q/O are
     ``[total_q, H, D]``, K/V are ``[total_kv, H_kv, D]``, and per-batch token
@@ -124,8 +124,8 @@ def build_flash_attn_dualwave_swp_module(
 
     if not gpu_arch.startswith("gfx950"):
         raise RuntimeError(f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}")
-    if head_dim != 128:
-        raise RuntimeError(f"flash_attn_dualwave_swp is D=128 only, got head_dim={head_dim}")
+    if head_dim not in (64, 128):
+        raise RuntimeError(f"flash_attn_dualwave_swp supports D=64 or D=128 only, got head_dim={head_dim}")
     if dtype_str not in ("bf16", "f16"):
         raise RuntimeError(f"flash_attn_dualwave_swp supports bf16/f16 only, got dtype={dtype_str}")
 
@@ -165,9 +165,7 @@ def build_flash_attn_dualwave_swp_module(
     DEFAULT_STRIDE_Q_N = NUM_HEADS_Q * HEAD_DIM
     DEFAULT_STRIDE_KV_N = NUM_HEADS_KV * HEAD_DIM
 
-    # LDS trait constants (gqa_d128_kernel_template.hpp §4-5). Interleaved
-    # double-buffer K0,V0,K1,V1; per-line stride = smem_linear_wave + padding
-    # (K: 520 bf16, V: 544 bf16); total LDS (2 K + 2 V) = 68096 B.
+    # Interleaved double-buffer K0,V0,K1,V1; each D line is 64 bf16.
     BF16_BYTES = 2
     D_128B_SIZE = 64  # = 128 B / sizeof(bf16) = 64 bf16
     VEC_KV = 8  # bf16 per ds_read pack (also MFMA pack_a/pack_b)
@@ -179,21 +177,21 @@ def build_flash_attn_dualwave_swp_module(
     SMEM_V_PAD = 64 // BF16_BYTES  # 32 bf16 (= 64 B padding)
     SMEM_K_LINE_STRIDE = SMEM_LINEAR_WAVE + SMEM_K_PAD  # 520 bf16
     SMEM_V_LINE_STRIDE = SMEM_LINEAR_WAVE + SMEM_V_PAD  # 544 bf16
-    SMEM_K_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_K_LINE_STRIDE  # 8 * 2 * 520 = 8320
-    SMEM_V_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_V_LINE_STRIDE  # 8 * 2 * 544 = 8704
+    SMEM_K_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_K_LINE_STRIDE
+    SMEM_V_TILE_ELEMS = SMEM_N_RPT * SMEM_D_RPT * SMEM_V_LINE_STRIDE
     NUM_PREFETCH_K = 2  # DUALWAVE_SWP double-buffer
     # DUALWAVE_SWP interleaved layout: [K0][V0][K1][V1]
-    DUALWAVE_SWP_KV_PER_BUFFER = SMEM_K_TILE_ELEMS + SMEM_V_TILE_ELEMS  # 17024 bf16 per (K, V) pair
-    LDS_KV_TOTAL_SIZE = NUM_PREFETCH_K * DUALWAVE_SWP_KV_PER_BUFFER  # 34048 bf16 = 68096 B
+    DUALWAVE_SWP_KV_PER_BUFFER = SMEM_K_TILE_ELEMS + SMEM_V_TILE_ELEMS
+    LDS_KV_TOTAL_SIZE = NUM_PREFETCH_K * DUALWAVE_SWP_KV_PER_BUFFER
     # K and V buffer bases (bf16 element offsets within the unified LDS region).
-    DUALWAVE_SWP_K_BUF_BASE = (0, DUALWAVE_SWP_KV_PER_BUFFER)  # K[0]=0, K[1]=17024
+    DUALWAVE_SWP_K_BUF_BASE = (0, DUALWAVE_SWP_KV_PER_BUFFER)
     DUALWAVE_SWP_V_BUF_BASE = (
-        SMEM_K_TILE_ELEMS,  # V[0]=8320
+        SMEM_K_TILE_ELEMS,
         SMEM_K_TILE_ELEMS + DUALWAVE_SWP_KV_PER_BUFFER,
-    )  # V[1]=25344
+    )
     # u_rk DUALWAVE_SWP strides (per derived element strides for the 8-axis u_rk layout).
     #   N-grp y-axis (axis 2)  : stride 256 bf16 (between v_s_lo and v_s_hi)
-    #   K-step axis (axes 4, 5): inner stride 16 (i_5 step), outer 4160 (i_4 d_rpt)
+    #   K-step axis (axes 4, 5): inner stride 16, outer stride between D lines
     DUALWAVE_SWP_URK_N_STRIP_STRIDE = 256  # bf16 offset to add for v_s_hi (n_strip=1)
     DUALWAVE_SWP_URK_KSTEP_INNER = 16  # bf16 stride between consecutive K-steps within a d_rpt
     DUALWAVE_SWP_URK_KSTEP_OUTER = SMEM_N_RPT * SMEM_K_LINE_STRIDE  # 4160 bf16 between d_rpt=0/1 arrays
@@ -209,8 +207,7 @@ def build_flash_attn_dualwave_swp_module(
     DUALWAVE_SWP_URV_DC_AXIS1 = 32  # axis 1 element stride (within half-D sub-row)
     DUALWAVE_SWP_URV_I5_STRIDE = D_128B_SIZE  # 64 (axis 5 element stride within a step_k)
 
-    # Shared-memory layout: a single 16B-aligned K/V region (K0/V0/K1/V1),
-    # 68096 B for the dual-wave software pipeline.
+    # Shared-memory layout: one 16B-aligned K/V region (K0/V0/K1/V1).
     _lds_elem_dtype = dtype_to_elem_type(dtype_str)
 
     # Stage the current split's page-id window, not the whole block-table row.
@@ -246,8 +243,7 @@ def build_flash_attn_dualwave_swp_module(
     # Vectorized uses kVS = 16/elem_size; only meaningful under PAGED.
     KV_VECTORIZED = paged and (kv_cache_layout == "vectorized")
     KV_VEC_SIZE = 16 // BF16_BYTES  # 8 for bf16/f16
-    # Vectorized V-LDS rows reuse dense per-wave padding: 512 elems + 32 pad = 544.
-    # 16 rows * 544 = 8704, so the existing V buffer allocation is unchanged.
+    # Vectorized V-LDS rows reuse dense per-wave padding: 512 elems + 32 pad.
     VEC_V_ROW_STRIDE = SMEM_V_LINE_STRIDE  # 544 (= 512 + dense SMEM_V_PAD 32)
     if kv_cache_layout not in ("linear", "vectorized"):
         raise ValueError(f"kv_cache_layout must be 'linear' or 'vectorized', got {kv_cache_layout!r}")
@@ -672,15 +668,20 @@ def build_flash_attn_dualwave_swp_module(
 
         def _sched_barrier_pairs(pairs, valu_cnt, group):
             """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups."""
+            pairs = _scale_sched_pairs(pairs)
             for _ in range_constexpr(pairs):
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_VALU_MASK, valu_cnt, group)
 
         def _sched_barrier_exp_pairs(pairs, exp_cnt, group):
             """Emit `pairs` × {1 MFMA + exp_cnt EXP} sched_group_barrier groups."""
+            pairs = _scale_sched_pairs(pairs)
             for _ in range_constexpr(pairs):
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_EXP_MASK, exp_cnt, group)
+
+        def _scale_sched_pairs(pairs):
+            return max(1, (pairs + 1) // 2) if HEAD_DIM == 64 else pairs
 
         def _ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes):
             byte_offset = lds_base_elem_idx * 2 + lds_kv_base_idx
@@ -714,7 +715,7 @@ def build_flash_attn_dualwave_swp_module(
             for pair in range_constexpr(K_STEPS_QK // 4):
                 q_32_packs.append(_concat_vectors(q_16_packs[pair * 2], q_16_packs[pair * 2 + 1]))
 
-            q_all = _concat_vectors(q_32_packs[0], q_32_packs[1])
+            q_all = q_32_packs[0] if const_expr(K_STEPS_QK == 4) else _concat_vectors(q_32_packs[0], q_32_packs[1])
             return Vec(q_all, (K_STEPS_QK * MFMA_LANE_K,), elem_dtype)
 
         def _scale_q_all(q_all_bf16):
@@ -1330,12 +1331,13 @@ def build_flash_attn_dualwave_swp_module(
         def _anchor_v_o(v_o):
             """Pin v_o accumulators at the current source position."""
             acc_irs = [_raw(v_o[dc]) for dc in range_constexpr(D_CHUNKS)]
-            ret_ty = ir.Type.parse("!llvm.struct<(vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>)>")
+            ret_ty = ir.Type.parse(f"!llvm.struct<({', '.join(['vector<16xf32>'] * D_CHUNKS)})>")
+            constraints = ",".join(["=v"] * D_CHUNKS + [str(i) for i in range(D_CHUNKS)])
             ret = llvm.inline_asm(
                 ret_ty,
                 acc_irs,
                 "",
-                "=v,=v,=v,=v,0,1,2,3",
+                constraints,
                 has_side_effects=True,
             )
             return [llvm.extractvalue(acc_irs[dc].type, ret, [dc]) for dc in range_constexpr(D_CHUNKS)]
@@ -1383,10 +1385,24 @@ def build_flash_attn_dualwave_swp_module(
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
             _debug_count_lazy_branch(all_below)
 
-            o0, o1, o2, o3 = (_raw(v_o[0]), _raw(v_o[1]), _raw(v_o[2]), _raw(v_o[3]))
             m_out = _raw(m_row)
             l_out = _raw(l_row)
             vp_out = _v_p_to_vec32(v_p)
+            if const_expr(D_CHUNKS == 2):
+                o0, o1 = _raw(v_o[0]), _raw(v_o[1])
+                if fx.Boolean(all_below):
+                    pass
+                else:
+                    corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
+                    scaled_accs = list(v_o)
+                    _scale_o(scaled_accs, corr)
+                    o0, o1 = _raw(scaled_accs[0]), _raw(scaled_accs[1])
+                    vp_out = _v_p_to_vec32(_scale_v_p(v_p, corr))
+                    l_out = _raw(_fmul(l_row, corr))
+                    m_out = _anchor_scalar_f32(m_tile_max)
+                return ([o0, o1], m_out, l_out, _v_vec32_to_p(vp_out))
+
+            o0, o1, o2, o3 = (_raw(v_o[0]), _raw(v_o[1]), _raw(v_o[2]), _raw(v_o[3]))
             if fx.Boolean(all_below):
                 pass
             else:
@@ -1424,12 +1440,12 @@ def build_flash_attn_dualwave_swp_module(
                 rocdl.s_barrier()
 
             _k_dma_m0 = (
-                (_k_dma_m0_base(0, 0), _k_dma_m0_base(0, 1)),
-                (_k_dma_m0_base(1, 0), _k_dma_m0_base(1, 1)),
+                tuple(_k_dma_m0_base(0, d) for d in range(NUM_DMA_K)),
+                tuple(_k_dma_m0_base(1, d) for d in range(NUM_DMA_K)),
             )
             _v_dma_m0 = (
-                (_v_dma_m0_base(0, 0), _v_dma_m0_base(0, 1)),
-                (_v_dma_m0_base(1, 0), _v_dma_m0_base(1, 1)),
+                tuple(_v_dma_m0_base(0, d) for d in range(NUM_DMA_V)),
+                tuple(_v_dma_m0_base(1, d) for d in range(NUM_DMA_V)),
             )
 
             # Prologue: load K tile split_t0 -> LDS buf0, wait, and sync the workgroup.
@@ -2132,7 +2148,8 @@ def build_flash_attn_dualwave_swp_module(
     # Combine kernel: out = sum_s w_s * O_s / sum_s w_s * l_s, w_s = exp2(m_s - m_max).
     # One wave row of 32 lanes covers a (b, h, s) row, 4 contiguous cols/lane.
     COMBINE_BLOCK = 256
-    COMBINE_ROWS_PER_BLOCK = COMBINE_BLOCK // (HEAD_DIM // 4)  # 8
+    COMBINE_LANES_PER_ROW = HEAD_DIM // 4
+    COMBINE_ROWS_PER_BLOCK = COMBINE_BLOCK // COMBINE_LANES_PER_ROW
 
     @flyc.kernel(known_block_size=[COMBINE_BLOCK, 1, 1])
     def flash_attn_splitk_combine_kernel(
@@ -2150,8 +2167,8 @@ def build_flash_attn_dualwave_swp_module(
         tid = fx.Index(gpu.thread_idx.x)
         blk = fx.Index(gpu.block_idx.x)
 
-        row = blk * COMBINE_ROWS_PER_BLOCK + tid // 32
-        col = (tid % 32) * 4
+        row = blk * COMBINE_ROWS_PER_BLOCK + tid // COMBINE_LANES_PER_ROW
+        col = (tid % COMBINE_LANES_PER_ROW) * 4
         hs = seq_v * NUM_HEADS_Q
         b = row // hs
         rem = row % hs

@@ -53,7 +53,7 @@ FLASH_ATTN_FUNC_KERNEL_CONFIG: dict = {
 
 # (batch, seq_len, num_heads, num_kv_heads, head_dim, num_kv_splits)
 # num_kv_heads == num_heads -> MHA; num_kv_heads < num_heads -> GQA/MQA.
-# num_kv_splits > 1 -> split-K path (gfx950 DUALWAVE_SWP only, seq_len >= 384, D=128).
+# num_kv_splits > 1 -> split-K path (gfx950 DUALWAVE_SWP only, seq_len >= 384, D=64/128).
 DEFAULT_CONFIGS = [
     # set1
     (16, 8192, 64, 64, 128, 1),
@@ -116,6 +116,9 @@ DEFAULT_CONFIGS = [
     (16, 8192, 64, 64, 128, 1),
     (16, 8192, 64, 8, 128, 1),
     (2, 1024, 64, 64, 128, 1),
+    (16, 8192, 64, 64, 64, 1),
+    (16, 8192, 64, 8, 64, 1),
+    (2, 1024, 64, 64, 64, 1),
 ]
 
 # Additional dense/varlen/cross-length cases.
@@ -124,10 +127,12 @@ DEFAULT_CONFIGS = [
 EXTRA_CONFIGS = [
     # varlen
     [[1024, 8192], None, None, 64, 64, 128, 1],
+    [[1024, 8192], None, None, 64, 64, 64, 1],
     # [[512, 256, 1024, 128], None, None, 64, 64, 128, 1],  # uneven; MHA
     # [[300, 700, 500], None, None, 32, 32, 128, 1],  # non-256/64-multiple
     # [[1024, 1024], None, None, 64, 8, 128, 1],  # even, GQA
     [[1, 3, 31, 33, 63, 65], None, None, 16, 16, 128, 1],  # small + non-multiple
+    [[1, 3, 31, 33, 63, 65], None, None, 16, 16, 64, 1],  # small + non-multiple
     # # cross-length
     # [31, 65, 1, 64, 8, 128, 1],
     # [31, 100, 1, 64, 8, 128, 1],
@@ -930,7 +935,7 @@ def run_attn_config(
 
     # ── split-K early-exit guard (mirrors run_splitk_config logic) ───────────
     if splitk:
-        if D != 128 or dtype_str not in ("bf16", "f16") or (seqlen_q is not None and seqlen_q < 384):
+        if D not in (64, 128) or dtype_str not in ("bf16", "f16") or (seqlen_q is not None and seqlen_q < 384):
             return {"skip": True}
 
     if use_block_table and (precomputed_inputs is None or precomputed_ref is None):
@@ -1175,6 +1180,8 @@ def run_aiter_bench(
 
     varlen = varlen_seqlens_q is not None
     if backend == "asm" and dtype != torch.bfloat16:
+        return {"skip": True}
+    if backend == "asm" and head_dim != 128:
         return {"skip": True}
     if backend == "asm" and (varlen or (seqlen_kv is not None and seqlen_kv != seq_len)):
         return {"skip": True}
@@ -2274,7 +2281,7 @@ def main():
         type=int,
         default=1,
         help="Split-K factor for the gfx950 DUALWAVE_SWP kernel. >1 runs the split-K "
-        "path (+combine kernel) via run_splitk_config; D=128 bf16/f16, seq_len >= 384.",
+        "path (+combine kernel) via run_splitk_config; D=64/128 bf16/f16, seq_len >= 384.",
     )
     causal_group = parser.add_mutually_exclusive_group()
     causal_group.add_argument("--causal", action="store_true", dest="causal")
@@ -2431,7 +2438,7 @@ def main():
         if args.num_kv_splits > 1:
             print(
                 f"  FlyDSL column: split-K path (num_kv_splits={args.num_kv_splits}); "
-                f"D!=128 / non-bf16,f16 / seq_len<384 / ws>4GiB configs SKIP"
+                f"D not in {{64,128}} / non-bf16,f16 / seq_len<384 / ws>4GiB configs SKIP"
             )
         print(f"  FlyDSL opts: {FLASH_ATTN_FUNC_KERNEL_CONFIG}")
         if "fp8" in dtypes_to_test:

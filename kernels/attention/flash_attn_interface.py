@@ -238,9 +238,9 @@ def _flydsl_flash_attn_paged(
 ) -> torch.Tensor:
     """Native paged-KV attention on the gfx950 dualwave kernel.
 
-    Supported config ONLY (anything else raises): linear cache layout
+    Supported config ONLY (anything else raises): linear/vectorized cache layout
     [NumBlocks, PageSize=64, NumKVHeads, HeadDim], vLLM lookup (block_table +
-    seqlen_k), causal, D=128, dtype bf16/f16.
+    seqlen_k), causal, D=64/128, dtype bf16/f16.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
       per kv-tile via block_table; split-K not supported (matches dense varlen).
@@ -297,8 +297,8 @@ def _flydsl_flash_attn_paged(
         raise NotImplementedError(
             f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
         )
-    if D != 128:
-        raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=128 only, got {D}")
+    if D not in (64, 128):
+        raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=64 or 128, got {D}")
     if k_head_dim != D:
         raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
 
@@ -311,9 +311,9 @@ def _flydsl_flash_attn_paged(
     # workgroups + a combine pass. Fills the GPU for low-occupancy shapes (small B / few
     # heads), where single-split paged underutilizes the device.
     splitk = num_kv_splits > 1
-    if splitk and (D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384):
+    if splitk and (D not in (64, 128) or dtype_str not in ("bf16", "f16") or Sq < 384):
         raise ValueError(
-            f"flydsl_flash_attn_func: paged split-K requires D=128, dtype bf16/f16, seq_len>=384; "
+            f"flydsl_flash_attn_func: paged split-K requires D=64/128, dtype bf16/f16, seq_len>=384; "
             f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
         )
 
@@ -406,7 +406,7 @@ def flydsl_flash_attn_func(
     block_table: Optional[torch.Tensor] = None,
     seqlen_k: Optional[torch.Tensor] = None,
     kv_cache_layout: str = "linear",
-    # Split-K (gfx950 only, seq_len >= 384, D=128, bf16/f16).
+    # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
     num_kv_splits: int = 1,
     # fp8 dense ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
     q_descale: Optional[torch.Tensor] = None,
@@ -455,7 +455,7 @@ def flydsl_flash_attn_func(
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
         block_table / seqlen_k: vLLM-style 2D block table metadata.
-        num_kv_splits: Split-K factor (>1: gfx950 only, D=128, bf16/f16, seq>=384).
+        num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
             for dense fp8 e4m3fn inputs.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
@@ -568,9 +568,9 @@ def flydsl_flash_attn_func(
 
     # ── split-K eligibility guard (SKIP analogous to run_splitk_config) ────
     if splitk:
-        if D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384:
+        if D not in (64, 128) or dtype_str not in ("bf16", "f16") or Sq < 384:
             raise ValueError(
-                f"flydsl_flash_attn_func: split-K requires D=128, dtype bf16/f16, seq_len>=384; "
+                f"flydsl_flash_attn_func: split-K requires D=64/128, dtype bf16/f16, seq_len>=384; "
                 f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
             )
         from kernels.attention.flash_attn_gfx950 import dualwave_splitk_workspace_elems

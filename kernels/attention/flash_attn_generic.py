@@ -172,10 +172,10 @@ def build_flash_attn_func_module_primary(
 
     # Both variants compute any seq_len >= 1 (the only correctness floor, enforced
     # by `_guard_seqlen`); the dense seq_len routing is a perf policy. DUALWAVE_SWP
-    # (gfx950 D=128 bf16/f16) is built for the outermost call only; dense routing
+    # (gfx950 D=64/128 bf16/f16) is built for the outermost call only; dense routing
     # uses `_routes_dense_to_dualwave`, and packed/varlen always uses DUALWAVE_SWP.
     _dualwave_swp_launch = None
-    if block_m is None and head_dim == 128 and dtype_str in ("bf16", "f16") and gpu_arch.startswith("gfx950"):
+    if block_m is None and head_dim in (64, 128) and dtype_str in ("bf16", "f16") and gpu_arch.startswith("gfx950"):
         try:
             from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
 
@@ -241,7 +241,7 @@ def build_flash_attn_func_module_primary(
         if cu_seqlens_q is not None and _dualwave_swp_launch is None:
             raise ValueError(
                 "QKV varlen (cu_seqlens) is only supported on the gfx950 DUALWAVE_SWP "
-                "path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)"
+                "path (head_dim=64/128, dtype bf16/f16, gpu_arch gfx950)"
             )
 
         def _fallback_no_diff_kv(*args, **kwargs):
@@ -253,7 +253,7 @@ def build_flash_attn_func_module_primary(
             if skv is not None and S_int is not None and int(skv) != S_int:
                 raise NotImplementedError(
                     "seq_len_kv != seq_len (cross-length attention) is only supported on the "
-                    "gfx950 DUALWAVE_SWP path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)."
+                    "gfx950 DUALWAVE_SWP path (head_dim=64/128, dtype bf16/f16, gpu_arch gfx950)."
                 )
             return _fallback(*args, **kwargs)
 
