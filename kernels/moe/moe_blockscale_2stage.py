@@ -23,18 +23,18 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import _if_else, _if_then
 from kernels.mma.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
-    crd2idx,
     lds_store_4b_xor16,
     lds_store_8b_xor16,
     lds_store_16b_xor16,
     load_b_pack_k32,
     make_preshuffle_b_layout,
+    preshuffle_crd2idx,
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
@@ -68,7 +68,7 @@ def compile_moe_blockscale_gemm1(
       - "int4": W4A8 path: X is int8, W is packed int4 (2 values per byte) unpacked to int8 in-kernel
     """
 
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
     _is_gfx950 = str(gpu_arch).startswith("gfx95")
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
@@ -594,7 +594,7 @@ def compile_moe_blockscale_gemm1(
                 col_base_swz = (
                     col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes // arith.index(int(elem_bytes)))
                 )
-                idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
+                idx_a16 = preshuffle_crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                 idx_a16 = idx_a16 + lds_base
                 loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                 a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
@@ -1194,7 +1194,7 @@ def compile_moe_blockscale_gemm2(
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
     _is_gfx950 = str(gpu_arch).startswith("gfx95")
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
@@ -1716,7 +1716,7 @@ def compile_moe_blockscale_gemm2(
                     col_base_swz = (
                         col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes // arith.index(int(elem_bytes)))
                     )
-                    idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
+                    idx_a16 = preshuffle_crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                     a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
@@ -2371,7 +2371,7 @@ def compile_moe_reduction(
     When use_mask=True, only sums slots where valid_mask[t,k]=1.
     Used in conjunction with compile_moe_blockscale_gemm2(accumulate=False) to avoid atomic contention.
     """
-    get_hip_arch()
+    get_rocm_arch()
     ir.ShapedType.get_dynamic_size()
 
     # Kernel Config

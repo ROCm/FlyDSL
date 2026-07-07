@@ -7,20 +7,16 @@ from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 
+# ceildiv is the canonical cdiv from the shared layer; re-exported here for the
+# gemm kernels that historically imported it from this module.
+from kernels.common.utils import cdiv as ceildiv  # noqa: F401
+
 
 def preshuffle_b(b_t):
     """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
     n, k = b_t.shape[-2:]
     assert n % 16 == 0 and k % 64 == 0, f"need N%16==0 and K%64==0, got N={n} K={k}"
     return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
-
-
-def ceildiv(a: int, b: int) -> int:
-    return (a + b - 1) // b
-
-
-def divmod(a: int, b: int) -> tuple[int, int]:
-    return (a // b, a % b)
 
 
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):

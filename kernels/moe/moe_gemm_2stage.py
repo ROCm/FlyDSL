@@ -20,7 +20,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 try:
@@ -44,7 +44,6 @@ from kernels.common.kernels_common import _if_else, _if_then
 from kernels.mma.mfma_epilogues import c_shuffle_epilog, default_epilog, mfma_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
-    crd2idx,
     extract_bf16_scale,
     lds_store_4b_xor16,
     lds_store_8b_xor16,
@@ -53,6 +52,7 @@ from kernels.mma.mfma_preshuffle_pipeline import (
     load_b_raw_w4a16,
     load_b_raw_w4a16_groupwise,
     make_preshuffle_b_layout,
+    preshuffle_crd2idx,
     swizzle_xor16,
     tile_chunk_coord_i32,
     unpack_b_w4a16,
@@ -95,7 +95,7 @@ def compile_moe_gemm1(
       atomically accumulate gate/up partials. Caller must pre-zero output.
     """
 
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}  # legacy; kept until stage2/reduction are migrated
 
@@ -148,7 +148,7 @@ def compile_moe_gemm1(
     # For groupwise scale, weight scale is applied per-group in the K loop,
     # so epilogue can skip weight scale multiplication (uses 1.0 for sw).
 
-    _is_gfx950 = "gfx95" in get_hip_arch()
+    _is_gfx950 = "gfx95" in get_rocm_arch()
     _has_cvt_off_f32_i4 = hasattr(rocdl, "cvt_off_f32_i4")
     use_gfx950_cvt = is_int4_bf16 and _is_gfx950 and _has_cvt_off_f32_i4
 
@@ -784,7 +784,7 @@ def compile_moe_gemm1(
                     col_base_swz = (
                         col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes // arith.index(int(elem_bytes)))
                     )
-                    idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
+                    idx_a16 = preshuffle_crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                     a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
@@ -1785,7 +1785,7 @@ def compile_moe_gemm2(
     `use_cshuffle_epilog` controls whether we use the LDS CShuffle epilogue before
     global atomics (recommended for performance).
     """
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
     allocator = SmemAllocator(None, arch=gpu_arch)
     _state = {}
 
@@ -1825,7 +1825,7 @@ def compile_moe_gemm2(
     _scale_is_bf16 = scale_is_bf16 and use_groupwise_scale
     experts * model_dim * num_groups
 
-    _is_gfx950 = "gfx95" in get_hip_arch()
+    _is_gfx950 = "gfx95" in get_rocm_arch()
     _has_cvt_off_f32_i4 = hasattr(rocdl, "cvt_off_f32_i4")
     use_gfx950_cvt = is_int4_bf16 and _is_gfx950 and _has_cvt_off_f32_i4
 
@@ -2426,7 +2426,7 @@ def compile_moe_gemm2(
                     col_base_swz = (
                         col_base_swz_bytes if elem_bytes == 1 else (col_base_swz_bytes // arith.index(int(elem_bytes)))
                     )
-                    idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
+                    idx_a16 = preshuffle_crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
                     loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
                     a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
@@ -3189,7 +3189,7 @@ def compile_moe_reduction(
     When use_mask=True, only sums slots where valid_mask[t,k]=1.
     Used in conjunction with compile_moe_gemm2(accumulate=False) to avoid atomic contention.
     """
-    get_hip_arch()
+    get_rocm_arch()
     ir.ShapedType.get_dynamic_size()
 
     # Kernel Config

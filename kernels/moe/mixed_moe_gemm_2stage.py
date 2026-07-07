@@ -20,7 +20,7 @@ from flydsl._mlir.dialects.arith import CmpIPredicate
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.layout_utils import crd2idx, idx2crd
 from kernels.common.layout_utils import get as layout_get
@@ -119,7 +119,7 @@ def compile_mixed_moe_gemm1(
 
     gate_mode controls the gate/up computation strategy — see GateMode enum.
     """
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem1")
     _state = {}
@@ -2460,7 +2460,7 @@ def compile_mixed_moe_gemm2(
     if _sort_block_m != tile_m and _sort_block_m % tile_m != 0:
         raise ValueError(f"sort_block_m ({_sort_block_m}) must be a multiple of tile_m ({tile_m})")
 
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
     allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
     allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem1")
     _state = {}

@@ -29,7 +29,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import _if_then, dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
@@ -120,7 +120,7 @@ def build_flash_attn_dualwave_swp_module(
     ``j`` of batch ``b`` reads physical page ``BlockTable[b*block_table_stride+j]``.
     Q/O stay dense ``[B, seqlen_q, H, D]``. Mutually exclusive with varlen/split-K.
     With ``paged=False`` codegen is byte-identical to the non-paged path."""
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
 
     if not gpu_arch.startswith("gfx950"):
         raise RuntimeError(f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}")

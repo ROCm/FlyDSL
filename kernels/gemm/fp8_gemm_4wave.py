@@ -30,7 +30,6 @@ from kernels.gemm.fp8_gemm_utils import (
     StoreC,
     ceildiv,
     compute_global_swizzle,
-    divmod,
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,

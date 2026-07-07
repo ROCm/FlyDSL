@@ -30,7 +30,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import _if_then, dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
@@ -131,7 +131,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
     ranges come from cumulative ``cu_seqlens_q`` / ``cu_seqlens_kv`` (int32
     ``[B+1]``) passed at launch. Per batch ``seqlen_q == seqlen_kv`` (self-attn).
     With ``varlen=False`` the dense path is unchanged (byte-identical codegen)."""
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
 
     if not gpu_arch.startswith("gfx950"):
         raise RuntimeError(f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}")
