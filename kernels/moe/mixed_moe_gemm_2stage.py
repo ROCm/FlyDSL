@@ -4377,7 +4377,7 @@ def compile_mixed_moe_gemm2(
                     # the last N-tile drains its SLC stores (vmcnt0), publishes
                     # the cross-card per-token flag, and resets the counter.
                     if const_expr(_tfs_enabled):
-                        from .dispatch_combine_intranode_kernel import (
+                        from .flydsl_dispatch_combine_intranode_kernel import (
                             atomic_add_global_at as _tfs_atomic_add,
                             atomic_add_global_at_system as _tfs_atomic_add_sys,
                             atomic_xchg_global_at_device as _tfs_atomic_xchg,

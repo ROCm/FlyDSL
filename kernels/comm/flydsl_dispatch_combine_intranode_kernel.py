@@ -11,6 +11,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm as _llvm_d
 from flydsl.expr import T, arith, const_expr, range_constexpr
 from flydsl.expr.buffer_ops import (
     buffer_load,
@@ -58,6 +59,37 @@ def _pack_f32x4_to_fp8(v4f32):
     _i32 = T.i32()
     lo = cvt_pk_fp8_f32(res=_i32, src_a=v4f32[0], src_b=v4f32[1], old=fx.Int32(0), word_sel=False)
     return cvt_pk_fp8_f32(res=_i32, src_a=v4f32[2], src_b=v4f32[3], old=lo, word_sel=True)
+
+
+def _to_ptr_global(v):
+    """Cast an i64 address to ``!llvm.ptr<1>`` (global address space)."""
+    return _llvm_d.IntToPtrOp(_llvm_d.PointerType.get(address_space=1), arith.unwrap(v)).result
+
+
+def atomic_add_global_at_system(addr_i64, val):
+    """System-scope (cross-card visible) atomic fetch-and-add (monotonic).
+
+    Used by the token-level-sync fused gemm2 epilogue to bump the remote per-token
+    flag on the combine kernel's home rank. Returns the old value.
+    """
+    ptr = _to_ptr_global(addr_i64)
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.add, ptr, arith.unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic, syncscope="one-as",
+    ).res
+
+
+def atomic_xchg_global_at_device(addr_i64, val):
+    """Device-scope monotonic atomic exchange (returns old value).
+
+    Consume-on-read reset of the rank-private local counter for the next
+    chain; ``syncscope="agent"`` since no cross-card visibility is needed.
+    """
+    ptr = _to_ptr_global(addr_i64)
+    return _llvm_d.AtomicRMWOp(
+        _llvm_d.AtomicBinOp.xchg, ptr, arith.unwrap(val),
+        _llvm_d.AtomicOrdering.monotonic, syncscope="agent",
+    ).res
 
 
 def make_dispatch_kernel(

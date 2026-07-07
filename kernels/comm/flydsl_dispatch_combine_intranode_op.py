@@ -247,6 +247,19 @@ class FlyDSLDispatchCombineConfig:
     quant_type: str = "none"
     max_total_recv_tokens: int = 0
     max_token_type_size: int = 0
+    # When enable_group_major is True the op ALSO owns the expert-major dispatch
+    # buffers the fused stage-1 megakernel (compile_fused_moe_gemm1(fuse_dispatch=))
+    # reads/writes, via an internal FlyDSLDispatchGroupMajorOp (self._gm). These use
+    # the QUANTIZED activation dtype (gm_data_type: fp8/fp4), distinct from the
+    # combine wire dtype (data_type, typically bf16). Default False keeps the op
+    # byte-identical for all existing (token-major only) users.
+    enable_group_major: bool = False
+    gm_data_type: Optional[torch.dtype] = None
+    gm_unit_size: int = 0
+    gm_scale_dim: int = 0
+    gm_scale_type_size: int = 1
+    gm_scheme: str = "fixedslot"
+    gm_compact: bool = False
 
     @property
     def is_fp4(self):
@@ -295,6 +308,235 @@ class FlyDSLDispatchCombineConfig:
     @property
     def scale_bytes(self):
         return self.scale_dim * self.scale_type_size
+
+
+def _gm_is_fp4(dt):
+    return dt == torch.float4_e2m1fn_x2
+
+
+def _gm_row_bytes(dt, hidden):
+    return hidden // 2 if _gm_is_fp4(dt) else hidden * torch.tensor([], dtype=dt).element_size()
+
+
+def _gm_row_view(dt, hidden):
+    return hidden // 2 if _gm_is_fp4(dt) else hidden
+
+
+class FlyDSLDispatchGroupMajorOp:
+    """Unified handshake-free fixed-slot (cap=mtpr) expert-major dispatch op."""
+
+    def __init__(self, *, rank, world_size, hidden_dim, max_tok_per_rank, experts_per_rank,
+                 topk, data_type, unit_size, scale_dim, scale_type_size=1,
+                 warp_num_per_block=4, block_num=None, num_valid_max=None,
+                 dedup_payload=False, low_latency=True, ll_unified=True,
+                 fused_scale_swizzle=False, scheme="fixedslot", compact=False):
+        assert world_size <= 8
+        # scheme: "fixedslot" = per-token remote-atomic packing (current); "handshake" =
+        # all-gather counts -> dense expert-major direct write (atomic-free).  Same outputs.
+        assert scheme in ("fixedslot", "handshake")
+        self.scheme = scheme
+        # compact (fixedslot/naive only): COUNT-first two-pass -> COMPACT expert-major layout (no
+        # per-expert cap reservation).  Phase-0 counts (remote atomic), block0 broadcasts a dense
+        # prefix-sum base (compact_base[le]), Phase-2 writes payload precisely.  Cuts num_valid_max
+        # from epr*cap (=epr*npes*mtpr, OOMs at large bs) to ~npes*mtpr*topk -> scales to full bs.
+        self.compact = bool(compact and scheme == "fixedslot")
+        self.rank = rank
+        self.npes = world_size
+        self.hidden = hidden_dim
+        self.mtpr = max_tok_per_rank
+        self.epr = experts_per_rank
+        self.topk = topk
+        self.dtype = data_type
+        self.unit = unit_size
+        # cap = per-expert fixed-slot capacity, rounded up to a tile_m multiple.  Each expert
+        # reserves `cap` rows; the post-pass emits only the occupied tiles, so the sparse GEMM
+        # tracks real load (cap only costs reserved address space, NOT GEMM compute).
+        # cap = npes*mtpr = the all-to-one worst case (a token hits an expert at most once, so a
+        # local expert receives at most npes*mtpr tokens) => PROVABLY overflow-free; no drops.
+        self.max_tokens_per_expert = world_size * max_tok_per_rank
+        self.ll_cap = ((self.max_tokens_per_expert + unit_size - 1) // unit_size) * unit_size
+        self.low_latency = True
+        self.ll_unified = True
+        self.scale_dim = scale_dim
+        self.scale_type_size = scale_type_size
+        self.scale_bytes = scale_dim * scale_type_size
+        self.scale_n_i32 = (self.scale_bytes + 3) // 4 if self.scale_bytes > 0 else 0
+        self.fused_scale_swizzle = bool(fused_scale_swizzle and self.scale_bytes > 0)
+        self.warps = warp_num_per_block
+        self._dev = torch.device("cuda", rank)
+        self.row_bytes = _gm_row_bytes(data_type, hidden_dim)
+        self.row_view = _gm_row_view(data_type, hidden_dim)
+
+        try:
+            cu = int(torch.cuda.get_device_properties(self._dev).multi_processor_count)
+        except Exception:
+            cu = 128
+        self._cu = cu
+
+        # Payload extent / GEMM grid bound:
+        #  * fixedslot SPARSE le*cap: needs epr*cap rows (one cap-region per local expert).
+        #  * handshake COMPACT dense: needs only total-recv worst case + per-expert tile_m padding,
+        #    NO per-expert cap reservation -> far smaller buffers AND a tight max_blocks so the
+        #    non-persistent GEMM does not over-launch ~empty CTAs (the cap-based bound launched
+        #    epr*cap/tile_m CTAs vs the ~num_valid actually occupied).
+        if num_valid_max is None:
+            if self.scheme == "handshake" or self.compact:
+                # tr <= npes*mtpr*topk (each of npes ranks' mtpr tokens hits <= topk of my experts);
+                # + epr*unit for the per-expert tile_m padding of the compact layout.
+                num_valid_max = world_size * max_tok_per_rank * topk + experts_per_rank * unit_size
+            else:
+                num_valid_max = experts_per_rank * self.ll_cap + 256
+        self.num_valid_max = int(num_valid_max)
+        self.max_blocks = (self.num_valid_max + unit_size - 1) // unit_size
+        # block_num: full parallelism at prefill; scaled down at small bs where the grid-barrier
+        # + large launch is pure fixed overhead.
+        if block_num is not None:
+            self.block_num = int(block_num)
+        else:
+            self.block_num = min(self._cu, 128, max(8, (max_tok_per_rank * topk) // 4))
+
+        self._alloc()
+        ms.shmem_barrier_all()
+        self._build_p2p()
+        # NOTE: the standalone dispatch KERNEL is no longer compiled/launched here — the dispatch
+        # logic is INLINED in the megakernel's GEMM prologue (compile_fused_moe_gemm1(fuse_dispatch=)).
+        # This op now only owns the symmetric (mori-shmem / P2P) buffers + sort-metadata tensors that
+        # the megakernel reads; there is NO `op.dispatch()` entry point anymore.
+
+    def _sym(self, shape, dtype):
+        t = mori_shmem_create_tensor(shape, dtype)
+        t.zero_()
+        return t
+
+    def _alloc(self):
+        npes, epr = self.npes, self.epr
+        nvm = self.num_valid_max
+        # symmetric (P2P) buffers
+        self.done2 = self._sym((npes,), torch.int32)
+        # persistent per-expert recv count: peers atomic-add as their tokens land; the post-pass
+        # copies running->ll_count then folds running back to 0 (no separate reset launch).
+        self.running = self._sym((epr,), torch.int32)
+        self.ll_count = self._sym((epr,), torch.int32)
+        self.rx_em = self._sym((nvm * self.row_bytes,), torch.int8)
+        self.scale_em = self._sym((max(1, nvm * self.scale_n_i32),), torch.int32)
+        self.idx_em = self._sym((nvm,), torch.int32)
+        self.wts_em = self._sym((nvm,), torch.float32)
+        self.srcmap_em = self._sym((nvm,), torch.int32)
+        # local-only buffers
+        self.gb1 = torch.zeros(1, dtype=torch.int64, device=self._dev)
+        self.sorted_expert_ids = torch.zeros(self.max_blocks, dtype=torch.int32, device=self._dev)
+        # per-occupied-tile sparse row base (le*cap + t*tile_m); GEMM reads bx_m from here.
+        self.tile_row_base = torch.zeros(self.max_blocks, dtype=torch.int32, device=self._dev)
+        self.num_valid = torch.zeros(2, dtype=torch.int32, device=self._dev)
+        # ---- Plan A: native total_recv (distinct recv count, == standard-dispatch dce.total_recv) ----
+        # fixedslot writes per-(token,expert) (running[le] counts copies), so distinct recv is computed
+        # by a per-token distinct-dest-PE dedup pass that bumps dest_ctr[dpe], then a cross-PE recv-count
+        # signal (recv_num, symmetric) accumulates total_recv -- mirrors the sorted path / standard
+        # dispatch.  Lets stage2 combine read total_recv natively (no redundant dce.dispatch).
+        self.total_recv = torch.zeros(1, dtype=torch.int32, device=self._dev)   # local; kernel accumulates
+        self.dest_ctr = torch.zeros(self.npes, dtype=torch.int32, device=self._dev)  # local send-count/dest
+        self.recv_num = self._sym((self.npes,), torch.int32)                    # symmetric: peers signal here
+        # ---- compact (naive count-first) buffers ----
+        # compact_base[le] = dense prefix-sum base (tile_m-padded) for local expert le; symmetric so
+        # senders read the DEST's base to place payload precisely.  done2c = the COUNT cross-PE
+        # done-barrier (separate epoch buffer from done2 which gates the WRITE round).  gb_cnt =
+        # the count-pass grid-arrival counter (separate from gb1 which gates the write-pass).
+        self.compact_base = None
+        self.done2c = None
+        self.gb_cnt = None
+        self.meta2 = None
+        self.write_cursor = None
+        if self.compact:
+            self.compact_base = self._sym((epr,), torch.int32)
+            self.done2c = self._sym((npes,), torch.int32)
+            self.gb_cnt = torch.zeros(1, dtype=torch.int64, device=self._dev)
+            self.meta2 = torch.zeros(1, dtype=torch.int32, device=self._dev)   # payload-ready flag
+            # phase-2 write cursor (SEPARATE from running, which is the count accumulator) so neither
+            # needs a mid-kernel reset (avoids the cross-rank reset race): both start at 0 and are
+            # reset to 0 only at kernel END (after cross-PE#2), mirroring the non-compact post-pass.
+            self.write_cursor = self._sym((epr,), torch.int32)
+            # cross-PE barrier #1b: AFTER each rank's block0 computes compact_base[], BEFORE any sender
+            # reads a DEST's compact_base in phase-2.  Without it a sender can read a dest's stale/zero
+            # compact_base (dest's block0 not done yet) -> wrong slots -> corrupt output on some ranks.
+            self.done2cb = self._sym((npes,), torch.int32)
+            # ---- ALL-GATHER compact (2 cross-PE rounds instead of 3): local count -> bigcnt all-gather
+            # -> each rank computes my_base[ge] LOCALLY (where its tokens land in each dest) -> strict
+            # write with a LOCAL cursor.  Avoids remote count atomics + remote compact_base read.
+            _te = npes * epr
+            self.local_hist = torch.zeros(_te, dtype=torch.int32, device=self._dev)     # per-launch reset
+            self.bigcnt = self._sym((npes * _te,), torch.int32)                          # [src][ge] all-gather
+            self.cnt_done = self._sym((npes,), torch.int32)                              # all-gather epoch barrier
+            self.my_base = torch.zeros(_te, dtype=torch.int32, device=self._dev)         # my tokens' base in each dest
+            self.local_cursor = torch.zeros(_te, dtype=torch.int32, device=self._dev)    # per-launch reset (write cursor)
+        self.swizzled_scale = None
+        if self.fused_scale_swizzle:
+            if self.scale_dim % 8 != 0:
+                raise ValueError(f"scale_dim={self.scale_dim} must be a multiple of 8")
+            m_tiles = (self.num_valid_max + 31) // 32
+            n_tiles = self.scale_dim // 8
+            self.swizzled_scale = torch.zeros((m_tiles, n_tiles, 4, 16), dtype=torch.int32, device=self._dev)
+        # ---- handshake-scheme buffers (all-gather counts -> dense expert-major) ----
+        if self.scheme == "handshake":
+            te = self.npes * self.epr
+            self.local_hist = torch.zeros(te, dtype=torch.int32, device=self._dev)   # in-graph reset
+            self.off_buf = torch.zeros(self.mtpr * self.topk, dtype=torch.int32, device=self._dev)
+            self.my_base = torch.zeros(te, dtype=torch.int32, device=self._dev)
+            self.bigcnt = self._sym((self.npes * te,), torch.int32)                  # [src][global_expert]
+            self.cnt_done = self._sym((self.npes,), torch.int32)                     # count-ready epoch signal
+            # W0 parallel counts-first: 2nd grid-arrival counter (post-SCT barrier). Monotonic, NEVER
+            # reset (epoch = gb2/nblk), CUDAGraph-safe — mirrors gb1.
+            self.gb2 = torch.zeros(1, dtype=torch.int64, device=self._dev)
+
+    def _p2p_table(self, t):
+        tbl = torch.zeros(self.npes, dtype=torch.int64, device=self._dev)
+        for pe in range(self.npes):
+            tbl[pe] = ms.shmem_ptr_p2p(t.data_ptr(), self.rank, pe)
+        return tbl
+
+    def _build_p2p(self):
+        self.p2p_done2 = self._p2p_table(self.done2)
+        self.p2p_running = self._p2p_table(self.running)
+        self.p2p_rx_em = self._p2p_table(self.rx_em)
+        self.p2p_scale_em = self._p2p_table(self.scale_em)
+        self.p2p_idx_em = self._p2p_table(self.idx_em)
+        self.p2p_wts_em = self._p2p_table(self.wts_em)
+        self.p2p_srcmap_em = self._p2p_table(self.srcmap_em)
+        self.p2p_recv_num = self._p2p_table(self.recv_num)   # Plan A: cross-PE recv-count signal target
+        if self.compact:
+            self.p2p_compact_base = self._p2p_table(self.compact_base)
+            self.p2p_done2c = self._p2p_table(self.done2c)
+            self.p2p_write_cursor = self._p2p_table(self.write_cursor)
+            self.p2p_done2cb = self._p2p_table(self.done2cb)
+            self.p2p_bigcnt = self._p2p_table(self.bigcnt)
+            self.p2p_cnt_done = self._p2p_table(self.cnt_done)
+        if self.scheme == "handshake":
+            self.p2p_bigcnt = self._p2p_table(self.bigcnt)
+            self.p2p_cnt_done = self._p2p_table(self.cnt_done)
+
+    def reset_counters(self):
+        """No-op: the per-expert count reset is folded into the kernel post-pass."""
+        return
+
+    @property
+    def ll_cap_used(self):
+        """Per-expert slot capacity (cap = npes*mtpr, tile_m-aligned; provably overflow-free)."""
+        return self.ll_cap
+
+    def _ll_views(self):
+        rx_em_view = self.rx_em.view(self.dtype).view(self.num_valid_max, self.row_view) \
+            if not _gm_is_fp4(self.dtype) else self.rx_em.view(torch.float4_e2m1fn_x2).view(self.num_valid_max, self.row_view)
+        scale_em_view = self.scale_em.view(torch.uint8).view(self.num_valid_max, max(1, self.scale_n_i32 * 4))[:, :self.scale_bytes]
+        scale_em_i32 = self.scale_em.view(self.num_valid_max, max(1, self.scale_n_i32))
+        return dict(rx_em=rx_em_view, scale_em=scale_em_view, scale_em_i32=scale_em_i32,
+                    idx_em=self.idx_em, wts_em=self.wts_em, srcmap_em=self.srcmap_em,
+                    sorted_expert_ids=self.sorted_expert_ids, tile_row_base=self.tile_row_base,
+                    num_valid=self.num_valid, dedup_rx=None,
+                    swizzled_scale=(None if self.swizzled_scale is None else
+                                    self.swizzled_scale
+                                    .view(getattr(torch, "float8_e8m0fnu", torch.uint8))
+                                    .view(-1, self.scale_dim)
+                                    .view(torch.uint8)))
+
 
 
 class FlyDSLDispatchCombineIntraNodeOp:
@@ -383,6 +625,45 @@ class FlyDSLDispatchCombineIntraNodeOp:
 
         self._comb_no_s1_fn: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
         self._comb_no_s1_compiled: Dict[Tuple[torch.dtype, bool, int, int], Any] = {}
+
+        self._gm = None
+        if getattr(config, "enable_group_major", False):
+            gm_dtype = config.gm_data_type if config.gm_data_type is not None else config.data_type
+            self._gm = FlyDSLDispatchGroupMajorOp(
+                rank=config.rank, world_size=config.world_size, hidden_dim=config.hidden_dim,
+                max_tok_per_rank=config.max_num_inp_token_per_rank,
+                experts_per_rank=config.num_experts_per_rank, topk=config.num_experts_per_token,
+                data_type=gm_dtype, unit_size=config.gm_unit_size,
+                scale_dim=config.gm_scale_dim, scale_type_size=config.gm_scale_type_size,
+                scheme=config.gm_scheme, compact=config.gm_compact,
+            )
+            # Unify total_recv: the fused dispatch prologue accumulates distinct-recv into
+            # the SAME buffer combine reads (self.total_recv), so no host/device bridge.
+            self._gm.total_recv = self.total_recv
+            ms.shmem_barrier_all()
+
+        # --- MegaMoE fused gemm2+combine token-flag machinery (grafted onto main's base) ---
+        # The fused gemm2 epilogue P2P-scatters into peers' shmem_comb_inp_tok and bumps a
+        # per-token flag (shmem_comb_token_flag) via device_local_counter; MegaMoeStage2 passes
+        # these to compile_fused_moe_gemm2_combine. main's cherry-picked op predates this feature.
+        _npes_tf = config.world_size
+        _mr_worst_tf = config.max_recv
+        self.shmem_comb_token_flag = mori_shmem_create_tensor((_mr_worst_tf,), torch.int32)
+        self.shmem_comb_token_flag.zero_()
+        self.device_local_counter = torch.zeros(
+            _mr_worst_tf * config.num_experts_per_token
+            + _npes_tf * config.num_experts_per_rank * 128,
+            dtype=torch.int32, device=self._dev)
+        ms.shmem_barrier_all()
+        self._p2p_comb_flag = torch.zeros(_npes_tf, dtype=torch.int64, device=self._dev)
+        for _pe_tf in range(_npes_tf):
+            self._p2p_comb_flag[_pe_tf] = ms.shmem_ptr_p2p(
+                self.shmem_comb_token_flag.data_ptr(), config.rank, _pe_tf)
+        self._fx_tis = self._fx_out_shmem_tok_id_to_src
+        self._fx_comb_flag = fx.Int64(self.shmem_comb_token_flag.data_ptr())
+        self._fx_local_counter = fx.Int64(self.device_local_counter.data_ptr())
+        self._fx_p2p_comb_flag = fx.Int64(self._p2p_comb_flag.data_ptr())
+        ms.shmem_barrier_all()
 
     def load_tuning_config(self, path=None):
         """Build and attach the geometry tuning table for this op's shape."""

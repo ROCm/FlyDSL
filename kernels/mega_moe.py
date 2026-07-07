@@ -39,7 +39,7 @@ import mori.shmem as ms
 
 from .mega_moe_gemm1 import compile_fused_moe_gemm1
 from .mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
-from .dispatch_combine_intranode_op import (
+from .flydsl_dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
@@ -363,6 +363,10 @@ class MegaMoeStage2:
                              "(only 'stage1_only' / None supported)")
         self.comb_cfg    = comb_cfg
         self.comb_op     = comb_op
+        # MegaMoE is the audited consumer of the fused GEMM2+combine path, so enable the
+        # combine_no_stage1 gate main ships default-off (it reduces the P2P-scattered tokens
+        # our fused GEMM2 epilogue writes; Stage-1 scatter is done in-kernel, not by combine).
+        FlyDSLDispatchCombineIntraNodeOp._ENABLE_COMBINE_NO_STAGE1 = True
         self.inter_dim   = inter_dim
         self.tile_m      = tile_m
         self.tile_n      = tile_n

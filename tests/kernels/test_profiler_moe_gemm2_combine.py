@@ -77,7 +77,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 import mori.shmem as ms
 
-from kernels.dispatch_combine_intranode_op import (
+from kernels.flydsl_dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )

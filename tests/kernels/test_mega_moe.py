@@ -41,7 +41,7 @@ import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
 import mori.shmem as ms  # noqa: E402
 
-from kernels.dispatch_combine_intranode_op import (  # noqa: E402
+from kernels.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
