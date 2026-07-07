@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-07T03:54:31Z",
+ "updated": "2026-07-07T04:14:47Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,28 +10,28 @@
    "branch": "lhc/refactor-kernels",
    "event": "pull_request",
    "title": "refactor(kernels): domain subpackages, layered common, de-duplication",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840170892",
    "created_at": "2026-07-07T03:50:43Z",
-   "updated_at": "2026-07-07T03:51:50Z",
+   "updated_at": "2026-07-07T03:52:53Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-07T03:51:50Z",
+     "started_at": "2026-07-07T03:52:51Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840170892/job/85532492132"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-07T03:51:50Z",
+     "started_at": "2026-07-07T03:52:51Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840170892/job/85532492135"
     },
@@ -212,11 +212,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Feat]: Add dispatch & combine tuning configuration (#772)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28838268134",
    "created_at": "2026-07-07T02:58:17Z",
-   "updated_at": "2026-07-07T02:59:55Z",
+   "updated_at": "2026-07-07T04:11:51Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -240,10 +240,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T02:59:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T04:11:50Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28838268134/job/85526642098"
     }
    ]
