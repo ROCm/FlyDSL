@@ -89,7 +89,7 @@ def _mega_default_tile(inter_dim):
     return 64, (256 if (int(inter_dim) % 256 == 0) else 128)
 
 
-_MEGA_TUNING_DIR = Path(__file__).resolve().parent / "tuning_configs"
+_MEGA_TUNING_DIR = Path(__file__).resolve().parent / "mega_moe_tuning_config"
 # megastage1 weights are always w4(fp4); the JSON ``dtype`` is the ACTIVATION quant.
 _MEGA_QUANT_TO_DTYPE = {"a4w4": "fp4", "a8w4": "fp8_ocp"}
 
