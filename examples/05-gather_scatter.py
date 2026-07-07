@@ -28,8 +28,6 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 
-from_dlpack = flyc.from_dlpack
-
 TileM = 8
 TileN = 32
 
