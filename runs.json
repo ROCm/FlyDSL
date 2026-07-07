@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-07T02:56:57Z",
+ "updated": "2026-07-07T03:38:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28839605142,
+   "pr": 807,
+   "commit": "c19c4f42e26f37f1313b4d048c75e2da9471f2af",
+   "branch": "lhc/refactor-kernels",
+   "event": "pull_request",
+   "title": "refactor(kernels): domain subpackages, layered common, de-duplication",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28839605142",
+   "created_at": "2026-07-07T03:34:41Z",
+   "updated_at": "2026-07-07T03:36:25Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 28838268134,
+   "pr": null,
+   "commit": "6a969e00e13763f35d998faa4844c6da22036c29",
+   "branch": "main",
+   "event": "push",
+   "title": "[Feat]: Add dispatch & combine tuning configuration (#772)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28838268134",
+   "created_at": "2026-07-07T02:58:17Z",
+   "updated_at": "2026-07-07T02:59:55Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-07T02:59:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28838268134/job/85526641944"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-07T02:59:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28838268134/job/85526641957"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-07T02:59:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28838268134/job/85526642098"
+    }
+   ]
+  },
   {
    "run_id": 28835197881,
    "pr": null,
@@ -412,7 +470,7 @@
   },
   {
    "run_id": 28781004239,
-   "pr": 772,
+   "pr": null,
    "commit": "ecca285a5348cc63dfd1d1ed4fd80024e3ce11d8",
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
@@ -427,7 +485,7 @@
   },
   {
    "run_id": 28780281748,
-   "pr": 772,
+   "pr": null,
    "commit": "78ad9e58e7e734a17d3dab3c88bc702b203924f0",
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
@@ -442,7 +500,7 @@
   },
   {
    "run_id": 28779492271,
-   "pr": 772,
+   "pr": null,
    "commit": "ab45b0dc2936751b5991ab8c97a126601182d704",
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
@@ -966,7 +1024,7 @@
   },
   {
    "run_id": 28744144062,
-   "pr": 772,
+   "pr": null,
    "commit": "626cf33dfe4b6bc880542b6c8ff01f20c0f02950",
    "branch": "yanbo/combine_perf_tuning",
    "event": "pull_request",
@@ -2019,36 +2077,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28634562835/job/84918239689"
     }
    ]
-  },
-  {
-   "run_id": 28616216288,
-   "pr": 788,
-   "commit": "92406ee720d1e79bc03e6a4da3885d54153becbd",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28616216288",
-   "created_at": "2026-07-02T19:29:03Z",
-   "updated_at": "2026-07-02T19:29:03Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28616144596,
-   "pr": 786,
-   "commit": "e7edf3b3d8da6d248f7eb3011be0e69a02a86221",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28616144596",
-   "created_at": "2026-07-02T19:27:43Z",
-   "updated_at": "2026-07-02T19:27:43Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
