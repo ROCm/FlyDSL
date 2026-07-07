@@ -57,6 +57,7 @@ from .utils.arith import (
     fp_to_int,
     int_to_fp,
     int_to_int,
+    resolve_fastmath,
 )
 
 
@@ -1729,6 +1730,7 @@ class Vector(ArithValue):
         kind = _resolve_combining_kind(op, is_fp, signed)
         et = element_type(self.type)
         kwargs = {}
+        fastmath = resolve_fastmath(fastmath)
         if fastmath is not None:
             kwargs["fastmath"] = fastmath
         if init_val is not None:

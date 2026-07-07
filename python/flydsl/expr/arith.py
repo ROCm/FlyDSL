@@ -18,9 +18,11 @@ from .._mlir.dialects.arith import *  # noqa: F401,F403
 __all__ = [
     "ArithValue",  # Deprecated: will be removed in a future release
     "_to_raw",  # Deprecated: will be removed in a future release
+    "FastMathFlags",
     "andi",
     "constant",
     "constant_vector",
+    "fastmath",
     "index",  # Deprecated: will be removed in a future release
     "index_cast",  # Deprecated: will be removed in a future release
     "int_to_fp",
@@ -35,7 +37,7 @@ __all__ = [
 ]
 
 # Override star-import cmpi/cmpf to accept Numeric types (Int32, etc.)
-from .._mlir.dialects import arith as _mlir_arith
+from .._mlir.dialects import arith
 from .meta import dsl_loc_tracing
 from .utils.arith import (  # noqa: F401
     ArithValue,
@@ -43,6 +45,7 @@ from .utils.arith import (  # noqa: F401
     andi,
     constant,
     constant_vector,
+    fastmath,
     index,
     index_cast,
     int_to_fp,
@@ -53,6 +56,7 @@ from .utils.arith import (  # noqa: F401
     unwrap,
     xori,
 )
+from .typing import as_ir_value
 
 
 @dsl_loc_tracing
@@ -67,7 +71,7 @@ def cmpi(predicate, lhs, rhs, **kwargs):
     Returns:
         An ``i1`` comparison result.
     """
-    return _mlir_arith.cmpi(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
+    return arith.cmpi(predicate, as_ir_value(lhs), as_ir_value(rhs), **kwargs)
 
 
 @dsl_loc_tracing
@@ -82,7 +86,7 @@ def cmpf(predicate, lhs, rhs, **kwargs):
     Returns:
         An ``i1`` comparison result.
     """
-    return _mlir_arith.cmpf(predicate, _to_raw(lhs), _to_raw(rhs), **kwargs)
+    return arith.cmpf(predicate, as_ir_value(lhs), as_ir_value(rhs), **kwargs)
 
 
 @dsl_loc_tracing
@@ -95,7 +99,7 @@ def maxnumf(a, b, **kwargs):
     from .numeric import Numeric
     from .typing import Vector
 
-    result = _mlir_arith.maxnumf(_to_raw(a), _to_raw(b), **kwargs)
+    result = arith.maxnumf(as_ir_value(a), as_ir_value(b), **kwargs)
     if isinstance(a, Vector):
         return Vector(result, a.shape, a.dtype)
     if isinstance(a, Numeric):
