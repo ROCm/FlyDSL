@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-07-07T00:01:18Z",
+ "updated": "2026-07-07T00:10:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28830452937,
+   "run_id": 28831985367,
    "pr": 785,
+   "commit": "304d0bc3678de204ad6dad0b7ae59e83dd548f95",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28831985367",
+   "created_at": "2026-07-07T00:08:08Z",
+   "updated_at": "2026-07-07T00:08:08Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28830452937,
+   "pr": null,
    "commit": "a19f7e6fee6b1e7cb3cc5115f714c07dada89e75",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -40,11 +55,11 @@
    "branch": "feat/autotune-cache-key-restore",
    "event": "pull_request",
    "title": "[1/5] autotune: harden cache key + add restore_value (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28829256053",
    "created_at": "2026-07-06T23:03:52Z",
-   "updated_at": "2026-07-06T23:08:54Z",
+   "updated_at": "2026-07-07T00:08:51Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -68,10 +83,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-06T23:08:46Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T00:08:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28829256053/job/85499851533"
     }
    ]
@@ -2004,21 +2019,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28615695231",
    "created_at": "2026-07-02T19:19:35Z",
    "updated_at": "2026-07-02T19:19:35Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28615595967,
-   "pr": null,
-   "commit": "5e2cda0ad3c95199e52943734741e3dd9ae5e799",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28615595967",
-   "created_at": "2026-07-02T19:17:44Z",
-   "updated_at": "2026-07-02T19:17:44Z",
    "actor": "jhinpan",
    "jobs": []
   }
