@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-07T05:18:44Z",
+ "updated": "2026-07-07T05:57:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28844909773,
+   "pr": null,
+   "commit": "b0e07abf08ec20192329c3c107446d075784be72",
+   "branch": "main",
+   "event": "push",
+   "title": "[1/5] autotune: harden cache key + add restore_value (#770) (#783)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28844909773",
+   "created_at": "2026-07-07T05:55:37Z",
+   "updated_at": "2026-07-07T05:56:53Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-07T05:56:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28844909773/job/85546633109"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-07T05:56:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28844909773/job/85546633110"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-07T05:56:53Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28844909773/job/85546633124"
+    }
+   ]
+  },
+  {
+   "run_id": 28843882736,
+   "pr": null,
+   "commit": "9291e446880e13ba3b5d1f9e3e22d1e1954b0761",
+   "branch": "main",
+   "event": "push",
+   "title": "[kernels]: refactor kernels into domain subpackages layered common an\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28843882736",
+   "created_at": "2026-07-07T05:29:52Z",
+   "updated_at": "2026-07-07T05:56:06Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-07T05:40:27Z",
+     "completed_at": "2026-07-07T05:56:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28843882736/job/85543549694"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-07T05:31:36Z",
+     "completed_at": "2026-07-07T05:46:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28843882736/job/85543549707"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-07T05:31:44Z",
+     "completed_at": "2026-07-07T05:56:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28843882736/job/85543549715"
+    }
+   ]
+  },
   {
    "run_id": 28843301136,
    "pr": 785,
@@ -1989,92 +2075,6 @@
      "started_at": "2026-07-03T06:12:24Z",
      "completed_at": "2026-07-03T07:03:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28642089791/job/84940518781"
-    }
-   ]
-  },
-  {
-   "run_id": 28642077981,
-   "pr": null,
-   "commit": "04def00770d882101f08426397de44525655ac58",
-   "branch": "jiacao/conv3d-implicit-8wave-fp8",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel(gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28642077981",
-   "created_at": "2026-07-03T06:10:08Z",
-   "updated_at": "2026-07-03T07:24:05Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-03T06:12:20Z",
-     "completed_at": "2026-07-03T07:03:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28642077981/job/84940456172"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-03T06:16:30Z",
-     "completed_at": "2026-07-03T06:30:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28642077981/job/84940456177"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-03T06:58:35Z",
-     "completed_at": "2026-07-03T07:24:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28642077981/job/84940456299"
-    }
-   ]
-  },
-  {
-   "run_id": 28641995716,
-   "pr": null,
-   "commit": "655f9b4d02dbacb906bdd500a76d436818692011",
-   "branch": "jiacao/conv2d-implicit-mfma",
-   "event": "pull_request",
-   "title": "[Kernel] conv2d: 8-wave double-buffered implicit-GEMM BF16 kernel(gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716",
-   "created_at": "2026-07-03T06:07:57Z",
-   "updated_at": "2026-07-03T06:10:41Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-03T06:09:42Z",
-     "completed_at": "2026-07-03T06:10:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716/job/84940186312"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-03T06:08:59Z",
-     "completed_at": "2026-07-03T06:10:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716/job/84940186321"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-03T06:08:59Z",
-     "completed_at": "2026-07-03T06:10:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641995716/job/84940186323"
     }
    ]
   }
