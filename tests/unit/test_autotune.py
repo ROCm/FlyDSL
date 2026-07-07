@@ -844,6 +844,58 @@ def test_call_do_bench_folds_setup_when_unsupported():
     assert order == ["setup", "kernel"]
 
 
+def test_call_do_bench_folds_setup_for_kwargs_only_benchmarker():
+    """A do_bench_fn with **kwargs but no explicit `setup` must still run setup
+    (folded), not have it passed-and-silently-dropped into **kwargs."""
+    order = []
+
+    def bench_kwargs(fn, warmup, rep, **kwargs):  # does NOT forward setup
+        fn()
+        return 1.0
+
+    t = _make_tuner(do_bench_fn=bench_kwargs)
+    t._call_do_bench(lambda: order.append("kernel"), lambda: order.append("setup"))
+    assert order == ["setup", "kernel"]  # setup ran (folded), not dropped
+
+
+def test_cache_hit_stale_config_degrades_to_default(monkeypatch):
+    """A cached config that's now incompatible (raises TypeError/KeyError on run)
+    must be dropped and degrade to the default, not hard-crash the call."""
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    calls = {"n": 0}
+
+    def fn(a, out, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("stale launch signature")  # the cached config fails
+        out._data[0] = 42.0  # the default run succeeds
+
+    t = _make_tuner(
+        fn=fn,
+        configs=[Config(BLOCK=1)],
+        default=lambda a, out, **kw: Config(BLOCK=2),
+        do_bench_fn=_bench_run_all,
+    )
+    a, out = FakeTensor((4,)), FakeTensor((1,))
+    key = t._make_key((a, out), {})
+    t.cache[key] = Config(BLOCK=1)  # seed a stale "best" so the cache-hit path runs
+    t(a, out)
+    assert out._data[0] == 42.0  # degraded to the default after dropping the stale entry
+    assert key not in t.cache  # stale entry dropped
+
+
+def test_get_all_configs_sweeps_f32():
+    """f32 must sweep BLOCK_THREADS (scalar path) rather than collapsing to the
+    single default. Imports the kernel/config module, so needs the bindings."""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from kernels.norm.rmsnorm_config import _BLOCK_THREADS_CHOICES, _WAVES_PER_EU_CHOICES, get_all_configs
+
+    cfgs = get_all_configs(8192, "f32")
+    blocks = sorted({c.kwargs["BLOCK_THREADS"] for c in cfgs})
+    assert blocks == sorted(_BLOCK_THREADS_CHOICES)  # every block present (no tile filter for f32)
+    assert len(cfgs) == len(_BLOCK_THREADS_CHOICES) * len(_WAVES_PER_EU_CHOICES)
+
+
 def test_cache_dir_change_does_not_serve_stale_config(tmp_path, monkeypatch):
     """Switching FLYDSL_AUTOTUNE_CACHE_DIR must drop the in-memory config tuned
     under the old dir. The fake tune picks BLOCK=64; the default is BLOCK=7.

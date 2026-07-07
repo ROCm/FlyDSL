@@ -66,14 +66,30 @@ def _device_fingerprint() -> str:
 
 
 def _source_fingerprint(fns) -> str:
-    """Short hash of the given callables' source, so editing a kernel/config
-    invalidates its cached tuned best (the toolchain fingerprint only covers
-    flydsl core, not kernels/). Falls back to repr for source-less callables."""
+    """Short hash of the given callables' *source files*, so editing the kernel /
+    config module -- including the module-level helpers and constants they use
+    (VEC_WIDTH, _BLOCK_THREADS_CHOICES, ...), not just the function body --
+    invalidates a stale cached tuned best. The toolchain fingerprint only covers
+    flydsl core, not kernels/. Falls back to the function source, then repr."""
     h = hashlib.sha256()
+    seen_files = set()
     for fn in fns:
         if fn is None:
             continue
         target = fn.func if hasattr(fn, "func") else fn
+        path = None
+        try:
+            path = inspect.getsourcefile(target)
+        except TypeError:
+            pass
+        if path and path not in seen_files:
+            seen_files.add(path)
+            try:
+                with open(path, "rb") as f:
+                    h.update(f.read())
+                continue
+            except OSError:
+                pass
         try:
             h.update(inspect.getsource(target).encode())
         except (OSError, TypeError):
@@ -459,10 +475,11 @@ class Autotuner:
             params = inspect.signature(self._do_bench).parameters
         except (TypeError, ValueError):
             params = {}
-        accepts_setup = "setup" in params or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-        )
-        if accepts_setup:
+        # Only pass `setup` when the benchmarker EXPLICITLY declares it. A
+        # `**kwargs` catch-all that doesn't forward setup would silently drop it
+        # (restore/reset would never run) -- for those, fold setup into the timed
+        # call instead so it always runs (just times it too).
+        if "setup" in params:
             return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep, setup=setup)
 
         def timed():
@@ -530,13 +547,18 @@ class Autotuner:
         if not force and key in self.cache:
             try:
                 return self._run_config(self.cache[key], key, args, kwargs)
-            except ValueError:
-                raise  # invalid config (e.g. num_warps) -> surface loudly
-            except Exception:
-                # A stale / incompatible cached entry (e.g. a structural knob that
-                # no longer exists) must not hard-crash a normal call: drop it and
-                # fall through to the heuristic default / a fresh search.
+            except (ValueError, TypeError, KeyError) as e:
+                # A stale / incompatible cached entry (a structural knob or launch
+                # signature that changed since it was tuned) must not hard-crash a
+                # normal call: drop it (in-memory AND on disk) and fall through to
+                # the default / a fresh search. Only config-incompatibility errors
+                # are caught here -- genuine compile/launch/runtime errors (e.g.
+                # RuntimeError) propagate so real bugs aren't masked.
+                from .utils import log
+
+                log().warning("autotune[%s]: dropping stale cached config: %s", self.name, e)
                 self.cache.pop(key, None)
+                self._save_disk_cache()
 
         # 2. Two-track heuristic: unless tuning is explicitly requested, take
         #    the analytic default and skip the search entirely (zero-search
@@ -605,20 +627,28 @@ class Autotuner:
                 continue
 
     def _save_disk_cache(self):
+        # Best-effort persistence: the cache is an optimization, so a write
+        # failure (read-only FS, full disk, permissions) must never crash an
+        # otherwise-successful tune -- log and move on.
         path = self._cache_file
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = {json.dumps(list(key)): config.to_dict() for key, config in self.cache.items()}
-        # Atomic write (tmp + rename): a concurrent reader never sees a torn or
-        # partial file (a bare write_text can be observed mid-write).
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, path)
-        except Exception:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(tmp)
-            raise
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {json.dumps(list(key)): config.to_dict() for key, config in self.cache.items()}
+            # Atomic write (tmp + rename): a concurrent reader never sees a torn
+            # or partial file (a bare write_text can be observed mid-write).
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp, path)
+            except Exception:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(tmp)
+                raise
+        except Exception as e:
+            from .utils import log
+
+            log().warning("autotune[%s]: could not persist tuning cache: %s", self.name, e)
 
 
 def autotune(

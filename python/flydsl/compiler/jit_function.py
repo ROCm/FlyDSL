@@ -758,12 +758,16 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
 
 
 def _iter_gpu_kernel_funcs(module: ir.Module):
-    """Yield the ``gpu.func`` kernel ops inside every ``gpu.module`` of *module*."""
+    """Yield the entry-point kernel ``gpu.func`` ops (those carrying the
+    ``gpu.kernel`` attribute) inside every ``gpu.module`` of *module*.
+
+    Non-kernel device helpers are skipped -- occupancy hints only apply to entry
+    points, and a module may hold both."""
     for top in module.body.operations:
         if top.operation.name != "gpu.module":
             continue
         for op in top.regions[0].blocks[0].operations:
-            if op.operation.name == "gpu.func":
+            if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
                 yield op
 
 
