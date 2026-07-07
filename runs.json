@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-07T01:06:11Z",
+ "updated": "2026-07-07T02:56:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28835197881,
+   "pr": null,
+   "commit": "db4d2a346dcd21781f48547e0c7549e77da541f8",
+   "branch": "main",
+   "event": "push",
+   "title": "[Kernel] conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel(gfx9\u2026",
+   "status": "completed",
+   "conclusion": "success",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28835197881",
+   "created_at": "2026-07-07T01:33:10Z",
+   "updated_at": "2026-07-07T02:54:53Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-07T01:35:48Z",
+     "completed_at": "2026-07-07T02:00:01Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28835197881/job/85517598507"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-07T01:36:34Z",
+     "completed_at": "2026-07-07T02:33:17Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28835197881/job/85517598514"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-07T01:36:24Z",
+     "completed_at": "2026-07-07T02:54:51Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28835197881/job/85517598524"
+    }
+   ]
+  },
   {
    "run_id": 28831985367,
    "pr": 785,
@@ -2004,21 +2047,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28616144596",
    "created_at": "2026-07-02T19:27:43Z",
    "updated_at": "2026-07-02T19:27:43Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28615695231,
-   "pr": null,
-   "commit": "b5c2305c9964af36b76814c0c279f19d677e4eb4",
-   "branch": "feat/autotune-ci-guard",
-   "event": "pull_request",
-   "title": "[4/5] autotune: CI guard + committed-config regression check (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28615695231",
-   "created_at": "2026-07-02T19:19:35Z",
-   "updated_at": "2026-07-02T19:19:35Z",
    "actor": "jhinpan",
    "jobs": []
   }
