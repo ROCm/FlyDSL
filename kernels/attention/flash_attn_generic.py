@@ -35,7 +35,6 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)  # 1.4426950408889634
@@ -470,13 +469,12 @@ def build_flash_attn_func_module_primary(
     LDS_V_TOTAL_SIZE = NUM_PREFETCH_V * LDS_V_TILE_SIZE
     LDS_KV_TOTAL_SIZE = LDS_K_TOTAL_SIZE + LDS_V_TOTAL_SIZE
 
-    allocator = SmemAllocator(
-        None,
-        arch=gpu_arch,
-        global_sym_name=f"flash_attn_func_smem_{PATH_TAG}",
-    )
-    lds_kv_offset = allocator._align(allocator.ptr, 16)
-    allocator.ptr = lds_kv_offset + LDS_KV_TOTAL_SIZE * 2
+    # Single 16B-aligned K/V LDS region (auto-tracked smem, no manual allocator).
+    _lds_elem_dtype = dtype_to_elem_type(dtype_str)
+
+    @fx.struct
+    class SharedStorage:
+        kv: fx.Array[_lds_elem_dtype, LDS_KV_TOTAL_SIZE, 16]
 
     @flyc.kernel(known_block_size=[BLOCK_SIZE, 1, 1])
     def flash_attn_generic_kernel(
@@ -529,14 +527,26 @@ def build_flash_attn_func_module_primary(
 
         seq_len_v = fx.Index(seq_len)
 
-        # ---- LDS view ----
-        base_ptr = allocator.get_base()
-        lds_kv = SmemPtr(
-            base_ptr,
-            lds_kv_offset,
-            elem_type,
-            shape=(LDS_KV_TOTAL_SIZE,),
-        ).get()
+        # ---- LDS region (single K/V array; pointer-based vectorized access) ----
+        # .peek() returns a Python handle; derive the LDS base once here (as an
+        # index and an addrspace(3) llvm ptr) and only use those ir.Values inside
+        # the runtime KV loop.
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
+        lds_kv_base_ptr = buffer_ops.create_llvm_ptr(lds_kv_base_idx, address_space=3)
+
+        def _lds_kv_gep(elem_idx):
+            return buffer_ops.get_element_ptr(
+                lds_kv_base_ptr,
+                byte_offset=_raw(fx.Index(elem_idx) * fx.Index(2)),
+                elem_type=T.i8,
+            )
+
+        def _lds_kv_store(elem_idx, vec_value, alignment):
+            llvm.StoreOp(_raw(vec_value), _lds_kv_gep(elem_idx), alignment=alignment)
+
+        def _lds_kv_load(vec_type, elem_idx, alignment):
+            return llvm.LoadOp(vec_type, _lds_kv_gep(elem_idx), alignment=alignment).result
 
         # ---- Thread / block indices ----
         block_id = fx.Index(gpu.block_idx.x)
@@ -568,8 +578,7 @@ def build_flash_attn_func_module_primary(
             the MFMA A-operand layout when per-lane addresses point to
             the correct K-row and D-column sub-group.
             """
-            byte_offset = lds_elem_idx * 2 + lds_kv_offset
-            byte_i64 = fx.Int64(byte_offset)
+            byte_i64 = fx.Int64(lds_kv_base_idx + lds_elem_idx * fx.Index(2))
             ptr = buffer_ops.create_llvm_ptr(byte_i64, address_space=3)
             return rocdl.ds_read_tr16_b64(v4f16_type, ptr).result
 
@@ -689,19 +698,21 @@ def build_flash_attn_func_module_primary(
                         swz_col = _k_swizzle(lds_row, load_col_base)
                         lds_idx = k_base + lds_row * K_STRIDE + swz_col
                         vec = load_global_f16xN(k_ptr, g_idx)
-                        Vec(vec).store(lds_kv, [lds_idx])
+                        _lds_kv_store(lds_idx, vec, 16)
                 else:
                     g_idx = global_idx_kv(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
                     swz_col = _k_swizzle(lds_row, load_col_base)
                     lds_idx = k_base + lds_row * K_STRIDE + swz_col
                     vec = load_global_f16xN(k_ptr, g_idx)
-                    Vec(vec).store(lds_kv, [lds_idx])
+                    _lds_kv_store(lds_idx, vec, 16)
 
         # ---- Cooperative V load ----
         def _v_store_row_major(v_base, lds_row, vec):
             lds_idx = v_base + lds_row * V_STRIDE + load_col_base
-            Vec(vec).store(lds_kv, [lds_idx])
+            # V_STRIDE may be HEAD_DIM+4 (non-DMA HW-transpose), so the row term is
+            # only 8B-aligned; keep alignment conservative for that layout.
+            _lds_kv_store(lds_idx, vec, 8)
 
         def _v_store_transposed(v_base, lds_row, vec):
             for _e in range_constexpr(VEC_WIDTH):
@@ -709,7 +720,7 @@ def build_flash_attn_func_module_primary(
                 vt_d = load_col_base + _e
                 vt_idx = v_base + vt_d * VT_STRIDE + lds_row
                 v1 = Vec.from_elements([elem], elem_dtype)
-                v1.store(lds_kv, [vt_idx])
+                _lds_kv_store(vt_idx, v1, 2)
 
         _v_store_to_lds = _v_store_row_major if USE_HW_TR else _v_store_transposed
 
@@ -782,7 +793,6 @@ def build_flash_attn_func_module_primary(
             NUM_DMA_K = K_TILE_BYTES // DMA_BATCH_BYTES
             LANES_PER_K_ROW = HEAD_DIM * 2 // DMA_BYTES
             ROWS_PER_DMA_BATCH = DMA_BATCH_BYTES // (HEAD_DIM * 2)
-            lds_kv_base_idx = buffer_ops.extract_base_index(lds_kv, address_space=3)
             _dma_size = fx.Int32(DMA_BYTES)
             _dma_soff = fx.Int32(0)
             _dma_off = fx.Int32(0)
@@ -990,8 +1000,8 @@ def build_flash_attn_func_module_primary(
                 k_packs_lo = [None] * K_STEPS_QK
                 k_packs_hi = [None] * K_STEPS_QK
                 for p in range_constexpr(_QK_PREFETCH_DEPTH):
-                    k_packs_lo[p] = Vec.load(mfma_pack_type, lds_kv, [_k_idx_lo(p)])
-                    k_packs_hi[p] = Vec.load(mfma_pack_type, lds_kv, [_k_idx_hi(p)])
+                    k_packs_lo[p] = _lds_kv_load(mfma_pack_type, _k_idx_lo(p), MFMA_LANE_K * 2)
+                    k_packs_hi[p] = _lds_kv_load(mfma_pack_type, _k_idx_hi(p), MFMA_LANE_K * 2)
 
                 if const_expr(ENABLE_DMA and not ENABLE_PREFETCH_3BUF):
                     coop_dma_v(kv_start, 0)
@@ -1003,11 +1013,11 @@ def build_flash_attn_func_module_primary(
                     s_acc_lo = mfma_acc(k_packs_lo[ks], q_b_packs[ks], s_acc_lo)
                     s_acc_hi = mfma_acc(k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
                     if const_expr(ks + _QK_PREFETCH_DEPTH < K_STEPS_QK):
-                        k_packs_lo[ks + _QK_PREFETCH_DEPTH] = Vec.load(
-                            mfma_pack_type, lds_kv, [_k_idx_lo(ks + _QK_PREFETCH_DEPTH)]
+                        k_packs_lo[ks + _QK_PREFETCH_DEPTH] = _lds_kv_load(
+                            mfma_pack_type, _k_idx_lo(ks + _QK_PREFETCH_DEPTH), MFMA_LANE_K * 2
                         )
-                        k_packs_hi[ks + _QK_PREFETCH_DEPTH] = Vec.load(
-                            mfma_pack_type, lds_kv, [_k_idx_hi(ks + _QK_PREFETCH_DEPTH)]
+                        k_packs_hi[ks + _QK_PREFETCH_DEPTH] = _lds_kv_load(
+                            mfma_pack_type, _k_idx_hi(ks + _QK_PREFETCH_DEPTH), MFMA_LANE_K * 2
                         )
 
                 # ==== Online softmax over 64 KV positions ====
@@ -1373,8 +1383,8 @@ def build_flash_attn_func_module_primary(
                         k_base = fx.Index(pks * PV_K_STEP) + lane_div_32 * 4
                         v_lo_idx = v_base + d_pos * VT_STRIDE + k_base
                         v_hi_idx = v_lo_idx + fx.Index(K_SUB_N)
-                        vl = Vec.load(v4f16_type, lds_kv, [v_lo_idx])
-                        vh = Vec.load(v4f16_type, lds_kv, [v_hi_idx])
+                        vl = _lds_kv_load(v4f16_type, v_lo_idx, 4)
+                        vh = _lds_kv_load(v4f16_type, v_hi_idx, 4)
                     return vl, vh
 
                 # Pre-read V for the first step.
@@ -1479,11 +1489,6 @@ def build_flash_attn_func_module_primary(
         seq_len: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         bs_idx = fx.Index(batch_size)
         sl_idx = fx.Index(seq_len)
         num_q_tiles = (sl_idx + BLOCK_M - 1) // BLOCK_M

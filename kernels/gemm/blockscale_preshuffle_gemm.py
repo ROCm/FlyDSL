@@ -10,19 +10,16 @@ Scale layouts: scale_a [scale_k, M] transposed, scale_b [scale_n, scale_k] row-m
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl.compiler.kernel_function import CompilationContext
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.mma.mfma_epilogues import mfma_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
     crd2idx,
-    lds_store_8b_xor16,
-    lds_store_16b_xor16,
     load_b_pack_k32,
     swizzle_xor16,
     tile_chunk_coord_i32,
@@ -72,9 +69,6 @@ def compile_blockscale_preshuffle_gemm(
     if use_async_copy and gpu_arch not in ("gfx942", "gfx950"):
         raise ValueError(f"async copy not supported on {gpu_arch}")
 
-    allocator_pong = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
-    allocator_ping = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem1")
-
     total_threads = 256
     bytes_a_per_tile = tile_m * tile_k * elem_bytes
     if bytes_a_per_tile % total_threads != 0:
@@ -98,9 +92,6 @@ def compile_blockscale_preshuffle_gemm(
 
     lds_stride_bytes = tile_k_bytes
 
-    def _out_elem_type():
-        return T.bf16 if is_bf16_out else T.f16
-
     def _out_elem_dtype():
         return fx.BFloat16 if is_bf16_out else fx.Float16
 
@@ -116,11 +107,13 @@ def compile_blockscale_preshuffle_gemm(
     buffer_size_bytes = max(lds_tile_bytes, lds_out_bytes // 2)
     buffer_size_elems = buffer_size_bytes  # fp8: 1 byte per elem
 
-    lds_pong_offset = allocator_pong._align(allocator_pong.ptr, 16)
-    allocator_pong.ptr = lds_pong_offset + buffer_size_elems
-
-    lds_ping_offset = allocator_ping._align(allocator_ping.ptr, 16)
-    allocator_ping.ptr = lds_ping_offset + buffer_size_elems
+    # Two contiguous fp8 LDS buffers (ping/pong). Declared adjacent so the
+    # optional CShuffle output region (out dtype, 2*tile_m*tile_n bytes) can
+    # alias the pong base and extend into ping, matching the old byte layout.
+    @fx.struct
+    class SharedStorage:
+        pong: fx.Array[fx.Float8E4M3FN, buffer_size_elems, 16]
+        ping: fx.Array[fx.Float8E4M3FN, buffer_size_elems, 16]
 
     # ── Compile-time layout constants ─────────────────────────────────────
     kpack_bytes = 16
@@ -171,15 +164,17 @@ def compile_blockscale_preshuffle_gemm(
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
 
-        # ---- LDS (separate ping/pong buffers) ----
-        base_ptr_pong = allocator_pong.get_base()
-        base_ptr_ping = allocator_ping.get_base()
-
-        lds_a_pong = SmemPtr(base_ptr_pong, lds_pong_offset, T.f8, shape=(tile_m * tile_k,)).get()
-        lds_a_ping = SmemPtr(base_ptr_ping, lds_ping_offset, T.f8, shape=(tile_m * tile_k,)).get()
+        # ---- LDS (ping/pong buffers via SharedStorage) ----
+        # `lds` is a Python handle; only its fields' raw pointers (.ptr) are used
+        # below. All LDS access is pointer-based (the .view() memref does not
+        # accept vector-dialect ops). Built once here, before any control flow.
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        lds_a_pong = lds.pong
+        lds_a_ping = lds.ping
 
         if const_expr(use_cshuffle_epilog):
-            lds_out = SmemPtr(base_ptr_pong, lds_pong_offset, _out_elem_type(), shape=(tile_m * tile_n,)).get()
+            # CShuffle output aliases the pong region reinterpreted as out dtype.
+            lds_out = fx.recast_iter(_out_elem_dtype(), lds.pong.ptr)
         else:
             lds_out = None
 
@@ -284,8 +279,9 @@ def compile_blockscale_preshuffle_gemm(
         # ── A LDS load helpers ────────────────────────────────────────────
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
-            idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz
-            return vector.load_op(T.f8x16, lds_buffer, [idx_a16])
+            idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz  # fp8: element idx == byte offset
+            u8 = fx.recast_iter(fx.Uint8, lds_buffer.ptr)
+            return fx.ptr_load(u8 + fx.Int32(idx_a16), result_type=T.f8x16)
 
         def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer):
             loaded_a16 = lds_load_16b(curr_row_a_lds, col_base, lds_buffer)
@@ -341,37 +337,22 @@ def compile_blockscale_preshuffle_gemm(
         c4_bytes = 4  # bytes per dword (always 4, used for LDS byte addressing)
 
         def store_a_tile_to_lds(vec_a_parts, lds_buffer, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
+            # Pointer-based LDS store with CK-style XOR16 swizzle on the K dim
+            # (inlined from lds_store_{16,8}b_xor16 since the vector-dialect store
+            # helpers do not accept the pointer-backed LDS buffer).
             for i in range_constexpr(num_a_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
+                col_local_bytes = col_a_local_i32 * c4_bytes
+                col_swz = swizzle_xor16(row_a_local, col_local_bytes, k_blocks16)
+                idx0 = crd2idx((fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds)  # fp8: element idx == byte off
+                base = fx.Int64(fx.ptrtoint(lds_buffer.ptr)) + fx.Int64(idx0)
+                lds_ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
                 if const_expr(a_load_bytes_v == 16):
-                    lds_store_16b_xor16(
-                        arith,
-                        vector,
-                        lds_memref=lds_buffer,
-                        vec16_ty=T.f8x16,
-                        layout_lds=layout_lds,
-                        row_local=row_a_local,
-                        col_local_i32=col_a_local_i32,
-                        tx_c4=c4_bytes,
-                        k_blocks16=k_blocks16,
-                        lds_base=0,
-                        vec_part_i32x4=vec_a_parts[i],
-                        elem_bytes=elem_bytes,
-                    )
+                    v16 = vector.bitcast(T.f8x16, vec_a_parts[i])
+                    llvm.StoreOp(v16, lds_ptr, alignment=16)
                 elif const_expr(a_load_bytes_v == 8):
-                    lds_store_8b_xor16(
-                        arith,
-                        vector,
-                        lds_memref=lds_buffer,
-                        vec8_ty=T.f8x8,
-                        layout_lds=layout_lds,
-                        row_local=row_a_local,
-                        col_local_i32=col_a_local_i32,
-                        tx_c4=c4_bytes,
-                        k_blocks16=k_blocks16,
-                        lds_base=0,
-                        vec_part_i32x2=vec_a_parts[i],
-                    )
+                    v8 = vector.bitcast(T.f8x8, vec_a_parts[i])
+                    llvm.StoreOp(v8, lds_ptr, alignment=8)
 
         # ── A DMA async: direct global→LDS transfer ─────────────────────
         _num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
@@ -389,9 +370,6 @@ def compile_blockscale_preshuffle_gemm(
             )
 
         def dma_a_tile_to_lds(base_k_div4, lds_buffer):
-            from flydsl._mlir.dialects import llvm
-            from flydsl._mlir.dialects import memref as memref_dialect
-
             dma_bytes = a_async_load_bytes
 
             for i in range_constexpr(_num_a_async_loads):
@@ -402,8 +380,8 @@ def compile_blockscale_preshuffle_gemm(
                 global_offset = fx.Int32(global_byte_idx)
 
                 if const_expr(i == 0):
-                    lds_addr = memref_dialect.extract_aligned_pointer_as_index(lds_buffer) + wave_id * 64 * dma_bytes
-                    lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, fx.Int64(lds_addr))
+                    lds_addr = fx.Int64(fx.ptrtoint(lds_buffer.ptr)) + fx.Int64(wave_id * 64 * dma_bytes)
+                    lds_ptr_i64_lane0 = rocdl.readfirstlane(T.i64, lds_addr)
                 else:
                     lds_ptr_i64_lane0 += total_threads * dma_bytes
                 lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
@@ -582,33 +560,23 @@ def compile_blockscale_preshuffle_gemm(
             if const_expr(use_cshuffle_epilog):
                 if const_expr(lds_out is None):
                     raise RuntimeError("use_cshuffle_epilog=True but lds_out is not allocated.")
-                gpu.barrier()
 
-                def write_row_to_lds(
-                    *,
-                    mi,
-                    ii,
-                    row_in_tile,
-                    row,
-                    row_base_lds,
-                    col_base_local,
-                    num_acc_n,
-                    lds_out,
-                ):
-                    for ni in range_constexpr(num_acc_n):
-                        col_local = col_base_local + (ni * 16)
-                        acc_idx = mi * num_acc_n + ni
-                        acc = final_accs[acc_idx]
-                        val = Vec(acc)[ii]
-                        v_out = val.to(_out_elem_dtype())
-                        lds_idx = row_base_lds + col_local
-                        v1 = Vec.from_elements([v_out], _out_elem_dtype())
-                        vector.store(v1, lds_out, [lds_idx], alignment=2)
+                # Inlined CShuffle epilogue (pointer-based LDS). Mirrors
+                # kernels.mma.mfma_epilogues.c_shuffle_epilog (standard path,
+                # block_size=256, cshuffle_nlane=32); pointer loads/stores are used
+                # because vector-dialect ops do not accept the LDS pointer. lds_out
+                # is the pong region reinterpreted as out dtype (element offsets).
+                cshuffle_nlane = 32
+                cshuffle_mlane = total_threads // cshuffle_nlane  # 8
+                e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
+                frag_elem_type = T.bf16 if is_bf16_out else T.f16
+                vec_frag_ty = T.vec(e_vec, frag_elem_type)
+                tile_n_idx = fx.Index(tile_n)
+                col_base_local = n_tile_base + lane_mod_16
 
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                     idx_out = row * c_n + col_g0
                     byte_off = idx_out * 2
-                    e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
                     if const_expr(e_vec == 4):
                         frag_i32x2 = Vec(frag).bitcast(fx.Int32)
                         buffer_ops.buffer_store(frag_i32x2, c_rsrc, byte_off, offset_is_bytes=True)
@@ -616,30 +584,45 @@ def compile_blockscale_preshuffle_gemm(
                         frag_i32 = Vec(frag).bitcast(fx.Int32)[0]
                         buffer_ops.buffer_store(frag_i32, c_rsrc, byte_off, offset_is_bytes=True)
 
-                e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
-                frag_elem_type = T.bf16 if is_bf16_out else T.f16
-                mfma_epilog(
-                    use_cshuffle=True,
-                    arith=arith,
-                    vector=vector,
-                    gpu=gpu,
-                    range_constexpr=range_constexpr,
-                    tile_m=tile_m,
-                    tile_n=tile_n,
-                    e_vec=e_vec,
-                    m_repeat=m_repeat,
-                    num_acc_n=num_acc_n,
-                    tx=tx,
-                    lane_div_16=lane_div_16,
-                    lane_mod_16=lane_mod_16,
-                    bx_m=bx_m,
-                    by_n=by_n,
-                    n_tile_base=n_tile_base,
-                    lds_out=lds_out,
-                    frag_elem_type=frag_elem_type,
-                    write_row_to_lds=write_row_to_lds,
-                    store_pair=store_pair,
-                )
+                # -- write C tile to LDS (row-major [tile_m, tile_n], out dtype) --
+                gpu.barrier()
+                lane_div_16_mul4 = lane_div_16 * 4
+                for mi in range_constexpr(m_repeat):
+                    for ii in range_constexpr(4):
+                        row_in_tile = fx.Index(mi * 16) + (lane_div_16_mul4 + fx.Index(ii))
+                        row_base_lds = row_in_tile * tile_n_idx
+                        for ni in range_constexpr(num_acc_n):
+                            col_local = col_base_local + (ni * 16)
+                            acc_idx = mi * num_acc_n + ni
+                            val = Vec(final_accs[acc_idx])[ii]
+                            v_out = val.to(_out_elem_dtype())
+                            lds_idx = row_base_lds + col_local
+                            fx.ptr_store(v_out, lds_out + fx.Int32(lds_idx))
+                gpu.barrier()
+
+                # -- shuffle remap + half2 store --
+                c_nlane = fx.Index(cshuffle_nlane)
+                m_lane = tx // c_nlane
+                n_lane = tx % c_nlane
+                c_evec = fx.Index(e_vec)
+                m_reps_shuffle = tile_m // cshuffle_mlane
+                n_reps_shuffle = tile_n // (cshuffle_nlane * e_vec)
+                for mr in range_constexpr(m_reps_shuffle):
+                    row_local = fx.Index(mr * cshuffle_mlane) + m_lane
+                    row = bx_m + row_local
+                    row_base_lds = row_local * tile_n_idx
+                    for nr in range_constexpr(n_reps_shuffle):
+                        col_pair0 = fx.Index(nr * (cshuffle_nlane * e_vec)) + (n_lane * c_evec)
+                        lds_idx_pair = row_base_lds + col_pair0
+                        frag = fx.ptr_load(lds_out + fx.Int32(lds_idx_pair), result_type=vec_frag_ty)
+                        store_pair(
+                            row_local=row_local,
+                            row=row,
+                            row_ctx=None,
+                            col_pair0=col_pair0,
+                            col_g0=by_n + col_pair0,
+                            frag=frag,
+                        )
                 return
 
             def body_row(*, mi, ii, row_in_tile, row):
@@ -873,13 +856,6 @@ def compile_blockscale_preshuffle_gemm(
         i32_n: fx.Int32,
         stream: fx.Stream,
     ):
-        allocator_pong.finalized = False
-        allocator_ping.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator_pong.finalize()
-            allocator_ping.finalize()
-
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = i32_n // tile_n
 

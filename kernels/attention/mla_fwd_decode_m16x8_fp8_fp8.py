@@ -18,8 +18,7 @@ NOTE: Do NOT use ``from __future__ import annotations`` here -- it breaks
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm, memref
-from flydsl.compiler.kernel_function import CompilationContext
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.arith import _to_raw as _raw
@@ -27,7 +26,6 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator
 
 
 def _is_gfx950_arch(arch: str) -> bool:
@@ -170,6 +168,17 @@ V3_TOTAL_LDS_BYTES: int = V3_P_LDS_KV_1 + V3_SZ_LDS_KV  # 84736
 assert max(SZ_LDS_O16, SZ_LDS_O32) <= V3_SZ_LDS_KV, "Output LDS must fit in one gfx950 KV buffer region"
 
 TOTAL_LDS_BYTES: int = V3_TOTAL_LDS_BYTES if IS_GFX950 else V2_TOTAL_LDS_BYTES
+
+
+# ---------------------------------------------------------------------------
+# Shared (LDS) storage
+# ---------------------------------------------------------------------------
+# The kernel manages LDS as one flat byte region addressed by absolute
+# offsets, so a single byte array covering the whole reservation matches the
+# previous statically-sized allocation exactly.
+@fx.struct
+class SharedStorage:
+    storage: fx.Array[fx.Int8, TOTAL_LDS_BYTES, 16]  # 16 = alignment
 
 
 # ---------------------------------------------------------------------------
@@ -360,16 +369,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         return arith.maximumf(_raw(a), _raw(b), fastmath=fastmath)
 
     # ---- LDS setup ----
-    arch = get_hip_arch()
-    lds_allocator = SmemAllocator(None, arch=arch)
-    lds_allocator.ptr = TOTAL_LDS_BYTES  # reserve LDS bytes
-
-    ctx = CompilationContext.get_current()
-    with ir.InsertionPoint(ctx.gpu_module_body):
-        lds_allocator.finalize()
-
-    lds_buffer = lds_allocator.get_base()
-    lds_base_idx = memref.extract_aligned_pointer_as_index(lds_buffer)
+    # Single flat byte reservation; all access below is via absolute LDS byte
+    # addresses computed off this base index (smem bytes are auto-tracked).
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_base_idx = ArithValue(_raw(fx.ptrtoint(lds.storage.ptr))).index_cast(T.index)
 
     # ---- V^T transpose perm constants ----
     c_perm0 = fx.Int32(0x05010400)
@@ -730,12 +733,12 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         # ds_write_b128 x 2 (4 dwords each = 32 fp8)
         lo_packed = Vec.from_elements(vt8[0:4], fx.Int32)
-        lo_i8 = Vec(lo_packed).bitcast(fx.Int8)
-        lo_i8.store(lds_buffer, [lds_vt_addr])
+        lo_ptr = _lds_ptr_from_i32(_i32(lds_vt_addr))
+        _ptr_store(lo_packed, lo_ptr, alignment=16)
 
         hi_packed = Vec.from_elements(vt8[4:8], fx.Int32)
-        hi_i8 = Vec(hi_packed).bitcast(fx.Int8)
-        hi_i8.store(lds_buffer, [lds_vt_addr + 16])
+        hi_ptr = _lds_ptr_from_i32(_i32(ArithValue(lds_vt_addr) + 16))
+        _ptr_store(hi_packed, hi_ptr, alignment=16)
 
     # ---- Helper: load transposed V from Vt LDS ----
     def _load_vt_from_lds(vt_base_i32, col_offset):
@@ -2099,6 +2102,6 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
     ).launch(
         grid=(num_cus, 1, 1),
         block=(NUM_THREADS, 1, 1),
-        smem=0,  # LDS is statically allocated via SmemAllocator
+        smem=0,  # LDS is statically allocated via SharedAllocator
         stream=stream,
     )

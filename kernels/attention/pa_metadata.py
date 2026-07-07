@@ -41,12 +41,10 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl.compiler.kernel_function import CompilationContext
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import Int32, T
 from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.common import dpp_utils
 from kernels.common.kernels_common import get_warp_size
@@ -139,6 +137,25 @@ FP8_MAX = 240.0
 LOG2E = 1.4426950408889634
 
 
+# ── LDS (shared memory) raw-pointer access helpers ───────────────────
+# The shared-storage API hands out `!fly.memref` views that only accept scalar
+# fx.memref_load/store. This kernel needs vectorized LDS traffic, so we
+# reinterpret each region's base pointer as an LDS (address space 3) llvm.ptr and
+# issue vector llvm.load/store at explicit byte offsets. `base_i64` is the raw
+# integer address of a shared-storage region (via fx.ptrtoint); `byte_off` is a
+# byte offset into that region.
+def _lds_ptr(base_i64, byte_off):
+    return buffer_ops.create_llvm_ptr(fx.Int64(base_i64) + fx.Int64(byte_off), address_space=3)
+
+
+def _lds_store_vec(base_i64, byte_off, vec_value, align):
+    llvm.StoreOp(vec_value, _lds_ptr(base_i64, byte_off), alignment=align)
+
+
+def _lds_load_vec(base_i64, byte_off, vec_ir_type, align):
+    return fx.Vector(llvm.LoadOp(vec_ir_type, _lds_ptr(base_i64, byte_off), alignment=align).result)
+
+
 def _load_k_flat(
     k_global_ptr,
     k_block_base_dw_i64,
@@ -200,21 +217,18 @@ def _build_pa_thread_invariants(
     )
     pv_prob_read_base = rowid * fx.Int32(MFMA_N * PROB_ROW_STRIDE_BYTES) + lane16id * fx.Int32(PROB_ROW_STRIDE_BYTES)
 
+    # Softmax-LDS element offsets (f32 indices); callers convert to byte offsets.
     sm_lane_wave_base = lane16id * fx.Int32(NUM_WARPS)
-    sm_max_off = fx.Index(sm_lane_wave_base + warp_id)
-    sm_sum_off = fx.Index(fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
-    sm_rd_max_offs = [fx.Index(sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)]
-    sm_rd_sum_offs = [
-        fx.Index(fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
-    ]
+    sm_max_off = sm_lane_wave_base + warp_id
+    sm_sum_off = fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
+    sm_rd_max_offs = [sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
+    sm_rd_sum_offs = [fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
 
     sm_vmax_wr_off = None
     sm_vmax_rd_offs = None
     if const_expr(per_token_kv):
-        sm_vmax_wr_off = fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id)
-        sm_vmax_rd_offs = [
-            fx.Index(fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w)) for w in range(NUM_WARPS)
-        ]
+        sm_vmax_wr_off = fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
+        sm_vmax_rd_offs = [fx.Int32(2 * NUM_WARPS * MFMA_N) + sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
 
     return (
         k_tok_thread_base,
@@ -275,9 +289,8 @@ def _compute_mtp_group_state(
 
 @flyc.jit
 def _finish_q_fragments(
-    logits_lds_i32,
-    logits_lds_i64,
-    softmax_lds_f32,
+    logits_base,
+    softmax_base,
     q_chunks,
     lane16id,
     rowid,
@@ -290,8 +303,8 @@ def _finish_q_fragments(
     # LDS Q layout (compact, per-qhead contiguous):
     #   Q[head=h][hd=d]  at byte offset  h * HEAD_SIZE + d   (FP8 after conversion)
     # Total Q footprint = 16 qheads * HEAD_SIZE bytes, aliased with the later P
-    # writes via `logits_lds_i32 / logits_lds_i64` (same base).  For HEAD_SIZE=64,
-    # only the first 8 lanes write Q for each qhead.
+    # writes via the logits/Q region base (addressed as i32 and i64).  For
+    # HEAD_SIZE=64, only the first 8 lanes write Q for each qhead.
     #
     # Writer: thread (warp_id W, rowid R', lane16id L') owns qhead = W*4 + R' =
     # `local_qhead_idx`, and within that qhead owns the 8 FP8 elements at
@@ -338,28 +351,30 @@ def _finish_q_fragments(
     q_w0, q_w1 = q_words
 
     if lane16id == fx.Int32(0):
-        fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32).store(
-            softmax_lds_f32, [fx.Index(local_qhead_idx)]
+        _lds_store_vec(
+            softmax_base,
+            local_qhead_idx * 4,
+            fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32),
+            align=4,
         )
 
     v01 = fx.Vector.from_elements([q_w0, q_w1], dtype=fx.Int32)
-    lds_q_i32 = lds_q_base >> fx.Int32(2)
+    # `lds_q_base` is already a byte offset into the logits/Q region.
     if const_expr(q_lanes_per_head < MFMA_N):
         if lane16id < fx.Int32(q_lanes_per_head):
-            v01.store(logits_lds_i32, [fx.Index(lds_q_i32)])
+            _lds_store_vec(logits_base, lds_q_base, v01, align=8)
     else:
-        v01.store(logits_lds_i32, [fx.Index(lds_q_i32)])
+        _lds_store_vec(logits_base, lds_q_base, v01, align=8)
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = fx.Vector.load(T.vec(1, fx.Float32.ir_type), softmax_lds_f32, [fx.Index(lane16id)])[0].ir_value()
+    query_scale_lane = _lds_load_vec(softmax_base, lane16id * 4, T.vec(1, fx.Float32.ir_type), align=4)[0].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
             # See layout comment above. Byte offset:
             #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
             lds_rd_byte = lane16id * c_head_size + fx.Int32(qkhe << 6) + (rowid << fx.Int32(4)) + fx.Int32(qkr << 3)
-            lds_rd_base = lds_rd_byte >> fx.Int32(3)
-            q_v1 = fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [fx.Index(lds_rd_base)])
+            q_v1 = _lds_load_vec(logits_base, lds_rd_byte, T.vec(1, T.i64), align=8)
             q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
 
@@ -402,9 +417,8 @@ def _prefetch_mtp_group_query(
 
 
 def _finish_mtp_group_q_fragments(
-    logits_lds_i32,
-    logits_lds_i64,
-    softmax_lds_f32,
+    logits_base,
+    softmax_base,
     mtp_prefetch,
     lane16id,
     rowid,
@@ -416,9 +430,8 @@ def _finish_mtp_group_q_fragments(
 ):
     qi_val, qhi_pos, q_chunks = mtp_prefetch
     q_frags, query_scale_lane = _finish_q_fragments(
-        logits_lds_i32,
-        logits_lds_i64,
-        softmax_lds_f32,
+        logits_base,
+        softmax_base,
         q_chunks,
         lane16id,
         rowid,
@@ -450,10 +463,9 @@ def _make_pa_phase_helpers(
     v_global_ptr,
     ks_rsrc,
     vs_rsrc,
-    logits_lds_i32,
-    logits_lds_i64,
-    softmax_lds_f32,
-    scale_lds_f32,
+    logits_base,
+    softmax_base,
+    scale_base,
     stride_ks_block,
     stride_ks_head,
     softmax_scale_base,
@@ -485,7 +497,7 @@ def _make_pa_phase_helpers(
     vhe_loop: int = 2,
 ):
     apply_causal_mask = needs_mask or query_length > 1
-    pv_prob_i64_indices = []
+    pv_prob_i64_bytes = []
     for vt in range_constexpr(VTLOOP):
         for j in range_constexpr(2):
             p_byte = (
@@ -493,7 +505,7 @@ def _make_pa_phase_helpers(
                 + pv_prob_read_base
                 + arith.constant(j * 8, type=T.i32)
             )
-            pv_prob_i64_indices.append(fx.Index(p_byte >> fx.Int32(3)))
+            pv_prob_i64_bytes.append(p_byte)
 
     def _load_kv_scale_scalars(tile_token_offset_i32, phys_block):
         if const_expr(per_token_kv):
@@ -527,13 +539,17 @@ def _make_pa_phase_helpers(
             if const_expr(preloaded_scale_scalars is None):
                 preloaded_scale_scalars = _load_kv_scale_scalars(tile_token_offset_i32, phys_block)
             k_scale_scalar, v_scale_scalar = preloaded_scale_scalars
-            fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32).store(
-                scale_lds_f32,
-                [fx.Index(scale_stage_token)],
+            _lds_store_vec(
+                scale_base,
+                scale_stage_token * 4,
+                fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32),
+                align=4,
             )
-            fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32).store(
-                scale_lds_f32,
-                [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + scale_stage_token)],
+            _lds_store_vec(
+                scale_base,
+                (fx.Int32(LDS_SCALE_V_OFFSET) + scale_stage_token) * 4,
+                fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
+                align=4,
             )
             rocdl.sched_barrier(0)
 
@@ -561,12 +577,13 @@ def _make_pa_phase_helpers(
                 v_scale_vecs = []
                 for td in range_constexpr(TLOOP):
                     scale_row_base = kv_tok_thread_base + fx.Int32(td * MFMA_N)
-                    k_scale_vecs.append(vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(scale_row_base)]))
+                    k_scale_vecs.append(_lds_load_vec(scale_base, scale_row_base * 4, T.f32x4, align=16))
                     v_scale_vecs.append(
-                        vector.load_op(
+                        _lds_load_vec(
+                            scale_base,
+                            (fx.Int32(LDS_SCALE_V_OFFSET) + scale_row_base) * 4,
                             T.f32x4,
-                            scale_lds_f32,
-                            [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + scale_row_base)],
+                            align=16,
                         )
                     )
                 return v_results, k_scale_vecs, v_scale_vecs
@@ -577,10 +594,10 @@ def _make_pa_phase_helpers(
         return kv_tok_thread_base + fx.Int32(td * MFMA_N)
 
     def _load_k_scale_vec(td: int):
-        return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(_scale_row_base(td))])
+        return _lds_load_vec(scale_base, _scale_row_base(td) * 4, T.f32x4, align=16)
 
     def _load_v_scale_vec(td: int):
-        return vector.load_op(T.f32x4, scale_lds_f32, [fx.Index(fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td))])
+        return _lds_load_vec(scale_base, (fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td)) * 4, T.f32x4, align=16)
 
     def _get_k_scale_vec(td: int, k_scale_vecs=None):
         if const_expr(cache_scale_vecs):
@@ -607,10 +624,11 @@ def _make_pa_phase_helpers(
                 v_max_warp = fx.maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
                 v_max_warp = fx.maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-            vector.store(
+            _lds_store_vec(
+                softmax_base,
+                sm_vmax_wr_off * 4,
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
-                softmax_lds_f32,
-                [sm_vmax_wr_off],
+                align=4,
             )
 
     def _token_vec_i32(kv_tok_base, td: int):
@@ -675,10 +693,11 @@ def _make_pa_phase_helpers(
             qk_max = fx.maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
             qk_max = fx.maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-        vector.store(
+        _lds_store_vec(
+            softmax_base,
+            sm_max_off * 4,
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_max_off],
+            align=4,
         )
 
         if const_expr(cache_scale_vecs and per_token_kv):
@@ -688,7 +707,7 @@ def _make_pa_phase_helpers(
     def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
         partition_max = neg_inf
         partition_sum = zero_f
-        max_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_max_offs[0]]))
+        max_vec = _lds_load_vec(softmax_base, sm_rd_max_offs[0] * 4, T.f32x4, align=16)
         for w in range_constexpr(NUM_WARPS):
             partition_max = fx.maxnumf(partition_max, max_vec[w])
 
@@ -702,10 +721,11 @@ def _make_pa_phase_helpers(
             d_out[td] = p_vec
         for sh in [32, 16]:
             local_exp_sum = local_exp_sum + local_exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-        vector.store(
+        _lds_store_vec(
+            softmax_base,
+            sm_sum_off * 4,
             fx.Vector.from_elements([local_exp_sum], dtype=fx.Float32),
-            softmax_lds_f32,
-            [sm_sum_off],
+            align=4,
         )
         if const_expr(needs_mask):
             accum_scale = arith.select(
@@ -717,7 +737,7 @@ def _make_pa_phase_helpers(
             accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         gpu.barrier()
-        sum_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_rd_sum_offs[0]]))
+        sum_vec = _lds_load_vec(softmax_base, sm_rd_sum_offs[0] * 4, T.f32x4, align=16)
         for w in range_constexpr(NUM_WARPS):
             partition_sum = arith.addf(
                 arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
@@ -732,7 +752,7 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
-            vmax_vec = fx.Vector(vector.load_op(T.f32x4, softmax_lds_f32, [sm_vmax_rd_offs[0]]))
+            vmax_vec = _lds_load_vec(softmax_base, sm_vmax_rd_offs[0] * 4, T.f32x4, align=16)
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
                 v_max_global = fx.maxnumf(v_max_global, w_vmax)
@@ -754,9 +774,8 @@ def _make_pa_phase_helpers(
             lo = rocdl.cvt_pk_fp8_f32(T.i32, p0, p1, arith.constant(0, type=T.i32), False)
             pk = rocdl.cvt_pk_fp8_f32(T.i32, p2, p3, lo, True)
             byte_base = prob_wr_thread_base + arith.constant(td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
-            i32_off = byte_base >> fx.Int32(2)
             pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
-            vector.store(pk_vec, logits_lds_i32, [fx.Index(i32_off)])
+            _lds_store_vec(logits_base, byte_base, pk_vec, align=4)
         return rmax, rsum, outs, v_correction
 
     def _pv_mfma(v_ops, outs, v_correction):
@@ -773,8 +792,8 @@ def _make_pa_phase_helpers(
         p_i64_all = []
         for vt in range_constexpr(VTLOOP):
             for j in range_constexpr(2):
-                p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
-                p_i64_all.append(fx.Vector.load(T.vec(1, T.i64), logits_lds_i64, [p_i64_idx])[0])
+                p_i64_byte = pv_prob_i64_bytes[vt * 2 + j]
+                p_i64_all.append(_lds_load_vec(logits_base, p_i64_byte, T.vec(1, T.i64), align=8)[0])
 
         for vhe in range_constexpr(vhe_loop):
             tmp_out = arith.constant_vector(0.0, T.f32x4)
@@ -1336,7 +1355,6 @@ def compile_pa_decode_metadata(
     """
     if block_size is None:
         block_size = KV_BLOCK_SIZE
-    arch = get_rocm_arch()
     if head_dim % QKHE_PER_FETCH != 0 or head_dim % (MFMA_N * NUM_WARPS) != 0 or head_dim % Q_ELEMS_PER_LANE != 0:
         raise ValueError(f"Unsupported head_dim={head_dim}; must be a multiple of {MFMA_N * NUM_WARPS}.")
     _HEAD = head_dim
@@ -1384,18 +1402,19 @@ def compile_pa_decode_metadata(
     LDS_VMAX_BYTES = NUM_WARPS * MFMA_N * 4 if const_expr(per_token_kv) else 0  # 256 or 0
     LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES + LDS_VMAX_BYTES
     LDS_SCALE_TOTAL = LDS_SCALE_BYTES if const_expr(per_token_kv) else 0
-    allocator = SmemAllocator(None, arch=arch, global_sym_name=f"pa_ps_smem_bs{_block_size}")
+    # One contiguous shared-storage region carved into sub-regions by byte offset
+    # (matches the prior single-buffer layout, incl. logits/Q i32↔i64 aliasing).
     logits_off = 0
-    allocator.ptr = LDS_LOGITS_BYTES
     softmax_off = LDS_LOGITS_BYTES
-    allocator.ptr += LDS_SOFTMAX_TOTAL
     scale_off = softmax_off + LDS_SOFTMAX_TOTAL
-    allocator.ptr += LDS_SCALE_TOTAL
     # Phys-block staging LDS for the small-block path (cross-warp visibility of
     # the per-warp page indices so V can read all blocks of a partition).
     bt_off = scale_off + LDS_SCALE_TOTAL
-    if _is_small_block:
-        allocator.ptr += NUM_WARPS * TLOOP * 4
+    _LDS_TOTAL_BYTES = bt_off + (NUM_WARPS * TLOOP * 4 if _is_small_block else 0)
+
+    @fx.struct
+    class SharedStorage:
+        buf: fx.Array[fx.Int32, _LDS_TOTAL_BYTES // 4, 16]
 
     # ── @flyc.kernel ─────────────────────────────────────────────────
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
@@ -1462,17 +1481,21 @@ def compile_pa_decode_metadata(
             k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
             v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
 
-        # ── LDS views ──
-        smem_base = allocator.get_base()
-        logits_lds_i32 = SmemPtr(smem_base, logits_off, T.i32, shape=(LDS_LOGITS_BYTES // 4,)).get()
-        softmax_lds_f32 = SmemPtr(smem_base, softmax_off, T.f32, shape=(LDS_SOFTMAX_TOTAL // 4,)).get()
-        logits_lds_i64 = SmemPtr(smem_base, logits_off, T.i64, shape=(LDS_LOGITS_BYTES // 8,)).get()
-        scale_lds_f32 = None
+        # ── LDS region base addresses ──
+        # Built ONCE at the top (before any runtime scf.if/for) so they dominate
+        # all child regions; downstream LDS traffic uses these raw i64 addresses
+        # via the pointer-based _lds_store_vec / _lds_load_vec helpers.  The
+        # logits/Q region is addressed as both i32 and i64 off the same base.
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        _lds_base = fx.Int64(fx.ptrtoint(lds.buf.ptr))
+        logits_base = _lds_base + fx.Int64(logits_off)
+        softmax_base = _lds_base + fx.Int64(softmax_off)
+        scale_base = None
         if const_expr(per_token_kv):
-            scale_lds_f32 = SmemPtr(smem_base, scale_off, T.f32, shape=(LDS_SCALE_BYTES // 4,)).get()
-        bt_lds_i32 = None
+            scale_base = _lds_base + fx.Int64(scale_off)
+        bt_base = None
         if const_expr(_is_small_block):
-            bt_lds_i32 = SmemPtr(smem_base, bt_off, T.i32, shape=(NUM_WARPS * TLOOP,)).get()
+            bt_base = _lds_base + fx.Int64(bt_off)
 
         # ── Constants ──
         c_kb = stride_k_block
@@ -1586,10 +1609,9 @@ def compile_pa_decode_metadata(
                 v_global_ptr=v_global_ptr,
                 ks_rsrc=ks_rsrc,
                 vs_rsrc=vs_rsrc,
-                logits_lds_i32=logits_lds_i32,
-                logits_lds_i64=logits_lds_i64,
-                softmax_lds_f32=softmax_lds_f32,
-                scale_lds_f32=scale_lds_f32,
+                logits_base=logits_base,
+                softmax_base=softmax_base,
+                scale_base=scale_base,
                 stride_ks_block=stride_ks_block,
                 stride_ks_head=stride_ks_head,
                 softmax_scale_base=_softmax_scale_const,
@@ -1679,20 +1701,25 @@ def compile_pa_decode_metadata(
             def _meta_store_phys_to_lds(phys_vec):
                 if (lane16id | rowid) == c_zero_i32:
                     if const_expr(_block_size == 64):
-                        fx.Vector.from_elements([phys_vec], dtype=fx.Int32).store(bt_lds_i32, [fx.Index(warp_id)])
+                        _lds_store_vec(
+                            bt_base,
+                            warp_id * fx.Int32(4),
+                            fx.Vector.from_elements([phys_vec], dtype=fx.Int32),
+                            align=4,
+                        )
                     else:
-                        phys_vec.store(bt_lds_i32, [fx.Index(warp_id * arith.constant(TLOOP, type=T.i32))])
+                        _lds_store_vec(bt_base, warp_id * arith.constant(TLOOP * 4, type=T.i32), phys_vec, align=16)
 
             def _meta_load_v_phys_from_lds():
                 v_phys_blocks = []
                 if const_expr(_block_size == 64):
-                    phys_block_vec = fx.Vector.load(T.vec(VTLOOP, T.i32), bt_lds_i32, [fx.Index(0)])
+                    phys_block_vec = _lds_load_vec(bt_base, 0, T.vec(VTLOOP, T.i32), align=16)
                     for vt in range_constexpr(VTLOOP):
                         v_phys_blocks.append(phys_block_vec[vt])
                 else:
                     for vt in range_constexpr(VTLOOP):
-                        bt_lds_off = arith.constant(vt * TLOOP, type=T.i32) + rowid
-                        v_phys_blocks.append(fx.Vector.load(T.vec(1, T.i32), bt_lds_i32, [fx.Index(bt_lds_off)])[0])
+                        bt_lds_byte = arith.constant(vt * TLOOP * 4, type=T.i32) + rowid * fx.Int32(4)
+                        v_phys_blocks.append(_lds_load_vec(bt_base, bt_lds_byte, T.vec(1, T.i32), align=4)[0])
                 return v_phys_blocks
 
             # ── Pre-load Q for every MTP group ONCE per work item.  Each
@@ -1722,9 +1749,8 @@ def compile_pa_decode_metadata(
                     q_lanes_per_head=_Q_LANES_PER_HEAD,
                 )
                 _qi, _qhi, _qfrags, _qscale = _finish_mtp_group_q_fragments(
-                    logits_lds_i32,
-                    logits_lds_i64,
-                    softmax_lds_f32,
+                    logits_base,
+                    softmax_base,
                     mtp_prefetch,
                     lane16id,
                     rowid,
@@ -2036,10 +2062,6 @@ def compile_pa_decode_metadata(
         num_sm,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         pa_decode_metadata_kenrel(
             out,
             po,
@@ -2077,7 +2099,6 @@ def compile_pa_decode_metadata(
     return {
         "launch": launch_pa_decode_metadata,
         "kernel": pa_decode_metadata_kenrel,
-        "allocator": allocator,
     }
 
 

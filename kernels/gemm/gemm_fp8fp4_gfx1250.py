@@ -12,23 +12,19 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, scf
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops, vector
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.gemm_common_gfx1250 import (
     extract_lds_base_idx,
-    get_lds_memref,
     lds_load_b32_raw,
     lds_load_b128_raw,
     pipeline_fence,
     pipeline_fence_signal,
     pipeline_fence_wait,
     store_acc_vec8_to_buffer,
-    store_acc_vec8_to_lds,
 )
 from kernels.mma.pipeline_utils import make_tail_plan, tdm_epilogue_fence_threshold_bytes
 
@@ -311,18 +307,18 @@ def compile_fp8fp4_gemm(
     tdm_desc_num_warps = 1
 
     # All pipeline stages share the same intra-stage layout in the generic
-    # arena path. The active gfx1250 FP8 TDM tile uses a separate reference
-    # pool layout below.
-    stage_layout = SmemAllocator(None, arch=gpu_arch, global_sym_name=f"mxscale_{data_format}_layout")
-    stage_a_data_rel_off = stage_layout._align(stage_layout.ptr, 16)
-    stage_layout.ptr = stage_a_data_rel_off + lds_a_data_bytes
-    stage_b_data_rel_off = stage_layout._align(stage_layout.ptr, 16)
-    stage_layout.ptr = stage_b_data_rel_off + lds_b_data_bytes
-    stage_a_scale_rel_off = stage_layout._align(stage_layout.ptr, 16)
-    stage_layout.ptr = stage_a_scale_rel_off + lds_a_scale_bytes
-    stage_b_scale_rel_off = stage_layout._align(stage_layout.ptr, 16)
-    stage_layout.ptr = stage_b_scale_rel_off + lds_b_scale_bytes
-    stage_bytes = _align_up(stage_layout.ptr, 128)
+    # arena path. Offsets are compile-time byte positions within one stage; the
+    # single LDS arena that backs every stage is allocated inside the kernel.
+    _stage_ptr = 0
+    stage_a_data_rel_off = _align_up(_stage_ptr, 16)
+    _stage_ptr = stage_a_data_rel_off + lds_a_data_bytes
+    stage_b_data_rel_off = _align_up(_stage_ptr, 16)
+    _stage_ptr = stage_b_data_rel_off + lds_b_data_bytes
+    stage_a_scale_rel_off = _align_up(_stage_ptr, 16)
+    _stage_ptr = stage_a_scale_rel_off + lds_a_scale_bytes
+    stage_b_scale_rel_off = _align_up(_stage_ptr, 16)
+    _stage_ptr = stage_b_scale_rel_off + lds_b_scale_bytes
+    stage_bytes = _align_up(_stage_ptr, 128)
 
     pre_loaded = num_buffers - 1
     loop_iters = (num_k_tiles - pre_loaded) // num_buffers
@@ -333,19 +329,13 @@ def compile_fp8fp4_gemm(
     _last_compute_stage = _base_tail_plan[-1][1]
 
     stage_pitch_bytes = _align_up(stage_bytes, 1024)
-    arena_alloc = SmemAllocator(
-        None,
-        arch=gpu_arch,
-        global_sym_name=(f"mxscale_{data_format}_{tile_m}x{tile_n}x{tile_k}_{m_warp}x{n_warp}_{num_buffers}buf_arena"),
-    )
 
     stage_phys_order = [i for i in range(num_buffers) if i != _last_compute_stage]
     stage_phys_order.append(_last_compute_stage)
     stage_base_off = [0] * num_buffers
     for phys_i, logical_i in enumerate(stage_phys_order):
         stage_base_off[logical_i] = phys_i * stage_pitch_bytes
-    arena_alloc.ptr = stage_pitch_bytes * num_buffers
-    arena_total_bytes = arena_alloc.ptr
+    arena_total_bytes = stage_pitch_bytes * num_buffers
     epilogue_fence_threshold_bytes = tdm_epilogue_fence_threshold_bytes(
         stage_base_off=stage_base_off,
         tail_plan=_base_tail_plan,
@@ -369,8 +359,9 @@ def compile_fp8fp4_gemm(
         d_need_epilogue_fence = total_d_bytes > epilogue_fence_threshold_bytes
         if total_d_bytes > arena_total_bytes:
             arena_total_bytes = total_d_bytes
-            arena_alloc.ptr = total_d_bytes
-    check_smem_capacity(arena_total_bytes, gpu_arch)
+    assert arena_total_bytes <= LDS_GFX1250_MAX_BYTES, (
+        f"Shared memory overflow: requested {arena_total_bytes} bytes, " f"limit is {LDS_GFX1250_MAX_BYTES} bytes"
+    )
 
     # TENSORcnt is tracked per-wave in hardware. Keep the fence budget in stage units;
     # secondary scale descriptors on 2/3-wave mxscale paths only make this more conservative.
@@ -479,6 +470,13 @@ def compile_fp8fp4_gemm(
         _fp8_pair_b_loads = _fp8_pair_wn * _b_frag_loads_per_wn
         # Scale ds_loads issued at the loop top. Uses the finalized module-level counts.
         _fp8_scale_loads = 0 if is_ptpc else (_a_scale_ds + _b_scale_ds)
+
+    # Single LDS arena backing every pipeline stage (and the epilogue D buffer,
+    # which reuses the arena from offset 0). All per-stage / per-tensor regions
+    # are compile-time byte slices into this one allocation.
+    @fx.struct
+    class SharedStorage:
+        arena: fx.Array[fx.Int8, arena_total_bytes, 1024]
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def kernel_mxscale_gemm(
@@ -713,8 +711,6 @@ def compile_fp8fp4_gemm(
             result = arith.select(tdm_wave_is_as, as_value, bs_value)
             result = arith.select(tdm_wave_is_b, b_value, result)
             return arith.select(tdm_wave_is_a, a_value, result)
-
-        elem_ty_lds = T.f16
 
         def _precompute_a_lane_bases(lds_ptr):
             """Precompute per-wm A fragment lane base addresses (byte offsets)."""
@@ -1967,11 +1963,38 @@ def compile_fp8fp4_gemm(
                 else:
                     addr_idx += store_acc_vec8_to_buffer(sub8, c_rsrc, addrs[addr_idx : addr_idx + 2])
 
-        def epilogue_lds_stores(final_accs, d_buf, d_base):
+        _lds_ptr_ty_d = ir.Type.parse("!llvm.ptr<3>")
+
+        def _lds_store_b128_raw(base_idx, byte_off, data_vec):
+            # Store 16 bytes to LDS at an absolute byte address (pointer-based).
+            addr_i32 = arith.unwrap(arith.index_cast(T.i32, base_idx + byte_off))
+            ptr_val = llvm.IntToPtrOp(_lds_ptr_ty_d, addr_i32).result
+            llvm.StoreOp(arith.unwrap(data_vec), ptr_val, alignment=16)
+
+        def _store_acc_vec8_to_lds_ptr(base_idx, elem_off, acc_vec8, out_elem):
+            # Pointer-based rewrite of store_acc_vec8_to_lds: the D buffer is a
+            # !fly.memref, which vector.store cannot target, so write via LDS
+            # pointers. elem_off is in f16-element (2-byte) units.
+            byte_off = elem_off * arith.index(2)
+            if const_expr(out_elem is not None):
+                h_vec = arith.trunc_f(T.vec(8, out_elem), acc_vec8)
+                i32_vec = vector.bitcast(T.vec(4, T.i32), h_vec)
+                _lds_store_b128_raw(base_idx, byte_off, i32_vec)
+            else:
+                for half in range_constexpr(2):
+                    vals = [
+                        vector.extract(acc_vec8, static_position=[half * 4 + vi], dynamic_position=[])
+                        for vi in range_constexpr(4)
+                    ]
+                    vec4 = vector.from_elements(T.vec(4, T.f32), vals)
+                    _lds_store_b128_raw(base_idx, byte_off + arith.index(half * 16), vec4)
+
+        def epilogue_lds_stores(final_accs, d_base_idx, d_base):
             for acc_idx, vec_base, m_off, wn in _sub_tiles:
                 sub8 = _get_acc_sub8(final_accs, acc_idx, vec_base)
                 imm = m_off * _lds_d_stride_elems + wn * _n_col_d_elems
-                store_acc_vec8_to_lds(d_buf, d_base, imm, sub8, out_elem=_out_elem_local)
+                elem_off = d_base + arith.index(imm)
+                _store_acc_vec8_to_lds_ptr(d_base_idx, elem_off, sub8, _out_elem_local)
 
         def _atomic_fadd_global(val, byte_off):
             # Device-scoped, relaxed atomic add into C at c_global_base_i64 + byte_off.
@@ -2091,52 +2114,46 @@ def compile_fp8fp4_gemm(
         acc_zero = arith.constant_vector(0.0, T.vec(ACC_VEC_SIZE, T.f32))
         accs = [acc_zero] * n_accs
 
-        lds_a_data_f16 = lds_a_data_bytes // 2
-        lds_b_data_f16 = lds_b_data_bytes // 2
-        lds_a_scale_f16 = lds_a_scale_bytes // 2
-        lds_b_scale_f16 = lds_b_scale_bytes // 2
+        # Single LDS arena; every pipeline stage and the epilogue D buffer are
+        # compile-time byte slices into it. TDM descriptors only read a slice's
+        # base pointer (elem_bytes is passed separately), and the raw ds_load
+        # path indexes by absolute LDS byte address, so each slice is described
+        # by (a) a base-pointer !fly.memref view and (b) an absolute byte index.
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        arena_ptr = lds.arena.ptr
+        arena_view = fx.make_view(arena_ptr, fx.make_layout(arena_total_bytes, 1))
+        arena_base_idx = extract_lds_base_idx(arena_view)
 
-        arena_base_ptr = arena_alloc.get_base()
+        def _stage_view(byte_off, nbytes):
+            # A base-pointer view over the arena at a compile-time byte offset.
+            p = fx.add_offset(arena_ptr, byte_off) if byte_off else arena_ptr
+            return fx.make_view(p, fx.make_layout(max(nbytes, 1), 1))
 
-        stages_a = [
-            SmemPtr(arena_base_ptr, stage_a_data_off[i], elem_ty_lds, shape=(lds_a_data_f16,))
-            for i in range_constexpr(num_buffers)
-        ]
-        stages_b = [
-            SmemPtr(arena_base_ptr, stage_b_data_off[i], elem_ty_lds, shape=(lds_b_data_f16,))
-            for i in range_constexpr(num_buffers)
-        ]
+        def _stage_idx(byte_off):
+            return arena_base_idx + arith.index(byte_off)
+
+        stages_a_mem = [_stage_view(stage_a_data_off[i], lds_a_data_bytes) for i in range_constexpr(num_buffers)]
+        stages_b_mem = [_stage_view(stage_b_data_off[i], lds_b_data_bytes) for i in range_constexpr(num_buffers)]
+        stages_a_idx = [_stage_idx(stage_a_data_off[i]) for i in range_constexpr(num_buffers)]
+        stages_b_idx = [_stage_idx(stage_b_data_off[i]) for i in range_constexpr(num_buffers)]
         if const_expr(is_ptpc):
             # PTPC applies sa*sb in the epilogue from global memory: no scale LDS.
             # Alias the scale stage handles to A/B so the shared plumbing stays valid;
             # for PTPC they are never written (no scale TDM) or read.
-            stages_as = stages_a
-            stages_bs = stages_b
+            stages_as_mem = stages_a_mem
+            stages_bs_mem = stages_b_mem
+            stages_as_idx = stages_a_idx
+            stages_bs_idx = stages_b_idx
         else:
-            stages_as = [
-                SmemPtr(arena_base_ptr, stage_a_scale_off[i], elem_ty_lds, shape=(lds_a_scale_f16,))
-                for i in range_constexpr(num_buffers)
-            ]
-            stages_bs = [
-                SmemPtr(arena_base_ptr, stage_b_scale_off[i], elem_ty_lds, shape=(lds_b_scale_f16,))
-                for i in range_constexpr(num_buffers)
-            ]
-
-        stages_a_mem = [stages_a[i].get() for i in range_constexpr(num_buffers)]
-        stages_b_mem = [stages_b[i].get() for i in range_constexpr(num_buffers)]
-        stages_as_mem = [stages_as[i].get() for i in range_constexpr(num_buffers)]
-        stages_bs_mem = [stages_bs[i].get() for i in range_constexpr(num_buffers)]
-
-        stages_a_idx = [extract_lds_base_idx(stages_a[i]) for i in range_constexpr(num_buffers)]
-        stages_b_idx = [extract_lds_base_idx(stages_b[i]) for i in range_constexpr(num_buffers)]
-        stages_as_idx = [extract_lds_base_idx(stages_as[i]) for i in range_constexpr(num_buffers)]
-        stages_bs_idx = [extract_lds_base_idx(stages_bs[i]) for i in range_constexpr(num_buffers)]
+            stages_as_mem = [_stage_view(stage_a_scale_off[i], lds_a_scale_bytes) for i in range_constexpr(num_buffers)]
+            stages_bs_mem = [_stage_view(stage_b_scale_off[i], lds_b_scale_bytes) for i in range_constexpr(num_buffers)]
+            stages_as_idx = [_stage_idx(stage_a_scale_off[i]) for i in range_constexpr(num_buffers)]
+            stages_bs_idx = [_stage_idx(stage_b_scale_off[i]) for i in range_constexpr(num_buffers)]
 
         if const_expr(tdm_store_enabled):
-            d_lds_base_ptr = arena_base_ptr
-            d_lds_f16_count = total_d_bytes // 2
-            d_smem = SmemPtr(d_lds_base_ptr, d_output_off, elem_ty_lds, shape=(d_lds_f16_count,))
-            d_lds_buffer = get_lds_memref(d_smem)
+            # D output reuses the arena from offset 0 (d_output_off == 0).
+            d_lds_base_ptr = arena_view
+            d_lds_base_idx = arena_base_idx
             warp_lds_off = (wave_m_idx * arith.index(n_warp) + wave_n_idx) * arith.index(_warp_d_elems)
             d_lane_base = (
                 warp_lds_off + lane16 * arith.index(_lds_d_stride_elems) + lane_kgrp * arith.index(4 * elem_bytes_d)
@@ -2552,7 +2569,7 @@ def compile_fp8fp4_gemm(
             if const_expr(d_need_epilogue_fence):
                 _pipeline_fence(outstanding=0)
             rocdl.sched_barrier(0)
-            epilogue_lds_stores(accs, d_lds_buffer, d_lane_base)
+            epilogue_lds_stores(accs, d_lds_base_idx, d_lane_base)
             rocdl.s_wait_dscnt(0)
             tdm_ops.tensor_store_2d(d_desc)
             tdm_ops.tensor_wait(0)
@@ -2618,10 +2635,8 @@ def compile_fp8fp4_gemm(
         stream: fx.Stream,
     ):
         _ = cache_tag
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            arena_alloc.finalized = False
-            arena_alloc.finalize()
+        # LDS is allocated via fx.SharedAllocator inside the kernel; smem bytes are
+        # auto-tracked, so no explicit arena finalization is needed here.
 
         gx = (i32_m + (tile_m - 1)) // tile_m
         gy = N // tile_n

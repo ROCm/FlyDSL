@@ -24,12 +24,8 @@ Computes C[M,N] = A[M,K] @ B_T[N,K]^T
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.ir import InsertionPoint
-from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch
-from flydsl.utils.smem_allocator import SmemAllocator
 
 WMMA_M = 16
 WMMA_N = 16
@@ -76,8 +72,6 @@ def create_wmma_gemm_module(
     LDS_ONE_BUF = LDS_A_SIZE + LDS_B_SIZE  # 10240 elements = 20KB
     LDS_TOTAL = 2 * LDS_ONE_BUF  # 20480 elements = 40KB
 
-    gpu_arch = get_rocm_arch()
-
     assert M % BLOCK_M == 0
     assert N % BLOCK_N == 0
     assert K % BLOCK_K == 0
@@ -88,6 +82,7 @@ def create_wmma_gemm_module(
     grid_m = M // BLOCK_M
     grid_n = N // BLOCK_N
     is_bf16 = in_dtype == "bf16"
+    lds_elem_dtype = fx.BFloat16 if is_bf16 else fx.Float16
 
     def _wmma_op(a_vec, b_vec, acc):
         if is_bf16:
@@ -95,13 +90,6 @@ def create_wmma_gemm_module(
             b_i16 = b_vec.bitcast(fx.Int16)
             return rocdl.wmma_f32_16x16x16_bf16(acc.type, a_i16, b_i16, acc).result
         return rocdl.wmma_f32_16x16x16_f16(acc.type, a_vec, b_vec, acc).result
-
-    elem_bytes = 2  # bf16/f16 are both 2 bytes
-    allocator = SmemAllocator(None, arch=gpu_arch)
-    # Reserve LDS space (allocate_array needs an ir.Type, but we're outside MLIR
-    # context here; manually compute offset instead).
-    lds_byte_offset = allocator._align(allocator.ptr, elem_bytes)
-    allocator.ptr = lds_byte_offset + LDS_TOTAL * elem_bytes
 
     @flyc.kernel
     def wmma_gemm_kernel(
@@ -112,10 +100,22 @@ def create_wmma_gemm_module(
         in_ir_ty = T.bf16 if is_bf16 else T.f16
         v8_in_ty = T.vec(8, in_ir_ty)
 
-        from flydsl.utils.smem_allocator import SmemPtr
+        # Allocate the whole (double-buffered) LDS region as one contiguous array.
+        # Vectorized (v8) LDS access goes through raw LDS pointers built ONCE here at
+        # the top: the pointer/int handles below are ir.Values, so they are safe to
+        # use inside the runtime pipeline loop (the .peek() handle itself is a Python
+        # object and must not be referenced from within scf regions).
+        lds = fx.SharedAllocator(static=False).allocate(fx.Array[lds_elem_dtype, LDS_TOTAL, 16]).peek()
+        lds_base_i64 = fx.Int64(fx.ptrtoint(lds.ptr))
+        lds_u8 = fx.recast_iter(fx.Uint8, lds.ptr)
 
-        lds_base = allocator.get_base()
-        lds_vec_ptr = SmemPtr(lds_base, lds_byte_offset, v8_in_ty, shape=(LDS_TOTAL // LOAD_VEC,))
+        def _lds_store_vec8(elem_off, value):
+            base = lds_base_i64 + fx.Int64(elem_off * 2)
+            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
+            _llvm.StoreOp(value, ptr, alignment=16)
+
+        def _lds_load_vec8(elem_off):
+            return fx.ptr_load(lds_u8 + fx.Int32(elem_off * 2), result_type=v8_in_ty)
 
         tid = gpu.thread_id("x")
         pid = gpu.block_id("x")
@@ -202,13 +202,13 @@ def create_wmma_gemm_module(
                 _, _, lds_rel = a_lds_info[al]
                 a_vec = raw_data[al].bitcast(fx.BFloat16 if is_bf16 else fx.Float16)
                 lds_idx = buf_offset + lds_rel
-                lds_vec_ptr.store(a_vec, [lds_idx // 8])
+                _lds_store_vec8(lds_idx, a_vec)
 
             for bl in range_constexpr(NUM_B_LOADS):
                 _, _, lds_rel = b_lds_info[bl]
                 b_vec = raw_data[NUM_A_LOADS + bl].bitcast(fx.BFloat16 if is_bf16 else fx.Float16)
                 lds_idx = buf_offset + lds_rel
-                lds_vec_ptr.store(b_vec, [lds_idx // 8])
+                _lds_store_vec8(lds_idx, b_vec)
 
         # ============================================================
         # LDS read helpers -- row-major with K-padding
@@ -220,7 +220,7 @@ def create_wmma_gemm_module(
             for rm in range_constexpr(reg_m):
                 row = wave_m * (reg_m * WMMA_M) + 16 * rm + lane16
                 lds_idx = buf_offset + row * BLOCK_K_PAD_A + col_base
-                a_raw = lds_vec_ptr.load([lds_idx // 8])
+                a_raw = _lds_load_vec8(lds_idx)
                 vecs.append(a_raw)
             return vecs
 
@@ -231,7 +231,7 @@ def create_wmma_gemm_module(
             for rn in range_constexpr(reg_n):
                 row = wave_n * (reg_n * WMMA_N) + 16 * rn + lane16
                 lds_idx = buf_offset + LDS_A_SIZE + row * BLOCK_K_PAD_B + col_base
-                b_raw = lds_vec_ptr.load([lds_idx // 8])
+                b_raw = _lds_load_vec8(lds_idx)
                 vecs.append(b_raw)
             return vecs
 
@@ -270,7 +270,7 @@ def create_wmma_gemm_module(
             col_base = 16 * rk + base8
             row = wave_m * (reg_m * WMMA_M) + 16 * rm_val + lane16
             lds_idx = buf_offset + row * BLOCK_K_PAD_A + col_base
-            return lds_vec_ptr.load([lds_idx // 8])
+            return _lds_load_vec8(lds_idx)
 
         # ============================================================
         # Initialize accumulators -- 4x4 = 16 accumulators
@@ -352,11 +352,6 @@ def create_wmma_gemm_module(
         arg_bt: fx.Tensor,
         stream: fx.Stream,
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-
         c1 = 1
         total_blocks = grid_m * grid_n
         bk = THREADS_PER_BLOCK
