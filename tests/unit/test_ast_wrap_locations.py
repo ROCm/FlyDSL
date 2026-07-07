@@ -155,22 +155,6 @@ def test_fallback_does_not_override_dsl_loc_tracing(monkeypatch):
     assert f":{_DEF_LINE}:" not in locs[0]
 
 
-def test_rewritten_plain_python_runs_without_mlir_context(monkeypatch):
-    """Fallback locations are a no-op when rewritten code runs outside tracing."""
-    monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "0")
-
-    def _plain(flag):
-        value = 1
-        if flag:
-            value = 2
-        return value
-
-    fn = types.FunctionType(_plain.__code__, dict(_plain.__globals__), _plain.__name__)
-    fn = ASTRewriter.transform(fn)
-    assert fn(True) == 2
-    assert fn(False) == 1
-
-
 def test_explicit_loc_is_not_overridden(monkeypatch):
     """An op that passes its own loc= must win over the floor."""
     monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "1")

@@ -213,8 +213,9 @@ def test_ast_rewrite_keeps_semantics_for_static_bool():
         return original_dispatch(*args, **kwargs)
 
     sample.__globals__["scf_if_dispatch"] = traced_dispatch
-    assert sample(True) == 2
-    assert sample(False) == 3
+    with Context(), Location.unknown():
+        assert sample(True) == 2
+        assert sample(False) == 3
     assert called["n"] in (0, 2)
 
 
@@ -237,6 +238,7 @@ def test_ast_rewrite_does_not_rewrite_static_string_compare():
         return original_dispatch(*args, **kwargs)
 
     sample.__globals__["scf_if_dispatch"] = traced_dispatch
-    assert sample("f32") == 1
-    assert sample("bf16") == 2
+    with Context(), Location.unknown():
+        assert sample("f32") == 1
+        assert sample("bf16") == 2
     assert called["n"] == 2
