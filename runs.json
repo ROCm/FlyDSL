@@ -1,22 +1,93 @@
 {
  "schema": 1,
- "updated": "2026-07-07T03:51:22Z",
+ "updated": "2026-07-07T03:54:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 28840111805,
+   "run_id": 28840170892,
    "pr": 807,
+   "commit": "37738e34ed50b934bf32ab87fee1220ae8d2057d",
+   "branch": "lhc/refactor-kernels",
+   "event": "pull_request",
+   "title": "refactor(kernels): domain subpackages, layered common, de-duplication",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840170892",
+   "created_at": "2026-07-07T03:50:43Z",
+   "updated_at": "2026-07-07T03:51:50Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-07T03:51:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840170892/job/85532492132"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-07T03:51:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840170892/job/85532492135"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-07T03:52:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840170892/job/85532492146"
+    }
+   ]
+  },
+  {
+   "run_id": 28840111805,
+   "pr": null,
    "commit": "3dac8d3218cfc49dca4c404763566e6074d3b830",
    "branch": "lhc/refactor-kernels",
    "event": "pull_request",
    "title": "refactor(kernels): domain subpackages, layered common, de-duplication",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840111805",
    "created_at": "2026-07-07T03:49:05Z",
-   "updated_at": "2026-07-07T03:49:59Z",
+   "updated_at": "2026-07-07T03:50:45Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-07T03:50:35Z",
+     "completed_at": "2026-07-07T03:50:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840111805/job/85532361746"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-07T03:50:35Z",
+     "completed_at": "2026-07-07T03:50:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840111805/job/85532361751"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-07T03:50:35Z",
+     "completed_at": "2026-07-07T03:50:43Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28840111805/job/85532361778"
+    }
+   ]
   },
   {
    "run_id": 28840086520,
@@ -2034,21 +2105,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641795603/job/84939549563"
     }
    ]
-  },
-  {
-   "run_id": 28641169058,
-   "pr": 795,
-   "commit": "0c5f94cf87ef03b694db6338a32723b10eb64516",
-   "branch": "feat/rmsnorm-backward-769",
-   "event": "pull_request",
-   "title": "[rmsnorm] Add backward pass + forward store_rstd for training (PR 1/3, #769)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28641169058",
-   "created_at": "2026-07-03T05:46:34Z",
-   "updated_at": "2026-07-03T05:46:34Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
