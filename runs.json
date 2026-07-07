@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-07T11:43:17Z",
+ "updated": "2026-07-07T11:48:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28863730804,
+   "pr": 816,
+   "commit": "a7528e1fb4320f0383765f4ce552d0d818ea972f",
+   "branch": "pr/fix-vector-numeric-promotion",
+   "event": "pull_request",
+   "title": "[Fix] Consistent promotion rules for Vector and Numeric",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863730804",
+   "created_at": "2026-07-07T11:46:53Z",
+   "updated_at": "2026-07-07T11:47:27Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 28863275201,
    "pr": null,
@@ -169,20 +184,20 @@
    "branch": "pr/fix-vector-numeric-promotion",
    "event": "pull_request",
    "title": "[Fix] Consistent promotion rules for Vector and Numeric",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28857644367",
    "created_at": "2026-07-07T09:57:05Z",
-   "updated_at": "2026-07-07T09:57:47Z",
+   "updated_at": "2026-07-07T11:46:55Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-07T09:57:46Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T11:46:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28857644367/job/85588204097"
     },
     {
@@ -2034,21 +2049,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28698289733/job/85111831760"
     }
    ]
-  },
-  {
-   "run_id": 28698144154,
-   "pr": null,
-   "commit": "8dac7c52f3d732cc323133d390e10ab23deb988b",
-   "branch": "jiacao/conv3d-implicit-8wave-fp8",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: 8-wave double-buffered FP8 implicit-GEMM kernel(gfx950)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28698144154",
-   "created_at": "2026-07-04T06:45:59Z",
-   "updated_at": "2026-07-04T06:47:23Z",
-   "actor": "jiacao-amd",
-   "jobs": []
   }
  ]
 }
