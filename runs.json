@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-07T11:48:30Z",
+ "updated": "2026-07-07T11:57:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "pr/fix-vector-numeric-promotion",
    "event": "pull_request",
    "title": "[Fix] Consistent promotion rules for Vector and Numeric",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863730804",
    "created_at": "2026-07-07T11:46:53Z",
-   "updated_at": "2026-07-07T11:47:27Z",
+   "updated_at": "2026-07-07T11:48:02Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-07T11:49:55Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863730804/job/85608659756"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-07T11:49:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863730804/job/85608659776"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-07T11:48:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863730804/job/85608659943"
+    }
+   ]
   },
   {
    "run_id": 28863275201,
@@ -270,11 +298,11 @@
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
    "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28854741895",
    "created_at": "2026-07-07T09:07:23Z",
-   "updated_at": "2026-07-07T11:39:10Z",
+   "updated_at": "2026-07-07T11:55:59Z",
    "actor": "Phil-amd",
    "jobs": [
     {
@@ -289,10 +317,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T11:39:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T11:55:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28854741895/job/85578627639"
     },
     {
@@ -313,19 +341,19 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28851725878",
    "created_at": "2026-07-07T08:14:25Z",
-   "updated_at": "2026-07-07T08:15:42Z",
+   "updated_at": "2026-07-07T11:56:19Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-07T08:15:42Z",
+     "started_at": "2026-07-07T11:56:19Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28851725878/job/85568677567"
     },
