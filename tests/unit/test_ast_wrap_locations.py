@@ -22,6 +22,7 @@ import pytest
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import arith
 from flydsl.compiler.ast_rewriter import ASTRewriter, FallbackLocations
+from flydsl.expr import meta as expr_meta
 
 pytestmark = [pytest.mark.l0_backend_agnostic]
 
@@ -79,6 +80,31 @@ _BRANCH_DEF = _bare_op_in_branch.__code__.co_firstlineno
 _BRANCH_IF_LINE = _BRANCH_DEF + 2  # the `if True:` statement line
 
 
+def _framework_decorated_constant_impl():
+    return arith.ConstantOp(ir.IntegerType.get_signless(32), 9)
+
+
+_FRAMEWORK_PRIMITIVE_FILE = f"{expr_meta.__file__}.test_primitive.py"
+_framework_decorated_constant = expr_meta.dsl_loc_tracing(
+    types.FunctionType(
+        _framework_decorated_constant_impl.__code__.replace(co_filename=_FRAMEWORK_PRIMITIVE_FILE),
+        globals(),
+        "_framework_decorated_constant_impl",
+    )
+)
+
+
+def _decorated_op_split_call():
+    return (
+        _framework_decorated_constant()
+    )
+
+
+_DECORATED_DEF = _decorated_op_split_call.__code__.co_firstlineno
+_DECORATED_FALLBACK_LINE = _DECORATED_DEF + 1  # the `return (` statement line
+_DECORATED_CALL_LINE = _DECORATED_DEF + 2  # the dsl_loc_tracing call site
+
+
 def test_bare_ops_get_their_own_source_line(monkeypatch):
     monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "1")
     locs = _run_traced(_two_bare_ops, transform=True)
@@ -111,11 +137,23 @@ def test_bare_op_inside_branch_gets_control_flow_line_not_def(monkeypatch):
     assert f":{_DEF_LINE}:" not in locs[0]
 
 
-def test_disabled_leaves_bare_ops_on_def_line(monkeypatch):
-    """Gated off: rewriter is a no-op, so bare ops still inherit the def line."""
+def test_wraps_even_when_debug_info_is_disabled(monkeypatch):
+    """IR locations are still needed for diagnostics when DWARF is disabled."""
     monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "0")
     locs = _run_traced(_two_bare_ops, transform=True)
-    assert all(f":{_DEF_LINE}:" in loc for loc in locs)
+    assert f":{_LINE_A}:" in locs[0]
+    assert f":{_LINE_B}:" in locs[1]
+    assert f":{_DEF_LINE}:" not in locs[0]
+    assert f":{_DEF_LINE}:" not in locs[1]
+
+
+def test_fallback_does_not_override_dsl_loc_tracing(monkeypatch):
+    """Decorated primitives keep their captured call-site loc inside the fallback scope."""
+    monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "0")
+    locs = _run_traced(_decorated_op_split_call, transform=True)
+    assert f":{_DECORATED_CALL_LINE}:" in locs[0]
+    assert f":{_DECORATED_FALLBACK_LINE}:" not in locs[0]
+    assert f":{_DEF_LINE}:" not in locs[0]
 
 
 def test_explicit_loc_is_not_overridden(monkeypatch):

@@ -1525,16 +1525,12 @@ class FallbackLocations(Transformer):
     nested ``FunctionDef`` / ``AsyncFunctionDef`` / ``ClassDef`` and rewriter-
     generated nodes (``_ASTREWRITE_MARKER``).
 
-    Gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO`` (the same env var that turns on
-    DWARF emission downstream); a no-op otherwise so production pays nothing.
+    Always enabled because compiler diagnostics also depend on IR locations,
+    independently of downstream DWARF emission.
 
     Registered last so it only wraps user statements left after the other
     rewriters have run.
     """
-
-    def __init__(self, context, first_lineno):
-        super().__init__(context, first_lineno)
-        self._enabled = env.debug.enable_debug_info
 
     @staticmethod
     @contextlib.contextmanager
@@ -1563,8 +1559,6 @@ class FallbackLocations(Transformer):
         return False
 
     def _wrap(self, stmt):
-        if not self._enabled:
-            return stmt
         if not hasattr(stmt, "lineno") or stmt.lineno is None:
             return stmt
         # Nested def/class are traced separately or run as plain Python.
@@ -1604,8 +1598,6 @@ class FallbackLocations(Transformer):
         return out
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
-        if not self._enabled:
-            return node
         if getattr(node, _ASTREWRITE_MARKER, None) is not None:
             return node
         node.body = self._wrap_block(node.body)
