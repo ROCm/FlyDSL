@@ -39,7 +39,7 @@ import mori.shmem as ms
 
 from .mega_moe_gemm1 import compile_fused_moe_gemm1
 from .mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
-from .flydsl_dispatch_combine_intranode_op import (
+from kernels.comm.flydsl_dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
@@ -89,7 +89,7 @@ def _mega_default_tile(inter_dim):
     return 64, (256 if (int(inter_dim) % 256 == 0) else 128)
 
 
-_MEGA_TUNING_DIR = Path(__file__).resolve().parent / "mega_moe_tuning_config"
+_MEGA_TUNING_DIR = Path(__file__).resolve().parent.parent / "comm" / "mega_moe_tuning_config"
 # megastage1 weights are always w4(fp4); the JSON ``dtype`` is the ACTIVATION quant.
 _MEGA_QUANT_TO_DTYPE = {"a4w4": "fp4", "a8w4": "fp8_ocp"}
 

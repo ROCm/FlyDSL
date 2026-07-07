@@ -41,7 +41,7 @@ import flydsl.compiler as flyc  # noqa: E402
 import flydsl.expr as fx  # noqa: E402
 import mori.shmem as ms  # noqa: E402
 
-from kernels.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
+from kernels.comm.flydsl_dispatch_combine_intranode_op import (  # noqa: E402
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
@@ -307,8 +307,8 @@ def _run_full_e2e(args, rank, world, dev, *, model_dim, inter_dim, experts, epr,
     import torch.nn.functional as _F
     from aiter import dtypes as _adt
     from aiter.ops.quant import per_1x32_mx_quant_hip
-    from kernels.mega_moe import MegaMoE
-    from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
+    from kernels.moe.mega_moe import MegaMoE
+    from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm1, compile_mixed_moe_gemm2
 
     def _relL2(a, b):
         a = _np.asarray(a, dtype=_np.float64); b = _np.asarray(b, dtype=_np.float64)

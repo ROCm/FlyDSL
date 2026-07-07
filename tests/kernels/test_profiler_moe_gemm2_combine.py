@@ -77,11 +77,11 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 import mori.shmem as ms
 
-from kernels.flydsl_dispatch_combine_intranode_op import (
+from kernels.comm.flydsl_dispatch_combine_intranode_op import (
     FlyDSLDispatchCombineConfig,
     FlyDSLDispatchCombineIntraNodeOp,
 )
-from kernels.mixed_moe_gemm_2stage import compile_mixed_moe_gemm2
+from kernels.moe.mixed_moe_gemm_2stage import compile_mixed_moe_gemm2
 
 # Reduction kernel for GEMM2 reduce (non-atomic) mode: sums the expanded
 # [max_recv*topk, model_dim] plain-store scratch over the topk dim back into
@@ -114,7 +114,7 @@ except Exception:  # noqa: BLE001
     fp4_utils = None  # type: ignore[assignment]
 
 try:
-    from kernels.mega_moe import (  # type: ignore
+    from kernels.moe.mega_moe import (  # type: ignore
         MegaMoeStage2,
     )
     # Module-level READY=False means the file is in place but the kernel

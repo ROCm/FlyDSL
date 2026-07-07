@@ -41,11 +41,11 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from kernels.kernels_common import validate_moe_dtypes
-from kernels.layout_utils import crd2idx, idx2crd
-from kernels.layout_utils import get as layout_get
-from kernels.mfma_epilogues import c_shuffle_epilog
-from kernels.mfma_preshuffle_pipeline import (
+from kernels.common.kernels_common import validate_moe_dtypes
+from kernels.common.layout_utils import crd2idx, idx2crd
+from kernels.common.layout_utils import get as layout_get
+from kernels.mma.mfma_epilogues import c_shuffle_epilog
+from kernels.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
     lds_store_16b_xor16,
