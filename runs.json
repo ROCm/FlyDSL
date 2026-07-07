@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-07T10:30:40Z",
+ "updated": "2026-07-07T11:27:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28862453823,
+   "pr": 817,
+   "commit": "0ca22714f1dae10878d69d3f699fcdea809c6676",
+   "branch": "pr/fix-fallback-locations",
+   "event": "pull_request",
+   "title": "[Fix] Always apply fallback IR locations",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862453823",
+   "created_at": "2026-07-07T11:23:55Z",
+   "updated_at": "2026-07-07T11:25:37Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
   {
    "run_id": 28857644367,
    "pr": 816,
@@ -29,19 +44,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T09:58:28Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T11:24:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28857644367/job/85588204103"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T10:03:32Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T11:10:43Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28857644367/job/85588204110"
     }
    ]
@@ -72,19 +87,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T09:35:02Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T10:37:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28856274176/job/85583637437"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T09:35:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T11:01:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28856274176/job/85583637459"
     }
    ]
@@ -124,10 +139,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T09:09:29Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T10:29:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28854741895/job/85578627850"
     }
    ]
@@ -1976,49 +1991,6 @@
      "started_at": "2026-07-03T15:45:53Z",
      "completed_at": "2026-07-03T15:59:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655653736/job/84984066868"
-    }
-   ]
-  },
-  {
-   "run_id": 28655409127,
-   "pr": null,
-   "commit": "766bae9c28cbb91024c7e6265f6e0d68892d677e",
-   "branch": "pr/enh-fmath-flag",
-   "event": "pull_request",
-   "title": "[Enh] Add finer FastMathFlag control",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127",
-   "created_at": "2026-07-03T10:43:39Z",
-   "updated_at": "2026-07-06T04:33:24Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-06T03:41:51Z",
-     "completed_at": "2026-07-06T04:33:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/85291056581"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-03T10:46:06Z",
-     "completed_at": "2026-07-03T12:08:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/85291056897"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-03T10:46:06Z",
-     "completed_at": "2026-07-03T11:41:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28655409127/job/85291070002"
     }
    ]
   }
