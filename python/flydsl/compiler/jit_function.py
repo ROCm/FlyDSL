@@ -767,25 +767,50 @@ def _iter_gpu_kernel_funcs(module: ir.Module):
                 yield op
 
 
-def _apply_occupancy_compile_hints(module: ir.Module) -> None:
-    """Lower occupancy compile-hints onto the kernel as ROCDL function attributes.
+def _append_passthrough(func_op, key: str, value: str) -> None:
+    """Append an LLVM ``passthrough`` ``[key, value]`` entry to a kernel func.
 
-    ``waves_per_eu`` only affects codegen when it is set as the
-    ``rocdl.waves_per_eu`` gpu.func attribute (which ``convert-gpu-to-rocdl``
-    turns into the LLVM ``amdgpu-waves-per-eu`` function attribute). Threading it
-    through ``gpu-module-to-binary opts=`` is silently ignored by the AMDGPU
-    backend, so the autotuner's ``Config(waves_per_eu=...)`` would otherwise be a
-    no-op. A value of 0 / None means "leave it to the compiler".
+    ``convert-gpu-to-rocdl`` copies ``passthrough`` from the gpu.func onto the
+    lowered llvm.func, where the LLVM emitter turns each entry into a function
+    attribute. This bridges AMDGPU attributes the ROCDL dialect does not
+    translate natively (same approach as ``FlyROCDLClusterAttrPass`` for
+    ``amdgpu-cluster-dims``). Appends so it never clobbers existing entries.
+    """
+    entry = ir.ArrayAttr.get([ir.StringAttr.get(key), ir.StringAttr.get(value)])
+    existing = func_op.attributes["passthrough"] if "passthrough" in func_op.attributes else None
+    items = ([*existing] if existing is not None else []) + [entry]
+    func_op.attributes["passthrough"] = ir.ArrayAttr.get(items)
+
+
+def _apply_occupancy_compile_hints(module: ir.Module) -> None:
+    """Lower occupancy compile-hints onto the kernel as function attributes.
+
+    The autotuner passes occupancy knobs (``Config.compiler_opts()``) as
+    ``compile_hints``; they only affect codegen when set as kernel *function
+    attributes*. Passing them via ``gpu-module-to-binary opts=`` is silently
+    ignored by the AMDGPU backend, so ``Config(waves_per_eu=..., maxnreg=...)``
+    would otherwise be a no-op. Mirrors how the MoE kernels set the attribute by
+    hand:
+
+      - ``waves_per_eu`` -> ``rocdl.waves_per_eu`` (translated by convert-gpu-to-rocdl)
+      - ``maxnreg``      -> ``amdgpu-num-vgpr`` LLVM passthrough (no native ROCDL attr)
+
+    A value of 0 / None means "leave it to the compiler".
     """
     from .kernel_function import CompilationContext
 
-    wpe = CompilationContext.get_compile_hints().get("waves_per_eu")
-    if not wpe:
+    hints = CompilationContext.get_compile_hints()
+    waves_per_eu = hints.get("waves_per_eu")
+    maxnreg = hints.get("maxnreg")
+    if not waves_per_eu and not maxnreg:
         return
     with module.context:
-        attr = ir.IntegerAttr.get(ir.IntegerType.get_signless(32), int(wpe))
+        i32 = ir.IntegerType.get_signless(32)
         for func_op in _iter_gpu_kernel_funcs(module):
-            func_op.attributes["rocdl.waves_per_eu"] = attr
+            if waves_per_eu:
+                func_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(i32, int(waves_per_eu))
+            if maxnreg:
+                _append_passthrough(func_op, "amdgpu-num-vgpr", str(int(maxnreg)))
 
 
 class MlirCompiler:

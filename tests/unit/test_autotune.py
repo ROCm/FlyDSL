@@ -670,6 +670,44 @@ def test_run_with_hints_sets_and_restores_compile_hints():
     assert fn.compile_hints == {}  # restored afterward
 
 
+def test_builder_mode_rejects_num_warps(monkeypatch):
+    """num_warps can't be routed in builder mode (block size is baked into
+    build_fn), so it must fail loudly instead of being silently dropped."""
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn_noop,
+        default=lambda a, out, **kw: Config(BLOCK=64, num_warps=4),
+        do_bench_fn=_bench_run_all,
+    )
+    with pytest.raises(ValueError, match="num_warps"):
+        t(FakeTensor((8,)), FakeTensor((1,)))
+
+
+def test_apply_occupancy_compile_hints_sets_func_attrs():
+    """waves_per_eu -> rocdl.waves_per_eu and maxnreg -> amdgpu-num-vgpr
+    passthrough, set on the kernel gpu.func. Guards against regressing to the
+    silent gpu-module-to-binary opts= no-op (needs the compiled bindings)."""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from flydsl._mlir import ir
+    from flydsl.compiler.jit_function import _apply_occupancy_compile_hints, _create_mlir_context
+    from flydsl.compiler.kernel_function import CompilationContext
+
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(
+            "module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx
+        )
+        with CompilationContext.compile_hints({"waves_per_eu": 3, "maxnreg": 64}):
+            _apply_occupancy_compile_hints(module)
+        text = str(module)
+    assert "rocdl.waves_per_eu" in text and "3" in text
+    assert "amdgpu-num-vgpr" in text and "64" in text
+
+
 def test_cache_dir_change_does_not_serve_stale_config(tmp_path, monkeypatch):
     """Switching FLYDSL_AUTOTUNE_CACHE_DIR must drop the in-memory config tuned
     under the old dir. The fake tune picks BLOCK=64; the default is BLOCK=7.

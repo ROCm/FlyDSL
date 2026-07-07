@@ -337,6 +337,15 @@ class Autotuner:
         """
         if self.build_fn is None:
             return self.fn
+        # In builder mode the block size is baked into build_fn, so a jit-kwarg
+        # like num_warps can't be routed to the launch call and would be
+        # silently dropped. Fail loudly instead of tuning a knob that no-ops.
+        if config.num_warps is not None:
+            raise ValueError(
+                f"num_warps={config.num_warps} can't be honored in builder mode "
+                "(block size is baked into build_fn). Make it a structural knob "
+                "(config kwarg routed to build) or use direct @autotune instead."
+            )
         if self.structural is not None:
             knob_key = tuple((k, config.kwargs.get(k)) for k in self.structural)
         else:
