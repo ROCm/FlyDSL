@@ -219,6 +219,7 @@ def make_tensor_descriptor_2d(
     atomic_barrier_enable: bool = False,
     early_timeout: bool = False,
     oob_outer_bound=None,
+    oob_inner_bound=None,
 ) -> TDMDescriptor2D:
     """Build a 2D TDM descriptor for tensor_load_to_lds_d2.
 
@@ -269,20 +270,12 @@ def make_tensor_descriptor_2d(
                        multicast-load knob (1 = GL1 returns to the requesters
                        present when GL2 data arrives, latecomers re-broadcast;
                        default 0 = standard wider-merge timeout).
-        oob_outer_bound: Optional runtime outer-dim global extent (e.g. real M for
-                       a row-major A/C) for non-tile-aligned outer dims. When given,
-                       ``tensor_dim1`` is set to the tile-start-relative remaining
-                       extent ``max(0, oob_outer_bound - (outer_off + warp_off_outer))``
-                       while ``tile_dim1`` is left at the full per-warp tile, so the
-                       partial last tile exceeds the tensor bound and the HW
-                       OOB-handles the overhang. On the validated eng-sample a
-                       regular-D# load issues no global fetch for the OOB rows
-                       (fault-safe) and zero-fills them in LDS. Store-side OOB via
-                       this field is HW-context dependent and not relied upon by
-                       callers (see flydsl_fp8_perf/m_pad_oob/FINDINGS.md). Accepts a
-                       Python int or an i32/index ir.Value. None (default) keeps
-                       tensor_dim1 == tile_dim1 (OOB off) — byte-identical to the
-                       original path.
+        oob_outer_bound: Optional runtime outer-dim global extent. When set,
+                       ``tensor_dim1`` becomes ``max(0, bound - tile_outer_start)``
+                       while ``tile_dim1`` stays at the full per-warp tile.
+        oob_inner_bound: Optional runtime inner-dim global extent. When set,
+                       ``tensor_dim0`` becomes ``max(0, bound - tile_inner_start)``
+                       while ``tile_dim0`` stays at the full per-warp tile.
 
     Returns:
         TDMDescriptor2D with dgroup0 and dgroup1 ready for tensor_load_2d.
@@ -427,11 +420,27 @@ def make_tensor_descriptor_2d(
         mask_i32 = arith.andi(workgroup_mask, arith.constant(0xFFFF, type=T.i32))
         g1_s0 = arith.ori(upper_const, mask_i32)
 
-    # sgpr1: atomic_barrier_addr[15:0]=0 | tensor_dim0_lo[31:16]
-    g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
+    def _oob_bound_to_i32(name, bound):
+        if isinstance(bound, int):
+            return arith.constant(bound, type=T.i32)
+        bound_i32 = bound.ir_value() if hasattr(bound, "ir_value") else bound
+        if not isinstance(bound_i32, ir.Value):
+            raise TypeError(f"{name} must be int or i32/index ir.Value, got {type(bound).__name__}")
+        if isinstance(bound_i32.type, ir.IndexType):
+            return arith.index_cast(T.i32, bound_i32)
+        if not (isinstance(bound_i32.type, ir.IntegerType) and bound_i32.type.width == 32):
+            raise TypeError(f"{name} ir.Value must be index or i32, got {bound_i32.type}")
+        return bound_i32
 
-    if oob_outer_bound is None:
-        # Compile-time tensor_dim1 == tile extent: OOB checking off.
+    def _remaining_oob_extent(name, bound, start):
+        bound_i32 = _oob_bound_to_i32(name, bound)
+        start_i32 = arith.index_cast(T.i32, start)
+        return arith.maxsi(arith.subi(bound_i32, start_i32), arith.constant(0, type=T.i32))
+
+    if oob_inner_bound is None and oob_outer_bound is None:
+        # Compile-time tensor_dim{0,1} == tile extents: OOB checking off.
+        # sgpr1: atomic_barrier_addr[15:0]=0 | tensor_dim0_lo[31:16]
+        g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
         # sgpr2: tensor_dim0_hi[15:0] | tensor_dim1_lo[31:16]
         g1_s2 = arith.constant(
             ((tdim0 >> 16) & 0xFFFF) | ((tdim1 & 0xFFFF) << 16),
@@ -443,35 +452,49 @@ def make_tensor_descriptor_2d(
             type=T.i32,
         )
     else:
-        # Runtime tensor_dim1 = max(0, oob_outer_bound - (outer_off + warp_off_outer)),
-        # tile-start-relative (the descriptor's global address already includes the
-        # tile/warp start). tile_dim1 (sgpr4) stays the full per-warp tile, so the
-        # partial last tile exceeds the tensor bound and the HW OOB-handles the
-        # overhang. tensor_dim0 (innermost) and the tile dims stay compile-time.
-        if isinstance(oob_outer_bound, int):
-            ob_i32 = arith.constant(oob_outer_bound, type=T.i32)
-        else:
-            ob_i32 = oob_outer_bound.ir_value() if hasattr(oob_outer_bound, "ir_value") else oob_outer_bound
-            if not isinstance(ob_i32, ir.Value):
-                raise TypeError(
-                    f"oob_outer_bound must be int or i32/index ir.Value, got {type(oob_outer_bound).__name__}"
-                )
-            if isinstance(ob_i32.type, ir.IndexType):
-                ob_i32 = arith.index_cast(T.i32, ob_i32)
-            elif not (isinstance(ob_i32.type, ir.IntegerType) and ob_i32.type.width == 32):
-                raise TypeError(f"oob_outer_bound ir.Value must be index or i32, got {ob_i32.type}")
-        start_i32 = arith.index_cast(T.i32, outer_off + warp_off_outer)
-        tdim1_rt = arith.maxsi(arith.subi(ob_i32, start_i32), arith.constant(0, type=T.i32))
+        # Runtime tensor_dim{0,1} are tile-start-relative; the descriptor's global
+        # address already includes the tile/warp start. Tile dims stay at the full
+        # per-warp tile, so partial tiles exceed the tensor bound and hardware OOB
+        # handles the overhang.
+        tdim0_rt = (
+            None
+            if oob_inner_bound is None
+            else _remaining_oob_extent("oob_inner_bound", oob_inner_bound, inner_off + warp_off_inner)
+        )
+        tdim1_rt = (
+            None
+            if oob_outer_bound is None
+            else _remaining_oob_extent("oob_outer_bound", oob_outer_bound, outer_off + warp_off_outer)
+        )
         c16 = arith.constant(16, type=T.i32)
         c_mask16 = arith.constant(0xFFFF, type=T.i32)
-        # sgpr2: tensor_dim0_hi[15:0] (const) | tensor_dim1_lo[31:16] (runtime)
+
+        if tdim0_rt is None:
+            # sgpr1: atomic_barrier_addr[15:0]=0 | tensor_dim0_lo[31:16]
+            g1_s1 = arith.constant((tdim0 & 0xFFFF) << 16, type=T.i32)
+            tdim0_hi = arith.constant((tdim0 >> 16) & 0xFFFF, type=T.i32)
+        else:
+            tdim0_lo = arith.andi(tdim0_rt, c_mask16)
+            tdim0_hi = arith.andi(arith.shrui(tdim0_rt, c16), c_mask16)
+            # sgpr1: atomic_barrier_addr[15:0]=0 | tensor_dim0_lo[31:16]
+            g1_s1 = arith.shli(tdim0_lo, c16)
+
+        if tdim1_rt is None:
+            tdim1_lo_shifted = arith.constant((tdim1 & 0xFFFF) << 16, type=T.i32)
+            tdim1_hi = arith.constant((tdim1 >> 16) & 0xFFFF, type=T.i32)
+        else:
+            tdim1_lo = arith.andi(tdim1_rt, c_mask16)
+            tdim1_lo_shifted = arith.shli(tdim1_lo, c16)
+            tdim1_hi = arith.andi(arith.shrui(tdim1_rt, c16), c_mask16)
+
+        # sgpr2: tensor_dim0_hi[15:0] | tensor_dim1_lo[31:16]
         g1_s2 = arith.ori(
-            arith.constant((tdim0 >> 16) & 0xFFFF, type=T.i32),
-            arith.shli(arith.andi(tdim1_rt, c_mask16), c16),
+            tdim0_hi,
+            tdim1_lo_shifted,
         )
-        # sgpr3: tensor_dim1_hi[15:0] (runtime) | tile_dim0[31:16] (const)
+        # sgpr3: tensor_dim1_hi[15:0] | tile_dim0[31:16] (const)
         g1_s3 = arith.ori(
-            arith.andi(arith.shrui(tdim1_rt, c16), c_mask16),
+            tdim1_hi,
             arith.constant(tile_d0 << 16, type=T.i32),
         )
 

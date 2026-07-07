@@ -837,6 +837,7 @@ def compile_fp8fp4_gemm(
                     workgroup_mask=b_mcast_mask,
                     atomic_barrier_enable=atomic_barrier_enable,
                     early_timeout=True,
+                    oob_outer_bound=N // scale_block_n,
                 )
             # 32x4: copy this tile's 32-N blocks x K-blocks slice of the preshuffled
             # [N//32, (K//128)*128] B-scale tensor.
@@ -878,6 +879,7 @@ def compile_fp8fp4_gemm(
                         atomic_barrier_enable=atomic_barrier_enable,
                         early_timeout=True,
                         oob_outer_bound=K_blockscale,
+                        oob_inner_bound=i32_m,
                     )
                 return tdm_ops.make_tensor_descriptor_2d(
                     global_ptr=arg_a_scale,
