@@ -1521,9 +1521,10 @@ class FallbackLocations(Transformer):
     ``loc=`` are unaffected (explicit ``loc=`` beats ``Location.current``).
 
     Recurses into bodies of compound statements (``for``, ``while``, ``if``,
-    ``with``, ``try``) so each inner statement gets its own location. Skips
-    nested ``FunctionDef`` / ``AsyncFunctionDef`` / ``ClassDef`` and rewriter-
-    generated nodes (``_ASTREWRITE_MARKER``).
+    ``with``, ``try``) and user-defined nested functions so each inner
+    statement gets its own location. Leaves nested ``FunctionDef`` /
+    ``AsyncFunctionDef`` / ``ClassDef`` statements themselves unwrapped, and
+    skips rewriter-generated function bodies (``_ASTREWRITE_MARKER``).
 
     Always enabled because compiler diagnostics also depend on IR locations,
     independently of downstream DWARF emission.
@@ -1561,7 +1562,7 @@ class FallbackLocations(Transformer):
     def _wrap(self, stmt):
         if not hasattr(stmt, "lineno") or stmt.lineno is None:
             return stmt
-        # Nested def/class are traced separately or run as plain Python.
+        # Def/class statements are not op-building statements themselves.
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return stmt
         # Don't double-wrap an existing _flydsl_loc with.
