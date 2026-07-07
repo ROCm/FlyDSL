@@ -24,7 +24,7 @@ except ImportError:
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
-from kernels.rmsnorm_autotune import rmsnorm_autotuned  # noqa: E402
+from kernels.norm.rmsnorm_autotune import rmsnorm_autotuned  # noqa: E402
 
 EPS = 1e-5
 

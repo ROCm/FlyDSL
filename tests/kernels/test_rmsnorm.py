@@ -18,7 +18,7 @@ import os
 import pytest
 
 import flydsl.compiler as flyc
-from kernels.rmsnorm_kernel import (
+from kernels.norm.rmsnorm_kernel import (
     build_fused_add_rmsnorm_dynamicquant_module,
     build_fused_add_rmsnorm_module,
     build_fused_add_rmsnorm_smoothquant_module,
