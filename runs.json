@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-07T07:14:06Z",
+ "updated": "2026-07-07T07:15:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -98,20 +98,20 @@
    "branch": "main",
    "event": "push",
    "title": "[1/5] autotune: harden cache key + add restore_value (#770) (#783)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28844909773",
    "created_at": "2026-07-07T05:55:37Z",
-   "updated_at": "2026-07-07T05:58:10Z",
+   "updated_at": "2026-07-07T07:14:00Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T05:58:09Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T07:13:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28844909773/job/85546633109"
     },
     {
