@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-07T11:34:49Z",
+ "updated": "2026-07-07T11:40:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28863219300,
+   "pr": null,
+   "commit": "b0c6f11035d96ec0c700de99d64c34e1b0718f2b",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI]: skip build/test for non-code changes (#815)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863219300",
+   "created_at": "2026-07-07T11:37:38Z",
+   "updated_at": "2026-07-07T11:38:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 28862922992,
    "pr": 817,
@@ -10,28 +25,28 @@
    "branch": "pr/fix-fallback-locations",
    "event": "pull_request",
    "title": "[Fix] Always apply fallback IR locations",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862922992",
    "created_at": "2026-07-07T11:32:17Z",
-   "updated_at": "2026-07-07T11:33:21Z",
+   "updated_at": "2026-07-07T11:33:25Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-07T11:33:25Z",
+     "started_at": "2026-07-07T11:34:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862922992/job/85605982089"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-07T11:33:25Z",
+     "started_at": "2026-07-07T11:34:42Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862922992/job/85605982127"
     },
@@ -341,20 +356,20 @@
    "branch": "main",
    "event": "push",
    "title": "[Feat] Add gather/scatter as derived exprs (#805)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184",
    "created_at": "2026-07-07T07:26:31Z",
-   "updated_at": "2026-07-07T07:32:34Z",
+   "updated_at": "2026-07-07T11:38:14Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-07T07:28:00Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T11:38:13Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184/job/85560189819"
     },
     {
@@ -2005,21 +2020,6 @@
    "created_at": "2026-07-04T06:44:51Z",
    "updated_at": "2026-07-04T06:46:14Z",
    "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 28686776094,
-   "pr": 801,
-   "commit": "b4dcec78258ec21a60c3988d027a63d362d80aa5",
-   "branch": "feat/layernorm-backward-769",
-   "event": "pull_request",
-   "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28686776094",
-   "created_at": "2026-07-03T22:53:55Z",
-   "updated_at": "2026-07-03T22:53:55Z",
-   "actor": "jhinpan",
    "jobs": []
   }
  ]
