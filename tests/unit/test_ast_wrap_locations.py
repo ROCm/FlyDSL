@@ -95,14 +95,13 @@ _framework_decorated_constant = expr_meta.dsl_loc_tracing(
 
 
 def _decorated_op_split_call():
-    return (
-        _framework_decorated_constant()
-    )
+    return (_framework_decorated_constant(),)[0]
 
 
 _DECORATED_DEF = _decorated_op_split_call.__code__.co_firstlineno
-_DECORATED_FALLBACK_LINE = _DECORATED_DEF + 1  # the `return (` statement line
-_DECORATED_CALL_LINE = _DECORATED_DEF + 2  # the dsl_loc_tracing call site
+_DECORATED_CALL_LINE = _DECORATED_DEF + 1
+_DECORATED_FALLBACK_COL = 4  # the `return` statement column
+_DECORATED_CALL_COL = 12  # the dsl_loc_tracing call expression column
 
 
 def test_bare_ops_get_their_own_source_line(monkeypatch):
@@ -151,8 +150,8 @@ def test_fallback_does_not_override_dsl_loc_tracing(monkeypatch):
     """Decorated primitives keep their captured call-site loc inside the fallback scope."""
     monkeypatch.setenv("FLYDSL_DEBUG_ENABLE_DEBUG_INFO", "0")
     locs = _run_traced(_decorated_op_split_call, transform=True)
-    assert f":{_DECORATED_CALL_LINE}:" in locs[0]
-    assert f":{_DECORATED_FALLBACK_LINE}:" not in locs[0]
+    assert f":{_DECORATED_CALL_LINE}:{_DECORATED_CALL_COL}" in locs[0]
+    assert f":{_DECORATED_CALL_LINE}:{_DECORATED_FALLBACK_COL}" not in locs[0]
     assert f":{_DEF_LINE}:" not in locs[0]
 
 
