@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-07T07:15:20Z",
+ "updated": "2026-07-07T07:28:58Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28849114185,
+   "pr": null,
+   "commit": "7e6486a2d9665dfb82ff29a17a7a221cb9d129c2",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Add finer FastMathFlag control (#789)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849114185",
+   "created_at": "2026-07-07T07:25:34Z",
+   "updated_at": "2026-07-07T07:25:55Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 28849052328,
+   "pr": 785,
+   "commit": "0e347bbf6bb57f696793559904db59ad689c9d8e",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849052328",
+   "created_at": "2026-07-07T07:24:24Z",
+   "updated_at": "2026-07-07T07:26:01Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 28848286632,
    "pr": 812,
@@ -20,7 +50,7 @@
   },
   {
    "run_id": 28846856301,
-   "pr": 785,
+   "pr": null,
    "commit": "a8b87e4d5b420d9540c3120a022d1dd24169dc6b",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -55,11 +85,11 @@
    "branch": "pr/feat-gather-scatter",
    "event": "pull_request",
    "title": "[Feat] Add gather/scatter as derived exprs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28845427504",
    "created_at": "2026-07-07T06:07:55Z",
-   "updated_at": "2026-07-07T06:28:35Z",
+   "updated_at": "2026-07-07T07:25:27Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -83,10 +113,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-07T06:11:00Z",
-     "completed_at": null,
+     "completed_at": "2026-07-07T07:25:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28845427504/job/85548287036"
     }
    ]
@@ -953,7 +983,7 @@
   },
   {
    "run_id": 28777012220,
-   "pr": 789,
+   "pr": null,
    "commit": "8cfa63cb442413a0aca9f840030b3b82e707c090",
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
@@ -996,7 +1026,7 @@
   },
   {
    "run_id": 28776905197,
-   "pr": 789,
+   "pr": null,
    "commit": "80f74fa8aa0b31fb2daa0a7335b8f749f8d7ad15",
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
@@ -1097,7 +1127,7 @@
   },
   {
    "run_id": 28769798050,
-   "pr": 789,
+   "pr": null,
    "commit": "f1181f514e34139576fa5d4e12e0aa49fa53bfef",
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
@@ -1650,7 +1680,7 @@
   },
   {
    "run_id": 28655409127,
-   "pr": 789,
+   "pr": null,
    "commit": "766bae9c28cbb91024c7e6265f6e0d68892d677e",
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
@@ -1837,7 +1867,7 @@
   },
   {
    "run_id": 28650835052,
-   "pr": 789,
+   "pr": null,
    "commit": "720de9fbd91f5e2aad2f097f79f6bdfd91205286",
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
@@ -1880,7 +1910,7 @@
   },
   {
    "run_id": 28650592586,
-   "pr": 789,
+   "pr": null,
    "commit": "9236389031246e2160515bd0c5110e00a30097d8",
    "branch": "pr/enh-fmath-flag",
    "event": "pull_request",
@@ -1907,92 +1937,6 @@
    "updated_at": "2026-07-03T09:06:02Z",
    "actor": "fsx950223",
    "jobs": []
-  },
-  {
-   "run_id": 28649455151,
-   "pr": 796,
-   "commit": "0b86c92874698cc31992bc6ed2042df76744f0c1",
-   "branch": "worktree-triton-style-occupancy-info",
-   "event": "pull_request",
-   "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151",
-   "created_at": "2026-07-03T08:48:36Z",
-   "updated_at": "2026-07-03T15:23:40Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-03T09:23:04Z",
-     "completed_at": "2026-07-03T15:23:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151/job/84963904684"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-03T08:50:24Z",
-     "completed_at": "2026-07-03T11:04:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151/job/84963904728"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-03T08:50:28Z",
-     "completed_at": "2026-07-03T10:41:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649455151/job/84963904763"
-    }
-   ]
-  },
-  {
-   "run_id": 28649199391,
-   "pr": null,
-   "commit": "64f5e47867a1883a846a2156128a68f360693b63",
-   "branch": "worktree-triton-style-occupancy-info",
-   "event": "pull_request",
-   "title": "feat(compile): surface AMDGPU kernel resource-usage info during compile",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391",
-   "created_at": "2026-07-03T08:43:34Z",
-   "updated_at": "2026-07-03T08:48:54Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-03T08:44:39Z",
-     "completed_at": "2026-07-03T08:48:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052931"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-03T08:45:45Z",
-     "completed_at": "2026-07-03T08:48:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052940"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-03T08:45:47Z",
-     "completed_at": "2026-07-03T08:48:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28649199391/job/84963052941"
-    }
-   ]
   }
  ]
 }
