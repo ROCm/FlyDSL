@@ -3,10 +3,13 @@
 
 """FlyDSL autotuner - benchmark multiple kernel configs, pick the fastest."""
 
+import contextlib
 import functools
+import hashlib
 import inspect
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -60,6 +63,22 @@ def _device_fingerprint() -> str:
         return str(get_rocm_arch())
     except Exception:
         return ""
+
+
+def _source_fingerprint(fns) -> str:
+    """Short hash of the given callables' source, so editing a kernel/config
+    invalidates its cached tuned best (the toolchain fingerprint only covers
+    flydsl core, not kernels/). Falls back to repr for source-less callables."""
+    h = hashlib.sha256()
+    for fn in fns:
+        if fn is None:
+            continue
+        target = fn.func if hasattr(fn, "func") else fn
+        try:
+            h.update(inspect.getsource(target).encode())
+        except (OSError, TypeError):
+            h.update(repr(fn).encode())
+    return h.hexdigest()[:16]
 
 
 def _normalize_strides(t) -> tuple:
@@ -143,13 +162,20 @@ class Config:
         )
 
 
-def do_bench(fn, warmup=5, rep=25, quantiles=None):
-    """Benchmark a GPU kernel using CUDA/HIP events. Returns median ms."""
+def do_bench(fn, warmup=5, rep=25, quantiles=None, setup=None):
+    """Benchmark a GPU kernel using CUDA/HIP events. Returns median ms. ``setup``,
+    if given, runs before each (untimed) warmup and timed iteration -- used to
+    restore/reset inputs without charging that copy to the measurement (it is
+    enqueued before the start event, so it is not part of the timed span)."""
     for _ in range(warmup):
+        if setup:
+            setup()
         fn()
     torch.cuda.synchronize()
     times = []
     for _ in range(rep):
+        if setup:
+            setup()
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -185,6 +211,7 @@ class Autotuner:
         key_fn=None,
         arg_names=None,
         structural=None,
+        source_fingerprint=None,
     ):
         self.fn = fn  # JitFunction instance (None in builder mode)
         self.configs = configs  # list, or callable(*args, **kwargs) -> [Config]
@@ -206,6 +233,11 @@ class Autotuner:
         self.default = default
         self.structural = tuple(structural) if structural is not None else None
         self._build_cache: Dict[tuple, object] = {}
+
+        # Fingerprint of the adopter's build/config source, folded into the cache
+        # key so editing the kernel or its config space invalidates a stale tuned
+        # "best" (the toolchain fingerprint only covers flydsl core, not kernels/).
+        self.source_fingerprint = source_fingerprint
 
         # key_fn(*args, **kwargs) -> ((name, value), ...): the specialization
         # axes. When set it replaces the self.key name lookup in _make_key, so
@@ -283,6 +315,11 @@ class Autotuner:
         key_vals.append(("_env_", _env_fingerprint()))
         key_vals.append(("_toolchain_", _toolchain_fingerprint()))
         key_vals.append(("_device_", _device_fingerprint()))
+        # Adopter source: the toolchain fingerprint only covers flydsl core, not
+        # the kernel/config module. Fold in a source hash so editing build/config
+        # invalidates a now-stale cached best.
+        if self.source_fingerprint:
+            key_vals.append(("_src_", self.source_fingerprint))
 
         return tuple(str(v) for v in key_vals)
 
@@ -327,6 +364,32 @@ class Autotuner:
             return self.prune_configs_by(configs, sig_args)
         return configs
 
+    def _reject_unroutable_config(self, config):
+        """Raise for a config carrying a knob that can't be honored, so it fails
+        loudly instead of being silently dropped or benchmarked as a no-op.
+
+        In builder mode the block size is baked into build_fn, so a jit-kwarg like
+        num_warps can't be routed to the launch call. (Called up-front in the
+        search loop, before the tolerant per-config except, and on the
+        default/cache-hit path via _resolve_fn.)
+        """
+        if self.build_fn is None:
+            return
+        if config.num_warps is not None:
+            raise ValueError(
+                f"num_warps={config.num_warps} can't be honored in builder mode "
+                "(block size is baked into build_fn). Make it a structural knob "
+                "(config kwarg routed to build) or use direct @autotune instead."
+            )
+        if self.structural is not None:
+            extra = [k for k in config.kwargs if k not in self.structural]
+            if extra:
+                raise ValueError(
+                    f"config kwargs {extra} are not in structural={self.structural}; in "
+                    "builder mode they route nowhere and would be silently dropped. Add "
+                    "them to `structural` (routed to build) or remove them from the config."
+                )
+
     def _resolve_fn(self, config, key, args, kwargs):
         """Return the launch callable for a config.
 
@@ -337,15 +400,7 @@ class Autotuner:
         """
         if self.build_fn is None:
             return self.fn
-        # In builder mode the block size is baked into build_fn, so a jit-kwarg
-        # like num_warps can't be routed to the launch call and would be
-        # silently dropped. Fail loudly instead of tuning a knob that no-ops.
-        if config.num_warps is not None:
-            raise ValueError(
-                f"num_warps={config.num_warps} can't be honored in builder mode "
-                "(block size is baked into build_fn). Make it a structural knob "
-                "(config kwarg routed to build) or use direct @autotune instead."
-            )
+        self._reject_unroutable_config(config)
         if self.structural is not None:
             knob_key = tuple((k, config.kwargs.get(k)) for k in self.structural)
         else:
@@ -370,48 +425,68 @@ class Autotuner:
         # Snapshot once before any rep runs, so restores are from pristine input.
         snapshot = self._snapshot_tensors(args, merged_kwargs)
 
-        def kernel_call():
-            # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
-            # hook that sets up state (incl. mutating a tensor) isn't clobbered
-            # by the restore. (Matches Triton: pre_hook runs on clean inputs.)
+        def setup():
+            # Runs before each rep but OUTSIDE the timed region: a restore is a
+            # full device copy that would swamp a small kernel and make configs
+            # indistinguishable if timed. Order: restore/reset first, THEN the
+            # pre_hooks, so a hook that sets up state isn't clobbered by the
+            # restore. (Matches Triton: pre_hook runs on clean inputs.)
             self._restore_tensors(snapshot)
             self._reset_tensors(args, merged_kwargs)
             if config.pre_hook:
                 config.pre_hook(merged_kwargs)
             if self.pre_hook:
                 self.pre_hook(merged_kwargs)
+
+        def kernel_call():
             self._run_with_hints(fn, compiler_opts, args, merged_kwargs)
             if self.post_hook:
                 self.post_hook(merged_kwargs)
 
         try:
-            return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
+            return self._call_do_bench(kernel_call, setup)
         finally:
             # Leave the caller's tensors as a single clean run would.
             if snapshot:
                 self._restore_tensors(snapshot)
 
+    def _call_do_bench(self, kernel_call, setup):
+        """Invoke the benchmarker, passing ``setup`` (untimed per-rep
+        restore/reset/pre_hooks) when it supports the param; otherwise fold setup
+        into the timed call so a custom do_bench_fn without ``setup`` still runs
+        correctly (just times the setup too)."""
+        try:
+            params = inspect.signature(self._do_bench).parameters
+        except (TypeError, ValueError):
+            params = {}
+        accepts_setup = "setup" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+        if accepts_setup:
+            return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep, setup=setup)
+
+        def timed():
+            setup()
+            return kernel_call()
+
+        return self._do_bench(timed, warmup=self.warmup, rep=self.rep)
+
     def _run_with_hints(self, fn, compiler_opts, args, kwargs):
-        """Run fn with optional compiler hints. Hints are set on fn.compile_hints
-        (which enters the JIT cache key) and restored after, so each distinct
-        waves_per_eu / maxnreg compiles a distinct binary instead of reusing a
-        cached one. Import is deferred so the core stays importable unbuilt."""
+        """Run fn with compiler hints set ONLY on the thread-local
+        CompilationContext -- never by mutating the shared, cached
+        ``fn.compile_hints`` (that races across concurrent tuned/served calls).
+        JitFunction folds the thread-local hints into its cache key, so each
+        distinct waves_per_eu / maxnreg still compiles and caches a distinct
+        binary. Import is deferred so the core stays importable unbuilt."""
         if not compiler_opts:
             return fn(*args, **kwargs)
 
         from .compiler.kernel_function import CompilationContext
 
-        prev_hints = getattr(fn, "compile_hints", None)
-        if prev_hints is not None:
-            # JitFunction: fold hints into its cache key so each distinct
-            # (waves_per_eu, maxnreg) compiles and caches a distinct binary.
-            fn.compile_hints = {**prev_hints, **compiler_opts}
-        try:
-            with CompilationContext.compile_hints(compiler_opts):
-                return fn(*args, **kwargs)
-        finally:
-            if prev_hints is not None:
-                fn.compile_hints = prev_hints
+        # Overlay onto any outer thread-local hints rather than replacing them.
+        merged = {**CompilationContext.get_compile_hints(), **compiler_opts}
+        with CompilationContext.compile_hints(merged):
+            return fn(*args, **kwargs)
 
     def _filter_call_kwargs(self, fn, kwargs):
         """Drop kwargs the launch fn doesn't accept. In builder mode the caller
@@ -453,7 +528,15 @@ class Autotuner:
 
         # 1. Cached best config from a prior tune (in-memory or disk).
         if not force and key in self.cache:
-            return self._run_config(self.cache[key], key, args, kwargs)
+            try:
+                return self._run_config(self.cache[key], key, args, kwargs)
+            except ValueError:
+                raise  # invalid config (e.g. num_warps) -> surface loudly
+            except Exception:
+                # A stale / incompatible cached entry (e.g. a structural knob that
+                # no longer exists) must not hard-crash a normal call: drop it and
+                # fall through to the heuristic default / a fresh search.
+                self.cache.pop(key, None)
 
         # 2. Two-track heuristic: unless tuning is explicitly requested, take
         #    the analytic default and skip the search entirely (zero-search
@@ -468,16 +551,22 @@ class Autotuner:
         configs = self._prune(configs, args, kwargs)
         print(f"[autotune] tuning {len(configs)} configs...")
         results = []
+        last_err = None
         for i, config in enumerate(configs):
+            # Reject unroutable configs up front -- before the tolerant except
+            # below -- so they fail loudly instead of being logged as "FAILED".
+            self._reject_unroutable_config(config)
             try:
                 t = self._bench_one(config, key, args, kwargs)
-                results.append((config, t))
-                print(f"  [{i+1}/{len(configs)}] {config} -> {t:.3f} ms")
             except Exception as e:
+                last_err = e
                 print(f"  [{i+1}/{len(configs)}] {config} -> FAILED: {e}")
+                continue
+            results.append((config, t))
+            print(f"  [{i+1}/{len(configs)}] {config} -> {t:.3f} ms")
 
         if not results:
-            raise RuntimeError("All autotune configs failed")
+            raise RuntimeError("All autotune configs failed") from last_err
 
         best_config, best_time = min(results, key=lambda x: x[1])
         print(f"[autotune] best: {best_config} ({best_time:.3f} ms)")
@@ -500,21 +589,36 @@ class Autotuner:
         if getattr(self, "_loaded_cache_path", None) is not None:
             self.cache.clear()
         self._loaded_cache_path = path
-        if path.exists():
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            return  # unreadable / torn file -> start empty rather than crash
+        if not isinstance(data, dict):
+            return
+        for key_str, cfg_dict in data.items():
+            # Skip a single malformed entry instead of discarding the whole cache.
             try:
-                data = json.loads(path.read_text())
-                for key_str, cfg_dict in data.items():
-                    key = tuple(json.loads(key_str))
-                    self.cache[key] = Config.from_dict(cfg_dict)
+                self.cache[tuple(json.loads(key_str))] = Config.from_dict(cfg_dict)
             except Exception:
-                pass
+                continue
 
     def _save_disk_cache(self):
-        self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
-        for key, config in self.cache.items():
-            data[json.dumps(list(key))] = config.to_dict()
-        self._cache_file.write_text(json.dumps(data, indent=2))
+        path = self._cache_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {json.dumps(list(key)): config.to_dict() for key, config in self.cache.items()}
+        # Atomic write (tmp + rename): a concurrent reader never sees a torn or
+        # partial file (a bare write_text can be observed mid-write).
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(tmp)
+            raise
 
 
 def autotune(
@@ -575,6 +679,7 @@ def autotune(
             do_bench_fn=do_bench,
             build_fn=build_fn,
             default=default,
+            source_fingerprint=_source_fingerprint([build_fn, fn]),
         )
 
     return decorator
@@ -622,6 +727,7 @@ def autotune_builder(
     if not name or not isinstance(name, str):
         raise ValueError("autotune_builder requires a non-empty string name (the cache identity)")
     structural = tuple(structural)
+    source_fingerprint = _source_fingerprint([build, configs, default, specialize])
 
     def _spec(args, kwargs):
         return specialize(*args, **kwargs)
@@ -663,6 +769,7 @@ def autotune_builder(
         key_fn=_key_fn,
         arg_names=launch_arg_names,
         structural=structural,
+        source_fingerprint=source_fingerprint,
         do_bench_fn=do_bench_fn,
     )
 

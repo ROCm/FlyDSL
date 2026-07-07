@@ -648,26 +648,29 @@ def test_builder_build_cache_ignores_compiler_hints(monkeypatch, tmp_path):
     assert n_build["n"] == 1, f"rebuilt {n_build['n']}x for hint-only variants (should be 1)"
 
 
-def test_run_with_hints_sets_and_restores_compile_hints():
-    """_run_with_hints must set fn.compile_hints during the call (so the hint
-    enters the JIT cache key) and restore it after (no cross-config leak)."""
+def test_run_with_hints_uses_thread_local_not_shared_attr():
+    """_run_with_hints must expose hints via the thread-local CompilationContext
+    during the call (so JitFunction folds them into its cache key) WITHOUT
+    mutating the shared, cached fn.compile_hints -- otherwise concurrent tuned /
+    served calls race on that attribute."""
+    # _run_with_hints imports CompilationContext, so skip without the bindings.
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from flydsl.compiler.kernel_function import CompilationContext
 
     class FakeJit:
         def __init__(self):
-            self.compile_hints = {}
+            self.compile_hints = {"baseline": 1}  # shared attr; must not change
             self.seen = None
 
         def __call__(self, *a, **k):
-            self.seen = dict(self.compile_hints)
+            self.seen = dict(CompilationContext.get_compile_hints())
 
-    # No compiler bindings needed: with hints present, _run_with_hints imports
-    # CompilationContext, so skip when the compiled bindings are absent.
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     fn = FakeJit()
     t = _make_tuner(fn=lambda a, out, **kw: None, configs=[Config(BLOCK=1)])
     t._run_with_hints(fn, Config(BLOCK=1, waves_per_eu=2).compiler_opts(), (), {})
-    assert fn.seen == {"waves_per_eu": 2}  # in the cache-key dict during compile
-    assert fn.compile_hints == {}  # restored afterward
+    assert fn.seen == {"waves_per_eu": 2}  # visible via thread-local during call
+    assert fn.compile_hints == {"baseline": 1}  # shared attr never mutated
+    assert CompilationContext.get_compile_hints() == {}  # thread-local restored after
 
 
 def test_builder_mode_rejects_num_warps(monkeypatch):
@@ -704,8 +707,141 @@ def test_apply_occupancy_compile_hints_sets_func_attrs():
         with CompilationContext.compile_hints({"waves_per_eu": 3, "maxnreg": 64}):
             _apply_occupancy_compile_hints(module)
         text = str(module)
-    assert "rocdl.waves_per_eu" in text and "3" in text
-    assert "amdgpu-num-vgpr" in text and "64" in text
+    # Precise matches (a bare "3"/"64" substring could appear in a type/loc).
+    assert "rocdl.waves_per_eu = 3" in text
+    assert '"amdgpu-num-vgpr", "64"' in text
+
+
+def test_set_passthrough_replaces_same_key_no_duplicate():
+    """maxnreg lowering must REPLACE an existing amdgpu-num-vgpr passthrough, not
+    append a duplicate (duplicate LLVM function attributes are ill-defined)."""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from flydsl._mlir import ir
+    from flydsl.compiler.jit_function import _apply_occupancy_compile_hints, _create_mlir_context, _set_passthrough
+    from flydsl.compiler.kernel_function import CompilationContext
+
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(
+            "module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx
+        )
+        func = module.body.operations[0].regions[0].blocks[0].operations[0]
+        # Pre-seed a build-time amdgpu-num-vgpr (as a kernel could) + an unrelated entry.
+        with ctx:
+            _set_passthrough(func, "no-inline", "true")
+            _set_passthrough(func, "amdgpu-num-vgpr", "128")
+        with CompilationContext.compile_hints({"maxnreg": 64}):
+            _apply_occupancy_compile_hints(module)
+        text = str(module)
+    assert text.count("amdgpu-num-vgpr") == 1  # replaced, not duplicated
+    assert '"amdgpu-num-vgpr", "64"' in text and '"amdgpu-num-vgpr", "128"' not in text
+    assert '"no-inline", "true"' in text  # unrelated entry preserved
+
+
+def test_builder_mode_rejects_num_warps_in_forced_search(monkeypatch):
+    """A num_warps config must fail loudly even on the forced-search path -- the
+    tolerant per-config except must not swallow the ValueError as "FAILED"."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64, num_warps=4)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn_noop,
+        do_bench_fn=_bench_run_all,
+    )
+    with pytest.raises(ValueError, match="num_warps"):
+        t(FakeTensor((8,)), FakeTensor((1,)))
+
+
+def test_builder_mode_rejects_unknown_structural_kwarg(monkeypatch):
+    """A builder Config kwarg not in `structural` routes nowhere and would be
+    silently dropped -- reject it loudly."""
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    t = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64, SPLIT_K=2)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn_noop,
+        structural=("BLOCK",),
+        default=lambda a, out, **kw: Config(BLOCK=64, SPLIT_K=2),
+        do_bench_fn=_bench_run_all,
+    )
+    with pytest.raises(ValueError, match="structural"):
+        t(FakeTensor((8,)), FakeTensor((1,)))
+
+
+def test_search_loop_chains_last_error_when_all_fail():
+    """If every config fails to benchmark, the RuntimeError must chain the last
+    underlying error (not discard it) so the real cause is recoverable."""
+
+    def boom(a, out, **kw):
+        raise RuntimeError("kernel boom")
+
+    t = _make_tuner(fn=boom, configs=[Config(BLOCK=1)], do_bench_fn=_bench_run_all)
+    with pytest.raises(RuntimeError, match="All autotune configs failed") as ei:
+        t(FakeTensor((8,)), FakeTensor((1,)))
+    assert isinstance(ei.value.__cause__, RuntimeError) and "boom" in str(ei.value.__cause__)
+
+
+def test_source_fingerprint_folds_into_key():
+    """A change in the adopter's build/config source (fingerprint) must change
+    the cache key, so a stale tuned best isn't served after a kernel edit."""
+    a = FakeTensor((8, 8))
+    t1 = _make_tuner()
+    t1.source_fingerprint = "aaaa"
+    t2 = _make_tuner()
+    t2.source_fingerprint = "bbbb"
+    assert t1._make_key((a, a), {}) != t2._make_key((a, a), {})
+
+
+def test_disk_cache_skips_malformed_entry(tmp_path, monkeypatch):
+    """One malformed disk-cache entry must be skipped, not discard the whole
+    cache (previously a single bad entry dropped everything)."""
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    t = _make_tuner(fn=lambda a, out, **kw: None, configs=[Config(BLOCK=128)], do_bench_fn=_bench_run_all)
+    a, out = FakeTensor((16, 64)), FakeTensor((16, 64))
+    t(a, out)  # tune -> writes one valid entry to disk
+    cache_file = next(tmp_path.glob("*.json"))
+    data = json.loads(cache_file.read_text())
+    assert len(data) == 1
+    data["not-a-json-key"] = {"BLOCK": 1}  # malformed key_str -> parse fails on load
+    cache_file.write_text(json.dumps(data))
+
+    t2 = _make_tuner(fn=lambda a, out, **kw: None, configs=[Config(BLOCK=128)], do_bench_fn=_bench_run_all)
+    assert t2._make_key((a, out), {}) in t2.cache  # good entry survived
+    assert len(t2.cache) == 1  # malformed one skipped
+
+
+def test_call_do_bench_passes_setup_when_supported():
+    """When the benchmarker accepts `setup`, it's passed through (so restore/reset
+    runs untimed) -- setup then kernel, in that order."""
+    order = []
+
+    def bench_with_setup(fn, warmup, rep, setup=None):
+        setup()
+        fn()
+        return 1.0
+
+    t = _make_tuner(do_bench_fn=bench_with_setup)
+    t._call_do_bench(lambda: order.append("kernel"), lambda: order.append("setup"))
+    assert order == ["setup", "kernel"]
+
+
+def test_call_do_bench_folds_setup_when_unsupported():
+    """A custom do_bench_fn without a `setup` param still runs setup (folded into
+    the timed call) -- so restore/reset isn't skipped."""
+    order = []
+
+    def bench_no_setup(fn, warmup, rep):
+        fn()
+        return 1.0
+
+    t = _make_tuner(do_bench_fn=bench_no_setup)
+    t._call_do_bench(lambda: order.append("kernel"), lambda: order.append("setup"))
+    assert order == ["setup", "kernel"]
 
 
 def test_cache_dir_change_does_not_serve_stale_config(tmp_path, monkeypatch):

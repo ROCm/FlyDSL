@@ -41,25 +41,31 @@ def get_default(N: int, dtype_str: str, arch: str = None) -> Config:
 
 
 def get_all_configs(N: int, dtype_str: str, arch: str = None):
-    """Exhaustive search space: BLOCK_THREADS x waves_per_eu. Configs whose
-    vectorized tile doesn't evenly divide the row are dropped (they'd fall to
-    the untuned scalar path)."""
+    """Exhaustive search space: BLOCK_THREADS x waves_per_eu.
+
+    bf16/f16 take the vectorized fast path (gated on ``elem_bits <= 16`` in the
+    kernel), so only BLOCK_THREADS whose tile ``BLOCK_THREADS * VEC_WIDTH``
+    evenly divides the row are kept. f32 never takes that path -- it uses the
+    scalar loop, which strides by BLOCK_THREADS and handles any N -- so every
+    BLOCK_THREADS is a valid, distinct f32 candidate (no tile filter). Previously
+    f32 was dropped entirely and silently collapsed to the single default."""
     # Small-N kernel ignores BLOCK_THREADS, so there's nothing to sweep.
     if N <= SMALL_N_THRESHOLD:
         return [get_default(N, dtype_str, arch)]
 
+    vectorized = _elem_bits(dtype_str) <= 16
     vec_width = 128 // _elem_bits(dtype_str)
     configs = []
     for block in _BLOCK_THREADS_CHOICES:
-        tile_cols = block * vec_width
-        # Keep only configs that hit the vectorized fast path for this N.
-        if N < tile_cols or N % tile_cols != 0 or _elem_bits(dtype_str) > 16:
-            continue
+        if vectorized:
+            tile_cols = block * vec_width
+            # bf16/f16: keep only blocks that hit the vectorized fast path for N.
+            if N < tile_cols or N % tile_cols != 0:
+                continue
         for wpe in _WAVES_PER_EU_CHOICES:
-            kw = {"BLOCK_THREADS": block}
             waves = None if wpe == 0 else wpe
-            configs.append(Config(waves_per_eu=waves, **kw))
-    # Fall back to the heuristic default if no fast-path config fits this N.
+            configs.append(Config(waves_per_eu=waves, BLOCK_THREADS=block))
+    # Fall back to the heuristic default if nothing fit (e.g. an odd bf16 N).
     if not configs:
         configs.append(get_default(N, dtype_str, arch))
     return configs

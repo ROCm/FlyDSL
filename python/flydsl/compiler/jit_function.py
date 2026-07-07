@@ -767,19 +767,31 @@ def _iter_gpu_kernel_funcs(module: ir.Module):
                 yield op
 
 
-def _append_passthrough(func_op, key: str, value: str) -> None:
-    """Append an LLVM ``passthrough`` ``[key, value]`` entry to a kernel func.
+def _set_passthrough(func_op, key: str, value: str) -> None:
+    """Set an LLVM ``passthrough`` ``[key, value]`` entry on a kernel func,
+    replacing any existing entry with the same key.
 
     ``convert-gpu-to-rocdl`` copies ``passthrough`` from the gpu.func onto the
     lowered llvm.func, where the LLVM emitter turns each entry into a function
     attribute. This bridges AMDGPU attributes the ROCDL dialect does not
     translate natively (same approach as ``FlyROCDLClusterAttrPass`` for
-    ``amdgpu-cluster-dims``). Appends so it never clobbers existing entries.
+    ``amdgpu-cluster-dims``). Preserves unrelated entries but must not leave a
+    duplicate key (duplicate LLVM function attributes are ill-defined).
     """
+
+    def _entry_key(e):
+        # Key/value entries are 2-element arrays [key, value]; unit attributes
+        # (e.g. "nounwind") are bare strings and have no key to match.
+        try:
+            arr = ir.ArrayAttr(e)
+            return ir.StringAttr(arr[0]).value if len(arr) else None
+        except (ValueError, TypeError):
+            return None
+
     entry = ir.ArrayAttr.get([ir.StringAttr.get(key), ir.StringAttr.get(value)])
     existing = func_op.attributes["passthrough"] if "passthrough" in func_op.attributes else None
-    items = ([*existing] if existing is not None else []) + [entry]
-    func_op.attributes["passthrough"] = ir.ArrayAttr.get(items)
+    kept = [e for e in existing if _entry_key(e) != key] if existing is not None else []
+    func_op.attributes["passthrough"] = ir.ArrayAttr.get(kept + [entry])
 
 
 def _apply_occupancy_compile_hints(module: ir.Module) -> None:
@@ -810,7 +822,7 @@ def _apply_occupancy_compile_hints(module: ir.Module) -> None:
             if waves_per_eu:
                 func_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(i32, int(waves_per_eu))
             if maxnreg:
-                _append_passthrough(func_op, "amdgpu-num-vgpr", str(int(maxnreg)))
+                _set_passthrough(func_op, "amdgpu-num-vgpr", str(int(maxnreg)))
 
 
 class MlirCompiler:
@@ -1326,8 +1338,14 @@ class JitFunction:
         sig = self._sig
         # Re-read env vars on every call.
         key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
-        if self.compile_hints:
-            key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in self.compile_hints.items()))))
+        # Fold the per-function baseline with the thread-local compile hints
+        # (e.g. the autotuner's occupancy overlay). Reading the thread-local here
+        # -- instead of mutating the shared self.compile_hints -- keeps each hint
+        # variant distinct in the cache key without racing across concurrent
+        # tuned calls.
+        effective_hints = {**self.compile_hints, **CompilationContext.get_compile_hints()}
+        if effective_hints:
+            key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in effective_hints.items()))))
 
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
@@ -1477,7 +1495,11 @@ class JitFunction:
                 )
             raise RuntimeError(msg)
 
-        _hints_ctx = CompilationContext.compile_hints(self.compile_hints) if self.compile_hints else nullcontext()
+        # Same merge as the cache key: the thread-local overlay (autotuner hints)
+        # wins over the per-function baseline, and is what convert-gpu-to-rocdl /
+        # the backend see during this compile.
+        effective_hints = {**self.compile_hints, **CompilationContext.get_compile_hints()}
+        _hints_ctx = CompilationContext.compile_hints(effective_hints) if effective_hints else nullcontext()
 
         compiled_func = None  # will be set inside lock or compile path
 
