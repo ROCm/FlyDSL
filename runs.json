@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-07T07:32:10Z",
+ "updated": "2026-07-07T07:34:19Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,11 +25,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Feat] Add gather/scatter as derived exprs (#805)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184",
    "created_at": "2026-07-07T07:26:31Z",
-   "updated_at": "2026-07-07T07:27:34Z",
+   "updated_at": "2026-07-07T07:32:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -44,9 +44,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-07T07:27:34Z",
+     "started_at": "2026-07-07T07:32:33Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184/job/85560189822"
     },
@@ -1261,11 +1261,11 @@
    "branch": "pr/fix-jit-cache-key-recursion",
    "event": "pull_request",
    "title": "[Fix] Break JIT cache-key dependency-traversal recursion cycles",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768961496",
    "created_at": "2026-07-06T05:01:55Z",
-   "updated_at": "2026-07-07T06:11:01Z",
+   "updated_at": "2026-07-07T07:30:07Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
