@@ -1539,7 +1539,11 @@ class FallbackLocations(Transformer):
         # Floor location for un-decorated (bare) MLIR ops written directly in a
         # kernel/jit body. Decorated primitives override this via their own
         # capture_user_location() scope; ops with an explicit loc= are unaffected.
-        with file_location(filename, line, col):
+        ctx = ir.Context.current
+        if ctx is None:
+            yield
+            return
+        with file_location(filename, line, col, context=ctx):
             yield
 
     @classmethod
