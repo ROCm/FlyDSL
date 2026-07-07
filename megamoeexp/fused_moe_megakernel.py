@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 from pathlib import Path
 
@@ -28,8 +29,8 @@ from mori.shmem import mori_shmem_create_tensor
 
 import flydsl.expr as fx
 
-from .tmp_mega_ep_dispatch import FlyDSLDispatchGroupMajorOp
-from .tmp_mega_gemm_2stage import compile_fused_moe_gemm1
+from .ep_dispatch_groupmajor_op import FlyDSLDispatchGroupMajorOp
+from .fused_moe_gemm_2stage import compile_fused_moe_gemm1
 
 
 def _is_fp4(dt):
@@ -46,26 +47,12 @@ def _mega_default_tile(inter_dim):
 
 # ── Precise megastage1 tile, from the FlyDSL tune JSON (copied from aiter) ─────────────────────────
 # The single tuned source for megastage1: the best (tile_m, tile_n, tile_k,
-# waves_per_eu, use_async_copy) per per-rank token bucket, keyed by the per-rank
-# GEMM1 shape (dtype, model_dim, inter_dim, experts_per_rank, topk).
-#
-# WHY ``experts_per_rank`` (NOT total ``expert``) is the key
-# ---------------------------------------------------------
-# Stage-1's GEMM1 runs PER RANK over this rank's ``epr = experts // world_size``
-# local experts; per-rank received tokens are ~``mtpr*topk`` (independent of
-# world_size, since each rank owns ``epr/experts`` of all routed slots), so the
-# per-rank problem -- and thus the best tile -- is fully determined by
-# ``(model_dim, inter_dim, epr, topk, mtpr)``.  ``world_size`` only enters through
-# ``epr``.  Keying by ``experts_per_rank`` therefore makes a single tuned table
-# valid across every ``(world_size, total_experts)`` combo that yields the same
-# ``epr`` (and matches stage-2 gemm2's existing EP-local convention in
-# ``mega_stage1_stage2._resolve_gemm2_tile``).  The legacy total-``expert`` /
-# ``_ep{n}``-in-filename keying silently mis-selected the tile whenever
-# world_size changed; it has been removed.
-#
-# Mirrors the gemm2+combine ``GeometryTuningTable`` bucket round-up
-# (tuning_configs/flydsl_{arch}_{model}_MegaStage1.json).  Auto-selected only when
-# the caller leaves the tile AUTO; an explicit tile always wins.
+# waves_per_eu, use_async_copy) per per-rank token bucket, keyed by GEMM shape
+# (dtype, model_dim, inter_dim, expert[total], topk). Mirrors the gemm2+combine
+# ``GeometryTuningTable`` mechanism
+# (tuning_configs/flydsl_{arch}_{model}_{kernel}_ep{n}.json + bucket round-up).
+# Auto-selected only when the caller leaves the tile AUTO; an explicit tile
+# always wins.
 _MEGA_TUNING_DIR = Path(__file__).resolve().parent / "tuning_configs"
 # Megastage1 weights are always w4(fp4); the JSON ``dtype`` is the ACTIVATION quant.
 _MEGA_QUANT_TO_DTYPE = {"a4w4": "fp4", "a8w4": "fp8_ocp"}
@@ -82,17 +69,15 @@ def _detect_gpu_model_name(device_index=0):
 
 
 @functools.lru_cache(maxsize=8)
-def _load_mega_tuning_rows(gpu_model):
+def _load_mega_tuning_rows(ep_size: int, gpu_model):
     """All ``megastage1`` rows from the best-matching MegaStage1 tune JSON
-    (``flydsl_*_MegaStage1.json``), preferring a ``gpu_model`` name match.
+    (``flydsl_*_MegaStage1_ep{n}.json``), preferring a ``gpu_model`` name match.
     Returns a tuple of dicts (hashable cache value); ``()`` on any miss. Call
-    ``_load_mega_tuning_rows.cache_clear()`` after editing the JSON to reload.
-
-    The table is world_size-agnostic: rows are keyed by ``experts_per_rank`` so a
-    single file serves every ``world_size`` (no ``_ep{n}`` filename split)."""
+    ``_load_mega_tuning_rows.cache_clear()`` after editing the JSON to reload."""
     if not _MEGA_TUNING_DIR.is_dir():
         return ()
-    cands = [p for p in _MEGA_TUNING_DIR.glob("flydsl_*_MegaStage1.json") if p.is_file()]
+    suffix = f"_MegaStage1_ep{ep_size}.json"
+    cands = [p for p in _MEGA_TUNING_DIR.glob(f"flydsl_*{suffix}") if p.is_file()]
     if not cands:
         return ()
     cands.sort(key=lambda p: (1 if (gpu_model and gpu_model in p.name) else 0, p.name),
@@ -105,20 +90,16 @@ def _load_mega_tuning_rows(gpu_model):
     return tuple(raw.get("megastage1", []))
 
 
-def _mega_tuned_tile(model_dim, inter_dim, experts, topk, quant, mtpr, world_size, gpu_model):
-    """Precise megastage1 config from the FlyDSL tune JSON, keyed by the per-rank
-    GEMM1 shape (``experts_per_rank = experts // world_size``); the token bucket
-    rounds up to the smallest ``num_tokens >= mtpr`` (largest on overflow),
-    mirroring the gemm2+combine ``GeometryTuningTable.lookup``. Returns
+def _mega_tuned_tile(model_dim, inter_dim, experts, topk, quant, mtpr, ep_size, gpu_model):
+    """Precise megastage1 config from the FlyDSL tune JSON, keyed by GEMM shape;
+    the token bucket rounds up to the smallest ``num_tokens >= mtpr`` (largest on
+    overflow), mirroring the gemm2+combine ``GeometryTuningTable.lookup``. Returns
     ``{tile_m, tile_n, tile_k, waves_per_eu, use_async_copy}`` or ``None`` on a
     miss (caller then falls back to the generic default tile)."""
     dtype = _MEGA_QUANT_TO_DTYPE.get(quant)
     if dtype is None:
         return None
-    if int(world_size) <= 0 or int(experts) % int(world_size) != 0:
-        return None
-    epr = int(experts) // int(world_size)
-    rows = _load_mega_tuning_rows(gpu_model)
+    rows = _load_mega_tuning_rows(int(ep_size), gpu_model)
     if not rows:
         return None
 
@@ -127,7 +108,7 @@ def _mega_tuned_tile(model_dim, inter_dim, experts, topk, quant, mtpr, world_siz
             return (r.get("dtype") == dtype
                     and int(r["model_dim"]) == int(model_dim)
                     and int(r["inter_dim"]) == int(inter_dim)
-                    and int(r["experts_per_rank"]) == epr
+                    and int(r["expert"]) == int(experts)
                     and int(r["topk"]) == int(topk))
         except (KeyError, ValueError, TypeError):
             return False
@@ -149,6 +130,59 @@ def _mega_tuned_tile(model_dim, inter_dim, experts, topk, quant, mtpr, world_siz
     )
 
 
+@functools.lru_cache(maxsize=8)
+def _load_mega_gemm2_rows(ep_size: int, gpu_model):
+    """All ``megagemm2`` rows from the best-matching MegaGemm2 tune JSON
+    (``flydsl_*_MegaGemm2_ep{n}.json``), preferring a ``gpu_model`` name match.
+    Returns a tuple of dicts; ``()`` on any miss. Symmetric with
+    ``_load_mega_tuning_rows`` (gemm1). Call ``.cache_clear()`` after editing."""
+    if not _MEGA_TUNING_DIR.is_dir():
+        return ()
+    suffix = f"_MegaGemm2_ep{ep_size}.json"
+    cands = [p for p in _MEGA_TUNING_DIR.glob(f"flydsl_*{suffix}") if p.is_file()]
+    if not cands:
+        return ()
+    cands.sort(key=lambda p: (1 if (gpu_model and gpu_model in p.name) else 0, p.name),
+               reverse=True)
+    try:
+        with open(cands[0], "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return ()
+    return tuple(raw.get("megagemm2", []))
+
+
+def _mega_gemm2_tuned_table(model_dim, inter_dim, experts, topk, ep_size, gpu_model):
+    """Per-M fused gemm2 tile table ``{num_tokens: (tile_m,tile_n,tile_k)}`` from
+    the FlyDSL MegaGemm2 tune JSON, keyed by GEMM2 shape. ``experts`` is the
+    LOCAL per-rank expert count (how the gemm2 tiles were tuned). Returns the
+    dict, or ``None`` on a miss so the op falls back to its single default tile.
+    RAW tiles -- the op clamps tile_m to a divisor of sort_block_m at run time.
+    Default entry point for ``MegaMoEExp`` (no env gate; mirrors gemm1's auto-tune)."""
+    rows = _load_mega_gemm2_rows(int(ep_size), gpu_model)
+    if not rows:
+        return None
+
+    def _match(r):
+        try:
+            return (int(r["model_dim"]) == int(model_dim)
+                    and int(r["inter_dim"]) == int(inter_dim)
+                    and int(r["expert"]) == int(experts)
+                    and int(r["topk"]) == int(topk))
+        except (KeyError, ValueError, TypeError):
+            return False
+
+    table = {}
+    for r in rows:
+        if _match(r):
+            try:
+                table[int(r["num_tokens"])] = (
+                    int(r["tile_m"]), int(r["tile_n"]), int(r["tile_k"]))
+            except (KeyError, ValueError):
+                continue
+    return table or None
+
+
 class FusedMoEMegaStage1:
     """Single-launch fused dispatch⊕GEMM megakernel (fixedslot decode strict-phase)."""
 
@@ -157,15 +191,7 @@ class FusedMoEMegaStage1:
                  network=None, scheme="fixedslot",
                  unit_size=-1, tile_n=-1, tile_k=256, warp_num_per_block=4,
                  waves_per_eu=4, use_async_copy=True, out_dtype="auto",
-                 total_recv_buf=None,
-                 # ---- M2b: merged single-launch GEMM2 phase ----
-                 # When fuse_gemm2 is True, GEMM2 (down-proj) + the combine Stage-1 P2P scatter run
-                 # inside this SAME megakernel launch (a second persistent phase pipelined with
-                 # GEMM1 via l2_ready).  Requires w2/w2_scale + the combine op (for its P2P tables).
-                 fuse_gemm2=False, w2=None, w2_scale=None, comb_op=None,
-                 gemm2_tile_m=32, gemm2_tile_n=128, gemm2_tile_k=256,
-                 gemm2_persist_m=4, gemm2_b_nt=2, gemm2_xcd_swizzle=0,
-                 gemm2_doweight=True):
+                 total_recv_buf=None):
         assert quant in ("a4w4", "a8w4")
         assert scheme == "fixedslot", f"scheme={scheme!r}: only 'fixedslot' supported (handshake removed)"
         assert out_dtype in ("auto", "f16", "fp8", "fp4"), out_dtype
@@ -209,6 +235,17 @@ class FusedMoEMegaStage1:
         # Two layouts, switched purely by buffer size (no env): fixedslot below the wrap, compact
         # above it.  Compact dispatch (dense rx) + GEMM1 atom-logical a2 output -> stage2 unchanged.
         self.compact = _max_buf >= 3_000_000_000
+        # G1 frontier is baked into the kernel at COMPILE time (env read when compile_fused_moe_gemm1
+        # traces).  Capture it HERE (construction time) so forward()'s per-launch cnt_ready reset does
+        # NOT re-read the env (callers like the bench restore FUSED_MEGA_FRONTIER after construction,
+        # which would desync the host reset from the frontier kernel).
+        self._frontier = (self.scheme == "fixedslot" and not self.compact
+                          and os.environ.get("FUSED_MEGA_FRONTIER", "0") not in ("0", "", "false", "False"))
+        # SPLIT (B) countdown producer: host recomputes remaining[global_expert] each launch (graph-safe
+        # scatter_add of topk_ids).  Captured at ctor (same reason as _frontier) so forward() doesn't
+        # re-read env after the bench restores it.
+        self._split = (self._frontier
+                       and os.environ.get("FUSED_MEGA_SPLIT", "0") not in ("0", "", "false", "False"))
         # tile AUTO (default -1): an explicit caller tile_m(unit_size)/tile_n always wins.
         # Otherwise this is the single megastage1 tune entrypoint: read the precise
         # FlyDSL JSON table keyed by shape + token bucket, then fall back to the
@@ -218,7 +255,7 @@ class FusedMoEMegaStage1:
         if int(unit_size) <= 0:
             _tuned = _mega_tuned_tile(
                 model_dim, inter_dim, experts, topk, quant, tune_tokens,
-                world_size, _detect_gpu_model_name(rank))  # keyed by experts_per_rank
+                world_size, _detect_gpu_model_name(rank))
         if _tuned is not None:
             unit_size = _tuned["tile_m"]
             if int(tile_n) <= 0:
@@ -293,72 +330,6 @@ class FusedMoEMegaStage1:
         # symmetric grid barrier (1 writer / N readers -> no 256-way atomic-RMW storm).
         self._meta = torch.zeros(1, dtype=torch.int32, device=self.dev)
 
-        # Dynamic claim scheduler: the single production consumer path.  The dispatch op always
-        # allocates the claim buffers; the kernel is compiled with the scheduler on; forward() zeros
-        # the per-launch claim state.  Fixed disp-table base for the scheduler ptrs (must be set
-        # BEFORE compile, which reads it; the disp table is built later in __init__ and appends the
-        # ptrs at this base, idx 50..58).
-        self._SCHED_DISP_BASE = 50
-
-        # ---- M2b merged GEMM2 phase config (compile-time) ----
-        self.fuse_gemm2 = bool(fuse_gemm2)
-        self.comb_op = comb_op
-        if self.fuse_gemm2:
-            if w2 is None or w2_scale is None or comb_op is None:
-                raise ValueError("fuse_gemm2=True requires w2, w2_scale, and comb_op.")
-            # GEMM2 indexes W2 by LOCAL expert id (epr rows); keep contiguous like w1.
-            self.w2 = w2.contiguous()
-            self.w2_scale = w2_scale.contiguous()
-            # GEMM2 tiles thread through; gemm2 tile_m must divide stage1's sort_block_m so each
-            # gemm2 tile stays within one expert's sort_block_m-padded rows.
-            self._g2_tile_m = int(gemm2_tile_m)
-            self._g2_tile_n = int(gemm2_tile_n)
-            self._g2_tile_k = int(gemm2_tile_k)
-            self._g2_persist_m = int(gemm2_persist_m)
-            self._g2_b_nt = int(gemm2_b_nt)
-            # XCD swizzle is INCOMPATIBLE with the merged single-launch grid: grid_x = max(gx1, gx2),
-            # but each phase's XCD remap derives _gx from its own N-extent (gx1 for GEMM1, gx2 for
-            # GEMM2) != grid_dim.x, which corrupts the (bx_persist, by) remap.  Disable both XCD
-            # swizzles on the fused path (perf-only; correctness-load-bearing here).
-            self._xcd = 0
-            self._g2_xcd = 0
-            self._g2_doweight = bool(gemm2_doweight)
-            if self.sort_block_m % self._g2_tile_m != 0:
-                raise ValueError(
-                    f"gemm2_tile_m={self._g2_tile_m} must divide stage1 sort_block_m="
-                    f"{self.sort_block_m}.")
-            if model_dim % self._g2_tile_n != 0:
-                raise ValueError(f"model_dim={model_dim} must be divisible by gemm2_tile_n="
-                                 f"{self._g2_tile_n}.")
-            if inter_dim % self._g2_tile_k != 0:
-                raise ValueError(f"inter_dim={inter_dim} must be divisible by gemm2_tile_k="
-                                 f"{self._g2_tile_k}.")
-            # fused_p2p_scatter cfg (Plan B): (npes, rank, max_tok, enable_weights=False,
-            # experts_per_token=topk, fp8_cast).  Weights are applied by GEMM2's doweight epilogue
-            # (gemm2_doweight) or the later combine, NOT P2P-scattered -> enable_weights=False.
-            # GEMM2 output is bf16 (no fp8 direct-cast on this path).
-            self._g2_out_dtype = "bf16"
-            self._g2_fused_cfg = (int(world_size), int(rank), int(max_tok_per_rank),
-                                  False, int(topk), False)
-            # GEMM2 local-combine fallback out (unused under fused_p2p_scatter; the launcher
-            # signature still needs a valid tensor).  Allocated once (cudagraph-safe).
-            self._g2_out_dummy = torch.zeros(1, dtype=torch.bfloat16, device=self.dev)
-            _g2_kw = dict(
-                fuse_gemm2=True,
-                gemm2_tile_m=self._g2_tile_m, gemm2_tile_n=self._g2_tile_n,
-                gemm2_tile_k=self._g2_tile_k, gemm2_out_dtype=self._g2_out_dtype,
-                gemm2_persist_m=self._g2_persist_m,
-                gemm2_sort_block_m=int(self.sort_block_m),
-                gemm2_b_nt=self._g2_b_nt, gemm2_xcd_swizzle=self._g2_xcd,
-                gemm2_fused_p2p_scatter=self._g2_fused_cfg,
-                gemm2_use_token_flag_sync=False,
-                gemm2_doweight=self._g2_doweight,
-            )
-        else:
-            self.w2 = None
-            self.w2_scale = None
-            _g2_kw = dict(fuse_gemm2=False)
-
         # ---- compile the megakernel (serialize compile across ranks to bound peak memory) ----
         # Always PERSISTENT: the persistent round-robin GEMM covers all occupied tiles regardless
         # of grid size (decode + prefill).
@@ -373,14 +344,12 @@ class FusedMoEMegaStage1:
                     use_cshuffle_epilog=None, contiguous_io=True, dedup_gather=False,
                     atom_contract=self.atom_contract,
                     sparse_tiles=True, persist_m=-1,
-                    sched_disp_base=self._SCHED_DISP_BASE,
                     raw_a_scale=True, xcd_swizzle=self._xcd,
                     fuse_dispatch=scheme, fuse_npes=world_size, fuse_topk=topk,
                     fuse_cap=self.cap, fuse_mtpr=self.mtpr,
                     fuse_scale_dim=self.scale_dim, fuse_scale_type_size=1,
                     rank=rank, experts_per_rank=self.epr, compact_dispatch=self.compact,
-                    compact_allgather=True,
-                    **_g2_kw)
+                    compact_allgather=True)
             if dist.is_initialized():
                 dist.barrier()
 
@@ -475,8 +444,7 @@ class FusedMoEMegaStage1:
                         op.recv_num.data_ptr(), op.p2p_recv_num.data_ptr(),  # 38 recv_num | 39 p2p_recv_num
                         # 40 _sti out | 41 _se_atom out (SEPARATE from the A-gather _trb/_se args)
                         self._sti.data_ptr(), self._se_atom.data_ptr(),
-                        self._wts_sorted.data_ptr(),                     # 42 sorted-row weights out
-                        0]                                               # 43 dead: overlap gate superseded by l1_ready sched (never read, base=50)
+                        self._wts_sorted.data_ptr()]                     # 42 sorted-row weights out
             else:
                 # fixedslot+atom.  idx 19: LOCAL srcmap_em (this rank's recv (k_slot<<24)|src_global)
                 # -> the GEMM epilogue reads it to write a2 @ logical row.
@@ -488,27 +456,16 @@ class FusedMoEMegaStage1:
                         (self._trecv_buf if self._trecv_buf is not None else op.total_recv).data_ptr(),
                         op.dest_ctr.data_ptr(),                              # 21 total_recv | 22 dest_ctr(local)
                         op.recv_num.data_ptr(), op.p2p_recv_num.data_ptr(),  # 23 recv_num(local) | 24 p2p_recv_num
-                        self._wts_sorted.data_ptr()]                         # 25 sorted-row weights out
-                # idx 26 was the TMP-COPY overlap gate (p2p payload_done peer table); superseded by
-                # the l1_ready dynamic-claim scheduler and never read (kernel reads only base=50+).
-                tbl += [0]                                          # 26 dead: p2p payload_done removed
-        # ---- dynamic claim scheduler pointers (FLYDSL_TMP_SCHED) ----
-        # Appended at a FIXED base (50) for BOTH compact and fixedslot layouts (their tables end at
-        # 43 / 26), so the kernel reads disp[50..58] regardless of dispatch path.  Pad with 0 up to base.
-        if True:
-            while len(tbl) < self._SCHED_DISP_BASE:
-                tbl.append(0)
-            tbl += [
-                op.l1_ready.data_ptr(),        # 50 l1_ready (local view: consumer reads this rank's)
-                op.p2p_l1_ready.data_ptr(),    # 51 p2p l1_ready (producer bumps DEST tile's, cross-PE)
-                op.tile_expected.data_ptr(),   # 52 tile_expected (block0 fills from count all-gather)
-                op.g1_claim.data_ptr(),        # 53 g1_claim (one-winner GEMM1 tile claim)
-                op.l2_ready.data_ptr(),        # 54 l2_ready (GEMM1-done mask)
-                op.g2_claim.data_ptr(),        # 55 g2_claim (one-winner GEMM2 tile claim)
-                op.sched_cursor.data_ptr(),    # 56 sched_cursor (global route claim cursor)
-                op.sched_done.data_ptr(),      # 57 sched_done (completed-tile counter)
-                op.block_claim.data_ptr(),     # 58 block_claim (per-block won-tile scratch)
-            ]
+                        self._wts_sorted.data_ptr(),                         # 25 sorted-row weights out
+                        # 26-28 G1 frontier (design §7): local expert_ready (block0 aggregates peers)
+                        # | p2p_expert_ready (producer publishes readiness to peers) | cnt_ready (block0
+                        # -> consumers per-expert count-ready epoch).  Present for all runs; only
+                        # read/written by the kernel when FUSED_MEGA_FRONTIER=1.
+                        op.expert_ready.data_ptr(), op.p2p_expert_ready.data_ptr(),
+                        op.cnt_ready.data_ptr(),
+                        # 29 SPLIT (B) countdown producer: per-src remaining[global_expert] (histogram of
+                        # this rank's topk_ids; host recomputes each launch).  Only read when SPLIT on.
+                        op.remaining.data_ptr()]
         self._disp = torch.tensor(tbl, dtype=torch.int64, device=self.dev)
         self._disp_host = torch.tensor(tbl, dtype=torch.int64)
 
@@ -535,16 +492,38 @@ class FusedMoEMegaStage1:
         # disp table holds ONLY fixed op/p2p pointers, built once in __init__.
 
         # per-launch resets (in-graph; graph-safe memsets, ordered before the megakernel).
-        # addr_payload_done is unused on the single scheduler path (the legacy per-expert gate /
-        # phase-ts diagnostics are removed) -> pass 0.
         pd_ptr = 0
         # Plan A: total_recv accumulates in-kernel each launch -> zero first (graph-safe).
         # dest_ctr / recv_num self-reset inside the kernel's recv-count signal.  Zero the SAME
         # buffer the kernel writes (external combine-op buffer when bridged, else own).
         (self._trecv_buf if self._trecv_buf is not None else self.op.total_recv).zero_()
-        # addr_expected_real = ll_count: P-static (fixedslot) derives (expert,k) per tile from it, and
-        # block0 fills tile_expected from it; compact_ag also populates ll_count (block0 post-CMP).
-        er_ptr = self.op.ll_count.data_ptr()
+        # G1 frontier: cnt_ready is LOCAL (block0 -> consumers, per-expert "count ready" flag).  Reset
+        # to 0 each launch in-graph (same stream, ordered before the megakernel) so block0's set-to-1 /
+        # consumer wait->0 works without a cross-launch epoch (no cross-card access -> no reset race).
+        if self._frontier:
+            self.op.cnt_ready.zero_()
+        if self._split:
+            # SPLIT countdown: remaining[ge] = # of THIS rank's (token,topk) rows routing to global
+            # expert ge.  Graph-safe: zero + scatter_add(ones) over topk_ids; invalid ids (>=experts)
+            # clamp to the dummy slot `experts` so they don't inflate any real expert's count (which
+            # would keep remaining[ge]>0 forever -> aggregator hangs).
+            # BIAS +1 for every global expert: the kernel's finalize pass does one extra decrement per
+            # expert, so remaining[ge] = count[ge]+1 -> after all writes+finalize it reaches 0 exactly
+            # once (whoever hits 1->0 publishes).  This publishes EVEN 0-count experts (count=0 -> 1 ->
+            # finalize drives to 0), so the aggregator never waits forever on a peer that has no tokens
+            # for an expert.  Dummy slot [experts] stays 0 (no finalize for it).
+            self.op.remaining.zero_()
+            self.op.remaining[:self.experts] = 1
+            _ic_flat = ic.reshape(-1).to(torch.int64)
+            _ic_idx = torch.where(_ic_flat < self.experts, _ic_flat,
+                                  torch.full_like(_ic_flat, self.experts))
+            self.op.remaining.scatter_add_(
+                0, _ic_idx, torch.ones_like(_ic_idx, dtype=torch.int32))
+        # P-static: the GEMM reads ll_count via addr_expected_real to derive (expert,k) per tile
+        # (fixedslot static-tiles only).
+        er_ptr = (self.op.ll_count.data_ptr()
+                  if (self.scheme == "fixedslot" and not self.compact)
+                  else 0)
         if self.compact:
             # compact all-gather: local_hist (count accumulator) + local_cursor (write cursor) must
             # start at 0 each launch (in-graph memset, CUDAGraph-safe; bigcnt is overwritten by the
@@ -554,20 +533,6 @@ class FusedMoEMegaStage1:
         # NOTE compact+atom combo: NO per-launch srcmap reset needed -- the GEMM derives the padding
         # mask in-kernel from ll_count (k,count via the prefix scan), exactly like fixslot.  So the
         # stage1->stage2 hookup adds ZERO extra per-forward ops beyond compact dispatch's own resets.
-        # Dynamic claim scheduler: zero the per-launch claim state (graph-safe memsets).  These are
-        # all LOCAL (agent-scope) buffers, so a per-launch host reset is race-free.
-        # NOTE: l1_ready is DELIBERATELY NOT reset here.  It is the only CROSS-PE scheduler buffer
-        # (peers atomic-add the DEST tile's arrival count).  Under barrier-free CUDAGraph replay
-        # ranks drift, so a host .zero_() would race drifted peers' remote bumps -> corrupt counts ->
-        # some ranks' consumer spin never satisfied -> cross-PE deadlock.  Instead l1_ready is zeroed
-        # ONCE at construction (op._sym) and accumulates monotonically; the GEMM consumer scales its
-        # per-tile threshold by the launch epoch (_a_meta) so no reset is needed.
-        self.op.g1_claim.zero_()
-        self.op.l2_ready.zero_()
-        self.op.g2_claim.zero_()
-        self.op.sched_cursor.zero_()
-        self.op.sched_done.zero_()
-        self.op.block_claim.zero_()
         a_mat = self._agv(self._rx)
         # compact still A-gathers via sparse_tiles (_trb) + expert (_se), so the sorted_token_ids/
         # sorted_expert_ids ARGS MUST stay the compact tile metadata; the atom outputs (_sti/_se_atom)
@@ -580,41 +545,15 @@ class FusedMoEMegaStage1:
             _sorted_arg = self._sti
             _se_arg = self._se_atom
         _wt_arg = self.op.wts_em
-        if self.fuse_gemm2:
-            # M2b: merged GEMM2 phase args.  GEMM2 reads the ATOM-contract sorted tables
-            # (_sti / _se_atom / _wts_sorted) the GEMM1 phase produced, a2 from self._out (HBM),
-            # and the combine op's P2P scatter tables.  i32 scalars are GEMM2 semantics:
-            #   tokens_in = max_recv (world*mtpr; drives the epilogue row-valid early-exit),
-            #   n_in = model_dim, k_in = inter_dim, size_expert_ids = _se_atom row count.
-            _max_recv = self.world_size * self.mtpr
-            co = self.comb_op
-            self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
-                      _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
-                      fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
-                      fx.Int32(self.max_blocks),
-                      fx.Int64(pd_ptr), fx.Int64(er_ptr),
-                      fx.Int64(self._disp.data_ptr()), fx.Int32(cur_tok),
-                      fx.Int64(xc.data_ptr()), fx.Int64(ic.data_ptr()),
-                      fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
-                      # ---- GEMM2 phase ----
-                      self.w2, self.w2_scale, self._g2_out_dummy,
-                      self._sti, self._se_atom, self._wts_sorted,
-                      co._fx_tis, co._fx_p2p_comb_inp,
-                      fx.Int64(self._sw_atom.data_ptr()), co._fx_p2p_comb_inp_wts,
-                      co._fx_local_counter, co._fx_p2p_comb_flag, co._fx_out_total_recv,
-                      fx.Int32(_max_recv), fx.Int32(self.model_dim), fx.Int32(self.inter_dim),
-                      fx.Int32(self._se_atom.numel()),
-                      stream=stream)
-        else:
-            self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
-                      _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
-                      fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
-                      fx.Int32(self.max_blocks),
-                      fx.Int64(pd_ptr), fx.Int64(er_ptr),
-                      fx.Int64(self._disp.data_ptr()), fx.Int32(cur_tok),
-                      fx.Int64(xc.data_ptr()), fx.Int64(ic.data_ptr()),
-                      fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
-                      stream=stream)
+        self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
+                  _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
+                  fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
+                  fx.Int32(self.max_blocks),
+                  fx.Int64(pd_ptr), fx.Int64(er_ptr),
+                  fx.Int64(self._disp.data_ptr()), fx.Int32(cur_tok),
+                  fx.Int64(xc.data_ptr()), fx.Int64(ic.data_ptr()),
+                  fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
+                  stream=stream)
         return dict(out=self._out, srcmap_em=self.op.srcmap_em, num_valid=self._nv,
                     sorted_expert_ids=self._se_atom,
                     sorted_token_ids=self._sti, sorted_weights=self._sw_atom,
