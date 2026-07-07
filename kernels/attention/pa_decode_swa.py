@@ -3,8 +3,6 @@
 
 """FlyDSL sliding-window paged attention decode kernel."""
 
-from __future__ import annotations
-
 import functools
 
 import flydsl.compiler as flyc
@@ -768,12 +766,13 @@ def compile_pa_decode_sw_reduce(
     reduce_width = 1 if max_context_partition_num <= 1 else 1 << ((max_context_partition_num - 1).bit_length())
     reduce_shuffle_offsets = [off for off in [32, 16, 8, 4, 2, 1] if off < reduce_width]
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
-    arch = get_hip_arch()
-    allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_sw_reduce_smem")
-    red_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = red_off + red_slots * 4
-    part_weights_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = part_weights_off + max_context_partition_num * 4
+
+    # LDS regions as a typed shared-storage struct; sizes/offsets/alignment are
+    # derived from the field types and the smem byte count is tracked automatically.
+    @fx.struct
+    class SharedStorage:
+        red: fx.Array[fx.Float32, red_slots, 16]  # cross-wave reduction scratch
+        part_weights: fx.Array[fx.Float32, max_context_partition_num, 16]  # per-partition weights
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
     def pa_decode_sw_reduce_kernel(
@@ -799,12 +798,13 @@ def compile_pa_decode_sw_reduce(
         kv_head_idx = fx.Int32(gpu.block_id("y"))
         eqgs_idx = fx.Int32(gpu.block_id("z"))
 
-        smem_base = allocator.get_base()
-        red_scratch = SmemPtr(smem_base, red_off, T.f32, shape=(red_slots,))
-        red_scratch.get()
+        # LDS memref views built once at the top so they dominate all child
+        # scf regions; the `lds` struct handle is only used here (not inside
+        # runtime control flow), the views themselves are MLIR-backed memrefs.
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        red_scratch = lds.red.view(fx.make_layout(red_slots, 1))
         if const_expr(max_context_partition_num > WARP_SIZE):
-            part_weights_lds = SmemPtr(smem_base, part_weights_off, T.f32, shape=(max_context_partition_num,))
-            part_weights_lds.get()
+            part_weights_lds = lds.part_weights.view(fx.make_layout(max_context_partition_num, 1))
 
         out_rsrc = buffer_ops.create_buffer_resource_from_addr(output_ptr)
         es_rsrc = buffer_ops.create_buffer_resource_from_addr(exp_sums_ptr)
@@ -847,23 +847,23 @@ def compile_pa_decode_sw_reduce(
 
             if lane == 0:
                 wave_idx = fx.Index(wave)
-                red_scratch.store(w, [wave_idx])
+                fx.memref_store(w, red_scratch, wave_idx)
             gpu.barrier()
 
             if wave == 0:
                 in_range = lane < c_red_slots
                 lane_safe = arith.select(in_range, lane, 0)
                 lane_safe_idx = fx.Index(lane_safe)
-                red_val = red_scratch.load([lane_safe_idx])
+                red_val = fx.memref_load(red_scratch, lane_safe_idx)
                 red_val = arith.select(in_range, red_val, neutral)
                 red_val = (
                     _wave_reduce_max_full(red_val) if const_expr(mode == "max") else _wave_reduce_sum_full(red_val)
                 )
                 if lane == 0:
-                    red_scratch.store(red_val, [fx.Index(0)])
+                    fx.memref_store(red_val, red_scratch, fx.Index(0))
             gpu.barrier()
 
-            return red_scratch.load([fx.Index(0)])
+            return fx.memref_load(red_scratch, fx.Index(0))
 
         if const_expr(max_context_partition_num <= WARP_SIZE):
             c_part_num = fx.Int32(max_context_partition_num)
@@ -1006,7 +1006,7 @@ def compile_pa_decode_sw_reduce(
                     part_scale = _exp2_f32_fast((part_max - global_max) * c_log2e)
                     weight = part_sum * part_scale * inv_global_exp_sum
                     part_idx_idx = fx.Index(part_i32)
-                    part_weights_lds.store(weight, [part_idx_idx])
+                    fx.memref_store(weight, part_weights_lds, part_idx_idx)
 
             gpu.barrier()
 
@@ -1014,7 +1014,7 @@ def compile_pa_decode_sw_reduce(
             for part_idx in range_constexpr(max_context_partition_num):
                 part_i32 = fx.Int32(part_idx)
                 part_idx_idx = fx.Index(part_idx)
-                weight = part_weights_lds.load([part_idx_idx])
+                weight = fx.memref_load(part_weights_lds, part_idx_idx)
                 logits_off = (
                     batch_idx * stride_logits_seq
                     + kv_head_idx * stride_logits_head
@@ -1064,10 +1064,6 @@ def compile_pa_decode_sw_reduce(
         num_kv_heads,
         stream: fx.Stream = fx.Stream(None),
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
         pa_decode_sw_reduce_kernel(
             output,
             exp_sums,
@@ -1093,7 +1089,6 @@ def compile_pa_decode_sw_reduce(
     return {
         "launch": launch_pa_decode_sw_reduce,
         "kernel": pa_decode_sw_reduce_kernel,
-        "allocator": allocator,
     }
 
 
