@@ -14,11 +14,19 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import fly, llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
+from flydsl.expr.typing import T
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.kernels_common import dtype_to_elem_type, get_warp_size
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 KERNEL_NAME = "rmsnorm"
 
@@ -51,6 +59,18 @@ def _store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, val
     fx.memref_store_vec(ts, r)
     view = fx.slice(divided_tensor, (None, index))
     fx.copy_atom_call(copy_atom, r, view)
+
+
+def _get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
+    if ptr_type is None:
+        ptr_type = ir.Type.parse("!llvm.ptr<1>")
+    base_ptr = fly.extract_aligned_pointer_as_index(ptr_type, ptr)
+    base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
+    byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
+    llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
+    llvm_ptr = llvm.IntToPtrOp(ptr_type, llvm_ptr).result
+    ptr_v = llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
+    return ptr_v
 
 
 def _load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
@@ -110,9 +130,9 @@ def _quant_dtype_max(dtype_str: str) -> float:
     raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
 
 
-def build_rmsnorm_module(N: int, dtype_str: str):
+def build_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False):
     if N <= 2048:
-        return _build_rmsnorm_large_m_small_n_module(N, dtype_str)
+        return _build_rmsnorm_large_m_small_n_module(N, dtype_str, store_rstd)
 
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
@@ -127,7 +147,7 @@ def build_rmsnorm_module(N: int, dtype_str: str):
     def rmsnorm_kernel(
         Input: fx.Tensor,
         Gamma: fx.Tensor,
-        _Unused: fx.Tensor,
+        Rstd: fx.Tensor,
         Output: fx.Tensor,
     ):
         bid = fx.block_idx.x
@@ -141,6 +161,11 @@ def build_rmsnorm_module(N: int, dtype_str: str):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
         s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
+
+        if const_expr(store_rstd):
+            Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
+            rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+            rstd_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
         def wave_reduce_add(x):
             w = x
@@ -227,6 +252,10 @@ def build_rmsnorm_module(N: int, dtype_str: str):
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
+            if const_expr(store_rstd):
+                if tid == 0:
+                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+
             # Pass 2: normalize + gamma + store (reuse cached input)
             for tile_i in range_constexpr(num_tiles):
                 idx = tid + tile_i * BLOCK_THREADS
@@ -278,6 +307,10 @@ def build_rmsnorm_module(N: int, dtype_str: str):
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
+            if const_expr(store_rstd):
+                if tid == 0:
+                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rrms)
+
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
                 idx = tid + base_idx_int
                 if idx < N:
@@ -289,6 +322,26 @@ def build_rmsnorm_module(N: int, dtype_str: str):
                     y = norm * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
                     _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+
+    if store_rstd:
+
+        @flyc.jit
+        def launch_rmsnorm(
+            Input: fx.Tensor,
+            Gamma: fx.Tensor,
+            Output: fx.Tensor,
+            Rstd: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            launcher = rmsnorm_kernel(Input, Gamma, Rstd, Output)
+            launcher.launch(
+                grid=(m_in, 1, 1),
+                block=(BLOCK_THREADS, 1, 1),
+                stream=stream,
+            )
+
+        return launch_rmsnorm
 
     @flyc.jit
     def launch_rmsnorm(
@@ -308,7 +361,7 @@ def build_rmsnorm_module(N: int, dtype_str: str):
     return launch_rmsnorm
 
 
-def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str):
+def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bool = False):
     BLOCK_N = 1 << (N - 1).bit_length()
     BLOCK_M = max(min(16384 // BLOCK_N, 32), 8)
     THREADS_PER_ROW = min(WARP_SIZE, 1024 // BLOCK_M)
@@ -319,7 +372,7 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str):
     def rmsnorm_large_m_small_n_kernel(
         Input: fx.Tensor,
         Gamma: fx.Tensor,
-        _Unused: fx.Tensor,
+        Rstd: fx.Tensor,
         Output: fx.Tensor,
         MIn: fx.Int32,
     ):
@@ -339,6 +392,10 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str):
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
+            if const_expr(store_rstd):
+                Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
+                rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+                rstd_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
             row_in = fx.slice(Input_buf, (row, None))
             row_out = fx.slice(Output_buf, (row, None))
@@ -377,6 +434,10 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str):
             ms_eps = mean_sq + eps_c
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
+            if const_expr(store_rstd):
+                if lane == 0:
+                    _store_scalar(rstd_copy_atom, fx.Float32, fx.Float32, rstd_div, row, rrms)
+
             for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
                 idx = lane + base_idx_int
                 if idx < N:
@@ -387,6 +448,26 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str):
                     y = (x * rrms) * g
                     y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
                     _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+
+    if store_rstd:
+
+        @flyc.jit
+        def launch_rmsnorm_large_m_small_n(
+            Input: fx.Tensor,
+            Gamma: fx.Tensor,
+            Output: fx.Tensor,
+            Rstd: fx.Tensor,
+            m_in: fx.Int32,
+            stream: fx.Stream = fx.Stream(None),
+        ):
+            launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Rstd, Output, m_in)
+            launcher.launch(
+                grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
+                block=(BLOCK_THREADS_SPECIAL, 1, 1),
+                stream=stream,
+            )
+
+        return launch_rmsnorm_large_m_small_n
 
     @flyc.jit
     def launch_rmsnorm_large_m_small_n(
@@ -404,6 +485,154 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str):
         )
 
     return launch_rmsnorm_large_m_small_n
+
+
+def build_rmsnorm_bwd_module(N: int, dtype_str: str):
+    """Fused RMSNorm backward: grid=(M,), one block per row.
+
+    Pass 1: c1 = mean_N(x_hat * wdy), x_hat = x*rstd, wdy = dy*gamma.
+    Pass 2: dx = (wdy - x_hat*c1) * rstd  -> DX (elem dtype);
+            dw_elem = dy * x_hat (fp32)   -> atomicAdd into DWeight[idx] (fp32).
+    Uses the module EPS constant implicitly via Rstd (supplied by the forward).
+    """
+    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
+    elem_bits = 32 if dtype_str == "f32" else 16
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
+
+    @flyc.kernel
+    def rmsnorm_bwd_kernel(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        DY: fx.Tensor,
+        Rstd: fx.Tensor,
+        DX: fx.Tensor,
+        DWeight: fx.Tensor,
+    ):
+        bid = fx.block_idx.x
+        tid = fx.thread_idx.x
+
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        fm_fast = arith.FastMathFlags.fast
+        n_float = float(N)
+        c_zero_f = fx.Float32(0.0)
+
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
+
+        def wave_reduce_add(x):
+            w = x
+            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
+                w = w.addf(peer, fastmath=fm_fast)
+            return w
+
+        def block_reduce_add(val):
+            if const_expr(RED_SLOTS == 1):
+                return wave_reduce_add(val)
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
+            w = wave_reduce_add(val)
+            if lane == 0:
+                fx.memref_store(w, s_red, wave)
+            gpu.barrier()
+            if wave == 0:
+                in_range = lane < RED_SLOTS
+                lane_safe = in_range.select(lane, 0)
+                v = fx.memref_load(s_red, lane_safe)
+                ww = in_range.select(v, c_zero_f)
+                ww = wave_reduce_add(ww)
+                if lane == 0:
+                    fx.memref_store(ww, s_red, 0)
+            gpu.barrier()
+            return fx.memref_load(s_red, 0)
+
+        Input_buf = fx.rocdl.make_buffer_tensor(Input)
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+        DY_buf = fx.rocdl.make_buffer_tensor(DY)
+        Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
+        DX_buf = fx.rocdl.make_buffer_tensor(DX)
+
+        row_in = fx.slice(Input_buf, (bid, None))
+        row_dy = fx.slice(DY_buf, (bid, None))
+        row_dx = fx.slice(DX_buf, (bid, None))
+
+        copy_atom_s = fx.make_copy_atom(
+            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+            elem_bits,
+        )
+        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
+
+        row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
+        dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
+        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+        dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
+        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+
+        rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
+
+        # Pass 1: c1 = mean( x_hat * wdy ) = mean( (x*rstd) * (dy*gamma) )
+        thread_acc = c_zero_f
+        for base in range_constexpr(0, N, BLOCK_THREADS):
+            idx = tid + base
+            is_valid = idx < N
+            idx_safe = is_valid.select(idx, 0)
+            x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
+            dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
+            g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
+            x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+            dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+            g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+            x_hat = x * rstd
+            wdy = dy * g
+            prod = x_hat * wdy
+            thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
+
+        sum_prod = block_reduce_add(thread_acc)
+        c1 = sum_prod / n_float
+
+        # Pass 2: dx = (wdy - x_hat*c1) * rstd ; dw = dy * x_hat (atomicAdd fp32)
+        for base in range_constexpr(0, N, BLOCK_THREADS):
+            idx = tid + base
+            if idx < N:
+                x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
+                dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx)
+                g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                x_hat = x * rstd
+                wdy = dy * g
+                dx = (wdy - x_hat * c1) * rstd
+                dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
+                _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
+
+                dw = dy * x_hat
+                ptr = _get_llvm_ptr(DWeight, idx, 4)
+                llvm.AtomicRMWOp(
+                    llvm.AtomicBinOp.fadd,
+                    ptr,
+                    dw.ir_value(),
+                    llvm.AtomicOrdering.monotonic,
+                    syncscope="agent",
+                    alignment=4,
+                )
+
+    @flyc.jit
+    def launch_rmsnorm_bwd(
+        Input: fx.Tensor,
+        Gamma: fx.Tensor,
+        DY: fx.Tensor,
+        Rstd: fx.Tensor,
+        DX: fx.Tensor,
+        DWeight: fx.Tensor,
+        m_in: fx.Int32,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        launcher = rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)
+        launcher.launch(grid=(m_in, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
+
+    return launch_rmsnorm_bwd
 
 
 def build_fused_add_rmsnorm_module(N: int, dtype_str: str):
@@ -1386,3 +1615,97 @@ def build_fused_add_rmsnorm_smoothquant_module(
         is_smooth=True,
         quant_dtype_str=quant_dtype_str,
     )
+
+
+# =====================================================================
+# Python wrappers + autograd (quack-aligned). PR 1: plain rmsnorm.
+# =====================================================================
+if torch is not None:
+
+    def _torch_dtype_to_str(dt) -> str:
+        if dt == torch.float32:
+            return "f32"
+        if dt == torch.float16:
+            return "f16"
+        if dt == torch.bfloat16:
+            return "bf16"
+        raise ValueError(f"unsupported torch dtype: {dt}")
+
+    # Compiled-fn caches keyed by (N, dtype_str, store_rstd) / (N, dtype_str).
+    _FWD_CACHE: dict = {}
+    _BWD_CACHE: dict = {}
+
+    def _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, stream):
+        key = (N, dtype_str, store_rstd)
+        entry = _FWD_CACHE.get(key)
+        if entry is None:
+            launch_fn = build_rmsnorm_module(N, dtype_str, store_rstd=store_rstd)
+            if store_rstd:
+                compiled = flyc.compile(launch_fn, x, weight, out, rstd, M, stream)
+            else:
+                compiled = flyc.compile(launch_fn, x, weight, out, M, stream)
+            _FWD_CACHE[key] = compiled
+            entry = compiled
+        return entry
+
+    def rmsnorm_fwd(x, weight, eps=EPS, store_rstd=False):
+        """Forward RMSNorm. Returns (out, rstd).
+
+        NOTE: the compiled kernel uses the module EPS constant (not `eps`);
+        `eps` is accepted for interface parity only (see module docstring).
+        """
+        assert x.dim() == 2, "rmsnorm_fwd expects a 2D (M, N) input"
+        M, N = x.shape
+        out = torch.empty_like(x)
+        rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
+        dtype_str = _torch_dtype_to_str(x.dtype)
+        stream = torch.cuda.current_stream()
+        compiled = _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, stream)
+        if store_rstd:
+            compiled(x, weight, out, rstd, M, stream)
+        else:
+            compiled(x, weight, out, M, stream)
+        return out, rstd
+
+    def rmsnorm_bwd(x, weight, dout, rstd, eps=EPS):
+        """Backward RMSNorm. Returns (dx, dw) with dw cast to weight dtype."""
+        assert x.dim() == 2, "rmsnorm_bwd expects a 2D (M, N) input"
+        M, N = x.shape
+        dtype_str = _torch_dtype_to_str(x.dtype)
+        dx = torch.empty_like(x)
+        dweight = torch.zeros((N,), device=x.device, dtype=torch.float32)
+        stream = torch.cuda.current_stream()
+        key = (N, dtype_str)
+        compiled = _BWD_CACHE.get(key)
+        if compiled is None:
+            launch_fn = build_rmsnorm_bwd_module(N, dtype_str)
+            # flyc.compile executes the kernel once during tracing, which would
+            # accumulate into DWeight; zero it AFTER compiling.
+            compiled = flyc.compile(launch_fn, x, weight, dout, rstd, dx, dweight, M, stream)
+            _BWD_CACHE[key] = compiled
+        dweight.zero_()
+        compiled(x, weight, dout, rstd, dx, dweight, M, stream)
+        return dx, dweight.to(weight.dtype)
+
+    class RMSNormFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, weight, eps):
+            need_grad = x.requires_grad or weight.requires_grad
+            out, rstd = rmsnorm_fwd(x, weight, eps=eps, store_rstd=need_grad)
+            ctx.save_for_backward(x, weight, rstd)
+            ctx.eps = eps
+            return out
+
+        @staticmethod
+        def backward(ctx, dout):
+            x, weight, rstd = ctx.saved_tensors
+            dx, dw = rmsnorm_bwd(x, weight, dout.contiguous(), rstd, eps=ctx.eps)
+            return dx, dw, None
+
+    def rmsnorm(x, weight=None, eps=EPS):
+        """Public entry: plain RMSNorm with autograd (weight required in PR 1)."""
+        assert weight is not None, "PR 1 rmsnorm requires an explicit weight"
+        N = weight.shape[-1]
+        x_flat = x.reshape(-1, N)
+        out_flat = RMSNormFunction.apply(x_flat, weight, eps)
+        return out_flat.reshape(x.shape)
