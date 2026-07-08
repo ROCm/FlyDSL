@@ -336,6 +336,8 @@ def build_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False, eps: 
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
+        # store_rstd=False path: the Rstd slot is an unused placeholder here, so
+        # we pass Gamma to fill the argument (it is never dereferenced in-kernel).
         launcher = rmsnorm_kernel(Input, Gamma, Gamma, Output)
         launcher.launch(
             grid=(m_in, 1, 1),
@@ -462,6 +464,8 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
+        # store_rstd=False path: the Rstd slot is an unused placeholder here, so
+        # we pass Gamma to fill the argument (it is never dereferenced in-kernel).
         launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output, m_in)
         launcher.launch(
             grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
