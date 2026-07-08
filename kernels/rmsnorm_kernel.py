@@ -14,14 +14,12 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import T
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from kernels.kernels_common import dtype_to_elem_type, get_warp_size
+from kernels.kernels_common import dtype_to_elem_type, get_llvm_ptr, get_warp_size
 
 try:
     import torch
@@ -59,18 +57,6 @@ def _store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, val
     fx.memref_store_vec(ts, r)
     view = fx.slice(divided_tensor, (None, index))
     fx.copy_atom_call(copy_atom, r, view)
-
-
-def _get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
-    if ptr_type is None:
-        ptr_type = ir.Type.parse("!llvm.ptr<1>")
-    base_ptr = fly.extract_aligned_pointer_as_index(ptr_type, ptr)
-    base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
-    byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
-    llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
-    llvm_ptr = llvm.IntToPtrOp(ptr_type, llvm_ptr).result
-    ptr_v = llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
-    return ptr_v
 
 
 def _load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
@@ -130,9 +116,9 @@ def _quant_dtype_max(dtype_str: str) -> float:
     raise ValueError(f"unsupported quant dtype: {dtype_str!r} (expected 'i8' or 'int8')")
 
 
-def build_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False):
+def build_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):
     if N <= 2048:
-        return _build_rmsnorm_large_m_small_n_module(N, dtype_str, store_rstd)
+        return _build_rmsnorm_large_m_small_n_module(N, dtype_str, store_rstd, eps)
 
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
@@ -155,7 +141,7 @@ def build_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False):
 
         elem_dtype = dtype_to_elem_type(dtype_str)
         fm_fast = arith.FastMathFlags.fast
-        eps_c = EPS
+        eps_c = eps
         n_float = float(N)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
@@ -361,7 +347,7 @@ def build_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False):
     return launch_rmsnorm
 
 
-def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bool = False):
+def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):
     BLOCK_N = 1 << (N - 1).bit_length()
     BLOCK_M = max(min(16384 // BLOCK_N, 32), 8)
     THREADS_PER_ROW = min(WARP_SIZE, 1024 // BLOCK_M)
@@ -386,7 +372,7 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
         if row < MIn:
             elem_dtype = dtype_to_elem_type(dtype_str)
             fm_fast = arith.FastMathFlags.fast
-            eps_c = EPS
+            eps_c = eps
             n_float = float(N)
 
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
@@ -493,7 +479,12 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str):
     Pass 1: c1 = mean_N(x_hat * wdy), x_hat = x*rstd, wdy = dy*gamma.
     Pass 2: dx = (wdy - x_hat*c1) * rstd  -> DX (elem dtype);
             dw_elem = dy * x_hat (fp32)   -> atomicAdd into DWeight[idx] (fp32).
-    Uses the module EPS constant implicitly via Rstd (supplied by the forward).
+    eps is baked into Rstd by the forward, so it is not needed here.
+
+    Perf follow-ups (deferred; correctness-complete as-is): this is the generic
+    scalar path only — a vectorized fast path (mirroring the forward) and caching
+    x/dy/gamma between pass 1 and pass 2 (the forward caches `in_local`) would cut
+    global traffic. Left out of PR 1 to keep the first backward reviewable.
     """
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -608,7 +599,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str):
                 _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
 
                 dw = dy * x_hat
-                ptr = _get_llvm_ptr(DWeight, idx, 4)
+                ptr = get_llvm_ptr(DWeight, idx, 4)
                 llvm.AtomicRMWOp(
                     llvm.AtomicBinOp.fadd,
                     ptr,
@@ -1631,15 +1622,17 @@ if torch is not None:
             return "bf16"
         raise ValueError(f"unsupported torch dtype: {dt}")
 
-    # Compiled-fn caches keyed by (N, dtype_str, store_rstd) / (N, dtype_str).
+    # Compiled-fn caches. Keys include device: a compiled function is bound to
+    # the device/context it was built on, so reusing it on another GPU faults.
+    # eps is a compile-time kernel constant, so it is part of the fwd key too.
     _FWD_CACHE: dict = {}
     _BWD_CACHE: dict = {}
 
-    def _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, stream):
-        key = (N, dtype_str, store_rstd)
+    def _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, eps, stream):
+        key = (N, dtype_str, store_rstd, float(eps), x.device)
         entry = _FWD_CACHE.get(key)
         if entry is None:
-            launch_fn = build_rmsnorm_module(N, dtype_str, store_rstd=store_rstd)
+            launch_fn = build_rmsnorm_module(N, dtype_str, store_rstd=store_rstd, eps=eps)
             if store_rstd:
                 compiled = flyc.compile(launch_fn, x, weight, out, rstd, M, stream)
             else:
@@ -1649,42 +1642,49 @@ if torch is not None:
         return entry
 
     def rmsnorm_fwd(x, weight, eps=EPS, store_rstd=False):
-        """Forward RMSNorm. Returns (out, rstd).
-
-        NOTE: the compiled kernel uses the module EPS constant (not `eps`);
-        `eps` is accepted for interface parity only (see module docstring).
-        """
+        """Forward RMSNorm. Returns (out, rstd). eps is baked into the kernel."""
         assert x.dim() == 2, "rmsnorm_fwd expects a 2D (M, N) input"
+        assert x.is_contiguous() and weight.is_contiguous(), "rmsnorm_fwd expects contiguous inputs"
         M, N = x.shape
         out = torch.empty_like(x)
         rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
         dtype_str = _torch_dtype_to_str(x.dtype)
-        stream = torch.cuda.current_stream()
-        compiled = _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, stream)
-        if store_rstd:
-            compiled(x, weight, out, rstd, M, stream)
-        else:
-            compiled(x, weight, out, M, stream)
+        # Bind compile + launch to the tensors' device so the compiled kernel and
+        # the stream belong to the right GPU/context (multi-GPU correctness).
+        with torch.cuda.device(x.device):
+            stream = torch.cuda.current_stream()
+            compiled = _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, eps, stream)
+            if store_rstd:
+                compiled(x, weight, out, rstd, M, stream)
+            else:
+                compiled(x, weight, out, M, stream)
         return out, rstd
 
     def rmsnorm_bwd(x, weight, dout, rstd, eps=EPS):
-        """Backward RMSNorm. Returns (dx, dw) with dw cast to weight dtype."""
+        """Backward RMSNorm. Returns (dx, dw) with dw cast to weight dtype.
+
+        eps is not used directly here — it is already baked into `rstd` by the
+        forward — but is accepted so callers can pass it symmetrically.
+        """
         assert x.dim() == 2, "rmsnorm_bwd expects a 2D (M, N) input"
+        assert x.is_contiguous() and dout.is_contiguous(), "rmsnorm_bwd expects contiguous inputs"
         M, N = x.shape
         dtype_str = _torch_dtype_to_str(x.dtype)
         dx = torch.empty_like(x)
         dweight = torch.zeros((N,), device=x.device, dtype=torch.float32)
-        stream = torch.cuda.current_stream()
-        key = (N, dtype_str)
-        compiled = _BWD_CACHE.get(key)
-        if compiled is None:
-            launch_fn = build_rmsnorm_bwd_module(N, dtype_str)
-            # flyc.compile executes the kernel once during tracing, which would
-            # accumulate into DWeight; zero it AFTER compiling.
-            compiled = flyc.compile(launch_fn, x, weight, dout, rstd, dx, dweight, M, stream)
-            _BWD_CACHE[key] = compiled
-        dweight.zero_()
-        compiled(x, weight, dout, rstd, dx, dweight, M, stream)
+        key = (N, dtype_str, x.device)
+        # Bind compile + launch to the tensors' device (multi-GPU correctness).
+        with torch.cuda.device(x.device):
+            stream = torch.cuda.current_stream()
+            compiled = _BWD_CACHE.get(key)
+            if compiled is None:
+                launch_fn = build_rmsnorm_bwd_module(N, dtype_str)
+                # flyc.compile executes the kernel once during tracing, which would
+                # accumulate into DWeight; zero it AFTER compiling.
+                compiled = flyc.compile(launch_fn, x, weight, dout, rstd, dx, dweight, M, stream)
+                _BWD_CACHE[key] = compiled
+            dweight.zero_()
+            compiled(x, weight, dout, rstd, dx, dweight, M, stream)
         return dx, dweight.to(weight.dtype)
 
     class RMSNormFunction(torch.autograd.Function):
@@ -1706,6 +1706,7 @@ if torch is not None:
         """Public entry: plain RMSNorm with autograd (weight required in PR 1)."""
         assert weight is not None, "PR 1 rmsnorm requires an explicit weight"
         N = weight.shape[-1]
+        assert x.shape[-1] == N, f"x last dim {x.shape[-1]} != weight length {N}"
         x_flat = x.reshape(-1, N)
         out_flat = RMSNormFunction.apply(x_flat, weight, eps)
         return out_flat.reshape(x.shape)
