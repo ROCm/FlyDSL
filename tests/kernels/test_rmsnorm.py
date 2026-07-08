@@ -17,8 +17,19 @@ import os
 
 import pytest
 
-import flydsl.compiler as flyc
-from kernels.norm.rmsnorm_kernel import (
+pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
+
+try:
+    import torch
+except ImportError:
+    torch = None
+if torch is None or not torch.cuda.is_available():
+    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
+
+# Imported after the torch guard: rmsnorm() is only defined when torch is present,
+# so importing it earlier makes a torch-less collection fail (ImportError) instead of skip.
+import flydsl.compiler as flyc  # noqa: E402
+from kernels.norm.rmsnorm_kernel import (  # noqa: E402
     build_fused_add_rmsnorm_dynamicquant_module,
     build_fused_add_rmsnorm_module,
     build_fused_add_rmsnorm_smoothquant_module,
@@ -28,22 +39,13 @@ from kernels.norm.rmsnorm_kernel import (
     build_rmsnorm_smoothquant_module,
     rmsnorm,
 )
-from tests.kernels.benchmark_common import (
+from tests.kernels.benchmark_common import (  # noqa: E402
     PerfRow,
     bench_gpu_us_torch,
     maybe_enable_aiter,
     print_perf_table,
 )
-from tests.test_common import run_perftest
-
-pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
-
-try:
-    import torch
-except ImportError:
-    torch = None
-if torch is None or not torch.cuda.is_available():
-    pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
+from tests.test_common import run_perftest  # noqa: E402
 
 DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
@@ -816,9 +818,10 @@ def test_rmsnorm_backward():
     configs = [
         (64, 256, "f32"),  # small-N path, f32
         (16, 512, "bf16"),  # small-N path, bf16
-        (4096, 4096, "bf16"),  # generic path, large
-        (64, 2000, "f32"),  # generic path, unaligned
-        (128, 4096, "f16"),  # generic path, f16
+        (4096, 4096, "bf16"),  # fast vectorized path (N % 2048 == 0, 16-bit)
+        (64, 2000, "f32"),  # small-N path, unaligned f32
+        (128, 4096, "f16"),  # fast vectorized path, f16
+        (64, 3000, "f32"),  # generic scalar path (N > 2048, f32)
     ]
 
     failures = 0
@@ -891,8 +894,9 @@ def test_rmsnorm_autograd():
 
     configs = [
         (64, 256, "f32"),  # small-N path
-        (128, 4096, "bf16"),  # generic path
-        (128, 4096, "f16"),  # generic path, f16
+        (128, 4096, "bf16"),  # fast vectorized path
+        (128, 4096, "f16"),  # fast vectorized path, f16
+        (128, 3000, "f32"),  # generic scalar path (N > 2048, f32)
     ]
 
     failures = 0
@@ -913,21 +917,23 @@ def test_rmsnorm_eps_honored():
     print("Running RMSNorm eps-honored Test")
     print("=" * 80)
     torch.manual_seed(0)
-    M, N = 32, 256
-    x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
-    w = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
+    # Cover both forward builders: small-N (N <= 2048) and the generic scalar path
+    # (N > 2048; f32 avoids the 16-bit fast path), so eps is verified on each.
+    for M, N in ((32, 256), (32, 3000)):
+        x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+        w = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
 
-    for eps in (1e-5, 1e-6, 1e-2):
-        y = rmsnorm(x, w, eps=eps)
-        ref = x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + eps) * w
-        err = (y - ref).abs().max().item()
-        print(f"  eps={eps:g}: max err vs torch ref = {err:.3e}")
-        assert err < 1e-4, f"eps={eps} not honored (err={err})"
+        for eps in (1e-5, 1e-6, 1e-2):
+            y = rmsnorm(x, w, eps=eps)
+            ref = x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + eps) * w
+            err = (y - ref).abs().max().item()
+            print(f"  N={N} eps={eps:g}: max err vs torch ref = {err:.3e}")
+            assert err < 1e-4, f"N={N} eps={eps} not honored (err={err})"
 
-    # A non-default eps must actually change the output (guards silent-ignore regressions).
-    diff = (rmsnorm(x, w, eps=1e-2) - rmsnorm(x, w, eps=1e-6)).abs().max().item()
-    print(f"  eps 1e-2 vs 1e-6 output diff = {diff:.3e} (must be > 0)")
-    assert diff > 0, "eps appears to be ignored"
+        # A non-default eps must actually change the output (guards silent-ignore regressions).
+        diff = (rmsnorm(x, w, eps=1e-2) - rmsnorm(x, w, eps=1e-6)).abs().max().item()
+        print(f"  N={N} eps 1e-2 vs 1e-6 output diff = {diff:.3e} (must be > 0)")
+        assert diff > 0, f"N={N}: eps appears to be ignored"
     print("  -> PASSED")
 
 
@@ -1187,7 +1193,8 @@ if __name__ == "__main__":
     test_rmsnorm_backward()
     test_rmsnorm_autograd()
     test_rmsnorm_eps_honored()
-    test_rmsnorm_multi_gpu()
+    if torch.cuda.device_count() >= 2:
+        test_rmsnorm_multi_gpu()
     test_rmsnorm_dynamicquant()
     test_rmsnorm_smoothquant()
     test_fused_add_rmsnorm()
