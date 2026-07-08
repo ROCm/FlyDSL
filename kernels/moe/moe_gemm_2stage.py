@@ -18,8 +18,10 @@ import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 try:
     from flydsl.runtime.device import (
@@ -44,6 +46,9 @@ from kernels.mma.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     crd2idx,
     extract_bf16_scale,
+    lds_store_4b_xor16,
+    lds_store_8b_xor16,
+    lds_store_16b_xor16,
     load_b_pack_k32,
     load_b_raw_w4a16,
     load_b_raw_w4a16_groupwise,
@@ -91,6 +96,8 @@ def compile_moe_gemm1(
     """
 
     gpu_arch = get_hip_arch()
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {}  # legacy; kept until stage2/reduction are migrated
 
     _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16")
     if in_dtype not in _valid_dtypes:
@@ -267,12 +274,8 @@ def compile_moe_gemm1(
     lds_total_elems = lds_total_bytes if elem_bytes == 1 else (lds_total_bytes // 2)
 
     lds_alloc_bytes = int(lds_total_elems) * int(elem_bytes)
-
-    # Shared-memory storage: one byte-typed region reused for the ping-pong X tiles
-    # and (aliased) for the optional CShuffle epilogue output.
-    @fx.struct
-    class SharedStorage:
-        x: fx.Array[fx.Uint8, lds_alloc_bytes, 16]
+    lds_alloc_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_alloc_offset + lds_alloc_bytes
 
     if True:
 
@@ -377,22 +380,32 @@ def compile_moe_gemm1(
             layout_tx_wave_lane = fx.make_layout((4, 64), stride=(64, 1))
             layout_lane16 = fx.make_layout((4, 16), stride=(16, 1))
 
-            # ── LDS allocation (built once at kernel top, before any runtime scf.if) ──
-            # `lds` is a Python handle; only its field's raw pointer (.ptr) is used below.
-            # LDS access is pointer-based (vector-dialect ops do not accept the .view() memref).
-            lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-            lds_x_base = lds.x.ptr  # i8 LDS base pointer for the ping-pong X tiles
-            # Alias the same LDS bytes for the optional CShuffle epilogue output.
-            # bf16 split-K uses bf16 (2B); other split-K uses f32 (4B); normal uses f16/bf16 (2B).
-            _lds_out_fx_dtype = (
-                fx.Float32 if (_is_splitk and not _splitk_use_bf16) else (fx.BFloat16 if is_bf16 else fx.Float16)
-            )
-            lds_out = fx.recast_iter(_lds_out_fx_dtype, lds.x.ptr) if _use_cshuffle_epilog else None
-
             # Everything below is gated by `blk_valid` to avoid doing buffer-resource setup and
             # gmem work for padding blocks.
             _if_blk = scf.IfOp(blk_valid)
             with _if_then(_if_blk):
+                base_ptr = allocator.get_base()
+                lds_x_ptr = SmemPtr(
+                    base_ptr,
+                    lds_alloc_offset,
+                    (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))),
+                    shape=(lds_total_elems,),
+                )
+                lds_x = lds_x_ptr.get()
+                # Alias LDS bytes for optional CShuffle epilogue.
+                # bf16 split-K uses bf16 (2B); other split-K uses f32 (4B); normal uses f16/bf16 (2B).
+                _lds_out_elem_type = T.f32 if (_is_splitk and not _splitk_use_bf16) else (T.bf16 if is_bf16 else T.f16)
+                lds_out = (
+                    SmemPtr(
+                        base_ptr,
+                        lds_x_ptr.byte_offset,
+                        _lds_out_elem_type,
+                        shape=(tile_m * tile_n,),
+                    ).get()
+                    if _use_cshuffle_epilog
+                    else None
+                )
+
                 # Buffer resources: for dynamic memrefs, provide `num_records_bytes` explicitly so
                 # hardware OOB behavior is stable (otherwise it falls back to a large max size).
                 c_topk = fx.Index(topk)
@@ -717,28 +730,53 @@ def compile_moe_gemm1(
                 acc_up = [acc_init] * (num_acc_n * m_repeat)
 
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                # View-based CK-style XOR16 store: recast the i8 LDS region and write the
-                # register vector as bytes (high-level layout/view idiom).
-                def _lds_x_store(vec_part, row_local, col_local_i32, lds_base, vec_ty, nbytes):
-                    col_local_bytes = col_local_i32 * fx.Index(4)
-                    col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-                    col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes // arith.index(int(elem_bytes)))
-                    idx0 = crd2idx((fx.Int32(row_local), fx.Int32(col_swz)), layout_lds) + lds_base
-                    byte_off = idx0 if elem_bytes == 1 else (idx0 * arith.index(int(elem_bytes)))
-                    # f8 must not go through the op; write as i8 (byte layout is identical).
-                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
-                    fx.make_view(it, fx.make_layout(nbytes, 1)).store(fx.Vector(vec_part).bitcast(fx.Uint8))
-
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
                         if const_expr(x_load_bytes == 16):
-                            _lds_x_store(vec_x_in_parts[i], row_local, col_local_i32, lds_base, vec16_x, 16)
+                            lds_store_16b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec16_ty=vec16_x,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=fx.Index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x4=vec_x_in_parts[i],
+                                elem_bytes=elem_bytes,
+                            )
                         elif const_expr(x_load_bytes == 8):
-                            _lds_x_store(vec_x_in_parts[i], row_local, col_local_i32, lds_base, vec8_x, 8)
+                            lds_store_8b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec8_ty=vec8_x,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=fx.Index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x2=vec_x_in_parts[i],
+                            )
                         else:
-                            _lds_x_store(vec_x_in_parts[i], row_local, col_local_i32, lds_base, vec4_x, 4)
+                            lds_store_4b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec4_ty=vec4_x,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=fx.Index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x1=vec_x_in_parts[i],
+                            )
 
                 # --- A LDS load helper for K64 (load 16B once, extract 2x i64 halves) ---
                 def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
@@ -748,14 +786,10 @@ def compile_moe_gemm1(
                     )
                     idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
-                    byte_off = idx_a16 if elem_bytes == 1 else (idx_a16 * arith.index(int(elem_bytes)))
-                    # View-based LDS load: read 16 bytes as i8 via recast+view (f8 must not go
-                    # through the op), then bitcast to i64x2 for the MFMA operands.
-                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
-                    loaded_a16 = fx.make_view(it, fx.make_layout(16, 1)).load()
-                    a_i64x2 = fx.Vector(loaded_a16).bitcast(fx.Int64)
-                    a0 = a_i64x2[0]
-                    a1 = a_i64x2[1]
+                    loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
+                    a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
+                    a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
+                    a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
                     return a0, a1
 
                 def compute_tile(
@@ -1159,6 +1193,7 @@ def compile_moe_gemm1(
                     )
 
                 # After scf.for: extract final state from yielded results.
+                SmemPtr._view_cache = None
                 if pair_iters > 0:
                     acc_gate = list(loop_results[:_n_acc])
                     acc_up = list(loop_results[_n_acc:_p_bg])
@@ -1681,6 +1716,11 @@ def compile_moe_gemm1(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator.finalize()
+
         inter_in = arith.index_cast(T.index, i32_inter_in)
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         gx = inter_in // fx.Index(tile_n)
@@ -1746,6 +1786,8 @@ def compile_moe_gemm2(
     global atomics (recommended for performance).
     """
     gpu_arch = get_hip_arch()
+    allocator = SmemAllocator(None, arch=gpu_arch)
+    _state = {}
 
     _valid_dtypes = ("fp8", "fp16", "bf16", "int8", "int8smooth", "int4", "int4_bf16")
     if in_dtype not in _valid_dtypes:
@@ -1919,12 +1961,8 @@ def compile_moe_gemm2(
     lds_total_elems = lds_total_bytes if elem_bytes == 1 else (lds_total_bytes // 2)
 
     lds_alloc_bytes = int(lds_total_elems) * int(elem_bytes)
-
-    # Shared-memory storage: one byte-typed region reused for the ping-pong X tiles
-    # and (aliased) for the optional CShuffle epilogue output.
-    @fx.struct
-    class SharedStorage:
-        x: fx.Array[fx.Uint8, lds_alloc_bytes, 16]
+    lds_alloc_offset = allocator._align(allocator.ptr, 16)
+    allocator.ptr = lds_alloc_offset + lds_alloc_bytes
 
     if True:
 
@@ -2000,14 +2038,24 @@ def compile_moe_gemm2(
             layout_lane16 = fx.make_layout((4, 16), stride=(16, 1))
             fx.make_layout((tile_m, tile_k), stride=(tile_k, 1))
 
-            # ── LDS allocation (built once at kernel top, before any runtime scf.if) ──
-            # `lds` is a Python handle; only its field's raw pointer (.ptr) is used below.
-            # LDS access is pointer-based (vector-dialect ops do not accept the .view() memref).
-            lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-            lds_x_base = lds.x.ptr  # i8 LDS base pointer for the ping-pong X tiles
+            base_ptr = allocator.get_base()
+            lds_x_ptr = SmemPtr(
+                base_ptr,
+                lds_alloc_offset,
+                (T.bf16 if is_bf16 else (T.f16 if is_f16 else (T.i8 if is_int8 else T.f8))),
+                shape=(lds_total_elems,),
+            )
+            lds_x = lds_x_ptr.get()
             # Alias the same underlying LDS bytes as f16/bf16 for epilogue shuffle.
             lds_out = (
-                fx.recast_iter(fx.BFloat16 if out_is_bf16 else fx.Float16, lds.x.ptr) if _use_cshuffle_epilog else None
+                SmemPtr(
+                    base_ptr,
+                    lds_x_ptr.byte_offset,
+                    (T.bf16 if out_is_bf16 else T.f16),
+                    shape=(tile_m * tile_n,),
+                ).get()
+                if _use_cshuffle_epilog
+                else None
             )
 
             # Buffer resources.
@@ -2324,28 +2372,53 @@ def compile_moe_gemm2(
                         return b_tile
 
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                # View-based CK-style XOR16 store: recast the i8 LDS region and write the
-                # register vector as bytes (high-level layout/view idiom).
-                def _lds_x_store(vec_part, row_local, col_local_i32, lds_base, vec_ty, nbytes):
-                    col_local_bytes = col_local_i32 * fx.Index(4)
-                    col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
-                    col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes // arith.index(int(elem_bytes)))
-                    idx0 = crd2idx((fx.Int32(row_local), fx.Int32(col_swz)), layout_lds) + lds_base
-                    byte_off = idx0 if elem_bytes == 1 else (idx0 * arith.index(int(elem_bytes)))
-                    # f8 must not go through the op; write as i8 (byte layout is identical).
-                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
-                    fx.make_view(it, fx.make_layout(nbytes, 1)).store(fx.Vector(vec_part).bitcast(fx.Uint8))
-
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
                     for i in range_constexpr(num_x_loads):
                         row_local = x_row_local[i]
                         col_local_i32 = x_col_local_i32[i]
                         if const_expr(x_load_bytes == 16):
-                            _lds_x_store(vec_x_in_parts[i], row_local, col_local_i32, lds_base, vec16_x, 16)
+                            lds_store_16b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec16_ty=vec16_x,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=fx.Index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x4=vec_x_in_parts[i],
+                                elem_bytes=elem_bytes,
+                            )
                         elif const_expr(x_load_bytes == 8):
-                            _lds_x_store(vec_x_in_parts[i], row_local, col_local_i32, lds_base, vec8_x, 8)
+                            lds_store_8b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec8_ty=vec8_x,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=fx.Index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x2=vec_x_in_parts[i],
+                            )
                         else:
-                            _lds_x_store(vec_x_in_parts[i], row_local, col_local_i32, lds_base, vec4_x, 4)
+                            lds_store_4b_xor16(
+                                arith,
+                                vector,
+                                lds_memref=lds_x,
+                                vec4_ty=vec4_x,
+                                layout_lds=layout_lds,
+                                row_local=row_local,
+                                col_local_i32=col_local_i32,
+                                tx_c4=fx.Index(4),
+                                k_blocks16=k_blocks16,
+                                lds_base=lds_base,
+                                vec_part_i32x1=vec_x_in_parts[i],
+                            )
 
                 # --- A LDS load helper for K64 (load 16B once, extract 2x i64 halves) ---
                 def lds_load_packs_k64(curr_row_a_lds, col_base_bytes, lds_base):
@@ -2355,14 +2428,10 @@ def compile_moe_gemm2(
                     )
                     idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
-                    byte_off = idx_a16 if elem_bytes == 1 else (idx_a16 * arith.index(int(elem_bytes)))
-                    # View-based LDS load: read 16 bytes as i8 via recast+view (f8 must not go
-                    # through the op), then bitcast to i64x2 for the MFMA operands.
-                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
-                    loaded_a16 = fx.make_view(it, fx.make_layout(16, 1)).load()
-                    a_i64x2 = fx.Vector(loaded_a16).bitcast(fx.Int64)
-                    a0 = a_i64x2[0]
-                    a1 = a_i64x2[1]
+                    loaded_a16 = vector.load_op(vec16_x, lds_x, [idx_a16])
+                    a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
+                    a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
+                    a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
                     return a0, a1
 
                 def compute_tile(
@@ -2749,6 +2818,7 @@ def compile_moe_gemm2(
 
                     loop_results = yield list(_ac) + _flatten_b_tile(_bn) + list(_a0n)
 
+                SmemPtr._view_cache = None
                 if pair_iters > 0:
                     acc = list(loop_results[:_n_acc])
                     b_cur = _unflatten_b_tile(list(loop_results[_p_b:_p_a0]))
@@ -3067,6 +3137,11 @@ def compile_moe_gemm2(
         i32_size_expert_ids_in: fx.Int32,
         stream: fx.Stream,
     ):
+        allocator.finalized = False
+        ctx = CompilationContext.get_current()
+        with ir.InsertionPoint(ctx.gpu_module_body):
+            allocator.finalize()
+
         n_in = arith.index_cast(T.index, i32_n_in)
         size_expert_ids_in = arith.index_cast(T.index, i32_size_expert_ids_in)
         gx = n_in // fx.Index(tile_n)
