@@ -385,14 +385,14 @@ def _flydsl_flash_attn_paged(
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
-        # Short paged varlen self-attn (linear) -> lightweight generic 4-wave
-        # BLOCK_M=128 kernel. Vectorized layout / cross-length / dense-paged /
-        # split-K / long sequences stay on the dualwave paged kernel.
+        # Short paged varlen self-attn (linear or vectorized) -> lightweight
+        # generic 4-wave BLOCK_M=128 kernel. cross-length / dense-paged / split-K
+        # / long sequences stay on the dualwave paged kernel.
         _arch = _gpu_arch(q.device)
         _paged_light_ok = (
             varlen
             and (num_kv_splits <= 1)
-            and (kv_cache_layout == "linear")
+            and (kv_cache_layout in ("linear", "vectorized"))
             and (not cross)
             and D in (64, 128)
             and dtype_str in ("bf16", "f16")
@@ -407,6 +407,7 @@ def _flydsl_flash_attn_paged(
                 dtype_str=dtype_str,
                 cross_seqlen=cross,
                 varlen=varlen,
+                kv_cache_layout=kv_cache_layout,
                 waves_per_eu=waves_per_eu,
                 daz=daz,
                 lazy_rescale=dualwave_swp_lazy_rescale,
@@ -463,6 +464,7 @@ def _build_paged_light(
     dtype_str: str,
     cross_seqlen: bool,
     varlen: bool,
+    kv_cache_layout: str,
     waves_per_eu: int,
     daz: bool,
     lazy_rescale: bool,
@@ -471,9 +473,9 @@ def _build_paged_light(
     enable_stagger: bool,
 ):
     """Build (and cache) a lightweight paged launcher: the generic 4-wave
-    BLOCK_M=128 kernel with linear paged KV (page_id via block_table) + packed
-    cu_seqlens. For short paged varlen self-attn on gfx942/gfx950. Non-DMA
-    (path_tag=N32); vectorized layout / cross-length route to dualwave."""
+    BLOCK_M=128 kernel with paged KV (linear or aiter-vectorized, page_id via
+    block_table) + packed cu_seqlens. For short paged varlen self-attn on
+    gfx942/gfx950. Non-DMA (path_tag=N32); cross-length routes to dualwave."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
 
     return build_flash_attn_func_module(
@@ -485,7 +487,7 @@ def _build_paged_light(
         cross_seqlen=cross_seqlen,
         varlen=varlen,
         paged=True,
-        kv_cache_layout="linear",
+        kv_cache_layout=kv_cache_layout,
         block_m=128,
         path_tag="N32",
         waves_per_eu=waves_per_eu,

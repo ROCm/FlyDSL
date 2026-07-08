@@ -442,11 +442,18 @@ def build_flash_attn_func_module_primary(
     # Linear cache layout [NumBlocks, PAGE_SIZE, Hkv, D] only (vectorized routes
     # to dualwave). Q/O stay packed varlen ([total_q, H, D] via cu_seqlens).
     PAGED = bool(paged)
-    if PAGED and kv_cache_layout != "linear":
+    if PAGED and kv_cache_layout not in ("linear", "vectorized"):
         raise NotImplementedError(
-            f"generic paged kernel supports linear kv_cache_layout only, got {kv_cache_layout!r}"
+            f"generic paged kernel supports linear/vectorized kv_cache_layout, got {kv_cache_layout!r}"
         )
+    # aiter vectorized 5D cache: K [NumBlocks,Hkv,D/kVS,PageSize,kVS],
+    # V [NumBlocks,Hkv,PageSize/kVS,D,kVS]; kVS = 16B/elem = 8 for bf16/f16.
+    KV_VECTORIZED = PAGED and (kv_cache_layout == "vectorized")
+    KV_VEC_SIZE = 8
     PAGE_SIZE = BLOCK_N  # one KV tile maps to one physical page
+    # vectorized K/V share page/head element strides: page = Hkv*D*PS, head = D*PS.
+    PAGE_STRIDE_VEC = NUM_HEADS_KV * HEAD_DIM * PAGE_SIZE
+    HEAD_STRIDE_VEC = HEAD_DIM * PAGE_SIZE
     if PAGED and ENABLE_DMA:
         raise NotImplementedError("generic paged kernel requires the non-DMA path (build with path_tag='N32')")
     STRIDE_TOKEN_Q = NUM_HEADS_Q * HEAD_DIM
@@ -659,6 +666,41 @@ def build_flash_attn_func_module_primary(
                 _gep = buffer_ops.get_element_ptr(_bt_ptr, fx.Int64(_bt_off), elem_type=fx.Int32.ir_type)
                 return fx.Index(fx.Int32(_pointer_load(fx.Int32.ir_type, _gep)))
 
+            if const_expr(KV_VECTORIZED):
+
+                def _vk_load(page_id, kv_row, col):
+                    # K[kv_row, col:col+VEC_WIDTH] from vectorized [.,Hkv,D/8,PS,8]:
+                    # two contiguous vec8 blocks (dg=col//8 and dg+1), each
+                    # cache[.,dg,kv_row,0:8] == K[kv_row, dg*8:dg*8+8].
+                    _b = (
+                        page_id * fx.Index(PAGE_STRIDE_VEC)
+                        + kv_head_idx * fx.Index(HEAD_STRIDE_VEC)
+                        + kv_row * fx.Index(KV_VEC_SIZE)
+                    )
+                    _dg = col // fx.Index(KV_VEC_SIZE)
+                    _lo = _load_global_half_vec(k_ptr, _b + _dg * fx.Index(PAGE_SIZE * KV_VEC_SIZE), KV_VEC_SIZE)
+                    _hi = _load_global_half_vec(
+                        k_ptr, _b + (_dg + fx.Index(1)) * fx.Index(PAGE_SIZE * KV_VEC_SIZE), KV_VEC_SIZE
+                    )
+                    return Vec(_lo).shuffle(Vec(_hi), list(range(VEC_WIDTH))).ir_value()
+
+                def _vv_load(page_id, kv_row, col):
+                    # V[kv_row, col:col+VEC_WIDTH] from vectorized [.,Hkv,PS/8,D,8]:
+                    # stride-8 gather, idx = kg*(D*8) + d*8 + (kv_row%8).
+                    _kg = kv_row // fx.Index(KV_VEC_SIZE)
+                    _kr = kv_row % fx.Index(KV_VEC_SIZE)
+                    _b = (
+                        page_id * fx.Index(PAGE_STRIDE_VEC)
+                        + kv_head_idx * fx.Index(HEAD_STRIDE_VEC)
+                        + _kg * fx.Index(HEAD_DIM * KV_VEC_SIZE)
+                        + _kr
+                    )
+                    _elems = []
+                    for _i in range_constexpr(VEC_WIDTH):
+                        _v1 = _load_global_half_vec(v_ptr, _b + (col + fx.Index(_i)) * fx.Index(KV_VEC_SIZE), 1)
+                        _elems.append(Vec(_v1)[0])
+                    return Vec.from_elements(_elems, elem_dtype).ir_value()
+
         # ---- Cooperative load decomposition ----
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
         load_lane_in_row = tid % THREADS_PER_ROW_LOAD
@@ -760,11 +802,13 @@ def build_flash_attn_func_module_primary(
                         vec = load_global_f16xN(k_ptr, g_idx)
                         Vec(vec).store(lds_kv, [lds_idx])
                 else:
-                    g_idx = global_idx_kv(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
                     swz_col = _k_swizzle(lds_row, load_col_base)
                     lds_idx = k_base + lds_row * K_STRIDE + swz_col
-                    vec = load_global_f16xN(k_ptr, g_idx)
+                    if const_expr(KV_VECTORIZED):
+                        vec = _vk_load(_pid_k, lds_row, load_col_base)
+                    else:
+                        vec = load_global_f16xN(k_ptr, global_idx_kv(row_idx, load_col_base))
                     Vec(vec).store(lds_kv, [lds_idx])
 
         # ---- Cooperative V load ----
@@ -800,9 +844,11 @@ def build_flash_attn_func_module_primary(
                         vec = load_global_f16xN(v_ptr, g_idx)
                         _v_store_to_lds(v_base, lds_row, vec)
                 else:
-                    g_idx = global_idx_kv(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
-                    vec = load_global_f16xN(v_ptr, g_idx)
+                    if const_expr(KV_VECTORIZED):
+                        vec = _vv_load(_pid_v, lds_row, load_col_base)
+                    else:
+                        vec = load_global_f16xN(v_ptr, global_idx_kv(row_idx, load_col_base))
                     _v_store_to_lds(v_base, lds_row, vec)
 
         def coop_load_v_global(tile_start):
@@ -816,8 +862,10 @@ def build_flash_attn_func_module_primary(
                     row_idx = _pid_vg * fx.Index(PAGE_SIZE) + load_row_in_batch + row_offset
                 else:
                     row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
-                g_idx = global_idx_kv(row_idx, load_col_base)
-                vecs.append(load_global_f16xN(v_ptr, g_idx))
+                if const_expr(KV_VECTORIZED):
+                    vecs.append(_vv_load(_pid_vg, load_row_in_batch + row_offset, load_col_base))
+                else:
+                    vecs.append(load_global_f16xN(v_ptr, global_idx_kv(row_idx, load_col_base)))
             return vecs
 
         def coop_store_v_lds(vecs, buf_id=0):
