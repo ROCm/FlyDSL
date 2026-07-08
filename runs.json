@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-08T20:17:54Z",
+ "updated": "2026-07-08T20:33:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -199,13 +199,41 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28937064576",
    "created_at": "2026-07-08T10:51:42Z",
-   "updated_at": "2026-07-08T10:51:43Z",
+   "updated_at": "2026-07-08T20:32:09Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-08T20:32:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28937064576/job/85975390865"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-08T20:32:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28937064576/job/85975390905"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-08T20:32:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28937064576/job/85975390992"
+    }
+   ]
   },
   {
    "run_id": 28936205281,
@@ -360,19 +388,19 @@
    "branch": "gemm_tune_v2",
    "event": "pull_request",
    "title": "Gemm tune v2",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28921916999",
    "created_at": "2026-07-08T06:17:17Z",
-   "updated_at": "2026-07-08T13:39:50Z",
+   "updated_at": "2026-07-08T20:31:26Z",
    "actor": "Copilot",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-08T13:39:50Z",
+     "started_at": "2026-07-08T20:31:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28921916999/job/85883753521"
     },
@@ -418,11 +446,11 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28920497901",
    "created_at": "2026-07-08T05:44:44Z",
-   "updated_at": "2026-07-08T05:45:56Z",
+   "updated_at": "2026-07-08T20:31:21Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -437,10 +465,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-08T20:16:14Z",
-     "completed_at": null,
+     "completed_at": "2026-07-08T20:31:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28920497901/job/85796630207"
     },
     {
