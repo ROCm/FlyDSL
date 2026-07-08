@@ -35,9 +35,7 @@ __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
 _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn: "fp8"}
 
-# Short varlen self-attn (max_seqlen_q <= this) routes to the lightweight generic
-# 4-wave BLOCK_M=128 kernel instead of the heavy 8-wave dualwave kernel on gfx950,
-# where the dualwave prologue/epilogue + 8-wave sync dominate for tiny workloads.
+# Short self-attn uses the 4-wave generic path; long/cross stays on dualwave.
 _VARLEN_LIGHT_MAX_SEQ = 256
 
 
@@ -142,10 +140,7 @@ def _build_varlen_light(
     debug_lazy_counts: bool,
     enable_stagger: bool,
 ):
-    """Build (and cache) a lightweight varlen launcher: the generic 4-wave
-    BLOCK_M=128 kernel with packed cu_seqlens (gfx942/gfx950). Used for short
-    varlen self-attn where the heavy 8-wave dualwave kernel underutilizes the
-    device. cross-length varlen is not supported here (falls back to dualwave)."""
+    """Build a lightweight packed-varlen launcher for short self-attn."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
 
     return build_flash_attn_func_module(
@@ -385,9 +380,7 @@ def _flydsl_flash_attn_paged(
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
-        # Short paged varlen self-attn (linear or vectorized) -> lightweight
-        # generic 4-wave BLOCK_M=128 kernel. cross-length / dense-paged / split-K
-        # / long sequences stay on the dualwave paged kernel.
+        # Short paged self-attn uses generic light; unsupported cases stay on dualwave.
         _arch = _gpu_arch(q.device)
         _paged_light_ok = (
             varlen
@@ -472,10 +465,7 @@ def _build_paged_light(
     debug_lazy_counts: bool,
     enable_stagger: bool,
 ):
-    """Build (and cache) a lightweight paged launcher: the generic 4-wave
-    BLOCK_M=128 kernel with paged KV (linear or aiter-vectorized, page_id via
-    block_table) + packed cu_seqlens. For short paged varlen self-attn on
-    gfx942/gfx950. Non-DMA (path_tag=N32); cross-length routes to dualwave."""
+    """Build a lightweight paged-varlen launcher for short self-attn."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
 
     return build_flash_attn_func_module(
@@ -717,10 +707,7 @@ def flydsl_flash_attn_func(
                 enable_stagger=dualwave_swp_enable_stagger,
             )
         elif varlen:
-            # Short varlen self-attn -> lightweight generic 4-wave BLOCK_M=128 kernel.
-            # The heavy 8-wave dualwave kernel wins for long sequences (amortized
-            # prologue). gfx942 has no dualwave, so self-attn varlen always uses the
-            # light path there. cross-length / debug-count varlen stay on dualwave.
+            # Short self-attn uses generic light; long/cross/debug stays on dualwave.
             _arch = _gpu_arch(q.device)
             _prefer_light = (
                 (not cross)

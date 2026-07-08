@@ -26,7 +26,7 @@ import os
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
@@ -74,10 +74,8 @@ def _waitcnt_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
-# Dense seq_len routing thresholds (gfx950). The DUALWAVE_SWP pipeline pays a
-# fixed prologue/epilogue cost amortized over total work (batch * seq_len), not
-# seq_len alone -- so its crossover vs the generic kernel happens at a lower
-# seq_len for large batches. Mirrors the existing batch*seq M128/M256 selector.
+# Dense routing thresholds reflect dualwave's fixed cost amortized over batch * seq_len.
+# Large batches reach the dualwave crossover at a shorter per-sequence length.
 _DUALWAVE_MIN_DENSE_SEQ = 256  # B=1: dualwave wins from S=256 up
 _DUALWAVE_LARGE_BATCH = 8  # at B>=8 the crossover drops to...
 _DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH = 192  # ...S=192
@@ -141,11 +139,8 @@ def build_flash_attn_func_module_primary(
         num_kv_heads = num_heads
     assert num_heads % num_kv_heads == 0, f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
 
-    # fp8 (e4m3fn) is gfx950 dual-wave SWP only, D=128 only, dense only. Route it
-    # through the SWP builder directly (the generic fallback below is f16/bf16 only)
-    # and reject unsupported fp8 configs with a clear error rather than silently
-    # falling through to the generic assert. The returned launcher takes the same
-    # public call signature plus q/k/v_descale kwargs (forwarded by the SWP wrapper).
+    # fp8 is gfx950 dualwave-only; reject unsupported configs before generic asserts.
+    # The returned launcher shares the public call signature plus descale kwargs.
     if dtype_str == "fp8":
         if not gpu_arch.startswith("gfx950"):
             raise ValueError(f"fp8 flash_attn requires gfx950 (got '{gpu_arch or 'unknown'}')")
@@ -173,10 +168,8 @@ def build_flash_attn_func_module_primary(
     K_SUB_N = 32
     WARP_SIZE = 64
 
-    # Both variants compute any seq_len >= 1 (the only correctness floor, enforced
-    # by `_guard_seqlen`); the dense seq_len routing is a perf policy. DUALWAVE_SWP
-    # (gfx950 D=64/128 bf16/f16) is built for the outermost call only; dense routing
-    # uses `_routes_dense_to_dualwave`, and packed/varlen always uses DUALWAVE_SWP.
+    # `seq_len >= 1` is the only correctness floor; dense dualwave routing is a perf policy.
+    # Packed/varlen still uses the prebuilt dualwave launcher unless a light path is selected.
     _dualwave_swp_launch = None
     if block_m is None and head_dim in (64, 128) and dtype_str in ("bf16", "f16") and gpu_arch.startswith("gfx950"):
         try:
@@ -268,10 +261,8 @@ def build_flash_attn_func_module_primary(
         else:
 
             def _dualwave_swp_dispatch(*args, **kwargs):
-                # Optional launch args must be keyword: the generic and DUALWAVE_SWP
-                # launchers differ past the 6 required positionals (generic's 7th is
-                # `stream`; DUALWAVE_SWP's is `stride_kv_n`), so a 7th positional
-                # would silently mean different things once routing picks a path.
+                # Optional launch args must be keywords because generic and dualwave
+                # disagree after the six required positionals.
                 if len(args) > 6:
                     raise TypeError(
                         "flash_attn_func: pass only Q, K, V, O, batch_size, seq_len "
@@ -290,10 +281,7 @@ def build_flash_attn_func_module_primary(
                         cross_len = True
                     if cross_len:
                         return _dualwave_swp_launch(*args, **kwargs)
-                # A dense call carrying a DUALWAVE_SWP-only kwarg cannot use the
-                # generic launcher (different signature), so it stays on DUALWAVE_SWP.
-                # Check key presence, not value (an explicit `debug_counts=None` still
-                # counts). Otherwise route by the batch-aware dense threshold.
+                # DUALWAVE-only kwargs force dualwave; even explicit `None` changes the signature.
                 if any(k in kwargs for k in _DUALWAVE_ONLY_KWARGS):
                     return _dualwave_swp_launch(*args, **kwargs)
                 if _routes_dense_to_dualwave(_extract_batch(args, kwargs), _extract_seq_len(args, kwargs)):
@@ -434,20 +422,15 @@ def build_flash_attn_func_module_primary(
     GQA_GROUP_SIZE = NUM_HEADS_Q // NUM_HEADS_KV
     HEAD_DIM = head_dim
     CAUSAL = causal
-    # varlen=True: packed QKV via cu_seqlens (launch-arg mode, kernel takes
-    # CuSeqQ/CuSeqKv). varlen=False keeps the dense signature byte-identical.
+    # Varlen uses packed QKV via launch-time cu_seqlens; dense keeps the old signature.
     VARLEN = bool(varlen)
-    # paged=True: K/V are a physical page cache; kv tile j of batch b reads page
-    # BlockTable[b*block_table_stride + j]. One page == one BLOCK_N kv tile.
-    # Linear cache layout [NumBlocks, PAGE_SIZE, Hkv, D] only (vectorized routes
-    # to dualwave). Q/O stay packed varlen ([total_q, H, D] via cu_seqlens).
+    # Paged K/V read physical page BlockTable[b*stride + tile]; Q/O stay packed.
     PAGED = bool(paged)
     if PAGED and kv_cache_layout not in ("linear", "vectorized"):
         raise NotImplementedError(
             f"generic paged kernel supports linear/vectorized kv_cache_layout, got {kv_cache_layout!r}"
         )
-    # aiter vectorized 5D cache: K [NumBlocks,Hkv,D/kVS,PageSize,kVS],
-    # V [NumBlocks,Hkv,PageSize/kVS,D,kVS]; kVS = 16B/elem = 8 for bf16/f16.
+    # Aiter vectorized 5D cache; kVS = 16B/elem = 8 for bf16/f16.
     KV_VECTORIZED = PAGED and (kv_cache_layout == "vectorized")
     KV_VEC_SIZE = 8
     PAGE_SIZE = BLOCK_N  # one KV tile maps to one physical page
@@ -463,11 +446,7 @@ def build_flash_attn_func_module_primary(
     # K uses XOR swizzle (col ^ ((row & mask) << 4)) at 16-element granularity
     # instead of padding. This enables ds_read_b128 (stride is 256B-aligned).
     K_STRIDE = HEAD_DIM
-    # Row mask for the K XOR swizzle = (#16-elem col blocks per row) - 1. A
-    # hardcoded 0x7 assumes HEAD_DIM=128 (8 blocks); for HEAD_DIM=64 (4 blocks)
-    # the mask must be 0x3, else (row&7)<<4 reaches 64..112 and the swizzled
-    # write overflows the 64-wide K row into the neighbouring KV row (data
-    # collision -> wrong scores for varying-along-d K). D=128 keeps 0x7.
+    # Mask by the number of 16-element D blocks; D=64 must avoid swizzling past col 63.
     K_SWZ_ROWMASK = HEAD_DIM // 16 - 1
     if USE_HW_TR:
         V_STRIDE = HEAD_DIM if ENABLE_DMA else HEAD_DIM + 4
@@ -475,24 +454,18 @@ def build_flash_attn_func_module_primary(
         VT_STRIDE = BLOCK_N + 2
         V_STRIDE = VT_STRIDE
 
-    # KV_VECTORIZED reuses dualwave's NO-major V-LDS so each P*V pack is one
-    # aligned v8 read (the cache is already 8-consecutive-n; sigma(K) makes P
-    # 8-consecutive-n, so V needs no sigma). Layout (n = physical kv):
-    #   elem(n,d) = (d//8)*VEC_V_LINE + (n//8)*VEC_V_D128 + (d%8)*8 + n%8
-    # One (d//8) line holds 8 d * 64 n = 512 elems + 32 dense pad = 544.
+    # Vectorized V uses no-major LDS so each P*V pack is one aligned v8 read.
+    # elem(n,d) = (d//8)*544 + (n//8)*64 + (d%8)*8 + n%8.
     VEC_V_LINE = 544
     VEC_V_D128 = 64
     VEC_V_NGROUPS = BLOCK_N // 8  # n-groups of 8 (8 for BLOCK_N=64)
     if KV_VECTORIZED:
-        # One contiguous v8 (8 consecutive n for one d) per (n_group, d); split
-        # the (BLOCK_N/8 * HEAD_DIM) v8 copies across all threads.
+        # Split one v8 copy per (n_group, d) across the workgroup.
         TOTAL_V8 = VEC_V_NGROUPS * HEAD_DIM
         assert TOTAL_V8 % BLOCK_SIZE == 0
         NV8_PER_THREAD = TOTAL_V8 // BLOCK_SIZE
         assert not ENABLE_PREFETCH_3BUF, "KV_VECTORIZED no-major V unsupported with 3-buffer prefetch"
-        # M3: fill the no-major V-LDS via buffer_load_lds DMA (direct GM->LDS,
-        # no VGPR round-trip). Each lane DMAs one v8; the no-major line is
-        # contiguous per (d//8) row so the hardware lane*16B stride reproduces it.
+        # Direct GM->LDS DMA fills no-major V rows without VGPR round-trips.
         V_NOMAJOR_DMA = os.getenv("FLYDSL_FLASH_ATTN_FUNC_VEC_V_DMA", "1") == "1"
 
     # Vectorized cooperative load constants.
@@ -548,6 +521,8 @@ def build_flash_attn_func_module_primary(
         compute_type = fx.Float32.ir_type
         k_ptr = _extract_aligned_pointer(K)
         v_ptr = _extract_aligned_pointer(V)
+        _load_atom_32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+        _v1i32_type = Vec.make_type(1, fx.Int32)
 
         # All FP operations use aggressive fast-math (no NaN/Inf checks, reassociation).
         # The unsafe_fp_math/fast_fp_math builder params control LLVM-level attributes only.
@@ -606,9 +581,7 @@ def build_flash_attn_func_module_primary(
         lane_div_32 = lane // 32  # 0/1
 
         # ---- ds_read_b64_tr_b16 lane decomposition ----
-        # Hardware does 4×4 transpose within blocks of 16 lanes.
-        # tr_k_group selects which of 4 K-rows within the block,
-        # tr_col_sub selects which 4-column sub-group within 16 columns.
+        # Hardware transposes 4x4 groups within 16 lanes; these indices select row/col groups.
         tr_k_group = (lane % 16) // 4  # 0..3: K-row offset within 4-row group
         tr_col_sub = lane % 4  # 0..3: 4-column sub-group
         tr_col_half = (lane % 32) // 16  # 0 or 1: first/second 16-column half
@@ -646,47 +619,42 @@ def build_flash_attn_func_module_primary(
         # turn this into a dynamic dispatch and lose `kv_head_idx`.
         kv_head_idx = q_head_idx if GQA_GROUP_SIZE == 1 else q_head_idx // GQA_GROUP_SIZE
 
-        # Per-batch token base + seqlen. Dense: batch_idx*seq_len (byte-identical
-        # to the previous inline form after CSE). Varlen (packed QKV): read the
-        # cumulative cu_seqlens[batch]/[batch+1]. num_q_tiles above keeps using
-        # seq_len_v (== max_seqlen_q) so the flat-grid decode matches the launch.
+        # Dense uses batch_idx*seq_len; varlen reads cu_seqlens[batch:batch+2].
+        # num_q_tiles still uses max_seqlen_q so flat-grid decode matches launch.
         if const_expr(VARLEN):
-            _cuq_ptr = _extract_aligned_pointer(CuSeqQ)
-            _cuk_ptr = _extract_aligned_pointer(CuSeqKv)
+            _cuq_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqQ), fx.make_layout(1, 1))
+            _cuk_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqKv), fx.make_layout(1, 1))
 
-            def _cu_load(ptr, idx):
-                gep = buffer_ops.get_element_ptr(ptr, fx.Int64(idx), elem_type=fx.Int32.ir_type)
-                return fx.Index(fx.Int32(_pointer_load(fx.Int32.ir_type, gep)))
+            def _cu_load(div, idx):
+                v = fly.copy_atom_call_ssa([_v1i32_type], _load_atom_32, fx.slice(div, (None, fx.Int32(idx))))
+                return fx.Index(Vec(v, (1,), fx.Int32)[0])
 
-            q_tok_base = _cu_load(_cuq_ptr, batch_idx)
-            kv_tok_base = _cu_load(_cuk_ptr, batch_idx)
-            seqlen_q_b = _cu_load(_cuq_ptr, batch_idx + fx.Index(1)) - q_tok_base
-            seqlen_kv_b = _cu_load(_cuk_ptr, batch_idx + fx.Index(1)) - kv_tok_base
+            q_tok_base = _cu_load(_cuq_div, batch_idx)
+            kv_tok_base = _cu_load(_cuk_div, batch_idx)
+            seqlen_q_b = _cu_load(_cuq_div, batch_idx + fx.Index(1)) - q_tok_base
+            seqlen_kv_b = _cu_load(_cuk_div, batch_idx + fx.Index(1)) - kv_tok_base
         else:
             q_tok_base = batch_idx * seq_len_v
             kv_tok_base = batch_idx * seq_len_v
             seqlen_q_b = seq_len_v
             seqlen_kv_b = seq_len_v
 
-        # Non-DMA KV loads use raw k_ptr/v_ptr. Dense/varlen fold the per-batch
-        # element offset so 0-based global_idx_kv reads this batch. Paged: K/V are a
-        # physical page cache indexed by page_id (BlockTable), so no batch fold --
-        # the page offset is added per tile via token_idx = page_id*PAGE_SIZE + row.
+        # Dense/varlen fold batch into raw K/V pointers; paged adds page_id per tile.
         if const_expr(not PAGED):
             _kv_ptr_batch_off = kv_tok_base * fx.Index(STRIDE_TOKEN_KV)
             k_ptr = buffer_ops.get_element_ptr(k_ptr, _kv_ptr_batch_off, elem_type=elem_type)
             v_ptr = buffer_ops.get_element_ptr(v_ptr, _kv_ptr_batch_off, elem_type=elem_type)
 
         if const_expr(PAGED):
-            _bt_ptr = _extract_aligned_pointer(BlockTable)
+            _bt_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(BlockTable), fx.make_layout(1, 1))
             _bt_stride_v = fx.Index(block_table_stride)
 
             def _paged_page_id(tile_start):
                 # page_id = BlockTable[batch_idx*block_table_stride + tile_start//PAGE_SIZE]
                 _tile_idx = tile_start // fx.Index(PAGE_SIZE)
                 _bt_off = batch_idx * _bt_stride_v + _tile_idx
-                _gep = buffer_ops.get_element_ptr(_bt_ptr, fx.Int64(_bt_off), elem_type=fx.Int32.ir_type)
-                return fx.Index(fx.Int32(_pointer_load(fx.Int32.ir_type, _gep)))
+                v = fly.copy_atom_call_ssa([_v1i32_type], _load_atom_32, fx.slice(_bt_div, (None, fx.Int32(_bt_off))))
+                return fx.Index(Vec(v, (1,), fx.Int32)[0])
 
             if const_expr(KV_VECTORIZED):
 
@@ -729,9 +697,7 @@ def build_flash_attn_func_module_primary(
         load_col_base = load_lane_in_row * VEC_WIDTH
 
         # ---- Helper: global flat indices ----
-        # Q/O are laid out with NUM_HEADS_Q heads; K/V with NUM_HEADS_KV.
-        # batch_idx*seq_len is folded into each tensor's descriptor base (see q/k/v/o_rsrc),
-        # so token indices are 0-based within the batch.
+        # Token indices are 0-based because the descriptor or raw pointer folds batch base.
         def global_idx_q(token_idx, col):
             return token_idx * STRIDE_TOKEN_Q + q_head_idx * HEAD_DIM + col
 
@@ -739,10 +705,7 @@ def build_flash_attn_func_module_primary(
             return token_idx * STRIDE_TOKEN_KV + kv_head_idx * HEAD_DIM + col
 
         def _kv_row_clamp(row_idx):
-            # Non-DMA KV loads use raw pointers (no hardware bounds), so clamp the
-            # global KV row to the last valid token; partial-tile lanes then read a
-            # duplicated in-bounds row whose contribution the score-side causal /
-            # padding mask discards. (The DMA path is bounded by num_records.)
+            # Raw non-DMA loads need an in-bounds row; score masks discard duplicated tails.
             last = seqlen_kv_b - fx.Index(1)
             return fx.Index(ArithValue(row_idx < seqlen_kv_b).select(row_idx, last))
 
@@ -803,11 +766,14 @@ def build_flash_attn_func_module_primary(
             mask = (row_idx & fx.Index(K_SWZ_ROWMASK)) << fx.Index(4)
             return col_idx ^ mask
 
-        # ---- KV_VECTORIZED sigma: swap bit2<->bit3 of the page-local kv row ----
-        # LDS row n loads the physical kv sigma(n); the plain lane%32 K read then
-        # makes QK^T emit P in 8-consecutive-kv order (matches dualwave no-major V).
+        # Sigma makes QK^T emit P in 8-consecutive-kv order for no-major V.
         def _sigma_kv(n):
-            return (n & fx.Index(3)) | ((n & fx.Index(8)) >> fx.Index(1)) | ((n & fx.Index(4)) << fx.Index(1)) | (n & fx.Index(-16))
+            return (
+                (n & fx.Index(3))
+                | ((n & fx.Index(8)) >> fx.Index(1))
+                | ((n & fx.Index(4)) << fx.Index(1))
+                | (n & fx.Index(-16))
+            )
 
         # ---- Cooperative K load (row-major, XOR-swizzled) ----
         def coop_load_k(tile_start, buf_id=0):
@@ -834,7 +800,6 @@ def build_flash_attn_func_module_primary(
                     swz_col = _k_swizzle(lds_row, load_col_base)
                     lds_idx = k_base + lds_row * K_STRIDE + swz_col
                     if const_expr(KV_VECTORIZED):
-                        # LDS row lds_row <- physical kv sigma(lds_row) (8-consecutive P).
                         vec = _vk_load(_pid_k, _sigma_kv(lds_row), load_col_base)
                     else:
                         vec = load_global_f16xN(k_ptr, global_idx_kv(row_idx, load_col_base))
@@ -881,13 +846,7 @@ def build_flash_attn_func_module_primary(
                     _v_store_to_lds(v_base, lds_row, vec)
 
         def coop_load_v_global(tile_start):
-            """Issue global loads for V, return vectors (non-blocking).
-
-            KV_VECTORIZED: each returned v8 is 8 consecutive n for one d (a
-            contiguous 128-bit read of the 5D cache's inner axis). Physical n --
-            no sigma; the no-major LDS store puts these where the v8 P*V read
-            expects them.
-            """
+            """Issue global V loads; vectorized mode returns no-major v8 rows."""
             if const_expr(KV_VECTORIZED):
                 _pid_vg = _paged_page_id(tile_start)
                 _base_v = _pid_vg * fx.Index(PAGE_STRIDE_VEC) + kv_head_idx * fx.Index(HEAD_STRIDE_VEC)
@@ -912,12 +871,7 @@ def build_flash_attn_func_module_primary(
             return vecs
 
         def coop_store_v_lds(vecs, buf_id=0):
-            """Write previously-loaded V vectors to LDS.
-
-            KV_VECTORIZED: store each v8 (8 consecutive n for one d) into the
-            no-major layout elem(n,d)=(d//8)*VEC_V_LINE+(n//8)*VEC_V_D128
-            +(d%8)*8+n%8, so the GEMM2 P*V read is one aligned v8 per pack.
-            """
+            """Write V vectors to LDS; vectorized mode uses no-major rows."""
             v_base = v_buf_base(buf_id)
             if const_expr(KV_VECTORIZED):
                 for j in range_constexpr(NV8_PER_THREAD):
@@ -943,7 +897,7 @@ def build_flash_attn_func_module_primary(
                     lds_row = load_row_in_batch + row_offset
                     _v_store_to_lds(v_base, lds_row, vecs[batch])
 
-        # ---- KV_VECTORIZED V: no-major GM->LDS DMA (buffer_load_dwordx4 ... lds) ----
+        # ---- KV_VECTORIZED V: no-major GM->LDS DMA ----
         if const_expr(KV_VECTORIZED and V_NOMAJOR_DMA):
             _v_dma_base_i64 = fx.Int64(buffer_ops.extract_base_index(V, address_space=1))
             _v_dma_page_bytes = fx.Int64(PAGE_STRIDE_VEC * 2)
@@ -955,9 +909,7 @@ def build_flash_attn_func_module_primary(
             _v_dma_dloc = lane % fx.Index(8)
 
             def coop_dma_v_nomajor(tile_start, buf_id=0):
-                # Each lane DMAs one v8 (8 consecutive n for a fixed d) straight
-                # into the no-major line; hardware lane*16B stride + per-(d//8)-row
-                # m0 reproduces elem(n,d)=(d//8)*544+no*64+(d%8)*8+n%8.
+                # Each lane DMAs one contiguous v8 into the no-major V line.
                 _pid = _paged_page_id(tile_start)
                 _paddr = _raw(_v_dma_base_i64 + fx.Int64(_pid) * _v_dma_page_bytes)
                 _rsrc = buffer_ops.create_buffer_resource_from_addr(
@@ -983,11 +935,8 @@ def build_flash_attn_func_module_primary(
                         _rsrc, _lds_ptr, _v_dma_sz, _voff, _v_dma_z, _v_dma_z, _v_dma_aux
                     )
 
-        # Per-batch descriptors: fold batch_idx*seq_len into each tensor's 48-bit base and
-        # bound num_records to ONE batch. Global indices are 0-based within the batch (see
-        # global_idx_q/kv + DMA global_row), so the 32-bit voffset and the int32 C-ABI
-        # shape field never see the whole-tensor numel (which can reach 2^31). OOB rows
-        # within the batch still read 0 / drop on store (arbitrary-seqlen safe).
+        # Per-batch descriptors keep global indices 0-based and bounded to one batch.
+        # This keeps 32-bit offsets small while preserving arbitrary-seqlen OOB behavior.
         _kv_nrec_bytes = _raw(seqlen_kv_b * fx.Index(STRIDE_TOKEN_KV * 2))
         _q_nrec_bytes = _raw(seqlen_q_b * fx.Index(STRIDE_TOKEN_Q * 2))
         _q_batch_byte_off = _raw(q_tok_base * fx.Index(STRIDE_TOKEN_Q * 2))
@@ -1414,10 +1363,7 @@ def build_flash_attn_func_module_primary(
                         s_raw_hi_15,
                     ]
                 else:
-                    # Non-causal KV padding mask: keys with absolute column >= seq_len
-                    # -> -inf, so OOB KV (0 or duplicated row) doesn't leak into softmax.
-                    # Col layout (mirrors causal): lo = kv_start + lane_div_32*4 +
-                    # ((r//4)*8 + r%4); hi = +K_SUB_N.
+                    # Mask physical KV columns outside seqlen so tail rows do not enter softmax.
                     kv_start_i32 = fx.Int32(kv_start)
                     seq_len_i32 = fx.Int32(seqlen_kv_b)
                     # KV_VECTORIZED: sigma(kv) in K load -> physical kv = kv_start +
@@ -1669,9 +1615,7 @@ def build_flash_attn_func_module_primary(
             loop_results = yield _yield_args
 
         # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
-        # gfx950: pack 4 f32 -> 2 bf16 dwords (cvt_pk_bf16_f32), permlane32_swap fuses
-        # each lane's 4 cols with its half-wave partner's -> 8 cols/store. O is
-        # num_records-bounded (o_rsrc) -> partial-q-tile OOB rows drop.
+        # gfx950 fuses half-wave partners into 8 cols/store; o_rsrc drops partial-tile OOB rows.
         l_final = loop_results[1]
         o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
 
@@ -1791,10 +1735,8 @@ def build_flash_attn_func_module_primary(
             stream=stream,
         )
 
-    # Best MI355X FMHA numbers so far were measured with ROCm/llvm-project
-    # `felix/tune_fmha` at c8cf6da4367c010c7cbbb7789a9c4349e7407619.
-    # Other LLVM revisions can compile/run this kernel, but usually leave a
-    # few percent of peak throughput on the table.
+    # Best MI355X FMHA numbers were measured with ROCm/llvm-project `felix/tune_fmha`;
+    # other LLVM revisions usually leave a few percent of peak throughput on the table.
     _fmha_compile_hints = {
         "fast_fp_math": fast_fp_math,
         "unsafe_fp_math": unsafe_fp_math,
