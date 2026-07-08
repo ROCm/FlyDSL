@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-08T02:48:12Z",
+ "updated": "2026-07-08T04:28:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28915548634,
+   "pr": 814,
+   "commit": "5437fcce669eed67631396b59a237a8a9315cae2",
+   "branch": "lhc/kernels-tier2",
+   "event": "pull_request",
+   "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915548634",
+   "created_at": "2026-07-08T03:34:56Z",
+   "updated_at": "2026-07-08T03:36:26Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-08T03:37:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915548634/job/85781881341"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-08T03:37:04Z",
+     "completed_at": "2026-07-08T04:19:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915548634/job/85781881347"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-08T03:36:26Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915548634/job/85781881353"
+    }
+   ]
+  },
+  {
+   "run_id": 28915538428,
+   "pr": 818,
+   "commit": "7a2241e11ce9020751dccbc1e6e2e10f144c1ee6",
+   "branch": "gemm_tune_v2",
+   "event": "pull_request",
+   "title": "Gemm tune v2",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915538428",
+   "created_at": "2026-07-08T03:34:38Z",
+   "updated_at": "2026-07-08T03:35:21Z",
+   "actor": "solinzby1",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-08T03:36:03Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915538428/job/85781769158"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-08T03:35:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915538428/job/85781769159"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-08T03:36:04Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28915538428/job/85781769176"
+    }
+   ]
+  },
   {
    "run_id": 28910624230,
    "pr": null,
@@ -480,7 +566,7 @@
   },
   {
    "run_id": 28854741895,
-   "pr": 814,
+   "pr": null,
    "commit": "968a3f0e6f59eb554e119619ffc03699366b6ae0",
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
@@ -2029,36 +2115,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28768114788/job/85296386240"
     }
    ]
-  },
-  {
-   "run_id": 28765771123,
-   "pr": 798,
-   "commit": "17d274090dbb2c68373091cc960c3b59d581ebcd",
-   "branch": "4wave_fp4_gemm_opt",
-   "event": "pull_request",
-   "title": "4wave fp4 gemm opt",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28765771123",
-   "created_at": "2026-07-06T03:26:19Z",
-   "updated_at": "2026-07-06T03:26:19Z",
-   "actor": "benenzhu",
-   "jobs": []
-  },
-  {
-   "run_id": 28765567378,
-   "pr": null,
-   "commit": "b296d89e90859ed3de873d47552e83f3ad779c26",
-   "branch": "4wave_fp4_gemm_opt",
-   "event": "pull_request",
-   "title": "4wave fp4 gemm opt",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28765567378",
-   "created_at": "2026-07-06T03:19:56Z",
-   "updated_at": "2026-07-06T03:19:56Z",
-   "actor": "benenzhu",
-   "jobs": []
   }
  ]
 }
