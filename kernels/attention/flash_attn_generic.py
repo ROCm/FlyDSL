@@ -475,6 +475,26 @@ def build_flash_attn_func_module_primary(
         VT_STRIDE = BLOCK_N + 2
         V_STRIDE = VT_STRIDE
 
+    # KV_VECTORIZED reuses dualwave's NO-major V-LDS so each P*V pack is one
+    # aligned v8 read (the cache is already 8-consecutive-n; sigma(K) makes P
+    # 8-consecutive-n, so V needs no sigma). Layout (n = physical kv):
+    #   elem(n,d) = (d//8)*VEC_V_LINE + (n//8)*VEC_V_D128 + (d%8)*8 + n%8
+    # One (d//8) line holds 8 d * 64 n = 512 elems + 32 dense pad = 544.
+    VEC_V_LINE = 544
+    VEC_V_D128 = 64
+    VEC_V_NGROUPS = BLOCK_N // 8  # n-groups of 8 (8 for BLOCK_N=64)
+    if KV_VECTORIZED:
+        # One contiguous v8 (8 consecutive n for one d) per (n_group, d); split
+        # the (BLOCK_N/8 * HEAD_DIM) v8 copies across all threads.
+        TOTAL_V8 = VEC_V_NGROUPS * HEAD_DIM
+        assert TOTAL_V8 % BLOCK_SIZE == 0
+        NV8_PER_THREAD = TOTAL_V8 // BLOCK_SIZE
+        assert not ENABLE_PREFETCH_3BUF, "KV_VECTORIZED no-major V unsupported with 3-buffer prefetch"
+        # M3: fill the no-major V-LDS via buffer_load_lds DMA (direct GM->LDS,
+        # no VGPR round-trip). Each lane DMAs one v8; the no-major line is
+        # contiguous per (d//8) row so the hardware lane*16B stride reproduces it.
+        V_NOMAJOR_DMA = os.getenv("FLYDSL_FLASH_ATTN_FUNC_VEC_V_DMA", "1") == "1"
+
     # Vectorized cooperative load constants.
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
     assert HEAD_DIM % VEC_WIDTH == 0
@@ -492,7 +512,9 @@ def build_flash_attn_func_module_primary(
 
     # K/V circular buffers; defaults to 1/1, optional 3/3 with CK-like LDS sequence.
     LDS_K_TILE_SIZE = BLOCK_N * K_STRIDE
-    if USE_HW_TR:
+    if KV_VECTORIZED:
+        LDS_V_TILE_SIZE = (HEAD_DIM // 8) * VEC_V_LINE
+    elif USE_HW_TR:
         LDS_V_TILE_SIZE = BLOCK_N * V_STRIDE
     else:
         LDS_V_TILE_SIZE = HEAD_DIM * VT_STRIDE
@@ -781,6 +803,12 @@ def build_flash_attn_func_module_primary(
             mask = (row_idx & fx.Index(K_SWZ_ROWMASK)) << fx.Index(4)
             return col_idx ^ mask
 
+        # ---- KV_VECTORIZED sigma: swap bit2<->bit3 of the page-local kv row ----
+        # LDS row n loads the physical kv sigma(n); the plain lane%32 K read then
+        # makes QK^T emit P in 8-consecutive-kv order (matches dualwave no-major V).
+        def _sigma_kv(n):
+            return (n & fx.Index(3)) | ((n & fx.Index(8)) >> fx.Index(1)) | ((n & fx.Index(4)) << fx.Index(1)) | (n & fx.Index(-16))
+
         # ---- Cooperative K load (row-major, XOR-swizzled) ----
         def coop_load_k(tile_start, buf_id=0):
             k_base = k_buf_base(buf_id)
@@ -806,7 +834,8 @@ def build_flash_attn_func_module_primary(
                     swz_col = _k_swizzle(lds_row, load_col_base)
                     lds_idx = k_base + lds_row * K_STRIDE + swz_col
                     if const_expr(KV_VECTORIZED):
-                        vec = _vk_load(_pid_k, lds_row, load_col_base)
+                        # LDS row lds_row <- physical kv sigma(lds_row) (8-consecutive P).
+                        vec = _vk_load(_pid_k, _sigma_kv(lds_row), load_col_base)
                     else:
                         vec = load_global_f16xN(k_ptr, global_idx_kv(row_idx, load_col_base))
                     Vec(vec).store(lds_kv, [lds_idx])
@@ -846,13 +875,30 @@ def build_flash_attn_func_module_primary(
                 else:
                     lds_row = load_row_in_batch + row_offset
                     if const_expr(KV_VECTORIZED):
-                        vec = _vv_load(_pid_v, lds_row, load_col_base)
+                        vec = _vv_load(_pid_v, _sigma_kv(lds_row), load_col_base)
                     else:
                         vec = load_global_f16xN(v_ptr, global_idx_kv(row_idx, load_col_base))
                     _v_store_to_lds(v_base, lds_row, vec)
 
         def coop_load_v_global(tile_start):
-            """Issue global loads for V, return vectors (non-blocking)."""
+            """Issue global loads for V, return vectors (non-blocking).
+
+            KV_VECTORIZED: each returned v8 is 8 consecutive n for one d (a
+            contiguous 128-bit read of the 5D cache's inner axis). Physical n --
+            no sigma; the no-major LDS store puts these where the v8 P*V read
+            expects them.
+            """
+            if const_expr(KV_VECTORIZED):
+                _pid_vg = _paged_page_id(tile_start)
+                _base_v = _pid_vg * fx.Index(PAGE_STRIDE_VEC) + kv_head_idx * fx.Index(HEAD_STRIDE_VEC)
+                vecs = []
+                for j in range_constexpr(NV8_PER_THREAD):
+                    _flat = tid + fx.Index(j * BLOCK_SIZE)
+                    _d = _flat // fx.Index(VEC_V_NGROUPS)
+                    _ng = _flat % fx.Index(VEC_V_NGROUPS)
+                    _src = _base_v + _ng * fx.Index(HEAD_DIM * KV_VEC_SIZE) + _d * fx.Index(KV_VEC_SIZE)
+                    vecs.append(_load_global_half_vec(v_ptr, _src, KV_VEC_SIZE))
+                return vecs
             vecs = []
             if const_expr(PAGED):
                 _pid_vg = _paged_page_id(tile_start)
@@ -862,15 +908,30 @@ def build_flash_attn_func_module_primary(
                     row_idx = _pid_vg * fx.Index(PAGE_SIZE) + load_row_in_batch + row_offset
                 else:
                     row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
-                if const_expr(KV_VECTORIZED):
-                    vecs.append(_vv_load(_pid_vg, load_row_in_batch + row_offset, load_col_base))
-                else:
-                    vecs.append(load_global_f16xN(v_ptr, global_idx_kv(row_idx, load_col_base)))
+                vecs.append(load_global_f16xN(v_ptr, global_idx_kv(row_idx, load_col_base)))
             return vecs
 
         def coop_store_v_lds(vecs, buf_id=0):
-            """Write previously-loaded V vectors to LDS."""
+            """Write previously-loaded V vectors to LDS.
+
+            KV_VECTORIZED: store each v8 (8 consecutive n for one d) into the
+            no-major layout elem(n,d)=(d//8)*VEC_V_LINE+(n//8)*VEC_V_D128
+            +(d%8)*8+n%8, so the GEMM2 P*V read is one aligned v8 per pack.
+            """
             v_base = v_buf_base(buf_id)
+            if const_expr(KV_VECTORIZED):
+                for j in range_constexpr(NV8_PER_THREAD):
+                    _flat = tid + fx.Index(j * BLOCK_SIZE)
+                    _d = _flat // fx.Index(VEC_V_NGROUPS)
+                    _ng = _flat % fx.Index(VEC_V_NGROUPS)
+                    _dst = (
+                        v_base
+                        + (_d // fx.Index(8)) * fx.Index(VEC_V_LINE)
+                        + _ng * fx.Index(VEC_V_D128)
+                        + (_d % fx.Index(8)) * fx.Index(8)
+                    )
+                    Vec(vecs[j]).store(lds_kv, [_dst])
+                return
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
                 if const_expr(KV_NEEDS_GUARD):
@@ -881,6 +942,46 @@ def build_flash_attn_func_module_primary(
                 else:
                     lds_row = load_row_in_batch + row_offset
                     _v_store_to_lds(v_base, lds_row, vecs[batch])
+
+        # ---- KV_VECTORIZED V: no-major GM->LDS DMA (buffer_load_dwordx4 ... lds) ----
+        if const_expr(KV_VECTORIZED and V_NOMAJOR_DMA):
+            _v_dma_base_i64 = fx.Int64(buffer_ops.extract_base_index(V, address_space=1))
+            _v_dma_page_bytes = fx.Int64(PAGE_STRIDE_VEC * 2)
+            _v_dma_lds_base = buffer_ops.extract_base_index(lds_kv, address_space=3)
+            _v_dma_sz = fx.Int32(16)
+            _v_dma_z = fx.Int32(0)
+            _v_dma_aux = fx.Int32(1)
+            _v_dma_no = lane // fx.Index(8)
+            _v_dma_dloc = lane % fx.Index(8)
+
+            def coop_dma_v_nomajor(tile_start, buf_id=0):
+                # Each lane DMAs one v8 (8 consecutive n for a fixed d) straight
+                # into the no-major line; hardware lane*16B stride + per-(d//8)-row
+                # m0 reproduces elem(n,d)=(d//8)*544+no*64+(d%8)*8+n%8.
+                _pid = _paged_page_id(tile_start)
+                _paddr = _raw(_v_dma_base_i64 + fx.Int64(_pid) * _v_dma_page_bytes)
+                _rsrc = buffer_ops.create_buffer_resource_from_addr(
+                    _paddr, num_records_bytes=_raw(_v_dma_page_bytes)
+                )
+                if const_expr(isinstance(buf_id, int)):
+                    _vb = _v_dma_lds_base + fx.Index((LDS_V_BASE + buf_id * LDS_V_TILE_SIZE) * 2)
+                else:
+                    _vb = _v_dma_lds_base + fx.Index(LDS_V_BASE * 2) + buf_id * fx.Index(LDS_V_TILE_SIZE * 2)
+                for d in range_constexpr(NV8_PER_THREAD):
+                    _row = wave_id * fx.Index(NV8_PER_THREAD) + fx.Index(d)
+                    _lds_b = _vb + _row * fx.Index(VEC_V_LINE * 2)
+                    _lds_lane0 = rocdl.readfirstlane(fx.Int64.ir_type, fx.Int64(_lds_b))
+                    _lds_ptr = buffer_ops.create_llvm_ptr(_lds_lane0, address_space=3)
+                    _dcol = _row * fx.Index(8) + _v_dma_dloc
+                    _voff_e = (
+                        kv_head_idx * fx.Index(HEAD_STRIDE_VEC)
+                        + _v_dma_no * fx.Index(HEAD_DIM * 8)
+                        + _dcol * fx.Index(8)
+                    )
+                    _voff = fx.Int32(_voff_e * fx.Index(2))
+                    rocdl.raw_ptr_buffer_load_lds(
+                        _rsrc, _lds_ptr, _v_dma_sz, _voff, _v_dma_z, _v_dma_z, _v_dma_aux
+                    )
 
         # Per-batch descriptors: fold batch_idx*seq_len into each tensor's 48-bit base and
         # bound num_records to ONE batch. Global indices are 0-based within the batch (see
@@ -1097,7 +1198,9 @@ def build_flash_attn_func_module_primary(
                 if const_expr(not _use_dma_dbuf):
                     k_base = k_buf_base(k_slot)
 
-                if const_expr(not USE_HW_TR or (not ENABLE_DMA and not ENABLE_PREFETCH_3BUF)):
+                if const_expr(KV_VECTORIZED and V_NOMAJOR_DMA):
+                    coop_dma_v_nomajor(kv_start, 0)
+                elif const_expr(not USE_HW_TR or (not ENABLE_DMA and not ENABLE_PREFETCH_3BUF)):
                     _v_vecs_prefetch = coop_load_v_global(kv_start)
 
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
@@ -1184,83 +1287,91 @@ def build_flash_attn_func_module_primary(
                     s_raw_hi_15 = s_raw_hi[15]
 
                     if tile_needs_mask:
-                        lane_off_i32 = lane_div_32_i32 * fx.Int32(4)
-                        kv_col_lo_0 = kv_start_i32 + lane_off_i32 + fx.Int32(0)
+                        # KV_VECTORIZED applies sigma(kv) in the K load, so the score at
+                        # logical n_pos holds physical kv = kv_start + sigma(n_pos):
+                        # lane_off bit2 -> bit3 (lane_div_32*8) and _off -> sigma(_off).
+                        if const_expr(KV_VECTORIZED):
+                            lane_off_i32 = lane_div_32_i32 * fx.Int32(8)
+                            _MOFF = (0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23)
+                        else:
+                            lane_off_i32 = lane_div_32_i32 * fx.Int32(4)
+                            _MOFF = (0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27)
+                        kv_col_lo_0 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[0])
                         s_raw_lo_0 = ArithValue(kv_col_lo_0 > q_row_i32).select(c_neg_inf, s_raw_lo_0)
                         s_raw_hi_0 = ArithValue(kv_col_lo_0 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_0
                         )
-                        kv_col_lo_1 = kv_start_i32 + lane_off_i32 + fx.Int32(1)
+                        kv_col_lo_1 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[1])
                         s_raw_lo_1 = ArithValue(kv_col_lo_1 > q_row_i32).select(c_neg_inf, s_raw_lo_1)
                         s_raw_hi_1 = ArithValue(kv_col_lo_1 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_1
                         )
-                        kv_col_lo_2 = kv_start_i32 + lane_off_i32 + fx.Int32(2)
+                        kv_col_lo_2 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[2])
                         s_raw_lo_2 = ArithValue(kv_col_lo_2 > q_row_i32).select(c_neg_inf, s_raw_lo_2)
                         s_raw_hi_2 = ArithValue(kv_col_lo_2 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_2
                         )
-                        kv_col_lo_3 = kv_start_i32 + lane_off_i32 + fx.Int32(3)
+                        kv_col_lo_3 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[3])
                         s_raw_lo_3 = ArithValue(kv_col_lo_3 > q_row_i32).select(c_neg_inf, s_raw_lo_3)
                         s_raw_hi_3 = ArithValue(kv_col_lo_3 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_3
                         )
-                        kv_col_lo_4 = kv_start_i32 + lane_off_i32 + fx.Int32(8)
+                        kv_col_lo_4 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[4])
                         s_raw_lo_4 = ArithValue(kv_col_lo_4 > q_row_i32).select(c_neg_inf, s_raw_lo_4)
                         s_raw_hi_4 = ArithValue(kv_col_lo_4 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_4
                         )
-                        kv_col_lo_5 = kv_start_i32 + lane_off_i32 + fx.Int32(9)
+                        kv_col_lo_5 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[5])
                         s_raw_lo_5 = ArithValue(kv_col_lo_5 > q_row_i32).select(c_neg_inf, s_raw_lo_5)
                         s_raw_hi_5 = ArithValue(kv_col_lo_5 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_5
                         )
-                        kv_col_lo_6 = kv_start_i32 + lane_off_i32 + fx.Int32(10)
+                        kv_col_lo_6 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[6])
                         s_raw_lo_6 = ArithValue(kv_col_lo_6 > q_row_i32).select(c_neg_inf, s_raw_lo_6)
                         s_raw_hi_6 = ArithValue(kv_col_lo_6 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_6
                         )
-                        kv_col_lo_7 = kv_start_i32 + lane_off_i32 + fx.Int32(11)
+                        kv_col_lo_7 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[7])
                         s_raw_lo_7 = ArithValue(kv_col_lo_7 > q_row_i32).select(c_neg_inf, s_raw_lo_7)
                         s_raw_hi_7 = ArithValue(kv_col_lo_7 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_7
                         )
-                        kv_col_lo_8 = kv_start_i32 + lane_off_i32 + fx.Int32(16)
+                        kv_col_lo_8 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[8])
                         s_raw_lo_8 = ArithValue(kv_col_lo_8 > q_row_i32).select(c_neg_inf, s_raw_lo_8)
                         s_raw_hi_8 = ArithValue(kv_col_lo_8 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_8
                         )
-                        kv_col_lo_9 = kv_start_i32 + lane_off_i32 + fx.Int32(17)
+                        kv_col_lo_9 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[9])
                         s_raw_lo_9 = ArithValue(kv_col_lo_9 > q_row_i32).select(c_neg_inf, s_raw_lo_9)
                         s_raw_hi_9 = ArithValue(kv_col_lo_9 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_9
                         )
-                        kv_col_lo_10 = kv_start_i32 + lane_off_i32 + fx.Int32(18)
+                        kv_col_lo_10 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[10])
                         s_raw_lo_10 = ArithValue(kv_col_lo_10 > q_row_i32).select(c_neg_inf, s_raw_lo_10)
                         s_raw_hi_10 = ArithValue(kv_col_lo_10 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_10
                         )
-                        kv_col_lo_11 = kv_start_i32 + lane_off_i32 + fx.Int32(19)
+                        kv_col_lo_11 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[11])
                         s_raw_lo_11 = ArithValue(kv_col_lo_11 > q_row_i32).select(c_neg_inf, s_raw_lo_11)
                         s_raw_hi_11 = ArithValue(kv_col_lo_11 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_11
                         )
-                        kv_col_lo_12 = kv_start_i32 + lane_off_i32 + fx.Int32(24)
+                        kv_col_lo_12 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[12])
                         s_raw_lo_12 = ArithValue(kv_col_lo_12 > q_row_i32).select(c_neg_inf, s_raw_lo_12)
                         s_raw_hi_12 = ArithValue(kv_col_lo_12 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_12
                         )
-                        kv_col_lo_13 = kv_start_i32 + lane_off_i32 + fx.Int32(25)
+                        kv_col_lo_13 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[13])
                         s_raw_lo_13 = ArithValue(kv_col_lo_13 > q_row_i32).select(c_neg_inf, s_raw_lo_13)
                         s_raw_hi_13 = ArithValue(kv_col_lo_13 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_13
                         )
-                        kv_col_lo_14 = kv_start_i32 + lane_off_i32 + fx.Int32(26)
+                        kv_col_lo_14 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[14])
                         s_raw_lo_14 = ArithValue(kv_col_lo_14 > q_row_i32).select(c_neg_inf, s_raw_lo_14)
                         s_raw_hi_14 = ArithValue(kv_col_lo_14 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_14
                         )
-                        kv_col_lo_15 = kv_start_i32 + lane_off_i32 + fx.Int32(27)
+                        kv_col_lo_15 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[15])
                         s_raw_lo_15 = ArithValue(kv_col_lo_15 > q_row_i32).select(c_neg_inf, s_raw_lo_15)
                         s_raw_hi_15 = ArithValue(kv_col_lo_15 + fx.Int32(K_SUB_N) > q_row_i32).select(
                             c_neg_inf, s_raw_hi_15
@@ -1308,11 +1419,17 @@ def build_flash_attn_func_module_primary(
                     # Col layout (mirrors causal): lo = kv_start + lane_div_32*4 +
                     # ((r//4)*8 + r%4); hi = +K_SUB_N.
                     kv_start_i32 = fx.Int32(kv_start)
-                    lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(4)
                     seq_len_i32 = fx.Int32(seqlen_kv_b)
+                    # KV_VECTORIZED: sigma(kv) in K load -> physical kv = kv_start +
+                    # lane_div_32*8 + sigma(_off); hi adds K_SUB_N (bit5 unchanged).
+                    if const_expr(KV_VECTORIZED):
+                        lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(8)
+                        _MOFF = (0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23)
+                    else:
+                        lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(4)
+                        _MOFF = (0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27)
                     for r in range_constexpr(16):
-                        _off = (r // 4) * 8 + (r % 4)
-                        kv_col = kv_start_i32 + lane_off_i32 + fx.Int32(_off)
+                        kv_col = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[r])
                         s_raw_lo[r] = ArithValue(kv_col >= seq_len_i32).select(c_neg_inf, s_raw_lo[r])
                         s_raw_hi[r] = ArithValue(kv_col + fx.Int32(K_SUB_N) >= seq_len_i32).select(
                             c_neg_inf, s_raw_hi[r]
@@ -1378,6 +1495,11 @@ def build_flash_attn_func_module_primary(
                     gpu.barrier()
                 elif const_expr(ENABLE_DMA):
                     v_base = v_buf_base(0)
+                    rocdl.s_waitcnt(0)
+                    gpu.barrier()
+                elif const_expr(KV_VECTORIZED and V_NOMAJOR_DMA):
+                    v_slot = 0
+                    v_base = v_buf_base(v_slot)
                     rocdl.s_waitcnt(0)
                     gpu.barrier()
                 else:
@@ -1479,6 +1601,21 @@ def build_flash_attn_func_module_primary(
 
                 def _read_v_pack(step_idx):
                     dc, pks = _steps[step_idx]
+                    if const_expr(KV_VECTORIZED):
+                        # No-major V: one aligned v8 per (dc,pks) half. Lane l reads
+                        # V[d=dc*32+l%32, n=pks*16+(l//32)*8+0..7] (lo) / +32 (hi).
+                        _lm = lane_mod_32
+                        v_lane_base = (
+                            v_base
+                            + (_lm // fx.Index(8)) * fx.Index(VEC_V_LINE)
+                            + lane_div_32 * fx.Index(VEC_V_D128)
+                            + (_lm % fx.Index(8)) * fx.Index(8)
+                        )
+                        _lo_off = dc * (D_CHUNK // 8) * VEC_V_LINE + pks * (PV_K_STEP // 8) * VEC_V_D128
+                        _hi_off = _lo_off + (K_SUB_N // 8) * VEC_V_D128
+                        vl = Vec.load(mfma_pack_type, lds_kv, [v_lane_base + fx.Index(_lo_off)])
+                        vh = Vec.load(mfma_pack_type, lds_kv, [v_lane_base + fx.Index(_hi_off)])
+                        return vl, vh
                     if const_expr(USE_HW_TR):
                         d_col = fx.Index(dc * D_CHUNK) + tr_col_half * 16 + tr_col_sub * 4
                         k_row = fx.Index(pks * PV_K_STEP) + lane_div_32 * 4 + tr_k_group
