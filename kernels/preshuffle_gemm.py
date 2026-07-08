@@ -14,9 +14,8 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
 from kernels.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
-# (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k); ported from v1.
+# (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k).
 _TILE_PRELOAD_TABLE = {
-    # (tile_m, tile_n, tile_k): (dsrd_preload, dvmem_preload)
     # ── tile_m = 16 ──
     (16, 64, 256): (2, 2),
     (16, 64, 512): (4, 4),
@@ -554,7 +553,7 @@ def compile_preshuffle_gemm(
                 results = yield [frag_C.load()]
             frag_C.store(results)
         elif const_expr(lds_stage == 2):
-            # 2-tile/iter ping-pong (lds_stage == 2): middle loop runs 2 tiles/iter
+            # 2-tile/iter ping-pong: middle loop runs 2 tiles/iter
             is_odd_tiles = (num_tiles % 2) == 1
             tail = 1 if is_odd_tiles else 2
             loop_end = (num_tiles - tail) // 2
@@ -598,7 +597,6 @@ def compile_preshuffle_gemm(
                     )
                     for ni in range_constexpr(num_acc_n)
                 ]
-                # 4 contiguous per-row scales per mi loaded as one 128b buffer_load (#791).
                 scale_a_rsrc = fx.buffer_ops.create_buffer_resource(arg_scale_a, max_size=True)
                 s_a = [
                     Vec(
@@ -646,7 +644,7 @@ def compile_preshuffle_gemm(
                 s_a_vals, s_b_vals, bias_vals = load_epi_operands()
 
             def apply_activation(val_s):
-                # ReLU/SiLU/GeLU ported from v1: maximumf for relu; exp+rcp for silu;
+                # ReLU/SiLU/GeLU : maximumf for relu; exp+rcp for silu;
                 # tanh-approx gelu expanded through a non-positive exponent (no overflow).
                 if const_expr(_has_relu):
                     return fx.Float32(val_s).maximumf(fx.Float32(0.0))
