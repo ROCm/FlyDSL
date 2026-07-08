@@ -281,7 +281,9 @@ def compile_blockscale_preshuffle_gemm(
             col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz  # fp8: element idx == byte offset
             u8 = fx.recast_iter(fx.Uint8, lds_buffer.ptr)
-            return fx.ptr_load(u8 + fx.Int32(idx_a16), result_type=T.f8x16)
+            # Load raw LDS bytes as i8x16 (f8 vectors do not lower through llvm/ptr
+            # ops); callers bitcast to the packed type they need (here i64x2).
+            return fx.ptr_load(u8 + fx.Int32(idx_a16), result_type=fx.Vector.make_type(16, fx.Uint8))
 
         def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer):
             loaded_a16 = lds_load_16b(curr_row_a_lds, col_base, lds_buffer)
@@ -347,11 +349,13 @@ def compile_blockscale_preshuffle_gemm(
                 idx0 = crd2idx((fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds)  # fp8: element idx == byte off
                 base = fx.Int64(fx.ptrtoint(lds_buffer.ptr)) + fx.Int64(idx0)
                 lds_ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
+                # Store raw dwords as i8 vectors (f8 vectors do not lower through the
+                # llvm store); the byte layout in LDS is identical.
                 if const_expr(a_load_bytes_v == 16):
-                    v16 = vector.bitcast(T.f8x16, vec_a_parts[i])
+                    v16 = vector.bitcast(fx.Vector.make_type(16, fx.Uint8), vec_a_parts[i])
                     llvm.StoreOp(v16, lds_ptr, alignment=16)
                 elif const_expr(a_load_bytes_v == 8):
-                    v8 = vector.bitcast(T.f8x8, vec_a_parts[i])
+                    v8 = vector.bitcast(fx.Vector.make_type(8, fx.Uint8), vec_a_parts[i])
                     llvm.StoreOp(v8, lds_ptr, alignment=8)
 
         # ── A DMA async: direct global→LDS transfer ─────────────────────
