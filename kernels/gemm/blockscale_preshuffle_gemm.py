@@ -280,10 +280,11 @@ def compile_blockscale_preshuffle_gemm(
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz  # fp8: element idx == byte offset
-            u8 = fx.recast_iter(fx.Uint8, lds_buffer.ptr)
-            # Load raw LDS bytes as i8x16 (f8 vectors do not lower through llvm/ptr
-            # ops); callers bitcast to the packed type they need (here i64x2).
-            return fx.ptr_load(u8 + fx.Int32(idx_a16), result_type=fx.Vector.make_type(16, fx.Uint8))
+            # Read 16 bytes as i8x16 via recast+view (f8 must not go through the op);
+            # caller bitcasts to i64x2. Mirrors the reference _vec_load_16xf8 idiom.
+            ptr_off = fx.add_offset(lds_buffer.ptr, fx.make_int_tuple(idx_a16))
+            i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
+            return fx.make_view(i8_iter, fx.make_layout(16, 1)).load()
 
         def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer):
             loaded_a16 = lds_load_16b(curr_row_a_lds, col_base, lds_buffer)
@@ -339,24 +340,20 @@ def compile_blockscale_preshuffle_gemm(
         c4_bytes = 4  # bytes per dword (always 4, used for LDS byte addressing)
 
         def store_a_tile_to_lds(vec_a_parts, lds_buffer, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
-            # Pointer-based LDS store with CK-style XOR16 swizzle on the K dim
-            # (inlined from lds_store_{16,8}b_xor16 since the vector-dialect store
-            # helpers do not accept the pointer-backed LDS buffer).
+            # View-based LDS store with CK-style XOR16 swizzle on the K dim. The
+            # dwords are written as i8 vectors (f8 must not go through the op; the
+            # byte layout is identical), mirroring the reference recast+view idiom.
             for i in range_constexpr(num_a_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
                 col_local_bytes = col_a_local_i32 * c4_bytes
                 col_swz = swizzle_xor16(row_a_local, col_local_bytes, k_blocks16)
                 idx0 = crd2idx((fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds)  # fp8: element idx == byte off
-                base = fx.Int64(fx.ptrtoint(lds_buffer.ptr)) + fx.Int64(idx0)
-                lds_ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
-                # Store raw dwords as i8 vectors (f8 vectors do not lower through the
-                # llvm store); the byte layout in LDS is identical.
+                ptr_off = fx.add_offset(lds_buffer.ptr, fx.make_int_tuple(idx0))
+                i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
                 if const_expr(a_load_bytes_v == 16):
-                    v16 = vector.bitcast(fx.Vector.make_type(16, fx.Uint8), vec_a_parts[i])
-                    llvm.StoreOp(v16, lds_ptr, alignment=16)
+                    fx.make_view(i8_iter, fx.make_layout(16, 1)).store(Vec(vec_a_parts[i]).bitcast(fx.Uint8))
                 elif const_expr(a_load_bytes_v == 8):
-                    v8 = vector.bitcast(fx.Vector.make_type(8, fx.Uint8), vec_a_parts[i])
-                    llvm.StoreOp(v8, lds_ptr, alignment=8)
+                    fx.make_view(i8_iter, fx.make_layout(8, 1)).store(Vec(vec_a_parts[i]).bitcast(fx.Uint8))
 
         # ── A DMA async: direct global→LDS transfer ─────────────────────
         _num_a_async_loads = bytes_per_thread_a // a_async_load_bytes
