@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-08T21:17:01Z",
+ "updated": "2026-07-08T21:33:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
    "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28967328704",
    "created_at": "2026-07-08T18:46:32Z",
-   "updated_at": "2026-07-08T18:48:22Z",
+   "updated_at": "2026-07-08T21:30:01Z",
    "actor": "amd-satre",
    "jobs": [
     {
@@ -29,10 +29,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-08T18:48:22Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-08T21:15:54Z",
+     "completed_at": "2026-07-08T21:30:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28967328704/job/85954101631"
     },
     {
@@ -209,10 +209,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-08T20:33:49Z",
-     "completed_at": null,
+     "completed_at": "2026-07-08T21:16:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28937064576/job/85975390865"
     },
     {
@@ -272,19 +272,19 @@
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
    "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28930978115",
    "created_at": "2026-07-08T09:06:25Z",
-   "updated_at": "2026-07-08T19:40:33Z",
+   "updated_at": "2026-07-08T21:30:28Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-08T19:40:33Z",
+     "started_at": "2026-07-08T21:30:28Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28930978115/job/85964961038"
     },
