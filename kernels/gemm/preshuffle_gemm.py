@@ -187,6 +187,7 @@ def compile_preshuffle_gemm(
         dsrd_preload, dvmem_preload = (0, 0)
 
     a_lds_elems = tile_m * tile_k
+
     @fx.struct
     class SharedStorage:
         a0: fx.Array[layout_elem, a_lds_elems, 16]
