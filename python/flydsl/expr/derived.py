@@ -20,6 +20,8 @@ __all__ = [
     "make_tiled_copy_A",
     "make_tiled_copy_B",
     "make_tiled_copy_C",
+    "gather",
+    "scatter",
 ]
 
 
@@ -171,3 +173,79 @@ def make_tiled_copy_C(copy_atom, tiled_mma):
         make_layout(select(tile_size, [1]), 1),
     )
     return make_tiled_copy(copy_atom, layout_tv, tile_mn)
+
+
+def _gather_scatter_expand(offset_tensor, operand, pred):
+    offset_rank = rank(offset_tensor)
+    if offset_rank < 1:
+        raise ValueError("offset_tensor must have at least the TV mode")
+    if pred is not None:
+        pred = make_view(get_iter(pred), prepend(get_layout(pred), make_layout(1, 0)))
+
+    tv = offset_tensor.shape[0].unpack()
+    if offset_rank == 1:
+        for v in range(tv):
+            operand_v = operand[None, v]
+            pred_v = None if pred is None else pred[None, v]
+            yield offset_tensor[v], operand_v, pred_v
+        return
+
+    offset_tensor = group(offset_tensor, 1, offset_rank)
+    operand = group(operand, 1, rank(operand))
+    if pred is not None:
+        pred = group(pred, 2, rank(pred))
+
+    rest = size(offset_tensor.shape[1]).unpack()
+
+    for v in range(tv):
+        for i in range(rest):
+            operand_v = operand[(None, v), i]
+            pred_v = None if pred is None else pred[None, v, i]
+            yield offset_tensor[v, i], operand_v, pred_v
+
+
+@dsl_loc_tracing
+def gather(copy_atom, base_iter, offset_tensor, dst_tensor, *, pred=None):
+    """indexed load ``dst_tensor = base[offset]``
+
+    Layout contract:
+
+    .. code-block:: text
+
+        copy_atom src value layout : copy_atom.layout_src_tv[1]
+        dst_tensor                 : ((AtomV, TV), Rest...)
+        offset_tensor              : (TV, Rest...)
+        pred                       : (TV, Rest...)  optional
+
+    For each ``(v, rest)`` instance, ``offset_tensor[v, rest]`` advances
+    ``base_iter``. The reconstructed source view uses the copy atom's source
+    value layout, while ``dst_tensor[(None, v), rest]`` supplies the matching
+    destination ``(AtomV,)`` slice.
+    """
+    src_layout = copy_atom.layout_src_tv[1]
+    for off, dst_v, pred_v in _gather_scatter_expand(offset_tensor, dst_tensor, pred):
+        src_v = make_view(base_iter + off, src_layout)
+        copy(copy_atom, src_v, dst_v, pred=pred_v)
+
+
+@dsl_loc_tracing
+def scatter(copy_atom, src_tensor, base_iter, offset_tensor, *, pred=None):
+    """indexed store ``base[offset] = src_tensor``
+
+    Layout contract:
+
+    .. code-block:: text
+
+        src_tensor                 : ((AtomV, TV), Rest...)
+        copy_atom dst value layout : copy_atom.layout_dst_tv[1]
+        offset_tensor              : (TV, Rest...)
+        pred                       : (TV, Rest...)  optional
+
+    For each ``(v, rest)`` instance, ``src_tensor[(None, v), rest]`` supplies
+    the source ``(AtomV,)`` slice. The reconstructed destination view uses the copy
+    atom's destination value layout at ``base_iter + offset_tensor[v, rest]``.
+    """
+    dst_layout = copy_atom.layout_dst_tv[1]
+    for off, src_v, pred_v in _gather_scatter_expand(offset_tensor, src_tensor, pred):
+        dst_v = make_view(base_iter + off, dst_layout)
+        copy(copy_atom, src_v, dst_v, pred=pred_v)

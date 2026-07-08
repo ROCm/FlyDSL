@@ -19,6 +19,12 @@ to GPU/ROCDL.
 
 .. toctree::
    :maxdepth: 2
+   :caption: Language Specification
+
+   arithmetic_types
+
+.. toctree::
+   :maxdepth: 2
    :caption: Guides
 
    architecture_guide

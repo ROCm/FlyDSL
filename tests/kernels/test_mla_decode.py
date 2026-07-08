@@ -39,7 +39,7 @@ from aiter.ops.attention import (  # noqa: E402  # pyright: ignore[reportMissing
     mla_reduce_v1,
 )  # noqa: E402
 
-from kernels.mla_fwd_decode import flydsl_mla_fwd_decode  # noqa: E402
+from kernels.attention.mla_fwd_decode import flydsl_mla_fwd_decode  # noqa: E402
 from tests.test_common import checkAllclose, run_perftest  # noqa: E402
 
 torch.set_default_device("cuda")

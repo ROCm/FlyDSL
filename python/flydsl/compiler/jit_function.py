@@ -9,6 +9,7 @@ import os
 import pickle
 import pkgutil
 import tempfile
+import threading
 import time
 import types
 from collections import namedtuple
@@ -23,6 +24,7 @@ from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
+from ..expr.utils.arith import fastmath as fastmath_ctx
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
@@ -40,6 +42,7 @@ from .kernel_function import (
     CompilationContext,
     KernelFunction,
     create_gpu_module,
+    effective_fastmath_hint,
     func_def_location,
     get_gpu_module_body,
 )
@@ -485,6 +488,19 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
     return vals
 
 
+# Per-thread ``id(func)`` set of keys being computed, to break cache-key
+# dependency cycles. Thread-local so concurrent compilations don't collide.
+_key_computation = threading.local()
+
+
+def _keys_in_progress() -> Set[int]:
+    stack = getattr(_key_computation, "stack", None)
+    if stack is None:
+        stack = set()
+        _key_computation.stack = stack
+    return stack
+
+
 def _collect_dependency_sources(
     func,
     rootFile,
@@ -502,6 +518,11 @@ def _collect_dependency_sources(
         # so cross-directory deps are tracked without dragging in the full
         # source file (which would force ad-hoc same-dir filtering).
         if isinstance(val, JitFunction):
+            # Cycle: this jit is already being keyed — emit a placeholder.
+            if id(val.func) in _keys_in_progress():
+                label = getattr(val.func, "__qualname__", getattr(val.func, "__name__", name))
+                sources.append(f"{prefix}jit-recursive:{name}:{label}")
+                return False
             val._ensure_cache_manager()
             sources.append(f"{prefix}jit:{name}:{val.manager_key}")
             return False  # do not recurse: manager_key already covers transitive deps
@@ -549,27 +570,35 @@ def _collect_dependency_sources(
 
 
 def _jit_function_cache_key(func: Callable, owner_cls=None) -> str:
-    parts = []
-    parts.append(_flydsl_key())
-    parts.append(_get_func_source(func))
+    in_progress = _keys_in_progress()
+    added = id(func) not in in_progress
+    if added:
+        in_progress.add(id(func))
     try:
-        rootFile = inspect.getfile(func)
-    except (TypeError, OSError):
-        rootFile = ""
-    depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls)
-    depSources.sort()
-    parts.extend(depSources)
+        parts = []
+        parts.append(_flydsl_key())
+        parts.append(_get_func_source(func))
+        try:
+            rootFile = inspect.getfile(func)
+        except (TypeError, OSError):
+            rootFile = ""
+        depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls)
+        depSources.sort()
+        parts.extend(depSources)
 
-    # Collect scalar closure values recursively — this covers compile-time parameters
-    # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
-    # indirectly via nested @kernel / helper functions, without requiring an explicit
-    # _cache_tag tuple in every kernel factory function.
-    all_closure_vals = sorted(_collect_closure_scalar_vals(func))
-    if all_closure_vals:
-        parts.append("closure_vals:" + ",".join(all_closure_vals))
+        # Collect scalar closure values recursively — this covers compile-time parameters
+        # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
+        # indirectly via nested @kernel / helper functions, without requiring an explicit
+        # _cache_tag tuple in every kernel factory function.
+        all_closure_vals = sorted(_collect_closure_scalar_vals(func))
+        if all_closure_vals:
+            parts.append("closure_vals:" + ",".join(all_closure_vals))
 
-    combined = "\n".join(parts)
-    return hashlib.sha256(combined.encode()).hexdigest()[:32]
+        combined = "\n".join(parts)
+        return hashlib.sha256(combined.encode()).hexdigest()[:32]
+    finally:
+        if added:
+            in_progress.discard(id(func))
 
 
 def _stage_label_from_fragment(fragment: str) -> str:
@@ -1482,8 +1511,12 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
+                                fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
+                                fastmath_scope = (
+                                    fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
+                                )
                                 # Bound the call-site boundary at the jit body.
-                                with tracing_context(self.func):
+                                with tracing_context(self.func), fastmath_scope:
                                     if bound_self is not None:
                                         self.func(bound_self, **named_args)
                                     else:
