@@ -351,7 +351,26 @@ def compile_fp8fp4_gemm(
     _a_frag_ds = wmma_m_rep * _a_frag_loads_per_wm
     _bs_ds_loads = wmma_n_rep * _b_frag_loads_per_wn + _scale_ds_loads
     _as_ds_loads = _a_frag_ds + _scale_ds_loads
-    _row_major_k_prefetch_bundle_ds = _a_frag_ds + _bs_ds_loads
+    _bsc_b_one_scale_block_per_warp = False
+    _bsc_b_full_scale_blocks_per_warp = False
+    _bsc_row_major_scale_ds = 0
+    # Row-major blockscale schedules scale LDS reads inside each K bundle, so
+    # dscnt bookkeeping must include those raw scale loads.
+    if is_blockscale and wmma_m_rep == 1 and k_wmma_steps > 1:
+        _bsc_b_one_scale_block_per_warp = (scale_block_n % warp_tile_n == 0) and (
+            tile_n % scale_block_n == 0 or scale_block_n % tile_n == 0
+        )
+        _bsc_b_full_scale_blocks_per_warp = (
+            not _bsc_b_one_scale_block_per_warp and tile_n % scale_block_n == 0 and warp_tile_n % scale_block_n == 0
+        )
+        if _bsc_b_one_scale_block_per_warp:
+            _bsc_row_major_b_scale_ds = 1
+        elif _bsc_b_full_scale_blocks_per_warp:
+            _bsc_row_major_b_scale_ds = warp_tile_n // scale_block_n
+        else:
+            _bsc_row_major_b_scale_ds = wmma_n_rep
+        _bsc_row_major_scale_ds = ascale_load + _bsc_row_major_b_scale_ds
+    _row_major_k_prefetch_bundle_ds = _a_frag_ds + _bs_ds_loads + _bsc_row_major_scale_ds
 
     _a_pad_dwords = packed_tile_k_a // 4
     _a_pad_pow2 = _a_pad_dwords > 0 and (_a_pad_dwords & (_a_pad_dwords - 1)) == 0
@@ -505,6 +524,7 @@ def compile_fp8fp4_gemm(
     use_fp8_quadrant_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_QUADRANT
     use_fp8_deep_pipeline_schedule = compute_schedule_kind == COMPUTE_SCHEDULE_FP8_DEEP_PIPELINE
     use_row_major_k_prefetch = wmma_m_rep == 1 and k_wmma_steps > 1
+    use_blockscale_row_major_scale_schedule = is_blockscale and use_row_major_k_prefetch
     _row_major_k_prefetch_depth = 2 if use_row_major_k_prefetch else 1
     _row_major_k_prefetch_depth = max(0, min(k_wmma_steps - 1, _row_major_k_prefetch_depth))
 
@@ -729,6 +749,29 @@ def compile_fp8fp4_gemm(
                             vals[ks * ascale_load + wm] = bvals[ks]
                 return vals
 
+            def load_ascale_bsc_ks_raw(lds_buf, ks):
+                vals = [None] * ascale_load
+                for wm in range_constexpr(ascale_load):
+                    row = _bsc_a_row0 + arith.index(wm * WMMA_M)
+                    abs_row = _bsc_a_abs_row0 + arith.index(wm * WMMA_M)
+                    row_ok = abs_row < m_idx
+                    if const_expr(ascale_col_major):
+                        off = arith.index(ks * lds_as_ks_stride) + row * arith.index(lds_as_row_stride)
+                        shift = 0
+                    else:
+                        off = row * arith.index(lds_as_row_stride) + arith.index((ks // 4) * 4)
+                        shift = (ks % 4) * 8
+                    vals[wm] = (fx.Int32(lds_load_b32_raw(lds_buf, off)), shift, row_ok)
+                return vals
+
+            def finish_ascale_bsc_raw(raw_vals):
+                vals = [None] * ascale_load
+                for wm in range_constexpr(ascale_load):
+                    word, shift, row_ok = raw_vals[wm]
+                    bval = _broadcast_byte_i32(word, shift)
+                    vals[wm] = arith.select(row_ok, bval, _scale_identity_i32)
+                return vals
+
             def load_bscale_bsc_all(lds_buf):
                 vals = [None] * (k_wmma_steps * wmma_n_rep)
                 b_wmmas_per_scale = scale_block_n // WMMA_N_EFF
@@ -737,7 +780,10 @@ def compile_fp8fp4_gemm(
                     byte_off = n_block * arith.index(bsc_b_row_stride_bytes)
                     return _load_scale_row_bytes(lds_buf, byte_off, k_wmma_steps)
 
-                if const_expr(tile_n % scale_block_n == 0 and scale_block_n % warp_tile_n == 0):
+                if const_expr(
+                    _bsc_b_one_scale_block_per_warp
+                    or (tile_n % scale_block_n == 0 and scale_block_n % warp_tile_n == 0)
+                ):
                     n_block = warp_n_base // arith.index(scale_block_n)
                     ks_vals = _load_bscale_block(n_block)
                     for wn in range_constexpr(wmma_n_rep):
@@ -762,6 +808,46 @@ def compile_fp8fp4_gemm(
                     ks_vals = _load_bscale_block(n_block)
                     for ks in range_constexpr(k_wmma_steps):
                         vals[ks * wmma_n_rep + wn] = ks_vals[ks]
+                return vals
+
+            def load_bscale_bsc_ks_raw(lds_buf, ks):
+                vals = [None] * wmma_n_rep
+                b_wmmas_per_scale = scale_block_n // WMMA_N_EFF
+                shift = (ks % 4) * 8
+
+                def _load_bscale_block(n_block):
+                    byte_off = n_block * arith.index(bsc_b_row_stride_bytes) + arith.index((ks // 4) * 4)
+                    return fx.Int32(lds_load_b32_raw(lds_buf, byte_off)), shift
+
+                if const_expr(
+                    _bsc_b_one_scale_block_per_warp
+                    or (tile_n % scale_block_n == 0 and scale_block_n % warp_tile_n == 0)
+                ):
+                    raw = _load_bscale_block(warp_n_base // arith.index(scale_block_n))
+                    for wn in range_constexpr(wmma_n_rep):
+                        vals[wn] = raw
+                    return vals
+
+                if const_expr(_bsc_b_full_scale_blocks_per_warp):
+                    n_block0 = warp_n_base // arith.index(scale_block_n)
+                    for nb in range_constexpr(warp_tile_n // scale_block_n):
+                        raw = _load_bscale_block(n_block0 + arith.index(nb))
+                        for local_wn in range_constexpr(b_wmmas_per_scale):
+                            vals[nb * b_wmmas_per_scale + local_wn] = raw
+                    return vals
+
+                _bsc_b_block_off = blk_n // arith.index(scale_block_n)
+                for wn in range_constexpr(wmma_n_rep):
+                    n_col = blk_n + warp_n_base + arith.index(wn * WMMA_N_EFF)
+                    n_block = n_col // arith.index(scale_block_n) - _bsc_b_block_off
+                    vals[wn] = _load_bscale_block(n_block)
+                return vals
+
+            def finish_bscale_bsc_raw(raw_vals):
+                vals = [None] * wmma_n_rep
+                for wn in range_constexpr(wmma_n_rep):
+                    word, shift = raw_vals[wn]
+                    vals[wn] = _broadcast_byte_i32(word, shift)
                 return vals
 
         # Runtime leading-dim strides (strided A/C). Dense callers pass lda == K,
@@ -1354,8 +1440,13 @@ def compile_fp8fp4_gemm(
             pf_a_scales=None,
         ):
             current_accs = list(accs_in)
-            _set_vgpr_a_scales(pf_a_scales, lds_as=lds_as)
-            _set_blockscale_b_scales(lds_bs=lds_bs)
+            if const_expr(use_blockscale_row_major_scale_schedule):
+                # Scales are carried as per-K raw LDS loads in the bundle queue.
+                _vgpr_scale_box[0] = None
+                _blockscale_b_scale_box[0] = None
+            else:
+                _set_vgpr_a_scales(pf_a_scales, lds_as=lds_as)
+                _set_blockscale_b_scales(lds_bs=lds_bs)
             a_buf, a_bases = _precompute_a_lane_bases(lds_a)
             b_buf, b_bases = _precompute_b_lane_bases(lds_b)
             if const_expr(is_mxscale):
@@ -1363,9 +1454,8 @@ def compile_fp8fp4_gemm(
                 bs_buf, bs_bases = _precompute_bs32_bases(lds_bs)
             else:
                 as_buf, as_bases = lds_as, None
-                bs_buf, bs_bases = lds_bs, None  # ptpc: B-scale in epilogue; blockscale: scale
-                # delivered via the VGPR box (_set_vgpr_a_scales/_set_blockscale_b_scales
-                # above) — bases unused either way.
+                # ptpc: B-scale in epilogue; blockscale: raw scale helpers use LDS directly.
+                bs_buf, bs_bases = lds_bs, None
 
             if const_expr(k_wmma_steps == 1):
                 b_frags, b_scales, a_scales = _load_b_and_scales(b_buf, b_bases, as_buf, as_bases, bs_buf, bs_bases, 0)
@@ -1384,6 +1474,12 @@ def compile_fp8fp4_gemm(
                 if const_expr(use_row_major_k_prefetch):
 
                     def _load_bundle(ks):
+                        if const_expr(use_blockscale_row_major_scale_schedule):
+                            raw_a_scales = load_ascale_bsc_ks_raw(as_buf, ks)
+                            raw_b_scales = load_bscale_bsc_ks_raw(bs_buf, ks)
+                            b_frags = [load_b_frag(b_buf, b_bases, wn, ks) for wn in range_constexpr(wmma_n_rep)]
+                            a_frag = load_a_frag(a_buf, a_bases[0], ks)
+                            return a_frag, b_frags, raw_a_scales, raw_b_scales
                         b_frags, b_scales, a_scales = _load_b_and_scales(
                             b_buf, b_bases, as_buf, as_bases, bs_buf, bs_bases, ks
                         )
@@ -1395,6 +1491,9 @@ def compile_fp8fp4_gemm(
                         if const_expr(emit_filler_now and emit_filler is not None):
                             rocdl.sched_barrier(0)
                             emit_filler()
+                        if const_expr(use_blockscale_row_major_scale_schedule):
+                            a_scales = finish_ascale_bsc_raw(a_scales)
+                            b_scales = finish_bscale_bsc_raw(b_scales)
                         for wn in range_constexpr(wmma_n_rep):
                             _emit_wmma(current_accs, 0, wn, a_frag, b_frags[wn], a_scales, b_scales)
 
