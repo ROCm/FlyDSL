@@ -14,12 +14,11 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from kernels.common.kernels_common import dtype_to_elem_type, get_llvm_ptr, get_warp_size
+from kernels.common.kernels_common import atomic_add, dtype_to_elem_type, get_warp_size
 
 try:
     import torch
@@ -599,15 +598,9 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str):
                 _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
 
                 dw = dy * x_hat
-                ptr = get_llvm_ptr(DWeight, idx, 4)
-                llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.fadd,
-                    ptr,
-                    dw.ir_value(),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                )
+                # fp32 atomic accumulate into the shared DWeight[idx] (cross-row
+                # reduction); helper picks fadd from dw's type. See kernels_common.
+                atomic_add(DWeight, idx, dw, dtype_bytes=4)
 
     @flyc.jit
     def launch_rmsnorm_bwd(

@@ -39,6 +39,46 @@ def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
     return llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
 
 
+def atomic_add(
+    dst,
+    offset,
+    value,
+    *,
+    dtype_bytes=4,
+    syncscope="agent",
+    ordering=None,
+    alignment=None,
+    ptr_type=None,
+):
+    """Atomically add ``value`` into ``dst[offset]`` in global memory.
+
+    Wraps the ``get_llvm_ptr`` + ``llvm.atomicrmw`` pair that kernels used to
+    inline (rmsnorm backward ``dweight`` accumulation, hgemm split-K epilogue and
+    semaphore). Selects ``fadd`` for a floating-point operand and integer ``add``
+    otherwise, from the operand's IR type, so a single call covers both cases.
+    Returns the atomicrmw result (the value previously stored at ``dst[offset]``).
+
+    ``dtype_bytes`` sizes the byte offset and, unless ``alignment`` is given, is
+    reused as the access alignment.
+    """
+    ptr = get_llvm_ptr(dst, offset, dtype_bytes, ptr_type=ptr_type)
+    val = value.ir_value() if const_expr(hasattr(value, "ir_value")) else value
+    elem_ty = val.type.element_type if isinstance(val.type, ir.VectorType) else val.type
+    bin_op = _llvm.AtomicBinOp.fadd if isinstance(elem_ty, ir.FloatType) else _llvm.AtomicBinOp.add
+    if ordering is None:
+        ordering = _llvm.AtomicOrdering.monotonic
+    if alignment is None:
+        alignment = dtype_bytes
+    return _llvm.AtomicRMWOp(
+        bin_op,
+        ptr,
+        val,
+        ordering,
+        syncscope=syncscope,
+        alignment=alignment,
+    ).result
+
+
 @contextmanager
 def _if_then(if_op, scf=None):
     """Context manager for SCF IfOp then-region across old/new Python APIs.
