@@ -54,3 +54,65 @@ def test_conv3d_vs_torch(n, c, t, h, w, k, stride, padding):
 
     assert y.shape == y_ref.shape
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+# Tile-size sweep: each forced (TILE_M, TILE_N, WAVE_M, WAVE_N) must stay correct.
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "tile",
+    [
+        (128, 128, 2, 4),  # default
+        (128, 256, 2, 4),
+        (256, 128, 2, 4),
+        (256, 256, 2, 4),
+        (128, 128, 4, 2),
+        (64, 128, 1, 4),
+        (64, 64, 2, 2),
+    ],
+)
+def test_conv3d_tile_configs(tile):
+    torch.manual_seed(4000 + sum(tile))
+    n, c, t, h, w, k, stride, padding = 2, 64, 6, 18, 18, 192, 1, 1
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((k,), device="cuda", dtype=torch.float32)
+
+    y = conv3d_implicit_8wave(x, weight, bias=bias, stride=stride, padding=padding, tile=tile)
+    y_ref = F.conv3d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+@_skip_non_cdna4
+def test_conv3d_autotune(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "at"))
+    from kernels.conv import conv3d_autotune
+
+    conv3d_autotune._MEM_CACHE.clear()
+
+    torch.manual_seed(4242)
+    n, c, t, h, w, k = 1, 128, 6, 40, 40, 128
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
+
+    y = conv3d_implicit_8wave(x, weight, stride=1, padding=1, autotune=True)
+    y_ref = F.conv3d(x, weight, stride=1, padding=1)
+    torch.cuda.synchronize()
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+    # A tile was chosen and persisted; the second call must hit the cache.
+    assert len(conv3d_autotune._MEM_CACHE) == 1
+    calls = {"n": 0}
+    orig = conv3d_autotune.do_bench
+
+    def _counting(*a, **kw):
+        calls["n"] += 1
+        return orig(*a, **kw)
+
+    monkeypatch.setattr(conv3d_autotune, "do_bench", _counting)
+    y2 = conv3d_implicit_8wave(x, weight, stride=1, padding=1, autotune=True)
+    torch.cuda.synchronize()
+    assert torch.allclose(y2, y_ref, rtol=2e-2, atol=2e-2)
+    assert calls["n"] == 0  # cached, no re-benchmark

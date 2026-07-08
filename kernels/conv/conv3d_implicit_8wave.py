@@ -8,6 +8,7 @@ Returns (N, K, Do, Ho, Wo) bf16. Supports stride, padding, bias, and split-K.
 """
 
 import functools
+import os
 import weakref
 
 import torch
@@ -18,15 +19,12 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 
-TILE_M = 128
-TILE_N = 128
+# TILE_K is pinned to the MFMA k-dim (mfma_f32_16x16x32_bf16 -> 32). The tile
+# size (TILE_M/TILE_N) and wave layout (WAVE_M/WAVE_N) are compile-time
+# parameters of compile_conv3d_implicit_8wave (autotuned per shape).
 TILE_K = 32
 STAGES = 2
-
-WAVE_M = 2
-WAVE_N = 4
 WARP_SIZE = 64
-BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE  # 512
 
 MFMA_M = 16
 MFMA_N = 16
@@ -34,20 +32,18 @@ MFMA_A_VALUES = 8
 MFMA_B_VALUES = 8
 MFMA_C_VALUES = 4
 
-HALF_M = TILE_M // 2
-HALF_N = TILE_N // 2
-QM_STEPS = HALF_M // WAVE_M // MFMA_M  # 2
-QN_STEPS = HALF_N // WAVE_N // MFMA_N  # 1
-N_SUB = QM_STEPS * QN_STEPS
-
-# The main loop below is handwritten for this exact 8-wave shape.
-assert QM_STEPS == 2 and QN_STEPS == 1
-
 LDG_VEC = 8
-BLOCK_VECS = LDG_VEC * BLOCK_THREADS
-LDG_A_COUNT = TILE_M * TILE_K // BLOCK_VECS
-LDS_A_SIZE = STAGES * TILE_M * TILE_K
-LDS_B_SIZE = STAGES * TILE_N * TILE_K
+
+# gfx950 (CDNA4) LDS capacity; this kernel needs the CDNA4 bf16 MFMA anyway.
+LDS_CAPACITY_BYTES = 163840
+BF16_BYTES = 2
+
+# Default tile config = the original hand-tuned 8-wave 128x128 shape.
+DEFAULT_TILE = (128, 128, 2, 4)
+
+
+def _autotune_enabled():
+    return os.environ.get("FLYDSL_CONV3D_AUTOTUNE", "0").lower() in ("1", "true", "yes")
 
 
 _WEIGHT_CACHE = {}
@@ -161,8 +157,35 @@ def _ncdhw_to_ndhwc(x, stream):
     return out
 
 
-@functools.lru_cache(maxsize=64)
-def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1):
+@functools.lru_cache(maxsize=256)
+def compile_conv3d_implicit_8wave(
+    n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1, tile=DEFAULT_TILE
+):
+    TILE_M, TILE_N, WAVE_M, WAVE_N = tile
+    BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE
+    # Per-wave MFMA grid (flat acc[mi * MI_N + ni]); WARP_M/N is the per-wave tile span.
+    MI_M = TILE_M // WAVE_M // MFMA_M
+    MI_N = TILE_N // WAVE_N // MFMA_N
+    N_ACC = MI_M * MI_N
+    WARP_M = MI_M * MFMA_M
+    WARP_N = MI_N * MFMA_N
+    BLOCK_VECS = LDG_VEC * BLOCK_THREADS
+    LDG_A_COUNT = TILE_M * TILE_K // BLOCK_VECS
+    LDG_B_COUNT = TILE_N * TILE_K // BLOCK_VECS
+    LDS_A_SIZE = STAGES * TILE_M * TILE_K
+    LDS_B_SIZE = STAGES * TILE_N * TILE_K
+
+    assert TILE_K == 32
+    assert TILE_M % (WAVE_M * MFMA_M) == 0, f"TILE_M={TILE_M} not divisible by WAVE_M*16"
+    assert TILE_N % (WAVE_N * MFMA_N) == 0, f"TILE_N={TILE_N} not divisible by WAVE_N*16"
+    assert (TILE_M * TILE_K) % BLOCK_VECS == 0, f"A tile {TILE_M}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
+    assert (TILE_N * TILE_K) % BLOCK_VECS == 0, f"B tile {TILE_N}x{TILE_K} not a multiple of {BLOCK_VECS} vecs"
+    assert LDG_A_COUNT >= 1 and LDG_B_COUNT >= 1
+    assert c % LDG_VEC == 0
+    assert BLOCK_THREADS <= 1024, f"BLOCK_THREADS={BLOCK_THREADS} exceeds 1024"
+    lds_bytes = STAGES * (TILE_M + TILE_N) * TILE_K * BF16_BYTES
+    assert lds_bytes <= LDS_CAPACITY_BYTES, f"LDS {lds_bytes} exceeds {LDS_CAPACITY_BYTES}"
+
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (w + 2 * pw - kw) // sw + 1
@@ -171,9 +194,6 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
     npq = n * dhw
     crs = c * kt * kh * kw
     k_tiles = (crs + TILE_K - 1) // TILE_K
-
-    assert c % LDG_VEC == 0
-    assert LDG_A_COUNT == 1
 
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
@@ -224,10 +244,7 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
             ir_type = Vec.make_type(8, elem_ty)
 
         acc0 = Vec.filled(MFMA_C_VALUES, 0.0, fx.Float32)
-        acc00 = [acc0 for _ in range_constexpr(N_SUB)]
-        acc01 = [acc0 for _ in range_constexpr(N_SUB)]
-        acc10 = [acc0 for _ in range_constexpr(N_SUB)]
-        acc11 = [acc0 for _ in range_constexpr(N_SUB)]
+        acc = [acc0 for _ in range_constexpr(N_ACC)]
 
         zero8 = Vec.filled(8, 0.0, elem_ty)
 
@@ -239,15 +256,6 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
                 waits.append(f"lgkmcnt({lgkmcnt})")
             pre = ("s_waitcnt " + " ".join(waits) + "\n\t") if waits else ""
             llvm.InlineAsmOp(None, [], f"{pre}s_barrier", "", has_side_effects=True)
-
-        def waitcnt(vmcnt=None, lgkmcnt=None):
-            waits = []
-            if vmcnt is not None:
-                waits.append(f"vmcnt({vmcnt})")
-            if lgkmcnt is not None:
-                waits.append(f"lgkmcnt({lgkmcnt})")
-            if waits:
-                llvm.InlineAsmOp(None, [], "s_waitcnt " + " ".join(waits), "", has_side_effects=True)
 
         def lds_ptr_at(lds_array, byte_offset):
             lds_base = fx.Int64(fx.ptrtoint(lds_array.ptr)) + fx.Int64(byte_offset)
@@ -270,67 +278,76 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
             return (v >= 0) & (v < fx.Index(hi))
 
         # ---- 3D im2col gather (global -> registers) ----
+        # Each thread loads LDG_A_COUNT vec8 chunks along the flattened (M, K) tile,
+        # returning a list of (raw, valid, lds_elem_off) consumed by commit_a.
         def gather_a(k_base):
-            linear = tid * LDG_VEC
-            local_m = linear // TILE_K
-            local_k = linear % TILE_K
-            row = m_offset + local_m
-            row_valid = row < fx.Index(npq)
-            n_idx = row // dhw
-            rem = row % dhw
-            ot = rem // hw_o
-            rem2 = rem % hw_o
-            oh = rem2 // wo
-            ow = rem2 % wo
-            k_abs = fx.Index(k_base) + fx.Index(local_k)
-            cc = k_abs % c
-            ckk = k_abs // c
-            kw_i = ckk % kw
-            ckk2 = ckk // kw
-            kh_i = ckk2 % kh
-            kt_i = ckk2 // kh
-            in_t = ot * st + kt_i - pt
-            in_h = oh * sh + kh_i - ph
-            in_w = ow * sw + kw_i - pw
-            k_valid = k_abs < fx.Index(crs)
-            valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
-            g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
-            g_off_i = fx.Int32(g_off)
-            safe = arith.select(valid, g_off_i, fx.Int32(0))
-            raw = buffer_ops.buffer_load(x_rsrc, safe, vec_width=8, dtype=elem_ty)
-            return (raw, valid, local_m * TILE_K + local_k)
+            out = []
+            for i in range_constexpr(LDG_A_COUNT):
+                linear = (tid + i * BLOCK_THREADS) * LDG_VEC
+                local_m = linear // TILE_K
+                local_k = linear % TILE_K
+                row = m_offset + local_m
+                row_valid = row < fx.Index(npq)
+                n_idx = row // dhw
+                rem = row % dhw
+                ot = rem // hw_o
+                rem2 = rem % hw_o
+                oh = rem2 // wo
+                ow = rem2 % wo
+                k_abs = fx.Index(k_base) + fx.Index(local_k)
+                cc = k_abs % c
+                ckk = k_abs // c
+                kw_i = ckk % kw
+                ckk2 = ckk // kw
+                kh_i = ckk2 % kh
+                kt_i = ckk2 // kh
+                in_t = ot * st + kt_i - pt
+                in_h = oh * sh + kh_i - ph
+                in_w = ow * sw + kw_i - pw
+                k_valid = k_abs < fx.Index(crs)
+                valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+                g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
+                g_off_i = fx.Int32(g_off)
+                safe = arith.select(valid, g_off_i, fx.Int32(0))
+                raw = buffer_ops.buffer_load(x_rsrc, safe, vec_width=8, dtype=elem_ty)
+                out.append((raw, valid, local_m * TILE_K + local_k))
+            return out
 
         def gather_b(k_base):
-            linear = tid * LDG_VEC
-            local_n = linear // TILE_K
-            local_k = linear % TILE_K
-            col = n_offset + fx.Index(local_n)
-            g_off = fx.Int32(col * crs + (fx.Index(k_base) + fx.Index(local_k)))
-            if const_expr(n_tail):
-                col_valid = col < fx.Index(k)
-                safe = arith.select(col_valid, g_off, fx.Int32(0))
-                raw = buffer_ops.buffer_load(w_rsrc, safe, vec_width=8, dtype=elem_ty)
-                return (raw, col_valid, local_n * TILE_K + local_k)
-            raw = buffer_ops.buffer_load(w_rsrc, g_off, vec_width=8, dtype=elem_ty)
-            return (raw, None, local_n * TILE_K + local_k)
+            out = []
+            for i in range_constexpr(LDG_B_COUNT):
+                linear = (tid + i * BLOCK_THREADS) * LDG_VEC
+                local_n = linear // TILE_K
+                local_k = linear % TILE_K
+                col = n_offset + fx.Index(local_n)
+                g_off = fx.Int32(col * crs + (fx.Index(k_base) + fx.Index(local_k)))
+                if const_expr(n_tail):
+                    col_valid = col < fx.Index(k)
+                    safe = arith.select(col_valid, g_off, fx.Int32(0))
+                    raw = buffer_ops.buffer_load(w_rsrc, safe, vec_width=8, dtype=elem_ty)
+                    out.append((raw, col_valid, local_n * TILE_K + local_k))
+                else:
+                    raw = buffer_ops.buffer_load(w_rsrc, g_off, vec_width=8, dtype=elem_ty)
+                    out.append((raw, None, local_n * TILE_K + local_k))
+            return out
 
-        def commit_a(stage, vo):
-            raw, valid, off = vo
-            val = arith.select(valid, raw, zero8)  # mask consumed here (hidden behind MFMAs)
-            lds_store_vec8(a_lds, fx.Index(stage) * TILE_M * TILE_K + off, val)
+        def commit_a(stage, vos):
+            for raw, valid, off in vos:
+                val = arith.select(valid, raw, zero8)  # mask consumed here (hidden behind MFMAs)
+                lds_store_vec8(a_lds, fx.Index(stage) * TILE_M * TILE_K + off, val)
 
-        def commit_b(stage, vo):
-            raw, valid, off = vo
-            val = raw if const_expr(valid is None) else arith.select(valid, raw, zero8)
-            lds_store_vec8(b_lds, fx.Index(stage) * TILE_N * TILE_K + off, val)
+        def commit_b(stage, vos):
+            for raw, valid, off in vos:
+                val = raw if const_expr(valid is None) else arith.select(valid, raw, zero8)
+                lds_store_vec8(b_lds, fx.Index(stage) * TILE_N * TILE_K + off, val)
 
-        # ---- single-vec ds_read (LDS -> register) ----
-        def read_a_vec(stage, m_half, wm):
-            a_row = m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + lane_m
+        # ---- single-vec ds_read (LDS -> register), indexed by per-wave MFMA row ----
+        def read_a_vec(stage, mi):
+            a_row = wave_m * WARP_M + mi * MFMA_M + lane_m
             return lds_load_vec8(a_lds, a_lds_off(stage, fx.Index(a_row), fx.Index(lane_k_a)))
 
-        def read_b_vec(stage, n_half, wn):
-            b_row = n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N + lane_n
+        def read_b_vec(stage, ni):
+            b_row = wave_n * WARP_N + ni * MFMA_N + lane_n
             return lds_load_vec8(b_lds, b_lds_off(stage, fx.Index(b_row), fx.Index(lane_k_b)))
 
         def mfma_one(a_frag, b_frag, c_frag):
@@ -341,50 +358,18 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
             rocdl.sched_mfma(1)
             return out
 
-        # phase_b_prefetch: compute C00 while prefetching B1 from LDS.
-        def phase_b_prefetch(read_stage, a0_0, a0_1, b0_0, acc):
-            out = [v for v in acc]
-            out[0] = mfma_one(a0_0, b0_0, out[0])
-            b1_0 = read_b_vec(read_stage, 1, 0)
-            rocdl.sched_dsrd(1)
-            out[1] = mfma_one(a0_1, b0_0, out[1])
-            return out, b1_0
+        def read_a_frags(stage):
+            frags = [read_a_vec(stage, mi) for mi in range_constexpr(MI_M)]
+            rocdl.sched_dsrd(MI_M)
+            return frags
 
-        # phase_a_prefetch: compute C01 while prefetching A1 from LDS.
-        def phase_a_prefetch(read_stage, a0_0, a0_1, b1_0, acc):
-            out = [v for v in acc]
-            out[0] = mfma_one(a0_0, b1_0, out[0])
-            a1_0 = read_a_vec(read_stage, 1, 0)
-            rocdl.sched_dsrd(1)
-            out[1] = mfma_one(a0_1, b1_0, out[1])
-            a1_1 = read_a_vec(read_stage, 1, 1)
-            rocdl.sched_dsrd(1)
-            return out, a1_0, a1_1
+        def read_b_frags(stage):
+            frags = [read_b_vec(stage, ni) for ni in range_constexpr(MI_N)]
+            rocdl.sched_dsrd(MI_N)
+            return frags
 
-        # phase_ab_prefetch: compute C11 while reading only the next tile's B0.
-        # A0 is read at the start of the next iteration to shorten VGPR lifetime.
-        def phase_ab_prefetch(read_stage, a1_0, a1_1, b1_0, acc):
-            out = [v for v in acc]
-            out[0] = mfma_one(a1_0, b1_0, out[0])
-            next_b0_0 = read_b_vec(read_stage, 0, 0)
-            rocdl.sched_dsrd(1)
-            out[1] = mfma_one(a1_1, b1_0, out[1])
-            return out, next_b0_0
-
-        def phase_compute(a1_0, a1_1, b_0, acc):
-            out = [v for v in acc]
-            out[0] = mfma_one(a1_0, b_0, out[0])
-            out[1] = mfma_one(a1_1, b_0, out[1])
-            return out
-
-        def compute_prefetch_phases(read_stage, a0_0, a0_1, b0_0):
-            rocdl.s_setprio(1)
-            c00, b1_0 = phase_b_prefetch(read_stage, a0_0, a0_1, b0_0, acc00)
-            c01, a1_0, a1_1 = phase_a_prefetch(read_stage, a0_0, a0_1, b1_0, acc01)
-            rocdl.s_setprio(0)
-            return c00, c01, a1_0, a1_1, b1_0
-
-        # ---- prologue: tile 0 -> LDS, tile 1 -> VGPR prefetch ----
+        # ---- generic double-buffered pipeline ----
+        # prologue: stage 0 committed to LDS, stage 1 prefetched to VGPR.
         stage = 0
         next_stage = 1
         commit_a(stage, gather_a(k_off))
@@ -392,83 +377,35 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
         if const_expr(tiles_per_split > 1):
             pf_a = gather_a(k_off + TILE_K)
             pf_b = gather_b(k_off + TILE_K)
-            rocdl.sched_vmem(2)
+            rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
         barrier(vmcnt=None, lgkmcnt=0)
 
-        a0_0 = read_a_vec(stage, 0, 0)
-        a0_1 = read_a_vec(stage, 0, 1)
-        b0_0 = read_b_vec(stage, 0, 0)
-        rocdl.sched_dsrd(3)
+        a_frags = read_a_frags(stage)
+        b_frags = read_b_frags(stage)
 
-        # ---- main loop: compute tile k, write prefetched k+1, load k+2 ----
-        if const_expr(tiles_per_split > 2):
-            for kt_idx in range_constexpr(tiles_per_split - 2):
-                acc00, acc01, a1_0, a1_1, b1_0 = compute_prefetch_phases(stage, a0_0, a0_1, b0_0)
-
-                # Extra lockstep barrier after the acc00/acc01 phase.
-                barrier(vmcnt=None, lgkmcnt=None)
-
+        for kt_idx in range_constexpr(tiles_per_split):
+            if const_expr(kt_idx + 1 < tiles_per_split):
                 commit_a(next_stage, pf_a)
-                rocdl.sched_dswr(1)
-                pf_a = gather_a(k_off + (kt_idx + 2) * TILE_K)
-                rocdl.sched_vmem(1)
-                rocdl.s_setprio(1)
-                acc10[0] = mfma_one(a1_0, b0_0, acc10[0])
-
                 commit_b(next_stage, pf_b)
-                rocdl.sched_dswr(1)
-                pf_b = gather_b(k_off + (kt_idx + 2) * TILE_K)
-                rocdl.sched_vmem(1)
-                acc10[1] = mfma_one(a1_1, b0_0, acc10[1])
-                rocdl.s_setprio(0)
+                rocdl.sched_dswr(LDG_A_COUNT + LDG_B_COUNT)
+                if const_expr(kt_idx + 2 < tiles_per_split):
+                    pf_a = gather_a(k_off + (kt_idx + 2) * TILE_K)
+                    pf_b = gather_b(k_off + (kt_idx + 2) * TILE_K)
+                    rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
 
+            rocdl.s_setprio(1)
+            for mi in range_constexpr(MI_M):
+                for ni in range_constexpr(MI_N):
+                    idx = mi * MI_N + ni
+                    acc[idx] = mfma_one(a_frags[mi], b_frags[ni], acc[idx])
+            rocdl.s_setprio(0)
+
+            if const_expr(kt_idx + 1 < tiles_per_split):
                 barrier(vmcnt=None, lgkmcnt=0)
-
-                rocdl.s_setprio(1)
-                acc11, b0_0 = phase_ab_prefetch(next_stage, a1_0, a1_1, b1_0, acc11)
-                rocdl.s_setprio(0)
-
-                # Extra lockstep barrier after the acc11 phase.
-                barrier(vmcnt=None, lgkmcnt=None)
-
                 stage = next_stage
                 next_stage = (stage + 1) % STAGES
-                a0_0 = read_a_vec(stage, 0, 0)
-                a0_1 = read_a_vec(stage, 0, 1)
-                rocdl.sched_dsrd(2)
-
-        # ---- peeled iteration: compute tile K-2, write final prefetched tile ----
-        if const_expr(tiles_per_split >= 2):
-            acc00, acc01, a1_0, a1_1, b1_0 = compute_prefetch_phases(stage, a0_0, a0_1, b0_0)
-
-            commit_a(next_stage, pf_a)
-            rocdl.sched_dswr(1)
-            rocdl.s_setprio(1)
-            acc10[0] = mfma_one(a1_0, b0_0, acc10[0])
-
-            commit_b(next_stage, pf_b)
-            rocdl.sched_dswr(1)
-            acc10[1] = mfma_one(a1_1, b0_0, acc10[1])
-            rocdl.s_setprio(0)
-
-            barrier(vmcnt=None, lgkmcnt=0)
-
-            rocdl.s_setprio(1)
-            acc11, b0_0 = phase_ab_prefetch(next_stage, a1_0, a1_1, b1_0, acc11)
-            rocdl.s_setprio(0)
-            stage = next_stage
-            next_stage = (stage + 1) % STAGES
-            a0_0 = read_a_vec(stage, 0, 0)
-            a0_1 = read_a_vec(stage, 0, 1)
-            rocdl.sched_dsrd(2)
-
-        # ---- epilogue: final tile, no more LDS overwrite or next-tile reads ----
-        acc00, acc01, a1_0, a1_1, b1_0 = compute_prefetch_phases(stage, a0_0, a0_1, b0_0)
-        waitcnt(lgkmcnt=0)
-        rocdl.s_setprio(1)
-        acc10 = phase_compute(a1_0, a1_1, b0_0, acc10)
-        acc11 = phase_compute(a1_0, a1_1, b1_0, acc11)
-        rocdl.s_setprio(0)
+                a_frags = read_a_frags(stage)
+                b_frags = read_b_frags(stage)
 
         _row_chk = npq % TILE_M != 0
         _need_chk = _row_chk or n_tail
@@ -482,12 +419,12 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
             v = col < fx.Index(k)
             return arith.andi(v, v)
 
-        def store_quad(acc, m_half, n_half):
-            for wm in range_constexpr(QM_STEPS):
-                row_base = m_offset + m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + c_m_vec
-                for wn in range_constexpr(QN_STEPS):
-                    col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N + c_n)
-                    a = Vec(acc[wm * QN_STEPS + wn])
+        def store_acc():
+            for mi in range_constexpr(MI_M):
+                row_base = m_offset + wave_m * WARP_M + mi * MFMA_M + c_m_vec
+                for ni in range_constexpr(MI_N):
+                    col = n_offset + fx.Index(wave_n * WARP_N + ni * MFMA_N + c_n)
+                    a = Vec(acc[mi * MI_N + ni])
                     if const_expr(has_bias and not use_splitk):
                         col_i = fx.Int32(col)
                         if const_expr(n_tail):
@@ -500,9 +437,9 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
                         if const_expr(n == 1):
                             off_nk = col * dhw + row
                         else:
-                            ni = row // dhw
+                            n_idx = row // dhw
                             sp = row % dhw
-                            off_nk = ni * (k * dhw) + col * dhw + sp
+                            off_nk = n_idx * (k * dhw) + col * dhw + sp
 
                         def _emit():
                             if const_expr(use_splitk):
@@ -519,10 +456,7 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
                         else:
                             _emit()
 
-        store_quad(acc00, 0, 0)
-        store_quad(acc01, 0, 1)
-        store_quad(acc10, 1, 0)
-        store_quad(acc11, 1, 1)
+        store_acc()
 
     @flyc.jit
     def launch(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -533,15 +467,16 @@ def compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, 
     return launch
 
 
-def _choose_splitk(npq, crs, k, device):
-    grid_m = (npq + TILE_M - 1) // TILE_M
-    grid_n = (k + TILE_N - 1) // TILE_N
+def _choose_splitk(npq, crs, k, device, tile=DEFAULT_TILE):
+    tile_m, tile_n = tile[0], tile[1]
+    grid_m = (npq + tile_m - 1) // tile_m
+    grid_n = (k + tile_n - 1) // tile_n
     base = grid_m * grid_n
     k_tiles = (crs + TILE_K - 1) // TILE_K
 
     if npq < 4096 or k_tiles < 16:
         return 1
-    if k % TILE_N != 0 or npq % TILE_M != 0 or crs % TILE_K != 0:  # atomic path needs clean tiles
+    if k % tile_n != 0 or npq % tile_m != 0 or crs % TILE_K != 0:  # atomic path needs clean tiles
         return 1
     try:
         num_cu = torch.cuda.get_device_properties(device).multi_processor_count
@@ -555,8 +490,20 @@ def _choose_splitk(npq, crs, k, device):
     return sk
 
 
-def conv3d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None):
+def _resolve_splitk(splitk, npq, crs, k, device, tile):
+    sk = _choose_splitk(npq, crs, k, device, tile) if splitk is None else max(1, splitk)
+    k_tiles = (crs + TILE_K - 1) // TILE_K
+    while sk > 1 and k_tiles % sk != 0:
+        sk -= 1
+    return sk
+
+
+def conv3d_implicit_8wave(
+    x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None
+):
     # x: (N,C,D,H,W) bf16, weight: (K,C,T,R,S) bf16. splitk=None -> auto-dispatch.
+    # tile=(TILE_M,TILE_N,WAVE_M,WAVE_N) forces a config; autotune=True picks the
+    # best tile per shape (also enabled via FLYDSL_CONV3D_AUTOTUNE=1).
     n, c, d, h, w = x.shape
     k, wc, kt, kh, kw = weight.shape
     assert c == wc
@@ -569,25 +516,40 @@ def conv3d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, splitk=None
     npq = n * do * ho * wo
     crs = c * kt * kh * kw
 
-    sk = _choose_splitk(npq, crs, k, x.device) if splitk is None else max(1, splitk)
-    k_tiles = (crs + TILE_K - 1) // TILE_K
-    while sk > 1 and k_tiles % sk != 0:
-        sk -= 1
-    use_splitk = sk > 1
-
-    # Fast fused NCDHW->NDHWC transpose + cached weight permute (reuse prod's
-    # helpers) instead of torch permute+contiguous per call.
-    x_ndhwc = _ncdhw_to_ndhwc(x, stream)
-    w_packed = _prep_weight(weight, k, kt, kh, kw, c)
-    if use_splitk:
-        y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
-    else:
-        y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+    launch_stream = torch.cuda.current_stream() if stream is None else stream
     has_bias = bias is not None
     bias_arg = bias.to(torch.float32).contiguous() if has_bias else torch.empty(1, device=x.device, dtype=torch.float32)
-    exe = compile_conv3d_implicit_8wave(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
-    exe(y, x_ndhwc, w_packed, bias_arg, torch.cuda.current_stream() if stream is None else stream)
-    if use_splitk:
+
+    # Transpose/weight-pack are tile-independent; do them once (also reused across
+    # tuning candidates).
+    x_ndhwc = _ncdhw_to_ndhwc(x, stream)
+    w_packed = _prep_weight(weight, k, kt, kh, kw, c)
+
+    shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
+
+    def _run(the_tile):
+        sk = _resolve_splitk(splitk, npq, crs, k, x.device, the_tile)
+        if sk > 1:
+            y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
+        else:
+            y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+        exe = compile_conv3d_implicit_8wave(
+            n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile
+        )
+        exe(y, x_ndhwc, w_packed, bias_arg, launch_stream)
+        return y, sk
+
+    if tile is not None:
+        chosen = tuple(tile)
+    elif autotune or (autotune is None and _autotune_enabled()):
+        from kernels.conv.conv3d_autotune import BF16_CANDIDATES, autotune_conv3d
+
+        chosen = autotune_conv3d("bf16", shape, "bf16", BF16_CANDIDATES, x.device, lambda t: _run(t)[0])
+    else:
+        chosen = DEFAULT_TILE
+
+    y, sk = _run(chosen)
+    if sk > 1:
         if has_bias:
             y = y + bias_arg.view(1, k)
         y = y.to(torch.bfloat16)

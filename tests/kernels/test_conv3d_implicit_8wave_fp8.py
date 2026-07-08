@@ -65,3 +65,36 @@ def test_conv3d_fp8_vs_fp8cast_reference(n, c, t, h, w, k, stride, padding):
     crs = c * 3 * 3 * 3
     threshold = 5e-2 if crs % 128 != 0 else 1e-2
     assert rel.item() < threshold, f"FP8 conv rel_err {rel.item():.3e} too high vs FP8-cast reference"
+
+
+# Tile-size sweep on an aligned shape (C, K, CRS all 128-multiples) so the only
+# error source is the FP8 quantization floor; each forced tile must match.
+@_skip_no_fp8
+@pytest.mark.parametrize(
+    "tile",
+    [
+        (128, 128, 2, 4),  # default
+        (128, 256, 2, 4),
+        (256, 128, 2, 4),
+        (256, 256, 2, 4),
+        (128, 128, 4, 2),
+        (64, 128, 1, 4),
+    ],
+)
+def test_conv3d_fp8_tile_configs(tile):
+    torch.manual_seed(3300 + sum(tile))
+    n, c, t, h, w, k, stride, padding = 1, 128, 3, 18, 18, 256, 1, 1
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
+
+    y = conv3d_implicit_8wave_fp8(x, weight, stride=stride, padding=padding, tile=tile)
+    ref = F.conv3d(
+        x.to(torch.float8_e4m3fn).to(torch.bfloat16),
+        weight.to(torch.float8_e4m3fn).to(torch.bfloat16),
+        stride=stride,
+        padding=padding,
+    )
+    torch.cuda.synchronize()
+    assert y.shape == ref.shape
+    rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
+    assert rel.item() < 6e-2, f"FP8 conv rel_err {rel.item():.3e} too high for tile {tile}"

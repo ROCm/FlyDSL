@@ -5,6 +5,7 @@ Returns (N, K, Do, Ho, Wo) bf16. Requires gfx95x; C%128==0, CRS%128==0, NPQ%128=
 """
 
 import functools
+import os
 import weakref
 
 import torch
@@ -16,34 +17,31 @@ from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.typing import T
 from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
 
-TILE_M = 128
-TILE_N = 128
+# TILE_K is pinned to the FP8 MFMA k-dim (mfma_f32_16x16x128 -> 128). The tile
+# size (TILE_M/TILE_N) and wave layout (WAVE_M/WAVE_N) are compile-time
+# parameters of compile_conv3d_implicit_8wave_fp8 (autotuned per shape).
 TILE_K = 128
 STAGES = 2
-
-WAVE_M = 2
-WAVE_N = 4
 WARP_SIZE = 64
-BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE
 
 MFMA_M = 16
 MFMA_N = 16
 MFMA_C_VALUES = 4
 
-HALF_M = TILE_M // 2
-HALF_N = TILE_N // 2
-QM_STEPS = HALF_M // WAVE_M // MFMA_M
-QN_STEPS = HALF_N // WAVE_N // MFMA_N
-N_SUB = QM_STEPS * QN_STEPS
-
-assert QM_STEPS == 2 and QN_STEPS == 1
-
 LDG_VEC = 16
-HALF_TILE_VECS = HALF_M * TILE_K // (LDG_VEC * BLOCK_THREADS)
-assert HALF_TILE_VECS == 1
 
-LDS_A_SIZE = STAGES * TILE_M * TILE_K
-LDS_B_SIZE = STAGES * TILE_N * TILE_K
+# gfx950 (CDNA4) LDS capacity (this kernel is CDNA4-only).
+LDS_CAPACITY_BYTES = 163840
+FP8_BYTES = 1
+
+# Default tile config = the original hand-tuned 8-wave 128x128 shape.
+DEFAULT_TILE = (128, 128, 2, 4)
+
+
+def _autotune_enabled():
+    return os.environ.get("FLYDSL_CONV3D_AUTOTUNE", "0").lower() in ("1", "true", "yes")
+
+
 PACK_BLOCK_THREADS = 256
 
 PACK_TR_TILE = 64
@@ -191,11 +189,36 @@ def compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw):
     return launch
 
 
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=256)
 def compile_conv3d_implicit_8wave_fp8(
-    n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1
+    n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1, tile=DEFAULT_TILE
 ):
     """Compile the FP8 conv: x is NDHWC FP8 bytes, weight is KTRSC FP8 bytes."""
+    TILE_M, TILE_N, WAVE_M, WAVE_N = tile
+    BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE
+    MI_M = TILE_M // WAVE_M // MFMA_M
+    MI_N = TILE_N // WAVE_N // MFMA_N
+    N_ACC = MI_M * MI_N
+    WARP_M = MI_M * MFMA_M
+    WARP_N = MI_N * MFMA_N
+    LDS_A_SIZE = STAGES * TILE_M * TILE_K
+    LDS_B_SIZE = STAGES * TILE_N * TILE_K
+    # Rows of a tile written per full pass of the block (each thread stores one
+    # LDG_VEC-wide chunk along K); TILE_K == vec chunks per row here.
+    A_ROW_BLKS = TILE_M // (BLOCK_THREADS * LDG_VEC // TILE_K)
+    B_ROW_BLKS = TILE_N // (BLOCK_THREADS * LDG_VEC // TILE_K)
+
+    assert TILE_K == 128
+    assert TILE_M % (WAVE_M * MFMA_M) == 0, f"TILE_M={TILE_M} not divisible by WAVE_M*16"
+    assert TILE_N % (WAVE_N * MFMA_N) == 0, f"TILE_N={TILE_N} not divisible by WAVE_N*16"
+    assert (TILE_M * TILE_K) % (BLOCK_THREADS * LDG_VEC) == 0, "A tile not a whole multiple of block loads"
+    assert (TILE_N * TILE_K) % (BLOCK_THREADS * LDG_VEC) == 0, "B tile not a whole multiple of block loads"
+    assert A_ROW_BLKS >= 1 and B_ROW_BLKS >= 1
+    assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
+    assert BLOCK_THREADS <= 1024, f"BLOCK_THREADS={BLOCK_THREADS} exceeds 1024"
+    lds_bytes = STAGES * (TILE_M + TILE_N) * TILE_K * FP8_BYTES
+    assert lds_bytes <= LDS_CAPACITY_BYTES, f"LDS {lds_bytes} exceeds {LDS_CAPACITY_BYTES}"
+
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (width + 2 * pw - kw) // sw + 1
@@ -205,7 +228,6 @@ def compile_conv3d_implicit_8wave_fp8(
     crs = c * kt * kh * kw
     k_tiles = (crs + TILE_K - 1) // TILE_K
 
-    assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
     assert k_tiles >= 1
 
     splitk = max(1, min(splitk, k_tiles))
@@ -254,11 +276,8 @@ def compile_conv3d_implicit_8wave_fp8(
         c_m_vec = lane_div_16 * MFMA_C_VALUES
         c_n = lane_mod_16
 
-        mfma = Mfma16x16x128(QM_STEPS, QN_STEPS)
-        acc00 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
-        acc01 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
-        acc10 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
-        acc11 = [mfma.zero_value for _ in range_constexpr(N_SUB)]
+        mfma = Mfma16x16x128(MI_M, MI_N)
+        acc = [mfma.zero_value for _ in range_constexpr(N_ACC)]
 
         Vec = fx.Vector
 
@@ -289,12 +308,16 @@ def compile_conv3d_implicit_8wave_fp8(
             src = fx.slice(src_div, (None, fx.Int32(src_elem)))
             fx.copy(g2s_atom, src, dst)
 
+        # Rows of a tile written per full pass of the block (each thread copies
+        # one LDG_VEC-wide chunk along K).
+        ROWS_PER_PASS = BLOCK_THREADS * LDG_VEC // TILE_K
+
         # ---- 3D im2col gather: global FP8 -> LDS (direct async copy) ----
-        def g2s_a_half(stage, m_half, k_base):
+        def g2s_a_block(stage, blk, k_base):
             linear = tid * LDG_VEC
             local_m = linear // TILE_K
             local_k = linear % TILE_K
-            row = m_offset + m_half * HALF_M + local_m
+            row = m_offset + blk * ROWS_PER_PASS + local_m
             row_valid = row < fx.Index(npq)
             n_idx = row // dhw
             rem = row % dhw
@@ -302,7 +325,7 @@ def compile_conv3d_implicit_8wave_fp8(
             rem2 = rem % hw_o
             oh = rem2 // wo
             ow = rem2 % wo
-            lds_elem = a_lds_off(stage, fx.Index(m_half * HALF_M) + local_m, local_k)
+            lds_elem = a_lds_off(stage, fx.Index(blk * ROWS_PER_PASS) + local_m, local_k)
             k_abs = fx.Index(k_base) + fx.Index(local_k)
             cc = k_abs % c
             ckk = k_abs // c
@@ -320,21 +343,21 @@ def compile_conv3d_implicit_8wave_fp8(
             safe_elem = arith.select(valid_data, g_elem_i, fx.Int32(x_num_records))
             copy_g2s(x_div, a_lds, lds_elem, safe_elem)
 
-        def g2s_b_half(stage, n_half, k_base):
+        def g2s_b_block(stage, blk, k_base):
             linear = tid * LDG_VEC
             local_n = linear // TILE_K
             local_k = linear % TILE_K
-            col = n_offset + fx.Index(n_half * HALF_N) + local_n
-            lds_elem = b_lds_off(stage, fx.Index(n_half * HALF_N) + local_n, local_k)
+            col = n_offset + fx.Index(blk * ROWS_PER_PASS) + local_n
+            lds_elem = b_lds_off(stage, fx.Index(blk * ROWS_PER_PASS) + local_n, local_k)
             g_elem = col * crs + (fx.Index(k_base) + fx.Index(local_k))
             g_elem_i = fx.Int32(g_elem)
             copy_g2s(w_div, b_lds, lds_elem, g_elem_i)
 
         def g2s_full_tile(stage, k_base):
-            g2s_a_half(stage, 0, k_base)
-            g2s_a_half(stage, 1, k_base)
-            g2s_b_half(stage, 0, k_base)
-            g2s_b_half(stage, 1, k_base)
+            for blk in range_constexpr(A_ROW_BLKS):
+                g2s_a_block(stage, blk, k_base)
+            for blk in range_constexpr(B_ROW_BLKS):
+                g2s_b_block(stage, blk, k_base)
 
         def lds_load_vec16(lds_array, elem_offset):
             u8_ptr = fx.recast_iter(fx.Uint8, lds_array.ptr)
@@ -345,13 +368,13 @@ def compile_conv3d_implicit_8wave_fp8(
             hi = lds_load_vec16(lds_array, elem_offset + fx.Index(64)).bitcast(fx.Int32)
             return pack_i32x4_i32x8(lo, hi)
 
-        def read_a_vec(stage, m_half, wm):
-            a_row = m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + lane_mod_16
+        def read_a_vec(stage, mi):
+            a_row = wave_m * WARP_M + mi * MFMA_M + lane_mod_16
             a_col = lane_div_16 * 16
             return lds_load_pack(a_lds, a_lds_off(stage, fx.Index(a_row), fx.Index(a_col)))
 
-        def read_b_vec(stage, n_half, wn):
-            b_row = n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N + lane_mod_16
+        def read_b_vec(stage, ni):
+            b_row = wave_n * WARP_N + ni * MFMA_N + lane_mod_16
             b_col = lane_div_16 * 16
             return lds_load_pack(b_lds, b_lds_off(stage, fx.Index(b_row), fx.Index(b_col)))
 
@@ -363,15 +386,23 @@ def compile_conv3d_implicit_8wave_fp8(
             fx.rocdl.sched_mfma(1)
             return out
 
+        def read_a_frags(stage):
+            frags = [read_a_vec(stage, mi) for mi in range_constexpr(MI_M)]
+            fx.rocdl.sched_dsrd(MI_M)
+            return frags
+
+        def read_b_frags(stage):
+            frags = [read_b_vec(stage, ni) for ni in range_constexpr(MI_N)]
+            fx.rocdl.sched_dsrd(MI_N)
+            return frags
+
         # ---- software-pipelined main loop ----
         stage = 0
         next_stage = 1
         g2s_full_tile(stage, k_off)
         barrier()
-        a0_0 = read_a_vec(stage, 0, 0)
-        a0_1 = read_a_vec(stage, 0, 1)
-        b0_0 = read_b_vec(stage, 0, 0)
-        fx.rocdl.sched_dsrd(3)
+        a_frags = read_a_frags(stage)
+        b_frags = read_b_frags(stage)
 
         for kt_idx in range_constexpr(tiles_per_split):
             # prefetch next tile: global -> LDS (async)
@@ -379,77 +410,55 @@ def compile_conv3d_implicit_8wave_fp8(
                 g2s_full_tile(next_stage, k_off + (kt_idx + 1) * TILE_K)
 
             setprio(1)
-            # acc00 = a0 . b0
-            acc00[0] = mfma_one(a0_0, b0_0, acc00[0])
-            b1_0 = read_b_vec(stage, 1, 0)
-            fx.rocdl.sched_dsrd(1)
-            acc00[1] = mfma_one(a0_1, b0_0, acc00[1])
-
-            # acc01 = a0 . b1
-            acc01[0] = mfma_one(a0_0, b1_0, acc01[0])
-            a1_0 = read_a_vec(stage, 1, 0)
-            fx.rocdl.sched_dsrd(1)
-            acc01[1] = mfma_one(a0_1, b1_0, acc01[1])
-            a1_1 = read_a_vec(stage, 1, 1)
-            fx.rocdl.sched_dsrd(1)
-
-            # acc10 = a1 . b0
-            acc10[0] = mfma_one(a1_0, b0_0, acc10[0])
-            acc10[1] = mfma_one(a1_1, b0_0, acc10[1])
-
-            # acc11 = a1 . b1
-            acc11[0] = mfma_one(a1_0, b1_0, acc11[0])
-            acc11[1] = mfma_one(a1_1, b1_0, acc11[1])
+            for mi in range_constexpr(MI_M):
+                for ni in range_constexpr(MI_N):
+                    idx = mi * MI_N + ni
+                    acc[idx] = mfma_one(a_frags[mi], b_frags[ni], acc[idx])
             setprio(0)
 
             if const_expr(kt_idx + 1 < tiles_per_split):
                 barrier()
                 stage = next_stage
                 next_stage = (stage + 1) % STAGES
-                a0_0 = read_a_vec(stage, 0, 0)
-                a0_1 = read_a_vec(stage, 0, 1)
-                b0_0 = read_b_vec(stage, 0, 0)
-                fx.rocdl.sched_dsrd(3)
+                a_frags = read_a_frags(stage)
+                b_frags = read_b_frags(stage)
 
-        def store_half_pair(acc0, acc1, m_half):
-            for wm in range_constexpr(QM_STEPS):
-                row_base = m_offset + m_half * HALF_M + wave_m * (HALF_M // WAVE_M) + wm * MFMA_M + c_m_vec
-                for n_half in range_constexpr(2):
-                    acc = acc0 if const_expr(n_half == 0) else acc1
-                    for wn in range_constexpr(QN_STEPS):
-                        col = n_offset + fx.Index(n_half * HALF_N + wave_n * (HALF_N // WAVE_N) + wn * MFMA_N) + c_n
-                        col_valid = col < fx.Index(k)
-                        # Under split-K the partial sums accumulate atomically into
-                        # FP32; bias is a single per-output add left to the host
-                        # post-pass (adding it per z-slice would scale it by splitk).
-                        if const_expr(has_bias and not use_splitk):
-                            bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=fx.Float32))
-                        acc_vec = Vec(acc[wm * QN_STEPS + wn])
-                        for i in range_constexpr(MFMA_C_VALUES):
-                            row = row_base + i
-                            out = acc_vec[i]
-                            if const_expr(use_splitk):
-                                # Atomics ignore hardware OOB suppression; guard explicitly.
-                                valid = (col < fx.Index(k)) & (row < fx.Index(npq))
-                                if valid:
-                                    off_b = fx.Int32((row * k + col) * 4)
-                                    z0 = fx.Int32(0)
-                                    fx.rocdl.raw_ptr_buffer_atomic_fadd(out, y_rsrc, off_b, z0, z0)
+        def store_acc():
+            for mi in range_constexpr(MI_M):
+                row_base = m_offset + wave_m * WARP_M + mi * MFMA_M + c_m_vec
+                for ni in range_constexpr(MI_N):
+                    col = n_offset + fx.Index(wave_n * WARP_N + ni * MFMA_N) + c_n
+                    col_valid = col < fx.Index(k)
+                    # Under split-K the partial sums accumulate atomically into
+                    # FP32; bias is a single per-output add left to the host
+                    # post-pass (adding it per z-slice would scale it by splitk).
+                    if const_expr(has_bias and not use_splitk):
+                        bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=fx.Float32))
+                    acc_vec = Vec(acc[mi * MI_N + ni])
+                    for i in range_constexpr(MFMA_C_VALUES):
+                        row = row_base + i
+                        out = acc_vec[i]
+                        if const_expr(use_splitk):
+                            # Atomics ignore hardware OOB suppression; guard explicitly.
+                            valid = (col < fx.Index(k)) & (row < fx.Index(npq))
+                            if valid:
+                                off_b = fx.Int32((row * k + col) * 4)
+                                z0 = fx.Int32(0)
+                                fx.rocdl.raw_ptr_buffer_atomic_fadd(out, y_rsrc, off_b, z0, z0)
+                        else:
+                            if const_expr(has_bias):
+                                out = out + bias_val
+                            # NCDHW output[n_idx, col, sp]: n_idx*(k*dhw) + col*dhw + sp.
+                            # n==1 fast path: n_idx=0, sp=row, no integer division.
+                            if const_expr(n == 1):
+                                off_ncdhw = col * dhw + row
                             else:
-                                if const_expr(has_bias):
-                                    out = out + bias_val
-                                # NCDHW output[ni, col, sp]: ni*(k*dhw) + col*dhw + sp.
-                                # n==1 fast path: ni=0, sp=row, no integer division.
-                                if const_expr(n == 1):
-                                    off_ncdhw = col * dhw + row
-                                else:
-                                    ni = row // dhw
-                                    sp = row % dhw
-                                    off_ncdhw = ni * (k * dhw) + col * dhw + sp
-                                buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
+                                n_idx = row // dhw
+                                sp = row % dhw
+                                off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
+                            buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
 
-        store_half_pair(acc00, acc01, 0)
-        store_half_pair(acc10, acc11, 1)
+        store_acc()
 
     @flyc.jit
     def launch(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -458,7 +467,10 @@ def compile_conv3d_implicit_8wave_fp8(
             x,
             weight,
             bias,
-            value_attrs={"rocdl.waves_per_eu": 2, "rocdl.flat_work_group_size": "512,512"},
+            value_attrs={
+                "rocdl.waves_per_eu": 2,
+                "rocdl.flat_work_group_size": f"{BLOCK_THREADS},{BLOCK_THREADS}",
+            },
         ).launch(grid=(grid_m, grid_n, splitk), block=(BLOCK_THREADS, 1, 1), stream=stream)
 
     return launch
@@ -471,10 +483,11 @@ def _normalize_3(v):
     return tuple(v)
 
 
-def _choose_splitk(npq, crs, k, device):
-    if npq % TILE_M != 0 or k % TILE_N != 0 or crs % TILE_K != 0:
+def _choose_splitk(npq, crs, k, device, tile=DEFAULT_TILE):
+    tile_m, tile_n = tile[0], tile[1]
+    if npq % tile_m != 0 or k % tile_n != 0 or crs % TILE_K != 0:
         return 1
-    base = (npq // TILE_M) * (k // TILE_N)
+    base = (npq // tile_m) * (k // tile_n)
     k_tiles = (crs + TILE_K - 1) // TILE_K
     if npq < 4096 or k_tiles < 16:
         return 1
@@ -490,8 +503,8 @@ def _choose_splitk(npq, crs, k, device):
     return sk
 
 
-def _resolve_splitk(splitk, npq, crs, k, device):
-    sk = _choose_splitk(npq, crs, k, device) if splitk is None else max(1, int(splitk))
+def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
+    sk = _choose_splitk(npq, crs, k, device, tile) if splitk is None else max(1, int(splitk))
     k_tiles = (crs + TILE_K - 1) // TILE_K
     sk = max(1, min(sk, k_tiles))
     while sk > 1 and k_tiles % sk != 0:
@@ -552,13 +565,18 @@ def _prep_weight_fp8(weight: torch.Tensor, stream=None) -> torch.Tensor:
     return out
 
 
-def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None):
+def conv3d_implicit_8wave_fp8(
+    x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None
+):
     """FP8 (E4M3FN) implicit conv3d. Same interface as the BF16 v6mb kernel.
 
     x: (N, C, D, H, W) bf16, weight: (K, C, T, R, S) bf16. Inputs are packed once
     to FP8 (NDHWC activation / cached KTRSC weight), then run through the CDNA4
     16x16x128 MFMA conv with a software-pipelined loop and optional split-K.
-    Returns bf16 (N, K, Do, Ho, Wo). splitk=None auto-dispatches."""
+    Returns bf16 (N, K, Do, Ho, Wo). splitk=None auto-dispatches.
+
+    tile=(TILE_M,TILE_N,WAVE_M,WAVE_N) forces a config; autotune=True picks the
+    best tile per shape (also enabled via FLYDSL_CONV3D_AUTOTUNE=1)."""
     n, c, d, h, width = x.shape
     k, wc, kt, kh, kw = weight.shape
     assert c == wc, f"in-channel mismatch: x has {c}, weight has {wc}"
@@ -586,21 +604,34 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, splitk=
     if has_bias:
         assert bias_arg.numel() == k, f"bias must have {k} elements, got {bias_arg.numel()}"
 
-    sk = _resolve_splitk(splitk, npq, crs, k, x.device)
-    use_splitk = sk > 1
-    if use_splitk:
-        y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
+    x_arg_t = flyc.from_torch_tensor(x_arg)
+    w_arg_t = flyc.from_torch_tensor(w_arg)
+    bias_t = flyc.from_torch_tensor(bias_arg)
+
+    def _run(the_tile):
+        sk = _resolve_splitk(splitk, npq, crs, k, x.device, the_tile)
+        if sk > 1:
+            y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
+        else:
+            y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
+        exe = compile_conv3d_implicit_8wave_fp8(
+            n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile
+        )
+        exe(flyc.from_torch_tensor(y.view(-1)), x_arg_t, w_arg_t, bias_t, launch_stream)
+        return y, sk
+
+    shape = (n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
+    if tile is not None:
+        chosen = tuple(tile)
+    elif autotune or (autotune is None and _autotune_enabled()):
+        from kernels.conv.conv3d_autotune import FP8_CANDIDATES, autotune_conv3d
+
+        chosen = autotune_conv3d("fp8", shape, "fp8", FP8_CANDIDATES, x.device, lambda t: _run(t)[0])
     else:
-        y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-    exe = compile_conv3d_implicit_8wave_fp8(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk)
-    exe(
-        flyc.from_torch_tensor(y.view(-1)),
-        flyc.from_torch_tensor(x_arg),
-        flyc.from_torch_tensor(w_arg),
-        flyc.from_torch_tensor(bias_arg),
-        launch_stream,
-    )
-    if use_splitk:
+        chosen = DEFAULT_TILE
+
+    y, sk = _run(chosen)
+    if sk > 1:
         if has_bias:
             y = y + bias_arg.view(1, k)
         y = y.to(torch.bfloat16)
