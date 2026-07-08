@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-08T10:39:09Z",
+ "updated": "2026-07-08T10:53:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28937064576,
+   "pr": 812,
+   "commit": "111c1b0284003517603a639ce9cd53877a758f1c",
+   "branch": "xudoyuan/kernels-smem-migration",
+   "event": "pull_request",
+   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28937064576",
+   "created_at": "2026-07-08T10:51:42Z",
+   "updated_at": "2026-07-08T10:51:43Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 28936205281,
    "pr": 812,
@@ -10,11 +25,11 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28936205281",
    "created_at": "2026-07-08T10:36:12Z",
-   "updated_at": "2026-07-08T10:36:13Z",
+   "updated_at": "2026-07-08T10:51:44Z",
    "actor": "xudoyuan",
    "jobs": []
   },
@@ -1913,21 +1928,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781375224/job/85501227814"
     }
    ]
-  },
-  {
-   "run_id": 28781004239,
-   "pr": null,
-   "commit": "ecca285a5348cc63dfd1d1ed4fd80024e3ce11d8",
-   "branch": "yanbo/combine_perf_tuning",
-   "event": "pull_request",
-   "title": "[Feat]: Add dispatch & combine tuning configuration",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28781004239",
-   "created_at": "2026-07-06T09:17:24Z",
-   "updated_at": "2026-07-06T09:23:30Z",
-   "actor": "yanboshao",
-   "jobs": []
   }
  ]
 }
