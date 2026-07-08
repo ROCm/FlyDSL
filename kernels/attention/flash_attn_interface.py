@@ -35,6 +35,11 @@ __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
 _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn: "fp8"}
 
+# Short varlen self-attn (max_seqlen_q <= this) routes to the lightweight generic
+# 4-wave BLOCK_M=128 kernel instead of the heavy 8-wave dualwave kernel on gfx950,
+# where the dualwave prologue/epilogue + 8-wave sync dominate for tiny workloads.
+_VARLEN_LIGHT_MAX_SEQ = 256
+
 
 def _dtype_str(t: torch.Tensor) -> str:
     s = _DTYPE_MAP.get(t.dtype)
@@ -113,6 +118,45 @@ def _build_varlen(
         num_kv_heads=num_kv_heads,
         varlen=True,
         cross_seqlen=cross_seqlen,
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+        dualwave_swp_lazy_rescale=lazy_rescale,
+        dualwave_swp_setprio=setprio,
+        dualwave_swp_debug_lazy_counts=debug_lazy_counts,
+        dualwave_swp_enable_stagger=enable_stagger,
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _build_varlen_light(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    cross_seqlen: bool,
+    waves_per_eu: int,
+    daz: bool,
+    lazy_rescale: bool,
+    setprio: bool,
+    debug_lazy_counts: bool,
+    enable_stagger: bool,
+):
+    """Build (and cache) a lightweight varlen launcher: the generic 4-wave
+    BLOCK_M=128 kernel with packed cu_seqlens (gfx942/gfx950). Used for short
+    varlen self-attn where the heavy 8-wave dualwave kernel underutilizes the
+    device. cross-length varlen is not supported here (falls back to dualwave)."""
+    from kernels.attention.flash_attn_generic import build_flash_attn_func_module
+
+    return build_flash_attn_func_module(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str=dtype_str,
+        num_kv_heads=num_kv_heads,
+        cross_seqlen=cross_seqlen,
+        varlen=True,
+        block_m=128,
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=lazy_rescale,
@@ -598,20 +642,48 @@ def flydsl_flash_attn_func(
                 enable_stagger=dualwave_swp_enable_stagger,
             )
         elif varlen:
-            exe = _build_varlen(
-                num_heads=H,
-                num_kv_heads=num_kv_heads,
-                head_dim=D,
-                causal=causal,
-                dtype_str=dtype_str,
-                cross_seqlen=cross,
-                waves_per_eu=waves_per_eu,
-                daz=daz,
-                lazy_rescale=dualwave_swp_lazy_rescale,
-                setprio=dualwave_swp_setprio,
-                debug_lazy_counts=debug_lazy,
-                enable_stagger=dualwave_swp_enable_stagger,
+            # Short varlen self-attn -> lightweight generic 4-wave BLOCK_M=128 kernel.
+            # The heavy 8-wave dualwave kernel wins for long sequences (amortized
+            # prologue). gfx942 has no dualwave, so self-attn varlen always uses the
+            # light path there. cross-length / debug-count varlen stay on dualwave.
+            _arch = _gpu_arch(q.device)
+            _prefer_light = (
+                (not cross)
+                and (not debug_lazy)
+                and D in (64, 128)
+                and dtype_str in ("bf16", "f16")
+                and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
             )
+            if _prefer_light:
+                exe = _build_varlen_light(
+                    num_heads=H,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=D,
+                    causal=causal,
+                    dtype_str=dtype_str,
+                    cross_seqlen=cross,
+                    waves_per_eu=waves_per_eu,
+                    daz=daz,
+                    lazy_rescale=dualwave_swp_lazy_rescale,
+                    setprio=dualwave_swp_setprio,
+                    debug_lazy_counts=debug_lazy,
+                    enable_stagger=dualwave_swp_enable_stagger,
+                )
+            else:
+                exe = _build_varlen(
+                    num_heads=H,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=D,
+                    causal=causal,
+                    dtype_str=dtype_str,
+                    cross_seqlen=cross,
+                    waves_per_eu=waves_per_eu,
+                    daz=daz,
+                    lazy_rescale=dualwave_swp_lazy_rescale,
+                    setprio=dualwave_swp_setprio,
+                    debug_lazy_counts=debug_lazy,
+                    enable_stagger=dualwave_swp_enable_stagger,
+                )
         else:
             exe = _build_dense(
                 num_heads=H,

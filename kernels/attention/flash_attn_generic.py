@@ -119,6 +119,7 @@ def build_flash_attn_func_module_primary(
     cu_seqlens_q=None,
     cu_seqlens_kv=None,
     cross_seqlen=False,
+    varlen=False,
     dualwave_swp_lazy_rescale=True,
     dualwave_swp_setprio=True,
     dualwave_swp_debug_lazy_counts=False,
@@ -431,13 +432,22 @@ def build_flash_attn_func_module_primary(
     GQA_GROUP_SIZE = NUM_HEADS_Q // NUM_HEADS_KV
     HEAD_DIM = head_dim
     CAUSAL = causal
+    # varlen=True: packed QKV via cu_seqlens (launch-arg mode, kernel takes
+    # CuSeqQ/CuSeqKv). varlen=False keeps the dense signature byte-identical.
+    VARLEN = bool(varlen)
     STRIDE_TOKEN_Q = NUM_HEADS_Q * HEAD_DIM
     STRIDE_TOKEN_KV = NUM_HEADS_KV * HEAD_DIM
 
     # Bank-conflict-free LDS strides.
-    # K uses XOR swizzle (col ^ ((row & 7) << 4)) at 16-element granularity
+    # K uses XOR swizzle (col ^ ((row & mask) << 4)) at 16-element granularity
     # instead of padding. This enables ds_read_b128 (stride is 256B-aligned).
     K_STRIDE = HEAD_DIM
+    # Row mask for the K XOR swizzle = (#16-elem col blocks per row) - 1. A
+    # hardcoded 0x7 assumes HEAD_DIM=128 (8 blocks); for HEAD_DIM=64 (4 blocks)
+    # the mask must be 0x3, else (row&7)<<4 reaches 64..112 and the swizzled
+    # write overflows the 64-wide K row into the neighbouring KV row (data
+    # collision -> wrong scores for varying-along-d K). D=128 keeps 0x7.
+    K_SWZ_ROWMASK = HEAD_DIM // 16 - 1
     if USE_HW_TR:
         V_STRIDE = HEAD_DIM if ENABLE_DMA else HEAD_DIM + 4
     else:
@@ -485,6 +495,8 @@ def build_flash_attn_func_module_primary(
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
         seq_len: fx.Int32,
+        CuSeqQ: fx.Tensor,
+        CuSeqKv: fx.Tensor,
     ):
         elem_dtype = dtype_to_elem_type(dtype_str)
         elem_type = elem_dtype.ir_type
@@ -589,9 +601,31 @@ def build_flash_attn_func_module_primary(
         # turn this into a dynamic dispatch and lose `kv_head_idx`.
         kv_head_idx = q_head_idx if GQA_GROUP_SIZE == 1 else q_head_idx // GQA_GROUP_SIZE
 
+        # Per-batch token base + seqlen. Dense: batch_idx*seq_len (byte-identical
+        # to the previous inline form after CSE). Varlen (packed QKV): read the
+        # cumulative cu_seqlens[batch]/[batch+1]. num_q_tiles above keeps using
+        # seq_len_v (== max_seqlen_q) so the flat-grid decode matches the launch.
+        if const_expr(VARLEN):
+            _cuq_ptr = _extract_aligned_pointer(CuSeqQ)
+            _cuk_ptr = _extract_aligned_pointer(CuSeqKv)
+
+            def _cu_load(ptr, idx):
+                gep = buffer_ops.get_element_ptr(ptr, fx.Int64(idx), elem_type=fx.Int32.ir_type)
+                return fx.Index(fx.Int32(_pointer_load(fx.Int32.ir_type, gep)))
+
+            q_tok_base = _cu_load(_cuq_ptr, batch_idx)
+            kv_tok_base = _cu_load(_cuk_ptr, batch_idx)
+            seqlen_q_b = _cu_load(_cuq_ptr, batch_idx + fx.Index(1)) - q_tok_base
+            seqlen_kv_b = _cu_load(_cuk_ptr, batch_idx + fx.Index(1)) - kv_tok_base
+        else:
+            q_tok_base = batch_idx * seq_len_v
+            kv_tok_base = batch_idx * seq_len_v
+            seqlen_q_b = seq_len_v
+            seqlen_kv_b = seq_len_v
+
         # Non-DMA KV loads use raw k_ptr/v_ptr; fold the per-batch element
         # offset so 0-based global_idx_kv reads this batch (DMA path uses k/v_rsrc).
-        _kv_ptr_batch_off = batch_idx * seq_len_v * fx.Index(STRIDE_TOKEN_KV)
+        _kv_ptr_batch_off = kv_tok_base * fx.Index(STRIDE_TOKEN_KV)
         k_ptr = buffer_ops.get_element_ptr(k_ptr, _kv_ptr_batch_off, elem_type=elem_type)
         v_ptr = buffer_ops.get_element_ptr(v_ptr, _kv_ptr_batch_off, elem_type=elem_type)
 
@@ -615,8 +649,8 @@ def build_flash_attn_func_module_primary(
             # global KV row to the last valid token; partial-tile lanes then read a
             # duplicated in-bounds row whose contribution the score-side causal /
             # padding mask discards. (The DMA path is bounded by num_records.)
-            last = seq_len_v - fx.Index(1)
-            return fx.Index(ArithValue(row_idx < seq_len_v).select(row_idx, last))
+            last = seqlen_kv_b - fx.Index(1)
+            return fx.Index(ArithValue(row_idx < seqlen_kv_b).select(row_idx, last))
 
         def _load_global_half_vec(ptr, base_idx, vec_elems: int):
             gep = buffer_ops.get_element_ptr(ptr, fx.Int64(base_idx), elem_type=elem_type)
@@ -672,7 +706,7 @@ def build_flash_attn_func_module_primary(
 
         # ---- K XOR swizzle: col ^ ((row & 7) << 4) at 16-element granularity ----
         def _k_swizzle(row_idx, col_idx):
-            mask = (row_idx & fx.Index(0x7)) << fx.Index(4)
+            mask = (row_idx & fx.Index(K_SWZ_ROWMASK)) << fx.Index(4)
             return col_idx ^ mask
 
         # ---- Cooperative K load (row-major, XOR-swizzled) ----
@@ -760,10 +794,10 @@ def build_flash_attn_func_module_primary(
         # global_idx_q/kv + DMA global_row), so the 32-bit voffset and the int32 C-ABI
         # shape field never see the whole-tensor numel (which can reach 2^31). OOB rows
         # within the batch still read 0 / drop on store (arbitrary-seqlen safe).
-        _kv_nrec_bytes = _raw(seq_len_v * fx.Index(STRIDE_TOKEN_KV * 2))
-        _q_nrec_bytes = _raw(seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
-        _q_batch_byte_off = _raw(batch_idx * seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
-        _kv_batch_byte_off = _raw(batch_idx * seq_len_v * fx.Index(STRIDE_TOKEN_KV * 2))
+        _kv_nrec_bytes = _raw(seqlen_kv_b * fx.Index(STRIDE_TOKEN_KV * 2))
+        _q_nrec_bytes = _raw(seqlen_q_b * fx.Index(STRIDE_TOKEN_Q * 2))
+        _q_batch_byte_off = _raw(q_tok_base * fx.Index(STRIDE_TOKEN_Q * 2))
+        _kv_batch_byte_off = _raw(kv_tok_base * fx.Index(STRIDE_TOKEN_KV * 2))
         q_rsrc = buffer_ops.create_buffer_resource(
             Q, max_size=False, num_records_bytes=_q_nrec_bytes, base_byte_offset=_q_batch_byte_off
         )
@@ -903,9 +937,9 @@ def build_flash_attn_func_module_primary(
         # ---- KV loop upper bound ----
         _q_end = q_start + BLOCK_M
         if const_expr(CAUSAL):
-            kv_upper = fx.Index(ArithValue(_q_end < seq_len_v).select(_q_end, seq_len_v))
+            kv_upper = fx.Index(ArithValue(_q_end < seqlen_kv_b).select(_q_end, seqlen_kv_b))
         else:
-            kv_upper = seq_len_v
+            kv_upper = seqlen_kv_b
 
         # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
         _use_dma_dbuf = ENABLE_DMA and not ENABLE_PREFETCH_3BUF
@@ -976,7 +1010,7 @@ def build_flash_attn_func_module_primary(
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
                 k_hi_offset = K_SUB_N * K_STRIDE
                 # XOR swizzle: col ^ ((row & 0x7) << 4) avoids LDS bank conflicts
-                k_swz_mask = (lane_mod_32 & fx.Index(0x7)) << fx.Index(4)
+                k_swz_mask = (lane_mod_32 & fx.Index(K_SWZ_ROWMASK)) << fx.Index(4)
 
                 def _k_idx_lo(ks):
                     col = fx.Index(ks * K_STEP_QK) + lane_div_32 * MFMA_LANE_K
@@ -1182,7 +1216,7 @@ def build_flash_attn_func_module_primary(
                     # ((r//4)*8 + r%4); hi = +K_SUB_N.
                     kv_start_i32 = fx.Int32(kv_start)
                     lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(4)
-                    seq_len_i32 = fx.Int32(seq_len_v)
+                    seq_len_i32 = fx.Int32(seqlen_kv_b)
                     for r in range_constexpr(16):
                         _off = (r // 4) * 8 + (r % 4)
                         kv_col = kv_start_i32 + lane_off_i32 + fx.Int32(_off)
@@ -1475,6 +1509,8 @@ def build_flash_attn_func_module_primary(
         K: fx.Tensor,
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
+        CuSeqQ: fx.Tensor,
+        CuSeqKv: fx.Tensor,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -1504,6 +1540,8 @@ def build_flash_attn_func_module_primary(
             V,
             O,
             seq_len,
+            CuSeqQ,
+            CuSeqKv,
             value_attrs={
                 "rocdl.waves_per_eu": waves_per_eu,
                 "rocdl.flat_work_group_size": (
@@ -1532,13 +1570,19 @@ def build_flash_attn_func_module_primary(
         },
     }
 
-    def _launch(*args, **kwargs):
+    def _launch(Q, K, V, O, batch_size, seq_len, *, cu_seqlens_q=None, cu_seqlens_kv=None, stream=None):  # noqa: E741
+        # Dense passes the O tensor as a placeholder for the unused cu_seqlens
+        # slots; the kernel only reads them under const_expr(VARLEN).
+        cq = cu_seqlens_q if cu_seqlens_q is not None else O
+        ck = cu_seqlens_kv if cu_seqlens_kv is not None else O
         with CompilationContext.compile_hints(_fmha_compile_hints):
-            return launch_flash_attn_generic(*args, **kwargs)
+            return launch_flash_attn_generic(Q, K, V, O, cq, ck, batch_size, seq_len, fx.Stream(stream))
 
     def _compile(Q, K, V, O, batch_size, seq_len, stream=None):  # noqa: E741
         with CompilationContext.compile_hints(_fmha_compile_hints):
-            return flyc.compile(launch_flash_attn_generic, Q, K, V, O, batch_size, seq_len, fx.Stream(stream))
+            return flyc.compile(
+                launch_flash_attn_generic, Q, K, V, O, O, O, batch_size, seq_len, fx.Stream(stream)
+            )
 
     _launch.compile = _compile
 
