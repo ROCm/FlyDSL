@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-07T21:49:44Z",
+ "updated": "2026-07-08T00:57:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28908943293,
+   "pr": 795,
+   "commit": "50296196a21e11a130c5c41c12d4c58b6d344246",
+   "branch": "feat/rmsnorm-backward-769",
+   "event": "pull_request",
+   "title": "[rmsnorm] Add backward pass + forward store_rstd for training (PR 1/3, #769)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28908943293",
+   "created_at": "2026-07-08T00:41:42Z",
+   "updated_at": "2026-07-08T00:41:42Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 28891713668,
    "pr": 785,
@@ -1988,49 +2003,6 @@
    "updated_at": "2026-07-06T03:14:50Z",
    "actor": "benenzhu",
    "jobs": []
-  },
-  {
-   "run_id": 28764608170,
-   "pr": 802,
-   "commit": "613ea6b6007de7e8871d7044fc43f231b865534b",
-   "branch": "refactor/fp8-8wave-fx-gemm-call",
-   "event": "pull_request",
-   "title": "Refactor/fp8 8wave fx gemm call",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170",
-   "created_at": "2026-07-06T02:51:10Z",
-   "updated_at": "2026-07-06T04:02:27Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-06T02:52:24Z",
-     "completed_at": "2026-07-06T03:30:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170/job/85286370190"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-06T02:52:32Z",
-     "completed_at": "2026-07-06T03:44:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170/job/85286370191"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-06T02:52:37Z",
-     "completed_at": "2026-07-06T04:02:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28764608170/job/85286370192"
-    }
-   ]
   }
  ]
 }
