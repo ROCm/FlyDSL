@@ -1642,6 +1642,10 @@ if torch is not None:
         """Forward RMSNorm. Returns (out, rstd). eps is baked into the kernel."""
         assert x.dim() == 2, "rmsnorm_fwd expects a 2D (M, N) input"
         assert x.is_contiguous() and weight.is_contiguous(), "rmsnorm_fwd expects contiguous inputs"
+        # gamma is read at x's element width and the kernel launches on x's device,
+        # so a mismatched weight would silently corrupt output (or read out of bounds).
+        assert weight.device == x.device, "rmsnorm_fwd: weight and x must be on the same device"
+        assert weight.dtype == x.dtype, "rmsnorm_fwd: weight dtype must match x dtype"
         M, N = x.shape
         out = torch.empty_like(x)
         rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
@@ -1665,6 +1669,11 @@ if torch is not None:
         """
         assert x.dim() == 2, "rmsnorm_bwd expects a 2D (M, N) input"
         assert x.is_contiguous() and dout.is_contiguous(), "rmsnorm_bwd expects contiguous inputs"
+        assert weight.is_contiguous(), "rmsnorm_bwd: weight must be contiguous"
+        # Same-device/same-dtype contract as the forward: gamma and dy are read at
+        # x's element width and the kernel launches on x's device (multi-GPU correctness).
+        assert weight.device == x.device == dout.device == rstd.device, "rmsnorm_bwd: inputs must share a device"
+        assert weight.dtype == x.dtype and dout.dtype == x.dtype, "rmsnorm_bwd: weight/dout dtype must match x"
         M, N = x.shape
         dtype_str = _torch_dtype_to_str(x.dtype)
         dx = torch.empty_like(x)
