@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-08T13:41:14Z",
+ "updated": "2026-07-08T16:01:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -143,11 +143,11 @@
    "branch": "gemm_tune_v2",
    "event": "pull_request",
    "title": "Gemm tune v2",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28921916999",
    "created_at": "2026-07-08T06:17:17Z",
-   "updated_at": "2026-07-08T13:39:44Z",
+   "updated_at": "2026-07-08T13:39:50Z",
    "actor": "Copilot",
    "jobs": [
     {
@@ -162,19 +162,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-08T13:39:50Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-08T13:41:16Z",
+     "completed_at": "2026-07-08T14:38:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28921916999/job/85883753565"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-08T13:39:50Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-08T13:41:21Z",
+     "completed_at": "2026-07-08T15:06:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28921916999/job/85883753584"
     }
    ]
