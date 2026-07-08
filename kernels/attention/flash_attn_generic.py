@@ -912,9 +912,7 @@ def build_flash_attn_func_module_primary(
                 # Each lane DMAs one contiguous v8 into the no-major V line.
                 _pid = _paged_page_id(tile_start)
                 _paddr = _raw(_v_dma_base_i64 + fx.Int64(_pid) * _v_dma_page_bytes)
-                _rsrc = buffer_ops.create_buffer_resource_from_addr(
-                    _paddr, num_records_bytes=_raw(_v_dma_page_bytes)
-                )
+                _rsrc = buffer_ops.create_buffer_resource_from_addr(_paddr, num_records_bytes=_raw(_v_dma_page_bytes))
                 if const_expr(isinstance(buf_id, int)):
                     _vb = _v_dma_lds_base + fx.Index((LDS_V_BASE + buf_id * LDS_V_TILE_SIZE) * 2)
                 else:
@@ -931,9 +929,7 @@ def build_flash_attn_func_module_primary(
                         + _dcol * fx.Index(8)
                     )
                     _voff = fx.Int32(_voff_e * fx.Index(2))
-                    rocdl.raw_ptr_buffer_load_lds(
-                        _rsrc, _lds_ptr, _v_dma_sz, _voff, _v_dma_z, _v_dma_z, _v_dma_aux
-                    )
+                    rocdl.raw_ptr_buffer_load_lds(_rsrc, _lds_ptr, _v_dma_sz, _voff, _v_dma_z, _v_dma_z, _v_dma_aux)
 
         # Per-batch descriptors keep global indices 0-based and bounded to one batch.
         # This keeps 32-bit offsets small while preserving arbitrary-seqlen OOB behavior.
@@ -1747,24 +1743,34 @@ def build_flash_attn_func_module_primary(
     }
 
     def _launch(
-        Q, K, V, O, batch_size, seq_len, *,  # noqa: E741
-        cu_seqlens_q=None, cu_seqlens_kv=None, block_table=None, block_table_stride=0, stream=None,
+        Q,
+        K,
+        V,
+        Out,
+        batch_size,
+        seq_len,
+        *,
+        cu_seqlens_q=None,
+        cu_seqlens_kv=None,
+        block_table=None,
+        block_table_stride=0,
+        stream=None,
     ):
-        # Dense/non-paged pass the O tensor as a placeholder for the unused
+        # Dense/non-paged pass the output tensor as a placeholder for the unused
         # cu_seqlens / block_table slots; the kernel only reads them under
         # const_expr(VARLEN) / const_expr(PAGED).
-        cq = cu_seqlens_q if cu_seqlens_q is not None else O
-        ck = cu_seqlens_kv if cu_seqlens_kv is not None else O
-        bt = block_table if block_table is not None else O
+        cq = cu_seqlens_q if cu_seqlens_q is not None else Out
+        ck = cu_seqlens_kv if cu_seqlens_kv is not None else Out
+        bt = block_table if block_table is not None else Out
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return launch_flash_attn_generic(
-                Q, K, V, O, cq, ck, bt, block_table_stride, batch_size, seq_len, fx.Stream(stream)
+                Q, K, V, Out, cq, ck, bt, block_table_stride, batch_size, seq_len, fx.Stream(stream)
             )
 
-    def _compile(Q, K, V, O, batch_size, seq_len, stream=None):  # noqa: E741
+    def _compile(Q, K, V, Out, batch_size, seq_len, stream=None):
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return flyc.compile(
-                launch_flash_attn_generic, Q, K, V, O, O, O, O, 0, batch_size, seq_len, fx.Stream(stream)
+                launch_flash_attn_generic, Q, K, V, Out, Out, Out, Out, 0, batch_size, seq_len, fx.Stream(stream)
             )
 
     _launch.compile = _compile
