@@ -385,22 +385,52 @@ def _flydsl_flash_attn_paged(
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
-        exe = _build_paged(
-            num_heads=H,
-            num_kv_heads=num_kv_heads,
-            head_dim=D,
-            causal=causal,
-            dtype_str=dtype_str,
-            cross_seqlen=cross,
-            waves_per_eu=waves_per_eu,
-            daz=daz,
-            lazy_rescale=dualwave_swp_lazy_rescale,
-            setprio=dualwave_swp_setprio,
-            enable_stagger=dualwave_swp_enable_stagger,
-            num_kv_splits=int(num_kv_splits),
-            varlen=varlen,
-            kv_cache_layout=kv_cache_layout,
+        # Short paged varlen self-attn (linear) -> lightweight generic 4-wave
+        # BLOCK_M=128 kernel. Vectorized layout / cross-length / dense-paged /
+        # split-K / long sequences stay on the dualwave paged kernel.
+        _arch = _gpu_arch(q.device)
+        _paged_light_ok = (
+            varlen
+            and (num_kv_splits <= 1)
+            and (kv_cache_layout == "linear")
+            and (not cross)
+            and D in (64, 128)
+            and dtype_str in ("bf16", "f16")
+            and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
+        if _paged_light_ok:
+            exe = _build_paged_light(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                cross_seqlen=cross,
+                varlen=varlen,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                lazy_rescale=dualwave_swp_lazy_rescale,
+                setprio=dualwave_swp_setprio,
+                debug_lazy_counts=False,
+                enable_stagger=dualwave_swp_enable_stagger,
+            )
+        else:
+            exe = _build_paged(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                cross_seqlen=cross,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                lazy_rescale=dualwave_swp_lazy_rescale,
+                setprio=dualwave_swp_setprio,
+                enable_stagger=dualwave_swp_enable_stagger,
+                num_kv_splits=int(num_kv_splits),
+                varlen=varlen,
+                kv_cache_layout=kv_cache_layout,
+            )
         if out is None:
             out = torch.empty_like(q)
         # Keep tensors in natural shape; flattening can overflow int32 C-ABI dims.
@@ -422,6 +452,49 @@ def _flydsl_flash_attn_paged(
         exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
 
     return out
+
+
+@functools.lru_cache(maxsize=256)
+def _build_paged_light(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    cross_seqlen: bool,
+    varlen: bool,
+    waves_per_eu: int,
+    daz: bool,
+    lazy_rescale: bool,
+    setprio: bool,
+    debug_lazy_counts: bool,
+    enable_stagger: bool,
+):
+    """Build (and cache) a lightweight paged launcher: the generic 4-wave
+    BLOCK_M=128 kernel with linear paged KV (page_id via block_table) + packed
+    cu_seqlens. For short paged varlen self-attn on gfx942/gfx950. Non-DMA
+    (path_tag=N32); vectorized layout / cross-length route to dualwave."""
+    from kernels.attention.flash_attn_generic import build_flash_attn_func_module
+
+    return build_flash_attn_func_module(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str=dtype_str,
+        num_kv_heads=num_kv_heads,
+        cross_seqlen=cross_seqlen,
+        varlen=varlen,
+        paged=True,
+        kv_cache_layout="linear",
+        block_m=128,
+        path_tag="N32",
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+        dualwave_swp_lazy_rescale=lazy_rescale,
+        dualwave_swp_setprio=setprio,
+        dualwave_swp_debug_lazy_counts=debug_lazy_counts,
+        dualwave_swp_enable_stagger=enable_stagger,
+    )
 
 
 # ── public API ─────────────────────────────────────────────────────────────

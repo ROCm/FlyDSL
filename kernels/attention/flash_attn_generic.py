@@ -120,6 +120,8 @@ def build_flash_attn_func_module_primary(
     cu_seqlens_kv=None,
     cross_seqlen=False,
     varlen=False,
+    paged=False,
+    kv_cache_layout="linear",
     dualwave_swp_lazy_rescale=True,
     dualwave_swp_setprio=True,
     dualwave_swp_debug_lazy_counts=False,
@@ -435,6 +437,18 @@ def build_flash_attn_func_module_primary(
     # varlen=True: packed QKV via cu_seqlens (launch-arg mode, kernel takes
     # CuSeqQ/CuSeqKv). varlen=False keeps the dense signature byte-identical.
     VARLEN = bool(varlen)
+    # paged=True: K/V are a physical page cache; kv tile j of batch b reads page
+    # BlockTable[b*block_table_stride + j]. One page == one BLOCK_N kv tile.
+    # Linear cache layout [NumBlocks, PAGE_SIZE, Hkv, D] only (vectorized routes
+    # to dualwave). Q/O stay packed varlen ([total_q, H, D] via cu_seqlens).
+    PAGED = bool(paged)
+    if PAGED and kv_cache_layout != "linear":
+        raise NotImplementedError(
+            f"generic paged kernel supports linear kv_cache_layout only, got {kv_cache_layout!r}"
+        )
+    PAGE_SIZE = BLOCK_N  # one KV tile maps to one physical page
+    if PAGED and ENABLE_DMA:
+        raise NotImplementedError("generic paged kernel requires the non-DMA path (build with path_tag='N32')")
     STRIDE_TOKEN_Q = NUM_HEADS_Q * HEAD_DIM
     STRIDE_TOKEN_KV = NUM_HEADS_KV * HEAD_DIM
 
@@ -497,6 +511,8 @@ def build_flash_attn_func_module_primary(
         seq_len: fx.Int32,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
+        BlockTable: fx.Tensor,
+        block_table_stride: fx.Int32,
     ):
         elem_dtype = dtype_to_elem_type(dtype_str)
         elem_type = elem_dtype.ir_type
@@ -623,11 +639,25 @@ def build_flash_attn_func_module_primary(
             seqlen_q_b = seq_len_v
             seqlen_kv_b = seq_len_v
 
-        # Non-DMA KV loads use raw k_ptr/v_ptr; fold the per-batch element
-        # offset so 0-based global_idx_kv reads this batch (DMA path uses k/v_rsrc).
-        _kv_ptr_batch_off = kv_tok_base * fx.Index(STRIDE_TOKEN_KV)
-        k_ptr = buffer_ops.get_element_ptr(k_ptr, _kv_ptr_batch_off, elem_type=elem_type)
-        v_ptr = buffer_ops.get_element_ptr(v_ptr, _kv_ptr_batch_off, elem_type=elem_type)
+        # Non-DMA KV loads use raw k_ptr/v_ptr. Dense/varlen fold the per-batch
+        # element offset so 0-based global_idx_kv reads this batch. Paged: K/V are a
+        # physical page cache indexed by page_id (BlockTable), so no batch fold --
+        # the page offset is added per tile via token_idx = page_id*PAGE_SIZE + row.
+        if const_expr(not PAGED):
+            _kv_ptr_batch_off = kv_tok_base * fx.Index(STRIDE_TOKEN_KV)
+            k_ptr = buffer_ops.get_element_ptr(k_ptr, _kv_ptr_batch_off, elem_type=elem_type)
+            v_ptr = buffer_ops.get_element_ptr(v_ptr, _kv_ptr_batch_off, elem_type=elem_type)
+
+        if const_expr(PAGED):
+            _bt_ptr = _extract_aligned_pointer(BlockTable)
+            _bt_stride_v = fx.Index(block_table_stride)
+
+            def _paged_page_id(tile_start):
+                # page_id = BlockTable[batch_idx*block_table_stride + tile_start//PAGE_SIZE]
+                _tile_idx = tile_start // fx.Index(PAGE_SIZE)
+                _bt_off = batch_idx * _bt_stride_v + _tile_idx
+                _gep = buffer_ops.get_element_ptr(_bt_ptr, fx.Int64(_bt_off), elem_type=fx.Int32.ir_type)
+                return fx.Index(fx.Int32(_pointer_load(fx.Int32.ir_type, _gep)))
 
         # ---- Cooperative load decomposition ----
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
@@ -712,9 +742,14 @@ def build_flash_attn_func_module_primary(
         # ---- Cooperative K load (row-major, XOR-swizzled) ----
         def coop_load_k(tile_start, buf_id=0):
             k_base = k_buf_base(buf_id)
+            if const_expr(PAGED):
+                _pid_k = _paged_page_id(tile_start)
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
-                row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
+                if const_expr(PAGED):
+                    row_idx = _pid_k * fx.Index(PAGE_SIZE) + load_row_in_batch + row_offset
+                else:
+                    row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
                 if const_expr(KV_NEEDS_GUARD):
                     row_valid = load_row_in_batch < fx.Index(BLOCK_N)
                     if row_valid:
@@ -749,9 +784,14 @@ def build_flash_attn_func_module_primary(
 
         def coop_load_v(tile_start, buf_id=0):
             v_base = v_buf_base(buf_id)
+            if const_expr(PAGED):
+                _pid_v = _paged_page_id(tile_start)
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
-                row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
+                if const_expr(PAGED):
+                    row_idx = _pid_v * fx.Index(PAGE_SIZE) + load_row_in_batch + row_offset
+                else:
+                    row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
                 if const_expr(KV_NEEDS_GUARD):
                     row_valid = load_row_in_batch < fx.Index(BLOCK_N)
                     if row_valid:
@@ -768,9 +808,14 @@ def build_flash_attn_func_module_primary(
         def coop_load_v_global(tile_start):
             """Issue global loads for V, return vectors (non-blocking)."""
             vecs = []
+            if const_expr(PAGED):
+                _pid_vg = _paged_page_id(tile_start)
             for batch in range_constexpr(NUM_BATCHES_KV):
                 row_offset = batch * ROWS_PER_BATCH_LOAD
-                row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
+                if const_expr(PAGED):
+                    row_idx = _pid_vg * fx.Index(PAGE_SIZE) + load_row_in_batch + row_offset
+                else:
+                    row_idx = _kv_row_clamp(tile_start + load_row_in_batch + row_offset)
                 g_idx = global_idx_kv(row_idx, load_col_base)
                 vecs.append(load_global_f16xN(v_ptr, g_idx))
             return vecs
@@ -1511,6 +1556,8 @@ def build_flash_attn_func_module_primary(
         O: fx.Tensor,  # noqa: E741
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
+        BlockTable: fx.Tensor,
+        block_table_stride: fx.Int32,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -1542,6 +1589,8 @@ def build_flash_attn_func_module_primary(
             seq_len,
             CuSeqQ,
             CuSeqKv,
+            BlockTable,
+            block_table_stride,
             value_attrs={
                 "rocdl.waves_per_eu": waves_per_eu,
                 "rocdl.flat_work_group_size": (
@@ -1570,18 +1619,25 @@ def build_flash_attn_func_module_primary(
         },
     }
 
-    def _launch(Q, K, V, O, batch_size, seq_len, *, cu_seqlens_q=None, cu_seqlens_kv=None, stream=None):  # noqa: E741
-        # Dense passes the O tensor as a placeholder for the unused cu_seqlens
-        # slots; the kernel only reads them under const_expr(VARLEN).
+    def _launch(
+        Q, K, V, O, batch_size, seq_len, *,  # noqa: E741
+        cu_seqlens_q=None, cu_seqlens_kv=None, block_table=None, block_table_stride=0, stream=None,
+    ):
+        # Dense/non-paged pass the O tensor as a placeholder for the unused
+        # cu_seqlens / block_table slots; the kernel only reads them under
+        # const_expr(VARLEN) / const_expr(PAGED).
         cq = cu_seqlens_q if cu_seqlens_q is not None else O
         ck = cu_seqlens_kv if cu_seqlens_kv is not None else O
+        bt = block_table if block_table is not None else O
         with CompilationContext.compile_hints(_fmha_compile_hints):
-            return launch_flash_attn_generic(Q, K, V, O, cq, ck, batch_size, seq_len, fx.Stream(stream))
+            return launch_flash_attn_generic(
+                Q, K, V, O, cq, ck, bt, block_table_stride, batch_size, seq_len, fx.Stream(stream)
+            )
 
     def _compile(Q, K, V, O, batch_size, seq_len, stream=None):  # noqa: E741
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return flyc.compile(
-                launch_flash_attn_generic, Q, K, V, O, O, O, batch_size, seq_len, fx.Stream(stream)
+                launch_flash_attn_generic, Q, K, V, O, O, O, O, 0, batch_size, seq_len, fx.Stream(stream)
             )
 
     _launch.compile = _compile
