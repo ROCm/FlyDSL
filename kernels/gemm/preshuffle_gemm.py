@@ -120,8 +120,7 @@ def compile_preshuffle_gemm(
     xcd_swizzle: int = 0,
     lds_stage: int = 2,
 ):
-    """Compile preshuffle GEMM (layout API, fp8/int8/fp16/bf16).
-
+    """Compile preshuffle GEMM (fp8/int8/fp16/bf16).
     Signature: fn(C, A, B, scale_a, scale_b, bias, M, N, stream). bias is the fused
     epilogue bias (per-N, out_dtype); unused when epilogue == "none".
     """
@@ -188,21 +187,10 @@ def compile_preshuffle_gemm(
         dsrd_preload, dvmem_preload = (0, 0)
 
     a_lds_elems = tile_m * tile_k
-
-    # lds_stage == 1 keeps a single A buffer (half the LDS): each tile reads it,
-    # then a barrier + overwrite stages the next tile into the same buffer. lds_stage
-    # == 2 is the classic ping-pong (a0/a1) that needs only one barrier per tile.
-    if lds_stage == 1:
-
-        @fx.struct
-        class SharedStorage:
-            a0: fx.Array[layout_elem, a_lds_elems, 16]
-
-    else:
-
-        @fx.struct
-        class SharedStorage:
-            a0: fx.Array[layout_elem, a_lds_elems, 16]
+    @fx.struct
+    class SharedStorage:
+        a0: fx.Array[layout_elem, a_lds_elems, 16]
+        if lds_stage == 2:
             a1: fx.Array[layout_elem, a_lds_elems, 16]
 
     # ── Kernel ────────────────────────────────────────────────────────
@@ -232,7 +220,6 @@ def compile_preshuffle_gemm(
                 N=N,
                 xcd_swizzle=xcd_swizzle,
             )
-            # xcd_remap_bx_by already returns i32 (all-i32 remap); use directly.
             bid_x, bid_y = _bx, _by
 
         if const_expr(use_mfma_scale_128):
@@ -261,7 +248,6 @@ def compile_preshuffle_gemm(
         tB = fx.flat_divide(gB, fx.make_tile(tile_n, tile_k))[None, None, bid_y, None]
         tC = fx.flat_divide(gC, fx.make_tile(tile_m, tile_n))[None, None, bid_x, bid_y]
 
-        # 128b copy atoms (buffer_load_dwordx4 / ds_read_b128)
         buf_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), layout_elem)
         uni_copy = fx.make_copy_atom(fx.UniversalCopy128b(), layout_elem)
 
@@ -471,17 +457,12 @@ def compile_preshuffle_gemm(
 
         # ── Pipeline stage (double-buffered B via split fragments) ─
         def mma_kloop(a_stage, cur_frag_B):
-            # s2r the A tile then issue the MMAs. K=128/K=32 (1 atom): flat k_iters → ki;
-            # K=16 gfx942 (2 atoms): (None, ki). a_stage is the LDS A buffer index
-            # (always 0 for lds_stage == 1, ping-pong read_stage for lds_stage == 2).
             for ki in range_constexpr(k_iters):
                 fx.copy(uni_copy, pA_s2r_stages[a_stage][None, None, ki], frag_A_retile[None, None, ki])
                 k_coord = ki if (use_mfma_scale_128 or use_mfma_k32) else (None, ki)
                 fx.gemm(tiled_mma, frag_C, frag_A[None, None, k_coord], cur_frag_B[None, None, k_coord], frag_C)
 
         def pipeline_2stage(read_stage, next_k_val=None, read_next=True):
-            # lds_stage == 2 only: read_stage ping-pongs both the A LDS buffer and the B
-            # register double-buffer.
             write_stage = read_stage ^ 1
             a_read = read_stage
             a_write = write_stage
@@ -527,10 +508,6 @@ def compile_preshuffle_gemm(
 
         # ── Main tile loop ────────────────────────────────────────────
         if const_expr(lds_stage == 1 and num_tiles > 1):
-            # 1-tile/iter, single A + single B buffer (register relief): mma consumes
-            # B[iv], then B[iv+1] is prefetched into the SAME fragment. No B loop-carry
-            # -> no backedge copies of the B tile -> A LDS-read addresses don't spill.
-            # Tiles 0..num_tiles-2; the last tile is the shared final MMA below.
             frag_Bc = frag_B_stages[0]
             frag_Bc_retile = frag_B_retile_stages[0]
             for iv, state in range(0, num_tiles - 1, 1, init=[frag_C.load()]):
@@ -630,7 +607,6 @@ def compile_preshuffle_gemm(
 
         # Final MMA stage — overlaps the epilogue-operand loads when issued above.
         if const_expr(lds_stage == 1):
-            # lds=1: last tile's A is resident in buf 0 and its B in frag_B_stages[0].
             mma_kloop(0, frag_B_stages[0])
         else:
             pipeline_2stage(read_stage=(num_tiles - 1) % 2, read_next=False)
