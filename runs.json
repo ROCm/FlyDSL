@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-08T19:41:53Z",
+ "updated": "2026-07-08T19:59:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,10 +20,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-08T18:49:21Z",
-     "completed_at": null,
+     "completed_at": "2026-07-08T19:47:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28967328704/job/85954101626"
     },
     {
@@ -263,18 +263,18 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-08T19:40:33Z",
+     "started_at": "2026-07-08T19:42:02Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28930978115/job/85964961070"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-08T19:40:33Z",
+     "started_at": "2026-07-08T19:42:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28930978115/job/85964961142"
     }
@@ -317,11 +317,11 @@
    "branch": "main",
    "event": "push",
    "title": "Gemm tune v2 (#818)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28922711522",
    "created_at": "2026-07-08T06:34:51Z",
-   "updated_at": "2026-07-08T06:35:46Z",
+   "updated_at": "2026-07-08T19:57:05Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -345,9 +345,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-08T06:35:46Z",
+     "started_at": "2026-07-08T19:57:05Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28922711522/job/85803379069"
     }
@@ -491,11 +491,11 @@
    "branch": "pr/fix-fallback-locations",
    "event": "pull_request",
    "title": "[Fix] Always apply fallback IR locations",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28918237971",
    "created_at": "2026-07-08T04:47:29Z",
-   "updated_at": "2026-07-08T04:48:23Z",
+   "updated_at": "2026-07-08T19:56:40Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -510,10 +510,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-08T19:40:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-08T19:56:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28918237971/job/85789666071"
     },
     {
