@@ -19,7 +19,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
+from flydsl._mlir import ir
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import Int32, T
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
@@ -83,20 +83,24 @@ _PACKED_FP8_QUERY_DTYPES = tuple(
 
 
 def _lds_load(ptr, elem_off, result_type, align):
-    """Vectorized/scalar LDS load via a raw ``llvm.LoadOp`` on an addr-space-3
-    pointer.  ``ptr`` is a typed shared-memory pointer and ``elem_off`` is an
-    element offset in that pointer's element units."""
-    byte = fx.Int64(fx.ptrtoint(ptr + elem_off))
-    p = buffer_ops.create_llvm_ptr(byte, address_space=3)
-    return llvm.LoadOp(result_type, p, alignment=align).result
+    """Vectorized/scalar LDS load via the high-level layout/view API.  ``ptr`` is
+    a typed shared-memory pointer and ``elem_off`` is an element offset in that
+    pointer's element units.  ``result_type`` is a 1-D vector type whose element
+    type matches the pointer's; only its length selects the view extent.  The
+    ``align`` argument is retained for call-site compatibility."""
+    del align  # natural alignment from the view layout
+    n_elems = ir.VectorType(result_type).shape[0]
+    it = fx.recast_iter(ptr.element_type, fx.add_offset(ptr, fx.Int32(elem_off)))
+    return fx.make_view(it, fx.make_layout(n_elems, 1)).load().ir_value()
 
 
 def _lds_store(value, ptr, elem_off, align):
-    """Vectorized/scalar LDS store via a raw ``llvm.StoreOp`` on an addr-space-3
-    pointer (see :func:`_lds_load` for the addressing convention)."""
-    byte = fx.Int64(fx.ptrtoint(ptr + elem_off))
-    p = buffer_ops.create_llvm_ptr(byte, address_space=3)
-    llvm.StoreOp(arith.unwrap(value), p, alignment=align)
+    """Vectorized/scalar LDS store via the high-level layout/view API (see
+    :func:`_lds_load` for the addressing convention)."""
+    del align  # natural alignment from the view layout
+    vec = value if isinstance(value, fx.Vector) else fx.Vector(value)
+    it = fx.recast_iter(vec.dtype, fx.add_offset(ptr, fx.Int32(elem_off)))
+    fx.make_view(it, fx.make_layout(vec.numel, 1)).store(vec)
 
 
 def _flatten_v_results(v_results, vhe_loop: int = 2):

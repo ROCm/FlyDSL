@@ -1963,23 +1963,21 @@ def compile_fp8fp4_gemm(
                 else:
                     addr_idx += store_acc_vec8_to_buffer(sub8, c_rsrc, addrs[addr_idx : addr_idx + 2])
 
-        _lds_ptr_ty_d = ir.Type.parse("!llvm.ptr<3>")
+        def _lds_store_b128_view(byte_off, data_vec, elem_dtype):
+            # Store a 128-bit register vector to LDS at an absolute byte offset via
+            # a high-level recast_iter + view. The arena is an i8 region (element
+            # index == byte offset), so add_offset advances by whole bytes.
+            it = fx.recast_iter(elem_dtype, fx.add_offset(arena_ptr, fx.Int32(byte_off)))
+            fx.make_view(it, fx.make_layout(4, 1)).store(fx.Vector(data_vec))
 
-        def _lds_store_b128_raw(base_idx, byte_off, data_vec):
-            # Store 16 bytes to LDS at an absolute byte address (pointer-based).
-            addr_i32 = arith.unwrap(arith.index_cast(T.i32, base_idx + byte_off))
-            ptr_val = llvm.IntToPtrOp(_lds_ptr_ty_d, addr_i32).result
-            llvm.StoreOp(arith.unwrap(data_vec), ptr_val, alignment=16)
-
-        def _store_acc_vec8_to_lds_ptr(base_idx, elem_off, acc_vec8, out_elem):
-            # Pointer-based rewrite of store_acc_vec8_to_lds: the D buffer is a
-            # !fly.memref, which vector.store cannot target, so write via LDS
-            # pointers. elem_off is in f16-element (2-byte) units.
+        def _store_acc_vec8_to_lds_ptr(elem_off, acc_vec8, out_elem):
+            # View-based store of an 8-element accumulator sub-tile into the D LDS
+            # buffer. elem_off is in f16-element (2-byte) units.
             byte_off = elem_off * arith.index(2)
             if const_expr(out_elem is not None):
                 h_vec = arith.trunc_f(T.vec(8, out_elem), acc_vec8)
                 i32_vec = vector.bitcast(T.vec(4, T.i32), h_vec)
-                _lds_store_b128_raw(base_idx, byte_off, i32_vec)
+                _lds_store_b128_view(byte_off, i32_vec, fx.Int32)
             else:
                 for half in range_constexpr(2):
                     vals = [
@@ -1987,14 +1985,14 @@ def compile_fp8fp4_gemm(
                         for vi in range_constexpr(4)
                     ]
                     vec4 = vector.from_elements(T.vec(4, T.f32), vals)
-                    _lds_store_b128_raw(base_idx, byte_off + arith.index(half * 16), vec4)
+                    _lds_store_b128_view(byte_off + arith.index(half * 16), vec4, fx.Float32)
 
-        def epilogue_lds_stores(final_accs, d_base_idx, d_base):
+        def epilogue_lds_stores(final_accs, d_base):
             for acc_idx, vec_base, m_off, wn in _sub_tiles:
                 sub8 = _get_acc_sub8(final_accs, acc_idx, vec_base)
                 imm = m_off * _lds_d_stride_elems + wn * _n_col_d_elems
                 elem_off = d_base + arith.index(imm)
-                _store_acc_vec8_to_lds_ptr(d_base_idx, elem_off, sub8, _out_elem_local)
+                _store_acc_vec8_to_lds_ptr(elem_off, sub8, _out_elem_local)
 
         def _atomic_fadd_global(val, byte_off):
             # Device-scoped, relaxed atomic add into C at c_global_base_i64 + byte_off.
@@ -2153,7 +2151,6 @@ def compile_fp8fp4_gemm(
         if const_expr(tdm_store_enabled):
             # D output reuses the arena from offset 0 (d_output_off == 0).
             d_lds_base_ptr = arena_view
-            d_lds_base_idx = arena_base_idx
             warp_lds_off = (wave_m_idx * arith.index(n_warp) + wave_n_idx) * arith.index(_warp_d_elems)
             d_lane_base = (
                 warp_lds_off + lane16 * arith.index(_lds_d_stride_elems) + lane_kgrp * arith.index(4 * elem_bytes_d)
@@ -2569,7 +2566,7 @@ def compile_fp8fp4_gemm(
             if const_expr(d_need_epilogue_fence):
                 _pipeline_fence(outstanding=0)
             rocdl.sched_barrier(0)
-            epilogue_lds_stores(accs, d_lds_base_idx, d_lane_base)
+            epilogue_lds_stores(accs, d_lane_base)
             rocdl.s_wait_dscnt(0)
             tdm_ops.tensor_store_2d(d_desc)
             tdm_ops.tensor_wait(0)

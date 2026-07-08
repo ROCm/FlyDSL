@@ -550,43 +550,40 @@ def compile_small_m_hgemm_kernel(
         BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
         bs_ = None
 
-        # New-API shared memory. .peek() hands back a Python handle; we take the
-        # raw LDS base address(es) here at the top and never touch `lds` again
-        # inside runtime control flow. All LDS access below goes through
-        # pointer-based llvm loads/stores on address-space-3 pointers.
+        # New-API shared memory. .peek() hands back a Python handle; we capture
+        # the raw LDS field pointer(s) here at the top and never touch `lds` again
+        # inside runtime control flow. Register load/store of LDS goes through the
+        # high-level recast_iter + make_view().load()/.store() idiom; the raw i64
+        # bases are retained only for the async global->LDS DMA path below.
         _lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        a_lds_base = fx.Int64(fx.ptrtoint(lds.a_smem.ptr))
+        a_smem_ptr = lds.a_smem.ptr
+        a_lds_base = fx.Int64(fx.ptrtoint(a_smem_ptr))
         if const_expr(B_TO_LDS):
-            b_lds_base = fx.Int64(fx.ptrtoint(lds.b_smem.ptr))
+            b_smem_ptr = lds.b_smem.ptr
+            b_lds_base = fx.Int64(fx.ptrtoint(b_smem_ptr))
 
-        def _lds_ptr_at(base_i64, elem_offset, elem_bytes):
-            off = elem_offset * elem_bytes
-            if isinstance(off, int):
-                off_i64 = fx.Int64(off)
-            else:
-                off_i64 = fx.Int64(arith.index_cast(T.i64, arith.unwrap(off, index=True)))
-            return llvm.inttoptr(_lds_ptr_type, arith._to_raw(base_i64 + off_i64))
-
-        def _make_lds_load(base_i64, elem_dtype, elem_bytes):
+        def _make_lds_load(field_ptr, elem_dtype):
             def _load(offset, vec_size=1):
-                vec_t = T.vec(vec_size, elem_dtype)
-                ptr = _lds_ptr_at(base_i64, offset, elem_bytes)
-                x = llvm.LoadOp(vec_t, ptr, alignment=16).result
+                it = fx.add_offset(fx.recast_iter(elem_dtype, field_ptr), fx.Int32(offset))
+                vec = arith._to_raw(fx.make_view(it, fx.make_layout(vec_size, 1)).load())
                 if vec_size > 1:
-                    return x
-                return vector.extract(x, static_position=[0], dynamic_position=[])
+                    return vec
+                return vector.extract(vec, static_position=[0], dynamic_position=[])
 
             return _load
 
-        def _make_lds_store(base_i64, elem_dtype, elem_bytes):
+        def _make_lds_store(field_ptr, elem_dtype):
+            elem_ir_ty = elem_dtype.ir_type
+
             def _store(offset, value, vec_size=1):
-                ptr = _lds_ptr_at(base_i64, offset, elem_bytes)
+                it = fx.add_offset(fx.recast_iter(elem_dtype, field_ptr), fx.Int32(offset))
+                view = fx.make_view(it, fx.make_layout(vec_size, 1))
                 if vec_size > 1:
-                    llvm.StoreOp(arith._to_raw(value), ptr, alignment=16)
+                    view.store(arith._to_raw(value))
                 else:
-                    vec = vector.from_elements(T.vec(1, elem_dtype), [value])
-                    llvm.StoreOp(arith._to_raw(vec), ptr, alignment=16)
+                    vec = vector.from_elements(T.vec(1, elem_ir_ty), [value])
+                    view.store(vec)
 
             return _store
 
@@ -595,8 +592,8 @@ def compile_small_m_hgemm_kernel(
             (STAGES, BLOCK_M, BLOCK_K),
             None,
             0,
-            _make_lds_load(a_lds_base, dtype_, DTYPE_BYTES),
-            _make_lds_store(a_lds_base, dtype_, DTYPE_BYTES),
+            _make_lds_load(a_smem_ptr, fx.BFloat16),
+            _make_lds_store(a_smem_ptr, fx.BFloat16),
         )
         if const_expr(B_TO_LDS):
             bs_ = TensorView(
@@ -604,16 +601,16 @@ def compile_small_m_hgemm_kernel(
                 (STAGES, BLOCK_N, BLOCK_K),
                 None,
                 0,
-                _make_lds_load(b_lds_base, dtype_, DTYPE_BYTES),
-                _make_lds_store(b_lds_base, dtype_, DTYPE_BYTES),
+                _make_lds_load(b_smem_ptr, fx.BFloat16),
+                _make_lds_store(b_smem_ptr, fx.BFloat16),
             )
         cs_ = TensorView(
             dtype_,
             (BLOCK_M, BLOCK_N),
             None,
             0,
-            _make_lds_load(a_lds_base, dtype_, DTYPE_BYTES),
-            _make_lds_store(a_lds_base, dtype_, DTYPE_BYTES),
+            _make_lds_load(a_smem_ptr, fx.BFloat16),
+            _make_lds_store(a_smem_ptr, fx.BFloat16),
         )
         if const_expr(IS_SPLIT_K):
             bc_ = TensorView(
@@ -621,8 +618,8 @@ def compile_small_m_hgemm_kernel(
                 (1,),
                 None,
                 0,
-                _make_lds_load(a_lds_base, T.i32, 4),
-                _make_lds_store(a_lds_base, T.i32, 4),
+                _make_lds_load(a_smem_ptr, fx.Int32),
+                _make_lds_store(a_smem_ptr, fx.Int32),
             )
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))
             signal_ = GTensor(signal, dtype=T.i32, shape=(-1,))

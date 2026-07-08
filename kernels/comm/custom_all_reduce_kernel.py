@@ -169,23 +169,26 @@ def _raw(v):
     return v.ir_value() if hasattr(v, "ir_value") else v
 
 
-def _smem_base(lds_field):
-    """Return the LDS base byte address (u64) of a shared-storage Array field."""
-    return fx.Uint64(fx.ptrtoint(lds_field.ptr))
+def _smem_pack_view(smem_ptr, idx):
+    """Build a vector<4xi32> view over one 16-byte pack in shared memory.
+
+    ``smem_ptr`` is the Int32 iterator of the shared-storage Array (captured once
+    at the top of the kernel, never re-derived from the ``lds`` handle inside
+    control flow). ``idx`` is the pack index; each pack is _ELEMS_PER_PACK i32
+    elements, so the element offset is ``idx * _ELEMS_PER_PACK``.
+    """
+    it = fx.recast_iter(fx.Int32, fx.add_offset(smem_ptr, fx.Int32(idx * _ELEMS_PER_PACK)))
+    return fx.make_view(it, fx.make_layout(_ELEMS_PER_PACK, 1))
 
 
-def _smem_store(smem_base_u64, value, idx):
+def _smem_store(smem_ptr, value, idx):
     """Store one 16-byte (vector<4xi32>) pack into shared memory by pack index."""
-    addr = smem_base_u64 + _u64(idx) * fx.Uint64(_BYTES_PER_PACK)
-    ptr = buffer_ops.create_llvm_ptr(addr, address_space=3)
-    llvm.StoreOp(_raw(value), ptr, alignment=16)
+    _smem_pack_view(smem_ptr, idx).store(value)
 
 
-def _smem_load(smem_base_u64, idx):
+def _smem_load(smem_ptr, idx):
     """Load one 16-byte (vector<4xi32>) pack from shared memory by pack index."""
-    addr = smem_base_u64 + _u64(idx) * fx.Uint64(_BYTES_PER_PACK)
-    ptr = buffer_ops.create_llvm_ptr(addr, address_space=3)
-    return fx.Vector(llvm.LoadOp(T.i32x4, ptr, alignment=16).result)
+    return _smem_pack_view(smem_ptr, idx).load()
 
 
 def _c64(v):
@@ -410,7 +413,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         in_ptrs_vec = _pack_i64_vec(in_ptrs_arr)
 
         lds = fx.SharedAllocator().allocate(SharedStorage1Stage).peek()
-        lds_base = _smem_base(lds.smem)
+        smem_ptr = lds.smem.ptr
 
         threads_per_rank_i32 = tnum_gpu
         # lane -> (rank-local warp id, lane-in-warp) under packed launch.
@@ -441,7 +444,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             raw = _load_v4i32(in_rsrc_desc, elem_off_i32)
             smem_base = parity * threads
             smem_idx = smem_base + lane_i32
-            _smem_store(lds_base, raw, smem_idx)
+            _smem_store(smem_ptr, raw, smem_idx)
             gpu.barrier()
 
             # Warp 0 reduces across all warps and writes to output
@@ -449,7 +452,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 acc = None
                 for wi in range_constexpr(world_size):
                     smem_read_idx = wi * threads_per_rank_i32 + lane_id + smem_base
-                    raw_i = _smem_load(lds_base, smem_read_idx)
+                    raw_i = _smem_load(smem_ptr, smem_read_idx)
                     if const_expr(is_f32):
                         # Raw LDS payload is i32x4; reinterpret as f32x4.
                         vf = raw_i.bitcast(fx.Float32)
@@ -524,7 +527,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         pack_stride = fx.grid_dim.x * threads_per_rank_i32
 
         lds = fx.SharedAllocator().allocate(SharedStorage2Stage).peek()
-        lds_base = _smem_base(lds.smem)
+        smem_ptr = lds.smem.ptr
         tmp_out_rsrc_desc = _make_rsrc(tmp_ptrs_arr[0])
 
         # ---- Stage 1: reduce-scatter ----
@@ -541,7 +544,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 smem_idx = lane_i32
             else:
                 smem_idx = smem_base_expr + lane_i32
-            _smem_store(lds_base, raw, smem_idx)
+            _smem_store(smem_ptr, raw, smem_idx)
             gpu.barrier()  # barrier 1: all warps have written smem
 
             if warp_id == 0:
@@ -551,7 +554,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         smem_read_idx = wi * threads_per_rank_i32 + lane_id
                     else:
                         smem_read_idx = wi * threads_per_rank_i32 + lane_id + smem_base_expr
-                    raw_i = _smem_load(lds_base, smem_read_idx)
+                    raw_i = _smem_load(smem_ptr, smem_read_idx)
                     if const_expr(is_f32):
                         vf = raw_i.bitcast(fx.Float32)
                         acc = vf if acc is None else acc + vf
@@ -674,7 +677,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
         pack_stride = fx.grid_dim.x * threads_per_rank_i32
 
         lds = fx.SharedAllocator().allocate(SharedStorageWriteMode).peek()
-        lds_base = _smem_base(lds.smem)
+        smem_ptr = lds.smem.ptr
         tmp_out_base_i64 = _extract_i64(tmp_ptrs_vec, rank_i32)
 
         # ---- Stage 1: scatter local input to REMOTE tmp buffers ----
@@ -745,7 +748,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 raw = _load_v4i32(tmp_out_rsrc_desc, src_off_i32)
 
             smem_idx = lane_i32
-            _smem_store(lds_base, raw, smem_idx)
+            _smem_store(smem_ptr, raw, smem_idx)
             gpu.barrier()
 
             # Warp 0 reduces across all warps, writes result to res area
@@ -757,7 +760,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 acc = None
                 for wi in range_constexpr(world_size):
                     smem_read_idx = (wi * tnum_gpu) + lane_id
-                    raw_i = _smem_load(lds_base, smem_read_idx)
+                    raw_i = _smem_load(smem_ptr, smem_read_idx)
                     if const_expr(is_f32):
                         # Raw LDS payload is i32x4; reinterpret as f32x4.
                         vf = raw_i.bitcast(fx.Float32)
@@ -773,14 +776,14 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     # Narrow back to storage dtype, then store as raw i32 bits.
                     out_raw = acc.to(half_dtype).bitcast(fx.Int32)
                 smem_result_idx = threads + lane_id
-                _smem_store(lds_base, out_raw, smem_result_idx)
+                _smem_store(smem_ptr, out_raw, smem_result_idx)
 
             gpu.barrier()
 
             # All warps read the same reduced result from res area and
             # nontemporal-write to their respective remote output buffers.
             smem_result_read_idx = threads + lane_id
-            reduced_val = _smem_load(lds_base, smem_result_read_idx)
+            reduced_val = _smem_load(smem_ptr, smem_result_read_idx)
 
             dst_out_pack_idx = rank_i32 * part_p + cur
             dst_off_i32 = dst_out_pack_idx * _ELEMS_PER_PACK

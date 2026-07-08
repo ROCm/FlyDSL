@@ -243,48 +243,57 @@ def compile_hgemm_kernel(
         C_ = GTensor(C, dtype=dtype_, shape=(-1, n))
         if const_expr(HAS_BIAS):
             BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
-        # Allocate LDS once, up-front, and derive every access base as an MLIR
-        # value here (never touch the python `lds` handle inside runtime scf
-        # control flow). C and BC alias the A region base (offset 0); B lives
-        # right after A. Vectorized LDS access goes through address-space(3)
-        # LLVM pointers; scalar access uses the same pointers with a narrower
-        # alignment. A/B tiles are strided (STAGES, rows, BLOCK_K); C is
-        # (BLOCK_M, BLOCK_N).
+        # Allocate LDS once, up-front, and capture each field base pointer here
+        # (never touch the python `lds` handle inside runtime scf control flow).
+        # C and BC alias the A region base (offset 0); B lives right after A.
+        # Register load/store use the high-level recast_iter + make_view idiom;
+        # the async global->LDS DMA path still needs a raw address-space(3)
+        # pointer, so a_lds_i64/b_lds_i64 are kept for it. A/B tiles are strided
+        # (STAGES, rows, BLOCK_K); C is (BLOCK_M, BLOCK_N).
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        a_lds_i64 = fx.Int64(fx.ptrtoint(lds.a_lds.ptr))
+        a_lds_ptr = lds.a_lds.ptr
+        a_lds_i64 = fx.Int64(fx.ptrtoint(a_lds_ptr))
         if const_expr(B_TO_LDS):
-            b_lds_i64 = fx.Int64(fx.ptrtoint(lds.b_lds.ptr))
+            b_lds_ptr = lds.b_lds.ptr
+            b_lds_i64 = fx.Int64(fx.ptrtoint(b_lds_ptr))
 
         def _lds_a3_ptr(base_i64, elem_off):
+            # Raw address-space(3) pointer for the async global->LDS DMA intrinsic.
             off_i64 = arith.index_cast(T.i64, fx.Index(elem_off) * fx.Index(DTYPE_BYTES))
             return buffer_ops.create_llvm_ptr(base_i64 + fx.Int64(off_i64), address_space=3)
 
+        def _lds_vec_view(base_ptr, elem_off, vec_size):
+            it = fx.recast_iter(fx_dtype, fx.add_offset(base_ptr, fx.Int32(elem_off)))
+            return fx.make_view(it, fx.make_layout(vec_size, 1))
+
         def as_store(stage, row, col, value):
             elem_off = fx.Index(stage) * (BLOCK_M * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            llvm.StoreOp(value, _lds_a3_ptr(a_lds_i64, elem_off), alignment=16)
+            _lds_vec_view(a_lds_ptr, elem_off, LDG_VEC_SIZE).store(value)
 
         def as_load(stage, row, col, vec_size):
             elem_off = fx.Index(stage) * (BLOCK_M * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            return llvm.LoadOp(T.vec(vec_size, dtype_), _lds_a3_ptr(a_lds_i64, elem_off), alignment=16).result
+            return _lds_vec_view(a_lds_ptr, elem_off, vec_size).load()
 
         def bs_store(stage, row, col, value):
             elem_off = fx.Index(stage) * (BLOCK_N * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            llvm.StoreOp(value, _lds_a3_ptr(b_lds_i64, elem_off), alignment=16)
+            _lds_vec_view(b_lds_ptr, elem_off, LDG_VEC_SIZE).store(value)
 
         def bs_load(stage, row, col, vec_size):
             elem_off = fx.Index(stage) * (BLOCK_N * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            return llvm.LoadOp(T.vec(vec_size, dtype_), _lds_a3_ptr(b_lds_i64, elem_off), alignment=16).result
+            return _lds_vec_view(b_lds_ptr, elem_off, vec_size).load()
 
         def cs_store_scalar(row, col, value):
             elem_off = fx.Index(row) * BLOCK_N + fx.Index(col)
-            llvm.StoreOp(value, _lds_a3_ptr(a_lds_i64, elem_off), alignment=DTYPE_BYTES)
+            it = fx.recast_iter(fx_dtype, fx.add_offset(a_lds_ptr, fx.Int32(elem_off)))
+            fx.memref_store(value, fx.make_view(it, fx.make_layout(1, 1)), 0)
 
         def cs_load_vec(row, col, vec_size):
             elem_off = fx.Index(row) * BLOCK_N + fx.Index(col)
-            return llvm.LoadOp(T.vec(vec_size, dtype_), _lds_a3_ptr(a_lds_i64, elem_off), alignment=16).result
+            return _lds_vec_view(a_lds_ptr, elem_off, vec_size).load()
 
         if const_expr(IS_SPLIT_K):
-            bc_ptr = buffer_ops.create_llvm_ptr(a_lds_i64, address_space=3)
+            # split-k arrival counter: one i32 aliasing the A region base.
+            bc_view = fx.make_view(fx.recast_iter(fx.Int32, a_lds_ptr), fx.make_layout(1, 1))
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))
             signal_ = GTensor(signal, dtype=T.i32, shape=(-1,))
             signal_idx = fx.Int32(fx.block_idx.x)
@@ -338,10 +347,10 @@ def compile_hgemm_kernel(
                     syncscope="agent",
                     alignment=4,
                 ).result
-                llvm.StoreOp(prev, bc_ptr, alignment=4)
+                fx.memref_store(prev, bc_view, 0)
                 scf.YieldOp([])
             gpu.barrier()
-            arrive_idx = fx.Index(llvm.LoadOp(T.i32, bc_ptr, alignment=4).result)
+            arrive_idx = fx.Index(fx.memref_load(bc_view, 0))
             # zero c if current block is the first arrived block
             cond_ks0 = arith.cmpi(arith.CmpIPredicate.eq, arrive_idx, fx.Index(0))
             cond_ks0_if = scf.IfOp(cond_ks0, results_=[], has_else=False)

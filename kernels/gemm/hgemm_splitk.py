@@ -240,8 +240,9 @@ def compile_hgemm_kernel(
         # handle itself is never referenced below.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         smem_ptr = lds.smem.ptr  # element-typed (f16/bf16) base pointer
-        smem_u8 = fx.recast_iter(fx.Uint8, smem_ptr)  # byte-addressed view for vector loads
-        smem_i64 = fx.Int64(fx.ptrtoint(smem_ptr))  # raw base address for DMA / vector stores
+        smem_i64 = fx.Int64(fx.ptrtoint(smem_ptr))  # raw base address for DMA
+        # High-level scalar memref view over the whole shared region (element-typed).
+        smem_view = lds.smem.view(fx.make_layout(SMEM_TOTAL_ELEMS, 1))
 
         # Linear element-offset helpers mirroring the old STensor shapes:
         #   as_: (STAGES, BLOCK_M, BLOCK_K)  base 0
@@ -257,16 +258,15 @@ def compile_hgemm_kernel(
             return (fx.Index(kw) * BLOCK_M + row) * BLOCK_N + col
 
         def lds_vec_load(elem_off, vec_size):
-            vec_ty = T.vec(vec_size, dtype_)
-            return fx.ptr_load(smem_u8 + fx.Int32(elem_off * DTYPE_BYTES), result_type=vec_ty)
+            it = fx.recast_iter(elem_cls, fx.add_offset(smem_ptr, fx.Int32(elem_off)))
+            return fx.make_view(it, fx.make_layout(vec_size, 1)).load().ir_value()
 
         def lds_vec_store(elem_off, value):
-            ptr = buffer_ops.create_llvm_ptr(smem_i64 + fx.Int64(elem_off * DTYPE_BYTES), address_space=3)
-            llvm.StoreOp(value, ptr, alignment=16)
+            it = fx.recast_iter(elem_cls, fx.add_offset(smem_ptr, fx.Int32(elem_off)))
+            fx.make_view(it, fx.make_layout(LDG_VEC_SIZE, 1)).store(fx.Vector(value))
 
         def lds_scalar_store(elem_off, value):
-            ptr = fx.add_offset(smem_ptr, fx.make_int_tuple(fx.Int32(elem_off)))
-            fx.ptr_store(value, ptr)
+            fx.memref_store(value, smem_view, fx.Int32(elem_off))
 
         if const_expr(IS_SPLIT_K):
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))

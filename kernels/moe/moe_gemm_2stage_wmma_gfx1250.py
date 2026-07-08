@@ -68,7 +68,7 @@ def _compile_stage1_wmma_kernel_impl(
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
-    from flydsl._mlir.dialects import llvm, scf
+    from flydsl._mlir.dialects import scf
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, vector
     from flydsl.expr.typing import T
@@ -172,14 +172,20 @@ def _compile_stage1_wmma_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
-        # New-API shared memory: build the three LDS region base addresses
-        # (as byte offsets into LDS) once at the top of the kernel. All
-        # LDS access below goes through raw !llvm.ptr<3> pointers built from
-        # these bases (the vector/rocdl LDS ops do not accept !fly.memref).
+        # New-API shared memory: capture the LDS region field pointer/views once
+        # at the top of the kernel. Register load/store to LDS uses the
+        # high-level recast_iter/make_view + memref idioms. Only the hardware
+        # transpose read (ds_load_tr16_b128) keeps a raw !llvm.ptr<3>, as that
+        # rocdl intrinsic requires a pointer.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        a_lds_ptr = lds.smem_a.ptr
+        a_lds_view = lds.smem_a.view(fx.make_layout(lds_a_elems, 1))
+        bg_lds_view = lds.smem_bg.view(fx.make_layout(lds_b_elems, 1))
+        bu_lds_view = lds.smem_bu.view(fx.make_layout(lds_b_elems, 1))
+        # Byte-address bases for the transpose reads (ds_load_tr16_b128), which
+        # require a raw LDS pointer.
         bg_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_bg.ptr)))
         bu_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_bu.ptr)))
-        a_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_a.ptr)))
 
         vec8_ty = ir.VectorType.get([8], T.f16)
 
@@ -187,11 +193,9 @@ def _compile_stage1_wmma_kernel_impl(
             byte_addr = base_bytes + arith.ArithValue(arith.unwrap(elem_off, index=True)) * arith.index(elem_bytes)
             return buffer_ops.create_llvm_ptr(byte_addr, address_space=3)
 
-        def _lds_store_f16(base_bytes, elem_off, val):
-            llvm.store(arith._to_raw(val), _lds_byte_ptr(base_bytes, elem_off), alignment=elem_bytes)
-
-        def _lds_load_v8(base_bytes, elem_off):
-            return llvm.load(vec8_ty, _lds_byte_ptr(base_bytes, elem_off), alignment=elem_bytes)
+        def _lds_load_a_v8(elem_off):
+            it = fx.recast_iter(fx.Float16, fx.add_offset(a_lds_ptr, fx.Int32(elem_off)))
+            return fx.make_view(it, fx.make_layout(8, 1)).load()
 
         def _lds_tr_load_v8(base_bytes, elem_off):
             return rocdl.ds_load_tr16_b128(vec8_ty, _lds_byte_ptr(base_bytes, elem_off))
@@ -240,10 +244,10 @@ def _compile_stage1_wmma_kernel_impl(
                         arith.constant(0.0, type=T.f16),
                     )
                     lds_idx = row * arith.index(lds_a_stride) + col
-                    _lds_store_f16(a_lds_base, lds_idx, x_val)
+                    fx.memref_store(x_val, a_lds_view, fx.Int32(lds_idx))
                     scf.YieldOp([])
 
-        def copy_b_to_lds(k_base, b_lds_base, up_shift):
+        def copy_b_to_lds(k_base, b_lds_view, up_shift):
             eid_idx = arith.index_cast(T.index, eid_i32)
             n_base = eid_idx * arith.index(n_total) + blk_n + arith.index(up_shift)
             total = int(tile_k) * int(tile_n)
@@ -267,7 +271,7 @@ def _compile_stage1_wmma_kernel_impl(
                         dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
-                    _lds_store_f16(b_lds_base, lds_idx, w_val)
+                    fx.memref_store(w_val, b_lds_view, fx.Int32(lds_idx))
                     scf.YieldOp([])
 
         def _precompute_a_lane_bases():
@@ -293,9 +297,9 @@ def _compile_stage1_wmma_kernel_impl(
         def load_a_frag(a_base, ks):
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = _lds_load_v8(a_lds_base, off0)
-            v1 = _lds_load_v8(a_lds_base, off1)
-            return vector.shuffle(v0, v1, list(range(16)))
+            v0 = _lds_load_a_v8(off0)
+            v1 = _lds_load_a_v8(off1)
+            return v0.shuffle(v1, list(range(16)))
 
         def load_b_frag(b_lds_base, b_base, ks):
             results = []
@@ -317,8 +321,8 @@ def _compile_stage1_wmma_kernel_impl(
             for kt in range_constexpr(num_k_tiles):
                 k_base = fx.Index(kt * int(tile_k))
                 pack_a_to_lds(k_base)
-                copy_b_to_lds(k_base, bg_lds_base, 0)
-                copy_b_to_lds(k_base, bu_lds_base, int(inter_dim))
+                copy_b_to_lds(k_base, bg_lds_view, 0)
+                copy_b_to_lds(k_base, bu_lds_view, int(inter_dim))
                 gpu.barrier()
 
                 for ks in range_constexpr(k_wmma_steps):
@@ -468,7 +472,7 @@ def _compile_stage2_wmma_kernel_impl(
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
-    from flydsl._mlir.dialects import llvm, scf
+    from flydsl._mlir.dialects import scf
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, vector
     from flydsl.expr.typing import T
@@ -588,13 +592,18 @@ def _compile_stage2_wmma_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
-        # New-API shared memory: build the two LDS region base addresses (as
-        # byte offsets into LDS) once at the top of the kernel. All LDS access
-        # below goes through raw !llvm.ptr<3> pointers built from these bases
-        # (the vector/rocdl LDS ops do not accept !fly.memref).
+        # New-API shared memory: capture the LDS region field pointer/views once
+        # at the top of the kernel. Register load/store to LDS uses the
+        # high-level recast_iter/make_view + memref idioms. Only the hardware
+        # transpose read (ds_load_tr16_b128) keeps a raw !llvm.ptr<3>, as that
+        # rocdl intrinsic requires a pointer.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        a_lds_ptr = lds.smem_a.ptr
+        a_lds_view = lds.smem_a.view(fx.make_layout(lds_a_elems, 1))
+        b_lds_view = lds.smem_b.view(fx.make_layout(lds_b_elems, 1))
+        # Byte-address base for the transpose reads (ds_load_tr16_b128), which
+        # require a raw LDS pointer.
         b_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_b.ptr)))
-        a_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_a.ptr)))
 
         vec8_ty = ir.VectorType.get([8], T.f16)
 
@@ -602,11 +611,9 @@ def _compile_stage2_wmma_kernel_impl(
             byte_addr = base_bytes + arith.ArithValue(arith.unwrap(elem_off, index=True)) * arith.index(elem_bytes)
             return buffer_ops.create_llvm_ptr(byte_addr, address_space=3)
 
-        def _lds_store_f16(base_bytes, elem_off, val):
-            llvm.store(arith._to_raw(val), _lds_byte_ptr(base_bytes, elem_off), alignment=elem_bytes)
-
-        def _lds_load_v8(base_bytes, elem_off):
-            return llvm.load(vec8_ty, _lds_byte_ptr(base_bytes, elem_off), alignment=elem_bytes)
+        def _lds_load_a_v8(elem_off):
+            it = fx.recast_iter(fx.Float16, fx.add_offset(a_lds_ptr, fx.Int32(elem_off)))
+            return fx.make_view(it, fx.make_layout(8, 1)).load()
 
         def _lds_tr_load_v8(base_bytes, elem_off):
             return rocdl.ds_load_tr16_b128(vec8_ty, _lds_byte_ptr(base_bytes, elem_off))
@@ -653,7 +660,7 @@ def _compile_stage2_wmma_kernel_impl(
                         arith.constant(0.0, type=T.f16),
                     )
                     lds_idx = row * arith.index(lds_a_stride) + col
-                    _lds_store_f16(a_lds_base, lds_idx, x_val)
+                    fx.memref_store(x_val, a_lds_view, fx.Int32(lds_idx))
                     scf.YieldOp([])
 
         def copy_b_to_lds(k_base):
@@ -680,7 +687,7 @@ def _compile_stage2_wmma_kernel_impl(
                         dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
-                    _lds_store_f16(b_lds_base, lds_idx, w_val)
+                    fx.memref_store(w_val, b_lds_view, fx.Int32(lds_idx))
                     scf.YieldOp([])
 
         def _precompute_a_lane_bases():
@@ -706,9 +713,9 @@ def _compile_stage2_wmma_kernel_impl(
         def load_a_frag(a_base, ks):
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = _lds_load_v8(a_lds_base, off0)
-            v1 = _lds_load_v8(a_lds_base, off1)
-            return vector.shuffle(v0, v1, list(range(16)))
+            v0 = _lds_load_a_v8(off0)
+            v1 = _lds_load_a_v8(off1)
+            return v0.shuffle(v1, list(range(16)))
 
         def load_b_frag(b_base, ks):
             results = []

@@ -532,21 +532,30 @@ def build_flash_attn_func_module_primary(
         # index and an addrspace(3) llvm ptr) and only use those ir.Values inside
         # the runtime KV loop.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
-        lds_kv_base_ptr = buffer_ops.create_llvm_ptr(lds_kv_base_idx, address_space=3)
-
-        def _lds_kv_gep(elem_idx):
-            return buffer_ops.get_element_ptr(
-                lds_kv_base_ptr,
-                byte_offset=_raw(fx.Index(elem_idx) * fx.Index(2)),
-                elem_type=T.i8,
-            )
+        # Capture the LDS base once here; the `lds` handle is a Python object and
+        # must never be referenced inside the runtime KV loop. `lds_kv_ptr` (a typed
+        # shared-memory iterator) drives the high-level view/recast register access;
+        # `lds_kv_base_idx` (a raw address) feeds the ds_read / DMA pointer paths
+        # that inherently require a pointer.
+        lds_kv_ptr = lds.kv.ptr
+        lds_kv_base_idx = fx.Index(fx.ptrtoint(lds_kv_ptr))
 
         def _lds_kv_store(elem_idx, vec_value, alignment):
-            llvm.StoreOp(_raw(vec_value), _lds_kv_gep(elem_idx), alignment=alignment)
+            # LDS register store via the high-level layout/view API. `elem_idx` is an
+            # element offset in the LDS element (f16/bf16) units. `alignment` is kept
+            # for call-site compatibility; the view derives natural alignment.
+            del alignment
+            vec = vec_value if isinstance(vec_value, Vec) else Vec(vec_value)
+            it = fx.recast_iter(vec.dtype, fx.add_offset(lds_kv_ptr, fx.Int32(elem_idx)))
+            fx.make_view(it, fx.make_layout(vec.numel, 1)).store(vec)
 
         def _lds_kv_load(vec_type, elem_idx, alignment):
-            return llvm.LoadOp(vec_type, _lds_kv_gep(elem_idx), alignment=alignment).result
+            # LDS register load via the high-level layout/view API (see _lds_kv_store
+            # for the addressing convention). `vec_type` only selects the view extent.
+            del alignment
+            n_elems = ir.VectorType(vec_type).shape[0]
+            it = fx.recast_iter(elem_dtype, fx.add_offset(lds_kv_ptr, fx.Int32(elem_idx)))
+            return fx.make_view(it, fx.make_layout(n_elems, 1)).load().ir_value()
 
         # ---- Thread / block indices ----
         block_id = fx.Index(gpu.block_idx.x)

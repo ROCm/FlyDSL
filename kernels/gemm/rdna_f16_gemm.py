@@ -25,7 +25,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
 
 WMMA_M = 16
 WMMA_N = 16
@@ -97,25 +96,21 @@ def create_wmma_gemm_module(
         arg_a: fx.Tensor,
         arg_bt: fx.Tensor,
     ):
-        in_ir_ty = T.bf16 if is_bf16 else T.f16
-        v8_in_ty = T.vec(8, in_ir_ty)
-
         # Allocate the whole (double-buffered) LDS region as one contiguous array.
-        # Vectorized (v8) LDS access goes through raw LDS pointers built ONCE here at
-        # the top: the pointer/int handles below are ir.Values, so they are safe to
-        # use inside the runtime pipeline loop (the .peek() handle itself is a Python
-        # object and must not be referenced from within scf regions).
+        # Vectorized (v8) LDS access uses the high-level layout/view API. The base
+        # iterator is built ONCE here at the top (it is an ir.Value, so it is safe to
+        # advance and view inside the runtime pipeline loop; the .peek() handle itself
+        # is a Python object and must not be referenced from within scf regions).
         lds = fx.SharedAllocator(static=False).allocate(fx.Array[lds_elem_dtype, LDS_TOTAL, 16]).peek()
-        lds_base_i64 = fx.Int64(fx.ptrtoint(lds.ptr))
-        lds_u8 = fx.recast_iter(fx.Uint8, lds.ptr)
+        lds_iter = fx.recast_iter(lds_elem_dtype, lds.ptr)
 
         def _lds_store_vec8(elem_off, value):
-            base = lds_base_i64 + fx.Int64(elem_off * 2)
-            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
-            _llvm.StoreOp(value, ptr, alignment=16)
+            it = fx.add_offset(lds_iter, fx.Int32(elem_off))
+            fx.make_view(it, fx.make_layout(LOAD_VEC, 1)).store(value)
 
         def _lds_load_vec8(elem_off):
-            return fx.ptr_load(lds_u8 + fx.Int32(elem_off * 2), result_type=v8_in_ty)
+            it = fx.add_offset(lds_iter, fx.Int32(elem_off))
+            return fx.make_view(it, fx.make_layout(LOAD_VEC, 1)).load()
 
         tid = gpu.thread_id("x")
         pid = gpu.block_id("x")

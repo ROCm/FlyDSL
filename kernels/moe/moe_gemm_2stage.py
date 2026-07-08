@@ -717,17 +717,17 @@ def compile_moe_gemm1(
                 acc_up = [acc_init] * (num_acc_n * m_repeat)
 
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                # Pointer-based CK-style XOR16 store (inlined from lds_store_{16,8,4}b_xor16;
-                # the vector-dialect store helpers do not accept the pointer-backed LDS buffer).
+                # View-based CK-style XOR16 store: recast the i8 LDS region and write the
+                # register vector as bytes (high-level layout/view idiom).
                 def _lds_x_store(vec_part, row_local, col_local_i32, lds_base, vec_ty, nbytes):
                     col_local_bytes = col_local_i32 * fx.Index(4)
                     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
                     col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes // arith.index(int(elem_bytes)))
                     idx0 = crd2idx((fx.Int32(row_local), fx.Int32(col_swz)), layout_lds) + lds_base
-                    off_i64 = fx.Int64(idx0) if elem_bytes == 1 else (fx.Int64(idx0) * fx.Int64(elem_bytes))
-                    base_i64 = fx.Int64(fx.ptrtoint(lds_x_base)) + off_i64
-                    p = buffer_ops.create_llvm_ptr(base_i64, address_space=3)
-                    llvm.StoreOp(vector.bitcast(vec_ty, vec_part), p, alignment=nbytes)
+                    byte_off = idx0 if elem_bytes == 1 else (idx0 * arith.index(int(elem_bytes)))
+                    # f8 must not go through the op; write as i8 (byte layout is identical).
+                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
+                    fx.make_view(it, fx.make_layout(nbytes, 1)).store(fx.Vector(vec_part).bitcast(fx.Uint8))
 
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
                     for i in range_constexpr(num_x_loads):
@@ -748,12 +748,14 @@ def compile_moe_gemm1(
                     )
                     idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
-                    byte_off = fx.Int32(idx_a16) if elem_bytes == 1 else (fx.Int32(idx_a16) * fx.Int32(elem_bytes))
-                    u8 = fx.recast_iter(fx.Uint8, lds_x_base)
-                    loaded_a16 = fx.ptr_load(u8 + byte_off, result_type=vec16_x)
-                    a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
-                    a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                    a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                    byte_off = idx_a16 if elem_bytes == 1 else (idx_a16 * arith.index(int(elem_bytes)))
+                    # View-based LDS load: read 16 bytes as i8 via recast+view (f8 must not go
+                    # through the op), then bitcast to i64x2 for the MFMA operands.
+                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
+                    loaded_a16 = fx.make_view(it, fx.make_layout(16, 1)).load()
+                    a_i64x2 = fx.Vector(loaded_a16).bitcast(fx.Int64)
+                    a0 = a_i64x2[0]
+                    a1 = a_i64x2[1]
                     return a0, a1
 
                 def compute_tile(
@@ -2322,17 +2324,17 @@ def compile_moe_gemm2(
                         return b_tile
 
                 # ---- Pipeline helpers: store X tile to LDS with ping-pong base ----
-                # Pointer-based CK-style XOR16 store (inlined from lds_store_{16,8,4}b_xor16;
-                # the vector-dialect store helpers do not accept the pointer-backed LDS buffer).
+                # View-based CK-style XOR16 store: recast the i8 LDS region and write the
+                # register vector as bytes (high-level layout/view idiom).
                 def _lds_x_store(vec_part, row_local, col_local_i32, lds_base, vec_ty, nbytes):
                     col_local_bytes = col_local_i32 * fx.Index(4)
                     col_swz_bytes = swizzle_xor16(row_local, col_local_bytes, k_blocks16)
                     col_swz = col_swz_bytes if elem_bytes == 1 else (col_swz_bytes // arith.index(int(elem_bytes)))
                     idx0 = crd2idx((fx.Int32(row_local), fx.Int32(col_swz)), layout_lds) + lds_base
-                    off_i64 = fx.Int64(idx0) if elem_bytes == 1 else (fx.Int64(idx0) * fx.Int64(elem_bytes))
-                    base_i64 = fx.Int64(fx.ptrtoint(lds_x_base)) + off_i64
-                    p = buffer_ops.create_llvm_ptr(base_i64, address_space=3)
-                    llvm.StoreOp(vector.bitcast(vec_ty, vec_part), p, alignment=nbytes)
+                    byte_off = idx0 if elem_bytes == 1 else (idx0 * arith.index(int(elem_bytes)))
+                    # f8 must not go through the op; write as i8 (byte layout is identical).
+                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
+                    fx.make_view(it, fx.make_layout(nbytes, 1)).store(fx.Vector(vec_part).bitcast(fx.Uint8))
 
                 def store_x_tile_to_lds(vec_x_in_parts, lds_base):
                     for i in range_constexpr(num_x_loads):
@@ -2353,12 +2355,14 @@ def compile_moe_gemm2(
                     )
                     idx_a16 = crd2idx((fx.Int32(curr_row_a_lds), fx.Int32(col_base_swz)), layout_lds)
                     idx_a16 = idx_a16 + lds_base
-                    byte_off = fx.Int32(idx_a16) if elem_bytes == 1 else (fx.Int32(idx_a16) * fx.Int32(elem_bytes))
-                    u8 = fx.recast_iter(fx.Uint8, lds_x_base)
-                    loaded_a16 = fx.ptr_load(u8 + byte_off, result_type=vec16_x)
-                    a_i64x2 = vector.bitcast(T.i64x2, loaded_a16)
-                    a0 = vector.extract(a_i64x2, static_position=[0], dynamic_position=[])
-                    a1 = vector.extract(a_i64x2, static_position=[1], dynamic_position=[])
+                    byte_off = idx_a16 if elem_bytes == 1 else (idx_a16 * arith.index(int(elem_bytes)))
+                    # View-based LDS load: read 16 bytes as i8 via recast+view (f8 must not go
+                    # through the op), then bitcast to i64x2 for the MFMA operands.
+                    it = fx.recast_iter(fx.Uint8, fx.add_offset(lds_x_base, fx.Int32(byte_off)))
+                    loaded_a16 = fx.make_view(it, fx.make_layout(16, 1)).load()
+                    a_i64x2 = fx.Vector(loaded_a16).bitcast(fx.Int64)
+                    a0 = a_i64x2[0]
+                    a1 = a_i64x2[1]
                     return a0, a1
 
                 def compute_tile(
