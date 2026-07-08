@@ -30,7 +30,7 @@ if not torch.cuda.is_available():
     print("CUDA/ROCm not available")
     sys.exit(1)
 
-from kernels.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
+from kernels.attention.flash_attn_interface import flydsl_flash_attn_func  # noqa: E402
 from tests.test_common import run_perftest  # noqa: E402
 
 UNIFORM_RANGE = (-1, 1)

@@ -7,7 +7,7 @@ pipeline's fixed cost amortizes over batch*seq_len rather than seq_len alone.
 
 import pytest
 
-from kernels.flash_attn_generic import (
+from kernels.attention.flash_attn_generic import (
     _DUALWAVE_LARGE_BATCH,
     _DUALWAVE_MIN_DENSE_SEQ,
     _DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH,

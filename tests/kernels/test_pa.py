@@ -39,13 +39,13 @@ except ImportError:
     print("Warning: Triton Gluon is unavailable; Gluon reference checks will fail.")
 
 try:
-    from kernels.pa_decode_fp8 import (
+    from kernels.attention.pa_decode_fp8 import (
         get_pa_metadata as flydsl_get_pa_metadata,
     )
-    from kernels.pa_decode_fp8 import (
+    from kernels.attention.pa_decode_fp8 import (
         get_recommended_splits,
     )
-    from kernels.pa_decode_fp8 import (
+    from kernels.attention.pa_decode_fp8 import (
         pa_decode_ps_launch as flydsl_ps_launch,
     )
 

@@ -346,29 +346,29 @@ class Numeric(metaclass=NumericMeta):
             return type(self)(-self.value)
         return type(self)(-self.value)
 
-    def __fly_bool__(self):
+    def __dsl_bool__(self):
         if isinstance(self.value, (int, float, bool)):
             return Boolean(bool(self.value))
         zero = arith_const(type(self).zero, type(self).ir_type)
         return self.__ne__(type(self)(zero))
 
-    def __fly_not__(self):
-        b = self.__fly_bool__()
+    def __dsl_not__(self):
+        b = self.__dsl_bool__()
         if isinstance(b.value, bool):
             return Boolean(not b.value)
         zero = arith_const(0, T.bool())
         return Boolean(b.ir_value().__eq__(zero))
 
-    def __fly_and__(self, other):
-        lhs = self.__fly_bool__()
-        rhs = as_numeric(other).__fly_bool__()
+    def __dsl_and__(self, other):
+        lhs = self.__dsl_bool__()
+        rhs = as_numeric(other).__dsl_bool__()
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value and rhs.value)
         return Boolean(lhs.ir_value().__and__(rhs.ir_value()))
 
-    def __fly_or__(self, other):
-        lhs = self.__fly_bool__()
-        rhs = as_numeric(other).__fly_bool__()
+    def __dsl_or__(self, other):
+        lhs = self.__dsl_bool__()
+        rhs = as_numeric(other).__dsl_bool__()
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value or rhs.value)
         return Boolean(lhs.ir_value().__or__(rhs.ir_value()))
