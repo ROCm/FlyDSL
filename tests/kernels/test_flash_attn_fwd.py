@@ -113,12 +113,27 @@ DEFAULT_CONFIGS = [
     (3, 65, 3, 3, 128, 1),
 ]
 DEFAULT_CONFIGS = [
-    (16, 8192, 64, 64, 128, 1),
-    (16, 8192, 64, 8, 128, 1),
-    (2, 1024, 64, 64, 128, 1),
-    (16, 8192, 64, 64, 64, 1),
-    (16, 8192, 64, 8, 64, 1),
-    (2, 1024, 64, 64, 64, 1),
+    # (16, 8192, 64, 64, 128, 1),
+    # (16, 8192, 64, 8, 128, 1),
+    # (2, 1024, 64, 64, 128, 1),
+    # (16, 8192, 64, 64, 64, 1),
+    # (16, 8192, 64, 8, 64, 1),
+    # (2, 1024, 64, 64, 64, 1),
+
+    # (16, 8192, 16, 16, 128, 1),
+    # (16, 8192, 16, 16, 64, 1),
+    # (1, 8192, 16, 16, 128, 1),
+    # (1, 8192, 16, 16, 64, 1),
+
+    # set5
+    (1, 64, 4, 4, 128, 1),
+    (1, 30, 4, 4, 128, 1),
+    (1, 1, 4, 4, 128, 1),
+    (2, 7, 4, 4, 128, 1),
+    (3, 31, 3, 3, 128, 1),
+    (5, 33, 5, 5, 128, 1),
+    (5, 63, 7, 7, 128, 1),
+    (3, 65, 3, 3, 128, 1),
 ]
 
 # Additional dense/varlen/cross-length cases.
@@ -128,6 +143,8 @@ EXTRA_CONFIGS = [
     # varlen
     [[1024, 8192], None, None, 64, 64, 128, 1],
     [[1024, 8192], None, None, 64, 64, 64, 1],
+    [[1024, 8192, 3, 31, 256, 512], None, None, 64, 64, 128, 1],
+    [[1024, 8192, 3, 31, 256, 512], None, None, 64, 64, 64, 1],
     # [[512, 256, 1024, 128], None, None, 64, 64, 128, 1],  # uneven; MHA
     # [[300, 700, 500], None, None, 32, 32, 128, 1],  # non-256/64-multiple
     # [[1024, 1024], None, None, 64, 8, 128, 1],  # even, GQA
@@ -1168,6 +1185,7 @@ def run_aiter_bench(
     backend="ck",
     num_kv_heads=None,
     precomputed_ref=None,
+    precomputed_inputs=None,
     seqlen_kv=None,
     varlen_seqlens_q=None,
     varlen_seqlens_kv=None,
@@ -1187,12 +1205,40 @@ def run_aiter_bench(
         return {"skip": True}
 
     results = {}
-    setup_seed(seed)
     torch.cuda.empty_cache()
 
     H, D = nheads, head_dim
     H_KV = num_kv_heads if num_kv_heads is not None else H
-    if varlen:
+    if precomputed_inputs is not None:
+        varlen = precomputed_inputs["varlen"]
+        B = precomputed_inputs["B"]
+        S = precomputed_inputs["Sq"]
+        Skv = precomputed_inputs["Skv"]
+        cu_q_t = precomputed_inputs["cu_q_t"]
+        cu_kv_t = precomputed_inputs["cu_kv_t"]
+        q = precomputed_inputs["q_t"]
+        k = precomputed_inputs["k_t"]
+        v = precomputed_inputs["v_t"]
+        if varlen:
+            vl_q = precomputed_inputs["vl_q"]
+            vl_kv = precomputed_inputs["vl_kv"]
+            cuq = precomputed_inputs["cuq"]
+            cukv = precomputed_inputs["cukv"]
+            total_q = precomputed_inputs["total_q"]
+            total_kv = precomputed_inputs["total_kv"]
+            q_pack, k_pack, v_pack = q, k, v
+            S = max(vl_q)
+            Skv = max(vl_kv)
+            q = torch.zeros(B, S, H, D, dtype=dtype, device="cuda")
+            k = torch.zeros(B, Skv, H_KV, D, dtype=dtype, device="cuda")
+            v = torch.zeros(B, Skv, H_KV, D, dtype=dtype, device="cuda")
+            for b in range(B):
+                q[b, : vl_q[b]] = q_pack[cuq[b] : cuq[b + 1]]
+                k[b, : vl_kv[b]] = k_pack[cukv[b] : cukv[b + 1]]
+                v[b, : vl_kv[b]] = v_pack[cukv[b] : cukv[b + 1]]
+    else:
+        setup_seed(seed)
+    if precomputed_inputs is None and varlen:
         vl_q = list(varlen_seqlens_q)
         vl_kv = list(varlen_seqlens_kv) if varlen_seqlens_kv is not None else vl_q
         B = len(vl_q)
@@ -1215,7 +1261,7 @@ def run_aiter_bench(
             q[b, : vl_q[b]] = q_pack[cuq[b] : cuq[b + 1]]
             k[b, : vl_kv[b]] = k_pack[cukv[b] : cukv[b + 1]]
             v[b, : vl_kv[b]] = v_pack[cukv[b] : cukv[b + 1]]
-    else:
+    elif precomputed_inputs is None:
         B, S, Skv = batch, seq_len, seqlen_kv if seqlen_kv is not None else seq_len
         cu_q_t = cu_kv_t = None
         q = torch.empty(B, S, H, D, dtype=dtype, device="cuda").uniform_(*UNIFORM_RANGE)
@@ -2501,6 +2547,24 @@ def main():
                             # Compute reference once for bf16/fp16 rows (fp8 helper owns quantization + reference).
                             if dtype_str == "fp8":
                                 pass
+                            elif args.trigger_lazy_else:
+                                precomputed_inputs, shared_ref = _build_inputs_and_reference_for_config(
+                                    batch=batch,
+                                    seqlen_q=seq_len,
+                                    seqlen_kv=None,
+                                    varlen_seqlens_q=None,
+                                    varlen_seqlens_kv=None,
+                                    num_heads=nh,
+                                    head_dim=hd,
+                                    num_kv_heads=nh_kv,
+                                    dtype=dtype,
+                                    causal=causal,
+                                    seed=args.seed,
+                                    use_block_table=False,
+                                    page_size=args.page_size,
+                                    kv_cache_layout=kv_cache_layout or "linear",
+                                    trigger_lazy_else=True,
+                                )
                             else:
                                 # All three use the same seed -> same Q/K/V -> identical reference.
                                 setup_seed(args.seed)
@@ -2612,6 +2676,7 @@ def main():
                                 backend="ck",
                                 num_kv_heads=nh_kv,
                                 precomputed_ref=shared_ref,
+                                precomputed_inputs=precomputed_inputs,
                             )
                             asm_r = run_aiter_bench(
                                 batch,
@@ -2626,6 +2691,7 @@ def main():
                                 backend="asm",
                                 num_kv_heads=nh_kv,
                                 precomputed_ref=shared_ref,
+                                precomputed_inputs=precomputed_inputs,
                             )
                         rows.append((cfg, fly_r, ck_r, asm_r))
 
