@@ -36,6 +36,146 @@ def _infer_np_dtype(width, signed, name):
     return getattr(np, name.lower(), None)
 
 
+_CMP_OPS = frozenset({operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operator.ne})
+_BOOL_WIDEN_OPS = frozenset(
+    {
+        operator.add,
+        operator.sub,
+        operator.mul,
+        operator.truediv,
+        operator.floordiv,
+        operator.mod,
+    }
+)
+_INT_ONLY_OPS = frozenset(
+    {
+        operator.and_,
+        operator.or_,
+        operator.xor,
+        operator.lshift,
+        operator.rshift,
+    }
+)
+
+
+def _resolve_float_type(ta, tb):
+    """Pick the common float type for a mixed pair."""
+    # Uses module-level _FLOAT_RANK / _widen_float (defined after all classes).
+    if ta.is_float and not tb.is_float:
+        return _widen_float(ta, tb.width)
+    if tb.is_float and not ta.is_float:
+        return _widen_float(tb, ta.width)
+    wa, wb = ta.width, tb.width
+    if wa != wb:
+        wider = ta if wa > wb else tb
+        if wider.width >= 16:
+            return wider
+    ra = _FLOAT_RANK.get(ta, 0)
+    rb = _FLOAT_RANK.get(tb, 0)
+    if ra != rb and max(ra, rb) > 0:
+        return ta if ra > rb else tb
+    if ra == rb and ra > 0:
+        # Same width, same rank, distinct types (f16 vs bf16): widen up.
+        return _widen_float(ta, wa + 1)
+    raise ValueError(f"no common float type for {ta} and {tb}; cast explicitly")
+
+
+def _resolve_numeric_type(ta, tb):
+    """Return the common Numeric type class for two Numeric type classes."""
+    if ta is tb:
+        return ta
+
+    if ta.is_float or tb.is_float:
+        return _resolve_float_type(ta, tb)
+
+    # Both integers — pick wider; on tie, prefer unsigned when mixed sign
+    if ta.signed == tb.signed:
+        return ta if ta.width >= tb.width else tb
+
+    u, s = (ta, tb) if not ta.signed else (tb, ta)
+    return u if u.width >= s.width else s
+
+
+def _operand_type_for_op(dtype, op):
+    """Normalize a Numeric type before applying the common-type lattice."""
+    if op in _BOOL_WIDEN_OPS and dtype is Boolean:
+        return Int32
+    return dtype
+
+
+def _common_numeric_type_for_op(ta, tb, op):
+    ta = _operand_type_for_op(ta, op)
+    tb = _operand_type_for_op(tb, op)
+    common_type = _resolve_numeric_type(ta, tb)
+    if op in _INT_ONLY_OPS and common_type.is_float:
+        raise TypeError(f"{op.__name__} requires integer operands, got {common_type.__name__}")
+    return common_type
+
+
+def _result_numeric_type_for_op(common_type, op):
+    if op in _CMP_OPS:
+        return Boolean
+    if op is operator.truediv and common_type.is_integer:
+        return Float64 if common_type.width > 32 else Float32
+    return common_type
+
+
+def _coerce_operands(a, b, op):
+    """Promote *a* and *b* to the operation's common scalar type."""
+    ta = _operand_type_for_op(type(a), op)
+    tb = _operand_type_for_op(type(b), op)
+    if type(a) is not ta:
+        a = a.to(ta)
+    if type(b) is not tb:
+        b = b.to(tb)
+
+    dest = _common_numeric_type_for_op(ta, tb, op)
+    return (a if ta is dest else a.to(dest), b if tb is dest else b.to(dest), dest)
+
+
+def _try_coerce_rhs(rhs):
+    """Try converting *rhs* to a Numeric; return None on failure."""
+    if isinstance(rhs, Numeric):
+        return rhs
+    if isinstance(rhs, ArithValue):
+        if isinstance(rhs.type, ir.VectorType):
+            return None
+        if isinstance(rhs.type, ir.IndexType):
+            return Index(rhs)
+        try:
+            return Numeric.from_ir_type(rhs.type)(rhs)
+        except (ValueError, KeyError):
+            return None
+    if isinstance(rhs, (int, float, bool)):
+        return as_numeric(rhs)
+    return None
+
+
+def _extract_arith(val, signed):
+    """Unwrap Numeric.value, attaching signedness if it's an ArithValue."""
+    v = val.value
+    return v.with_signedness(signed) if isinstance(v, ArithValue) else v
+
+
+def _make_binop(op, swap=False):
+    """Create a binary-operator closure for Numeric subclasses."""
+
+    def _apply(lhs, rhs):
+        rhs = _try_coerce_rhs(rhs)
+        if rhs is None:
+            return NotImplemented
+
+        lhs, rhs, common_type = _coerce_operands(lhs, rhs, op)
+        out_type = _result_numeric_type_for_op(common_type, op)
+
+        lv, rv = _extract_arith(lhs, lhs.signed), _extract_arith(rhs, rhs.signed)
+        if swap:
+            lv, rv = rv, lv
+        return out_type(op(lv, rv))
+
+    return _apply
+
+
 class NumericMeta(type):
     width: int
     log_width: int
@@ -166,117 +306,6 @@ class NumericMeta(type):
             raise ValueError(f"no zero value for {cls}")
 
 
-_CMP_OPS = frozenset({operator.lt, operator.le, operator.gt, operator.ge, operator.eq, operator.ne})
-
-
-def _widen_bool_to_int32(x, widen_bool=False):
-    """Promote Boolean to Int32 for arithmetic when widen_bool=True.
-
-    Per C++-style usual arithmetic conversions, we deliberately do NOT apply
-    integer promotion: i8/i16/u8/u16 stay at their narrow width.
-    Same-width same-signedness operands keep their type; cross-width or
-    cross-sign mixing is resolved by ``_coerce_operands``.
-    """
-    if widen_bool and type(x) is Boolean:
-        return x.to(Int32), Int32
-    return x, type(x)
-
-
-def _resolve_float_type(ta, tb):
-    """Pick the wider float type, or the one with higher rank at equal width."""
-    # Use module-level _FLOAT_RANK (defined after all classes)
-    if ta.is_float and not tb.is_float:
-        return ta
-    if tb.is_float and not ta.is_float:
-        return tb
-    wa, wb = ta.width, tb.width
-    if wa != wb:
-        wider = ta if wa > wb else tb
-        if wider.width >= 16:
-            return wider
-    ra = _FLOAT_RANK.get(ta, 0)
-    rb = _FLOAT_RANK.get(tb, 0)
-    if ra >= rb and ra > 0:
-        return ta
-    if rb > ra:
-        return tb
-    raise ValueError(f"no common float type for {ta} and {tb}; cast explicitly")
-
-
-def _coerce_operands(a, b, widen_bool=False):
-    """Promote *a* and *b* to a common scalar type."""
-    ta, tb = type(a), type(b)
-    a, ta = _widen_bool_to_int32(a, widen_bool=widen_bool)
-    b, tb = _widen_bool_to_int32(b, widen_bool=widen_bool)
-
-    if ta is tb:
-        return a, b, ta
-
-    if ta.is_float or tb.is_float:
-        dest = _resolve_float_type(ta, tb)
-        return (a if type(a) is dest else a.to(dest), b if type(b) is dest else b.to(dest), dest)
-
-    # Both integers — pick wider; on tie, prefer unsigned when mixed sign
-    if ta.signed == tb.signed:
-        wider = ta if ta.width >= tb.width else tb
-        return (a if type(a) is wider else a.to(wider), b if type(b) is wider else b.to(wider), wider)
-
-    u, s = (ta, tb) if not ta.signed else (tb, ta)
-    dest = u if u.width >= s.width else s
-    return (a if type(a) is dest else a.to(dest), b if type(b) is dest else b.to(dest), dest)
-
-
-def _try_coerce_rhs(rhs):
-    """Try converting *rhs* to a Numeric; return None on failure."""
-    if isinstance(rhs, Numeric):
-        return rhs
-    if isinstance(rhs, ArithValue):
-        if isinstance(rhs.type, ir.VectorType):
-            return None
-        if isinstance(rhs.type, ir.IndexType):
-            return Index(rhs)
-        try:
-            return Numeric.from_ir_type(rhs.type)(rhs)
-        except (ValueError, KeyError):
-            return None
-    if isinstance(rhs, (int, float, bool)):
-        return as_numeric(rhs)
-    return None
-
-
-def _extract_arith(val, signed):
-    """Unwrap Numeric.value, attaching signedness if it's an ArithValue."""
-    v = val.value
-    return v.with_signedness(signed) if isinstance(v, ArithValue) else v
-
-
-def _make_binop(op, promote=True, widen_bool=False, swap=False):
-    """Create a binary-operator closure for Numeric subclasses."""
-
-    def _apply(lhs, rhs):
-        rhs = _try_coerce_rhs(rhs)
-        if rhs is None:
-            return NotImplemented
-
-        out_type = type(lhs)
-        if promote:
-            lhs, rhs, out_type = _coerce_operands(lhs, rhs, widen_bool)
-        else:
-            rhs = type(lhs)(rhs)
-
-        if op in _CMP_OPS:
-            out_type = Boolean
-        elif op is operator.truediv and isinstance(lhs, Integer):
-            out_type = Float64 if out_type.width > 32 else Float32
-
-        lv, rv = _extract_arith(lhs, lhs.signed), _extract_arith(rhs, rhs.signed)
-        if swap:
-            lv, rv = rv, lv
-        return out_type(op(lv, rv))
-
-    return _apply
-
-
 class Numeric(metaclass=NumericMeta):
     def __init__(self, value):
         self.value = value
@@ -346,29 +375,29 @@ class Numeric(metaclass=NumericMeta):
             return type(self)(-self.value)
         return type(self)(-self.value)
 
-    def __fly_bool__(self):
+    def __dsl_bool__(self):
         if isinstance(self.value, (int, float, bool)):
             return Boolean(bool(self.value))
         zero = arith_const(type(self).zero, type(self).ir_type)
         return self.__ne__(type(self)(zero))
 
-    def __fly_not__(self):
-        b = self.__fly_bool__()
+    def __dsl_not__(self):
+        b = self.__dsl_bool__()
         if isinstance(b.value, bool):
             return Boolean(not b.value)
         zero = arith_const(0, T.bool())
         return Boolean(b.ir_value().__eq__(zero))
 
-    def __fly_and__(self, other):
-        lhs = self.__fly_bool__()
-        rhs = as_numeric(other).__fly_bool__()
+    def __dsl_and__(self, other):
+        lhs = self.__dsl_bool__()
+        rhs = as_numeric(other).__dsl_bool__()
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value and rhs.value)
         return Boolean(lhs.ir_value().__and__(rhs.ir_value()))
 
-    def __fly_or__(self, other):
-        lhs = self.__fly_bool__()
-        rhs = as_numeric(other).__fly_bool__()
+    def __dsl_or__(self, other):
+        lhs = self.__dsl_bool__()
+        rhs = as_numeric(other).__dsl_bool__()
         if isinstance(lhs.value, bool) and isinstance(rhs.value, bool):
             return Boolean(lhs.value or rhs.value)
         return Boolean(lhs.ir_value().__or__(rhs.ir_value()))
@@ -438,40 +467,40 @@ class Numeric(metaclass=NumericMeta):
         return ir2dsl_map[ir_type]
 
     def __add__(self, other):
-        return _make_binop(operator.add, widen_bool=True)(self, other)
+        return _make_binop(operator.add)(self, other)
 
     def __sub__(self, other):
-        return _make_binop(operator.sub, widen_bool=True)(self, other)
+        return _make_binop(operator.sub)(self, other)
 
     def __mul__(self, other):
-        return _make_binop(operator.mul, widen_bool=True)(self, other)
+        return _make_binop(operator.mul)(self, other)
 
     def __floordiv__(self, other):
-        return _make_binop(operator.floordiv, widen_bool=True)(self, other)
+        return _make_binop(operator.floordiv)(self, other)
 
     def __truediv__(self, other):
-        return _make_binop(operator.truediv, widen_bool=True)(self, other)
+        return _make_binop(operator.truediv)(self, other)
 
     def __mod__(self, other):
-        return _make_binop(operator.mod, widen_bool=True)(self, other)
+        return _make_binop(operator.mod)(self, other)
 
     def __radd__(self, other):
         return self.__add__(other)
 
     def __rsub__(self, other):
-        return _make_binop(operator.sub, widen_bool=True, swap=True)(self, other)
+        return _make_binop(operator.sub, swap=True)(self, other)
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
     def __rfloordiv__(self, other):
-        return _make_binop(operator.floordiv, widen_bool=True, swap=True)(self, other)
+        return _make_binop(operator.floordiv, swap=True)(self, other)
 
     def __rtruediv__(self, other):
-        return _make_binop(operator.truediv, widen_bool=True, swap=True)(self, other)
+        return _make_binop(operator.truediv, swap=True)(self, other)
 
     def __rmod__(self, other):
-        return _make_binop(operator.mod, widen_bool=True, swap=True)(self, other)
+        return _make_binop(operator.mod, swap=True)(self, other)
 
     def __pow__(self, other):
         return _make_binop(operator.pow)(self, other)
@@ -592,7 +621,7 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
     def __rlshift__(self, other):
         other_ = as_numeric(other)
         if not isinstance(other_, Integer):
-            raise ValueError(f"left-shift requires integer operands, got {other_}")
+            raise TypeError(f"left-shift requires integer operands, got {other_}")
         return other_.__lshift__(self)
 
     def __rshift__(self, other):
@@ -601,7 +630,7 @@ class Integer(Numeric, metaclass=NumericMeta, width=32, signed=True, ir_type=T.i
     def __rrshift__(self, other):
         other_ = as_numeric(other)
         if not isinstance(other_, Integer):
-            raise ValueError(f"right-shift requires integer operands, got {other_}")
+            raise TypeError(f"right-shift requires integer operands, got {other_}")
         return other_.__rshift__(self)
 
     def __and__(self, other):
@@ -798,47 +827,6 @@ def _widen_float(float_type, min_width):
         if w >= min_width:
             return _FLOAT_BY_MIN_WIDTH[w]
     return Float64
-
-
-@classmethod
-def _promote(cls, a_type, b_type):
-    """Resolve the promoted result type for two Numeric types.
-
-    :param a_type: Left Numeric class (e.g. Float16)
-    :param b_type: Right Numeric class (e.g. Float32)
-    :return: The common Numeric class both can be safely promoted to
-    """
-    if a_type is b_type:
-        return a_type
-
-    a_float = a_type.is_float
-    b_float = b_type.is_float
-
-    if a_float and not b_float:
-        return _widen_float(a_type, b_type.width)
-    if b_float and not a_float:
-        return _widen_float(b_type, a_type.width)
-
-    if a_float and b_float:
-        aw, bw = a_type.width, b_type.width
-        if aw > bw and aw >= 16:
-            return a_type
-        if bw > aw and bw >= 16:
-            return b_type
-        if aw == bw:
-            ra = _FLOAT_RANK.get(a_type, 0)
-            rb = _FLOAT_RANK.get(b_type, 0)
-            return a_type if ra >= rb else b_type
-        raise ValueError(f"cannot promote {a_type} and {b_type}; cast explicitly")
-
-    # Both integers
-    if a_type.signed == b_type.signed:
-        return a_type if a_type.width >= b_type.width else b_type
-    u, s = (a_type, b_type) if not a_type.signed else (b_type, a_type)
-    return u if u.width >= s.width else s
-
-
-Numeric.promote = _promote
 
 
 class Index(Integer, metaclass=NumericMeta, width=64, signed=False, ir_type=lambda: ir.IndexType.get()):

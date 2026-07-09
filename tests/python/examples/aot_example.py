@@ -32,7 +32,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from kernels.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
+from kernels.gemm.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 
 
 def precompile_to_cache(launch_fn, M: int, N: int, K: int, in_dtype: str):

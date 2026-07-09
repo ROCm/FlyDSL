@@ -75,11 +75,11 @@ except Exception:
     HAS_AITER = False
 
 # Kernel implementations live under `kernels/`; this test file is the harness.
-from kernels.mixed_moe_gemm_2stage import (  # noqa: E402
+from kernels.moe.mixed_moe_gemm_2stage import (  # noqa: E402
     compile_mixed_moe_gemm1,
     compile_mixed_moe_gemm2,
 )
-from kernels.moe_gemm_2stage import (  # noqa: E402
+from kernels.moe.moe_gemm_2stage import (  # noqa: E402
     MoeGemm2Mode,
     compile_moe_gemm1,
     compile_moe_gemm2,

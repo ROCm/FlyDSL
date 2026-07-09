@@ -45,6 +45,8 @@ from .numeric import (
     Uint32,
     Uint64,
     Uint128,
+    _common_numeric_type_for_op,
+    _result_numeric_type_for_op,
     as_numeric,
 )
 from .primitive import *
@@ -57,6 +59,7 @@ from .utils.arith import (
     fp_to_int,
     int_to_fp,
     int_to_int,
+    resolve_fastmath,
 )
 
 
@@ -1593,28 +1596,55 @@ class Vector(ArithValue):
     def with_signedness(self, signed):
         return ArithValue(self, signed)
 
-    def _wrap_op_result(self, result, shape):
+    def _wrap_op_result(self, result, shape, dtype):
+        # ── TEMPORARY HACK BEGIN (remove together with the Index type) ────
+        if isinstance(result, ir.Value):
+            actual = result.type.element_type if isinstance(result.type, ir.VectorType) else result.type
+            if dtype.ir_type != actual:
+                dtype = Numeric.from_ir_type(actual)
+        # ── TEMPORARY HACK END ────────────────────────────────────────────
         if isinstance(result, ir.Value) and isinstance(result.type, ir.VectorType):
-            return Vector(result, shape, self._result_dtype(result.type.element_type))
+            return Vector(result, shape, dtype)
         if isinstance(result, Numeric):
             return result
         if isinstance(result, ir.Value):
-            return self._result_dtype(result.type)(result)
+            return dtype(result)
         return result
 
-    def _result_dtype(self, elem_type) -> Type[Numeric]:
-        if self._dtype.ir_type == elem_type:
-            return self._dtype
-        return Numeric.from_ir_type(elem_type)
+    @staticmethod
+    def _operand_element_dtype(other):
+        if isinstance(other, Vector):
+            return other.dtype
+        if isinstance(other, Numeric):
+            return type(other)
+        if isinstance(other, (int, float, bool)):
+            return type(as_numeric(other))
+        return None
 
     def _apply_op(self, method_name, op, other, flip=False):
         lhs = self
         rhs = other
         shape = self.shape
+
+        self_dtype = self.dtype
+        other_dtype = self._operand_element_dtype(other)
+        common_dtype = (
+            _common_numeric_type_for_op(self_dtype, other_dtype, op) if other_dtype is not None else self_dtype
+        )
+        result_dtype = _result_numeric_type_for_op(common_dtype, op)
+
         if isinstance(other, Vector):
             shape = self._infer_broadcast_shape(self.shape, other.shape)
             lhs = self.broadcast_to(shape)
             rhs = other.broadcast_to(shape)
+            if rhs.dtype is not common_dtype:
+                rhs = rhs.to(common_dtype)
+        elif isinstance(other, Numeric) and type(other) is not common_dtype:
+            rhs = other.to(common_dtype)
+
+        if lhs.dtype is not common_dtype:
+            lhs = lhs.to(common_dtype)
+
         method = getattr(ArithValue, method_name)
         if flip:
             if isinstance(rhs, Vector):
@@ -1624,7 +1654,7 @@ class Vector(ArithValue):
                 result = getattr(ArithValue, reverse_name)(lhs, rhs)
         else:
             result = method(lhs, rhs)
-        return self._wrap_op_result(result, shape)
+        return self._wrap_op_result(result, shape, result_dtype)
 
     def apply_op(self, op, other, flip=False):
         method_name = _VECTOR_OP_METHODS.get(op)
@@ -1729,6 +1759,7 @@ class Vector(ArithValue):
         kind = _resolve_combining_kind(op, is_fp, signed)
         et = element_type(self.type)
         kwargs = {}
+        fastmath = resolve_fastmath(fastmath)
         if fastmath is not None:
             kwargs["fastmath"] = fastmath
         if init_val is not None:

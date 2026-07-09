@@ -55,7 +55,7 @@ def _pad_2d_tensor(t, rows, cols):
 )
 def test_cluster_mcast_gemm(M, N, K, cluster_m, cluster_n):
     """WMMA GEMM with TDM multicast: end-to-end cluster launch + data sharing."""
-    from kernels.wmma_gemm_gfx1250 import compile_wmma_gemm_tdm
+    from kernels.gemm.wmma_gemm_gfx1250 import compile_wmma_gemm_tdm
     from tests.test_common import verify_output
 
     tile_m, tile_n, tile_k = 128, 256, 128

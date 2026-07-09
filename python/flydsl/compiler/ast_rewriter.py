@@ -3,6 +3,7 @@
 
 import ast
 import contextlib
+import copy
 import difflib
 import functools
 import inspect
@@ -394,24 +395,24 @@ class Transformer(ast.NodeTransformer):
 class RewriteBoolOps(Transformer):
     @staticmethod
     def dsl_and_(lhs, rhs):
-        if hasattr(lhs, "__fly_and__"):
-            return lhs.__fly_and__(rhs)
-        if hasattr(rhs, "__fly_and__"):
-            return rhs.__fly_and__(lhs)
+        if hasattr(lhs, "__dsl_and__"):
+            return lhs.__dsl_and__(rhs)
+        if hasattr(rhs, "__dsl_and__"):
+            return rhs.__dsl_and__(lhs)
         return lhs and rhs
 
     @staticmethod
     def dsl_or_(lhs, rhs):
-        if hasattr(lhs, "__fly_or__"):
-            return lhs.__fly_or__(rhs)
-        if hasattr(rhs, "__fly_or__"):
-            return rhs.__fly_or__(lhs)
+        if hasattr(lhs, "__dsl_or__"):
+            return lhs.__dsl_or__(rhs)
+        if hasattr(rhs, "__dsl_or__"):
+            return rhs.__dsl_or__(lhs)
         return lhs or rhs
 
     @staticmethod
     def dsl_not_(x):
-        if hasattr(x, "__fly_not__"):
-            return x.__fly_not__()
+        if hasattr(x, "__dsl_not__"):
+            return x.__dsl_not__()
         return not x
 
     @classmethod
@@ -421,6 +422,26 @@ class RewriteBoolOps(Transformer):
             "dsl_or_": cls.dsl_or_,
             "dsl_not_": cls.dsl_not_,
         }
+
+    def visit_Compare(self, node: ast.Compare):
+        node = self.generic_visit(node)
+        if len(node.ops) == 1:
+            return node
+        # Chained comparison `a < b < c` -> `(a < b) and (b < c)`, then reuse the
+        # `and` lowering. Middle operands are referenced by two comparisons, matching
+        # the existing repeated-evaluation convention in visit_BoolOp.
+        operands = [node.left] + node.comparators
+        comparisons = []
+        for i, op in enumerate(node.ops):
+            comparison = ast.Compare(
+                left=copy.deepcopy(operands[i]),
+                ops=[copy.deepcopy(op)],
+                comparators=[copy.deepcopy(operands[i + 1])],
+            )
+            comparisons.append(ast.copy_location(comparison, node))
+        chained = ast.copy_location(ast.BoolOp(op=ast.And(), values=comparisons), node)
+        chained = ast.fix_missing_locations(chained)
+        return self.visit_BoolOp(chained)
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
