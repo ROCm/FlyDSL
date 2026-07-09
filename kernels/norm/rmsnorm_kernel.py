@@ -18,11 +18,27 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from kernels.common.kernels_common import (
-    atomic_add,
-    dtype_to_elem_type,
-    get_warp_size,
+from kernels.common.kernels_common import dtype_to_elem_type
+
+# Backward builders live in their own module (see review on #800); re-exported
+# here so existing importers (tests, callers) keep working unchanged.
+from kernels.norm.rmsnorm_bwd_kernel import (  # noqa: E402,F401
+    build_fused_add_rmsnorm_bwd_module,
+    build_rmsnorm_bwd_module,
 )
+from kernels.norm.rmsnorm_common import (
+    BLOCK_THREADS,
+    EPS,
+    VEC_WIDTH,
+    WARP_SIZE,
+)
+from kernels.norm.rmsnorm_common import load_scalar as _load_scalar
+from kernels.norm.rmsnorm_common import load_vec as _load_vec
+from kernels.norm.rmsnorm_common import make_reduction_storage as _make_reduction_storage
+from kernels.norm.rmsnorm_common import store_scalar as _store_scalar
+from kernels.norm.rmsnorm_common import store_vec as _store_vec
+from kernels.norm.rmsnorm_common import to_elem_scalar as _to_elem_scalar
+from kernels.norm.rmsnorm_common import to_elem_vec as _to_elem_vec
 
 try:
     import torch
@@ -30,74 +46,6 @@ except ImportError:
     torch = None
 
 KERNEL_NAME = "rmsnorm"
-
-EPS = 1e-5
-
-BLOCK_THREADS = 256
-WARP_SIZE = get_warp_size()
-VEC_WIDTH = 8
-
-
-def _make_reduction_storage(red_slots: int):
-    @fx.struct
-    class SharedStorage:
-        s_red: fx.Array[fx.Float32, red_slots, 16]
-        s_red2: fx.Array[fx.Float32, red_slots, 16]
-
-    return SharedStorage
-
-
-def _load_scalar(copy_atom, elem_dtype, divided_tensor, index):
-    view = fx.slice(divided_tensor, (None, index))
-    r = fx.make_rmem_tensor(1, elem_dtype)
-    fx.copy_atom_call(copy_atom, view, r)
-    return fx.memref_load_vec(r)[0]
-
-
-def _store_scalar(copy_atom, elem_dtype, store_dtype, divided_tensor, index, val):
-    r = fx.make_rmem_tensor(1, elem_dtype)
-    ts = full(1, store_dtype(val), store_dtype)
-    fx.memref_store_vec(ts, r)
-    view = fx.slice(divided_tensor, (None, index))
-    fx.copy_atom_call(copy_atom, r, view)
-
-
-def _load_vec(copy_atom, vec_width, elem_dtype, div_tensor, idx):
-    r = fx.make_rmem_tensor(vec_width, elem_dtype)
-    fx.copy_atom_call(copy_atom, fx.slice(div_tensor, (None, idx)), r)
-    return fx.memref_load_vec(r)
-
-
-def _store_vec(copy_atom, vec_width, elem_dtype, val, div_tensor, idx):
-    r = fx.make_rmem_tensor(vec_width, elem_dtype)
-    fx.memref_store_vec(val, r)
-    fx.copy_atom_call(copy_atom, r, fx.slice(div_tensor, (None, idx)))
-
-
-def _to_elem_scalar(dtype_str: str, elem_dtype, y):
-    if const_expr(dtype_str == "f32"):
-        return y
-    return y.to(elem_dtype)
-
-
-def _to_elem_vec(dtype_str: str, elem_dtype, use_hw_cvt_bf16: bool, y):
-    if const_expr(dtype_str == "bf16"):
-        if const_expr(use_hw_cvt_bf16):
-            return y.to(elem_dtype)
-        u = y.bitcast(fx.Uint32)
-        upper = u >> 16
-        lsb = upper & 1
-        bias = lsb + 0x7FFF
-        u_round = y.bitcast(fx.Uint32) + bias
-        bf16_bits = u_round >> 16
-        even = bf16_bits.shuffle(bf16_bits, [0, 2, 4, 6])
-        odd = bf16_bits.shuffle(bf16_bits, [1, 3, 5, 7])
-        odd_sh = odd << 16
-        packed = even | odd_sh
-        return packed.bitcast(elem_dtype)
-    if const_expr(dtype_str == "f32"):
-        return y
-    return y.to(elem_dtype)
 
 
 def _store_yscale(scale_copy_atom, yscale_div, index, val):
@@ -476,151 +424,6 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
     return launch_rmsnorm_large_m_small_n
 
 
-def build_rmsnorm_bwd_module(N: int, dtype_str: str):
-    """Fused RMSNorm backward: grid=(M,), one block per row.
-
-    Pass 1: c1 = mean_N(x_hat * wdy), x_hat = x*rstd, wdy = dy*gamma.
-    Pass 2: dx = (wdy - x_hat*c1) * rstd  -> DX (elem dtype);
-            dw_elem = dy * x_hat (fp32)   -> atomicAdd into DWeight[idx] (fp32).
-    eps is baked into Rstd by the forward, so it is not needed here.
-
-    Perf follow-ups (deferred; correctness-complete as-is): this is the generic
-    scalar path only — a vectorized fast path (mirroring the forward) and caching
-    x/dy/gamma between pass 1 and pass 2 (the forward caches `in_local`) would cut
-    global traffic. Left out of PR 1 to keep the first backward reviewable.
-    """
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    elem_bits = 32 if dtype_str == "f32" else 16
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
-
-    @flyc.kernel
-    def rmsnorm_bwd_kernel(
-        Input: fx.Tensor,
-        Gamma: fx.Tensor,
-        DY: fx.Tensor,
-        Rstd: fx.Tensor,
-        DX: fx.Tensor,
-        DWeight: fx.Tensor,
-    ):
-        bid = fx.block_idx.x
-        tid = fx.thread_idx.x
-
-        elem_dtype = dtype_to_elem_type(dtype_str)
-        fm_fast = arith.FastMathFlags.fast
-        n_float = float(N)
-        c_zero_f = fx.Float32(0.0)
-
-        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
-
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
-
-        def block_reduce_add(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val)
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w = wave_reduce_add(val)
-            if lane == 0:
-                fx.memref_store(w, s_red, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
-                ww = wave_reduce_add(ww)
-                if lane == 0:
-                    fx.memref_store(ww, s_red, 0)
-            gpu.barrier()
-            return fx.memref_load(s_red, 0)
-
-        Input_buf = fx.rocdl.make_buffer_tensor(Input)
-        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-        DY_buf = fx.rocdl.make_buffer_tensor(DY)
-        Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
-        DX_buf = fx.rocdl.make_buffer_tensor(DX)
-
-        row_in = fx.slice(Input_buf, (bid, None))
-        row_dy = fx.slice(DY_buf, (bid, None))
-        row_dx = fx.slice(DX_buf, (bid, None))
-
-        copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            elem_bits,
-        )
-        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-
-        row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
-        dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
-        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
-        dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
-        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
-
-        rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
-
-        # Pass 1: c1 = mean( x_hat * wdy ) = mean( (x*rstd) * (dy*gamma) )
-        thread_acc = c_zero_f
-        for base in range_constexpr(0, N, BLOCK_THREADS):
-            idx = tid + base
-            is_valid = idx < N
-            idx_safe = is_valid.select(idx, 0)
-            x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
-            dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
-            g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
-            x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-            dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
-            g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-            x_hat = x * rstd
-            wdy = dy * g
-            prod = x_hat * wdy
-            thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
-
-        sum_prod = block_reduce_add(thread_acc)
-        c1 = sum_prod / n_float
-
-        # Pass 2: dx = (wdy - x_hat*c1) * rstd ; dw = dy * x_hat (atomicAdd fp32)
-        for base in range_constexpr(0, N, BLOCK_THREADS):
-            idx = tid + base
-            if idx < N:
-                x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
-                dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx)
-                g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
-                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
-                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                x_hat = x * rstd
-                wdy = dy * g
-                dx = (wdy - x_hat * c1) * rstd
-                dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
-                _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
-
-                dw = dy * x_hat
-                atomic_add(DWeight, idx, dw, dtype_bytes=4)
-
-    @flyc.jit
-    def launch_rmsnorm_bwd(
-        Input: fx.Tensor,
-        Gamma: fx.Tensor,
-        DY: fx.Tensor,
-        Rstd: fx.Tensor,
-        DX: fx.Tensor,
-        DWeight: fx.Tensor,
-        m_in: fx.Int32,
-        stream: fx.Stream = fx.Stream(None),
-    ):
-        launcher = rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)
-        launcher.launch(grid=(m_in, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
-
-    return launch_rmsnorm_bwd
-
-
 def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
@@ -869,169 +672,6 @@ def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = Fa
         )
 
     return launch_fused_add_rmsnorm
-
-
-def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str):
-    """Fused-add / prenorm RMSNorm backward: grid=(M,), one block per row.
-
-    Inputs: Added (= residual_out from fwd), Gamma, DY (= dout), DResidualOut
-    (grad flowing into residual_out from downstream), Rstd.
-
-    With a_hat = Added*rstd, wdy = dy*gamma, c1 = mean_N(a_hat*wdy):
-      d_added = (wdy - a_hat*c1) * rstd          (gradient through the norm)
-      total   = d_added + dresidual_out_elem     (downstream residual grad)
-    Since added = x + residual_in, dx == dresidual == total unconditionally, so
-    the kernel writes `total` to DX only; the python wrapper returns dx as both
-    grads (aliased). dweight = sum_rows(dy * a_hat) (fp32 atomicAdd).
-
-    eps is baked into Rstd by the forward, so it is not needed here.
-
-    DResidualOut is ALWAYS a real tensor: the python wrapper passes a zero
-    tensor when the caller has no downstream residual grad (pure-norm case).
-    This keeps the kernel branch-free wrt None.
-
-    Perf follow-ups (deferred; correctness-complete): generic scalar path only —
-    a vectorized fast path + caching between passes would cut global traffic.
-    """
-    RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    elem_bits = 32 if dtype_str == "f32" else 16
-    SharedStorage = _make_reduction_storage(RED_SLOTS)
-
-    @flyc.kernel
-    def fused_add_rmsnorm_bwd_kernel(
-        Added: fx.Tensor,
-        Gamma: fx.Tensor,
-        DY: fx.Tensor,
-        DResidualOut: fx.Tensor,
-        Rstd: fx.Tensor,
-        DX: fx.Tensor,
-        DWeight: fx.Tensor,
-    ):
-        bid = fx.block_idx.x
-        tid = fx.thread_idx.x
-
-        elem_dtype = dtype_to_elem_type(dtype_str)
-        fm_fast = arith.FastMathFlags.fast
-        n_float = float(N)
-        c_zero_f = fx.Float32(0.0)
-
-        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
-
-        def wave_reduce_add(x):
-            w = x
-            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
-                off = WARP_SIZE // (2 << _sh_exp)
-                peer = w.shuffle_xor(off, WARP_SIZE)
-                w = w.addf(peer, fastmath=fm_fast)
-            return w
-
-        def block_reduce_add(val):
-            if const_expr(RED_SLOTS == 1):
-                return wave_reduce_add(val)
-            lane = tid % WARP_SIZE
-            wave = tid // WARP_SIZE
-            w = wave_reduce_add(val)
-            if lane == 0:
-                fx.memref_store(w, s_red, wave)
-            gpu.barrier()
-            if wave == 0:
-                in_range = lane < RED_SLOTS
-                lane_safe = in_range.select(lane, 0)
-                v = fx.memref_load(s_red, lane_safe)
-                ww = in_range.select(v, c_zero_f)
-                ww = wave_reduce_add(ww)
-                if lane == 0:
-                    fx.memref_store(ww, s_red, 0)
-            gpu.barrier()
-            return fx.memref_load(s_red, 0)
-
-        Added_buf = fx.rocdl.make_buffer_tensor(Added)
-        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-        DY_buf = fx.rocdl.make_buffer_tensor(DY)
-        DResidualOut_buf = fx.rocdl.make_buffer_tensor(DResidualOut)
-        Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
-        DX_buf = fx.rocdl.make_buffer_tensor(DX)
-
-        row_added = fx.slice(Added_buf, (bid, None))
-        row_dy = fx.slice(DY_buf, (bid, None))
-        row_dres_out = fx.slice(DResidualOut_buf, (bid, None))
-        row_dx = fx.slice(DX_buf, (bid, None))
-
-        copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-            elem_bits,
-        )
-        copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
-
-        added_div = fx.logical_divide(row_added, fx.make_layout(1, 1))
-        dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
-        dres_out_div = fx.logical_divide(row_dres_out, fx.make_layout(1, 1))
-        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
-        dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
-        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
-
-        rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
-
-        # Pass 1: c1 = mean( a_hat * wdy ) = mean( (added*rstd) * (dy*gamma) )
-        thread_acc = c_zero_f
-        for base in range_constexpr(0, N, BLOCK_THREADS):
-            idx = tid + base
-            is_valid = idx < N
-            idx_safe = is_valid.select(idx, 0)
-            a_e = _load_scalar(copy_atom_s, elem_dtype, added_div, idx_safe)
-            dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
-            g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
-            a = a_e if dtype_str == "f32" else a_e.to(fx.Float32)
-            dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
-            g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-            a_hat = a * rstd
-            wdy = dy * g
-            prod = a_hat * wdy
-            thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
-
-        sum_prod = block_reduce_add(thread_acc)
-        c1 = sum_prod / n_float
-
-        # Pass 2: d_added = (wdy - a_hat*c1) * rstd ; total = d_added + dres_out
-        #         store total -> DX and DResidual ; dw = dy*a_hat (atomicAdd fp32)
-        for base in range_constexpr(0, N, BLOCK_THREADS):
-            idx = tid + base
-            if idx < N:
-                a_e = _load_scalar(copy_atom_s, elem_dtype, added_div, idx)
-                dy_e = _load_scalar(copy_atom_s, elem_dtype, dy_div, idx)
-                g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
-                dres_out_e = _load_scalar(copy_atom_s, elem_dtype, dres_out_div, idx)
-                a = a_e if dtype_str == "f32" else a_e.to(fx.Float32)
-                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
-                g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                dres_out = dres_out_e if dtype_str == "f32" else dres_out_e.to(fx.Float32)
-                a_hat = a * rstd
-                wdy = dy * g
-                d_added = (wdy - a_hat * c1) * rstd
-                total = d_added + dres_out
-                total_e = total if dtype_str == "f32" else total.to(elem_dtype)
-                _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, total_e)
-
-                dw = dy * a_hat
-                atomic_add(DWeight, idx, dw, dtype_bytes=4)
-
-    @flyc.jit
-    def launch_fused_add_rmsnorm_bwd(
-        Added: fx.Tensor,
-        Gamma: fx.Tensor,
-        DY: fx.Tensor,
-        DResidualOut: fx.Tensor,
-        Rstd: fx.Tensor,
-        DX: fx.Tensor,
-        DWeight: fx.Tensor,
-        m_in: fx.Int32,
-        stream: fx.Stream = fx.Stream(None),
-    ):
-        launcher = fused_add_rmsnorm_bwd_kernel(Added, Gamma, DY, DResidualOut, Rstd, DX, DWeight)
-        launcher.launch(grid=(m_in, 1, 1), block=(BLOCK_THREADS, 1, 1), stream=stream)
-
-    return launch_fused_add_rmsnorm_bwd
 
 
 def _build_rmsnorm_quant_module(
@@ -1806,15 +1446,7 @@ def build_fused_add_rmsnorm_smoothquant_module(
 # Python wrappers + autograd (quack-aligned). PR 1: plain rmsnorm.
 # =====================================================================
 if torch is not None:
-
-    def _torch_dtype_to_str(dt) -> str:
-        if dt == torch.float32:
-            return "f32"
-        if dt == torch.float16:
-            return "f16"
-        if dt == torch.bfloat16:
-            return "bf16"
-        raise ValueError(f"unsupported torch dtype: {dt}")
+    from kernels.norm.rmsnorm_common import torch_dtype_to_str as _torch_dtype_to_str
 
     # Compiled-fn caches. Keys include device: a compiled function is bound to
     # the device/context it was built on, so reusing it on another GPU faults.
@@ -1911,7 +1543,9 @@ if torch is not None:
     _FUSED_ADD_FWD_CACHE: dict = {}
     _FUSED_ADD_BWD_CACHE: dict = {}
 
-    def _get_fused_add_fwd_compiled(x, residual, weight, out, residual_out, rstd, M, N, dtype_str, store_rstd, eps, stream):
+    def _get_fused_add_fwd_compiled(
+        x, residual, weight, out, residual_out, rstd, M, N, dtype_str, store_rstd, eps, stream
+    ):
         key = (N, dtype_str, store_rstd, float(eps), x.device)
         entry = _FUSED_ADD_FWD_CACHE.get(key)
         if entry is None:
@@ -1988,9 +1622,7 @@ if torch is not None:
                 launch_fn = build_fused_add_rmsnorm_bwd_module(N, dtype_str)
                 # flyc.compile executes the kernel once during tracing, which would
                 # accumulate into DWeight; zero it AFTER compiling.
-                compiled = flyc.compile(
-                    launch_fn, added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream
-                )
+                compiled = flyc.compile(launch_fn, added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
                 _FUSED_ADD_BWD_CACHE[key] = compiled
             dweight.zero_()
             compiled(added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
