@@ -13,6 +13,7 @@ import threading
 import time
 import types
 from collections import namedtuple
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache, partial
@@ -851,8 +852,20 @@ def _set_occupancy_attrs(func_op, *, waves_per_eu=None, maxnreg=None) -> None:
         _set_passthrough(func_op, "amdgpu-num-vgpr", str(int(maxnreg)))
 
 
+def _resolve_occupancy_hint(hint, sym_name: str):
+    """Resolve one occupancy compile-hint for a single kernel entry point.
+
+    A hint is either a scalar (applied uniformly to every ``gpu.kernel``) or a
+    ``{sym_name: value}`` mapping (per-kernel; kernels absent from the map are
+    left to the compiler -- i.e. resolve to ``None``).
+    """
+    if isinstance(hint, Mapping):
+        return hint.get(sym_name)
+    return hint
+
+
 def _apply_occupancy_compile_hints(module: ir.Module) -> None:
-    """Lower the autotuner's occupancy compile-hints onto every kernel gpu.func.
+    """Lower the autotuner's occupancy compile-hints onto each kernel gpu.func.
 
     ``Config.compiler_opts()`` surfaces occupancy knobs (``waves_per_eu``,
     ``maxnreg``) as thread-local ``compile_hints``. They only take effect as
@@ -860,6 +873,16 @@ def _apply_occupancy_compile_hints(module: ir.Module) -> None:
     them via :func:`_set_occupancy_attrs` -- the single occupancy mechanism. The
     dead ``gpu-module-to-binary opts=`` route (silently ignored by the AMDGPU
     backend) is intentionally not used.
+
+    Per-kernel vs uniform: each hint may be a scalar ``int`` -- applied to
+    *every* ``gpu.kernel`` entry point (the common case, e.g. single-kernel
+    launchers like rmsnorm) -- or a ``{sym_name: int}`` mapping resolved per
+    kernel func against its ``sym_name`` (kernels absent from the map are left
+    to the compiler). The mapping form lets a multi-kernel ``@jit`` launcher
+    scope occupancy per entry kernel via ``CompilationContext.compile_hints``.
+    Note: the autotuner's ``Config`` still only expresses scalar knobs, so
+    autotune-driven *independent* per-kernel tuning is not wired yet -- a Config
+    would need to carry the mapping and the search to explore it (see PR #785).
     """
     from .kernel_function import CompilationContext
 
@@ -870,7 +893,12 @@ def _apply_occupancy_compile_hints(module: ir.Module) -> None:
         return
     with module.context:
         for func_op in _iter_gpu_kernel_funcs(module):
-            _set_occupancy_attrs(func_op, waves_per_eu=waves_per_eu, maxnreg=maxnreg)
+            sym_name = ir.StringAttr(func_op.attributes["sym_name"]).value
+            _set_occupancy_attrs(
+                func_op,
+                waves_per_eu=_resolve_occupancy_hint(waves_per_eu, sym_name),
+                maxnreg=_resolve_occupancy_hint(maxnreg, sym_name),
+            )
 
 
 class MlirCompiler:

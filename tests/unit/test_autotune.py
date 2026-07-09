@@ -733,6 +733,33 @@ def test_set_passthrough_replaces_same_key_no_duplicate():
     assert '"no-inline", "true"' in text  # unrelated entry preserved
 
 
+def test_apply_occupancy_compile_hints_per_kernel_mapping():
+    """A {sym_name: value} hint scopes occupancy per entry kernel; a kernel
+    absent from a given map is left to the compiler. (Scalar/uniform behavior is
+    covered by test_apply_occupancy_compile_hints_sets_func_attrs.)"""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from flydsl._mlir import ir
+    from flydsl.compiler.jit_function import _apply_occupancy_compile_hints, _create_mlir_context
+    from flydsl.compiler.kernel_function import CompilationContext
+
+    src = "module { gpu.module @m { gpu.func @a() kernel { gpu.return } gpu.func @b() kernel { gpu.return } } }"
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(src, context=ctx)
+        with CompilationContext.compile_hints({"waves_per_eu": {"a": 2}, "maxnreg": {"b": 64}}):
+            _apply_occupancy_compile_hints(module)
+        funcs = {
+            ir.StringAttr(f.attributes["sym_name"]).value: str(f)
+            for f in module.body.operations[0].regions[0].blocks[0].operations
+            if f.operation.name == "gpu.func"
+        }
+    # kernel a: waves_per_eu only (absent from the maxnreg map)
+    assert "rocdl.waves_per_eu = 2" in funcs["a"]
+    assert "amdgpu-num-vgpr" not in funcs["a"]
+    # kernel b: maxnreg only (absent from the waves_per_eu map)
+    assert '"amdgpu-num-vgpr", "64"' in funcs["b"]
+    assert "rocdl.waves_per_eu" not in funcs["b"]
+
+
 def test_builder_mode_rejects_num_warps_in_forced_search(monkeypatch):
     """A num_warps config must fail loudly even on the forced-search path -- the
     tolerant per-config except must not swallow the ValueError as "FAILED"."""
