@@ -56,14 +56,14 @@ def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves):
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
-def _compile_mxfp_blockscale_gemm(
+def compile_mxfp4_gemm(
     *,
     N: int,
     K: int,
-    BM: int,
-    BN: int,
-    BK: int,
-    a_dtype: str,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    a_dtype: str = "fp4",
     out_dtype: str = "bf16",
     waves_per_eu: Optional[int] = None,
     enable_scheduler: Optional[bool] = None,
@@ -71,10 +71,14 @@ def _compile_mxfp_blockscale_gemm(
     dsrd_preload: int = -1,
     dvmem_preload: int = -1,
 ):
-    """Shared implementation for MXFP4 (a_dtype='fp4') and MXFP6 (a_dtype='fp6') preshuffle GEMM.
+    """Compile MXFP4/MXFP6 preshuffle GEMM -> fn(C, A, B, scale_a, scale_b, bias, M, N, stream).
 
-    Returns fn(C, A, B, scale_a, scale_b, bias, M, N, stream).
+    a_dtype='fp4': A is MXFP4 (E2M1), 2 codes/byte.
+    a_dtype='fp6': A is MXFP6 (E2M3), FP8-padded (pack_fp6_e2m3: 24 B + 8 B zero pad per
+        K=32 chunk); gfx950 only (needs mfma.scale.f32.16x16x128.f8f6f4).
+    B: CK-preshuffled MXFP4. scale_a/scale_b are e8m0; C is (M, N) out_dtype; bias unused.
     """
+    BM, BN, BK = tile_m, tile_n, tile_k
     if BK not in (128, 256) or K % BK != 0:
         raise ValueError(f"tile_k must be 128 or 256 dividing K; got tile_k={BK}, K={K}")
     if K % 256 != 0:
@@ -243,18 +247,7 @@ def _compile_mxfp_blockscale_gemm(
                         v_lo = Vec(fx.memref_load_vec(t_lo))
                         v_hi = Vec(fx.memref_load_vec(t_hi))
                         t = fx.make_rmem_tensor(6, Int32)
-                        t.store(
-                            Vec.from_elements(
-                                [
-                                    _raw(v_lo[0]),
-                                    _raw(v_lo[1]),
-                                    _raw(v_lo[2]),
-                                    _raw(v_lo[3]),
-                                    _raw(v_hi[0]),
-                                    _raw(v_hi[1]),
-                                ]
-                            )
-                        )
+                        t.store(Vec.from_elements([v_lo[i] for i in range(4)] + [v_hi[i] for i in range(2)], Int32))
                         av.append(t)
             else:
                 # fp4: one 128-bit LDS read per (mi, kh) -> i32[4]
@@ -527,81 +520,9 @@ def _compile_mxfp_blockscale_gemm(
     return launch_gemm
 
 
-def compile_mxfp4_gemm(
-    *,
-    N: int,
-    K: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    out_dtype: str = "bf16",
-    waves_per_eu: Optional[int] = None,
-    enable_scheduler: Optional[bool] = None,
-    use_async_copy: bool = True,
-    dsrd_preload: int = -1,
-    dvmem_preload: int = -1,
-):
-    """Compile MXFP4 (A4W4) preshuffle GEMM -> fn(C, A, B, scale_a, scale_b, bias, M, N, stream).
+def compile_mxfp6_gemm(**kw):
+    """MXFP6 (E2M3) A × MXFP4 (E2M1) B preshuffle GEMM (gfx950 only).
 
-    A: MXFP4 (E2M1), 2 codes/byte. B: CK-preshuffled MXFP4. scale_a/scale_b are e8m0;
-    C is (M, N) out_dtype; bias unused (parity).
+    Thin wrapper over compile_mxfp4_gemm(a_dtype='fp6'); same signature/args.
     """
-    return _compile_mxfp_blockscale_gemm(
-        N=N,
-        K=K,
-        BM=tile_m,
-        BN=tile_n,
-        BK=tile_k,
-        a_dtype="fp4",
-        out_dtype=out_dtype,
-        waves_per_eu=waves_per_eu,
-        enable_scheduler=enable_scheduler,
-        use_async_copy=use_async_copy,
-        dsrd_preload=dsrd_preload,
-        dvmem_preload=dvmem_preload,
-    )
-
-
-# ---------------------------------------------------------------------------
-# compile_mxfp6_gemm — MXFP6 (E2M3) A × MXFP4 (E2M1) B preshuffle GEMM
-# ---------------------------------------------------------------------------
-
-
-def compile_mxfp6_gemm(
-    *,
-    N: int,
-    K: int,
-    tile_m: int,
-    tile_n: int,
-    tile_k: int,
-    out_dtype: str = "bf16",
-    waves_per_eu: Optional[int] = None,
-    enable_scheduler: Optional[bool] = None,
-    use_async_copy: bool = True,
-    dsrd_preload: int = -1,
-    dvmem_preload: int = -1,
-):
-    """Compile MXFP6×MXFP4 (A6W4) preshuffle GEMM.
-
-    Same signature as compile_mxfp4_gemm:
-      fn(C, A, B, scale_a, scale_b, bias, M, N, stream)
-
-    A: MXFP6 E2M3, tight-packed fp6 (pack_fp6_e2m3 layout, 24 B per K=32
-       chunk) + 8 B zero pad = 32 B per chunk. scale_a/scale_b: E8M0 per-32.
-    B: CK-preshuffled MXFP4 E2M1.  bias unused (parity with compile_mxfp4_gemm).
-    Only supported on gfx950 (CDNA4, has mfma.scale.f32.16x16x128.f8f6f4).
-    """
-    return _compile_mxfp_blockscale_gemm(
-        N=N,
-        K=K,
-        BM=tile_m,
-        BN=tile_n,
-        BK=tile_k,
-        a_dtype="fp6",
-        out_dtype=out_dtype,
-        waves_per_eu=waves_per_eu,
-        enable_scheduler=enable_scheduler,
-        use_async_copy=use_async_copy,
-        dsrd_preload=dsrd_preload,
-        dvmem_preload=dvmem_preload,
-    )
+    return compile_mxfp4_gemm(a_dtype="fp6", **kw)
