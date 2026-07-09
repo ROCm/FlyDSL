@@ -19,6 +19,7 @@ from flydsl.expr import (
 )
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common.kernels_common import get_llvm_ptr
 from kernels.common.tensor_shim import GTensor, get_dtype_in_kernel
 
 SPLIT_K_SEMAPHORE_MAX_LEN = 256
@@ -323,15 +324,6 @@ def compile_hgemm_kernel(
         B_FRAGS_LEN = WARP_K_STEPS * WARP_N_STEPS
         C_FRAGS_LEN = WARP_M_STEPS * WARP_N_STEPS
         c_frags = [acc_init] * C_FRAGS_LEN
-
-        def get_llvm_ptr(ptr, offset, dtype_bytes):
-            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, ptr)
-            base_ptr = llvm.PtrToIntOp(_i64_type, base_ptr).result
-            byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
-            llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
-            llvm_ptr = llvm.IntToPtrOp(_ptr_type, llvm_ptr).result
-            ptr_v = llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
-            return ptr_v
 
         def zero_c():
             # get arrive index within split-k group
