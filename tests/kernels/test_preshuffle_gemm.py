@@ -30,7 +30,11 @@ if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.gemm.mxfp4_preshuffle import compile_mxfp4_gemm, compile_mxfp6_gemm  # noqa: E402
+from kernels.gemm.mxfp4_preshuffle import (  # noqa: E402
+    compile_mxfp4_gemm,
+    compile_mxfp6_gemm,
+    compile_mxfp8_gemm,
+)
 from kernels.gemm.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
@@ -559,6 +563,277 @@ def test_mfma_a6w4_preshuffle(
     print(f"[flyc] W4A6 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
 
 
+# ── W4A8: MXFP8 (E4M3) A × MXFP4 (E2M1) B ─────────────────────────────────
+
+
+@pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
+@pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
+@pytest.mark.parametrize(
+    "M, N, K, tile_m, tile_n, tile_k",
+    [
+        (64, 8192, 8192, 64, 128, 128),
+        (32, 8192, 8192, 32, 128, 256),
+        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
+        # Large M scales best with a small tile_m / wide tile_n (more blocks, fewer
+        # redundant A loads) — see the f8f4 tile sweep.
+        pytest.param(1024, 8192, 8192, 64, 512, 256, marks=pytest.mark.large_shape),
+        pytest.param(2048, 8192, 8192, 64, 512, 256, marks=pytest.mark.large_shape),
+        pytest.param(256, 4096, 14336, 128, 256, 256, marks=pytest.mark.large_shape),
+    ],
+)
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+def test_mfma_a8w4_preshuffle(
+    out_dtype,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    use_async_copy,
+    *,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+    waves_per_eu: int = 0,
+):
+    """W4A8: MXFP8 (E4M3) A × MXFP4 (E2M1) B preshuffle GEMM — gfx950 only."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP8/FP4 GEMM requires gfx950, got {get_rocm_arch()}")
+
+    print("=" * 80)
+    print(f"MFMA W4A8 (MXFP8 A × MXFP4 B) GEMM Test (Tile: {tile_m}x{tile_n}x{tile_k})")
+    print("=" * 80)
+
+    _wpe = int(waves_per_eu) if waves_per_eu else 0
+    _wpe = None if _wpe <= 0 else _wpe
+    launch_fn = compile_mxfp8_gemm(
+        N=N,
+        K=K,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        out_dtype=out_dtype,
+        waves_per_eu=_wpe,
+        use_async_copy=bool(use_async_copy),
+    )
+    print(f"✓ Compiled (waves_per_eu={_wpe}, async_copy={use_async_copy})")
+
+    device = torch.device("cuda")
+    M_align_32 = (M + 31) // 32 * 32
+    N_align_32 = (N + 31) // 32 * 32
+
+    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
+    a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
+    b_fp32_padded = torch.zeros(N_align_32, K, device=device, dtype=torch.float32)
+    a_fp32_padded[:M] = a_fp32
+    b_fp32_padded[:N] = b_fp32
+
+    # A: MXFP8 E4M3, 1 byte/code (natural, no packing).
+    a_codes_full, scale_a_orig, _ = fp4_utils.per_1x32_f8_quant(a_fp32_padded)
+    a_codes = a_codes_full[:M]
+    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+
+    # B: MXFP4 E2M1, identical to test_mfma_w4_flyc_preshuffle.
+    b_q, scale_b, _ = fp4_utils.per_1x32_f4_quant(b_fp32_padded)
+    b_q = b_q[:N]
+    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
+
+    # Reference: dequant(A) @ dequant(B).T in fp32.
+    a_deq = fp4_utils.fp8_e4m3_to_f32(a_codes) * fp4_utils.e8m0_to_f32(scale_a_orig[:M].repeat_interleave(32, dim=1))
+    b_deq = fp4_utils.mxfp4_to_f32(b_q) * fp4_utils.e8m0_to_f32(scale_b[:N].repeat_interleave(32, dim=1))
+    c_ref = torch.mm(a_deq, b_deq.T).to(torch.float32)
+
+    torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
+    c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
+    _dummy_bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+
+    def _to_bytes(t):
+        return t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)
+
+    def _a8w4_args(c, a, b, sa, sb):
+        return (
+            c.contiguous().view(-1),
+            _to_bytes(a).contiguous().view(-1),
+            _to_bytes(b).contiguous().view(-1),
+            _to_bytes(sa).contiguous().view(-1),
+            _to_bytes(sb).contiguous().view(-1),
+            _dummy_bias,
+            M,
+            N,
+            torch.cuda.current_stream(),
+        )
+
+    compiled_fn = flyc.compile(launch_fn, *_a8w4_args(c_out, a_codes, b_shuffled, scale_a, scale_b_shuffled))
+
+    def launch_kernel(c, a, b, sa, sb):
+        compiled_fn(*_a8w4_args(c, a, b, sa, sb))
+
+    bench_iters = max(2, int(bench_iters))
+    _, us = run_perftest(
+        launch_kernel,
+        c_out,
+        a_codes,
+        b_shuffled,
+        scale_a,
+        scale_b_shuffled,
+        num_iters=bench_iters,
+        num_warmup=int(bench_warmup),
+    )
+    torch.cuda.synchronize()
+
+    assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
+
+    # A: 1 byte/code (MXFP8); B: 0.5 byte/code (MXFP4).
+    bytes_moved = M * K + (N * K) // 2 + M * N * 2 + (M + N) * (K // 32)
+    tflops = (2 * M * N * K) / (us / 1e6) / 1e12
+    tbps = bytes_moved / 1e12 / (us / 1e6)
+    print(f"[flyc] W4A8 Throughput: {us:.1f} us, {tflops:.2f} TFLOPS, BW: {tbps:.3f} TB/s")
+
+
+# ── Batched W4A8: strided-batched MXFP8 A × MXFP4 B ────────────────────────
+
+
+def _make_a8w4_batch(batch, M, N, K, device):
+    """Quantize `batch` independent MXFP8-A / MXFP4-B GEMM operands.
+
+    Returns flat contiguous per-batch tensors (A, scale_a, B_shuffled, scale_b_shuffled)
+    plus the list of per-batch fp32 reference outputs.
+    """
+
+    def _to_bytes(t):
+        return t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)
+
+    M32 = (M + 31) // 32 * 32
+    N32 = (N + 31) // 32 * 32
+    a_l, sa_l, b_l, sb_l, ref_l = [], [], [], [], []
+    for _ in range(batch):
+        a = torch.randn(M, K, device=device)
+        b = torch.randn(N, K, device=device)
+        ap = torch.zeros(M32, K, device=device)
+        bp = torch.zeros(N32, K, device=device)
+        ap[:M] = a
+        bp[:N] = b
+        ac, sao, _ = fp4_utils.per_1x32_f8_quant(ap)
+        ac = ac[:M]
+        sa = fp4_utils.shuffle_scale_w4(sao, 1, False)
+        bq, sb, _ = fp4_utils.per_1x32_f4_quant(bp)
+        bq = bq[:N]
+        bs = fp4_utils.shuffle_weight_w4(bq, 16, False, False)
+        sbs = fp4_utils.shuffle_scale_w4(sb, 1, False)
+        adq = fp4_utils.fp8_e4m3_to_f32(ac) * fp4_utils.e8m0_to_f32(sao[:M].repeat_interleave(32, 1))
+        bdq = fp4_utils.mxfp4_to_f32(bq) * fp4_utils.e8m0_to_f32(sb[:N].repeat_interleave(32, 1))
+        ref_l.append(torch.mm(adq, bdq.T).float())
+        a_l.append(_to_bytes(ac).contiguous().view(-1))
+        sa_l.append(_to_bytes(sa).contiguous().view(-1))
+        b_l.append(_to_bytes(bs).contiguous().view(-1))
+        sb_l.append(_to_bytes(sbs).contiguous().view(-1))
+    return (torch.cat(a_l), torch.cat(sa_l), torch.cat(b_l), torch.cat(sb_l), ref_l)
+
+
+@pytest.mark.parametrize(
+    "batch, M, N, K, tile_m, tile_n, tile_k",
+    [
+        (4, 64, 8192, 8192, 64, 128, 128),
+        (8, 32, 4096, 4096, 32, 128, 256),
+    ],
+)
+@pytest.mark.l2_device
+@pytest.mark.rocm_lower
+def test_mfma_a8w4_batch_preshuffle(
+    batch,
+    M,
+    N,
+    K,
+    tile_m,
+    tile_n,
+    tile_k,
+    *,
+    bench_iters: int = DEFAULT_BENCH_ITERS,
+    bench_warmup: int = DEFAULT_BENCH_WARMUP,
+):
+    """Strided-batched W4A8 GEMM: verify vs fp32 reference AND vs looping the
+    single-GEMM kernel `batch` times, then compare the two launch strategies."""
+    if get_rocm_arch() != "gfx950":
+        pytest.skip(f"FP8/FP4 GEMM requires gfx950, got {get_rocm_arch()}")
+
+    print("=" * 80)
+    print(f"MFMA batched W4A8 GEMM (batch={batch}, Tile: {tile_m}x{tile_n}x{tile_k})")
+    print("=" * 80)
+
+    device = torch.device("cuda")
+    A, SA, B, SB, ref_l = _make_a8w4_batch(batch, M, N, K, device)
+    bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+    stream = torch.cuda.current_stream()
+
+    a_len, sa_len = A.numel() // batch, SA.numel() // batch
+    b_len, sb_len = B.numel() // batch, SB.numel() // batch
+
+    # ── Batched launch (grid.z = batch) ──
+    fn_b = compile_mxfp8_gemm(N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, batch=batch)
+    C_b = torch.zeros(batch * M * N, dtype=torch.bfloat16, device=device)
+
+    def _batched_args(c):
+        return (c, A, B, SA, SB, bias, M, N, stream)
+
+    cf_b = flyc.compile(fn_b, *_batched_args(C_b))
+
+    def launch_batched(c):
+        cf_b(*_batched_args(c))
+
+    launch_batched(C_b)
+    torch.cuda.synchronize()
+
+    C_bv = C_b.view(batch, M, N).to(torch.float32)
+    for z in range(batch):
+        assert verify_output(C_bv[z], ref_l[z], rtol=0.1, atol=0.1), f"batch {z} mismatch vs reference"
+
+    # ── Loop of single-GEMM launches (batch=1) ──
+    fn_1 = compile_mxfp8_gemm(N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, batch=1)
+    C_1 = torch.zeros(batch * M * N, dtype=torch.bfloat16, device=device)
+
+    def _single_args(c, z):
+        return (
+            c[z * M * N : (z + 1) * M * N],
+            A[z * a_len : (z + 1) * a_len],
+            B[z * b_len : (z + 1) * b_len],
+            SA[z * sa_len : (z + 1) * sa_len],
+            SB[z * sb_len : (z + 1) * sb_len],
+            bias,
+            M,
+            N,
+            stream,
+        )
+
+    cf_1 = flyc.compile(fn_1, *_single_args(C_1, 0))
+
+    def launch_loop(c):
+        for z in range(batch):
+            cf_1(*_single_args(c, z))
+
+    launch_loop(C_1)
+    torch.cuda.synchronize()
+
+    # Batched output must be identical to looping the single-GEMM kernel.
+    max_diff = (C_1.to(torch.float32) - C_b.to(torch.float32)).abs().max().item()
+    assert max_diff == 0.0, f"batched vs loop-of-single mismatch: max_abs_diff={max_diff}"
+
+    bench_iters = max(2, int(bench_iters))
+    _, us_b = run_perftest(launch_batched, C_b, num_iters=bench_iters, num_warmup=int(bench_warmup))
+    _, us_l = run_perftest(launch_loop, C_1, num_iters=bench_iters, num_warmup=int(bench_warmup))
+    torch.cuda.synchronize()
+
+    flops = 2 * batch * M * N * K
+    tflops_b = flops / (us_b / 1e6) / 1e12
+    tflops_l = flops / (us_l / 1e6) / 1e12
+    print(
+        f"[flyc] batched: {us_b:.1f} us ({tflops_b:.1f} TFLOPS) | "
+        f"loop-of-{batch}: {us_l:.1f} us ({tflops_l:.1f} TFLOPS) | speedup={us_l / us_b:.2f}x"
+    )
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -589,10 +864,41 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wfp4", action="store_true", default=False, help="Run weight-fp4 (MXFP4) preshuffle GEMM test."
     )
+    parser.add_argument(
+        "--wa8", action="store_true", default=False, help="Run W4A8 (MXFP8 A × MXFP4 B) preshuffle GEMM test."
+    )
+    parser.add_argument("--batch", type=int, default=1, help="Batch count for the W4A8 test (--wa8).")
     args = parser.parse_args()
     torch.set_default_device("cuda")
     try:
-        if not args.wfp4:
+        if args.wa8:
+            if args.batch > 1:
+                test_mfma_a8w4_batch_preshuffle(
+                    args.batch,
+                    args.M,
+                    args.N,
+                    args.K,
+                    args.tile_m,
+                    args.tile_n,
+                    args.tile_k,
+                    bench_iters=args.num_iters,
+                    bench_warmup=args.num_warmup,
+                )
+            else:
+                test_mfma_a8w4_preshuffle(
+                    args.out_dtype,
+                    args.M,
+                    args.N,
+                    args.K,
+                    args.tile_m,
+                    args.tile_n,
+                    args.tile_k,
+                    bool(args.use_async_copy),
+                    bench_iters=args.num_iters,
+                    bench_warmup=args.num_warmup,
+                    waves_per_eu=int(args.waves_per_eu),
+                )
+        elif not args.wfp4:
             if args.in_dtype == "fp4":
                 raise ValueError("--in_dtype fp4 requires --wfp4")
             test_mfma_a8_flyc_preshuffle(
