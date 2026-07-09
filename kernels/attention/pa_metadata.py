@@ -144,13 +144,26 @@ LOG2E = 1.4426950408889634
 # reads/writes through a make_view register vector — the high-level layout/view
 # idiom (no raw llvm.ptr / llvm.load / llvm.store).  `base_iter` is a region's
 # Uint8 iterator; `byte_off` is a byte offset into that region.
+def _lds_typed_iter(base_iter, byte_off, elem_dtype, num_elems):
+    # Advance the Uint8 (1-byte) region iterator to the byte offset, then recast
+    # to the access element type. recast_iter inherits the source iterator's
+    # alignment, so recasting a byte iterator straight to f32/i64 would keep
+    # 1-byte alignment and be rejected ("alignment must be a positive multiple
+    # of element byte size"). The byte offsets are element-aligned by
+    # construction, so rebuild the pointer with the full access alignment.
+    byte_it = fx.add_offset(base_iter, fx.Int32(byte_off))
+    align = num_elems * (elem_dtype.width // 8)
+    ptr_ty = fx.PointerType.get(elem_dtype.ir_type, byte_it.memspace, align)
+    return fx.recast_iter(ptr_ty, byte_it)
+
+
 def _lds_store_vec(base_iter, byte_off, vec_value):
-    it = fx.recast_iter(vec_value.dtype, fx.add_offset(base_iter, fx.Int32(byte_off)))
+    it = _lds_typed_iter(base_iter, byte_off, vec_value.dtype, vec_value.numel)
     fx.make_view(it, fx.make_layout(vec_value.numel, 1)).store(vec_value)
 
 
 def _lds_load_vec(base_iter, byte_off, elem_dtype, n):
-    it = fx.recast_iter(elem_dtype, fx.add_offset(base_iter, fx.Int32(byte_off)))
+    it = _lds_typed_iter(base_iter, byte_off, elem_dtype, n)
     return fx.Vector(fx.make_view(it, fx.make_layout(n, 1)).load())
 
 
