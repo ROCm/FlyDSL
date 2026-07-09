@@ -701,9 +701,7 @@ def test_apply_occupancy_compile_hints_sets_func_attrs():
     from flydsl.compiler.kernel_function import CompilationContext
 
     with _create_mlir_context() as ctx:
-        module = ir.Module.parse(
-            "module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx
-        )
+        module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
         with CompilationContext.compile_hints({"waves_per_eu": 3, "maxnreg": 64}):
             _apply_occupancy_compile_hints(module)
         text = str(module)
@@ -721,9 +719,7 @@ def test_set_passthrough_replaces_same_key_no_duplicate():
     from flydsl.compiler.kernel_function import CompilationContext
 
     with _create_mlir_context() as ctx:
-        module = ir.Module.parse(
-            "module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx
-        )
+        module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
         func = module.body.operations[0].regions[0].blocks[0].operations[0]
         # Pre-seed a build-time amdgpu-num-vgpr (as a kernel could) + an unrelated entry.
         with ctx:
