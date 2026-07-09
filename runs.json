@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-09T07:13:09Z",
+ "updated": "2026-07-09T07:17:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -201,19 +201,19 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994227333",
    "created_at": "2026-07-09T04:32:11Z",
-   "updated_at": "2026-07-09T04:33:49Z",
+   "updated_at": "2026-07-09T07:11:49Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-09T04:33:49Z",
+     "started_at": "2026-07-09T07:11:48Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994227333/job/86040524660"
     },
@@ -287,11 +287,11 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28986695572",
    "created_at": "2026-07-09T01:04:17Z",
-   "updated_at": "2026-07-09T01:10:50Z",
+   "updated_at": "2026-07-09T07:11:12Z",
    "actor": "jhinpan",
    "jobs": [
     {
