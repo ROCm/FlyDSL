@@ -117,9 +117,13 @@ def build_rmsnorm_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
     arch = get_hip_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
+    USE_VEC_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    VEC_TILES = N // VEC_WIDTH if USE_VEC_N else 0
+    NUM_VEC_ITERS = (
+        (VEC_TILES + BLOCK_THREADS - 1) // BLOCK_THREADS if USE_VEC_N else 0
+    )
 
     SharedStorage = _make_reduction_storage(RED_SLOTS)
 
@@ -188,10 +192,9 @@ def build_rmsnorm_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
             return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
 
         # ==================================================================
-        # Fast path: N is a multiple of tile_cols
+        # Fast path: vectorized full-row body for f16/bf16 N aligned to vec8
         # ==================================================================
-        if const_expr(N >= tile_cols and N % tile_cols == 0 and elem_bits <= 16):
-            num_tiles = N // tile_cols
+        if const_expr(USE_VEC_N):
             # ── Layout API: buffer-backed tensors + tiled access ─────
             Input_buf = fx.rocdl.make_buffer_tensor(Input)
             Output_buf = fx.rocdl.make_buffer_tensor(Output)
@@ -212,15 +215,17 @@ def build_rmsnorm_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
             in_local = []
 
             # Pass 1: load + cache + sumsq
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
-                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx)
+                is_valid = idx < VEC_TILES
+                idx_safe = is_valid.select(idx, 0)
+                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
                 in_local.append(vec)
                 x = vec.to(fx.Float32)
 
                 x2 = x * x
                 red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
-                thread_sumsq = thread_sumsq + red2
+                thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
             _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
             mean_sq = sum_sq / n_float
@@ -228,17 +233,17 @@ def build_rmsnorm_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
             rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
             # Pass 2: normalize + gamma + store (reuse cached input)
-            for tile_i in range_constexpr(num_tiles):
+            for tile_i in range_constexpr(NUM_VEC_ITERS):
                 idx = tid + tile_i * BLOCK_THREADS
 
-                g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
-                x = in_local[tile_i].to(fx.Float32)
+                if idx < VEC_TILES:
+                    g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, idx).to(fx.Float32)
+                    x = in_local[tile_i].to(fx.Float32)
 
-                y = (x * rrms) * g
-                out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                    y = (x * rrms) * g
+                    out_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
 
-                out_idx = tid + tile_i * BLOCK_THREADS
-                _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, out_idx)
+                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, out_e, out_div, idx)
 
         else:
             # ==============================================================
@@ -309,11 +314,24 @@ def build_rmsnorm_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
 
 
 def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
-    BLOCK_N = 1 << (N - 1).bit_length()
-    BLOCK_M = max(min(16384 // BLOCK_N, 32), 8)
-    THREADS_PER_ROW = min(WARP_SIZE, 1024 // BLOCK_M)
-    BLOCK_THREADS_SPECIAL = BLOCK_M * THREADS_PER_ROW
     elem_bits = 32 if dtype_str == "f32" else 16
+    USE_VEC_SMALL_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    VEC_TILES = N // VEC_WIDTH if USE_VEC_SMALL_N else 0
+
+    if USE_VEC_SMALL_N:
+        BLOCK_M = 1
+        THREADS_PER_ROW = max(64, 1 << (VEC_TILES - 1).bit_length())
+        BLOCK_THREADS_SPECIAL = THREADS_PER_ROW
+    else:
+        BLOCK_N = 1 << (N - 1).bit_length()
+        BLOCK_M = max(min(16384 // BLOCK_N, 32), 8)
+        THREADS_PER_ROW = min(WARP_SIZE, 1024 // BLOCK_M)
+        BLOCK_THREADS_SPECIAL = BLOCK_M * THREADS_PER_ROW
+
+    RED_SLOTS = max(1, (BLOCK_THREADS_SPECIAL + WARP_SIZE - 1) // WARP_SIZE)
+    arch = get_hip_arch()
+    USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
+    SharedStorage = _make_reduction_storage(RED_SLOTS)
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS_SPECIAL, 1, 1])
     def rmsnorm_large_m_small_n_kernel(
@@ -326,67 +344,150 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, eps: float = D
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
 
-        lane = tid % THREADS_PER_ROW
-        row_local = tid // THREADS_PER_ROW
-        row = bid * fx.Int32(BLOCK_M) + row_local
+        elem_dtype = dtype_to_elem_type(dtype_str)
+        fm_fast = arith.FastMathFlags.fast
+        eps_c = eps
+        n_float = float(N)
 
-        if row < MIn:
-            elem_dtype = dtype_to_elem_type(dtype_str)
-            fm_fast = arith.FastMathFlags.fast
-            eps_c = eps
-            n_float = float(N)
+        def wave_reduce_add(x):
+            w = x
+            for _sh_exp in range_constexpr(int(math.log2(WARP_SIZE))):
+                off = WARP_SIZE // (2 << _sh_exp)
+                peer = w.shuffle_xor(off, WARP_SIZE)
+                w = w.addf(peer, fastmath=fm_fast)
+            return w
 
-            Input_buf = fx.rocdl.make_buffer_tensor(Input)
-            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-            Output_buf = fx.rocdl.make_buffer_tensor(Output)
+        def block_reduce_add2(val0, val1):
+            if const_expr(RED_SLOTS == 1):
+                return wave_reduce_add(val0), wave_reduce_add(val1)
 
-            row_in = fx.slice(Input_buf, (row, None))
-            row_out = fx.slice(Output_buf, (row, None))
+            lane = tid % WARP_SIZE
+            wave = tid // WARP_SIZE
 
-            copy_atom_s = fx.make_copy_atom(
-                fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
-                elem_bits,
-            )
+            lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+            s_red = lds.s_red.view(fx.make_layout(RED_SLOTS, 1))
+            s_red2 = lds.s_red2.view(fx.make_layout(RED_SLOTS, 1))
 
-            row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
-            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
-            out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
+            w0 = wave_reduce_add(val0)
+            w1 = wave_reduce_add(val1)
 
-            def group_reduce_add(x):
-                w = x
-                for _sh_exp in range_constexpr(int(math.log2(THREADS_PER_ROW))):
-                    off = THREADS_PER_ROW // (2 << _sh_exp)
-                    peer = w.shuffle_xor(off, fx.Int32(THREADS_PER_ROW))
-                    w = w.addf(peer, fastmath=fm_fast)
-                return w
+            if lane == 0:
+                fx.memref_store(w0, s_red, wave)
+                fx.memref_store(w1, s_red2, wave)
+            gpu.barrier()
 
-            c_zero_f = fx.Float32(0.0)
-            thread_sumsq = c_zero_f
+            if wave == 0:
+                in_range = lane < RED_SLOTS
+                lane_safe = in_range.select(lane, 0)
+                v0 = fx.memref_load(s_red, lane_safe)
+                v1 = fx.memref_load(s_red2, lane_safe)
+                ww0 = in_range.select(v0, 0.0)
+                ww1 = in_range.select(v1, 0.0)
+                ww0 = wave_reduce_add(ww0)
+                ww1 = wave_reduce_add(ww1)
 
-            for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
-                idx = lane + base_idx_int
-                is_valid = idx < N
-                idx_safe = is_valid.select(idx, 0)
-                x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
-                x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                if lane == 0:
+                    fx.memref_store(ww0, s_red, 0)
+                    fx.memref_store(ww1, s_red2, 0)
+            gpu.barrier()
+
+            return fx.memref_load(s_red, 0), fx.memref_load(s_red2, 0)
+
+        if const_expr(USE_VEC_SMALL_N):
+            row = bid
+
+            if row < MIn:
+                Input_buf = fx.rocdl.make_buffer_tensor(Input)
+                Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+                Output_buf = fx.rocdl.make_buffer_tensor(Output)
+
+                row_in = fx.slice(Input_buf, (row, None))
+                row_out = fx.slice(Output_buf, (row, None))
+
+                in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
+                gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
+                out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
+
+                copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+
+                c_zero_f = fx.Float32(0.0)
+                thread_dummy = c_zero_f
+                is_valid = tid < VEC_TILES
+                idx_safe = is_valid.select(tid, 0)
+                vec = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, in_div, idx_safe)
+                x = vec.to(fx.Float32)
+
                 x2 = x * x
-                thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
+                red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
+                thread_sumsq = is_valid.select(red2, c_zero_f)
 
-            sum_sq = group_reduce_add(thread_sumsq)
-            mean_sq = sum_sq / n_float
-            ms_eps = mean_sq + eps_c
-            rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+                _, sum_sq = block_reduce_add2(thread_dummy, thread_sumsq)
+                mean_sq = sum_sq / n_float
+                ms_eps = mean_sq + eps_c
+                rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
 
-            for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
-                idx = lane + base_idx_int
-                if idx < N:
-                    x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
-                    g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
-                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
-                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                if tid < VEC_TILES:
+                    g = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, tid).to(fx.Float32)
                     y = (x * rrms) * g
-                    y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
-                    _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
+                    y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
+                    _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, tid)
+        else:
+            lane = tid % THREADS_PER_ROW
+            row_local = tid // THREADS_PER_ROW
+            row = bid * fx.Int32(BLOCK_M) + row_local
+
+            if row < MIn:
+                Input_buf = fx.rocdl.make_buffer_tensor(Input)
+                Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
+                Output_buf = fx.rocdl.make_buffer_tensor(Output)
+
+                row_in = fx.slice(Input_buf, (row, None))
+                row_out = fx.slice(Output_buf, (row, None))
+
+                copy_atom_s = fx.make_copy_atom(
+                    fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+                    elem_bits,
+                )
+
+                row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
+                gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+                out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
+
+                def group_reduce_add(x):
+                    w = x
+                    for _sh_exp in range_constexpr(int(math.log2(THREADS_PER_ROW))):
+                        off = THREADS_PER_ROW // (2 << _sh_exp)
+                        peer = w.shuffle_xor(off, fx.Int32(THREADS_PER_ROW))
+                        w = w.addf(peer, fastmath=fm_fast)
+                    return w
+
+                c_zero_f = fx.Float32(0.0)
+                thread_sumsq = c_zero_f
+
+                for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
+                    idx = lane + base_idx_int
+                    is_valid = idx < N
+                    idx_safe = is_valid.select(idx, 0)
+                    x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx_safe)
+                    x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                    x2 = x * x
+                    thread_sumsq = thread_sumsq + is_valid.select(x2, c_zero_f)
+
+                sum_sq = group_reduce_add(thread_sumsq)
+                mean_sq = sum_sq / n_float
+                ms_eps = mean_sq + eps_c
+                rrms = fmath.rsqrt(ms_eps, fastmath=fm_fast)
+
+                for base_idx_int in range_constexpr(0, BLOCK_N, THREADS_PER_ROW):
+                    idx = lane + base_idx_int
+                    if idx < N:
+                        x_e = _load_scalar(copy_atom_s, elem_dtype, row_div, idx)
+                        g_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div, idx)
+                        x = x_e if dtype_str == "f32" else x_e.to(fx.Float32)
+                        g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
+                        y = (x * rrms) * g
+                        y_e = _to_elem_scalar(dtype_str, elem_dtype, y)
+                        _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div, idx, y_e)
 
     @flyc.jit
     def launch_rmsnorm_large_m_small_n(
@@ -397,11 +498,18 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, eps: float = D
         stream: fx.Stream = fx.Stream(None),
     ):
         launcher = rmsnorm_large_m_small_n_kernel(Input, Gamma, Gamma, Output, m_in)
-        launcher.launch(
-            grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
-            block=(BLOCK_THREADS_SPECIAL, 1, 1),
-            stream=stream,
-        )
+        if USE_VEC_SMALL_N:
+            launcher.launch(
+                grid=(m_in, 1, 1),
+                block=(BLOCK_THREADS_SPECIAL, 1, 1),
+                stream=stream,
+            )
+        else:
+            launcher.launch(
+                grid=((m_in + fx.Int32(BLOCK_M - 1)) // fx.Int32(BLOCK_M), 1, 1),
+                block=(BLOCK_THREADS_SPECIAL, 1, 1),
+                stream=stream,
+            )
 
     return launch_rmsnorm_large_m_small_n
 
