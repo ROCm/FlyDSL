@@ -10,12 +10,13 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, memref, scf
+from flydsl._mlir.dialects import llvm, memref, scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SMEM_CAPACITY_MAP, SmemAllocator, SmemPtr
+from kernels.common.kernels_common import get_llvm_ptr
 from kernels.common.tensor_shim import GTensor, STensor, _run_compiled, get_dtype_in_kernel
 from kernels.gemm.splitk_hgemm import swizzle_xor16
 
@@ -281,15 +282,6 @@ def compile_hgemm_kernel(
             else:
                 asm = f"s_waitcnt vmcnt({vmcnt})"
             llvm.InlineAsmOp(None, [], asm, "", has_side_effects=True)
-
-        def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=ir.Type.parse("!llvm.ptr<1>")):
-            base_ptr = fly.extract_aligned_pointer_as_index(ptr_type, ptr)
-            base_ptr = llvm.PtrToIntOp(T.i64, base_ptr).result
-            byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
-            llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
-            llvm_ptr = llvm.IntToPtrOp(ptr_type, llvm_ptr).result
-            ptr_v = llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
-            return ptr_v
 
         def zero_c():
             # zero c if current block is the first block

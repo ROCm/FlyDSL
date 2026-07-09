@@ -48,6 +48,7 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels.common.kernels_common import get_llvm_ptr
 from kernels.common.tensor_shim import GTensor, STensor, _to_raw, get_dtype_in_kernel
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.splitk_hgemm import (
@@ -619,14 +620,6 @@ def compile_small_m_hgemm_kernel(
                 with ir.InsertionPoint(cond_boundary_if.then_block):
                     c_g.vec_store((row_idx, tile_n_offset + n_local_idx), init_vec, LDG_VEC_SIZE)
                     scf.YieldOp([])
-
-        def get_llvm_ptr(ptr, offset, dtype_bytes):
-            base_ptr = fly.extract_aligned_pointer_as_index(_ptr_type, ptr)
-            base_ptr = llvm.PtrToIntOp(_i64_type, base_ptr).result
-            byte_offset = arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
-            llvm_ptr = llvm.AddOp(base_ptr, byte_offset, llvm.IntegerOverflowFlags(0)).result
-            llvm_ptr = llvm.IntToPtrOp(_ptr_type, llvm_ptr).result
-            return llvm_ptr._value if hasattr(llvm_ptr, "_value") else llvm_ptr
 
         def prepare_split_k_tile(c_g, bias_g, tile_n_offset, tile_signal_idx):
             is_t0_cond = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(tid), fx.Index(0))
