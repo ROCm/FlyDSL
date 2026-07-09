@@ -74,32 +74,6 @@ def _waitcnt_vm_n(n):
     rocdl.s_waitcnt(val)
 
 
-# Dense routing thresholds reflect dualwave's fixed cost amortized over batch * seq_len.
-# Large batches reach the dualwave crossover at a shorter per-sequence length.
-_DUALWAVE_MIN_DENSE_SEQ = 256  # B=1: dualwave wins from S=256 up
-_DUALWAVE_LARGE_BATCH = 8  # at B>=8 the crossover drops to...
-_DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH = 192  # ...S=192
-
-# DUALWAVE_SWP-only launch kwargs: a dense call passing any of these cannot use
-# the generic launcher (different signature) and must stay on DUALWAVE_SWP.
-_DUALWAVE_ONLY_KWARGS = frozenset({"stride_kv_n", "stride_q_n", "head_dim_runtime", "debug_counts", "workspace"})
-
-
-def _routes_dense_to_dualwave(batch, seq_len):
-    """Dense routing: True -> DUALWAVE_SWP, False -> generic fallback.
-
-    Batch-aware threshold (see notes above). A non-int seq_len routes to
-    DUALWAVE_SWP (it handles any length); packed/varlen and dualwave-only-kwarg
-    cases are decided by the caller before this is reached.
-    """
-    if not isinstance(seq_len, int):
-        return True
-    b = batch if isinstance(batch, int) else 1
-    if b >= _DUALWAVE_LARGE_BATCH:
-        return seq_len >= _DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH
-    return seq_len >= _DUALWAVE_MIN_DENSE_SEQ
-
-
 def build_flash_attn_func_module_primary(
     num_heads,
     head_dim,
@@ -120,10 +94,6 @@ def build_flash_attn_func_module_primary(
     varlen=False,
     paged=False,
     kv_cache_layout="linear",
-    dualwave_swp_lazy_rescale=True,
-    dualwave_swp_setprio=True,
-    dualwave_swp_debug_lazy_counts=False,
-    dualwave_swp_enable_stagger=True,
 ):
     """Build the flash_attn_func launcher using the post-refactor FlyDSL API.
 
@@ -139,114 +109,12 @@ def build_flash_attn_func_module_primary(
         num_kv_heads = num_heads
     assert num_heads % num_kv_heads == 0, f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
 
-    # fp8 is gfx950 dualwave-only; reject unsupported configs before generic asserts.
-    # The returned launcher shares the public call signature plus descale kwargs.
     if dtype_str == "fp8":
-        if not gpu_arch.startswith("gfx950"):
-            raise ValueError(f"fp8 flash_attn requires gfx950 (got '{gpu_arch or 'unknown'}')")
-        if head_dim != 128:
-            raise ValueError(f"fp8 flash_attn requires head_dim == 128 (got {head_dim})")
-        if cu_seqlens_q is not None or cu_seqlens_kv is not None:
-            raise ValueError("fp8 flash_attn does not support varlen (cu_seqlens) yet")
-        from kernels.attention.flash_attn_fp8_gfx950 import build_flash_attn_dualwave_swp_fp8_module
-
-        return build_flash_attn_dualwave_swp_fp8_module(
-            num_heads=num_heads,
-            head_dim=head_dim,
-            causal=causal,
-            dtype_str="fp8",
-            num_kv_heads=num_kv_heads,
-            waves_per_eu=waves_per_eu,
-            daz=daz,
-            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
-            dualwave_swp_setprio=dualwave_swp_setprio,
-            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
-            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-        )
+        raise ValueError("generic flash_attn_func supports f16/bf16 only; fp8 is routed by flash_attn_interface")
 
     BLOCK_N = 64
     K_SUB_N = 32
     WARP_SIZE = 64
-
-    # `seq_len >= 1` is the only correctness floor; dense dualwave routing is a perf policy.
-    # Packed/varlen still uses the prebuilt dualwave launcher unless a light path is selected.
-    _dualwave_swp_launch = None
-    if block_m is None and head_dim in (64, 128) and dtype_str in ("bf16", "f16") and gpu_arch.startswith("gfx950"):
-        try:
-            from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
-
-            _dualwave_swp_launch = build_flash_attn_dualwave_swp_module(
-                num_heads=num_heads,
-                head_dim=head_dim,
-                causal=causal,
-                dtype_str=dtype_str,
-                num_kv_heads=num_kv_heads,
-                waves_per_eu=waves_per_eu,
-                daz=daz,
-                dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
-                dualwave_swp_setprio=dualwave_swp_setprio,
-                dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
-                dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-                # QKV varlen (packed cu_seqlens). Non-None cu_seqlens_q -> build the
-                # varlen kernel variant; the runtime tensors are captured here and
-                # forwarded into the dualwave launch by _wrap_with_dualwave_swp below.
-                varlen=(cu_seqlens_q is not None),
-                # Emit the extra v_s_1 causal mask needed for seqlen_q != seqlen_kv
-                # (bottom-right). Off by default so self-attention keeps its schedule.
-                cross_seqlen=cross_seqlen,
-            )
-        except Exception as _dualwave_swp_err:
-            import sys
-
-            print(
-                f"[flash_attn_func] DUALWAVE_SWP path build failed, falling back: {_dualwave_swp_err}",
-                file=sys.stderr,
-            )
-            _dualwave_swp_launch = None
-
-    # Low-occupancy dense: the default 4-wave M128 tile wastes waves when the grid
-    # is tiny; a 2-wave block_m=64/N32 tile makes more (lighter) blocks that spread
-    # across more CUs and drop idle waves. Dispatched at launch by _use_light.
-    _light_launch = None
-    _light_cu = 256
-    if block_m is None and not varlen and not paged and head_dim in (64, 128) and dtype_str in ("bf16", "f16"):
-        try:
-            import torch as _torch
-
-            _light_cu = int(_torch.cuda.get_device_properties(_torch.cuda.current_device()).multi_processor_count)
-        except Exception:
-            _light_cu = 256
-        _light_launch = build_flash_attn_func_module_primary(
-            num_heads,
-            head_dim,
-            causal,
-            dtype_str,
-            sm_scale,
-            waves_per_eu,
-            flat_work_group_size=128,
-            block_m=64,
-            unsafe_fp_math=unsafe_fp_math,
-            fast_fp_math=fast_fp_math,
-            daz=daz,
-            path_tag="N32",
-            num_kv_heads=num_kv_heads,
-            cross_seqlen=cross_seqlen,
-            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
-            dualwave_swp_setprio=dualwave_swp_setprio,
-            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
-            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-        )
-
-    def _use_light(args, kwargs):
-        """True when the default M128 grid under-fills the CUs (route to light)."""
-        if _light_launch is None:
-            return False
-        B = args[4] if len(args) > 4 else kwargs.get("batch_size", None)
-        S = args[5] if len(args) > 5 else kwargs.get("seq_len", None)
-        if not isinstance(B, int) or not isinstance(S, int):
-            return False
-        main_blocks = B * num_heads * ((S + 127) // 128)
-        return main_blocks < _light_cu
 
     def _extract_seq_len(args, kwargs):
         """Return the launch-time seq_len as int, or None if not statically known."""
@@ -269,133 +137,6 @@ def build_flash_attn_func_module_primary(
         if hasattr(_dispatched, "compile"):
             _guarded.compile = _dispatched.compile
         return _guarded
-
-    def _extract_batch(args, kwargs):
-        B = args[4] if len(args) > 4 else kwargs.get("batch_size", None)
-        return B if isinstance(B, int) else 1
-
-    def _wrap_with_dualwave_swp(_fallback):
-        """Route runtime shapes between DUALWAVE_SWP and the generic fallback, then
-        apply the seq_len guard at the outermost build (inner block_m-set builds are
-        guarded by their parent)."""
-        if cu_seqlens_q is not None and _dualwave_swp_launch is None:
-            raise ValueError(
-                "QKV varlen (cu_seqlens) is only supported on the gfx950 DUALWAVE_SWP "
-                "path (head_dim=64/128, dtype bf16/f16, gpu_arch gfx950)"
-            )
-
-        def _fallback_no_diff_kv(*args, **kwargs):
-            # seq_len_kv (cross-length attention) is a gfx950 DUALWAVE_SWP feature;
-            # the generic fallback is self-attention only. Drop an equal seq_len_kv,
-            # reject a differing one with a clear error.
-            skv = kwargs.pop("seq_len_kv", None)
-            S_int = _extract_seq_len(args, kwargs)
-            if skv is not None and S_int is not None and int(skv) != S_int:
-                raise NotImplementedError(
-                    "seq_len_kv != seq_len (cross-length attention) is only supported on the "
-                    "gfx950 DUALWAVE_SWP path (head_dim=64/128, dtype bf16/f16, gpu_arch gfx950)."
-                )
-            return _fallback(*args, **kwargs)
-
-        if hasattr(_fallback, "compile"):
-            _fallback_no_diff_kv.compile = _fallback.compile
-
-        if _dualwave_swp_launch is None:
-            dispatched = _fallback_no_diff_kv
-        else:
-
-            def _dualwave_swp_dispatch(*args, **kwargs):
-                # Optional launch args must be keywords because generic and dualwave
-                # disagree after the six required positionals.
-                if len(args) > 6:
-                    raise TypeError(
-                        "flash_attn_func: pass only Q, K, V, O, batch_size, seq_len "
-                        "positionally; stream/stride_*/debug_counts/workspace by keyword."
-                    )
-                # Packed/varlen always uses DUALWAVE_SWP (no generic cu_seqlens path);
-                # cu_seqlens captured at build time are forwarded here.
-                if cu_seqlens_q is not None:
-                    return _dualwave_swp_launch(*args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs)
-                skv = kwargs.get("seq_len_kv", None)
-                if skv is not None:
-                    S_int = _extract_seq_len(args, kwargs)
-                    try:
-                        cross_len = S_int is None or int(skv) != S_int
-                    except (TypeError, ValueError):
-                        cross_len = True
-                    if cross_len:
-                        return _dualwave_swp_launch(*args, **kwargs)
-                # DUALWAVE-only kwargs force dualwave; even explicit `None` changes the signature.
-                if any(k in kwargs for k in _DUALWAVE_ONLY_KWARGS):
-                    return _dualwave_swp_launch(*args, **kwargs)
-                if _routes_dense_to_dualwave(_extract_batch(args, kwargs), _extract_seq_len(args, kwargs)):
-                    return _dualwave_swp_launch(*args, **kwargs)
-                return _fallback_no_diff_kv(*args, **kwargs)
-
-            if hasattr(_fallback, "compile"):
-                _dualwave_swp_dispatch.compile = _fallback.compile
-            dispatched = _dualwave_swp_dispatch
-
-        if block_m is None:
-            return _guard_seqlen(dispatched)
-        return dispatched
-
-    # Auto tile selection: for H>=32, build both M=128 and M=256 variants
-    # and dispatch at runtime based on B*S.
-    if block_m is None and num_heads >= 32:
-        _launcher_m128 = build_flash_attn_func_module_primary(
-            num_heads,
-            head_dim,
-            causal,
-            dtype_str,
-            sm_scale,
-            waves_per_eu,
-            flat_work_group_size=256,
-            block_m=128,
-            unsafe_fp_math=unsafe_fp_math,
-            fast_fp_math=fast_fp_math,
-            daz=daz,
-            path_tag=path_tag,
-            num_kv_heads=num_kv_heads,
-            cross_seqlen=cross_seqlen,
-            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
-            dualwave_swp_setprio=dualwave_swp_setprio,
-            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
-            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-        )
-        _launcher_m256 = build_flash_attn_func_module_primary(
-            num_heads,
-            head_dim,
-            causal,
-            dtype_str,
-            sm_scale,
-            waves_per_eu,
-            flat_work_group_size=512,
-            block_m=256,
-            unsafe_fp_math=unsafe_fp_math,
-            fast_fp_math=fast_fp_math,
-            daz=daz,
-            path_tag=path_tag,
-            num_kv_heads=num_kv_heads,
-            cross_seqlen=cross_seqlen,
-            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
-            dualwave_swp_setprio=dualwave_swp_setprio,
-            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
-            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
-        )
-        _BS_THRESHOLD = 4096 * num_heads
-
-        def _auto_launch(*args, **kwargs):
-            if _use_light(args, kwargs):
-                return _light_launch(*args, **kwargs)
-            B = args[4] if len(args) > 4 else kwargs.get("batch_size", 1)
-            S = args[5] if len(args) > 5 else kwargs.get("seq_len", 128)
-            bs = (B if isinstance(B, int) else 1) * (S if isinstance(S, int) else 128)
-            if bs * num_heads >= _BS_THRESHOLD:
-                return _launcher_m256(*args, **kwargs)
-            return _launcher_m128(*args, **kwargs)
-
-        return _wrap_with_dualwave_swp(_auto_launch)
 
     if block_m is not None:
         BLOCK_M = block_m
@@ -470,8 +211,9 @@ def build_flash_attn_func_module_primary(
     GQA_GROUP_SIZE = NUM_HEADS_Q // NUM_HEADS_KV
     HEAD_DIM = head_dim
     CAUSAL = causal
-    # Varlen uses packed QKV via launch-time cu_seqlens; dense keeps the old signature.
+    # Varlen uses packed QKV via launch-time cu_seqlens.
     VARLEN = bool(varlen)
+    CROSS_SEQLEN = bool(cross_seqlen)
     # Paged K/V read physical page BlockTable[b*stride + tile]; Q/O stay packed.
     PAGED = bool(paged)
     if PAGED and kv_cache_layout not in ("linear", "vectorized"):
@@ -559,6 +301,7 @@ def build_flash_attn_func_module_primary(
         V: fx.Tensor,
         O: fx.Tensor,  # noqa: E741
         seq_len: fx.Int32,
+        seq_len_kv: fx.Int32,
         CuSeqQ: fx.Tensor,
         CuSeqKv: fx.Tensor,
         BlockTable: fx.Tensor,
@@ -608,6 +351,7 @@ def build_flash_attn_func_module_primary(
             return _mfma(rocdl.mfma_f32_32x32x8f16, a, b, c)
 
         seq_len_v = fx.Index(seq_len)
+        seq_len_kv_v = fx.Index(seq_len_kv)
 
         # ---- LDS view ----
         base_ptr = allocator.get_base()
@@ -667,7 +411,7 @@ def build_flash_attn_func_module_primary(
         # turn this into a dynamic dispatch and lose `kv_head_idx`.
         kv_head_idx = q_head_idx if GQA_GROUP_SIZE == 1 else q_head_idx // GQA_GROUP_SIZE
 
-        # Dense uses batch_idx*seq_len; varlen reads cu_seqlens[batch:batch+2].
+        # Dense uses independent Q/KV lengths; varlen reads cu_seqlens[batch:batch+2].
         # num_q_tiles still uses max_seqlen_q so flat-grid decode matches launch.
         if const_expr(VARLEN):
             _cuq_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqQ), fx.make_layout(1, 1))
@@ -683,9 +427,9 @@ def build_flash_attn_func_module_primary(
             seqlen_kv_b = _cu_load(_cuk_div, batch_idx + fx.Index(1)) - kv_tok_base
         else:
             q_tok_base = batch_idx * seq_len_v
-            kv_tok_base = batch_idx * seq_len_v
+            kv_tok_base = batch_idx * seq_len_kv_v
             seqlen_q_b = seq_len_v
-            seqlen_kv_b = seq_len_v
+            seqlen_kv_b = seq_len_kv_v
 
         # Dense/varlen fold batch into raw K/V pointers; paged adds page_id per tile.
         if const_expr(not PAGED):
@@ -1104,6 +848,7 @@ def build_flash_attn_func_module_primary(
 
         # ---- Constants ----
         c_neg_inf = fx.Float32(float("-inf"))
+        c_neg_floor = fx.Float32(-3.0e38)
         c_zero_f = fx.Float32(0.0)
         c_sm_scale_log2e = fx.Float32(sm_scale * _LOG2E)
         c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
@@ -1124,7 +869,11 @@ def build_flash_attn_func_module_primary(
         # ---- KV loop upper bound ----
         _q_end = q_start + BLOCK_M
         if const_expr(CAUSAL):
-            kv_upper = fx.Index(ArithValue(_q_end < seqlen_kv_b).select(_q_end, seqlen_kv_b))
+            delta_i32 = fx.Int32(seqlen_kv_b) - fx.Int32(seqlen_q_b)
+            causal_end_i32 = fx.Int32(_q_end) + delta_i32
+            causal_end_i32 = fx.Int32(ArithValue(causal_end_i32 > fx.Int32(0)).select(causal_end_i32, fx.Int32(0)))
+            causal_end = fx.Index(causal_end_i32)
+            kv_upper = fx.Index(ArithValue(causal_end < seqlen_kv_b).select(causal_end, seqlen_kv_b))
         else:
             kv_upper = seqlen_kv_b
 
@@ -1243,7 +992,8 @@ def build_flash_attn_func_module_primary(
                 if const_expr(CAUSAL):
                     kv_start_i32 = fx.Int32(kv_start)
                     lane_div_32_i32 = fx.Int32(lane_div_32)
-                    q_start_i32 = fx.Int32(q_start)
+                    q_start_i32 = fx.Int32(q_start) + delta_i32
+                    q_mask_limit_i32 = q_row_i32 + delta_i32
                     max_kv_col_i32 = kv_start_i32 + fx.Int32(BLOCK_N - 1)
                     tile_needs_mask = max_kv_col_i32 > q_start_i32
                     s_raw_lo_0 = s_raw_lo[0]
@@ -1290,83 +1040,83 @@ def build_flash_attn_func_module_primary(
                             lane_off_i32 = lane_div_32_i32 * fx.Int32(4)
                             _MOFF = (0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27)
                         kv_col_lo_0 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[0])
-                        s_raw_lo_0 = ArithValue(kv_col_lo_0 > q_row_i32).select(c_neg_inf, s_raw_lo_0)
-                        s_raw_hi_0 = ArithValue(kv_col_lo_0 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_0 = ArithValue(kv_col_lo_0 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_0)
+                        s_raw_hi_0 = ArithValue(kv_col_lo_0 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_0
                         )
                         kv_col_lo_1 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[1])
-                        s_raw_lo_1 = ArithValue(kv_col_lo_1 > q_row_i32).select(c_neg_inf, s_raw_lo_1)
-                        s_raw_hi_1 = ArithValue(kv_col_lo_1 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_1 = ArithValue(kv_col_lo_1 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_1)
+                        s_raw_hi_1 = ArithValue(kv_col_lo_1 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_1
                         )
                         kv_col_lo_2 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[2])
-                        s_raw_lo_2 = ArithValue(kv_col_lo_2 > q_row_i32).select(c_neg_inf, s_raw_lo_2)
-                        s_raw_hi_2 = ArithValue(kv_col_lo_2 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_2 = ArithValue(kv_col_lo_2 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_2)
+                        s_raw_hi_2 = ArithValue(kv_col_lo_2 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_2
                         )
                         kv_col_lo_3 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[3])
-                        s_raw_lo_3 = ArithValue(kv_col_lo_3 > q_row_i32).select(c_neg_inf, s_raw_lo_3)
-                        s_raw_hi_3 = ArithValue(kv_col_lo_3 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_3 = ArithValue(kv_col_lo_3 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_3)
+                        s_raw_hi_3 = ArithValue(kv_col_lo_3 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_3
                         )
                         kv_col_lo_4 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[4])
-                        s_raw_lo_4 = ArithValue(kv_col_lo_4 > q_row_i32).select(c_neg_inf, s_raw_lo_4)
-                        s_raw_hi_4 = ArithValue(kv_col_lo_4 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_4 = ArithValue(kv_col_lo_4 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_4)
+                        s_raw_hi_4 = ArithValue(kv_col_lo_4 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_4
                         )
                         kv_col_lo_5 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[5])
-                        s_raw_lo_5 = ArithValue(kv_col_lo_5 > q_row_i32).select(c_neg_inf, s_raw_lo_5)
-                        s_raw_hi_5 = ArithValue(kv_col_lo_5 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_5 = ArithValue(kv_col_lo_5 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_5)
+                        s_raw_hi_5 = ArithValue(kv_col_lo_5 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_5
                         )
                         kv_col_lo_6 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[6])
-                        s_raw_lo_6 = ArithValue(kv_col_lo_6 > q_row_i32).select(c_neg_inf, s_raw_lo_6)
-                        s_raw_hi_6 = ArithValue(kv_col_lo_6 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_6 = ArithValue(kv_col_lo_6 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_6)
+                        s_raw_hi_6 = ArithValue(kv_col_lo_6 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_6
                         )
                         kv_col_lo_7 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[7])
-                        s_raw_lo_7 = ArithValue(kv_col_lo_7 > q_row_i32).select(c_neg_inf, s_raw_lo_7)
-                        s_raw_hi_7 = ArithValue(kv_col_lo_7 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_7 = ArithValue(kv_col_lo_7 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_7)
+                        s_raw_hi_7 = ArithValue(kv_col_lo_7 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_7
                         )
                         kv_col_lo_8 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[8])
-                        s_raw_lo_8 = ArithValue(kv_col_lo_8 > q_row_i32).select(c_neg_inf, s_raw_lo_8)
-                        s_raw_hi_8 = ArithValue(kv_col_lo_8 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_8 = ArithValue(kv_col_lo_8 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_8)
+                        s_raw_hi_8 = ArithValue(kv_col_lo_8 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_8
                         )
                         kv_col_lo_9 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[9])
-                        s_raw_lo_9 = ArithValue(kv_col_lo_9 > q_row_i32).select(c_neg_inf, s_raw_lo_9)
-                        s_raw_hi_9 = ArithValue(kv_col_lo_9 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_9 = ArithValue(kv_col_lo_9 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_9)
+                        s_raw_hi_9 = ArithValue(kv_col_lo_9 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_9
                         )
                         kv_col_lo_10 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[10])
-                        s_raw_lo_10 = ArithValue(kv_col_lo_10 > q_row_i32).select(c_neg_inf, s_raw_lo_10)
-                        s_raw_hi_10 = ArithValue(kv_col_lo_10 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_10 = ArithValue(kv_col_lo_10 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_10)
+                        s_raw_hi_10 = ArithValue(kv_col_lo_10 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_10
                         )
                         kv_col_lo_11 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[11])
-                        s_raw_lo_11 = ArithValue(kv_col_lo_11 > q_row_i32).select(c_neg_inf, s_raw_lo_11)
-                        s_raw_hi_11 = ArithValue(kv_col_lo_11 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_11 = ArithValue(kv_col_lo_11 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_11)
+                        s_raw_hi_11 = ArithValue(kv_col_lo_11 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_11
                         )
                         kv_col_lo_12 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[12])
-                        s_raw_lo_12 = ArithValue(kv_col_lo_12 > q_row_i32).select(c_neg_inf, s_raw_lo_12)
-                        s_raw_hi_12 = ArithValue(kv_col_lo_12 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_12 = ArithValue(kv_col_lo_12 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_12)
+                        s_raw_hi_12 = ArithValue(kv_col_lo_12 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_12
                         )
                         kv_col_lo_13 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[13])
-                        s_raw_lo_13 = ArithValue(kv_col_lo_13 > q_row_i32).select(c_neg_inf, s_raw_lo_13)
-                        s_raw_hi_13 = ArithValue(kv_col_lo_13 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_13 = ArithValue(kv_col_lo_13 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_13)
+                        s_raw_hi_13 = ArithValue(kv_col_lo_13 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_13
                         )
                         kv_col_lo_14 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[14])
-                        s_raw_lo_14 = ArithValue(kv_col_lo_14 > q_row_i32).select(c_neg_inf, s_raw_lo_14)
-                        s_raw_hi_14 = ArithValue(kv_col_lo_14 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_14 = ArithValue(kv_col_lo_14 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_14)
+                        s_raw_hi_14 = ArithValue(kv_col_lo_14 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_14
                         )
                         kv_col_lo_15 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[15])
-                        s_raw_lo_15 = ArithValue(kv_col_lo_15 > q_row_i32).select(c_neg_inf, s_raw_lo_15)
-                        s_raw_hi_15 = ArithValue(kv_col_lo_15 + fx.Int32(K_SUB_N) > q_row_i32).select(
+                        s_raw_lo_15 = ArithValue(kv_col_lo_15 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_15)
+                        s_raw_hi_15 = ArithValue(kv_col_lo_15 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
                             c_neg_inf, s_raw_hi_15
                         )
 
@@ -1433,6 +1183,8 @@ def build_flash_attn_func_module_primary(
                 peer_max = reduction_peer(local_max)
                 row_max = _fmax(local_max, peer_max)
                 m_new_raw = _fmax(m_running, row_max)
+                if const_expr(CAUSAL and CROSS_SEQLEN):
+                    m_new_raw = _fmax(m_new_raw, c_neg_floor)
 
                 diff_m_raw = _fsub(m_running, m_new_raw)
                 diff_m_scaled = _fmul(diff_m_raw, c_sm_scale_log2e)
@@ -1663,7 +1415,11 @@ def build_flash_attn_func_module_primary(
         l_final = loop_results[1]
         o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
 
-        inv_l = rocdl.rcp(T.f32, l_final)
+        inv_l_rcp = rocdl.rcp(T.f32, l_final)
+        if const_expr(CAUSAL and CROSS_SEQLEN):
+            inv_l = ArithValue(fx.Float32(l_final) > c_zero_f).select(inv_l_rcp, c_zero_f)
+        else:
+            inv_l = inv_l_rcp
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
         v_o = [Vec(o_finals[dc]) * inv_l_vec for dc in range_constexpr(D_CHUNKS)]
 
@@ -1733,6 +1489,7 @@ def build_flash_attn_func_module_primary(
         block_table_stride: fx.Int32,
         batch_size: fx.Int32,
         seq_len: fx.Int32,
+        seq_len_kv: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
         allocator.finalized = False
@@ -1760,6 +1517,7 @@ def build_flash_attn_func_module_primary(
             V,
             O,
             seq_len,
+            seq_len_kv,
             CuSeqQ,
             CuSeqKv,
             BlockTable,
@@ -1802,6 +1560,7 @@ def build_flash_attn_func_module_primary(
         cu_seqlens_kv=None,
         block_table=None,
         block_table_stride=0,
+        seq_len_kv=None,
         stream=None,
     ):
         # Dense/non-paged pass the output tensor as a placeholder for the unused
@@ -1810,30 +1569,24 @@ def build_flash_attn_func_module_primary(
         cq = cu_seqlens_q if cu_seqlens_q is not None else Out
         ck = cu_seqlens_kv if cu_seqlens_kv is not None else Out
         bt = block_table if block_table is not None else Out
+        skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return launch_flash_attn_generic(
-                Q, K, V, Out, cq, ck, bt, block_table_stride, batch_size, seq_len, fx.Stream(stream)
+                Q, K, V, Out, cq, ck, bt, block_table_stride, batch_size, seq_len, skv, fx.Stream(stream)
             )
 
-    def _compile(Q, K, V, Out, batch_size, seq_len, stream=None):
+    def _compile(Q, K, V, Out, batch_size, seq_len, seq_len_kv=None, stream=None):
+        skv = seq_len if seq_len_kv is None else seq_len_kv
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return flyc.compile(
-                launch_flash_attn_generic, Q, K, V, Out, Out, Out, Out, 0, batch_size, seq_len, fx.Stream(stream)
+                launch_flash_attn_generic, Q, K, V, Out, Out, Out, Out, 0, batch_size, seq_len, skv, fx.Stream(stream)
             )
 
     _launch.compile = _compile
 
-    if _light_launch is not None:
-
-        def _launch_maybe_light(*args, **kwargs):
-            if _use_light(args, kwargs):
-                return _light_launch(*args, **kwargs)
-            return _launch(*args, **kwargs)
-
-        _launch_maybe_light.compile = _compile
-        return _wrap_with_dualwave_swp(_launch_maybe_light)
-
-    return _wrap_with_dualwave_swp(_launch)
+    if block_m is None:
+        return _guard_seqlen(_launch)
+    return _launch
 
 
 build_flash_attn_func_module = build_flash_attn_func_module_primary
