@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-09T08:50:33Z",
+ "updated": "2026-07-09T10:15:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -50,10 +50,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-09T08:05:30Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T08:50:47Z",
+     "completed_at": "2026-07-09T10:00:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003519674/job/86069722111"
     },
     {
@@ -68,10 +68,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-09T08:24:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-09T10:06:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003519674/job/86069722139"
     }
    ]
@@ -108,10 +108,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-09T07:59:54Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T08:50:47Z",
+     "completed_at": "2026-07-09T10:12:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003204260/job/86068696337"
     },
     {
@@ -663,20 +663,20 @@
    "branch": "hyg/fmha_hd64_smallseq_opt",
    "event": "pull_request",
    "title": "Hyg/fmha hd64 smallseq opt",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28960340269",
    "created_at": "2026-07-08T16:53:23Z",
-   "updated_at": "2026-07-09T08:07:20Z",
+   "updated_at": "2026-07-09T10:12:10Z",
    "actor": "yanguahe",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-09T08:07:21Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T08:50:55Z",
+     "completed_at": "2026-07-09T10:12:09Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28960340269/job/86070059274"
     },
     {
