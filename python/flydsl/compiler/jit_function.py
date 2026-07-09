@@ -827,20 +827,39 @@ def _set_passthrough(func_op, key: str, value: str) -> None:
     func_op.attributes["passthrough"] = ir.ArrayAttr.get(kept + [entry])
 
 
-def _apply_occupancy_compile_hints(module: ir.Module) -> None:
-    """Lower occupancy compile-hints onto the kernel as function attributes.
+def _set_occupancy_attrs(func_op, *, waves_per_eu=None, maxnreg=None) -> None:
+    """Single source of truth for writing occupancy knobs onto a kernel
+    ``gpu.func`` as the attributes the ROCDL / LLVM lowering actually honors.
 
-    The autotuner passes occupancy knobs (``Config.compiler_opts()``) as
-    ``compile_hints``; they only affect codegen when set as kernel *function
-    attributes*. Passing them via ``gpu-module-to-binary opts=`` is silently
-    ignored by the AMDGPU backend, so ``Config(waves_per_eu=..., maxnreg=...)``
-    would otherwise be a no-op. Mirrors how the MoE kernels set the attribute by
-    hand:
+    There is exactly one working mechanism for occupancy -- these ``gpu.func``
+    attributes:
 
       - ``waves_per_eu`` -> ``rocdl.waves_per_eu`` (translated by convert-gpu-to-rocdl)
       - ``maxnreg``      -> ``amdgpu-num-vgpr`` LLVM passthrough (no native ROCDL attr)
 
-    A value of 0 / None means "leave it to the compiler".
+    The autotune compile-hint path (:func:`_apply_occupancy_compile_hints`)
+    routes here, and hand-authored kernels that set ``rocdl.waves_per_eu`` via
+    ``value_attrs`` land on the same attribute. Passing these knobs through
+    ``gpu-module-to-binary opts=`` does NOT work -- the AMDGPU backend drops them
+    silently. A value of 0 / None means "leave it to the compiler". Must be
+    called with *func_op*'s MLIR context active.
+    """
+    if waves_per_eu:
+        i32 = ir.IntegerType.get_signless(32)
+        func_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(i32, int(waves_per_eu))
+    if maxnreg:
+        _set_passthrough(func_op, "amdgpu-num-vgpr", str(int(maxnreg)))
+
+
+def _apply_occupancy_compile_hints(module: ir.Module) -> None:
+    """Lower the autotuner's occupancy compile-hints onto every kernel gpu.func.
+
+    ``Config.compiler_opts()`` surfaces occupancy knobs (``waves_per_eu``,
+    ``maxnreg``) as thread-local ``compile_hints``. They only take effect as
+    kernel function attributes, so this walks the entry-point kernels and writes
+    them via :func:`_set_occupancy_attrs` -- the single occupancy mechanism. The
+    dead ``gpu-module-to-binary opts=`` route (silently ignored by the AMDGPU
+    backend) is intentionally not used.
     """
     from .kernel_function import CompilationContext
 
@@ -850,12 +869,8 @@ def _apply_occupancy_compile_hints(module: ir.Module) -> None:
     if not waves_per_eu and not maxnreg:
         return
     with module.context:
-        i32 = ir.IntegerType.get_signless(32)
         for func_op in _iter_gpu_kernel_funcs(module):
-            if waves_per_eu:
-                func_op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(i32, int(waves_per_eu))
-            if maxnreg:
-                _set_passthrough(func_op, "amdgpu-num-vgpr", str(int(maxnreg)))
+            _set_occupancy_attrs(func_op, waves_per_eu=waves_per_eu, maxnreg=maxnreg)
 
 
 class MlirCompiler:

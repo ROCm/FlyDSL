@@ -35,16 +35,17 @@ class RocmBackend(BaseBackend):
 
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
-        waves_per_eu = compile_hints.get("waves_per_eu")
-        maxnreg = compile_hints.get("maxnreg")
 
+        # Occupancy knobs (waves_per_eu, maxnreg) are deliberately NOT forwarded
+        # to gpu-module-to-binary opts= here: the AMDGPU backend silently ignores
+        # --amdgpu-waves-per-eu / --amdgpu-num-vgpr passed that way. They are the
+        # sole responsibility of _apply_occupancy_compile_hints (jit_function.py),
+        # which lowers them onto the kernel gpu.func as attributes -- the one
+        # mechanism the backend honors. Routing them here too would consume the
+        # same hint twice on a dead path.
         bin_cli_opts = []
         if env.debug.enable_debug_info:
             bin_cli_opts.append("-g")
-        if waves_per_eu:
-            bin_cli_opts.append(f"--amdgpu-waves-per-eu={waves_per_eu}")
-        if maxnreg:
-            bin_cli_opts.append(f"--amdgpu-num-vgpr={maxnreg}")
 
         rocdl_opts = {
             "O": 2,
