@@ -14,14 +14,13 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.common.kernels_common import (
+    atomic_add,
     dtype_to_elem_type,
-    get_llvm_ptr,
     get_warp_size,
 )
 
@@ -603,15 +602,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str):
                 _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
 
                 dw = dy * x_hat
-                ptr = get_llvm_ptr(DWeight, idx, 4)
-                llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.fadd,
-                    ptr,
-                    dw.ir_value(),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                )
+                atomic_add(DWeight, idx, dw, dtype_bytes=4)
 
     @flyc.jit
     def launch_rmsnorm_bwd(
@@ -1023,15 +1014,7 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str):
                 _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, total_e)
 
                 dw = dy * a_hat
-                ptr = get_llvm_ptr(DWeight, idx, 4)
-                llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.fadd,
-                    ptr,
-                    dw.ir_value(),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                )
+                atomic_add(DWeight, idx, dw, dtype_bytes=4)
 
     @flyc.jit
     def launch_fused_add_rmsnorm_bwd(
