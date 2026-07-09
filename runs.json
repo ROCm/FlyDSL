@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-09T00:50:55Z",
+ "updated": "2026-07-09T01:03:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -44,10 +44,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-09T00:09:08Z",
-     "completed_at": null,
+     "completed_at": "2026-07-09T01:02:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28984277713/job/86010341679"
     },
     {
