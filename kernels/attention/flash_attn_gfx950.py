@@ -1423,21 +1423,26 @@ def build_flash_attn_dualwave_swp_module(
                 m_out = _anchor_scalar_f32(m_tile_max)
             return ([o0, o1, o2, o3], m_out, l_out, _v_vec32_to_p(vp_out))
 
+        @flyc.jit
         def _zero_o_block():
             q_row_z = q_start + wave_q_offset + lane_mod_32
             zero_pack = Vec.from_elements([c_zero_i, c_zero_i, c_zero_i, c_zero_i], fx.Int32)
-            with _if_then(_scf.IfOp(_raw(ArithValue(q_row_z < seqlen_q_v)))):
+            if q_row_z < seqlen_q_v:
                 o_base_z = _global_idx_q(q_row_z, lane_div_32 * 8)
                 for dc in range_constexpr(D_CHUNKS):
                     for g in range_constexpr(2):
                         o_global_z = o_base_z + (dc * D_CHUNK + 2 * g * 8)
                         _buffer_store_128(zero_pack, o_global_z)
 
+        @flyc.jit
+        def _zero_o_block_if_needed():
+            if causal_end_raw_i32 <= fx.Int32(0):
+                _zero_o_block()
+
         # Empty split-K and OOB varlen q-blocks share one uniform guard.
         # VARLEN and SPLITK are mutually exclusive.
         if const_expr(CAUSAL and CROSS_SEQLEN and not SPLITK):
-            with _if_then(_scf.IfOp(_raw(ArithValue(causal_end_raw_i32 <= fx.Int32(0))))):
-                _zero_o_block()
+            _zero_o_block_if_needed()
         if const_expr(SPLITK):
             _split_if = _scf.IfOp(_raw(split_nonempty))
             _split_guard = _if_then(_split_if)

@@ -228,7 +228,7 @@ def _build_varlen_light(
     debug_lazy_counts: bool,
     enable_stagger: bool,
 ):
-    """Build a lightweight packed-varlen launcher for short self-attn."""
+    """Build a lightweight packed-varlen launcher for short attention."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
 
     return build_flash_attn_func_module(
@@ -547,7 +547,7 @@ def _build_paged_light(
     debug_lazy_counts: bool,
     enable_stagger: bool,
 ):
-    """Build a lightweight paged-varlen launcher for short self-attn."""
+    """Build a lightweight paged-varlen launcher for short attention."""
     from kernels.attention.flash_attn_generic import build_flash_attn_func_module
 
     return build_flash_attn_func_module(

@@ -1496,12 +1496,16 @@ def build_flash_attn_func_module_primary(
                         o_global = global_idx_q(q_row, d_col)
                         buffer_ops.buffer_store(o2, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
 
-        # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
-        if const_expr(CAUSAL and CROSS_SEQLEN):
+        @flyc.jit
+        def _store_cross_o():
             if causal_end_raw_i32 <= c_zero_i32:
                 _zero_o_block()
-            if causal_end_raw_i32 > c_zero_i32:
+            else:
                 _normalize_and_store_o()
+
+        # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
+        if const_expr(CAUSAL and CROSS_SEQLEN):
+            _store_cross_o()
         else:
             _normalize_and_store_o()
 
