@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-09T10:43:40Z",
+ "updated": "2026-07-09T10:53:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -403,11 +403,11 @@
    "branch": "feat/fused-add-rmsnorm-backward-769",
    "event": "pull_request",
    "title": "[rmsnorm] Add fused-add / residual backward (PR 2/3, #769)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28987225598",
    "created_at": "2026-07-09T01:18:12Z",
-   "updated_at": "2026-07-09T10:41:23Z",
+   "updated_at": "2026-07-09T10:52:38Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -422,10 +422,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-09T10:41:23Z",
-     "completed_at": null,
+     "completed_at": "2026-07-09T10:52:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28987225598/job/86045403095"
     },
     {
