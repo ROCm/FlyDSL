@@ -19,7 +19,6 @@ from flydsl.expr.numeric import (
     Boolean,
     Float16,
     Float32,
-    Float64,
     Int8,
     Int16,
     Int32,
@@ -310,72 +309,82 @@ class TestOperators:
 
 
 # ===========================================================================
-# C. Type promotion
+# C. Common-type handling in operators
 # ===========================================================================
 
 
-class TestTypePromotion:
+class TestCommonTypeHandling:
+    """Mixed-dtype vector operators convert both operands to a common type
+    using the same rule as scalar Numeric arithmetic
+    """
 
-    def test_same_type(self):
-        assert Numeric.promote(Float32, Float32) is Float32
+    def test_int_plus_float_uses_common_type(self):
+        """Int32 Vector + Float32 Vector → float; must emit addf, not addi."""
 
-    def test_f16_f32(self):
-        assert Numeric.promote(Float16, Float32) is Float32
+        def build(a, b):
+            ta = Vector(a, 8, Int32)
+            tb = Vector(b, 8, Float32)
+            result = ta + tb
+            assert result.dtype is Float32
 
-    def test_bf16_f32(self):
-        assert Numeric.promote(BFloat16, Float32) is Float32
+        ir_text = _build_module(build, [_vec_i32, _vec_f32])
+        assert "arith.addf" in ir_text
+        assert "arith.addi" not in ir_text
 
-    def test_int_float(self):
-        """Int32 + Float32 → Float32."""
-        assert Numeric.promote(Int32, Float32) is Float32
+    def test_float_plus_int_uses_common_type(self):
+        """Float32 Vector + Int32 Vector → float (LHS already float)."""
 
-    def test_int_wider_than_float(self):
-        """Float16 + Int32 → Float32 (int width 32 > float width 16)."""
-        assert Numeric.promote(Float16, Int32) is Float32
+        def build(a, b):
+            ta = Vector(a, 8, Float32)
+            tb = Vector(b, 8, Int32)
+            result = ta + tb
+            assert result.dtype is Float32
 
-    def test_int_same_width_as_float(self):
-        """Float32 + Int32 → Float32 (same width, float wins)."""
-        assert Numeric.promote(Float32, Int32) is Float32
+        ir_text = _build_module(build, [_vec_f32, _vec_i32])
+        assert "arith.addf" in ir_text
 
-    def test_int_narrower_than_float(self):
-        """Float32 + Int16 → Float32 (int is narrower)."""
-        assert Numeric.promote(Float32, Int16) is Float32
+    def test_int_widening_uses_common_type(self):
+        """Int16 Vector + Int32 Vector widens to the wider integer type."""
 
-    def test_int64_with_float32(self):
-        """Float32 + Int64 → Float64 (int width 64 > float width 32)."""
-        from flydsl.expr.numeric import Int64
+        def build(a, b):
+            ta = Vector(a, 8, Int16)
+            tb = Vector(b, 8, Int32)
+            result = ta + tb
+            assert result.dtype is Int32
 
-        assert Numeric.promote(Float32, Int64) is Float64
+        ir_text = _build_module(build, [_vec_i16, _vec_i32])
+        assert "arith.addi" in ir_text
 
-    def test_f16_f64(self):
-        assert Numeric.promote(Float16, Float64) is Float64
-
-    def test_promote_in_operator(self):
-        """Mixed-type vector ops require explicit .to() conversion (no auto-promote)."""
+    def test_f16_plus_f32_extends_narrow_operand(self):
+        """Float16 + Float32 uses Float32; the narrower operand is extended."""
 
         def build(a, b):
             ta = Vector(a, 8, Float16)
             tb = Vector(b, 8, Float32)
-            ta_f32 = ta.to(Float32)
-            result = ta_f32 + tb
+            result = ta + tb
             assert result.dtype is Float32
 
         ir_text = _build_module(build, [_vec_f16, _vec_f32])
         assert "arith.extf" in ir_text
         assert "arith.addf" in ir_text
 
-    def test_mixed_signed_unsigned_int(self):
-        """Int32 + Uint32 → Uint32 (unsigned wins at same width)."""
-        assert Numeric.promote(Int32, Uint32) is Uint32
-        assert Numeric.promote(Uint32, Int32) is Uint32
+    def test_scalar_numeric_operand_uses_common_type(self):
+        """Int32 Vector + Float32 scalar converts the vector to float."""
 
-    def test_promote_bf16_scalar(self):
-        """BFloat16 tensor + scalar → explicit .to() needed for mixed-type ops."""
+        def build(a):
+            ta = Vector(a, 8, Int32)
+            result = ta + Float32(2.0)
+            assert result.dtype is Float32
+
+        ir_text = _build_module(build, [_vec_i32])
+        assert "arith.addf" in ir_text
+
+    def test_python_float_operand_uses_common_type(self):
+        """BFloat16 Vector + Python float uses f32 (no explicit .to())."""
 
         def build(a):
             ta = Vector(a, 8, BFloat16)
-            ta_f32 = ta.to(Float32)
-            result = ta_f32 + 1.0
+            result = ta + 1.0
             assert result.dtype is Float32
 
         ir_text = _build_module(build, [_vec_bf16])
@@ -844,12 +853,6 @@ class TestFmath:
             assert isinstance(result, Float32)
 
         _build_module(build, [ir.F32Type.get])
-
-    def test_int_scalar_math(self):
-        """math.exp2 on raw integer ir.Value (not through Numeric) is allowed by MLIR."""
-        # math.py passes through to MLIR ops which accept any float-like;
-        # integer scalars wrapped in Int32 Numeric are handled by _traced_math_op
-        pass
 
     def test_vector_scalar_atan2(self):
         """atan2 with Vector and scalar broadcasts the scalar."""
