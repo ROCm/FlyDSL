@@ -104,6 +104,29 @@ def test_config_no_compiler_opts_when_unset():
     assert c.all_kwargs() == {"BLOCK": 64}
 
 
+def test_config_accepts_per_kernel_occupancy_mapping():
+    """Occupancy knobs may be a {sym_name: int} per-kernel mapping: it flows
+    through compiler_opts, round-trips to_dict/from_dict, stays JSON-serializable
+    (disk cache), and reprs deterministically. Empty maps collapse to unset and
+    non-str keys are rejected."""
+    c = Config(BLOCK=128, waves_per_eu={"kern_a": 2, "kern_b": 4}, maxnreg={"kern_a": 128})
+    assert c.compiler_opts() == {"waves_per_eu": {"kern_a": 2, "kern_b": 4}, "maxnreg": {"kern_a": 128}}
+
+    d = c.to_dict()
+    assert json.loads(json.dumps(d)) == d  # survives the disk-cache JSON round-trip
+    c2 = Config.from_dict(d)
+    assert c2.compiler_opts() == c.compiler_opts()
+    assert c2.kwargs == {"BLOCK": 128}
+
+    # repr is insertion-order-independent (used in tuning logs)
+    assert repr(Config(waves_per_eu={"b": 1, "a": 2})) == repr(Config(waves_per_eu={"a": 2, "b": 1}))
+
+    # empty mapping means "unset"; non-str keys are rejected
+    assert Config(waves_per_eu={}).compiler_opts() == {}
+    with pytest.raises(TypeError):
+        Config(waves_per_eu={2: 2})
+
+
 # ── stride normalization ─────────────────────────────────────────────────
 def test_normalize_strides_buckets():
     assert _normalize_strides(FakeTensor((4, 8))) == ("s", 1)  # contiguous: inner=1, outer=other
@@ -758,6 +781,20 @@ def test_apply_occupancy_compile_hints_per_kernel_mapping():
     # kernel b: maxnreg only (absent from the waves_per_eu map)
     assert '"amdgpu-num-vgpr", "64"' in funcs["b"]
     assert "rocdl.waves_per_eu" not in funcs["b"]
+
+
+def test_stable_hint_repr_canonicalizes_mappings():
+    """The compile-cache hint repr is order-independent for mapping values, so a
+    per-kernel occupancy map (or llvm_options) differing only in insertion order
+    yields one cache key instead of compiling twice. List order stays
+    significant."""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from flydsl.compiler.jit_function import _stable_hint_repr
+
+    assert _stable_hint_repr({"a": 2, "b": 4}) == _stable_hint_repr({"b": 4, "a": 2})
+    assert _stable_hint_repr({"x": {"p": 1, "q": 2}}) == _stable_hint_repr({"x": {"q": 2, "p": 1}})
+    assert _stable_hint_repr(2) == "2"
+    assert _stable_hint_repr([3, 1, 2]) == "[3, 1, 2]"
 
 
 def test_builder_mode_rejects_num_warps_in_forced_search(monkeypatch):

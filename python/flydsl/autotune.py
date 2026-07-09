@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -118,14 +119,40 @@ def _normalize_strides(t) -> tuple:
     return tuple(out)
 
 
+def _normalize_occupancy(value, knob: str):
+    """Validate/normalize an occupancy knob to ``None``, an ``int`` (uniform
+    across every kernel), or a ``{sym_name: int}`` per-kernel mapping.
+
+    A mapping is copied to a plain ``dict`` (so a custom Mapping still serializes
+    and hashes canonically), its keys must be kernel entry-point names, and an
+    empty/all-unset mapping collapses to ``None``. Occupancy is a per-kernel
+    ``gpu.func`` attribute, so the mapping lets one Config target several entry
+    kernels independently; see ``_apply_occupancy_compile_hints``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        norm = {}
+        for name, v in value.items():
+            if not isinstance(name, str):
+                raise TypeError(
+                    f"{knob}: per-kernel mapping keys must be kernel names (str), got {type(name).__name__}"
+                )
+            norm[name] = int(v)
+        return norm or None
+    return int(value)
+
+
 class Config:
     """A single tuning configuration."""
 
     def __init__(self, *, num_warps=None, waves_per_eu=None, maxnreg=None, pre_hook=None, **kwargs):
         self.kwargs = kwargs
         self.num_warps = num_warps
-        self.waves_per_eu = waves_per_eu
-        self.maxnreg = maxnreg
+        # Occupancy knobs may be a scalar (uniform) or a {sym_name: int} mapping
+        # (per-kernel); normalized so they serialize / hash canonically.
+        self.waves_per_eu = _normalize_occupancy(waves_per_eu, "waves_per_eu")
+        self.maxnreg = _normalize_occupancy(maxnreg, "maxnreg")
         self.pre_hook = pre_hook
 
     def all_kwargs(self):
@@ -147,13 +174,20 @@ class Config:
         }
 
     def __repr__(self):
+        def fmt(v):
+            # Render mappings with sorted keys so the repr (used in tuning logs)
+            # is deterministic regardless of dict insertion order.
+            if isinstance(v, Mapping):
+                return "{" + ", ".join(f"{k!r}: {v[k]}" for k in sorted(v)) + "}"
+            return str(v)
+
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
         if self.num_warps is not None:
             parts.append(f"num_warps={self.num_warps}")
         if self.waves_per_eu is not None:
-            parts.append(f"waves_per_eu={self.waves_per_eu}")
+            parts.append(f"waves_per_eu={fmt(self.waves_per_eu)}")
         if self.maxnreg is not None:
-            parts.append(f"maxnreg={self.maxnreg}")
+            parts.append(f"maxnreg={fmt(self.maxnreg)}")
         return f"Config({', '.join(parts)})"
 
     def to_dict(self):
@@ -639,7 +673,9 @@ class Autotuner:
             fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w") as f:
-                    json.dump(data, f, indent=2)
+                    # sort_keys canonicalizes nested per-kernel occupancy maps so
+                    # the on-disk cache is deterministic (stable diffs, no churn).
+                    json.dump(data, f, indent=2, sort_keys=True)
                 os.replace(tmp, path)
             except Exception:
                 with contextlib.suppress(FileNotFoundError):

@@ -901,6 +901,20 @@ def _apply_occupancy_compile_hints(module: ir.Module) -> None:
             )
 
 
+def _stable_hint_repr(value) -> str:
+    """Order-independent string form of a compile-hint value for the cache key.
+
+    ``Mapping`` values (e.g. a per-kernel occupancy ``{sym_name: value}`` or an
+    ``llvm_options`` dict) are canonicalized by sorted key -- recursively -- so
+    two logically-equal hints that differ only in dict insertion order share one
+    cache key instead of compiling (and caching) twice. Non-mapping values keep
+    their plain ``str`` form (list/tuple order is significant and preserved).
+    """
+    if isinstance(value, Mapping):
+        return "{" + ", ".join(f"{k!r}: {_stable_hint_repr(value[k])}" for k in sorted(value)) + "}"
+    return str(value)
+
+
 class MlirCompiler:
     @classmethod
     def compile(
@@ -1421,7 +1435,7 @@ class JitFunction:
         # tuned calls.
         effective_hints = {**self.compile_hints, **CompilationContext.get_compile_hints()}
         if effective_hints:
-            key_parts.append(("_hints_", tuple(sorted((k, str(v)) for k, v in effective_hints.items()))))
+            key_parts.append(("_hints_", tuple(sorted((k, _stable_hint_repr(v)) for k, v in effective_hints.items()))))
 
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
