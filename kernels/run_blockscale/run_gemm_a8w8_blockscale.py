@@ -10,28 +10,28 @@ Edit the CONFIG block below — no CLI args. Run with:
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Problem shape
-M = 1024 #896
-N = 2048
-K = 2880
+M = 256 #896
+N = 1024
+K = 8192
 
 # Scale granularity (must match how the scales were quantized)
 SCALE_BLOCK_K = 128
 SCALE_BLOCK_N = 128
 
 # Tile dims (tile_k must equal SCALE_BLOCK_K for Phase 1)
-TILE_M = 256 #224
-TILE_N = 256
-TILE_K = 128
+TILE_M = 32 #224
+TILE_N = 32
+TILE_K = 512
 
 # Warp grid
 M_WARP = 2
 N_WARP = 2
 
 # Pipeline / perf knobs
-NUM_BUFFERS = 3
+NUM_BUFFERS = 4
 WAVES_PER_EU = None
 L2_PREFETCH_DISTANCE = 0
-USE_TDM_STORE = False
+USE_TDM_STORE = True
 # Experimental: forwards to AMDGPU LLVM `amdgpu-loop-carried-load-percent`
 # function attribute via passthrough. Set to 0 to try less-conservative
 # scheduling of loop-carried VGPRs. None disables (no attribute set).
@@ -41,7 +41,7 @@ LOOP_CARRIED_LOAD_PERCENT = 0
 # wave entry). Saves ~1786 cycles of prologue stall on the gfx1250 sim.
 KERNARG_PRELOAD = True
 # Kernel variant: "reg_preload" (primary) or "manual".
-VARIANT = "manual"
+VARIANT = "reg_preload"
 # Manual-only: reuseB on consecutive WMMAs sharing the A-operand (a_cur, n>0) →
 # matrix_b_reuse, skips re-reading those VGPRs on gfx1250.
 WMMA_OPERAND_REUSE = True
@@ -50,7 +50,7 @@ WMMA_OPERAND_REUSE = True
 # s_barrier_signal/wait (no release/acquire fences) so the scheduler may hoist the
 # prefetch ds_loads up into the WMMA shadows. Verify via trace — a passing unit
 # test is NOT proof (cross-wave race is timing-dependent). False = stock gpu.barrier().
-USE_MANUAL_BARRIER = True
+USE_MANUAL_BARRIER = False
 
 # Manual-only: fully preload the A panel (A0..A_{M-1}) in the prologue and refill
 # each A row's registers IN PLACE for tile T+1 — timed one compute-row after the
@@ -58,7 +58,7 @@ USE_MANUAL_BARRIER = True
 # second buffer); B stays double-buffered. Requires scales_per_tile==1 (tile_k ==
 # scale_block_k). A ds_load win, not a VGPR win — verify the A-refill distance in
 # the trace (a passing unit test is NOT proof).
-A_RESIDENT_REFILL = True
+A_RESIDENT_REFILL = False
 
 # Output dtype ("bf16" / "fp16" / "f32")
 OUT_DTYPE = "bf16"
