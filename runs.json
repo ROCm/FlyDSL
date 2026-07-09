@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-09T11:47:06Z",
+ "updated": "2026-07-09T13:17:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,29 +10,29 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29005981806",
    "created_at": "2026-07-09T08:48:18Z",
-   "updated_at": "2026-07-09T11:45:19Z",
+   "updated_at": "2026-07-09T13:11:28Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-09T11:45:19Z",
-     "completed_at": null,
+     "completed_at": "2026-07-09T12:10:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29005981806/job/86096473989"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-09T10:28:32Z",
-     "completed_at": null,
+     "completed_at": "2026-07-09T11:55:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29005981806/job/86096474010"
     },
     {
@@ -43,6 +43,24 @@
      "started_at": "2026-07-09T10:28:32Z",
      "completed_at": "2026-07-09T11:23:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29005981806/job/86096474015"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T12:10:55Z",
+     "completed_at": "2026-07-09T12:59:37Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29005981806/job/86115193996"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T12:12:54Z",
+     "completed_at": "2026-07-09T13:11:27Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29005981806/job/86115194108"
     }
    ]
   },
@@ -53,38 +71,38 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)\u2026",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491",
    "created_at": "2026-07-09T08:05:46Z",
-   "updated_at": "2026-07-09T11:45:35Z",
+   "updated_at": "2026-07-09T13:14:36Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-09T11:45:35Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T12:10:26Z",
+     "completed_at": "2026-07-09T12:37:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491/job/86110650673"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-09T11:45:35Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T11:46:53Z",
+     "completed_at": "2026-07-09T13:14:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491/job/86110650674"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-09T11:45:35Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T11:46:46Z",
+     "completed_at": "2026-07-09T12:38:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491/job/86110650689"
     }
    ]
