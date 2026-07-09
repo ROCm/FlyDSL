@@ -126,6 +126,21 @@ def test_config_accepts_per_kernel_occupancy_mapping():
     with pytest.raises(TypeError):
         Config(waves_per_eu={2: 2})
 
+    # 0 collapses to "unset" (shares codegen + cache key with an absent hint),
+    # for both scalars and per-kernel map values
+    assert Config(waves_per_eu=0).compiler_opts() == {}
+    assert Config(waves_per_eu={"a": 0}).compiler_opts() == {}
+    assert Config(waves_per_eu={"a": 0, "b": 2}).compiler_opts() == {"waves_per_eu": {"b": 2}}
+
+    # non-int / negative occupancy is rejected (bool is not a valid occupancy)
+    for bad in (True, 2.5, "2"):
+        with pytest.raises(TypeError):
+            Config(waves_per_eu=bad)
+    with pytest.raises(ValueError):
+        Config(maxnreg=-1)
+    with pytest.raises(TypeError):
+        Config(maxnreg={"a": 1.5})
+
 
 # ── stride normalization ─────────────────────────────────────────────────
 def test_normalize_strides_buckets():
@@ -794,7 +809,22 @@ def test_stable_hint_repr_canonicalizes_mappings():
     assert _stable_hint_repr({"a": 2, "b": 4}) == _stable_hint_repr({"b": 4, "a": 2})
     assert _stable_hint_repr({"x": {"p": 1, "q": 2}}) == _stable_hint_repr({"x": {"q": 2, "p": 1}})
     assert _stable_hint_repr(2) == "2"
-    assert _stable_hint_repr([3, 1, 2]) == "[3, 1, 2]"
+    assert _stable_hint_repr([3, 1, 2]) == "[3, 1, 2]"  # list order preserved
+    # a dict nested inside a list is still canonicalized
+    assert _stable_hint_repr([{"a": 2, "b": 4}]) == _stable_hint_repr([{"b": 4, "a": 2}])
+    assert _stable_hint_repr([1, {"z": 1, "a": 2}]) == "[1, {'a': 2, 'z': 1}]"
+
+
+def test_unmatched_occupancy_hint_keys():
+    """A per-kernel occupancy map key naming no kernel is surfaced (so the caller
+    warns) instead of being a silent no-op. Scalar hints never 'miss'."""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from flydsl.compiler.jit_function import _unmatched_occupancy_hint_keys
+
+    present = {"kern_a", "kern_b"}
+    out = _unmatched_occupancy_hint_keys({"waves_per_eu": 2, "maxnreg": {"kern_a": 128, "typo": 64}}, present)
+    assert out == {"maxnreg": ["typo"]}
+    assert _unmatched_occupancy_hint_keys({"waves_per_eu": {"kern_a": 2}}, present) == {}
 
 
 def test_builder_mode_rejects_num_warps_in_forced_search(monkeypatch):
@@ -954,6 +984,23 @@ def test_get_all_configs_sweeps_f32():
     blocks = sorted({c.kwargs["BLOCK_THREADS"] for c in cfgs})
     assert blocks == sorted(_BLOCK_THREADS_CHOICES)  # every block present (no tile filter for f32)
     assert len(cfgs) == len(_BLOCK_THREADS_CHOICES) * len(_WAVES_PER_EU_CHOICES)
+
+
+def test_get_default_bf16_hits_vectorized_tile():
+    """get_default must pick a BLOCK_THREADS whose tile divides N for bf16/f16,
+    so the zero-search default hits the vectorized fast path (regression: N=5120
+    used to pick 256 -> tile 2048 -> scalar). f32 is unaffected (scalar path)."""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    from kernels.norm.rmsnorm_config import _BLOCK_THREADS_CHOICES, _elem_bits, get_default
+
+    vec_width = 128 // _elem_bits("bf16")
+    for N in (4096, 5120, 7168, 8192):
+        block = get_default(N, "bf16").kwargs["BLOCK_THREADS"]
+        assert N % (block * vec_width) == 0, f"bf16 N={N}: block {block} misses the vectorized tile"
+    # N=5120 specifically resolves to 128 (256's tile 2048 does not divide 5120)
+    assert get_default(5120, "bf16").kwargs["BLOCK_THREADS"] == 128
+    # f32 uses the scalar path, so the divisibility filter does not apply
+    assert get_default(5120, "f32").kwargs["BLOCK_THREADS"] in _BLOCK_THREADS_CHOICES
 
 
 def test_cache_dir_change_does_not_serve_stale_config(tmp_path, monkeypatch):

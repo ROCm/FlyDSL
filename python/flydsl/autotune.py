@@ -123,12 +123,25 @@ def _normalize_occupancy(value, knob: str):
     """Validate/normalize an occupancy knob to ``None``, an ``int`` (uniform
     across every kernel), or a ``{sym_name: int}`` per-kernel mapping.
 
-    A mapping is copied to a plain ``dict`` (so a custom Mapping still serializes
-    and hashes canonically), its keys must be kernel entry-point names, and an
-    empty/all-unset mapping collapses to ``None``. Occupancy is a per-kernel
-    ``gpu.func`` attribute, so the mapping lets one Config target several entry
-    kernels independently; see ``_apply_occupancy_compile_hints``.
+    Values must be non-negative ``int``s (``bool`` is rejected -- it is an
+    ``int`` subclass but never a meaningful occupancy). ``0`` means "leave it to
+    the compiler" and collapses to ``None`` so it shares codegen *and* a JIT
+    cache key with an absent hint (no redundant recompile). A mapping is copied
+    to a plain ``dict`` (so a custom Mapping still serializes/hashes
+    canonically) with kernel entry-point names as keys; an empty/all-unset
+    mapping collapses to ``None``. Occupancy is a per-kernel ``gpu.func``
+    attribute, so the mapping lets one Config target several entry kernels; see
+    ``_apply_occupancy_compile_hints``.
     """
+
+    def _coerce(v):
+        # bool is an int subclass but is never a valid occupancy value.
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise TypeError(f"{knob}: occupancy value must be a non-negative int, got {v!r} ({type(v).__name__})")
+        if v < 0:
+            raise ValueError(f"{knob}: occupancy value must be >= 0, got {v}")
+        return v or None  # 0 -> None ("leave it to the compiler")
+
     if value is None:
         return None
     if isinstance(value, Mapping):
@@ -138,9 +151,11 @@ def _normalize_occupancy(value, knob: str):
                 raise TypeError(
                     f"{knob}: per-kernel mapping keys must be kernel names (str), got {type(name).__name__}"
                 )
-            norm[name] = int(v)
+            cv = _coerce(v)
+            if cv is not None:
+                norm[name] = cv
         return norm or None
-    return int(value)
+    return _coerce(value)
 
 
 class Config:

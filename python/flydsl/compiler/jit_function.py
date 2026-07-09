@@ -805,12 +805,16 @@ def _set_passthrough(func_op, key: str, value: str) -> None:
     """Set an LLVM ``passthrough`` ``[key, value]`` entry on a kernel func,
     replacing any existing entry with the same key.
 
-    ``convert-gpu-to-rocdl`` copies ``passthrough`` from the gpu.func onto the
-    lowered llvm.func, where the LLVM emitter turns each entry into a function
-    attribute. This bridges AMDGPU attributes the ROCDL dialect does not
-    translate natively (same approach as ``FlyROCDLClusterAttrPass`` for
-    ``amdgpu-cluster-dims``). Preserves unrelated entries but must not leave a
-    duplicate key (duplicate LLVM function attributes are ill-defined).
+    ``convert-gpu-to-rocdl`` copies the ``passthrough`` discardable attr from the
+    gpu.func onto the lowered llvm.func, where the LLVM emitter turns each entry
+    into a function attribute -- bridging AMDGPU function attributes the ROCDL
+    dialect does not translate natively (e.g. ``amdgpu-num-vgpr``). This is
+    related to, but distinct from, ``FlyROCDLClusterAttrPass``: that pass copies
+    a ``rocdl.cluster_dims`` attr and *synthesizes* the passthrough on the
+    llvm.func in a post-lowering pass, whereas here the ``passthrough`` is set
+    directly on the gpu.func and carried through as-is. Preserves unrelated
+    entries but must not leave a duplicate key (duplicate LLVM function
+    attributes are ill-defined).
     """
 
     def _entry_key(e):
@@ -864,6 +868,23 @@ def _resolve_occupancy_hint(hint, sym_name: str):
     return hint
 
 
+def _unmatched_occupancy_hint_keys(hints: dict, present: set) -> dict:
+    """Map ``knob -> [keys]`` for per-kernel occupancy hints whose keys name no
+    kernel in *present* (the ``sym_name``s of the module's entry kernels).
+
+    A ``{sym_name: value}`` hint with a stale/typo'd key would otherwise be a
+    silent no-op -- the exact "silently ignored" failure this occupancy rework
+    set out to eliminate -- so the caller warns on any leftovers.
+    """
+    out = {}
+    for knob, hint in hints.items():
+        if isinstance(hint, Mapping):
+            missing = sorted(k for k in hint if k not in present)
+            if missing:
+                out[knob] = missing
+    return out
+
+
 def _apply_occupancy_compile_hints(module: ir.Module) -> None:
     """Lower the autotuner's occupancy compile-hints onto each kernel gpu.func.
 
@@ -878,11 +899,13 @@ def _apply_occupancy_compile_hints(module: ir.Module) -> None:
     *every* ``gpu.kernel`` entry point (the common case, e.g. single-kernel
     launchers like rmsnorm) -- or a ``{sym_name: int}`` mapping resolved per
     kernel func against its ``sym_name`` (kernels absent from the map are left
-    to the compiler). The mapping form lets a multi-kernel ``@jit`` launcher
-    scope occupancy per entry kernel via ``CompilationContext.compile_hints``.
-    Note: the autotuner's ``Config`` still only expresses scalar knobs, so
-    autotune-driven *independent* per-kernel tuning is not wired yet -- a Config
-    would need to carry the mapping and the search to explore it (see PR #785).
+    to the compiler; a map key naming no kernel is warned about, not silently
+    dropped). The mapping form lets a multi-kernel ``@jit`` launcher scope
+    occupancy per entry kernel via ``CompilationContext.compile_hints``. Note:
+    ``Config`` can carry such a mapping, but the autotune *search* still
+    enumerates scalar knobs only, so autotune-driven *independent* per-kernel
+    tuning is not wired end-to-end yet -- the search would need to explore the
+    mappings (deferred; see PR #785).
     """
     from .kernel_function import CompilationContext
 
@@ -891,27 +914,42 @@ def _apply_occupancy_compile_hints(module: ir.Module) -> None:
     maxnreg = hints.get("maxnreg")
     if not waves_per_eu and not maxnreg:
         return
+    seen = set()
     with module.context:
         for func_op in _iter_gpu_kernel_funcs(module):
             sym_name = ir.StringAttr(func_op.attributes["sym_name"]).value
+            seen.add(sym_name)
             _set_occupancy_attrs(
                 func_op,
                 waves_per_eu=_resolve_occupancy_hint(waves_per_eu, sym_name),
                 maxnreg=_resolve_occupancy_hint(maxnreg, sym_name),
             )
+    for knob, missing in _unmatched_occupancy_hint_keys(
+        {"waves_per_eu": waves_per_eu, "maxnreg": maxnreg}, seen
+    ).items():
+        log().warning(
+            "occupancy hint %r targets kernel(s) %s not present in the module (kernels: %s); "
+            "those entries were ignored -- check for a typo or stale sym_name.",
+            knob,
+            missing,
+            sorted(seen),
+        )
 
 
 def _stable_hint_repr(value) -> str:
     """Order-independent string form of a compile-hint value for the cache key.
 
     ``Mapping`` values (e.g. a per-kernel occupancy ``{sym_name: value}`` or an
-    ``llvm_options`` dict) are canonicalized by sorted key -- recursively -- so
-    two logically-equal hints that differ only in dict insertion order share one
-    cache key instead of compiling (and caching) twice. Non-mapping values keep
-    their plain ``str`` form (list/tuple order is significant and preserved).
+    ``llvm_options`` dict) are canonicalized by sorted key, recursively; list /
+    tuple values recurse element-wise with order preserved (so a dict nested in
+    a list is still canonicalized). Two logically-equal hints that differ only
+    in dict insertion order thus share one cache key instead of compiling (and
+    caching) twice. Scalars keep their plain ``str`` form.
     """
     if isinstance(value, Mapping):
         return "{" + ", ".join(f"{k!r}: {_stable_hint_repr(value[k])}" for k in sorted(value)) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_stable_hint_repr(v) for v in value) + "]"
     return str(value)
 
 

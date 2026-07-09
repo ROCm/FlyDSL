@@ -29,6 +29,16 @@ def get_default(N: int, dtype_str: str, arch: str = None) -> Config:
     Heuristic: pick the smallest block whose vectorized tiles cover the row in a
     handful of iterations, clamped to [128, 1024]. Wider rows want more threads;
     narrow rows keep the block small to preserve occupancy.
+
+    For bf16/f16 the pick is then shrunk to the largest candidate whose tile
+    (``BLOCK_THREADS * VEC_WIDTH``) evenly divides N, so the zero-search default
+    actually hits the vectorized fast path (the kernel gates it on
+    ``N % tile_cols == 0``) -- matching the divisibility filter get_all_configs
+    applies. Without this, a "tile-aware" block can still miss the fast path and
+    silently fall to the slow scalar loop for common N (e.g. bf16 N=5120 picks
+    256 whose tile 2048 does not divide 5120 -> scalar, while 128 would
+    vectorize). If nothing divides N, every block runs scalar anyway, so keep
+    the heuristic pick. f32 always uses the scalar loop, so no filter applies.
     """
     vec_width = 128 // _elem_bits(dtype_str)
     # Aim for ~2 vectorized tiles per row: block ≈ N / (2 * vec_width).
@@ -37,6 +47,12 @@ def get_default(N: int, dtype_str: str, arch: str = None) -> Config:
     for choice in _BLOCK_THREADS_CHOICES:
         if choice <= max(128, target):
             block = choice
+
+    if _elem_bits(dtype_str) <= 16:
+        dividing = [b for b in _BLOCK_THREADS_CHOICES if b <= block and N >= b * vec_width and N % (b * vec_width) == 0]
+        if dividing:
+            block = max(dividing)
+
     return Config(BLOCK_THREADS=block)
 
 
