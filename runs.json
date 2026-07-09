@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-09T01:25:49Z",
+ "updated": "2026-07-09T04:39:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 28994374930,
+   "pr": 785,
+   "commit": "4b253f8e29c0dda01ac72c9dd56c0decc707d9b1",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994374930",
+   "created_at": "2026-07-09T04:36:20Z",
+   "updated_at": "2026-07-09T04:36:20Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 28994227333,
+   "pr": 812,
+   "commit": "e0198bbe76f9740d6e698a17f7cc424a996ba05b",
+   "branch": "xudoyuan/kernels-smem-migration",
+   "event": "pull_request",
+   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994227333",
+   "created_at": "2026-07-09T04:32:11Z",
+   "updated_at": "2026-07-09T04:33:49Z",
+   "actor": "xudoyuan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-09T04:33:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994227333/job/86040524660"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-09T04:34:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994227333/job/86040524667"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-09T04:34:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994227333/job/86040524676"
+    }
+   ]
+  },
   {
    "run_id": 28987225598,
    "pr": 800,
@@ -35,19 +93,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-09T01:10:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-09T01:42:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28986695572/job/86018016517"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-09T01:10:45Z",
-     "completed_at": null,
+     "completed_at": "2026-07-09T01:58:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28986695572/job/86018016525"
     },
     {
@@ -78,7 +136,7 @@
   },
   {
    "run_id": 28984277713,
-   "pr": 785,
+   "pr": null,
    "commit": "42ae6972b00dd3d2936c5b80a2c96ae4d2fd6608",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -1880,64 +1938,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28839998371/job/85532042975"
     }
    ]
-  },
-  {
-   "run_id": 28839878885,
-   "pr": null,
-   "commit": "85bd58d718afd008b1e809e725772f5ed705caf8",
-   "branch": "lhc/refactor-kernels",
-   "event": "pull_request",
-   "title": "refactor(kernels): domain subpackages, layered common, de-duplication",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28839878885",
-   "created_at": "2026-07-07T03:42:33Z",
-   "updated_at": "2026-07-07T03:46:22Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T03:45:05Z",
-     "completed_at": "2026-07-07T03:46:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28839878885/job/85531681385"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T03:45:06Z",
-     "completed_at": "2026-07-07T03:46:03Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28839878885/job/85531681386"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T03:45:08Z",
-     "completed_at": "2026-07-07T03:46:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28839878885/job/85531681396"
-    }
-   ]
-  },
-  {
-   "run_id": 28839605142,
-   "pr": null,
-   "commit": "c19c4f42e26f37f1313b4d048c75e2da9471f2af",
-   "branch": "lhc/refactor-kernels",
-   "event": "pull_request",
-   "title": "refactor(kernels): domain subpackages, layered common, de-duplication",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28839605142",
-   "created_at": "2026-07-07T03:34:41Z",
-   "updated_at": "2026-07-07T03:36:25Z",
-   "actor": "Phil-amd",
-   "jobs": []
   }
  ]
 }
