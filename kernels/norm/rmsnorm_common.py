@@ -38,6 +38,21 @@ def make_reduction_storage(red_slots: int):
     return SharedStorage
 
 
+def make_single_reduction_storage(red_slots: int):
+    """One-accumulator variant of :func:`make_reduction_storage`.
+
+    The backward kernels run a single block reduction (only ``s_red``), so they
+    use this instead of the two-slot struct to avoid allocating the unused
+    ``s_red2`` LDS array.
+    """
+
+    @fx.struct
+    class SharedStorage:
+        s_red: fx.Array[fx.Float32, red_slots, 16]
+
+    return SharedStorage
+
+
 def load_scalar(copy_atom, elem_dtype, divided_tensor, index):
     view = fx.slice(divided_tensor, (None, index))
     r = fx.make_rmem_tensor(1, elem_dtype)

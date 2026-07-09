@@ -19,9 +19,10 @@ from kernels.norm.rmsnorm_common import (
     BLOCK_THREADS,
     WARP_SIZE,
     load_scalar,
-    make_reduction_storage,
+    make_single_reduction_storage,
     store_scalar,
 )
+
 
 def build_rmsnorm_bwd_module(N: int, dtype_str: str):
     """Fused RMSNorm backward: grid=(M,), one block per row.
@@ -38,7 +39,7 @@ def build_rmsnorm_bwd_module(N: int, dtype_str: str):
     """
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
-    SharedStorage = make_reduction_storage(RED_SLOTS)
+    SharedStorage = make_single_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def rmsnorm_bwd_kernel(
@@ -192,7 +193,7 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str):
     """
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
-    SharedStorage = make_reduction_storage(RED_SLOTS)
+    SharedStorage = make_single_reduction_storage(RED_SLOTS)
 
     @flyc.kernel
     def fused_add_rmsnorm_bwd_kernel(
@@ -291,7 +292,8 @@ def build_fused_add_rmsnorm_bwd_module(N: int, dtype_str: str):
         c1 = sum_prod / n_float
 
         # Pass 2: d_added = (wdy - a_hat*c1) * rstd ; total = d_added + dres_out
-        #         store total -> DX and DResidual ; dw = dy*a_hat (atomicAdd fp32)
+        #         store total -> DX only (the wrapper aliases dx as dresidual, since
+        #         added = x + residual_in => dx == dresidual) ; dw = dy*a_hat (atomicAdd fp32)
         for base in range_constexpr(0, N, BLOCK_THREADS):
             idx = tid + base
             if idx < N:

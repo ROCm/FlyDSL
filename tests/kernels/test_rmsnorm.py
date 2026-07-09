@@ -19,10 +19,10 @@ import pytest
 
 import flydsl.compiler as flyc
 from kernels.norm.rmsnorm_kernel import (
+    build_fused_add_rmsnorm_bwd_module,
     build_fused_add_rmsnorm_dynamicquant_module,
     build_fused_add_rmsnorm_module,
     build_fused_add_rmsnorm_smoothquant_module,
-    build_fused_add_rmsnorm_bwd_module,
     build_rmsnorm_bwd_module,
     build_rmsnorm_dynamicquant_module,
     build_rmsnorm_module,
@@ -725,9 +725,7 @@ def run_fused_add_bwd_test(M: int, N: int, dtype: str = "f32"):
         dx = torch.empty((M, N), device="cuda", dtype=torch_dtype)
         dweight = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
         dres_out_arg = dres_out if dres_out is not None else torch.zeros((M, N), device="cuda", dtype=torch_dtype)
-        bwd_c = flyc.compile(
-            bwd_fn, residual_out, weight, dy, dres_out_arg, rstd, dx, dweight, M, stream
-        )
+        bwd_c = flyc.compile(bwd_fn, residual_out, weight, dy, dres_out_arg, rstd, dx, dweight, M, stream)
         dweight.zero_()
         bwd_c(residual_out, weight, dy, dres_out_arg, rstd, dx, dweight, M, stream)
         torch.cuda.synchronize()
@@ -810,14 +808,7 @@ def run_fused_add_autograd_test(M: int, N: int, dtype: str = "f32"):
     grad_ok = x3.grad is not None and tuple(x3.grad.shape) == tuple(x3.shape)
     print(f"  3D reshape: out_shape_ok={shape_ok} grad_shape_ok={grad_ok}")
 
-    ok = (
-        out_err < out_atol
-        and dx_err < dx_atol
-        and dres_err < dx_atol
-        and dw_err < dw_atol
-        and shape_ok
-        and grad_ok
-    )
+    ok = out_err < out_atol and dx_err < dx_atol and dres_err < dx_atol and dw_err < dw_atol and shape_ok and grad_ok
     print(f"  -> {'PASSED' if ok else 'FAILED'}")
     return ok
 
@@ -888,6 +879,26 @@ def test_fused_add_rmsnorm_dtype_mismatch():
             raise SystemExit("dtype mismatch was NOT rejected")
         except AssertionError:
             pass
+    print("  -> PASSED")
+
+
+@pytest.mark.multi_gpu
+def test_fused_add_rmsnorm_device_mismatch():
+    """Operands on different devices must be rejected (kernel binds to x.device)."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >= 2 GPUs")
+    print("=" * 80)
+    print("Running fused_add_rmsnorm device-mismatch guard Test")
+    print("=" * 80)
+    N = 256
+    x = torch.randn((4, N), device="cuda:0", dtype=DTYPE_BF16)
+    residual = torch.randn((4, N), device="cuda:0", dtype=DTYPE_BF16)
+    weight = torch.rand((N,), device="cuda:1", dtype=DTYPE_BF16)  # wrong device
+    try:
+        fused_add_rmsnorm(x, residual, weight)
+        raise SystemExit("device mismatch was NOT rejected")
+    except AssertionError:
+        pass
     print("  -> PASSED")
 
 

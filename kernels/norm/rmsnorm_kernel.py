@@ -1471,6 +1471,9 @@ if torch is not None:
         """Forward RMSNorm. Returns (out, rstd). eps is baked into the kernel."""
         assert x.dim() == 2, "rmsnorm_fwd expects a 2D (M, N) input"
         assert x.is_contiguous() and weight.is_contiguous(), "rmsnorm_fwd expects contiguous inputs"
+        # The kernel is compiled/launched on x.device (also the only device in the
+        # cache key); every operand pointer must live on that same device.
+        assert x.device == weight.device, f"x/weight must be on the same device, got {x.device}/{weight.device}"
         M, N = x.shape
         out = torch.empty_like(x)
         rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_rstd else None
@@ -1494,6 +1497,9 @@ if torch is not None:
         """
         assert x.dim() == 2, "rmsnorm_bwd expects a 2D (M, N) input"
         assert x.is_contiguous() and dout.is_contiguous(), "rmsnorm_bwd expects contiguous inputs"
+        assert (
+            x.device == weight.device == dout.device == rstd.device
+        ), "rmsnorm_bwd expects all tensors on the same device"
         M, N = x.shape
         dtype_str = _torch_dtype_to_str(x.dtype)
         dx = torch.empty_like(x)
@@ -1533,7 +1539,10 @@ if torch is not None:
         assert weight is not None, "PR 1 rmsnorm requires an explicit weight"
         N = weight.shape[-1]
         assert x.shape[-1] == N, f"x last dim {x.shape[-1]} != weight length {N}"
-        x_flat = x.reshape(-1, N)
+        # reshape() can return a non-contiguous view (e.g. from a strided slice);
+        # the kernel indexes rows by raw stride, so force contiguity here rather
+        # than relying only on the fwd assert (which vanishes under python -O).
+        x_flat = x.reshape(-1, N).contiguous()
         out_flat = RMSNormFunction.apply(x_flat, weight, eps)
         return out_flat.reshape(x.shape)
 
@@ -1574,6 +1583,10 @@ if torch is not None:
         assert (
             x.dtype == residual.dtype == weight.dtype
         ), f"x/residual/weight dtypes must match, got {x.dtype}/{residual.dtype}/{weight.dtype}"
+        # Only x.device gates compile/stream/cache; all operands must co-reside.
+        assert (
+            x.device == residual.device == weight.device
+        ), f"x/residual/weight must be on the same device, got {x.device}/{residual.device}/{weight.device}"
         M, N = x.shape
         out = torch.empty_like(x)
         residual_out = torch.empty_like(x)
@@ -1605,9 +1618,13 @@ if torch is not None:
         assert (
             added.dtype == weight.dtype == dout.dtype
         ), f"added/weight/dout dtypes must match, got {added.dtype}/{weight.dtype}/{dout.dtype}"
+        assert (
+            added.device == weight.device == dout.device == rstd.device
+        ), "fused_add_rmsnorm_bwd expects all tensors on the same device"
         if dresidual_out is not None:
             assert dresidual_out.is_contiguous(), "fused_add_rmsnorm_bwd expects contiguous dresidual_out"
             assert dresidual_out.dtype == added.dtype, "dresidual_out dtype must match added"
+            assert dresidual_out.device == added.device, "dresidual_out must be on the same device as added"
         M, N = added.shape
         dtype_str = _torch_dtype_to_str(added.dtype)
         if dresidual_out is None:
@@ -1660,8 +1677,10 @@ if torch is not None:
         N = weight.shape[-1]
         assert x.shape[-1] == N, f"x last dim {x.shape[-1]} != weight length {N}"
         assert x.shape == residual.shape, "x and residual must have the same shape"
-        x_flat = x.reshape(-1, N)
-        residual_flat = residual.reshape(-1, N)
+        # reshape() can return a non-contiguous view; force contiguity so the
+        # kernel's raw-stride row indexing stays correct even under python -O.
+        x_flat = x.reshape(-1, N).contiguous()
+        residual_flat = residual.reshape(-1, N).contiguous()
         if prenorm:
             out_flat, residual_out_flat = FusedAddRMSNormFunction.apply(x_flat, residual_flat, weight, eps, True)
             return out_flat.reshape(x.shape), residual_out_flat.reshape(x.shape)
