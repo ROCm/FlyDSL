@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-09T10:53:51Z",
+ "updated": "2026-07-09T11:12:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -68,11 +68,11 @@
    "branch": "feat/mxfp6-gemm",
    "event": "pull_request",
    "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003519674",
    "created_at": "2026-07-09T08:04:17Z",
-   "updated_at": "2026-07-09T08:05:30Z",
+   "updated_at": "2026-07-09T11:09:41Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -87,9 +87,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-09T08:05:30Z",
+     "started_at": "2026-07-09T11:09:40Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003519674/job/86069722126"
     },
@@ -199,11 +199,11 @@
    "branch": "worktree-pa-decode-run-compiled",
    "event": "pull_request",
    "title": "perf(pa): use _run_compiled for PA decode kernel launches",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28998207943",
    "created_at": "2026-07-09T06:15:29Z",
-   "updated_at": "2026-07-09T06:16:56Z",
+   "updated_at": "2026-07-09T11:09:31Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -227,10 +227,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-09T06:16:56Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T10:53:37Z",
+     "completed_at": "2026-07-09T11:09:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28998207943/job/86052616442"
     }
    ]
