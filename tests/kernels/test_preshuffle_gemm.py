@@ -566,19 +566,44 @@ def test_mfma_a6w4_preshuffle(
 # ── W4A8: MXFP8 (E4M3) A × MXFP4 (E2M1) B ─────────────────────────────────
 
 
+def _quant_a8w4(M, N, K, device):
+    """One MXFP8-A / MXFP4-B operand set (M/N padded to /32 for scale shuffle, A/scale
+    sliced back to real M -> ragged rows read OOB in the kernel). Returns flat bytes +ref."""
+
+    def _bytes(t):
+        return (t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)).contiguous().view(-1)
+
+    ap = torch.zeros((M + 31) // 32 * 32, K, device=device)
+    bp = torch.zeros((N + 31) // 32 * 32, K, device=device)
+    ap[:M] = torch.randn(M, K, device=device)
+    bp[:N] = torch.randn(N, K, device=device)
+
+    ac, sao, _ = fp4_utils.per_1x32_f8_quant(ap)
+    ac = ac[:M]
+    sa = fp4_utils.shuffle_scale_w4(sao, 1, False)
+    bq, sb, _ = fp4_utils.per_1x32_f4_quant(bp)
+    bq = bq[:N]
+    bs = fp4_utils.shuffle_weight_w4(bq, 16, False, False)
+    sbs = fp4_utils.shuffle_scale_w4(sb, 1, False)
+
+    a_deq = fp4_utils.fp8_e4m3_to_f32(ac) * fp4_utils.e8m0_to_f32(sao[:M].repeat_interleave(32, 1))
+    b_deq = fp4_utils.mxfp4_to_f32(bq) * fp4_utils.e8m0_to_f32(sb[:N].repeat_interleave(32, 1))
+    c_ref = torch.mm(a_deq, b_deq.T).float()
+    return _bytes(ac), _bytes(sa), _bytes(bs), _bytes(sbs), c_ref
+
+
 @pytest.mark.parametrize("out_dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("use_async_copy", [False, True], ids=["sync_copy", "async_copy"])
 @pytest.mark.parametrize(
     "M, N, K, tile_m, tile_n, tile_k",
     [
-        (64, 8192, 8192, 64, 128, 128),
-        (32, 8192, 8192, 32, 128, 256),
-        pytest.param(128, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
-        # Large M scales best with a small tile_m / wide tile_n (more blocks, fewer
-        # redundant A loads) — see the f8f4 tile sweep.
-        pytest.param(1024, 8192, 8192, 64, 512, 256, marks=pytest.mark.large_shape),
-        pytest.param(2048, 8192, 8192, 64, 512, 256, marks=pytest.mark.large_shape),
-        pytest.param(256, 4096, 14336, 128, 256, 256, marks=pytest.mark.large_shape),
+        # All M are ragged (not a multiple of 32) to exercise OOB row handling.
+        (62, 8192, 8192, 64, 128, 128),
+        (30, 8192, 8192, 32, 128, 256),
+        pytest.param(126, 8192, 8192, 64, 128, 256, marks=pytest.mark.large_shape),
+        pytest.param(1020, 8192, 8192, 64, 512, 256, marks=pytest.mark.large_shape),
+        pytest.param(2044, 8192, 8192, 64, 512, 256, marks=pytest.mark.large_shape),
+        pytest.param(254, 4096, 14336, 128, 256, 256, marks=pytest.mark.large_shape),
     ],
 )
 @pytest.mark.l2_device
@@ -620,73 +645,27 @@ def test_mfma_a8w4_preshuffle(
     print(f"✓ Compiled (waves_per_eu={_wpe}, async_copy={use_async_copy})")
 
     device = torch.device("cuda")
-    M_align_32 = (M + 31) // 32 * 32
-    N_align_32 = (N + 31) // 32 * 32
-
-    a_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
-    b_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
-    a_fp32_padded = torch.zeros(M_align_32, K, device=device, dtype=torch.float32)
-    b_fp32_padded = torch.zeros(N_align_32, K, device=device, dtype=torch.float32)
-    a_fp32_padded[:M] = a_fp32
-    b_fp32_padded[:N] = b_fp32
-
-    # A: MXFP8 E4M3, 1 byte/code (natural, no packing).
-    a_codes_full, scale_a_orig, _ = fp4_utils.per_1x32_f8_quant(a_fp32_padded)
-    a_codes = a_codes_full[:M]
-    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
-
-    # B: MXFP4 E2M1, identical to test_mfma_w4_flyc_preshuffle.
-    b_q, scale_b, _ = fp4_utils.per_1x32_f4_quant(b_fp32_padded)
-    b_q = b_q[:N]
-    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
-    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
-
-    # Reference: dequant(A) @ dequant(B).T in fp32.
-    a_deq = fp4_utils.fp8_e4m3_to_f32(a_codes) * fp4_utils.e8m0_to_f32(scale_a_orig[:M].repeat_interleave(32, dim=1))
-    b_deq = fp4_utils.mxfp4_to_f32(b_q) * fp4_utils.e8m0_to_f32(scale_b[:N].repeat_interleave(32, dim=1))
-    c_ref = torch.mm(a_deq, b_deq.T).to(torch.float32)
+    A, SA, B, SB, c_ref = _quant_a8w4(M, N, K, device)
 
     torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
     c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
-    _dummy_bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+    bias = torch.empty(0, dtype=torch.bfloat16, device=device)
+    stream = torch.cuda.current_stream()
 
-    def _to_bytes(t):
-        return t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)
+    def _args(c):
+        return (c.contiguous().view(-1), A, B, SA, SB, bias, M, N, stream)
 
-    def _a8w4_args(c, a, b, sa, sb):
-        return (
-            c.contiguous().view(-1),
-            _to_bytes(a).contiguous().view(-1),
-            _to_bytes(b).contiguous().view(-1),
-            _to_bytes(sa).contiguous().view(-1),
-            _to_bytes(sb).contiguous().view(-1),
-            _dummy_bias,
-            M,
-            N,
-            torch.cuda.current_stream(),
-        )
+    compiled_fn = flyc.compile(launch_fn, *_args(c_out))
 
-    compiled_fn = flyc.compile(launch_fn, *_a8w4_args(c_out, a_codes, b_shuffled, scale_a, scale_b_shuffled))
-
-    def launch_kernel(c, a, b, sa, sb):
-        compiled_fn(*_a8w4_args(c, a, b, sa, sb))
+    def launch_kernel(c):
+        compiled_fn(*_args(c))
 
     bench_iters = max(2, int(bench_iters))
-    _, us = run_perftest(
-        launch_kernel,
-        c_out,
-        a_codes,
-        b_shuffled,
-        scale_a,
-        scale_b_shuffled,
-        num_iters=bench_iters,
-        num_warmup=int(bench_warmup),
-    )
+    _, us = run_perftest(launch_kernel, c_out, num_iters=bench_iters, num_warmup=int(bench_warmup))
     torch.cuda.synchronize()
 
     assert verify_output(c_out.to(torch.float32), c_ref, rtol=0.1, atol=0.1)
 
-    # A: 1 byte/code (MXFP8); B: 0.5 byte/code (MXFP4).
     bytes_moved = M * K + (N * K) // 2 + M * N * 2 + (M + N) * (K // 32)
     tflops = (2 * M * N * K) / (us / 1e6) / 1e12
     tbps = bytes_moved / 1e12 / (us / 1e6)
@@ -697,47 +676,17 @@ def test_mfma_a8w4_preshuffle(
 
 
 def _make_a8w4_batch(batch, M, N, K, device):
-    """Quantize `batch` independent MXFP8-A / MXFP4-B GEMM operands.
-
-    Returns flat contiguous per-batch tensors (A, scale_a, B_shuffled, scale_b_shuffled)
-    plus the list of per-batch fp32 reference outputs.
-    """
-
-    def _to_bytes(t):
-        return t if t.dtype in (torch.uint8, torch.int8) else t.view(torch.uint8)
-
-    M32 = (M + 31) // 32 * 32
-    N32 = (N + 31) // 32 * 32
-    a_l, sa_l, b_l, sb_l, ref_l = [], [], [], [], []
-    for _ in range(batch):
-        a = torch.randn(M, K, device=device)
-        b = torch.randn(N, K, device=device)
-        ap = torch.zeros(M32, K, device=device)
-        bp = torch.zeros(N32, K, device=device)
-        ap[:M] = a
-        bp[:N] = b
-        ac, sao, _ = fp4_utils.per_1x32_f8_quant(ap)
-        ac = ac[:M]
-        sa = fp4_utils.shuffle_scale_w4(sao, 1, False)
-        bq, sb, _ = fp4_utils.per_1x32_f4_quant(bp)
-        bq = bq[:N]
-        bs = fp4_utils.shuffle_weight_w4(bq, 16, False, False)
-        sbs = fp4_utils.shuffle_scale_w4(sb, 1, False)
-        adq = fp4_utils.fp8_e4m3_to_f32(ac) * fp4_utils.e8m0_to_f32(sao[:M].repeat_interleave(32, 1))
-        bdq = fp4_utils.mxfp4_to_f32(bq) * fp4_utils.e8m0_to_f32(sb[:N].repeat_interleave(32, 1))
-        ref_l.append(torch.mm(adq, bdq.T).float())
-        a_l.append(_to_bytes(ac).contiguous().view(-1))
-        sa_l.append(_to_bytes(sa).contiguous().view(-1))
-        b_l.append(_to_bytes(bs).contiguous().view(-1))
-        sb_l.append(_to_bytes(sbs).contiguous().view(-1))
-    return (torch.cat(a_l), torch.cat(sa_l), torch.cat(b_l), torch.cat(sb_l), ref_l)
+    """`batch` operand sets concatenated per-batch -> flat (A, SA, B, SB) + ref list."""
+    cols = [_quant_a8w4(M, N, K, device) for _ in range(batch)]
+    A, SA, B, SB = (torch.cat([c[i] for c in cols]) for i in range(4))
+    return A, SA, B, SB, [c[4] for c in cols]
 
 
 @pytest.mark.parametrize(
     "batch, M, N, K, tile_m, tile_n, tile_k",
     [
-        (4, 64, 8192, 8192, 64, 128, 128),
-        (8, 32, 4096, 4096, 32, 128, 256),
+        (4, 62, 8192, 8192, 64, 128, 128),
+        (8, 30, 4096, 4096, 32, 128, 256),
     ],
 )
 @pytest.mark.l2_device
@@ -754,8 +703,7 @@ def test_mfma_a8w4_batch_preshuffle(
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
 ):
-    """Strided-batched W4A8 GEMM: verify vs fp32 reference AND vs looping the
-    single-GEMM kernel `batch` times, then compare the two launch strategies."""
+    """Strided-batched W4A8: verify vs fp32 ref and byte-identical to loop-of-single."""
     if get_rocm_arch() != "gfx950":
         pytest.skip(f"FP8/FP4 GEMM requires gfx950, got {get_rocm_arch()}")
 
@@ -771,7 +719,6 @@ def test_mfma_a8w4_batch_preshuffle(
     a_len, sa_len = A.numel() // batch, SA.numel() // batch
     b_len, sb_len = B.numel() // batch, SB.numel() // batch
 
-    # ── Batched launch (grid.z = batch) ──
     fn_b = compile_mxfp8_gemm(N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, batch=batch)
     C_b = torch.zeros(batch * M * N, dtype=torch.bfloat16, device=device)
 
@@ -790,7 +737,6 @@ def test_mfma_a8w4_batch_preshuffle(
     for z in range(batch):
         assert verify_output(C_bv[z], ref_l[z], rtol=0.1, atol=0.1), f"batch {z} mismatch vs reference"
 
-    # ── Loop of single-GEMM launches (batch=1) ──
     fn_1 = compile_mxfp8_gemm(N=N, K=K, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k, batch=1)
     C_1 = torch.zeros(batch * M * N, dtype=torch.bfloat16, device=device)
 
@@ -816,7 +762,6 @@ def test_mfma_a8w4_batch_preshuffle(
     launch_loop(C_1)
     torch.cuda.synchronize()
 
-    # Batched output must be identical to looping the single-GEMM kernel.
     max_diff = (C_1.to(torch.float32) - C_b.to(torch.float32)).abs().max().item()
     assert max_diff == 0.0, f"batched vs loop-of-single mismatch: max_abs_diff={max_diff}"
 

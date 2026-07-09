@@ -771,13 +771,8 @@ def per_1x32_f6_quant(x):
 
 
 def per_1x32_f8_quant(x):
-    """Per-1x32 MXFP8 (E4M3) quant of an A operand (1 byte/code, no packing).
-
-    Returns:
-      a_codes: (M, K) uint8 - raw E4M3FN bytes, the exact layout the kernel reads.
-      scale:   (M, K//32) e8m0 (unshuffled; caller applies shuffle_scale_w4).
-      a_codes: same tensor again (for the dequant reference via fp8_e4m3_to_f32).
-    """
+    """Per-1x32 MXFP8 (E4M3) quant of an A operand -> (codes uint8 (M,K), scale e8m0
+    (M,K//32) unshuffled, codes again for the dequant ref)."""
     block = 32
     F8E4M3_MAX = 448.0
     dtypeMax = 2.0 ** int(torch.log2(torch.tensor(F8E4M3_MAX, dtype=torch.float32)).item())

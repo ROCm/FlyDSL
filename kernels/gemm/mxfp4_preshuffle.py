@@ -88,20 +88,12 @@ def compile_mxfp4_gemm(
 ):
     """Compile MXFP4/MXFP6/MXFP8 preshuffle GEMM -> fn(C, A, B, scale_a, scale_b, bias, M, N, stream).
 
-    a_dtype='fp4': A is MXFP4 (E2M1), 2 codes/byte.
-    a_dtype='fp6': A is MXFP6 (E2M3), FP8-padded (pack_fp6_e2m3: 24 B + 8 B zero pad per
-        K=32 chunk); gfx950 only (needs mfma.scale.f32.16x16x128.f8f6f4).
-    a_dtype='fp8': A is MXFP8 (E4M3), 1 byte/code (natural, no packing); gfx950 only.
-    B: CK-preshuffled MXFP4. scale_a/scale_b are e8m0; C is (M, N) out_dtype; bias unused.
-
-    batch>1: strided-batched GEMM. All batches share M/N/K; C/A/B/scale_a/scale_b are
-    contiguous per-batch and the batch index rides grid.z. batch=1 is the plain GEMM
-    (no batch math emitted, byte-identical codegen).
+    a_dtype 'fp4'/'fp6'/'fp8' = MXFP4 (2 codes/byte) / MXFP6 (FP8-padded, gfx950) /
+    MXFP8 E4M3 (1 byte/code, gfx950). B is CK-preshuffled MXFP4; scales are e8m0; bias
+    unused. batch>1 = strided-batched over grid.z (batch=1 emits no batch math).
     """
     if a_dtype not in _A_ELEM:
         raise ValueError(f"a_dtype must be one of {sorted(_A_ELEM)}; got {a_dtype!r}")
-    if batch < 1:
-        raise ValueError(f"batch must be >= 1; got {batch}")
     BM, BN, BK = tile_m, tile_n, tile_k
     if BK not in (128, 256) or K % BK != 0:
         raise ValueError(f"tile_k must be 128 or 256 dividing K; got tile_k={BK}, K={K}")
@@ -109,14 +101,18 @@ def compile_mxfp4_gemm(
         raise ValueError(f"K must be a multiple of 256 (e8m0 scale chunk); got K={K}")
     out_elem = BFloat16 if out_dtype == "bf16" else Float16
 
-    # A dtype-specific row sizes. fp6/fp8 are 1 byte/code (fp6 FP8-padded); fp4 is 2/byte.
-    if a_dtype in ("fp6", "fp8"):
-        a_row_bytes = K
-        A_ROW_B = BK
-    else:
-        # fp4: 2 codes/byte
-        a_row_bytes = K // 2  # A bytes per full M-row
-        A_ROW_B = BK // 2  # A bytes per row in a K-tile
+    # Row sizes + read_a fragment layout (i32 units). fp6/fp8: two ds_read_b128 halves
+    # A_HI_OFF apart -> i32[A_NDW]; fp4: one -> i32[4]. A_GK_I32/A_KH_I32 = per-group
+    # (gk=lane//16) / per-k-half strides.
+    if a_dtype == "fp8":
+        a_row_bytes, A_ROW_B = K, BK
+        A_GK_I32, A_KH_I32, A_HI_OFF, A_NDW = 4, 32, 16, 8
+    elif a_dtype == "fp6":
+        a_row_bytes, A_ROW_B = K, BK
+        A_GK_I32, A_KH_I32, A_HI_OFF, A_NDW = 8, 32, 4, 6
+    else:  # fp4: 2 codes/byte
+        a_row_bytes, A_ROW_B = K // 2, BK // 2
+        A_GK_I32, A_KH_I32 = 4, 16
 
     # Cooperative LDS A tile (row-major [m][col]) shared by the 4 N-waves -> no 4x
     # redundant A gmem reads. fp4/fp6 = 2/1 codes/byte.
@@ -187,9 +183,8 @@ def compile_mxfp4_gemm(
         bx_m = bid_x * fx.Int32(BM)
         by_n = bid_y * fx.Int32(BN)
 
-        # Strided-batched: shift each operand's base to batch bid_z. Per-batch num_records
-        # (below) keep the ragged-M OOB bounds correct within each batch. batch=1 emits no
-        # batch math (byte-identical codegen).
+        # Strided-batched: shift each operand base to batch bid_z (per-batch num_records
+        # below keep ragged-M OOB correct within each batch).
         if const_expr(batch > 1):
             bz = fx.Int64(bid_z)
             arg_a = fx.Int64(arg_a) + bz * (fx.Int64(i32_m) * fx.Int64(a_row_bytes))
@@ -198,8 +193,7 @@ def compile_mxfp4_gemm(
             arg_scale_a = fx.Int64(arg_scale_a) + bz * a_sc_stride
             arg_scale_b = fx.Int64(arg_scale_b) + bz * fx.Int64((N // 32) * _scale_chunk_dw * 4)
 
-        # A: cooperative gmem->LDS then ds_read the MFMA operands. Bound to the actual
-        # M rows so blocks past M read OOB -> 0 instead of faulting (ragged M).
+        # A: cooperative gmem->LDS then ds_read, bound to real M rows (ragged M OOB -> 0).
         a_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
         _i8g = fx.PointerType.get(T.i8, address_space=fx.AddressSpace.Global, alignment=16)
         a_nrec = fx.Int64(i32_m) * fx.Int64(a_row_bytes)
@@ -265,56 +259,23 @@ def compile_mxfp4_gemm(
         def read_a(parity):
             base_iter = _iter_of(parity)
             av = []
-            if const_expr(a_dtype == "fp8"):
-                # fp8: 32 codes/lane = i32[8], but the 16x16x128 f8 ABI splits them into
-                # two 16-code halves 64 K apart (K = kh*128 + gk*16 and +64+gk*16), matching
-                # the fp8 MFMA operand read in fp8_gemm_4wave.py.
-                for mi in range_constexpr(m_chunks):
-                    for kh in range_constexpr(k_halves):
-                        off_lo = (
-                            (fx.Int32(mi * 16) + lane_mod_16) * fx.Int32(A_ROW_I32)
-                            + fx.Int32(kh * 32)
-                            + lane_div_16 * fx.Int32(4)
-                        )
-                        t_lo = fx.make_rmem_tensor(4, Int32)
-                        t_hi = fx.make_rmem_tensor(4, Int32)
-                        fx.copy(lds_copy, _lds_view(base_iter, off_lo), t_lo)
-                        fx.copy(lds_copy, _lds_view(base_iter, off_lo + fx.Int32(16)), t_hi)
-                        v_lo = Vec(fx.memref_load_vec(t_lo))
-                        v_hi = Vec(fx.memref_load_vec(t_hi))
-                        t = fx.make_rmem_tensor(8, Int32)
-                        t.store(Vec.from_elements([v_lo[i] for i in range(4)] + [v_hi[i] for i in range(4)], Int32))
-                        av.append(t)
-            elif const_expr(a_dtype == "fp6"):
-                # Read 8 DWORDs per (mi, kh) over the 32-byte per-lane region, store the
-                # first 6 into i32[6] (discard the FP8-padding zero DWORDs).
-                for mi in range_constexpr(m_chunks):
-                    for kh in range_constexpr(k_halves):
-                        off = (
-                            (fx.Int32(mi * 16) + lane_mod_16) * fx.Int32(A_ROW_I32)
-                            + fx.Int32(kh * 32)
-                            + lane_div_16 * fx.Int32(8)
-                        )
-                        t_lo = fx.make_rmem_tensor(4, Int32)
-                        t_hi = fx.make_rmem_tensor(4, Int32)
-                        fx.copy(lds_copy, _lds_view(base_iter, off), t_lo)
-                        fx.copy(lds_copy, _lds_view(base_iter, off + fx.Int32(4)), t_hi)
-                        v_lo = Vec(fx.memref_load_vec(t_lo))
-                        v_hi = Vec(fx.memref_load_vec(t_hi))
-                        t = fx.make_rmem_tensor(6, Int32)
-                        t.store(Vec.from_elements([v_lo[i] for i in range(4)] + [v_hi[i] for i in range(2)], Int32))
-                        av.append(t)
-            else:
-                # fp4: one 128-bit LDS read per (mi, kh) -> i32[4]
-                # Each lane's K=128 A operand = 16 B (k-group strides 16 B, 128-K half 64 B).
-                for mi in range_constexpr(m_chunks):
-                    for kh in range_constexpr(k_halves):
-                        off = (
-                            (fx.Int32(mi * 16) + lane_mod_16) * fx.Int32(A_ROW_I32)
-                            + fx.Int32(kh * 16)
-                            + lane_div_16 * fx.Int32(4)
-                        )
+            for mi in range_constexpr(m_chunks):
+                for kh in range_constexpr(k_halves):
+                    off = (
+                        (fx.Int32(mi * 16) + lane_mod_16) * fx.Int32(A_ROW_I32)
+                        + fx.Int32(kh * A_KH_I32)
+                        + lane_div_16 * fx.Int32(A_GK_I32)
+                    )
+                    if const_expr(a_dtype == "fp4"):
                         av.append(_read16(base_iter, off))
+                    else:
+                        # fp6/fp8: pack two halves into i32[A_NDW]. fp8's two 16-code halves
+                        # sit 64 K apart (f8f6f4 ABI); fp6 drops the 2 FP8-pad zeros.
+                        lo = Vec(fx.memref_load_vec(_read16(base_iter, off)))
+                        hi = Vec(fx.memref_load_vec(_read16(base_iter, off + fx.Int32(A_HI_OFF))))
+                        t = fx.make_rmem_tensor(A_NDW, Int32)
+                        t.store(lo.shuffle(hi, list(range(A_NDW))))
+                        av.append(t)
             return av
 
         n_col_base = by_n + wave * fx.Int32(BN // 4)
@@ -580,16 +541,10 @@ def compile_mxfp4_gemm(
 
 
 def compile_mxfp6_gemm(**kw):
-    """MXFP6 (E2M3) A × MXFP4 (E2M1) B preshuffle GEMM (gfx950 only).
-
-    Thin wrapper over compile_mxfp4_gemm(a_dtype='fp6'); same signature/args.
-    """
+    """MXFP6 (E2M3) A × MXFP4 B preshuffle GEMM (gfx950); wraps a_dtype='fp6'."""
     return compile_mxfp4_gemm(a_dtype="fp6", **kw)
 
 
 def compile_mxfp8_gemm(**kw):
-    """MXFP8 (E4M3) A × MXFP4 (E2M1) B preshuffle GEMM (gfx950 only).
-
-    Thin wrapper over compile_mxfp4_gemm(a_dtype='fp8'); same signature/args.
-    """
+    """MXFP8 (E4M3) A × MXFP4 B preshuffle GEMM (gfx950); wraps a_dtype='fp8'."""
     return compile_mxfp4_gemm(a_dtype="fp8", **kw)
