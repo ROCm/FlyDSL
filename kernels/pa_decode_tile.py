@@ -10,7 +10,9 @@ FlyDSL's high-level tile/layout API (``make_buffer_tensor`` + ``zipped_divide`` 
 intrinsics and hand-scheduled MFMA.  It deliberately trades performance for
 clarity and is scoped to a single configuration:
 
-* per-tensor fp8 K/V quantization (scalar ``key_scale`` / ``value_scale``),
+* per-tensor fp8 K/V quantization (``key_scale`` / ``value_scale``, 1-element
+  device tensors read in-kernel via a scalar buffer load, like
+  ``pa_decode_ps_kernel``),
 * ``query_length == 1`` (pure decode, one query token per sequence),
 * no kv-varlen, no sliding window.
 
@@ -107,9 +109,12 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, T
 from flydsl.expr.vector import ReductionOp
+from kernels import dpp_utils
 from kernels.utils import (
+    cdiv,
     exp2_amdgcn_scalar,
     exp2_f32_fast,
+    rcp_f32,
 )
 
 MFMA_MNK = 16  # M = N = 16 for the MMA atom
@@ -128,6 +133,7 @@ def compile_pa_decode_tile(
     block_size: int,
     num_partitions: int = 1,
     softmax_scale: float | None = None,
+    query_dtype: str = "f16",
 ):
     """Build the tile-programming PA-decode kernel + launch wrapper.
 
@@ -147,9 +153,21 @@ def compile_pa_decode_tile(
     ``pa_decode_ps_kernel``'s own head_dim constraint, since the raw
     dwordx4-load addressing this kernel uses has a 64-element minimum
     granularity.
+
+    ``query_dtype`` selects the query tensor's 16-bit float element type
+    (``"f16"`` or ``"bf16"``), matching ``pa_decode_ps_kernel``'s own
+    ``query_input_dtype`` flag. It's a compile-time constant (not a kernel
+    argument) since it picks the load's element type at trace time; each
+    distinct value gets its own compiled kernel via this function's
+    ``lru_cache``.
     """
     assert head_dim % MFMA_MNK == 0, f"head_dim {head_dim} must be a multiple of {MFMA_MNK}"
     assert block_size in (16, 64), f"pa_decode_tile only supports block_size in (16, 64), got {block_size}"
+    assert query_dtype in (
+        "f16",
+        "bf16",
+    ), f"pa_decode_tile only supports query_dtype in ('f16', 'bf16'), got {query_dtype}"
+    Q_DTYPE = fx.BFloat16 if query_dtype == "bf16" else fx.Float16
     # head_dim must be a multiple of 64: same floor as pa_decode_ps_kernel's own
     # head_dim constraint (a raw dwordx4 fp8 fetch is 16B = 16 elements; the
     # smallest per-lane-group unit this kernel's addressing scheme divides
@@ -192,7 +210,8 @@ def compile_pa_decode_tile(
     # per row) must stay fixed at 16 -- it's tied to `lane16`'s role as the
     # width of the per-row absmax butterfly reduction (itself MFMA_MNK-tied),
     # not to head_dim -- so QCHUNK is what scales with head_dim instead.
-    QCHUNK = HEAD // 16  # f16 elements per lane's load chunk (8 for HEAD=128, 4 for HEAD=64)
+    NQCHUNK = 16
+    QCHUNK = HEAD // NQCHUNK  # f16 elements per lane's load chunk (8 for HEAD=128, 4 for HEAD=64)
 
     # PV output-dim chunking: VHE_CHUNKS * NWARP * MFMA_MNK covers HEAD (like
     # RGROUP_QUARTERS above, but for PV's N-dimension instead of QK's
@@ -262,8 +281,8 @@ def compile_pa_decode_tile(
         value_cache_ptr: fx.Tensor,  # [num_blocks, num_kv_heads, block_size//16, HEAD, 16] (blocked, see module docstring)
         block_tables_ptr: fx.Tensor,  # [num_seqs, max_blocks_per_seq]
         context_lengths_ptr: fx.Tensor,  # [num_seqs]
-        key_scale: fx.Float32,
-        value_scale: fx.Float32,
+        key_scale_ptr: fx.Tensor,  # [1] per-tensor fp8 K dequant scale
+        value_scale_ptr: fx.Tensor,  # [1] per-tensor fp8 V dequant scale
         max_blocks_per_seq: Int32,
         num_q_heads: Int32,
     ):
@@ -310,10 +329,11 @@ def compile_pa_decode_tile(
 
         _k_load_fp8x16 = _make_flat_loader(key_cache_ptr, FP8, 16, fx.UniversalCopy128b())
         _v_load_fp8x16 = _make_flat_loader(value_cache_ptr, FP8, 16, fx.UniversalCopy128b())
-        # QCHUNK f16 elements = QCHUNK*16 bits per lane's load (128 bits for
-        # QCHUNK=8 at HEAD=128, 64 bits for QCHUNK=4 at HEAD=64).
+        # QCHUNK 16-bit float (f16 or bf16, per Q_DTYPE) elements = QCHUNK*16
+        # bits per lane's load (128 bits for QCHUNK=8 at HEAD=128, 64 bits for
+        # QCHUNK=4 at HEAD=64).
         _q_copy_op = fx.rocdl.BufferCopy128b() if QCHUNK == 8 else fx.rocdl.BufferCopy64b()
-        _q_load_f16chunk = _make_flat_loader(query_ptr, fx.Float16, QCHUNK, _q_copy_op)
+        _q_load_chunk = _make_flat_loader(query_ptr, Q_DTYPE, QCHUNK, _q_copy_op)
         _ctxlen_load = _make_flat_loader(context_lengths_ptr, fx.Int32, 1, fx.rocdl.BufferCopy32b())
 
         def _k_load16(byte_off):
@@ -324,6 +344,20 @@ def compile_pa_decode_tile(
 
         context_len = fx.Int32(_ctxlen_load(seq)[0])
         bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, max_size=True)
+        # Per-tensor K/V scales are uniform across the whole launch (same
+        # address for every lane) -- route through a scalar buffer load so it
+        # lands once in an SGPR and broadcasts for free, like
+        # `_load_phys_scalar`'s block-table lookup below, and matching how
+        # `pa_decode_ps_kernel` reads its own per-tensor `key_scale`/
+        # `value_scale` tensors.
+        ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
+        vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
+        key_scale = fx.Int32(
+            buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
+        ).bitcast(fx.Float32)
+        value_scale = fx.Int32(
+            buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1, is_scalar=True)
+        ).bitcast(fx.Float32)
 
         # This CTA only walks its partition's slice of the TILE_TOK-blocks, so the
         # context is parallelized across grid.z CTAs (more CUs for low batch).
@@ -331,8 +365,8 @@ def compile_pa_decode_tile(
         # no dependency on anything below) so the K prefetch that needs it can
         # also be hoisted before the Q-quantization barrier -- see the K-ops
         # section below for why.
-        num_tiles = (context_len + (TILE_TOK - 1)) // TILE_TOK
-        tiles_per_part = (num_tiles + (NP - 1)) // NP
+        num_tiles = cdiv(context_len, TILE_TOK)
+        tiles_per_part = cdiv(num_tiles, NP)
         part_start = part * tiles_per_part
         part_end_raw = part_start + tiles_per_part
         part_end = arith.select(part_end_raw < num_tiles, part_end_raw, num_tiles)
@@ -457,7 +491,8 @@ def compile_pa_decode_tile(
         # whole warp); at block_size=16, local_tok//16 == warp (page depends on
         # (a, warp), shared by all 64 lanes of that warp) -- either way this is
         # one `_load_phys` per (thread's own) warp per `a`, not per-lane.
-        c_nhgroup = HEAD // 16  # total 16-element head-chunks in the cache layout
+        # == HEAD // 16 (same formula as QCHUNK -- reused rather than recomputed).
+        c_nhgroup = QCHUNK  # total 16-element head-chunks in the cache layout
         local_tok = warp * c16 + lane16  # 0..63: this thread's token within a 64-token chunk
 
         def _k_page(base_page, a):
@@ -489,7 +524,23 @@ def compile_pa_decode_tile(
             # confirmed via ATT trace to be the dominant stall (~49% of all
             # cycles) once block_size shrank below TILE_TOK. Batching the
             # loads lets their latencies overlap instead of serializing.
-            phys_list = [_load_phys_scalar(_k_page(base_page, a)) for a in range_constexpr(NCHUNK)]
+            #
+            # At block_size=64 (PAGES_PER_CHUNK=1), `_k_page(base_page, a) ==
+            # base_page + a` for every `a` -- NCHUNK consecutive block-table
+            # entries -- so one wide `vec_width=NCHUNK` scalar load fetches all
+            # of them in a single s_buffer_load_dwordx4 instead of NCHUNK
+            # separate s_buffer_load_dword instructions (confirmed via LLVM
+            # IR), matching pa_decode_ps_kernel's own
+            # `_pa_small_block_stage_phys_blocks`, which does the same
+            # single-wide-load batching. At block_size=16 (PAGES_PER_CHUNK=4),
+            # `_k_page`'s per-`a` addresses are PAGES_PER_CHUNK apart (not
+            # consecutive), so they can't be folded into one contiguous wide
+            # load this way; keep the per-`a` loop there.
+            if const_expr(PAGES_PER_CHUNK == 1):
+                phys_vec = fx.Vector(_load_phys_scalar(base_page, NCHUNK))
+                phys_list = [fx.Int32(phys_vec[a]) for a in range_constexpr(NCHUNK)]
+            else:
+                phys_list = [_load_phys_scalar(_k_page(base_page, a)) for a in range_constexpr(NCHUNK)]
             flat = []
             for a in range_constexpr(NCHUNK):
                 flat.extend(_k_ops(phys_list[a]))
@@ -587,34 +638,52 @@ def compile_pa_decode_tile(
         # row's 16 chunks while the other ~240 threads idled at the barrier --
         # that idle wait was confirmed via ATT trace to cost ~7-8% of all
         # kernel stall cycles at bs=128/ctx=16384.
-        NQCHUNK = HEAD // QCHUNK
-        assert NQCHUNK == 16, "Q-quant lane assignment requires HEAD == 16 * QCHUNK"
 
         qh_local = warp * 4 + rgroup  # 0..15: this thread's query row
 
         if qh_local < GS:
             qh0 = kv_h * GS + qh_local
-            row_byte0 = (seq * num_q_heads + qh0) * (HEAD * 2)  # f16 = 2B/elem
+            row_byte0 = (seq * num_q_heads + qh0) * (HEAD * 2)  # 16-bit float = 2B/elem
             chunk_off = row_byte0 + lane16 * (QCHUNK * 2)
-            q_chunk_f16 = _q_load_f16chunk(chunk_off // 2)  # byte offset -> f16-element index
+            q_chunk = _q_load_chunk(chunk_off // 2)  # byte offset -> element index
 
-            # local absmax over this thread's own QCHUNK elements, then butterfly
-            # reduce over the 16 lanes owning this same row (fixed warp/rgroup,
-            # lane16 varies) -- fp16->fp32 is monotonic for finite values, so
-            # comparing in f16 and only widening the final scalar to f32 avoids
-            # feeding a full-vector fpext into a reduce (which would otherwise
-            # force the backend to scalarize into per-element v_cvt_f32_f16_sdwa
-            # instead of packed v_cvt_pk_f32_f16).
-            local_absmax_f16 = fmath.absf(q_chunk_f16).reduce(ReductionOp.MAX)
-            for sh in (1, 2, 4, 8):
-                local_absmax_f16 = local_absmax_f16.maximumf(local_absmax_f16.shuffle_xor(sh, c16))
-            absmax = local_absmax_f16.to(fx.Float32)
-            # per-row symmetric fp8 quantization: q_scale = absmax / FP8_MAX
+            # local absmax over this thread's own QCHUNK elements (kept in
+            # Q_DTYPE: widening to f32 is monotonic for finite values in both
+            # f16 and bf16, so comparing at the native width and only
+            # widening the scalar result to f32 avoids feeding a full-vector
+            # fpext into a reduce, which would otherwise force the backend to
+            # scalarize into per-element conversions instead of a packed one
+            # -- for f16 specifically, packed v_cvt_pk_f32_f16 vs scalarized
+            # v_cvt_f32_f16_sdwa; bf16->f32 widening is even cheaper, a plain
+            # left-shift, so this structure is at worst neutral there), then a
+            # butterfly reduce over the 16 lanes owning this same row (fixed
+            # warp/rgroup, lane16 varies).
+            #
+            # The cross-lane reduce uses `dpp_utils.dpp_xor_f32` (raw
+            # `llvm.amdgcn.update.dpp.i32`), matching pa_decode_ps_kernel's own
+            # analogous per-row Q-absmax reduction exactly (see
+            # `_finish_q_fragments` in pa_decode_fp8.py) -- not the DSL's
+            # generic `shuffle_xor`. DPP executes in the VALU crossbar with no
+            # LDS/DS-unit involvement at all, one level cheaper than even the
+            # `ds_swizzle` path `shuffle_xor(sh, WAVE)` gets for a 16-lane XOR
+            # (confirmed via LLVM IR: `shuffle_xor` at width=c16 emits 4x
+            # mbcnt+ds_bpermute; at width=WAVE it emits ds_swizzle; dpp_xor_f32
+            # emits update.dpp directly, no ds_swizzle/ds_bpermute/mbcnt at all).
+            local_absmax = fmath.absf(q_chunk).reduce(ReductionOp.MAX)
+            absmax = local_absmax.to(fx.Float32)
+            for sh in (8, 4, 2, 1):
+                absmax = absmax.maximumf(dpp_utils.dpp_xor_f32(absmax, sh))
+            # per-row symmetric fp8 quantization: q_scale = absmax / FP8_MAX.
+            # HW reciprocal approximation (rcp_f32, same helper
+            # pa_decode_ps_kernel uses for this exact quantity -- see
+            # `inv_query_scale` in `_finish_q_fragments`) instead of a full
+            # IEEE division: its ULP-level error is negligible next to the
+            # fp8 quantization noise this kernel already carries.
             q_scale = absmax * fx.Float32(1.0 / FP8_MAX)
-            inv = fx.Float32(1.0) / q_scale.maximumf(fx.Float32(1e-20))
+            inv = fx.Float32(rcp_f32(q_scale.maximumf(fx.Float32(1e-20))))
             inv_b = fx.Vector.from_elements([inv], dtype=fx.Float32).broadcast_to(QCHUNK)
 
-            q_scaled_chunk = q_chunk_f16.to(fx.Float32) * inv_b
+            q_scaled_chunk = q_chunk.to(fx.Float32) * inv_b
             _st_words(
                 sQ_off + qh_local * HEAD + lane16 * QCHUNK,
                 _f32_to_fp8_words(q_scaled_chunk),
@@ -723,9 +792,6 @@ def compile_pa_decode_tile(
                     ops.extend([w[0], w[1]])
             return ops  # NVOPS i64, the 64-token contiguous run for this head
 
-        def _v_ops_from_phys_row(phys_row):
-            return [_v_ops(phys_row, vh) for vh in range_constexpr(VHE_CHUNKS)]
-
         # O is carried in registers across tiles (one VHE_CHUNKS-list of PV
         # C-fragment vectors), rescaled by the softmax correction each tile.
         # `m` (the running row max) is ALSO carried in registers now -- every
@@ -741,13 +807,8 @@ def compile_pa_decode_tile(
             v_page_cur = [ostate[3 + i] for i in range_constexpr(PAGES_PER_CHUNK)]  # this tile's V pages
             m_prev = ostate[3 + PAGES_PER_CHUNK]  # this thread's own running max, carried from last tile
             l_prev = ostate[4 + PAGES_PER_CHUNK]  # this thread's own running denom, carried from last tile
-            tt_i32 = fx.Int32(arith.index_cast(T.i32, tt))
+            tt_i32 = fx.Int32(tt)
             tok0, _ = _tile_tok0_and_page(tt_i32)
-
-            # ---- hoist raw dwordx4 V loads BEFORE QK so their DMA hides behind QK
-            # + softmax (production loads V early too); consumed by the PV MMA.
-            # `v_page_cur` was prefetched last iteration (see below). ----
-            v_cur = _v_ops_from_phys_row(v_page_cur)
 
             # ---- QK in TLOOP chunks: NCHUNK raw MFMAs -> f32x4/lane ----
             # Each chunk accumulates the N_SUBCHUNKS head-quarter k_steps (this
@@ -770,10 +831,25 @@ def compile_pa_decode_tile(
             # there is no same-page case worth special-casing -- every tile
             # re-derives its own page(s) fresh via `_k_ops_flat`.
             #
+            # (Issuing this before the QK MFMAs instead -- so the load overlaps
+            # QK too, not just softmax+PV -- was tried: `_k_ops_flat` has no
+            # dependency on the QK MFMAs' output, so it's legal, but it
+            # extended k_next's live range back across the whole QK MFMA loop.
+            # The compiler responded by flipping to AGPR-form MFMA with far
+            # higher combined register pressure (VGPR 16 + AGPR 128 = 144 vs.
+            # 112 here), dropping occupancy 4 -> 3 waves/SIMD, and measured
+            # ~9.5% *slower* end-to-end despite the extra hiding window --
+            # same failure mode as V's analogous attempt below. Reverted.)
+            #
             # (V is deliberately NOT carried the same way: an earlier attempt
             # at prefetching v_next one tile ahead, mirroring k_next, pushed
             # VGPR usage up ~20% -- 136 -> 164 -- and measured *slower* despite
-            # the extra hiding time, so V stays hoisted at tile-start instead.)
+            # the extra hiding time. V's own load is now deferred to right
+            # before its PV use instead -- see the PV loop below -- which
+            # cuts peak VGPR far more (132 -> 112, crossing the 512//132==3
+            # -> 512//112==4 waves/SIMD occupancy boundary) and measured
+            # ~10% *faster* despite losing the QK+softmax hiding window V's
+            # raw loads used to get from being hoisted up here.)
             #
             # On a partition's LAST tile there is no next tile to prefetch, so
             # skip the load with a real conditional (not `arith.select`, which
@@ -811,7 +887,6 @@ def compile_pa_decode_tile(
             # fragments); the mask is a cheap scalar threshold (token = a*64 + base + r
             # < n_valid  <=>  (a*64+r) < n_valid - base).
             c16 = 16
-            c_w = WAVE
             qh = lane - (lane // c16) * c16  # qhead = lane % 16
             l16g = lane // c16  # 0..3 lane-group within the warp
             scale = scale_qk * _ld1(sQscale_off, qh)  # per-qhead positive score scale
@@ -833,9 +908,12 @@ def compile_pa_decode_tile(
             for a in range_constexpr(NCHUNK):
                 pm = pm.maximumf(masked_chunks[a].reduce(ReductionOp.MAX))
             for sh in (16, 32):
-                pm = pm.maximumf(pm.shuffle_xor(sh, c_w))
-            if l16g == 0:  # one lane per (qhead, warp)
-                _st_lw(sLmax_off, qh, warp, pm * scale)
+                pm = pm.maximumf(pm.shuffle_xor(sh, WAVE))
+            # pa_decode_ps_kernel's equivalent store (`_cross_warp_softmax_and_prob_pack`)
+            # is unconditional -- all 4 lanes sharing this qhead (l16g=0..3) already
+            # hold the identical post-shuffle_xor `pm`, so this is a harmless
+            # same-value redundant write, not a race.
+            _st_lw(sLmax_off, qh, warp, pm * scale)
             gpu.barrier()
 
             # Read back next tile's V page-index row now that the barrier
@@ -866,6 +944,7 @@ def compile_pa_decode_tile(
             # lane owns in chunk `a` (token_base = a*TOK_CHUNK + warp*16 + l16g*4), so
             # a direct store replaces the make_fragment_C/tiled_copy_C round trip.
             base4 = 4
+            words = []
             for a in range_constexpr(NCHUNK):
                 # HW exp2 intrinsic (exp2_f32_fast) instead of MLIR's generic
                 # math.exp2 (a polynomial approximation whose edge-case handling
@@ -873,12 +952,19 @@ def compile_pa_decode_tile(
                 # attribution) -- matches ps's own exp2_f32_fast usage.
                 Pa = fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b))
                 ls = ls + Pa.reduce(ReductionOp.ADD)
-                word = _f32_to_fp8_words(Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32))[0]
-                token_base = (a * TOK_CHUNK) + warp * c16 + l16g * base4
-                p_off = sP_off + qh * TILE_TOK + token_base
-                _view(p_off, fx.Int32, fx.make_layout(1, 1), 4).store(fx.Vector.from_elements([word], dtype=fx.Int32))
+                words.append(_f32_to_fp8_words(Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32))[0])
+            # One strided vector store (stride = TOK_CHUNK bytes = TOK_CHUNK/4
+            # Int32 elements, matching consecutive `a`'s token_base spacing)
+            # instead of NCHUNK separate 4-byte stores -- the backend packs
+            # the 4 logical stores into 2 `ds_write2_b32` instructions instead
+            # of 3 (1 solo + 1 paired + 1 solo) for the old per-`a` stores,
+            # with no VGPR cost (confirmed via ISA dump: 132 either way).
+            p_off0 = sP_off + qh * TILE_TOK + warp * c16 + l16g * base4
+            _view(p_off0, fx.Int32, fx.make_layout(NCHUNK, TOK_CHUNK // 4), 4).store(
+                fx.Vector.from_elements(words, dtype=fx.Int32)
+            )
             for sh in (16, 32):
-                ls = ls + ls.shuffle_xor(sh, c_w)
+                ls = ls + ls.shuffle_xor(sh, WAVE)
             if l16g == 0:
                 _st_lw(sLsum_off, qh, warp, ls)
                 if warp == 0:
@@ -924,9 +1010,18 @@ def compile_pa_decode_tile(
             corr_vec = _view(corr_off, fx.Float32, fx.make_layout(OP_ELEMS, 1), 4).load()
             corr_s = [corr_vec[v] for v in range_constexpr(OP_ELEMS)]
             for vh in range_constexpr(VHE_CHUNKS):
+                # Load THIS vh's V data right before its own MFMA use instead
+                # of hoisting the full VHE_CHUNKS set before QK: only NVOPS
+                # i64 (one vh's worth) needs to be live at a time instead of
+                # VHE_CHUNKS*NVOPS simultaneously, trading some of the
+                # QK+softmax latency-hiding window for lower peak VGPR --
+                # worth trying since VGPR is the kernel's binding occupancy
+                # constraint (512//132 == 512//128 + 1 wave/SIMD boundary is
+                # close by).
+                v_vh = _v_ops(v_page_cur, vh)
                 acc = arith.constant_vector(0.0, T.f32x4)
                 for s in range_constexpr(NVOPS):
-                    acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [p_ops[s], v_cur[vh][s], acc, 0, 0, 0])
+                    acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [p_ops[s], v_vh[s], acc, 0, 0, 0])
                 op = fx.Vector(acc)
                 oo = o_acc[vh]
                 o_acc[vh] = fx.Vector.from_elements(
@@ -991,12 +1086,24 @@ def compile_pa_decode_tile(
         col_e = sub_e * ELEMS_PER_THREAD
         row_off = sO_off + row_e * (HEAD * 4) + col_e * 4
         o_v = _view(row_off, fx.Float32, fx.make_layout(ELEMS_PER_THREAD, 1), 4).load()
+        # value_scale and the P dequant (1/FP8_MAX) are true per-CTA constants
+        # (this kernel only supports per-tensor K/V scale, unlike
+        # pa_decode_ps_kernel's `_pv_mfma`, which folds value_scale into every
+        # PV tile because that code path is shared with its per-token_kv mode)
+        # -- fold them in exactly once here, before the NP branch, so both
+        # paths below write an already-scaled numerator and the reduce kernel
+        # (NP>1) needs no value_scale of its own, matching pa_decode_ps_kernel's
+        # property that its reduce step only flash-combines partitions.
+        o_scale = v_scale_f * fx.Float32(1.0 / FP8_MAX)
+        o_v = o_v * fx.Vector.from_elements([o_scale], dtype=fx.Float32).broadcast_to(ELEMS_PER_THREAD)
 
         if const_expr(NP == 1):
             # single partition: normalize and write the output directly (no
-            # partials / reduce round-trip).  Fold value_scale and 1/FP8_MAX.
+            # partials / reduce round-trip).
             qh = kv_h * GS + row_e
-            inv_l = (fx.Float32(1.0) / _ld1(sL_off, row_e)) * v_scale_f * fx.Float32(1.0 / FP8_MAX)
+            # HW reciprocal approximation, matching pa_decode_ps_kernel's own
+            # softmax-denominator reciprocal (`inv_sum = rcp_f32(safe_sum)`).
+            inv_l = fx.Float32(rcp_f32(_ld1(sL_off, row_e)))
             o_out = (o_v * fx.Vector.from_elements([inv_l], dtype=fx.Float32).broadcast_to(ELEMS_PER_THREAD)).to(
                 fx.Float16
             )
@@ -1007,8 +1114,8 @@ def compile_pa_decode_tile(
             out_chunk = fx.slice(fx.logical_divide(out_row, fx.make_layout(ELEMS_PER_THREAD, 1)), (None, sub_e))
             out_chunk.store(o_out)
         else:
-            # multi-partition: write this partition's (m_p, l_p, numerator O_p);
-            # the reduce kernel flash-combines them (value_scale/1/FP8_MAX there).
+            # multi-partition: write this partition's (m_p, l_p, already-scaled
+            # numerator O_p); the reduce kernel only flash-combines partitions.
             base = ((seq * n_kv + kv_h) * NP + part) * GS + row_e
             if sub_e == 0:
                 pmax_ptr[base] = _ld1(sM_off, row_e)
@@ -1036,7 +1143,6 @@ def compile_pa_decode_tile(
         pmax_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, NP, GS]
         psum_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, NP, GS]
         pout_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, NP, GS, HEAD]
-        value_scale: fx.Float32,
         num_q_heads: Int32,
     ):
         d = fx.Int32(gpu.thread_id("x"))  # head-dim element
@@ -1044,21 +1150,24 @@ def compile_pa_decode_tile(
         kv_h = fx.Int32(gpu.block_id("y"))
         row = fx.Int32(gpu.block_id("z"))  # query row within the kv-head group
         n_kv = num_q_heads // GS
-        out_scale = fx.Float32(value_scale) * fx.Float32(1.0 / FP8_MAX)
         # element index of (seq, kv_h, partition 0, this row); + p*GS, then *HEAD + d
         base = (seq * n_kv + kv_h) * (NP * GS) + row
 
         def _exp2s(x):
             return fx.Float32(exp2_amdgcn_scalar(x))
 
-        # pmax/psum are indexed only by (seq, kv_h, row, p) -- the same address
-        # for all RED_THREADS=HEAD threads in this CTA, since neither depends
-        # on `d`. Reading them via the tensor's per-lane vector load makes
-        # every thread redundantly issue its own global load for an address
-        # that's uniform across the whole block; route through a scalar
-        # buffer load instead so it lands once in an SGPR and broadcasts for
-        # free, the same fix applied to the main kernel's block-table lookup
-        # (see `_load_phys_scalar`).
+        # pmax/psum are indexed only by (seq, kv_h, row, p) -- the same
+        # address for all RED_THREADS=HEAD threads in this CTA, since neither
+        # depends on `d`. Reading them via the tensor's per-lane vector load
+        # makes every thread redundantly issue its own global load for an
+        # address that's uniform across the whole block; route through a
+        # scalar buffer load instead so it lands once in an SGPR and
+        # broadcasts for free, the same fix applied to the main kernel's
+        # block-table lookup (see `_load_phys_scalar`). `pout` is already
+        # scaled by value_scale/1/FP8_MAX (folded in once by the main
+        # kernel's epilogue), so this reduce step only flash-combines
+        # partitions -- no scale of its own, matching pa_decode_ps_kernel's
+        # reduce step.
         pmax_rsrc = buffer_ops.create_buffer_resource(pmax_ptr, max_size=True)
         psum_rsrc = buffer_ops.create_buffer_resource(psum_ptr, max_size=True)
 
@@ -1078,7 +1187,9 @@ def compile_pa_decode_tile(
             den = den + _ld_scalar_f32(psum_rsrc, idx) * w
             num = num + pout_ptr[idx * HEAD + d] * w
         qh = kv_h * GS + row
-        output_ptr[seq, qh, d] = (num / den * out_scale).to(fx.Float16)
+        # HW reciprocal approximation instead of a per-lane division (same
+        # rationale as the main kernel's `inv`/`inv_l`).
+        output_ptr[seq, qh, d] = (num * fx.Float32(rcp_f32(den))).to(fx.Float16)
 
     @flyc.jit
     def pa_decode_tile_launch(
@@ -1091,8 +1202,8 @@ def compile_pa_decode_tile(
         value_cache: fx.Tensor,
         block_tables: fx.Tensor,
         context_lengths: fx.Tensor,
-        key_scale: fx.Float32,
-        value_scale: fx.Float32,
+        key_scale: fx.Tensor,  # [1] per-tensor fp8 K dequant scale
+        value_scale: fx.Tensor,  # [1] per-tensor fp8 V dequant scale
         max_blocks_per_seq: Int32,
         num_q_heads: Int32,
         num_seqs: Int32,
@@ -1115,7 +1226,7 @@ def compile_pa_decode_tile(
             num_q_heads,
         ).launch(grid=(num_seqs, num_kv_heads, NP), block=(BLOCK_THREADS, 1, 1), stream=stream)
         if const_expr(NP > 1):
-            pa_decode_tile_reduce_kernel(output, pmax, psum, pout, value_scale, num_q_heads).launch(
+            pa_decode_tile_reduce_kernel(output, pmax, psum, pout, num_q_heads).launch(
                 grid=(num_seqs, num_kv_heads, GS), block=(RED_THREADS, 1, 1), stream=stream
             )
 
@@ -1129,8 +1240,8 @@ def pa_decode_tile(
     value_cache: torch.Tensor,
     block_tables: torch.Tensor,
     context_lengths: torch.Tensor,
-    key_scale: float,
-    value_scale: float,
+    key_scale: float | torch.Tensor,
+    value_scale: float | torch.Tensor,
     softmax_scale: float | None = None,
     stream=None,
 ) -> None:
@@ -1148,6 +1259,12 @@ def pa_decode_tile(
     assert v_head_dim == head_dim and v_width == 16 and v_subblocks == block_size // 16
     query_group_size = num_q_heads // num_kv_heads
     max_blocks_per_seq = block_tables.shape[1]
+    if query.dtype == torch.bfloat16:
+        query_dtype = "bf16"
+    elif query.dtype == torch.float16:
+        query_dtype = "f16"
+    else:
+        raise ValueError(f"pa_decode_tile only supports f16/bf16 query, got {query.dtype}")
 
     # Choose the number of context partitions (grid.z). This kernel launches a
     # *static* one-CTA-per-partition grid (unlike production's *persistent*
@@ -1183,7 +1300,7 @@ def pa_decode_tile(
     TARGET_CTAS_PER_CU = 8
     MIN_TILES_PER_PARTITION = 2
     device_cus = torch.cuda.get_device_properties(query.device).multi_processor_count
-    cu_fill_np = -(-(TARGET_CTAS_PER_CU * device_cus) // (num_seqs * num_kv_heads))  # ceil div
+    cu_fill_np = cdiv(TARGET_CTAS_PER_CU * device_cus, num_seqs * num_kv_heads)
     # Bounded by `max_blocks_per_seq * block_size / TILE_TOK` (an upper bound
     # on the number of 256-token compute tiles any sequence could need), NOT
     # by the actual per-sequence context length: reading `context_lengths` on
@@ -1194,7 +1311,7 @@ def pa_decode_tile(
     # `block_tables` for a larger max-sequence-length than any single call
     # uses will see a looser (but still correct) bound here.
     tile_tok = 256
-    max_possible_tiles = -(-(max_blocks_per_seq * block_size) // tile_tok)  # ceil div, no host sync
+    max_possible_tiles = cdiv(max_blocks_per_seq * block_size, tile_tok)  # no host sync (see below)
     cu_starved = (num_seqs * num_kv_heads) < device_cus
     tiles_np_cap = max_possible_tiles if cu_starved else max(1, max_possible_tiles // MIN_TILES_PER_PARTITION)
     base_np = get_recommended_splits(num_seqs, num_kv_heads)
@@ -1207,6 +1324,7 @@ def pa_decode_tile(
         block_size=int(block_size),
         num_partitions=num_partitions,
         softmax_scale=softmax_scale,
+        query_dtype=query_dtype,
     )
     dev = query.device
     if num_partitions == 1:
@@ -1218,6 +1336,15 @@ def pa_decode_tile(
         psum = torch.empty(num_seqs, num_kv_heads, num_partitions, GS, dtype=torch.float32, device=dev)
         pout = torch.empty(num_seqs, num_kv_heads, num_partitions, GS, head_dim, dtype=torch.float32, device=dev)
     s = stream or torch.cuda.current_stream()
+    # Per-tensor K/V scales are read in-kernel via buffer_load (matching
+    # `pa_decode_ps_kernel`), not baked in as a host scalar kernarg -- so a
+    # plain float still works (wrapped into a 1-element tensor here) but a
+    # caller-owned device tensor (e.g. computed on-device) is also accepted
+    # and passed straight through.
+    key_scale_t = key_scale if isinstance(key_scale, torch.Tensor) else torch.tensor([float(key_scale)], device=dev)
+    value_scale_t = (
+        value_scale if isinstance(value_scale, torch.Tensor) else torch.tensor([float(value_scale)], device=dev)
+    )
     compiled["launch"](
         output,
         pmax.view(-1),
@@ -1228,8 +1355,8 @@ def pa_decode_tile(
         value_cache,
         block_tables.to(torch.int32),
         context_lengths.to(torch.int32),
-        float(key_scale),
-        float(value_scale),
+        key_scale_t.to(dtype=torch.float32, device=dev),
+        value_scale_t.to(dtype=torch.float32, device=dev),
         int(max_blocks_per_seq),
         int(num_q_heads),
         int(num_seqs),

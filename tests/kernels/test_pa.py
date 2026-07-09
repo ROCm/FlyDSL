@@ -1253,7 +1253,13 @@ def test_multi_case_set(case_set_name: str) -> None:
 # module docstring), so we fp8-quantize then cast the codes to f16 here.
 # ---------------------------------------------------------------------------
 def _run_pa_decode_tile_case(
-    num_kv_heads: int, group_size: int, context_len: int, num_seqs: int, block_size: int, head_dim: int = 128
+    num_kv_heads: int,
+    group_size: int,
+    context_len: int,
+    num_seqs: int,
+    block_size: int,
+    head_dim: int = 128,
+    query_dtype: torch.dtype = torch.float16,
 ) -> float:
     from kernels.pa_decode_tile import pa_decode_tile
 
@@ -1273,7 +1279,7 @@ def _run_pa_decode_tile_case(
     num_blocks = num_seqs * max_blocks
     k_scale = v_scale = 0.04
 
-    query = (torch.randn(num_seqs, num_q_heads, head_dim, device=dev, dtype=torch.float16) * 0.3).contiguous()
+    query = (torch.randn(num_seqs, num_q_heads, head_dim, device=dev, dtype=query_dtype) * 0.3).contiguous()
     k_f = torch.randn(num_blocks, num_kv_heads, block_size, head_dim, device=dev) * 0.3
     v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
     # fp8-quantize K/V (e4m3fnuz, the format gfx942 fp8 MMA consumes); the kernel
@@ -1361,6 +1367,23 @@ def test_pa_decode_tile_reference_head_dim64(
         num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size, head_dim=64
     )
     assert max_diff <= 1e-2, f"tile PA decode (head_dim=64) max diff {max_diff:.3e} exceeds tolerance"
+
+
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("context_len", [1027, 17])
+def test_pa_decode_tile_reference_bf16_query(context_len: int, block_size: int) -> None:
+    # Only the query load's element type changes for bf16 (see Q_DTYPE in
+    # compile_pa_decode_tile); a small shape subset is enough to cover the
+    # bf16 load path without re-running the full f16 grid.
+    max_diff = _run_pa_decode_tile_case(
+        num_kv_heads=1,
+        group_size=8,
+        context_len=context_len,
+        num_seqs=3,
+        block_size=block_size,
+        query_dtype=torch.bfloat16,
+    )
+    assert max_diff <= 1e-2, f"tile PA decode (bf16 query) max diff {max_diff:.3e} exceeds tolerance"
 
 
 if __name__ == "__main__":
