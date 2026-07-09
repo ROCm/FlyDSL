@@ -53,7 +53,6 @@ def atomic_add(
 ):
     """Atomically add ``value`` into ``dst[offset]`` in global memory.
 
-    Wraps the ``get_llvm_ptr`` + ``llvm.atomicrmw`` pair that kernels used to
     inline (e.g. the rmsnorm backward ``dweight`` accumulation). Selects
     ``fadd`` for a floating-point operand and integer ``add`` otherwise, from
     the operand's IR type, so a single call covers both cases. Returns the
