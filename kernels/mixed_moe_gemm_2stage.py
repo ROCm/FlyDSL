@@ -17,7 +17,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, memref, scf
-from flydsl._mlir.dialects.arith import CmpIPredicate
+from flydsl._mlir.dialects.arith import CmpFPredicate, CmpIPredicate
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
@@ -258,7 +258,7 @@ def compile_mixed_moe_gemm1(
     _as1_tag = "_as1" if a_scale_one else ""
     _xcd_tag = f"_xcd{xcd_swizzle}" if xcd_swizzle > 0 else ""
     module_name = (
-        f"mfma_moe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"
+        f"mfma_moe1_{act}_mul_a{a_dtype}_w{b_dtype}_{out_s}"
         f"_t{tile_m}x{tile_n}x{tile_k}_pm{persist_m}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}_v32"
     ).replace("-", "_")
 
@@ -1770,10 +1770,42 @@ def compile_mixed_moe_gemm1(
                         result_elems.append(g * sig * (u + _one))
                     return vector.from_elements(vec4_f32, result_elems)
 
+                def _gelu_tanh_mul_vec4(gate_v4, up_v4):
+                    """Element-wise gelu_tanh(gate) * up on vec4_f32.
+
+                    GeLU tanh approx: 0.5*g*(1 + tanh(y)),
+                    y = sqrt(2/pi)*(g + 0.044715*g^3).
+                    1 + tanh(y) = 2/(1+e) for y>=0, 2e/(1+e) for y<0, with
+                    e = exp(-2|y|) computed via exp2 (non-positive exponent
+                    avoids fp32 overflow); folding the 0.5 gives
+                    g * num/(1+e), num = (y>=0 ? 1 : e).
+                    """
+                    result_elems = []
+                    _c_sqrt2pi = arith.constant(0.7978845608028654, type=f32)
+                    _c_coeff = arith.constant(0.044715, type=f32)
+                    _neg_log2e = arith.constant(-1.4426950408889634, type=f32)
+                    _one = arith.constant(1.0, type=f32)
+                    _two = arith.constant(2.0, type=f32)
+                    _zero = arith.constant(0.0, type=f32)
+                    for ei in range_constexpr(4):
+                        g = vector.extract(gate_v4, static_position=[ei], dynamic_position=[])
+                        u = vector.extract(up_v4, static_position=[ei], dynamic_position=[])
+                        y = _c_sqrt2pi * (g + _c_coeff * g * g * g)
+                        abs_y = arith.maximumf(y, _zero - y)
+                        t = _two * abs_y * _neg_log2e
+                        e = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [t], [], [])
+                        den = _one + e
+                        rcp = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [den], [], [])
+                        num = arith.select(arith.cmpf(CmpFPredicate.OGE, y, _zero), _one, e)
+                        result_elems.append(g * num * rcp * u)
+                    return vector.from_elements(vec4_f32, result_elems)
+
                 def _act_vec4(gate_v4, up_v4):
                     """Dispatch activation based on `act` parameter."""
                     if const_expr(act == "swiglu"):
                         return _swiglu_mul_vec4(gate_v4, up_v4)
+                    elif const_expr(act == "gelu_tanh"):
+                        return _gelu_tanh_mul_vec4(gate_v4, up_v4)
                     else:
                         return _silu_mul_vec4(gate_v4, up_v4)
 

@@ -104,6 +104,7 @@ def compile_moe_gemm1(
     use_cshuffle_epilog: bool | None = None,
     scale_is_bf16: bool = False,
     k_batch: int = 1,
+    activation: str = "silu",
 ):
     """Compile stage1 kernel (`moe_gemm1`) and return the compiled executable.
 
@@ -137,6 +138,14 @@ def compile_moe_gemm1(
     elem_bytes = 2 if is_f16_or_bf16 else 1
     if out_dtype not in ("f16", "bf16"):
         raise ValueError(f"out_dtype must be 'f16' or 'bf16', got {out_dtype!r}")
+    _valid_activations = ("silu", "gelu_tanh")
+    if activation not in _valid_activations:
+        raise ValueError(f"activation must be one of {_valid_activations}, got {activation!r}")
+    if activation not in ("silu", "gelu_tanh") and k_batch > 1:
+        raise ValueError(
+            f"activation={activation!r} is not supported with split-K (k_batch={k_batch}); "
+            "stage1 defers activation under split-K"
+        )
 
     # NOTE: don't materialize MLIR types outside an active MLIR Context.
     def out_mlir():
@@ -351,6 +360,24 @@ def compile_moe_gemm1(
                 den = 1.0 + emu
                 sig = rocdl.rcp(T.f32, den)
                 return x * sig
+
+            def gelu_tanh(x):
+                # GeLU tanh approx: 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3))).
+                # Expand tanh via exp(-2|y|) in [0,1] (non-positive exponent avoids fp32
+                # overflow). Mirrors the proven gelu in preshuffle_gemm.py; fx.exp accepts
+                # Numeric wrappers (unlike raw rocdl.exp2, which needs a bare ir.Value).
+                half = fx.Float32(0.5)
+                one = fx.Float32(1.0)
+                two = fx.Float32(2.0)
+                zero = fx.Float32(0.0)
+                x3 = x * x * x
+                y = fx.Float32(0.7978845608) * (x + fx.Float32(0.044715) * x3)
+                abs_y = fx.Float32(y).maximumf(zero - y)
+                e = fx.exp(fx.Float32(-2.0) * abs_y)
+                den = one + e
+                # 1 + tanh(y): y>=0 -> 2/den ; y<0 -> 2*e/den
+                numerator = (y > zero).select(two, two * e)
+                return half * x * (numerator * (one / den))
 
             acc_init = arith.constant_vector(0, T.i32x4) if is_int8 else arith.constant_vector(0.0, T.f32x4)
             zero_f32_acc = arith.constant_vector(0.0, T.f32x4) if is_int4_bf16_groupwise else None
@@ -1585,7 +1612,10 @@ def compile_moe_gemm1(
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
-                            y = silu(vg) * vu
+                            if const_expr(activation == "gelu_tanh"):
+                                y = gelu_tanh(vg) * vu
+                            else:
+                                y = silu(vg) * vu
                             if const_expr(doweight_stage1):
                                 y = y * tw
                             y16 = arith.trunc_f(T.f16, y)
@@ -1708,7 +1738,10 @@ def compile_moe_gemm1(
                             vg = vg * sx * sw_gate
                             vu = vu * sx * sw_up
 
-                            y = silu(vg) * vu
+                            if const_expr(activation == "gelu_tanh"):
+                                y = gelu_tanh(vg) * vu
+                            else:
+                                y = silu(vg) * vu
                             if const_expr(doweight_stage1):
                                 y = y * tw
                             y = arith.trunc_f(out_mlir(), y)
