@@ -38,7 +38,6 @@ _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn:
 # Short self-attn uses the 4-wave generic path; long/cross stays on dualwave.
 _VARLEN_LIGHT_MAX_SEQ = 256
 
-
 def _dtype_str(t: torch.Tensor) -> str:
     s = _DTYPE_MAP.get(t.dtype)
     if s is None:
@@ -151,7 +150,8 @@ def _build_varlen_light(
         num_kv_heads=num_kv_heads,
         cross_seqlen=cross_seqlen,
         varlen=True,
-        block_m=128,
+        block_m=64,
+        flat_work_group_size=128,
         waves_per_eu=waves_per_eu,
         daz=daz,
         dualwave_swp_lazy_rescale=lazy_rescale,
@@ -383,9 +383,7 @@ def _flydsl_flash_attn_paged(
         # Short paged self-attn uses generic light; unsupported cases stay on dualwave.
         _arch = _gpu_arch(q.device)
         _paged_light_ok = (
-            varlen
-            and (num_kv_splits <= 1)
-            and (kv_cache_layout in ("linear", "vectorized"))
+            (num_kv_splits <= 1)
             and (not cross)
             and D in (64, 128)
             and dtype_str in ("bf16", "f16")
@@ -478,7 +476,8 @@ def _build_paged_light(
         varlen=varlen,
         paged=True,
         kv_cache_layout=kv_cache_layout,
-        block_m=128,
+        block_m=64,
+        flat_work_group_size=128,
         path_tag="N32",
         waves_per_eu=waves_per_eu,
         daz=daz,

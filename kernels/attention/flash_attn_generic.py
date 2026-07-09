@@ -204,6 +204,50 @@ def build_flash_attn_func_module_primary(
             )
             _dualwave_swp_launch = None
 
+    # Low-occupancy dense: the default 4-wave M128 tile wastes waves when the grid
+    # is tiny; a 2-wave block_m=64/N32 tile makes more (lighter) blocks that spread
+    # across more CUs and drop idle waves. Dispatched at launch by _use_light.
+    _light_launch = None
+    _light_cu = 256
+    if block_m is None and not varlen and not paged and head_dim in (64, 128) and dtype_str in ("bf16", "f16"):
+        try:
+            import torch as _torch
+
+            _light_cu = int(_torch.cuda.get_device_properties(_torch.cuda.current_device()).multi_processor_count)
+        except Exception:
+            _light_cu = 256
+        _light_launch = build_flash_attn_func_module_primary(
+            num_heads,
+            head_dim,
+            causal,
+            dtype_str,
+            sm_scale,
+            waves_per_eu,
+            flat_work_group_size=128,
+            block_m=64,
+            unsafe_fp_math=unsafe_fp_math,
+            fast_fp_math=fast_fp_math,
+            daz=daz,
+            path_tag="N32",
+            num_kv_heads=num_kv_heads,
+            cross_seqlen=cross_seqlen,
+            dualwave_swp_lazy_rescale=dualwave_swp_lazy_rescale,
+            dualwave_swp_setprio=dualwave_swp_setprio,
+            dualwave_swp_debug_lazy_counts=dualwave_swp_debug_lazy_counts,
+            dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
+        )
+
+    def _use_light(args, kwargs):
+        """True when the default M128 grid under-fills the CUs (route to light)."""
+        if _light_launch is None:
+            return False
+        B = args[4] if len(args) > 4 else kwargs.get("batch_size", None)
+        S = args[5] if len(args) > 5 else kwargs.get("seq_len", None)
+        if not isinstance(B, int) or not isinstance(S, int):
+            return False
+        main_blocks = B * num_heads * ((S + 127) // 128)
+        return main_blocks < _light_cu
+
     def _extract_seq_len(args, kwargs):
         """Return the launch-time seq_len as int, or None if not statically known."""
         S = args[5] if len(args) > 5 else kwargs.get("seq_len", None)
@@ -342,6 +386,8 @@ def build_flash_attn_func_module_primary(
         _BS_THRESHOLD = 4096 * num_heads
 
         def _auto_launch(*args, **kwargs):
+            if _use_light(args, kwargs):
+                return _light_launch(*args, **kwargs)
             B = args[4] if len(args) > 4 else kwargs.get("batch_size", 1)
             S = args[5] if len(args) > 5 else kwargs.get("seq_len", 128)
             bs = (B if isinstance(B, int) else 1) * (S if isinstance(S, int) else 128)
@@ -364,6 +410,7 @@ def build_flash_attn_func_module_primary(
     NUM_WAVES = flat_work_group_size // WARP_SIZE
     BLOCK_SIZE = flat_work_group_size
     ROWS_PER_WAVE = BLOCK_M // NUM_WAVES
+    assert ROWS_PER_WAVE == 32, f"BLOCK_M/NUM_WAVES must be 32, got {ROWS_PER_WAVE}"
     if path_tag.upper() in ("N32", "N128"):
         PATH_TAG = path_tag.upper()
     elif dtype_str in ("f16", "bf16") and causal and head_dim == 128:
@@ -406,10 +453,11 @@ def build_flash_attn_func_module_primary(
     assert head_dim % 32 == 0, f"head_dim ({head_dim}) must be divisible by 32"
     assert head_dim >= 64, f"head_dim ({head_dim}) must be >= 64"
     assert flat_work_group_size in (
+        64,
         128,
         256,
         512,
-    ), f"flat_work_group_size must be 128, 256, or 512, got {flat_work_group_size}"
+    ), f"flat_work_group_size must be 64, 128, 256, or 512, got {flat_work_group_size}"
     assert dtype_str in ("f16", "bf16"), "flash_attn_func only supports f16 and bf16"
     assert BLOCK_N % 32 == 0
     assert BLOCK_N_OUT % BLOCK_N == 0
@@ -1774,6 +1822,16 @@ def build_flash_attn_func_module_primary(
             )
 
     _launch.compile = _compile
+
+    if _light_launch is not None:
+
+        def _launch_maybe_light(*args, **kwargs):
+            if _use_light(args, kwargs):
+                return _light_launch(*args, **kwargs)
+            return _launch(*args, **kwargs)
+
+        _launch_maybe_light.compile = _compile
+        return _wrap_with_dualwave_swp(_launch_maybe_light)
 
     return _wrap_with_dualwave_swp(_launch)
 
