@@ -580,6 +580,7 @@ def build_flash_attn_dualwave_swp_module(
         # exp2(-inf - floor) == 0 (no NaN), so acc/l stay 0 and O is zeroed below.
         c_neg_floor = fx.Float32(-3.0e38)
         c_zero_f = fx.Float32(0.0)
+        c_zero_i = fx.Int32(0)
         head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
         c_log2e_f = fx.Float32(_LOG2E)
         c_sm_scale_log2e = fx.Float32(
@@ -601,8 +602,10 @@ def build_flash_attn_dualwave_swp_module(
         if const_expr(CAUSAL):
             # Bottom-right: last kept key col for this q-block = q_start+BLOCK_M-1+delta,
             # so tiles = ceil((q_start+BLOCK_M+delta)/64), clamped >= 0 (delta may be < 0).
-            causal_end_i32 = fx.Int32(q_start + BLOCK_M) + delta_i32
-            causal_end_i32 = fx.Int32(ArithValue(causal_end_i32 > fx.Int32(0)).select(causal_end_i32, fx.Int32(0)))
+            causal_end_raw_i32 = fx.Int32(q_start + BLOCK_M) + delta_i32
+            causal_end_i32 = fx.Int32(
+                ArithValue(causal_end_raw_i32 > fx.Int32(0)).select(causal_end_raw_i32, fx.Int32(0))
+            )
             causal_num_tiles = (fx.Index(causal_end_i32) + kv_tile_size - 1) // kv_tile_size
             max_num_tiles = fx.Index(ArithValue(causal_num_tiles < num_kv_tiles).select(causal_num_tiles, num_kv_tiles))
         else:
@@ -1420,13 +1423,32 @@ def build_flash_attn_dualwave_swp_module(
                 m_out = _anchor_scalar_f32(m_tile_max)
             return ([o0, o1, o2, o3], m_out, l_out, _v_vec32_to_p(vp_out))
 
+        def _zero_o_block():
+            q_row_z = q_start + wave_q_offset + lane_mod_32
+            zero_pack = Vec.from_elements([c_zero_i, c_zero_i, c_zero_i, c_zero_i], fx.Int32)
+            with _if_then(_scf.IfOp(_raw(ArithValue(q_row_z < seqlen_q_v)))):
+                o_base_z = _global_idx_q(q_row_z, lane_div_32 * 8)
+                for dc in range_constexpr(D_CHUNKS):
+                    for g in range_constexpr(2):
+                        o_global_z = o_base_z + (dc * D_CHUNK + 2 * g * 8)
+                        _buffer_store_128(zero_pack, o_global_z)
+
         # Empty split-K and OOB varlen q-blocks share one uniform guard.
         # VARLEN and SPLITK are mutually exclusive.
+        if const_expr(CAUSAL and CROSS_SEQLEN and not SPLITK):
+            with _if_then(_scf.IfOp(_raw(ArithValue(causal_end_raw_i32 <= fx.Int32(0))))):
+                _zero_o_block()
         if const_expr(SPLITK):
             _split_if = _scf.IfOp(_raw(split_nonempty))
             _split_guard = _if_then(_split_if)
         elif const_expr(VARLEN):
-            _split_guard = _if_then(_scf.IfOp(_raw(ArithValue(q_start < seqlen_q_v))))
+            if const_expr(CAUSAL and CROSS_SEQLEN):
+                active_q_block = ArithValue(q_start < seqlen_q_v) & (causal_end_raw_i32 > fx.Int32(0))
+                _split_guard = _if_then(_scf.IfOp(_raw(active_q_block)))
+            else:
+                _split_guard = _if_then(_scf.IfOp(_raw(ArithValue(q_start < seqlen_q_v))))
+        elif const_expr(CAUSAL and CROSS_SEQLEN):
+            _split_guard = _if_then(_scf.IfOp(_raw(ArithValue(causal_end_raw_i32 > fx.Int32(0)))))
         else:
             _split_guard = contextlib.nullcontext()
         with _split_guard:

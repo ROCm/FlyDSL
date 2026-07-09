@@ -850,6 +850,7 @@ def build_flash_attn_func_module_primary(
         c_neg_inf = fx.Float32(float("-inf"))
         c_neg_floor = fx.Float32(-3.0e38)
         c_zero_f = fx.Float32(0.0)
+        c_zero_i32 = fx.Int32(0)
         c_sm_scale_log2e = fx.Float32(sm_scale * _LOG2E)
         c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
         width_i32 = fx.Int32(WARP_SIZE)
@@ -870,8 +871,10 @@ def build_flash_attn_func_module_primary(
         _q_end = q_start + BLOCK_M
         if const_expr(CAUSAL):
             delta_i32 = fx.Int32(seqlen_kv_b) - fx.Int32(seqlen_q_b)
-            causal_end_i32 = fx.Int32(_q_end) + delta_i32
-            causal_end_i32 = fx.Int32(ArithValue(causal_end_i32 > fx.Int32(0)).select(causal_end_i32, fx.Int32(0)))
+            causal_end_raw_i32 = fx.Int32(_q_end) + delta_i32
+            causal_end_i32 = fx.Int32(
+                ArithValue(causal_end_raw_i32 > fx.Int32(0)).select(causal_end_raw_i32, fx.Int32(0))
+            )
             causal_end = fx.Index(causal_end_i32)
             kv_upper = fx.Index(ArithValue(causal_end < seqlen_kv_b).select(causal_end, seqlen_kv_b))
         else:
@@ -1410,72 +1413,97 @@ def build_flash_attn_func_module_primary(
                     _yield_args.append(_cur_buf_id)
             loop_results = yield _yield_args
 
-        # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
-        # gfx950 fuses half-wave partners into 8 cols/store; o_rsrc drops partial-tile OOB rows.
-        l_final = loop_results[1]
-        o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
+        def _zero_o_block():
+            if const_expr(USE_PERMLANE_OSTORE):
+                zero_pack = Vec.filled(4, 0, fx.Int32)
+                for dc in range_constexpr(D_CHUNKS):
+                    for g in range_constexpr(2):
+                        d_col = fx.Index(dc * D_CHUNK) + (fx.Index(2 * g) + lane_div_32) * fx.Index(8)
+                        o_global = global_idx_q(q_row, d_col)
+                        buffer_ops.buffer_store(zero_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
+            else:
+                zero_pack = Vec.filled(2, 0, fx.Int32)
+                for dc in range_constexpr(D_CHUNKS):
+                    for grp in range_constexpr(4):
+                        d_col = fx.Index(dc * D_CHUNK) + lane_div_32 * fx.Index(4) + fx.Index(grp * 8)
+                        o_global = global_idx_q(q_row, d_col)
+                        buffer_ops.buffer_store(zero_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
 
-        inv_l_rcp = rocdl.rcp(T.f32, l_final)
-        if const_expr(CAUSAL and CROSS_SEQLEN):
-            inv_l = ArithValue(fx.Float32(l_final) > c_zero_f).select(inv_l_rcp, c_zero_f)
-        else:
-            inv_l = inv_l_rcp
-        inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
-        v_o = [Vec(o_finals[dc]) * inv_l_vec for dc in range_constexpr(D_CHUNKS)]
+        def _normalize_and_store_o():
+            # gfx950 fuses half-wave partners into 8 cols/store; o_rsrc drops partial-tile OOB rows.
+            l_final = loop_results[1]
+            o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
 
-        if const_expr(USE_PERMLANE_OSTORE):
-            # gfx950: 128-bit permlane-fused store (cvt_pk_bf16_f32 + permlane32_swap).
-            pair_i32_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
-            is_hi_half = ArithValue(lane_div_32 != fx.Index(0))
+            inv_l_rcp = rocdl.rcp(T.f32, l_final)
+            if const_expr(CAUSAL and CROSS_SEQLEN):
+                inv_l = ArithValue(fx.Float32(l_final) > c_zero_f).select(inv_l_rcp, c_zero_f)
+            else:
+                inv_l = inv_l_rcp
+            inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
+            v_o = [Vec(o_finals[dc]) * inv_l_vec for dc in range_constexpr(D_CHUNKS)]
 
-            def _o_pack_2dw(dc, store_group):
-                # 4 f32 outputs -> 2 packed-16bit dwords (lo = cols 0,1; hi = cols 2,3).
-                r_base = store_group * 4
-                if const_expr(dtype_str == "bf16"):
-                    lo = rocdl.cvt_pk_bf16_f32(Vec(v_o[dc])[r_base], Vec(v_o[dc])[r_base + 1])
-                    hi = rocdl.cvt_pk_bf16_f32(Vec(v_o[dc])[r_base + 2], Vec(v_o[dc])[r_base + 3])
-                    return lo, hi
-                o_f16 = [fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype) for i in range_constexpr(4)]
-                pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-                return _raw(pack[0]), _raw(pack[1])
+            if const_expr(USE_PERMLANE_OSTORE):
+                # gfx950: 128-bit permlane-fused store (cvt_pk_bf16_f32 + permlane32_swap).
+                pair_i32_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
+                is_hi_half = ArithValue(lane_div_32 != fx.Index(0))
 
-            def _swap_halves(dw):
-                # permlane32_swap(a,b) -> (a.lo|b.lo, a.hi|b.hi); with a=b=dw the
-                # partner dword dw[lane^32] is result[1] on low lanes, [0] on high.
-                swapped = rocdl.permlane32_swap(pair_i32_ty, _raw(dw), _raw(dw), False, False)
-                lo_res = llvm.extractvalue(T.i32, swapped, [0])
-                hi_res = llvm.extractvalue(T.i32, swapped, [1])
-                return is_hi_half.select(lo_res, hi_res)
-
-            for dc in range_constexpr(D_CHUNKS):
-                for g in range_constexpr(2):
-                    d0_a, d1_a = _o_pack_2dw(dc, 2 * g)
-                    d0_b, d1_b = _o_pack_2dw(dc, 2 * g + 1)
-                    # low lanes: own group-2g cols 0-3 ++ partner's cols 4-7;
-                    # high lanes: partner's group-(2g+1) cols 0-3 ++ own cols 4-7.
-                    y0_a, y1_a = _swap_halves(d0_a), _swap_halves(d1_a)
-                    y0_b, y1_b = _swap_halves(d0_b), _swap_halves(d1_b)
-                    w0 = is_hi_half.select(y0_b, _raw(d0_a))
-                    w1 = is_hi_half.select(y1_b, _raw(d1_a))
-                    w2 = is_hi_half.select(_raw(d0_b), y0_a)
-                    w3 = is_hi_half.select(_raw(d1_b), y1_a)
-                    o_pack = Vec.from_elements([fx.Int32(w0), fx.Int32(w1), fx.Int32(w2), fx.Int32(w3)], fx.Int32)
-                    d_col = fx.Index(dc * D_CHUNK) + (fx.Index(2 * g) + lane_div_32) * fx.Index(8)
-                    o_global = global_idx_q(q_row, d_col)
-                    buffer_ops.buffer_store(o_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
-        else:
-            # gfx942 fallback (no permlane32_swap / cvt_pk_bf16_f32): each lane stores
-            # its 16 cols as 4 dwordx2 groups via .to(elem_dtype); col map d_col =
-            # dc*D_CHUNK + lane_div_32*4 + 8*grp + r. num_records bound drops OOB rows.
-            for dc in range_constexpr(D_CHUNKS):
-                for grp in range_constexpr(4):
-                    r0 = grp * 4
-                    o_f16 = [fx.Float32(Vec(v_o[dc])[r0 + i]).to(elem_dtype) for i in range_constexpr(4)]
+                def _o_pack_2dw(dc, store_group):
+                    # 4 f32 outputs -> 2 packed-16bit dwords (lo = cols 0,1; hi = cols 2,3).
+                    r_base = store_group * 4
+                    if const_expr(dtype_str == "bf16"):
+                        lo = rocdl.cvt_pk_bf16_f32(Vec(v_o[dc])[r_base], Vec(v_o[dc])[r_base + 1])
+                        hi = rocdl.cvt_pk_bf16_f32(Vec(v_o[dc])[r_base + 2], Vec(v_o[dc])[r_base + 3])
+                        return lo, hi
+                    o_f16 = [fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype) for i in range_constexpr(4)]
                     pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-                    o2 = Vec.from_elements([_raw(pack[0]), _raw(pack[1])], fx.Int32)
-                    d_col = fx.Index(dc * D_CHUNK) + lane_div_32 * fx.Index(4) + fx.Index(grp * 8)
-                    o_global = global_idx_q(q_row, d_col)
-                    buffer_ops.buffer_store(o2, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
+                    return _raw(pack[0]), _raw(pack[1])
+
+                def _swap_halves(dw):
+                    # permlane32_swap(a,b) -> (a.lo|b.lo, a.hi|b.hi); with a=b=dw the
+                    # partner dword dw[lane^32] is result[1] on low lanes, [0] on high.
+                    swapped = rocdl.permlane32_swap(pair_i32_ty, _raw(dw), _raw(dw), False, False)
+                    lo_res = llvm.extractvalue(T.i32, swapped, [0])
+                    hi_res = llvm.extractvalue(T.i32, swapped, [1])
+                    return is_hi_half.select(lo_res, hi_res)
+
+                for dc in range_constexpr(D_CHUNKS):
+                    for g in range_constexpr(2):
+                        d0_a, d1_a = _o_pack_2dw(dc, 2 * g)
+                        d0_b, d1_b = _o_pack_2dw(dc, 2 * g + 1)
+                        # low lanes: own group-2g cols 0-3 ++ partner's cols 4-7;
+                        # high lanes: partner's group-(2g+1) cols 0-3 ++ own cols 4-7.
+                        y0_a, y1_a = _swap_halves(d0_a), _swap_halves(d1_a)
+                        y0_b, y1_b = _swap_halves(d0_b), _swap_halves(d1_b)
+                        w0 = is_hi_half.select(y0_b, _raw(d0_a))
+                        w1 = is_hi_half.select(y1_b, _raw(d1_a))
+                        w2 = is_hi_half.select(_raw(d0_b), y0_a)
+                        w3 = is_hi_half.select(_raw(d1_b), y1_a)
+                        o_pack = Vec.from_elements([fx.Int32(w0), fx.Int32(w1), fx.Int32(w2), fx.Int32(w3)], fx.Int32)
+                        d_col = fx.Index(dc * D_CHUNK) + (fx.Index(2 * g) + lane_div_32) * fx.Index(8)
+                        o_global = global_idx_q(q_row, d_col)
+                        buffer_ops.buffer_store(o_pack, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
+            else:
+                # gfx942 fallback (no permlane32_swap / cvt_pk_bf16_f32): each lane stores
+                # its 16 cols as 4 dwordx2 groups via .to(elem_dtype); col map d_col =
+                # dc*D_CHUNK + lane_div_32*4 + 8*grp + r. num_records bound drops OOB rows.
+                for dc in range_constexpr(D_CHUNKS):
+                    for grp in range_constexpr(4):
+                        r0 = grp * 4
+                        o_f16 = [fx.Float32(Vec(v_o[dc])[r0 + i]).to(elem_dtype) for i in range_constexpr(4)]
+                        pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
+                        o2 = Vec.from_elements([_raw(pack[0]), _raw(pack[1])], fx.Int32)
+                        d_col = fx.Index(dc * D_CHUNK) + lane_div_32 * fx.Index(4) + fx.Index(grp * 8)
+                        o_global = global_idx_q(q_row, d_col)
+                        buffer_ops.buffer_store(o2, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
+
+        # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
+        if const_expr(CAUSAL and CROSS_SEQLEN):
+            if causal_end_raw_i32 <= c_zero_i32:
+                _zero_o_block()
+            if causal_end_raw_i32 > c_zero_i32:
+                _normalize_and_store_o()
+        else:
+            _normalize_and_store_o()
 
     @flyc.jit
     def launch_flash_attn_generic(
