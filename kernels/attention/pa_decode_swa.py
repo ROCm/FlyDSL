@@ -76,18 +76,26 @@ def _exp2_f32_fast(value):
 # offset, then recast to the access element type and wrapped in a 1-D view so
 # `.load()` / `.store()` issue the vector access. `region_ptr` is a struct
 # field pointer; `byte_off` is a byte offset into that region.
-def _lds_byte_iter(region_ptr, byte_off):
-    return fx.add_offset(fx.recast_iter(fx.Uint8, region_ptr), fx.Int32(byte_off))
+def _lds_view_vec(region_ptr, byte_off, elem_dtype, num_elems):
+    # Advance by the byte offset on a byte (Uint8) iterator, then recast to the
+    # access element type. A plain recast_iter would inherit the byte iterator's
+    # 1-byte alignment, which a vectorized `.load()`/`.store()` rejects
+    # ("alignment must be a positive multiple of element byte size"). The byte
+    # offsets are element-aligned by construction, so rebuild the pointer type
+    # with the full access alignment (num_elems * element bytes).
+    byte_it = fx.add_offset(fx.recast_iter(fx.Uint8, region_ptr), fx.Int32(byte_off))
+    align = num_elems * (elem_dtype.width // 8)
+    ptr_ty = fx.PointerType.get(elem_dtype.ir_type, byte_it.memspace, align)
+    it = fx.recast_iter(ptr_ty, byte_it)
+    return fx.make_view(it, fx.make_layout(num_elems, 1))
 
 
 def _lds_store_vec(region_ptr, byte_off, vec_value):
-    it = fx.recast_iter(vec_value.dtype, _lds_byte_iter(region_ptr, byte_off))
-    fx.make_view(it, fx.make_layout(vec_value.numel, 1)).store(vec_value)
+    _lds_view_vec(region_ptr, byte_off, vec_value.dtype, vec_value.numel).store(vec_value)
 
 
 def _lds_load_vec(region_ptr, byte_off, elem_dtype, num_elems):
-    it = fx.recast_iter(elem_dtype, _lds_byte_iter(region_ptr, byte_off))
-    return fx.make_view(it, fx.make_layout(num_elems, 1)).load()
+    return _lds_view_vec(region_ptr, byte_off, elem_dtype, num_elems).load()
 
 
 def _load_k_flat(
