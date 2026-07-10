@@ -9,10 +9,7 @@ import os
 from pathlib import Path
 from typing import Callable, Dict, List
 
-try:
-    import torch
-except ImportError:
-    torch = None
+from .profiling import do_bench as do_bench
 
 
 def _env_fingerprint() -> tuple:
@@ -127,26 +124,6 @@ class Config:
             maxnreg=d.pop("maxnreg", None),
             **d,
         )
-
-
-def do_bench(fn, warmup=5, rep=25, quantiles=None):
-    """Benchmark a GPU kernel using CUDA/HIP events. Returns median ms."""
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    times = []
-    for _ in range(rep):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        fn()
-        end.record()
-        torch.cuda.synchronize()
-        times.append(start.elapsed_time(end))
-    times.sort()
-    if quantiles:
-        return [times[min(int(q * len(times)), len(times) - 1)] for q in quantiles]
-    return times[len(times) // 2]
 
 
 class Autotuner:
