@@ -53,7 +53,7 @@ import flydsl.expr as fx
 from flydsl.compiler.protocol import dsl_size_of
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr.typing import Int32, T
+from flydsl.expr.typing import T
 from flydsl.expr.vector import ReductionOp
 from kernels.common import dpp_utils
 from kernels.common.tensor_shim import _run_compiled
@@ -64,7 +64,7 @@ from kernels.common.utils import (
     rcp_f32,
 )
 
-MFMA_MNK = 16  # M = N = 16 for the MMA atom
+MFMA_MNK = 16  # M = N = 16 for the MMA atom; also query rows handled per CTA (padded to 16)
 MFMA_K = 32  # fp8 MFMA contracts K = 32 per instruction (mfma_f32_16x16x32_fp8_fp8)
 WAVE = 64
 LOG2E = 1.4426950408889634
@@ -113,7 +113,6 @@ def compile_pa_decode_tile(
     assert head_dim % 64 == 0, f"pa_decode_tile only supports head_dim that's a multiple of 64, got {head_dim}"
     HEAD = head_dim
     GS = query_group_size
-    M = MFMA_MNK  # query rows handled per CTA (padded to 16)
     NWARP = 4  # 4 waves / CTA
     TOK_PER_WARP = 64  # tokens each warp owns per compute block (matches production KV_COMPUTE_BLOCK)
     TILE_TOK = NWARP * TOK_PER_WARP  # 256 tokens / compute block
@@ -138,7 +137,6 @@ def compile_pa_decode_tile(
 
     if softmax_scale is None:
         softmax_scale = 1.0 / (HEAD**0.5)
-    _softmax_scale = float(softmax_scale)
     NP = int(num_partitions)  # context partitions (grid.z); compile-time constant
 
     BLOCK_THREADS = NWARP * WAVE  # 256
@@ -152,9 +150,8 @@ def compile_pa_decode_tile(
     # softmax reduce over M via cheap shuffle_xor) and PV's output accumulator
     # is register-resident/loop-carried, not per-tile LDS.
     f32 = 4
-    sQ_off = 0
-    sQ_bytes = M * HEAD * 1  # fp8
-    sP_off = sQ_off + sQ_bytes
+    sQ_bytes = MFMA_MNK * HEAD * 1  # fp8
+    sP_off = sQ_bytes
     # sP's per-qhead row is padded 16B past TILE_TOK: an unpadded 256B stride
     # is a multiple of the 32-bank*4B LDS wrap, so every (qh, l16g) P-pack
     # write hits the same bank across all 16 qh values. +16B is the smallest
@@ -162,24 +159,24 @@ def compile_pa_decode_tile(
     # the PV read's ds_read_b128 loads (+8B also breaks it but misaligns
     # those loads, measuring slower overall).
     SP_ROW_BYTES = TILE_TOK + 16
-    sP_bytes = M * SP_ROW_BYTES  # fp8, padded rows (only the first TILE_TOK bytes/row hold real data)
+    sP_bytes = MFMA_MNK * SP_ROW_BYTES  # fp8, padded rows (only the first TILE_TOK bytes/row hold real data)
     sO_off = sP_off + sP_bytes
-    sO_bytes = M * HEAD * f32
+    sO_bytes = MFMA_MNK * HEAD * f32
     sM_off = sO_off + sO_bytes
-    sL_off = sM_off + M * f32
-    sCorr_off = sL_off + M * f32
-    sQscale_off = sCorr_off + M * f32  # per-row query dequant scale
+    sL_off = sM_off + MFMA_MNK * f32
+    sCorr_off = sL_off + MFMA_MNK * f32
+    sQscale_off = sCorr_off + MFMA_MNK * f32  # per-row query dequant scale
     # Cross-warp reduction scratch: per (query row, warp) local max/sum. Row
     # stride padded to NWARP+1 (not NWARP), since a plain 16-byte stride
     # wraps the 32-bank LDS twice (row r and r+8 share a bank); 5 is coprime
     # with 32 banks, avoiding the conflict.
     NWARP_PAD = NWARP + 1
-    sLmax_off = sQscale_off + M * f32
-    sLsum_off = sLmax_off + M * NWARP_PAD * f32
+    sLmax_off = sQscale_off + MFMA_MNK * f32
+    sLsum_off = sLmax_off + MFMA_MNK * NWARP_PAD * f32
     # V page-table prefetch staging: warp w's PAGES_PER_CHUNK-wide row (fetched
     # via one scalar wide load) is broadcast here for all 4 warps to read (V's
     # page depends on `rgroup`, which is shared across warps -- see `_v_page`).
-    sVPage_off = sLsum_off + M * NWARP_PAD * f32
+    sVPage_off = sLsum_off + MFMA_MNK * NWARP_PAD * f32
     sVPage_bytes = NWARP * PAGES_PER_CHUNK * 4  # i32
     total_bytes = sVPage_off + sVPage_bytes
 
@@ -197,8 +194,8 @@ def compile_pa_decode_tile(
         context_lengths_ptr: fx.Tensor,  # [num_seqs]
         key_scale_ptr: fx.Tensor,  # [1] per-tensor fp8 K dequant scale
         value_scale_ptr: fx.Tensor,  # [1] per-tensor fp8 V dequant scale
-        max_blocks_per_seq: Int32,
-        num_q_heads: Int32,
+        max_blocks_per_seq: fx.Int32,
+        num_q_heads: fx.Int32,
     ):
         tid = fx.Int32(gpu.thread_id("x"))
         warp = tid // WAVE  # 0..NWARP-1
@@ -266,8 +263,8 @@ def compile_pa_decode_tile(
         part_start = part * tiles_per_part
         part_end_raw = part_start + tiles_per_part
         part_end = arith.select(part_end_raw < num_tiles, part_end_raw, num_tiles)
-        loop_start = fx.Index(part_start)
-        loop_end = fx.Index(part_end)
+        loop_start = fx.Int64(part_start)
+        loop_end = fx.Int64(part_end)
 
         # ── LDS views ──
         # One i8 blob carved into typed views via byte-offset pointers, used
@@ -379,7 +376,7 @@ def compile_pa_decode_tile(
         # ── per-CTA scalar constants ──
         # softmax_scale and key_scale fold into the score tile; log2e folds into
         # the exp2 used for softmax.
-        scale_qk = fx.Float32(_softmax_scale * LOG2E) * fx.Float32(key_scale)
+        scale_qk = fx.Float32(softmax_scale * LOG2E) * fx.Float32(key_scale)
         v_scale_f = fx.Float32(value_scale)
         NEG_INF = fx.Float32(float("-inf"))
         ZERO_F = fx.Float32(0.0)
@@ -451,14 +448,14 @@ def compile_pa_decode_tile(
 
             q_scaled_chunk = q_chunk.to(fx.Float32) * inv_b
             _st_words(
-                sQ_off + qh_local * HEAD + lane16 * QCHUNK,
+                qh_local * HEAD + lane16 * QCHUNK,
                 _f32_to_fp8_words(q_scaled_chunk),
             )
             if lane16 == 0:
                 _st1(sQscale_off, qh_local, q_scale)
         else:
             _st_words(
-                sQ_off + qh_local * HEAD + lane16 * QCHUNK,
+                qh_local * HEAD + lane16 * QCHUNK,
                 fx.Vector.filled(QCHUNK // 4, 0, fx.Int32),
             )
             if lane16 == 0:
@@ -484,7 +481,7 @@ def compile_pa_decode_tile(
         q_ops = []
         for qkhe in range_constexpr(QKHE_LOOP):
             he_idx = qkhe * RGROUP_QUARTERS + rgroup
-            chunk = _view(sQ_off + lane16 * HEAD + he_idx * QK_CHUNK_ELEMS, fx.Int64, fx.make_layout(2, 1)).load()
+            chunk = _view(lane16 * HEAD + he_idx * QK_CHUNK_ELEMS, fx.Int64, fx.make_layout(2, 1)).load()
             q_ops.extend([chunk[0], chunk[1]])
         # q_ops[s] for s=0..N_SUBCHUNKS-1, s = qkhe*2+qkr, = head[he_idx*16+qkr*8 : +8] of qhead=lane16
 
@@ -503,8 +500,8 @@ def compile_pa_decode_tile(
         # step computes O[:, vh*VHE_SIZE:+VHE_SIZE] instead of materializing
         # the full [16, HEAD] at once.
         VHE_SIZE = HEAD // VHE_CHUNKS
-        tmpl_Op = fx.make_rmem_tensor(fx.make_layout((M, VHE_SIZE), (VHE_SIZE, 1)), fx.Float32)
-        OP_ELEMS = M * VHE_SIZE // (NWARP * WAVE)  # PV C-fragment elements/lane/chunk (probed = 4)
+        tmpl_Op = fx.make_rmem_tensor(fx.make_layout((MFMA_MNK, VHE_SIZE), (VHE_SIZE, 1)), fx.Float32)
+        OP_ELEMS = MFMA_MNK * VHE_SIZE // (NWARP * WAVE)  # PV C-fragment elements/lane/chunk (probed = 4)
 
         # ── raw dwordx4 V load (B operand) ──
         # lane (rgroup) takes the contiguous token slice [rgroup*64:+64] for
@@ -539,9 +536,7 @@ def compile_pa_decode_tile(
         # C-fragment vectors), rescaled by the softmax correction each tile.
         # `m` is carried the same way (see the init comment above).
         o_zero = fx.Vector.filled(OP_ELEMS, 0.0, fx.Float32)
-        for tt, ostate in range(
-            loop_start, loop_end, arith.index(1), init=[o_zero, o_zero, k_pf0, v_page_pf0, NEG_INF, ZERO_F]
-        ):
+        for tt, ostate in range(loop_start, loop_end, 1, init=[o_zero, o_zero, k_pf0, v_page_pf0, NEG_INF, ZERO_F]):
             o_acc = [ostate[0], ostate[1]]
             k_cur = ostate[2]  # this tile's prefetched K, as one (NCHUNK*N_SUBCHUNKS,) i64 vector
             v_page_cur = ostate[3]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
@@ -678,7 +673,7 @@ def compile_pa_decode_tile(
             # its correction factor is already in `m_old`/`m_new` registers --
             # no need to read back what it just wrote to sCorr_off/sL_off.
             l_new = l_prev
-            if tid < M:
+            if tid < MFMA_MNK:
                 gsum = _ld_lw_row(sLsum_off, tid).reduce(ReductionOp.ADD)
                 corr_reg = fx.Float32(exp2_amdgcn_scalar(m_old - m_new))
                 accum_sum = fx.Float32(
@@ -759,7 +754,7 @@ def compile_pa_decode_tile(
             sO_chunk = _view(
                 (sO_off + vh * VHE_SIZE * 4),
                 fx.Float32,
-                fx.make_layout((M, VHE_SIZE), (HEAD, 1)),
+                fx.make_layout((MFMA_MNK, VHE_SIZE), (HEAD, 1)),
             )
             fx.copy(copy_c, thr_copy_o_e.retile(frag_Oe), thr_copy_o_e.partition_D(sO_chunk), pred=None)
         gpu.barrier()
@@ -837,10 +832,10 @@ def compile_pa_decode_tile(
         context_lengths: fx.Tensor,
         key_scale: fx.Tensor,  # [1] per-tensor fp8 K dequant scale
         value_scale: fx.Tensor,  # [1] per-tensor fp8 V dequant scale
-        max_blocks_per_seq: Int32,
-        num_q_heads: Int32,
-        num_seqs: Int32,
-        num_kv_heads: Int32,
+        max_blocks_per_seq: fx.Int32,
+        num_q_heads: fx.Int32,
+        num_seqs: fx.Int32,
+        num_kv_heads: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
         pa_decode_tile_kernel(
