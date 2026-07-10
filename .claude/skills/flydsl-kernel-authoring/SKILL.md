@@ -3,7 +3,7 @@ name: flydsl-kernel-authoring
 description: >
   Comprehensive reference for authoring FlyDSL GPU kernels on AMD GPUs.
   Covers the layout algebra, tiled copy/MMA, buffer ops, loop-carried range loops,
-  SmemAllocator, autotuning, and common patterns. Use when writing,
+  SharedAllocator (LDS), autotuning, and common patterns. Use when writing,
   reviewing, or understanding FlyDSL kernel code.
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
@@ -56,8 +56,9 @@ Pipeline is built by `RocmBackend._pipeline_parts()` and split into three stages
 - `python/flydsl/expr/gpu.py` - GPU operations (thread_idx, block_idx, barrier)
 - `python/flydsl/expr/buffer_ops.py` - AMD buffer load/store intrinsics
 - `python/flydsl/expr/rocdl/` - MFMA/WMMA and other ROCm intrinsics (package: cdna4, cluster, inline_asm, tdm_ops, universal)
-- `python/flydsl/utils/smem_allocator.py` - LDS (shared memory) management
-- `kernels/` - Pre-built kernels (preshuffle_gemm.py, layernorm, softmax, rmsnorm)
+- `python/flydsl/expr/gpu.py` - `SharedAllocator` for LDS (shared memory), `thread_id`/`block_id`, `barrier`
+- `python/flydsl/utils/smem_allocator.py` - legacy `SmemAllocator` (un-migrated kernels only)
+- `kernels/` - Pre-built kernels, organized into subpackages: `gemm/` (preshuffle_gemm.py, mxfp4_preshuffle.py, ...), `norm/` (layernorm/softmax/rmsnorm), `attention/`, `moe/`, `mma/`, `common/`, `comm/`, `conv/`
 
 ---
 
@@ -160,7 +161,6 @@ fx.select(int_tuple, indices=[0, 2])      # Pick specific modes
 fx.group(int_tuple, begin=1, end=3)        # Group modes into nested tuple
 fx.append(base, elem)                      # Append mode
 fx.prepend(base, elem)                     # Prepend mode
-fx.zip(lhs, rhs)                           # Zip two IntTuples
 fx.slice(src, coord)                       # Slice at coordinate (None = keep mode)
 ```
 
@@ -204,7 +204,7 @@ launch(A, B, 1024)
 
 ### Current Syntax Quick Reference
 
-Use the current public FlyDSL surface from `kernels/preshuffle_gemm.py` when writing new kernels:
+Use the current public FlyDSL surface from `kernels/gemm/preshuffle_gemm.py` when writing new kernels:
 
 ```python
 Vec = fx.Vector
@@ -595,28 +595,37 @@ buffer_ops.buffer_store(data, rsrc, offset)
 
 ## 5. Shared Memory (LDS)
 
-### SmemAllocator Pattern
-```python
-from flydsl.utils.smem_allocator import SmemAllocator
-from flydsl.expr.typing import T
-from flydsl.compiler.kernel_function import CompilationContext
+### SharedAllocator Pattern (preferred for new kernels)
 
-allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
-lds_a = allocator.allocate_array(T.f16, 8192)  # Allocate typed arrays
-lds_b = allocator.allocate_array(T.f16, 8192)
+Declare the LDS storage as an ``@fx.struct`` of ``fx.Array`` fields, allocate it
+inside the kernel with ``fx.SharedAllocator``, then ``.view()`` each field as a
+layout. In the default ``static=True`` mode the compiler sizes a per-leaf static
+LDS global, so ``launch(smem=...)`` is left unset.
+
+```python
+import flydsl.expr as fx
+
+@fx.struct
+class SharedStorage:
+    a: fx.Array[fx.Float16, 8192]
+    b: fx.Array[fx.Float16, 8192]
 
 @flyc.kernel
 def my_kernel(A: fx.Tensor, ...):
-    lds_base = allocator.get_base()       # Get base ptr inside kernel
-    lds_a_ptr = lds_a(lds_base)           # SmemPtr for typed access
-    val = lds_a_ptr.load([idx])
-    lds_a_ptr.store(val, [idx])
-
-    # Finalize in GPU module body (before launch)
-    comp_ctx = CompilationContext.get_current()
-    with ir.InsertionPoint(comp_ctx.gpu_module_body):
-        allocator.finalize()
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_a = lds.a.view(fx.make_layout((64, 128), (128, 1)))
+    lds_b = lds.b.view(fx.make_layout((64, 128), (128, 1)))
+    # ds_write / ds_read happen through copy atoms or view loads/stores
 ```
+
+For the dynamic mode (``static=False``), the launch wrapper auto-infers
+``smem`` from ``SharedAllocator.allocated_bytes`` when ``smem=None``.
+
+### Legacy SmemAllocator
+
+`flydsl.utils.smem_allocator.SmemAllocator` remains for un-migrated kernels. Its
+surface is ``__init__``/``finalize``/``get_base`` plus ``SmemPtr.get/load/store``;
+prefer `SharedAllocator` for anything new.
 
 ### LDS Capacity
 | Architecture | GPU | LDS per CU |
@@ -643,7 +652,7 @@ result = rocdl.mfma_i32_16x16x32i8(a, b, acc)
 ```
 
 ### GEMM Pattern (Preshuffle)
-The preshuffle GEMM pattern in `kernels/preshuffle_gemm.py`:
+The preshuffle GEMM pattern in `kernels/gemm/preshuffle_gemm.py`:
 1. B matrix is pre-shuffled to layout: (N/16, K/64, 4, 16, kpack_bytes)
 2. A tiles loaded from global to LDS with XOR16 swizzle for bank-conflict avoidance
 3. K64-byte micro-steps: each step issues 2x K32 MFMA operations
@@ -670,7 +679,8 @@ for sh in [32, 16, 8, 4, 2, 1]:
 3. `gpu.barrier()`
 4. Wave 0 reads and reduces NUM_WAVES partials from LDS
 
-See `kernels/reduce.py` for reusable implementations.
+See the norm kernels in `kernels/norm/` (e.g. `rmsnorm_kernel.py`, which defines
+local `wave_reduce_add` / `block_reduce_add` closures) for worked reductions.
 
 ---
 
@@ -850,13 +860,13 @@ Pass raw `torch.Tensor` objects instead.
 
 3. **Cache stale after code changes**: The disk cache auto-invalidates on source/closure changes. Only set `FLYDSL_RUNTIME_ENABLE_CACHE=0` or clear `~/.flydsl/cache/` if you changed C++ passes or non-closure helpers.
 
-4. **LDS overflow**: Check capacity (64KB on gfx942, 160KB on gfx950). Use `SmemAllocator` which tracks allocations.
+4. **LDS overflow**: Check capacity (64KB on gfx942, 160KB on gfx950). `SharedAllocator` sizes the LDS global for you; the compiler errors if a static allocation exceeds the arch limit.
 
 5. **Dynamic vs Constexpr**: `Constexpr[int]` values are baked into IR -- different values produce different compiled kernels. Use `Int32` for truly dynamic values.
 
 6. **Tensor layout marking**: For dynamic shapes or alignment, use `flyc.from_dlpack(tensor).mark_layout_dynamic(leading_dim=0, divisibility=4)`.
 
-7. **SmemAllocator finalize**: Must call `allocator.finalize()` inside the GPU module body (use `CompilationContext.get_current().gpu_module_body`).
+7. **Legacy SmemAllocator finalize**: only for the legacy `SmemAllocator` path — call `allocator.finalize()` inside the GPU module body (`CompilationContext.get_current().gpu_module_body`). `SharedAllocator` needs no finalize step.
 
 8. **AMD wavefront size**: Always 64 on gfx9xx. Use shifts [32, 16, 8, 4, 2, 1] for full-wave reduction.
 
@@ -878,7 +888,7 @@ Pass raw `torch.Tensor` objects instead.
 | Tiling | Manual via divide/product operations | Auto-tiling with `tl.program_id` | Auto-tiling |
 | Memory access | Copy atoms, buffer load/store, TiledCopy | `tl.load`/`tl.store` | `gluon.load`/`gluon.store` |
 | MFMA | Direct `rocdl.mfma_*` intrinsics | `tl.dot` | `gluon.dot` |
-| Shared memory | SmemAllocator with explicit management | Implicit scratchpad | Implicit |
+| Shared memory | SharedAllocator + `@fx.struct` explicit management | Implicit scratchpad | Implicit |
 | Abstraction level | Low (near hardware) | Medium | Medium-High |
 | Compilation | MLIR (Fly dialect -> LLVM -> HSACO) | MLIR (Triton dialect -> LLVM) | MLIR |
 | Control | Maximum control over data layout and movement | Less control, more automation | Least control |
