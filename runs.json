@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T02:13:09Z",
+ "updated": "2026-07-10T02:23:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -83,20 +83,20 @@
    "branch": "main",
    "event": "push",
    "title": "perf(pa): use _run_compiled for PA decode kernel launches (#822)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29060914790",
    "created_at": "2026-07-10T00:49:33Z",
-   "updated_at": "2026-07-10T00:52:38Z",
+   "updated_at": "2026-07-10T02:21:28Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T00:52:37Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T02:21:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29060914790/job/86262525498"
     },
     {
@@ -111,10 +111,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T00:52:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T02:14:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29060914790/job/86262525525"
     }
    ]
