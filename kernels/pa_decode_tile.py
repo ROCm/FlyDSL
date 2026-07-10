@@ -40,7 +40,7 @@ multiple of 64 (64 or 128), matching production's own floor.
                     ceil(context_len/block_size), since the last tile always
                     issues a full-span load)
 * ``context_lengths`` [num_seqs]                                     int32
-* ``output``       [num_seqs, num_q_heads, head_dim]                 f16
+* ``output``       [num_seqs, num_q_heads, head_dim]                 same dtype as ``query`` (f16/bf16)
 
 Algorithm: one CTA (4 waves/256 threads) per (seq, kv_head) runs a flash-style
 online softmax over 256-token compute blocks gathered via ``block_tables``.
@@ -67,6 +67,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import Int32, T
 from flydsl.expr.vector import ReductionOp
 from kernels import dpp_utils
+from kernels.tensor_shim import _run_compiled
 from kernels.utils import (
     cdiv,
     exp2_amdgcn_scalar,
@@ -134,18 +135,13 @@ def compile_pa_decode_tile(
     PAGES_PER_CHUNK = TOK_PER_WARP // block_size  # pages spanned by one 64-token warp-chunk: 1 (bs=64) or 4 (bs=16)
     assert HEAD % (NWARP * MFMA_MNK) == 0, "head_dim must split across the 4 warps for PV"
 
-    # ── head_dim-derived QK contraction chunking (matches pa_decode_ps_kernel's
-    # own K/Q addressing -- see _pa_small_block_load_k_flat /
-    # _finish_q_fragments in pa_decode_fp8.py) ──
-    # The fp8 mfma_f32_16x16x32 atom's A/B operand is 8 fp8 elements (one i64)
-    # per lane per instruction. head_dim is chunked in two levels: a fixed
-    # 16-element chunk (QK_CHUNK_ELEMS, one dwordx4 load), 4 of which
-    # (RGROUP_QUARTERS = WAVE // MFMA_MNK, `rgroup` == production's `rowid`)
-    # make one 64-element fetch group; QKHE_LOOP (the outer fetch-group count)
-    # is what scales with head_dim:
-    #   QKHE_LOOP = HEAD // (RGROUP_QUARTERS * QK_CHUNK_ELEMS)  (2 for HEAD=128, 1 for 64)
-    #   N_SUBCHUNKS = QKHE_LOOP * (QK_CHUNK_ELEMS // 8)          (4 for HEAD=128, 2 for 64)
-    # head_dim element for (qkhe, rgroup, qkr): (qkhe*RGROUP_QUARTERS+rgroup)*QK_CHUNK_ELEMS + qkr*8
+    # head_dim-derived QK chunking (matches pa_decode_ps_kernel's K/Q
+    # addressing): the fp8 MFMA operand is 8 fp8 elements (one i64) per lane
+    # per instruction. head_dim splits into a fixed 16-element chunk
+    # (QK_CHUNK_ELEMS, one dwordx4 load), 4 of which (RGROUP_QUARTERS,
+    # `rgroup` == production's `rowid`) make one 64-element fetch group;
+    # QKHE_LOOP is the fetch-group count and scales with head_dim. head_dim
+    # element for (qkhe, rgroup, qkr): (qkhe*RGROUP_QUARTERS+rgroup)*QK_CHUNK_ELEMS+qkr*8
     RGROUP_QUARTERS = 4
     QK_CHUNK_ELEMS = 16
     QKHE_LOOP = HEAD // (RGROUP_QUARTERS * QK_CHUNK_ELEMS)
@@ -183,18 +179,12 @@ def compile_pa_decode_tile(
     sQ_off = 0
     sQ_bytes = M * HEAD * 1  # fp8
     sP_off = sQ_off + sQ_bytes
-    # sP's per-qhead row is padded 16 bytes past its TILE_TOK data bytes: an
-    # unpadded TILE_TOK=256B stride is a multiple of the 32-bank*4B=128B LDS
-    # wrap, so every (qh, l16g) write in the P-pack store below lands on the
-    # SAME bank across all 16 qh values -- a 16-way bank conflict, verified
-    # by direct bank-index computation (`(qh*TILE_TOK//4 + l16g) % 32` is
-    # identical for every qh, since TILE_TOK//4=64 is a multiple of 32).
-    # +16B is the SMALLEST padding that both cuts the worst-case conflict to
-    # 2-way AND keeps the row stride a multiple of 16B -- required for the PV
-    # read's ds_read_b128 (128-bit) vectorized loads to stay aligned; +8B
-    # also cuts the conflict to 2-way but breaks that 16B alignment, forcing
-    # narrower/more LDS load instructions and measuring ~3.5% *slower*
-    # despite the fixed bank conflict (confirmed via interleaved A/B).
+    # sP's per-qhead row is padded 16B past TILE_TOK: an unpadded 256B stride
+    # is a multiple of the 32-bank*4B LDS wrap, so every (qh, l16g) P-pack
+    # write hits the same bank across all 16 qh values. +16B is the smallest
+    # padding that both breaks the conflict and keeps the row 16B-aligned for
+    # the PV read's ds_read_b128 loads (+8B also breaks it but misaligns
+    # those loads, measuring slower overall).
     SP_ROW_BYTES = TILE_TOK + 16
     sP_bytes = M * SP_ROW_BYTES  # fp8, padded rows (only the first TILE_TOK bytes/row hold real data)
     sO_off = sP_off + sP_bytes
@@ -204,11 +194,9 @@ def compile_pa_decode_tile(
     sCorr_off = sL_off + M * f32
     sQscale_off = sCorr_off + M * f32  # per-row query dequant scale
     # Cross-warp reduction scratch: per (query row, warp) local max/sum. Row
-    # stride is padded to NWARP+1 (not NWARP): a plain 4-float/16-byte stride
-    # wraps the 32-bank LDS twice, so all 16 rows writing/reading every tile
-    # hit a 2-way bank conflict (row r and r+8 share a bank); 5 is coprime
-    # with 32 banks, so every row lands on a distinct bank -- same fix as
-    # pa_decode_ps_kernel's PROB_ROW_STRIDE_BYTES padding.
+    # stride padded to NWARP+1 (not NWARP), since a plain 16-byte stride
+    # wraps the 32-bank LDS twice (row r and r+8 share a bank); 5 is coprime
+    # with 32 banks, avoiding the conflict.
     NWARP_PAD = NWARP + 1
     sLmax_off = sQscale_off + M * f32
     sLsum_off = sLmax_off + M * NWARP_PAD * f32
@@ -225,7 +213,7 @@ def compile_pa_decode_tile(
         # per-partition partial outputs (combined by the reduce kernel when NP>1):
         pmax_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, GS]   row max
         psum_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, GS]   row sum
-        pout_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, GS, HEAD] bf16, normalized O_p/l_p
+        pout_ptr: fx.Tensor,  # [num_seqs, num_kv_heads, num_partitions, GS, HEAD] Q_DTYPE, normalized O_p/l_p
         query_ptr: fx.Tensor,  # [num_seqs, num_q_heads, HEAD]
         key_cache_ptr: fx.Tensor,  # [num_blocks, num_kv_heads, HEAD//16, block_size, 16] (blocked, see module docstring)
         value_cache_ptr: fx.Tensor,  # [num_blocks, num_kv_heads, block_size//16, HEAD, 16] (blocked, see module docstring)
@@ -244,21 +232,12 @@ def compile_pa_decode_tile(
         part = fx.Int32(gpu.block_id("z"))  # context partition handled by this CTA
         n_kv = num_q_heads // GS  # num_kv_heads
 
-        # fx.copy-based K/V/Q/context_len loaders (see fp8_gemm_utils.py's
-        # G2SLoader/StoreC pattern), indexed by the same raw byte/element
-        # offset the raw-pointer loaders already compute (fp8 is 1B/elem, so
-        # byte offset == element index).
-        # `logical_divide(..., make_layout(1, 1))` + `slice` only picks the
-        # start element; the copy atom's own width determines how much
-        # actually gets copied per call.
-        #
-        # K/V/context_len use UniversalCopy128b/32b over a plain raw
-        # addrspace(1) pointer (same `llvm.load` CopyOpUniversalCopyType
-        # emits, matching the global_load_i64x2/i32 this replaces) -- no
-        # buffer-resource descriptor. Q keeps the buffer-resource
-        # BufferCopy128b path. Which of the two `copy_op` is (a
-        # CopyOpCDNA3BufferCopyType or a plain CopyOpUniversalCopyType)
-        # decides whether the source needs a buffer-resource descriptor.
+        # fx.copy-based K/V/Q/context_len loaders, indexed by the same raw
+        # byte/element offset the raw-pointer loaders already compute (fp8 is
+        # 1B/elem, so byte offset == element index). K/V/context_len use
+        # UniversalCopy128b/32b over a plain raw pointer (no buffer-resource
+        # descriptor); Q keeps the buffer-resource BufferCopy128b path --
+        # `copy_op`'s type decides which.
         def _make_flat_loader(tensor_ptr, elem_ty, reg_width, copy_op):
             use_buffer_resource = isinstance(copy_op, fx.rocdl.CopyOpCDNA3BufferCopyType)
             copy_atom = fx.make_copy_atom(copy_op, elem_ty)
@@ -395,62 +374,35 @@ def compile_pa_decode_tile(
             return _view(off, fx.Int32, fx.make_layout(PAGES_PER_CHUNK, 1)).load()
 
         # ── raw dwordx4 K load (A operand), pa_decode_ps_kernel's layout ──
-        # CONTIGUOUS-per-warp token assignment: token = warp*TOK_CHUNK +
-        # a*c16 + lane16 (each warp owns one contiguous 64-token run
-        # [warp*64:+64], matching pa_decode_ps_kernel's own per-warp token
-        # ownership -- unlike the earlier interleaved scheme, where warp
-        # `warp`'s tokens were four separate 16-token windows spread across
-        # the whole 256-token tile: a*64+warp*16+lane16). Softmax's mask
-        # (_ct/base_tok_f below) and the P-pack write position must encode
-        # this SAME formula for correctness; V's own addressing partitions
-        # tokens by `rgroup` (a different, already-contiguous split) and sP
-        # is addressed by actual token value either way, so neither needs to
-        # change.
+        # Contiguous-per-warp token assignment: token = warp*TOK_CHUNK +
+        # a*c16 + lane16. Softmax's mask (_ct/base_tok_f below) and the
+        # P-pack write position must encode this same formula.
         #
-        # head_dim chunk index = qkhe*RGROUP_QUARTERS+rgroup (`rgroup` ==
-        # production's `rowid`), each chunk one dwordx4 (16B) -- same formula
-        # as `_pa_small_block_load_k_flat`.
-        #
-        # key_cache_ptr uses pa_decode_ps_kernel's own BLOCKED layout
-        # [num_blocks, num_kv_heads, HEAD//16, block_size, 16] (fp8), NOT the
-        # plain [num_blocks,num_kv_heads,block_size,HEAD] layout: the 16-byte
-        # head-chunk is innermost/contiguous per token, so adjacent lanes
-        # (adjacent TOKENS, per the MFMA-fixed lane roles) land 16 bytes
-        # apart -- coalesced. The plain layout instead puts adjacent lanes
-        # HEAD bytes apart (confirmed via ATT trace to be the dominant stall,
-        # ~58% of all cycles, from poor coalescing).
-        #
-        # A warp's own 64-token run spans PAGES_PER_CHUNK pages (1 at
-        # block_size=64, 4 at block_size=16): `page_within_warp = (a*c16) //
-        # block_size`, `within_page_tok = (a*c16 + lane16) % block_size`,
-        # `physical_page = base_page + warp*PAGES_PER_CHUNK + page_within_warp`
-        # -- and because a warp's PAGES_PER_CHUNK pages are now always
-        # CONSECUTIVE (unlike the old interleaved formula, which was only
-        # consecutive across `a` at block_size=64), `_k_ops_flat` below folds
-        # every case into one wide scalar load, not just block_size=64.
-        c_nhgroup = QCHUNK  # total 16-element head-chunks in the cache layout (== HEAD // 16)
+        # key_cache_ptr's BLOCKED layout [num_blocks, num_kv_heads, HEAD//16,
+        # block_size, 16] (fp8) keeps the 16-byte head-chunk innermost per
+        # token, so adjacent lanes (adjacent tokens) land 16 bytes apart --
+        # coalesced (a plain [...,block_size,HEAD] layout would not be).
+        # QCHUNK doubles as this layout's head-chunk count (== HEAD // 16).
 
         def _k_ops(phys, a):
             within_page_tok = (a * c16 + lane16) % block_size
             ops = []
             for qkhe in range_constexpr(QKHE_LOOP):
                 he_idx = qkhe * RGROUP_QUARTERS + rgroup
-                base = (((phys * n_kv + kv_h) * c_nhgroup + he_idx) * block_size + within_page_tok) * QK_CHUNK_ELEMS
+                base = (((phys * n_kv + kv_h) * QCHUNK + he_idx) * block_size + within_page_tok) * QK_CHUNK_ELEMS
                 w = _k_load16(base)  # head[he_idx*16 : +16] -> k_step 2*qkhe, 2*qkhe+1
                 ops.extend([w[0], w[1]])
             return ops  # N_SUBCHUNKS i64 operands
 
         # All NCHUNK chunks' K as one flat (NCHUNK*N_SUBCHUNKS,) i64 vector --
-        # one loop-carried value (not NCHUNK*N_SUBCHUNKS scalars) so tile
-        # tt+1's K prefetch overlaps tt's softmax+PV, like pa_decode_ps_kernel.
+        # one loop-carried value so tile tt+1's K prefetch overlaps tt's
+        # softmax+PV, like pa_decode_ps_kernel.
         def _k_ops_flat(tt_i32):
             _, base_page = _tile_tok0_and_page(tt_i32)
             # This warp's PAGES_PER_CHUNK physical pages are consecutive,
-            # starting at base_page + warp*PAGES_PER_CHUNK -- one wide
-            # `vec_width=PAGES_PER_CHUNK` scalar load replaces the old
-            # per-`a` (or, at PAGES_PER_CHUNK==1, per-NCHUNK) lookups, same
-            # `_load_phys_scalar`-into-LDS-broadcast-free pattern as
-            # `pa_decode_ps_kernel`'s own `_pa_small_block_stage_phys_blocks`.
+            # starting at base_page + warp*PAGES_PER_CHUNK -- one wide scalar
+            # load, same pattern as pa_decode_ps_kernel's own
+            # `_pa_small_block_stage_phys_blocks`.
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             phys_vec = (
                 fx.Vector.from_elements([fx.Int32(fetched)], dtype=fx.Int32)
@@ -462,21 +414,20 @@ def compile_pa_decode_tile(
                 phys = fx.Int32(phys_vec[(a * c16) // block_size])
                 flat.extend(_k_ops(phys, a))
             if const_expr(HEAD == 64):
+                # Groups the raw K loads into one scheduling unit for the
+                # post-RA scheduler (zero VGPR cost); measured faster at
+                # head_dim=64, not re-verified at head_dim=128.
                 fx.rocdl.sched_vmem(len(flat) // 2)
             return fx.Vector.from_elements(flat, dtype=fx.Int64)
 
         # ── prologue: prefetch the first tile's K ──
-        # Issued before Q-quant's barrier (not right before the main loop), so
-        # K's global loads and block-table lookups can be scheduled
-        # concurrently with Q's own global load -- a barrier is a hard
-        # reordering boundary, so issuing them together lets the memory
-        # subsystem overlap their latency instead of paying both serially.
+        # Issued before Q-quant's barrier so K's loads and block-table lookup
+        # overlap Q's own global load instead of paying both serially.
         num_tiles_m1 = num_tiles - 1
         start_safe = arith.select(part_start < num_tiles, part_start, num_tiles_m1)
         k_pf0 = _k_ops_flat(start_safe)
-        # V page-index prefetch, issued here too so it overlaps Q-quant the
-        # same way K's does; the LDS write is visible after the barrier below,
-        # so `_v_page_read_row` needs no barrier of its own.
+        # V page-index prefetch, issued here too for the same overlap; the
+        # LDS write is visible after the barrier below.
         _v_page_fetch_and_stage(start_safe)
 
         # ── per-CTA scalar constants ──
@@ -541,11 +492,9 @@ def compile_pa_decode_tile(
         # (qh_local = warp*4 + rgroup) and lane16 selects that row's own
         # QCHUNK-element head-dim slice, so every thread loads, converts, and
         # packs exactly one chunk -- matching pa_decode_ps_kernel's
-        # `_finish_q_fragments` lane-per-chunk layout. The row's absmax is then
-        # a DPP butterfly reduction over the 16 lanes sharing (warp, rgroup)
-        # (see below), no LDS/barrier needed for the reduction itself. A
-        # single-lane-per-row design here previously idled ~240 threads at the
-        # barrier, costing ~7-8% of all kernel stall cycles at bs=128/ctx=16384.
+        # `_finish_q_fragments` lane-per-chunk layout. The row's absmax is a
+        # DPP butterfly reduction over the 16 lanes sharing (warp, rgroup),
+        # no LDS/barrier needed for the reduction itself.
 
         qh_local = warp * 4 + rgroup  # 0..15: this thread's query row
 
@@ -555,18 +504,11 @@ def compile_pa_decode_tile(
             chunk_off = row_byte0 + lane16 * (QCHUNK * 2)
             q_chunk = _q_load_chunk(chunk_off // 2)  # byte offset -> element index
 
-            # Local absmax over this thread's own QCHUNK elements, kept in
-            # Q_DTYPE (widening to f32 is monotonic for both f16/bf16, so
-            # comparing at native width avoids a full-vector fpext forcing
-            # scalarized conversions), then a butterfly reduce over the 16
-            # lanes owning this row (fixed warp/rgroup, lane16 varies).
-            #
-            # The cross-lane reduce uses `dpp_utils.dpp_xor_f32` (raw
-            # llvm.amdgcn.update.dpp.i32), matching pa_decode_ps_kernel's own
-            # analogous reduction (`_finish_q_fragments`) instead of the DSL's
-            # generic `shuffle_xor`: DPP runs in the VALU crossbar with no
-            # LDS/DS-unit involvement, cheaper than even shuffle_xor's
-            # ds_swizzle path for a 16-lane XOR (confirmed via LLVM IR).
+            # Local absmax over this thread's own QCHUNK elements (compared at
+            # native Q_DTYPE width, widening to f32 only after), then a DPP
+            # butterfly reduce over the 16 lanes owning this row -- cheaper
+            # than `shuffle_xor`'s ds_swizzle path, matching
+            # pa_decode_ps_kernel's own `_finish_q_fragments`.
             local_absmax = fmath.absf(q_chunk).reduce(ReductionOp.MAX)
             absmax = local_absmax.to(fx.Float32)
             for sh in (8, 4, 2, 1):
@@ -637,21 +579,12 @@ def compile_pa_decode_tile(
         OP_ELEMS = M * VHE_SIZE // (NWARP * WAVE)  # PV C-fragment elements/lane/chunk (probed = 4)
 
         # ── raw dwordx4 V load (B operand), pa_decode_ps_kernel's layout ──
-        # PV contracts over token, so the token->k_step mapping is free as
-        # long as V and P (p_ops) agree: lane (rgroup) takes the contiguous
-        # token slice [rgroup*64:+64] for its head (vh*VHE_SIZE+warp*16+
-        # lane16), loaded as 4x i64x2 (128-bit) = 8 k_step operands.
-        #
-        # value_cache_ptr uses pa_decode_ps_kernel's own "trans_v" BLOCKED
+        # lane (rgroup) takes the contiguous token slice [rgroup*64:+64] for
+        # its head (vh*VHE_SIZE+warp*16+lane16). value_cache_ptr's "trans_v"
         # layout [num_blocks, num_kv_heads, block_size//16, head_dim, 16]
-        # (fp8): 16 CONSECUTIVE TOKENS innermost (V is token-vectorized, not
-        # head-dim-vectorized like K), block_size//16 token-subblock outermost.
-        #
-        # A rgroup's 64-token run can span multiple block_size pages: outer
-        # loop `sub` picks the page, inner loop `step` walks that page's own
-        # token run in 16-token increments (production's token-subblock
-        # index) -- collapses to single-page/4-step at block_size=64 and
-        # 4-pages/1-step at block_size=16, both totaling NVOPS=8 i64 operands.
+        # keeps 16 consecutive tokens innermost (V is token-vectorized,
+        # unlike K); a rgroup's 64-token run can span multiple block_size
+        # pages, so `sub`/`step` below walk pages/16-token sub-blocks.
         NVOPS = TILE_TOK // MFMA_K  # 8 PV k_steps (256 tokens / K=32)
         STEPS_PER_PAGE = block_size // 16
 
@@ -667,24 +600,10 @@ def compile_pa_decode_tile(
                     base = (((phys_row[sub] * n_kv + kv_h) * STEPS_PER_PAGE + step) * HEAD + head_element) * 16
                     w = _v_load16(base)
                     ops.extend([w[0], w[1]])
-            # `sched_group_barrier(mask_vmem_rd, NVOPS, 0)` groups all NVOPS
-            # raw V loads above into one scheduling unit -- a scheduling-only
-            # intrinsic with no result register and no VGPR-live-range cost,
-            # unlike every register-carrying V-hiding attempt above. (A
-            # first attempt inserting this hint after EACH individual load
-            # instead of once for the whole group measured ~1% *slower*,
-            # t=-3.49 -- it forced per-load serialization instead of letting
-            # the scheduler batch all NVOPS loads together for memory-level
-            # parallelism; reverted in favor of this single whole-group form.)
-            #
-            # Measured shape-dependent: ~2.2% faster at head_dim=64/ctx=16384
-            # (t=8.35, 16-sample interleaved A/B) but ~3.2% *slower* at
-            # head_dim=128/ctx=32768 (t=-2.14, VHE_CHUNKS=2 there calls this
-            # hint twice per tile instead of once, apparently over-
-            # constraining the scheduler across the two vh chunks). Gated to
-            # HEAD==64 only, matching this file's existing head_dim compile-
-            # time specialization elsewhere (QKHE_LOOP/VHE_CHUNKS/NCHUNK).
             if const_expr(HEAD == 64):
+                # Groups the NVOPS raw V loads into one scheduling unit for
+                # the post-RA scheduler (zero VGPR cost); measured faster at
+                # head_dim=64, slower at head_dim=128 (not applied there).
                 fx.rocdl.sched_vmem(len(ops) // 2)
             return ops  # NVOPS i64, the 64-token contiguous run for this head
 
@@ -718,31 +637,16 @@ def compile_pa_decode_tile(
 
             # Prefetch next tile's K; loads overlap softmax+PV below. Backing
             # pages almost always change tile-to-tile at these small block
-            # sizes, so every tile re-derives its page(s) fresh.
-            #
-            # (Issuing this before the QK MFMAs instead was tried -- legal,
-            # since `_k_ops_flat` has no dependency on QK's output, but it
-            # extended k_next's live range across the whole QK MFMA loop. The
-            # compiler responded with AGPR-form MFMA and far higher register
-            # pressure (VGPR 16+AGPR 128=144 vs. 112), dropping occupancy
-            # 4->3 waves/SIMD and measuring ~9.5% *slower* despite the extra
-            # hiding window -- same failure mode as V's attempt below. Reverted.)
-            #
-            # (V is deliberately NOT carried the same way: prefetching v_next
-            # one tile ahead, mirroring k_next, pushed VGPR up ~20% (136->164)
-            # and measured slower. V's load is deferred to right before its PV
-            # use instead -- see the PV loop below -- cutting peak VGPR far
-            # more (132->112, crossing the 3->4 waves/SIMD boundary) and
-            # measuring ~10% *faster* despite losing that hiding window.)
+            # sizes, so every tile re-derives its page(s) fresh. V is
+            # deliberately NOT carried the same way -- it's loaded right
+            # before its PV use instead (see below) to keep peak VGPR lower.
             #
             # On a partition's last tile there's no next tile, so skip with a
             # real conditional (not `arith.select`, which only clamps the
-            # index while the loads still execute) -- unconditional
-            # prefetching there was a measurable waste for thin partitions.
+            # index while the loads still execute).
             #
             # k_cur/k_next are one (NCHUNK*N_SUBCHUNKS,) i64 Vector (a single
-            # MLIR-backed value, not NCHUNK*N_SUBCHUNKS scalars), so this
-            # if-reassignment works directly, no per-element unpack.
+            # MLIR-backed value), so this if-reassignment works directly.
             tt1 = tt_i32 + 1
             k_next = k_cur
             if tt1 < part_end:
@@ -792,26 +696,13 @@ def compile_pa_decode_tile(
             if tt1 < part_end:
                 v_page_next = _v_page_read_row()
 
-            # Re-test of an idea previously reverted at head_dim=128 (see the
-            # PV loop's own comment below, "three variants ... none produced
-            # a verified win"): `v_page_cur` has no dependency on anything
-            # computed THIS tile (it's this tile's own already-prefetched
-            # page row, available at loop entry), so its raw V loads can
-            # legally be issued here -- right after the pass-1 barrier,
-            # before pass 2's exp/pack/store work -- instead of right before
-            # PV with nothing to hide behind. The earlier attempts predate
-            # the fastmath + LDS bank-conflict fixes elsewhere in this file,
-            # which dropped baseline VGPR enough (84+4=88, now equal to
-            # production's own combined VGPR at this shape) that this costs
-            # only +8 VGPR (92+4=96) -- NOT enough to cross the 5->4
-            # waves/SIMD occupancy boundary (512//96 still floors to 5) the
-            # way the old attempts did. Measured ~4.9% faster (t=27.4,
-            # 16-sample interleaved A/B) at head_dim=64/ctx=16384 -- this is
-            # what closed the remaining gap to pa_decode_ps_kernel and then
-            # some (tile now ~1.2% *faster*, t=-8.3). Only applied at
-            # HEAD==64 (VHE_CHUNKS==1: this loads exactly the one vh chunk
-            # PV will use, not "the full VHE_CHUNKS set" the reverted
-            # head_dim=128 attempts hoisted) -- not re-verified at HEAD==128.
+            # `v_page_cur` has no dependency on anything computed this tile,
+            # so at HEAD==64 its V loads are issued here -- right after the
+            # pass-1 barrier, overlapping pass 2's exp/pack/store work --
+            # instead of right before PV with nothing to hide behind. Costs
+            # +8 VGPR, not enough to drop occupancy at this shape. Not
+            # applied at HEAD==128 (VHE_CHUNKS==2 there, higher VGPR cost;
+            # see the PV loop's own comment below).
             v_vh_early = None
             if const_expr(HEAD == 64):
                 v_vh_early = _v_ops(v_page_cur, 0)
@@ -848,18 +739,11 @@ def compile_pa_decode_tile(
                 fx.Vector.from_elements(words, dtype=fx.Int32)
             )
             if const_expr(HEAD == 64):
-                # `sched_group_barrier(mask_dswr, NCHUNK, 0)`: same
-                # scheduling-only, zero-VGPR-cost mechanism as the
-                # `sched_vmem` hints on K/V's raw loads above (see `_v_ops`),
-                # now grouping this LDS write instead. Measured ~0.68%
-                # faster (t=2.82, 16-sample interleaved A/B) on top of the
-                # K/V sched_vmem wins, no regression at head_dim=128 (not
-                # applied there). A matching `sched_dsrd` hint on the P·V
-                # read side below (`p_ops`) was tried and measured a severe
-                # ~10% *slower* result instead -- that read is already one
-                # fused vectorized LDS load, not a multi-instruction loop
-                # like this store, so grouping it fought the scheduler
-                # rather than helping it.
+                # Same scheduling-hint mechanism as the `sched_vmem` calls
+                # above, grouping this LDS store instead; measured faster.
+                # A matching `sched_dsrd` hint on the P·V read below (already
+                # one fused vectorized load, not a multi-instruction store)
+                # measured much slower and isn't used.
                 fx.rocdl.sched_dswr(NCHUNK)
             for sh in (16, 32):
                 ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=arith.FastMathFlags.contract)
@@ -905,76 +789,10 @@ def compile_pa_decode_tile(
             corr_vec = _view(corr_off, fx.Float32, fx.make_layout(OP_ELEMS, 1)).load()
             corr_s = [corr_vec[v] for v in range_constexpr(OP_ELEMS)]
             for vh in range_constexpr(VHE_CHUNKS):
-                # At HEAD==64, `v_vh` is actually `v_vh_early` (loaded right
-                # after the pass-1 barrier -- see that assignment's own
-                # comment) rather than hoisted here right before its MFMA
-                # use. This overturns the finding right below: at the time
-                # it was written (predating the fastmath + LDS bank-conflict
-                # fixes elsewhere in this file), issuing V any earlier than
-                # right-before-use always cost enough VGPR to drop occupancy
-                # and lose net. Once baseline VGPR fell to 88 (equal to
-                # production's), the SAME early-issue idea cost only +8 VGPR
-                # -- not enough to cross the occupancy boundary -- and
-                # measured ~4.9% faster (t=27.4). At HEAD==128 (VHE_CHUNKS==
-                # 2, not re-verified under the current baseline) this
-                # right-before-use load is still used, trading hiding window
-                # for lower peak VGPR (the kernel's binding occupancy
-                # constraint -- see the K-prefetch comment above for the
-                # measured win this bought there). Re-confirmed at
-                # large tiles-per-partition (bs=128, ctx up to 65536) with
-                # THREE variants -- full-tile ping-pong issued right after the
-                # pass-1 barrier, issued right after this tile's own PV MFMA
-                # (mirroring pa_decode_ps_kernel's placement), and a smaller
-                # one-vh-ahead software pipeline -- none produced a verified
-                # win: the full-tile variants measured ~15-18% *slower*
-                # (AGPR-heavy 3-waves/SIMD occupancy loss); the one-vh
-                # pipeline kept occupancy unchanged but left the ATT stall
-                # profile statistically unchanged too (VMEM-wait 38.06% vs
-                # baseline 37.49%) and its wall-clock delta was noise-level
-                # across repeated runs. Root cause (confirmed via ISA-level,
-                # exec-count-normalized ATT analysis): tile's per-tile
-                # cross-warp softmax reduction (`shuffle_xor`-based, ~742/781
-                # below) cost ~3x more cycles per instance than
-                # pa_decode_ps_kernel's structurally-identical reduction, for
-                # reasons rooted in inter-warp LDS/DS-unit contention, not
-                # source-level coding or scheduling differences -- so tile
-                # couldn't afford to trade a wave of occupancy for V-hiding
-                # the way production can, and reordering V's load within the
-                # existing occupancy budget didn't move the needle since the
-                # compiler's own scheduler already extracts what overlap is
-                # available regardless of source-level call placement. Fixed
-                # not by further V-prefetch tuning but by the contiguous-
-                # per-warp token reassignment above (K's addressing / mask /
-                # P-pack): measured (15-sample A/B, since the true ~3-5%
-                # effect is smaller than single-digit-sample noise) ~3.1%
-                # faster at ctx=32768 (t=2.42) and ~4.9% faster at ctx=65536
-                # (t=5.16) at bs=128, block_size=64, head_dim=128. A second,
-                # independent win: pa_decode_ps_kernel applies
-                # `fastmath=contract` (FMA fusion) to its own cross-warp sum
-                # combine and PV correction-scale (`_cross_warp_softmax_and_
-                # prob_pack`/`_pv_mfma`); tile used plain `+`/`*` there with
-                # no fastmath at all. Matching it (see `ls.addf`/`l_new`
-                # combine/`o_acc[vh]` update below) dropped VGPR 92->84 at
-                # head_dim=64 (fewer fused instructions, not a VGPR/occupancy
-                # trade) and measured ~1.1% faster at head_dim=64/ctx=16384
-                # (t=3.81, 8-sample interleaved A/B), with no regression at
-                # head_dim=128/ctx=32768 (t=-0.28, noise-level).
-                #
-                # A fourth idea specifically targeting V's exposed HBM latency
-                # (the ~7% residual gap at head_dim=64/ctx=16384 after the LDS
-                # bank-conflict fix elsewhere in this file): `rocdl.
-                # global_prefetch` (llvm.amdgcn.global.prefetch) issues a
-                # fire-and-forget L2 cache-warm hint with NO destination
-                # register, so unlike every attempt above it can't cost VGPR/
-                # occupancy at all -- fetch next tile's V bytes via this
-                # intrinsic right after `v_page_next` becomes available, no
-                # register-carried state needed. Untried avenue on paper, but
-                # it hard-crashes ("Fatal Python error: Aborted") during the
-                # compile pipeline on gfx942 -- confirming this file's own
-                # source comment in tdm_ops.py's `l2_prefetch_tile`: its LLVM
-                # ISel pattern was written for gfx1250's global_prefetch_b8
-                # and is not merely "silently dropped" elsewhere, it's
-                # unsupported outright on gfx942. Not usable here.
+                # At HEAD==64, `v_vh` is `v_vh_early` (loaded right after the
+                # pass-1 barrier, see above); at HEAD==128 it's loaded here,
+                # right before its MFMA use, trading hiding window for lower
+                # peak VGPR (the kernel's binding occupancy constraint).
                 v_vh = v_vh_early if const_expr(HEAD == 64) else _v_ops(v_page_cur, vh)
                 acc = arith.constant_vector(0.0, T.f32x4)
                 for s in range_constexpr(NVOPS):
@@ -1060,7 +878,7 @@ def compile_pa_decode_tile(
             # softmax-denominator reciprocal (`inv_sum = rcp_f32(safe_sum)`).
             inv_l = fx.Float32(rcp_f32(_ld1(sL_off, row_e)))
             o_out = (o_v * fx.Vector.from_elements([inv_l], dtype=fx.Float32).broadcast_to(ELEMS_PER_THREAD)).to(
-                fx.Float16
+                Q_DTYPE
             )
             # Divide this (seq, qh) row's HEAD axis into ELEMS_PER_THREAD-wide
             # chunks and pick this lane's chunk (no manual byte offset).
@@ -1150,6 +968,8 @@ def pa_decode_tile(
     _, _, v_subblocks, v_head_dim, v_width = value_cache.shape
     # V's "trans_v" layout matches pa_decode_ps_kernel's own.
     assert v_head_dim == head_dim and v_width == 16 and v_subblocks == block_size // 16
+    assert block_tables.dtype == torch.int32, f"block_tables must be int32, got {block_tables.dtype}"
+    assert context_lengths.dtype == torch.int32, f"context_lengths must be int32, got {context_lengths.dtype}"
     query_group_size = num_q_heads // num_kv_heads
     max_blocks_per_seq = block_tables.shape[1]
     if query.dtype == torch.bfloat16:
@@ -1158,27 +978,20 @@ def pa_decode_tile(
         query_dtype = "f16"
     else:
         raise ValueError(f"pa_decode_tile only supports f16/bf16 query, got {query.dtype}")
+    assert (
+        output.dtype == query.dtype
+    ), f"pa_decode_tile requires output.dtype == query.dtype, got {output.dtype} vs {query.dtype}"
 
     # Choose the number of context partitions (grid.z). This kernel launches a
     # *static* one-CTA-per-partition grid (unlike production's *persistent*
-    # kernel), so it needs its own NP heuristic. Two regimes, measured
-    # directly on an 80-CU MI308X:
-    #
+    # kernel), so it needs its own NP heuristic, tuned via a direct sweep on
+    # an 80-CU MI308X. Two regimes:
     #   - CU-STARVED (num_seqs*num_kv_heads < device CU count): push NP up to
-    #     `cu_fill_np`, uncapped by tiles-per-partition (idle CUs are worse
-    #     than thin partitions). Measured: batch=1, ctx=16384 -> NP=8 to a
-    #     CU-filling NP=32 is 2.5x faster; batch=3, ctx=1027 [5 tiles] ->
-    #     NP=5 beats NP=1 by ~30%.
+    #     `cu_fill_np`, uncapped by tiles-per-partition -- idle CUs are worse
+    #     than thin partitions.
     #   - NOT CU-STARVED: further CTAs only add occupancy depth and reduce-
     #     kernel/prologue overhead, so cap tiles-per-partition to at least
-    #     MIN_TILES_PER_PARTITION. Measured: batch=81, ctx=16384 [64 tiles] ->
-    #     NP=5..8 all close, ~6-8% faster than NP=4; batch=81, ctx=1027
-    #     [5 tiles] -> uncapped NP=8 measured 30% *slower* than NP=2 (same
-    #     total CTAs, 648 vs 162, wasn't what mattered -- tiles-per-partition,
-    #     1 vs 3, was).
-    #
-    # TARGET_CTAS_PER_CU=8 and MIN_TILES_PER_PARTITION=2 were picked by a
-    # direct sweep on that hardware to land near every sweet spot above.
+    #     MIN_TILES_PER_PARTITION.
     from kernels.pa_decode_fp8 import get_recommended_splits
 
     TARGET_CTAS_PER_CU = 8
@@ -1229,7 +1042,14 @@ def pa_decode_tile(
     value_scale_t = (
         value_scale if isinstance(value_scale, torch.Tensor) else torch.tensor([float(value_scale)], device=dev)
     )
-    compiled["launch"](
+    assert (
+        key_scale_t.dtype == torch.float32 and key_scale_t.device == dev
+    ), f"key_scale tensor must be float32 on {dev}, got {key_scale_t.dtype} on {key_scale_t.device}"
+    assert (
+        value_scale_t.dtype == torch.float32 and value_scale_t.device == dev
+    ), f"value_scale tensor must be float32 on {dev}, got {value_scale_t.dtype} on {value_scale_t.device}"
+    _run_compiled(
+        compiled["launch"],
         output,
         pmax.view(-1),
         psum.view(-1),
@@ -1237,10 +1057,10 @@ def pa_decode_tile(
         query,
         key_cache,
         value_cache,
-        block_tables.to(torch.int32),
-        context_lengths.to(torch.int32),
-        key_scale_t.to(dtype=torch.float32, device=dev),
-        value_scale_t.to(dtype=torch.float32, device=dev),
+        block_tables,
+        context_lengths,
+        key_scale_t,
+        value_scale_t,
         int(max_blocks_per_seq),
         int(num_q_heads),
         int(num_seqs),
@@ -1262,14 +1082,15 @@ def pa_decode_tile(
             query_seq_len=1,
             query_group_size=GS,
             head_size=head_dim,
-            output_dtype_str="f16",
+            output_dtype_str=query_dtype,
             logits_dtype_str=query_dtype,
         )
-        reduce_compiled["launch"](
+        _run_compiled(
+            reduce_compiled["launch"],
             output.data_ptr(),
             psum.data_ptr(),  # exp_sums
             pmax.data_ptr(),  # max_logits
-            pout.data_ptr(),  # logits (already-normalized bf16 partials)
+            pout.data_ptr(),  # logits (already-normalized query_dtype partials)
             output.stride(0),
             0,  # stride_output_len: unused (query_length==1, query_idx always 0)
             GS * output.stride(1),

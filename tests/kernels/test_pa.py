@@ -21,7 +21,6 @@ try:
     import aiter
     from aiter import dtypes, per_tensor_quant, pertoken_quant
     from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
-    from aiter.test_common import checkAllclose
 except Exception as exc:
     pytest.skip(f"aiter is not available: {exc}", allow_module_level=True)
 
@@ -631,14 +630,13 @@ def summarize_comparison(
     atol: float,
     rtol: float,
 ) -> Tuple[int, Dict[str, object]]:
-    err = checkAllclose(expected, actual, atol=atol, rtol=rtol, msg=f"[{name}]")
-    err = 1 if err > 0 else 0
     diff_result = compare_arrays(
         actual.to(torch.float32).detach().cpu().numpy(),
         expected.to(torch.float32).detach().cpu().numpy(),
     )
-    print(f"{name} {'PASSED' if err == 0 else 'FAILED'}")
-    return err, diff_result
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol, msg=f"[{name}] mismatch")
+    print(f"{name} PASSED")
+    return 0, diff_result
 
 
 def run_pa_decode_ps_test(
@@ -1169,11 +1167,9 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
     results_df.to_csv(output_file, index=False)
     print(f"\nResults saved to {output_file}")
     print(f"\nSummary:\n{results_df}")
-    flydsl_errors = int(results_df["err_flydsl_ps"].sum())
-
-    if flydsl_errors:
-        raise AssertionError(f"{flydsl_errors} FlyDSL PS case(s) exceeded the Torch-reference tolerance")
-
+    # No aggregate error check needed here: summarize_comparison now raises via
+    # torch.testing.assert_close on the first out-of-tolerance case, so reaching
+    # this point means every case in results_df already passed.
     print("\nAll PS-only tests passed!")
 
 
@@ -1260,7 +1256,7 @@ def _run_pa_decode_tile_case(
     block_size: int,
     head_dim: int = 128,
     query_dtype: torch.dtype = torch.float16,
-) -> float:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     from kernels.pa_decode_tile import pa_decode_tile
 
     setup_seed(0)
@@ -1311,7 +1307,7 @@ def _run_pa_decode_tile_case(
             block_tables[s, b] = s * max_blocks + b
     context_lengths = torch.full((num_seqs,), context_len, dtype=torch.int32, device=dev)
 
-    output = torch.zeros(num_seqs, num_q_heads, head_dim, device=dev, dtype=torch.float16)
+    output = torch.zeros(num_seqs, num_q_heads, head_dim, device=dev, dtype=query_dtype)
     pa_decode_tile(
         output,
         query,
@@ -1337,10 +1333,10 @@ def _run_pa_decode_tile_case(
             vals[t] = vc[phys, :, :, within]
         q = query[s].unsqueeze(0).to(torch.float32)  # [1, num_q_heads, head_dim]
         refs.append(
-            reference_masked_attention(q, keys, vals, 1.0 / head_dim**0.5, torch.float16, is_causal=True).squeeze(0)
+            reference_masked_attention(q, keys, vals, 1.0 / head_dim**0.5, query_dtype, is_causal=True).squeeze(0)
         )
     ref = torch.stack(refs)
-    return (output.to(torch.float32) - ref.to(torch.float32)).abs().max().item()
+    return output.to(torch.float32), ref.to(torch.float32)
 
 
 @pytest.mark.parametrize("block_size", [16, 64])
@@ -1349,9 +1345,10 @@ def _run_pa_decode_tile_case(
 def test_pa_decode_tile_reference(num_kv_heads: int, group_size: int, context_len: int, block_size: int) -> None:
     # fp8 (e4m3) Q and P quantization limit accuracy; the error averages down with
     # context length (~1e-2 at ctx=17, ~1e-3 at ctx=1027), so use an fp8-appropriate
-    # tolerance rather than the f16-era 5e-3.
-    max_diff = _run_pa_decode_tile_case(num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size)
-    assert max_diff <= 1e-2, f"tile PA decode max diff {max_diff:.3e} exceeds tolerance"
+    # tolerance rather than the f16-era 5e-3. rtol=0: a pure absolute-diff check,
+    # matching this test's original max_diff <= 1e-2 semantics.
+    output, ref = _run_pa_decode_tile_case(num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size)
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode mismatch")
 
 
 @pytest.mark.parametrize("block_size", [16, 64])
@@ -1363,10 +1360,10 @@ def test_pa_decode_tile_reference_head_dim64(
     # head_dim=64 exercises the generalized RGROUP_WIDTH/N_SUBCHUNKS/QCHUNK/
     # VHE_CHUNKS formulas in kernels/pa_decode_tile.py (previously hardcoded
     # for head_dim=128 only); see compile_pa_decode_tile's docstring.
-    max_diff = _run_pa_decode_tile_case(
+    output, ref = _run_pa_decode_tile_case(
         num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size, head_dim=64
     )
-    assert max_diff <= 1e-2, f"tile PA decode (head_dim=64) max diff {max_diff:.3e} exceeds tolerance"
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (head_dim=64) mismatch")
 
 
 @pytest.mark.parametrize("block_size", [16, 64])
@@ -1375,7 +1372,7 @@ def test_pa_decode_tile_reference_bf16_query(context_len: int, block_size: int) 
     # Only the query load's element type changes for bf16 (see Q_DTYPE in
     # compile_pa_decode_tile); a small shape subset is enough to cover the
     # bf16 load path without re-running the full f16 grid.
-    max_diff = _run_pa_decode_tile_case(
+    output, ref = _run_pa_decode_tile_case(
         num_kv_heads=1,
         group_size=8,
         context_len=context_len,
@@ -1383,7 +1380,7 @@ def test_pa_decode_tile_reference_bf16_query(context_len: int, block_size: int) 
         block_size=block_size,
         query_dtype=torch.bfloat16,
     )
-    assert max_diff <= 1e-2, f"tile PA decode (bf16 query) max diff {max_diff:.3e} exceeds tolerance"
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (bf16 query) mismatch")
 
 
 if __name__ == "__main__":
