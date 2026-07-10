@@ -1343,10 +1343,6 @@ def _run_pa_decode_tile_case(
 @pytest.mark.parametrize("num_kv_heads,group_size", [(1, 8), (1, 16), (2, 8)])
 @pytest.mark.parametrize("context_len", [1027, 256, 17])
 def test_pa_decode_tile_reference(num_kv_heads: int, group_size: int, context_len: int, block_size: int) -> None:
-    # fp8 (e4m3) Q and P quantization limit accuracy; the error averages down with
-    # context length (~1e-2 at ctx=17, ~1e-3 at ctx=1027), so use an fp8-appropriate
-    # tolerance rather than the f16-era 5e-3. rtol=0: a pure absolute-diff check,
-    # matching this test's original max_diff <= 1e-2 semantics.
     output, ref = _run_pa_decode_tile_case(num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size)
     torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode mismatch")
 
@@ -1357,9 +1353,6 @@ def test_pa_decode_tile_reference(num_kv_heads: int, group_size: int, context_le
 def test_pa_decode_tile_reference_head_dim64(
     num_kv_heads: int, group_size: int, context_len: int, block_size: int
 ) -> None:
-    # head_dim=64 exercises the generalized RGROUP_WIDTH/N_SUBCHUNKS/QCHUNK/
-    # VHE_CHUNKS formulas in kernels/pa_decode_tile.py (previously hardcoded
-    # for head_dim=128 only); see compile_pa_decode_tile's docstring.
     output, ref = _run_pa_decode_tile_case(
         num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size, head_dim=64
     )
@@ -1369,9 +1362,6 @@ def test_pa_decode_tile_reference_head_dim64(
 @pytest.mark.parametrize("block_size", [16, 64])
 @pytest.mark.parametrize("context_len", [1027, 17])
 def test_pa_decode_tile_reference_bf16_query(context_len: int, block_size: int) -> None:
-    # Only the query load's element type changes for bf16 (see Q_DTYPE in
-    # compile_pa_decode_tile); a small shape subset is enough to cover the
-    # bf16 load path without re-running the full f16 grid.
     output, ref = _run_pa_decode_tile_case(
         num_kv_heads=1,
         group_size=8,

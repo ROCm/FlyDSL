@@ -314,8 +314,6 @@ def compile_pa_decode_tile(
             _, base_page = _tile_tok0_and_page(tt_i32)
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             if lane == 0:
-                # buffer_load(vec_width=1) returns a bare scalar, not a Vector --
-                # wrap it. vec_width>1 already returns a Vector directly.
                 fetched_vec = (
                     fx.Vector.from_elements([fx.Int32(fetched)], dtype=fx.Int32)
                     if const_expr(PAGES_PER_CHUNK == 1)
@@ -339,13 +337,6 @@ def compile_pa_decode_tile(
         # Contiguous-per-warp token assignment: token = warp*TOK_CHUNK +
         # a*c16 + lane16. Softmax's mask (_ct/base_tok_f below) and the
         # P-pack write position must encode this same formula.
-        #
-        # key_cache_ptr's BLOCKED layout [num_blocks, num_kv_heads, HEAD//16,
-        # block_size, 16] (fp8) keeps the 16-byte head-chunk innermost per
-        # token, so adjacent lanes (adjacent tokens) land 16 bytes apart --
-        # coalesced (a plain [...,block_size,HEAD] layout would not be).
-        # QCHUNK doubles as this layout's head-chunk count (== HEAD // 16).
-
         def _k_ops(phys, a):
             within_page_tok = (a * c16 + lane16) % block_size
             ops = []
@@ -403,9 +394,7 @@ def compile_pa_decode_tile(
         def _st1(byte_off, m_idx, val):
             _row(byte_off, m_idx, 1, fx.Float32).store(fx.Vector.from_elements([val], dtype=fx.Float32))
 
-        # f32[16, NWARP] cross-warp scratch (row stride padded to NWARP_PAD to
-        # avoid the 2-way LDS bank conflict -- see `sLmax_off`'s comment):
-        # scalar write at (row, warp), vec read of a row's NWARP valid slots.
+        # f32[16, NWARP] cross-warp scratch: scalar write at (row, warp), vec read of a row's NWARP valid slots.
         def _st_lw(base_off, row, w, val):
             off = base_off + (row * NWARP_PAD + w) * 4
             _view(off, fx.Float32, fx.make_layout(1, 1)).store(fx.Vector.from_elements([val], dtype=fx.Float32))
@@ -427,12 +416,6 @@ def compile_pa_decode_tile(
 
         def _st_words(byte_off, words):
             _view(byte_off, fx.Int32, fx.make_layout(words.shape[0], 1)).store(words)
-
-        # sP holds fp8 probabilities as [qhead, token] (qhead stride
-        # SP_ROW_BYTES, padded past TILE_TOK to avoid an LDS bank conflict --
-        # see SP_ROW_BYTES's comment; token stride 1); each lane writes its
-        # (qhead, token) slice directly and the PV P read (p_ops) reads it
-        # back with the same layout.
 
         # QK: D[token, qhead] = K(A) · Q(B)ᵀ, tiled (NWARP,1,1) splits tokens (M)
         # across the 4 warps — so the softmax reduces over M (tokens) cheaply.
@@ -585,13 +568,6 @@ def compile_pa_decode_tile(
             # sizes, so every tile re-derives its page(s) fresh. V is
             # deliberately NOT carried the same way -- it's loaded right
             # before its PV use instead (see below) to keep peak VGPR lower.
-            #
-            # On a partition's last tile there's no next tile, so skip with a
-            # real conditional (not `arith.select`, which only clamps the
-            # index while the loads still execute).
-            #
-            # k_cur/k_next are one (NCHUNK*N_SUBCHUNKS,) i64 Vector (a single
-            # MLIR-backed value), so this if-reassignment works directly.
             tt1 = tt_i32 + 1
             k_next = k_cur
             if tt1 < part_end:
