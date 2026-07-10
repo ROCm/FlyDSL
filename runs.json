@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-10T07:44:15Z",
+ "updated": "2026-07-10T08:09:12Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29078750386,
+   "pr": 825,
+   "commit": "e5f41cfd5915df5cdeeafae4499d48c68d043aa6",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29078750386",
+   "created_at": "2026-07-10T08:07:01Z",
+   "updated_at": "2026-07-10T08:07:02Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 29077417739,
    "pr": 825,
@@ -10,11 +25,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29077417739",
    "created_at": "2026-07-10T07:41:15Z",
-   "updated_at": "2026-07-10T07:41:16Z",
+   "updated_at": "2026-07-10T08:07:02Z",
    "actor": "fsx950223",
    "jobs": []
   },
@@ -1855,49 +1870,6 @@
      "started_at": "2026-07-08T05:46:27Z",
      "completed_at": "2026-07-08T06:24:16Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28920497901/job/85796630216"
-    }
-   ]
-  },
-  {
-   "run_id": 28918237971,
-   "pr": 817,
-   "commit": "6df1b7eb3f01931b6cde50719f66bdc2d76ab9c9",
-   "branch": "pr/fix-fallback-locations",
-   "event": "pull_request",
-   "title": "[Fix] Always apply fallback IR locations",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28918237971",
-   "created_at": "2026-07-08T04:47:29Z",
-   "updated_at": "2026-07-08T19:56:40Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-08T04:49:03Z",
-     "completed_at": "2026-07-08T05:22:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28918237971/job/85789666069"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-08T19:40:50Z",
-     "completed_at": "2026-07-08T19:56:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28918237971/job/85789666071"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-08T04:49:07Z",
-     "completed_at": "2026-07-08T05:52:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28918237971/job/85789666094"
     }
    ]
   }
