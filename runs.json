@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T09:57:24Z",
+ "updated": "2026-07-10T10:16:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -201,11 +201,11 @@
    "branch": "main",
    "event": "push",
    "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing (#\u2026",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075759881",
    "created_at": "2026-07-10T07:07:58Z",
-   "updated_at": "2026-07-10T07:09:02Z",
+   "updated_at": "2026-07-10T10:13:49Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -229,9 +229,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T07:09:02Z",
+     "started_at": "2026-07-10T10:13:49Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075759881/job/86307024377"
     }
@@ -287,11 +287,11 @@
    "branch": "pr/opt-layout-lowering",
    "event": "pull_request",
    "title": "[Opt] Improve rewrite config to match with CBV pattern",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075189097",
    "created_at": "2026-07-10T06:56:22Z",
-   "updated_at": "2026-07-10T06:57:21Z",
+   "updated_at": "2026-07-10T10:13:11Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -306,10 +306,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-10T06:57:21Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-10T09:57:21Z",
+     "completed_at": "2026-07-10T10:13:10Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075189097/job/86305261209"
     },
     {
