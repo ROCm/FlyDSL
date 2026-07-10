@@ -797,7 +797,19 @@ def compile_pa_decode_sw_reduce(
     query_group_size: int,
     head_size: int,
     output_dtype_str: str,
+    logits_dtype_str: str = "bf16",
 ):
+    # Partition partials (`logits`) are read at this dtype; defaults to bf16
+    # (this kernel's original, still-default behavior for existing callers).
+    # Callers with an fp8 query should still keep this at bf16 (fp8 has too
+    # little precision for a re-accumulated intermediate) -- only real f16/f32
+    # queries should pick a matching non-bf16 value here.
+    if logits_dtype_str == "f32":
+        LOGITS_DTYPE = fx.Float32
+    elif logits_dtype_str == "f16":
+        LOGITS_DTYPE = fx.Float16
+    else:
+        LOGITS_DTYPE = fx.BFloat16
     block_threads = head_size
     assert block_threads > 0, "head_size must be positive"
     assert block_threads <= 1024, "head_size must fit in one workgroup"
@@ -967,8 +979,8 @@ def compile_pa_decode_sw_reduce(
                     + eqgs_idx * stride_logits_group
                     + tid
                 )
-                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=fx.BFloat16)
-                part_logits = fx.Float32(part_logits_bf16)
+                part_logits_raw = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=LOGITS_DTYPE)
+                part_logits = fx.Float32(part_logits_raw)
                 acc = acc + part_logits * weight
         else:
             # Fallback for unusually large sliding-window partition counts.
@@ -1058,8 +1070,8 @@ def compile_pa_decode_sw_reduce(
                     + eqgs_idx * stride_logits_group
                     + tid
                 )
-                part_logits_bf16 = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=fx.BFloat16)
-                part_logits = fx.Float32(part_logits_bf16)
+                part_logits_raw = buffer_ops.buffer_load(logits_rsrc, logits_off, vec_width=1, dtype=LOGITS_DTYPE)
+                part_logits = fx.Float32(part_logits_raw)
                 acc = acc + part_logits * weight
 
         query_idx = udiv_const(eqgs_idx, query_group_size)
