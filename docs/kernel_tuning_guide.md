@@ -22,6 +22,112 @@ at optimizations without a trace usually moves the bottleneck instead of removin
 
 ---
 
+## 0. Background: The GPU Performance Model
+
+Before the specific levers, it helps to have a mental model of *where a kernel's
+time goes*. A GPU does not make individual instructions fast — it hides their
+latency with parallelism. Each SIMD holds several wavefronts; when one wave
+stalls waiting on memory, the scheduler issues from another ready wave. So tuning
+is two problems: **keep enough independent work in flight to cover latency**, and
+**don't exceed the machine's throughput ceilings** (compute FLOPs or memory
+bandwidth). Almost every technique later in this guide is one of those two.
+
+### Thread traces and instruction interleaving
+
+An **ATT (Advanced Thread Trace)** records, per instruction on one CU, when it
+issued and how many cycles it *stalled*. Within a single wave, instructions issue
+in program order; a "stall" means the wave could not issue because it was waiting
+on a dependency — almost always an `s_waitcnt` counter or a barrier.
+
+The compiler (guided by the `sched_*` hints in §5) **interleaves independent
+instruction classes** — MFMA, global loads (VMEM), LDS reads/writes — so that a
+long-latency operation overlaps useful work instead of blocking it. Two hardware
+counters gate this:
+
+- **`vmcnt`** — outstanding VMEM (global/`buffer_load`) operations.
+- **`lgkmcnt`** — outstanding LDS and scalar-memory operations.
+
+An instruction that *consumes* a load result waits on the relevant counter
+(`s_waitcnt vmcnt(0)` / `lgkmcnt(0)`). If the consumer is issued too close to the
+load, the load's latency is exposed as stall cycles in the trace. Interleaving and
+scheduling exist to convert those stall cycles into issue cycles. Collect and read
+a trace with `/kernel-trace-analysis` (§9).
+
+### The latencies you are hiding
+
+Order-of-magnitude on CDNA (cycles; exact values vary by arch and contention):
+
+| Operation | Latency | Notes |
+|---|---|---|
+| SALU / VALU | ~1–8 | address math, integer/float ALU |
+| MFMA | ~16–64 | the compute you *want* to be waiting on |
+| LDS `ds_read`/`ds_write` | ~20–40 (gfx942) | async; more with bank conflicts |
+| Global load (HBM) | ~300+ | an order of magnitude above LDS |
+| `s_barrier` | variable | whole workgroup must arrive |
+
+The whole game is arranging enough independent instructions (and enough resident
+waves) between issuing a high-latency op and needing its result.
+
+### Hiding LDS latency
+
+LDS ops are asynchronous, and a `ds_read` that depends on a prior `ds_write` must
+be separated by `s_waitcnt lgkmcnt(0)` or an `s_barrier`. If the wait sits right
+after the write, the ~20–40-cycle latency is fully exposed. Hide it by
+**increasing the write→read distance** — schedule independent MFMAs, address math,
+or the next tile's global loads between the write and the wait — and by
+**A0-prefetching** the first LDS pack right after a barrier so the first
+`ds_read` overlaps the following VMEM loads. See §3 (swizzle) and §4 (prefetch);
+bank conflicts (§3) both raise per-op latency *and* cut effective LDS bandwidth.
+
+### Hiding global-memory latency
+
+Global loads are the longest-latency common op (~300+ cycles), so they dominate if
+exposed. The primary tool is **software prefetch / double-buffering** (§4): issue
+the *next* iteration's `buffer_load`s before consuming the current iteration's
+data, so the fetch overlaps compute. Larger `tile_k` increases reuse per byte
+fetched; higher **occupancy** gives the scheduler more waves to switch to while
+one is waiting. A useful trick in multi-phase kernels: **hoist the next phase's
+loads into a barrier-wait region** — the barrier is dead time anyway, so the load
+arrives for free.
+
+### Bandwidth
+
+Once latency is hidden, you hit a **throughput ceiling**. There are two:
+
+- **Compute** — MFMA FLOP/s. Peak (gfx942 MI300X, single GCD): ~653 TFLOPS FP8,
+  ~326 TFLOPS BF16, ~653 TOPS INT8.
+- **Memory bandwidth** — HBM GB/s, plus the L2 and LDS byte/cycle limits (LDS peak
+  128 B/cyc on gfx942, 256 B/cyc on gfx950).
+
+*Effective* memory bandwidth depends on access quality: **coalesced, vectorized**
+accesses (`buffer_load_dwordx4`, full 64 B cache lines) approach peak, while
+uncoalesced or partial-cache-line access wastes HBM. When a kernel is
+memory-bound, cache/HBM PMC counters (§9) — L2 hit rate, 32 B-partial fraction,
+over-fetch, per-channel balance — tell you *why*, which ISA inspection alone
+usually gets wrong.
+
+### Is the kernel memory-, compute-, or latency-bound?
+
+Compute the arithmetic intensity `AI = FLOPs / bytes_moved` and compare it to the
+roofline crossover (§8). Three regimes, each with a different fix and a different
+trace/PMC signature:
+
+| Regime | What's saturated | Trace / PMC signature | Where to look |
+|---|---|---|---|
+| **Compute-bound** | MFMA units | MFMA utilization high (≥ ~70%), memory pipes idle | §5 scheduling, §7 occupancy, cut non-MFMA overhead |
+| **Bandwidth-bound** | HBM / L2 / LDS BW | memory BW near peak, low L2 hit or high over-fetch; MFMA util moderate | §3 coalescing/swizzle, smaller dtype, bigger `tile_k`, XCD balance (§9) |
+| **Latency-bound** | *nothing* — work is stalled | **both** MFMA util and memory BW low, **high** `s_waitcnt`/`s_barrier` stall | §4 prefetch, §7 occupancy, §5 interleaving |
+
+The distinction that trips people up is **latency-bound vs bandwidth-bound**: a
+latency-bound kernel is slow while *neither* ceiling is saturated — the pipes are
+simply idle waiting on exposed latency (common at small `M` or low occupancy). The
+cure is more overlap and more waves in flight, not more bandwidth. A
+bandwidth-bound kernel, by contrast, is already moving bytes as fast as the memory
+system allows, so the cure is moving *fewer* or *better-shaped* bytes. Rule of
+thumb: **M ≤ 512 → likely memory/latency-bound; M > 512 → likely compute-bound.**
+
+---
+
 ## 1. Tiling Strategy
 
 GEMM tiles the output `C[M, N]` and the reduction `K` into blocks. With a 256-thread
