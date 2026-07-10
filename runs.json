@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T20:51:00Z",
+ "updated": "2026-07-10T21:03:54Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/profile-tools",
    "event": "pull_request",
    "title": "[Feature] Extract reusable event-based benchmarking helper",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29102823936",
    "created_at": "2026-07-10T15:13:07Z",
-   "updated_at": "2026-07-10T20:47:24Z",
+   "updated_at": "2026-07-10T21:01:53Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -29,10 +29,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T20:47:24Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T21:01:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29102823936/job/86396035914"
     },
     {
