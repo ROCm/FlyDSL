@@ -407,7 +407,7 @@ FlyDSL's design is inspired by ideas from several projects:
 - [ROCm Composable Kernel](https://github.com/ROCm/composable_kernel) — tile-based kernel design patterns for AMD GPUs
 - [ROCm AIter](https://github.com/ROCm/aiter) — test infrastructure and performance comparison baselines (MIT)
 - [Triton](https://github.com/triton-lang/triton) — Python DSL for GPU kernel authoring
-- [HipKittens](https://github.com/HazyResearch/HipKittens) — tile-based abstractions for high-performance AMD GPU kernels
+- [HipKittens](https://github.com/HazyResearch/HipKittens) — minimal, opinionated C++ embedded primitives for fast AMD AI kernels (part of the ThunderKittens family)
 
 ## 📄 License
 
