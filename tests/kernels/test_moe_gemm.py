@@ -2147,6 +2147,7 @@ def test_moe_gemm_2stage_bf16_out(use_reduce):
         use_valid_mask=False,
         test_graph=False,
         group_size=-1,
+        activation="silu",
         num_iters=2,
         num_warmup=1,
     )
