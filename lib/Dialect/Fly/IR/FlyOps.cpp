@@ -190,9 +190,8 @@ Type applyOffsetOnTensorLike(LayoutBuilder<LayoutAttr> &builder, Type tensorLike
 #define FLY_INFER_RETURN_TYPES(OP)                                                                 \
   llvm::LogicalResult OP::inferReturnTypes(                                                        \
       mlir::MLIRContext *context, std::optional<::mlir::Location> location,                        \
-      mlir::ValueRange operands, mlir::DictionaryAttr attributes,                                  \
-      mlir::OpaqueProperties properties, mlir::RegionRange regions,                                \
-      llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
+      mlir::ValueRange operands, mlir::DictionaryAttr attributes, mlir::PropertyRef properties,    \
+      mlir::RegionRange regions, llvm::SmallVectorImpl<mlir::Type> &inferredReturnTypes)
 
 //===----------------------------------------------------------------------===//
 // Constructors
