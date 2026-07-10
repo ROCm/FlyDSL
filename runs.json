@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T08:37:16Z",
+ "updated": "2026-07-10T08:54:30Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -401,13 +401,41 @@
    "branch": "mxfp4-batched-preshuffle-gemm",
    "event": "pull_request",
    "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068040177",
    "created_at": "2026-07-10T04:00:14Z",
-   "updated_at": "2026-07-10T04:00:15Z",
+   "updated_at": "2026-07-10T08:53:34Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T08:53:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068040177/job/86324302385"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T08:53:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068040177/job/86324302388"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T08:53:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068040177/job/86324302423"
+    }
+   ]
   },
   {
    "run_id": 29067975809,
@@ -431,11 +459,11 @@
    "branch": "hyg/fmha_hd64_smallseq_opt",
    "event": "pull_request",
    "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990",
    "created_at": "2026-07-10T03:34:36Z",
-   "updated_at": "2026-07-10T03:35:46Z",
+   "updated_at": "2026-07-10T08:53:13Z",
    "actor": "yanguahe",
    "jobs": [
     {
@@ -459,9 +487,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T03:35:46Z",
+     "started_at": "2026-07-10T08:53:13Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990/job/86281147896"
     }
@@ -532,11 +560,11 @@
    "branch": "mxfp4-batched-preshuffle-gemm",
    "event": "pull_request",
    "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064510474",
    "created_at": "2026-07-10T02:22:35Z",
-   "updated_at": "2026-07-10T03:34:03Z",
+   "updated_at": "2026-07-10T08:52:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -551,10 +579,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-10T03:34:03Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-10T08:37:13Z",
+     "completed_at": "2026-07-10T08:52:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064510474/job/86280963844"
     },
     {
