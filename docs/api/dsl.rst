@@ -145,7 +145,7 @@ Prefer typed DSL values and operator-overloaded arithmetic:
    import flydsl.expr as fx
    from flydsl.expr.typing import Vector as Vec
 
-   c = fx.Index(42)
+   c = fx.Int64(42)
    v = fx.Int32(idx)
    f = fx.Float32(1.0)
    r = cond.select(a, b)
@@ -153,7 +153,7 @@ Prefer typed DSL values and operator-overloaded arithmetic:
 
 Preferred APIs:
 
-- **fx.Int32(value)**, **fx.Int64(value)**, **fx.Index(value)**, **fx.Float32(value)** -- constants and casts
+- **fx.Int32(value)**, **fx.Int64(value)**, **fx.Float32(value)** -- typed constants and casts (use **fx.Int64** for index/offset values and loop bounds; **fx.Index** is deprecated)
 - **ArithValue / Numeric operators** -- ``+``, ``-``, ``*``, ``/``, ``%``, ``<<``, ``>>``
 - **cond.select(true_val, false_val)** -- ternary select when ``cond`` is an ``ArithValue``
 - **arith.cmpi(predicate, lhs, rhs)** -- integer comparison

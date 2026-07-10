@@ -270,8 +270,8 @@ to create genuine SSA phi nodes:
 next_a = buffer_ops.buffer_load(rsrc_a, offsets_0, vec_width=4)
 init_state = [_unwrap(v) for v in [next_a, acc]]
 
-# Runtime loop — bounds MUST be fx.Index(...), not Python ints (see pitfalls)
-for iv, state in range(fx.Index(0), fx.Index(N - 1), fx.Index(1), init=init_state):
+# Runtime loop — bounds MUST be a typed DSL integer (fx.Int64), not Python ints (see pitfalls)
+for iv, state in range(fx.Int64(0), fx.Int64(N - 1), fx.Int64(1), init=init_state):
     a, acc = state[0], state[1]
     next_a = buffer_ops.buffer_load(rsrc_a, compute_offsets(iv + 1), vec_width=4)  # async
     acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)   # overlaps next load
@@ -284,8 +284,8 @@ acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)
 
 Three pitfalls (all covered in `/prefetch-data-load`):
 
-1. **Bounds must be `fx.Index(...)`.** Constant Python-int bounds make the
-   rewriter unroll the loop and silently ignore `init=`.
+1. **Bounds must be a typed DSL integer (`fx.Int64(...)`).** Constant Python-int
+   bounds make the rewriter unroll the loop and silently ignore `init=`.
 2. **Unwrap init values at hard boundaries only.** Most carried values stay
    `fx.Int32`/`fx.Float32`/`Vector`; unwrap to raw `ir.Value` only where a
    low-level helper demands it.
@@ -364,21 +364,65 @@ preshuffle GEMM also exposes fused epilogues via the `epilogue=` argument of
 
 ## 7. Register Budget & Occupancy
 
-On CDNA3/CDNA4 the two VGPR files — **arch_vgpr** (VALU, VMEM, LDS ops, prefetch
-buffers) and **accum_vgpr / AGPR** (MFMA writeback) — share **one combined
-512-entry occupancy budget** per SIMD. Occupancy ≈ `512 / (arch_vgpr +
-accum_vgpr)` waves. Growing prefetch/LDS-address arch_vgpr therefore *does*
-compete with MFMA accumulators.
+**Occupancy** is how many wavefronts are resident per SIMD at once — the pool the
+scheduler draws from to hide latency (§0). It is the **minimum across three
+resource limiters**, capped by a hardware maximum:
 
-| Combined arch + accum | Waves/SIMD | Impact |
-|---|---|---|
-| ≤ 128 | 4 | High occupancy |
-| ≤ 170 | 3 | Good |
-| ≤ 256 | 2 | Moderate |
-| ≤ 512 | 1 | Minimum |
-| > 512 | **SPILL** | Severe regression |
+```
+occupancy (waves/SIMD) = min(vgpr_limit, lds_limit, sgpr_limit, HW_MAX)
+```
 
-Rough VGPR estimate for a FP8 tile:
+Whichever resource you exhaust *first* caps occupancy — so all three must be
+watched, and the arch you target changes each limit.
+
+### The three resources
+
+**1. VGPR.** On **CDNA3 (gfx942)** and **CDNA4 (gfx950)** the two vector-register
+files — **arch_vgpr** (VALU, VMEM, LDS ops, prefetch buffers) and **accum_vgpr /
+AGPR** (MFMA writeback) — share **one combined 512-entry budget** per SIMD, so
+`vgpr_limit = 512 // (arch_vgpr + accum_vgpr)`. Growing prefetch/LDS-address
+arch_vgpr therefore competes with MFMA accumulators for the same budget. (This is
+*not* the old separate-pool `256 / max(arch, accum)` model — that was CDNA1
+gfx908.)
+
+| Combined arch + accum (wave64) | vgpr_limit (waves/SIMD) |
+|---|---|
+| ≤ 64 | 8 (hardware max) |
+| ≤ 128 | 4 |
+| ≤ 170 | 3 |
+| ≤ 256 | 2 |
+| ≤ 512 | 1 |
+| > 512 | **SPILL** — severe regression |
+
+**2. LDS.** LDS is a per-CU pool shared by all resident workgroups, so
+`resident_workgroups = LDS_per_CU // LDS_per_workgroup`; more LDS per block →
+fewer concurrent blocks → fewer waves. The pool size is arch-specific:
+**64 KB (gfx942)**, **160 KB (gfx950)**, **320 KB (gfx1250)**. A 160 KB / 320 KB
+budget lets a kernel keep bigger tiles (or more buffers) resident before LDS,
+rather than VGPR, becomes the limiter.
+
+**3. SGPR.** Scalar registers (kernel args, buffer descriptors, loop/scalar
+state) also gate occupancy: on CDNA, ~**800 SGPRs per SIMD**, allocated in
+granules of 16, so `sgpr_limit = 800 // sgpr_per_wave`. SGPR is rarely the binding
+limit but can bite kernels with many buffer resources or scalar-heavy prologues.
+
+### Architecture differences at a glance
+
+| Arch | Wave | VGPR model | LDS/CU | Notes |
+|---|---|---|---|---|
+| gfx942 (CDNA3) | 64 | combined 512 (arch 256 + accum 256) / SIMD | 64 KB | MFMA; combined-pool occupancy |
+| gfx950 (CDNA4) | 64 | combined 512 (arch 256 + accum 256) / SIMD | 160 KB | + MFMA-scale / transpose loads; 2.5× LDS headroom |
+| gfx1250 | **32** | wave32 register file (per-wave counts differ) | 320 KB | wave32 accounting — a 32-lane wave; query per-kernel counts, don't assume the CDNA 512 rule |
+
+Because gfx1250 runs **wave32**, its per-wave VGPR/SGPR accounting differs from the
+wave64 CDNA parts — don't reuse the `512 // (arch+accum)` rule there. The
+occupancy *formula* (min over VGPR/LDS/SGPR, capped at the HW max) still holds;
+only the per-resource limits change. When in doubt, read the actual allocation
+back from the profiler rather than estimating.
+
+### Estimating and measuring
+
+Rough VGPR estimate for a wave64 FP8 tile:
 
 ```
 accumulators = m_repeat × num_acc_n × 4     # → accum_vgpr
@@ -386,15 +430,20 @@ B tile       = k_unroll × 2 × num_acc_n × 2 # → arch_vgpr
 A prefetch   ≈ 4 ; A tile regs = num_a_loads × 4 ; addressing ≈ 10–20
 ```
 
-Query the actual allocation from the rocprofv3 database:
+Query the real allocation (all three resources) from the rocprofv3 database:
 
 ```sql
-SELECT ks.KernelName, ki.arch_vgpr_count, ki.accum_vgpr_count
+SELECT ks.KernelName, ki.arch_vgpr_count, ki.accum_vgpr_count,
+       ki.sgpr_count, ki.lds_size
 FROM rocpd_kernel_dispatch kd
 JOIN rocpd_info_kernel_symbol ks ON kd.kernel_symbol_id = ks.id
 JOIN rocpd_info_kernel ki ON kd.kernel_id = ki.id
 WHERE ks.KernelName LIKE '%target_kernel%' LIMIT 5;
 ```
+
+`/kernel-trace-analysis` (§9) reports the computed occupancy and which resource is
+the binding limiter, so you know whether to cut VGPR, shrink LDS per block, or
+reduce SGPR pressure.
 
 **Do not** use `maxnreg` to force `accum_vgpr=0` — it spills MFMA results through
 arch_vgpr via `v_accvgpr_read` (measured ~4.5× regression).

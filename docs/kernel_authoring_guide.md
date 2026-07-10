@@ -18,7 +18,7 @@
 | **Tensor arg** | `fx.Tensor` | GPU tensor argument (via DLPack) |
 | **Stream arg** | `fx.Stream` | CUDA/HIP stream argument |
 | **Barrier** | `fx.gpu.barrier()` | Workgroup synchronization |
-| **Constants** | `fx.Int32` / `fx.Index` / `fx.Float32` | Create typed DSL constants |
+| **Constants** | `fx.Int32` / `fx.Int64` / `fx.Float32` | Create typed DSL constants (`fx.Int64` for index/offset values; `fx.Index` is deprecated) |
 | **Range loop** | `range_constexpr(n)` | Compile-time unrolled loop |
 | **Buffer load** | `buffer_ops.buffer_load(rsrc, off)` | AMD buffer load intrinsic |
 
@@ -194,7 +194,7 @@ raw_bid = gpu.block_id("x")
 import flydsl.expr as fx
 
 # Constants (prefer DSL numeric types)
-c42 = fx.Index(42)          # index type constant
+c42 = fx.Int64(42)          # 64-bit integer constant (prefer over the deprecated fx.Index)
 c3_14 = fx.Float32(3.14)    # f32 constant
 mask = fx.Int32(0xFF)       # i32 constant
 
@@ -205,8 +205,8 @@ result = a // 4
 result = a % 16
 
 # Cast (prefer DSL numeric constructors)
-idx = fx.Index(int_val)     # cast to index type
-i32_val = fx.Int32(idx)     # cast to i32
+i64_val = fx.Int64(int_val) # cast to 64-bit integer (fx.Index is deprecated)
+i32_val = fx.Int32(i64_val) # cast to i32
 
 # Select
 result = cond.select(true_val, false_val)  # when cond is an ArithValue
