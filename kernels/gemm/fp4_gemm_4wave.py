@@ -35,6 +35,7 @@ from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
     ceildiv,
     compute_global_swizzle,
+    divmod,
     make_fp8_buffer_tensor,
     swizzle_128,
     wait_barrier,

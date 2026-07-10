@@ -12,6 +12,15 @@ from flydsl.expr.typing import Vector as Vec
 from kernels.common.utils import cdiv as ceildiv  # noqa: F401
 
 
+def divmod(a, b):
+    """Integer divmod that works on DSL values (e.g. ``Int32``).
+
+    The builtin ``divmod`` rejects DSL scalar types, so this uses the overloaded
+    ``//`` / ``%`` operators to emit the corresponding ops.
+    """
+    return (a // b, a % b)
+
+
 def preshuffle_b(b_t):
     """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
     n, k = b_t.shape[-2:]
