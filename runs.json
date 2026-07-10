@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-10T04:02:02Z",
+ "updated": "2026-07-10T04:40:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29068882183,
+   "pr": 800,
+   "commit": "f39cf15d369983616e2bca54ea40f118ced45d80",
+   "branch": "feat/fused-add-rmsnorm-backward-769",
+   "event": "pull_request",
+   "title": "[rmsnorm] Add fused-add / residual backward (PR 2/3, #769)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068882183",
+   "created_at": "2026-07-10T04:22:00Z",
+   "updated_at": "2026-07-10T04:23:52Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T04:23:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068882183/job/86286326421"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T04:25:01Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068882183/job/86286326425"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T04:24:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068882183/job/86286326433"
+    }
+   ]
+  },
   {
    "run_id": 29068040177,
    "pr": 824,
@@ -39,7 +82,7 @@
    "commit": "3c28750559b7c838eae0494c1abd824dea6e0919",
    "branch": "hyg/fmha_hd64_smallseq_opt",
    "event": "pull_request",
-   "title": "Hyg/fmha hd64 smallseq opt",
+   "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing",
    "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990",
@@ -295,7 +338,7 @@
   },
   {
    "run_id": 29057846422,
-   "pr": 800,
+   "pr": null,
    "commit": "108179dcd75669123f998c126b33d5990bf59817",
    "branch": "feat/fused-add-rmsnorm-backward-769",
    "event": "pull_request",
@@ -342,7 +385,7 @@
    "commit": "91abfc8b086420fc3a1b70815e90223d4e165a25",
    "branch": "hyg/fmha_hd64_smallseq_opt",
    "event": "pull_request",
-   "title": "Hyg/fmha hd64 smallseq opt",
+   "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29037533870",
@@ -1112,7 +1155,7 @@
    "commit": "f7c0c78a70976ed2f9227c073e07e5d2afe5c8d5",
    "branch": "hyg/fmha_hd64_smallseq_opt",
    "event": "pull_request",
-   "title": "Hyg/fmha hd64 smallseq opt",
+   "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28960340269",
@@ -1185,7 +1228,7 @@
    "commit": "357a5e27887f2e577a345233f188c10e9e1a9c93",
    "branch": "hyg/fmha_hd64_smallseq_opt",
    "event": "pull_request",
-   "title": "Hyg/fmha hd64 smallseq opt",
+   "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28959515817",
@@ -1913,21 +1956,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863275201/job/85607173209"
     }
    ]
-  },
-  {
-   "run_id": 28863219300,
-   "pr": null,
-   "commit": "b0c6f11035d96ec0c700de99d64c34e1b0718f2b",
-   "branch": "main",
-   "event": "push",
-   "title": "[CI]: skip build/test for non-code changes (#815)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28863219300",
-   "created_at": "2026-07-07T11:37:38Z",
-   "updated_at": "2026-07-07T11:38:55Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
