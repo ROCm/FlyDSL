@@ -3,17 +3,6 @@
 
 """Readable tile-programming reference for paged-attention fp8 decode.
 
-Correctness-first reimplementation of the decode math that production
-``pa_decode_ps_kernel`` (``pa_decode_fp8.py``) computes, using FlyDSL's
-tile/layout API instead of raw buffer intrinsics and hand-scheduled MFMA.
-Trades performance for clarity; scoped to per-tensor fp8 K/V quantization
-(``key_scale``/``value_scale``, 1-element device tensors read via a scalar
-buffer load), ``query_length == 1``, no kv-varlen, no sliding window.
-
-Like ``pa_decode_ps_kernel``, splits the context across ``grid.z`` partitions
-(one CTA each) writing partial (max, sum, numerator) results, combined by a
-small reduce kernel -- spreads low-batch/long-context work across more CUs.
-
 fp8: K/V stored as e4m3 FNUZ, fed straight into ``mfma_f32_16x16x32_fp8_fp8``.
 Q (bf16/f16) is quantized to fp8 with a per-row scale; softmax probabilities P
 are quantized to fp8 for P·V. Scales fold out of the matmuls: ``q_scale`` and
@@ -108,12 +97,10 @@ def compile_pa_decode_tile(
     four for 16).
 
     ``head_dim`` must be a multiple of 64 (64 or 128) -- same floor as
-    pa_decode_ps_kernel's own, since the raw dwordx4-load addressing has a
-    64-element minimum granularity.
+    since the raw dwordx4-load addressing has a 64-element minimum granularity.
 
     ``query_dtype`` (``"f16"`` or ``"bf16"``) selects the query tensor's
-    16-bit float element type, matching pa_decode_ps_kernel's
-    ``query_input_dtype`` flag.
+    16-bit float element type.
     """
     assert head_dim % MFMA_MNK == 0, f"head_dim {head_dim} must be a multiple of {MFMA_MNK}"
     assert block_size in (16, 64), f"pa_decode_tile only supports block_size in (16, 64), got {block_size}"
@@ -122,26 +109,18 @@ def compile_pa_decode_tile(
         "bf16",
     ), f"pa_decode_tile only supports query_dtype in ('f16', 'bf16'), got {query_dtype}"
     Q_DTYPE = fx.BFloat16 if query_dtype == "bf16" else fx.Float16
-    # Same floor as pa_decode_ps_kernel: the addressing below (QKHE_LOOP/
-    # N_SUBCHUNKS/VHE_CHUNKS) divides head_dim into 64-element units, so 32
-    # would need a smaller load granularity, not just different formulas.
+
     assert head_dim % 64 == 0, f"pa_decode_tile only supports head_dim that's a multiple of 64, got {head_dim}"
     HEAD = head_dim
     GS = query_group_size
     M = MFMA_MNK  # query rows handled per CTA (padded to 16)
-    NWARP = 4  # 4 waves / CTA (matches pa_decode_ps_kernel)
+    NWARP = 4  # 4 waves / CTA
     TOK_PER_WARP = 64  # tokens each warp owns per compute block (matches production KV_COMPUTE_BLOCK)
     TILE_TOK = NWARP * TOK_PER_WARP  # 256 tokens / compute block
     PAGES_PER_CHUNK = TOK_PER_WARP // block_size  # pages spanned by one 64-token warp-chunk: 1 (bs=64) or 4 (bs=16)
     assert HEAD % (NWARP * MFMA_MNK) == 0, "head_dim must split across the 4 warps for PV"
 
-    # head_dim-derived QK chunking (matches pa_decode_ps_kernel's K/Q
-    # addressing): the fp8 MFMA operand is 8 fp8 elements (one i64) per lane
-    # per instruction. head_dim splits into a fixed 16-element chunk
-    # (QK_CHUNK_ELEMS, one dwordx4 load), 4 of which (RGROUP_QUARTERS,
-    # `rgroup` == production's `rowid`) make one 64-element fetch group;
-    # QKHE_LOOP is the fetch-group count and scales with head_dim. head_dim
-    # element for (qkhe, rgroup, qkr): (qkhe*RGROUP_QUARTERS+rgroup)*QK_CHUNK_ELEMS+qkr*8
+    # head_dim-derived QK chunking: the fp8 MFMA operand is 8 fp8 elements (one i64) per lane per instruction. head_dim splits into a fixed 16-element chunk (QK_CHUNK_ELEMS, one dwordx4 load), 4 of which (RGROUP_QUARTERS, `rgroup` == production's `rowid`) make one 64-element fetch group; QKHE_LOOP is the fetch-group count and scales with head_dim. head_dim
     RGROUP_QUARTERS = 4
     QK_CHUNK_ELEMS = 16
     QKHE_LOOP = HEAD // (RGROUP_QUARTERS * QK_CHUNK_ELEMS)
@@ -155,9 +134,6 @@ def compile_pa_decode_tile(
     NQCHUNK = 16
     QCHUNK = HEAD // NQCHUNK  # f16 elements per lane's load chunk (8 for HEAD=128, 4 for HEAD=64)
 
-    # PV output-dim chunking: VHE_CHUNKS*NWARP*MFMA_MNK covers HEAD (like
-    # RGROUP_QUARTERS above, but for PV's N-dimension), so VHE_CHUNKS scales
-    # with head_dim while NWARP/MFMA_MNK stay architecture-fixed.
     VHE_CHUNKS = HEAD // (NWARP * MFMA_MNK)  # 2 for HEAD=128, 1 for HEAD=64
 
     if softmax_scale is None:
@@ -272,10 +248,6 @@ def compile_pa_decode_tile(
 
         context_len = fx.Int32(_ctxlen_load(seq)[0])
         bt_rsrc = buffer_ops.create_buffer_resource(block_tables_ptr, max_size=True)
-        # Per-tensor K/V scales are uniform across the whole launch -- route
-        # through a scalar buffer load so it lands once in an SGPR and
-        # broadcasts for free (like `_load_phys_scalar` below), matching how
-        # pa_decode_ps_kernel reads its own key_scale/value_scale tensors.
         ks_rsrc = buffer_ops.create_buffer_resource(key_scale_ptr, max_size=True)
         vs_rsrc = buffer_ops.create_buffer_resource(value_scale_ptr, max_size=True)
         key_scale = fx.Int32(
@@ -325,16 +297,6 @@ def compile_pa_decode_tile(
             return tok0, tok0 // block_size
 
         def _load_phys_scalar(page, vec_width=1):
-            # ONLY valid when `page` is wave-uniform (same for all 64 lanes) --
-            # routes through the scalar/SMEM cache via llvm.amdgcn.s.buffer.load
-            # instead of a per-lane VMEM load, the same fix pa_decode_ps_kernel
-            # applies to this lookup (`_pa_small_block_stage_phys_blocks` in
-            # pa_decode_fp8.py; was 25% of all kernel stalls there). K's page
-            # depends only on (a, warp), both wave-uniform. V's page depends on
-            # `rgroup` (NOT wave-uniform), so V can't consume this path
-            # directly -- but `_v_page_fetch_and_stage` below reuses it
-            # (vec_width=PAGES_PER_CHUNK) to *fetch* V's pages, one warp per
-            # `rgroup` row, broadcasting to the other warps via LDS.
             result = buffer_ops.buffer_load(
                 bt_rsrc, seq * max_blocks_per_seq + page, vec_width=vec_width, is_scalar=True
             )
@@ -373,7 +335,7 @@ def compile_pa_decode_tile(
             off = sVPage_off + rgroup * (PAGES_PER_CHUNK * 4)
             return _view(off, fx.Int32, fx.make_layout(PAGES_PER_CHUNK, 1)).load()
 
-        # ── raw dwordx4 K load (A operand), pa_decode_ps_kernel's layout ──
+        # ── raw dwordx4 K load (A operand) ──
         # Contiguous-per-warp token assignment: token = warp*TOK_CHUNK +
         # a*c16 + lane16. Softmax's mask (_ct/base_tok_f below) and the
         # P-pack write position must encode this same formula.
@@ -394,15 +356,8 @@ def compile_pa_decode_tile(
                 ops.extend([w[0], w[1]])
             return ops  # N_SUBCHUNKS i64 operands
 
-        # All NCHUNK chunks' K as one flat (NCHUNK*N_SUBCHUNKS,) i64 vector --
-        # one loop-carried value so tile tt+1's K prefetch overlaps tt's
-        # softmax+PV, like pa_decode_ps_kernel.
         def _k_ops_flat(tt_i32):
             _, base_page = _tile_tok0_and_page(tt_i32)
-            # This warp's PAGES_PER_CHUNK physical pages are consecutive,
-            # starting at base_page + warp*PAGES_PER_CHUNK -- one wide scalar
-            # load, same pattern as pa_decode_ps_kernel's own
-            # `_pa_small_block_stage_phys_blocks`.
             fetched = _load_phys_scalar(base_page + warp * PAGES_PER_CHUNK, PAGES_PER_CHUNK)
             phys_vec = (
                 fx.Vector.from_elements([fx.Int32(fetched)], dtype=fx.Int32)
@@ -479,7 +434,6 @@ def compile_pa_decode_tile(
         # (qhead, token) slice directly and the PV P read (p_ops) reads it
         # back with the same layout.
 
-        # ── MMA atoms (production token=M orientation) ──
         # QK: D[token, qhead] = K(A) · Q(B)ᵀ, tiled (NWARP,1,1) splits tokens (M)
         # across the 4 warps — so the softmax reduces over M (tokens) cheaply.
         # PV: O[qhead, head_dim], tiled (1,NWARP,1) splits head_dim (N).
@@ -491,8 +445,7 @@ def compile_pa_decode_tile(
         # of GS (<=16) lanes: (warp, rgroup) selects one of the 16 query rows
         # (qh_local = warp*4 + rgroup) and lane16 selects that row's own
         # QCHUNK-element head-dim slice, so every thread loads, converts, and
-        # packs exactly one chunk -- matching pa_decode_ps_kernel's
-        # `_finish_q_fragments` lane-per-chunk layout. The row's absmax is a
+        # packs exactly one chunk. The row's absmax is a
         # DPP butterfly reduction over the 16 lanes sharing (warp, rgroup),
         # no LDS/barrier needed for the reduction itself.
 
@@ -504,18 +457,11 @@ def compile_pa_decode_tile(
             chunk_off = row_byte0 + lane16 * (QCHUNK * 2)
             q_chunk = _q_load_chunk(chunk_off // 2)  # byte offset -> element index
 
-            # Local absmax over this thread's own QCHUNK elements (compared at
-            # native Q_DTYPE width, widening to f32 only after), then a DPP
-            # butterfly reduce over the 16 lanes owning this row -- cheaper
-            # than `shuffle_xor`'s ds_swizzle path, matching
-            # pa_decode_ps_kernel's own `_finish_q_fragments`.
             local_absmax = fmath.absf(q_chunk).reduce(ReductionOp.MAX)
             absmax = local_absmax.to(fx.Float32)
             for sh in (8, 4, 2, 1):
                 absmax = absmax.maximumf(dpp_utils.dpp_xor_f32(absmax, sh))
-            # q_scale = absmax / FP8_MAX; rcp_f32 (HW reciprocal, matching
-            # pa_decode_ps_kernel's `inv_query_scale`) instead of a full IEEE
-            # division -- its error is negligible next to fp8 quant noise.
+
             q_scale = absmax * fx.Float32(1.0 / FP8_MAX)
             inv = fx.Float32(rcp_f32(q_scale.maximumf(fx.Float32(1e-20))))
             inv_b = fx.Vector.from_elements([inv], dtype=fx.Float32).broadcast_to(QCHUNK)
@@ -551,7 +497,7 @@ def compile_pa_decode_tile(
         # i64 operands (constant across tiles -> read once, held in
         # registers). Lane (lane16, rgroup) feeds MMA column n=lane16 (qhead);
         # MUST use the exact same (qkhe, rgroup, qkr) -> head_dim permutation
-        # as K's `_k_ops` (matches pa_decode_ps_kernel's `_finish_q_fragments`).
+        # as K's `_k_ops`.
         q_ops = []
         for qkhe in range_constexpr(QKHE_LOOP):
             he_idx = qkhe * RGROUP_QUARTERS + rgroup
@@ -564,7 +510,6 @@ def compile_pa_decode_tile(
 
         # QK in TLOOP chunks of TOK_CHUNK tokens: each chunk yields a f32x4
         # C-fragment, so softmax processes 4 scores at a time (low VGPR peak)
-        # -- matching pa_decode_ps_kernel's TLOOP.
         # compile-time per-chunk token offsets (token = base_tok_f + a*c16 + r,
         # matching K's own contiguous-per-warp formula above: base_tok_f
         # supplies warp*TOK_CHUNK + l16g*4)
@@ -578,7 +523,7 @@ def compile_pa_decode_tile(
         tmpl_Op = fx.make_rmem_tensor(fx.make_layout((M, VHE_SIZE), (VHE_SIZE, 1)), fx.Float32)
         OP_ELEMS = M * VHE_SIZE // (NWARP * WAVE)  # PV C-fragment elements/lane/chunk (probed = 4)
 
-        # ── raw dwordx4 V load (B operand), pa_decode_ps_kernel's layout ──
+        # ── raw dwordx4 V load (B operand) ──
         # lane (rgroup) takes the contiguous token slice [rgroup*64:+64] for
         # its head (vh*VHE_SIZE+warp*16+lane16). value_cache_ptr's "trans_v"
         # layout [num_blocks, num_kv_heads, block_size//16, head_dim, 16]
@@ -683,10 +628,9 @@ def compile_pa_decode_tile(
                 pm = pm.maximumf(masked_chunks[a].reduce(ReductionOp.MAX))
             for sh in (16, 32):
                 pm = pm.maximumf(pm.shuffle_xor(sh, WAVE))
-            # Unconditional store (matches pa_decode_ps_kernel's own
-            # `_cross_warp_softmax_and_prob_pack`): all 4 lanes sharing this
-            # qhead already hold the identical post-shuffle_xor `pm`, so this
-            # is a harmless same-value redundant write, not a race.
+            # Unconditional store: all 4 lanes sharing this qhead already hold
+            # the identical post-shuffle_xor `pm`, so this is a harmless
+            # same-value redundant write, not a race.
             _st_lw(sLmax_off, qh, warp, pm * scale)
             gpu.barrier()
 
@@ -720,7 +664,7 @@ def compile_pa_decode_tile(
             for a in range_constexpr(NCHUNK):
                 # HW exp2 intrinsic instead of MLIR's generic math.exp2 (a
                 # polynomial approximation costing ~32 extra v_cndmask here)
-                # -- matches pa_decode_ps_kernel's own exp2_f32_fast usage.
+                # -- matches exp2_f32_fast usage.
                 Pa = fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b))
                 ls = ls + Pa.reduce(ReductionOp.ADD)
                 words.append(_f32_to_fp8_words(Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32))[0])
@@ -849,7 +793,7 @@ def compile_pa_decode_tile(
         # ELEMS_PER_THREAD-wide slice) instead of only the GS row-owner lanes
         # looping over all HEAD elements -- fully uses the wave and cuts the
         # epilogue's static instruction count (measured ds_read: 45 -> ~15,
-        # matching pa_decode_ps_kernel's range).
+        # matching range).
         assert BLOCK_THREADS % GS == 0, "epilogue requires BLOCK_THREADS to divide evenly by GS"
         THREADS_PER_ROW = BLOCK_THREADS // GS
         ELEMS_PER_THREAD = HEAD // THREADS_PER_ROW
@@ -862,9 +806,7 @@ def compile_pa_decode_tile(
         row_off = sO_off + row_e * (HEAD * 4) + col_e * 4
         o_v = _view(row_off, fx.Float32, fx.make_layout(ELEMS_PER_THREAD, 1)).load()
         # value_scale and the P dequant (1/FP8_MAX) are true per-CTA constants
-        # here (unlike pa_decode_ps_kernel's `_pv_mfma`, which folds
-        # value_scale into every PV tile since that path is shared with
-        # per-token_kv) -- fold them in exactly once, before the NP branch, so
+        # here -- fold them in exactly once, before the NP branch, so
         # both paths write an already-scaled numerator and the reduce kernel
         # needs no value_scale of its own.
         o_scale = v_scale_f * fx.Float32(1.0 / FP8_MAX)
@@ -874,11 +816,7 @@ def compile_pa_decode_tile(
             # single partition: normalize and write the output directly (no
             # partials / reduce round-trip).
             qh = kv_h * GS + row_e
-            # HW reciprocal approximation, matching pa_decode_ps_kernel's own
-            # softmax-denominator reciprocal (`inv_sum = rcp_f32(safe_sum)`).
-            # Clamp to 1.0 when l==0 (a partition/tile with no valid tokens)
-            # so rcp_f32 can't return +inf and multiply into a NaN below --
-            # o_v is also 0 there, so the clamp still yields a harmless 0.
+
             l_row = _ld1(sL_off, row_e)
             safe_l = arith.select(l_row > ZERO_F, l_row, fx.Float32(1.0))
             inv_l = fx.Float32(rcp_f32(safe_l))
@@ -891,11 +829,6 @@ def compile_pa_decode_tile(
             out_chunk = fx.slice(fx.logical_divide(out_row, fx.make_layout(ELEMS_PER_THREAD, 1)), (None, sub_e))
             out_chunk.store(o_out)
         else:
-            # multi-partition: write this partition's (m_p, l_p, already-
-            # normalized + scaled O_p/l_p in Q_DTYPE) -- reused pa_decode_sw_reduce_kernel
-            # (kernels/pa_decode_swa.py, pa_decode_ps_kernel's own reduce)
-            # does a weighted blend of these pre-normalized partials, not a
-            # raw-numerator/raw-denominator combine like the old custom reduce.
             base = ((seq * n_kv + kv_h) * NP + part) * GS + row_e
             if sub_e == 0:
                 pmax_ptr[base] = _ld1(sM_off, row_e)
@@ -904,8 +837,7 @@ def compile_pa_decode_tile(
             # NP > this seq's actual tile count): o_v is also 0 there, so an
             # unclamped rcp_f32(0)==+inf would multiply into a NaN partial
             # that the reduce kernel's zero-weighting can't filter back out
-            # (0 * NaN == NaN, not 0). Same guard as pa_decode_ps_kernel's
-            # own `safe_sum`/`inv_sum` (`_normalize_pa_output`).
+            # (0 * NaN == NaN, not 0).
             l_p_row = _ld1(sL_off, row_e)
             safe_l_p = arith.select(l_p_row > ZERO_F, l_p_row, fx.Float32(1.0))
             inv_l_p = fx.Float32(rcp_f32(safe_l_p))
@@ -915,11 +847,6 @@ def compile_pa_decode_tile(
             pout_div = fx.logical_divide(pout_ptr, fx.make_layout(ELEMS_PER_THREAD, 1))
             pout_chunk = fx.slice(pout_div, (None, base * THREADS_PER_ROW + sub_e))
             pout_chunk.store(o_norm)
-
-    # NP>1 reduce: reuses pa_decode_ps_kernel's own `pa_decode_sw_reduce_kernel`
-    # (kernels/pa_decode_swa.py) instead of a custom implementation -- see
-    # `pa_decode_tile()` below, where it's compiled and launched from the host
-    # (matching how pa_decode_ps_launch itself calls it).
 
     @flyc.jit
     def pa_decode_tile_launch(
@@ -1016,13 +943,12 @@ def pa_decode_tile(
 ) -> None:
     """Host entry point. See module docstring for the expected tensor layouts."""
     num_seqs, num_q_heads, head_dim = query.shape
-    num_blocks, num_kv_heads, num_hgroups, block_size, hgroup_width = key_cache.shape
-    # K's blocked layout matches pa_decode_ps_kernel's own (fixed 16-element
-    # head-chunk width -- see compile_pa_decode_tile's QKHE_LOOP comment).
+    _, num_kv_heads, num_hgroups, block_size, hgroup_width = key_cache.shape
+
     assert num_hgroups == head_dim // 16 and hgroup_width == 16
     assert block_size in (16, 64), f"pa_decode_tile only supports block_size in (16, 64), got {block_size}"
     _, _, v_subblocks, v_head_dim, v_width = value_cache.shape
-    # V's "trans_v" layout matches pa_decode_ps_kernel's own.
+
     assert v_head_dim == head_dim and v_width == 16 and v_subblocks == block_size // 16
     assert block_tables.dtype == torch.int32, f"block_tables must be int32, got {block_tables.dtype}"
     assert context_lengths.dtype == torch.int32, f"context_lengths must be int32, got {context_lengths.dtype}"
@@ -1065,9 +991,7 @@ def pa_decode_tile(
         pout_dtype = torch.bfloat16 if query_dtype == "bf16" else torch.float16
         pout = torch.empty(num_seqs, num_kv_heads, num_partitions, GS, head_dim, dtype=pout_dtype, device=dev)
     s = stream or torch.cuda.current_stream()
-    # K/V scales are read in-kernel via buffer_load (matching
-    # pa_decode_ps_kernel), not a host kernarg -- a plain float still works
-    # (wrapped into a 1-element tensor) or a caller-owned device tensor.
+
     key_scale_t = key_scale if isinstance(key_scale, torch.Tensor) else torch.tensor([float(key_scale)], device=dev)
     value_scale_t = (
         value_scale if isinstance(value_scale, torch.Tensor) else torch.tensor([float(value_scale)], device=dev)
@@ -1098,13 +1022,6 @@ def pa_decode_tile(
         s,
     )
     if num_partitions > 1:
-        # Reuse pa_decode_ps_kernel's own reduce kernel (kernels/pa_decode_swa.py)
-        # instead of a custom implementation, called exactly the way
-        # pa_decode_ps_launch itself calls it: raw data_ptr()s + explicit
-        # strides, host-side (not from within pa_decode_tile_launch's own
-        # trace, since this reduce kernel's calling convention is
-        # raw-fx.Int64-pointer based, not fx.Tensor based like this file's
-        # own kernels).
         from kernels.attention.pa_decode_swa import compile_pa_decode_sw_reduce
 
         reduce_compiled = compile_pa_decode_sw_reduce(
