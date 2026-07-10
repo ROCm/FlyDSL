@@ -36,6 +36,7 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.common.kernels_common import dtype_to_elem_type
+from kernels.common.tensor_shim import lds_load_vec, lds_store_vec
 
 _LOG2E = host_math.log2(host_math.e)  # 1.4426950408889634
 _VMCNT_LO_MASK = 0xF
@@ -494,9 +495,7 @@ def build_flash_attn_func_module_primary(
         # The unsafe_fp_math/fast_fp_math builder params control LLVM-level attributes only.
         fm_fast = fx.arith.FastMathFlags.fast
         v4f16_type = Vec.make_type(4, elem_dtype)
-        v8f16_type = Vec.make_type(8, elem_dtype)
         v16f32_type = Vec.make_type(16, fx.Float32)
-        mfma_pack_type = v8f16_type if USE_K16 else v4f16_type
         MFMA_LANE_K = 8 if USE_K16 else 4
 
         def _mfma(mfma_fn, a, b, c):
@@ -527,35 +526,14 @@ def build_flash_attn_func_module_primary(
 
         seq_len_v = fx.Index(seq_len)
 
-        # ---- LDS region (single K/V array; pointer-based vectorized access) ----
-        # .peek() returns a Python handle; derive the LDS base once here (as an
-        # index and an addrspace(3) llvm ptr) and only use those ir.Values inside
-        # the runtime KV loop.
+        # ---- LDS K/V region (single array; one sub-view per vectorized access) ----
+        # `lds.kv` is the typed shared field; `lds.kv.ptr` is its pointer. The `lds`
+        # handle stays out of the runtime loop -- capture the base once as the field
+        # pointer (for register load/store) and as a raw address `lds_kv_base_idx`
+        # (the ds_read / DMA paths take a pointer, not a view).
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        # Capture the LDS base once here; the `lds` handle is a Python object and
-        # must never be referenced inside the runtime KV loop. `lds_kv_ptr` (a typed
-        # shared-memory iterator) drives the high-level view/recast register access;
-        # `lds_kv_base_idx` (a raw address) feeds the ds_read / DMA pointer paths
-        # that inherently require a pointer.
         lds_kv_ptr = lds.kv.ptr
         lds_kv_base_idx = fx.Index(fx.ptrtoint(lds_kv_ptr))
-
-        def _lds_kv_store(elem_idx, vec_value, alignment):
-            # LDS register store via the high-level layout/view API. `elem_idx` is an
-            # element offset in the LDS element (f16/bf16) units. `alignment` is kept
-            # for call-site compatibility; the view derives natural alignment.
-            del alignment
-            vec = vec_value if isinstance(vec_value, Vec) else Vec(vec_value)
-            it = fx.recast_iter(vec.dtype, fx.add_offset(lds_kv_ptr, fx.Int32(elem_idx)))
-            fx.make_view(it, fx.make_layout(vec.numel, 1)).store(vec)
-
-        def _lds_kv_load(vec_type, elem_idx, alignment):
-            # LDS register load via the high-level layout/view API (see _lds_kv_store
-            # for the addressing convention). `vec_type` only selects the view extent.
-            del alignment
-            n_elems = ir.VectorType(vec_type).shape[0]
-            it = fx.recast_iter(elem_dtype, fx.add_offset(lds_kv_ptr, fx.Int32(elem_idx)))
-            return fx.make_view(it, fx.make_layout(n_elems, 1)).load().ir_value()
 
         # ---- Thread / block indices ----
         block_id = fx.Index(gpu.block_idx.x)
@@ -707,21 +685,19 @@ def build_flash_attn_func_module_primary(
                         swz_col = _k_swizzle(lds_row, load_col_base)
                         lds_idx = k_base + lds_row * K_STRIDE + swz_col
                         vec = load_global_f16xN(k_ptr, g_idx)
-                        _lds_kv_store(lds_idx, vec, 16)
+                        lds_store_vec(lds_kv_ptr, lds_idx, vec)
                 else:
                     g_idx = global_idx_kv(row_idx, load_col_base)
                     lds_row = load_row_in_batch + row_offset
                     swz_col = _k_swizzle(lds_row, load_col_base)
                     lds_idx = k_base + lds_row * K_STRIDE + swz_col
                     vec = load_global_f16xN(k_ptr, g_idx)
-                    _lds_kv_store(lds_idx, vec, 16)
+                    lds_store_vec(lds_kv_ptr, lds_idx, vec)
 
         # ---- Cooperative V load ----
         def _v_store_row_major(v_base, lds_row, vec):
             lds_idx = v_base + lds_row * V_STRIDE + load_col_base
-            # V_STRIDE may be HEAD_DIM+4 (non-DMA HW-transpose), so the row term is
-            # only 8B-aligned; keep alignment conservative for that layout.
-            _lds_kv_store(lds_idx, vec, 8)
+            lds_store_vec(lds_kv_ptr, lds_idx, vec)
 
         def _v_store_transposed(v_base, lds_row, vec):
             for _e in range_constexpr(VEC_WIDTH):
@@ -729,7 +705,7 @@ def build_flash_attn_func_module_primary(
                 vt_d = load_col_base + _e
                 vt_idx = v_base + vt_d * VT_STRIDE + lds_row
                 v1 = Vec.from_elements([elem], elem_dtype)
-                _lds_kv_store(vt_idx, v1, 2)
+                lds_store_vec(lds_kv_ptr, vt_idx, v1)
 
         _v_store_to_lds = _v_store_row_major if USE_HW_TR else _v_store_transposed
 
@@ -1009,8 +985,8 @@ def build_flash_attn_func_module_primary(
                 k_packs_lo = [None] * K_STEPS_QK
                 k_packs_hi = [None] * K_STEPS_QK
                 for p in range_constexpr(_QK_PREFETCH_DEPTH):
-                    k_packs_lo[p] = _lds_kv_load(mfma_pack_type, _k_idx_lo(p), MFMA_LANE_K * 2)
-                    k_packs_hi[p] = _lds_kv_load(mfma_pack_type, _k_idx_hi(p), MFMA_LANE_K * 2)
+                    k_packs_lo[p] = lds_load_vec(lds_kv_ptr, _k_idx_lo(p), elem_dtype, MFMA_LANE_K)
+                    k_packs_hi[p] = lds_load_vec(lds_kv_ptr, _k_idx_hi(p), elem_dtype, MFMA_LANE_K)
 
                 if const_expr(ENABLE_DMA and not ENABLE_PREFETCH_3BUF):
                     coop_dma_v(kv_start, 0)
@@ -1022,11 +998,11 @@ def build_flash_attn_func_module_primary(
                     s_acc_lo = mfma_acc(k_packs_lo[ks], q_b_packs[ks], s_acc_lo)
                     s_acc_hi = mfma_acc(k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
                     if const_expr(ks + _QK_PREFETCH_DEPTH < K_STEPS_QK):
-                        k_packs_lo[ks + _QK_PREFETCH_DEPTH] = _lds_kv_load(
-                            mfma_pack_type, _k_idx_lo(ks + _QK_PREFETCH_DEPTH), MFMA_LANE_K * 2
+                        k_packs_lo[ks + _QK_PREFETCH_DEPTH] = lds_load_vec(
+                            lds_kv_ptr, _k_idx_lo(ks + _QK_PREFETCH_DEPTH), elem_dtype, MFMA_LANE_K
                         )
-                        k_packs_hi[ks + _QK_PREFETCH_DEPTH] = _lds_kv_load(
-                            mfma_pack_type, _k_idx_hi(ks + _QK_PREFETCH_DEPTH), MFMA_LANE_K * 2
+                        k_packs_hi[ks + _QK_PREFETCH_DEPTH] = lds_load_vec(
+                            lds_kv_ptr, _k_idx_hi(ks + _QK_PREFETCH_DEPTH), elem_dtype, MFMA_LANE_K
                         )
 
                 # ==== Online softmax over 64 KV positions ====
@@ -1392,8 +1368,8 @@ def build_flash_attn_func_module_primary(
                         k_base = fx.Index(pks * PV_K_STEP) + lane_div_32 * 4
                         v_lo_idx = v_base + d_pos * VT_STRIDE + k_base
                         v_hi_idx = v_lo_idx + fx.Index(K_SUB_N)
-                        vl = _lds_kv_load(v4f16_type, v_lo_idx, 4)
-                        vh = _lds_kv_load(v4f16_type, v_hi_idx, 4)
+                        vl = lds_load_vec(lds_kv_ptr, v_lo_idx, elem_dtype, 4)
+                        vh = lds_load_vec(lds_kv_ptr, v_hi_idx, elem_dtype, 4)
                     return vl, vh
 
                 # Pre-read V for the first step.

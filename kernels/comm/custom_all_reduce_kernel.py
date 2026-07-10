@@ -19,6 +19,7 @@ from flydsl.expr import arith as ea
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.comm.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
+from kernels.common.tensor_shim import lds_load_vec, lds_store_vec
 
 # ---------------------------------------------------------------------------
 # Low-level memory helpers — all operate on raw i64 device addresses.
@@ -169,26 +170,19 @@ def _raw(v):
     return v.ir_value() if hasattr(v, "ir_value") else v
 
 
-def _smem_pack_view(smem_ptr, idx):
-    """Build a vector<4xi32> view over one 16-byte pack in shared memory.
-
-    ``smem_ptr`` is the Int32 iterator of the shared-storage Array (captured once
-    at the top of the kernel, never re-derived from the ``lds`` handle inside
-    control flow). ``idx`` is the pack index; each pack is _ELEMS_PER_PACK i32
-    elements, so the element offset is ``idx * _ELEMS_PER_PACK``.
-    """
-    it = fx.recast_iter(fx.Int32, fx.add_offset(smem_ptr, fx.Int32(idx * _ELEMS_PER_PACK)))
-    return fx.make_view(it, fx.make_layout(_ELEMS_PER_PACK, 1))
-
-
+# Thin adapters over the shared LDS helpers, addressed by 16-byte pack index.
+# ``smem_ptr`` is the Int32 iterator of the shared-storage Array (captured once at
+# the top of the kernel, never re-derived from the ``lds`` handle inside control
+# flow); each pack is _ELEMS_PER_PACK i32 elements, so the element offset is
+# ``idx * _ELEMS_PER_PACK``.
 def _smem_store(smem_ptr, value, idx):
     """Store one 16-byte (vector<4xi32>) pack into shared memory by pack index."""
-    _smem_pack_view(smem_ptr, idx).store(value)
+    lds_store_vec(smem_ptr, idx * _ELEMS_PER_PACK, value)
 
 
 def _smem_load(smem_ptr, idx):
     """Load one 16-byte (vector<4xi32>) pack from shared memory by pack index."""
-    return _smem_pack_view(smem_ptr, idx).load()
+    return lds_load_vec(smem_ptr, idx * _ELEMS_PER_PACK, fx.Int32, _ELEMS_PER_PACK)
 
 
 def _c64(v):

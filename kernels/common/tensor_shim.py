@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
 from flydsl.compiler.protocol import extract_to_ir_values
@@ -328,3 +329,33 @@ class STensor(TensorBase):
             vec_t = T.vec(1, self.dtype)
             vec = vector.from_elements(vec_t, [value])
             vector.store(vec, self.memptr, [offset], alignment=16)
+
+
+# ===----------------------------------------------------------------------=== #
+# Shared LDS / shared-memory vectorized register access (new smem + new vector)
+#
+# The canonical way to read/write a fixed-width vector at an element offset into a
+# shared-storage field pointer (`lds.<field>.ptr`). Prefer these over per-kernel
+# copies. Offsets count ELEMENTS (not bytes); recast-first (dtype then offset)
+# keeps the access element-aligned; values in/out are DSL `fx.Vector`.
+#
+# Note: this is the new-smem/new-vector path (fly view + memref_load_vec). The
+# legacy `STensor` above (upstream `vector.load_op`/`vector.store` over a builtin
+# memref) is a separate set kept for its existing users; migrate those to these
+# helpers only together with their builtin-memref consumers.
+# ===----------------------------------------------------------------------=== #
+def lds_vec_view(ptr, elem_off, dtype, num_elems):
+    """A `num_elems`-wide view of `dtype` elements at element offset `elem_off`."""
+    it = fx.add_offset(fx.recast_iter(dtype, ptr), fx.Int32(elem_off))
+    return fx.make_view(it, fx.make_layout(num_elems, 1))
+
+
+def lds_load_vec(ptr, elem_off, dtype, num_elems):
+    """Load `num_elems` `dtype` elements from LDS at element offset `elem_off` -> Vector."""
+    return lds_vec_view(ptr, elem_off, dtype, num_elems).load()
+
+
+def lds_store_vec(ptr, elem_off, vec):
+    """Store DSL Vector `vec` into LDS at element offset `elem_off`."""
+    vec = vec if isinstance(vec, fx.Vector) else fx.Vector(vec)
+    lds_vec_view(ptr, elem_off, vec.dtype, vec.numel).store(vec)

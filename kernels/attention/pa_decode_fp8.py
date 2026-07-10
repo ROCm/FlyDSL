@@ -26,6 +26,7 @@ from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
 from kernels.common import dpp_utils
+from kernels.common.tensor_shim import lds_load_vec, lds_store_vec
 from kernels.common.utils import (
     cdiv,
     exp2_f32_fast,
@@ -82,25 +83,18 @@ _PACKED_FP8_QUERY_DTYPES = tuple(
 )
 
 
+# Thin adapters over the shared LDS helpers (kernels.common.tensor_shim). Kept
+# with the local signature because callers here feed the loaded value straight
+# into raw vector-dialect ops (vector.extract/insert) and scf loop state, which
+# need an ir.Value rather than a DSL Vector -- hence the `.ir_value()`. `result_type`
+# only selects the view extent; `align` is legacy and ignored (natural alignment).
 def _lds_load(ptr, elem_off, result_type, align):
-    """Vectorized/scalar LDS load via the high-level layout/view API.  ``ptr`` is
-    a typed shared-memory pointer and ``elem_off`` is an element offset in that
-    pointer's element units.  ``result_type`` is a 1-D vector type whose element
-    type matches the pointer's; only its length selects the view extent.  The
-    ``align`` argument is retained for call-site compatibility."""
-    del align  # natural alignment from the view layout
     n_elems = ir.VectorType(result_type).shape[0]
-    it = fx.recast_iter(ptr.element_type, fx.add_offset(ptr, fx.Int32(elem_off)))
-    return fx.make_view(it, fx.make_layout(n_elems, 1)).load().ir_value()
+    return lds_load_vec(ptr, elem_off, ptr.element_type, n_elems).ir_value()
 
 
 def _lds_store(value, ptr, elem_off, align):
-    """Vectorized/scalar LDS store via the high-level layout/view API (see
-    :func:`_lds_load` for the addressing convention)."""
-    del align  # natural alignment from the view layout
-    vec = value if isinstance(value, fx.Vector) else fx.Vector(value)
-    it = fx.recast_iter(vec.dtype, fx.add_offset(ptr, fx.Int32(elem_off)))
-    fx.make_view(it, fx.make_layout(vec.numel, 1)).store(vec)
+    lds_store_vec(ptr, elem_off, value)
 
 
 def _flatten_v_results(v_results, vhe_loop: int = 2):
