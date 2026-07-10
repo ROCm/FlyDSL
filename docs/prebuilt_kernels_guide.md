@@ -65,8 +65,17 @@ Computes `RMSNorm(x) = x / sqrt(mean(x^2) + eps) * gamma`.
 ```python
 from kernels.norm.rmsnorm_kernel import build_rmsnorm_module
 
-executor = build_rmsnorm_module(N=8192, dtype_str="bf16")
+executor = build_rmsnorm_module(N=8192, dtype_str="bf16", store_rstd=False)
 ```
+
+`build_rmsnorm_module(N, dtype_str, store_rstd=False, eps=EPS)` optionally
+writes the per-row reciprocal std (`rstd`) for use by the backward pass.
+
+**Backward:** `build_rmsnorm_bwd_module(N, dtype_str)` builds the fused RMSNorm
+backward kernel (grid `(M,)`, one block per row). Kernel signature
+`rmsnorm_bwd_kernel(Input, Gamma, DY, Rstd, DX, DWeight)`: it reads the forward
+`Rstd`, writes `DX` (input grad) and atomic-adds into `DWeight` (fp32 weight
+grad). `eps` is baked into `Rstd` by the forward, so it is not needed here.
 
 **Configuration Constants:** Same as LayerNorm (BLOCK_THREADS=256, VEC_WIDTH=8, etc.)
 
@@ -163,7 +172,16 @@ Returns a `@flyc.jit`-decorated function that auto-compiles on first call.
 
 **Key constraints:**
 - `tile_k` must be a positive divisor of `K`
-- FP4/MXFP4 GEMM is a separate kernel (`kernels/gemm/mxfp4_preshuffle.py`, `kernels/gemm/fp4_gemm_4wave.py`); INT4 is not supported by this kernel.
+- MX (block-scaled) GEMM is a separate kernel (`kernels/gemm/mxfp4_preshuffle.py`, `kernels/gemm/fp4_gemm_4wave.py`); INT4 is not supported by this kernel.
+
+**MX A x MXFP4 B GEMM (`kernels/gemm/mxfp4_preshuffle.py`, gfx950):** the
+`launch_gemm` `@flyc.jit` launcher runs `A x preshuffled MXFP4 B` with per-32
+E8M0 scales, selecting the A element type via `a_dtype` (`"fp4"`, `"fp6"`, or
+`"fp8"`; B is always MXFP4). This unified `launch_gemm` is the current gfx950
+entry point (it replaced the earlier standalone `compile_mxfp6_gemm` from #780);
+the separate `compile_mxfp4_gemm` in `kernels/gemm/gemm_fp8fp4_gfx1250.py` is the
+distinct gfx1250 kernel. `batch>1` runs a strided-batched GEMM over `grid.z`.
+Covered by `tests/kernels/test_preshuffle_gemm.py`.
 
 **Pipeline details:**
 - **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
