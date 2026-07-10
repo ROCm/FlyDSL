@@ -876,7 +876,12 @@ def compile_pa_decode_tile(
             qh = kv_h * GS + row_e
             # HW reciprocal approximation, matching pa_decode_ps_kernel's own
             # softmax-denominator reciprocal (`inv_sum = rcp_f32(safe_sum)`).
-            inv_l = fx.Float32(rcp_f32(_ld1(sL_off, row_e)))
+            # Clamp to 1.0 when l==0 (a partition/tile with no valid tokens)
+            # so rcp_f32 can't return +inf and multiply into a NaN below --
+            # o_v is also 0 there, so the clamp still yields a harmless 0.
+            l_row = _ld1(sL_off, row_e)
+            safe_l = arith.select(l_row > ZERO_F, l_row, fx.Float32(1.0))
+            inv_l = fx.Float32(rcp_f32(safe_l))
             o_out = (o_v * fx.Vector.from_elements([inv_l], dtype=fx.Float32).broadcast_to(ELEMS_PER_THREAD)).to(
                 Q_DTYPE
             )
@@ -895,7 +900,15 @@ def compile_pa_decode_tile(
             if sub_e == 0:
                 pmax_ptr[base] = _ld1(sM_off, row_e)
                 psum_ptr[base] = _ld1(sL_off, row_e)
-            inv_l_p = fx.Float32(rcp_f32(_ld1(sL_off, row_e)))
+            # Clamp to 1.0 when l_p==0 (a partition assigned zero tiles, e.g.
+            # NP > this seq's actual tile count): o_v is also 0 there, so an
+            # unclamped rcp_f32(0)==+inf would multiply into a NaN partial
+            # that the reduce kernel's zero-weighting can't filter back out
+            # (0 * NaN == NaN, not 0). Same guard as pa_decode_ps_kernel's
+            # own `safe_sum`/`inv_sum` (`_normalize_pa_output`).
+            l_p_row = _ld1(sL_off, row_e)
+            safe_l_p = arith.select(l_p_row > ZERO_F, l_p_row, fx.Float32(1.0))
+            inv_l_p = fx.Float32(rcp_f32(safe_l_p))
             o_norm = (o_v * fx.Vector.from_elements([inv_l_p], dtype=fx.Float32).broadcast_to(ELEMS_PER_THREAD)).to(
                 Q_DTYPE
             )
@@ -946,6 +959,49 @@ def compile_pa_decode_tile(
     return {"launch": pa_decode_tile_launch, "kernel": pa_decode_tile_kernel}
 
 
+def _choose_num_partitions(
+    num_seqs: int,
+    num_kv_heads: int,
+    max_blocks_per_seq: int,
+    block_size: int,
+    device: torch.device,
+    *,
+    target_ctas_per_cu: int = 8,
+    min_tiles_per_partition: int = 2,
+    tile_tok: int = 256,
+) -> int:
+    """Choose the number of context partitions (grid.z) for pa_decode_tile.
+
+    This kernel launches a *static* one-CTA-per-partition grid (unlike
+    production's *persistent* kernel), so it needs its own NP heuristic,
+    tuned via a direct sweep on an 80-CU MI308X. Two regimes:
+      - CU-STARVED (num_seqs*num_kv_heads < device CU count): push NP up to
+        `cu_fill_np`, uncapped by tiles-per-partition -- idle CUs are worse
+        than thin partitions.
+      - NOT CU-STARVED: further CTAs only add occupancy depth and reduce-
+        kernel/prologue overhead, so cap tiles-per-partition to at least
+        `min_tiles_per_partition`.
+
+    ``target_ctas_per_cu``, ``min_tiles_per_partition``, and ``tile_tok``
+    default to the values this heuristic was tuned with; override only to
+    re-sweep or adapt to a different device.
+    """
+    from kernels.pa_decode_fp8 import get_recommended_splits
+
+    device_cus = torch.cuda.get_device_properties(device).multi_processor_count
+    cu_fill_np = cdiv(target_ctas_per_cu * device_cus, num_seqs * num_kv_heads)
+    # Bounded by max_blocks_per_seq*block_size/tile_tok, NOT the actual
+    # context length: reading `context_lengths` on the host forces a GPU
+    # sync, illegal during CUDA graph capture. Exact when callers size
+    # `block_tables` to the actual context length; looser (but still
+    # correct) if they over-allocate for a larger max-sequence-length.
+    max_possible_tiles = cdiv(max_blocks_per_seq * block_size, tile_tok)
+    cu_starved = (num_seqs * num_kv_heads) < device_cus
+    tiles_np_cap = max_possible_tiles if cu_starved else max(1, max_possible_tiles // min_tiles_per_partition)
+    base_np = get_recommended_splits(num_seqs, num_kv_heads)
+    return max(1, min(max(base_np, cu_fill_np), tiles_np_cap))
+
+
 def pa_decode_tile(
     output: torch.Tensor,
     query: torch.Tensor,
@@ -982,33 +1038,7 @@ def pa_decode_tile(
         output.dtype == query.dtype
     ), f"pa_decode_tile requires output.dtype == query.dtype, got {output.dtype} vs {query.dtype}"
 
-    # Choose the number of context partitions (grid.z). This kernel launches a
-    # *static* one-CTA-per-partition grid (unlike production's *persistent*
-    # kernel), so it needs its own NP heuristic, tuned via a direct sweep on
-    # an 80-CU MI308X. Two regimes:
-    #   - CU-STARVED (num_seqs*num_kv_heads < device CU count): push NP up to
-    #     `cu_fill_np`, uncapped by tiles-per-partition -- idle CUs are worse
-    #     than thin partitions.
-    #   - NOT CU-STARVED: further CTAs only add occupancy depth and reduce-
-    #     kernel/prologue overhead, so cap tiles-per-partition to at least
-    #     MIN_TILES_PER_PARTITION.
-    from kernels.pa_decode_fp8 import get_recommended_splits
-
-    TARGET_CTAS_PER_CU = 8
-    MIN_TILES_PER_PARTITION = 2
-    device_cus = torch.cuda.get_device_properties(query.device).multi_processor_count
-    cu_fill_np = cdiv(TARGET_CTAS_PER_CU * device_cus, num_seqs * num_kv_heads)
-    # Bounded by max_blocks_per_seq*block_size/TILE_TOK, NOT the actual
-    # context length: reading `context_lengths` on the host forces a GPU
-    # sync, illegal during CUDA graph capture. Exact when callers size
-    # `block_tables` to the actual context length; looser (but still
-    # correct) if they over-allocate for a larger max-sequence-length.
-    tile_tok = 256
-    max_possible_tiles = cdiv(max_blocks_per_seq * block_size, tile_tok)  # no host sync (see below)
-    cu_starved = (num_seqs * num_kv_heads) < device_cus
-    tiles_np_cap = max_possible_tiles if cu_starved else max(1, max_possible_tiles // MIN_TILES_PER_PARTITION)
-    base_np = get_recommended_splits(num_seqs, num_kv_heads)
-    num_partitions = max(1, min(max(base_np, cu_fill_np), tiles_np_cap))
+    num_partitions = _choose_num_partitions(num_seqs, num_kv_heads, max_blocks_per_seq, block_size, query.device)
     GS = query_group_size
 
     compiled = compile_pa_decode_tile(
