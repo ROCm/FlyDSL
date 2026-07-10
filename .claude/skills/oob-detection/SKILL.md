@@ -74,15 +74,15 @@ temporary guard immediately before the load/store. In FlyDSL kernels, prefer a
 small `printf` with the failing coordinates:
 
 ```python
-load_start = q_elem + arith.constant(qwi * 4, type=T.i32)
-load_end = load_start + arith.constant(vec_width - 1, type=T.i32)
-legal_end = q_base + arith.constant(HEAD_SIZE - 1, type=T.i32)
+load_start = q_elem + fx.Int32(qwi * 4)
+load_end = load_start + fx.Int32(vec_width - 1)
+legal_end = q_base + fx.Int32(HEAD_SIZE - 1)
 
 if load_end > legal_end:
     fx.printf(
         "OOB q load: lane=%d qwi=%d q_base=%d load=[%d,%d] legal_end=%d\n",
         lane16id,
-        arith.constant(qwi, type=T.i32),
+        fx.Int32(qwi),
         q_base,
         load_start,
         load_end,

@@ -818,26 +818,61 @@ public:
 // IntTupleLike operations
 //===----------------------------------------------------------------------===//
 
+// Normal-form fast path for structural ops (get/take/select/group/slice/dice) on
+// a plain Layout. Recurse natively in C++ over the shape and stride sub-tuples,
+// emitting only the final MakeLayoutOp + its MakeIntTuple operands.
+template <typename ApplyFn>
+static LogicalResult expandIntTupleOnLayout(Operation *op, Value src, PatternRewriter &rewriter,
+                                            ApplyFn applyFn) {
+  auto layoutTy = dyn_cast<LayoutType>(src.getType());
+  if (!layoutTy)
+    return failure();
+  if (!isNormalForm(cast<TypedValue<LayoutType>>(src)))
+    return failure();
+
+  auto makeLayout = src.getDefiningOp<MakeLayoutOp>();
+  Value shape = makeLayout.getShape();
+  Value stride = makeLayout.getStride();
+
+  IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, op->getLoc());
+  IntTupleValueAdaptor shapeA =
+      IntTupleValueAdaptor::create(builder, shape, cast<IntTupleType>(shape.getType()).getAttr());
+  IntTupleValueAdaptor strideA =
+      IntTupleValueAdaptor::create(builder, stride, cast<IntTupleType>(stride.getType()).getAttr());
+  IntTupleValueAdaptor rShape = applyFn(builder, shapeA);
+  IntTupleValueAdaptor rStride = applyFn(builder, strideA);
+  rewriter.replaceOpWithNewOp<MakeLayoutOp>(op, op->getResult(0).getType(),
+                                            builder.finalize(rShape), builder.finalize(rStride));
+  return success();
+}
+
 class GetOpLowering : public OpRewritePattern<GetOp> {
 public:
   using OpRewritePattern<GetOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(GetOp op, PatternRewriter &rewriter) const override {
     Value input = op.getInput();
+    ArrayRef<int32_t> mode = op.getMode();
+    auto applyFn = [&](IntTupleBuilder<IntTupleValueAdaptor> &b, IntTupleValueAdaptor a) {
+      for (int32_t i : mode)
+        a = b.at(a, i);
+      return a;
+    };
+
+    // Normal-form fast path for LinearLayout.
+    if (isa<LayoutType>(input.getType()))
+      return expandIntTupleOnLayout(op, input, rewriter, applyFn);
+
     auto intTupleTy = dyn_cast<IntTupleType>(input.getType());
     if (!intTupleTy)
       return failure();
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(input)))
       return failure();
 
-    IntTupleBuilder<IntTupleValueAdaptor> tupleBuilder(rewriter, op.getLoc());
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, op.getLoc());
     IntTupleValueAdaptor adaptor =
-        IntTupleValueAdaptor::create(tupleBuilder, input, intTupleTy.getAttr());
-
-    for (int32_t idx : op.getMode()) {
-      adaptor = tupleBuilder.at(adaptor, idx);
-    }
-    rewriter.replaceOp(op, tupleBuilder.finalize(adaptor));
+        IntTupleValueAdaptor::create(builder, input, intTupleTy.getAttr());
+    rewriter.replaceOp(op, builder.finalize(applyFn(builder, adaptor)));
     return success();
   }
 };
@@ -847,24 +882,27 @@ public:
   using OpRewritePattern<TakeOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(TakeOp op, PatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
     Value tuple = op.getTuple();
     int32_t begin = op.getBegin();
     int32_t end = op.getEnd();
+    auto applyFn = [&](IntTupleBuilder<IntTupleValueAdaptor> &b, IntTupleValueAdaptor a) {
+      return intTupleTake(b, a, begin, end);
+    };
+
+    // Normal-form fast path for LinearLayout.
+    if (isa<LayoutType>(tuple.getType()))
+      return expandIntTupleOnLayout(op, tuple, rewriter, applyFn);
 
     auto intTupleTy = dyn_cast<IntTupleType>(tuple.getType());
     if (!intTupleTy)
       return failure();
-
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(tuple)))
       return failure();
 
-    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, op.getLoc());
     IntTupleValueAdaptor adaptor =
         IntTupleValueAdaptor::create(builder, tuple, intTupleTy.getAttr());
-
-    IntTupleValueAdaptor result = intTupleTake(builder, adaptor, begin, end);
-    rewriter.replaceOp(op, builder.finalize(result));
+    rewriter.replaceOp(op, builder.finalize(applyFn(builder, adaptor)));
     return success();
   }
 };
@@ -874,23 +912,26 @@ public:
   using OpRewritePattern<SelectOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(SelectOp op, PatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
     Value tuple = op.getTuple();
+    ArrayRef<int32_t> indices = op.getIndices();
+    auto applyFn = [&](IntTupleBuilder<IntTupleValueAdaptor> &b, IntTupleValueAdaptor a) {
+      return intTupleSelect(b, a, indices);
+    };
+
+    // Normal-form fast path for LinearLayout.
+    if (isa<LayoutType>(tuple.getType()))
+      return expandIntTupleOnLayout(op, tuple, rewriter, applyFn);
 
     auto intTupleTy = dyn_cast<IntTupleType>(tuple.getType());
     if (!intTupleTy)
       return failure();
-
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(tuple)))
       return failure();
 
-    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, op.getLoc());
     IntTupleValueAdaptor adaptor =
         IntTupleValueAdaptor::create(builder, tuple, intTupleTy.getAttr());
-
-    ArrayRef<int32_t> indices = op.getIndices();
-    IntTupleValueAdaptor result = intTupleSelect(builder, adaptor, indices);
-    rewriter.replaceOp(op, builder.finalize(result));
+    rewriter.replaceOp(op, builder.finalize(applyFn(builder, adaptor)));
     return success();
   }
 };
@@ -900,24 +941,27 @@ public:
   using OpRewritePattern<GroupOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(GroupOp op, PatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
     Value tuple = op.getTuple();
     int32_t begin = op.getBegin();
     int32_t end = op.getEnd();
+    auto applyFn = [&](IntTupleBuilder<IntTupleValueAdaptor> &b, IntTupleValueAdaptor a) {
+      return intTupleGroup(b, a, begin, end);
+    };
+
+    // Normal-form fast path for LinearLayout.
+    if (isa<LayoutType>(tuple.getType()))
+      return expandIntTupleOnLayout(op, tuple, rewriter, applyFn);
 
     auto intTupleTy = dyn_cast<IntTupleType>(tuple.getType());
     if (!intTupleTy)
       return failure();
-
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(tuple)))
       return failure();
 
-    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, op.getLoc());
     IntTupleValueAdaptor adaptor =
         IntTupleValueAdaptor::create(builder, tuple, intTupleTy.getAttr());
-
-    IntTupleValueAdaptor result = intTupleGroup(builder, adaptor, begin, end);
-    rewriter.replaceOp(op, builder.finalize(result));
+    rewriter.replaceOp(op, builder.finalize(applyFn(builder, adaptor)));
     return success();
   }
 };
@@ -981,25 +1025,27 @@ public:
   using OpRewritePattern<SliceOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(SliceOp op, PatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
     Value src = op.getSrc();
-    Value coord = op.getCoord();
+    auto coordTy = dyn_cast<IntTupleType>(op.getCoord().getType());
+    if (!coordTy)
+      return failure();
+    IntTupleAttr coordAttr = coordTy.getAttr();
+    auto applyFn = [&](IntTupleBuilder<IntTupleValueAdaptor> &b, IntTupleValueAdaptor a) {
+      return intTupleSlice(b, a, coordAttr);
+    };
+
+    if (isa<LayoutType>(src.getType()))
+      return expandIntTupleOnLayout(op, src, rewriter, applyFn);
 
     auto srcTy = dyn_cast<IntTupleType>(src.getType());
-    auto coordTy = dyn_cast<IntTupleType>(coord.getType());
-
-    if (!srcTy || !coordTy)
+    if (!srcTy)
       return failure();
-
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(src)))
       return failure();
 
-    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, op.getLoc());
     IntTupleValueAdaptor srcAdaptor = IntTupleValueAdaptor::create(builder, src, srcTy.getAttr());
-
-    IntTupleValueAdaptor result = intTupleSlice(builder, srcAdaptor, coordTy.getAttr());
-
-    rewriter.replaceOp(op, builder.finalize(result));
+    rewriter.replaceOp(op, builder.finalize(applyFn(builder, srcAdaptor)));
     return success();
   }
 };
@@ -1009,23 +1055,29 @@ public:
   using OpRewritePattern<DiceOp>::OpRewritePattern;
 
   LogicalResult matchAndRewrite(DiceOp op, PatternRewriter &rewriter) const override {
-    auto loc = op.getLoc();
     Value src = op.getSrc();
-    Value coord = op.getCoord();
+    auto coordTy = dyn_cast<IntTupleType>(op.getCoord().getType());
+    if (!coordTy)
+      return failure();
+    IntTupleAttr coordAttr = coordTy.getAttr();
+
+    if (isa<LayoutType>(src.getType()))
+      return expandIntTupleOnLayout(
+          op, src, rewriter, [&](IntTupleBuilder<IntTupleValueAdaptor> &b, IntTupleValueAdaptor a) {
+            return intTupleDice(b, a, coordAttr);
+          });
 
     auto intTupleTy = dyn_cast<IntTupleType>(src.getType());
-    auto coordTy = dyn_cast<IntTupleType>(coord.getType());
-    if (!intTupleTy || !coordTy)
+    if (!intTupleTy)
       return failure();
-
     if (!isNormalForm(cast<TypedValue<IntTupleType>>(src)))
       return failure();
 
-    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, loc);
+    IntTupleBuilder<IntTupleValueAdaptor> builder(rewriter, op.getLoc());
     IntTupleValueAdaptor srcAdaptor =
         IntTupleValueAdaptor::create(builder, src, intTupleTy.getAttr());
 
-    IntTupleValueAdaptor result = intTupleDice(builder, srcAdaptor, coordTy.getAttr());
+    IntTupleValueAdaptor result = intTupleDice(builder, srcAdaptor, coordAttr);
     rewriter.replaceOp(op, builder.finalize(result));
     return success();
   }
@@ -2940,7 +2992,10 @@ public:
     layout_rewrite::populateWithGenerated(patterns);
     memref_rewrite::populateWithGenerated(patterns);
 
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
+    GreedyRewriteConfig config;
+    config.setUseTopDownTraversal(true).setRegionSimplificationLevel(
+        GreedySimplifyRegionLevel::Disabled);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns), config)))
       signalPassFailure();
 
     IRRewriter rewriter(context);

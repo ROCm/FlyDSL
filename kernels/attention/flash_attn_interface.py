@@ -35,6 +35,14 @@ __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 
 _DTYPE_MAP = {torch.bfloat16: "bf16", torch.float16: "f16", torch.float8_e4m3fn: "fp8"}
 
+# Short varlen/paged cases use the lightweight generic path.
+_VARLEN_LIGHT_MAX_SEQ = 256
+_DENSE_LIGHT_CU_FALLBACK = 256
+_DENSE_DUALWAVE_MIN_SEQ = 256
+_DENSE_DUALWAVE_LARGE_BATCH = 8
+_DENSE_DUALWAVE_MIN_SEQ_LARGE_BATCH = 192
+_DENSE_M256_MIN_TOKENS = 4096
+
 
 def _dtype_str(t: torch.Tensor) -> str:
     s = _DTYPE_MAP.get(t.dtype)
@@ -50,11 +58,66 @@ def _gpu_arch(device: torch.device) -> str:
         return ""
 
 
+def _dense_routes_to_dualwave(batch: int, seq_len: int) -> bool:
+    if batch >= _DENSE_DUALWAVE_LARGE_BATCH:
+        return seq_len >= _DENSE_DUALWAVE_MIN_SEQ_LARGE_BATCH
+    return seq_len >= _DENSE_DUALWAVE_MIN_SEQ
+
+
+def _dense_light_cu(device: torch.device) -> int:
+    try:
+        return int(torch.cuda.get_device_properties(device.index).multi_processor_count)
+    except Exception:
+        return _DENSE_LIGHT_CU_FALLBACK
+
+
+def _dense_generic_tile(batch: int, seq_len: int, num_heads: int, head_dim: int, dtype_str: str, device: torch.device):
+    if head_dim in (64, 128) and dtype_str in ("bf16", "f16"):
+        main_blocks = batch * num_heads * ((seq_len + 127) // 128)
+        if main_blocks < _dense_light_cu(device):
+            return 64, 128, "N32"
+    if num_heads >= 32 and batch * seq_len >= _DENSE_M256_MIN_TOKENS:
+        return 256, 512, "auto"
+    return 128, 256, "auto"
+
+
 # ── build-cache helpers ────────────────────────────────────────────────────
 
 
 @functools.lru_cache(maxsize=256)
 def _build_dense(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    cross_seqlen: bool,
+    block_m: int,
+    flat_work_group_size: int,
+    path_tag: str,
+    waves_per_eu: int,
+    daz: bool,
+):
+    """Build (and cache) one dense generic launcher variant."""
+    from kernels.attention.flash_attn_generic import build_flash_attn_func_module
+
+    return build_flash_attn_func_module(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str=dtype_str,
+        num_kv_heads=num_kv_heads,
+        cross_seqlen=cross_seqlen,
+        block_m=block_m,
+        flat_work_group_size=flat_work_group_size,
+        path_tag=path_tag,
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _build_dense_dualwave(
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
@@ -68,10 +131,10 @@ def _build_dense(
     debug_lazy_counts: bool,
     enable_stagger: bool,
 ):
-    """Build (and cache) a dense-mode launcher via the generic dispatch."""
-    from kernels.attention.flash_attn_generic import build_flash_attn_func_module
+    """Build (and cache) the dense gfx950 DUALWAVE_SWP launcher."""
+    from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
 
-    return build_flash_attn_func_module(
+    return build_flash_attn_dualwave_swp_module(
         num_heads=num_heads,
         head_dim=head_dim,
         causal=causal,
@@ -83,6 +146,34 @@ def _build_dense(
         dualwave_swp_lazy_rescale=lazy_rescale,
         dualwave_swp_setprio=setprio,
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
+        dualwave_swp_enable_stagger=enable_stagger,
+    )
+
+
+@functools.lru_cache(maxsize=128)
+def _build_dense_fp8(
+    num_heads: int,
+    num_kv_heads: int,
+    causal: bool,
+    waves_per_eu: int,
+    daz: bool,
+    lazy_rescale: bool,
+    setprio: bool,
+    enable_stagger: bool,
+):
+    """Build (and cache) the dense gfx950 fp8 launcher."""
+    from kernels.attention.flash_attn_fp8_gfx950 import build_flash_attn_dualwave_swp_fp8_module
+
+    return build_flash_attn_dualwave_swp_fp8_module(
+        num_heads=num_heads,
+        head_dim=128,
+        causal=causal,
+        dtype_str="fp8",
+        num_kv_heads=num_kv_heads,
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+        dualwave_swp_lazy_rescale=lazy_rescale,
+        dualwave_swp_setprio=setprio,
         dualwave_swp_enable_stagger=enable_stagger,
     )
 
@@ -119,6 +210,39 @@ def _build_varlen(
         dualwave_swp_setprio=setprio,
         dualwave_swp_debug_lazy_counts=debug_lazy_counts,
         dualwave_swp_enable_stagger=enable_stagger,
+    )
+
+
+@functools.lru_cache(maxsize=256)
+def _build_varlen_light(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    cross_seqlen: bool,
+    waves_per_eu: int,
+    daz: bool,
+    lazy_rescale: bool,
+    setprio: bool,
+    debug_lazy_counts: bool,
+    enable_stagger: bool,
+):
+    """Build a lightweight packed-varlen launcher for short attention."""
+    from kernels.attention.flash_attn_generic import build_flash_attn_func_module
+
+    return build_flash_attn_func_module(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str=dtype_str,
+        num_kv_heads=num_kv_heads,
+        cross_seqlen=cross_seqlen,
+        varlen=True,
+        block_m=64,
+        flat_work_group_size=128,
+        waves_per_eu=waves_per_eu,
+        daz=daz,
     )
 
 
@@ -238,9 +362,9 @@ def _flydsl_flash_attn_paged(
 ) -> torch.Tensor:
     """Native paged-KV attention on the gfx950 dualwave kernel.
 
-    Supported config ONLY (anything else raises): linear cache layout
+    Supported config ONLY (anything else raises): linear/vectorized cache layout
     [NumBlocks, PageSize=64, NumKVHeads, HeadDim], vLLM lookup (block_table +
-    seqlen_k), causal, D=128, dtype bf16/f16.
+    seqlen_k), causal, D=64/128, dtype bf16/f16.
     - Dense 4D Q ``[B, Sq, H, D]``: split-K (num_kv_splits>1) supported (seq_len>=384).
     - Varlen packed Q ``[total_q, H, D]`` (cu_seqlens_q given): paged K/V looked up
       per kv-tile via block_table; split-K not supported (matches dense varlen).
@@ -297,8 +421,8 @@ def _flydsl_flash_attn_paged(
         raise NotImplementedError(
             f"flydsl_flash_attn_func: native paged KV supports page_size={_PAGED_PAGE_SIZE} only, got {page_size}"
         )
-    if D != 128:
-        raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=128 only, got {D}")
+    if D not in (64, 128):
+        raise NotImplementedError(f"flydsl_flash_attn_func: native paged KV supports head_dim=64 or 128, got {D}")
     if k_head_dim != D:
         raise ValueError(f"flydsl_flash_attn_func: paged K head_dim ({k_head_dim}) must match q head_dim ({D})")
 
@@ -311,9 +435,9 @@ def _flydsl_flash_attn_paged(
     # workgroups + a combine pass. Fills the GPU for low-occupancy shapes (small B / few
     # heads), where single-split paged underutilizes the device.
     splitk = num_kv_splits > 1
-    if splitk and (D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384):
+    if splitk and (D not in (64, 128) or dtype_str not in ("bf16", "f16") or Sq < 384):
         raise ValueError(
-            f"flydsl_flash_attn_func: paged split-K requires D=128, dtype bf16/f16, seq_len>=384; "
+            f"flydsl_flash_attn_func: paged split-K requires D=64/128, dtype bf16/f16, seq_len>=384; "
             f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
         )
 
@@ -341,22 +465,48 @@ def _flydsl_flash_attn_paged(
 
     with torch.cuda.device(q.device.index):
         launch_stream = torch.cuda.current_stream(q.device) if stream is None else stream
-        exe = _build_paged(
-            num_heads=H,
-            num_kv_heads=num_kv_heads,
-            head_dim=D,
-            causal=causal,
-            dtype_str=dtype_str,
-            cross_seqlen=cross,
-            waves_per_eu=waves_per_eu,
-            daz=daz,
-            lazy_rescale=dualwave_swp_lazy_rescale,
-            setprio=dualwave_swp_setprio,
-            enable_stagger=dualwave_swp_enable_stagger,
-            num_kv_splits=int(num_kv_splits),
-            varlen=varlen,
-            kv_cache_layout=kv_cache_layout,
+        # Short paged attention uses generic light; unsupported cases stay on dualwave.
+        _arch = _gpu_arch(q.device)
+        _paged_light_ok = (
+            (num_kv_splits <= 1)
+            and D in (64, 128)
+            and dtype_str in ("bf16", "f16")
+            and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
         )
+        if _paged_light_ok:
+            exe = _build_paged_light(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                cross_seqlen=cross,
+                varlen=varlen,
+                kv_cache_layout=kv_cache_layout,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                lazy_rescale=dualwave_swp_lazy_rescale,
+                setprio=dualwave_swp_setprio,
+                debug_lazy_counts=False,
+                enable_stagger=dualwave_swp_enable_stagger,
+            )
+        else:
+            exe = _build_paged(
+                num_heads=H,
+                num_kv_heads=num_kv_heads,
+                head_dim=D,
+                causal=causal,
+                dtype_str=dtype_str,
+                cross_seqlen=cross,
+                waves_per_eu=waves_per_eu,
+                daz=daz,
+                lazy_rescale=dualwave_swp_lazy_rescale,
+                setprio=dualwave_swp_setprio,
+                enable_stagger=dualwave_swp_enable_stagger,
+                num_kv_splits=int(num_kv_splits),
+                varlen=varlen,
+                kv_cache_layout=kv_cache_layout,
+            )
         if out is None:
             out = torch.empty_like(q)
         # Keep tensors in natural shape; flattening can overflow int32 C-ABI dims.
@@ -378,6 +528,44 @@ def _flydsl_flash_attn_paged(
         exe(q_flat, k_flat, v_flat, o_flat, B, Sq, **kwargs)
 
     return out
+
+
+@functools.lru_cache(maxsize=256)
+def _build_paged_light(
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    causal: bool,
+    dtype_str: str,
+    cross_seqlen: bool,
+    varlen: bool,
+    kv_cache_layout: str,
+    waves_per_eu: int,
+    daz: bool,
+    lazy_rescale: bool,
+    setprio: bool,
+    debug_lazy_counts: bool,
+    enable_stagger: bool,
+):
+    """Build a lightweight paged-varlen launcher for short attention."""
+    from kernels.attention.flash_attn_generic import build_flash_attn_func_module
+
+    return build_flash_attn_func_module(
+        num_heads=num_heads,
+        head_dim=head_dim,
+        causal=causal,
+        dtype_str=dtype_str,
+        num_kv_heads=num_kv_heads,
+        cross_seqlen=cross_seqlen,
+        varlen=varlen,
+        paged=True,
+        kv_cache_layout=kv_cache_layout,
+        block_m=64,
+        flat_work_group_size=128,
+        path_tag="N32",
+        waves_per_eu=waves_per_eu,
+        daz=daz,
+    )
 
 
 # ── public API ─────────────────────────────────────────────────────────────
@@ -406,7 +594,7 @@ def flydsl_flash_attn_func(
     block_table: Optional[torch.Tensor] = None,
     seqlen_k: Optional[torch.Tensor] = None,
     kv_cache_layout: str = "linear",
-    # Split-K (gfx950 only, seq_len >= 384, D=128, bf16/f16).
+    # Split-K (gfx950 only, seq_len >= 384, D=64/128, bf16/f16).
     num_kv_splits: int = 1,
     # fp8 dense ABI: per-tensor descales for pre-quantized e4m3fn Q/K/V.
     q_descale: Optional[torch.Tensor] = None,
@@ -455,7 +643,7 @@ def flydsl_flash_attn_func(
         cross_seqlen: Whether seqlen_q and seqlen_kv differ. Required in varlen mode;
             dense mode infers it from ``q.shape[1] != k.shape[1]``.
         block_table / seqlen_k: vLLM-style 2D block table metadata.
-        num_kv_splits: Split-K factor (>1: gfx950 only, D=128, bf16/f16, seq>=384).
+        num_kv_splits: Split-K factor (>1: gfx950 only, D=64/128, bf16/f16, seq>=384).
         q_descale / k_descale / v_descale: fp32 shape-[1] descales required
             for dense fp8 e4m3fn inputs.
         out: Optional pre-allocated output tensor. For fp8, output is bf16;
@@ -517,6 +705,8 @@ def flydsl_flash_attn_func(
             raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support varlen")
         if num_kv_splits > 1:
             raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support split-K")
+        if debug_counts is not None:
+            raise NotImplementedError("flydsl_flash_attn_func: fp8 flash_attn does not support debug_counts")
         if any(x is None for x in (q_descale, k_descale, v_descale)):
             raise ValueError("flydsl_flash_attn_func: fp8 requires q_descale, k_descale, and v_descale")
         for name, scale in (("q_descale", q_descale), ("k_descale", k_descale), ("v_descale", v_descale)):
@@ -568,9 +758,9 @@ def flydsl_flash_attn_func(
 
     # ── split-K eligibility guard (SKIP analogous to run_splitk_config) ────
     if splitk:
-        if D != 128 or dtype_str not in ("bf16", "f16") or Sq < 384:
+        if D not in (64, 128) or dtype_str not in ("bf16", "f16") or Sq < 384:
             raise ValueError(
-                f"flydsl_flash_attn_func: split-K requires D=128, dtype bf16/f16, seq_len>=384; "
+                f"flydsl_flash_attn_func: split-K requires D=64/128, dtype bf16/f16, seq_len>=384; "
                 f"got D={D}, dtype={dtype_str}, seq_len={Sq}"
             )
         from kernels.attention.flash_attn_gfx950 import dualwave_splitk_workspace_elems
@@ -598,35 +788,95 @@ def flydsl_flash_attn_func(
                 enable_stagger=dualwave_swp_enable_stagger,
             )
         elif varlen:
-            exe = _build_varlen(
-                num_heads=H,
-                num_kv_heads=num_kv_heads,
-                head_dim=D,
-                causal=causal,
-                dtype_str=dtype_str,
-                cross_seqlen=cross,
-                waves_per_eu=waves_per_eu,
-                daz=daz,
-                lazy_rescale=dualwave_swp_lazy_rescale,
-                setprio=dualwave_swp_setprio,
-                debug_lazy_counts=debug_lazy,
-                enable_stagger=dualwave_swp_enable_stagger,
+            # Short varlen attention uses generic light; long/debug stays on dualwave.
+            _arch = _gpu_arch(q.device)
+            _prefer_light = (
+                (not debug_lazy)
+                and D in (64, 128)
+                and dtype_str in ("bf16", "f16")
+                and (not _arch.startswith("gfx950") or Sq <= _VARLEN_LIGHT_MAX_SEQ)
             )
+            if _prefer_light:
+                exe = _build_varlen_light(
+                    num_heads=H,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=D,
+                    causal=causal,
+                    dtype_str=dtype_str,
+                    cross_seqlen=cross,
+                    waves_per_eu=waves_per_eu,
+                    daz=daz,
+                    lazy_rescale=dualwave_swp_lazy_rescale,
+                    setprio=dualwave_swp_setprio,
+                    debug_lazy_counts=debug_lazy,
+                    enable_stagger=dualwave_swp_enable_stagger,
+                )
+            else:
+                exe = _build_varlen(
+                    num_heads=H,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=D,
+                    causal=causal,
+                    dtype_str=dtype_str,
+                    cross_seqlen=cross,
+                    waves_per_eu=waves_per_eu,
+                    daz=daz,
+                    lazy_rescale=dualwave_swp_lazy_rescale,
+                    setprio=dualwave_swp_setprio,
+                    debug_lazy_counts=debug_lazy,
+                    enable_stagger=dualwave_swp_enable_stagger,
+                )
         else:
-            exe = _build_dense(
-                num_heads=H,
-                num_kv_heads=num_kv_heads,
-                head_dim=D,
-                causal=causal,
-                dtype_str=dtype_str,
-                cross_seqlen=cross,
-                waves_per_eu=waves_per_eu,
-                daz=daz,
-                lazy_rescale=dualwave_swp_lazy_rescale,
-                setprio=dualwave_swp_setprio,
-                debug_lazy_counts=debug_lazy,
-                enable_stagger=dualwave_swp_enable_stagger,
-            )
+            _arch = _gpu_arch(q.device)
+            if dtype_str == "fp8":
+                if not _arch.startswith("gfx950"):
+                    raise ValueError(f"flydsl_flash_attn_func: fp8 requires gfx950, got '{_arch or 'unknown'}'")
+                exe = _build_dense_fp8(
+                    num_heads=H,
+                    num_kv_heads=num_kv_heads,
+                    causal=causal,
+                    waves_per_eu=waves_per_eu,
+                    daz=daz,
+                    lazy_rescale=dualwave_swp_lazy_rescale,
+                    setprio=dualwave_swp_setprio,
+                    enable_stagger=dualwave_swp_enable_stagger,
+                )
+            else:
+                can_dualwave = D in (64, 128) and dtype_str in ("bf16", "f16") and _arch.startswith("gfx950")
+                if debug_lazy and not can_dualwave:
+                    raise NotImplementedError(
+                        "flydsl_flash_attn_func: debug_counts requires the gfx950 DUALWAVE_SWP path"
+                    )
+                if debug_lazy or (can_dualwave and _dense_routes_to_dualwave(B, Sq)):
+                    exe = _build_dense_dualwave(
+                        num_heads=H,
+                        num_kv_heads=num_kv_heads,
+                        head_dim=D,
+                        causal=causal,
+                        dtype_str=dtype_str,
+                        cross_seqlen=cross,
+                        waves_per_eu=waves_per_eu,
+                        daz=daz,
+                        lazy_rescale=dualwave_swp_lazy_rescale,
+                        setprio=dualwave_swp_setprio,
+                        debug_lazy_counts=debug_lazy,
+                        enable_stagger=dualwave_swp_enable_stagger,
+                    )
+                else:
+                    block_m, flat_work_group_size, path_tag = _dense_generic_tile(B, Sq, H, D, dtype_str, q.device)
+                    exe = _build_dense(
+                        num_heads=H,
+                        num_kv_heads=num_kv_heads,
+                        head_dim=D,
+                        causal=causal,
+                        dtype_str=dtype_str,
+                        cross_seqlen=cross,
+                        block_m=block_m,
+                        flat_work_group_size=flat_work_group_size,
+                        path_tag=path_tag,
+                        waves_per_eu=waves_per_eu,
+                        daz=daz,
+                    )
 
         # ── allocate output ─────────────────────────────────────────────────
         if out is None:
