@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-10T13:47:12Z",
+ "updated": "2026-07-10T13:57:51Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29097833837,
+   "pr": null,
+   "commit": "c1b52184b195b7377714e0ba662cadac0e1bc4e8",
+   "branch": "main",
+   "event": "push",
+   "title": "[rmsnorm] Add fused-add / residual backward (PR 2/3, #769) (#800)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097833837",
+   "created_at": "2026-07-10T13:55:01Z",
+   "updated_at": "2026-07-10T13:55:02Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 29097187484,
    "pr": 823,
@@ -10,13 +25,41 @@
    "branch": "add-gelu-tanh-moe-stage1",
    "event": "pull_request",
    "title": "[MoE] Add gelu_tanh activation to MoE stage1 GEMM kernels",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484",
    "created_at": "2026-07-10T13:44:31Z",
-   "updated_at": "2026-07-10T13:45:48Z",
+   "updated_at": "2026-07-10T13:46:24Z",
    "actor": "jonahbernard",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T13:46:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484/job/86376954461"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T13:46:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484/job/86376954477"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T13:46:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484/job/86376954532"
+    }
+   ]
   },
   {
    "run_id": 29097128912,
@@ -40,11 +83,11 @@
    "branch": "main",
    "event": "push",
    "title": "[Opt] Improve rewrite config to match with CBV pattern (#826)",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29096621463",
    "created_at": "2026-07-10T13:35:31Z",
-   "updated_at": "2026-07-10T13:35:31Z",
+   "updated_at": "2026-07-10T13:55:02Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1786,21 +1829,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28986695572/job/86018016569"
     }
    ]
-  },
-  {
-   "run_id": 28984670555,
-   "pr": null,
-   "commit": "7d33bef5ddcd21cf8a48515ba69d8a800c437388",
-   "branch": "feat/fused-add-rmsnorm-backward-769",
-   "event": "pull_request",
-   "title": "[rmsnorm] Add fused-add / residual backward (PR 2/3, #769)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28984670555",
-   "created_at": "2026-07-09T00:12:51Z",
-   "updated_at": "2026-07-09T00:12:51Z",
-   "actor": "jhinpan",
-   "jobs": []
   },
   {
    "run_id": 28984277713,
