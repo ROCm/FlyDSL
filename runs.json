@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T21:03:54Z",
+ "updated": "2026-07-10T21:20:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "add-gelu-tanh-moe-stage1",
    "event": "pull_request",
    "title": "[MoE] Add gelu_tanh activation to MoE stage1 GEMM kernels",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537",
    "created_at": "2026-07-10T14:44:38Z",
-   "updated_at": "2026-07-10T19:58:38Z",
+   "updated_at": "2026-07-10T21:18:32Z",
    "actor": "jonahbernard",
    "jobs": [
     {
@@ -72,19 +72,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-10T19:58:38Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-10T21:03:57Z",
+     "completed_at": "2026-07-10T21:18:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537/job/86452024498"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T19:59:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T21:09:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537/job/86452024544"
     }
    ]
