@@ -13,12 +13,70 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import arith as _std_arith
 from flydsl._mlir.dialects import builtin
+from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import gpu as _gpu
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import scf as _scf
-from flydsl.expr import buffer_ops
+from flydsl.expr import arith as _expr_arith
+from flydsl.expr import buffer_ops, const_expr
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch, is_rdna_arch
+
+
+def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
+    """Build a global (address-space 1) ``!llvm.ptr`` at ``ptr + offset*dtype_bytes``.
+
+    Shared home for the LLVM-ptr arithmetic used by atomic/global accesses
+    (previously duplicated in hgemm_splitk.py and rmsnorm_kernel.py).
+    """
+    if ptr_type is None:
+        ptr_type = ir.Type.parse("!llvm.ptr<1>")
+    base_ptr = _fly.extract_aligned_pointer_as_index(ptr_type, ptr)
+    base_ptr = _llvm.PtrToIntOp(T.i64, base_ptr).result
+    byte_offset = _expr_arith.index_cast(T.i64, fx.Index(offset) * fx.Index(dtype_bytes))
+    llvm_ptr = _llvm.AddOp(base_ptr, byte_offset, _llvm.IntegerOverflowFlags(0)).result
+    llvm_ptr = _llvm.IntToPtrOp(ptr_type, llvm_ptr).result
+    return llvm_ptr._value if const_expr(hasattr(llvm_ptr, "_value")) else llvm_ptr
+
+
+def atomic_add(
+    dst,
+    offset,
+    value,
+    *,
+    dtype_bytes=4,
+    syncscope="agent",
+    ordering=None,
+    alignment=None,
+    ptr_type=None,
+):
+    """Atomically add ``value`` into ``dst[offset]`` in global memory.
+
+    Wraps the ``get_llvm_ptr`` + ``llvm.atomicrmw`` pair that kernels used to
+    inline (rmsnorm backward ``dweight`` accumulation, hgemm split-K epilogue and
+    semaphore). Selects ``fadd`` for a floating-point operand and integer ``add``
+    otherwise, from the operand's IR type, so a single call covers both cases.
+    Returns the atomicrmw result (the value previously stored at ``dst[offset]``).
+
+    ``dtype_bytes`` sizes the byte offset and, unless ``alignment`` is given, is
+    reused as the access alignment.
+    """
+    ptr = get_llvm_ptr(dst, offset, dtype_bytes, ptr_type=ptr_type)
+    val = value.ir_value() if const_expr(hasattr(value, "ir_value")) else value
+    elem_ty = val.type.element_type if isinstance(val.type, ir.VectorType) else val.type
+    bin_op = _llvm.AtomicBinOp.fadd if isinstance(elem_ty, ir.FloatType) else _llvm.AtomicBinOp.add
+    if ordering is None:
+        ordering = _llvm.AtomicOrdering.monotonic
+    if alignment is None:
+        alignment = dtype_bytes
+    return _llvm.AtomicRMWOp(
+        bin_op,
+        ptr,
+        val,
+        ordering,
+        syncscope=syncscope,
+        alignment=alignment,
+    ).result
 
 
 @contextmanager

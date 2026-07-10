@@ -31,6 +31,7 @@ from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
 from kernels.common import dpp_utils
+from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
     cdiv,
     exp2_f32_fast,
@@ -1816,7 +1817,8 @@ def pa_decode_ps_launch(
             head_dim=int(head_size),
         )
 
-        compiled_sw["launch"](
+        _run_compiled(
+            compiled_sw["launch"],
             exp_sums.data_ptr(),
             max_logits.data_ptr(),
             temporary_output.data_ptr(),
@@ -1864,7 +1866,8 @@ def pa_decode_ps_launch(
             head_size=head_size,
             output_dtype_str=_get_output_dtype_str(output),
         )
-        compiled_sw_reduce["launch"](
+        _run_compiled(
+            compiled_sw_reduce["launch"],
             output_5d.data_ptr(),
             exp_sums.data_ptr(),
             max_logits.data_ptr(),
@@ -1938,7 +1941,8 @@ def pa_decode_ps_launch(
             head_dim=int(head_size),
         )
         output_5d = output.reshape(batch_size, query_length, num_kv_heads, query_group_size, head_size)
-        compiled_small["launch"](
+        _run_compiled(
+            compiled_small["launch"],
             exp_sums.data_ptr(),
             max_logits.data_ptr(),
             temporary_output.data_ptr(),
@@ -1977,7 +1981,8 @@ def pa_decode_ps_launch(
             head_size=head_size,
             output_dtype_str=_get_output_dtype_str(output),
         )
-        compiled_sw_reduce["launch"](
+        _run_compiled(
+            compiled_sw_reduce["launch"],
             output_5d.data_ptr(),
             exp_sums.data_ptr(),
             max_logits.data_ptr(),
@@ -2032,7 +2037,8 @@ def pa_decode_ps_launch(
     stride_po_ql = metadata.get("stride_po_ql", num_query_heads * query.shape[-1])
     stride_pl_ql = metadata.get("stride_pl_ql", num_query_heads)
 
-    compiled["launch"](
+    _run_compiled(
+        compiled["launch"],
         output.data_ptr(),
         partial_output.data_ptr(),
         partial_lse.data_ptr(),
