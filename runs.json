@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-09T21:53:13Z",
+ "updated": "2026-07-10T01:02:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29060914790,
+   "pr": null,
+   "commit": "e4f2b3cd57ac16eb8c80bd674be3cd6af35ad7f7",
+   "branch": "main",
+   "event": "push",
+   "title": "perf(pa): use _run_compiled for PA decode kernel launches (#822)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29060914790",
+   "created_at": "2026-07-10T00:49:33Z",
+   "updated_at": "2026-07-10T00:52:38Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T00:52:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29060914790/job/86262525498"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T00:51:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29060914790/job/86262525513"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T00:52:18Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29060914790/job/86262525525"
+    }
+   ]
+  },
+  {
+   "run_id": 29057846422,
+   "pr": 800,
+   "commit": "108179dcd75669123f998c126b33d5990bf59817",
+   "branch": "feat/fused-add-rmsnorm-backward-769",
+   "event": "pull_request",
+   "title": "[rmsnorm] Add fused-add / residual backward (PR 2/3, #769)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29057846422",
+   "created_at": "2026-07-09T23:37:09Z",
+   "updated_at": "2026-07-09T23:39:35Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-09T23:39:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29057846422/job/86253224313"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-09T23:39:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29057846422/job/86253224320"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-09T23:38:52Z",
+     "completed_at": "2026-07-10T00:05:35Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29057846422/job/86253224342"
+    }
+   ]
+  },
   {
    "run_id": 29037533870,
    "pr": 819,
@@ -487,7 +573,7 @@
   },
   {
    "run_id": 28987225598,
-   "pr": 800,
+   "pr": null,
    "commit": "30943ce8e5d14f5e539730e36f89c288c74f45fb",
    "branch": "feat/fused-add-rmsnorm-backward-769",
    "event": "pull_request",
@@ -1926,92 +2012,6 @@
    "updated_at": "2026-07-07T07:29:37Z",
    "actor": "jhinpan",
    "jobs": []
-  },
-  {
-   "run_id": 28849164184,
-   "pr": null,
-   "commit": "cde1b9f0a71be0199c145d0b4ca5c5d4fe92abfb",
-   "branch": "main",
-   "event": "push",
-   "title": "[Feat] Add gather/scatter as derived exprs (#805)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184",
-   "created_at": "2026-07-07T07:26:31Z",
-   "updated_at": "2026-07-07T11:38:14Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T07:28:00Z",
-     "completed_at": "2026-07-07T11:38:13Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184/job/85560189819"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-07T07:32:33Z",
-     "completed_at": "2026-07-07T08:48:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184/job/85560189822"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-07T07:29:20Z",
-     "completed_at": "2026-07-07T08:26:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849164184/job/85560189850"
-    }
-   ]
-  },
-  {
-   "run_id": 28849114185,
-   "pr": null,
-   "commit": "7e6486a2d9665dfb82ff29a17a7a221cb9d129c2",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Add finer FastMathFlag control (#789)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849114185",
-   "created_at": "2026-07-07T07:25:34Z",
-   "updated_at": "2026-07-07T07:26:33Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T07:26:32Z",
-     "completed_at": "2026-07-07T07:26:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849114185/job/85560020209"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T07:26:32Z",
-     "completed_at": "2026-07-07T07:26:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849114185/job/85560020217"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T07:26:32Z",
-     "completed_at": "2026-07-07T07:26:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28849114185/job/85560020232"
-    }
-   ]
   }
  ]
 }
