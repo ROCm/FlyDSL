@@ -735,7 +735,8 @@ def test_apply_occupancy_compile_hints_sets_func_attrs():
     silent gpu-module-to-binary opts= no-op (needs the compiled bindings)."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
-    from flydsl.compiler.jit_function import _apply_occupancy_compile_hints, _create_mlir_context
+    from flydsl.compiler.backends.rocm import _apply_occupancy_compile_hints
+    from flydsl.compiler.jit_function import _create_mlir_context
     from flydsl.compiler.kernel_function import CompilationContext
 
     with _create_mlir_context() as ctx:
@@ -753,7 +754,8 @@ def test_set_passthrough_replaces_same_key_no_duplicate():
     append a duplicate (duplicate LLVM function attributes are ill-defined)."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
-    from flydsl.compiler.jit_function import _apply_occupancy_compile_hints, _create_mlir_context, _set_passthrough
+    from flydsl.compiler.backends.rocm import _apply_occupancy_compile_hints, _set_passthrough
+    from flydsl.compiler.jit_function import _create_mlir_context
     from flydsl.compiler.kernel_function import CompilationContext
 
     with _create_mlir_context() as ctx:
@@ -777,7 +779,8 @@ def test_apply_occupancy_compile_hints_per_kernel_mapping():
     covered by test_apply_occupancy_compile_hints_sets_func_attrs.)"""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
-    from flydsl.compiler.jit_function import _apply_occupancy_compile_hints, _create_mlir_context
+    from flydsl.compiler.backends.rocm import _apply_occupancy_compile_hints
+    from flydsl.compiler.jit_function import _create_mlir_context
     from flydsl.compiler.kernel_function import CompilationContext
 
     src = "module { gpu.module @m { gpu.func @a() kernel { gpu.return } gpu.func @b() kernel { gpu.return } } }"
@@ -819,7 +822,7 @@ def test_unmatched_occupancy_hint_keys():
     """A per-kernel occupancy map key naming no kernel is surfaced (so the caller
     warns) instead of being a silent no-op. Scalar hints never 'miss'."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl.compiler.jit_function import _unmatched_occupancy_hint_keys
+    from flydsl.compiler.backends.rocm import _unmatched_occupancy_hint_keys
 
     present = {"kern_a", "kern_b"}
     out = _unmatched_occupancy_hint_keys({"waves_per_eu": 2, "maxnreg": {"kern_a": 128, "typo": 64}}, present)

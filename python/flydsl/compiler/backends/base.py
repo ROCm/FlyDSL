@@ -78,6 +78,17 @@ class BaseBackend(metaclass=ABCMeta):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support external LLVM codegen")
 
+    def apply_occupancy_hints(self, module) -> None:
+        """Lower occupancy compile-hints (``waves_per_eu`` / ``maxnreg``) onto the
+        module's entry-point kernels as target function attributes.
+
+        Occupancy control is target-specific, so the base backend is a no-op.
+        ``MlirCompiler.compile`` calls this on the parsed module before running
+        the lowering pipeline; a backend overrides it to annotate its kernels
+        (see :class:`~flydsl.compiler.backends.rocm.RocmBackend`).
+        """
+        return None
+
     @abstractmethod
     def gpu_module_targets(self) -> List[str]:
         """MLIR target attributes for ``create_gpu_module(..., targets=...)``."""
