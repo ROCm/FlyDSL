@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T18:52:41Z",
+ "updated": "2026-07-10T20:00:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,13 +53,41 @@
    "branch": "add-gelu-tanh-moe-stage1",
    "event": "pull_request",
    "title": "[MoE] Add gelu_tanh activation to MoE stage1 GEMM kernels",
-   "status": "pending",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537",
    "created_at": "2026-07-10T14:44:38Z",
-   "updated_at": "2026-07-10T14:44:39Z",
+   "updated_at": "2026-07-10T19:58:38Z",
    "actor": "jonahbernard",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T19:58:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537/job/86452024490"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T19:58:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537/job/86452024498"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T19:58:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537/job/86452024544"
+    }
+   ]
   },
   {
    "run_id": 29099472966,
@@ -141,20 +169,20 @@
    "branch": "add-gelu-tanh-moe-stage1",
    "event": "pull_request",
    "title": "[MoE] Add gelu_tanh activation to MoE stage1 GEMM kernels",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484",
    "created_at": "2026-07-10T13:44:31Z",
-   "updated_at": "2026-07-10T14:08:39Z",
+   "updated_at": "2026-07-10T19:57:32Z",
    "actor": "jonahbernard",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-10T13:56:51Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T19:57:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484/job/86376954461"
     },
     {
