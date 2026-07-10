@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T09:23:06Z",
+ "updated": "2026-07-10T09:27:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -345,19 +345,19 @@
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
    "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29070368278",
    "created_at": "2026-07-10T05:01:03Z",
-   "updated_at": "2026-07-10T05:02:46Z",
+   "updated_at": "2026-07-10T09:24:23Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T05:02:46Z",
+     "started_at": "2026-07-10T09:24:22Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29070368278/job/86290630030"
     },
@@ -388,20 +388,20 @@
    "branch": "feat/fused-add-rmsnorm-backward-769",
    "event": "pull_request",
    "title": "[rmsnorm] Add fused-add / residual backward (PR 2/3, #769)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068882183",
    "created_at": "2026-07-10T04:22:00Z",
-   "updated_at": "2026-07-10T09:08:16Z",
+   "updated_at": "2026-07-10T09:23:40Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T09:08:16Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T09:23:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068882183/job/86286326421"
     },
     {
