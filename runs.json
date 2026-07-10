@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T09:27:03Z",
+ "updated": "2026-07-10T09:44:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
    "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29082800910",
    "created_at": "2026-07-10T09:21:58Z",
-   "updated_at": "2026-07-10T09:21:59Z",
+   "updated_at": "2026-07-10T09:41:51Z",
    "actor": "Phil-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T09:41:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29082800910/job/86332982538"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T09:41:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29082800910/job/86332982561"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T09:41:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29082800910/job/86332982617"
+    }
+   ]
   },
   {
    "run_id": 29082583158,
@@ -302,19 +330,19 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29071593315",
    "created_at": "2026-07-10T05:32:21Z",
-   "updated_at": "2026-07-10T05:33:18Z",
+   "updated_at": "2026-07-10T09:41:33Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T05:33:17Z",
+     "started_at": "2026-07-10T09:41:32Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29071593315/job/86294150142"
     },
@@ -345,20 +373,20 @@
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
    "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29070368278",
    "created_at": "2026-07-10T05:01:03Z",
-   "updated_at": "2026-07-10T09:24:23Z",
+   "updated_at": "2026-07-10T09:41:25Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T09:24:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T09:41:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29070368278/job/86290630030"
     },
     {
