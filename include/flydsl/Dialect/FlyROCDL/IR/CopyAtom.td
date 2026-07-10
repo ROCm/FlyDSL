@@ -8,9 +8,11 @@ include "flydsl/Dialect/FlyROCDL/IR/Dialect.td"
 
 def FlyROCDL_CopyOpBufferCopy : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopy", "cdna3.buffer_copy",[]> {
   let parameters = (ins
-    "int32_t":$bitSize
+    "int32_t":$bitSize,
+    // raw buffer load/store cachepolicy: 0 = cached, 2 = non-temporal (nt)
+    DefaultValuedParameter<"int32_t", "0">:$cacheModifier
   );
-  let assemblyFormat = "`<` $bitSize `>`";
+  let assemblyFormat = "`<` $bitSize (`,` `cache` `=` $cacheModifier^)? `>`";
 }
 
 def FlyROCDL_CopyOpBufferCopyLDS : FlyROCDL_StatefulCopyOp<"CopyOpCDNA3BufferCopyLDS", "cdna3.buffer_copy_lds",[]> {

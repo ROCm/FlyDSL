@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
+# Copyright (c) 2026 FlyDSL Project Contributors
+
+"""Vectorized, predicated, target-neutral 2D elementwise add (C = A + B).
+
+This example is **target-neutral**: it uses only the backend-agnostic ``flydsl.expr`` API, so it
+supports on any backend.
+
+Highlights:
+  1. **float4 vectorization** via ``UniversalCopy128b`` -- each copy atom moves 128 bits
+     (4 x f32) along the contiguous (N) axis, so every thread loads/stores one ``float4``.
+  2. **Predicated OOB masking**: the (M, N) shape need not be a multiple of the block tile,
+     so border blocks have threads whose float4 lies past the tensor. A per-atom boolean
+     predicate (``coord < (M, N)``) gates each copy, so a load/store never touches OOB memory.
+"""
 
 import torch
 
@@ -8,129 +21,84 @@ import flydsl.expr as fx
 
 
 @flyc.kernel
-def vectorAddKernel(
+def vector_add_kernel(
     A: fx.Tensor,
     B: fx.Tensor,
     C: fx.Tensor,
-    block_dim: fx.Constexpr[int],
+    tiled_copy: fx.TiledCopy,
 ):
-    bid = fx.block_idx.x
     tid = fx.thread_idx.x
-    fx.printf("[kernel] bid={}, tid={}", bid, tid)
+    bid_x, bid_y = fx.block_idx.x, fx.block_idx.y
 
-    A = fx.rocdl.make_buffer_tensor(A)
+    # Identity (coordinate) tensor: value == logical coord (m, n).
+    M, N = A.shape.unpack()
+    idC = fx.make_view((0, 0), fx.make_identity_layout((M, N)))
 
-    tA = fx.logical_divide(A, fx.make_layout(block_dim, 1))
-    tB = fx.logical_divide(B, fx.make_layout(block_dim, 1))
-    tC = fx.logical_divide(C, fx.make_layout(block_dim, 1))
+    TileMN = tiled_copy.tile_mn
 
-    tA = fx.slice(tA, (None, bid))
-    tB = fx.slice(tB, (None, bid))
-    tC = fx.slice(tC, (None, bid))
-    tA = fx.logical_divide(tA, fx.make_layout(1, 1))
-    tB = fx.logical_divide(tB, fx.make_layout(1, 1))
-    tC = fx.logical_divide(tC, fx.make_layout(1, 1))
+    gA = fx.flat_divide(A, TileMN)[None, None, bid_x, bid_y]
+    gB = fx.flat_divide(B, TileMN)[None, None, bid_x, bid_y]
+    gC = fx.flat_divide(C, TileMN)[None, None, bid_x, bid_y]
+    cC = fx.flat_divide(idC, TileMN)[None, None, bid_x, bid_y]
 
-    copyAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    copyAtomBuffer = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+    thr_copy = tiled_copy.get_slice(tid)
 
-    rA = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-    rB = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-    rC = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+    thr_gA = thr_copy.partition_S(gA)
+    thr_gB = thr_copy.partition_S(gB)
+    thr_gC = thr_copy.partition_D(gC)
+    thr_cC = thr_copy.partition_S(cC)[(0, None), None, None]
 
-    fx.copy_atom_call(copyAtomBuffer, fx.slice(tA, (None, tid)), rA)
-    fx.copy_atom_call(copyAtom, fx.slice(tB, (None, tid)), rB)
+    thr_rA = fx.make_fragment_like(thr_gA)
+    thr_rB = fx.make_fragment_like(thr_gB)
+    thr_rC = fx.make_fragment_like(thr_gC)
+    thr_pC = fx.make_fragment_like(thr_cC, dtype=fx.Boolean)
 
-    vC = fx.arith.addf(fx.memref_load_vec(rA), fx.memref_load_vec(rB))
-    fx.memref_store_vec(vC, rC)
+    for a in fx.range_constexpr(fx.size(thr_pC.shape).unpack()):
+        thr_pC[a] = fx.elem_less(thr_cC[a], (M, N))
 
-    fx.copy_atom_call(copyAtom, rC, fx.slice(tC, (None, tid)))
+    copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)
+
+    fx.copy(copy_atom, thr_gA, thr_rA, pred=thr_pC)
+    fx.copy(copy_atom, thr_gB, thr_rB, pred=thr_pC)
+
+    thr_rC.store(thr_rA.load() + thr_rB.load())
+
+    fx.copy(copy_atom, thr_rC, thr_gC, pred=thr_pC)
 
 
 @flyc.jit
-def vectorAdd(
+def vector_add(
     A: fx.Tensor,
     B: fx.Tensor,
-    C,  # omitted for auto induction
-    n: fx.Int32,  # dynamic int32
-    const_n: fx.Constexpr[int],  # static int32, it has an effect on function cache-key
+    C: fx.Tensor,
     stream: fx.Stream = fx.Stream(None),
 ):
-    block_dim = 64
-    grid_x = (n + block_dim - 1) // block_dim
-    fx.printf("> vectorAdd: n={}, grid_x={}", n, grid_x)
+    copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)
+    tiled_copy = fx.make_tiled_copy_tv(
+        copy_atom,
+        fx.make_ordered_layout((8, 16), order=(1, 0)),
+        fx.make_ordered_layout((1, 4), order=(0, 1)),
+    )
+    tile_m, tile_n = tiled_copy.tile_mn.unpack()
 
-    vectorAddKernel(A, B, C, block_dim).launch(grid=(grid_x, 1, 1), block=[block_dim, 1, 1], stream=stream)
-
-
-def run_eager():
-    """Normal execution (no graph capture) - should always work."""
-    n = 128
-    A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-    B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-    C = torch.zeros(n, dtype=torch.float32).cuda()
-    tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
-    vectorAdd(tA, B, C, n, n + 1, stream=torch.cuda.Stream())
-    torch.cuda.synchronize()
-    is_closed = torch.allclose(C, A + B)
-    print(f"[Eager] Result correct: {is_closed}")
-    if not is_closed:
-        print("tA:", A[:32])
-        print("tB:", B[:32])
-        print("tC:", C[:32])
-    print("Hello, Fly!")
-    return is_closed
+    M, N = A.shape.unpack()
+    grid_m = (M + tile_m - 1) // tile_m
+    grid_n = (N + tile_n - 1) // tile_n
+    vector_add_kernel(A, B, C, tiled_copy).launch(grid=(grid_m, grid_n, 1), block=(8 * 16, 1, 1), stream=stream)
 
 
-def run_graph_capture():
-    """CUDA Graph Capture via fly-gpu-stream-inject (no TLS hack needed)."""
-    n = 128
-    A = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-    B = torch.randint(0, 10, (n,), dtype=torch.float32).cuda()
-    C = torch.zeros(n, dtype=torch.float32).cuda()
-    tA = flyc.from_dlpack(A).mark_layout_dynamic(leading_dim=0, divisibility=4)
+M, N = 100, 1000
 
-    # Warmup (triggers JIT compilation)
-    vectorAdd(tA, B, C, n, n + 1, stream=torch.cuda.Stream())
-    torch.cuda.synchronize()
+A = torch.randn(M, N, dtype=torch.float32, device=torch.device("cuda"))
+B = torch.randn(M, N, dtype=torch.float32, device=torch.device("cuda"))
+C = torch.zeros(M, N, dtype=torch.float32, device=torch.device("cuda"))
 
-    C.zero_()
+vector_add(A, B, C, stream=torch.cuda.Stream())
+torch.cuda.synchronize()
 
-    graph = torch.cuda.CUDAGraph()
-    capture_stream = torch.cuda.Stream()
-    capture_stream.wait_stream(torch.cuda.current_stream())
-
-    with torch.cuda.stream(capture_stream):
-        with torch.cuda.graph(graph, stream=capture_stream):
-            vectorAdd(tA, B, C, n, n + 1, stream=capture_stream)
-
-    C.zero_()
-    graph.replay()
-    torch.cuda.synchronize()
-
-    ok = torch.allclose(C, A + B)
-    print(f"[Graph Capture] Result correct: {ok}")
-    if not ok:
-        print(f"  Expected: {(A + B)[:16]}")
-        print(f"  Got:      {C[:16]}")
-    return ok
-
-
-if __name__ == "__main__":
-    print("=" * 50)
-    print("Test 1: Eager execution")
-    print("=" * 50)
-    ok1 = run_eager()
-
-    print()
-    print("=" * 50)
-    print("Test 2: CUDA Graph Capture")
-    print("=" * 50)
-    try:
-        ok2 = run_graph_capture()
-    except Exception as e:
-        print(f"[Graph Capture] FAILED with exception: {e}")
-        ok2 = False
-
-    print()
-    print(f"All passed: {ok1 and ok2}")
+if torch.allclose(A + B, C):
+    print("PASS")
+else:
+    print("FAIL:")
+    print(A + B)
+    print(C)

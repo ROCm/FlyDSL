@@ -1,22 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
+import inspect
 import linecache
 import sys
 import traceback
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import List, Optional
 
 from .._mlir import ir
 from ..expr.meta import _is_framework_file
 from ..utils import env
+from .jit_argument import is_type_param_annotation
+from .protocol import DslType
 
 __all__ = [
     "DSLCompileError",
     "diag_records_from_mlir_error",
     "dsl_ir_diagnostics",
     "install_excepthook",
+    "warn_annotation_value_mismatch",
+    "warn_invalid_annotations",
 ]
 
 
@@ -174,3 +181,43 @@ def dsl_ir_diagnostics(ctx):
     finally:
         if handler.attached:
             handler.detach()
+
+
+def warn_annotation_value_mismatch(param_name, annotation, actual_type, *, context):
+    """Warn (do not fail) when a runtime parameter's value type contradicts its DSL annotation.
+
+    The annotation is not enforced during tracing; the actual value type is what gets used.
+    This surfaces the silent mismatch instead of letting a wrong annotation pass unnoticed.
+    """
+    warnings.warn(
+        f"{context} parameter '{param_name}' is annotated as "
+        f"'{getattr(annotation, '__name__', repr(annotation))}', but the argument resolves to "
+        f"'{getattr(actual_type, '__name__', repr(actual_type))}'. "
+        f"The annotation is not enforced; the actual value type is used.",
+        stacklevel=3,
+    )
+
+
+def warn_invalid_annotations(sig, *, context):
+    """Definition-time check: warn about runtime parameters whose annotation is not a DSL
+    value type, or a Type[T] annotation.
+
+    This depends only on the signature, not on any call's argument values, so it belongs at
+    signature-resolution time and runs once per function. It is deliberately separate from
+    the per-call value/annotation consistency check (``warn_annotation_value_mismatch``):
+    whether an annotation *is* a DslValue is a property of the definition; whether an actual
+    value *matches* it is a property of the call.
+    """
+    for name, param in sig.parameters.items():
+        ann = param.annotation
+        if ann is inspect.Parameter.empty:
+            continue
+        if isinstance(ann, DslType) or is_type_param_annotation(ann):
+            continue
+        if isinstance(ann, type) and issubclass(ann, SimpleNamespace):
+            continue
+        warnings.warn(
+            f"{context} parameter '{name}' is annotated as '{getattr(ann, '__name__', repr(ann))}', which is not "
+            f"a DSL value type.",
+            stacklevel=3,
+        )

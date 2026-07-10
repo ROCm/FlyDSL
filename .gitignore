@@ -64,3 +64,11 @@ Thumbs.db
 # Sphinx documentation build
 docs/_build/
 python/flydsl/_mlir
+
+# Benchmark/accuracy CSVs emitted by tests/kernels harnesses
+fmha_perf_*.csv
+run_pa_decode_ps_test.*.csv
+.humanize/
+
+# rocprofv3 raw counter/trace output
+.rocprofv3/

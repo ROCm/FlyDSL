@@ -3,7 +3,7 @@
 
 import inspect
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -11,8 +11,9 @@ from .._mlir import ir
 from .._mlir.dialects import arith, gpu
 from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.typing import Constexpr
+from ..expr.utils.arith import fastmath as fastmath_ctx
 from .ast_rewriter import ASTRewriter
-from .diagnostics import install_excepthook
+from .diagnostics import install_excepthook, warn_annotation_value_mismatch, warn_invalid_annotations
 from .jit_argument import is_type_param_annotation, resolve_signature
 from .mlir_utils import convert_to_mlir_attr
 from .protocol import construct_from_ir_values, extract_to_ir_values, get_ir_types
@@ -243,6 +244,15 @@ class CompilationContext:
         return kid
 
 
+def effective_fastmath_hint(hints: dict):
+    """Resolve the ambient fastmath hint for traced JIT/kernel bodies."""
+    if "fastmath" in hints:
+        return hints["fastmath"]
+    if hints.get("fast_fp_math"):
+        return "fast"
+    return None
+
+
 # =============================================================================
 # Kernel Launcher
 # =============================================================================
@@ -455,6 +465,9 @@ class KernelFunction:
         else:
             self._sig = full_sig
 
+        # Definition-time annotation validity check (once per function, signature-only).
+        warn_invalid_annotations(self._sig, context="@kernel")
+
     @classmethod
     def get_current(cls) -> Optional["KernelFunction"]:
         return cls._current
@@ -485,11 +498,17 @@ class KernelFunction:
         for param_name, value in bound.arguments.items():
             param = sig.parameters[param_name]
             annotation = param.annotation
-            if annotation is not inspect.Parameter.empty and Constexpr.is_constexpr_annotation(annotation):
-                constexpr_values[param_name] = value
-            elif annotation is not inspect.Parameter.empty and is_type_param_annotation(annotation):
+            if annotation is not inspect.Parameter.empty and (
+                Constexpr.is_constexpr_annotation(annotation) or is_type_param_annotation(annotation)
+            ):
                 constexpr_values[param_name] = value
             else:
+                if (
+                    annotation is not inspect.Parameter.empty
+                    and isinstance(annotation, type)
+                    and not isinstance(value, annotation)
+                ):
+                    warn_annotation_value_mismatch(param_name, annotation, type(value), context="@kernel")
                 param_names.append(param_name)
                 param_values.append(value)
 
@@ -531,8 +550,11 @@ class KernelFunction:
                         idx += n
 
                     dsl_args.update(constexpr_values)
+
+                    fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
+                    fastmath_scope = fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
                     # Bound the call-site boundary at the kernel body.
-                    with tracing_context(self._func):
+                    with tracing_context(self._func), fastmath_scope:
                         if bound_self is not None:
                             self._func(bound_self, **dsl_args)
                         else:

@@ -25,7 +25,7 @@ import flydsl  # noqa: E402,F401 -- preload system comgr before torch/HIP loads 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.wmma_gemm_gfx1250 import compile_wmma_gemm_tdm  # noqa: E402
+from kernels.gemm.wmma_gemm_gfx1250 import compile_wmma_gemm_tdm  # noqa: E402
 from tests.test_common import verify_output  # noqa: E402
 
 if not torch.cuda.is_available():

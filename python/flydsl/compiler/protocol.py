@@ -11,7 +11,7 @@ from .._mlir import ir
 @runtime_checkable
 class DslType(Protocol):
     @classmethod
-    def __construct_from_ir_values__(cls, values: List[ir.Value]) -> "DslType": ...
+    def __construct_from_ir_values__(cls, values: List[ir.Value], exemplar: "DslType | None" = None) -> "DslType": ...
     def __extract_to_ir_values__(self) -> List[ir.Value]: ...
 
 
@@ -100,7 +100,8 @@ def construct_from_ir_values(dsl_type, args, values: List[ir.Value]) -> DslType:
             raise ValueError(f"SimpleNamespace expected {cursor} ir.Values, got {len(values)}")
         return SimpleNamespace(**rebuilt)
     if hasattr(dsl_type, "__construct_from_ir_values__"):
-        return dsl_type.__construct_from_ir_values__(values)
+        exemplar = args if not isinstance(args, type) else None
+        return dsl_type.__construct_from_ir_values__(values, exemplar)
     if isinstance(dsl_type, (tuple, list)):
         elems = []
         for ty, arg in zip(dsl_type, args, strict=True):

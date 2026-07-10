@@ -326,6 +326,19 @@ struct PyTileType : PyConcreteType<PyTileType> {
         "Create a TileType from a list of modes or a single mode (leaf tile)");
 
     c.def_prop_ro("rank", [](PyTileType &self) { return self.toCppType().rank(); });
+    c.def_prop_ro("is_leaf", [](PyTileType &self) { return self.toCppType().getAttr().isLeaf(); });
+    c.def("at", [](PyTileType &self, int32_t idx) -> MlirType {
+      TileType ty = self.toCppType();
+      if (idx < 0 || idx >= ty.rank())
+        throw std::invalid_argument("TileType.at: index out of range");
+      TileAttr attr = ty.getAttr();
+      Attribute mode = attr.isLeaf() ? attr.getValue() : attr.at(idx);
+      if (auto layoutAttr = dyn_cast<LayoutAttr>(mode))
+        return wrap(LayoutType::get(layoutAttr));
+      if (auto tileAttr = dyn_cast<TileAttr>(mode))
+        return wrap(TileType::get(tileAttr));
+      return wrap(IntTupleType::get(IntTupleAttr::get(mode)));
+    });
   }
 };
 
@@ -929,16 +942,18 @@ struct PyCopyOpUniversalAtomicType : PyConcreteType<PyCopyOpUniversalAtomicType>
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](int32_t atomicOp, PyType &valTypeObj, DefaultingPyMlirContext context) {
+        [](int32_t atomicOp, PyType &valTypeObj, const std::string &syncscope,
+           DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           auto atomicOpAttr =
               ::mlir::fly::AtomicOpAttr::get(ctx, static_cast<::mlir::fly::AtomicOp>(atomicOp));
           return PyCopyOpUniversalAtomicType(
               context->getRef(),
-              wrap(CopyOpUniversalAtomicType::get(atomicOpAttr, unwrap(valTypeObj))));
+              wrap(CopyOpUniversalAtomicType::get(atomicOpAttr, unwrap(valTypeObj), syncscope)));
         },
-        "atomic_op"_a, "val_type"_a, nb::kw_only(), "context"_a = nb::none(),
-        "Create a CopyOpUniversalAtomicType with atomic op and value type");
+        "atomic_op"_a, "val_type"_a, "syncscope"_a = std::string(), nb::kw_only(),
+        "context"_a = nb::none(),
+        "Create a CopyOpUniversalAtomicType with atomic op, value type and sync scope");
   }
 };
 

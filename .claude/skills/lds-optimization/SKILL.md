@@ -216,29 +216,34 @@ swizzled_col = original_col XOR (row >> shift)
 
 This ensures threads accessing the same column in different rows hit different banks.
 
-### FlyDSL XOR Swizzle with SmemAllocator
+### FlyDSL XOR Swizzle with SharedAllocator
 
-In FlyDSL, LDS is managed through `SmemAllocator`. To apply swizzle, XOR the
-row index into the LDS address when computing store/load offsets:
+In FlyDSL, declare the LDS storage as an `@fx.struct` of `fx.Array` fields and
+allocate it inside the kernel with `fx.SharedAllocator` (the current LDS API).
+To apply swizzle, XOR the row index into the LDS address when computing
+store/load offsets:
 
 ```python
-from flydsl.utils.smem_allocator import SmemAllocator
+import flydsl.expr as fx
 
-allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
+@fx.struct
+class SharedStorage:
+    key: fx.Array[fx.Float16, KV_BLOCK_SIZE * HEAD_SIZE]
 
 @flyc.kernel
 def my_kernel(...):
-    lds_base = allocator.get_base()
-    lds_key_ptr = lds_key(lds_base)
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, PADDED_STRIDE), (PADDED_STRIDE, 1)))
 
     # XOR-swizzle address: distribute bank accesses
     # row_idx and col_idx are the logical 2D coordinates
     # XOR_BITS controls swizzle width (typically 4 for fp16 vec=8)
     swizzled_col = col_idx ^ (row_idx & XOR_MASK)
-    lds_offset = row_idx * PADDED_STRIDE + swizzled_col
-    lds_key_ptr.store(data, [lds_offset])
+    fx.memref_store(data, lds_key, [row_idx, swizzled_col])
 ```
+
+The legacy `flydsl.utils.smem_allocator.SmemAllocator` path remains for
+un-migrated kernels but is not recommended for new code.
 
 ### Choosing Swizzle Parameters
 
@@ -260,10 +265,14 @@ Before (conflict-prone, linear layout):
 
 ```python
 # Linear shared memory layout — threads in same warp hit same banks
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
+@fx.struct
+class SharedStorage:
+    key: fx.Array[fx.Float16, KV_BLOCK_SIZE * HEAD_SIZE]
+
+lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, HEAD_SIZE), (HEAD_SIZE, 1)))
 # Store key tile: all threads write to column 0,1,2... -> bank conflicts
-lds_offset = row * HEAD_SIZE + col
-lds_key_ptr.store(data, [lds_offset])
+fx.memref_store(data, lds_key, [row, col])
 ```
 
 After (swizzled, conflict-free):
@@ -271,10 +280,10 @@ After (swizzled, conflict-free):
 ```python
 # XOR-swizzle distributes accesses across banks
 XOR_BITS = 4  # for fp16 vec=8: covers 4 banks per vec
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * HEAD_SIZE)
+lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, HEAD_SIZE), (HEAD_SIZE, 1)))
 swizzled_col = col ^ ((row & 0x7) << XOR_BITS)
-lds_offset = row * HEAD_SIZE + swizzled_col
-lds_key_ptr.store(data, [lds_offset])  # now conflict-free
+fx.memref_store(data, lds_key, [row, swizzled_col])  # now conflict-free
 ```
 
 ## Optimization Method 2: Padding
@@ -308,19 +317,21 @@ PADDING = 1  # or a small number
 PADDED_HEAD_SIZE = HEAD_SIZE + PADDING
 
 # Allocate with extra column for padding
-lds_key = allocator.allocate_array(T.f16, KV_BLOCK_SIZE * PADDED_HEAD_SIZE)
+@fx.struct
+class SharedStorage:
+    key: fx.Array[fx.Float16, KV_BLOCK_SIZE * PADDED_HEAD_SIZE]
 
 @flyc.kernel
 def my_kernel(...):
-    lds_base = allocator.get_base()
-    lds_key_ptr = lds_key(lds_base)
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    # View with padded stride: physical row stride is PADDED_HEAD_SIZE
+    lds_key = lds.key.view(fx.make_layout((KV_BLOCK_SIZE, HEAD_SIZE), (PADDED_HEAD_SIZE, 1)))
 
-    # Write key data using padded stride (ignore padding column)
-    lds_offset = row * PADDED_HEAD_SIZE + col
-    lds_key_ptr.store(data, [lds_offset])
+    # Write key data using padded stride (padding column stays unused)
+    fx.memref_store(data, lds_key, [row, col])
 
-    # Read back using same padded stride
-    data = lds_key_ptr.load([row * PADDED_HEAD_SIZE + col])
+    # Read back using same padded-stride view
+    data = fx.memref_load(lds_key, [row, col])
 ```
 
 ### Padding Amount
@@ -428,7 +439,7 @@ After applying LDS optimizations:
 
 3. **LDS usage**: Check total LDS consumption:
    ```python
-   # Estimate: sum of all allocator.allocate_array() sizes * element_size
+   # Estimate: sum of all @fx.struct fx.Array field byte sizes
    # gfx942: Must be <= 65536 bytes (64 KB) per workgroup
    # gfx950: Must be <= 163840 bytes (160 KB) per workgroup
    # Note: gfx950 allocates LDS in 1280-byte granularity (1280-byte aligned blocks)

@@ -79,6 +79,16 @@ LogicalResult MmaOpCDNA3_MFMAType::verify(function_ref<InFlightDiagnostic()> emi
   if (m != n) {
     return emitError() << "invalid MNK dimensions for CDNA3 MFMA: " << m << "x" << n << "x" << k;
   }
+
+  // Integer MFMA path (i8 inputs accumulate into i32).
+  if (elemTyA.isInteger(8) || elemTyB.isInteger(8)) {
+    if (!(elemTyA.isInteger(8) && elemTyB.isInteger(8)))
+      return emitError() << "integer MFMA requires both A and B to be i8";
+    if (!elemTyAcc.isInteger(32))
+      return emitError() << "integer MFMA requires i32 accumulator, got " << elemTyAcc;
+    return success();
+  }
+
   if (!elemTyAcc.isF32())
     return emitError() << "elemTyAcc must be f32, got " << elemTyAcc;
 
@@ -182,6 +192,7 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   DISPATCH_MFMA_SSA(16, 2, elemTyA.isBF16(), mfma_f32_16x16x2bf16)
   DISPATCH_MFMA_SSA(4, 2, elemTyA.isBF16(), mfma_f32_4x4x2bf16)
   DISPATCH_MFMA_SSA(32, 4, elemTyA.isBF16(), mfma_f32_32x32x4bf16)
+  DISPATCH_MFMA_SSA(32, 8, elemTyA.isBF16(), mfma_f32_32x32x8bf16_1k)
   DISPATCH_MFMA_SSA(16, 8, elemTyA.isBF16(), mfma_f32_16x16x8bf16)
   DISPATCH_MFMA_SSA(16, 16, elemTyA.isBF16(), mfma_f32_16x16x16bf16_1k)
   DISPATCH_MFMA_SSA(16, 32, elemTyA.isBF16(), mfma_f32_16x16x32_bf16)
@@ -195,6 +206,9 @@ FailureOr<Value> MmaOpCDNA3_MFMAType::emitAtomCallSSA(OpBuilder &builder, Locati
   DISPATCH_MFMA_SSA(32, 16, isFP8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_fp8_bf8)
   DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isFP8(elemTyB), mfma_f32_32x32x16_bf8_fp8)
   DISPATCH_MFMA_SSA(32, 16, isBF8(elemTyA) && isBF8(elemTyB), mfma_f32_32x32x16_bf8_bf8)
+
+  DISPATCH_MFMA_SSA(16, 32, elemTyA.isInteger(8) && elemTyB.isInteger(8), mfma_i32_16x16x32_i8)
+  DISPATCH_MFMA_SSA(32, 16, elemTyA.isInteger(8) && elemTyB.isInteger(8), mfma_i32_32x32x16_i8)
 
 #undef DISPATCH_MFMA_SSA
 

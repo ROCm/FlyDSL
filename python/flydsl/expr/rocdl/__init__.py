@@ -17,6 +17,7 @@ This module provides access to ROCm-specific GPU operations including:
 from ..._mlir.dialects.rocdl import *  # noqa: F401,F403
 from ..meta import dsl_loc_tracing
 from . import cdna4 as cdna4
+from .enum import SyncScope as SyncScope
 
 # Keep references to ODS-generated builders so we can wrap them without losing access.
 _ods_wmma_scale_f32_16x16x128_f8f6f4 = globals().get("wmma_scale_f32_16x16x128_f8f6f4", None)

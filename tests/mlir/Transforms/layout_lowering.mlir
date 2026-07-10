@@ -424,3 +424,25 @@ func.func @test_equal_int_vs_basis() -> i1 {
   %r = fly.equal(%a, %b) : (!fly.int_tuple<(1)>, !fly.int_tuple<(1E0)>) -> i1
   return %r : i1
 }
+
+// -----
+
+// === load_vec on a CoordTensor (leaf-int base) ===
+
+// fly.memref.load_vec on a CoordTensor evaluates base + layout(i) for i in [0, size) into a
+// vector<size x i32>; each element is materialized via crd2idx (no memory load). Here base=0
+// and the row stride is 0, so column-major element i carries its column index.
+// CHECK-LABEL: @test_load_vec_coord_tensor
+func.func @test_load_vec_coord_tensor() -> vector<6xi32> {
+  %base = fly.make_int_tuple() : () -> !fly.int_tuple<0>
+  %s = fly.make_int_tuple() : () -> !fly.int_tuple<(2, 3)>
+  %d = fly.make_int_tuple() : () -> !fly.int_tuple<(0, 1)>
+  %layout = fly.make_layout(%s, %d) : (!fly.int_tuple<(2, 3)>, !fly.int_tuple<(0, 1)>) -> !fly.layout<(2, 3) : (0, 1)>
+  %ct = fly.make_view(%base, %layout) : (!fly.int_tuple<0>, !fly.layout<(2, 3) : (0, 1)>) -> !fly.coord_tensor<0, (2, 3) : (0, 1)>
+  // All elements are static, so the per-element constants fold into one dense vector.
+  // CHECK-NOT: fly.memref.load_vec
+  // CHECK: %[[CST:.*]] = arith.constant dense<[0, 0, 1, 1, 2, 2]> : vector<6xi32>
+  // CHECK: return %[[CST]] : vector<6xi32>
+  %vec = fly.memref.load_vec(%ct) : (!fly.coord_tensor<0, (2, 3) : (0, 1)>) -> vector<6xi32>
+  return %vec : vector<6xi32>
+}

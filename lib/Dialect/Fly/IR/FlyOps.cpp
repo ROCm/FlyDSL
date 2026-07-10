@@ -1946,9 +1946,36 @@ FLY_INFER_RETURN_TYPES(MemRefLoadOp) {
 }
 
 FLY_INFER_RETURN_TYPES(MemRefLoadVecOp) {
+  if (auto coordTensorTy = dyn_cast<CoordTensorType>(operands[0].getType())) {
+    IntTupleAttr baseAttr = coordTensorTy.getBase();
+    if (!baseAttr.isLeafInt())
+      return emitOptionalError(
+          location, "MemRefLoadVecOp: CoordTensor base must be a leaf int, got ", baseAttr);
+
+    auto layoutAttr = dyn_cast<LayoutAttr>(coordTensorTy.getLayout());
+    if (!layoutAttr)
+      return emitOptionalError(
+          location, "MemRefLoadVecOp: CoordTensorTy with ComposedLayout is not supported");
+    IntTupleBuilder<IntTupleAttr> builder(context);
+    IntTupleAttr size = intTupleProduct(builder, layoutAttr.getShape());
+
+    if (!size.isLeafInt() || !size.isStatic())
+      return emitOptionalError(
+          location, "MemRefLoadVecOp: layout size must be static and leaf int, got ", size);
+
+    IntTupleAttr offsetProbe = layoutCrd2Idx(builder, IntTupleAttr::getLeafDynamic(context),
+                                             layoutAttr.getShape(), layoutAttr.getStride());
+    IntTupleAttr reprIdx = intTupleAdd(builder, baseAttr, offsetProbe);
+    int32_t width = reprIdx.extractIntFromLeaf().getWidth();
+    Type elemTy = IntegerType::get(context, width == 64 ? 64 : 32);
+    inferredReturnTypes.push_back(VectorType::get({size.getLeafAsInt().getValue()}, elemTy));
+    return success();
+  }
+
   auto memrefTy = dyn_cast<MemRefType>(operands[0].getType());
   if (!memrefTy)
-    return emitOptionalError(location, "MemRefLoadVecOp: expected MemRefType, got ",
+    return emitOptionalError(location,
+                             "MemRefLoadVecOp: expected MemRefType or CoordTensorType, got ",
                              operands[0].getType());
   auto layoutAttr = dyn_cast<LayoutAttr>(memrefTy.getLayout());
   if (!layoutAttr)
