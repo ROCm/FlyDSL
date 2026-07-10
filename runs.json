@@ -1,20 +1,35 @@
 {
  "schema": 1,
- "updated": "2026-07-10T02:23:57Z",
+ "updated": "2026-07-10T02:26:09Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29064510474,
+   "pr": 824,
+   "commit": "9428ffefa5925abbb9f1eb9bb41ee8d28ca3a146",
+   "branch": "mxfp4-batched-preshuffle-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064510474",
+   "created_at": "2026-07-10T02:22:35Z",
+   "updated_at": "2026-07-10T02:22:36Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 29064038772,
    "pr": 824,
    "commit": "1c52baa23a00e14199edcede98aae4d117ccef0c",
    "branch": "mxfp4-batched-preshuffle-gemm",
    "event": "pull_request",
-   "title": "[Kernel] Modernize mxfp4 preshuffle GEMM: thin @flyc.jit launcher + batching",
-   "status": "pending",
-   "conclusion": null,
+   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064038772",
    "created_at": "2026-07-10T02:09:58Z",
-   "updated_at": "2026-07-10T02:09:59Z",
+   "updated_at": "2026-07-10T02:22:36Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -24,7 +39,7 @@
    "commit": "d841ab8cf3abdd768e096e887826cd40388fd2d7",
    "branch": "mxfp4-batched-preshuffle-gemm",
    "event": "pull_request",
-   "title": "[Kernel] Modernize mxfp4 preshuffle GEMM: thin @flyc.jit launcher + batching",
+   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
    "status": "completed",
    "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29063883264",
@@ -39,7 +54,7 @@
    "commit": "6fc7dbd1dad3eb16e66886da67e5a221e8069aa9",
    "branch": "mxfp4-batched-preshuffle-gemm",
    "event": "pull_request",
-   "title": "[Kernel] Modernize mxfp4 preshuffle GEMM: thin @flyc.jit launcher + batching",
+   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
    "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29063150518",
@@ -1939,49 +1954,6 @@
      "started_at": "2026-07-07T09:35:03Z",
      "completed_at": "2026-07-07T11:01:23Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28856274176/job/85583637459"
-    }
-   ]
-  },
-  {
-   "run_id": 28854741895,
-   "pr": null,
-   "commit": "968a3f0e6f59eb554e119619ffc03699366b6ae0",
-   "branch": "lhc/kernels-tier2",
-   "event": "pull_request",
-   "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28854741895",
-   "created_at": "2026-07-07T09:07:23Z",
-   "updated_at": "2026-07-07T11:55:59Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-07T09:09:29Z",
-     "completed_at": "2026-07-07T10:08:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28854741895/job/85578627623"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-07T11:39:09Z",
-     "completed_at": "2026-07-07T11:55:58Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28854741895/job/85578627639"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-07T09:09:29Z",
-     "completed_at": "2026-07-07T10:29:39Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28854741895/job/85578627850"
     }
    ]
   }
