@@ -1,11 +1,69 @@
 {
  "schema": 1,
- "updated": "2026-07-10T12:42:46Z",
+ "updated": "2026-07-10T12:53:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29093120509,
+   "run_id": 29093863571,
+   "pr": null,
+   "commit": "ba41a1f50a9612b92c6c1f9c3585714e49638b4c",
+   "branch": "main",
+   "event": "push",
+   "title": "[Docs] Refresh API docs, add kernel tuning guide, fix kernel-authorin\u2026",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093863571",
+   "created_at": "2026-07-10T12:49:49Z",
+   "updated_at": "2026-07-10T12:50:30Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:50:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093863571/job/86365659718"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:50:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093863571/job/86365659728"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:50:30Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093863571/job/86365659746"
+    }
+   ]
+  },
+  {
+   "run_id": 29093725814,
    "pr": 827,
+   "commit": "c4e30bf98798166528096a111808736ed1d878e1",
+   "branch": "worktree-docs-api-refresh",
+   "event": "pull_request",
+   "title": "[Docs] Refresh API docs, add kernel tuning guide, fix kernel-authoring skills",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814",
+   "created_at": "2026-07-10T12:47:21Z",
+   "updated_at": "2026-07-10T12:47:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29093120509,
+   "pr": null,
    "commit": "309d835043d52ab981da56749c514594e9f5847b",
    "branch": "worktree-docs-api-refresh",
    "event": "pull_request",
@@ -53,13 +111,41 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "pending",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29090473846",
    "created_at": "2026-07-10T11:46:38Z",
-   "updated_at": "2026-07-10T11:46:39Z",
+   "updated_at": "2026-07-10T12:50:03Z",
    "actor": "xudoyuan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:50:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29090473846/job/86365750145"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:50:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29090473846/job/86365750154"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:50:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29090473846/job/86365750160"
+    }
+   ]
   },
   {
    "run_id": 29089966906,
@@ -128,11 +214,11 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29088873470",
    "created_at": "2026-07-10T11:15:32Z",
-   "updated_at": "2026-07-10T12:23:39Z",
+   "updated_at": "2026-07-10T12:50:04Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -147,19 +233,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T11:17:13Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T12:49:19Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29088873470/job/86349309824"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T11:17:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T12:50:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29088873470/job/86349309834"
     }
    ]
@@ -1842,36 +1928,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/28960340269/job/86070060101"
     }
    ]
-  },
-  {
-   "run_id": 28960061311,
-   "pr": null,
-   "commit": "3f92925eb5ba5f5bd6dc30e2d458a61dc0f7fede",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28960061311",
-   "created_at": "2026-07-08T16:49:00Z",
-   "updated_at": "2026-07-08T23:43:58Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28960027146,
-   "pr": null,
-   "commit": "2860c2a3a9d0ea4cf947c94020bf8e7bc1601f68",
-   "branch": "feat/rmsnorm-backward-769",
-   "event": "pull_request",
-   "title": "[rmsnorm] Add backward pass + forward store_rstd for training (PR 1/3, #769)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28960027146",
-   "created_at": "2026-07-08T16:48:26Z",
-   "updated_at": "2026-07-08T23:18:45Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
