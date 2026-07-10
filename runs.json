@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T10:33:24Z",
+ "updated": "2026-07-10T10:58:32Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -143,11 +143,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076182596",
    "created_at": "2026-07-10T07:16:28Z",
-   "updated_at": "2026-07-10T07:18:25Z",
+   "updated_at": "2026-07-10T10:57:19Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -162,9 +162,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T07:18:25Z",
+     "started_at": "2026-07-10T10:57:18Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076182596/job/86308484584"
     },
@@ -186,28 +186,28 @@
    "branch": "main",
    "event": "push",
    "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher (#824)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258",
    "created_at": "2026-07-10T07:11:02Z",
-   "updated_at": "2026-07-10T10:32:28Z",
+   "updated_at": "2026-07-10T10:32:34Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T10:32:34Z",
+     "started_at": "2026-07-10T10:34:00Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258/job/86341855695"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T10:32:34Z",
+     "started_at": "2026-07-10T10:33:57Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258/job/86341855711"
     },
@@ -272,11 +272,11 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075238714",
    "created_at": "2026-07-10T06:57:27Z",
-   "updated_at": "2026-07-10T10:32:05Z",
+   "updated_at": "2026-07-10T10:56:37Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -300,10 +300,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T10:32:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T10:56:37Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075238714/job/86305517940"
     }
    ]
