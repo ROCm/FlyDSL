@@ -36,7 +36,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
         sys.path.insert(0, _p)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.moe_blockscale_2stage import compile_moe_blockscale_gemm1, compile_moe_blockscale_gemm2  # noqa: E402
+from kernels.moe.moe_blockscale_2stage import compile_moe_blockscale_gemm1, compile_moe_blockscale_gemm2  # noqa: E402
 from tests.test_common import checkAllclose, run_perftest  # noqa: E402
 from tests.utils import pertoken_quant, shuffle_weight  # noqa: E402
 

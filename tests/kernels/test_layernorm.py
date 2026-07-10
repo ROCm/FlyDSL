@@ -18,7 +18,7 @@ import os
 import pytest
 
 import flydsl.compiler as flyc
-from kernels.layernorm_kernel import (
+from kernels.norm.layernorm_kernel import (
     build_fused_add_layernorm_dynamicquant_module,
     build_fused_add_layernorm_module,
     build_fused_add_layernorm_smoothquant_module,

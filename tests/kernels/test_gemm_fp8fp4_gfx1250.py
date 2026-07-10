@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 import flydsl.compiler as flyc  # noqa: E402,I001
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.gemm_fp8fp4_gfx1250 import (  # noqa: E402
+from kernels.gemm.gemm_fp8fp4_gfx1250 import (  # noqa: E402
     compile_mxscale_gemm,
     compile_ptpc_gemm,
 )

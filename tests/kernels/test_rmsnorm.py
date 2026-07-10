@@ -17,23 +17,6 @@ import os
 
 import pytest
 
-import flydsl.compiler as flyc
-from kernels.rmsnorm_kernel import (
-    build_fused_add_rmsnorm_dynamicquant_module,
-    build_fused_add_rmsnorm_module,
-    build_fused_add_rmsnorm_smoothquant_module,
-    build_rmsnorm_dynamicquant_module,
-    build_rmsnorm_module,
-    build_rmsnorm_smoothquant_module,
-)
-from tests.kernels.benchmark_common import (
-    PerfRow,
-    bench_gpu_us_torch,
-    maybe_enable_aiter,
-    print_perf_table,
-)
-from tests.test_common import run_perftest
-
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 try:
@@ -42,6 +25,27 @@ except ImportError:
     torch = None
 if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
+
+# Imported after the torch guard: rmsnorm() is only defined when torch is present,
+# so importing it earlier makes a torch-less collection fail (ImportError) instead of skip.
+import flydsl.compiler as flyc  # noqa: E402
+from kernels.norm.rmsnorm_kernel import (  # noqa: E402
+    build_fused_add_rmsnorm_dynamicquant_module,
+    build_fused_add_rmsnorm_module,
+    build_fused_add_rmsnorm_smoothquant_module,
+    build_rmsnorm_bwd_module,
+    build_rmsnorm_dynamicquant_module,
+    build_rmsnorm_module,
+    build_rmsnorm_smoothquant_module,
+    rmsnorm,
+)
+from tests.kernels.benchmark_common import (  # noqa: E402
+    PerfRow,
+    bench_gpu_us_torch,
+    maybe_enable_aiter,
+    print_perf_table,
+)
+from tests.test_common import run_perftest  # noqa: E402
 
 DTYPE_FP32 = torch.float32
 DTYPE_FP16 = torch.float16
@@ -569,6 +573,82 @@ def _reference_fused_add_rmsnorm_quant(
     return residual_expected, q, yscale
 
 
+def _reference_rmsnorm_bwd(x_dev, weight_dev, dy_dev):
+    """Eager rmsnorm backward via autograd. Returns dx, dw, rstd (all fp32)."""
+    x = x_dev.detach().to(DTYPE_FP32).requires_grad_(True)
+    w = weight_dev.detach().to(DTYPE_FP32).requires_grad_(True)
+    rstd = torch.rsqrt((x * x).mean(dim=1, keepdim=True) + EPS)
+    y = x * rstd * w
+    dx, dw = torch.autograd.grad(y, [x, w], grad_outputs=dy_dev.to(DTYPE_FP32))
+    return dx.detach(), dw.detach(), rstd.detach().squeeze(1).contiguous()
+
+
+def run_bwd_test(M: int, N: int, dtype: str = "f32"):
+    print(f"\nTesting RMSNorm backward (M={M}, N={N}, dtype={dtype})")
+
+    torch_dtype = _torch_dtype(dtype)
+    try:
+        fwd_fn = build_rmsnorm_module(N, dtype, store_rstd=True)
+        bwd_fn = build_rmsnorm_bwd_module(N, dtype)
+    except Exception as e:
+        print(f"[FAIL] Compile failed for bwd (M={M}, N={N}, dtype={dtype}): {type(e).__name__}: {e}")
+        return False
+
+    torch.manual_seed(42)
+    x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+    weight = torch.rand((N,), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+    dy = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).contiguous()
+
+    dx_ref, dw_ref, rstd_ref = _reference_rmsnorm_bwd(x, weight, dy)
+
+    stream = torch.cuda.current_stream()
+
+    # --- forward with store_rstd: validates rstd from the kernel ---
+    out = torch.empty((M, N), device="cuda", dtype=torch_dtype)
+    rstd = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
+    fwd_c = flyc.compile(fwd_fn, x, weight, out, rstd, M, stream)
+    fwd_c(x, weight, out, rstd, M, stream)
+    torch.cuda.synchronize()
+    rstd_err = (rstd - rstd_ref).abs().max().item()
+
+    # --- backward: dx + dweight ---
+    dx = torch.empty((M, N), device="cuda", dtype=torch_dtype)
+    dweight = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
+    bwd_c = flyc.compile(bwd_fn, x, weight, dy, rstd, dx, dweight, M, stream)
+    dweight.zero_()
+    bwd_c(x, weight, dy, rstd, dx, dweight, M, stream)
+    torch.cuda.synchronize()
+
+    dx_err = (dx.to(DTYPE_FP32) - dx_ref).abs().max().item()
+    dw_mag = dw_ref.abs().max().item()
+
+    # Tolerances (calibrated). dweight is summed over M -> larger magnitude -> relative.
+    rstd_atol = 1e-3
+    dx_atol = {"f32": 1e-3, "f16": 3e-2, "bf16": 2e-1}[dtype]
+    dw_rtol = {"f32": 1e-4, "f16": 3e-2, "bf16": 1e-1}[dtype]
+    dw_atol = {"f32": 1e-2, "f16": 1e-1, "bf16": 5e-1}[dtype]
+
+    print(f"  rstd max abs err    = {rstd_err:.3e} (atol={rstd_atol})")
+    print(f"  dx max abs err      = {dx_err:.3e} (atol={dx_atol})")
+    print(f"  dweight |max|       = {dw_mag:.3e}")
+
+    dw_ok = True
+    try:
+        torch.testing.assert_close(dweight, dw_ref, rtol=dw_rtol, atol=dw_atol)
+    except AssertionError as e:
+        dw_ok = False
+        dw_err = (dweight - dw_ref).abs().max().item()
+        print(f"  dweight max abs err = {dw_err:.3e} (rtol={dw_rtol}, atol={dw_atol})")
+        print(f"  [dweight mismatch] {e}")
+    else:
+        dw_err = (dweight - dw_ref).abs().max().item()
+        print(f"  dweight max abs err = {dw_err:.3e} (rtol={dw_rtol}, atol={dw_atol})")
+
+    ok = rstd_err < rstd_atol and dx_err < dx_atol and dw_ok
+    print(f"  -> {'PASSED' if ok else 'FAILED'}")
+    return ok
+
+
 def _bench_aiter_rmsnorm(M: int, N: int, dtype: str):
     torch_dtype = _torch_dtype(dtype)
 
@@ -728,6 +808,158 @@ def test_rmsnorm():
     # Ensure a non-zero exit code on failure for shell wrappers.
     if failures != 0:
         raise SystemExit(1)
+
+
+def test_rmsnorm_backward():
+    print("=" * 80)
+    print("Running RMSNorm Backward Tests")
+    print("=" * 80)
+
+    configs = [
+        (64, 256, "f32"),  # small-N path, f32
+        (16, 512, "bf16"),  # small-N path, bf16
+        (4096, 4096, "bf16"),  # fast vectorized path (N % 2048 == 0, 16-bit)
+        (64, 2000, "f32"),  # small-N path, unaligned f32
+        (128, 4096, "f16"),  # fast vectorized path, f16
+        (64, 3000, "f32"),  # generic scalar path (N > 2048, f32)
+    ]
+
+    failures = 0
+    for M, N, dtype in configs:
+        ok = run_bwd_test(M, N, dtype)
+        if not ok:
+            failures += 1
+
+    print("\n" + "=" * 80)
+    if failures == 0:
+        print("ALL TESTS PASSED")
+    else:
+        print(f"{failures} TESTS FAILED")
+    print("=" * 80)
+    if failures != 0:
+        raise SystemExit(1)
+
+
+def run_autograd_test(M: int, N: int, dtype: str = "f32"):
+    """End-to-end: the public rmsnorm() autograd path (what quack calls),
+    including batched (>2D) input reshape and grads on x + weight."""
+    print(f"\nTesting rmsnorm() autograd (M={M}, N={N}, dtype={dtype})")
+    torch_dtype = _torch_dtype(dtype)
+    torch.manual_seed(42)
+
+    x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).requires_grad_(True)
+    weight = torch.rand((N,), device="cuda", dtype=DTYPE_FP32).to(torch_dtype).requires_grad_(True)
+    dy = torch.randn((M, N), device="cuda", dtype=torch_dtype)
+
+    out = rmsnorm(x, weight)
+    out.backward(dy)
+    dx_out, dw_out = x.grad.detach(), weight.grad.detach()
+
+    # fp32 autograd reference
+    xf = x.detach().to(DTYPE_FP32).requires_grad_(True)
+    wf = weight.detach().to(DTYPE_FP32).requires_grad_(True)
+    rstd = torch.rsqrt((xf * xf).mean(dim=1, keepdim=True) + EPS)
+    yr = xf * rstd * wf
+    dxr, dwr = torch.autograd.grad(yr, [xf, wf], dy.to(DTYPE_FP32))
+
+    out_err = (out.detach().to(DTYPE_FP32) - yr.detach()).abs().max().item()
+    dx_err = (dx_out.to(DTYPE_FP32) - dxr).abs().max().item()
+    dw_err = (dw_out.to(DTYPE_FP32) - dwr).abs().max().item()
+
+    out_atol = {"f32": 1e-3, "f16": 3e-2, "bf16": 2e-1}[dtype]
+    dx_atol = {"f32": 1e-3, "f16": 3e-2, "bf16": 2e-1}[dtype]
+    dw_atol = {"f32": 1e-2, "f16": 2e-1, "bf16": 1.0}[dtype]
+
+    print(f"  out max abs err = {out_err:.3e} (atol={out_atol})")
+    print(f"  dx  max abs err = {dx_err:.3e} (atol={dx_atol})")
+    print(f"  dw  max abs err = {dw_err:.3e} (atol={dw_atol})")
+
+    # Batched (3D) input must reshape correctly through the public entry.
+    x3 = torch.randn((4, M // 4 if M >= 4 else 1, N), device="cuda", dtype=torch_dtype, requires_grad=True)
+    y3 = rmsnorm(x3, weight)
+    shape_ok = tuple(y3.shape) == tuple(x3.shape)
+    y3.sum().backward()
+    grad_ok = x3.grad is not None and tuple(x3.grad.shape) == tuple(x3.shape)
+    print(f"  3D reshape: out_shape_ok={shape_ok} grad_shape_ok={grad_ok}")
+
+    ok = out_err < out_atol and dx_err < dx_atol and dw_err < dw_atol and shape_ok and grad_ok
+    print(f"  -> {'PASSED' if ok else 'FAILED'}")
+    return ok
+
+
+def test_rmsnorm_autograd():
+    print("=" * 80)
+    print("Running rmsnorm() Autograd (end-to-end) Tests")
+    print("=" * 80)
+
+    configs = [
+        (64, 256, "f32"),  # small-N path
+        (128, 4096, "bf16"),  # fast vectorized path
+        (128, 4096, "f16"),  # fast vectorized path, f16
+        (128, 3000, "f32"),  # generic scalar path (N > 2048, f32)
+    ]
+
+    failures = 0
+    for M, N, dtype in configs:
+        if not run_autograd_test(M, N, dtype):
+            failures += 1
+
+    print("\n" + "=" * 80)
+    print("ALL TESTS PASSED" if failures == 0 else f"{failures} TESTS FAILED")
+    print("=" * 80)
+    if failures != 0:
+        raise SystemExit(1)
+
+
+def test_rmsnorm_eps_honored():
+    """eps must be baked into the kernel, not silently replaced by the module EPS."""
+    print("=" * 80)
+    print("Running RMSNorm eps-honored Test")
+    print("=" * 80)
+    torch.manual_seed(0)
+    # Cover both forward builders: small-N (N <= 2048) and the generic scalar path
+    # (N > 2048; f32 avoids the 16-bit fast path), so eps is verified on each.
+    for M, N in ((32, 256), (32, 3000)):
+        x = torch.randn((M, N), device="cuda", dtype=DTYPE_FP32)
+        w = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
+
+        for eps in (1e-5, 1e-6, 1e-2):
+            y = rmsnorm(x, w, eps=eps)
+            ref = x / torch.sqrt((x * x).mean(dim=1, keepdim=True) + eps) * w
+            err = (y - ref).abs().max().item()
+            print(f"  N={N} eps={eps:g}: max err vs torch ref = {err:.3e}")
+            assert err < 1e-4, f"N={N} eps={eps} not honored (err={err})"
+
+        # A non-default eps must actually change the output (guards silent-ignore regressions).
+        diff = (rmsnorm(x, w, eps=1e-2) - rmsnorm(x, w, eps=1e-6)).abs().max().item()
+        print(f"  N={N} eps 1e-2 vs 1e-6 output diff = {diff:.3e} (must be > 0)")
+        assert diff > 0, f"N={N}: eps appears to be ignored"
+    print("  -> PASSED")
+
+
+@pytest.mark.multi_gpu
+def test_rmsnorm_multi_gpu():
+    """Compiled-fn cache must not reuse a device-0 kernel on device 1 (would fault)."""
+    print("=" * 80)
+    print("Running RMSNorm multi-GPU Test")
+    print("=" * 80)
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    torch.manual_seed(0)
+    N = 256
+    for dev in ("cuda:0", "cuda:1"):
+        x = torch.randn((16, N), device=dev, dtype=DTYPE_FP32, requires_grad=True)
+        w = torch.rand((N,), device=dev, dtype=DTYPE_FP32, requires_grad=True)
+        dy = torch.randn((16, N), device=dev, dtype=DTYPE_FP32)
+        y = rmsnorm(x, w)
+        y.backward(dy)
+        torch.cuda.synchronize(dev)
+        ref = x.detach() / torch.sqrt((x.detach() ** 2).mean(1, keepdim=True) + EPS) * w.detach()
+        err = (y.detach() - ref).abs().max().item()
+        print(f"  {dev}: out err={err:.3e}, dx finite={torch.isfinite(x.grad).all().item()}")
+        assert err < 1e-4 and torch.isfinite(x.grad).all()
+    print("  -> PASSED")
 
 
 @pytest.mark.large_shape
@@ -958,6 +1190,11 @@ def test_fused_add_rmsnorm_smoothquant():
 
 if __name__ == "__main__":
     test_rmsnorm()
+    test_rmsnorm_backward()
+    test_rmsnorm_autograd()
+    test_rmsnorm_eps_honored()
+    if torch.cuda.device_count() >= 2:
+        test_rmsnorm_multi_gpu()
     test_rmsnorm_dynamicquant()
     test_rmsnorm_smoothquant()
     test_fused_add_rmsnorm()

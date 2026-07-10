@@ -25,6 +25,46 @@ env:
   GITHUB_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.event.head_commit.id || github.sha }}
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Detect whether the change touches code. Docs-only / non-code changes (docs,
+  # markdown, root docs, images, non-workflow .github files) set code_changed to
+  # 'false', and the heavy test / multi-gpu jobs below are skipped at the job
+  # level (a skipped required check still counts as passing for branch
+  # protection), so no GPU runner is used. workflow_dispatch always forces a
+  # full run, and a detection failure fails safe to running the tests.
+  # ---------------------------------------------------------------------------
+  detect-changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      # true when any changed file is code, OR on manual dispatch (force run).
+      code_changed: ${{ steps.filter.outputs.code == 'true' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Detect code vs non-code changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          # code is true when any changed file is NOT one of the non-code paths
+          # below (everything under '**' minus the negated docs / markdown /
+          # image / non-workflow .github patterns).
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+              - '!**/*.rst'
+              - '!LICENSE'
+              - '!**/*.png'
+              - '!**/*.jpg'
+              - '!**/*.jpeg'
+              - '!**/*.gif'
+              - '!**/*.svg'
+              - '!**/*.webp'
+              - '!.github/ISSUE_TEMPLATE/**'
+
   check-signal:
     if: ${{ github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'multi-gpu' }}
     runs-on: ubuntu-latest
@@ -46,7 +86,15 @@ jobs:
   # Runs on 1-GPU and Navi runners only.
   # ---------------------------------------------------------------------------
   test:
-    needs: check-signal
+    needs: [check-signal, detect-changes]
+    # Run only when check-signal passed AND the change touched code. Docs-only
+    # changes (code_changed == 'false') skip this job entirely, so no GPU runner
+    # is used; a detect-changes failure falls back to running.
+    if: >-
+      ${{ always()
+          && needs.check-signal.result == 'success'
+          && (needs.detect-changes.result != 'success'
+              || needs.detect-changes.outputs.code_changed == 'true') }}
     env:
       # Some self-hosted runners configure a GitHub -> git-cache URL rewrite.
       # If that cache is unavailable, checkout fails before the tests start.
@@ -357,15 +405,19 @@ jobs:
   # fail-fast: false ensures both runners always complete even if one fails.
   # ---------------------------------------------------------------------------
   multi-gpu:
-    needs: test
+    needs: [test, detect-changes]
     name: Multi-GPU Communication Operator Tests (${{ matrix.runners }})
     timeout-minutes: 120
     env:
       # Keep checkout independent of runner-local git-cache rewrites.
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
+    # Also gated on code_changed: docs-only changes skip this job (a
+    # detect-changes failure falls back to running).
     if: |
-      always() && (
+      always() &&
+      (needs.detect-changes.result != 'success' ||
+       needs.detect-changes.outputs.code_changed == 'true') && (
         (github.event_name == 'pull_request' &&
          contains(github.event.pull_request.labels.*.name, 'multi-gpu')) ||
         github.event_name == 'workflow_dispatch'
