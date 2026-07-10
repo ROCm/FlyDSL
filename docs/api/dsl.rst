@@ -109,6 +109,8 @@ High-level classes for tiled copy and MMA partitioning:
 - **ThrMma** -- per-thread MMA view: ``partition_A(a)``, ``partition_B(b)``, ``partition_C(c)``
 - **make_layout_tv(thr, val)** -- build thread-value layout
 - **make_tiled_copy_A/B/C(copy_atom, tiled_mma)** -- create TiledCopy matched to MMA operands
+- **fx.gather(copy_atom, base_iter, offset_tensor, dst_tensor, \*, pred=None)** -- indexed load ``dst = base[offset]`` via a copy atom (offset tensor is ``(TV, Rest...)``)
+- **fx.scatter(copy_atom, src_tensor, base_iter, offset_tensor, \*, pred=None)** -- indexed store ``base[offset] = src`` (see ``examples/05-gather_scatter.py``)
 
 Type Annotations
 ~~~~~~~~~~~~~~~~~
@@ -120,6 +122,8 @@ Type Annotations
 - **fx.Float8E4M3FN**, **fx.Float8E4M3FNUZ**, **fx.Float8E5M2** -- FP8 scalar types
 - **fx.Stream** -- GPU stream argument
 - **fx.T** -- type namespace (``T.f32``, ``T.f16``, ``T.bf16``, ``T.i8``, ``T.index``, etc.)
+- **fx.Basis(value, modes)** / **fx.E(\*modes)** -- basis-stride leaves for by-mode layout construction (``E(0)`` → ``1E0``)
+- **fx.SyncScope** -- target-neutral LLVM sync scopes (``SyncScope.System``, ``SyncScope.SingleThread``); AMDGPU scopes live in ``flydsl.expr.rocdl.enum.SyncScope``
 
 GPU Intrinsics (``flydsl.expr.gpu``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -141,7 +145,7 @@ Prefer typed DSL values and operator-overloaded arithmetic:
    import flydsl.expr as fx
    from flydsl.expr.typing import Vector as Vec
 
-   c = fx.Index(42)
+   c = fx.Int64(42)
    v = fx.Int32(idx)
    f = fx.Float32(1.0)
    r = cond.select(a, b)
@@ -149,12 +153,25 @@ Prefer typed DSL values and operator-overloaded arithmetic:
 
 Preferred APIs:
 
-- **fx.Int32(value)**, **fx.Int64(value)**, **fx.Index(value)**, **fx.Float32(value)** -- constants and casts
+- **fx.Int32(value)**, **fx.Int64(value)**, **fx.Float32(value)** -- typed constants and casts (use **fx.Int64** for index/offset values and loop bounds; **fx.Index** is deprecated)
 - **ArithValue / Numeric operators** -- ``+``, ``-``, ``*``, ``/``, ``%``, ``<<``, ``>>``
 - **cond.select(true_val, false_val)** -- ternary select when ``cond`` is an ``ArithValue``
 - **arith.cmpi(predicate, lhs, rhs)** -- integer comparison
 - **arith.cmpf(predicate, lhs, rhs)** -- float comparison
-- **Direct ``arith.*FOp(..., fastmath=...)``** -- use only where explicit fastmath flags are required for performance
+- **arith.maxnumf(a, b)** -- float maximum returning the non-NaN operand (libm ``fmax``); preserves the DSL type of ``a``
+- **Chained comparisons** (``lo <= x < hi``) are supported inside traced kernels and lower to combined ``cmp`` + ``and``.
+
+Fastmath flags can be applied ambiently to a block or per-op:
+
+.. code-block:: python
+
+   with fx.fastmath(fx.FastMathFlags.fast):
+       y = a * b + c          # float operators/math funcs inherit the flags
+       z = fx.exp(a, fastmath="contract")   # explicit arg overrides the ambient scope
+
+- **fx.fastmath(flags)** -- context manager applying ``fastmath`` to float ops built in the block; nests and restores on exit
+- **fx.FastMathFlags** -- flag enum (``fast``, ``contract``, ``reassoc``, …; combine with ``|``)
+- **Direct ``arith.addf(..., fastmath=...)`` / ``arith.AddFOp(..., fastmath=...)``** -- per-op flags where an ambient scope is not desired
 
 Vector Values (``flydsl.expr.typing.Vector``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -182,7 +199,7 @@ AMD CDNA3/CDNA4 buffer load/store with hardware bounds checking:
    buffer_ops.buffer_store(data, rsrc, offset, mask=is_valid)
 
 - **create_buffer_resource(tensor, num_records=None, max_size=False)** -- create buffer descriptor
-- **buffer_load(rsrc, offset, vec_width, dtype, soffset_bytes, mask)** -- vector buffer load
+- **buffer_load(rsrc, offset, vec_width=4, dtype=None, mask=None, cache_modifier=0, soffset_bytes=None, is_scalar=False)** -- vector buffer load; ``is_scalar=True`` emits the uniform/SGPR ``s.buffer.load`` (vec_width 1 or 4, i32 result, no mask/soffset)
 - **buffer_store(data, rsrc, offset, soffset_bytes, mask)** -- buffer store
 - **BufferResourceDescriptor** -- descriptor dataclass
 

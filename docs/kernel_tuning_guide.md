@@ -22,6 +22,112 @@ at optimizations without a trace usually moves the bottleneck instead of removin
 
 ---
 
+## 0. Background: The GPU Performance Model
+
+Before the specific levers, it helps to have a mental model of *where a kernel's
+time goes*. A GPU does not make individual instructions fast — it hides their
+latency with parallelism. Each SIMD holds several wavefronts; when one wave
+stalls waiting on memory, the scheduler issues from another ready wave. So tuning
+is two problems: **keep enough independent work in flight to cover latency**, and
+**don't exceed the machine's throughput ceilings** (compute FLOPs or memory
+bandwidth). Almost every technique later in this guide is one of those two.
+
+### Thread traces and instruction interleaving
+
+An **ATT (Advanced Thread Trace)** records, per instruction on one CU, when it
+issued and how many cycles it *stalled*. Within a single wave, instructions issue
+in program order; a "stall" means the wave could not issue because it was waiting
+on a dependency — almost always an `s_waitcnt` counter or a barrier.
+
+The compiler (guided by the `sched_*` hints in §5) **interleaves independent
+instruction classes** — MFMA, global loads (VMEM), LDS reads/writes — so that a
+long-latency operation overlaps useful work instead of blocking it. Two hardware
+counters gate this:
+
+- **`vmcnt`** — outstanding VMEM (global/`buffer_load`) operations.
+- **`lgkmcnt`** — outstanding LDS and scalar-memory operations.
+
+An instruction that *consumes* a load result waits on the relevant counter
+(`s_waitcnt vmcnt(0)` / `lgkmcnt(0)`). If the consumer is issued too close to the
+load, the load's latency is exposed as stall cycles in the trace. Interleaving and
+scheduling exist to convert those stall cycles into issue cycles. Collect and read
+a trace with `/kernel-trace-analysis` (§9).
+
+### The latencies you are hiding
+
+Order-of-magnitude on CDNA (cycles; exact values vary by arch and contention):
+
+| Operation | Latency | Notes |
+|---|---|---|
+| SALU / VALU | ~1–8 | address math, integer/float ALU |
+| MFMA | ~16–64 | the compute you *want* to be waiting on |
+| LDS `ds_read`/`ds_write` | ~20–40 (gfx942) | async; more with bank conflicts |
+| Global load (HBM) | ~300+ | an order of magnitude above LDS |
+| `s_barrier` | variable | whole workgroup must arrive |
+
+The whole game is arranging enough independent instructions (and enough resident
+waves) between issuing a high-latency op and needing its result.
+
+### Hiding LDS latency
+
+LDS ops are asynchronous, and a `ds_read` that depends on a prior `ds_write` must
+be separated by `s_waitcnt lgkmcnt(0)` or an `s_barrier`. If the wait sits right
+after the write, the ~20–40-cycle latency is fully exposed. Hide it by
+**increasing the write→read distance** — schedule independent MFMAs, address math,
+or the next tile's global loads between the write and the wait — and by
+**A0-prefetching** the first LDS pack right after a barrier so the first
+`ds_read` overlaps the following VMEM loads. See §3 (swizzle) and §4 (prefetch);
+bank conflicts (§3) both raise per-op latency *and* cut effective LDS bandwidth.
+
+### Hiding global-memory latency
+
+Global loads are the longest-latency common op (~300+ cycles), so they dominate if
+exposed. The primary tool is **software prefetch / double-buffering** (§4): issue
+the *next* iteration's `buffer_load`s before consuming the current iteration's
+data, so the fetch overlaps compute. Larger `tile_k` increases reuse per byte
+fetched; higher **occupancy** gives the scheduler more waves to switch to while
+one is waiting. A useful trick in multi-phase kernels: **hoist the next phase's
+loads into a barrier-wait region** — the barrier is dead time anyway, so the load
+arrives for free.
+
+### Bandwidth
+
+Once latency is hidden, you hit a **throughput ceiling**. There are two:
+
+- **Compute** — MFMA FLOP/s. Peak (gfx942 MI300X, single GCD): ~653 TFLOPS FP8,
+  ~326 TFLOPS BF16, ~653 TOPS INT8.
+- **Memory bandwidth** — HBM GB/s, plus the L2 and LDS byte/cycle limits (LDS peak
+  128 B/cyc on gfx942, 256 B/cyc on gfx950).
+
+*Effective* memory bandwidth depends on access quality: **coalesced, vectorized**
+accesses (`buffer_load_dwordx4`, full 64 B cache lines) approach peak, while
+uncoalesced or partial-cache-line access wastes HBM. When a kernel is
+memory-bound, cache/HBM PMC counters (§9) — L2 hit rate, 32 B-partial fraction,
+over-fetch, per-channel balance — tell you *why*, which ISA inspection alone
+usually gets wrong.
+
+### Is the kernel memory-, compute-, or latency-bound?
+
+Compute the arithmetic intensity `AI = FLOPs / bytes_moved` and compare it to the
+roofline crossover (§8). Three regimes, each with a different fix and a different
+trace/PMC signature:
+
+| Regime | What's saturated | Trace / PMC signature | Where to look |
+|---|---|---|---|
+| **Compute-bound** | MFMA units | MFMA utilization high (≥ ~70%), memory pipes idle | §5 scheduling, §7 occupancy, cut non-MFMA overhead |
+| **Bandwidth-bound** | HBM / L2 / LDS BW | memory BW near peak, low L2 hit or high over-fetch; MFMA util moderate | §3 coalescing/swizzle, smaller dtype, bigger `tile_k`, XCD balance (§9) |
+| **Latency-bound** | *nothing* — work is stalled | **both** MFMA util and memory BW low, **high** `s_waitcnt`/`s_barrier` stall | §4 prefetch, §7 occupancy, §5 interleaving |
+
+The distinction that trips people up is **latency-bound vs bandwidth-bound**: a
+latency-bound kernel is slow while *neither* ceiling is saturated — the pipes are
+simply idle waiting on exposed latency (common at small `M` or low occupancy). The
+cure is more overlap and more waves in flight, not more bandwidth. A
+bandwidth-bound kernel, by contrast, is already moving bytes as fast as the memory
+system allows, so the cure is moving *fewer* or *better-shaped* bytes. Rule of
+thumb: **M ≤ 512 → likely memory/latency-bound; M > 512 → likely compute-bound.**
+
+---
+
 ## 1. Tiling Strategy
 
 GEMM tiles the output `C[M, N]` and the reduction `K` into blocks. With a 256-thread
@@ -164,8 +270,8 @@ to create genuine SSA phi nodes:
 next_a = buffer_ops.buffer_load(rsrc_a, offsets_0, vec_width=4)
 init_state = [_unwrap(v) for v in [next_a, acc]]
 
-# Runtime loop — bounds MUST be fx.Index(...), not Python ints (see pitfalls)
-for iv, state in range(fx.Index(0), fx.Index(N - 1), fx.Index(1), init=init_state):
+# Runtime loop — bounds MUST be a typed DSL integer (fx.Int64), not Python ints (see pitfalls)
+for iv, state in range(fx.Int64(0), fx.Int64(N - 1), fx.Int64(1), init=init_state):
     a, acc = state[0], state[1]
     next_a = buffer_ops.buffer_load(rsrc_a, compute_offsets(iv + 1), vec_width=4)  # async
     acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)   # overlaps next load
@@ -178,8 +284,8 @@ acc = rocdl.mfma_f32_16x16x16_f16(transform(a), b, acc)
 
 Three pitfalls (all covered in `/prefetch-data-load`):
 
-1. **Bounds must be `fx.Index(...)`.** Constant Python-int bounds make the
-   rewriter unroll the loop and silently ignore `init=`.
+1. **Bounds must be a typed DSL integer (`fx.Int64(...)`).** Constant Python-int
+   bounds make the rewriter unroll the loop and silently ignore `init=`.
 2. **Unwrap init values at hard boundaries only.** Most carried values stay
    `fx.Int32`/`fx.Float32`/`Vector`; unwrap to raw `ir.Value` only where a
    low-level helper demands it.
@@ -258,21 +364,65 @@ preshuffle GEMM also exposes fused epilogues via the `epilogue=` argument of
 
 ## 7. Register Budget & Occupancy
 
-On CDNA3/CDNA4 the two VGPR files — **arch_vgpr** (VALU, VMEM, LDS ops, prefetch
-buffers) and **accum_vgpr / AGPR** (MFMA writeback) — share **one combined
-512-entry occupancy budget** per SIMD. Occupancy ≈ `512 / (arch_vgpr +
-accum_vgpr)` waves. Growing prefetch/LDS-address arch_vgpr therefore *does*
-compete with MFMA accumulators.
+**Occupancy** is how many wavefronts are resident per SIMD at once — the pool the
+scheduler draws from to hide latency (§0). It is the **minimum across three
+resource limiters**, capped by a hardware maximum:
 
-| Combined arch + accum | Waves/SIMD | Impact |
-|---|---|---|
-| ≤ 128 | 4 | High occupancy |
-| ≤ 170 | 3 | Good |
-| ≤ 256 | 2 | Moderate |
-| ≤ 512 | 1 | Minimum |
-| > 512 | **SPILL** | Severe regression |
+```
+occupancy (waves/SIMD) = min(vgpr_limit, lds_limit, sgpr_limit, HW_MAX)
+```
 
-Rough VGPR estimate for a FP8 tile:
+Whichever resource you exhaust *first* caps occupancy — so all three must be
+watched, and the arch you target changes each limit.
+
+### The three resources
+
+**1. VGPR.** On **CDNA3 (gfx942)** and **CDNA4 (gfx950)** the two vector-register
+files — **arch_vgpr** (VALU, VMEM, LDS ops, prefetch buffers) and **accum_vgpr /
+AGPR** (MFMA writeback) — share **one combined 512-entry budget** per SIMD, so
+`vgpr_limit = 512 // (arch_vgpr + accum_vgpr)`. Growing prefetch/LDS-address
+arch_vgpr therefore competes with MFMA accumulators for the same budget. (This is
+*not* the old separate-pool `256 / max(arch, accum)` model — that was CDNA1
+gfx908.)
+
+| Combined arch + accum (wave64) | vgpr_limit (waves/SIMD) |
+|---|---|
+| ≤ 64 | 8 (hardware max) |
+| ≤ 128 | 4 |
+| ≤ 170 | 3 |
+| ≤ 256 | 2 |
+| ≤ 512 | 1 |
+| > 512 | **SPILL** — severe regression |
+
+**2. LDS.** LDS is a per-CU pool shared by all resident workgroups, so
+`resident_workgroups = LDS_per_CU // LDS_per_workgroup`; more LDS per block →
+fewer concurrent blocks → fewer waves. The pool size is arch-specific:
+**64 KB (gfx942)**, **160 KB (gfx950)**, **320 KB (gfx1250)**. A 160 KB / 320 KB
+budget lets a kernel keep bigger tiles (or more buffers) resident before LDS,
+rather than VGPR, becomes the limiter.
+
+**3. SGPR.** Scalar registers (kernel args, buffer descriptors, loop/scalar
+state) also gate occupancy: on CDNA, ~**800 SGPRs per SIMD**, allocated in
+granules of 16, so `sgpr_limit = 800 // sgpr_per_wave`. SGPR is rarely the binding
+limit but can bite kernels with many buffer resources or scalar-heavy prologues.
+
+### Architecture differences at a glance
+
+| Arch | Wave | VGPR model | LDS/CU | Notes |
+|---|---|---|---|---|
+| gfx942 (CDNA3) | 64 | combined 512 (arch 256 + accum 256) / SIMD | 64 KB | MFMA; combined-pool occupancy |
+| gfx950 (CDNA4) | 64 | combined 512 (arch 256 + accum 256) / SIMD | 160 KB | + MFMA-scale / transpose loads; 2.5× LDS headroom |
+| gfx1250 | **32** | wave32 register file (per-wave counts differ) | 320 KB | wave32 accounting — a 32-lane wave; query per-kernel counts, don't assume the CDNA 512 rule |
+
+Because gfx1250 runs **wave32**, its per-wave VGPR/SGPR accounting differs from the
+wave64 CDNA parts — don't reuse the `512 // (arch+accum)` rule there. The
+occupancy *formula* (min over VGPR/LDS/SGPR, capped at the HW max) still holds;
+only the per-resource limits change. When in doubt, read the actual allocation
+back from the profiler rather than estimating.
+
+### Estimating and measuring
+
+Rough VGPR estimate for a wave64 FP8 tile:
 
 ```
 accumulators = m_repeat × num_acc_n × 4     # → accum_vgpr
@@ -280,15 +430,20 @@ B tile       = k_unroll × 2 × num_acc_n × 2 # → arch_vgpr
 A prefetch   ≈ 4 ; A tile regs = num_a_loads × 4 ; addressing ≈ 10–20
 ```
 
-Query the actual allocation from the rocprofv3 database:
+Query the real allocation (all three resources) from the rocprofv3 database:
 
 ```sql
-SELECT ks.KernelName, ki.arch_vgpr_count, ki.accum_vgpr_count
+SELECT ks.KernelName, ki.arch_vgpr_count, ki.accum_vgpr_count,
+       ki.sgpr_count, ki.lds_size
 FROM rocpd_kernel_dispatch kd
 JOIN rocpd_info_kernel_symbol ks ON kd.kernel_symbol_id = ks.id
 JOIN rocpd_info_kernel ki ON kd.kernel_id = ki.id
 WHERE ks.KernelName LIKE '%target_kernel%' LIMIT 5;
 ```
+
+`/kernel-trace-analysis` (§9) reports the computed occupancy and which resource is
+the binding limiter, so you know whether to cut VGPR, shrink LDS per block, or
+reduce SGPR pressure.
 
 **Do not** use `maxnreg` to force `accum_vgpr=0` — it spills MFMA results through
 arch_vgpr via `v_accvgpr_read` (measured ~4.5× regression).
