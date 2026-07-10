@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-07-10T03:36:17Z",
+ "updated": "2026-07-10T04:02:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29068040177,
+   "pr": 824,
+   "commit": "255ce6a1588c1741ba30d031b5c3c7594408107e",
+   "branch": "mxfp4-batched-preshuffle-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068040177",
+   "created_at": "2026-07-10T04:00:14Z",
+   "updated_at": "2026-07-10T04:00:15Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29067975809,
+   "pr": 824,
+   "commit": "e7212f0cdd69f31108654dd7176ecf43b54f38d1",
+   "branch": "mxfp4-batched-preshuffle-gemm",
+   "event": "pull_request",
+   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067975809",
+   "created_at": "2026-07-10T03:58:24Z",
+   "updated_at": "2026-07-10T04:00:16Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29067143990,
+   "pr": 819,
+   "commit": "3c28750559b7c838eae0494c1abd824dea6e0919",
+   "branch": "hyg/fmha_hd64_smallseq_opt",
+   "event": "pull_request",
+   "title": "Hyg/fmha hd64 smallseq opt",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990",
+   "created_at": "2026-07-10T03:34:36Z",
+   "updated_at": "2026-07-10T03:35:46Z",
+   "actor": "yanguahe",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T03:36:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990/job/86281147891"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T03:36:40Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990/job/86281147892"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T03:35:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990/job/86281147896"
+    }
+   ]
+  },
   {
    "run_id": 29064932080,
    "pr": 823,
@@ -68,19 +141,19 @@
    "branch": "mxfp4-batched-preshuffle-gemm",
    "event": "pull_request",
    "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064510474",
    "created_at": "2026-07-10T02:22:35Z",
-   "updated_at": "2026-07-10T03:33:56Z",
+   "updated_at": "2026-07-10T03:34:03Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T03:34:03Z",
+     "started_at": "2026-07-10T03:35:34Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064510474/job/86280963840"
     },
@@ -96,9 +169,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T03:34:03Z",
+     "started_at": "2026-07-10T03:35:29Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064510474/job/86280963849"
     }
@@ -1854,107 +1927,6 @@
    "created_at": "2026-07-07T11:37:38Z",
    "updated_at": "2026-07-07T11:38:55Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 28862922992,
-   "pr": null,
-   "commit": "a95fedec3f770a68b25bc112216d5adf99723811",
-   "branch": "pr/fix-fallback-locations",
-   "event": "pull_request",
-   "title": "[Fix] Always apply fallback IR locations",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862922992",
-   "created_at": "2026-07-07T11:32:17Z",
-   "updated_at": "2026-07-07T12:33:54Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-07T11:34:33Z",
-     "completed_at": "2026-07-07T12:18:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862922992/job/85605982089"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-07T11:34:42Z",
-     "completed_at": "2026-07-07T12:12:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862922992/job/85605982127"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T11:33:25Z",
-     "completed_at": "2026-07-07T12:33:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862922992/job/85605982169"
-    }
-   ]
-  },
-  {
-   "run_id": 28862730280,
-   "pr": null,
-   "commit": "406d69cb131e96a8325c0a8ee3ca3f029569499e",
-   "branch": "pr/fix-fallback-locations",
-   "event": "pull_request",
-   "title": "[Fix] Always apply fallback IR locations",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862730280",
-   "created_at": "2026-07-07T11:28:54Z",
-   "updated_at": "2026-07-07T11:32:35Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T11:29:46Z",
-     "completed_at": "2026-07-07T11:32:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862730280/job/85605282558"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T11:30:37Z",
-     "completed_at": "2026-07-07T11:32:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862730280/job/85605282578"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "cancelled",
-     "started_at": "2026-07-07T11:30:26Z",
-     "completed_at": "2026-07-07T11:32:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862730280/job/85605282595"
-    }
-   ]
-  },
-  {
-   "run_id": 28862453823,
-   "pr": null,
-   "commit": "0ca22714f1dae10878d69d3f699fcdea809c6676",
-   "branch": "pr/fix-fallback-locations",
-   "event": "pull_request",
-   "title": "[Fix] Always apply fallback IR locations",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28862453823",
-   "created_at": "2026-07-07T11:23:55Z",
-   "updated_at": "2026-07-07T11:25:37Z",
-   "actor": "sjfeng1999",
    "jobs": []
   }
  ]
