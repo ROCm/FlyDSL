@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T13:57:51Z",
+ "updated": "2026-07-10T14:14:24Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -25,37 +25,37 @@
    "branch": "add-gelu-tanh-moe-stage1",
    "event": "pull_request",
    "title": "[MoE] Add gelu_tanh activation to MoE stage1 GEMM kernels",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484",
    "created_at": "2026-07-10T13:44:31Z",
-   "updated_at": "2026-07-10T13:46:24Z",
+   "updated_at": "2026-07-10T14:08:39Z",
    "actor": "jonahbernard",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T13:46:24Z",
+     "started_at": "2026-07-10T13:56:51Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484/job/86376954461"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T13:46:24Z",
+     "started_at": "2026-07-10T13:59:57Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484/job/86376954477"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T13:46:24Z",
+     "started_at": "2026-07-10T14:08:38Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29097187484/job/86376954532"
     }
@@ -141,10 +141,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T13:31:47Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T13:56:05Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29096312917/job/86373804644"
     }
    ]
@@ -184,10 +184,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T12:51:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T14:07:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093863571/job/86365659746"
     }
    ]
@@ -199,13 +199,41 @@
    "branch": "worktree-docs-api-refresh",
    "event": "pull_request",
    "title": "[Docs] Refresh API docs, add kernel tuning guide, fix kernel-authoring skills",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814",
    "created_at": "2026-07-10T12:47:21Z",
-   "updated_at": "2026-07-10T12:47:22Z",
+   "updated_at": "2026-07-10T14:12:40Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T14:12:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814/job/86382546043"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T14:12:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814/job/86382546045"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-10T14:12:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814/job/86382546076"
+    }
+   ]
   },
   {
    "run_id": 29093120509,
@@ -214,11 +242,11 @@
    "branch": "worktree-docs-api-refresh",
    "event": "pull_request",
    "title": "[Docs] Refresh API docs, add kernel tuning guide, fix kernel-authoring skills",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093120509",
    "created_at": "2026-07-10T12:36:36Z",
-   "updated_at": "2026-07-10T12:38:43Z",
+   "updated_at": "2026-07-10T14:11:46Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -233,19 +261,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T12:38:14Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T13:56:28Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093120509/job/86363139466"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T12:38:36Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T14:11:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093120509/job/86363139493"
     }
    ]
@@ -285,10 +313,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T12:52:15Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T14:07:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29090473846/job/86365750160"
     }
    ]
