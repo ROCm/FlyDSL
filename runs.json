@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-10T20:33:43Z",
+ "updated": "2026-07-10T20:51:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "feat/profile-tools",
    "event": "pull_request",
    "title": "[Feature] Extract reusable event-based benchmarking helper",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29102823936",
    "created_at": "2026-07-10T15:13:07Z",
-   "updated_at": "2026-07-10T15:14:26Z",
+   "updated_at": "2026-07-10T20:47:24Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -29,9 +29,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-10T15:14:26Z",
+     "started_at": "2026-07-10T20:47:24Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29102823936/job/86396035914"
     },
@@ -63,10 +63,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T19:59:52Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T20:41:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29100981537/job/86452024490"
     },
     {
@@ -343,11 +343,11 @@
    "branch": "worktree-docs-api-refresh",
    "event": "pull_request",
    "title": "[Docs] Refresh API docs, add kernel tuning guide, fix kernel-authoring skills",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814",
    "created_at": "2026-07-10T12:47:21Z",
-   "updated_at": "2026-07-10T14:12:45Z",
+   "updated_at": "2026-07-10T20:46:46Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -362,10 +362,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-10T14:12:45Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-10T20:31:51Z",
+     "completed_at": "2026-07-10T20:46:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814/job/86382546045"
     },
     {
