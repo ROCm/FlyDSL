@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-10T12:09:30Z",
+ "updated": "2026-07-10T12:42:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29093120509,
+   "pr": 827,
+   "commit": "309d835043d52ab981da56749c514594e9f5847b",
+   "branch": "worktree-docs-api-refresh",
+   "event": "pull_request",
+   "title": "[Docs] Refresh API docs, add kernel tuning guide, fix kernel-authoring skills",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093120509",
+   "created_at": "2026-07-10T12:36:36Z",
+   "updated_at": "2026-07-10T12:38:43Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:38:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093120509/job/86363139443"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:38:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093120509/job/86363139466"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-10T12:38:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093120509/job/86363139493"
+    }
+   ]
+  },
   {
    "run_id": 29090473846,
    "pr": 812,
@@ -85,20 +128,20 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29088873470",
    "created_at": "2026-07-10T11:15:32Z",
-   "updated_at": "2026-07-10T11:16:40Z",
+   "updated_at": "2026-07-10T12:23:39Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-10T11:16:40Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-10T12:23:38Z",
+     "completed_at": "2026-07-10T12:38:03Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29088873470/job/86349309785"
     },
     {
@@ -186,38 +229,38 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29080154653",
    "created_at": "2026-07-10T08:33:32Z",
-   "updated_at": "2026-07-10T11:13:16Z",
+   "updated_at": "2026-07-10T12:39:39Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-10T11:14:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T12:10:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29080154653/job/86348734136"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T11:14:41Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T12:39:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29080154653/job/86348734144"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-10T11:13:16Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-10T12:09:21Z",
+     "completed_at": "2026-07-10T12:22:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29080154653/job/86348734171"
     }
    ]
@@ -1828,21 +1871,6 @@
    "created_at": "2026-07-08T16:48:26Z",
    "updated_at": "2026-07-08T23:18:45Z",
    "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28959515817,
-   "pr": null,
-   "commit": "357a5e27887f2e577a345233f188c10e9e1a9c93",
-   "branch": "hyg/fmha_hd64_smallseq_opt",
-   "event": "pull_request",
-   "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28959515817",
-   "created_at": "2026-07-08T16:40:27Z",
-   "updated_at": "2026-07-08T16:42:00Z",
-   "actor": "yanguahe",
    "jobs": []
   }
  ]
