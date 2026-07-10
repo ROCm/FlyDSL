@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-10T08:09:12Z",
+ "updated": "2026-07-10T08:28:16Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29079700356,
+   "pr": 825,
+   "commit": "9f65de8ebdda8a00274b134dc7d6a5ddd8f794fd",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29079700356",
+   "created_at": "2026-07-10T08:24:58Z",
+   "updated_at": "2026-07-10T08:24:59Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 29078750386,
    "pr": 825,
@@ -10,11 +25,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29078750386",
    "created_at": "2026-07-10T08:07:01Z",
-   "updated_at": "2026-07-10T08:07:02Z",
+   "updated_at": "2026-07-10T08:25:00Z",
    "actor": "fsx950223",
    "jobs": []
   },
@@ -132,10 +147,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T07:10:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T08:23:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075759881/job/86307024373"
     },
     {
@@ -166,10 +181,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T07:06:54Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T08:23:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075238714/job/86305517913"
     },
     {
@@ -227,10 +242,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-10T07:06:37Z",
-     "completed_at": null,
+     "completed_at": "2026-07-10T08:23:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075189097/job/86305261235"
     }
    ]
@@ -1829,49 +1844,6 @@
    "updated_at": "2026-07-08T06:19:58Z",
    "actor": "solinzby1",
    "jobs": []
-  },
-  {
-   "run_id": 28920497901,
-   "pr": 812,
-   "commit": "3035bb8ff6b949003c8f575275c0553326dca718",
-   "branch": "xudoyuan/kernels-smem-migration",
-   "event": "pull_request",
-   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28920497901",
-   "created_at": "2026-07-08T05:44:44Z",
-   "updated_at": "2026-07-08T20:31:21Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-08T05:50:09Z",
-     "completed_at": "2026-07-08T07:02:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28920497901/job/85796630200"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-08T20:16:14Z",
-     "completed_at": "2026-07-08T20:31:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28920497901/job/85796630207"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-08T05:46:27Z",
-     "completed_at": "2026-07-08T06:24:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/28920497901/job/85796630216"
-    }
-   ]
   }
  ]
 }
