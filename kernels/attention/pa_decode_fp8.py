@@ -82,9 +82,6 @@ _PACKED_FP8_QUERY_DTYPES = tuple(
 )
 
 
-
-
-
 def _flatten_v_results(v_results, vhe_loop: int = 2):
     """v_results[vt][vhe] = i64x2 → flat list of 2 * VTLOOP * vhe_loop scalar i64
     values, in the same order ``_unflatten_v_results`` expects.  Used to carry
@@ -1427,7 +1424,9 @@ def compile_pa_decode_ps(
             for td in range_constexpr(TLOOP):
                 row = _kv_tok_thread_base + arith.constant(td * MFMA_N, type=T.i32)
                 k_scale_vecs.append(lds_load_vec(scale_lds_f32, row, fx.Float32, 4).ir_value())
-                v_scale_vecs.append(lds_load_vec(scale_lds_f32, fx.Int32(LDS_SCALE_V_OFFSET) + row, fx.Float32, 4).ir_value())
+                v_scale_vecs.append(
+                    lds_load_vec(scale_lds_f32, fx.Int32(LDS_SCALE_V_OFFSET) + row, fx.Float32, 4).ir_value()
+                )
             return k_scale_vecs, v_scale_vecs
 
         # Pre-load the FIRST sub-partition's K so the loop body can issue the
