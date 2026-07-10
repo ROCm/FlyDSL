@@ -1167,9 +1167,6 @@ def parse_arg_and_run_test(sample_rate0: float = None, *, output_tag: str = TEST
     results_df.to_csv(output_file, index=False)
     print(f"\nResults saved to {output_file}")
     print(f"\nSummary:\n{results_df}")
-    # No aggregate error check needed here: summarize_comparison now raises via
-    # torch.testing.assert_close on the first out-of-tolerance case, so reaching
-    # this point means every case in results_df already passed.
     print("\nAll PS-only tests passed!")
 
 
