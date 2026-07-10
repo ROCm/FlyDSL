@@ -50,6 +50,7 @@ from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.common import dpp_utils
 from kernels.common.kernels_common import get_warp_size
+from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
     exp2_f32_fast,
     global_load_i64x2,
@@ -1291,7 +1292,8 @@ def get_pa_metadata_v1(
     work_info_flat = work_info.view(-1)
     reduce_final_map_flat = reduce_final_map.view(-1)
 
-    compiled["launch"](
+    _run_compiled(
+        compiled["launch"],
         seqlens_qo_indptr,
         pages_kv_indptr,
         context_lens,
@@ -1301,6 +1303,7 @@ def get_pa_metadata_v1(
         reduce_final_map_flat,
         reduce_partial_map,
         num_batches,
+        fx.Stream(None),
     )
 
 
@@ -2257,10 +2260,8 @@ def pa_ps_reduce(
         head_size=int(head_size),
         output_dtype_str=out_dtype_str,
     )
-    kwargs = {}
-    if stream is not None:
-        kwargs["stream"] = stream
-    compiled["launch"](
+    _run_compiled(
+        compiled["launch"],
         final_output,
         partial_output,
         partial_lse,
@@ -2272,5 +2273,5 @@ def pa_ps_reduce(
         stride_po_row,
         stride_pl_row,
         num_groups,
-        **kwargs,
+        stream if stream is not None else fx.Stream(None),
     )
