@@ -214,8 +214,8 @@ bx = gpu.block_id("x")
 by = gpu.block_id("y")
 
 i32_m: fx.Int32
-c_m = fx.Index(i32_m)
-c4 = fx.Index(4)
+c_m = fx.Int64(i32_m)
+c4 = fx.Int64(4)
 zero_f = fx.Float32(0.0)
 
 layout = fx.make_layout((4, 64), (64, 1))
@@ -231,7 +231,7 @@ rsrc = buffer_ops.create_buffer_resource(tensor, max_size=True)
 word = buffer_ops.buffer_load(rsrc, fx.Int32(offset), vec_width=4, dtype=fx.Int32)
 ```
 
-Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, and raw `vector.*` helpers. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Index`/`fx.Int32`/`fx.Float32`, and `fx.Vector` for new code.
+Older code may use `gpu.thread_idx.x`, `gpu.block_idx.x`, `arith.constant(...)`, `T.i32`, and raw `vector.*` helpers. Keep those when editing existing code that already uses them heavily, but prefer `gpu.thread_id/block_id`, `fx.Int64`/`fx.Int32`/`fx.Float32`, and `fx.Vector` for new code.
 
 ### Parameter Types
 | Type | Description | At host boundary |
@@ -275,9 +275,9 @@ Use Python/DSL operators for runtime SSA comparisons. The AST rewriter lowers dy
 
 ```python
 tid = gpu.thread_id("x")
-lane = tid % fx.Index(64)
-c_zero = fx.Index(0)
-c_limit = fx.Index(8)
+lane = tid % fx.Int64(64)
+c_zero = fx.Int64(0)
+c_limit = fx.Int64(8)
 
 # Preferred: readable DSL comparisons
 if lane == c_zero:
@@ -383,10 +383,10 @@ tile_0 = prefetch(0)
 init_state = [acc_init, tile_0_flat_val1, tile_0_flat_val2, ...]
 
 # Runtime loop with loop-carried state
-# Use fx.Index(...) bounds so the AST rewriter does not treat this as a Python unrolled range.
-_start = fx.Index(0)
-_stop = fx.Index(N - 1)
-_step = fx.Index(1)
+# Use typed DSL integer bounds (fx.Int64) so the AST rewriter does not treat this as a Python unrolled range.
+_start = fx.Int64(0)
+_stop = fx.Int64(N - 1)
+_step = fx.Int64(1)
 for iv, state in range(_start, _stop, _step, init=init_state):
     acc_in = state[0]
     tile_in = state[1:]
@@ -412,7 +412,7 @@ compute(acc_final, tile_final)
 
 **Three critical pitfalls (all verified by debugging):**
 
-1. **Loop bounds must be DSL index values, NOT Python ints.** If you write `range(0, 15, 1, init=...)`, the AST rewriter treats constant bounds as a Python `range` and unrolls the loop — silently ignoring `init=`. Use `fx.Index(0)`, `fx.Index(15)`, `fx.Index(1)` instead.
+1. **Loop bounds must be a typed DSL integer such as `fx.Int64(...)`, NOT a plain Python int.** A plain int makes the AST rewriter unroll the loop and silently ignore `init=`. If you write `range(0, 15, 1, init=...)`, the AST rewriter treats the constant bounds as a Python `range` and unrolls; only plain Python-int bounds are unrolled, so a typed bound still produces a runtime `scf.for`. Use `fx.Int64(0)`, `fx.Int64(15)`, `fx.Int64(1)` instead.
 
 2. **Prefer internal types, but unwrap at hard boundaries.** Most `range(..., init=...)` uses accept DSL numeric/vector values. If a lower-level helper explicitly expects raw `ir.Value`, unwrap with `v.ir_value()` / `_raw(v)` at that boundary only.
 
@@ -424,7 +424,7 @@ compute(acc_final, tile_final)
 
 ### Arithmetic Operations
 ```python
-c42 = fx.Index(42)                              # index type constant (preferred)
+c42 = fx.Int64(42)                              # typed integer constant (preferred)
 c3_14 = fx.Float32(3.14)                        # f32 constant (preferred)
 mask = fx.Int32(0xFF)                            # i32 constant (preferred)
 
@@ -854,7 +854,7 @@ Pass raw `torch.Tensor` objects instead.
 
 ### Common Issues
 
-1. **Constants/casts**: Prefer `fx.Int32(...)`, `fx.Int64(...)`, `fx.Index(...)`, and `fx.Float32(...)`. Use `arith.constant(...)` only at low-level boundaries.
+1. **Constants/casts**: Prefer `fx.Int32(...)`, `fx.Int64(...)`, and `fx.Float32(...)` (`fx.Index(...)` is being deprecated in favor of `fx.Int64(...)`). Use `arith.constant(...)` only at low-level boundaries.
 
 2. **`buffer_ops.buffer_load` offset**: The `offset` parameter is in ELEMENTS, not bytes.
 

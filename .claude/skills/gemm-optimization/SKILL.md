@@ -17,7 +17,7 @@ allowed-tools: Read Edit Bash Grep Glob Agent
 Comprehensive guide to writing and optimizing high-performance GEMM kernels in
 FlyDSL on AMD CDNA GPUs (MI300X gfx942, MI350 gfx950).
 
-Based on the production `kernels/preshuffle_gemm.py` implementation.
+Based on the production `kernels/gemm/preshuffle_gemm.py` implementation.
 
 ---
 
@@ -104,14 +104,29 @@ Buffer PING: [   Load tile_k=1  ] [Compute tile_k=1] [   Load tile_k=3  ] ...
 
 ### 2.2 FlyDSL Implementation
 
-```python
-# Two independent SmemAllocators (separate LDS regions)
-allocator_pong = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
-allocator_ping = SmemAllocator(None, arch="gfx942", global_sym_name="smem1")
+Declare both A buffers as `fx.Array` fields of an `@fx.struct` and allocate them
+with `fx.SharedAllocator` (the current LDS API — see `kernels/gemm/preshuffle_gemm.py`,
+where `a0`/`a1` are the pong/ping A buffers). In the default `static=True` mode the
+compiler sizes the static LDS globals for you.
 
-lds_a_pong = allocator_pong.allocate_array(T.i8, buffer_size_bytes)
-lds_a_ping = allocator_ping.allocate_array(T.i8, buffer_size_bytes)
+```python
+a_lds_elems = tile_m * tile_k  # elements per A buffer
+
+@fx.struct
+class SharedStorage:
+    a0: fx.Array[layout_elem, a_lds_elems, 16]  # PONG buffer
+    if lds_stage == 2:
+        a1: fx.Array[layout_elem, a_lds_elems, 16]  # PING buffer
+
+@flyc.kernel
+def kernel_gemm(...):
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_a_pong = lds.a0.view(fx.make_layout((tile_m, tile_k), (tile_k, 1)))
+    lds_a_ping = lds.a1.view(fx.make_layout((tile_m, tile_k), (tile_k, 1)))
 ```
+
+The legacy `flydsl.utils.smem_allocator.SmemAllocator` path remains for un-migrated
+kernels but is not recommended for new code.
 
 ### 2.3 Main Loop Structure (2-Stage)
 

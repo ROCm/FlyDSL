@@ -332,7 +332,9 @@ for i in range(runtime_N):
     ...
 
 # Loop with carried state (software pipelining)
-start, stop, step = fx.Index(0), fx.Index(N - 1), fx.Index(1)
+# Bounds must be typed DSL integers (fx.Int64), NOT plain Python ints — a plain
+# int makes the AST rewriter unroll the loop and silently ignore init=.
+start, stop, step = fx.Int64(0), fx.Int64(N - 1), fx.Int64(1)
 for iv, state in range(start, stop, step, init=[acc_init, ...]):
     acc = state[0]
     # ... compute ...
