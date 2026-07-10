@@ -47,13 +47,18 @@ from kernels.comm.flydsl_dispatch_combine_intranode_op import (
 try:
     import aiter
     from aiter import dtypes as _adt
-    from aiter.ops.quant import per_1x32_mx_quant_hip
-    _HAS_AITER_QUANT = True
 except Exception:  # noqa: BLE001
     aiter = None
     _adt = None
-    per_1x32_mx_quant_hip = None
-    _HAS_AITER_QUANT = False
+
+
+def _mx_quant():
+    """Lazy handle to aiter's MXFP8/FP4 activation quant (a8w4/a4w4 only). Imported at the call
+    site, NOT at module load: some aiter branches (moe_v2_api / customer LQQ) ship the smoothquant
+    path but not ``per_1x32_mx_quant_hip``, and the a8w4smooth/w8a8smooth delivery path never needs
+    it -- so importing this module must not depend on it being present."""
+    from aiter.ops.quant import per_1x32_mx_quant_hip
+    return per_1x32_mx_quant_hip
 
 
 __all__ = ["MegaMoE", "MegaMoeStage1", "MegaMoeStage2", "Stage1Output",
@@ -90,8 +95,71 @@ def _mega_default_tile(inter_dim):
 
 
 _MEGA_TUNING_DIR = Path(__file__).resolve().parent.parent / "comm" / "mega_moe_tuning_config"
-# megastage1 weights are always w4(fp4); the JSON ``dtype`` is the ACTIVATION quant.
-_MEGA_QUANT_TO_DTYPE = {"a4w4": "fp4", "a8w4": "fp8_ocp"}
+# megastage1 weights are always w4(fp4)/int8; the JSON ``dtype`` is the ACTIVATION quant.
+# int8 covers a8w4smooth (packed-int4 W) and w8a8smooth (full int8 W) -- both run int8 activations
+# through the same int8 K64 GEMM, so they share one "int8" tune-table dtype.
+_MEGA_QUANT_TO_DTYPE = {"a4w4": "fp4", "a8w4": "fp8_ocp", "a8w4smooth": "int8", "w8a8smooth": "int8"}
+
+
+def _convert_aiter_lqq_to_megamoe(u4, scale_u8, zero_u8):
+    """Host-side (load-time) re-layout of an aiter LQQ ``lqq_1x64_quant`` RAW output into the
+    megamoe a8w4smooth weight layout. The dequant MATH is identical on both sides --
+    ``int8 = (u4*scale_u8 + zero_u8) ^ 0x80`` per 64-K group -- so ONLY the byte layout changes:
+
+      * weight: base(16,16) int4 preshuffle -> K64 interleave -> 4-bit pack (mirrors
+        ``shuffle_weight(use_int4=True, interleave_k64=True)`` + megamoe nibble pack).
+      * qparams: aiter ``[E, rows, K//64]`` u8 -> megamoe ``[E, nb, g256, 16]`` int32, packing the
+        four K64 groups of a 256-K tile into one dword (little-endian byte order).
+
+    Args:
+        u4:       ``[E, rows, K]`` uint8 (values 0..15) -- LQQ 4-bit weight, pre-shuffle.
+        scale_u8: ``[E, rows, K//64]`` uint8 -- per-64-K scale.
+        zero_u8:  ``[E, rows, K//64]`` uint8 -- per-64-K zero point.
+
+    Returns:
+        ``(w_packed_i8, qscale_i32, qzero_i32)`` ready to feed MegaMoE's a8w4smooth path as
+        ``w1``/``w1_lqq_scale``/``w1_lqq_zero`` (or the w2 trio).
+    """
+    if u4.dim() != 3:
+        raise ValueError(f"aiter LQQ u4 must be [E, rows, K], got {tuple(u4.shape)}")
+    E, M, K = u4.shape
+    if K % 256 != 0 or M % 16 != 0:
+        raise ValueError(f"aiter LQQ convert needs K%256==0 and rows%16==0, got rows={M}, K={K}")
+    nb, g256 = M // 16, K // 256
+    dev = u4.device
+    # ---- weight: base(16,16) int4 preshuffle (inner K=32, BK=32) + K64 interleave ----
+    # Faithful to tests.utils.shuffle_weight(layout=(16,16), use_int4=True, interleave_k64=True).
+    x = (u4.view(torch.uint8) & 0xF).to(torch.uint8)
+    BN, Kinner, BKb = 16, 32, 32
+    xs = x.view(E, M // BN, BN, K // BKb, BKb // Kinner, Kinner).permute(0, 1, 3, 4, 2, 5).contiguous().view(E, M, K)
+    x128 = xs.view(E, M, K // 128, 128)
+    y128 = torch.empty_like(x128)
+    y128[..., 0::2] = x128[..., :64]
+    y128[..., 1::2] = x128[..., 64:]
+    xs = y128.view(E, M, K)
+    # nibble pack: [v0..v7] -> b0=(v1<<4)|v0, ...
+    u = (xs & 0xF).reshape(-1, 8)
+    wp = torch.empty((u.shape[0], 4), device=dev, dtype=torch.uint8)
+    wp[:, 0] = u[:, 0] | (u[:, 1] << 4)
+    wp[:, 1] = u[:, 2] | (u[:, 3] << 4)
+    wp[:, 2] = u[:, 4] | (u[:, 5] << 4)
+    wp[:, 3] = u[:, 6] | (u[:, 7] << 4)
+    w_packed = wp.view(-1).view(torch.int8).contiguous()
+
+    # ---- qparams: [E, M, K//64] u8 -> [E, nb, g256, 16] int32 (4 K64 groups packed LE) ----
+    def _to_i32(q):
+        q5 = q.view(E, nb, 16, g256, 4).permute(0, 1, 3, 2, 4).contiguous().to(torch.int32)
+        return (q5[..., 0] | (q5[..., 1] << 8) | (q5[..., 2] << 16) | (q5[..., 3] << 24)).contiguous()
+
+    return w_packed, _to_i32(scale_u8), _to_i32(zero_u8)
+
+
+def _as_i32_contig(t):
+    """Contiguous int32 view of a packed4 LQQ qparam tensor. The megamoe qparams are already
+    int32-sized (four K64 bytes packed per dword); reinterpret to int32 only if a differently
+    typed (e.g. uint8) tensor was passed."""
+    t = t.contiguous()
+    return t if t.dtype == torch.int32 else t.view(torch.int32)
 
 
 def _detect_gpu_model_name(device_index=0):
@@ -355,6 +423,9 @@ class MegaMoeStage2:
         doweight_fused: bool = True,
         gemm2_tile_table: dict | None = None,
         force_mode: Optional[str] = None,
+        # a8w4smooth (a_dtype='int8'): packed4 W2 qscale/qzero (this rank's LOCAL epr experts).
+        w2_lqq_scale: Optional[torch.Tensor] = None,
+        w2_lqq_zero: Optional[torch.Tensor] = None,
     ):
         # force_mode is accepted for back-compat only (some callers pass
         # "stage1_only"); run() always uses the fused stage1-only path.
@@ -376,6 +447,19 @@ class MegaMoeStage2:
         self.b_nt        = b_nt
         self.a_dtype     = a_dtype
         self.b_dtype     = b_dtype
+        self._is_int8    = (a_dtype == "int8")
+        # w8a8smooth: FULL int8 W2 (b_dtype='int8'), per-output-row f32 scale, NO packed4 LQQ
+        # qscale/qzero (gemm2 is_int8_full B-loader). a8w4smooth uses b_dtype='int4' + packed4 qparams.
+        self._is_w8a8    = self._is_int8 and (b_dtype == "int8")
+        # a8w4smooth: packed4 W2 qscale/qzero addresses for the fused gemm2's in-kernel int4->int8
+        # dequant. int32-viewed contiguous (kernel reads via create_buffer_resource_from_addr).
+        self._qs_w2 = None
+        self._qz_w2 = None
+        if self._is_int8 and not self._is_w8a8:
+            assert w2_lqq_scale is not None and w2_lqq_zero is not None, (
+                "MegaMoeStage2(a8w4smooth) requires w2_lqq_scale/w2_lqq_zero (packed4 qparams)")
+            self._qs_w2 = _as_i32_contig(w2_lqq_scale)
+            self._qz_w2 = _as_i32_contig(w2_lqq_zero)
         self.xcd_swizzle = xcd_swizzle
         self.use_token_flag_sync = bool(use_token_flag_sync)
         # Apply routing weights in the GEMM2 epilogue; combine_no_stage1 reduces
@@ -452,8 +536,9 @@ class MegaMoeStage2:
         Per-bucket ``persist_m``/``b_nt``/``xcd_swizzle`` override the ctor default only
         when present in the table row; tile falls back to the ctor tile with no table.
         The chosen tile_m is always clamped to a divisor of sort_block_m."""
+        _tk_force = 256 if self._is_int8 else None   # int8 gemm2 is K64-packed -> tile_k MUST be 256
         if not self._tile_table or run_tokens is None:
-            return (self._clamp_tile_m(self.tile_m), self.tile_n, self.tile_k,
+            return (self._clamp_tile_m(self.tile_m), self.tile_n, (_tk_force or self.tile_k),
                     self.persist_m, self.b_nt, self.xcd_swizzle)
         keys = sorted(self._tile_table)
         b = self._next_pow2(run_tokens)
@@ -466,7 +551,7 @@ class MegaMoeStage2:
             b = ge[0] if ge else keys[-1]
         row = self._tile_table[b]
         return (
-            self._clamp_tile_m(row["tile_m"]), int(row["tile_n"]), int(row["tile_k"]),
+            self._clamp_tile_m(row["tile_m"]), int(row["tile_n"]), (_tk_force or int(row["tile_k"])),
             int(row.get("persist_m", self.persist_m)),
             int(row.get("b_nt", self.b_nt)),
             int(row.get("xcd_swizzle", self.xcd_swizzle)),
@@ -650,6 +735,14 @@ class MegaMoeStage2:
             comb_op._fx_p2p_comb_flag,
             comb_op._fx_out_total_recv,
         )
+        # a8w4smooth (int8): the fused gemm2 launcher takes trailing packed4 W2 qscale/qzero addresses
+        # (after the i32 shape scalars, before the stream) for the in-kernel int4->int8 B-dequant.
+        # w8a8smooth (FULL int8 W2): no LQQ qparams -> pass 0/0 (gemm2 is_int8_full skips them).
+        _qp = ()
+        if self._is_int8:
+            _qs2 = fx.Int64(self._qs_w2.data_ptr()) if self._qs_w2 is not None else fx.Int64(0)
+            _qz2 = fx.Int64(self._qz_w2.data_ptr()) if self._qz_w2 is not None else fx.Int64(0)
+            _qp = (_qs2, _qz2)
         compiled = self._compiled_by_tile.get(cfg)
         if compiled is None:
             compiled = flyc.compile(
@@ -657,6 +750,7 @@ class MegaMoeStage2:
                 *common_args,
                 fx.Int32(tokens_in), fx.Int32(n_in), fx.Int32(k_in),
                 fx.Int32(size_expert_ids),
+                *_qp,
                 s_fx,
             )
             self._compiled_by_tile[cfg] = compiled
@@ -664,6 +758,7 @@ class MegaMoeStage2:
             compiled(
                 *common_args,
                 tokens_in, n_in, k_in, size_expert_ids,
+                *_qp,
                 s_fx,
             )
 
@@ -685,17 +780,33 @@ def _resolve_stage1_config(*, model_dim, inter_dim, experts, topk, quant,
     """Resolve the fused stage-1 GEMM tile + layout (compact) BEFORE the combine op
     allocates its group-major buffers (which need unit_size/compact). Returns a
     dict of resolved values consumed by both the combine op (gm_*) and stage-1."""
-    assert quant in ("a4w4", "a8w4")
+    assert quant in ("a4w4", "a8w4", "a8w4smooth", "w8a8smooth")
     if experts % world_size != 0:
         raise ValueError(f"experts={experts} must divide world_size={world_size}")
     epr = experts // world_size
-    data_type = torch.float8_e4m3fn if quant == "a8w4" else torch.float4_e2m1fn_x2
-    a_dtype = "fp8" if quant == "a8w4" else "fp4"
-    scale_dim = model_dim // 32
+    if quant in ("a8w4smooth", "w8a8smooth"):
+        # int8 activations + packed-int4 (a8w4smooth) or FULL int8 (w8a8smooth) weights. The
+        # group-major dispatch payload is int8 (row_bytes = model_dim, like fp8) and the activation
+        # scale is ONE f32 per (token,slot) (scale_dim=1, type_size=4 -> the comb_op sizes scale_em
+        # as int32-per-row). tile_k is pinned to 256 (K64 packs / kpack=16), matching the standalone
+        # a8w4 gemm1. The activation datapath is IDENTICAL; only the weight kind differs downstream.
+        data_type = torch.int8
+        a_dtype = "int8"
+        scale_dim = 1
+        tile_k = 256
+    else:
+        data_type = torch.float8_e4m3fn if quant == "a8w4" else torch.float4_e2m1fn_x2
+        a_dtype = "fp8" if quant == "a8w4" else "fp4"
+        scale_dim = model_dim // 32
 
-    # Two layouts, switched purely by buffer size (no env): fixedslot below the
-    # 4GB wrap, compact above it.
-    _row_b = int(model_dim) if quant == "a8w4" else (int(model_dim) // 2)
+    # Two layouts, switched purely by buffer size (no env, not customer-visible): fixedslot below
+    # the 3GB wrap, compact above it. a8w4smooth/w8a8smooth use the SAME size-based rule as the fp
+    # a8w4/a4w4 path (unified) -- so DECODE (small max_tok_per_rank -> buffer <3GB) auto-picks the
+    # fixedslot dispatch (low fixed overhead, ~20% faster at small batch) and PREFILL/large-batch
+    # (>= ~2181 tok/rank -> buffer >=3GB) auto-picks compact. fixedslot was verified bit-for-bit
+    # correctness-equivalent to compact at EP1 AND EP8 (identical relL2, deterministic across
+    # launches; the old P-static ll_count race no longer manifests).
+    _row_b = int(model_dim) if quant in ("a8w4", "a8w4smooth", "w8a8smooth") else (int(model_dim) // 2)
     _max_buf = epr * world_size * int(max_tok_per_rank) * max(_row_b, int(inter_dim) * 2)
     compact = _max_buf >= 3_000_000_000
 
@@ -716,6 +827,8 @@ def _resolve_stage1_config(*, model_dim, inter_dim, experts, topk, quant,
         _tm_t, _tn_t = _mega_default_tile(int(inter_dim))
         unit_size = int(unit_size) if int(unit_size) > 0 else _tm_t
         tile_n = int(tile_n) if int(tile_n) > 0 else _tn_t
+    if quant in ("a8w4smooth", "w8a8smooth"):
+        tile_k = 256   # int8 gemm1 is K64-packed (kpack=16) -> tile_k MUST be 256, whatever the JSON says
     unit_size = int(unit_size)
     sort_block_m = max(32, unit_size)
 
@@ -755,8 +868,18 @@ class MegaMoeStage1:
 
     def __init__(self, *, comm_op, cfg, rank, world_size, model_dim, inter_dim,
                  experts, topk, quant, w1, w1_scale, max_tok_per_rank,
+                 w1_lqq_scale=None, w1_lqq_zero=None, fc1_smooth=None,
                  scheme="fixedslot", warp_num_per_block=4, out_dtype="auto"):
-        assert quant in ("a4w4", "a8w4")
+        assert quant in ("a4w4", "a8w4", "a8w4smooth", "w8a8smooth")
+        # a8w4smooth (LQQ int8 x packed-int4 + smoothquant): int8 activations, packed-int4 weights,
+        # per-(token,slot) f32 activation scale (vs mxscale's fp8/fp4 + e8m0). The send-side front
+        # smoothquant emits per-slot int8; the dispatch prologue scatters it PER-SLOT (see the
+        # is_int8 branch in mega_moe_gemm1).
+        # w8a8smooth: int8 activations x FULL int8 W1 (per-output-row f32 scale, NO packed-int4 / NO
+        # LQQ qscale-qzero). Shares a8w4smooth's int8-activation dispatch/smoothquant; only the weight
+        # datapath differs (b_dtype='int8' -> gemm1's is_int8_full B-loader).
+        self._is_int8 = quant in ("a8w4smooth", "w8a8smooth")
+        self._is_w8a8 = (quant == "w8a8smooth")
         assert scheme == "fixedslot", f"scheme={scheme!r}: only 'fixedslot' supported (handshake removed)"
         assert out_dtype in ("auto", "f16", "fp8", "fp4"), out_dtype
         self.scheme = scheme
@@ -773,8 +896,12 @@ class MegaMoeStage1:
         self.dev = torch.device("cuda", rank)
         self.data_type = cfg["data_type"]
         self.a_dtype = cfg["a_dtype"]
+        if self._is_int8:
+            self.a_dtype = "int8"        # activations are int8 (front smoothquant output)
         if out_dtype == "auto":
-            out_dtype = self.a_dtype
+            # int8's a_dtype isn't a valid OUTPUT dtype -> stage-1 a2 is f16 (bf16 handoff); the
+            # fused-stage2 int8 requant (T2.7) reads it back. mxscale keeps out==a_dtype.
+            out_dtype = "f16" if self._is_int8 else self.a_dtype
         self.scale_dim = cfg["scale_dim"]
         self.compact = cfg["compact"]
         self.unit_size = int(cfg["unit_size"])
@@ -790,6 +917,30 @@ class MegaMoeStage1:
         # w1/w1_scale are this rank's `epr` expert rows ONLY (ATOM local convention).
         self.w1 = w1.contiguous()
         self.w1_scale = w1_scale.contiguous()
+        # a8w4smooth: packed4 qscale/qzero (this rank's LOCAL epr experts) for the in-kernel
+        # int4->int8 B-dequant, plus the GLOBAL per-expert smooth (the SEND-side front quant sees
+        # every expert a local token may route to, so smooth must cover ALL experts, not just epr).
+        if self._is_int8:
+            assert fc1_smooth is not None, (
+                "a8w4smooth/w8a8smooth fused stage-1 requires fc1_smooth (GLOBAL [experts, model_dim])")
+            if self._is_w8a8:
+                # FULL int8 W1: no LQQ packed4 qscale/qzero (gemm1 is_int8_full B-loader).
+                self._qs_w = None
+                self._qz_w = None
+            else:
+                assert w1_lqq_scale is not None and w1_lqq_zero is not None, (
+                    "a8w4smooth fused stage-1 requires w1_lqq_scale/w1_lqq_zero (packed4 qparams)")
+                self._qs_w = _as_i32_contig(w1_lqq_scale)
+                self._qz_w = _as_i32_contig(w1_lqq_zero)
+            self._fc1_smooth = fc1_smooth.to(torch.float32).contiguous()
+            # Front smoothquant scratch (token-major per-slot): row = src_tok*topk + slot == _wk,
+            # exactly the index the dispatch prologue reads for the int8 payload + f32 scale.
+            # Pre-allocated once (fixed mtpr) so forward is allocation-free on this path.
+            self._fq_i8 = torch.zeros((self.mtpr * topk, model_dim), dtype=torch.int8, device=self.dev)
+            self._fq_scale = torch.zeros((self.mtpr * topk,), dtype=torch.float32, device=self.dev)
+            # Cache the aiter front-smoothquant fn once (no per-forward import in the hot loop).
+            from aiter.ops.quant import smooth_per_token_scaled_quant as _sptsq
+            self._sptsq = _sptsq
 
         # group-major dispatch buffers owned by the combine op.
         self.comm_op = comm_op
@@ -803,14 +954,20 @@ class MegaMoeStage1:
         # total_recv is UNIFIED with combine (op.total_recv aliases comb_op.total_recv).
         self._trecv_buf = None
 
+        # a8w4smooth (int8) datapath knobs: packed-int4 B, tile_k=256 (K64 packs, kpack=16), and a
+        # per-(token,slot) f32 activation scale (fuse_scale_dim=1, type_size=4) vs mxscale's e8m0.
+        _b_dtype = ("int8" if self._is_w8a8 else "int4") if self._is_int8 else "fp4"
+        _tile_k_c = 256 if self._is_int8 else tile_k
+        _fuse_sdim = 1 if self._is_int8 else self.scale_dim
+        _fuse_stsz = 4 if self._is_int8 else 1
         # Compile the megakernel (serialize across ranks to bound peak memory).
         self.mega = None
         for pe in range(world_size):
             if rank == pe:
                 self.mega = compile_fused_moe_gemm1(
                     model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=1,
-                    tile_m=self.unit_size, tile_n=self.tile_n, tile_k=tile_k, doweight_stage1=False,
-                    a_dtype=self.a_dtype, b_dtype="fp4", out_dtype=out_dtype, act="silu",
+                    tile_m=self.unit_size, tile_n=self.tile_n, tile_k=_tile_k_c, doweight_stage1=False,
+                    a_dtype=self.a_dtype, b_dtype=_b_dtype, out_dtype=out_dtype, act="silu",
                     waves_per_eu=waves_per_eu, use_async_copy=use_async_copy,
                     use_cshuffle_epilog=None, contiguous_io=True, dedup_gather=False,
                     atom_contract=self.atom_contract,
@@ -818,7 +975,7 @@ class MegaMoeStage1:
                     raw_a_scale=True, xcd_swizzle=self._xcd,
                     fuse_dispatch=scheme, fuse_npes=world_size, fuse_topk=topk,
                     fuse_cap=self.cap, fuse_mtpr=self.mtpr,
-                    fuse_scale_dim=self.scale_dim, fuse_scale_type_size=1,
+                    fuse_scale_dim=_fuse_sdim, fuse_scale_type_size=_fuse_stsz,
                     rank=rank, experts_per_rank=self.epr, compact_dispatch=self.compact,
                     compact_allgather=True)
             if dist.is_initialized():
@@ -934,6 +1091,25 @@ class MegaMoeStage1:
         xc = x.contiguous(); wc = wts.contiguous()
         ic = topk_ids.to(torch.int32).contiguous(); sc = scales.contiguous()
 
+        # a8w4smooth: send-side per-slot front smoothquant -> token-major int8 + per-slot f32 scale
+        # (the fused dispatch prologue then scatters each slot's row PER-SLOT). This replaces the raw
+        # bf16/fp8 payload+scale pointers with the pre-quantized int8 A + f32 scale.
+        if self._is_int8:
+            # Front smoothquant via aiter's device `smooth_per_token_scaled_quant` -- the SAME kernel
+            # AG/RS's fused_moe uses -- in ONE graph-safe launch: token-major [T,topk,K] int8 + f32
+            # scale (row = t*topk+slot) that the dispatch scatters per-slot. x is broadcast over slots
+            # (expand, stride-0); per-(token,slot) expert = topk_ids drives fc1_smooth[expert].
+            _T = int(xc.shape[0])
+            self._sptsq(self._fq_i8[:_T * self.topk].view(_T, self.topk, self.model_dim),
+                        xc.view(_T, 1, self.model_dim).expand(_T, self.topk, self.model_dim),
+                        self._fq_scale[:_T * self.topk].view(_T, self.topk, 1),
+                        self._fc1_smooth, ic, smooth_scale_map_hash=None, enable_ps=True)
+            _a_in_ptr = self._fq_i8.data_ptr()
+            _sc_in_ptr = self._fq_scale.data_ptr()
+        else:
+            _a_in_ptr = xc.data_ptr()
+            _sc_in_ptr = sc.data_ptr()
+
         pd_ptr = 0
         # total_recv accumulates in-kernel each launch -> zero first (graph-safe).
         (self._trecv_buf if self._trecv_buf is not None else self.op.total_recv).zero_()
@@ -951,14 +1127,24 @@ class MegaMoeStage1:
             _sorted_arg = self._sti
             _se_arg = self._se_atom
         _wt_arg = self.op.wts_em
+        # a8w4smooth/w8a8smooth thread two trailing packed4 W1 qscale/qzero addresses for the
+        # in-kernel int4->int8 B-dequant (w8a8smooth is FULL int8 W1 -> pass 0/0; gemm1 is_int8_full
+        # skips them). mxscale (fp8/fp4) has no such trailing args. The int8 dispatch also reads the
+        # pre-quantized per-slot int8 A (_a_in_ptr) + f32 scale (_sc_in_ptr) set above.
+        _int8_qp = ()
+        if self._is_int8:
+            _qs_ptr = fx.Int64(self._qs_w.data_ptr()) if self._qs_w is not None else fx.Int64(0)
+            _qz_ptr = fx.Int64(self._qz_w.data_ptr()) if self._qz_w is not None else fx.Int64(0)
+            _int8_qp = (_qs_ptr, _qz_ptr)
         self.mega(self._out, a_mat, self.w1, self._scale_i32, self.w1_scale,
                   _sorted_arg, _se_arg, _wt_arg, self._nv, self._bias, self._osd,
                   fx.Int32(self.nvm), fx.Int32(self.inter_dim * 2), fx.Int32(self.model_dim),
                   fx.Int32(self.max_blocks),
                   fx.Int64(pd_ptr), fx.Int64(er_ptr),
                   fx.Int64(self._disp.data_ptr()), fx.Int32(cur_tok),
-                  fx.Int64(xc.data_ptr()), fx.Int64(ic.data_ptr()),
-                  fx.Int64(wc.data_ptr()), fx.Int64(sc.data_ptr()),
+                  fx.Int64(_a_in_ptr), fx.Int64(ic.data_ptr()),
+                  fx.Int64(wc.data_ptr()), fx.Int64(_sc_in_ptr),
+                  *_int8_qp,
                   stream=stream)
         return self.output
 
@@ -1000,6 +1186,15 @@ class MegaMoE:
         w2: torch.Tensor,
         w2_scale: torch.Tensor,
         max_tok_per_rank: int,
+        # ---- a8w4smooth (LQQ W4A8 + smoothquant) extra weights; None for a8w4/a4w4 ----
+        w1_lqq_scale: Optional[torch.Tensor] = None,
+        w1_lqq_zero: Optional[torch.Tensor] = None,
+        w2_lqq_scale: Optional[torch.Tensor] = None,
+        w2_lqq_zero: Optional[torch.Tensor] = None,
+        fc1_smooth_scale: Optional[torch.Tensor] = None,
+        fc2_smooth_scale: Optional[torch.Tensor] = None,
+        expert_mask: Optional[torch.Tensor] = None,
+        local_expert_hash: Optional[torch.Tensor] = None,
         tune_tokens: Optional[int] = None,
         network: Optional[str] = None,
         mega_scheme: str = "fixedslot",
@@ -1018,12 +1213,57 @@ class MegaMoE:
         gemm2_tile_table: Optional[dict] = None,
         enable_fused_stage1: bool = True,
         enable_fused_stage2: bool = True,
+        weight_format: str = "megamoe",
     ):
-        assert quant in ("a8w4", "a4w4"), quant
-        if not _HAS_AITER_QUANT:
-            raise RuntimeError("MegaMoE needs aiter (per_1x32_mx_quant_hip)")
+        assert quant in ("a8w4", "a4w4", "a8w4smooth", "w8a8smooth"), quant
+        assert weight_format in ("megamoe", "aiter_lqq"), weight_format
+        # a8w4smooth (LQQ int8 x packed-int4 + qscale/qzero + smoothquant) is the AG/RS repro's
+        # datatype. FUSED-only: front smoothquant + per-slot int8 dispatch + int8 gemm1 (MegaMoeStage1)
+        # -> recv requant -> int8 gemm2 + combine (MegaMoeStage2).
+        self._is_a8w4smooth = (quant == "a8w4smooth")
+        # w8a8smooth (W8A8 + smoothquant): int8 activation x FULL int8 weight (per-output-row f32
+        # scale, NO packed-int4 / NO LQQ qscale/qzero). Shares a8w4smooth's fused int8-activation
+        # datapath; ONLY the weight datapath differs (b_dtype='int8' baked into stage1/_g2).
+        self._is_w8a8smooth = (quant == "w8a8smooth")
+        # int8-smooth = a8w4smooth (packed-int4 W + LQQ) OR w8a8smooth (FULL int8 W, per-row f32 scale).
+        # Both ride the SAME fused megakernels (front smoothquant -> per-slot int8 dispatch -> int8
+        # gemm1 -> requant -> int8 gemm2 + combine); ONLY the weight datapath differs.
+        self._is_int8_smooth = self._is_a8w4smooth or self._is_w8a8smooth
+        # int8 smoothquant is FUSED-ONLY (the bf16-dispatch non-fused reference paths were validation
+        # scaffolding, removed from the delivery). Require (fused, fused).
+        if self._is_int8_smooth and not (bool(enable_fused_stage1) and bool(enable_fused_stage2)):
+            raise ValueError(
+                "quant in {a8w4smooth,w8a8smooth} is fused-only; "
+                "set enable_fused_stage1=enable_fused_stage2=True.")
+        self._a8_fused = self._is_a8w4smooth
+        self._w8a8_fused = self._is_w8a8smooth
+        self._int8_fused = self._is_int8_smooth
+        if not self._is_a8w4smooth and not self._is_w8a8smooth:
+            try:
+                _mx_quant()   # a8w4/a4w4 (mxscale) need the fp8/fp4 quant kernel; smoothquant does not
+            except Exception as _e:  # noqa: BLE001
+                raise RuntimeError(
+                    "MegaMoE(a8w4/a4w4) needs aiter.ops.quant.per_1x32_mx_quant_hip") from _e
+        if (self._is_a8w4smooth or self._is_w8a8smooth) and (
+                aiter is None or not hasattr(aiter, "moe_smooth_per_token_scaled_quant")):
+            raise RuntimeError(
+                "MegaMoE(a8w4smooth/w8a8smooth) needs aiter.moe_smooth_per_token_scaled_quant + moe_sorting_fwd")
         if (max_tok_per_rank & (max_tok_per_rank - 1)) != 0:
             raise ValueError(f"max_tok_per_rank={max_tok_per_rank} must be a power of two")
+        # weight_format='aiter_lqq': w1/w2 are the aiter LQQ ``lqq_1x64_quant`` RAW outputs
+        # (u4 [E,rows,K] uint8 + per-64-K scale/zero [E,rows,K//64] uint8). Re-lay-out them into
+        # megamoe's packed4 + interleave_k64 layout ONCE here (dequant math is identical), so the
+        # rest of __init__ sees ordinary megamoe a8w4smooth weights.
+        self.weight_format = weight_format
+        if weight_format == "aiter_lqq":
+            if not self._is_a8w4smooth:
+                raise ValueError("weight_format='aiter_lqq' is only valid for quant='a8w4smooth'")
+            if any(t is None for t in (w1_lqq_scale, w1_lqq_zero, w2_lqq_scale, w2_lqq_zero)):
+                raise ValueError(
+                    "weight_format='aiter_lqq' needs w1/w2 (u4 [E,rows,K] uint8) and "
+                    "w1/w2_lqq_scale + w1/w2_lqq_zero (u8 [E,rows,K//64]) from lqq_1x64_quant")
+            w1, w1_lqq_scale, w1_lqq_zero = _convert_aiter_lqq_to_megamoe(w1, w1_lqq_scale, w1_lqq_zero)
+            w2, w2_lqq_scale, w2_lqq_zero = _convert_aiter_lqq_to_megamoe(w2, w2_lqq_scale, w2_lqq_zero)
         self.rank = int(rank)
         self.world_size = int(world_size)
         self.model_dim = int(model_dim)
@@ -1052,8 +1292,13 @@ class MegaMoE:
                 "Set enable_fused_stage1=False for a non-fused stage-2.")
         self.dev = torch.device("cuda", rank)
         self._is_fp4 = (quant == "a4w4")
-        self._qd = _adt.fp4x2 if self._is_fp4 else _adt.fp8
-        self._stp = None if self._is_fp4 else _adt.fp8_e8m0
+        if self._int8_fused:
+            # a8w4smooth/w8a8smooth fused: no mxscale per_1x32 quant (front smoothquant runs inside stage-1).
+            self._qd = None
+            self._stp = None
+        else:
+            self._qd = _adt.fp4x2 if self._is_fp4 else _adt.fp8
+            self._stp = None if self._is_fp4 else _adt.fp8_e8m0
 
         # Resolve stage-1 tile / layout (tiles used by both fused & non-fused gemm1; compact sizing).
         self._s1cfg = _resolve_stage1_config(
@@ -1076,7 +1321,7 @@ class MegaMoE:
             gm_data_type=self._s1cfg["data_type"],
             gm_unit_size=self._s1cfg["unit_size"],
             gm_scale_dim=self._s1cfg["scale_dim"],
-            gm_scale_type_size=1,
+            gm_scale_type_size=(4 if self._is_int8_smooth else 1),  # a8w4smooth/w8a8smooth: f32 per-(token,slot) scale
             gm_scheme=mega_scheme,
             gm_compact=self._s1cfg["compact"],
         )
@@ -1090,12 +1335,21 @@ class MegaMoE:
         # ---- stage-1 ----
         if self.enable_fused_stage1:
             # Fused dispatch + GEMM1 megakernel (uses comb_op._gm buffers).
+            # a8w4smooth: thread packed4 W1 qparams + GLOBAL fc1_smooth (front smoothquant is inside
+            # MegaMoeStage1.forward, so it needs every expert a local token may route to).
+            if self._a8_fused:
+                _s1_a8 = dict(w1_lqq_scale=w1_lqq_scale, w1_lqq_zero=w1_lqq_zero, fc1_smooth=fc1_smooth_scale)
+            elif self._w8a8_fused:
+                # w8a8smooth: FULL int8 W1 (no LQQ packed4 qparams); still needs GLOBAL fc1_smooth.
+                _s1_a8 = dict(fc1_smooth=fc1_smooth_scale)
+            else:
+                _s1_a8 = {}
             self.stage1 = MegaMoeStage1(
                 comm_op=self.comb_op, cfg=self._s1cfg,
                 rank=rank, world_size=world_size, model_dim=model_dim, inter_dim=inter_dim,
                 experts=experts, topk=topk, quant=quant, w1=w1, w1_scale=w1_scale,
                 max_tok_per_rank=max_tok_per_rank, scheme=mega_scheme,
-                warp_num_per_block=int(warp_num_per_block), out_dtype="auto")
+                warp_num_per_block=int(warp_num_per_block), out_dtype="auto", **_s1_a8)
             self.sort_block_m = int(self.stage1.sort_block_m)
             # megav1 _sti encodes src_global=dest -> combine tok_id_to_src is identity (const).
             self.comb_op.shmem_tok_id_to_src.copy_(
@@ -1141,9 +1395,12 @@ class MegaMoE:
             # tile_m=64). tile_m/n/k stay conditional -> only an explicit gemm2_tile_m>0 overrides
             # the table. gemm2_persist_m<=0 (default -1) -> MegaMoeStage2's persistent mode
             # (grid_y=cu_num, matches aiter's dsv4/EP gemm2 `_persist`); >0 opts into legacy N-tile.
+            # a8w4smooth: gemm2 is int8 x packed-int4 (a2_dtype=='int8' from _s1cfg); thread W2 qparams.
             g2_kwargs = dict(
                 comb_cfg=self.comb_cfg, comb_op=self.comb_op, inter_dim=int(inter_dim),
-                a_dtype=self.a2_dtype, b_dtype="fp4", sort_block_m=_s1_sbm,
+                a_dtype=self.a2_dtype,
+                b_dtype=("int8" if self._w8a8_fused else ("int4" if self._a8_fused else "fp4")),
+                sort_block_m=_s1_sbm,
                 gemm2_tile_table=gemm2_tile_table,
                 xcd_swizzle=int(xcd_swizzle),
             )
@@ -1152,7 +1409,38 @@ class MegaMoE:
             if int(gemm2_tile_m) > 0:
                 g2_kwargs.update(
                     tile_m=int(gemm2_tile_m), tile_n=int(gemm2_tile_n), tile_k=int(gemm2_tile_k))
+            if self._int8_fused:
+                # int8 gemm2 needs tile_k=256 (K64 packs / kpack=16). Priority: explicit gemm2_tile_m param
+                # > JSON MegaGemm2 tune table (int8 rows, dtype-mapped) > default 32x64. tile_k is ALWAYS
+                # forced to 256 (MegaMoeStage2 re-forces it for int8, so table rows can't break it).
+                if int(gemm2_tile_m) > 0:
+                    g2_kwargs.update(tile_m=int(gemm2_tile_m), tile_n=int(gemm2_tile_n), tile_k=256,
+                                     gemm2_tile_table=None)
+                elif gemm2_tile_table:
+                    pass  # keep the int8 tune table; MegaMoeStage2 picks per-bucket tiles (tile_k->256)
+                else:
+                    g2_kwargs.update(tile_m=32, tile_n=64, tile_k=256, gemm2_tile_table=None)
+                if self._a8_fused:
+                    # a8w4smooth: thread W2 packed4 qparams (w8a8smooth full-int8 W2 has none).
+                    g2_kwargs.update(w2_lqq_scale=w2_lqq_scale, w2_lqq_zero=w2_lqq_zero)
             self._g2 = MegaMoeStage2(**g2_kwargs)
+            if self._int8_fused:
+                # LOCAL fc2_smooth slice [epr, inter]: the v2 requant indexes smooth_scale by the LOCAL
+                # sorted expert id (0..epr-1) that stage-1 emits. Preallocated int8 a2 + f32 a2_scale
+                # scratch (ATOM row = token*topk+slot), fed to the fused int8 gemm2.
+                _lo = self.rank * self.epr
+                self._a8f_fc2_smooth = fc2_smooth_scale.to(torch.float32)[_lo:_lo + self.epr].contiguous()
+                _a2rows = world_size * self.mtpr * topk
+                self._a8f_a2i8 = torch.zeros((_a2rows, inter_dim), dtype=torch.int8, device=self.dev)
+                self._a8f_a2scale = torch.zeros((_a2rows,), dtype=torch.float32, device=self.dev)
+                # Hoist the fused-forward's per-step host junk into __init__ so the hot loop is just
+                # kernel launches: preallocated (unused) stage-1 `scales` placeholder, cached host
+                # constants, and the cached aiter requant fn (no per-forward import).
+                self._a8f_dummy_sc = torch.zeros((self.mtpr, 1), dtype=torch.float32, device=self.dev)
+                self._a8f_G = int(world_size * self.mtpr)
+                self._a8f_g2_sbm = int(self._g2.sort_block_m)
+                from aiter import moe_smooth_per_token_scaled_quant as _msptsq
+                self._a8f_msptsq = _msptsq
         else:
             # Non-fused stage-2: standalone compile_mixed_moe_gemm2 + comb_op.combine.
             self._g2 = None
@@ -1217,10 +1505,11 @@ class MegaMoE:
         aiter.moe_sorting_fwd(self._nf_recv_topk[:trc], _ow[:trc], self._nf_a_st, self._nf_a_sw,
                               self._nf_a_se, self._nf_a_nv, self._nf_a_mbuf[:trc],
                               int(experts), int(tm), None, None, 0)
+        _q = _mx_quant()
         if self._is_fp4:
-            _a1q, _a1sp = per_1x32_mx_quant_hip(_bt[:trc].contiguous(), quant_dtype=self._qd)
+            _a1q, _a1sp = _q(_bt[:trc].contiguous(), quant_dtype=self._qd)
         else:
-            _a1q, _a1sp = per_1x32_mx_quant_hip(_bt[:trc].contiguous(), quant_dtype=self._qd,
+            _a1q, _a1sp = _q(_bt[:trc].contiguous(), quant_dtype=self._qd,
                                                 scale_type=self._stp)
         aiter.mxfp4_moe_sort_hip(self._nf_a1s, _a1sp, self._nf_a_st, self._nf_a_nv,
                                  int(trc), int(model_dim))
@@ -1276,13 +1565,64 @@ class MegaMoE:
         _r = self.comb_op.combine(self._nfg2_out, _w, _idx, cur_tok=run_tokens)
         return _r[0] if isinstance(_r, (tuple, list)) else _r
 
+    def _forward_smoothquant_fused(self, x_bf16, wts, topk_ids, *, stream=None, slice_output=True):
+        """FUSED int8 smoothquant (a8w4smooth / w8a8smooth): front-smoothquant + per-slot int8 dispatch
+        + int8 gemm1 (MegaMoeStage1) -> recv requant(fc2_smooth) -> int8 gemm2 + combine (MegaMoeStage2).
+        Both GEMMs are BIT-EXACT to the standalone kernels; this assembles them over the (fused,fused)
+        plumbing. The packed4-vs-full-int8 weight datapath is baked into stage1/_g2 at construction
+        (b_dtype='int4' for a8w4smooth, 'int8' for w8a8smooth)."""
+        # Optional phase-boundary CUDA events (diagnostic; OFF by default -> no graph/runtime impact).
+        # Splits wall-clock into stage1[front-quant+dispatch+gemm1] / requant / stage2[gemm2+combine].
+        # (dispatch and gemm1 are ONE fused megakernel, as are gemm2 and the P2P scatter, so those
+        # cannot be split at a host boundary -- use the per-kernel profiler for the rest.)
+        _ph = getattr(self, "_phase_timing", False)
+        if _ph:
+            _pe = [torch.cuda.Event(enable_timing=True) for _ in range(4)]
+            _pe[0].record()
+        run_tokens = int(x_bf16.shape[0])
+        ic = topk_ids.to(torch.int32).contiguous()
+        wc = wts.contiguous()
+        # MegaMoeStage1 (int8) runs its own front smoothquant internally; the `scales` arg is unused --
+        # feed the preallocated dummy (sliced, no per-forward alloc/fill).
+        s1 = self.stage1.forward(x_bf16[:run_tokens].contiguous(), wc,
+                                 self._a8f_dummy_sc[:run_tokens], ic, stream=stream)
+        if _ph:
+            _pe[1].record()
+        # Intermediate requant: a2 (f16, ATOM [_G,topk,inter]) -> per-(token,slot) int8 + f32 a2_scale,
+        # via aiter's moe_smooth_per_token_scaled_quant v2 path -- the SAME call the customer AG/RS
+        # repro uses. v2 consumes stage-1's sorted metadata DIRECTLY: it decodes each valid row's ATOM
+        # position (t*topk+s, where t=src_global, s=slot) and its per-block LOCAL expert internally,
+        # then writes a2_i8/a2_scale at that ATOM row. No separate per-row expert map / scatter is
+        # needed (no all-gather, no ~10-op emap build) -- the routing already crossed during dispatch
+        # and lives in stage-1's sorted_token_ids/sorted_expert_ids. topk_ids is unused by v2.
+        _G = self._a8f_G
+        self._a8f_msptsq(self._a8f_a2i8.view(_G, self.topk, self.inter_dim),
+                         s1.a2.view(_G, self.topk, self.inter_dim),
+                         self._a8f_a2scale, self._a8f_fc2_smooth, ic,
+                         s1.sorted_token_ids, s1.sorted_expert_ids, s1.num_valid_ids,
+                         self._a8f_g2_sbm, None, False, False)
+        if _ph:
+            _pe[2].record()
+        # fused int8 gemm2 (+ in-epilogue P2P scatter) + combine_no_stage1.
+        ret = self._g2.run(
+            a2=self._a8f_a2i8, w2=self.w2,
+            a2_scale=self._a8f_a2scale, w2_scale=self.w2_scale,
+            sorted_token_ids=s1.sorted_token_ids, sorted_expert_ids=s1.sorted_expert_ids,
+            sorted_weights=s1.sorted_weights, num_valid_ids=s1.num_valid_ids, wts_buf=s1.wts_buf,
+            cur_tok=run_tokens, run_tokens=run_tokens, stream=stream)
+        if _ph:
+            _pe[3].record()
+            self._phase_evs = _pe
+        out_tok = ret[0] if isinstance(ret, (tuple, list)) else ret
+        return out_tok[:run_tokens] if slice_output else out_tok
+
     def quantize(self, x_bf16):
         """Quantize bf16 activation -> (fp8/fp4 payload, e8m0 scale as uint8)."""
+        _q = _mx_quant()
         if self._is_fp4:
-            mq, msq = per_1x32_mx_quant_hip(x_bf16.contiguous(), quant_dtype=self._qd)
+            mq, msq = _q(x_bf16.contiguous(), quant_dtype=self._qd)
         else:
-            mq, msq = per_1x32_mx_quant_hip(x_bf16.contiguous(), quant_dtype=self._qd,
-                                            scale_type=self._stp)
+            mq, msq = _q(x_bf16.contiguous(), quant_dtype=self._qd, scale_type=self._stp)
         return mq, msq.view(torch.uint8)
 
     def _run_stage2(self, s1, run_tokens, stream, slice_output):
@@ -1318,6 +1658,12 @@ class MegaMoE:
         run_tokens = int(x_bf16.shape[0])
         if run_tokens > self.mtpr:
             raise ValueError(f"run_tokens={run_tokens} > max_tok_per_rank={self.mtpr}")
+        if self._is_int8_smooth:
+            # int8 smoothquant (a8w4smooth / w8a8smooth) is fused-only: front-smoothquant + per-slot
+            # int8 dispatch + int8 gemm1 (MegaMoeStage1) -> recv requant -> int8 gemm2 + combine
+            # (MegaMoeStage2). The packed4-vs-full-int8 weight datapath is baked into stage1/_g2 at
+            # construction (b_dtype='int4' for a8w4smooth, 'int8' for w8a8smooth).
+            return self._forward_smoothquant_fused(x_bf16, wts, topk_ids, stream=stream, slice_output=slice_output)
         wc = wts.contiguous()
         ic = topk_ids.to(torch.int32).contiguous()
         if self.enable_fused_stage1:

@@ -185,6 +185,46 @@ def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
 
 
 @dsl_loc_tracing
+def extract_workgroup_aligned_ptr(memref_val, address_space: int = 3) -> ir.Value:
+    """Extract a workgroup-AS (LDS) memref's aligned base as `!llvm.ptr<AS>`
+    while preserving LLVM pointer provenance.
+
+    The standard ``memref.extract_aligned_pointer_as_index`` returns ``index``;
+    rebuilding the pointer via ``inttoptr`` strips provenance, which forces LLVM
+    alias analysis to assume the resulting pointer may alias every other LDS
+    access and serializes ``buffer_load_lds`` writes against neighboring
+    ``ds_read``s (an ``expcnt(0)`` before every ds_read).
+
+    This helper instead casts the memref to its lowered LLVM struct type
+    (memref descriptor) via ``builtin.unrealized_conversion_cast`` and pulls out
+    the aligned-ptr field with ``llvm.extractvalue``. After the standard
+    memref-to-llvm conversion the cast becomes reflexive and is folded by
+    ``reconcile-unrealized-casts``; the ``extractvalue`` (and any subsequent
+    ``llvm.getelementptr``) keeps SSA provenance back to the original
+    ``memref.get_global``, so AA can disambiguate writes to one LDS buffer from
+    reads of another. Pair with :func:`get_element_ptr` to add byte offsets.
+
+    Only supports rank-1 statically-shaped workgroup-AS memrefs, which matches
+    what ``SmemAllocator`` produces.
+    """
+    from .._mlir.dialects import builtin as _builtin
+
+    raw = _unwrap_value(memref_val)
+    mr_ty = ir.MemRefType(raw.type)
+    if mr_ty.rank != 1:
+        raise ValueError(
+            f"extract_workgroup_aligned_ptr only handles rank-1 memrefs, got rank {mr_ty.rank}"
+        )
+    struct_ty = ir.Type.parse(
+        f"!llvm.struct<(ptr<{address_space}>, ptr<{address_space}>, i64,"
+        " array<1 x i64>, array<1 x i64>)>"
+    )
+    ptr_ty = ir.Type.parse(f"!llvm.ptr<{address_space}>")
+    desc = _builtin.unrealized_conversion_cast([struct_ty], [raw])
+    return llvm.extractvalue(ptr_ty, desc, [1])
+
+
+@dsl_loc_tracing
 def get_element_ptr(
     base_ptr,
     byte_offset: Union[int, ir.Value, None] = None,

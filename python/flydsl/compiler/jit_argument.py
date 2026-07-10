@@ -518,6 +518,7 @@ _TORCH_DTYPE_TO_MLIR_BUILDER = {
     torch.bool: lambda: ir.IntegerType.get_signless(1),
     torch.uint8: lambda: ir.IntegerType.get_signless(8),
     torch.int8: lambda: ir.IntegerType.get_signless(8),
+    torch.int4: lambda: ir.IntegerType.get_signless(4),
     torch.int16: lambda: ir.IntegerType.get_signless(16),
     torch.int32: lambda: ir.IntegerType.get_signless(32),
     torch.int64: lambda: ir.IntegerType.get_signless(64),

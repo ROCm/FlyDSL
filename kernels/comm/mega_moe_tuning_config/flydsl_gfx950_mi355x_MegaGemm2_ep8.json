@@ -434,6 +434,76 @@
    "tile_m": 64,
    "tile_n": 256,
    "tile_k": 256
-  }
+  },
+  {
+   "dtype": "int8",
+   "model_dim": 3584,
+   "inter_dim": 1280,
+   "expert": 48,
+   "topk": 8,
+   "num_tokens": 8,
+   "tile_m": 32,
+   "tile_n": 128,
+   "tile_k": 256
+  },
+  {
+   "dtype": "int8",
+   "model_dim": 3584,
+   "inter_dim": 1280,
+   "expert": 48,
+   "topk": 8,
+   "num_tokens": 16,
+   "tile_m": 32,
+   "tile_n": 128,
+   "tile_k": 256
+  },
+  {
+   "dtype": "int8",
+   "model_dim": 3584,
+   "inter_dim": 1280,
+   "expert": 48,
+   "topk": 8,
+   "num_tokens": 32,
+   "tile_m": 32,
+   "tile_n": 128,
+   "tile_k": 256
+  },
+  {
+   "dtype": "int8",
+   "model_dim": 3584,
+   "inter_dim": 1280,
+   "expert": 48,
+   "topk": 8,
+   "num_tokens": 64,
+   "tile_m": 32,
+   "tile_n": 128,
+   "tile_k": 256
+  },
+  {
+   "dtype": "int8",
+   "model_dim": 3584,
+   "inter_dim": 1280,
+   "expert": 48,
+   "topk": 8,
+   "num_tokens": 2048,
+   "tile_m": 64,
+   "tile_n": 128,
+   "tile_k": 256
+  },
+  {
+   "dtype": "int8",
+   "model_dim": 3584,
+   "inter_dim": 1280,
+   "expert": 48,
+   "topk": 8,
+   "num_tokens": 4096,
+   "tile_m": 64,
+   "tile_n": 128,
+   "tile_k": 256
+  },
+  {"dtype": "int8", "model_dim": 3584, "inter_dim": 1280, "expert": 48, "topk": 8, "num_tokens": 128, "tile_m": 64, "tile_n": 128, "tile_k": 256},
+  {"dtype": "int8", "model_dim": 3584, "inter_dim": 1280, "expert": 48, "topk": 8, "num_tokens": 256, "tile_m": 64, "tile_n": 128, "tile_k": 256},
+  {"dtype": "int8", "model_dim": 3584, "inter_dim": 1280, "expert": 48, "topk": 8, "num_tokens": 512, "tile_m": 64, "tile_n": 128, "tile_k": 256},
+  {"dtype": "int8", "model_dim": 3584, "inter_dim": 1280, "expert": 48, "topk": 8, "num_tokens": 1024, "tile_m": 64, "tile_n": 128, "tile_k": 256}
  ]
 }

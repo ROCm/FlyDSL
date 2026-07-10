@@ -61,6 +61,7 @@ NETWORKS = {
     "r1_v3":    dict(model_dim=7168, inter_dim=2048, experts=256, topk=8),
     "v4_flash": dict(model_dim=4096, inter_dim=2048, experts=256, topk=6),
     "v4_pro":   dict(model_dim=7168, inter_dim=3072, experts=384, topk=6),
+    "m13":      dict(model_dim=3584, inter_dim=1280, experts=384, topk=8),
 }
 
 # batch-size sweeps for --matrix / --full-bs.
