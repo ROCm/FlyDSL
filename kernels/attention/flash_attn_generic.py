@@ -36,13 +36,8 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels.attention.dualwave_common import _LOG2E, _waitcnt_vm_n
 from kernels.common.kernels_common import dtype_to_elem_type
-
-_LOG2E = host_math.log2(host_math.e)  # 1.4426950408889634
-_VMCNT_LO_MASK = 0xF
-_LGKMCNT_EXPCNT_BASE = 0x3F70
-_VMCNT_HI_SHIFT = 14
-_VMCNT_HI_MASK = 0x3
 
 
 def _llvm_value(value):
@@ -66,12 +61,6 @@ def _pointer_load(result_type: ir.Type, ptr: ir.Value) -> ir.Value:
 
 def _pointer_store(value: ir.Value, ptr: ir.Value):
     return llvm.StoreOp(_llvm_value(value), _llvm_value(ptr))
-
-
-def _waitcnt_vm_n(n):
-    """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
-    val = (n & _VMCNT_LO_MASK) | _LGKMCNT_EXPCNT_BASE | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
-    rocdl.s_waitcnt(val)
 
 
 def build_flash_attn_func_module_primary(

@@ -4,7 +4,6 @@
 """gfx950 DUALWAVE_SWP FP8 flash attention."""
 
 import contextlib
-import math as host_math
 import os
 
 import flydsl.compiler as flyc
@@ -20,25 +19,18 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
-from flydsl.runtime.device import get_rocm_arch
-from kernels.attention.dualwave_swp_common import (
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from kernels.attention.dualwave_common import (
+    _LOG2E,
     _ds_read_tr8_b64_imm,
     _ds_read_tr16_b64_imm,
     _extract_aligned_pointer,
     _lds_alias_scope_array,
     _read_exec_i64,
     _waitcnt_vm_n,
-    dualwave_splitk_workspace_elems,  # noqa: F401  (re-exported: public API)
+    dualwave_splitk_workspace_elems,  # noqa: F401
 )
 from kernels.common.kernels_common import _if_then, dtype_to_elem_type
-
-_LOG2E = host_math.log2(host_math.e)
-# s_waitcnt bitfield encoding
-_VMCNT_LO_MASK = 0xF
-_LGKMCNT_EXPCNT_BASE = 0x3F70
-_VMCNT_HI_SHIFT = 14
-_VMCNT_HI_MASK = 0x3
-_LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.dualwave_swp.lds">'
 
 
 def build_flash_attn_dualwave_swp_fp8_module(

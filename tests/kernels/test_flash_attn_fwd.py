@@ -1067,7 +1067,14 @@ def run_attn_config(
     if verbose:
         o_flat = o_t.reshape(-1)
         ref_flat = ref_t.reshape(-1)
-        tag = f"B={B} Sq={Sq} H={H} D={D}"
+        _mask = "causal" if causal else "noncausal"
+        _hkv = num_kv_heads if num_kv_heads is not None else H
+        if varlen:
+            tag = f"varlen Sq={list(vl_q)} Skv={list(vl_kv)} H={H} Hkv={_hkv} D={D} {_mask} splits={num_kv_splits}"
+        else:
+            tag = f"B={B} Sq={Sq} Skv={Skv} H={H} Hkv={_hkv} D={D} {_mask} splits={num_kv_splits}"
+        if use_block_table:
+            tag += f" BT page{page_size} {kv_cache_layout}"
         rm = compute_md5(o_flat)
         rm2 = compute_md5(ref_flat)
         print(f"  [{tag}] result_md5 = {rm}")
@@ -2378,6 +2385,11 @@ def main():
         help="Run additional varlen/cross-length configs from EXTRA_CONFIGS",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print per-config result_md5 / ref_md5 and bit-identical check (also enabled in --compare mode)",
+    )
+    parser.add_argument(
         "--block-table",
         action="store_true",
         help="Build K/V through a paged cache plus block_table before materializing the current dense/packed ABI",
@@ -2639,6 +2651,7 @@ def main():
                                     num_kv_splits=kv_splits,
                                     seed=args.seed,
                                     dtype_str=dtype_str,
+                                    verbose=args.verbose,
                                     trigger_lazy_else=args.trigger_lazy_else,
                                     compare_mode=True,
                                     precomputed_ref=shared_ref,
@@ -2852,6 +2865,7 @@ def main():
                                     num_kv_splits=kv_splits,
                                     seed=args.seed,
                                     dtype_str=dtype_str,
+                                    verbose=args.verbose,
                                     compare_mode=True,
                                     precomputed_ref=shared_ref,
                                     precomputed_inputs=precomputed_inputs,
