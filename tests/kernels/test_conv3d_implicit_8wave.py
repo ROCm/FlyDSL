@@ -16,7 +16,11 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit_8wave import conv3d_implicit_8wave
+from kernels.conv.conv3d_implicit_8wave import (
+    conv1d_implicit,
+    conv2d_implicit,
+    conv3d_implicit_8wave,
+)
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -56,6 +60,46 @@ def test_conv3d_vs_torch(n, c, t, h, w, k, stride, padding):
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
 
 
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "kernel_shape,padding",
+    [
+        ((1, 3, 3), (0, 1, 1)),
+        ((3, 1, 1), (1, 0, 0)),
+    ],
+)
+def test_conv3d_factorized_filters_vs_torch(kernel_shape, padding):
+    """Cover the spatial-only and temporal-only filter dispatch paths."""
+    torch.manual_seed(3100 + sum(kernel_shape))
+    n, c, t, h, w, k = 1, 64, 6, 18, 20, 128
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
+
+    y = conv3d_implicit_8wave(x, weight, stride=1, padding=padding)
+    y_ref = F.conv3d(x, weight, stride=1, padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+@_skip_non_cdna4
+@pytest.mark.parametrize("c", [16, 64])
+def test_conv3d_runtime_k_loop_short_problems(c):
+    """Exercise one- and two-K-tile runtime-pipeline epilogues."""
+    torch.manual_seed(3200 + c)
+    n, t, h, w, k = 1, 3, 8, 8, 64
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, 1, 1, 1), device="cuda", dtype=torch.bfloat16)
+
+    y = conv3d_implicit_8wave(x, weight)
+    y_ref = F.conv3d(x, weight)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
 # Tile-size sweep: each forced (TILE_M, TILE_N, WAVE_M, WAVE_N) must stay correct.
 @_skip_non_cdna4
 @pytest.mark.parametrize(
@@ -65,6 +109,7 @@ def test_conv3d_vs_torch(n, c, t, h, w, k, stride, padding):
         (128, 256, 2, 4),
         (256, 128, 2, 4),
         (256, 256, 2, 4),
+        (256, 256, 4, 4),
         (128, 128, 4, 2),
         (64, 128, 1, 4),
         (64, 64, 2, 2),
@@ -116,3 +161,54 @@ def test_conv3d_autotune(tmp_path, monkeypatch):
     torch.cuda.synchronize()
     assert torch.allclose(y2, y_ref, rtol=2e-2, atol=2e-2)
     assert calls["n"] == 0  # cached, no re-benchmark
+
+
+# 2D conv via the depth-1 degenerate path through the 3D kernel.
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "kernel_shape,stride,padding",
+    [
+        ((3, 3), 1, 1),
+        ((1, 1), 1, 0),  # 1x1 -> temporal_only_fast-style vectorized epilogue
+        ((5, 5), 1, 2),
+        ((3, 3), 2, 1),
+    ],
+)
+def test_conv2d_vs_torch(kernel_shape, stride, padding):
+    torch.manual_seed(5000 + sum(kernel_shape) + stride + padding)
+    n, c, h, w, k = 2, 64, 24, 28, 128
+    x = torch.randn((n, c, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((k,), device="cuda", dtype=torch.float32)
+
+    y = conv2d_implicit(x, weight, bias=bias, stride=stride, padding=padding)
+    y_ref = F.conv2d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
+
+
+# 1D conv via the depth/height-1 degenerate path through the 3D kernel.
+@_skip_non_cdna4
+@pytest.mark.parametrize(
+    "s,stride,padding",
+    [
+        (3, 1, 1),
+        (1, 1, 0),
+        (5, 2, 2),
+    ],
+)
+def test_conv1d_vs_torch(s, stride, padding):
+    torch.manual_seed(6000 + s + stride + padding)
+    n, c, w, k = 2, 64, 96, 128
+    x = torch.randn((n, c, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, s), device="cuda", dtype=torch.bfloat16)
+    bias = torch.randn((k,), device="cuda", dtype=torch.float32)
+
+    y = conv1d_implicit(x, weight, bias=bias, stride=stride, padding=padding)
+    y_ref = F.conv1d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == y_ref.shape
+    assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)

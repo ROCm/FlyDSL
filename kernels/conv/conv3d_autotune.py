@@ -46,6 +46,7 @@ BF16_CANDIDATES = [
     (128, 256, 2, 4),
     (256, 128, 2, 4),
     (256, 256, 2, 4),
+    (256, 256, 4, 4),
     (128, 128, 4, 2),
     (64, 128, 1, 4),
     (64, 64, 2, 2),
@@ -61,6 +62,7 @@ FP8_CANDIDATES = [
 ]
 
 _MEM_CACHE = {}
+_CACHE_SCHEMA_VERSION = 2
 
 
 def _cache_dir():
@@ -71,13 +73,15 @@ def _cache_file(kind):
     return _cache_dir() / f"conv3d_{kind}.json"
 
 
-def _make_key(kind, shape, dtype_str):
+def _make_key(kind, shape, dtype_str, candidates):
     return (
         kind,
         tuple(shape),
         dtype_str,
         _device_fingerprint(),
         _toolchain_fingerprint(),
+        _CACHE_SCHEMA_VERSION,
+        tuple(tuple(tile) for tile in candidates),
     )
 
 
@@ -114,7 +118,7 @@ def autotune_conv3d(kind, shape, dtype_str, candidates, device, run_tile, warmup
     deterministically from the chosen tile at call time, so only the tile is
     cached.
     """
-    key = _make_key(kind, shape, dtype_str)
+    key = _make_key(kind, shape, dtype_str, candidates)
     if key in _MEM_CACHE:
         return _MEM_CACHE[key]
     disk = _load_disk(kind, key)
