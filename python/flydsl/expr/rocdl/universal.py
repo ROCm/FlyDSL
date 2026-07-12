@@ -287,7 +287,7 @@ def make_tdm_tensor(tensor: Tensor, tensor_extents=None) -> Tensor:
         address_space=TargetAddressSpace.GlobalTensorDesc,
         alignment=ptr.alignment,
     )
-    # Struct fields are (base, tensor_dim0=inner, tensor_dim1=outer) to match the
-    # TDM descriptor's dim0=innermost / dim1=outermost convention.
-    gtd_ptr = make_ptr(gtd_ptr_ty, [ptr, inner.ir_value(), outer.ir_value()])
+    # Operand fields are (base, outer extent, inner extent) in tensor dim order;
+    # the atom applies the descriptor's innermost-first convention at lowering.
+    gtd_ptr = make_ptr(gtd_ptr_ty, [ptr, outer.ir_value(), inner.ir_value()])
     return make_view(gtd_ptr, layout)

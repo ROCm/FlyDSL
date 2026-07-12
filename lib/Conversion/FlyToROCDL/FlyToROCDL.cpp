@@ -158,7 +158,7 @@ public:
       auto args = adaptor.getArgs();
       if (args.size() != 3)
         return rewriter.notifyMatchFailure(
-            op, "global_tensor_desc make_ptr expects 3 args: base, dim0, dim1");
+            op, "global_tensor_desc make_ptr expects 3 args: base, outer_extent, inner_extent");
       rewriter.replaceOp(op, GlobalTensorDesc::pack(rewriter, loc, args[0], args[1], args[2]));
       return success();
     }

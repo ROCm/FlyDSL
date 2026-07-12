@@ -242,15 +242,16 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   // Stores fold LDS padding into the tile extent (no de-pad on the store path).
   int32_t ldsInnerStride = (padActive && !isStore) ? (inner + getPadAmount()) : inner;
 
-  // Global operand: a global_tensor_desc carries {base ptr, tensor_dim0,
-  // tensor_dim1}; a plain global memref is a bare base ptr with no bound
-  // (extents default to INT32_MAX => whole tile in-bounds).
+  // Global operand: a global_tensor_desc carries {base ptr, outer extent, inner
+  // extent}; a plain global memref is a bare base ptr with no bound (extents
+  // default to INT32_MAX => whole tile in-bounds). tensorDim0/tensorDim1 follow
+  // the descriptor's innermost-first convention (dim0 = inner, dim1 = outer).
   bool glbIsDesc = isTargetAddressSpace<GlobalTensorDescAddressAttr>(glbMemTy.getAddressSpace());
   Value glbBasePtr = glbIsDesc ? GlobalTensorDesc::base(builder, loc, glbPtr) : glbPtr;
-  Value tensorDim0 =
-      glbIsDesc ? GlobalTensorDesc::dim0(builder, loc, glbPtr) : i32Const(builder, loc, 0x7FFFFFFF);
-  Value tensorDim1 =
-      glbIsDesc ? GlobalTensorDesc::dim1(builder, loc, glbPtr) : i32Const(builder, loc, 0x7FFFFFFF);
+  Value tensorDim0 = glbIsDesc ? GlobalTensorDesc::innerExtent(builder, loc, glbPtr)
+                               : i32Const(builder, loc, 0x7FFFFFFF);
+  Value tensorDim1 = glbIsDesc ? GlobalTensorDesc::outerExtent(builder, loc, glbPtr)
+                               : i32Const(builder, loc, 0x7FFFFFFF);
 
   Type i64Ty = builder.getI64Type();
   Value glbBase = LLVM::PtrToIntOp::create(builder, loc, i64Ty, glbBasePtr);

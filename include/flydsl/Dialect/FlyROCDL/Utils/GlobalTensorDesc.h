@@ -15,6 +15,9 @@
 // tensor_dim1 for out-of-bounds handling.
 namespace mlir::fly_rocdl {
 
+// Fields are {base ptr, outer extent, inner extent} in tensor (layout) dim
+// order. The TDM descriptor's innermost-first convention (tensor_dim0 = inner)
+// is applied by the consuming atom via the named accessors, not encoded here.
 struct GlobalTensorDesc {
   static constexpr unsigned kBaseAddrSpace = 1; // global
 
@@ -24,21 +27,21 @@ struct GlobalTensorDesc {
                                              IntegerType::get(ctx, 32), IntegerType::get(ctx, 32)});
   }
 
-  static Value pack(OpBuilder &b, Location loc, Value base, Value dim0, Value dim1) {
+  static Value pack(OpBuilder &b, Location loc, Value base, Value outerExtent, Value innerExtent) {
     Value s = LLVM::UndefOp::create(b, loc, getType(b.getContext()));
     s = LLVM::InsertValueOp::create(b, loc, s, base, ArrayRef<int64_t>{0});
-    s = LLVM::InsertValueOp::create(b, loc, s, dim0, ArrayRef<int64_t>{1});
-    s = LLVM::InsertValueOp::create(b, loc, s, dim1, ArrayRef<int64_t>{2});
+    s = LLVM::InsertValueOp::create(b, loc, s, outerExtent, ArrayRef<int64_t>{1});
+    s = LLVM::InsertValueOp::create(b, loc, s, innerExtent, ArrayRef<int64_t>{2});
     return s;
   }
 
   static Value base(OpBuilder &b, Location loc, Value v) {
     return LLVM::ExtractValueOp::create(b, loc, v, ArrayRef<int64_t>{0});
   }
-  static Value dim0(OpBuilder &b, Location loc, Value v) {
+  static Value outerExtent(OpBuilder &b, Location loc, Value v) {
     return LLVM::ExtractValueOp::create(b, loc, v, ArrayRef<int64_t>{1});
   }
-  static Value dim1(OpBuilder &b, Location loc, Value v) {
+  static Value innerExtent(OpBuilder &b, Location loc, Value v) {
     return LLVM::ExtractValueOp::create(b, loc, v, ArrayRef<int64_t>{2});
   }
 };

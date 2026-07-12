@@ -125,8 +125,8 @@ func.func @test_tdm_load_mcast(
 
 // -----
 
-// OOB via operand: a global_tensor_desc operand carries {base ptr, tensor_dim0,
-// tensor_dim1}. The base is PtrToInt'd for the address; the extents drive the
+// OOB via operand: a global_tensor_desc operand carries {base ptr, outer extent,
+// inner extent}. The base is PtrToInt'd for the address; the extents drive the
 // runtime tensor_dim0/1 = max(0, globalDim - warp start), so a ragged tile is
 // HW-guarded (load: zero-fill; store: drop). tile dims stay static.
 
