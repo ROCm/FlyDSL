@@ -99,6 +99,7 @@ def torch_moe_gemm1(
     doweight_stage1: bool,
     group_size: int = -1,
     scale_w1_groups: torch.Tensor | None = None,
+    activation: str = "silu",
 ) -> torch.Tensor:
     """Return [tokens, topk, inter_dim] fp32.
 
@@ -106,7 +107,10 @@ def torch_moe_gemm1(
         group_size: -1 for per-row scale (uses scale_w1_flat), >0 for group-wise scale.
         scale_w1_groups: Group-wise scale tensor of shape [E, K//group_size, 2*inter_dim] (Opt 0 layout).
                          Required when group_size > 0; ignored otherwise.
+        activation: "silu" or "gelu_tanh"; fused gate activation applied as act(gate)*up.
     """
+    if activation not in ("silu", "gelu_tanh"):
+        raise ValueError(f"activation must be 'silu' or 'gelu_tanh', got {activation!r}")
     topk = topk_ids.shape[1]
     # Independent per-1x32 block-scale detection for x and w, so that mixed
     # precisions such as A8W4 (fp8 activation + mxfp4 weight) can use the correct
@@ -154,7 +158,10 @@ def torch_moe_gemm1(
         y2 = F.linear(x_in, w1[e, :, :])  # [num, 2*inter_dim]
         gate = y2[:, :inter_dim]
         up = y2[:, inter_dim:]
-        y = F.silu(gate) * up
+        if activation == "gelu_tanh":
+            y = F.gelu(gate, approximate="tanh") * up
+        else:
+            y = F.silu(gate) * up
         if doweight_stage1:
             y = y * topk_weights[t_idx, s_idx].unsqueeze(-1)
         out[t_idx, s_idx, :] = y

@@ -17,7 +17,7 @@ Compile options:
   quant_mode : "fp4" | "fp8" | "none"
   gui_layout : False -> gate-up separated  [gate_0:N, up_0:N]
                True  -> block-interleaved  [gate_0:16, up_0:16, gate_16:32, ...]
-  act        : "silu" | "swiglu"
+  act        : "silu" | "swiglu" | "gelu_tanh"
 """
 
 import flydsl.compiler as flyc
@@ -26,7 +26,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm, scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, vector
-from flydsl.expr.arith import ArithValue, CmpIPredicate
+from flydsl.expr.arith import ArithValue, CmpFPredicate, CmpIPredicate
 from flydsl.expr.typing import Int32, T
 
 BLOCK_THREADS = 256
@@ -64,7 +64,7 @@ def build_silu_and_mul_fq_module(
     _need_fp8 = quant_mode == "fp8"
     _need_quant = _need_fp4 or _need_fp8
     assert _need_fp4 or _need_fp8 or quant_mode == "none"
-    if act not in ("silu", "swiglu"):
+    if act not in ("silu", "swiglu", "gelu_tanh"):
         raise ValueError(f"Unsupported activation for split-K path: {act!r}")
 
     scale_cols = inter_dim // 32
@@ -145,7 +145,7 @@ def build_silu_and_mul_fq_module(
         scale_rsrc = buffer_ops.create_buffer_resource(out_scale_sorted, max_size=True)
         tid_rsrc = buffer_ops.create_buffer_resource(sorted_ids, max_size=True)
         nv_rsrc = buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
-        if enable_bias:
+        if const_expr(enable_bias):
             topk_rsrc = buffer_ops.create_buffer_resource(topk_ids, max_size=True)
             bias_rsrc = buffer_ops.create_buffer_resource(bias, max_size=True)
 
@@ -203,7 +203,7 @@ def build_silu_and_mul_fq_module(
                 _if_valid = scf.IfOp(is_valid, has_else=True)
                 with ir.InsertionPoint(_if_valid.then_block):
                     in_row = token_id * topk_i32 + slot_id
-                    if enable_bias:
+                    if const_expr(enable_bias):
                         # sorted_ids encodes token and slot, not expert. Use topk_ids
                         # to recover the expert-specific bias row for this token slot.
                         expert_id = buffer_ops.buffer_load(topk_rsrc, in_row, vec_width=1, dtype=i32)
@@ -255,6 +255,10 @@ def build_silu_and_mul_fq_module(
 
                     neg_log2e = arith.constant(-1.4426950408889634, type=f32)
                     swiglu_neg_alpha_log2e = arith.constant(-1.4426950408889634 * 1.702, type=f32)
+                    # gelu_tanh constants (clamp-free path).
+                    gelu_sqrt2pi = arith.constant(0.7978845608028654, type=f32)
+                    gelu_coeff = arith.constant(0.044715, type=f32)
+                    c2_f32 = arith.constant(2.0, type=f32)
                     if const_expr(swiglu_limit != 0):
                         _limit = arith.constant(float(swiglu_limit), type=f32)
                         _neg_limit = arith.constant(-float(swiglu_limit), type=f32)
@@ -267,10 +271,25 @@ def build_silu_and_mul_fq_module(
                         g = vector.extract(gate_f32, static_position=[vi], dynamic_position=[])
                         u = vector.extract(up_f32, static_position=[vi], dynamic_position=[])
 
-                        if enable_bias:
+                        if const_expr(enable_bias):
                             bias_col = col0 + arith.constant(vi, type=i32)
                             g = g + _load_bias_scalar(bias_row + bias_col)
                             u = u + _load_bias_scalar(bias_row + inter_dim_i32 + bias_col)
+                        if const_expr(act == "gelu_tanh"):
+                            # GeLU tanh approx (clamp-free): 0.5*g*(1 + tanh(y)),
+                            # y = sqrt(2/pi)*(g + 0.044715*g^3). Expand tanh via
+                            # e = exp(-2|y|) (non-positive exponent -> fp32 stable):
+                            # 1 + tanh(y) = 2/(1+e) for y>=0, 2e/(1+e) for y<0.
+                            # Folding the 0.5 gives g * num/(1+e), num = (y>=0 ? 1 : e).
+                            y = gelu_sqrt2pi * (g + gelu_coeff * g * g * g)
+                            abs_y = arith.maximumf(y, c0_f32 - y)
+                            te = c2_f32 * abs_y * neg_log2e
+                            e = llvm.call_intrinsic(f32, "llvm.amdgcn.exp2.f32", [te], [], [])
+                            den_g = c1_f32 + e
+                            rcp_g = llvm.call_intrinsic(f32, "llvm.amdgcn.rcp.f32", [den_g], [], [])
+                            num_g = arith.select(arith.cmpf(CmpFPredicate.OGE, y, c0_f32), c1_f32, e)
+                            act_vals.append(g * num_g * rcp_g * u)
+                            continue
                         gate = g
                         linear = u
                         t = gate * neg_log2e
