@@ -23,7 +23,6 @@
 #include "flydsl/Dialect/Fly/Utils/PointerUtils.h"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
 #include "flydsl/Dialect/FlyROCDL/Utils/BufferFatPtr.h"
-#include "flydsl/Dialect/FlyROCDL/Utils/GlobalTensorDesc.h"
 
 namespace mlir {
 #define GEN_PASS_DEF_FLYTOROCDLCONVERSIONPASS
@@ -153,13 +152,6 @@ public:
       Value bufferRsrc = ROCDL::MakeBufferRsrcOp::create(rewriter, loc, rsrcPtrTy, base, stride,
                                                          numRecords, flags);
       rewriter.replaceOp(op, BufferFatPtr::pack(rewriter, loc, bufferRsrc));
-      return success();
-    } else if (isTargetAddressSpace<GlobalTensorDescAddressAttr>(addrSpaceAttr)) {
-      auto args = adaptor.getArgs();
-      if (args.size() != 3)
-        return rewriter.notifyMatchFailure(
-            op, "global_tensor_desc make_ptr expects 3 args: base, outer_extent, inner_extent");
-      rewriter.replaceOp(op, GlobalTensorDesc::pack(rewriter, loc, args[0], args[1], args[2]));
       return success();
     }
 
@@ -754,16 +746,12 @@ public:
     addConversion([&](fly::MemRefType flyMemRefTy) -> Type {
       if (isTargetAddressSpace<BufferDescAddressAttr>(flyMemRefTy.getAddressSpace()))
         return BufferFatPtr::getType(flyMemRefTy.getContext());
-      if (isTargetAddressSpace<GlobalTensorDescAddressAttr>(flyMemRefTy.getAddressSpace()))
-        return GlobalTensorDesc::getType(flyMemRefTy.getContext());
       unsigned as = mapAttrToLLVMAddressSpace(flyMemRefTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyMemRefTy.getContext(), as);
     });
     addConversion([&](fly::PointerType flyPtrTy) -> Type {
       if (isTargetAddressSpace<BufferDescAddressAttr>(flyPtrTy.getAddressSpace()))
         return BufferFatPtr::getType(flyPtrTy.getContext());
-      if (isTargetAddressSpace<GlobalTensorDescAddressAttr>(flyPtrTy.getAddressSpace()))
-        return GlobalTensorDesc::getType(flyPtrTy.getContext());
       unsigned as = mapAttrToLLVMAddressSpace(flyPtrTy.getAddressSpace());
       return LLVM::LLVMPointerType::get(flyPtrTy.getContext(), as);
     });

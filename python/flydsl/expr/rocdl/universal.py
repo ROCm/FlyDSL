@@ -171,18 +171,19 @@ def TDM2D(
     atomic_barrier=False,
     early_timeout=False,
 ):
-    """Create a gfx1250 2D TDM (Tensor Data Mover) Global<->LDS copy atom.
+    """Create a gfx1250 2D TDM (Tensor Data Mover) Global<->LDS copy atom *type*.
 
-    Direction is inferred at lowering from which side is Global vs Shared; tile
-    geometry comes from the Global-side memref layout. ``pad_interval`` /
-    ``pad_amount`` (elements) add LDS row padding on the load path.
+    Direction is inferred at lowering from which side is Global vs Shared; the tile
+    shape is compile-time on the operand layout. ``pad_interval`` / ``pad_amount``
+    (elements) add LDS row padding on the load path.
 
     ``atomic_barrier`` (descriptor bit 18, HW auto-barrier) and ``early_timeout``
     (bit 21, multicast-load GL1 knob) set compile-time descriptor config bits.
 
-    Runtime atom state (via ``fx.atom.set_value``): ``workgroup_mask`` (MCAST
-    mask). Out-of-bounds handling is carried on the global operand — wrap it with
-    ``make_tdm_tensor(g, [outer, inner])`` to bound the tensor extent.
+    The tile descriptor (global base pointer, runtime 2D extent for out-of-bounds
+    handling, and outer stride) plus the MCAST ``workgroup_mask`` are runtime atom
+    state set via ``fx.atom.set_value``. :func:`make_tdm_atom` builds the atom and
+    populates that descriptor from a tensor in one call.
     """
     return CopyOpGFX1250TDM2DType.get(
         num_warps,
@@ -202,7 +203,7 @@ def make_buffer_tensor(
 ) -> Tensor:
     """Wrap ``tensor`` in a buffer-resource view for hardware OOB-checked
     loads / stores (CDNA buffer copy). For the gfx1250 TDM DMA use
-    :func:`make_tdm_tensor` instead — TDM needs a raw VA, not a buffer resource.
+    :func:`make_tdm_atom` instead — TDM needs a raw VA, not a buffer resource.
 
     ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
     Pass ``num_records_bytes`` when the byte count is a compile-time
@@ -250,44 +251,62 @@ def make_buffer_tensor(
     return make_view(buf_ptr, layout)
 
 
-def make_tdm_tensor(tensor: Tensor, tensor_extents=None) -> Tensor:
-    """Wrap ``tensor`` as a TDM global operand carrying its runtime extent.
+def make_tdm_atom(
+    tensor: Tensor,
+    tensor_extents=None,
+    outer_stride=None,
+    *,
+    num_warps,
+    pad_interval=0,
+    pad_amount=0,
+    cache_modifier=0,
+    atomic_barrier=False,
+    early_timeout=False,
+) -> object:
+    """Build a gfx1250 2D TDM copy atom carrying ``tensor``'s tile descriptor.
 
-    The tile geometry stays in the layout; the tensor's extent (globalDim) rides
-    on the pointer so the TDM copy atom reads it for hardware out-of-bounds
-    handling (load: zero-fill, store: drop), instead of a per-copy atom-state knob.
+    The atom holds the global tile descriptor as runtime state: base pointer, the
+    tensor's 2D extent (for hardware out-of-bounds handling: load zero-fill, store
+    drop), and the outer stride in elements. Reuse the atom across a tile loop; to
+    move to the next tile re-set ``base`` via ``fx.atom.set_value(atom, "base",
+    ptr)``.
 
-    ``tensor_extents`` is an optional list in tensor dim order ``[outer, inner]``.
-    Each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or any
-    ``fx`` integer); ``None`` (or an omitted trailing dim) means no clamp on that
-    axis (INT32_MAX). At most 2 entries (TDM is 2D).
+    ``tensor_extents`` is an optional list in tensor dim order ``[outer, inner]``;
+    each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or any
+    ``fx`` integer), and ``None`` (or an omitted trailing dim) means no clamp on
+    that axis (INT32_MAX). ``outer_stride`` is the runtime outer stride in
+    elements; ``None`` falls back to the tile memref's static layout stride.
 
-    This is the TDM analogue of :func:`make_buffer_tensor`'s ``num_records`` (both
-    carry the OOB bound on the operand), but keeps a raw VA rather than a fat
-    buffer resource, as the TDM descriptor build requires.
+    Issue the copy with ``fx.copy_atom_call(atom, global_tile, lds)``: the global
+    operand supplies only the tile shape and the copy direction.
     """
+    from ..primitive import atom_set_value, make_copy_atom
+
     NO_CLAMP = 0x7FFFFFFF
 
     extents = list(tensor_extents) if tensor_extents is not None else []
     if len(extents) > 2:
-        raise ValueError(f"make_tdm_tensor: at most 2 extents (TDM is 2D), got {len(extents)}")
+        raise ValueError(f"make_tdm_atom: at most 2 extents (TDM is 2D), got {len(extents)}")
     extents += [None] * (2 - len(extents))  # pad to [outer, inner]
 
-    def _dim(v):
-        if v is None:
-            return Int32(NO_CLAMP)
+    def _i32(v):
         return v if isinstance(v, Int32) else Int32(v)
 
-    outer, inner = _dim(extents[0]), _dim(extents[1])
+    outer = Int32(NO_CLAMP) if extents[0] is None else _i32(extents[0])
+    inner = Int32(NO_CLAMP) if extents[1] is None else _i32(extents[1])
+    stride = Int32(0) if outer_stride is None else _i32(outer_stride)
 
-    ptr = get_iter(tensor)
-    layout = get_layout(tensor)
-    gtd_ptr_ty = PointerType.get(
-        elem_ty=tensor.element_type.ir_type,
-        address_space=TargetAddressSpace.GlobalTensorDesc,
-        alignment=ptr.alignment,
+    copy_op = CopyOpGFX1250TDM2DType.get(
+        num_warps,
+        pad_interval,
+        pad_amount,
+        cache_modifier,
+        atomic_barrier=atomic_barrier,
+        early_timeout=early_timeout,
     )
-    # Operand fields are (base, outer extent, inner extent) in tensor dim order;
-    # the atom applies the descriptor's innermost-first convention at lowering.
-    gtd_ptr = make_ptr(gtd_ptr_ty, [ptr, outer.ir_value(), inner.ir_value()])
-    return make_view(gtd_ptr, layout)
+    atom = make_copy_atom(copy_op, tensor.element_type)
+    atom = atom_set_value(atom, "base", get_iter(tensor))
+    atom = atom_set_value(atom, "outer_extent", outer)
+    atom = atom_set_value(atom, "inner_extent", inner)
+    atom = atom_set_value(atom, "outer_stride", stride)
+    return atom

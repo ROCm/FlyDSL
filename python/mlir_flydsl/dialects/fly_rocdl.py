@@ -17,11 +17,5 @@ class _TargetAddressSpace:
 
         return ir.Attribute.parse("#fly_rocdl.buffer_desc")
 
-    @property
-    def GlobalTensorDesc(self):
-        from .. import ir
-
-        return ir.Attribute.parse("#fly_rocdl.global_tensor_desc")
-
 
 TargetAddressSpace = _TargetAddressSpace()

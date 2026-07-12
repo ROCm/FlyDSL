@@ -13,7 +13,6 @@
 #include "flydsl/Dialect/Fly/IR/FlyDialect.h"
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 #include "flydsl/Dialect/FlyROCDL/IR/Dialect.h"
-#include "flydsl/Dialect/FlyROCDL/Utils/GlobalTensorDesc.h"
 
 using namespace mlir;
 using namespace mlir::fly;
@@ -91,27 +90,52 @@ Value i32Const(OpBuilder &b, Location loc, int32_t v) {
 
 } // namespace
 
-// Stateful: one i32 field — workgroup_mask (MCAST). The OOB tensor bound is
-// carried on the global operand (global_tensor_desc), not as atom state.
+// Stateful: the atom carries the whole TDM 2D descriptor. Slot 0 is the MCAST
+// workgroup_mask; slots 1-4 are the global tile descriptor (base pointer, the
+// tensor's runtime outer/inner extent for OOB handling, and the outer stride in
+// elements). base is the per-tile global address; the coordinate advances by
+// re-setting it. The extents default INT32_MAX (no clamp) and stride defaults 0
+// (fall back to the tile memref's static layout stride).
 std::optional<unsigned> CopyOpGFX1250TDM2DType::getFieldIndex(AtomStateField field) {
   switch (field) {
   case AtomStateField::WorkgroupMask:
     return 0;
+  case AtomStateField::Base:
+    return 1;
+  case AtomStateField::OuterExtent:
+    return 2;
+  case AtomStateField::InnerExtent:
+    return 3;
+  case AtomStateField::OuterStride:
+    return 4;
   default:
     return std::nullopt;
   }
 }
 
 Type CopyOpGFX1250TDM2DType::getConvertedType(MLIRContext *ctx) const {
-  return LLVM::LLVMStructType::getLiteral(ctx, {IntegerType::get(ctx, 32)});
+  auto i32 = IntegerType::get(ctx, 32);
+  auto glbPtr = LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/1);
+  return LLVM::LLVMStructType::getLiteral(ctx, {i32, glbPtr, i32, i32, i32});
 }
 
 Value CopyOpGFX1250TDM2DType::getDefaultState(OpBuilder &builder, Location loc) const {
-  auto structTy = cast<LLVM::LLVMStructType>(getConvertedType(builder.getContext()));
+  auto *ctx = builder.getContext();
+  auto structTy = cast<LLVM::LLVMStructType>(getConvertedType(ctx));
   Value state = LLVM::UndefOp::create(builder, loc, structTy);
+  auto insert = [&](AtomStateField f, Value v) {
+    state =
+        LLVM::InsertValueOp::create(builder, loc, state, v, ArrayRef<int64_t>{*getFieldIndex(f)});
+  };
   Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
-  state = LLVM::InsertValueOp::create(
-      builder, loc, state, zero, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::WorkgroupMask)});
+  Value noClamp = arith::ConstantIntOp::create(builder, loc, 0x7FFFFFFF, 32);
+  Value nullBase =
+      LLVM::ZeroOp::create(builder, loc, LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/1));
+  insert(AtomStateField::WorkgroupMask, zero);
+  insert(AtomStateField::Base, nullBase);
+  insert(AtomStateField::OuterExtent, noClamp);
+  insert(AtomStateField::InnerExtent, noClamp);
+  insert(AtomStateField::OuterStride, zero);
   return state;
 }
 
@@ -196,15 +220,9 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   if (!srcMemTy || !dstMemTy)
     return failure();
 
-  // A global_tensor_desc operand (base pointer + runtime 2D extent) counts as the
-  // global side; a plain global memref carries no bound (whole tile in-bounds).
-  auto isGlobalLike = [](fly::MemRefType t) {
-    return isGenericAddressSpace<fly::AddressSpace::Global>(t.getAddressSpace()) ||
-           isTargetAddressSpace<GlobalTensorDescAddressAttr>(t.getAddressSpace());
-  };
-  bool srcGlobal = isGlobalLike(srcMemTy);
+  bool srcGlobal = isGenericAddressSpace<fly::AddressSpace::Global>(srcMemTy.getAddressSpace());
   bool srcShared = isGenericAddressSpace<fly::AddressSpace::Shared>(srcMemTy.getAddressSpace());
-  bool dstGlobal = isGlobalLike(dstMemTy);
+  bool dstGlobal = isGenericAddressSpace<fly::AddressSpace::Global>(dstMemTy.getAddressSpace());
   bool dstShared = isGenericAddressSpace<fly::AddressSpace::Shared>(dstMemTy.getAddressSpace());
 
   bool isLoad = srcGlobal && dstShared;
@@ -212,19 +230,23 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   if (!isLoad && !isStore)
     return failure();
 
-  // Global side carries the tile geometry; LDS side is the scratch tile.
+  // The global operand only marks the direction; its base pointer, extents, and
+  // stride come from the atom descriptor state. The tile shape is compile-time on
+  // the operand layout.
   fly::MemRefType glbMemTy = isLoad ? srcMemTy : dstMemTy;
-  Value glbPtr = isLoad ? src : dst;
   Value ldsPtr = isLoad ? dst : src;
 
   auto layout = dyn_cast<fly::LayoutAttr>(glbMemTy.getLayout());
-  if (!layout || !layout.isStatic() || layout.rank() != 2)
+  if (!layout || !layout.isStaticShape() || layout.rank() != 2)
     return failure();
 
   int32_t outer = layout.getShape().at(0).getLeafAsInt().getValue();
   int32_t inner = layout.getShape().at(1).getLeafAsInt().getValue();
-  int32_t outerStride = layout.getStride().at(0).getLeafAsInt().getValue();
   int32_t innerStride = layout.getStride().at(1).getLeafAsInt().getValue();
+  // outer stride is runtime (from atom state); a static layout value is used only
+  // as the fallback when the state stride is left unset (sentinel 0).
+  int32_t staticOuterStride =
+      layout.isStaticStride() ? layout.getStride().at(0).getLeafAsInt().getValue() : 0;
 
   int32_t elemBits = glbMemTy.getElemTy().getIntOrFloatBitWidth();
   if (elemBits % 8 != 0)
@@ -242,20 +264,27 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   // Stores fold LDS padding into the tile extent (no de-pad on the store path).
   int32_t ldsInnerStride = (padActive && !isStore) ? (inner + getPadAmount()) : inner;
 
-  // Global operand: a global_tensor_desc carries {base ptr, outer extent, inner
-  // extent}; a plain global memref is a bare base ptr with no bound (extents
-  // default to INT32_MAX => whole tile in-bounds). tensorDim0/tensorDim1 follow
-  // the descriptor's innermost-first convention (dim0 = inner, dim1 = outer).
-  bool glbIsDesc = isTargetAddressSpace<GlobalTensorDescAddressAttr>(glbMemTy.getAddressSpace());
-  Value glbBasePtr = glbIsDesc ? GlobalTensorDesc::base(builder, loc, glbPtr) : glbPtr;
-  Value tensorDim0 = glbIsDesc ? GlobalTensorDesc::innerExtent(builder, loc, glbPtr)
-                               : i32Const(builder, loc, 0x7FFFFFFF);
-  Value tensorDim1 = glbIsDesc ? GlobalTensorDesc::outerExtent(builder, loc, glbPtr)
-                               : i32Const(builder, loc, 0x7FFFFFFF);
+  // Descriptor state on the atom: base pointer, runtime outer/inner extent (OOB
+  // bound, following the innermost-first convention: dim0 = inner, dim1 = outer),
+  // and outer stride. outer stride falls back to the static layout value when the
+  // state field is left at its 0 sentinel.
+  auto stateField = [&](AtomStateField f) {
+    return LLVM::ExtractValueOp::create(builder, loc, atomVal,
+                                        ArrayRef<int64_t>{*getFieldIndex(f)});
+  };
+  Value glbBasePtr = stateField(AtomStateField::Base);
+  Value tensorDim0 = stateField(AtomStateField::InnerExtent);
+  Value tensorDim1 = stateField(AtomStateField::OuterExtent);
+  Value stateStride = stateField(AtomStateField::OuterStride);
+  Value strideUnset = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, stateStride,
+                                            i32Const(builder, loc, 0));
+  Value outerStride = arith::SelectOp::create(
+      builder, loc, strideUnset, i32Const(builder, loc, staticOuterStride), stateStride);
 
   Type i64Ty = builder.getI64Type();
   Value glbBase = LLVM::PtrToIntOp::create(builder, loc, i64Ty, glbBasePtr);
   Value ldsBase = LLVM::PtrToIntOp::create(builder, loc, builder.getI32Type(), ldsPtr);
+  Value outerStride64 = arith::ExtSIOp::create(builder, loc, i64Ty, outerStride);
 
   // Per-wave outer/inner offsets (in elements), needed both for the descriptor
   // address and the per-wave OOB tensor-bound clamp below.
@@ -276,9 +305,7 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
 
     auto toI64 = [&](Value v) { return arith::ExtUIOp::create(builder, loc, i64Ty, v); };
     Value glbElemOff = arith::AddIOp::create(
-        builder, loc,
-        arith::MulIOp::create(builder, loc, toI64(warpOffOuter),
-                              arith::ConstantIntOp::create(builder, loc, outerStride, 64)),
+        builder, loc, arith::MulIOp::create(builder, loc, toI64(warpOffOuter), outerStride64),
         arith::MulIOp::create(builder, loc, toI64(warpOffInner),
                               arith::ConstantIntOp::create(builder, loc, innerStride, 64)));
     Value glbByteOff = arith::MulIOp::create(
@@ -339,7 +366,7 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
                       ((pad.enable ? 1 : 0) << 20) | ((getEarlyTimeout() ? 1 : 0) << 21) |
                       (pad.interval << 22) | (pad.amount << 25);
   int32_t g1s4 = tileD1 & 0xFFFF;
-  int32_t g1s5 = outerStride;
+  Value g1s5 = outerStride; // descriptor stride_dim0 (runtime)
 
   // Config word [15:0] carries the runtime MCAST workgroup mask; upper bits are
   // the compile-time config.
@@ -350,8 +377,8 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
 
   // tensor_dim0/tensor_dim1 are per-wave runtime bounds = max(0, globalDim - warp
   // start); the tile dims (g1s4 / tileD0) stay static, so a ragged tile is HW
-  // OOB-handled (load: zero-fill; store: drop). A plain global operand supplies
-  // globalDim = INT32_MAX => whole tile in-bounds.
+  // OOB-handled (load: zero-fill; store: drop). The default extent state is
+  // INT32_MAX => whole tile in-bounds.
   Value c16 = i32Const(builder, loc, 16);
   Value mask16 = i32Const(builder, loc, 0xFFFF);
   Value zeroC = i32Const(builder, loc, 0);
@@ -375,7 +402,7 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
 
   Value dgroup1 = vector::FromElementsOp::create(
       builder, loc, VectorType::get({8}, builder.getI32Type()),
-      ValueRange{g1s0, g1s1, g1s2, g1s3, i32Const(builder, loc, g1s4), i32Const(builder, loc, g1s5),
+      ValueRange{g1s0, g1s1, g1s2, g1s3, i32Const(builder, loc, g1s4), g1s5,
                  i32Const(builder, loc, 0), i32Const(builder, loc, 0)});
 
   // Unused descriptor groups.
