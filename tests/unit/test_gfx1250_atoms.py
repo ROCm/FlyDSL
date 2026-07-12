@@ -83,20 +83,3 @@ def test_tdm2d_type_roundtrip():
         t3 = U.TDM(1, 1, atomic_barrier=True, early_timeout=True)
         assert "barrier = true, timeout = true" in str(t3)
         assert ir.Type.parse(str(t3)) == t3
-
-
-def test_tdm_gather_type_roundtrip():
-    with _ctx(), ir.Location.unknown():
-        from flydsl._mlir.dialects import fly_rocdl  # noqa: F401
-        from flydsl.expr.rocdl import universal as U
-
-        t = U.TDMGather()
-        assert "gfx1250.tdm_gather" in str(t)
-        assert "index = 32" in str(t)
-        assert ir.Type.parse(str(t)) == t
-
-        t16 = U.TDMGather(index_size=16, pad_interval=64, pad_amount=8, cache_modifier=2)
-        assert "index = 16" in str(t16)
-        assert "pad = 64, 8" in str(t16)
-        assert ir.Type.parse(str(t16)) == t16
-        assert t16 != t

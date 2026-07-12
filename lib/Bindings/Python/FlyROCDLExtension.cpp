@@ -201,26 +201,6 @@ struct PyCopyOpGFX1250TDMType : PyConcreteType<PyCopyOpGFX1250TDMType> {
   }
 };
 
-struct PyCopyOpGFX1250TDMGatherType : PyConcreteType<PyCopyOpGFX1250TDMGatherType> {
-  FLYDSL_REGISTER_TYPE_BINDING(CopyOpGFX1250TDMGatherType, "CopyOpGFX1250TDMGatherType");
-
-  static void bindDerived(ClassTy &c) {
-    c.def_static(
-        "get",
-        [](int32_t indexSize, int32_t padInterval, int32_t padAmount, int32_t cacheModifier,
-           DefaultingPyMlirContext context) {
-          MLIRContext *ctx = unwrap(context.get()->get());
-          return PyCopyOpGFX1250TDMGatherType(
-              context->getRef(), wrap(CopyOpGFX1250TDMGatherType::get(ctx, indexSize, padInterval,
-                                                                      padAmount, cacheModifier)));
-        },
-        "index_size"_a = 32, "pad_interval"_a = 0, "pad_amount"_a = 0, "cache_modifier"_a = 0,
-        nb::kw_only(), "context"_a = nb::none(),
-        "Create a CopyOpGFX1250TDMGatherType (TDM gather Global<->LDS copy) with row-index "
-        "width (16 or 32), optional LDS padding (interval/amount in elements), and cache modifier");
-  }
-};
-
 struct PyCopyOpCDNA4LdsReadTransposeType : PyConcreteType<PyCopyOpCDNA4LdsReadTransposeType> {
   FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA4LdsReadTransposeType, "CopyOpCDNA4LdsReadTransposeType");
 
@@ -256,7 +236,6 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDMType::bind(m);
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDMGatherType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
   // clang-format on
 }

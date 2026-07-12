@@ -40,15 +40,6 @@ func.func @bad_tdm_warps(
 
 // -----
 
-// TDM gather row-index width must be 16 or 32.
-// CHECK: indexSize must be 16 or 32, got 8
-func.func @bad_gather_index_size(
-    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 8, pad = 0, 0, cache = 0>, 0>) {
-  return
-}
-
-// -----
-
 // CHECK: padInterval and padAmount must both be zero or both non-zero
 func.func @bad_tdm_pad(
     %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 64, 0, cache = 0, barrier = false, timeout = false>, 0>) {
