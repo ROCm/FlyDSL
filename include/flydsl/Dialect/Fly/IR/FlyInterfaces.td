@@ -132,7 +132,16 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
            "::mlir::Value":$atomVal,
            "::mlir::Value":$src,
            "::mlir::Value":$dst,
-           "::mlir::Value":$pred)>
+           "::mlir::Value":$pred)>,
+    InterfaceMethod<
+      "Whether the atom transfers the whole tile in a single call (e.g. a TDM "
+      "DMA). If true, the expand-copy lowering keeps the full tiled memref "
+      "instead of decomposing it into per-element copy_atom_calls.",
+      "bool",
+      "isWholeTileCopy",
+      (ins),
+      /*methodBody=*/[{}],
+      /*defaultImplementation=*/[{ return false; }]>
   ];
 }
 

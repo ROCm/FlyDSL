@@ -64,7 +64,14 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 //       oob_outer_bound.
 //===----------------------------------------------------------------------===//
 
-def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", "gfx1250.tdm_2d",[]> {
+// Spelled out (not via FlyROCDL_StatefulCopyOp) so it can override the
+// CopyOpTypeInterface `isWholeTileCopy` method (TDM is a whole-tile DMA, so the
+// expand-copy lowering must not decompose the tiled memref per element).
+def FlyROCDL_CopyOpGFX1250TDM2D : TypeDef<FlyROCDL_Dialect, "CopyOpGFX1250TDM2D", [
+    DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface, ["isWholeTileCopy"]>,
+    DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
+  ]> {
+  let mnemonic = "gfx1250.tdm_2d";
   let parameters = (ins
     "int32_t":$numWarps,
     // Padding in elements (both zero disables LDS padding).
@@ -77,6 +84,9 @@ def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", 
     `,` `cache` `=` $cacheModifier `>`
   }];
   let genVerifyDecl = 1;
+  let extraClassDeclaration = [{
+    static std::optional<unsigned> getFieldIndex(AtomStateField field);
+  }];
 }
 
 #endif // FLYROCDL_COPYATOM

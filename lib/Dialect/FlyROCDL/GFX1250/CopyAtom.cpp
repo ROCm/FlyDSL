@@ -126,6 +126,10 @@ Value CopyOpGFX1250TDM2DType::setAtomState(OpBuilder &builder, Location loc, Val
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, fieldValue, ArrayRef<int64_t>{*idx});
 }
 
+// TDM is a whole-tile DMA: one copy_atom_call transfers the entire 2D tile, so
+// the expand-copy lowering must keep the full tiled memref (not decompose it).
+bool CopyOpGFX1250TDM2DType::isWholeTileCopy() const { return true; }
+
 Attribute CopyOpGFX1250TDM2DType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
 
 Attribute CopyOpGFX1250TDM2DType::getThrBitLayoutSrc() const {

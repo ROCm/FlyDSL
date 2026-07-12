@@ -2170,6 +2170,19 @@ public:
     Value dst = op.getDst();
     Value pred = op.getPred();
 
+    // Whole-tile copy atoms (e.g. gfx1250 TDM DMA) transfer the entire tile in a
+    // single call and read the tile geometry from the (rank-2) memref layout, so
+    // they must NOT be decomposed per element. Emit one copy_atom_call directly.
+    if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
+      if (auto copyOp = dyn_cast<CopyOpTypeInterface>(copyAtomTy.getCopyOp())) {
+        if (copyOp.isWholeTileCopy()) {
+          CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+          rewriter.eraseOp(op);
+          return success();
+        }
+      }
+    }
+
     auto srcMemRefTy = cast<fly::MemRefType>(src.getType());
     auto dstMemRefTy = cast<fly::MemRefType>(dst.getType());
     auto predMemRefTy = pred ? cast<fly::MemRefType>(pred.getType()) : nullptr;
