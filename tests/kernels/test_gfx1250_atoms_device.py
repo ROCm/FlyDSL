@@ -148,7 +148,7 @@ def _compile_wmma_scale_fp8(M: int, N: int, K: int):
         copy_a = fx.make_copy_atom(fx.rocdl.BufferCopy(f8.width), f8)
         copy_c = fx.make_copy_atom(fx.rocdl.BufferCopy(f32.width), f32)
         tiled_copy_A = fx.make_tiled_copy_A(copy_a, tiled_mma)
-        tiled_copy_B = fx.make_tiled_copy_A(copy_a, tiled_mma)
+        tiled_copy_B = fx.make_tiled_copy_B(copy_a, tiled_mma)
         tiled_copy_C = fx.make_tiled_copy_C(copy_c, tiled_mma)
         thr_copy_A = tiled_copy_A.get_slice(tid)
         thr_copy_B = tiled_copy_B.get_slice(tid)

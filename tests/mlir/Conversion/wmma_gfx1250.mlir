@@ -9,7 +9,7 @@
 
 // CHECK-LABEL: @test_wmma_iu4
 func.func @test_wmma_iu4(
-    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32>>) {
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = false, signB = false, clamp = false>>) {
   %lay_ab = fly.static : !fly.layout<16:1>
   %lay_cd = fly.static : !fly.layout<8:1>
   %d = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<i32, register, 8:1>
@@ -20,8 +20,32 @@ func.func @test_wmma_iu4(
   // CHECK-DAG: %[[A_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<2xi32>
   // CHECK-DAG: %[[B_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<2xi32>
   // CHECK-DAG: %[[C_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<8xi32>
+  // Unsigned (default): the printer elides the false sign/clamp attrs.
   // CHECK: %[[RES:.*]] = rocdl.wmma.i32.16x16x32.iu4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]] : (vector<2xi32>, vector<2xi32>, vector<8xi32>) -> vector<8xi32>
   // CHECK: llvm.store %[[RES]], %{{.*}} : vector<8xi32>, !llvm.ptr<5>
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = false, signB = false, clamp = false>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
+  return
+}
+
+// -----
+
+// Signed int4 with clamp: signA/signB/clamp are forwarded to the intrinsic
+// (the rocdl op printer only shows the non-false attrs).
+
+// CHECK-LABEL: @test_wmma_iu4_signed_clamp
+func.func @test_wmma_iu4_signed_clamp(
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>) {
+  %lay_ab = fly.static : !fly.layout<16:1>
+  %lay_cd = fly.static : !fly.layout<8:1>
+  %d = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<i32, register, 8:1>
+  %a = fly.memref.alloca(%lay_ab) : (!fly.layout<16:1>) -> !fly.memref<i4, register, 16:1>
+  %b = fly.memref.alloca(%lay_ab) : (!fly.layout<16:1>) -> !fly.memref<i4, register, 16:1>
+  %c = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<i32, register, 8:1>
+
+  // CHECK: rocdl.wmma.i32.16x16x32.iu4
+  // CHECK-SAME: clamp = true
+  // CHECK-SAME: signA = true
+  // CHECK-SAME: signB = true
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (i4, i4) -> i32, signA = true, signB = true, clamp = true>>, !fly.memref<i32, register, 8:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i4, register, 16:1>, !fly.memref<i32, register, 8:1>) -> ()
   return
 }

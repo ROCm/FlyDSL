@@ -83,15 +83,13 @@ def MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None):
 def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     """Create an arch-appropriate WMMA atom.
 
-    Supported kwargs (gfx11 integer paths only — iu8 / iu4):
+    Supported kwargs (integer paths only — iu8 / iu4):
         sign_a (bool, default False): treat A operand as signed.
         sign_b (bool, default False): treat B operand as signed.
         clamp  (bool, default False): saturate integer accumulator.
-    These are forwarded verbatim to MmaOpGFX11_WMMAType.get(); the ROCDL
-    intrinsic's verify() will reject them on fp16/bf16 paths.
-    The gfx12 / gfx1250 path (MmaOpGFX1250_WMMAType) does not expose these knobs
-    yet — its integer WMMA (iu8/iu4) hardcodes sign/clamp to false — and it will
-    raise if any of these kwargs are passed as True.
+    Forwarded to the arch-specific WMMA atom (MmaOpGFX11_WMMAType on gfx11,
+    MmaOpGFX1250_WMMAType on gfx12 / gfx1250); the atom's verify() rejects them
+    on the float (fp16/bf16/fp8) paths, where the intrinsic has no such operands.
     Future WMMA ops for new architectures should extend kwargs here rather
     than growing the positional signature.
     """
@@ -112,9 +110,17 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     if arch.startswith("gfx11"):
         return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
     if arch.startswith("gfx12"):
-        if any(kwargs.get(k) for k in ("sign_a", "sign_b", "clamp")):
-            raise ValueError("sign_a/sign_b/clamp are not supported on the gfx12 / gfx1250 WMMA path yet")
-        return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
+        return MmaOpGFX1250_WMMAType.get(
+            m,
+            n,
+            k,
+            ty_ab,
+            ty_ab,
+            ty_acc,
+            sign_a=bool(kwargs.get("sign_a", False)),
+            sign_b=bool(kwargs.get("sign_b", False)),
+            clamp=bool(kwargs.get("clamp", False)),
+        )
     raise ValueError(
         f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5), gfx12xx (RDNA4), and gfx1250. "
     )
