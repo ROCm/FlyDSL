@@ -1,15 +1,30 @@
 {
  "schema": 1,
- "updated": "2026-07-12T14:31:13Z",
+ "updated": "2026-07-12T15:07:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29196036045,
+   "run_id": 29196558546,
    "pr": 835,
+   "commit": "8a31ecdfe0e3cc941073855279303f127189b5b1",
+   "branch": "feature/propagate-param-types",
+   "event": "pull_request",
+   "title": "[Misc] Propagate signatures through expr decorators",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29196558546",
+   "created_at": "2026-07-12T14:36:05Z",
+   "updated_at": "2026-07-12T14:36:05Z",
+   "actor": "simondanielsson",
+   "jobs": []
+  },
+  {
+   "run_id": 29196036045,
+   "pr": null,
    "commit": "8796d41245b6e531df0c1e581489b6e09c80b019",
    "branch": "feature/propagate-param-types",
    "event": "pull_request",
-   "title": "[Misc] Propagate param types in decorators",
+   "title": "[Misc] Propagate signatures through expr decorators",
    "status": "completed",
    "conclusion": "action_required",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29196036045",
@@ -141,11 +156,11 @@
    "branch": "gfx1250_doc_fixups",
    "event": "pull_request",
    "title": "[FlyROCDL] gfx1250 review follow-ups: signed-int WMMA, comment fixes, atom docs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193446719",
    "created_at": "2026-07-12T12:54:18Z",
-   "updated_at": "2026-07-12T13:57:07Z",
+   "updated_at": "2026-07-12T15:04:25Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -169,10 +184,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T13:57:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T15:04:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193446719/job/86654820225"
     }
    ]
@@ -1631,49 +1646,6 @@
      "started_at": "2026-07-10T07:19:19Z",
      "completed_at": "2026-07-10T08:33:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076182596/job/86308484596"
-    }
-   ]
-  },
-  {
-   "run_id": 29075911258,
-   "pr": null,
-   "commit": "41b8f90a2042f25271ac08ab3c407bc1eda2172c",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher (#824)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258",
-   "created_at": "2026-07-10T07:11:02Z",
-   "updated_at": "2026-07-10T12:08:19Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T10:34:00Z",
-     "completed_at": "2026-07-10T11:51:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258/job/86341855695"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T10:33:57Z",
-     "completed_at": "2026-07-10T11:50:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258/job/86341855711"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T11:41:58Z",
-     "completed_at": "2026-07-10T12:08:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258/job/86341855736"
     }
    ]
   }
