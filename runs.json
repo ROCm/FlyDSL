@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-12T15:40:18Z",
+ "updated": "2026-07-12T16:53:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29200854715,
+   "pr": 837,
+   "commit": "5a976c4d9f73b16c9a0578efe9c9a095825de871",
+   "branch": "xiaoyu/a8w4-quark",
+   "event": "pull_request",
+   "title": "Add a8w4 kernel for Quark mix-precision",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29200854715",
+   "created_at": "2026-07-12T16:49:57Z",
+   "updated_at": "2026-07-12T16:51:24Z",
+   "actor": "amd-xiaoyu12",
+   "jobs": []
+  },
   {
    "run_id": 29196558546,
    "pr": 835,
@@ -1605,49 +1620,6 @@
    "updated_at": "2026-07-10T07:41:16Z",
    "actor": "fsx950223",
    "jobs": []
-  },
-  {
-   "run_id": 29076182596,
-   "pr": 825,
-   "commit": "74cfc298d9893272827261004ea8bb76cf4f61c8",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076182596",
-   "created_at": "2026-07-10T07:16:28Z",
-   "updated_at": "2026-07-10T11:12:49Z",
-   "actor": "fsx950223",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-10T07:38:07Z",
-     "completed_at": "2026-07-10T08:33:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076182596/job/86308484577"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T10:57:18Z",
-     "completed_at": "2026-07-10T11:12:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076182596/job/86308484584"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T07:19:19Z",
-     "completed_at": "2026-07-10T08:33:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076182596/job/86308484596"
-    }
-   ]
   }
  ]
 }
