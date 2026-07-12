@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-12T06:30:35Z",
+ "updated": "2026-07-12T06:46:56Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29183087304,
+   "pr": 830,
+   "commit": "d1f053502e7b5fdc29c69c516ae1788d71c9e5ea",
+   "branch": "add_1250_mma_scale",
+   "event": "pull_request",
+   "title": "Add 1250 mma scale",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183087304",
+   "created_at": "2026-07-12T06:43:39Z",
+   "updated_at": "2026-07-12T06:43:40Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29182725373,
+   "pr": 830,
+   "commit": "2998a9bdf3d03fd97535f314a5cf948d35195b97",
+   "branch": "add_1250_mma_scale",
+   "event": "pull_request",
+   "title": "Add 1250 mma scale",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29182725373",
+   "created_at": "2026-07-12T06:29:20Z",
+   "updated_at": "2026-07-12T06:43:40Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 29182650361,
    "pr": 820,
@@ -1830,64 +1860,6 @@
      "started_at": "2026-07-09T08:24:10Z",
      "completed_at": "2026-07-09T10:06:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003519674/job/86069722139"
-    }
-   ]
-  },
-  {
-   "run_id": 29003448799,
-   "pr": null,
-   "commit": "ebfc2c53026726516354767c2f93f754a045de6f",
-   "branch": "feat/mxfp6-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003448799",
-   "created_at": "2026-07-09T08:03:00Z",
-   "updated_at": "2026-07-09T08:04:18Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29003204260,
-   "pr": null,
-   "commit": "4ab98c061d5bd3b4dfe0af538c74456185bdcbcc",
-   "branch": "main",
-   "event": "push",
-   "title": "[rmsnorm] Add backward pass + forward store_rstd for training (PR 1/3\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003204260",
-   "created_at": "2026-07-09T07:58:26Z",
-   "updated_at": "2026-07-09T11:44:40Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-09T08:50:47Z",
-     "completed_at": "2026-07-09T10:12:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003204260/job/86068696337"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-09T08:23:19Z",
-     "completed_at": "2026-07-09T10:18:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003204260/job/86068696338"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-09T11:25:35Z",
-     "completed_at": "2026-07-09T11:44:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003204260/job/86068696347"
     }
    ]
   }
