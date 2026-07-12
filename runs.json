@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-12T14:23:08Z",
+ "updated": "2026-07-12T14:31:13Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,7 +9,7 @@
    "commit": "8796d41245b6e531df0c1e581489b6e09c80b019",
    "branch": "feature/propagate-param-types",
    "event": "pull_request",
-   "title": "[Misc] Propagate param types in decorators for better user experience",
+   "title": "[Misc] Propagate param types in decorators",
    "status": "completed",
    "conclusion": "action_required",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29196036045",
@@ -40,11 +40,11 @@
    "branch": "main",
    "event": "push",
    "title": "update version 0.2.4(#834)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193639726",
    "created_at": "2026-07-12T13:00:50Z",
-   "updated_at": "2026-07-12T13:28:30Z",
+   "updated_at": "2026-07-12T14:29:15Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -68,10 +68,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T13:21:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T14:29:15Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193639726/job/86654150718"
     }
    ]
@@ -151,10 +151,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T13:42:53Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T14:29:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193446719/job/86654820219"
     },
     {
