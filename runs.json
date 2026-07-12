@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-12T14:16:05Z",
+ "updated": "2026-07-12T14:23:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29196036045,
+   "pr": 835,
+   "commit": "8796d41245b6e531df0c1e581489b6e09c80b019",
+   "branch": "feature/propagate-param-types",
+   "event": "pull_request",
+   "title": "[Misc] Propagate param types in decorators for better user experience",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29196036045",
+   "created_at": "2026-07-12T14:19:38Z",
+   "updated_at": "2026-07-12T14:19:38Z",
+   "actor": "simondanielsson",
+   "jobs": []
+  },
   {
    "run_id": 29193850534,
    "pr": 833,
@@ -270,11 +285,11 @@
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
    "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653",
    "created_at": "2026-07-12T12:15:27Z",
-   "updated_at": "2026-07-12T13:15:05Z",
+   "updated_at": "2026-07-12T14:21:55Z",
    "actor": "HaonanWang98",
    "jobs": [
     {
@@ -289,10 +304,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T13:04:52Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T14:21:54Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653/job/86652854275"
     },
     {
@@ -1659,49 +1674,6 @@
      "started_at": "2026-07-10T11:41:58Z",
      "completed_at": "2026-07-10T12:08:18Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075911258/job/86341855736"
-    }
-   ]
-  },
-  {
-   "run_id": 29075759881,
-   "pr": null,
-   "commit": "d97c20fc8d1df782e8c54a0ddf0f95e3bbb6e078",
-   "branch": "main",
-   "event": "push",
-   "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing (#\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075759881",
-   "created_at": "2026-07-10T07:07:58Z",
-   "updated_at": "2026-07-10T10:31:43Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T07:38:05Z",
-     "completed_at": "2026-07-10T09:05:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075759881/job/86307024352"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T07:10:06Z",
-     "completed_at": "2026-07-10T08:23:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075759881/job/86307024373"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T10:13:49Z",
-     "completed_at": "2026-07-10T10:31:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29075759881/job/86307024377"
     }
    ]
   }
