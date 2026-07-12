@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-12T12:18:24Z",
+ "updated": "2026-07-12T12:38:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29192612522,
+   "pr": 832,
+   "commit": "20e2e1c54b5c32cd25c0ef39c1487c2608606e0a",
+   "branch": "gfx1250_doc_fixups",
+   "event": "pull_request",
+   "title": "[FlyROCDL] Fix stale gfx1250 atom comments (TDM N-D, gfx1250 != RDNA4)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192612522",
+   "created_at": "2026-07-12T12:26:13Z",
+   "updated_at": "2026-07-12T12:33:39Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T12:33:39Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192612522/job/86649879845"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T12:27:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192612522/job/86649879863"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T12:27:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192612522/job/86649879870"
+    }
+   ]
+  },
+  {
+   "run_id": 29192397665,
+   "pr": null,
+   "commit": "57a163d353ed98057052112d1469dfda5631a8cc",
+   "branch": "main",
+   "event": "push",
+   "title": "[FlyROCDL] Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms (#830)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192397665",
+   "created_at": "2026-07-12T12:18:49Z",
+   "updated_at": "2026-07-12T12:20:46Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-12T12:20:35Z",
+     "completed_at": "2026-07-12T12:32:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192397665/job/86649324903"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T12:20:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192397665/job/86649324922"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T12:20:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192397665/job/86649324923"
+    }
+   ]
+  },
   {
    "run_id": 29192304653,
    "pr": 830,
@@ -20,7 +106,7 @@
   },
   {
    "run_id": 29192231698,
-   "pr": 830,
+   "pr": null,
    "commit": "797266f8380e5317b9a7274c16c69082b0760579",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -35,7 +121,7 @@
   },
   {
    "run_id": 29191778200,
-   "pr": 830,
+   "pr": null,
    "commit": "55ba145786dfebf5923ff1d53d5db65e4366879b",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -78,7 +164,7 @@
   },
   {
    "run_id": 29187578776,
-   "pr": 830,
+   "pr": null,
    "commit": "8fdac2dc7a23093cd4c2f14fa4040807a075e601",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -121,7 +207,7 @@
   },
   {
    "run_id": 29186911881,
-   "pr": 830,
+   "pr": null,
    "commit": "e04f0910c96dc2fbb7c7efe94bb0d9982fe45f07",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -136,7 +222,7 @@
   },
   {
    "run_id": 29185350204,
-   "pr": 830,
+   "pr": null,
    "commit": "bdcbca1252e9fdebaf3a60a417f810c6b789a204",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -237,7 +323,7 @@
   },
   {
    "run_id": 29185035124,
-   "pr": 830,
+   "pr": null,
    "commit": "2a475611352709a2f048c8c2edd2685ede3750e1",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -252,7 +338,7 @@
   },
   {
    "run_id": 29183500927,
-   "pr": 830,
+   "pr": null,
    "commit": "14110bff20c517374c48a08d31ed1d450b2f6db2",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -295,7 +381,7 @@
   },
   {
    "run_id": 29183401486,
-   "pr": 830,
+   "pr": null,
    "commit": "2dc93366d66b7a05cb4cd0d5d9739e7484bbb391",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -310,7 +396,7 @@
   },
   {
    "run_id": 29183272482,
-   "pr": 830,
+   "pr": null,
    "commit": "db807f2f376ab2649503247cc7444f920cb6edc5",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -325,7 +411,7 @@
   },
   {
    "run_id": 29183087304,
-   "pr": 830,
+   "pr": null,
    "commit": "d1f053502e7b5fdc29c69c516ae1788d71c9e5ea",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -340,7 +426,7 @@
   },
   {
    "run_id": 29182725373,
-   "pr": 830,
+   "pr": null,
    "commit": "2998a9bdf3d03fd97535f314a5cf948d35195b97",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -385,7 +471,7 @@
   },
   {
    "run_id": 29181743209,
-   "pr": 830,
+   "pr": null,
    "commit": "f6361a6b78b52f2f477cd8758c8521d13890ec7b",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -443,7 +529,7 @@
   },
   {
    "run_id": 29181291521,
-   "pr": 830,
+   "pr": null,
    "commit": "ee6cb61fba5344826b398b0e2e0a4f544608dc0c",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -458,7 +544,7 @@
   },
   {
    "run_id": 29180935067,
-   "pr": 830,
+   "pr": null,
    "commit": "731c6ca8e594be847f365033fdecd4ce6d90eac3",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -473,7 +559,7 @@
   },
   {
    "run_id": 29180573776,
-   "pr": 830,
+   "pr": null,
    "commit": "50622964ae96c16bc748d622db0de573255917db",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -516,7 +602,7 @@
   },
   {
    "run_id": 29180030283,
-   "pr": 830,
+   "pr": null,
    "commit": "fe7d1b6fd35ea2780fa7afde2ec93a006e9735ff",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -531,7 +617,7 @@
   },
   {
    "run_id": 29179616282,
-   "pr": 830,
+   "pr": null,
    "commit": "82c85fb87de4d66ba5438de632a94ec2e206552b",
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
@@ -1672,64 +1758,6 @@
      "started_at": "2026-07-10T08:55:17Z",
      "completed_at": "2026-07-10T10:26:17Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29068040177/job/86324302423"
-    }
-   ]
-  },
-  {
-   "run_id": 29067975809,
-   "pr": null,
-   "commit": "e7212f0cdd69f31108654dd7176ecf43b54f38d1",
-   "branch": "mxfp4-batched-preshuffle-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067975809",
-   "created_at": "2026-07-10T03:58:24Z",
-   "updated_at": "2026-07-10T04:00:16Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29067143990,
-   "pr": 819,
-   "commit": "3c28750559b7c838eae0494c1abd824dea6e0919",
-   "branch": "hyg/fmha_hd64_smallseq_opt",
-   "event": "pull_request",
-   "title": "[FMHA] Add D=64 support and optimize short-sequence gfx950 routing",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990",
-   "created_at": "2026-07-10T03:34:36Z",
-   "updated_at": "2026-07-10T09:08:07Z",
-   "actor": "yanguahe",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T03:36:40Z",
-     "completed_at": "2026-07-10T04:51:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990/job/86281147891"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T03:36:40Z",
-     "completed_at": "2026-07-10T04:59:56Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990/job/86281147892"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T08:53:13Z",
-     "completed_at": "2026-07-10T09:08:06Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29067143990/job/86281147896"
     }
    ]
   }
