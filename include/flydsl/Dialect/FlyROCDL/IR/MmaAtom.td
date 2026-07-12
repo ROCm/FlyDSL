@@ -91,6 +91,44 @@ def FlyROCDL_MmaOpGFX1250_WMMA : FlyROCDL_MmaOp<"MmaOpGFX1250_WMMA", "gfx1250.wm
 }
 
 //===----------------------------------------------------------------------===//
+// MmaOp GFX1250 — MX-scaled WMMA wave32 (E8M0 block scale, V_WMMA_SCALE)
+//===----------------------------------------------------------------------===//
+
+def FlyROCDL_MmaOpGFX1250_WMMAScale : FlyROCDL_StatefulMmaOp<"MmaOpGFX1250_WMMAScale", "gfx1250.wmma_scale", []> {
+  let parameters = (ins
+    "int32_t":$m,
+    "int32_t":$n,
+    "int32_t":$k,
+    "Type":$elemTyA,
+    "Type":$elemTyB,
+    "Type":$elemTyAcc,
+    "int32_t":$opselA,
+    "int32_t":$opselB
+  );
+  let assemblyFormat = [{
+    `<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc
+    `,` `opselA` `=` $opselA `,` `opselB` `=` $opselB `>`
+  }];
+
+  let builders = [
+    TypeBuilderWithInferredContext<(ins
+      "int32_t":$m, "int32_t":$n, "int32_t":$k,
+      "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   /*opselA=*/0, /*opselB=*/0);
+    }]>,
+    TypeBuilderWithInferredContext<(ins
+      "int32_t":$m, "int32_t":$n, "int32_t":$k,
+      "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc,
+      "int32_t":$opselA, "int32_t":$opselB), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   opselA, opselB);
+    }]>
+  ];
+  let genVerifyDecl = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // MmaOp GFX11 — WMMA wave32 (RDNA3 / RDNA3.5: gfx1100, gfx1101, gfx1102,
 // gfx1103, gfx1150, gfx1151, gfx1152)
 //===----------------------------------------------------------------------===//

@@ -45,4 +45,28 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
   let genVerifyDecl = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// CopyOp GFX1250 — 2D TDM (Tensor Data Mover) async Global<->LDS copy.
+//
+// Descriptor-driven whole-tile DMA. The tile geometry (outer/inner extent,
+// outer stride) is taken from the Global-side memref layout; padding / warp
+// distribution / cache policy are compile-time atom parameters. Direction
+// (load vs store) is inferred from which side is Global vs Shared.
+//===----------------------------------------------------------------------===//
+
+def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_CopyOp<"CopyOpGFX1250TDM2D", "gfx1250.tdm_2d",[]> {
+  let parameters = (ins
+    "int32_t":$numWarps,
+    // Padding in elements (both zero disables LDS padding).
+    "int32_t":$padInterval,
+    "int32_t":$padAmount,
+    "int32_t":$cacheModifier
+  );
+  let assemblyFormat = [{
+    `<` `warps` `=` $numWarps `,` `pad` `=` $padInterval `,` $padAmount
+    `,` `cache` `=` $cacheModifier `>`
+  }];
+  let genVerifyDecl = 1;
+}
+
 #endif // FLYROCDL_COPYATOM

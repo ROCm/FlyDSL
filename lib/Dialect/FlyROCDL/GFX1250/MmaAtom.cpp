@@ -6,6 +6,8 @@
 
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 
+#include "WmmaLayout.h"
+
 using namespace mlir;
 using namespace mlir::fly;
 
