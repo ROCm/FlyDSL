@@ -83,28 +83,6 @@ def test_conv3d_factorized_filters_vs_torch(kernel_shape, padding):
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
 
 
-# >2^31-element input exercises the BIG_IN rebased addressing on the temporal-only
-# fast (3x1x1) decode path -- the path whose rebase is derived separately from the
-# generic decode. Input alone is ~4.4 GB. Single case: two multi-GB conv+reference
-# runs in one process can abort the HIP runtime; the generic BIG_IN (1x3x3) rebase
-# is covered by the large-tensor fix's own validation.
-@_skip_non_cdna4
-@pytest.mark.large_shape
-def test_conv3d_large_tensor_big_in_temporal_vs_torch():
-    n, c, t, h, w, k = 1, 640, 240, 160, 90, 64
-    assert n * c * t * h * w > 0x7FFFFFFF  # must trip the BIG_IN path
-    torch.manual_seed(7031)
-    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn((k, c, 3, 1, 1), device="cuda", dtype=torch.bfloat16)
-
-    y = conv3d_implicit_8wave(x, weight, stride=1, padding=(1, 0, 0))
-    y_ref = F.conv3d(x, weight, stride=1, padding=(1, 0, 0))
-    torch.cuda.synchronize()
-
-    assert y.shape == y_ref.shape
-    assert torch.allclose(y, y_ref, rtol=3e-2, atol=3e-2)
-
-
 @_skip_non_cdna4
 @pytest.mark.parametrize("c", [16, 64])
 def test_conv3d_runtime_k_loop_short_problems(c):

@@ -12,14 +12,15 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm
+from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir.dialects import rocdl as _rocdl
+from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.typing import T
-from kernels.common.mem_ops import buffer_atomic_add
-from flydsl._mlir import ir as _ir
-from flydsl._mlir.dialects import llvm as _llvm, rocdl as _rocdl
-from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
 from flydsl.expr.utils.arith import ArithValue as _ArithValue
+from kernels.common.mem_ops import buffer_atomic_add
 from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
 
 
@@ -33,7 +34,8 @@ def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
     rsrc_ty = _ir.Type.parse("!llvm.ptr<8>")
     base_ptr = _llvm.IntToPtrOp(ptr_ty, addr_i64.ir_value()).result
     rsrc_raw = _rocdl.MakeBufferRsrcOp(
-        rsrc_ty, base_ptr,
+        rsrc_ty,
+        base_ptr,
         buffer_ops._create_i16_constant(0),
         buffer_ops._create_i64_constant(0xFFFFFFFF),
         buffer_ops._create_i32_constant(buffer_ops._get_buffer_flags()),
@@ -45,6 +47,7 @@ def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
     )
     rsrc_cast = _llvm.BitcastOp(f8_ptr_ty.ir_type, rsrc_raw).result
     return fx.Tensor(fx.make_view(_ArithValue(rsrc_cast), fx.get_layout(ref_buf_tensor)))
+
 
 # TILE_K is pinned to the FP8 MFMA k-dim (mfma_f32_16x16x128 -> 128). The tile
 # size (TILE_M/TILE_N) and wave layout (WAVE_M/WAVE_N) are compile-time
@@ -272,6 +275,24 @@ def compile_conv3d_implicit_8wave_fp8(
     crs = c * kt * kh * kw
     k_tiles = (crs + TILE_K - 1) // TILE_K
     BIG_IN = (n * c * d * h * width) > 0x7FFFFFFF
+    # Output element count; when its byte offset can exceed int32 the epilogue
+    # buffer_store (i32 voffset) overflows, so store via 64-bit global pointers.
+    BIG_OUT = (n * k * do * ho * wo * 2) > 0x7FFFFFFF
+    # Kt x 1 x 1, stride-1, same-shape temporal-only conv: an input row differs
+    # from its output row only by a temporal plane delta, removing the generic
+    # n/t/h/w decomposition and spatial bounds checks in the im2col gather.
+    temporal_only_fast = (
+        kh == 1
+        and kw == 1
+        and st == 1
+        and sh == 1
+        and sw == 1
+        and ph == 0
+        and pw == 0
+        and do == d
+        and ho == h
+        and wo == width
+    )
 
     assert k_tiles >= 1
 
@@ -376,30 +397,43 @@ def compile_conv3d_implicit_8wave_fp8(
             local_k = linear % TILE_K
             row = m_offset + blk * ROWS_PER_PASS + local_m
             row_valid = row < fx.Index(npq)
-            n_idx = row // dhw
-            rem = row % dhw
-            ot = rem // hw_o
-            rem2 = rem % hw_o
-            oh = rem2 // wo
-            ow = rem2 % wo
             lds_elem = a_lds_off(stage, fx.Index(blk * ROWS_PER_PASS) + local_m, local_k)
             k_abs = fx.Index(k_base) + fx.Index(local_k)
             cc = k_abs % c
-            ckk = k_abs // c
-            kw_i = ckk % kw
-            ckk2 = ckk // kw
-            kh_i = ckk2 % kh
-            kt_i = ckk2 // kh
-            in_t = ot * st + kt_i - pt
-            in_h = oh * sh + kh_i - ph
-            in_w = ow * sw + kw_i - pw
             k_valid = k_abs < fx.Index(crs)
-            valid_data = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
-            if const_expr(BIG_IN):
-                di = n_idx - nbase
-                g_elem = (((di * d + (in_t - base_t)) * h + in_h) * width + in_w) * c + cc
+            if const_expr(temporal_only_fast):
+                kt_i = k_abs // c
+                temporal_delta = kt_i - pt
+                out_t = (row // hw_o) % d
+                in_t = out_t + temporal_delta
+                valid_data = row_valid & k_valid & in_range(in_t, d)
+                if const_expr(BIG_IN):
+                    # Offset relative to x_div's rebased origin so the i32 element
+                    # offset does not overflow.
+                    g_elem = ((row + temporal_delta * hw_o) - (nbase * dhw + base_t * hw_o)) * c + cc
+                else:
+                    g_elem = (row + temporal_delta * hw_o) * c + cc
             else:
-                g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
+                n_idx = row // dhw
+                rem = row % dhw
+                ot = rem // hw_o
+                rem2 = rem % hw_o
+                oh = rem2 // wo
+                ow = rem2 % wo
+                ckk = k_abs // c
+                kw_i = ckk % kw
+                ckk2 = ckk // kw
+                kh_i = ckk2 % kh
+                kt_i = ckk2 // kh
+                in_t = ot * st + kt_i - pt
+                in_h = oh * sh + kh_i - ph
+                in_w = ow * sw + kw_i - pw
+                valid_data = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
+                if const_expr(BIG_IN):
+                    di = n_idx - nbase
+                    g_elem = (((di * d + (in_t - base_t)) * h + in_h) * width + in_w) * c + cc
+                else:
+                    g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
             g_elem_i = fx.Int32(g_elem)
             safe_elem = arith.select(valid_data, g_elem_i, fx.Int32(x_num_records))
             copy_g2s(x_div, a_lds, lds_elem, safe_elem)
@@ -484,6 +518,23 @@ def compile_conv3d_implicit_8wave_fp8(
                 a_frags = read_a_frags(stage)
                 b_frags = read_b_frags(stage)
 
+        # Pack a lane's MFMA_C_VALUES accumulators into one vectorized store. For
+        # n==1 (no split-K) they map to rows row_base+0..3, which are contiguous
+        # in y (off_ncdhw = col*dhw + row) and 8-byte aligned (row_base and dhw
+        # are multiples of MFMA_C_VALUES), so a single validity check gates them.
+        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
+
+        # For >2^31-byte outputs the i32 buffer_store voffset overflows; store via
+        # a 64-bit global pointer built from the full element offset instead.
+        if const_expr(BIG_OUT):
+            y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
+
+        def _big_store(off_elem, value):
+            addr = y_elem_base + fx.Int64(off_elem) * fx.Int64(2)
+            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+            v = value.ir_value() if hasattr(value, "ir_value") else value
+            llvm.StoreOp(v, ptr, alignment=2)
+
         def store_acc():
             for mi in range_constexpr(MI_M):
                 row_base = m_offset + wave_m * WARP_M + mi * MFMA_M + c_m_vec
@@ -496,6 +547,22 @@ def compile_conv3d_implicit_8wave_fp8(
                     if const_expr(has_bias and not use_splitk):
                         bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col, vec_width=1, dtype=fx.Float32))
                     acc_vec = Vec(acc[mi * MI_N + ni])
+
+                    if const_expr(_vec_store):
+                        off0 = col * dhw + fx.Index(row_base)
+
+                        def _emit_vec4():
+                            vals = []
+                            for i in range_constexpr(MFMA_C_VALUES):
+                                o = acc_vec[i] + bias_val if const_expr(has_bias) else acc_vec[i]
+                                vals.append(o.to(fx.BFloat16))
+                            v4 = fx.Vector.from_elements(vals, dtype=fx.BFloat16)
+                            buffer_ops.buffer_store(v4, y_rsrc, off0)
+
+                        if col_valid:
+                            _emit_vec4()
+                        continue
+
                     for i in range_constexpr(MFMA_C_VALUES):
                         row = row_base + i
                         out = acc_vec[i]
@@ -517,7 +584,11 @@ def compile_conv3d_implicit_8wave_fp8(
                                 n_idx = row // dhw
                                 sp = row % dhw
                                 off_ncdhw = n_idx * (k * dhw) + col * dhw + sp
-                            buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
+                            if const_expr(BIG_OUT):
+                                if col_valid:
+                                    _big_store(off_ncdhw, out.to(fx.BFloat16))
+                            else:
+                                buffer_ops.buffer_store(out.to(fx.BFloat16), y_rsrc, off_ncdhw, mask=col_valid)
 
         store_acc()
 
@@ -547,6 +618,8 @@ def _normalize_3(v):
 def _choose_splitk(npq, crs, k, device, tile=DEFAULT_TILE):
     tile_m, tile_n = tile[0], tile[1]
     if npq % tile_m != 0 or k % tile_n != 0 or crs % TILE_K != 0:
+        return 1
+    if npq * k * 4 > 0x7FFFFFFF:  # split-K fp32 output atomic uses an i32 byte offset
         return 1
     base = (npq // tile_m) * (k // tile_n)
     k_tiles = (crs + TILE_K - 1) // TILE_K
@@ -700,4 +773,38 @@ def conv3d_implicit_8wave_fp8(
     return y
 
 
-__all__ = ["conv3d_implicit_8wave_fp8"]
+def conv2d_implicit_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    """2D FP8 conv via the 3D kernel (depth-1 degenerate case).
+
+    x: (N, C, H, W) bf16, weight: (K, C, R, S) bf16. stride/padding int or 2-tuple.
+    Returns (N, K, Ho, Wo). Reshapes to the D=T=1 case and squeezes depth back.
+    """
+    assert x.dim() == 4 and weight.dim() == 4, "conv2d_implicit_fp8 expects (N,C,H,W) / (K,C,R,S)"
+    sh, sw = (stride, stride) if isinstance(stride, int) else stride
+    ph, pw = (padding, padding) if isinstance(padding, int) else padding
+    n, c, h, w = x.shape
+    k, wc, r, s = weight.shape
+    x5 = x.reshape(n, c, 1, h, w)
+    w5 = weight.reshape(k, wc, 1, r, s)
+    y5 = conv3d_implicit_8wave_fp8(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), **kwargs)
+    return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[3], y5.shape[4])
+
+
+def conv1d_implicit_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    """1D FP8 conv via the 3D kernel (depth/height-1 degenerate case).
+
+    x: (N, C, W) bf16, weight: (K, C, S) bf16. stride/padding int or 1-tuple.
+    Returns (N, K, Wo). Reshapes to the D=H=T=R=1 case and squeezes back.
+    """
+    assert x.dim() == 3 and weight.dim() == 3, "conv1d_implicit_fp8 expects (N,C,W) / (K,C,S)"
+    sw = stride if isinstance(stride, int) else stride[0]
+    pw = padding if isinstance(padding, int) else padding[0]
+    n, c, w = x.shape
+    k, wc, s = weight.shape
+    x5 = x.reshape(n, c, 1, 1, w)
+    w5 = weight.reshape(k, wc, 1, 1, s)
+    y5 = conv3d_implicit_8wave_fp8(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), **kwargs)
+    return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
+
+
+__all__ = ["conv3d_implicit_8wave_fp8", "conv2d_implicit_fp8", "conv1d_implicit_fp8"]
