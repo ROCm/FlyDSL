@@ -1,11 +1,26 @@
 {
  "schema": 1,
- "updated": "2026-07-12T06:19:35Z",
+ "updated": "2026-07-12T06:30:35Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29182386441,
+   "run_id": 29182650361,
    "pr": 820,
+   "commit": "31e5866e5edd888a4014071925829dc02063679f",
+   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
+   "event": "pull_request",
+   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29182650361",
+   "created_at": "2026-07-12T06:26:13Z",
+   "updated_at": "2026-07-12T06:27:39Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 29182386441,
+   "pr": null,
    "commit": "0c4ffbf23a3d5516596d599a5200bf3b9afabb12",
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
@@ -25,11 +40,11 @@
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
    "title": "Add 1250 mma scale",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29181743209",
    "created_at": "2026-07-12T05:49:53Z",
-   "updated_at": "2026-07-12T06:11:06Z",
+   "updated_at": "2026-07-12T06:26:46Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -44,19 +59,19 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-12T06:11:06Z",
+     "started_at": "2026-07-12T06:26:46Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29181743209/job/86622053436"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T06:12:02Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T06:25:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29181743209/job/86622053440"
     }
    ]
@@ -1875,21 +1890,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003204260/job/86068696347"
     }
    ]
-  },
-  {
-   "run_id": 29000641917,
-   "pr": 812,
-   "commit": "bf6c1678da6e47277cc812f6a6d6cf86e2a4877b",
-   "branch": "xudoyuan/kernels-smem-migration",
-   "event": "pull_request",
-   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29000641917",
-   "created_at": "2026-07-09T07:08:44Z",
-   "updated_at": "2026-07-09T08:48:19Z",
-   "actor": "xudoyuan",
-   "jobs": []
   }
  ]
 }
