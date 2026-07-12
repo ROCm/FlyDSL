@@ -20,11 +20,12 @@ using namespace mlir::fly;
 namespace mlir::fly_rocdl {
 
 //===----------------------------------------------------------------------===//
-// CopyOpGFX1250TDMType — 2D TDM async Global<->LDS copy
+// CopyOpGFX1250TDMType — N-D TDM async Global<->LDS whole-tile copy (rank 1-5).
 //
-// 2D (non-gather) port of tdm_ops.py::make_tensor_descriptor_2d. The Global-side
-// memref layout supplies the tile geometry; the atom parameters supply padding,
-// warp count, and cache policy. Direction is inferred from the address spaces.
+// The Global-side memref layout supplies the compile-time tile geometry; the
+// atom parameters supply padding, warp count, and cache policy; the tile
+// descriptor (base / per-dim extent / per-dim stride) is runtime atom state.
+// Direction (load vs store) is inferred from the operand address spaces.
 //===----------------------------------------------------------------------===//
 
 namespace {

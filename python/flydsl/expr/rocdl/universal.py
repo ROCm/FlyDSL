@@ -89,8 +89,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
         clamp  (bool, default False): saturate integer accumulator.
     These are forwarded verbatim to MmaOpGFX11_WMMAType.get(); the ROCDL
     intrinsic's verify() will reject them on fp16/bf16 paths.
-    The gfx12 (RDNA4) path does not expose these knobs yet and will raise
-    if any are passed as True.
+    The gfx12 / gfx1250 path (MmaOpGFX1250_WMMAType) does not expose these knobs
+    yet — its integer WMMA (iu8/iu4) hardcodes sign/clamp to false — and it will
+    raise if any of these kwargs are passed as True.
     Future WMMA ops for new architectures should extend kwargs here rather
     than growing the positional signature.
     """
@@ -102,7 +103,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
 
     # Arch-aware dispatch:
     #   * RDNA3 / RDNA3.5 (gfx1100..gfx1152) use the legacy v16-operand WMMA ABI.
-    #   * RDNA4 (gfx1250)                    uses the new v8-operand ABI.
+    #   * RDNA4 (gfx12xx, e.g. gfx1201) and gfx1250 use the new v8-operand ABI;
+    #     both route through MmaOpGFX1250_WMMAType via the gfx12 prefix below.
+    #     (gfx1250 is its own arch, not RDNA4, but shares this WMMA atom.)
     from ...runtime.device import get_rocm_arch
 
     arch = (get_rocm_arch() or "").lower()
@@ -110,10 +113,10 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
         return MmaOpGFX11_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc, **kwargs)
     if arch.startswith("gfx12"):
         if any(kwargs.get(k) for k in ("sign_a", "sign_b", "clamp")):
-            raise ValueError("sign_a/sign_b/clamp are not supported on the gfx12 (RDNA4) WMMA path yet")
+            raise ValueError("sign_a/sign_b/clamp are not supported on the gfx12 / gfx1250 WMMA path yet")
         return MmaOpGFX1250_WMMAType.get(m, n, k, ty_ab, ty_ab, ty_acc)
     raise ValueError(
-        f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5) and gfx12xx (RDNA4). "
+        f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5), gfx12xx (RDNA4), and gfx1250. "
     )
 
 
