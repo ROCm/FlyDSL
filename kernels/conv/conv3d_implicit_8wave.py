@@ -210,7 +210,6 @@ def compile_conv3d_implicit_8wave(
     crs = c * kt * kh * kw
     k_tiles = (crs + TILE_K - 1) // TILE_K
 
-    DHWC = c * d * h * w
     BIG_IN = (n * c * d * h * w) > 0x7FFFFFFF
 
     n_tail = k % TILE_N != 0
@@ -223,6 +222,22 @@ def compile_conv3d_implicit_8wave(
     grid_m = (npq + TILE_M - 1) // TILE_M
     elem_ty = fx.BFloat16
     mfma_fn = rocdl.mfma_f32_16x16x32_bf16
+    temporal_only_fast = (
+        kh == 1
+        and kw == 1
+        and st == 1
+        and sh == 1
+        and sw == 1
+        and ph == 0
+        and pw == 0
+        and do == d
+        and ho == h
+        and wo == w
+        # The >2^31-element rebase (BIG_IN) uses the generic n/t/h/w decode to
+        # compute the origin-relative offset; the temporal-only fast decode does
+        # not carry that rebase, so fall through to the generic path when BIG_IN.
+        and not BIG_IN
+    )
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv3d_8wave_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
@@ -306,46 +321,63 @@ def compile_conv3d_implicit_8wave(
 
         # ---- 3D im2col gather (global -> registers) ----
         # Each thread loads LDG_A_COUNT vec8 chunks along the flattened (M, K) tile,
-        # returning a list of (raw, valid, lds_elem_off) consumed by commit_a.
+        # returning [raw values..., validity bits...] as flat MLIR state.  Keeping
+        # this state flat lets the runtime K-loop carry prefetched values through
+        # scf.for iter_args without compile-time-unrolling every K tile.
         def gather_a(k_base):
-            out = []
+            raws = []
+            valids = []
             for i in range_constexpr(LDG_A_COUNT):
                 linear = (tid + i * BLOCK_THREADS) * LDG_VEC
                 local_m = linear // TILE_K
                 local_k = linear % TILE_K
                 row = m_offset + local_m
                 row_valid = row < fx.Index(npq)
-                n_idx = row // dhw
-                rem = row % dhw
-                ot = rem // hw_o
-                rem2 = rem % hw_o
-                oh = rem2 // wo
-                ow = rem2 % wo
                 k_abs = fx.Index(k_base) + fx.Index(local_k)
                 cc = k_abs % c
-                ckk = k_abs // c
-                kw_i = ckk % kw
-                ckk2 = ckk // kw
-                kh_i = ckk2 % kh
-                kt_i = ckk2 // kh
-                in_t = ot * st + kt_i - pt
-                in_h = oh * sh + kh_i - ph
-                in_w = ow * sw + kw_i - pw
                 k_valid = k_abs < fx.Index(crs)
-                valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
-                if const_expr(BIG_IN):
-                    di = n_idx - nbase
-                    g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
+                if const_expr(temporal_only_fast):
+                    # For Kt x 1 x 1, stride-1, same-shape convolution, an
+                    # input row differs from its output row only by a temporal
+                    # plane delta.  This removes the generic n/t/h/w
+                    # div/mod decomposition and all spatial bounds checks.
+                    kt_i = k_abs // c
+                    temporal_delta = kt_i - pt
+                    out_t = (row // hw_o) % d
+                    in_t = out_t + temporal_delta
+                    valid = row_valid & k_valid & in_range(in_t, d)
+                    g_off = (row + temporal_delta * hw_o) * c + cc
                 else:
-                    g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
+                    n_idx = row // dhw
+                    rem = row % dhw
+                    ot = rem // hw_o
+                    rem2 = rem % hw_o
+                    oh = rem2 // wo
+                    ow = rem2 % wo
+                    ckk = k_abs // c
+                    kw_i = ckk % kw
+                    ckk2 = ckk // kw
+                    kh_i = ckk2 % kh
+                    kt_i = ckk2 // kh
+                    in_t = ot * st + kt_i - pt
+                    in_h = oh * sh + kh_i - ph
+                    in_w = ow * sw + kw_i - pw
+                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+                    if const_expr(BIG_IN):
+                        di = n_idx - nbase
+                        g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
+                    else:
+                        g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
                 g_off_i = fx.Int32(g_off)
                 safe = arith.select(valid, g_off_i, fx.Int32(0))
                 raw = buffer_ops.buffer_load(x_rsrc, safe, vec_width=8, dtype=elem_ty)
-                out.append((raw, valid, local_m * TILE_K + local_k))
-            return out
+                raws.append(raw)
+                valids.append(valid)
+            return raws + valids
 
         def gather_b(k_base):
-            out = []
+            raws = []
+            valids = []
             for i in range_constexpr(LDG_B_COUNT):
                 linear = (tid + i * BLOCK_THREADS) * LDG_VEC
                 local_n = linear // TILE_K
@@ -356,20 +388,36 @@ def compile_conv3d_implicit_8wave(
                     col_valid = col < fx.Index(k)
                     safe = arith.select(col_valid, g_off, fx.Int32(0))
                     raw = buffer_ops.buffer_load(w_rsrc, safe, vec_width=8, dtype=elem_ty)
-                    out.append((raw, col_valid, local_n * TILE_K + local_k))
+                    valids.append(col_valid)
                 else:
                     raw = buffer_ops.buffer_load(w_rsrc, g_off, vec_width=8, dtype=elem_ty)
-                    out.append((raw, None, local_n * TILE_K + local_k))
-            return out
+                raws.append(raw)
+            return raws + valids
 
-        def commit_a(stage, vos):
-            for raw, valid, off in vos:
+        def commit_a(stage, values):
+            raws = list(values[:LDG_A_COUNT])
+            valids = list(values[LDG_A_COUNT:])
+            for i in range_constexpr(LDG_A_COUNT):
+                linear = (tid + i * BLOCK_THREADS) * LDG_VEC
+                local_m = linear // TILE_K
+                local_k = linear % TILE_K
+                raw = raws[i]
+                valid = valids[i]
                 val = arith.select(valid, raw, zero8)  # mask consumed here (hidden behind MFMAs)
+                off = local_m * TILE_K + local_k
                 lds_store_vec8(a_lds, fx.Index(stage) * TILE_M * TILE_K + off, val)
 
-        def commit_b(stage, vos):
-            for raw, valid, off in vos:
-                val = raw if const_expr(valid is None) else arith.select(valid, raw, zero8)
+        def commit_b(stage, values):
+            raws = list(values[:LDG_B_COUNT])
+            if const_expr(n_tail):
+                valids = list(values[LDG_B_COUNT:])
+            for i in range_constexpr(LDG_B_COUNT):
+                linear = (tid + i * BLOCK_THREADS) * LDG_VEC
+                local_n = linear // TILE_K
+                local_k = linear % TILE_K
+                raw = raws[i]
+                val = arith.select(valids[i], raw, zero8) if const_expr(n_tail) else raw
+                off = local_n * TILE_K + local_k
                 lds_store_vec8(b_lds, fx.Index(stage) * TILE_N * TILE_K + off, val)
 
         # ---- single-vec ds_read (LDS -> register), indexed by per-wave MFMA row ----
@@ -399,10 +447,21 @@ def compile_conv3d_implicit_8wave(
             rocdl.sched_dsrd(MI_N)
             return frags
 
-        # ---- generic double-buffered pipeline ----
-        # prologue: stage 0 committed to LDS, stage 1 prefetched to VGPR.
+        def do_compute(acc_values, a_frag_values, b_frag_values):
+            rocdl.s_setprio(1)
+            for mi in range_constexpr(MI_M):
+                for ni in range_constexpr(MI_N):
+                    idx = mi * MI_N + ni
+                    acc_values[idx] = mfma_one(a_frag_values[mi], b_frag_values[ni], acc_values[idx])
+            rocdl.s_setprio(0)
+            return acc_values
+
+        # ---- generic double-buffered runtime pipeline ----
+        # Keep only the small per-thread register state as scf.for iter_args:
+        # accumulators, current LDS fragments, and the next tile prefetched into
+        # VGPRs.  This replaces an O(K-tiles) fully-unrolled IR body with one
+        # runtime loop while preserving load/compute overlap.
         stage = 0
-        next_stage = 1
         commit_a(stage, gather_a(k_off))
         commit_b(stage, gather_b(k_off))
         if const_expr(tiles_per_split > 1):
@@ -410,36 +469,84 @@ def compile_conv3d_implicit_8wave(
             pf_b = gather_b(k_off + TILE_K)
             rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
         barrier(vmcnt=None, lgkmcnt=0)
-
         a_frags = read_a_frags(stage)
         b_frags = read_b_frags(stage)
 
-        for kt_idx in range_constexpr(tiles_per_split):
-            if const_expr(kt_idx + 1 < tiles_per_split):
-                commit_a(next_stage, pf_a)
-                commit_b(next_stage, pf_b)
+        if const_expr(tiles_per_split == 1):
+            acc = do_compute(acc, a_frags, b_frags)
+        else:
+            n_acc_state = N_ACC
+            n_a_frag_state = MI_M
+            n_b_frag_state = MI_N
+            n_pf_a_state = 2 * LDG_A_COUNT
+
+            init_state = list(acc) + list(a_frags) + list(b_frags) + list(pf_a) + list(pf_b)
+
+            # Process tiles [0, tiles_per_split-2).  The last two tiles are an
+            # explicit epilogue, avoiding an out-of-bounds speculative prefetch.
+            for kt_idx, state_values in range(0, tiles_per_split - 2, init=init_state):
+                state_values = list(state_values)
+                state_acc = list(state_values[:n_acc_state])
+                pos = n_acc_state
+                state_a = list(state_values[pos : pos + n_a_frag_state])
+                pos += n_a_frag_state
+                state_b = list(state_values[pos : pos + n_b_frag_state])
+                pos += n_b_frag_state
+                state_pf_a = list(state_values[pos : pos + n_pf_a_state])
+                pos += n_pf_a_state
+                state_pf_b = list(state_values[pos:])
+
+                next_stage = (kt_idx + 1) % STAGES
+                commit_a(next_stage, state_pf_a)
+                commit_b(next_stage, state_pf_b)
                 rocdl.sched_dswr(LDG_A_COUNT + LDG_B_COUNT)
-                if const_expr(kt_idx + 2 < tiles_per_split):
-                    pf_a = gather_a(k_off + (kt_idx + 2) * TILE_K)
-                    pf_b = gather_b(k_off + (kt_idx + 2) * TILE_K)
-                    rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
 
-            rocdl.s_setprio(1)
-            for mi in range_constexpr(MI_M):
-                for ni in range_constexpr(MI_N):
-                    idx = mi * MI_N + ni
-                    acc[idx] = mfma_one(a_frags[mi], b_frags[ni], acc[idx])
-            rocdl.s_setprio(0)
+                next_pf_a = gather_a(k_off + (kt_idx + 2) * TILE_K)
+                next_pf_b = gather_b(k_off + (kt_idx + 2) * TILE_K)
+                rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
 
-            if const_expr(kt_idx + 1 < tiles_per_split):
+                state_acc = do_compute(state_acc, state_a, state_b)
                 barrier(vmcnt=None, lgkmcnt=0)
-                stage = next_stage
-                next_stage = (stage + 1) % STAGES
-                a_frags = read_a_frags(stage)
-                b_frags = read_b_frags(stage)
+                next_a = read_a_frags(next_stage)
+                next_b = read_b_frags(next_stage)
+
+                results = yield (list(state_acc) + list(next_a) + list(next_b) + list(next_pf_a) + list(next_pf_b))
+
+            results = list(results)
+            acc = list(results[:n_acc_state])
+            pos = n_acc_state
+            a_frags = list(results[pos : pos + n_a_frag_state])
+            pos += n_a_frag_state
+            b_frags = list(results[pos : pos + n_b_frag_state])
+            pos += n_b_frag_state
+            pf_a = list(results[pos : pos + n_pf_a_state])
+            pos += n_pf_a_state
+            pf_b = list(results[pos:])
+
+            final_stage = (tiles_per_split - 1) % STAGES
+            commit_a(final_stage, pf_a)
+            commit_b(final_stage, pf_b)
+            rocdl.sched_dswr(LDG_A_COUNT + LDG_B_COUNT)
+
+            # Compute the penultimate tile while the final tile enters LDS.
+            acc = do_compute(acc, a_frags, b_frags)
+            barrier(vmcnt=None, lgkmcnt=0)
+            a_frags = read_a_frags(final_stage)
+            b_frags = read_b_frags(final_stage)
+            acc = do_compute(acc, a_frags, b_frags)
 
         _row_chk = npq % TILE_M != 0
         _need_chk = _row_chk or n_tail
+
+        # Vectorized epilogue: for n==1 (no split-K), the 4 acc values a[0..3] map
+        # to output rows row_base+0..3, which are contiguous in y (off_nk =
+        # col*dhw + row) and 8-byte aligned (row_base and dhw are both multiples of
+        # MFMA_C_VALUES). Pack them into one vec4 bf16 store instead of 4 scalar
+        # buffer_store_short -- the epilogue VMEM-store was ~12% of kernel stalls
+        # on the short-reduction 3x1x1 path. A 4-group never straddles the npq
+        # boundary (npq==dhw is a multiple of 4 and row_base%4==0), so a single
+        # row_base check gates the whole vector.
+        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0)
 
         def _valid_raw(row, col):
             if const_expr(_row_chk and n_tail):
@@ -461,6 +568,26 @@ def compile_conv3d_implicit_8wave(
                         if const_expr(n_tail):
                             col_i = arith.select(col < fx.Index(k), col_i, fx.Int32(0))
                         bias_val = fx.Float32(buffer_ops.buffer_load(bias_rsrc, col_i, vec_width=1, dtype=fx.Float32))
+
+                    if const_expr(_vec_store):
+                        row0 = fx.Index(row_base)
+                        off_nk0 = col * dhw + row0
+
+                        def _emit_vec():
+                            vals = []
+                            for i in range_constexpr(MFMA_C_VALUES):
+                                cval = (a[i] + bias_val) if const_expr(has_bias) else a[i]
+                                vals.append(cval.to(elem_ty))
+                            v4 = fx.Vector.from_elements(vals, dtype=elem_ty)
+                            buffer_ops.buffer_store(v4, y_rsrc, off_nk0)
+
+                        if const_expr(_need_chk):
+                            if _valid_raw(row0, col):
+                                _emit_vec()
+                        else:
+                            _emit_vec()
+                        continue
+
                     for i in range_constexpr(MFMA_C_VALUES):
                         row = fx.Index(row_base + i)
                         off_sk = row * k + col
@@ -586,3 +713,41 @@ def conv3d_implicit_8wave(
         y = y.to(torch.bfloat16)
         return y.view(n, do, ho, wo, k).permute(0, 4, 1, 2, 3)
     return y
+
+
+def conv2d_implicit(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    """2D conv via the 3D implicit-GEMM kernel (depth-1 degenerate case).
+
+    x: (N, C, H, W) bf16, weight: (K, C, R, S) bf16. stride/padding are int or a
+    2-tuple (h, w). Returns (N, K, Ho, Wo). The implicit-GEMM collapses all filter
+    taps into the reduction, so 2D is exactly the D=T=1 case of conv3d -- this
+    reshapes to 5D, reuses the same kernel (including the vectorized epilogue), and
+    squeezes the depth axis back out.
+    """
+    assert x.dim() == 4 and weight.dim() == 4, "conv2d_implicit expects (N,C,H,W) / (K,C,R,S)"
+    sh, sw = (stride, stride) if isinstance(stride, int) else stride
+    ph, pw = (padding, padding) if isinstance(padding, int) else padding
+    n, c, h, w = x.shape
+    k, wc, r, s = weight.shape
+    x5 = x.reshape(n, c, 1, h, w)
+    w5 = weight.reshape(k, wc, 1, r, s)
+    y5 = conv3d_implicit_8wave(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), **kwargs)
+    return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[3], y5.shape[4])
+
+
+def conv1d_implicit(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    """1D conv via the 3D implicit-GEMM kernel (depth/height-1 degenerate case).
+
+    x: (N, C, W) bf16, weight: (K, C, S) bf16. stride/padding are int or a 1-tuple.
+    Returns (N, K, Wo). Reshapes to the D=H=T=R=1 case of conv3d and squeezes the
+    depth+height axes back out.
+    """
+    assert x.dim() == 3 and weight.dim() == 3, "conv1d_implicit expects (N,C,W) / (K,C,S)"
+    sw = stride if isinstance(stride, int) else stride[0]
+    pw = padding if isinstance(padding, int) else padding[0]
+    n, c, w = x.shape
+    k, wc, s = weight.shape
+    x5 = x.reshape(n, c, 1, 1, w)
+    w5 = weight.reshape(k, wc, 1, 1, s)
+    y5 = conv3d_implicit_8wave(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), **kwargs)
+    return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
