@@ -133,9 +133,10 @@ def WMMAScale(
 ):
     """Create a gfx1250 MX-scaled WMMA atom (E8M0 block scale) for the unified
     f8/f6/f4 operand format. Per-operand scales are atom state (``scale_a`` /
-    ``scale_b``, i32); ``opsel_a`` / ``opsel_b`` select the scale lane index.
-    ``mod_c`` (i16 C-operand modifier) and ``reuse_a`` / ``reuse_b`` (operand-reuse
-    scheduler hints) are forwarded to the V_WMMA_SCALE intrinsic.
+    ``scale_b``, i32); ``opsel_a`` / ``opsel_b`` are forwarded as the intrinsic's
+    ``scaleAType`` / ``scaleBType`` operands (the scale-format / lane selector,
+    not an output opsel). ``mod_c`` (i16 C-operand modifier) and ``reuse_a`` /
+    ``reuse_b`` (operand-reuse scheduler hints) are forwarded to V_WMMA_SCALE.
     """
     ty_a = elem_ty_a.ir_type if hasattr(elem_ty_a, "ir_type") else elem_ty_a
     if elem_ty_b is None:
@@ -181,7 +182,7 @@ def TDM2D(
 
     Runtime atom state (via ``fx.atom.set_value``): ``workgroup_mask`` (MCAST
     mask). Out-of-bounds handling is carried on the global operand — wrap it with
-    ``make_tdm_tensor(g, tensor_dim0, tensor_dim1)`` to bound the tensor extent.
+    ``make_tdm_tensor(g, [outer, inner])`` to bound the tensor extent.
     """
     return CopyOpGFX1250TDM2DType.get(
         num_warps,
@@ -200,7 +201,8 @@ def make_buffer_tensor(
     num_records_bytes=None,
 ) -> Tensor:
     """Wrap ``tensor`` in a buffer-resource view for hardware OOB-checked
-    loads / stores.
+    loads / stores (CDNA buffer copy). For the gfx1250 TDM DMA use
+    :func:`make_tdm_tensor` instead — TDM needs a raw VA, not a buffer resource.
 
     ``max_size=True`` (default) sets the descriptor to ``0xFFFFFFFF``.
     Pass ``num_records_bytes`` when the byte count is a compile-time
@@ -259,6 +261,10 @@ def make_tdm_tensor(tensor: Tensor, tensor_extents=None) -> Tensor:
     Each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or any
     ``fx`` integer); ``None`` (or an omitted trailing dim) means no clamp on that
     axis (INT32_MAX). At most 2 entries (TDM is 2D).
+
+    This is the TDM analogue of :func:`make_buffer_tensor`'s ``num_records`` (both
+    carry the OOB bound on the operand), but keeps a raw VA rather than a fat
+    buffer resource, as the TDM descriptor build requires.
     """
     NO_CLAMP = 0x7FFFFFFF
 
