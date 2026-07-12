@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-12T01:02:20Z",
+ "updated": "2026-07-12T04:27:11Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29179616282,
+   "pr": 830,
+   "commit": "82c85fb87de4d66ba5438de632a94ec2e206552b",
+   "branch": "add_1250_mma_scale",
+   "event": "pull_request",
+   "title": "Add 1250 mma scale",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29179616282",
+   "created_at": "2026-07-12T04:22:45Z",
+   "updated_at": "2026-07-12T04:23:39Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 29102823936,
    "pr": 829,
@@ -1873,21 +1888,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994461245",
    "created_at": "2026-07-09T04:38:47Z",
    "updated_at": "2026-07-09T04:38:47Z",
-   "actor": "jhinpan",
-   "jobs": []
-  },
-  {
-   "run_id": 28994374930,
-   "pr": null,
-   "commit": "4b253f8e29c0dda01ac72c9dd56c0decc707d9b1",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/28994374930",
-   "created_at": "2026-07-09T04:36:20Z",
-   "updated_at": "2026-07-09T04:36:20Z",
    "actor": "jhinpan",
    "jobs": []
   }
