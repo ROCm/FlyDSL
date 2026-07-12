@@ -87,4 +87,46 @@ def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", 
   let genVerifyDecl = 1;
 }
 
+//===----------------------------------------------------------------------===//
+// CopyOp GFX1250 — TDM gather Global<->LDS copy.
+//
+// Gather port of tdm_ops.py::make_tensor_gather_descriptor. Loads/stores a set of
+// rows selected by explicit row indices carried as atom state (a packed
+// vector<8xi32>) rather than iterating a contiguous outer dim. The global operand
+// supplies only the tile shape (outer = rows, inner = per-row width) and the copy
+// direction. Stateful fields (via fly.atom.set_value):
+//   `workgroup_mask` (default 0): MCAST mask, ORed into GROUP1 config [15:0].
+//   `base`: global matrix base pointer.
+//   `outer_extent` (default INT32_MAX): tensor_dim1, the row count for HW OOB on
+//     the gather indices (index >= extent => OOB row, zero-filled on load).
+//   `inner_extent` (default INT32_MAX): tensor_dim0, the full matrix row width for
+//     column OOB.
+//   `outer_stride` (default = unset sentinel): row stride in elements; falls back
+//     to the static layout stride when unset.
+//   `row_indices`: vector<8xi32> of packed row indices (32-bit: 8 indices; 16-bit:
+//     16 indices, 2 per lane).
+//   `gather_count` (default = unset sentinel): number of valid indices; falls back
+//     to the operand's outer tile extent when unset.
+//   `imm_offset` (default 0, i64): byte offset added to `base` (K-column advance).
+//===----------------------------------------------------------------------===//
+
+// Like TDM2D, the gather DMA moves the whole tile in one shot; override
+// `getCopyRank` (== 2) so the expand-copy lowering emits a single rank-2 call.
+def FlyROCDL_CopyOpGFX1250TDMGather : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDMGather",
+    "gfx1250.tdm_gather", /*traits=*/[], /*copyOverrides=*/["getCopyRank"]> {
+  let parameters = (ins
+    // Row-index width in bits: 32 (up to 8 indices) or 16 (up to 16 indices).
+    "int32_t":$indexSize,
+    // Padding in elements (both zero disables LDS padding).
+    "int32_t":$padInterval,
+    "int32_t":$padAmount,
+    "int32_t":$cacheModifier
+  );
+  let assemblyFormat = [{
+    `<` `index` `=` $indexSize `,` `pad` `=` $padInterval `,` $padAmount
+    `,` `cache` `=` $cacheModifier `>`
+  }];
+  let genVerifyDecl = 1;
+}
+
 #endif // FLYROCDL_COPYATOM

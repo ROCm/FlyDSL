@@ -35,9 +35,16 @@ def test_wmma_scale_type_roundtrip():
         t_fp8 = U.WMMAScale(16, 16, 128, f8, f8, f32)
         assert "gfx1250.wmma_scale" in str(t_fp8)
         assert "opselA = 0, opselB = 0" in str(t_fp8)
-        # Defaults: modC = 0, reuseA/reuseB = false.
+        # Defaults: modC = 0, reuseA/reuseB = false, blockSize = 32.
         assert "modC = 0, reuseA = false, reuseB = false" in str(t_fp8)
+        assert "blockSize = 32" in str(t_fp8)
         assert ir.Type.parse(str(t_fp8)) == t_fp8
+
+        # block-16 (V_WMMA_SCALE16) variant round-trips.
+        t_b16 = U.WMMAScale(16, 16, 128, f8, f8, f32, block_size=16)
+        assert "blockSize = 16" in str(t_b16)
+        assert ir.Type.parse(str(t_b16)) == t_b16
+        assert t_b16 != t_fp8
 
         t_fp4 = U.WMMAScale(16, 16, 128, f4, f4, f32, opsel_a=1, opsel_b=2)
         assert "opselA = 1, opselB = 2" in str(t_fp4)
@@ -74,3 +81,20 @@ def test_tdm2d_type_roundtrip():
         t3 = U.TDM2D(1, atomic_barrier=True, early_timeout=True)
         assert "barrier = true, timeout = true" in str(t3)
         assert ir.Type.parse(str(t3)) == t3
+
+
+def test_tdm_gather_type_roundtrip():
+    with _ctx(), ir.Location.unknown():
+        from flydsl._mlir.dialects import fly_rocdl  # noqa: F401
+        from flydsl.expr.rocdl import universal as U
+
+        t = U.TDMGather()
+        assert "gfx1250.tdm_gather" in str(t)
+        assert "index = 32" in str(t)
+        assert ir.Type.parse(str(t)) == t
+
+        t16 = U.TDMGather(index_size=16, pad_interval=64, pad_amount=8, cache_modifier=2)
+        assert "index = 16" in str(t16)
+        assert "pad = 64, 8" in str(t16)
+        assert ir.Type.parse(str(t16)) == t16
+        assert t16 != t

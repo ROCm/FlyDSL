@@ -86,19 +86,20 @@ struct PyMmaOpGFX1250_WMMAScaleType : PyConcreteType<PyMmaOpGFX1250_WMMAScaleTyp
         "get",
         [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
            int32_t opselA, int32_t opselB, int32_t modC, bool reuseA, bool reuseB,
-           DefaultingPyMlirContext context) {
+           int32_t blockSize, DefaultingPyMlirContext context) {
           return PyMmaOpGFX1250_WMMAScaleType(
               context->getRef(), wrap(MmaOpGFX1250_WMMAScaleType::get(
                                      m, n, k, unwrap(elemTyA), unwrap(elemTyB), unwrap(elemTyAcc),
-                                     opselA, opselB, modC, reuseA, reuseB)));
+                                     opselA, opselB, modC, reuseA, reuseB, blockSize)));
         },
         "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, "opsel_a"_a = 0,
-        "opsel_b"_a = 0, "mod_c"_a = 0, "reuse_a"_a = false, "reuse_b"_a = false, nb::kw_only(),
-        "context"_a = nb::none(),
+        "opsel_b"_a = 0, "mod_c"_a = 0, "reuse_a"_a = false, "reuse_b"_a = false,
+        "block_size"_a = 32, nb::kw_only(), "context"_a = nb::none(),
         "Create a MmaOpGFX1250_WMMAScaleType (MX-scaled WMMA, E8M0 block scale) with "
         "m, n, k dimensions, element types, optional opsel_a / opsel_b (compile-time "
-        "lane index into the scale vector, default 0), and the intrinsic mod_c / reuse_a / "
-        "reuse_b attributes (default 0 / false)");
+        "lane index into the scale vector, default 0), the intrinsic mod_c / reuse_a / "
+        "reuse_b attributes (default 0 / false), and block_size (16 or 32, default 32) "
+        "selecting the V_WMMA_SCALE16 / V_WMMA_SCALE form");
   }
 };
 
@@ -199,6 +200,26 @@ struct PyCopyOpGFX1250TDM2DType : PyConcreteType<PyCopyOpGFX1250TDM2DType> {
   }
 };
 
+struct PyCopyOpGFX1250TDMGatherType : PyConcreteType<PyCopyOpGFX1250TDMGatherType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpGFX1250TDMGatherType, "CopyOpGFX1250TDMGatherType");
+
+  static void bindDerived(ClassTy &c) {
+    c.def_static(
+        "get",
+        [](int32_t indexSize, int32_t padInterval, int32_t padAmount, int32_t cacheModifier,
+           DefaultingPyMlirContext context) {
+          MLIRContext *ctx = unwrap(context.get()->get());
+          return PyCopyOpGFX1250TDMGatherType(
+              context->getRef(), wrap(CopyOpGFX1250TDMGatherType::get(ctx, indexSize, padInterval,
+                                                                      padAmount, cacheModifier)));
+        },
+        "index_size"_a = 32, "pad_interval"_a = 0, "pad_amount"_a = 0, "cache_modifier"_a = 0,
+        nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpGFX1250TDMGatherType (TDM gather Global<->LDS copy) with row-index "
+        "width (16 or 32), optional LDS padding (interval/amount in elements), and cache modifier");
+  }
+};
+
 struct PyCopyOpCDNA4LdsReadTransposeType : PyConcreteType<PyCopyOpCDNA4LdsReadTransposeType> {
   FLYDSL_REGISTER_TYPE_BINDING(CopyOpCDNA4LdsReadTransposeType, "CopyOpCDNA4LdsReadTransposeType");
 
@@ -234,6 +255,7 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDM2DType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDMGatherType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
   // clang-format on
 }

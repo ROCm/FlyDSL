@@ -13,7 +13,7 @@
 // Stateful atom type converts to the descriptor struct
 // {workgroup_mask, base, outer_extent, inner_extent, outer_stride}.
 // CHECK-LABEL: @test_tdm_type
-// CHECK-SAME: (%{{.*}}: !llvm.struct<(i32, ptr<1>, i32, i32, i32)>)
+// CHECK-SAME: (%{{.*}}: !llvm.struct<(i32, ptr<1>, i32, i32, i32, i64)>)
 func.func @test_tdm_type(
     %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>) {
   return
@@ -27,7 +27,7 @@ func.func @test_tdm_type(
 // stride when unset (== 0).
 
 // CHECK-LABEL: @test_tdm_load
-// CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32, ptr<1>, i32, i32, i32)>, %[[OE:.*]]: i32, %[[IE:.*]]: i32, %[[OS:.*]]: i32,
+// CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32, ptr<1>, i32, i32, i32, i64)>, %[[OE:.*]]: i32, %[[IE:.*]]: i32, %[[OS:.*]]: i32,
 func.func @test_tdm_load(
     %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>,
     %oe: i32, %ie: i32, %os: i32,
@@ -37,8 +37,8 @@ func.func @test_tdm_load(
   %a2 = fly.atom.set_value(%a1, "inner_extent", %ie) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, i32) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>
   %a3 = fly.atom.set_value(%a2, "outer_stride", %os) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, i32) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>
   // base (slot 1) -> global address; extents (slots 3/2) -> OOB; stride (slot 4).
-  // CHECK-DAG: %[[BASE:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(i32, ptr<1>, i32, i32, i32)>
-  // CHECK-DAG: %[[STRIDE:.*]] = llvm.extractvalue %{{.*}}[4] : !llvm.struct<(i32, ptr<1>, i32, i32, i32)>
+  // CHECK-DAG: %[[BASE:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(i32, ptr<1>, i32, i32, i32, i64)>
+  // CHECK-DAG: %[[STRIDE:.*]] = llvm.extractvalue %{{.*}}[4] : !llvm.struct<(i32, ptr<1>, i32, i32, i32, i64)>
   // stride fallback: select(stride == unset-sentinel, static_layout_stride, stride)
   // CHECK-DAG: %[[SENT:.*]] = arith.constant -2147483648 : i32
   // CHECK-DAG: %[[UNSET:.*]] = arith.cmpi eq, %[[STRIDE]], %[[SENT]]
@@ -146,5 +146,28 @@ func.func @test_tdm_load_barrier_timeout(
   // CHECK-DAG: arith.constant 2424832 : i32
   // CHECK: rocdl.tensor.load.to.lds
   fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = true, timeout = true>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  return
+}
+
+// -----
+
+// imm_offset (state slot 5, i64): a K-loop advances the tile by bumping one
+// scalar. The offset is added to the base in i64 after ptrtoint, before the
+// address is split into GROUP0 (so the carry into glb_hi is automatic).
+
+// CHECK-LABEL: @test_tdm_load_imm_offset
+func.func @test_tdm_load_imm_offset(
+    %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>,
+    %off: i64,
+    %src: !fly.memref<f16, global, (128,64):(64,1)>,
+    %dst: !fly.memref<f16, shared, (128,64):(64,1)>) {
+  // CHECK: %[[A1:.*]] = llvm.insertvalue %[[OFF:.*]], %{{.*}}[5] : !llvm.struct<(i32, ptr<1>, i32, i32, i32, i64)>
+  %a1 = fly.atom.set_value(%atom, "imm_offset", %off) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, i64) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>
+  // CHECK-DAG: %[[BASE:.*]] = llvm.extractvalue %[[A1]][1]
+  // CHECK-DAG: %[[IMM:.*]] = llvm.extractvalue %[[A1]][5]
+  // CHECK-DAG: %[[BI:.*]] = llvm.ptrtoint %[[BASE]] : !llvm.ptr<1> to i64
+  // CHECK: arith.addi %[[BI]], %[[IMM]] : i64
+  // CHECK: rocdl.tensor.load.to.lds
+  fly.copy_atom_call(%a1, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }

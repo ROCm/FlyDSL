@@ -110,12 +110,17 @@ def FlyROCDL_MmaOpGFX1250_WMMAScale : FlyROCDL_StatefulMmaOp<"MmaOpGFX1250_WMMAS
     // rocdl op.
     "int32_t":$modC,
     "bool":$reuseA,
-    "bool":$reuseB
+    "bool":$reuseB,
+    // MX block size (elements per shared E8M0 scale): 32 selects the block-32
+    // V_WMMA_SCALE form (i32 scale operands), 16 selects the block-16
+    // V_WMMA_SCALE16 form (i64 scale operands). Default 32.
+    "int32_t":$blockSize
   );
   let assemblyFormat = [{
     `<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc
     `,` `opselA` `=` $opselA `,` `opselB` `=` $opselB
-    `,` `modC` `=` $modC `,` `reuseA` `=` $reuseA `,` `reuseB` `=` $reuseB `>`
+    `,` `modC` `=` $modC `,` `reuseA` `=` $reuseA `,` `reuseB` `=` $reuseB
+    `,` `blockSize` `=` $blockSize `>`
   }];
 
   let builders = [
@@ -124,14 +129,15 @@ def FlyROCDL_MmaOpGFX1250_WMMAScale : FlyROCDL_StatefulMmaOp<"MmaOpGFX1250_WMMAS
       "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
                    /*opselA=*/0, /*opselB=*/0, /*modC=*/0, /*reuseA=*/false,
-                   /*reuseB=*/false);
+                   /*reuseB=*/false, /*blockSize=*/32);
     }]>,
     TypeBuilderWithInferredContext<(ins
       "int32_t":$m, "int32_t":$n, "int32_t":$k,
       "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc,
       "int32_t":$opselA, "int32_t":$opselB), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
-                   opselA, opselB, /*modC=*/0, /*reuseA=*/false, /*reuseB=*/false);
+                   opselA, opselB, /*modC=*/0, /*reuseA=*/false, /*reuseB=*/false,
+                   /*blockSize=*/32);
     }]>,
     TypeBuilderWithInferredContext<(ins
       "int32_t":$m, "int32_t":$n, "int32_t":$k,
@@ -139,7 +145,16 @@ def FlyROCDL_MmaOpGFX1250_WMMAScale : FlyROCDL_StatefulMmaOp<"MmaOpGFX1250_WMMAS
       "int32_t":$opselA, "int32_t":$opselB,
       "int32_t":$modC, "bool":$reuseA, "bool":$reuseB), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
-                   opselA, opselB, modC, reuseA, reuseB);
+                   opselA, opselB, modC, reuseA, reuseB, /*blockSize=*/32);
+    }]>,
+    TypeBuilderWithInferredContext<(ins
+      "int32_t":$m, "int32_t":$n, "int32_t":$k,
+      "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc,
+      "int32_t":$opselA, "int32_t":$opselB,
+      "int32_t":$modC, "bool":$reuseA, "bool":$reuseB,
+      "int32_t":$blockSize), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   opselA, opselB, modC, reuseA, reuseB, blockSize);
     }]>
   ];
   let genVerifyDecl = 1;

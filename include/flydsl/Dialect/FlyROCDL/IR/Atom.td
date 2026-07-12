@@ -17,7 +17,11 @@ def FlyROCDL_AtomStateField : I32EnumAttr<"AtomStateField", "", [
   I32EnumAttrCase<"Base",               5, "base">,
   I32EnumAttrCase<"OuterExtent",        6, "outer_extent">,
   I32EnumAttrCase<"InnerExtent",        7, "inner_extent">,
-  I32EnumAttrCase<"OuterStride",        8, "outer_stride">
+  I32EnumAttrCase<"OuterStride",        8, "outer_stride">,
+  // TDM gather: packed row indices (vector<8xi32>) and the count of valid
+  // indices consumed from that vector.
+  I32EnumAttrCase<"RowIndices",         9, "row_indices">,
+  I32EnumAttrCase<"GatherCount",        10, "gather_count">
 ]> {
   let genSpecializedAttr = 0;
   let cppNamespace = FlyROCDL_Dialect.cppNamespace;

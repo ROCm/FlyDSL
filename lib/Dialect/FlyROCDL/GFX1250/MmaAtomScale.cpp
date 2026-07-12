@@ -38,14 +38,15 @@ std::optional<unsigned> MmaOpGFX1250_WMMAScaleType::getFieldIndex(AtomStateField
 }
 
 Type MmaOpGFX1250_WMMAScaleType::getConvertedType(MLIRContext *ctx) const {
-  auto i32Ty = IntegerType::get(ctx, 32);
-  return LLVM::LLVMStructType::getLiteral(ctx, {i32Ty, i32Ty});
+  // block-16 (V_WMMA_SCALE16) carries i64 scale operands; block-32 carries i32.
+  auto scaleTy = IntegerType::get(ctx, getBlockSize() == 16 ? 64 : 32);
+  return LLVM::LLVMStructType::getLiteral(ctx, {scaleTy, scaleTy});
 }
 
 Value MmaOpGFX1250_WMMAScaleType::getDefaultState(OpBuilder &builder, Location loc) const {
   auto structTy = cast<LLVM::LLVMStructType>(getConvertedType(builder.getContext()));
   Value state = LLVM::UndefOp::create(builder, loc, structTy);
-  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  Value zero = arith::ConstantIntOp::create(builder, loc, 0, getBlockSize() == 16 ? 64 : 32);
   state = LLVM::InsertValueOp::create(builder, loc, state, zero,
                                       ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleA)});
   state = LLVM::InsertValueOp::create(builder, loc, state, zero,
@@ -66,8 +67,10 @@ Value MmaOpGFX1250_WMMAScaleType::setAtomState(OpBuilder &builder, Location loc,
     return nullptr;
   Value scaleVal = fieldValue;
   Type srcTy = scaleVal.getType();
-  Type i32Ty = IntegerType::get(builder.getContext(), 32);
-  if (srcTy != i32Ty) {
+  // block-16 scales are i64 (8 e8m0 bytes over K=128); block-32 are i32.
+  unsigned scaleBits = getBlockSize() == 16 ? 64 : 32;
+  Type wantTy = IntegerType::get(builder.getContext(), scaleBits);
+  if (srcTy != wantTy) {
     auto bitWidthOf = [](Type t) -> unsigned {
       if (auto vec = dyn_cast<VectorType>(t)) {
         Type elt = vec.getElementType();
@@ -79,9 +82,9 @@ Value MmaOpGFX1250_WMMAScaleType::setAtomState(OpBuilder &builder, Location loc,
         return intTy.getWidth();
       return 0;
     };
-    if (bitWidthOf(srcTy) != 32)
+    if (bitWidthOf(srcTy) != scaleBits)
       return nullptr;
-    scaleVal = LLVM::BitcastOp::create(builder, loc, i32Ty, scaleVal);
+    scaleVal = LLVM::BitcastOp::create(builder, loc, wantTy, scaleVal);
   }
   return LLVM::InsertValueOp::create(builder, loc, atomStruct, scaleVal, ArrayRef<int64_t>{*idx});
 }
@@ -139,7 +142,9 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::verify(function_ref<InFlightDiagnostic
                                                  int32_t m, int32_t n, int32_t k, Type elemTyA,
                                                  Type elemTyB, Type elemTyAcc, int32_t opselA,
                                                  int32_t opselB, int32_t modC, bool reuseA,
-                                                 bool reuseB) {
+                                                 bool reuseB, int32_t blockSize) {
+  if (blockSize != 16 && blockSize != 32)
+    return emitError() << "blockSize must be 16 or 32, got " << blockSize;
   bool is16 = (m == 16 && n == 16 && k == 128);
   bool is32x16 = (m == 32 && n == 16 && k == 128);
   if (!is16 && !is32x16) {
@@ -232,9 +237,18 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
       builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
 
   // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuseA / reuseB come from
-  // the atom's compile-time params.
+  // the atom's compile-time params. block-16 selects the V_WMMA_SCALE16 form
+  // (i64 scale operands); block-32 the V_WMMA_SCALE form (i32 scale operands).
+  bool block16 = getBlockSize() == 16;
   if (m == 32 && n == 16 && k == 128) {
     // fp4-only form; no fmtA/fmtB operands.
+    if (block16)
+      return ROCDL::wmma_scale16_f32_32x16x128_f4::create(
+                 builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
+                 /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
+                 /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
+                 /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+          .getResult();
     return ROCDL::wmma_scale_f32_32x16x128_f4::create(
                builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
                /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
@@ -248,6 +262,14 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   if (!aFmt || !bFmt)
     return failure();
 
+  if (block16)
+    return ROCDL::wmma_scale16_f32_16x16x128_f8f6f4::create(
+               builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
+               /*modC=*/(uint16_t)getModC(), c,
+               /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
+               /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
+               /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
+        .getResult();
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
              builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
              /*modC=*/(uint16_t)getModC(), c,

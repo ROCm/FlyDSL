@@ -8,7 +8,7 @@
 
 // CHECK: unsupported MNK for GFX1250 WMMA_Scale: 32x32x64 (expected 16x16x128 or 32x16x128)
 func.func @bad_mma_shape(
-    %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x32x64, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>) {
+    %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x32x64, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 32>>) {
   return
 }
 
@@ -17,7 +17,16 @@ func.func @bad_mma_shape(
 // The 32x16x128 form is fp4-only.
 // CHECK: GFX1250 WMMA_Scale 32x16x128 requires f4E2M1FN A and B
 func.func @bad_mma_32x16_fp8(
-    %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>) {
+    %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 32>>) {
+  return
+}
+
+// -----
+
+// blockSize must be 16 or 32 (elements per shared E8M0 scale).
+// CHECK: blockSize must be 16 or 32, got 8
+func.func @bad_mma_blocksize(
+    %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 8>>) {
   return
 }
 
@@ -26,6 +35,15 @@ func.func @bad_mma_32x16_fp8(
 // CHECK: numWarps must be a positive power of two, got 3
 func.func @bad_tdm_warps(
     %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 3, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>) {
+  return
+}
+
+// -----
+
+// TDM gather row-index width must be 16 or 32.
+// CHECK: indexSize must be 16 or 32, got 8
+func.func @bad_gather_index_size(
+    %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 8, pad = 0, 0, cache = 0>, 0>) {
   return
 }
 
