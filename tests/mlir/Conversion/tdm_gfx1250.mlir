@@ -6,12 +6,14 @@
 // tile geometry; direction (load vs store) is inferred from the address spaces.
 //   Global -> Shared  =>  rocdl.tensor.load.to.lds
 //   Shared -> Global  =>  rocdl.tensor.store.from.lds
+// The tensor OOB extent is carried on the global operand (global_tensor_desc);
+// a plain global operand supplies globalDim = INT32_MAX (whole tile in-bounds).
 
 // -----
 
-// Stateful atom type converts to a 2-i32 struct (workgroup_mask, oob_outer).
+// Stateful atom type converts to a 1-i32 struct (workgroup_mask only).
 // CHECK-LABEL: @test_tdm_type
-// CHECK-SAME: (%{{.*}}: !llvm.struct<(i32, i32)>)
+// CHECK-SAME: (%{{.*}}: !llvm.struct<(i32)>)
 func.func @test_tdm_type(
     %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>) {
   return
@@ -19,13 +21,8 @@ func.func @test_tdm_type(
 
 // -----
 
-// Load, single warp: descriptor addresses derive from the memref base pointers.
-// tile = 128x64 f16, stride (64, 1). tdim0/tile dims/stride are compile-time;
-// tensor_dim1 is runtime = max(0, oob_outer - startOuter) (default oob_outer =
-// INT32_MAX => whole tile in-bounds).
-//
-// Compile-time GROUP1 parts: s0 = 1<<16 = 65536, s1 = (64&0xffff)<<16 = 4194304,
-// tileD0<<16 = 64<<16 = 4194304, s4 = tile_dim1 = 128, s5 = outer stride = 64.
+// Load, single warp, plain global operand: descriptor addresses derive from the
+// memref base pointers; tensor_dim0/1 default to INT32_MAX (no clamp).
 
 // CHECK-LABEL: @test_tdm_load
 // CHECK-SAME: (%[[SRC:.*]]: !llvm.ptr<1>, %[[DST:.*]]: !llvm.ptr<3>)
@@ -33,20 +30,18 @@ func.func @test_tdm_load(
     %src: !fly.memref<f16, global, (128,64):(64,1)>,
     %dst: !fly.memref<f16, shared, (128,64):(64,1)>) {
   %atom = fly.make_copy_atom {valBits = 0 : i32} : !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>
-  // Default state: workgroup_mask=0, oob_outer=INT32_MAX (no clamp).
+  // Plain global => globalDim defaults to INT32_MAX on both axes.
   // CHECK: arith.constant 2147483647 : i32
-  // Global base and LDS base come from the pointers.
+  // CHECK: arith.constant 2147483647 : i32
   // CHECK-DAG: %[[GBASE:.*]] = llvm.ptrtoint %[[SRC]] : !llvm.ptr<1> to i64
   // CHECK-DAG: %[[LBASE:.*]] = llvm.ptrtoint %[[DST]] : !llvm.ptr<3> to i32
-  // GROUP0 packs (pred=1, lds_addr, glb_lo, glb_hi | type):
   // CHECK: %[[GLO:.*]] = llvm.trunc %[[GBASE]] : i64 to i32
-  // CHECK: %[[GHI0:.*]] = llvm.lshr %[[GBASE]]
-  // CHECK: %[[GHI:.*]] = llvm.trunc %[[GHI0]] : i64 to i32
-  // CHECK: %[[GHITY:.*]] = arith.ori %[[GHI]], %{{.*}}
-  // CHECK: %[[DG0:.*]] = vector.from_elements %{{.*}}, %[[LBASE]], %[[GLO]], %[[GHITY]] : vector<4xi32>
-  // GROUP1: tensor_dim1 runtime (OOB clamp) from the oob_outer state field.
-  // CHECK: %[[OOB:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(i32, i32)>
-  // CHECK: arith.subi %[[OOB]], %{{.*}}
+  // CHECK: llvm.lshr %[[GBASE]]
+  // CHECK: %[[DG0:.*]] = vector.from_elements %{{.*}}, %[[LBASE]], %[[GLO]], %{{.*}} : vector<4xi32>
+  // tensor_dim0/1 runtime clamp = max(0, globalDim - warp start).
+  // CHECK: arith.subi
+  // CHECK: arith.maxsi
+  // CHECK: arith.subi
   // CHECK: arith.maxsi
   // CHECK: %[[DG1:.*]] = vector.from_elements
   // CHECK: rocdl.tensor.load.to.lds %[[DG0]], %[[DG1]], %{{.*}}, %{{.*}}, %{{.*}} cachepolicy 0 : vector<4xi32>, vector<8xi32>
@@ -70,9 +65,9 @@ func.func @test_tdm_store(
 
 // -----
 
-// Multi-warp load distributes the tile: wave.id is read and the per-wave
-// offsets scale the descriptor addresses. warps=4 over a 128x64 tile splits the
-// outer dim 4-ways (bpw_outer=32, bpw_inner=64).
+// Multi-warp load distributes the tile: wave.id is read and the per-wave offsets
+// scale the descriptor addresses. warps=4 over a 128x64 tile splits the outer dim
+// 4-ways (bpw_outer=32, bpw_inner=64).
 
 // CHECK-LABEL: @test_tdm_load_warps
 func.func @test_tdm_load_warps(
@@ -83,10 +78,6 @@ func.func @test_tdm_load_warps(
   // CHECK-DAG: %[[W4:.*]] = arith.constant 4 : i32
   // CHECK-DAG: arith.remui %[[WID]], %[[W4]]
   // CHECK-DAG: arith.divui %[[WID]], %[[W4]]
-  // GROUP1 per-warp: tdim0=inner=64, tile_dim1=outer per-warp=32; tensor_dim1
-  // runtime = max(0, oob_outer - warp_off_outer).
-  // CHECK: arith.subi
-  // CHECK: arith.maxsi
   // CHECK: rocdl.tensor.load.to.lds
   fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 4, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
@@ -115,7 +106,7 @@ func.func @test_tdm_load_pad(
 // MCAST: a runtime workgroup_mask (atom state) is ORed into GROUP1 config [15:0].
 
 // CHECK-LABEL: @test_tdm_load_mcast
-// CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32, i32)>, %[[MASK:.*]]: i32,
+// CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32)>, %[[MASK:.*]]: i32,
 func.func @test_tdm_load_mcast(
     %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>,
     %mask: i32,
@@ -134,40 +125,25 @@ func.func @test_tdm_load_mcast(
 
 // -----
 
-// OOB: a runtime oob_outer (atom state) sets tensor_dim1 = max(0, oob_outer -
-// startOuter) while tile_dim1 stays static, so ragged / partial tiles are
-// HW-guarded (load: zero-fill; store: drop).
+// OOB via operand: a global_tensor_desc operand carries {base ptr, tensor_dim0,
+// tensor_dim1}. The base is PtrToInt'd for the address; the extents drive the
+// runtime tensor_dim0/1 = max(0, globalDim - warp start), so a ragged tile is
+// HW-guarded (load: zero-fill; store: drop). tile dims stay static.
 
-// CHECK-LABEL: @test_tdm_load_oob
-// CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32, i32)>, %[[ROWS:.*]]: i32,
-func.func @test_tdm_load_oob(
-    %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>,
-    %rows: i32,
-    %src: !fly.memref<f16, global, (128,64):(64,1)>,
+// CHECK-LABEL: @test_tdm_load_bounded
+// CHECK-SAME: (%[[GTD:.*]]: !llvm.struct<(ptr<1>, i32, i32)>, %[[DST:.*]]: !llvm.ptr<3>)
+func.func @test_tdm_load_bounded(
+    %src: !fly.memref<f16, #fly_rocdl.global_tensor_desc, (128,64):(64,1)>,
     %dst: !fly.memref<f16, shared, (128,64):(64,1)>) {
-  // CHECK: %[[A1:.*]] = llvm.insertvalue %[[ROWS]], %[[ATOM]][1]
-  %a1 = fly.atom.set_value(%atom, "oob_outer", %rows) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, i32) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>
-  // CHECK: %[[O:.*]] = llvm.extractvalue %[[A1]][1]
-  // CHECK: arith.subi %[[O]], %{{.*}}
+  %atom = fly.make_copy_atom {valBits = 0 : i32} : !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>
+  // CHECK-DAG: %[[BASE:.*]] = llvm.extractvalue %[[GTD]][0] : !llvm.struct<(ptr<1>, i32, i32)>
+  // CHECK-DAG: %[[D0:.*]] = llvm.extractvalue %[[GTD]][1] : !llvm.struct<(ptr<1>, i32, i32)>
+  // CHECK-DAG: %[[D1:.*]] = llvm.extractvalue %[[GTD]][2] : !llvm.struct<(ptr<1>, i32, i32)>
+  // CHECK: llvm.ptrtoint %[[BASE]] : !llvm.ptr<1> to i64
+  // CHECK-DAG: arith.subi %[[D0]], %{{.*}}
+  // CHECK-DAG: arith.subi %[[D1]], %{{.*}}
   // CHECK: arith.maxsi
   // CHECK: rocdl.tensor.load.to.lds
-  fly.copy_atom_call(%a1, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
-  return
-}
-
-// -----
-
-// barrier=true (bit18) and timeout=true (bit21) set the descriptor config word
-// GROUP1 sgpr0. f16 => data_size = log2(2) = 1 (bit16). No pad, so the compile-
-// time upper config = (1<<16) | (1<<18) | (1<<21) = 2424832.
-
-// CHECK-LABEL: @test_tdm_load_barrier_timeout
-func.func @test_tdm_load_barrier_timeout(
-    %src: !fly.memref<f16, global, (128,64):(64,1)>,
-    %dst: !fly.memref<f16, shared, (128,64):(64,1)>) {
-  %atom = fly.make_copy_atom {valBits = 0 : i32} : !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = true, timeout = true>, 0>
-  // CHECK-DAG: arith.constant 2424832 : i32
-  // CHECK: rocdl.tensor.load.to.lds
-  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = true, timeout = true>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0, barrier = false, timeout = false>, 0>, !fly.memref<f16, #fly_rocdl.global_tensor_desc, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }

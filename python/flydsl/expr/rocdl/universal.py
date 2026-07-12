@@ -179,9 +179,9 @@ def TDM2D(
     ``atomic_barrier`` (descriptor bit 18, HW auto-barrier) and ``early_timeout``
     (bit 21, multicast-load GL1 knob) set compile-time descriptor config bits.
 
-    Runtime state (set via ``fx.atom.set_value`` before the copy):
-    ``workgroup_mask`` (MCAST mask) and ``oob_outer`` (outer-dim tensor bound in
-    rows-from-tile-start for ragged tiles; default INT32_MAX = no clamp).
+    Runtime atom state (via ``fx.atom.set_value``): ``workgroup_mask`` (MCAST
+    mask). Out-of-bounds handling is carried on the global operand — wrap it with
+    ``make_tdm_tensor(g, tensor_dim0, tensor_dim1)`` to bound the tensor extent.
     """
     return CopyOpGFX1250TDM2DType.get(
         num_warps,
@@ -246,3 +246,30 @@ def make_buffer_tensor(
         ],
     )
     return make_view(buf_ptr, layout)
+
+
+def make_tdm_tensor(tensor: Tensor, tensor_dim0=None, tensor_dim1=None) -> Tensor:
+    """Wrap ``tensor`` as a TDM global operand carrying its 2D runtime extent.
+
+    The tile geometry stays in the layout; the tensor's ``(tensor_dim0,
+    tensor_dim1)`` extent (globalDim) rides on the pointer so the TDM copy atom
+    reads it for hardware out-of-bounds handling (load: zero-fill, store: drop),
+    instead of a per-copy atom-state knob. A ``None`` dim defaults to INT32_MAX
+    (no clamp on that axis).
+    """
+    NO_CLAMP = 0x7FFFFFFF
+
+    def _dim(v):
+        if v is None:
+            return Int32(NO_CLAMP)
+        return v if isinstance(v, Int32) else Int32(v)
+
+    ptr = get_iter(tensor)
+    layout = get_layout(tensor)
+    gtd_ptr_ty = PointerType.get(
+        elem_ty=tensor.element_type.ir_type,
+        address_space=TargetAddressSpace.GlobalTensorDesc,
+        alignment=ptr.alignment,
+    )
+    gtd_ptr = make_ptr(gtd_ptr_ty, [ptr, _dim(tensor_dim0).ir_value(), _dim(tensor_dim1).ir_value()])
+    return make_view(gtd_ptr, layout)

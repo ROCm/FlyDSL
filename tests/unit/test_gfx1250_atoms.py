@@ -74,3 +74,16 @@ def test_tdm2d_type_roundtrip():
         t3 = U.TDM2D(1, atomic_barrier=True, early_timeout=True)
         assert "barrier = true, timeout = true" in str(t3)
         assert ir.Type.parse(str(t3)) == t3
+
+
+def test_global_tensor_desc_addrspace():
+    # The TDM OOB bound rides on a global_tensor_desc operand (make_tdm_tensor);
+    # check the address-space attribute binds and a memref in it round-trips.
+    with _ctx(), ir.Location.unknown():
+        from flydsl._mlir.dialects import fly_rocdl
+
+        gtd = fly_rocdl.TargetAddressSpace.GlobalTensorDesc
+        assert "global_tensor_desc" in str(gtd)
+
+        ty = ir.Type.parse("!fly.memref<f16, #fly_rocdl.global_tensor_desc, (128,64):(64,1)>")
+        assert "global_tensor_desc" in str(ty)
