@@ -248,21 +248,31 @@ def make_buffer_tensor(
     return make_view(buf_ptr, layout)
 
 
-def make_tdm_tensor(tensor: Tensor, tensor_dim0=None, tensor_dim1=None) -> Tensor:
-    """Wrap ``tensor`` as a TDM global operand carrying its 2D runtime extent.
+def make_tdm_tensor(tensor: Tensor, tensor_extents=None) -> Tensor:
+    """Wrap ``tensor`` as a TDM global operand carrying its runtime extent.
 
-    The tile geometry stays in the layout; the tensor's ``(tensor_dim0,
-    tensor_dim1)`` extent (globalDim) rides on the pointer so the TDM copy atom
-    reads it for hardware out-of-bounds handling (load: zero-fill, store: drop),
-    instead of a per-copy atom-state knob. A ``None`` dim defaults to INT32_MAX
-    (no clamp on that axis).
+    The tile geometry stays in the layout; the tensor's extent (globalDim) rides
+    on the pointer so the TDM copy atom reads it for hardware out-of-bounds
+    handling (load: zero-fill, store: drop), instead of a per-copy atom-state knob.
+
+    ``tensor_extents`` is an optional list in tensor dim order ``[outer, inner]``.
+    Each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or any
+    ``fx`` integer); ``None`` (or an omitted trailing dim) means no clamp on that
+    axis (INT32_MAX). At most 2 entries (TDM is 2D).
     """
     NO_CLAMP = 0x7FFFFFFF
+
+    extents = list(tensor_extents) if tensor_extents is not None else []
+    if len(extents) > 2:
+        raise ValueError(f"make_tdm_tensor: at most 2 extents (TDM is 2D), got {len(extents)}")
+    extents += [None] * (2 - len(extents))  # pad to [outer, inner]
 
     def _dim(v):
         if v is None:
             return Int32(NO_CLAMP)
         return v if isinstance(v, Int32) else Int32(v)
+
+    outer, inner = _dim(extents[0]), _dim(extents[1])
 
     ptr = get_iter(tensor)
     layout = get_layout(tensor)
@@ -271,5 +281,7 @@ def make_tdm_tensor(tensor: Tensor, tensor_dim0=None, tensor_dim1=None) -> Tenso
         address_space=TargetAddressSpace.GlobalTensorDesc,
         alignment=ptr.alignment,
     )
-    gtd_ptr = make_ptr(gtd_ptr_ty, [ptr, _dim(tensor_dim0).ir_value(), _dim(tensor_dim1).ir_value()])
+    # Struct fields are (base, tensor_dim0=inner, tensor_dim1=outer) to match the
+    # TDM descriptor's dim0=innermost / dim1=outermost convention.
+    gtd_ptr = make_ptr(gtd_ptr_ty, [ptr, inner.ir_value(), outer.ir_value()])
     return make_view(gtd_ptr, layout)

@@ -19,9 +19,9 @@ struct GlobalTensorDesc {
   static constexpr unsigned kBaseAddrSpace = 1; // global
 
   static LLVM::LLVMStructType getType(MLIRContext *ctx) {
-    return LLVM::LLVMStructType::getLiteral(
-        ctx, {LLVM::LLVMPointerType::get(ctx, kBaseAddrSpace), IntegerType::get(ctx, 32),
-              IntegerType::get(ctx, 32)});
+    return LLVM::LLVMStructType::getLiteral(ctx,
+                                            {LLVM::LLVMPointerType::get(ctx, kBaseAddrSpace),
+                                             IntegerType::get(ctx, 32), IntegerType::get(ctx, 32)});
   }
 
   static Value pack(OpBuilder &b, Location loc, Value base, Value dim0, Value dim1) {

@@ -247,10 +247,10 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   // (extents default to INT32_MAX => whole tile in-bounds).
   bool glbIsDesc = isTargetAddressSpace<GlobalTensorDescAddressAttr>(glbMemTy.getAddressSpace());
   Value glbBasePtr = glbIsDesc ? GlobalTensorDesc::base(builder, loc, glbPtr) : glbPtr;
-  Value tensorDim0 = glbIsDesc ? GlobalTensorDesc::dim0(builder, loc, glbPtr)
-                               : i32Const(builder, loc, 0x7FFFFFFF);
-  Value tensorDim1 = glbIsDesc ? GlobalTensorDesc::dim1(builder, loc, glbPtr)
-                               : i32Const(builder, loc, 0x7FFFFFFF);
+  Value tensorDim0 =
+      glbIsDesc ? GlobalTensorDesc::dim0(builder, loc, glbPtr) : i32Const(builder, loc, 0x7FFFFFFF);
+  Value tensorDim1 =
+      glbIsDesc ? GlobalTensorDesc::dim1(builder, loc, glbPtr) : i32Const(builder, loc, 0x7FFFFFFF);
 
   Type i64Ty = builder.getI64Type();
   Value glbBase = LLVM::PtrToIntOp::create(builder, loc, i64Ty, glbBasePtr);
@@ -367,7 +367,8 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   // s1: tensor_dim0_lo [31:16]
   Value g1s1 = arith::ShLIOp::create(builder, loc, td0Lo, c16);
   // s2: tensor_dim0_hi [15:0] | tensor_dim1_lo [31:16]
-  Value g1s2 = arith::OrIOp::create(builder, loc, td0Hi, arith::ShLIOp::create(builder, loc, td1Lo, c16));
+  Value g1s2 =
+      arith::OrIOp::create(builder, loc, td0Hi, arith::ShLIOp::create(builder, loc, td1Lo, c16));
   // s3: tensor_dim1_hi [15:0] | tile_dim0 [31:16]
   Value g1s3 = arith::OrIOp::create(builder, loc, td1Hi, i32Const(builder, loc, tileD0 << 16));
 
