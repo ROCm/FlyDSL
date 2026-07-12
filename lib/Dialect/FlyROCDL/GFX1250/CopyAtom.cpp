@@ -32,24 +32,47 @@ namespace mlir::fly_rocdl {
 
 namespace {
 
-// (encoded_interval, encoded_amount) for the TDM padding bitfield, following the
-// Triton TDMUtility convention used by compute_padding_encoding().
+// (encoded_interval, encoded_amount) for the TDM padding bitfield, matching the
+// dword-based encoding of compute_padding_encoding() in tdm_ops.py:
+//   interval_dw = pad_interval_elems * elem_bits / 32   (must be a power of two)
+//   amount_dw   = pad_amount_elems   * elem_bits / 32
+//   encoded_interval = log2(interval_dw) - 1  -> descriptor bits [24:22] (3 bits)
+//   encoded_amount   = amount_dw - 1          -> descriptor bits [31:25] (7 bits)
 struct PadEncoding {
   int32_t interval = 0;
   int32_t amount = 0;
   bool enable = false;
 };
 
-PadEncoding computePadEncoding(int32_t padIntervalElems, int32_t padAmountElems, int32_t elemBits) {
+// Returns the encoding for active padding, a disabled encoding when no padding is
+// requested (both extents non-positive), or failure() when the requested padding
+// cannot be represented in the descriptor bitfield (not dword-aligned, dword
+// interval not a power of two, or an encoded field out of range). Failing here
+// prevents silently emitting a wrong TDM descriptor.
+FailureOr<PadEncoding> computePadEncoding(int32_t padIntervalElems, int32_t padAmountElems,
+                                          int32_t elemBits) {
   PadEncoding e;
   if (padIntervalElems <= 0 || padAmountElems <= 0)
-    return e;
+    return e; // padding disabled
+  // Both extents must be a whole number of 32-bit dwords.
+  if ((padIntervalElems * elemBits) % 32 != 0 || (padAmountElems * elemBits) % 32 != 0)
+    return failure();
   int32_t intervalDw = padIntervalElems * elemBits / 32;
   int32_t amountDw = padAmountElems * elemBits / 32;
   if (intervalDw <= 0 || amountDw <= 0)
-    return e;
-  e.interval = llvm::Log2_32(static_cast<uint32_t>(intervalDw)) - 1;
-  e.amount = amountDw - 1;
+    return failure();
+  // interval encodes as log2(interval_dw) - 1, so the dword interval must be a
+  // power of two (>= 2, since encoded_interval >= 0).
+  if ((intervalDw & (intervalDw - 1)) != 0)
+    return failure();
+  int32_t encInterval = llvm::Log2_32(static_cast<uint32_t>(intervalDw)) - 1;
+  int32_t encAmount = amountDw - 1;
+  if (encInterval < 0 || encInterval > 0x7) // [24:22]
+    return failure();
+  if (encAmount < 0 || encAmount > 0x7F) // [31:25]
+    return failure();
+  e.interval = encInterval;
+  e.amount = encAmount;
   e.enable = true;
   return e;
 }
@@ -149,6 +172,19 @@ LogicalResult CopyOpGFX1250TDM2DType::verify(function_ref<InFlightDiagnostic()> 
     return emitError() << "numWarps must be a positive power of two, got " << numWarps;
   if ((padInterval == 0) != (padAmount == 0))
     return emitError() << "padInterval and padAmount must both be zero or both non-zero";
+  if (padInterval != 0) {
+    if (padInterval < 0 || padAmount < 0)
+      return emitError() << "padInterval and padAmount must be non-negative, got " << padInterval
+                         << ", " << padAmount;
+    // The descriptor encodes interval as log2(interval_in_dwords) - 1. Element
+    // bits are only known at lowering, but they are a power of two for every
+    // supported type, so interval_in_dwords is a power of two iff padInterval
+    // (in elements) is. Reject the non-power-of-two case statically; the exact
+    // dword alignment / bitfield-range check happens at lowering where the
+    // element type is known.
+    if ((padInterval & (padInterval - 1)) != 0)
+      return emitError() << "padInterval must be a power of two (in elements), got " << padInterval;
+  }
   return success();
 }
 
@@ -304,7 +340,14 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
     padInterval = 0;
     padAmount = 0;
   }
-  PadEncoding pad = computePadEncoding(padInterval, padAmount, elemBits);
+  FailureOr<PadEncoding> padOr = computePadEncoding(padInterval, padAmount, elemBits);
+  if (failed(padOr))
+    return mlir::emitError(loc)
+           << "gfx1250 TDM: padding (interval=" << padInterval << ", amount=" << padAmount
+           << " elements at " << elemBits
+           << "-bit) is not encodable — the dword interval must be a power of two and the encoded "
+              "fields must fit the descriptor bitfield";
+  PadEncoding pad = *padOr;
 
   int32_t g1s0Upper = (dataSizeCode << 16) | ((pad.enable ? 1 : 0) << 20) | (pad.interval << 22) |
                       (pad.amount << 25);
