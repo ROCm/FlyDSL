@@ -211,6 +211,9 @@ def compile_conv3d_implicit_8wave(
     k_tiles = (crs + TILE_K - 1) // TILE_K
 
     BIG_IN = (n * c * d * h * w) > 0x7FFFFFFF
+    # Output element count; when its byte offset can exceed int32 the epilogue
+    # buffer_store (i32 voffset) overflows, so store via 64-bit global pointers.
+    BIG_OUT = (n * k * do * ho * wo * BF16_BYTES) > 0x7FFFFFFF
 
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
@@ -343,10 +346,8 @@ def compile_conv3d_implicit_8wave(
                     in_t = out_t + temporal_delta
                     valid = row_valid & k_valid & in_range(in_t, d)
                     if const_expr(BIG_IN):
-                        # Rebase against x_base_elem = (nbase*dhw + base_t*hw_o)*c
-                        # so the residual element offset fits in int32 (same origin
-                        # x_rsrc is built from). Equivalent to the generic BIG_IN
-                        # decode with in_h=oh, in_w=ow folded back into `row`.
+                        # Offset relative to x_rsrc's rebased origin so the i32
+                        # element offset does not overflow.
                         g_off = ((row + temporal_delta * hw_o) - (nbase * dhw + base_t * hw_o)) * c + cc
                     else:
                         g_off = (row + temporal_delta * hw_o) * c + cc
@@ -541,15 +542,22 @@ def compile_conv3d_implicit_8wave(
         _row_chk = npq % TILE_M != 0
         _need_chk = _row_chk or n_tail
 
-        # Vectorized epilogue: for n==1 (no split-K), the 4 acc values a[0..3] map
-        # to output rows row_base+0..3, which are contiguous in y (off_nk =
-        # col*dhw + row) and 8-byte aligned (row_base and dhw are both multiples of
-        # MFMA_C_VALUES). Pack them into one vec4 bf16 store instead of 4 scalar
-        # buffer_store_short -- the epilogue VMEM-store was ~12% of kernel stalls
-        # on the short-reduction 3x1x1 path. A 4-group never straddles the npq
-        # boundary (npq==dhw is a multiple of 4 and row_base%4==0), so a single
-        # row_base check gates the whole vector.
-        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0)
+        # Pack a lane's MFMA_C_VALUES accumulators into one vectorized store. For
+        # n==1 (no split-K) they map to rows row_base+0..3, which are contiguous
+        # in y (off_nk = col*dhw + row) and 8-byte aligned (row_base and dhw are
+        # multiples of MFMA_C_VALUES), and a 4-group never straddles the npq
+        # boundary, so a single row_base validity check gates the whole vector.
+        _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
+
+        # For >2^31-byte outputs the i32 buffer_store voffset overflows; store via
+        # a 64-bit global pointer built from the full element offset instead.
+        if const_expr(BIG_OUT):
+            y_elem_base = fx.Int64(buffer_ops.extract_base_index(y))
+
+        def _big_store(off_nk_i64, value):
+            addr = y_elem_base + off_nk_i64 * fx.Int64(BF16_BYTES)
+            ptr = buffer_ops.create_llvm_ptr(addr, address_space=1)
+            llvm.StoreOp(value.ir_value() if hasattr(value, "ir_value") else value, ptr, alignment=2)
 
         def _valid_raw(row, col):
             if const_expr(_row_chk and n_tail):
@@ -609,7 +617,10 @@ def compile_conv3d_implicit_8wave(
                                 rocdl.raw_ptr_buffer_atomic_fadd(a[i], y_rsrc, off_b, z0, z0)
                             else:
                                 cval = (a[i] + bias_val).to(elem_ty) if const_expr(has_bias) else a[i].to(elem_ty)
-                                buffer_ops.buffer_store(cval, y_rsrc, off_nk)
+                                if const_expr(BIG_OUT):
+                                    _big_store(fx.Int64(off_nk), cval)
+                                else:
+                                    buffer_ops.buffer_store(cval, y_rsrc, off_nk)
 
                         if const_expr(_need_chk):
                             if _valid_raw(row, col):
@@ -638,6 +649,8 @@ def _choose_splitk(npq, crs, k, device, tile=DEFAULT_TILE):
     if npq < 4096 or k_tiles < 16:
         return 1
     if k % tile_n != 0 or npq % tile_m != 0 or crs % TILE_K != 0:  # atomic path needs clean tiles
+        return 1
+    if npq * k * 4 > 0x7FFFFFFF:  # split-K fp32 output atomic uses an i32 byte offset
         return 1
     try:
         num_cu = torch.cuda.get_device_properties(device).multi_processor_count
@@ -722,10 +735,8 @@ def conv2d_implicit(x, weight, bias=None, stride=1, padding=0, **kwargs):
     """2D conv via the 3D implicit-GEMM kernel (depth-1 degenerate case).
 
     x: (N, C, H, W) bf16, weight: (K, C, R, S) bf16. stride/padding are int or a
-    2-tuple (h, w). Returns (N, K, Ho, Wo). The implicit-GEMM collapses all filter
-    taps into the reduction, so 2D is exactly the D=T=1 case of conv3d -- this
-    reshapes to 5D, reuses the same kernel (including the vectorized epilogue), and
-    squeezes the depth axis back out.
+    2-tuple (h, w). Returns (N, K, Ho, Wo). 2D is the D=T=1 case of conv3d, so
+    this reshapes to 5D, runs the 3D kernel, and squeezes the depth axis back out.
     """
     assert x.dim() == 4 and weight.dim() == 4, "conv2d_implicit expects (N,C,H,W) / (K,C,R,S)"
     sh, sw = (stride, stride) if isinstance(stride, int) else stride

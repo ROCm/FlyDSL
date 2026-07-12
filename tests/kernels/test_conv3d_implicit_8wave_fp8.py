@@ -17,7 +17,11 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit_8wave_fp8 import conv3d_implicit_8wave_fp8
+from kernels.conv.conv3d_implicit_8wave_fp8 import (
+    conv1d_implicit_fp8,
+    conv2d_implicit_fp8,
+    conv3d_implicit_8wave_fp8,
+)
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -98,3 +102,44 @@ def test_conv3d_fp8_tile_configs(tile):
     assert y.shape == ref.shape
     rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
     assert rel.item() < 6e-2, f"FP8 conv rel_err {rel.item():.3e} too high for tile {tile}"
+
+
+def _fp8cast(t):
+    return t.to(torch.float8_e4m3fn).to(torch.bfloat16)
+
+
+# 2D FP8 conv via the depth-1 wrapper. NPQ-aligned so only the FP8 quant floor
+# contributes (partial-tile masking accuracy is covered by the 3D tests).
+@_skip_no_fp8
+@pytest.mark.parametrize("kernel_shape,padding", [((3, 3), 1), ((1, 1), 0)])
+def test_conv2d_fp8_vs_reference(kernel_shape, padding):
+    torch.manual_seed(5100 + sum(kernel_shape))
+    n, c, h, w, k = 1, 128, 32, 32, 128
+    x = torch.randn((n, c, h, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
+
+    y = conv2d_implicit_fp8(x, weight, padding=padding)
+    ref = F.conv2d(_fp8cast(x), _fp8cast(weight), padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == ref.shape
+    rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
+    assert rel.item() < 2e-2, f"FP8 conv2d rel_err {rel.item():.3e}"
+
+
+# 1D FP8 conv via the depth/height-1 wrapper.
+@_skip_no_fp8
+@pytest.mark.parametrize("s,padding", [(3, 1), (1, 0)])
+def test_conv1d_fp8_vs_reference(s, padding):
+    torch.manual_seed(6100 + s)
+    n, c, w, k = 1, 128, 256, 128
+    x = torch.randn((n, c, w), device="cuda", dtype=torch.bfloat16)
+    weight = torch.randn((k, c, s), device="cuda", dtype=torch.bfloat16)
+
+    y = conv1d_implicit_fp8(x, weight, padding=padding)
+    ref = F.conv1d(_fp8cast(x), _fp8cast(weight), padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == ref.shape
+    rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
+    assert rel.item() < 2e-2, f"FP8 conv1d rel_err {rel.item():.3e}"
