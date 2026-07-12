@@ -6,13 +6,13 @@ import inspect
 import os
 import threading
 from functools import lru_cache, wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 from .._mlir import ir
 from ..utils import env
 
 if TYPE_CHECKING:
-    from typing import Callable, ParamSpec, TypeVar
+    from typing import Any, Callable, ParamSpec, TypeVar
 
     _P = ParamSpec("_P")
     _R = TypeVar("_R")
@@ -156,6 +156,10 @@ def dsl_loc_tracing(fn: "Callable[_P, _R]") -> "Callable[_P, _R]":
     return wrapper
 
 
+@overload
+def dsl_wrap_result(target: "Callable[_P, Any]") -> "Callable[_P, Any]": ...
+@overload
+def dsl_wrap_result(target: "type | None" = None) -> "Callable[[Callable[_P, Any]], Callable[_P, Any]]": ...
 def dsl_wrap_result(target=None):
     """Wrap the op result(s) back into DslType values.
 
