@@ -134,14 +134,17 @@ def Fly_CopyOpTypeInterface : TypeInterface<"CopyOpTypeInterface"> {
            "::mlir::Value":$dst,
            "::mlir::Value":$pred)>,
     InterfaceMethod<
-      "Whether the atom transfers the whole tile in a single call (e.g. a TDM "
-      "DMA). If true, the expand-copy lowering keeps the full tiled memref "
-      "instead of decomposing it into per-element copy_atom_calls.",
-      "bool",
-      "isWholeTileCopy",
+      "Number of memref dimensions this atom transfers in a single "
+      "copy_atom_call. Default 1: the expand-copy lowering peels the tiled "
+      "memref down to a rank-1 leaf and emits one call per element/fragment. An "
+      "atom that moves a whole N-D tile in one instruction (e.g. the gfx1250 "
+      "TDM 2D DMA) returns N, and the lowering emits a single call on the "
+      "rank-N memref instead of decomposing it.",
+      "unsigned",
+      "getCopyRank",
       (ins),
       /*methodBody=*/[{}],
-      /*defaultImplementation=*/[{ return false; }]>
+      /*defaultImplementation=*/[{ return 1; }]>
   ];
 }
 

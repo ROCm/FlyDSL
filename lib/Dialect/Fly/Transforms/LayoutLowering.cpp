@@ -2170,19 +2170,6 @@ public:
     Value dst = op.getDst();
     Value pred = op.getPred();
 
-    // Whole-tile copy atoms (e.g. gfx1250 TDM DMA) transfer the entire tile in a
-    // single call and read the tile geometry from the (rank-2) memref layout, so
-    // they must NOT be decomposed per element. Emit one copy_atom_call directly.
-    if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
-      if (auto copyOp = dyn_cast<CopyOpTypeInterface>(copyAtomTy.getCopyOp())) {
-        if (copyOp.isWholeTileCopy()) {
-          CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
-          rewriter.eraseOp(op);
-          return success();
-        }
-      }
-    }
-
     auto srcMemRefTy = cast<fly::MemRefType>(src.getType());
     auto dstMemRefTy = cast<fly::MemRefType>(dst.getType());
     auto predMemRefTy = pred ? cast<fly::MemRefType>(pred.getType()) : nullptr;
@@ -2204,6 +2191,22 @@ public:
 
     if (srcRank != dstRank)
       return rewriter.notifyMatchFailure(op, "src/dst ranks mismatch");
+
+    // Atoms that move a whole N-D tile in one call (e.g. TDM DMA) declare
+    // getCopyRank() == N and read the tile geometry from the rank-N memref
+    // layout. Emit a single call once the tile matches that rank, instead of
+    // decomposing it. The default rank 1 (guarded by > 1 here) leaves the
+    // per-element path below unchanged for every other atom.
+    if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
+      if (auto copyOp = dyn_cast<CopyOpTypeInterface>(copyAtomTy.getCopyOp())) {
+        unsigned copyRank = copyOp.getCopyRank();
+        if (copyRank > 1 && srcRank == static_cast<int32_t>(copyRank)) {
+          CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
+          rewriter.eraseOp(op);
+          return success();
+        }
+      }
+    }
 
     if (pred && predLayoutAttr.rank() == srcRank - 1) {
       LayoutBuilder<LayoutValueAdaptor> builder(rewriter, loc);

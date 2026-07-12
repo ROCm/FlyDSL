@@ -64,10 +64,10 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 //       oob_outer_bound.
 //===----------------------------------------------------------------------===//
 
-// TDM is a whole-tile DMA, so it overrides `isWholeTileCopy` to keep the
-// expand-copy lowering from decomposing the tiled memref per element.
+// TDM moves the whole 2D tile in one DMA, so it overrides `getCopyRank` (== 2)
+// to keep the expand-copy lowering from decomposing the tiled memref per element.
 def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", "gfx1250.tdm_2d",
-    /*traits=*/[], /*copyOverrides=*/["isWholeTileCopy"]> {
+    /*traits=*/[], /*copyOverrides=*/["getCopyRank"]> {
   let parameters = (ins
     "int32_t":$numWarps,
     // Padding in elements (both zero disables LDS padding).
