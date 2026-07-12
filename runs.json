@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-12T09:31:45Z",
+ "updated": "2026-07-12T09:34:50Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -55,13 +55,41 @@
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
    "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660",
    "created_at": "2026-07-12T08:03:57Z",
-   "updated_at": "2026-07-12T09:30:12Z",
+   "updated_at": "2026-07-12T09:32:36Z",
    "actor": "jiacao-amd",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T09:31:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660/job/86636415588"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T09:31:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660/job/86636415589"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T09:32:36Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660/job/86636415599"
+    }
+   ]
   },
   {
    "run_id": 29185161589,
