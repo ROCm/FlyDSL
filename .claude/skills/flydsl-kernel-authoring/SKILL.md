@@ -589,7 +589,25 @@ buffer_ops.buffer_store(data, rsrc, offset)
 | `fx.UniversalCopy32b()` | 32 | 1x f32 element copy |
 | `fx.UniversalCopy(64)` | 64 | 2x f32 elements |
 | `fx.UniversalCopy(128)` | 128 | 4x f32 elements |
-| `fx.rocdl.BufferCopy128b()` | 128 | AMD buffer load 4xf32 |
+| `fx.rocdl.BufferCopy128b()` | 128 | AMD buffer load 4xf32 (CDNA) |
+| `fx.rocdl.make_tdm_atom(...)` | whole tile | gfx1250 TDM async Global↔LDS DMA (1–5D) — see below |
+
+**gfx1250 TDM async copy** (`fx.rocdl.make_tdm_atom`): a whole-tile DMA whose
+descriptor (base pointer, per-dim extent for HW OOB handling, per-dim stride) is
+carried as **atom state**. The global operand of `copy_atom_call` is a
+shape/direction token only — its layout gives the compile-time N-D tile shape and
+its address space picks load vs store; its *pointer is unused* (base comes from
+state). Needs a **raw VA** (not `make_buffer_tensor`).
+
+```python
+lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
+lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))       # note: lds.ptr
+g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))
+atom = fx.rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)            # rank = len(extents), 1–5D
+fx.copy_atom_call(atom, g2d, lds2d)                               # Global → LDS
+fx.rocdl.tdm_ops.tensor_wait(0)                                  # await async DMA
+atom = fx.rocdl.advance_tdm_atom(atom, k_tile * k_stride_bytes)  # K-loop tile bump (imm_offset)
+```
 
 ---
 
@@ -649,6 +667,36 @@ result = rocdl.mfma_f32_16x16x32_fp8(a, b, acc)
 
 # INT8 MFMA
 result = rocdl.mfma_i32_16x16x32i8(a, b, acc)
+```
+
+### gfx1250 WMMA (wave32)
+
+gfx1250 uses **WMMA** (not MFMA), M=N=16. Build the atom with `rocdl.WMMA` (arch
+dispatched: gfx11 v16 ABI, gfx12 / gfx1250 v8 ABI) and issue it via
+`fx.make_mma_atom` + `fx.gemm` / `fx.mma_atom_call`:
+
+| dtype (A,B → Acc) | K | notes |
+|---|---|---|
+| f32 → f32 | 4 | |
+| f16 / bf16 → f32 or same | 32 | |
+| fp8 / bf8 (OCP E4M3FN / E5M2, any mix) → f32 or f16 | 64, 128 | |
+| i8 → i32 | 64 | `sign_a` / `sign_b` / `clamp` kwargs |
+| i4 → i32 | 32 | `sign_a` / `sign_b` / `clamp` kwargs |
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))       # fp8 → f32
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=True, clamp=True))
+```
+
+**MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, ..., block_size=32)` for
+the E8M0 block-scaled f8/f6/f4 format (`16x16x128`, or `32x16x128` fp4-only).
+Per-operand scales are atom state; `block_size` 32 → i32 scale (i64 for 16):
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMAScale(16, 16, 128, fx.Float8E4M3FN))
+mma = fx.atom_set_value(mma, "scale_a", fx.Int32(scale_a))
+mma = fx.atom_set_value(mma, "scale_b", fx.Int32(scale_b))
+fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)
 ```
 
 ### GEMM Pattern (Preshuffle)
