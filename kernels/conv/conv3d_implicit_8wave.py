@@ -234,10 +234,6 @@ def compile_conv3d_implicit_8wave(
         and do == d
         and ho == h
         and wo == w
-        # The >2^31-element rebase (BIG_IN) uses the generic n/t/h/w decode to
-        # compute the origin-relative offset; the temporal-only fast decode does
-        # not carry that rebase, so fall through to the generic path when BIG_IN.
-        and not BIG_IN
     )
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
@@ -347,7 +343,14 @@ def compile_conv3d_implicit_8wave(
                     out_t = (row // hw_o) % d
                     in_t = out_t + temporal_delta
                     valid = row_valid & k_valid & in_range(in_t, d)
-                    g_off = (row + temporal_delta * hw_o) * c + cc
+                    if const_expr(BIG_IN):
+                        # Rebase against x_base_elem = (nbase*dhw + base_t*hw_o)*c
+                        # so the residual element offset fits in int32 (same origin
+                        # x_rsrc is built from). Equivalent to the generic BIG_IN
+                        # decode with in_h=oh, in_w=ow folded back into `row`.
+                        g_off = ((row + temporal_delta * hw_o) - (nbase * dhw + base_t * hw_o)) * c + cc
+                    else:
+                        g_off = (row + temporal_delta * hw_o) * c + cc
                 else:
                     n_idx = row // dhw
                     rem = row % dhw
