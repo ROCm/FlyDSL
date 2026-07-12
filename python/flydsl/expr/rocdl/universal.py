@@ -117,10 +117,25 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
     )
 
 
-def WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, *, opsel_a=0, opsel_b=0):
+def WMMAScale(
+    m,
+    n,
+    k,
+    elem_ty_a,
+    elem_ty_b=None,
+    elem_ty_acc=None,
+    *,
+    opsel_a=0,
+    opsel_b=0,
+    mod_c=0,
+    reuse_a=False,
+    reuse_b=False,
+):
     """Create a gfx1250 MX-scaled WMMA atom (E8M0 block scale) for the unified
     f8/f6/f4 operand format. Per-operand scales are atom state (``scale_a`` /
     ``scale_b``, i32); ``opsel_a`` / ``opsel_b`` select the scale lane index.
+    ``mod_c`` (i16 C-operand modifier) and ``reuse_a`` / ``reuse_b`` (operand-reuse
+    scheduler hints) are forwarded to the V_WMMA_SCALE intrinsic.
     """
     ty_a = elem_ty_a.ir_type if hasattr(elem_ty_a, "ir_type") else elem_ty_a
     if elem_ty_b is None:
@@ -132,21 +147,50 @@ def WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, *, opsel_a=0
         if elem_ty_acc is None
         else (elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc)
     )
-    return MmaOpGFX1250_WMMAScaleType.get(m, n, k, ty_a, ty_b, ty_acc, opsel_a=opsel_a, opsel_b=opsel_b)
+    return MmaOpGFX1250_WMMAScaleType.get(
+        m,
+        n,
+        k,
+        ty_a,
+        ty_b,
+        ty_acc,
+        opsel_a=opsel_a,
+        opsel_b=opsel_b,
+        mod_c=mod_c,
+        reuse_a=reuse_a,
+        reuse_b=reuse_b,
+    )
 
 
-def TDM2D(num_warps, pad_interval=0, pad_amount=0, cache_modifier=0):
+def TDM2D(
+    num_warps,
+    pad_interval=0,
+    pad_amount=0,
+    cache_modifier=0,
+    atomic_barrier=False,
+    early_timeout=False,
+):
     """Create a gfx1250 2D TDM (Tensor Data Mover) Global<->LDS copy atom.
 
     Direction is inferred at lowering from which side is Global vs Shared; tile
     geometry comes from the Global-side memref layout. ``pad_interval`` /
     ``pad_amount`` (elements) add LDS row padding on the load path.
 
+    ``atomic_barrier`` (descriptor bit 18, HW auto-barrier) and ``early_timeout``
+    (bit 21, multicast-load GL1 knob) set compile-time descriptor config bits.
+
     Runtime state (set via ``fx.atom.set_value`` before the copy):
     ``workgroup_mask`` (MCAST mask) and ``oob_outer`` (outer-dim tensor bound in
     rows-from-tile-start for ragged tiles; default INT32_MAX = no clamp).
     """
-    return CopyOpGFX1250TDM2DType.get(num_warps, pad_interval, pad_amount, cache_modifier)
+    return CopyOpGFX1250TDM2DType.get(
+        num_warps,
+        pad_interval,
+        pad_amount,
+        cache_modifier,
+        atomic_barrier=atomic_barrier,
+        early_timeout=early_timeout,
+    )
 
 
 def make_buffer_tensor(

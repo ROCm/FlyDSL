@@ -66,11 +66,16 @@ def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", 
     // Padding in elements (both zero disables LDS padding).
     "int32_t":$padInterval,
     "int32_t":$padAmount,
-    "int32_t":$cacheModifier
+    "int32_t":$cacheModifier,
+    // Descriptor config bits (GROUP1 sgpr0): atomic_barrier_enable [18] sets the
+    // HW auto-barrier bit; early_timeout [21] is a multicast-load GL1 knob.
+    "bool":$atomicBarrier,
+    "bool":$earlyTimeout
   );
   let assemblyFormat = [{
     `<` `warps` `=` $numWarps `,` `pad` `=` $padInterval `,` $padAmount
-    `,` `cache` `=` $cacheModifier `>`
+    `,` `cache` `=` $cacheModifier `,` `barrier` `=` $atomicBarrier
+    `,` `timeout` `=` $earlyTimeout `>`
   }];
   let genVerifyDecl = 1;
 }

@@ -138,7 +138,8 @@ static bool isSupportedScaledElemTy(Type ty) {
 LogicalResult MmaOpGFX1250_WMMAScaleType::verify(function_ref<InFlightDiagnostic()> emitError,
                                                  int32_t m, int32_t n, int32_t k, Type elemTyA,
                                                  Type elemTyB, Type elemTyAcc, int32_t opselA,
-                                                 int32_t opselB) {
+                                                 int32_t opselB, int32_t modC, bool reuseA,
+                                                 bool reuseB) {
   bool is16 = (m == 16 && n == 16 && k == 128);
   bool is32x16 = (m == 32 && n == 16 && k == 128);
   if (!is16 && !is32x16) {
@@ -166,6 +167,8 @@ LogicalResult MmaOpGFX1250_WMMAScaleType::verify(function_ref<InFlightDiagnostic
     return emitError() << "opselA must be in [0, 3], got " << opselA;
   if (opselB < 0 || opselB > 3)
     return emitError() << "opselB must be in [0, 3], got " << opselB;
+  if (modC < 0 || modC > 0xFFFF)
+    return emitError() << "modC must fit the i16 intrinsic field [0, 65535], got " << modC;
   return success();
 }
 
@@ -228,14 +231,15 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
   Value scaleB = LLVM::ExtractValueOp::create(
       builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::ScaleB)});
 
-  // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuse default to 0.
+  // fmtScaleA / fmtScaleB default to 0 (E8M0). modC / reuseA / reuseB come from
+  // the atom's compile-time params.
   if (m == 32 && n == 16 && k == 128) {
     // fp4-only form; no fmtA/fmtB operands.
     return ROCDL::wmma_scale_f32_32x16x128_f4::create(
-               builder, loc, accTy, a, b, /*modC=*/(uint16_t)0, c,
+               builder, loc, accTy, a, b, /*modC=*/(uint16_t)getModC(), c,
                /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
                /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-               /*reuseA=*/false, /*reuseB=*/false)
+               /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
         .getResult();
   }
 
@@ -245,10 +249,11 @@ FailureOr<Value> MmaOpGFX1250_WMMAScaleType::emitAtomCallSSA(OpBuilder &builder,
     return failure();
 
   return ROCDL::wmma_scale_f32_16x16x128_f8f6f4::create(
-             builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b, /*modC=*/(uint16_t)0, c,
+             builder, loc, accTy, /*fmtA=*/*aFmt, a, /*fmtB=*/*bFmt, b,
+             /*modC=*/(uint16_t)getModC(), c,
              /*scaleAType=*/(uint32_t)getOpselA(), /*fmtScaleA=*/(uint32_t)0, scaleA,
              /*scaleBType=*/(uint32_t)getOpselB(), /*fmtScaleB=*/(uint32_t)0, scaleB,
-             /*reuseA=*/false, /*reuseB=*/false)
+             /*reuseA=*/getReuseA(), /*reuseB=*/getReuseB())
       .getResult();
 }
 

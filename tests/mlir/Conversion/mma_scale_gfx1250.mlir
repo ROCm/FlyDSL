@@ -13,7 +13,7 @@
 // CHECK-LABEL: @test_wmma_scale_type
 // CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32, i32)>)
 func.func @test_wmma_scale_type(
-    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>) {
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>) {
   return
 }
 
@@ -33,8 +33,8 @@ func.func @test_make_wmma_scale_default() {
   // CHECK-DAG: %[[C0:.*]] = arith.constant 0 : i32
   // CHECK-DAG: %[[S1:.*]] = llvm.insertvalue %[[C0]], %[[UNDEF]][0]
   // CHECK: llvm.insertvalue %[[C0]], %[[S1]][1]
-  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
+  %atom = fly.make_mma_atom : !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }
 
@@ -46,7 +46,7 @@ func.func @test_make_wmma_scale_default() {
 // CHECK-LABEL: @test_wmma_scale_call_fp8
 // CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32, i32)>, %[[SA:.*]]: i32, %[[SB:.*]]: i32)
 func.func @test_wmma_scale_call_fp8(
-    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>,
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>,
     %scale_a: i32,
     %scale_b: i32) {
   %lay_ab = fly.static : !fly.layout<64:1>
@@ -57,9 +57,9 @@ func.func @test_wmma_scale_call_fp8(
   %c = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
 
   // CHECK: %[[A1:.*]] = llvm.insertvalue %[[SA]], %[[ATOM]][0]
-  %atom_a = fly.atom.set_value(%atom, "scale_a", %scale_a) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>, i32) -> !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>
+  %atom_a = fly.atom.set_value(%atom, "scale_a", %scale_a) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>, i32) -> !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>
   // CHECK: %[[A2:.*]] = llvm.insertvalue %[[SB]], %[[A1]][1]
-  %atom_ab = fly.atom.set_value(%atom_a, "scale_b", %scale_b) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>, i32) -> !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>
+  %atom_ab = fly.atom.set_value(%atom_a, "scale_b", %scale_b) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>, i32) -> !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>
 
   // CHECK-DAG: %[[A_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<16xi32>
   // CHECK-DAG: %[[B_VAL:.*]] = llvm.load %{{.*}} : !llvm.ptr<5> -> vector<16xi32>
@@ -68,7 +68,7 @@ func.func @test_wmma_scale_call_fp8(
   // CHECK-DAG: %[[SB_VAL:.*]] = llvm.extractvalue %[[A2]][1]
   // CHECK: %[[RES:.*]] = rocdl.wmma.scale.f32.16x16x128.f8f6f4 %[[A_VAL]], %[[B_VAL]], %[[C_VAL]], %[[SA_VAL]], %[[SB_VAL]] : (vector<16xi32>, vector<16xi32>, vector<8xf32>, i32, i32) -> vector<8xf32>
   // CHECK: llvm.store %[[RES]], %{{.*}} : vector<8xf32>, !llvm.ptr<5>
-  fly.mma_atom_call(%atom_ab, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
+  fly.mma_atom_call(%atom_ab, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }
 
@@ -78,7 +78,7 @@ func.func @test_wmma_scale_call_fp8(
 
 // CHECK-LABEL: @test_wmma_scale_call_fp4_opsel
 func.func @test_wmma_scale_call_fp4_opsel(
-    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 2>>) {
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 2, modC = 0, reuseA = false, reuseB = false>>) {
   %lay_ab = fly.static : !fly.layout<32:1>
   %lay_cd = fly.static : !fly.layout<8:1>
   %d = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
@@ -87,7 +87,7 @@ func.func @test_wmma_scale_call_fp4_opsel(
   %c = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
 
   // CHECK: rocdl.wmma.scale.f32.16x16x128.f8f6f4 %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} {fmtA = 4 : i32, fmtB = 4 : i32, scaleAType = 1 : i32, scaleBType = 2 : i32} : (vector<8xi32>, vector<8xi32>, vector<8xf32>, i32, i32) -> vector<8xf32>
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 2>>, !fly.memref<f32, register, 8:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f32, register, 8:1>) -> ()
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 2, modC = 0, reuseA = false, reuseB = false>>, !fly.memref<f32, register, 8:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }
 
@@ -99,7 +99,7 @@ func.func @test_wmma_scale_call_fp4_opsel(
 
 // CHECK-LABEL: @test_wmma_scale_call_fp4_32x16
 func.func @test_wmma_scale_call_fp4_32x16(
-    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1>>) {
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1, modC = 0, reuseA = false, reuseB = false>>) {
   %lay_a = fly.static : !fly.layout<128:1>
   %lay_b = fly.static : !fly.layout<64:1>
   %lay_c = fly.static : !fly.layout<16:1>
@@ -109,6 +109,29 @@ func.func @test_wmma_scale_call_fp4_32x16(
   %c = fly.memref.alloca(%lay_c) : (!fly.layout<16:1>) -> !fly.memref<f32, register, 16:1>
 
   // CHECK: rocdl.wmma.scale.f32.32x16x128.f4 %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} {scaleBType = 1 : i32} : (vector<16xi32>, vector<8xi32>, vector<16xf32>, i32, i32) -> vector<16xf32>
-  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1>>, !fly.memref<f32, register, 16:1>, !fly.memref<f4E2M1FN, register, 128:1>, !fly.memref<f4E2M1FN, register, 64:1>, !fly.memref<f32, register, 16:1>) -> ()
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1, modC = 0, reuseA = false, reuseB = false>>, !fly.memref<f32, register, 16:1>, !fly.memref<f4E2M1FN, register, 128:1>, !fly.memref<f4E2M1FN, register, 64:1>, !fly.memref<f32, register, 16:1>) -> ()
+  return
+}
+
+// -----
+
+// Non-default modC / reuseA / reuseB are forwarded to the intrinsic attrs
+// (default 0/false is elided by the rocdl op printer, so it only shows here).
+
+// CHECK-LABEL: @test_wmma_scale_call_fp8_modc_reuse
+func.func @test_wmma_scale_call_fp8_modc_reuse(
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 1, reuseA = true, reuseB = true>>) {
+  %lay_ab = fly.static : !fly.layout<64:1>
+  %lay_cd = fly.static : !fly.layout<8:1>
+  %d = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
+  %a = fly.memref.alloca(%lay_ab) : (!fly.layout<64:1>) -> !fly.memref<f8E4M3FN, register, 64:1>
+  %b = fly.memref.alloca(%lay_ab) : (!fly.layout<64:1>) -> !fly.memref<f8E4M3FN, register, 64:1>
+  %c = fly.memref.alloca(%lay_cd) : (!fly.layout<8:1>) -> !fly.memref<f32, register, 8:1>
+
+  // CHECK: rocdl.wmma.scale.f32.16x16x128.f8f6f4
+  // CHECK-SAME: modC = 1 : i16
+  // CHECK-SAME: reuseA = true
+  // CHECK-SAME: reuseB = true
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 1, reuseA = true, reuseB = true>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }

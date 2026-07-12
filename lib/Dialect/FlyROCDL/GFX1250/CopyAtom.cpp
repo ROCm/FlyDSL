@@ -153,7 +153,8 @@ Attribute CopyOpGFX1250TDM2DType::getThrBitLayoutRef() const {
 
 LogicalResult CopyOpGFX1250TDM2DType::verify(function_ref<InFlightDiagnostic()> emitError,
                                              int32_t numWarps, int32_t padInterval,
-                                             int32_t padAmount, int32_t cacheModifier) {
+                                             int32_t padAmount, int32_t cacheModifier,
+                                             bool atomicBarrier, bool earlyTimeout) {
   if (numWarps < 1 || (numWarps & (numWarps - 1)) != 0)
     return emitError() << "numWarps must be a positive power of two, got " << numWarps;
   if ((padInterval == 0) != (padAmount == 0))
@@ -322,8 +323,9 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
               "fields must fit the descriptor bitfield";
   PadEncoding pad = *padOr;
 
-  int32_t g1s0Upper = (dataSizeCode << 16) | ((pad.enable ? 1 : 0) << 20) | (pad.interval << 22) |
-                      (pad.amount << 25);
+  int32_t g1s0Upper = (dataSizeCode << 16) | ((getAtomicBarrier() ? 1 : 0) << 18) |
+                      ((pad.enable ? 1 : 0) << 20) | ((getEarlyTimeout() ? 1 : 0) << 21) |
+                      (pad.interval << 22) | (pad.amount << 25);
   int32_t g1s1 = (tdim0 & 0xFFFF) << 16;
   int32_t g1s4 = tileD1 & 0xFFFF;
   int32_t g1s5 = outerStride;

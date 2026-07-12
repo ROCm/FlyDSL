@@ -35,6 +35,8 @@ def test_wmma_scale_type_roundtrip():
         t_fp8 = U.WMMAScale(16, 16, 128, f8, f8, f32)
         assert "gfx1250.wmma_scale" in str(t_fp8)
         assert "opselA = 0, opselB = 0" in str(t_fp8)
+        # Defaults: modC = 0, reuseA/reuseB = false.
+        assert "modC = 0, reuseA = false, reuseB = false" in str(t_fp8)
         assert ir.Type.parse(str(t_fp8)) == t_fp8
 
         t_fp4 = U.WMMAScale(16, 16, 128, f4, f4, f32, opsel_a=1, opsel_b=2)
@@ -46,6 +48,11 @@ def test_wmma_scale_type_roundtrip():
         assert "32x16x128" in str(t_32x16)
         assert ir.Type.parse(str(t_32x16)) == t_32x16
 
+        # modC / reuseA / reuseB forwarded and round-tripped.
+        t_reuse = U.WMMAScale(16, 16, 128, f8, f8, f32, mod_c=1, reuse_a=True, reuse_b=True)
+        assert "modC = 1, reuseA = true, reuseB = true" in str(t_reuse)
+        assert ir.Type.parse(str(t_reuse)) == t_reuse
+
 
 def test_tdm2d_type_roundtrip():
     with _ctx(), ir.Location.unknown():
@@ -54,9 +61,16 @@ def test_tdm2d_type_roundtrip():
 
         t = U.TDM2D(1)
         assert "gfx1250.tdm_2d" in str(t)
+        # Defaults: barrier / timeout = false.
+        assert "barrier = false, timeout = false" in str(t)
         assert ir.Type.parse(str(t)) == t
 
         t2 = U.TDM2D(8, pad_interval=64, pad_amount=8, cache_modifier=2)
         assert "warps = 8" in str(t2)
         assert "pad = 64, 8" in str(t2)
         assert ir.Type.parse(str(t2)) == t2
+
+        # barrier / timeout config bits forwarded and round-tripped.
+        t3 = U.TDM2D(1, atomic_barrier=True, early_timeout=True)
+        assert "barrier = true, timeout = true" in str(t3)
+        assert ir.Type.parse(str(t3)) == t3

@@ -103,11 +103,19 @@ def FlyROCDL_MmaOpGFX1250_WMMAScale : FlyROCDL_StatefulMmaOp<"MmaOpGFX1250_WMMAS
     "Type":$elemTyB,
     "Type":$elemTyAcc,
     "int32_t":$opselA,
-    "int32_t":$opselB
+    "int32_t":$opselB,
+    // Intrinsic attributes forwarded to V_WMMA_SCALE: modC (I16 C-operand
+    // modifier) and reuseA/reuseB (I1 operand-reuse scheduler hints). Always
+    // printed for clarity; default 0/false leaves them elided from the emitted
+    // rocdl op.
+    "int32_t":$modC,
+    "bool":$reuseA,
+    "bool":$reuseB
   );
   let assemblyFormat = [{
     `<` custom<MNKDimensionList>($m, $n, $k) `,` `(` $elemTyA `,` $elemTyB `)` `->` $elemTyAcc
-    `,` `opselA` `=` $opselA `,` `opselB` `=` $opselB `>`
+    `,` `opselA` `=` $opselA `,` `opselB` `=` $opselB
+    `,` `modC` `=` $modC `,` `reuseA` `=` $reuseA `,` `reuseB` `=` $reuseB `>`
   }];
 
   let builders = [
@@ -115,14 +123,23 @@ def FlyROCDL_MmaOpGFX1250_WMMAScale : FlyROCDL_StatefulMmaOp<"MmaOpGFX1250_WMMAS
       "int32_t":$m, "int32_t":$n, "int32_t":$k,
       "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
-                   /*opselA=*/0, /*opselB=*/0);
+                   /*opselA=*/0, /*opselB=*/0, /*modC=*/0, /*reuseA=*/false,
+                   /*reuseB=*/false);
     }]>,
     TypeBuilderWithInferredContext<(ins
       "int32_t":$m, "int32_t":$n, "int32_t":$k,
       "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc,
       "int32_t":$opselA, "int32_t":$opselB), [{
       return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
-                   opselA, opselB);
+                   opselA, opselB, /*modC=*/0, /*reuseA=*/false, /*reuseB=*/false);
+    }]>,
+    TypeBuilderWithInferredContext<(ins
+      "int32_t":$m, "int32_t":$n, "int32_t":$k,
+      "Type":$elemTyA, "Type":$elemTyB, "Type":$elemTyAcc,
+      "int32_t":$opselA, "int32_t":$opselB,
+      "int32_t":$modC, "bool":$reuseA, "bool":$reuseB), [{
+      return $_get(elemTyA.getContext(), m, n, k, elemTyA, elemTyB, elemTyAcc,
+                   opselA, opselB, modC, reuseA, reuseB);
     }]>
   ];
   let genVerifyDecl = 1;
