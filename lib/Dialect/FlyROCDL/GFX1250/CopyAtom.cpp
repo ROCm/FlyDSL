@@ -332,11 +332,10 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   Value c16 = i32Const(builder, loc, 16);
   Value mask16 = i32Const(builder, loc, 0xFFFF);
   Value td1Lo = arith::AndIOp::create(builder, loc, tdim1, mask16);
-  Value g1s2 = arith::OrIOp::create(
-      builder, loc, i32Const(builder, loc, (tdim0 >> 16) & 0xFFFF),
-      arith::ShLIOp::create(builder, loc, td1Lo, c16));
-  Value td1Hi = arith::AndIOp::create(builder, loc,
-                                      arith::ShRUIOp::create(builder, loc, tdim1, c16), mask16);
+  Value g1s2 = arith::OrIOp::create(builder, loc, i32Const(builder, loc, (tdim0 >> 16) & 0xFFFF),
+                                    arith::ShLIOp::create(builder, loc, td1Lo, c16));
+  Value td1Hi =
+      arith::AndIOp::create(builder, loc, arith::ShRUIOp::create(builder, loc, tdim1, c16), mask16);
   Value g1s3 = arith::OrIOp::create(builder, loc, td1Hi, i32Const(builder, loc, tileD0 << 16));
 
   Value dgroup1 = vector::FromElementsOp::create(
