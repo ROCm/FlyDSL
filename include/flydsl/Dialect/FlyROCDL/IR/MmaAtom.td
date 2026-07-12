@@ -102,6 +102,10 @@ def FlyROCDL_MmaOpGFX1250_WMMAScale : FlyROCDL_StatefulMmaOp<"MmaOpGFX1250_WMMAS
     "Type":$elemTyA,
     "Type":$elemTyB,
     "Type":$elemTyAcc,
+    // opselA/opselB are forwarded verbatim as the intrinsic's scaleAType /
+    // scaleBType operands (the scale-format / lane selector into the scale
+    // vector), NOT an output opsel; named opsel* only for consistency with the
+    // plain WMMA atom. Valid range [0, 3].
     "int32_t":$opselA,
     "int32_t":$opselB,
     // Intrinsic attributes forwarded to V_WMMA_SCALE: modC (I16 C-operand

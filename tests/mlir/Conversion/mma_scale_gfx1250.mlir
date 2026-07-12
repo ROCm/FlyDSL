@@ -174,3 +174,25 @@ func.func @test_wmma_scale16_call_fp8(
   fly.mma_atom_call(%atom_ab, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0, modC = 0, reuseA = false, reuseB = false, blockSize = 16>>, !fly.memref<f32, register, 8:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f8E4M3FN, register, 64:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }
+
+// -----
+
+// block-16 + 32x16x128 fp4 (A/B-swap perf path): scale state is i64 and the
+// form lowers to rocdl.wmma.scale16.f32.32x16x128.f4 (i64 scale operands).
+// A (32 rows) is vector<16xi32>, B (16 rows) is vector<8xi32>, acc vector<16xf32>.
+
+// CHECK-LABEL: @test_wmma_scale16_call_fp4_32x16
+func.func @test_wmma_scale16_call_fp4_32x16(
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1, modC = 0, reuseA = false, reuseB = false, blockSize = 16>>) {
+  %lay_a = fly.static : !fly.layout<128:1>
+  %lay_b = fly.static : !fly.layout<64:1>
+  %lay_c = fly.static : !fly.layout<16:1>
+  %d = fly.memref.alloca(%lay_c) : (!fly.layout<16:1>) -> !fly.memref<f32, register, 16:1>
+  %a = fly.memref.alloca(%lay_a) : (!fly.layout<128:1>) -> !fly.memref<f4E2M1FN, register, 128:1>
+  %b = fly.memref.alloca(%lay_b) : (!fly.layout<64:1>) -> !fly.memref<f4E2M1FN, register, 64:1>
+  %c = fly.memref.alloca(%lay_c) : (!fly.layout<16:1>) -> !fly.memref<f32, register, 16:1>
+
+  // CHECK: rocdl.wmma.scale16.f32.32x16x128.f4 %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} {scaleBType = 1 : i32} : (vector<16xi32>, vector<8xi32>, vector<16xf32>, i64, i64) -> vector<16xf32>
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1, modC = 0, reuseA = false, reuseB = false, blockSize = 16>>, !fly.memref<f32, register, 16:1>, !fly.memref<f4E2M1FN, register, 128:1>, !fly.memref<f4E2M1FN, register, 64:1>, !fly.memref<f32, register, 16:1>) -> ()
+  return
+}

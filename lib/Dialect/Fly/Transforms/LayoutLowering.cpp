@@ -2200,7 +2200,15 @@ public:
     if (auto copyAtomTy = dyn_cast<CopyAtomType>(copyAtomVal.getType())) {
       if (auto copyOp = dyn_cast<CopyOpTypeInterface>(copyAtomTy.getCopyOp())) {
         unsigned copyRank = copyOp.getCopyRank();
-        if (copyRank > 1 && srcRank == static_cast<int32_t>(copyRank)) {
+        if (copyRank > 1) {
+          // A whole-tile atom reads its geometry from the rank-N memref, so the
+          // tile must be presented at exactly that rank. Anything else (a
+          // larger, not-yet-tiled memref or a lower-rank tile) has no valid
+          // per-element decomposition for this atom — fail loudly here rather
+          // than silently peeling it apart into wrong per-element calls below.
+          if (srcRank != static_cast<int32_t>(copyRank))
+            return rewriter.notifyMatchFailure(
+                op, "whole-tile copy atom requires a memref of its exact copy rank");
           CopyAtomCall::create(rewriter, loc, copyAtomVal, src, dst, pred);
           rewriter.eraseOp(op);
           return success();

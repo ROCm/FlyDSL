@@ -328,7 +328,12 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
       strideElems[i] = arith::SelectOp::create(
           builder, loc, unset, arith::ConstantIntOp::create(builder, loc, s, 64), st);
     } else {
-      strideElems[i] = st; // no static fallback; sentinel faults loudly
+      // Dynamic outer stride: there is no static layout stride to fall back to,
+      // so the caller must set stride_i explicitly (make_tdm_atom's `strides`).
+      // An unset slot carries the sentinel (a large negative stride) straight
+      // into the descriptor, which produces a visibly-wrong transfer rather than
+      // silently aliasing a legitimate stride 0.
+      strideElems[i] = st;
     }
   }
   strideElems[rank - 1] = arith::ConstantIntOp::create(builder, loc, 1, 64); // innermost contiguous
@@ -341,12 +346,15 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
   Value ldsBase = LLVM::PtrToIntOp::create(builder, loc, builder.getI32Type(), ldsPtr);
 
   // Compile-time LDS per-warp strides (elements): innermost contiguous, with row
-  // padding folded into the next-outer stride on the load path.
+  // padding folded into the next-outer stride. Padding describes the LDS layout,
+  // so it applies to both directions (load fills padded LDS, store reads it) —
+  // matching the Triton reference, which encodes padding identically for load and
+  // store.
   SmallVector<int32_t> ldsStride(rank);
   ldsStride[rank - 1] = 1;
   if (rank >= 2) {
     int32_t innerRow = tileShape[rank - 1];
-    if (padActive && !isStore)
+    if (padActive)
       innerRow += getPadAmount();
     ldsStride[rank - 2] = innerRow;
     for (int32_t i = rank - 3; i >= 0; --i)
@@ -398,13 +406,10 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
       builder, loc, VectorType::get({4}, builder.getI32Type()),
       ValueRange{i32Const(builder, loc, /*pred=*/1), ldsAddr, g0s2, g0s3});
 
-  // Padding config (folded into the tile extent on the store path).
+  // Padding descriptor bitfield: set for both directions (it describes the LDS
+  // layout the DMA engine walks — pad-per-row on fill and on drain alike).
   int32_t padInterval = getPadInterval();
   int32_t padAmount = getPadAmount();
-  if (isStore && padActive) {
-    padInterval = 0;
-    padAmount = 0;
-  }
   FailureOr<PadEncoding> padOr = computePadEncoding(padInterval, padAmount, elemBits);
   if (failed(padOr))
     return mlir::emitError(loc)
@@ -416,8 +421,9 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
 
   // Descriptor dims are innermost-first: descriptor dim j maps to tensor dim
   // (rank-1-j). tensor_dim_j is the per-wave OOB clamp max(0, extent - warp start);
-  // tile_dim_j is the static per-warp block size. Store folds row padding into the
-  // innermost tile dim (descriptor dim 0).
+  // tile_dim_j is the static per-warp block size. LDS padding is carried by the
+  // pad bitfield + ldsStride, never by widening tile_dim, so the global transfer
+  // extent stays the true tile size for both load and store.
   auto descTensorDim = [&](int32_t j) -> Value { // runtime i32, clamped
     int32_t d = rank - 1 - j;
     return arith::MaxSIOp::create(
@@ -425,10 +431,7 @@ LogicalResult CopyOpGFX1250TDMType::emitAtomCall(OpBuilder &builder, Location lo
   };
   auto descTileDim = [&](int32_t j) -> int32_t {
     int32_t d = rank - 1 - j;
-    int32_t t = bpw[d];
-    if (j == 0 && isStore && padActive)
-      t += getPadAmount();
-    return t;
+    return bpw[d];
   };
   // 48-bit stride slots: descriptor stride k = stride of tensor dim (rank-2-k).
   auto descStrideLo32 = [&](int32_t k) -> Value {

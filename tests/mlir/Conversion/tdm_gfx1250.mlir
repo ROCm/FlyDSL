@@ -121,6 +121,26 @@ func.func @test_tdm_load_pad(
 
 // -----
 
+// Store with the same LDS padding is encoded identically to load: the pad
+// bitfield (same 118554624 constant) is set and the tile dim is NOT widened by
+// padAmount, so the global write extent stays the true 128x64 tile (matches the
+// Triton reference, which encodes padding the same way for both directions).
+
+// CHECK-LABEL: @test_tdm_store_pad
+func.func @test_tdm_store_pad(
+    %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 64, 8, cache = 0, barrier = false, timeout = false>, 0>,
+    %src: !fly.memref<f16, shared, (128,64):(64,1)>,
+    %dst: !fly.memref<f16, global, (128,64):(64,1)>) {
+  // CHECK-DAG: arith.constant 118554624 : i32
+  // tile_dim0 stays 64 (0x40) -> 64 << 16 = 4194304; NOT 72 (64+pad 8).
+  // CHECK-DAG: arith.constant 4194304 : i32
+  // CHECK: rocdl.tensor.store.from.lds
+  fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 64, 8, cache = 0, barrier = false, timeout = false>, 0>, !fly.memref<f16, shared, (128,64):(64,1)>, !fly.memref<f16, global, (128,64):(64,1)>) -> ()
+  return
+}
+
+// -----
+
 // MCAST: a runtime workgroup_mask (atom state slot 0) is ORed into GROUP1 config
 // [15:0].
 
