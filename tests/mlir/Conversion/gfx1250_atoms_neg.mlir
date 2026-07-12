@@ -55,3 +55,13 @@ func.func @bad_tdm_pad_pow2(
     %a: !fly.copy_atom<!fly_rocdl.gfx1250.tdm<rank = 2, warps = 1, pad = 48, 8, cache = 0, barrier = false, timeout = false>, 0>) {
   return
 }
+
+// -----
+
+// signA/signB/clamp are integer-only (iu4/iu8) controls; the verifier rejects
+// them on the float WMMA paths.
+// CHECK: signA/signB/clamp are only valid for integer (iu4/iu8) WMMA
+func.func @bad_wmma_sign_on_fp(
+    %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma<16x16x32, (f16, f16) -> f32, signA = true, signB = false, clamp = false>>) {
+  return
+}

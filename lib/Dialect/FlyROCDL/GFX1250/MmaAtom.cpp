@@ -116,9 +116,15 @@ Attribute MmaOpGFX1250_WMMAType::getThrValLayoutC() const {
 
 LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> emitError, int32_t m,
                                             int32_t n, int32_t k, Type elemTyA, Type elemTyB,
-                                            Type elemTyAcc) {
+                                            Type elemTyAcc, bool signA, bool signB, bool clamp) {
   if (m != 16 || n != 16)
     return emitError() << "GFX1250 WMMA requires M=N=16, got " << m << "x" << n;
+
+  // signA/signB/clamp are integer-only controls (iu4 / iu8). Reject them on the
+  // float paths, where the ROCDL intrinsic has no such operands.
+  if ((signA || signB || clamp) && !(elemTyA.isInteger(4) || elemTyA.isInteger(8)))
+    return emitError() << "signA/signB/clamp are only valid for integer (iu4/iu8) WMMA, got A="
+                       << elemTyA;
 
   // gfx1250 has native OCP fp8 (E4M3FN / E5M2), not the CDNA FNUZ variants.
   auto isF8 = [](Type ty) { return isa<Float8E4M3FNType>(ty) || isa<Float8E5M2Type>(ty); };
@@ -228,29 +234,30 @@ enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp, ModsIUClamp };
 
 template <typename WmmaOp, WmmaVariant Variant>
 static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType accTy, Value a,
-                                    Value b, Value c) {
+                                    Value b, Value c, bool signA = false, bool signB = false,
+                                    bool clamp = false) {
   Value res;
   if constexpr (Variant == WmmaVariant::ModsAllReuse) {
+    // Float path: no sign/clamp operands.
     res = WmmaOp::create(builder, loc, accTy,
                          /*signA=*/false, a, /*signB=*/false, b,
                          /*modC=*/(uint16_t)0, c)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsC) {
+    // fp8 path: no sign/clamp operands.
     res = WmmaOp::create(builder, loc, accTy, a, b,
                          /*modC=*/(uint16_t)0, c,
                          /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
   } else if constexpr (Variant == WmmaVariant::ModsABClamp) {
-    res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b, c,
-                         /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
+    // iu8: sign + reuse + clamp controls.
+    res = WmmaOp::create(builder, loc, accTy, signA, a, signB, b, c,
+                         /*reuseA=*/false, /*reuseB=*/false, clamp)
               .getResult();
   } else {
     // IU form (e.g. iu4): sign/clamp controls but no reuseA/reuseB operands.
     static_assert(Variant == WmmaVariant::ModsIUClamp);
-    res = WmmaOp::create(builder, loc, accTy,
-                         /*signA=*/false, a, /*signB=*/false, b, c, /*clamp=*/false)
-              .getResult();
+    res = WmmaOp::create(builder, loc, accTy, signA, a, signB, b, c, clamp).getResult();
   }
   return res;
 }
@@ -286,9 +293,15 @@ FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
   if (c.getType() != accTy)
     c = LLVM::BitcastOp::create(builder, loc, accTy, c);
 
+  // Integer (iu4/iu8) sign/clamp controls; false/ignored on the float paths.
+  bool signA = getSignA();
+  bool signB = getSignB();
+  bool clamp = getClamp();
+
 #define DISPATCH_WMMA_SSA(M_, K_, PRED, OP, VARIANT)                                               \
   if (m == M_ && n == M_ && k == K_ && (PRED)) {                                                   \
-    return emitWmmaSSA<ROCDL::OP, WmmaVariant::VARIANT>(builder, loc, accTy, a, b, c);             \
+    return emitWmmaSSA<ROCDL::OP, WmmaVariant::VARIANT>(builder, loc, accTy, a, b, c, signA,       \
+                                                        signB, clamp);                             \
   }
 
 #define DISPATCH_WMMA_SSA_FP8(K_, ACC_PRED, ACC_PREFIX)                                            \

@@ -66,15 +66,17 @@ struct PyMmaOpGFX1250_WMMAType : PyConcreteType<PyMmaOpGFX1250_WMMAType> {
     c.def_static(
         "get",
         [](int32_t m, int32_t n, int32_t k, PyType &elemTyA, PyType &elemTyB, PyType &elemTyAcc,
-           DefaultingPyMlirContext context) {
+           bool signA, bool signB, bool clamp, DefaultingPyMlirContext context) {
           return PyMmaOpGFX1250_WMMAType(
               context->getRef(),
               wrap(MmaOpGFX1250_WMMAType::get(m, n, k, unwrap(elemTyA), unwrap(elemTyB),
-                                              unwrap(elemTyAcc))));
+                                              unwrap(elemTyAcc), signA, signB, clamp)));
         },
-        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, nb::kw_only(),
-        "context"_a = nb::none(),
-        "Create a MmaOpGFX1250_WMMAType with m, n, k dimensions and element types");
+        "m"_a, "n"_a, "k"_a, "elem_ty_a"_a, "elem_ty_b"_a, "elem_ty_acc"_a, "sign_a"_a = false,
+        "sign_b"_a = false, "clamp"_a = false, nb::kw_only(), "context"_a = nb::none(),
+        "Create a MmaOpGFX1250_WMMAType with m, n, k dimensions and element types. "
+        "sign_a / sign_b / clamp are integer-only (iu4 / iu8) controls (signed operands / "
+        "accumulator saturation); they must be false on the float paths.");
   }
 };
 

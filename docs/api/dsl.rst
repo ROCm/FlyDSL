@@ -208,9 +208,12 @@ ROCDL Operations (``flydsl.expr.rocdl``)
 
 AMD-specific operations for ROCm:
 
-- **fx.rocdl.make_buffer_tensor(tensor)** -- create buffer resource from tensor
+- **fx.rocdl.make_buffer_tensor(tensor)** -- create buffer resource from tensor (CDNA buffer copy)
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy instruction atoms
-- **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None)** -- MFMA instruction atom constructor (4th arg is the A/B element type; accumulator defaults to f32)
+- **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None)** -- MFMA instruction atom constructor (CDNA3/CDNA4; 4th arg is the A/B element type; accumulator defaults to f32)
+- **fx.rocdl.WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, \*\*kwargs)** -- WMMA MMA atom constructor (arch-dispatched: gfx11 / gfx12 / gfx1250). gfx1250 supports f32(K4), f16/bf16(K32), fp8/bf8(K64/128), i8(K64), i4(K32); integer paths take ``sign_a`` / ``sign_b`` / ``clamp``
+- **fx.rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, \*, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False, block_size=32)** -- gfx1250 MX-scaled WMMA (E8M0 block scale, f8/f6/f4; ``16x16x128`` or ``32x16x128`` fp4-only). Per-operand scales are atom state (``scale_a`` / ``scale_b``)
+- **fx.rocdl.make_tdm_atom(tensor, tensor_extents, strides=None, \*, num_warps, ...)** -- build a gfx1250 TDM (Tensor Data Mover) async Global↔LDS whole-tile copy atom (rank 1-5); the tile descriptor is carried as atom state. ``fx.rocdl.TDM(rank, num_warps, ...)`` builds the atom type only; ``fx.rocdl.advance_tdm_atom(atom, byte_offset)`` bumps the K-loop tile offset
 - **fx.rocdl.sched_mfma(cnt)** -- insert MFMA scheduling barrier
 - **fx.rocdl.sched_vmem(cnt)** -- insert VMEM scheduling barrier
 - **fx.rocdl.sched_dsrd(cnt)** -- insert DS read scheduling barrier
