@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-12T13:21:02Z",
+ "updated": "2026-07-12T13:29:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -29,9 +29,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193639726",
    "created_at": "2026-07-12T13:00:50Z",
-   "updated_at": "2026-07-12T13:19:51Z",
+   "updated_at": "2026-07-12T13:28:30Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T13:28:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193639726/job/86654150700"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T13:21:00Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193639726/job/86654150702"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-12T13:21:06Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193639726/job/86654150718"
+    }
+   ]
   },
   {
    "run_id": 29193628623,
@@ -98,13 +126,41 @@
    "branch": "gfx1250_doc_fixups",
    "event": "pull_request",
    "title": "[FlyROCDL] gfx1250 review follow-ups: signed-int WMMA, comment fixes, atom docs",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193446719",
    "created_at": "2026-07-12T12:54:18Z",
-   "updated_at": "2026-07-12T12:54:19Z",
+   "updated_at": "2026-07-12T13:28:26Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-12T13:28:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193446719/job/86654820219"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-12T13:28:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193446719/job/86654820220"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-12T13:28:32Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29193446719/job/86654820225"
+    }
+   ]
   },
   {
    "run_id": 29193205664,
@@ -128,11 +184,11 @@
    "branch": "gfx1250_doc_fixups",
    "event": "pull_request",
    "title": "[FlyROCDL] gfx1250 review follow-ups: signed-int WMMA, comment fixes, atom docs",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192612522",
    "created_at": "2026-07-12T12:26:13Z",
-   "updated_at": "2026-07-12T12:33:39Z",
+   "updated_at": "2026-07-12T13:27:31Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -156,10 +212,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T12:27:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T13:27:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192612522/job/86649879870"
     }
    ]
@@ -242,10 +298,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T13:15:04Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T13:27:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653/job/86652854290"
     }
    ]
