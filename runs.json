@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-12T06:53:28Z",
+ "updated": "2026-07-12T06:58:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29183401486,
+   "pr": 830,
+   "commit": "2dc93366d66b7a05cb4cd0d5d9739e7484bbb391",
+   "branch": "add_1250_mma_scale",
+   "event": "pull_request",
+   "title": "Add 1250 mma scale",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183401486",
+   "created_at": "2026-07-12T06:56:11Z",
+   "updated_at": "2026-07-12T06:56:12Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 29183272482,
    "pr": 830,
@@ -10,11 +25,11 @@
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
    "title": "Add 1250 mma scale",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183272482",
    "created_at": "2026-07-12T06:50:55Z",
-   "updated_at": "2026-07-12T06:50:56Z",
+   "updated_at": "2026-07-12T06:56:12Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -1789,49 +1804,6 @@
      "started_at": "2026-07-09T12:12:54Z",
      "completed_at": "2026-07-09T13:11:27Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29005981806/job/86115194108"
-    }
-   ]
-  },
-  {
-   "run_id": 29003602491,
-   "pr": null,
-   "commit": "927959cd98efada6eb6e4f19eb76bfed8a643246",
-   "branch": "main",
-   "event": "push",
-   "title": "[Kernel] Add compile_mxfp6_gemm: MXFP6\u00d7MXFP4 preshuffle GEMM (gfx950)\u2026",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491",
-   "created_at": "2026-07-09T08:05:46Z",
-   "updated_at": "2026-07-09T13:14:36Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-09T12:10:26Z",
-     "completed_at": "2026-07-09T12:37:22Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491/job/86110650673"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-09T11:46:53Z",
-     "completed_at": "2026-07-09T13:14:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491/job/86110650674"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-09T11:46:46Z",
-     "completed_at": "2026-07-09T12:38:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29003602491/job/86110650689"
     }
    ]
   }
