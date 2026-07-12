@@ -53,9 +53,15 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 // distribution / cache policy are compile-time atom parameters. Direction
 // (load vs store) is inferred from which side is Global vs Shared.
 //
-// Stateful: carries a runtime `workgroup_mask` (default 0) for TDM multicast
-// (MCAST) loads, ORed into the descriptor's GROUP1 config word [15:0]. Set via
-// fly.atom.set_value(atom, "workgroup_mask", %mask).
+// Stateful runtime fields (set via fly.atom.set_value(atom, name, %v)):
+//   `workgroup_mask` (default 0): TDM multicast (MCAST) mask, ORed into the
+//       descriptor's GROUP1 config word [15:0].
+//   `oob_outer` (default INT32_MAX = no clamp): outer-dim tensor bound in
+//       rows-from-tile-start for ragged / OOB tiles. Sets tensor_dim1 =
+//       max(0, oob_outer - warp_off_outer) while tile_dim1 stays static, so the
+//       HW fault-guards (load: zero-fill) / drops (store) the partial-tile
+//       overhang — the copy-atom equivalent of make_tensor_descriptor_2d's
+//       oob_outer_bound.
 //===----------------------------------------------------------------------===//
 
 def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", "gfx1250.tdm_2d",[]> {
