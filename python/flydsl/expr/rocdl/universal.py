@@ -275,14 +275,20 @@ def make_tdm_atom(
     each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or any
     ``fx`` integer), and ``None`` (or an omitted trailing dim) means no clamp on
     that axis (INT32_MAX). ``outer_stride`` is the runtime outer stride in
-    elements; ``None`` falls back to the tile memref's static layout stride.
+    elements; ``None`` falls back to the tile memref's *static* layout stride.
+    Pass ``outer_stride`` explicitly when the tile has a dynamic (runtime) outer
+    stride — there is no static value to fall back to, and leaving it unset
+    produces a faulting descriptor stride rather than silently reading stride 0.
 
-    Issue the copy with ``fx.copy_atom_call(atom, global_tile, lds)``: the global
-    operand supplies only the tile shape and the copy direction.
+    Issue the copy with ``fx.copy_atom_call(atom, global_tile, lds)``. NOTE: the
+    global operand's *pointer is unused* — only its layout (tile shape) and
+    address space (copy direction) are read; the base address comes from the
+    ``base`` state set here (re-set it to advance to the next tile).
     """
     from ..primitive import atom_set_value, make_copy_atom
 
     NO_CLAMP = 0x7FFFFFFF
+    STRIDE_UNSET = -0x80000000  # matches kOuterStrideUnset in CopyAtom.cpp
 
     extents = list(tensor_extents) if tensor_extents is not None else []
     if len(extents) > 2:
@@ -294,7 +300,7 @@ def make_tdm_atom(
 
     outer = Int32(NO_CLAMP) if extents[0] is None else _i32(extents[0])
     inner = Int32(NO_CLAMP) if extents[1] is None else _i32(extents[1])
-    stride = Int32(0) if outer_stride is None else _i32(outer_stride)
+    stride = Int32(STRIDE_UNSET) if outer_stride is None else _i32(outer_stride)
 
     copy_op = CopyOpGFX1250TDM2DType.get(
         num_warps,

@@ -88,6 +88,11 @@ Value i32Const(OpBuilder &b, Location loc, int32_t v) {
   return arith::ConstantIntOp::create(b, loc, v, 32);
 }
 
+// Sentinel for an unset `outer_stride` state field: fall back to the tile
+// memref's static layout stride. Distinct from any real stride (including a
+// legitimate 0 broadcast stride), so "unset" and "explicitly 0" don't alias.
+constexpr int32_t kOuterStrideUnset = static_cast<int32_t>(0x80000000);
+
 } // namespace
 
 // Stateful: the atom carries the whole TDM 2D descriptor. Slot 0 is the MCAST
@@ -129,13 +134,14 @@ Value CopyOpGFX1250TDM2DType::getDefaultState(OpBuilder &builder, Location loc) 
   };
   Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
   Value noClamp = arith::ConstantIntOp::create(builder, loc, 0x7FFFFFFF, 32);
+  Value strideUnset = arith::ConstantIntOp::create(builder, loc, kOuterStrideUnset, 32);
   Value nullBase =
       LLVM::ZeroOp::create(builder, loc, LLVM::LLVMPointerType::get(ctx, /*addrSpace=*/1));
   insert(AtomStateField::WorkgroupMask, zero);
   insert(AtomStateField::Base, nullBase);
   insert(AtomStateField::OuterExtent, noClamp);
   insert(AtomStateField::InnerExtent, noClamp);
-  insert(AtomStateField::OuterStride, zero);
+  insert(AtomStateField::OuterStride, strideUnset);
   return state;
 }
 
@@ -243,10 +249,7 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   int32_t outer = layout.getShape().at(0).getLeafAsInt().getValue();
   int32_t inner = layout.getShape().at(1).getLeafAsInt().getValue();
   int32_t innerStride = layout.getStride().at(1).getLeafAsInt().getValue();
-  // outer stride is runtime (from atom state); a static layout value is used only
-  // as the fallback when the state stride is left unset (sentinel 0).
-  int32_t staticOuterStride =
-      layout.isStaticStride() ? layout.getStride().at(0).getLeafAsInt().getValue() : 0;
+  bool hasStaticOuterStride = layout.isStaticStride();
 
   int32_t elemBits = glbMemTy.getElemTy().getIntOrFloatBitWidth();
   if (elemBits % 8 != 0)
@@ -276,10 +279,22 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   Value tensorDim0 = stateField(AtomStateField::InnerExtent);
   Value tensorDim1 = stateField(AtomStateField::OuterExtent);
   Value stateStride = stateField(AtomStateField::OuterStride);
-  Value strideUnset = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, stateStride,
-                                            i32Const(builder, loc, 0));
-  Value outerStride = arith::SelectOp::create(
-      builder, loc, strideUnset, i32Const(builder, loc, staticOuterStride), stateStride);
+  Value outerStride;
+  if (hasStaticOuterStride) {
+    // Static layout stride is the fallback when the state field is left at its
+    // unset sentinel; an explicitly-set state stride (including 0) overrides it.
+    int32_t s = layout.getStride().at(0).getLeafAsInt().getValue();
+    Value unset = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, stateStride,
+                                        i32Const(builder, loc, kOuterStrideUnset));
+    outerStride =
+        arith::SelectOp::create(builder, loc, unset, i32Const(builder, loc, s), stateStride);
+  } else {
+    // Dynamic layout stride: no compile-time fallback exists, so the stride must
+    // be supplied via outer_stride state. If left unset, the sentinel propagates
+    // to an out-of-range descriptor stride that faults — rather than silently
+    // defaulting to 0 (a whole-tile broadcast that reads wrong data).
+    outerStride = stateStride;
+  }
 
   Type i64Ty = builder.getI64Type();
   Value glbBase = LLVM::PtrToIntOp::create(builder, loc, i64Ty, glbBasePtr);

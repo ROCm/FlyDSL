@@ -39,9 +39,9 @@ func.func @test_tdm_load(
   // base (slot 1) -> global address; extents (slots 3/2) -> OOB; stride (slot 4).
   // CHECK-DAG: %[[BASE:.*]] = llvm.extractvalue %{{.*}}[1] : !llvm.struct<(i32, ptr<1>, i32, i32, i32)>
   // CHECK-DAG: %[[STRIDE:.*]] = llvm.extractvalue %{{.*}}[4] : !llvm.struct<(i32, ptr<1>, i32, i32, i32)>
-  // stride fallback: select(stride == 0, static_layout_stride, stride)
-  // CHECK-DAG: %[[Z:.*]] = arith.constant 0 : i32
-  // CHECK-DAG: %[[UNSET:.*]] = arith.cmpi eq, %[[STRIDE]], %[[Z]]
+  // stride fallback: select(stride == unset-sentinel, static_layout_stride, stride)
+  // CHECK-DAG: %[[SENT:.*]] = arith.constant -2147483648 : i32
+  // CHECK-DAG: %[[UNSET:.*]] = arith.cmpi eq, %[[STRIDE]], %[[SENT]]
   // CHECK: %[[OSV:.*]] = arith.select %[[UNSET]], %{{.*}}, %[[STRIDE]]
   // CHECK: llvm.ptrtoint %[[BASE]] : !llvm.ptr<1> to i64
   // OOB clamp from the extent state fields.
