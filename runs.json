@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-12T09:07:19Z",
+ "updated": "2026-07-12T09:31:45Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29187578776,
+   "pr": 830,
+   "commit": "8fdac2dc7a23093cd4c2f14fa4040807a075e601",
+   "branch": "add_1250_mma_scale",
+   "event": "pull_request",
+   "title": "Add 1250 mma scale",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29187578776",
+   "created_at": "2026-07-12T09:30:25Z",
+   "updated_at": "2026-07-12T09:30:25Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
   {
    "run_id": 29186911881,
    "pr": 830,
@@ -10,11 +25,11 @@
    "branch": "add_1250_mma_scale",
    "event": "pull_request",
    "title": "Add 1250 mma scale",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29186911881",
    "created_at": "2026-07-12T09:05:56Z",
-   "updated_at": "2026-07-12T09:05:57Z",
+   "updated_at": "2026-07-12T09:30:25Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -40,11 +55,11 @@
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
    "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "pending",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660",
    "created_at": "2026-07-12T08:03:57Z",
-   "updated_at": "2026-07-12T08:03:58Z",
+   "updated_at": "2026-07-12T09:30:12Z",
    "actor": "jiacao-amd",
    "jobs": []
   },
@@ -55,11 +70,11 @@
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
    "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185161589",
    "created_at": "2026-07-12T08:01:16Z",
-   "updated_at": "2026-07-12T08:26:51Z",
+   "updated_at": "2026-07-12T09:30:13Z",
    "actor": "jiacao-amd",
    "jobs": [
     {
@@ -74,10 +89,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-12T08:26:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-12T09:30:12Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185161589/job/86629936933"
     },
     {
@@ -1689,21 +1704,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064510474/job/86280963849"
     }
    ]
-  },
-  {
-   "run_id": 29064038772,
-   "pr": null,
-   "commit": "1c52baa23a00e14199edcede98aae4d117ccef0c",
-   "branch": "mxfp4-batched-preshuffle-gemm",
-   "event": "pull_request",
-   "title": "[Kernel] mxfp4 preshuffle GEMM: thin batched @flyc.jit launcher",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29064038772",
-   "created_at": "2026-07-10T02:09:58Z",
-   "updated_at": "2026-07-10T02:22:36Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
