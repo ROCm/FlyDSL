@@ -69,7 +69,7 @@ def _compile_tdm_roundtrip(M: int, N: int, num_warps: int):
 
         # One contiguous LDS tile of the same shape.
         lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
-        lds2d = fx.make_view(fx.get_iter(lds), fx.make_layout((M, N), (N, 1)))
+        lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))
 
         # Global -> LDS. tensor_extents = full tile (no OOB clamp); the innermost
         # stride is assumed 1 so only the outer stride (N) is carried, and it
@@ -125,9 +125,13 @@ def _compile_wmma_scale_fp8(M: int, N: int, K: int):
     def wmma_scale_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
         tid = fx.thread_idx.x
 
-        bA = fx.make_view(fx.get_iter(A), fx.make_layout((M, K), (K, 1)))
-        bB = fx.make_view(fx.get_iter(B), fx.make_layout((N, K), (K, 1)))
-        bC = fx.make_view(fx.get_iter(C), fx.make_layout((M, N), (N, 1)))
+        # CDNA buffer copy loads/stores through a buffer resource, so wrap the
+        # global tensors in a buffer-resource view (make_buffer_tensor). This is
+        # legal on gfx1250 too (buffer_load / buffer_store); only the TDM DMA
+        # path needs a raw VA instead.
+        bA = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(A)), fx.make_layout((M, K), (K, 1)))
+        bB = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(B)), fx.make_layout((N, K), (K, 1)))
+        bC = fx.make_view(fx.get_iter(fx.rocdl.make_buffer_tensor(C)), fx.make_layout((M, N), (N, 1)))
 
         mma_atom = fx.make_mma_atom(fx.rocdl.WMMAScale(M, N, K, f8, f8, f32))
         # E8M0 block scales of 1.0 on both operands (atom state).
