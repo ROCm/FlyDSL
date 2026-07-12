@@ -90,3 +90,25 @@ func.func @test_wmma_scale_call_fp4_opsel(
   fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<16x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 1, opselB = 2>>, !fly.memref<f32, register, 8:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f4E2M1FN, register, 32:1>, !fly.memref<f32, register, 8:1>) -> ()
   return
 }
+
+// -----
+
+// 32x16x128 fp4 (A/B-swap perf path) -> rocdl.wmma.scale.f32.32x16x128.f4.
+// A operand (32 rows) is vector<16xi32>, B (16 rows) is vector<8xi32>, acc is
+// vector<16xf32>. opselB forwarded via scaleBType.
+
+// CHECK-LABEL: @test_wmma_scale_call_fp4_32x16
+func.func @test_wmma_scale_call_fp4_32x16(
+    %atom: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1>>) {
+  %lay_a = fly.static : !fly.layout<128:1>
+  %lay_b = fly.static : !fly.layout<64:1>
+  %lay_c = fly.static : !fly.layout<16:1>
+  %d = fly.memref.alloca(%lay_c) : (!fly.layout<16:1>) -> !fly.memref<f32, register, 16:1>
+  %a = fly.memref.alloca(%lay_a) : (!fly.layout<128:1>) -> !fly.memref<f4E2M1FN, register, 128:1>
+  %b = fly.memref.alloca(%lay_b) : (!fly.layout<64:1>) -> !fly.memref<f4E2M1FN, register, 64:1>
+  %c = fly.memref.alloca(%lay_c) : (!fly.layout<16:1>) -> !fly.memref<f32, register, 16:1>
+
+  // CHECK: rocdl.wmma.scale.f32.32x16x128.f4 %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}, %{{.*}} {scaleBType = 1 : i32} : (vector<16xi32>, vector<8xi32>, vector<16xf32>, i32, i32) -> vector<16xf32>
+  fly.mma_atom_call(%atom, %d, %a, %b, %c) : (!fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f4E2M1FN, f4E2M1FN) -> f32, opselA = 0, opselB = 1>>, !fly.memref<f32, register, 16:1>, !fly.memref<f4E2M1FN, register, 128:1>, !fly.memref<f4E2M1FN, register, 64:1>, !fly.memref<f32, register, 16:1>) -> ()
+  return
+}

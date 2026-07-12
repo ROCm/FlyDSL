@@ -183,9 +183,8 @@ struct PyCopyOpGFX1250TDM2DType : PyConcreteType<PyCopyOpGFX1250TDM2DType> {
            DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
           return PyCopyOpGFX1250TDM2DType(
-              context->getRef(),
-              wrap(CopyOpGFX1250TDM2DType::get(ctx, numWarps, padInterval, padAmount,
-                                               cacheModifier)));
+              context->getRef(), wrap(CopyOpGFX1250TDM2DType::get(ctx, numWarps, padInterval,
+                                                                  padAmount, cacheModifier)));
         },
         "num_warps"_a, "pad_interval"_a = 0, "pad_amount"_a = 0, "cache_modifier"_a = 0,
         nb::kw_only(), "context"_a = nb::none(),

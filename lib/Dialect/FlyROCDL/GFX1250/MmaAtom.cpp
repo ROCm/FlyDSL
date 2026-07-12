@@ -120,7 +120,8 @@ LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> e
   if (m != 16 || n != 16)
     return emitError() << "GFX1250 WMMA requires M=N=16, got " << m << "x" << n;
 
-  auto isF8 = [](Type ty) { return isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty); };
+  // gfx1250 has native OCP fp8 (E4M3FN / E5M2), not the CDNA FNUZ variants.
+  auto isF8 = [](Type ty) { return isa<Float8E4M3FNType>(ty) || isa<Float8E5M2Type>(ty); };
 
   bool valid = false;
 
@@ -146,8 +147,8 @@ LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> e
   return success();
 }
 
-static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty); }
-static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
+static bool isFP8(Type ty) { return isa<Float8E4M3FNType>(ty); }
+static bool isBF8(Type ty) { return isa<Float8E5M2Type>(ty); }
 static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
 static Type getWmmaABType(MLIRContext *ctx, int32_t m, int32_t k, Type elemTy) {

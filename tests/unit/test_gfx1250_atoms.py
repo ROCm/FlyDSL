@@ -41,6 +41,11 @@ def test_wmma_scale_type_roundtrip():
         assert "opselA = 1, opselB = 2" in str(t_fp4)
         assert ir.Type.parse(str(t_fp4)) == t_fp4
 
+        # 32x16x128 fp4 (A/B-swap perf path)
+        t_32x16 = U.WMMAScale(32, 16, 128, f4, f4, f32, opsel_b=1)
+        assert "32x16x128" in str(t_32x16)
+        assert ir.Type.parse(str(t_32x16)) == t_32x16
+
 
 def test_tdm2d_type_roundtrip():
     with _ctx(), ir.Location.unknown():

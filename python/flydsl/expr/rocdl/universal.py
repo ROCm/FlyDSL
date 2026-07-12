@@ -145,6 +145,10 @@ def TDM2D(num_warps, pad_interval=0, pad_amount=0, cache_modifier=0):
     ``copy_atom_call`` is Global vs Shared. The tile geometry is taken from the
     Global-side memref layout; ``pad_interval`` / ``pad_amount`` (in elements)
     add LDS row padding on the load path.
+
+    The atom carries a runtime ``workgroup_mask`` state field (default 0) for TDM
+    multicast (MCAST) loads. Set it with
+    ``fx.atom.set_value(atom, "workgroup_mask", mask)`` before the copy.
     """
     return CopyOpGFX1250TDM2DType.get(num_warps, pad_interval, pad_amount, cache_modifier)
 

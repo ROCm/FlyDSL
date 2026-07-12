@@ -52,9 +52,13 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 // outer stride) is taken from the Global-side memref layout; padding / warp
 // distribution / cache policy are compile-time atom parameters. Direction
 // (load vs store) is inferred from which side is Global vs Shared.
+//
+// Stateful: carries a runtime `workgroup_mask` (default 0) for TDM multicast
+// (MCAST) loads, ORed into the descriptor's GROUP1 config word [15:0]. Set via
+// fly.atom.set_value(atom, "workgroup_mask", %mask).
 //===----------------------------------------------------------------------===//
 
-def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_CopyOp<"CopyOpGFX1250TDM2D", "gfx1250.tdm_2d",[]> {
+def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", "gfx1250.tdm_2d",[]> {
   let parameters = (ins
     "int32_t":$numWarps,
     // Padding in elements (both zero disables LDS padding).

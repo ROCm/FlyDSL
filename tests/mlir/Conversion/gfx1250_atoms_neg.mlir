@@ -6,9 +6,18 @@
 
 // -----
 
-// CHECK: unsupported MNK for GFX1250 WMMA_Scale: 32x32x64 (expected 16x16x128)
+// CHECK: unsupported MNK for GFX1250 WMMA_Scale: 32x32x64 (expected 16x16x128 or 32x16x128)
 func.func @bad_mma_shape(
     %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x32x64, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>) {
+  return
+}
+
+// -----
+
+// The 32x16x128 form is fp4-only.
+// CHECK: GFX1250 WMMA_Scale 32x16x128 requires f4E2M1FN A and B
+func.func @bad_mma_32x16_fp8(
+    %a: !fly.mma_atom<!fly_rocdl.gfx1250.wmma_scale<32x16x128, (f8E4M3FN, f8E4M3FN) -> f32, opselA = 0, opselB = 0>>) {
   return
 }
 

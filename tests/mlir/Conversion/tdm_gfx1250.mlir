@@ -9,9 +9,9 @@
 
 // -----
 
-// Non-stateful atom type converts to an empty struct.
+// Stateful atom type converts to a struct with one i32 (workgroup_mask).
 // CHECK-LABEL: @test_tdm_type
-// CHECK-SAME: (%{{.*}}: !llvm.struct<()>)
+// CHECK-SAME: (%{{.*}}: !llvm.struct<(i32)>)
 func.func @test_tdm_type(
     %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0>, 0>) {
   return
@@ -109,5 +109,27 @@ func.func @test_tdm_load_pad(
   // CHECK-DAG: arith.constant 118554624 : i32
   // CHECK: rocdl.tensor.load.to.lds
   fly.copy_atom_call(%atom, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 64, 8, cache = 0>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
+  return
+}
+
+// -----
+
+// MCAST: a runtime workgroup_mask (atom state) is ORed into GROUP1 config [15:0].
+
+// CHECK-LABEL: @test_tdm_load_mcast
+// CHECK-SAME: (%[[ATOM:.*]]: !llvm.struct<(i32)>, %[[MASK:.*]]: i32,
+func.func @test_tdm_load_mcast(
+    %atom: !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0>, 0>,
+    %mask: i32,
+    %src: !fly.memref<f16, global, (128,64):(64,1)>,
+    %dst: !fly.memref<f16, shared, (128,64):(64,1)>) {
+  // CHECK: %[[A1:.*]] = llvm.insertvalue %[[MASK]], %[[ATOM]][0]
+  %a1 = fly.atom.set_value(%atom, "workgroup_mask", %mask) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0>, 0>, i32) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0>, 0>
+  // CHECK: %[[M:.*]] = llvm.extractvalue %[[A1]][0]
+  // CHECK-DAG: %[[MLOW:.*]] = arith.andi %[[M]], %{{.*}}
+  // CHECK-DAG: %[[UPPER:.*]] = arith.constant 65536 : i32
+  // CHECK: %[[S0:.*]] = arith.ori %[[UPPER]], %[[MLOW]]
+  // CHECK: rocdl.tensor.load.to.lds
+  fly.copy_atom_call(%a1, %src, %dst) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_2d<warps = 1, pad = 0, 0, cache = 0>, 0>, !fly.memref<f16, global, (128,64):(64,1)>, !fly.memref<f16, shared, (128,64):(64,1)>) -> ()
   return
 }

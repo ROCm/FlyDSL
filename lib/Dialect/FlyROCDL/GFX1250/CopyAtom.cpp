@@ -79,13 +79,40 @@ Value i32Const(OpBuilder &b, Location loc, int32_t v) {
 
 } // namespace
 
-bool CopyOpGFX1250TDM2DType::isStatic() const { return true; }
+// Stateful: a single i32 workgroup_mask (MCAST) field, default 0.
+std::optional<unsigned> CopyOpGFX1250TDM2DType::getFieldIndex(AtomStateField field) {
+  switch (field) {
+  case AtomStateField::WorkgroupMask:
+    return 0;
+  default:
+    return std::nullopt;
+  }
+}
 
-Value CopyOpGFX1250TDM2DType::rebuildStaticValue(OpBuilder &builder, Location loc,
-                                                 Value currentValue) const {
-  if (currentValue && isa<MakeCopyAtomOp>(currentValue.getDefiningOp()))
+Type CopyOpGFX1250TDM2DType::getConvertedType(MLIRContext *ctx) const {
+  return LLVM::LLVMStructType::getLiteral(ctx, {IntegerType::get(ctx, 32)});
+}
+
+Value CopyOpGFX1250TDM2DType::getDefaultState(OpBuilder &builder, Location loc) const {
+  auto structTy = cast<LLVM::LLVMStructType>(getConvertedType(builder.getContext()));
+  Value state = LLVM::UndefOp::create(builder, loc, structTy);
+  Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
+  return LLVM::InsertValueOp::create(
+      builder, loc, state, zero, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::WorkgroupMask)});
+}
+
+Value CopyOpGFX1250TDM2DType::setAtomState(OpBuilder &builder, Location loc, Value atomStruct,
+                                           Attribute fieldAttr, Value fieldValue) const {
+  auto fieldStr = dyn_cast<StringAttr>(fieldAttr);
+  if (!fieldStr)
     return nullptr;
-  return MakeCopyAtomOp::create(builder, loc, CopyAtomType::get(*this, /*valBits=*/0), 0);
+  auto field = symbolizeAtomStateField(fieldStr.getValue());
+  if (!field)
+    return nullptr;
+  auto idx = getFieldIndex(*field);
+  if (!idx)
+    return nullptr;
+  return LLVM::InsertValueOp::create(builder, loc, atomStruct, fieldValue, ArrayRef<int64_t>{*idx});
 }
 
 Attribute CopyOpGFX1250TDM2DType::getThrLayout() const { return FxLayout(FxC(1), FxC(1)); }
@@ -112,8 +139,9 @@ LogicalResult CopyOpGFX1250TDM2DType::verify(function_ref<InFlightDiagnostic()> 
 
 FailureOr<Value> CopyOpGFX1250TDM2DType::emitAtomCallSSA(OpBuilder &builder, Location loc,
                                                          Type resultTy, Type copyAtomTyArg,
-                                                         Type srcTyArg, Type dstTyArg, Value atomVal,
-                                                         Value src, Value dst) const {
+                                                         Type srcTyArg, Type dstTyArg,
+                                                         Value atomVal, Value src,
+                                                         Value dst) const {
   if (failed(emitAtomCall(builder, loc, copyAtomTyArg, srcTyArg, dstTyArg, atomVal, src, dst)))
     return failure();
   return Value{};
@@ -222,6 +250,14 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
 
   // ================================================================
   // GROUP0 (vector<4xi32>): pred, lds_addr, glb_lo, glb_hi | type
+  //
+  // The global address is computed and split in full 64 bits: glb_lo is the low
+  // word and glb_hi is (glbAddr >> 32). In a K-reduction loop the kernel passes
+  // a per-iteration sliced global memref (base advanced by k*delta); because the
+  // split happens on the full i64 address, any carry out of the low 32 bits
+  // lands in glb_hi automatically. This makes the atom carry-safe by
+  // construction over >4 GiB buffers — no separate addr64 helper is required
+  // (unlike the raw tdm_ops addr-lo shortcut).
   // ================================================================
   Value g0s0 = i32Const(builder, loc, /*pred=*/1);
   Value g0s1 = ldsAddr;
@@ -251,30 +287,37 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   }
   PadEncoding pad = computePadEncoding(padInterval, padAmount, elemBits);
 
-  int32_t g1s0 = (dataSizeCode << 16) | ((pad.enable ? 1 : 0) << 20) | (pad.interval << 22) |
-                 (pad.amount << 25);
+  int32_t g1s0Upper = (dataSizeCode << 16) | ((pad.enable ? 1 : 0) << 20) | (pad.interval << 22) |
+                      (pad.amount << 25);
   int32_t g1s1 = (tdim0 & 0xFFFF) << 16;
   int32_t g1s2 = ((tdim0 >> 16) & 0xFFFF) | ((tdim1 & 0xFFFF) << 16);
   int32_t g1s3 = ((tdim1 >> 16) & 0xFFFF) | (tileD0 << 16);
   int32_t g1s4 = tileD1 & 0xFFFF;
   int32_t g1s5 = outerStride;
 
+  // GROUP1 config word [15:0] carries the MCAST workgroup mask (runtime atom
+  // state); upper bits are the compile-time descriptor config.
+  Value maskRaw = LLVM::ExtractValueOp::create(
+      builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::WorkgroupMask)});
+  Value maskLow = arith::AndIOp::create(builder, loc, maskRaw, i32Const(builder, loc, 0xFFFF));
+  Value g1s0 = arith::OrIOp::create(builder, loc, i32Const(builder, loc, g1s0Upper), maskLow);
+
   Value dgroup1 = vector::FromElementsOp::create(
       builder, loc, VectorType::get({8}, builder.getI32Type()),
-      ValueRange{i32Const(builder, loc, g1s0), i32Const(builder, loc, g1s1),
-                 i32Const(builder, loc, g1s2), i32Const(builder, loc, g1s3),
-                 i32Const(builder, loc, g1s4), i32Const(builder, loc, g1s5),
-                 i32Const(builder, loc, 0), i32Const(builder, loc, 0)});
+      ValueRange{g1s0, i32Const(builder, loc, g1s1), i32Const(builder, loc, g1s2),
+                 i32Const(builder, loc, g1s3), i32Const(builder, loc, g1s4),
+                 i32Const(builder, loc, g1s5), i32Const(builder, loc, 0),
+                 i32Const(builder, loc, 0)});
 
   // Unused descriptor groups.
   Value zero = i32Const(builder, loc, 0);
-  Value dg2 = vector::FromElementsOp::create(builder, loc, VectorType::get({4}, builder.getI32Type()),
-                                             ValueRange{zero, zero, zero, zero});
-  Value dg3 = vector::FromElementsOp::create(builder, loc, VectorType::get({4}, builder.getI32Type()),
-                                             ValueRange{zero, zero, zero, zero});
-  Value dg4 = vector::FromElementsOp::create(
-      builder, loc, VectorType::get({8}, builder.getI32Type()),
-      ValueRange{zero, zero, zero, zero, zero, zero, zero, zero});
+  Value dg2 = vector::FromElementsOp::create(
+      builder, loc, VectorType::get({4}, builder.getI32Type()), ValueRange{zero, zero, zero, zero});
+  Value dg3 = vector::FromElementsOp::create(
+      builder, loc, VectorType::get({4}, builder.getI32Type()), ValueRange{zero, zero, zero, zero});
+  Value dg4 =
+      vector::FromElementsOp::create(builder, loc, VectorType::get({8}, builder.getI32Type()),
+                                     ValueRange{zero, zero, zero, zero, zero, zero, zero, zero});
 
   uint32_t cachePolicy = static_cast<uint32_t>(getCacheModifier());
   ArrayAttr noAliasScopes;
