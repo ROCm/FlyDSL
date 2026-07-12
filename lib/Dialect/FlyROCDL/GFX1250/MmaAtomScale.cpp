@@ -21,10 +21,9 @@ namespace mlir::fly_rocdl {
 //===----------------------------------------------------------------------===//
 // MmaOpGFX1250_WMMAScaleType — MX-scaled WMMA (E8M0 block scale)
 //
-// Wraps ROCDL::wmma_scale_f32_16x16x128_f8f6f4, the gfx1250 wave32 scaled WMMA
-// for the unified f8/f6/f4 operand format. Per-operand E8M0 block scales are
-// carried as atom state (ScaleA / ScaleB, i32 SGPRs) and set via SetAtomState,
-// mirroring MmaOpCDNA4_MFMAScaleType.
+// gfx1250 wave32 scaled WMMA for the unified f8/f6/f4 operand format. Per-operand
+// E8M0 scales are carried as atom state (ScaleA / ScaleB, i32), mirroring
+// MmaOpCDNA4_MFMAScaleType.
 //===----------------------------------------------------------------------===//
 
 std::optional<unsigned> MmaOpGFX1250_WMMAScaleType::getFieldIndex(AtomStateField field) {
@@ -98,17 +97,13 @@ Type MmaOpGFX1250_WMMAScaleType::getValTypeB() const { return getElemTyB(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeC() const { return getElemTyAcc(); }
 Type MmaOpGFX1250_WMMAScaleType::getValTypeD() const { return getElemTyAcc(); }
 
-// PROVISIONAL layouts for the 32x16x128 f4 form. The emit path (ROCDL op
-// selection + operand vector shapes) is validated by FileCheck, but these
-// thr-val layouts are derived by analogy to the 16-row form and are NOT yet
-// verified against hardware for make_tiled_mma partitioning. The shipping fp4
-// kernels feed pre-arranged fragments through a direct mma_atom_call, which
-// does not consult these layouts. Do not rely on them for tiled-MMA fragment
-// construction without on-device validation.
+// PROVISIONAL layouts for the 32x16x128 f4 form: the emit path is FileCheck-
+// validated, but these thr-val layouts are derived by analogy to the 16-row form
+// and NOT hardware-verified for make_tiled_mma. The shipping fp4 kernels feed
+// pre-arranged fragments through a direct mma_atom_call and never consult them.
 static Attribute scaled32RowLayoutA(MLIRContext *ctx, int32_t k) {
   auto getContext = [&]() { return ctx; };
-  // 32 lanes cover the 32 M rows; each lane holds the full K, reference (M,K)
-  // column-major with stride (1, 32).
+  // 32 lanes over 32 M rows; each lane holds the full K. Reference (M,K) stride (1, 32).
   return FxLayout(FxShape(FxThr(32), FxVal(k)), FxStride(FxThr(1), FxVal(32)));
 }
 
@@ -190,11 +185,8 @@ static std::optional<uint32_t> wmmaScaleFmtEncode(Type elemTy) {
   return std::nullopt;
 }
 
-// A/B operand vector<Nxi32> container for a `rows x K` wave32 scaled WMMA
-// operand: i32 words per lane = rows * K * elemBits / 1024. For 16x16x128:
-//   fp8 (8-bit) -> vector<16xi32>, fp6 -> vector<12xi32>, fp4 -> vector<8xi32>.
-// For the 32x16x128 f4 form: A (32 rows) -> vector<16xi32>, B (16 rows) ->
-// vector<8xi32>.
+// A/B operand vector<Nxi32> for a `rows x K` operand: N = rows * K * elemBits /
+// 1024 (e.g. 16x16x128 fp8 -> vector<16xi32>, fp6 -> 12, fp4 -> 8).
 static Type getScaledWmmaABType(MLIRContext *ctx, int32_t rows, int32_t k, Type elemTy) {
   if (!isSupportedScaledElemTy(elemTy))
     return nullptr;

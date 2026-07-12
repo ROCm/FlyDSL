@@ -12,10 +12,8 @@ def FlyROCDL_AtomStateField : I32EnumAttr<"AtomStateField", "", [
   I32EnumAttrCase<"ScaleA",             2, "scale_a">,
   I32EnumAttrCase<"ScaleB",             3, "scale_b">,
   I32EnumAttrCase<"WorkgroupMask",      4, "workgroup_mask">,
-  // Runtime outer-dim tensor bound (rows from the tile start) for OOB / ragged
-  // tiles: tensor_dim1 = max(0, oob_outer - warp_off_outer), tile_dim1 stays
-  // static so the HW fault-guards (load) / drops (store) the partial-tile
-  // overhang. Default INT32_MAX = no clamp (full tile).
+  // Runtime outer-dim tensor bound (rows from tile start) for ragged tiles;
+  // default INT32_MAX = no clamp. See CopyOpGFX1250TDM2D.
   I32EnumAttrCase<"OobOuter",           5, "oob_outer">
 ]> {
   let genSpecializedAttr = 0;

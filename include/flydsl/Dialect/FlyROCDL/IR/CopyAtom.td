@@ -48,20 +48,13 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 //===----------------------------------------------------------------------===//
 // CopyOp GFX1250 — 2D TDM (Tensor Data Mover) async Global<->LDS copy.
 //
-// Descriptor-driven whole-tile DMA. The tile geometry (outer/inner extent,
-// outer stride) is taken from the Global-side memref layout; padding / warp
-// distribution / cache policy are compile-time atom parameters. Direction
-// (load vs store) is inferred from which side is Global vs Shared.
-//
-// Stateful runtime fields (set via fly.atom.set_value(atom, name, %v)):
-//   `workgroup_mask` (default 0): TDM multicast (MCAST) mask, ORed into the
-//       descriptor's GROUP1 config word [15:0].
+// Whole-tile DMA; tile geometry comes from the Global-side memref layout,
+// direction is inferred from which side is Global vs Shared. Stateful runtime
+// fields (via fly.atom.set_value):
+//   `workgroup_mask` (default 0): MCAST mask, ORed into GROUP1 config [15:0].
 //   `oob_outer` (default INT32_MAX = no clamp): outer-dim tensor bound in
-//       rows-from-tile-start for ragged / OOB tiles. Sets tensor_dim1 =
-//       max(0, oob_outer - warp_off_outer) while tile_dim1 stays static, so the
-//       HW fault-guards (load: zero-fill) / drops (store) the partial-tile
-//       overhang — the copy-atom equivalent of make_tensor_descriptor_2d's
-//       oob_outer_bound.
+//       rows-from-tile-start; sets tensor_dim1 = max(0, oob_outer - warp_off)
+//       while tile_dim1 stays static, so a ragged tile is HW-guarded.
 //===----------------------------------------------------------------------===//
 
 // TDM moves the whole 2D tile in one DMA, so it overrides `getCopyRank` (== 2)

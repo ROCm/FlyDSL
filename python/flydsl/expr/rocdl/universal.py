@@ -118,12 +118,9 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
 
 
 def WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, *, opsel_a=0, opsel_b=0):
-    """Create a gfx1250 MX-scaled WMMA atom (E8M0 block scale, V_WMMA_SCALE).
-
-    Wraps ROCDL wmma.scale.f32.16x16x128.f8f6f4 for the unified f8/f6/f4 operand
-    format. Per-operand E8M0 scales are carried as atom state (``scale_a`` /
-    ``scale_b``, i32) set via SetAtomState; ``opsel_a`` / ``opsel_b`` select the
-    lane index into the scale vector (compile-time, default 0).
+    """Create a gfx1250 MX-scaled WMMA atom (E8M0 block scale) for the unified
+    f8/f6/f4 operand format. Per-operand scales are atom state (``scale_a`` /
+    ``scale_b``, i32); ``opsel_a`` / ``opsel_b`` select the scale lane index.
     """
     ty_a = elem_ty_a.ir_type if hasattr(elem_ty_a, "ir_type") else elem_ty_a
     if elem_ty_b is None:
@@ -141,20 +138,13 @@ def WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None, elem_ty_acc=None, *, opsel_a=0
 def TDM2D(num_warps, pad_interval=0, pad_amount=0, cache_modifier=0):
     """Create a gfx1250 2D TDM (Tensor Data Mover) Global<->LDS copy atom.
 
-    Direction (load vs store) is inferred at lowering from which side of the
-    ``copy_atom_call`` is Global vs Shared. The tile geometry is taken from the
-    Global-side memref layout; ``pad_interval`` / ``pad_amount`` (in elements)
-    add LDS row padding on the load path.
+    Direction is inferred at lowering from which side is Global vs Shared; tile
+    geometry comes from the Global-side memref layout. ``pad_interval`` /
+    ``pad_amount`` (elements) add LDS row padding on the load path.
 
-    Runtime state fields (set via ``fx.copy(atom, src, dst, <field>=value)`` or
-    ``fx.atom.set_value(atom, "<field>", value)`` before the copy):
-
-    - ``workgroup_mask`` (default 0): TDM multicast (MCAST) mask.
-    - ``oob_outer`` (default INT32_MAX = no clamp): outer-dim tensor bound in
-      rows-from-tile-start for ragged / OOB tiles. tensor_dim1 becomes
-      ``max(0, oob_outer - warp_off_outer)`` while tile_dim1 stays static, so the
-      partial last tile is fault-guarded on load (zero-fill) and dropped on store
-      — the copy-atom equivalent of ``make_tensor_descriptor_2d(oob_outer_bound=)``.
+    Runtime state (set via ``fx.atom.set_value`` before the copy):
+    ``workgroup_mask`` (MCAST mask) and ``oob_outer`` (outer-dim tensor bound in
+    rows-from-tile-start for ragged tiles; default INT32_MAX = no clamp).
     """
     return CopyOpGFX1250TDM2DType.get(num_warps, pad_interval, pad_amount, cache_modifier)
 

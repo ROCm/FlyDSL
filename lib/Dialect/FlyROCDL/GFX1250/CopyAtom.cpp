@@ -22,54 +22,41 @@ namespace mlir::fly_rocdl {
 //===----------------------------------------------------------------------===//
 // CopyOpGFX1250TDM2DType — 2D TDM async Global<->LDS copy
 //
-// Ports the 2D (non-gather) descriptor build of
-// python/flydsl/expr/rocdl/tdm_ops.py::make_tensor_descriptor_2d (including the
-// runtime oob_outer_bound / ragged-tile clamp via the oob_outer atom state) plus
-// tensor_load_2d / tensor_store_2d into a copy atom. The Global-side memref
-// layout supplies the tile geometry (outer/inner extent + outer stride); the
-// atom parameters supply padding, warp count, and cache policy.
+// 2D (non-gather) port of tdm_ops.py::make_tensor_descriptor_2d. The Global-side
+// memref layout supplies the tile geometry; the atom parameters supply padding,
+// warp count, and cache policy. Direction is inferred from the address spaces.
 //===----------------------------------------------------------------------===//
 
 namespace {
 
-// (encoded_interval, encoded_amount) for the TDM padding bitfield, matching the
-// dword-based encoding of compute_padding_encoding() in tdm_ops.py:
-//   interval_dw = pad_interval_elems * elem_bits / 32   (must be a power of two)
-//   amount_dw   = pad_amount_elems   * elem_bits / 32
-//   encoded_interval = log2(interval_dw) - 1  -> descriptor bits [24:22] (3 bits)
-//   encoded_amount   = amount_dw - 1          -> descriptor bits [31:25] (7 bits)
+// TDM padding descriptor bitfield:
+//   encoded_interval = log2(interval_dw) - 1  -> bits [24:22] (3 bits)
+//   encoded_amount   = amount_dw - 1          -> bits [31:25] (7 bits)
+//   where *_dw = pad_*_elems * elem_bits / 32
 struct PadEncoding {
   int32_t interval = 0;
   int32_t amount = 0;
   bool enable = false;
 };
 
-// Returns the encoding for active padding, a disabled encoding when no padding is
-// requested (both extents non-positive), or failure() when the requested padding
-// cannot be represented in the descriptor bitfield (not dword-aligned, dword
-// interval not a power of two, or an encoded field out of range). Failing here
-// prevents silently emitting a wrong TDM descriptor.
+// Encoding for active padding, a disabled encoding when none is requested, or
+// failure() when it cannot be represented (not dword-aligned, dword interval not
+// a power of two, or a field out of range) — failing here avoids silently
+// emitting a wrong descriptor.
 FailureOr<PadEncoding> computePadEncoding(int32_t padIntervalElems, int32_t padAmountElems,
                                           int32_t elemBits) {
   PadEncoding e;
   if (padIntervalElems <= 0 || padAmountElems <= 0)
-    return e; // padding disabled
-  // Both extents must be a whole number of 32-bit dwords.
+    return e; // disabled
   if ((padIntervalElems * elemBits) % 32 != 0 || (padAmountElems * elemBits) % 32 != 0)
     return failure();
   int32_t intervalDw = padIntervalElems * elemBits / 32;
   int32_t amountDw = padAmountElems * elemBits / 32;
-  if (intervalDw <= 0 || amountDw <= 0)
-    return failure();
-  // interval encodes as log2(interval_dw) - 1, so the dword interval must be a
-  // power of two (>= 2, since encoded_interval >= 0).
-  if ((intervalDw & (intervalDw - 1)) != 0)
+  if (intervalDw <= 0 || amountDw <= 0 || (intervalDw & (intervalDw - 1)) != 0)
     return failure();
   int32_t encInterval = llvm::Log2_32(static_cast<uint32_t>(intervalDw)) - 1;
   int32_t encAmount = amountDw - 1;
-  if (encInterval < 0 || encInterval > 0x7) // [24:22]
-    return failure();
-  if (encAmount < 0 || encAmount > 0x7F) // [31:25]
+  if (encInterval < 0 || encInterval > 0x7 || encAmount < 0 || encAmount > 0x7F)
     return failure();
   e.interval = encInterval;
   e.amount = encAmount;
@@ -77,7 +64,7 @@ FailureOr<PadEncoding> computePadEncoding(int32_t padIntervalElems, int32_t padA
   return e;
 }
 
-// Mirror of tdm_ops.compute_warp_distribution for a 2D [outer, inner] block.
+// 2D [outer, inner] warp distribution (mirrors tdm_ops.compute_warp_distribution).
 void computeWarpDistribution(int32_t outer, int32_t inner, int32_t numWarps, int32_t &warpsOuter,
                              int32_t &warpsInner, int32_t &bpwOuter, int32_t &bpwInner) {
   int32_t dims[2] = {outer, inner};
@@ -127,8 +114,7 @@ Value CopyOpGFX1250TDM2DType::getDefaultState(OpBuilder &builder, Location loc) 
   Value zero = arith::ConstantIntOp::create(builder, loc, 0, 32);
   state = LLVM::InsertValueOp::create(
       builder, loc, state, zero, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::WorkgroupMask)});
-  // oob_outer default INT32_MAX: tensor_dim1 >= tile_dim1 => whole tile in-bounds
-  // (byte-identical behavior to the pre-OOB atom for callers that never set it).
+  // oob_outer default INT32_MAX => tensor_dim1 >= tile_dim1 (whole tile in-bounds).
   Value noClamp = arith::ConstantIntOp::create(builder, loc, 0x7FFFFFFF, 32);
   state = LLVM::InsertValueOp::create(builder, loc, state, noClamp,
                                       ArrayRef<int64_t>{*getFieldIndex(AtomStateField::OobOuter)});
@@ -176,12 +162,9 @@ LogicalResult CopyOpGFX1250TDM2DType::verify(function_ref<InFlightDiagnostic()> 
     if (padInterval < 0 || padAmount < 0)
       return emitError() << "padInterval and padAmount must be non-negative, got " << padInterval
                          << ", " << padAmount;
-    // The descriptor encodes interval as log2(interval_in_dwords) - 1. Element
-    // bits are only known at lowering, but they are a power of two for every
-    // supported type, so interval_in_dwords is a power of two iff padInterval
-    // (in elements) is. Reject the non-power-of-two case statically; the exact
-    // dword alignment / bitfield-range check happens at lowering where the
-    // element type is known.
+    // interval_in_dwords is a power of two iff padInterval (in elements) is, since
+    // element bits are a power of two; the exact dword/bitfield check needs the
+    // element type and runs at lowering.
     if ((padInterval & (padInterval - 1)) != 0)
       return emitError() << "padInterval must be a power of two (in elements), got " << padInterval;
   }
@@ -304,17 +287,9 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
     startOuter = i32Const(builder, loc, 0);
   }
 
-  // ================================================================
-  // GROUP0 (vector<4xi32>): pred, lds_addr, glb_lo, glb_hi | type
-  //
-  // The global address is computed and split in full 64 bits: glb_lo is the low
-  // word and glb_hi is (glbAddr >> 32). In a K-reduction loop the kernel passes
-  // a per-iteration sliced global memref (base advanced by k*delta); because the
-  // split happens on the full i64 address, any carry out of the low 32 bits
-  // lands in glb_hi automatically. This makes the atom carry-safe by
-  // construction over >4 GiB buffers — no separate addr64 helper is required
-  // (unlike the raw tdm_ops addr-lo shortcut).
-  // ================================================================
+  // GROUP0 (vector<4xi32>): pred, lds_addr, glb_lo, glb_hi | type. The global
+  // address is split from the full i64, so a K-loop advancing the base carries
+  // into glb_hi automatically (carry-safe over >4 GiB buffers).
   Value g0s0 = i32Const(builder, loc, /*pred=*/1);
   Value g0s1 = ldsAddr;
   Value g0s2 = LLVM::TruncOp::create(builder, loc, builder.getI32Type(), glbAddr);
@@ -326,9 +301,7 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   Value dgroup0 = vector::FromElementsOp::create(
       builder, loc, VectorType::get({4}, builder.getI32Type()), ValueRange{g0s0, g0s1, g0s2, g0s3});
 
-  // ================================================================
-  // GROUP1 (vector<8xi32>): all compile-time — config + dims + tile + stride
-  // ================================================================
+  // GROUP1 (vector<8xi32>): config + dims + tile + stride.
   int32_t tdim0 = bpwInner;  // innermost extent per warp (compile-time)
   int32_t tileD0 = bpwInner; // block dim0 per warp
   int32_t tileD1 = bpwOuter; // block dim1 per warp (full per-warp tile extent)
@@ -355,18 +328,16 @@ LogicalResult CopyOpGFX1250TDM2DType::emitAtomCall(OpBuilder &builder, Location 
   int32_t g1s4 = tileD1 & 0xFFFF;
   int32_t g1s5 = outerStride;
 
-  // GROUP1 config word [15:0] carries the MCAST workgroup mask (runtime atom
-  // state); upper bits are the compile-time descriptor config.
+  // Config word [15:0] carries the runtime MCAST workgroup mask; upper bits are
+  // the compile-time config.
   Value maskRaw = LLVM::ExtractValueOp::create(
       builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::WorkgroupMask)});
   Value maskLow = arith::AndIOp::create(builder, loc, maskRaw, i32Const(builder, loc, 0xFFFF));
   Value g1s0 = arith::OrIOp::create(builder, loc, i32Const(builder, loc, g1s0Upper), maskLow);
 
-  // tensor_dim1 is runtime: max(0, oob_outer - startOuter). Default oob_outer =
-  // INT32_MAX makes this >= tileD1 (whole tile in-bounds). When the caller sets
-  // oob_outer = rows-from-tile-start, the partial last tile exceeds the tensor
-  // bound and the HW OOB-handles the overhang (load: zero-fill; store: drop).
-  // tile_dim1 (g1s4) stays the full static per-warp extent.
+  // tensor_dim1 = max(0, oob_outer - startOuter) is runtime; tile_dim1 (g1s4)
+  // stays the full static extent, so a ragged last tile is HW OOB-handled
+  // (load: zero-fill; store: drop).
   Value oobOuter = LLVM::ExtractValueOp::create(
       builder, loc, atomVal, ArrayRef<int64_t>{*getFieldIndex(AtomStateField::OobOuter)});
   Value tdim1 = arith::MaxSIOp::create(builder, loc,
