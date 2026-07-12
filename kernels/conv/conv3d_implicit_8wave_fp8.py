@@ -15,7 +15,35 @@ import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.typing import T
+from flydsl._mlir import ir as _ir
+from flydsl._mlir.dialects import llvm as _llvm, rocdl as _rocdl
+from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
+from flydsl.expr.utils.arith import ArithValue as _ArithValue
 from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
+
+
+def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
+    """Create a rebased FP8 buffer tensor from a raw i64 byte address.
+
+    Used for the per-block BIG_IN rebase in compile_conv3d_implicit_8wave_fp8.
+    Must be called inside a kernel trace (active MLIR context required).
+    """
+    ptr_ty = _ir.Type.parse("!llvm.ptr")
+    rsrc_ty = _ir.Type.parse("!llvm.ptr<8>")
+    base_ptr = _llvm.IntToPtrOp(ptr_ty, addr_i64.ir_value()).result
+    rsrc_raw = _rocdl.MakeBufferRsrcOp(
+        rsrc_ty, base_ptr,
+        buffer_ops._create_i16_constant(0),
+        buffer_ops._create_i64_constant(0xFFFFFFFF),
+        buffer_ops._create_i32_constant(buffer_ops._get_buffer_flags()),
+    ).result
+    f8_ptr_ty = fx.PointerType.get(
+        elem_ty=fp8_ir_t,
+        address_space=_TAS.BufferDesc,
+        alignment=fx.PointerType(fx.get_iter(ref_buf_tensor).type).alignment,
+    )
+    rsrc_cast = _llvm.BitcastOp(f8_ptr_ty.ir_type, rsrc_raw).result
+    return fx.Tensor(fx.make_view(_ArithValue(rsrc_cast), fx.get_layout(ref_buf_tensor)))
 
 # TILE_K is pinned to the FP8 MFMA k-dim (mfma_f32_16x16x128 -> 128). The tile
 # size (TILE_M/TILE_N) and wave layout (WAVE_M/WAVE_N) are compile-time
@@ -65,6 +93,7 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
     grid_s = (dhw + PACK_TR_TILE - 1) // PACK_TR_TILE
     grid_c = (c + PACK_TR_TILE - 1) // PACK_TR_TILE
     elem_ty = fx.BFloat16
+    BIG = (n * c * dhw) > 0x7FFFFFFF
 
     @flyc.kernel(known_block_size=[PACK_TR_THREADS, 1, 1])
     def pack_x_kernel(out: fx.Tensor, x: fx.Tensor):
@@ -85,8 +114,16 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
         s0 = fx.block_idx.x * PACK_TR_TILE
         c0 = fx.block_idx.y * PACK_TR_TILE
         nb = fx.block_idx.z
-        in_base = nb * c * dhw
-        out_base = nb * dhw * c
+        if const_expr(BIG):
+            in_base_elem = fx.Index(nb) * fx.Index(c) * fx.Index(dhw) + fx.Index(c0) * fx.Index(dhw) + fx.Index(s0)
+            in_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(in_base_elem) * fx.Int64(2)
+            x_rsrc = buffer_ops.create_buffer_resource_from_addr(in_addr)
+            out_base_elem = fx.Index(nb) * fx.Index(dhw) * fx.Index(c) + fx.Index(s0) * fx.Index(c) + fx.Index(c0)
+            out_addr = fx.Int64(buffer_ops.extract_base_index(out)) + fx.Int64(out_base_elem)
+            out_rsrc = buffer_ops.create_buffer_resource_from_addr(out_addr)
+        else:
+            in_base = nb * c * dhw
+            out_base = nb * dhw * c
 
         def lds_store_vec8(elem_offset, value):
             base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset * 2)
@@ -105,7 +142,10 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
             cc = c0 + rc
             ss = s0 + sv
             valid = (cc < c) & (ss < dhw)
-            g = fx.Int32(in_base + cc * dhw + ss)
+            if const_expr(BIG):
+                g = fx.Int32(rc * dhw + sv)
+            else:
+                g = fx.Int32(in_base + cc * dhw + ss)
             safe = arith.select(valid, g, fx.Int32(0))
             v = buffer_ops.buffer_load(x_rsrc, safe, vec_width=PACK_TR_VEC, dtype=elem_ty)
             lds_store_vec8(rc * PACK_TR_LDS_S + sv, v)
@@ -129,7 +169,10 @@ def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
                 lo1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[4], scalars[5], fx.Int32(0), False)
                 p1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[6], scalars[7], lo1, True)
                 packed = fx.Vector.from_elements([p0, p1], fx.Int32)
-                byte_off = out_base + ss * c + cc
+                if const_expr(BIG):
+                    byte_off = rs * c + cv
+                else:
+                    byte_off = out_base + ss * c + cc
                 buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
 
     @flyc.jit
@@ -227,6 +270,7 @@ def compile_conv3d_implicit_8wave_fp8(
     npq = n * dhw
     crs = c * kt * kh * kw
     k_tiles = (crs + TILE_K - 1) // TILE_K
+    BIG_IN = (n * c * d * h * width) > 0x7FFFFFFF
 
     assert k_tiles >= 1
 
@@ -266,6 +310,18 @@ def compile_conv3d_implicit_8wave_fp8(
             k_off = fx.block_idx.z * (tiles_per_split * TILE_K)
         else:
             k_off = fx.Index(0)
+
+        if const_expr(BIG_IN):
+            nbase = m_offset // dhw
+            ot_base0 = (m_offset % dhw) // hw_o
+            base_t = ot_base0 - fx.Index(pt)
+            base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
+            x_base_byte = ((nbase * fx.Index(d) + base_t) * fx.Index(h)) * fx.Index(width) * fx.Index(c)
+            x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_byte)
+            x_div = fx.logical_divide(
+                _make_fp8_buffer_tensor_from_addr(x_addr, f8_ir_t, x_buf),
+                fx.make_layout(1, 1),
+            )
 
         wid = tid // WARP_SIZE
         lane = tid % WARP_SIZE
@@ -338,7 +394,11 @@ def compile_conv3d_implicit_8wave_fp8(
             in_w = ow * sw + kw_i - pw
             k_valid = k_abs < fx.Index(crs)
             valid_data = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
-            g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
+            if const_expr(BIG_IN):
+                di = n_idx - nbase
+                g_elem = (((di * d + (in_t - base_t)) * h + in_h) * width + in_w) * c + cc
+            else:
+                g_elem = (((n_idx * d + in_t) * h + in_h) * width + in_w) * c + cc
             g_elem_i = fx.Int32(g_elem)
             safe_elem = arith.select(valid_data, g_elem_i, fx.Int32(x_num_records))
             copy_g2s(x_div, a_lds, lds_elem, safe_elem)

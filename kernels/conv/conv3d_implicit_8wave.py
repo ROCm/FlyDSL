@@ -74,6 +74,7 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
     grid_s = (s + TR_TILE - 1) // TR_TILE
     grid_c = (c + TR_TILE - 1) // TR_TILE
     elem_ty = fx.BFloat16
+    BIG = (n * c * s) > 0x7FFFFFFF
 
     @flyc.kernel(known_block_size=[TR_THREADS, 1, 1])
     def transpose_kernel(out: fx.Tensor, inp: fx.Tensor):
@@ -94,8 +95,16 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
         s0 = fx.block_idx.x * TR_TILE
         c0 = fx.block_idx.y * TR_TILE
         nb = fx.block_idx.z
-        in_base = nb * c * s
-        out_base = nb * s * c
+        if const_expr(BIG):
+            in_base_elem = fx.Index(nb) * fx.Index(c) * fx.Index(s) + fx.Index(c0) * fx.Index(s) + fx.Index(s0)
+            in_addr = fx.Int64(buffer_ops.extract_base_index(inp)) + fx.Int64(in_base_elem) * fx.Int64(2)
+            in_rsrc = buffer_ops.create_buffer_resource_from_addr(in_addr)
+            out_base_elem = fx.Index(nb) * fx.Index(s) * fx.Index(c) + fx.Index(s0) * fx.Index(c) + fx.Index(c0)
+            out_addr = fx.Int64(buffer_ops.extract_base_index(out)) + fx.Int64(out_base_elem) * fx.Int64(2)
+            out_rsrc = buffer_ops.create_buffer_resource_from_addr(out_addr)
+        else:
+            in_base = nb * c * s
+            out_base = nb * s * c
 
         def lds_store_vec8(elem_offset, value):
             base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset * 2)
@@ -114,7 +123,10 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
             cc = c0 + rc
             ss = s0 + sv
             valid = (cc < c) & (ss < s)
-            g = fx.Int32(in_base + cc * s + ss)
+            if const_expr(BIG):
+                g = fx.Int32(rc * s + sv)
+            else:
+                g = fx.Int32(in_base + cc * s + ss)
             safe = arith.select(valid, g, fx.Int32(0))
             v = buffer_ops.buffer_load(in_rsrc, safe, vec_width=TR_VEC, dtype=elem_ty)
             lds_store_vec8(rc * _TR_LDS_S + sv, v)
@@ -131,7 +143,10 @@ def compile_transpose_ncdhw_ndhwc(n, c, s):
             vv = fx.Vector.from_elements(scalars, dtype=elem_ty)
             valid = (ss < s) & (cc < c)
             if valid:
-                go = fx.Int32(out_base + ss * c + cc)
+                if const_expr(BIG):
+                    go = fx.Int32(rs * c + cv)
+                else:
+                    go = fx.Int32(out_base + ss * c + cc)
                 buffer_ops.buffer_store(vv, out_rsrc, go)
 
     @flyc.jit
@@ -195,6 +210,9 @@ def compile_conv3d_implicit_8wave(
     crs = c * kt * kh * kw
     k_tiles = (crs + TILE_K - 1) // TILE_K
 
+    DHWC = c * d * h * w
+    BIG_IN = (n * c * d * h * w) > 0x7FFFFFFF
+
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
 
@@ -225,6 +243,15 @@ def compile_conv3d_implicit_8wave(
             k_off = fx.block_idx.z * (tiles_per_split * TILE_K)
         else:
             k_off = 0
+
+        if const_expr(BIG_IN):
+            nbase = m_offset // dhw
+            ot_base0 = (m_offset % dhw) // hw_o
+            base_t = ot_base0 - fx.Index(pt)
+            base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
+            x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + fx.Index(0)) * fx.Index(w) * fx.Index(c)
+            x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_elem) * fx.Int64(2)
+            x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr)
 
         wid = tid // WARP_SIZE
         lane = tid % WARP_SIZE
@@ -306,7 +333,11 @@ def compile_conv3d_implicit_8wave(
                 in_w = ow * sw + kw_i - pw
                 k_valid = k_abs < fx.Index(crs)
                 valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
-                g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
+                if const_expr(BIG_IN):
+                    di = n_idx - nbase
+                    g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
+                else:
+                    g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
                 g_off_i = fx.Int32(g_off)
                 safe = arith.select(valid, g_off_i, fx.Int32(0))
                 raw = buffer_ops.buffer_load(x_rsrc, safe, vec_width=8, dtype=elem_ty)
