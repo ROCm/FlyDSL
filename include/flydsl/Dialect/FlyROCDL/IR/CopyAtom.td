@@ -46,29 +46,31 @@ def FlyROCDL_CopyOpLdsReadTranspose : FlyROCDL_CopyOp<"CopyOpCDNA4LdsReadTranspo
 }
 
 //===----------------------------------------------------------------------===//
-// CopyOp GFX1250 — 2D TDM (Tensor Data Mover) async Global<->LDS copy.
+// CopyOp GFX1250 — N-D TDM (Tensor Data Mover) async Global<->LDS copy (1-5D).
 //
 // Whole-tile DMA. The atom carries the tile descriptor as runtime state. The
 // global operand of the copy_atom_call is a *shape/direction token only*: only
 // its layout (compile-time tile shape) and address space (load vs store) are
 // read — its pointer is unused; the base address comes from the `base` state.
-// Stateful fields (via fly.atom.set_value):
+// `rank` (1-5) is the tensor/tile rank. Stateful fields (via fly.atom.set_value):
 //   `workgroup_mask` (default 0): MCAST mask, ORed into GROUP1 config [15:0].
 //   `base`: global tile base pointer (advance it to move to the next tile).
-//   `outer_extent` / `inner_extent` (default INT32_MAX = no clamp): the tensor's
-//     2D extent for OOB handling; tensor_dim0/1 = max(0, extent - warp start)
-//     while the tile dims stay static, so a ragged tile is HW-guarded.
-//   `outer_stride` (default = unset sentinel): outer stride in elements. Unset
-//     falls back to the tile memref's static layout stride; a tile with a
-//     dynamic outer stride must set this (else the descriptor stride faults
-//     rather than silently reading stride 0).
+//   `extent_i` (default INT32_MAX = no clamp): per-dim tensor extent (tensor dim
+//     order, 0=outermost) for OOB handling; tensor_dim = max(0, extent - warp
+//     start) while the tile dims stay static, so a ragged tile is HW-guarded.
+//   `stride_i` (default = unset sentinel): per-dim tensor stride in elements for
+//     dims 0..rank-2 (innermost stride is assumed 1). Unset falls back to the
+//     tile memref's static layout stride.
+//   `imm_offset` (default 0): i64 byte offset added to base (K-loop tile bump).
 //===----------------------------------------------------------------------===//
 
-// TDM moves the whole 2D tile in one DMA, so it overrides `getCopyRank` (== 2)
+// TDM moves the whole N-D tile in one DMA, so it overrides `getCopyRank` (== rank)
 // to keep the expand-copy lowering from decomposing the tiled memref per element.
-def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", "gfx1250.tdm_2d",
+def FlyROCDL_CopyOpGFX1250TDM : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM", "gfx1250.tdm",
     /*traits=*/[], /*copyOverrides=*/["getCopyRank"]> {
   let parameters = (ins
+    // Tensor/tile rank (1-5).
+    "int32_t":$rank,
     "int32_t":$numWarps,
     // Padding in elements (both zero disables LDS padding).
     "int32_t":$padInterval,
@@ -80,7 +82,7 @@ def FlyROCDL_CopyOpGFX1250TDM2D : FlyROCDL_StatefulCopyOp<"CopyOpGFX1250TDM2D", 
     "bool":$earlyTimeout
   );
   let assemblyFormat = [{
-    `<` `warps` `=` $numWarps `,` `pad` `=` $padInterval `,` $padAmount
+    `<` `rank` `=` $rank `,` `warps` `=` $numWarps `,` `pad` `=` $padInterval `,` $padAmount
     `,` `cache` `=` $cacheModifier `,` `barrier` `=` $atomicBarrier
     `,` `timeout` `=` $earlyTimeout `>`
   }];

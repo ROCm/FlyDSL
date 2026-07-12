@@ -12,8 +12,8 @@ from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferAtomicType,
     CopyOpCDNA3BufferCopyLDSType,
     CopyOpCDNA3BufferCopyType,
-    CopyOpGFX1250TDM2DType,
     CopyOpGFX1250TDMGatherType,
+    CopyOpGFX1250TDMType,
     MmaOpCDNA3_MFMAType,
     TargetAddressSpace,
 )
@@ -170,7 +170,8 @@ def WMMAScale(
     )
 
 
-def TDM2D(
+def TDM(
+    rank,
     num_warps,
     pad_interval=0,
     pad_amount=0,
@@ -178,21 +179,23 @@ def TDM2D(
     atomic_barrier=False,
     early_timeout=False,
 ):
-    """Create a gfx1250 2D TDM (Tensor Data Mover) Global<->LDS copy atom *type*.
+    """Create a gfx1250 N-D TDM (Tensor Data Mover) Global<->LDS copy atom *type*.
 
-    Direction is inferred at lowering from which side is Global vs Shared; the tile
-    shape is compile-time on the operand layout. ``pad_interval`` / ``pad_amount``
-    (elements) add LDS row padding on the load path.
+    ``rank`` is the tensor/tile rank (1-5). Direction is inferred at lowering from
+    which side is Global vs Shared; the tile shape is compile-time on the operand
+    layout. ``pad_interval`` / ``pad_amount`` (elements) add LDS row padding on the
+    load path.
 
     ``atomic_barrier`` (descriptor bit 18, HW auto-barrier) and ``early_timeout``
     (bit 21, multicast-load GL1 knob) set compile-time descriptor config bits.
 
-    The tile descriptor (global base pointer, runtime 2D extent for out-of-bounds
-    handling, and outer stride) plus the MCAST ``workgroup_mask`` are runtime atom
+    The tile descriptor (global base pointer, per-dim extent for out-of-bounds
+    handling, per-dim stride) plus the MCAST ``workgroup_mask`` are runtime atom
     state set via ``fx.atom.set_value``. :func:`make_tdm_atom` builds the atom and
     populates that descriptor from a tensor in one call.
     """
-    return CopyOpGFX1250TDM2DType.get(
+    return CopyOpGFX1250TDMType.get(
+        rank,
         num_warps,
         pad_interval,
         pad_amount,
@@ -260,8 +263,8 @@ def make_buffer_tensor(
 
 def make_tdm_atom(
     tensor: Tensor,
-    tensor_extents=None,
-    outer_stride=None,
+    tensor_extents,
+    strides=None,
     *,
     num_warps,
     pad_interval=0,
@@ -270,46 +273,43 @@ def make_tdm_atom(
     atomic_barrier=False,
     early_timeout=False,
 ) -> object:
-    """Build a gfx1250 2D TDM copy atom carrying ``tensor``'s tile descriptor.
+    """Build a gfx1250 N-D TDM copy atom carrying ``tensor``'s tile descriptor.
 
     The atom holds the global tile descriptor as runtime state: base pointer, the
-    tensor's 2D extent (for hardware out-of-bounds handling: load zero-fill, store
-    drop), and the outer stride in elements. Reuse the atom across a tile loop; to
-    move to the next tile re-set ``base`` via ``fx.atom.set_value(atom, "base",
-    ptr)``.
+    tensor's per-dim extent (for hardware out-of-bounds handling: load zero-fill,
+    store drop), and per-dim strides. Reuse the atom across a tile loop; to move to
+    the next tile re-set ``base`` (or bump ``imm_offset`` via
+    :func:`advance_tdm_atom`).
 
-    ``tensor_extents`` is an optional list in tensor dim order ``[outer, inner]``;
-    each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or any
-    ``fx`` integer), and ``None`` (or an omitted trailing dim) means no clamp on
-    that axis (INT32_MAX). ``outer_stride`` is the runtime outer stride in
-    elements; ``None`` falls back to the tile memref's *static* layout stride.
-    Pass ``outer_stride`` explicitly when the tile has a dynamic (runtime) outer
-    stride — there is no static value to fall back to, and leaving it unset
-    produces a faulting descriptor stride rather than silently reading stride 0.
+    ``tensor_extents`` is a list of the tensor's per-dim extent in tensor dim order
+    ``[dim0(outermost) .. dim_{rank-1}(innermost)]`` (rank = ``len(tensor_extents)``,
+    1-5); each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or
+    any ``fx`` integer), and ``None`` means no clamp on that axis (INT32_MAX).
+    ``strides`` is an optional list of per-dim strides in elements (same order);
+    the innermost stride is assumed 1 and ignored, so entries for dims 0..rank-2
+    are used. ``None`` (or a ``None`` entry) falls back to the tile memref's static
+    layout stride; pass it explicitly for a tile with a dynamic outer stride (else
+    the descriptor stride faults rather than silently reading stride 0).
 
     Issue the copy with ``fx.copy_atom_call(atom, global_tile, lds)``. NOTE: the
-    global operand's *pointer is unused* — only its layout (tile shape) and
-    address space (copy direction) are read; the base address comes from the
-    ``base`` state set here (re-set it to advance to the next tile).
+    global operand's *pointer is unused* — only its layout (tile shape) and address
+    space (copy direction) are read; the base comes from the ``base`` state.
     """
     from ..primitive import atom_set_value, make_copy_atom
 
     NO_CLAMP = 0x7FFFFFFF
     STRIDE_UNSET = -0x80000000  # matches kOuterStrideUnset in CopyAtom.cpp
 
-    extents = list(tensor_extents) if tensor_extents is not None else []
-    if len(extents) > 2:
-        raise ValueError(f"make_tdm_atom: at most 2 extents (TDM is 2D), got {len(extents)}")
-    extents += [None] * (2 - len(extents))  # pad to [outer, inner]
+    extents = list(tensor_extents)
+    rank = len(extents)
+    if not 1 <= rank <= 5:
+        raise ValueError(f"make_tdm_atom: rank must be in [1, 5], got {rank}")
+    strides = list(strides) if strides is not None else [None] * rank
+    if len(strides) != rank:
+        raise ValueError(f"make_tdm_atom: expected {rank} strides, got {len(strides)}")
 
-    def _i32(v):
-        return v if isinstance(v, Int32) else Int32(v)
-
-    outer = Int32(NO_CLAMP) if extents[0] is None else _i32(extents[0])
-    inner = Int32(NO_CLAMP) if extents[1] is None else _i32(extents[1])
-    stride = Int32(STRIDE_UNSET) if outer_stride is None else _i32(outer_stride)
-
-    copy_op = CopyOpGFX1250TDM2DType.get(
+    copy_op = CopyOpGFX1250TDMType.get(
+        rank,
         num_warps,
         pad_interval,
         pad_amount,
@@ -319,9 +319,20 @@ def make_tdm_atom(
     )
     atom = make_copy_atom(copy_op, tensor.element_type)
     atom = atom_set_value(atom, "base", get_iter(tensor))
-    atom = atom_set_value(atom, "outer_extent", outer)
-    atom = atom_set_value(atom, "inner_extent", inner)
-    atom = atom_set_value(atom, "outer_stride", stride)
+    for i in range(rank):
+        ext = (
+            Int32(NO_CLAMP)
+            if extents[i] is None
+            else (extents[i] if isinstance(extents[i], Int32) else Int32(extents[i]))
+        )
+        atom = atom_set_value(atom, f"extent_{i}", ext)
+    for i in range(rank - 1):  # innermost stride assumed 1, not stored
+        st = (
+            Int64(STRIDE_UNSET)
+            if strides[i] is None
+            else (strides[i] if isinstance(strides[i], Int64) else Int64(strides[i]))
+        )
+        atom = atom_set_value(atom, f"stride_{i}", st)
     return atom
 
 

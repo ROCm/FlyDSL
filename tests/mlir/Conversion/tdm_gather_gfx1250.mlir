@@ -37,7 +37,7 @@ func.func @test_gather_load(
   // CHECK: llvm.insertvalue %[[IDX]], %{{.*}}[5]
   %a1 = fly.atom.set_value(%atom, "row_indices", %idx) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 32, pad = 0, 0, cache = 0>, 0>, vector<8xi32>) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 32, pad = 0, 0, cache = 0>, 0>
   // outer_extent (tensor_dim1) = runtime row count for OOB on indices.
-  %a2 = fly.atom.set_value(%a1, "outer_extent", %nrows) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 32, pad = 0, 0, cache = 0>, 0>, i32) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 32, pad = 0, 0, cache = 0>, 0>
+  %a2 = fly.atom.set_value(%a1, "extent_0", %nrows) : (!fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 32, pad = 0, 0, cache = 0>, 0>, i32) -> !fly.copy_atom<!fly_rocdl.gfx1250.tdm_gather<index = 32, pad = 0, 0, cache = 0>, 0>
   // gather_count (slot 6) unset -> select to tile row count 8.
   // CHECK-DAG: %[[CNT:.*]] = llvm.extractvalue %{{.*}}[6]
   // CHECK-DAG: %[[C8:.*]] = arith.constant 8 : i32

@@ -177,26 +177,27 @@ struct PyCopyOpCDNA3BufferAtomicType : PyConcreteType<PyCopyOpCDNA3BufferAtomicT
   }
 };
 
-struct PyCopyOpGFX1250TDM2DType : PyConcreteType<PyCopyOpGFX1250TDM2DType> {
-  FLYDSL_REGISTER_TYPE_BINDING(CopyOpGFX1250TDM2DType, "CopyOpGFX1250TDM2DType");
+struct PyCopyOpGFX1250TDMType : PyConcreteType<PyCopyOpGFX1250TDMType> {
+  FLYDSL_REGISTER_TYPE_BINDING(CopyOpGFX1250TDMType, "CopyOpGFX1250TDMType");
 
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](int32_t numWarps, int32_t padInterval, int32_t padAmount, int32_t cacheModifier,
-           bool atomicBarrier, bool earlyTimeout, DefaultingPyMlirContext context) {
+        [](int32_t rank, int32_t numWarps, int32_t padInterval, int32_t padAmount,
+           int32_t cacheModifier, bool atomicBarrier, bool earlyTimeout,
+           DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
-          return PyCopyOpGFX1250TDM2DType(
+          return PyCopyOpGFX1250TDMType(
               context->getRef(),
-              wrap(CopyOpGFX1250TDM2DType::get(ctx, numWarps, padInterval, padAmount, cacheModifier,
-                                               atomicBarrier, earlyTimeout)));
+              wrap(CopyOpGFX1250TDMType::get(ctx, rank, numWarps, padInterval, padAmount,
+                                             cacheModifier, atomicBarrier, earlyTimeout)));
         },
-        "num_warps"_a, "pad_interval"_a = 0, "pad_amount"_a = 0, "cache_modifier"_a = 0,
+        "rank"_a, "num_warps"_a, "pad_interval"_a = 0, "pad_amount"_a = 0, "cache_modifier"_a = 0,
         "atomic_barrier"_a = false, "early_timeout"_a = false, nb::kw_only(),
         "context"_a = nb::none(),
-        "Create a CopyOpGFX1250TDM2DType (2D TDM Global<->LDS copy) with warp count, "
-        "optional LDS padding (interval/amount in elements), cache modifier, and the "
-        "descriptor atomic_barrier / early_timeout config bits (default false)");
+        "Create a CopyOpGFX1250TDMType (N-D TDM Global<->LDS copy) with tensor rank (1-5), "
+        "warp count, optional LDS padding (interval/amount in elements), cache modifier, and "
+        "the descriptor atomic_barrier / early_timeout config bits (default false)");
   }
 };
 
@@ -254,7 +255,7 @@ NB_MODULE(_mlirDialectsFlyROCDL, m) {
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferCopyLDSType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA3BufferAtomicType::bind(m);
-  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDM2DType::bind(m);
+  ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDMType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpGFX1250TDMGatherType::bind(m);
   ::mlir::python::MLIR_BINDINGS_PYTHON_DOMAIN::fly_rocdl::PyCopyOpCDNA4LdsReadTransposeType::bind(m);
   // clang-format on

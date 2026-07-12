@@ -66,19 +66,21 @@ def test_tdm2d_type_roundtrip():
         from flydsl._mlir.dialects import fly_rocdl  # noqa: F401
         from flydsl.expr.rocdl import universal as U
 
-        t = U.TDM2D(1)
-        assert "gfx1250.tdm_2d" in str(t)
+        t = U.TDM(2, 1)
+        assert "gfx1250.tdm<" in str(t)
+        assert "rank = 2" in str(t)
         # Defaults: barrier / timeout = false.
         assert "barrier = false, timeout = false" in str(t)
         assert ir.Type.parse(str(t)) == t
 
-        t2 = U.TDM2D(8, pad_interval=64, pad_amount=8, cache_modifier=2)
+        t2 = U.TDM(3, 8, pad_interval=64, pad_amount=8, cache_modifier=2)
+        assert "rank = 3" in str(t2)
         assert "warps = 8" in str(t2)
         assert "pad = 64, 8" in str(t2)
         assert ir.Type.parse(str(t2)) == t2
 
         # barrier / timeout config bits forwarded and round-tripped.
-        t3 = U.TDM2D(1, atomic_barrier=True, early_timeout=True)
+        t3 = U.TDM(1, 1, atomic_barrier=True, early_timeout=True)
         assert "barrier = true, timeout = true" in str(t3)
         assert ir.Type.parse(str(t3)) == t3
 
