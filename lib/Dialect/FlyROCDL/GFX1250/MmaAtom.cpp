@@ -6,6 +6,8 @@
 
 #include "flydsl/Dialect/Fly/Utils/ThrValLayoutMacro.h.inc"
 
+#include "WmmaLayout.h"
+
 using namespace mlir;
 using namespace mlir::fly;
 
@@ -118,7 +120,8 @@ LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> e
   if (m != 16 || n != 16)
     return emitError() << "GFX1250 WMMA requires M=N=16, got " << m << "x" << n;
 
-  auto isF8 = [](Type ty) { return isa<Float8E4M3FNUZType>(ty) || isa<Float8E5M2FNUZType>(ty); };
+  // gfx1250 has native OCP fp8 (E4M3FN / E5M2), not the CDNA FNUZ variants.
+  auto isF8 = [](Type ty) { return isa<Float8E4M3FNType>(ty) || isa<Float8E5M2Type>(ty); };
 
   bool valid = false;
 
@@ -137,6 +140,9 @@ LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> e
   if (k == 64 && elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32))
     valid = true;
 
+  if (k == 32 && elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32))
+    valid = true;
+
   if (!valid) {
     return emitError() << "unsupported GFX1250 WMMA configuration: " << m << "x" << n << "x" << k
                        << " with A=" << elemTyA << ", B=" << elemTyB << ", Acc=" << elemTyAcc;
@@ -144,8 +150,8 @@ LogicalResult MmaOpGFX1250_WMMAType::verify(function_ref<InFlightDiagnostic()> e
   return success();
 }
 
-static bool isFP8(Type ty) { return isa<Float8E4M3FNUZType>(ty); }
-static bool isBF8(Type ty) { return isa<Float8E5M2FNUZType>(ty); }
+static bool isFP8(Type ty) { return isa<Float8E4M3FNType>(ty); }
+static bool isBF8(Type ty) { return isa<Float8E5M2Type>(ty); }
 static bool isF8(Type ty) { return isFP8(ty) || isBF8(ty); }
 
 static Type getWmmaABType(MLIRContext *ctx, int32_t m, int32_t k, Type elemTy) {
@@ -169,6 +175,12 @@ static Type getWmmaABType(MLIRContext *ctx, int32_t m, int32_t k, Type elemTy) {
       return VectorType::get({4}, i32Ty);
     if (k == 64)
       return VectorType::get({8}, i32Ty);
+    return nullptr;
+  }
+
+  if (elemTy.isInteger(4)) {
+    if (k == 32)
+      return VectorType::get({2}, i32Ty);
     return nullptr;
   }
 
@@ -206,10 +218,13 @@ static int64_t getWmmaAccVecSize(int32_t m, int32_t k, Type elemTyA, Type elemTy
   if (k == 64 && elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32))
     return 8;
 
+  if (k == 32 && elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32))
+    return 8;
+
   return 0;
 }
 
-enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp };
+enum class WmmaVariant { ModsAllReuse, ModsC, ModsABClamp, ModsIUClamp };
 
 template <typename WmmaOp, WmmaVariant Variant>
 static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType accTy, Value a,
@@ -225,11 +240,16 @@ static FailureOr<Value> emitWmmaSSA(OpBuilder &builder, Location loc, VectorType
                          /*modC=*/(uint16_t)0, c,
                          /*reuseA=*/false, /*reuseB=*/false)
               .getResult();
-  } else {
-    static_assert(Variant == WmmaVariant::ModsABClamp);
+  } else if constexpr (Variant == WmmaVariant::ModsABClamp) {
     res = WmmaOp::create(builder, loc, accTy,
                          /*signA=*/false, a, /*signB=*/false, b, c,
                          /*reuseA=*/false, /*reuseB=*/false, /*clamp=*/false)
+              .getResult();
+  } else {
+    // IU form (e.g. iu4): sign/clamp controls but no reuseA/reuseB operands.
+    static_assert(Variant == WmmaVariant::ModsIUClamp);
+    res = WmmaOp::create(builder, loc, accTy,
+                         /*signA=*/false, a, /*signB=*/false, b, c, /*clamp=*/false)
               .getResult();
   }
   return res;
@@ -300,6 +320,9 @@ FailureOr<Value> MmaOpGFX1250_WMMAType::emitAtomCallSSA(OpBuilder &builder, Loca
 
   DISPATCH_WMMA_SSA(16, 64, elemTyA.isInteger(8) && elemTyB.isInteger(8) && elemTyAcc.isInteger(32),
                     wmma_i32_16x16x64_iu8, ModsABClamp)
+
+  DISPATCH_WMMA_SSA(16, 32, elemTyA.isInteger(4) && elemTyB.isInteger(4) && elemTyAcc.isInteger(32),
+                    wmma_i32_16x16x32_iu4, ModsIUClamp)
 
 #undef DISPATCH_WMMA_SSA_FP8
 #undef DISPATCH_WMMA_SSA
