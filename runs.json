@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-13T06:01:32Z",
+ "updated": "2026-07-13T06:09:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -20,10 +20,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-13T05:33:36Z",
-     "completed_at": null,
+     "completed_at": "2026-07-13T06:00:38Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225777671/job/86739553178"
     },
     {
@@ -53,20 +53,20 @@
    "branch": "feat/layernorm-backward-769",
    "event": "pull_request",
    "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225581821",
    "created_at": "2026-07-13T05:08:53Z",
-   "updated_at": "2026-07-13T05:45:40Z",
+   "updated_at": "2026-07-13T06:08:42Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-13T05:10:22Z",
-     "completed_at": null,
+     "completed_at": "2026-07-13T06:00:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225581821/job/86738995318"
     },
     {
@@ -81,10 +81,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-13T05:45:39Z",
-     "completed_at": null,
+     "completed_at": "2026-07-13T06:08:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225581821/job/86738995340"
     }
    ]
