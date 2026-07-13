@@ -26,6 +26,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common.tensor_shim import lds_vec_view
 
 
 def _is_gfx950_arch(arch: str) -> bool:
@@ -362,16 +363,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     _lds_base_i32 = _i32(lds_base_idx)
 
     def _lds_view(abs_addr, nbytes, extra_bytes=0):
-        """View `nbytes` of LDS as a u8 vector at a byte address.
-
-        `abs_addr` is a byte address in the same lds_base_idx-relative space used
-        throughout this kernel; the offset relative to the storage base is
-        (abs_addr - lds_base_idx) so add_offset reconstructs the identical byte
-        address. Bytes are viewed as u8 (f8-safe); callers bitcast as needed.
-        """
+        """u8 view of `nbytes` at absolute LDS byte address `abs_addr` (+ `extra_bytes`)."""
         rel = ArithValue(_i32(abs_addr)) - ArithValue(_lds_base_i32) + extra_bytes
-        i8_iter = fx.recast_iter(fx.Uint8, fx.add_offset(_lds_storage_ptr, _raw(rel)))
-        return fx.make_view(i8_iter, fx.make_layout(nbytes, 1))
+        return lds_vec_view(_lds_storage_ptr, _raw(rel), fx.Uint8, nbytes)
 
     # ---- V^T transpose perm constants ----
     c_perm0 = fx.Int32(0x05010400)
