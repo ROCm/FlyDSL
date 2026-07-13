@@ -22,7 +22,7 @@ def FlyROCDL_GetBufferRsrcOp : FlyROCDL_Op<"get_buffer_rsrc",
     not to a bare buffer resource. This op extracts element 0, the ROCDL buffer
     resource (`!llvm.ptr<8>`), so it can be fed to raw ROCDL buffer intrinsics.
 
-    The operand must be a `fly.ptr` in the `buffer_desc` address space;
+    The operand must be a `fly.ptr` in the `buffer_desc` address space.
   }];
   let arguments = (ins AnyType:$ptr);
   let results = (outs AnyType:$result);
