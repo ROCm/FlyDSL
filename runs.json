@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-13T03:47:54Z",
+ "updated": "2026-07-13T04:30:48Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29223446551,
+   "pr": 820,
+   "commit": "45dc8f0894d8431d8ed6e765348f14f79d7551a7",
+   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
+   "event": "pull_request",
+   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29223446551",
+   "created_at": "2026-07-13T04:14:33Z",
+   "updated_at": "2026-07-13T04:15:52Z",
+   "actor": "jiacao-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T04:15:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29223446551/job/86733020449"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T04:15:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29223446551/job/86733020451"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T04:15:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29223446551/job/86733020467"
+    }
+   ]
+  },
   {
    "run_id": 29219744818,
    "pr": 838,
@@ -613,7 +656,7 @@
   },
   {
    "run_id": 29185236660,
-   "pr": 820,
+   "pr": null,
    "commit": "0191be874e899731a0718cc648218f0a2139d90b",
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
@@ -1689,21 +1732,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29080154653/job/86348734171"
     }
    ]
-  },
-  {
-   "run_id": 29079700356,
-   "pr": 825,
-   "commit": "9f65de8ebdda8a00274b134dc7d6a5ddd8f794fd",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29079700356",
-   "created_at": "2026-07-10T08:24:58Z",
-   "updated_at": "2026-07-10T08:33:33Z",
-   "actor": "fsx950223",
-   "jobs": []
   }
  ]
 }
