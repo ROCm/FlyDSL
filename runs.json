@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-13T01:42:20Z",
+ "updated": "2026-07-13T02:44:00Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29219744818,
+   "pr": 838,
+   "commit": "6c3adedcadffb0f6bb1ad8d03e6a529d54b00b12",
+   "branch": "mxfp8_dsl",
+   "event": "pull_request",
+   "title": "add mxfp8 support",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29219744818",
+   "created_at": "2026-07-13T02:33:01Z",
+   "updated_at": "2026-07-13T02:35:12Z",
+   "actor": "solinzby1",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T02:35:11Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29219744818/job/86722469566"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T02:34:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29219744818/job/86722469570"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T02:34:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29219744818/job/86722469573"
+    }
+   ]
+  },
   {
    "run_id": 29216115273,
    "pr": 814,
@@ -10,38 +53,38 @@
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
    "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29216115273",
    "created_at": "2026-07-13T00:49:14Z",
-   "updated_at": "2026-07-13T01:40:31Z",
+   "updated_at": "2026-07-13T02:42:35Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-13T01:40:36Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-13T01:41:34Z",
+     "completed_at": "2026-07-13T02:42:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29216115273/job/86717250514"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-13T01:40:36Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-13T01:41:34Z",
+     "completed_at": "2026-07-13T02:21:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29216115273/job/86717250542"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-13T01:40:36Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-13T01:41:24Z",
+     "completed_at": "2026-07-13T01:54:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29216115273/job/86717250551"
     }
    ]
@@ -1659,21 +1702,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29079700356",
    "created_at": "2026-07-10T08:24:58Z",
    "updated_at": "2026-07-10T08:33:33Z",
-   "actor": "fsx950223",
-   "jobs": []
-  },
-  {
-   "run_id": 29078750386,
-   "pr": 825,
-   "commit": "e5f41cfd5915df5cdeeafae4499d48c68d043aa6",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29078750386",
-   "created_at": "2026-07-10T08:07:01Z",
-   "updated_at": "2026-07-10T08:25:00Z",
    "actor": "fsx950223",
    "jobs": []
   }
