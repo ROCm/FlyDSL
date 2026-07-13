@@ -44,7 +44,7 @@ from tests.kernels.benchmark_common import (  # noqa: E402
     bench_kernel_us as _bench_kernel_us,
 )
 from tests.kernels.test_ref import torch_moe_gemm1, torch_moe_gemm2  # noqa: E402
-from tests.kernels.utils import fp4_utils  # noqa: E402
+from tests.kernels.utils import gemm_common_utils  # noqa: E402
 from tests.test_common import verify_output  # noqa: E402
 from tests.utils import get_dtype_max  # noqa: E402
 
@@ -76,14 +76,14 @@ def _per_1x32_fp8_quant(x: torch.Tensor):
     x_blk = torch.nan_to_num(x_blk, nan=0.0, posinf=0.0, neginf=0.0)
     max_abs = torch.amax(torch.abs(x_blk), dim=1)
     dtype_max = float(get_dtype_max(DTYPE_FP8))
-    scale_e8m0 = fp4_utils.f32_to_e8m0(max_abs / dtype_max)
-    scale_f32 = fp4_utils.e8m0_to_f32(scale_e8m0)
+    scale_e8m0 = gemm_common_utils.f32_to_e8m0(max_abs / dtype_max)
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0)
     scale_f32 = torch.nan_to_num(scale_f32, nan=1.0, posinf=1.0, neginf=1.0)
     scale_f32[scale_f32 == 0] = 1.0
     y_f32 = x_blk / scale_f32.view(-1, 1)
     # Clamp before casting to float8 to avoid generating NaN payloads.
     y_f32 = torch.clamp(y_f32, min=-dtype_max, max=dtype_max)
-    y = fp4_utils._f32_to_floatx_unpacked(y_f32.contiguous().view(-1), 4, 3).view(torch.uint8)
+    y = gemm_common_utils._f32_to_floatx_unpacked(y_f32.contiguous().view(-1), 4, 3).view(torch.uint8)
     y = y.view(*shape_original)
     scale = scale_e8m0.view(m, n // SCALE_BLOCK).view(torch.uint8)
     return y, scale
@@ -92,17 +92,17 @@ def _per_1x32_fp8_quant(x: torch.Tensor):
 def _dequant_blockscale_fp8(x_q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     if scale.dim() == x_q.dim() - 1:
         scale = scale.view(*x_q.shape[:-1], scale.shape[-1])
-    scale_f32 = fp4_utils.e8m0_to_f32(scale.view(torch.uint8))
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale.view(torch.uint8))
     scale_expanded = scale_f32.repeat_interleave(SCALE_BLOCK, dim=-1)[..., : x_q.shape[-1]]
-    return fp4_utils.fp8_e4m3_to_f32(x_q.view(torch.uint8)) * scale_expanded
+    return gemm_common_utils.fp8_e4m3_to_f32(x_q.view(torch.uint8)) * scale_expanded
 
 
 def _dequant_blockscale_fp4(x_q: torch.Tensor, scale: torch.Tensor, k_dim: int) -> torch.Tensor:
     if scale.dim() == x_q.dim() - 1:
         scale = scale.view(*x_q.shape[:-1], scale.shape[-1])
-    scale_f32 = fp4_utils.e8m0_to_f32(scale.view(torch.uint8))
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale.view(torch.uint8))
     scale_expanded = scale_f32.repeat_interleave(SCALE_BLOCK, dim=-1)[..., :k_dim]
-    return fp4_utils.mxfp4_to_f32(x_q.view(torch.uint8))[..., :k_dim] * scale_expanded
+    return gemm_common_utils.mxfp4_to_f32(x_q.view(torch.uint8))[..., :k_dim] * scale_expanded
 
 
 def _torch_moe_gemm1_a8w4(
@@ -350,10 +350,10 @@ def run_moe_stage1(
 
     # Quantize inputs / weights (stage1 does not use W2).
     if in_dtype == "fp4":
-        x_fp4, scale_x_raw, _ = fp4_utils.per_1x32_f4_quant(x_fp32)
+        x_fp4, scale_x_raw, _ = gemm_common_utils.per_1x32_f4_quant(x_fp32)
         x_q = x_fp4.view(torch.uint8)
         scale_x = scale_x_raw.view(torch.uint8).view(tokens, model_dim // 32)
-        w1_fp4, scale_w1_raw, _ = fp4_utils.per_1x32_f4_quant(w1_fp32.view(-1, model_dim))
+        w1_fp4, scale_w1_raw, _ = gemm_common_utils.per_1x32_f4_quant(w1_fp32.view(-1, model_dim))
         w1_q = w1_fp4.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 2)
         scale_w1 = scale_w1_raw.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 32)
     elif in_dtype == "fp8":
@@ -361,7 +361,7 @@ def run_moe_stage1(
         w1_q, scale_w1 = _per_1x32_fp8_quant(w1_fp32)
     else:  # a8w4
         x_q, scale_x = _per_1x32_fp8_quant(x_fp32)
-        w1_q, scale_w1, _ = fp4_utils.per_1x32_f4_quant(w1_fp32)
+        w1_q, scale_w1, _ = gemm_common_utils.per_1x32_f4_quant(w1_fp32)
         w1_q = w1_q.view(torch.uint8)
         scale_w1 = scale_w1.view(torch.uint8)
 
@@ -388,7 +388,7 @@ def run_moe_stage1(
     if in_dtype in ("fp8", "a8w4"):
         w1_rows = experts * (2 * inter_dim)
         w1_cols = model_dim // 2 if is_a8w4 else model_dim
-        w1_shuffled = fp4_utils.preshuffle_b_16x16(
+        w1_shuffled = gemm_common_utils.preshuffle_b_16x16(
             w1_q.contiguous().view(w1_rows, w1_cols),
             w1_rows,
             w1_cols,
@@ -735,13 +735,13 @@ def run_moe_stage2(
 
     # Quantize inputs / weights.
     if in_dtype == "fp4":
-        x_fp4, scale_x_raw, _ = fp4_utils.per_1x32_f4_quant(x_fp32)
+        x_fp4, scale_x_raw, _ = gemm_common_utils.per_1x32_f4_quant(x_fp32)
         x_q = x_fp4.view(torch.uint8)
         scale_x = scale_x_raw.view(torch.uint8).view(tokens, model_dim // 32)
-        w1_fp4, scale_w1_raw, _ = fp4_utils.per_1x32_f4_quant(w1_fp32.view(-1, model_dim))
+        w1_fp4, scale_w1_raw, _ = gemm_common_utils.per_1x32_f4_quant(w1_fp32.view(-1, model_dim))
         w1_q = w1_fp4.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 2)
         scale_w1 = scale_w1_raw.view(torch.uint8).view(experts, 2 * inter_dim, model_dim // 32)
-        w2_fp4, scale_w2_raw, _ = fp4_utils.per_1x32_f4_quant(w2_fp32.view(-1, inter_dim))
+        w2_fp4, scale_w2_raw, _ = gemm_common_utils.per_1x32_f4_quant(w2_fp32.view(-1, inter_dim))
         w2_q = w2_fp4.view(torch.uint8).view(experts, model_dim, inter_dim // 2)
         scale_w2 = scale_w2_raw.view(torch.uint8).view(experts, model_dim, inter_dim // 32)
     elif in_dtype == "fp8":
@@ -750,8 +750,8 @@ def run_moe_stage2(
         w2_q, scale_w2 = _per_1x32_fp8_quant(w2_fp32)
     else:  # a8w4
         x_q, scale_x = _per_1x32_fp8_quant(x_fp32)
-        w1_q, scale_w1, _ = fp4_utils.per_1x32_f4_quant(w1_fp32)
-        w2_q, scale_w2, _ = fp4_utils.per_1x32_f4_quant(w2_fp32)
+        w1_q, scale_w1, _ = gemm_common_utils.per_1x32_f4_quant(w1_fp32)
+        w2_q, scale_w2, _ = gemm_common_utils.per_1x32_f4_quant(w2_fp32)
         w1_q = w1_q.view(torch.uint8)
         scale_w1 = scale_w1.view(torch.uint8)
         w2_q = w2_q.view(torch.uint8)
@@ -775,7 +775,7 @@ def run_moe_stage2(
     if in_dtype in ("fp8", "a8w4"):
         w2_rows = experts * model_dim
         w2_cols = inter_dim // 2 if is_a8w4 else inter_dim
-        w2_shuffled = fp4_utils.preshuffle_b_16x16(
+        w2_shuffled = gemm_common_utils.preshuffle_b_16x16(
             w2_q.contiguous().view(w2_rows, w2_cols),
             w2_rows,
             w2_cols,
@@ -827,8 +827,8 @@ def run_moe_stage2(
         if in_dtype in ("fp8", "a8w4"):
             a2_q, a2_scale = _per_1x32_fp8_quant(out1_ref)
         else:  # fp4
-            a2_q = fp4_utils.random_fp4_packed(tokens * topk, inter_dim, device=device)
-            a2_scale = fp4_utils.random_e8m0(tokens * topk, inter_dim // 32, device=device)
+            a2_q = gemm_common_utils.random_fp4_packed(tokens * topk, inter_dim, device=device)
+            a2_scale = gemm_common_utils.random_e8m0(tokens * topk, inter_dim // 32, device=device)
 
     # Pad A2 activation for non-aligned inter_dim (stage2 K-padding).
     if _orig_inter_dim != inter_dim:
@@ -1423,15 +1423,15 @@ def _prepare_a2_from_stage1(
         if in_dtype == "fp4":
             dev = device or out1_fp16.device
             if skip_ref:
-                a2_q = fp4_utils.random_fp4_packed(tokens * topk, inter_dim, device=dev).view(
+                a2_q = gemm_common_utils.random_fp4_packed(tokens * topk, inter_dim, device=dev).view(
                     tokens, topk, inter_dim // 2
                 )
-                a2_scale = fp4_utils.random_e8m0(tokens * topk, inter_dim // 32, device=dev).view(
+                a2_scale = gemm_common_utils.random_e8m0(tokens * topk, inter_dim // 32, device=dev).view(
                     tokens, topk, inter_dim // 32
                 )
             else:
                 f32 = out1_fp16.to(torch.float32)
-                a2_fp4, a2_scale_raw, _ = fp4_utils.per_1x32_f4_quant(f32.view(-1, inter_dim))
+                a2_fp4, a2_scale_raw, _ = gemm_common_utils.per_1x32_f4_quant(f32.view(-1, inter_dim))
                 a2_q = a2_fp4.view(torch.uint8).view(tokens, topk, inter_dim // 2)
                 a2_scale = a2_scale_raw.view(torch.uint8).view(tokens, topk, inter_dim // 32)
         else:
@@ -1441,7 +1441,7 @@ def _prepare_a2_from_stage1(
 
     if in_dtype == "fp4":
         f32 = out1_fp16.to(torch.float32)
-        a2_fp4, a2_scale_raw, _ = fp4_utils.per_1x32_f4_quant(f32.view(-1, inter_dim))
+        a2_fp4, a2_scale_raw, _ = gemm_common_utils.per_1x32_f4_quant(f32.view(-1, inter_dim))
         a2_q = a2_fp4.view(torch.uint8).view(tokens, topk, inter_dim // 2)
         a2_scale = a2_scale_raw.view(torch.uint8).view(tokens, topk, inter_dim // 32)
     elif in_dtype in ("fp8", "a8w4"):
@@ -1567,8 +1567,8 @@ def test_moe_2stage_fp4_smoke(use_reduce: bool):
         skip_ref=True,
     )
 
-    a2_fp4 = fp4_utils.random_fp4_packed(tokens * topk, inter_dim, device=stage1_out.device)
-    a2_scale = fp4_utils.random_e8m0(tokens * topk, inter_dim // 32, device=stage1_out.device)
+    a2_fp4 = gemm_common_utils.random_fp4_packed(tokens * topk, inter_dim, device=stage1_out.device)
+    a2_scale = gemm_common_utils.random_e8m0(tokens * topk, inter_dim // 32, device=stage1_out.device)
     stage2_out, _ = run_moe_stage2(
         tokens=tokens,
         model_dim=model_dim,

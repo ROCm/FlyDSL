@@ -430,7 +430,7 @@ def run_moe_stage1(
 
     # Quantize inputs / weights.
     if is_fp4_path:
-        from tests.kernels.utils import fp4_utils
+        from tests.kernels.utils import gemm_common_utils
 
         # x: MX-FP8 (e4m3fn, 1 B/elem) for a8w4; MX-FP4 (packed, 0.5 B/elem) for fp4.
         if is_a8w4:
@@ -525,10 +525,10 @@ def run_moe_stage1(
         w1_q_flat = w1_q.view(experts * (2 * inter_dim), model_dim // 2).contiguous()
         scale_w1_flat = scale_w1.view(experts * (2 * inter_dim), model_dim // 32).contiguous()
         # Weight scale: e8m0_shuffle (no MoE sorting needed for weights).
-        scale_w1_1d = fp4_utils.e8m0_shuffle(scale_w1).view(torch.uint8).contiguous()
+        scale_w1_1d = gemm_common_utils.e8m0_shuffle(scale_w1).view(torch.uint8).contiguous()
         # Activation scale: must be sorted by MoE routing order.
         scale_x_1d = (
-            fp4_utils.moe_mxfp4_sort(
+            gemm_common_utils.moe_mxfp4_sort(
                 scale_x[:tokens, :].view(tokens, 1, -1),
                 sorted_ids=sorted_token_ids,
                 num_valid_ids=num_valid_ids,
@@ -1091,10 +1091,10 @@ def run_moe_stage2(
         w2_q, scale_w2 = pertoken_quant(w2_fp32, quant_dtype=torch.int8, dtypeMax=7)
         scale_x = None
     elif in_dtype in ("fp4", "a8w4"):
-        from tests.kernels.utils import fp4_utils
+        from tests.kernels.utils import gemm_common_utils
 
-        if fp4_utils is None:
-            pytest.skip("fp4_utils not available (triton not installed)")
+        if gemm_common_utils is None:
+            pytest.skip("gemm_common_utils not available (triton not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"FP4 MFMA requires gfx950+, got {ARCH}")
         # FP4 / A8W4 share the MXFP4 W2 path; quantize W2 only here. A2 comes
@@ -1136,7 +1136,7 @@ def run_moe_stage2(
         # FP4 / A8W4: preshuffle W2 and prepare MXFP4 weight scales
         w2_shuffled = shuffle_weight(w2_q.view(torch.float4_e2m1fn_x2))
         w2_kernel = w2_shuffled.view(torch.uint8).contiguous()
-        w2_scale_1d = fp4_utils.e8m0_shuffle(scale_w2).view(torch.uint8).contiguous()
+        w2_scale_1d = gemm_common_utils.e8m0_shuffle(scale_w2).view(torch.uint8).contiguous()
 
         # A2 input: provided by the caller.  For 'fp4' it is packed MXFP4
         # [tokens*topk, inter_dim//2]; for 'a8w4' it is MX-FP8 e4m3fn bytes
@@ -1153,7 +1153,7 @@ def run_moe_stage2(
             )
         # Sort A2 scale by MoE routing order (dtype-agnostic on the E8M0 bytes).
         a2_scale_1d = (
-            fp4_utils.moe_mxfp4_sort(
+            gemm_common_utils.moe_mxfp4_sort(
                 a2_scale_raw.view(tokens, topk, -1),
                 sorted_ids=sorted_token_ids,
                 num_valid_ids=num_valid_ids,
@@ -1942,7 +1942,7 @@ def _per_1x32_fp4_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
     Returns (x_fp4, scale_e8m0) where x_fp4.shape[-1] == x.shape[-1] // 2.
     """
-    from tests.kernels.utils import fp4_utils
+    from tests.kernels.utils import gemm_common_utils
 
     block_size = 32
     F4E2M1_MAX = 6.0
@@ -1954,10 +1954,10 @@ def _per_1x32_fp4_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     m, n = x.shape
     x_blocks = x.view(-1, block_size).float()
     max_abs = torch.amax(torch.abs(x_blocks), dim=1)
-    scale_e8m0 = fp4_utils.f32_to_e8m0(max_abs / dtypeMax)
-    scale_f32 = fp4_utils.e8m0_to_f32(scale_e8m0)
+    scale_e8m0 = gemm_common_utils.f32_to_e8m0(max_abs / dtypeMax)
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0)
     y = x_blocks / scale_f32.view(-1, 1)
-    y_fp4 = fp4_utils.f32_to_mxfp4(y)
+    y_fp4 = gemm_common_utils.f32_to_mxfp4(y)
     y_fp4 = y_fp4.view(*shape_orig[:-1], -1)  # K dim halved
     scale = scale_e8m0.view(m, -1).view(torch.uint8)
     return y_fp4, scale
@@ -1971,14 +1971,14 @@ def _per_1x32_mxfp8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     E8M0 scale stored as uint8.  Returns
         (x_q [..., K] fp8_e4m3fn, scale_e8m0 [..., K//32] uint8).
     """
-    from tests.kernels.utils import fp4_utils
+    from tests.kernels.utils import gemm_common_utils
 
     fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
     shape_orig = x.shape
     x_flat = x.contiguous().view(-1, 32).float()
     amax = torch.amax(torch.abs(x_flat), dim=-1).clamp_min(1e-30)
-    scale_e8m0 = fp4_utils.f32_to_e8m0(amax / fp8_max)
-    scale_f32 = fp4_utils.e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
+    scale_e8m0 = gemm_common_utils.f32_to_e8m0(amax / fp8_max)
+    scale_f32 = gemm_common_utils.e8m0_to_f32(scale_e8m0).clamp_min(1e-30)
     x_q = (x_flat / scale_f32.view(-1, 1)).clamp(-fp8_max, fp8_max).to(torch.float8_e4m3fn)
     x_q = x_q.view(shape_orig).contiguous()
     scale_bytes = scale_e8m0.view(*shape_orig[:-1], shape_orig[-1] // 32).view(torch.uint8).contiguous()
@@ -2304,9 +2304,9 @@ def test_moe_stage2_standalone(
     """
     is_fp4_path = in_dtype in ("fp4", "a8w4")
     if is_fp4_path:
-        from tests.kernels.utils import fp4_utils
+        from tests.kernels.utils import gemm_common_utils
 
-        if fp4_utils is None:
+        if gemm_common_utils is None:
             pytest.skip("FP4 dependencies not available (triton/mixed_moe_gemm not installed)")
         if "gfx95" not in ARCH:
             pytest.skip(f"{in_dtype} requires gfx950+, got {ARCH}")
