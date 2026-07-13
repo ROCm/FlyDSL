@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-13T18:35:30Z",
+ "updated": "2026-07-13T18:53:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,19 +10,19 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647",
    "created_at": "2026-07-13T18:20:18Z",
-   "updated_at": "2026-07-13T18:22:25Z",
+   "updated_at": "2026-07-13T18:45:18Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-13T18:22:25Z",
+     "started_at": "2026-07-13T18:45:18Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86899058782"
     },
@@ -81,10 +81,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-13T18:22:00Z",
-     "completed_at": null,
+     "completed_at": "2026-07-13T18:45:04Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274036979/job/86898704672"
     }
    ]
