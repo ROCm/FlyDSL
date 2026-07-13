@@ -152,9 +152,9 @@ public:
         throw std::runtime_error("Unsupported float bit width: " + std::to_string(dtype.bits));
       }
     case kDLInt:
-      return IntegerType::get(ctx, dtype.bits, IntegerType::Signed);
+      return IntegerType::get(ctx, dtype.bits);
     case kDLUInt:
-      return IntegerType::get(ctx, dtype.bits, IntegerType::Unsigned);
+      return IntegerType::get(ctx, dtype.bits);
     case kDLBfloat:
       return BFloat16Type::get(ctx);
     case kDLBool:

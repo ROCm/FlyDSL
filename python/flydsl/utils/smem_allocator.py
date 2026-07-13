@@ -244,8 +244,8 @@ SMEM_CAPACITY_MAP = {
     "gfx950": 163840,  # MI300C / MI300X Enhanced Models: 64KB LDS per CU
     "gfx1151": 65536,  # RDNA3.5: 64KB LDS per WGP
     "gfx1201": 65536,  # RDNA4: 64KB LDS per WGP
-    # GFX1250 (MI450 Series) - 320KB LDS (WGP$ unified, 5 × 64KB segments)
-    "gfx1250": 327680,  # MI450: 320KB configurable as LDS
+    # GFX1250 - 320KB LDS (WGP$ unified, 5 × 64KB segments)
+    "gfx1250": 327680,  # 320KB configurable as LDS
 }
 
 

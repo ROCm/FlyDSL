@@ -15,7 +15,7 @@ from .._mlir.dialects import vector as _vector
 
 # Re-export upstream dialect for ``from flydsl.expr import vector; vector.broadcast(...)``
 from .._mlir.dialects.vector import *  # noqa: F401,F403,E402
-from .meta import traced_op
+from .meta import dsl_loc_tracing
 
 # Re-export Vector and friends so ``from flydsl.expr.vector import Vector`` works
 from .typing import ReductionOp, Vector, empty_like, full, full_like, ones_like, zeros_like  # noqa: F401
@@ -26,8 +26,8 @@ from .typing import ReductionOp, Vector, empty_like, full, full_like, ones_like,
 # ═══════════════════════════════════════════════════════════════════════
 
 
-@traced_op
-def from_elements(*args, loc=None, ip=None, **kwargs):
+@dsl_loc_tracing
+def from_elements(*args, **kwargs):
     """Construct a vector from scalar elements, auto-unwrapping ArithValue wrappers."""
     from . import arith as _arith_ext
 
@@ -36,22 +36,20 @@ def from_elements(*args, loc=None, ip=None, **kwargs):
         elems = args[1]
         if isinstance(elems, (list, tuple)):
             args[1] = [_arith_ext.unwrap(v) for v in elems]
-        return _vector.from_elements(*args, loc=loc, ip=ip, **kwargs)
+        return _vector.from_elements(*args, **kwargs)
 
-    return _vector.from_elements(*args, loc=loc, ip=ip, **kwargs)
+    return _vector.from_elements(*args, **kwargs)
 
 
-@traced_op
-def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
+@dsl_loc_tracing
+def store(value, memref, indices, **kwargs):
     """Vector store wrapper that accepts ArithValue/wrappers for value/indices."""
     from . import arith as _arith_ext
 
     return _vector.store(
         _arith_ext.unwrap(value),
         _arith_ext.unwrap(memref),
-        [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
-        loc=loc,
-        ip=ip,
+        [_arith_ext.unwrap(i, index=True) for i in indices],
         **kwargs,
     )
 
@@ -61,8 +59,8 @@ def store(value, memref, indices, *, loc=None, ip=None, **kwargs):
 # -----------------------------------------------------------------------------
 
 
-@traced_op
-def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip=None):
+@dsl_loc_tracing
+def extract(vector, static_position=None, dynamic_position=None):
     """Wrapper around `vector.ExtractOp(...).result`.
 
     When only ``dynamic_position`` is supplied (without explicit
@@ -77,7 +75,7 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
         static_position = []
     if dynamic_position is None:
         dynamic_position = []
-    dynamic_position = [_arith_ext.unwrap(i, index=True, loc=loc) for i in dynamic_position]
+    dynamic_position = [_arith_ext.unwrap(i, index=True) for i in dynamic_position]
 
     n_static = len(static_position)
     n_dynamic = len(dynamic_position)
@@ -86,36 +84,30 @@ def extract(vector, static_position=None, dynamic_position=None, *, loc=None, ip
         static_position = list(static_position) + [kDynamic] * (n_dynamic - n_static)
 
     return _vector.ExtractOp(
-        _arith_ext.unwrap(vector, loc=loc),
+        _arith_ext.unwrap(vector),
         static_position=static_position,
         dynamic_position=dynamic_position,
-        loc=loc,
-        ip=ip,
     ).result
 
 
-@traced_op
-def load_op(result_type, memref, indices, *, loc=None, ip=None):
+@dsl_loc_tracing
+def load_op(result_type, memref, indices):
     """Wrapper around `vector.LoadOp(...).result`."""
     from . import arith as _arith_ext
 
     return _vector.LoadOp(
         result_type,
         _arith_ext.unwrap(memref),
-        [_arith_ext.unwrap(i, index=True, loc=loc) for i in indices],
-        loc=loc,
-        ip=ip,
+        [_arith_ext.unwrap(i, index=True) for i in indices],
     ).result
 
 
-@traced_op
-def bitcast(result_type, source, *, loc=None, ip=None):
+@dsl_loc_tracing
+def bitcast(result_type, source):
     """Wrapper around `vector.BitCastOp(...).result`."""
     from . import arith as _arith_ext
 
     return _vector.BitCastOp(
         result_type,
-        _arith_ext.unwrap(source, loc=loc),
-        loc=loc,
-        ip=ip,
+        _arith_ext.unwrap(source),
     ).result

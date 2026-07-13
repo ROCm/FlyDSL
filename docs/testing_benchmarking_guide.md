@@ -66,7 +66,7 @@ Full end-to-end tests: compile FlyDSL kernels, execute on GPU, validate against 
 | `test_softmax.py` | Softmax | Row-wise softmax |
 | `test_layernorm.py` | LayerNorm | Layer normalization |
 | `test_rmsnorm.py` | RMSNorm | RMS normalization |
-| `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/int4/bf16) |
+| `test_preshuffle_gemm.py` | GEMM | Preshuffle MFMA GEMM (fp8/int8/fp16/bf16) |
 | `test_blockscale_preshuffle_gemm.py` | GEMM | Block-scale (MXFP4) preshuffle GEMM |
 | `test_moe_gemm.py` | MoE GEMM | Mixture-of-Experts GEMM |
 | `test_moe_blockscale.py` | MoE | MoE with block-scale quantization |
@@ -96,7 +96,7 @@ tests/python/examples/
 
 ### 2.1 `scripts/run_tests.sh`
 
-Runs the preshuffle GEMM test suite via pytest:
+Runs the full FlyDSL test suite:
 
 ```bash
 bash scripts/run_tests.sh
@@ -104,10 +104,12 @@ bash scripts/run_tests.sh
 
 **Features:**
 - Auto-discovers build directory (`build-fly/`)
-- Sets up `PYTHONPATH` and `LD_LIBRARY_PATH`
-- Runs `pytest tests/kernels/test_preshuffle_gemm.py`
+- Auto-selects the GPU with the most free VRAM when `HIP_VISIBLE_DEVICES` is unset
+- Sets up `PYTHONPATH` and `LD_LIBRARY_PATH`, and exports `FLYDSL_RUN_QUANT=1`
+- Runs `pytest` over `tests/kernels/`, `tests/unit/`, `tests/system/`, and `tests/python/examples/`
+- Runs the standalone `examples/` scripts and the MLIR FileCheck tests (`tests/mlir/`)
 - By default skips `large_shape`-marked tests (set `RUN_TESTS_FULL=1` for all)
-- Outputs pass/fail summary
+- Fail-fast: exits on the first failure
 
 **Environment setup:**
 ```bash
@@ -132,7 +134,6 @@ fp8,16,77824,5120,16,128,256
 fp8,5120,5120,8320,64,256,128
 fp8,9728,8192,8320,64,256,128
 int8,9728,8192,8320,64,256,128
-int4,9728,8192,8320,64,256,128
 bf16,5120,5120,8320,64,256,128
 '
 
@@ -235,26 +236,7 @@ gpu_us = bench_gpu_us_torch(fn, warmup=20, iters=200)
 
 ---
 
-## 5. Compilation Utilities (`tests/utils.py`)
-
-### `compile_to_hsaco()`
-
-Standalone compilation path for tests:
-
-```python
-from tests.utils import compile_to_hsaco
-
-hsaco = compile_to_hsaco(mlir_module, kernel_name="my_kernel")
-```
-
-**Pipeline stages:**
-1. Fly coordinate lowering
-2. `fly-to-standard` lowering
-3. `canonicalize` + `cse`
-4. Attach ROCDL target (auto-detect GPU arch)
-5. `convert-gpu-to-rocdl` (SCF→CF, bare pointer memref)
-6. `gpu-to-llvm` + `lower-to-llvm`
-7. `gpu-module-to-binary`
+## 5. Test Utilities (`tests/utils.py`)
 
 ### Weight Utilities
 
@@ -402,12 +384,12 @@ bash scripts/dumpir.sh
 
 | File | Description |
 |---|---|
-| `scripts/run_tests.sh` | GEMM test runner (pytest) |
+| `scripts/run_tests.sh` | Full test runner (pytest + examples + FileCheck) |
 | `scripts/run_benchmark.sh` | Benchmark harness with configurable shapes |
 | `scripts/dumpir.sh` | IR dump helper script |
 | `tests/conftest.py` | Pytest fixtures (MLIR context, module, insert point) |
 | `tests/test_common.py` | `perftest()`, `checkAllclose()`, `verify_output()` |
-| `tests/utils.py` | `compile_to_hsaco()`, `pertoken_quant()`, `shuffle_weight()` |
+| `tests/utils.py` | `pertoken_quant()`, `shuffle_weight()` |
 | `tests/kernels/benchmark_common.py` | `bench_gpu_us_torch()`, benchmark harness |
 | `tests/mlir/{LayoutAlgebra,Conversion,Transforms}/` | MLIR lit tests (18 files) |
 | `tests/python/examples/` | Python AOT examples |

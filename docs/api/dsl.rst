@@ -32,7 +32,6 @@ Layout Construction
 - **fx.make_coord(\*coords)** -- create a coordinate tuple
 - **fx.make_ordered_layout(shape, order)** -- layout with explicit mode ordering
 - **fx.make_identity_layout(shape)** -- identity layout (strides = prefix products)
-- **fx.make_identity_tensor(shape)** -- identity coordinate tensor
 
 Layout Inspection
 ~~~~~~~~~~~~~~~~~~
@@ -43,7 +42,7 @@ Layout Inspection
 - **fx.depth(layout)** -- nesting depth
 - **fx.get_shape(layout)** -- extract shape tuple
 - **fx.get_stride(layout)** -- extract stride tuple
-- **fx.get_scalar(int_tuple, idx)** -- extract scalar from nested int tuple
+- **fx.get_scalar(int_tuple)** -- extract the scalar from a single-leaf int tuple (per-mode access is ``fx.get``)
 
 Layout Algebra
 ~~~~~~~~~~~~~~~
@@ -67,8 +66,8 @@ Layout Products & Divides
 Coordinate Mapping
 ~~~~~~~~~~~~~~~~~~~
 
-- **fx.crd2idx(coord, shape, stride)** -- coordinate to linear index
-- **fx.idx2crd(idx, shape)** -- linear index to coordinate
+- **fx.crd2idx(coord, layout)** -- coordinate to linear index
+- **fx.idx2crd(idx, layout)** -- linear index to coordinate
 - **fx.slice(tensor, slices)** -- slice a tensor by coordinates or ``None``
 - **fx.get(layout, idx)** -- access element at index
 
@@ -80,29 +79,30 @@ Memory Operations
 - **fx.memref_store(value, memref, indices)** -- scalar store to memref
 - **fx.memref_load_vec(memref)** -- load entire register as a vector
 - **fx.memref_store_vec(vec, memref)** -- store vector to register memref
-- **fx.make_fragment_layout_like(layout_like)** -- compute the corresponding fragment layout
+- **fx.make_fragment_layout_like(tensor)** -- compute the corresponding fragment layout
 - **fx.make_fragment_like(tensor)** -- allocate register fragment with same layout
 
 Copy & GEMM
 ~~~~~~~~~~~~~
 
 - **fx.make_copy_atom(instr, dtype)** -- create a CopyAtom from instruction descriptor
-- **fx.make_mma_atom(instr, dtype)** -- create an MmaAtom from MFMA descriptor
-- **fx.make_tile(layouts)** -- build a tile from a list of layouts
+- **fx.make_mma_atom(instr)** -- create an MmaAtom from an MMA op type (the op type carries the dtype, e.g. ``fx.rocdl.MFMA(16, 16, 4, fx.Float32)``)
+- **fx.make_tile(\*layouts)** -- build a tile from layouts (variadic)
 - **fx.make_tiled_copy(copy_atom, layout_tv, tile_mn)** -- build a TiledCopy
 - **fx.make_tiled_mma(mma_atom, ...)** -- build a TiledMma
-- **fx.copy(tiled_copy, src, dst, pred=None)** -- execute a tiled copy (with optional predicate mask)
-- **fx.gemm(tiled_mma, accum, A, B)** -- execute tiled matrix multiply-accumulate
+- **fx.copy(copy_atom, src, dst, pred=None)** -- execute a copy (with optional predicate mask)
+- **fx.gemm(mma_atom, d, a, b, c)** -- execute matrix multiply-accumulate (accumulator passed as both ``d`` and ``c``)
 - **fx.copy_atom_call(atom, src, dst)** -- invoke a single copy atom
-- **fx.mma_atom_call(atom, accum, A, B)** -- invoke a single MMA atom
+- **fx.mma_atom_call(atom, d, a, b, c)** -- invoke a single MMA atom
 
 Derived Tiled Operations (``flydsl.expr.derived``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 High-level classes for tiled copy and MMA partitioning:
 
-- **CopyAtom** -- single hardware copy instruction descriptor
-- **MmaAtom** -- single MMA instruction descriptor (MFMA)
+- **CopyAtom** (``flydsl.expr.typing``) -- single hardware copy instruction descriptor
+- **MmaAtom** (``flydsl.expr.typing``) -- single MMA instruction descriptor (MFMA)
+- **CopyAtomType**, **MmaAtomType** -- atom type wrappers exposed by ``flydsl.expr.derived``
 - **TiledCopy** -- multi-thread tiled copy; use ``get_slice(tid)`` → ``ThrCopy``
 - **TiledMma** -- multi-thread tiled MMA; use ``get_slice(tid)`` → ``ThrMma``
 - **ThrCopy** -- per-thread copy view: ``partition_S(src)``, ``partition_D(dst)``, ``retile(t)``
@@ -116,7 +116,8 @@ Type Annotations
 - **fx.Tensor** -- GPU tensor argument
 - **fx.Constexpr[int]** -- compile-time constant
 - **fx.Int32** -- dynamic int32 argument
-- **fx.Float32**, **fx.Float16**, **fx.BFloat16**, **fx.Float8** -- scalar types
+- **fx.Float32**, **fx.Float16**, **fx.BFloat16** -- scalar types
+- **fx.Float8E4M3FN**, **fx.Float8E4M3FNUZ**, **fx.Float8E5M2** -- FP8 scalar types
 - **fx.Stream** -- GPU stream argument
 - **fx.T** -- type namespace (``T.f32``, ``T.f16``, ``T.bf16``, ``T.i8``, ``T.index``, etc.)
 
@@ -192,7 +193,7 @@ AMD-specific operations for ROCm:
 
 - **fx.rocdl.make_buffer_tensor(tensor)** -- create buffer resource from tensor
 - **fx.rocdl.BufferCopy32b** / **BufferCopy128b** -- buffer copy instruction atoms
-- **fx.rocdl.MFMA(M, N, K, acc_type)** -- MFMA instruction atom constructor
+- **fx.rocdl.MFMA(m, n, k, elem_ty_ab, elem_ty_acc=None)** -- MFMA instruction atom constructor (4th arg is the A/B element type; accumulator defaults to f32)
 - **fx.rocdl.sched_mfma(cnt)** -- insert MFMA scheduling barrier
 - **fx.rocdl.sched_vmem(cnt)** -- insert VMEM scheduling barrier
 - **fx.rocdl.sched_dsrd(cnt)** -- insert DS read scheduling barrier
@@ -210,6 +211,6 @@ Compiler API (``flydsl.compiler``)
 - **@flyc.jit** -- decorator for host-side JIT launch functions
 - **flyc.from_dlpack(tensor)** -- convert DLPack-compatible tensors (PyTorch, etc.) to FlyDSL
 - **JitArgumentRegistry** -- registry for custom argument type adapters
-- **CompilationContext** -- context object available during kernel compilation
+- **flydsl.compiler.kernel_function.CompilationContext** -- context object available during kernel compilation (not a top-level ``flydsl.compiler`` symbol)
 
 .. seealso:: :doc:`compiler` for the full compilation pipeline and pass details.

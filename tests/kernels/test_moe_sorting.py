@@ -33,13 +33,13 @@ from flydsl.runtime.device import is_rdna_arch  # noqa: E402
 if is_rdna_arch():
     pytest.skip("MoE sorting kernel requires CDNA (MI300X/MI350X).", allow_module_level=True)
 
-from kernels.moe_sorting_kernel import (  # noqa: E402
+from kernels.moe.moe_sorting_kernel import (  # noqa: E402
     UNIT_SIZE,
     _supports_fused_oneshot,
     moe_softmax_sort_flydsl,
     moe_sorting_flydsl,
 )
-from kernels.topk_gating_softmax_kernel import (  # noqa: E402
+from kernels.moe.topk_gating_softmax_kernel import (  # noqa: E402
     build_topk_gating_softmax_module,
 )
 
@@ -317,7 +317,7 @@ def run_test(T, E, topk, unit_size=UNIT_SIZE, max_tokens=None):
     """
     # Let moe_sorting_flydsl auto-select oneshot/multiphase path.
     # max_tokens is only needed for explicit oneshot-path override.
-    from kernels.moe_sorting_kernel import BLOCK_SIZE, _compute_sub_tokens
+    from kernels.moe.moe_sorting_kernel import BLOCK_SIZE, _compute_sub_tokens
 
     sub_tokens = _compute_sub_tokens(E)
     ONESHOT_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, E // 8)))
@@ -540,7 +540,7 @@ def test_moe_sorting_multiphase_full(T, E, topk):
 
 def run_test_ep(T, E, topk, mask_ratio=0.5, unit_size=UNIT_SIZE):
     """Run MoE sorting test with expert_mask (EP mode)."""
-    from kernels.moe_sorting_kernel import BLOCK_SIZE, _compute_sub_tokens
+    from kernels.moe.moe_sorting_kernel import BLOCK_SIZE, _compute_sub_tokens
 
     sub_tokens = _compute_sub_tokens(E)
     ONESHOT_MAX_T = min(sub_tokens, max(16, BLOCK_SIZE // max(topk, E // 8)))
@@ -1013,7 +1013,7 @@ def run_bench_comparison(token_sweep=None):
     if token_sweep is None:
         token_sweep = [1, 4, 8, 16, 32, 64, 128, 512, 2048, 4096, 8192, 16384]
 
-    from kernels.moe_sorting_kernel import _compute_sub_tokens
+    from kernels.moe.moe_sorting_kernel import _compute_sub_tokens
 
     sub_tokens = _compute_sub_tokens(E)
 

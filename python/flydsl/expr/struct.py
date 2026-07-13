@@ -19,6 +19,7 @@ from ..compiler.protocol import (
     peek_from_ptr,
     poke_into_ptr,
 )
+from .meta import dsl_loc_tracing
 from .primitive import add_offset
 from .typing import Array, Constexpr, Pointer
 
@@ -410,7 +411,7 @@ def _make_composite_class(
         )
 
     @classmethod
-    def __construct_from_ir_values__(cls, values):
+    def __construct_from_ir_values__(cls, values, exemplar=None):
         rebuilt = {}
         cursor = 0
         for name, eff_type in _effective_field_defs(cls):
@@ -768,6 +769,7 @@ class Arena:
         self._offset = offset + nbytes
         return offset
 
+    @dsl_loc_tracing
     def allocate(self, storable_or_int, alignment=None):
         """Allocate a Storable type or raw bytes, returning ``Storage[T]``.
 

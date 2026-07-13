@@ -1,86 +1,150 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) 2025 FlyDSL Project Contributors
+# Copyright (c) 2026 FlyDSL Project Contributors
 
+import contextlib
 import inspect
-from functools import wraps
+import os
+import threading
+from functools import lru_cache, wraps
 
 from .._mlir import ir
+from ..utils import env
+
+__all__ = [
+    "capture_user_location",
+    "dsl_loc_tracing",
+    "dsl_wrap_result",
+    "tracing_context",
+]
+
+# Package root for the ``flydsl`` Python package: ``.../python/flydsl``.
+# Any frame whose file lives under this prefix is treated as DSL library code
+# and skipped when locating the user's source position.
+_FLYDSL_PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-# TODO: remove this in the future.
-def _to_raw_value(obj):
-    if isinstance(obj, ir.Value):
-        return obj
-    if isinstance(obj, type):
-        return obj
-    if hasattr(obj, "__extract_to_ir_values__"):
-        values = obj.__extract_to_ir_values__()
-        if len(values) != 1:
-            raise ValueError(f"Primitive function expects 1 value, got {len(values)}")
-        return values[0]
-    if isinstance(obj, tuple):
-        return tuple(_to_raw_value(e) for e in obj)
-    if isinstance(obj, list):
-        return [_to_raw_value(e) for e in obj]
-    return obj
+@lru_cache(maxsize=1024)
+def _is_framework_file(filename: str) -> bool:
+    """True if *filename* belongs to DSL library code (or is not locatable)."""
+    if not filename or filename[0] == "<":
+        # ``<string>``, ``<frozen ...>`` and similar synthetic names are not
+        # user source we can point at.
+        return True
+    return os.path.abspath(filename).startswith(_FLYDSL_PKG_ROOT)
 
 
-# TODO: remove this in the future.
-def _flatten_args(args, kwargs):
-    new_args = tuple(_to_raw_value(a) for a in args)
-    new_kwargs = {k: _to_raw_value(v) if k not in ("loc", "ip") else v for k, v in kwargs.items()}
-    return new_args, new_kwargs
+# --------------------------------------------------------------------------- #
+# Tracing Variable (thread-local)
+# --------------------------------------------------------------------------- #
+_tls = threading.local()
 
 
-def _caller_location(depth=1):
-    """Build an MLIR Location from the Python call-site *depth* frames up."""
-    frame = inspect.currentframe()
-    for _ in range(depth + 1):
-        if frame is not None:
+def _stack():
+    s = getattr(_tls, "stack", None)
+    if s is None:
+        s = _tls.stack = []
+    return s
+
+
+@contextlib.contextmanager
+def tracing_context(func):
+    _stack().append(getattr(func, "__code__", None))
+    try:
+        yield
+    finally:
+        stack = _stack()
+        if stack:
+            stack.pop()
+
+
+def file_location(filename: str, line: int, col: int = 0, context=None) -> ir.Location:
+    ctx = context or ir.Context.current
+    if filename and not filename.startswith("<"):
+        filename = os.path.abspath(filename)
+    return ir.Location.file(filename, line, col, context=ctx)
+
+
+def capture_user_location() -> ir.Location:
+    """Build a ``CallSiteLoc`` chain over the *user* frames.
+
+    Walks up from the op-building site, skips DSL-library frames, and records
+    every user frame from the innermost (where the op is written) up to the
+    tracing boundary.
+    """
+    stack = getattr(_tls, "stack", None)
+    boundary = stack[-1] if stack else None
+    max_depth = env.debug.max_loc_depth
+    ctx = ir.Context.current
+    locs = []
+    boundary_loc = None
+    dropped = 0
+
+    frame = inspect.currentframe().f_back
+    try:
+        while frame is not None:
+            code = frame.f_code
+            is_boundary = boundary is not None and code is boundary
+            if not _is_framework_file(code.co_filename):
+                keep = len(locs) < max_depth
+                if keep or is_boundary:
+                    info = inspect.getframeinfo(frame, context=0)
+                    # ``Traceback.positions`` only exists on Python 3.11+; fall
+                    # back to ``f_lineno`` / col 0 on 3.8-3.10.
+                    pos = getattr(info, "positions", None)
+                    line = pos.lineno if pos is not None and pos.lineno is not None else frame.f_lineno
+                    col = pos.col_offset if pos is not None and pos.col_offset is not None else 0
+                    floc = file_location(info.filename, line, col, context=ctx)
+                    if keep:
+                        locs.append(floc)
+                    else:
+                        # Always keep the kernel frame: it is the top of the stack.
+                        boundary_loc = floc
+                else:
+                    dropped += 1
+            if is_boundary:
+                break
             frame = frame.f_back
-    if frame is None:
+    finally:
+        del frame
+
+    # The kernel boundary frame is always kept as the outermost call-site
+    if boundary_loc is not None:
+        locs.append(boundary_loc)
+
+    if not locs:
         return ir.Location.unknown()
-
-    info = inspect.getframeinfo(frame)
-    pos = getattr(info, "positions", None)
-    line = pos.lineno if pos is not None else info.lineno
-    col = (pos.col_offset or 0) if pos is not None else 0
-    file_loc = ir.Location.file(info.filename, line, col)
-
-    if info.code_context:
-        label = " ".join(ln.strip() for ln in info.code_context)
-    else:
-        label = info.function
-    return ir.Location.name(label, childLoc=file_loc)
+    callee, callers = locs[0], locs[1:]
+    if not callers:
+        return callee
+    return ir.Location.callsite(callee, callers)
 
 
-# TODO: remove this in the future.
-def traced_op(op):
-    @wraps(op)
-    def wrapper(*args, **kwargs):
-        loc = kwargs.pop("loc", None)
-        if loc is None:
-            loc = _caller_location(depth=1)
-        args, kwargs = _flatten_args(args, kwargs)
-        with loc:
-            return op(*args, **kwargs)
+def dsl_loc_tracing(fn):
+    """Attach a source ``Location`` to the op(s) a primitive builds.
 
-    return wrapper
+    Location policy (single source of truth for the whole ``expr`` layer):
 
-
-def dsl_loc_tracing(op):
-    """Capture the caller's Python source position as an MLIR Location
-
-    TODO: enhance this in the recent changes. loc is missed in the op arguments.
+    * The location is the **full user call-site chain** -- a ``CallSiteLoc``
+      from the innermost user frame (where the op is written) up to the
+      boundary, each frame a ``FileLineColLoc`` (line + column).  A lone user
+      frame collapses to a plain ``FileLineColLoc``.
+    * It is captured **once** and entered as a dynamic ``with loc:`` scope, so
+      every op the decorated function builds inherits it via
+      ``Location.current``.
     """
 
-    @wraps(op)
+    @wraps(fn)
     def wrapper(*args, **kwargs):
-        loc = kwargs.pop("loc", None)
-        if loc is None:
-            loc = _caller_location(depth=1)
-        with loc:
-            return op(*args, **kwargs)
+        if getattr(_tls, "active_loc", None) is not None:
+            # Already inside a captured scope
+            return fn(*args, **kwargs)
+        loc = capture_user_location()
+        _tls.active_loc = loc
+        try:
+            with loc:
+                return fn(*args, **kwargs)
+        finally:
+            _tls.active_loc = None
 
     return wrapper
 

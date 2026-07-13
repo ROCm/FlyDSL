@@ -9,6 +9,7 @@ import os
 import pickle
 import pkgutil
 import tempfile
+import threading
 import time
 import types
 from collections import namedtuple
@@ -21,17 +22,28 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
+from ..expr.utils.arith import fastmath as fastmath_ctx
 from ..utils import env, log
 from .ast_rewriter import ASTRewriter
 from .backends import compile_backend_name, get_backend
+from .diagnostics import (
+    DSLCompileError,
+    diag_records_from_mlir_error,
+    dsl_ir_diagnostics,
+    install_excepthook,
+    warn_annotation_value_mismatch,
+    warn_invalid_annotations,
+)
 from .jit_argument import convert_to_jit_arguments, is_type_param_annotation, resolve_signature
 from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
-    FuncLocationTracker,
     KernelFunction,
     create_gpu_module,
+    effective_fastmath_hint,
+    func_def_location,
     get_gpu_module_body,
 )
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
@@ -279,46 +291,6 @@ def _snapshot_refs(refs: List[Tuple[str, str, dict]], *, stable: bool) -> Dict[T
     return out
 
 
-class FlyDSLCompileError(RuntimeError):
-    """Raised when an MLIR pass pipeline fails.
-
-    ``diagnostics`` carries the list of error-severity messages collected
-    during the failed ``pm.run()``.
-    """
-
-    def __init__(self, message: str, diagnostics: Optional[List[str]] = None):
-        self.diagnostics = diagnostics or []
-        if self.diagnostics:
-            full = message + "\nMLIR diagnostics:\n" + "\n".join(f"  - {d}" for d in self.diagnostics)
-        else:
-            full = message
-        super().__init__(full)
-
-
-@contextmanager
-def _mlir_diagnostics(ctx):
-    """Collect MLIR error diagnostics emitted during a ``with`` block.
-
-    Yields a list that the caller can inspect after the block.  Only
-    ``ERROR`` severity messages are captured; non-error diagnostics are
-    left to the default handler (returns ``False``).
-    """
-    diags: List[str] = []
-
-    def _handler(d):
-        if d.severity == ir.DiagnosticSeverity.ERROR:
-            diags.append(str(d))
-            return True
-        return False
-
-    handler = ctx.attach_diagnostic_handler(_handler)
-    try:
-        yield diags
-    finally:
-        if handler.attached:
-            handler.detach()
-
-
 def _flydsl_key() -> str:
     extra = list(EXTRA_SOURCE_DIRS)
     env_extra = os.environ.get("FLYDSL_EXTRA_SOURCE_DIRS", "")
@@ -516,6 +488,19 @@ def _collect_closure_scalar_vals(func, visited_ids: Optional[Set[int]] = None) -
     return vals
 
 
+# Per-thread ``id(func)`` set of keys being computed, to break cache-key
+# dependency cycles. Thread-local so concurrent compilations don't collide.
+_key_computation = threading.local()
+
+
+def _keys_in_progress() -> Set[int]:
+    stack = getattr(_key_computation, "stack", None)
+    if stack is None:
+        stack = set()
+        _key_computation.stack = stack
+    return stack
+
+
 def _collect_dependency_sources(
     func,
     rootFile,
@@ -533,6 +518,11 @@ def _collect_dependency_sources(
         # so cross-directory deps are tracked without dragging in the full
         # source file (which would force ad-hoc same-dir filtering).
         if isinstance(val, JitFunction):
+            # Cycle: this jit is already being keyed — emit a placeholder.
+            if id(val.func) in _keys_in_progress():
+                label = getattr(val.func, "__qualname__", getattr(val.func, "__name__", name))
+                sources.append(f"{prefix}jit-recursive:{name}:{label}")
+                return False
             val._ensure_cache_manager()
             sources.append(f"{prefix}jit:{name}:{val.manager_key}")
             return False  # do not recurse: manager_key already covers transitive deps
@@ -580,27 +570,35 @@ def _collect_dependency_sources(
 
 
 def _jit_function_cache_key(func: Callable, owner_cls=None) -> str:
-    parts = []
-    parts.append(_flydsl_key())
-    parts.append(_get_func_source(func))
+    in_progress = _keys_in_progress()
+    added = id(func) not in in_progress
+    if added:
+        in_progress.add(id(func))
     try:
-        rootFile = inspect.getfile(func)
-    except (TypeError, OSError):
-        rootFile = ""
-    depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls)
-    depSources.sort()
-    parts.extend(depSources)
+        parts = []
+        parts.append(_flydsl_key())
+        parts.append(_get_func_source(func))
+        try:
+            rootFile = inspect.getfile(func)
+        except (TypeError, OSError):
+            rootFile = ""
+        depSources = _collect_dependency_sources(func, rootFile, owner_cls=owner_cls)
+        depSources.sort()
+        parts.extend(depSources)
 
-    # Collect scalar closure values recursively — this covers compile-time parameters
-    # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
-    # indirectly via nested @kernel / helper functions, without requiring an explicit
-    # _cache_tag tuple in every kernel factory function.
-    all_closure_vals = sorted(_collect_closure_scalar_vals(func))
-    if all_closure_vals:
-        parts.append("closure_vals:" + ",".join(all_closure_vals))
+        # Collect scalar closure values recursively — this covers compile-time parameters
+        # (tile_m, tile_n, waves_per_eu, etc.) captured directly by the @jit launcher OR
+        # indirectly via nested @kernel / helper functions, without requiring an explicit
+        # _cache_tag tuple in every kernel factory function.
+        all_closure_vals = sorted(_collect_closure_scalar_vals(func))
+        if all_closure_vals:
+            parts.append("closure_vals:" + ",".join(all_closure_vals))
 
-    combined = "\n".join(parts)
-    return hashlib.sha256(combined.encode()).hexdigest()[:32]
+        combined = "\n".join(parts)
+        return hashlib.sha256(combined.encode()).hexdigest()[:32]
+    finally:
+        if added:
+            in_progress.discard(id(func))
 
 
 def _stage_label_from_fragment(fragment: str) -> str:
@@ -781,11 +779,11 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
     pm = PassManager.parse(pipeline)
     pm.enable_verifier(verifier)
     pm.enable_ir_printing(print_after_all=print_after_all)
-    with _mlir_diagnostics(module.context) as diags:
+    with dsl_ir_diagnostics(module.context) as diags:
         try:
             pm.run(module.operation)
         except Exception as exc:
-            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
+            raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
 class MlirCompiler:
@@ -793,7 +791,10 @@ class MlirCompiler:
     def compile(
         cls, module: ir.Module, *, arch: str = "", func_name: str = "", link_libs: Optional[list] = None
     ) -> ir.Module:
-        module.operation.verify()
+        try:
+            module.operation.verify()
+        except ir.MLIRError as exc:
+            raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
 
         backend = get_backend(arch=arch)
 
@@ -850,11 +851,11 @@ class MlirCompiler:
                     stage_name = f"{stage_num:02d}_{_stage_label_from_fragment(frag)}"
                     pm = PassManager.parse(f"builtin.module({frag})")
                     pm.enable_verifier(env.debug.enable_verifier)
-                    with _mlir_diagnostics(module.context) as diags:
+                    with dsl_ir_diagnostics(module.context) as diags:
                         try:
                             pm.run(module.operation)
                         except Exception as exc:
-                            raise FlyDSLCompileError(str(exc), diagnostics=diags) from exc
+                            raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
                     stage_asm = module.operation.get_asm(enable_debug_info=True)
                     out = _dump_ir(stage_name, dump_dir=dump_dir, asm=stage_asm)
@@ -1148,6 +1149,7 @@ def _build_call_state(sig, args_tuple, func_exe):
 
 class JitFunction:
     def __init__(self, func: Callable, compile_hints: Optional[dict] = None):
+        install_excepthook()
         # Same rationale as KernelFunction._original_func: ASTRewriter.transform
         # mutates `func.__code__` in place, after which the JIT cache walker
         # (`_get_underlying_func`) can no longer see closure-captured helpers
@@ -1245,6 +1247,9 @@ class JitFunction:
         else:
             self._sig = full_sig
         self._backend_target = get_backend().target  # frozen dataclass, stable
+
+        # Definition-time annotation validity check (once per function, signature-only).
+        warn_invalid_annotations(self._sig, context="@jit")
 
     def _ensure_cache_manager(self, owner_cls=None):
         if self.manager_key is not None and self._manager_owner_cls is owner_cls:
@@ -1466,17 +1471,24 @@ class JitFunction:
             else:
                 with _create_mlir_context() as ctx, _hints_ctx:
                     param_names, jit_args, dsl_types, constexpr_values = convert_to_jit_arguments(sig, bound)
+                    # Per-call value/annotation consistency check.
+                    for pname, dsl_type in zip(param_names, dsl_types):
+                        ann = sig.parameters[pname].annotation
+                        if (
+                            ann is not inspect.Parameter.empty
+                            and isinstance(ann, type)
+                            and not issubclass(dsl_type, ann)
+                        ):
+                            warn_annotation_value_mismatch(pname, ann, dsl_type, context="@jit")
                     has_user_stream = _ensure_stream_arg(jit_args)
                     ir_types = get_ir_types(jit_args)
-                    loc = ir.Location.unknown(ctx)
+                    loc = func_def_location(self.func, ctx)
 
                     log().info(f"jit_args={jit_args}")
                     log().info(f"dsl_types={dsl_types}")
 
                     module = ir.Module.create(loc=loc)
                     module.operation.attributes["gpu.container_module"] = ir.UnitAttr.get()
-
-                    func_tracker = FuncLocationTracker(self.func)
 
                     with ir.InsertionPoint(module.body), loc:
                         backend = get_backend()
@@ -1486,7 +1498,7 @@ class JitFunction:
                         func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
                         entry_block = func_op.add_entry_block()
 
-                        with CompilationContext.create(func_tracker) as comp_ctx:
+                        with CompilationContext.create() as comp_ctx:
                             comp_ctx.gpu_module_op = gpu_module
                             comp_ctx.gpu_module_body = get_gpu_module_body(gpu_module)
 
@@ -1499,10 +1511,16 @@ class JitFunction:
                                 log().info(f"dsl_args={dsl_args}")
                                 named_args = dict(zip(param_names, dsl_args))
                                 named_args.update(constexpr_values)
-                                if bound_self is not None:
-                                    self.func(bound_self, **named_args)
-                                else:
-                                    self.func(**named_args)
+                                fastmath_flag = effective_fastmath_hint(CompilationContext.get_compile_hints())
+                                fastmath_scope = (
+                                    fastmath_ctx(fastmath_flag) if fastmath_flag is not None else nullcontext()
+                                )
+                                # Bound the call-site boundary at the jit body.
+                                with tracing_context(self.func), fastmath_scope:
+                                    if bound_self is not None:
+                                        self.func(bound_self, **named_args)
+                                    else:
+                                        self.func(**named_args)
                                 func.ReturnOp([])
 
                     original_ir = module.operation.get_asm(enable_debug_info=True)

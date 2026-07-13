@@ -39,7 +39,6 @@
 | | `fx.group(it, begin, end)` | `fly.group` | Group modes into nested tuple |
 | | `fx.append(base, elem)` | `fly.append` | Append mode to IntTuple |
 | | `fx.prepend(base, elem)` | `fly.prepend` | Prepend mode to IntTuple |
-| | `fx.zip(lhs, rhs)` | `fly.zip` | Zip two IntTuples |
 | **Recast** | `fx.recast_layout(ly, old, new)` | `fly.recast_layout` | Recast layout for type width change |
 
 ---
@@ -99,9 +98,8 @@ shape_nested = fx.make_shape(9, (4, 8))   # (9, (4, 8))
 col_major = fx.make_ordered_layout((M, N), order=(0, 1))  # stride order: M-first
 row_major = fx.make_ordered_layout((M, N), order=(1, 0))  # stride order: N-first
 
-# Identity layout / tensor
+# Identity layout
 identity = fx.make_identity_layout((M, N))
-id_tensor = fx.make_identity_tensor((M, N))
 ```
 
 ---
@@ -277,14 +275,6 @@ extended = fx.append(base_tuple, new_elem)
 extended = fx.prepend(base_tuple, new_elem)
 ```
 
-### `zip(lhs, rhs)`
-
-Zip two IntTuples mode-wise:
-
-```python
-zipped = fx.zip(shapes_a, shapes_b)
-```
-
 ### `slice(src, coord)`
 
 Slice an IntTuple/layout at a coordinate:
@@ -406,16 +396,16 @@ fx.gemm(mma_atom, d, a, b, c)
 | Property | Class | Description |
 |---|---|---|
 | `copy_atom.thr_layout` | `CopyAtom` | Thread layout of copy atom |
-| `copy_atom.tv_layout_src` | `CopyAtom` | Thread-value layout for source |
-| `copy_atom.tv_layout_dst` | `CopyAtom` | Thread-value layout for destination |
+| `copy_atom.layout_src_tv` | `CopyAtom` | Thread-value layout for source |
+| `copy_atom.layout_dst_tv` | `CopyAtom` | Thread-value layout for destination |
 | `mma_atom.thr_layout` | `MmaAtom` | Thread layout |
 | `mma_atom.shape_mnk` | `MmaAtom` | M×N×K tile dimensions |
-| `mma_atom.tv_layout_A/B/C` | `MmaAtom` | Thread-value layouts per operand |
-| `tiled_copy.tiled_tv_layout_S` | `TiledCopy` | Full tiled source layout |
-| `tiled_copy.tiled_tv_layout_D` | `TiledCopy` | Full tiled destination layout |
+| `mma_atom.layout_A_tv/layout_B_tv/layout_C_tv` | `MmaAtom` | Thread-value layouts per operand |
+| `tiled_copy.layout_src_tv_tiled` | `TiledCopy` | Full tiled source layout |
+| `tiled_copy.layout_dst_tv_tiled` | `TiledCopy` | Full tiled destination layout |
 | `tiled_mma.tile_size_mnk` | `TiledMma` | Tiled MMA dimensions |
 | `tiled_mma.thr_layout_vmnk` | `TiledMma` | Thread layout across V,M,N,K |
-| `tiled_mma.tiled_tv_layout_A/B/C` | `TiledMma` | Full tiled layouts per operand |
+| `tiled_mma.tv_layout_A_tiled/tv_layout_B_tiled/tv_layout_C_tiled` | `TiledMma` | Full tiled layouts per operand |
 
 ---
 

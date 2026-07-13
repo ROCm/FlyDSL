@@ -24,6 +24,7 @@ from .._mlir.ir import (
     IntegerType,
     TypeAttr,
 )
+from .meta import dsl_loc_tracing
 
 _TYPE_MAP = {
     "int32": lambda: IntegerType.get_signless(32),
@@ -109,6 +110,7 @@ class ExternFunction:
                 sym_visibility="private",
             )
 
+    @dsl_loc_tracing
     def __call__(self, *args: Any) -> Any:
         from ..compiler.kernel_function import CompilationContext
 

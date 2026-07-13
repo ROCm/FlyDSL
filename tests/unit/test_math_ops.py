@@ -6,7 +6,7 @@
 """Tests for flydsl.expr.math DSL wrappers.
 
 Verifies that:
-1. DSL wrappers override raw MLIR star-imports (traced_op + _to_raw).
+1. DSL wrappers override raw MLIR star-imports (dsl_loc_tracing + _to_raw).
 2. Each wrapper generates the correct math dialect op in IR.
 3. Wrappers accept DSL Numeric types (Float32, Int32) and auto-unwrap them.
 4. fastmath= attribute propagates to the generated ops.
@@ -111,7 +111,7 @@ _WRAPPED_NAMES = [
 @pytest.mark.l0_backend_agnostic
 @pytest.mark.parametrize("name", _WRAPPED_NAMES)
 def test_wrapper_overrides_raw(name):
-    """Our @traced_op wrapper must not be the same object as the raw MLIR binding."""
+    """Our @dsl_loc_tracing wrapper must not be the same object as the raw MLIR binding."""
     ours = getattr(fly_math, name)
     raw = getattr(_raw_math, name)
     assert ours is not raw, f"fly_math.{name} is still the raw MLIR function"

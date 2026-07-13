@@ -256,6 +256,24 @@ class DebugEnvManager(EnvManager):
     enable_debug_info = OptBool(False, description="Generate debug info in compiled code")
     enable_verifier = OptBool(True, description="Verify IR module")
 
+    show_stacktrace = OptBool(
+        False,
+        env_var="FLYDSL_DEBUG_SHOW_STACKTRACE",
+        description=(
+            "Show the full raw Python traceback (DSL-internal frames + the chained "
+            "MLIRError) for compile errors, instead of the filtered Python-native view"
+        ),
+    )
+
+    max_loc_depth = OptInt(
+        5,
+        min_value=1,
+        description=(
+            "Max number of user frames recorded in a source-location call-site "
+            "chain (innermost op -> kernel); overflow drops the middle frames"
+        ),
+    )
+
 
 class RuntimeEnvManager(EnvManager):
     """Runtime options (``FLYDSL_RUNTIME_*`` environment variables)."""

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
+import contextlib
+
 import pytest
 
 import flydsl.expr as fx
@@ -23,6 +25,17 @@ def _build_ir(build_fn):
 
             assert module.operation.verify()
             return str(module)
+
+
+@contextlib.contextmanager
+def _trace_context():
+    """Open a context with an insertion point so ``fx.static`` ops can be built."""
+    with Context() as ctx:
+        ctx.allow_unregistered_dialects = True
+        with Location.unknown(ctx):
+            module = Module.create()
+            with InsertionPoint(module.body):
+                yield
 
 
 @pytest.mark.parametrize(
@@ -61,3 +74,49 @@ def test_make_rmem_tensor_preserves_layout_argument():
     assert "fly.make_layout" in ir
     assert "fly.make_ordered_layout" not in ir
     assert "!fly.memref<f16, register, (2,3):(8,1)>" in ir
+
+
+# ``Tile.unpack()`` recovers the per-mode value, mirroring ``IntTuple.unpack``.
+
+
+def test_tile_unpack_int_modes():
+    # Mirrors the host-side ``tiled_copy.tile_mn.unpack()`` use in 01-vectorAdd.py.
+    with _trace_context():
+        copy_atom = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Float32)
+        tiled_copy = fx.make_tiled_copy_tv(
+            copy_atom,
+            fx.make_ordered_layout((8, 16), order=(1, 0)),
+            fx.make_ordered_layout((1, 4), order=(0, 1)),
+        )
+        assert tiled_copy.tile_mn.unpack() == (8, 64)
+
+
+def test_tile_unpack_single_mode_is_leaf():
+    # A single (non-list) mode builds a leaf tile.
+    with _trace_context():
+        assert fx.make_tile(256).unpack() == 256
+
+
+def test_tile_unpack_nested_modes():
+    with _trace_context():
+        assert fx.make_tile(128, (8, 4)).unpack() == (128, (8, 4))
+
+
+def test_tile_unpack_layout_modes():
+    with _trace_context():
+        lt = fx.LayoutType.get(16, 1)
+        modes = fx.static(fx.TileType.get([lt, lt])).unpack()
+        assert isinstance(modes, tuple) and len(modes) == 2
+        assert all(isinstance(m, fx.Layout) for m in modes)
+        for m in modes:
+            assert m.shape.unpack() == 16
+            assert m.stride.unpack() == 1
+
+
+def test_tile_unpack_mixed_int_and_layout_modes():
+    with _trace_context():
+        lt = fx.LayoutType.get(8, 1)
+        modes = fx.static(fx.TileType.get([32, lt])).unpack()
+        assert modes[0] == 32
+        assert isinstance(modes[1], fx.Layout)
+        assert modes[1].shape.unpack() == 8

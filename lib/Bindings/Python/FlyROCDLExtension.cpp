@@ -106,13 +106,14 @@ struct PyCopyOpCDNA3BufferCopyType : PyConcreteType<PyCopyOpCDNA3BufferCopyType>
   static void bindDerived(ClassTy &c) {
     c.def_static(
         "get",
-        [](int32_t bitSize, DefaultingPyMlirContext context) {
+        [](int32_t bitSize, int32_t cacheModifier, DefaultingPyMlirContext context) {
           MLIRContext *ctx = unwrap(context.get()->get());
-          return PyCopyOpCDNA3BufferCopyType(context->getRef(),
-                                             wrap(CopyOpCDNA3BufferCopyType::get(ctx, bitSize)));
+          return PyCopyOpCDNA3BufferCopyType(
+              context->getRef(), wrap(CopyOpCDNA3BufferCopyType::get(ctx, bitSize, cacheModifier)));
         },
-        "bit_size"_a, nb::kw_only(), "context"_a = nb::none(),
-        "Create a CopyOpCDNA3BufferCopyType with the given bit size");
+        "bit_size"_a, "cache_modifier"_a = 0, nb::kw_only(), "context"_a = nb::none(),
+        "Create a CopyOpCDNA3BufferCopyType with the given bit size and "
+        "cache_modifier (0=cached, 2=non-temporal)");
   }
 };
 

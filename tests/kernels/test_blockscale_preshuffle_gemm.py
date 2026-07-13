@@ -28,7 +28,7 @@ for _p in reversed(_PYTHON_CANDIDATES):
         sys.path.insert(0, _p)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.blockscale_preshuffle_gemm import compile_blockscale_preshuffle_gemm  # noqa: E402
+from kernels.gemm.blockscale_preshuffle_gemm import compile_blockscale_preshuffle_gemm  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import shuffle_weight  # noqa: E402
 

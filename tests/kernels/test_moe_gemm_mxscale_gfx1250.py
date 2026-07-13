@@ -169,7 +169,7 @@ def _torch_moe_gemm2_a8w4(
 
 # Reuse routing utilities from the base MoE GEMM test harness.
 # Kernel implementations live under `kernels/`; this test file is the harness.
-from kernels.moe_gemm_2stage_mxscale_gfx1250 import (  # noqa: E402
+from kernels.moe.moe_gemm_2stage_mxscale_gfx1250 import (  # noqa: E402
     MoeGemm2Mode,
     compile_moe_gemm1,
     compile_moe_gemm2,

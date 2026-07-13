@@ -5,11 +5,15 @@ args, globals-drift detection, and the ir.Type fallback in ``_arg_cache_sig``.""
 
 from __future__ import annotations
 
+import inspect
+import textwrap
+
 import pytest
 import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler import jit_function
 from flydsl.compiler.protocol import cache_signature
 
 
@@ -173,11 +177,24 @@ def _load_mod(tmp_path, name, body):
     import importlib.util
 
     src = tmp_path / f"{name}.py"
-    src.write_text(body)
+    src.write_text(textwrap.dedent(body))
     spec = importlib.util.spec_from_file_location(name, src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _reset_manager_key(jit_fn):
+    jit_fn.manager_key = None
+    jit_fn._manager_owner_cls = None
+    jit_fn.cache_manager = None
+
+
+def _manager_key(jit_fn, *, reset=False):
+    if reset:
+        _reset_manager_key(jit_fn)
+    jit_fn._ensure_cache_manager()
+    return jit_fn.manager_key
 
 
 def test_container_global_folded_by_value_not_collapsed(tmp_path):
@@ -257,3 +274,129 @@ def test_drift_baseline_is_per_owner_cls():
     launch._check_globals_drift(A)  # A's baseline (FOO) unchanged → no raise
     with pytest.raises(RuntimeError, match="BAR"):
         launch._check_globals_drift(B)  # B's own baseline catches the BAR drift
+
+
+def test_top_level_launch_named_jit_does_not_recurse_forever(tmp_path, monkeypatch):
+    """A top-level ``@flyc.jit`` named ``launch`` whose body calls
+    ``kernel(...).launch(...)`` must not blow the stack while building its key.
+    """
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    mod = _load_mod(
+        tmp_path,
+        "launch_attr_collision",
+        """
+        import flydsl.compiler as flyc
+        import flydsl.expr as fx
+
+        @flyc.kernel
+        def my_kernel(C: fx.Tensor):
+            pass
+
+        @flyc.jit
+        def launch(C: fx.Tensor):
+            my_kernel(C).launch(grid=(1, 1, 1), block=[1, 1, 1])
+        """,
+    )
+
+    key1 = _manager_key(mod.launch, reset=True)  # must not raise RecursionError
+    key2 = _manager_key(mod.launch)
+    dep_sources = jit_function._collect_dependency_sources(mod.launch.func, inspect.getfile(mod.launch.func))
+
+    assert key1 == key2
+    assert any("my_kernel" in source for source in dep_sources)
+
+
+def test_jit_self_reference_does_not_recurse_forever(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    mod = _load_mod(
+        tmp_path,
+        "jit_self_ref",
+        """
+        import flydsl.compiler as flyc
+        import flydsl.expr as fx
+
+        @flyc.jit
+        def solo(A: fx.Tensor):
+            _ = solo
+            return A
+        """,
+    )
+
+    key1 = _manager_key(mod.solo, reset=True)
+    key2 = _manager_key(mod.solo)
+
+    assert key1 == key2
+
+
+def test_mutually_referential_jits_do_not_recurse_forever(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    mod = _load_mod(
+        tmp_path,
+        "jit_mutual_ref",
+        """
+        import flydsl.compiler as flyc
+        import flydsl.expr as fx
+
+        @flyc.jit
+        def first(A: fx.Tensor):
+            _ = second
+            return A
+
+        @flyc.jit
+        def second(A: fx.Tensor):
+            _ = first
+            return A
+        """,
+    )
+
+    _reset_manager_key(mod.first)
+    _reset_manager_key(mod.second)
+    first_key = _manager_key(mod.first)
+    second_key = _manager_key(mod.second)
+
+    assert first_key == _manager_key(mod.first)
+    assert second_key == _manager_key(mod.second)
+
+
+def test_in_progress_stack_is_thread_local():
+    """Each thread must get its own in-progress set."""
+    import threading
+
+    main_stack = jit_function._keys_in_progress()
+    assert jit_function._keys_in_progress() is main_stack
+
+    other = {}
+
+    def worker():
+        other["stack"] = jit_function._keys_in_progress()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+
+    assert other["stack"] is not main_stack
+
+
+def test_key_computation_leaves_no_in_progress_leak(tmp_path, monkeypatch):
+    """The in-progress stack must be empty again after keying."""
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    monkeypatch.setattr(jit_function, "_flydsl_key", lambda: "test-flydsl-key")
+    mod = _load_mod(
+        tmp_path,
+        "jit_no_leak",
+        """
+        import flydsl.compiler as flyc
+        import flydsl.expr as fx
+
+        @flyc.jit
+        def solo(A: fx.Tensor):
+            _ = solo
+            return A
+        """,
+    )
+
+    _manager_key(mod.solo, reset=True)
+    assert jit_function._keys_in_progress() == set()

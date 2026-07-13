@@ -383,6 +383,8 @@ IntTuple intTupleBinaryOp(const IntTupleBuilder<IntTuple> &builder, BinaryOp &&b
 
 template <class IntTuple>
 IntTuple intTupleAdd(const IntTupleBuilder<IntTuple> &builder, IntTuple lhs, IntTuple rhs) {
+  if (lhs.isLeafBasis() || rhs.isLeafBasis())
+    return builder.add(lhs, rhs);
   return intTupleBinaryOp(
       builder, [&](IntTuple a, IntTuple b) { return builder.add(a, b); }, lhs, rhs);
 }

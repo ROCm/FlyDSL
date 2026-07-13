@@ -1,4 +1,14 @@
 # FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL)
+
+<div align="center" id="badges">
+
+[![CI](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml)
+[![Benchmark](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/flydsl.yaml)
+[![Dashboard](https://img.shields.io/badge/Performance-Dashboard-blue)](https://rocm.github.io/FlyDSL/ci-dashboard/)
+[![Docs](https://img.shields.io/badge/Docs-rocm.github.io%2FFlyDSL-blue)](https://rocm.github.io/FlyDSL)
+
+</div>
+
 > A Python DSL and a MLIR stack for authoring high‑performance GPU kernels with explicit layouts and tiling. 
 
 FlyDSL is the **Python front‑end** of the project: a *Flexible Layout Python DSL* for expressing
@@ -159,6 +169,7 @@ bash scripts/build.sh -j64
 | Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
 | Layout System | FlyDSL layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
 | Kernel Authoring | Writing GPU kernels — MlirModule, tiled copies, MFMA, shared memory | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Kernel Tuning | Performance tuning — tiling, LDS swizzle, prefetch, MFMA scheduling, profiling | [Tuning Guide](docs/kernel_tuning_guide.md) |
 | Pre-built Kernels | Available kernels — GEMM, MoE, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
 | Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
 
@@ -197,6 +208,7 @@ Formula: `Index = dot(Coord, Stride) = sum(c_i * s_i)`
 | Architecture | Compilation pipeline, project structure, environment config | [Architecture Guide](docs/architecture_guide.md) |
 | Layout System | Fly layout algebra — Shape, Stride, Layout, Coord, all operations | [Layout Guide](docs/layout_system_guide.md) |
 | Kernel Authoring | Writing GPU kernels — `@flyc.kernel`, `@flyc.jit`, expression API | [Kernel Guide](docs/kernel_authoring_guide.md) |
+| Kernel Tuning | Performance tuning — tiling, LDS swizzle, prefetch, MFMA scheduling, profiling | [Tuning Guide](docs/kernel_tuning_guide.md) |
 | Pre-built Kernels | Available kernels — GEMM, Softmax, Norm — config and usage | [Kernels Reference](docs/prebuilt_kernels_guide.md) |
 | Testing & Benchmarks | Test infrastructure, benchmarking, performance comparison | [Testing Guide](docs/testing_benchmarking_guide.md) |
 
@@ -383,7 +395,7 @@ See `examples/` for more examples including tiled copy (`02-tiledCopy.py`), tile
 | **Quantization** | `test_quant.py` | Quantization utilities |
 
 **Verified Platforms**:
-*   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), AMD MI450 (gfx1250), Radeon AI PRO R9700 (gfx1201)
+*   AMD MI300X/MI308X (gfx942), AMD MI350/MI355X (gfx950), gfx1250, Radeon AI PRO R9700 (gfx1201)
 *   Linux / ROCm 6.x, 7.x
 
 ## 🙏 Acknowledgements
@@ -395,6 +407,7 @@ FlyDSL's design is inspired by ideas from several projects:
 - [ROCm Composable Kernel](https://github.com/ROCm/composable_kernel) — tile-based kernel design patterns for AMD GPUs
 - [ROCm AIter](https://github.com/ROCm/aiter) — test infrastructure and performance comparison baselines (MIT)
 - [Triton](https://github.com/triton-lang/triton) — Python DSL for GPU kernel authoring
+- [HipKittens](https://github.com/HazyResearch/HipKittens) — minimal, opinionated C++ embedded primitives for fast AMD AI kernels (part of the ThunderKittens family)
 
 ## 📄 License
 

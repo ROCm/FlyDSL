@@ -3,6 +3,7 @@
 
 import ast
 import contextlib
+import copy
 import difflib
 import functools
 import inspect
@@ -14,6 +15,7 @@ from typing import List
 from .._mlir import ir
 from .._mlir.dialects import arith, scf
 from ..expr import const_expr
+from ..expr.meta import capture_user_location, file_location
 from ..expr.typing import as_dsl_value, as_ir_value
 from ..utils import env, log
 
@@ -25,23 +27,10 @@ def _set_lineno(node, n=1):
     return node
 
 
-@contextlib.contextmanager
-def _flydsl_loc(filename, lineno):
-    """Tracing-time context manager: push an MLIR file:line Location so any
-    IR ops created inside this block default to (filename, lineno) instead of
-    the function definition line.  Inserted automatically by `WrapLocations`
-    AST transformer around every user statement.
-
-    No-op outside an active MLIR Context (e.g., if the rewritten function is
-    invoked outside of JIT tracing for some reason).
-    """
-    try:
-        loc = ir.Location.file(filename, lineno, 0)
-    except (RuntimeError, ValueError):
-        yield
-        return
-    with loc:
-        yield
+def _locate_block_args(block, loc):
+    """Give a region block's arguments (e.g. scf.for iv / iter_args) *loc*."""
+    for arg in block.arguments:
+        ir.BlockArgument(arg).set_location(loc)
 
 
 def _find_func_in_code_object(co, func_name):
@@ -183,7 +172,7 @@ class ASTRewriter:
         module = ast.parse(f_src)
         assert isinstance(module.body[0], ast.FunctionDef), f"unexpected ast node {module.body[0]}"
 
-        context = types.SimpleNamespace()
+        context = types.SimpleNamespace(python_globals=f.__globals__)
         context.filename = f.__code__.co_filename
         for transformer_ctor in cls.transformers:
             orig_code = ast.unparse(module) if env.debug.ast_diff else None
@@ -406,24 +395,24 @@ class Transformer(ast.NodeTransformer):
 class RewriteBoolOps(Transformer):
     @staticmethod
     def dsl_and_(lhs, rhs):
-        if hasattr(lhs, "__fly_and__"):
-            return lhs.__fly_and__(rhs)
-        if hasattr(rhs, "__fly_and__"):
-            return rhs.__fly_and__(lhs)
+        if hasattr(lhs, "__dsl_and__"):
+            return lhs.__dsl_and__(rhs)
+        if hasattr(rhs, "__dsl_and__"):
+            return rhs.__dsl_and__(lhs)
         return lhs and rhs
 
     @staticmethod
     def dsl_or_(lhs, rhs):
-        if hasattr(lhs, "__fly_or__"):
-            return lhs.__fly_or__(rhs)
-        if hasattr(rhs, "__fly_or__"):
-            return rhs.__fly_or__(lhs)
+        if hasattr(lhs, "__dsl_or__"):
+            return lhs.__dsl_or__(rhs)
+        if hasattr(rhs, "__dsl_or__"):
+            return rhs.__dsl_or__(lhs)
         return lhs or rhs
 
     @staticmethod
     def dsl_not_(x):
-        if hasattr(x, "__fly_not__"):
-            return x.__fly_not__()
+        if hasattr(x, "__dsl_not__"):
+            return x.__dsl_not__()
         return not x
 
     @classmethod
@@ -433,6 +422,26 @@ class RewriteBoolOps(Transformer):
             "dsl_or_": cls.dsl_or_,
             "dsl_not_": cls.dsl_not_,
         }
+
+    def visit_Compare(self, node: ast.Compare):
+        node = self.generic_visit(node)
+        if len(node.ops) == 1:
+            return node
+        # Chained comparison `a < b < c` -> `(a < b) and (b < c)`, then reuse the
+        # `and` lowering. Middle operands are referenced by two comparisons, matching
+        # the existing repeated-evaluation convention in visit_BoolOp.
+        operands = [node.left] + node.comparators
+        comparisons = []
+        for i, op in enumerate(node.ops):
+            comparison = ast.Compare(
+                left=copy.deepcopy(operands[i]),
+                ops=[copy.deepcopy(op)],
+                comparators=[copy.deepcopy(operands[i + 1])],
+            )
+            comparisons.append(ast.copy_location(comparison, node))
+        chained = ast.copy_location(ast.BoolOp(op=ast.And(), values=comparisons), node)
+        chained = ast.fix_missing_locations(chained)
+        return self.visit_BoolOp(chained)
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
@@ -635,16 +644,16 @@ class ReplaceIfWithDispatch(Transformer):
 
         if not result_names:
             has_else = else_fn is not None
-            if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=ir.Location.unknown())
+            if_op = scf.IfOp(cond_i1, [], has_else=has_else, loc=capture_user_location())
             with ir.InsertionPoint(if_op.regions[0].blocks[0]):
                 ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
-                scf.YieldOp([])
+                scf.YieldOp([], loc=capture_user_location())
             if has_else:
                 if len(if_op.regions[1].blocks) == 0:
                     if_op.regions[1].blocks.append(*[])
                 with ir.InsertionPoint(if_op.regions[1].blocks[0]):
                     ReplaceIfWithDispatch._call_branch(else_fn, result_names, result_values)
-                    scf.YieldOp([])
+                    scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
         if else_fn is None:
@@ -661,7 +670,7 @@ class ReplaceIfWithDispatch(Transformer):
             state_raw.append(raw)
 
         result_types = [v.type for v in state_raw]
-        if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=ir.Location.unknown())
+        if_op = scf.IfOp(cond_i1, result_types, has_else=True, loc=capture_user_location())
 
         with ir.InsertionPoint(if_op.regions[0].blocks[0]):
             then_result = ReplaceIfWithDispatch._call_branch(then_fn, result_names, result_values)
@@ -675,7 +684,7 @@ class ReplaceIfWithDispatch(Transformer):
                         f"if/else variable '{name}' type mismatch in then-branch: "
                         f"expected {expect_ty}, got {got.type}"
                     )
-            scf.YieldOp(then_raw)
+            scf.YieldOp(then_raw, loc=capture_user_location())
 
         if len(if_op.regions[1].blocks) == 0:
             if_op.regions[1].blocks.append(*[])
@@ -691,7 +700,7 @@ class ReplaceIfWithDispatch(Transformer):
                         f"if/else variable '{name}' type mismatch in else-branch: "
                         f"expected {expect_ty}, got {got.type}"
                     )
-            scf.YieldOp(else_raw)
+            scf.YieldOp(else_raw, loc=capture_user_location())
 
         wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(if_op.results), result_values)
         if len(result_names) == 1:
@@ -900,13 +909,13 @@ class ReplaceIfWithDispatch(Transformer):
                 )
             yield_type = probe_then_raw.type
 
-        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=ir.Location.unknown())
+        op = scf.IfOp(cond_i1, [yield_type], has_else=True, loc=capture_user_location())
         with ir.InsertionPoint(op.regions[0].blocks[0]):
-            scf.YieldOp([as_ir_value(then_fn())])
+            scf.YieldOp([as_ir_value(then_fn())], loc=capture_user_location())
         if len(op.regions[1].blocks) == 0:
             op.regions[1].blocks.append()
         with ir.InsertionPoint(op.regions[1].blocks[0]):
-            scf.YieldOp([as_ir_value(else_fn())])
+            scf.YieldOp([as_ir_value(else_fn())], loc=capture_user_location())
 
         sandbox.operation.erase()
         return as_dsl_value(op.results[0], probe_then)
@@ -918,17 +927,18 @@ class InsertEmptyYieldForSCFFor(Transformer):
 
     @staticmethod
     def _to_index(val):
+        loc = capture_user_location()
         if isinstance(val, ir.Value):
             if val.type == ir.IndexType.get():
                 return val
-            return arith.IndexCastOp(ir.IndexType.get(), val).result
+            return arith.IndexCastOp(ir.IndexType.get(), val, loc=loc).result
         if hasattr(val, "ir_value"):
             raw = val.ir_value()
             if isinstance(raw, ir.Value) and raw.type != ir.IndexType.get():
-                return arith.IndexCastOp(ir.IndexType.get(), raw).result
+                return arith.IndexCastOp(ir.IndexType.get(), raw, loc=loc).result
             return raw
         if isinstance(val, int) and not isinstance(val, bool):
-            return arith.ConstantOp(ir.IndexType.get(), val).result
+            return arith.ConstantOp(ir.IndexType.get(), val, loc=loc).result
         raise TypeError(f"_to_index expected ir.Value, object with ir_value(), or int; got {type(val).__name__}")
 
     @staticmethod
@@ -943,11 +953,15 @@ class InsertEmptyYieldForSCFFor(Transformer):
         step_val = InsertEmptyYieldForSCFFor._to_index(step)
         if init is not None:
             init = [as_ir_value(v) for v in init]
-            for_op = scf.ForOp(start_val, stop_val, step_val, init)
+            loc = capture_user_location()
+            for_op = scf.ForOp(start_val, stop_val, step_val, init, loc=loc)
+            _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable, list(for_op.inner_iter_args)
         else:
-            for_op = scf.ForOp(start_val, stop_val, step_val)
+            loc = capture_user_location()
+            for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 yield for_op.induction_variable
 
@@ -965,7 +979,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 raise TypeError(f"for-loop {name} must be i32, got {type(val).__name__}")
             if val.type == idx_ty:
                 log().warning("for-loop %s is index type, consider using fx.Int32 instead", name)
-                bounds[i] = (name, arith.IndexCastOp(i32_ty, val).result)
+                bounds[i] = (name, arith.IndexCastOp(i32_ty, val, loc=capture_user_location()).result)
             elif val.type != i32_ty:
                 raise TypeError(f"for-loop {name} must be i32, got {val.type}")
         start_val, stop_val, step_val = bounds[0][1], bounds[1][1], bounds[2][1]
@@ -985,11 +999,13 @@ class InsertEmptyYieldForSCFFor(Transformer):
             )
 
         if not result_names:
-            for_op = scf.ForOp(start_val, stop_val, step_val)
+            loc = capture_user_location()
+            for_op = scf.ForOp(start_val, stop_val, step_val, loc=loc)
+            _locate_block_args(for_op.body, loc)
             with ir.InsertionPoint(for_op.body):
                 iv = for_op.induction_variable
                 body_fn(iv, result_names)
-                scf.YieldOp([])
+                scf.YieldOp([], loc=capture_user_location())
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
 
         state_raw = []
@@ -1002,7 +1018,9 @@ class InsertEmptyYieldForSCFFor(Transformer):
                 )
             state_raw.append(raw)
 
-        for_op = scf.ForOp(start_val, stop_val, step_val, state_raw)
+        loc = capture_user_location()
+        for_op = scf.ForOp(start_val, stop_val, step_val, state_raw, loc=loc)
+        _locate_block_args(for_op.body, loc)
 
         with ir.InsertionPoint(for_op.body):
             iv = for_op.induction_variable
@@ -1020,7 +1038,7 @@ class InsertEmptyYieldForSCFFor(Transformer):
                     raise TypeError(
                         f"for-loop variable '{name}' type mismatch: " f"expected {expect_ty}, got {got.type}"
                     )
-            scf.YieldOp(body_raw)
+            scf.YieldOp(body_raw, loc=capture_user_location())
 
         wrapped = ReplaceIfWithDispatch._pack_dispatch_results(list(for_op.results), result_values)
         if len(result_names) == 1:
@@ -1270,7 +1288,7 @@ class ReplaceYieldWithSCFYield(Transformer):
                 processed.append(a.ir_value())
             else:
                 processed.append(a)
-        scf.YieldOp(processed)
+        scf.YieldOp(processed, loc=capture_user_location())
         parent_op = ir.InsertionPoint.current.block.owner
         if hasattr(parent_op, "results") and len(parent_op.results):
             results = list(parent_op.results)
@@ -1327,9 +1345,12 @@ class CanonicalizeWhile(Transformer):
             state_raw.append(raw)
 
         result_types = [v.type for v in state_raw]
-        while_op = scf.WhileOp(result_types, state_raw, loc=ir.Location.unknown())
-        while_op.regions[0].blocks.append(*result_types)
-        while_op.regions[1].blocks.append(*result_types)
+        loc = capture_user_location()
+        while_op = scf.WhileOp(result_types, state_raw, loc=loc)
+        # Give the loop-carried block arguments the user location.
+        arg_locs = [loc] * len(result_types)
+        while_op.regions[0].blocks.append(*result_types, arg_locs=arg_locs)
+        while_op.regions[1].blocks.append(*result_types, arg_locs=arg_locs)
 
         with ir.InsertionPoint(while_op.regions[0].blocks[0]):
             before_args = list(while_op.regions[0].blocks[0].arguments)
@@ -1338,7 +1359,7 @@ class CanonicalizeWhile(Transformer):
             cond_i1 = ReplaceIfWithDispatch._to_i1(before_cond)
             if not isinstance(cond_i1, ir.Value):
                 raise TypeError(f"dynamic while condition must lower to ir.Value, got {type(cond_i1).__name__}")
-            scf.ConditionOp(cond_i1, before_args)
+            scf.ConditionOp(cond_i1, before_args, loc=capture_user_location())
 
         with ir.InsertionPoint(while_op.regions[1].blocks[0]):
             after_args = list(while_op.regions[1].blocks[0].arguments)
@@ -1354,9 +1375,9 @@ class CanonicalizeWhile(Transformer):
                         raise TypeError(
                             f"while-loop variable '{name}' type mismatch: expected {expect_ty}, got {got.type}"
                         )
-                scf.YieldOp(body_raw)
+                scf.YieldOp(body_raw, loc=capture_user_location())
             else:
-                scf.YieldOp([])
+                scf.YieldOp([], loc=capture_user_location())
 
         if not result_names:
             return ReplaceIfWithDispatch._pack_named_values(result_names, result_values)
@@ -1483,56 +1504,75 @@ class CanonicalizeWhile(Transformer):
 
 
 @ASTRewriter.register
-class WrapLocations(Transformer):
-    """Wrap every user statement with ``with _flydsl_loc(__file__, lineno):``
-    so MLIR ops emitted during tracing inherit the correct source line.
+class FallbackLocations(Transformer):
+    """Source-location fallback for bare MLIR ops.
 
-    Without this pass, all ops that don't pass an explicit ``loc=`` kwarg
-    fall back to the function definition line (via ``FuncLocationTracker``),
-    causing the Pattern-5 hotspot-mapping artifact where everything aggregates
-    to the ``@flyc.kernel`` decorator line in ATT trace output.
+    Wraps every user statement with ``with _flydsl_loc(__file__, line, col):``
+    so bare MLIR ops emitted during tracing inherit the correct source line.
+
+    Without this pass, ops that don't pass an explicit ``loc=`` kwarg and aren't
+    built by an ``@dsl_loc_tracing`` primitive fall back to ``Location.current``,
+    which during tracing is the kernel ``def`` line. That aggregates every bare
+    op to the ``@flyc.kernel`` decorator line in ATT trace output (the Pattern-5
+    hotspot-mapping artifact).
+
+    This is a *floor*: decorated primitives re-capture a precise line+column
+    call-site chain inside their own ``with`` scope, and ops with an explicit
+    ``loc=`` are unaffected (explicit ``loc=`` beats ``Location.current``).
 
     Recurses into bodies of compound statements (``for``, ``while``, ``if``,
-    ``with``, ``try``) so each inner statement also gets its own location.
-    Skips nested ``FunctionDef`` / ``AsyncFunctionDef`` / ``ClassDef`` (they
-    get their own location-tracking machinery if they're traced).
+    ``with``, ``try``) so each inner statement gets its own location. Skips
+    nested ``FunctionDef`` / ``AsyncFunctionDef`` / ``ClassDef`` and rewriter-
+    generated nodes (``_ASTREWRITE_MARKER``).
 
-    Gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO`` (the same env var that turns
-    on DWARF emission downstream).  When disabled, this transformer is a
-    no-op so production builds don't pay the AST/tracing overhead.
+    Gated by ``FLYDSL_DEBUG_ENABLE_DEBUG_INFO`` (the same env var that turns on
+    DWARF emission downstream); a no-op otherwise so production pays nothing.
+
+    Registered last so it only wraps user statements left after the other
+    rewriters have run.
     """
 
     def __init__(self, context, first_lineno):
         super().__init__(context, first_lineno)
-        # Gate on the same env var as downstream debug-info emission: if
-        # users don't enable debug info, the source mapping won't reach the
-        # ATT trace anyway, so there's no reason to pay the wrapping cost.
         self._enabled = env.debug.enable_debug_info
 
     @staticmethod
-    def rewrite_globals():
-        return {"_flydsl_loc": _flydsl_loc}
+    @contextlib.contextmanager
+    def _flydsl_loc(filename, line, col=0):
+        # Floor location for un-decorated (bare) MLIR ops written directly in a
+        # kernel/jit body. Decorated primitives override this via their own
+        # capture_user_location() scope; ops with an explicit loc= are unaffected.
+        with file_location(filename, line, col):
+            yield
+
+    @classmethod
+    def rewrite_globals(cls):
+        return {"_flydsl_loc": cls._flydsl_loc}
 
     def _abs_line(self, node):
-        # During transformer execution, node.lineno is relative to the
-        # function source (1 = first line).  Convert to absolute file line.
         return self.first_lineno + node.lineno
+
+    @staticmethod
+    def _is_loc_with(stmt):
+        if not isinstance(stmt, ast.With):
+            return False
+        for item in stmt.items:
+            ce = item.context_expr
+            if isinstance(ce, ast.Call) and isinstance(ce.func, ast.Name) and ce.func.id == "_flydsl_loc":
+                return True
+        return False
 
     def _wrap(self, stmt):
         if not self._enabled:
             return stmt
         if not hasattr(stmt, "lineno") or stmt.lineno is None:
             return stmt
-        # Don't wrap nested function/class defs — they're either traced
-        # separately or run as plain Python.
+        # Nested def/class are traced separately or run as plain Python.
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return stmt
-        # Don't double-wrap if it's already a _flydsl_loc with.
-        if isinstance(stmt, ast.With):
-            for item in stmt.items:
-                ce = item.context_expr
-                if isinstance(ce, ast.Call) and isinstance(ce.func, ast.Name) and ce.func.id == "_flydsl_loc":
-                    return stmt
+        # Don't double-wrap an existing _flydsl_loc with.
+        if self._is_loc_with(stmt):
+            return stmt
         with_stmt = ast.With(
             items=[
                 ast.withitem(
@@ -1541,6 +1581,7 @@ class WrapLocations(Transformer):
                         args=[
                             ast.Constant(self.context.filename),
                             ast.Constant(self._abs_line(stmt)),
+                            ast.Constant(getattr(stmt, "col_offset", 0)),
                         ],
                         keywords=[],
                     ),
@@ -1553,8 +1594,6 @@ class WrapLocations(Transformer):
         return ast.copy_location(with_stmt, stmt)
 
     def _wrap_block(self, stmts):
-        # Transform each stmt first (visit recurses into compound bodies),
-        # then wrap with a per-stmt location.
         out = []
         for s in stmts:
             visited = self.visit(s)
@@ -1567,7 +1606,7 @@ class WrapLocations(Transformer):
     def visit_FunctionDef(self, node: ast.FunctionDef):
         if not self._enabled:
             return node
-        if getattr(node, _ASTREWRITE_MARKER, False):
+        if getattr(node, _ASTREWRITE_MARKER, None) is not None:
             return node
         node.body = self._wrap_block(node.body)
         return node
@@ -1576,7 +1615,6 @@ class WrapLocations(Transformer):
         return self.visit_FunctionDef(node)
 
     def visit_For(self, node: ast.For):
-        node.iter = node.iter  # don't recurse into expression nodes
         node.body = self._wrap_block(node.body)
         if node.orelse:
             node.orelse = self._wrap_block(node.orelse)
@@ -1598,6 +1636,10 @@ class WrapLocations(Transformer):
         return node
 
     def visit_With(self, node: ast.With):
+        # Already-wrapped _flydsl_loc blocks are idempotent: don't recurse and
+        # re-wrap their single inner statement.
+        if self._is_loc_with(node):
+            return node
         node.body = self._wrap_block(node.body)
         return node
 

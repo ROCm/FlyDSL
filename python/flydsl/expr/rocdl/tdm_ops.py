@@ -41,6 +41,7 @@ from ..._mlir.dialects import (
 )
 from .. import arith, vector
 from ..arith import _to_raw as _raw
+from ..meta import dsl_loc_tracing
 from ..typing import T
 from ..utils.arith import ArithValue as _ArithValue
 
@@ -198,6 +199,7 @@ def _i32_const(v: int) -> ir.Value:
 # ---------------------------------------------------------------------------
 
 
+@dsl_loc_tracing
 def make_tensor_descriptor_2d(
     global_ptr,
     lds_memref,
@@ -494,6 +496,7 @@ def make_tensor_descriptor_2d(
     return TDMDescriptor2D(dgroup0=dgroup0, dgroup1=dgroup1)
 
 
+@dsl_loc_tracing
 def make_tensor_gather_descriptor(
     global_ptr,
     lds_memref,
@@ -694,6 +697,7 @@ def make_tensor_gather_descriptor(
     )
 
 
+@dsl_loc_tracing
 def make_tensor_gather_dgroup0(
     global_ptr,
     lds_memref,
@@ -739,6 +743,7 @@ def make_tensor_gather_dgroup0(
     return vector.from_elements(T.vec(4, T.i32), [g0_s0, g0_s1, g0_s2, g0_s3])
 
 
+@dsl_loc_tracing
 def tensor_load_gather(
     desc: TDMGatherDescriptor,
     cache_policy: int = 0,
@@ -763,6 +768,7 @@ def tensor_load_gather(
     )
 
 
+@dsl_loc_tracing
 def tensor_store_gather(
     desc: TDMGatherDescriptor,
     cache_policy: int = 0,
@@ -811,6 +817,7 @@ def _replace_dgroup0_addr_lo(dgroup0, new_addr_lo):
     ).result
 
 
+@dsl_loc_tracing
 def update_tensor_descriptor_2d_addr_lo(
     desc: TDMDescriptor2D,
     new_addr_lo,
@@ -851,6 +858,7 @@ def update_tensor_descriptor_2d_addr_lo(
     )
 
 
+@dsl_loc_tracing
 def update_tensor_gather_descriptor_addr_lo(
     desc: TDMGatherDescriptor,
     new_addr_lo,
@@ -913,6 +921,7 @@ _TDM_ADDR_HI_MASK = 0x3FFFFFFF  # bits [29:0]
 _TDM_ADDR_HI_FLAG_MASK = 0xC0000000  # bits [31:30]
 
 
+@dsl_loc_tracing
 def add_addr_with_carry(base_addr_lo, base_addr_hi, delta_i32):
     """Carry-safe ``(base_lo, base_hi) += delta`` for TDM descriptor lanes 2/3.
 
@@ -983,6 +992,7 @@ def _replace_dgroup0_addr_lo_hi(dgroup0, new_addr_lo, new_addr_hi):
     ).result
 
 
+@dsl_loc_tracing
 def update_tensor_descriptor_2d_addr_lo_hi(
     desc: TDMDescriptor2D,
     new_addr_lo,
@@ -1001,6 +1011,7 @@ def update_tensor_descriptor_2d_addr_lo_hi(
     )
 
 
+@dsl_loc_tracing
 def update_tensor_gather_descriptor_addr_lo_hi(
     desc: TDMGatherDescriptor,
     new_addr_lo,
@@ -1015,6 +1026,7 @@ def update_tensor_gather_descriptor_addr_lo_hi(
     )
 
 
+@dsl_loc_tracing
 def update_tensor_descriptor_2d_addr64(
     desc: TDMDescriptor2D,
     base_addr_lo,
@@ -1046,6 +1058,7 @@ def update_tensor_descriptor_2d_addr64(
     return update_tensor_descriptor_2d_addr_lo_hi(desc, new_lo, new_hi)
 
 
+@dsl_loc_tracing
 def update_tensor_gather_descriptor_addr64(
     desc: TDMGatherDescriptor,
     base_addr_lo,
@@ -1069,6 +1082,7 @@ def _zero_dgroup_v8i32():
     return vector.from_elements(T.vec(8, T.i32), [z, z, z, z, z, z, z, z])
 
 
+@dsl_loc_tracing
 def tensor_load_2d(
     desc: TDMDescriptor2D,
     cache_policy: int = 0,
@@ -1092,6 +1106,7 @@ def tensor_load_2d(
     rocdl.tensor_load_to_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
 
 
+@dsl_loc_tracing
 def tensor_store_2d(
     desc: TDMDescriptor2D,
     cache_policy: int = 0,
@@ -1111,6 +1126,7 @@ def tensor_store_2d(
     rocdl.tensor_store_from_lds(_raw(desc.dgroup0), _raw(desc.dgroup1), dg2, dg3, dg4, cache_policy)
 
 
+@dsl_loc_tracing
 def tensor_wait(count: int = 0) -> None:
     """Wait for outstanding TDM tensor operations.
 
@@ -1131,6 +1147,7 @@ PREFETCH_SCOPE_SE = 8  # SE scope = L2 cache
 PREFETCH_SCOPE_DEVICE = 16  # Device scope
 
 
+@dsl_loc_tracing
 def l2_prefetch_tile(
     global_ptr,
     global_offset: Tuple,

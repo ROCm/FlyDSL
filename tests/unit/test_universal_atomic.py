@@ -26,6 +26,7 @@ def reduce_add_kernel(
     A: fx.Tensor,
     Out: fx.Tensor,
     block_dim: fx.Constexpr[int],
+    syncscope: fx.Constexpr[str],
 ):
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
@@ -35,7 +36,10 @@ def reduce_add_kernel(
     tA = fx.logical_divide(tA, fx.make_layout(1, 1))
 
     loadAtom = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
-    atomicAtom = fx.make_copy_atom(fx.UniversalAtomic(fx.AtomicOp.Add, fx.Float32), fx.Float32)
+    atomicAtom = fx.make_copy_atom(
+        fx.UniversalAtomic(fx.AtomicOp.Add, fx.Float32, syncscope=syncscope),
+        fx.Float32,
+    )
 
     rA = fx.make_rmem_tensor(1, fx.Float32)
     fx.copy_atom_call(loadAtom, fx.slice(tA, (None, tid)), rA)
@@ -53,17 +57,28 @@ def reduce_add(
     n: fx.Int32,
     const_n: fx.Constexpr[int],
     block_dim: fx.Constexpr[int],
+    syncscope: fx.Constexpr[str],
     stream: fx.Stream = fx.Stream(None),
 ):
     grid_x = (n + block_dim - 1) // block_dim
-    reduce_add_kernel(A, Out, block_dim).launch(
+    reduce_add_kernel(A, Out, block_dim, syncscope).launch(
         grid=(grid_x, 1, 1),
         block=(block_dim, 1, 1),
         stream=stream,
     )
 
 
-def test_reduce_add_atomic():
+@pytest.mark.parametrize(
+    "syncscope",
+    [
+        fx.SyncScope.System,
+        fx.SyncScope.SingleThread,
+        fx.rocdl.SyncScope.Agent,
+        fx.rocdl.SyncScope.Workgroup,
+        fx.rocdl.SyncScope.Wavefront,
+    ],
+)
+def test_reduce_add_atomic(syncscope):
     BLOCK_DIM = 64
     N = BLOCK_DIM * 4
 
@@ -72,13 +87,13 @@ def test_reduce_add_atomic():
 
     stream = torch.cuda.Stream()
     tA = flyc.from_torch_tensor(a_dev).mark_layout_dynamic(leading_dim=0, divisibility=1)
-    reduce_add(tA, out_dev, N, N, BLOCK_DIM, stream=stream)
+    reduce_add(tA, out_dev, N, N, BLOCK_DIM, syncscope, stream=stream)
     torch.cuda.synchronize()
 
-    expected = a_dev.sum()
+    expected = a_dev.sum().item()
     actual = out_dev.item()
-    print(f"Expected: {expected.item()}, Got: {actual}")
-    assert abs(actual - expected.item()) < 1e-3, f"reduceAdd mismatch: expected {expected.item()}, got {actual}"
+    print(f"[scope={syncscope!r}] Expected: {expected}, Got: {actual}")
+    assert abs(actual - expected) < 1e-3, f"scope={syncscope!r} reduceAdd mismatch: expected {expected}, got {actual}"
 
 
 @flyc.kernel
@@ -142,6 +157,13 @@ def test_reduce_max_atomic():
 
 
 if __name__ == "__main__":
-    test_reduce_add_atomic()
+    for _scope in [
+        fx.SyncScope.System,
+        fx.SyncScope.SingleThread,
+        fx.rocdl.SyncScope.Agent,
+        fx.rocdl.SyncScope.Workgroup,
+        fx.rocdl.SyncScope.Wavefront,
+    ]:
+        test_reduce_add_atomic(_scope)
     test_reduce_max_atomic()
     print("ALL PASSED")

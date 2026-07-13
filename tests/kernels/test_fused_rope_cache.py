@@ -55,7 +55,7 @@ import pytest
 import torch
 
 from flydsl.runtime.device import get_rocm_arch as _get_rocm_arch
-from kernels.fused_rope_cache_kernel import build_fused_rope_cache_module
+from kernels.attention.fused_rope_cache_kernel import build_fused_rope_cache_module
 
 # ---------------------------------------------------------------------------
 # Skip if no GPU

@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from kernels.softmax_kernel import build_softmax_module
+from kernels.norm.softmax_kernel import build_softmax_module
 from tests.kernels.benchmark_common import (
     PerfRow,
     bench_gpu_us_torch,

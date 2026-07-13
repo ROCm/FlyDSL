@@ -53,3 +53,12 @@ def test_jit_accepts_nested_tuple_constexpr_parameter(frontend_only_jit):
         assert shape == (16, (True, 2.5))
 
     build((16, (True, 2.5)))
+
+
+def test_jit_accepts_chained_compare_constexpr(frontend_only_jit):
+    @flyc.jit
+    def build(value: fx.Constexpr[int], upper: fx.Constexpr[int], expected: fx.Constexpr[bool]):
+        assert fx.const_expr(0 < value < upper) == expected
+
+    build(3, 8, True)
+    build(0, 8, False)
