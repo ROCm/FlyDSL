@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-13T17:02:58Z",
+ "updated": "2026-07-13T17:14:57Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "pr/enh-buffer-rsrc-utils",
    "event": "pull_request",
    "title": "[Enh] Add rocdl.buffer_rsrc utilities: make_buffer_ptr & get_buffer_rsrc",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29266316461",
    "created_at": "2026-07-13T16:24:58Z",
-   "updated_at": "2026-07-13T16:24:59Z",
+   "updated_at": "2026-07-13T17:13:33Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-13T17:13:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29266316461/job/86883629259"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-13T17:13:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29266316461/job/86883629313"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-13T17:13:38Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29266316461/job/86883629325"
+    }
+   ]
   },
   {
    "run_id": 29265060242,
@@ -25,11 +53,11 @@
    "branch": "pr/enh-buffer-rsrc-utils",
    "event": "pull_request",
    "title": "[Enh] Add rocdl.buffer_rsrc utilities: make_buffer_ptr & get_buffer_rsrc",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29265060242",
    "created_at": "2026-07-13T16:06:44Z",
-   "updated_at": "2026-07-13T16:09:28Z",
+   "updated_at": "2026-07-13T17:12:21Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -44,10 +72,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-13T16:09:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-13T17:12:20Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29265060242/job/86868208648"
     },
     {
