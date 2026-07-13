@@ -19,8 +19,8 @@ from flydsl.expr import arith as _arith
 from flydsl.expr.typing import T
 
 
-def crd2idx(crd, layout):
-    """crd2idx returning an index-typed ir.Value (unwraps fly.int_tuple)."""
+def preshuffle_crd2idx(crd, layout):
+    """preshuffle_crd2idx returning an index-typed ir.Value (unwraps fly.int_tuple)."""
     scalar = fx.get_scalar(fx.crd2idx(crd, layout)).ir_value()
     if isinstance(scalar.type, ir.IndexType):
         return scalar
@@ -314,7 +314,7 @@ def load_b_raw_w4a16(
     k2_base = lane_odd * fx.Index(half_bytes)
 
     coord_pack = (n_blk, k0, k1_local, n_intra, fx.Index(0))
-    idx_pack = crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
+    idx_pack = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
     idx_bytes = idx_pack + k2_base
 
     b4 = _buffer_load_vec(
@@ -447,7 +447,7 @@ def load_b_pack_k32(
     k2_base = arith.constant((ki_step % 2) * half_bytes, index=True)
 
     coord_pack = (n_blk, k0, k1, n_intra, fx.Index(0))
-    idx_pack = crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
+    idx_pack = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
 
     if unpack_int4:
         idx_bytes = idx_pack + k2_base
@@ -553,7 +553,7 @@ def _lds_store_xor16(
         raise ValueError(f"elem_bytes must be 1 or 2, got {elem_bytes!r}")
     col_swz_bytes = swizzle_xor16(row_local, col_local_i32 * tx_c4, k_blocks16)
     col_swz = col_swz_bytes if elem_bytes == 1 else col_swz_bytes // 2
-    idx0 = crd2idx((fx.Int32(row_local), fx.Int32(col_swz)), layout_lds) + lds_base
+    idx0 = preshuffle_crd2idx((fx.Int32(row_local), fx.Int32(col_swz)), layout_lds) + lds_base
     vector.store(vector.bitcast(vec_ty, vec_part), lds_memref, [idx0])
 
 
@@ -671,14 +671,14 @@ def lds_load_pack_k32(
     col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
     if ck_lds128:
         coord_a16 = (curr_row_a_lds, col_base_swz)
-        idx_a16 = crd2idx(tuple(fx.Int32(c) for c in coord_a16), layout_lds) + lds_base
+        idx_a16 = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_a16), layout_lds) + lds_base
         loaded_a16 = vector.load_op(vec16_ty, lds_memref, [idx_a16])
         a_vec128 = vector.bitcast(vec2_i64_ty, loaded_a16)
         return vector.extract(a_vec128, static_position=[half], dynamic_position=[])
     else:
         col_swizzled = col_base_swz + (half * 8)
         coord_a = (curr_row_a_lds, col_swizzled)
-        idx_a = crd2idx(tuple(fx.Int32(c) for c in coord_a), layout_lds) + lds_base
+        idx_a = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_a), layout_lds) + lds_base
         loaded_a8 = vector.load_op(vec8_ty, lds_memref, [idx_a])
         a_vec64 = vector.bitcast(vec1_i64_ty, loaded_a8)
         return vector.extract(a_vec64, static_position=[0], dynamic_position=[])

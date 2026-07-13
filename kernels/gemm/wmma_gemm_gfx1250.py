@@ -12,7 +12,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_const
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.gemm_common_gfx1250 import (
@@ -143,7 +143,7 @@ def compile_wmma_gemm_tdm(
             f"got {num_k_tiles} (K={K}, tile_k={tile_k})"
         )
 
-    gpu_arch = str(get_hip_arch())
+    gpu_arch = str(get_rocm_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
 
     wmma_op = rocdl.wmma_f32_16x16x32_f16 if is_f16 else rocdl.wmma_f32_16x16x32_bf16

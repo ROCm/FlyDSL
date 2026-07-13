@@ -34,7 +34,7 @@ from flydsl.expr import rocdl as fly_rocdl
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import get_warp_size
 from kernels.moe.topk_gating_softmax_kernel import (
@@ -232,7 +232,7 @@ def _compile_moe_sorting_oneshot(
     unit_size : int
         GEMM tile-M for padding alignment (default 32).
     """
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     E = num_experts
     # CDNA (warp64): 512 threads = 8 waves, affordable cross-wave reduction.
     max_oneshot_block = 512 if WARP_SIZE == 64 else 256
@@ -748,7 +748,7 @@ def compile_moe_sorting_oneshot_fused(
         dtype_str   — input dtype for the gating logits (``f32`` / ``f16`` / ``bf16``)
         renormalize — whether the top-K weights are renormalised to sum to 1
     """
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     E = num_experts
     smem_cols = E + 1
 
@@ -1257,7 +1257,7 @@ def _compile_moe_sorting_multiphase(
     unit_size : int
         GEMM tile-M for padding alignment (default 32).
     """
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     E = num_experts
 
     @flyc.jit
@@ -2085,7 +2085,7 @@ def _compute_sub_tokens(num_experts, arch=None):
     Same formula as _compile_moe_sorting_oneshot.
     """
     if arch is None:
-        arch = get_hip_arch()
+        arch = get_rocm_arch()
     E = num_experts
     smem_cols = E + 1
     if arch in ("gfx942",) or str(arch).startswith("gfx94"):
