@@ -11,6 +11,7 @@ conversion) inputs.
 
 import functools
 
+from kernels.common.tensor_shim import lds_load_vec
 from kernels.moe.moe_gemm_2stage import (
     MoeGemm2Mode,
     compile_moe_reduction,
@@ -186,10 +187,6 @@ def _compile_stage1_wmma_kernel_impl(
             byte_addr = base_bytes + arith.ArithValue(arith.unwrap(elem_off, index=True)) * arith.index(elem_bytes)
             return buffer_ops.create_llvm_ptr(byte_addr, address_space=3)
 
-        def _lds_load_a_v8(elem_off):
-            it = fx.recast_iter(fx.Float16, fx.add_offset(a_lds_ptr, fx.Int32(elem_off)))
-            return fx.make_view(it, fx.make_layout(8, 1)).load()
-
         def _lds_tr_load_v8(base_bytes, elem_off):
             return rocdl.ds_load_tr16_b128(vec8_ty, _lds_byte_ptr(base_bytes, elem_off))
 
@@ -290,8 +287,8 @@ def _compile_stage1_wmma_kernel_impl(
         def load_a_frag(a_base, ks):
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = _lds_load_a_v8(off0)
-            v1 = _lds_load_a_v8(off1)
+            v0 = lds_load_vec(a_lds_ptr, off0, fx.Float16, 8)
+            v1 = lds_load_vec(a_lds_ptr, off1, fx.Float16, 8)
             return v0.shuffle(v1, list(range(16)))
 
         def load_b_frag(b_lds_base, b_base, ks):
@@ -597,10 +594,6 @@ def _compile_stage2_wmma_kernel_impl(
             byte_addr = base_bytes + arith.ArithValue(arith.unwrap(elem_off, index=True)) * arith.index(elem_bytes)
             return buffer_ops.create_llvm_ptr(byte_addr, address_space=3)
 
-        def _lds_load_a_v8(elem_off):
-            it = fx.recast_iter(fx.Float16, fx.add_offset(a_lds_ptr, fx.Int32(elem_off)))
-            return fx.make_view(it, fx.make_layout(8, 1)).load()
-
         def _lds_tr_load_v8(base_bytes, elem_off):
             return rocdl.ds_load_tr16_b128(vec8_ty, _lds_byte_ptr(base_bytes, elem_off))
 
@@ -699,8 +692,8 @@ def _compile_stage2_wmma_kernel_impl(
         def load_a_frag(a_base, ks):
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = _lds_load_a_v8(off0)
-            v1 = _lds_load_a_v8(off1)
+            v0 = lds_load_vec(a_lds_ptr, off0, fx.Float16, 8)
+            v1 = lds_load_vec(a_lds_ptr, off1, fx.Float16, 8)
             return v0.shuffle(v1, list(range(16)))
 
         def load_b_frag(b_base, ks):

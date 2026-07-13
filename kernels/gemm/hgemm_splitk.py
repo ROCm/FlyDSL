@@ -15,7 +15,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import get_llvm_ptr
-from kernels.common.tensor_shim import GTensor, _run_compiled, get_dtype_in_kernel
+from kernels.common.tensor_shim import GTensor, _run_compiled, get_dtype_in_kernel, lds_load_vec, lds_store_vec
 from kernels.gemm.splitk_hgemm import swizzle_xor16
 
 fm_fast = arith.FastMathFlags.fast
@@ -245,17 +245,6 @@ def compile_hgemm_kernel(
         def cs_off(kw, row, col):
             return (fx.Index(kw) * BLOCK_M + row) * BLOCK_N + col
 
-        def lds_vec_load(elem_off, vec_size):
-            it = fx.recast_iter(elem_cls, fx.add_offset(smem_ptr, fx.Int32(elem_off)))
-            return fx.make_view(it, fx.make_layout(vec_size, 1)).load().ir_value()
-
-        def lds_vec_store(elem_off, value):
-            it = fx.recast_iter(elem_cls, fx.add_offset(smem_ptr, fx.Int32(elem_off)))
-            fx.make_view(it, fx.make_layout(LDG_VEC_SIZE, 1)).store(fx.Vector(value))
-
-        def lds_scalar_store(elem_off, value):
-            fx.memref_store(value, smem_view, fx.Int32(elem_off))
-
         if const_expr(IS_SPLIT_K):
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))
             signal_ = GTensor(signal, dtype=T.i32, shape=(-1,))
@@ -413,7 +402,7 @@ def compile_hgemm_kernel(
                 k_local_idx = global_tid % LDG_A_X_THREADS * LDG_VEC_SIZE
                 col_in_bytes = k_local_idx * DTYPE_BYTES
                 col_in_bytes = swizzle_xor16(m_local_idx, col_in_bytes, k_blocks16)
-                lds_vec_store(as_off(lds_stage, m_local_idx, col_in_bytes // DTYPE_BYTES), vecs[i])
+                lds_store_vec(smem_ptr, as_off(lds_stage, m_local_idx, col_in_bytes // DTYPE_BYTES), fx.Vector(vecs[i]))
 
         def get_dma_copy_warp_offset():
             warp_offset = rocdl.readfirstlane(
@@ -519,9 +508,12 @@ def compile_hgemm_kernel(
                         row = warp_atom_n_idx + ldmatrix_b_n_idx
                         col_in_bytes = (warp_atom_k_idx + ldmatrix_b_k_vec_idx) * DTYPE_BYTES
                         col_in_bytes = swizzle_xor16(row, col_in_bytes, k_blocks16)
-                        vec = lds_vec_load(
-                            bs_off(s, row, col_in_bytes // DTYPE_BYTES), WMMA_B_FRAG_VALUES * MFMA_PER_WARP_K
-                        )
+                        vec = lds_load_vec(
+                            smem_ptr,
+                            bs_off(s, row, col_in_bytes // DTYPE_BYTES),
+                            elem_cls,
+                            WMMA_B_FRAG_VALUES * MFMA_PER_WARP_K,
+                        ).ir_value()
                         b_frags[ii] = vec
                 else:
                     b_frags = [initial_b_frags[i] for i in range_constexpr(kk * WARP_N_STEPS, (kk + 1) * WARP_N_STEPS)]
@@ -531,9 +523,12 @@ def compile_hgemm_kernel(
                     row = warp_atom_m_idx + ldmatrix_a_m_idx
                     col_in_bytes = (warp_atom_k_idx + ldmatrix_a_k_vec_idx) * DTYPE_BYTES
                     col_in_bytes = swizzle_xor16(row, col_in_bytes, k_blocks16)
-                    vec = lds_vec_load(
-                        as_off(s, row, col_in_bytes // DTYPE_BYTES), WMMA_A_FRAG_VALUES * MFMA_PER_WARP_K
-                    )
+                    vec = lds_load_vec(
+                        smem_ptr,
+                        as_off(s, row, col_in_bytes // DTYPE_BYTES),
+                        elem_cls,
+                        WMMA_A_FRAG_VALUES * MFMA_PER_WARP_K,
+                    ).ir_value()
                     a_frags[ii] = vec
                 rocdl.sched_barrier(0)
                 for ii in range_constexpr(WARP_M_STEPS):
@@ -674,9 +669,9 @@ def compile_hgemm_kernel(
                     val = vector.extract(c_frags[ii * WARP_N_STEPS + jj], static_position=[kk], dynamic_position=[])
                     val = val.truncf(dtype_)
                     if const_expr(IS_SLICE_K):
-                        lds_scalar_store(cs_off(wid_k, lds_m_idx, lds_n_idx), val)
+                        fx.memref_store(val, smem_view, fx.Int32(cs_off(wid_k, lds_m_idx, lds_n_idx)))
                     else:
-                        lds_scalar_store(cs_off(0, lds_m_idx, lds_n_idx), val)
+                        fx.memref_store(val, smem_view, fx.Int32(cs_off(0, lds_m_idx, lds_n_idx)))
 
         # write back to global
         if const_expr(IS_SPLIT_K):
@@ -690,9 +685,13 @@ def compile_hgemm_kernel(
                 cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
-                    pk_val = lds_vec_load(cs_off(0, m_local_idx, n_local_idx), LDG_VEC_SIZE)
+                    pk_val = lds_load_vec(
+                        smem_ptr, cs_off(0, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE
+                    ).ir_value()
                     for ksi in range_constexpr(1, BLOCK_K_WARPS):
-                        pk_val += lds_vec_load(cs_off(ksi, m_local_idx, n_local_idx), LDG_VEC_SIZE)
+                        pk_val += lds_load_vec(
+                            smem_ptr, cs_off(ksi, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE
+                        ).ir_value()
                     linear_offset_c = C_.linear_offset((m_global_idx, n_global_idx))
                     # split to vec2s
                     vec2_ty = T.vec(2, dtype_)
@@ -721,9 +720,11 @@ def compile_hgemm_kernel(
                 cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
-                    vec = lds_vec_load(cs_off(0, m_local_idx, n_local_idx), LDG_VEC_SIZE)
+                    vec = lds_load_vec(smem_ptr, cs_off(0, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE).ir_value()
                     for ksi in range_constexpr(1, BLOCK_K_WARPS):
-                        vec += lds_vec_load(cs_off(ksi, m_local_idx, n_local_idx), LDG_VEC_SIZE)
+                        vec += lds_load_vec(
+                            smem_ptr, cs_off(ksi, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE
+                        ).ir_value()
                     if const_expr(HAS_BIAS):
                         bias_vec = BIAS_.vec_load((n_offset + n_local_idx,), LDG_VEC_SIZE)
                         vec = vec + bias_vec

@@ -20,7 +20,7 @@ from flydsl.expr import (
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import get_llvm_ptr
-from kernels.common.tensor_shim import GTensor, get_dtype_in_kernel
+from kernels.common.tensor_shim import GTensor, get_dtype_in_kernel, lds_vec_view
 
 SPLIT_K_SEMAPHORE_MAX_LEN = 256
 
@@ -247,34 +247,29 @@ def compile_hgemm_kernel(
             off_i64 = arith.index_cast(T.i64, fx.Index(elem_off) * fx.Index(DTYPE_BYTES))
             return buffer_ops.create_llvm_ptr(base_i64 + fx.Int64(off_i64), address_space=3)
 
-        def _lds_vec_view(base_ptr, elem_off, vec_size):
-            it = fx.recast_iter(fx_dtype, fx.add_offset(base_ptr, fx.Int32(elem_off)))
-            return fx.make_view(it, fx.make_layout(vec_size, 1))
-
         def as_store(stage, row, col, value):
             elem_off = fx.Index(stage) * (BLOCK_M * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            _lds_vec_view(a_lds_ptr, elem_off, LDG_VEC_SIZE).store(value)
+            lds_vec_view(a_lds_ptr, elem_off, fx_dtype, LDG_VEC_SIZE).store(value)
 
         def as_load(stage, row, col, vec_size):
             elem_off = fx.Index(stage) * (BLOCK_M * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            return _lds_vec_view(a_lds_ptr, elem_off, vec_size).load()
+            return lds_vec_view(a_lds_ptr, elem_off, fx_dtype, vec_size).load()
 
         def bs_store(stage, row, col, value):
             elem_off = fx.Index(stage) * (BLOCK_N * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            _lds_vec_view(b_lds_ptr, elem_off, LDG_VEC_SIZE).store(value)
+            lds_vec_view(b_lds_ptr, elem_off, fx_dtype, LDG_VEC_SIZE).store(value)
 
         def bs_load(stage, row, col, vec_size):
             elem_off = fx.Index(stage) * (BLOCK_N * BLOCK_K) + fx.Index(row) * BLOCK_K + fx.Index(col)
-            return _lds_vec_view(b_lds_ptr, elem_off, vec_size).load()
+            return lds_vec_view(b_lds_ptr, elem_off, fx_dtype, vec_size).load()
 
         def cs_store_scalar(row, col, value):
             elem_off = fx.Index(row) * BLOCK_N + fx.Index(col)
-            it = fx.recast_iter(fx_dtype, fx.add_offset(a_lds_ptr, fx.Int32(elem_off)))
-            fx.memref_store(value, fx.make_view(it, fx.make_layout(1, 1)), 0)
+            fx.memref_store(value, lds_vec_view(a_lds_ptr, elem_off, fx_dtype, 1), 0)
 
         def cs_load_vec(row, col, vec_size):
             elem_off = fx.Index(row) * BLOCK_N + fx.Index(col)
-            return _lds_vec_view(a_lds_ptr, elem_off, vec_size).load()
+            return lds_vec_view(a_lds_ptr, elem_off, fx_dtype, vec_size).load()
 
         if const_expr(IS_SPLIT_K):
             bc_view = fx.make_view(fx.recast_iter(fx.Int32, a_lds_ptr), fx.make_layout(1, 1))

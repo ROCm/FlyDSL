@@ -25,6 +25,7 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from kernels.common.tensor_shim import lds_load_vec, lds_store_vec
 
 WMMA_M = 16
 WMMA_N = 16
@@ -97,15 +98,6 @@ def create_wmma_gemm_module(
         arg_bt: fx.Tensor,
     ):
         lds = fx.SharedAllocator(static=False).allocate(fx.Array[lds_elem_dtype, LDS_TOTAL, 16]).peek()
-        lds_iter = fx.recast_iter(lds_elem_dtype, lds.ptr)
-
-        def _lds_store_vec8(elem_off, value):
-            it = fx.add_offset(lds_iter, fx.Int32(elem_off))
-            fx.make_view(it, fx.make_layout(LOAD_VEC, 1)).store(value)
-
-        def _lds_load_vec8(elem_off):
-            it = fx.add_offset(lds_iter, fx.Int32(elem_off))
-            return fx.make_view(it, fx.make_layout(LOAD_VEC, 1)).load()
 
         tid = gpu.thread_id("x")
         pid = gpu.block_id("x")
@@ -192,13 +184,13 @@ def create_wmma_gemm_module(
                 _, _, lds_rel = a_lds_info[al]
                 a_vec = raw_data[al].bitcast(fx.BFloat16 if is_bf16 else fx.Float16)
                 lds_idx = buf_offset + lds_rel
-                _lds_store_vec8(lds_idx, a_vec)
+                lds_store_vec(lds.ptr, lds_idx, a_vec)
 
             for bl in range_constexpr(NUM_B_LOADS):
                 _, _, lds_rel = b_lds_info[bl]
                 b_vec = raw_data[NUM_A_LOADS + bl].bitcast(fx.BFloat16 if is_bf16 else fx.Float16)
                 lds_idx = buf_offset + lds_rel
-                _lds_store_vec8(lds_idx, b_vec)
+                lds_store_vec(lds.ptr, lds_idx, b_vec)
 
         # ============================================================
         # LDS read helpers -- row-major with K-padding
@@ -210,7 +202,7 @@ def create_wmma_gemm_module(
             for rm in range_constexpr(reg_m):
                 row = wave_m * (reg_m * WMMA_M) + 16 * rm + lane16
                 lds_idx = buf_offset + row * BLOCK_K_PAD_A + col_base
-                a_raw = _lds_load_vec8(lds_idx)
+                a_raw = lds_load_vec(lds.ptr, lds_idx, lds_elem_dtype, LOAD_VEC)
                 vecs.append(a_raw)
             return vecs
 
@@ -221,7 +213,7 @@ def create_wmma_gemm_module(
             for rn in range_constexpr(reg_n):
                 row = wave_n * (reg_n * WMMA_N) + 16 * rn + lane16
                 lds_idx = buf_offset + LDS_A_SIZE + row * BLOCK_K_PAD_B + col_base
-                b_raw = _lds_load_vec8(lds_idx)
+                b_raw = lds_load_vec(lds.ptr, lds_idx, lds_elem_dtype, LOAD_VEC)
                 vecs.append(b_raw)
             return vecs
 
@@ -260,7 +252,7 @@ def create_wmma_gemm_module(
             col_base = 16 * rk + base8
             row = wave_m * (reg_m * WMMA_M) + 16 * rm_val + lane16
             lds_idx = buf_offset + row * BLOCK_K_PAD_A + col_base
-            return _lds_load_vec8(lds_idx)
+            return lds_load_vec(lds.ptr, lds_idx, lds_elem_dtype, LOAD_VEC)
 
         # ============================================================
         # Initialize accumulators -- 4x4 = 16 accumulators
