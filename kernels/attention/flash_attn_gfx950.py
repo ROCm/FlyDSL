@@ -21,6 +21,7 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm
 from flydsl._mlir.dialects import scf as _scf
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
+from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
@@ -31,14 +32,25 @@ from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.dualwave_common import (
     _LOG2E,
+    _anchor_scalar_f32,
+    _attn_mask_vec2_imm,
+    _bitcast_f32,
+    _bitcast_i32,
+    _concat_vectors,
     _ds_read_tr16_b64_imm,
+    _dualwave_lds_alias_scopes,
+    _dualwave_lds_noalias_scopes,
+    _dualwave_lds_scope,
     _extract_aligned_pointer,
-    _lds_alias_scope_array,
     _read_exec_i64,
+    _reduction_pair,
+    _scale_sched_pairs,
+    _stagger_extra_barrier_if_zero,
     _waitcnt_vm_n,
-    dualwave_splitk_workspace_elems,  # noqa: F401  (re-exported for flash_attn_interface)
 )
 from kernels.common.kernels_common import _if_then, dtype_to_elem_type
+
+scf_if_dispatch = ReplaceIfWithDispatch.scf_if_dispatch
 
 
 def build_flash_attn_dualwave_swp_module(
@@ -246,15 +258,6 @@ def build_flash_attn_dualwave_swp_module(
             lds_bt_base_ptr = buffer_ops.create_llvm_ptr(lds_bt_base_idx, address_space=3)
 
         lds_scope_names = ("lds_k0", "lds_k1", "lds_v0", "lds_v1")
-
-        def _lds_scope(kind, buf_id):
-            return f"lds_{kind}{buf_id}"
-
-        def _lds_alias_scopes(name):
-            return _lds_alias_scope_array([name])
-
-        def _lds_noalias_scopes(name):
-            return _lds_alias_scope_array([scope_name for scope_name in lds_scope_names if scope_name != name])
 
         h_idx = fx.Index(gpu.block_idx.x)
         q_block_idx = fx.Index(gpu.block_idx.y)
@@ -623,20 +626,17 @@ def build_flash_attn_dualwave_swp_module(
 
         def _sched_barrier_pairs(pairs, valu_cnt, group):
             """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups."""
-            pairs = _scale_sched_pairs(pairs)
+            pairs = _scale_sched_pairs(pairs, HEAD_DIM)
             for _ in range_constexpr(pairs):
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_VALU_MASK, valu_cnt, group)
 
         def _sched_barrier_exp_pairs(pairs, exp_cnt, group):
             """Emit `pairs` × {1 MFMA + exp_cnt EXP} sched_group_barrier groups."""
-            pairs = _scale_sched_pairs(pairs)
+            pairs = _scale_sched_pairs(pairs, HEAD_DIM)
             for _ in range_constexpr(pairs):
                 rocdl.sched_group_barrier(_MFMA_MASK, 1, group)
                 rocdl.sched_group_barrier(_EXP_MASK, exp_cnt, group)
-
-        def _scale_sched_pairs(pairs):
-            return max(1, (pairs + 1) // 2) if HEAD_DIM == 64 else pairs
 
         def _ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes):
             byte_offset = lds_base_elem_idx * 2 + lds_kv_base_idx
@@ -646,14 +646,6 @@ def build_flash_attn_dualwave_swp_module(
         def _global_idx_q(token_idx, col):
             # All paths fold q_tok_base into the O descriptor base, so index 0-based here.
             return token_idx * stride_q_n_v + q_head_idx * HEAD_DIM + col
-
-        def _concat_vectors(lhs, rhs):
-            lhs_vec = Vec(lhs)
-            rhs_vec = Vec(rhs)
-            return lhs_vec.shuffle(
-                rhs_vec,
-                list(range(lhs_vec.numel)) + [lhs_vec.numel + i for i in range(rhs_vec.numel)],
-            )
 
         def _load_q_all(q_row_in_block):
             q_raw_packs = []
@@ -710,52 +702,6 @@ def build_flash_attn_dualwave_swp_module(
             ).ir_value()
 
         debug_counts_rsrc = _make_raw_buffer_rsrc(DebugCounts) if DUALWAVE_SWP_DEBUG_LAZY_COUNTS else None
-
-        def _bitcast_i32(value):
-            return _raw(ArithValue(value).bitcast(fx.Int32.ir_type))
-
-        def _bitcast_f32(value):
-            return _raw(ArithValue(value).bitcast(fx.Float32.ir_type))
-
-        def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
-            """DUALWAVE_SWP pair mask asm: 2 compares followed by 2 cndmasks."""
-            asm_str = (
-                f"v_cmp_lt_i32_e64 $0, $6, {int(thr_x)}\n\t"
-                f"v_cmp_lt_i32_e64 $1, $6, {int(thr_y)}\n\t"
-                "v_cndmask_b32_e64 $2, $4, $7, $0\n\t"
-                "v_cndmask_b32_e64 $3, $5, $7, $1"
-            )
-            ret_struct_ty = ir.Type.parse("!llvm.struct<(i64, i64, i32, i32)>")
-            ret = llvm.inline_asm(
-                ret_struct_ty,
-                [
-                    _raw(x_ref_i32),
-                    _raw(y_ref_i32),
-                    _raw(rel_i32),
-                    _raw(neg_inf_i32),
-                ],
-                asm_str,
-                "=s,=s,=v,=v,2,3,v,v,~{vcc}",
-                has_side_effects=True,
-            )
-            return llvm.extractvalue(T.i32, ret, [2]), llvm.extractvalue(T.i32, ret, [3])
-
-        def _anchor_pair(v_s):
-            lo, hi = v_s
-            lo_ir = _raw(lo)
-            hi_ir = _raw(hi)
-            ret_ty = ir.Type.parse("!llvm.struct<(vector<16xf32>, vector<16xf32>)>")
-            ret = llvm.inline_asm(
-                ret_ty,
-                [lo_ir, hi_ir],
-                "",
-                "=v,=v,0,1",
-                has_side_effects=True,
-            )
-            return (
-                llvm.extractvalue(lo_ir.type, ret, [0]),
-                llvm.extractvalue(hi_ir.type, ret, [1]),
-            )
 
         def _anchor_v_p(v_p):
             p_lo, p_hi = v_p
@@ -818,16 +764,6 @@ def build_flash_attn_dualwave_swp_module(
             if fx.Int32(_stagger_i32) != fx.Int32(0):
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
-
-        def _stagger_extra_barrier_if_zero():
-            """Emit `s_barrier;` only when stagger == 0."""
-            llvm.inline_asm(
-                ir.Type.parse("!llvm.void"),
-                [_stagger_i32],
-                ("s_cmp_eq_u32 $0, 0\n\ts_cbranch_scc0 1f\n\ts_barrier\n\t1:"),
-                "s",
-                has_side_effects=True,
-            )
 
         def _bf16_trunc_pack_v8(f32_vals):
             if const_expr(dtype_str == "bf16"):
@@ -953,14 +889,6 @@ def build_flash_attn_dualwave_swp_module(
                     src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
                     _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset)
 
-        def _reduction_pair(v_f32):
-            v_i32 = _bitcast_i32(v_f32)
-            pair_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
-            swapped = rocdl.permlane32_swap(pair_ty, v_i32, v_i32, False, True)
-            lhs_i32 = llvm.extractvalue(T.i32, swapped, [0])
-            rhs_i32 = llvm.extractvalue(T.i32, swapped, [1])
-            return _bitcast_f32(lhs_i32), _bitcast_f32(rhs_i32)
-
         def _async_load_k_from_lds_to_vgpr(buf_id, urk_base):
             """Read all 16 K MFMA packs from LDS buffer `buf_id` (DUALWAVE_SWP u_rk)."""
             k_base = _k_buf_base(buf_id)
@@ -968,15 +896,15 @@ def build_flash_attn_dualwave_swp_module(
             k_hi = [None] * K_STEPS_QK
 
             def _load_k_pack_aligned(elem_idx):
-                scope_name = _lds_scope("k", buf_id)
+                scope_name = _dualwave_lds_scope("k", buf_id)
                 byte_offset = elem_idx * BF16_BYTES
                 ptr = buffer_ops.get_element_ptr(lds_kv_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
                 return llvm.LoadOp(
                     mfma_pack_type,
                     ptr,
                     alignment=16,
-                    alias_scopes=_lds_alias_scopes(scope_name),
-                    noalias_scopes=_lds_noalias_scopes(scope_name),
+                    alias_scopes=_dualwave_lds_alias_scopes(scope_name),
+                    noalias_scopes=_dualwave_lds_noalias_scopes(scope_name, lds_scope_names),
                 ).result
 
             if const_expr(KV_VECTORIZED):
@@ -1314,17 +1242,6 @@ def build_flash_attn_dualwave_swp_module(
                         _debug_atomic_inc_lazy_count(0)
                     else:
                         _debug_atomic_inc_lazy_count(4)
-
-        def _anchor_scalar_f32(x):
-            """Pin a scalar f32 at the current source position (no-op asm)."""
-            x_ir = _raw(x)
-            return llvm.inline_asm(
-                x_ir.type,
-                [x_ir],
-                "",
-                "=v,0",
-                has_side_effects=True,
-            )
 
         def _rescale_o(v_o, m_row, l_row, m_tile_max, v_p):
             m_new = _fmax(m_row, m_tile_max)
@@ -1986,7 +1903,7 @@ def build_flash_attn_dualwave_swp_module(
 
             # Close the phase shift with the complementary group-A barrier before store.
             if const_expr(DUALWAVE_SWP_ENABLE_STAGGER):
-                _stagger_extra_barrier_if_zero()  # group A: +1 s_barrier -> close the shift
+                _stagger_extra_barrier_if_zero(_stagger_i32)  # group A: +1 s_barrier -> close the shift
             else:
                 rocdl.s_barrier()
 
