@@ -29,7 +29,10 @@ from kernels.mma.mfma_preshuffle_pipeline import (
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
-from kernels.moe.mixed_moe_gemm_2stage._common import _get_cu_num
+from kernels.moe.mixed_moe_gemm_2stage.common import _get_cu_num
+from kernels.moe.moe_common import (
+    i64x4_to_i32x8 as pack_i64x4_to_i32x8,
+)
 
 
 @functools.lru_cache(maxsize=None)
@@ -1010,12 +1013,6 @@ def compile_mixed_moe_gemm2(
                         epilogue_pf = (None, tw_pf, bias)
 
                     c0_i64 = arith.constant(0, type=T.i64)
-                    vec4_i64 = T.vec(4, T.i64)
-                    vec8_i32 = T.vec(8, T.i32)
-
-                    def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                        v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                        return vector.bitcast(vec8_i32, v4)
 
                     # fp4 path -- single k_idx loop [0, k_unroll).
                     # b_hi load is issued at the very start so all k_unroll

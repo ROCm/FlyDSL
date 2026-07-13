@@ -30,6 +30,12 @@ from kernels.mma.mfma_preshuffle_pipeline import (
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
+from kernels.moe.moe_common import (
+    i64_to_v4f16 as _i64_to_v4f16,
+)
+from kernels.moe.moe_common import (
+    i64x4_to_i32x8 as _pack128,
+)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -670,10 +676,6 @@ def compile_moe_blockscale_gemm1(
 
                 if const_expr(_is_gfx950):
 
-                    def _pack128(x0, x1, x2, x3):
-                        v4 = vector.from_elements(T.vec(4, T.i64), [x0, x1, x2, x3])
-                        return vector.bitcast(T.vec(8, T.i32), v4)
-
                     for sb in range_constexpr(sb_per_tile_s1):
                         s_a_vec4_list, s_w_gate_vals, s_w_up_vals = pre_scales[sb]
                         ku0 = sb * ku_per_sb_s1
@@ -738,10 +740,6 @@ def compile_moe_blockscale_gemm1(
                         if const_expr(is_int8)
                         else (rocdl.mfma_f32_16x16x16f16 if is_f16 else rocdl.mfma_f32_16x16x32_fp8_fp8)
                     )
-
-                    def _i64_to_v4f16(x_i64):
-                        v1 = vector.from_elements(T.vec(1, T.i64), [x_i64])
-                        return vector.bitcast(T.f16x4, v1)
 
                     def mfma_k64(acc_in, a0, a1, b0, b1):
                         if const_expr(is_f16):
@@ -829,10 +827,6 @@ def compile_moe_blockscale_gemm1(
                             else buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=T.f32)
                         )
                     epilogue_pf = (sw_gate_pf, sw_up_pf)
-
-                def _i64_to_v4f16(x_i64):
-                    v1 = vector.from_elements(T.vec(1, T.i64), [x_i64])
-                    return vector.bitcast(T.f16x4, v1)
 
                 def mfma_k64(acc_in, a0, a1, b0, b1):
                     if const_expr(is_f16):

@@ -6,14 +6,14 @@
 Split from the former monolithic ``moe_gemm_2stage.py``; public API unchanged.
 """
 
-from kernels.moe.moe_gemm_2stage._gemm1 import compile_moe_gemm1
-from kernels.moe.moe_gemm_2stage._gemm2 import (
+from kernels.moe.moe_gemm_2stage.gemm1 import compile_moe_gemm1
+from kernels.moe.moe_gemm_2stage.gemm2 import (
     MoeGemm2Mode,
     _MoeGemm2ReduceWrapper,
     compile_moe_gemm2,
     compile_moe_gemm2_ex,
 )
-from kernels.moe.moe_gemm_2stage._reduction import compile_moe_reduction
+from kernels.moe.moe_gemm_2stage.reduction import compile_moe_reduction
 
 __all__ = [
     "MoeGemm2Mode",

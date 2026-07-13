@@ -6,8 +6,8 @@
 Split from the former monolith; public API unchanged.
 """
 
-from kernels.moe.mixed_moe_gemm_2stage._gemm1 import compile_mixed_moe_gemm1
-from kernels.moe.mixed_moe_gemm_2stage._gemm2 import compile_mixed_moe_gemm2
+from kernels.moe.mixed_moe_gemm_2stage.gemm1 import compile_mixed_moe_gemm1
+from kernels.moe.mixed_moe_gemm_2stage.gemm2 import compile_mixed_moe_gemm2
 
 __all__ = [
     "compile_mixed_moe_gemm1",

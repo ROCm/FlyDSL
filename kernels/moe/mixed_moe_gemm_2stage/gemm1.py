@@ -28,10 +28,16 @@ from kernels.mma.mfma_preshuffle_pipeline import (
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
-from kernels.moe.mixed_moe_gemm_2stage._common import _barrier
+from kernels.moe.mixed_moe_gemm_2stage.common import _barrier
 from kernels.moe.moe_common import (
     GateMode,
 )  # noqa: F401  re-exported for back-compat
+from kernels.moe.moe_common import (
+    i64x4_to_i32x8 as _pack,
+)
+from kernels.moe.moe_common import (
+    i64x4_to_i32x8 as pack_i64x4_to_i32x8,
+)
 
 
 @functools.lru_cache(maxsize=None)
@@ -1048,12 +1054,6 @@ def compile_mixed_moe_gemm1(
                         epilogue_pf = (None, tw_pf, bias_pf)
 
                     c0_i64 = arith.constant(0, type=T.i64)
-                    vec4_i64 = T.vec(4, T.i64)
-                    vec8_i32 = T.vec(8, T.i32)
-
-                    def pack_i64x4_to_i32x8(x0, x1, x2, x3):
-                        v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                        return vector.bitcast(vec8_i32, v4)
 
                     _eff_packed = (ku_count + pack_K - 1) // pack_K
                     # B-major: fix B (ni), cycle A (mi) -- B from VMEM stays
@@ -1171,12 +1171,6 @@ def compile_mixed_moe_gemm1(
                     a_scale_vals: list of A scale scalars indexed by mi_packed.
                     """
                     c0_i64 = arith.constant(0, type=T.i64)
-                    vec4_i64 = T.vec(4, T.i64)
-                    vec8_i32 = T.vec(8, T.i32)
-
-                    def _pack(x0, x1, x2, x3):
-                        v4 = vector.from_elements(vec4_i64, [x0, x1, x2, x3])
-                        return vector.bitcast(vec8_i32, v4)
 
                     mfma_res_ty = vec4_f32
                     gb128 = _pack(gate_b_single[0], gate_b_single[1], c0_i64, c0_i64)

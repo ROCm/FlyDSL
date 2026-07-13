@@ -32,6 +32,18 @@ from kernels.mma.mfma_preshuffle_pipeline import (
     tile_chunk_coord_i32,
     unpack_b_w4a16,
 )
+from kernels.moe.moe_common import (
+    i64_to_v4f16 as _i64_to_v4f16,
+)
+from kernels.moe.moe_common import (
+    i64_to_v4i16 as _i64_to_v4i16,
+)
+from kernels.moe.moe_common import (
+    i64x2_to_v8bf16 as _i64x2_to_v8bf16,
+)
+from kernels.moe.moe_common import (
+    i64x2_to_v8f16 as _i64x2_to_v8f16,
+)
 
 
 @functools.lru_cache(maxsize=1024)
@@ -815,22 +827,6 @@ def compile_moe_gemm1(
                                 else buffer_ops.buffer_load(sw_rsrc, row_up_idx, vec_width=1, dtype=T.f32)
                             )
                         epilogue_pf = (sw_gate_pf, sw_up_pf)
-
-                    def _i64_to_v4f16(x_i64):
-                        v1 = vector.from_elements(T.vec(1, T.i64), [x_i64])
-                        return vector.bitcast(T.f16x4, v1)
-
-                    def _i64_to_v4i16(x_i64):
-                        v1 = vector.from_elements(T.vec(1, T.i64), [x_i64])
-                        return vector.bitcast(T.i16x4, v1)
-
-                    def _i64x2_to_v8f16(lo, hi):
-                        v2 = vector.from_elements(T.i64x2, [lo, hi])
-                        return vector.bitcast(T.f16x8, v2)
-
-                    def _i64x2_to_v8bf16(lo, hi):
-                        v2 = vector.from_elements(T.i64x2, [lo, hi])
-                        return vector.bitcast(T.bf16x8, v2)
 
                     def mfma_k64(acc_in, a0, a1, b0, b1):
                         if const_expr(_use_mfma_k32):
