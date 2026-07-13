@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-13T09:15:06Z",
+ "updated": "2026-07-13T10:09:04Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29239834624,
+   "pr": 839,
+   "commit": "092c3184916ded2dc899d379d13715f6178c654a",
+   "branch": "kernel-refactor",
+   "event": "pull_request",
+   "title": "[kernels]: add common/mem_ops for shared memory/atomic helpers",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29239834624",
+   "created_at": "2026-07-13T09:37:55Z",
+   "updated_at": "2026-07-13T10:07:51Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-13T09:40:01Z",
+     "completed_at": "2026-07-13T09:51:55Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29239834624/job/86783218581"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-13T09:40:16Z",
+     "completed_at": "2026-07-13T09:51:54Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29239834624/job/86783218582"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-13T09:43:26Z",
+     "completed_at": "2026-07-13T10:07:50Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29239834624/job/86783218594"
+    }
+   ]
+  },
   {
    "run_id": 29235839177,
    "pr": 835,
@@ -53,11 +96,11 @@
    "branch": "mxfp8_dsl",
    "event": "pull_request",
    "title": "add mxfp8 support",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29234983118",
    "created_at": "2026-07-13T08:18:31Z",
-   "updated_at": "2026-07-13T09:13:36Z",
+   "updated_at": "2026-07-13T09:42:54Z",
    "actor": "Copilot",
    "jobs": [
     {
@@ -72,10 +115,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-13T09:13:35Z",
-     "completed_at": null,
+     "completed_at": "2026-07-13T09:42:53Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29234983118/job/86772699324"
     },
     {
@@ -1809,49 +1852,6 @@
      "started_at": "2026-07-10T12:51:10Z",
      "completed_at": "2026-07-10T14:07:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093863571/job/86365659746"
-    }
-   ]
-  },
-  {
-   "run_id": 29093725814,
-   "pr": 827,
-   "commit": "c4e30bf98798166528096a111808736ed1d878e1",
-   "branch": "worktree-docs-api-refresh",
-   "event": "pull_request",
-   "title": "[Docs] Refresh API docs, add kernel tuning guide, fix kernel-authoring skills",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814",
-   "created_at": "2026-07-10T12:47:21Z",
-   "updated_at": "2026-07-10T20:46:46Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T14:15:28Z",
-     "completed_at": "2026-07-10T15:46:24Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814/job/86382546043"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T20:31:51Z",
-     "completed_at": "2026-07-10T20:46:45Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814/job/86382546045"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-10T14:14:47Z",
-     "completed_at": "2026-07-10T15:08:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29093725814/job/86382546076"
     }
    ]
   }
