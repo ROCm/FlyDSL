@@ -170,15 +170,9 @@ assert max(SZ_LDS_O16, SZ_LDS_O32) <= V3_SZ_LDS_KV, "Output LDS must fit in one 
 TOTAL_LDS_BYTES: int = V3_TOTAL_LDS_BYTES if IS_GFX950 else V2_TOTAL_LDS_BYTES
 
 
-# ---------------------------------------------------------------------------
-# Shared (LDS) storage
-# ---------------------------------------------------------------------------
-# The kernel manages LDS as one flat byte region addressed by absolute
-# offsets, so a single byte array covering the whole reservation matches the
-# previous statically-sized allocation exactly.
 @fx.struct
 class SharedStorage:
-    storage: fx.Array[fx.Int8, TOTAL_LDS_BYTES, 16]  # 16 = alignment
+    storage: fx.Array[fx.Int8, TOTAL_LDS_BYTES, 16]
 
 
 # ---------------------------------------------------------------------------
@@ -361,16 +355,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         return arith.maximumf(_raw(a), _raw(b), fastmath=fastmath)
 
     # ---- LDS setup ----
-    # Single flat byte reservation; all access below is via absolute LDS byte
-    # addresses computed off this base index (smem bytes are auto-tracked).
     lds = fx.SharedAllocator().allocate(SharedStorage).peek()
     lds_base_idx = ArithValue(_raw(fx.ptrtoint(lds.storage.ptr))).index_cast(T.index)
 
-    # High-level LDS access: capture the storage base pointer ONCE here (the
-    # `lds` handle is a Python object and must never be touched inside runtime
-    # control flow). All register load/store below go through _lds_view, which
-    # rebuilds the same byte address off this pointer via add_offset + make_view
-    # instead of raw llvm load/store on an inttoptr'd address.
     _lds_storage_ptr = lds.storage.ptr
     _lds_base_i32 = _i32(lds_base_idx)
 
@@ -496,7 +483,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         if const_expr(check_boundary):
             is_oob = ArithValue(row_i32) == -1
             if is_oob:
-                # Write zero at lane's position via the high-level LDS view.
                 lds_addr = _i32(ArithValue(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
                 _lds_view(lds_addr, 4).store(Vec.from_elements([c_zero_i32], fx.Int32).bitcast(fx.Uint8))
             else:
@@ -737,7 +723,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         block_offset = (row_blk * VT_BLKS_PER_ROW_PAD + col_blk) * VT_ELEMS_PER_BLK
         lds_vt_addr = vt_lds_base_idx + block_offset
 
-        # 2x 16-byte (32 fp8) stores via the high-level LDS view.
         lo_packed = Vec.from_elements(vt8[0:4], fx.Int32)
         _lds_view(_i32(lds_vt_addr), 16).store(lo_packed.bitcast(fx.Uint8))
 
@@ -832,7 +817,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         # (i32 = 4), so divide by 4.  s_offset is also in bytes.
         voff_dw = (v_offset + s_offset) // 4
 
-        # Pre-compute LDS addresses (constant across passes)
         lds_st_addr = p_lds_q_warp + lds_st_offset
         lds_rd_addr = p_lds_q_warp + lds_ld_offset
 
@@ -1319,7 +1303,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-        # LDS read: 4 dwords = 8 bf16 in coalesced layout, via the high-level view.
         lds_rd_addr = _i32(ArithValue(lds_warp) + o16_rd_offset)
         data = _raw(_lds_view(lds_rd_addr, 16).load().bitcast(fx.Int32))
 
@@ -1355,7 +1338,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         col_offset_i32 = tile_idx * MFMA_N * 2
         O32_LD_DELTA = 8 * O32_ELEM_PER_PAD_ROW * 4  # 1152 bytes between round 0/1
 
-        # LDS write: 2 sub-blocks -> 2x 16-byte stores via the high-level view.
         rocdl.s_waitcnt(_encode_waitcnt(vmcnt=0))
         for sub, acc_val in enumerate([oaccu_a, oaccu_b]):
             sub_offset = sub * O32_NUM_COLS // 2 * 4
@@ -1364,7 +1346,6 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
-        # LDS read: 2 rounds of 16 bytes (round 0 = rows 0-7, round 1 = rows 8-15).
         lds_rd_addr = _i32(ArithValue(lds_warp) + o32_rd_offset)
         data_0 = _raw(_lds_view(lds_rd_addr, 16).load().bitcast(fx.Int32))
         data_1 = _raw(_lds_view(lds_rd_addr, 16, extra_bytes=O32_LD_DELTA).load().bitcast(fx.Int32))
@@ -2102,6 +2083,6 @@ def launch_mla_fwd_decode_m16x8_fp8_fp8(
     ).launch(
         grid=(num_cus, 1, 1),
         block=(NUM_THREADS, 1, 1),
-        smem=0,  # LDS is statically allocated via SharedAllocator
+        smem=0,
         stream=stream,
     )

@@ -107,9 +107,6 @@ def compile_blockscale_preshuffle_gemm(
     buffer_size_bytes = max(lds_tile_bytes, lds_out_bytes // 2)
     buffer_size_elems = buffer_size_bytes  # fp8: 1 byte per elem
 
-    # Two contiguous fp8 LDS buffers (ping/pong). Declared adjacent so the
-    # optional CShuffle output region (out dtype, 2*tile_m*tile_n bytes) can
-    # alias the pong base and extend into ping, matching the old byte layout.
     @fx.struct
     class SharedStorage:
         pong: fx.Array[fx.Float8E4M3FN, buffer_size_elems, 16]
@@ -164,16 +161,11 @@ def compile_blockscale_preshuffle_gemm(
         bx = gpu.block_id("x")
         by = gpu.block_id("y")
 
-        # ---- LDS (ping/pong buffers via SharedStorage) ----
-        # `lds` is a Python handle; only its fields' raw pointers (.ptr) are used
-        # below. All LDS access is pointer-based (the .view() memref does not
-        # accept vector-dialect ops). Built once here, before any control flow.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a_pong = lds.pong
         lds_a_ping = lds.ping
 
         if const_expr(use_cshuffle_epilog):
-            # CShuffle output aliases the pong region reinterpreted as out dtype.
             lds_out = fx.recast_iter(_out_elem_dtype(), lds.pong.ptr)
         else:
             lds_out = None
@@ -279,9 +271,7 @@ def compile_blockscale_preshuffle_gemm(
         # ── A LDS load helpers ────────────────────────────────────────────
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
-            idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz  # fp8: element idx == byte offset
-            # Read 16 bytes as i8x16 via recast+view (f8 must not go through the op);
-            # caller bitcasts to i64x2. Mirrors the reference _vec_load_16xf8 idiom.
+            idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz
             ptr_off = fx.add_offset(lds_buffer.ptr, fx.make_int_tuple(idx_a16))
             i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
             return fx.make_view(i8_iter, fx.make_layout(16, 1)).load()
@@ -340,16 +330,11 @@ def compile_blockscale_preshuffle_gemm(
         c4_bytes = 4  # bytes per dword (always 4, used for LDS byte addressing)
 
         def store_a_tile_to_lds(vec_a_parts, lds_buffer, a_load_bytes_v, tx_i32_base_v, chunk_i32_a_v):
-            # View-based LDS store with CK-style XOR16 swizzle on the K dim. The
-            # dwords are written as i8 vectors (f8 must not go through the op; the
-            # byte layout is identical), mirroring the reference recast+view idiom.
             for i in range_constexpr(num_a_loads):
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
                 col_local_bytes = col_a_local_i32 * c4_bytes
                 col_swz = swizzle_xor16(row_a_local, col_local_bytes, k_blocks16)
-                idx0 = preshuffle_crd2idx(
-                    (fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds
-                )  # fp8: element idx == byte off
+                idx0 = preshuffle_crd2idx((fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds)
                 ptr_off = fx.add_offset(lds_buffer.ptr, fx.make_int_tuple(idx0))
                 i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
                 if const_expr(a_load_bytes_v == 16):
@@ -564,13 +549,8 @@ def compile_blockscale_preshuffle_gemm(
                 if const_expr(lds_out is None):
                     raise RuntimeError("use_cshuffle_epilog=True but lds_out is not allocated.")
 
-                # Inlined CShuffle epilogue (pointer-based LDS). Mirrors
-                # kernels.mma.mfma_epilogues.c_shuffle_epilog (standard path,
-                # block_size=256, cshuffle_nlane=32); pointer loads/stores are used
-                # because vector-dialect ops do not accept the LDS pointer. lds_out
-                # is the pong region reinterpreted as out dtype (element offsets).
                 cshuffle_nlane = 32
-                cshuffle_mlane = total_threads // cshuffle_nlane  # 8
+                cshuffle_mlane = total_threads // cshuffle_nlane
                 e_vec = 4 if (int(tile_n) % (32 * 4)) == 0 else 2
                 frag_elem_type = T.bf16 if is_bf16_out else T.f16
                 vec_frag_ty = T.vec(e_vec, frag_elem_type)
@@ -587,7 +567,6 @@ def compile_blockscale_preshuffle_gemm(
                         frag_i32 = Vec(frag).bitcast(fx.Int32)[0]
                         buffer_ops.buffer_store(frag_i32, c_rsrc, byte_off, offset_is_bytes=True)
 
-                # -- write C tile to LDS (row-major [tile_m, tile_n], out dtype) --
                 gpu.barrier()
                 lane_div_16_mul4 = lane_div_16 * 4
                 for mi in range_constexpr(m_repeat):
@@ -603,7 +582,6 @@ def compile_blockscale_preshuffle_gemm(
                             fx.ptr_store(v_out, lds_out + fx.Int32(lds_idx))
                 gpu.barrier()
 
-                # -- shuffle remap + half2 store --
                 c_nlane = fx.Index(cshuffle_nlane)
                 m_lane = tx // c_nlane
                 n_lane = tx % c_nlane

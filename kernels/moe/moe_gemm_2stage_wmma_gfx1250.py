@@ -172,18 +172,11 @@ def _compile_stage1_wmma_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
-        # New-API shared memory: capture the LDS region field pointer/views once
-        # at the top of the kernel. Register load/store to LDS uses the
-        # high-level recast_iter/make_view + memref idioms. Only the hardware
-        # transpose read (ds_load_tr16_b128) keeps a raw !llvm.ptr<3>, as that
-        # rocdl intrinsic requires a pointer.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_lds_ptr = lds.smem_a.ptr
         a_lds_view = lds.smem_a.view(fx.make_layout(lds_a_elems, 1))
         bg_lds_view = lds.smem_bg.view(fx.make_layout(lds_b_elems, 1))
         bu_lds_view = lds.smem_bu.view(fx.make_layout(lds_b_elems, 1))
-        # Byte-address bases for the transpose reads (ds_load_tr16_b128), which
-        # require a raw LDS pointer.
         bg_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_bg.ptr)))
         bu_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_bu.ptr)))
 
@@ -592,17 +585,10 @@ def _compile_stage2_wmma_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
-        # New-API shared memory: capture the LDS region field pointer/views once
-        # at the top of the kernel. Register load/store to LDS uses the
-        # high-level recast_iter/make_view + memref idioms. Only the hardware
-        # transpose read (ds_load_tr16_b128) keeps a raw !llvm.ptr<3>, as that
-        # rocdl intrinsic requires a pointer.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_lds_ptr = lds.smem_a.ptr
         a_lds_view = lds.smem_a.view(fx.make_layout(lds_a_elems, 1))
         b_lds_view = lds.smem_b.view(fx.make_layout(lds_b_elems, 1))
-        # Byte-address base for the transpose reads (ds_load_tr16_b128), which
-        # require a raw LDS pointer.
         b_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_b.ptr)))
 
         vec8_ty = ir.VectorType.get([8], T.f16)

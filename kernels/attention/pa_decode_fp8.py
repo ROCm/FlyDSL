@@ -129,7 +129,6 @@ def _build_pa_thread_invariants(
     pv_prob_read_base = rowid * fx.Int32(MFMA_N * PROB_ROW_STRIDE_BYTES) + lane16id * fx.Int32(PROB_ROW_STRIDE_BYTES)
 
     sm_lane_wave_base = lane16id * fx.Int32(NUM_WARPS)
-    # LDS element offsets (f32 units) into softmax_lds; consumed by lds_load_vec/lds_store_vec.
     sm_max_off = sm_lane_wave_base + warp_id
     sm_sum_off = fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
     sm_rd_max_offs = [sm_lane_wave_base + fx.Int32(w) for w in range(NUM_WARPS)]
@@ -1019,8 +1018,6 @@ def compile_pa_decode_ps(
     LDS_VMAX_BYTES = NUM_WARPS * MFMA_N * 4 if const_expr(per_token_kv) else 0
     LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES + LDS_VMAX_BYTES
 
-    # Each region is a separate @fx.struct field; smem bytes are auto-tracked.
-    # The K/V per-token scale staging region (scale) exists only for per_token_kv.
     _LOGITS_I32 = LDS_LOGITS_BYTES // 4
     _SOFTMAX_F32 = LDS_SOFTMAX_TOTAL // 4
     _SCALE_F32 = LDS_SCALE_BYTES // 4
@@ -1116,10 +1113,6 @@ def compile_pa_decode_ps(
             k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
             v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
 
-        # Build ALL LDS region pointers ONCE here at the top (before any runtime
-        # scf.if/for): these are plain MLIR pointer values captured by the phase
-        # helpers/closures below.  The logits region is aliased as both i32 (Q/P
-        # words) and i64 (P fragments) via recast_iter.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         logits_lds_i32 = lds.logits.ptr
         logits_lds_i64 = fx.recast_iter(fx.Int64, lds.logits.ptr)
@@ -1300,7 +1293,6 @@ def compile_pa_decode_ps(
                 if const_expr(block_size == 64):
                     # block_size=64: `_stage_phys_blocks` returned vec_width=1
                     # → scalar i32, not a Vector.  Wrap in a 1-element
-                    # Vector so we can use the LDS store API.
                     # Each warp writes 1 i32 to bt_lds_i32[warp_id];
                     # `_load_v_phys_blocks_from_lds` reads back the 4-elem
                     # vec starting at offset 0.

@@ -248,11 +248,6 @@ def _compile_moe_sorting_oneshot(
     r_for_sub = min(r_for_sub, r_token_min)
     sub_tokens = r_for_sub
 
-    # LDS regions for the sorting phases.
-    #   cumsum[E+1]  : exclusive prefix sums per expert
-    #   cumdup[E+1]  : duplicate of cumsum for the scatter phase
-    #   mesh[sub_tokens, smem_cols] : token x expert histogram
-    #   scratch[NUM_WAVES]          : cross-wave scratch for prefix sum
     @fx.struct
     class SharedStorage:
         cumsum: fx.Array[fx.Int32, smem_cols, 16]
@@ -293,9 +288,6 @@ def _compile_moe_sorting_oneshot(
         nvalid_rsrc = buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
         mask_rsrc = buffer_ops.create_buffer_resource(expert_mask_tensor, max_size=True)
 
-        # LDS: build memref views ONCE at the top — they dominate all child
-        # scf.for/scf.if regions. The 'lds' handle is a Python object and must
-        # never be referenced inside a runtime scf.if/for body.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         cumsum_mr = lds.cumsum.view(fx.make_layout(smem_cols, 1))
         cumdup_mr = lds.cumdup.view(fx.make_layout(smem_cols, 1))
@@ -439,7 +431,6 @@ def _compile_moe_sorting_oneshot(
                 gpu.barrier()
 
             # Step 2: All-wave parallel prefix sum (cumsum → cumdup).
-            # (scratch_mr view built once at the top of the kernel.)
 
             # All threads read cumsum[tid+1] (in chunks for E > ONESHOT_BLOCK)
             for _ps_chunk in range_constexpr(0, E, ONESHOT_BLOCK):
@@ -751,9 +742,6 @@ def compile_moe_sorting_oneshot_fused(
     r_for_sub = min(r_for_sub, r_token_min)
     sub_tokens = r_for_sub
 
-    # LDS regions. The weights_lds[max_tokens, topk] region stages gating
-    # winner weights on-chip so Phase 3's scatter reads them from LDS instead
-    # of HBM (≤512 B at the oneshot bound, negligible occupancy impact).
     @fx.struct
     class SharedStorage:
         cumsum: fx.Array[fx.Int32, smem_cols, 16]
@@ -792,7 +780,6 @@ def compile_moe_sorting_oneshot_fused(
         nvalid_rsrc = buffer_ops.create_buffer_resource(num_valid_ids, max_size=True)
         mask_rsrc = buffer_ops.create_buffer_resource(expert_mask_tensor, max_size=True)
 
-        # Build memref views ONCE at the top (dominate all child scf regions).
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         cumsum_mr = lds.cumsum.view(fx.make_layout(smem_cols, 1))
         cumdup_mr = lds.cumdup.view(fx.make_layout(smem_cols, 1))

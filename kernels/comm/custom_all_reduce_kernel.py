@@ -170,11 +170,6 @@ def _raw(v):
     return v.ir_value() if hasattr(v, "ir_value") else v
 
 
-# Thin adapters over the shared LDS helpers, addressed by 16-byte pack index.
-# ``smem_ptr`` is the Int32 iterator of the shared-storage Array (captured once at
-# the top of the kernel, never re-derived from the ``lds`` handle inside control
-# flow); each pack is _ELEMS_PER_PACK i32 elements, so the element offset is
-# ``idx * _ELEMS_PER_PACK``.
 def _smem_store(smem_ptr, value, idx):
     """Store one 16-byte (vector<4xi32>) pack into shared memory by pack index."""
     lds_store_vec(smem_ptr, idx * _ELEMS_PER_PACK, value)
@@ -357,8 +352,6 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
     _est_iters_2stage = max(1, (max(1, part_p) + _MAX_BLOCKS * tnum_gpu - 1) // (_MAX_BLOCKS * tnum_gpu))
     _use_single_buf_2stage = _est_iters_2stage >= 3
 
-    # Shared-memory layouts. Each "slot" is one 16-byte pack (vector<4xi32>),
-    # so the backing Int32 array holds slots * _ELEMS_PER_PACK elements.
     _smem_slots_1stage = 2 * threads
     _smem_slots_2stage = threads if _use_single_buf_2stage else 2 * threads
     _smem_slots_wm = 2 * threads

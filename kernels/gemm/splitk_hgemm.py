@@ -186,14 +186,6 @@ def compile_hgemm_kernel(
     if HAS_BIAS:
         KERNEL_NAME += "_BIAS"
 
-    # Shared-memory (LDS) region sizing, in elements of the compute dtype.
-    #   A region : STAGES x BLOCK_M x BLOCK_K   (double-buffered A tiles)
-    #   B region : STAGES x BLOCK_N x BLOCK_K   (double-buffered B tiles, if B_TO_LDS)
-    #   C region : BLOCK_M x BLOCK_N            (output tile, ALIASES the A region base)
-    #   BC       : one i32 counter              (ALIASES the A region base)
-    # C/BC reuse the A region base to keep total LDS usage identical to the
-    # legacy allocator. When B is in LDS the C tile may span past A into B, so
-    # the trailing (B) field is padded to guarantee the aliased C tile fits.
     AS_ELEMS = STAGES * BLOCK_M * BLOCK_K
     BS_ELEMS = STAGES * BLOCK_N * BLOCK_K
     CMN_ELEMS = BLOCK_M * BLOCK_N
@@ -244,13 +236,6 @@ def compile_hgemm_kernel(
         C_ = GTensor(C, dtype=dtype_, shape=(-1, n))
         if const_expr(HAS_BIAS):
             BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
-        # Allocate LDS once, up-front, and capture each field base pointer here
-        # (never touch the python `lds` handle inside runtime scf control flow).
-        # C and BC alias the A region base (offset 0); B lives right after A.
-        # Register load/store use the high-level recast_iter + make_view idiom;
-        # the async global->LDS DMA path still needs a raw address-space(3)
-        # pointer, so a_lds_i64/b_lds_i64 are kept for it. A/B tiles are strided
-        # (STAGES, rows, BLOCK_K); C is (BLOCK_M, BLOCK_N).
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_lds_ptr = lds.a_lds.ptr
         a_lds_i64 = fx.Int64(fx.ptrtoint(a_lds_ptr))
@@ -259,7 +244,6 @@ def compile_hgemm_kernel(
             b_lds_i64 = fx.Int64(fx.ptrtoint(b_lds_ptr))
 
         def _lds_a3_ptr(base_i64, elem_off):
-            # Raw address-space(3) pointer for the async global->LDS DMA intrinsic.
             off_i64 = arith.index_cast(T.i64, fx.Index(elem_off) * fx.Index(DTYPE_BYTES))
             return buffer_ops.create_llvm_ptr(base_i64 + fx.Int64(off_i64), address_space=3)
 
@@ -293,7 +277,6 @@ def compile_hgemm_kernel(
             return _lds_vec_view(a_lds_ptr, elem_off, vec_size).load()
 
         if const_expr(IS_SPLIT_K):
-            # split-k arrival counter: one i32 aliasing the A region base.
             bc_view = fx.make_view(fx.recast_iter(fx.Int32, a_lds_ptr), fx.make_layout(1, 1))
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))
             signal_ = GTensor(signal, dtype=T.i32, shape=(-1,))

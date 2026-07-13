@@ -96,11 +96,6 @@ def create_wmma_gemm_module(
         arg_a: fx.Tensor,
         arg_bt: fx.Tensor,
     ):
-        # Allocate the whole (double-buffered) LDS region as one contiguous array.
-        # Vectorized (v8) LDS access uses the high-level layout/view API. The base
-        # iterator is built ONCE here at the top (it is an ir.Value, so it is safe to
-        # advance and view inside the runtime pipeline loop; the .peek() handle itself
-        # is a Python object and must not be referenced from within scf regions).
         lds = fx.SharedAllocator(static=False).allocate(fx.Array[lds_elem_dtype, LDS_TOTAL, 16]).peek()
         lds_iter = fx.recast_iter(lds_elem_dtype, lds.ptr)
 

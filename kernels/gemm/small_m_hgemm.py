@@ -482,11 +482,6 @@ def compile_small_m_hgemm_kernel(
         SMEM_USE = _align_up(AS_BYTES, 16) + STAGES * BLOCK_N * BLOCK_K * DTYPE_BYTES
     assert SMEM_USE <= MAX_LDS_BYTES
 
-    # Shared-memory storage. The A staging region is also reused for the C
-    # output tile and (in split-K) a single broadcast word, matching the
-    # original overlapping byte reservation, so it is declared once as one
-    # field and the C / broadcast aliases are recovered via separate views
-    # over the same base pointer.
     A_SMEM_ELEMS = AS_BYTES // DTYPE_BYTES
     B_SMEM_ELEMS = STAGES * BLOCK_N * BLOCK_K
 
@@ -551,11 +546,6 @@ def compile_small_m_hgemm_kernel(
         BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
         bs_ = None
 
-        # New-API shared memory. .peek() hands back a Python handle; we capture
-        # the raw LDS field pointer(s) here at the top and never touch `lds` again
-        # inside runtime control flow. Register load/store of LDS goes through the
-        # high-level recast_iter + make_view().load()/.store() idiom; the raw i64
-        # bases are retained only for the async global->LDS DMA path below.
         _lds_ptr_type = ir.Type.parse("!llvm.ptr<3>")
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         a_smem_ptr = lds.a_smem.ptr

@@ -126,7 +126,6 @@ def _build_pa_thread_invariants(
     kv_tok_thread_base = warp_id * c_tokens_per_warp + rowid * 4
     rowid_8x8 = rowid >> fx.Int32(1)
     offset_in_slot = rowid & fx.Int32(1)
-    # prob writes are i32-typed; reads are i64-typed. Offsets are in element units.
     prob_row_i32 = PROB_ROW_STRIDE_BYTES // 4
     prob_row_i64 = PROB_ROW_STRIDE_BYTES // 8
     prob_wr_thread_base = (
@@ -137,7 +136,6 @@ def _build_pa_thread_invariants(
     )
     pv_prob_read_base = rowid * fx.Int32(MFMA_N * prob_row_i64) + lane16id * fx.Int32(prob_row_i64)
 
-    # Softmax-LDS f32 element offsets.
     sm_lane_wave_base = lane16id * fx.Int32(NUM_WARPS)
     sm_max_off = sm_lane_wave_base + warp_id
     sm_sum_off = fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
@@ -221,13 +219,8 @@ def _finish_q_fragments(
     qkhe_loop: int,
     q_lanes_per_head: int,
 ):
-    # LDS Q layout: Q[head=h][hd=d] is FP8 at byte offset h*HEAD_SIZE + d,
-    # aliased with the later P writes through the logits region (i32/i64 views).
-    # Writer owns qhead=local_qhead_idx and its 8 FP8 elems at head_dim
-    # [lane16id*8 .. +7], stored as 2 i32 words. Reader (mfma_f32_16x16x32_fp8_fp8,
-    # B=Q^T) consumes one i64 per k_step = qkhe*2 + qkr.
-    c_head_dw = fx.Int32(head_size // 4)  # HEAD_SIZE in i32 words
-    lds_q_base = local_qhead_idx * c_head_dw + lane16id * 2  # i32-word offset
+    c_head_dw = fx.Int32(head_size // 4)
+    lds_q_base = local_qhead_idx * c_head_dw + lane16id * 2
     abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
     c_zero_f = fx.Float32(0.0)
     c_one_f = fx.Float32(1.0)
@@ -279,7 +272,6 @@ def _finish_q_fragments(
     query_scale_lane = lds_load_vec(softmax_base, lane16id, fx.Float32, 1)[0].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
-            # i64-element offset: lane16id*(HEAD_SIZE/8) + qkhe*8 + rowid*2 + qkr
             lds_rd = lane16id * fx.Int32(head_size // 8) + fx.Int32(qkhe * 8) + rowid * fx.Int32(2) + fx.Int32(qkr)
             q_v1 = lds_load_vec(logits_base, lds_rd, fx.Int64, 1)
             q_frags.append(q_v1[0])
@@ -749,12 +741,10 @@ def compile_pa_decode_sw_reduce(
     reduce_shuffle_offsets = [off for off in [32, 16, 8, 4, 2, 1] if off < reduce_width]
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
 
-    # LDS regions as a typed shared-storage struct; sizes/offsets/alignment are
-    # derived from the field types and the smem byte count is tracked automatically.
     @fx.struct
     class SharedStorage:
-        red: fx.Array[fx.Float32, red_slots, 16]  # cross-wave reduction scratch
-        part_weights: fx.Array[fx.Float32, max_context_partition_num, 16]  # per-partition weights
+        red: fx.Array[fx.Float32, red_slots, 16]
+        part_weights: fx.Array[fx.Float32, max_context_partition_num, 16]
 
     @flyc.kernel(known_block_size=(block_threads, 1, 1))
     def pa_decode_sw_reduce_kernel(
@@ -780,9 +770,6 @@ def compile_pa_decode_sw_reduce(
         kv_head_idx = fx.Int32(gpu.block_id("y"))
         eqgs_idx = fx.Int32(gpu.block_id("z"))
 
-        # LDS memref views built once at the top so they dominate all child
-        # scf regions; the `lds` struct handle is only used here (not inside
-        # runtime control flow), the views themselves are MLIR-backed memrefs.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         red_scratch = lds.red.view(fx.make_layout(red_slots, 1))
         if const_expr(max_context_partition_num > WARP_SIZE):
@@ -1126,11 +1113,6 @@ def compile_pa_decode_sw(
     LDS_VMAX_BYTES = NUM_WARPS * MFMA_N * 4 if const_expr(per_token_kv) else 0
     LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES + LDS_VMAX_BYTES
 
-    # LDS regions as a typed shared-storage struct; sizes/offsets/alignment are
-    # derived from the field types and the smem byte count is tracked
-    # automatically. The logits/Q region is aliased as both i32 and i64 through a
-    # single field via raw-pointer views. The scale staging region only exists
-    # for the per-token-KV path (matching the old conditional byte reservation).
     if per_token_kv:
 
         @fx.struct
@@ -1213,11 +1195,6 @@ def compile_pa_decode_sw(
             k_scale_val = buffer_ops.buffer_load(ks_rsrc, 0, vec_width=1)
             v_scale_val = buffer_ops.buffer_load(vs_rsrc, 0, vec_width=1)
 
-        # LDS region pointers captured once at the top so they dominate all child
-        # scf regions; the `lds` struct handle is a Python object used only here
-        # (never inside runtime control flow). Each region is accessed through the
-        # high-level view API; the logits region serves both i32 and i64 traffic
-        # from the same base via per-access recast.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         logits_base = lds.logits.ptr
         softmax_base = lds.softmax.ptr

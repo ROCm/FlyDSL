@@ -331,19 +331,6 @@ class STensor(TensorBase):
             vector.store(vec, self.memptr, [offset], alignment=16)
 
 
-# ===----------------------------------------------------------------------=== #
-# Shared LDS / shared-memory vectorized register access (new smem + new vector)
-#
-# The canonical way to read/write a fixed-width vector at an element offset into a
-# shared-storage field pointer (`lds.<field>.ptr`). Prefer these over per-kernel
-# copies. Offsets count ELEMENTS (not bytes); recast-first (dtype then offset)
-# keeps the access element-aligned; values in/out are DSL `fx.Vector`.
-#
-# Note: this is the new-smem/new-vector path (fly view + memref_load_vec). The
-# legacy `STensor` above (upstream `vector.load_op`/`vector.store` over a builtin
-# memref) is a separate set kept for its existing users; migrate those to these
-# helpers only together with their builtin-memref consumers.
-# ===----------------------------------------------------------------------=== #
 def lds_vec_view(ptr, elem_off, dtype, num_elems):
     """A `num_elems`-wide view of `dtype` elements at element offset `elem_off`."""
     it = fx.add_offset(fx.recast_iter(dtype, ptr), fx.Int32(elem_off))

@@ -190,7 +190,6 @@ def _build_pa_thread_invariants(
     kv_tok_thread_base = warp_id * c_tokens_per_warp + rowid * 4
     rowid_8x8 = rowid >> fx.Int32(1)
     offset_in_slot = rowid & fx.Int32(1)
-    # prob writes are i32-typed; reads are i64-typed. Offsets are in element units.
     prob_row_i32 = PROB_ROW_STRIDE_BYTES // 4
     prob_row_i64 = PROB_ROW_STRIDE_BYTES // 8
     prob_wr_thread_base = (
@@ -201,7 +200,6 @@ def _build_pa_thread_invariants(
     )
     pv_prob_read_base = rowid * fx.Int32(MFMA_N * prob_row_i64) + lane16id * fx.Int32(prob_row_i64)
 
-    # Softmax-LDS f32 element offsets.
     sm_lane_wave_base = lane16id * fx.Int32(NUM_WARPS)
     sm_max_off = sm_lane_wave_base + warp_id
     sm_sum_off = fx.Int32(NUM_WARPS * MFMA_N) + sm_lane_wave_base + warp_id
@@ -284,13 +282,8 @@ def _finish_q_fragments(
     qkhe_loop: int,
     q_lanes_per_head: int,
 ):
-    # LDS Q layout: Q[head=h][hd=d] is FP8 at byte offset h*HEAD_SIZE + d,
-    # aliased with the later P writes through the logits region (i32/i64 views).
-    # Writer owns qhead=local_qhead_idx and its 8 FP8 elems at head_dim
-    # [lane16id*8 .. +7], stored as 2 i32 words. Reader (mfma_f32_16x16x32_fp8_fp8,
-    # B=Q^T) consumes one i64 per k_step = qkhe*2 + qkr.
-    c_head_dw = fx.Int32(head_size // 4)  # HEAD_SIZE in i32 words
-    lds_q_base = local_qhead_idx * c_head_dw + lane16id * 2  # i32-word offset
+    c_head_dw = fx.Int32(head_size // 4)
+    lds_q_base = local_qhead_idx * c_head_dw + lane16id * 2
     abs_mask = fx.Vector.filled(4, 0x7FFFFFFF, fx.Int32)
     c_zero_f = fx.Float32(0.0)
     c_one_f = fx.Float32(1.0)
@@ -342,7 +335,6 @@ def _finish_q_fragments(
     query_scale_lane = lds_load_vec(softmax_base, lane16id, fx.Float32, 1)[0].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
-            # i64-element offset: lane16id*(HEAD_SIZE/8) + qkhe*8 + rowid*2 + qkr
             lds_rd = lane16id * fx.Int32(head_size // 8) + fx.Int32(qkhe * 8) + rowid * fx.Int32(2) + fx.Int32(qkr)
             q_v1 = lds_load_vec(logits_base, lds_rd, fx.Int64, 1)
             q_frags.append(q_v1[0])
@@ -1369,8 +1361,6 @@ def compile_pa_decode_metadata(
     LDS_VMAX_BYTES = NUM_WARPS * MFMA_N * 4 if const_expr(per_token_kv) else 0  # 256 or 0
     LDS_SOFTMAX_TOTAL = LDS_SOFTMAX_BYTES + LDS_VMAX_BYTES
     LDS_SCALE_TOTAL = LDS_SCALE_BYTES if const_expr(per_token_kv) else 0
-    # One contiguous shared-storage region carved into sub-regions by byte offset
-    # (matches the prior single-buffer layout, incl. logits/Q i32↔i64 aliasing).
     logits_off = 0
     softmax_off = LDS_LOGITS_BYTES
     scale_off = softmax_off + LDS_SOFTMAX_TOTAL
@@ -1448,13 +1438,6 @@ def compile_pa_decode_metadata(
             k_scale_val = buffer_ops.buffer_load(ks_rsrc, arith.constant(0, type=T.i32), vec_width=1)
             v_scale_val = buffer_ops.buffer_load(vs_rsrc, arith.constant(0, type=T.i32), vec_width=1)
 
-        # ── LDS region base pointers ──
-        # Built ONCE at the top (before any runtime scf.if/for) so they dominate
-        # all child regions. `buf` is an i32 array; each sub-region base is the
-        # shared base advanced by the region's compile-time offset in i32 words.
-        # Downstream LDS traffic recasts to the access dtype via the view-based
-        # lds_store_vec / lds_load_vec helpers, so the logits/Q region can be
-        # addressed as both i32 and i64 off the same base.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         buf_base = lds.buf.ptr
         logits_base = fx.add_offset(buf_base, fx.Int32(logits_off // 4))

@@ -188,11 +188,6 @@ def compile_hgemm_kernel(
     BLOCK_K_BYTES = BLOCK_K * DTYPE_BYTES
 
     # LDS parameters:
-    # Single flat shared-memory region (elements of the compute dtype). The A
-    # staging area starts at element 0, the B staging area (when B_TO_LDS) right
-    # after it, and the C output region aliases the start of the A/B area (it is
-    # only live after the K loop finishes). Total size is the max of the two, so
-    # aliasing does not increase the reserved smem.
     A_ELEMS = STAGES * BLOCK_M * BLOCK_K
     B_ELEMS = STAGES * BLOCK_N * BLOCK_K if B_TO_LDS else 0
     if B_TO_LDS:
@@ -236,19 +231,11 @@ def compile_hgemm_kernel(
         C_ = GTensor(C, dtype=dtype_, shape=(-1, n))
         if const_expr(HAS_BIAS):
             BIAS_ = GTensor(BIAS, dtype=dtype_, shape=(n,))
-        # Shared-memory storage. Build all base pointers ONCE here (they are
-        # plain pointer ir.Values usable inside control flow); the 'lds' python
-        # handle itself is never referenced below.
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        smem_ptr = lds.smem.ptr  # element-typed (f16/bf16) base pointer
-        smem_i64 = fx.Int64(fx.ptrtoint(smem_ptr))  # raw base address for DMA
-        # High-level scalar memref view over the whole shared region (element-typed).
+        smem_ptr = lds.smem.ptr
+        smem_i64 = fx.Int64(fx.ptrtoint(smem_ptr))
         smem_view = lds.smem.view(fx.make_layout(SMEM_TOTAL_ELEMS, 1))
 
-        # Linear element-offset helpers mirroring the old STensor shapes:
-        #   as_: (STAGES, BLOCK_M, BLOCK_K)  base 0
-        #   bs_: (STAGES, BLOCK_N, BLOCK_K)  base A_ELEMS
-        #   cs_: (BLOCK_K_WARPS, BLOCK_M, BLOCK_N)  base 0 (aliases as_/bs_)
         def as_off(stage, row, col):
             return (fx.Index(stage) * BLOCK_M + row) * BLOCK_K + col
 
