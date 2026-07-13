@@ -16,11 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit_8wave import (
-    conv1d_implicit,
-    conv2d_implicit,
-    conv3d_implicit_8wave,
-)
+from kernels.conv.conv3d_implicit_8wave import conv3d_implicit_8wave
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -181,7 +177,7 @@ def test_conv2d_vs_torch(kernel_shape, stride, padding):
     weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
     bias = torch.randn((k,), device="cuda", dtype=torch.float32)
 
-    y = conv2d_implicit(x, weight, bias=bias, stride=stride, padding=padding)
+    y = conv3d_implicit_8wave(x, weight, bias=bias, stride=stride, padding=padding)
     y_ref = F.conv2d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
     torch.cuda.synchronize()
 
@@ -206,7 +202,7 @@ def test_conv1d_vs_torch(s, stride, padding):
     weight = torch.randn((k, c, s), device="cuda", dtype=torch.bfloat16)
     bias = torch.randn((k,), device="cuda", dtype=torch.float32)
 
-    y = conv1d_implicit(x, weight, bias=bias, stride=stride, padding=padding)
+    y = conv3d_implicit_8wave(x, weight, bias=bias, stride=stride, padding=padding)
     y_ref = F.conv1d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
     torch.cuda.synchronize()
 
