@@ -19,7 +19,7 @@ import math as host_math
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
-from flydsl._mlir.dialects import fly, llvm, vector
+from flydsl._mlir.dialects import fly, llvm
 from flydsl._mlir.dialects import scf as _scf
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.kernel_function import CompilationContext
@@ -30,6 +30,14 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch
+from kernels.attention.dualwave_swp_common import (
+    _ds_read_tr16_b64_imm,
+    _extract_aligned_pointer,
+    _lds_alias_scope_array,
+    _read_exec_i64,
+    _waitcnt_vm_n,
+    dualwave_splitk_workspace_elems,  # noqa: F401  (re-exported: public API)
+)
 from kernels.common.kernels_common import _if_then, dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
@@ -39,54 +47,6 @@ _LGKMCNT_EXPCNT_BASE = 0x3F70
 _VMCNT_HI_SHIFT = 14
 _VMCNT_HI_MASK = 0x3
 _LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "flydsl.dualwave_swp.lds">'
-
-
-def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
-    """gfx950 ds_read_b64_tr_b16 with DUALWAVE_SWP immediate byte offset."""
-    imm = int(imm_offset)
-    raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
-    raw = llvm.inline_asm(
-        raw_type,
-        [_raw(addr_i32)],
-        f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n",
-        "=v,v,~{memory}",
-        has_side_effects=True,
-    )
-    return vector.BitCastOp(result_type, raw).result
-
-
-def _extract_aligned_pointer(tensor, address_space=None) -> ir.Value:
-    from flydsl._mlir.dialects import fly as _fly
-
-    ptr_type = ir.Type.parse("!llvm.ptr" if address_space is None else f"!llvm.ptr<{address_space}>")
-    return _fly.extract_aligned_pointer_as_index(ptr_type, tensor)
-
-
-def _waitcnt_vm_n(n):
-    """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
-    val = (n & _VMCNT_LO_MASK) | _LGKMCNT_EXPCNT_BASE | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
-    rocdl.s_waitcnt(val)
-
-
-def _read_exec_i64():
-    """Read the current wave exec mask, matching Clang's builtin lowering."""
-    true_i1 = fx.Boolean(True).ir_value()
-    return rocdl.ballot(T.i64, true_i1)
-
-
-def _lds_alias_scope_array(names):
-    attrs = [f'#llvm.alias_scope<id = "{name}", domain = {_LDS_ALIAS_DOMAIN}>' for name in names]
-    return ir.Attribute.parse(f"[{', '.join(attrs)}]")
-
-
-def dualwave_splitk_workspace_elems(batch_size, num_heads, seq_len, num_kv_splits, head_dim=128):
-    """fp32 elements needed for the split-K workspace: O_partial + Mrow + Lrow.
-
-    O_partial is stored as kernel-native 16-bit (bf16/fp16), two columns per
-    fp32 slot; Mrow/Lrow stay fp32.
-    """
-    rows = batch_size * num_kv_splits * num_heads * seq_len
-    return rows * (head_dim // 2) + 2 * rows
 
 
 def build_flash_attn_dualwave_swp_module(
