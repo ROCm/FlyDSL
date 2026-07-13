@@ -18,7 +18,7 @@
 | **Tensor arg** | `fx.Tensor` | GPU tensor argument (via DLPack) |
 | **Stream arg** | `fx.Stream` | CUDA/HIP stream argument |
 | **Barrier** | `fx.gpu.barrier()` | Workgroup synchronization |
-| **Constants** | `fx.Int32` / `fx.Index` / `fx.Float32` | Create typed DSL constants |
+| **Constants** | `fx.Int32` / `fx.Int64` / `fx.Float32` | Create typed DSL constants (`fx.Int64` for index/offset values; `fx.Index` is deprecated) |
 | **Range loop** | `range_constexpr(n)` | Compile-time unrolled loop |
 | **Buffer load** | `buffer_ops.buffer_load(rsrc, off)` | AMD buffer load intrinsic |
 
@@ -194,7 +194,7 @@ raw_bid = gpu.block_id("x")
 import flydsl.expr as fx
 
 # Constants (prefer DSL numeric types)
-c42 = fx.Index(42)          # index type constant
+c42 = fx.Int64(42)          # 64-bit integer constant (prefer over the deprecated fx.Index)
 c3_14 = fx.Float32(3.14)    # f32 constant
 mask = fx.Int32(0xFF)       # i32 constant
 
@@ -205,8 +205,8 @@ result = a // 4
 result = a % 16
 
 # Cast (prefer DSL numeric constructors)
-idx = fx.Index(int_val)     # cast to index type
-i32_val = fx.Int32(idx)     # cast to i32
+i64_val = fx.Int64(int_val) # cast to 64-bit integer (fx.Index is deprecated)
+i32_val = fx.Int32(i64_val) # cast to i32
 
 # Select
 result = cond.select(true_val, false_val)  # when cond is an ArithValue
@@ -263,7 +263,7 @@ from flydsl.expr import rocdl
 # Buffer tensor — wraps a Tensor with AMD buffer resource descriptor
 A_buf = rocdl.make_buffer_tensor(A)
 
-# MFMA MMA atom constructor — returns MmaAtomCDNA3_MFMAType
+# MFMA MMA atom constructor (CDNA3/CDNA4) — returns MmaAtomCDNA3_MFMAType
 atom_type = rocdl.MFMA(m=16, n=16, k=32, elem_ty_ab=fx.Float8E4M3FNUZ)
 
 # Buffer copy atom types
@@ -271,6 +271,9 @@ copy_op = rocdl.BufferCopy128b()   # 128-bit buffer copy
 copy_op = rocdl.BufferCopy64b()    # 64-bit buffer copy
 copy_op = rocdl.BufferCopy32b()    # 32-bit buffer copy
 ```
+
+See [gfx1250 WMMA & TDM atoms](#gfx1250-wmma--tdm-atoms-wave32) below for the
+gfx1250 WMMA (incl. MX-scaled) MMA atoms and the TDM async copy atom.
 
 #### MFMA Instructions
 
@@ -321,6 +324,71 @@ val = rocdl.ds_bpermute(idx, src)
 data = rocdl.raw_ptr_buffer_load(rsrc, offset, soffset, aux)
 rocdl.raw_ptr_buffer_store(data, rsrc, offset, soffset, aux)
 ```
+
+#### gfx1250 WMMA & TDM atoms (wave32)
+
+gfx1250 kernels run **wave32** and use WMMA (not MFMA) for matrix math and the
+TDM (Tensor Data Mover) engine for async whole-tile Global↔LDS copies. All of the
+factories below live in `flydsl.expr.rocdl` (`from flydsl.expr import rocdl`).
+
+**WMMA MMA atom** — `rocdl.WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs)`
+is arch-dispatched (gfx11 v16 ABI; gfx12 / gfx1250 v8 ABI). On gfx1250 it builds
+`MmaOpGFX1250_WMMAType` (M=N=16). Supported K / dtypes:
+
+| dtype (A,B → Acc) | K | notes |
+|---|---|---|
+| f32 → f32 | 4 | |
+| f16/bf16 → f32 or same | 32 | |
+| fp8/bf8 (E4M3FN / E5M2, any mix) → f32 or f16 | 64, 128 | native OCP fp8 |
+| i8 → i32 | 64 | `sign_a` / `sign_b` / `clamp` kwargs |
+| i4 → i32 | 32 | `sign_a` / `sign_b` / `clamp` kwargs |
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, fx.Float16))          # f16 → f32
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))    # fp8 → f32
+# signed int4 with accumulator clamp:
+mma = fx.make_mma_atom(rocdl.WMMA(16, 16, 32, T.i4, T.i32, sign_a=True, sign_b=True, clamp=True))
+```
+
+**MX-scaled WMMA** — `rocdl.WMMAScale(m, n, k, elem_ty_a, elem_ty_b=None,
+elem_ty_acc=None, *, opsel_a=0, opsel_b=0, mod_c=0, reuse_a=False, reuse_b=False,
+block_size=32)` builds the E8M0 block-scaled WMMA (`V_WMMA_SCALE` /
+`V_WMMA_SCALE16`) for the unified f8/f6/f4 operand format. Shapes: `16x16x128`
+(f8/f6/f4) and `32x16x128` (fp4-only). Per-operand E8M0 scales are **atom state**
+(`scale_a` / `scale_b`); `block_size` 32 → i32 scale state, 16 → i64.
+
+```python
+mma = fx.make_mma_atom(rocdl.WMMAScale(16, 16, 128, fx.Float8E4M3FN))
+mma = fx.atom_set_value(mma, "scale_a", fx.Int32(scale_a))   # E8M0 scales
+mma = fx.atom_set_value(mma, "scale_b", fx.Int32(scale_b))
+fx.gemm(mma, frag_C, frag_A, frag_B, frag_C)
+```
+
+**TDM async copy atom** — the descriptor (base pointer, per-dim extent for HW
+out-of-bounds handling, per-dim stride) is carried as **atom state**; the global
+operand of `copy_atom_call` is a *shape/direction token only* (its layout gives
+the compile-time N-D tile shape, its address space picks load vs store — its
+pointer is unused). Build it with `rocdl.make_tdm_atom`:
+
+```python
+# make_tdm_atom(tensor, tensor_extents, strides=None, *, num_warps,
+#               pad_interval=0, pad_amount=0, cache_modifier=0,
+#               atomic_barrier=False, early_timeout=False)
+lds = fx.SharedAllocator().allocate(fx.Array[fx.Float16, M * N]).peek()
+lds2d = fx.make_view(lds.ptr, fx.make_layout((M, N), (N, 1)))       # note: lds.ptr
+g2d = fx.make_view(fx.get_iter(A), fx.make_layout((M, N), (N, 1)))  # raw VA, not make_buffer_tensor
+
+atom = rocdl.make_tdm_atom(g2d, [M, N], num_warps=4)   # rank = len(extents), 1–5D
+fx.copy_atom_call(atom, g2d, lds2d)                    # Global → LDS (direction from address spaces)
+rocdl.tdm_ops.tensor_wait(0)                           # await the async DMA (s_wait_tensorcnt)
+
+# K-loop: bump one scalar instead of re-deriving base (imm_offset, carry-safe i64)
+atom = rocdl.advance_tdm_atom(atom, k_tile * k_stride_bytes)
+```
+
+`rocdl.TDM(rank, num_warps, ...)` builds just the atom *type* when you want to set
+the descriptor state manually. Unlike the CDNA buffer copy, TDM needs a **raw VA**
+— do not wrap the global tensor in `make_buffer_tensor`.
 
 ### 4.5 GPU Operations (`fx.gpu`)
 
@@ -374,38 +442,47 @@ def my_kernel(data: fx.Tensor, N: fx.Constexpr[int]):
 
 ## 6. Shared Memory (LDS)
 
-### 6.1 `SmemAllocator`
+### 6.1 `fx.SharedAllocator` + `@fx.struct`
+
+New kernels declare their LDS layout as a `@fx.struct` storage type and
+allocate it with `fx.SharedAllocator` (from `flydsl.expr.gpu`, reached as
+`fx.SharedAllocator`) inside the kernel body. Each field is an `fx.Array[elem,
+count, align]`; `.allocate(StorageStruct).peek()` returns a handle whose fields
+expose typed views:
 
 ```python
-from flydsl.utils.smem_allocator import SmemAllocator
-from flydsl.expr.typing import T
+import flydsl.expr as fx
 
-# Create allocator for target architecture
-allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
+# Declare the LDS layout. Fields may be conditional on compile-time config.
+@fx.struct
+class SharedStorage:
+    s_red: fx.Array[fx.Float32, red_slots, 16]   # red_slots elems, 16B aligned
+    s_red2: fx.Array[fx.Float32, red_slots, 16]
 
-# Allocate typed arrays
-lds_a = allocator.allocate_array(T.f16, 8192)
-lds_b = allocator.allocate_array(T.f16, 8192)
+@flyc.kernel
+def my_kernel(...):
+    # Allocate the storage struct in LDS (inside the @kernel body).
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
 
-# Inside kernel: get base pointer and typed views
-lds_base = allocator.get_base()
-lds_a_ptr = lds_a(lds_base)  # SmemPtr
-lds_b_ptr = lds_b(lds_base)  # SmemPtr
-
-# Load/store through SmemPtr
-val = lds_a_ptr.load([idx])
-lds_b_ptr.store(val, [idx])
+    # Get a logical view over each field and use it with the layout API.
+    s_red = lds.s_red.view(fx.make_layout(red_slots, 1))
+    s_red2 = lds.s_red2.view(fx.make_layout(red_slots, 1))
 ```
 
-### 6.2 Finalizing LDS Allocation
+By default `SharedAllocator` is `static=True`: each leaf emits a per-leaf static
+LDS global that the compiler sizes, so `launch(smem=...)` is left unset. Use
+`static=False` (dynamic) mode to have the launch wrapper auto-infer `smem` from
+`SharedAllocator.allocated_bytes` when `smem=None` (an explicit `smem` must be
+`>=` that size). See `kernels/gemm/preshuffle_gemm.py` and
+`kernels/norm/rmsnorm_kernel.py` for real usage.
 
-For `@flyc.kernel` style kernels, finalize the allocator in the GPU module:
+### 6.2 Legacy `SmemAllocator`
 
-```python
-comp_ctx = CompilationContext.get_current()
-with ir.InsertionPoint(comp_ctx.gpu_module_body):
-    allocator.finalize()
-```
+The older `SmemAllocator` / `SmemPtr` path
+(`python/flydsl/utils/smem_allocator.py`) remains for un-migrated kernels: it
+tracks byte offsets manually (`_align` / `finalize` / `get_base`) and its
+`finalize()` must be called inside the `gpu.module` body. Prefer
+`fx.SharedAllocator` for new kernels.
 
 ### 6.3 LDS Capacity
 
@@ -529,46 +606,62 @@ Shows the diff between original and rewritten AST for debugging control flow tra
 
 ## 11. Complete Example: Preshuffle GEMM
 
-From `kernels/preshuffle_gemm.py`:
+From `kernels/gemm/preshuffle_gemm.py`:
 
 ```python
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import gpu, buffer_ops, rocdl, range_constexpr
+from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.utils.smem_allocator import SmemAllocator
 
-def compile_preshuffle_gemm_a8(*, M, N, K, tile_m, tile_n, tile_k,
-                                 in_dtype="fp8", lds_stage=2, ...):
-    allocator = SmemAllocator(None, arch=gpu_arch, global_sym_name="smem0")
-    lds_a = allocator.allocate_array(T.i8, tile_m * tile_k)
-    # ... more allocations ...
+def compile_preshuffle_gemm(*, N, K, tile_m, tile_n, tile_k,
+                             in_dtype="fp8", out_dtype="bf16",
+                             epilogue="none", lds_stage=2, ...):
+    a_lds_elems = tile_m * tile_k
+
+    # Declare the LDS layout as a storage struct.
+    @fx.struct
+    class SharedStorage:
+        a0: fx.Array[layout_elem, a_lds_elems, 16]
+        if lds_stage == 2:
+            a1: fx.Array[layout_elem, a_lds_elems, 16]
 
     @flyc.kernel
-    def gemm_kernel(
+    def kernel_gemm(
         arg_c: fx.Tensor, arg_a: fx.Tensor, arg_b: fx.Tensor,
-        arg_scale_a: fx.Tensor, arg_scale_b: fx.Tensor,
-        m_in: fx.Int32, n_in: fx.Int32,
+        arg_scale_a: fx.Tensor, arg_scale_b: fx.Tensor, arg_bias: fx.Tensor,
+        i32_m: fx.Int32, i32_n: fx.Int32,
+        tiled_mma_arg: fx.TiledMma, tiled_copy_g2s: fx.TiledCopy,
     ):
-        tid = gpu.thread_idx.x
-        bid = gpu.block_idx.x
-        # ... complex GEMM implementation using MFMA, LDS, tiling ...
+        tid = fx.thread_idx.x
+        bid_x, bid_y, _ = fx.block_idx
+
+        gA = fx.rocdl.make_buffer_tensor(arg_a, ...)
+        gB = fx.rocdl.make_buffer_tensor(arg_b)
+        gC = fx.rocdl.make_buffer_tensor(arg_c, ...)
+
+        # Allocate LDS and take typed views over the storage fields.
+        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+        # ... GEMM implementation using MFMA, LDS, tiling ...
 
     @flyc.jit
     def launch_fn(
         arg_c: fx.Tensor, arg_a: fx.Tensor, arg_b: fx.Tensor,
-        arg_scale_a: fx.Tensor, arg_scale_b: fx.Tensor,
+        arg_scale_a: fx.Tensor, arg_scale_b: fx.Tensor, arg_bias: fx.Tensor,
         M_val: fx.Int32, N_val: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
-        gemm_kernel(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b,
-                    M_val, N_val).launch(
-            grid=(grid_x, grid_y), block=(256,),
-            smem=smem_bytes, stream=stream,
+        kernel_gemm(arg_c, arg_a, arg_b, arg_scale_a, arg_scale_b, arg_bias,
+                    M_val, N_val, tiled_mma, tiled_copy_g2s).launch(
+            grid=(grid_x, grid_y), block=(256,), stream=stream,
         )
 
     return launch_fn
 ```
+
+`M` is a runtime argument (`i32_m` / `M_val`), not a compile-time parameter, so
+one compiled kernel serves any `M`. Output post-processing is selected with
+`epilogue=` (`"none"`, `"bias"`, `"bias_relu"`, `"bias_silu"`, `"bias_gelu"`).
 
 ---
 
@@ -583,18 +676,18 @@ Writing a new kernel?
 │   └── See tests/kernels/test_vec_add.py
 │
 ├── Reduction (norm, softmax)?
-│   ├── Use warp_reduce / block_reduce from kernels/reduce.py
-│   └── See kernels/layernorm_kernel.py, kernels/softmax_kernel.py
+│   ├── Reductions are inline (wave/block reduce helpers within the kernel)
+│   └── See kernels/norm/rmsnorm_kernel.py, kernels/norm/softmax_kernel.py
 │
 ├── Matrix multiply (GEMM)?
-│   ├── Use @flyc.kernel + SmemAllocator + MFMA
-│   ├── B-preshuffle layout from mfma_preshuffle_pipeline.py
-│   └── See kernels/preshuffle_gemm.py
+│   ├── Use @flyc.kernel + fx.SharedAllocator + MFMA
+│   ├── B-preshuffle layout from kernels/mma/mfma_preshuffle_pipeline.py
+│   └── See kernels/gemm/preshuffle_gemm.py
 │
 ├── Need shared memory?
-│   ├── Use SmemAllocator with target arch
-│   ├── Call finalize() in GPU module body
-│   └── Call get_base() inside @kernel
+│   ├── Declare a @fx.struct storage layout
+│   ├── Allocate with fx.SharedAllocator().allocate(Storage).peek()
+│   └── Take .view(...) over each field inside @kernel
 │
 └── Need compile-time specialization?
     ├── Use Constexpr[T] parameters
@@ -620,8 +713,8 @@ Writing a new kernel?
 | `python/flydsl/expr/buffer_ops.py` | AMD buffer load/store operations |
 | `python/flydsl/expr/rocdl/` | ROCm dialect intrinsics (MFMA/WMMA, buffer, TDM, cluster) |
 | `python/flydsl/expr/primitive.py` | Layout algebra primitives (make_shape, crd2idx, etc.) |
-| `python/flydsl/utils/smem_allocator.py` | `SmemAllocator`, `SmemPtr`, LDS management |
-| `kernels/preshuffle_gemm.py` | Preshuffle GEMM kernel example |
-| `kernels/reduce.py` | Warp/block reduction primitives |
+| `python/flydsl/expr/gpu.py` | `SharedAllocator`, GPU ops (thread_id, barrier, ...) |
+| `python/flydsl/utils/smem_allocator.py` | Legacy `SmemAllocator` / `SmemPtr` LDS management |
+| `kernels/gemm/preshuffle_gemm.py` | Preshuffle GEMM kernel example |
 | `tests/kernels/test_vec_add.py` | Vector add kernel test |
 | `tests/kernels/test_preshuffle_gemm.py` | Preshuffle GEMM test |

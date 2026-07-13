@@ -13,12 +13,12 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.utils import align_up as _align_up
 
 
 def _require_gfx1250() -> None:
-    arch = str(get_hip_arch())
+    arch = str(get_rocm_arch())
     if not arch.startswith("gfx1250"):
         raise RuntimeError(f"Expected gfx1250 architecture, got {arch!r}")
 

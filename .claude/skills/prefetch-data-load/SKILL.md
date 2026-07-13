@@ -106,9 +106,9 @@ init_state = [_unwrap(v) for v in [next_data_A, next_data_B, acc]]
 #### Step 2: Runtime loop with loop-carried state
 
 ```python
-_start = fx.Index(0)
-_stop = fx.Index(N - 1)  # N-1 iterations; last handled in epilogue
-_step = fx.Index(1)
+_start = fx.Int64(0)
+_stop = fx.Int64(N - 1)  # N-1 iterations; last handled in epilogue
+_step = fx.Int64(1)
 
 for iv, state in range(_start, _stop, _step, init=init_state):
     # Swap: prefetched -> current
@@ -190,8 +190,8 @@ def _unpack(state):
 pf_0 = issue_bt_k_loads(partition_0)
 init_state = _pack(flatten(pf_0['kv']), pf_0['part_start'], ...)
 
-# Runtime loop (bounds MUST be fx.Index, not Python ints!)
-for iv, state in range(fx.Index(0), fx.Index(N - 1), fx.Index(1), init=init_state):
+# Runtime loop (bounds MUST be a typed DSL integer like fx.Int64, not Python ints!)
+for iv, state in range(fx.Int64(0), fx.Int64(N - 1), fx.Int64(1), init=init_state):
     kv, part_start, bt, rmax, rsum, acc = _unpack(state)
     rmax, rsum, acc = compute_qk_softmax_pv(kv, part_start, bt, rmax, rsum, acc)
     pf_next = issue_bt_k_loads(next_partition(iv + 1))
@@ -211,10 +211,13 @@ K loads needed).
 
 ### Three Critical Pitfalls
 
-1. **Loop bounds must be `fx.Index(...)`, NOT Python ints.** If you write
-   `range(0, 15, 1, init=...)`, the AST rewriter treats constant bounds as a
-   Python `range` and unrolls the loop — silently ignoring `init=`. Use
-   `fx.Index(0)`, `fx.Index(15)`, `fx.Index(1)` instead.
+1. **Loop bounds must be a typed DSL integer such as `fx.Int64(...)`, NOT a
+   Python int.** A plain int makes the AST rewriter unroll the loop and silently
+   ignore `init=`. If you write `range(0, 15, 1, init=...)`, the AST rewriter
+   treats the constant bounds as a Python `range` and unrolls; only plain
+   Python-int bounds are unrolled, so a typed bound still produces a runtime
+   `scf.for` (the rewriter index-casts non-Python-int bounds into `scf.for`).
+   Use `fx.Int64(0)`, `fx.Int64(15)`, `fx.Int64(1)` instead.
 
 2. **Prefer internal types; unwrap only at hard boundaries.** Most loop-carried
    values can remain `fx.Int32`, `fx.Float32`, `ArithValue`, or `Vector`. If a
@@ -359,7 +362,7 @@ This works because:
 - **Don't reorder loads that have data dependencies**: if `load_B` depends on the result of `load_A` (e.g., block table lookup -> cache load), they must stay sequential within the prefetch block.
 - **Don't forget to handle conditional branches**: if scale loads are conditional (`KV_QUANT_MODE`), the prefetch must replicate the same conditions.
 - **Don't break the prologue/epilogue semantics**: the prologue covers iteration 0; the runtime loop runs N-1 iterations carrying prefetched data; epilogue processes the last iteration from `results`.
-- **Don't use Python ints as loop bounds when using `init=`**: use `fx.Index(...)` or the loop will be unrolled, silently ignoring `init=`.
+- **Don't use Python ints as loop bounds when using `init=`**: use a typed DSL integer such as `fx.Int64(...)`, NOT a plain int, or the AST rewriter will unroll the loop and silently ignore `init=`.
 
 ## Verification
 
