@@ -347,7 +347,9 @@ def compile_blockscale_preshuffle_gemm(
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
                 col_local_bytes = col_a_local_i32 * c4_bytes
                 col_swz = swizzle_xor16(row_a_local, col_local_bytes, k_blocks16)
-                idx0 = preshuffle_crd2idx((fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds)  # fp8: element idx == byte off
+                idx0 = preshuffle_crd2idx(
+                    (fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds
+                )  # fp8: element idx == byte off
                 ptr_off = fx.add_offset(lds_buffer.ptr, fx.make_int_tuple(idx0))
                 i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
                 if const_expr(a_load_bytes_v == 16):
