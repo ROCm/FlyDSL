@@ -168,7 +168,7 @@ def build_silu_and_mul_fq_module(
         if const_expr(_need_fp4):
 
             def _f32_to_e2m1(qx_f32):
-                # Match fp4_utils.f32_to_mxfp4 / HIP quant: saturate, denorm,
+                # Match gemm_common_utils.f32_to_mxfp4 / HIP quant: saturate, denorm,
                 # and normal round-to-nearest-even paths.
                 qx = qx_f32.bitcast(i32)
                 s = qx & c0x80000000_i32
@@ -306,7 +306,7 @@ def build_silu_and_mul_fq_module(
                             local_max = arith.maximumf(local_max, peer)
 
                         max_i32_v = local_max.bitcast(i32)
-                        # Match fp4_utils.f32_to_e8m0(max_abs / 4): round the
+                        # Match gemm_common_utils.f32_to_e8m0(max_abs / 4): round the
                         # exponent at the 1.5x threshold before dropping mantissa.
                         max_rounded = (max_i32_v + c0x400000_i32) & c0xFF800000_i32
                         exp_field = max_rounded >> c23_i32

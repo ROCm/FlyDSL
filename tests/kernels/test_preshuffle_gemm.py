@@ -33,7 +33,7 @@ if _PYFLYDSL_SRC not in sys.path:
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
 from kernels.gemm.mxfp4_preshuffle import launch_gemm  # noqa: E402
 from kernels.gemm.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
-from tests.kernels.utils import fp4_utils  # noqa: E402
+from tests.kernels.utils import gemm_common_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant, shuffle_weight  # noqa: E402
 
@@ -395,24 +395,24 @@ def test_mfma_w4_flyc_preshuffle(
     a_fp32_padded[:M] = a_fp32[:M]
     b_fp32_padded[:N] = b_fp32[:N]
 
-    a_q, scale_a_orig, _ = fp4_utils.per_1x32_f4_quant(a_fp32_padded)
+    a_q, scale_a_orig, _ = gemm_common_utils.per_1x32_f4_quant(a_fp32_padded)
     a_q = a_q[:M]
-    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+    scale_a = gemm_common_utils.shuffle_scale_w4(scale_a_orig, 1, False)
 
-    b_q, scale_b, _ = fp4_utils.per_1x32_f4_quant(b_fp32_padded)
+    b_q, scale_b, _ = gemm_common_utils.per_1x32_f4_quant(b_fp32_padded)
     b_q = b_q[:N]
 
     def run_torch_w4(x, w, x_scales, w_scales, dtype):
-        x_f32 = fp4_utils.mxfp4_to_f32(x)
-        w_f32 = fp4_utils.mxfp4_to_f32(w)
-        x_scales_f32 = fp4_utils.e8m0_to_f32(x_scales[: x.shape[0]].repeat_interleave(32, dim=1))
-        w_scales_f32 = fp4_utils.e8m0_to_f32(w_scales[: w.shape[0]].repeat_interleave(32, dim=1))
+        x_f32 = gemm_common_utils.mxfp4_to_f32(x)
+        w_f32 = gemm_common_utils.mxfp4_to_f32(w)
+        x_scales_f32 = gemm_common_utils.e8m0_to_f32(x_scales[: x.shape[0]].repeat_interleave(32, dim=1))
+        w_scales_f32 = gemm_common_utils.e8m0_to_f32(w_scales[: w.shape[0]].repeat_interleave(32, dim=1))
         return torch.mm(x_f32 * x_scales_f32, (w_f32 * w_scales_f32).T).to(dtype)
 
     c_ref = run_torch_w4(a_q, b_q, scale_a_orig, scale_b, torch.float32)
 
-    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
-    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
+    b_shuffled = gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_b_shuffled = gemm_common_utils.shuffle_scale_w4(scale_b, 1, False)
 
     torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
     c_out = torch.zeros((M, N), dtype=torch_out_dtype, device=device)
@@ -521,19 +521,23 @@ def test_mfma_a6w4_preshuffle(
     b_fp32_padded[:N] = b_fp32
 
     # A: MXFP6 E2M3, FP8-padded (1 byte/code).
-    a_pad, scale_a_orig, a_unpacked = fp4_utils.per_1x32_f6_quant(a_fp32_padded)
+    a_pad, scale_a_orig, a_unpacked = gemm_common_utils.per_1x32_f6_quant(a_fp32_padded)
     a_codes = a_pad[:M]
-    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+    scale_a = gemm_common_utils.shuffle_scale_w4(scale_a_orig, 1, False)
 
     # B: MXFP4 E2M1, identical to test_mfma_w4_flyc_preshuffle.
-    b_q, scale_b, _ = fp4_utils.per_1x32_f4_quant(b_fp32_padded)
+    b_q, scale_b, _ = gemm_common_utils.per_1x32_f4_quant(b_fp32_padded)
     b_q = b_q[:N]
-    b_shuffled = fp4_utils.shuffle_weight_w4(b_q, 16, False, False)
-    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b, 1, False)
+    b_shuffled = gemm_common_utils.shuffle_weight_w4(b_q, 16, False, False)
+    scale_b_shuffled = gemm_common_utils.shuffle_scale_w4(scale_b, 1, False)
 
     # Reference: dequant(A) @ dequant(B).T in fp32.
-    a_deq = fp4_utils.fp6_e2m3_to_f32(a_unpacked) * fp4_utils.e8m0_to_f32(scale_a_orig[:M].repeat_interleave(32, dim=1))
-    b_deq = fp4_utils.mxfp4_to_f32(b_q) * fp4_utils.e8m0_to_f32(scale_b[:N].repeat_interleave(32, dim=1))
+    a_deq = gemm_common_utils.fp6_e2m3_to_f32(a_unpacked) * gemm_common_utils.e8m0_to_f32(
+        scale_a_orig[:M].repeat_interleave(32, dim=1)
+    )
+    b_deq = gemm_common_utils.mxfp4_to_f32(b_q) * gemm_common_utils.e8m0_to_f32(
+        scale_b[:N].repeat_interleave(32, dim=1)
+    )
     c_ref = torch.mm(a_deq, b_deq.T).to(torch.float32)
 
     torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
@@ -634,18 +638,18 @@ def test_mfma_a8w8_preshuffle(
     b_fp32_padded[:N] = b_fp32
 
     # A: MXFP8 E4M3, 1 byte/code, row-major (not preshuffled). B: MXFP8, preshuffled 16x16.
-    a_q, scale_a_orig = fp4_utils.per_1x32_f8_quant(a_fp32_padded)
+    a_q, scale_a_orig = gemm_common_utils.per_1x32_f8_quant(a_fp32_padded)
     a_codes = a_q[:M]
-    scale_a = fp4_utils.shuffle_scale_w4(scale_a_orig, 1, False)
+    scale_a = gemm_common_utils.shuffle_scale_w4(scale_a_orig, 1, False)
 
-    w_q, scale_b_orig = fp4_utils.per_1x32_f8_quant(b_fp32_padded)
+    w_q, scale_b_orig = gemm_common_utils.per_1x32_f8_quant(b_fp32_padded)
     w_q = w_q[:N]
-    b_shuffled = fp4_utils.shuffle_weight_w4(w_q, 16, False, False)
-    scale_b_shuffled = fp4_utils.shuffle_scale_w4(scale_b_orig, 1, False)
+    b_shuffled = gemm_common_utils.shuffle_weight_w4(w_q, 16, False, False)
+    scale_b_shuffled = gemm_common_utils.shuffle_scale_w4(scale_b_orig, 1, False)
 
     # Reference: dequant(A) @ dequant(B).T in fp32 (torch decodes fp8 natively).
-    a_deq = a_codes.float() * fp4_utils.e8m0_to_f32(scale_a_orig[:M].repeat_interleave(32, dim=1))
-    b_deq = w_q.float() * fp4_utils.e8m0_to_f32(scale_b_orig[:N].repeat_interleave(32, dim=1))
+    a_deq = a_codes.float() * gemm_common_utils.e8m0_to_f32(scale_a_orig[:M].repeat_interleave(32, dim=1))
+    b_deq = w_q.float() * gemm_common_utils.e8m0_to_f32(scale_b_orig[:N].repeat_interleave(32, dim=1))
     c_ref = torch.mm(a_deq, b_deq.T).to(torch.float32)
 
     torch_out_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
