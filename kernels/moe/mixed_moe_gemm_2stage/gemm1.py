@@ -1896,7 +1896,7 @@ def compile_mixed_moe_gemm1(
 
                 def _f32_to_e2m1(qx_f32):
                     """Convert a scaled f32 value to fp4 (e2m1) 4-bit integer."""
-                    # Match fp4_utils.f32_to_mxfp4 / HIP quant: saturate, denorm,
+                    # Match gemm_common_utils.f32_to_mxfp4 / HIP quant: saturate, denorm,
                     # and normal round-to-nearest-even paths.
                     qx = qx_f32.bitcast(T.i32)
                     s = qx & _c0x80000000_i32
@@ -1942,7 +1942,7 @@ def compile_mixed_moe_gemm1(
                             local_max = arith.maximumf(local_max, peer)
 
                         max_i32 = local_max.bitcast(T.i32)
-                        # Match fp4_utils.f32_to_e8m0(max_abs / 4): round the
+                        # Match gemm_common_utils.f32_to_e8m0(max_abs / 4): round the
                         # exponent at the 1.5x threshold before dropping mantissa.
                         max_rounded = (max_i32 + _c0x400000_i32) & _c0xFF800000_i32
                         exp_field = max_rounded >> _c23_i32
