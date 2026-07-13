@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-12T21:35:34Z",
+ "updated": "2026-07-13T01:00:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29216115273,
+   "pr": 814,
+   "commit": "6a6b64e19207837a08cf576072dee2d95b4ac751",
+   "branch": "lhc/kernels-tier2",
+   "event": "pull_request",
+   "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29216115273",
+   "created_at": "2026-07-13T00:49:14Z",
+   "updated_at": "2026-07-13T00:49:15Z",
+   "actor": "Phil-amd",
+   "jobs": []
+  },
+  {
+   "run_id": 29215749921,
+   "pr": null,
+   "commit": "75eb6e9e0072b0e2fe82b739ed0f4de4d9764d81",
+   "branch": "lhc/kernels-tier2",
+   "event": "pull_request",
+   "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921",
+   "created_at": "2026-07-13T00:38:23Z",
+   "updated_at": "2026-07-13T00:39:45Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T00:39:44Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921/job/86711275431"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-13T00:39:35Z",
+     "completed_at": "2026-07-13T00:52:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921/job/86711275433"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T00:39:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921/job/86711275436"
+    }
+   ]
+  },
   {
    "run_id": 29200854715,
    "pr": 837,
@@ -1462,7 +1520,7 @@
   },
   {
    "run_id": 29082800910,
-   "pr": 814,
+   "pr": null,
    "commit": "1f9de65b20deab0c317cbf40575e9e22c716b851",
    "branch": "lhc/kernels-tier2",
    "event": "pull_request",
@@ -1588,36 +1646,6 @@
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29078750386",
    "created_at": "2026-07-10T08:07:01Z",
    "updated_at": "2026-07-10T08:25:00Z",
-   "actor": "fsx950223",
-   "jobs": []
-  },
-  {
-   "run_id": 29077417739,
-   "pr": 825,
-   "commit": "45b734b92f6bd3da91a101b4753dee99d4af17bf",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29077417739",
-   "created_at": "2026-07-10T07:41:15Z",
-   "updated_at": "2026-07-10T08:07:02Z",
-   "actor": "fsx950223",
-   "jobs": []
-  },
-  {
-   "run_id": 29076865561,
-   "pr": 825,
-   "commit": "ed684b8850ae3665e801f74997a17ad3499ec0f1",
-   "branch": "pa-decode-tile",
-   "event": "pull_request",
-   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29076865561",
-   "created_at": "2026-07-10T07:30:05Z",
-   "updated_at": "2026-07-10T07:41:16Z",
    "actor": "fsx950223",
    "jobs": []
   }
