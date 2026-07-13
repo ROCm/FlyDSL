@@ -1326,6 +1326,15 @@ def build_flash_attn_dualwave_swp_module(
                 has_side_effects=True,
             )
 
+        def _rescale_o(v_o, m_row, l_row, m_tile_max, v_p):
+            m_new = _fmax(m_row, m_tile_max)
+            corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new)))
+            _scale_o(v_o, corr)
+            v_o = _anchor_v_o(v_o)
+            v_p = _scale_v_p(v_p, corr)
+            l_row = _fmul(l_row, corr)
+            return v_o, m_new, l_row, v_p
+
         @flyc.jit
         def _lazy_rescale_o(v_o, m_row, l_row, m_tile_max, v_p):
             """DUALWAVE_SWP lazy rescale before the remaining MMA1 steps."""
@@ -1340,40 +1349,30 @@ def build_flash_attn_dualwave_swp_module(
             all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
             _debug_count_lazy_branch(all_below)
 
-            m_out = _raw(m_row)
-            l_out = _raw(l_row)
-            vp_out = _v_p_to_vec32(v_p)
-            if const_expr(D_CHUNKS == 2):
-                o0, o1 = _raw(v_o[0]), _raw(v_o[1])
-                if fx.Boolean(all_below):
-                    pass
-                else:
-                    corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
-                    scaled_accs = list(v_o)
-                    _scale_o(scaled_accs, corr)
-                    o0, o1 = _raw(scaled_accs[0]), _raw(scaled_accs[1])
-                    vp_out = _v_p_to_vec32(_scale_v_p(v_p, corr))
-                    l_out = _raw(_fmul(l_row, corr))
-                    m_out = _anchor_scalar_f32(m_tile_max)
-                return ([o0, o1], m_out, l_out, _v_vec32_to_p(vp_out))
+            # When all rows are below the rescale threshold the correction is a no-op.
+            # A Python list cannot cross a dynamic `if`, so drive the scf.if directly with
+            # the D_CHUNKS accumulators + packed-v_p/l/m as explicit scalar state (works for
+            # both D_CHUNKS==2 and ==4). all_below true -> keep; false -> rescale.
+            _state = [_raw(v_o[dc]) for dc in range(D_CHUNKS)]
+            _state += [_v_p_to_vec32(v_p), _raw(l_row), _raw(m_row)]
+            _names = tuple("_lr%d" % i for i in range(D_CHUNKS + 3))
 
-            o0, o1, o2, o3 = (_raw(v_o[0]), _raw(v_o[1]), _raw(v_o[2]), _raw(v_o[3]))
-            if fx.Boolean(all_below):
-                pass
-            else:
+            def _rescale(_n, *_st):
                 corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max)))
                 scaled_accs = list(v_o)
                 _scale_o(scaled_accs, corr)
-                o0, o1, o2, o3 = (
-                    _raw(scaled_accs[0]),
-                    _raw(scaled_accs[1]),
-                    _raw(scaled_accs[2]),
-                    _raw(scaled_accs[3]),
-                )
-                vp_out = _v_p_to_vec32(_scale_v_p(v_p, corr))
-                l_out = _raw(_fmul(l_row, corr))
-                m_out = _anchor_scalar_f32(m_tile_max)
-            return ([o0, o1, o2, o3], m_out, l_out, _v_vec32_to_p(vp_out))
+                out = [_raw(scaled_accs[dc]) for dc in range(D_CHUNKS)]
+                out.append(_v_p_to_vec32(_scale_v_p(v_p, corr)))
+                out.append(_raw(_fmul(l_row, corr)))
+                out.append(_anchor_scalar_f32(m_tile_max))
+                return out
+
+            _res = scf_if_dispatch(all_below, lambda *_a: None, _rescale, state_names=_names, state_values=_state)
+            o_out = list(_res[0:D_CHUNKS])
+            vp_out = _res[D_CHUNKS]
+            l_out = _res[D_CHUNKS + 1]
+            m_out = _res[D_CHUNKS + 2]
+            return (o_out, m_out, l_out, _v_vec32_to_p(vp_out))
 
         @flyc.jit
         def _zero_o_block():
@@ -1609,13 +1608,7 @@ def build_flash_attn_dualwave_swp_module(
                 if const_expr(DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_0 = _lazy_rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
                 else:
-                    m_new_a = _fmax(m_row, m_tile_max_a)
-                    corr_a = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_a)))
-                    _scale_o(v_o, corr_a)
-                    v_o = _anchor_v_o(v_o)
-                    v_p_0 = _scale_v_p(v_p_0, corr_a)
-                    l_row = _fmul(l_row, corr_a)
-                    m_row = m_new_a
+                    v_o, m_row, l_row, v_p_0 = _rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
                 v_o = _mma1_step_k(1, v_p_0, v_v, v_o)
                 v_o = _mma1_step_k(2, v_p_0, v_v, v_o)
                 v_o = _mma1_step_k(3, v_p_0, v_v, v_o)
@@ -1710,13 +1703,7 @@ def build_flash_attn_dualwave_swp_module(
                 if const_expr(DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_1 = _lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
                 else:
-                    m_new_b = _fmax(m_row, m_tile_max_b)
-                    corr_b = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new_b)))
-                    _scale_o(v_o, corr_b)
-                    v_o = _anchor_v_o(v_o)
-                    v_p_1 = _scale_v_p(v_p_1, corr_b)
-                    l_row = _fmul(l_row, corr_b)
-                    m_row = m_new_b
+                    v_o, m_row, l_row, v_p_1 = _rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
                 v_v = v_packs_b
                 v_o = _mma1_step_k(1, v_p_1, v_v, v_o)
                 v_o = _mma1_step_k(2, v_p_1, v_v, v_o)
