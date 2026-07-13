@@ -3,9 +3,9 @@
 
 """Shared gfx950 DUALWAVE_SWP flash-attention helpers.
 
-Low-level primitives shared by the gfx950 DUALWAVE_SWP flash attention kernels:
-ds_read transpose loads, s_waitcnt encoding, exec-mask read, LDS alias-scope
-attributes, and split-K workspace sizing.
+Low-level primitives shared by the bf16/fp16 and fp8 gfx950 DUALWAVE_SWP flash
+attention kernels: ds_read transpose loads, s_waitcnt encoding, exec-mask read,
+LDS alias-scope attributes, and split-K workspace sizing.
 """
 
 import math as host_math
@@ -34,6 +34,24 @@ def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
         raw_type,
         [_raw(addr_i32)],
         f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n",
+        "=v,v,~{memory}",
+        has_side_effects=True,
+    )
+    return vector.BitCastOp(result_type, raw).result
+
+
+def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
+    """gfx950 ds_read_b64_tr_b8 (8-bit transpose) with immediate byte offset.
+
+    Returns 64 bits = 8 fp8 (the fp8 analog of ds_read_b64_tr_b16's 4 bf16),
+    used for the fp8 V transpose load.
+    """
+    imm = int(imm_offset)
+    raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
+    raw = llvm.inline_asm(
+        raw_type,
+        [_raw(addr_i32)],
+        f"ds_read_b64_tr_b8 $0, $1 offset:{imm}\n",
         "=v,v,~{memory}",
         has_side_effects=True,
     )
