@@ -27,7 +27,7 @@ from kernels.gemm.gemm_fp8fp4_gfx1250 import (  # noqa: E402
     compile_mxscale_gemm,
     compile_ptpc_gemm,
 )
-from tests.kernels.utils import fp4_utils  # noqa: E402
+from tests.kernels.utils import gemm_common_utils  # noqa: E402
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -112,16 +112,16 @@ def _fp4_e2m1_packed_fill(rows: int, cols: int, value: float) -> torch.Tensor:
     # would land on 0 and make the whole weight tensor vanish.
     snapped = _nearest_mxfp4_value(value)
     dense = torch.full((rows, cols), float(snapped), dtype=torch.float32)
-    return fp4_utils.f32_to_mxfp4(dense).view(torch.uint8)
+    return gemm_common_utils.f32_to_mxfp4(dense).view(torch.uint8)
 
 
 def _random_ab_inputs(M: int, N: int, K: int, data_format: str):
     if data_format == "a8w4":
         a = random_fp8_data(M, K)
-        b = fp4_utils.random_fp4_packed(N, K)
+        b = gemm_common_utils.random_fp4_packed(N, K)
     elif data_format == "fp4":
-        a = fp4_utils.random_fp4_packed(M, K)
-        b = fp4_utils.random_fp4_packed(N, K)
+        a = gemm_common_utils.random_fp4_packed(M, K)
+        b = gemm_common_utils.random_fp4_packed(N, K)
     elif data_format == "fp8":
         a = random_fp8_data(M, K)
         b = random_fp8_data(N, K)
@@ -132,7 +132,7 @@ def _random_ab_inputs(M: int, N: int, K: int, data_format: str):
 
 def _random_mxscale_inputs(M: int, N: int, K: int, data_format: str):
     a, b = _random_ab_inputs(M, N, K, data_format)
-    return a, b, fp4_utils.random_e8m0(M, K // SCALE_BLOCK), fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+    return a, b, gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK), gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK)
 
 
 def _const_fill_inputs(M, N, K, data_format: str, value: float):
@@ -179,7 +179,7 @@ def _fill_mode_label(fill_spec, data_format: str) -> str:
 
 
 def _has_nonzero_quantized_values(tensor: torch.Tensor, data_format: str) -> bool:
-    convert = fp4_utils.mxfp4_to_f32 if data_format == "fp4" else fp4_utils.fp8_e4m3_to_f32
+    convert = gemm_common_utils.mxfp4_to_f32 if data_format == "fp4" else gemm_common_utils.fp8_e4m3_to_f32
     return bool(convert(tensor.view(torch.uint8)).abs().max().item() > 0)
 
 
@@ -195,8 +195,8 @@ def _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, convert_fn, convert_
     """Reference scaled GEMM: D = (A * A_scale) @ (B * B_scale)^T."""
     a_f32 = convert_fn(a.view(torch.uint8))[:M, :K]
     b_f32 = (convert_fn_b or convert_fn)(b.view(torch.uint8))[:N, :K]
-    a_sc = fp4_utils.e8m0_to_f32(a_scale.view(torch.uint8))
-    b_sc = fp4_utils.e8m0_to_f32(b_scale.view(torch.uint8))
+    a_sc = gemm_common_utils.e8m0_to_f32(a_scale.view(torch.uint8))
+    b_sc = gemm_common_utils.e8m0_to_f32(b_scale.view(torch.uint8))
     a_sc_exp = a_sc.repeat_interleave(SCALE_BLOCK, dim=-1)[:M, :K]
     b_sc_exp = b_sc.repeat_interleave(SCALE_BLOCK, dim=-1)[:N, :K]
     return torch.matmul(a_f32 * a_sc_exp, (b_f32 * b_sc_exp).T)
@@ -208,8 +208,8 @@ def reference_ptpc_gemm(data_format, a, b, sa, sb, M, N, K):
     data_format="fp8": FP8 activation + FP8 weight.
     data_format="a8w4": FP8 activation + FP4 (E2M1) weight.
     """
-    a_f32 = fp4_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K]
-    convert_b = fp4_utils.mxfp4_to_f32 if data_format == "a8w4" else fp4_utils.fp8_e4m3_to_f32
+    a_f32 = gemm_common_utils.fp8_e4m3_to_f32(a.view(torch.uint8))[:M, :K]
+    convert_b = gemm_common_utils.mxfp4_to_f32 if data_format == "a8w4" else gemm_common_utils.fp8_e4m3_to_f32
     b_f32 = convert_b(b.view(torch.uint8))[:N, :K]
     raw = torch.matmul(a_f32, b_f32.T)
     return raw * sa[:M].view(M, 1) * sb[:N].view(1, N)
@@ -220,12 +220,20 @@ def _reference_gemm(scale_mode: str, data_format: str, a, b, a_scale, b_scale, M
         return reference_ptpc_gemm(data_format, a, b, a_scale, b_scale, M, N, K)
     if data_format == "a8w4":
         return _reference_scaled_gemm(
-            a, b, a_scale, b_scale, M, N, K, fp4_utils.fp8_e4m3_to_f32, convert_fn_b=fp4_utils.mxfp4_to_f32
+            a,
+            b,
+            a_scale,
+            b_scale,
+            M,
+            N,
+            K,
+            gemm_common_utils.fp8_e4m3_to_f32,
+            convert_fn_b=gemm_common_utils.mxfp4_to_f32,
         )
     if data_format == "fp4":
-        return _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, fp4_utils.mxfp4_to_f32)
+        return _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, gemm_common_utils.mxfp4_to_f32)
     if data_format == "fp8":
-        return _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, fp4_utils.fp8_e4m3_to_f32)
+        return _reference_scaled_gemm(a, b, a_scale, b_scale, M, N, K, gemm_common_utils.fp8_e4m3_to_f32)
     raise ValueError(f"unsupported data_format={data_format!r}")
 
 
@@ -469,7 +477,7 @@ def _run_gemm_test(
         _expect_shape("B scale", b_scale, (kernel_n,))
         a = _with_strided_a(a, problem_shape, lda)
 
-    b = fp4_utils.preshuffle_b_16x16(b, kernel_n, kernel_k // pack_b)
+    b = gemm_common_utils.preshuffle_b_16x16(b, kernel_n, kernel_k // pack_b)
 
     a_gpu = a.cuda()
     b_gpu = b.cuda()
@@ -956,19 +964,19 @@ def test_mxscale_gemm_cudagraph(data_format, M, N, K, tile_m, tile_n, tile_k, m_
     # because we pick a clean shape).
     torch.manual_seed(0)
     if is_fp4:
-        a = fp4_utils.random_fp4_packed(M, K)
-        b = fp4_utils.random_fp4_packed(N, K)
+        a = gemm_common_utils.random_fp4_packed(M, K)
+        b = gemm_common_utils.random_fp4_packed(N, K)
     else:
         a = random_fp8_data(M, K)
         b = random_fp8_data(N, K)
-    a_scale = fp4_utils.random_e8m0(M, K // SCALE_BLOCK)
-    b_scale = fp4_utils.random_e8m0(N, K // SCALE_BLOCK)
+    a_scale = gemm_common_utils.random_e8m0(M, K // SCALE_BLOCK)
+    b_scale = gemm_common_utils.random_e8m0(N, K // SCALE_BLOCK)
 
     ascale_load_path = _select_ascale_load_path(M)
     a_scale_ps = _prepare_a_scale_for_path(a_scale, ascale_load_path)
     b_scale_ps = preshuffle_scale(b_scale)
     pack_b = 2 if is_fp4 else 1
-    b_ps = fp4_utils.preshuffle_b_16x16(b, N, K // pack_b)
+    b_ps = gemm_common_utils.preshuffle_b_16x16(b, N, K // pack_b)
 
     a_gpu = a.cuda()
     b_gpu = b_ps.cuda()
@@ -1587,7 +1595,7 @@ def _run_benchmark(args):
             print(f"  Fill mode: const={value:g} (FP8 byte=0x{fp8_byte:02x}), {b_note}, sa=sb=1.0")
         else:
             a_raw = random_fp8_data(M, K)
-            b_raw = fp4_utils.random_fp4_packed(N, K) if is_a8w4 else random_fp8_data(N, K)
+            b_raw = gemm_common_utils.random_fp4_packed(N, K) if is_a8w4 else random_fp8_data(N, K)
             a_scale = (0.5 + torch.rand(M, dtype=torch.float32)).contiguous()
             b_scale = (0.5 + torch.rand(N, dtype=torch.float32)).contiguous()
             print(f"  Fill mode: random fp8 A / {b_kind} B, fp32 per-token/per-channel scales")
@@ -1596,7 +1604,7 @@ def _run_benchmark(args):
         _validate_ab_inputs(a, b, problem_shape)
         _expect_shape("A scale", a_scale, (kernel_m,))
         _expect_shape("B scale", b_scale, (kernel_n,))
-        b = fp4_utils.preshuffle_b_16x16(b, kernel_n, K_packed_b)
+        b = gemm_common_utils.preshuffle_b_16x16(b, kernel_n, K_packed_b)
     else:
         a, b, a_scale, b_scale, fill_spec = _fill_mode_inputs(
             M, N, K, data_format, getattr(args, "fill_mode", "random")
@@ -1608,7 +1616,7 @@ def _run_benchmark(args):
         b_scale = preshuffle_scale(b_scale)
 
         K_packed = kernel_k // PACK_B
-        b = fp4_utils.preshuffle_b_16x16(b, kernel_n, K_packed)
+        b = gemm_common_utils.preshuffle_b_16x16(b, kernel_n, K_packed)
 
     a_gpu = a.cuda()
     b_gpu = b.cuda()
@@ -1875,7 +1883,7 @@ def _run_graph_verify(args):
     a_scale = _prepare_a_scale_for_path(a_scale, ascale_load_path)
     b_scale = preshuffle_scale(b_scale)
     K_packed = kernel_k // problem_shape["pack_b"]
-    b = fp4_utils.preshuffle_b_16x16(b, kernel_n, K_packed)
+    b = gemm_common_utils.preshuffle_b_16x16(b, kernel_n, K_packed)
 
     a_gpu = a.cuda()
     b_gpu = b.cuda()
