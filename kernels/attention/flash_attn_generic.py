@@ -313,6 +313,9 @@ def build_flash_attn_func_module_primary(
         mfma_pack_type = v8f16_type if USE_K16 else v4f16_type
         MFMA_LANE_K = 8 if USE_K16 else 4
 
+        # gfx950 (K16) GEMM MMA via the layout MMA atom (same as flash_attn_gfx950).
+        _mma_atom_k16 = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, elem_dtype))
+
         def _mfma(mfma_fn, a, b, c):
             return mfma_fn(v16f32_type, [a, b, c])
 
@@ -329,14 +332,13 @@ def build_flash_attn_func_module_primary(
             return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
 
         def mfma_acc(a, b, c):
+            if const_expr(USE_K16):
+                return fly.mma_atom_call_ssa([v16f32_type], _mma_atom_k16, a, b, c)
+            # gfx942 K8 fallback (dead on gfx950); bf16 needs an int16 bitcast.
             if const_expr(dtype_str == "bf16"):
-                if const_expr(USE_K16):
-                    return _mfma(rocdl.mfma_f32_32x32x16_bf16, a, b, c)
                 a = Vec(a).bitcast(fx.Int16)
                 b = Vec(b).bitcast(fx.Int16)
                 return _mfma(rocdl.mfma_f32_32x32x8bf16_1k, a, b, c)
-            if const_expr(USE_K16):
-                return _mfma(rocdl.mfma_f32_32x32x16_f16, a, b, c)
             return _mfma(rocdl.mfma_f32_32x32x8f16, a, b, c)
 
         seq_len_v = fx.Index(seq_len)
@@ -982,172 +984,51 @@ def build_flash_attn_func_module_primary(
                     s_raw_hi.append(Vec(s_acc_hi)[r])
 
                 if const_expr(CAUSAL):
+                    # Keep the runtime tile_needs_mask guard (below-diagonal tiles skip the
+                    # 32 selects) but fold the selects into a loop. A Python list cannot be
+                    # carried across a dynamic `if`, so drive the scf.if directly with the 32
+                    # scalar scores as explicit state -> byte-identical ISA to the unrolled form.
+                    # KV_VECTORIZED applies sigma(kv) in the K load, so the score at logical
+                    # n_pos holds physical kv = kv_start + sigma(n_pos).
                     kv_start_i32 = fx.Int32(kv_start)
                     lane_div_32_i32 = fx.Int32(lane_div_32)
                     q_start_i32 = fx.Int32(q_start) + delta_i32
                     q_mask_limit_i32 = q_row_i32 + delta_i32
                     max_kv_col_i32 = kv_start_i32 + fx.Int32(BLOCK_N - 1)
                     tile_needs_mask = max_kv_col_i32 > q_start_i32
-                    s_raw_lo_0 = s_raw_lo[0]
-                    s_raw_lo_1 = s_raw_lo[1]
-                    s_raw_lo_2 = s_raw_lo[2]
-                    s_raw_lo_3 = s_raw_lo[3]
-                    s_raw_lo_4 = s_raw_lo[4]
-                    s_raw_lo_5 = s_raw_lo[5]
-                    s_raw_lo_6 = s_raw_lo[6]
-                    s_raw_lo_7 = s_raw_lo[7]
-                    s_raw_lo_8 = s_raw_lo[8]
-                    s_raw_lo_9 = s_raw_lo[9]
-                    s_raw_lo_10 = s_raw_lo[10]
-                    s_raw_lo_11 = s_raw_lo[11]
-                    s_raw_lo_12 = s_raw_lo[12]
-                    s_raw_lo_13 = s_raw_lo[13]
-                    s_raw_lo_14 = s_raw_lo[14]
-                    s_raw_lo_15 = s_raw_lo[15]
-                    s_raw_hi_0 = s_raw_hi[0]
-                    s_raw_hi_1 = s_raw_hi[1]
-                    s_raw_hi_2 = s_raw_hi[2]
-                    s_raw_hi_3 = s_raw_hi[3]
-                    s_raw_hi_4 = s_raw_hi[4]
-                    s_raw_hi_5 = s_raw_hi[5]
-                    s_raw_hi_6 = s_raw_hi[6]
-                    s_raw_hi_7 = s_raw_hi[7]
-                    s_raw_hi_8 = s_raw_hi[8]
-                    s_raw_hi_9 = s_raw_hi[9]
-                    s_raw_hi_10 = s_raw_hi[10]
-                    s_raw_hi_11 = s_raw_hi[11]
-                    s_raw_hi_12 = s_raw_hi[12]
-                    s_raw_hi_13 = s_raw_hi[13]
-                    s_raw_hi_14 = s_raw_hi[14]
-                    s_raw_hi_15 = s_raw_hi[15]
 
-                    if tile_needs_mask:
-                        # KV_VECTORIZED applies sigma(kv) in the K load, so the score at
-                        # logical n_pos holds physical kv = kv_start + sigma(n_pos):
-                        # lane_off bit2 -> bit3 (lane_div_32*8) and _off -> sigma(_off).
+                    # Everything the guard executed stays inside the branch (lane_off/_MOFF
+                    # included) and the state/yield order is interleaved (lo_r, hi_r per r),
+                    # so the emitted scf.if is structurally identical to the unrolled form
+                    # and the ISA stays byte-identical.
+                    def _apply_causal_mask(_names, *scores):
                         if const_expr(KV_VECTORIZED):
                             lane_off_i32 = lane_div_32_i32 * fx.Int32(8)
                             _MOFF = (0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23)
                         else:
                             lane_off_i32 = lane_div_32_i32 * fx.Int32(4)
                             _MOFF = (0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27)
-                        kv_col_lo_0 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[0])
-                        s_raw_lo_0 = ArithValue(kv_col_lo_0 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_0)
-                        s_raw_hi_0 = ArithValue(kv_col_lo_0 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_0
-                        )
-                        kv_col_lo_1 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[1])
-                        s_raw_lo_1 = ArithValue(kv_col_lo_1 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_1)
-                        s_raw_hi_1 = ArithValue(kv_col_lo_1 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_1
-                        )
-                        kv_col_lo_2 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[2])
-                        s_raw_lo_2 = ArithValue(kv_col_lo_2 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_2)
-                        s_raw_hi_2 = ArithValue(kv_col_lo_2 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_2
-                        )
-                        kv_col_lo_3 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[3])
-                        s_raw_lo_3 = ArithValue(kv_col_lo_3 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_3)
-                        s_raw_hi_3 = ArithValue(kv_col_lo_3 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_3
-                        )
-                        kv_col_lo_4 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[4])
-                        s_raw_lo_4 = ArithValue(kv_col_lo_4 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_4)
-                        s_raw_hi_4 = ArithValue(kv_col_lo_4 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_4
-                        )
-                        kv_col_lo_5 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[5])
-                        s_raw_lo_5 = ArithValue(kv_col_lo_5 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_5)
-                        s_raw_hi_5 = ArithValue(kv_col_lo_5 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_5
-                        )
-                        kv_col_lo_6 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[6])
-                        s_raw_lo_6 = ArithValue(kv_col_lo_6 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_6)
-                        s_raw_hi_6 = ArithValue(kv_col_lo_6 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_6
-                        )
-                        kv_col_lo_7 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[7])
-                        s_raw_lo_7 = ArithValue(kv_col_lo_7 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_7)
-                        s_raw_hi_7 = ArithValue(kv_col_lo_7 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_7
-                        )
-                        kv_col_lo_8 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[8])
-                        s_raw_lo_8 = ArithValue(kv_col_lo_8 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_8)
-                        s_raw_hi_8 = ArithValue(kv_col_lo_8 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_8
-                        )
-                        kv_col_lo_9 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[9])
-                        s_raw_lo_9 = ArithValue(kv_col_lo_9 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_9)
-                        s_raw_hi_9 = ArithValue(kv_col_lo_9 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_9
-                        )
-                        kv_col_lo_10 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[10])
-                        s_raw_lo_10 = ArithValue(kv_col_lo_10 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_10)
-                        s_raw_hi_10 = ArithValue(kv_col_lo_10 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_10
-                        )
-                        kv_col_lo_11 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[11])
-                        s_raw_lo_11 = ArithValue(kv_col_lo_11 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_11)
-                        s_raw_hi_11 = ArithValue(kv_col_lo_11 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_11
-                        )
-                        kv_col_lo_12 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[12])
-                        s_raw_lo_12 = ArithValue(kv_col_lo_12 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_12)
-                        s_raw_hi_12 = ArithValue(kv_col_lo_12 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_12
-                        )
-                        kv_col_lo_13 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[13])
-                        s_raw_lo_13 = ArithValue(kv_col_lo_13 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_13)
-                        s_raw_hi_13 = ArithValue(kv_col_lo_13 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_13
-                        )
-                        kv_col_lo_14 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[14])
-                        s_raw_lo_14 = ArithValue(kv_col_lo_14 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_14)
-                        s_raw_hi_14 = ArithValue(kv_col_lo_14 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_14
-                        )
-                        kv_col_lo_15 = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[15])
-                        s_raw_lo_15 = ArithValue(kv_col_lo_15 > q_mask_limit_i32).select(c_neg_inf, s_raw_lo_15)
-                        s_raw_hi_15 = ArithValue(kv_col_lo_15 + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
-                            c_neg_inf, s_raw_hi_15
-                        )
+                        out = []
+                        for r in range_constexpr(16):
+                            kv_col = kv_start_i32 + lane_off_i32 + fx.Int32(_MOFF[r])
+                            out.append(ArithValue(kv_col > q_mask_limit_i32).select(c_neg_inf, scores[2 * r]))
+                            out.append(
+                                ArithValue(kv_col + fx.Int32(K_SUB_N) > q_mask_limit_i32).select(
+                                    c_neg_inf, scores[2 * r + 1]
+                                )
+                            )
+                        return out
 
-                    s_raw_lo = [
-                        s_raw_lo_0,
-                        s_raw_lo_1,
-                        s_raw_lo_2,
-                        s_raw_lo_3,
-                        s_raw_lo_4,
-                        s_raw_lo_5,
-                        s_raw_lo_6,
-                        s_raw_lo_7,
-                        s_raw_lo_8,
-                        s_raw_lo_9,
-                        s_raw_lo_10,
-                        s_raw_lo_11,
-                        s_raw_lo_12,
-                        s_raw_lo_13,
-                        s_raw_lo_14,
-                        s_raw_lo_15,
-                    ]
-                    s_raw_hi = [
-                        s_raw_hi_0,
-                        s_raw_hi_1,
-                        s_raw_hi_2,
-                        s_raw_hi_3,
-                        s_raw_hi_4,
-                        s_raw_hi_5,
-                        s_raw_hi_6,
-                        s_raw_hi_7,
-                        s_raw_hi_8,
-                        s_raw_hi_9,
-                        s_raw_hi_10,
-                        s_raw_hi_11,
-                        s_raw_hi_12,
-                        s_raw_hi_13,
-                        s_raw_hi_14,
-                        s_raw_hi_15,
-                    ]
+                    _mask_names = tuple("_sm%d" % i for i in range(32))
+                    _interleaved = [v for r in range(16) for v in (s_raw_lo[r], s_raw_hi[r])]
+                    _masked = scf_if_dispatch(
+                        tile_needs_mask,
+                        _apply_causal_mask,
+                        state_names=_mask_names,
+                        state_values=_interleaved,
+                    )
+                    s_raw_lo = [_masked[2 * r] for r in range(16)]
+                    s_raw_hi = [_masked[2 * r + 1] for r in range(16)]
                 else:
                     # Mask physical KV columns outside seqlen so tail rows do not enter softmax.
                     kv_start_i32 = fx.Int32(kv_start)
@@ -1245,89 +1126,29 @@ def build_flash_attn_func_module_primary(
                     gpu.barrier()
 
                 # ==== Build P packs for lo and hi halves ====
-                if const_expr(dtype_str == "bf16" and not USE_K16):
-                    p_packs_lo = []
-                    p_packs_hi = []
-                    for pks in range_constexpr(PV_K_STEPS):
-                        p_base = pks * 4
-                        p_packs_lo.append(bf16_trunc_pack_v4(p_vals_lo[p_base : p_base + 4]))
-                        p_packs_hi.append(bf16_trunc_pack_v4(p_vals_hi[p_base : p_base + 4]))
-                elif const_expr(dtype_str == "bf16" and USE_K16):
-                    p_packs_lo = []
-                    p_packs_hi = []
-                    for pks in range_constexpr(PV_K_STEPS):
-                        p_base = pks * 8
-                        p_packs_lo.append(bf16_trunc_pack_v8(p_vals_lo[p_base : p_base + 8]))
-                        p_packs_hi.append(bf16_trunc_pack_v8(p_vals_hi[p_base : p_base + 8]))
-                else:
-                    p_f16_lo = []
-                    p_f16_hi = []
+                # bf16 truncates (upper-16-bit pack); f16 rounds each element then packs.
+                # Slice width is MFMA_LANE_K (8 for K16, 4 for K8) in every case.
+                def _build_p_packs(p_vals):
+                    packs = []
+                    if const_expr(dtype_str == "bf16"):
+                        for pks in range_constexpr(PV_K_STEPS):
+                            p_base = pks * MFMA_LANE_K
+                            chunk = p_vals[p_base : p_base + MFMA_LANE_K]
+                            if const_expr(USE_K16):
+                                packs.append(bf16_trunc_pack_v8(chunk))
+                            else:
+                                packs.append(bf16_trunc_pack_v4(chunk))
+                        return packs
+                    p_f16 = []
                     for r in range_constexpr(16):
-                        p_f16_lo.append(fx.Float32(p_vals_lo[r]).to(elem_dtype))
-                        p_f16_hi.append(fx.Float32(p_vals_hi[r]).to(elem_dtype))
+                        p_f16.append(fx.Float32(p_vals[r]).to(elem_dtype))
+                    for pks in range_constexpr(PV_K_STEPS):
+                        p_base = pks * MFMA_LANE_K
+                        packs.append(Vec.from_elements(p_f16[p_base : p_base + MFMA_LANE_K], elem_dtype).ir_value())
+                    return packs
 
-                    if const_expr(USE_K16):
-                        p_packs_lo = []
-                        p_packs_hi = []
-                        for pks in range_constexpr(PV_K_STEPS):
-                            p_base = pks * 8
-                            p_packs_lo.append(
-                                Vec.from_elements(
-                                    [
-                                        p_f16_lo[p_base + 0],
-                                        p_f16_lo[p_base + 1],
-                                        p_f16_lo[p_base + 2],
-                                        p_f16_lo[p_base + 3],
-                                        p_f16_lo[p_base + 4],
-                                        p_f16_lo[p_base + 5],
-                                        p_f16_lo[p_base + 6],
-                                        p_f16_lo[p_base + 7],
-                                    ],
-                                    elem_dtype,
-                                ).ir_value()
-                            )
-                            p_packs_hi.append(
-                                Vec.from_elements(
-                                    [
-                                        p_f16_hi[p_base + 0],
-                                        p_f16_hi[p_base + 1],
-                                        p_f16_hi[p_base + 2],
-                                        p_f16_hi[p_base + 3],
-                                        p_f16_hi[p_base + 4],
-                                        p_f16_hi[p_base + 5],
-                                        p_f16_hi[p_base + 6],
-                                        p_f16_hi[p_base + 7],
-                                    ],
-                                    elem_dtype,
-                                ).ir_value()
-                            )
-                    else:
-                        p_packs_lo = []
-                        p_packs_hi = []
-                        for pks in range_constexpr(PV_K_STEPS):
-                            p_base = pks * 4
-                            p_packs_lo.append(
-                                Vec.from_elements(
-                                    [
-                                        p_f16_lo[p_base],
-                                        p_f16_lo[p_base + 1],
-                                        p_f16_lo[p_base + 2],
-                                        p_f16_lo[p_base + 3],
-                                    ],
-                                    elem_dtype,
-                                ).ir_value()
-                            )
-                            p_packs_hi.append(
-                                Vec.from_elements(
-                                    [
-                                        p_f16_hi[p_base],
-                                        p_f16_hi[p_base + 1],
-                                        p_f16_hi[p_base + 2],
-                                        p_f16_hi[p_base + 3],
-                                    ],
-                                    elem_dtype,
-                                ).ir_value()
-                            )
+                p_packs_lo = _build_p_packs(p_vals_lo)
+                p_packs_hi = _build_p_packs(p_vals_hi)
 
                 # Build flat (dc, pks) schedule for interleaved GEMM2.
                 _steps = [(dc, pks) for dc in range(D_CHUNKS) for pks in range(PV_K_STEPS)]
