@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import functools
 
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 
 from kernels.moe.moe_gemm_2stage import (
     MoeGemm2Mode,
@@ -246,7 +246,7 @@ def _compile_stage1_mxscale_kernel_impl(
 
     alloc = SmemAllocator(
         None,
-        arch=str(get_hip_arch()),
+        arch=str(get_rocm_arch()),
         global_sym_name=(
             f"moe_mxscale_{data_format}_s1_single_g{int(bool(use_tdm_gather))}"
             f"_as{int(_use_tdm_gather_as)}"
@@ -2420,7 +2420,7 @@ def _compile_stage2_mxscale_kernel_impl(
 
     alloc = SmemAllocator(
         None,
-        arch=str(get_hip_arch()),
+        arch=str(get_rocm_arch()),
         global_sym_name=(
             f"moe_mxscale_{data_format}_s2_single_g{int(bool(use_tdm_gather))}"
             f"_as{int(_use_tdm_gather_as)}"

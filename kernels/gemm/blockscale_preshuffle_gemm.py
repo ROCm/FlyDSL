@@ -14,13 +14,13 @@ from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.mma.mfma_epilogues import mfma_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
-    crd2idx,
     load_b_pack_k32,
+    preshuffle_crd2idx,
     swizzle_xor16,
     tile_chunk_coord_i32,
 )
@@ -62,7 +62,7 @@ def compile_blockscale_preshuffle_gemm(
 
     is_bf16_out = out_dtype == "bf16"
 
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
     _is_gfx950 = str(gpu_arch).startswith("gfx95")
     _is_gfx942 = str(gpu_arch).startswith("gfx942")
 
@@ -248,7 +248,7 @@ def compile_blockscale_preshuffle_gemm(
             k0 = k0_base + ku
             k1 = lane_div_16
             coord_pack = (n_blk_list[ni], k0, k1, n_intra_list[ni], fx.Int32(0))
-            idx_pack = crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
+            idx_pack = preshuffle_crd2idx(tuple(fx.Int32(c) for c in coord_pack), layout_b)
             b16 = _buffer_load_vec(
                 buffer_ops,
                 vector,
@@ -347,7 +347,7 @@ def compile_blockscale_preshuffle_gemm(
                 row_a_local, col_a_local_i32 = a_tile_chunk_coord_i32(i, tx_i32_base_v, chunk_i32_a_v)
                 col_local_bytes = col_a_local_i32 * c4_bytes
                 col_swz = swizzle_xor16(row_a_local, col_local_bytes, k_blocks16)
-                idx0 = crd2idx((fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds)  # fp8: element idx == byte off
+                idx0 = preshuffle_crd2idx((fx.Int32(row_a_local), fx.Int32(col_swz)), layout_lds)  # fp8: element idx == byte off
                 ptr_off = fx.add_offset(lds_buffer.ptr, fx.make_int_tuple(idx0))
                 i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
                 if const_expr(a_load_bytes_v == 16):

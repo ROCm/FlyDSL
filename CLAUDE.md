@@ -81,6 +81,7 @@ FlyDSL/
 | Layout algebra | [`docs/layout_system_guide.md`](docs/layout_system_guide.md) | Shape/Stride/Layout/Coord APIs, products, divides, coordinate mapping |
 | CuTe layout reference | [`docs/cute_layout_algebra_guide.md`](docs/cute_layout_algebra_guide.md) | Mathematical background and FlyDSL mapping of CuTe concepts |
 | Kernel authoring | [`docs/kernel_authoring_guide.md`](docs/kernel_authoring_guide.md) | `@flyc.kernel`, `@flyc.jit`, launch config, LDS, tiled copy/MMA |
+| Kernel tuning | [`docs/kernel_tuning_guide.md`](docs/kernel_tuning_guide.md) | Tiling, LDS double-buffer/swizzle, prefetch, MFMA scheduling, occupancy, ATT/PMC profiling |
 | Pre-built kernels | [`docs/prebuilt_kernels_guide.md`](docs/prebuilt_kernels_guide.md) | Norm, Softmax, GEMM, MoE, attention, dtype/config notes |
 | External bitcode integration | [`docs/extern_integration_guide.md`](docs/extern_integration_guide.md) | `ffi` + `link_extern`: plug pre-compiled LLVM bitcode into the JIT pipeline (`python/flydsl/expr/extern.py`, `compiler/extern_link.py`) |
 | Testing & benchmarking | [`docs/testing_benchmarking_guide.md`](docs/testing_benchmarking_guide.md) | Test categories, benchmark harness, performance comparisons |

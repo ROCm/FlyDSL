@@ -25,7 +25,7 @@ from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 
 
 def _is_gfx950_arch(arch: str) -> bool:
@@ -48,7 +48,7 @@ NUM_WARPS: int = 8
 WARP_SIZE: int = 64
 NUM_THREADS: int = NUM_WARPS * WARP_SIZE  # 512
 BLOCK_M: int = 128  # == NUM_QO_HEADS
-IS_GFX950: bool = _is_gfx950_arch(get_hip_arch())
+IS_GFX950: bool = _is_gfx950_arch(get_rocm_arch())
 BLOCK_N: int = 64 if IS_GFX950 else 32
 BLOCK_K: int = 32
 TILE_M: int = BLOCK_M // NUM_WARPS  # 16

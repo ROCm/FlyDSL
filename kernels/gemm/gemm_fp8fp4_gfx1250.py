@@ -16,7 +16,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.gemm_common_gfx1250 import (
@@ -211,7 +211,7 @@ def compile_fp8fp4_gemm(
     if num_k_tiles < num_buffers:
         raise ValueError(f"{num_buffers}-stage buffering requires num_k_tiles >= {num_buffers}, got {num_k_tiles}")
 
-    gpu_arch = str(get_hip_arch())
+    gpu_arch = str(get_rocm_arch())
     assert gpu_arch.startswith("gfx1250"), f"Expected gfx1250, got {gpu_arch}"
 
     k_wmma_steps = tile_k // WMMA_K
