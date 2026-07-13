@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-13T19:32:23Z",
+ "updated": "2026-07-13T21:37:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,39 +10,39 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647",
    "created_at": "2026-07-13T18:20:18Z",
-   "updated_at": "2026-07-13T19:17:58Z",
+   "updated_at": "2026-07-13T21:01:09Z",
    "actor": "jhinpan",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-13T21:01:08Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86933116335"
+    },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
      "status": "completed",
      "conclusion": "failure",
-     "started_at": "2026-07-13T18:45:18Z",
-     "completed_at": "2026-07-13T19:02:32Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86899058782"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T18:25:02Z",
-     "completed_at": "2026-07-13T19:17:57Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86899058802"
+     "started_at": "2026-07-13T20:57:26Z",
+     "completed_at": "2026-07-13T21:07:31Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86933116413"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
      "status": "completed",
      "conclusion": "failure",
-     "started_at": "2026-07-13T18:24:41Z",
-     "completed_at": "2026-07-13T19:02:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86899058824"
+     "started_at": "2026-07-13T20:58:00Z",
+     "completed_at": "2026-07-13T21:21:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86933116428"
     }
    ]
   },
