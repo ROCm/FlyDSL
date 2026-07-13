@@ -31,13 +31,20 @@ pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
 aiter = pytest.importorskip("aiter", reason="aiter is not installed, skipping MLA tests")
 from aiter import dtypes  # noqa: E402  # pyright: ignore[reportMissingImports]
-from aiter.ops.attention import (  # noqa: E402  # pyright: ignore[reportMissingImports]
-    get_mla_metadata_info_v1,
-    get_mla_metadata_v1,
-    hk_mla_decode_fwd,
-    mla_decode_stage1_asm_fwd,
-    mla_reduce_v1,
-)  # noqa: E402
+
+try:
+    from aiter.ops.attention import (  # noqa: E402  # pyright: ignore[reportMissingImports]
+        get_mla_metadata_info_v1,
+        get_mla_metadata_v1,
+        hk_mla_decode_fwd,
+        mla_decode_stage1_asm_fwd,
+        mla_reduce_v1,
+    )
+except ImportError as _e:
+    # aiter is installed but its attention API drifted (e.g. hk_mla_decode_fwd
+    # was renamed). Skip this module cleanly instead of aborting collection for
+    # the whole suite.
+    pytest.skip(f"aiter.ops.attention API mismatch ({_e})", allow_module_level=True)
 
 from kernels.attention.mla_fwd_decode import flydsl_mla_fwd_decode  # noqa: E402
 from tests.test_common import checkAllclose, run_perftest  # noqa: E402
