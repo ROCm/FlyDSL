@@ -27,7 +27,8 @@ def get_llvm_ptr(ptr, offset, dtype_bytes, ptr_type=None):
     """Build a global (address-space 1) ``!llvm.ptr`` at ``ptr + offset*dtype_bytes``.
 
     Shared home for the LLVM-ptr arithmetic used by atomic/global accesses
-    (previously duplicated in hgemm_splitk.py and rmsnorm_kernel.py).
+    (previously duplicated in hgemm_splitk.py, small_m_hgemm.py, splitk_hgemm.py
+    and rmsnorm_kernel.py).
     """
     if ptr_type is None:
         ptr_type = ir.Type.parse("!llvm.ptr<1>")
@@ -52,11 +53,10 @@ def atomic_add(
 ):
     """Atomically add ``value`` into ``dst[offset]`` in global memory.
 
-    Wraps the ``get_llvm_ptr`` + ``llvm.atomicrmw`` pair that kernels used to
-    inline (rmsnorm backward ``dweight`` accumulation, hgemm split-K epilogue and
-    semaphore). Selects ``fadd`` for a floating-point operand and integer ``add``
-    otherwise, from the operand's IR type, so a single call covers both cases.
-    Returns the atomicrmw result (the value previously stored at ``dst[offset]``).
+    inline (e.g. the rmsnorm backward ``dweight`` accumulation). Selects
+    ``fadd`` for a floating-point operand and integer ``add`` otherwise, from
+    the operand's IR type, so a single call covers both cases. Returns the
+    atomicrmw result (the value previously stored at ``dst[offset]``).
 
     ``dtype_bytes`` sizes the byte offset and, unless ``alignment`` is given, is
     reused as the access alignment.

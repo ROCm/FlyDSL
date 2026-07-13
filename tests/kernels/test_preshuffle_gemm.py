@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -30,13 +31,53 @@ if _PYFLYDSL_SRC not in sys.path:
     sys.path.insert(0, _PYFLYDSL_SRC)
 
 from flydsl.runtime.device import get_rocm_arch  # noqa: E402
-from kernels.gemm.mxfp4_preshuffle import compile_mxfp4_gemm, compile_mxfp6_gemm  # noqa: E402
+from kernels.gemm.mxfp4_preshuffle import launch_gemm  # noqa: E402
 from kernels.gemm.preshuffle_gemm import compile_preshuffle_gemm  # noqa: E402
 from tests.kernels.utils import fp4_utils  # noqa: E402
 from tests.test_common import run_perftest, verify_output  # noqa: E402
 from tests.utils import pertoken_quant, shuffle_weight  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
+
+
+def _ptr(t):
+    """Raw data_ptr as an fx.Pointer kernel arg for the batched launch_gemm."""
+    return flyc.from_c_void_p(fx.Uint8, t.contiguous().data_ptr())
+
+
+def _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, a_dtype, waves_per_eu=0):
+    """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
+    the tests use. launch_gemm is a thin @flyc.jit that caches per Constexpr config."""
+
+    def _launch(c, a, b, sa, sb, bias, M, N_, stream):
+        launch_gemm(
+            _ptr(c),
+            _ptr(a),
+            _ptr(b),
+            _ptr(sa),
+            _ptr(sb),
+            M,
+            N_,
+            stream,
+            N,
+            K,
+            tile_m,
+            tile_n,
+            tile_k,
+            a_dtype,
+            out_dtype,
+            1,
+            -1,
+            -1,
+            -1,
+            -1,
+            -1,
+            -1,
+            int(waves_per_eu or 0),
+        )
+
+    return _launch
+
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
@@ -338,15 +379,7 @@ def test_mfma_w4_flyc_preshuffle(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = compile_mxfp4_gemm(
-        N=N,
-        K=K,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        out_dtype=out_dtype,
-        waves_per_eu=_wpe,
-    )
+    launch_fn = _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, "fp4", _wpe)
     print(f"✓ Compiled (waves_per_eu={_wpe})")
 
     device = torch.device("cuda")
@@ -404,10 +437,8 @@ def test_mfma_w4_flyc_preshuffle(
             torch.cuda.current_stream(),
         )
 
-    compiled_fn = flyc.compile(launch_fn, *_w4_args(c_out, a_q, b_shuffled, scale_a, scale_b_shuffled))
-
     def launch_kernel(c, a, b, sa, sb):
-        compiled_fn(*_w4_args(c, a, b, sa, sb))
+        launch_fn(*_w4_args(c, a, b, sa, sb))
 
     bench_iters = max(2, int(bench_iters))
     _, us = run_perftest(
@@ -474,15 +505,7 @@ def test_mfma_a6w4_preshuffle(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = compile_mxfp6_gemm(
-        N=N,
-        K=K,
-        tile_m=tile_m,
-        tile_n=tile_n,
-        tile_k=tile_k,
-        out_dtype=out_dtype,
-        waves_per_eu=_wpe,
-    )
+    launch_fn = _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, "fp6", _wpe)
     print(f"✓ Compiled (waves_per_eu={_wpe})")
 
     device = torch.device("cuda")
@@ -532,10 +555,8 @@ def test_mfma_a6w4_preshuffle(
             torch.cuda.current_stream(),
         )
 
-    compiled_fn = flyc.compile(launch_fn, *_a6w4_args(c_out, a_codes, b_shuffled, scale_a, scale_b_shuffled))
-
     def launch_kernel(c, a, b, sa, sb):
-        compiled_fn(*_a6w4_args(c, a, b, sa, sb))
+        launch_fn(*_a6w4_args(c, a, b, sa, sb))
 
     bench_iters = max(2, int(bench_iters))
     _, us = run_perftest(

@@ -132,4 +132,4 @@ method closing over runtime state), the caller should either:
 | [`python/flydsl/compiler/kernel_function.py`](../python/flydsl/compiler/kernel_function.py) | `CompilationContext` (carries `link_libs`, `post_load_processors`) |
 | [`python/flydsl/compiler/jit_function.py`](../python/flydsl/compiler/jit_function.py) | Passes `link_libs` into `MlirCompiler.compile` and propagates `post_load_processors` to `CompiledArtifact` |
 | [`python/flydsl/compiler/jit_executor.py`](../python/flydsl/compiler/jit_executor.py) | Looks up FlyDSL ROCm module loader symbols, owns `GpuJitModule`, and runs `post_load_processors` |
-| [`lib/Runtime/FlyRocmRuntimeWrappers.cpp`](../lib/Runtime/FlyRocmRuntimeWrappers.cpp) | C++ runtime: stateless `mgpuModuleLoad` wrapper |
+| [`lib/Runtime/ROCm/FlyRocmRuntimeWrappers.cpp`](../lib/Runtime/ROCm/FlyRocmRuntimeWrappers.cpp) | C++ runtime: stateless `mgpuModuleLoad` wrapper |

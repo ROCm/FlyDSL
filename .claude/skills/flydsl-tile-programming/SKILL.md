@@ -332,7 +332,9 @@ for i in range(runtime_N):
     ...
 
 # Loop with carried state (software pipelining)
-start, stop, step = fx.Index(0), fx.Index(N - 1), fx.Index(1)
+# Bounds must be typed DSL integers (fx.Int64), NOT plain Python ints — a plain
+# int makes the AST rewriter unroll the loop and silently ignore init=.
+start, stop, step = fx.Int64(0), fx.Int64(N - 1), fx.Int64(1)
 for iv, state in range(start, stop, step, init=[acc_init, ...]):
     acc = state[0]
     # ... compute ...
@@ -376,31 +378,26 @@ fx.rocdl.sched_dswr(N)     # schedule N DS writes
 
 ## Step 6: Add Shared Memory (if needed)
 
-```python
-from flydsl.utils.smem_allocator import SmemAllocator
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir import ir
+Declare the LDS storage as an ``@fx.struct`` of ``fx.Array`` fields and allocate
+it inside the kernel with ``fx.SharedAllocator`` (the current LDS API — the
+compiler sizes the static LDS global, so ``launch(smem=...)`` is left unset):
 
-allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
-lds_buf = allocator.allocate_array(fx.T.f16, num_elements)
+```python
+@fx.struct
+class SharedStorage:
+    buf: fx.Array[fx.Float16, num_elements]
 
 @flyc.kernel
 def kernel_with_lds(A: fx.Tensor, ...):
-    lds_base = allocator.get_base()
-    lds_ptr = lds_buf(lds_base)
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_buf = lds.buf.view(fx.make_layout((rows, cols), (cols, 1)))
 
-    # Write to LDS
-    lds_ptr.store(value, [idx])
+    # Write to LDS, sync, read back (through view loads/stores or copy atoms)
     fx.gpu.barrier()
-
-    # Read from LDS
-    val = lds_ptr.load([idx])
-
-    # Finalize (inside GPU module body, before launch)
-    comp_ctx = CompilationContext.get_current()
-    with ir.InsertionPoint(comp_ctx.gpu_module_body):
-        allocator.finalize()
 ```
+
+(The legacy `flydsl.utils.smem_allocator.SmemAllocator` path still exists for
+un-migrated kernels but is not recommended for new code.)
 
 LDS capacity: gfx942 (MI300X) = 64KB, gfx950 (MI350) = 160KB.
 

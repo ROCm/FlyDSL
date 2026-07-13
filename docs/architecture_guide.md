@@ -77,31 +77,50 @@ FlyDSL/
 │   ├── 03-tiledMma.py                # Tiled MMA (GEMM) with MFMA atoms
 │   └── 04-preshuffle_gemm.py         # Preshuffle GEMM end-to-end example
 │
-├── kernels/                          # Production GPU kernels
-│   ├── preshuffle_gemm.py            # GEMM (preshuffle layout)
-│   ├── blockscale_preshuffle_gemm.py # Blockscale GEMM
-│   ├── hgemm_splitk.py               # FP16 GEMM split-K
-│   ├── moe_gemm_2stage.py            # MoE GEMM (2-stage gate/up + reduce)
-│   ├── moe_blockscale_2stage.py      # MoE Blockscale GEMM
-│   ├── mixed_moe_gemm_2stage.py      # Mixed-precision MoE GEMM
-│   ├── pa_decode_fp8.py              # Paged attention decode (FP8)
-│   ├── flash_attn_generic.py         # FlashAttention generic fallback
-│   ├── flash_attn_gfx950.py          # FlashAttention gfx950 fast path
-│   ├── layernorm_kernel.py           # LayerNorm (layout API)
-│   ├── rmsnorm_kernel.py             # RMSNorm (layout API)
-│   ├── softmax_kernel.py             # Softmax (layout API)
-│   ├── fused_rope_cache_kernel.py    # Fused RoPE + KV cache
-│   ├── custom_all_reduce.py          # Multi-GPU all-reduce
-│   ├── rdna_f16_gemm.py              # RDNA FP16 GEMM
-│   ├── rdna_fp8_preshuffle_gemm.py   # RDNA FP8 GEMM
-│   ├── gemm_common_gfx1250.py        # GFX1250 GEMM common
-│   ├── gemm_fp8fp4_gfx1250.py        # GFX1250 FP8/FP4 GEMM
-│   ├── wmma_gemm_gfx1250.py          # GFX1250 WMMA GEMM
-│   ├── mfma_epilogues.py             # MFMA epilogue helpers
-│   ├── mfma_preshuffle_pipeline.py   # Preshuffle helpers for MFMA kernels
-│   ├── pipeline_utils.py             # Pipeline utility helpers
-│   ├── kernels_common.py             # Common kernel utilities
-│   └── tensor_shim.py                # GTensor/STensor abstraction
+├── kernels/                          # Production GPU kernels (organized by domain)
+│   ├── gemm/                         # Dense GEMM kernels
+│   │   ├── preshuffle_gemm.py        # GEMM (preshuffle layout)
+│   │   ├── blockscale_preshuffle_gemm.py # Blockscale GEMM
+│   │   ├── mxfp4_preshuffle.py       # MXFP4 preshuffle GEMM
+│   │   ├── fp4_gemm_4wave.py         # FP4 4-wave GEMM
+│   │   ├── fp8_gemm_4wave.py         # FP8 4-wave GEMM
+│   │   ├── fp8_gemm_8wave.py         # FP8 8-wave GEMM
+│   │   ├── hgemm_splitk.py           # FP16 GEMM split-K
+│   │   ├── rdna_f16_gemm.py          # RDNA FP16 GEMM
+│   │   ├── rdna_fp8_preshuffle_gemm.py # RDNA FP8 GEMM
+│   │   ├── gemm_common_gfx1250.py    # GFX1250 GEMM common
+│   │   ├── gemm_fp8fp4_gfx1250.py    # GFX1250 FP8/FP4 GEMM
+│   │   ├── wmma_gemm_gfx1250.py      # GFX1250 WMMA GEMM
+│   │   └── fp8_gemm_utils.py         # FP8 GEMM helpers
+│   ├── norm/                         # Normalization kernels
+│   │   ├── layernorm_kernel.py       # LayerNorm (layout API)
+│   │   ├── rmsnorm_kernel.py         # RMSNorm (layout API)
+│   │   └── softmax_kernel.py         # Softmax (layout API)
+│   ├── attention/                    # Attention kernels
+│   │   ├── pa_decode_fp8.py          # Paged attention decode (FP8)
+│   │   ├── pa_decode_swa.py          # Paged attention sliding-window
+│   │   ├── flash_attn_generic.py     # FlashAttention generic fallback
+│   │   ├── flash_attn_gfx950.py      # FlashAttention gfx950 fast path
+│   │   ├── mla_fwd_decode.py         # MLA forward decode
+│   │   └── fused_rope_cache_kernel.py # Fused RoPE + KV cache
+│   ├── moe/                          # Mixture-of-experts kernels
+│   │   ├── moe_gemm_2stage.py        # MoE GEMM (2-stage gate/up + reduce)
+│   │   ├── moe_blockscale_2stage.py  # MoE Blockscale GEMM
+│   │   ├── mixed_moe_gemm_2stage.py  # Mixed-precision MoE GEMM
+│   │   ├── moe_sorting_kernel.py     # MoE token sorting
+│   │   └── topk_gating_softmax_kernel.py # Top-k gating softmax
+│   ├── mma/                          # Shared MMA pipeline helpers
+│   │   ├── mfma_epilogues.py         # MFMA epilogue helpers
+│   │   ├── mfma_preshuffle_pipeline.py # Preshuffle helpers for MFMA kernels
+│   │   └── pipeline_utils.py         # Pipeline utility helpers
+│   ├── conv/                         # Convolution kernels
+│   │   └── conv3d_implicit_8wave.py  # Implicit-GEMM 3D convolution
+│   ├── comm/                         # Multi-GPU communication
+│   │   └── custom_all_reduce.py      # Multi-GPU all-reduce
+│   └── common/                       # Cross-domain kernel utilities
+│       ├── kernels_common.py         # Common kernel utilities
+│       ├── layout_utils.py           # Layout helpers
+│       └── tensor_shim.py            # GTensor/STensor abstraction
 │
 ├── tests/
 │   ├── mlir/                         # MLIR-level tests (Conversion, LayoutAlgebra, Transforms)
@@ -115,7 +134,7 @@ FlyDSL/
 └── scripts/                          # Build and test helpers
     ├── build.sh                      # Build FlyDSL (CMake + ninja)
     ├── build_llvm.sh                 # Build MLIR from ROCm llvm-project
-    ├── run_tests.sh                  # Run GEMM test suite
+    ├── run_tests.sh                  # Run full test suite (pytest + examples + FileCheck)
     ├── run_benchmark.sh              # Run benchmarks
     └── dumpir.sh                     # Dump intermediate IR
 ```
