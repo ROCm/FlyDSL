@@ -76,11 +76,21 @@ def _get_rmsnorm_configs():
             configs.append((int(m_s), int(n_s), dt))
     else:
         configs = [
-            (64, 256, "f32"),  # f32 aligned
-            (32, 128, "f16"),  # f16 aligned
-            (64, 2000, "f32"),  # unaligned tail handling
-            (16, 512, "bf16"),  # bf16 small shape
-            (64, 8192, "bf16"),  # bf16 fast-path N with small M
+            (16, 512, "bf16"),
+            (1024, 512, "bf16"),
+            (32768, 512, "bf16"),
+            (16, 2000, "bf16"),
+            (1024, 2000, "bf16"),
+            (32768, 2000, "bf16"),
+            (16, 2001, "bf16"),
+            (1024, 2001, "bf16"),
+            (32768, 2001, "bf16"),
+            (16, 3072, "bf16"),
+            (1024, 3072, "bf16"),
+            (32768, 3072, "bf16"),
+            (16, 8192, "bf16"),
+            (1024, 8192, "bf16"),
+            (32768, 8192, "bf16"),
         ]
     return configs
 
