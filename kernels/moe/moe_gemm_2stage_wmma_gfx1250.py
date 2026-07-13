@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import functools
 
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.moe.moe_gemm_2stage import (
     MoeGemm2Mode,
     compile_moe_reduction,
@@ -95,7 +95,7 @@ def _compile_stage1_wmma_kernel_impl(
     lds_a_elems = int(tile_m) * lds_a_stride + LDS_PAD_A
     lds_b_elems = int(tile_k) * lds_b_stride + LDS_PAD_B
 
-    alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name="moe_fp16_s1_single")
+    alloc = SmemAllocator(None, arch=str(get_rocm_arch()), global_sym_name="moe_fp16_s1_single")
     off_bg = alloc._align(alloc.ptr, 16)
     alloc.ptr = off_bg + lds_b_elems * elem_bytes
     off_bu = alloc._align(alloc.ptr, 16)
@@ -484,7 +484,7 @@ def _compile_stage2_wmma_kernel_impl(
     lds_a_elems = int(tile_m) * lds_a_stride + LDS_PAD_A
     lds_b_elems = int(tile_k) * lds_b_stride + LDS_PAD_B
 
-    alloc = SmemAllocator(None, arch=str(get_hip_arch()), global_sym_name="moe_fp16_s2_single")
+    alloc = SmemAllocator(None, arch=str(get_rocm_arch()), global_sym_name="moe_fp16_s2_single")
     off_b = alloc._align(alloc.ptr, 16)
     alloc.ptr = off_b + lds_b_elems * elem_bytes
     off_a = alloc._align(alloc.ptr, 16)

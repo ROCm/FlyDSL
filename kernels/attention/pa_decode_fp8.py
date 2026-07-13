@@ -25,7 +25,7 @@ from flydsl._mlir import ir
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import Int32, T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
@@ -1011,7 +1011,7 @@ def compile_pa_decode_ps(
     _N_K_h = TLOOP * _QKHELOOP * 2
     _N_V_FLAT_h = 2 * VTLOOP * _VHELOOP
 
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     query_load_is_bf16 = query_input_dtype == "bf16"
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_dim**0.5)
