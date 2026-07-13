@@ -320,10 +320,6 @@ def compile_conv3d_implicit_8wave(
             return (v >= 0) & (v < fx.Index(hi))
 
         # ---- 3D im2col gather (global -> registers) ----
-        # Each thread loads LDG_A_COUNT vec8 chunks along the flattened (M, K) tile,
-        # returning [raw values..., validity bits...] as flat MLIR state.  Keeping
-        # this state flat lets the runtime K-loop carry prefetched values through
-        # scf.for iter_args without compile-time-unrolling every K tile.
         def gather_a(k_base):
             raws = []
             valids = []
@@ -337,18 +333,12 @@ def compile_conv3d_implicit_8wave(
                 cc = k_abs % c
                 k_valid = k_abs < fx.Index(crs)
                 if const_expr(temporal_only_fast):
-                    # For Kt x 1 x 1, stride-1, same-shape convolution, an
-                    # input row differs from its output row only by a temporal
-                    # plane delta.  This removes the generic n/t/h/w
-                    # div/mod decomposition and all spatial bounds checks.
                     kt_i = k_abs // c
                     temporal_delta = kt_i - pt
                     out_t = (row // hw_o) % d
                     in_t = out_t + temporal_delta
                     valid = row_valid & k_valid & in_range(in_t, d)
                     if const_expr(BIG_IN):
-                        # Offset relative to x_rsrc's rebased origin so the i32
-                        # element offset does not overflow.
                         g_off = ((row + temporal_delta * hw_o) - (nbase * dhw + base_t * hw_o)) * c + cc
                     else:
                         g_off = (row + temporal_delta * hw_o) * c + cc
@@ -408,7 +398,7 @@ def compile_conv3d_implicit_8wave(
                 local_k = linear % TILE_K
                 raw = raws[i]
                 valid = valids[i]
-                val = arith.select(valid, raw, zero8)  # mask consumed here (hidden behind MFMAs)
+                val = arith.select(valid, raw, zero8)
                 off = local_m * TILE_K + local_k
                 lds_store_vec8(a_lds, fx.Index(stage) * TILE_M * TILE_K + off, val)
 
@@ -461,11 +451,7 @@ def compile_conv3d_implicit_8wave(
             rocdl.s_setprio(0)
             return acc_values
 
-        # ---- generic double-buffered runtime pipeline ----
-        # Keep only the small per-thread register state as scf.for iter_args:
-        # accumulators, current LDS fragments, and the next tile prefetched into
-        # VGPRs.  This replaces an O(K-tiles) fully-unrolled IR body with one
-        # runtime loop while preserving load/compute overlap.
+        # ---- prologue: tile 0 -> LDS, tile 1 -> VGPR prefetch ----
         stage = 0
         commit_a(stage, gather_a(k_off))
         commit_b(stage, gather_b(k_off))
@@ -487,8 +473,7 @@ def compile_conv3d_implicit_8wave(
 
             init_state = list(acc) + list(a_frags) + list(b_frags) + list(pf_a) + list(pf_b)
 
-            # Process tiles [0, tiles_per_split-2).  The last two tiles are an
-            # explicit epilogue, avoiding an out-of-bounds speculative prefetch.
+            # ---- main loop: compute tile k, write prefetched k+1, load k+2 ----
             for kt_idx, state_values in range(0, tiles_per_split - 2, init=init_state):
                 state_values = list(state_values)
                 state_acc = list(state_values[:n_acc_state])
@@ -542,12 +527,6 @@ def compile_conv3d_implicit_8wave(
 
         _row_chk = npq % TILE_M != 0
         _need_chk = _row_chk or n_tail
-
-        # Pack a lane's MFMA_C_VALUES accumulators into one vectorized store. For
-        # n==1 (no split-K) they map to rows row_base+0..3, which are contiguous
-        # in y (off_nk = col*dhw + row) and 8-byte aligned (row_base and dhw are
-        # multiples of MFMA_C_VALUES), and a 4-group never straddles the npq
-        # boundary, so a single row_base validity check gates the whole vector.
         _vec_store = (n == 1) and (not use_splitk) and (dhw % MFMA_C_VALUES == 0) and (not BIG_OUT)
 
         # For >2^31-byte outputs the i32 buffer_store voffset overflows; store via
@@ -640,42 +619,41 @@ def compile_conv3d_implicit_8wave(
     return launch
 
 
-def _choose_splitk(npq, crs, k, device, tile=DEFAULT_TILE):
-    tile_m, tile_n = tile[0], tile[1]
-    grid_m = (npq + tile_m - 1) // tile_m
-    grid_n = (k + tile_n - 1) // tile_n
-    base = grid_m * grid_n
+def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
+    # splitk=None auto-picks a value that roughly fills the CUs; an explicit value
+    # is just clamped. Either way the result is snapped to a k_tiles divisor.
     k_tiles = (crs + TILE_K - 1) // TILE_K
-
-    if npq < 4096 or k_tiles < 16:
-        return 1
-    if k % tile_n != 0 or npq % tile_m != 0 or crs % TILE_K != 0:  # atomic path needs clean tiles
-        return 1
-    if npq * k * 4 > 0x7FFFFFFF:  # split-K fp32 output atomic uses an i32 byte offset
-        return 1
-    try:
-        num_cu = torch.cuda.get_device_properties(device).multi_processor_count
-    except Exception:
-        num_cu = 256
-    if base >= (3 * num_cu) // 4:  # base grid already (nearly) fills the machine
-        return 1
-    sk = min(4, max(1, num_cu // base), k_tiles)  # aim to roughly fill the CUs
+    if splitk is None:
+        tile_m, tile_n = tile[0], tile[1]
+        base = ((npq + tile_m - 1) // tile_m) * ((k + tile_n - 1) // tile_n)
+        if (
+            npq < 4096
+            or k_tiles < 16
+            or k % tile_n != 0  # atomic path needs clean tiles
+            or npq % tile_m != 0
+            or crs % TILE_K != 0
+            or npq * k * 4 > 0x7FFFFFFF  # split-K fp32 output atomic uses an i32 byte offset
+        ):
+            sk = 1
+        else:
+            try:
+                num_cu = torch.cuda.get_device_properties(device).multi_processor_count
+            except Exception:
+                num_cu = 256
+            if base >= (3 * num_cu) // 4:  # base grid already (nearly) fills the machine
+                sk = 1
+            else:
+                sk = min(4, max(1, num_cu // base), k_tiles)  # aim to roughly fill the CUs
+    else:
+        sk = max(1, splitk)
     while sk > 1 and k_tiles % sk != 0:  # prefer a divisor (no overhang)
         sk -= 1
     return sk
 
 
-def _resolve_splitk(splitk, npq, crs, k, device, tile):
-    sk = _choose_splitk(npq, crs, k, device, tile) if splitk is None else max(1, splitk)
-    k_tiles = (crs + TILE_K - 1) // TILE_K
-    while sk > 1 and k_tiles % sk != 0:
-        sk -= 1
-    return sk
-
-
-def conv3d_implicit_8wave(
-    x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None
-):
+def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None):
+    # 3D implicit-GEMM implementation; the public conv3d_implicit_8wave entry
+    # dispatches 1D/2D/3D by filter rank and forwards true 3D calls here.
     # x: (N,C,D,H,W) bf16, weight: (K,C,T,R,S) bf16. splitk=None -> auto-dispatch.
     # tile=(TILE_M,TILE_N,WAVE_M,WAVE_N) forces a config; autotune=True picks the
     # best tile per shape (also enabled via FLYDSL_CONV3D_AUTOTUNE=1).
@@ -732,37 +710,45 @@ def conv3d_implicit_8wave(
     return y
 
 
-def conv2d_implicit(x, weight, bias=None, stride=1, padding=0, **kwargs):
-    """2D conv via the 3D implicit-GEMM kernel (depth-1 degenerate case).
-
-    x: (N, C, H, W) bf16, weight: (K, C, R, S) bf16. stride/padding are int or a
-    2-tuple (h, w). Returns (N, K, Ho, Wo). 2D is the D=T=1 case of conv3d, so
-    this reshapes to 5D, runs the 3D kernel, and squeezes the depth axis back out.
-    """
-    assert x.dim() == 4 and weight.dim() == 4, "conv2d_implicit expects (N,C,H,W) / (K,C,R,S)"
+def _conv2d_impl(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    assert x.dim() == 4 and weight.dim() == 4, "conv2d expects (N,C,H,W) / (K,C,R,S)"
     sh, sw = (stride, stride) if isinstance(stride, int) else stride
     ph, pw = (padding, padding) if isinstance(padding, int) else padding
     n, c, h, w = x.shape
     k, wc, r, s = weight.shape
     x5 = x.reshape(n, c, 1, h, w)
     w5 = weight.reshape(k, wc, 1, r, s)
-    y5 = conv3d_implicit_8wave(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), **kwargs)
+    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, sh, sw), padding=(0, ph, pw), **kwargs)
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[3], y5.shape[4])
 
 
-def conv1d_implicit(x, weight, bias=None, stride=1, padding=0, **kwargs):
-    """1D conv via the 3D implicit-GEMM kernel (depth/height-1 degenerate case).
-
-    x: (N, C, W) bf16, weight: (K, C, S) bf16. stride/padding are int or a 1-tuple.
-    Returns (N, K, Wo). Reshapes to the D=H=T=R=1 case of conv3d and squeezes the
-    depth+height axes back out.
-    """
-    assert x.dim() == 3 and weight.dim() == 3, "conv1d_implicit expects (N,C,W) / (K,C,S)"
+def _conv1d_impl(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    assert x.dim() == 3 and weight.dim() == 3, "conv1d expects (N,C,W) / (K,C,S)"
     sw = stride if isinstance(stride, int) else stride[0]
     pw = padding if isinstance(padding, int) else padding[0]
     n, c, w = x.shape
     k, wc, s = weight.shape
     x5 = x.reshape(n, c, 1, 1, w)
     w5 = weight.reshape(k, wc, 1, 1, s)
-    y5 = conv3d_implicit_8wave(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), **kwargs)
+    y5 = _conv3d_impl(x5, w5, bias=bias, stride=(1, 1, sw), padding=(0, 0, pw), **kwargs)
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
+
+
+def conv3d_implicit_8wave(x, weight, bias=None, stride=1, padding=0, **kwargs):
+    """Main implicit-GEMM conv entry; dispatches 1D/2D/3D by filter rank.
+
+    Rank is taken from the filter (weight.dim() - 2): 3 -> 3D (N,C,D,H,W)/(K,C,T,R,S),
+    2 -> 2D (N,C,H,W)/(K,C,R,S), 1 -> 1D (N,C,W)/(K,C,S); x and weight must match.
+    True 3D calls run the implementation directly; 2D/1D reshape to the degenerate
+    5D case. stride/padding/bias and extra kwargs (splitk, tile, autotune, stream)
+    forward to the chosen path.
+    """
+    assert x.dim() == weight.dim(), f"x rank {x.dim()} != weight rank {weight.dim()}"
+    spatial_rank = weight.dim() - 2
+    if spatial_rank == 3:
+        return _conv3d_impl(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
+    if spatial_rank == 2:
+        return _conv2d_impl(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
+    if spatial_rank == 1:
+        return _conv1d_impl(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
+    raise ValueError(f"conv3d_implicit_8wave supports 1D/2D/3D; got filter rank {weight.dim()}")
