@@ -17,7 +17,7 @@ import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import dtype_to_elem_type
 
 # Backward builders live in their own module (see review on #800); re-exported
@@ -78,7 +78,7 @@ def build_rmsnorm_module(
     if N <= SMALL_N_THRESHOLD:
         return _build_rmsnorm_large_m_small_n_module(N, dtype_str, store_rstd, eps)
 
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     # BLOCK_THREADS is the block size (threads per row-block). It is a build-time
@@ -443,7 +443,7 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bo
 
 
 def build_fused_add_rmsnorm_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     tile_cols = BLOCK_THREADS * VEC_WIDTH
@@ -1068,7 +1068,7 @@ def _build_fused_add_rmsnorm_quant_module(
     is_smooth: bool,
     quant_dtype_str: str = "i8",
 ):
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     tile_cols = BLOCK_THREADS * VEC_WIDTH

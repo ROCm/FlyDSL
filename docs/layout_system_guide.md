@@ -331,6 +331,7 @@ ptr = fx.add_offset(ptr, offset)
 | `fx.rocdl.BufferCopy128b()` | AMD buffer-descriptor 128-bit copy |
 | `fx.rocdl.BufferCopy64b()` | AMD buffer-descriptor 64-bit copy |
 | `fx.rocdl.BufferCopy32b()` | AMD buffer-descriptor 32-bit copy |
+| `fx.rocdl.make_tdm_atom(tensor, extents, ...)` | gfx1250 TDM async Global↔LDS whole-tile copy (1–5D); descriptor carried as atom state |
 
 #### Construction
 
@@ -338,8 +339,12 @@ ptr = fx.add_offset(ptr, offset)
 # Create copy atom (copy_op_type, elem_type)
 copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
 
-# Create MMA atom
+# Create MMA atom (CDNA MFMA)
 mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
+
+# gfx1250 (wave32): WMMA and MX-scaled WMMA MMA atoms
+mma_atom = fx.make_mma_atom(fx.rocdl.WMMA(16, 16, 128, fx.Float8E4M3FN))
+mma_atom = fx.make_mma_atom(fx.rocdl.WMMAScale(16, 16, 128, fx.Float8E4M3FN))  # E8M0 block scale
 
 # Build thread-value layout from thread and value layouts
 tiler_mn, layout_tv = fx.make_layout_tv(thr_layout, val_layout)

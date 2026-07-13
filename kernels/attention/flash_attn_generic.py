@@ -34,7 +34,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import dtype_to_elem_type
 
@@ -103,7 +103,7 @@ def build_flash_attn_func_module_primary(
     Q/O still have ``num_heads`` heads; K/V have ``num_kv_heads`` heads, with
     every ``num_heads // num_kv_heads`` consecutive Q heads sharing one KV head.
     """
-    gpu_arch = get_hip_arch()
+    gpu_arch = get_rocm_arch()
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
