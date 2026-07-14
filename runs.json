@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-14T07:58:40Z",
+ "updated": "2026-07-14T09:11:03Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29317944578,
+   "pr": 849,
+   "commit": "9afc41c38fa62a8c44a00a76a07d76596fd3fdcb",
+   "branch": "refactor/mma-into-common",
+   "event": "pull_request",
+   "title": "[kernels]: move mma/ under common/, rename pipeline_utils_gfx1250.py",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317944578",
+   "created_at": "2026-07-14T08:25:08Z",
+   "updated_at": "2026-07-14T08:53:08Z",
+   "actor": "Phil-amd",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T08:30:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317944578/job/87036489388"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T08:53:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317944578/job/87036489401"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T08:27:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317944578/job/87036489415"
+    }
+   ]
+  },
+  {
+   "run_id": 29317856418,
+   "pr": 801,
+   "commit": "deeee94d3e7ec2773747d63fd2cfc91b5d3f578a",
+   "branch": "feat/layernorm-backward-769",
+   "event": "pull_request",
+   "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317856418",
+   "created_at": "2026-07-14T08:23:40Z",
+   "updated_at": "2026-07-14T08:26:04Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-14T08:26:03Z",
+     "completed_at": "2026-07-14T08:50:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317856418/job/87036110436"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-14T08:25:12Z",
+     "completed_at": "2026-07-14T08:52:16Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317856418/job/87036110452"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T08:25:23Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317856418/job/87036110469"
+    }
+   ]
+  },
   {
    "run_id": 29314472471,
    "pr": 786,
@@ -53,20 +139,20 @@
    "branch": "fujun.han/del-redundant-documentation-table",
    "event": "pull_request",
    "title": "[Docs] Remove duplicate Documentation table from README",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444",
    "created_at": "2026-07-14T05:46:06Z",
-   "updated_at": "2026-07-14T06:49:15Z",
+   "updated_at": "2026-07-14T09:08:41Z",
    "actor": "Peter9606",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T06:48:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T09:08:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444/job/87018327426"
     },
     {
@@ -581,7 +667,7 @@
   },
   {
    "run_id": 29270694051,
-   "pr": 801,
+   "pr": null,
    "commit": "d7df312aab1d2bb4e2b1715dcd7f6f141a91c548",
    "branch": "feat/layernorm-backward-769",
    "event": "pull_request",
@@ -2203,64 +2289,6 @@
      "started_at": "2026-07-12T13:15:04Z",
      "completed_at": "2026-07-12T13:27:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653/job/86652854290"
-    }
-   ]
-  },
-  {
-   "run_id": 29192231698,
-   "pr": null,
-   "commit": "797266f8380e5317b9a7274c16c69082b0760579",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192231698",
-   "created_at": "2026-07-12T12:13:01Z",
-   "updated_at": "2026-07-12T12:15:28Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29191778200,
-   "pr": null,
-   "commit": "55ba145786dfebf5923ff1d53d5db65e4366879b",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29191778200",
-   "created_at": "2026-07-12T11:58:23Z",
-   "updated_at": "2026-07-12T13:03:13Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T12:00:24Z",
-     "completed_at": "2026-07-12T12:49:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29191778200/job/86647658172"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T12:00:09Z",
-     "completed_at": "2026-07-12T12:12:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29191778200/job/86647658173"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T12:00:22Z",
-     "completed_at": "2026-07-12T13:03:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29191778200/job/86647658175"
     }
    ]
   }
