@@ -13,11 +13,12 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, idx2crd, range_constexpr, rocdl, tdm_ops
 from flydsl.expr.rocdl import cluster
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, check_smem_capacity
+from kernels.common import buffer_ops
 from kernels.common.utils import align_up as _align_up
 from kernels.gemm.gemm_common_gfx1250 import (
     extract_lds_base_idx,
@@ -575,9 +576,9 @@ def compile_fp8fp4_gemm(
                         n,
                         soff,
                     )
-                    scf.YieldOp([arith.unwrap(v) for v in vals])
+                    scf.YieldOp([as_ir_value(v) for v in vals])
                 with ir.InsertionPoint(if_op.else_block):
-                    scf.YieldOp([arith.unwrap(_scale_identity_i32) for _ in range(n)])
+                    scf.YieldOp([as_ir_value(_scale_identity_i32) for _ in range(n)])
                 return list(if_op.results)
 
             def _load_ascale_impl(k_base, guarded):
@@ -599,9 +600,9 @@ def compile_fp8fp4_gemm(
                 full_tile = (blk_m + arith.index(tile_m)) <= m_idx
                 if_op = scf.IfOp(full_tile, [T.i32] * _vs_tile_a, has_else=True)
                 with ir.InsertionPoint(if_op.then_block):
-                    scf.YieldOp([arith.unwrap(v) for v in _load_ascale_impl(k_base, guarded=False)])
+                    scf.YieldOp([as_ir_value(v) for v in _load_ascale_impl(k_base, guarded=False)])
                 with ir.InsertionPoint(if_op.else_block):
-                    scf.YieldOp([arith.unwrap(v) for v in _load_ascale_impl(k_base, guarded=True)])
+                    scf.YieldOp([as_ir_value(v) for v in _load_ascale_impl(k_base, guarded=True)])
                 return list(if_op.results)
 
             _bvs_prefetch = _load_ascale

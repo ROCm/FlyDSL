@@ -27,8 +27,7 @@ def test_ifexp_static_cond_true(monkeypatch):
     @flyc.kernel
     def ifexp_true_kernel(Out: fx.Tensor):
         a = fx.Int32(42) if fx.Int32(1) > fx.Int32(0) else fx.Int32(99)
-        rsrc = fx.buffer_ops.create_buffer_resource(Out)
-        fx.buffer_ops.buffer_store(a, rsrc, fx.Int32(0))
+        Out[0] = a
 
     @flyc.jit
     def ifexp_true_launch(Out: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -51,8 +50,7 @@ def test_ifexp_static_cond_false(monkeypatch):
     @flyc.kernel
     def ifexp_false_kernel(Out: fx.Tensor):
         a = fx.Int32(42) if fx.Int32(0) > fx.Int32(1) else fx.Int32(99)
-        rsrc = fx.buffer_ops.create_buffer_resource(Out)
-        fx.buffer_ops.buffer_store(a, rsrc, fx.Int32(0))
+        Out[0] = a
 
     @flyc.jit
     def ifexp_false_launch(Out: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
@@ -75,8 +73,7 @@ def test_ifexp_dynamic_cond_true(monkeypatch):
     @flyc.kernel
     def ifexp_dyn_kernel(Out: fx.Tensor, x: fx.Int32):
         a = x + fx.Int32(10) if x > fx.Int32(0) else x - fx.Int32(10)
-        rsrc = fx.buffer_ops.create_buffer_resource(Out)
-        fx.buffer_ops.buffer_store(a, rsrc, fx.Int32(0))
+        Out[0] = a
 
     @flyc.jit
     def ifexp_dyn_launch(Out: fx.Tensor, x: fx.Int32, stream: fx.Stream = fx.Stream(None)):
@@ -99,8 +96,7 @@ def test_ifexp_dynamic_cond_false(monkeypatch):
     @flyc.kernel
     def ifexp_dyn_kernel(Out: fx.Tensor, x: fx.Int32):
         a = x + fx.Int32(10) if x > fx.Int32(0) else x - fx.Int32(10)
-        rsrc = fx.buffer_ops.create_buffer_resource(Out)
-        fx.buffer_ops.buffer_store(a, rsrc, fx.Int32(0))
+        Out[0] = a
 
     @flyc.jit
     def ifexp_dyn_launch(Out: fx.Tensor, x: fx.Int32, stream: fx.Stream = fx.Stream(None)):
@@ -124,8 +120,7 @@ def test_ifexp_nested(monkeypatch):
     def ifexp_nested_kernel(Out: fx.Tensor, x: fx.Int32, flag: fx.Int32):
         cond = (x > fx.Int32(0)) if (flag > fx.Int32(0)) else (x < fx.Int32(0))
         a = fx.Int32(1) if cond else fx.Int32(0)
-        rsrc = fx.buffer_ops.create_buffer_resource(Out)
-        fx.buffer_ops.buffer_store(a, rsrc, fx.Int32(0))
+        Out[0] = a
 
     @flyc.jit
     def ifexp_nested_launch(Out: fx.Tensor, x: fx.Int32, flag: fx.Int32, stream: fx.Stream = fx.Stream(None)):
@@ -155,8 +150,7 @@ def test_ifexp_in_for_loop(monkeypatch):
         acc = fx.Int32(0)
         for i in range(fx.Int32(4)):
             acc = acc + fx.Int32(1) if x > fx.Int32(0) else acc - fx.Int32(1)
-        rsrc = fx.buffer_ops.create_buffer_resource(Out)
-        fx.buffer_ops.buffer_store(acc, rsrc, fx.Int32(0))
+        Out[0] = acc
 
     @flyc.jit
     def ifexp_loop_launch(Out: fx.Tensor, x: fx.Int32, stream: fx.Stream = fx.Stream(None)):

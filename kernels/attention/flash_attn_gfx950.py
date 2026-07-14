@@ -23,7 +23,7 @@ from flydsl._mlir.dialects import fly, llvm
 from flydsl._mlir.dialects import scf as _scf
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
@@ -38,6 +38,7 @@ from kernels.attention.dualwave_swp_common import (
     _waitcnt_vm_n,
     dualwave_splitk_workspace_elems,  # noqa: F401  (re-exported: public API)
 )
+from kernels.common import buffer_ops
 from kernels.common.kernels_common import _if_then, dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)

@@ -26,10 +26,11 @@ import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.ir import InsertionPoint
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator
+from kernels.common import buffer_ops
 
 WMMA_M = 16
 WMMA_N = 16

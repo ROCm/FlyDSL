@@ -10,12 +10,14 @@ Scale layouts: scale_a [scale_k, M] transposed, scale_b [scale_n, scale_k] row-m
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
+from flydsl._mlir.dialects import vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, as_ir_value, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from kernels.common import buffer_ops
 from kernels.mma.mfma_epilogues import mfma_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
@@ -285,7 +287,7 @@ def compile_blockscale_preshuffle_gemm(
         def lds_load_16b(curr_row_a_lds, col_base, lds_buffer):
             col_base_swz = swizzle_xor16(curr_row_a_lds, col_base, k_blocks16)
             idx_a16 = curr_row_a_lds * _lds_k_dim_c + col_base_swz
-            return vector.load_op(T.f8x16, lds_buffer, [idx_a16])
+            return vector.load(T.f8x16, as_ir_value(lds_buffer), [as_ir_value(idx_a16)])
 
         def lds_load_packs_k64(curr_row_a_lds, col_base, lds_buffer):
             loaded_a16 = lds_load_16b(curr_row_a_lds, col_base, lds_buffer)
@@ -603,7 +605,7 @@ def compile_blockscale_preshuffle_gemm(
                         v_out = val.to(_out_elem_dtype())
                         lds_idx = row_base_lds + col_local
                         v1 = Vec.from_elements([v_out], _out_elem_dtype())
-                        vector.store(v1, lds_out, [lds_idx], alignment=2)
+                        vector.store(as_ir_value(v1), as_ir_value(lds_out), [as_ir_value(lds_idx)], alignment=2)
 
                 def store_pair(*, row_local, row, row_ctx, col_pair0, col_g0, frag):
                     idx_out = row * c_n + col_g0

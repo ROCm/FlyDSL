@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 
+from flydsl.expr import as_ir_value
 from flydsl.runtime.device import get_rocm_arch
 from kernels.moe.moe_gemm_2stage import (
     MoeGemm2Mode,
@@ -53,11 +54,12 @@ def _compile_stage1_wmma_kernel_impl(
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
-    from flydsl._mlir.dialects import scf
+    from flydsl._mlir.dialects import scf, vector
     from flydsl.compiler.kernel_function import CompilationContext
-    from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, vector
+    from flydsl.expr import arith, gpu, idx2crd, range_constexpr, rocdl
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
+    from kernels.common import buffer_ops
 
     WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
     WAVE_SIZE = 32
@@ -212,8 +214,8 @@ def _compile_stage1_wmma_kernel_impl(
                         arith.constant(0.0, type=T.f16),
                     )
                     lds_idx = row * arith.index(lds_a_stride) + col
-                    v1 = vector.from_elements(T.vec(1, T.f16), [x_val])
-                    vector.store(v1, lds_a, [lds_idx], alignment=2)
+                    v1 = vector.from_elements(T.vec(1, T.f16), [as_ir_value(x_val)])
+                    vector.store(as_ir_value(v1), as_ir_value(lds_a), [as_ir_value(lds_idx)], alignment=2)
                     scf.YieldOp([])
 
         def copy_b_to_lds(k_base, lds_memref, up_shift):
@@ -240,8 +242,8 @@ def _compile_stage1_wmma_kernel_impl(
                         dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
-                    v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
-                    vector.store(v1, lds_memref, [lds_idx], alignment=2)
+                    v1 = vector.from_elements(T.vec(1, T.f16), [as_ir_value(w_val)])
+                    vector.store(as_ir_value(v1), as_ir_value(lds_memref), [as_ir_value(lds_idx)], alignment=2)
                     scf.YieldOp([])
 
         def _precompute_a_lane_bases():
@@ -268,8 +270,8 @@ def _compile_stage1_wmma_kernel_impl(
             vec8_ty = ir.VectorType.get([8], T.f16)
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = vector.load_op(vec8_ty, lds_a, [off0])
-            v1 = vector.load_op(vec8_ty, lds_a, [off1])
+            v0 = vector.load(vec8_ty, as_ir_value(lds_a), [as_ir_value(off0)])
+            v1 = vector.load(vec8_ty, as_ir_value(lds_a), [as_ir_value(off1)])
             return vector.shuffle(v0, v1, list(range(16)))
 
         def load_b_frag(lds_buf, b_base, ks):
@@ -445,11 +447,12 @@ def _compile_stage2_wmma_kernel_impl(
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl._mlir import ir
-    from flydsl._mlir.dialects import scf
+    from flydsl._mlir.dialects import scf, vector
     from flydsl.compiler.kernel_function import CompilationContext
-    from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, vector
+    from flydsl.expr import arith, const_expr, gpu, idx2crd, range_constexpr, rocdl
     from flydsl.expr.typing import T
     from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
+    from kernels.common import buffer_ops
 
     WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
     WAVE_SIZE = 32
@@ -615,8 +618,8 @@ def _compile_stage2_wmma_kernel_impl(
                         arith.constant(0.0, type=T.f16),
                     )
                     lds_idx = row * arith.index(lds_a_stride) + col
-                    v1 = vector.from_elements(T.vec(1, T.f16), [x_val])
-                    vector.store(v1, lds_a, [lds_idx], alignment=2)
+                    v1 = vector.from_elements(T.vec(1, T.f16), [as_ir_value(x_val)])
+                    vector.store(as_ir_value(v1), as_ir_value(lds_a), [as_ir_value(lds_idx)], alignment=2)
                     scf.YieldOp([])
 
         def copy_b_to_lds(k_base):
@@ -643,8 +646,8 @@ def _compile_stage2_wmma_kernel_impl(
                         dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
-                    v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
-                    vector.store(v1, lds_b, [lds_idx], alignment=2)
+                    v1 = vector.from_elements(T.vec(1, T.f16), [as_ir_value(w_val)])
+                    vector.store(as_ir_value(v1), as_ir_value(lds_b), [as_ir_value(lds_idx)], alignment=2)
                     scf.YieldOp([])
 
         def _precompute_a_lane_bases():
@@ -671,8 +674,8 @@ def _compile_stage2_wmma_kernel_impl(
             vec8_ty = ir.VectorType.get([8], T.f16)
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = vector.load_op(vec8_ty, lds_a, [off0])
-            v1 = vector.load_op(vec8_ty, lds_a, [off1])
+            v0 = vector.load(vec8_ty, as_ir_value(lds_a), [as_ir_value(off0)])
+            v1 = vector.load(vec8_ty, as_ir_value(lds_a), [as_ir_value(off1)])
             return vector.shuffle(v0, v1, list(range(16)))
 
         def load_b_frag(b_base, ks):
