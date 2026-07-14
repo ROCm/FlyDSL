@@ -183,6 +183,15 @@ the separate `compile_mxfp4_gemm` in `kernels/gemm/gemm_fp8fp4_gfx1250.py` is th
 distinct gfx1250 kernel. `batch>1` runs a strided-batched GEMM over `grid.z`.
 Covered by `tests/kernels/test_preshuffle_gemm.py`.
 
+**8-wave a8w4 GEMM (`kernels/gemm/mxfp4_8wave.py`, gfx950):** `compile_mxfp4_8w`
+builds an 8-wave (2x4 wave grid, 256x256 tile) `fp8 E4M3 A x preshuffled MXFP4 B`
+dense GEMM with per-1x32 E8M0 scales and bf16/fp16 output, sharing the input
+recipe of the `mxfp4_preshuffle` a8w4 path. It streams A gmem->LDS via
+double-buffered async DMA (XOR-swizzled to avoid bank conflicts) and interleaves
+the next-tile DMA between MFMA sub-groups; on compute-bound shapes it runs
+~20-25% faster than the 4-wave `mxfp4_preshuffle` a8w4 path (e.g. 8192^3: ~2984
+vs ~2425 TFLOPS). Covered by `tests/kernels/test_mxfp4_8wave.py`.
+
 **Pipeline details:**
 - **lds_stage=2 (ping-pong)**: Two LDS buffers for A tiles. Cross-tile A0 prefetch overlaps VMEM with LDS reads
 - **lds_stage=1 (single)**: CK-style intrawave schedule with single LDS buffer
