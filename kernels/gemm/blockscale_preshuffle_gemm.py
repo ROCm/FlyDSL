@@ -16,8 +16,8 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from kernels.mma.mfma_epilogues import mfma_epilog
-from kernels.mma.mfma_preshuffle_pipeline import (
+from kernels.common.mma.mfma_epilogues import mfma_epilog
+from kernels.common.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
     lds_store_8b_xor16,
