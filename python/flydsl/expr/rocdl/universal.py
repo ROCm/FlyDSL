@@ -13,7 +13,6 @@ from ..._mlir.dialects.fly_rocdl import (
     CopyOpCDNA3BufferAtomicType,
     CopyOpCDNA3BufferCopyLDSType,
     CopyOpCDNA3BufferCopyType,
-    CopyOpGFX1250TDMType,
     MmaOpCDNA3_MFMAType,
     TargetAddressSpace,
 )
@@ -189,41 +188,6 @@ def WMMAScale(
     )
 
 
-def TDM(
-    rank,
-    num_warps,
-    pad_interval=0,
-    pad_amount=0,
-    cache_modifier=0,
-    atomic_barrier=False,
-    early_timeout=False,
-):
-    """Create a gfx1250 N-D TDM (Tensor Data Mover) Global<->LDS copy atom *type*.
-
-    ``rank`` is the tensor/tile rank (1-5). Direction is inferred at lowering from
-    which side is Global vs Shared; the tile shape is compile-time on the operand
-    layout. ``pad_interval`` / ``pad_amount`` (elements) add LDS row padding on the
-    load path.
-
-    ``atomic_barrier`` (descriptor bit 18, HW auto-barrier) and ``early_timeout``
-    (bit 21, multicast-load GL1 knob) set compile-time descriptor config bits.
-
-    The tile descriptor (global base pointer, per-dim extent for out-of-bounds
-    handling, per-dim stride) plus the MCAST ``workgroup_mask`` are runtime atom
-    state set via ``fx.atom.set_value``. :func:`make_tdm_atom` builds the atom and
-    populates that descriptor from a tensor in one call.
-    """
-    return CopyOpGFX1250TDMType.get(
-        rank,
-        num_warps,
-        pad_interval,
-        pad_amount,
-        cache_modifier,
-        atomic_barrier=atomic_barrier,
-        early_timeout=early_timeout,
-    )
-
-
 def make_buffer_ptr(ptr: Pointer, num_records_bytes=None):
     """Construct a new buffer-resource (``BufferDesc``) pointer from a global
     pointer, for hardware OOB-checked loads / stores.
@@ -297,98 +261,6 @@ def make_buffer_tensor(
 
     buf_ptr = make_buffer_ptr(ptr, num_records_bytes=num_records_bytes)
     return make_view(buf_ptr, layout)
-
-
-def make_tdm_atom(
-    tensor: Tensor,
-    tensor_extents,
-    strides=None,
-    *,
-    num_warps,
-    pad_interval=0,
-    pad_amount=0,
-    cache_modifier=0,
-    atomic_barrier=False,
-    early_timeout=False,
-) -> object:
-    """Build a gfx1250 N-D TDM copy atom carrying ``tensor``'s tile descriptor.
-
-    The atom holds the global tile descriptor as runtime state: base pointer, the
-    tensor's per-dim extent (for hardware out-of-bounds handling: load zero-fill,
-    store drop), and per-dim strides. Reuse the atom across a tile loop; to move to
-    the next tile re-set ``base`` (or bump ``imm_offset`` via
-    :func:`advance_tdm_atom`).
-
-    ``tensor_extents`` is a list of the tensor's per-dim extent in tensor dim order
-    ``[dim0(outermost) .. dim_{rank-1}(innermost)]`` (rank = ``len(tensor_extents)``,
-    1-5); each entry is a Python ``int`` or an ``i32`` / ``index`` runtime value (or
-    any ``fx`` integer), and ``None`` means no clamp on that axis (INT32_MAX).
-    ``strides`` is an optional list of per-dim strides in elements (same order);
-    the innermost stride is assumed 1 and ignored, so entries for dims 0..rank-2
-    are used. ``None`` (or a ``None`` entry) falls back to the tile memref's static
-    layout stride; pass it explicitly for a tile with a dynamic outer stride (else
-    the descriptor stride faults rather than silently reading stride 0).
-
-    Issue the copy with ``fx.copy_atom_call(atom, global_tile, lds)``. NOTE: the
-    global operand's *pointer is unused* — only its layout (tile shape) and address
-    space (copy direction) are read; the base comes from the ``base`` state.
-    """
-    from ..primitive import atom_set_value, make_copy_atom
-
-    NO_CLAMP = 0x7FFFFFFF
-    STRIDE_UNSET = -0x80000000  # matches kOuterStrideUnset in CopyAtom.cpp
-
-    extents = list(tensor_extents)
-    rank = len(extents)
-    if not 1 <= rank <= 5:
-        raise ValueError(f"make_tdm_atom: rank must be in [1, 5], got {rank}")
-    strides = list(strides) if strides is not None else [None] * rank
-    if len(strides) != rank:
-        raise ValueError(f"make_tdm_atom: expected {rank} strides, got {len(strides)}")
-
-    copy_op = CopyOpGFX1250TDMType.get(
-        rank,
-        num_warps,
-        pad_interval,
-        pad_amount,
-        cache_modifier,
-        atomic_barrier=atomic_barrier,
-        early_timeout=early_timeout,
-    )
-    atom = make_copy_atom(copy_op, tensor.element_type)
-    atom = atom_set_value(atom, "base", get_iter(tensor))
-    for i in range(rank):
-        ext = (
-            Int32(NO_CLAMP)
-            if extents[i] is None
-            else (extents[i] if isinstance(extents[i], Int32) else Int32(extents[i]))
-        )
-        atom = atom_set_value(atom, f"extent_{i}", ext)
-    for i in range(rank - 1):  # innermost stride assumed 1, not stored
-        st = (
-            Int64(STRIDE_UNSET)
-            if strides[i] is None
-            else (strides[i] if isinstance(strides[i], Int64) else Int64(strides[i]))
-        )
-        atom = atom_set_value(atom, f"stride_{i}", st)
-    return atom
-
-
-def advance_tdm_atom(atom, byte_offset) -> object:
-    """Return a TDM atom with its global byte offset (``imm_offset``) set.
-
-    The offset is added to the ``base`` pointer in i64 at lowering (carry-safe),
-    so a K-reduction loop can advance the tile by bumping this single scalar
-    instead of re-deriving and re-setting the ``base`` pointer each iteration.
-    ``byte_offset`` is the cumulative byte delta from ``base`` (typically
-    ``k_tile * k_stride_bytes``); it replaces (does not accumulate onto) any
-    previously-set ``imm_offset``. Accepts a Python ``int`` or an ``i64`` / any
-    ``fx`` integer value.
-    """
-    from ..primitive import atom_set_value
-
-    off = byte_offset if isinstance(byte_offset, Int64) else Int64(byte_offset)
-    return atom_set_value(atom, "imm_offset", off)
 
 
 @dsl_loc_tracing
