@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-14T18:45:13Z",
+ "updated": "2026-07-14T19:35:27Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -111,20 +111,20 @@
    "branch": "ci/skip-docs-only-tests",
    "event": "pull_request",
    "title": "[CI] skip build/test for docs-only changes",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29328320282",
    "created_at": "2026-07-14T11:16:33Z",
-   "updated_at": "2026-07-14T13:34:11Z",
+   "updated_at": "2026-07-14T19:33:47Z",
    "actor": "Phil-amd",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-14T13:33:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T19:33:46Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29328320282/job/87098449526"
     },
     {
