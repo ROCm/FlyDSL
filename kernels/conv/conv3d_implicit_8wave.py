@@ -215,13 +215,29 @@ def compile_conv3d_implicit_8wave(
 
     # Async copy (global->LDS DMA via buffer_load_lds) hides the load latency the
     # sync global->VGPR->LDS path exposes. Padding/OOB taps are masked by routing
-    # the element offset past num_records so the hardware bounds check writes 0 to
-    # LDS (verified). Requires the buffer's real num_records (not max_size), which
-    # rules out BIG_IN (rebased/oversized resource) and >2^31-byte tensors (i32
-    # voffset). x and weight byte sizes must fit int32 for the element offset math.
+    # the byte offset past num_records so the hardware bounds check writes 0 to LDS
+    # (verified). The buffer voffset is UNSIGNED 32-bit (probed), so any offset that
+    # fits under 2^32 bytes is valid -- no 64-bit soffset split needed.
+    #
+    # Two regimes:
+    #  - not BIG_IN: the raw x resource with real num_records = X_BYTES. Padding taps
+    #    route to OOB_SENTINEL (> X_BYTES, < 2^32) -> hardware zero. Needs X_BYTES <
+    #    OOB_SENTINEL so the sentinel stays above bounds.
+    #  - BIG_IN (n==1 only): x is rebased to the block's (nbase, base_t) origin so the
+    #    per-tile relative offsets are tiny (<~0.3GB, verified). The rebased resource
+    #    gets a fixed num_records = BIG_ASYNC_NR (2GB): well above any legal relative
+    #    tap yet below OOB_SENTINEL, so padding still zeroes. n>1 is excluded because
+    #    di=(n_idx-nbase) can jump a whole batch and blow past 2^32.
+    # The sync global->VGPR->LDS path is kept as the fallback for the residual cases
+    # async cannot cover: n>1 BIG_IN and >~4.29GB weights. Do not delete it.
     X_BYTES = n * c * d * h * w * BF16_BYTES
     W_BYTES = k * c * kt * kh * kw * BF16_BYTES
-    USE_ASYNC = (not BIG_IN) and (X_BYTES <= 0x7FFFFFFF) and (W_BYTES <= 0x7FFFFFFF)
+    OOB_SENTINEL_ELEM = 0x7FFFFF80  # *2 = 0xFFFFFF00 bytes (~4.2950 GB), just under 2^32
+    OOB_SENTINEL_BYTES = OOB_SENTINEL_ELEM * BF16_BYTES
+    BIG_ASYNC_NR = 0x80000000  # 2 GB num_records for the rebased BIG_IN resource
+    _small_ok = (X_BYTES < OOB_SENTINEL_BYTES) and (W_BYTES < OOB_SENTINEL_BYTES)
+    _big_ok = BIG_IN and (n == 1) and (W_BYTES < OOB_SENTINEL_BYTES)
+    USE_ASYNC = _small_ok if not BIG_IN else _big_ok
     # Async frees the A-tile VGPRs the sync path spent on the global->VGPR->LDS hop,
     # so the software pipeline can go deeper than the sync 2-stage double buffer.
     # PIPE_STAGES buffers are kept in LDS; PIPE_STAGES-1 tiles are prefetched ahead.
@@ -262,9 +278,12 @@ def compile_conv3d_implicit_8wave(
     def conv3d_8wave_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
         if const_expr(USE_ASYNC):
             # Real num_records so OOB-routed padding taps read back as 0 from the
-            # hardware bounds check (see async_a/async_b masking).
-            x_rsrc = buffer_ops.create_buffer_resource(x, num_records_bytes=X_BYTES)
+            # hardware bounds check (see async_a/async_b masking). The x resource is
+            # (re)built below: raw+X_BYTES for the small case, rebased+BIG_ASYNC_NR
+            # for BIG_IN.
             w_rsrc = buffer_ops.create_buffer_resource(weight, num_records_bytes=W_BYTES)
+            if const_expr(not BIG_IN):
+                x_rsrc = buffer_ops.create_buffer_resource(x, num_records_bytes=X_BYTES)
         else:
             x_rsrc = buffer_ops.create_buffer_resource(x)
             w_rsrc = buffer_ops.create_buffer_resource(weight)
@@ -291,7 +310,13 @@ def compile_conv3d_implicit_8wave(
             base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
             x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + fx.Index(0)) * fx.Index(w) * fx.Index(c)
             x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_elem) * fx.Int64(2)
-            x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr)
+            if const_expr(USE_ASYNC):
+                # Bounded num_records so async OOB-routed padding taps zero: legal
+                # per-tile relative offsets are <~0.3GB << BIG_ASYNC_NR (2GB) <
+                # OOB_SENTINEL, so valid taps stay in-bounds and padding zeroes.
+                x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr, num_records_bytes=BIG_ASYNC_NR)
+            else:
+                x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr)
 
         wid = tid // WARP_SIZE
         lane = tid % WARP_SIZE
@@ -500,7 +525,7 @@ def compile_conv3d_implicit_8wave(
         # 16B where the sync commit_* path would. Invalid taps route the element
         # offset past num_records; the bounds check then writes 0 to LDS (verified).
         DMA_BYTES = LDG_VEC * BF16_BYTES  # 16
-        OOB_ELEM = fx.Int32(0x7FFFFFF0)  # element offset guaranteed past num_records
+        OOB_ELEM = fx.Int32(OOB_SENTINEL_ELEM)  # element offset guaranteed past num_records
 
         def _lds_dma_ptr(lds_array, stage_tile, i):
             # buffer_load_lds is wave-collective: the LDS pointer is lane-0's base
