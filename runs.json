@@ -1,22 +1,89 @@
 {
  "schema": 1,
- "updated": "2026-07-13T22:14:27Z",
+ "updated": "2026-07-14T00:18:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
-   "run_id": 29274051647,
+   "run_id": 29295282652,
    "pr": 786,
+   "commit": "5dd9528b20de0e45caaa9ad08cae96656c06f175",
+   "branch": "feat/autotune-offline-configs",
+   "event": "pull_request",
+   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652",
+   "created_at": "2026-07-14T00:12:19Z",
+   "updated_at": "2026-07-14T00:17:10Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 29294567536,
+   "pr": 842,
+   "commit": "da380bab997fc62af63bebfb35b531d0a794ff7d",
+   "branch": "fix/bench-skip-not-fail",
+   "event": "pull_request",
+   "title": "[CI] run_benchmark: treat runtime pytest.skip as skipped, not failed",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536",
+   "created_at": "2026-07-13T23:57:45Z",
+   "updated_at": "2026-07-14T00:00:13Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-13T23:59:58Z",
+     "completed_at": "2026-07-14T00:11:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536/job/86965315748"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T00:00:10Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536/job/86965315750"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T00:00:13Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536/job/86965315771"
+    }
+   ]
+  },
+  {
+   "run_id": 29274051647,
+   "pr": null,
    "commit": "74bca1e215416112a285bf9d48c8120b18ebcee4",
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
    "status": "completed",
-   "conclusion": "failure",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647",
    "created_at": "2026-07-13T18:20:18Z",
-   "updated_at": "2026-07-13T22:13:27Z",
+   "updated_at": "2026-07-14T00:17:10Z",
    "actor": "jhinpan",
    "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-13T23:43:42Z",
+     "completed_at": "2026-07-14T00:17:09Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86962910079"
+    },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
@@ -24,7 +91,7 @@
      "conclusion": "failure",
      "started_at": "2026-07-13T21:01:08Z",
      "completed_at": "2026-07-13T22:13:26Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86933116335"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86962910513"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -33,16 +100,7 @@
      "conclusion": "failure",
      "started_at": "2026-07-13T20:57:26Z",
      "completed_at": "2026-07-13T21:07:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86933116413"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T20:58:00Z",
-     "completed_at": "2026-07-13T21:21:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86933116428"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274051647/job/86962910687"
     }
    ]
   },
@@ -2064,36 +2122,6 @@
    "created_at": "2026-07-12T06:29:20Z",
    "updated_at": "2026-07-12T06:43:40Z",
    "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29182650361,
-   "pr": null,
-   "commit": "31e5866e5edd888a4014071925829dc02063679f",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29182650361",
-   "created_at": "2026-07-12T06:26:13Z",
-   "updated_at": "2026-07-12T06:27:39Z",
-   "actor": "jiacao-amd",
-   "jobs": []
-  },
-  {
-   "run_id": 29182386441,
-   "pr": null,
-   "commit": "0c4ffbf23a3d5516596d599a5200bf3b9afabb12",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29182386441",
-   "created_at": "2026-07-12T06:15:36Z",
-   "updated_at": "2026-07-12T06:16:42Z",
-   "actor": "jiacao-amd",
    "jobs": []
   }
  ]
