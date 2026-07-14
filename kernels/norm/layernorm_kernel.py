@@ -15,12 +15,11 @@ import math
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
 from flydsl.runtime.device import get_rocm_arch
-from kernels.common.kernels_common import dtype_to_elem_type, get_llvm_ptr, get_warp_size
+from kernels.common.kernels_common import atomic_add, dtype_to_elem_type, get_warp_size
 
 try:
     import torch
@@ -410,14 +409,12 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
 
     @flyc.kernel
     def layernorm_bwd_kernel(
-        Input: fx.Tensor,
-        Gamma: fx.Tensor,
-        DY: fx.Tensor,
-        Mean: fx.Tensor,
-        Rstd: fx.Tensor,
-        DX: fx.Tensor,
-        # Atomic-only outputs carry no shape/stride contract; raw pointers keep
-        # their kernel ABI to a single address each.
+        Input: fx.Pointer,
+        Gamma: fx.Pointer,
+        DY: fx.Pointer,
+        Mean: fx.Pointer,
+        Rstd: fx.Pointer,
+        DX: fx.Pointer,
         DGamma: fx.Pointer,
         DBias: fx.Pointer,
     ):
@@ -473,16 +470,19 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
 
             return fx.memref_load(s_sum, 0), fx.memref_load(s_sumsq, 0)
 
-        Input_buf = fx.rocdl.make_buffer_tensor(Input)
-        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-        DY_buf = fx.rocdl.make_buffer_tensor(DY)
-        Mean_buf = fx.rocdl.make_buffer_tensor(Mean)
-        Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
-        DX_buf = fx.rocdl.make_buffer_tensor(DX)
-
-        row_in = fx.slice(Input_buf, (bid, None))
-        row_dy = fx.slice(DY_buf, (bid, None))
-        row_dx = fx.slice(DX_buf, (bid, None))
+        # All layouts are fixed by the wrapper's contiguous contract. Rebuild
+        # only the row/scalar views used by this block so the kernel ABI carries
+        # one address per tensor and no dynamic shape/stride operands.
+        row_layout = fx.make_layout(N, 1)
+        scalar_layout = fx.make_layout(1, 1)
+        bid_i64 = fx.Int64(bid)
+        row_offset = bid_i64 * N
+        row_in = fx.rocdl.make_buffer_tensor((Input + row_offset).view(row_layout))
+        gamma = fx.rocdl.make_buffer_tensor(Gamma.view(row_layout))
+        row_dy = fx.rocdl.make_buffer_tensor((DY + row_offset).view(row_layout))
+        mean_row = fx.rocdl.make_buffer_tensor((Mean + bid_i64).view(scalar_layout))
+        rstd_row = fx.rocdl.make_buffer_tensor((Rstd + bid_i64).view(scalar_layout))
+        row_dx = fx.rocdl.make_buffer_tensor((DX + row_offset).view(row_layout))
 
         copy_atom_s = fx.make_copy_atom(
             fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
@@ -492,15 +492,13 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
 
         row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
         dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
-        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+        gamma_div = fx.logical_divide(gamma, fx.make_layout(1, 1))
         dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
-        mean_div = fx.logical_divide(Mean_buf, fx.make_layout(1, 1))
-        rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+        mean_div = fx.logical_divide(mean_row, scalar_layout)
+        rstd_div = fx.logical_divide(rstd_row, scalar_layout)
 
-        mean = _load_scalar(copy_atom_f32, fx.Float32, mean_div, bid)
-        rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
-        # get_llvm_ptr extracts an aligned address from a tensor view. These
-        # static views add no runtime layout operands to the pointer ABI.
+        mean = _load_scalar(copy_atom_f32, fx.Float32, mean_div, 0)
+        rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, 0)
         dgamma_view = DGamma.view(fx.make_layout(N, 1))
         dbias_view = DBias.view(fx.make_layout(N, 1))
 
@@ -543,34 +541,17 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
                 _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
 
                 dgamma = dy * x_hat
-                ptr_g = get_llvm_ptr(dgamma_view, idx, 4)
-                llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.fadd,
-                    ptr_g,
-                    dgamma.ir_value(),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                )
-
-                ptr_b = get_llvm_ptr(dbias_view, idx, 4)
-                llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.fadd,
-                    ptr_b,
-                    dy.ir_value(),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                )
+                atomic_add(dgamma_view, idx, dgamma, dtype_bytes=4)
+                atomic_add(dbias_view, idx, dy, dtype_bytes=4)
 
     @flyc.jit
     def launch_layernorm_bwd(
-        Input: fx.Tensor,
-        Gamma: fx.Tensor,
-        DY: fx.Tensor,
-        Mean: fx.Tensor,
-        Rstd: fx.Tensor,
-        DX: fx.Tensor,
+        Input: fx.Pointer,
+        Gamma: fx.Pointer,
+        DY: fx.Pointer,
+        Mean: fx.Pointer,
+        Rstd: fx.Pointer,
+        DX: fx.Pointer,
         DGamma: fx.Pointer,
         DBias: fx.Pointer,
         m_in: fx.Int32,
@@ -1644,16 +1625,22 @@ if torch is not None:
         the forward — but is accepted so callers can pass it symmetrically.
         """
         assert x.dim() == 2, "layernorm_bwd expects a 2D (M, N) input"
-        assert x.is_contiguous() and dout.is_contiguous(), "layernorm_bwd expects contiguous inputs"
+        assert all(t.is_contiguous() for t in (x, weight, dout, mean, rstd)), "layernorm_bwd expects contiguous inputs"
         assert (
             x.dtype == weight.dtype == dout.dtype
         ), f"x/weight/dout dtypes must match, got {x.dtype}/{weight.dtype}/{dout.dtype}"
         M, N = x.shape
-        assert weight.shape[-1] == N, "weight length must equal x last dim (N)"
+        assert dout.shape == x.shape, "dout shape must equal x shape"
+        assert weight.numel() == N, "weight length must equal x last dim (N)"
+        assert mean.numel() == M and rstd.numel() == M, "mean/rstd length must equal x rows (M)"
+        assert all(
+            t.device == x.device for t in (weight, dout, mean, rstd)
+        ), "x/weight/dout/mean/rstd must be on the same device"
         # mean/rstd are per-row fp32 stats saved by the forward; the kernel reads
         # them with an fp32 copy atom, so a non-fp32 dtype would be misread.
         assert mean.dtype == torch.float32 and rstd.dtype == torch.float32, "mean/rstd must be fp32"
         dtype_str = _torch_dtype_to_str(x.dtype)
+        elem_dtype = dtype_to_elem_type(dtype_str)
         dx = torch.empty_like(x)
         dweight = torch.zeros((N,), device=x.device, dtype=torch.float32)
         dbias = torch.zeros((N,), device=x.device, dtype=torch.float32)
@@ -1666,16 +1653,22 @@ if torch is not None:
                 launch_fn = build_layernorm_bwd_module(N, dtype_str)
                 # flyc.compile executes the kernel once during tracing, which would
                 # accumulate into DGamma/DBias; zero them AFTER compiling.
+                x_ptr = flyc.from_c_void_p(elem_dtype, x.data_ptr())
+                weight_ptr = flyc.from_c_void_p(elem_dtype, weight.data_ptr())
+                dout_ptr = flyc.from_c_void_p(elem_dtype, dout.data_ptr())
+                mean_ptr = flyc.from_c_void_p(fx.Float32, mean.data_ptr())
+                rstd_ptr = flyc.from_c_void_p(fx.Float32, rstd.data_ptr())
+                dx_ptr = flyc.from_c_void_p(elem_dtype, dx.data_ptr())
                 dweight_ptr = flyc.from_c_void_p(fx.Float32, dweight.data_ptr())
                 dbias_ptr = flyc.from_c_void_p(fx.Float32, dbias.data_ptr())
                 compiled = flyc.compile(
                     launch_fn,
-                    x,
-                    weight,
-                    dout,
-                    mean,
-                    rstd,
-                    dx,
+                    x_ptr,
+                    weight_ptr,
+                    dout_ptr,
+                    mean_ptr,
+                    rstd_ptr,
+                    dx_ptr,
                     dweight_ptr,
                     dbias_ptr,
                     M,
@@ -1684,7 +1677,18 @@ if torch is not None:
                 _BWD_CACHE[key] = compiled
             dweight.zero_()
             dbias.zero_()
-            compiled(x, weight, dout, mean, rstd, dx, dweight.data_ptr(), dbias.data_ptr(), M, stream)
+            compiled(
+                x.data_ptr(),
+                weight.data_ptr(),
+                dout.data_ptr(),
+                mean.data_ptr(),
+                rstd.data_ptr(),
+                dx.data_ptr(),
+                dweight.data_ptr(),
+                dbias.data_ptr(),
+                M,
+                stream,
+            )
         return dx, dweight.to(weight.dtype), dbias.to(weight.dtype)
 
     class LayerNormFunction(torch.autograd.Function):

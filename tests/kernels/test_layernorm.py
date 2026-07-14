@@ -1028,12 +1028,42 @@ def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
     dx = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     dgamma = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
     dbias = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
+    elem_dtype = {"f32": fx.Float32, "f16": fx.Float16, "bf16": fx.BFloat16}[dtype]
+    x_ptr = flyc.from_c_void_p(elem_dtype, x.data_ptr())
+    weight_ptr = flyc.from_c_void_p(elem_dtype, weight.data_ptr())
+    dy_ptr = flyc.from_c_void_p(elem_dtype, dy.data_ptr())
+    mean_ptr = flyc.from_c_void_p(fx.Float32, mean.data_ptr())
+    rstd_ptr = flyc.from_c_void_p(fx.Float32, rstd.data_ptr())
+    dx_ptr = flyc.from_c_void_p(elem_dtype, dx.data_ptr())
     dgamma_ptr = flyc.from_c_void_p(fx.Float32, dgamma.data_ptr())
     dbias_ptr = flyc.from_c_void_p(fx.Float32, dbias.data_ptr())
-    bwd_c = flyc.compile(bwd_fn, x, weight, dy, mean, rstd, dx, dgamma_ptr, dbias_ptr, M, stream)
+    bwd_c = flyc.compile(
+        bwd_fn,
+        x_ptr,
+        weight_ptr,
+        dy_ptr,
+        mean_ptr,
+        rstd_ptr,
+        dx_ptr,
+        dgamma_ptr,
+        dbias_ptr,
+        M,
+        stream,
+    )
     dgamma.zero_()
     dbias.zero_()
-    bwd_c(x, weight, dy, mean, rstd, dx, dgamma.data_ptr(), dbias.data_ptr(), M, stream)
+    bwd_c(
+        x.data_ptr(),
+        weight.data_ptr(),
+        dy.data_ptr(),
+        mean.data_ptr(),
+        rstd.data_ptr(),
+        dx.data_ptr(),
+        dgamma.data_ptr(),
+        dbias.data_ptr(),
+        M,
+        stream,
+    )
     torch.cuda.synchronize()
 
     dx_err = (dx.to(DTYPE_FP32) - dx_ref).abs().max().item()
