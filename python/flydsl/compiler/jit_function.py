@@ -748,14 +748,11 @@ class PipelineConfig:
     external: bool
 
 
-def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
+def _pipeline_fragments_for_mode(backend, *, compile_hints: dict) -> PipelineConfig:
     """Return pipeline configuration including optional external split."""
-    from .kernel_function import CompilationContext
-
-    hints = CompilationContext.get_compile_hints()
-    llvm_opts = hints.get("llvm_options")
+    llvm_opts = compile_hints.get("llvm_options")
     if _use_external_binary_codegen():
-        pre_binary_fragments, binary_fragment = backend.external_binary_pipeline_fragments(compile_hints=hints)
+        pre_binary_fragments, binary_fragment = backend.external_binary_pipeline_fragments(compile_hints=compile_hints)
         return PipelineConfig(
             fragments=[*pre_binary_fragments, binary_fragment],
             pre_binary=pre_binary_fragments,
@@ -764,7 +761,7 @@ def _pipeline_fragments_for_mode(backend) -> PipelineConfig:
             external=True,
         )
 
-    fragments = backend.pipeline_fragments(compile_hints=hints)
+    fragments = backend.pipeline_fragments(compile_hints=compile_hints)
     return PipelineConfig(
         fragments=fragments,
         pre_binary=None,
@@ -815,10 +812,16 @@ class MlirCompiler:
             raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
 
         backend = get_backend(arch=arch)
+        from .kernel_function import CompilationContext
 
+        compile_hints = CompilationContext.get_compile_hints()
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        backend.apply_occupancy_hints(module)
-        cfg = _pipeline_fragments_for_mode(backend)
+        # Some compile hints are pass options, while ROCm occupancy hints must be
+        # written onto gpu.func before convert-gpu-to-rocdl.  Pass the same
+        # explicit hint snapshot to both paths so backend hooks do not depend on
+        # hidden thread-local lookups.
+        backend.lower_occupancy_compile_hints(module, compile_hints=compile_hints)
+        cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
         fragments = cfg.fragments
         pre_binary_fragments = cfg.pre_binary
         binary_fragment = cfg.binary_fragment

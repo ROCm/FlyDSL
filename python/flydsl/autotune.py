@@ -131,7 +131,7 @@ def _normalize_occupancy(value, knob: str):
     canonically) with kernel entry-point names as keys; an empty/all-unset
     mapping collapses to ``None``. Occupancy is a per-kernel ``gpu.func``
     attribute, so the mapping lets one Config target several entry kernels; see
-    ``_apply_occupancy_compile_hints``.
+    ``RocmBackend.lower_occupancy_compile_hints``.
     """
 
     def _coerce(v):

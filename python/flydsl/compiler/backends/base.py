@@ -78,14 +78,21 @@ class BaseBackend(metaclass=ABCMeta):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support external LLVM codegen")
 
-    def apply_occupancy_hints(self, module) -> None:
-        """Lower occupancy compile-hints (``waves_per_eu`` / ``maxnreg``) onto the
-        module's entry-point kernels as target function attributes.
+    def lower_occupancy_compile_hints(self, module, *, compile_hints: dict) -> None:
+        """Optional pre-pipeline lowering for occupancy-related compile hints.
 
-        Occupancy control is target-specific, so the base backend is a no-op.
-        ``MlirCompiler.compile`` calls this on the parsed module before running
-        the lowering pipeline; a backend overrides it to annotate its kernels
-        (see :class:`~flydsl.compiler.backends.rocm.RocmBackend`).
+        ``MlirCompiler.compile`` calls this hook after reparsing the JIT module
+        and before building/running this backend's lowering pipeline.  The
+        ``compile_hints`` argument is the same effective hint dictionary passed
+        to :meth:`pipeline_fragments`, so subclasses should read hints from this
+        explicit argument rather than reaching back into ``CompilationContext``.
+
+        The base implementation is intentionally a no-op: most backends either
+        have no occupancy attributes or handle occupancy through normal pipeline
+        options.  Backends that require target-specific kernel annotations
+        override this method to materialize those hints onto the module before
+        lowering (for example ROCm lowers ``waves_per_eu`` / ``maxnreg`` onto
+        each entry-point ``gpu.func``).
         """
         return None
 

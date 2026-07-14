@@ -729,20 +729,18 @@ def test_builder_mode_rejects_num_warps(monkeypatch):
         t(FakeTensor((8,)), FakeTensor((1,)))
 
 
-def test_apply_occupancy_compile_hints_sets_func_attrs():
+def test_lower_occupancy_compile_hints_sets_func_attrs():
     """waves_per_eu -> rocdl.waves_per_eu and maxnreg -> amdgpu-num-vgpr
     passthrough, set on the kernel gpu.func. Guards against regressing to the
     silent gpu-module-to-binary opts= no-op (needs the compiled bindings)."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
-    from flydsl.compiler.backends.rocm import _apply_occupancy_compile_hints
+    from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints
     from flydsl.compiler.jit_function import _create_mlir_context
-    from flydsl.compiler.kernel_function import CompilationContext
 
     with _create_mlir_context() as ctx:
         module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
-        with CompilationContext.compile_hints({"waves_per_eu": 3, "maxnreg": 64}):
-            _apply_occupancy_compile_hints(module)
+        _lower_occupancy_compile_hints(module, compile_hints={"waves_per_eu": 3, "maxnreg": 64})
         text = str(module)
     # Precise matches (a bare "3"/"64" substring could appear in a type/loc).
     assert "rocdl.waves_per_eu = 3" in text
@@ -754,9 +752,8 @@ def test_set_passthrough_replaces_same_key_no_duplicate():
     append a duplicate (duplicate LLVM function attributes are ill-defined)."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
-    from flydsl.compiler.backends.rocm import _apply_occupancy_compile_hints, _set_passthrough
+    from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints, _set_passthrough
     from flydsl.compiler.jit_function import _create_mlir_context
-    from flydsl.compiler.kernel_function import CompilationContext
 
     with _create_mlir_context() as ctx:
         module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
@@ -765,29 +762,26 @@ def test_set_passthrough_replaces_same_key_no_duplicate():
         with ctx:
             _set_passthrough(func, "no-inline", "true")
             _set_passthrough(func, "amdgpu-num-vgpr", "128")
-        with CompilationContext.compile_hints({"maxnreg": 64}):
-            _apply_occupancy_compile_hints(module)
+        _lower_occupancy_compile_hints(module, compile_hints={"maxnreg": 64})
         text = str(module)
     assert text.count("amdgpu-num-vgpr") == 1  # replaced, not duplicated
     assert '"amdgpu-num-vgpr", "64"' in text and '"amdgpu-num-vgpr", "128"' not in text
     assert '"no-inline", "true"' in text  # unrelated entry preserved
 
 
-def test_apply_occupancy_compile_hints_per_kernel_mapping():
+def test_lower_occupancy_compile_hints_per_kernel_mapping():
     """A {sym_name: value} hint scopes occupancy per entry kernel; a kernel
     absent from a given map is left to the compiler. (Scalar/uniform behavior is
-    covered by test_apply_occupancy_compile_hints_sets_func_attrs.)"""
+    covered by test_lower_occupancy_compile_hints_sets_func_attrs.)"""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
-    from flydsl.compiler.backends.rocm import _apply_occupancy_compile_hints
+    from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints
     from flydsl.compiler.jit_function import _create_mlir_context
-    from flydsl.compiler.kernel_function import CompilationContext
 
     src = "module { gpu.module @m { gpu.func @a() kernel { gpu.return } gpu.func @b() kernel { gpu.return } } }"
     with _create_mlir_context() as ctx:
         module = ir.Module.parse(src, context=ctx)
-        with CompilationContext.compile_hints({"waves_per_eu": {"a": 2}, "maxnreg": {"b": 64}}):
-            _apply_occupancy_compile_hints(module)
+        _lower_occupancy_compile_hints(module, compile_hints={"waves_per_eu": {"a": 2}, "maxnreg": {"b": 64}})
         funcs = {
             ir.StringAttr(f.attributes["sym_name"]).value: str(f)
             for f in module.body.operations[0].regions[0].blocks[0].operations
