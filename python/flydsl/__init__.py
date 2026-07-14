@@ -5,3 +5,5 @@
 __version__ = "0.2.4"
 
 from .autotune import Config as Config, autotune as autotune  # noqa: E402
+
+# CI trigger test: code change should run the full GPU test matrix (not skipped).
