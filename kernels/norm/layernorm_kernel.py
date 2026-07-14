@@ -416,8 +416,10 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
         Mean: fx.Tensor,
         Rstd: fx.Tensor,
         DX: fx.Tensor,
-        DGamma: fx.Tensor,
-        DBias: fx.Tensor,
+        # Atomic-only outputs carry no shape/stride contract; raw pointers keep
+        # their kernel ABI to a single address each.
+        DGamma: fx.Pointer,
+        DBias: fx.Pointer,
     ):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
@@ -497,6 +499,10 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
 
         mean = _load_scalar(copy_atom_f32, fx.Float32, mean_div, bid)
         rstd = _load_scalar(copy_atom_f32, fx.Float32, rstd_div, bid)
+        # get_llvm_ptr extracts an aligned address from a tensor view. These
+        # static views add no runtime layout operands to the pointer ABI.
+        dgamma_view = DGamma.view(fx.make_layout(N, 1))
+        dbias_view = DBias.view(fx.make_layout(N, 1))
 
         # Pass 1: c1 = mean(wdy) ; c2 = mean(wdy * x_hat)
         thread_c1 = c_zero_f
@@ -537,7 +543,7 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
                 _store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
 
                 dgamma = dy * x_hat
-                ptr_g = get_llvm_ptr(DGamma, idx, 4)
+                ptr_g = get_llvm_ptr(dgamma_view, idx, 4)
                 llvm.AtomicRMWOp(
                     llvm.AtomicBinOp.fadd,
                     ptr_g,
@@ -547,7 +553,7 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
                     alignment=4,
                 )
 
-                ptr_b = get_llvm_ptr(DBias, idx, 4)
+                ptr_b = get_llvm_ptr(dbias_view, idx, 4)
                 llvm.AtomicRMWOp(
                     llvm.AtomicBinOp.fadd,
                     ptr_b,
@@ -565,8 +571,8 @@ def build_layernorm_bwd_module(N: int, dtype_str: str):
         Mean: fx.Tensor,
         Rstd: fx.Tensor,
         DX: fx.Tensor,
-        DGamma: fx.Tensor,
-        DBias: fx.Tensor,
+        DGamma: fx.Pointer,
+        DBias: fx.Pointer,
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
@@ -1660,11 +1666,25 @@ if torch is not None:
                 launch_fn = build_layernorm_bwd_module(N, dtype_str)
                 # flyc.compile executes the kernel once during tracing, which would
                 # accumulate into DGamma/DBias; zero them AFTER compiling.
-                compiled = flyc.compile(launch_fn, x, weight, dout, mean, rstd, dx, dweight, dbias, M, stream)
+                dweight_ptr = flyc.from_c_void_p(fx.Float32, dweight.data_ptr())
+                dbias_ptr = flyc.from_c_void_p(fx.Float32, dbias.data_ptr())
+                compiled = flyc.compile(
+                    launch_fn,
+                    x,
+                    weight,
+                    dout,
+                    mean,
+                    rstd,
+                    dx,
+                    dweight_ptr,
+                    dbias_ptr,
+                    M,
+                    stream,
+                )
                 _BWD_CACHE[key] = compiled
             dweight.zero_()
             dbias.zero_()
-            compiled(x, weight, dout, mean, rstd, dx, dweight, dbias, M, stream)
+            compiled(x, weight, dout, mean, rstd, dx, dweight.data_ptr(), dbias.data_ptr(), M, stream)
         return dx, dweight.to(weight.dtype), dbias.to(weight.dtype)
 
     class LayerNormFunction(torch.autograd.Function):

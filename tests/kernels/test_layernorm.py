@@ -18,6 +18,7 @@ import os
 import pytest
 
 import flydsl.compiler as flyc
+import flydsl.expr as fx
 from kernels.norm.layernorm_kernel import (
     build_fused_add_layernorm_dynamicquant_module,
     build_fused_add_layernorm_module,
@@ -1027,10 +1028,12 @@ def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
     dx = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     dgamma = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
     dbias = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
-    bwd_c = flyc.compile(bwd_fn, x, weight, dy, mean, rstd, dx, dgamma, dbias, M, stream)
+    dgamma_ptr = flyc.from_c_void_p(fx.Float32, dgamma.data_ptr())
+    dbias_ptr = flyc.from_c_void_p(fx.Float32, dbias.data_ptr())
+    bwd_c = flyc.compile(bwd_fn, x, weight, dy, mean, rstd, dx, dgamma_ptr, dbias_ptr, M, stream)
     dgamma.zero_()
     dbias.zero_()
-    bwd_c(x, weight, dy, mean, rstd, dx, dgamma, dbias, M, stream)
+    bwd_c(x, weight, dy, mean, rstd, dx, dgamma.data_ptr(), dbias.data_ptr(), M, stream)
     torch.cuda.synchronize()
 
     dx_err = (dx.to(DTYPE_FP32) - dx_ref).abs().max().item()
