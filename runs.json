@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-14T02:35:34Z",
+ "updated": "2026-07-14T02:47:34Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29301784497,
+   "pr": 820,
+   "commit": "2ff124b1287f6e96fcd1837ea0ed5108d738c90d",
+   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
+   "event": "pull_request",
+   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29301784497",
+   "created_at": "2026-07-14T02:44:00Z",
+   "updated_at": "2026-07-14T02:44:49Z",
+   "actor": "jiacao-amd",
+   "jobs": []
+  },
   {
    "run_id": 29298551004,
    "pr": 835,
@@ -78,10 +93,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T01:29:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T02:41:26Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298523202/job/86977356622"
     },
     {
@@ -130,10 +145,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T01:19:46Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T02:37:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593/job/86976295087"
     },
     {
@@ -1415,7 +1430,7 @@
   },
   {
    "run_id": 29223446551,
-   "pr": 820,
+   "pr": null,
    "commit": "45dc8f0894d8431d8ed6e765348f14f79d7551a7",
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
@@ -2192,49 +2207,6 @@
    "updated_at": "2026-07-12T08:08:08Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 29183500927,
-   "pr": null,
-   "commit": "14110bff20c517374c48a08d31ed1d450b2f6db2",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183500927",
-   "created_at": "2026-07-12T07:00:01Z",
-   "updated_at": "2026-07-12T09:35:28Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T07:40:01Z",
-     "completed_at": "2026-07-12T08:29:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183500927/job/86628030824"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T07:37:05Z",
-     "completed_at": "2026-07-12T07:49:37Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183500927/job/86628030825"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T08:26:51Z",
-     "completed_at": "2026-07-12T09:35:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183500927/job/86628030829"
-    }
-   ]
   }
  ]
 }
