@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-14T22:38:22Z",
+ "updated": "2026-07-14T23:25:20Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "perf/rmsnorm-bwd-config-cache",
    "event": "pull_request",
    "title": "[Test] Expand RMSNorm backward configs, cache reuse, and Torch benchmarks",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296",
    "created_at": "2026-07-14T22:36:43Z",
-   "updated_at": "2026-07-14T22:36:43Z",
+   "updated_at": "2026-07-14T22:39:24Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T22:39:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296/job/87222276049"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T22:39:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296/job/87222276076"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-14T22:38:29Z",
+     "completed_at": "2026-07-14T22:52:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296/job/87222276087"
+    }
+   ]
   },
   {
    "run_id": 29366839827,
@@ -25,11 +53,11 @@
    "branch": "feat/layernorm-backward-769",
    "event": "pull_request",
    "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29366839827",
    "created_at": "2026-07-14T20:43:56Z",
-   "updated_at": "2026-07-14T21:18:39Z",
+   "updated_at": "2026-07-14T23:21:46Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -44,19 +72,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T21:18:38Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T23:04:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29366839827/job/87204808674"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T21:07:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T23:21:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29366839827/job/87204808680"
     }
    ]
@@ -173,10 +201,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T21:24:46Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T22:54:34Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364720331/job/87207441082"
     },
     {
