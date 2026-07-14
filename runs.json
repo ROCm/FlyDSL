@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-14T02:47:34Z",
+ "updated": "2026-07-14T02:53:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -83,11 +83,11 @@
    "branch": "pr/enh-buffer-rsrc-utils",
    "event": "pull_request",
    "title": "[Enh] Add rocdl.buffer_rsrc utilities: make_buffer_ptr & get_buffer_rsrc",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298523202",
    "created_at": "2026-07-14T01:25:44Z",
-   "updated_at": "2026-07-14T02:11:09Z",
+   "updated_at": "2026-07-14T02:50:48Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -102,10 +102,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T01:29:00Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T02:50:47Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298523202/job/86977356650"
     },
     {
@@ -126,11 +126,11 @@
    "branch": "main",
    "event": "push",
    "title": "[CI] run_benchmark: treat runtime pytest.skip as skipped, not failed \u2026",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593",
    "created_at": "2026-07-14T01:17:10Z",
-   "updated_at": "2026-07-14T01:19:47Z",
+   "updated_at": "2026-07-14T02:50:41Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -154,10 +154,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T01:19:45Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T02:50:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593/job/86976295156"
     }
    ]
