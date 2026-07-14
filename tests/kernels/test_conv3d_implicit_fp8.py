@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Correctness test for the FP8 (E4M3FN) 8-wave implicit-GEMM conv3d kernel.
+"""Correctness test for the FP8 (E4M3FN) implicit-GEMM conv3d kernel.
 
-The kernel quantizes the bf16 inputs to FP8, so it is checked against an
-FP8-cast reference (``x.to(float8_e4m3fn)`` / weight likewise) rather than the
-full-precision bf16 conv. Requires the CDNA4 (gfx95x) 16x16x128 FP8 MFMA. Only
-``c % 16 == 0`` is required; partial M/N/K tiles (NPQ, K, CRS not multiples of
-128) are masked, so misaligned channel counts and frame counts are covered too.
+The kernel consumes FP8 (E4M3FN) inputs natively, so the tests quantize the bf16
+inputs to FP8 and pass the FP8 tensors in, checking against an FP8-cast reference
+(the same FP8 tensors cast back to bf16) rather than the full-precision bf16 conv.
+Requires the CDNA4 (gfx95x) 16x16x128 FP8 MFMA. Only ``c % 16 == 0`` is required;
+partial M/N/K tiles (NPQ, K, CRS not multiples of 128) are masked, so misaligned
+channel counts and frame counts are covered too.
 """
 
 import pytest
@@ -17,7 +18,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit_8wave_fp8 import conv3d_implicit_8wave_fp8
+from kernels.conv.conv3d_implicit_fp8 import conv3d_implicit_fp8
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -45,13 +46,13 @@ _skip_no_fp8 = pytest.mark.skipif(not _IS_CDNA4, reason=f"FP8 16x16x128 MFMA nee
 )
 def test_conv3d_fp8_vs_fp8cast_reference(n, c, t, h, w, k, stride, padding):
     torch.manual_seed(2500 + h + w + k)
-    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
 
-    y = conv3d_implicit_8wave_fp8(x, weight, stride=stride, padding=padding)
+    y = conv3d_implicit_fp8(x, weight, stride=stride, padding=padding)
     ref = F.conv3d(
-        x.to(torch.float8_e4m3fn).to(torch.bfloat16),
-        weight.to(torch.float8_e4m3fn).to(torch.bfloat16),
+        x.to(torch.bfloat16),
+        weight.to(torch.bfloat16),
         stride=stride,
         padding=padding,
     )
@@ -84,13 +85,13 @@ def test_conv3d_fp8_vs_fp8cast_reference(n, c, t, h, w, k, stride, padding):
 def test_conv3d_fp8_tile_configs(tile):
     torch.manual_seed(3300 + sum(tile))
     n, c, t, h, w, k, stride, padding = 1, 128, 3, 18, 18, 256, 1, 1
-    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+    weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
 
-    y = conv3d_implicit_8wave_fp8(x, weight, stride=stride, padding=padding, tile=tile)
+    y = conv3d_implicit_fp8(x, weight, stride=stride, padding=padding, tile=tile)
     ref = F.conv3d(
-        x.to(torch.float8_e4m3fn).to(torch.bfloat16),
-        weight.to(torch.float8_e4m3fn).to(torch.bfloat16),
+        x.to(torch.bfloat16),
+        weight.to(torch.bfloat16),
         stride=stride,
         padding=padding,
     )
@@ -100,8 +101,8 @@ def test_conv3d_fp8_tile_configs(tile):
     assert rel.item() < 6e-2, f"FP8 conv rel_err {rel.item():.3e} too high for tile {tile}"
 
 
-def _fp8cast(t):
-    return t.to(torch.float8_e4m3fn).to(torch.bfloat16)
+def _fp8(t):
+    return t.to(torch.float8_e4m3fn)
 
 
 # 2D FP8 conv via the depth-1 wrapper. NPQ-aligned so only the FP8 quant floor
@@ -111,11 +112,11 @@ def _fp8cast(t):
 def test_conv2d_fp8_vs_reference(kernel_shape, padding):
     torch.manual_seed(5100 + sum(kernel_shape))
     n, c, h, w, k = 1, 128, 32, 32, 128
-    x = torch.randn((n, c, h, w), device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
+    x = _fp8(torch.randn((n, c, h, w), device="cuda", dtype=torch.bfloat16))
+    weight = _fp8(torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16))
 
-    y = conv3d_implicit_8wave_fp8(x, weight, padding=padding)
-    ref = F.conv2d(_fp8cast(x), _fp8cast(weight), padding=padding)
+    y = conv3d_implicit_fp8(x, weight, padding=padding)
+    ref = F.conv2d(x.to(torch.bfloat16), weight.to(torch.bfloat16), padding=padding)
     torch.cuda.synchronize()
 
     assert y.shape == ref.shape
@@ -129,11 +130,11 @@ def test_conv2d_fp8_vs_reference(kernel_shape, padding):
 def test_conv1d_fp8_vs_reference(s, padding):
     torch.manual_seed(6100 + s)
     n, c, w, k = 1, 128, 256, 128
-    x = torch.randn((n, c, w), device="cuda", dtype=torch.bfloat16)
-    weight = torch.randn((k, c, s), device="cuda", dtype=torch.bfloat16)
+    x = _fp8(torch.randn((n, c, w), device="cuda", dtype=torch.bfloat16))
+    weight = _fp8(torch.randn((k, c, s), device="cuda", dtype=torch.bfloat16))
 
-    y = conv3d_implicit_8wave_fp8(x, weight, padding=padding)
-    ref = F.conv1d(_fp8cast(x), _fp8cast(weight), padding=padding)
+    y = conv3d_implicit_fp8(x, weight, padding=padding)
+    ref = F.conv1d(x.to(torch.bfloat16), weight.to(torch.bfloat16), padding=padding)
     torch.cuda.synchronize()
 
     assert y.shape == ref.shape

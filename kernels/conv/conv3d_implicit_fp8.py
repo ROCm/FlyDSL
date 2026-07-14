@@ -1,7 +1,11 @@
-"""8-wave double-buffered implicit-GEMM conv3d (FP8, CDNA4 only).
+"""Double-buffered implicit-GEMM conv3d (FP8, CDNA4 only).
 
-x: (N, C, D, H, W) bf16 NCDHW, weight: (K, C, T, R, S) bf16 KCTRS.
+x: (N, C, D, H, W) fp8 (E4M3FN) NCDHW, weight: (K, C, T, R, S) fp8 KCTRS.
 Returns (N, K, Do, Ho, Wo) bf16. Requires gfx95x; C%128==0, CRS%128==0, NPQ%128==0.
+
+Inputs are consumed natively as FP8 (no internal bf16->fp8 cast); the host entry
+only reorders them into the kernel-native NDHWC / KTRSC layout (a memory-bound
+layout transpose, weight cached by identity).
 """
 
 import functools
@@ -18,7 +22,6 @@ from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import rocdl as _rocdl
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
-from flydsl.expr.typing import T
 from flydsl.expr.utils.arith import ArithValue as _ArithValue
 from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
 
@@ -26,7 +29,7 @@ from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, p
 def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
     """Create a rebased FP8 buffer tensor from a raw i64 byte address.
 
-    Used for the per-block BIG_IN rebase in compile_conv3d_implicit_8wave_fp8.
+    Used for the per-block BIG_IN rebase in compile_conv3d_implicit_fp8.
     Must be called inside a kernel trace (active MLIR context required).
     """
     ptr_ty = _ir.Type.parse("!llvm.ptr")
@@ -50,7 +53,7 @@ def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
 
 # TILE_K is pinned to the FP8 MFMA k-dim (mfma_f32_16x16x128 -> 128). The tile
 # size (TILE_M/TILE_N) and wave layout (WAVE_M/WAVE_N) are compile-time
-# parameters of compile_conv3d_implicit_8wave_fp8 (autotuned per shape).
+# parameters of compile_conv3d_implicit_fp8 (autotuned per shape).
 TILE_K = 128
 STAGES = 2
 WARP_SIZE = 64
@@ -65,7 +68,8 @@ LDG_VEC = 16
 LDS_CAPACITY_BYTES = 163840
 FP8_BYTES = 1
 
-# Default tile config = the original hand-tuned 8-wave 128x128 shape.
+# Default tile config = the original hand-tuned 128x128 shape (2x4 = 8 waves);
+# the autotuner picks larger tiles (e.g. 256x256x4x4 = 16 waves) per shape.
 DEFAULT_TILE = (128, 128, 2, 4)
 
 
@@ -73,170 +77,11 @@ def _autotune_enabled():
     return os.environ.get("FLYDSL_CONV3D_AUTOTUNE", "0").lower() in ("1", "true", "yes")
 
 
-PACK_BLOCK_THREADS = 256
-
-PACK_TR_TILE = 64
-PACK_TR_VEC = 8
-PACK_TR_THREADS = 256
-PACK_TR_VPL = PACK_TR_TILE // PACK_TR_VEC
-PACK_TR_ITERS = (PACK_TR_TILE * PACK_TR_TILE) // (PACK_TR_VEC * PACK_TR_THREADS)
-PACK_TR_PAD = 8
-PACK_TR_LDS_S = PACK_TR_TILE + PACK_TR_PAD
-
 _WEIGHT_FP8_CACHE = {}
 
 
-@functools.lru_cache(maxsize=64)
-def compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width):
-    """Pack activation BF16 NCDHW -> FP8 bytes in NDHWC order (transpose + cast)."""
-    assert c % PACK_TR_VEC == 0, f"tiled FP8 pack needs C % {PACK_TR_VEC} == 0, got C={c}"
-    dhw = d * h * width
-    assert dhw % PACK_TR_VEC == 0, f"tiled FP8 pack needs DHW % {PACK_TR_VEC} == 0, got DHW={dhw}"
-    total_bytes = n * c * dhw
-    grid_s = (dhw + PACK_TR_TILE - 1) // PACK_TR_TILE
-    grid_c = (c + PACK_TR_TILE - 1) // PACK_TR_TILE
-    elem_ty = fx.BFloat16
-    BIG = (n * c * dhw) > 0x7FFFFFFF
-
-    @flyc.kernel(known_block_size=[PACK_TR_THREADS, 1, 1])
-    def pack_x_kernel(out: fx.Tensor, x: fx.Tensor):
-        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
-        x_rsrc = buffer_ops.create_buffer_resource(x, max_size=False, num_records_bytes=total_bytes * 2)
-        lds_alloc = fx.SharedAllocator(static=False)
-        lds = lds_alloc.allocate(fx.Array[elem_ty, PACK_TR_TILE * PACK_TR_LDS_S, 16]).peek()
-
-        Vec = fx.Vector
-
-        class Vec8Ty:
-            ir_type = Vec.make_type(PACK_TR_VEC, elem_ty)
-
-        class BF16Ty:
-            ir_type = elem_ty.ir_type
-
-        tid = fx.thread_idx.x
-        s0 = fx.block_idx.x * PACK_TR_TILE
-        c0 = fx.block_idx.y * PACK_TR_TILE
-        nb = fx.block_idx.z
-        if const_expr(BIG):
-            in_base_elem = fx.Index(nb) * fx.Index(c) * fx.Index(dhw) + fx.Index(c0) * fx.Index(dhw) + fx.Index(s0)
-            in_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(in_base_elem) * fx.Int64(2)
-            x_rsrc = buffer_ops.create_buffer_resource_from_addr(in_addr)
-            out_base_elem = fx.Index(nb) * fx.Index(dhw) * fx.Index(c) + fx.Index(s0) * fx.Index(c) + fx.Index(c0)
-            out_addr = fx.Int64(buffer_ops.extract_base_index(out)) + fx.Int64(out_base_elem)
-            out_rsrc = buffer_ops.create_buffer_resource_from_addr(out_addr)
-        else:
-            in_base = nb * c * dhw
-            out_base = nb * dhw * c
-
-        def lds_store_vec8(elem_offset, value):
-            base = fx.Int64(fx.ptrtoint(lds.ptr)) + fx.Int64(elem_offset * 2)
-            ptr = buffer_ops.create_llvm_ptr(base, address_space=3)
-            llvm.StoreOp(value, ptr, alignment=16)
-
-        def lds_load_scalar(elem_offset):
-            u8 = fx.recast_iter(fx.Uint8, lds.ptr)
-            return fx.ptr_load(u8 + fx.Int32(elem_offset * 2), result_type=BF16Ty)
-
-        # Read coalesced along contiguous S from NCDHW into LDS[c_local, s_local].
-        for i in range_constexpr(PACK_TR_ITERS):
-            lin = tid + i * PACK_TR_THREADS
-            rc = lin // PACK_TR_VPL
-            sv = (lin % PACK_TR_VPL) * PACK_TR_VEC
-            cc = c0 + rc
-            ss = s0 + sv
-            valid = (cc < c) & (ss < dhw)
-            if const_expr(BIG):
-                g = fx.Int32(rc * dhw + sv)
-            else:
-                g = fx.Int32(in_base + cc * dhw + ss)
-            safe = arith.select(valid, g, fx.Int32(0))
-            v = buffer_ops.buffer_load(x_rsrc, safe, vec_width=PACK_TR_VEC, dtype=elem_ty)
-            lds_store_vec8(rc * PACK_TR_LDS_S + sv, v)
-
-        llvm.InlineAsmOp(None, [], "s_waitcnt lgkmcnt(0)\n\ts_barrier", "", has_side_effects=True)
-
-        # Read LDS transposed and store FP8-packed dwords along contiguous C.
-        for i in range_constexpr(PACK_TR_ITERS):
-            lin = tid + i * PACK_TR_THREADS
-            rs = lin // PACK_TR_VPL
-            cv = (lin % PACK_TR_VPL) * PACK_TR_VEC
-            ss = s0 + rs
-            cc = c0 + cv
-            valid = (ss < dhw) & (cc < c)
-            if valid:
-                scalars = [
-                    lds_load_scalar((cv + j) * PACK_TR_LDS_S + rs).to(fx.Float32) for j in range_constexpr(PACK_TR_VEC)
-                ]
-                lo0 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[0], scalars[1], fx.Int32(0), False)
-                p0 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[2], scalars[3], lo0, True)
-                lo1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[4], scalars[5], fx.Int32(0), False)
-                p1 = fx.rocdl.cvt_pk_fp8_f32(T.i32, scalars[6], scalars[7], lo1, True)
-                packed = fx.Vector.from_elements([p0, p1], fx.Int32)
-                if const_expr(BIG):
-                    byte_off = rs * c + cv
-                else:
-                    byte_off = out_base + ss * c + cc
-                buffer_ops.buffer_store(packed, out_rsrc, byte_off, offset_is_bytes=True)
-
-    @flyc.jit
-    def launch(out: fx.Tensor, x: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        pack_x_kernel(out, x).launch(
-            grid=(grid_s, grid_c, n),
-            block=(PACK_TR_THREADS, 1, 1),
-            stream=stream,
-        )
-
-    return launch
-
-
-@functools.lru_cache(maxsize=64)
-def compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw):
-    """Pack weight BF16 KCTRS -> FP8 bytes in KTRSC order (transpose + cast)."""
-    assert c % 4 == 0, f"FP8 pack stores 4 channels per dword, got C={c}"
-    trs = kt * kh * kw
-    total_bytes = k * c * trs
-    total_packs = total_bytes // 4
-    grid_x = (total_packs + PACK_BLOCK_THREADS - 1) // PACK_BLOCK_THREADS
-
-    @flyc.kernel(known_block_size=[PACK_BLOCK_THREADS, 1, 1])
-    def pack_w_kernel(out: fx.Tensor, weight: fx.Tensor):
-        out_rsrc = buffer_ops.create_buffer_resource(out, max_size=False, num_records_bytes=total_bytes)
-        w_rsrc = buffer_ops.create_buffer_resource(weight, max_size=False, num_records_bytes=total_bytes * 2)
-
-        pack_idx = fx.block_idx.x * PACK_BLOCK_THREADS + fx.thread_idx.x
-        if pack_idx < fx.Index(total_packs):
-            c_pack = pack_idx % (c // 4)
-            rest = pack_idx // (c // 4)
-            c_base = c_pack * 4
-            k_idx = rest // trs
-            trs_idx = rest % trs
-
-            src_base = (k_idx * c + c_base) * trs + trs_idx
-            v0 = buffer_ops.buffer_load(w_rsrc, src_base, vec_width=1, dtype=fx.BFloat16).extf(T.f32)
-            v1 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(trs), vec_width=1, dtype=fx.BFloat16).extf(T.f32)
-            v2 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(2 * trs), vec_width=1, dtype=fx.BFloat16).extf(
-                T.f32
-            )
-            v3 = buffer_ops.buffer_load(w_rsrc, src_base + fx.Index(3 * trs), vec_width=1, dtype=fx.BFloat16).extf(
-                T.f32
-            )
-            lo = fx.rocdl.cvt_pk_fp8_f32(T.i32, v0, v1, fx.Int32(0), False)
-            packed = fx.rocdl.cvt_pk_fp8_f32(T.i32, v2, v3, lo, True)
-            buffer_ops.buffer_store(packed, out_rsrc, pack_idx * 4, offset_is_bytes=True)
-
-    @flyc.jit
-    def launch(out: fx.Tensor, weight: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        pack_w_kernel(out, weight).launch(
-            grid=(grid_x, 1, 1),
-            block=(PACK_BLOCK_THREADS, 1, 1),
-            stream=stream,
-        )
-
-    return launch
-
-
 @functools.lru_cache(maxsize=256)
-def compile_conv3d_implicit_8wave_fp8(
+def compile_conv3d_implicit_fp8(
     n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1, tile=DEFAULT_TILE
 ):
     """Compile the FP8 conv: x is NDHWC FP8 bytes, weight is KTRSC FP8 bytes."""
@@ -301,7 +146,7 @@ def compile_conv3d_implicit_8wave_fp8(
     elem_ty = fx.Float8E4M3FN
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
-    def conv3d_8wave_fp8_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
+    def conv3d_implicit_fp8_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
         x_num_records = n * d * h * width * c
         y_rsrc = buffer_ops.create_buffer_resource(
             y, max_size=False, num_records_bytes=npq * k * (4 if const_expr(use_splitk) else 2)
@@ -579,7 +424,7 @@ def compile_conv3d_implicit_8wave_fp8(
 
     @flyc.jit
     def launch(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor, stream: fx.Stream = fx.Stream(None)):
-        conv3d_8wave_fp8_kernel(
+        conv3d_implicit_fp8_kernel(
             y,
             x,
             weight,
@@ -636,58 +481,39 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
     return sk
 
 
-def pack_activation_ncdhw_bf16_to_ndhwc_fp8(x: torch.Tensor, stream=None) -> torch.Tensor:
-    """BF16 NCDHW activation -> int8 storage of FP8 E4M3FN in NDHWC order."""
-    assert x.dtype == torch.bfloat16, f"expected BF16 activation, got {x.dtype}"
-    n, c, d, h, width = x.shape
-    s = d * h * width
-    out_numel = n * d * h * width * c
-    if not (x.is_contiguous() and c % PACK_TR_VEC == 0 and s % PACK_TR_VEC == 0):
-        return x.to(torch.float8_e4m3fn).permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
-    out = torch.empty((out_numel,), device=x.device, dtype=torch.int8)
-    exe = compile_pack_activation_ncdhw_bf16_to_ndhwc_fp8(n, c, d, h, width)
-    exe(
-        flyc.from_torch_tensor(out),
-        flyc.from_torch_tensor(x.contiguous()),
-        torch.cuda.current_stream() if stream is None else stream,
-    )
-    return out
+def layout_activation_ncdhw_to_ndhwc_fp8(x: torch.Tensor) -> torch.Tensor:
+    """FP8 NCDHW activation -> int8 storage of FP8 in NDHWC order (layout only).
+
+    Input is already FP8 (E4M3FN); this is a pure memory reorder (C moved innermost),
+    no dtype conversion.
+    """
+    assert x.dtype == torch.float8_e4m3fn, f"expected FP8 E4M3FN activation, got {x.dtype}"
+    return x.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
 
 
-def pack_weight_kctrs_bf16_to_ktrsc_fp8(weight: torch.Tensor, stream=None) -> torch.Tensor:
-    """BF16 KCTRS weight -> int8 storage of FP8 E4M3FN in KTRSC order."""
-    assert weight.dtype == torch.bfloat16, f"expected BF16 weight, got {weight.dtype}"
-    k, c, kt, kh, kw = weight.shape
-    assert c % 4 == 0, f"FP8 pack stores 4 channels per dword, got C={c}"
-    out_numel = k * c * kt * kh * kw
-    out = torch.empty((out_numel,), device=weight.device, dtype=torch.int8)
-    exe = compile_pack_weight_kctrs_bf16_to_ktrsc_fp8(k, c, kt, kh, kw)
-    exe(
-        flyc.from_torch_tensor(out),
-        flyc.from_torch_tensor(weight.contiguous()),
-        torch.cuda.current_stream() if stream is None else stream,
-    )
-    return out
+def _prep_weight_fp8(weight: torch.Tensor) -> torch.Tensor:
+    """Reorder + cache the FP8 weight (KCTRS -> KTRSC) by source identity (weights reused).
 
-
-def _prep_weight_fp8(weight: torch.Tensor, stream=None) -> torch.Tensor:
-    """Pack + cache the FP8 weight by source tensor identity (weights are reused)."""
+    Input is already FP8 (E4M3FN); the transpose is a pure memory reorder.
+    """
+    assert weight.dtype == torch.float8_e4m3fn, f"expected FP8 E4M3FN weight, got {weight.dtype}"
     key = id(weight)
     ent = _WEIGHT_FP8_CACHE.get(key)
     if ent is not None and ent[0]() is weight:
         return ent[1]
-    out = pack_weight_kctrs_bf16_to_ktrsc_fp8(weight, stream=stream)
+    out = weight.permute(0, 2, 3, 4, 1).contiguous().view(torch.int8).view(-1)
     _WEIGHT_FP8_CACHE[key] = (weakref.ref(weight), out)
     return out
 
 
 def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None):
     """FP8 (E4M3FN) 3D implicit-GEMM implementation; the public
-    conv3d_implicit_8wave_fp8 entry dispatches 1D/2D/3D by filter rank and
+    conv3d_implicit_fp8 entry dispatches 1D/2D/3D by filter rank and
     forwards true 3D calls here.
 
-    x: (N, C, D, H, W) bf16, weight: (K, C, T, R, S) bf16. Inputs are packed once
-    to FP8 (NDHWC activation / cached KTRSC weight), then run through the CDNA4
+    x: (N, C, D, H, W) fp8 (E4M3FN), weight: (K, C, T, R, S) fp8. Inputs are consumed
+    natively as FP8 (no bf16->fp8 cast); the host only reorders them into the
+    kernel-native NDHWC activation / cached KTRSC weight layout, then runs the CDNA4
     16x16x128 MFMA conv with a software-pipelined loop and optional split-K.
     Returns bf16 (N, K, Do, Ho, Wo). splitk=None auto-dispatches.
 
@@ -696,7 +522,9 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, str
     n, c, d, h, width = x.shape
     k, wc, kt, kh, kw = weight.shape
     assert c == wc, f"in-channel mismatch: x has {c}, weight has {wc}"
-    assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
+    assert (
+        x.dtype == torch.float8_e4m3fn and weight.dtype == torch.float8_e4m3fn
+    ), f"expected FP8 E4M3FN x/weight, got x={x.dtype}, weight={weight.dtype}"
     st, sh, sw = _normalize_3(stride)
     pt, ph, pw = _normalize_3(padding)
     do = (d + 2 * pt - kt) // st + 1
@@ -708,8 +536,8 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, str
     assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
 
     launch_stream = torch.cuda.current_stream() if stream is None else stream
-    x_arg = pack_activation_ncdhw_bf16_to_ndhwc_fp8(x, stream=launch_stream)
-    w_arg = _prep_weight_fp8(weight, stream=launch_stream)
+    x_arg = layout_activation_ncdhw_to_ndhwc_fp8(x)
+    w_arg = _prep_weight_fp8(weight)
 
     has_bias = bias is not None
     bias_arg = (
@@ -730,7 +558,7 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, str
             y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
         else:
             y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-        exe = compile_conv3d_implicit_8wave_fp8(
+        exe = compile_conv3d_implicit_fp8(
             n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile
         )
         exe(flyc.from_torch_tensor(y.view(-1)), x_arg_t, w_arg_t, bias_t, launch_stream)
@@ -758,8 +586,8 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, str
 def _conv2d_impl_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
     """2D FP8 conv via the 3D kernel (depth-1 degenerate case).
 
-    x: (N, C, H, W) bf16, weight: (K, C, R, S) bf16. stride/padding int or 2-tuple.
-    Returns (N, K, Ho, Wo). Reshapes to the D=T=1 case and squeezes depth back.
+    x: (N, C, H, W) fp8 (E4M3FN), weight: (K, C, R, S) fp8. stride/padding int or 2-tuple.
+    Returns (N, K, Ho, Wo) bf16. Reshapes to the D=T=1 case and squeezes depth back.
     """
     assert x.dim() == 4 and weight.dim() == 4, "conv2d fp8 expects (N,C,H,W) / (K,C,R,S)"
     sh, sw = (stride, stride) if isinstance(stride, int) else stride
@@ -775,8 +603,8 @@ def _conv2d_impl_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
 def _conv1d_impl_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
     """1D FP8 conv via the 3D kernel (depth/height-1 degenerate case).
 
-    x: (N, C, W) bf16, weight: (K, C, S) bf16. stride/padding int or 1-tuple.
-    Returns (N, K, Wo). Reshapes to the D=H=T=R=1 case and squeezes back.
+    x: (N, C, W) fp8 (E4M3FN), weight: (K, C, S) fp8. stride/padding int or 1-tuple.
+    Returns (N, K, Wo) bf16. Reshapes to the D=H=T=R=1 case and squeezes back.
     """
     assert x.dim() == 3 and weight.dim() == 3, "conv1d fp8 expects (N,C,W) / (K,C,S)"
     sw = stride if isinstance(stride, int) else stride[0]
@@ -789,7 +617,7 @@ def _conv1d_impl_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
     return y5.reshape(y5.shape[0], y5.shape[1], y5.shape[4])
 
 
-def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
+def conv3d_implicit_fp8(x, weight, bias=None, stride=1, padding=0, **kwargs):
     """Main FP8 implicit-GEMM conv entry; dispatches 1D/2D/3D by filter rank.
 
     Rank is taken from the filter (weight.dim() - 2): 3 -> 3D (N,C,D,H,W)/(K,C,T,R,S),
@@ -806,7 +634,7 @@ def conv3d_implicit_8wave_fp8(x, weight, bias=None, stride=1, padding=0, **kwarg
         return _conv2d_impl_fp8(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
     if spatial_rank == 1:
         return _conv1d_impl_fp8(x, weight, bias=bias, stride=stride, padding=padding, **kwargs)
-    raise ValueError(f"conv3d_implicit_8wave_fp8 supports 1D/2D/3D; got filter rank {weight.dim()}")
+    raise ValueError(f"conv3d_implicit_fp8 supports 1D/2D/3D; got filter rank {weight.dim()}")
 
 
-__all__ = ["conv3d_implicit_8wave_fp8"]
+__all__ = ["conv3d_implicit_fp8"]

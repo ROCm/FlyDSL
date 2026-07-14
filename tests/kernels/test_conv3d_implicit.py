@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""Correctness test for the bf16 8-wave implicit-GEMM conv3d kernel.
+"""Correctness test for the bf16 implicit-GEMM conv3d kernel.
 
-Compares ``conv3d_implicit_8wave`` against ``torch.nn.functional.conv3d`` on
+Compares ``conv3d_implicit`` against ``torch.nn.functional.conv3d`` on
 NCDHW/OIDHW bf16 inputs across stride/padding and M%TILE_M / K%TILE_N tail paths.
 Channels must satisfy the kernel's ``c % 8 == 0`` and ``crs = c*kt*kh*kw`` a
 multiple of TILE_K (32) constraints.
@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from flydsl.runtime.device import get_rocm_arch
-from kernels.conv.conv3d_implicit_8wave import conv3d_implicit_8wave
+from kernels.conv.conv3d_implicit import conv3d_implicit
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
 
@@ -24,7 +24,7 @@ _ARCH = get_rocm_arch()
 # mfma_f32_16x16x32_bf16 is only available on CDNA4 (gfx95x)
 _skip_non_cdna4 = pytest.mark.skipif(
     not (isinstance(_ARCH, str) and _ARCH.startswith("gfx95")),
-    reason=f"conv3d 8-wave BF16 needs mfma_f32_16x16x32_bf16 (CDNA4 gfx95x), got {_ARCH}",
+    reason=f"conv3d BF16 needs mfma_f32_16x16x32_bf16 (CDNA4 gfx95x), got {_ARCH}",
 )
 
 
@@ -48,7 +48,7 @@ def test_conv3d_vs_torch(n, c, t, h, w, k, stride, padding):
     weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
     bias = torch.randn((k,), device="cuda", dtype=torch.float32)
 
-    y = conv3d_implicit_8wave(x, weight, bias=bias, stride=stride, padding=padding)
+    y = conv3d_implicit(x, weight, bias=bias, stride=stride, padding=padding)
     y_ref = F.conv3d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
     torch.cuda.synchronize()
 
@@ -71,7 +71,7 @@ def test_conv3d_factorized_filters_vs_torch(kernel_shape, padding):
     x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
 
-    y = conv3d_implicit_8wave(x, weight, stride=1, padding=padding)
+    y = conv3d_implicit(x, weight, stride=1, padding=padding)
     y_ref = F.conv3d(x, weight, stride=1, padding=padding)
     torch.cuda.synchronize()
 
@@ -88,7 +88,7 @@ def test_conv3d_runtime_k_loop_short_problems(c):
     x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn((k, c, 1, 1, 1), device="cuda", dtype=torch.bfloat16)
 
-    y = conv3d_implicit_8wave(x, weight)
+    y = conv3d_implicit(x, weight)
     y_ref = F.conv3d(x, weight)
     torch.cuda.synchronize()
 
@@ -118,7 +118,7 @@ def test_conv3d_tile_configs(tile):
     weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
     bias = torch.randn((k,), device="cuda", dtype=torch.float32)
 
-    y = conv3d_implicit_8wave(x, weight, bias=bias, stride=stride, padding=padding, tile=tile)
+    y = conv3d_implicit(x, weight, bias=bias, stride=stride, padding=padding, tile=tile)
     y_ref = F.conv3d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
     torch.cuda.synchronize()
 
@@ -138,7 +138,7 @@ def test_conv3d_autotune(tmp_path, monkeypatch):
     x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16)
     weight = torch.randn((k, c, 3, 3, 3), device="cuda", dtype=torch.bfloat16)
 
-    y = conv3d_implicit_8wave(x, weight, stride=1, padding=1, autotune=True)
+    y = conv3d_implicit(x, weight, stride=1, padding=1, autotune=True)
     y_ref = F.conv3d(x, weight, stride=1, padding=1)
     torch.cuda.synchronize()
     assert torch.allclose(y, y_ref, rtol=2e-2, atol=2e-2)
@@ -153,7 +153,7 @@ def test_conv3d_autotune(tmp_path, monkeypatch):
         return orig(*a, **kw)
 
     monkeypatch.setattr(conv3d_autotune, "do_bench", _counting)
-    y2 = conv3d_implicit_8wave(x, weight, stride=1, padding=1, autotune=True)
+    y2 = conv3d_implicit(x, weight, stride=1, padding=1, autotune=True)
     torch.cuda.synchronize()
     assert torch.allclose(y2, y_ref, rtol=2e-2, atol=2e-2)
     assert calls["n"] == 0  # cached, no re-benchmark
@@ -177,7 +177,7 @@ def test_conv2d_vs_torch(kernel_shape, stride, padding):
     weight = torch.randn((k, c, *kernel_shape), device="cuda", dtype=torch.bfloat16)
     bias = torch.randn((k,), device="cuda", dtype=torch.float32)
 
-    y = conv3d_implicit_8wave(x, weight, bias=bias, stride=stride, padding=padding)
+    y = conv3d_implicit(x, weight, bias=bias, stride=stride, padding=padding)
     y_ref = F.conv2d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
     torch.cuda.synchronize()
 
@@ -202,7 +202,7 @@ def test_conv1d_vs_torch(s, stride, padding):
     weight = torch.randn((k, c, s), device="cuda", dtype=torch.bfloat16)
     bias = torch.randn((k,), device="cuda", dtype=torch.float32)
 
-    y = conv3d_implicit_8wave(x, weight, bias=bias, stride=stride, padding=padding)
+    y = conv3d_implicit(x, weight, bias=bias, stride=stride, padding=padding)
     y_ref = F.conv1d(x, weight, bias=bias.to(torch.bfloat16), stride=stride, padding=padding)
     torch.cuda.synchronize()
 
