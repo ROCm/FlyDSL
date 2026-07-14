@@ -860,23 +860,16 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     st, sh, sw = (stride, stride, stride) if isinstance(stride, int) else stride
     pt, ph, pw = (padding, padding, padding) if isinstance(padding, int) else padding
 
-    # 3x1x1 fast path: y[n,k,d,h,w] = sum_c sum_dt W[k,c,dt] * x[n,c,d+dt-1,h,w]
-    # Spatial dims H,W are not gathered; only the time dimension is unfolded.
-    # unfold(x, kernel=3, pad=1 along D) -> A[N*D*H*W, 3C] then GEMM A @ W.T.
-    # The unfold is a strided view (no copy of x); only A is materialized.
-    # Routes to hgemm_splitk (FlyDSL) when A fits in i32 byte range (<~4.29GB),
-    # otherwise falls back to torch.matmul (rocBLAS handles arbitrary sizes).
-    # 1x1x1 fast path: the conv reduces to a plain GEMM over channels
-    #   y[n,k,dhw] = sum_c weight[k,c] * x[n,c,dhw]
-    # No im2col / NDHWC transpose is needed (x's C is dim 1, spatial is contiguous),
-    # so route through a tuned bf16 matmul instead of the transpose+implicit-GEMM
-    # path (which pays a full-tensor NCDHW->NDHWC transpose the 1x1x1 op never needs).
+    # 1x1x1 fast path: y[n,k,dhw] = sum_c weight[k,c] * x[n,c,dhw] — pure channel GEMM.
+    # The async im2col path pays an NCDHW→NDHWC transpose (~5-6ms for 14GB tensors)
+    # that 1x1x1 never needs since x is already channel-major (dim 1). Routing through
+    # torch.matmul (rocBLAS) gives 201 TF vs 78 TF for async im2col — 2.6x faster.
+    # FlyDSL has no GEMM kernel for these dims (M=14M, K=48: i32 overflow + N not %128).
     if kt == 1 and kh == 1 and kw == 1 and st == 1 and sh == 1 and sw == 1 and pt == 0 and ph == 0 and pw == 0:
         wm = weight.reshape(k, c)
         if n == 1:
             y = torch.matmul(wm, x.reshape(c, d * h * w)).reshape(n, k, d, h, w)
         else:
-            # (N,C,DHW) -> (N,K,DHW): broadcast (K,C) over the batch dim
             y = torch.matmul(wm, x.reshape(n, c, d * h * w)).reshape(n, k, d, h, w)
         if bias is not None:
             y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
