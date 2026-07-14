@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-14T04:21:42Z",
+ "updated": "2026-07-14T04:46:59Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29306723771,
+   "pr": 844,
+   "commit": "53bd502d3ab7f4e5867dceef926e6112b2c298b2",
+   "branch": "forward_lse",
+   "event": "pull_request",
+   "title": "Add forward LSE output to FlyDSL flash attention kernels",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29306723771",
+   "created_at": "2026-07-14T04:44:39Z",
+   "updated_at": "2026-07-14T04:45:20Z",
+   "actor": "amd-wsung102",
+   "jobs": []
+  },
   {
    "run_id": 29301784497,
    "pr": 820,
@@ -2192,21 +2207,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185161589/job/86629936946"
     }
    ]
-  },
-  {
-   "run_id": 29185035124,
-   "pr": null,
-   "commit": "2a475611352709a2f048c8c2edd2685ede3750e1",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185035124",
-   "created_at": "2026-07-12T07:56:41Z",
-   "updated_at": "2026-07-12T08:08:08Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
