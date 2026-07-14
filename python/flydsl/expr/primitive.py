@@ -4,7 +4,12 @@
 import inspect
 from enum import IntEnum
 from functools import wraps
-from typing import overload
+from typing import TYPE_CHECKING, overload
+
+if TYPE_CHECKING:
+    from typing import Any, Callable, ParamSpec
+
+    _P = ParamSpec("_P")
 
 from .._mlir import ir
 from .._mlir._mlir_libs._mlirDialectsFly import _Basis
@@ -296,11 +301,11 @@ def _coerce_int_tuple_permissive(v):
 def coerce_int_tuple_args(*arg_names, permissive=False):
     coerce = _coerce_int_tuple_permissive if permissive else _coerce_int_tuple
 
-    def decorator(fn):
+    def decorator(fn: "Callable[_P, Any]") -> "Callable[_P, Any]":
         sig = inspect.signature(fn)
 
         @wraps(fn)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: "_P.args", **kwargs: "_P.kwargs") -> "Any":
             bound = sig.bind_partial(*args, **kwargs)
             for name in arg_names:
                 v = bound.arguments.get(name)
