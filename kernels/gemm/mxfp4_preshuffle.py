@@ -26,26 +26,30 @@ from flydsl.expr.typing import Vector as Vec
 _A_ELEM = {"fp4": Float4E2M1FN, "fp6": Float6E2M3FN, "fp8": Float8E4M3FN}
 
 
-def _scale_mma_atoms(a_dtype):
-    """16 (opsel_a, opsel_b) scaled-MFMA atoms; A elem is fp4/fp6/fp8, B always fp4."""
+def _scale_mma_atoms(a_dtype, b_dtype):
+    """16 (opsel_a, opsel_b) scaled-MFMA atoms; A elem is fp4/fp6/fp8, B is fp4/fp8."""
     elem_a = _A_ELEM[a_dtype]
+    elem_b = _A_ELEM[b_dtype]
     return {
-        (osa, osb): fx.make_mma_atom(
-            fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_a, Float4E2M1FN, opsel_a=osa, opsel_b=osb)
-        )
+        (osa, osb): fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, elem_a, elem_b, opsel_a=osa, opsel_b=osb))
         for osa in range(4)
         for osb in range(4)
     }
 
 
-def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves):
-    """Preshuffled B view for one N-row tile; index [l//16, l%16, kt, half, None] -> i32[4]."""
+def _bq_view(arg_bq_addr, row_elems, KH4, k_tiles, k_halves, pair):
+    """Preshuffled B view for one N-row tile; index [l//16, l%16, kt, half, p, None] -> i32[4].
+
+    `pair` = K0 blocks per 128-K MFMA: 1 for fp4 B (one i32[4]), 2 for fp8 B (lo/hi halves
+    packed into i32[8] by load_b). K0 blocks (256 i32 each) run contiguously along K as
+    ((kt*k_halves + kh)*pair + p); the fp4 case keeps a size-1 `p` dim (byte-identical view)."""
     col_base = rocdl.readfirstlane(T.i32, row_elems * KH4)
     i32_ptr_ty = fx.PointerType.get(T.i32, address_space=fx.AddressSpace.Global, alignment=16)
     off_i64 = fx.Int64(col_base)
     base_iter = fx.inttoptr(i32_ptr_ty, arg_bq_addr + off_i64 * fx.Int64(4))
-    shape = (4, 16, k_tiles, k_halves, 4)
-    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, (64, 4, k_halves * 256, 256, 1))))
+    shape = (4, 16, k_tiles, k_halves, pair, 4)
+    strides = (64, 4, k_halves * pair * 256, pair * 256, 256, 1)
+    view = fx.Tensor(fx.make_view(base_iter, fx.make_layout(shape, strides)))
     return fx.rocdl.make_buffer_tensor(view, max_size=False)
 
 
@@ -66,6 +70,7 @@ def launch_gemm(
     tile_k: Constexpr[int],
     a_dtype: Constexpr[str],
     out_dtype: Constexpr[str],
+    b_dtype: Constexpr[str],
     batch: Constexpr[int],
     a_row_stride: Constexpr[int],
     a_batch_stride: Constexpr[int],
@@ -77,9 +82,10 @@ def launch_gemm(
 ):
     """Direct @flyc.jit launcher. Operands are fx.Pointer (pass ptr_arg(t): raw data_ptr, no
     per-launch DLPack). Compile once with flyc.compile, then cf(*runtime). a_dtype fp4/fp6/fp8
-    A x preshuffled MXFP4 B, e8m0 scales. batch>1 = strided-batched over grid.z. The
-    a_/sca_/c_ row/batch strides make A/scale_a/C addressing caller-controlled; each <0 keeps
-    the contiguous [B,M,*] bmn default, all set = the [M,B,*] mbn layout. waves_per_eu<=0 = unset.
+    A x preshuffled b_dtype (fp4/fp8) B, e8m0 scales (a8w8 = a_dtype=fp8, b_dtype=fp8).
+    batch>1 = strided-batched over grid.z. The a_/sca_/c_ row/batch strides make A/scale_a/C
+    addressing caller-controlled; each <0 keeps the contiguous [B,M,*] bmn default, all set =
+    the [M,B,*] mbn layout. waves_per_eu<=0 = unset.
     """
     BM, BN, BK = tile_m, tile_n, tile_k
     if const_expr(out_dtype == "bf16"):
@@ -102,8 +108,12 @@ def launch_gemm(
     A_ROW_I32 = A_ROW_B // 4
     swz_lds = a_dtype in ("fp4", "fp8")
     k_blk16 = A_ROW_B // 16
-    K_HALF = K // 2
-    KH4 = K_HALF // 4
+    # B fragment layout: fp8 B needs i32[8] (two K0 blocks / 128-K MFMA); fp4 B i32[4] (one).
+    if const_expr(b_dtype == "fp8"):
+        b_row_bytes, B_NDW, B_BLK_PER_MMA = K, 8, 2
+    else:  # fp4
+        b_row_bytes, B_NDW, B_BLK_PER_MMA = K // 2, 4, 1
+    KH4 = b_row_bytes // 4  # i32 per N-row in preshuffled B (== (K//2)//4 for fp4)
     K_TILES = K // BK
     k_halves = BK // 128  # 16x16x128 MFMA k-steps per K-tile
     # e8m0 scales are 256-K granular, B 128-K: tiles_per_chunk K-tiles share a word (hi/lo 16b = 128-K half).
@@ -123,7 +133,7 @@ def launch_gemm(
     else:
         a_ds_per = 2
     sched_num_ds_load = m_chunks * k_halves * a_ds_per
-    sched_num_gmem = n_coop + num_acc_n * k_halves + m_pairs + n_pairs
+    sched_num_gmem = n_coop + num_acc_n * k_halves * B_BLK_PER_MMA + m_pairs + n_pairs
 
     @fx.struct
     class SharedA:
@@ -140,7 +150,7 @@ def launch_gemm(
         i32_m: fx.Int32,
         i32_n: fx.Int32,
     ):
-        scale_atoms = _scale_mma_atoms(a_dtype)
+        scale_atoms = _scale_mma_atoms(a_dtype, b_dtype)
 
         tid = fx.Int32(fx.thread_idx.x)
         bid_x, bid_y, bid_z = fx.block_idx
@@ -161,7 +171,7 @@ def launch_gemm(
                 arg_a = arg_a + bz * (fx.Int64(i32_m) * fx.Int64(a_row_bytes))
             else:
                 arg_a = arg_a + bz * fx.Int64(a_batch_stride)
-            arg_b = arg_b + bz * fx.Int64(N * (K // 2))
+            arg_b = arg_b + bz * fx.Int64(N * b_row_bytes)
             if const_expr(sca_batch_stride < 0):
                 sc_bstride = fx.Int64((i32_m + 31) // 32) * fx.Int64(_scale_chunk_dw) * fx.Int64(4)
                 arg_scale_a = arg_scale_a + bz * sc_bstride
@@ -257,7 +267,10 @@ def launch_gemm(
             return av
 
         n_col_base = by_n + wave * (BN // 4)
-        bq_views = [_bq_view(arg_b, n_col_base + ni * 16, KH4, K_TILES, k_halves) for ni in range_constexpr(num_acc_n)]
+        bq_views = [
+            _bq_view(arg_b, n_col_base + ni * 16, KH4, K_TILES, k_halves, B_BLK_PER_MMA)
+            for ni in range_constexpr(num_acc_n)
+        ]
         b_copy = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), 32)
         bs_copy = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
@@ -294,13 +307,21 @@ def launch_gemm(
         n_acc = m_chunks * num_acc_n
 
         def load_b(kt):
-            # buffer_load_dwordx4 straight into i32[4] register fragments.
+            # buffer_load_dwordx4 into i32[4] frags; fp8 B packs two K0 blocks (lo/hi, 64 K
+            # apart, f8f6f4 ABI) into i32[8] — same shuffle as read_a's fp6/fp8 A path.
             ops = []
             for ni in range_constexpr(num_acc_n):
                 for kh in range_constexpr(k_halves):
-                    bf = fx.make_rmem_tensor(4, Int32)
-                    fx.copy_atom_call(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, None], bf)
-                    ops.append(bf)
+                    lo = fx.make_rmem_tensor(4, Int32)
+                    fx.copy_atom_call(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 0, None], lo)
+                    if const_expr(b_dtype == "fp4"):
+                        ops.append(lo)
+                    else:  # fp8: lo ++ hi -> i32[B_NDW]
+                        hi = fx.make_rmem_tensor(4, Int32)
+                        fx.copy_atom_call(b_copy, bq_views[ni][lane_div_16, lane_mod_16, kt, kh, 1, None], hi)
+                        t = fx.make_rmem_tensor(B_NDW, Int32)
+                        t.store(Vec(fx.memref_load_vec(lo)).shuffle(Vec(fx.memref_load_vec(hi)), list(range(B_NDW))))
+                        ops.append(t)
             return ops
 
         def load_sc(chunk_kt):
