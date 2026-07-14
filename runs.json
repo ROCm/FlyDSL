@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-14T21:09:10Z",
+ "updated": "2026-07-14T21:19:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -139,13 +139,41 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364720331",
    "created_at": "2026-07-14T20:11:09Z",
-   "updated_at": "2026-07-14T20:11:10Z",
+   "updated_at": "2026-07-14T21:17:19Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T21:17:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364720331/job/87207441025"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T21:17:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364720331/job/87207441082"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T21:17:27Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364720331/job/87207441195"
+    }
+   ]
   },
   {
    "run_id": 29364518027,
@@ -169,11 +197,11 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364206242",
    "created_at": "2026-07-14T20:03:24Z",
-   "updated_at": "2026-07-14T20:05:15Z",
+   "updated_at": "2026-07-14T21:17:07Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -188,19 +216,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-14T20:05:10Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T21:17:06Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364206242/job/87191797017"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-14T20:05:14Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T21:17:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364206242/job/87191797024"
     }
    ]
