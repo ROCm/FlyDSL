@@ -1,8 +1,152 @@
 {
  "schema": 1,
- "updated": "2026-07-14T00:53:13Z",
+ "updated": "2026-07-14T01:29:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29298551004,
+   "pr": 835,
+   "commit": "becf6c793df7447e629e75f1ed8186da9a7afd70",
+   "branch": "feature/propagate-param-types",
+   "event": "pull_request",
+   "title": "[Misc] Propagate signatures through expr decorators",
+   "status": "completed",
+   "conclusion": "action_required",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004",
+   "created_at": "2026-07-14T01:26:24Z",
+   "updated_at": "2026-07-14T01:26:24Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29298539964,
+   "pr": 839,
+   "commit": "1ec9f7e9d28296e6794ee9cca11fba667b9907c3",
+   "branch": "kernel-refactor",
+   "event": "pull_request",
+   "title": "[kernels]: add common/mem_ops for shared memory/atomic helpers",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298539964",
+   "created_at": "2026-07-14T01:26:08Z",
+   "updated_at": "2026-07-14T01:27:15Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:27:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298539964/job/86977358242"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:27:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298539964/job/86977358284"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:27:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298539964/job/86977358295"
+    }
+   ]
+  },
+  {
+   "run_id": 29298523202,
+   "pr": 841,
+   "commit": "f5b74317d6dd508e5aeb6b66d76daa8c98db8d0d",
+   "branch": "pr/enh-buffer-rsrc-utils",
+   "event": "pull_request",
+   "title": "[Enh] Add rocdl.buffer_rsrc utilities: make_buffer_ptr & get_buffer_rsrc",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298523202",
+   "created_at": "2026-07-14T01:25:44Z",
+   "updated_at": "2026-07-14T01:27:14Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:27:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298523202/job/86977356622"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:27:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298523202/job/86977356650"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:27:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298523202/job/86977356663"
+    }
+   ]
+  },
+  {
+   "run_id": 29298166593,
+   "pr": null,
+   "commit": "a85595136c647b2ac4532be43ad6e37beaedc085",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] run_benchmark: treat runtime pytest.skip as skipped, not failed \u2026",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593",
+   "created_at": "2026-07-14T01:17:10Z",
+   "updated_at": "2026-07-14T01:19:47Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:19:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593/job/86976295042"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:19:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593/job/86976295087"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T01:19:45Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593/job/86976295156"
+    }
+   ]
+  },
   {
    "run_id": 29295282652,
    "pr": 786,
@@ -10,20 +154,20 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652",
    "created_at": "2026-07-14T00:12:19Z",
-   "updated_at": "2026-07-14T00:19:08Z",
+   "updated_at": "2026-07-14T01:28:00Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-14T00:19:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T01:27:59Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652/job/86968012504"
     },
     {
@@ -38,10 +182,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-14T00:19:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T01:27:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652/job/86968012521"
     }
    ]
@@ -177,7 +321,7 @@
   },
   {
    "run_id": 29271947966,
-   "pr": 835,
+   "pr": null,
    "commit": "01347d86b9c4b399c04cbbc5e4bbb185770d6599",
    "branch": "feature/propagate-param-types",
    "event": "pull_request",
@@ -511,7 +655,7 @@
   },
   {
    "run_id": 29249100198,
-   "pr": 839,
+   "pr": null,
    "commit": "12f8dffa30bb67f683d74ef3252a8f6cafd0ff59",
    "branch": "kernel-refactor",
    "event": "pull_request",
@@ -2091,66 +2235,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183500927/job/86628030829"
     }
    ]
-  },
-  {
-   "run_id": 29183401486,
-   "pr": null,
-   "commit": "2dc93366d66b7a05cb4cd0d5d9739e7484bbb391",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183401486",
-   "created_at": "2026-07-12T06:56:11Z",
-   "updated_at": "2026-07-12T07:00:02Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29183272482,
-   "pr": null,
-   "commit": "db807f2f376ab2649503247cc7444f920cb6edc5",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183272482",
-   "created_at": "2026-07-12T06:50:55Z",
-   "updated_at": "2026-07-12T06:56:12Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29183087304,
-   "pr": null,
-   "commit": "d1f053502e7b5fdc29c69c516ae1788d71c9e5ea",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29183087304",
-   "created_at": "2026-07-12T06:43:39Z",
-   "updated_at": "2026-07-12T06:50:56Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29182725373,
-   "pr": null,
-   "commit": "2998a9bdf3d03fd97535f314a5cf948d35195b97",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29182725373",
-   "created_at": "2026-07-12T06:29:20Z",
-   "updated_at": "2026-07-12T06:43:40Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
