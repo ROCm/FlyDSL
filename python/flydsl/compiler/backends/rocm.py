@@ -37,14 +37,8 @@ class RocmBackend(BaseBackend):
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         chip = self.target.arch
 
-        # Occupancy knobs (waves_per_eu, maxnreg) are intentionally absent from
-        # these gpu-module-to-binary opts.  MlirCompiler passes the same
-        # compile_hints to lower_occupancy_compile_hints() before this pipeline
-        # runs, and ROCm lowers them onto the kernel gpu.func as attributes
-        # there.  That pre-pipeline attribute path is the one AMDGPU honors;
-        # --amdgpu-waves-per-eu / --amdgpu-num-vgpr in opts= are silently
-        # ignored, so adding them here would only duplicate the hint on a dead
-        # path.
+        # Keep occupancy out of opts=: AMDGPU ignores those flags here.  They are
+        # lowered onto gpu.func attributes before this pipeline runs.
         bin_cli_opts = []
         if env.debug.enable_debug_info:
             bin_cli_opts.append("-g")
@@ -106,20 +100,8 @@ class RocmBackend(BaseBackend):
     def lower_occupancy_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Materialize ROCm occupancy compile hints before ROCDL lowering.
 
-        ``compile_hints`` comes from ``CompilationContext.get_compile_hints()``
-        in ``MlirCompiler.compile`` and is also used to build the pass pipeline.
-        For ROCm, the occupancy hints in that dictionary cannot remain as plain
-        Python-side tuning metadata: the AMDGPU backend only acts on them once
-        they are present on each entry kernel as MLIR/LLVM function attributes.
-
-        This hook is therefore the narrow bridge from compile-time tuning hints
-        to target-visible kernel attributes:
-
-          - ``waves_per_eu`` becomes ``rocdl.waves_per_eu`` on ``gpu.func``.
-          - ``maxnreg`` becomes an ``amdgpu-num-vgpr`` LLVM passthrough attr.
-
-        It must run before ``convert-gpu-to-rocdl`` so those attributes survive
-        the GPU-to-ROCDL/LLVM lowering pipeline.
+        ``waves_per_eu`` and ``maxnreg`` only affect AMDGPU codegen as kernel
+        function attrs, so this must run before ``convert-gpu-to-rocdl``.
         """
         _lower_occupancy_compile_hints(module, compile_hints=compile_hints)
 
@@ -147,28 +129,13 @@ class RocmBackend(BaseBackend):
 
 # -- occupancy compile-hint lowering ------------------------------------------
 #
-# Data flow:
-#
-#   Config.compiler_opts() / CompilationContext.compile_hints(...)
-#     -> MlirCompiler.compile(...): effective compile_hints
-#     -> RocmBackend.lower_occupancy_compile_hints(module, compile_hints=...)
-#     -> _lower_occupancy_compile_hints(...)
-#     -> _set_occupancy_attrs(...) on each entry-point gpu.func
-#
-# Why this exists: waves_per_eu / maxnreg are ROCm/AMDGPU occupancy knobs, but
-# the AMDGPU backend only honors them as kernel function attributes.  Passing the
-# same values via gpu-module-to-binary opts= is silently ignored, so this module
-# keeps a single working knob -> attribute lowering path.  ``ir`` is imported
-# lazily inside each helper so backend discovery remains importable even without
-# the compiled ``_mlir`` bindings.
+# Config/compiler hints enter here explicitly from MlirCompiler.compile.  Keep
+# the AMDGPU knob lowering in one place, and import ``ir`` lazily so backend
+# discovery works without compiled MLIR bindings.
 
 
 def _iter_gpu_kernel_funcs(module):
-    """Yield the entry-point kernel ``gpu.func`` ops (those carrying the
-    ``gpu.kernel`` attribute) inside every ``gpu.module`` of *module*.
-
-    Non-kernel device helpers are skipped -- occupancy hints only apply to entry
-    points, and a module may hold both."""
+    """Yield entry-point ``gpu.func`` ops and skip device helpers."""
     for top in module.body.operations:
         if top.operation.name != "gpu.module":
             continue
@@ -178,20 +145,7 @@ def _iter_gpu_kernel_funcs(module):
 
 
 def _set_passthrough(func_op, key: str, value: str) -> None:
-    """Set an LLVM ``passthrough`` ``[key, value]`` entry on a kernel func,
-    replacing any existing entry with the same key.
-
-    ``convert-gpu-to-rocdl`` copies the ``passthrough`` discardable attr from the
-    gpu.func onto the lowered llvm.func, where the LLVM emitter turns each entry
-    into a function attribute -- bridging AMDGPU function attributes the ROCDL
-    dialect does not translate natively (e.g. ``amdgpu-num-vgpr``). This is
-    related to, but distinct from, ``FlyROCDLClusterAttrPass``: that pass copies
-    a ``rocdl.cluster_dims`` attr and *synthesizes* the passthrough on the
-    llvm.func in a post-lowering pass, whereas here the ``passthrough`` is set
-    directly on the gpu.func and carried through as-is. Preserves unrelated
-    entries but must not leave a duplicate key (duplicate LLVM function
-    attributes are ill-defined).
-    """
+    """Set or replace one LLVM passthrough function attribute."""
     from ..._mlir import ir
 
     def _entry_key(e):
@@ -210,18 +164,12 @@ def _set_passthrough(func_op, key: str, value: str) -> None:
 
 
 def _set_occupancy_attrs(func_op, *, waves_per_eu=None, maxnreg=None) -> None:
-    """Single source of truth for writing occupancy knobs onto a kernel
-    ``gpu.func`` as the attributes the ROCDL / LLVM lowering actually honors:
+    """Write ROCm occupancy knobs onto one kernel ``gpu.func``.
 
       - ``waves_per_eu`` -> ``rocdl.waves_per_eu`` (translated by convert-gpu-to-rocdl)
       - ``maxnreg``      -> ``amdgpu-num-vgpr`` LLVM passthrough (no native ROCDL attr)
 
-    The autotune compile-hint path (:func:`_lower_occupancy_compile_hints`)
-    routes here, and hand-authored kernels that set ``rocdl.waves_per_eu`` via
-    ``value_attrs`` land on the same attribute. Passing these knobs through
-    ``gpu-module-to-binary opts=`` does NOT work -- the AMDGPU backend drops them
-    silently. A value of 0 / None means "leave it to the compiler". Must be
-    called with *func_op*'s MLIR context active.
+    ``None`` / ``0`` means "leave it to the compiler".
     """
     from ..._mlir import ir
 
@@ -233,25 +181,14 @@ def _set_occupancy_attrs(func_op, *, waves_per_eu=None, maxnreg=None) -> None:
 
 
 def _resolve_occupancy_hint(hint, sym_name: str):
-    """Resolve one occupancy compile-hint for a single kernel entry point.
-
-    A hint is either a scalar (applied uniformly to every ``gpu.kernel``) or a
-    ``{sym_name: value}`` mapping (per-kernel; kernels absent from the map are
-    left to the compiler -- i.e. resolve to ``None``).
-    """
+    """Resolve a scalar or ``{sym_name: value}`` hint for one kernel."""
     if isinstance(hint, Mapping):
         return hint.get(sym_name)
     return hint
 
 
 def _unmatched_occupancy_hint_keys(hints: dict, present: set) -> dict:
-    """Map ``knob -> [keys]`` for per-kernel occupancy hints whose keys name no
-    kernel in *present* (the ``sym_name``s of the module's entry kernels).
-
-    A ``{sym_name: value}`` hint with a stale/typo'd key would otherwise be a
-    silent no-op -- the exact "silently ignored" failure this occupancy rework
-    set out to eliminate -- so the caller warns on any leftovers.
-    """
+    """Return stale per-kernel hint keys by knob name."""
     out = {}
     for knob, hint in hints.items():
         if isinstance(hint, Mapping):
@@ -262,28 +199,7 @@ def _unmatched_occupancy_hint_keys(hints: dict, present: set) -> dict:
 
 
 def _lower_occupancy_compile_hints(module, *, compile_hints: dict) -> None:
-    """Lower the autotuner's occupancy compile-hints onto each kernel gpu.func.
-
-    ``compile_hints`` is an explicit snapshot from ``MlirCompiler.compile``. It
-    may contain occupancy knobs from ``Config.compiler_opts()`` or a surrounding
-    ``CompilationContext.compile_hints(...)`` scope. These knobs only take
-    effect as kernel function attributes, so this walks the entry-point kernels
-    and writes them via :func:`_set_occupancy_attrs` -- the single occupancy
-    mechanism. The dead ``gpu-module-to-binary opts=`` route (silently ignored
-    by the AMDGPU backend) is intentionally not used.
-
-    Per-kernel vs uniform: each hint may be a scalar ``int`` -- applied to
-    *every* ``gpu.kernel`` entry point (the common case, e.g. single-kernel
-    launchers like rmsnorm) -- or a ``{sym_name: int}`` mapping resolved per
-    kernel func against its ``sym_name`` (kernels absent from the map are left
-    to the compiler; a map key naming no kernel is warned about, not silently
-    dropped). The mapping form lets a multi-kernel ``@jit`` launcher scope
-    occupancy per entry kernel via ``CompilationContext.compile_hints``. Note:
-    ``Config`` can carry such a mapping, but the autotune *search* still
-    enumerates scalar knobs only, so autotune-driven *independent* per-kernel
-    tuning is not wired end-to-end yet -- the search would need to explore the
-    mappings (deferred; see PR #785).
-    """
+    """Lower scalar or per-kernel occupancy hints onto entry kernels."""
     from ..._mlir import ir
 
     waves_per_eu = compile_hints.get("waves_per_eu")

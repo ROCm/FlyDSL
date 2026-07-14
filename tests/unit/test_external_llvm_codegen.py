@@ -64,10 +64,7 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
     assert pre_binary[-1] == "reconcile-unrealized-casts"
     assert any(fragment.startswith("gpu.module(") for fragment in pre_binary)
     assert binary.startswith("gpu-module-to-binary")
-    # Occupancy knobs must NOT ride on gpu-module-to-binary opts= -- the AMDGPU
-    # backend silently ignores them there. They are lowered onto the kernel
-    # gpu.func as attributes instead (_lower_occupancy_compile_hints). Asserting
-    # their absence guards against regressing to that dead no-op path.
+    # AMDGPU ignores occupancy flags in opts=; they are gpu.func attrs instead.
     assert "--amdgpu-waves-per-eu" not in binary
     assert "--amdgpu-num-vgpr" not in binary
 

@@ -816,10 +816,7 @@ class MlirCompiler:
 
         compile_hints = CompilationContext.get_compile_hints()
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        # Some compile hints are pass options, while ROCm occupancy hints must be
-        # written onto gpu.func before convert-gpu-to-rocdl.  Pass the same
-        # explicit hint snapshot to both paths so backend hooks do not depend on
-        # hidden thread-local lookups.
+        # Keep pre-pipeline lowering and pipeline construction on the same hint snapshot.
         backend.lower_occupancy_compile_hints(module, compile_hints=compile_hints)
         cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
         fragments = cfg.fragments

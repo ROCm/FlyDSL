@@ -730,9 +730,7 @@ def test_builder_mode_rejects_num_warps(monkeypatch):
 
 
 def test_lower_occupancy_compile_hints_sets_func_attrs():
-    """waves_per_eu -> rocdl.waves_per_eu and maxnreg -> amdgpu-num-vgpr
-    passthrough, set on the kernel gpu.func. Guards against regressing to the
-    silent gpu-module-to-binary opts= no-op (needs the compiled bindings)."""
+    """ROCm occupancy hints lower to kernel function attrs."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
     from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints
@@ -742,14 +740,13 @@ def test_lower_occupancy_compile_hints_sets_func_attrs():
         module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
         _lower_occupancy_compile_hints(module, compile_hints={"waves_per_eu": 3, "maxnreg": 64})
         text = str(module)
-    # Precise matches (a bare "3"/"64" substring could appear in a type/loc).
+    # Avoid loose numeric substring matches.
     assert "rocdl.waves_per_eu = 3" in text
     assert '"amdgpu-num-vgpr", "64"' in text
 
 
 def test_set_passthrough_replaces_same_key_no_duplicate():
-    """maxnreg lowering must REPLACE an existing amdgpu-num-vgpr passthrough, not
-    append a duplicate (duplicate LLVM function attributes are ill-defined)."""
+    """maxnreg lowering replaces an existing passthrough attr."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
     from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints, _set_passthrough
@@ -758,7 +755,7 @@ def test_set_passthrough_replaces_same_key_no_duplicate():
     with _create_mlir_context() as ctx:
         module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
         func = module.body.operations[0].regions[0].blocks[0].operations[0]
-        # Pre-seed a build-time amdgpu-num-vgpr (as a kernel could) + an unrelated entry.
+        # Preserve unrelated passthrough entries while replacing the target key.
         with ctx:
             _set_passthrough(func, "no-inline", "true")
             _set_passthrough(func, "amdgpu-num-vgpr", "128")
@@ -770,9 +767,7 @@ def test_set_passthrough_replaces_same_key_no_duplicate():
 
 
 def test_lower_occupancy_compile_hints_per_kernel_mapping():
-    """A {sym_name: value} hint scopes occupancy per entry kernel; a kernel
-    absent from a given map is left to the compiler. (Scalar/uniform behavior is
-    covered by test_lower_occupancy_compile_hints_sets_func_attrs.)"""
+    """Per-kernel occupancy maps only annotate named kernels."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl._mlir import ir
     from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints

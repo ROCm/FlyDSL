@@ -81,18 +81,10 @@ class BaseBackend(metaclass=ABCMeta):
     def lower_occupancy_compile_hints(self, module, *, compile_hints: dict) -> None:
         """Optional pre-pipeline lowering for occupancy-related compile hints.
 
-        ``MlirCompiler.compile`` calls this hook after reparsing the JIT module
-        and before building/running this backend's lowering pipeline.  The
-        ``compile_hints`` argument is the same effective hint dictionary passed
-        to :meth:`pipeline_fragments`, so subclasses should read hints from this
-        explicit argument rather than reaching back into ``CompilationContext``.
-
-        The base implementation is intentionally a no-op: most backends either
-        have no occupancy attributes or handle occupancy through normal pipeline
-        options.  Backends that require target-specific kernel annotations
-        override this method to materialize those hints onto the module before
-        lowering (for example ROCm lowers ``waves_per_eu`` / ``maxnreg`` onto
-        each entry-point ``gpu.func``).
+        ``compile_hints`` is the same snapshot passed to ``pipeline_fragments``.
+        Most backends need no pre-lowering annotations, so the default is a
+        no-op.  ROCm overrides this to write occupancy attrs onto entry-point
+        ``gpu.func`` ops before ROCDL lowering.
         """
         return None
 
