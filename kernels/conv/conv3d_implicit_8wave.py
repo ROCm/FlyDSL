@@ -616,6 +616,11 @@ def compile_conv3d_implicit_8wave(
             # in-flight tile (vmcnt = remaining in-flight), reads it, launches the
             # tile PIPE_STAGES-1 ahead, and computes -- so DMA overlaps MFMA across
             # the full pipeline depth rather than a single double buffer.
+            # Note: range_constexpr (full unroll) outperforms scf.for here because
+            # the LLVM software pipeliner has cross-iteration visibility of all 576+
+            # tile bodies, enabling global ds_read↔MFMA interleaving that beats
+            # per-iteration sched hints. The spill overhead (prologue only, not hot path)
+            # is smaller than the scheduling gain from full unroll.
             PREFETCH = PIPE_STAGES - 1
             for s in range_constexpr(PREFETCH):
                 if const_expr(s < tiles_per_split):
@@ -854,6 +859,39 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
     st, sh, sw = (stride, stride, stride) if isinstance(stride, int) else stride
     pt, ph, pw = (padding, padding, padding) if isinstance(padding, int) else padding
+
+    # 3x1x1 fast path: y[n,k,d,h,w] = sum_c sum_dt W[k,c,dt] * x[n,c,d+dt-1,h,w]
+    # Spatial dims H,W are not gathered; only the time dimension is unfolded.
+    # unfold(x, kernel=3, pad=1 along D) -> A[N*D*H*W, 3C] then GEMM A @ W.T.
+    # The unfold is a strided view (no copy of x); only A is materialized.
+    # Routes to hgemm_splitk (FlyDSL) when A fits in i32 byte range (<~4.29GB),
+    # otherwise falls back to torch.matmul (rocBLAS handles arbitrary sizes).
+    if kt == 3 and kh == 1 and kw == 1 and st == 1 and sh == 1 and sw == 1 and pt == 1 and ph == 0 and pw == 0:
+        import torch.nn.functional as _F
+        hw = h * w
+        M = n * d * hw
+        # Only use unfold+GEMM when A fits in memory without a huge temporary.
+        # A_bytes = M * C * 3 * 2 (bf16). For large shapes (>~4GB) the .contiguous()
+        # call would allocate 42GB; fall through to the async im2col path instead.
+        A_bytes = M * c * 3 * 2
+        _tile_n = 256 if k % 256 == 0 else (128 if k % 128 == 0 else 0)
+        if A_bytes < 0x7FFFFF80 * 2 and _tile_n > 0:
+            # unfold along T: (N*C, 1, D, H*W) → unfold(3,1) pad(1,0) → (N*C, 3, M)
+            # Reshape to (N, C, 3, M) → permute(0,3,1,2) → (N,M,C,3) → (M, C*3)
+            # W2 = weight.reshape(k, c*3) matches: W[k, c*3+kt] = weight[k,c,kt] ✓
+            xhw = x.reshape(n * c, 1, d, hw)
+            A_unf = _F.unfold(xhw, kernel_size=(3, 1), padding=(1, 0))  # (N*C, 3, M)
+            A = A_unf.reshape(n, c, 3, M).permute(0, 3, 1, 2).reshape(M, c * 3).contiguous()
+            W2 = weight.reshape(k, c * 3)
+            y_flat = torch.empty(M, k, dtype=x.dtype, device=x.device)
+            from kernels.gemm.hgemm_splitk import hgemm_splitk_
+            hgemm_splitk_(y_flat, A, W2, None, {"TILE_N": _tile_n},
+                          torch.cuda.current_stream() if stream is None else stream)
+            y = y_flat.reshape(n, d, hw, k).permute(0, 3, 1, 2).reshape(n, k, d, h, w).contiguous()
+            if bias is not None:
+                y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
+            return y
+        # else: fall through to async im2col (large shapes where A > 4.29GB)
 
     # 1x1x1 fast path: the conv reduces to a plain GEMM over channels
     #   y[n,k,dhw] = sum_c weight[k,c] * x[n,c,dhw]
