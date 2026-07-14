@@ -4,7 +4,6 @@
 from ..._mlir import ir
 from ..._mlir._mlir_libs._mlirDialectsFlyROCDL import (
     MmaOpGFX11_WMMAType,
-    MmaOpGFX1250_WMMAScaleType,
     MmaOpGFX1250_WMMAType,
 )
 from ..._mlir.dialects import fly_rocdl
@@ -133,58 +132,6 @@ def WMMA(m, n, k, elem_ty_ab, elem_ty_acc=None, **kwargs):
         )
     raise ValueError(
         f"WMMA is not available on target arch {arch!r}; supported: gfx11xx (RDNA3 / RDNA3.5), gfx12xx (RDNA4), and gfx1250. "
-    )
-
-
-def WMMAScale(
-    m,
-    n,
-    k,
-    elem_ty_a,
-    elem_ty_b=None,
-    elem_ty_acc=None,
-    *,
-    opsel_a=0,
-    opsel_b=0,
-    mod_c=0,
-    reuse_a=False,
-    reuse_b=False,
-    block_size=32,
-):
-    """Create a gfx1250 MX-scaled WMMA atom (E8M0 block scale) for the unified
-    f8/f6/f4 operand format. Per-operand scales are atom state (``scale_a`` /
-    ``scale_b``); ``opsel_a`` / ``opsel_b`` are forwarded as the intrinsic's
-    ``scaleAType`` / ``scaleBType`` operands (the scale-format / lane selector,
-    not an output opsel). ``mod_c`` (i16 C-operand modifier) and ``reuse_a`` /
-    ``reuse_b`` (operand-reuse scheduler hints) are forwarded to V_WMMA_SCALE.
-
-    ``block_size`` selects the MX block size (elements per shared E8M0 scale):
-    ``32`` (default) uses V_WMMA_SCALE with i32 scale state; ``16`` uses
-    V_WMMA_SCALE16 with i64 scale state.
-    """
-    ty_a = elem_ty_a.ir_type if hasattr(elem_ty_a, "ir_type") else elem_ty_a
-    if elem_ty_b is None:
-        ty_b = ty_a
-    else:
-        ty_b = elem_ty_b.ir_type if hasattr(elem_ty_b, "ir_type") else elem_ty_b
-    ty_acc = (
-        ir.F32Type.get()
-        if elem_ty_acc is None
-        else (elem_ty_acc.ir_type if hasattr(elem_ty_acc, "ir_type") else elem_ty_acc)
-    )
-    return MmaOpGFX1250_WMMAScaleType.get(
-        m,
-        n,
-        k,
-        ty_a,
-        ty_b,
-        ty_acc,
-        opsel_a=opsel_a,
-        opsel_b=opsel_b,
-        mod_c=mod_c,
-        reuse_a=reuse_a,
-        reuse_b=reuse_b,
-        block_size=block_size,
     )
 
 

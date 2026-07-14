@@ -7,8 +7,8 @@
 and the 2D TDM copy atom.
 
 These only build the FlyROCDL atom *types* via the Python factories in
-``flydsl.expr.rocdl`` (WMMAScale in ``universal``, TDM in ``cdna5``) and check
-textual round-trip + verifier behavior; no GPU is required.
+``flydsl.expr.rocdl.cdna5`` (gfx1250 MX-scale WMMA + TDM) and check textual
+round-trip + verifier behavior; no GPU is required.
 """
 
 import pytest
@@ -26,7 +26,7 @@ def _ctx():
 def test_wmma_scale_type_roundtrip():
     with _ctx(), ir.Location.unknown():
         from flydsl._mlir.dialects import fly_rocdl  # noqa: F401  (register dialect)
-        from flydsl.expr.rocdl import universal as U
+        from flydsl.expr.rocdl import cdna5 as U
 
         f8 = ir.Float8E4M3FNType.get()
         f4 = ir.Float4E2M1FNType.get()
