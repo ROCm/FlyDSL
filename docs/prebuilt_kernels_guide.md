@@ -311,7 +311,7 @@ from flydsl.expr import gpu, rocdl
 @flyc.kernel
 def gemm_kernel(arg_c: fx.Tensor, arg_a: fx.Tensor, ...):
     tid = gpu.thread_idx.x
-    # ... uses fx.*, Numeric/Vector, .*, rocdl.* ...
+    # ... uses fx.*, Numeric/Vector, gpu.*, rocdl.* ...
 
 @flyc.jit
 def launch_fn(arg_c: fx.Tensor, ..., stream: fx.Stream = fx.Stream(None)):

@@ -673,7 +673,7 @@ def compile_mixed_moe_gemm1(
                     for i in range_constexpr(num_x_loads):
                         idx_i32 = x_row_base_div4[i] + base_k_div4 + x_col_local_i32[i]
                         x_vec = load_x(idx_i32)
-                        parts.append(vector.bitcast(T.vec(4, as_ir_value(i32)), x_vec))
+                        parts.append(vector.bitcast(T.vec(4, i32), as_ir_value(x_vec)))
                     return parts
 
                 # Wave/lane decomposition (identical to stage2)
