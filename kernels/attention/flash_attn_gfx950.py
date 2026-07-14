@@ -220,6 +220,37 @@ def build_flash_attn_dualwave_swp_module(
                                 o_div=o_div,
                             )
 
+        def _issue_kv_dma(src_div, lds_addr, src_elem, soffset):
+            """Leaf 128-bit global->LDS DMA, binding the shared _dma_atom / _lds_ptr_ty."""
+            dwc._buffer_load_lds_128(src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty)
+
+        def _kv_src_div(base_iter, base_iter_ty, align, dense_div, page_id, name):
+            """Paged buffer view (page offset folded into descriptor) or dense global view."""
+            if const_expr(traits.PAGED):
+                if const_expr(page_id is None):
+                    raise ValueError(f"{name} requires page_id when PAGED=True")
+                return dwc._make_page_view(
+                    base_iter,
+                    base_iter_ty,
+                    align,
+                    page_id,
+                    _page_byte_stride,
+                    _page_nrec_bytes,
+                    _page_layout,
+                    _elem_ir,
+                    _buf_flags_i32,
+                )
+            return dense_div
+
+        def _async_load_kv_linear(dma_m0, buf_id, src_div, src_base, soffset, num_dma):
+            """Shared linear/dense KV DMA loop: contiguous D_128B chunks per warp lane."""
+            for d in range_constexpr(num_dma):
+                lds_addr = dma_m0[buf_id][d]
+                n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
+                global_d = d_bucket * traits.VEC_KV + (d * traits.D_128B_SIZE)
+                src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
+                _issue_kv_dma(src_div, lds_addr, src_elem, soffset)
+
         def _async_load_k(
             tile_start,
             buf_id,
@@ -233,22 +264,7 @@ def build_flash_attn_dualwave_swp_module(
                 kv_head_elem_offset=kv_head_elem_offset,
                 stride_kv_n_v=stride_kv_n_v,
             )
-            if const_expr(traits.PAGED):
-                if const_expr(page_id is None):
-                    raise ValueError("_async_load_k requires page_id when PAGED=True")
-                src_div = dwc._make_page_view(
-                    _k_iter,
-                    _k_iter_ty,
-                    _k_align,
-                    page_id,
-                    _page_byte_stride,
-                    _page_nrec_bytes,
-                    _page_layout,
-                    _elem_ir,
-                    _buf_flags_i32,
-                )
-            else:
-                src_div = k_div
+            src_div = _kv_src_div(_k_iter, _k_iter_ty, _k_align, k_div, page_id, "_async_load_k")
             if const_expr(traits.KV_VECTORIZED):
                 # Copy vectorized K into native K-LDS and apply sigma(n) during DMA for simple hot reads.
                 for d in range_constexpr(NUM_DMA_K):
@@ -262,18 +278,9 @@ def build_flash_attn_dualwave_swp_module(
                         kv_head_idx * (traits.HEAD_DIM // traits.KV_VEC_SIZE) * traits.BLOCK_N * traits.KV_VEC_SIZE
                         + src_oct * traits.KV_VEC_SIZE
                     )
-                    dwc._buffer_load_lds_128(
-                        src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty
-                    )
+                    _issue_kv_dma(src_div, lds_addr, src_elem, soffset)
             else:
-                for d in range_constexpr(NUM_DMA_K):
-                    lds_addr = k_dma_m0[buf_id][d]
-                    n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
-                    global_d = d_bucket * traits.VEC_KV + (d * traits.D_128B_SIZE)
-                    src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
-                    dwc._buffer_load_lds_128(
-                        src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty
-                    )
+                _async_load_kv_linear(k_dma_m0, buf_id, src_div, src_base, soffset, NUM_DMA_K)
 
         def _async_load_v(
             tile_start,
@@ -288,22 +295,7 @@ def build_flash_attn_dualwave_swp_module(
                 kv_head_elem_offset=kv_head_elem_offset,
                 stride_kv_n_v=stride_kv_n_v,
             )
-            if const_expr(traits.PAGED):
-                if const_expr(page_id is None):
-                    raise ValueError("_async_load_v requires page_id when PAGED=True")
-                src_div = dwc._make_page_view(
-                    _v_iter,
-                    _v_iter_ty,
-                    _v_align,
-                    page_id,
-                    _page_byte_stride,
-                    _page_nrec_bytes,
-                    _page_layout,
-                    _elem_ir,
-                    _buf_flags_i32,
-                )
-            else:
-                src_div = v_div
+            src_div = _kv_src_div(_v_iter, _v_iter_ty, _v_align, v_div, page_id, "_async_load_v")
             if const_expr(traits.KV_VECTORIZED):
                 # Copy vectorized V into padded NO-major wave rows for bank-friendly ds_read_b128.
                 for d in range_constexpr(NUM_DMA_V):
@@ -320,18 +312,9 @@ def build_flash_attn_dualwave_swp_module(
                         traits.KV_VEC_SIZE,
                         traits.HEAD_DIM,
                     )
-                    dwc._buffer_load_lds_128(
-                        src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty
-                    )
+                    _issue_kv_dma(src_div, lds_addr, src_elem, soffset)
             else:
-                for d in range_constexpr(NUM_DMA_V):
-                    lds_addr = v_dma_m0[buf_id][d]
-                    n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
-                    global_d = d_bucket * traits.VEC_KV + (d * traits.D_128B_SIZE)
-                    src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
-                    dwc._buffer_load_lds_128(
-                        src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty
-                    )
+                _async_load_kv_linear(v_dma_m0, buf_id, src_div, src_base, soffset, NUM_DMA_V)
 
         def _load_page_id_lds(tile_idx):
             local_tile = tile_idx - split_t0
@@ -350,18 +333,22 @@ def build_flash_attn_dualwave_swp_module(
                 return dwc._finish_page_id(page_id, traits=traits)
             return fx.Index(0)
 
+        def _load_q_pack(q_row_in_block, ks):
+            """Load one 128-bit Q pack for MFMA k-step `ks` and bitcast to elem dtype."""
+            q_col = (ks * traits.K_STEP_QK) + lane_div_32 * traits.MFMA_LANE_K
+            g_idx = q_row_in_block * stride_q_n_v + q_col
+            q_i32_pack = dwc._buffer_load_128(
+                q_gmem_elem_offset + g_idx,
+                _load_atom_128=_load_atom_128,
+                q_div=q_div,
+                v4i32_type=v4i32_type,
+            )
+            return Vec(q_i32_pack, (4,), fx.Int32).bitcast(elem_dtype).ir_value()
+
         def _load_q_all(q_row_in_block):
             q_raw_packs = []
             for ks in range_constexpr(traits.K_STEPS_QK):
-                q_col = (ks * traits.K_STEP_QK) + lane_div_32 * traits.MFMA_LANE_K
-                g_idx = q_row_in_block * stride_q_n_v + q_col
-                q_i32_pack = dwc._buffer_load_128(
-                    q_gmem_elem_offset + g_idx,
-                    _load_atom_128=_load_atom_128,
-                    q_div=q_div,
-                    v4i32_type=v4i32_type,
-                )
-                q_raw_packs.append(Vec(q_i32_pack, (4,), fx.Int32).bitcast(elem_dtype).ir_value())
+                q_raw_packs.append(_load_q_pack(q_row_in_block, ks))
             q_16_packs = []
             for pair in range_constexpr(traits.K_STEPS_QK // 2):
                 q_16_packs.append(dwc._concat_vectors(q_raw_packs[pair * 2], q_raw_packs[pair * 2 + 1]))
