@@ -91,6 +91,37 @@ jobs:
           RETRY_INTERVAL_SECONDS: 30
 
   # ---------------------------------------------------------------------------
+  # Status shim for docs-only changes. When the 'test' matrix job is skipped
+  # (code_changed == 'false'), GitHub does NOT emit the per-matrix
+  # 'test (<runner>)' check runs, so any branch-protection required check with
+  # those names hangs on "Expected — Waiting for status to be reported" and
+  # blocks the PR forever. This job reuses the same name + matrix to report
+  # exactly those required checks as successful on a cheap ubuntu runner (no GPU
+  # runner used). It runs ONLY when 'test' is skipped for a non-code change, so
+  # the two never produce the same check at the same time.
+  # ---------------------------------------------------------------------------
+  test-skip:
+    needs: [check-signal, detect-changes]
+    if: >-
+      ${{ always()
+          && needs.detect-changes.result == 'success'
+          && needs.detect-changes.outputs.code_changed != 'true' }}
+    name: test
+    strategy:
+      matrix:
+        runners: [
+          'linux-flydsl-mi325-1',
+          'linux-flydsl-mi355-1',
+          'linux-flydsl-navi-2',
+        ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report skipped GPU tests as passed
+        run: |
+          echo "Non-code (docs/yaml-only) change: GPU tests skipped."
+          echo "Reporting required check 'test (${{ matrix.runners }})' as passed."
+
+  # ---------------------------------------------------------------------------
   # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
   # Runs on 1-GPU and Navi runners only.
   # ---------------------------------------------------------------------------
