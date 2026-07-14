@@ -866,33 +866,6 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     # The unfold is a strided view (no copy of x); only A is materialized.
     # Routes to hgemm_splitk (FlyDSL) when A fits in i32 byte range (<~4.29GB),
     # otherwise falls back to torch.matmul (rocBLAS handles arbitrary sizes).
-    if kt == 3 and kh == 1 and kw == 1 and st == 1 and sh == 1 and sw == 1 and pt == 1 and ph == 0 and pw == 0:
-        import torch.nn.functional as _F
-        hw = h * w
-        M = n * d * hw
-        # Only use unfold+GEMM when A fits in memory without a huge temporary.
-        # A_bytes = M * C * 3 * 2 (bf16). For large shapes (>~4GB) the .contiguous()
-        # call would allocate 42GB; fall through to the async im2col path instead.
-        A_bytes = M * c * 3 * 2
-        _tile_n = 256 if k % 256 == 0 else (128 if k % 128 == 0 else 0)
-        if A_bytes < 0x7FFFFF80 * 2 and _tile_n > 0:
-            # unfold along T: (N*C, 1, D, H*W) → unfold(3,1) pad(1,0) → (N*C, 3, M)
-            # Reshape to (N, C, 3, M) → permute(0,3,1,2) → (N,M,C,3) → (M, C*3)
-            # W2 = weight.reshape(k, c*3) matches: W[k, c*3+kt] = weight[k,c,kt] ✓
-            xhw = x.reshape(n * c, 1, d, hw)
-            A_unf = _F.unfold(xhw, kernel_size=(3, 1), padding=(1, 0))  # (N*C, 3, M)
-            A = A_unf.reshape(n, c, 3, M).permute(0, 3, 1, 2).reshape(M, c * 3).contiguous()
-            W2 = weight.reshape(k, c * 3)
-            y_flat = torch.empty(M, k, dtype=x.dtype, device=x.device)
-            from kernels.gemm.hgemm_splitk import hgemm_splitk_
-            hgemm_splitk_(y_flat, A, W2, None, {"TILE_N": _tile_n},
-                          torch.cuda.current_stream() if stream is None else stream)
-            y = y_flat.reshape(n, d, hw, k).permute(0, 3, 1, 2).reshape(n, k, d, h, w).contiguous()
-            if bias is not None:
-                y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
-            return y
-        # else: fall through to async im2col (large shapes where A > 4.29GB)
-
     # 1x1x1 fast path: the conv reduces to a plain GEMM over channels
     #   y[n,k,dhw] = sum_c weight[k,c] * x[n,c,dhw]
     # No im2col / NDHWC transpose is needed (x's C is dim 1, spatial is contiguous),
