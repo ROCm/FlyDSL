@@ -46,7 +46,7 @@ from kernels.grouped_gemm_blockscale_common import (
     setup_lds_allocation,
     validate_params,
 )
-from kernels.mfma_epilogues import mfma_epilog
+from kernels.mma.mfma_epilogues import mfma_epilog
 
 
 @functools.lru_cache(maxsize=128)
@@ -166,13 +166,13 @@ def compile_grouped_gemm_blockscale_masked(
 
         # Wave/lane decomposition (256 threads = 4 waves x 64 lanes)
         layout_wave_lane = fx.make_layout((4, 64), stride=(64, 1))
-        coord_wave_lane = fx.idx2crd(tx, layout_wave_lane)
+        coord_wave_lane = fx.idx2crd(fx.Int32(tx), layout_wave_lane)
         wave_id = fx.get(coord_wave_lane, 0)
         lane_id = fx.get(coord_wave_lane, 1)
 
         # Lane decomposition for MFMA (lane_id -> lane_div_16, lane_mod_16)
         layout_lane16 = fx.make_layout((4, 16), stride=(16, 1))
-        coord_lane16 = fx.idx2crd(lane_id, layout_lane16)
+        coord_lane16 = fx.idx2crd(fx.Int32(lane_id), layout_lane16)
         lane_div_16 = fx.get(coord_lane16, 0)
         lane_mod_16 = fx.get(coord_lane16, 1)
 

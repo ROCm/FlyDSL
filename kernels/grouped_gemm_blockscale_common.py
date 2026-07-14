@@ -16,7 +16,7 @@ from flydsl._mlir.dialects import math as math_dialect
 from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.arith import ArithValue
 from flydsl.expr.typing import T, Vector
-from kernels.mfma_preshuffle_pipeline import (
+from kernels.mma.mfma_preshuffle_pipeline import (
     crd2idx,
     lds_store_16b_xor16,
     load_b_pack_k32,
@@ -764,7 +764,7 @@ def make_n_block_coords(
     group_n_off = group_idx * n_in
     for ni in range_constexpr(num_acc_n):
         col_global = group_n_off + by_n + n_tile_base + (ni * 16) + lane_mod_16
-        coord_ni = fx.idx2crd(col_global, layout_n_blk_intra)
+        coord_ni = fx.idx2crd(fx.Int32(col_global), layout_n_blk_intra)
         n_blk_list.append(fx.get(coord_ni, 0))
         n_intra_list.append(fx.get(coord_ni, 1))
 
