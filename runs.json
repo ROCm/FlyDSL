@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-14T21:38:16Z",
+ "updated": "2026-07-14T22:38:22Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29373560296,
+   "pr": 854,
+   "commit": "067598ce3cc5d7c8f4f0fe1a78405b5af60e2d87",
+   "branch": "perf/rmsnorm-bwd-config-cache",
+   "event": "pull_request",
+   "title": "[Test] Expand RMSNorm backward configs, cache reuse, and Torch benchmarks",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296",
+   "created_at": "2026-07-14T22:36:43Z",
+   "updated_at": "2026-07-14T22:36:43Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 29366839827,
    "pr": 801,
@@ -96,29 +111,29 @@
    "branch": "feat/autotune-offline-configs",
    "event": "pull_request",
    "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364875585",
    "created_at": "2026-07-14T20:13:32Z",
-   "updated_at": "2026-07-14T20:41:50Z",
+   "updated_at": "2026-07-14T22:36:31Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T20:41:49Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T22:36:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364875585/job/87193997049"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T20:15:27Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T22:33:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364875585/job/87193997154"
     },
     {
@@ -2304,21 +2319,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225581821/job/86738995340"
     }
    ]
-  },
-  {
-   "run_id": 29225400065,
-   "pr": null,
-   "commit": "a87fa378c802b807d1eae50352d5cc01e0dea307",
-   "branch": "feat/layernorm-backward-769",
-   "event": "pull_request",
-   "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225400065",
-   "created_at": "2026-07-13T05:04:20Z",
-   "updated_at": "2026-07-13T05:05:27Z",
-   "actor": "jhinpan",
-   "jobs": []
   }
  ]
 }
