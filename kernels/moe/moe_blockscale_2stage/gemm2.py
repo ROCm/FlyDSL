@@ -19,6 +19,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import _if_then
+from kernels.common.mem_ops import buffer_atomic_add
 from kernels.mma.mfma_epilogues import c_shuffle_epilog, default_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -1001,13 +1002,7 @@ def compile_moe_blockscale_gemm2(
                 e_vec = _e_vec
 
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
-                    rocdl.raw_ptr_buffer_atomic_fadd(
-                        val_f16x2,
-                        out_rsrc,
-                        byte_off_i32,
-                        zero_i32,
-                        zero_i32,
-                    )
+                    buffer_atomic_add(val_f16x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
 
                 # Blockscale: dequant already done in compute_tile_bs_s2, no sw/sx needed here.
 
@@ -1016,13 +1011,7 @@ def compile_moe_blockscale_gemm2(
                     c4_i32 = fx.Int32(4)
 
                     def atomic_add_f32(val_f32, byte_off_i32):
-                        rocdl.raw_ptr_buffer_atomic_fadd(
-                            val_f32,
-                            out_rsrc,
-                            byte_off_i32,
-                            zero_i32,
-                            zero_i32,
-                        )
+                        buffer_atomic_add(val_f32, out_rsrc, byte_off_i32, zero_i32, zero_i32)
 
                     def _stage2_row_atomic(*, mi: int, ii: int, row_in_tile, row):
                         # Blockscale: dequant already done in compute_tile_bs_s2.

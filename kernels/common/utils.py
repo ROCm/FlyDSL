@@ -4,8 +4,15 @@
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, rocdl
+from flydsl.expr import arith, const_expr, rocdl
 from flydsl.expr.typing import T
+
+# Pointer/global-load helpers now live in mem_ops; re-exported here for back-compat.
+from kernels.common.mem_ops import extract_global_ptr as extract_global_ptr
+from kernels.common.mem_ops import global_load as global_load
+from kernels.common.mem_ops import global_load_i32 as global_load_i32
+from kernels.common.mem_ops import global_load_i64x2 as global_load_i64x2
+from kernels.common.mem_ops import global_ptr_from_addr as global_ptr_from_addr
 
 
 def rcp_f32(value):
@@ -82,29 +89,3 @@ def urem_const(value, divisor: int):
 def unflatten_k(k_flat, qkhe_loop: int = 2):
     n = qkhe_loop * 2
     return [[k_flat[td * n + j] for j in range(n)] for td in range(len(k_flat) // n)]
-
-
-def extract_global_ptr(tensor):
-    from flydsl._mlir.dialects import fly as _fly
-
-    raw = tensor.ir_value() if hasattr(tensor, "ir_value") and not isinstance(tensor, ir.Value) else tensor
-    ptr_type = ir.Type.parse("!llvm.ptr<1>")
-    return _fly.extract_aligned_pointer_as_index(ptr_type, raw)
-
-
-def global_ptr_from_addr(addr_i64):
-    raw = addr_i64.ir_value() if hasattr(addr_i64, "ir_value") and not isinstance(addr_i64, ir.Value) else addr_i64
-    return llvm.IntToPtrOp(ir.Type.parse("!llvm.ptr<1>"), raw).result
-
-
-def global_load(global_ptr, byte_offset, result_type, *, alignment):
-    ptr = buffer_ops.get_element_ptr(global_ptr, byte_offset=fx.Int64(byte_offset), elem_type=T.i8)
-    return llvm.LoadOp(result_type, ptr, alignment=alignment).result
-
-
-def global_load_i64x2(global_ptr, byte_offset_i64):
-    return global_load(global_ptr, byte_offset_i64, T.i64x2, alignment=16)
-
-
-def global_load_i32(global_ptr, elem_offset_i32):
-    return global_load(global_ptr, fx.Int64(elem_offset_i32) * fx.Int64(4), T.i32, alignment=4)
