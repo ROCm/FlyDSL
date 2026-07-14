@@ -26,7 +26,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
-from kernels.common.kernels_common import _if_then
+from kernels.common.kernels_common import _if_then, dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
 # s_waitcnt bitfield encoding
@@ -543,19 +543,6 @@ def _load_block_table_to_lds(
                 llvm.StoreOp(page_id_i32, dst)
 
 
-def _load_page_id_lds(
-    tile_idx,
-    *,
-    lds_bt_base_ptr,
-    split_t0,
-):
-    local_tile = tile_idx - split_t0
-    src = buffer_ops.get_element_ptr(
-        lds_bt_base_ptr, byte_offset=_raw(fx.Int32(local_tile * fx.Index(4))), elem_type=T.i8
-    )
-    return llvm.LoadOp(T.i32, src).result
-
-
 def _finish_page_id(v, *, traits):
     rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
     v = rocdl.readfirstlane(T.i32, v)
@@ -735,78 +722,6 @@ def _ds_read_tr_v4f16_imm(
     return _ds_read_tr16_b64_imm(v4f16_type, addr_i32, imm_bytes)
 
 
-def _global_idx_q(
-    token_idx,
-    col,
-    TRAITS_HEAD_DIM,
-    *,
-    q_head_idx,
-    stride_q_n_v,
-):
-    return token_idx * stride_q_n_v + q_head_idx * TRAITS_HEAD_DIM + col
-
-
-def _load_q_all(
-    q_row_in_block,
-    traits,
-    *,
-    _load_atom_128,
-    elem_dtype,
-    lane_div_32,
-    q_div,
-    q_gmem_elem_offset,
-    stride_q_n_v,
-    v4i32_type,
-):
-    q_raw_packs = []
-    for ks in range_constexpr(traits.K_STEPS_QK):
-        q_col = (ks * traits.K_STEP_QK) + lane_div_32 * traits.MFMA_LANE_K
-        g_idx = q_row_in_block * stride_q_n_v + q_col
-        q_i32_pack = _buffer_load_128(
-            q_gmem_elem_offset + g_idx,
-            _load_atom_128=_load_atom_128,
-            q_div=q_div,
-            v4i32_type=v4i32_type,
-        )
-        q_raw_packs.append(Vec(q_i32_pack, (4,), fx.Int32).bitcast(elem_dtype).ir_value())
-    q_16_packs = []
-    for pair in range_constexpr(traits.K_STEPS_QK // 2):
-        q_16_packs.append(_concat_vectors(q_raw_packs[pair * 2], q_raw_packs[pair * 2 + 1]))
-
-    q_32_packs = []
-    for pair in range_constexpr(traits.K_STEPS_QK // 4):
-        q_32_packs.append(_concat_vectors(q_16_packs[pair * 2], q_16_packs[pair * 2 + 1]))
-
-    q_all = q_32_packs[0] if const_expr(traits.K_STEPS_QK == 4) else _concat_vectors(q_32_packs[0], q_32_packs[1])
-    return Vec(q_all, (traits.K_STEPS_QK * traits.MFMA_LANE_K,), elem_dtype)
-
-
-def _scale_q_all(
-    q_all_bf16,
-    traits,
-    *,
-    c_sm_scale_log2e,
-    elem_dtype,
-    fm_fast,
-    v64bf16_type,
-    v64f32_type,
-):
-    fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
-    q_all_f32_op = llvm.FPExtOp(v64f32_type, _raw(q_all_bf16))
-    q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-    q_all_f32 = q_all_f32_op.result
-    scale_vec = Vec.from_elements([c_sm_scale_log2e], fx.Float32).broadcast_to(traits.K_STEPS_QK * traits.MFMA_LANE_K)
-    q_all_scaled_f32 = arith.mulf(
-        _raw(scale_vec),
-        _raw(q_all_f32),
-        fastmath=fm_fast,
-    )
-    q_all_scaled_bf16_op = llvm.FPTruncOp(v64bf16_type, q_all_scaled_f32)
-    q_all_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-    q_all_scaled_bf16 = q_all_scaled_bf16_op.result
-    return Vec(q_all_scaled_bf16, (traits.K_STEPS_QK * traits.MFMA_LANE_K,), elem_dtype)
-
-
 def _get_q_pack(q_all_scaled_bf16, ks, traits):
     q_vec = Vec(q_all_scaled_bf16)
     base = ks * traits.MFMA_LANE_K
@@ -905,6 +820,14 @@ def _scale_v_p(
     p_scaled_bf16_op = llvm.FPTruncOp(v32bf16_type, p_scaled_f32)
     p_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
     return _v_vec32_to_p(p_scaled_bf16_op.result, traits, elem_dtype=elem_dtype)
+
+
+def _rescale_params(traits):
+    elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
+    fm_fast = fx.arith.FastMathFlags.fast
+    v32bf16_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, elem_dtype)
+    v32f32_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, fx.Float32)
+    return elem_dtype, fm_fast, v32bf16_type, v32f32_type
 
 
 @flyc.jit
@@ -1022,290 +945,6 @@ def _v_dma_m0_base(
     return rocdl.readfirstlane(T.i32, _raw(fx.Int32(lds_addr)))
 
 
-def _async_load_page_id(
-    tile_start,
-    traits,
-    page_id_override=None,
-    *,
-    lds_bt_base_ptr,
-    split_t0,
-):
-    if const_expr(traits.PAGED):
-        if const_expr(page_id_override is not None):
-            return page_id_override
-        page_id = _load_page_id_lds(
-            tile_start // fx.Index(traits.BLOCK_N), lds_bt_base_ptr=lds_bt_base_ptr, split_t0=split_t0
-        )
-        return _finish_page_id(page_id, traits=traits)
-    return fx.Index(0)
-
-
-def _async_load_k(
-    tile_start,
-    buf_id,
-    k_dma_m0,
-    traits,
-    page_id=None,
-    *,
-    NUM_DMA_K,
-    _buf_flags_i32,
-    _dma_atom,
-    _elem_ir,
-    _k_align,
-    _k_iter,
-    _k_iter_ty,
-    _lds_ptr_ty,
-    _page_byte_stride,
-    _page_layout,
-    _page_nrec_bytes,
-    d_bucket,
-    k_div,
-    kv_gmem_elem_offset,
-    kv_head_elem_offset,
-    kv_head_idx,
-    lane_in_warp,
-    n_in_warp,
-    stride_kv_n_v,
-    wave_id,
-    wave_id_uni,
-):
-    src_base, soffset = _kv_tile_addr(
-        tile_start,
-        PAGED=traits.PAGED,
-        kv_gmem_elem_offset=kv_gmem_elem_offset,
-        kv_head_elem_offset=kv_head_elem_offset,
-        stride_kv_n_v=stride_kv_n_v,
-    )
-    if const_expr(traits.PAGED):
-        if const_expr(page_id is None):
-            raise ValueError("_async_load_k requires page_id when PAGED=True")
-        src_div = _make_page_view(
-            _k_iter,
-            _k_iter_ty,
-            _k_align,
-            page_id,
-            _page_byte_stride,
-            _page_nrec_bytes,
-            _page_layout,
-            _elem_ir,
-            _buf_flags_i32,
-        )
-    else:
-        src_div = k_div
-    if const_expr(traits.KV_VECTORIZED):
-        # Copy vectorized K into native K-LDS [d//8, n, d%8] with coalesced writes.
-        # Apply sigma(n) during DMA so the hot K read uses plain lane%32 indexing.
-        for d in range_constexpr(NUM_DMA_K):
-            oct_idx = wave_id_uni * (traits.WARP_SIZE * NUM_DMA_K) + d * traits.WARP_SIZE + lane_in_warp
-            lds_addr = k_dma_m0[buf_id][d]
-            _ni = oct_idx % traits.BLOCK_N
-            _dg = oct_idx // traits.BLOCK_N
-            _src_ni = (_ni & 3) | ((_ni & 8) >> 1) | ((_ni & 4) << 1) | (_ni & ~15)
-            src_oct = _dg * traits.BLOCK_N + _src_ni
-            src_elem = (
-                kv_head_idx * (traits.HEAD_DIM // traits.KV_VEC_SIZE) * traits.BLOCK_N * traits.KV_VEC_SIZE
-                + src_oct * traits.KV_VEC_SIZE
-            )
-            _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty)
-    else:
-        for d in range_constexpr(NUM_DMA_K):
-            lds_addr = k_dma_m0[buf_id][d]
-            n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
-            global_d = d_bucket * traits.VEC_KV + (d * traits.D_128B_SIZE)
-            src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
-            _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty)
-
-
-def _async_load_v(
-    tile_start,
-    buf_id,
-    v_dma_m0,
-    traits,
-    page_id=None,
-    *,
-    NUM_DMA_V,
-    _buf_flags_i32,
-    _dma_atom,
-    _elem_ir,
-    _lds_ptr_ty,
-    _page_byte_stride,
-    _page_layout,
-    _page_nrec_bytes,
-    _v_align,
-    _v_iter,
-    _v_iter_ty,
-    d_bucket,
-    kv_gmem_elem_offset,
-    kv_head_elem_offset,
-    kv_head_idx,
-    lane_in_warp,
-    n_in_warp,
-    stride_kv_n_v,
-    v_div,
-    wave_id,
-    wave_id_uni,
-):
-    src_base, soffset = _kv_tile_addr(
-        tile_start,
-        PAGED=traits.PAGED,
-        kv_gmem_elem_offset=kv_gmem_elem_offset,
-        kv_head_elem_offset=kv_head_elem_offset,
-        stride_kv_n_v=stride_kv_n_v,
-    )
-    if const_expr(traits.PAGED):
-        if const_expr(page_id is None):
-            raise ValueError("_async_load_v requires page_id when PAGED=True")
-        src_div = _make_page_view(
-            _v_iter,
-            _v_iter_ty,
-            _v_align,
-            page_id,
-            _page_byte_stride,
-            _page_nrec_bytes,
-            _page_layout,
-            _elem_ir,
-            _buf_flags_i32,
-        )
-    else:
-        src_div = v_div
-    if const_expr(traits.KV_VECTORIZED):
-        # Copy vectorized V into padded wave rows; lane maps to no=lane//8,
-        # d_local=lane%8. NO-major order keeps ds_read_b128 bank-friendly.
-        for d in range_constexpr(NUM_DMA_V):
-            row = wave_id_uni * NUM_DMA_V + d
-            no = lane_in_warp // traits.SMEM_N_PER_WAVE
-            d_local = lane_in_warp % traits.SMEM_N_PER_WAVE
-            d_col = row * traits.SMEM_N_PER_WAVE + d_local
-            lds_addr = v_dma_m0[buf_id][d]
-            src_elem = _vec_v_elem(
-                no * traits.KV_VEC_SIZE,
-                d_col,
-                kv_head_idx,
-                traits.BLOCK_N,
-                traits.KV_VEC_SIZE,
-                traits.HEAD_DIM,
-            )
-            _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty)
-    else:
-        for d in range_constexpr(NUM_DMA_V):
-            lds_addr = v_dma_m0[buf_id][d]
-            n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
-            global_d = d_bucket * traits.VEC_KV + (d * traits.D_128B_SIZE)
-            src_elem = src_base + n_in_tile * stride_kv_n_v + global_d
-            _buffer_load_lds_128(src_div, lds_addr, src_elem, soffset, _dma_atom=_dma_atom, _lds_ptr_ty=_lds_ptr_ty)
-
-
-def _async_load_k_from_lds_to_vgpr(
-    buf_id,
-    urk_base,
-    traits,
-    *,
-    lane_div_32,
-    lane_mod_32,
-    lds_kv_base_ptr,
-    mfma_pack_type,
-):
-    """Read all 16 K MFMA packs from LDS buffer `buf_id` (DUALWAVE_SWP u_rk)."""
-    k_base = _k_buf_base(buf_id, traits.DUALWAVE_SWP_K_BUF_BASE, traits.DUALWAVE_SWP_KV_PER_BUFFER)
-    k_lo = [None] * traits.K_STEPS_QK
-    k_hi = [None] * traits.K_STEPS_QK
-
-    if const_expr(traits.KV_VECTORIZED):
-        # Native K-LDS [d//8,n,d%8] lets one v8f16 load read consecutive d.
-        # DMA already applied sigma(n), so QK^T emits P in 8-consecutive-n order.
-        _kn = lane_mod_32
-        for ks in range_constexpr(traits.K_STEPS_QK):
-            idx_lo = k_base + (ks * 2 + lane_div_32) * (traits.BLOCK_N * traits.KV_VEC_SIZE) + _kn * traits.KV_VEC_SIZE
-            idx_hi = idx_lo + traits.DUALWAVE_SWP_URK_N_STRIP_STRIDE
-            k_lo[ks] = _load_k_pack_aligned(
-                lds_kv_base_ptr, idx_lo, buf_id, mfma_pack_type, traits.LDS_SCOPE_NAMES, traits.BF16_BYTES
-            )
-            k_hi[ks] = _load_k_pack_aligned(
-                lds_kv_base_ptr, idx_hi, buf_id, mfma_pack_type, traits.LDS_SCOPE_NAMES, traits.BF16_BYTES
-            )
-        return (k_lo, k_hi)
-
-    for ks in range_constexpr(traits.K_STEPS_QK):
-        ks_offset = (ks // 4) * traits.DUALWAVE_SWP_URK_KSTEP_OUTER + (ks % 4) * traits.DUALWAVE_SWP_URK_KSTEP_INNER
-        idx_lo = k_base + urk_base + (ks_offset)
-        idx_hi = idx_lo + traits.DUALWAVE_SWP_URK_N_STRIP_STRIDE
-        k_lo[ks] = _load_k_pack_aligned(
-            lds_kv_base_ptr, idx_lo, buf_id, mfma_pack_type, traits.LDS_SCOPE_NAMES, traits.BF16_BYTES
-        )
-        k_hi[ks] = _load_k_pack_aligned(
-            lds_kv_base_ptr, idx_hi, buf_id, mfma_pack_type, traits.LDS_SCOPE_NAMES, traits.BF16_BYTES
-        )
-    return (k_lo, k_hi)
-
-
-def _read_v_packs_for_buf(
-    buf_id,
-    urv_base,
-    traits,
-    *,
-    lane_div_32,
-    lane_mod_32,
-    lds_kv_base_idx,
-    lds_kv_base_ptr,
-    mfma_pack_type,
-    v4f16_type,
-):
-    """Read all V packs from LDS buffer `buf_id` in DUALWAVE_SWP issue order."""
-    v_base = _v_buf_base(
-        buf_id,
-        traits.DUALWAVE_SWP_V_BUF_BASE,
-        traits.SMEM_K_TILE_ELEMS,
-        traits.DUALWAVE_SWP_KV_PER_BUFFER,
-    )
-    if const_expr(traits.KV_VECTORIZED):
-        # Padded V-LDS NO-major layout: elem(n,d) = (d//8)*544 + (n//8)*64 + (d%8)*8 + n%8.
-        # P is already 8-consecutive-n, so each P*V pack becomes one aligned v8f16 load.
-        _lm = lane_mod_32
-        v_addr_base = (
-            v_base
-            + (_lm // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE
-            + lane_div_32 * traits.D_128B_SIZE
-            + (_lm % traits.SMEM_N_PER_WAVE) * traits.KV_VEC_SIZE
-        )
-        # Fold the per-lane part into the base pointer so each pack uses an immediate offset.
-        v_base_ptr = buffer_ops.get_element_ptr(
-            lds_kv_base_ptr, byte_offset=_raw(fx.Int32(v_addr_base * traits.BF16_BYTES)), elem_type=T.i8
-        )
-
-        packs = [[None] * traits.D_CHUNKS for _ in range(4)]
-        for dc in range_constexpr(traits.D_CHUNKS):
-            for k_substep in range_constexpr(4):
-                const_off = dc * (traits.D_CHUNK // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE + k_substep * (
-                    2 * traits.D_128B_SIZE
-                )
-                packs[k_substep][dc] = _read_v8f16_off(v_base_ptr, const_off, traits.BF16_BYTES, mfma_pack_type)
-        return packs
-    lds_base = v_base + urv_base
-    packs = [[None] * traits.D_CHUNKS for _ in range(4)]
-    for dc in range_constexpr(traits.D_CHUNKS):
-        i_0 = dc // 2  # axes 0 selection: 0 → D < 64, 1 → D >= 64 (d_rpt)
-        i_1 = dc % 2  # axes 1 selection: half-D sub-row group
-        dc_off = i_0 * traits.DUALWAVE_SWP_URV_DC_AXIS0 + i_1 * traits.DUALWAVE_SWP_URV_DC_AXIS1
-        for k_substep in range_constexpr(4):
-            step_k_off = k_substep * traits.DUALWAVE_SWP_URV_STEP_K_STRIDE
-            imm_lo = (step_k_off + dc_off) * traits.BF16_BYTES
-            # axis 5 = 0 and axis 5 = 1 reads (in-register K stride 64 bf16)
-            a = _ds_read_tr_v4f16_imm(
-                lds_base,
-                imm_lo,
-                lds_kv_base_idx=lds_kv_base_idx,
-                v4f16_type=v4f16_type,
-            )
-            b = _ds_read_tr_v4f16_imm(
-                lds_base,
-                imm_lo + traits.DUALWAVE_SWP_URV_I5_STRIDE * traits.BF16_BYTES,
-                lds_kv_base_idx=lds_kv_base_idx,
-                v4f16_type=v4f16_type,
-            )
-            packs[k_substep][dc] = Vec(a).shuffle(Vec(b), [0, 1, 2, 3, 4, 5, 6, 7]).ir_value()
-    return packs
-
-
 def _mma0(
     v_k,
     *,
@@ -1409,14 +1048,6 @@ def _causal_mask_inplace(
         s_hi[idx_y] = _bitcast_f32(new_y_hi)
 
 
-def _v_s_vec_to_lists(v_s):
-    s_lo, s_hi = v_s
-    return (
-        [Vec(s_lo)[r] for r in range_constexpr(16)],
-        [Vec(s_hi)[r] for r in range_constexpr(16)],
-    )
-
-
 def _v_pair_to_vec32(v):
     return _concat_vectors(v[0], v[1]).ir_value()
 
@@ -1426,88 +1057,6 @@ def _v_vec32_to_pair(v):
     v_lo = v_vec.shuffle(v_vec, [i for i in range(16)]).ir_value()
     v_hi = v_vec.shuffle(v_vec, [16 + i for i in range(16)]).ir_value()
     return v_lo, v_hi
-
-
-@flyc.jit
-def _causal_mask_prologue_if_needed(
-    v_s,
-    tile_idx,
-    kv_end_pos,
-    traits,
-    *,
-    delta_i32,
-    lane_div_32,
-    q_row_i32,
-    q_start_pos_i32,
-):
-    """Return masked score vectors when DUALWAVE_SWP's causal guard is active."""
-    s_lo, s_hi = v_s
-    if q_start_pos_i32 + delta_i32 < fx.Int32(kv_end_pos):
-        lo_list, hi_list = _v_s_vec_to_lists(v_s)
-        _causal_mask_inplace(
-            (lo_list, hi_list),
-            tile_idx,
-            traits,
-            delta_i32=delta_i32,
-            lane_div_32=lane_div_32,
-            q_row_i32=q_row_i32,
-        )
-        s_lo = Vec.from_elements([_raw(v) for v in lo_list], fx.Float32).ir_value()
-        s_hi = Vec.from_elements([_raw(v) for v in hi_list], fx.Float32).ir_value()
-    return s_lo, s_hi
-
-
-def _seq_pad_mask_inplace(
-    v_s_lists,
-    tile_idx,
-    traits,
-    *,
-    c_neg_inf,
-    lane_div_32,
-    seqlen_kv_i32,
-):
-    """Mask scores whose absolute KV column is beyond seq_len."""
-    s_lo, s_hi = v_s_lists
-    _lane_n_off = 8 if traits.KV_VECTORIZED else 4
-    kv_tile_start = tile_idx * traits.BLOCK_N
-    col_base = fx.Int32(kv_tile_start) + fx.Int32(lane_div_32) * fx.Int32(_lane_n_off)
-    for r in range_constexpr(16):
-        if const_expr(traits.KV_VECTORIZED):
-            thr = (r // 8) * 16 + (r % 8)
-        else:
-            thr = (r // 4) * 8 + (r % 4)
-        col_lo = col_base + fx.Int32(thr)
-        col_hi = col_lo + fx.Int32(32)
-        s_lo[r] = ArithValue(col_lo < seqlen_kv_i32).select(s_lo[r], c_neg_inf)
-        s_hi[r] = ArithValue(col_hi < seqlen_kv_i32).select(s_hi[r], c_neg_inf)
-
-
-@flyc.jit
-def _seq_pad_mask_if_needed(
-    v_s,
-    tile_idx,
-    traits,
-    *,
-    c_neg_inf,
-    lane_div_32,
-    seqlen_kv_i32,
-):
-    """Apply the non-causal tail mask only when this KV tile crosses seq_len."""
-    s_lo, s_hi = v_s
-    kv_tile_end = (tile_idx + fx.Index(1)) * traits.BLOCK_N
-    if fx.Int32(kv_tile_end) > seqlen_kv_i32:
-        lo_list, hi_list = _v_s_vec_to_lists(v_s)
-        _seq_pad_mask_inplace(
-            (lo_list, hi_list),
-            tile_idx,
-            traits,
-            c_neg_inf=c_neg_inf,
-            lane_div_32=lane_div_32,
-            seqlen_kv_i32=seqlen_kv_i32,
-        )
-        s_lo = Vec.from_elements([_raw(v) for v in lo_list], fx.Float32).ir_value()
-        s_hi = Vec.from_elements([_raw(v) for v in hi_list], fx.Float32).ir_value()
-    return s_lo, s_hi
 
 
 def _attn_row_max(
@@ -1689,12 +1238,8 @@ def _rescale_o(
     m_tile_max,
     v_p,
     traits,
-    *,
-    elem_dtype,
-    fm_fast,
-    v32bf16_type,
-    v32f32_type,
 ):
+    elem_dtype, fm_fast, v32bf16_type, v32f32_type = _rescale_params(traits)
     m_new = _fmax(m_row, m_tile_max, fm_fast=fm_fast)
     corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new, fm_fast=fm_fast)))
     _scale_o(v_o, corr, traits.D_CHUNKS, fm_fast=fm_fast)
@@ -1715,10 +1260,6 @@ def _rescale_o(
 def _lazy_rescale_o_rescale(
     _n,
     *_st,
-    elem_dtype,
-    fm_fast,
-    v32bf16_type,
-    v32f32_type,
     v_o,
     m_row,
     l_row,
@@ -1726,6 +1267,7 @@ def _lazy_rescale_o_rescale(
     v_p,
     traits,
 ):
+    elem_dtype, fm_fast, v32bf16_type, v32f32_type = _rescale_params(traits)
     corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max, fm_fast=fm_fast)))
     scaled_accs = list(v_o)
     _scale_o(scaled_accs, corr, traits.D_CHUNKS, fm_fast=fm_fast)
@@ -1754,15 +1296,12 @@ def _lazy_rescale_o(
     v_p,
     traits,
     *,
-    c_eight_f,
     debug_counts_rsrc,
-    elem_dtype,
-    fm_fast,
     lane,
-    v32bf16_type,
-    v32f32_type,
 ):
     """DUALWAVE_SWP lazy rescale before the remaining MMA1 steps."""
+    elem_dtype, fm_fast, _, _ = _rescale_params(traits)
+    c_eight_f = fx.Float32(traits.DUALWAVE_SWP_RESCALE_THRESHOLD)
     m_diff = _fsub(m_tile_max, m_row, fm_fast=fm_fast)
     below = ArithValue(fx.Float32(m_diff) <= c_eight_f)
     ballot = rocdl.ballot(T.i64, _raw(below))
@@ -1787,10 +1326,6 @@ def _lazy_rescale_o(
     _rescale = lambda _n, *_st: _lazy_rescale_o_rescale(
         _n,
         *_st,
-        elem_dtype=elem_dtype,
-        fm_fast=fm_fast,
-        v32bf16_type=v32bf16_type,
-        v32f32_type=v32f32_type,
         v_o=v_o,
         m_row=m_row,
         l_row=l_row,
@@ -1805,6 +1340,12 @@ def _lazy_rescale_o(
     l_out = _res[traits.D_CHUNKS + 1]
     m_out = _res[traits.D_CHUNKS + 2]
     return (o_out, m_out, l_out, _v_vec32_to_p(vp_out, traits, elem_dtype=elem_dtype))
+
+
+def _dualwave_sync_barrier():
+    rocdl.sched_barrier(0)
+    rocdl.s_barrier()
+    rocdl.sched_barrier(0)
 
 
 def dualwave_splitk_workspace_elems(batch_size, num_heads, seq_len, num_kv_splits, head_dim=128):
