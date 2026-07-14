@@ -14,6 +14,7 @@ import inspect
 from typing import Any
 
 from flydsl.runtime.device import get_rocm_arch
+from kernels.common.mem_ops import buffer_atomic_add
 from kernels.common.utils import align_up as _align_up
 
 
@@ -383,7 +384,7 @@ def _emit_stage1_gate_up_splitk_epilogue(
     mask_even_i32 = arith.constant(0xFFFFFFFE, type=T.i32)
 
     def atomic_add_x2(val_x2, byte_off_i32):
-        rocdl.raw_ptr_buffer_atomic_fadd(val_x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
+        buffer_atomic_add(val_x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
 
     inter_stride_i32 = i32_inter_in * c2_i32  # row stride for [tokens*topk, 2*inter_dim]
     if _use_bias:
@@ -552,7 +553,7 @@ def _emit_stage2_store_epilogue(
     mask_even_i32 = arith.constant(0xFFFFFFFE, type=T.i32)
 
     def atomic_add_x2(val_x2, byte_off_i32):
-        rocdl.raw_ptr_buffer_atomic_fadd(val_x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
+        buffer_atomic_add(val_x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
 
     if _use_bias:
         # bias[e, n] f32; flat index = e * model_dim + n. Routing-weight

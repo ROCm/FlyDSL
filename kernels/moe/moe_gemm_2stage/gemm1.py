@@ -16,6 +16,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import _if_then
+from kernels.common.mem_ops import buffer_atomic_add
 from kernels.mma.mfma_epilogues import c_shuffle_epilog, mfma_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
@@ -1369,13 +1370,7 @@ def compile_moe_gemm1(
                             else:
                                 # gfx950+: buffer_atomic_pk_add_bf16
                                 byte_off_i32 = arith.index_cast(T.i32, row_byte_ctx + byte_off_col)
-                                rocdl.raw_ptr_buffer_atomic_fadd(
-                                    frag,
-                                    out_rsrc,
-                                    byte_off_i32,
-                                    _z,
-                                    _z,
-                                )
+                                buffer_atomic_add(frag, out_rsrc, byte_off_i32, _z, _z)
                         else:
                             # f32 atomic: global atomicrmw fadd
                             ptr_addr_idx = row_byte_ctx + byte_off_col

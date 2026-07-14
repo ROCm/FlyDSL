@@ -18,6 +18,7 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.layout_utils import crd2idx, idx2crd
 from kernels.common.layout_utils import get as layout_get
+from kernels.common.mem_ops import buffer_atomic_add
 from kernels.mma.mfma_epilogues import c_shuffle_epilog
 from kernels.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
@@ -1360,13 +1361,7 @@ def compile_mixed_moe_gemm2(
                 zero_i32 = arith.constant(0)
 
                 def atomic_add_f16x2(val_f16x2, byte_off_i32):
-                    rocdl.raw_ptr_buffer_atomic_fadd(
-                        val_f16x2,
-                        out_rsrc,
-                        byte_off_i32,
-                        zero_i32,
-                        zero_i32,
-                    )
+                    buffer_atomic_add(val_f16x2, out_rsrc, byte_off_i32, zero_i32, zero_i32)
 
                 # Weight scales for the N tile (col_g depends on lane/wave/by but not on (t,s)).
                 if const_expr(lds_out is None):
