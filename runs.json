@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-14T05:39:26Z",
+ "updated": "2026-07-14T07:03:23Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29309401444,
+   "pr": 846,
+   "commit": "5ca25c4887f8cb7d2a9f01d0d5e64a9061b2e8a0",
+   "branch": "fujun.han/del-redundant-documentation-table",
+   "event": "pull_request",
+   "title": "[Docs] Remove duplicate Documentation table from README",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444",
+   "created_at": "2026-07-14T05:46:06Z",
+   "updated_at": "2026-07-14T06:49:15Z",
+   "actor": "Peter9606",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T06:48:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444/job/87018327426"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T06:44:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444/job/87018327436"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T06:49:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444/job/87018327445"
+    }
+   ]
+  },
   {
    "run_id": 29309000153,
    "pr": null,
@@ -14,9 +57,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153",
    "created_at": "2026-07-14T05:37:01Z",
-   "updated_at": "2026-07-14T05:38:03Z",
+   "updated_at": "2026-07-14T06:06:37Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-14T06:06:36Z",
+     "completed_at": "2026-07-14T06:27:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153/job/87008726782"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T05:39:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153/job/87008726786"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-14T05:39:32Z",
+     "completed_at": "2026-07-14T06:56:25Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153/job/87008726813"
+    }
+   ]
   },
   {
    "run_id": 29308950734,
@@ -117,9 +188,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004",
    "created_at": "2026-07-14T01:26:24Z",
-   "updated_at": "2026-07-14T05:38:03Z",
+   "updated_at": "2026-07-14T05:39:39Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-14T05:39:21Z",
+     "completed_at": "2026-07-14T06:05:48Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004/job/87008730652"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T05:39:20Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004/job/87008730674"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-14T05:39:38Z",
+     "completed_at": "2026-07-14T06:16:07Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004/job/87008730693"
+    }
+   ]
   },
   {
    "run_id": 29298539964,
@@ -2164,21 +2263,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29187578776/job/86636775988"
     }
    ]
-  },
-  {
-   "run_id": 29186911881,
-   "pr": null,
-   "commit": "e04f0910c96dc2fbb7c7efe94bb0d9982fe45f07",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29186911881",
-   "created_at": "2026-07-12T09:05:56Z",
-   "updated_at": "2026-07-12T09:30:25Z",
-   "actor": "coderfeli",
-   "jobs": []
   }
  ]
 }
