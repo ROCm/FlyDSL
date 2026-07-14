@@ -1,4 +1,4 @@
-# FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL)
+# FlyDSL — <span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL
 
 <div align="center" id="badges">
 
@@ -406,3 +406,6 @@ Apache License 2.0
 
 This is an experimental feature/tool and is not part of the official ROCm distribution. It is provided for evaluation and testing purposes only.
 For further usage or inquiries, please initiate a discussion thread with the original authors.
+
+<!-- CI skip test: docs-only change to verify non-code changes skip GPU test jobs. -->
+

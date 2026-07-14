@@ -47,9 +47,16 @@ jobs:
         id: filter
         uses: dorny/paths-filter@v3
         with:
+          # 'every' makes a file count as "code" only when it matches ALL the
+          # patterns below (i.e. it matches '**' AND is none of the negated
+          # docs / markdown / image paths). The 'code' output is then true when
+          # at least one changed file is code. With the default 'some'
+          # quantifier the leading '**' matches every file, so 'code' would be
+          # true for docs-only changes and the skip would never trigger.
+          predicate-quantifier: 'every'
           # code is true when any changed file is NOT one of the non-code paths
           # below (everything under '**' minus the negated docs / markdown /
-          # image / non-workflow .github patterns).
+          # image / yaml / non-workflow .github patterns).
           filters: |
             code:
               - '**'
@@ -63,6 +70,8 @@ jobs:
               - '!**/*.gif'
               - '!**/*.svg'
               - '!**/*.webp'
+              - '!**/*.yaml'
+              - '!**/*.yml'
               - '!.github/ISSUE_TEMPLATE/**'
 
   check-signal:
