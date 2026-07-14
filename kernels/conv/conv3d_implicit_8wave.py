@@ -15,6 +15,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
@@ -188,8 +189,6 @@ def compile_conv3d_implicit_8wave(
     BLOCK_VECS = LDG_VEC * BLOCK_THREADS
     LDG_A_COUNT = TILE_M * TILE_K // BLOCK_VECS
     LDG_B_COUNT = TILE_N * TILE_K // BLOCK_VECS
-    LDS_A_SIZE = STAGES * TILE_M * TILE_K
-    LDS_B_SIZE = STAGES * TILE_N * TILE_K
 
     assert TILE_K == 32
     assert TILE_M % (WAVE_M * MFMA_M) == 0, f"TILE_M={TILE_M} not divisible by WAVE_M*16"
@@ -199,8 +198,6 @@ def compile_conv3d_implicit_8wave(
     assert LDG_A_COUNT >= 1 and LDG_B_COUNT >= 1
     assert c % LDG_VEC == 0
     assert BLOCK_THREADS <= 1024, f"BLOCK_THREADS={BLOCK_THREADS} exceeds 1024"
-    lds_bytes = STAGES * (TILE_M + TILE_N) * TILE_K * BF16_BYTES
-    assert lds_bytes <= LDS_CAPACITY_BYTES, f"LDS {lds_bytes} exceeds {LDS_CAPACITY_BYTES}"
 
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
@@ -215,6 +212,28 @@ def compile_conv3d_implicit_8wave(
     # Output element count; when its byte offset can exceed int32 the epilogue
     # buffer_store (i32 voffset) overflows, so store via 64-bit global pointers.
     BIG_OUT = (n * k * do * ho * wo * BF16_BYTES) > 0x7FFFFFFF
+
+    # Async copy (global->LDS DMA via buffer_load_lds) hides the load latency the
+    # sync global->VGPR->LDS path exposes. Padding/OOB taps are masked by routing
+    # the element offset past num_records so the hardware bounds check writes 0 to
+    # LDS (verified). Requires the buffer's real num_records (not max_size), which
+    # rules out BIG_IN (rebased/oversized resource) and >2^31-byte tensors (i32
+    # voffset). x and weight byte sizes must fit int32 for the element offset math.
+    X_BYTES = n * c * d * h * w * BF16_BYTES
+    W_BYTES = k * c * kt * kh * kw * BF16_BYTES
+    USE_ASYNC = (not BIG_IN) and (X_BYTES <= 0x7FFFFFFF) and (W_BYTES <= 0x7FFFFFFF)
+    # Async frees the A-tile VGPRs the sync path spent on the global->VGPR->LDS hop,
+    # so the software pipeline can go deeper than the sync 2-stage double buffer.
+    # PIPE_STAGES buffers are kept in LDS; PIPE_STAGES-1 tiles are prefetched ahead.
+    # Depth 4 is the measured sweet spot on gfx950 (256x256x4x4): depths 2/3 don't
+    # amortize the DMA issue overhead, depth 5 hits the 160KB LDS cap (occupancy 1).
+    ASYNC_STAGES = 4
+    PIPE_STAGES = ASYNC_STAGES if USE_ASYNC else STAGES
+
+    LDS_A_SIZE = PIPE_STAGES * TILE_M * TILE_K
+    LDS_B_SIZE = PIPE_STAGES * TILE_N * TILE_K
+    lds_bytes = PIPE_STAGES * (TILE_M + TILE_N) * TILE_K * BF16_BYTES
+    assert lds_bytes <= LDS_CAPACITY_BYTES, f"LDS {lds_bytes} exceeds {LDS_CAPACITY_BYTES}"
 
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
@@ -241,8 +260,14 @@ def compile_conv3d_implicit_8wave(
 
     @flyc.kernel(known_block_size=[BLOCK_THREADS, 1, 1])
     def conv3d_8wave_kernel(y: fx.Tensor, x: fx.Tensor, weight: fx.Tensor, bias: fx.Tensor):
-        x_rsrc = buffer_ops.create_buffer_resource(x)
-        w_rsrc = buffer_ops.create_buffer_resource(weight)
+        if const_expr(USE_ASYNC):
+            # Real num_records so OOB-routed padding taps read back as 0 from the
+            # hardware bounds check (see async_a/async_b masking).
+            x_rsrc = buffer_ops.create_buffer_resource(x, num_records_bytes=X_BYTES)
+            w_rsrc = buffer_ops.create_buffer_resource(weight, num_records_bytes=W_BYTES)
+        else:
+            x_rsrc = buffer_ops.create_buffer_resource(x)
+            w_rsrc = buffer_ops.create_buffer_resource(weight)
         y_rsrc = buffer_ops.create_buffer_resource(y)
         if const_expr(has_bias):
             bias_rsrc = buffer_ops.create_buffer_resource(bias)
@@ -319,51 +344,108 @@ def compile_conv3d_implicit_8wave(
         def in_range(v, hi):
             return (v >= 0) & (v < fx.Index(hi))
 
+        # ---- Per-thread row decomposition (loop-invariant across K) ----
+        # gather_a() is called once per K-tile in the software pipeline, but the
+        # A-row a thread owns depends only on tid, not on k_base. Decompose the
+        # row into (n_idx, ot/out_t, oh, ow) ONCE here and reuse every K-tile;
+        # only the channel term cc and tap indices vary with k_base below.
+        _row_dec = []  # per-i tuple of precomputed row terms
+        for i in range_constexpr(LDG_A_COUNT):
+            linear = (tid + i * BLOCK_THREADS) * LDG_VEC
+            local_m = linear // TILE_K
+            local_k = linear % TILE_K  # 0 (LDG_VEC==TILE_K) — kept for generality
+            row = m_offset + local_m
+            row_valid = row < fx.Index(npq)
+            if const_expr(temporal_only_fast):
+                out_t = (row // hw_o) % d
+                _row_dec.append((local_k, row, row_valid, out_t))
+            else:
+                n_idx = row // dhw
+                rem = row % dhw
+                ot = rem // hw_o
+                rem2 = rem % hw_o
+                oh = rem2 // wo
+                ow = rem2 % wo
+                in_t0 = ot * st - pt
+                in_h0 = oh * sh - ph
+                in_w0 = ow * sw - pw
+                if const_expr(BIG_IN):
+                    di = n_idx - nbase
+                    _row_dec.append((local_k, row_valid, di, in_t0, in_h0, in_w0))
+                else:
+                    _row_dec.append((local_k, row_valid, n_idx, in_t0, in_h0, in_w0))
+
+        # When c is a multiple of TILE_K, one k-tile of TILE_K contiguous k_abs
+        # stays within a single channel group, so the tap index (k_abs//c) and
+        # channel base (k_base%c) are UNIFORM across threads: derive them once from
+        # k_base via scalar SALU and use cc = cc_base + local_k (no wrap), replacing
+        # per-thread integer div/mod by c. Falls back to per-thread when c%TILE_K!=0
+        # (e.g. c=16), where a k-tile can straddle two channel groups.
+        SCALAR_K = (c % TILE_K == 0)
+
+        # ---- 3D im2col address math (shared by sync gather + async DMA) ----
+        # Returns (g_off_i32_elem, valid) for A-tile load slot i at K-base k_base.
+        def _a_addr(i, kbase_i, cc_base, ckk_base):
+            dec = _row_dec[i]
+            local_k = dec[0]
+            k_abs = kbase_i + fx.Index(local_k)
+            if const_expr(SCALAR_K):
+                cc = cc_base + fx.Index(local_k)
+            else:
+                cc = k_abs % c
+            k_valid = k_abs < fx.Index(crs)
+            if const_expr(temporal_only_fast):
+                _, row, row_valid, out_t = dec
+                kt_i = ckk_base if const_expr(SCALAR_K) else k_abs // c
+                temporal_delta = kt_i - pt
+                in_t = out_t + temporal_delta
+                valid = row_valid & k_valid & in_range(in_t, d)
+                if const_expr(BIG_IN):
+                    g_off = ((row + temporal_delta * hw_o) - (fx.Index(nbase) * dhw + base_t * hw_o)) * c + cc
+                else:
+                    g_off = (row + temporal_delta * hw_o) * c + cc
+            else:
+                ckk = ckk_base if const_expr(SCALAR_K) else k_abs // c
+                kw_i = ckk % kw
+                ckk2 = ckk // kw
+                kh_i = ckk2 % kh
+                kt_i = ckk2 // kh
+                if const_expr(BIG_IN):
+                    _, row_valid, di, in_t0, in_h0, in_w0 = dec
+                    in_t = in_t0 + kt_i
+                    in_h = in_h0 + kh_i
+                    in_w = in_w0 + kw_i
+                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+                    g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
+                else:
+                    _, row_valid, n_idx, in_t0, in_h0, in_w0 = dec
+                    in_t = in_t0 + kt_i
+                    in_h = in_h0 + kh_i
+                    in_w = in_w0 + kw_i
+                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+                    g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
+            return fx.Int32(g_off), valid
+
+        def _b_addr(i, k_base):
+            linear = (tid + i * BLOCK_THREADS) * LDG_VEC
+            local_n = linear // TILE_K
+            local_k = linear % TILE_K
+            col = n_offset + fx.Index(local_n)
+            g_off = fx.Int32(col * crs + (fx.Index(k_base) + fx.Index(local_k)))
+            col_valid = (col < fx.Index(k)) if const_expr(n_tail) else None
+            return g_off, col_valid
+
         # ---- 3D im2col gather (global -> registers) ----
         def gather_a(k_base):
+            kbase_i = fx.Index(k_base)
+            cc_base = ckk_base = None
+            if const_expr(SCALAR_K):
+                cc_base = kbase_i % c
+                ckk_base = kbase_i // c
             raws = []
             valids = []
             for i in range_constexpr(LDG_A_COUNT):
-                linear = (tid + i * BLOCK_THREADS) * LDG_VEC
-                local_m = linear // TILE_K
-                local_k = linear % TILE_K
-                row = m_offset + local_m
-                row_valid = row < fx.Index(npq)
-                k_abs = fx.Index(k_base) + fx.Index(local_k)
-                cc = k_abs % c
-                k_valid = k_abs < fx.Index(crs)
-                if const_expr(temporal_only_fast):
-                    kt_i = k_abs // c
-                    temporal_delta = kt_i - pt
-                    out_t = (row // hw_o) % d
-                    in_t = out_t + temporal_delta
-                    valid = row_valid & k_valid & in_range(in_t, d)
-                    if const_expr(BIG_IN):
-                        g_off = ((row + temporal_delta * hw_o) - (nbase * dhw + base_t * hw_o)) * c + cc
-                    else:
-                        g_off = (row + temporal_delta * hw_o) * c + cc
-                else:
-                    n_idx = row // dhw
-                    rem = row % dhw
-                    ot = rem // hw_o
-                    rem2 = rem % hw_o
-                    oh = rem2 // wo
-                    ow = rem2 % wo
-                    ckk = k_abs // c
-                    kw_i = ckk % kw
-                    ckk2 = ckk // kw
-                    kh_i = ckk2 % kh
-                    kt_i = ckk2 // kh
-                    in_t = ot * st + kt_i - pt
-                    in_h = oh * sh + kh_i - ph
-                    in_w = ow * sw + kw_i - pw
-                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
-                    if const_expr(BIG_IN):
-                        di = n_idx - nbase
-                        g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
-                    else:
-                        g_off = (((n_idx * d + in_t) * h + in_h) * w + in_w) * c + cc
-                g_off_i = fx.Int32(g_off)
+                g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
                 safe = arith.select(valid, g_off_i, fx.Int32(0))
                 raw = buffer_ops.buffer_load(x_rsrc, safe, vec_width=8, dtype=elem_ty)
                 raws.append(raw)
@@ -374,13 +456,8 @@ def compile_conv3d_implicit_8wave(
             raws = []
             valids = []
             for i in range_constexpr(LDG_B_COUNT):
-                linear = (tid + i * BLOCK_THREADS) * LDG_VEC
-                local_n = linear // TILE_K
-                local_k = linear % TILE_K
-                col = n_offset + fx.Index(local_n)
-                g_off = fx.Int32(col * crs + (fx.Index(k_base) + fx.Index(local_k)))
+                g_off, col_valid = _b_addr(i, k_base)
                 if const_expr(n_tail):
-                    col_valid = col < fx.Index(k)
                     safe = arith.select(col_valid, g_off, fx.Int32(0))
                     raw = buffer_ops.buffer_load(w_rsrc, safe, vec_width=8, dtype=elem_ty)
                     valids.append(col_valid)
@@ -414,6 +491,63 @@ def compile_conv3d_implicit_8wave(
                 val = arith.select(valids[i], raw, zero8) if const_expr(n_tail) else raw
                 off = local_n * TILE_K + local_k
                 lds_store_vec8(b_lds, fx.Index(stage) * TILE_N * TILE_K + off, val)
+
+        # ---- async copy (global -> LDS DMA), masking via OOB routing ----
+        # buffer_load_lds is wave-collective: one uniform LDS base (readfirstlane)
+        # and the hardware spreads lanes by lane*DMA_BYTES. conv's A/B LDS layout is
+        # already thread-contiguous (thread i owns byte i*16), so the per-slot base
+        # is `stage_base + i*BLOCK_THREADS*16` and lane fan-out lands each thread's
+        # 16B where the sync commit_* path would. Invalid taps route the element
+        # offset past num_records; the bounds check then writes 0 to LDS (verified).
+        DMA_BYTES = LDG_VEC * BF16_BYTES  # 16
+        OOB_ELEM = fx.Int32(0x7FFFFFF0)  # element offset guaranteed past num_records
+
+        def _lds_dma_ptr(lds_array, stage_tile, i):
+            # buffer_load_lds is wave-collective: the LDS pointer is lane-0's base
+            # and the hardware adds lane*DMA_BYTES per lane. Compute the SAME
+            # per-thread element offset commit_* uses ((tid+i*BT)*LDG_VEC, contiguous
+            # so consecutive lanes are DMA_BYTES apart), then readfirstlane picks
+            # each wave's lane-0 base; the hardware lane spread rebuilds the layout.
+            off_elems = fx.Index(stage_tile) + (fx.Index(tid) + fx.Index(i * BLOCK_THREADS)) * fx.Index(LDG_VEC)
+            base_bytes = off_elems * fx.Index(BF16_BYTES)
+            addr = fx.Int64(fx.ptrtoint(lds_array.ptr)) + fx.Int64(base_bytes)
+            addr = rocdl.readfirstlane(T.i64, arith.index_cast(T.i64, addr.ir_value()))
+            return llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), addr)
+
+        def _dma_to_lds(rsrc, lds_ptr, voff_elem):
+            # voff_elem: DSL Int32 element offset; byte offset folds through *2.
+            voff_b = (voff_elem * fx.Int32(BF16_BYTES)).ir_value()
+            rocdl.raw_ptr_buffer_load_lds(
+                rsrc,
+                lds_ptr,
+                arith.constant(DMA_BYTES, type=T.i32),
+                voff_b,
+                arith.constant(0, type=T.i32),
+                arith.constant(0, type=T.i32),
+                arith.constant(0, type=T.i32),
+            )
+
+        def _async_a(stage, k_base):
+            kbase_i = fx.Index(k_base)
+            cc_base = ckk_base = None
+            if const_expr(SCALAR_K):
+                cc_base = kbase_i % c
+                ckk_base = kbase_i // c
+            stage_tile = fx.Index(stage) * TILE_M * TILE_K
+            for i in range_constexpr(LDG_A_COUNT):
+                g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
+                voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
+                _dma_to_lds(x_rsrc, _lds_dma_ptr(a_lds, stage_tile, i), voff)
+
+        def _async_b(stage, k_base):
+            stage_tile = fx.Index(stage) * TILE_N * TILE_K
+            for i in range_constexpr(LDG_B_COUNT):
+                g_off, col_valid = _b_addr(i, k_base)
+                if const_expr(n_tail):
+                    voff = fx.Int32(arith.select(col_valid, g_off, OOB_ELEM))
+                else:
+                    voff = g_off
+                _dma_to_lds(w_rsrc, _lds_dma_ptr(b_lds, stage_tile, i), voff)
 
         # ---- single-vec ds_read (LDS -> register), indexed by per-wave MFMA row ----
         def read_a_vec(stage, mi):
@@ -451,21 +585,54 @@ def compile_conv3d_implicit_8wave(
             rocdl.s_setprio(0)
             return acc_values
 
-        # ---- prologue: tile 0 -> LDS, tile 1 -> VGPR prefetch ----
-        stage = 0
-        commit_a(stage, gather_a(k_off))
-        commit_b(stage, gather_b(k_off))
-        if const_expr(tiles_per_split > 1):
+        if const_expr(USE_ASYNC):
+            # Async global->LDS software pipeline (PIPE_STAGES deep): each DMA lands
+            # straight in LDS (no VGPR prefetch state). Prologue issues the first
+            # PIPE_STAGES-1 tiles' DMAs; each loop iter waits only the oldest
+            # in-flight tile (vmcnt = remaining in-flight), reads it, launches the
+            # tile PIPE_STAGES-1 ahead, and computes -- so DMA overlaps MFMA across
+            # the full pipeline depth rather than a single double buffer.
+            PREFETCH = PIPE_STAGES - 1
+            for s in range_constexpr(PREFETCH):
+                if const_expr(s < tiles_per_split):
+                    _async_a(s, k_off + s * TILE_K)
+                    _async_b(s, k_off + s * TILE_K)
+            LDG_PER_TILE = LDG_A_COUNT + LDG_B_COUNT
+            for kt_idx in range_constexpr(tiles_per_split):
+                cur = kt_idx % PIPE_STAGES
+                # vmcnt counts outstanding buffer_load_lds INSTRUCTIONS (not tiles);
+                # wait until only the still-needed future tiles remain in flight.
+                inflight_tiles = min(PREFETCH - 1, tiles_per_split - 1 - kt_idx)
+                barrier(vmcnt=inflight_tiles * LDG_PER_TILE, lgkmcnt=0)
+                a_frags = read_a_frags(cur)
+                b_frags = read_b_frags(cur)
+                nxt = kt_idx + PREFETCH
+                if const_expr(nxt < tiles_per_split):
+                    _async_a(nxt % PIPE_STAGES, k_off + nxt * TILE_K)
+                    _async_b(nxt % PIPE_STAGES, k_off + nxt * TILE_K)
+                    rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
+                acc = do_compute(acc, a_frags, b_frags)
+
+        # ---- sync prologue: tile 0 -> LDS, tile 1 -> VGPR prefetch ----
+        elif const_expr(tiles_per_split == 1):
+            stage = 0
+            commit_a(stage, gather_a(k_off))
+            commit_b(stage, gather_b(k_off))
+            barrier(vmcnt=None, lgkmcnt=0)
+            a_frags = read_a_frags(stage)
+            b_frags = read_b_frags(stage)
+            acc = do_compute(acc, a_frags, b_frags)
+        else:
+            stage = 0
+            commit_a(stage, gather_a(k_off))
+            commit_b(stage, gather_b(k_off))
             pf_a = gather_a(k_off + TILE_K)
             pf_b = gather_b(k_off + TILE_K)
             rocdl.sched_vmem(LDG_A_COUNT + LDG_B_COUNT)
-        barrier(vmcnt=None, lgkmcnt=0)
-        a_frags = read_a_frags(stage)
-        b_frags = read_b_frags(stage)
+            barrier(vmcnt=None, lgkmcnt=0)
+            a_frags = read_a_frags(stage)
+            b_frags = read_b_frags(stage)
 
-        if const_expr(tiles_per_split == 1):
-            acc = do_compute(acc, a_frags, b_frags)
-        else:
             n_acc_state = N_ACC
             n_a_frag_state = MI_M
             n_b_frag_state = MI_N
@@ -663,6 +830,23 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     assert x.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
     st, sh, sw = (stride, stride, stride) if isinstance(stride, int) else stride
     pt, ph, pw = (padding, padding, padding) if isinstance(padding, int) else padding
+
+    # 1x1x1 fast path: the conv reduces to a plain GEMM over channels
+    #   y[n,k,dhw] = sum_c weight[k,c] * x[n,c,dhw]
+    # No im2col / NDHWC transpose is needed (x's C is dim 1, spatial is contiguous),
+    # so route through a tuned bf16 matmul instead of the transpose+implicit-GEMM
+    # path (which pays a full-tensor NCDHW->NDHWC transpose the 1x1x1 op never needs).
+    if kt == 1 and kh == 1 and kw == 1 and st == 1 and sh == 1 and sw == 1 and pt == 0 and ph == 0 and pw == 0:
+        wm = weight.reshape(k, c)
+        if n == 1:
+            y = torch.matmul(wm, x.reshape(c, d * h * w)).reshape(n, k, d, h, w)
+        else:
+            # (N,C,DHW) -> (N,K,DHW): broadcast (K,C) over the batch dim
+            y = torch.matmul(wm, x.reshape(n, c, d * h * w)).reshape(n, k, d, h, w)
+        if bias is not None:
+            y = y + bias.to(y.dtype).view(1, k, 1, 1, 1)
+        return y
+
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (w + 2 * pw - kw) // sw + 1
