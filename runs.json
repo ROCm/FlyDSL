@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-14T14:45:57Z",
+ "updated": "2026-07-14T15:51:08Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29343987992,
+   "pr": 853,
+   "commit": "9c963011655d876f9f71cd0c999d4ee506744d33",
+   "branch": "pr/refactor-buffer-ops",
+   "event": "pull_request",
+   "title": "[Refactor] move buffer_ops to kernels.common; remove expr/vector.py",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29343987992",
+   "created_at": "2026-07-14T15:08:08Z",
+   "updated_at": "2026-07-14T15:08:09Z",
+   "actor": "sjfeng1999",
+   "jobs": []
+  },
+  {
+   "run_id": 29342327467,
+   "pr": 853,
+   "commit": "86efde1040b9936ca6a78355253ab91bda6d0b0f",
+   "branch": "pr/refactor-buffer-ops",
+   "event": "pull_request",
+   "title": "[Refactor] move buffer_ops to kernels.common; remove expr/vector.py",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467",
+   "created_at": "2026-07-14T14:46:02Z",
+   "updated_at": "2026-07-14T14:46:57Z",
+   "actor": "sjfeng1999",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-14T14:48:36Z",
+     "completed_at": "2026-07-14T15:29:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467/job/87117242986"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-14T14:46:57Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467/job/87117243015"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-14T14:48:31Z",
+     "completed_at": "2026-07-14T15:40:59Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467/job/87117243023"
+    }
+   ]
+  },
   {
    "run_id": 29331122598,
    "pr": 849,
@@ -81,10 +139,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T13:34:08Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T15:12:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29328320282/job/87098449562"
     }
    ]
@@ -2261,64 +2319,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29216115273/job/86717250551"
     }
    ]
-  },
-  {
-   "run_id": 29215749921,
-   "pr": null,
-   "commit": "75eb6e9e0072b0e2fe82b739ed0f4de4d9764d81",
-   "branch": "lhc/kernels-tier2",
-   "event": "pull_request",
-   "title": "[kernels] Structure-only cleanup: unify naming, dedup helpers, split monolith module",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921",
-   "created_at": "2026-07-13T00:38:23Z",
-   "updated_at": "2026-07-13T01:39:51Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-13T00:39:44Z",
-     "completed_at": "2026-07-13T01:39:51Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921/job/86711275431"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-13T00:39:35Z",
-     "completed_at": "2026-07-13T00:52:21Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921/job/86711275433"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-13T00:39:45Z",
-     "completed_at": "2026-07-13T01:26:41Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29215749921/job/86711275436"
-    }
-   ]
-  },
-  {
-   "run_id": 29200854715,
-   "pr": 837,
-   "commit": "5a976c4d9f73b16c9a0578efe9c9a095825de871",
-   "branch": "xiaoyu/a8w4-quark",
-   "event": "pull_request",
-   "title": "Add a8w4 kernel for Quark mix-precision",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29200854715",
-   "created_at": "2026-07-12T16:49:57Z",
-   "updated_at": "2026-07-12T16:51:24Z",
-   "actor": "amd-xiaoyu12",
-   "jobs": []
   }
  ]
 }
