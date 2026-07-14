@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-07-14T04:46:59Z",
+ "updated": "2026-07-14T05:39:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29309000153,
+   "pr": null,
+   "commit": "149ff32b0050a14e94deb8b548cc8b729432e2c5",
+   "branch": "main",
+   "event": "push",
+   "title": "[kernels]: add common/mem_ops for shared memory/atomic helpers (#839)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153",
+   "created_at": "2026-07-14T05:37:01Z",
+   "updated_at": "2026-07-14T05:38:03Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29308950734,
+   "pr": null,
+   "commit": "4c576a18aa0a3f4d27e6dd86ccdd4d3ea7aab56b",
+   "branch": "main",
+   "event": "push",
+   "title": "[Enh] Add rocdl.buffer_rsrc utilities: make_buffer_ptr & get_buffer_r\u2026",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308950734",
+   "created_at": "2026-07-14T05:35:52Z",
+   "updated_at": "2026-07-14T05:37:17Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29308126953,
+   "pr": 785,
+   "commit": "8fbae45127db82b7bf0fec01ca958b8d3d3e59fb",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953",
+   "created_at": "2026-07-14T05:17:07Z",
+   "updated_at": "2026-07-14T05:20:25Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-14T05:19:17Z",
+     "completed_at": "2026-07-14T05:34:23Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953/job/87006102461"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T05:19:29Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953/job/87006102482"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T05:20:25Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953/job/87006102543"
+    }
+   ]
+  },
   {
    "run_id": 29306723771,
    "pr": 844,
@@ -40,11 +113,11 @@
    "branch": "feature/propagate-param-types",
    "event": "pull_request",
    "title": "[Misc] Propagate signatures through expr decorators",
-   "status": "completed",
-   "conclusion": "action_required",
+   "status": "in_progress",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004",
    "created_at": "2026-07-14T01:26:24Z",
-   "updated_at": "2026-07-14T01:26:24Z",
+   "updated_at": "2026-07-14T05:38:03Z",
    "actor": "coderfeli",
    "jobs": []
   },
@@ -308,7 +381,7 @@
   },
   {
    "run_id": 29274036979,
-   "pr": 785,
+   "pr": null,
    "commit": "b37716173e32a52619f8551a8d9ff8b765e2096d",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -409,7 +482,7 @@
   },
   {
    "run_id": 29266316461,
-   "pr": 841,
+   "pr": null,
    "commit": "0e0505a230bf023bff0fb7551c41228a94739604",
    "branch": "pr/enh-buffer-rsrc-utils",
    "event": "pull_request",
@@ -452,7 +525,7 @@
   },
   {
    "run_id": 29265060242,
-   "pr": 841,
+   "pr": null,
    "commit": "fff0dacd957ccafdb8d71994b6e9deee7d59a801",
    "branch": "pr/enh-buffer-rsrc-utils",
    "event": "pull_request",
@@ -2106,107 +2179,6 @@
    "updated_at": "2026-07-12T09:30:25Z",
    "actor": "coderfeli",
    "jobs": []
-  },
-  {
-   "run_id": 29185350204,
-   "pr": null,
-   "commit": "bdcbca1252e9fdebaf3a60a417f810c6b789a204",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185350204",
-   "created_at": "2026-07-12T08:08:07Z",
-   "updated_at": "2026-07-12T09:05:58Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29185236660,
-   "pr": null,
-   "commit": "0191be874e899731a0718cc648218f0a2139d90b",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660",
-   "created_at": "2026-07-12T08:03:57Z",
-   "updated_at": "2026-07-12T10:33:35Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T09:31:48Z",
-     "completed_at": "2026-07-12T10:33:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660/job/86636415588"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T09:31:50Z",
-     "completed_at": "2026-07-12T09:43:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660/job/86636415589"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T09:32:36Z",
-     "completed_at": "2026-07-12T10:16:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185236660/job/86636415599"
-    }
-   ]
-  },
-  {
-   "run_id": 29185161589,
-   "pr": null,
-   "commit": "1a740c39fd15cce8dd9d0ab495770f76ff77f49f",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185161589",
-   "created_at": "2026-07-12T08:01:16Z",
-   "updated_at": "2026-07-12T09:30:13Z",
-   "actor": "jiacao-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T08:03:24Z",
-     "completed_at": "2026-07-12T08:44:31Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185161589/job/86629936932"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T08:26:50Z",
-     "completed_at": "2026-07-12T09:30:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185161589/job/86629936933"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T08:03:16Z",
-     "completed_at": "2026-07-12T08:15:27Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29185161589/job/86629936946"
-    }
-   ]
   }
  ]
 }
