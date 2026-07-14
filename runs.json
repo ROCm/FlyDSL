@@ -1,8 +1,81 @@
 {
  "schema": 1,
- "updated": "2026-07-14T09:14:03Z",
+ "updated": "2026-07-14T09:52:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29323073125,
+   "pr": 850,
+   "commit": "e55ebb76900fe645101bd73b2439e87dffa68e53",
+   "branch": "binding_fa_opt",
+   "event": "pull_request",
+   "title": "optimize flydsl flash attention kernel",
+   "status": "completed",
+   "conclusion": "failure",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29323073125",
+   "created_at": "2026-07-14T09:48:37Z",
+   "updated_at": "2026-07-14T09:49:46Z",
+   "actor": "binding7012",
+   "jobs": []
+  },
+  {
+   "run_id": 29321481150,
+   "pr": null,
+   "commit": "fa4f8ae2d5b0a08ca2b428247fd0ff5a7863558d",
+   "branch": "main",
+   "event": "push",
+   "title": "[Misc] Propagate signatures through expr decorators (#835)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29321481150",
+   "created_at": "2026-07-14T09:22:31Z",
+   "updated_at": "2026-07-14T09:22:33Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29320926000,
+   "pr": null,
+   "commit": "ca461e8c71485868724ba041419d2fd775b90591",
+   "branch": "main",
+   "event": "push",
+   "title": "[Docs] Remove duplicate Documentation table from README (#846)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000",
+   "created_at": "2026-07-14T09:13:32Z",
+   "updated_at": "2026-07-14T09:19:36Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T09:15:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000/job/87046074513"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-14T09:15:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000/job/87046074578"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-14T09:19:35Z",
+     "completed_at": "2026-07-14T09:46:38Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000/job/87046076543"
+    }
+   ]
+  },
   {
    "run_id": 29317944578,
    "pr": 849,
@@ -29,10 +102,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T08:53:07Z",
-     "completed_at": null,
+     "completed_at": "2026-07-14T09:18:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317944578/job/87036489401"
     },
     {
@@ -649,21 +722,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29274036979/job/86898704672"
     }
    ]
-  },
-  {
-   "run_id": 29271947966,
-   "pr": null,
-   "commit": "01347d86b9c4b399c04cbbc5e4bbb185770d6599",
-   "branch": "feature/propagate-param-types",
-   "event": "pull_request",
-   "title": "[Misc] Propagate signatures through expr decorators",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29271947966",
-   "created_at": "2026-07-13T17:49:07Z",
-   "updated_at": "2026-07-13T17:49:07Z",
-   "actor": "simondanielsson",
-   "jobs": []
   },
   {
    "run_id": 29270694051,
@@ -1975,21 +2033,6 @@
    ]
   },
   {
-   "run_id": 29196036045,
-   "pr": null,
-   "commit": "8796d41245b6e531df0c1e581489b6e09c80b019",
-   "branch": "feature/propagate-param-types",
-   "event": "pull_request",
-   "title": "[Misc] Propagate signatures through expr decorators",
-   "status": "completed",
-   "conclusion": "action_required",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29196036045",
-   "created_at": "2026-07-12T14:19:38Z",
-   "updated_at": "2026-07-12T14:19:38Z",
-   "actor": "simondanielsson",
-   "jobs": []
-  },
-  {
    "run_id": 29193850534,
    "pr": 833,
    "commit": "2ae7140504a6aa183c2fa5392ac3388455137995",
@@ -2246,49 +2289,6 @@
      "started_at": "2026-07-12T12:20:45Z",
      "completed_at": "2026-07-12T13:07:33Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192397665/job/86649324923"
-    }
-   ]
-  },
-  {
-   "run_id": 29192304653,
-   "pr": 830,
-   "commit": "d6188810383ee3814e5b2ae57fadb58f9bb09641",
-   "branch": "add_1250_mma_scale",
-   "event": "pull_request",
-   "title": "Add gfx1250 MX-scaled WMMA + N-D TDM copy atoms",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653",
-   "created_at": "2026-07-12T12:15:27Z",
-   "updated_at": "2026-07-12T14:21:55Z",
-   "actor": "HaonanWang98",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T13:04:46Z",
-     "completed_at": "2026-07-12T13:51:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653/job/86652854259"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T13:04:52Z",
-     "completed_at": "2026-07-12T14:21:54Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653/job/86652854275"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-12T13:15:04Z",
-     "completed_at": "2026-07-12T13:27:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29192304653/job/86652854290"
     }
    ]
   }
