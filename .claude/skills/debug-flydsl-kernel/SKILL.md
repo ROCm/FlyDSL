@@ -157,9 +157,9 @@ for i in range_constexpr(4): result[i] = ...
 Current FlyDSL supports runtime comparisons in Python `if`; the AST rewriter lowers dynamic conditions to `scf.IfOp`. Prefer readable DSL operators for runtime SSA values:
 ```python
 tid = gpu.thread_id("x")
-lane = tid % fx.Index(64)
-c_zero = fx.Index(0)
-c_limit = fx.Index(8)
+lane = tid % fx.Int64(64)
+c_zero = fx.Int64(0)
+c_limit = fx.Int64(8)
 
 # Runtime condition, lowered to scf.IfOp
 if lane == c_zero:

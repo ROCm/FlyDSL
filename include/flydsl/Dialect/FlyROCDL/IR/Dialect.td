@@ -52,9 +52,13 @@ class FlyROCDL_CopyOp<string typeName, string typeMnemonic, list<Trait> traits =
   let mnemonic = typeMnemonic;
 }
 
-class FlyROCDL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = []>
+// `copyOverrides` lists CopyOpTypeInterface methods that have a default
+// implementation but are overridden by this type (e.g. `getCopyRank`); they
+// must be named so TableGen emits their declarations.
+class FlyROCDL_StatefulCopyOp<string typeName, string typeMnemonic, list<Trait> traits = [],
+                              list<string> copyOverrides = []>
     : TypeDef<FlyROCDL_Dialect, typeName, !listconcat(traits, [
-        DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface>,
+        DeclareTypeInterfaceMethods<Fly_CopyOpTypeInterface, copyOverrides>,
         DeclareTypeInterfaceMethods<Fly_StatefulOpTypeInterface>
       ])> {
   let mnemonic = typeMnemonic;

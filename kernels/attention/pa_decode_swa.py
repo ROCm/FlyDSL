@@ -14,7 +14,7 @@ from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr import math as fly_math
 from flydsl.expr.typing import Int32, T
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.common import dpp_utils
@@ -780,7 +780,7 @@ def compile_pa_decode_sw_reduce(
     reduce_width = 1 if max_context_partition_num <= 1 else 1 << ((max_context_partition_num - 1).bit_length())
     reduce_shuffle_offsets = [off for off in [32, 16, 8, 4, 2, 1] if off < reduce_width]
     red_slots = max(1, (block_threads + WARP_SIZE - 1) // WARP_SIZE)
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     allocator = SmemAllocator(None, arch=arch, global_sym_name="pa_ps_sw_reduce_smem")
     red_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = red_off + red_slots * 4
@@ -1138,7 +1138,7 @@ def compile_pa_decode_sw(
     sliding_window is a compile-time constant.
     """
     assert sliding_window > 0, "compile_pa_decode_sw requires sliding_window > 0"
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     if query_input_dtype not in ("bf16", "f16"):
         raise ValueError("`compile_pa_decode_sw` only supports bf16/f16 query inputs.")
     if head_dim % QKHE_PER_FETCH != 0 or head_dim % (MFMA_N * NUM_WARPS) != 0 or head_dim % Q_ELEMS_PER_LANE != 0:

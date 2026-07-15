@@ -18,7 +18,7 @@ import flydsl.expr as fx
 from flydsl.expr import arith, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.vector import ReductionOp, full
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import dtype_to_elem_type, get_warp_size
 
 KERNEL_NAME = "layernorm"
@@ -113,7 +113,7 @@ def _quant_dtype_max(dtype_str: str) -> float:
 
 
 def build_layernorm_module(N: int, dtype_str: str):
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
@@ -343,7 +343,7 @@ def build_layernorm_module(N: int, dtype_str: str):
 
 
 def build_fused_add_layernorm_module(N: int, dtype_str: str):
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
@@ -913,7 +913,7 @@ def _build_fused_add_layernorm_quant_module(
     is_smooth: bool,
     quant_dtype_str: str = "i8",
 ):
-    arch = get_hip_arch()
+    arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
