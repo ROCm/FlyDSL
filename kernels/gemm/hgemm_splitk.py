@@ -14,7 +14,7 @@ from flydsl._mlir.dialects import llvm, scf
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
-from kernels.common.kernels_common import get_llvm_ptr
+from kernels.common.kernels_common import atomic_add, get_llvm_ptr
 from kernels.common.tensor_shim import GTensor, _run_compiled, get_dtype_in_kernel, lds_load_vec, lds_store_vec
 from kernels.gemm.splitk_hgemm import swizzle_xor16
 
@@ -360,15 +360,7 @@ def compile_hgemm_kernel(
             # clean semaphore and signal if this is the last block within split-k group
             is_t0_cond_if = scf.IfOp(is_t0_cond, results_=[], has_else=False)
             with ir.InsertionPoint(is_t0_cond_if.then_block):
-                semaphore_ptr = get_llvm_ptr(semaphore, signal_idx, 4)
-                arrive_idx = llvm.AtomicRMWOp(
-                    llvm.AtomicBinOp.add,
-                    semaphore_ptr,
-                    arith.constant(1, type=T.i32),
-                    llvm.AtomicOrdering.monotonic,
-                    syncscope="agent",
-                    alignment=4,
-                ).result
+                arrive_idx = atomic_add(semaphore, signal_idx, arith.constant(1, type=T.i32), dtype_bytes=4)
                 cond_ksl = arith.cmpi(arith.CmpIPredicate.eq, fx.Index(arrive_idx), fx.Index(SPLIT_K - 1))
                 cond_ksl_if = scf.IfOp(cond_ksl, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_ksl_if.then_block):

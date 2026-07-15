@@ -14,6 +14,7 @@ import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.typing import T
+from kernels.common.mem_ops import buffer_atomic_add
 from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, pack_i32x4_i32x8
 
 TILE_M = 128
@@ -434,7 +435,7 @@ def compile_conv3d_implicit_8wave_fp8(
                                 if valid:
                                     off_b = fx.Int32((row * k + col) * 4)
                                     z0 = fx.Int32(0)
-                                    fx.rocdl.raw_ptr_buffer_atomic_fadd(out, y_rsrc, off_b, z0, z0)
+                                    buffer_atomic_add(out, y_rsrc, off_b, z0, z0)
                             else:
                                 if const_expr(has_bias):
                                     out = out + bias_val

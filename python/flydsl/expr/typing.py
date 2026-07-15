@@ -961,8 +961,8 @@ class Pointer(BuiltinDslType):
         return self.type.alignment
 
     @dsl_loc_tracing
-    def load(self):
-        return ptr_load(self)
+    def load(self, dtype=None):
+        return ptr_load(self, result_type=dtype)
 
     @dsl_loc_tracing
     def store(self, value):
