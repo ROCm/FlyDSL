@@ -18,7 +18,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, vector
-from flydsl._mlir.dialects import scf as _scf
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
@@ -26,7 +25,6 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
-from kernels.common.kernels_common import _if_then, dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
 # s_waitcnt bitfield encoding
@@ -283,6 +281,26 @@ def make_dualwave_swp_traits(
     )
 
 
+def _fadd(a, b, fm_fast):
+    return arith.addf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
+
+
+def _fsub(a, b, fm_fast):
+    return arith.subf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
+
+
+def _fmul(a, b, fm_fast):
+    return arith.mulf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
+
+
+def _fmax(a, b, fm_fast):
+    return arith.MaxNumFOp(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast).result
+
+
+def _mfma_acc(a, b, c, _mma_atom, mfma_acc_vec_type):
+    return fly.mma_atom_call_ssa([mfma_acc_vec_type], _mma_atom, a, b, c)
+
+
 def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
     """gfx950 ds_read_b64_tr_b16 with DUALWAVE_SWP immediate byte offset."""
     imm = int(imm_offset)
@@ -389,30 +407,23 @@ def _make_ws_rsrc(ws_base_i64, byte_offset, nrec_bytes):
     return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=as_mlir_value(fx.Int64(nrec_bytes)))
 
 
-def _read_v8f16_off(v_base_ptr, const_off, TRAITS_BF16_BYTES, kv_mfma_pack_type):
+def _read_v8f16_off(traits, v_base_ptr, const_off, kv_mfma_pack_type):
     ptr = buffer_ops.get_element_ptr(
-        v_base_ptr, byte_offset=as_mlir_value(fx.Int32(const_off * TRAITS_BF16_BYTES)), elem_type=T.i8
+        v_base_ptr, byte_offset=as_mlir_value(fx.Int32(const_off * traits.BF16_BYTES)), elem_type=T.i8
     )
     return llvm.LoadOp(kv_mfma_pack_type, ptr, alignment=16).result
 
 
-def _load_k_pack_aligned(
-    lds_kv_base_ptr,
-    elem_idx,
-    buf_id,
-    kv_mfma_pack_type,
-    lds_scope_names,
-    TRAITS_BF16_BYTES,
-):
+def _load_k_pack_aligned(traits, lds_kv_base_ptr, elem_idx, buf_id, kv_mfma_pack_type):
     scope_name = _dualwave_lds_scope("k", buf_id)
-    byte_offset = elem_idx * TRAITS_BF16_BYTES
+    byte_offset = elem_idx * traits.BF16_BYTES
     ptr = buffer_ops.get_element_ptr(lds_kv_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
     return llvm.LoadOp(
         kv_mfma_pack_type,
         ptr,
         alignment=16,
         alias_scopes=_dualwave_lds_alias_scopes(scope_name),
-        noalias_scopes=_dualwave_lds_noalias_scopes(scope_name, lds_scope_names),
+        noalias_scopes=_dualwave_lds_noalias_scopes(scope_name, traits.LDS_SCOPE_NAMES),
     ).result
 
 
@@ -511,53 +522,7 @@ def _reduction_pair(v_f32):
     return _bitcast_f32(lhs_i32), _bitcast_f32(rhs_i32)
 
 
-# Helpers moved out of flash_attn_gfx950.py to keep the kernel body definition-free.
-
-
-def _load_block_table_to_lds(
-    traits,
-    *,
-    _bt_atom,
-    _bt_div,
-    _bt_v1i32,
-    batch_idx,
-    block_table_stride_v,
-    lds_bt_base_ptr,
-    num_kv_tiles,
-    split_t0,
-    split_t_end,
-    tid,
-):
-    segment_tiles = split_t_end - split_t0
-    for pass_id in range_constexpr(traits.PAGED_BT_LDS_SIZE // traits.BLOCK_SIZE):
-        local_tile = tid + fx.Index(pass_id * traits.BLOCK_SIZE)
-        with _if_then(_scf.IfOp(as_mlir_value(ArithValue(local_tile < segment_tiles)))):
-            tile_idx = split_t0 + local_tile
-            byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(4)))
-            dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
-            llvm.StoreOp(as_mlir_value(fx.Int32(0)), dst)
-            with _if_then(_scf.IfOp(as_mlir_value(ArithValue(tile_idx < num_kv_tiles)))):
-                row_idx = batch_idx * block_table_stride_v + tile_idx
-                v = fly.copy_atom_call_ssa([_bt_v1i32], _bt_atom, fx.slice(_bt_div, (None, fx.Int32(row_idx))))
-                page_id_i32 = as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
-                llvm.StoreOp(page_id_i32, dst)
-
-
-def _finish_page_id(v, *, traits):
-    rocdl.s_waitcnt(traits.LGKMCNT_0_ONLY)
-    v = rocdl.readfirstlane(T.i32, v)
-    return fx.Index(fx.Int32(v))
-
-
-def _make_rebased_view(
-    base_iter,
-    byte_off,
-    nrec_bytes,
-    layout,
-    *,
-    _buf_flags_i32,
-    _elem_ir,
-):
+def _make_rebased_view(base_iter, byte_off, nrec_bytes, layout, _buf_flags_i32, _elem_ir):
     base_i64 = fx.Int64(fx.ptrtoint(base_iter))
     shifted = fx.inttoptr(base_iter.type, base_i64 + fx.Int64(byte_off))
     buf_ptr_ty = fx.PointerType.get(
@@ -584,26 +549,12 @@ def _ws_store_quad_i32(dwords, local_elem_index, rsrc):
     buffer_ops.buffer_store(vec_ir, rsrc, as_mlir_value(fx.Int32(local_elem_index)))
 
 
-def _buffer_load_128(
-    elem_index,
-    *,
-    _load_atom_128,
-    q_div,
-    q_load_i32x4_type,
-):
+def _buffer_load_128(elem_index, _load_atom_128, q_div, q_load_i32x4_type):
     """128-bit global->register load (buffer_load_dwordx4) from Q."""
     return fly.copy_atom_call_ssa([q_load_i32x4_type], _load_atom_128, fx.slice(q_div, (None, fx.Int32(elem_index))))
 
 
-def _buffer_load_lds_128(
-    src_div,
-    lds_byte_addr,
-    src_elem,
-    soffset_elems,
-    *,
-    _dma_atom,
-    _lds_ptr_ty,
-):
+def _buffer_load_lds_128(src_div, lds_byte_addr, src_elem, soffset_elems, _dma_atom, _lds_ptr_ty):
     """128-bit global->LDS DMA; `src_elem` is voffset, `soffset_elems` is scaled by the atom."""
     lds_ptr = fx.inttoptr(_lds_ptr_ty, fx.Int32(lds_byte_addr))
     dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
@@ -611,85 +562,183 @@ def _buffer_load_lds_128(
     fx.copy(_dma_atom, src, dst, soffset=fx.Int32(soffset_elems))
 
 
-def _buffer_store_64(
-    pack_i32_vec,
-    elem_index,
-    *,
-    _o_store_reg,
-    _store_atom_64,
-    o_div,
-):
+def _buffer_store_64(pack_i32_vec, elem_index, _o_store_reg, _store_atom_64, o_div):
     """64-bit register->global store (buffer_store_dwordx2) into O."""
     fx.memref_store_vec(pack_i32_vec, _o_store_reg)
     fx.copy(_store_atom_64, _o_store_reg, fx.slice(o_div, (None, fx.Int32(elem_index))))
 
 
-def _buffer_store_128(
-    pack_i32_vec,
-    elem_index,
-    *,
-    _o_store_reg_128,
-    _store_atom_128,
-    o_div,
-):
+def _buffer_store_128(pack_i32_vec, elem_index, _o_store_reg_128, _store_atom_128, o_div):
     """128-bit register->global store (buffer_store_dwordx4) into O."""
     fx.memref_store_vec(pack_i32_vec, _o_store_reg_128)
     fx.copy(_store_atom_128, _o_store_reg_128, fx.slice(o_div, (None, fx.Int32(elem_index))))
 
 
-def _fadd(
-    a,
-    b,
-    *,
-    fm_fast,
+def _splitk_workspace_split_z(traits, batch_idx, split_idx):
+    return batch_idx * traits.NUM_KV_SPLITS + split_idx
+
+
+def _splitk_workspace_resources(
+    ws_base_i64,
+    split_z,
+    ws_opart_per_split_bytes,
+    ws_ml_per_split_bytes,
+    ws_mrow_abs_bytes,
+    ws_lrow_abs_bytes,
 ):
-    return arith.addf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
+    opart_rsrc = _make_ws_rsrc(ws_base_i64, split_z * ws_opart_per_split_bytes, ws_opart_per_split_bytes)
+    mrow_rsrc = _make_ws_rsrc(ws_base_i64, ws_mrow_abs_bytes + split_z * ws_ml_per_split_bytes, ws_ml_per_split_bytes)
+    lrow_rsrc = _make_ws_rsrc(ws_base_i64, ws_lrow_abs_bytes + split_z * ws_ml_per_split_bytes, ws_ml_per_split_bytes)
+    return opart_rsrc, mrow_rsrc, lrow_rsrc
 
 
-def _fsub(
-    a,
-    b,
-    *,
-    fm_fast,
+def _splitk_local_opart_row_base(traits, q_head_idx, seq_len_v, q_row):
+    return (q_head_idx * seq_len_v + q_row) * fx.Index(traits.HEAD_DIM // 2)
+
+
+def _splitk_local_ml_idx(q_head_idx, seq_len_v, q_row):
+    return q_head_idx * seq_len_v + q_row
+
+
+def _splitk_o_partial_dword_col(traits, dc, g, lane_div_32):
+    return dc * (traits.D_CHUNK // 2) + (2 * g + lane_div_32) * 4
+
+
+def _store_empty_splitk_o_partial_row(traits, local_opart_base, lane_div_32, opart_rsrc):
+    c_zero_i = fx.Int32(0)
+    for dc in range_constexpr(traits.D_CHUNKS):
+        for g in range_constexpr(2):
+            _ws_store_quad_i32(
+                [c_zero_i, c_zero_i, c_zero_i, c_zero_i],
+                local_opart_base + _splitk_o_partial_dword_col(traits, dc, g, lane_div_32),
+                opart_rsrc,
+            )
+
+
+def _store_splitk_ml_row(m_row, l_row, local_ml_idx, mrow_rsrc, lrow_rsrc):
+    _ws_store_f32(m_row, local_ml_idx, mrow_rsrc)
+    _ws_store_f32(l_row, local_ml_idx, lrow_rsrc)
+
+
+def _o_pack_2dw(traits, v_o, dc, store_group, elem_dtype):
+    r_base = store_group * 4
+    if const_expr(traits.DTYPE_STR == "bf16"):
+        lo = rocdl.cvt_pk_bf16_f32(
+            Vec(v_o[dc])[r_base],
+            Vec(v_o[dc])[r_base + 1],
+        )
+        hi = rocdl.cvt_pk_bf16_f32(
+            Vec(v_o[dc])[r_base + 2],
+            Vec(v_o[dc])[r_base + 3],
+        )
+        return lo, hi
+
+    o_f16 = []
+    for i in range_constexpr(4):
+        o_f16.append(fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype))
+    pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
+    return as_mlir_value(pack[0]), as_mlir_value(pack[1])
+
+
+def _swap_halves(dw):
+    pair_i32_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
+    swapped = rocdl.permlane32_swap(pair_i32_ty, as_mlir_value(dw), as_mlir_value(dw), False, False)
+    lo_res = llvm.extractvalue(T.i32, swapped, [0])
+    hi_res = llvm.extractvalue(T.i32, swapped, [1])
+    return lo_res, hi_res
+
+
+def _fused_o_128_dwords(lane_div_32, d0_a, d1_a, d0_b, d1_b):
+    is_hi_half = ArithValue(lane_div_32 != fx.Index(0))
+    y0_a_lo, y0_a_hi = _swap_halves(d0_a)
+    y1_a_lo, y1_a_hi = _swap_halves(d1_a)
+    y0_b_lo, y0_b_hi = _swap_halves(d0_b)
+    y1_b_lo, y1_b_hi = _swap_halves(d1_b)
+    y0_a, y1_a = is_hi_half.select(y0_a_lo, y0_a_hi), is_hi_half.select(y1_a_lo, y1_a_hi)
+    y0_b, y1_b = is_hi_half.select(y0_b_lo, y0_b_hi), is_hi_half.select(y1_b_lo, y1_b_hi)
+    w0 = is_hi_half.select(y0_b, as_mlir_value(d0_a))
+    w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
+    w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
+    w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
+    return w0, w1, w2, w3
+
+
+def _packed_o_128_dwords(traits, v_o, dc, g, lane_div_32, elem_dtype):
+    d0_a, d1_a = _o_pack_2dw(traits, v_o, dc, 2 * g, elem_dtype)
+    d0_b, d1_b = _o_pack_2dw(traits, v_o, dc, 2 * g + 1, elem_dtype)
+    return _fused_o_128_dwords(lane_div_32, d0_a, d1_a, d0_b, d1_b)
+
+
+def _packed_o_128_vec(traits, v_o, dc, g, lane_div_32, elem_dtype):
+    return Vec.from_elements(
+        [fx.Int32(w) for w in _packed_o_128_dwords(traits, v_o, dc, g, lane_div_32, elem_dtype)],
+        fx.Int32,
+    )
+
+
+def _final_o_base(traits, q_row, stride_q_n_v, q_head_idx, lane_div_32):
+    return q_row * stride_q_n_v + q_head_idx * traits.HEAD_DIM + lane_div_32 * 8
+
+
+def _final_o_global(traits, o_base, dc, g):
+    return o_base + (dc * traits.D_CHUNK + 2 * g * 8)
+
+
+def _store_final_o_128(traits, v_o, dc, g, o_base, lane_div_32, elem_dtype, _o_store_reg_128, _store_atom_128, o_div):
+    _buffer_store_128(
+        _packed_o_128_vec(traits, v_o, dc, g, lane_div_32, elem_dtype),
+        _final_o_global(traits, o_base, dc, g),
+        _o_store_reg_128=_o_store_reg_128,
+        _store_atom_128=_store_atom_128,
+        o_div=o_div,
+    )
+
+
+def _store_final_o_row(
+    traits, v_o, q_row, stride_q_n_v, q_head_idx, lane_div_32, elem_dtype, _o_store_reg_128, _store_atom_128, o_div
 ):
-    return arith.subf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
+    o_base = _final_o_base(traits, q_row, stride_q_n_v, q_head_idx, lane_div_32)
+    for dc in range_constexpr(traits.D_CHUNKS):
+        for g in range_constexpr(2):
+            _store_final_o_128(
+                traits,
+                v_o,
+                dc,
+                g,
+                o_base,
+                lane_div_32,
+                elem_dtype,
+                _o_store_reg_128,
+                _store_atom_128,
+                o_div,
+            )
 
 
-def _fmul(
-    a,
-    b,
-    *,
-    fm_fast,
-):
-    return arith.mulf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
+def _store_splitk_partial_o_quad(traits, v_o, dc, g, local_opart_row_base, lane_div_32, opart_rsrc, elem_dtype):
+    w0, w1, w2, w3 = _packed_o_128_dwords(traits, v_o, dc, g, lane_div_32, elem_dtype)
+    _ws_store_quad_i32(
+        [w0, w1, w2, w3],
+        local_opart_row_base + _splitk_o_partial_dword_col(traits, dc, g, lane_div_32),
+        opart_rsrc,
+    )
 
 
-def _fmax(
-    a,
-    b,
-    *,
-    fm_fast,
-):
-    return arith.MaxNumFOp(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast).result
+def _store_splitk_partial_o_row(traits, v_o, local_opart_row_base, lane_div_32, opart_rsrc, elem_dtype):
+    for dc in range_constexpr(traits.D_CHUNKS):
+        for g in range_constexpr(2):
+            _store_splitk_partial_o_quad(
+                traits,
+                v_o,
+                dc,
+                g,
+                local_opart_row_base,
+                lane_div_32,
+                opart_rsrc,
+                elem_dtype,
+            )
 
 
-def _mfma_acc(
-    a,
-    b,
-    c,
-    *,
-    _mma_atom,
-    mfma_acc_vec_type,
-):
-    return fly.mma_atom_call_ssa([mfma_acc_vec_type], _mma_atom, a, b, c)
-
-
-def _sched_barrier_pairs(
-    pairs,
-    valu_cnt,
-    group,
-    traits,
-):
+def _sched_barrier_pairs(traits, pairs, valu_cnt, group):
     """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups."""
     pairs = _scale_sched_pairs(pairs, traits.HEAD_DIM)
     for _ in range_constexpr(pairs):
@@ -697,12 +746,7 @@ def _sched_barrier_pairs(
         rocdl.sched_group_barrier(traits.SCHED_VALU_MASK, valu_cnt, group)
 
 
-def _sched_barrier_exp_pairs(
-    pairs,
-    exp_cnt,
-    group,
-    traits,
-):
+def _sched_barrier_exp_pairs(traits, pairs, exp_cnt, group):
     """Emit `pairs` × {1 MFMA + exp_cnt EXP} sched_group_barrier groups."""
     pairs = _scale_sched_pairs(pairs, traits.HEAD_DIM)
     for _ in range_constexpr(pairs):
@@ -710,19 +754,13 @@ def _sched_barrier_exp_pairs(
         rocdl.sched_group_barrier(traits.SCHED_EXP_MASK, exp_cnt, group)
 
 
-def _ds_read_tr_v4f16_imm(
-    lds_base_elem_idx,
-    imm_bytes,
-    *,
-    lds_kv_base_idx,
-    v_lds_read_vec4_type,
-):
+def _ds_read_tr_v4f16_imm(lds_base_elem_idx, imm_bytes, lds_kv_base_idx, v_lds_read_vec4_type):
     byte_offset = lds_base_elem_idx * 2 + lds_kv_base_idx
     addr_i32 = fx.Int32(byte_offset)
     return _ds_read_tr16_b64_imm(v_lds_read_vec4_type, addr_i32, imm_bytes)
 
 
-def _get_q_pack(q_all_scaled_bf16, ks, traits):
+def _get_q_pack(traits, q_all_scaled_bf16, ks):
     q_vec = Vec(q_all_scaled_bf16)
     base = ks * traits.MFMA_LANE_K
     return q_vec.shuffle(q_vec, [base + i for i in range(traits.MFMA_LANE_K)]).ir_value()
@@ -744,12 +782,7 @@ def _make_raw_buffer_rsrc(tensor):
     ).ir_value()
 
 
-def _anchor_v_p(
-    v_p,
-    traits,
-    *,
-    elem_dtype,
-):
+def _anchor_v_p(traits, v_p, elem_dtype):
     p_lo, p_hi = v_p
     p_lo_all = _concat_vectors(p_lo[0], p_lo[1])
     p_hi_all = _concat_vectors(p_hi[0], p_hi[1])
@@ -780,12 +813,7 @@ def _v_p_to_vec32(v_p):
     return _concat_vectors(p_lo_all, p_hi_all).ir_value()
 
 
-def _v_vec32_to_p(
-    v_p_all,
-    traits,
-    *,
-    elem_dtype,
-):
+def _v_vec32_to_p(traits, v_p_all, elem_dtype):
     p_vec = Vec(v_p_all, (traits.PV_K_STEPS * 2 * 8,), elem_dtype)
     p_lo = []
     p_hi = []
@@ -797,16 +825,14 @@ def _v_vec32_to_p(
     return p_lo, p_hi
 
 
-def _scale_v_p(
-    v_p,
-    scale_scalar,
-    traits,
-    *,
-    elem_dtype,
-    fm_fast,
-    v32bf16_type,
-    v32f32_type,
-):
+def _rescale_value_types(traits, elem_dtype):
+    v32bf16_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, elem_dtype)
+    v32f32_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, fx.Float32)
+    return v32bf16_type, v32f32_type
+
+
+def _scale_v_p(traits, v_p, scale_scalar, elem_dtype, fm_fast):
+    v32bf16_type, v32f32_type = _rescale_value_types(traits, elem_dtype)
     fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
     p_all = _v_p_to_vec32(v_p)
     p_all_f32_op = llvm.FPExtOp(v32f32_type, as_mlir_value(p_all))
@@ -819,32 +845,19 @@ def _scale_v_p(
     )
     p_scaled_bf16_op = llvm.FPTruncOp(v32bf16_type, p_scaled_f32)
     p_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
-    return _v_vec32_to_p(p_scaled_bf16_op.result, traits, elem_dtype=elem_dtype)
-
-
-def _rescale_params(traits):
-    elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
-    fm_fast = fx.arith.FastMathFlags.fast
-    v32bf16_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, elem_dtype)
-    v32f32_type = Vec.make_type(traits.PV_K_STEPS * 2 * 8, fx.Float32)
-    return elem_dtype, fm_fast, v32bf16_type, v32f32_type
+    return _v_vec32_to_p(traits, p_scaled_bf16_op.result, elem_dtype=elem_dtype)
 
 
 @flyc.jit
-def _stagger_extra_barrier_if_one(*, _stagger_i32):
+def _stagger_extra_barrier_if_one(_stagger_i32):
     """Emit `sched_barrier(0); s_barrier;` only when stagger == 1."""
     if fx.Int32(_stagger_i32) != fx.Int32(0):
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
 
 
-def _bf16_trunc_pack_v8(
-    f32_vals,
-    *,
-    dtype_str,
-    elem_dtype,
-):
-    if const_expr(dtype_str == "bf16"):
+def _bf16_trunc_pack_v8(traits, f32_vals, elem_dtype):
+    if const_expr(traits.DTYPE_STR == "bf16"):
         pairs = []
         for j in range_constexpr(4):
             pairs.append(rocdl.cvt_pk_bf16_f32(f32_vals[j * 2], f32_vals[j * 2 + 1]))
@@ -856,55 +869,34 @@ def _bf16_trunc_pack_v8(
     return Vec.from_elements(f16_vals, elem_dtype).ir_value()
 
 
-def _k_buf_base(buf_id, TRAITS_DUALWAVE_SWP_K_BUF_BASE, TRAITS_DUALWAVE_SWP_KV_PER_BUFFER):
+def _k_buf_base(traits, buf_id):
     if const_expr(isinstance(buf_id, int)):
-        return TRAITS_DUALWAVE_SWP_K_BUF_BASE[buf_id]
+        return traits.DUALWAVE_SWP_K_BUF_BASE[buf_id]
     # runtime buf_id (rare): K0=0, K1=DUALWAVE_SWP_KV_PER_BUFFER
-    return buf_id * TRAITS_DUALWAVE_SWP_KV_PER_BUFFER
+    return buf_id * traits.DUALWAVE_SWP_KV_PER_BUFFER
 
 
-def _v_buf_base(
-    buf_id,
-    TRAITS_DUALWAVE_SWP_V_BUF_BASE,
-    TRAITS_SMEM_K_TILE_ELEMS,
-    TRAITS_DUALWAVE_SWP_KV_PER_BUFFER,
-):
+def _v_buf_base(traits, buf_id):
     if const_expr(isinstance(buf_id, int)):
-        return TRAITS_DUALWAVE_SWP_V_BUF_BASE[buf_id]
-    return TRAITS_SMEM_K_TILE_ELEMS + buf_id * TRAITS_DUALWAVE_SWP_KV_PER_BUFFER
+        return traits.DUALWAVE_SWP_V_BUF_BASE[buf_id]
+    return traits.SMEM_K_TILE_ELEMS + buf_id * traits.DUALWAVE_SWP_KV_PER_BUFFER
 
 
-def _kv_tile_addr(
-    tile_start,
-    *,
-    PAGED,
-    kv_gmem_elem_offset,
-    kv_head_elem_offset,
-    stride_kv_n_v,
-):
+def _kv_tile_addr(traits, tile_start, kv_gmem_elem_offset, kv_head_elem_offset, stride_kv_n_v):
     """Return (src_base, soffset): dense uses tile_start*stride; paged folds page offset into the descriptor."""
-    if const_expr(PAGED):
+    if const_expr(traits.PAGED):
         return kv_head_elem_offset, 0
     return kv_gmem_elem_offset, tile_start * stride_kv_n_v
 
 
-def _linear_kv_src_elem(
-    src_base,
-    d,
-    traits,
-    *,
-    n_in_warp,
-    wave_id,
-    d_bucket,
-    stride_kv_n_v,
-):
+def _linear_kv_src_elem(traits, src_base, d, n_in_warp, wave_id, d_bucket, stride_kv_n_v):
     """Global element index for lane's d-th 128-bit chunk in a linear KV tile."""
     n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
     global_d = d_bucket * traits.VEC_KV + d * traits.D_128B_SIZE
     return src_base + n_in_tile * stride_kv_n_v + global_d
 
 
-def _vec_k_dma_oct_idx(d, traits, *, wave_id_uni, lane_in_warp):
+def _vec_k_dma_oct_idx(traits, d, wave_id_uni, lane_in_warp):
     """Flat octet index for this wave/lane's d-th DMA slot in vectorized K layout."""
     return wave_id_uni * (traits.WARP_SIZE * traits.SMEM_D_RPT) + d * traits.WARP_SIZE + lane_in_warp
 
@@ -914,9 +906,9 @@ def _sigma_k_tile_n(ni):
     return (ni & 3) | ((ni & 8) >> 1) | ((ni & 4) << 1) | (ni & ~15)
 
 
-def _vec_k_src_elem(d, traits, *, wave_id_uni, lane_in_warp, kv_head_idx):
+def _vec_k_src_elem(traits, d, wave_id_uni, lane_in_warp, kv_head_idx):
     """Global element index for vectorized K DMA slot d (sigma remap applied)."""
-    oct_idx = _vec_k_dma_oct_idx(d, traits, wave_id_uni=wave_id_uni, lane_in_warp=lane_in_warp)
+    oct_idx = _vec_k_dma_oct_idx(traits, d, wave_id_uni=wave_id_uni, lane_in_warp=lane_in_warp)
     ni, dg = oct_idx % traits.BLOCK_N, oct_idx // traits.BLOCK_N
     src_oct = dg * traits.BLOCK_N + _sigma_k_tile_n(ni)
     return (
@@ -925,7 +917,7 @@ def _vec_k_src_elem(d, traits, *, wave_id_uni, lane_in_warp, kv_head_idx):
     )
 
 
-def _vec_v_src_elem(d, traits, *, wave_id_uni, lane_in_warp, kv_head_idx):
+def _vec_v_src_elem(traits, d, wave_id_uni, lane_in_warp, kv_head_idx):
     """Global element index for vectorized V DMA slot d (NO-major wave rows)."""
     row = wave_id_uni * traits.SMEM_D_RPT + d
     no = lane_in_warp // traits.SMEM_N_PER_WAVE
@@ -933,32 +925,49 @@ def _vec_v_src_elem(d, traits, *, wave_id_uni, lane_in_warp, kv_head_idx):
     return _vec_v_elem(no * traits.KV_VEC_SIZE, d_col, kv_head_idx, traits.BLOCK_N, traits.KV_VEC_SIZE, traits.HEAD_DIM)
 
 
-def _paged_bt_byte_offset(tile_idx, *, split_t0):
+def _paged_bt_byte_offset(tile_idx, split_t0):
     """Byte offset of `tile_idx`'s page-id entry in the LDS block-table cache."""
     return fx.Int32((tile_idx - split_t0) * fx.Index(4))
 
 
-def _q_pack_col(ks, traits, *, lane_div_32):
+def _q_pack_col(traits, ks, lane_div_32):
     """K-dimension column for Q pack at MFMA k-step `ks` for this lane."""
     return ks * traits.K_STEP_QK + lane_div_32 * traits.MFMA_LANE_K
 
 
-def _q_pack_global_idx(q_row_in_block, ks, traits, *, lane_div_32, stride_q_n_v):
+def _q_pack_global_idx(traits, q_row_in_block, ks, lane_div_32, stride_q_n_v):
     """Flat global element index for Q pack (q_row, ks)."""
-    return q_row_in_block * stride_q_n_v + _q_pack_col(ks, traits, lane_div_32=lane_div_32)
+    return q_row_in_block * stride_q_n_v + _q_pack_col(traits, ks, lane_div_32=lane_div_32)
 
 
-def _vec_k_lds_idx_lo(k_base, ks, traits, *, lane_div_32, lane_mod_32):
+def _vec_k_lds_idx_lo(traits, k_base, ks, lane_div_32, lane_mod_32):
     """LDS element index for vectorized K pack lo at k-step `ks` for this lane."""
     return k_base + (ks * 2 + lane_div_32) * (traits.BLOCK_N * traits.KV_VEC_SIZE) + lane_mod_32 * traits.KV_VEC_SIZE
 
 
-def _swizzled_ks_offset(ks, traits):
+def _swizzled_ks_offset(traits, ks):
     """Non-vectorized K LDS offset for k-step `ks` (outer/inner swizzle pattern)."""
     return (ks // 4) * traits.DUALWAVE_SWP_URK_KSTEP_OUTER + (ks % 4) * traits.DUALWAVE_SWP_URK_KSTEP_INNER
 
 
-def _vec_v_lds_addr_base(v_base, traits, *, lane_div_32, lane_mod_32):
+def _k_lds_read_base_per_lane(traits, lane_mod_32, lane_div_32):
+    return (
+        (lane_mod_32 % 8) * traits.SMEM_K_LINE_STRIDE
+        + (lane_mod_32 // 8) * traits.D_128B_SIZE
+        + lane_div_32 * traits.VEC_KV
+    )
+
+
+def _v_lds_read_base_per_lane(traits, lane, lane_div_32):
+    return (
+        lane_div_32 * traits.DUALWAVE_SWP_URV_GRPK
+        + ((lane % 16) // 4) * traits.DUALWAVE_SWP_URV_LANE_HI
+        + ((lane // 16) % 2) * traits.DUALWAVE_SWP_URV_GRP_N
+        + (lane % 4) * traits.DUALWAVE_SWP_URV_LANE_LO
+    )
+
+
+def _vec_v_lds_addr_base(traits, v_base, lane_div_32, lane_mod_32):
     """Per-lane LDS element base (in elements) for vectorized V reads."""
     lm = lane_mod_32
     return (
@@ -969,49 +978,38 @@ def _vec_v_lds_addr_base(v_base, traits, *, lane_div_32, lane_mod_32):
     )
 
 
-def _vec_v_const_off(dc, k_substep, traits):
+def _vec_v_const_off(traits, dc, k_substep):
     """Constant element offset from lane base for vectorized V pack (dc, k_substep)."""
     return dc * (traits.D_CHUNK // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE + k_substep * (
         2 * traits.D_128B_SIZE
     )
 
 
-def _swizzled_v_dc_off(dc, traits):
+def _swizzled_v_dc_off(traits, dc):
     """Non-vectorized V LDS dc-axis offset (swizzled axis0/axis1 decomposition)."""
     return (dc // 2) * traits.DUALWAVE_SWP_URV_DC_AXIS0 + (dc % 2) * traits.DUALWAVE_SWP_URV_DC_AXIS1
 
 
-def _swizzled_v_imm_lo(dc, k_substep, traits):
+def _swizzled_v_imm_lo(traits, dc, k_substep):
     """Non-vectorized V LDS byte offset for (dc, k_substep) in bf16 elements."""
-    return (k_substep * traits.DUALWAVE_SWP_URV_STEP_K_STRIDE + _swizzled_v_dc_off(dc, traits)) * traits.BF16_BYTES
+    return (k_substep * traits.DUALWAVE_SWP_URV_STEP_K_STRIDE + _swizzled_v_dc_off(traits, dc)) * traits.BF16_BYTES
 
 
-def _seq_pad_col_base(tile_idx, traits, *, lane_div_32):
+def _seq_pad_col_base(traits, tile_idx, lane_div_32):
     """Base KV column for this lane's lo-half scores at `tile_idx`."""
     _lane_n_off = 8 if traits.KV_VECTORIZED else 4
     return fx.Int32(tile_idx * traits.BLOCK_N) + fx.Int32(lane_div_32) * fx.Int32(_lane_n_off)
 
 
-def _seq_pad_score_threshold(r, traits):
+def _seq_pad_score_threshold(traits, r):
     """Column threshold offset for score row `r` (layout-dependent swizzle)."""
     if const_expr(traits.KV_VECTORIZED):
         return (r // 8) * 16 + (r % 8)
     return (r // 4) * 8 + (r % 4)
 
 
-def _k_dma_m0_base(
-    buf_id,
-    d,
-    traits,
-    *,
-    lane_in_warp,
-    lds_kv_base_idx,
-    wave_id_uni,
-):
-    k_lds_byte_base = (
-        lds_kv_base_idx
-        + _k_buf_base(buf_id, traits.DUALWAVE_SWP_K_BUF_BASE, traits.DUALWAVE_SWP_KV_PER_BUFFER) * traits.BF16_BYTES
-    )
+def _k_dma_m0_base(traits, buf_id, d, lane_in_warp, lds_kv_base_idx, wave_id_uni):
+    k_lds_byte_base = lds_kv_base_idx + _k_buf_base(traits, buf_id) * traits.BF16_BYTES
     if const_expr(traits.KV_VECTORIZED):
         oct_idx = wave_id_uni * (traits.WARP_SIZE * traits.SMEM_D_RPT) + d * traits.WARP_SIZE + lane_in_warp
         lds_addr = k_lds_byte_base + oct_idx * (traits.KV_VEC_SIZE * traits.BF16_BYTES)
@@ -1024,25 +1022,8 @@ def _k_dma_m0_base(
     return rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(lds_addr)))
 
 
-def _v_dma_m0_base(
-    buf_id,
-    d,
-    traits,
-    *,
-    lane_in_warp,
-    lds_kv_base_idx,
-    wave_id_uni,
-):
-    v_lds_byte_base = (
-        lds_kv_base_idx
-        + _v_buf_base(
-            buf_id,
-            traits.DUALWAVE_SWP_V_BUF_BASE,
-            traits.SMEM_K_TILE_ELEMS,
-            traits.DUALWAVE_SWP_KV_PER_BUFFER,
-        )
-        * traits.BF16_BYTES
-    )
+def _v_dma_m0_base(traits, buf_id, d, lane_in_warp, lds_kv_base_idx, wave_id_uni):
+    v_lds_byte_base = lds_kv_base_idx + _v_buf_base(traits, buf_id) * traits.BF16_BYTES
     if const_expr(traits.KV_VECTORIZED):
         row = wave_id_uni * traits.SMEM_D_RPT + d
         lds_elem = row * traits.VEC_V_ROW_STRIDE + lane_in_warp * traits.KV_VEC_SIZE
@@ -1056,34 +1037,7 @@ def _v_dma_m0_base(
     return rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(lds_addr)))
 
 
-def _mma0(
-    v_k,
-    *,
-    traits,
-    _mma_atom,
-    c_zero_v16f32,
-    q_all_scaled_bf16,
-    mfma_acc_vec_type,
-):
-    k_lo, k_hi = v_k
-    v_s_lo = c_zero_v16f32
-    v_s_hi = c_zero_v16f32
-    for ks in range_constexpr(traits.K_STEPS_QK):
-        q_pack = _get_q_pack(q_all_scaled_bf16, ks, traits)
-        v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo, _mma_atom=_mma_atom, mfma_acc_vec_type=mfma_acc_vec_type)
-        v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi, _mma_atom=_mma_atom, mfma_acc_vec_type=mfma_acc_vec_type)
-    return (v_s_lo, v_s_hi)
-
-
-def _causal_mask_inplace(
-    v_s,
-    tile_idx,
-    traits,
-    *,
-    delta_i32,
-    lane_div_32,
-    q_row_i32,
-):
+def _causal_mask_inplace(traits, v_s, tile_idx, delta_i32, lane_div_32, q_row_i32):
     """Apply causal mask using DUALWAVE_SWP inline-asm attn_mask_vec2_imm (DUALWAVE_SWP u_rk path)."""
     s_lo, s_hi = v_s
     kv_tile_start = tile_idx * traits.BLOCK_N
@@ -1170,150 +1124,11 @@ def _v_vec32_to_pair(v):
     return v_lo, v_hi
 
 
-def _attn_row_max(
-    v_s,
-    *,
-    c_neg_inf,
-    fm_fast,
-):
-    s_lo, s_hi = v_s
-    m = c_neg_inf
-    for r in range_constexpr(16):
-        m = _fmax(m, s_lo[r], fm_fast=fm_fast)
-    for r in range_constexpr(16):
-        m = _fmax(m, s_hi[r], fm_fast=fm_fast)
-    lhs, rhs = _reduction_pair(m)
-    return _fmax(lhs, rhs, fm_fast=fm_fast)
-
-
-def _mma1_step_k(
-    step,
-    v_p,
-    v_v,
-    v_o,
-    TRAITS_D_CHUNKS,
-    *,
-    _mma_atom,
-    mfma_acc_vec_type,
-):
-    v_p_lo, v_p_hi = v_p
-    v_pk = v_v[step]
-    if const_expr(step < 2):
-        p_pk = v_p_lo[step]
-    else:
-        p_pk = v_p_hi[step - 2]
-    for dc in range_constexpr(TRAITS_D_CHUNKS):
-        v_o[dc] = _mfma_acc(v_pk[dc], p_pk, v_o[dc], _mma_atom=_mma_atom, mfma_acc_vec_type=mfma_acc_vec_type)
-    return v_o
-
-
-def _mma1(
-    v_p,
-    v_v,
-    v_o,
-    *,
-    D_CHUNKS,
-    _mma_atom,
-    mfma_acc_vec_type,
-):
-    for step in range_constexpr(4):
-        v_o = _mma1_step_k(
-            step,
-            v_p,
-            v_v,
-            v_o,
-            D_CHUNKS,
-            _mma_atom=_mma_atom,
-            mfma_acc_vec_type=mfma_acc_vec_type,
-        )
-    return v_o
-
-
-def _attn_sub_row(
-    v_s,
-    row_max,
-    *,
-    fm_fast,
-):
-    s_lo, s_hi = v_s
-    lo_sub = []
-    hi_sub = []
-    for r in range_constexpr(16):
-        lo_sub.append(_fsub(s_lo[r], row_max, fm_fast=fm_fast))
-    for r in range_constexpr(16):
-        hi_sub.append(_fsub(s_hi[r], row_max, fm_fast=fm_fast))
-    lo_vec = Vec.from_elements(lo_sub, fx.Float32).ir_value()
-    hi_vec = Vec.from_elements(hi_sub, fx.Float32).ir_value()
-    return lo_vec, hi_vec
-
-
-def _attn_exp2_slice(v_s, start, length):
-    if const_expr(start == 0):
-        s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
-        lo_partial = []
-        for r in range_constexpr(16):
-            lo_partial.append(rocdl.exp2(T.f32, as_mlir_value(s_lo[r])))
-        return Vec.from_elements(lo_partial, fx.Float32).ir_value(), v_s[1]
-
-    lo_partial = [Vec(v_s[0])[r] for r in range_constexpr(16)]
-    hi_full = []
-    for r in range_constexpr(16):
-        hi_full.append(rocdl.exp2(T.f32, as_mlir_value(Vec(v_s[1])[r])))
-    return lo_partial, hi_full
-
-
-def _attn_sum(
-    v_p,
-    *,
-    c_zero_f,
-    fm_fast,
-):
-    lo_partial_list, hi_full = v_p
-    local_sum = c_zero_f
-    for r in range_constexpr(16):
-        local_sum = _fadd(local_sum, lo_partial_list[r], fm_fast=fm_fast)
-    for r in range_constexpr(16):
-        local_sum = _fadd(local_sum, hi_full[r], fm_fast=fm_fast)
-    lhs_sum, rhs_sum = _reduction_pair(local_sum)
-    return _fadd(lhs_sum, rhs_sum, fm_fast=fm_fast)
-
-
-def _cast_p(
-    v_p,
-    traits,
-    *,
-    elem_dtype,
-):
-    lo_partial_list, hi_full = v_p
-    p_lo_packs = []
-    p_hi_packs = []
-    # Vectorized QK^T already emits P in the order consumed by V reads.
-    for pks in range_constexpr(traits.PV_K_STEPS):
-        p_base = pks * 8
-        lo_slice = [lo_partial_list[p_base + s] for s in range_constexpr(8)]
-        hi_slice = hi_full[p_base : p_base + 8]
-        p_lo_packs.append(_bf16_trunc_pack_v8(lo_slice, dtype_str=traits.DTYPE_STR, elem_dtype=elem_dtype))
-        p_hi_packs.append(_bf16_trunc_pack_v8(hi_slice, dtype_str=traits.DTYPE_STR, elem_dtype=elem_dtype))
-    return p_lo_packs, p_hi_packs
-
-
-def _scale_o(
-    v_o,
-    scale_scalar,
-    TRAITS_D_CHUNKS,
-    *,
-    fm_fast,
-):
-    scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
-    for dc in range_constexpr(TRAITS_D_CHUNKS):
-        v_o[dc] = _fmul(Vec(v_o[dc]), scale_vec, fm_fast=fm_fast)
-
-
-def _anchor_v_o(v_o, TRAITS_D_CHUNKS):
+def _anchor_v_o(traits, v_o):
     """Pin v_o accumulators at the current source position."""
-    acc_irs = [as_mlir_value(v_o[dc]) for dc in range_constexpr(TRAITS_D_CHUNKS)]
-    ret_ty = ir.Type.parse(f"!llvm.struct<({', '.join(['vector<16xf32>'] * TRAITS_D_CHUNKS)})>")
-    constraints = ",".join(["=v"] * TRAITS_D_CHUNKS + [str(i) for i in range(TRAITS_D_CHUNKS)])
+    acc_irs = [as_mlir_value(v_o[dc]) for dc in range_constexpr(traits.D_CHUNKS)]
+    ret_ty = ir.Type.parse(f"!llvm.struct<({', '.join(['vector<16xf32>'] * traits.D_CHUNKS)})>")
+    constraints = ",".join(["=v"] * traits.D_CHUNKS + [str(i) for i in range(traits.D_CHUNKS)])
     ret = llvm.inline_asm(
         ret_ty,
         acc_irs,
@@ -1321,10 +1136,10 @@ def _anchor_v_o(v_o, TRAITS_D_CHUNKS):
         constraints,
         has_side_effects=True,
     )
-    return [llvm.extractvalue(acc_irs[dc].type, ret, [dc]) for dc in range_constexpr(TRAITS_D_CHUNKS)]
+    return [llvm.extractvalue(acc_irs[dc].type, ret, [dc]) for dc in range_constexpr(traits.D_CHUNKS)]
 
 
-def _debug_atomic_inc_lazy_count(byte_offset, *, debug_counts_rsrc):
+def _debug_atomic_inc_lazy_count(byte_offset, debug_counts_rsrc):
     rocdl.raw_buffer_atomic_fadd(
         as_mlir_value(fx.Float32(1.0)),
         debug_counts_rsrc,
@@ -1335,130 +1150,13 @@ def _debug_atomic_inc_lazy_count(byte_offset, *, debug_counts_rsrc):
 
 
 @flyc.jit
-def _debug_count_lazy_branch(
-    all_below,
-    *,
-    DUALWAVE_SWP_DEBUG_LAZY_COUNTS,
-    debug_counts_rsrc,
-    lane,
-):
-    if const_expr(DUALWAVE_SWP_DEBUG_LAZY_COUNTS):
+def _debug_count_lazy_branch(traits, all_below, debug_counts_rsrc, lane):
+    if const_expr(traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS):
         if fx.Int32(lane) == fx.Int32(0):
             if fx.Boolean(all_below):
                 _debug_atomic_inc_lazy_count(0, debug_counts_rsrc=debug_counts_rsrc)
             else:
                 _debug_atomic_inc_lazy_count(4, debug_counts_rsrc=debug_counts_rsrc)
-
-
-def _rescale_o(
-    v_o,
-    m_row,
-    l_row,
-    m_tile_max,
-    v_p,
-    traits,
-):
-    elem_dtype, fm_fast, v32bf16_type, v32f32_type = _rescale_params(traits)
-    m_new = _fmax(m_row, m_tile_max, fm_fast=fm_fast)
-    corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_new, fm_fast=fm_fast)))
-    _scale_o(v_o, corr, traits.D_CHUNKS, fm_fast=fm_fast)
-    v_o = _anchor_v_o(v_o, traits.D_CHUNKS)
-    v_p = _scale_v_p(
-        v_p,
-        corr,
-        traits,
-        elem_dtype=elem_dtype,
-        fm_fast=fm_fast,
-        v32bf16_type=v32bf16_type,
-        v32f32_type=v32f32_type,
-    )
-    l_row = _fmul(l_row, corr, fm_fast=fm_fast)
-    return v_o, m_new, l_row, v_p
-
-
-def _lazy_rescale_o_rescale(
-    _n,
-    *_st,
-    v_o,
-    m_row,
-    l_row,
-    m_tile_max,
-    v_p,
-    traits,
-):
-    elem_dtype, fm_fast, v32bf16_type, v32f32_type = _rescale_params(traits)
-    corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_tile_max, fm_fast=fm_fast)))
-    scaled_accs = list(v_o)
-    _scale_o(scaled_accs, corr, traits.D_CHUNKS, fm_fast=fm_fast)
-    out = [as_mlir_value(scaled_accs[dc]) for dc in range(traits.D_CHUNKS)]
-    scaled_p = _scale_v_p(
-        v_p,
-        corr,
-        traits,
-        elem_dtype=elem_dtype,
-        fm_fast=fm_fast,
-        v32bf16_type=v32bf16_type,
-        v32f32_type=v32f32_type,
-    )
-    out.append(_v_p_to_vec32(scaled_p))
-    out.append(as_mlir_value(_fmul(l_row, corr, fm_fast=fm_fast)))
-    out.append(_anchor_scalar_f32(m_tile_max))
-    return out
-
-
-@flyc.jit
-def _lazy_rescale_o(
-    v_o,
-    m_row,
-    l_row,
-    m_tile_max,
-    v_p,
-    traits,
-    *,
-    debug_counts_rsrc,
-    lane,
-):
-    """DUALWAVE_SWP lazy rescale before the remaining MMA1 steps."""
-    elem_dtype, fm_fast, _, _ = _rescale_params(traits)
-    c_eight_f = fx.Float32(traits.DUALWAVE_SWP_RESCALE_THRESHOLD)
-    m_diff = _fsub(m_tile_max, m_row, fm_fast=fm_fast)
-    below = ArithValue(fx.Float32(m_diff) <= c_eight_f)
-    ballot = rocdl.ballot(T.i64, as_mlir_value(below))
-    all_below = arith.cmpi(
-        arith.CmpIPredicate.eq,
-        as_mlir_value(ballot),
-        _read_exec_i64(),
-    )
-    all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
-    _debug_count_lazy_branch(
-        all_below,
-        DUALWAVE_SWP_DEBUG_LAZY_COUNTS=traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS,
-        debug_counts_rsrc=debug_counts_rsrc,
-        lane=lane,
-    )
-
-    # Drive scf.if with explicit accumulator/P/l/m state; all_below keeps it unchanged.
-    _state = [as_mlir_value(v_o[dc]) for dc in range(traits.D_CHUNKS)]
-    _state += [_v_p_to_vec32(v_p), as_mlir_value(l_row), as_mlir_value(m_row)]
-    _names = tuple("_lr%d" % i for i in range(traits.D_CHUNKS + 3))
-
-    _rescale = lambda _n, *_st: _lazy_rescale_o_rescale(
-        _n,
-        *_st,
-        v_o=v_o,
-        m_row=m_row,
-        l_row=l_row,
-        m_tile_max=m_tile_max,
-        v_p=v_p,
-        traits=traits,
-    )
-
-    _res = scf_if_dispatch(all_below, lambda *_a: None, _rescale, state_names=_names, state_values=_state)
-    o_out = list(_res[0 : traits.D_CHUNKS])
-    vp_out = _res[traits.D_CHUNKS]
-    l_out = _res[traits.D_CHUNKS + 1]
-    m_out = _res[traits.D_CHUNKS + 2]
-    return (o_out, m_out, l_out, _v_vec32_to_p(vp_out, traits, elem_dtype=elem_dtype))
 
 
 def _dualwave_sync_barrier():
