@@ -15,8 +15,8 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.runtime.device import get_rocm_arch
-from kernels.mma.mfma_epilogues import mfma_epilog
-from kernels.mma.mfma_preshuffle_pipeline import (
+from kernels.common.mma.mfma_epilogues import mfma_epilog
+from kernels.common.mma.mfma_preshuffle_pipeline import (
     _buffer_load_vec,
     buffer_copy_gmem16_dwordx4,
     load_b_pack_k32,
