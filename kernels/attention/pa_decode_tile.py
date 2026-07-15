@@ -420,19 +420,6 @@ def compile_pa_decode_tile(
             # block-table scalar load -- this was the ATT-profiled #1
             # hotspot region.
             if const_expr(block_size == 64):
-                # At block_size==64, PAGES_PER_CHUNK==1: all NCHUNK chunks
-                # share ONE physical page, so its scale row is one
-                # contiguous NCHUNK*4-byte run in memory. Unlike `_k_ops`'s
-                # own per-(a,lane16) ownership (needed there because K's DATA
-                # load must match the MFMA A-operand's lane mapping), this
-                # scale LDS round-trip only needs the (warp, token) LDS slot
-                # to end up correct -- WHICH lane loads WHICH token is free
-                # to choose. So each lane instead owns one CONTIGUOUS
-                # NCHUNK-token window (lane16*NCHUNK : +NCHUNK), turning
-                # NCHUNK separate scalar loads (+ NCHUNK stores) into one
-                # dwordx4 vector load (+ one vector store), per tensor --
-                # 8 VMEM instructions collapse to 2 (the ATT-profiled #1
-                # hotspot).
                 phys = fx.Int32(phys_vec[0])
                 base_tok = lane16 * NCHUNK
                 scale_idx = phys * stride_ks_block + kv_h * stride_ks_head + base_tok
@@ -726,9 +713,6 @@ def compile_pa_decode_tile(
             # None-initialized variable across a dynamic if.
             if tt1 < part_end:
                 k_next, phys_vec1 = _k_ops_flat(tt1)
-                # Prefetch next tile's V page-index row the same way: fetch +
-                # LDS store here, before the softmax barrier; read back into
-                # `v_page_next` right after, reusing that barrier.
                 _v_page_fetch_and_stage(tt1)
                 # Per-token K/V scale (per_token_kv only): staged here too,
                 # one tile ahead, so it's already barrier-visible (via
@@ -826,11 +810,11 @@ def compile_pa_decode_tile(
 
             # `v_page_cur` has no dependency on anything computed this tile,
             # so at HEAD==64 its V loads are issued here -- right after the
-            # pass-1 barrier, overlapping pass 2's exp/pack/store work --
-            # instead of right before PV with nothing to hide behind. Costs
-            # +8 VGPR, not enough to drop occupancy at this shape. Not
-            # applied at HEAD==128 (VHE_CHUNKS==2 there, higher VGPR cost;
-            # see the PV loop's own comment below).
+            # pass-1 barrier, overlapping pass 2's exp/pack/store work instead
+            # of right before PV with nothing to hide behind. Costs +8 VGPR,
+            # not enough to drop occupancy at this shape. Not applied at
+            # HEAD==128 (VHE_CHUNKS==2 there, higher VGPR cost; see the PV
+            # loop's own comment below).
             v_vh_early = None
             if const_expr(HEAD == 64):
                 v_vh_early = _v_ops(v_page_cur, 0)
@@ -846,25 +830,8 @@ def compile_pa_decode_tile(
             base4 = 4
             words = []
             for a in range_constexpr(NCHUNK):
-                # HW exp2 intrinsic instead of MLIR's generic math.exp2 (a
-                # polynomial approximation costing ~32 extra v_cndmask here)
-                # -- matches exp2_f32_fast usage.
                 Pa = fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b))
                 ls = ls + Pa.reduce(ReductionOp.ADD)
-                # per_token_kv folds this token's V-scale (normalized so the
-                # tile-wide max maps to ~FP8_MAX) into P before quantizing,
-                # since V-scale can't be factored out of the PV sum after
-                # MFMA the way a single per-tensor scale can (see
-                # v_max_scaled's own comment above). At HEAD==64 (VGPR-bound,
-                # 96->112 combined VGPR dropped occupancy 5->4 waves/SIMD),
-                # re-read fresh from LDS (`_load_v_scale_vec`) instead of
-                # keeping the early `v_scale_vecs[a]` values live in
-                # registers across the barrier/v_max_scaled section above --
-                # measured occupancy back to 5 waves/SIMD, ~1% faster. At
-                # HEAD==128 the kernel is already LDS-bound (unaffected by
-                # this VGPR trade), so the extra LDS reads there are pure
-                # added cost -- keep the cached values instead (measured
-                # slower with the reload at that shape).
                 if const_expr(per_token_kv):
                     v_scale_this = _load_v_scale_vec(a) if const_expr(HEAD == 64) else v_scale_vecs[a]
                     p_scaled = Pa * v_scale_this * norm_factor_b
@@ -900,7 +867,7 @@ def compile_pa_decode_tile(
                     _st1(sCorr_off, qh, fx.Float32(exp2_amdgcn_scalar(m_old - m_new)))
             gpu.barrier()
 
-            # phase 3: merge per-warp sums into the running denominator. `tid <
+            # pass 3: merge per-warp sums into the running denominator. `tid <
             # M` is exactly the `(l16g==0 and warp==0)` thread set above, so
             # its correction factor is already in `m_old`/`m_new` registers --
             # no need to read back what it just wrote to sCorr_off/sL_off.
@@ -936,10 +903,6 @@ def compile_pa_decode_tile(
             corr_vec = _view(corr_off, fx.Float32, fx.make_layout(OP_ELEMS, 1)).load()
             corr_s = [corr_vec[v] for v in range_constexpr(OP_ELEMS)]
             for vh in range_constexpr(VHE_CHUNKS):
-                # At HEAD==64, `v_vh` is `v_vh_early` (loaded right after the
-                # pass-1 barrier, see above); at HEAD==128 it's loaded here,
-                # right before its MFMA use, trading hiding window for lower
-                # peak VGPR (the kernel's binding occupancy constraint).
                 v_vh = v_vh_early if const_expr(HEAD == 64) else _v_ops(v_page_cur, vh)
                 acc = arith.constant_vector(0.0, T.f32x4)
                 for s in range_constexpr(NVOPS):
@@ -1051,11 +1014,6 @@ def compile_pa_decode_tile(
             if sub_e == 0:
                 pmax_ptr[base] = _ld1(sM_off, row_e)
                 psum_ptr[base] = _ld1(sL_off, row_e)
-            # Clamp to 1.0 when l_p==0 (a partition assigned zero tiles, e.g.
-            # NP > this seq's actual tile count): o_v is also 0 there, so an
-            # unclamped rcp_f32(0)==+inf would multiply into a NaN partial
-            # that the reduce kernel's zero-weighting can't filter back out
-            # (0 * NaN == NaN, not 0).
             l_p_row = _ld1(sL_off, row_e)
             safe_l_p = arith.select(l_p_row > ZERO_F, l_p_row, fx.Float32(1.0))
             inv_l_p = fx.Float32(rcp_f32(safe_l_p))
