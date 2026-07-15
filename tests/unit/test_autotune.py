@@ -104,42 +104,15 @@ def test_config_no_compiler_opts_when_unset():
     assert c.all_kwargs() == {"BLOCK": 64}
 
 
-def test_config_accepts_per_kernel_occupancy_mapping():
-    """Occupancy knobs may be a {sym_name: int} per-kernel mapping: it flows
-    through compiler_opts, round-trips to_dict/from_dict, stays JSON-serializable
-    (disk cache), and reprs deterministically. Empty maps collapse to unset and
-    non-str keys are rejected."""
-    c = Config(BLOCK=128, waves_per_eu={"kern_a": 2, "kern_b": 4}, maxnreg={"kern_a": 128})
-    assert c.compiler_opts() == {"waves_per_eu": {"kern_a": 2, "kern_b": 4}, "maxnreg": {"kern_a": 128}}
+@pytest.mark.parametrize("value", [True, -1, "2", {"kernel": 2}])
+def test_config_rejects_invalid_waves_per_eu(value):
+    error = ValueError if value == -1 else TypeError
+    with pytest.raises(error, match="waves_per_eu"):
+        Config(waves_per_eu=value)
 
-    d = c.to_dict()
-    assert json.loads(json.dumps(d)) == d  # survives the disk-cache JSON round-trip
-    c2 = Config.from_dict(d)
-    assert c2.compiler_opts() == c.compiler_opts()
-    assert c2.kwargs == {"BLOCK": 128}
 
-    # repr is insertion-order-independent (used in tuning logs)
-    assert repr(Config(waves_per_eu={"b": 1, "a": 2})) == repr(Config(waves_per_eu={"a": 2, "b": 1}))
-
-    # empty mapping means "unset"; non-str keys are rejected
-    assert Config(waves_per_eu={}).compiler_opts() == {}
-    with pytest.raises(TypeError):
-        Config(waves_per_eu={2: 2})
-
-    # 0 collapses to "unset" (shares codegen + cache key with an absent hint),
-    # for both scalars and per-kernel map values
-    assert Config(waves_per_eu=0).compiler_opts() == {}
-    assert Config(waves_per_eu={"a": 0}).compiler_opts() == {}
-    assert Config(waves_per_eu={"a": 0, "b": 2}).compiler_opts() == {"waves_per_eu": {"b": 2}}
-
-    # non-int / negative occupancy is rejected (bool is not a valid occupancy)
-    for bad in (True, 2.5, "2"):
-        with pytest.raises(TypeError):
-            Config(waves_per_eu=bad)
-    with pytest.raises(ValueError):
-        Config(maxnreg=-1)
-    with pytest.raises(TypeError):
-        Config(maxnreg={"a": 1.5})
+def test_config_preserves_zero_waves_per_eu():
+    assert Config(waves_per_eu=0).compiler_opts() == {"waves_per_eu": 0}
 
 
 # ── stride normalization ─────────────────────────────────────────────────
@@ -657,21 +630,27 @@ def test_builder_positional_scalar_rejected(monkeypatch):
 
 
 def test_builder_build_cache_ignores_compiler_hints(monkeypatch, tmp_path):
-    """configs differing only in waves_per_eu must build the module once, not
-    once per hint (C1: build cache was over-keyed on repr(config))."""
+    """Compiler-option variants share one structural build; the JIT binary
+    cache, not the builder cache, distinguishes waves_per_eu."""
     monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    import flydsl.compiler as flyc
+
     n_build = {"n": 0}
+
+    @flyc.jit
+    def launch():
+        pass
 
     def build(N, dtype_str, BLOCK=0):
         n_build["n"] += 1
-        return lambda a, out, stream=None: None
+        return launch
 
     def specialize(a, out, dtype_str="bf16", stream=None):
         return {"N": a.shape[-1], "dtype_str": dtype_str}
 
-    # 3 configs, same BLOCK, differing only in waves_per_eu.
-    space = [Config(BLOCK=64, waves_per_eu=w) for w in (None, 1, 2)]
+    space = [Config(BLOCK=64, waves_per_eu=w) for w in (0, 1, 2)]
     t = autotune_builder(
         name="op",
         build=build,
@@ -682,22 +661,42 @@ def test_builder_build_cache_ignores_compiler_hints(monkeypatch, tmp_path):
         rep=1,
         do_bench_fn=lambda call, warmup, rep: (call(), 1.0)[1],
     )
-    t(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="bf16")
-    assert n_build["n"] == 1, f"rebuilt {n_build['n']}x for hint-only variants (should be 1)"
+    args = (FakeTensor((16, 512)), FakeTensor((1,)))
+    kwargs = {"dtype_str": "bf16"}
+    key = t.tuner._make_key(args, kwargs)
+    for config in space:
+        t.tuner._resolve_fn(config, key, args, kwargs)
+    assert n_build["n"] == 1
+
+
+def test_builder_compiler_hints_require_lazy_jit_function(monkeypatch):
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    config = Config(BLOCK=64, waves_per_eu=2)
+    t = Autotuner(
+        fn=None,
+        configs=[config],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn_noop,
+        default=lambda a, out, **kw: config,
+        structural=("BLOCK",),
+        do_bench_fn=_bench_run_all,
+    )
+    with pytest.raises(TypeError, match="lazy @flyc.jit JitFunction"):
+        t(FakeTensor((8,)), FakeTensor((1,)))
 
 
 def test_run_with_hints_uses_thread_local_not_shared_attr():
-    """_run_with_hints must expose hints via the thread-local CompilationContext
-    during the call (so JitFunction folds them into its cache key) WITHOUT
-    mutating the shared, cached fn.compile_hints -- otherwise concurrent tuned /
-    served calls race on that attribute."""
-    # _run_with_hints imports CompilationContext, so skip without the bindings.
+    """A candidate hint is a thread-local overlay, never a mutation of the
+    shared cached JitFunction."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from flydsl.compiler.kernel_function import CompilationContext
 
     class FakeJit:
         def __init__(self):
-            self.compile_hints = {"baseline": 1}  # shared attr; must not change
+            self.compile_hints = {"baseline": 1}
             self.seen = None
 
         def __call__(self, *a, **k):
@@ -705,10 +704,11 @@ def test_run_with_hints_uses_thread_local_not_shared_attr():
 
     fn = FakeJit()
     t = _make_tuner(fn=lambda a, out, **kw: None, configs=[Config(BLOCK=1)])
-    t._run_with_hints(fn, Config(BLOCK=1, waves_per_eu=2).compiler_opts(), (), {})
-    assert fn.seen == {"waves_per_eu": 2}  # visible via thread-local during call
-    assert fn.compile_hints == {"baseline": 1}  # shared attr never mutated
-    assert CompilationContext.get_compile_hints() == {}  # thread-local restored after
+    with CompilationContext.compile_hints({"outer": 7, "waves_per_eu": 1}):
+        t._run_with_hints(fn, {"waves_per_eu": 2}, (), {})
+    assert fn.seen == {"outer": 7, "waves_per_eu": 2}
+    assert fn.compile_hints == {"baseline": 1}
+    assert CompilationContext.get_compile_hints() == {}
 
 
 def test_builder_mode_rejects_num_warps(monkeypatch):
@@ -727,96 +727,6 @@ def test_builder_mode_rejects_num_warps(monkeypatch):
     )
     with pytest.raises(ValueError, match="num_warps"):
         t(FakeTensor((8,)), FakeTensor((1,)))
-
-
-def test_lower_occupancy_compile_hints_sets_func_attrs():
-    """ROCm occupancy hints lower to kernel function attrs."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl._mlir import ir
-    from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints
-    from flydsl.compiler.jit_function import _create_mlir_context
-
-    with _create_mlir_context() as ctx:
-        module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
-        _lower_occupancy_compile_hints(module, compile_hints={"waves_per_eu": 3, "maxnreg": 64})
-        text = str(module)
-    # Avoid loose numeric substring matches.
-    assert "rocdl.waves_per_eu = 3" in text
-    assert '"amdgpu-num-vgpr", "64"' in text
-
-
-def test_set_passthrough_replaces_same_key_no_duplicate():
-    """maxnreg lowering replaces an existing passthrough attr."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl._mlir import ir
-    from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints, _set_passthrough
-    from flydsl.compiler.jit_function import _create_mlir_context
-
-    with _create_mlir_context() as ctx:
-        module = ir.Module.parse("module { gpu.module @m { gpu.func @k() kernel { gpu.return } } }", context=ctx)
-        func = module.body.operations[0].regions[0].blocks[0].operations[0]
-        # Preserve unrelated passthrough entries while replacing the target key.
-        with ctx:
-            _set_passthrough(func, "no-inline", "true")
-            _set_passthrough(func, "amdgpu-num-vgpr", "128")
-        _lower_occupancy_compile_hints(module, compile_hints={"maxnreg": 64})
-        text = str(module)
-    assert text.count("amdgpu-num-vgpr") == 1  # replaced, not duplicated
-    assert '"amdgpu-num-vgpr", "64"' in text and '"amdgpu-num-vgpr", "128"' not in text
-    assert '"no-inline", "true"' in text  # unrelated entry preserved
-
-
-def test_lower_occupancy_compile_hints_per_kernel_mapping():
-    """Per-kernel occupancy maps only annotate named kernels."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl._mlir import ir
-    from flydsl.compiler.backends.rocm import _lower_occupancy_compile_hints
-    from flydsl.compiler.jit_function import _create_mlir_context
-
-    src = "module { gpu.module @m { gpu.func @a() kernel { gpu.return } gpu.func @b() kernel { gpu.return } } }"
-    with _create_mlir_context() as ctx:
-        module = ir.Module.parse(src, context=ctx)
-        _lower_occupancy_compile_hints(module, compile_hints={"waves_per_eu": {"a": 2}, "maxnreg": {"b": 64}})
-        funcs = {
-            ir.StringAttr(f.attributes["sym_name"]).value: str(f)
-            for f in module.body.operations[0].regions[0].blocks[0].operations
-            if f.operation.name == "gpu.func"
-        }
-    # kernel a: waves_per_eu only (absent from the maxnreg map)
-    assert "rocdl.waves_per_eu = 2" in funcs["a"]
-    assert "amdgpu-num-vgpr" not in funcs["a"]
-    # kernel b: maxnreg only (absent from the waves_per_eu map)
-    assert '"amdgpu-num-vgpr", "64"' in funcs["b"]
-    assert "rocdl.waves_per_eu" not in funcs["b"]
-
-
-def test_stable_hint_repr_canonicalizes_mappings():
-    """The compile-cache hint repr is order-independent for mapping values, so a
-    per-kernel occupancy map (or llvm_options) differing only in insertion order
-    yields one cache key instead of compiling twice. List order stays
-    significant."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl.compiler.jit_function import _stable_hint_repr
-
-    assert _stable_hint_repr({"a": 2, "b": 4}) == _stable_hint_repr({"b": 4, "a": 2})
-    assert _stable_hint_repr({"x": {"p": 1, "q": 2}}) == _stable_hint_repr({"x": {"q": 2, "p": 1}})
-    assert _stable_hint_repr(2) == "2"
-    assert _stable_hint_repr([3, 1, 2]) == "[3, 1, 2]"  # list order preserved
-    # a dict nested inside a list is still canonicalized
-    assert _stable_hint_repr([{"a": 2, "b": 4}]) == _stable_hint_repr([{"b": 4, "a": 2}])
-    assert _stable_hint_repr([1, {"z": 1, "a": 2}]) == "[1, {'a': 2, 'z': 1}]"
-
-
-def test_unmatched_occupancy_hint_keys():
-    """A per-kernel occupancy map key naming no kernel is surfaced (so the caller
-    warns) instead of being a silent no-op. Scalar hints never 'miss'."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl.compiler.backends.rocm import _unmatched_occupancy_hint_keys
-
-    present = {"kern_a", "kern_b"}
-    out = _unmatched_occupancy_hint_keys({"waves_per_eu": 2, "maxnreg": {"kern_a": 128, "typo": 64}}, present)
-    assert out == {"maxnreg": ["typo"]}
-    assert _unmatched_occupancy_hint_keys({"waves_per_eu": {"kern_a": 2}}, present) == {}
 
 
 def test_builder_mode_rejects_num_warps_in_forced_search(monkeypatch):
@@ -966,16 +876,29 @@ def test_cache_hit_stale_config_degrades_to_default(monkeypatch):
     assert key not in t.cache  # stale entry dropped
 
 
-def test_get_all_configs_sweeps_f32():
-    """f32 must sweep BLOCK_THREADS (scalar path) rather than collapsing to the
-    single default. Imports the kernel/config module, so needs the bindings."""
+def test_rmsnorm_configs_route_wpe_as_compile_option():
+    """RMSNorm keeps structural build knobs separate from backend options."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from kernels.norm.rmsnorm_config import _BLOCK_THREADS_CHOICES, _WAVES_PER_EU_CHOICES, get_all_configs
+    from kernels.norm.rmsnorm_autotune import rmsnorm_autotuned
+    from kernels.norm.rmsnorm_config import _BLOCK_THREADS_CHOICES, get_all_configs
 
     cfgs = get_all_configs(8192, "f32")
     blocks = sorted({c.kwargs["BLOCK_THREADS"] for c in cfgs})
     assert blocks == sorted(_BLOCK_THREADS_CHOICES)  # every block present (no tile filter for f32)
-    assert len(cfgs) == len(_BLOCK_THREADS_CHOICES) * len(_WAVES_PER_EU_CHOICES)
+    assert all("WAVES_PER_EU" not in c.kwargs for c in cfgs)
+    assert {c.compiler_opts()["waves_per_eu"] for c in cfgs} == {0, 1, 2}
+    assert {(c.kwargs["BLOCK_THREADS"], c.compiler_opts()["waves_per_eu"]) for c in cfgs} == {
+        (128, 0),
+        (128, 1),
+        (128, 2),
+        (256, 0),
+        (256, 1),
+        (256, 2),
+        (512, 0),
+        (512, 2),
+        (1024, 0),
+    }
+    assert rmsnorm_autotuned.tuner.structural == ("BLOCK_THREADS",)
 
 
 def test_get_default_bf16_hits_vectorized_tile():

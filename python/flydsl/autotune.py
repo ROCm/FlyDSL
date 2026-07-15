@@ -10,7 +10,6 @@ import inspect
 import json
 import os
 import tempfile
-from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -119,55 +118,23 @@ def _normalize_strides(t) -> tuple:
     return tuple(out)
 
 
-def _normalize_occupancy(value, knob: str):
-    """Validate/normalize an occupancy knob to ``None``, an ``int`` (uniform
-    across every kernel), or a ``{sym_name: int}`` per-kernel mapping.
+class Config:
+    """A single tuning configuration.
 
-    Values must be non-negative ``int``s (``bool`` is rejected -- it is an
-    ``int`` subclass but never a meaningful occupancy). ``0`` means "leave it to
-    the compiler" and collapses to ``None`` so it shares codegen *and* a JIT
-    cache key with an absent hint (no redundant recompile). A mapping is copied
-    to a plain ``dict`` (so a custom Mapping still serializes/hashes
-    canonically) with kernel entry-point names as keys; an empty/all-unset
-    mapping collapses to ``None``. Occupancy is a per-kernel ``gpu.func``
-    attribute, so the mapping lets one Config target several entry kernels; see
-    ``RocmBackend.lower_occupancy_compile_hints``.
+    ``waves_per_eu`` is a non-negative scalar backend option; ``0`` requests
+    the compiler default and ``None`` leaves any source-level setting untouched.
     """
 
-    def _coerce(v):
-        # bool is an int subclass but is never a valid occupancy value.
-        if isinstance(v, bool) or not isinstance(v, int):
-            raise TypeError(f"{knob}: occupancy value must be a non-negative int, got {v!r} ({type(v).__name__})")
-        if v < 0:
-            raise ValueError(f"{knob}: occupancy value must be >= 0, got {v}")
-        return v or None  # 0 -> None ("leave it to the compiler")
-
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        norm = {}
-        for name, v in value.items():
-            if not isinstance(name, str):
-                raise TypeError(
-                    f"{knob}: per-kernel mapping keys must be kernel names (str), got {type(name).__name__}"
-                )
-            cv = _coerce(v)
-            if cv is not None:
-                norm[name] = cv
-        return norm or None
-    return _coerce(value)
-
-
-class Config:
-    """A single tuning configuration."""
-
     def __init__(self, *, num_warps=None, waves_per_eu=None, maxnreg=None, pre_hook=None, **kwargs):
+        if waves_per_eu is not None:
+            if isinstance(waves_per_eu, bool) or not isinstance(waves_per_eu, int):
+                raise TypeError(f"waves_per_eu must be a non-negative int or None, got {waves_per_eu!r}")
+            if waves_per_eu < 0:
+                raise ValueError(f"waves_per_eu must be >= 0, got {waves_per_eu}")
         self.kwargs = kwargs
         self.num_warps = num_warps
-        # Occupancy knobs may be a scalar (uniform) or a {sym_name: int} mapping
-        # (per-kernel); normalized so they serialize / hash canonically.
-        self.waves_per_eu = _normalize_occupancy(waves_per_eu, "waves_per_eu")
-        self.maxnreg = _normalize_occupancy(maxnreg, "maxnreg")
+        self.waves_per_eu = waves_per_eu
+        self.maxnreg = maxnreg
         self.pre_hook = pre_hook
 
     def all_kwargs(self):
@@ -189,20 +156,13 @@ class Config:
         }
 
     def __repr__(self):
-        def fmt(v):
-            # Render mappings with sorted keys so the repr (used in tuning logs)
-            # is deterministic regardless of dict insertion order.
-            if isinstance(v, Mapping):
-                return "{" + ", ".join(f"{k!r}: {v[k]}" for k in sorted(v)) + "}"
-            return str(v)
-
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
         if self.num_warps is not None:
             parts.append(f"num_warps={self.num_warps}")
         if self.waves_per_eu is not None:
-            parts.append(f"waves_per_eu={fmt(self.waves_per_eu)}")
+            parts.append(f"waves_per_eu={self.waves_per_eu}")
         if self.maxnreg is not None:
-            parts.append(f"maxnreg={fmt(self.maxnreg)}")
+            parts.append(f"maxnreg={self.maxnreg}")
         return f"Config({', '.join(parts)})"
 
     def to_dict(self):
@@ -292,8 +252,7 @@ class Autotuner:
         self.cache: Dict[tuple, Config] = {}
 
         # Builder mode: build_fn rebuilds the module per config. `structural`
-        # names the config kwargs build_fn consumes; the build cache keys only on
-        # those, so hint-only variants (waves_per_eu) reuse one built module.
+        # names the config kwargs build_fn consumes and keys the build cache.
         self.build_fn = build_fn
         self.default = default
         self.structural = tuple(structural) if structural is not None else None
@@ -433,10 +392,11 @@ class Autotuner:
         """Raise for a config carrying a knob that can't be honored, so it fails
         loudly instead of being silently dropped or benchmarked as a no-op.
 
-        In builder mode the block size is baked into build_fn, so a jit-kwarg like
-        num_warps can't be routed to the launch call. (Called up-front in the
-        search loop, before the tolerant per-config except, and on the
-        default/cache-hit path via _resolve_fn.)
+        Builder-mode structural choices must be kwargs consumed by build_fn.
+        Compiler options remain valid: they are applied when the returned lazy
+        JitFunction compiles. (Called up-front in the search loop, before the
+        tolerant per-config except, and on the default/cache-hit path via
+        _resolve_fn.)
         """
         if self.build_fn is None:
             return
@@ -458,10 +418,10 @@ class Autotuner:
     def _resolve_fn(self, config, key, args, kwargs):
         """Return the launch callable for a config.
 
-        Direct mode: the wrapped jit fn. Builder mode: build the module (cached),
-        keyed on the spec + the structural knobs build_fn consumes — NOT the
-        whole config, so configs differing only in compiler hints (waves_per_eu)
-        share one build instead of recompiling per hint.
+        Direct mode: the wrapped jit fn. Builder mode: build the lazy launch
+        function (cached) by specialization and the structural knobs consumed by
+        build_fn. Compiler-option variants intentionally share this build; the
+        JIT cache separates their compiled binaries.
         """
         if self.build_fn is None:
             return self.fn
@@ -475,6 +435,15 @@ class Autotuner:
         if built is None:
             built = self.build_fn(config, *args, **kwargs)
             self._build_cache[cache_key] = built
+        compiler_opts = config.compiler_opts()
+        if compiler_opts:
+            from .compiler.jit_function import JitFunction
+
+            if not isinstance(built, JitFunction):
+                raise TypeError(
+                    f"{self.name}: compiler options {sorted(compiler_opts)} require build() "
+                    "to return a lazy @flyc.jit JitFunction"
+                )
         return built
 
     def _bench_one(self, config, key, args, kwargs):
@@ -538,21 +507,14 @@ class Autotuner:
         return self._do_bench(timed, warmup=self.warmup, rep=self.rep)
 
     def _run_with_hints(self, fn, compiler_opts, args, kwargs):
-        """Run fn with compiler hints set ONLY on the thread-local
-        CompilationContext -- never by mutating the shared, cached
-        ``fn.compile_hints`` (that races across concurrent tuned/served calls).
-        JitFunction folds the thread-local hints into its cache key, so each
-        distinct waves_per_eu / maxnreg still compiles and caches a distinct
-        binary. Import is deferred so the core stays importable unbuilt."""
-        if not compiler_opts:
-            return fn(*args, **kwargs)
+        """Run a direct or builder-mode kernel with compiler-option overlays."""
+        if compiler_opts:
+            from .compiler.kernel_function import CompilationContext
 
-        from .compiler.kernel_function import CompilationContext
-
-        # Overlay onto any outer thread-local hints rather than replacing them.
-        merged = {**CompilationContext.get_compile_hints(), **compiler_opts}
-        with CompilationContext.compile_hints(merged):
-            return fn(*args, **kwargs)
+            merged = {**CompilationContext.get_compile_hints(), **compiler_opts}
+            with CompilationContext.compile_hints(merged):
+                return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
 
     def _filter_call_kwargs(self, fn, kwargs):
         """Drop kwargs the launch fn doesn't accept. In builder mode the caller
@@ -688,8 +650,7 @@ class Autotuner:
             fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w") as f:
-                    # sort_keys canonicalizes nested per-kernel occupancy maps so
-                    # the on-disk cache is deterministic (stable diffs, no churn).
+                    # Keep the on-disk cache deterministic (stable diffs, no churn).
                     json.dump(data, f, indent=2, sort_keys=True)
                 os.replace(tmp, path)
             except Exception:
@@ -797,13 +758,16 @@ def autotune_builder(
     Args:
         name: artifact / disk-cache identity (required — builder tuners share a
             cache dir, so each needs a distinct name).
-        build: build(**spec, **structural_knobs) -> launch callable.
+        build: build(**spec, **structural_knobs) -> lazy ``@flyc.jit`` launch
+            function. A lazy JitFunction is required when configs carry compiler
+            options, because those options are applied at JIT compile time.
         specialize: specialize(*args, **kwargs) -> dict of the build/lookup axes
             (shape + build-only scalars). Its items become the cache key, so a
             scalar like dtype_str can't be silently dropped from the key.
         configs / default: called as configs(**spec) / default(**spec).
-        structural: config kwarg names passed to build() (vs compiler hints,
-            which flow through Config.compiler_opts()).
+        structural: config kwarg names passed to build(). Compiler options such
+            as ``waves_per_eu`` bypass the builder and are applied when the
+            returned JitFunction compiles.
     """
     if not name or not isinstance(name, str):
         raise ValueError("autotune_builder requires a non-empty string name (the cache identity)")

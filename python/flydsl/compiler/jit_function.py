@@ -13,7 +13,6 @@ import threading
 import time
 import types
 from collections import namedtuple
-from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache, partial
@@ -784,23 +783,6 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
-def _stable_hint_repr(value) -> str:
-    """Order-independent string form of a compile-hint value for the cache key.
-
-    ``Mapping`` values (e.g. a per-kernel occupancy ``{sym_name: value}`` or an
-    ``llvm_options`` dict) are canonicalized by sorted key, recursively; list /
-    tuple values recurse element-wise with order preserved (so a dict nested in
-    a list is still canonicalized). Two logically-equal hints that differ only
-    in dict insertion order thus share one cache key instead of compiling (and
-    caching) twice. Scalars keep their plain ``str`` form.
-    """
-    if isinstance(value, Mapping):
-        return "{" + ", ".join(f"{k!r}: {_stable_hint_repr(value[k])}" for k in sorted(value)) + "}"
-    if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(_stable_hint_repr(v) for v in value) + "]"
-    return str(value)
-
-
 class MlirCompiler:
     @classmethod
     def compile(
@@ -812,12 +794,10 @@ class MlirCompiler:
             raise DSLCompileError("MLIR verification failed", diagnostics=diag_records_from_mlir_error(exc)) from exc
 
         backend = get_backend(arch=arch)
-        from .kernel_function import CompilationContext
 
-        compile_hints = CompilationContext.get_compile_hints()
+        compile_hints = dict(CompilationContext.get_compile_hints())
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
-        # Keep pre-pipeline lowering and pipeline construction on the same hint snapshot.
-        backend.lower_occupancy_compile_hints(module, compile_hints=compile_hints)
+        backend.lower_compile_hints(module, compile_hints=compile_hints)
         cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
         fragments = cfg.fragments
         pre_binary_fragments = cfg.pre_binary
@@ -1317,14 +1297,14 @@ class JitFunction:
         sig = self._sig
         # Re-read env vars on every call.
         key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
-        # Fold the per-function baseline with the thread-local compile hints
-        # (e.g. the autotuner's occupancy overlay). Reading the thread-local here
-        # -- instead of mutating the shared self.compile_hints -- keeps each hint
-        # variant distinct in the cache key without racing across concurrent
-        # tuned calls.
         effective_hints = {**self.compile_hints, **CompilationContext.get_compile_hints()}
         if effective_hints:
-            key_parts.append(("_hints_", tuple(sorted((k, _stable_hint_repr(v)) for k, v in effective_hints.items()))))
+            key_parts.append(
+                (
+                    "_hints_",
+                    tuple(sorted((key, (type(value), repr(value))) for key, value in effective_hints.items())),
+                )
+            )
 
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
@@ -1474,9 +1454,6 @@ class JitFunction:
                 )
             raise RuntimeError(msg)
 
-        # Same merge as the cache key: the thread-local overlay (autotuner hints)
-        # wins over the per-function baseline, and is what convert-gpu-to-rocdl /
-        # the backend see during this compile.
         effective_hints = {**self.compile_hints, **CompilationContext.get_compile_hints()}
         _hints_ctx = CompilationContext.compile_hints(effective_hints) if effective_hints else nullcontext()
 

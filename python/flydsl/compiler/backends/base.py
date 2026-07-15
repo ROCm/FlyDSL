@@ -64,10 +64,14 @@ class BaseBackend(metaclass=ABCMeta):
     def pipeline_fragments(self, *, compile_hints: dict) -> List[str]:
         """Ordered list of MLIR PassManager.parse fragments.
 
-        ``compile_hints`` carries per-kernel knobs such as ``waves_per_eu``
-        and ``maxnreg`` (from ``CompilationContext.get_compile_hints()``).
+        ``compile_hints`` carries options from
+        ``CompilationContext.get_compile_hints()``.
         """
         ...
+
+    def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
+        """Optionally materialize backend-specific hints before the pipeline."""
+        return None
 
     def external_binary_pipeline_fragments(self, *, compile_hints: dict) -> Tuple[List[str], str]:
         """Split the pipeline for external device binary code generation.
@@ -77,16 +81,6 @@ class BaseBackend(metaclass=ABCMeta):
         toolchain to produce device code object bytes.
         """
         raise NotImplementedError(f"{type(self).__name__} does not support external LLVM codegen")
-
-    def lower_occupancy_compile_hints(self, module, *, compile_hints: dict) -> None:
-        """Optional pre-pipeline lowering for occupancy-related compile hints.
-
-        ``compile_hints`` is the same snapshot passed to ``pipeline_fragments``.
-        Most backends need no pre-lowering annotations, so the default is a
-        no-op.  ROCm overrides this to write occupancy attrs onto entry-point
-        ``gpu.func`` ops before ROCDL lowering.
-        """
-        return None
 
     @abstractmethod
     def gpu_module_targets(self) -> List[str]:

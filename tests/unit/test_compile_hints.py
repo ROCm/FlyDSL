@@ -188,18 +188,26 @@ class TestCompileHintsPropagation:
         _reset_jit_caches(_noop_launch)
 
         orig = rocm.RocmBackend.pipeline_fragments
+        orig_lower = rocm.RocmBackend.lower_compile_hints
 
         def patched(self, *, compile_hints):
             captured["hints"] = dict(compile_hints)
             return orig(self, compile_hints=compile_hints)
 
-        monkeypatch.setattr(rocm.RocmBackend, "pipeline_fragments", patched)
+        def patched_lower(self, module, *, compile_hints):
+            captured["lower_hints"] = dict(compile_hints)
+            return orig_lower(self, module, compile_hints=compile_hints)
 
-        exe = flyc.compile[{"fast_fp_math": True, "unsafe_fp_math": True}](_noop_launch)
+        monkeypatch.setattr(rocm.RocmBackend, "pipeline_fragments", patched)
+        monkeypatch.setattr(rocm.RocmBackend, "lower_compile_hints", patched_lower)
+
+        exe = flyc.compile[{"fast_fp_math": True, "unsafe_fp_math": True, "waves_per_eu": 2}](_noop_launch)
         exe()
 
         assert captured["hints"].get("fast_fp_math") is True
         assert captured["hints"].get("unsafe_fp_math") is True
+        assert captured["hints"].get("waves_per_eu") == 2
+        assert captured["lower_hints"] == captured["hints"]
 
     def test_llvm_options_in_compile_hints(self):
         """Verify llvm_options key is accepted and doesn't crash."""

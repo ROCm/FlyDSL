@@ -6,6 +6,7 @@ from __future__ import annotations
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.jit_argument import JitArgumentRegistry
+from flydsl.compiler.kernel_function import CompilationContext
 
 
 class _FakeCudaStream:
@@ -62,3 +63,24 @@ def test_future_annotations_runtime_int32_ignores_value_in_cache_key():
     assert key1 == key2
     assert ("n", (fx.Int32,)) in key1
     assert ("n", (int, 1)) not in key1
+
+
+def test_thread_local_compile_options_enter_cache_key_before_build():
+    @flyc.jit
+    def launch(stream: fx.Stream = fx.Stream(None)):
+        pass
+
+    # The same backend-option path is public outside autotune.
+    flyc.compile[{"fast_fp_math": True, "waves_per_eu": 4}](launch)
+    baseline = _cache_key(launch)
+    with CompilationContext.compile_hints({"waves_per_eu": 1}):
+        wpe1 = _cache_key(launch)
+    with CompilationContext.compile_hints({"waves_per_eu": 2}):
+        wpe2 = _cache_key(launch)
+    with CompilationContext.compile_hints({"waves_per_eu": "2"}):
+        invalid_string = _cache_key(launch)
+
+    assert len({baseline, wpe1, wpe2, invalid_string}) == 4
+    hints = dict(next(value for name, value in wpe2 if name == "_hints_"))
+    assert hints["fast_fp_math"] == (bool, "True")
+    assert hints["waves_per_eu"] == (int, "2")  # thread-local candidate wins

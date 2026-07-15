@@ -10,13 +10,15 @@ VEC_WIDTH is not tuned (pinned to 128//elem_bits by the 128-bit buffer copy).
 """
 
 from flydsl.autotune import Config
+from kernels.norm.rmsnorm_common import WARP_SIZE
 from kernels.norm.rmsnorm_kernel import SMALL_N_THRESHOLD
 
 # Candidate block sizes. All are multiples of the warp size (64 on CDNA) and
 # span both the <=256 (no known_block_size) and >256 (needs known_block_size)
 # regimes so the tuner can trade occupancy against per-thread work.
 _BLOCK_THREADS_CHOICES = (128, 256, 512, 1024)
-_WAVES_PER_EU_CHOICES = (0, 1, 2)  # 0 == leave to the compiler; nonzero lowers to the rocdl.waves_per_eu func attr
+_WAVES_PER_EU_CHOICES = (0, 1, 2)  # Triton-style exact WPE; 0 means compiler default.
+_CDNA_EUS_PER_CU = 4
 
 
 def _elem_bits(dtype_str: str) -> int:
@@ -79,8 +81,12 @@ def get_all_configs(N: int, dtype_str: str, arch: str = None):
             if N < tile_cols or N % tile_cols != 0:
                 continue
         for wpe in _WAVES_PER_EU_CHOICES:
-            waves = None if wpe == 0 else wpe
-            configs.append(Config(waves_per_eu=waves, BLOCK_THREADS=block))
+            # A workgroup imposes its own occupancy floor. On CDNA, block / 64
+            # waves are distributed over four EUs; exact WPE below that floor is
+            # impossible, so LLVM falls back to its default occupancy decision.
+            if wpe and WARP_SIZE == 64 and block > wpe * WARP_SIZE * _CDNA_EUS_PER_CU:
+                continue
+            configs.append(Config(waves_per_eu=wpe, BLOCK_THREADS=block))
     # Fall back to the heuristic default if nothing fit (e.g. an odd bf16 N).
     if not configs:
         configs.append(get_default(N, dtype_str, arch))

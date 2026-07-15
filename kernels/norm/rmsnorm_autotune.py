@@ -3,8 +3,9 @@
 
 """Autotuned RMSNorm — the first real adopter of ``flydsl.autotune``.
 
-RMSNorm bakes its structural knob (BLOCK_THREADS) at module-build time, so the
-tuner rebuilds the module per config via ``autotune_builder`` (builder mode).
+RMSNorm bakes BLOCK_THREADS at module-build time, so the tuner rebuilds the
+module per structural config via ``autotune_builder``. ``waves_per_eu`` remains
+a backend compile option and reuses the same structural build.
 Normal runs use the ``get_default`` heuristic; ``FLYDSL_AUTOTUNE=1`` sweeps
 ``get_all_configs``.
 
