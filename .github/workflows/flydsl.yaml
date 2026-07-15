@@ -47,9 +47,10 @@ jobs:
         id: filter
         uses: dorny/paths-filter@v3
         with:
-          # code is true when any changed file is NOT one of the non-code paths
-          # below (everything under '**' minus the negated docs / markdown /
-          # image / non-workflow .github patterns).
+          # 'every': a file is code only if it matches all patterns, so
+          # docs-only changes yield code=false. The default 'some' would match
+          # any file via '**' and make 'code' always true.
+          predicate-quantifier: 'every'
           filters: |
             code:
               - '**'
@@ -80,6 +81,36 @@ jobs:
           GITHUB_SHA: ${{ github.sha }}
           MAX_RETRIES: 5
           RETRY_INTERVAL_SECONDS: 30
+
+  # Reports the required 'test (<runner>)' checks when the GPU 'test' job is
+  # skipped for a non-code change (a skipped matrix job emits no per-runner
+  # checks, which would leave branch protection waiting forever). Fails them if
+  # check-signal failed/was cancelled, since check-signal is not itself required.
+  test-skip:
+    needs: [check-signal, detect-changes]
+    if: >-
+      ${{ always()
+          && needs.detect-changes.result == 'success'
+          && needs.detect-changes.outputs.code_changed != 'true' }}
+    name: test
+    strategy:
+      matrix:
+        runners: [
+          'linux-flydsl-mi325-1',
+          'linux-flydsl-mi355-1',
+          'linux-flydsl-navi-2',
+        ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report skipped GPU tests (green) or fail if pre-checks failed (red)
+        env:
+          CHECK_SIGNAL_RESULT: ${{ needs.check-signal.result }}
+        run: |
+          if [ "$CHECK_SIGNAL_RESULT" = "failure" ] || [ "$CHECK_SIGNAL_RESULT" = "cancelled" ]; then
+            echo "::error::check-signal ${CHECK_SIGNAL_RESULT}; failing 'test (${{ matrix.runners }})' for this docs-only change."
+            exit 1
+          fi
+          echo "Docs-only change: GPU tests skipped (check-signal=${CHECK_SIGNAL_RESULT}); reporting 'test (${{ matrix.runners }})' as passed."
 
   # ---------------------------------------------------------------------------
   # Single-GPU tests: kernels, unit, examples, MLIR FileCheck, benchmarks.
