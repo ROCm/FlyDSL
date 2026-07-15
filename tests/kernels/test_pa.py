@@ -1275,10 +1275,12 @@ def _run_pa_decode_tile_case(
     query = (torch.randn(num_seqs, num_q_heads, head_dim, device=dev, dtype=query_dtype) * 0.3).contiguous()
     k_f = torch.randn(num_blocks, num_kv_heads, block_size, head_dim, device=dev) * 0.3
     v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
-    # fp8-quantize K/V (e4m3fnuz, the format gfx942 fp8 MMA consumes); the kernel
-    # multiplies by the per-tensor scale to dequantize.
-    key_cache_plain = (k_f / k_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
-    value_cache_plain = (v_f / v_scale).clamp(-240, 240).to(torch.float8_e4m3fnuz)
+    # fp8-quantize K/V (aiter's `dtypes.fp8`, the arch-native e4m3 format --
+    # FNUZ on gfx942, OCP e4m3fn on gfx950; the kernel multiplies by the
+    # per-tensor scale to dequantize).
+    fp8_max = torch.finfo(dtypes.fp8).max
+    key_cache_plain = (k_f / k_scale).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
+    value_cache_plain = (v_f / v_scale).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
     # kernel expects K/V in the SAME BLOCKED layouts pa_decode_ps_kernel uses
     # (see kernels/pa_decode_tile.py module docstring); relayout once here,
     # same as production relayouts K/V at quantization time (not per decode

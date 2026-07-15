@@ -3,7 +3,8 @@
 
 """Readable tile-programming reference for paged-attention fp8 decode.
 
-fp8: K/V stored as e4m3 FNUZ, fed straight into ``mfma_f32_16x16x32_fp8_fp8``.
+fp8: K/V stored as e4m3 (FNUZ on gfx942, OCP e4m3fn on gfx950 -- see ``FP8``
+in ``compile_pa_decode_tile``), fed straight into ``mfma_f32_16x16x32_fp8_fp8``.
 Q (bf16/f16) is quantized to fp8 with a per-row scale; softmax probabilities P
 are quantized to fp8 for P·V. Scales fold out of the matmuls: ``q_scale`` and
 ``key_scale`` into the QK score; ``value_scale`` and the P dequant (1/FP8_MAX)
@@ -15,12 +16,12 @@ fan-out per 256-token compute tile at trace time). ``head_dim`` must be a
 multiple of 64 (64 or 128), matching production's own floor.
 
 * ``query``        [num_seqs, num_q_heads, head_dim]                 f16/bf16
-* ``key_cache``    [num_blocks, num_kv_heads, head_dim//16, block_size, 16]  fp8 e4m3fnuz
+* ``key_cache``    [num_blocks, num_kv_heads, head_dim//16, block_size, 16]  fp8 (see ``FP8``)
                    (SAME layout as ``_pa_small_block_load_k_flat`` in
                     ``pa_decode_fp8.py``: 16-element head-chunk outer, token
                     next-innermost, for coalesced dwordx4 loads -- see
                     ``QKHE_LOOP`` below)
-* ``value_cache``  [num_blocks, num_kv_heads, block_size//16, head_dim, 16]  fp8 e4m3fnuz
+* ``value_cache``  [num_blocks, num_kv_heads, block_size//16, head_dim, 16]  fp8 (see ``FP8``)
                    (SAME "trans_v" layout as ``_pa_small_block_load_v_trans``:
                     16 consecutive tokens innermost, unlike K)
 * ``block_tables`` [num_seqs, max_blocks_per_seq]                    int32
@@ -55,6 +56,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.vector import ReductionOp
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common import dpp_utils
 from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
@@ -68,8 +70,6 @@ MFMA_MNK = 16  # M = N = 16 for the MMA atom; also query rows handled per CTA (p
 MFMA_K = 32  # fp8 MFMA contracts K = 32 per instruction (mfma_f32_16x16x32_fp8_fp8)
 WAVE = 64
 LOG2E = 1.4426950408889634
-FP8 = fx.Float8E4M3FNUZ  # gfx942 fp8 MFMA uses the FNUZ format (not e4m3fn)
-FP8_MAX = 240.0  # max representable magnitude of e4m3fnuz
 
 
 @functools.lru_cache(maxsize=None)
@@ -102,6 +102,15 @@ def compile_pa_decode_tile(
     ``query_dtype`` (``"f16"`` or ``"bf16"``) selects the query tensor's
     16-bit float element type.
     """
+    # The native fp8 MFMA operand format differs by chip generation: gfx942
+    # (CDNA3) uses e4m3 FNUZ, gfx950 (CDNA4) uses OCP e4m3fn -- same convention
+    # as preshuffle_gemm.py/qk_norm_rope_quant.py. Feeding FNUZ-encoded bits
+    # into gfx950's fp8 MFMA (which decodes them as OCP) silently produces
+    # wrong results rather than NaN.
+    is_gfx950 = "gfx95" in get_rocm_arch()
+    FP8 = fx.Float8E4M3FN if is_gfx950 else fx.Float8E4M3FNUZ
+    FP8_MAX = 448.0 if is_gfx950 else 240.0  # max representable magnitude of the format above
+
     assert head_dim % MFMA_MNK == 0, f"head_dim {head_dim} must be a multiple of {MFMA_MNK}"
     assert block_size in (16, 64), f"pa_decode_tile only supports block_size in (16, 64), got {block_size}"
     assert query_dtype in (
