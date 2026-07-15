@@ -1254,6 +1254,7 @@ def _run_pa_decode_tile_case(
     head_dim: int = 128,
     query_dtype: torch.dtype = torch.float16,
     per_token_kv: bool = False,
+    query_length: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     from kernels.attention.pa_decode_tile import pa_decode_tile
 
@@ -1285,7 +1286,14 @@ def _run_pa_decode_tile_case(
         k_scale_bcast = k_scale
         v_scale_bcast = v_scale
 
-    query = (torch.randn(num_seqs, num_q_heads, head_dim, device=dev, dtype=query_dtype) * 0.3).contiguous()
+    # `query`/`output` are [num_seqs*query_length, num_q_heads, head_dim],
+    # row-major by (seq, MTP position) -- query_length>1 exercises MTP
+    # (speculative-decode); the KV cache (below) already stands in for
+    # "context_len already includes the MTP tail tokens' own K/V" since
+    # it's independent random data here, not derived from query.
+    query = (
+        torch.randn(num_seqs * query_length, num_q_heads, head_dim, device=dev, dtype=query_dtype) * 0.3
+    ).contiguous()
     k_f = torch.randn(num_blocks, num_kv_heads, block_size, head_dim, device=dev) * 0.3
     v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
     # fp8-quantize K/V (aiter's `dtypes.fp8`, the arch-native e4m3 format --
@@ -1319,7 +1327,7 @@ def _run_pa_decode_tile_case(
             block_tables[s, b] = s * max_blocks + b
     context_lengths = torch.full((num_seqs,), context_len, dtype=torch.int32, device=dev)
 
-    output = torch.zeros(num_seqs, num_q_heads, head_dim, device=dev, dtype=query_dtype)
+    output = torch.zeros(num_seqs * query_length, num_q_heads, head_dim, device=dev, dtype=query_dtype)
     pa_decode_tile(
         output,
         query,
@@ -1343,11 +1351,12 @@ def _run_pa_decode_tile_case(
             within = t % block_size
             keys[t] = kc[phys, :, within, :]
             vals[t] = vc[phys, :, :, within]
-        q = query[s].unsqueeze(0).to(torch.float32)  # [1, num_q_heads, head_dim]
-        refs.append(
-            reference_masked_attention(q, keys, vals, 1.0 / head_dim**0.5, query_dtype, is_causal=True).squeeze(0)
-        )
-    ref = torch.stack(refs)
+        # q spans this seq's query_length MTP rows: reference_masked_attention's
+        # own s_q != s_k ("generation phase") branch derives each row's causal
+        # bound as `context_len - query_length + 1 + qi`, matching the kernel.
+        q = query[s * query_length : (s + 1) * query_length].to(torch.float32)
+        refs.append(reference_masked_attention(q, keys, vals, 1.0 / head_dim**0.5, query_dtype, is_causal=True))
+    ref = torch.cat(refs, dim=0)
     return output.to(torch.float32), ref.to(torch.float32)
 
 
@@ -1395,6 +1404,56 @@ def test_pa_decode_tile_reference_per_token_kv(
         num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size, per_token_kv=True
     )
     torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (per_token_kv) mismatch")
+
+
+# ---------------------------------------------------------------------------
+# Wide GQA (query_group_size > 16) and MTP (query_length > 1): both flatten
+# into TOTAL_ROWS = query_length * group_size, tiled into M_TILES = ceil(.../16)
+# independent MFMA row-groups -- see compile_pa_decode_tile's own docstring.
+# The epilogue requires BLOCK_THREADS(256) % TOTAL_ROWS == 0, so cases here
+# stick to power-of-2 TOTAL_ROWS (matches this kernel's documented limit).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("group_size", [32, 64])
+@pytest.mark.parametrize("context_len", [1027, 17])
+def test_pa_decode_tile_reference_wide_gqa(group_size: int, context_len: int, block_size: int) -> None:
+    output, ref = _run_pa_decode_tile_case(
+        num_kv_heads=1, group_size=group_size, context_len=context_len, num_seqs=3, block_size=block_size
+    )
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (wide GQA) mismatch")
+
+
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("num_kv_heads,group_size", [(1, 8), (1, 16), (2, 8)])
+@pytest.mark.parametrize("query_length", [2, 4])
+@pytest.mark.parametrize("context_len", [1027, 17])
+def test_pa_decode_tile_reference_mtp(
+    num_kv_heads: int, group_size: int, query_length: int, context_len: int, block_size: int
+) -> None:
+    output, ref = _run_pa_decode_tile_case(
+        num_kv_heads,
+        group_size,
+        context_len,
+        num_seqs=3,
+        block_size=block_size,
+        query_length=query_length,
+    )
+    # Slightly looser than the other reference tests' 1e-2: more M-tiles means
+    # more independent fp8 quantization/rounding events, which measurably (but
+    # only marginally -- mean error is unchanged, just the tail) widens the
+    # worst-case outlier at query_length=4 (M_TILES up to 4 here).
+    torch.testing.assert_close(output, ref, atol=1.5e-2, rtol=0, msg="tile PA decode (MTP) mismatch")
+
+
+@pytest.mark.parametrize("context_len", [1027, 17])
+def test_pa_decode_tile_reference_mtp_wide_gqa(context_len: int) -> None:
+    # query_length=2, group_size=32 -> TOTAL_ROWS=64, M_TILES=4: exercises
+    # both axes together, confirming the flattened (qi, gs_head) index and
+    # per-row causal bound compose correctly, not just each axis alone.
+    output, ref = _run_pa_decode_tile_case(
+        num_kv_heads=1, group_size=32, context_len=context_len, num_seqs=3, block_size=64, query_length=2
+    )
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (MTP + wide GQA) mismatch")
 
 
 if __name__ == "__main__":
