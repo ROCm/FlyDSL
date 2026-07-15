@@ -147,12 +147,30 @@ def build_flash_attn_dualwave_swp_module(
         head_dim_runtime: fx.Int32,
         block_table_stride: fx.Int32,
     ):
+        NUM_DMA_K = traits.SMEM_D_RPT
+        NUM_DMA_V = traits.SMEM_D_RPT
+
         fm_fast = fx.arith.FastMathFlags.fast
         elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
         q_load_i32x4_type = Vec.make_type(4, fx.Int32)
         v_lds_read_vec4_type = Vec.make_type(4, elem_dtype)
         kv_mfma_pack_type = Vec.make_type(8, elem_dtype)
         mfma_acc_vec_type = Vec.make_type(16, fx.Float32)
+
+        c_neg_inf = fx.Float32(float("-inf"))
+        c_neg_floor = fx.Float32(-3.0e38)
+        c_zero_f = fx.Float32(0.0)
+        c_zero_i = fx.Int32(0)
+        c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
+        head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
+        c_log2e_f = fx.Float32(_LOG2E)
+        c_sm_scale_log2e = fx.Float32(
+            arith.mulf(
+                as_mlir_value(fmath.rsqrt(head_dim_f32, fastmath=fm_fast)),
+                as_mlir_value(c_log2e_f),
+                fastmath=fm_fast,
+            )
+        )
 
         seq_len_v = fx.Index(seq_len)
         seq_len_kv_v = fx.Index(seq_len_kv)
@@ -198,6 +216,145 @@ def build_flash_attn_dualwave_swp_module(
         group_id = h_idx // traits.NUM_HEADS_KV
         q_head_idx = h_kv_idx * traits.GQA_GROUP_SIZE + group_id
         kv_head_idx = h_kv_idx
+
+        if const_expr(traits.VARLEN):
+            # Read cu_seqlens through the element-indexed Layout API and 32-bit copy atom.
+            _cuq_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqQ), fx.make_layout(1, 1))
+            _cuk_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqKv), fx.make_layout(1, 1))
+            _cu_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+            _cu_v1i32 = Vec.make_type(1, fx.Int32)
+
+            q_tok_base = _cu_load(_cuq_div, batch_idx, _cu_atom, _cu_v1i32)
+            q_tok_end = _cu_load(_cuq_div, batch_idx + fx.Index(1), _cu_atom, _cu_v1i32)
+            kv_tok_base = _cu_load(_cuk_div, batch_idx, _cu_atom, _cu_v1i32)
+            kv_tok_end = _cu_load(_cuk_div, batch_idx + fx.Index(1), _cu_atom, _cu_v1i32)
+            seqlen_q_v = q_tok_end - q_tok_base
+            seqlen_kv_v = kv_tok_end - kv_tok_base
+            seqlen_kv_i32 = fx.Int32(seqlen_kv_v)
+        else:
+            # Dense Q and K/V use independent seqlen_q (= seq_len) and seqlen_kv (= seq_len_kv).
+            q_tok_base = batch_idx * seq_len_v
+            kv_tok_base = batch_idx * seq_len_kv_v
+            q_tok_end = (batch_idx + fx.Index(1)) * seq_len_v
+            kv_tok_end = (batch_idx + fx.Index(1)) * seq_len_kv_v
+            seqlen_q_v = seq_len_v
+            seqlen_kv_v = seq_len_kv_v
+            seqlen_kv_i32 = seq_len_kv
+
+        # Paged KV reads tile j from BlockTable; within-page stride matches dense K/V.
+        if const_expr(traits.PAGED):
+            block_table_stride_v = fx.Index(block_table_stride)
+            _bt_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(BlockTable), fx.make_layout(1, 1))
+            _bt_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+            _bt_v1i32 = Vec.make_type(1, fx.Int32)
+            kv_head_elem_offset = kv_head_idx * traits.HEAD_DIM
+        else:
+            block_table_stride_v = None
+            _bt_div = None
+            _bt_atom = None
+            _bt_v1i32 = None
+            kv_head_elem_offset = None
+
+        # Bottom-right causal offset: row r keeps keys [0, r + delta], where delta is KV-Q length.
+        delta_i32 = fx.Int32(seqlen_kv_i32 - fx.Int32(seqlen_q_v))
+        # Fold batch token bases into descriptors so per-batch indices stay 0-based and 32-bit.
+        q_gmem_elem_offset = q_start * stride_q_n_v + q_head_idx * traits.HEAD_DIM
+        kv_gmem_elem_offset = kv_head_idx * traits.HEAD_DIM
+
+        # Per-batch/page descriptors fold large offsets into the 48-bit base.
+        _buf_flags_i32 = fx.Int32(buffer_ops._get_buffer_flags())
+        _elem_ir = elem_dtype.ir_type
+        # Q/O use per-batch descriptors with q_tok_base folded into the base.
+        _qo_per_batch_elems = seqlen_q_v * stride_q_n_v
+        _qo_nrec_bytes = _qo_per_batch_elems * fx.Index(traits.BF16_BYTES)
+        _qo_layout = fx.make_layout(fx.Int32(_qo_per_batch_elems), fx.Int32(1))
+        _q_batch_byte_off = q_tok_base * stride_q_n_v * fx.Index(traits.BF16_BYTES)
+        q_div = dwc._make_rebased_view(
+            fx.get_iter(Q),
+            _q_batch_byte_off,
+            _qo_nrec_bytes,
+            _qo_layout,
+            _buf_flags_i32=_buf_flags_i32,
+            _elem_ir=_elem_ir,
+        )
+        o_div = dwc._make_rebased_view(
+            fx.get_iter(O),
+            _q_batch_byte_off,
+            _qo_nrec_bytes,
+            _qo_layout,
+            _buf_flags_i32=_buf_flags_i32,
+            _elem_ir=_elem_ir,
+        )
+
+        if const_expr(traits.PAGED):
+            # K/V page-cache descriptors fold page offsets into the 48-bit base for >4 GiB caches.
+            k_div = None
+            v_div = None
+            _k_iter = fx.get_iter(K)
+            _k_align = _k_iter.alignment
+            _k_iter_ty = _k_iter.type
+            _v_iter = fx.get_iter(V)
+            _v_align = _v_iter.alignment
+            _v_iter_ty = _v_iter.type
+            _page_elems = fx.Index(traits.BLOCK_N) * stride_kv_n_v
+            _page_byte_stride = _page_elems * fx.Index(traits.BF16_BYTES)
+            _page_nrec_bytes = fx.Int64(_page_byte_stride)
+            _page_layout = fx.make_layout(fx.Int32(_page_elems), fx.Int32(1))
+
+            if const_expr(traits.KV_VECTORIZED):
+                # Vectorized V is global-transposed; gather (n,d) and rebuild linear-V LDS bytes.
+                _v_base_i64 = fx.Int64(fx.ptrtoint(_v_iter))
+
+        else:
+            # K/V use per-batch descriptors with kv_tok_base folded into the base.
+            _kv_per_batch_elems = seqlen_kv_v * stride_kv_n_v
+            _kv_nrec_bytes = _kv_per_batch_elems * fx.Index(traits.BF16_BYTES)
+            _kv_layout = fx.make_layout(fx.Int32(_kv_per_batch_elems), fx.Int32(1))
+            _kv_batch_byte_off = kv_tok_base * stride_kv_n_v * fx.Index(traits.BF16_BYTES)
+            k_div = dwc._make_rebased_view(
+                fx.get_iter(K),
+                _kv_batch_byte_off,
+                _kv_nrec_bytes,
+                _kv_layout,
+                _buf_flags_i32=_buf_flags_i32,
+                _elem_ir=_elem_ir,
+            )
+            v_div = dwc._make_rebased_view(
+                fx.get_iter(V),
+                _kv_batch_byte_off,
+                _kv_nrec_bytes,
+                _kv_layout,
+                _buf_flags_i32=_buf_flags_i32,
+                _elem_ir=_elem_ir,
+            )
+            _k_iter = None
+            _k_align = None
+            _k_iter_ty = None
+            _v_iter = None
+            _v_align = None
+            _v_iter_ty = None
+            _page_byte_stride = None
+            _page_nrec_bytes = None
+            _page_layout = None
+        _load_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
+        _store_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
+        _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+        _o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
+        _lds_ptr_ty = fx.PointerType.get(elem_dtype.ir_type, 2, traits.DMA_BYTES)
+        if const_expr(traits.SPLITK):
+            # Split-K workspace via DebugCounts stores O_partial, Mrow, then Lrow.
+            _ws_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(DebugCounts)))
+            _ws_opart_per_split_elems = fx.Index(traits.NUM_HEADS_Q) * seq_len_v * fx.Index(traits.HEAD_DIM // 2)
+            _ws_ml_per_split_elems = fx.Index(traits.NUM_HEADS_Q) * seq_len_v
+            _ws_opart_per_split_bytes = _ws_opart_per_split_elems * fx.Index(4)
+            _ws_ml_per_split_bytes = _ws_ml_per_split_elems * fx.Index(4)
+            _ws_grid_z = fx.Index(gpu.grid_dim.z)
+            _ws_mrow_abs_bytes = _ws_grid_z * _ws_opart_per_split_bytes
+            _ws_lrow_abs_bytes = _ws_mrow_abs_bytes + _ws_grid_z * _ws_ml_per_split_bytes
+
+        lane_in_warp = tid % traits.WARP_SIZE
+        n_in_warp = lane_in_warp // traits.VEC_KV
+        d_bucket = lane_in_warp % traits.VEC_KV
 
         # Empty split-K and OOB varlen q-blocks share one guard; traits.VARLEN and SPLITK are exclusive.
         @flyc.jit
@@ -376,6 +533,8 @@ def build_flash_attn_dualwave_swp_module(
 
         def _scale_q_all(q_all_bf16):
             fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
+            v64bf16_type = Vec.make_type(traits.K_STEPS_QK * traits.MFMA_LANE_K, elem_dtype)
+            v64f32_type = Vec.make_type(traits.K_STEPS_QK * traits.MFMA_LANE_K, fx.Float32)
             q_all_f32_op = llvm.FPExtOp(v64f32_type, as_mlir_value(q_all_bf16))
             q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
             q_all_f32 = q_all_f32_op.result
@@ -536,30 +695,6 @@ def build_flash_attn_dualwave_swp_module(
                 s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
             return s_lo, s_hi
 
-        if const_expr(traits.VARLEN):
-            # Read cu_seqlens through the element-indexed Layout API and 32-bit copy atom.
-            _cuq_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqQ), fx.make_layout(1, 1))
-            _cuk_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqKv), fx.make_layout(1, 1))
-            _cu_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
-            _cu_v1i32 = Vec.make_type(1, fx.Int32)
-
-            q_tok_base = _cu_load(_cuq_div, batch_idx, _cu_atom, _cu_v1i32)
-            q_tok_end = _cu_load(_cuq_div, batch_idx + fx.Index(1), _cu_atom, _cu_v1i32)
-            kv_tok_base = _cu_load(_cuk_div, batch_idx, _cu_atom, _cu_v1i32)
-            kv_tok_end = _cu_load(_cuk_div, batch_idx + fx.Index(1), _cu_atom, _cu_v1i32)
-            seqlen_q_v = q_tok_end - q_tok_base
-            seqlen_kv_v = kv_tok_end - kv_tok_base
-            seqlen_kv_i32 = fx.Int32(seqlen_kv_v)
-        else:
-            # Dense Q and K/V use independent seqlen_q (= seq_len) and seqlen_kv (= seq_len_kv).
-            q_tok_base = batch_idx * seq_len_v
-            kv_tok_base = batch_idx * seq_len_kv_v
-            q_tok_end = (batch_idx + fx.Index(1)) * seq_len_v
-            kv_tok_end = (batch_idx + fx.Index(1)) * seq_len_kv_v
-            seqlen_q_v = seq_len_v
-            seqlen_kv_v = seq_len_kv_v
-            seqlen_kv_i32 = seq_len_kv
-
         def _k_dma_base(buf_id, d):
             return dwc._k_dma_m0_base(
                 buf_id,
@@ -582,141 +717,6 @@ def build_flash_attn_dualwave_swp_module(
 
         def _dma_m0_table(base_fn, count):
             return tuple(tuple(base_fn(buf, d) for d in range(count)) for buf in range(2))
-
-        # Bottom-right causal offset: row r keeps keys [0, r + delta], where delta is KV-Q length.
-        delta_i32 = fx.Int32(seqlen_kv_i32 - fx.Int32(seqlen_q_v))
-
-        # Fold batch token bases into descriptors so per-batch indices stay 0-based and 32-bit.
-        q_gmem_elem_offset = q_start * stride_q_n_v + q_head_idx * traits.HEAD_DIM
-        kv_gmem_elem_offset = kv_head_idx * traits.HEAD_DIM
-
-        # Paged KV reads tile j from BlockTable; within-page stride matches dense K/V.
-        if const_expr(traits.PAGED):
-            block_table_stride_v = fx.Index(block_table_stride)
-            _bt_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(BlockTable), fx.make_layout(1, 1))
-            _bt_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
-            _bt_v1i32 = Vec.make_type(1, fx.Int32)
-            kv_head_elem_offset = kv_head_idx * traits.HEAD_DIM
-        else:
-            block_table_stride_v = None
-            _bt_div = None
-            _bt_atom = None
-            _bt_v1i32 = None
-            kv_head_elem_offset = None
-        NUM_DMA_K = traits.SMEM_D_RPT
-        NUM_DMA_V = traits.SMEM_D_RPT
-
-        # Per-batch/page descriptors fold large offsets into the 48-bit base.
-        _buf_flags_i32 = fx.Int32(buffer_ops._get_buffer_flags())
-        _elem_ir = elem_dtype.ir_type
-        # Q/O use per-batch descriptors with q_tok_base folded into the base.
-        _qo_per_batch_elems = seqlen_q_v * stride_q_n_v
-        _qo_nrec_bytes = _qo_per_batch_elems * fx.Index(traits.BF16_BYTES)
-        _qo_layout = fx.make_layout(fx.Int32(_qo_per_batch_elems), fx.Int32(1))
-        _q_batch_byte_off = q_tok_base * stride_q_n_v * fx.Index(traits.BF16_BYTES)
-        q_div = dwc._make_rebased_view(
-            fx.get_iter(Q),
-            _q_batch_byte_off,
-            _qo_nrec_bytes,
-            _qo_layout,
-            _buf_flags_i32=_buf_flags_i32,
-            _elem_ir=_elem_ir,
-        )
-        o_div = dwc._make_rebased_view(
-            fx.get_iter(O),
-            _q_batch_byte_off,
-            _qo_nrec_bytes,
-            _qo_layout,
-            _buf_flags_i32=_buf_flags_i32,
-            _elem_ir=_elem_ir,
-        )
-
-        if const_expr(traits.PAGED):
-            # K/V page-cache descriptors fold page offsets into the 48-bit base for >4 GiB caches.
-            k_div = None
-            v_div = None
-            _k_iter = fx.get_iter(K)
-            _k_align = _k_iter.alignment
-            _k_iter_ty = _k_iter.type
-            _v_iter = fx.get_iter(V)
-            _v_align = _v_iter.alignment
-            _v_iter_ty = _v_iter.type
-            _page_elems = fx.Index(traits.BLOCK_N) * stride_kv_n_v
-            _page_byte_stride = _page_elems * fx.Index(traits.BF16_BYTES)
-            _page_nrec_bytes = fx.Int64(_page_byte_stride)
-            _page_layout = fx.make_layout(fx.Int32(_page_elems), fx.Int32(1))
-
-            if const_expr(traits.KV_VECTORIZED):
-                # Vectorized V is global-transposed; gather (n,d) and rebuild linear-V LDS bytes.
-                _v_base_i64 = fx.Int64(fx.ptrtoint(_v_iter))
-
-        else:
-            # K/V use per-batch descriptors with kv_tok_base folded into the base.
-            _kv_per_batch_elems = seqlen_kv_v * stride_kv_n_v
-            _kv_nrec_bytes = _kv_per_batch_elems * fx.Index(traits.BF16_BYTES)
-            _kv_layout = fx.make_layout(fx.Int32(_kv_per_batch_elems), fx.Int32(1))
-            _kv_batch_byte_off = kv_tok_base * stride_kv_n_v * fx.Index(traits.BF16_BYTES)
-            k_div = dwc._make_rebased_view(
-                fx.get_iter(K),
-                _kv_batch_byte_off,
-                _kv_nrec_bytes,
-                _kv_layout,
-                _buf_flags_i32=_buf_flags_i32,
-                _elem_ir=_elem_ir,
-            )
-            v_div = dwc._make_rebased_view(
-                fx.get_iter(V),
-                _kv_batch_byte_off,
-                _kv_nrec_bytes,
-                _kv_layout,
-                _buf_flags_i32=_buf_flags_i32,
-                _elem_ir=_elem_ir,
-            )
-            _k_iter = None
-            _k_align = None
-            _k_iter_ty = None
-            _v_iter = None
-            _v_align = None
-            _v_iter_ty = None
-            _page_byte_stride = None
-            _page_nrec_bytes = None
-            _page_layout = None
-        _load_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
-        _store_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
-        _dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
-        _o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
-        _lds_ptr_ty = fx.PointerType.get(elem_dtype.ir_type, 2, traits.DMA_BYTES)
-        if const_expr(traits.SPLITK):
-            # Split-K workspace via DebugCounts stores O_partial, Mrow, then Lrow.
-            _ws_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(DebugCounts)))
-            _ws_opart_per_split_elems = fx.Index(traits.NUM_HEADS_Q) * seq_len_v * fx.Index(traits.HEAD_DIM // 2)
-            _ws_ml_per_split_elems = fx.Index(traits.NUM_HEADS_Q) * seq_len_v
-            _ws_opart_per_split_bytes = _ws_opart_per_split_elems * fx.Index(4)
-            _ws_ml_per_split_bytes = _ws_ml_per_split_elems * fx.Index(4)
-            _ws_grid_z = fx.Index(gpu.grid_dim.z)
-            _ws_mrow_abs_bytes = _ws_grid_z * _ws_opart_per_split_bytes
-            _ws_lrow_abs_bytes = _ws_mrow_abs_bytes + _ws_grid_z * _ws_ml_per_split_bytes
-
-        lane_in_warp = tid % traits.WARP_SIZE
-        n_in_warp = lane_in_warp // traits.VEC_KV
-        d_bucket = lane_in_warp % traits.VEC_KV
-
-        c_neg_inf = fx.Float32(float("-inf"))
-        c_neg_floor = fx.Float32(-3.0e38)
-        c_zero_f = fx.Float32(0.0)
-        c_zero_i = fx.Int32(0)
-        head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
-        c_log2e_f = fx.Float32(_LOG2E)
-        c_sm_scale_log2e = fx.Float32(
-            arith.mulf(
-                as_mlir_value(fmath.rsqrt(head_dim_f32, fastmath=fm_fast)),
-                as_mlir_value(c_log2e_f),
-                fastmath=fm_fast,
-            )
-        )
-        c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
-        v64bf16_type = Vec.make_type(traits.K_STEPS_QK * traits.MFMA_LANE_K, elem_dtype)
-        v64f32_type = Vec.make_type(traits.K_STEPS_QK * traits.MFMA_LANE_K, fx.Float32)
 
         kv_tile_size = traits.BLOCK_N
         num_kv_tiles = (seqlen_kv_v + kv_tile_size - 1) // kv_tile_size
