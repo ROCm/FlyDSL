@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-15T21:46:51Z",
+ "updated": "2026-07-15T23:13:26Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29457354426,
+   "pr": 855,
+   "commit": "097c333bc816f356f2c027e376620c7e0ee37607",
+   "branch": "perf/rmsnorm-bwd-two-stage",
+   "event": "pull_request",
+   "title": "[Perf] Optimize RMSNorm backward with staged reduction and vec8 I/O",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29457354426",
+   "created_at": "2026-07-15T23:02:51Z",
+   "updated_at": "2026-07-15T23:10:36Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 29453553110,
+   "pr": null,
+   "commit": "1f2e953cd9f369ac6d1660f3038e45234d502761",
+   "branch": "perf/rmsnorm-bwd-two-stage",
+   "event": "pull_request",
+   "title": "[Perf] Optimize RMSNorm backward with staged reduction and vec8 I/O",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29453553110",
+   "created_at": "2026-07-15T21:54:05Z",
+   "updated_at": "2026-07-15T23:09:22Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-15T21:57:10Z",
+     "completed_at": "2026-07-15T23:09:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29453553110/job/87481838703"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-15T21:57:04Z",
+     "completed_at": "2026-07-15T23:09:21Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29453553110/job/87481838758"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-15T21:56:53Z",
+     "completed_at": "2026-07-15T22:11:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29453553110/job/87481838762"
+    }
+   ]
+  },
   {
    "run_id": 29444443854,
    "pr": 785,
@@ -10,19 +68,19 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29444443854",
    "created_at": "2026-07-15T19:25:30Z",
-   "updated_at": "2026-07-15T21:44:52Z",
+   "updated_at": "2026-07-15T21:46:07Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-15T21:44:53Z",
+     "started_at": "2026-07-15T21:46:06Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29444443854/job/87479795119"
     },
@@ -791,11 +849,11 @@
   },
   {
    "run_id": 29380026024,
-   "pr": 855,
+   "pr": null,
    "commit": "6463241b56a995929e01d117d11bb28eb476d817",
    "branch": "perf/rmsnorm-bwd-two-stage",
    "event": "pull_request",
-   "title": "[Perf] Add staged dweight reduction for RMSNorm backward",
+   "title": "[Perf] Optimize RMSNorm backward with staged reduction and vec8 I/O",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024",
@@ -2082,92 +2140,6 @@
      "started_at": "2026-07-14T01:19:45Z",
      "completed_at": "2026-07-14T02:50:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298166593/job/86976295156"
-    }
-   ]
-  },
-  {
-   "run_id": 29295282652,
-   "pr": null,
-   "commit": "5dd9528b20de0e45caaa9ad08cae96656c06f175",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652",
-   "created_at": "2026-07-14T00:12:19Z",
-   "updated_at": "2026-07-14T01:28:00Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-14T00:19:07Z",
-     "completed_at": "2026-07-14T01:27:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652/job/86968012504"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T00:18:57Z",
-     "completed_at": "2026-07-14T00:31:55Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652/job/86968012507"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-14T00:19:07Z",
-     "completed_at": "2026-07-14T01:27:35Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29295282652/job/86968012521"
-    }
-   ]
-  },
-  {
-   "run_id": 29294567536,
-   "pr": 842,
-   "commit": "da380bab997fc62af63bebfb35b531d0a794ff7d",
-   "branch": "fix/bench-skip-not-fail",
-   "event": "pull_request",
-   "title": "[CI] run_benchmark: treat runtime pytest.skip as skipped, not failed",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536",
-   "created_at": "2026-07-13T23:57:45Z",
-   "updated_at": "2026-07-14T02:33:11Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-13T23:59:58Z",
-     "completed_at": "2026-07-14T00:11:05Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536/job/86965315748"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T00:00:10Z",
-     "completed_at": "2026-07-14T02:33:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536/job/86965315750"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T00:00:13Z",
-     "completed_at": "2026-07-14T02:22:28Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29294567536/job/86965315771"
     }
    ]
   }
