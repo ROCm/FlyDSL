@@ -1253,6 +1253,7 @@ def _run_pa_decode_tile_case(
     block_size: int,
     head_dim: int = 128,
     query_dtype: torch.dtype = torch.float16,
+    per_token_kv: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     from kernels.attention.pa_decode_tile import pa_decode_tile
 
@@ -1270,17 +1271,29 @@ def _run_pa_decode_tile_case(
     num_tiles = (context_len + tile_tok - 1) // tile_tok
     max_blocks = num_tiles * tile_tok // block_size
     num_blocks = num_seqs * max_blocks
-    k_scale = v_scale = 0.04
+    if per_token_kv:
+        # One dequant scale per (physical block, kv head, token-in-block),
+        # matching pa_decode_ps_kernel's own per_token_kv tensor layout.
+        # Random positive values in a similar range to the per-tensor 0.04
+        # default, so the fp8 quantization noise floor stays comparable.
+        k_scale = (torch.rand(num_blocks, num_kv_heads, block_size, device=dev) * 0.03 + 0.02).contiguous()
+        v_scale = (torch.rand(num_blocks, num_kv_heads, block_size, device=dev) * 0.03 + 0.02).contiguous()
+        k_scale_bcast = k_scale.unsqueeze(-1)  # broadcast over head_dim, K's own trailing axis
+        v_scale_bcast = v_scale[:, :, None, :]  # broadcast over head_dim, V's own axis-2 (before block_size)
+    else:
+        k_scale = v_scale = 0.04
+        k_scale_bcast = k_scale
+        v_scale_bcast = v_scale
 
     query = (torch.randn(num_seqs, num_q_heads, head_dim, device=dev, dtype=query_dtype) * 0.3).contiguous()
     k_f = torch.randn(num_blocks, num_kv_heads, block_size, head_dim, device=dev) * 0.3
     v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
     # fp8-quantize K/V (aiter's `dtypes.fp8`, the arch-native e4m3 format --
     # FNUZ on gfx942, OCP e4m3fn on gfx950; the kernel multiplies by the
-    # per-tensor scale to dequantize).
+    # (per-tensor or per-token) scale to dequantize).
     fp8_max = torch.finfo(dtypes.fp8).max
-    key_cache_plain = (k_f / k_scale).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
-    value_cache_plain = (v_f / v_scale).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
+    key_cache_plain = (k_f / k_scale_bcast).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
+    value_cache_plain = (v_f / v_scale_bcast).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
     # kernel expects K/V in the SAME BLOCKED layouts pa_decode_ps_kernel uses
     # (see kernels/pa_decode_tile.py module docstring); relayout once here,
     # same as production relayouts K/V at quantization time (not per decode
@@ -1319,8 +1332,8 @@ def _run_pa_decode_tile_case(
     )
     torch.cuda.synchronize()
 
-    kc = key_cache_plain.to(torch.float32) * k_scale
-    vc = value_cache_plain.to(torch.float32) * v_scale
+    kc = key_cache_plain.to(torch.float32) * k_scale_bcast
+    vc = value_cache_plain.to(torch.float32) * v_scale_bcast
     refs = []
     for s in range(num_seqs):
         keys = torch.empty(context_len, num_kv_heads, head_dim, device=dev)
@@ -1370,6 +1383,23 @@ def test_pa_decode_tile_reference_bf16_query(context_len: int, block_size: int) 
         query_dtype=torch.bfloat16,
     )
     torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (bf16 query) mismatch")
+
+
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("num_kv_heads,group_size", [(1, 8), (1, 16), (2, 8)])
+@pytest.mark.parametrize("context_len", [1027, 256, 17])
+def test_pa_decode_tile_reference_per_token_kv(
+    num_kv_heads: int, group_size: int, context_len: int, block_size: int
+) -> None:
+    # Exercises the per_token_kv path: key_scale/value_scale become
+    # [num_blocks, num_kv_heads, block_size] tensors (one dequant scale per
+    # physical KV token) instead of a single per-tensor scalar -- see
+    # compile_pa_decode_tile's own docstring for how K/V-scale application
+    # differs from the per-tensor case.
+    output, ref = _run_pa_decode_tile_case(
+        num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size, per_token_kv=True
+    )
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (per_token_kv) mismatch")
 
 
 if __name__ == "__main__":
