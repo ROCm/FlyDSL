@@ -204,13 +204,25 @@ def compile_pa_decode_tile(
     # page depends on `rgroup`, which is shared across warps -- see `_v_page`).
     sVPage_off = sLsum_off + MFMA_MNK * NWARP_PAD * f32
     sVPage_bytes = NWARP * PAGES_PER_CHUNK * 4  # i32
+    total_bytes = sVPage_off + sVPage_bytes
     # Per-token K/V dequant scale staging (per_token_kv only): NWARP*
     # TOK_PER_WARP floats each for K and V, laid out by (warp,
     # token-in-warp) -- the same addressing K/V data itself uses -- then
     # re-read as 4-wide per-(a, l16g) vectors matching the QK/P token
     # layout (_ct's own contiguous-per-warp formula). K/V share one
     # physical-page lookup (same token, different scale tensor).
-    sKScale_off = sVPage_off + sVPage_bytes
+    #
+    # Aliased INTO sO's byte range instead of appended after sVPage: sO
+    # (the running-output accumulator staging buffer) is only written/read
+    # in the post-loop epilogue (see its own comment above), while the
+    # scale buffers are only touched INSIDE the tile loop (prefetched one
+    # tile ahead, consumed the same iteration) -- their live ranges never
+    # overlap, so they can share bytes at zero extra LDS cost instead of
+    # growing `total_bytes`. This matters for occupancy: at head_dim=128
+    # the extra 2080 bytes this used to cost pushed LDS from 15872 to
+    # 17920 bytes/CTA, dropping 4 waves/SIMD to 3 (65536//16384 vs
+    # //17920); sO_bytes (>=4096, since HEAD>=64) always has room to spare.
+    sKScale_off = sO_off
     sVScale_off = sKScale_off + NWARP * TOK_PER_WARP * f32
     sKVScale_bytes = 2 * NWARP * TOK_PER_WARP * f32 if per_token_kv else 0
     # Cross-warp v_scale-max reduction scratch (per_token_kv only): one
@@ -218,7 +230,10 @@ def compile_pa_decode_tile(
     # _st_lw/_ld_lw_row's existing NWARP_PAD padding/bank-conflict fix.
     sVScaleMax_off = sKScale_off + sKVScale_bytes
     sVScaleMax_bytes = NWARP_PAD * f32 if per_token_kv else 0
-    total_bytes = sVScaleMax_off + sVScaleMax_bytes
+    assert sVScaleMax_off + sVScaleMax_bytes <= sO_off + sO_bytes, (
+        "per-token K/V scale staging (aliased into sO's LDS range) overflows sO_bytes -- "
+        f"needs {sVScaleMax_off + sVScaleMax_bytes - sO_off} bytes, sO only has {sO_bytes}"
+    )
 
     @flyc.kernel(known_block_size=(BLOCK_THREADS, 1, 1))
     def pa_decode_tile_kernel(
@@ -404,22 +419,57 @@ def compile_pa_decode_tile(
             # formula) instead of re-fetched here, to avoid a duplicate
             # block-table scalar load -- this was the ATT-profiled #1
             # hotspot region.
-            loaded = [_kv_scale_ops(fx.Int32(phys_vec[(a * c16) // block_size]), a) for a in range_constexpr(NCHUNK)]
-            for a in range_constexpr(NCHUNK):
-                k_scale_scalar, v_scale_scalar = loaded[a]
-                slot = (warp * TOK_PER_WARP + a * c16 + lane16) * f32
-                _view(sKScale_off + slot, fx.Float32, fx.make_layout(1, 1)).store(
-                    fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32)
-                )
-                _view(sVScale_off + slot, fx.Float32, fx.make_layout(1, 1)).store(
-                    fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32)
-                )
+            if const_expr(block_size == 64):
+                # At block_size==64, PAGES_PER_CHUNK==1: all NCHUNK chunks
+                # share ONE physical page, so its scale row is one
+                # contiguous NCHUNK*4-byte run in memory. Unlike `_k_ops`'s
+                # own per-(a,lane16) ownership (needed there because K's DATA
+                # load must match the MFMA A-operand's lane mapping), this
+                # scale LDS round-trip only needs the (warp, token) LDS slot
+                # to end up correct -- WHICH lane loads WHICH token is free
+                # to choose. So each lane instead owns one CONTIGUOUS
+                # NCHUNK-token window (lane16*NCHUNK : +NCHUNK), turning
+                # NCHUNK separate scalar loads (+ NCHUNK stores) into one
+                # dwordx4 vector load (+ one vector store), per tensor --
+                # 8 VMEM instructions collapse to 2 (the ATT-profiled #1
+                # hotspot).
+                phys = fx.Int32(phys_vec[0])
+                base_tok = lane16 * NCHUNK
+                scale_idx = phys * stride_ks_block + kv_h * stride_ks_head + base_tok
+                k_scale_vec = fx.Vector(buffer_ops.buffer_load(ks_rsrc, scale_idx, vec_width=NCHUNK, dtype=fx.Float32))
+                v_scale_vec = fx.Vector(buffer_ops.buffer_load(vs_rsrc, scale_idx, vec_width=NCHUNK, dtype=fx.Float32))
+                slot = (warp * TOK_PER_WARP + base_tok) * f32
+                _view(sKScale_off + slot, fx.Float32, fx.make_layout(NCHUNK, 1)).store(k_scale_vec)
+                _view(sVScale_off + slot, fx.Float32, fx.make_layout(NCHUNK, 1)).store(v_scale_vec)
+            else:
+                loaded = [
+                    _kv_scale_ops(fx.Int32(phys_vec[(a * c16) // block_size]), a) for a in range_constexpr(NCHUNK)
+                ]
+                for a in range_constexpr(NCHUNK):
+                    k_scale_scalar, v_scale_scalar = loaded[a]
+                    slot = (warp * TOK_PER_WARP + a * c16 + lane16) * f32
+                    _view(sKScale_off + slot, fx.Float32, fx.make_layout(1, 1)).store(
+                        fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32)
+                    )
+                    _view(sVScale_off + slot, fx.Float32, fx.make_layout(1, 1)).store(
+                        fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32)
+                    )
 
         def _load_kv_scale_vecs(a):
             slot = (warp * TOK_CHUNK + a * c16 + rgroup * 4) * f32
             k_scale_vec = _view(sKScale_off + slot, fx.Float32, fx.make_layout(4, 1)).load()
             v_scale_vec = _view(sVScale_off + slot, fx.Float32, fx.make_layout(4, 1)).load()
             return k_scale_vec, v_scale_vec
+
+        def _load_v_scale_vec(a):
+            # V-only re-read of `_load_kv_scale_vecs`'s own LDS slot, used by
+            # the P-pack loop far below instead of holding NCHUNK 4-wide
+            # `v_scale_vecs` live across the whole intervening pass-1
+            # barrier/V-page-read/v_max_scaled section -- trades one cheap
+            # LDS read per chunk for a much shorter register live range
+            # (was costing 16 VGPR held idle across that whole span).
+            slot = (warp * TOK_CHUNK + a * c16 + rgroup * 4) * f32
+            return _view(sVScale_off + slot, fx.Float32, fx.make_layout(4, 1)).load()
 
         # ── raw dwordx4 K load (A operand) ──
         # Contiguous-per-warp token assignment: token = warp*TOK_CHUNK +
@@ -805,12 +855,21 @@ def compile_pa_decode_tile(
                 # tile-wide max maps to ~FP8_MAX) into P before quantizing,
                 # since V-scale can't be factored out of the PV sum after
                 # MFMA the way a single per-tensor scale can (see
-                # v_max_scaled's own comment above).
-                p_scaled = (
-                    Pa * v_scale_vecs[a] * norm_factor_b
-                    if const_expr(per_token_kv)
-                    else Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
-                )
+                # v_max_scaled's own comment above). At HEAD==64 (VGPR-bound,
+                # 96->112 combined VGPR dropped occupancy 5->4 waves/SIMD),
+                # re-read fresh from LDS (`_load_v_scale_vec`) instead of
+                # keeping the early `v_scale_vecs[a]` values live in
+                # registers across the barrier/v_max_scaled section above --
+                # measured occupancy back to 5 waves/SIMD, ~1% faster. At
+                # HEAD==128 the kernel is already LDS-bound (unaffected by
+                # this VGPR trade), so the extra LDS reads there are pure
+                # added cost -- keep the cached values instead (measured
+                # slower with the reload at that shape).
+                if const_expr(per_token_kv):
+                    v_scale_this = _load_v_scale_vec(a) if const_expr(HEAD == 64) else v_scale_vecs[a]
+                    p_scaled = Pa * v_scale_this * norm_factor_b
+                else:
+                    p_scaled = Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
                 words.append(_f32_to_fp8_words(p_scaled)[0])
             # One strided vector store instead of NCHUNK separate 4-byte
             # stores -- the backend packs it into 2 ds_write2_b32 instructions
