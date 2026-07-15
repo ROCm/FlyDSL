@@ -1,5 +1,7 @@
 # FlyDSL (<span style="color:#2f81f7"><strong>F</strong></span>lexible <span style="color:#2f81f7"><strong>l</strong></span>ayout p<span style="color:#2f81f7"><strong>y</strong></span>thon DSL)
 
+<!-- CI skip verification: yaml + docs only change should skip the GPU test jobs. -->
+
 <div align="center" id="badges">
 
 [![CI](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml/badge.svg)](https://github.com/ROCm/FlyDSL/actions/workflows/ci.yaml)
