@@ -104,15 +104,41 @@ def test_config_no_compiler_opts_when_unset():
     assert c.all_kwargs() == {"BLOCK": 64}
 
 
-@pytest.mark.parametrize("value", [True, -1, "2", {"kernel": 2}])
-def test_config_rejects_invalid_waves_per_eu(value):
-    error = ValueError if value == -1 else TypeError
+def test_config_preserves_per_kernel_occupancy_interface():
+    config = Config(
+        BLOCK=128,
+        waves_per_eu={"kernel_b": 4, "kernel_a": 2},
+        maxnreg={"kernel_a": 128},
+    )
+
+    assert config.compiler_opts() == {
+        "waves_per_eu": {"kernel_b": 4, "kernel_a": 2},
+        "maxnreg": {"kernel_a": 128},
+    }
+    assert Config.from_dict(config.to_dict()).compiler_opts() == config.compiler_opts()
+    assert json.loads(json.dumps(config.to_dict())) == config.to_dict()
+    assert repr(Config(waves_per_eu={"b": 1, "a": 2})) == repr(Config(waves_per_eu={"a": 2, "b": 1}))
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (True, TypeError),
+        (-1, ValueError),
+        ("2", TypeError),
+        ({2: 2}, TypeError),
+        ({"kernel": True}, TypeError),
+        ({"kernel": -1}, ValueError),
+    ],
+)
+def test_config_rejects_invalid_waves_per_eu(value, error):
     with pytest.raises(error, match="waves_per_eu"):
         Config(waves_per_eu=value)
 
 
-def test_config_preserves_zero_waves_per_eu():
-    assert Config(waves_per_eu=0).compiler_opts() == {"waves_per_eu": 0}
+def test_config_zero_waves_per_eu_is_unset():
+    assert Config(waves_per_eu=0).compiler_opts() == {}
+    assert Config(waves_per_eu={"a": 0, "b": 2}).compiler_opts() == {"waves_per_eu": {"b": 2}}
 
 
 # ── stride normalization ─────────────────────────────────────────────────
@@ -886,8 +912,12 @@ def test_rmsnorm_configs_route_wpe_as_compile_option():
     blocks = sorted({c.kwargs["BLOCK_THREADS"] for c in cfgs})
     assert blocks == sorted(_BLOCK_THREADS_CHOICES)  # every block present (no tile filter for f32)
     assert all("WAVES_PER_EU" not in c.kwargs for c in cfgs)
-    assert {c.compiler_opts()["waves_per_eu"] for c in cfgs} == {0, 1, 2}
-    assert {(c.kwargs["BLOCK_THREADS"], c.compiler_opts()["waves_per_eu"]) for c in cfgs} == {
+
+    def effective_wpe(config):
+        return config.compiler_opts().get("waves_per_eu", 0)
+
+    assert {effective_wpe(c) for c in cfgs} == {0, 1, 2}
+    assert {(c.kwargs["BLOCK_THREADS"], effective_wpe(c)) for c in cfgs} == {
         (128, 0),
         (128, 1),
         (128, 2),

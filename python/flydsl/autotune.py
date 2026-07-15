@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -118,23 +119,47 @@ def _normalize_strides(t) -> tuple:
     return tuple(out)
 
 
+def _normalize_occupancy(value, knob: str):
+    """Normalize a scalar or per-kernel occupancy compile option.
+
+    ``0`` means unset, matching Triton's backend option and preserving any
+    source-level kernel attribute. A mapping scopes non-zero overrides by
+    ``gpu.func`` symbol for multi-entry FlyDSL modules.
+    """
+
+    def normalize_scalar(item):
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise TypeError(f"{knob} must contain non-negative ints, got {item!r}")
+        if item < 0:
+            raise ValueError(f"{knob} must be >= 0, got {item}")
+        return item or None
+
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        normalized = {}
+        for kernel_name, item in value.items():
+            if not isinstance(kernel_name, str):
+                raise TypeError(f"{knob} mapping keys must be kernel names, got {kernel_name!r}")
+            item = normalize_scalar(item)
+            if item is not None:
+                normalized[kernel_name] = item
+        return normalized or None
+    return normalize_scalar(value)
+
+
 class Config:
     """A single tuning configuration.
 
-    ``waves_per_eu`` is a non-negative scalar backend option; ``0`` requests
-    the compiler default and ``None`` leaves any source-level setting untouched.
+    Occupancy options accept a scalar uniform override or a ``{kernel: value}``
+    mapping. ``None``/``0`` preserve source-level kernel attributes.
     """
 
     def __init__(self, *, num_warps=None, waves_per_eu=None, maxnreg=None, pre_hook=None, **kwargs):
-        if waves_per_eu is not None:
-            if isinstance(waves_per_eu, bool) or not isinstance(waves_per_eu, int):
-                raise TypeError(f"waves_per_eu must be a non-negative int or None, got {waves_per_eu!r}")
-            if waves_per_eu < 0:
-                raise ValueError(f"waves_per_eu must be >= 0, got {waves_per_eu}")
         self.kwargs = kwargs
         self.num_warps = num_warps
-        self.waves_per_eu = waves_per_eu
-        self.maxnreg = maxnreg
+        self.waves_per_eu = _normalize_occupancy(waves_per_eu, "waves_per_eu")
+        self.maxnreg = _normalize_occupancy(maxnreg, "maxnreg")
         self.pre_hook = pre_hook
 
     def all_kwargs(self):
@@ -156,13 +181,18 @@ class Config:
         }
 
     def __repr__(self):
+        def format_option(value):
+            if isinstance(value, Mapping):
+                return "{" + ", ".join(f"{key!r}: {value[key]}" for key in sorted(value)) + "}"
+            return str(value)
+
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
         if self.num_warps is not None:
             parts.append(f"num_warps={self.num_warps}")
         if self.waves_per_eu is not None:
-            parts.append(f"waves_per_eu={self.waves_per_eu}")
+            parts.append(f"waves_per_eu={format_option(self.waves_per_eu)}")
         if self.maxnreg is not None:
-            parts.append(f"maxnreg={self.maxnreg}")
+            parts.append(f"maxnreg={format_option(self.maxnreg)}")
         return f"Config({', '.join(parts)})"
 
     def to_dict(self):

@@ -69,9 +69,10 @@ def test_rocm_external_pipeline_split_matches_full_pipeline():
     assert pre_binary[-1] == "reconcile-unrealized-casts"
     assert any(fragment.startswith("gpu.module(") for fragment in pre_binary)
     assert binary.startswith("gpu-module-to-binary")
-    # WPE is materialized on entry functions before lowering. Keep the legacy
-    # maxnreg forwarding unchanged in this PR.
-    assert "--amdgpu-waves-per-eu" not in binary
+    # Preserve the low-level compiler-option compatibility route. Function attrs
+    # remain the effective semantic owner until the AMDGPU serializer consumes
+    # these options directly.
+    assert "--amdgpu-waves-per-eu=2" in binary
     assert "--amdgpu-num-vgpr=128" in binary
 
 
@@ -106,7 +107,7 @@ def test_rocm_lower_compile_hints_sets_exact_wpe_on_kernel_entries_only():
     assert "amdgpu-waves-per-eu" not in funcs["helper"]
 
 
-def test_rocm_lower_compile_hints_distinguishes_none_from_zero():
+def test_rocm_lower_compile_hints_preserves_source_for_none_and_zero():
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
     src = "module { gpu.module @m { gpu.func @k() kernel attributes {rocdl.waves_per_eu = 3 : i32} { gpu.return } } }"
 
@@ -116,15 +117,13 @@ def test_rocm_lower_compile_hints_distinguishes_none_from_zero():
         backend.lower_compile_hints(untouched, compile_hints={})
         assert "rocdl.waves_per_eu = 3" in str(untouched)
 
-        reset = ir.Module.parse(src)
-        backend.lower_compile_hints(reset, compile_hints={"waves_per_eu": 0})
-        text = str(reset)
-        assert "rocdl.waves_per_eu" not in text
-        assert '"amdgpu-waves-per-eu", "0,0"' in text
+        zero = ir.Module.parse(src)
+        backend.lower_compile_hints(zero, compile_hints={"waves_per_eu": 0})
+        assert "rocdl.waves_per_eu = 3" in str(zero)
 
 
-@pytest.mark.parametrize("value", [True, -1, {"k": 2}])
-def test_rocm_lower_compile_hints_rejects_non_scalar_wpe(value):
+@pytest.mark.parametrize("value", [True, -1, {2: 2}, {"k": True}, {"k": -1}])
+def test_rocm_lower_compile_hints_rejects_invalid_wpe(value):
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
     with ir.Context() as ctx, ir.Location.unknown(ctx):
         ctx.load_all_available_dialects()
@@ -133,12 +132,48 @@ def test_rocm_lower_compile_hints_rejects_non_scalar_wpe(value):
             backend.lower_compile_hints(module, compile_hints={"waves_per_eu": value})
 
 
+def test_rocm_lower_compile_hints_supports_per_kernel_override():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    src = r"""module {
+      gpu.module @m {
+        gpu.func @a() kernel attributes {rocdl.waves_per_eu = 1 : i32} { gpu.return }
+        gpu.func @b() kernel attributes {rocdl.waves_per_eu = 3 : i32} { gpu.return }
+        gpu.func @c() kernel attributes {rocdl.waves_per_eu = 4 : i32} { gpu.return }
+      }
+    }"""
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = ir.Module.parse(src)
+        backend.lower_compile_hints(
+            module,
+            compile_hints={
+                "waves_per_eu": {"a": 2, "b": 0},
+                "maxnreg": {"b": 64},
+            },
+        )
+        funcs = {
+            ir.StringAttr(op.attributes["sym_name"]).value: str(op)
+            for op in module.body.operations[0].regions[0].blocks[0].operations
+            if op.operation.name == "gpu.func"
+        }
+
+    assert '"amdgpu-waves-per-eu", "2,2"' in funcs["a"]
+    assert "rocdl.waves_per_eu" not in funcs["a"]
+    # Zero/unset and absent map entries preserve their per-kernel source intent.
+    assert "rocdl.waves_per_eu = 3" in funcs["b"]
+    assert '"amdgpu-num-vgpr", "64"' in funcs["b"]
+    assert "rocdl.waves_per_eu = 4" in funcs["c"]
+
+
 def test_rocm_wpe_reaches_native_llvm_as_exact_constraint():
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
     with _create_mlir_context() as ctx:
         module = ir.Module.parse(
             """module attributes {gpu.container_module} {
-              gpu.module @m { gpu.func @k() kernel { gpu.return } }
+              gpu.module @m {
+                gpu.func @k() kernel attributes {rocdl.waves_per_eu = 1 : i32} { gpu.return }
+              }
             }""",
             context=ctx,
         )
@@ -148,6 +183,26 @@ def test_rocm_wpe_reaches_native_llvm_as_exact_constraint():
         llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
 
     assert '"amdgpu-waves-per-eu"="2,2"' in llvm_ir
+    assert '"amdgpu-waves-per-eu"="1"' not in llvm_ir
+
+
+def test_rocm_zero_wpe_preserves_source_constraint_through_llvm():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(
+            """module attributes {gpu.container_module} {
+              gpu.module @m {
+                gpu.func @k() kernel attributes {rocdl.waves_per_eu = 3 : i32} { gpu.return }
+              }
+            }""",
+            context=ctx,
+        )
+        backend.lower_compile_hints(module, compile_hints={"waves_per_eu": 0})
+        pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={"waves_per_eu": 0})
+        PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
+        llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
+
+    assert '"amdgpu-waves-per-eu"="3"' in llvm_ir
 
 
 def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):

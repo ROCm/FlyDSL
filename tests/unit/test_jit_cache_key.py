@@ -84,3 +84,44 @@ def test_thread_local_compile_options_enter_cache_key_before_build():
     hints = dict(next(value for name, value in wpe2 if name == "_hints_"))
     assert hints["fast_fp_math"] == (bool, "True")
     assert hints["waves_per_eu"] == (int, "2")  # thread-local candidate wins
+
+
+def test_mapping_compile_options_have_canonical_cache_keys():
+    @flyc.jit
+    def launch(stream: fx.Stream = fx.Stream(None)):
+        pass
+
+    with CompilationContext.compile_hints(
+        {"waves_per_eu": {"kernel_a": 2, "kernel_b": 4}, "llvm_options": {"x": 1, "y": 2}}
+    ):
+        ordered = _cache_key(launch)
+    with CompilationContext.compile_hints(
+        {"llvm_options": {"y": 2, "x": 1}, "waves_per_eu": {"kernel_b": 4, "kernel_a": 2}}
+    ):
+        reversed_order = _cache_key(launch)
+
+    assert ordered == reversed_order
+
+
+def test_compile_hint_snapshot_couples_cache_key_to_compilation_options():
+    @flyc.jit
+    def launch(stream: fx.Stream = fx.Stream(None)):
+        pass
+
+    launch.compile_hints = {"waves_per_eu": {"kernel": 1}}
+    snapshot = launch._effective_compile_hints()
+    launch.compile_hints["waves_per_eu"]["kernel"] = 2
+
+    launch._ensure_sig()
+    bound = launch._sig.bind()
+    bound.apply_defaults()
+    snapshot_key = launch._resolve_and_make_cache_key(bound.arguments, effective_hints=snapshot)
+
+    launch.compile_hints = {"waves_per_eu": {"kernel": 1}}
+    expected_key = _cache_key(launch)
+    launch.compile_hints = {"waves_per_eu": {"kernel": 2}}
+    mutated_key = _cache_key(launch)
+
+    assert snapshot == {"waves_per_eu": {"kernel": 1}}
+    assert snapshot_key == expected_key
+    assert snapshot_key != mutated_key

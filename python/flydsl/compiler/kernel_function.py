@@ -188,7 +188,11 @@ class CompilationContext:
     @classmethod
     @contextmanager
     def compile_hints(cls, hints: dict):
-        """Context manager for setting compiler hints (thread-safe).
+        """Set per-call compiler hints for the current thread.
+
+        These hints overlay persistent ``JitFunction.compile_hints``; duplicate
+        keys here win. Nested contexts replace one another, so callers that
+        need a partial overlay must merge with :meth:`get_compile_hints` first.
 
         Usage:
             with CompilationContext.compile_hints({"waves_per_eu": 2}):

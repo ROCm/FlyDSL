@@ -13,6 +13,7 @@ import threading
 import time
 import types
 from collections import namedtuple
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache, partial
@@ -783,6 +784,29 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
+def _stable_hint_key(value):
+    """Type-aware, insertion-order-independent compile-hint cache identity."""
+    if isinstance(value, Mapping):
+        items = sorted(value.items(), key=lambda item: (type(item[0]).__qualname__, repr(item[0])))
+        return (dict, tuple((_stable_hint_key(key), _stable_hint_key(item)) for key, item in items))
+    if isinstance(value, list):
+        return (list, tuple(_stable_hint_key(item) for item in value))
+    if isinstance(value, tuple):
+        return (tuple, tuple(_stable_hint_key(item) for item in value))
+    return (type(value), repr(value))
+
+
+def _snapshot_compile_hint(value):
+    """Detach supported container hints from caller-owned mutable objects."""
+    if isinstance(value, Mapping):
+        return {key: _snapshot_compile_hint(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_snapshot_compile_hint(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_snapshot_compile_hint(item) for item in value)
+    return value
+
+
 class MlirCompiler:
     @classmethod
     def compile(
@@ -1178,6 +1202,7 @@ class JitFunction:
         self._backend_target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
+        self._last_call_cache_key = threading.local()
         self._extern_linkage_keys = set()
 
         # owner_cls -> first-compile snapshot of the used globals; RAISE on any
@@ -1201,6 +1226,11 @@ class JitFunction:
         if obj is None:
             return self
         return partial(self.__call__, obj)
+
+    def _effective_compile_hints(self):
+        """Snapshot persistent defaults overlaid by this call's options."""
+        merged = {**self.compile_hints, **CompilationContext.get_compile_hints()}
+        return {key: _snapshot_compile_hint(value) for key, value in merged.items()}
 
     def _get_global_refs(self, owner_cls=None) -> List[Tuple[str, str, dict]]:
         """Memoized global-ref discovery (see :func:`_discover_global_refs`)."""
@@ -1279,7 +1309,7 @@ class JitFunction:
         self.cache_manager = JitCacheManager(cache_dir)
         self.cache_manager.load_all()
 
-    def _resolve_and_make_cache_key(self, bound_args):
+    def _resolve_and_make_cache_key(self, bound_args, *, effective_hints=None):
         """Resolve raw call values into JitArgument instances *in place* and
         build the tuple cache key from them.
 
@@ -1297,12 +1327,13 @@ class JitFunction:
         sig = self._sig
         # Re-read env vars on every call.
         key_parts = [("_env_", _cache_invalidating_env_values()), ("_target_", self._backend_target)]
-        effective_hints = {**self.compile_hints, **CompilationContext.get_compile_hints()}
+        if effective_hints is None:
+            effective_hints = self._effective_compile_hints()
         if effective_hints:
             key_parts.append(
                 (
                     "_hints_",
-                    tuple(sorted((key, (type(value), repr(value))) for key, value in effective_hints.items())),
+                    tuple(sorted((key, _stable_hint_key(value)) for key, value in effective_hints.items())),
                 )
             )
 
@@ -1354,9 +1385,11 @@ class JitFunction:
             cache[owner_cls] = (("_globals_", tuple(sorted(stable.items()))),) if stable else ()
         return cache[owner_cls]
 
-    def _build_full_cache_key(self, bound_arguments, *, owner_cls=None, bound_self=None):
+    def _build_full_cache_key(self, bound_arguments, *, owner_cls=None, bound_self=None, effective_hints=None):
         """Build the complete cache key: arg signatures + stable globals snapshot + self type."""
-        cache_key = self._globals_key_prefix(owner_cls) + self._resolve_and_make_cache_key(bound_arguments)
+        cache_key = self._globals_key_prefix(owner_cls) + self._resolve_and_make_cache_key(
+            bound_arguments, effective_hints=effective_hints
+        )
         if bound_self is not None:
             cache_key = (("_self_type_", type(bound_self)),) + cache_key
         return cache_key
@@ -1391,7 +1424,16 @@ class JitFunction:
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
-        cache_key = self._build_full_cache_key(bound.arguments, owner_cls=owner_cls, bound_self=bound_self)
+        # One detached snapshot owns both cache identity and compilation. Public
+        # persistent hint mutation in another thread cannot mix two variants.
+        effective_hints = self._effective_compile_hints()
+        cache_key = self._build_full_cache_key(
+            bound.arguments,
+            owner_cls=owner_cls,
+            bound_self=bound_self,
+            effective_hints=effective_hints,
+        )
+        self._last_call_cache_key.value = cache_key
 
         args_tuple = tuple(bound.arguments.values())
 
@@ -1454,7 +1496,6 @@ class JitFunction:
                 )
             raise RuntimeError(msg)
 
-        effective_hints = {**self.compile_hints, **CompilationContext.get_compile_hints()}
         _hints_ctx = CompilationContext.compile_hints(effective_hints) if effective_hints else nullcontext()
 
         compiled_func = None  # will be set inside lock or compile path
@@ -1670,7 +1711,9 @@ def _compile_impl(func, *args) -> CompiledFunction:
     sig = jf._sig  # guaranteed initialized after __call__
     bound = sig.bind(*args)
     bound.apply_defaults()
-    cache_key = jf._build_full_cache_key(bound.arguments)
+    cache_key = getattr(jf._last_call_cache_key, "value", None)
+    if cache_key is None:
+        raise RuntimeError("flyc.compile(): JIT call completed without recording its cache key.")
     args_tuple = tuple(bound.arguments.values())
 
     # Look up the CompiledArtifact.  We must hold a direct reference to it
