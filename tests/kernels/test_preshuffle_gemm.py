@@ -45,7 +45,7 @@ def _ptr(t):
     return flyc.from_c_void_p(fx.Uint8, t.contiguous().data_ptr())
 
 
-def _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, a_dtype, waves_per_eu=0, b_dtype="fp4"):
+def _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, a_dtype, waves_per_eu=0, b_dtype="fp4", xcd_swizzle=0):
     """Adapt the batched launch_gemm to the (c, a, b, sa, sb, bias, M, N, stream) call shape
     the tests use. launch_gemm is a thin @flyc.jit that caches per Constexpr config."""
 
@@ -75,6 +75,7 @@ def _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, a_dtype, waves_per_
             -1,
             -1,
             int(waves_per_eu or 0),
+            xcd_swizzle,
         )
 
     return _launch
@@ -598,6 +599,7 @@ def test_mfma_a6w4_preshuffle(
         pytest.param(1024, 8192, 8192, 64, 256, 256, marks=pytest.mark.large_shape),
     ],
 )
+@pytest.mark.parametrize("xcd_swizzle", [0, 4], ids=["xcd0", "xcd4"])
 @pytest.mark.l2_device
 @pytest.mark.rocm_lower
 def test_mfma_a8w8_preshuffle(
@@ -608,6 +610,7 @@ def test_mfma_a8w8_preshuffle(
     tile_m,
     tile_n,
     tile_k,
+    xcd_swizzle,
     *,
     bench_iters: int = DEFAULT_BENCH_ITERS,
     bench_warmup: int = DEFAULT_BENCH_WARMUP,
@@ -623,7 +626,9 @@ def test_mfma_a8w8_preshuffle(
 
     _wpe = int(waves_per_eu) if waves_per_eu else 0
     _wpe = None if _wpe <= 0 else _wpe
-    launch_fn = _mxfp4_launcher(N, K, tile_m, tile_n, tile_k, out_dtype, "fp8", _wpe, b_dtype="fp8")
+    launch_fn = _mxfp4_launcher(
+        N, K, tile_m, tile_n, tile_k, out_dtype, "fp8", _wpe, b_dtype="fp8", xcd_swizzle=xcd_swizzle
+    )
     print(f"✓ Compiled (waves_per_eu={_wpe})")
 
     device = torch.device("cuda")
