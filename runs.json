@@ -1,8 +1,96 @@
 {
  "schema": 1,
- "updated": "2026-07-15T05:40:05Z",
+ "updated": "2026-07-15T06:15:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29393593495,
+   "pr": null,
+   "commit": "221192273ed75b61b3c7947ec893a7022c56fa0d",
+   "branch": "main",
+   "event": "push",
+   "title": "[kernels] Relocate shared MMA infrastructure under common/ (#849)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393593495",
+   "created_at": "2026-07-15T06:13:43Z",
+   "updated_at": "2026-07-15T06:14:22Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29393540221,
+   "pr": null,
+   "commit": "8bf3743f7281293dbb88f65c7712c3eadd289db0",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] skip build/test for docs-only changes (#852)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393540221",
+   "created_at": "2026-07-15T06:12:37Z",
+   "updated_at": "2026-07-15T06:13:46Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29393512338,
+   "pr": 825,
+   "commit": "d45c0a44c37551e492ca5edaf08ff0ccdad66eb1",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393512338",
+   "created_at": "2026-07-15T06:12:04Z",
+   "updated_at": "2026-07-15T06:12:05Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
+  {
+   "run_id": 29393371585,
+   "pr": 825,
+   "commit": "66df1a8fe3c5b078049a8f28e041c6c3199bb93d",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393371585",
+   "created_at": "2026-07-15T06:09:01Z",
+   "updated_at": "2026-07-15T06:10:07Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-15T06:10:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393371585/job/87281560867"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-15T06:10:46Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393371585/job/87281560872"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-15T06:10:07Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393371585/job/87281560917"
+    }
+   ]
+  },
   {
    "run_id": 29391917050,
    "pr": 812,
@@ -29,10 +117,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-15T05:38:54Z",
-     "completed_at": null,
+     "completed_at": "2026-07-15T05:54:11Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29391917050/job/87277220010"
     },
     {
@@ -2176,140 +2264,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29249074891/job/86813241516"
     }
    ]
-  },
-  {
-   "run_id": 29248208051,
-   "pr": 812,
-   "commit": "ae69f9ab5bf47596d32d8455621958475a2fd12d",
-   "branch": "xudoyuan/kernels-smem-migration",
-   "event": "pull_request",
-   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29248208051",
-   "created_at": "2026-07-13T12:00:08Z",
-   "updated_at": "2026-07-13T13:11:43Z",
-   "actor": "xudoyuan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T12:13:41Z",
-     "completed_at": "2026-07-13T12:30:42Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29248208051/job/86812466271"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T12:13:30Z",
-     "completed_at": "2026-07-13T12:33:53Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29248208051/job/86812466293"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-13T12:14:49Z",
-     "completed_at": "2026-07-13T12:29:36Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29248208051/job/86812466313"
-    },
-    {
-     "runner": "linux-flydsl-mi325-8",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T12:34:35Z",
-     "completed_at": "2026-07-13T12:52:52Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29248208051/job/86817041277"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-13T12:34:35Z",
-     "completed_at": "2026-07-13T13:11:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29248208051/job/86817041303"
-    }
-   ]
-  },
-  {
-   "run_id": 29247416747,
-   "pr": 840,
-   "commit": "a84cfd7cbc25b27694ef681f997f805faf8b2bd9",
-   "branch": "fix/mla-decode-aiter-import",
-   "event": "pull_request",
-   "title": "[Fix]: mla_decode test aborts whole collection on aiter API drift",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29247416747",
-   "created_at": "2026-07-13T11:46:26Z",
-   "updated_at": "2026-07-13T12:43:05Z",
-   "actor": "Phil-amd",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T11:49:18Z",
-     "completed_at": "2026-07-13T12:43:04Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29247416747/job/86807794899"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T11:49:55Z",
-     "completed_at": "2026-07-13T12:34:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29247416747/job/86807794954"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-13T11:48:11Z",
-     "completed_at": "2026-07-13T12:14:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29247416747/job/86807794984"
-    }
-   ]
-  },
-  {
-   "run_id": 29247338297,
-   "pr": 812,
-   "commit": "c7f5db60fa0d3681f5ff2b4c11093efef6c0896e",
-   "branch": "xudoyuan/kernels-smem-migration",
-   "event": "pull_request",
-   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29247338297",
-   "created_at": "2026-07-13T11:45:06Z",
-   "updated_at": "2026-07-13T12:00:09Z",
-   "actor": "xudoyuan",
-   "jobs": []
-  },
-  {
-   "run_id": 29244850136,
-   "pr": 812,
-   "commit": "66236257d11e7224ce472c40f711217fc609d166",
-   "branch": "xudoyuan/kernels-smem-migration",
-   "event": "pull_request",
-   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29244850136",
-   "created_at": "2026-07-13T11:02:37Z",
-   "updated_at": "2026-07-13T11:45:07Z",
-   "actor": "xudoyuan",
-   "jobs": []
   }
  ]
 }
