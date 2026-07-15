@@ -1461,6 +1461,24 @@ if torch is not None:
     _FWD_CACHE: dict = {}
     _BWD_CACHE: dict = {}
 
+    # A cached FlyDSL callable accepts the raw cudaStream_t directly.  Avoid
+    # constructing a Python Stream wrapper or entering a no-op device guard on
+    # the hot same-device path, while retaining the guard when tensors belong
+    # to a non-current device.
+    _get_current_raw_stream = getattr(
+        torch._C,
+        "_cuda_getCurrentRawStream",
+        lambda device_index: torch.cuda.current_stream(device_index).cuda_stream,
+    )
+
+    def _launch_cached_on_device(compiled, device, args):
+        device_index = device.index
+        if torch.cuda.current_device() == device_index:
+            compiled(*args, _get_current_raw_stream(device_index))
+        else:
+            with torch.cuda.device(device_index):
+                compiled(*args, _get_current_raw_stream(device_index))
+
     # The staged path needs enough rows to amortize its second launch.  Its
     # 512-thread vec8 kernel needs fewer persistent programs than the scalar
     # fallback, which trades more programs for latency hiding.  Keep this
@@ -1528,26 +1546,28 @@ if torch is not None:
         eps is not used directly here — it is already baked into `rstd` by the
         forward — but is accepted so callers can pass it symmetrically.
         """
+        device = x.device
+        dtype = x.dtype
         assert x.dim() == 2, "rmsnorm_bwd expects a 2D (M, N) input"
         assert x.is_contiguous() and dout.is_contiguous(), "rmsnorm_bwd expects contiguous inputs"
         assert weight.is_contiguous(), "rmsnorm_bwd: weight must be contiguous"
         # Same-device/same-dtype contract as the forward: gamma and dy are read at
         # x's element width and the kernel launches on x's device (multi-GPU correctness).
-        assert weight.device == x.device == dout.device == rstd.device, "rmsnorm_bwd: inputs must share a device"
-        assert weight.dtype == x.dtype and dout.dtype == x.dtype, "rmsnorm_bwd: weight/dout dtype must match x"
+        assert weight.device == device == dout.device == rstd.device, "rmsnorm_bwd: inputs must share a device"
+        assert weight.dtype == dtype and dout.dtype == dtype, "rmsnorm_bwd: weight/dout dtype must match x"
         M, N = x.shape
-        dtype_str = _torch_dtype_to_str(x.dtype)
+        dtype_str = _torch_dtype_to_str(dtype)
         dx = torch.empty_like(x)
-        # Bind compile + launch to the tensors' device (multi-GPU correctness).
-        with torch.cuda.device(x.device):
-            stream = torch.cuda.current_stream()
-            path, num_programs = _select_rmsnorm_bwd_config(M, N, dtype_str, x.device)
-            if path == "two_stage":
-                dweight = torch.empty_like(weight)
-                partial = torch.empty((num_programs * N,), device=x.device, dtype=torch.float32)
-                key = (path, N, dtype_str, num_programs, x.device)
-                compiled = _BWD_CACHE.get(key)
-                if compiled is None:
+        path, num_programs = _select_rmsnorm_bwd_config(M, N, dtype_str, device)
+        if path == "two_stage":
+            dweight = torch.empty_like(weight)
+            partial = torch.empty((num_programs * N,), device=device, dtype=torch.float32)
+            key = (path, N, dtype_str, num_programs, device)
+            compiled = _BWD_CACHE.get(key)
+            if compiled is None:
+                # Compilation and code-object loading are device-context bound.
+                with torch.cuda.device(device):
+                    stream = torch.cuda.current_stream()
                     launch_fn = build_rmsnorm_bwd_two_stage_module(N, dtype_str, num_programs)
                     compiled = flyc.compile(
                         launch_fn,
@@ -1561,21 +1581,23 @@ if torch is not None:
                         M,
                         stream,
                     )
-                    _BWD_CACHE[key] = compiled
-                else:
-                    compiled(x, weight, dout, rstd, dx, dweight, partial, M, stream)
-                return dx, dweight
-
-            dweight = torch.empty((N,), device=x.device, dtype=torch.float32)
-            key = (path, N, dtype_str, x.device)
-            compiled = _BWD_CACHE.get(key)
-            dweight.zero_()
-            if compiled is None:
-                launch_fn = build_rmsnorm_bwd_module(N, dtype_str)
-                compiled = flyc.compile(launch_fn, x, weight, dout, rstd, dx, dweight, M, stream)
                 _BWD_CACHE[key] = compiled
             else:
-                compiled(x, weight, dout, rstd, dx, dweight, M, stream)
+                _launch_cached_on_device(compiled, device, (x, weight, dout, rstd, dx, dweight, partial, M))
+            return dx, dweight
+
+        dweight = torch.empty((N,), device=device, dtype=torch.float32)
+        key = (path, N, dtype_str, device)
+        compiled = _BWD_CACHE.get(key)
+        dweight.zero_()
+        if compiled is None:
+            with torch.cuda.device(device):
+                stream = torch.cuda.current_stream()
+                launch_fn = build_rmsnorm_bwd_module(N, dtype_str)
+                compiled = flyc.compile(launch_fn, x, weight, dout, rstd, dx, dweight, M, stream)
+            _BWD_CACHE[key] = compiled
+        else:
+            _launch_cached_on_device(compiled, device, (x, weight, dout, rstd, dx, dweight, M))
         return dx, dweight.to(weight.dtype)
 
     class RMSNormFunction(torch.autograd.Function):
@@ -1672,32 +1694,34 @@ if torch is not None:
         it is treated as zero (a zero tensor is passed to the branch-free
         kernel). eps is already baked into `rstd`.
         """
+        device = added.device
+        dtype = added.dtype
         assert added.dim() == 2, "fused_add_rmsnorm_bwd expects a 2D (M, N) input"
         assert added.is_contiguous() and dout.is_contiguous(), "fused_add_rmsnorm_bwd expects contiguous inputs"
         assert (
-            added.dtype == weight.dtype == dout.dtype
-        ), f"added/weight/dout dtypes must match, got {added.dtype}/{weight.dtype}/{dout.dtype}"
+            dtype == weight.dtype == dout.dtype
+        ), f"added/weight/dout dtypes must match, got {dtype}/{weight.dtype}/{dout.dtype}"
         assert (
-            added.device == weight.device == dout.device == rstd.device
+            device == weight.device == dout.device == rstd.device
         ), "fused_add_rmsnorm_bwd expects all tensors on the same device"
         if dresidual_out is not None:
             assert dresidual_out.is_contiguous(), "fused_add_rmsnorm_bwd expects contiguous dresidual_out"
-            assert dresidual_out.dtype == added.dtype, "dresidual_out dtype must match added"
-            assert dresidual_out.device == added.device, "dresidual_out must be on the same device as added"
+            assert dresidual_out.dtype == dtype, "dresidual_out dtype must match added"
+            assert dresidual_out.device == device, "dresidual_out must be on the same device as added"
         M, N = added.shape
-        dtype_str = _torch_dtype_to_str(added.dtype)
+        dtype_str = _torch_dtype_to_str(dtype)
         if dresidual_out is None:
             dresidual_out = torch.zeros_like(added)
         dx = torch.empty_like(added)
-        with torch.cuda.device(added.device):
-            stream = torch.cuda.current_stream()
-            path, num_programs = _select_rmsnorm_bwd_config(M, N, dtype_str, added.device)
-            if path == "two_stage":
-                dweight = torch.empty_like(weight)
-                partial = torch.empty((num_programs * N,), device=added.device, dtype=torch.float32)
-                key = (path, N, dtype_str, num_programs, added.device)
-                compiled = _FUSED_ADD_BWD_CACHE.get(key)
-                if compiled is None:
+        path, num_programs = _select_rmsnorm_bwd_config(M, N, dtype_str, device)
+        if path == "two_stage":
+            dweight = torch.empty_like(weight)
+            partial = torch.empty((num_programs * N,), device=device, dtype=torch.float32)
+            key = (path, N, dtype_str, num_programs, device)
+            compiled = _FUSED_ADD_BWD_CACHE.get(key)
+            if compiled is None:
+                with torch.cuda.device(device):
+                    stream = torch.cuda.current_stream()
                     launch_fn = build_fused_add_rmsnorm_bwd_two_stage_module(N, dtype_str, num_programs)
                     compiled = flyc.compile(
                         launch_fn,
@@ -1712,32 +1736,31 @@ if torch is not None:
                         M,
                         stream,
                     )
-                    _FUSED_ADD_BWD_CACHE[key] = compiled
-                else:
-                    compiled(
-                        added,
-                        weight,
-                        dout,
-                        dresidual_out,
-                        rstd,
-                        dx,
-                        dweight,
-                        partial,
-                        M,
-                        stream,
-                    )
-                return dx, dx, dweight
-
-            dweight = torch.empty((N,), device=added.device, dtype=torch.float32)
-            key = (path, N, dtype_str, added.device)
-            compiled = _FUSED_ADD_BWD_CACHE.get(key)
-            dweight.zero_()
-            if compiled is None:
-                launch_fn = build_fused_add_rmsnorm_bwd_module(N, dtype_str)
-                compiled = flyc.compile(launch_fn, added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
                 _FUSED_ADD_BWD_CACHE[key] = compiled
             else:
-                compiled(added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
+                _launch_cached_on_device(
+                    compiled,
+                    device,
+                    (added, weight, dout, dresidual_out, rstd, dx, dweight, partial, M),
+                )
+            return dx, dx, dweight
+
+        dweight = torch.empty((N,), device=device, dtype=torch.float32)
+        key = (path, N, dtype_str, device)
+        compiled = _FUSED_ADD_BWD_CACHE.get(key)
+        dweight.zero_()
+        if compiled is None:
+            with torch.cuda.device(device):
+                stream = torch.cuda.current_stream()
+                launch_fn = build_fused_add_rmsnorm_bwd_module(N, dtype_str)
+                compiled = flyc.compile(launch_fn, added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
+            _FUSED_ADD_BWD_CACHE[key] = compiled
+        else:
+            _launch_cached_on_device(
+                compiled,
+                device,
+                (added, weight, dout, dresidual_out, rstd, dx, dweight, M),
+            )
         # dx == dresidual by construction; return dx as both (aliased).
         return dx, dx, dweight.to(weight.dtype)
 

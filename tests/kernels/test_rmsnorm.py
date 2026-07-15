@@ -1545,6 +1545,7 @@ def test_rmsnorm_multi_gpu():
     if torch.cuda.device_count() < 2:
         pytest.skip("needs >=2 GPUs")
 
+    torch.cuda.set_device(0)
     torch.manual_seed(0)
     for M, N, dtype, out_atol, grad_atol in (
         (16, 256, DTYPE_FP32, 1e-4, 1e-3),
@@ -1562,6 +1563,16 @@ def test_rmsnorm_multi_gpu():
             y.backward(dy)
             torch.cuda.synchronize(dev)
 
+            # Autograd warmed this device's backward cache.  Exercise the hot
+            # launch again while cuda:0 remains the caller's current device;
+            # the cuda:1 case must enter the guarded cross-device fallback and
+            # restore the caller's device afterward.
+            caller_device = torch.cuda.current_device()
+            rstd = torch.rsqrt(x.detach().to(DTYPE_FP32).square().mean(1) + EPS)
+            dx_cached, dw_cached = rmsnorm_kernel_impl.rmsnorm_bwd(x.detach(), w.detach(), dy, rstd)
+            torch.cuda.synchronize(dev)
+            assert torch.cuda.current_device() == caller_device
+
             xf = x.detach().to(DTYPE_FP32).requires_grad_(True)
             wf = w.detach().to(DTYPE_FP32).requires_grad_(True)
             ref = xf * torch.rsqrt(xf.square().mean(1, keepdim=True) + EPS) * wf
@@ -1572,6 +1583,8 @@ def test_rmsnorm_multi_gpu():
             torch.testing.assert_close(y.detach().to(DTYPE_FP32), ref, rtol=rtol, atol=out_atol)
             torch.testing.assert_close(x.grad.to(DTYPE_FP32), dx_ref, rtol=rtol, atol=grad_atol)
             torch.testing.assert_close(w.grad.to(DTYPE_FP32), dw_ref, rtol=rtol, atol=dw_atol)
+            torch.testing.assert_close(dx_cached.to(DTYPE_FP32), dx_ref, rtol=rtol, atol=grad_atol)
+            torch.testing.assert_close(dw_cached.to(DTYPE_FP32), dw_ref, rtol=rtol, atol=dw_atol)
             print(f"  M={M} N={N} {dev}: {path} forward/backward match reference")
     print("  -> PASSED")
 
