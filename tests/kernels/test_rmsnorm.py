@@ -70,7 +70,9 @@ BENCH_ITERS = 100
 _RMSNORM_BACKWARD_CONFIGS = (
     (64, 256, "f32"),  # small-N path, f32
     (16, 512, "bf16"),  # small-N path, bf16
-    (512, 2048, "f16"),  # staged finalizer cast/store
+    (512, 4096, "f16"),  # staged vec8 main path and finalizer cast/store
+    (513, 5000, "bf16"),  # vec8 column/program tails
+    (513, 4097, "bf16"),  # 16-bit scalar fallback above the vec8 threshold
     (4096, 4096, "bf16"),  # model-relevant large shape
     (64, 2000, "f32"),  # small-N path, unaligned
     (128, 4096, "f16"),  # f16, large hidden size
@@ -1497,6 +1499,41 @@ def test_rmsnorm_bwd_two_stage_multistream_workspace():
         dx_ref, dw_ref, _ = _reference_rmsnorm_bwd(x, weight, dout)
         torch.testing.assert_close(dx.to(DTYPE_FP32), dx_ref, rtol=1e-1, atol=2e-1)
         torch.testing.assert_close(dweight.to(DTYPE_FP32), dw_ref, rtol=1e-1, atol=1.0)
+
+
+def test_rmsnorm_bwd_vec8_contiguous_storage_offset():
+    """Contiguous tensors need not have a 16-byte-aligned storage offset."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    M, N = 512, 4096
+
+    def offset_rand(shape):
+        numel = 1
+        for dim in shape:
+            numel *= dim
+        tensor = torch.randn((numel + 1,), device=device, dtype=DTYPE_BF16)[1:].view(shape)
+        assert tensor.is_contiguous() and tensor.data_ptr() % 16 != 0
+        return tensor
+
+    added = offset_rand((M, N))
+    weight = offset_rand((N,))
+    dout = offset_rand((M, N))
+    dresidual_out = offset_rand((M, N))
+    rstd = torch.rsqrt(added.to(DTYPE_FP32).square().mean(1) + EPS)
+    dx_ref, dweight_ref, _ = _reference_rmsnorm_bwd(added, weight, dout)
+
+    dx, dweight = rmsnorm_kernel_impl.rmsnorm_bwd(added, weight, dout, rstd)
+    torch.testing.assert_close(dx.to(DTYPE_FP32), dx_ref, rtol=1e-1, atol=2e-1)
+    torch.testing.assert_close(dweight.to(DTYPE_FP32), dweight_ref, rtol=1e-1, atol=1.0)
+
+    dx, dresidual, dweight = rmsnorm_kernel_impl.fused_add_rmsnorm_bwd(added, weight, dout, rstd, dresidual_out)
+    assert dx.data_ptr() == dresidual.data_ptr()
+    torch.testing.assert_close(
+        dx.to(DTYPE_FP32),
+        dx_ref + dresidual_out.to(DTYPE_FP32),
+        rtol=1e-1,
+        atol=2e-1,
+    )
+    torch.testing.assert_close(dweight.to(DTYPE_FP32), dweight_ref, rtol=1e-1, atol=1.0)
 
 
 @pytest.mark.multi_gpu

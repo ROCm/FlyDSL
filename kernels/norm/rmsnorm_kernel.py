@@ -27,6 +27,7 @@ from kernels.norm.rmsnorm_bwd_kernel import (  # noqa: E402,F401
     build_fused_add_rmsnorm_bwd_two_stage_module,
     build_rmsnorm_bwd_module,
     build_rmsnorm_bwd_two_stage_module,
+    is_rmsnorm_bwd_two_stage_vec_config,
 )
 from kernels.norm.rmsnorm_common import (
     BLOCK_THREADS,
@@ -1460,10 +1461,10 @@ if torch is not None:
     _FWD_CACHE: dict = {}
     _BWD_CACHE: dict = {}
 
-    # The staged path needs enough rows to amortize its second launch.  Wide
-    # and FP32 rows carry more live accumulators, so cap their program count to
-    # avoid excess register pressure and scratch.  Keep this selector as the
-    # single source of truth shared by plain and fused-add wrappers.
+    # The staged path needs enough rows to amortize its second launch.  Its
+    # 512-thread vec8 kernel needs fewer persistent programs than the scalar
+    # fallback, which trades more programs for latency hiding.  Keep this
+    # selector as the single source of truth shared by plain and fused wrappers.
     _BWD_TWO_STAGE_MIN_ROWS = 512
     _BWD_TWO_STAGE_MAX_N = 8192
     _BWD_CU_COUNT_CACHE: dict = {}
@@ -1477,14 +1478,12 @@ if torch is not None:
 
     def _select_rmsnorm_bwd_config(M, N, dtype_str, device):
         if M >= _BWD_TWO_STAGE_MIN_ROWS and N <= _BWD_TWO_STAGE_MAX_N:
-            if M < 1024:
-                programs_per_cu = 1
-            elif M < 2048 or dtype_str == "f32" or N <= 2048 or N > 4096:
-                programs_per_cu = 2
+            num_cus = _get_rmsnorm_bwd_cu_count(device)
+            if is_rmsnorm_bwd_two_stage_vec_config(N, dtype_str):
+                num_programs = num_cus if M < 2048 else (3 * num_cus) // 2
             else:
-                programs_per_cu = 4
-            num_programs = min(M, _get_rmsnorm_bwd_cu_count(device) * programs_per_cu)
-            return ("two_stage", num_programs)
+                num_programs = num_cus if M < 1024 else 2 * num_cus
+            return ("two_stage", min(M, num_programs))
         return ("atomic", None)
 
     def _get_fwd_compiled(x, weight, out, rstd, M, N, dtype_str, store_rstd, eps, stream):
