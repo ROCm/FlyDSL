@@ -103,6 +103,8 @@ jobs:
       # If that cache is unavailable, checkout fails before the tests start.
       GIT_CONFIG_GLOBAL: /dev/null
       GIT_CONFIG_NOSYSTEM: "1"
+      # Temporary quarantine for linux-flydsl-navi-2 GPU 1; see #858.
+      CI_HIP_VISIBLE_DEVICES: ${{ contains(matrix.runners, 'navi') && '3' || '' }}
     strategy:
       matrix:
         runners: [
@@ -137,8 +139,13 @@ jobs:
             DEVICE_FLAG="--device /dev/dri"
           fi
 
+          GPU_ENV_ARGS=()
+          if [ -n "${CI_HIP_VISIBLE_DEVICES}" ]; then
+            GPU_ENV_ARGS=(--env "HIP_VISIBLE_DEVICES=${CI_HIP_VISIBLE_DEVICES}")
+          fi
+
           echo "Starting container: flydsl_test:ci"
-          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG \
+          docker run -dt --network=host --user root --device=/dev/kfd $DEVICE_FLAG "${GPU_ENV_ARGS[@]}" \
           -v "${GITHUB_WORKSPACE:-$PWD}/flydsl-test:/flydsl-test" \
           --ipc=host --group-add video \
           --shm-size 16g \
@@ -228,6 +235,7 @@ jobs:
           docker exec flydsl_test bash -c "python3 -c 'import triton; assert tuple(map(int, triton.__version__.split(\"+\", 1)[0].split(\".\")[:3])) >= (3, 6, 0), triton.__version__; print(\"Installed triton\", triton.__version__)'"
 
       - name: Run tests
+        timeout-minutes: 60
         run: |
           docker exec flydsl_test bash -c "export PYTHONPATH=/tmp/aiter:\${PYTHONPATH:-} && export AITER_REPO=/tmp/aiter && cd /flydsl-test && RUN_TESTS_FULL=1 bash scripts/run_tests.sh"
 
