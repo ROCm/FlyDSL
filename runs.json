@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-15T03:24:43Z",
+ "updated": "2026-07-15T03:32:49Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,20 +10,20 @@
    "branch": "ci/fix-fork-baselines",
    "event": "pull_request",
    "title": "[CI] Make benchmark baselines fork-safe and bounded",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380724467",
    "created_at": "2026-07-15T01:04:29Z",
-   "updated_at": "2026-07-15T02:47:34Z",
+   "updated_at": "2026-07-15T03:29:23Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-15T02:47:34Z",
-     "completed_at": null,
+     "completed_at": "2026-07-15T03:29:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380724467/job/87256063269"
     },
     {
