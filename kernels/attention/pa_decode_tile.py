@@ -119,11 +119,6 @@ def compile_pa_decode_tile(
     see the module docstring and ``pa_decode_tile()``'s own docstring for the
     expected ``key_scale``/``value_scale`` tensor shape in that mode.
     """
-    # The native fp8 MFMA operand format differs by chip generation: gfx942
-    # (CDNA3) uses e4m3 FNUZ, gfx950 (CDNA4) uses OCP e4m3fn -- same convention
-    # as preshuffle_gemm.py/qk_norm_rope_quant.py. Feeding FNUZ-encoded bits
-    # into gfx950's fp8 MFMA (which decodes them as OCP) silently produces
-    # wrong results rather than NaN.
     is_gfx950 = "gfx95" in get_rocm_arch()
     FP8 = fx.Float8E4M3FN if is_gfx950 else fx.Float8E4M3FNUZ
     FP8_MAX = 448.0 if is_gfx950 else 240.0  # max representable magnitude of the format above
@@ -459,13 +454,8 @@ def compile_pa_decode_tile(
                 phys = fx.Int32(phys_vec[(a * c16) // block_size])
                 flat.extend(_k_ops(phys, a))
             if const_expr(HEAD == 64):
-                # Groups the raw K loads into one scheduling unit for the
-                # post-RA scheduler (zero VGPR cost); measured faster at
-                # head_dim=64, not re-verified at head_dim=128.
                 fx.rocdl.sched_vmem(len(flat) // 2)
-            # `phys_vec` is also returned so per_token_kv's own
-            # `_stage_kv_scale_to_lds` (same tile, same page formula) can
-            # reuse it instead of re-issuing the block-table lookup.
+
             return fx.Vector.from_elements(flat, dtype=fx.Int64), phys_vec
 
         # ── prologue: prefetch the first tile's K ──
@@ -622,9 +612,6 @@ def compile_pa_decode_tile(
                     w = _v_load16(base)
                     ops.extend([w[0], w[1]])
             if const_expr(HEAD == 64):
-                # Groups the NVOPS raw V loads into one scheduling unit for
-                # the post-RA scheduler (zero VGPR cost); measured faster at
-                # head_dim=64, slower at head_dim=128 (not applied there).
                 fx.rocdl.sched_vmem(len(ops) // 2)
             return ops  # NVOPS i64, the 64-token contiguous run for this head
 
@@ -789,11 +776,6 @@ def compile_pa_decode_tile(
                 fx.Vector.from_elements(words, dtype=fx.Int32)
             )
             if const_expr(HEAD == 64):
-                # Same scheduling-hint mechanism as the `sched_vmem` calls
-                # above, grouping this LDS store instead; measured faster.
-                # A matching `sched_dsrd` hint on the P·V read below (already
-                # one fused vectorized load, not a multi-instruction store)
-                # measured much slower and isn't used.
                 fx.rocdl.sched_dswr(NCHUNK)
             for sh in (16, 32):
                 ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=arith.FastMathFlags.contract)
@@ -913,14 +895,7 @@ def compile_pa_decode_tile(
         col_e = sub_e * ELEMS_PER_THREAD
         row_off = sO_off + row_e * (HEAD * 4) + col_e * 4
         o_v = _view(row_off, fx.Float32, fx.make_layout(ELEMS_PER_THREAD, 1)).load()
-        # Per-tensor packs P unscaled by v_scale (`Pa*FP8_MAX`, see the
-        # P-pack loop above), so v_scale and the P dequant (1/FP8_MAX) are
-        # true per-CTA constants deferred to exactly here, once, before the
-        # NP branch. per_token_kv instead packs `Pa*v_scale*norm_factor`
-        # (V-scale can't be deferred -- see that same loop) and already
-        # fully undid that scaling with the per-tile `v_max_scaled`
-        # correction in the main loop above, so no further scale is needed
-        # here.
+
         if const_expr(per_token_kv):
             o_scale = fx.Float32(1.0)
         else:

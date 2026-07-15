@@ -1391,11 +1391,6 @@ def test_pa_decode_tile_reference_bf16_query(context_len: int, block_size: int) 
 def test_pa_decode_tile_reference_per_token_kv(
     num_kv_heads: int, group_size: int, context_len: int, block_size: int
 ) -> None:
-    # Exercises the per_token_kv path: key_scale/value_scale become
-    # [num_blocks, num_kv_heads, block_size] tensors (one dequant scale per
-    # physical KV token) instead of a single per-tensor scalar -- see
-    # compile_pa_decode_tile's own docstring for how K/V-scale application
-    # differs from the per-tensor case.
     output, ref = _run_pa_decode_tile_case(
         num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size, per_token_kv=True
     )
