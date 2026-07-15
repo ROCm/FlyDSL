@@ -19,7 +19,6 @@ import flydsl.expr as fx
 from flydsl._mlir import ir as _ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl._mlir.dialects import rocdl as _rocdl
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TAS
 from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr
 from flydsl.expr.utils.arith import ArithValue as _ArithValue
@@ -29,26 +28,35 @@ from kernels.gemm.fp8_gemm_utils import Mfma16x16x128, make_fp8_buffer_tensor, p
 def _make_fp8_buffer_tensor_from_addr(addr_i64, fp8_ir_t, ref_buf_tensor):
     """Create a rebased FP8 buffer tensor from a raw i64 byte address.
 
-    Used for the per-block BIG_IN rebase in compile_conv3d_implicit_fp8.
-    Must be called inside a kernel trace (active MLIR context required).
+    Mirrors make_buffer_tensor() in rocdl/universal.py: converts the i64 base
+    address to an llvm ptr, wraps it in a BufferDesc pointer via make_ptr, and
+    returns a Tensor view over the same layout as ref_buf_tensor. A 2 GB
+    num_records bound (BIG_ASYNC_NR) ensures OOB-routed padding taps zero.
     """
-    ptr_ty = _ir.Type.parse("!llvm.ptr")
-    rsrc_ty = _ir.Type.parse("!llvm.ptr<8>")
-    base_ptr = _llvm.IntToPtrOp(ptr_ty, addr_i64.ir_value()).result
-    rsrc_raw = _rocdl.MakeBufferRsrcOp(
-        rsrc_ty,
-        base_ptr,
-        buffer_ops._create_i16_constant(0),
-        buffer_ops._create_i64_constant(0xFFFFFFFF),
-        buffer_ops._create_i32_constant(buffer_ops._get_buffer_flags()),
-    ).result
+    from flydsl.expr.rocdl.universal import make_ptr
+
+    BIG_ASYNC_NR = 0x80000000  # 2 GB
+    alignment = fx.PointerType(fx.get_iter(ref_buf_tensor).type).alignment
     f8_ptr_ty = fx.PointerType.get(
         elem_ty=fp8_ir_t,
         address_space=_TAS.BufferDesc,
-        alignment=fx.PointerType(fx.get_iter(ref_buf_tensor).type).alignment,
+        alignment=alignment,
     )
-    rsrc_cast = _llvm.BitcastOp(f8_ptr_ty.ir_type, rsrc_raw).result
-    return fx.Tensor(fx.make_view(_ArithValue(rsrc_cast), fx.get_layout(ref_buf_tensor)))
+    # Convert i64 address -> llvm.ptr (the base pointer for the buffer resource)
+    llvm_ptr_ty = _ir.Type.parse("!llvm.ptr")
+    addr_val = addr_i64.ir_value() if hasattr(addr_i64, "ir_value") else addr_i64
+    base_ptr = _llvm.IntToPtrOp(llvm_ptr_ty, addr_val).result
+    # Wrap in a BufferDesc pointer using the same make_ptr path as make_buffer_tensor
+    buf_ptr = make_ptr(
+        f8_ptr_ty,
+        [
+            _ArithValue(base_ptr),
+            fx.Int16(0).ir_value(),
+            fx.Int64(BIG_ASYNC_NR).ir_value(),
+            fx.Int32(buffer_ops._get_buffer_flags()).ir_value(),
+        ],
+    )
+    return fx.Tensor(fx.make_view(buf_ptr, fx.get_layout(ref_buf_tensor)))
 
 
 # TILE_K is pinned to the FP8 MFMA k-dim (mfma_f32_16x16x128 -> 128). The tile
