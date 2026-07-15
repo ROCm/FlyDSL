@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-15T04:46:08Z",
+ "updated": "2026-07-15T05:05:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -139,11 +139,11 @@
    "branch": "ci/fix-fork-baselines",
    "event": "pull_request",
    "title": "[CI] Make benchmark baselines fork-safe and bounded",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29387022374",
    "created_at": "2026-07-15T03:38:29Z",
-   "updated_at": "2026-07-15T03:50:03Z",
+   "updated_at": "2026-07-15T05:00:02Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -167,10 +167,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-15T03:40:24Z",
-     "completed_at": null,
+     "completed_at": "2026-07-15T05:00:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29387022374/job/87262450487"
     }
    ]
@@ -684,7 +684,7 @@
    "commit": "39a46b241d9deb216ab23edc48d0da29acf6dbab",
    "branch": "refactor/mma-into-common",
    "event": "pull_request",
-   "title": "[kernels]: move mma/ under common/, rename pipeline_utils_gfx1250.py",
+   "title": "[kernels] Relocate shared MMA infrastructure under common",
    "status": "completed",
    "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29331122598",
@@ -1088,7 +1088,7 @@
    "commit": "9afc41c38fa62a8c44a00a76a07d76596fd3fdcb",
    "branch": "refactor/mma-into-common",
    "event": "pull_request",
-   "title": "[kernels]: move mma/ under common/, rename pipeline_utils_gfx1250.py",
+   "title": "[kernels] Relocate shared MMA infrastructure under common",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29317944578",
