@@ -389,18 +389,18 @@ def _make_ws_rsrc(ws_base_i64, byte_offset, nrec_bytes):
     return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=as_mlir_value(fx.Int64(nrec_bytes)))
 
 
-def _read_v8f16_off(v_base_ptr, const_off, TRAITS_BF16_BYTES, mfma_pack_type):
+def _read_v8f16_off(v_base_ptr, const_off, TRAITS_BF16_BYTES, kv_mfma_pack_type):
     ptr = buffer_ops.get_element_ptr(
         v_base_ptr, byte_offset=as_mlir_value(fx.Int32(const_off * TRAITS_BF16_BYTES)), elem_type=T.i8
     )
-    return llvm.LoadOp(mfma_pack_type, ptr, alignment=16).result
+    return llvm.LoadOp(kv_mfma_pack_type, ptr, alignment=16).result
 
 
 def _load_k_pack_aligned(
     lds_kv_base_ptr,
     elem_idx,
     buf_id,
-    mfma_pack_type,
+    kv_mfma_pack_type,
     lds_scope_names,
     TRAITS_BF16_BYTES,
 ):
@@ -408,7 +408,7 @@ def _load_k_pack_aligned(
     byte_offset = elem_idx * TRAITS_BF16_BYTES
     ptr = buffer_ops.get_element_ptr(lds_kv_base_ptr, byte_offset=byte_offset, elem_type=T.i8)
     return llvm.LoadOp(
-        mfma_pack_type,
+        kv_mfma_pack_type,
         ptr,
         alignment=16,
         alias_scopes=_dualwave_lds_alias_scopes(scope_name),
@@ -589,10 +589,10 @@ def _buffer_load_128(
     *,
     _load_atom_128,
     q_div,
-    v4i32_type,
+    q_load_i32x4_type,
 ):
     """128-bit global->register load (buffer_load_dwordx4) from Q."""
-    return fly.copy_atom_call_ssa([v4i32_type], _load_atom_128, fx.slice(q_div, (None, fx.Int32(elem_index))))
+    return fly.copy_atom_call_ssa([q_load_i32x4_type], _load_atom_128, fx.slice(q_div, (None, fx.Int32(elem_index))))
 
 
 def _buffer_load_lds_128(
@@ -679,9 +679,9 @@ def _mfma_acc(
     c,
     *,
     _mma_atom,
-    v16f32_type,
+    mfma_acc_vec_type,
 ):
-    return fly.mma_atom_call_ssa([v16f32_type], _mma_atom, a, b, c)
+    return fly.mma_atom_call_ssa([mfma_acc_vec_type], _mma_atom, a, b, c)
 
 
 def _sched_barrier_pairs(
@@ -715,11 +715,11 @@ def _ds_read_tr_v4f16_imm(
     imm_bytes,
     *,
     lds_kv_base_idx,
-    v4f16_type,
+    v_lds_read_vec4_type,
 ):
     byte_offset = lds_base_elem_idx * 2 + lds_kv_base_idx
     addr_i32 = fx.Int32(byte_offset)
-    return _ds_read_tr16_b64_imm(v4f16_type, addr_i32, imm_bytes)
+    return _ds_read_tr16_b64_imm(v_lds_read_vec4_type, addr_i32, imm_bytes)
 
 
 def _get_q_pack(q_all_scaled_bf16, ks, traits):
@@ -888,6 +888,117 @@ def _kv_tile_addr(
     return kv_gmem_elem_offset, tile_start * stride_kv_n_v
 
 
+def _linear_kv_src_elem(
+    src_base,
+    d,
+    traits,
+    *,
+    n_in_warp,
+    wave_id,
+    d_bucket,
+    stride_kv_n_v,
+):
+    """Global element index for lane's d-th 128-bit chunk in a linear KV tile."""
+    n_in_tile = n_in_warp * traits.NUM_WAVES + wave_id
+    global_d = d_bucket * traits.VEC_KV + d * traits.D_128B_SIZE
+    return src_base + n_in_tile * stride_kv_n_v + global_d
+
+
+def _vec_k_dma_oct_idx(d, traits, *, wave_id_uni, lane_in_warp):
+    """Flat octet index for this wave/lane's d-th DMA slot in vectorized K layout."""
+    return wave_id_uni * (traits.WARP_SIZE * traits.SMEM_D_RPT) + d * traits.WARP_SIZE + lane_in_warp
+
+
+def _sigma_k_tile_n(ni):
+    """Sigma permutation applied to K tile-n during vectorized DMA (bit-shuffle)."""
+    return (ni & 3) | ((ni & 8) >> 1) | ((ni & 4) << 1) | (ni & ~15)
+
+
+def _vec_k_src_elem(d, traits, *, wave_id_uni, lane_in_warp, kv_head_idx):
+    """Global element index for vectorized K DMA slot d (sigma remap applied)."""
+    oct_idx = _vec_k_dma_oct_idx(d, traits, wave_id_uni=wave_id_uni, lane_in_warp=lane_in_warp)
+    ni, dg = oct_idx % traits.BLOCK_N, oct_idx // traits.BLOCK_N
+    src_oct = dg * traits.BLOCK_N + _sigma_k_tile_n(ni)
+    return (
+        kv_head_idx * (traits.HEAD_DIM // traits.KV_VEC_SIZE) * traits.BLOCK_N * traits.KV_VEC_SIZE
+        + src_oct * traits.KV_VEC_SIZE
+    )
+
+
+def _vec_v_src_elem(d, traits, *, wave_id_uni, lane_in_warp, kv_head_idx):
+    """Global element index for vectorized V DMA slot d (NO-major wave rows)."""
+    row = wave_id_uni * traits.SMEM_D_RPT + d
+    no = lane_in_warp // traits.SMEM_N_PER_WAVE
+    d_col = row * traits.SMEM_N_PER_WAVE + lane_in_warp % traits.SMEM_N_PER_WAVE
+    return _vec_v_elem(no * traits.KV_VEC_SIZE, d_col, kv_head_idx, traits.BLOCK_N, traits.KV_VEC_SIZE, traits.HEAD_DIM)
+
+
+def _paged_bt_byte_offset(tile_idx, *, split_t0):
+    """Byte offset of `tile_idx`'s page-id entry in the LDS block-table cache."""
+    return fx.Int32((tile_idx - split_t0) * fx.Index(4))
+
+
+def _q_pack_col(ks, traits, *, lane_div_32):
+    """K-dimension column for Q pack at MFMA k-step `ks` for this lane."""
+    return ks * traits.K_STEP_QK + lane_div_32 * traits.MFMA_LANE_K
+
+
+def _q_pack_global_idx(q_row_in_block, ks, traits, *, lane_div_32, stride_q_n_v):
+    """Flat global element index for Q pack (q_row, ks)."""
+    return q_row_in_block * stride_q_n_v + _q_pack_col(ks, traits, lane_div_32=lane_div_32)
+
+
+def _vec_k_lds_idx_lo(k_base, ks, traits, *, lane_div_32, lane_mod_32):
+    """LDS element index for vectorized K pack lo at k-step `ks` for this lane."""
+    return k_base + (ks * 2 + lane_div_32) * (traits.BLOCK_N * traits.KV_VEC_SIZE) + lane_mod_32 * traits.KV_VEC_SIZE
+
+
+def _swizzled_ks_offset(ks, traits):
+    """Non-vectorized K LDS offset for k-step `ks` (outer/inner swizzle pattern)."""
+    return (ks // 4) * traits.DUALWAVE_SWP_URK_KSTEP_OUTER + (ks % 4) * traits.DUALWAVE_SWP_URK_KSTEP_INNER
+
+
+def _vec_v_lds_addr_base(v_base, traits, *, lane_div_32, lane_mod_32):
+    """Per-lane LDS element base (in elements) for vectorized V reads."""
+    lm = lane_mod_32
+    return (
+        v_base
+        + (lm // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE
+        + lane_div_32 * traits.D_128B_SIZE
+        + (lm % traits.SMEM_N_PER_WAVE) * traits.KV_VEC_SIZE
+    )
+
+
+def _vec_v_const_off(dc, k_substep, traits):
+    """Constant element offset from lane base for vectorized V pack (dc, k_substep)."""
+    return dc * (traits.D_CHUNK // traits.SMEM_N_PER_WAVE) * traits.VEC_V_ROW_STRIDE + k_substep * (
+        2 * traits.D_128B_SIZE
+    )
+
+
+def _swizzled_v_dc_off(dc, traits):
+    """Non-vectorized V LDS dc-axis offset (swizzled axis0/axis1 decomposition)."""
+    return (dc // 2) * traits.DUALWAVE_SWP_URV_DC_AXIS0 + (dc % 2) * traits.DUALWAVE_SWP_URV_DC_AXIS1
+
+
+def _swizzled_v_imm_lo(dc, k_substep, traits):
+    """Non-vectorized V LDS byte offset for (dc, k_substep) in bf16 elements."""
+    return (k_substep * traits.DUALWAVE_SWP_URV_STEP_K_STRIDE + _swizzled_v_dc_off(dc, traits)) * traits.BF16_BYTES
+
+
+def _seq_pad_col_base(tile_idx, traits, *, lane_div_32):
+    """Base KV column for this lane's lo-half scores at `tile_idx`."""
+    _lane_n_off = 8 if traits.KV_VECTORIZED else 4
+    return fx.Int32(tile_idx * traits.BLOCK_N) + fx.Int32(lane_div_32) * fx.Int32(_lane_n_off)
+
+
+def _seq_pad_score_threshold(r, traits):
+    """Column threshold offset for score row `r` (layout-dependent swizzle)."""
+    if const_expr(traits.KV_VECTORIZED):
+        return (r // 8) * 16 + (r % 8)
+    return (r // 4) * 8 + (r % 4)
+
+
 def _k_dma_m0_base(
     buf_id,
     d,
@@ -952,15 +1063,15 @@ def _mma0(
     _mma_atom,
     c_zero_v16f32,
     q_all_scaled_bf16,
-    v16f32_type,
+    mfma_acc_vec_type,
 ):
     k_lo, k_hi = v_k
     v_s_lo = c_zero_v16f32
     v_s_hi = c_zero_v16f32
     for ks in range_constexpr(traits.K_STEPS_QK):
         q_pack = _get_q_pack(q_all_scaled_bf16, ks, traits)
-        v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo, _mma_atom=_mma_atom, v16f32_type=v16f32_type)
-        v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi, _mma_atom=_mma_atom, v16f32_type=v16f32_type)
+        v_s_lo = _mfma_acc(k_lo[ks], q_pack, v_s_lo, _mma_atom=_mma_atom, mfma_acc_vec_type=mfma_acc_vec_type)
+        v_s_hi = _mfma_acc(k_hi[ks], q_pack, v_s_hi, _mma_atom=_mma_atom, mfma_acc_vec_type=mfma_acc_vec_type)
     return (v_s_lo, v_s_hi)
 
 
@@ -1083,7 +1194,7 @@ def _mma1_step_k(
     TRAITS_D_CHUNKS,
     *,
     _mma_atom,
-    v16f32_type,
+    mfma_acc_vec_type,
 ):
     v_p_lo, v_p_hi = v_p
     v_pk = v_v[step]
@@ -1092,7 +1203,7 @@ def _mma1_step_k(
     else:
         p_pk = v_p_hi[step - 2]
     for dc in range_constexpr(TRAITS_D_CHUNKS):
-        v_o[dc] = _mfma_acc(v_pk[dc], p_pk, v_o[dc], _mma_atom=_mma_atom, v16f32_type=v16f32_type)
+        v_o[dc] = _mfma_acc(v_pk[dc], p_pk, v_o[dc], _mma_atom=_mma_atom, mfma_acc_vec_type=mfma_acc_vec_type)
     return v_o
 
 
@@ -1103,10 +1214,18 @@ def _mma1(
     *,
     D_CHUNKS,
     _mma_atom,
-    v16f32_type,
+    mfma_acc_vec_type,
 ):
     for step in range_constexpr(4):
-        v_o = _mma1_step_k(step, v_p, v_v, v_o, D_CHUNKS, _mma_atom=_mma_atom, v16f32_type=v16f32_type)
+        v_o = _mma1_step_k(
+            step,
+            v_p,
+            v_v,
+            v_o,
+            D_CHUNKS,
+            _mma_atom=_mma_atom,
+            mfma_acc_vec_type=mfma_acc_vec_type,
+        )
     return v_o
 
 
