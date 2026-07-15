@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-15T23:13:26Z",
+ "updated": "2026-07-15T23:24:02Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29457354426",
    "created_at": "2026-07-15T23:02:51Z",
-   "updated_at": "2026-07-15T23:10:36Z",
+   "updated_at": "2026-07-15T23:12:17Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-15T23:12:14Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29457354426/job/87494591312"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-15T23:12:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29457354426/job/87494591323"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-15T23:12:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29457354426/job/87494591341"
+    }
+   ]
   },
   {
    "run_id": 29453553110,
@@ -68,20 +96,20 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29444443854",
    "created_at": "2026-07-15T19:25:30Z",
-   "updated_at": "2026-07-15T21:46:07Z",
+   "updated_at": "2026-07-15T23:22:15Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-15T21:46:06Z",
-     "completed_at": null,
+     "completed_at": "2026-07-15T23:22:14Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29444443854/job/87479795119"
     },
     {
