@@ -9,9 +9,11 @@ Implements stage1/stage2 single-kernel inline paths using the
 conversion) inputs.
 """
 
+from __future__ import annotations
+
 import functools
 
-from kernels.common.tensor_shim import lds_load_vec
+from flydsl.runtime.device import get_rocm_arch
 from kernels.moe.moe_gemm_2stage import (
     MoeGemm2Mode,
     compile_moe_reduction,
@@ -20,31 +22,13 @@ from kernels.moe.moe_gemm_2stage_common_gfx1250 import (
     _bf16_to_f16_wrapper,
     _emit_stage1_gate_up_epilogue,
     _emit_stage2_store_epilogue,
+    _finalize_alloc_and_launch_2d,
     _make_moe_wave_layout,
     _make_wmma_sub_tiles,
     _moe_out_elem_ty,
     _pick_fp16_single_launch_shape,
     _require_gfx1250,
 )
-
-
-def _launch_2d_no_alloc(*, ctx, launcher, gx, gy, block_threads, stream, waves_per_eu, ir, gz=1):
-    """Set optional per-func attributes and launch a 2D grid.
-
-    Shared-memory bytes are auto-tracked by the ``fx.SharedAllocator`` used
-    inside the kernel, so no explicit finalize step is required.
-    """
-    for op in ctx.gpu_module_body.operations:
-        if hasattr(op, "attributes") and op.OPERATION_NAME == "gpu.func":
-            if waves_per_eu is not None and int(waves_per_eu) >= 1:
-                op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
-                    ir.IntegerType.get_signless(32), int(waves_per_eu)
-                )
-    launcher.launch(
-        grid=(gx, gy, gz),
-        block=(block_threads, 1, 1),
-        stream=stream,
-    )
 
 
 @functools.lru_cache(maxsize=64)
@@ -73,6 +57,7 @@ def _compile_stage1_wmma_kernel_impl(
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, gpu, idx2crd, range_constexpr, rocdl, vector
     from flydsl.expr.typing import T
+    from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
     WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
     WAVE_SIZE = 32
@@ -110,11 +95,13 @@ def _compile_stage1_wmma_kernel_impl(
     lds_a_elems = int(tile_m) * lds_a_stride + LDS_PAD_A
     lds_b_elems = int(tile_k) * lds_b_stride + LDS_PAD_B
 
-    @fx.struct
-    class SharedStorage:
-        smem_bg: fx.Array[fx.Float16, lds_b_elems, 16]
-        smem_bu: fx.Array[fx.Float16, lds_b_elems, 16]
-        smem_a: fx.Array[fx.Float16, lds_a_elems, 16]
+    alloc = SmemAllocator(None, arch=str(get_rocm_arch()), global_sym_name="moe_fp16_s1_single")
+    off_bg = alloc._align(alloc.ptr, 16)
+    alloc.ptr = off_bg + lds_b_elems * elem_bytes
+    off_bu = alloc._align(alloc.ptr, 16)
+    alloc.ptr = off_bu + lds_b_elems * elem_bytes
+    off_a = alloc._align(alloc.ptr, 16)
+    alloc.ptr = off_a + lds_a_elems * elem_bytes
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_fp16_stage1_single(
@@ -173,22 +160,13 @@ def _compile_stage1_wmma_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
-        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        a_lds_ptr = lds.smem_a.ptr
-        a_lds_view = lds.smem_a.view(fx.make_layout(lds_a_elems, 1))
-        bg_lds_view = lds.smem_bg.view(fx.make_layout(lds_b_elems, 1))
-        bu_lds_view = lds.smem_bu.view(fx.make_layout(lds_b_elems, 1))
-        bg_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_bg.ptr)))
-        bu_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_bu.ptr)))
-
-        vec8_ty = ir.VectorType.get([8], T.f16)
-
-        def _lds_byte_ptr(base_bytes, elem_off):
-            byte_addr = base_bytes + arith.ArithValue(arith.unwrap(elem_off, index=True)) * arith.index(elem_bytes)
-            return buffer_ops.create_llvm_ptr(byte_addr, address_space=3)
-
-        def _lds_tr_load_v8(base_bytes, elem_off):
-            return rocdl.ds_load_tr16_b128(vec8_ty, _lds_byte_ptr(base_bytes, elem_off))
+        base_ptr = alloc.get_base()
+        smem_bg = SmemPtr(base_ptr, off_bg, T.f16, shape=(lds_b_elems,))
+        smem_bu = SmemPtr(base_ptr, off_bu, T.f16, shape=(lds_b_elems,))
+        smem_a = SmemPtr(base_ptr, off_a, T.f16, shape=(lds_a_elems,))
+        lds_bg = get_op_result_or_value(smem_bg.get())
+        lds_bu = get_op_result_or_value(smem_bu.get())
+        lds_a = get_op_result_or_value(smem_a.get())
 
         def silu(x):
             t = x * (-1.4426950408889634)
@@ -234,10 +212,11 @@ def _compile_stage1_wmma_kernel_impl(
                         arith.constant(0.0, type=T.f16),
                     )
                     lds_idx = row * arith.index(lds_a_stride) + col
-                    fx.memref_store(x_val, a_lds_view, fx.Int32(lds_idx))
+                    v1 = vector.from_elements(T.vec(1, T.f16), [x_val])
+                    vector.store(v1, lds_a, [lds_idx], alignment=2)
                     scf.YieldOp([])
 
-        def copy_b_to_lds(k_base, b_lds_view, up_shift):
+        def copy_b_to_lds(k_base, lds_memref, up_shift):
             eid_idx = arith.index_cast(T.index, eid_i32)
             n_base = eid_idx * arith.index(n_total) + blk_n + arith.index(up_shift)
             total = int(tile_k) * int(tile_n)
@@ -261,7 +240,8 @@ def _compile_stage1_wmma_kernel_impl(
                         dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
-                    fx.memref_store(w_val, b_lds_view, fx.Int32(lds_idx))
+                    v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
+                    vector.store(v1, lds_memref, [lds_idx], alignment=2)
                     scf.YieldOp([])
 
         def _precompute_a_lane_bases():
@@ -285,18 +265,20 @@ def _compile_stage1_wmma_kernel_impl(
             return bases
 
         def load_a_frag(a_base, ks):
+            vec8_ty = ir.VectorType.get([8], T.f16)
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = lds_load_vec(a_lds_ptr, off0, fx.Float16, 8)
-            v1 = lds_load_vec(a_lds_ptr, off1, fx.Float16, 8)
-            return v0.shuffle(v1, list(range(16)))
+            v0 = vector.load_op(vec8_ty, lds_a, [off0])
+            v1 = vector.load_op(vec8_ty, lds_a, [off1])
+            return vector.shuffle(v0, v1, list(range(16)))
 
-        def load_b_frag(b_lds_base, b_base, ks):
+        def load_b_frag(lds_buf, b_base, ks):
+            vec8_ty = ir.VectorType.get([8], T.f16)
             results = []
             for k_half in range_constexpr(2):
                 k_row_off = (ks * WMMA_K + k_half * 16) * lds_b_stride
                 elem_off = b_base + arith.index(k_row_off)
-                v = _lds_tr_load_v8(b_lds_base, elem_off)
+                v = rocdl.lds_transpose_load(vec8_ty, lds_buf, elem_off, elem_bytes)
                 results.append(v)
             return vector.shuffle(results[0], results[1], list(range(16)))
 
@@ -311,13 +293,13 @@ def _compile_stage1_wmma_kernel_impl(
             for kt in range_constexpr(num_k_tiles):
                 k_base = fx.Index(kt * int(tile_k))
                 pack_a_to_lds(k_base)
-                copy_b_to_lds(k_base, bg_lds_view, 0)
-                copy_b_to_lds(k_base, bu_lds_view, int(inter_dim))
+                copy_b_to_lds(k_base, lds_bg, 0)
+                copy_b_to_lds(k_base, lds_bu, int(inter_dim))
                 gpu.barrier()
 
                 for ks in range_constexpr(k_wmma_steps):
-                    b_gate_frags = [load_b_frag(bg_lds_base, b_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
-                    b_up_frags = [load_b_frag(bu_lds_base, b_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
+                    b_gate_frags = [load_b_frag(lds_bg, b_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
+                    b_up_frags = [load_b_frag(lds_bu, b_bases[wn], ks) for wn in range_constexpr(wmma_n_rep)]
                     for wm in range_constexpr(wmma_m_rep):
                         a_frag = load_a_frag(a_bases[wm], ks)
                         for wn in range_constexpr(wmma_n_rep):
@@ -421,8 +403,9 @@ def _compile_stage1_wmma_kernel_impl(
             i32_k_in,
             i32_size_expert_ids_in,
         )
-        _launch_2d_no_alloc(
+        _finalize_alloc_and_launch_2d(
             ctx=ctx,
+            alloc=alloc,
             launcher=launcher,
             gx=gx,
             gy=gy,
@@ -466,6 +449,7 @@ def _compile_stage2_wmma_kernel_impl(
     from flydsl.compiler.kernel_function import CompilationContext
     from flydsl.expr import arith, buffer_ops, const_expr, gpu, idx2crd, range_constexpr, rocdl, vector
     from flydsl.expr.typing import T
+    from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr, get_op_result_or_value
 
     WMMA_M, WMMA_N, WMMA_K = 16, 16, 32
     WAVE_SIZE = 32
@@ -500,10 +484,11 @@ def _compile_stage2_wmma_kernel_impl(
     lds_a_elems = int(tile_m) * lds_a_stride + LDS_PAD_A
     lds_b_elems = int(tile_k) * lds_b_stride + LDS_PAD_B
 
-    @fx.struct
-    class SharedStorage:
-        smem_b: fx.Array[fx.Float16, lds_b_elems, 16]
-        smem_a: fx.Array[fx.Float16, lds_a_elems, 16]
+    alloc = SmemAllocator(None, arch=str(get_rocm_arch()), global_sym_name="moe_fp16_s2_single")
+    off_b = alloc._align(alloc.ptr, 16)
+    alloc.ptr = off_b + lds_b_elems * elem_bytes
+    off_a = alloc._align(alloc.ptr, 16)
+    alloc.ptr = off_a + lds_a_elems * elem_bytes
 
     @flyc.kernel(known_block_size=[block_threads, 1, 1])
     def moe_fp16_stage2_single(
@@ -582,20 +567,11 @@ def _compile_stage2_wmma_kernel_impl(
         warp_n_base = wave_n_idx * arith.index(warp_tile_n)
         blk_n = bx * arith.index(int(tile_n))
 
-        lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        a_lds_ptr = lds.smem_a.ptr
-        a_lds_view = lds.smem_a.view(fx.make_layout(lds_a_elems, 1))
-        b_lds_view = lds.smem_b.view(fx.make_layout(lds_b_elems, 1))
-        b_lds_base = arith.ArithValue(arith.index_cast(T.index, fx.ptrtoint(lds.smem_b.ptr)))
-
-        vec8_ty = ir.VectorType.get([8], T.f16)
-
-        def _lds_byte_ptr(base_bytes, elem_off):
-            byte_addr = base_bytes + arith.ArithValue(arith.unwrap(elem_off, index=True)) * arith.index(elem_bytes)
-            return buffer_ops.create_llvm_ptr(byte_addr, address_space=3)
-
-        def _lds_tr_load_v8(base_bytes, elem_off):
-            return rocdl.ds_load_tr16_b128(vec8_ty, _lds_byte_ptr(base_bytes, elem_off))
+        base_ptr = alloc.get_base()
+        smem_b = SmemPtr(base_ptr, off_b, T.f16, shape=(lds_b_elems,))
+        smem_a = SmemPtr(base_ptr, off_a, T.f16, shape=(lds_a_elems,))
+        lds_b = get_op_result_or_value(smem_b.get())
+        lds_a = get_op_result_or_value(smem_a.get())
 
         def pack_a_to_lds(k_base):
             total = int(tile_m * tile_k)
@@ -639,7 +615,8 @@ def _compile_stage2_wmma_kernel_impl(
                         arith.constant(0.0, type=T.f16),
                     )
                     lds_idx = row * arith.index(lds_a_stride) + col
-                    fx.memref_store(x_val, a_lds_view, fx.Int32(lds_idx))
+                    v1 = vector.from_elements(T.vec(1, T.f16), [x_val])
+                    vector.store(v1, lds_a, [lds_idx], alignment=2)
                     scf.YieldOp([])
 
         def copy_b_to_lds(k_base):
@@ -666,7 +643,8 @@ def _compile_stage2_wmma_kernel_impl(
                         dtype=T.f16,
                     )
                     lds_idx = k_local * arith.index(lds_b_stride) + n_local
-                    fx.memref_store(w_val, b_lds_view, fx.Int32(lds_idx))
+                    v1 = vector.from_elements(T.vec(1, T.f16), [w_val])
+                    vector.store(v1, lds_b, [lds_idx], alignment=2)
                     scf.YieldOp([])
 
         def _precompute_a_lane_bases():
@@ -690,18 +668,20 @@ def _compile_stage2_wmma_kernel_impl(
             return bases
 
         def load_a_frag(a_base, ks):
+            vec8_ty = ir.VectorType.get([8], T.f16)
             off0 = a_base + arith.index(ks * WMMA_K)
             off1 = a_base + arith.index(ks * WMMA_K + 16)
-            v0 = lds_load_vec(a_lds_ptr, off0, fx.Float16, 8)
-            v1 = lds_load_vec(a_lds_ptr, off1, fx.Float16, 8)
-            return v0.shuffle(v1, list(range(16)))
+            v0 = vector.load_op(vec8_ty, lds_a, [off0])
+            v1 = vector.load_op(vec8_ty, lds_a, [off1])
+            return vector.shuffle(v0, v1, list(range(16)))
 
         def load_b_frag(b_base, ks):
+            vec8_ty = ir.VectorType.get([8], T.f16)
             results = []
             for k_half in range_constexpr(2):
                 k_row_off = (ks * WMMA_K + k_half * 16) * lds_b_stride
                 elem_off = b_base + arith.index(k_row_off)
-                v = _lds_tr_load_v8(b_lds_base, elem_off)
+                v = rocdl.lds_transpose_load(vec8_ty, lds_b, elem_off, elem_bytes)
                 results.append(v)
             return vector.shuffle(results[0], results[1], list(range(16)))
 
@@ -816,8 +796,9 @@ def _compile_stage2_wmma_kernel_impl(
             i32_k_in,
             i32_size_expert_ids_in,
         )
-        _launch_2d_no_alloc(
+        _finalize_alloc_and_launch_2d(
             ctx=ctx,
+            alloc=alloc,
             launcher=launcher,
             gx=gx,
             gy=gy,
