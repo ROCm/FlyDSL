@@ -23,7 +23,7 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
-from flydsl.expr.utils.arith import _to_raw as _raw
+from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention import dualwave_common as dwc
 from kernels.attention.dualwave_common import (
@@ -185,12 +185,12 @@ def build_flash_attn_dualwave_swp_module(
         lane_mod_32 = lane % 32
         lane_div_32 = lane // 32
 
-        _tid_i32 = _raw(fx.Int32(tid))
+        _tid_i32 = as_mlir_value(fx.Int32(tid))
         _wave_id_uni_i32 = rocdl.readfirstlane(
             T.i32,
-            arith.divsi(_tid_i32, _raw(fx.Int32(traits.WARP_SIZE))),
+            arith.divsi(_tid_i32, as_mlir_value(fx.Int32(traits.WARP_SIZE))),
         )
-        _stagger_i32 = arith.divsi(_wave_id_uni_i32, _raw(fx.Int32(4)))
+        _stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(4)))
         wave_id_uni = fx.Index(_wave_id_uni_i32)
 
         wave_q_offset = wave_id * traits.ROWS_PER_WAVE
@@ -320,7 +320,7 @@ def build_flash_attn_dualwave_swp_module(
             local_tile = tile_idx - split_t0
             src = buffer_ops.get_element_ptr(
                 lds_bt_base_ptr,
-                byte_offset=_raw(fx.Int32(local_tile * fx.Index(4))),
+                byte_offset=as_mlir_value(fx.Int32(local_tile * fx.Index(4))),
                 elem_type=T.i8,
             )
             return llvm.LoadOp(T.i32, src).result
@@ -366,21 +366,36 @@ def build_flash_attn_dualwave_swp_module(
 
         def _scale_q_all(q_all_bf16):
             fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
-            q_all_f32_op = llvm.FPExtOp(v64f32_type, _raw(q_all_bf16))
+            q_all_f32_op = llvm.FPExtOp(v64f32_type, as_mlir_value(q_all_bf16))
             q_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
             q_all_f32 = q_all_f32_op.result
             scale_vec = Vec.from_elements([c_sm_scale_log2e], fx.Float32).broadcast_to(
                 traits.K_STEPS_QK * traits.MFMA_LANE_K
             )
             q_all_scaled_f32 = arith.mulf(
-                _raw(scale_vec),
-                _raw(q_all_f32),
+                as_mlir_value(scale_vec),
+                as_mlir_value(q_all_f32),
                 fastmath=fm_fast,
             )
             q_all_scaled_bf16_op = llvm.FPTruncOp(v64bf16_type, q_all_scaled_f32)
             q_all_scaled_bf16_op.operation.attributes["fastmathFlags"] = fm_fast_attr
             q_all_scaled_bf16 = q_all_scaled_bf16_op.result
             return Vec(q_all_scaled_bf16, (traits.K_STEPS_QK * traits.MFMA_LANE_K,), elem_dtype)
+
+        def _load_k_pair(buf_id, idx_lo):
+            """Load one lo/hi K MFMA pack pair from LDS; idx_hi = idx_lo + URK_N_STRIP_STRIDE."""
+            lo = dwc._load_k_pack_aligned(
+                lds_kv_base_ptr, idx_lo, buf_id, mfma_pack_type, traits.LDS_SCOPE_NAMES, traits.BF16_BYTES
+            )
+            hi = dwc._load_k_pack_aligned(
+                lds_kv_base_ptr,
+                idx_lo + traits.DUALWAVE_SWP_URK_N_STRIP_STRIDE,
+                buf_id,
+                mfma_pack_type,
+                traits.LDS_SCOPE_NAMES,
+                traits.BF16_BYTES,
+            )
+            return lo, hi
 
         def _async_load_k_from_lds_to_vgpr(buf_id, urk_base):
             """Read all 16 K MFMA packs from LDS buffer `buf_id` (DUALWAVE_SWP u_rk)."""
@@ -400,47 +415,14 @@ def build_flash_attn_dualwave_swp_module(
                         + (ks * 2 + lane_div_32) * (traits.BLOCK_N * traits.KV_VEC_SIZE)
                         + _kn * traits.KV_VEC_SIZE
                     )
-                    idx_hi = idx_lo + traits.DUALWAVE_SWP_URK_N_STRIP_STRIDE
-                    k_lo[ks] = dwc._load_k_pack_aligned(
-                        lds_kv_base_ptr,
-                        idx_lo,
-                        buf_id,
-                        mfma_pack_type,
-                        traits.LDS_SCOPE_NAMES,
-                        traits.BF16_BYTES,
-                    )
-                    k_hi[ks] = dwc._load_k_pack_aligned(
-                        lds_kv_base_ptr,
-                        idx_hi,
-                        buf_id,
-                        mfma_pack_type,
-                        traits.LDS_SCOPE_NAMES,
-                        traits.BF16_BYTES,
-                    )
+                    k_lo[ks], k_hi[ks] = _load_k_pair(buf_id, idx_lo)
                 return (k_lo, k_hi)
 
             for ks in range_constexpr(traits.K_STEPS_QK):
                 ks_offset = (ks // 4) * traits.DUALWAVE_SWP_URK_KSTEP_OUTER + (
                     ks % 4
                 ) * traits.DUALWAVE_SWP_URK_KSTEP_INNER
-                idx_lo = k_base + urk_base + ks_offset
-                idx_hi = idx_lo + traits.DUALWAVE_SWP_URK_N_STRIP_STRIDE
-                k_lo[ks] = dwc._load_k_pack_aligned(
-                    lds_kv_base_ptr,
-                    idx_lo,
-                    buf_id,
-                    mfma_pack_type,
-                    traits.LDS_SCOPE_NAMES,
-                    traits.BF16_BYTES,
-                )
-                k_hi[ks] = dwc._load_k_pack_aligned(
-                    lds_kv_base_ptr,
-                    idx_hi,
-                    buf_id,
-                    mfma_pack_type,
-                    traits.LDS_SCOPE_NAMES,
-                    traits.BF16_BYTES,
-                )
+                k_lo[ks], k_hi[ks] = _load_k_pair(buf_id, k_base + urk_base + ks_offset)
             return (k_lo, k_hi)
 
         def _read_v_packs_for_buf(buf_id, urv_base):
@@ -451,6 +433,7 @@ def build_flash_attn_dualwave_swp_module(
                 traits.SMEM_K_TILE_ELEMS,
                 traits.DUALWAVE_SWP_KV_PER_BUFFER,
             )
+            packs = [[None] * traits.D_CHUNKS for _ in range(4)]
             if const_expr(traits.KV_VECTORIZED):
                 _lm = lane_mod_32
                 v_addr_base = (
@@ -461,11 +444,9 @@ def build_flash_attn_dualwave_swp_module(
                 )
                 v_base_ptr = buffer_ops.get_element_ptr(
                     lds_kv_base_ptr,
-                    byte_offset=_raw(fx.Int32(v_addr_base * traits.BF16_BYTES)),
+                    byte_offset=as_mlir_value(fx.Int32(v_addr_base * traits.BF16_BYTES)),
                     elem_type=T.i8,
                 )
-
-                packs = [[None] * traits.D_CHUNKS for _ in range(4)]
                 for dc in range_constexpr(traits.D_CHUNKS):
                     for k_substep in range_constexpr(4):
                         const_off = dc * (
@@ -480,7 +461,6 @@ def build_flash_attn_dualwave_swp_module(
                 return packs
 
             lds_base = v_base + urv_base
-            packs = [[None] * traits.D_CHUNKS for _ in range(4)]
             for dc in range_constexpr(traits.D_CHUNKS):
                 i_0 = dc // 2
                 i_1 = dc % 2
@@ -524,8 +504,8 @@ def build_flash_attn_dualwave_swp_module(
                     lane_div_32=lane_div_32,
                     q_row_i32=q_row_i32,
                 )
-                s_lo = Vec.from_elements([_raw(v) for v in lo_list], fx.Float32).ir_value()
-                s_hi = Vec.from_elements([_raw(v) for v in hi_list], fx.Float32).ir_value()
+                s_lo = Vec.from_elements([as_mlir_value(v) for v in lo_list], fx.Float32).ir_value()
+                s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
             return s_lo, s_hi
 
         def _seq_pad_mask_inplace(v_s_lists, tile_idx):
@@ -552,8 +532,8 @@ def build_flash_attn_dualwave_swp_module(
             if fx.Int32(kv_tile_end) > seqlen_kv_i32:
                 lo_list, hi_list = _v_s_vec_to_lists(v_s)
                 _seq_pad_mask_inplace((lo_list, hi_list), tile_idx)
-                s_lo = Vec.from_elements([_raw(v) for v in lo_list], fx.Float32).ir_value()
-                s_hi = Vec.from_elements([_raw(v) for v in hi_list], fx.Float32).ir_value()
+                s_lo = Vec.from_elements([as_mlir_value(v) for v in lo_list], fx.Float32).ir_value()
+                s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
             return s_lo, s_hi
 
         if const_expr(traits.VARLEN):
@@ -729,8 +709,8 @@ def build_flash_attn_dualwave_swp_module(
         c_log2e_f = fx.Float32(_LOG2E)
         c_sm_scale_log2e = fx.Float32(
             arith.mulf(
-                _raw(fmath.rsqrt(head_dim_f32, fastmath=fm_fast)),
-                _raw(c_log2e_f),
+                as_mlir_value(fmath.rsqrt(head_dim_f32, fastmath=fm_fast)),
+                as_mlir_value(c_log2e_f),
                 fastmath=fm_fast,
             )
         )
@@ -1294,7 +1274,7 @@ def build_flash_attn_dualwave_swp_module(
             )
             m_tile_max_e3 = dwc._attn_row_max(v_s_1, c_neg_inf=c_neg_inf, fm_fast=fm_fast)
             row_max_e3 = dwc._fmax(m_row, m_tile_max_e3, fm_fast=fm_fast)
-            rescale_e3 = rocdl.exp2(T.f32, _raw(dwc._fsub(m_row, row_max_e3, fm_fast=fm_fast)))
+            rescale_e3 = rocdl.exp2(T.f32, as_mlir_value(dwc._fsub(m_row, row_max_e3, fm_fast=fm_fast)))
             m_row = row_max_e3
             v_s_1 = dwc._attn_sub_row(v_s_1, row_max_e3, fm_fast=fm_fast)
             v_p_1 = dwc._attn_exp2_slice(v_s_1, 0, 16)
@@ -1367,7 +1347,7 @@ def build_flash_attn_dualwave_swp_module(
             )
             m_tile_max_e7 = dwc._attn_row_max(v_s_0, c_neg_inf=c_neg_inf, fm_fast=fm_fast)
             row_max_e7 = dwc._fmax(m_row, m_tile_max_e7, fm_fast=fm_fast)
-            rescale_e7 = rocdl.exp2(T.f32, _raw(dwc._fsub(m_row, row_max_e7, fm_fast=fm_fast)))
+            rescale_e7 = rocdl.exp2(T.f32, as_mlir_value(dwc._fsub(m_row, row_max_e7, fm_fast=fm_fast)))
             m_row = row_max_e7
             v_s_0 = dwc._attn_sub_row(v_s_0, row_max_e7, fm_fast=fm_fast)
             v_p_0 = dwc._attn_exp2_slice(v_s_0, 0, 16)
@@ -1435,7 +1415,7 @@ def build_flash_attn_dualwave_swp_module(
             )
             m_tile_max_e11 = dwc._attn_row_max(v_s_1, c_neg_inf=c_neg_inf, fm_fast=fm_fast)
             row_max_e11 = dwc._fmax(m_row, m_tile_max_e11, fm_fast=fm_fast)
-            rescale_e11 = rocdl.exp2(T.f32, _raw(dwc._fsub(m_row, row_max_e11, fm_fast=fm_fast)))
+            rescale_e11 = rocdl.exp2(T.f32, as_mlir_value(dwc._fsub(m_row, row_max_e11, fm_fast=fm_fast)))
             m_row = row_max_e11
             v_s_1 = dwc._attn_sub_row(v_s_1, row_max_e11, fm_fast=fm_fast)
             v_p_1 = dwc._attn_exp2_slice(v_s_1, 0, 16)
@@ -1465,7 +1445,7 @@ def build_flash_attn_dualwave_swp_module(
             )
 
             # Normalize O; split-K stores normalized partials for later w_s * l_s reweighting.
-            inv_l_rcp = rocdl.rcp(T.f32, _raw(l_row))
+            inv_l_rcp = rocdl.rcp(T.f32, as_mlir_value(l_row))
             inv_l = ArithValue(fx.Float32(l_row) > c_zero_f).select(inv_l_rcp, c_zero_f)
             dwc._scale_o(v_o, inv_l, traits.D_CHUNKS, fm_fast=fm_fast)
 
@@ -1496,13 +1476,13 @@ def build_flash_attn_dualwave_swp_module(
                 for i in range_constexpr(4):
                     o_f16.append(fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype))
                 pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-                return _raw(pack[0]), _raw(pack[1])
+                return as_mlir_value(pack[0]), as_mlir_value(pack[1])
 
             is_hi_half = ArithValue(lane_div_32 != fx.Index(0))
 
             def _swap_halves(dw):
                 # permlane32_swap returns the partner dword from lane^32 for each half-wave.
-                swapped = rocdl.permlane32_swap(pair_i32_ty, _raw(dw), _raw(dw), False, False)
+                swapped = rocdl.permlane32_swap(pair_i32_ty, as_mlir_value(dw), as_mlir_value(dw), False, False)
                 lo_res = llvm.extractvalue(T.i32, swapped, [0])
                 hi_res = llvm.extractvalue(T.i32, swapped, [1])
                 return is_hi_half.select(lo_res, hi_res)
@@ -1517,10 +1497,10 @@ def build_flash_attn_dualwave_swp_module(
                         # Fuse low/high half-wave groups into contiguous 8-column store pairs.
                         y0_a, y1_a = _swap_halves(d0_a), _swap_halves(d1_a)
                         y0_b, y1_b = _swap_halves(d0_b), _swap_halves(d1_b)
-                        w0 = is_hi_half.select(y0_b, _raw(d0_a))
-                        w1 = is_hi_half.select(y1_b, _raw(d1_a))
-                        w2 = is_hi_half.select(_raw(d0_b), y0_a)
-                        w3 = is_hi_half.select(_raw(d1_b), y1_a)
+                        w0 = is_hi_half.select(y0_b, as_mlir_value(d0_a))
+                        w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
+                        w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
+                        w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
                         o_pack = Vec.from_elements([fx.Int32(w0), fx.Int32(w1), fx.Int32(w2), fx.Int32(w3)], fx.Int32)
                         o_global = o_base + (dc * traits.D_CHUNK + 2 * g * 8)
                         dwc._buffer_store_128(
@@ -1556,10 +1536,10 @@ def build_flash_attn_dualwave_swp_module(
                                 d0_b, d1_b = _o_pack_2dw(dc, 2 * g + 1)
                                 y0_a, y1_a = _swap_halves(d0_a), _swap_halves(d1_a)
                                 y0_b, y1_b = _swap_halves(d0_b), _swap_halves(d1_b)
-                                w0 = is_hi_half.select(y0_b, _raw(d0_a))
-                                w1 = is_hi_half.select(y1_b, _raw(d1_a))
-                                w2 = is_hi_half.select(_raw(d0_b), y0_a)
-                                w3 = is_hi_half.select(_raw(d1_b), y1_a)
+                                w0 = is_hi_half.select(y0_b, as_mlir_value(d0_a))
+                                w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
+                                w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
+                                w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
                                 dw_col = dc * (traits.D_CHUNK // 2) + (2 * g + lane_div_32) * 4
                                 dwc._ws_store_quad_i32(
                                     [w0, w1, w2, w3],
@@ -1640,16 +1620,18 @@ def build_flash_attn_dualwave_swp_module(
         _ws_base_i64_c = fx.Int64(fx.ptrtoint(fx.get_iter(WS)))
 
         def _make_ws_rsrc_c(byte_offset, nrec_bytes):
-            addr_i64 = _raw(_ws_base_i64_c + fx.Int64(byte_offset))
-            return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=_raw(fx.Int64(nrec_bytes)))
+            addr_i64 = as_mlir_value(_ws_base_i64_c + fx.Int64(byte_offset))
+            return buffer_ops.create_buffer_resource_from_addr(
+                addr_i64, num_records_bytes=as_mlir_value(fx.Int64(nrec_bytes))
+            )
 
         # O is natural-shape [B, S, H, D]; per-batch descriptor folds b*seq_v into the
         # 48-bit base so the flat index stays 0-based within the batch (< 2^31).
         _o_per_batch_elems_c = seq_v * stride_v
         _o_batch_byte_off_c = b * _o_per_batch_elems_c * fx.Index(2)
         _o_rsrc_c = buffer_ops.create_buffer_resource_from_addr(
-            _raw(fx.Int64(fx.ptrtoint(fx.get_iter(O))) + fx.Int64(_o_batch_byte_off_c)),
-            num_records_bytes=_raw(fx.Int64(_o_per_batch_elems_c * fx.Index(2))),
+            as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(O))) + fx.Int64(_o_batch_byte_off_c)),
+            num_records_bytes=as_mlir_value(fx.Int64(_o_per_batch_elems_c * fx.Index(2))),
         )
         _load_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
 
@@ -1663,16 +1645,16 @@ def build_flash_attn_dualwave_swp_module(
             lrsrc_i = _make_ws_rsrc_c(
                 _ws_lrow_abs_bytes_c + split_z_i * _ws_ml_per_split_bytes_c, _ws_ml_per_split_bytes_c
             )
-            m_f32 = buffer_ops.buffer_load(mrsrc_i, _raw(fx.Int32(local_ml_idx_c)), vec_width=1, dtype=T.f32)
-            l_f32 = buffer_ops.buffer_load(lrsrc_i, _raw(fx.Int32(local_ml_idx_c)), vec_width=1, dtype=T.f32)
+            m_f32 = buffer_ops.buffer_load(mrsrc_i, as_mlir_value(fx.Int32(local_ml_idx_c)), vec_width=1, dtype=T.f32)
+            l_f32 = buffer_ops.buffer_load(lrsrc_i, as_mlir_value(fx.Int32(local_ml_idx_c)), vec_width=1, dtype=T.f32)
             m_s.append(m_f32)
             l_s.append(l_f32)
         m_max = m_s[0]
         for i in range_constexpr(traits.NUM_KV_SPLITS - 1):
             m_max = dwc._fmax(m_max, m_s[i + 1], fm_fast=fm_fast)
 
-        den = _raw(fx.Float32(0.0))
-        acc = _raw(Vec.filled(4, 0.0, fx.Float32))
+        den = as_mlir_value(fx.Float32(0.0))
+        acc = as_mlir_value(Vec.filled(4, 0.0, fx.Float32))
         for i in range_constexpr(traits.NUM_KV_SPLITS):
             # Empty split (causal tail): l == 0 and O_partial is zeroed -> skip its O
             # reads. The runtime `if` (call in cond -> scf.if) reassigns pre-existing
@@ -1684,12 +1666,16 @@ def build_flash_attn_dualwave_swp_module(
             @flyc.jit
             def _accum_split(acc, den):
                 if fx.Float32(l_s[i]) > fx.Float32(0.0):
-                    w = rocdl.exp2(T.f32, _raw(arith.subf(_raw(m_s[i]), _raw(m_max), fastmath=fm_fast)))
+                    w = rocdl.exp2(
+                        T.f32, as_mlir_value(arith.subf(as_mlir_value(m_s[i]), as_mlir_value(m_max), fastmath=fm_fast))
+                    )
                     wl = dwc._fmul(w, l_s[i], fm_fast=fm_fast)
                     den = dwc._fadd(den, wl, fm_fast=fm_fast)
                     # O_partial holds packed 16-bit normalized partials (2 cols/dword):
                     # dwordx2 per lane, extend the 4 cols to f32, weight by w * l.
-                    o2_raw = buffer_ops.buffer_load(orsrc_i, _raw(fx.Int32(local_o_idx_i)), vec_width=2, dtype=T.i32)
+                    o2_raw = buffer_ops.buffer_load(
+                        orsrc_i, as_mlir_value(fx.Int32(local_o_idx_i)), vec_width=2, dtype=T.i32
+                    )
                     o2_i32 = ir.Value(o2_raw)
                     o4 = Vec(o2_i32, (2,), fx.Int32).bitcast(elem_dtype).to(fx.Float32)
                     w4 = Vec.from_elements([fx.Float32(wl)], fx.Float32).broadcast_to(4)
@@ -1710,14 +1696,14 @@ def build_flash_attn_dualwave_swp_module(
             for i in range_constexpr(4):
                 o_f16.append(fx.Float32(out4[i]).to(elem_dtype))
             pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-            lo, hi = _raw(pack[0]), _raw(pack[1])
+            lo, hi = as_mlir_value(pack[0]), as_mlir_value(pack[1])
         o_pack = Vec.from_elements([fx.Int32(lo), fx.Int32(hi)], fx.Int32)
         # b folded into the descriptor base; index 0-based within the batch. o_global is in
         # elem_dtype (2-byte) units, so pass an explicit byte offset (the i32x2 data would
         # otherwise be scaled by 4 bytes/elem).
         o_global = s * stride_v + h * traits.HEAD_DIM + col
         buffer_ops.buffer_store(
-            o_pack.ir_value(), _o_rsrc_c, _raw(fx.Int32(o_global * fx.Index(2))), offset_is_bytes=True
+            o_pack.ir_value(), _o_rsrc_c, as_mlir_value(fx.Int32(o_global * fx.Index(2))), offset_is_bytes=True
         )
 
     @flyc.jit

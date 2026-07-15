@@ -25,7 +25,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
-from flydsl.expr.utils.arith import _to_raw as _raw
+from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from kernels.common.kernels_common import _if_then, dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
@@ -289,7 +289,7 @@ def _ds_read_tr16_b64_imm(result_type, addr_i32, imm_offset=0):
     raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
     raw = llvm.inline_asm(
         raw_type,
-        [_raw(addr_i32)],
+        [as_mlir_value(addr_i32)],
         f"ds_read_b64_tr_b16 $0, $1 offset:{imm}\n",
         "=v,v,~{memory}",
         has_side_effects=True,
@@ -307,7 +307,7 @@ def _ds_read_tr8_b64_imm(result_type, addr_i32, imm_offset=0):
     raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
     raw = llvm.inline_asm(
         raw_type,
-        [_raw(addr_i32)],
+        [as_mlir_value(addr_i32)],
         f"ds_read_b64_tr_b8 $0, $1 offset:{imm}\n",
         "=v,v,~{memory}",
         has_side_effects=True,
@@ -371,8 +371,8 @@ def _make_page_view(
 
 
 def _make_v_page_rsrc(v_base_i64, page_id, page_byte_stride, page_nrec_bytes):
-    addr = _raw(v_base_i64 + fx.Int64(page_id * page_byte_stride))
-    return buffer_ops.create_buffer_resource_from_addr(addr, num_records_bytes=_raw(page_nrec_bytes))
+    addr = as_mlir_value(v_base_i64 + fx.Int64(page_id * page_byte_stride))
+    return buffer_ops.create_buffer_resource_from_addr(addr, num_records_bytes=as_mlir_value(page_nrec_bytes))
 
 
 def _vec_v_elem(n, d, kv_head_idx, TRAITS_BLOCK_N, TRAITS_KV_VEC_SIZE, TRAITS_HEAD_DIM):
@@ -385,13 +385,13 @@ def _vec_v_elem(n, d, kv_head_idx, TRAITS_BLOCK_N, TRAITS_KV_VEC_SIZE, TRAITS_HE
 
 
 def _make_ws_rsrc(ws_base_i64, byte_offset, nrec_bytes):
-    addr_i64 = _raw(ws_base_i64 + fx.Int64(byte_offset))
-    return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=_raw(fx.Int64(nrec_bytes)))
+    addr_i64 = as_mlir_value(ws_base_i64 + fx.Int64(byte_offset))
+    return buffer_ops.create_buffer_resource_from_addr(addr_i64, num_records_bytes=as_mlir_value(fx.Int64(nrec_bytes)))
 
 
 def _read_v8f16_off(v_base_ptr, const_off, TRAITS_BF16_BYTES, mfma_pack_type):
     ptr = buffer_ops.get_element_ptr(
-        v_base_ptr, byte_offset=_raw(fx.Int32(const_off * TRAITS_BF16_BYTES)), elem_type=T.i8
+        v_base_ptr, byte_offset=as_mlir_value(fx.Int32(const_off * TRAITS_BF16_BYTES)), elem_type=T.i8
     )
     return llvm.LoadOp(mfma_pack_type, ptr, alignment=16).result
 
@@ -430,11 +430,11 @@ def _concat_vectors(lhs, rhs):
 
 
 def _bitcast_i32(value):
-    return _raw(ArithValue(value).bitcast(fx.Int32.ir_type))
+    return as_mlir_value(ArithValue(value).bitcast(fx.Int32.ir_type))
 
 
 def _bitcast_f32(value):
-    return _raw(ArithValue(value).bitcast(fx.Float32.ir_type))
+    return as_mlir_value(ArithValue(value).bitcast(fx.Float32.ir_type))
 
 
 def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
@@ -449,10 +449,10 @@ def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32
     ret = llvm.inline_asm(
         ret_struct_ty,
         [
-            _raw(x_ref_i32),
-            _raw(y_ref_i32),
-            _raw(rel_i32),
-            _raw(neg_inf_i32),
+            as_mlir_value(x_ref_i32),
+            as_mlir_value(y_ref_i32),
+            as_mlir_value(rel_i32),
+            as_mlir_value(neg_inf_i32),
         ],
         asm_str,
         "=s,=s,=v,=v,2,3,v,v,~{vcc}",
@@ -463,8 +463,8 @@ def _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32
 
 def _anchor_pair(v_s):
     lo, hi = v_s
-    lo_ir = _raw(lo)
-    hi_ir = _raw(hi)
+    lo_ir = as_mlir_value(lo)
+    hi_ir = as_mlir_value(hi)
     ret_ty = ir.Type.parse("!llvm.struct<(vector<16xf32>, vector<16xf32>)>")
     ret = llvm.inline_asm(
         ret_ty,
@@ -481,7 +481,7 @@ def _anchor_pair(v_s):
 
 def _anchor_scalar_f32(x):
     """Pin a scalar f32 at the current source position (no-op asm)."""
-    x_ir = _raw(x)
+    x_ir = as_mlir_value(x)
     return llvm.inline_asm(
         x_ir.type,
         [x_ir],
@@ -531,15 +531,15 @@ def _load_block_table_to_lds(
     segment_tiles = split_t_end - split_t0
     for pass_id in range_constexpr(traits.PAGED_BT_LDS_SIZE // traits.BLOCK_SIZE):
         local_tile = tid + fx.Index(pass_id * traits.BLOCK_SIZE)
-        with _if_then(_scf.IfOp(_raw(ArithValue(local_tile < segment_tiles)))):
+        with _if_then(_scf.IfOp(as_mlir_value(ArithValue(local_tile < segment_tiles)))):
             tile_idx = split_t0 + local_tile
-            byte_off = _raw(fx.Int32(local_tile * fx.Index(4)))
+            byte_off = as_mlir_value(fx.Int32(local_tile * fx.Index(4)))
             dst = buffer_ops.get_element_ptr(lds_bt_base_ptr, byte_offset=byte_off, elem_type=T.i8)
-            llvm.StoreOp(_raw(fx.Int32(0)), dst)
-            with _if_then(_scf.IfOp(_raw(ArithValue(tile_idx < num_kv_tiles)))):
+            llvm.StoreOp(as_mlir_value(fx.Int32(0)), dst)
+            with _if_then(_scf.IfOp(as_mlir_value(ArithValue(tile_idx < num_kv_tiles)))):
                 row_idx = batch_idx * block_table_stride_v + tile_idx
                 v = fly.copy_atom_call_ssa([_bt_v1i32], _bt_atom, fx.slice(_bt_div, (None, fx.Int32(row_idx))))
-                page_id_i32 = _raw(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
+                page_id_i32 = as_mlir_value(fx.Int32(Vec(v, (1,), fx.Int32)[0]))
                 llvm.StoreOp(page_id_i32, dst)
 
 
@@ -574,14 +574,14 @@ def _make_rebased_view(
 
 def _ws_store_f32(f32_val, local_elem_index, rsrc):
     """32-bit f32 store into a per-split-z workspace region via raw buffer descriptor."""
-    f32_ir = _raw(fx.Float32(f32_val))
-    buffer_ops.buffer_store(f32_ir, rsrc, _raw(fx.Int32(local_elem_index)))
+    f32_ir = as_mlir_value(fx.Float32(f32_val))
+    buffer_ops.buffer_store(f32_ir, rsrc, as_mlir_value(fx.Int32(local_elem_index)))
 
 
 def _ws_store_quad_i32(dwords, local_elem_index, rsrc):
     """128-bit i32x4 store (buffer_store_dwordx4) into a per-split-z workspace region."""
     vec_ir = Vec.from_elements([fx.Int32(v) for v in dwords], fx.Int32).ir_value()
-    buffer_ops.buffer_store(vec_ir, rsrc, _raw(fx.Int32(local_elem_index)))
+    buffer_ops.buffer_store(vec_ir, rsrc, as_mlir_value(fx.Int32(local_elem_index)))
 
 
 def _buffer_load_128(
@@ -643,7 +643,7 @@ def _fadd(
     *,
     fm_fast,
 ):
-    return arith.addf(_raw(a), _raw(b), fastmath=fm_fast)
+    return arith.addf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
 
 
 def _fsub(
@@ -652,7 +652,7 @@ def _fsub(
     *,
     fm_fast,
 ):
-    return arith.subf(_raw(a), _raw(b), fastmath=fm_fast)
+    return arith.subf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
 
 
 def _fmul(
@@ -661,7 +661,7 @@ def _fmul(
     *,
     fm_fast,
 ):
-    return arith.mulf(_raw(a), _raw(b), fastmath=fm_fast)
+    return arith.mulf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
 
 
 def _fmax(
@@ -670,7 +670,7 @@ def _fmax(
     *,
     fm_fast,
 ):
-    return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
+    return arith.MaxNumFOp(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast).result
 
 
 def _mfma_acc(
@@ -754,7 +754,7 @@ def _anchor_v_p(
     p_lo_all = _concat_vectors(p_lo[0], p_lo[1])
     p_hi_all = _concat_vectors(p_hi[0], p_hi[1])
     p_all = _concat_vectors(p_lo_all, p_hi_all)
-    p_all_ir = _raw(p_all)
+    p_all_ir = as_mlir_value(p_all)
     p_all_anchored = llvm.inline_asm(
         p_all_ir.type,
         [p_all_ir],
@@ -809,12 +809,12 @@ def _scale_v_p(
 ):
     fm_fast_attr = ir.Attribute.parse("#llvm.fastmath<fast>")
     p_all = _v_p_to_vec32(v_p)
-    p_all_f32_op = llvm.FPExtOp(v32f32_type, _raw(p_all))
+    p_all_f32_op = llvm.FPExtOp(v32f32_type, as_mlir_value(p_all))
     p_all_f32_op.operation.attributes["fastmathFlags"] = fm_fast_attr
     scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(traits.PV_K_STEPS * 2 * 8)
     p_scaled_f32 = arith.mulf(
-        _raw(scale_vec),
-        _raw(p_all_f32_op.result),
+        as_mlir_value(scale_vec),
+        as_mlir_value(p_all_f32_op.result),
         fastmath=fm_fast,
     )
     p_scaled_bf16_op = llvm.FPTruncOp(v32bf16_type, p_scaled_f32)
@@ -910,7 +910,7 @@ def _k_dma_m0_base(
             + wave_id_uni * (traits.SMEM_K_LINE_STRIDE * traits.BF16_BYTES)
             + (d * traits.SMEM_N_RPT * traits.SMEM_K_LINE_STRIDE * traits.BF16_BYTES)
         )
-    return rocdl.readfirstlane(T.i32, _raw(fx.Int32(lds_addr)))
+    return rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(lds_addr)))
 
 
 def _v_dma_m0_base(
@@ -942,7 +942,7 @@ def _v_dma_m0_base(
             + wave_id_uni * (traits.SMEM_V_LINE_STRIDE * traits.BF16_BYTES)
             + (d * traits.SMEM_N_RPT * traits.SMEM_V_LINE_STRIDE * traits.BF16_BYTES)
         )
-    return rocdl.readfirstlane(T.i32, _raw(fx.Int32(lds_addr)))
+    return rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(lds_addr)))
 
 
 def _mma0(
@@ -1133,13 +1133,13 @@ def _attn_exp2_slice(v_s, start, length):
         s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
         lo_partial = []
         for r in range_constexpr(16):
-            lo_partial.append(rocdl.exp2(T.f32, _raw(s_lo[r])))
+            lo_partial.append(rocdl.exp2(T.f32, as_mlir_value(s_lo[r])))
         return Vec.from_elements(lo_partial, fx.Float32).ir_value(), v_s[1]
 
     lo_partial = [Vec(v_s[0])[r] for r in range_constexpr(16)]
     hi_full = []
     for r in range_constexpr(16):
-        hi_full.append(rocdl.exp2(T.f32, _raw(Vec(v_s[1])[r])))
+        hi_full.append(rocdl.exp2(T.f32, as_mlir_value(Vec(v_s[1])[r])))
     return lo_partial, hi_full
 
 
@@ -1192,7 +1192,7 @@ def _scale_o(
 
 def _anchor_v_o(v_o, TRAITS_D_CHUNKS):
     """Pin v_o accumulators at the current source position."""
-    acc_irs = [_raw(v_o[dc]) for dc in range_constexpr(TRAITS_D_CHUNKS)]
+    acc_irs = [as_mlir_value(v_o[dc]) for dc in range_constexpr(TRAITS_D_CHUNKS)]
     ret_ty = ir.Type.parse(f"!llvm.struct<({', '.join(['vector<16xf32>'] * TRAITS_D_CHUNKS)})>")
     constraints = ",".join(["=v"] * TRAITS_D_CHUNKS + [str(i) for i in range(TRAITS_D_CHUNKS)])
     ret = llvm.inline_asm(
@@ -1207,11 +1207,11 @@ def _anchor_v_o(v_o, TRAITS_D_CHUNKS):
 
 def _debug_atomic_inc_lazy_count(byte_offset, *, debug_counts_rsrc):
     rocdl.raw_buffer_atomic_fadd(
-        _raw(fx.Float32(1.0)),
+        as_mlir_value(fx.Float32(1.0)),
         debug_counts_rsrc,
-        _raw(fx.Int32(byte_offset)),
-        _raw(fx.Int32(0)),
-        _raw(fx.Int32(0)),
+        as_mlir_value(fx.Int32(byte_offset)),
+        as_mlir_value(fx.Int32(0)),
+        as_mlir_value(fx.Int32(0)),
     )
 
 
@@ -1241,7 +1241,7 @@ def _rescale_o(
 ):
     elem_dtype, fm_fast, v32bf16_type, v32f32_type = _rescale_params(traits)
     m_new = _fmax(m_row, m_tile_max, fm_fast=fm_fast)
-    corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_new, fm_fast=fm_fast)))
+    corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_new, fm_fast=fm_fast)))
     _scale_o(v_o, corr, traits.D_CHUNKS, fm_fast=fm_fast)
     v_o = _anchor_v_o(v_o, traits.D_CHUNKS)
     v_p = _scale_v_p(
@@ -1268,10 +1268,10 @@ def _lazy_rescale_o_rescale(
     traits,
 ):
     elem_dtype, fm_fast, v32bf16_type, v32f32_type = _rescale_params(traits)
-    corr = rocdl.exp2(T.f32, _raw(_fsub(m_row, m_tile_max, fm_fast=fm_fast)))
+    corr = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, m_tile_max, fm_fast=fm_fast)))
     scaled_accs = list(v_o)
     _scale_o(scaled_accs, corr, traits.D_CHUNKS, fm_fast=fm_fast)
-    out = [_raw(scaled_accs[dc]) for dc in range(traits.D_CHUNKS)]
+    out = [as_mlir_value(scaled_accs[dc]) for dc in range(traits.D_CHUNKS)]
     scaled_p = _scale_v_p(
         v_p,
         corr,
@@ -1282,7 +1282,7 @@ def _lazy_rescale_o_rescale(
         v32f32_type=v32f32_type,
     )
     out.append(_v_p_to_vec32(scaled_p))
-    out.append(_raw(_fmul(l_row, corr, fm_fast=fm_fast)))
+    out.append(as_mlir_value(_fmul(l_row, corr, fm_fast=fm_fast)))
     out.append(_anchor_scalar_f32(m_tile_max))
     return out
 
@@ -1304,10 +1304,10 @@ def _lazy_rescale_o(
     c_eight_f = fx.Float32(traits.DUALWAVE_SWP_RESCALE_THRESHOLD)
     m_diff = _fsub(m_tile_max, m_row, fm_fast=fm_fast)
     below = ArithValue(fx.Float32(m_diff) <= c_eight_f)
-    ballot = rocdl.ballot(T.i64, _raw(below))
+    ballot = rocdl.ballot(T.i64, as_mlir_value(below))
     all_below = arith.cmpi(
         arith.CmpIPredicate.eq,
-        _raw(ballot),
+        as_mlir_value(ballot),
         _read_exec_i64(),
     )
     all_below = llvm.intr_expect(all_below, arith.constant(1, type=ir.IntegerType.get_signless(1)))
@@ -1319,8 +1319,8 @@ def _lazy_rescale_o(
     )
 
     # Drive scf.if with explicit accumulator/P/l/m state; all_below keeps it unchanged.
-    _state = [_raw(v_o[dc]) for dc in range(traits.D_CHUNKS)]
-    _state += [_v_p_to_vec32(v_p), _raw(l_row), _raw(m_row)]
+    _state = [as_mlir_value(v_o[dc]) for dc in range(traits.D_CHUNKS)]
+    _state += [_v_p_to_vec32(v_p), as_mlir_value(l_row), as_mlir_value(m_row)]
     _names = tuple("_lr%d" % i for i in range(traits.D_CHUNKS + 3))
 
     _rescale = lambda _n, *_st: _lazy_rescale_o_rescale(

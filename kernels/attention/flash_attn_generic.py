@@ -33,8 +33,8 @@ from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
-from flydsl.expr.utils.arith import _to_raw as _raw
-from flydsl.runtime.device import get_rocm_arch
+from flydsl.expr.utils.arith import _to_raw as as_mlir_value
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.dualwave_common import _LOG2E, _waitcnt_vm_n
 from kernels.common.kernels_common import dtype_to_elem_type
@@ -320,16 +320,16 @@ def build_flash_attn_func_module_primary(
             return mfma_fn(v16f32_type, [a, b, c])
 
         def _fadd(a, b):
-            return arith.addf(_raw(a), _raw(b), fastmath=fm_fast)
+            return arith.addf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
 
         def _fsub(a, b):
-            return arith.subf(_raw(a), _raw(b), fastmath=fm_fast)
+            return arith.subf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
 
         def _fmul(a, b):
-            return arith.mulf(_raw(a), _raw(b), fastmath=fm_fast)
+            return arith.mulf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
 
         def _fmax(a, b):
-            return arith.MaxNumFOp(_raw(a), _raw(b), fastmath=fm_fast).result
+            return arith.MaxNumFOp(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast).result
 
         def mfma_acc(a, b, c):
             if const_expr(USE_K16):
@@ -694,8 +694,10 @@ def build_flash_attn_func_module_primary(
             def coop_dma_v_nomajor(tile_start, buf_id=0):
                 # Each lane DMAs one contiguous v8 into the no-major V line.
                 _pid = _paged_page_id(tile_start)
-                _paddr = _raw(_v_dma_base_i64 + fx.Int64(_pid) * _v_dma_page_bytes)
-                _rsrc = buffer_ops.create_buffer_resource_from_addr(_paddr, num_records_bytes=_raw(_v_dma_page_bytes))
+                _paddr = as_mlir_value(_v_dma_base_i64 + fx.Int64(_pid) * _v_dma_page_bytes)
+                _rsrc = buffer_ops.create_buffer_resource_from_addr(
+                    _paddr, num_records_bytes=as_mlir_value(_v_dma_page_bytes)
+                )
                 if const_expr(isinstance(buf_id, int)):
                     _vb = _v_dma_lds_base + fx.Index((LDS_V_BASE + buf_id * LDS_V_TILE_SIZE) * 2)
                 else:
@@ -716,10 +718,10 @@ def build_flash_attn_func_module_primary(
 
         # Per-batch descriptors keep global indices 0-based and bounded to one batch.
         # This keeps 32-bit offsets small while preserving arbitrary-seqlen OOB behavior.
-        _kv_nrec_bytes = _raw(seqlen_kv_b * fx.Index(STRIDE_TOKEN_KV * 2))
-        _q_nrec_bytes = _raw(seqlen_q_b * fx.Index(STRIDE_TOKEN_Q * 2))
-        _q_batch_byte_off = _raw(q_tok_base * fx.Index(STRIDE_TOKEN_Q * 2))
-        _kv_batch_byte_off = _raw(kv_tok_base * fx.Index(STRIDE_TOKEN_KV * 2))
+        _kv_nrec_bytes = as_mlir_value(seqlen_kv_b * fx.Index(STRIDE_TOKEN_KV * 2))
+        _q_nrec_bytes = as_mlir_value(seqlen_q_b * fx.Index(STRIDE_TOKEN_Q * 2))
+        _q_batch_byte_off = as_mlir_value(q_tok_base * fx.Index(STRIDE_TOKEN_Q * 2))
+        _kv_batch_byte_off = as_mlir_value(kv_tok_base * fx.Index(STRIDE_TOKEN_KV * 2))
         q_rsrc = buffer_ops.create_buffer_resource(
             Q, max_size=False, num_records_bytes=_q_nrec_bytes, base_byte_offset=_q_batch_byte_off
         )
@@ -1266,12 +1268,12 @@ def build_flash_attn_func_module_primary(
                         return lo, hi
                     o_f16 = [fx.Float32(Vec(v_o[dc])[r_base + i]).to(elem_dtype) for i in range_constexpr(4)]
                     pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-                    return _raw(pack[0]), _raw(pack[1])
+                    return as_mlir_value(pack[0]), as_mlir_value(pack[1])
 
                 def _swap_halves(dw):
                     # permlane32_swap(a,b) -> (a.lo|b.lo, a.hi|b.hi); with a=b=dw the
                     # partner dword dw[lane^32] is result[1] on low lanes, [0] on high.
-                    swapped = rocdl.permlane32_swap(pair_i32_ty, _raw(dw), _raw(dw), False, False)
+                    swapped = rocdl.permlane32_swap(pair_i32_ty, as_mlir_value(dw), as_mlir_value(dw), False, False)
                     lo_res = llvm.extractvalue(T.i32, swapped, [0])
                     hi_res = llvm.extractvalue(T.i32, swapped, [1])
                     return is_hi_half.select(lo_res, hi_res)
@@ -1284,10 +1286,10 @@ def build_flash_attn_func_module_primary(
                         # high lanes: partner's group-(2g+1) cols 0-3 ++ own cols 4-7.
                         y0_a, y1_a = _swap_halves(d0_a), _swap_halves(d1_a)
                         y0_b, y1_b = _swap_halves(d0_b), _swap_halves(d1_b)
-                        w0 = is_hi_half.select(y0_b, _raw(d0_a))
-                        w1 = is_hi_half.select(y1_b, _raw(d1_a))
-                        w2 = is_hi_half.select(_raw(d0_b), y0_a)
-                        w3 = is_hi_half.select(_raw(d1_b), y1_a)
+                        w0 = is_hi_half.select(y0_b, as_mlir_value(d0_a))
+                        w1 = is_hi_half.select(y1_b, as_mlir_value(d1_a))
+                        w2 = is_hi_half.select(as_mlir_value(d0_b), y0_a)
+                        w3 = is_hi_half.select(as_mlir_value(d1_b), y1_a)
                         o_pack = Vec.from_elements([fx.Int32(w0), fx.Int32(w1), fx.Int32(w2), fx.Int32(w3)], fx.Int32)
                         d_col = fx.Index(dc * D_CHUNK) + (fx.Index(2 * g) + lane_div_32) * fx.Index(8)
                         o_global = global_idx_q(q_row, d_col)
@@ -1301,7 +1303,7 @@ def build_flash_attn_func_module_primary(
                         r0 = grp * 4
                         o_f16 = [fx.Float32(Vec(v_o[dc])[r0 + i]).to(elem_dtype) for i in range_constexpr(4)]
                         pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-                        o2 = Vec.from_elements([_raw(pack[0]), _raw(pack[1])], fx.Int32)
+                        o2 = Vec.from_elements([as_mlir_value(pack[0]), as_mlir_value(pack[1])], fx.Int32)
                         d_col = fx.Index(dc * D_CHUNK) + lane_div_32 * fx.Index(4) + fx.Index(grp * 8)
                         o_global = global_idx_q(q_row, d_col)
                         buffer_ops.buffer_store(o2, o_rsrc, o_global * fx.Index(2), offset_is_bytes=True)
