@@ -161,14 +161,14 @@ def _fill_sentinel_slots(sorted_ids_rsrc, sorted_w_rsrc, start, count, sentinel,
 # ---------------------------------------------------------------------------
 # LDS helpers for multiphase kernels (module-level, used inside @flyc.kernel)
 # ---------------------------------------------------------------------------
-def _lds_load_raw(raw_mr, idx):
-    """Load i32 from an LDS memref view. idx can be i32 or index."""
-    return fx.Int32(fx.memref_load(raw_mr, idx))
+def _lds_load_raw(raw_ptr, idx):
+    """Load i32 from an LDS pointer at element offset `idx` (i32 or index)."""
+    return fx.Int32(fx.ptr_load(raw_ptr + fx.Int64(idx)))
 
 
-def _lds_store_raw(raw_mr, val, idx):
-    """Store i32 to an LDS memref view. idx can be i32 or index."""
-    fx.memref_store(val, raw_mr, idx)
+def _lds_store_raw(raw_ptr, val, idx):
+    """Store i32 to an LDS pointer at element offset `idx` (i32 or index)."""
+    fx.ptr_store(val, raw_ptr + fx.Int64(idx))
 
 
 # ---------------------------------------------------------------------------
@@ -289,10 +289,10 @@ def _compile_moe_sorting_oneshot(
         mask_rsrc = buffer_ops.create_buffer_resource(expert_mask_tensor, max_size=True)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        cumsum_mr = lds.cumsum.view(fx.make_layout(smem_cols, 1))
-        cumdup_mr = lds.cumdup.view(fx.make_layout(smem_cols, 1))
-        mesh_mr = lds.mesh.view(fx.make_layout(sub_tokens * smem_cols, 1))
-        scratch_mr = lds.scratch.view(fx.make_layout(NUM_WAVES, 1))
+        cumsum_mr = lds.cumsum.ptr
+        cumdup_mr = lds.cumdup.ptr
+        mesh_mr = lds.mesh.ptr
+        scratch_mr = lds.scratch.ptr
 
         c_topk = fx.Int32(topk)
         c_E = fx.Int32(E)
@@ -781,10 +781,10 @@ def compile_moe_sorting_oneshot_fused(
         mask_rsrc = buffer_ops.create_buffer_resource(expert_mask_tensor, max_size=True)
 
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        cumsum_mr = lds.cumsum.view(fx.make_layout(smem_cols, 1))
-        cumdup_mr = lds.cumdup.view(fx.make_layout(smem_cols, 1))
-        mesh_mr = lds.mesh.view(fx.make_layout(sub_tokens * smem_cols, 1))
-        weights_lds_mr = lds.weights_lds.view(fx.make_layout(max_tokens * topk, 1))
+        cumsum_mr = lds.cumsum.ptr
+        cumdup_mr = lds.cumdup.ptr
+        mesh_mr = lds.mesh.ptr
+        weights_lds_mr = lds.weights_lds.ptr
 
         c_topk = fx.Int32(topk)
         c_E = fx.Int32(E)
@@ -1451,7 +1451,7 @@ def _compile_moe_sorting_multiphase(
         c_ff = fx.Int32(0xFF)
 
         lds = fx.SharedAllocator().allocate(P1SharedStorage).peek()
-        reduce_mr = lds.reduce.view(fx.make_layout(K3_NUM_WAVES, 1))
+        reduce_mr = lds.reduce.ptr
 
         mesh_row_i32_base = (eid * i32_mesh_stride) >> fx.Int32(2)
         i32_words_per_row = i32_mesh_stride >> fx.Int32(2)
@@ -1570,7 +1570,7 @@ def _compile_moe_sorting_multiphase(
         c_block = fx.Int32(P0V2_BLOCK)
 
         lds = fx.SharedAllocator().allocate(P0V2SharedStorage).peek()
-        reduce_mr = lds.reduce.view(fx.make_layout(P0V2_NUM_WAVES, 1))
+        reduce_mr = lds.reduce.ptr
 
         # Precompute mesh row base (in i32 words) and words per row
         mesh_row_i32_base = (eid * i32_mesh_stride) >> fx.Int32(2)
@@ -1732,8 +1732,8 @@ def _compile_moe_sorting_multiphase(
 
         # LDS: cumsum[E+1] for prefix sums + cross-wave scratch
         lds = fx.SharedAllocator().allocate(K4SharedStorage).peek()
-        cumsum_mr = lds.cumsum.view(fx.make_layout(k4_smem_cols, 1))
-        scatter_mr = lds.scatter.view(fx.make_layout(K4_NUM_WAVES, 1))
+        cumsum_mr = lds.cumsum.ptr
+        scatter_mr = lds.scatter.ptr
 
         is_sort_block = bid < c_E
         is_zero_block = bid >= c_E

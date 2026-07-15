@@ -15,7 +15,7 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import atomic_add, get_llvm_ptr
-from kernels.common.tensor_shim import GTensor, _run_compiled, get_dtype_in_kernel, lds_load_vec, lds_store_vec
+from kernels.common.tensor_shim import GTensor, _run_compiled, get_dtype_in_kernel
 from kernels.gemm.splitk_hgemm import swizzle_xor16
 
 fm_fast = arith.FastMathFlags.fast
@@ -237,13 +237,13 @@ def compile_hgemm_kernel(
         smem_view = lds.smem.view(fx.make_layout(SMEM_TOTAL_ELEMS, 1))
 
         def as_off(stage, row, col):
-            return (fx.Index(stage) * BLOCK_M + row) * BLOCK_K + col
+            return (fx.Int64(stage) * BLOCK_M + row) * BLOCK_K + col
 
         def bs_off(stage, row, col):
-            return A_ELEMS + (fx.Index(stage) * BLOCK_N + row) * BLOCK_K + col
+            return A_ELEMS + (fx.Int64(stage) * BLOCK_N + row) * BLOCK_K + col
 
         def cs_off(kw, row, col):
-            return (fx.Index(kw) * BLOCK_M + row) * BLOCK_N + col
+            return (fx.Int64(kw) * BLOCK_M + row) * BLOCK_N + col
 
         if const_expr(IS_SPLIT_K):
             semaphore_ = GTensor(semaphore, dtype=T.i32, shape=(-1,))
@@ -394,7 +394,8 @@ def compile_hgemm_kernel(
                 k_local_idx = global_tid % LDG_A_X_THREADS * LDG_VEC_SIZE
                 col_in_bytes = k_local_idx * DTYPE_BYTES
                 col_in_bytes = swizzle_xor16(m_local_idx, col_in_bytes, k_blocks16)
-                lds_store_vec(smem_ptr, as_off(lds_stage, m_local_idx, col_in_bytes // DTYPE_BYTES), fx.Vector(vecs[i]))
+                vecs_off = smem_ptr + as_off(lds_stage, m_local_idx, col_in_bytes // DTYPE_BYTES)
+                fx.ptr_store(vecs[i], vecs_off)
 
         def get_dma_copy_warp_offset():
             warp_offset = rocdl.readfirstlane(
@@ -500,11 +501,9 @@ def compile_hgemm_kernel(
                         row = warp_atom_n_idx + ldmatrix_b_n_idx
                         col_in_bytes = (warp_atom_k_idx + ldmatrix_b_k_vec_idx) * DTYPE_BYTES
                         col_in_bytes = swizzle_xor16(row, col_in_bytes, k_blocks16)
-                        vec = lds_load_vec(
-                            smem_ptr,
-                            bs_off(s, row, col_in_bytes // DTYPE_BYTES),
-                            elem_cls,
-                            WMMA_B_FRAG_VALUES * MFMA_PER_WARP_K,
+                        vec = fx.ptr_load(
+                            smem_ptr + bs_off(s, row, col_in_bytes // DTYPE_BYTES),
+                            result_type=fx.Vector.make_type(WMMA_B_FRAG_VALUES * MFMA_PER_WARP_K, elem_cls),
                         ).ir_value()
                         b_frags[ii] = vec
                 else:
@@ -515,11 +514,9 @@ def compile_hgemm_kernel(
                     row = warp_atom_m_idx + ldmatrix_a_m_idx
                     col_in_bytes = (warp_atom_k_idx + ldmatrix_a_k_vec_idx) * DTYPE_BYTES
                     col_in_bytes = swizzle_xor16(row, col_in_bytes, k_blocks16)
-                    vec = lds_load_vec(
-                        smem_ptr,
-                        as_off(s, row, col_in_bytes // DTYPE_BYTES),
-                        elem_cls,
-                        WMMA_A_FRAG_VALUES * MFMA_PER_WARP_K,
+                    vec = fx.ptr_load(
+                        smem_ptr + as_off(s, row, col_in_bytes // DTYPE_BYTES),
+                        result_type=fx.Vector.make_type(WMMA_A_FRAG_VALUES * MFMA_PER_WARP_K, elem_cls),
                     ).ir_value()
                     a_frags[ii] = vec
                 rocdl.sched_barrier(0)
@@ -670,19 +667,21 @@ def compile_hgemm_kernel(
             split_k_barrier()
             for i in range_constexpr(LDG_REG_C_COUNT):
                 global_tid = BLOCK_THREADS * i + tid
-                m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
-                n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
+                m_local_idx = fx.Int64(global_tid // LDG_C_X_THREADS)
+                n_local_idx = fx.Int64(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
                 n_global_idx = n_offset + n_local_idx
                 cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
-                    pk_val = lds_load_vec(
-                        smem_ptr, cs_off(0, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE
+                    pk_val = fx.ptr_load(
+                        smem_ptr + cs_off(0, m_local_idx, n_local_idx),
+                        result_type=fx.Vector.make_type(LDG_VEC_SIZE, elem_cls),
                     ).ir_value()
                     for ksi in range_constexpr(1, BLOCK_K_WARPS):
-                        pk_val += lds_load_vec(
-                            smem_ptr, cs_off(ksi, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE
+                        pk_val += fx.ptr_load(
+                            smem_ptr + cs_off(ksi, m_local_idx, n_local_idx),
+                            result_type=fx.Vector.make_type(LDG_VEC_SIZE, elem_cls),
                         ).ir_value()
                     linear_offset_c = C_.linear_offset((m_global_idx, n_global_idx))
                     # split to vec2s
@@ -706,16 +705,20 @@ def compile_hgemm_kernel(
             gpu.barrier()
             for i in range_constexpr(LDG_REG_C_COUNT):
                 global_tid = BLOCK_THREADS * i + tid
-                m_local_idx = fx.Index(global_tid // LDG_C_X_THREADS)
-                n_local_idx = fx.Index(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
+                m_local_idx = fx.Int64(global_tid // LDG_C_X_THREADS)
+                n_local_idx = fx.Int64(global_tid % LDG_C_X_THREADS * LDG_VEC_SIZE)
                 m_global_idx = m_offset + m_local_idx
                 cond_boundary = arith.cmpi(arith.CmpIPredicate.ult, m_global_idx, fx.Index(m))
                 cond_boundary_if = scf.IfOp(cond_boundary, results_=[], has_else=False)
                 with ir.InsertionPoint(cond_boundary_if.then_block):
-                    vec = lds_load_vec(smem_ptr, cs_off(0, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE).ir_value()
+                    vec = fx.ptr_load(
+                        smem_ptr + cs_off(0, m_local_idx, n_local_idx),
+                        result_type=fx.Vector.make_type(LDG_VEC_SIZE, elem_cls),
+                    ).ir_value()
                     for ksi in range_constexpr(1, BLOCK_K_WARPS):
-                        vec += lds_load_vec(
-                            smem_ptr, cs_off(ksi, m_local_idx, n_local_idx), elem_cls, LDG_VEC_SIZE
+                        vec += fx.ptr_load(
+                            smem_ptr + cs_off(ksi, m_local_idx, n_local_idx),
+                            result_type=fx.Vector.make_type(LDG_VEC_SIZE, elem_cls),
                         ).ir_value()
                     if const_expr(HAS_BIAS):
                         bias_vec = BIAS_.vec_load((n_offset + n_local_idx,), LDG_VEC_SIZE)

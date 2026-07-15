@@ -25,7 +25,7 @@ from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
 from kernels.common import dpp_utils
-from kernels.common.tensor_shim import _run_compiled, lds_load_vec, lds_store_vec
+from kernels.common.tensor_shim import _run_compiled
 from kernels.common.utils import (
     cdiv,
     exp2_f32_fast,
@@ -257,30 +257,31 @@ def _finish_q_fragments(
     q_w0, q_w1 = q_words
 
     if lane16id == fx.Int32(0):
-        lds_store_vec(
-            softmax_lds_f32,
-            local_qhead_idx,
+        fx.ptr_store(
             fx.Vector.from_elements([query_scale_lane], dtype=fx.Float32),
+            softmax_lds_f32 + local_qhead_idx,
         )
 
     v01 = fx.Vector.from_elements([q_w0, q_w1], dtype=fx.Int32)
     lds_q_i32 = lds_q_base >> fx.Int32(2)
     if const_expr(q_lanes_per_head < MFMA_N):
         if lane16id < fx.Int32(q_lanes_per_head):
-            lds_store_vec(logits_lds_i32, lds_q_i32, v01)
+            fx.ptr_store(v01, logits_lds_i32 + lds_q_i32)
     else:
-        lds_store_vec(logits_lds_i32, lds_q_i32, v01)
+        fx.ptr_store(v01, logits_lds_i32 + lds_q_i32)
 
     q_frags = []
     gpu.barrier()
-    query_scale_lane = lds_load_vec(softmax_lds_f32, lane16id, fx.Float32, 1)[0].ir_value()
+    query_scale_lane = fx.ptr_load(softmax_lds_f32 + (lane16id), result_type=fx.Vector.make_type(1, fx.Float32))[
+        0
+    ].ir_value()
     for qkhe in range_constexpr(qkhe_loop):
         for qkr in range_constexpr(2):
             # See layout comment above. Byte offset:
             #   lane16id * HEAD_SIZE + qkhe*64 + rowid*16 + qkr*8
             lds_rd_byte = lane16id * c_head_size + fx.Int32(qkhe << 6) + (rowid << fx.Int32(4)) + fx.Int32(qkr << 3)
             lds_rd_base = lds_rd_byte >> fx.Int32(3)
-            q_v1 = lds_load_vec(logits_lds_i64, lds_rd_base, fx.Int64, 1)
+            q_v1 = fx.ptr_load(logits_lds_i64 + (lds_rd_base), result_type=fx.Vector.make_type(1, fx.Int64))
             q_frags.append(q_v1[0])
     return q_frags, query_scale_lane
 
@@ -408,10 +409,15 @@ def _make_pa_phase_helpers(
         return kv_tok_thread_base + fx.Int32(td * MFMA_N)
 
     def _load_k_scale_vec(td: int):
-        return lds_load_vec(scale_lds_f32, _scale_row_base(td), fx.Float32, 4).ir_value()
+        return fx.ptr_load(
+            scale_lds_f32 + (_scale_row_base(td)), result_type=fx.Vector.make_type(4, fx.Float32)
+        ).ir_value()
 
     def _load_v_scale_vec(td: int):
-        return lds_load_vec(scale_lds_f32, fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td), fx.Float32, 4).ir_value()
+        return fx.ptr_load(
+            scale_lds_f32 + (fx.Int32(LDS_SCALE_V_OFFSET) + _scale_row_base(td)),
+            result_type=fx.Vector.make_type(4, fx.Float32),
+        ).ir_value()
 
     def _get_k_scale_vec(td: int, k_scale_vecs=None):
         if const_expr(per_token_kv):
@@ -438,10 +444,9 @@ def _make_pa_phase_helpers(
                 v_max_warp = fx.maxnumf(v_max_warp, fx.Vector(vs).reduce("max"))
             for sh in [32, 16]:
                 v_max_warp = fx.maxnumf(v_max_warp, v_max_warp.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-            lds_store_vec(
-                softmax_lds_f32,
-                sm_vmax_wr_off,
+            fx.ptr_store(
                 fx.Vector.from_elements([v_max_warp], dtype=fx.Float32),
+                softmax_lds_f32 + sm_vmax_wr_off,
             )
 
     def _token_vec_i32(kv_tok_base, td: int):
@@ -502,10 +507,9 @@ def _make_pa_phase_helpers(
             qk_max = fx.maxnumf(qk_max, fx.Vector(logits_vec).reduce("max"))
         for sh in [32, 16]:
             qk_max = fx.maxnumf(qk_max, qk_max.shuffle_xor(arith.constant(sh, type=T.i32), c_w))
-        lds_store_vec(
-            softmax_lds_f32,
-            sm_max_off,
+        fx.ptr_store(
             fx.Vector.from_elements([qk_max], dtype=fx.Float32),
+            softmax_lds_f32 + sm_max_off,
         )
 
         if const_expr(per_token_kv):
@@ -515,7 +519,7 @@ def _make_pa_phase_helpers(
     def _cross_warp_softmax_and_prob_pack(d_out, rmax, rsum, outs, v_scale_vecs):
         partition_max = neg_inf
         partition_sum = zero_f
-        max_vec = lds_load_vec(softmax_lds_f32, sm_rd_max_offs[0], fx.Float32, 4)
+        max_vec = fx.ptr_load(softmax_lds_f32 + (sm_rd_max_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             partition_max = fx.maxnumf(partition_max, max_vec[w])
 
@@ -529,10 +533,9 @@ def _make_pa_phase_helpers(
             d_out[td] = p_vec
         for sh in [32, 16]:
             local_exp_sum = local_exp_sum + local_exp_sum.shuffle_xor(arith.constant(sh, type=T.i32), c_w)
-        lds_store_vec(
-            softmax_lds_f32,
-            sm_sum_off,
+        fx.ptr_store(
             fx.Vector.from_elements([local_exp_sum], dtype=fx.Float32),
+            softmax_lds_f32 + sm_sum_off,
         )
         if const_expr(needs_mask):
             accum_scale = arith.select(
@@ -544,7 +547,7 @@ def _make_pa_phase_helpers(
             accum_scale = exp2_f32_fast((rmax - new_rmax) * fx.Float32(LOG2E).ir_value())
 
         gpu.barrier()
-        sum_vec = lds_load_vec(softmax_lds_f32, sm_rd_sum_offs[0], fx.Float32, 4)
+        sum_vec = fx.ptr_load(softmax_lds_f32 + (sm_rd_sum_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32))
         for w in range_constexpr(NUM_WARPS):
             partition_sum = arith.addf(
                 arith.unwrap(partition_sum), arith.unwrap(sum_vec[w]), fastmath=arith.FastMathFlags.contract
@@ -559,7 +562,9 @@ def _make_pa_phase_helpers(
 
         if const_expr(per_token_kv):
             v_max_global = zero_f
-            vmax_vec = lds_load_vec(softmax_lds_f32, sm_vmax_rd_offs[0], fx.Float32, 4)
+            vmax_vec = fx.ptr_load(
+                softmax_lds_f32 + (sm_vmax_rd_offs[0]), result_type=fx.Vector.make_type(4, fx.Float32)
+            )
             for w in range_constexpr(NUM_WARPS):
                 w_vmax = vmax_vec[w]
                 v_max_global = fx.maxnumf(v_max_global, w_vmax)
@@ -583,7 +588,7 @@ def _make_pa_phase_helpers(
             byte_base = prob_wr_thread_base + arith.constant(td * MFMA_N * PROB_ROW_STRIDE_BYTES, type=T.i32)
             i32_off = byte_base >> fx.Int32(2)
             pk_vec = vector.from_elements(T.vec(1, T.i32), [pk])
-            lds_store_vec(logits_lds_i32, i32_off, pk_vec)
+            fx.ptr_store(pk_vec, logits_lds_i32 + i32_off)
         return rmax, rsum, outs, v_correction
 
     def _pv_mfma(v_ops, outs, v_correction):
@@ -601,7 +606,9 @@ def _make_pa_phase_helpers(
         for vt in range_constexpr(VTLOOP):
             for j in range_constexpr(2):
                 p_i64_idx = pv_prob_i64_indices[vt * 2 + j]
-                p_i64_all.append(lds_load_vec(logits_lds_i64, p_i64_idx, fx.Int64, 1)[0])
+                p_i64_all.append(
+                    fx.ptr_load(logits_lds_i64 + (p_i64_idx), result_type=fx.Vector.make_type(1, fx.Int64))[0]
+                )
 
         for vhe in range_constexpr(vhe_loop):
             tmp_out = arith.constant_vector(0.0, T.f32x4)
@@ -1296,24 +1303,25 @@ def compile_pa_decode_ps(
                     # Each warp writes 1 i32 to bt_lds_i32[warp_id];
                     # `_load_v_phys_blocks_from_lds` reads back the 4-elem
                     # vec starting at offset 0.
-                    lds_store_vec(
-                        bt_lds_i32,
-                        warp_id,
+                    fx.ptr_store(
                         fx.Vector.from_elements([phys_block_vec], dtype=fx.Int32),
+                        bt_lds_i32 + warp_id,
                     )
                 else:
-                    lds_store_vec(bt_lds_i32, warp_id * fx.Int32(TLOOP), phys_block_vec)
+                    fx.ptr_store(phys_block_vec, bt_lds_i32 + warp_id * fx.Int32(TLOOP))
 
         def _pa_small_block_load_v_phys_blocks_from_lds():
             v_phys_blocks = []
             if const_expr(block_size == 64):
-                phys_block_vec = lds_load_vec(bt_lds_i32, fx.Int32(0), fx.Int32, VTLOOP)
+                phys_block_vec = fx.ptr_load(
+                    bt_lds_i32 + (fx.Int32(0)), result_type=fx.Vector.make_type(VTLOOP, fx.Int32)
+                )
                 for vt in range_constexpr(VTLOOP):
                     v_phys_blocks.append(phys_block_vec[vt])
             else:
                 for vt in range_constexpr(VTLOOP):
                     bt_lds_off = fx.Int32(vt * TLOOP) + rowid
-                    phys_block = lds_load_vec(bt_lds_i32, bt_lds_off, fx.Int32, 1)[0]
+                    phys_block = fx.ptr_load(bt_lds_i32 + (bt_lds_off), result_type=fx.Vector.make_type(1, fx.Int32))[0]
                     v_phys_blocks.append(phys_block)
             return v_phys_blocks
 
@@ -1403,11 +1411,10 @@ def compile_pa_decode_ps(
             # Warp-local: warp w writes slots [w*64, w*64+64) and reads only
             # those back, so the RAW is intra-wave (compiler lgkmcnt) — no barrier.
             t = warp_id * fx.Int32(WARP_SIZE) + rowid * fx.Int32(MFMA_N) + lane16id
-            lds_store_vec(scale_lds_f32, t, fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32))
-            lds_store_vec(
-                scale_lds_f32,
-                fx.Int32(LDS_SCALE_V_OFFSET) + t,
+            fx.ptr_store(fx.Vector.from_elements([k_scale_scalar], dtype=fx.Float32), scale_lds_f32 + t)
+            fx.ptr_store(
                 fx.Vector.from_elements([v_scale_scalar], dtype=fx.Float32),
+                scale_lds_f32 + (fx.Int32(LDS_SCALE_V_OFFSET) + t),
             )
 
         def _load_small_block_scale_vecs():
@@ -1415,9 +1422,14 @@ def compile_pa_decode_ps(
             v_scale_vecs = []
             for td in range_constexpr(TLOOP):
                 row = _kv_tok_thread_base + arith.constant(td * MFMA_N, type=T.i32)
-                k_scale_vecs.append(lds_load_vec(scale_lds_f32, row, fx.Float32, 4).ir_value())
+                k_scale_vecs.append(
+                    fx.ptr_load(scale_lds_f32 + (row), result_type=fx.Vector.make_type(4, fx.Float32)).ir_value()
+                )
                 v_scale_vecs.append(
-                    lds_load_vec(scale_lds_f32, fx.Int32(LDS_SCALE_V_OFFSET) + row, fx.Float32, 4).ir_value()
+                    fx.ptr_load(
+                        scale_lds_f32 + (fx.Int32(LDS_SCALE_V_OFFSET) + row),
+                        result_type=fx.Vector.make_type(4, fx.Float32),
+                    ).ir_value()
                 )
             return k_scale_vecs, v_scale_vecs
 

@@ -556,8 +556,8 @@ def compile_small_m_hgemm_kernel(
 
         def _make_lds_load(field_ptr, elem_dtype):
             def _load(offset, vec_size=1):
-                it = fx.add_offset(fx.recast_iter(elem_dtype, field_ptr), fx.Int32(offset))
-                vec = arith._to_raw(fx.make_view(it, fx.make_layout(vec_size, 1)).load())
+                ptr = fx.recast_iter(elem_dtype, field_ptr) + fx.Int64(offset)
+                vec = arith._to_raw(fx.ptr_load(ptr, result_type=fx.Vector.make_type(vec_size, elem_dtype)))
                 if vec_size > 1:
                     return vec
                 return vector.extract(vec, static_position=[0], dynamic_position=[])
@@ -568,13 +568,12 @@ def compile_small_m_hgemm_kernel(
             elem_ir_ty = elem_dtype.ir_type
 
             def _store(offset, value, vec_size=1):
-                it = fx.add_offset(fx.recast_iter(elem_dtype, field_ptr), fx.Int32(offset))
-                view = fx.make_view(it, fx.make_layout(vec_size, 1))
+                ptr = fx.recast_iter(elem_dtype, field_ptr) + fx.Int64(offset)
                 if vec_size > 1:
-                    view.store(arith._to_raw(value))
+                    fx.ptr_store(arith._to_raw(value), ptr)
                 else:
                     vec = vector.from_elements(T.vec(1, elem_ir_ty), [value])
-                    view.store(vec)
+                    fx.ptr_store(vec, ptr)
 
             return _store
 

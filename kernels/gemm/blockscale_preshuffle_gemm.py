@@ -338,9 +338,9 @@ def compile_blockscale_preshuffle_gemm(
                 ptr_off = fx.add_offset(lds_buffer.ptr, fx.make_int_tuple(idx0))
                 i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
                 if const_expr(a_load_bytes_v == 16):
-                    fx.make_view(i8_iter, fx.make_layout(16, 1)).store(Vec(vec_a_parts[i]).bitcast(fx.Uint8))
+                    fx.ptr_store(Vec(vec_a_parts[i]).bitcast(fx.Uint8), i8_iter)
                 elif const_expr(a_load_bytes_v == 8):
-                    fx.make_view(i8_iter, fx.make_layout(8, 1)).store(Vec(vec_a_parts[i]).bitcast(fx.Uint8))
+                    fx.ptr_store(Vec(vec_a_parts[i]).bitcast(fx.Uint8), i8_iter)
 
         # ── A DMA async: direct global→LDS transfer ─────────────────────
         _num_a_async_loads = bytes_per_thread_a // a_async_load_bytes

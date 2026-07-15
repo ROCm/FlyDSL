@@ -26,7 +26,6 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.runtime.device import get_rocm_arch
-from kernels.common.tensor_shim import lds_vec_view
 
 
 def _is_gfx950_arch(arch: str) -> bool:
@@ -359,13 +358,13 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
     lds = fx.SharedAllocator().allocate(SharedStorage).peek()
     lds_base_idx = ArithValue(_raw(fx.ptrtoint(lds.storage.ptr))).index_cast(T.index)
 
-    _lds_storage_ptr = lds.storage.ptr
+    _lds_storage_ptr = fx.recast_iter(fx.Uint8, lds.storage.ptr)
     _lds_base_i32 = _i32(lds_base_idx)
 
-    def _lds_view(abs_addr, nbytes, extra_bytes=0):
-        """u8 view of `nbytes` at absolute LDS byte address `abs_addr` (+ `extra_bytes`)."""
+    def _lds_ptr(abs_addr, extra_bytes=0):
+        """u8 LDS pointer at absolute byte address `abs_addr` (+ `extra_bytes`)."""
         rel = ArithValue(_i32(abs_addr)) - ArithValue(_lds_base_i32) + extra_bytes
-        return lds_vec_view(_lds_storage_ptr, _raw(rel), fx.Uint8, nbytes)
+        return _lds_storage_ptr + fx.Int32(_raw(rel))
 
     # ---- V^T transpose perm constants ----
     c_perm0 = fx.Int32(0x05010400)
@@ -478,7 +477,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
             is_oob = ArithValue(row_i32) == -1
             if is_oob:
                 lds_addr = _i32(ArithValue(lds_base_i32) + block_idx_const * KV_NUM_COLS + _i32(lane_idx) * 4)
-                _lds_view(lds_addr, 4).store(Vec.from_elements([c_zero_i32], fx.Int32).bitcast(fx.Uint8))
+                fx.ptr_store(Vec.from_elements([c_zero_i32], fx.Int32).bitcast(fx.Uint8), _lds_ptr(lds_addr))
             else:
                 _emit_vram_to_lds()
         else:
@@ -666,7 +665,9 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
                 off = KV_SUB_BYTES
             else:
                 off = KV_SUB_BYTES + KV_BYTES_PER_ROW
-            data_vec = _lds_view(lds_addr, 8, extra_bytes=off).load().bitcast(fx.Int32)
+            data_vec = fx.ptr_load(
+                _lds_ptr(lds_addr, extra_bytes=off), result_type=fx.Vector.make_type(8, fx.Uint8)
+            ).bitcast(fx.Int32)
             v_vals.append(data_vec[0])
             v_vals.append(data_vec[1])
         return v_vals  # 8 i32 values
@@ -718,10 +719,10 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         lds_vt_addr = vt_lds_base_idx + block_offset
 
         lo_packed = Vec.from_elements(vt8[0:4], fx.Int32)
-        _lds_view(_i32(lds_vt_addr), 16).store(lo_packed.bitcast(fx.Uint8))
+        fx.ptr_store(lo_packed.bitcast(fx.Uint8), _lds_ptr(_i32(lds_vt_addr)))
 
         hi_packed = Vec.from_elements(vt8[4:8], fx.Int32)
-        _lds_view(_i32(ArithValue(lds_vt_addr) + 16), 16).store(hi_packed.bitcast(fx.Uint8))
+        fx.ptr_store(hi_packed.bitcast(fx.Uint8), _lds_ptr(_i32(ArithValue(lds_vt_addr) + 16)))
 
     # ---- Helper: load transposed V from Vt LDS ----
     def _load_vt_from_lds(vt_base_i32, col_offset):
@@ -826,10 +827,16 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         def _shuffle_q_through_lds(q_vram_data):
             """LDS write + barrier + LDS read via the high-level LDS view."""
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-            _lds_view(lds_st_addr, 16).store(Vec(q_vram_data).bitcast(fx.Uint8))
+            fx.ptr_store(Vec(q_vram_data).bitcast(fx.Uint8), _lds_ptr(lds_st_addr))
             rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
-            q0 = _raw(_lds_view(lds_rd_addr, 8).load().bitcast(fx.Int64)[0])
-            q1 = _raw(_lds_view(lds_rd_addr, 8, extra_bytes=MFMA_K).load().bitcast(fx.Int64)[0])
+            q0 = _raw(
+                fx.ptr_load(_lds_ptr(lds_rd_addr), result_type=fx.Vector.make_type(8, fx.Uint8)).bitcast(fx.Int64)[0]
+            )
+            q1 = _raw(
+                fx.ptr_load(
+                    _lds_ptr(lds_rd_addr, extra_bytes=MFMA_K), result_type=fx.Vector.make_type(8, fx.Uint8)
+                ).bitcast(fx.Int64)[0]
+            )
             return (q0, q1)
 
         # 3-deep pipeline: keep 2 buffer_loads in flight while shuffling
@@ -1298,7 +1305,7 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
         lds_rd_addr = _i32(ArithValue(lds_warp) + o16_rd_offset)
-        data = _raw(_lds_view(lds_rd_addr, 16).load().bitcast(fx.Int32))
+        data = _raw(fx.ptr_load(_lds_ptr(lds_rd_addr), result_type=fx.Vector.make_type(16, fx.Uint8)).bitcast(fx.Int32))
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
@@ -1336,13 +1343,19 @@ def kn_mla_fwd_decode_m16x8_fp8_fp8(
         for sub, acc_val in enumerate([oaccu_a, oaccu_b]):
             sub_offset = sub * O32_NUM_COLS // 2 * 4
             st_addr_sub = _i32(ArithValue(lds_st_addr) + sub_offset)
-            _lds_view(st_addr_sub, 16).store(Vec(acc_val).bitcast(fx.Uint8))
+            fx.ptr_store(Vec(acc_val).bitcast(fx.Uint8), _lds_ptr(st_addr_sub))
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 
         lds_rd_addr = _i32(ArithValue(lds_warp) + o32_rd_offset)
-        data_0 = _raw(_lds_view(lds_rd_addr, 16).load().bitcast(fx.Int32))
-        data_1 = _raw(_lds_view(lds_rd_addr, 16, extra_bytes=O32_LD_DELTA).load().bitcast(fx.Int32))
+        data_0 = _raw(
+            fx.ptr_load(_lds_ptr(lds_rd_addr), result_type=fx.Vector.make_type(16, fx.Uint8)).bitcast(fx.Int32)
+        )
+        data_1 = _raw(
+            fx.ptr_load(
+                _lds_ptr(lds_rd_addr, extra_bytes=O32_LD_DELTA), result_type=fx.Vector.make_type(16, fx.Uint8)
+            ).bitcast(fx.Int32)
+        )
 
         rocdl.s_waitcnt(_encode_waitcnt(lgkmcnt=0))
 

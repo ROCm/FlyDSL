@@ -19,7 +19,6 @@ from flydsl.expr import arith as ea
 from flydsl.expr import buffer_ops, const_expr, gpu, range_constexpr
 from flydsl.expr.typing import Int32, Int64, Stream, T
 from kernels.comm.custom_all_reduce import _KMAXBLOCKS as _MAX_BLOCKS
-from kernels.common.tensor_shim import lds_load_vec, lds_store_vec
 
 # ---------------------------------------------------------------------------
 # Low-level memory helpers — all operate on raw i64 device addresses.
@@ -421,7 +420,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
             raw = _load_v4i32(in_rsrc_desc, elem_off_i32)
             smem_base = parity * threads
             smem_idx = smem_base + lane_i32
-            lds_store_vec(smem_ptr, smem_idx * _ELEMS_PER_PACK, raw)
+            fx.ptr_store(raw, smem_ptr + (smem_idx * _ELEMS_PER_PACK))
             gpu.barrier()
 
             # Warp 0 reduces across all warps and writes to output
@@ -429,7 +428,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 acc = None
                 for wi in range_constexpr(world_size):
                     smem_read_idx = wi * threads_per_rank_i32 + lane_id + smem_base
-                    raw_i = lds_load_vec(smem_ptr, smem_read_idx * _ELEMS_PER_PACK, fx.Int32, _ELEMS_PER_PACK)
+                    raw_i = fx.ptr_load(
+                        smem_ptr + (smem_read_idx * _ELEMS_PER_PACK),
+                        result_type=fx.Vector.make_type(_ELEMS_PER_PACK, fx.Int32),
+                    )
                     if const_expr(is_f32):
                         # Raw LDS payload is i32x4; reinterpret as f32x4.
                         vf = raw_i.bitcast(fx.Float32)
@@ -521,7 +523,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 smem_idx = lane_i32
             else:
                 smem_idx = smem_base_expr + lane_i32
-            lds_store_vec(smem_ptr, smem_idx * _ELEMS_PER_PACK, raw)
+            fx.ptr_store(raw, smem_ptr + (smem_idx * _ELEMS_PER_PACK))
             gpu.barrier()  # barrier 1: all warps have written smem
 
             if warp_id == 0:
@@ -531,7 +533,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                         smem_read_idx = wi * threads_per_rank_i32 + lane_id
                     else:
                         smem_read_idx = wi * threads_per_rank_i32 + lane_id + smem_base_expr
-                    raw_i = lds_load_vec(smem_ptr, smem_read_idx * _ELEMS_PER_PACK, fx.Int32, _ELEMS_PER_PACK)
+                    raw_i = fx.ptr_load(
+                        smem_ptr + (smem_read_idx * _ELEMS_PER_PACK),
+                        result_type=fx.Vector.make_type(_ELEMS_PER_PACK, fx.Int32),
+                    )
                     if const_expr(is_f32):
                         vf = raw_i.bitcast(fx.Float32)
                         acc = vf if acc is None else acc + vf
@@ -725,7 +730,7 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 raw = _load_v4i32(tmp_out_rsrc_desc, src_off_i32)
 
             smem_idx = lane_i32
-            lds_store_vec(smem_ptr, smem_idx * _ELEMS_PER_PACK, raw)
+            fx.ptr_store(raw, smem_ptr + (smem_idx * _ELEMS_PER_PACK))
             gpu.barrier()
 
             # Warp 0 reduces across all warps, writes result to res area
@@ -737,7 +742,10 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                 acc = None
                 for wi in range_constexpr(world_size):
                     smem_read_idx = (wi * tnum_gpu) + lane_id
-                    raw_i = lds_load_vec(smem_ptr, smem_read_idx * _ELEMS_PER_PACK, fx.Int32, _ELEMS_PER_PACK)
+                    raw_i = fx.ptr_load(
+                        smem_ptr + (smem_read_idx * _ELEMS_PER_PACK),
+                        result_type=fx.Vector.make_type(_ELEMS_PER_PACK, fx.Int32),
+                    )
                     if const_expr(is_f32):
                         # Raw LDS payload is i32x4; reinterpret as f32x4.
                         vf = raw_i.bitcast(fx.Float32)
@@ -753,14 +761,17 @@ def make_allreduce_kernels(*, N: int, dtype_str: str, world_size: int, threads: 
                     # Narrow back to storage dtype, then store as raw i32 bits.
                     out_raw = acc.to(half_dtype).bitcast(fx.Int32)
                 smem_result_idx = threads + lane_id
-                lds_store_vec(smem_ptr, smem_result_idx * _ELEMS_PER_PACK, out_raw)
+                fx.ptr_store(out_raw, smem_ptr + (smem_result_idx * _ELEMS_PER_PACK))
 
             gpu.barrier()
 
             # All warps read the same reduced result from res area and
             # nontemporal-write to their respective remote output buffers.
             smem_result_read_idx = threads + lane_id
-            reduced_val = lds_load_vec(smem_ptr, smem_result_read_idx * _ELEMS_PER_PACK, fx.Int32, _ELEMS_PER_PACK)
+            reduced_val = fx.ptr_load(
+                smem_ptr + (smem_result_read_idx * _ELEMS_PER_PACK),
+                result_type=fx.Vector.make_type(_ELEMS_PER_PACK, fx.Int32),
+            )
 
             dst_out_pack_idx = rank_i32 * part_p + cur
             dst_off_i32 = dst_out_pack_idx * _ELEMS_PER_PACK
