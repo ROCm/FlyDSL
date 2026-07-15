@@ -1,11 +1,54 @@
 {
  "schema": 1,
- "updated": "2026-07-15T00:10:05Z",
+ "updated": "2026-07-15T00:52:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
+   "run_id": 29380026024,
+   "pr": 855,
+   "commit": "6463241b56a995929e01d117d11bb28eb476d817",
+   "branch": "perf/rmsnorm-bwd-two-stage",
+   "event": "pull_request",
+   "title": "[Perf] Add staged dweight reduction for RMSNorm backward",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024",
+   "created_at": "2026-07-15T00:48:15Z",
+   "updated_at": "2026-07-15T00:49:16Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-15T00:49:52Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024/job/87241618376"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-15T00:49:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024/job/87241618379"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-15T00:49:16Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024/job/87241618404"
+    }
+   ]
+  },
+  {
    "run_id": 29378123716,
-   "pr": 820,
+   "pr": null,
    "commit": "49890ad97e45b78b8c0884eb168eb281d943d2ff",
    "branch": "jiacao/conv3d-multi-tile-autotune-v2",
    "event": "pull_request",
@@ -35,10 +78,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-14T22:39:24Z",
-     "completed_at": null,
+     "completed_at": "2026-07-15T00:17:01Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29373560296/job/87222276049"
     },
     {
@@ -2274,49 +2317,6 @@
      "started_at": "2026-07-13T07:02:08Z",
      "completed_at": "2026-07-13T07:22:36Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29230616415/job/86754023117"
-    }
-   ]
-  },
-  {
-   "run_id": 29225777671,
-   "pr": null,
-   "commit": "37fc57664af7b57babccb5f3162443b2cb3bc609",
-   "branch": "feat/autotune-offline-configs",
-   "event": "pull_request",
-   "title": "[3/5] autotune: offline config emit + runtime lookup (#770)",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225777671",
-   "created_at": "2026-07-13T05:13:19Z",
-   "updated_at": "2026-07-13T06:33:02Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T05:33:36Z",
-     "completed_at": "2026-07-13T06:00:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225777671/job/86739553178"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T06:09:40Z",
-     "completed_at": "2026-07-13T06:33:02Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225777671/job/86739553180"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-13T05:14:49Z",
-     "completed_at": "2026-07-13T05:40:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29225777671/job/86739553197"
     }
    ]
   }
