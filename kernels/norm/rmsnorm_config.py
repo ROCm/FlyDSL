@@ -10,7 +10,7 @@ VEC_WIDTH is not tuned (pinned to 128//elem_bits by the 128-bit buffer copy).
 """
 
 from flydsl.autotune import Config
-from kernels.norm.rmsnorm_common import WARP_SIZE
+from kernels.common.kernels_common import get_warp_size
 from kernels.norm.rmsnorm_kernel import SMALL_N_THRESHOLD
 
 # Candidate block sizes. All are multiples of the warp size (64 on CDNA) and
@@ -73,6 +73,7 @@ def get_all_configs(N: int, dtype_str: str, arch: str = None):
 
     vectorized = _elem_bits(dtype_str) <= 16
     vec_width = 128 // _elem_bits(dtype_str)
+    warp_size = get_warp_size(arch)
     configs = []
     for block in _BLOCK_THREADS_CHOICES:
         if vectorized:
@@ -84,7 +85,7 @@ def get_all_configs(N: int, dtype_str: str, arch: str = None):
             # A workgroup imposes its own occupancy floor. On CDNA, block / 64
             # waves are distributed over four EUs; exact WPE below that floor is
             # impossible, so LLVM falls back to its default occupancy decision.
-            if wpe and WARP_SIZE == 64 and block > wpe * WARP_SIZE * _CDNA_EUS_PER_CU:
+            if wpe and warp_size == 64 and block > wpe * warp_size * _CDNA_EUS_PER_CU:
                 continue
             configs.append(Config(waves_per_eu=wpe, BLOCK_THREADS=block))
     # Fall back to the heuristic default if nothing fit (e.g. an odd bf16 N).

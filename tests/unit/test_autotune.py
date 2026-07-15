@@ -902,13 +902,20 @@ def test_cache_hit_stale_config_degrades_to_default(monkeypatch):
     assert key not in t.cache  # stale entry dropped
 
 
-def test_rmsnorm_configs_route_wpe_as_compile_option():
+@pytest.mark.parametrize(
+    ("arch", "extra_pairs"),
+    [
+        ("gfx950", set()),
+        ("gfx1201", {(512, 1), (1024, 1), (1024, 2)}),
+    ],
+)
+def test_rmsnorm_configs_route_wpe_as_compile_option(arch, extra_pairs):
     """RMSNorm keeps structural build knobs separate from backend options."""
     pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
     from kernels.norm.rmsnorm_autotune import rmsnorm_autotuned
     from kernels.norm.rmsnorm_config import _BLOCK_THREADS_CHOICES, get_all_configs
 
-    cfgs = get_all_configs(8192, "f32")
+    cfgs = get_all_configs(8192, "f32", arch=arch)
     blocks = sorted({c.kwargs["BLOCK_THREADS"] for c in cfgs})
     assert blocks == sorted(_BLOCK_THREADS_CHOICES)  # every block present (no tile filter for f32)
     assert all("WAVES_PER_EU" not in c.kwargs for c in cfgs)
@@ -917,7 +924,7 @@ def test_rmsnorm_configs_route_wpe_as_compile_option():
         return config.compiler_opts().get("waves_per_eu", 0)
 
     assert {effective_wpe(c) for c in cfgs} == {0, 1, 2}
-    assert {(c.kwargs["BLOCK_THREADS"], effective_wpe(c)) for c in cfgs} == {
+    expected_pairs = {
         (128, 0),
         (128, 1),
         (128, 2),
@@ -928,6 +935,7 @@ def test_rmsnorm_configs_route_wpe_as_compile_option():
         (512, 2),
         (1024, 0),
     }
+    assert {(c.kwargs["BLOCK_THREADS"], effective_wpe(c)) for c in cfgs} == expected_pairs | extra_pairs
     assert rmsnorm_autotuned.tuner.structural == ("BLOCK_THREADS",)
 
 
