@@ -197,6 +197,7 @@ def build_flash_attn_dualwave_swp_module(
         ctx.init_tile_bounds()
         ctx.init_active_guard()
         ctx.init_lds_read_bases()
+        ctx.init_dma_m0_tables()
 
         active = ctx.active
         elem_dtype = ctx.elem_dtype
@@ -213,9 +214,6 @@ def build_flash_attn_dualwave_swp_module(
         gemm_helper = dwc.DualwaveGemmHelper(ctx)
         softmax_helper = dwc.DualwaveSoftmaxHelper(ctx)
 
-        if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN and not traits.SPLITK):
-            output_store.zero_o_block_if_needed()
-
         def _main_body():
             # Paged: stage the block-table row into LDS before any page-id ds_read.
             if const_expr(traits.PAGED):
@@ -223,8 +221,6 @@ def build_flash_attn_dualwave_swp_module(
                 rocdl.s_waitcnt(0)
                 rocdl.sched_barrier(0)
                 rocdl.s_barrier()
-
-            ctx.init_dma_m0_tables()
 
             # Prologue: load K tile split_t0 -> LDS buf0, wait, and sync the workgroup.
             if const_expr(traits.PAGED):
@@ -380,9 +376,7 @@ def build_flash_attn_dualwave_swp_module(
                 else:
                     v_s_1 = softmax_helper.v_s_vec_to_lists(v_s_1)
                 m_tile_max_a = softmax_helper.reduce_max(v_s_1)
-
                 dwc._sched_barrier_pairs(traits, 4, 6, 2)
-
                 if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_0 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
                 else:
@@ -457,7 +451,6 @@ def build_flash_attn_dualwave_swp_module(
                 v_o = gemm_helper.pv_step_k(0, v_p_1, v_v, v_o)
                 m_tile_max_b = softmax_helper.reduce_max(v_s_0)
                 dwc._sched_barrier_pairs(traits, 4, 6, 4)
-
                 if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_1 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
                 else:
@@ -704,6 +697,9 @@ def build_flash_attn_dualwave_swp_module(
                 output_store.store_final_o(v_o, ctx.q_row)
             else:
                 output_store.store_splitk_partial_o(v_o, m_row, l_row, ctx.q_row)
+
+        if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN and not traits.SPLITK):
+            output_store.zero_o_block_if_needed()
 
         if active is None:
             _main_body()
