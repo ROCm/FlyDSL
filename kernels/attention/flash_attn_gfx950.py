@@ -18,11 +18,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
-from flydsl.expr.typing import T
-from flydsl.expr.typing import Vector as Vec
-from flydsl.expr.utils.arith import ArithValue
-from flydsl.expr.utils.arith import _to_raw as as_mlir_value
+from flydsl.expr import const_expr, range_constexpr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from kernels.attention.flash_attn_utils import (
     DualwaveGemmHelper,
@@ -32,6 +28,8 @@ from kernels.attention.flash_attn_utils import (
     DualwavePageIdLoader,
     DualwaveQLoader,
     DualwaveSoftmaxHelper,
+    DualwaveSplitKCombineContext,
+    DualwaveSplitKCombineHelper,
     DualwaveStoreHelper,
     _anchor_v_o,
     _anchor_v_p,
@@ -731,141 +729,24 @@ def build_flash_attn_dualwave_swp_module(
     COMBINE_BLOCK = 256
     COMBINE_LANES_PER_ROW = traits.HEAD_DIM // 4
     COMBINE_ROWS_PER_BLOCK = COMBINE_BLOCK // COMBINE_LANES_PER_ROW
-    combine_trait_values = (traits.HEAD_DIM, traits.NUM_HEADS_Q)
 
     @flyc.kernel(known_block_size=[COMBINE_BLOCK, 1, 1])
     def flash_attn_splitk_combine_kernel(
         O: fx.Tensor, WS: fx.Tensor, batch_size: fx.Int32, seq_len: fx.Int32, stride_q_n: fx.Int32  # noqa: E741
     ):
-        HEAD_DIM, NUM_HEADS_Q = combine_trait_values
+        ctx = DualwaveSplitKCombineContext(traits, O, WS, batch_size, seq_len, stride_q_n)
+        ctx.init_types_and_constants()
+        ctx.init_runtime_indices()
+        ctx.init_thread_mapping(COMBINE_ROWS_PER_BLOCK, COMBINE_LANES_PER_ROW)
+        ctx.init_workspace()
+        ctx.init_descriptors()
 
-        elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
-        fm_fast = fx.arith.FastMathFlags.fast
-
-        def _combine_fadd(a, b):
-            return arith.addf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
-
-        def _combine_fmul(a, b):
-            return arith.mulf(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast)
-
-        def _combine_fmax(a, b):
-            return arith.MaxNumFOp(as_mlir_value(a), as_mlir_value(b), fastmath=fm_fast).result
-
-        seq_v = fx.Index(seq_len)
-        stride_v = fx.Index(stride_q_n)
-        bs_v = fx.Index(batch_size)
-        tid = fx.Index(gpu.thread_idx.x)
-        blk = fx.Index(gpu.block_idx.x)
-
-        row = blk * COMBINE_ROWS_PER_BLOCK + tid // COMBINE_LANES_PER_ROW
-        col = (tid % COMBINE_LANES_PER_ROW) * 4
-        hs = seq_v * traits.NUM_HEADS_Q
-        b = row // hs
-        rem = row % hs
-        h = rem // seq_v
-        s = rem % seq_v
-
-        z_total = bs_v * traits.NUM_KV_SPLITS
-        # Per-split-z sizes (match the write-side constants in the main kernel).
-        _ws_opart_per_split_elems_c = traits.NUM_HEADS_Q * seq_v * (traits.HEAD_DIM // 2)
-        _ws_ml_per_split_elems_c = traits.NUM_HEADS_Q * seq_v
-        _ws_opart_per_split_bytes_c = _ws_opart_per_split_elems_c * 4
-        _ws_ml_per_split_bytes_c = _ws_ml_per_split_elems_c * 4
-        _ws_mrow_abs_bytes_c = z_total * _ws_opart_per_split_bytes_c
-        _ws_lrow_abs_bytes_c = _ws_mrow_abs_bytes_c + z_total * _ws_ml_per_split_bytes_c
-        # Local (per-split) indices for this thread's (h, s) slot.
-        local_ml_idx_c = h * seq_v + s
-        local_o_base_c = (h * seq_v + s) * fx.Index(traits.HEAD_DIM // 2)
-
-        # Per-split WS descriptors fold cross-split offset into the 48-bit base.
-        _ws_base_i64_c = fx.Int64(fx.ptrtoint(fx.get_iter(WS)))
-
-        def _make_ws_rsrc_c(byte_offset, nrec_bytes):
-            addr_i64 = as_mlir_value(_ws_base_i64_c + fx.Int64(byte_offset))
-            return buffer_ops.create_buffer_resource_from_addr(
-                addr_i64, num_records_bytes=as_mlir_value(fx.Int64(nrec_bytes))
-            )
-
-        # O is natural-shape [B, S, H, D]; per-batch descriptor folds b*seq_v into the
-        # 48-bit base so the flat index stays 0-based within the batch (< 2^31).
-        _o_per_batch_elems_c = seq_v * stride_v
-        _o_batch_byte_off_c = b * _o_per_batch_elems_c * fx.Index(2)
-        _o_rsrc_c = buffer_ops.create_buffer_resource_from_addr(
-            as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(O))) + fx.Int64(_o_batch_byte_off_c)),
-            num_records_bytes=as_mlir_value(fx.Int64(_o_per_batch_elems_c * fx.Index(2))),
-        )
-        _load_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
-
-        m_s = []
-        l_s = []
-        for i in range_constexpr(traits.NUM_KV_SPLITS):
-            split_z_i = b * traits.NUM_KV_SPLITS + i
-            mrsrc_i = _make_ws_rsrc_c(
-                _ws_mrow_abs_bytes_c + split_z_i * _ws_ml_per_split_bytes_c, _ws_ml_per_split_bytes_c
-            )
-            lrsrc_i = _make_ws_rsrc_c(
-                _ws_lrow_abs_bytes_c + split_z_i * _ws_ml_per_split_bytes_c, _ws_ml_per_split_bytes_c
-            )
-            m_f32 = buffer_ops.buffer_load(mrsrc_i, as_mlir_value(fx.Int32(local_ml_idx_c)), vec_width=1, dtype=T.f32)
-            l_f32 = buffer_ops.buffer_load(lrsrc_i, as_mlir_value(fx.Int32(local_ml_idx_c)), vec_width=1, dtype=T.f32)
-            m_s.append(m_f32)
-            l_s.append(l_f32)
-        m_max = m_s[0]
-        for i in range_constexpr(traits.NUM_KV_SPLITS - 1):
-            m_max = _combine_fmax(m_max, m_s[i + 1])
-
-        den = as_mlir_value(fx.Float32(0.0))
-        acc = as_mlir_value(Vec.filled(4, 0.0, fx.Float32))
-        for i in range_constexpr(traits.NUM_KV_SPLITS):
-            # Empty split (causal tail): l == 0 and O_partial is zeroed -> skip its O
-            # reads. The runtime `if` (call in cond -> scf.if) reassigns pre-existing
-            # acc/den so the update propagates; not-taken keeps them unchanged.
-            split_z_i = b * traits.NUM_KV_SPLITS + i
-            orsrc_i = _make_ws_rsrc_c(split_z_i * _ws_opart_per_split_bytes_c, _ws_opart_per_split_bytes_c)
-            local_o_idx_i = local_o_base_c + col // 2
-
-            @flyc.jit
-            def _accum_split(acc, den):
-                if fx.Float32(l_s[i]) > fx.Float32(0.0):
-                    w = rocdl.exp2(
-                        T.f32, as_mlir_value(arith.subf(as_mlir_value(m_s[i]), as_mlir_value(m_max), fastmath=fm_fast))
-                    )
-                    wl = _combine_fmul(w, l_s[i])
-                    den = _combine_fadd(den, wl)
-                    # O_partial holds packed 16-bit normalized partials (2 cols/dword):
-                    # dwordx2 per lane, extend the 4 cols to f32, weight by w * l.
-                    o2_raw = buffer_ops.buffer_load(
-                        orsrc_i, as_mlir_value(fx.Int32(local_o_idx_i)), vec_width=2, dtype=T.i32
-                    )
-                    o2_i32 = ir.Value(o2_raw)
-                    o4 = Vec(o2_i32, (2,), fx.Int32).bitcast(elem_dtype).to(fx.Float32)
-                    w4 = Vec.from_elements([fx.Float32(wl)], fx.Float32).broadcast_to(4)
-                    acc = _combine_fadd(acc, _combine_fmul(w4, o4))
-                return acc, den
-
-            acc, den = _accum_split(acc, den)
-
-        inv_rcp = rocdl.rcp(T.f32, den)
-        inv = ArithValue(fx.Float32(den) > fx.Float32(0.0)).select(inv_rcp, fx.Float32(0.0))
-        inv4 = Vec.from_elements([fx.Float32(inv)], fx.Float32).broadcast_to(4)
-        out4 = Vec(_combine_fmul(acc, inv4), (4,), fx.Float32)
-        if const_expr(traits.DTYPE_STR == "bf16"):
-            lo = rocdl.cvt_pk_bf16_f32(out4[0], out4[1])
-            hi = rocdl.cvt_pk_bf16_f32(out4[2], out4[3])
-        else:
-            o_f16 = []
-            for i in range_constexpr(4):
-                o_f16.append(fx.Float32(out4[i]).to(elem_dtype))
-            pack = Vec.from_elements(o_f16, elem_dtype).bitcast(fx.Int32)
-            lo, hi = as_mlir_value(pack[0]), as_mlir_value(pack[1])
-        o_pack = Vec.from_elements([fx.Int32(lo), fx.Int32(hi)], fx.Int32)
-        # b folded into the descriptor base; index 0-based within the batch. o_global is in
-        # elem_dtype (2-byte) units, so pass an explicit byte offset (the i32x2 data would
-        # otherwise be scaled by 4 bytes/elem).
-        o_global = s * stride_v + h * traits.HEAD_DIM + col
-        buffer_ops.buffer_store(
-            o_pack.ir_value(), _o_rsrc_c, as_mlir_value(fx.Int32(o_global * fx.Index(2))), offset_is_bytes=True
-        )
+        combine = DualwaveSplitKCombineHelper(ctx)
+        m_s, l_s = combine.load_ml_rows()
+        m_max = combine.reduce_m_max(m_s)
+        acc, den = combine.accumulate_splits(m_s, l_s, m_max)
+        o_pack = combine.pack_output(acc, den)
+        combine.store_output(o_pack)
 
     @flyc.jit
     def launch_flash_attn_dualwave_swp(

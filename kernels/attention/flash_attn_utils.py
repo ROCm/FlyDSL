@@ -2195,6 +2195,188 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         _store_splitk_partial_if_qrow()
 
 
+class DualwaveSplitKCombineContext:
+    """Shared per-kernel state for the split-K combine pass."""
+
+    def __init__(
+        self,
+        traits_or_ctx,
+        O=None,  # noqa: E741
+        WS=None,
+        batch_size=None,
+        seq_len=None,
+        stride_q_n=None,
+    ):
+        if isinstance(traits_or_ctx, DualwaveSplitKCombineContext):
+            self.__dict__.update(traits_or_ctx.__dict__)
+            self.ctx_ref = getattr(traits_or_ctx, "ctx_ref", traits_or_ctx)
+            return
+
+        self.ctx_ref = self
+        self.traits = traits_or_ctx
+        self.O = O
+        self.WS = WS
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.stride_q_n = stride_q_n
+
+    def init_types_and_constants(self):
+        self.elem_dtype = dtype_to_elem_type(self.traits.DTYPE_STR)
+        self.fm_fast = fx.arith.FastMathFlags.fast
+        self.c_zero_f = fx.Float32(0.0)
+        self.c_zero_v4f32 = Vec.filled(4, 0.0, fx.Float32)
+
+    def init_runtime_indices(self):
+        self.seq_len_v = fx.Index(self.seq_len)
+        self.stride_q_n_v = fx.Index(self.stride_q_n)
+        self.batch_size_v = fx.Index(self.batch_size)
+
+    def init_thread_mapping(self, combine_rows_per_block, combine_lanes_per_row):
+        traits = self.traits
+        self.tid = fx.Index(gpu.thread_idx.x)
+        self.blk = fx.Index(gpu.block_idx.x)
+        self.row = self.blk * combine_rows_per_block + self.tid // combine_lanes_per_row
+        self.col = (self.tid % combine_lanes_per_row) * 4
+        heads_per_batch = self.seq_len_v * traits.NUM_HEADS_Q
+        self.batch_idx = self.row // heads_per_batch
+        rem = self.row % heads_per_batch
+        self.q_head_idx = rem // self.seq_len_v
+        self.seq_idx = rem % self.seq_len_v
+
+    def init_workspace(self):
+        traits = self.traits
+        z_total = self.batch_size_v * traits.NUM_KV_SPLITS
+        self.ws_opart_per_split_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v * fx.Index(traits.HEAD_DIM // 2)
+        self.ws_ml_per_split_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
+        self.ws_opart_per_split_bytes = self.ws_opart_per_split_elems * fx.Index(4)
+        self.ws_ml_per_split_bytes = self.ws_ml_per_split_elems * fx.Index(4)
+        self.ws_mrow_abs_bytes = z_total * self.ws_opart_per_split_bytes
+        self.ws_lrow_abs_bytes = self.ws_mrow_abs_bytes + z_total * self.ws_ml_per_split_bytes
+        self.local_ml_idx = self.q_head_idx * self.seq_len_v + self.seq_idx
+        self.local_o_base = (self.q_head_idx * self.seq_len_v + self.seq_idx) * fx.Index(traits.HEAD_DIM // 2)
+        self.ws_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(self.WS)))
+
+    def init_descriptors(self):
+        per_batch_elems = self.seq_len_v * self.stride_q_n_v
+        batch_byte_off = self.batch_idx * per_batch_elems * fx.Index(2)
+        self.o_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            as_mlir_value(fx.Int64(fx.ptrtoint(fx.get_iter(self.O))) + fx.Int64(batch_byte_off)),
+            num_records_bytes=as_mlir_value(fx.Int64(per_batch_elems * fx.Index(2))),
+        )
+        self.load_atom_64 = fx.make_copy_atom(fx.rocdl.BufferCopy64b(), fx.Int32)
+
+    def workspace_resource(self, byte_offset, nrec_bytes):
+        return _make_ws_rsrc(self.ws_base_i64, byte_offset, nrec_bytes)
+
+    def split_z(self, split_i):
+        return self.batch_idx * self.traits.NUM_KV_SPLITS + split_i
+
+    def opart_resource(self, split_z):
+        return self.workspace_resource(split_z * self.ws_opart_per_split_bytes, self.ws_opart_per_split_bytes)
+
+    def mrow_resource(self, split_z):
+        return self.workspace_resource(
+            self.ws_mrow_abs_bytes + split_z * self.ws_ml_per_split_bytes,
+            self.ws_ml_per_split_bytes,
+        )
+
+    def lrow_resource(self, split_z):
+        return self.workspace_resource(
+            self.ws_lrow_abs_bytes + split_z * self.ws_ml_per_split_bytes,
+            self.ws_ml_per_split_bytes,
+        )
+
+
+class DualwaveSplitKCombineHelper(DualwaveSplitKCombineContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
+
+    def load_ml_rows(self):
+        m_s = []
+        l_s = []
+        for i in range_constexpr(self.traits.NUM_KV_SPLITS):
+            split_z_i = self.split_z(i)
+            m_f32 = buffer_ops.buffer_load(
+                self.mrow_resource(split_z_i),
+                as_mlir_value(fx.Int32(self.local_ml_idx)),
+                vec_width=1,
+                dtype=T.f32,
+            )
+            l_f32 = buffer_ops.buffer_load(
+                self.lrow_resource(split_z_i),
+                as_mlir_value(fx.Int32(self.local_ml_idx)),
+                vec_width=1,
+                dtype=T.f32,
+            )
+            m_s.append(m_f32)
+            l_s.append(l_f32)
+        return m_s, l_s
+
+    def reduce_m_max(self, m_s):
+        m_max = m_s[0]
+        for i in range_constexpr(self.traits.NUM_KV_SPLITS - 1):
+            m_max = _fmax(m_max, m_s[i + 1], self.fm_fast)
+        return m_max
+
+    def init_accumulators(self):
+        return as_mlir_value(self.c_zero_v4f32), as_mlir_value(self.c_zero_f)
+
+    def accumulate_split(self, acc, den, split_i, m_i, l_i, m_max):
+        orsrc_i = self.opart_resource(self.split_z(split_i))
+        local_o_idx_i = self.local_o_base + self.col // 2
+
+        @flyc.jit
+        def _accum_split(acc, den):
+            if fx.Float32(l_i) > fx.Float32(0.0):
+                w = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_i, m_max, self.fm_fast)))
+                wl = _fmul(w, l_i, self.fm_fast)
+                den = _fadd(den, wl, self.fm_fast)
+                o2_raw = buffer_ops.buffer_load(
+                    orsrc_i,
+                    as_mlir_value(fx.Int32(local_o_idx_i)),
+                    vec_width=2,
+                    dtype=T.i32,
+                )
+                o2_i32 = ir.Value(o2_raw)
+                o4 = Vec(o2_i32, (2,), fx.Int32).bitcast(self.elem_dtype).to(fx.Float32)
+                w4 = Vec.from_elements([fx.Float32(wl)], fx.Float32).broadcast_to(4)
+                acc = _fadd(acc, _fmul(w4, o4, self.fm_fast), self.fm_fast)
+            return acc, den
+
+        return _accum_split(acc, den)
+
+    def accumulate_splits(self, m_s, l_s, m_max):
+        acc, den = self.init_accumulators()
+        for i in range_constexpr(self.traits.NUM_KV_SPLITS):
+            acc, den = self.accumulate_split(acc, den, i, m_s[i], l_s[i], m_max)
+        return acc, den
+
+    def pack_output(self, acc, den):
+        inv_rcp = rocdl.rcp(T.f32, den)
+        inv = ArithValue(fx.Float32(den) > self.c_zero_f).select(inv_rcp, self.c_zero_f)
+        inv4 = Vec.from_elements([fx.Float32(inv)], fx.Float32).broadcast_to(4)
+        out4 = Vec(_fmul(acc, inv4, self.fm_fast), (4,), fx.Float32)
+        if const_expr(self.traits.DTYPE_STR == "bf16"):
+            lo = rocdl.cvt_pk_bf16_f32(out4[0], out4[1])
+            hi = rocdl.cvt_pk_bf16_f32(out4[2], out4[3])
+        else:
+            o_f16 = []
+            for i in range_constexpr(4):
+                o_f16.append(fx.Float32(out4[i]).to(self.elem_dtype))
+            pack = Vec.from_elements(o_f16, self.elem_dtype).bitcast(fx.Int32)
+            lo, hi = as_mlir_value(pack[0]), as_mlir_value(pack[1])
+        return Vec.from_elements([fx.Int32(lo), fx.Int32(hi)], fx.Int32)
+
+    def store_output(self, o_pack):
+        o_global = self.seq_idx * self.stride_q_n_v + self.q_head_idx * self.traits.HEAD_DIM + self.col
+        buffer_ops.buffer_store(
+            o_pack.ir_value(),
+            self.o_rsrc,
+            as_mlir_value(fx.Int32(o_global * fx.Index(2))),
+            offset_is_bytes=True,
+        )
+
+
 # Misc debug and public helpers
 
 
