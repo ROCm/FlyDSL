@@ -44,10 +44,12 @@ _LGKMCNT_EXPCNT_BASE = 0x3F70
 _VMCNT_HI_SHIFT = 14
 _VMCNT_HI_MASK = 0x3
 _LGKMCNT_0_ONLY = 0xC07F
+
+
 def _encode_waitcnt(vmcnt=63, expcnt=7, lgkmcnt=63):
-  vm_lo = vmcnt & _VMCNT_LO_MASK
-  vm_hi = (vmcnt >> 4) & _VMCNT_HI_MASK
-  return vm_lo | (expcnt << 4) | (lgkmcnt << 8) | (vm_hi << _VMCNT_HI_SHIFT)
+    vm_lo = vmcnt & _VMCNT_LO_MASK
+    vm_hi = (vmcnt >> 4) & _VMCNT_HI_MASK
+    return vm_lo | (expcnt << 4) | (lgkmcnt << 8) | (vm_hi << _VMCNT_HI_SHIFT)
 
 
 def _llvm_value(value):
@@ -77,10 +79,14 @@ def _waitcnt_vm_n(n):
     """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
     val = (n & _VMCNT_LO_MASK) | _LGKMCNT_EXPCNT_BASE | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
     rocdl.s_waitcnt(val)
+
+
 _DUALWAVE_MIN_DENSE_SEQ = 256
 _DUALWAVE_LARGE_BATCH = 8
 _DUALWAVE_MIN_DENSE_SEQ_LARGE_BATCH = 192
 _DUALWAVE_ONLY_KWARGS = frozenset({"stride_kv_n", "stride_q_n", "head_dim_runtime", "debug_counts", "workspace"})
+
+
 def _tree_reduce(vals, binop):
     items = list(vals)
     while len(items) > 1:
@@ -89,6 +95,8 @@ def _tree_reduce(vals, binop):
             nxt.append(items[-1])
         items = nxt
     return items[0]
+
+
 def _routes_dense_to_dualwave(batch, seq_len):
     if not isinstance(seq_len, int):
         return True
@@ -165,15 +173,16 @@ def build_flash_attn_func_module_primary(
     K_SUB_N = 32
     WARP_SIZE = 64
     _dualwave_swp_launch = None
-    _enable_gfx942_dualwave = (
-        gpu_arch.startswith("gfx942")
-        and os.getenv("FLYDSL_ENABLE_GFX942_DUALWAVE", "0") == "1"
-    )
-    if block_m is None and head_dim == 128 and dtype_str in ("bf16", "f16") and (
-        gpu_arch.startswith("gfx950") or _enable_gfx942_dualwave
+    _enable_gfx942_dualwave = gpu_arch.startswith("gfx942") and os.getenv("FLYDSL_ENABLE_GFX942_DUALWAVE", "0") == "1"
+    if (
+        block_m is None
+        and head_dim == 128
+        and dtype_str in ("bf16", "f16")
+        and (gpu_arch.startswith("gfx950") or _enable_gfx942_dualwave)
     ):
         try:
             from kernels.attention.flash_attn_gfx950 import build_flash_attn_dualwave_swp_module
+
             _dualwave_swp_launch = build_flash_attn_dualwave_swp_module(
                 num_heads=num_heads,
                 head_dim=head_dim,
@@ -191,6 +200,7 @@ def build_flash_attn_func_module_primary(
             )
         except Exception as _dualwave_swp_err:
             import sys
+
             print(
                 f"[flash_attn_func] DUALWAVE_SWP path build failed, falling back: {_dualwave_swp_err}",
                 file=sys.stderr,
@@ -218,15 +228,18 @@ def build_flash_attn_func_module_primary(
         if hasattr(_dispatched, "compile"):
             _guarded.compile = _dispatched.compile
         return _guarded
+
     def _extract_batch(args, kwargs):
         B = args[4] if len(args) > 4 else kwargs.get("batch_size", None)
         return B if isinstance(B, int) else 1
+
     def _wrap_with_dualwave_swp(_fallback):
         if cu_seqlens_q is not None and _dualwave_swp_launch is None:
             raise ValueError(
                 "QKV varlen (cu_seqlens) is only supported on the gfx950 DUALWAVE_SWP "
                 "path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)"
             )
+
         def _fallback_no_diff_kv(*args, **kwargs):
             skv = kwargs.pop("seq_len_kv", None)
             S_int = _extract_seq_len(args, kwargs)
@@ -236,11 +249,13 @@ def build_flash_attn_func_module_primary(
                     "gfx950 DUALWAVE_SWP path (head_dim=128, dtype bf16/f16, gpu_arch gfx950)."
                 )
             return _fallback(*args, **kwargs)
+
         if hasattr(_fallback, "compile"):
             _fallback_no_diff_kv.compile = _fallback.compile
         if _dualwave_swp_launch is None:
             dispatched = _fallback_no_diff_kv
         else:
+
             def _dualwave_swp_dispatch(*args, **kwargs):
                 if len(args) > 6:
                     raise TypeError(
@@ -263,12 +278,14 @@ def build_flash_attn_func_module_primary(
                 if _routes_dense_to_dualwave(_extract_batch(args, kwargs), _extract_seq_len(args, kwargs)):
                     return _dualwave_swp_launch(*args, **kwargs)
                 return _fallback_no_diff_kv(*args, **kwargs)
+
             if hasattr(_fallback, "compile"):
                 _dualwave_swp_dispatch.compile = _fallback.compile
             dispatched = _dualwave_swp_dispatch
         if block_m is None:
             return _guard_seqlen(dispatched)
         return dispatched
+
     if block_m is None and num_heads >= 32:
         _launcher_m128 = build_flash_attn_func_module_primary(
             num_heads,
@@ -311,6 +328,7 @@ def build_flash_attn_func_module_primary(
             dualwave_swp_enable_stagger=dualwave_swp_enable_stagger,
         )
         _BS_THRESHOLD = 2048 * num_heads if gpu_arch.startswith("gfx942") else 4096 * num_heads
+
         def _auto_launch(*args, **kwargs):
             B = args[4] if len(args) > 4 else kwargs.get("batch_size", 1)
             S = args[5] if len(args) > 5 else kwargs.get("seq_len", 128)
@@ -318,6 +336,7 @@ def build_flash_attn_func_module_primary(
             if bs * num_heads >= _BS_THRESHOLD:
                 return _launcher_m256(*args, **kwargs)
             return _launcher_m128(*args, **kwargs)
+
         return _wrap_with_dualwave_swp(_auto_launch)
 
     if block_m is not None:
@@ -345,22 +364,16 @@ def build_flash_attn_func_module_primary(
     # buffer_load_dwordx4_lds (16B DMA-to-LDS) requires gfx950+; gfx94x only has dword (4B).
     _has_lds_load_b128 = not gpu_arch.startswith("gfx942")
     ENABLE_GFX942_DMA = (
-        gpu_arch.startswith("gfx942")
-        and os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_GFX942_DMA", "0") == "1"
+        gpu_arch.startswith("gfx942") and os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_GFX942_DMA", "0") == "1"
     )
     ENABLE_DMA = ENABLE_GFX942_DMA or (
-        _has_lds_load_b128
-        and (PATH_TAG == "N128" or (os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"))
+        _has_lds_load_b128 and (PATH_TAG == "N128" or (os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_DMA", "0") == "1"))
     )
     ENABLE_GFX942_KV_GPFETCH = (
         gpu_arch.startswith("gfx942")
         and not ENABLE_PREFETCH_3BUF
         and (not ENABLE_DMA or ENABLE_GFX942_DMA)
         and os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_KV_GPFETCH", "1") == "1"
-    )
-    ENABLE_GFX942_K_GPFETCH = (
-        ENABLE_GFX942_KV_GPFETCH
-        and os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_K_GPFETCH", "0") == "1"
     )
     ENABLE_LDS_VEC16 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_ENABLE_LDS_VEC16", "1") == "1"
     _V_PERM_TR_ENV = os.getenv("FLYDSL_FLASH_ATTN_FUNC_V_PERM_TR", "1") == "1"
@@ -373,9 +386,7 @@ def build_flash_attn_func_module_primary(
     if REDUCE_MODE not in ("xor", "ds_bpermute"):
         REDUCE_MODE = "xor"
     SKIP_KV_PAD_MASK = os.getenv("FLYDSL_FLASH_ATTN_FUNC_SKIP_KV_PAD_MASK", "1") == "1"
-    NUM_PREFETCH_K = 3 if ENABLE_PREFETCH_3BUF else (
-        2 if (ENABLE_DMA and not ENABLE_GFX942_DMA) else 1
-    )
+    NUM_PREFETCH_K = 3 if ENABLE_PREFETCH_3BUF else (2 if (ENABLE_DMA and not ENABLE_GFX942_DMA) else 1)
     NUM_PREFETCH_V = 3 if ENABLE_PREFETCH_3BUF else 1
     CK_LDS_SEQ = (1, 2, 0, 1, 0, 1, 2, 0) if ENABLE_PREFETCH_3BUF else (0,)
 
@@ -440,8 +451,8 @@ def build_flash_attn_func_module_primary(
 
     # Vectorized V uses no-major LDS so each P*V pack is one aligned v8 read.
     # elem(n,d) = (d//8)*544 + (n//8)*64 + (d%8)*8 + n%8.
-        # Split one v8 copy per (n_group, d) across the workgroup.
-        # Direct GM->LDS DMA fills no-major V rows without VGPR round-trips.
+    # Split one v8 copy per (n_group, d) across the workgroup.
+    # Direct GM->LDS DMA fills no-major V rows without VGPR round-trips.
 
     # Vectorized cooperative load constants.
     VEC_WIDTH = 16 if ENABLE_LDS_VEC16 else 8
@@ -508,10 +519,12 @@ def build_flash_attn_func_module_primary(
         fm_fast = fx.arith.FastMathFlags.fast
         _NATIVE_EXP2 = os.getenv("FLYDSL_FLASH_ATTN_FUNC_NATIVE_EXP2", "1") == "1"
         _f32_ir_type = ir.F32Type.get()
+
         def _exp2(x):
             if const_expr(_NATIVE_EXP2):
                 return rocdl.exp2(_f32_ir_type, _raw(x))
             return ArithValue(x).exp2(fastmath=fm_fast)
+
         v4f16_type = Vec.make_type(4, elem_dtype)
         v8f16_type = Vec.make_type(8, elem_dtype)
         v16f32_type = Vec.make_type(16, fx.Float32)
@@ -554,7 +567,6 @@ def build_flash_attn_func_module_primary(
             elem_type,
             shape=(LDS_KV_TOTAL_SIZE,),
         ).get()
-        lds_kv_base_ptr = buffer_ops.create_llvm_ptr(fx.Int64(lds_kv_offset), address_space=3)
 
         # ---- Thread / block indices ----
         block_id = fx.Index(gpu.block_idx.x)
@@ -611,20 +623,16 @@ def build_flash_attn_func_module_primary(
         # Dense uses independent Q/KV lengths; varlen reads cu_seqlens[batch:batch+2].
         # num_q_tiles still uses max_seqlen_q so flat-grid decode matches launch.
 
-
-
         # Dense/varlen fold batch into raw K/V pointers; paged adds page_id per tile.
 
+        # page_id = BlockTable[batch_idx*block_table_stride + tile_start//PAGE_SIZE]
 
-                # page_id = BlockTable[batch_idx*block_table_stride + tile_start//PAGE_SIZE]
+        # K[kv_row, col:col+VEC_WIDTH] from vectorized [.,Hkv,D/8,PS,8]:
+        # two contiguous vec8 blocks (dg=col//8 and dg+1), each
+        # cache[.,dg,kv_row,0:8] == K[kv_row, dg*8:dg*8+8].
 
-
-                    # K[kv_row, col:col+VEC_WIDTH] from vectorized [.,Hkv,D/8,PS,8]:
-                    # two contiguous vec8 blocks (dg=col//8 and dg+1), each
-                    # cache[.,dg,kv_row,0:8] == K[kv_row, dg*8:dg*8+8].
-
-                    # V[kv_row, col:col+VEC_WIDTH] from vectorized [.,Hkv,PS/8,D,8]:
-                    # stride-8 gather, idx = kg*(D*8) + d*8 + (kv_row%8).
+        # V[kv_row, col:col+VEC_WIDTH] from vectorized [.,Hkv,PS/8,D,8]:
+        # stride-8 gather, idx = kg*(D*8) + d*8 + (kv_row%8).
 
         # ---- Cooperative load decomposition ----
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
@@ -641,6 +649,7 @@ def build_flash_attn_func_module_primary(
             vp_row_base = vp_row_group * VP_ROWS_PER_THREAD
             _VP_SEL_LO = fx.Int32(0x05040100)
             _VP_SEL_HI = fx.Int32(0x07060302)
+
         # ---- Helper: global flat indices ----
         # Token indices are 0-based because the descriptor or raw pointer folds batch base.
         def global_idx_q(token_idx, col):
@@ -673,6 +682,7 @@ def build_flash_attn_func_module_primary(
 
         def _bitcast_i32(value):
             return fx.Int32(ArithValue(value).bitcast(fx.Int32.ir_type))
+
         _PERM_PACK = os.getenv("FLYDSL_FLASH_ATTN_FUNC_PERM_PACK", "1") == "1"
         _TREE_REDUCE = os.getenv("FLYDSL_FLASH_ATTN_FUNC_TREE_REDUCE", "0") == "1"
         _BF16_PACK_SEL = fx.Int32(0x07060302)
@@ -702,14 +712,20 @@ def build_flash_attn_func_module_primary(
             for j in range_constexpr(4):
                 pairs.append(_pack_bf16_pair(f32_vals[j * 2], f32_vals[j * 2 + 1], _c16, _cmask))
             return Vec.from_elements(pairs, fx.Int32).bitcast(elem_dtype).ir_value()
+
         def _k_sigma_n(n):
-            return (n & fx.Index(0x3)) | ((n & fx.Index(0x8)) >> fx.Index(1)) | (
-                (n & fx.Index(0x4)) << fx.Index(1)
-            ) | (n & ~fx.Index(0xF))
+            return (
+                (n & fx.Index(0x3))
+                | ((n & fx.Index(0x8)) >> fx.Index(1))
+                | ((n & fx.Index(0x4)) << fx.Index(1))
+                | (n & ~fx.Index(0xF))
+            )
+
         def _k_vec_elem_idx(n, col_f16):
             d_group = col_f16 // fx.Index(K_VEC_SIZE)
             d_local = col_f16 % fx.Index(K_VEC_SIZE)
             return d_group * fx.Index(K_VEC_N_STRIDE) + n * fx.Index(K_VEC_SIZE) + d_local
+
         def _load_k_mfma_pack(elem_idx):
             return Vec.load(mfma_pack_type, lds_kv, [elem_idx]).ir_value()
 
@@ -750,6 +766,7 @@ def build_flash_attn_func_module_primary(
                     lds_idx = k_base + lds_row * K_STRIDE + swz_col
                     vec = load_global_f16xN(k_ptr, g_idx)
                     Vec(vec).store(lds_kv, [lds_idx])
+
         def coop_load_k_global(tile_start):
             vecs = []
             for batch in range_constexpr(NUM_BATCHES_KV):
@@ -758,6 +775,7 @@ def build_flash_attn_func_module_primary(
                 g_idx = global_idx_kv(row_idx, load_col_base)
                 vecs.append(load_global_f16xN(k_ptr, g_idx))
             return vecs
+
         def coop_store_k_lds(vecs, buf_id=0):
             k_base = k_buf_base(buf_id)
             for batch in range_constexpr(NUM_BATCHES_KV):
@@ -839,6 +857,7 @@ def build_flash_attn_func_module_primary(
                 g_idx = global_idx_kv(row_idx, vp_col_base)
                 vecs.append(load_global_f16xN(v_ptr, g_idx))
             return vecs
+
         # ---- KV_VECTORIZED V: no-major GM->LDS DMA ----
 
         def coop_store_v_lds_perm(vecs, buf_id=0):
@@ -865,6 +884,7 @@ def build_flash_attn_func_module_primary(
                 hi_01 = rocdl.perm_b32(b, a, _VP_SEL_HI)
                 v_hi = Vec.from_elements([hi_01], fx.Int32).bitcast(elem_dtype)
                 v_hi.store(lds_kv, [v_base + dh * fx.Index(VT_STRIDE) + vp_row_base])
+
         _kv_nrec_bytes = _raw(seq_len_v * fx.Index(STRIDE_TOKEN_KV * 2))
         _q_nrec_bytes = _raw(seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
         _q_batch_byte_off = _raw(batch_idx * seq_len_v * fx.Index(STRIDE_TOKEN_Q * 2))
@@ -1018,12 +1038,7 @@ def build_flash_attn_func_module_primary(
         # Loop-carried: [m_old, l_old, o_acc_chunks..., (buf_id if DMA dbuf)]
         _use_dma_dbuf = ENABLE_DMA and not ENABLE_PREFETCH_3BUF
         _use_k_dbuf = _use_dma_dbuf
-        _pipe_k = (
-            ENABLE_GFX942_KV_GPFETCH
-            and not _use_k_dbuf
-            and not ENABLE_PREFETCH_3BUF
-            and N_SUBTILES == 1
-        )
+        _pipe_k = ENABLE_GFX942_KV_GPFETCH and not _use_k_dbuf and not ENABLE_PREFETCH_3BUF and N_SUBTILES == 1
         init_args = [c_neg_inf, c_zero_f]
         for _ in range_constexpr(D_CHUNKS):
             init_args.append(c_zero_v16f32)
@@ -1043,9 +1058,7 @@ def build_flash_attn_func_module_primary(
             o_accs = [inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)]
             _cur_buf_id = inner_iter_args[2 + D_CHUNKS] if _use_k_dbuf else None
             _carried_k_vecs = (
-                [inner_iter_args[2 + D_CHUNKS + _kb] for _kb in range_constexpr(NUM_BATCHES_KV)]
-                if _pipe_k
-                else None
+                [inner_iter_args[2 + D_CHUNKS + _kb] for _kb in range_constexpr(NUM_BATCHES_KV)] if _pipe_k else None
             )
             preload_k_count = NUM_PREFETCH_K if NUM_PREFETCH_K < N_SUBTILES else N_SUBTILES
 
@@ -1111,7 +1124,9 @@ def build_flash_attn_func_module_primary(
                 if const_expr(not _use_k_dbuf):
                     k_base = k_buf_base(k_slot)
 
-                if const_expr(not ENABLE_GFX942_KV_GPFETCH and (not USE_HW_TR or (not ENABLE_DMA and not ENABLE_PREFETCH_3BUF))):
+                if const_expr(
+                    not ENABLE_GFX942_KV_GPFETCH and (not USE_HW_TR or (not ENABLE_DMA and not ENABLE_PREFETCH_3BUF))
+                ):
                     _v_vecs_prefetch = coop_load_v_global(kv_start)
 
                 # ==== GEMM1: bulk-read all K packs, then pipeline MFMAs ====
@@ -1147,10 +1162,13 @@ def build_flash_attn_func_module_primary(
                     if const_expr(ENABLE_GFX942_VEC_K):
                         return _load_k_mfma_pack(idx)
                     return Vec.load(mfma_pack_type, lds_kv, [idx]).ir_value()
+
                 if const_expr(ENABLE_GFX942_KV_GPFETCH and not ENABLE_GFX942_VEC_K):
                     _QK_PREFETCH_DEPTH = int(os.getenv("FLYDSL_FLASH_ATTN_FUNC_QK_PF_DEPTH", "3"))
                 else:
-                    _QK_PREFETCH_DEPTH = 4 if (ENABLE_GFX942_KV_GPFETCH or ENABLE_GFX942_VEC_K) else (3 if ENABLE_DMA else 2)
+                    _QK_PREFETCH_DEPTH = (
+                        4 if (ENABLE_GFX942_KV_GPFETCH or ENABLE_GFX942_VEC_K) else (3 if ENABLE_DMA else 2)
+                    )
                 k_packs_lo = [None] * K_STEPS_QK
                 k_packs_hi = [None] * K_STEPS_QK
                 if const_expr(ENABLE_GFX942_VEC_K or ENABLE_GFX942_KV_GPFETCH):
@@ -1162,7 +1180,6 @@ def build_flash_attn_func_module_primary(
                     for p in range_constexpr(_QK_PREFETCH_DEPTH):
                         k_packs_lo[p] = _load_k_pack(p, False)
                         k_packs_hi[p] = _load_k_pack(p, True)
-
 
                 s_acc_lo = c_zero_v16f32
                 s_acc_hi = c_zero_v16f32
@@ -1232,10 +1249,11 @@ def build_flash_attn_func_module_primary(
                         kv_col_lo_0 = kv_start_i32 + lane_off_i32 + fx.Int32(0)
                         s_raw_lo_0 = ArithValue(kv_col_lo_0 > q_row_i32).select(c_neg_inf, s_raw_lo_0)
                         s_raw_hi_0 = ArithValue(kv_col_lo_0 + fx.Int32(K_SUB_N) > q_row_i32).select(
-                        # KV_VECTORIZED applies sigma(kv) in the K load, so the score at
-                        # logical n_pos holds physical kv = kv_start + sigma(n_pos):
-                        # lane_off bit2 -> bit3 (lane_div_32*8) and _off -> sigma(_off).
-                            c_neg_inf, s_raw_hi_0
+                            # KV_VECTORIZED applies sigma(kv) in the K load, so the score at
+                            # logical n_pos holds physical kv = kv_start + sigma(n_pos):
+                            # lane_off bit2 -> bit3 (lane_div_32*8) and _off -> sigma(_off).
+                            c_neg_inf,
+                            s_raw_hi_0,
                         )
                         kv_col_lo_1 = kv_start_i32 + lane_off_i32 + fx.Int32(1)
                         s_raw_lo_1 = ArithValue(kv_col_lo_1 > q_row_i32).select(c_neg_inf, s_raw_lo_1)
@@ -1384,8 +1402,6 @@ def build_flash_attn_func_module_primary(
                 scaled_max = _fmul(c_sm_scale_log2e, m_new_raw)
                 neg_scaled_max = _fsub(c_zero_f, scaled_max)
 
-
-
                 # ==== Rescale O accumulators ====
                 corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(16)
                 if const_expr(not USE_HW_TR):
@@ -1427,8 +1443,8 @@ def build_flash_attn_func_module_primary(
                 def _p_exp_val(s_raw):
                     diff = fmath.fma(s_raw, c_sm_scale_log2e, neg_scaled_max, fastmath=fm_fast)
                     return _exp2(diff)
-                # ==== Build P packs for lo and hi halves ====
 
+                # ==== Build P packs for lo and hi halves ====
 
                 # Build flat (dc, pks) schedule for interleaved GEMM2.
                 _steps = [(dc, pks) for dc in range(D_CHUNKS) for pks in range(PV_K_STEPS)]
@@ -1436,8 +1452,8 @@ def build_flash_attn_func_module_primary(
 
                 def _read_v_pack(step_idx):
                     dc, pks = _steps[step_idx]
-                        # No-major V: one aligned v8 per (dc,pks) half. Lane l reads
-                        # V[d=dc*32+l%32, n=pks*16+(l//32)*8+0..7] (lo) / +32 (hi).
+                    # No-major V: one aligned v8 per (dc,pks) half. Lane l reads
+                    # V[d=dc*32+l%32, n=pks*16+(l//32)*8+0..7] (lo) / +32 (hi).
                     if const_expr(USE_HW_TR):
                         d_col = fx.Index(dc * D_CHUNK) + tr_col_half * 16 + tr_col_sub * 4
                         k_row = fx.Index(pks * PV_K_STEP) + lane_div_32 * 4 + tr_k_group
@@ -1501,7 +1517,7 @@ def build_flash_attn_func_module_primary(
                         p_hi = _p_exp_val(s_raw_hi[r])
                         p_vals_hi.append(p_hi)
                         local_sum = _fadd(local_sum, p_hi)
-                # Pre-read V for the first step.
+                    # Pre-read V for the first step.
 
                     peer_sum = reduction_peer(local_sum)
                     tile_sum = _fadd(local_sum, peer_sum)
@@ -1623,7 +1639,7 @@ def build_flash_attn_func_module_primary(
         inv_l = rocdl.rcp(T.f32, l_final)
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
         v_o = [Vec(o_finals[dc]) * inv_l_vec for dc in range_constexpr(D_CHUNKS)]
-            # gfx950 fuses half-wave partners into 8 cols/store; o_rsrc drops partial-tile OOB rows.
+        # gfx950 fuses half-wave partners into 8 cols/store; o_rsrc drops partial-tile OOB rows.
 
         if const_expr(USE_PERMLANE_OSTORE):
             pair_i32_ty = ir.Type.parse("!llvm.struct<(i32, i32)>")
@@ -1645,6 +1661,7 @@ def build_flash_attn_func_module_primary(
                 lo_res = llvm.extractvalue(T.i32, swapped, [0])
                 hi_res = llvm.extractvalue(T.i32, swapped, [1])
                 return is_hi_half.select(lo_res, hi_res)
+
             for dc in range_constexpr(D_CHUNKS):
                 for g in range_constexpr(2):
                     d0_a, d1_a = _o_pack_2dw(dc, 2 * g)
@@ -1674,12 +1691,11 @@ def build_flash_attn_func_module_primary(
                     # permlane32_swap(a,b) -> (a.lo|b.lo, a.hi|b.hi); with a=b=dw the
                     # partner dword dw[lane^32] is result[1] on low lanes, [0] on high.
 
-                        # low lanes: own group-2g cols 0-3 ++ partner's cols 4-7;
-                        # high lanes: partner's group-(2g+1) cols 0-3 ++ own cols 4-7.
+                    # low lanes: own group-2g cols 0-3 ++ partner's cols 4-7;
+                    # high lanes: partner's group-(2g+1) cols 0-3 ++ own cols 4-7.
                 # gfx942 fallback (no permlane32_swap / cvt_pk_bf16_f32): each lane stores
                 # its 16 cols as 4 dwordx2 groups via .to(elem_dtype); col map d_col =
                 # dc*D_CHUNK + lane_div_32*4 + 8*grp + r. num_records bound drops OOB rows.
-
 
         # ---- Normalize and store O (128-bit buffer_store_dwordx4) ----
 
@@ -1738,9 +1754,7 @@ def build_flash_attn_func_module_primary(
         "lsr-drop-solution": True,
     }
     if gpu_arch.startswith("gfx942"):
-        _llvm_opts["amdgpu-expert-scheduling-mode"] = (
-            os.getenv("FLYDSL_LLVM_EXPERT_SCHED", "1") == "1"
-        )
+        _llvm_opts["amdgpu-expert-scheduling-mode"] = os.getenv("FLYDSL_LLVM_EXPERT_SCHED", "1") == "1"
         if os.getenv("FLYDSL_LLVM_SCHEDULE_REGION", "0") == "1":
             _llvm_opts["amdgpu-schedule-regions"] = True
     # Best MI355X FMHA numbers were measured with ROCm/llvm-project `felix/tune_fmha`;
@@ -1758,9 +1772,9 @@ def build_flash_attn_func_module_primary(
         with CompilationContext.compile_hints(_fmha_compile_hints):
             return launch_flash_attn_generic(*args, **kwargs)
 
-    def _compile(Q, K, V, O, batch_size, seq_len, stream=None):
+    def _compile(Q, K, V, Out, batch_size, seq_len, stream=None):
         with CompilationContext.compile_hints(_fmha_compile_hints):
-            return flyc.compile(launch_flash_attn_generic, Q, K, V, O, batch_size, seq_len, fx.Stream(stream))
+            return flyc.compile(launch_flash_attn_generic, Q, K, V, Out, batch_size, seq_len, fx.Stream(stream))
 
     _launch.compile = _compile
 
