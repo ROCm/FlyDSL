@@ -71,10 +71,10 @@ Examples:
 
 ```bash
 # Default: full pytest areas (same idea as scripts/run_tests.sh pytest step)
-python3 -m pytest tests/kernels/ tests/unit/ tests/python/examples/ -v
+python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/python/examples/ -v
 
 # Exclude large shapes (matches run_tests.sh when RUN_TESTS_FULL is unset)
-python3 -m pytest tests/kernels/ tests/unit/ tests/python/examples/ -m "not large_shape" -v
+python3 -m pytest tests/kernels/ tests/language/ tests/unit/ tests/python/examples/ -m "not large_shape" -v
 
 # When tests are annotated — examples (forward-looking)
 # python3 -m pytest tests/ -m "l0_backend_agnostic or l1a_compile_no_target_dialect" -v

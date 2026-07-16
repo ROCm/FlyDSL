@@ -348,6 +348,18 @@ def _neg_op(self):
 
 
 @dsl_loc_tracing
+def _abs_op(self):
+    if self.type == T.bool():
+        raise TypeError("abs is not supported for boolean type")
+    if self.is_float:
+        return math.absf(self, fastmath=current_fastmath())
+    if not self.signed:
+        # Unsigned integers are already non-negative.
+        return self
+    return math.absi(self)
+
+
+@dsl_loc_tracing
 def _invert_op(self):
     return arith.xori(self, arith_const(-1, self.type))
 
@@ -387,6 +399,7 @@ class ArithValue(ir.Value):
         return type(self)(self, signed)
 
     __neg__ = _neg_op
+    __abs__ = _abs_op
     __invert__ = _invert_op
 
     __add__ = partialmethod(_binary_op, op="add")
