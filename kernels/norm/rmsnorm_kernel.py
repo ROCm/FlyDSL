@@ -1453,11 +1453,13 @@ def build_fused_add_rmsnorm_smoothquant_module(
 # Python wrappers + autograd (quack-aligned). PR 1: plain rmsnorm.
 # =====================================================================
 if torch is not None:
+    from kernels.common.tensor_shim import _run_compiled
     from kernels.norm.rmsnorm_common import torch_dtype_to_str as _torch_dtype_to_str
 
-    # Compiled-fn caches. Keys include device: a compiled function is bound to
-    # the device/context it was built on, so reusing it on another GPU faults.
-    # eps is a compile-time kernel constant, so it is part of the fwd key too.
+    # Forward caches retain CompiledFunctions; eps is a compile-time kernel
+    # constant, so it is part of the key.  Backward caches instead retain one
+    # persistent JitFunction launcher per structural specialization and device;
+    # _run_compiled owns the launcher's single CompiledFunction in ``._cf``.
     _FWD_CACHE: dict = {}
     _BWD_CACHE: dict = {}
 
@@ -1471,13 +1473,13 @@ if torch is not None:
         lambda device_index: torch.cuda.current_stream(device_index).cuda_stream,
     )
 
-    def _launch_cached_on_device(compiled, device, args):
+    def _run_compiled_on_device(launcher, device, args):
         device_index = device.index
         if torch.cuda.current_device() == device_index:
-            compiled(*args, _get_current_raw_stream(device_index))
+            _run_compiled(launcher, *args, _get_current_raw_stream(device_index))
         else:
             with torch.cuda.device(device_index):
-                compiled(*args, _get_current_raw_stream(device_index))
+                _run_compiled(launcher, *args, _get_current_raw_stream(device_index))
 
     # The staged path needs enough rows to amortize its second launch.  Its
     # 512-thread vec8 kernel needs fewer persistent programs than the scalar
@@ -1563,14 +1565,15 @@ if torch is not None:
             dweight = torch.empty_like(weight)
             partial = torch.empty((num_programs * N,), device=device, dtype=torch.float32)
             key = (path, N, dtype_str, num_programs, device)
-            compiled = _BWD_CACHE.get(key)
-            if compiled is None:
-                # Compilation and code-object loading are device-context bound.
+            launcher = _BWD_CACHE.get(key)
+            if launcher is None:
+                # The builder has an arch-dependent vec conversion choice, and
+                # compilation/code-object loading are device-context bound.
                 with torch.cuda.device(device):
-                    stream = torch.cuda.current_stream()
-                    launch_fn = build_rmsnorm_bwd_two_stage_module(N, dtype_str, num_programs)
-                    compiled = flyc.compile(
-                        launch_fn,
+                    device_index = device.index
+                    launcher = build_rmsnorm_bwd_two_stage_module(N, dtype_str, num_programs)
+                    _run_compiled(
+                        launcher,
                         x,
                         weight,
                         dout,
@@ -1579,25 +1582,35 @@ if torch is not None:
                         dweight,
                         partial,
                         M,
-                        stream,
+                        _get_current_raw_stream(device_index),
                     )
-                _BWD_CACHE[key] = compiled
+                _BWD_CACHE[key] = launcher
             else:
-                _launch_cached_on_device(compiled, device, (x, weight, dout, rstd, dx, dweight, partial, M))
+                _run_compiled_on_device(launcher, device, (x, weight, dout, rstd, dx, dweight, partial, M))
             return dx, dweight
 
         dweight = torch.empty((N,), device=device, dtype=torch.float32)
-        key = (path, N, dtype_str, device)
-        compiled = _BWD_CACHE.get(key)
+        key = (path, N, dtype_str, num_programs, device)
+        launcher = _BWD_CACHE.get(key)
         dweight.zero_()
-        if compiled is None:
+        if launcher is None:
             with torch.cuda.device(device):
-                stream = torch.cuda.current_stream()
-                launch_fn = build_rmsnorm_bwd_module(N, dtype_str)
-                compiled = flyc.compile(launch_fn, x, weight, dout, rstd, dx, dweight, M, stream)
-            _BWD_CACHE[key] = compiled
+                device_index = device.index
+                launcher = build_rmsnorm_bwd_module(N, dtype_str)
+                _run_compiled(
+                    launcher,
+                    x,
+                    weight,
+                    dout,
+                    rstd,
+                    dx,
+                    dweight,
+                    M,
+                    _get_current_raw_stream(device_index),
+                )
+            _BWD_CACHE[key] = launcher
         else:
-            _launch_cached_on_device(compiled, device, (x, weight, dout, rstd, dx, dweight, M))
+            _run_compiled_on_device(launcher, device, (x, weight, dout, rstd, dx, dweight, M))
         return dx, dweight.to(weight.dtype)
 
     class RMSNormFunction(torch.autograd.Function):
@@ -1718,13 +1731,13 @@ if torch is not None:
             dweight = torch.empty_like(weight)
             partial = torch.empty((num_programs * N,), device=device, dtype=torch.float32)
             key = (path, N, dtype_str, num_programs, device)
-            compiled = _FUSED_ADD_BWD_CACHE.get(key)
-            if compiled is None:
+            launcher = _FUSED_ADD_BWD_CACHE.get(key)
+            if launcher is None:
                 with torch.cuda.device(device):
-                    stream = torch.cuda.current_stream()
-                    launch_fn = build_fused_add_rmsnorm_bwd_two_stage_module(N, dtype_str, num_programs)
-                    compiled = flyc.compile(
-                        launch_fn,
+                    device_index = device.index
+                    launcher = build_fused_add_rmsnorm_bwd_two_stage_module(N, dtype_str, num_programs)
+                    _run_compiled(
+                        launcher,
                         added,
                         weight,
                         dout,
@@ -1734,30 +1747,41 @@ if torch is not None:
                         dweight,
                         partial,
                         M,
-                        stream,
+                        _get_current_raw_stream(device_index),
                     )
-                _FUSED_ADD_BWD_CACHE[key] = compiled
+                _FUSED_ADD_BWD_CACHE[key] = launcher
             else:
-                _launch_cached_on_device(
-                    compiled,
+                _run_compiled_on_device(
+                    launcher,
                     device,
                     (added, weight, dout, dresidual_out, rstd, dx, dweight, partial, M),
                 )
             return dx, dx, dweight
 
         dweight = torch.empty((N,), device=device, dtype=torch.float32)
-        key = (path, N, dtype_str, device)
-        compiled = _FUSED_ADD_BWD_CACHE.get(key)
+        key = (path, N, dtype_str, num_programs, device)
+        launcher = _FUSED_ADD_BWD_CACHE.get(key)
         dweight.zero_()
-        if compiled is None:
+        if launcher is None:
             with torch.cuda.device(device):
-                stream = torch.cuda.current_stream()
-                launch_fn = build_fused_add_rmsnorm_bwd_module(N, dtype_str)
-                compiled = flyc.compile(launch_fn, added, weight, dout, dresidual_out, rstd, dx, dweight, M, stream)
-            _FUSED_ADD_BWD_CACHE[key] = compiled
+                device_index = device.index
+                launcher = build_fused_add_rmsnorm_bwd_module(N, dtype_str)
+                _run_compiled(
+                    launcher,
+                    added,
+                    weight,
+                    dout,
+                    dresidual_out,
+                    rstd,
+                    dx,
+                    dweight,
+                    M,
+                    _get_current_raw_stream(device_index),
+                )
+            _FUSED_ADD_BWD_CACHE[key] = launcher
         else:
-            _launch_cached_on_device(
-                compiled,
+            _run_compiled_on_device(
+                launcher,
                 device,
                 (added, weight, dout, dresidual_out, rstd, dx, dweight, M),
             )

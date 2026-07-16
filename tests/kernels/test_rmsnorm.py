@@ -1424,20 +1424,28 @@ def test_rmsnorm_bwd_two_stage_cache_reuse_across_m(monkeypatch, fused_add):
     dtype = DTYPE_BF16
     N = 512
     first_m, second_m = 1024, 1025
-    path, _ = rmsnorm_kernel_impl._select_rmsnorm_bwd_config(first_m, N, "bf16", device)
+    path, num_programs = rmsnorm_kernel_impl._select_rmsnorm_bwd_config(first_m, N, "bf16", device)
     assert path == "two_stage"
 
     builder_name = "build_fused_add_rmsnorm_bwd_two_stage_module" if fused_add else "build_rmsnorm_bwd_two_stage_module"
     cache = rmsnorm_kernel_impl._FUSED_ADD_BWD_CACHE if fused_add else rmsnorm_kernel_impl._BWD_CACHE
+    key = (path, N, "bf16", num_programs, device)
     original_builder = getattr(rmsnorm_kernel_impl, builder_name)
     build_count = 0
+    run_compiled_count = 0
 
     def counted_builder(*args, **kwargs):
         nonlocal build_count
         build_count += 1
         return original_builder(*args, **kwargs)
 
+    def counted_run_compiled(*args, **kwargs):
+        nonlocal run_compiled_count
+        run_compiled_count += 1
+        return _run_compiled(*args, **kwargs)
+
     monkeypatch.setattr(rmsnorm_kernel_impl, builder_name, counted_builder)
+    monkeypatch.setattr(rmsnorm_kernel_impl, "_run_compiled", counted_run_compiled)
     saved_cache = cache.copy()
     cache.clear()
 
@@ -1463,8 +1471,13 @@ def test_rmsnorm_bwd_two_stage_cache_reuse_across_m(monkeypatch, fused_add):
 
     try:
         run(first_m, 11)
+        launcher = cache[key]
+        compiled = launcher._cf
         run(second_m, 12)
         assert build_count == 1
+        assert run_compiled_count == 2
+        assert cache[key] is launcher
+        assert launcher._cf is compiled
     finally:
         cache.clear()
         cache.update(saved_cache)
@@ -1562,6 +1575,7 @@ def test_rmsnorm_multi_gpu():
             y = rmsnorm(x, w)
             y.backward(dy)
             torch.cuda.synchronize(dev)
+            assert torch.cuda.current_device() == 0
 
             # Autograd warmed this device's backward cache.  Exercise the hot
             # launch again while cuda:0 remains the caller's current device;
