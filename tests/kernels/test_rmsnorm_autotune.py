@@ -17,7 +17,7 @@ if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 import flydsl.compiler as flyc  # noqa: E402
-from kernels.norm.rmsnorm_autotune import _rmsnorm_tuner, rmsnorm_autotuned  # noqa: E402
+from kernels.norm.rmsnorm_autotune import _SEARCH_CONFIGS, _rmsnorm_tuner, rmsnorm_autotuned  # noqa: E402
 from kernels.norm.rmsnorm_kernel import rmsnorm_direct  # noqa: E402
 
 EPS = 1e-5
@@ -38,22 +38,23 @@ def _reference(x, g):
 
 
 def _inputs(M=32, N=8192):
-    torch.manual_seed(0)
-    x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16)
-    g = torch.rand(N, device="cuda", dtype=torch.bfloat16)
-    return x, g, _reference(x, g), torch.cuda.current_stream()
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    x = torch.randn(M, N, device="cuda", dtype=torch.bfloat16, generator=generator)
+    g = torch.rand(N, device="cuda", dtype=torch.bfloat16, generator=generator)
+    return x, g, _reference(x, g)
 
 
 def _assert_close(out, ref):
-    assert (out.float() - ref).abs().max().item() < 2e-2
+    torch.testing.assert_close(out.float(), ref, rtol=0, atol=2e-2)
 
 
 def test_rmsnorm_direct_specializes_known_block_size():
-    x, g, ref, stream = _inputs(M=1)
+    x, g, ref = _inputs(M=1)
     out = torch.empty_like(x)
+    stream = torch.cuda.current_stream()
 
-    compiled = flyc.compile(rmsnorm_direct, x, g, out, 1, 8192, "bf16", 512, stream)
-    torch.cuda.synchronize()
+    compiled = flyc.compile(rmsnorm_direct, x, g, out, x.shape[0], x.shape[1], "bf16", 512, stream)
+    stream.synchronize()
     artifact = compiled._keepalive
 
     assert "known_block_size = array<i32: 512, 1, 1>" in artifact.source_ir
@@ -62,38 +63,68 @@ def test_rmsnorm_direct_specializes_known_block_size():
     _assert_close(out, ref)
 
 
-def test_rmsnorm_autotuned_default_skips_search(monkeypatch):
+def test_rmsnorm_autotuned_default_uses_current_stream_and_skips_search(monkeypatch):
     monkeypatch.setattr(_rmsnorm_tuner, "_bench_one", lambda *args, **kwargs: pytest.fail("unexpected search"))
-    x, g, ref, stream = _inputs()
+    x, g, ref = _inputs()
     out = torch.empty_like(x)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    observed_streams = []
+    original_run_config = _rmsnorm_tuner._run_config
 
-    rmsnorm_autotuned(x, g, out, x.shape[0], stream=stream)
-    torch.cuda.synchronize()
+    def checked_run_config(config, args, kwargs):
+        observed_streams.append(kwargs["stream"].cuda_stream)
+        return original_run_config(config, args, kwargs)
+
+    monkeypatch.setattr(_rmsnorm_tuner, "_run_config", checked_run_config)
+
+    with torch.cuda.stream(stream):
+        rmsnorm_autotuned(x, g, out, x.shape[0])
+    stream.synchronize()
+
+    assert observed_streams == [stream.cuda_stream]
     _assert_close(out, ref)
 
 
 def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
-    calls = 0
-    original = _rmsnorm_tuner._bench_one
-
-    def counting_bench(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(_rmsnorm_tuner, "_bench_one", counting_bench)
-    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
-    x, g, ref, stream = _inputs()
+    completed = 0
+    x, g, ref = _inputs(M=8)
     out = torch.empty_like(x)
-    rmsnorm_autotuned(x, g, out, x.shape[0], stream=stream)
-    torch.cuda.synchronize()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    raw_stream = stream.cuda_stream
+
+    def bench_once(call, warmup, rep):
+        nonlocal completed
+        assert torch.cuda.current_stream().cuda_stream == stream.cuda_stream
+        call()
+        stream.synchronize()
+        completed += 1
+        return float(completed)
+
+    monkeypatch.setattr(_rmsnorm_tuner, "_do_bench", bench_once)
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    rmsnorm_autotuned(x, g, out, x.shape[0], stream=raw_stream)
+    stream.synchronize()
+
+    assert completed == len(_SEARCH_CONFIGS)
     _assert_close(out, ref)
-    assert calls > 1
+
+    call_kwargs = {"N": x.shape[1], "dtype_str": "bf16", "stream": raw_stream}
+    winner_key = _rmsnorm_tuner._make_key((x, g, out, x.shape[0]), call_kwargs)
+    assert winner_key in _rmsnorm_tuner.cache
+    other_m_key = _rmsnorm_tuner._make_key((x, g, out, x.shape[0] + 1), call_kwargs)
+    assert other_m_key != winner_key
 
     monkeypatch.delenv("FLYDSL_AUTOTUNE")
-    searched = calls
+    monkeypatch.setattr(
+        _rmsnorm_tuner,
+        "default",
+        lambda *args, **kwargs: pytest.fail("cached winner should take precedence over default"),
+    )
     cached = torch.empty_like(x)
-    rmsnorm_autotuned(x, g, cached, x.shape[0], stream=stream)
-    torch.cuda.synchronize()
+    rmsnorm_autotuned(x, g, cached, x.shape[0], stream=raw_stream)
+    stream.synchronize()
+
+    assert completed == len(_SEARCH_CONFIGS)
     _assert_close(cached, ref)
-    assert calls == searched

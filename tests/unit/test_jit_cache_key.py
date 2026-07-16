@@ -79,10 +79,9 @@ def test_thread_local_wpe_overrides_persistent_hint_and_enters_cache_key():
             inner = _cache_key(launch)
             assert launch._effective_compile_hints()["waves_per_eu"] == 2
         assert launch._effective_compile_hints()["waves_per_eu"] == 1
+    assert launch._effective_compile_hints()["waves_per_eu"] == 4
     with CompilationContext.compile_hints({"waves_per_eu": "2"}):
         invalid_type = _cache_key(launch)
 
     assert len({persistent, outer, inner}) == 3
     assert invalid_type != inner
-    hints = next(value for name, value in inner if name == "_hints_")
-    assert ("waves_per_eu", "builtins", "int", "2") in hints

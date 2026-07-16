@@ -385,26 +385,42 @@ def test_autotune_decorator_wraps_into_autotuner():
 
 
 # ── two-track default/search ─────────────────────────────────────────────
-def test_default_skips_search(monkeypatch):
+def test_cache_hit_precedes_default_and_search(monkeypatch):
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    default_calls = 0
 
     def fn(a, out, BLOCK):
         out._data[0] = float(BLOCK)
 
+    def default(a, out):
+        nonlocal default_calls
+        default_calls += 1
+        return Config(BLOCK=999)
+
     def fail_bench(call, warmup, rep):
-        pytest.fail("default path benchmarked configs")
+        pytest.fail("normal path benchmarked configs")
 
     tuner = _make_tuner(
         fn=fn,
         configs=[Config(BLOCK=64), Config(BLOCK=128)],
-        default=lambda a, out: Config(BLOCK=999),
+        default=default,
         do_bench_fn=fail_bench,
     )
+    a = FakeTensor((8,))
     out = FakeTensor((1,))
+    args = (a, out)
+    tuner.cache[tuner._make_key(args, {})] = Config(BLOCK=128)
 
-    tuner(FakeTensor((8,)), out)
+    tuner(*args)
+
+    assert out._data[0] == 128.0
+    assert default_calls == 0
+
+    tuner.cache.clear()
+    tuner(*args)
 
     assert out._data[0] == 999.0
+    assert default_calls == 1
 
 
 def test_force_search_bypasses_cache_and_default(monkeypatch):

@@ -6,6 +6,7 @@
 import inspect
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable, Dict, List
 
@@ -291,35 +292,56 @@ class Autotuner:
             return self.prune_configs_by(configs, sig_args)
         return configs
 
+    def _stream_context(self, args, kwargs):
+        """Use an explicit torch/raw stream for benchmark events and setup ops."""
+        if torch is None:
+            return nullcontext()
+        sig_args = dict(zip(self.arg_names, args))
+        sig_args.update(kwargs)
+        stream = sig_args.get("stream")
+        if isinstance(stream, torch.cuda.Stream):
+            return torch.cuda.stream(stream)
+        if isinstance(stream, int):
+            device = next(
+                (value.device for value in sig_args.values() if isinstance(value, torch.Tensor) and value.is_cuda),
+                None,
+            )
+            stream = (
+                torch.cuda.default_stream(device) if stream == 0 else torch.cuda.ExternalStream(stream, device=device)
+            )
+            return torch.cuda.stream(stream)
+        return nullcontext()
+
     def _bench_one(self, config, args, kwargs):
         """Compile and benchmark one config. Returns time in ms."""
         merged_kwargs = dict(kwargs)
         merged_kwargs.update(config.all_kwargs())
         compiler_opts = config.compiler_opts()
 
-        # Snapshot once before any rep runs, so restores are from pristine input.
-        snapshot = self._snapshot_tensors(args, merged_kwargs)
+        with self._stream_context(args, merged_kwargs):
+            # Snapshot once before any rep runs, so restores are from pristine input.
+            snapshot = self._snapshot_tensors(args, merged_kwargs)
 
-        def kernel_call():
-            # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
-            # hook that sets up state (incl. mutating a tensor) isn't clobbered
-            # by the restore. Each benchmark rep starts from clean inputs.
-            self._restore_tensors(snapshot)
-            self._reset_tensors(args, merged_kwargs)
-            if config.pre_hook:
-                config.pre_hook(merged_kwargs)
-            if self.pre_hook:
-                self.pre_hook(merged_kwargs)
-            self._run_with_hints(compiler_opts, args, merged_kwargs)
-            if self.post_hook:
-                self.post_hook(merged_kwargs)
-
-        try:
-            return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
-        finally:
-            # Leave the caller's tensors as a single clean run would.
-            if snapshot:
+            def kernel_call():
+                # Order: restore/reset the inputs first, THEN run the pre_hooks, so a
+                # hook that sets up state (incl. mutating a tensor) isn't clobbered
+                # by the restore. Each benchmark rep starts from clean inputs.
                 self._restore_tensors(snapshot)
+                self._reset_tensors(args, merged_kwargs)
+                if config.pre_hook:
+                    config.pre_hook(merged_kwargs)
+                if self.pre_hook:
+                    self.pre_hook(merged_kwargs)
+                self._run_with_hints(compiler_opts, args, merged_kwargs)
+                if self.post_hook:
+                    self.post_hook(merged_kwargs)
+
+            try:
+                return self._do_bench(kernel_call, warmup=self.warmup, rep=self.rep)
+            finally:
+                # Leave the caller's tensors as a single clean run would.
+                if snapshot:
+                    self._restore_tensors(snapshot)
 
     def _run_with_hints(self, compiler_opts, args, kwargs):
         """Run the kernel with optional compiler hints. Import is deferred so
@@ -338,8 +360,9 @@ class Autotuner:
         clean run (restore_value tensors are already restored by _bench_one)."""
         merged = dict(kwargs)
         merged.update(config.all_kwargs())
-        self._reset_tensors(args, merged)
-        return self._run_with_hints(config.compiler_opts(), args, merged)
+        with self._stream_context(args, merged):
+            self._reset_tensors(args, merged)
+            return self._run_with_hints(config.compiler_opts(), args, merged)
 
     def __call__(self, *args, **kwargs):
         key = self._make_key(args, kwargs)

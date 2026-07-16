@@ -114,8 +114,8 @@ class RocmBackend(BaseBackend):
 
         with module.context:
             for func_op in _iter_gpu_kernel_funcs(module):
-                # The native ROCDL form is min-only. Remove it before writing
-                # the exact min/max constraint used by Triton's AMD backend.
+                # rocdl.waves_per_eu expresses a minimum. Replace it with the exact
+                # min/max LLVM passthrough for an explicit compile-hint override.
                 if "rocdl.waves_per_eu" in func_op.attributes:
                     del func_op.attributes["rocdl.waves_per_eu"]
                 _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")

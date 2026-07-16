@@ -30,18 +30,22 @@ def _search_configs(input_t, gamma, output, m_in, N, dtype_str="bf16", stream=No
 
 _rmsnorm_tuner = autotune(
     configs=_search_configs,
-    key=["N", "dtype_str"],
+    key=["m_in", "N", "dtype_str"],
     default=_default_config,
 )(rmsnorm_direct)
 
 
 def rmsnorm_autotuned(input_t, gamma, output, m_in, dtype_str="bf16", stream=None):
-    return _rmsnorm_tuner(
-        input_t,
-        gamma,
-        output,
-        m_in,
-        N=int(input_t.shape[-1]),
-        dtype_str=dtype_str,
-        stream=stream,
-    )
+    import torch
+
+    with torch.cuda.device(input_t.device):
+        launch_stream = torch.cuda.current_stream() if stream is None else stream
+        return _rmsnorm_tuner(
+            input_t,
+            gamma,
+            output,
+            m_in,
+            N=int(input_t.shape[-1]),
+            dtype_str=dtype_str,
+            stream=launch_stream,
+        )

@@ -4,6 +4,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from flydsl._mlir import ir
 from flydsl._mlir._mlir_libs._mlirDialectsLLVM import translate_module_to_llvmir
 from flydsl._mlir.passmanager import PassManager
@@ -14,6 +16,8 @@ from flydsl.compiler.external_llvm import (
     run_external_binary_codegen,
 )
 from flydsl.compiler.jit_function import _create_mlir_context
+
+pytestmark = [pytest.mark.l1b_target_dialect, pytest.mark.rocm_lower]
 
 
 def _write_executable(path: Path, text: str) -> None:
@@ -109,6 +113,23 @@ def test_rocm_lower_wpe_preserves_source_default_and_overrides_kernel_entries():
     assert "amdgpu-waves-per-eu" not in funcs["helper"]
 
 
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (True, TypeError),
+        ("2", TypeError),
+        (-1, ValueError),
+    ],
+)
+def test_rocm_lower_wpe_rejects_invalid_values(value, error):
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        module = ir.Module.create()
+        with pytest.raises(error, match="waves_per_eu"):
+            backend.lower_compile_hints(module, compile_hints={"waves_per_eu": value})
+
+
 def test_rocm_wpe_reaches_native_llvm_as_exact_constraint():
     backend = RocmBackend(RocmBackend.make_target("gfx942"))
     with _create_mlir_context() as ctx:
@@ -121,7 +142,7 @@ def test_rocm_wpe_reaches_native_llvm_as_exact_constraint():
             context=ctx,
         )
         backend.lower_compile_hints(module, compile_hints={"waves_per_eu": 2})
-        pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={"waves_per_eu": 2})
+        pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={})
         PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
         llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
 
