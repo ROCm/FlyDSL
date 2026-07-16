@@ -72,18 +72,11 @@ def build_flash_attn_dualwave_swp_module(
 ):
     """Build an DUALWAVE_SWP flash_attn launcher for D=64/128 bf16/f16 on gfx950.
 
-    ``varlen`` builds the QKV variable-length (packed) variant: Q/O are
-    ``[total_q, H, D]``, K/V are ``[total_kv, H_kv, D]``, and per-batch token
-    ranges come from cumulative ``cu_seqlens_q`` / ``cu_seqlens_kv`` (int32
-    ``[B+1]``) passed at launch. Per batch ``seqlen_q == seqlen_kv`` (self-attn).
-    With ``varlen=False`` the dense path is unchanged (byte-identical codegen).
-
-    ``paged`` builds the paged-KV variant: K/V are a physical page cache
-    ``[NumBlocks, PAGE_SIZE, H_kv, D]`` (PAGE_SIZE == BLOCK_N == 64) and kv-tile
-    ``j`` of batch ``b`` reads physical page ``BlockTable[b*block_table_stride+j]``.
-    Q/O stay dense ``[B, seqlen_q, H, D]``. Mutually exclusive with varlen/split-K.
-    With ``paged=False`` codegen is byte-identical to the non-paged path."""
-    gpu_arch = get_rocm_arch()
+    Supports dense self-attention, varlen packed QKV, and paged-KV cache modes.
+    Varlen uses cu_seqlens_q/kv with per-batch self-attention ranges.
+    Paged mode keeps Q/O dense and maps KV tiles through BlockTable pages.
+    Varlen, paged, and split-K are mutually constrained by the caller."""
+    gpu_arch = get_hip_arch()
 
     if not gpu_arch.startswith("gfx950"):
         raise RuntimeError(f"flash_attn_dualwave_swp requires gfx950+ (uses ds_read_tr16_b64), got {gpu_arch}")
