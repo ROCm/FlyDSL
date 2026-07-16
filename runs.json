@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T07:54:12Z",
+ "updated": "2026-07-16T08:00:52Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -111,13 +111,41 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "pending",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486",
    "created_at": "2026-07-16T07:44:49Z",
-   "updated_at": "2026-07-16T07:44:50Z",
+   "updated_at": "2026-07-16T07:58:31Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T07:58:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486/job/87566939214"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T07:58:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486/job/87566939263"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T07:58:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486/job/87566939304"
+    }
+   ]
   },
   {
    "run_id": 29480856448,
@@ -194,10 +222,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T07:17:30Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T07:53:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29479299800/job/87559412583"
     },
     {
@@ -457,11 +485,11 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769",
    "created_at": "2026-07-16T04:20:01Z",
-   "updated_at": "2026-07-16T04:20:43Z",
+   "updated_at": "2026-07-16T07:58:01Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -476,19 +504,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-16T06:20:21Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T07:58:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425818"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-16T04:20:43Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T07:58:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425866"
     }
    ]
