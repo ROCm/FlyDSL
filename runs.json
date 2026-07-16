@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T10:12:03Z",
+ "updated": "2026-07-16T10:20:21Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -53,11 +53,11 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520",
    "created_at": "2026-07-16T09:20:23Z",
-   "updated_at": "2026-07-16T09:21:31Z",
+   "updated_at": "2026-07-16T10:19:15Z",
    "actor": "xudoyuan",
    "jobs": [
     {
@@ -72,19 +72,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T09:21:31Z",
+     "started_at": "2026-07-16T10:19:14Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520/job/87583243881"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T09:36:57Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T10:10:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520/job/87583243897"
     }
    ]
@@ -283,20 +283,20 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482744386",
    "created_at": "2026-07-16T08:14:16Z",
-   "updated_at": "2026-07-16T09:59:44Z",
+   "updated_at": "2026-07-16T10:18:52Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-16T09:59:44Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T10:18:51Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482744386/job/87580478543"
     },
     {
