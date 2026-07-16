@@ -22,7 +22,7 @@ from flydsl.expr.typing import (
     T,
 )
 from flydsl.expr.typing import Vector as Vec
-from kernels.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
+from kernels.common.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
 _A_ELEM = {"fp4": Float4E2M1FN, "fp6": Float6E2M3FN, "fp8": Float8E4M3FN}
 
