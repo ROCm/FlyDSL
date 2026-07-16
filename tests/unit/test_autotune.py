@@ -358,26 +358,8 @@ def test_disk_cache_roundtrip(tmp_path, monkeypatch):
 
 # ── decorator ────────────────────────────────────────────────────────────
 def test_autotune_decorator_wraps_into_autotuner():
-    """@autotune returns an Autotuner that forwards restore_value/reset_to_zero."""
+    """@autotune returns an Autotuner and forwards its options."""
 
-    def fake_jit(a, out, **kw):
-        pass
-
-    tuned = autotune(
-        configs=[Config(BLOCK=128)],
-        key=["a"],
-        restore_value=["a"],
-        reset_to_zero=["out"],
-    )(fake_jit)
-
-    assert isinstance(tuned, Autotuner)
-    assert tuned.restore_value == ["a"]
-    assert tuned.reset_to_zero == ["out"]
-    assert [c.kwargs["BLOCK"] for c in tuned.configs] == [128]
-
-
-# ── two-track default/search ─────────────────────────────────────────────
-def test_autotune_decorator_forwards_default_and_callable_configs():
     def fake_jit(a, out, **kw):
         pass
 
@@ -387,12 +369,22 @@ def test_autotune_decorator_forwards_default_and_callable_configs():
     def default(a, out):
         return Config(BLOCK=64)
 
-    tuned = autotune(configs=configs, key=["a"], default=default)(fake_jit)
+    tuned = autotune(
+        configs=configs,
+        key=["a"],
+        default=default,
+        restore_value=["a"],
+        reset_to_zero=["out"],
+    )(fake_jit)
 
+    assert isinstance(tuned, Autotuner)
+    assert tuned.restore_value == ["a"]
+    assert tuned.reset_to_zero == ["out"]
     assert tuned.configs is configs
     assert tuned.default is default
 
 
+# ── two-track default/search ─────────────────────────────────────────────
 def test_default_skips_search(monkeypatch):
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
 

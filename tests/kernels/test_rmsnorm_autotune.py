@@ -17,7 +17,7 @@ if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 import flydsl.compiler as flyc  # noqa: E402
-from kernels.norm.rmsnorm_autotune import rmsnorm_autotuned  # noqa: E402
+from kernels.norm.rmsnorm_autotune import _rmsnorm_tuner, rmsnorm_autotuned  # noqa: E402
 from kernels.norm.rmsnorm_kernel import rmsnorm_direct  # noqa: E402
 
 EPS = 1e-5
@@ -25,12 +25,11 @@ EPS = 1e-5
 
 @pytest.fixture(autouse=True)
 def _isolated_tuner(tmp_path, monkeypatch):
-    tuner = rmsnorm_autotuned.tuner
-    tuner.cache.clear()
-    monkeypatch.setattr(tuner, "_cache_file", tmp_path / "rmsnorm.json")
+    _rmsnorm_tuner.cache.clear()
+    monkeypatch.setattr(_rmsnorm_tuner, "_cache_file", tmp_path / "rmsnorm.json")
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
     yield
-    tuner.cache.clear()
+    _rmsnorm_tuner.cache.clear()
 
 
 def _reference(x, g):
@@ -64,8 +63,7 @@ def test_rmsnorm_direct_specializes_known_block_size():
 
 
 def test_rmsnorm_autotuned_default_skips_search(monkeypatch):
-    tuner = rmsnorm_autotuned.tuner
-    monkeypatch.setattr(tuner, "_bench_one", lambda *args, **kwargs: pytest.fail("unexpected search"))
+    monkeypatch.setattr(_rmsnorm_tuner, "_bench_one", lambda *args, **kwargs: pytest.fail("unexpected search"))
     x, g, ref, stream = _inputs()
     out = torch.empty_like(x)
 
@@ -75,16 +73,15 @@ def test_rmsnorm_autotuned_default_skips_search(monkeypatch):
 
 
 def test_rmsnorm_autotuned_search_then_cache_hit(monkeypatch):
-    tuner = rmsnorm_autotuned.tuner
     calls = 0
-    original = tuner._bench_one
+    original = _rmsnorm_tuner._bench_one
 
     def counting_bench(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(tuner, "_bench_one", counting_bench)
+    monkeypatch.setattr(_rmsnorm_tuner, "_bench_one", counting_bench)
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     x, g, ref, stream = _inputs()
     out = torch.empty_like(x)
