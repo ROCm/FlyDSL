@@ -1236,15 +1236,6 @@ def test_multi_case_set(case_set_name: str) -> None:
         raise ValueError(f"Unsupported case set: {case_set_name}")
 
 
-# ---------------------------------------------------------------------------
-# Tile-programming reference (kernels/pa_decode_tile.py)
-#
-# Validates the readable, correctness-first tile-programming reimplementation of
-# the PA decode math against `reference_masked_attention`, for the minimal slice
-# it supports: per-tensor fp8 K/V, query_length=1, no kv-varlen, no sliding
-# window.  The reference kernel consumes f16 K/V holding the fp8 codes (see its
-# module docstring), so we fp8-quantize then cast the codes to f16 here.
-# ---------------------------------------------------------------------------
 def _run_pa_decode_tile_case(
     num_kv_heads: int,
     group_size: int,
@@ -1255,28 +1246,18 @@ def _run_pa_decode_tile_case(
     query_dtype: torch.dtype = torch.float16,
     per_token_kv: bool = False,
     query_length: int = 1,
+    trans_v: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     from kernels.attention.pa_decode_tile import pa_decode_tile
 
     setup_seed(0)
     dev = "cuda"
     num_q_heads = num_kv_heads * group_size
-    # The kernel addresses K/V (and the block table) in whole 256-token compute
-    # tiles: even the last, partially-valid tile issues loads (masked out in
-    # softmax, not skipped) for its full 256-token span. block_size divides
-    # 256 evenly (16, 64), so block_tables must cover ceil(context_len/256)
-    # tiles' worth of pages, not just ceil(context_len/block_size) -- the
-    # latter under-allocates whenever context_len isn't a multiple of 256,
-    # causing an out-of-bounds block-table read for the padding tokens.
     tile_tok = 256
     num_tiles = (context_len + tile_tok - 1) // tile_tok
     max_blocks = num_tiles * tile_tok // block_size
     num_blocks = num_seqs * max_blocks
     if per_token_kv:
-        # One dequant scale per (physical block, kv head, token-in-block),
-        # matching pa_decode_ps_kernel's own per_token_kv tensor layout.
-        # Random positive values in a similar range to the per-tensor 0.04
-        # default, so the fp8 quantization noise floor stays comparable.
         k_scale = (torch.rand(num_blocks, num_kv_heads, block_size, device=dev) * 0.03 + 0.02).contiguous()
         v_scale = (torch.rand(num_blocks, num_kv_heads, block_size, device=dev) * 0.03 + 0.02).contiguous()
         k_scale_bcast = k_scale.unsqueeze(-1)  # broadcast over head_dim, K's own trailing axis
@@ -1286,40 +1267,20 @@ def _run_pa_decode_tile_case(
         k_scale_bcast = k_scale
         v_scale_bcast = v_scale
 
-    # `query`/`output` are [num_seqs*query_length, num_q_heads, head_dim],
-    # row-major by (seq, MTP position) -- query_length>1 exercises MTP
-    # (speculative-decode); the KV cache (below) already stands in for
-    # "context_len already includes the MTP tail tokens' own K/V" since
-    # it's independent random data here, not derived from query.
     query = (
         torch.randn(num_seqs * query_length, num_q_heads, head_dim, device=dev, dtype=query_dtype) * 0.3
     ).contiguous()
     k_f = torch.randn(num_blocks, num_kv_heads, block_size, head_dim, device=dev) * 0.3
     v_f = torch.randn(num_blocks, num_kv_heads, head_dim, block_size, device=dev) * 0.3
-    # fp8-quantize K/V (aiter's `dtypes.fp8`, the arch-native e4m3 format --
-    # FNUZ on gfx942, OCP e4m3fn on gfx950; the kernel multiplies by the
-    # (per-tensor or per-token) scale to dequantize).
     fp8_max = torch.finfo(dtypes.fp8).max
     key_cache_plain = (k_f / k_scale_bcast).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
     value_cache_plain = (v_f / v_scale_bcast).clamp(-fp8_max, fp8_max).to(dtypes.fp8)
-    # kernel expects K/V in the SAME BLOCKED layouts pa_decode_ps_kernel uses
-    # (see kernels/pa_decode_tile.py module docstring); relayout once here,
-    # same as production relayouts K/V at quantization time (not per decode
-    # call). K needs a real transpose (plain layout puts head_dim innermost)
-    # into [num_blocks, num_kv_heads, head_dim//16, block_size, 16] -- the
-    # fixed 16-element chunk width matches pa_decode_ps_kernel's own K layout,
-    # not a head_dim-derived split.
     key_cache = (
         key_cache_plain.view(num_blocks, num_kv_heads, block_size, head_dim // 16, 16)
         .permute(0, 1, 3, 2, 4)
         .contiguous()
     )
-    # V's "trans_v" layout ([num_blocks, num_kv_heads, block_size//16,
-    # head_dim, 16], 16 CONSECUTIVE TOKENS innermost) is IDENTICAL to what the
-    # PS test harness's own shuffle_value_cache_layout() produces from a plain
-    # [num_blocks, num_kv_heads, head_dim, block_size] tensor -- reuse it
-    # directly so both kernels' tests share one V relayout path.
-    value_cache = shuffle_value_cache_layout(value_cache_plain)
+    value_cache = shuffle_value_cache_layout(value_cache_plain) if trans_v else value_cache_plain
 
     block_tables = torch.zeros(num_seqs, max_blocks, dtype=torch.int32, device=dev)
     for s in range(num_seqs):
@@ -1351,9 +1312,6 @@ def _run_pa_decode_tile_case(
             within = t % block_size
             keys[t] = kc[phys, :, within, :]
             vals[t] = vc[phys, :, :, within]
-        # q spans this seq's query_length MTP rows: reference_masked_attention's
-        # own s_q != s_k ("generation phase") branch derives each row's causal
-        # bound as `context_len - query_length + 1 + qi`, matching the kernel.
         q = query[s * query_length : (s + 1) * query_length].to(torch.float32)
         refs.append(reference_masked_attention(q, keys, vals, 1.0 / head_dim**0.5, query_dtype, is_causal=True))
     ref = torch.cat(refs, dim=0)
@@ -1366,6 +1324,15 @@ def _run_pa_decode_tile_case(
 def test_pa_decode_tile_reference(num_kv_heads: int, group_size: int, context_len: int, block_size: int) -> None:
     output, ref = _run_pa_decode_tile_case(num_kv_heads, group_size, context_len, num_seqs=3, block_size=block_size)
     torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode mismatch")
+
+
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("context_len", [1027, 256, 17])
+def test_pa_decode_tile_reference_trans_v_false(context_len: int, block_size: int) -> None:
+    output, ref = _run_pa_decode_tile_case(
+        num_kv_heads=1, group_size=8, context_len=context_len, num_seqs=3, block_size=block_size, trans_v=False
+    )
+    torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (trans_v=False) mismatch")
 
 
 @pytest.mark.parametrize("block_size", [16, 64])
@@ -1406,13 +1373,6 @@ def test_pa_decode_tile_reference_per_token_kv(
     torch.testing.assert_close(output, ref, atol=1e-2, rtol=0, msg="tile PA decode (per_token_kv) mismatch")
 
 
-# ---------------------------------------------------------------------------
-# Wide GQA (query_group_size > 16) and MTP (query_length > 1): both flatten
-# into TOTAL_ROWS = query_length * group_size, tiled into M_TILES = ceil(.../16)
-# independent MFMA row-groups -- see compile_pa_decode_tile's own docstring.
-# The epilogue requires BLOCK_THREADS(256) % TOTAL_ROWS == 0, so cases here
-# stick to power-of-2 TOTAL_ROWS (matches this kernel's documented limit).
-# ---------------------------------------------------------------------------
 @pytest.mark.parametrize("block_size", [16, 64])
 @pytest.mark.parametrize("group_size", [32, 64])
 @pytest.mark.parametrize("context_len", [1027, 17])
@@ -1438,18 +1398,11 @@ def test_pa_decode_tile_reference_mtp(
         block_size=block_size,
         query_length=query_length,
     )
-    # Slightly looser than the other reference tests' 1e-2: more M-tiles means
-    # more independent fp8 quantization/rounding events, which measurably (but
-    # only marginally -- mean error is unchanged, just the tail) widens the
-    # worst-case outlier at query_length=4 (M_TILES up to 4 here).
     torch.testing.assert_close(output, ref, atol=1.5e-2, rtol=0, msg="tile PA decode (MTP) mismatch")
 
 
 @pytest.mark.parametrize("context_len", [1027, 17])
 def test_pa_decode_tile_reference_mtp_wide_gqa(context_len: int) -> None:
-    # query_length=2, group_size=32 -> TOTAL_ROWS=64, M_TILES=4: exercises
-    # both axes together, confirming the flattened (qi, gs_head) index and
-    # per-row causal bound compose correctly, not just each axis alone.
     output, ref = _run_pa_decode_tile_case(
         num_kv_heads=1, group_size=32, context_len=context_len, num_seqs=3, block_size=64, query_length=2
     )

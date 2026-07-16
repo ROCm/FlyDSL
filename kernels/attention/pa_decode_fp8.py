@@ -29,6 +29,7 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.attention.pa_common import _compute_block_base_dw_i64, _prefetch_q_chunks
 from kernels.attention.pa_decode_swa import compile_pa_decode_sw, compile_pa_decode_sw_reduce
+from kernels.attention.pa_decode_tile import pa_decode_tile
 from kernels.attention.pa_metadata import compile_pa_decode_metadata
 from kernels.common import dpp_utils
 from kernels.common.tensor_shim import _run_compiled
@@ -848,6 +849,24 @@ def get_recommended_splits(
     sliding_window: int = 0,
     context_partition_size: int = KV_COMPUTE_BLOCK,
     query_length: int = 1,
+    # Static-grid (pa_decode_tile) refinement: when `max_blocks_per_seq` is
+    # given, the base heuristic below (tuned for persistent kernels) is
+    # pushed up/down to account for a *static* one-CTA-per-partition grid,
+    # via a second heuristic tuned by a direct sweep on an 80-CU MI308X.
+    # Two regimes: CU-STARVED (num_sequences*num_kv_heads < device CU count)
+    # pushes NP up to `cu_fill_np`, uncapped by tiles-per-partition -- idle
+    # CUs are worse than thin partitions; otherwise, further CTAs only add
+    # occupancy depth and reduce-kernel/prologue overhead, so
+    # tiles-per-partition is capped to at least `min_tiles_per_partition`.
+    # `device`/`target_ctas_per_cu`/`min_tiles_per_partition`/`tile_tok`
+    # only matter in this refined mode; defaults match what it was tuned
+    # with -- override only to re-sweep or adapt to a different device.
+    max_blocks_per_seq: int | None = None,
+    block_size: int = 1,
+    device: torch.device | None = None,
+    target_ctas_per_cu: int = 8,
+    min_tiles_per_partition: int = 2,
+    tile_tok: int = 256,
 ) -> int:
     """Recommend ``max_context_partition_num`` for PS partitioned paths.
 
@@ -861,13 +880,22 @@ def get_recommended_splits(
         window_token_count = sliding_window + query_length
         return cdiv(window_token_count - 1, context_partition_size) + 1
 
-    props = torch.cuda.get_device_properties(torch.device("cuda"))
+    props = torch.cuda.get_device_properties(device or torch.device("cuda"))
     # Reference uses occupancy = 2 (see `get_occupancy()` in the Gluon module).
     occupancy = 2
     num_sm = props.multi_processor_count * occupancy
     denom = max(1, num_sequences * num_kv_heads * split_kv_blocks)
     n = cdiv(num_sm, denom) * split_kv_blocks
-    return max(4, min(n, 8))
+    base_np = max(4, min(n, 8))
+    if max_blocks_per_seq is None:
+        return base_np
+
+    device_cus = props.multi_processor_count
+    cu_fill_np = cdiv(target_ctas_per_cu * device_cus, num_sequences * num_kv_heads)
+    max_possible_tiles = cdiv(max_blocks_per_seq * block_size, tile_tok)
+    cu_starved = (num_sequences * num_kv_heads) < device_cus
+    tiles_np_cap = max_possible_tiles if cu_starved else max(1, max_possible_tiles // min_tiles_per_partition)
+    return max(1, min(max(base_np, cu_fill_np), tiles_np_cap))
 
 
 # Small block_size (16/64) is routed through the load-balanced worklist
@@ -1889,7 +1917,8 @@ def pa_decode_ps_launch(
         )
         return "ps_sw_partitioned"
 
-    # ── small-block (block_size 16/64) → grid partition kernel + reduce ──
+    # ── small-block (block_size 16/64) → tile kernel, falling back to the
+    # grid-partition kernel + reduce when the shape isn't tile-eligible ──
     # Key cache shape is [num_blocks, num_kv_heads, head_size // 16, block_size, 16].
     block_size = key_cache.shape[-2]
     if block_size in _PA_DECODE_PS_SMALL_BLOCK_SIZES:
@@ -1898,9 +1927,63 @@ def pa_decode_ps_launch(
                 f"pa_decode_ps_launch: block_size={block_size} requires `block_tables` "
                 "(per-sequence physical block index table)."
             )
-        batch_size = context_lengths.shape[0]
         head_size = query.shape[-1]
-        eqgs = query_length * query_group_size
+        total_rows = query_length * query_group_size
+        batch_size = context_lengths.shape[0]
+        # pa_decode_tile now supports both V-cache layouts (trans_v True or
+        # False), so this branch is unconditionally tile-eligible; the
+        # grid-partition-kernel-+-reduce fallback below is currently dead
+        # code kept for reference/rollback.
+        tile_eligible = True
+        if tile_eligible:
+            np_tile = None
+            tile_pmax = tile_psum = tile_pout = None
+            if is_graph_capturing:
+                # Buffer sizes must be fixed ahead of capture and stay
+                # identical across every replay, so force the same
+                # `max_context_partition_num` heuristic the other PS paths
+                # use here (instead of pa_decode_tile's own internal
+                # per-call choice) and require the caller to have
+                # preallocated exp_sums/max_logits/temporary_output for it,
+                # exactly as the other paths already require.
+                np_tile = max_context_partition_num
+                if np_tile == 0:
+                    blocks_per_partition = KV_COMPUTE_BLOCK // block_size
+                    np_tile = get_recommended_splits(batch_size, num_kv_heads, split_kv_blocks=blocks_per_partition)
+                if exp_sums is None or max_logits is None or temporary_output is None:
+                    raise ValueError(
+                        "CUDA graph capture requires preallocated `exp_sums`, `max_logits`, "
+                        "and `temporary_output` for the tile-backed small-block PS path."
+                    )
+                tile_pmax, tile_psum, tile_pout = max_logits, exp_sums, temporary_output
+            # pa_decode_tile requires an exact [num_blocks, num_kv_heads,
+            # block_size] per-token scale shape; callers here may pass an
+            # extra trailing singleton dim (e.g. from a pertoken-quant
+            # helper), which reshape away without changing the strides.
+            if per_token_kv:
+                num_blocks = key_cache.shape[0]
+                key_scale = key_scale.reshape(num_blocks, num_kv_heads, block_size)
+                value_scale = value_scale.reshape(num_blocks, num_kv_heads, block_size)
+            pa_decode_tile(
+                output,
+                query,
+                key_cache,
+                value_cache,
+                block_tables,
+                context_lengths,
+                key_scale,
+                value_scale,
+                softmax_scale=softmax_scale,
+                stream=s,
+                num_partitions=np_tile,
+                pmax=tile_pmax,
+                psum=tile_psum,
+                pout=tile_pout,
+            )
+            return "ps_small_block"
+
+        batch_size = context_lengths.shape[0]
+        eqgs = total_rows
         context_partition_size = KV_COMPUTE_BLOCK
         blocks_per_partition = context_partition_size // block_size
         if max_context_partition_num == 0:
