@@ -22,6 +22,7 @@ from flydsl.expr.typing import (
     T,
 )
 from flydsl.expr.typing import Vector as Vec
+from kernels.mma.mfma_preshuffle_pipeline import xcd_remap_bx_by
 
 _A_ELEM = {"fp4": Float4E2M1FN, "fp6": Float6E2M3FN, "fp8": Float8E4M3FN}
 
@@ -79,6 +80,7 @@ def launch_gemm(
     c_row_stride: Constexpr[int],
     c_batch_stride: Constexpr[int],
     waves_per_eu: Constexpr[int],
+    xcd_swizzle: Constexpr[int] = 0,
 ):
     """Direct @flyc.jit launcher. Operands are fx.Pointer (pass ptr_arg(t): raw data_ptr, no
     per-launch DLPack). Compile once with flyc.compile, then cf(*runtime). a_dtype fp4/fp6/fp8
@@ -158,6 +160,17 @@ def launch_gemm(
         lane = tid % 64
         lane_div_16 = lane // 16
         lane_mod_16 = lane % 16
+
+        if const_expr(xcd_swizzle > 0):
+            bid_x, bid_y = xcd_remap_bx_by(
+                bid_x,
+                bid_y,
+                i32_m,
+                tile_m=BM,
+                tile_n=BN,
+                N=N,
+                xcd_swizzle=xcd_swizzle,
+            )
         bx_m = bid_x * BM
         by_n = bid_y * BN
 
