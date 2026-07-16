@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T12:32:34Z",
+ "updated": "2026-07-16T12:49:37Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29494234796",
    "created_at": "2026-07-16T11:23:14Z",
-   "updated_at": "2026-07-16T12:10:56Z",
+   "updated_at": "2026-07-16T12:46:31Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
@@ -29,19 +29,19 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T12:10:55Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T12:34:30Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29494234796/job/87607547092"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T11:50:03Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T12:46:31Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29494234796/job/87607547097"
     }
    ]
