@@ -207,12 +207,9 @@ def compile_conv3d_implicit(
     BIG_IN_NR = 0x80000000  # 2 GB num_records for the rebased BIG_IN resource
     assert W_BYTES < OOB_SENTINEL_BYTES, f"weight {W_BYTES}B exceeds limit {OOB_SENTINEL_BYTES}B"
     assert X_BYTES < OOB_SENTINEL_BYTES or BIG_IN, f"input {X_BYTES}B exceeds limit"
-    # BIG_IN + n==1: rebase x_rsrc to block's first sample (nbase), keep g_off int32.
-    # BIG_IN + n>1:  x_rsrc stays at tensor base; per-load g_off computed as int64 via
-    #               create_buffer_resource_from_addr so each DMA sees the correct sample.
     BIG_IN_N1 = BIG_IN and n == 1
     BIG_IN_NM = BIG_IN and n > 1
-    X_SAMPLE_BYTES = c * d * h * w * BF16_BYTES  # bytes per sample (int64-safe)
+    X_SAMPLE_BYTES = c * d * h * w * BF16_BYTES
 
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
@@ -261,8 +258,6 @@ def compile_conv3d_implicit(
 
         tid = fx.thread_idx.x
         if const_expr(WGM > 1):
-            # Grouped-M workgroup L2-swizzle: visit WGM consecutive m-tiles across all
-            # grid_n n-tiles before advancing in M, keeping the weight tile hot in L2.
             pid = fx.Index(fx.block_idx.x) + fx.Index(fx.block_idx.y) * fx.Index(grid_m)
             blocks_per_group = fx.Index(WGM * grid_n)
             group_id = pid // blocks_per_group
@@ -281,8 +276,6 @@ def compile_conv3d_implicit(
             k_off = 0
 
         if const_expr(BIG_IN_N1):
-            # n==1: rebase x_rsrc to the block's first temporal output position so
-            # all per-lane g_off values stay int32-safe within BIG_IN_NR (2 GB).
             nbase = m_offset // dhw
             ot_base0 = (m_offset % dhw) // hw_o
             base_t = ot_base0 - fx.Index(pt)
@@ -291,8 +284,6 @@ def compile_conv3d_implicit(
             x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_elem) * fx.Int64(2)
             x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr, num_records_bytes=BIG_IN_NR)
         if const_expr(BIG_IN_NM):
-            # n>1: keep x_rsrc at tensor base; per-load rebase handled in _load_a
-            # using per-row n_idx so g_off stays int32 within a single sample.
             x_base_addr = fx.Int64(buffer_ops.extract_base_index(x))
 
         wid = tid // WARP_SIZE
@@ -359,11 +350,9 @@ def compile_conv3d_implicit(
                 in_h0 = oh * sh - ph
                 in_w0 = ow * sw - pw
                 if const_expr(BIG_IN_N1):
-                    # n==1: di is relative to block's nbase (stays int32)
                     di = n_idx - nbase
                     _row_dec.append((local_k, row_valid, di, in_t0, in_h0, in_w0))
                 elif const_expr(BIG_IN_NM):
-                    # n>1: store n_idx itself; per-load rebase in _load_a
                     _row_dec.append((local_k, row_valid, n_idx, in_t0, in_h0, in_w0))
                 else:
                     _row_dec.append((local_k, row_valid, n_idx, in_t0, in_h0, in_w0))
@@ -404,14 +393,11 @@ def compile_conv3d_implicit(
                     valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
                     g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
                 elif const_expr(BIG_IN_NM):
-                    # n>1 BIG_IN: g_off is relative to this row's sample base (int32-safe
-                    # within one sample since single-sample bytes < BIG_IN_NR = 2 GB).
                     _, row_valid, n_idx, in_t0, in_h0, in_w0 = dec
                     in_t = in_t0 + kt_i
                     in_h = in_h0 + kh_i
                     in_w = in_w0 + kw_i
                     valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
-                    # offset within the sample (fits int32 since X_SAMPLE_BYTES < 2 GB)
                     g_off = ((in_t * h + in_h) * w + in_w) * c + cc
                     return fx.Int32(g_off), valid, n_idx
                 else:
@@ -464,10 +450,8 @@ def compile_conv3d_implicit(
             stage_tile = fx.Index(stage) * TILE_M * TILE_K
             for i in range_constexpr(LDG_A_COUNT):
                 if const_expr(BIG_IN_NM):
-                    # _a_addr returns (g_off, valid, n_idx) for BIG_IN_NM
                     addr_ret = _a_addr(i, kbase_i, cc_base, ckk_base)
                     g_off_i, valid, n_idx_i = addr_ret
-                    # rebase x_rsrc to this row's sample so g_off stays int32
                     sample_addr = x_base_addr + fx.Int64(n_idx_i) * fx.Int64(X_SAMPLE_BYTES)
                     x_rsrc_i = buffer_ops.create_buffer_resource_from_addr(sample_addr, num_records_bytes=BIG_IN_NR)
                     voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
@@ -720,7 +704,6 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
     elif autotune or (autotune is None and _autotune_enabled()):
         from kernels.conv.conv3d_implicit_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
 
-        # Sweep (tile, wgm) pairs; autotune_conv3d sees flattened (tile, wgm) tuples.
         candidates = [(t, w) for t in BF16_CANDIDATES for w in WGM_VALUES]
         best = autotune_conv3d("bf16", shape, "bf16", candidates, x.device, lambda tw: _run(tw[0], tw[1])[0])
         chosen_tile, chosen_wgm = best
