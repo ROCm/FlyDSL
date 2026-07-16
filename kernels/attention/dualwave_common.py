@@ -121,7 +121,7 @@ class DualwaveSwpTraits:
     LGKMCNT_0_ONLY: int
 
 
-def make_dualwave_swp_traits(
+def _make_dualwave_swp_traits(
     num_heads,
     num_kv_heads,
     head_dim,
@@ -346,6 +346,22 @@ def _waitcnt_vm_n(n):
     """Emit s_waitcnt vmcnt(n) only (lgkmcnt=63, expcnt=7)."""
     val = (n & _VMCNT_LO_MASK) | _LGKMCNT_EXPCNT_BASE | (((n >> 4) & _VMCNT_HI_MASK) << _VMCNT_HI_SHIFT)
     rocdl.s_waitcnt(val)
+
+
+def _s_waitcnt(val):
+    rocdl.s_waitcnt(val)
+
+
+def _sched_barrier(val):
+    rocdl.sched_barrier(val)
+
+
+def _s_barrier():
+    rocdl.s_barrier()
+
+
+def _s_setprio(val):
+    rocdl.s_setprio(val)
 
 
 def _read_exec_i64():
@@ -851,9 +867,9 @@ def _scale_v_p(traits, v_p, scale_scalar, elem_dtype, fm_fast):
 
 
 @flyc.jit
-def _stagger_extra_barrier_if_one(_stagger_i32):
+def _stagger_extra_barrier_if_one(stagger_i32):
     """Emit `sched_barrier(0); s_barrier;` only when stagger == 1."""
-    if fx.Int32(_stagger_i32) != fx.Int32(0):
+    if fx.Int32(stagger_i32) != fx.Int32(0):
         rocdl.sched_barrier(0)
         rocdl.s_barrier()
 
@@ -1131,7 +1147,7 @@ class DualwaveKernelContext:
             T.i32,
             arith.divsi(_tid_i32, as_mlir_value(fx.Int32(traits.WARP_SIZE))),
         )
-        self._stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(4)))
+        self.stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(4)))
         self.wave_id_uni = fx.Index(_wave_id_uni_i32)
 
         self.wave_q_offset = self.wave_id * traits.ROWS_PER_WAVE
