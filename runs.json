@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T08:45:10Z",
+ "updated": "2026-07-16T09:08:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117",
    "created_at": "2026-07-16T08:42:33Z",
-   "updated_at": "2026-07-16T08:43:25Z",
+   "updated_at": "2026-07-16T08:44:02Z",
    "actor": "jhinpan",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T08:44:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117/job/87575679888"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T08:45:37Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117/job/87575679918"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T08:44:02Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29484418117/job/87575679921"
+    }
+   ]
   },
   {
    "run_id": 29482783396,
@@ -68,13 +96,41 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482744386",
    "created_at": "2026-07-16T08:14:16Z",
-   "updated_at": "2026-07-16T08:14:17Z",
+   "updated_at": "2026-07-16T09:07:43Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T09:07:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482744386/job/87580478543"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T09:07:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482744386/job/87580478569"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T09:07:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29482744386/job/87580478580"
+    }
+   ]
   },
   {
    "run_id": 29481210935,
@@ -386,11 +442,11 @@
    "branch": "feat/layernorm-backward-769",
    "event": "pull_request",
    "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214",
    "created_at": "2026-07-16T06:43:09Z",
-   "updated_at": "2026-07-16T06:44:42Z",
+   "updated_at": "2026-07-16T09:07:26Z",
    "actor": "jhinpan",
    "jobs": [
     {
@@ -414,9 +470,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T06:44:42Z",
+     "started_at": "2026-07-16T09:07:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214/job/87553963850"
     }
@@ -631,11 +687,11 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29468076802",
    "created_at": "2026-07-16T03:04:01Z",
-   "updated_at": "2026-07-16T03:06:20Z",
+   "updated_at": "2026-07-16T09:06:41Z",
    "actor": "fsx950223",
    "jobs": [
     {
@@ -659,10 +715,10 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-16T03:06:05Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T09:06:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29468076802/job/87525557309"
     }
    ]
