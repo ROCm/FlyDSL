@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T11:55:38Z",
+ "updated": "2026-07-16T12:16:42Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,11 +10,11 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29494234796",
    "created_at": "2026-07-16T11:23:14Z",
-   "updated_at": "2026-07-16T11:24:31Z",
+   "updated_at": "2026-07-16T12:10:56Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
@@ -29,9 +29,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T11:24:31Z",
+     "started_at": "2026-07-16T12:10:55Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29494234796/job/87607547092"
     },
@@ -72,10 +72,10 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-16T11:09:47Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T12:02:24Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493028955/job/87603680511"
     },
     {
@@ -149,19 +149,19 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-16T11:04:16Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T11:55:45Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492926585/job/87603421308"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-16T11:52:01Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T12:10:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492926585/job/87603421320"
     },
     {
@@ -182,20 +182,20 @@
    "branch": "fix-mxfp4-preshuffle-import",
    "event": "pull_request",
    "title": "fix(kernels): correct stale kernels.mma import in mxfp4_preshuffle",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807",
    "created_at": "2026-07-16T10:51:17Z",
-   "updated_at": "2026-07-16T11:15:40Z",
+   "updated_at": "2026-07-16T12:15:37Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-16T10:53:50Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T12:15:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402605"
     },
     {
