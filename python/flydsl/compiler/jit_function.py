@@ -22,12 +22,6 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
-from ..compile_hints import (
-    canonicalize_compile_hints,
-    compile_hints_cache_key,
-    merge_compile_hint_layers,
-    resolve_compile_hints,
-)
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..expr.utils.arith import fastmath as fastmath_ctx
@@ -47,6 +41,7 @@ from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
     KernelFunction,
+    _merge_compile_hints,
     create_gpu_module,
     effective_fastmath_hint,
     func_def_location,
@@ -311,7 +306,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
 
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
-         flydsl.runtime.*, flydsl.utils.*, plus root-level compiler inputs
+         flydsl.runtime.*, flydsl.utils.*
       2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
@@ -344,12 +339,10 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
             except Exception:
                 pass
 
-    # Root-level compiler inputs are not discovered by the package walk above.
-    for filename in ("__init__.py", "compile_hints.py"):
-        p = flydsl_root / filename
-        if p.is_file():
-            with open(p, "rb") as f:
-                contents.append(hashlib.sha256(f.read()).hexdigest())
+    p = flydsl_root / "__init__.py"
+    if p.is_file():
+        with open(p, "rb") as f:
+            contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
     backend = get_backend()
@@ -803,7 +796,7 @@ class MlirCompiler:
 
         backend = get_backend(arch=arch)
 
-        compile_hints = canonicalize_compile_hints(CompilationContext.get_compile_hints())
+        compile_hints = CompilationContext.get_compile_hints()
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         backend.lower_compile_hints(module, compile_hints=compile_hints)
         cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
@@ -1176,7 +1169,7 @@ class JitFunction:
         self._original_func.__qualname__ = func.__qualname__
         self._original_func.__module__ = func.__module__
         self.func = ASTRewriter.transform(func)
-        self.compile_hints = merge_compile_hint_layers(compile_hints)
+        self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
         self.manager_key = None
         self._manager_owner_cls = None
         self.cache_manager = None
@@ -1186,7 +1179,6 @@ class JitFunction:
         self._backend_target = None  # lazy: GPUTarget resolved once in _ensure_sig
         self._mem_cache = {}
         self._last_compiled = None  # (cache_key, CompiledArtifact) for compile()
-        self._last_call_cache_key = threading.local()
         self._extern_linkage_keys = set()
 
         # owner_cls -> first-compile snapshot of the used globals; RAISE on any
@@ -1213,7 +1205,7 @@ class JitFunction:
 
     def _effective_compile_hints(self):
         """Resolve persistent defaults and the current thread-local overlay."""
-        return resolve_compile_hints(self.compile_hints, CompilationContext.get_compile_hints())
+        return _merge_compile_hints(self.compile_hints, CompilationContext.get_compile_hints())
 
     def _get_global_refs(self, owner_cls=None) -> List[Tuple[str, str, dict]]:
         """Memoized global-ref discovery (see :func:`_discover_global_refs`)."""
@@ -1313,7 +1305,13 @@ class JitFunction:
         if effective_hints is None:
             effective_hints = self._effective_compile_hints()
         if effective_hints:
-            key_parts.append(("_hints_", compile_hints_cache_key(effective_hints)))
+            hint_key = tuple(
+                sorted(
+                    (key, type(value).__module__, type(value).__qualname__, repr(value))
+                    for key, value in effective_hints.items()
+                )
+            )
+            key_parts.append(("_hints_", hint_key))
 
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
@@ -1402,8 +1400,7 @@ class JitFunction:
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
 
-        # One detached snapshot owns both cache identity and compilation. Public
-        # persistent hint mutation in another thread cannot mix two variants.
+        # Resolve once so cache identity and compilation use the same options.
         effective_hints = self._effective_compile_hints()
         cache_key = self._build_full_cache_key(
             bound.arguments,
@@ -1411,7 +1408,6 @@ class JitFunction:
             bound_self=bound_self,
             effective_hints=effective_hints,
         )
-        self._last_call_cache_key.value = cache_key
 
         args_tuple = tuple(bound.arguments.values())
 
@@ -1689,9 +1685,7 @@ def _compile_impl(func, *args) -> CompiledFunction:
     sig = jf._sig  # guaranteed initialized after __call__
     bound = sig.bind(*args)
     bound.apply_defaults()
-    cache_key = getattr(jf._last_call_cache_key, "value", None)
-    if cache_key is None:
-        raise RuntimeError("flyc.compile(): JIT call completed without recording its cache key.")
+    cache_key = jf._build_full_cache_key(bound.arguments)
     args_tuple = tuple(bound.arguments.values())
 
     # Look up the CompiledArtifact.  We must hold a direct reference to it
@@ -1735,7 +1729,7 @@ class CompileCallable:
 
     def __call__(self, func, *args):
         if self._compile_hints and isinstance(func, JitFunction):
-            func.compile_hints = merge_compile_hint_layers(func.compile_hints, self._compile_hints)
+            func.compile_hints = {**func.compile_hints, **self._compile_hints}
         if not args:
             # No args → just return the (hinted) function for deferred compilation
             return func

@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
-from ..compile_hints import merge_compile_hint_layers
 from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.typing import Constexpr
 from ..expr.utils.arith import fastmath as fastmath_ctx
@@ -172,6 +171,15 @@ def _normalize_dim(dim: DimType) -> Tuple[DimValueType, DimValueType, DimValueTy
 # =============================================================================
 
 
+def _merge_compile_hints(*layers) -> dict:
+    """Shallow-merge hint layers; later non-None values win."""
+    merged = {}
+    for layer in layers:
+        if layer:
+            merged.update((key, value) for key, value in layer.items() if value is not None)
+    return merged
+
+
 class CompilationContext:
     """Context for tracking compilation state within a @jit function.
 
@@ -183,26 +191,20 @@ class CompilationContext:
 
     _current = threading.local()
 
-    # Thread-local storage for generic backend compile hints.
+    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
     _compile_hints = threading.local()
 
     @classmethod
     @contextmanager
     def compile_hints(cls, hints: dict):
-        """Set per-call compiler hints for the current thread.
-
-        These hints overlay persistent ``JitFunction.compile_hints``; duplicate
-        keys here win. Nested contexts shallow-merge in the same way, with the
-        inner value replacing the whole value for a duplicate key. ``None``
-        inherits the outer value, while an occupancy value of ``0`` is retained
-        as an explicit request for the source/compiler baseline.
+        """Set thread-local hints, shallow-merging nested contexts.
 
         Usage:
             with CompilationContext.compile_hints({"waves_per_eu": 2}):
                 fn(*args, **kwargs)
         """
         prev = getattr(cls._compile_hints, "data", None)
-        cls._compile_hints.data = merge_compile_hint_layers(prev, hints)
+        cls._compile_hints.data = _merge_compile_hints(prev, hints)
         try:
             yield
         finally:

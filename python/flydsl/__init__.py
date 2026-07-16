@@ -4,7 +4,4 @@
 
 __version__ = "0.2.4"
 
-from .autotune import (  # noqa: E402
-    Config as Config,
-    autotune as autotune,
-)
+from .autotune import Config as Config, autotune as autotune  # noqa: E402

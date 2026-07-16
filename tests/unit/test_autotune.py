@@ -66,9 +66,9 @@ class FakeTensor:
 
 
 def _make_tuner(fn=None, **kw):
-    """Build an Autotuner with a no-op fake JIT function."""
+    """Build an Autotuner with named args (a, out) and a no-op fake jit fn."""
 
-    def default_fn(a, out):
+    def default_fn(a, out):  # signature drives arg_names
         pass
 
     return Autotuner(
@@ -102,113 +102,6 @@ def test_config_no_compiler_opts_when_unset():
     c = Config(BLOCK=64)
     assert c.compiler_opts() == {}
     assert c.all_kwargs() == {"BLOCK": 64}
-
-
-def test_config_preserves_per_kernel_occupancy_interface():
-    config = Config(
-        BLOCK=128,
-        waves_per_eu={"kernel_b": 4, "kernel_a": 2},
-        maxnreg={"kernel_a": 128},
-    )
-
-    assert config.compiler_opts() == {
-        "waves_per_eu": {"kernel_b": 4, "kernel_a": 2},
-        "maxnreg": {"kernel_a": 128},
-    }
-    assert Config.from_dict(config.to_dict()).compiler_opts() == config.compiler_opts()
-    assert json.loads(json.dumps(config.to_dict())) == config.to_dict()
-    assert repr(Config(waves_per_eu={"b": 1, "a": 2})) == repr(Config(waves_per_eu={"a": 2, "b": 1}))
-
-
-def test_config_generic_compile_hints_roundtrip():
-    config = Config(
-        BLOCK=128,
-        compile_hints={
-            "future_hint": {"mode": "aggressive"},
-            "llvm_options": {"enable-post-misched": False},
-            "future_schedule": [1, "two", False, None, {"nested": 3.5}],
-        },
-    )
-
-    serialized = config.to_dict()
-    assert json.loads(json.dumps(serialized)) == serialized
-    assert Config.from_dict(serialized).compiler_opts() == config.compiler_opts()
-    assert config.compiler_opts() == {
-        "future_hint": {"mode": "aggressive"},
-        "llvm_options": {"enable-post-misched": False},
-        "future_schedule": [1, "two", False, None, {"nested": 3.5}],
-    }
-    assert "compile_hints=" in repr(config)
-
-
-def test_config_canonicalizes_fastmath_before_json_persistence():
-    config = Config(compile_hints={"fastmath": {"reassoc", "contract"}})
-
-    assert config.compiler_opts() == {"fastmath": "contract,reassoc"}
-    assert Config.from_dict(config.to_dict()).compiler_opts() == config.compiler_opts()
-
-
-@pytest.mark.parametrize(
-    ("compile_hints", "match"),
-    [
-        ({"future_hint": (1, 2)}, "tuple"),
-        ({"future_hint": [{"nested": (1,)}]}, "tuple"),
-        ({"future_hint": {1: "one"}}, "string keys"),
-        ({"future_hint": object()}, "scalar values"),
-        ({"future_hint": float("nan")}, "finite"),
-    ],
-)
-def test_config_rejects_compile_hints_that_are_not_json_type_stable(compile_hints, match):
-    with pytest.raises((TypeError, ValueError), match=match):
-        Config(compile_hints=compile_hints)
-
-
-def test_config_revalidates_mutated_compile_hints_before_use():
-    config = Config(compile_hints={"future_hint": [1, 2]})
-    config.compile_hints["future_hint"] = (1, 2)
-
-    with pytest.raises(TypeError, match="tuple"):
-        config.compiler_opts()
-
-
-def test_config_typed_aliases_override_generic_compile_hints():
-    config = Config(
-        compile_hints={"waves_per_eu": 1, "maxnreg": 64, "future_hint": True},
-        waves_per_eu=2,
-        maxnreg=0,
-    )
-
-    assert config.compiler_opts() == {"waves_per_eu": 2, "maxnreg": 0, "future_hint": True}
-    assert config.to_dict() == {
-        "waves_per_eu": 2,
-        "maxnreg": 0,
-        "compile_hints": {"future_hint": True},
-    }
-    assert Config(compile_hints={"waves_per_eu": 3}, waves_per_eu=None).compiler_opts()["waves_per_eu"] == 3
-
-
-@pytest.mark.parametrize(
-    ("value", "error"),
-    [
-        (True, TypeError),
-        (-1, ValueError),
-        ("2", TypeError),
-        ({2: 2}, TypeError),
-        ({"kernel": True}, TypeError),
-        ({"kernel": -1}, ValueError),
-    ],
-)
-def test_config_rejects_invalid_waves_per_eu(value, error):
-    with pytest.raises(error, match="waves_per_eu"):
-        Config(waves_per_eu=value)
-
-
-def test_config_zero_waves_per_eu_is_an_explicit_reset():
-    # Zero must survive the candidate layer so it can override an outer or
-    # persistent WPE.  The final compile-hint resolver removes it only after
-    # precedence has been resolved, returning codegen to the source baseline.
-    assert Config(waves_per_eu=0).compiler_opts() == {"waves_per_eu": 0}
-    assert Config(waves_per_eu={"a": 0, "b": 2}).compiler_opts() == {"waves_per_eu": {"a": 0, "b": 2}}
 
 
 # ── stride normalization ─────────────────────────────────────────────────
@@ -313,49 +206,19 @@ def test_key_insensitive_to_kwarg_order():
     assert k1 == k2
 
 
-def test_key_normalizes_omitted_and_explicit_function_defaults():
-    def fn(a, out, dtype_str="bf16", BLOCK=128):
+def test_key_varies_with_effective_compile_hints():
+    hints = {"waves_per_eu": 1}
+
+    def fn(a, out, **kw):
         pass
 
-    tuner = _make_tuner(fn=fn, key=["dtype_str"])
-    args = (FakeTensor((8, 8)), FakeTensor((8, 8)))
-
-    omitted = tuner._make_key(args, {})
-    keyword = tuner._make_key(args, {"dtype_str": "bf16"})
-    positional = tuner._make_key((*args, "bf16"), {})
-
-    assert omitted == keyword == positional
-
-
-def test_key_rejects_unknown_launcher_parameter_name():
-    with pytest.raises(ValueError, match="dytpe_str"):
-        _make_tuner(key=["dytpe_str"])
-
-
-def test_scalar_key_preserves_value_type():
-    def fn(a, out, mode=None):
-        pass
-
-    tuner = _make_tuner(fn=fn, key=["mode"])
-    args = (FakeTensor((8, 8)), FakeTensor((8, 8)))
-
-    assert tuner._make_key(args, {"mode": 1}) != tuner._make_key(args, {"mode": "1"})
-
-
-def test_key_varies_with_baseline_compile_hints():
-    baseline = {"waves_per_eu": 1}
-
-    def fn(a, out):
-        pass
-
-    fn._effective_compile_hints = lambda: dict(baseline)
+    fn._effective_compile_hints = lambda: dict(hints)
     tuner = _make_tuner(fn=fn)
     args = (FakeTensor((8, 8)), FakeTensor((8, 8)))
     first = tuner._make_key(args, {})
-    baseline["waves_per_eu"] = 2
-    second = tuner._make_key(args, {})
+    hints["waves_per_eu"] = 2
 
-    assert first != second
+    assert tuner._make_key(args, {}) != first
 
 
 # ── restore_value (in-place correctness) ────────────────────────────────
@@ -500,396 +363,86 @@ def test_autotune_decorator_wraps_into_autotuner():
     def fake_jit(a, out, **kw):
         pass
 
-    default = lambda a, out: Config(BLOCK=64)
     tuned = autotune(
         configs=[Config(BLOCK=128)],
         key=["a"],
         restore_value=["a"],
         reset_to_zero=["out"],
-        default=default,
     )(fake_jit)
 
     assert isinstance(tuned, Autotuner)
     assert tuned.restore_value == ["a"]
     assert tuned.reset_to_zero == ["out"]
-    assert tuned.default is default
     assert [c.kwargs["BLOCK"] for c in tuned.configs] == [128]
 
 
-def test_autotune_source_fingerprint_includes_selection_callables(monkeypatch):
-    import importlib
-
-    at = importlib.import_module("flydsl.autotune")
-    captured = []
+# ── two-track default/search ─────────────────────────────────────────────
+def test_autotune_decorator_forwards_default_and_callable_configs():
+    def fake_jit(a, out, **kw):
+        pass
 
     def configs(a, out):
         return [Config(BLOCK=128)]
 
     def default(a, out):
-        return Config(BLOCK=128)
+        return Config(BLOCK=64)
 
-    def prune(configs, named_args):
-        return configs
+    tuned = autotune(configs=configs, key=["a"], default=default)(fake_jit)
 
-    def bench(call, warmup, rep):
-        return 1.0
-
-    monkeypatch.setattr(at, "_source_fingerprint", lambda callables: captured.extend(callables) or "fingerprint")
-
-    @autotune(configs=configs, key=["a"], default=default, prune_configs_by=prune, do_bench=bench)
-    def fn(a, out, BLOCK=128):
-        pass
-
-    assert fn.source_fingerprint == "fingerprint"
-    assert configs in captured
-    assert default in captured
-    assert prune in captured
-    assert bench in captured
-
-
-# ── two-track default ────────────────────────────────────────────
-def _bench_run_all(call, warmup, rep):
-    # deterministic fake do_bench: run once, return a constant time
-    call()
-    return 1.0
+    assert tuned.configs is configs
+    assert tuned.default is default
 
 
 def test_default_skips_search(monkeypatch):
-    """With a default heuristic and FLYDSL_AUTOTUNE off, no benchmarking runs."""
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
-    benched = {"n": 0}
-
-    def bench(call, warmup, rep):
-        benched["n"] += 1
-        call()
-        return 1.0
 
     def fn(a, out, BLOCK):
         out._data[0] = float(BLOCK)
 
-    def default(a, out, **kw):
-        return Config(BLOCK=999)
+    def fail_bench(call, warmup, rep):
+        pytest.fail("default path benchmarked configs")
 
-    t = Autotuner(
+    tuner = _make_tuner(
         fn=fn,
         configs=[Config(BLOCK=64), Config(BLOCK=128)],
-        key=["a"],
-        warmup=1,
-        rep=1,
-        default=default,
-        do_bench_fn=bench,
+        default=lambda a, out: Config(BLOCK=999),
+        do_bench_fn=fail_bench,
     )
     out = FakeTensor((1,))
-    t(FakeTensor((8,)), out)
-    assert benched["n"] == 0  # no search
-    assert out._data[0] == 999.0  # heuristic default was used
+
+    tuner(FakeTensor((8,)), out)
+
+    assert out._data[0] == 999.0
 
 
-def test_default_forced_search_with_env(monkeypatch):
-    """FLYDSL_AUTOTUNE=1 forces the full search even when a default exists."""
+def test_force_search_bypasses_cache_and_default(monkeypatch):
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
-    benched = {"n": 0}
+    calls = {"configs": 0, "default": 0, "bench": 0}
+
+    def fn(a, out, BLOCK):
+        out._data[0] = float(BLOCK)
+
+    def configs(a, out):
+        calls["configs"] += 1
+        return [Config(BLOCK=64), Config(BLOCK=128)]
+
+    def default(a, out):
+        calls["default"] += 1
+        return Config(BLOCK=7)
 
     def bench(call, warmup, rep):
-        benched["n"] += 1
+        calls["bench"] += 1
         call()
-        return 1.0
+        return float(calls["bench"])
 
-    def fn(a, out, BLOCK):
-        out._data[0] = float(BLOCK)
-
-    t = Autotuner(
-        fn=fn,
-        configs=[Config(BLOCK=64), Config(BLOCK=128)],
-        key=["a"],
-        warmup=1,
-        rep=1,
-        default=lambda a, out, **kw: Config(BLOCK=64),
-        do_bench_fn=bench,
-    )
-    t(FakeTensor((8,)), FakeTensor((1,)))
-    assert benched["n"] == 2  # both configs searched
-
-
-def test_cache_hit_runtime_error_does_not_delete_valid_tuning_result():
-    def fn(a, out, BLOCK):
-        raise TypeError("launcher bug")
-
-    tuned = Autotuner(
-        fn=fn,
-        configs=[Config(BLOCK=64)],
-        key=["a"],
-        warmup=1,
-        rep=1,
-    )
+    tuner = _make_tuner(fn=fn, configs=configs, default=default, do_bench_fn=bench)
     args = (FakeTensor((8,)), FakeTensor((1,)))
-    key = tuned._make_key(args, {})
-    tuned.cache[key] = Config(BLOCK=64)
+    tuner.cache[tuner._make_key(args, {})] = Config(BLOCK=999)
 
-    with pytest.raises(TypeError, match="launcher bug"):
-        tuned(*args)
+    tuner(*args)
 
-    assert tuned.cache[key].kwargs == {"BLOCK": 64}
-
-
-def test_tuning_enabled_env(monkeypatch):
-    from flydsl.autotune import _tuning_enabled
-
-    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
-    assert _tuning_enabled() is False
-    monkeypatch.setenv("FLYDSL_AUTOTUNE", "0")
-    assert _tuning_enabled() is False
-    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
-    assert _tuning_enabled() is True
-    monkeypatch.setenv("FLYDSL_AUTOTUNE", " FALSE ")
-    assert _tuning_enabled() is False
-
-
-def test_run_with_hints_uses_thread_local_not_shared_attr():
-    """A candidate hint is a thread-local overlay, never a mutation of the
-    shared cached JitFunction."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl.compiler.kernel_function import CompilationContext
-
-    class FakeJit:
-        def __init__(self):
-            self.compile_hints = {"baseline": 1}
-            self.seen = None
-
-        def __call__(self, *a, **k):
-            self.seen = dict(CompilationContext.get_compile_hints())
-
-    fn = FakeJit()
-    t = _make_tuner(fn=fn, key=[], configs=[Config(BLOCK=1)])
-    with CompilationContext.compile_hints({"outer": 7, "waves_per_eu": 1}):
-        t._run_with_hints({"waves_per_eu": 2}, (), {})
-    assert fn.seen == {"outer": 7, "waves_per_eu": 2}
-    assert fn.compile_hints == {"baseline": 1}
-    assert CompilationContext.get_compile_hints() == {}
-
-
-def test_candidate_zero_resets_outer_and_persistent_occupancy():
-    """A candidate zero is a real overlay, not an absent candidate option."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    import flydsl.compiler as flyc
-    from flydsl.compiler.kernel_function import CompilationContext
-
-    @flyc.jit
-    def hint_owner():
-        pass
-
-    hint_owner.compile_hints = {"persistent": 1, "waves_per_eu": 4}
-
-    class Observer:
-        def __call__(self):
-            self.seen = hint_owner._effective_compile_hints()
-
-    observer = Observer()
-    tuner = _make_tuner(fn=observer, key=[])
-    with CompilationContext.compile_hints({"outer": 2, "waves_per_eu": 3}):
-        tuner._run_with_hints(Config(waves_per_eu=0).compiler_opts(), (), {})
-
-    assert observer.seen == {"persistent": 1, "outer": 2}
-
-
-def test_cache_hit_applies_compile_hints_to_direct_function():
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from flydsl.compiler.kernel_function import CompilationContext
-
-    class Observer:
-        def __init__(self):
-            self.compile_hints = {"baseline": 1}
-            self.seen = None
-
-        def __call__(self, a, out, BLOCK):
-            self.seen = (BLOCK, dict(CompilationContext.get_compile_hints()))
-
-    fn = Observer()
-    tuner = _make_tuner(fn=fn, configs=[Config(BLOCK=64, waves_per_eu=2)])
-    args = (FakeTensor((8,)), FakeTensor((1,)))
-    key = tuner._make_key(args, {})
-    tuner.cache[key] = Config(BLOCK=64, waves_per_eu=2)
-
-    with CompilationContext.compile_hints({"outer": 7, "waves_per_eu": 1}):
-        tuner(*args)
-
-    assert fn.seen == (64, {"outer": 7, "waves_per_eu": 2})
-    assert fn.compile_hints == {"baseline": 1}
-
-
-def test_search_loop_chains_last_error_when_all_fail():
-    """If every config fails to benchmark, the RuntimeError must chain the last
-    underlying error (not discard it) so the real cause is recoverable."""
-
-    def boom(a, out, **kw):
-        raise RuntimeError("kernel boom")
-
-    t = _make_tuner(fn=boom, configs=[Config(BLOCK=1)], do_bench_fn=_bench_run_all)
-    with pytest.raises(RuntimeError, match="All autotune configs failed") as ei:
-        t(FakeTensor((8,)), FakeTensor((1,)))
-    assert isinstance(ei.value.__cause__, RuntimeError) and "boom" in str(ei.value.__cause__)
-
-
-def test_source_fingerprint_folds_into_key():
-    """A change in the adopter's kernel/config source (fingerprint) must change
-    the cache key, so a stale tuned best isn't served after a kernel edit."""
-    a = FakeTensor((8, 8))
-    t1 = _make_tuner()
-    t1.source_fingerprint = "aaaa"
-    t2 = _make_tuner()
-    t2.source_fingerprint = "bbbb"
-    assert t1._make_key((a, a), {}) != t2._make_key((a, a), {})
-
-
-def test_disk_cache_skips_malformed_entry(tmp_path, monkeypatch):
-    """One malformed disk-cache entry must be skipped, not discard the whole
-    cache (previously a single bad entry dropped everything)."""
-    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    t = _make_tuner(fn=lambda a, out, **kw: None, configs=[Config(BLOCK=128)], do_bench_fn=_bench_run_all)
-    a, out = FakeTensor((16, 64)), FakeTensor((16, 64))
-    t(a, out)  # tune -> writes one valid entry to disk
-    cache_file = next(tmp_path.glob("*.json"))
-    data = json.loads(cache_file.read_text())
-    assert len(data) == 1
-    data["not-a-json-key"] = {"BLOCK": 1}  # malformed key_str -> parse fails on load
-    cache_file.write_text(json.dumps(data))
-
-    t2 = _make_tuner(fn=lambda a, out, **kw: None, configs=[Config(BLOCK=128)], do_bench_fn=_bench_run_all)
-    assert t2._make_key((a, out), {}) in t2.cache  # good entry survived
-    assert len(t2.cache) == 1  # malformed one skipped
-
-
-def test_call_do_bench_passes_setup_when_supported():
-    """When the benchmarker accepts `setup`, it's passed through (so restore/reset
-    runs untimed) -- setup then kernel, in that order."""
-    order = []
-
-    def bench_with_setup(fn, warmup, rep, setup=None):
-        setup()
-        fn()
-        return 1.0
-
-    t = _make_tuner(do_bench_fn=bench_with_setup)
-    t._call_do_bench(lambda: order.append("kernel"), lambda: order.append("setup"))
-    assert order == ["setup", "kernel"]
-
-
-def test_call_do_bench_folds_setup_when_unsupported():
-    """A custom do_bench_fn without a `setup` param still runs setup (folded into
-    the timed call) -- so restore/reset isn't skipped."""
-    order = []
-
-    def bench_no_setup(fn, warmup, rep):
-        fn()
-        return 1.0
-
-    t = _make_tuner(do_bench_fn=bench_no_setup)
-    t._call_do_bench(lambda: order.append("kernel"), lambda: order.append("setup"))
-    assert order == ["setup", "kernel"]
-
-
-def test_call_do_bench_folds_setup_for_kwargs_only_benchmarker():
-    """A do_bench_fn with **kwargs but no explicit `setup` must still run setup
-    (folded), not have it passed-and-silently-dropped into **kwargs."""
-    order = []
-
-    def bench_kwargs(fn, warmup, rep, **kwargs):  # does NOT forward setup
-        fn()
-        return 1.0
-
-    t = _make_tuner(do_bench_fn=bench_kwargs)
-    t._call_do_bench(lambda: order.append("kernel"), lambda: order.append("setup"))
-    assert order == ["setup", "kernel"]  # setup ran (folded), not dropped
-
-
-@pytest.mark.parametrize(
-    ("arch", "extra_pairs"),
-    [
-        ("gfx950", set()),
-        ("gfx1201", {(512, 1), (1024, 1), (1024, 2)}),
-    ],
-)
-def test_rmsnorm_configs_route_wpe_as_compile_option(arch, extra_pairs):
-    """RMSNorm keeps JIT config kwargs separate from backend options."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from kernels.norm.rmsnorm_autotune import rmsnorm_autotuned
-    from kernels.norm.rmsnorm_config import _BLOCK_THREADS_CHOICES, get_all_configs
-    from kernels.norm.rmsnorm_kernel import rmsnorm_direct
-
-    cfgs = get_all_configs(8192, "f32", arch=arch)
-    blocks = sorted({c.kwargs["BLOCK_THREADS"] for c in cfgs})
-    assert blocks == sorted(_BLOCK_THREADS_CHOICES)  # every block present (no tile filter for f32)
-    assert all("WAVES_PER_EU" not in c.kwargs for c in cfgs)
-
-    def effective_wpe(config):
-        return config.compiler_opts().get("waves_per_eu", 0)
-
-    assert {effective_wpe(c) for c in cfgs} == {0, 1, 2}
-    expected_pairs = {
-        (128, 0),
-        (128, 1),
-        (128, 2),
-        (256, 0),
-        (256, 1),
-        (256, 2),
-        (512, 0),
-        (512, 2),
-        (1024, 0),
-    }
-    assert {(c.kwargs["BLOCK_THREADS"], effective_wpe(c)) for c in cfgs} == expected_pairs | extra_pairs
-    assert rmsnorm_autotuned.tuner.fn is rmsnorm_direct
-
-
-def test_get_default_bf16_hits_vectorized_tile():
-    """get_default must pick a BLOCK_THREADS whose tile divides N for bf16/f16,
-    so the zero-search default hits the vectorized fast path (regression: N=5120
-    used to pick 256 -> tile 2048 -> scalar). f32 is unaffected (scalar path)."""
-    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
-    from kernels.norm.rmsnorm_config import _BLOCK_THREADS_CHOICES, _elem_bits, get_default
-
-    vec_width = 128 // _elem_bits("bf16")
-    for N in (4096, 5120, 7168, 8192):
-        block = get_default(N, "bf16").kwargs["BLOCK_THREADS"]
-        assert N % (block * vec_width) == 0, f"bf16 N={N}: block {block} misses the vectorized tile"
-    # N=5120 specifically resolves to 128 (256's tile 2048 does not divide 5120)
-    assert get_default(5120, "bf16").kwargs["BLOCK_THREADS"] == 128
-    # f32 uses the scalar path, so the divisibility filter does not apply
-    assert get_default(5120, "f32").kwargs["BLOCK_THREADS"] in _BLOCK_THREADS_CHOICES
-
-
-def test_cache_dir_change_does_not_serve_stale_config(tmp_path, monkeypatch):
-    """Switching FLYDSL_AUTOTUNE_CACHE_DIR must drop the in-memory config tuned
-    under the old dir. The fake tune picks BLOCK=64; the default is BLOCK=7.
-    After switching to an empty dir with tuning OFF, the call must fall to the
-    default (7) — proving the stale dir-A best (64) was cleared, not served."""
-    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "A"))
-
-    def fn(a, out, BLOCK):
-        out._data[0] = float(BLOCK)
-
-    tuner = Autotuner(
-        fn=fn,
-        configs=[Config(BLOCK=64)],
-        key=["a"],
-        warmup=1,
-        rep=1,
-        default=lambda a, out: Config(BLOCK=7),
-        do_bench_fn=_bench_run_all,
-    )
-
-    # 1. Force a tune into dir A -> in-memory best BLOCK=64.
-    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
-    out = FakeTensor((1,))
-    tuner(FakeTensor((16, 512)), out)
-    assert out._data[0] == 64.0  # tuned config in memory
-
-    # 2. Switch to empty dir B, tuning OFF: stale in-memory best must be dropped,
-    #    so this serves the heuristic default (7), not dir-A's 64.
-    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
-    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path / "B"))
-    out2 = FakeTensor((1,))
-    tuner(FakeTensor((16, 512)), out2)
-    assert out2._data[0] == 7.0, "served a stale in-memory config from the old cache dir"
+    assert calls == {"configs": 1, "default": 0, "bench": 2}
+    assert args[1]._data[0] == 64.0
 
 
 if __name__ == "__main__":

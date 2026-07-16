@@ -47,9 +47,7 @@ except ImportError:
 
 KERNEL_NAME = "rmsnorm"
 
-# N at or below this routes to the small-N kernel, whose block geometry is
-# derived analytically and ignores BLOCK_THREADS. Single source of truth so the
-# autotune config space (rmsnorm_config) stays in sync.
+# The small-N path derives its own block geometry and is not tuned.
 SMALL_N_THRESHOLD = 2048
 
 
@@ -81,11 +79,7 @@ def build_rmsnorm_module(
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    # BLOCK_THREADS is a compile-time structural knob: it sizes the shared
-    # reduction storage and vectorized tile stride, and determines both the
-    # launch block and known_block_size. Factory callers bake it when creating
-    # this launcher; rmsnorm_direct supplies it as a JIT Constexpr instead.
-    # known_block_size is required on AMDGPU once the block exceeds 256.
+    # BLOCK_THREADS controls storage, tiling, and launch geometry.
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -324,15 +318,7 @@ def rmsnorm_direct(
     BLOCK_THREADS: fx.Constexpr[int],
     stream: fx.Stream = fx.Stream(None),
 ):
-    """Direct launcher whose structural choices specialize with the JIT key.
-
-    ``build_rmsnorm_module`` remains the compatibility factory used by the
-    non-autotuned APIs. Calling its lazy launcher while tracing this function
-    inlines the same kernel definition into the active module, so the factory
-    and direct paths share one implementation. In particular, shared storage,
-    tile loops, ``known_block_size``, and launch geometry all derive from this
-    call's ``BLOCK_THREADS`` Constexpr.
-    """
+    """Specialize the existing RMSNorm factory through JIT Constexpr inputs."""
     launch = build_rmsnorm_module(N, dtype_str, BLOCK_THREADS=BLOCK_THREADS)
     launch(Input, Gamma, Output, m_in, stream)
 

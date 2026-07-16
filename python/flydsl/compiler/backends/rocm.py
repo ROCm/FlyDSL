@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-from collections.abc import Mapping
 from typing import List, Tuple
 
-from ...compile_hints import canonicalize_compile_hints
 from ...runtime.device import get_rocm_arch, is_rdna_arch
-from ...utils import env, log
+from ...utils import env
 from .base import BaseBackend, GPUTarget
 
 
@@ -36,7 +34,6 @@ class RocmBackend(BaseBackend):
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
-        compile_hints = canonicalize_compile_hints(compile_hints)
         chip = self.target.arch
         waves_per_eu = compile_hints.get("waves_per_eu")
         maxnreg = compile_hints.get("maxnreg")
@@ -44,12 +41,9 @@ class RocmBackend(BaseBackend):
         bin_cli_opts = []
         if env.debug.enable_debug_info:
             bin_cli_opts.append("-g")
-        # Keep the uniform low-level option route for compatibility. Today the
-        # effective AMDGPU semantics come from the synchronized function attrs
-        # materialized below; a per-kernel mapping has no scalar CLI form.
-        if isinstance(waves_per_eu, int):
+        if waves_per_eu:
             bin_cli_opts.append(f"--amdgpu-waves-per-eu={waves_per_eu}")
-        if isinstance(maxnreg, int):
+        if maxnreg:
             bin_cli_opts.append(f"--amdgpu-num-vgpr={maxnreg}")
 
         rocdl_opts = {
@@ -107,42 +101,24 @@ class RocmBackend(BaseBackend):
         return self._pipeline_parts(compile_hints=compile_hints)
 
     def lower_compile_hints(self, module, *, compile_hints: dict) -> None:
-        """Materialize occupancy overlays on kernel entry functions.
-
-        Source ``value_attrs`` are the per-kernel baseline. Non-zero scalar or
-        mapped compile options explicitly replace that baseline; ``None``/``0``
-        preserve it. WPE uses Triton's exact ``N,N`` LLVM constraint. Device
-        helpers are not entry kernels and are skipped.
-        """
-        compile_hints = canonicalize_compile_hints(compile_hints)
+        """Materialize a scalar waves-per-EU override on kernel entries."""
         waves_per_eu = compile_hints.get("waves_per_eu")
-        maxnreg = compile_hints.get("maxnreg")
-        if waves_per_eu is None and maxnreg is None:
+        if waves_per_eu is None:
+            return
+        if isinstance(waves_per_eu, bool) or not isinstance(waves_per_eu, int):
+            raise TypeError(f"waves_per_eu must be a non-negative int, got {waves_per_eu!r}")
+        if waves_per_eu < 0:
+            raise ValueError(f"waves_per_eu must be >= 0, got {waves_per_eu}")
+        if waves_per_eu == 0:
             return
 
-        seen = set()
         with module.context:
-            from ..._mlir import ir
-
             for func_op in _iter_gpu_kernel_funcs(module):
-                kernel_name = ir.StringAttr(func_op.attributes["sym_name"]).value
-                seen.add(kernel_name)
-                kernel_wpe = _resolve_occupancy_hint(waves_per_eu, kernel_name)
-                kernel_maxnreg = _resolve_occupancy_hint(maxnreg, kernel_name)
-                if kernel_wpe is not None:
-                    # ROCDL's native form is min-only and would overwrite the
-                    # passthrough during translation, so remove it before
-                    # materializing the explicit exact compile override.
-                    if "rocdl.waves_per_eu" in func_op.attributes:
-                        del func_op.attributes["rocdl.waves_per_eu"]
-                    _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{kernel_wpe},{kernel_wpe}")
-                if kernel_maxnreg is not None:
-                    _set_passthrough(func_op, "amdgpu-num-vgpr", str(kernel_maxnreg))
-
-        for knob, missing in _unmatched_occupancy_hint_keys(
-            {"waves_per_eu": waves_per_eu, "maxnreg": maxnreg}, seen
-        ).items():
-            log().warning("occupancy hint %r targets missing kernel(s): %s", knob, missing)
+                # The native ROCDL form is min-only. Remove it before writing
+                # the exact min/max constraint used by Triton's AMD backend.
+                if "rocdl.waves_per_eu" in func_op.attributes:
+                    del func_op.attributes["rocdl.waves_per_eu"]
+                _set_passthrough(func_op, "amdgpu-waves-per-eu", f"{waves_per_eu},{waves_per_eu}")
 
     def gpu_module_targets(self) -> List[str]:
         chip = self.target.arch
@@ -174,20 +150,6 @@ def _iter_gpu_kernel_funcs(module):
         for op in top.regions[0].blocks[0].operations:
             if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
                 yield op
-
-
-def _resolve_occupancy_hint(value, kernel_name: str):
-    if isinstance(value, Mapping):
-        return value.get(kernel_name)
-    return value
-
-
-def _unmatched_occupancy_hint_keys(hints: dict, present: set) -> dict:
-    return {
-        knob: sorted(kernel_name for kernel_name in value if kernel_name not in present)
-        for knob, value in hints.items()
-        if isinstance(value, Mapping) and any(kernel_name not in present for kernel_name in value)
-    }
 
 
 def _set_passthrough(func_op, key: str, value: str) -> None:

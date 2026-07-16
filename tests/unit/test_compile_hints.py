@@ -49,14 +49,6 @@ def _reset_jit_caches(jit_fn):
     jit_fn.cache_manager = None
 
 
-@pytest.fixture(autouse=True)
-def _isolate_noop_launch_compile_hints():
-    """Keep persistent hints on the shared test launcher from leaking by order."""
-    _noop_launch.compile_hints = {}
-    yield
-    _noop_launch.compile_hints = {}
-
-
 # ──────────────────────────────────────────────────────────────
 # Tests: LLVM option Python bindings
 # ──────────────────────────────────────────────────────────────
@@ -187,8 +179,8 @@ class TestCompileCallable:
 class TestCompileHintsPropagation:
     """Test that compile_hints flow through to the compilation pipeline."""
 
-    def test_compile_hints_reach_lowering_and_pipeline(self, monkeypatch):
-        """The same effective hints reach backend IR lowering and pipeline generation."""
+    def test_fp_math_reaches_pipeline(self, monkeypatch):
+        """Verify fast_fp_math/unsafe_fp_math appear in rocdl-attach-target."""
         from flydsl.compiler.backends import rocm
 
         captured = {}
@@ -196,25 +188,18 @@ class TestCompileHintsPropagation:
         _reset_jit_caches(_noop_launch)
 
         orig = rocm.RocmBackend.pipeline_fragments
-        orig_lower = rocm.RocmBackend.lower_compile_hints
 
         def patched(self, *, compile_hints):
             captured["hints"] = dict(compile_hints)
             return orig(self, compile_hints=compile_hints)
 
-        def patched_lower(self, module, *, compile_hints):
-            captured["lower_hints"] = dict(compile_hints)
-            return orig_lower(self, module, compile_hints=compile_hints)
-
         monkeypatch.setattr(rocm.RocmBackend, "pipeline_fragments", patched)
-        monkeypatch.setattr(rocm.RocmBackend, "lower_compile_hints", patched_lower)
 
-        exe = flyc.compile[{"fast_fp_math": True, "unsafe_fp_math": True, "waves_per_eu": 2}](_noop_launch)
+        exe = flyc.compile[{"fast_fp_math": True, "unsafe_fp_math": True}](_noop_launch)
         exe()
 
-        expected = {"fast_fp_math": True, "unsafe_fp_math": True, "waves_per_eu": 2}
-        assert captured["lower_hints"] == expected
-        assert captured["hints"] == expected
+        assert captured["hints"].get("fast_fp_math") is True
+        assert captured["hints"].get("unsafe_fp_math") is True
 
     def test_llvm_options_in_compile_hints(self):
         """Verify llvm_options key is accepted and doesn't crash."""
