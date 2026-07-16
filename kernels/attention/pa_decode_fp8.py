@@ -838,18 +838,6 @@ def get_recommended_splits(
     sliding_window: int = 0,
     context_partition_size: int = KV_COMPUTE_BLOCK,
     query_length: int = 1,
-    # Static-grid (pa_decode_tile) refinement: when `max_blocks_per_seq` is
-    # given, the base heuristic below (tuned for persistent kernels) is
-    # pushed up/down to account for a *static* one-CTA-per-partition grid,
-    # via a second heuristic tuned by a direct sweep on an 80-CU MI308X.
-    # Two regimes: CU-STARVED (num_sequences*num_kv_heads < device CU count)
-    # pushes NP up to `cu_fill_np`, uncapped by tiles-per-partition -- idle
-    # CUs are worse than thin partitions; otherwise, further CTAs only add
-    # occupancy depth and reduce-kernel/prologue overhead, so
-    # tiles-per-partition is capped to at least `min_tiles_per_partition`.
-    # `device`/`target_ctas_per_cu`/`min_tiles_per_partition`/`tile_tok`
-    # only matter in this refined mode; defaults match what it was tuned
-    # with -- override only to re-sweep or adapt to a different device.
     max_blocks_per_seq: int | None = None,
     block_size: int = 1,
     device: torch.device | None = None,
