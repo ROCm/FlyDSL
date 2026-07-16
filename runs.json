@@ -1,8 +1,115 @@
 {
  "schema": 1,
- "updated": "2026-07-16T05:22:40Z",
+ "updated": "2026-07-16T07:10:15Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29478799716,
+   "pr": null,
+   "commit": "7471153843119cadfbef363ac07b679d3c060f8f",
+   "branch": "main",
+   "event": "push",
+   "title": "[Test] Expand RMSNorm backward configs and Torch benchmarks (#854)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29478799716",
+   "created_at": "2026-07-16T07:06:13Z",
+   "updated_at": "2026-07-16T07:07:52Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T07:07:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29478799716/job/87557903566"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T07:07:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29478799716/job/87557903600"
+    }
+   ]
+  },
+  {
+   "run_id": 29477614155,
+   "pr": 785,
+   "commit": "a6de6a2effd0ed0d703ea4246e6d8c13a215ae39",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477614155",
+   "created_at": "2026-07-16T06:44:23Z",
+   "updated_at": "2026-07-16T06:44:24Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
+  {
+   "run_id": 29477550214,
+   "pr": 801,
+   "commit": "bc0cebe7c987b69f074ecf18d723faf388b3a1f8",
+   "branch": "feat/layernorm-backward-769",
+   "event": "pull_request",
+   "title": "[layernorm] Add backward pass for training (PR 3/3, #769)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214",
+   "created_at": "2026-07-16T06:43:09Z",
+   "updated_at": "2026-07-16T06:44:42Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T06:52:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214/job/87553963818"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T06:44:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214/job/87553963825"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T06:44:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477550214/job/87553963850"
+    }
+   ]
+  },
+  {
+   "run_id": 29474299617,
+   "pr": 812,
+   "commit": "41ae377db2308b3f7479e33c0bc2b21ecfcca8ce",
+   "branch": "xudoyuan/kernels-smem-migration",
+   "event": "pull_request",
+   "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29474299617",
+   "created_at": "2026-07-16T05:35:34Z",
+   "updated_at": "2026-07-16T05:35:35Z",
+   "actor": "xudoyuan",
+   "jobs": []
+  },
   {
    "run_id": 29473602944,
    "pr": null,
@@ -10,13 +117,41 @@
    "branch": "main",
    "event": "push",
    "title": "add xcd remap (#863)",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29473602944",
    "created_at": "2026-07-16T05:19:49Z",
-   "updated_at": "2026-07-16T05:21:04Z",
+   "updated_at": "2026-07-16T07:06:45Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-16T05:32:11Z",
+     "completed_at": "2026-07-16T06:08:03Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29473602944/job/87542015171"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-16T05:21:44Z",
+     "completed_at": "2026-07-16T07:06:14Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29473602944/job/87542015172"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-16T06:21:12Z",
+     "completed_at": "2026-07-16T07:06:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29473602944/job/87542015181"
+    }
+   ]
   },
   {
    "run_id": 29472365672,
@@ -63,7 +198,7 @@
   },
   {
    "run_id": 29471116769,
-   "pr": 785,
+   "pr": null,
    "commit": "80d57f928e8e0cc141439ceb0a5d9d1701bb116d",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -78,18 +213,18 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T04:21:33Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T06:18:41Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425814"
     },
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T04:20:43Z",
+     "started_at": "2026-07-16T06:20:21Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425818"
     },
@@ -414,28 +549,28 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522",
    "created_at": "2026-07-15T12:13:42Z",
-   "updated_at": "2026-07-16T04:56:34Z",
+   "updated_at": "2026-07-16T06:42:27Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-8",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T04:57:31Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T05:41:35Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87538572399"
     },
     {
      "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T04:56:34Z",
+     "started_at": "2026-07-16T06:42:26Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87538572412"
     },
@@ -1152,7 +1287,7 @@
   },
   {
    "run_id": 29366839827,
-   "pr": 801,
+   "pr": null,
    "commit": "45b786cfe9adfab32c509fbf8d41323418c96a7b",
    "branch": "feat/layernorm-backward-769",
    "event": "pull_request",
@@ -1996,150 +2131,6 @@
      "started_at": "2026-07-14T07:25:56Z",
      "completed_at": "2026-07-14T07:50:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29314472471/job/87025353136"
-    }
-   ]
-  },
-  {
-   "run_id": 29309401444,
-   "pr": 846,
-   "commit": "5ca25c4887f8cb7d2a9f01d0d5e64a9061b2e8a0",
-   "branch": "fujun.han/del-redundant-documentation-table",
-   "event": "pull_request",
-   "title": "[Docs] Remove duplicate Documentation table from README",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444",
-   "created_at": "2026-07-14T05:46:06Z",
-   "updated_at": "2026-07-14T09:08:41Z",
-   "actor": "Peter9606",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T06:48:33Z",
-     "completed_at": "2026-07-14T09:08:40Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444/job/87018327426"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T06:44:22Z",
-     "completed_at": "2026-07-14T07:09:30Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444/job/87018327436"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-14T06:49:14Z",
-     "completed_at": "2026-07-14T07:46:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309401444/job/87018327445"
-    }
-   ]
-  },
-  {
-   "run_id": 29309000153,
-   "pr": null,
-   "commit": "149ff32b0050a14e94deb8b548cc8b729432e2c5",
-   "branch": "main",
-   "event": "push",
-   "title": "[kernels]: add common/mem_ops for shared memory/atomic helpers (#839)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153",
-   "created_at": "2026-07-14T05:37:01Z",
-   "updated_at": "2026-07-14T07:26:48Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T06:06:36Z",
-     "completed_at": "2026-07-14T06:27:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153/job/87008726782"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T05:39:33Z",
-     "completed_at": "2026-07-14T07:26:47Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153/job/87008726786"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T05:39:32Z",
-     "completed_at": "2026-07-14T06:56:25Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29309000153/job/87008726813"
-    }
-   ]
-  },
-  {
-   "run_id": 29308950734,
-   "pr": null,
-   "commit": "4c576a18aa0a3f4d27e6dd86ccdd4d3ea7aab56b",
-   "branch": "main",
-   "event": "push",
-   "title": "[Enh] Add rocdl.buffer_rsrc utilities: make_buffer_ptr & get_buffer_r\u2026",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308950734",
-   "created_at": "2026-07-14T05:35:52Z",
-   "updated_at": "2026-07-14T05:37:17Z",
-   "actor": "coderfeli",
-   "jobs": []
-  },
-  {
-   "run_id": 29308126953,
-   "pr": null,
-   "commit": "8fbae45127db82b7bf0fec01ca958b8d3d3e59fb",
-   "branch": "feat/autotune-rmsnorm-adopt",
-   "event": "pull_request",
-   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953",
-   "created_at": "2026-07-14T05:17:07Z",
-   "updated_at": "2026-07-14T07:52:39Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T05:19:17Z",
-     "completed_at": "2026-07-14T05:34:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953/job/87006102461"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T05:19:29Z",
-     "completed_at": "2026-07-14T07:52:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953/job/87006102482"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T05:20:25Z",
-     "completed_at": "2026-07-14T07:36:19Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953/job/87006102543"
     }
    ]
   }
