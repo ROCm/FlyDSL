@@ -36,7 +36,7 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from kernels.attention.dualwave_common import _LOG2E, _waitcnt_vm_n
+from kernels.attention.flash_attn_utils import _LOG2E, _waitcnt_vm_n, scf_if_dispatch
 from kernels.common.kernels_common import dtype_to_elem_type
 
 

@@ -24,7 +24,7 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from kernels.attention.dualwave_common import (
+from kernels.attention.flash_attn_utils import (
     DualwaveGemmHelper,
     DualwaveKernelContext,
     DualwaveKvGmemToLdsLoader,

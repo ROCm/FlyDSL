@@ -29,7 +29,7 @@ import torch
 import torch.nn.functional as F  # noqa: F401  (imported for callers' convenience)
 
 # Re-export so callers only need to import from this module.
-from kernels.attention.dualwave_common import dualwave_splitk_workspace_elems
+from kernels.attention.flash_attn_utils import dualwave_splitk_workspace_elems
 
 __all__ = ["flydsl_flash_attn_func", "dualwave_splitk_workspace_elems"]
 

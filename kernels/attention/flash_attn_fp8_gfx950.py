@@ -20,7 +20,7 @@ from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
-from kernels.attention.dualwave_common import (
+from kernels.attention.flash_attn_utils import (
     _LOG2E,
     _ds_read_tr8_b64_imm,
     _ds_read_tr16_b64_imm,
