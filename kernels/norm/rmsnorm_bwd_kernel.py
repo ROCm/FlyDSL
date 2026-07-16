@@ -378,12 +378,12 @@ def _build_rmsnorm_bwd_two_stage_module(
         raise ValueError(f"num_programs must be positive, got {num_programs}")
 
     RED_SLOTS = max(1, (TWO_STAGE_PARTIAL_THREADS + WARP_SIZE - 1) // WARP_SIZE)
-    NUM_COL_TILES = (N + TWO_STAGE_PARTIAL_THREADS - 1) // TWO_STAGE_PARTIAL_THREADS
     elem_bits = 32 if dtype_str == "f32" else 16
     USE_VEC = is_rmsnorm_bwd_two_stage_vec_config(N, dtype_str)
-    NUM_VEC_TILES = N // VEC_WIDTH if USE_VEC else 0
-    NUM_VEC_ITERS = (NUM_VEC_TILES + TWO_STAGE_PARTIAL_THREADS - 1) // TWO_STAGE_PARTIAL_THREADS if USE_VEC else 0
-    PARTIAL_ACC_SIZE = NUM_VEC_ITERS * VEC_WIDTH if USE_VEC else NUM_COL_TILES
+    IO_WIDTH = VEC_WIDTH if USE_VEC else 1
+    NUM_IO_TILES = (N + IO_WIDTH - 1) // IO_WIDTH
+    NUM_IO_ITERS = (NUM_IO_TILES + TWO_STAGE_PARTIAL_THREADS - 1) // TWO_STAGE_PARTIAL_THREADS
+    PARTIAL_ACC_SIZE = NUM_IO_ITERS * IO_WIDTH
     arch = get_rocm_arch() if USE_VEC else ""
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
     SharedStorage = make_single_reduction_storage(RED_SLOTS)
@@ -450,173 +450,132 @@ def _build_rmsnorm_bwd_two_stage_module(
         rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
         partial_div = fx.logical_divide(DWeightPartial_buf, fx.make_layout(1, 1))
 
-        copy_atom_s = fx.make_copy_atom(
-            fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b(),
+        copy_atom_io = fx.make_copy_atom(
+            (
+                fx.rocdl.BufferCopy128b()
+                if USE_VEC
+                else (fx.rocdl.BufferCopy16b() if elem_bits <= 16 else fx.rocdl.BufferCopy32b())
+            ),
             elem_bits,
         )
         copy_atom_f32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
+        gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(IO_WIDTH, 1))
+        gamma_local = []
         if const_expr(USE_VEC):
-            copy_atom_vec = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            gamma_vec_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
-            gamma_local = []
-            for tile_i in range_constexpr(NUM_VEC_ITERS):
-                vec_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
-                is_valid = vec_idx < NUM_VEC_TILES
-                vec_idx_safe = is_valid.select(vec_idx, 0)
-                gamma_local.append(load_vec(copy_atom_vec, VEC_WIDTH, elem_dtype, gamma_vec_div, vec_idx_safe))
+            for tile_i in range_constexpr(NUM_IO_ITERS):
+                io_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+                is_valid = io_idx < NUM_IO_TILES
+                io_idx_safe = is_valid.select(io_idx, 0)
+                gamma_local.append(load_vec(copy_atom_io, IO_WIDTH, elem_dtype, gamma_div, io_idx_safe))
 
-            dweight_partial = fx.Vector.filled(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
-            for row in range(fx.Int32(bid), MIn, num_programs):
-                row_source = fx.slice(Source_buf, (row, None))
-                row_dy = fx.slice(DY_buf, (row, None))
-                row_dx = fx.slice(DX_buf, (row, None))
-                if const_expr(fused_add):
-                    row_dres_out = fx.slice(DResidualOut_buf, (row, None))
+        dweight_partial = fx.Vector.filled(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
+        for row in range(fx.Int32(bid), MIn, num_programs):
+            row_source = fx.slice(Source_buf, (row, None))
+            row_dy = fx.slice(DY_buf, (row, None))
+            row_dx = fx.slice(DX_buf, (row, None))
+            if const_expr(fused_add):
+                row_dres_out = fx.slice(DResidualOut_buf, (row, None))
 
-                source_div = fx.logical_divide(row_source, fx.make_layout(VEC_WIDTH, 1))
-                dy_div = fx.logical_divide(row_dy, fx.make_layout(VEC_WIDTH, 1))
-                dx_div = fx.logical_divide(row_dx, fx.make_layout(VEC_WIDTH, 1))
-                if const_expr(fused_add):
-                    dres_out_div = fx.logical_divide(row_dres_out, fx.make_layout(VEC_WIDTH, 1))
+            source_div = fx.logical_divide(row_source, fx.make_layout(IO_WIDTH, 1))
+            dy_div = fx.logical_divide(row_dy, fx.make_layout(IO_WIDTH, 1))
+            dx_div = fx.logical_divide(row_dx, fx.make_layout(IO_WIDTH, 1))
+            if const_expr(fused_add):
+                dres_out_div = fx.logical_divide(row_dres_out, fx.make_layout(IO_WIDTH, 1))
 
-                rstd = load_scalar(copy_atom_f32, fx.Float32, rstd_div, row)
-                thread_acc = c_zero_f
-                source_local = []
-                dy_local = []
-                for tile_i in range_constexpr(NUM_VEC_ITERS):
-                    vec_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
-                    is_valid = vec_idx < NUM_VEC_TILES
-                    vec_idx_safe = is_valid.select(vec_idx, 0)
-                    source_e = load_vec(copy_atom_vec, VEC_WIDTH, elem_dtype, source_div, vec_idx_safe)
-                    dy_e = load_vec(copy_atom_vec, VEC_WIDTH, elem_dtype, dy_div, vec_idx_safe)
+            rstd = load_scalar(copy_atom_f32, fx.Float32, rstd_div, row)
+            thread_acc = c_zero_f
+            source_local = []
+            dy_local = []
+            for tile_i in range_constexpr(NUM_IO_ITERS):
+                io_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+                is_valid = io_idx < NUM_IO_TILES
+                io_idx_safe = is_valid.select(io_idx, 0)
+                if const_expr(USE_VEC):
+                    source_e = load_vec(copy_atom_io, IO_WIDTH, elem_dtype, source_div, io_idx_safe)
+                    dy_e = load_vec(copy_atom_io, IO_WIDTH, elem_dtype, dy_div, io_idx_safe)
                     source_local.append(source_e)
                     dy_local.append(dy_e)
-                    source_hat = source_e.to(fx.Float32) * rstd
-                    wdy = dy_e.to(fx.Float32) * gamma_local[tile_i].to(fx.Float32)
-                    prod = (source_hat * wdy).reduce(ReductionOp.ADD, fastmath=fm_fast)
-                    thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
+                    gamma_e = gamma_local[tile_i]
+                else:
+                    source_e = load_scalar(copy_atom_io, elem_dtype, source_div, io_idx_safe)
+                    dy_e = load_scalar(copy_atom_io, elem_dtype, dy_div, io_idx_safe)
+                    gamma_e = load_scalar(copy_atom_io, elem_dtype, gamma_div, io_idx_safe)
 
-                sum_prod = block_reduce_add(thread_acc)
-                c1 = sum_prod / n_float
+                source = source_e if dtype_str == "f32" else source_e.to(fx.Float32)
+                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                gamma = gamma_e if dtype_str == "f32" else gamma_e.to(fx.Float32)
+                source_hat = source * rstd
+                wdy = dy * gamma
+                prod = source_hat * wdy
+                if const_expr(USE_VEC):
+                    prod = prod.reduce(ReductionOp.ADD, fastmath=fm_fast)
 
-                row_dweight = []
-                for tile_i in range_constexpr(NUM_VEC_ITERS):
-                    vec_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
-                    is_valid = vec_idx < NUM_VEC_TILES
-                    vec_idx_safe = is_valid.select(vec_idx, 0)
-                    source_hat = source_local[tile_i].to(fx.Float32) * rstd
-                    dy = dy_local[tile_i].to(fx.Float32)
-                    wdy = dy * gamma_local[tile_i].to(fx.Float32)
-                    dx = (wdy - source_hat * c1) * rstd
-                    if const_expr(fused_add):
-                        dres = load_vec(
-                            copy_atom_vec,
-                            VEC_WIDTH,
-                            elem_dtype,
-                            dres_out_div,
-                            vec_idx_safe,
-                        ).to(fx.Float32)
-                        dx = dx + dres
+                thread_acc = thread_acc + is_valid.select(prod, c_zero_f)
 
-                    if vec_idx < NUM_VEC_TILES:
-                        dx_e = to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, dx)
-                        store_vec(copy_atom_vec, VEC_WIDTH, elem_dtype, dx_e, dx_div, vec_idx)
+            sum_prod = block_reduce_add(thread_acc)
+            c1 = sum_prod / n_float
+            row_dweight = []
+            for tile_i in range_constexpr(NUM_IO_ITERS):
+                io_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+                is_valid = io_idx < NUM_IO_TILES
+                io_idx_safe = is_valid.select(io_idx, 0)
+                if const_expr(USE_VEC):
+                    source_e = source_local[tile_i]
+                    dy_e = dy_local[tile_i]
+                    gamma_e = gamma_local[tile_i]
+                else:
+                    source_e = load_scalar(copy_atom_io, elem_dtype, source_div, io_idx_safe)
+                    dy_e = load_scalar(copy_atom_io, elem_dtype, dy_div, io_idx_safe)
+                    gamma_e = load_scalar(copy_atom_io, elem_dtype, gamma_div, io_idx_safe)
 
-                    dw = dy * source_hat
-                    for lane in range_constexpr(VEC_WIDTH):
-                        row_dweight.append(is_valid.select(dw[lane], c_zero_f))
+                source = source_e if dtype_str == "f32" else source_e.to(fx.Float32)
+                dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
+                gamma = gamma_e if dtype_str == "f32" else gamma_e.to(fx.Float32)
+                source_hat = source * rstd
+                wdy = dy * gamma
 
-                dweight_partial = dweight_partial + fx.Vector.from_elements(row_dweight, fx.Float32)
-                gpu.barrier()
-
-            for tile_i in range_constexpr(NUM_VEC_ITERS):
-                vec_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
-                if vec_idx < NUM_VEC_TILES:
-                    for lane in range_constexpr(VEC_WIDTH):
-                        idx = vec_idx * VEC_WIDTH + lane
-                        partial_idx = bid * N + idx
-                        store_scalar(
-                            copy_atom_f32,
-                            fx.Float32,
-                            fx.Float32,
-                            partial_div,
-                            partial_idx,
-                            dweight_partial[tile_i * VEC_WIDTH + lane],
-                        )
-        else:
-            gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
-            dweight_partial = fx.Vector.filled(PARTIAL_ACC_SIZE, 0.0, fx.Float32)
-
-            for row in range(fx.Int32(bid), MIn, num_programs):
-                row_source = fx.slice(Source_buf, (row, None))
-                row_dy = fx.slice(DY_buf, (row, None))
-                row_dx = fx.slice(DX_buf, (row, None))
+                dx = (wdy - source_hat * c1) * rstd
                 if const_expr(fused_add):
-                    row_dres_out = fx.slice(DResidualOut_buf, (row, None))
-
-                source_div = fx.logical_divide(row_source, fx.make_layout(1, 1))
-                dy_div = fx.logical_divide(row_dy, fx.make_layout(1, 1))
-                dx_div = fx.logical_divide(row_dx, fx.make_layout(1, 1))
-                if const_expr(fused_add):
-                    dres_out_div = fx.logical_divide(row_dres_out, fx.make_layout(1, 1))
-
-                rstd = load_scalar(copy_atom_f32, fx.Float32, rstd_div, row)
-                thread_acc = c_zero_f
-                for base in range_constexpr(0, N, TWO_STAGE_PARTIAL_THREADS):
-                    idx = tid + base
-                    is_valid = idx < N
-                    idx_safe = is_valid.select(idx, 0)
-                    source_e = load_scalar(copy_atom_s, elem_dtype, source_div, idx_safe)
-                    dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
-                    g_e = load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
-                    source = source_e if dtype_str == "f32" else source_e.to(fx.Float32)
-                    dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
-                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                    source_hat = source * rstd
-                    wdy = dy * g
-                    thread_acc = thread_acc + is_valid.select(source_hat * wdy, c_zero_f)
-
-                sum_prod = block_reduce_add(thread_acc)
-                c1 = sum_prod / n_float
-                row_dweight = []
-                for base in range_constexpr(0, N, TWO_STAGE_PARTIAL_THREADS):
-                    idx = tid + base
-                    is_valid = idx < N
-                    idx_safe = is_valid.select(idx, 0)
-                    source_e = load_scalar(copy_atom_s, elem_dtype, source_div, idx_safe)
-                    dy_e = load_scalar(copy_atom_s, elem_dtype, dy_div, idx_safe)
-                    g_e = load_scalar(copy_atom_s, elem_dtype, gamma_div, idx_safe)
-                    source = source_e if dtype_str == "f32" else source_e.to(fx.Float32)
-                    dy = dy_e if dtype_str == "f32" else dy_e.to(fx.Float32)
-                    g = g_e if dtype_str == "f32" else g_e.to(fx.Float32)
-                    source_hat = source * rstd
-                    wdy = dy * g
-                    dx = (wdy - source_hat * c1) * rstd
-                    if const_expr(fused_add):
-                        dres_e = load_scalar(copy_atom_s, elem_dtype, dres_out_div, idx_safe)
+                    if const_expr(USE_VEC):
+                        dres = load_vec(copy_atom_io, IO_WIDTH, elem_dtype, dres_out_div, io_idx_safe).to(fx.Float32)
+                    else:
+                        dres_e = load_scalar(copy_atom_io, elem_dtype, dres_out_div, io_idx_safe)
                         dres = dres_e if dtype_str == "f32" else dres_e.to(fx.Float32)
-                        dx = dx + dres
+                    dx = dx + dres
 
-                    if idx < N:
+                if io_idx < NUM_IO_TILES:
+                    if const_expr(USE_VEC):
+                        dx_e = to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, dx)
+                        store_vec(copy_atom_io, IO_WIDTH, elem_dtype, dx_e, dx_div, io_idx)
+                    else:
                         dx_e = dx if dtype_str == "f32" else dx.to(elem_dtype)
-                        store_scalar(copy_atom_s, elem_dtype, elem_dtype, dx_div, idx, dx_e)
-                    row_dweight.append(is_valid.select(dy * source_hat, c_zero_f))
+                        store_scalar(copy_atom_io, elem_dtype, elem_dtype, dx_div, io_idx, dx_e)
 
-                dweight_partial = dweight_partial + fx.Vector.from_elements(row_dweight, fx.Float32)
-                gpu.barrier()
+                dw = dy * source_hat
+                if const_expr(USE_VEC):
+                    for lane in range_constexpr(IO_WIDTH):
+                        row_dweight.append(is_valid.select(dw[lane], c_zero_f))
+                else:
+                    row_dweight.append(is_valid.select(dw, c_zero_f))
 
-            for tile_i in range_constexpr(NUM_COL_TILES):
-                idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
-                if idx < N:
+            dweight_partial = dweight_partial + fx.Vector.from_elements(row_dweight, fx.Float32)
+            gpu.barrier()
+
+        for tile_i in range_constexpr(NUM_IO_ITERS):
+            io_idx = tid + tile_i * TWO_STAGE_PARTIAL_THREADS
+            if io_idx < NUM_IO_TILES:
+                for lane in range_constexpr(IO_WIDTH):
+                    idx = io_idx * IO_WIDTH + lane
                     partial_idx = bid * N + idx
+                    partial_value = dweight_partial[tile_i * IO_WIDTH + lane]
                     store_scalar(
                         copy_atom_f32,
                         fx.Float32,
                         fx.Float32,
                         partial_div,
                         partial_idx,
-                        dweight_partial[tile_i],
+                        partial_value,
                     )
 
     @flyc.kernel
