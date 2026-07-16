@@ -17,8 +17,8 @@ from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.common.kernels_common import _if_then
 from kernels.common.mem_ops import buffer_atomic_add
-from kernels.mma.mfma_epilogues import c_shuffle_epilog, mfma_epilog
-from kernels.mma.mfma_preshuffle_pipeline import (
+from kernels.common.mma.mfma_epilogues import c_shuffle_epilog, mfma_epilog
+from kernels.common.mma.mfma_preshuffle_pipeline import (
     buffer_copy_gmem16_dwordx4,
     extract_bf16_scale,
     lds_store_4b_xor16,
