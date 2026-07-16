@@ -165,7 +165,7 @@ def _ncdhw_to_ndhwc(x, stream):
 
 @functools.lru_cache(maxsize=256)
 def compile_conv3d_implicit(
-    n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1, tile=DEFAULT_TILE
+    n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, splitk=1, tile=DEFAULT_TILE, wgm=1
 ):
     TILE_M, TILE_N, WAVE_M, WAVE_N = tile
     BLOCK_THREADS = WAVE_M * WAVE_N * WARP_SIZE
@@ -225,6 +225,7 @@ def compile_conv3d_implicit(
     LDS_B_SIZE = PIPE_STAGES * TILE_N * TILE_K
 
     grid_m = (npq + TILE_M - 1) // TILE_M
+    WGM = max(1, int(wgm))
     elem_ty = fx.BFloat16
     mfma_fn = rocdl.mfma_f32_16x16x32_bf16
     temporal_only_fast = (
@@ -254,8 +255,21 @@ def compile_conv3d_implicit(
         b_lds = lds_alloc.allocate(fx.Array[elem_ty, LDS_B_SIZE, 16]).peek()
 
         tid = fx.thread_idx.x
-        m_offset = fx.block_idx.x * TILE_M
-        n_offset = fx.block_idx.y * TILE_N
+        if const_expr(WGM > 1):
+            # Grouped-M workgroup L2-swizzle: visit WGM consecutive m-tiles across all
+            # grid_n n-tiles before advancing in M, keeping the weight tile hot in L2.
+            pid = fx.Index(fx.block_idx.x) + fx.Index(fx.block_idx.y) * fx.Index(grid_m)
+            blocks_per_group = fx.Index(WGM * grid_n)
+            group_id = pid // blocks_per_group
+            first_m = group_id * fx.Index(WGM)
+            group_rows = fx.Index(grid_m) - first_m
+            group_rows = fx.Index(arith.select(group_rows < fx.Index(WGM), group_rows, fx.Index(WGM)))
+            local = pid % blocks_per_group
+            m_offset = fx.Index(first_m + (local % group_rows)) * TILE_M
+            n_offset = fx.Index(local // group_rows) * TILE_N
+        else:
+            m_offset = fx.block_idx.x * TILE_M
+            n_offset = fx.block_idx.y * TILE_N
         if const_expr(use_splitk):
             k_off = fx.block_idx.z * (tiles_per_split * TILE_K)
         else:
@@ -306,11 +320,14 @@ def compile_conv3d_implicit(
             u8_ptr = fx.recast_iter(fx.Uint8, lds_array.ptr)
             return fx.ptr_load(u8_ptr + fx.Int32(elem_offset * 2), result_type=Vec8Ty)
 
+        def _swz(row, col):
+            return col ^ (((row // 2) % (TILE_K // 8)) * 8)
+
         def a_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_M + row) * TILE_K + col
+            return (fx.Index(stage) * TILE_M + row) * TILE_K + _swz(row, col)
 
         def b_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_N + row) * TILE_K + col
+            return (fx.Index(stage) * TILE_N + row) * TILE_K + _swz(row, col)
 
         def in_range(v, hi):
             return (v >= 0) & (v < fx.Index(hi))
@@ -397,7 +414,7 @@ def compile_conv3d_implicit(
 
         # ---- global -> LDS DMA copy, masking via OOB routing ----
         DMA_BYTES = LDG_VEC * BF16_BYTES  # 16
-        OOB_ELEM = fx.Int32(OOB_SENTINEL_ELEM) 
+        OOB_ELEM = fx.Int32(OOB_SENTINEL_ELEM)
 
         def _lds_dma_ptr(lds_array, stage_tile, i):
             off_elems = fx.Index(stage_tile) + (fx.Index(tid) + fx.Index(i * BLOCK_THREADS)) * fx.Index(LDG_VEC)
@@ -476,7 +493,7 @@ def compile_conv3d_implicit(
             rocdl.s_setprio(0)
             return acc_values
 
-        # global->LDS software pipeline 
+        # global->LDS software pipeline
         # ---- prologue: fill the pipeline with the first PREFETCH tiles' DMAs ----
         PREFETCH = PIPE_STAGES - 1
         for s in range_constexpr(PREFETCH):
@@ -599,10 +616,10 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
         if (
             npq < 4096
             or k_tiles < 16
-            or k % tile_n != 0 
+            or k % tile_n != 0
             or npq % tile_m != 0
             or crs % TILE_K != 0
-            or npq * k * 4 > 0x7FFFFFFF  
+            or npq * k * 4 > 0x7FFFFFFF
         ):
             sk = 1
         else:
@@ -655,26 +672,33 @@ def _conv3d_impl(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=
 
     shape = (n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
 
-    def _run(the_tile):
+    def _run(the_tile, the_wgm=1):
         sk = _resolve_splitk(splitk, npq, crs, k, x.device, the_tile)
         if sk > 1:
             y = torch.zeros((npq, k), device=x.device, dtype=torch.float32)
         else:
             y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-        exe = compile_conv3d_implicit(n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile)
+        exe = compile_conv3d_implicit(
+            n, c, d, h, w, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, sk, the_tile, the_wgm
+        )
         exe(y, x_ndhwc, w_packed, bias_arg, launch_stream)
         return y, sk
 
     if tile is not None:
-        chosen = tuple(tile)
+        chosen_tile = tuple(tile)
+        chosen_wgm = 1
     elif autotune or (autotune is None and _autotune_enabled()):
-        from kernels.conv.conv3d_implicit_autotune import BF16_CANDIDATES, autotune_conv3d
+        from kernels.conv.conv3d_implicit_autotune import BF16_CANDIDATES, WGM_VALUES, autotune_conv3d
 
-        chosen = autotune_conv3d("bf16", shape, "bf16", BF16_CANDIDATES, x.device, lambda t: _run(t)[0])
+        # Sweep (tile, wgm) pairs; autotune_conv3d sees flattened (tile, wgm) tuples.
+        candidates = [(t, w) for t in BF16_CANDIDATES for w in WGM_VALUES]
+        best = autotune_conv3d("bf16", shape, "bf16", candidates, x.device, lambda tw: _run(tw[0], tw[1])[0])
+        chosen_tile, chosen_wgm = best
     else:
-        chosen = DEFAULT_TILE
+        chosen_tile = DEFAULT_TILE
+        chosen_wgm = 1
 
-    y, sk = _run(chosen)
+    y, sk = _run(chosen_tile, chosen_wgm)
     if sk > 1:
         if has_bias:
             y = y + bias_arg.view(1, k)

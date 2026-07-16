@@ -2,13 +2,6 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 """Manual tile autotuner for the implicit-GEMM conv3d kernels.
-
-The tile config (TILE_M/TILE_N/WAVE_M/WAVE_N) is baked into the lru_cache'd
-``compile_conv3d_*`` factory as a compile-time constant, so the ``@autotune``
-decorator (which injects config as ``@flyc.jit`` kwargs) does not fit. Instead we
-benchmark a small candidate list per problem shape with ``do_bench`` and cache
-the winner (in-memory + JSON on disk), reusing the fingerprint helpers from
-``flydsl.autotune``.
 """
 
 import json
@@ -61,8 +54,10 @@ FP8_CANDIDATES = [
     (64, 128, 1, 4),
 ]
 
+WGM_VALUES = [1, 4, 8]
+
 _MEM_CACHE = {}
-_CACHE_SCHEMA_VERSION = 2
+_CACHE_SCHEMA_VERSION = 3
 
 
 def _cache_dir():
@@ -74,6 +69,11 @@ def _cache_file(kind):
 
 
 def _make_key(kind, shape, dtype_str, candidates):
+    def _canon(c):
+        if isinstance(c, tuple) and len(c) == 2 and isinstance(c[0], tuple):
+            return (tuple(c[0]), c[1])
+        return tuple(c)
+
     return (
         kind,
         tuple(shape),
@@ -81,7 +81,7 @@ def _make_key(kind, shape, dtype_str, candidates):
         _device_fingerprint(),
         _toolchain_fingerprint(),
         _CACHE_SCHEMA_VERSION,
-        tuple(tuple(tile) for tile in candidates),
+        tuple(_canon(c) for c in candidates),
     )
 
 
@@ -94,10 +94,14 @@ def _load_disk(kind, key):
     except Exception:
         return None
     ent = data.get(json.dumps(list(key)))
-    return tuple(ent) if ent is not None else None
+    if ent is None:
+        return None
+    if isinstance(ent[0], list):
+        return (tuple(ent[0]), ent[1])
+    return tuple(ent)
 
 
-def _save_disk(kind, key, tile):
+def _save_disk(kind, key, best):
     f = _cache_file(kind)
     f.parent.mkdir(parents=True, exist_ok=True)
     data = {}
@@ -106,17 +110,20 @@ def _save_disk(kind, key, tile):
             data = json.loads(f.read_text())
         except Exception:
             data = {}
-    data[json.dumps(list(key))] = list(tile)
+    if isinstance(best, tuple) and len(best) == 2 and isinstance(best[0], tuple):
+        data[json.dumps(list(key))] = [list(best[0]), best[1]]
+    else:
+        data[json.dumps(list(key))] = list(best)
     f.write_text(json.dumps(data, indent=2))
 
 
 def autotune_conv3d(kind, shape, dtype_str, candidates, device, run_tile, warmup=5, rep=20):
-    """Return the best (TILE_M, TILE_N, WAVE_M, WAVE_N) for this problem shape.
+    """Return the best candidate for this problem shape.
 
-    ``run_tile(tile)`` must launch one full conv for the given tile (used both to
-    benchmark and, by the caller, for the final real run). Split-K is re-derived
-    deterministically from the chosen tile at call time, so only the tile is
-    cached.
+    Each element of ``candidates`` is either a tile tuple (TILE_M, TILE_N, WAVE_M, WAVE_N)
+    or a (tile_tuple, wgm) pair when wgm sweep is enabled. ``run_tile(candidate)``
+    must launch one full conv for the given candidate and return the output tensor.
+    The winning candidate is cached (in-memory + JSON on disk).
     """
     key = _make_key(kind, shape, dtype_str, candidates)
     if key in _MEM_CACHE:
@@ -129,6 +136,7 @@ def autotune_conv3d(kind, shape, dtype_str, candidates, device, run_tile, warmup
     results = []
     for tile in candidates:
         try:
+            run_tile(tile)  # dry run: triggers compile (lru_cache miss) outside do_bench
             t = do_bench(lambda: run_tile(tile), warmup=warmup, rep=rep)
             results.append((tile, t))
         except Exception:
