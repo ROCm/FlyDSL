@@ -163,7 +163,7 @@ def _fill_sentinel_slots(sorted_ids_rsrc, sorted_w_rsrc, start, count, sentinel,
 # ---------------------------------------------------------------------------
 def _lds_load_raw(raw_ptr, idx):
     """Load i32 from an LDS pointer at element offset `idx` (i32 or index)."""
-    return fx.Int32(fx.ptr_load(raw_ptr + fx.Int64(idx)))
+    return fx.ptr_load(raw_ptr + fx.Int64(idx))
 
 
 def _lds_store_raw(raw_ptr, val, idx):
