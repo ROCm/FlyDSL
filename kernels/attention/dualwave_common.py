@@ -694,68 +694,6 @@ def _packed_o_128_vec(traits, v_o, dc, g, lane_div_32, elem_dtype):
     )
 
 
-def _final_o_base(traits, q_row, stride_q_n_v, q_head_idx, lane_div_32):
-    return q_row * stride_q_n_v + q_head_idx * traits.HEAD_DIM + lane_div_32 * 8
-
-
-def _final_o_global(traits, o_base, dc, g):
-    return o_base + (dc * traits.D_CHUNK + 2 * g * 8)
-
-
-def _store_final_o_128(traits, v_o, dc, g, o_base, lane_div_32, elem_dtype, _o_store_reg_128, _store_atom_128, o_div):
-    _buffer_store_128(
-        _packed_o_128_vec(traits, v_o, dc, g, lane_div_32, elem_dtype),
-        _final_o_global(traits, o_base, dc, g),
-        _o_store_reg_128=_o_store_reg_128,
-        _store_atom_128=_store_atom_128,
-        o_div=o_div,
-    )
-
-
-def _store_final_o_row(
-    traits, v_o, q_row, stride_q_n_v, q_head_idx, lane_div_32, elem_dtype, _o_store_reg_128, _store_atom_128, o_div
-):
-    o_base = _final_o_base(traits, q_row, stride_q_n_v, q_head_idx, lane_div_32)
-    for dc in range_constexpr(traits.D_CHUNKS):
-        for g in range_constexpr(2):
-            _store_final_o_128(
-                traits,
-                v_o,
-                dc,
-                g,
-                o_base,
-                lane_div_32,
-                elem_dtype,
-                _o_store_reg_128,
-                _store_atom_128,
-                o_div,
-            )
-
-
-def _store_splitk_partial_o_quad(traits, v_o, dc, g, local_opart_row_base, lane_div_32, opart_rsrc, elem_dtype):
-    w0, w1, w2, w3 = _packed_o_128_dwords(traits, v_o, dc, g, lane_div_32, elem_dtype)
-    _ws_store_quad_i32(
-        [w0, w1, w2, w3],
-        local_opart_row_base + _splitk_o_partial_dword_col(traits, dc, g, lane_div_32),
-        opart_rsrc,
-    )
-
-
-def _store_splitk_partial_o_row(traits, v_o, local_opart_row_base, lane_div_32, opart_rsrc, elem_dtype):
-    for dc in range_constexpr(traits.D_CHUNKS):
-        for g in range_constexpr(2):
-            _store_splitk_partial_o_quad(
-                traits,
-                v_o,
-                dc,
-                g,
-                local_opart_row_base,
-                lane_div_32,
-                opart_rsrc,
-                elem_dtype,
-            )
-
-
 def _sched_barrier_pairs(traits, pairs, valu_cnt, group):
     """Emit `pairs` × {1 MFMA + valu_cnt VALU} sched_group_barrier groups."""
     pairs = _scale_sched_pairs(pairs, traits.HEAD_DIM)
@@ -1358,12 +1296,12 @@ class DualwaveKernelContext:
         self.num_kv_tiles = (self.seqlen_kv_v + self.kv_tile_size - 1) // self.kv_tile_size
         if const_expr(traits.CAUSAL):
             self.causal_end_raw_i32 = fx.Int32(self.q_start + traits.BLOCK_M) + self.delta_i32
-            self.causal_end_i32 = fx.Int32(
+            causal_end_i32 = fx.Int32(
                 ArithValue(self.causal_end_raw_i32 > fx.Int32(0)).select(self.causal_end_raw_i32, fx.Int32(0))
             )
-            self.causal_num_tiles = (fx.Index(self.causal_end_i32) + self.kv_tile_size - 1) // self.kv_tile_size
+            causal_num_tiles = (fx.Index(causal_end_i32) + self.kv_tile_size - 1) // self.kv_tile_size
             self.max_num_tiles = fx.Index(
-                ArithValue(self.causal_num_tiles < self.num_kv_tiles).select(self.causal_num_tiles, self.num_kv_tiles)
+                ArithValue(causal_num_tiles < self.num_kv_tiles).select(causal_num_tiles, self.num_kv_tiles)
             )
         else:
             self.causal_end_raw_i32 = None
@@ -1741,6 +1679,79 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
             [Vec(s_hi)[r] for r in range_constexpr(16)],
         )
 
+    def _causal_mask_inplace(self, v_s, tile_idx, q_row_i32=None):
+        """Apply causal mask using DUALWAVE_SWP inline-asm attn_mask_vec2_imm."""
+        if q_row_i32 is None:
+            q_row_i32 = self.ctx_ref.q_row_i32
+        traits = self.traits
+        s_lo, s_hi = v_s
+        kv_tile_start = tile_idx * traits.BLOCK_N
+        kv_start_i32 = fx.Int32(kv_tile_start)
+        # lane>=32 has a larger n offset in the K-permuted P layout.
+        lane_n_off = 8 if traits.KV_VECTORIZED else 4
+        lane_off_i32 = fx.Int32(self.lane_div_32) * fx.Int32(lane_n_off)
+        rel_lo_i32 = fx.Int32(q_row_i32 + self.delta_i32 - kv_start_i32 - lane_off_i32)
+        rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(32))
+        neg_inf_i32 = fx.Int32(traits.NEG_INF_F32_BITS)
+
+        if const_expr(traits.KV_VECTORIZED):
+            pair_thresholds = [
+                (0, 1),
+                (2, 3),  # r=0,1  r=2,3
+                (4, 5),
+                (6, 7),  # r=4,5  r=6,7
+                (16, 17),
+                (18, 19),  # r=8,9  r=10,11
+                (20, 21),
+                (22, 23),  # r=12,13 r=14,15
+            ]
+        else:
+            pair_thresholds = [
+                (0, 1),
+                (2, 3),  # r=0,1  r=2,3
+                (8, 9),
+                (10, 11),  # r=4,5  r=6,7
+                (16, 17),
+                (18, 19),  # r=8,9  r=10,11
+                (24, 25),
+                (26, 27),  # r=12,13 r=14,15
+            ]
+        for p in range_constexpr(len(pair_thresholds)):
+            thr_x, thr_y = pair_thresholds[p]
+            idx_x = p * 2
+            idx_y = p * 2 + 1
+
+            x_lo_bits = _bitcast_i32(s_lo[idx_x])
+            y_lo_bits = _bitcast_i32(s_lo[idx_y])
+            new_x_lo, new_y_lo = _attn_mask_vec2_imm(
+                rel_lo_i32,
+                neg_inf_i32,
+                thr_x,
+                thr_y,
+                x_lo_bits,
+                y_lo_bits,
+            )
+            s_lo[idx_x] = _bitcast_f32(new_x_lo)
+            s_lo[idx_y] = _bitcast_f32(new_y_lo)
+
+        for p in range_constexpr(len(pair_thresholds)):
+            thr_x, thr_y = pair_thresholds[p]
+            idx_x = p * 2
+            idx_y = p * 2 + 1
+
+            x_hi_bits = _bitcast_i32(s_hi[idx_x])
+            y_hi_bits = _bitcast_i32(s_hi[idx_y])
+            new_x_hi, new_y_hi = _attn_mask_vec2_imm(
+                rel_hi_i32,
+                neg_inf_i32,
+                thr_x,
+                thr_y,
+                x_hi_bits,
+                y_hi_bits,
+            )
+            s_hi[idx_x] = _bitcast_f32(new_x_hi)
+            s_hi[idx_y] = _bitcast_f32(new_y_hi)
+
     def causal_mask_prologue_if_needed(
         self,
         v_s,
@@ -1760,23 +1771,13 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
             q_start_pos_i32 = self.ctx_ref.q_start_pos_i32
         if q_row_i32 is None:
             q_row_i32 = self.ctx_ref.q_row_i32
-        traits = self.traits
-        delta_i32 = self.delta_i32
-        lane_div_32 = self.lane_div_32
 
         @flyc.jit
         def _causal_mask_prologue_if_needed(v_s, tile_idx, kv_end_pos, q_start_pos_i32, q_row_i32):
             s_lo, s_hi = v_s
-            if q_start_pos_i32 + delta_i32 < fx.Int32(kv_end_pos):
+            if q_start_pos_i32 + self.delta_i32 < fx.Int32(kv_end_pos):
                 lo_list, hi_list = self.v_s_vec_to_lists(v_s)
-                _causal_mask_inplace(
-                    traits,
-                    (lo_list, hi_list),
-                    tile_idx,
-                    delta_i32=delta_i32,
-                    lane_div_32=lane_div_32,
-                    q_row_i32=q_row_i32,
-                )
+                self._causal_mask_inplace((lo_list, hi_list), tile_idx, q_row_i32=q_row_i32)
                 s_lo = Vec.from_elements([as_mlir_value(v) for v in lo_list], fx.Float32).ir_value()
                 s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
             return s_lo, s_hi
@@ -2065,6 +2066,40 @@ class DualwaveStoreHelper(DualwaveKernelContext):
     def __init__(self, ctx):
         super().__init__(ctx)
 
+    def _final_o_base(self, q_row):
+        return q_row * self.stride_q_n_v + self.q_head_idx * self.traits.HEAD_DIM + self.lane_div_32 * 8
+
+    def _final_o_global(self, o_base, dc, g):
+        return o_base + (dc * self.traits.D_CHUNK + 2 * g * 8)
+
+    def _store_final_o_128(self, v_o, dc, g, o_base):
+        _buffer_store_128(
+            _packed_o_128_vec(self.traits, v_o, dc, g, self.lane_div_32, self.elem_dtype),
+            self._final_o_global(o_base, dc, g),
+            _o_store_reg_128=self.o_store_reg_128,
+            _store_atom_128=self.store_atom_128,
+            o_div=self.o_div,
+        )
+
+    def _store_final_o_row(self, v_o, q_row):
+        o_base = self._final_o_base(q_row)
+        for dc in range_constexpr(self.traits.D_CHUNKS):
+            for g in range_constexpr(2):
+                self._store_final_o_128(v_o, dc, g, o_base)
+
+    def _store_splitk_partial_o_quad(self, v_o, dc, g, local_opart_row_base, opart_rsrc):
+        w0, w1, w2, w3 = _packed_o_128_dwords(self.traits, v_o, dc, g, self.lane_div_32, self.elem_dtype)
+        _ws_store_quad_i32(
+            [w0, w1, w2, w3],
+            local_opart_row_base + _splitk_o_partial_dword_col(self.traits, dc, g, self.lane_div_32),
+            opart_rsrc,
+        )
+
+    def _store_splitk_partial_o_row(self, v_o, local_opart_row_base, opart_rsrc):
+        for dc in range_constexpr(self.traits.D_CHUNKS):
+            for g in range_constexpr(2):
+                self._store_splitk_partial_o_quad(v_o, dc, g, local_opart_row_base, opart_rsrc)
+
     def zero_o_block_if_needed(self, causal_end_raw_i32=None):
         if causal_end_raw_i32 is None:
             causal_end_raw_i32 = self.causal_end_raw_i32
@@ -2073,12 +2108,6 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         wave_q_offset = self.wave_q_offset
         lane_mod_32 = self.lane_mod_32
         seq_len_v = self.seq_len_v
-        stride_q_n_v = self.stride_q_n_v
-        q_head_idx = self.q_head_idx
-        lane_div_32 = self.lane_div_32
-        o_store_reg_128 = self.o_store_reg_128
-        store_atom_128 = self.store_atom_128
-        o_div = self.o_div
 
         @flyc.jit
         def _zero_o_block_if_needed():
@@ -2087,16 +2116,15 @@ class DualwaveStoreHelper(DualwaveKernelContext):
                 c_zero_i = fx.Int32(0)
                 zero_pack = Vec.from_elements([c_zero_i, c_zero_i, c_zero_i, c_zero_i], fx.Int32)
                 if q_row_z < seq_len_v:
-                    o_base_z = q_row_z * stride_q_n_v + q_head_idx * traits.HEAD_DIM + lane_div_32 * 8
+                    o_base_z = self._final_o_base(q_row_z)
                     for dc in range_constexpr(traits.D_CHUNKS):
                         for g in range_constexpr(2):
-                            o_global_z = o_base_z + (dc * traits.D_CHUNK + 2 * g * 8)
                             _buffer_store_128(
                                 zero_pack,
-                                o_global_z,
-                                _o_store_reg_128=o_store_reg_128,
-                                _store_atom_128=store_atom_128,
-                                o_div=o_div,
+                                self._final_o_global(o_base_z, dc, g),
+                                _o_store_reg_128=self.o_store_reg_128,
+                                _store_atom_128=self.store_atom_128,
+                                o_div=self.o_div,
                             )
 
         _zero_o_block_if_needed()
@@ -2155,120 +2183,23 @@ class DualwaveStoreHelper(DualwaveKernelContext):
         _store_empty_split()
 
     def store_final_o(self, v_o, q_row):
-        _store_final_o_row(
-            self.traits,
-            v_o,
-            q_row,
-            self.stride_q_n_v,
-            self.q_head_idx,
-            self.lane_div_32,
-            self.elem_dtype,
-            self.o_store_reg_128,
-            self.store_atom_128,
-            self.o_div,
-        )
+        self._store_final_o_row(v_o, q_row)
 
     def store_splitk_partial_o(self, v_o, m_row, l_row, q_row):
         _opart_rsrc, _mrow_rsrc, _lrow_rsrc = self._splitk_workspace_resources()
         local_opart_row_base = _splitk_local_opart_row_base(self.traits, self.q_head_idx, self.seq_len_v, q_row)
         local_ml_idx = _splitk_local_ml_idx(self.q_head_idx, self.seq_len_v, q_row)
-        traits = self.traits
         seq_len_v = self.seq_len_v
-        lane_div_32 = self.lane_div_32
-        elem_dtype = self.elem_dtype
         lane = self.lane
 
         @flyc.jit
         def _store_splitk_partial_if_qrow():
             if q_row < seq_len_v:
-                _store_splitk_partial_o_row(
-                    traits,
-                    v_o,
-                    local_opart_row_base,
-                    lane_div_32,
-                    _opart_rsrc,
-                    elem_dtype,
-                )
+                self._store_splitk_partial_o_row(v_o, local_opart_row_base, _opart_rsrc)
                 if lane < fx.Index(32):
                     _store_splitk_ml_row(m_row, l_row, local_ml_idx, _mrow_rsrc, _lrow_rsrc)
 
         _store_splitk_partial_if_qrow()
-
-
-def _causal_mask_inplace(traits, v_s, tile_idx, delta_i32, lane_div_32, q_row_i32):
-    """Apply causal mask using DUALWAVE_SWP inline-asm attn_mask_vec2_imm (DUALWAVE_SWP u_rk path)."""
-    s_lo, s_hi = v_s
-    kv_tile_start = tile_idx * traits.BLOCK_N
-    kv_start_i32 = fx.Int32(kv_tile_start)
-    # lane>=32 holds n offset by +8 in the K-permuted P layout (vs +4 in the
-    # interleaved layout); thresholds below are the lane-independent n part.
-    _lane_n_off = 8 if traits.KV_VECTORIZED else 4
-    lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(_lane_n_off)
-    # Bottom-right causal: keep key col <= q_row + delta (delta=seqlen_kv-seqlen_q).
-    rel_lo_i32 = fx.Int32(q_row_i32 + delta_i32 - kv_start_i32 - lane_off_i32)
-    # v_s_hi: i_n=1, so N += W_N = 32
-    rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(32))
-    neg_inf_i32 = fx.Int32(traits.NEG_INF_F32_BITS)
-
-    if const_expr(traits.KV_VECTORIZED):
-        # Vectorized K-read makes P land in consecutive-n groups: {0..7, 16..23}.
-        pair_thresholds = [
-            (0, 1),
-            (2, 3),  # r=0,1  r=2,3
-            (4, 5),
-            (6, 7),  # r=4,5  r=6,7
-            (16, 17),
-            (18, 19),  # r=8,9  r=10,11
-            (20, 21),
-            (22, 23),  # r=12,13 r=14,15
-        ]
-    else:
-        pair_thresholds = [
-            (0, 1),
-            (2, 3),  # r=0,1  r=2,3
-            (8, 9),
-            (10, 11),  # r=4,5  r=6,7
-            (16, 17),
-            (18, 19),  # r=8,9  r=10,11
-            (24, 25),
-            (26, 27),  # r=12,13 r=14,15
-        ]
-    for p in range_constexpr(len(pair_thresholds)):
-        thr_x, thr_y = pair_thresholds[p]
-        idx_x = p * 2
-        idx_y = p * 2 + 1
-
-        # s_lo pair (n_strip = 0)
-        x_lo_bits = _bitcast_i32(s_lo[idx_x])
-        y_lo_bits = _bitcast_i32(s_lo[idx_y])
-        new_x_lo, new_y_lo = _attn_mask_vec2_imm(
-            rel_lo_i32,
-            neg_inf_i32,
-            thr_x,
-            thr_y,
-            x_lo_bits,
-            y_lo_bits,
-        )
-        s_lo[idx_x] = _bitcast_f32(new_x_lo)
-        s_lo[idx_y] = _bitcast_f32(new_y_lo)
-
-    for p in range_constexpr(len(pair_thresholds)):
-        thr_x, thr_y = pair_thresholds[p]
-        idx_x = p * 2
-        idx_y = p * 2 + 1
-        # s_hi pair (n_strip = 1, rel shifted by 4)
-        x_hi_bits = _bitcast_i32(s_hi[idx_x])
-        y_hi_bits = _bitcast_i32(s_hi[idx_y])
-        new_x_hi, new_y_hi = _attn_mask_vec2_imm(
-            rel_hi_i32,
-            neg_inf_i32,
-            thr_x,
-            thr_y,
-            x_hi_bits,
-            y_hi_bits,
-        )
-        s_hi[idx_x] = _bitcast_f32(new_x_hi)
-        s_hi[idx_y] = _bitcast_f32(new_y_hi)
 
 
 def _v_pair_to_vec32(v):
