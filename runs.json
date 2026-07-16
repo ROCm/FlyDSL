@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-16T04:01:35Z",
+ "updated": "2026-07-16T04:26:29Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29471116769,
+   "pr": 785,
+   "commit": "80d57f928e8e0cc141439ceb0a5d9d1701bb116d",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769",
+   "created_at": "2026-07-16T04:20:01Z",
+   "updated_at": "2026-07-16T04:20:43Z",
+   "actor": "jhinpan",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T04:21:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425814"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T04:20:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425818"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T04:20:43Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29471116769/job/87534425866"
+    }
+   ]
+  },
   {
    "run_id": 29470251414,
    "pr": 825,
@@ -164,7 +207,7 @@
   },
   {
    "run_id": 29444443854,
-   "pr": 785,
+   "pr": null,
    "commit": "c4237a4485a31dd50ce2e5c36d784138ee2c25d4",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
@@ -2071,49 +2114,6 @@
    "updated_at": "2026-07-14T02:44:49Z",
    "actor": "jiacao-amd",
    "jobs": []
-  },
-  {
-   "run_id": 29298551004,
-   "pr": 835,
-   "commit": "becf6c793df7447e629e75f1ed8186da9a7afd70",
-   "branch": "feature/propagate-param-types",
-   "event": "pull_request",
-   "title": "[Misc] Propagate signatures through expr decorators",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004",
-   "created_at": "2026-07-14T01:26:24Z",
-   "updated_at": "2026-07-14T07:55:24Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T05:39:21Z",
-     "completed_at": "2026-07-14T06:05:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004/job/87008730652"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T05:39:20Z",
-     "completed_at": "2026-07-14T07:55:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004/job/87008730674"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-14T05:39:38Z",
-     "completed_at": "2026-07-14T06:16:07Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29298551004/job/87008730693"
-    }
-   ]
   }
  ]
 }
