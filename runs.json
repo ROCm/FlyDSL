@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T16:40:59Z",
+ "updated": "2026-07-16T18:06:07Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "pr/docs-arithmetic-types",
    "event": "pull_request",
    "title": "[Docs] Arithmetic types: authoritative spec + conformance suite",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852",
    "created_at": "2026-07-16T16:34:29Z",
-   "updated_at": "2026-07-16T16:38:46Z",
+   "updated_at": "2026-07-16T18:03:25Z",
    "actor": "sjfeng1999",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T16:41:03Z",
+     "completed_at": "2026-07-16T17:57:05Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852/job/87682585413"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T16:40:49Z",
+     "completed_at": "2026-07-16T18:03:24Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852/job/87682585438"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-16T16:40:06Z",
+     "completed_at": "2026-07-16T16:55:45Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29516144852/job/87682585466"
+    }
+   ]
   },
   {
    "run_id": 29513663405,
