@@ -46,6 +46,7 @@ from .numeric import (
     Uint64,
     Uint128,
     _common_numeric_type_for_op,
+    _resolve_numeric_type,
     _result_numeric_type_for_op,
     as_numeric,
 )
