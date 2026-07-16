@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T00:53:58Z",
+ "updated": "2026-07-16T01:31:55Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,20 +10,20 @@
    "branch": "perf/rmsnorm-bwd-two-stage",
    "event": "pull_request",
    "title": "[Perf] Optimize RMSNorm backward with staged reduction and vec8 I/O",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "success",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29457354426",
    "created_at": "2026-07-15T23:02:51Z",
-   "updated_at": "2026-07-15T23:12:17Z",
+   "updated_at": "2026-07-16T01:29:03Z",
    "actor": "jhinpan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-15T23:12:14Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T01:29:02Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29457354426/job/87494591312"
     },
     {
