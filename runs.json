@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-16T11:06:13Z",
+ "updated": "2026-07-16T11:18:10Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -10,13 +10,41 @@
    "branch": "atom_1250_refactor",
    "event": "pull_request",
    "title": "Atom 1250 refactor",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493028955",
    "created_at": "2026-07-16T11:03:26Z",
-   "updated_at": "2026-07-16T11:04:04Z",
+   "updated_at": "2026-07-16T11:04:41Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T11:04:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493028955/job/87603680506"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T11:09:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493028955/job/87603680511"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T11:08:47Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493028955/job/87603680549"
+    }
+   ]
   },
   {
    "run_id": 29493025626,
@@ -25,13 +53,41 @@
    "branch": "pr/docs-arithmetic-types",
    "event": "pull_request",
    "title": "[Docs] Arithmetic types: authoritative spec + conformance suite",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493025626",
    "created_at": "2026-07-16T11:03:22Z",
-   "updated_at": "2026-07-16T11:04:03Z",
+   "updated_at": "2026-07-16T11:04:41Z",
    "actor": "coderfeli",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T11:04:41Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493025626/job/87603678478"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T11:05:22Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493025626/job/87603678482"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T11:05:21Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29493025626/job/87603678499"
+    }
+   ]
   },
   {
    "run_id": 29492926585,
@@ -50,9 +106,9 @@
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T11:03:25Z",
+     "started_at": "2026-07-16T11:04:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492926585/job/87603421308"
     },
@@ -68,9 +124,9 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T11:03:25Z",
+     "started_at": "2026-07-16T11:04:16Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492926585/job/87603421322"
     }
@@ -83,11 +139,11 @@
    "branch": "fix-mxfp4-preshuffle-import",
    "event": "pull_request",
    "title": "fix(kernels): correct stale kernels.mma import in mxfp4_preshuffle",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807",
    "created_at": "2026-07-16T10:51:17Z",
-   "updated_at": "2026-07-16T10:52:58Z",
+   "updated_at": "2026-07-16T11:15:40Z",
    "actor": "coderfeli",
    "jobs": [
     {
@@ -111,9 +167,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T10:52:58Z",
+     "started_at": "2026-07-16T11:15:39Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402643"
     }
@@ -126,38 +182,38 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "queued",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381",
    "created_at": "2026-07-16T10:49:15Z",
-   "updated_at": "2026-07-16T10:50:33Z",
+   "updated_at": "2026-07-16T11:15:23Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T10:51:48Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T11:08:55Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940897"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
-     "conclusion": null,
-     "started_at": "2026-07-16T10:50:33Z",
-     "completed_at": null,
+     "status": "completed",
+     "conclusion": "failure",
+     "started_at": "2026-07-16T11:05:08Z",
+     "completed_at": "2026-07-16T11:15:22Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940935"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T10:51:49Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T11:07:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940988"
     }
    ]
@@ -212,11 +268,11 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520",
    "created_at": "2026-07-16T09:20:23Z",
-   "updated_at": "2026-07-16T10:52:59Z",
+   "updated_at": "2026-07-16T11:04:13Z",
    "actor": "xudoyuan",
    "jobs": [
     {
