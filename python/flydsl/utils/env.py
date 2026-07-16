@@ -74,7 +74,7 @@ class OptBool(EnvOption[bool]):
         super().__init__(default, env_var, description)
 
     def parse_value(self, raw: str) -> bool:
-        return raw.lower() in ("1", "true", "yes", "on")
+        return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 class OptInt(EnvOption[int]):
@@ -292,11 +292,29 @@ class RuntimeEnvManager(EnvManager):
     )
 
 
+class AutotuneEnvManager(EnvManager):
+    """Autotuner controls (``FLYDSL_AUTOTUNE*`` environment variables)."""
+
+    env_prefix = "AUTOTUNE"
+
+    enabled = OptBool(
+        False,
+        env_var="FLYDSL_AUTOTUNE",
+        description="Force a fresh exhaustive search instead of using a heuristic default or cached best",
+    )
+    cache_dir = OptStr(
+        str(Path.home() / ".flydsl" / "autotune"),
+        description="Directory for persisted best autotune configurations",
+    )
+
+
 compile = CompileEnvManager()
 debug = DebugEnvManager()
 runtime = RuntimeEnvManager()
+autotune = AutotuneEnvManager()
 
 __all__ = [
+    "autotune",
     "compile",
     "debug",
     "runtime",

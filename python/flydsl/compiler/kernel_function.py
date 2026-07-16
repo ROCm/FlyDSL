@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from .._mlir import ir
 from .._mlir.dialects import arith, gpu
+from ..compile_hints import merge_compile_hint_layers
 from ..expr.meta import capture_user_location, file_location, tracing_context
 from ..expr.typing import Constexpr
 from ..expr.utils.arith import fastmath as fastmath_ctx
@@ -182,7 +183,7 @@ class CompilationContext:
 
     _current = threading.local()
 
-    # Thread-local storage for compile hints (waves_per_eu, maxnreg, etc.)
+    # Thread-local storage for generic backend compile hints.
     _compile_hints = threading.local()
 
     @classmethod
@@ -191,15 +192,17 @@ class CompilationContext:
         """Set per-call compiler hints for the current thread.
 
         These hints overlay persistent ``JitFunction.compile_hints``; duplicate
-        keys here win. Nested contexts replace one another, so callers that
-        need a partial overlay must merge with :meth:`get_compile_hints` first.
+        keys here win. Nested contexts shallow-merge in the same way, with the
+        inner value replacing the whole value for a duplicate key. ``None``
+        inherits the outer value, while an occupancy value of ``0`` is retained
+        as an explicit request for the source/compiler baseline.
 
         Usage:
             with CompilationContext.compile_hints({"waves_per_eu": 2}):
                 fn(*args, **kwargs)
         """
         prev = getattr(cls._compile_hints, "data", None)
-        cls._compile_hints.data = hints
+        cls._compile_hints.data = merge_compile_hint_layers(prev, hints)
         try:
             yield
         finally:

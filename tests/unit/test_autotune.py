@@ -120,6 +120,73 @@ def test_config_preserves_per_kernel_occupancy_interface():
     assert repr(Config(waves_per_eu={"b": 1, "a": 2})) == repr(Config(waves_per_eu={"a": 2, "b": 1}))
 
 
+def test_config_generic_compile_hints_roundtrip():
+    config = Config(
+        BLOCK=128,
+        compile_hints={
+            "future_hint": {"mode": "aggressive"},
+            "llvm_options": {"enable-post-misched": False},
+            "future_schedule": [1, "two", False, None, {"nested": 3.5}],
+        },
+    )
+
+    serialized = config.to_dict()
+    assert json.loads(json.dumps(serialized)) == serialized
+    assert Config.from_dict(serialized).compiler_opts() == config.compiler_opts()
+    assert config.compiler_opts() == {
+        "future_hint": {"mode": "aggressive"},
+        "llvm_options": {"enable-post-misched": False},
+        "future_schedule": [1, "two", False, None, {"nested": 3.5}],
+    }
+    assert "compile_hints=" in repr(config)
+
+
+def test_config_canonicalizes_fastmath_before_json_persistence():
+    config = Config(compile_hints={"fastmath": {"reassoc", "contract"}})
+
+    assert config.compiler_opts() == {"fastmath": "contract,reassoc"}
+    assert Config.from_dict(config.to_dict()).compiler_opts() == config.compiler_opts()
+
+
+@pytest.mark.parametrize(
+    ("compile_hints", "match"),
+    [
+        ({"future_hint": (1, 2)}, "tuple"),
+        ({"future_hint": [{"nested": (1,)}]}, "tuple"),
+        ({"future_hint": {1: "one"}}, "string keys"),
+        ({"future_hint": object()}, "scalar values"),
+        ({"future_hint": float("nan")}, "finite"),
+    ],
+)
+def test_config_rejects_compile_hints_that_are_not_json_type_stable(compile_hints, match):
+    with pytest.raises((TypeError, ValueError), match=match):
+        Config(compile_hints=compile_hints)
+
+
+def test_config_revalidates_mutated_compile_hints_before_use():
+    config = Config(compile_hints={"future_hint": [1, 2]})
+    config.compile_hints["future_hint"] = (1, 2)
+
+    with pytest.raises(TypeError, match="tuple"):
+        config.compiler_opts()
+
+
+def test_config_typed_aliases_override_generic_compile_hints():
+    config = Config(
+        compile_hints={"waves_per_eu": 1, "maxnreg": 64, "future_hint": True},
+        waves_per_eu=2,
+        maxnreg=0,
+    )
+
+    assert config.compiler_opts() == {"waves_per_eu": 2, "maxnreg": 0, "future_hint": True}
+    assert config.to_dict() == {
+        "waves_per_eu": 2,
+        "maxnreg": 0,
+        "compile_hints": {"future_hint": True},
+    }
+    assert Config(compile_hints={"waves_per_eu": 3}, waves_per_eu=None).compiler_opts()["waves_per_eu"] == 3
+
+
 @pytest.mark.parametrize(
     ("value", "error"),
     [
@@ -136,9 +203,12 @@ def test_config_rejects_invalid_waves_per_eu(value, error):
         Config(waves_per_eu=value)
 
 
-def test_config_zero_waves_per_eu_is_unset():
-    assert Config(waves_per_eu=0).compiler_opts() == {}
-    assert Config(waves_per_eu={"a": 0, "b": 2}).compiler_opts() == {"waves_per_eu": {"b": 2}}
+def test_config_zero_waves_per_eu_is_an_explicit_reset():
+    # Zero must survive the candidate layer so it can override an outer or
+    # persistent WPE.  The final compile-hint resolver removes it only after
+    # precedence has been resolved, returning codegen to the source baseline.
+    assert Config(waves_per_eu=0).compiler_opts() == {"waves_per_eu": 0}
+    assert Config(waves_per_eu={"a": 0, "b": 2}).compiler_opts() == {"waves_per_eu": {"a": 0, "b": 2}}
 
 
 # ── stride normalization ─────────────────────────────────────────────────
@@ -385,16 +455,19 @@ def test_autotune_decorator_wraps_into_autotuner():
     def fake_jit(a, out, **kw):
         pass
 
+    default = lambda a, out: Config(BLOCK=64)
     tuned = autotune(
         configs=[Config(BLOCK=128)],
         key=["a"],
         restore_value=["a"],
         reset_to_zero=["out"],
+        default=default,
     )(fake_jit)
 
     assert isinstance(tuned, Autotuner)
     assert tuned.restore_value == ["a"]
     assert tuned.reset_to_zero == ["out"]
+    assert tuned.default is default
     assert [c.kwargs["BLOCK"] for c in tuned.configs] == [128]
 
 
@@ -523,25 +596,107 @@ def build_fn_noop(config, a, out, **kw):
 def test_filter_call_kwargs_drops_build_only_kwargs():
     """Builder-only kwargs (e.g. dtype_str) must not reach the launch fn."""
 
-    def build_fn(config, a, out, dtype_str="bf16", **kw):
-        # launch fn only accepts a, out — not dtype_str
-        def launch(a, out):
-            pass
+    def build(N, dtype_str, BLOCK=0):
+        return lambda a, out: None
 
-        return launch
+    def specialize(a, out, dtype="bf16", **kwargs):
+        # Caller input names and build specialization keys need not match.
+        return {"N": a.shape[-1], "dtype_str": dtype}
 
-    t = Autotuner(
+    t = autotune_builder(
+        name="filter-build-only",
+        build=build,
+        specialize=specialize,
+        configs=lambda N, dtype_str: [Config(BLOCK=64)],
+        default=lambda N, dtype_str: Config(BLOCK=64),
+        structural=("BLOCK",),
+        build_only=("dtype",),
+        warmup=1,
+        rep=1,
+        do_bench_fn=_bench_run_all,
+    )
+    # dtype_str would raise TypeError if not filtered out before the launch call
+    t(FakeTensor((8,)), FakeTensor((1,)), dtype="f16")
+
+    # Only explicitly declared caller parameters are build-only. A misspelled runtime kwarg must
+    # reach the strict launcher and fail instead of being silently discarded.
+    with pytest.raises(TypeError, match="streem"):
+        t(FakeTensor((8,)), FakeTensor((1,)), dtype="f16", streem=object())
+
+
+def test_cache_hit_launcher_typo_does_not_delete_valid_tuning_result():
+    def build(N, dtype_str, BLOCK=0):
+        return lambda a, out: None
+
+    def specialize(a, out, dtype="bf16", **kwargs):
+        return {"N": a.shape[-1], "dtype_str": dtype}
+
+    tuned = autotune_builder(
+        name="cache-hit-runtime-error",
+        build=build,
+        specialize=specialize,
+        configs=lambda N, dtype_str: [Config(BLOCK=64)],
+        default=lambda N, dtype_str: Config(BLOCK=64),
+        structural=("BLOCK",),
+        build_only=("dtype",),
+        warmup=1,
+        rep=1,
+    )
+    args = (FakeTensor((8,)), FakeTensor((1,)))
+    valid_kwargs = {"dtype": "f16"}
+    key = tuned.tuner._make_key(args, valid_kwargs)
+    tuned.tuner.cache[key] = Config(BLOCK=64)
+
+    with pytest.raises(TypeError, match="streem"):
+        tuned(*args, **valid_kwargs, streem=object())
+
+    assert tuned.tuner.cache[key].kwargs == {"BLOCK": 64}
+
+
+@pytest.mark.parametrize("error_type", [TypeError, ValueError, KeyError])
+def test_cache_hit_builder_failure_does_not_delete_valid_tuning_result(error_type):
+    def build_fn(config, a, out):
+        raise error_type("builder bug")
+
+    tuner = Autotuner(
         fn=None,
         configs=[Config(BLOCK=64)],
         key=["a"],
         warmup=1,
         rep=1,
         build_fn=build_fn,
-        default=lambda a, out, **kw: Config(BLOCK=64),
+        structural=("BLOCK",),
+        default=lambda a, out: Config(BLOCK=128),
         do_bench_fn=_bench_run_all,
     )
-    # dtype_str would raise TypeError if not filtered out before the launch call
-    t(FakeTensor((8,)), FakeTensor((1,)), dtype_str="f16")
+    args = (FakeTensor((8,)), FakeTensor((1,)))
+    key = tuner._make_key(args, {})
+    tuner.cache[key] = Config(BLOCK=64)
+
+    with pytest.raises(error_type, match="builder bug"):
+        tuner(*args)
+
+    assert tuner.cache[key].kwargs == {"BLOCK": 64}
+
+
+def test_low_level_builder_filters_explicit_build_only_kwargs():
+    def build_fn(config, a, out, dtype_str="bf16"):
+        return lambda a, out: None
+
+    tuner = Autotuner(
+        fn=None,
+        configs=[Config(BLOCK=64)],
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn,
+        build_only=("dtype_str",),
+        default=lambda a, out, **kwargs: Config(BLOCK=64),
+        do_bench_fn=_bench_run_all,
+    )
+    tuner(FakeTensor((8,)), FakeTensor((1,)), dtype_str="f16")
+    with pytest.raises(TypeError, match="by keyword"):
+        tuner(FakeTensor((8,)), FakeTensor((1,)), "f16")
 
 
 def test_tuning_enabled_env(monkeypatch):
@@ -553,6 +708,8 @@ def test_tuning_enabled_env(monkeypatch):
     assert _tuning_enabled() is False
     monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     assert _tuning_enabled() is True
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", " FALSE ")
+    assert _tuning_enabled() is False
 
 
 # ── autotune_builder (one-call adoption) ─────────────────────────────────
@@ -616,6 +773,77 @@ def test_builder_scalar_enters_key():
     assert k_bf16 != k_f16
 
 
+def test_builder_specializes_once_per_public_call(monkeypatch):
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    calls = {"specialize": 0}
+
+    def specialize(a, out, dtype_str="bf16"):
+        calls["specialize"] += 1
+        return {"N": a.shape[-1], "dtype_str": dtype_str}
+
+    tuned = autotune_builder(
+        name="single-specialization",
+        build=lambda N, dtype_str, BLOCK=0: (lambda a, out: None),
+        specialize=specialize,
+        configs=lambda N, dtype_str: [Config(BLOCK=1)],
+        default=lambda N, dtype_str: Config(BLOCK=1),
+        structural=("BLOCK",),
+        build_only=("dtype_str",),
+        warmup=1,
+        rep=1,
+    )
+    tuned(FakeTensor((8,)), FakeTensor((1,)), dtype_str="f16")
+    assert calls["specialize"] == 1
+
+
+def test_builder_forced_search_specializes_once(monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
+    calls = {"specialize": 0}
+
+    def specialize(a, out):
+        calls["specialize"] += 1
+        return {"N": a.shape[-1]}
+
+    tuned = autotune_builder(
+        name="single-search-specialization",
+        build=lambda N, BLOCK=0: (lambda a, out: None),
+        specialize=specialize,
+        configs=lambda N: [Config(BLOCK=1), Config(BLOCK=2)],
+        structural=("BLOCK",),
+        warmup=1,
+        rep=1,
+        do_bench_fn=_bench_run_all,
+    )
+    tuned(FakeTensor((8,)), FakeTensor((1,)))
+    assert calls["specialize"] == 1
+
+
+def test_builder_exception_resets_specialization_context(monkeypatch):
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    calls = {"specialize": 0}
+
+    def specialize(a):
+        calls["specialize"] += 1
+        return {"N": a.shape[-1]}
+
+    tuned = autotune_builder(
+        name="exception-specialization-reset",
+        build=lambda N, BLOCK=0: (lambda a: (_ for _ in ()).throw(RuntimeError("launch failed"))),
+        specialize=specialize,
+        configs=lambda N: [Config(BLOCK=1)],
+        default=lambda N: Config(BLOCK=1),
+        structural=("BLOCK",),
+        warmup=1,
+        rep=1,
+    )
+
+    with pytest.raises(RuntimeError, match="launch failed"):
+        tuned(FakeTensor((8,)))
+    calls_after_failure = calls["specialize"]
+    tuned.tuner._make_key((FakeTensor((16,)),), {})
+    assert calls["specialize"] == calls_after_failure + 1
+
+
 def test_builder_requires_name():
     """Builder mode must carry a distinct cache name (else tuners collide on
     unknown.json)."""
@@ -632,10 +860,13 @@ def test_builder_positional_scalar_rejected(monkeypatch):
     (codex#1: silently binding it to the wrong launch slot is worse)."""
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
 
+    calls = {"specialize": 0}
+
     def build(N, dtype_str, BLOCK=0):
         return lambda a, out, stream=None: None
 
     def specialize(a, out, dtype_str="bf16", stream=None):
+        calls["specialize"] += 1
         return {"N": a.shape[-1], "dtype_str": dtype_str}
 
     t = autotune_builder(
@@ -645,14 +876,74 @@ def test_builder_positional_scalar_rejected(monkeypatch):
         configs=lambda N, dtype_str: [Config(BLOCK=1)],
         default=lambda N, dtype_str: Config(BLOCK=1),
         structural=("BLOCK",),
+        build_only=("dtype_str",),
         warmup=1,
         rep=1,
     )
     # dtype_str keyword: fine.
     t(FakeTensor((16, 512)), FakeTensor((1,)), dtype_str="f16")
-    # dtype_str positional (5th arg): rejected with a clear error.
+    # dtype_str positional (third arg): rejected with a clear error.
     with pytest.raises(TypeError, match="by keyword"):
         t(FakeTensor((16, 512)), FakeTensor((1,)), "f16")
+    assert calls["specialize"] == 1
+
+
+def test_builder_dual_use_axis_can_be_positional(monkeypatch):
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    seen = []
+
+    def build(N, n, BLOCK=0):
+        return lambda a, n: seen.append(n)
+
+    def specialize(a, n):
+        return {"N": a.shape[-1], "n": n}
+
+    tuned = autotune_builder(
+        name="dual-use-axis",
+        build=build,
+        specialize=specialize,
+        configs=lambda N, n: [Config(BLOCK=1)],
+        default=lambda N, n: Config(BLOCK=1),
+        structural=("BLOCK",),
+        warmup=1,
+        rep=1,
+    )
+    tuned(FakeTensor((8,)), 7)
+    assert seen == [7]
+
+
+def test_builder_varargs_do_not_bind_keyword_only_build_only_name(monkeypatch):
+    monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
+    seen = []
+
+    def specialize(a, *extras, dtype="bf16"):
+        return {"N": a.shape[-1], "dtype_str": dtype}
+
+    tuned = autotune_builder(
+        name="varargs-build-only",
+        build=lambda N, dtype_str, BLOCK=0: (lambda a, *extras: seen.extend(extras)),
+        specialize=specialize,
+        configs=lambda N, dtype_str: [Config(BLOCK=1)],
+        default=lambda N, dtype_str: Config(BLOCK=1),
+        structural=("BLOCK",),
+        build_only=("dtype",),
+        warmup=1,
+        rep=1,
+    )
+
+    tuned(FakeTensor((8,)), 10, 20, dtype="f16")
+    assert seen == [10, 20]
+
+
+def test_builder_rejects_unknown_build_only_name():
+    with pytest.raises(ValueError, match="build_only"):
+        autotune_builder(
+            name="bad-build-only",
+            build=lambda N: (lambda a: None),
+            specialize=lambda a: {"N": a.shape[-1]},
+            configs=lambda N: [Config()],
+            build_only=("dtype_str",),
+        )
 
 
 def test_builder_build_cache_ignores_compiler_hints(monkeypatch, tmp_path):
@@ -735,6 +1026,30 @@ def test_run_with_hints_uses_thread_local_not_shared_attr():
     assert fn.seen == {"outer": 7, "waves_per_eu": 2}
     assert fn.compile_hints == {"baseline": 1}
     assert CompilationContext.get_compile_hints() == {}
+
+
+def test_candidate_zero_resets_outer_and_persistent_occupancy():
+    """A candidate zero is a real overlay, not an absent candidate option."""
+    pytest.importorskip("flydsl._mlir._mlir_libs._mlirDialectsFly")
+    import flydsl.compiler as flyc
+    from flydsl.compiler.kernel_function import CompilationContext
+
+    @flyc.jit
+    def hint_owner():
+        pass
+
+    hint_owner.compile_hints = {"persistent": 1, "waves_per_eu": 4}
+
+    class Observer:
+        def __call__(self):
+            self.seen = hint_owner._effective_compile_hints()
+
+    observer = Observer()
+    tuner = _make_tuner()
+    with CompilationContext.compile_hints({"outer": 2, "waves_per_eu": 3}):
+        tuner._run_with_hints(observer, Config(waves_per_eu=0).compiler_opts(), (), {})
+
+    assert observer.seen == {"persistent": 1, "outer": 2}
 
 
 def test_builder_mode_rejects_num_warps(monkeypatch):
@@ -877,28 +1192,31 @@ def test_call_do_bench_folds_setup_for_kwargs_only_benchmarker():
 
 
 def test_cache_hit_stale_config_degrades_to_default(monkeypatch):
-    """A cached config that's now incompatible (raises TypeError/KeyError on run)
-    must be dropped and degrade to the default, not hard-crash the call."""
+    """A cached config rejected during resolution degrades to the default."""
     monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
-    calls = {"n": 0}
 
-    def fn(a, out, **kw):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise TypeError("stale launch signature")  # the cached config fails
-        out._data[0] = 42.0  # the default run succeeds
+    def build_fn(config, a, out):
+        block = config.kwargs["BLOCK"]
+        return lambda a, out: out._data.__setitem__(0, float(block))
 
-    t = _make_tuner(
-        fn=fn,
+    t = Autotuner(
+        fn=None,
         configs=[Config(BLOCK=1)],
-        default=lambda a, out, **kw: Config(BLOCK=2),
+        key=["a"],
+        warmup=1,
+        rep=1,
+        build_fn=build_fn,
+        structural=("BLOCK",),
+        default=lambda a, out: Config(BLOCK=2),
         do_bench_fn=_bench_run_all,
     )
     a, out = FakeTensor((4,)), FakeTensor((1,))
     key = t._make_key((a, out), {})
-    t.cache[key] = Config(BLOCK=1)  # seed a stale "best" so the cache-hit path runs
+    # Simulate a disk entry from an older config schema. It is rejected before
+    # the runtime launcher is invoked, so falling back is unambiguous.
+    t.cache[key] = Config(REMOVED_KNOB=1)
     t(a, out)
-    assert out._data[0] == 42.0  # degraded to the default after dropping the stale entry
+    assert out._data[0] == 2.0
     assert key not in t.cache  # stale entry dropped
 
 

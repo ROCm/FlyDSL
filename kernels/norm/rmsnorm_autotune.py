@@ -29,4 +29,5 @@ rmsnorm_autotuned = autotune_builder(
     configs=get_all_configs,
     default=get_default,
     structural=("BLOCK_THREADS",),
+    build_only=("dtype_str",),
 )

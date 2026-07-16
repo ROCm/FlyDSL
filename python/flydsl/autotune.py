@@ -8,16 +8,25 @@ import functools
 import hashlib
 import inspect
 import json
+import math
 import os
 import tempfile
 from collections.abc import Mapping
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable, Dict, List
+
+from .compile_hints import merge_compile_hint_layers, normalize_occupancy_hint
+from .utils import env
 
 try:
     import torch
 except ImportError:
     torch = None
+
+
+class _ConfigCompatibilityError(ValueError, TypeError):
+    """A cached config is structurally incompatible with the current tuner."""
 
 
 def _tuning_enabled() -> bool:
@@ -27,7 +36,7 @@ def _tuning_enabled() -> bool:
     the analytic default. Opt in with ``FLYDSL_AUTOTUNE=1`` to actually tune.
     Autotuners without a ``default`` always search (there is no fallback).
     """
-    return os.environ.get("FLYDSL_AUTOTUNE", "0") not in ("0", "", "false", "False")
+    return env.autotune.enabled
 
 
 def _env_fingerprint() -> tuple:
@@ -119,48 +128,90 @@ def _normalize_strides(t) -> tuple:
     return tuple(out)
 
 
-def _normalize_occupancy(value, knob: str):
-    """Normalize a scalar or per-kernel occupancy compile option.
-
-    ``0`` means unset, matching Triton's backend option and preserving any
-    source-level kernel attribute. A mapping scopes non-zero overrides by
-    ``gpu.func`` symbol for multi-entry FlyDSL modules.
-    """
-
-    def normalize_scalar(item):
-        if isinstance(item, bool) or not isinstance(item, int):
-            raise TypeError(f"{knob} must contain non-negative ints, got {item!r}")
-        if item < 0:
-            raise ValueError(f"{knob} must be >= 0, got {item}")
-        return item or None
-
-    if value is None:
-        return None
+def _validate_json_compile_hint(value, path="compile_hints"):
+    """Require a JSON round-trip to preserve every compile-hint value's type."""
+    value_type = type(value)
+    if value is None or value_type in (str, bool, int):
+        return
+    if value_type is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} floats must be finite for a stable JSON round-trip")
+        return
+    if value_type is list:
+        for index, item in enumerate(value):
+            _validate_json_compile_hint(item, f"{path}[{index}]")
+        return
     if isinstance(value, Mapping):
-        normalized = {}
-        for kernel_name, item in value.items():
-            if not isinstance(kernel_name, str):
-                raise TypeError(f"{knob} mapping keys must be kernel names, got {kernel_name!r}")
-            item = normalize_scalar(item)
-            if item is not None:
-                normalized[kernel_name] = item
-        return normalized or None
-    return normalize_scalar(value)
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{path} mappings must have string keys, got {key!r}")
+            _validate_json_compile_hint(item, f"{path}[{key!r}]")
+        return
+    if value_type is tuple:
+        raise TypeError(f"{path} contains a tuple, which JSON would change to a list")
+    raise TypeError(
+        f"{path} must contain only JSON-roundtrip type-stable data "
+        f"(dict[str, ...], list, or JSON scalars), got {value_type.__name__}"
+    )
 
 
 class Config:
     """A single tuning configuration.
 
+    ``compile_hints`` is the generic compiler-option envelope. Known hints are
+    canonicalized first; the resulting values must be JSON-roundtrip type-stable
+    data: dictionaries with string keys, lists, and JSON scalars. Tuples and
+    non-string mapping keys are rejected so the persisted autotune cache cannot
+    silently change their types. Occupancy aliases remain as typed conveniences
+    and override the same key in ``compile_hints`` when explicitly set.
+
     Occupancy options accept a scalar uniform override or a ``{kernel: value}``
-    mapping. ``None``/``0`` preserve source-level kernel attributes.
+    mapping. ``None`` inherits a lower-priority hint; ``0`` explicitly returns
+    to source/compiler defaults after all hint layers have been resolved.
     """
 
-    def __init__(self, *, num_warps=None, waves_per_eu=None, maxnreg=None, pre_hook=None, **kwargs):
+    def __init__(
+        self,
+        *,
+        num_warps=None,
+        waves_per_eu=None,
+        maxnreg=None,
+        compile_hints: Mapping | None = None,
+        pre_hook=None,
+        **kwargs,
+    ):
         self.kwargs = kwargs
         self.num_warps = num_warps
-        self.waves_per_eu = _normalize_occupancy(waves_per_eu, "waves_per_eu")
-        self.maxnreg = _normalize_occupancy(maxnreg, "maxnreg")
+        aliases = {}
+        if waves_per_eu is not None:
+            aliases["waves_per_eu"] = normalize_occupancy_hint(waves_per_eu, "waves_per_eu")
+        if maxnreg is not None:
+            aliases["maxnreg"] = normalize_occupancy_hint(maxnreg, "maxnreg")
+        self.compile_hints = merge_compile_hint_layers(compile_hints, aliases)
+        _validate_json_compile_hint(self.compile_hints)
         self.pre_hook = pre_hook
+
+    def _set_occupancy_alias(self, key, value):
+        if value is None:
+            self.compile_hints.pop(key, None)
+        else:
+            self.compile_hints = merge_compile_hint_layers(self.compile_hints, {key: value})
+
+    @property
+    def waves_per_eu(self):
+        return self.compile_hints.get("waves_per_eu")
+
+    @waves_per_eu.setter
+    def waves_per_eu(self, value):
+        self._set_occupancy_alias("waves_per_eu", value)
+
+    @property
+    def maxnreg(self):
+        return self.compile_hints.get("maxnreg")
+
+    @maxnreg.setter
+    def maxnreg(self, value):
+        self._set_occupancy_alias("maxnreg", value)
 
     def all_kwargs(self):
         """All kwargs to inject into @jit call."""
@@ -171,21 +222,17 @@ class Config:
 
     def compiler_opts(self):
         """Compiler-level options (not user kwargs)."""
-        return {
-            k: v
-            for k, v in [
-                ("waves_per_eu", self.waves_per_eu),
-                ("maxnreg", self.maxnreg),
-            ]
-            if v is not None
-        }
+        compile_hints = merge_compile_hint_layers(self.compile_hints)
+        _validate_json_compile_hint(compile_hints)
+        return compile_hints
 
     def __repr__(self):
         def format_option(value):
             if isinstance(value, Mapping):
-                return "{" + ", ".join(f"{key!r}: {value[key]}" for key in sorted(value)) + "}"
+                return "{" + ", ".join(f"{key!r}: {value[key]!r}" for key in sorted(value)) + "}"
             return str(value)
 
+        compile_hints = self.compiler_opts()
         parts = [f"{k}={v}" for k, v in self.kwargs.items()]
         if self.num_warps is not None:
             parts.append(f"num_warps={self.num_warps}")
@@ -193,6 +240,9 @@ class Config:
             parts.append(f"waves_per_eu={format_option(self.waves_per_eu)}")
         if self.maxnreg is not None:
             parts.append(f"maxnreg={format_option(self.maxnreg)}")
+        other_hints = {key: value for key, value in compile_hints.items() if key not in ("waves_per_eu", "maxnreg")}
+        if other_hints:
+            parts.append(f"compile_hints={format_option(other_hints)}")
         return f"Config({', '.join(parts)})"
 
     def to_dict(self):
@@ -200,10 +250,16 @@ class Config:
         # JSON), so a pre_hook that affects correctness won't survive the disk
         # cache — keep pre_hook for timing side-effects only.
         d = dict(self.kwargs)
-        for k in ("num_warps", "waves_per_eu", "maxnreg"):
-            v = getattr(self, k)
+        compile_hints = self.compiler_opts()
+        if self.num_warps is not None:
+            d["num_warps"] = self.num_warps
+        for k in ("waves_per_eu", "maxnreg"):
+            v = compile_hints.get(k)
             if v is not None:
                 d[k] = v
+        other_hints = {key: value for key, value in compile_hints.items() if key not in ("waves_per_eu", "maxnreg")}
+        if other_hints:
+            d["compile_hints"] = other_hints
         return d
 
     @classmethod
@@ -213,6 +269,7 @@ class Config:
             num_warps=d.pop("num_warps", None),
             waves_per_eu=d.pop("waves_per_eu", None),
             maxnreg=d.pop("maxnreg", None),
+            compile_hints=d.pop("compile_hints", None),
             **d,
         )
 
@@ -264,7 +321,9 @@ class Autotuner:
         default=None,
         name=None,
         key_fn=None,
+        build_only=(),
         arg_names=None,
+        positional_arg_names=None,
         structural=None,
         source_fingerprint=None,
     ):
@@ -297,19 +356,46 @@ class Autotuner:
         # axes. When set it replaces the self.key name lookup in _make_key, so
         # build-only scalars (dtype_str, causal, ...) enter the key too.
         self.key_fn = key_fn
+        # Explicit caller-side names consumed by specialize/build rather than
+        # the returned launch function. Unknown kwargs are never inferred as
+        # build-only: they reach the launcher and fail normally.
+        if isinstance(build_only, str):
+            raise TypeError("build_only must be an iterable of parameter names")
+        self.build_only = tuple(build_only)
+        if any(not isinstance(param, str) for param in self.build_only):
+            raise TypeError("build_only must be an iterable of parameter names")
 
         # Arg names for reset/restore/filter lookup: explicit > jit fn sig >
         # build_fn sig minus leading 'config'.
+        derived_positional_arg_names = None
         if arg_names is not None:
             self.arg_names = list(arg_names)
         elif fn is not None:
             src = fn.func if hasattr(fn, "func") else fn
-            self.arg_names = list(inspect.signature(src).parameters.keys())
+            params = list(inspect.signature(src).parameters.values())
+            self.arg_names = [param.name for param in params]
+            derived_positional_arg_names = [
+                param.name
+                for param in params
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
         elif build_fn is not None:
             src = build_fn.func if hasattr(build_fn, "func") else build_fn
-            self.arg_names = list(inspect.signature(src).parameters.keys())[1:]
+            params = list(inspect.signature(src).parameters.values())[1:]
+            self.arg_names = [param.name for param in params]
+            derived_positional_arg_names = [
+                param.name
+                for param in params
+                if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
         else:
             self.arg_names = []
+        if positional_arg_names is None:
+            self.positional_arg_names = (
+                derived_positional_arg_names if derived_positional_arg_names is not None else self.arg_names
+            )
+        else:
+            self.positional_arg_names = list(positional_arg_names)
 
         # Disk cache. Prefer an explicit name (required for builder mode, where
         # fn is None — otherwise every builder tuner would share unknown.json).
@@ -326,7 +412,7 @@ class Autotuner:
     def _cache_file(self) -> Path:
         # Resolved per access so FLYDSL_AUTOTUNE_CACHE_DIR can change between
         # calls (a module-level tuner isn't pinned to the import-time dir).
-        cache_dir = Path(os.environ.get("FLYDSL_AUTOTUNE_CACHE_DIR", os.path.expanduser("~/.flydsl/autotune")))
+        cache_dir = Path(env.autotune.cache_dir).expanduser()
         return cache_dir / f"{self.name}.json"
 
     def _make_key(self, args, kwargs):
@@ -431,7 +517,7 @@ class Autotuner:
         if self.build_fn is None:
             return
         if config.num_warps is not None:
-            raise ValueError(
+            raise _ConfigCompatibilityError(
                 f"num_warps={config.num_warps} can't be honored in builder mode "
                 "(block size is baked into build_fn). Make it a structural knob "
                 "(config kwarg routed to build) or use direct @autotune instead."
@@ -439,13 +525,13 @@ class Autotuner:
         if self.structural is not None:
             extra = [k for k in config.kwargs if k not in self.structural]
             if extra:
-                raise ValueError(
+                raise _ConfigCompatibilityError(
                     f"config kwargs {extra} are not in structural={self.structural}; in "
                     "builder mode they route nowhere and would be silently dropped. Add "
                     "them to `structural` (routed to build) or remove them from the config."
                 )
 
-    def _resolve_fn(self, config, key, args, kwargs):
+    def _resolve_fn(self, config, key, args, kwargs, *, compiler_opts=None):
         """Return the launch callable for a config.
 
         Direct mode: the wrapped jit fn. Builder mode: build the lazy launch
@@ -455,6 +541,8 @@ class Autotuner:
         """
         if self.build_fn is None:
             return self.fn
+        if compiler_opts is None:
+            compiler_opts = config.compiler_opts()
         self._reject_unroutable_config(config)
         if self.structural is not None:
             knob_key = tuple((k, config.kwargs.get(k)) for k in self.structural)
@@ -465,12 +553,11 @@ class Autotuner:
         if built is None:
             built = self.build_fn(config, *args, **kwargs)
             self._build_cache[cache_key] = built
-        compiler_opts = config.compiler_opts()
         if compiler_opts:
             from .compiler.jit_function import JitFunction
 
             if not isinstance(built, JitFunction):
-                raise TypeError(
+                raise _ConfigCompatibilityError(
                     f"{self.name}: compiler options {sorted(compiler_opts)} require build() "
                     "to return a lazy @flyc.jit JitFunction"
                 )
@@ -479,8 +566,8 @@ class Autotuner:
     def _bench_one(self, config, key, args, kwargs):
         """Compile and benchmark one config. Returns time in ms."""
         compiler_opts = config.compiler_opts()
-        fn = self._resolve_fn(config, key, args, kwargs)
-        merged_kwargs = dict(self._filter_call_kwargs(fn, kwargs))
+        fn = self._resolve_fn(config, key, args, kwargs, compiler_opts=compiler_opts)
+        merged_kwargs = dict(self._filter_call_kwargs(kwargs))
         # In builder mode the config's structural kwargs (e.g. BLOCK_THREADS)
         # are consumed by build_fn, not passed to the launch call.
         if self.build_fn is None:
@@ -541,41 +628,51 @@ class Autotuner:
         if compiler_opts:
             from .compiler.kernel_function import CompilationContext
 
-            merged = {**CompilationContext.get_compile_hints(), **compiler_opts}
-            with CompilationContext.compile_hints(merged):
+            with CompilationContext.compile_hints(compiler_opts):
                 return fn(*args, **kwargs)
         return fn(*args, **kwargs)
 
-    def _filter_call_kwargs(self, fn, kwargs):
-        """Drop kwargs the launch fn doesn't accept. In builder mode the caller
-        may pass build-only kwargs (e.g. dtype_str) that route to build_fn but
-        aren't launch params; the built jit fn binds strictly."""
-        if self.build_fn is None:
-            return kwargs
-        src = fn.func if hasattr(fn, "func") else fn
-        try:
-            params = inspect.signature(src).parameters
-        except (TypeError, ValueError):
-            return kwargs
-        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-            return kwargs
-        return {k: v for k, v in kwargs.items() if k in params}
+    def _filter_call_kwargs(self, kwargs):
+        """Remove only explicitly declared build-only kwargs.
 
-    def _run_config(self, config, key, args, kwargs):
-        """Run the chosen config as a real (non-benchmark) call. Resolves the
-        launch fn (builder mode rebuilds per config), applies config kwargs +
-        hints, and re-applies reset_to_zero so cache hits and the post-tune run
-        behave like a single clean run (restore_value already handled)."""
-        fn = self._resolve_fn(config, key, args, kwargs)
-        merged = dict(self._filter_call_kwargs(fn, kwargs))
+        Signature filtering used to discard every kwarg unknown to the launch
+        function, which also hid caller typos. All other kwargs are left for the
+        launcher to accept or reject.
+        """
+        if self.build_fn is None or not self.build_only:
+            return kwargs
+        return {key: value for key, value in kwargs.items() if key not in self.build_only}
+
+    def _prepare_config_run(self, config, key, args, kwargs):
+        """Resolve config-owned state before invoking the runtime launcher."""
+        compiler_opts = config.compiler_opts()
+        fn = self._resolve_fn(config, key, args, kwargs, compiler_opts=compiler_opts)
+        merged = dict(self._filter_call_kwargs(kwargs))
         # Builder mode: structural kwargs (e.g. BLOCK_THREADS) go to build_fn,
         # not the launch call.
         if self.build_fn is None:
             merged.update(config.all_kwargs())
+        return fn, compiler_opts, merged
+
+    def _run_prepared_config(self, prepared, args):
+        fn, compiler_opts, merged = prepared
         self._reset_tensors(args, merged)
-        return self._run_with_hints(fn, config.compiler_opts(), args, merged)
+        return self._run_with_hints(fn, compiler_opts, args, merged)
+
+    def _run_config(self, config, key, args, kwargs):
+        """Run one chosen config as a real (non-benchmark) call."""
+        return self._run_prepared_config(self._prepare_config_run(config, key, args, kwargs), args)
+
+    def _reject_positional_build_only(self, args):
+        leaked = [param for param in self.positional_arg_names[: len(args)] if param in self.build_only]
+        if leaked:
+            raise TypeError(
+                f"{self.name}: build-only arg(s) {leaked} must be passed by keyword, not positionally "
+                f"(they route to build/specialize, not the launch call)"
+            )
 
     def __call__(self, *args, **kwargs):
+        self._reject_positional_build_only(args)
         self._load_disk_cache()  # pick up the current cache dir (may be set post-init)
         key = self._make_key(args, kwargs)
 
@@ -587,19 +684,24 @@ class Autotuner:
         # 1. Cached best config from a prior tune (in-memory or disk).
         if not force and key in self.cache:
             try:
-                return self._run_config(self.cache[key], key, args, kwargs)
-            except (ValueError, TypeError, KeyError) as e:
-                # A stale / incompatible cached entry (a structural knob or launch
-                # signature that changed since it was tuned) must not hard-crash a
+                prepared = self._prepare_config_run(self.cache[key], key, args, kwargs)
+            except _ConfigCompatibilityError as e:
+                # A stale / incompatible cached entry (for example, a structural
+                # knob removed since tuning) must not hard-crash a
                 # normal call: drop it (in-memory AND on disk) and fall through to
-                # the default / a fresh search. Only config-incompatibility errors
-                # are caught here -- genuine compile/launch/runtime errors (e.g.
-                # RuntimeError) propagate so real bugs aren't masked.
+                # the default / a fresh search. Only errors raised by explicit
+                # config-contract validation are caught here; builder, compiler,
+                # and launcher failures propagate without invalidating the cache.
                 from .utils import log
 
                 log().warning("autotune[%s]: dropping stale cached config: %s", self.name, e)
                 self.cache.pop(key, None)
                 self._save_disk_cache()
+            else:
+                # Runtime/launcher failures are not evidence that the cached
+                # config is stale. In particular, a misspelled caller kwarg must
+                # propagate without deleting a valid tuning result.
+                return self._run_prepared_config(prepared, args)
 
         # 2. Two-track heuristic: unless tuning is explicitly requested, take
         #    the analytic default and skip the search entirely (zero-search
@@ -704,7 +806,6 @@ def autotune(
     pre_hook: Callable = None,
     post_hook: Callable = None,
     do_bench: Callable = None,
-    build_fn: Callable = None,
     default: Callable = None,
 ):
     """Autotune decorator for @jit functions.
@@ -716,18 +817,12 @@ def autotune(
         def myKernel(..., BLOCK: fx.Constexpr[int], ...):
             ...
 
-    For kernels whose structural knobs are baked at module-build time (as every
-    current FlyDSL kernel is), prefer ``autotune_builder`` — it wires build_fn /
-    default / configs / structural for you. The low-level ``build_fn`` / ``default``
-    args below are the primitives it builds on.
+    For kernels whose structural knobs are baked at module-build time, use
+    ``autotune_builder`` instead.
 
     Args:
-        build_fn: build_fn(config, *args, **kwargs) -> launch_callable. Enables
-            builder mode; built modules are cached per (key, config).
-        default: two-track heuristic default(*args, **kwargs) -> Config. When
-            set, normal runs use it and skip the search (zero-search); set
-            FLYDSL_AUTOTUNE=1 to force the full search. Without a default, every
-            uncached run searches.
+        default: optional heuristic ``default(*args, **kwargs) -> Config`` used
+            without benchmarking unless ``FLYDSL_AUTOTUNE`` forces a search.
         restore_value: tensor args the kernel mutates in place (output overlaps
             input, or accumulation). Snapshotted and restored before each bench
             rep so every config is measured on identical inputs. Required when
@@ -749,9 +844,8 @@ def autotune(
             pre_hook=pre_hook,
             post_hook=post_hook,
             do_bench_fn=do_bench,
-            build_fn=build_fn,
             default=default,
-            source_fingerprint=_source_fingerprint([build_fn, fn]),
+            source_fingerprint=_source_fingerprint([fn, default, Config]),
         )
 
     return decorator
@@ -765,6 +859,7 @@ def autotune_builder(
     configs,
     default=None,
     structural=(),
+    build_only=(),
     warmup=10,
     rep=50,
     restore_value=None,
@@ -783,6 +878,7 @@ def autotune_builder(
             configs=get_all_configs,         # (**spec) -> [Config]
             default=get_default,             # (**spec) -> Config
             structural=("BLOCK_THREADS",),   # config kwargs routed into build()
+            build_only=("dtype_str",),        # specialize/build only, not launcher
         )
 
     Args:
@@ -798,14 +894,36 @@ def autotune_builder(
         structural: config kwarg names passed to build(). Compiler options such
             as ``waves_per_eu`` bypass the builder and are applied when the
             returned JitFunction compiles.
+        build_only: caller parameter names consumed by ``specialize``/``build``
+            but not forwarded to the returned launch function. These parameters
+            must be passed by keyword.
     """
     if not name or not isinstance(name, str):
         raise ValueError("autotune_builder requires a non-empty string name (the cache identity)")
     structural = tuple(structural)
-    source_fingerprint = _source_fingerprint([build, configs, default, specialize])
+    if isinstance(build_only, str):
+        raise TypeError("build_only must be an iterable of parameter names")
+    build_only = tuple(build_only)
+    if any(not isinstance(param, str) for param in build_only):
+        raise TypeError("build_only must be an iterable of parameter names")
+    src = specialize.func if hasattr(specialize, "func") else specialize
+    sig = inspect.signature(src)
+    unknown_build_only = [param for param in build_only if param not in sig.parameters]
+    if unknown_build_only:
+        raise ValueError(f"{name}: build_only contains parameters absent from specialize(): {unknown_build_only}")
+    source_fingerprint = _source_fingerprint([build, configs, default, specialize, Config])
+    no_specialization = object()
+    specialization = ContextVar(f"flydsl_autotune_{name}_specialization", default=no_specialization)
+
+    def _compute_spec(args, kwargs):
+        spec = specialize(*args, **kwargs)
+        if not isinstance(spec, Mapping):
+            raise TypeError(f"{name}: specialize() must return a mapping, got {type(spec).__name__}")
+        return dict(spec)
 
     def _spec(args, kwargs):
-        return specialize(*args, **kwargs)
+        spec = specialization.get()
+        return _compute_spec(args, kwargs) if spec is no_specialization else spec
 
     def _key_fn(*args, **kwargs):
         return tuple(sorted(_spec(args, kwargs).items()))
@@ -826,9 +944,12 @@ def autotune_builder(
 
     # specialize's signature names the full call, so restore_value/reset_to_zero
     # can look tensors up by name.
-    src = specialize.func if hasattr(specialize, "func") else specialize
-    sig = inspect.signature(src)
     launch_arg_names = list(sig.parameters.keys())
+    positional_arg_names = [
+        param.name
+        for param in sig.parameters.values()
+        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
 
     tuner = Autotuner(
         fn=None,
@@ -842,23 +963,25 @@ def autotune_builder(
         default=_default,
         name=name,
         key_fn=_key_fn,
+        build_only=build_only,
         arg_names=launch_arg_names,
+        positional_arg_names=positional_arg_names,
         structural=structural,
         source_fingerprint=source_fingerprint,
         do_bench_fn=do_bench_fn,
     )
 
-    # A build-only scalar (a param that is also a spec key, e.g. dtype_str) must
-    # be keyword — positionally it would shift the launch args to the wrong slot.
+    # A build-only scalar must be keyword-only at the public call site; otherwise
+    # removing it would shift subsequent runtime launch arguments.
     @functools.wraps(src)
     def call(*args, **kwargs):
-        leaked = [n for n in list(sig.parameters)[: len(args)] if n in _spec(args, kwargs)]
-        if leaked:
-            raise TypeError(
-                f"{name}: build-only arg(s) {leaked} must be passed by keyword, not positionally "
-                f"(they route to build/specialize, not the launch call)"
-            )
-        return tuner(*args, **kwargs)
+        tuner._reject_positional_build_only(args)
+        spec = _compute_spec(args, kwargs)
+        token = specialization.set(spec)
+        try:
+            return tuner(*args, **kwargs)
+        finally:
+            specialization.reset(token)
 
     call.tuner = tuner  # expose for tests / introspection
     return call

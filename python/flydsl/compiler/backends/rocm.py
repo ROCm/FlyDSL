@@ -4,6 +4,7 @@
 from collections.abc import Mapping
 from typing import List, Tuple
 
+from ...compile_hints import canonicalize_compile_hints
 from ...runtime.device import get_rocm_arch, is_rdna_arch
 from ...utils import env, log
 from .base import BaseBackend, GPUTarget
@@ -35,9 +36,10 @@ class RocmBackend(BaseBackend):
         return " ".join(f"{k}={v}" for k, v in opts.items())
 
     def _pipeline_parts(self, *, compile_hints: dict) -> Tuple[List[str], str]:
+        compile_hints = canonicalize_compile_hints(compile_hints)
         chip = self.target.arch
-        waves_per_eu = _normalize_occupancy_hint(compile_hints.get("waves_per_eu"), "waves_per_eu")
-        maxnreg = _normalize_occupancy_hint(compile_hints.get("maxnreg"), "maxnreg")
+        waves_per_eu = compile_hints.get("waves_per_eu")
+        maxnreg = compile_hints.get("maxnreg")
 
         bin_cli_opts = []
         if env.debug.enable_debug_info:
@@ -112,8 +114,9 @@ class RocmBackend(BaseBackend):
         preserve it. WPE uses Triton's exact ``N,N`` LLVM constraint. Device
         helpers are not entry kernels and are skipped.
         """
-        waves_per_eu = _normalize_occupancy_hint(compile_hints.get("waves_per_eu"), "waves_per_eu")
-        maxnreg = _normalize_occupancy_hint(compile_hints.get("maxnreg"), "maxnreg")
+        compile_hints = canonicalize_compile_hints(compile_hints)
+        waves_per_eu = compile_hints.get("waves_per_eu")
+        maxnreg = compile_hints.get("maxnreg")
         if waves_per_eu is None and maxnreg is None:
             return
 
@@ -171,30 +174,6 @@ def _iter_gpu_kernel_funcs(module):
         for op in top.regions[0].blocks[0].operations:
             if op.operation.name == "gpu.func" and "gpu.kernel" in op.attributes:
                 yield op
-
-
-def _normalize_occupancy_hint(value, knob: str):
-    """Validate public compile-hint input and collapse zero to unset."""
-
-    def normalize_scalar(item):
-        if isinstance(item, bool) or not isinstance(item, int):
-            raise TypeError(f"{knob} must contain non-negative ints, got {item!r}")
-        if item < 0:
-            raise ValueError(f"{knob} must be >= 0, got {item}")
-        return item or None
-
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        normalized = {}
-        for kernel_name, item in value.items():
-            if not isinstance(kernel_name, str):
-                raise TypeError(f"{knob} mapping keys must be kernel names, got {kernel_name!r}")
-            item = normalize_scalar(item)
-            if item is not None:
-                normalized[kernel_name] = item
-        return normalized or None
-    return normalize_scalar(value)
 
 
 def _resolve_occupancy_hint(value, kernel_name: str):

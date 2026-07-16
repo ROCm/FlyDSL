@@ -13,7 +13,6 @@ import threading
 import time
 import types
 from collections import namedtuple
-from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache, partial
@@ -23,6 +22,12 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .._mlir import ir
 from .._mlir.dialects import func
 from .._mlir.passmanager import PassManager
+from ..compile_hints import (
+    canonicalize_compile_hints,
+    compile_hints_cache_key,
+    merge_compile_hint_layers,
+    resolve_compile_hints,
+)
 from ..expr.meta import tracing_context
 from ..expr.typing import Constexpr, Stream
 from ..expr.utils.arith import fastmath as fastmath_ctx
@@ -306,7 +311,7 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
 
     Covers:
       1. All Python source files under flydsl.compiler.*, flydsl.expr.*,
-         flydsl.runtime.*, flydsl.utils.*
+         flydsl.runtime.*, flydsl.utils.*, plus root-level compiler inputs
       2. Native shared libraries (_mlirDialectsFly*.so, libFly*.so, libfly_jit_runtime.so,
          libmlir_rocm_runtime.so)
       3. flydsl.__version__
@@ -339,10 +344,12 @@ def _flydsl_key_cached(use_external_binary: bool, llvm_dir: str, extra_source_di
             except Exception:
                 pass
 
-    p = flydsl_root / "__init__.py"
-    if p.is_file():
-        with open(p, "rb") as f:
-            contents.append(hashlib.sha256(f.read()).hexdigest())
+    # Root-level compiler inputs are not discovered by the package walk above.
+    for filename in ("__init__.py", "compile_hints.py"):
+        p = flydsl_root / filename
+        if p.is_file():
+            with open(p, "rb") as f:
+                contents.append(hashlib.sha256(f.read()).hexdigest())
 
     # 2) Hash native shared libraries (C++ passes, runtime wrappers, bindings).
     backend = get_backend()
@@ -784,29 +791,6 @@ def _run_pipeline(module: ir.Module, fragments: list, *, verifier: bool, print_a
             raise DSLCompileError(str(exc), diagnostics=diags) from exc
 
 
-def _stable_hint_key(value):
-    """Type-aware, insertion-order-independent compile-hint cache identity."""
-    if isinstance(value, Mapping):
-        items = sorted(value.items(), key=lambda item: (type(item[0]).__qualname__, repr(item[0])))
-        return (dict, tuple((_stable_hint_key(key), _stable_hint_key(item)) for key, item in items))
-    if isinstance(value, list):
-        return (list, tuple(_stable_hint_key(item) for item in value))
-    if isinstance(value, tuple):
-        return (tuple, tuple(_stable_hint_key(item) for item in value))
-    return (type(value), repr(value))
-
-
-def _snapshot_compile_hint(value):
-    """Detach supported container hints from caller-owned mutable objects."""
-    if isinstance(value, Mapping):
-        return {key: _snapshot_compile_hint(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_snapshot_compile_hint(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_snapshot_compile_hint(item) for item in value)
-    return value
-
-
 class MlirCompiler:
     @classmethod
     def compile(
@@ -819,7 +803,7 @@ class MlirCompiler:
 
         backend = get_backend(arch=arch)
 
-        compile_hints = dict(CompilationContext.get_compile_hints())
+        compile_hints = canonicalize_compile_hints(CompilationContext.get_compile_hints())
         module = ir.Module.parse(module.operation.get_asm(enable_debug_info=env.debug.enable_debug_info))
         backend.lower_compile_hints(module, compile_hints=compile_hints)
         cfg = _pipeline_fragments_for_mode(backend, compile_hints=compile_hints)
@@ -1192,7 +1176,7 @@ class JitFunction:
         self._original_func.__qualname__ = func.__qualname__
         self._original_func.__module__ = func.__module__
         self.func = ASTRewriter.transform(func)
-        self.compile_hints = dict(compile_hints) if compile_hints is not None else {}
+        self.compile_hints = merge_compile_hint_layers(compile_hints)
         self.manager_key = None
         self._manager_owner_cls = None
         self.cache_manager = None
@@ -1228,9 +1212,8 @@ class JitFunction:
         return partial(self.__call__, obj)
 
     def _effective_compile_hints(self):
-        """Snapshot persistent defaults overlaid by this call's options."""
-        merged = {**self.compile_hints, **CompilationContext.get_compile_hints()}
-        return {key: _snapshot_compile_hint(value) for key, value in merged.items()}
+        """Resolve persistent defaults and the current thread-local overlay."""
+        return resolve_compile_hints(self.compile_hints, CompilationContext.get_compile_hints())
 
     def _get_global_refs(self, owner_cls=None) -> List[Tuple[str, str, dict]]:
         """Memoized global-ref discovery (see :func:`_discover_global_refs`)."""
@@ -1330,12 +1313,7 @@ class JitFunction:
         if effective_hints is None:
             effective_hints = self._effective_compile_hints()
         if effective_hints:
-            key_parts.append(
-                (
-                    "_hints_",
-                    tuple(sorted((key, _stable_hint_key(value)) for key, value in effective_hints.items())),
-                )
-            )
+            key_parts.append(("_hints_", compile_hints_cache_key(effective_hints)))
 
         for name, arg in bound_args.items():
             param = sig.parameters.get(name)
@@ -1757,7 +1735,7 @@ class CompileCallable:
 
     def __call__(self, func, *args):
         if self._compile_hints and isinstance(func, JitFunction):
-            func.compile_hints = {**func.compile_hints, **self._compile_hints}
+            func.compile_hints = merge_compile_hint_layers(func.compile_hints, self._compile_hints)
         if not args:
             # No args → just return the (hinted) function for deferred compilation
             return func

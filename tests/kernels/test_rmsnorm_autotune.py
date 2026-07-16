@@ -11,8 +11,6 @@ Verifies the two-track builder-mode autotuner end to end:
   - the tuned result is cached (a second call does not re-tune)
 """
 
-import os
-
 import pytest
 
 pytestmark = [pytest.mark.l2_device, pytest.mark.rocm_lower]
@@ -43,12 +41,12 @@ def _reference(x, g):
     return (xf * torch.rsqrt((xf * xf).mean(-1, keepdim=True) + EPS)) * g.float()
 
 
-def _run(M, N, autotune_env, tmp_cache):
-    os.environ["FLYDSL_AUTOTUNE_CACHE_DIR"] = str(tmp_cache)
+def _run(M, N, autotune_env, tmp_cache, monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_cache))
     if autotune_env:
-        os.environ["FLYDSL_AUTOTUNE"] = "1"
+        monkeypatch.setenv("FLYDSL_AUTOTUNE", "1")
     else:
-        os.environ.pop("FLYDSL_AUTOTUNE", None)
+        monkeypatch.delenv("FLYDSL_AUTOTUNE", raising=False)
 
     torch.manual_seed(0)
     x = torch.randn(M, N, device="cuda").to(torch.bfloat16)
@@ -63,16 +61,22 @@ def _run(M, N, autotune_env, tmp_cache):
     return err, (x, g, ref, s)
 
 
-def test_rmsnorm_autotuned_default(tmp_path):
+def test_rmsnorm_autotuned_default(tmp_path, monkeypatch):
     """Zero-search default run is correct."""
-    err, _ = _run(4096, 8192, autotune_env=False, tmp_cache=tmp_path)
+    err, _ = _run(4096, 8192, autotune_env=False, tmp_cache=tmp_path, monkeypatch=monkeypatch)
     assert err < 2e-2, f"default run max_err={err}"
 
 
 def test_rmsnorm_autotuned_search_and_cache(tmp_path, monkeypatch):
     """Forced search is correct, and a subsequent normal call does NOT re-tune
     (it reuses the cached best) — proven by counting benchmark invocations."""
-    err, (x, g, ref, s) = _run(4096, 8192, autotune_env=True, tmp_cache=tmp_path)
+    err, (x, g, ref, s) = _run(
+        4096,
+        8192,
+        autotune_env=True,
+        tmp_cache=tmp_path,
+        monkeypatch=monkeypatch,
+    )
     assert err < 2e-2, f"tuned run max_err={err}"
 
     # A tuned-config JSON must have been persisted.

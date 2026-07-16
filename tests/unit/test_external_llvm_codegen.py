@@ -2,6 +2,7 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from flydsl.compiler.external_llvm import (
     run_external_binary_codegen,
 )
 from flydsl.compiler.jit_function import _create_mlir_context
+from flydsl.utils import log
 
 
 def _write_executable(path: Path, text: str) -> None:
@@ -117,6 +119,10 @@ def test_rocm_lower_compile_hints_preserves_source_for_none_and_zero():
         backend.lower_compile_hints(untouched, compile_hints={})
         assert "rocdl.waves_per_eu = 3" in str(untouched)
 
+        none = ir.Module.parse(src)
+        backend.lower_compile_hints(none, compile_hints={"waves_per_eu": None})
+        assert "rocdl.waves_per_eu = 3" in str(none)
+
         zero = ir.Module.parse(src)
         backend.lower_compile_hints(zero, compile_hints={"waves_per_eu": 0})
         assert "rocdl.waves_per_eu = 3" in str(zero)
@@ -203,6 +209,71 @@ def test_rocm_zero_wpe_preserves_source_constraint_through_llvm():
         llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
 
     assert '"amdgpu-waves-per-eu"="3"' in llvm_ir
+
+
+def test_rocm_maxnreg_reaches_native_llvm():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(
+            """module attributes {gpu.container_module} {
+              gpu.module @m {
+                gpu.func @k() kernel attributes {
+                  passthrough = [["amdgpu-num-vgpr", "32"]]
+                } { gpu.return }
+              }
+            }""",
+            context=ctx,
+        )
+        backend.lower_compile_hints(module, compile_hints={"maxnreg": 64})
+        pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={"maxnreg": 64})
+        PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
+        llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
+
+    assert '"amdgpu-num-vgpr"="64"' in llvm_ir
+    assert '"amdgpu-num-vgpr"="32"' not in llvm_ir
+
+
+def test_rocm_zero_maxnreg_preserves_source_constraint_through_llvm():
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    with _create_mlir_context() as ctx:
+        module = ir.Module.parse(
+            """module attributes {gpu.container_module} {
+              gpu.module @m {
+                gpu.func @k() kernel attributes {
+                  passthrough = [["amdgpu-num-vgpr", "32"]]
+                } { gpu.return }
+              }
+            }""",
+            context=ctx,
+        )
+        backend.lower_compile_hints(module, compile_hints={"maxnreg": 0})
+        pre_binary, _ = backend.external_binary_pipeline_fragments(compile_hints={"maxnreg": 0})
+        PassManager.parse(f"builtin.module({','.join(pre_binary)})", ctx).run(module.operation)
+        llvm_ir = translate_module_to_llvmir(module.body.operations[0].operation)
+
+    assert '"amdgpu-num-vgpr"="32"' in llvm_ir
+
+
+def test_rocm_lower_compile_hints_warns_for_unmatched_mapping_keys(caplog, monkeypatch):
+    backend = RocmBackend(RocmBackend.make_target("gfx942"))
+    logger = log()
+    monkeypatch.setattr(logger, "propagate", True)
+
+    with ir.Context() as ctx, ir.Location.unknown(ctx):
+        ctx.load_all_available_dialects()
+        module = ir.Module.parse("module { gpu.module @m { gpu.func @present() kernel { gpu.return } } }")
+        with caplog.at_level(logging.WARNING, logger=logger.name):
+            backend.lower_compile_hints(
+                module,
+                compile_hints={
+                    "waves_per_eu": {"missing_b": 2, "missing_a": 1},
+                    "maxnreg": {"missing_c": 64},
+                },
+            )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "occupancy hint 'waves_per_eu' targets missing kernel(s): ['missing_a', 'missing_b']" in messages
+    assert "occupancy hint 'maxnreg' targets missing kernel(s): ['missing_c']" in messages
 
 
 def test_external_llvm_fingerprint_uses_configured_tools(tmp_path, monkeypatch):

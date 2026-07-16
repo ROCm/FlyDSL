@@ -9,30 +9,13 @@ from functools import partialmethod
 from ..._mlir import ir
 from ..._mlir.dialects import arith, math
 from ..._mlir.extras import types as T
+from ...compile_hints import normalize_fastmath_hint as _normalize_fastmath
 from ..meta import dsl_loc_tracing
 
 # --------------------------------------------------------------------------- #
 # Ambient fastmath context (thread-local)
 # --------------------------------------------------------------------------- #
 _fm_tls = threading.local()
-
-
-def _normalize_fastmath(flags):
-    """Normalize a fastmath spec to a value the MLIR ``fastmath=`` arg accepts.
-
-    Accepts a single flag (``arith.FastMathFlags``, ``str``), a combined
-    ``FastMathFlags`` value (via ``|``), an iterable of flags (combined
-    comma-separated), or ``None``.
-    """
-    if flags is None:
-        return None
-    if isinstance(flags, str):
-        return flags
-    if isinstance(flags, (set, frozenset)):
-        return ",".join(sorted(str(f) for f in flags))
-    if isinstance(flags, (list, tuple)):
-        return ",".join(str(f) for f in flags)
-    return str(flags)
 
 
 def current_fastmath():

@@ -49,6 +49,14 @@ def _reset_jit_caches(jit_fn):
     jit_fn.cache_manager = None
 
 
+@pytest.fixture(autouse=True)
+def _isolate_noop_launch_compile_hints():
+    """Keep persistent hints on the shared test launcher from leaking by order."""
+    _noop_launch.compile_hints = {}
+    yield
+    _noop_launch.compile_hints = {}
+
+
 # ──────────────────────────────────────────────────────────────
 # Tests: LLVM option Python bindings
 # ──────────────────────────────────────────────────────────────
@@ -179,8 +187,8 @@ class TestCompileCallable:
 class TestCompileHintsPropagation:
     """Test that compile_hints flow through to the compilation pipeline."""
 
-    def test_fp_math_reaches_pipeline(self, monkeypatch):
-        """Verify fast_fp_math/unsafe_fp_math appear in rocdl-attach-target."""
+    def test_compile_hints_reach_lowering_and_pipeline(self, monkeypatch):
+        """The same effective hints reach backend IR lowering and pipeline generation."""
         from flydsl.compiler.backends import rocm
 
         captured = {}
@@ -204,10 +212,9 @@ class TestCompileHintsPropagation:
         exe = flyc.compile[{"fast_fp_math": True, "unsafe_fp_math": True, "waves_per_eu": 2}](_noop_launch)
         exe()
 
-        assert captured["hints"].get("fast_fp_math") is True
-        assert captured["hints"].get("unsafe_fp_math") is True
-        assert captured["hints"].get("waves_per_eu") == 2
-        assert captured["lower_hints"] == captured["hints"]
+        expected = {"fast_fp_math": True, "unsafe_fp_math": True, "waves_per_eu": 2}
+        assert captured["lower_hints"] == expected
+        assert captured["hints"] == expected
 
     def test_llvm_options_in_compile_hints(self):
         """Verify llvm_options key is accepted and doesn't crash."""
