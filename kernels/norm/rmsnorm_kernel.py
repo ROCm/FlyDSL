@@ -81,12 +81,11 @@ def build_rmsnorm_module(
     arch = get_rocm_arch()
     USE_HW_CVT_PK_BF16_F32 = (arch == "gfx950") or str(arch).startswith("gfx95")
 
-    # BLOCK_THREADS is the block size (threads per row-block). It is a build-time
-    # structural knob: it sizes the shared reduction storage, the vectorized
-    # tile stride, and the launch block dim, so it is baked into the module
-    # rather than passed as a jit Constexpr. Autotune (builder mode) rebuilds
-    # this module per candidate BLOCK_THREADS. `known_block_size` is required
-    # on AMDGPU once the block exceeds 256.
+    # BLOCK_THREADS is a compile-time structural knob: it sizes the shared
+    # reduction storage and vectorized tile stride, and determines both the
+    # launch block and known_block_size. Factory callers bake it when creating
+    # this launcher; rmsnorm_direct supplies it as a JIT Constexpr instead.
+    # known_block_size is required on AMDGPU once the block exceeds 256.
     tile_cols = BLOCK_THREADS * VEC_WIDTH
     RED_SLOTS = max(1, (BLOCK_THREADS + WARP_SIZE - 1) // WARP_SIZE)
     elem_bits = 32 if dtype_str == "f32" else 16
@@ -312,6 +311,30 @@ def build_rmsnorm_module(
         )
 
     return launch_rmsnorm
+
+
+@flyc.jit
+def rmsnorm_direct(
+    Input: fx.Tensor,
+    Gamma: fx.Tensor,
+    Output: fx.Tensor,
+    m_in: fx.Int32,
+    N: fx.Constexpr[int],
+    dtype_str: fx.Constexpr[str],
+    BLOCK_THREADS: fx.Constexpr[int],
+    stream: fx.Stream = fx.Stream(None),
+):
+    """Direct launcher whose structural choices specialize with the JIT key.
+
+    ``build_rmsnorm_module`` remains the compatibility factory used by the
+    non-autotuned APIs. Calling its lazy launcher while tracing this function
+    inlines the same kernel definition into the active module, so the factory
+    and direct paths share one implementation. In particular, shared storage,
+    tile loops, ``known_block_size``, and launch geometry all derive from this
+    call's ``BLOCK_THREADS`` Constexpr.
+    """
+    launch = build_rmsnorm_module(N, dtype_str, BLOCK_THREADS=BLOCK_THREADS)
+    launch(Input, Gamma, Output, m_in, stream)
 
 
 def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, store_rstd: bool = False, eps: float = EPS):

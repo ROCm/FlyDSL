@@ -3,13 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
 
-"""GPU integration test for autotuned RMSNorm (first autotune_builder adopter, #770).
+"""GPU integration test for direct-mode autotuned RMSNorm (#770).
 
-Verifies the two-track builder-mode autotuner end to end:
+Verifies the two-track direct-mode autotuner end to end:
   - zero-search default run produces correct output
   - forced-search (FLYDSL_AUTOTUNE=1) sweeps configs, picks one, stays correct
   - the tuned result is cached (a second call does not re-tune)
+  - structural block sizes are JIT Constexpr specializations, including the
+    ``known_block_size`` metadata required above AMDGPU's default limit
 """
+
+import re
 
 import pytest
 
@@ -23,6 +27,7 @@ if torch is None or not torch.cuda.is_available():
     pytest.skip("CUDA/ROCm not available. Skipping GPU tests.", allow_module_level=True)
 
 from kernels.norm.rmsnorm_autotune import rmsnorm_autotuned  # noqa: E402
+from kernels.norm.rmsnorm_kernel import rmsnorm_direct  # noqa: E402
 
 EPS = 1e-5
 
@@ -39,6 +44,71 @@ def _fresh_cache():
 def _reference(x, g):
     xf = x.float()
     return (xf * torch.rsqrt((xf * xf).mean(-1, keepdim=True) + EPS)) * g.float()
+
+
+def test_rmsnorm_autotuned_uses_direct_mode():
+    """The adopter must rely on JIT Constexpr specialization, not a second
+    builder/cache/routing path in the autotuner."""
+    assert rmsnorm_autotuned.tuner.fn is rmsnorm_direct
+
+
+@pytest.mark.parametrize(("block_threads", "red_slots"), [(512, 8), (1024, 16)])
+def test_rmsnorm_direct_specializes_structural_ir(block_threads, red_slots):
+    """A single direct JIT must materialize every structural consequence of
+    BLOCK_THREADS independently for each specialization."""
+    torch.manual_seed(0)
+    x = torch.randn(1, 8192, device="cuda", dtype=torch.bfloat16)
+    g = torch.rand(8192, device="cuda", dtype=torch.bfloat16)
+    out = torch.empty_like(x)
+
+    rmsnorm_direct(
+        x,
+        g,
+        out,
+        1,
+        8192,
+        "bf16",
+        block_threads,
+        torch.cuda.current_stream(),
+    )
+    torch.cuda.synchronize()
+
+    cache_key = rmsnorm_direct._last_call_cache_key.value
+    artifact = rmsnorm_direct._mem_cache[cache_key]
+    source_ir = artifact.source_ir
+    compiled_ir = artifact.ir
+
+    assert f"known_block_size = array<i32: {block_threads}, 1, 1>" in source_ir
+    assert source_ir.count(f"allocBytes = {red_slots * 4} : i64") >= 2
+    assert f"!fly.memref<f32, shared, {red_slots}:1" in source_ir
+    assert re.search(rf"gpu\.launch_func .* threads in \(%c{block_threads}, %c1", source_ir)
+    match = re.search(r"max_flat_workgroup_size\s*=\s*(\d+)", compiled_ir)
+    assert match is not None
+    assert int(match.group(1)) == block_threads
+
+    err = (out.float() - _reference(x, g)).abs().max().item()
+    assert err < 2e-2, f"block={block_threads} max_err={err}"
+
+
+def test_rmsnorm_direct_preserves_small_n_route():
+    """The direct adapter keeps the existing compile-time small-N kernel;
+    its analytic geometry intentionally ignores the tuned block candidate."""
+    torch.manual_seed(0)
+    x = torch.randn(8, 2048, device="cuda", dtype=torch.bfloat16)
+    g = torch.rand(2048, device="cuda", dtype=torch.bfloat16)
+    out = torch.empty_like(x)
+
+    rmsnorm_direct(x, g, out, 8, 2048, "bf16", 1024, torch.cuda.current_stream())
+    torch.cuda.synchronize()
+
+    cache_key = rmsnorm_direct._last_call_cache_key.value
+    source_ir = rmsnorm_direct._mem_cache[cache_key].source_ir
+    assert "gpu.func @rmsnorm_large_m_small_n_kernel" in source_ir
+    assert "known_block_size = array<i32: 512, 1, 1>" in source_ir
+    assert re.search(r"gpu\.launch_func .* threads in \(%c512, %c1", source_ir)
+
+    err = (out.float() - _reference(x, g)).abs().max().item()
+    assert err < 2e-2, f"small-N max_err={err}"
 
 
 def _run(M, N, autotune_env, tmp_cache, monkeypatch):

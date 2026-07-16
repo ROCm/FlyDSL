@@ -92,3 +92,13 @@ def get_all_configs(N: int, dtype_str: str, arch: str = None):
     if not configs:
         configs.append(get_default(N, dtype_str, arch))
     return configs
+
+
+def _get_default_for_autotune(input_t, gamma, output, m_in, N, dtype_str="bf16", stream=None):
+    """Adapt the direct launcher's call signature to the default heuristic."""
+    return get_default(N, dtype_str)
+
+
+def _get_all_configs_for_autotune(input_t, gamma, output, m_in, N, dtype_str="bf16", stream=None):
+    """Adapt the direct launcher's call signature to the search space."""
+    return get_all_configs(N, dtype_str)

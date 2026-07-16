@@ -3,31 +3,37 @@
 
 """Autotuned RMSNorm — the first real adopter of ``flydsl.autotune``.
 
-RMSNorm bakes BLOCK_THREADS at module-build time, so the tuner rebuilds the
-module per structural config via ``autotune_builder``. ``waves_per_eu`` remains
-a backend compile option and reuses the same structural build.
+``BLOCK_THREADS`` is a JIT Constexpr, so each structural config specializes the
+normal FlyDSL JIT path. ``waves_per_eu`` remains a backend compile hint.
 Normal runs use the ``get_default`` heuristic; ``FLYDSL_AUTOTUNE=1`` sweeps
 ``get_all_configs``.
 
     rmsnorm_autotuned(input, gamma, output, M, dtype_str="bf16", stream=stream)
 """
 
-from flydsl.autotune import autotune_builder
-from kernels.norm.rmsnorm_config import get_all_configs, get_default
-from kernels.norm.rmsnorm_kernel import build_rmsnorm_module
+from flydsl.autotune import autotune
+from kernels.norm.rmsnorm_config import _get_all_configs_for_autotune, _get_default_for_autotune
+from kernels.norm.rmsnorm_kernel import rmsnorm_direct
+
+_rmsnorm_tuner = autotune(
+    configs=_get_all_configs_for_autotune,
+    key=["N", "dtype_str"],
+    default=_get_default_for_autotune,
+)(rmsnorm_direct)
 
 
-def _specialize(input_t, gamma, output, m_in, dtype_str="bf16", stream=None):
-    # Build/lookup axes; dtype_str must be here so bf16 vs f16 keys differ.
-    return {"N": int(input_t.shape[-1]), "dtype_str": dtype_str}
+def rmsnorm_autotuned(input_t, gamma, output, m_in, dtype_str="bf16", stream=None):
+    """Launch RMSNorm while deriving the compile-time row width from input."""
+    return _rmsnorm_tuner(
+        input_t,
+        gamma,
+        output,
+        m_in,
+        N=int(input_t.shape[-1]),
+        dtype_str=dtype_str,
+        stream=stream,
+    )
 
 
-rmsnorm_autotuned = autotune_builder(
-    name="rmsnorm",
-    build=build_rmsnorm_module,
-    specialize=_specialize,
-    configs=get_all_configs,
-    default=get_default,
-    structural=("BLOCK_THREADS",),
-    build_only=("dtype_str",),
-)
+# Preserve the small public inspection surface used by tests and tooling.
+rmsnorm_autotuned.tuner = _rmsnorm_tuner
