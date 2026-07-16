@@ -647,9 +647,6 @@ def compile_pa_decode_tile(
         NVOPS = TILE_TOK // MFMA_K  # 8 PV k_steps (256 tokens / K=32)
         STEPS_PER_PAGE = block_size // 16
 
-        # V's page depends only on (rgroup, sub), not `warp`, so all 4 warps
-        # want the same pages every tile -- see `_v_page_fetch_and_stage`/
-        # `_v_page_read_row` above for the once-per-tile fetch+broadcast.
         def _v_ops(phys_row, vh):
             head_group = ((vh * VHE_SIZE) // 16) + warp
             head_element = head_group * 16 + lane16
@@ -723,18 +720,10 @@ def compile_pa_decode_tile(
                         )
                     frag_Ss.append(fx.Vector(acc))
 
-                # K's prefetch, V's page-index prefetch, and (per_token_kv
-                # only) the K/V scale stage all share the same `tt1 <
-                # part_end` guard, so they're issued together in one branch
-                # -- this also lets `_stage_kv_scale_to_lds` reuse
-                # `_k_ops_flat`'s own `phys_vec` (same tile, same page
-                # formula) instead of re-fetching the block-table lookup.
-                # K/V don't depend on the query row, so this is issued once
-                # per tile (gated to m==0), right after QK MFMA and before
-                # softmax -- matching this feature's own pre-M-tile
-                # instruction order, so the V-page read below can still
-                # reuse the upcoming pass-1 barrier for free instead of
-                # needing a dedicated one.
+                # K/V/scale prefetch: doesn't depend on the query row, so
+                # gated to m==0. Issued here (after QK MFMA, before softmax)
+                # so the V-page read below can reuse the upcoming pass-1
+                # barrier instead of needing a dedicated one.
                 if const_expr(m == 0):
                     k_next = k_cur
                     if tt1 < part_end:
@@ -901,9 +890,7 @@ def compile_pa_decode_tile(
                 corr_off = sCorr_off + m_base_pv * 4
                 corr_vec = _view(corr_off, fx.Float32, fx.make_layout(OP_ELEMS, 1)).load()
                 corr_s = [corr_vec[v] for v in range_constexpr(OP_ELEMS)]
-                # In-place mutation (not a copy): at HEAD==64, VHE_CHUNKS==1,
-                # so only vh=0 runs below -- index 1 must carry its old value
-                # through unchanged (dead state, never read for HEAD==64).
+
                 for vh in range_constexpr(VHE_CHUNKS):
                     v_vh = v_vh_early if const_expr(HEAD == 64) else _v_ops(v_page_cur, vh)
                     acc = arith.constant_vector(0.0, T.f32x4)
@@ -1114,11 +1101,6 @@ def _choose_num_partitions(
 
     device_cus = torch.cuda.get_device_properties(device).multi_processor_count
     cu_fill_np = cdiv(target_ctas_per_cu * device_cus, num_seqs * num_kv_heads)
-    # Bounded by max_blocks_per_seq*block_size/tile_tok, NOT the actual
-    # context length: reading `context_lengths` on the host forces a GPU
-    # sync, illegal during CUDA graph capture. Exact when callers size
-    # `block_tables` to the actual context length; looser (but still
-    # correct) if they over-allocate for a larger max-sequence-length.
     max_possible_tiles = cdiv(max_blocks_per_seq * block_size, tile_tok)
     cu_starved = (num_seqs * num_kv_heads) < device_cus
     tiles_np_cap = max_possible_tiles if cu_starved else max(1, max_possible_tiles // min_tiles_per_partition)
@@ -1139,12 +1121,6 @@ def pa_decode_tile(
     stream=None,
 ) -> None:
     """Host entry point. See module docstring for the expected tensor layouts."""
-    # `query`/`output` are [num_seqs*query_length, num_q_heads, head_dim],
-    # row-major by (seq, MTP position qi) -- same flattening convention as
-    # pa_decode_ps_kernel's own `query_length = query.shape[0] // batch_size`
-    # (`pa_decode_fp8.py:1750`). `query_length > 1` is multi-token
-    # speculative-decode (MTP): the KV cache already holds the MTP tail
-    # tokens' own K/V, appended at the end of `context_lengths`.
     num_seqs = context_lengths.shape[0]
     total_q_rows, num_q_heads, head_dim = query.shape
     assert (
@@ -1221,19 +1197,9 @@ def pa_decode_tile(
         dummy = torch.empty(1, dtype=torch.float32, device=dev)
         pmax = psum = pout = dummy
     else:
-        # Partial-output buffers: TRUE num_seqs outer, with the flattened
-        # (MTP position, GQA head) row axis (TOTAL_ROWS = query_length*GS)
-        # as a unit-stride inner axis -- matches `pa_decode_sw_reduce_kernel`'s
-        # own `eqgs_idx` convention (it indexes these buffers with `eqgs_idx`
-        # directly, not a separately-strided query-position term).
         total_rows = query_length * GS
         pmax = torch.empty(num_seqs, num_kv_heads, num_partitions, total_rows, dtype=torch.float32, device=dev)
         psum = torch.empty(num_seqs, num_kv_heads, num_partitions, total_rows, dtype=torch.float32, device=dev)
-        # Pre-normalized (O_p/l_p) partials, matching what the reused
-        # pa_decode_sw_reduce_kernel expects (see the main kernel's NP>1
-        # store) -- kept in output's own dtype (f16/bf16) rather than forced
-        # to bf16, since tile never has an fp8 query needing that precision
-        # tradeoff.
         pout = torch.empty(num_seqs, num_kv_heads, num_partitions, total_rows, head_dim, dtype=output.dtype, device=dev)
     s = stream or torch.cuda.current_stream()
 
