@@ -463,7 +463,7 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
             or k % tile_n != 0
             or crs % TILE_K != 0
             or npq * k * 4 > 0x7FFFFFFF  # split-K fp32 output atomic uses an i32 byte offset
-            or npq < 4096
+            or base == 0
             or k_tiles < 16
         ):
             sk = 1
@@ -472,20 +472,19 @@ def _resolve_splitk(splitk, npq, crs, k, device, tile=DEFAULT_TILE):
                 num_cu = torch.cuda.get_device_properties(device).multi_processor_count
             except Exception:
                 num_cu = 256
-            sk = 1 if base >= (3 * num_cu) // 4 else min(4, max(1, num_cu // base), k_tiles)
+            # Split-K only to fill the GPU when the (M,N) grid alone underfills it.
+            # base = number of (M,N) tiles = workgroups at sk=1. Once base already
+            # covers ~all CUs, split-K is pure overhead (2x MFMA + an fp32 reduction),
+            # so keep sk=1. This underfill test is authoritative -- do NOT additionally
+            # cap tiles-per-split: a single workgroup running the full k-loop (e.g. 72
+            # iters) is the fast path (matches the fp8_gemm pipeline), and an artificial
+            # cap would force split-K on large grids where it only slows things down.
+            sk = 1 if base >= (3 * num_cu) // 4 else min(8, max(1, (num_cu + base - 1) // base), k_tiles)
     else:
         sk = max(1, int(splitk))
     sk = max(1, min(sk, k_tiles))
     while sk > 1 and k_tiles % sk != 0:
         sk -= 1
-    MAX_TILES_PER_SPLIT = 54
-    tiles_per_split = k_tiles // sk
-    if tiles_per_split > MAX_TILES_PER_SPLIT:
-        min_sk = (k_tiles + MAX_TILES_PER_SPLIT - 1) // MAX_TILES_PER_SPLIT
-        for candidate in range(min_sk, k_tiles + 1):
-            if k_tiles % candidate == 0 and k_tiles // candidate <= MAX_TILES_PER_SPLIT:
-                sk = candidate
-                break
     return sk
 
 

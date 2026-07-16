@@ -175,7 +175,10 @@ FP8_BYTES = 1
 
 
 @functools.lru_cache(maxsize=256)
-def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False):
+def compile_conv3d_implicit_fp8_gemm8w(
+    n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias=False, wgm=1
+):
+    WGM = max(1, int(wgm))
     do = (d + 2 * pt - kt) // st + 1
     ho = (h + 2 * ph - kh) // sh + 1
     wo = (width + 2 * pw - kw) // sw + 1
@@ -204,6 +207,14 @@ def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh,
         and ho == h
         and wo == width
     )
+
+    # Per-axis compile-time flag: is a padding bounds-check needed on the input coord?
+    # A degenerate axis (kernel size 1, no pad, stride 1, out==in) can never go
+    # out of bounds, so its in_range check (2 cmp + an AND -> a v_cndmask) is pure
+    # waste. Skipping it in the hot im2col path trims VALU/cndmask pressure.
+    need_t_check = not (kt == 1 and pt == 0 and st == 1 and do == d)
+    need_h_check = not (kh == 1 and ph == 0 and sh == 1 and ho == h)
+    need_w_check = not (kw == 1 and pw == 0 and sw == 1 and wo == width)
 
     grid_m = (npq + BLOCK_M - 1) // BLOCK_M
     grid_n = k // BLOCK_N
@@ -253,8 +264,23 @@ def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh,
         wave_id = tid // WARP_SIZE
         wave_m = wave_id // 4
         wave_n = wave_id % 4
-        block_m = fx.block_idx.x
-        block_n = fx.block_idx.y
+        if const_expr(WGM > 1):
+            # Grouped-M workgroup L2-swizzle: visit WGM consecutive m-tiles across all
+            # n-tiles before advancing, so the weight (B) tile stays hot in L2 across
+            # the group. Mirrors the bf16 conv3d_implicit kernel's wgm remap; targets
+            # narrow-N shapes (few n-tiles) where the default row-major grid evicts B.
+            pid = fx.Index(fx.block_idx.x) + fx.Index(fx.block_idx.y) * fx.Index(grid_m)
+            blocks_per_group = fx.Index(WGM * grid_n)
+            group_id = pid // blocks_per_group
+            first_m = group_id * fx.Index(WGM)
+            group_rows = fx.Index(grid_m) - first_m
+            group_rows = fx.Index(arith.select(group_rows < fx.Index(WGM), group_rows, fx.Index(WGM)))
+            local = pid % blocks_per_group
+            block_m = fx.Index(first_m + (local % group_rows))
+            block_n = fx.Index(local // group_rows)
+        else:
+            block_m = fx.block_idx.x
+            block_n = fx.block_idx.y
 
         m_offset = block_m * BLOCK_M
 
@@ -281,13 +307,32 @@ def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh,
         # k_col..k_col+15 are 16 consecutive channels of ONE (kt,kh,kw) tap, so one
         # spatial address + contiguous channel base. Returns the OOB-sentinel element
         # offset for padded / out-of-bounds taps (hardware bounds check zeroes LDS).
-        def im2col_safe_elem(m_row, k_col):
+        #
+        # PERF: the output-spatial decomposition of m_row (n_idx, ot, oh, ow) is
+        # loop-INVARIANT across the K loop (m_row has no k dependence), yet it costs
+        # 4 div/mods. Precompute it once per (half, step) via _spatial_of_row and reuse
+        # it every k-iter; the k-loop body then only decodes the tap (kt/kh/kw from
+        # k_col, cheap since c is large so k_col//c changes slowly) and combines. This
+        # lifts the dominant VALU cost out of the hot loop (MfmaUtil 60% -> higher).
+        def _spatial_of_row(m_row):
             row_valid = m_row < fx.Index(npq)
+            if const_expr(temporal_only_fast):
+                out_t = (m_row // hw_o) % d
+                return (row_valid, out_t, m_row)
+            n_idx = m_row // dhw
+            rem = m_row % dhw
+            ot = rem // hw_o
+            rem2 = rem % hw_o
+            oh = rem2 // wo
+            ow = rem2 % wo
+            return (row_valid, n_idx, ot, oh, ow)
+
+        def im2col_safe_elem_pre(spatial, k_col):
             cc = k_col % c
             if const_expr(temporal_only_fast):
+                row_valid, out_t, m_row = spatial
                 kt_i = k_col // c
                 temporal_delta = kt_i - pt
-                out_t = (m_row // hw_o) % d
                 in_t = out_t + temporal_delta
                 valid = row_valid & in_range(in_t, d)
                 if const_expr(BIG_IN):
@@ -295,12 +340,7 @@ def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh,
                 else:
                     g_elem = (m_row + temporal_delta * hw_o) * c + cc
             else:
-                n_idx = m_row // dhw
-                rem = m_row % dhw
-                ot = rem // hw_o
-                rem2 = rem % hw_o
-                oh = rem2 // wo
-                ow = rem2 % wo
+                row_valid, n_idx, ot, oh, ow = spatial
                 ckk = k_col // c
                 kw_i = ckk % kw
                 ckk2 = ckk // kw
@@ -309,7 +349,13 @@ def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh,
                 in_t = ot * st + kt_i - pt
                 in_h = oh * sh + kh_i - ph
                 in_w = ow * sw + kw_i - pw
-                valid = row_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, width)
+                valid = row_valid
+                if const_expr(need_t_check):
+                    valid = valid & in_range(in_t, d)
+                if const_expr(need_h_check):
+                    valid = valid & in_range(in_h, h)
+                if const_expr(need_w_check):
+                    valid = valid & in_range(in_w, width)
                 if const_expr(BIG_IN):
                     di = n_idx - nbase
                     g_elem = (((di * d + (in_t - base_t)) * h + in_h) * width + in_w) * c + cc
@@ -333,21 +379,35 @@ def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh,
         # the im2col A-gather overhead. Diagnostic only (env CONV_STRIP_IM2COL=1).
         STRIP_IM2COL = os.environ.get("CONV_STRIP_IM2COL", "0") in ("1", "true", "yes")
 
-        def conv_a_g2s(lds_dst, half, k_iter):
+        # Per-(half, step) loop-invariant data: the LDS byte offset (cc, step_off) and
+        # the output-spatial decomposition of m_row. Computed ONCE here (not per k-iter);
+        # the SSA values dominate every conv_a_g2s call (first use is in the prologue).
+        def _conv_a_g2s_pre(half):
             m_half_base = m_offset + fx.Index(half * LDS_BLOCK_M)
-            k_base = fx.Index(k_iter * BLOCK_K)
+            steps = []
             for step in range_constexpr(N_LDS_STEPS_A):
                 row_g = lane_id // 8 + wave_id * 8 + step * (N_WAVES * 8)
                 col_g = (lane_id % 8) * 16
                 r, cc = swizzle_128(row_g, col_g)
                 m_row = m_half_base + r
-                k_col = k_base + cc
+                step_off = wave_id * 1024 + step * (N_WAVES * 1024)
                 if const_expr(STRIP_IM2COL):
+                    steps.append((step_off, cc, m_row, None))
+                else:
+                    steps.append((step_off, cc, m_row, _spatial_of_row(m_row)))
+            return steps
+
+        _a_g2s_pre = [_conv_a_g2s_pre(0), _conv_a_g2s_pre(1)]
+
+        def conv_a_g2s(lds_dst, half, k_iter):
+            k_base = fx.Index(k_iter * BLOCK_K)
+            for step_off, cc, m_row, spatial in _a_g2s_pre[half]:
+                if const_expr(STRIP_IM2COL):
+                    k_col = k_base + cc
                     lin = m_row * crs + k_col
                     safe = fx.Int32(arith.select(m_row < fx.Index(npq), lin, fx.Index(x_num_records)))
                 else:
-                    safe = im2col_safe_elem(m_row, k_col)
-                step_off = wave_id * 1024 + step * (N_WAVES * 1024)
+                    safe = im2col_safe_elem_pre(spatial, k_base + cc)
                 base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(step_off)
                 lds_ptr = fx.inttoptr(LdsPtr_t, base_i32)
                 dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
@@ -550,7 +610,7 @@ def compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh,
     return launch
 
 
-def _conv3d_impl_fp8_gemm8w(x, weight, bias=None, stride=1, padding=0, stream=None):
+def _conv3d_impl_fp8_gemm8w(x, weight, bias=None, stride=1, padding=0, stream=None, wgm=8):
     n, c, d, h, width = x.shape
     k, wc, kt, kh, kw = weight.shape
     assert c == wc, f"in-channel mismatch: x has {c}, weight has {wc}"
@@ -578,7 +638,7 @@ def _conv3d_impl_fp8_gemm8w(x, weight, bias=None, stride=1, padding=0, stream=No
         assert bias_arg.numel() == k, f"bias must have {k} elements, got {bias_arg.numel()}"
 
     y = torch.empty((n, k, do, ho, wo), device=x.device, dtype=torch.bfloat16)
-    exe = compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias)
+    exe = compile_conv3d_implicit_fp8_gemm8w(n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, has_bias, wgm)
     exe(
         flyc.from_torch_tensor(y.view(-1)),
         flyc.from_torch_tensor(x_arg),
