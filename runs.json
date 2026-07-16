@@ -1,8 +1,94 @@
 {
  "schema": 1,
- "updated": "2026-07-16T10:46:25Z",
+ "updated": "2026-07-16T10:59:39Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29492301807,
+   "pr": 870,
+   "commit": "0d0578e70fee80790e1a99e3c11e22b2e7f3f4ba",
+   "branch": "fix-mxfp4-preshuffle-import",
+   "event": "pull_request",
+   "title": "fix(kernels): correct stale kernels.mma import in mxfp4_preshuffle",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807",
+   "created_at": "2026-07-16T10:51:17Z",
+   "updated_at": "2026-07-16T10:52:58Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:53:50Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402605"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:53:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402613"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:52:58Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492301807/job/87601402643"
+    }
+   ]
+  },
+  {
+   "run_id": 29492181381,
+   "pr": 869,
+   "commit": "9541e6bb322d050e1009f38002069eee7eafc69a",
+   "branch": "kernel/sage-attention-cdna",
+   "event": "pull_request",
+   "title": "[Kernel] Add CDNA SageAttention kernel",
+   "status": "queued",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381",
+   "created_at": "2026-07-16T10:49:15Z",
+   "updated_at": "2026-07-16T10:50:33Z",
+   "actor": "LiuYinfeng01",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:51:48Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940897"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:50:33Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940935"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:51:49Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29492181381/job/87600940988"
+    }
+   ]
+  },
   {
    "run_id": 29489439964,
    "pr": 868,
@@ -10,11 +96,11 @@
    "branch": "pr/docs-arithmetic-types",
    "event": "pull_request",
    "title": "[Docs] Arithmetic types: authoritative spec + conformance suite",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29489439964",
    "created_at": "2026-07-16T10:03:27Z",
-   "updated_at": "2026-07-16T10:04:08Z",
+   "updated_at": "2026-07-16T10:57:13Z",
    "actor": "sjfeng1999",
    "jobs": [
     {
@@ -38,9 +124,9 @@
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-16T10:04:08Z",
+     "started_at": "2026-07-16T10:57:12Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29489439964/job/87591836342"
     }
@@ -53,20 +139,20 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520",
    "created_at": "2026-07-16T09:20:23Z",
-   "updated_at": "2026-07-16T10:19:15Z",
+   "updated_at": "2026-07-16T10:52:59Z",
    "actor": "xudoyuan",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-16T09:34:12Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T10:52:58Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520/job/87583243858"
     },
     {
@@ -86,6 +172,24 @@
      "started_at": "2026-07-16T09:36:57Z",
      "completed_at": "2026-07-16T10:10:00Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520/job/87583243897"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:52:59Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520/job/87601404700"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T10:53:51Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486771520/job/87601404721"
     }
    ]
   },
@@ -111,20 +215,20 @@
    "branch": "atom_1250_refactor",
    "event": "pull_request",
    "title": "Atom 1250 refactor",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486279568",
    "created_at": "2026-07-16T09:12:30Z",
-   "updated_at": "2026-07-16T10:45:18Z",
+   "updated_at": "2026-07-16T10:56:08Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-16T10:45:18Z",
-     "completed_at": null,
+     "completed_at": "2026-07-16T10:56:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29486279568/job/87581701030"
     },
     {
@@ -2110,92 +2214,6 @@
      "started_at": "2026-07-14T20:05:14Z",
      "completed_at": "2026-07-14T21:17:07Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29364206242/job/87191797024"
-    }
-   ]
-  },
-  {
-   "run_id": 29343987992,
-   "pr": 853,
-   "commit": "9c963011655d876f9f71cd0c999d4ee506744d33",
-   "branch": "pr/refactor-buffer-ops",
-   "event": "pull_request",
-   "title": "[Refactor] move buffer_ops to kernels.common; remove expr/vector.py",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29343987992",
-   "created_at": "2026-07-14T15:08:08Z",
-   "updated_at": "2026-07-14T21:07:45Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T19:47:40Z",
-     "completed_at": "2026-07-14T21:07:44Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29343987992/job/87187757519"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T19:47:30Z",
-     "completed_at": "2026-07-14T20:54:16Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29343987992/job/87187757547"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T19:47:19Z",
-     "completed_at": "2026-07-14T20:02:09Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29343987992/job/87187757572"
-    }
-   ]
-  },
-  {
-   "run_id": 29342327467,
-   "pr": 853,
-   "commit": "86efde1040b9936ca6a78355253ab91bda6d0b0f",
-   "branch": "pr/refactor-buffer-ops",
-   "event": "pull_request",
-   "title": "[Refactor] move buffer_ops to kernels.common; remove expr/vector.py",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467",
-   "created_at": "2026-07-14T14:46:02Z",
-   "updated_at": "2026-07-14T19:45:01Z",
-   "actor": "sjfeng1999",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-14T14:48:36Z",
-     "completed_at": "2026-07-14T15:29:20Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467/job/87117242986"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-14T19:34:59Z",
-     "completed_at": "2026-07-14T19:45:00Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467/job/87117243015"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-14T14:48:31Z",
-     "completed_at": "2026-07-14T15:40:59Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29342327467/job/87117243023"
     }
    ]
   }
