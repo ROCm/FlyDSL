@@ -125,10 +125,10 @@ def compile_pa_decode_tile(
     ``TOTAL_ROWS = query_length * query_group_size`` query-row axis, tiled
     into ``M_TILES = ceil(TOTAL_ROWS / 16)`` independent 16-row MFMA tiles --
     same unified mechanism ``pa_decode_ps_kernel`` uses (its ``_mtp_groups``).
-    ``query_length == 1 and query_group_size <= 16`` (``M_TILES == 1``) is
-    the default/common case and stays byte-for-byte identical to a kernel
-    compiled without this feature; each extra M-tile duplicates a full set
-    of loop-carried softmax/output state, so VGPR/LDS -- and therefore
+    Every configuration (including the default ``query_length == 1 and
+    query_group_size <= 16``, i.e. ``M_TILES == 1``) goes through this one
+    row-tiled code path; each extra M-tile duplicates a full set of
+    loop-carried softmax/output state, so VGPR/LDS -- and therefore
     occupancy -- scale roughly linearly with ``M_TILES``.
     """
     is_gfx950 = "gfx95" in get_rocm_arch()
@@ -150,9 +150,8 @@ def compile_pa_decode_tile(
     assert QLEN >= 1, f"query_length must be >= 1, got {QLEN}"
     # Flattened query-row axis (MTP position outer, GQA head inner -- same
     # row-major convention as pa_decode_ps_kernel's own `_mtp_groups`),
-    # tiled into independent 16-row MFMA M-tiles. M_TILES==1 (the default,
-    # QLEN==1 and GS<=16) must stay byte-for-byte identical to a kernel
-    # built without this feature -- see this function's own docstring.
+    # tiled into independent 16-row MFMA M-tiles -- see this function's own
+    # docstring.
     TOTAL_ROWS = QLEN * GS
     M_TILES = cdiv(TOTAL_ROWS, MFMA_MNK)
     ROWS_PADDED = M_TILES * MFMA_MNK
@@ -611,16 +610,14 @@ def compile_pa_decode_tile(
         q_ops_all = []
         for m in range_constexpr(M_TILES):
             q_row_off = m * MFMA_MNK * HEAD
-            q_ops = []
             for qkhe in range_constexpr(QKHE_LOOP):
                 he_idx = qkhe * RGROUP_QUARTERS + rgroup
                 chunk = _view(
                     q_row_off + lane16 * HEAD + he_idx * QK_CHUNK_ELEMS, fx.Int64, fx.make_layout(2, 1)
                 ).load()
-                q_ops.extend([chunk[0], chunk[1]])
-            q_ops_all.append(q_ops)
-        # q_ops_all[m][s] for s=0..N_SUBCHUNKS-1, s = qkhe*2+qkr, = M-tile
-        # m's head[he_idx*16+qkr*8 : +8] of qhead=lane16
+                q_ops_all.extend([chunk[0], chunk[1]])
+        # q_ops_all[m*N_SUBCHUNKS+s] for s=0..N_SUBCHUNKS-1, s = qkhe*2+qkr,
+        # = M-tile m's head[he_idx*16+qkr*8 : +8] of qhead=lane16
 
         copy_c = fx.make_copy_atom(fx.UniversalCopy32b(), fx.Float32)
         tcopy_o = fx.make_tiled_copy_C(copy_c, tiled_mma_pv)  # PV out -> sO (epilogue)
@@ -666,128 +663,99 @@ def compile_pa_decode_tile(
                 fx.rocdl.sched_vmem(len(ops) // 2)
             return ops  # NVOPS i64, the 64-token contiguous run for this head
 
-        # Per-row-group (M-tile) causal bound, precomputed once (doesn't
-        # depend on tt): `qi_of_row = (m*16 + lane16) // GS` decomposes the
-        # flattened row index into its MTP position, same convention the
-        # Q-quant loop above uses. `causal_bound = context_len - (QLEN-1) +
-        # qi_of_row` is production's own formula -- the KV cache already
-        # holds the MTP tail tokens' own K/V, so this single per-row bound
-        # *is* the intra-MTP causal mask, no separate term needed. M_TILES==1
-        # (QLEN==1, GS<=16) uses plain `context_len` directly, with no
-        # derived-value arithmetic at all, to stay byte-for-byte identical
-        # to a kernel built without this feature (qi_of_row would collapse
-        # to 0 for every real row here anyway, but computing and holding
-        # that derived value live for the whole KV loop cost extra VGPR --
-        # measured via VGPR/LDS diffing, per this feature's own invariant).
-        if const_expr(M_TILES == 1 and QLEN == 1):
-            causal_bound = [context_len]
+        # QLEN==1 means every valid row has qi_of_row==0 (TOTAL_ROWS==GS, so
+        # flat_idx<GS always) regardless of M_TILES -- covers wide-GQA-only
+        # configs too, not just M_TILES==1. Using plain `context_len` there
+        # (instead of a `lane16`-derived expression) keeps this genuinely
+        # wave-uniform: `lane16` is per-lane-divergent, so folding it in
+        # forces the compiler to materialize a per-lane VGPR value held live
+        # across the whole KV loop even though it's mathematically constant
+        # across the wave here -- measured to cost ~20 VGPR (122->142 at
+        # head_dim=128) for no behavioral difference.
+        if const_expr(QLEN == 1):
+            causal_bound = [context_len for _m in range_constexpr(M_TILES)]
         else:
             causal_bound = [context_len - (QLEN - 1) + (m * MFMA_MNK + lane16) // GS for m in range_constexpr(M_TILES)]
 
-        # O is carried in registers across tiles (one VHE_CHUNKS-list of PV
-        # C-fragment vectors per M-tile), rescaled by the softmax correction
-        # each tile. `m_prev`/`l_prev` are carried the same way, per M-tile
-        # (see the init comment above) -- state is flattened as
-        # [k_pf0, v_page_pf0] + M_TILES * [o0, o1, m_prev, l_prev], EXCEPT at
-        # M_TILES==1 where the slot order instead matches this feature's
-        # pre-M-tile layout exactly ([o0, o1, k, v, m, l]) -- measured to
-        # matter: the post-RA scheduler/register-allocator is sensitive to
-        # loop-carried operand order, and using the M_TILES>1 order even for
-        # the M_TILES==1 case cost +16 combined VGPR (128->144 at
-        # head_dim=128) despite the values themselves being identical.
-        if const_expr(M_TILES == 1 and QLEN == 1):
-            K_SLOT, V_SLOT = 2, 3
+        K_SLOT, V_SLOT = 0, 1
 
-            def _o0_slot(m):
-                return 0
+        def _o0_slot(m):
+            return 2 + 4 * m
 
-            def _o1_slot(m):
-                return 1
+        def _o1_slot(m):
+            return 2 + 4 * m + 1
 
-            def _m_slot(m):
-                return 4
+        def _m_slot(m):
+            return 2 + 4 * m + 2
 
-            def _l_slot(m):
-                return 5
-
-        else:
-            K_SLOT, V_SLOT = 0, 1
-
-            def _o0_slot(m):
-                return 2 + 4 * m
-
-            def _o1_slot(m):
-                return 2 + 4 * m + 1
-
-            def _m_slot(m):
-                return 2 + 4 * m + 2
-
-            def _l_slot(m):
-                return 2 + 4 * m + 3
+        def _l_slot(m):
+            return 2 + 4 * m + 3
 
         o_zero = fx.Vector.filled(OP_ELEMS, 0.0, fx.Float32)
-        if const_expr(M_TILES == 1 and QLEN == 1):
-            init_state = [o_zero, o_zero, k_pf0, v_page_pf0, NEG_INF, ZERO_F]
-        else:
-            init_state = [k_pf0, v_page_pf0]
-            for _m in range_constexpr(M_TILES):
-                init_state.extend([o_zero, o_zero, NEG_INF, ZERO_F])
+        init_state = [k_pf0, v_page_pf0]
+        for _m in range_constexpr(M_TILES):
+            init_state.extend([o_zero, o_zero, NEG_INF, ZERO_F])
+        base4 = 4
         for tt, ostate in range(loop_start, loop_end, 1, init=init_state):
-            if const_expr(M_TILES == 1 and QLEN == 1):
-                o_acc = [ostate[0], ostate[1]]
-                k_cur = ostate[2]  # this tile's prefetched K, as one (NCHUNK*N_SUBCHUNKS,) i64 vector
-                v_page_cur = ostate[3]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
-                m_prev = ostate[4]  # this thread's own running max, carried from last tile
-                l_prev = ostate[5]  # this thread's own running denom, carried from last tile
-                tt_i32 = fx.Int32(tt)
-                tok0, _ = _tile_tok0_and_page(tt_i32)
+            k_cur = ostate[K_SLOT]  # this tile's prefetched K, as one (NCHUNK*N_SUBCHUNKS,) i64 vector
+            v_page_cur = ostate[V_SLOT]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
+            tt_i32 = fx.Int32(tt)
+            tok0, _ = _tile_tok0_and_page(tt_i32)
+
+            tt1 = tt_i32 + 1
+
+            next_state_map = {}
+            for m in range_constexpr(M_TILES):
+                o_acc = [ostate[_o0_slot(m)], ostate[_o1_slot(m)]]
+                m_prev = ostate[_m_slot(m)]  # this thread's own running max, carried from last tile
+                l_prev = ostate[_l_slot(m)]  # this thread's own running denom, carried from last tile
 
                 # ---- QK in TLOOP chunks: NCHUNK raw MFMAs -> f32x4/lane ----
                 # Each chunk accumulates the N_SUBCHUNKS head-quarter k_steps
                 # (this tile's prefetched k_cur) into one f32x4 C-fragment
-                # (D[token, qhead]).
+                # (D[token, qhead]), using this M-tile's own Q operand.
                 frag_Ss = []
                 for a in range_constexpr(NCHUNK):
                     acc = arith.constant_vector(0.0, T.f32x4)
                     for s in range_constexpr(N_SUBCHUNKS):
                         acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(
-                            T.f32x4, [k_cur[a * N_SUBCHUNKS + s], q_ops[s], acc, 0, 0, 0]
+                            T.f32x4, [k_cur[a * N_SUBCHUNKS + s], q_ops_all[m * N_SUBCHUNKS + s], acc, 0, 0, 0]
                         )
                     frag_Ss.append(fx.Vector(acc))
 
-                tt1 = tt_i32 + 1
-                k_next = k_cur
-                # K's prefetch, V's page-index prefetch, and (per_token_kv only)
-                # the K/V scale stage all share the same `tt1 < part_end` guard,
-                # so they're issued together in one branch -- this also lets
-                # `_stage_kv_scale_to_lds` reuse `_k_ops_flat`'s own `phys_vec`
-                # (same tile, same page formula) instead of re-fetching the
-                # block-table lookup, without threading it out through a
-                # None-initialized variable across a dynamic if.
-                if tt1 < part_end:
-                    k_next, phys_vec1 = _k_ops_flat(tt1)
-                    _v_page_fetch_and_stage(tt1)
-                    # Per-token K/V scale (per_token_kv only): staged here too,
-                    # one tile ahead, so it's already barrier-visible (via
-                    # either barrier below) by the time next tile's iteration
-                    # reads it back at the very top -- same cadence as
-                    # k_next/K's own prefetch.
-                    if const_expr(per_token_kv):
-                        _stage_kv_scale_to_lds(phys_vec1)
+                # K's prefetch, V's page-index prefetch, and (per_token_kv
+                # only) the K/V scale stage all share the same `tt1 <
+                # part_end` guard, so they're issued together in one branch
+                # -- this also lets `_stage_kv_scale_to_lds` reuse
+                # `_k_ops_flat`'s own `phys_vec` (same tile, same page
+                # formula) instead of re-fetching the block-table lookup.
+                # K/V don't depend on the query row, so this is issued once
+                # per tile (gated to m==0), right after QK MFMA and before
+                # softmax -- matching this feature's own pre-M-tile
+                # instruction order, so the V-page read below can still
+                # reuse the upcoming pass-1 barrier for free instead of
+                # needing a dedicated one.
+                if const_expr(m == 0):
+                    k_next = k_cur
+                    if tt1 < part_end:
+                        k_next, phys_vec1 = _k_ops_flat(tt1)
+                        _v_page_fetch_and_stage(tt1)
+                        if const_expr(per_token_kv):
+                            _stage_kv_scale_to_lds(phys_vec1)
 
                 # ---- register-resident softmax over M = token, 4 scores at a time ----
                 # Each lane owns ONE qhead (= lane%16); reduce its tokens with a
                 # register reduce + shuffle_xor(16,32). Mask is a cheap scalar
                 # threshold (token = warp*TOK_CHUNK+a*c16+l16g*4+r < n_valid,
                 # matching K's contiguous-per-warp formula above).
-                c16 = 16
                 qh = lane - (lane // c16) * c16  # qhead = lane % 16
                 l16g = lane // c16  # 0..3 lane-group within the warp
-                scale = scale_qk * _ld1(sQscale_off, qh)  # per-qhead positive score scale
-                n_valid_tile = (context_len - tok0).to(fx.Float32)
+                scale = scale_qk * _ld1(sQscale_off, m * MFMA_MNK + qh)  # per-qhead positive score scale
+                n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
                 base_tok_f = fx.Int32(warp * TOK_CHUNK + l16g * 4).to(fx.Float32)
                 thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
-                neg4 = fx.Vector.filled(4, float("-inf"), fx.Float32)
+
+                neg4 = fx.Vector.filled(4, -1e30, fx.Float32)
 
                 # per_token_kv: K-scale varies per token, so (unlike the
                 # per-tensor `scale` above, a positive constant that commutes
@@ -840,11 +808,14 @@ def compile_pa_decode_tile(
                     _st_lw(sVScaleMax_off, 0, warp, pv_max)
                 gpu.barrier()
 
-                # Read back next tile's V page-index row now that the barrier
-                # above has made `_v_page_fetch_and_stage`'s store visible.
-                v_page_next = v_page_cur
-                if tt1 < part_end:
-                    v_page_next = _v_page_read_row()
+                # Read back next tile's V page-index row now that the
+                # barrier above has made `_v_page_fetch_and_stage`'s store
+                # visible -- shared across M-tiles, so only done once
+                # (at m==0), reusing this barrier for free.
+                if const_expr(m == 0):
+                    v_page_next = v_page_cur
+                    if tt1 < part_end:
+                        v_page_next = _v_page_read_row()
 
                 # per_token_kv: combine all 4 warps' max V-scale (staged just
                 # above, now barrier-visible) into this tile's normalization
@@ -866,14 +837,12 @@ def compile_pa_decode_tile(
                     v_vh_early = _v_ops(v_page_cur, 0)
 
                 # pass 2: global max over warps -> exp -> fp8 P pack (-> sP) -> sum
-                m_old = m_prev
-                m_new = m_old.maximumf(_ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
+                m_new = m_prev.maximumf(_ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
                 m_new_b = fx.Vector.from_elements([m_new], dtype=fx.Float32).broadcast_to(4)
                 ls = fx.Float32(0.0)
                 # Raw i32-word store straight to sP[qhead][token_base:+4] (fp8,
                 # 1B/elem): the packed word's 4 fp8 lanes are exactly the 4
                 # consecutive tokens this lane owns in chunk `a`.
-                base4 = 4
                 words = []
                 for a in range_constexpr(NCHUNK):
                     Pa = fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b))
@@ -896,17 +865,17 @@ def compile_pa_decode_tile(
                 if l16g == 0:
                     _st_lw(sLsum_off, qh, warp, ls)
                     if warp == 0:
-                        _st1(sCorr_off, qh, fx.Float32(exp2_amdgcn_scalar(m_old - m_new)))
+                        _st1(sCorr_off, qh, fx.Float32(exp2_amdgcn_scalar(m_prev - m_new)))
                 gpu.barrier()
 
                 # pass 3: merge per-warp sums into the running denominator. `tid <
                 # M` is exactly the `(l16g==0 and warp==0)` thread set above, so
-                # its correction factor is already in `m_old`/`m_new` registers --
+                # its correction factor is already in `m_prev`/`m_new` registers --
                 # no need to read back what it just wrote to sCorr_off/sL_off.
                 l_new = l_prev
                 if tid < MFMA_MNK:
                     gsum = _ld_lw_row(sLsum_off, tid).reduce(ReductionOp.ADD)
-                    corr_reg = fx.Float32(exp2_amdgcn_scalar(m_old - m_new))
+                    corr_reg = fx.Float32(exp2_amdgcn_scalar(m_prev - m_new))
                     accum_sum = fx.Float32(
                         arith.mulf(arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=arith.FastMathFlags.contract)
                     )
@@ -923,7 +892,7 @@ def compile_pa_decode_tile(
                 ).load()
 
                 # ---- PV with register-resident O accumulate (no LDS round-trip) ----
-                # O_new = O_old*corr + P·V per head-dim chunk; corr = exp2(m_old-m_new)
+                # O_new = O_old*corr + P·V per head-dim chunk; corr = exp2(m_prev-m_new)
                 # is per-row (PV C-fragment: vec element v of lane L holds row
                 # m = (L%64//16)*4+v, so corr_s[v] = corr[m_base+v]). No barrier
                 # after PV: O is in registers and next iter's barriers order any
@@ -932,6 +901,9 @@ def compile_pa_decode_tile(
                 corr_off = sCorr_off + m_base_pv * 4
                 corr_vec = _view(corr_off, fx.Float32, fx.make_layout(OP_ELEMS, 1)).load()
                 corr_s = [corr_vec[v] for v in range_constexpr(OP_ELEMS)]
+                # In-place mutation (not a copy): at HEAD==64, VHE_CHUNKS==1,
+                # so only vh=0 runs below -- index 1 must carry its old value
+                # through unchanged (dead state, never read for HEAD==64).
                 for vh in range_constexpr(VHE_CHUNKS):
                     v_vh = v_vh_early if const_expr(HEAD == 64) else _v_ops(v_page_cur, vh)
                     acc = arith.constant_vector(0.0, T.f32x4)
@@ -961,259 +933,17 @@ def compile_pa_decode_tile(
                         ],
                         dtype=fx.Float32,
                     )
-                next_state = [o_acc[0], o_acc[1], k_next, v_page_next, m_new, l_new]
-            else:
-                k_cur = ostate[K_SLOT]  # this tile's prefetched K, as one (NCHUNK*N_SUBCHUNKS,) i64 vector
-                v_page_cur = ostate[V_SLOT]  # this tile's V pages, as one PAGES_PER_CHUNK-wide i32 vector
-                tt_i32 = fx.Int32(tt)
-                tok0, _ = _tile_tok0_and_page(tt_i32)
+                next_state_map[_o0_slot(m)] = o_acc[0]
+                next_state_map[_o1_slot(m)] = o_acc[1]
+                next_state_map[_m_slot(m)] = m_new
+                next_state_map[_l_slot(m)] = l_new
 
-                tt1 = tt_i32 + 1
-                k_next = k_cur
-                # K's prefetch, V's page-index prefetch, and (per_token_kv only)
-                # the K/V scale stage all share the same `tt1 < part_end` guard,
-                # so they're issued together in one branch -- this also lets
-                # `_stage_kv_scale_to_lds` reuse `_k_ops_flat`'s own `phys_vec`
-                # (same tile, same page formula) instead of re-fetching the
-                # block-table lookup, without threading it out through a
-                # None-initialized variable across a dynamic if. K/V don't
-                # depend on the query row, so this is issued once per tile,
-                # shared across all M-tiles below (not repeated per M-tile).
-                if tt1 < part_end:
-                    k_next, phys_vec1 = _k_ops_flat(tt1)
-                    _v_page_fetch_and_stage(tt1)
-                    if const_expr(per_token_kv):
-                        _stage_kv_scale_to_lds(phys_vec1)
-
-                v_page_next = v_page_cur
-
-                next_state_map = {K_SLOT: k_next}
-                for m in range_constexpr(M_TILES):
-                    o_acc = [ostate[_o0_slot(m)], ostate[_o1_slot(m)]]
-                    m_prev = ostate[_m_slot(m)]  # this thread's own running max, carried from last tile
-                    l_prev = ostate[_l_slot(m)]  # this thread's own running denom, carried from last tile
-
-                    # ---- QK in TLOOP chunks: NCHUNK raw MFMAs -> f32x4/lane ----
-                    # Each chunk accumulates the N_SUBCHUNKS head-quarter k_steps
-                    # (this tile's prefetched k_cur) into one f32x4 C-fragment
-                    # (D[token, qhead]), using this M-tile's own Q operand.
-                    frag_Ss = []
-                    for a in range_constexpr(NCHUNK):
-                        acc = arith.constant_vector(0.0, T.f32x4)
-                        for s in range_constexpr(N_SUBCHUNKS):
-                            acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(
-                                T.f32x4, [k_cur[a * N_SUBCHUNKS + s], q_ops_all[m][s], acc, 0, 0, 0]
-                            )
-                        frag_Ss.append(fx.Vector(acc))
-
-                    # ---- register-resident softmax over M = token, 4 scores at a time ----
-                    # Each lane owns ONE qhead (= lane%16); reduce its tokens with a
-                    # register reduce + shuffle_xor(16,32). Mask is a cheap scalar
-                    # threshold (token = warp*TOK_CHUNK+a*c16+l16g*4+r < n_valid,
-                    # matching K's contiguous-per-warp formula above).
-                    c16 = 16
-                    qh = lane - (lane // c16) * c16  # qhead = lane % 16
-                    l16g = lane // c16  # 0..3 lane-group within the warp
-                    scale = scale_qk * _ld1(sQscale_off, m * MFMA_MNK + qh)  # per-qhead positive score scale
-                    n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
-                    base_tok_f = fx.Int32(warp * TOK_CHUNK + l16g * 4).to(fx.Float32)
-                    thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
-
-                    neg4 = fx.Vector.filled(4, -1e30, fx.Float32)
-
-                    # per_token_kv: K-scale varies per token, so (unlike the
-                    # per-tensor `scale` above, a positive constant that commutes
-                    # with max and can be applied AFTER the max-reduce below) it
-                    # must be folded into the raw score BEFORE masking/max-reduce.
-                    # V-scale doesn't affect QK at all -- it's carried alongside here
-                    # only because it's read from the same LDS round-trip.
-                    v_scale_vecs = None
-                    if const_expr(per_token_kv):
-                        v_scale_vecs = []
-                        scaled_frags = []
-                        for a in range_constexpr(NCHUNK):
-                            k_scale_vec, v_scale_vec = _load_kv_scale_vecs(a)
-                            v_scale_vecs.append(v_scale_vec)
-                            scaled_frags.append(frag_Ss[a] * k_scale_vec)
-                    else:
-                        scaled_frags = frag_Ss
-
-                    # Computed once and reused in pass 2 below (doesn't depend on pass
-                    # 1's output) instead of recomputing from scratch in both passes,
-                    # halving the mask compare/select instruction count for free.
-                    masked_chunks = [(_ct[a] < thr).select(scaled_frags[a], neg4) for a in range_constexpr(NCHUNK)]
-
-                    # pass 1: per-warp max for this qhead
-                    pm = fx.Float32(float("-inf"))
-                    for a in range_constexpr(NCHUNK):
-                        pm = pm.maximumf(masked_chunks[a].reduce(ReductionOp.MAX))
-                    for sh in (16, 32):
-                        pm = pm.maximumf(pm.shuffle_xor(sh, WAVE))
-                    # Unconditional store: all 4 lanes sharing this qhead already hold
-                    # the identical post-shuffle_xor `pm`, so this is a harmless
-                    # same-value redundant write, not a race.
-                    _st_lw(sLmax_off, qh, warp, pm * scale)
-
-                    # per_token_kv: this warp's own max V-scale over its 256/4 owned
-                    # tokens (masked to 0, not -inf, for out-of-range tokens -- a
-                    # max reduce ignores 0 as long as real scales are positive,
-                    # matching production's `_store_vmax_warp`). v_scale doesn't
-                    # depend on qhead, so this is naturally redundant across the 16
-                    # qh-differing lanes sharing (warp, l16g) -- harmless, since
-                    # they all compute the identical value. Reuses the pass-1
-                    # barrier below (no new barrier needed), same as `pm`/sLmax.
-                    if const_expr(per_token_kv):
-                        zero4 = fx.Vector.filled(4, 0.0, fx.Float32)
-                        pv_max = fx.Float32(0.0)
-                        for a in range_constexpr(NCHUNK):
-                            pv_max = pv_max.maximumf(
-                                (_ct[a] < thr).select(v_scale_vecs[a], zero4).reduce(ReductionOp.MAX)
-                            )
-                        for sh in (16, 32):
-                            pv_max = pv_max.maximumf(pv_max.shuffle_xor(sh, WAVE))
-                        _st_lw(sVScaleMax_off, 0, warp, pv_max)
-                    gpu.barrier()
-
-                    # Read back next tile's V page-index row now that the barrier
-                    # above has made `_v_page_fetch_and_stage`'s store visible --
-                    # shared across M-tiles, so only done once (at m==0).
-                    if const_expr(m == 0):
-                        if tt1 < part_end:
-                            v_page_next = _v_page_read_row()
-
-                    # per_token_kv: combine all 4 warps' max V-scale (staged just
-                    # above, now barrier-visible) into this tile's normalization
-                    # factor -- mirrors production's `v_max_scaled`/`norm_factor`.
-                    # `v_max_scaled` also doubles as this tile's PV correction
-                    # factor (applied to `op` in the PV loop below), replacing the
-                    # single per-CTA `v_scale_f` the per-tensor path uses instead.
-                    v_max_scaled = None
-                    norm_factor_b = None
-                    if const_expr(per_token_kv):
-                        v_max_global = _ld_lw_row(sVScaleMax_off, 0).reduce(ReductionOp.MAX)
-                        v_max_scaled = v_max_global * fx.Float32(1.0 / FP8_MAX)
-                        v_max_safe = v_max_scaled + fx.Float32(1e-8 / FP8_MAX)
-                        norm_factor = fx.Float32(rcp_f32(v_max_safe))
-                        norm_factor_b = fx.Vector.from_elements([norm_factor], dtype=fx.Float32).broadcast_to(4)
-
-                    v_vh_early = None
-                    if const_expr(HEAD == 64):
-                        v_vh_early = _v_ops(v_page_cur, 0)
-
-                    # pass 2: global max over warps -> exp -> fp8 P pack (-> sP) -> sum
-                    m_old = m_prev
-                    m_new = m_old.maximumf(_ld_lw_row(sLmax_off, qh).reduce(ReductionOp.MAX))
-                    m_new_b = fx.Vector.from_elements([m_new], dtype=fx.Float32).broadcast_to(4)
-                    ls = fx.Float32(0.0)
-                    # Raw i32-word store straight to sP[qhead][token_base:+4] (fp8,
-                    # 1B/elem): the packed word's 4 fp8 lanes are exactly the 4
-                    # consecutive tokens this lane owns in chunk `a`.
-                    base4 = 4
-                    words = []
-                    for a in range_constexpr(NCHUNK):
-                        Pa = fx.Vector(exp2_f32_fast(masked_chunks[a] * scale - m_new_b))
-                        ls = ls + Pa.reduce(ReductionOp.ADD)
-                        if const_expr(per_token_kv):
-                            v_scale_this = _load_v_scale_vec(a) if const_expr(HEAD == 64) else v_scale_vecs[a]
-                            p_scaled = Pa * v_scale_this * norm_factor_b
-                        else:
-                            p_scaled = Pa * fx.Vector.filled(4, FP8_MAX, fx.Float32)
-                        words.append(_f32_to_fp8_words(p_scaled)[0])
-
-                    p_off0 = sP_off + qh * SP_ROW_BYTES + warp * TOK_CHUNK + l16g * base4
-                    _view(p_off0, fx.Int32, fx.make_layout(NCHUNK, c16 // 4)).store(
-                        fx.Vector.from_elements(words, dtype=fx.Int32)
-                    )
-                    if const_expr(HEAD == 64):
-                        fx.rocdl.sched_dswr(NCHUNK)
-                    for sh in (16, 32):
-                        ls = ls.addf(ls.shuffle_xor(sh, WAVE), fastmath=arith.FastMathFlags.contract)
-                    if l16g == 0:
-                        _st_lw(sLsum_off, qh, warp, ls)
-                        if warp == 0:
-                            _st1(sCorr_off, qh, fx.Float32(exp2_amdgcn_scalar(m_old - m_new)))
-                    gpu.barrier()
-
-                    # pass 3: merge per-warp sums into the running denominator. `tid <
-                    # M` is exactly the `(l16g==0 and warp==0)` thread set above, so
-                    # its correction factor is already in `m_old`/`m_new` registers --
-                    # no need to read back what it just wrote to sCorr_off/sL_off.
-                    l_new = l_prev
-                    if tid < MFMA_MNK:
-                        gsum = _ld_lw_row(sLsum_off, tid).reduce(ReductionOp.ADD)
-                        corr_reg = fx.Float32(exp2_amdgcn_scalar(m_old - m_new))
-                        accum_sum = fx.Float32(
-                            arith.mulf(
-                                arith.unwrap(l_prev), arith.unwrap(corr_reg), fastmath=arith.FastMathFlags.contract
-                            )
-                        )
-                        l_new = accum_sum.addf(gsum, fastmath=arith.FastMathFlags.contract)
-
-                    # ---- read P back as the A operand for P·V: lane reads
-                    # sP[qhead=lane16][token rgroup*64:+64], the same permuted token
-                    # slice v_ops uses so the raw PV MMA matches. Row stride is
-                    # SP_ROW_BYTES (see the P-pack store above), not TILE_TOK. ----
-                    p_ops = _view(
-                        sP_off + lane16 * SP_ROW_BYTES + rgroup * 64,
-                        fx.Int64,
-                        fx.make_layout(NVOPS, 1),
-                    ).load()
-
-                    # ---- PV with register-resident O accumulate (no LDS round-trip) ----
-                    # O_new = O_old*corr + P·V per head-dim chunk; corr = exp2(m_old-m_new)
-                    # is per-row (PV C-fragment: vec element v of lane L holds row
-                    # m = (L%64//16)*4+v, so corr_s[v] = corr[m_base+v]). No barrier
-                    # after PV: O is in registers and next iter's barriers order any
-                    # sP reuse. Raw PV MMA: NVOPS k_steps accumulate into one f32x4.
-                    m_base_pv = (lane // c16) * 4
-                    corr_off = sCorr_off + m_base_pv * 4
-                    corr_vec = _view(corr_off, fx.Float32, fx.make_layout(OP_ELEMS, 1)).load()
-                    corr_s = [corr_vec[v] for v in range_constexpr(OP_ELEMS)]
-                    # Copy (not [None, None]): at HEAD==64, VHE_CHUNKS==1, so
-                    # only vh=0 runs below -- index 1 must carry its old value
-                    # through unchanged (dead state, never read for HEAD==64),
-                    # matching the original code's in-place `o_acc[vh] = ...`
-                    # mutation semantics.
-                    o_acc_new = list(o_acc)
-                    for vh in range_constexpr(VHE_CHUNKS):
-                        v_vh = v_vh_early if const_expr(HEAD == 64) else _v_ops(v_page_cur, vh)
-                        acc = arith.constant_vector(0.0, T.f32x4)
-                        for s in range_constexpr(NVOPS):
-                            acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(T.f32x4, [p_ops[s], v_vh[s], acc, 0, 0, 0])
-                        op = fx.Vector(acc)
-                        if const_expr(per_token_kv):
-                            # This tile's V-scale correction (undoes the P*v_scale
-                            # normalization applied before the fp8 pack above) --
-                            # replaces the per-tensor path's single per-CTA
-                            # `v_scale_f`, folded in once at the very end instead
-                            # (see the epilogue's `o_scale` below).
-                            v_corr_b = fx.Vector.from_elements([v_max_scaled], dtype=fx.Float32).broadcast_to(OP_ELEMS)
-                            op = op * v_corr_b
-                        oo = o_acc[vh]
-                        fm_contract = arith.FastMathFlags.contract
-                        o_acc_new[vh] = fx.Vector.from_elements(
-                            [
-                                fx.Float32(
-                                    arith.addf(
-                                        arith.mulf(arith.unwrap(oo[v]), arith.unwrap(corr_s[v]), fastmath=fm_contract),
-                                        arith.unwrap(op[v]),
-                                        fastmath=fm_contract,
-                                    )
-                                )
-                                for v in range_constexpr(OP_ELEMS)
-                            ],
-                            dtype=fx.Float32,
-                        )
-                    next_state_map[_o0_slot(m)] = o_acc_new[0]
-                    next_state_map[_o1_slot(m)] = o_acc_new[1]
-                    next_state_map[_m_slot(m)] = m_new
-                    next_state_map[_l_slot(m)] = l_new
-                next_state_map[V_SLOT] = v_page_next
-                next_state = [next_state_map[i] for i in range(len(next_state_map))]
+            next_state_map[K_SLOT] = k_next
+            next_state_map[V_SLOT] = v_page_next
+            next_state = [next_state_map[i] for i in range(len(next_state_map))]
             results = yield next_state
         o_final = results
 
-        c16 = 16
         qh_post = lane - (lane // c16) * c16
         l16g_post = lane // c16
         thr_copy_o_e = tcopy_o.get_slice(tid)
