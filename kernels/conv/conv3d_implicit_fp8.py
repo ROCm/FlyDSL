@@ -513,9 +513,11 @@ def _prep_weight_fp8(weight: torch.Tensor) -> torch.Tensor:
     return out
 
 
-# gemm8w's rigid 256x256x128 8-wave tile requires these; see conv3d_implicit_fp8_gemm8w.
+# gemm8w now handles N-partial (k%256), K-partial (crs%128), and tiny-K (crs<=128,
+# padded to 2 tiles), so the only remaining requirement is c%16 (shared by both the
+# fp8 MFMA path and the NDHWC transpose). Everything else routes to gemm8w.
 def _gemm8w_eligible(k, crs, c):
-    return (k % 256 == 0) and (crs % 128 == 0) and (c % 16 == 0) and (crs // 128 >= 2)
+    return c % 16 == 0
 
 
 def _run_gemm8w_fp8(x, weight, bias, strides, pads, stream, autotune, dims):

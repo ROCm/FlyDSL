@@ -186,12 +186,20 @@ def compile_conv3d_implicit_fp8_gemm8w(
     hw_o = ho * wo
     npq = n * dhw
     crs = c * kt * kh * kw
-    K_ITERS = crs // BLOCK_K
+    # K-partial (crs % 128 != 0): round the k-loop up to a whole number of 128-wide
+    # tiles. crs_pad is the padded K extent; the tail tile's k columns in [crs, crs_pad)
+    # are made zero on both operands -- A via the k_col < crs im2col mask (OOB sentinel),
+    # B via a host-side zero-pad of the weight's crs dimension to crs_pad.
+    # The 3-stage pipeline (prologue prefetches k=0,1 + 2 tail steps) needs K_ITERS>=2,
+    # so tiny-K shapes (crs <= 128) are padded up to 2 full tiles (the 2nd reads zeros).
+    crs_pad = max(2 * BLOCK_K, ((crs + BLOCK_K - 1) // BLOCK_K) * BLOCK_K)
+    K_ITERS = crs_pad // BLOCK_K
 
     assert c % 16 == 0, f"FP8 needs C % 16 == 0, got C={c}"
-    assert crs % BLOCK_K == 0, f"gemm8w needs crs % 128 == 0 (aligned K), got crs={crs}"
-    assert k % BLOCK_N == 0, f"gemm8w needs k % 256 == 0 (BLOCK_N), got k={k}"
-    assert K_ITERS >= 2, f"gemm8w needs crs//128 >= 2, got {K_ITERS}"
+    # N-partial (k % 256 != 0) is supported: grid_n ceils, the tail n-tile's OOB k
+    # columns read 0 from the weight buffer (num_records bound) and the epilogue masks
+    # col >= k, so the extra columns are computed-as-zero and never stored.
+    assert K_ITERS >= 2, f"gemm8w needs crs_pad//128 >= 2, got {K_ITERS}"
 
     BIG_IN = (n * c * d * h * width) > 0x7FFFFFFF
     BIG_OUT = (n * k * do * ho * wo * 2) > 0x7FFFFFFF
@@ -217,7 +225,7 @@ def compile_conv3d_implicit_fp8_gemm8w(
     need_w_check = not (kw == 1 and pw == 0 and sw == 1 and wo == width)
 
     grid_m = (npq + BLOCK_M - 1) // BLOCK_M
-    grid_n = k // BLOCK_N
+    grid_n = (k + BLOCK_N - 1) // BLOCK_N  # ceil: N-partial (k%256!=0) needs the tail n-tile
 
     a_lds_size = LDS_BLOCK_M * BLOCK_K  # 16384
     b_lds_size = LDS_BLOCK_N * BLOCK_K
@@ -327,14 +335,24 @@ def compile_conv3d_implicit_fp8_gemm8w(
             ow = rem2 % wo
             return (row_valid, n_idx, ot, oh, ow)
 
-        def im2col_safe_elem_pre(spatial, k_col):
+        K_PARTIAL = crs != crs_pad
+
+        def im2col_safe_elem_pre(spatial, k_col, k_iter):
             cc = k_col % c
+            # K-partial: the tail tile (k_iter == K_ITERS-1) has k columns >= crs; those
+            # decode a bogus tap, so mask them to the OOB sentinel (reads 0). Only the
+            # tail tile can exceed crs, so gate on k_iter to keep aligned tiles cheap.
+            k_in_range = True
+            if const_expr(K_PARTIAL and k_iter == K_ITERS - 1):
+                k_in_range = k_col < fx.Index(crs)
             if const_expr(temporal_only_fast):
                 row_valid, out_t, m_row = spatial
                 kt_i = k_col // c
                 temporal_delta = kt_i - pt
                 in_t = out_t + temporal_delta
                 valid = row_valid & in_range(in_t, d)
+                if const_expr(K_PARTIAL and k_iter == K_ITERS - 1):
+                    valid = valid & k_in_range
                 if const_expr(BIG_IN):
                     g_elem = ((m_row + temporal_delta * hw_o) - (nbase * dhw + base_t * hw_o)) * c + cc
                 else:
@@ -356,6 +374,8 @@ def compile_conv3d_implicit_fp8_gemm8w(
                     valid = valid & in_range(in_h, h)
                 if const_expr(need_w_check):
                     valid = valid & in_range(in_w, width)
+                if const_expr(K_PARTIAL and k_iter == K_ITERS - 1):
+                    valid = valid & k_in_range
                 if const_expr(BIG_IN):
                     di = n_idx - nbase
                     g_elem = (((di * d + (in_t - base_t)) * h + in_h) * width + in_w) * c + cc
@@ -407,18 +427,20 @@ def compile_conv3d_implicit_fp8_gemm8w(
                     lin = m_row * crs + k_col
                     safe = fx.Int32(arith.select(m_row < fx.Index(npq), lin, fx.Index(x_num_records)))
                 else:
-                    safe = im2col_safe_elem_pre(spatial, k_base + cc)
+                    safe = im2col_safe_elem_pre(spatial, k_base + cc, k_iter)
                 base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr)) + fx.Int32(step_off)
                 lds_ptr = fx.inttoptr(LdsPtr_t, base_i32)
                 dst = fx.make_view(lds_ptr, fx.make_layout(1, 1))
                 src = fx.slice(x_div, (None, fx.Int32(safe)))
                 fx.copy(g2s_atom, src, dst)
 
-        # ---- B G2S: plain KTRSC (k, crs) matrix -> reuse the GEMM loader verbatim ----
-        gl_off_b = compute_global_swizzle(lane_id, wave_id, crs, N_LDS_ROUNDS, preshuffled=False)
+        # ---- B G2S: plain KTRSC (k, crs_pad) matrix -> reuse the GEMM loader verbatim ----
+        # Row stride is crs_pad (the host zero-pads the weight's crs dim to a 128 multiple),
+        # so the k-loop's tail tile reads the padded zeros for k_col in [crs, crs_pad).
+        gl_off_b = compute_global_swizzle(lane_id, wave_id, crs_pad, N_LDS_ROUNDS, preshuffled=False)
         b_g2s = G2SLoader(b_div, gl_off_b, N_LDS_STEPS_B, f8_ir_t, wave_id)
-        B0_gl_offset = (block_n * BLOCK_N) * crs
-        B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * crs
+        B0_gl_offset = (block_n * BLOCK_N) * crs_pad
+        B1_gl_offset = (block_n * BLOCK_N + LDS_BLOCK_N) * crs_pad
 
         a_s2r = S2RLoader(wave_m, N_TILES_A)
         b_s2r = S2RLoader(wave_n, N_TILES_B)
@@ -627,6 +649,16 @@ def _conv3d_impl_fp8_gemm8w(x, weight, bias=None, stride=1, padding=0, stream=No
     launch_stream = torch.cuda.current_stream() if stream is None else stream
     x_arg = _transpose_activation_fp8(x)
     w_arg = _prep_weight_fp8(weight)
+
+    # K-partial: the kernel's k-loop runs over crs_pad (crs rounded up to 128). Zero-pad
+    # the weight's crs dimension so the tail tile reads zeros for k in [crs, crs_pad).
+    crs = c * kt * kh * kw
+    crs_pad = max(2 * 128, ((crs + 128 - 1) // 128) * 128)
+    if crs_pad != crs:
+        w_mat = w_arg.view(k, crs)
+        w_padded = torch.zeros((k, crs_pad), device=w_mat.device, dtype=w_mat.dtype)
+        w_padded[:, :crs] = w_mat
+        w_arg = w_padded.view(-1)
 
     has_bias = bias is not None
     bias_arg = (
