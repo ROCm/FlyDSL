@@ -1,8 +1,66 @@
 {
  "schema": 1,
- "updated": "2026-07-16T04:26:29Z",
+ "updated": "2026-07-16T05:22:40Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29473602944,
+   "pr": null,
+   "commit": "a7eef7f17d013db3f6b162acc7330097dd120756",
+   "branch": "main",
+   "event": "push",
+   "title": "add xcd remap (#863)",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29473602944",
+   "created_at": "2026-07-16T05:19:49Z",
+   "updated_at": "2026-07-16T05:21:04Z",
+   "actor": "coderfeli",
+   "jobs": []
+  },
+  {
+   "run_id": 29472365672,
+   "pr": null,
+   "commit": "d8773196fbf99cb55fcdacac355430281edbd14e",
+   "branch": "main",
+   "event": "push",
+   "title": "[CI] Make benchmark baselines fork-safe and bounded (#857)",
+   "status": "completed",
+   "conclusion": "cancelled",
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29472365672",
+   "created_at": "2026-07-16T04:51:14Z",
+   "updated_at": "2026-07-16T05:20:21Z",
+   "actor": "coderfeli",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-16T04:53:58Z",
+     "completed_at": "2026-07-16T05:20:20Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29472365672/job/87538130795"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-16T04:53:01Z",
+     "completed_at": "2026-07-16T05:19:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29472365672/job/87538130797"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "completed",
+     "conclusion": "cancelled",
+     "started_at": "2026-07-16T04:53:01Z",
+     "completed_at": "2026-07-16T05:19:49Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29472365672/job/87538130813"
+    }
+   ]
+  },
   {
    "run_id": 29471116769,
    "pr": 785,
@@ -356,21 +414,30 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "completed",
-   "conclusion": "failure",
+   "status": "queued",
+   "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522",
    "created_at": "2026-07-15T12:13:42Z",
-   "updated_at": "2026-07-15T20:00:11Z",
+   "updated_at": "2026-07-16T04:56:34Z",
    "actor": "xudoyuan",
    "jobs": [
     {
-     "runner": "linux-flydsl-mi325-1",
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-16T04:57:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87538572399"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
      "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-15T12:16:08Z",
-     "completed_at": "2026-07-15T13:01:18Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87349238293"
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-16T04:56:34Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87538572412"
     },
     {
      "runner": "linux-flydsl-navi-2",
@@ -379,7 +446,7 @@
      "conclusion": "success",
      "started_at": "2026-07-15T18:34:52Z",
      "completed_at": "2026-07-15T18:50:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87349238393"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87538572601"
     },
     {
      "runner": "linux-flydsl-mi355-1",
@@ -388,25 +455,16 @@
      "conclusion": "success",
      "started_at": "2026-07-15T12:16:17Z",
      "completed_at": "2026-07-15T13:47:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87349238418"
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87538572603"
     },
     {
-     "runner": "linux-flydsl-mi325-8",
+     "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
      "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-15T19:49:10Z",
-     "completed_at": "2026-07-15T20:00:11Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87443542056"
-    },
-    {
-     "runner": "linux-flydsl-mi355-8",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "failure",
-     "started_at": "2026-07-15T18:50:57Z",
-     "completed_at": "2026-07-15T19:20:29Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87443542102"
+     "conclusion": "success",
+     "started_at": "2026-07-15T12:16:08Z",
+     "completed_at": "2026-07-15T13:01:18Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29414436522/job/87538572722"
     }
    ]
   },
@@ -2084,36 +2142,6 @@
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29308126953/job/87006102543"
     }
    ]
-  },
-  {
-   "run_id": 29306723771,
-   "pr": 844,
-   "commit": "53bd502d3ab7f4e5867dceef926e6112b2c298b2",
-   "branch": "forward_lse",
-   "event": "pull_request",
-   "title": "Add forward LSE output to FlyDSL flash attention kernels",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29306723771",
-   "created_at": "2026-07-14T04:44:39Z",
-   "updated_at": "2026-07-14T04:45:20Z",
-   "actor": "amd-wsung102",
-   "jobs": []
-  },
-  {
-   "run_id": 29301784497,
-   "pr": null,
-   "commit": "2ff124b1287f6e96fcd1837ea0ed5108d738c90d",
-   "branch": "jiacao/conv3d-multi-tile-autotune-v2",
-   "event": "pull_request",
-   "title": "[Kernel] conv3d: parameterize tile size + add autotuner",
-   "status": "completed",
-   "conclusion": "failure",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29301784497",
-   "created_at": "2026-07-14T02:44:00Z",
-   "updated_at": "2026-07-14T02:44:49Z",
-   "actor": "jiacao-amd",
-   "jobs": []
   }
  ]
 }
