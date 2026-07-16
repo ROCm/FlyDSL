@@ -129,12 +129,12 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
     # ── GPU kernel ────────────────────────────────────────────────────────
     @flyc.kernel
     def layernorm_kernel(
-        Input: fx.Tensor,
-        Gamma: fx.Tensor,
-        Beta: fx.Tensor,
-        Output: fx.Tensor,
-        Mean: fx.Tensor,
-        Rstd: fx.Tensor,
+        Input: fx.Pointer,
+        Gamma: fx.Pointer,
+        Beta: fx.Pointer,
+        Output: fx.Pointer,
+        Mean: fx.Pointer,
+        Rstd: fx.Pointer,
     ):
         bid = fx.block_idx.x
         tid = fx.thread_idx.x
@@ -147,11 +147,24 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
         s_sum = lds.s_sum.view(fx.make_layout(RED_SLOTS, 1))
         s_sumsq = lds.s_sumsq.view(fx.make_layout(RED_SLOTS, 1))
 
+        # The wrapper guarantees contiguous [M, N] rows and contiguous [N]
+        # affine parameters. Reconstruct only this block's static views so the
+        # kernel ABI carries one address per argument, without shape/stride
+        # metadata for layouts already fixed by the contract.
+        row_layout = fx.make_layout(N, 1)
+        scalar_layout = fx.make_layout(1, 1)
+        bid_i64 = fx.Int64(bid)
+        row_offset = bid_i64 * N
+        Input_buf = fx.rocdl.make_buffer_tensor((Input + row_offset).view(row_layout))
+        Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma.view(row_layout))
+        Beta_buf = fx.rocdl.make_buffer_tensor(Beta.view(row_layout))
+        Output_buf = fx.rocdl.make_buffer_tensor((Output + row_offset).view(row_layout))
+
         if const_expr(store_stats):
-            Mean_buf = fx.rocdl.make_buffer_tensor(Mean)
-            Rstd_buf = fx.rocdl.make_buffer_tensor(Rstd)
-            mean_div = fx.logical_divide(Mean_buf, fx.make_layout(1, 1))
-            rstd_div = fx.logical_divide(Rstd_buf, fx.make_layout(1, 1))
+            mean_row = fx.rocdl.make_buffer_tensor((Mean + bid_i64).view(scalar_layout))
+            rstd_row = fx.rocdl.make_buffer_tensor((Rstd + bid_i64).view(scalar_layout))
+            mean_div = fx.logical_divide(mean_row, scalar_layout)
+            rstd_div = fx.logical_divide(rstd_row, scalar_layout)
             stats_copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), 32)
 
         # ── helpers: wave / block reduction ───────────────────────────────
@@ -220,16 +233,8 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
             in_local = []
 
             # ── Layout API: buffer-backed tensors + tiled access ─────
-            Input_buf = fx.rocdl.make_buffer_tensor(Input)
-            Output_buf = fx.rocdl.make_buffer_tensor(Output)
-            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-            Beta_buf = fx.rocdl.make_buffer_tensor(Beta)
-
-            row_in = fx.slice(Input_buf, (bid, None))
-            row_out = fx.slice(Output_buf, (bid, None))
-
-            in_div = fx.logical_divide(row_in, fx.make_layout(VEC_WIDTH, 1))
-            out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
+            in_div = fx.logical_divide(Input_buf, fx.make_layout(VEC_WIDTH, 1))
+            out_div = fx.logical_divide(Output_buf, fx.make_layout(VEC_WIDTH, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(VEC_WIDTH, 1))
             beta_div = fx.logical_divide(Beta_buf, fx.make_layout(VEC_WIDTH, 1))
 
@@ -253,8 +258,8 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
 
             if const_expr(store_stats):
                 if tid == 0:
-                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, mean_div, bid, mean)
-                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rstd)
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, mean_div, 0, mean)
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, rstd_div, 0, rstd)
 
             g_cur = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, gamma_div, tid).to(fx.Float32)
             b_cur = _load_vec(copy_atom, VEC_WIDTH, elem_dtype, beta_div, tid).to(fx.Float32)
@@ -286,14 +291,6 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
             # ==============================================================
             # Generic path: 2-pass scalar implementation for arbitrary N
             # ==============================================================
-            Input_buf = fx.rocdl.make_buffer_tensor(Input)
-            Output_buf = fx.rocdl.make_buffer_tensor(Output)
-            Gamma_buf = fx.rocdl.make_buffer_tensor(Gamma)
-            Beta_buf = fx.rocdl.make_buffer_tensor(Beta)
-
-            row_in = fx.slice(Input_buf, (bid, None))
-            row_out = fx.slice(Output_buf, (bid, None))
-
             c_zero_f = fx.Float32(0.0)
             thread_sum = c_zero_f
             thread_sumsq = c_zero_f
@@ -303,10 +300,10 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
                 elem_bits,
             )
 
-            row_div = fx.logical_divide(row_in, fx.make_layout(1, 1))
+            row_div = fx.logical_divide(Input_buf, fx.make_layout(1, 1))
             gamma_div = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
             beta_div = fx.logical_divide(Beta_buf, fx.make_layout(1, 1))
-            out_div = fx.logical_divide(row_out, fx.make_layout(1, 1))
+            out_div = fx.logical_divide(Output_buf, fx.make_layout(1, 1))
 
             # ── Pass 1: sum + sumsq ──────────────────────────────────────
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
@@ -326,8 +323,8 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
 
             if const_expr(store_stats):
                 if tid == 0:
-                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, mean_div, bid, mean)
-                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, rstd_div, bid, rstd)
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, mean_div, 0, mean)
+                    _store_scalar(stats_copy_atom, fx.Float32, fx.Float32, rstd_div, 0, rstd)
 
             # ── Pass 2: normalize + affine + store ───────────────────────
             for base_idx_int in range_constexpr(0, N, BLOCK_THREADS):
@@ -351,12 +348,12 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
 
         @flyc.jit
         def launch_layernorm(
-            Input: fx.Tensor,
-            Gamma: fx.Tensor,
-            Beta: fx.Tensor,
-            Output: fx.Tensor,
-            Mean: fx.Tensor,
-            Rstd: fx.Tensor,
+            Input: fx.Pointer,
+            Gamma: fx.Pointer,
+            Beta: fx.Pointer,
+            Output: fx.Pointer,
+            Mean: fx.Pointer,
+            Rstd: fx.Pointer,
             m_in: fx.Int32,
             stream: fx.Stream = fx.Stream(None),
         ):
@@ -371,10 +368,10 @@ def build_layernorm_module(N: int, dtype_str: str, store_stats: bool = False, ep
 
     @flyc.jit
     def launch_layernorm(
-        Input: fx.Tensor,
-        Gamma: fx.Tensor,
-        Beta: fx.Tensor,
-        Output: fx.Tensor,
+        Input: fx.Pointer,
+        Gamma: fx.Pointer,
+        Beta: fx.Pointer,
+        Output: fx.Pointer,
         m_in: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
@@ -1582,10 +1579,27 @@ if torch is not None:
         entry = _FWD_CACHE.get(key)
         if entry is None:
             launch_fn = build_layernorm_module(N, dtype_str, store_stats=store_stats, eps=eps)
+            elem_dtype = dtype_to_elem_type(dtype_str)
+            x_ptr = flyc.from_c_void_p(elem_dtype, x.data_ptr())
+            weight_ptr = flyc.from_c_void_p(elem_dtype, weight.data_ptr())
+            bias_ptr = flyc.from_c_void_p(elem_dtype, bias.data_ptr())
+            out_ptr = flyc.from_c_void_p(elem_dtype, out.data_ptr())
             if store_stats:
-                compiled = flyc.compile(launch_fn, x, weight, bias, out, mean, rstd, M, stream)
+                mean_ptr = flyc.from_c_void_p(fx.Float32, mean.data_ptr())
+                rstd_ptr = flyc.from_c_void_p(fx.Float32, rstd.data_ptr())
+                compiled = flyc.compile(
+                    launch_fn,
+                    x_ptr,
+                    weight_ptr,
+                    bias_ptr,
+                    out_ptr,
+                    mean_ptr,
+                    rstd_ptr,
+                    M,
+                    stream,
+                )
             else:
-                compiled = flyc.compile(launch_fn, x, weight, bias, out, M, stream)
+                compiled = flyc.compile(launch_fn, x_ptr, weight_ptr, bias_ptr, out_ptr, M, stream)
             _FWD_CACHE[key] = compiled
             entry = compiled
         return entry
@@ -1601,8 +1615,10 @@ if torch is not None:
         assert (
             x.dtype == weight.dtype == bias.dtype
         ), f"x/weight/bias dtypes must match, got {x.dtype}/{weight.dtype}/{bias.dtype}"
+        assert weight.device == x.device and bias.device == x.device, "x/weight/bias must be on the same device"
         M, N = x.shape
-        assert weight.shape[-1] == N and bias.shape[-1] == N, "weight/bias length must equal x last dim (N)"
+        assert weight.dim() == 1 and bias.dim() == 1, "weight/bias must be 1D affine vectors"
+        assert weight.shape[0] == N and bias.shape[0] == N, "weight/bias length must equal x last dim (N)"
         out = torch.empty_like(x)
         mean = torch.empty((M,), device=x.device, dtype=torch.float32) if store_stats else None
         rstd = torch.empty((M,), device=x.device, dtype=torch.float32) if store_stats else None
@@ -1613,9 +1629,18 @@ if torch is not None:
             stream = torch.cuda.current_stream()
             compiled = _get_fwd_compiled(x, weight, bias, out, mean, rstd, M, N, dtype_str, store_stats, eps, stream)
             if store_stats:
-                compiled(x, weight, bias, out, mean, rstd, M, stream)
+                compiled(
+                    x.data_ptr(),
+                    weight.data_ptr(),
+                    bias.data_ptr(),
+                    out.data_ptr(),
+                    mean.data_ptr(),
+                    rstd.data_ptr(),
+                    M,
+                    stream,
+                )
             else:
-                compiled(x, weight, bias, out, M, stream)
+                compiled(x.data_ptr(), weight.data_ptr(), bias.data_ptr(), out.data_ptr(), M, stream)
         return out, mean, rstd
 
     def layernorm_bwd(x, weight, dout, mean, rstd, eps=EPS):
@@ -1631,7 +1656,7 @@ if torch is not None:
         ), f"x/weight/dout dtypes must match, got {x.dtype}/{weight.dtype}/{dout.dtype}"
         M, N = x.shape
         assert dout.shape == x.shape, "dout shape must equal x shape"
-        assert weight.numel() == N, "weight length must equal x last dim (N)"
+        assert weight.dim() == 1 and weight.shape[0] == N, "weight must be a length-N 1D affine vector"
         assert mean.numel() == M and rstd.numel() == M, "mean/rstd length must equal x rows (M)"
         assert all(
             t.device == x.device for t in (weight, dout, mean, rstd)

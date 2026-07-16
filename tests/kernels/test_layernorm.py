@@ -67,6 +67,20 @@ def _torch_dtype(dtype: str):
     raise ValueError(f"unsupported dtype: {dtype}")
 
 
+def _flydsl_elem_dtype(dtype: str):
+    if dtype == "f32":
+        return fx.Float32
+    if dtype == "f16":
+        return fx.Float16
+    if dtype == "bf16":
+        return fx.BFloat16
+    raise ValueError(f"unsupported dtype: {dtype}")
+
+
+def _as_pointer(tensor, elem_dtype):
+    return flyc.from_c_void_p(elem_dtype, tensor.data_ptr())
+
+
 def _get_layernorm_configs():
     shapes_env = os.environ.get("ROCDSL_LAYERNORM_SHAPES", "").strip()
     if shapes_env:
@@ -129,10 +143,26 @@ def run_test(M: int, N: int, dtype: str = "f32"):
 
     print("Launching kernel...")
     stream = torch.cuda.current_stream()
-    compiled_fn = flyc.compile(launch_fn, input_dev, gamma_dev, beta_dev, output_dev, M, stream)
+    elem_dtype = _flydsl_elem_dtype(dtype)
+    compiled_fn = flyc.compile(
+        launch_fn,
+        _as_pointer(input_dev, elem_dtype),
+        _as_pointer(gamma_dev, elem_dtype),
+        _as_pointer(beta_dev, elem_dtype),
+        _as_pointer(output_dev, elem_dtype),
+        M,
+        stream,
+    )
 
     def kernel_launch():
-        compiled_fn(input_dev, gamma_dev, beta_dev, output_dev, M, stream)
+        compiled_fn(
+            input_dev.data_ptr(),
+            gamma_dev.data_ptr(),
+            beta_dev.data_ptr(),
+            output_dev.data_ptr(),
+            M,
+            stream,
+        )
 
     # One run for correctness visibility, then benchmark via shared harness.
     kernel_launch()
@@ -1018,8 +1048,28 @@ def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
     out = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     mean = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
     rstd = torch.empty((M,), device="cuda", dtype=DTYPE_FP32)
-    fwd_c = flyc.compile(fwd_fn, x, weight, bias, out, mean, rstd, M, stream)
-    fwd_c(x, weight, bias, out, mean, rstd, M, stream)
+    elem_dtype = _flydsl_elem_dtype(dtype)
+    fwd_c = flyc.compile(
+        fwd_fn,
+        _as_pointer(x, elem_dtype),
+        _as_pointer(weight, elem_dtype),
+        _as_pointer(bias, elem_dtype),
+        _as_pointer(out, elem_dtype),
+        _as_pointer(mean, fx.Float32),
+        _as_pointer(rstd, fx.Float32),
+        M,
+        stream,
+    )
+    fwd_c(
+        x.data_ptr(),
+        weight.data_ptr(),
+        bias.data_ptr(),
+        out.data_ptr(),
+        mean.data_ptr(),
+        rstd.data_ptr(),
+        M,
+        stream,
+    )
     torch.cuda.synchronize()
     mean_err = (mean - mean_ref).abs().max().item()
     rstd_err = (rstd - rstd_ref).abs().max().item()
@@ -1028,15 +1078,14 @@ def run_layernorm_bwd_test(M: int, N: int, dtype: str = "f32"):
     dx = torch.empty((M, N), device="cuda", dtype=torch_dtype)
     dgamma = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
     dbias = torch.zeros((N,), device="cuda", dtype=DTYPE_FP32)
-    elem_dtype = {"f32": fx.Float32, "f16": fx.Float16, "bf16": fx.BFloat16}[dtype]
-    x_ptr = flyc.from_c_void_p(elem_dtype, x.data_ptr())
-    weight_ptr = flyc.from_c_void_p(elem_dtype, weight.data_ptr())
-    dy_ptr = flyc.from_c_void_p(elem_dtype, dy.data_ptr())
-    mean_ptr = flyc.from_c_void_p(fx.Float32, mean.data_ptr())
-    rstd_ptr = flyc.from_c_void_p(fx.Float32, rstd.data_ptr())
-    dx_ptr = flyc.from_c_void_p(elem_dtype, dx.data_ptr())
-    dgamma_ptr = flyc.from_c_void_p(fx.Float32, dgamma.data_ptr())
-    dbias_ptr = flyc.from_c_void_p(fx.Float32, dbias.data_ptr())
+    x_ptr = _as_pointer(x, elem_dtype)
+    weight_ptr = _as_pointer(weight, elem_dtype)
+    dy_ptr = _as_pointer(dy, elem_dtype)
+    mean_ptr = _as_pointer(mean, fx.Float32)
+    rstd_ptr = _as_pointer(rstd, fx.Float32)
+    dx_ptr = _as_pointer(dx, elem_dtype)
+    dgamma_ptr = _as_pointer(dgamma, fx.Float32)
+    dbias_ptr = _as_pointer(dbias, fx.Float32)
     bwd_c = flyc.compile(
         bwd_fn,
         x_ptr,
@@ -1237,6 +1286,39 @@ def test_layernorm_eps_honored():
     print("  -> PASSED")
 
 
+@pytest.mark.parametrize("M,N,dtype", [(3, 257, "f32"), (2, 8192, "bf16")])
+def test_layernorm_pointer_storage_offset(M, N, dtype):
+    """Pointer row math must be relative to each contiguous view's data_ptr."""
+    torch_dtype = _torch_dtype(dtype)
+
+    def offset_rand(shape):
+        numel = 1
+        for dim in shape:
+            numel *= dim
+        tensor = torch.randn((numel + 1,), device="cuda", dtype=torch_dtype)[1:].view(shape)
+        assert tensor.is_contiguous() and tensor.storage_offset() == 1
+        return tensor
+
+    x = offset_rand((M, N)).detach().requires_grad_(True)
+    weight = offset_rand((N,)).detach().requires_grad_(True)
+    bias = offset_rand((N,)).detach().requires_grad_(True)
+    dout = offset_rand((M, N))
+
+    out = layernorm(x, weight, bias)
+    out.backward(dout)
+
+    out_ref = _reference_layernorm(x.detach(), weight.detach(), bias.detach())
+    dx_ref, dweight_ref, dbias_ref, _, _ = _reference_layernorm_bwd(x.detach(), weight.detach(), bias.detach(), dout)
+    out_atol = {"f32": 1e-4, "bf16": 2e-2}[dtype]
+    dx_atol = {"f32": 1e-3, "bf16": 2e-1}[dtype]
+    grad_rtol = {"f32": 1e-4, "bf16": 1e-1}[dtype]
+    grad_atol = {"f32": 1e-2, "bf16": 1.0}[dtype]
+    torch.testing.assert_close(out.to(DTYPE_FP32), out_ref, rtol=grad_rtol, atol=out_atol)
+    torch.testing.assert_close(x.grad.to(DTYPE_FP32), dx_ref, rtol=grad_rtol, atol=dx_atol)
+    torch.testing.assert_close(weight.grad.to(DTYPE_FP32), dweight_ref, rtol=grad_rtol, atol=grad_atol)
+    torch.testing.assert_close(bias.grad.to(DTYPE_FP32), dbias_ref, rtol=grad_rtol, atol=grad_atol)
+
+
 @pytest.mark.multi_gpu
 def test_layernorm_multi_gpu():
     """Compiled-fn cache must not reuse a device-0 kernel on device 1 (would fault)."""
@@ -1265,6 +1347,24 @@ def test_layernorm_multi_gpu():
     print("  -> PASSED")
 
 
+@pytest.mark.multi_gpu
+def test_layernorm_device_mismatch():
+    """Raw pointer launches must reject cross-device affine parameters."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs >=2 GPUs")
+
+    x = torch.randn((4, 256), device="cuda:0", dtype=DTYPE_FP32)
+    w0 = torch.rand((256,), device="cuda:0", dtype=DTYPE_FP32)
+    b0 = torch.rand((256,), device="cuda:0", dtype=DTYPE_FP32)
+    w1 = w0.to("cuda:1")
+    b1 = b0.to("cuda:1")
+
+    with pytest.raises(AssertionError, match="same device"):
+        layernorm(x, w1, b0)
+    with pytest.raises(AssertionError, match="same device"):
+        layernorm(x, w0, b1)
+
+
 def test_layernorm_dtype_mismatch():
     """Mixed x/weight/bias dtypes must be rejected (kernel uses one elem dtype)."""
     print("=" * 80)
@@ -1281,6 +1381,23 @@ def test_layernorm_dtype_mismatch():
         except AssertionError:
             pass
     print("  -> PASSED")
+
+
+def test_layernorm_affine_shape_mismatch():
+    """Pointer views require exactly N affine elements, not merely a trailing N."""
+    N = 256
+    x = torch.randn((4, N), device="cuda", dtype=DTYPE_FP32)
+    weight = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
+    bias = torch.rand((N,), device="cuda", dtype=DTYPE_FP32)
+
+    with pytest.raises(AssertionError, match="1D"):
+        layernorm(x, weight.view(1, N), bias)
+    with pytest.raises(AssertionError, match="1D"):
+        layernorm(x, weight, bias.view(1, N))
+    with pytest.raises(AssertionError, match="1D"):
+        layernorm(x, weight.view(1, N).expand(2, N).contiguous(), bias)
+    with pytest.raises(AssertionError, match="1D"):
+        layernorm(x, weight, bias.view(1, N).expand(2, N).contiguous())
 
 
 if __name__ == "__main__":
