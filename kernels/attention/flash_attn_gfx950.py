@@ -112,6 +112,26 @@ def build_flash_attn_dualwave_swp_module(
         kv_vectorized=KV_VECTORIZED,
     )
     traits.BLOCK_N_OUT // traits.BLOCK_N
+    _dualwave_swp_cache_tag = (
+        traits.NUM_HEADS_Q,
+        traits.NUM_HEADS_KV,
+        traits.HEAD_DIM,
+        traits.CAUSAL,
+        traits.DTYPE_STR,
+        traits.WAVES_PER_EU,
+        traits.DAZ,
+        traits.DUALWAVE_SWP_LAZY_RESCALE,
+        traits.DUALWAVE_SWP_SETPRIO,
+        traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS,
+        traits.DUALWAVE_SWP_ENABLE_STAGGER,
+        traits.NUM_KV_SPLITS,
+        traits.SPLITK,
+        traits.PAGED,
+        traits.VARLEN,
+        traits.CROSS_SEQLEN,
+        traits.KV_CACHE_LAYOUT,
+        traits.KV_VECTORIZED,
+    )
 
     # Shared-memory layout: one 16B-aligned K/V region (K0/V0/K1/V1).
     _lds_elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
@@ -1221,6 +1241,8 @@ def build_flash_attn_dualwave_swp_module(
         block_table_stride: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
     ):
+        # Make shape/mode traits visible to the JIT cache key.
+        _ = _dualwave_swp_cache_tag
         bs_idx = fx.Index(batch_size)
         sl_idx = fx.Index(seq_len)
         num_q_blocks = (sl_idx + traits.BLOCK_M - 1) // traits.BLOCK_M
