@@ -20,11 +20,13 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace as _TargetAddressSpace
 from flydsl.compiler.ast_rewriter import ReplaceIfWithDispatch
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import math as fmath
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
+from kernels.common.kernels_common import dtype_to_elem_type
 
 _LOG2E = host_math.log2(host_math.e)
 # s_waitcnt bitfield encoding
@@ -1008,32 +1010,401 @@ def _seq_pad_score_threshold(traits, r):
     return (r // 4) * 8 + (r % 4)
 
 
-class DualwavePageIdLoader:
+class DualwaveKernelContext:
+    """Shared per-kernel state for the gfx950 dualwave attention helpers."""
+
     def __init__(
         self,
-        traits,
-        tid,
-        split_t0,
-        split_t_end,
-        num_kv_tiles,
-        batch_idx,
-        block_table_stride_v,
-        lds_bt_base_ptr,
-        bt_div,
-        bt_atom,
-        bt_v1i32,
+        traits_or_ctx,
+        Q=None,
+        K=None,
+        V=None,
+        O=None,  # noqa: E741
+        DebugCounts=None,
+        CuSeqQ=None,
+        CuSeqKv=None,
+        BlockTable=None,
+        seq_len=None,
+        seq_len_kv=None,
+        stride_q_n=None,
+        stride_kv_n=None,
+        head_dim_runtime=None,
+        block_table_stride=None,
     ):
-        self.traits = traits
-        self.tid = tid
-        self.split_t0 = split_t0
-        self.split_t_end = split_t_end
-        self.num_kv_tiles = num_kv_tiles
-        self.batch_idx = batch_idx
-        self.block_table_stride_v = block_table_stride_v
-        self.lds_bt_base_ptr = lds_bt_base_ptr
-        self.bt_div = bt_div
-        self.bt_atom = bt_atom
-        self.bt_v1i32 = bt_v1i32
+        if isinstance(traits_or_ctx, DualwaveKernelContext):
+            self.__dict__.update(traits_or_ctx.__dict__)
+            self.ctx_ref = getattr(traits_or_ctx, "ctx_ref", traits_or_ctx)
+            return
+
+        self.ctx_ref = self
+        self.traits = traits_or_ctx
+        self.Q = Q
+        self.K = K
+        self.V = V
+        self.O = O
+        self.DebugCounts = DebugCounts
+        self.CuSeqQ = CuSeqQ
+        self.CuSeqKv = CuSeqKv
+        self.BlockTable = BlockTable
+        self.seq_len = seq_len
+        self.seq_len_kv = seq_len_kv
+        self.stride_q_n = stride_q_n
+        self.stride_kv_n = stride_kv_n
+        self.head_dim_runtime = head_dim_runtime
+        self.block_table_stride = block_table_stride
+
+    def init_types_and_constants(self, head_dim_runtime=None):
+        if head_dim_runtime is None:
+            head_dim_runtime = self.head_dim_runtime
+        traits = self.traits
+        self.NUM_DMA_K = traits.SMEM_D_RPT
+        self.NUM_DMA_V = traits.SMEM_D_RPT
+
+        self.fm_fast = fx.arith.FastMathFlags.fast
+        self.elem_dtype = dtype_to_elem_type(traits.DTYPE_STR)
+        self.q_load_i32x4_type = Vec.make_type(4, fx.Int32)
+        self.v_lds_read_vec4_type = Vec.make_type(4, self.elem_dtype)
+        self.kv_mfma_pack_type = Vec.make_type(8, self.elem_dtype)
+        self.mfma_acc_vec_type = Vec.make_type(16, fx.Float32)
+
+        self.c_neg_inf = fx.Float32(float("-inf"))
+        self.c_neg_floor = fx.Float32(-3.0e38)
+        self.c_zero_f = fx.Float32(0.0)
+        self.c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
+        head_dim_f32 = fx.Float32(fx.Int32(head_dim_runtime))
+        c_log2e_f = fx.Float32(_LOG2E)
+        self.c_sm_scale_log2e = fx.Float32(
+            arith.mulf(
+                as_mlir_value(fmath.rsqrt(head_dim_f32, fastmath=self.fm_fast)),
+                as_mlir_value(c_log2e_f),
+                fastmath=self.fm_fast,
+            )
+        )
+
+    def init_runtime_indices(self, seq_len=None, seq_len_kv=None, stride_q_n=None, stride_kv_n=None):
+        if seq_len is None:
+            seq_len = self.seq_len
+        if seq_len_kv is None:
+            seq_len_kv = self.seq_len_kv
+        if stride_q_n is None:
+            stride_q_n = self.stride_q_n
+        if stride_kv_n is None:
+            stride_kv_n = self.stride_kv_n
+        self.seq_len = seq_len
+        self.seq_len_kv = seq_len_kv
+        self.seq_len_v = fx.Index(seq_len)
+        self.seq_len_kv_v = fx.Index(seq_len_kv)
+        self.stride_q_n_v = fx.Index(stride_q_n)
+        self.stride_kv_n_v = fx.Index(stride_kv_n)
+
+    def init_lds(self, shared_storage):
+        lds = fx.SharedAllocator().allocate(shared_storage).peek()
+        self.lds = lds
+        self.lds_kv_base_idx = fx.Index(fx.ptrtoint(lds.kv.ptr))
+        self.lds_kv_base_ptr = buffer_ops.create_llvm_ptr(self.lds_kv_base_idx, address_space=3)
+        if const_expr(self.traits.PAGED):
+            self.lds_bt_base_idx = fx.Index(fx.ptrtoint(lds.bt.ptr))
+            self.lds_bt_base_ptr = buffer_ops.create_llvm_ptr(self.lds_bt_base_idx, address_space=3)
+        else:
+            self.lds_bt_base_ptr = None
+
+    def init_thread_mapping(self):
+        traits = self.traits
+        self.h_idx = fx.Index(gpu.block_idx.x)
+        self.q_block_idx = fx.Index(gpu.block_idx.y)
+        if const_expr(traits.SPLITK):
+            self.bz_idx = fx.Index(gpu.block_idx.z)
+            self.batch_idx = self.bz_idx // traits.NUM_KV_SPLITS
+            self.split_idx = self.bz_idx % traits.NUM_KV_SPLITS
+        else:
+            self.batch_idx = fx.Index(gpu.block_idx.z)
+            self.split_idx = None
+        self.tid = fx.Index(gpu.thread_idx.x)
+
+        self.wave_id = self.tid // traits.WARP_SIZE
+        self.lane = self.tid % traits.WARP_SIZE
+        self.lane_mod_32 = self.lane % 32
+        self.lane_div_32 = self.lane // 32
+
+        _tid_i32 = as_mlir_value(fx.Int32(self.tid))
+        _wave_id_uni_i32 = rocdl.readfirstlane(
+            T.i32,
+            arith.divsi(_tid_i32, as_mlir_value(fx.Int32(traits.WARP_SIZE))),
+        )
+        self._stagger_i32 = arith.divsi(_wave_id_uni_i32, as_mlir_value(fx.Int32(4)))
+        self.wave_id_uni = fx.Index(_wave_id_uni_i32)
+
+        self.wave_q_offset = self.wave_id * traits.ROWS_PER_WAVE
+        self.q_start = self.q_block_idx * traits.BLOCK_M
+
+        self.h_kv_idx = self.h_idx % traits.NUM_HEADS_KV
+        self.group_id = self.h_idx // traits.NUM_HEADS_KV
+        self.q_head_idx = self.h_kv_idx * traits.GQA_GROUP_SIZE + self.group_id
+        self.kv_head_idx = self.h_kv_idx
+
+    def init_sequence_lengths(self, CuSeqQ=None, CuSeqKv=None):
+        if CuSeqQ is None:
+            CuSeqQ = self.CuSeqQ
+        if CuSeqKv is None:
+            CuSeqKv = self.CuSeqKv
+        traits = self.traits
+        if const_expr(traits.VARLEN):
+            _cuq_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqQ), fx.make_layout(1, 1))
+            _cuk_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(CuSeqKv), fx.make_layout(1, 1))
+            _cu_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+            _cu_v1i32 = Vec.make_type(1, fx.Int32)
+
+            self.q_tok_base = _cu_load(_cuq_div, self.batch_idx, _cu_atom, _cu_v1i32)
+            self.q_tok_end = _cu_load(_cuq_div, self.batch_idx + fx.Index(1), _cu_atom, _cu_v1i32)
+            self.kv_tok_base = _cu_load(_cuk_div, self.batch_idx, _cu_atom, _cu_v1i32)
+            self.kv_tok_end = _cu_load(_cuk_div, self.batch_idx + fx.Index(1), _cu_atom, _cu_v1i32)
+            self.seqlen_q_v = self.q_tok_end - self.q_tok_base
+            self.seqlen_kv_v = self.kv_tok_end - self.kv_tok_base
+            self.seqlen_kv_i32 = fx.Int32(self.seqlen_kv_v)
+        else:
+            self.q_tok_base = self.batch_idx * self.seq_len_v
+            self.kv_tok_base = self.batch_idx * self.seq_len_kv_v
+            self.q_tok_end = (self.batch_idx + fx.Index(1)) * self.seq_len_v
+            self.kv_tok_end = (self.batch_idx + fx.Index(1)) * self.seq_len_kv_v
+            self.seqlen_q_v = self.seq_len_v
+            self.seqlen_kv_v = self.seq_len_kv_v
+            self.seqlen_kv_i32 = self.seq_len_kv
+
+    def init_descriptors(
+        self,
+        q_tensor=None,
+        k_tensor=None,
+        v_tensor=None,
+        o_tensor=None,
+        block_table=None,
+        block_table_stride=None,
+    ):
+        if q_tensor is None:
+            q_tensor = self.Q
+        if k_tensor is None:
+            k_tensor = self.K
+        if v_tensor is None:
+            v_tensor = self.V
+        if o_tensor is None:
+            o_tensor = self.O
+        if block_table is None:
+            block_table = self.BlockTable
+        if block_table_stride is None:
+            block_table_stride = self.block_table_stride
+        traits = self.traits
+        if const_expr(traits.PAGED):
+            self.block_table_stride_v = fx.Index(block_table_stride)
+            self.bt_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(block_table), fx.make_layout(1, 1))
+            self.bt_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+            self.bt_v1i32 = Vec.make_type(1, fx.Int32)
+            self.kv_head_elem_offset = self.kv_head_idx * traits.HEAD_DIM
+        else:
+            self.block_table_stride_v = None
+            self.bt_div = None
+            self.bt_atom = None
+            self.bt_v1i32 = None
+            self.kv_head_elem_offset = None
+
+        self.delta_i32 = fx.Int32(self.seqlen_kv_i32 - fx.Int32(self.seqlen_q_v))
+        self.q_gmem_elem_offset = self.q_start * self.stride_q_n_v + self.q_head_idx * traits.HEAD_DIM
+        self.kv_gmem_elem_offset = self.kv_head_idx * traits.HEAD_DIM
+
+        self.buf_flags_i32 = fx.Int32(buffer_ops._get_buffer_flags())
+        self.elem_ir = self.elem_dtype.ir_type
+        qo_per_batch_elems = self.seqlen_q_v * self.stride_q_n_v
+        qo_nrec_bytes = qo_per_batch_elems * fx.Index(traits.BF16_BYTES)
+        qo_layout = fx.make_layout(fx.Int32(qo_per_batch_elems), fx.Int32(1))
+        q_batch_byte_off = self.q_tok_base * self.stride_q_n_v * fx.Index(traits.BF16_BYTES)
+        self.q_div = _make_rebased_view(
+            fx.get_iter(q_tensor),
+            q_batch_byte_off,
+            qo_nrec_bytes,
+            qo_layout,
+            _buf_flags_i32=self.buf_flags_i32,
+            _elem_ir=self.elem_ir,
+        )
+        self.o_div = _make_rebased_view(
+            fx.get_iter(o_tensor),
+            q_batch_byte_off,
+            qo_nrec_bytes,
+            qo_layout,
+            _buf_flags_i32=self.buf_flags_i32,
+            _elem_ir=self.elem_ir,
+        )
+
+        if const_expr(traits.PAGED):
+            self.k_div = None
+            self.v_div = None
+            page_elems = fx.Index(traits.BLOCK_N) * self.stride_kv_n_v
+            self.page_byte_stride = page_elems * fx.Index(traits.BF16_BYTES)
+            self.page_nrec_bytes = fx.Int64(self.page_byte_stride)
+            self.page_layout = fx.make_layout(fx.Int32(page_elems), fx.Int32(1))
+        else:
+            kv_per_batch_elems = self.seqlen_kv_v * self.stride_kv_n_v
+            kv_nrec_bytes = kv_per_batch_elems * fx.Index(traits.BF16_BYTES)
+            kv_layout = fx.make_layout(fx.Int32(kv_per_batch_elems), fx.Int32(1))
+            kv_batch_byte_off = self.kv_tok_base * self.stride_kv_n_v * fx.Index(traits.BF16_BYTES)
+            self.k_div = _make_rebased_view(
+                fx.get_iter(k_tensor),
+                kv_batch_byte_off,
+                kv_nrec_bytes,
+                kv_layout,
+                _buf_flags_i32=self.buf_flags_i32,
+                _elem_ir=self.elem_ir,
+            )
+            self.v_div = _make_rebased_view(
+                fx.get_iter(v_tensor),
+                kv_batch_byte_off,
+                kv_nrec_bytes,
+                kv_layout,
+                _buf_flags_i32=self.buf_flags_i32,
+                _elem_ir=self.elem_ir,
+            )
+            self.page_byte_stride = None
+            self.page_nrec_bytes = None
+            self.page_layout = None
+        self.debug_counts_rsrc = (
+            _make_raw_buffer_rsrc(self.DebugCounts) if traits.DUALWAVE_SWP_DEBUG_LAZY_COUNTS else None
+        )
+
+    def init_workspace(self, DebugCounts=None):
+        if DebugCounts is None:
+            DebugCounts = self.DebugCounts
+        traits = self.traits
+        if const_expr(traits.SPLITK):
+            self.ws_base_i64 = fx.Int64(fx.ptrtoint(fx.get_iter(DebugCounts)))
+            self.ws_opart_per_split_elems = (
+                fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v * fx.Index(traits.HEAD_DIM // 2)
+            )
+            self.ws_ml_per_split_elems = fx.Index(traits.NUM_HEADS_Q) * self.seq_len_v
+            self.ws_opart_per_split_bytes = self.ws_opart_per_split_elems * fx.Index(4)
+            self.ws_ml_per_split_bytes = self.ws_ml_per_split_elems * fx.Index(4)
+            self.ws_grid_z = fx.Index(gpu.grid_dim.z)
+            self.ws_mrow_abs_bytes = self.ws_grid_z * self.ws_opart_per_split_bytes
+            self.ws_lrow_abs_bytes = self.ws_mrow_abs_bytes + self.ws_grid_z * self.ws_ml_per_split_bytes
+        else:
+            self.ws_base_i64 = None
+            self.ws_opart_per_split_bytes = None
+            self.ws_ml_per_split_bytes = None
+            self.ws_mrow_abs_bytes = None
+            self.ws_lrow_abs_bytes = None
+
+    def init_atoms_and_lds_ptrs(self):
+        self.load_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
+        self.store_atom_128 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Int32)
+        self.dma_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
+        self.mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(32, 32, 16, self.elem_dtype))
+        self.o_store_reg_128 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Int32)
+        self.lds_ptr_ty = fx.PointerType.get(self.elem_dtype.ir_type, 2, self.traits.DMA_BYTES)
+
+    def init_dma_thread_offsets(self):
+        self.lane_in_warp = self.tid % self.traits.WARP_SIZE
+        self.n_in_warp = self.lane_in_warp // self.traits.VEC_KV
+        self.d_bucket = self.lane_in_warp % self.traits.VEC_KV
+
+    def init_q_row(self):
+        traits = self.traits
+        self.q_row_in_block = self.wave_q_offset + self.lane_mod_32
+        self.q_start_pos_i32 = fx.Int32(self.q_start + self.wave_id_uni * traits.ROWS_PER_WAVE)
+        self.q_row = self.q_start + self.q_row_in_block
+        self.q_row_i32 = fx.Int32(self.q_row)
+
+    def k_dma_base(self, buf_id, d):
+        return _k_dma_m0_base(
+            self.traits,
+            buf_id,
+            d,
+            lane_in_warp=self.lane_in_warp,
+            lds_kv_base_idx=self.lds_kv_base_idx,
+            wave_id_uni=self.wave_id_uni,
+        )
+
+    def v_dma_base(self, buf_id, d):
+        return _v_dma_m0_base(
+            self.traits,
+            buf_id,
+            d,
+            lane_in_warp=self.lane_in_warp,
+            lds_kv_base_idx=self.lds_kv_base_idx,
+            wave_id_uni=self.wave_id_uni,
+        )
+
+    def dma_m0_table(self, base_fn, count):
+        return tuple(tuple(base_fn(buf, d) for d in range(count)) for buf in range(2))
+
+    def init_dma_m0_tables(self):
+        self.k_dma_m0 = self.dma_m0_table(self.k_dma_base, self.NUM_DMA_K)
+        self.v_dma_m0 = self.dma_m0_table(self.v_dma_base, self.NUM_DMA_V)
+
+    def init_tile_bounds(self):
+        traits = self.traits
+        self.kv_tile_size = traits.BLOCK_N
+        self.num_kv_tiles = (self.seqlen_kv_v + self.kv_tile_size - 1) // self.kv_tile_size
+        if const_expr(traits.CAUSAL):
+            self.causal_end_raw_i32 = fx.Int32(self.q_start + traits.BLOCK_M) + self.delta_i32
+            self.causal_end_i32 = fx.Int32(
+                ArithValue(self.causal_end_raw_i32 > fx.Int32(0)).select(self.causal_end_raw_i32, fx.Int32(0))
+            )
+            self.causal_num_tiles = (fx.Index(self.causal_end_i32) + self.kv_tile_size - 1) // self.kv_tile_size
+            self.max_num_tiles = fx.Index(
+                ArithValue(self.causal_num_tiles < self.num_kv_tiles).select(self.causal_num_tiles, self.num_kv_tiles)
+            )
+        else:
+            self.causal_end_raw_i32 = None
+            self.max_num_tiles = self.num_kv_tiles
+
+        self.max_num_tiles = ((self.max_num_tiles + fx.Index(1)) // fx.Index(2)) * fx.Index(2)
+        self.max_num_tiles = fx.Index(
+            ArithValue(self.max_num_tiles < fx.Index(4)).select(fx.Index(4), self.max_num_tiles)
+        )
+
+        if const_expr(traits.SPLITK):
+            chunk = ((self.max_num_tiles + (traits.NUM_KV_SPLITS - 1)) // traits.NUM_KV_SPLITS + 1) // 2 * 2
+            chunk = fx.Index(ArithValue(chunk < fx.Index(6)).select(fx.Index(6), chunk))
+            self.split_t0 = self.split_idx * chunk
+            self.split_t_end = self.split_t0 + chunk
+            self.split_t_end = fx.Index(
+                ArithValue(self.split_t_end < self.max_num_tiles).select(self.split_t_end, self.max_num_tiles)
+            )
+            self.split_t_end = fx.Index(
+                ArithValue(self.max_num_tiles - self.split_t_end < fx.Index(4)).select(
+                    self.max_num_tiles, self.split_t_end
+                )
+            )
+            self.split_nonempty = self.split_t0 + fx.Index(4) <= self.max_num_tiles
+        else:
+            self.split_t0 = 0
+            self.split_t_end = self.max_num_tiles
+
+    def compute_active_guard(self):
+        traits = self.traits
+        if const_expr(traits.SPLITK):
+            return self.split_nonempty
+        if const_expr(traits.VARLEN):
+            if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN):
+                return ArithValue(self.q_start < self.seqlen_q_v) & (self.causal_end_raw_i32 > fx.Int32(0))
+            return ArithValue(self.q_start < self.seqlen_q_v)
+        if const_expr(traits.CAUSAL and traits.CROSS_SEQLEN):
+            return ArithValue(self.causal_end_raw_i32 > fx.Int32(0))
+        return None
+
+    def init_active_guard(self):
+        self.active = self.compute_active_guard()
+
+    def init_lds_read_bases(self):
+        self.k_lds_read_base_per_lane = _k_lds_read_base_per_lane(self.traits, self.lane_mod_32, self.lane_div_32)
+        self.v_lds_read_base_per_lane = _v_lds_read_base_per_lane(self.traits, self.lane, self.lane_div_32)
+
+    def split_tile(self, offset_tiles=0):
+        return self.split_t0 + fx.Index(offset_tiles)
+
+    def tile_start(self, tile_idx):
+        return tile_idx * self.traits.BLOCK_N
+
+
+class DualwavePageIdLoader(DualwaveKernelContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
 
     def load_block_table_to_lds(self):
         traits = self.traits
@@ -1079,39 +1450,28 @@ class DualwavePageIdLoader:
         v = rocdl.readfirstlane(T.i32, v)
         return fx.Index(fx.Int32(v))
 
+    def async_load_tile_page_id(self, tile_idx, page_id_override=None):
+        if const_expr(self.traits.PAGED):
+            if const_expr(page_id_override is not None):
+                return page_id_override
+            page_id = self.load_page_id_lds(tile_idx)
+            return self.finish_page_id(page_id)
+        return fx.Index(0)
+
+    def async_load_split_page(self, offset_tiles=0, page_id_override=None):
+        return self.async_load_tile_page_id(self.split_tile(offset_tiles), page_id_override=page_id_override)
+
     def async_load_page_id(self, tile_start, page_id_override=None):
         if const_expr(self.traits.PAGED):
             if const_expr(page_id_override is not None):
                 return page_id_override
-            page_id = self.load_page_id_lds(tile_start // fx.Index(self.traits.BLOCK_N))
-            return self.finish_page_id(page_id)
+            return self.async_load_tile_page_id(tile_start // fx.Index(self.traits.BLOCK_N))
         return fx.Index(0)
 
 
-class DualwaveQLoader:
-    def __init__(
-        self,
-        traits,
-        elem_dtype,
-        q_gmem_elem_offset,
-        q_div,
-        load_atom_128,
-        q_load_i32x4_type,
-        stride_q_n_v,
-        lane_div_32,
-        c_sm_scale_log2e,
-        fm_fast,
-    ):
-        self.traits = traits
-        self.elem_dtype = elem_dtype
-        self.q_gmem_elem_offset = q_gmem_elem_offset
-        self.q_div = q_div
-        self.load_atom_128 = load_atom_128
-        self.q_load_i32x4_type = q_load_i32x4_type
-        self.stride_q_n_v = stride_q_n_v
-        self.lane_div_32 = lane_div_32
-        self.c_sm_scale_log2e = c_sm_scale_log2e
-        self.fm_fast = fm_fast
+class DualwaveQLoader(DualwaveKernelContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
 
     def load_pack(self, q_row_in_block, ks):
         q_i32_pack = _buffer_load_128(
@@ -1129,11 +1489,14 @@ class DualwaveQLoader:
         )
         return Vec(q_i32_pack, (4,), fx.Int32).bitcast(self.elem_dtype).ir_value()
 
-    def load_all(self, q_row_in_block):
+    def load_all(self):
         traits = self.traits
+        ctx = self.ctx_ref
+        ctx.init_q_row()
+
         q_raw_packs = []
         for ks in range_constexpr(traits.K_STEPS_QK):
-            q_raw_packs.append(self.load_pack(q_row_in_block, ks))
+            q_raw_packs.append(self.load_pack(ctx.q_row_in_block, ks))
         q_16_packs = []
         for pair in range_constexpr(traits.K_STEPS_QK // 2):
             q_16_packs.append(_concat_vectors(q_raw_packs[pair * 2], q_raw_packs[pair * 2 + 1]))
@@ -1167,12 +1530,9 @@ class DualwaveQLoader:
         return Vec(q_all_scaled_bf16, (traits.K_STEPS_QK * traits.MFMA_LANE_K,), self.elem_dtype)
 
 
-class DualwaveGemmHelper:
-    def __init__(self, traits, mma_atom, mfma_acc_vec_type, c_zero_v16f32):
-        self.traits = traits
-        self.mma_atom = mma_atom
-        self.mfma_acc_vec_type = mfma_acc_vec_type
-        self.c_zero_v16f32 = c_zero_v16f32
+class DualwaveGemmHelper(DualwaveKernelContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
 
     def qk(self, v_k, q_all_scaled_bf16):
         k_lo, k_hi = v_k
@@ -1201,32 +1561,9 @@ class DualwaveGemmHelper:
         return v_o
 
 
-class DualwaveSoftmaxHelper:
-    def __init__(
-        self,
-        traits,
-        elem_dtype,
-        fm_fast,
-        lane_div_32,
-        lane,
-        delta_i32,
-        seqlen_kv_i32,
-        debug_counts_rsrc,
-        c_neg_inf,
-        c_neg_floor,
-        c_zero_f,
-    ):
-        self.traits = traits
-        self.elem_dtype = elem_dtype
-        self.fm_fast = fm_fast
-        self.lane_div_32 = lane_div_32
-        self.lane = lane
-        self.delta_i32 = delta_i32
-        self.seqlen_kv_i32 = seqlen_kv_i32
-        self.debug_counts_rsrc = debug_counts_rsrc
-        self.c_neg_inf = c_neg_inf
-        self.c_neg_floor = c_neg_floor
-        self.c_zero_f = c_zero_f
+class DualwaveSoftmaxHelper(DualwaveKernelContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
 
     def reduce_max(self, v_s):
         s_lo, s_hi = v_s
@@ -1388,7 +1725,25 @@ class DualwaveSoftmaxHelper:
             [Vec(s_hi)[r] for r in range_constexpr(16)],
         )
 
-    def causal_mask_prologue_if_needed(self, v_s, tile_idx, kv_end_pos, q_start_pos_i32, q_row_i32):
+    def causal_mask_prologue_if_needed(
+        self,
+        v_s,
+        tile_idx=None,
+        kv_end_pos=None,
+        q_start_pos_i32=None,
+        q_row_i32=None,
+        *,
+        kv_end_tile=None,
+    ):
+        if tile_idx is None:
+            tile_idx = fx.Index(0)
+        if kv_end_pos is None:
+            end_tile = tile_idx + fx.Index(1) if kv_end_tile is None else kv_end_tile
+            kv_end_pos = self.tile_start(end_tile)
+        if q_start_pos_i32 is None:
+            q_start_pos_i32 = self.ctx_ref.q_start_pos_i32
+        if q_row_i32 is None:
+            q_row_i32 = self.ctx_ref.q_row_i32
         traits = self.traits
         delta_i32 = self.delta_i32
         lane_div_32 = self.lane_div_32
@@ -1411,6 +1766,13 @@ class DualwaveSoftmaxHelper:
             return s_lo, s_hi
 
         return _causal_mask_prologue_if_needed(v_s, tile_idx, kv_end_pos, q_start_pos_i32, q_row_i32)
+
+    def causal_mask_split_prologue_if_needed(self, v_s, offset_tiles=0, end_offset_tiles=1):
+        return self.causal_mask_prologue_if_needed(
+            v_s,
+            self.split_tile(offset_tiles),
+            kv_end_tile=self.split_tile(end_offset_tiles),
+        )
 
     def seq_pad_mask_inplace(self, v_s_lists, tile_idx):
         s_lo, s_hi = v_s_lists
@@ -1468,56 +1830,11 @@ def _v_dma_m0_base(traits, buf_id, d, lane_in_warp, lds_kv_base_idx, wave_id_uni
     return rocdl.readfirstlane(T.i32, as_mlir_value(fx.Int32(lds_addr)))
 
 
-class DualwaveKvGmemToLdsLoader:
-    def __init__(
-        self,
-        traits,
-        K,
-        V,
-        k_div,
-        v_div,
-        page_byte_stride,
-        page_nrec_bytes,
-        page_layout,
-        elem_ir,
-        buf_flags_i32,
-        dma_atom,
-        lds_ptr_ty,
-        kv_gmem_elem_offset,
-        kv_head_elem_offset,
-        stride_kv_n_v,
-        n_in_warp,
-        wave_id,
-        d_bucket,
-        wave_id_uni,
-        lane_in_warp,
-        kv_head_idx,
-        num_dma_k,
-        num_dma_v,
-    ):
-        self.traits = traits
-        self.K = K
-        self.V = V
-        self.k_div = k_div
-        self.v_div = v_div
-        self.page_byte_stride = page_byte_stride
-        self.page_nrec_bytes = page_nrec_bytes
-        self.page_layout = page_layout
-        self.elem_ir = elem_ir
-        self.buf_flags_i32 = buf_flags_i32
-        self.dma_atom = dma_atom
-        self.lds_ptr_ty = lds_ptr_ty
-        self.kv_gmem_elem_offset = kv_gmem_elem_offset
-        self.kv_head_elem_offset = kv_head_elem_offset
-        self.stride_kv_n_v = stride_kv_n_v
-        self.n_in_warp = n_in_warp
-        self.wave_id = wave_id
-        self.d_bucket = d_bucket
-        self.wave_id_uni = wave_id_uni
-        self.lane_in_warp = lane_in_warp
-        self.kv_head_idx = kv_head_idx
-        self.num_dma_k = num_dma_k
-        self.num_dma_v = num_dma_v
+class DualwaveKvGmemToLdsLoader(DualwaveKernelContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.num_dma_k = self.NUM_DMA_K
+        self.num_dma_v = self.NUM_DMA_V
 
     def _issue_kv_dma(self, src_div, lds_addr, src_elem, soffset):
         _buffer_load_lds_128(
@@ -1564,7 +1881,8 @@ class DualwaveKvGmemToLdsLoader:
                 soffset,
             )
 
-    def load_k(self, tile_start, buf_id, k_dma_m0, page_id=None):
+    def load_k(self, tile_start, buf_id, page_id=None):
+        ctx = self.ctx_ref
         src_base, soffset = _kv_tile_addr(
             self.traits,
             tile_start,
@@ -1577,7 +1895,7 @@ class DualwaveKvGmemToLdsLoader:
             for d in range_constexpr(self.num_dma_k):
                 self._issue_kv_dma(
                     src_div,
-                    k_dma_m0[buf_id][d],
+                    ctx.k_dma_m0[buf_id][d],
                     _vec_k_src_elem(
                         self.traits,
                         d,
@@ -1588,9 +1906,16 @@ class DualwaveKvGmemToLdsLoader:
                     soffset,
                 )
         else:
-            self._async_load_kv_linear(k_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_k)
+            self._async_load_kv_linear(ctx.k_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_k)
 
-    def load_v(self, tile_start, buf_id, v_dma_m0, page_id=None):
+    def load_k_tile(self, tile_idx, buf_id, page_id=None):
+        self.load_k(self.tile_start(tile_idx), buf_id, page_id=page_id)
+
+    def load_k_split(self, offset_tiles, buf_id, page_id=None):
+        self.load_k_tile(self.split_tile(offset_tiles), buf_id, page_id=page_id)
+
+    def load_v(self, tile_start, buf_id, page_id=None):
+        ctx = self.ctx_ref
         src_base, soffset = _kv_tile_addr(
             self.traits,
             tile_start,
@@ -1603,7 +1928,7 @@ class DualwaveKvGmemToLdsLoader:
             for d in range_constexpr(self.num_dma_v):
                 self._issue_kv_dma(
                     src_div,
-                    v_dma_m0[buf_id][d],
+                    ctx.v_dma_m0[buf_id][d],
                     _vec_v_src_elem(
                         self.traits,
                         d,
@@ -1614,27 +1939,18 @@ class DualwaveKvGmemToLdsLoader:
                     soffset,
                 )
         else:
-            self._async_load_kv_linear(v_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_v)
+            self._async_load_kv_linear(ctx.v_dma_m0, buf_id, src_div, src_base, soffset, self.num_dma_v)
+
+    def load_v_tile(self, tile_idx, buf_id, page_id=None):
+        self.load_v(self.tile_start(tile_idx), buf_id, page_id=page_id)
+
+    def load_v_split(self, offset_tiles, buf_id, page_id=None):
+        self.load_v_tile(self.split_tile(offset_tiles), buf_id, page_id=page_id)
 
 
-class DualwaveKvLdsToVgprLoader:
-    def __init__(
-        self,
-        traits,
-        lds_kv_base_ptr,
-        lds_kv_base_idx,
-        kv_mfma_pack_type,
-        v_lds_read_vec4_type,
-        lane_div_32,
-        lane_mod_32,
-    ):
-        self.traits = traits
-        self.lds_kv_base_ptr = lds_kv_base_ptr
-        self.lds_kv_base_idx = lds_kv_base_idx
-        self.kv_mfma_pack_type = kv_mfma_pack_type
-        self.v_lds_read_vec4_type = v_lds_read_vec4_type
-        self.lane_div_32 = lane_div_32
-        self.lane_mod_32 = lane_mod_32
+class DualwaveKvLdsToVgprLoader(DualwaveKernelContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
 
     def _load_k_pair(self, buf_id, idx_lo):
         lo = _load_k_pack_aligned(
@@ -1653,7 +1969,9 @@ class DualwaveKvLdsToVgprLoader:
         )
         return lo, hi
 
-    def load_k(self, buf_id, urk_base):
+    def load_k(self, buf_id, urk_base=None):
+        if urk_base is None:
+            urk_base = self.k_lds_read_base_per_lane
         k_base = _k_buf_base(self.traits, buf_id)
         k_lo = [None] * self.traits.K_STEPS_QK
         k_hi = [None] * self.traits.K_STEPS_QK
@@ -1676,7 +1994,9 @@ class DualwaveKvLdsToVgprLoader:
             k_lo[ks], k_hi[ks] = self._load_k_pair(buf_id, k_base + urk_base + _swizzled_ks_offset(self.traits, ks))
         return (k_lo, k_hi)
 
-    def load_v(self, buf_id, urv_base):
+    def load_v(self, buf_id, urv_base=None):
+        if urv_base is None:
+            urv_base = self.v_lds_read_base_per_lane
         v_base = _v_buf_base(self.traits, buf_id)
         packs = [[None] * self.traits.D_CHUNKS for _ in range(4)]
         if const_expr(self.traits.KV_VECTORIZED):
@@ -1725,58 +2045,13 @@ class DualwaveKvLdsToVgprLoader:
         return packs
 
 
-class DualwaveStoreHelper:
-    def __init__(
-        self,
-        traits,
-        stride_q_n_v,
-        q_head_idx,
-        lane_div_32,
-        elem_dtype,
-        o_store_reg_128,
-        store_atom_128,
-        o_div,
-        ws_base_i64,
-        ws_opart_per_split_bytes,
-        ws_ml_per_split_bytes,
-        ws_mrow_abs_bytes,
-        ws_lrow_abs_bytes,
-        batch_idx,
-        split_idx,
-        seq_len_v,
-        q_start,
-        wave_q_offset,
-        lane_mod_32,
-        lane,
-        max_num_tiles,
-        split_t0,
-        c_zero_f,
-    ):
-        self.traits = traits
-        self.stride_q_n_v = stride_q_n_v
-        self.q_head_idx = q_head_idx
-        self.lane_div_32 = lane_div_32
-        self.elem_dtype = elem_dtype
-        self.o_store_reg_128 = o_store_reg_128
-        self.store_atom_128 = store_atom_128
-        self.o_div = o_div
-        self.ws_base_i64 = ws_base_i64
-        self.ws_opart_per_split_bytes = ws_opart_per_split_bytes
-        self.ws_ml_per_split_bytes = ws_ml_per_split_bytes
-        self.ws_mrow_abs_bytes = ws_mrow_abs_bytes
-        self.ws_lrow_abs_bytes = ws_lrow_abs_bytes
-        self.batch_idx = batch_idx
-        self.split_idx = split_idx
-        self.seq_len_v = seq_len_v
-        self.q_start = q_start
-        self.wave_q_offset = wave_q_offset
-        self.lane_mod_32 = lane_mod_32
-        self.lane = lane
-        self.max_num_tiles = max_num_tiles
-        self.split_t0 = split_t0
-        self.c_zero_f = c_zero_f
+class DualwaveStoreHelper(DualwaveKernelContext):
+    def __init__(self, ctx):
+        super().__init__(ctx)
 
-    def zero_o_block_if_needed(self, causal_end_raw_i32):
+    def zero_o_block_if_needed(self, causal_end_raw_i32=None):
+        if causal_end_raw_i32 is None:
+            causal_end_raw_i32 = self.causal_end_raw_i32
         traits = self.traits
         q_start = self.q_start
         wave_q_offset = self.wave_q_offset
