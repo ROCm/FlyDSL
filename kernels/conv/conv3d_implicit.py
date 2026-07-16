@@ -207,7 +207,12 @@ def compile_conv3d_implicit(
     BIG_IN_NR = 0x80000000  # 2 GB num_records for the rebased BIG_IN resource
     assert W_BYTES < OOB_SENTINEL_BYTES, f"weight {W_BYTES}B exceeds limit {OOB_SENTINEL_BYTES}B"
     assert X_BYTES < OOB_SENTINEL_BYTES or BIG_IN, f"input {X_BYTES}B exceeds limit"
-    assert (not BIG_IN) or (n == 1), "BIG_IN (>2^31-element) input requires n == 1"
+    # BIG_IN + n==1: rebase x_rsrc to block's first sample (nbase), keep g_off int32.
+    # BIG_IN + n>1:  x_rsrc stays at tensor base; per-load g_off computed as int64 via
+    #               create_buffer_resource_from_addr so each DMA sees the correct sample.
+    BIG_IN_N1 = BIG_IN and n == 1
+    BIG_IN_NM = BIG_IN and n > 1
+    X_SAMPLE_BYTES = c * d * h * w * BF16_BYTES  # bytes per sample (int64-safe)
 
     n_tail = k % TILE_N != 0
     grid_n = (k + TILE_N - 1) // TILE_N
@@ -275,17 +280,20 @@ def compile_conv3d_implicit(
         else:
             k_off = 0
 
-        if const_expr(BIG_IN):
+        if const_expr(BIG_IN_N1):
+            # n==1: rebase x_rsrc to the block's first temporal output position so
+            # all per-lane g_off values stay int32-safe within BIG_IN_NR (2 GB).
             nbase = m_offset // dhw
             ot_base0 = (m_offset % dhw) // hw_o
             base_t = ot_base0 - fx.Index(pt)
             base_t = arith.select(base_t < fx.Index(0), fx.Index(0), base_t)
             x_base_elem = ((nbase * fx.Index(d) + base_t) * fx.Index(h) + fx.Index(0)) * fx.Index(w) * fx.Index(c)
             x_addr = fx.Int64(buffer_ops.extract_base_index(x)) + fx.Int64(x_base_elem) * fx.Int64(2)
-            # Bounded num_records so OOB-routed padding taps zero: legal per-tile
-            # relative offsets are <~0.3GB << BIG_IN_NR (2GB) < OOB_SENTINEL, so
-            # valid taps stay in-bounds and padding zeroes.
             x_rsrc = buffer_ops.create_buffer_resource_from_addr(x_addr, num_records_bytes=BIG_IN_NR)
+        if const_expr(BIG_IN_NM):
+            # n>1: keep x_rsrc at tensor base; per-load rebase handled in _load_a
+            # using per-row n_idx so g_off stays int32 within a single sample.
+            x_base_addr = fx.Int64(buffer_ops.extract_base_index(x))
 
         wid = tid // WARP_SIZE
         lane = tid % WARP_SIZE
@@ -320,14 +328,11 @@ def compile_conv3d_implicit(
             u8_ptr = fx.recast_iter(fx.Uint8, lds_array.ptr)
             return fx.ptr_load(u8_ptr + fx.Int32(elem_offset * 2), result_type=Vec8Ty)
 
-        def _swz(row, col):
-            return col ^ (((row // 2) % (TILE_K // 8)) * 8)
-
         def a_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_M + row) * TILE_K + _swz(row, col)
+            return (fx.Index(stage) * TILE_M + row) * TILE_K + col
 
         def b_lds_off(stage, row, col):
-            return (fx.Index(stage) * TILE_N + row) * TILE_K + _swz(row, col)
+            return (fx.Index(stage) * TILE_N + row) * TILE_K + col
 
         def in_range(v, hi):
             return (v >= 0) & (v < fx.Index(hi))
@@ -353,9 +358,13 @@ def compile_conv3d_implicit(
                 in_t0 = ot * st - pt
                 in_h0 = oh * sh - ph
                 in_w0 = ow * sw - pw
-                if const_expr(BIG_IN):
+                if const_expr(BIG_IN_N1):
+                    # n==1: di is relative to block's nbase (stays int32)
                     di = n_idx - nbase
                     _row_dec.append((local_k, row_valid, di, in_t0, in_h0, in_w0))
+                elif const_expr(BIG_IN_NM):
+                    # n>1: store n_idx itself; per-load rebase in _load_a
+                    _row_dec.append((local_k, row_valid, n_idx, in_t0, in_h0, in_w0))
                 else:
                     _row_dec.append((local_k, row_valid, n_idx, in_t0, in_h0, in_w0))
 
@@ -377,7 +386,7 @@ def compile_conv3d_implicit(
                 temporal_delta = kt_i - pt
                 in_t = out_t + temporal_delta
                 valid = row_valid & k_valid & in_range(in_t, d)
-                if const_expr(BIG_IN):
+                if const_expr(BIG_IN_N1):
                     g_off = ((row + temporal_delta * hw_o) - (fx.Index(nbase) * dhw + base_t * hw_o)) * c + cc
                 else:
                     g_off = (row + temporal_delta * hw_o) * c + cc
@@ -387,13 +396,24 @@ def compile_conv3d_implicit(
                 ckk2 = ckk // kw
                 kh_i = ckk2 % kh
                 kt_i = ckk2 // kh
-                if const_expr(BIG_IN):
+                if const_expr(BIG_IN_N1):
                     _, row_valid, di, in_t0, in_h0, in_w0 = dec
                     in_t = in_t0 + kt_i
                     in_h = in_h0 + kh_i
                     in_w = in_w0 + kw_i
                     valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
                     g_off = (((di * d + (in_t - base_t)) * h + in_h) * w + in_w) * c + cc
+                elif const_expr(BIG_IN_NM):
+                    # n>1 BIG_IN: g_off is relative to this row's sample base (int32-safe
+                    # within one sample since single-sample bytes < BIG_IN_NR = 2 GB).
+                    _, row_valid, n_idx, in_t0, in_h0, in_w0 = dec
+                    in_t = in_t0 + kt_i
+                    in_h = in_h0 + kh_i
+                    in_w = in_w0 + kw_i
+                    valid = row_valid & k_valid & in_range(in_t, d) & in_range(in_h, h) & in_range(in_w, w)
+                    # offset within the sample (fits int32 since X_SAMPLE_BYTES < 2 GB)
+                    g_off = ((in_t * h + in_h) * w + in_w) * c + cc
+                    return fx.Int32(g_off), valid, n_idx
                 else:
                     _, row_valid, n_idx, in_t0, in_h0, in_w0 = dec
                     in_t = in_t0 + kt_i
@@ -443,9 +463,19 @@ def compile_conv3d_implicit(
                 ckk_base = kbase_i // c
             stage_tile = fx.Index(stage) * TILE_M * TILE_K
             for i in range_constexpr(LDG_A_COUNT):
-                g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
-                voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
-                _dma_to_lds(x_rsrc, _lds_dma_ptr(a_lds, stage_tile, i), voff)
+                if const_expr(BIG_IN_NM):
+                    # _a_addr returns (g_off, valid, n_idx) for BIG_IN_NM
+                    addr_ret = _a_addr(i, kbase_i, cc_base, ckk_base)
+                    g_off_i, valid, n_idx_i = addr_ret
+                    # rebase x_rsrc to this row's sample so g_off stays int32
+                    sample_addr = x_base_addr + fx.Int64(n_idx_i) * fx.Int64(X_SAMPLE_BYTES)
+                    x_rsrc_i = buffer_ops.create_buffer_resource_from_addr(sample_addr, num_records_bytes=BIG_IN_NR)
+                    voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
+                    _dma_to_lds(x_rsrc_i, _lds_dma_ptr(a_lds, stage_tile, i), voff)
+                else:
+                    g_off_i, valid = _a_addr(i, kbase_i, cc_base, ckk_base)
+                    voff = fx.Int32(arith.select(valid, g_off_i, OOB_ELEM))
+                    _dma_to_lds(x_rsrc, _lds_dma_ptr(a_lds, stage_tile, i), voff)
 
         def _load_b(stage, k_base):
             stage_tile = fx.Index(stage) * TILE_N * TILE_K
