@@ -77,7 +77,7 @@ holds uniformly across arithmetic, comparison, bitwise, and shift operators.
 
 ### Python literals
 
-A bare literal stays plain Python while it only meets other Python values 
+A bare literal stays plain Python while it only meets other Python values
 (`2 + 3` is ordinary Python). On contact with a `Numeric` it takes a DSL type
 *by value* (see *Operand normalization*) as a compile-time value; on contact
 with a `Vector` it broadcasts to the lanes and the result is run-time. After

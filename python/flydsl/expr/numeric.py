@@ -394,6 +394,10 @@ class Numeric(metaclass=NumericMeta):
         return self
 
     def __abs__(self):
+        # Match the IR-level restriction (_abs_op) for both static and run-time
+        # values: abs is undefined for a boolean.
+        if type(self) is Boolean:
+            raise TypeError("abs is not supported for boolean type")
         if isinstance(self.value, (int, float, bool)):
             return type(self)(abs(self.value))
         return type(self)(abs(self.ir_value()))

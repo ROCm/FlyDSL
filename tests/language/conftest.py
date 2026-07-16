@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 FlyDSL Project Contributors
 
-"""Shared pytest configuration for the language conformance suite (tests/lang).
+"""Shared pytest configuration for the language conformance suite (tests/language).
 
 Language semantics are exercised through the real DSL frontend via ``@flyc.jit``
 in frontend-only mode: ``COMPILE_ONLY`` is set (no device execution) and the

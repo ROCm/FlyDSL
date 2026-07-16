@@ -531,6 +531,18 @@ class TestScalarUnaryOps:
 
         run(body)
 
+    def test_abs_boolean_raises(self):
+        """abs is undefined for a boolean, consistently for static and run-time
+        values (the IR layer already rejects it)."""
+
+        def body(x: fx.Boolean):
+            with pytest.raises(TypeError):
+                abs(Boolean(True))  # compile-time
+            with pytest.raises(TypeError):
+                abs(x)  # run-time
+
+        run(body, True)
+
     def test_neg_folds_compile_time(self):
         def body():
             r = -Int32(3)
