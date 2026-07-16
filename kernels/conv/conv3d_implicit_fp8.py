@@ -513,6 +513,44 @@ def _prep_weight_fp8(weight: torch.Tensor) -> torch.Tensor:
     return out
 
 
+# gemm8w's rigid 256x256x128 8-wave tile requires these; see conv3d_implicit_fp8_gemm8w.
+def _gemm8w_eligible(k, crs, c):
+    return (k % 256 == 0) and (crs % 128 == 0) and (c % 16 == 0) and (crs // 128 >= 2)
+
+
+def _run_gemm8w_fp8(x, weight, bias, strides, pads, stream, autotune, dims):
+    """Route to the fp8_gemm 8-wave conv. gemm8w has a fixed tile (no TILE sweep);
+    its only tunable is WGM (workgroup L2-swizzle grouping), so the autotune path
+    sweeps WGM_VALUES via the shared autotune_conv3d, reusing the same cache."""
+    from kernels.conv.conv3d_implicit_fp8_gemm8w import _conv3d_impl_fp8_gemm8w
+
+    st, sh, sw = strides
+    pt, ph, pw = pads
+    n, c, d, h, width, k, kt, kh, kw = dims
+
+    do_tune = autotune or (autotune is None and _autotune_enabled())
+    if not do_tune:
+        return _conv3d_impl_fp8_gemm8w(x, weight, bias=bias, stride=strides, padding=pads, stream=stream)
+
+    from kernels.conv.conv3d_autotune import WGM_VALUES, autotune_conv3d
+
+    # Fixed-tile marker so the cache key still distinguishes gemm8w from the general
+    # kernel's tile sweep; only WGM actually varies.
+    candidates = [((256, 256, 8, 4), w) for w in WGM_VALUES]
+    shape = (n, c, d, h, width, k, kt, kh, kw, st, sh, sw, pt, ph, pw, bias is not None)
+    best = autotune_conv3d(
+        "fp8_gemm8w",
+        shape,
+        "fp8",
+        candidates,
+        x.device,
+        lambda cand: _conv3d_impl_fp8_gemm8w(
+            x, weight, bias=bias, stride=strides, padding=pads, stream=stream, wgm=cand[1]
+        ),
+    )
+    return _conv3d_impl_fp8_gemm8w(x, weight, bias=bias, stride=strides, padding=pads, stream=stream, wgm=best[1])
+
+
 def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, stream=None, tile=None, autotune=None):
     """FP8 (E4M3FN) 3D implicit-GEMM implementation; the public
     conv3d_implicit_fp8 entry dispatches 1D/2D/3D by filter rank and
@@ -539,6 +577,16 @@ def _conv3d_impl_fp8(x, weight, bias=None, stride=1, padding=0, splitk=None, str
     wo = (width + 2 * pw - kw) // sw + 1
     npq = n * do * ho * wo
     crs = c * kt * kh * kw
+
+    # Fast path: the hand-scheduled fp8_gemm 8-wave pipeline (conv3d_implicit_fp8_gemm8w)
+    # is ~1.7x this general kernel on aligned shapes, so route to it whenever its rigid
+    # constraints hold (256x256x128 tile: k%256==0, crs%128==0, c%16==0, crs//128>=2).
+    # Everything else (unaligned k/crs, tiny K) falls through to the general kernel below,
+    # which supports arbitrary shapes + split-K + a per-shape tile autotune.
+    if tile is None and _gemm8w_eligible(k, crs, c):
+        return _run_gemm8w_fp8(
+            x, weight, bias, (st, sh, sw), (pt, ph, pw), stream, autotune, (n, c, d, h, width, k, kt, kh, kw)
+        )
 
     assert c % LDG_VEC == 0, f"FP8 vector load needs C % {LDG_VEC} == 0, got C={c}"
 

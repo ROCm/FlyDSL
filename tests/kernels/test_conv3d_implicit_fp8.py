@@ -101,6 +101,58 @@ def test_conv3d_fp8_tile_configs(tile):
     assert rel.item() < 6e-2, f"FP8 conv rel_err {rel.item():.3e} too high for tile {tile}"
 
 
+# Aligned shapes (k%256==0, crs%128==0, c%16==0, crs//128>=2) are routed by the
+# public entry to the fp8_gemm 8-wave fast path (conv3d_implicit_fp8_gemm8w). These
+# cases exercise that dispatch and confirm the fast kernel matches the FP8-cast ref.
+@_skip_no_fp8
+@pytest.mark.parametrize(
+    "n,c,t,h,w,k,kt,kh,kw,stride,padding",
+    [
+        (1, 256, 3, 16, 16, 256, 1, 3, 3, 1, (0, 1, 1)),  # crs=2304
+        (1, 128, 4, 12, 12, 256, 3, 3, 3, 1, 1),  # crs=3456
+        (1, 256, 4, 16, 16, 256, 1, 1, 1, 1, 0),  # crs=256 (min k_iters=2)
+    ],
+)
+def test_conv3d_fp8_gemm8w_dispatch(n, c, t, h, w, k, kt, kh, kw, stride, padding):
+    from kernels.conv.conv3d_implicit_fp8 import _gemm8w_eligible
+
+    crs = c * kt * kh * kw
+    assert _gemm8w_eligible(k, crs, c), "shape must route to gemm8w"
+
+    torch.manual_seed(2600 + c + k + h)
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+    weight = torch.randn((k, c, kt, kh, kw), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+
+    y = conv3d_implicit_fp8(x, weight, stride=stride, padding=padding)
+    ref = F.conv3d(x.to(torch.bfloat16), weight.to(torch.bfloat16), stride=stride, padding=padding)
+    torch.cuda.synchronize()
+
+    assert y.shape == ref.shape
+    rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
+    assert rel.item() < 2e-2, f"gemm8w-routed FP8 conv rel_err {rel.item():.3e}"
+
+
+# The gemm8w fast path has no tile sweep (fixed 256x256x128); its only autotune knob
+# is WGM (workgroup L2-swizzle). autotune=True must sweep WGM, cache, and stay correct.
+@_skip_no_fp8
+def test_conv3d_fp8_gemm8w_autotune_wgm(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLYDSL_AUTOTUNE_CACHE_DIR", str(tmp_path))
+    torch.manual_seed(2700)
+    n, c, t, h, w, k = 1, 256, 3, 16, 16, 256
+    x = torch.randn((n, c, t, h, w), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+    weight = torch.randn((k, c, 1, 3, 3), device="cuda", dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+
+    y = conv3d_implicit_fp8(x, weight, stride=1, padding=(0, 1, 1), autotune=True)
+    y2 = conv3d_implicit_fp8(x, weight, stride=1, padding=(0, 1, 1), autotune=True)  # cache hit
+    ref = F.conv3d(x.to(torch.bfloat16), weight.to(torch.bfloat16), stride=1, padding=(0, 1, 1))
+    torch.cuda.synchronize()
+
+    assert y.shape == ref.shape
+    rel = (y.float() - ref.float()).abs().mean() / ref.float().abs().mean().clamp_min(1e-6)
+    assert rel.item() < 2e-2, f"gemm8w autotune rel_err {rel.item():.3e}"
+    assert torch.equal(y, y2), "cached WGM re-run must be deterministic"
+
+
 def _fp8(t):
     return t.to(torch.float8_e4m3fn)
 
