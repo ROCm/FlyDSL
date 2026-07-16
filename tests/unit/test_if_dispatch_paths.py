@@ -49,6 +49,31 @@ if (n := foo()):
     assert assigned == ["x", "i", "y", "w", "z", "err", "n", "out"]
 
 
+def test_collect_assigned_vars_excludes_self():
+    """A store like ``self.buf[i] = x`` or ``self.flag = 1`` mutates the object
+    in place and does NOT rebind the ``self`` name, so ``self`` must not be
+    threaded as a written region arg. Regression guard: previously the store
+    forced ``self`` (the base ``Name`` of the attribute) into ``write_args``,
+    which made the if/for/while rewriter try to carry ``self`` through the
+    scf result values. Mirrors ``visit_Call`` already excluding ``self`` from
+    invoked_args; ``self`` stays reachable in the region via closure."""
+    # Subscript store on a self attribute -- the original failing case.
+    stmts = ast.parse("self.semaphore_buf[idx] = 0").body
+    assert _collect_assigned_vars(stmts, [{"self", "idx"}]) == []
+
+    # Plain attribute store on self.
+    stmts = ast.parse("self.flag = 1").body
+    assert _collect_assigned_vars(stmts, [{"self"}]) == []
+
+    # A real local-tensor subscript store must still be collected as a write.
+    stmts = ast.parse("x[idx] = 0").body
+    assert _collect_assigned_vars(stmts, [{"x", "idx"}]) == ["x"]
+
+    # self.method() calls were already excluded from invoked_args.
+    stmts = ast.parse("self.do_it()").body
+    assert _collect_assigned_vars(stmts, [{"self"}]) == []
+
+
 def test_scf_if_dispatch_static_with_states_no_ifop():
     with Context(), Location.unknown():
         module = Module.create()

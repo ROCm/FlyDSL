@@ -82,6 +82,8 @@ def _collect_assigned_vars(body_stmts, active_symbols, orelse_stmts=None, test_e
             return None
 
         def visit_Name(self, node):
+            if node.id == "self":
+                return
             if isinstance(node.ctx, ast.Store) or self.force_store:
                 add_unique(write_args, node.id)
 
