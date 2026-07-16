@@ -1,8 +1,38 @@
 {
  "schema": 1,
- "updated": "2026-07-16T07:45:28Z",
+ "updated": "2026-07-16T07:47:17Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29480986346,
+   "pr": 865,
+   "commit": "eb69c72e67f52609d6e67ef5a2d34afaa0aa64e3",
+   "branch": "patch-2",
+   "event": "pull_request",
+   "title": "[Doc] Add FlyDSL Project Status and Compatibility Notice",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480986346",
+   "created_at": "2026-07-16T07:45:06Z",
+   "updated_at": "2026-07-16T07:45:45Z",
+   "actor": "jamestangg",
+   "jobs": []
+  },
+  {
+   "run_id": 29480970486,
+   "pr": 785,
+   "commit": "f011227c5cf93438dafcdabc7eb5965efd88f3e6",
+   "branch": "feat/autotune-rmsnorm-adopt",
+   "event": "pull_request",
+   "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
+   "status": "pending",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29480970486",
+   "created_at": "2026-07-16T07:44:49Z",
+   "updated_at": "2026-07-16T07:44:50Z",
+   "actor": "jhinpan",
+   "jobs": []
+  },
   {
    "run_id": 29480856448,
    "pr": 825,
@@ -149,16 +179,16 @@
   },
   {
    "run_id": 29477614155,
-   "pr": 785,
+   "pr": null,
    "commit": "a6de6a2effd0ed0d703ea4246e6d8c13a215ae39",
    "branch": "feat/autotune-rmsnorm-adopt",
    "event": "pull_request",
    "title": "[2/5] autotune: two-track config + first real adopter (rmsnorm) (#770)",
-   "status": "pending",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29477614155",
    "created_at": "2026-07-16T06:44:23Z",
-   "updated_at": "2026-07-16T06:44:24Z",
+   "updated_at": "2026-07-16T07:44:50Z",
    "actor": "jhinpan",
    "jobs": []
   },
@@ -2056,92 +2086,6 @@
    "updated_at": "2026-07-14T09:49:46Z",
    "actor": "binding7012",
    "jobs": []
-  },
-  {
-   "run_id": 29321481150,
-   "pr": null,
-   "commit": "fa4f8ae2d5b0a08ca2b428247fd0ff5a7863558d",
-   "branch": "main",
-   "event": "push",
-   "title": "[Misc] Propagate signatures through expr decorators (#835)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29321481150",
-   "created_at": "2026-07-14T09:22:31Z",
-   "updated_at": "2026-07-14T11:55:24Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T10:50:37Z",
-     "completed_at": "2026-07-14T11:37:43Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29321481150/job/87062635168"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T10:42:41Z",
-     "completed_at": "2026-07-14T11:11:33Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29321481150/job/87062635211"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T10:40:34Z",
-     "completed_at": "2026-07-14T11:55:23Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29321481150/job/87062635214"
-    }
-   ]
-  },
-  {
-   "run_id": 29320926000,
-   "pr": null,
-   "commit": "ca461e8c71485868724ba041419d2fd775b90591",
-   "branch": "main",
-   "event": "push",
-   "title": "[Docs] Remove duplicate Documentation table from README (#846)",
-   "status": "completed",
-   "conclusion": "cancelled",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000",
-   "created_at": "2026-07-14T09:13:32Z",
-   "updated_at": "2026-07-14T10:38:35Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T09:15:22Z",
-     "completed_at": "2026-07-14T10:38:34Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000/job/87046074513"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T09:15:34Z",
-     "completed_at": "2026-07-14T10:13:10Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000/job/87046074578"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-14T09:19:35Z",
-     "completed_at": "2026-07-14T09:46:38Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29320926000/job/87046076543"
-    }
-   ]
   }
  ]
 }
