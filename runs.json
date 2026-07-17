@@ -1,8 +1,23 @@
 {
  "schema": 1,
- "updated": "2026-07-17T10:24:35Z",
+ "updated": "2026-07-17T10:26:41Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29573356695,
+   "pr": 825,
+   "commit": "4b305cfd23b9248afbfa439dc1ee7d25d4d2d7bb",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29573356695",
+   "created_at": "2026-07-17T10:24:25Z",
+   "updated_at": "2026-07-17T10:25:15Z",
+   "actor": "fsx950223",
+   "jobs": []
+  },
   {
    "run_id": 29571437772,
    "pr": 825,
@@ -10,20 +25,20 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29571437772",
    "created_at": "2026-07-17T09:51:14Z",
-   "updated_at": "2026-07-17T09:54:46Z",
+   "updated_at": "2026-07-17T10:24:58Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-17T09:54:44Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T10:24:57Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29571437772/job/87856170927"
     },
     {
@@ -354,20 +369,20 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "in_progress",
+   "status": "queued",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29560732998",
    "created_at": "2026-07-17T06:40:50Z",
-   "updated_at": "2026-07-17T08:51:55Z",
+   "updated_at": "2026-07-17T10:23:42Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-17T08:51:54Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T10:23:42Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29560732998/job/87841393044"
     },
     {
@@ -387,6 +402,24 @@
      "started_at": "2026-07-17T06:44:09Z",
      "completed_at": "2026-07-17T07:42:40Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29560732998/job/87841393743"
+    },
+    {
+     "runner": "linux-flydsl-mi325-8",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-17T10:24:54Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29560732998/job/87861949240"
+    },
+    {
+     "runner": "linux-flydsl-mi355-8",
+     "arch": "gfx950",
+     "status": "queued",
+     "conclusion": null,
+     "started_at": "2026-07-17T10:23:42Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29560732998/job/87861949247"
     }
    ]
   },
@@ -2267,49 +2300,6 @@
    "updated_at": "2026-07-15T07:05:00Z",
    "actor": "fsx950223",
    "jobs": []
-  },
-  {
-   "run_id": 29393593495,
-   "pr": null,
-   "commit": "221192273ed75b61b3c7947ec893a7022c56fa0d",
-   "branch": "main",
-   "event": "push",
-   "title": "[kernels] Relocate shared MMA infrastructure under common/ (#849)",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393593495",
-   "created_at": "2026-07-15T06:13:43Z",
-   "updated_at": "2026-07-15T12:32:13Z",
-   "actor": "coderfeli",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-15T06:21:48Z",
-     "completed_at": "2026-07-15T07:47:50Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393593495/job/87282266929"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-15T07:22:54Z",
-     "completed_at": "2026-07-15T08:36:08Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393593495/job/87282266932"
-    },
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-15T12:11:55Z",
-     "completed_at": "2026-07-15T12:32:12Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29393593495/job/87282267015"
-    }
-   ]
   }
  ]
 }
