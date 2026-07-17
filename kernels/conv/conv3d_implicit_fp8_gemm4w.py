@@ -3,7 +3,7 @@
 
 """Implicit-GEMM conv3d (FP8, CDNA4) using the fp8_gemm 4-wave pipeline.
 
-Sibling of ``conv3d_implicit_fp8_gemm8w`` -- same conv-specific im2col A-loader
+Sibling of ``conv3d_implicit_fp8`` (the 8-wave kernel) -- same conv-specific im2col A-loader
 and direct-store epilogue, but the GEMM core is ported from
 ``kernels/gemm/fp8_gemm_4wave.py`` instead of the 8-wave kernel:
 
@@ -43,8 +43,8 @@ from kernels.conv.conv3d_implicit_fp8 import (
     _make_fp8_buffer_tensor_from_addr,
     _normalize_3,
     _prep_weight_fp8,
+    _transpose_activation_fp8,
 )
-from kernels.conv.conv3d_implicit_fp8_gemm8w import _transpose_activation_fp8
 from kernels.gemm.fp8_gemm_4wave import _xcd_swizzle
 from kernels.gemm.fp8_gemm_utils import (
     G2SLoader,
