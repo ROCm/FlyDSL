@@ -385,7 +385,7 @@ def build_flash_attn_func_module_primary(
     REDUCE_MODE = os.getenv("FLYDSL_FLASH_ATTN_FUNC_REDUCE_MODE", "xor").strip().lower()
     if REDUCE_MODE not in ("xor", "ds_bpermute"):
         REDUCE_MODE = "xor"
-    SKIP_KV_PAD_MASK = os.getenv("FLYDSL_FLASH_ATTN_FUNC_SKIP_KV_PAD_MASK", "1") == "1"
+    SKIP_KV_PAD_MASK = os.getenv("FLYDSL_FLASH_ATTN_FUNC_SKIP_KV_PAD_MASK", "0") == "1"
     NUM_PREFETCH_K = 3 if ENABLE_PREFETCH_3BUF else (2 if (ENABLE_DMA and not ENABLE_GFX942_DMA) else 1)
     NUM_PREFETCH_V = 3 if ENABLE_PREFETCH_3BUF else 1
     CK_LDS_SEQ = (1, 2, 0, 1, 0, 1, 2, 0) if ENABLE_PREFETCH_3BUF else (0,)
@@ -1373,13 +1373,17 @@ def build_flash_attn_func_module_primary(
                     lane_off_i32 = fx.Int32(lane_div_32) * fx.Int32(4)
                     seq_len_i32 = fx.Int32(seq_len_v)
                     if const_expr(not SKIP_KV_PAD_MASK):
+                        kv_tile_end = kv_start + fx.Index(BLOCK_N)
+                        needs_pad_mask = fx.Int32(kv_tile_end) > seq_len_i32
                         for r in range_constexpr(16):
                             _off = (r // 4) * 8 + (r % 4)
                             kv_col = kv_start_i32 + lane_off_i32 + fx.Int32(_off)
-                            s_raw_lo[r] = ArithValue(kv_col >= seq_len_i32).select(c_neg_inf, s_raw_lo[r])
-                            s_raw_hi[r] = ArithValue(kv_col + fx.Int32(K_SUB_N) >= seq_len_i32).select(
+                            masked_lo = ArithValue(kv_col >= seq_len_i32).select(c_neg_inf, s_raw_lo[r])
+                            masked_hi = ArithValue(kv_col + fx.Int32(K_SUB_N) >= seq_len_i32).select(
                                 c_neg_inf, s_raw_hi[r]
                             )
+                            s_raw_lo[r] = ArithValue(needs_pad_mask).select(masked_lo, s_raw_lo[r])
+                            s_raw_hi[r] = ArithValue(needs_pad_mask).select(masked_hi, s_raw_hi[r])
                 if const_expr(_TREE_REDUCE):
                     local_max = _tree_reduce(list(s_raw_lo) + list(s_raw_hi), _fmax)
                 else:
