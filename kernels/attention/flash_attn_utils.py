@@ -362,6 +362,137 @@ def _bf16_trunc_pack_v8(traits, f32_vals, elem_dtype):
     return Vec.from_elements(f16_vals, elem_dtype).ir_value()
 
 
+def _score_pair_to_lists(v_s):
+    s_lo, s_hi = v_s
+    return (
+        [Vec(s_lo)[r] for r in range_constexpr(16)],
+        [Vec(s_hi)[r] for r in range_constexpr(16)],
+    )
+
+
+def _score_lists_to_vecs(v_s_lists):
+    s_lo, s_hi = v_s_lists
+    return (
+        Vec.from_elements([as_mlir_value(v) for v in s_lo], fx.Float32).ir_value(),
+        Vec.from_elements([as_mlir_value(v) for v in s_hi], fx.Float32).ir_value(),
+    )
+
+
+def _reduce_score_pair(v_s, initial, reducer, fm_fast):
+    s_lo, s_hi = v_s
+    acc = initial
+    for r in range_constexpr(16):
+        acc = reducer(acc, s_lo[r], fm_fast)
+    for r in range_constexpr(16):
+        acc = reducer(acc, s_hi[r], fm_fast)
+    return acc
+
+
+def _lane_pair_reduce(v, reducer, fm_fast):
+    lhs, rhs = _reduction_pair(v)
+    return reducer(lhs, rhs, fm_fast)
+
+
+def _score_pair_max(v_s, neg_inf, fm_fast):
+    return _lane_pair_reduce(_reduce_score_pair(v_s, neg_inf, _fmax, fm_fast), _fmax, fm_fast)
+
+
+def _score_pair_sum(v_s, zero_f, fm_fast):
+    return _lane_pair_reduce(_reduce_score_pair(v_s, zero_f, _fadd, fm_fast), _fadd, fm_fast)
+
+
+def _sub_score_pair(v_s, row_max, fm_fast):
+    s_lo, s_hi = v_s
+    lo_sub = []
+    hi_sub = []
+    for r in range_constexpr(16):
+        lo_sub.append(_fsub(s_lo[r], row_max, fm_fast))
+    for r in range_constexpr(16):
+        hi_sub.append(_fsub(s_hi[r], row_max, fm_fast))
+    return Vec.from_elements(lo_sub, fx.Float32).ir_value(), Vec.from_elements(hi_sub, fx.Float32).ir_value()
+
+
+def _exp2_score_slice(v_s, start, length):
+    if const_expr(start == 0):
+        s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
+        lo_partial = []
+        for r in range_constexpr(16):
+            lo_partial.append(rocdl.exp2(T.f32, as_mlir_value(s_lo[r])))
+        return Vec.from_elements(lo_partial, fx.Float32).ir_value(), v_s[1]
+
+    lo_partial = [Vec(v_s[0])[r] for r in range_constexpr(16)]
+    hi_full = []
+    for r in range_constexpr(16):
+        hi_full.append(rocdl.exp2(T.f32, as_mlir_value(Vec(v_s[1])[r])))
+    return lo_partial, hi_full
+
+
+def _pack_p_v8_slices(traits, v_p, pack_v8_fn):
+    lo_partial_list, hi_full = v_p
+    p_lo_packs = []
+    p_hi_packs = []
+    for pks in range_constexpr(traits.PV_K_STEPS):
+        p_base = pks * 8
+        lo_slice = [lo_partial_list[p_base + s] for s in range_constexpr(8)]
+        hi_slice = hi_full[p_base : p_base + 8]
+        p_lo_packs.append(pack_v8_fn(lo_slice))
+        p_hi_packs.append(pack_v8_fn(hi_slice))
+    return p_lo_packs, p_hi_packs
+
+
+def _safe_l_inv(l_row, zero_f):
+    l_inv = rocdl.rcp(T.f32, as_mlir_value(l_row))
+    return ArithValue(fx.Float32(l_row) > zero_f).select(l_inv, zero_f)
+
+
+def _rescale_from_tile_max(m_row, m_tile_max, fm_fast):
+    row_max = _fmax(m_row, m_tile_max, fm_fast)
+    rescale = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, row_max, fm_fast)))
+    return row_max, rescale
+
+
+def _scale_o_accs(v_o, scale_scalar, traits, fm_fast):
+    scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
+    for dc in range_constexpr(traits.D_CHUNKS):
+        v_o[dc] = _fmul(Vec(v_o[dc]), scale_vec, fm_fast)
+
+
+def _causal_pair_thresholds(kv_vectorized):
+    if const_expr(kv_vectorized):
+        return [
+            (0, 1),
+            (2, 3),
+            (4, 5),
+            (6, 7),
+            (16, 17),
+            (18, 19),
+            (20, 21),
+            (22, 23),
+        ]
+    return [
+        (0, 1),
+        (2, 3),
+        (8, 9),
+        (10, 11),
+        (16, 17),
+        (18, 19),
+        (24, 25),
+        (26, 27),
+    ]
+
+
+def _apply_dualwave_causal_mask_pair(s_values, rel_i32, neg_inf_i32, pair_thresholds):
+    for p in range_constexpr(len(pair_thresholds)):
+        thr_x, thr_y = pair_thresholds[p]
+        idx_x = p * 2
+        idx_y = p * 2 + 1
+        x_bits = _bitcast_i32(s_values[idx_x])
+        y_bits = _bitcast_i32(s_values[idx_y])
+        new_x, new_y = _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_bits, y_bits)
+        s_values[idx_x] = _bitcast_f32(new_x)
+        s_values[idx_y] = _bitcast_f32(new_y)
+
+
 # Descriptor, LDS, and buffer helpers
 
 
@@ -2332,12 +2463,7 @@ class GenericSoftmaxHelper:
         return fx.Float32(v_f32).shuffle_xor(ctx.shuf_32_i32, ctx.width_i32)
 
     def split_scores(self, s_acc_lo, s_acc_hi):
-        s_raw_lo = []
-        s_raw_hi = []
-        for r in range_constexpr(16):
-            s_raw_lo.append(Vec(s_acc_lo)[r])
-            s_raw_hi.append(Vec(s_acc_hi)[r])
-        return s_raw_lo, s_raw_hi
+        return _score_pair_to_lists((s_acc_lo, s_acc_hi))
 
     def _kv_mask_lane_off(self, kv_start_i32):
         # Physical KV column base per lane; KV_VECTORIZED applies sigma(kv) in the K load.
@@ -3161,82 +3287,38 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         super().__init__(ctx)
 
     def reduce_max(self, v_s):
-        s_lo, s_hi = v_s
-        m = self.c_neg_inf
-        for r in range_constexpr(16):
-            m = _fmax(m, s_lo[r], self.fm_fast)
-        for r in range_constexpr(16):
-            m = _fmax(m, s_hi[r], self.fm_fast)
-        lhs, rhs = _reduction_pair(m)
-        return _fmax(lhs, rhs, self.fm_fast)
+        return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def floor_masked_max(self, row_max):
         return _fmax(row_max, self.c_neg_floor, self.fm_fast)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
-        row_max = _fmax(m_row, m_tile_max, self.fm_fast)
-        rescale = rocdl.exp2(T.f32, as_mlir_value(_fsub(m_row, row_max, self.fm_fast)))
-        return row_max, rescale
+        return _rescale_from_tile_max(m_row, m_tile_max, self.fm_fast)
 
     def apply_l_rescale(self, l_row, rescale):
         return _fmul(l_row, rescale, self.fm_fast)
 
     def exp2(self, v_s, start, length):
-        if const_expr(start == 0):
-            s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
-            lo_partial = []
-            for r in range_constexpr(16):
-                lo_partial.append(rocdl.exp2(T.f32, as_mlir_value(s_lo[r])))
-            return Vec.from_elements(lo_partial, fx.Float32).ir_value(), v_s[1]
-
-        lo_partial = [Vec(v_s[0])[r] for r in range_constexpr(16)]
-        hi_full = []
-        for r in range_constexpr(16):
-            hi_full.append(rocdl.exp2(T.f32, as_mlir_value(Vec(v_s[1])[r])))
-        return lo_partial, hi_full
+        return _exp2_score_slice(v_s, start, length)
 
     def reduce_sum(self, l_row, v_p):
-        lo_partial_list, hi_full = v_p
-        local_sum = self.c_zero_f
-        for r in range_constexpr(16):
-            local_sum = _fadd(local_sum, lo_partial_list[r], self.fm_fast)
-        for r in range_constexpr(16):
-            local_sum = _fadd(local_sum, hi_full[r], self.fm_fast)
-        lhs_sum, rhs_sum = _reduction_pair(local_sum)
-        return _fadd(l_row, _fadd(lhs_sum, rhs_sum, self.fm_fast), self.fm_fast)
+        return _fadd(l_row, _score_pair_sum(v_p, self.c_zero_f, self.fm_fast), self.fm_fast)
 
     def sub_m(self, v_s, row_max):
-        s_lo, s_hi = v_s
-        lo_sub = []
-        hi_sub = []
-        for r in range_constexpr(16):
-            lo_sub.append(_fsub(s_lo[r], row_max, self.fm_fast))
-        for r in range_constexpr(16):
-            hi_sub.append(_fsub(s_hi[r], row_max, self.fm_fast))
-        lo_vec = Vec.from_elements(lo_sub, fx.Float32).ir_value()
-        hi_vec = Vec.from_elements(hi_sub, fx.Float32).ir_value()
-        return lo_vec, hi_vec
+        return _sub_score_pair(v_s, row_max, self.fm_fast)
 
     def cast_p(self, v_p):
-        lo_partial_list, hi_full = v_p
-        p_lo_packs = []
-        p_hi_packs = []
-        for pks in range_constexpr(self.traits.PV_K_STEPS):
-            p_base = pks * 8
-            lo_slice = [lo_partial_list[p_base + s] for s in range_constexpr(8)]
-            hi_slice = hi_full[p_base : p_base + 8]
-            p_lo_packs.append(_bf16_trunc_pack_v8(self.traits, lo_slice, elem_dtype=self.elem_dtype))
-            p_hi_packs.append(_bf16_trunc_pack_v8(self.traits, hi_slice, elem_dtype=self.elem_dtype))
-        return p_lo_packs, p_hi_packs
+        return _pack_p_v8_slices(
+            self.traits,
+            v_p,
+            lambda vals: _bf16_trunc_pack_v8(self.traits, vals, elem_dtype=self.elem_dtype),
+        )
 
     def safe_l_inv(self, l_row):
-        l_inv = rocdl.rcp(T.f32, as_mlir_value(l_row))
-        return ArithValue(fx.Float32(l_row) > self.c_zero_f).select(l_inv, self.c_zero_f)
+        return _safe_l_inv(l_row, self.c_zero_f)
 
     def scale_o(self, v_o, scale_scalar):
-        scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
-        for dc in range_constexpr(self.traits.D_CHUNKS):
-            v_o[dc] = _fmul(Vec(v_o[dc]), scale_vec, self.fm_fast)
+        _scale_o_accs(v_o, scale_scalar, self.traits, self.fm_fast)
 
     def rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
         m_new = _fmax(m_row, m_tile_max, self.fm_fast)
@@ -3314,11 +3396,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         return _lazy_rescale_o(v_o, m_row, l_row, m_tile_max, v_p)
 
     def v_s_vec_to_lists(self, v_s):
-        s_lo, s_hi = v_s
-        return (
-            [Vec(s_lo)[r] for r in range_constexpr(16)],
-            [Vec(s_hi)[r] for r in range_constexpr(16)],
-        )
+        return _score_pair_to_lists(v_s)
 
     def _causal_mask_inplace(self, v_s, tile_idx, q_row_i32=None):
         """Apply causal mask using DUALWAVE_SWP inline-asm attn_mask_vec2_imm."""
@@ -3335,63 +3413,9 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
         rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(32))
         neg_inf_i32 = fx.Int32(traits.NEG_INF_F32_BITS)
 
-        if const_expr(traits.KV_VECTORIZED):
-            pair_thresholds = [
-                (0, 1),
-                (2, 3),  # r=0,1  r=2,3
-                (4, 5),
-                (6, 7),  # r=4,5  r=6,7
-                (16, 17),
-                (18, 19),  # r=8,9  r=10,11
-                (20, 21),
-                (22, 23),  # r=12,13 r=14,15
-            ]
-        else:
-            pair_thresholds = [
-                (0, 1),
-                (2, 3),  # r=0,1  r=2,3
-                (8, 9),
-                (10, 11),  # r=4,5  r=6,7
-                (16, 17),
-                (18, 19),  # r=8,9  r=10,11
-                (24, 25),
-                (26, 27),  # r=12,13 r=14,15
-            ]
-        for p in range_constexpr(len(pair_thresholds)):
-            thr_x, thr_y = pair_thresholds[p]
-            idx_x = p * 2
-            idx_y = p * 2 + 1
-
-            x_lo_bits = _bitcast_i32(s_lo[idx_x])
-            y_lo_bits = _bitcast_i32(s_lo[idx_y])
-            new_x_lo, new_y_lo = _attn_mask_vec2_imm(
-                rel_lo_i32,
-                neg_inf_i32,
-                thr_x,
-                thr_y,
-                x_lo_bits,
-                y_lo_bits,
-            )
-            s_lo[idx_x] = _bitcast_f32(new_x_lo)
-            s_lo[idx_y] = _bitcast_f32(new_y_lo)
-
-        for p in range_constexpr(len(pair_thresholds)):
-            thr_x, thr_y = pair_thresholds[p]
-            idx_x = p * 2
-            idx_y = p * 2 + 1
-
-            x_hi_bits = _bitcast_i32(s_hi[idx_x])
-            y_hi_bits = _bitcast_i32(s_hi[idx_y])
-            new_x_hi, new_y_hi = _attn_mask_vec2_imm(
-                rel_hi_i32,
-                neg_inf_i32,
-                thr_x,
-                thr_y,
-                x_hi_bits,
-                y_hi_bits,
-            )
-            s_hi[idx_x] = _bitcast_f32(new_x_hi)
-            s_hi[idx_y] = _bitcast_f32(new_y_hi)
+        pair_thresholds = _causal_pair_thresholds(traits.KV_VECTORIZED)
+        _apply_dualwave_causal_mask_pair(s_lo, rel_lo_i32, neg_inf_i32, pair_thresholds)
+        _apply_dualwave_causal_mask_pair(s_hi, rel_hi_i32, neg_inf_i32, pair_thresholds)
 
     def causal_mask_prologue_if_needed(
         self,
@@ -3419,8 +3443,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
             if q_start_pos_i32 + self.delta_i32 < fx.Int32(kv_end_pos):
                 lo_list, hi_list = self.v_s_vec_to_lists(v_s)
                 self._causal_mask_inplace((lo_list, hi_list), tile_idx, q_row_i32=q_row_i32)
-                s_lo = Vec.from_elements([as_mlir_value(v) for v in lo_list], fx.Float32).ir_value()
-                s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
+                s_lo, s_hi = _score_lists_to_vecs((lo_list, hi_list))
             return s_lo, s_hi
 
         return _causal_mask_prologue_if_needed(v_s, tile_idx, kv_end_pos, q_start_pos_i32, q_row_i32)
@@ -3452,8 +3475,7 @@ class DualwaveSoftmaxHelper(DualwaveKernelContext):
             if fx.Int32(kv_tile_end) > seqlen_kv_i32:
                 lo_list, hi_list = self.v_s_vec_to_lists(v_s)
                 self.seq_pad_mask_inplace((lo_list, hi_list), tile_idx)
-                s_lo = Vec.from_elements([as_mlir_value(v) for v in lo_list], fx.Float32).ir_value()
-                s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
+                s_lo, s_hi = _score_lists_to_vecs((lo_list, hi_list))
             return s_lo, s_hi
 
         return _seq_pad_mask_if_needed(v_s, tile_idx)
@@ -4067,8 +4089,8 @@ class DualwaveFp8KernelContext:
         self.split_t0 = split_t0
         self.split_t_end = split_t_end
 
-    def init_workspace_io(self, enable_sdump=False):
-        if const_expr(self.traits.SPLITK or enable_sdump):
+    def init_workspace_io(self):
+        if const_expr(self.traits.SPLITK):
             self.ws_div = fx.logical_divide(fx.rocdl.make_buffer_tensor(self.DebugCounts), fx.make_layout(1, 1))
             self.ws_store_atom_32 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
             self.ws_store_reg_32 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
@@ -4378,33 +4400,10 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         super().__init__(ctx)
 
     def _attn_mask_vec2_imm(self, rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32):
-        asm_str = (
-            f"v_cmp_lt_i32_e64 $0, $6, {int(thr_x)}\n\t"
-            f"v_cmp_lt_i32_e64 $1, $6, {int(thr_y)}\n\t"
-            "v_cndmask_b32_e64 $2, $4, $7, $0\n\t"
-            "v_cndmask_b32_e64 $3, $5, $7, $1"
-        )
-        ret_struct_ty = ir.Type.parse("!llvm.struct<(i64, i64, i32, i32)>")
-        ret = llvm.inline_asm(
-            ret_struct_ty,
-            [
-                as_mlir_value(x_ref_i32),
-                as_mlir_value(y_ref_i32),
-                as_mlir_value(rel_i32),
-                as_mlir_value(neg_inf_i32),
-            ],
-            asm_str,
-            "=s,=s,=v,=v,2,3,v,v,~{vcc}",
-            has_side_effects=True,
-        )
-        return llvm.extractvalue(T.i32, ret, [2]), llvm.extractvalue(T.i32, ret, [3])
+        return _attn_mask_vec2_imm(rel_i32, neg_inf_i32, thr_x, thr_y, x_ref_i32, y_ref_i32)
 
     def v_s_vec_to_lists(self, v_s):
-        s_lo, s_hi = v_s
-        return (
-            [Vec(s_lo)[r] for r in range_constexpr(16)],
-            [Vec(s_hi)[r] for r in range_constexpr(16)],
-        )
+        return _score_pair_to_lists(v_s)
 
     def _causal_mask_inplace(self, v_s, tile_idx):
         traits = self.traits
@@ -4417,25 +4416,9 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         rel_lo_i32 = fx.Int32(self.ctx_ref.q_row_i32 + self.delta_i32 - kv_start_i32 - lane_off_i32)
         rel_hi_i32 = fx.Int32(rel_lo_i32 - fx.Int32(32))
         neg_inf_i32 = fx.Int32(traits.NEG_INF_F32_BITS)
-        pair_thresholds = [(0, 1), (2, 3), (8, 9), (10, 11), (16, 17), (18, 19), (24, 25), (26, 27)]
-        for p in range_constexpr(len(pair_thresholds)):
-            thr_x, thr_y = pair_thresholds[p]
-            idx_x = p * 2
-            idx_y = p * 2 + 1
-            x_lo_bits = self.bitcast_i32(s_lo[idx_x])
-            y_lo_bits = self.bitcast_i32(s_lo[idx_y])
-            new_x_lo, new_y_lo = self._attn_mask_vec2_imm(rel_lo_i32, neg_inf_i32, thr_x, thr_y, x_lo_bits, y_lo_bits)
-            s_lo[idx_x] = self.bitcast_f32(new_x_lo)
-            s_lo[idx_y] = self.bitcast_f32(new_y_lo)
-        for p in range_constexpr(len(pair_thresholds)):
-            thr_x, thr_y = pair_thresholds[p]
-            idx_x = p * 2
-            idx_y = p * 2 + 1
-            x_hi_bits = self.bitcast_i32(s_hi[idx_x])
-            y_hi_bits = self.bitcast_i32(s_hi[idx_y])
-            new_x_hi, new_y_hi = self._attn_mask_vec2_imm(rel_hi_i32, neg_inf_i32, thr_x, thr_y, x_hi_bits, y_hi_bits)
-            s_hi[idx_x] = self.bitcast_f32(new_x_hi)
-            s_hi[idx_y] = self.bitcast_f32(new_y_hi)
+        pair_thresholds = _causal_pair_thresholds(False)
+        _apply_dualwave_causal_mask_pair(s_lo, rel_lo_i32, neg_inf_i32, pair_thresholds)
+        _apply_dualwave_causal_mask_pair(s_hi, rel_hi_i32, neg_inf_i32, pair_thresholds)
 
     def causal_mask_prologue_if_needed(self, v_s, tile_idx=None, kv_end_pos=None):
         if tile_idx is None:
@@ -4449,8 +4432,7 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             if self.ctx_ref.q_start_pos_i32 + self.delta_i32 < fx.Int32(kv_end_pos):
                 lo_list, hi_list = self.v_s_vec_to_lists(v_s)
                 self._causal_mask_inplace((lo_list, hi_list), tile_idx)
-                s_lo = Vec.from_elements([as_mlir_value(v) for v in lo_list], fx.Float32).ir_value()
-                s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
+                s_lo, s_hi = _score_lists_to_vecs((lo_list, hi_list))
             return s_lo, s_hi
 
         return _run(v_s)
@@ -4478,77 +4460,32 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
             if fx.Int32(kv_tile_end) > self.seqlen_kv_i32:
                 lo_list, hi_list = self.v_s_vec_to_lists(v_s)
                 self._seq_pad_mask_inplace((lo_list, hi_list), tile_idx)
-                s_lo = Vec.from_elements([as_mlir_value(v) for v in lo_list], fx.Float32).ir_value()
-                s_hi = Vec.from_elements([as_mlir_value(v) for v in hi_list], fx.Float32).ir_value()
+                s_lo, s_hi = _score_lists_to_vecs((lo_list, hi_list))
             return s_lo, s_hi
 
         return _run(v_s)
 
     def reduce_max(self, v_s):
-        s_lo, s_hi = v_s
-        m = self.c_neg_inf
-        for r in range_constexpr(16):
-            m = self.fmax(m, s_lo[r])
-        for r in range_constexpr(16):
-            m = self.fmax(m, s_hi[r])
-        lhs, rhs = self.reduction_pair(m)
-        return self.fmax(lhs, rhs)
+        return _score_pair_max(v_s, self.c_neg_inf, self.fm_fast)
 
     def floor_masked_max(self, row_max):
         return self.fmax(row_max, self.c_neg_floor)
 
     def sub_m(self, v_s, row_max):
-        s_lo, s_hi = v_s
-        lo_sub = []
-        hi_sub = []
-        for r in range_constexpr(16):
-            lo_sub.append(self.fsub(s_lo[r], row_max))
-        for r in range_constexpr(16):
-            hi_sub.append(self.fsub(s_hi[r], row_max))
-        lo_vec = Vec.from_elements(lo_sub, fx.Float32).ir_value()
-        hi_vec = Vec.from_elements(hi_sub, fx.Float32).ir_value()
-        return lo_vec, hi_vec
+        return _sub_score_pair(v_s, row_max, self.fm_fast)
 
     def exp2(self, v_s, start, length):
-        if const_expr(start == 0):
-            s_lo = [Vec(v_s[0])[r] for r in range_constexpr(16)]
-            lo_partial = []
-            for r in range_constexpr(16):
-                lo_partial.append(rocdl.exp2(T.f32, as_mlir_value(s_lo[r])))
-            return Vec.from_elements(lo_partial, fx.Float32).ir_value(), v_s[1]
-        lo_partial = [Vec(v_s[0])[r] for r in range_constexpr(16)]
-        hi_full = []
-        for r in range_constexpr(16):
-            hi_full.append(rocdl.exp2(T.f32, as_mlir_value(Vec(v_s[1])[r])))
-        return lo_partial, hi_full
+        return _exp2_score_slice(v_s, start, length)
 
     def tile_sum(self, v_p):
-        lo_partial_list, hi_full = v_p
-        local_sum = self.c_zero_f
-        for r in range_constexpr(16):
-            local_sum = self.fadd(local_sum, lo_partial_list[r])
-        for r in range_constexpr(16):
-            local_sum = self.fadd(local_sum, hi_full[r])
-        lhs_sum, rhs_sum = self.reduction_pair(local_sum)
-        return self.fadd(lhs_sum, rhs_sum)
+        return _score_pair_sum(v_p, self.c_zero_f, self.fm_fast)
 
     def cast_p(self, v_p):
         # Pack the finished softmax probabilities into v8 bf16 P packs for PV.
-        lo_partial_list, hi_full = v_p
-        p_lo_packs = []
-        p_hi_packs = []
-        for pks in range_constexpr(self.traits.PV_K_STEPS):
-            p_base = pks * 8
-            lo_slice = [lo_partial_list[p_base + s] for s in range_constexpr(8)]
-            p_lo_packs.append(self.bf16_trunc_pack_v8(lo_slice))
-            hi_slice = hi_full[p_base : p_base + 8]
-            p_hi_packs.append(self.bf16_trunc_pack_v8(hi_slice))
-        return p_lo_packs, p_hi_packs
+        return _pack_p_v8_slices(self.traits, v_p, self.bf16_trunc_pack_v8)
 
     def scale_o(self, v_o, scale_scalar):
-        scale_vec = Vec.from_elements([scale_scalar], fx.Float32).broadcast_to(16)
-        for dc in range_constexpr(self.traits.D_CHUNKS):
-            v_o[dc] = self.fmul(Vec(v_o[dc]), scale_vec)
+        _scale_o_accs(v_o, scale_scalar, self.traits, self.fm_fast)
 
     def scale_v_p(self, v_p, scale_scalar):
         # P is v8 bf16 (HIPREC): ext to f32, scale, repack bf16.
@@ -4562,63 +4499,30 @@ class DualwaveFp8SoftmaxHelper(DualwaveFp8KernelContext):
         return out_lo, out_hi
 
     def anchor_v_p(self, v_p):
-        p_lo, p_hi = v_p
-        p_lo_all = self.concat_vectors(p_lo[0], p_lo[1])
-        p_hi_all = self.concat_vectors(p_hi[0], p_hi[1])
-        p_all = self.concat_vectors(p_lo_all, p_hi_all)
-        p_all_ir = as_mlir_value(p_all)
-        p_all_anchored = llvm.inline_asm(p_all_ir.type, [p_all_ir], "", "=v,0", has_side_effects=True)
-        p_vec = Vec(p_all_anchored, (self.traits.PV_K_STEPS * 2 * 8,), self.p_elem)
-        anchored_lo = []
-        anchored_hi = []
-        for pks in range_constexpr(self.traits.PV_K_STEPS):
-            lo_base = pks * 8
-            hi_base = self.traits.PV_K_STEPS * 8 + pks * 8
-            anchored_lo.append(p_vec.shuffle(p_vec, [lo_base + i for i in range(8)]).ir_value())
-            anchored_hi.append(p_vec.shuffle(p_vec, [hi_base + i for i in range(8)]).ir_value())
-        return anchored_lo, anchored_hi
+        return _anchor_v_p(self.traits, v_p, elem_dtype=self.p_elem)
 
     def anchor_v_o(self, v_o):
-        d_chunks = self.traits.D_CHUNKS
-        acc_irs = [as_mlir_value(v_o[dc]) for dc in range_constexpr(d_chunks)]
-        ret_ty = ir.Type.parse("!llvm.struct<(vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>)>")
-        ret = llvm.inline_asm(ret_ty, acc_irs, "", "=v,=v,=v,=v,0,1,2,3", has_side_effects=True)
-        return [llvm.extractvalue(acc_irs[dc].type, ret, [dc]) for dc in range_constexpr(d_chunks)]
+        return _anchor_v_o(self.traits, v_o)
 
     def anchor_scalar_f32(self, x):
-        x_ir = as_mlir_value(x)
-        return llvm.inline_asm(x_ir.type, [x_ir], "", "=v,0", has_side_effects=True)
+        return _anchor_scalar_f32(x)
 
     def safe_l_inv(self, l_row):
-        inv_l_rcp = rocdl.rcp(T.f32, as_mlir_value(l_row))
-        return ArithValue(fx.Float32(l_row) > self.c_zero_f).select(inv_l_rcp, self.c_zero_f)
+        return _safe_l_inv(l_row, self.c_zero_f)
 
     def rescale_from_tile_max(self, m_row, m_tile_max):
-        row_max = self.fmax(m_row, m_tile_max)
-        rescale = rocdl.exp2(T.f32, as_mlir_value(self.fsub(m_row, row_max)))
-        return row_max, rescale
+        return _rescale_from_tile_max(m_row, m_tile_max, self.fm_fast)
 
     def apply_l_rescale(self, l_row, rescale):
-        return self.fmul(l_row, rescale)
+        return _fmul(l_row, rescale, self.fm_fast)
 
     def v_p_to_vec32(self, v_p):
         # P packs are (p_lo[0..1], p_hi[0..1]) v8 bf16; concat into one v32 SSA value
         # for the scf.if loop-carry.
-        p_lo, p_hi = v_p
-        p_lo_all = self.concat_vectors(p_lo[0], p_lo[1])
-        p_hi_all = self.concat_vectors(p_hi[0], p_hi[1])
-        return self.concat_vectors(p_lo_all, p_hi_all).ir_value()
+        return _v_p_to_vec32(v_p)
 
     def v_vec32_to_p(self, v_p_all):
-        p_vec = Vec(v_p_all, (self.traits.PV_K_STEPS * 2 * 8,), self.p_elem)
-        p_lo = []
-        p_hi = []
-        for pks in range_constexpr(self.traits.PV_K_STEPS):
-            lo_base = pks * 8
-            hi_base = self.traits.PV_K_STEPS * 8 + pks * 8
-            p_lo.append(p_vec.shuffle(p_vec, [lo_base + i for i in range(8)]).ir_value())
-            p_hi.append(p_vec.shuffle(p_vec, [hi_base + i for i in range(8)]).ir_value())
-        return p_lo, p_hi
+        return _v_vec32_to_p(self.traits, v_p_all, elem_dtype=self.p_elem)
 
     def lazy_rescale_o(self, v_o, m_row, l_row, m_tile_max, v_p):
         @flyc.jit

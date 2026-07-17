@@ -4,7 +4,6 @@
 """gfx950 DUALWAVE_SWP FP8 flash attention."""
 
 import contextlib
-import os
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -12,7 +11,6 @@ from flydsl._mlir.dialects import scf as _scf
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
-from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
@@ -163,13 +161,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
         ctx.init_dma_thread_offsets()
         ctx.init_descale()
         ctx.init_tile_bounds()
-
-        # Optional S-logit dump writes post-QK f32 logits into DebugCounts for layout
-        # debugging; FLYDSL_SDUMP also enables it outside fp8.
-        _FP8_SDUMP = const_expr(
-            os.environ.get("FLYDSL_FP8_SDUMP", "0") == "1" or os.environ.get("FLYDSL_SDUMP", "0") == "1"
-        )
-        ctx.init_workspace_io(_FP8_SDUMP)
+        ctx.init_workspace_io()
 
         # fp8 pipeline helpers (logic lives in flash_attn_utils; the kernel drives the
         # software-pipeline schedule below and calls into these).
@@ -221,16 +213,6 @@ def build_flash_attn_dualwave_swp_fp8_module(
 
             # Prologue scores + first softmax pass for KV tile 0
             v_s_0 = gemm_helper.qk(v_k, q_all_wide)
-            if const_expr(_FP8_SDUMP):
-                # Dump the 32 raw logits/lane (16 lo + 16 hi) to DebugCounts at
-                # index ((wave*WARP_SIZE + lane)*32 + r). Read back vs torch QK^T to
-                # recover the lane->(query_row, kv_col) map. (q_block 0 only.)
-                _sd_base = (ctx.wave_id_uni * fx.Index(traits.WARP_SIZE) + ctx.lane) * fx.Index(32)
-                _sl = Vec(v_s_0[0])
-                _sh = Vec(v_s_0[1])
-                for _r in range_constexpr(16):
-                    ctx.ws_store_f32(fx.Float32(_sl[_r]), _sd_base + fx.Index(_r))
-                    ctx.ws_store_f32(fx.Float32(_sh[_r]), _sd_base + fx.Index(16 + _r))
             rocdl.sched_barrier(0)
             if const_expr(traits.CAUSAL):
                 if const_expr(SPLITK):
