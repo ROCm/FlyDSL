@@ -56,14 +56,8 @@ def barrier(*args, **kwargs):
 def shuffle(value, offset, width, mode="xor"):
     """Move ``value`` across lanes of a subgroup (warp) via ``gpu.shuffle``.
 
-    - ``"xor"``  — lane ``k`` reads lane ``k ^ offset``
-    - ``"up"``   — lane ``k`` reads lane ``k - offset``.
-    - ``"down"`` — lane ``k`` reads lane ``k + offset``.
-    - ``"idx"``  — every lane reads lane ``offset``.
-
     ``width`` is the number of participating lanes and must be uniform across
-    the subgroup. The result is re-wrapped to ``value``'s DSL type by
-    ``dsl_math_wrap_result`` (the ``value`` exemplar).
+    the subgroup.
     """
     if mode not in ("xor", "up", "down", "idx"):
         raise ValueError(f"invalid shuffle mode {mode!r}; expected one of (xor, up, down, idx)")
@@ -76,10 +70,24 @@ def shuffle(value, offset, width, mode="xor"):
     ).shuffleResult
 
 
-shuffle_xor = lambda value, offset, width: shuffle(value, offset, width, mode="xor")
-shuffle_up = lambda value, offset, width: shuffle(value, offset, width, mode="up")
-shuffle_down = lambda value, offset, width: shuffle(value, offset, width, mode="down")
-shuffle_idx = lambda value, lane, width: shuffle(value, lane, width, mode="idx")
+def shuffle_xor(value, offset, width):
+    """``shuffle`` in ``"xor"`` mode: lane ``k`` reads lane ``k ^ offset``."""
+    return shuffle(value, offset, width, mode="xor")
+
+
+def shuffle_up(value, offset, width):
+    """``shuffle`` in ``"up"`` mode: lane ``k`` reads lane ``k - offset``."""
+    return shuffle(value, offset, width, mode="up")
+
+
+def shuffle_down(value, offset, width):
+    """``shuffle`` in ``"down"`` mode: lane ``k`` reads lane ``k + offset``."""
+    return shuffle(value, offset, width, mode="down")
+
+
+def shuffle_idx(value, lane, width):
+    """``shuffle`` in ``"idx"`` mode: every lane reads lane ``lane``."""
+    return shuffle(value, lane, width, mode="idx")
 
 
 thread_idx = Tuple3D(gpu.thread_id)
