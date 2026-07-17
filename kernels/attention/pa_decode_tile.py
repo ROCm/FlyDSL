@@ -200,12 +200,12 @@ def compile_pa_decode_tile(
     # NWARP_PAD = NWARP+1 (not NWARP): a plain 16B stride wraps the 32-bank
     # LDS twice (row r and r+8 share a bank); 5 is coprime with 32 banks.
     NWARP_PAD = NWARP + 1
-    # Phase-split (M_TILES>1, any block_size, head_dim!=64): sLmax gets a
-    # per-M-tile slice so all M-tiles' pass-1 (QK+mask+max-reduce) writes share
-    # ONE barrier instead of M_TILES separate ones -- see the phase-1/phase-2
-    # split below. M_TILES==1 (nothing to merge) and head_dim==64 (VHE_CHUNKS==1
-    # V-load path not wired for the split) keep the single-slice per-m layout.
-    PHASE1_MTILES = M_TILES if (head_dim != 64) else 1
+    # Phase-split for every M_TILES>1 shape (all block_size / head_dim): sLmax
+    # gets a per-M-tile slice so all M-tiles' pass-1 (QK+mask+max-reduce) writes
+    # share ONE barrier instead of M_TILES separate ones (see the phase-1/
+    # phase-2 split below). M_TILES==1 has nothing to merge, so PHASE1_MTILES==1
+    # naturally routes it to the single-slice per-m path.
+    PHASE1_MTILES = M_TILES
     sLmax_off = sQscale_off + ROWS_PADDED * f32
     sLsum_off = sLmax_off + PHASE1_MTILES * MFMA_MNK * NWARP_PAD * f32
     # V page-table prefetch staging: warp w's row is broadcast here for all
@@ -222,7 +222,7 @@ def compile_pa_decode_tile(
     # buffer path that had to hoist both (32) before the prefetch clobbered
     # them -- the 16 VGPR freed drops per_token M_TILES=4 under the 256/2-wave
     # cliff. Costs one extra buffer of LDS.
-    KV_DOUBLE_BUF = per_token_kv and head_dim != 64 and M_TILES > 1
+    KV_DOUBLE_BUF = per_token_kv and M_TILES > 1
     KV_BUFS = 2 if KV_DOUBLE_BUF else 1
     KV_BUF_STRIDE = 2 * NWARP * TOK_PER_WARP * f32  # k-region + v-region, one buffer
     sKScale_off = sVPage_off + sVPage_bytes
@@ -699,7 +699,7 @@ def compile_pa_decode_tile(
             # any block_size) instead of reloading per M-tile (V loads are raw
             # global loads, so redundant reloads are costlier than LDS re-reads).
             v_vh_shared = None
-            if const_expr(M_TILES > 1 and head_dim != 64):
+            if const_expr(M_TILES > 1):
                 v_vh_shared = [_v_ops(v_page_cur, vh) for vh in range_constexpr(VHE_CHUNKS)]
 
             # q_scale doesn't depend on `m` either; read this lane's whole
@@ -707,7 +707,7 @@ def compile_pa_decode_tile(
             # transposed [qh][m] sQscale layout) instead of M_TILES separate
             # narrow re-reads, one per m-tile's own pass below (phase-split).
             q_scale_vec = None
-            if const_expr(M_TILES > 1 and head_dim != 64):
+            if const_expr(M_TILES > 1):
                 qh_for_scale = lane - (lane // c16) * c16
                 q_scale_vec = _view(
                     sQscale_off + qh_for_scale * (M_TILES * f32), fx.Float32, fx.make_layout(M_TILES, 1)
@@ -716,15 +716,13 @@ def compile_pa_decode_tile(
             def _lmax_off_m(m):
                 return sLmax_off + (m * MFMA_MNK * NWARP_PAD * f32 if const_expr(PHASE1_MTILES > 1) else 0)
 
-            # block_size==16 (PHASE1_MTILES==M_TILES>1): split pass-1 (QK +
-            # mask + per-warp max-reduce) into its own loop over every
-            # M-tile, writing each M-tile's own LDS slice, so all M-tiles
-            # share ONE barrier instead of M_TILES separate ones. This
-            # reduces total LDS instruction count (fewer barrier-adjacent
-            # ds_read/ds_write sequences) without changing wall-clock
-            # behavior for this path (measured neutral). Other configs
-            # (block_size==64, head_dim==64, or M_TILES==1) keep the
-            # original single-barrier-per-m loop below, byte-for-byte.
+            # Phase-split (PHASE1_MTILES==M_TILES>1, i.e. any M_TILES>1 shape):
+            # split pass-1 (QK + mask + per-warp max-reduce) into its own loop
+            # over every M-tile, writing each M-tile's own LDS slice, so all
+            # M-tiles share ONE barrier instead of M_TILES separate ones
+            # (fewer barrier-adjacent ds_read/ds_write sequences). Only
+            # M_TILES==1 (nothing to merge) takes the single-barrier-per-m
+            # loop below.
             if const_expr(PHASE1_MTILES > 1):
                 masked_chunks_saved = [None] * M_TILES
                 scale_saved = [None] * M_TILES
@@ -944,9 +942,9 @@ def compile_pa_decode_tile(
                     # a scalar threshold (token < n_valid).
                     qh = lane - (lane // c16) * c16  # qhead = lane % 16
                     l16g = lane // c16  # 0..3 lane-group within the warp
-                    # This path only runs for head_dim==64 / M_TILES==1 (the
-                    # phase-split covers head!=64 M>1), so q_scale is read
-                    # per-m directly -- the hoisted q_scale_vec is phase-split-only.
+                    # This path only runs for M_TILES==1 (the phase-split covers
+                    # all M_TILES>1), so q_scale is read per-m directly -- the
+                    # hoisted q_scale_vec is phase-split-only.
                     scale = scale_qk * _ld1(sQscale_off, qh * M_TILES + m)  # per-qhead positive score scale
                     n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
                     base_tok_f = fx.Int32(warp * TOK_CHUNK + l16g * 4).to(fx.Float32)
