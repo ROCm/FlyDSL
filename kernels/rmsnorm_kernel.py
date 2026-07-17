@@ -315,8 +315,10 @@ def build_rmsnorm_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
 
 def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, eps: float = DEFAULT_EPS):
     elem_bits = 32 if dtype_str == "f32" else 16
-    USE_VEC_SMALL_N = elem_bits <= 16 and N % VEC_WIDTH == 0
+    USE_VEC_SMALL_N = elem_bits <= 16 and N >= VEC_WIDTH
     VEC_TILES = N // VEC_WIDTH if USE_VEC_SMALL_N else 0
+    VEC_ELEMS = VEC_TILES * VEC_WIDTH
+    TAIL_ELEMS = N - VEC_ELEMS
 
     if USE_VEC_SMALL_N:
         BLOCK_N = 1 << (N - 1).bit_length()
@@ -414,6 +416,11 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, eps: float = D
                 out_div = fx.logical_divide(row_out, fx.make_layout(VEC_WIDTH, 1))
 
                 copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
+                if const_expr(TAIL_ELEMS > 0):
+                    row_div_s = fx.logical_divide(row_in, fx.make_layout(1, 1))
+                    gamma_div_s = fx.logical_divide(Gamma_buf, fx.make_layout(1, 1))
+                    out_div_s = fx.logical_divide(row_out, fx.make_layout(1, 1))
+                    copy_atom_s = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), elem_bits)
 
                 c_zero_f = fx.Float32(0.0)
                 thread_sumsq = c_zero_f
@@ -439,6 +446,13 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, eps: float = D
                     red2 = x2.reduce(ReductionOp.ADD, fastmath=fm_fast)
                     thread_sumsq = thread_sumsq + is_valid.select(red2, c_zero_f)
 
+                if const_expr(TAIL_ELEMS > 0):
+                    if lane < TAIL_ELEMS:
+                        tail_idx = lane + VEC_ELEMS
+                        x_tail_e = _load_scalar(copy_atom_s, elem_dtype, row_div_s, tail_idx)
+                        x_tail = x_tail_e.to(fx.Float32)
+                        thread_sumsq = thread_sumsq + (x_tail * x_tail)
+
                 sum_sq = group_reduce_add(thread_sumsq)
                 mean_sq = sum_sq / n_float
                 ms_eps = mean_sq + eps_c
@@ -452,6 +466,17 @@ def _build_rmsnorm_large_m_small_n_module(N: int, dtype_str: str, eps: float = D
                         y = (x * rrms) * g
                         y_e = _to_elem_vec(dtype_str, elem_dtype, USE_HW_CVT_PK_BF16_F32, y)
                         _store_vec(copy_atom, VEC_WIDTH, elem_dtype, y_e, out_div, idx)
+
+                if const_expr(TAIL_ELEMS > 0):
+                    if lane < TAIL_ELEMS:
+                        tail_idx = lane + VEC_ELEMS
+                        x_tail_e = _load_scalar(copy_atom_s, elem_dtype, row_div_s, tail_idx)
+                        g_tail_e = _load_scalar(copy_atom_s, elem_dtype, gamma_div_s, tail_idx)
+                        x_tail = x_tail_e.to(fx.Float32)
+                        g_tail = g_tail_e.to(fx.Float32)
+                        y_tail = (x_tail * rrms) * g_tail
+                        y_tail_e = _to_elem_scalar(dtype_str, elem_dtype, y_tail)
+                        _store_scalar(copy_atom_s, elem_dtype, elem_dtype, out_div_s, tail_idx, y_tail_e)
         else:
             lane = tid % THREADS_PER_ROW
             row_local = tid // THREADS_PER_ROW
