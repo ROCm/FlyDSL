@@ -232,7 +232,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             m_row_pro = softmax_helper.reduce_max(v_s_0)
             if const_expr(traits.CAUSAL):
                 # Floor fully-masked rows (-inf) to finite so exp2 yields 0, not NaN.
-                m_row_pro = ctx.fmax(m_row_pro, ctx.c_neg_floor)
+                m_row_pro = softmax_helper.floor_masked_max(m_row_pro)
             v_s_0 = softmax_helper.sub_m(v_s_0, m_row_pro)
             v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
             rocdl.sched_barrier(0)
@@ -282,8 +282,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 # sum into l_row, cast to bf16 for P*V.
                 v_s_1 = gemm_helper.qk(v_k, q_all_wide)
                 v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
-                tile_sum_a = softmax_helper.tile_sum(v_p_0)
-                l_row = ctx.fadd(l_row, tile_sum_a)
+                l_row = softmax_helper.reduce_sum(l_row, v_p_0)
                 v_p_0 = softmax_helper.cast_p(v_p_0)
                 v_p_0 = softmax_helper.anchor_v_p(v_p_0)
                 _sched_barrier_exp_pairs(traits, 6, 3, 1)
@@ -322,13 +321,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_0 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
                 else:
-                    m_new_a = ctx.fmax(m_row, m_tile_max_a)
-                    corr_a = rocdl.exp2(T.f32, _raw(ctx.fsub(m_row, m_new_a)))
-                    softmax_helper.scale_o(v_o, corr_a)
-                    v_o = softmax_helper.anchor_v_o(v_o)
-                    v_p_0 = softmax_helper.scale_v_p(v_p_0, corr_a)
-                    l_row = ctx.fmul(l_row, corr_a)
-                    m_row = m_new_a
+                    v_o, m_row, l_row, v_p_0 = softmax_helper.rescale_o(v_o, m_row, l_row, m_tile_max_a, v_p_0)
                 v_o = gemm_helper.pv_step_k(1, v_p_0, v_v, v_o)
                 v_o = gemm_helper.pv_step_k(2, v_p_0, v_v, v_o)
                 v_o = gemm_helper.pv_step_k(3, v_p_0, v_v, v_o)
@@ -362,8 +355,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 # 2nd-half exp2, sum into l_row, cast to bf16.
                 v_s_0 = gemm_helper.qk(v_k, q_all_wide)
                 v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
-                tile_sum_b = softmax_helper.tile_sum(v_p_1)
-                l_row = ctx.fadd(l_row, tile_sum_b)
+                l_row = softmax_helper.reduce_sum(l_row, v_p_1)
                 v_p_1 = softmax_helper.cast_p(v_p_1)
                 v_p_1 = softmax_helper.anchor_v_p(v_p_1)
                 _sched_barrier_exp_pairs(traits, 6, 3, 3)
@@ -402,13 +394,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 if const_expr(traits.DUALWAVE_SWP_LAZY_RESCALE):
                     v_o, m_row, l_row, v_p_1 = softmax_helper.lazy_rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
                 else:
-                    m_new_b = ctx.fmax(m_row, m_tile_max_b)
-                    corr_b = rocdl.exp2(T.f32, _raw(ctx.fsub(m_row, m_new_b)))
-                    softmax_helper.scale_o(v_o, corr_b)
-                    v_o = softmax_helper.anchor_v_o(v_o)
-                    v_p_1 = softmax_helper.scale_v_p(v_p_1, corr_b)
-                    l_row = ctx.fmul(l_row, corr_b)
-                    m_row = m_new_b
+                    v_o, m_row, l_row, v_p_1 = softmax_helper.rescale_o(v_o, m_row, l_row, m_tile_max_b, v_p_1)
                 v_v = v_packs_b
                 v_o = gemm_helper.pv_step_k(1, v_p_1, v_v, v_o)
                 v_o = gemm_helper.pv_step_k(2, v_p_1, v_v, v_o)
@@ -451,8 +437,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # Epilogue C1 (compute): MMA0 -> v_s_1; finish v_p_0 softmax (like C1).
             v_s_1 = gemm_helper.qk(v_k, q_all_wide)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
-            tile_sum_e1 = softmax_helper.tile_sum(v_p_0)
-            l_row = ctx.fadd(l_row, tile_sum_e1)
+            l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = softmax_helper.anchor_v_p(v_p_0)
             _sched_barrier_exp_pairs(traits, 6, 3, 5)
@@ -483,8 +468,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 rocdl.s_setprio(1)
             v_o = gemm_helper.pv(v_p_0, v_packs_e3, v_o)
             m_tile_max_e3 = softmax_helper.reduce_max(v_s_1)
-            row_max_e3 = ctx.fmax(m_row, m_tile_max_e3)
-            rescale_e3 = rocdl.exp2(T.f32, _raw(ctx.fsub(m_row, row_max_e3)))
+            row_max_e3, rescale_e3 = softmax_helper.rescale_from_tile_max(m_row, m_tile_max_e3)
             m_row = row_max_e3
             v_s_1 = softmax_helper.sub_m(v_s_1, row_max_e3)
             v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
@@ -512,10 +496,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # Epilogue C5 (compute): MMA0 -> v_s_0; fold rescale_e3 into l_row, finish
             # v_p_1 softmax.
             v_s_0 = gemm_helper.qk(v_k, q_all_wide)
-            l_row = ctx.fmul(l_row, rescale_e3)
+            l_row = softmax_helper.apply_l_rescale(l_row, rescale_e3)
             v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
-            tile_sum_e5 = softmax_helper.tile_sum(v_p_1)
-            l_row = ctx.fadd(l_row, tile_sum_e5)
+            l_row = softmax_helper.reduce_sum(l_row, v_p_1)
             v_p_1 = softmax_helper.cast_p(v_p_1)
             v_p_1 = softmax_helper.anchor_v_p(v_p_1)
             _sched_barrier_exp_pairs(traits, 6, 3, 7)
@@ -545,8 +528,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
                 rocdl.s_setprio(1)
             v_o = gemm_helper.pv(v_p_1, v_packs_e7, v_o)
             m_tile_max_e7 = softmax_helper.reduce_max(v_s_0)
-            row_max_e7 = ctx.fmax(m_row, m_tile_max_e7)
-            rescale_e7 = rocdl.exp2(T.f32, _raw(ctx.fsub(m_row, row_max_e7)))
+            row_max_e7, rescale_e7 = softmax_helper.rescale_from_tile_max(m_row, m_tile_max_e7)
             m_row = row_max_e7
             v_s_0 = softmax_helper.sub_m(v_s_0, row_max_e7)
             v_p_0 = softmax_helper.exp2(v_s_0, 0, 16)
@@ -573,10 +555,9 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # Epilogue C9 (compute): MMA0 -> v_s_1 (last tile); fold rescale_e7 into
             # l_row, finish v_p_0 softmax.
             v_s_1 = gemm_helper.qk(v_k, q_all_wide)
-            l_row = ctx.fmul(l_row, rescale_e7)
+            l_row = softmax_helper.apply_l_rescale(l_row, rescale_e7)
             v_p_0 = softmax_helper.exp2(v_p_0, 16, 16)
-            tile_sum_e9 = softmax_helper.tile_sum(v_p_0)
-            l_row = ctx.fadd(l_row, tile_sum_e9)
+            l_row = softmax_helper.reduce_sum(l_row, v_p_0)
             v_p_0 = softmax_helper.cast_p(v_p_0)
             v_p_0 = softmax_helper.anchor_v_p(v_p_0)
             _sched_barrier_exp_pairs(traits, 6, 3, 9)
@@ -607,8 +588,7 @@ def build_flash_attn_dualwave_swp_fp8_module(
             # further pass follows.
             v_o = gemm_helper.pv(v_p_0, v_packs_e11, v_o)
             m_tile_max_e11 = softmax_helper.reduce_max(v_s_1)
-            row_max_e11 = ctx.fmax(m_row, m_tile_max_e11)
-            rescale_e11 = rocdl.exp2(T.f32, _raw(ctx.fsub(m_row, row_max_e11)))
+            row_max_e11, rescale_e11 = softmax_helper.rescale_from_tile_max(m_row, m_tile_max_e11)
             m_row = row_max_e11
             v_s_1 = softmax_helper.sub_m(v_s_1, row_max_e11)
             v_p_1 = softmax_helper.exp2(v_s_1, 0, 16)
@@ -616,9 +596,8 @@ def build_flash_attn_dualwave_swp_fp8_module(
             _sched_barrier_exp_pairs(traits, 7, 3, 10)
             rocdl.sched_barrier(0)
             v_p_1 = softmax_helper.exp2(v_p_1, 16, 16)
-            l_row = ctx.fmul(l_row, rescale_e11)
-            tile_sum_e11 = softmax_helper.tile_sum(v_p_1)
-            l_row = ctx.fadd(l_row, tile_sum_e11)
+            l_row = softmax_helper.apply_l_rescale(l_row, rescale_e11)
+            l_row = softmax_helper.reduce_sum(l_row, v_p_1)
             v_p_1 = softmax_helper.cast_p(v_p_1)
             v_p_1 = softmax_helper.anchor_v_p(v_p_1)
             rocdl.sched_barrier(0)

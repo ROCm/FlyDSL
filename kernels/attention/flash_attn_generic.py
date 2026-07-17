@@ -37,6 +37,7 @@ from kernels.attention.flash_attn_utils import (
     GenericStoreHelper,
     _make_flash_attn_generic_traits,
     _waitcnt_vm_n,
+    scf_if_dispatch,
 )
 
 
@@ -67,7 +68,7 @@ def build_flash_attn_func_module_primary(
     ``num_kv_heads``; each group of ``num_heads // num_kv_heads`` Q heads shares
     one K/V head. Dense launches accept any positive ``seq_len``.
     """
-    gpu_arch = get_rocm_arch()
+    gpu_arch = get_hip_arch()
 
     if num_kv_heads is None:
         num_kv_heads = num_heads
@@ -273,8 +274,11 @@ def build_flash_attn_func_module_primary(
                     else:
                         _next_kv = kv_block_start + fx.Index(traits.BLOCK_N_OUT)
                         _has_next = _next_kv < kv_upper
-                        if _has_next:
+
+                        def _prefetch_next_k():
                             kv_gmem_to_lds.coop_dma_k(_next_kv, _next_k_buf_id)
+
+                        scf_if_dispatch(_has_next, _prefetch_next_k)
                     rocdl.sched_barrier(0)
                     k_base = kv_gmem_to_lds.k_buf_base(_k_buf_id)
                 else:
