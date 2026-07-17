@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-17T11:00:54Z",
+ "updated": "2026-07-17T11:03:14Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -14,9 +14,37 @@
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575270352",
    "created_at": "2026-07-17T10:58:36Z",
-   "updated_at": "2026-07-17T11:00:00Z",
+   "updated_at": "2026-07-17T11:02:05Z",
    "actor": "fsx950223",
-   "jobs": []
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-17T11:02:05Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575270352/job/87868465813"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-17T11:01:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575270352/job/87868465859"
+    },
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-17T11:01:24Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575270352/job/87868465875"
+    }
+   ]
   },
   {
    "run_id": 29575171628,
@@ -25,11 +53,11 @@
    "branch": "hyg/fmha_refactor",
    "event": "pull_request",
    "title": "[FMHA] Kernel refactor for modularity and code simplification",
-   "status": "pending",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29575171628",
    "created_at": "2026-07-17T10:56:52Z",
-   "updated_at": "2026-07-17T10:56:52Z",
+   "updated_at": "2026-07-17T11:02:24Z",
    "actor": "zhiding512",
    "jobs": []
   },
@@ -126,11 +154,11 @@
    "branch": "hyg/fmha_refactor",
    "event": "pull_request",
    "title": "[FMHA] Kernel refactor for modularity and code simplification",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "cancelled",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29574578133",
    "created_at": "2026-07-17T10:46:14Z",
-   "updated_at": "2026-07-17T10:49:05Z",
+   "updated_at": "2026-07-17T11:02:00Z",
    "actor": "zhiding512",
    "jobs": [
     {
@@ -154,10 +182,10 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "cancelled",
      "started_at": "2026-07-17T10:48:48Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T11:01:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29574578133/job/87866198450"
     }
    ]
