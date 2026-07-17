@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-07-17T08:35:59Z",
+ "updated": "2026-07-17T09:06:31Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
   {
@@ -9,12 +9,12 @@
    "commit": "42a1610a7d13ba224c712e685cb493f789835403",
    "branch": "binding_fa_opt",
    "event": "pull_request",
-   "title": "optimize flydsl flash attention kernel",
-   "status": "queued",
+   "title": "[Perf]optimize flydsl flash attention kernel",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29566559232",
    "created_at": "2026-07-17T08:28:47Z",
-   "updated_at": "2026-07-17T08:29:38Z",
+   "updated_at": "2026-07-17T08:58:41Z",
    "actor": "binding7012",
    "jobs": [
     {
@@ -29,18 +29,18 @@
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-17T08:29:38Z",
+     "started_at": "2026-07-17T08:51:43Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29566559232/job/87840527111"
     },
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-17T08:29:38Z",
+     "started_at": "2026-07-17T08:58:41Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29566559232/job/87840527127"
     }
@@ -53,28 +53,28 @@
    "branch": "pa-decode-tile",
    "event": "pull_request",
    "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29565584950",
    "created_at": "2026-07-17T08:11:41Z",
-   "updated_at": "2026-07-17T08:13:10Z",
+   "updated_at": "2026-07-17T08:36:56Z",
    "actor": "fsx950223",
    "jobs": [
     {
      "runner": "linux-flydsl-navi-2",
      "arch": "gfx1201",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-17T08:29:00Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T08:57:25Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29565584950/job/87837609853"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-17T08:13:10Z",
+     "started_at": "2026-07-17T08:36:55Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29565584950/job/87837609864"
     },
@@ -96,29 +96,29 @@
    "branch": "kernel/sage-attention-cdna",
    "event": "pull_request",
    "title": "[Kernel] Add CDNA SageAttention kernel",
-   "status": "in_progress",
-   "conclusion": null,
+   "status": "completed",
+   "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29564438477",
    "created_at": "2026-07-17T07:51:36Z",
-   "updated_at": "2026-07-17T08:11:58Z",
+   "updated_at": "2026-07-17T09:04:33Z",
    "actor": "LiuYinfeng01",
    "jobs": [
     {
      "runner": "linux-flydsl-mi325-1",
      "arch": "gfx942",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "success",
      "started_at": "2026-07-17T07:54:02Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T09:04:32Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29564438477/job/87834006234"
     },
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "in_progress",
-     "conclusion": null,
+     "status": "completed",
+     "conclusion": "failure",
      "started_at": "2026-07-17T08:00:49Z",
-     "completed_at": null,
+     "completed_at": "2026-07-17T08:36:39Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29564438477/job/87834006239"
     },
     {
@@ -139,19 +139,19 @@
    "branch": "xudoyuan/kernels-smem-migration",
    "event": "pull_request",
    "title": "[kernels] Migrate pa_decode_swa reduce kernel to SharedAllocator smem",
-   "status": "queued",
+   "status": "in_progress",
    "conclusion": null,
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29560732998",
    "created_at": "2026-07-17T06:40:50Z",
-   "updated_at": "2026-07-17T08:34:24Z",
+   "updated_at": "2026-07-17T08:51:55Z",
    "actor": "coderfeli",
    "jobs": [
     {
      "runner": "linux-flydsl-mi355-1",
      "arch": "gfx950",
-     "status": "queued",
+     "status": "in_progress",
      "conclusion": null,
-     "started_at": "2026-07-17T08:34:25Z",
+     "started_at": "2026-07-17T08:51:54Z",
      "completed_at": null,
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29560732998/job/87841393044"
     },
@@ -1233,7 +1233,7 @@
    "commit": "fc63532a01eefa928e263fe31e75275890c2a4e9",
    "branch": "binding_fa_opt",
    "event": "pull_request",
-   "title": "optimize flydsl flash attention kernel",
+   "title": "[Perf]optimize flydsl flash attention kernel",
    "status": "completed",
    "conclusion": "failure",
    "url": "https://github.com/ROCm/FlyDSL/actions/runs/29479299800",
