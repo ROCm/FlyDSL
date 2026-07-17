@@ -1081,7 +1081,6 @@ def compile_pa_decode_tile(
         inv_fp8 = fx.Float32(1.0 / FP8_MAX)
         for m in range_constexpr(M_TILES):
             row = m * MFMA_MNK + lane16  # flat (mtp, gqa) query-row for this lane
-            row_ok = (m + 1) * MFMA_MNK <= TOTAL_ROWS  # last tile may be partial
             l_row = o_final[_l_slot(m)]
             safe_l = arith.select(l_row > ZERO_F, l_row, fx.Float32(1.0))
             inv_l = fx.Float32(rcp_f32(safe_l))
@@ -1116,17 +1115,16 @@ def compile_pa_decode_tile(
                 o_norm = (o_final[o_slot] * o_scale_b).to(Q_DTYPE)
                 head_base = vh * (NWARP * MFMA_MNK) + warp * MFMA_MNK + rgroup * OP_ELEMS
                 sub = head_base // OP_ELEMS
-                # row_ok is a compile-time bool: when True (full tile) Python
-                # short-circuits the `or`, so `row < TOTAL_ROWS` is never emitted
-                # and the store is unconditional; only a partial last tile falls
-                # back to the runtime bounds guard.
-                if row_ok or row < TOTAL_ROWS:
+                # A partial last tile has out-of-range rows for the high lanes;
+                # guard the store. For full tiles the compiler folds this away
+                # (row = m*16 + lane16, lane16 = tid&15 <= 15 < TOTAL_ROWS - m*16).
+                if row < TOTAL_ROWS:
                     _emit(o_norm, sub)
 
             if const_expr(NP > 1):
                 if warp == 0 and rgroup == 0:
                     base = ((seq * n_kv + kv_h) * NP + part) * TOTAL_ROWS + row
-                    if row_ok or row < TOTAL_ROWS:
+                    if row < TOTAL_ROWS:
                         pmax_ptr[base] = o_final[_m_slot(m)]
                         psum_ptr[base] = l_row
 
