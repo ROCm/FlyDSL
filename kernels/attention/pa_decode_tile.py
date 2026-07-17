@@ -200,12 +200,12 @@ def compile_pa_decode_tile(
     # NWARP_PAD = NWARP+1 (not NWARP): a plain 16B stride wraps the 32-bank
     # LDS twice (row r and r+8 share a bank); 5 is coprime with 32 banks.
     NWARP_PAD = NWARP + 1
-    # block_size==16 (and head_dim!=64, matching `v_vh_shared`'s own gate
-    # below): sLmax/sVScaleMax get a per-M-tile slice so all M-tiles'
-    # pass-1 (QK+mask+max-reduce) writes can share ONE barrier instead of
-    # M_TILES separate ones -- see the phase-1/phase-2 split below. Other
-    # configs keep the original single-slice layout.
-    PHASE1_MTILES = M_TILES if (block_size == 16 and head_dim != 64) else 1
+    # Phase-split (M_TILES>1, any block_size, head_dim!=64): sLmax gets a
+    # per-M-tile slice so all M-tiles' pass-1 (QK+mask+max-reduce) writes share
+    # ONE barrier instead of M_TILES separate ones -- see the phase-1/phase-2
+    # split below. M_TILES==1 (nothing to merge) and head_dim==64 (VHE_CHUNKS==1
+    # V-load path not wired for the split) keep the single-slice per-m layout.
+    PHASE1_MTILES = M_TILES if (head_dim != 64) else 1
     sLmax_off = sQscale_off + ROWS_PADDED * f32
     sLsum_off = sLmax_off + PHASE1_MTILES * MFMA_MNK * NWARP_PAD * f32
     # V page-table prefetch staging: warp w's row is broadcast here for all
@@ -222,7 +222,7 @@ def compile_pa_decode_tile(
     # buffer path that had to hoist both (32) before the prefetch clobbered
     # them -- the 16 VGPR freed drops per_token M_TILES=4 under the 256/2-wave
     # cliff. Costs one extra buffer of LDS.
-    KV_DOUBLE_BUF = per_token_kv and block_size == 16 and head_dim != 64 and M_TILES > 1
+    KV_DOUBLE_BUF = per_token_kv and head_dim != 64 and M_TILES > 1
     KV_BUFS = 2 if KV_DOUBLE_BUF else 1
     KV_BUF_STRIDE = 2 * NWARP * TOK_PER_WARP * f32  # k-region + v-region, one buffer
     sKScale_off = sVPage_off + sVPage_bytes
@@ -687,40 +687,27 @@ def compile_pa_decode_tile(
 
             next_state = [None, None]  # slots 0/1 (K_SLOT/V_SLOT) filled in at m==0 below
 
-            # k/v-scale-per-token doesn't depend on `m` (only on `warp`/`a`),
-            # so for block_size==16 MTP/wide-GQA configs (already VGPR-bound
-            # to 1 wave/SIMD, so the extra live range costs no occupancy)
-            # load it once here instead of redundantly re-reading the same
-            # LDS slot from every M-tile's own pass below. Gated to
-            # block_size==16 only: on block_size==64 this same hoist crosses
-            # a 2->1 occupancy cliff and is a large regression there.
-            # Non-double-buffered path keeps the combined k+v hoist (held
-            # across both phases). The double-buffered phase-split path below
-            # instead loads k and v separately (Phase A / Phase B) to halve
-            # the peak scale-register liveness -- see KV_DOUBLE_BUF.
-            kv_scale_vecs_shared = None
-            if const_expr(per_token_kv and M_TILES > 1 and block_size == 16 and not KV_DOUBLE_BUF):
-                kv_scale_vecs_shared = [_load_kv_scale_vecs(a) for a in range_constexpr(NCHUNK)]
+            # k/v-scale-per-token doesn't depend on `m` (only on `warp`/`a`), so
+            # the phase-split hoists it once (via KV_DOUBLE_BUF: k in Phase A,
+            # v re-read in Phase B from the un-clobbered ping-pong buffer) instead
+            # of re-reading per M-tile. The non-phase-split path (head64 / M1)
+            # reads per-m directly (see below).
             cur_kv_buf = _kv_buf_off(tt)
 
             # V pages/data for this KV-tile iteration don't depend on `m`
-            # either; same block_size==16-only hoist as kv_scale above (V
-            # loads are raw global loads, so redundant reloads across
-            # M-tiles are even costlier than the LDS re-reads above).
+            # either; hoist once for the phase-split (M_TILES>1, head_dim!=64,
+            # any block_size) instead of reloading per M-tile (V loads are raw
+            # global loads, so redundant reloads are costlier than LDS re-reads).
             v_vh_shared = None
-            if const_expr(M_TILES > 1 and block_size == 16 and head_dim != 64):
+            if const_expr(M_TILES > 1 and head_dim != 64):
                 v_vh_shared = [_v_ops(v_page_cur, vh) for vh in range_constexpr(VHE_CHUNKS)]
 
             # q_scale doesn't depend on `m` either; read this lane's whole
             # M_TILES-wide row in one shot (contiguous thanks to the
             # transposed [qh][m] sQscale layout) instead of M_TILES separate
-            # narrow re-reads, one per m-tile's own pass below. Gated to
-            # block_size==16 only: on block_size==64 this same hoist (even
-            # though it's only M_TILES<=4 extra floats) crosses the same
-            # 256-VGPR/2-wave occupancy cliff as the other M-tile-independent
-            # hoists above -- measured a severe regression there.
+            # narrow re-reads, one per m-tile's own pass below (phase-split).
             q_scale_vec = None
-            if const_expr(M_TILES > 1 and block_size == 16):
+            if const_expr(M_TILES > 1 and head_dim != 64):
                 qh_for_scale = lane - (lane // c16) * c16
                 q_scale_vec = _view(
                     sQscale_off + qh_for_scale * (M_TILES * f32), fx.Float32, fx.make_layout(M_TILES, 1)
@@ -957,11 +944,10 @@ def compile_pa_decode_tile(
                     # a scalar threshold (token < n_valid).
                     qh = lane - (lane // c16) * c16  # qhead = lane % 16
                     l16g = lane // c16  # 0..3 lane-group within the warp
-                    scale = scale_qk * (
-                        fx.Float32(q_scale_vec[m])
-                        if const_expr(M_TILES > 1 and block_size == 16)
-                        else _ld1(sQscale_off, qh * M_TILES + m)
-                    )  # per-qhead positive score scale
+                    # This path only runs for head_dim==64 / M_TILES==1 (the
+                    # phase-split covers head!=64 M>1), so q_scale is read
+                    # per-m directly -- the hoisted q_scale_vec is phase-split-only.
+                    scale = scale_qk * _ld1(sQscale_off, qh * M_TILES + m)  # per-qhead positive score scale
                     n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
                     base_tok_f = fx.Int32(warp * TOK_CHUNK + l16g * 4).to(fx.Float32)
                     thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
@@ -976,11 +962,7 @@ def compile_pa_decode_tile(
                         v_scale_vecs = []
                         scaled_frags = []
                         for a in range_constexpr(NCHUNK):
-                            k_scale_vec, v_scale_vec = (
-                                kv_scale_vecs_shared[a]
-                                if const_expr(M_TILES > 1 and block_size == 16)
-                                else _load_kv_scale_vecs(a)
-                            )
+                            k_scale_vec, v_scale_vec = _load_kv_scale_vecs(a)
                             v_scale_vecs.append(v_scale_vec)
                             scaled_frags.append(frag_Ss[a] * k_scale_vec)
                     else:
