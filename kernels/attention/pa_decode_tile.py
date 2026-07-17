@@ -908,10 +908,12 @@ def compile_pa_decode_tile(
                     if const_expr(m < M_TILES - 1):
                         fx.rocdl.sched_barrier(0)
             else:
-                m = 0  # M_TILES==1: this (non-phase-split) branch handles the single-tile case only
-                o_acc = [ostate[_o0_slot(m)], ostate[_o1_slot(m)]]
-                m_prev = ostate[_m_slot(m)]  # this thread's own running max, carried from last tile
-                l_prev = ostate[_l_slot(m)]  # this thread's own running denom, carried from last tile
+                # M_TILES==1 single tile: loop-carried state is [K=0, V=1, o0=2,
+                # o1=3, running-max=4, running-denom=5] (tile-0 of _o0_slot(m)=2+4*m,
+                # _o1_slot=3+4*m, _m_slot=4+4*m, _l_slot=5+4*m).
+                o_acc = [ostate[2], ostate[3]]
+                m_prev = ostate[4]  # this thread's own running max, carried from last tile
+                l_prev = ostate[5]  # this thread's own running denom, carried from last tile
                 # QK: each NCHUNK chunk accumulates N_SUBCHUNKS k_steps into
                 # one f32x4 C-fragment (D[token, qhead]), using this M-tile's
                 # own Q operand.
@@ -920,7 +922,7 @@ def compile_pa_decode_tile(
                     acc = arith.constant_vector(0.0, T.f32x4)
                     for s in range_constexpr(N_SUBCHUNKS):
                         acc = fx.rocdl.mfma_f32_16x16x32_fp8_fp8(
-                            T.f32x4, [k_cur[a * N_SUBCHUNKS + s], q_ops_all[m * N_SUBCHUNKS + s], acc, 0, 0, 0]
+                            T.f32x4, [k_cur[a * N_SUBCHUNKS + s], q_ops_all[s], acc, 0, 0, 0]
                         )
                     frag_Ss.append(fx.Vector(acc))
                 # K/V/scale prefetch for tt+1, issued here so the V-page read
@@ -941,8 +943,8 @@ def compile_pa_decode_tile(
                 # This path only runs for M_TILES==1 (the phase-split covers
                 # all M_TILES>1), so q_scale is read per-m directly -- the
                 # hoisted q_scale_vec is phase-split-only.
-                scale = scale_qk * _ld1(sQscale_off, qh * M_TILES + m)  # per-qhead positive score scale
-                n_valid_tile = (causal_bound[m] - tok0).to(fx.Float32)
+                scale = scale_qk * _ld1(sQscale_off, qh)  # per-qhead positive score scale (M_TILES==1)
+                n_valid_tile = (causal_bound[0] - tok0).to(fx.Float32)
                 base_tok_f = fx.Int32(warp * TOK_CHUNK + l16g * 4).to(fx.Float32)
                 thr = fx.Vector.from_elements([n_valid_tile - base_tok_f], dtype=fx.Float32).broadcast_to(4)
                 neg4 = fx.Vector.filled(4, -1e30, fx.Float32)
