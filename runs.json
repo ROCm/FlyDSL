@@ -1,8 +1,51 @@
 {
  "schema": 1,
- "updated": "2026-07-17T00:57:15Z",
+ "updated": "2026-07-17T04:24:46Z",
  "repo": "ROCm/FlyDSL",
  "runs": [
+  {
+   "run_id": 29552853218,
+   "pr": 825,
+   "commit": "20faaa4d30c3a365ae7e2a74f7ecac63013e91f4",
+   "branch": "pa-decode-tile",
+   "event": "pull_request",
+   "title": "perf(pa tile): readable tile-programming PA decode kernel, matches/beats production",
+   "status": "in_progress",
+   "conclusion": null,
+   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29552853218",
+   "created_at": "2026-07-17T03:37:56Z",
+   "updated_at": "2026-07-17T04:20:32Z",
+   "actor": "fsx950223",
+   "jobs": [
+    {
+     "runner": "linux-flydsl-mi355-1",
+     "arch": "gfx950",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-17T04:20:31Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29552853218/job/87799078927"
+    },
+    {
+     "runner": "linux-flydsl-navi-2",
+     "arch": "gfx1201",
+     "status": "completed",
+     "conclusion": "success",
+     "started_at": "2026-07-17T03:39:55Z",
+     "completed_at": "2026-07-17T03:56:41Z",
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29552853218/job/87799078937"
+    },
+    {
+     "runner": "linux-flydsl-mi325-1",
+     "arch": "gfx942",
+     "status": "in_progress",
+     "conclusion": null,
+     "started_at": "2026-07-17T04:20:15Z",
+     "completed_at": null,
+     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29552853218/job/87799078939"
+    }
+   ]
+  },
   {
    "run_id": 29538355438,
    "pr": 855,
@@ -2227,49 +2270,6 @@
      "started_at": "2026-07-15T01:08:53Z",
      "completed_at": "2026-07-15T02:03:52Z",
      "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380724467/job/87256063691"
-    }
-   ]
-  },
-  {
-   "run_id": 29380026024,
-   "pr": null,
-   "commit": "6463241b56a995929e01d117d11bb28eb476d817",
-   "branch": "perf/rmsnorm-bwd-two-stage",
-   "event": "pull_request",
-   "title": "[Perf] Optimize RMSNorm backward with staged reduction and vec8 I/O",
-   "status": "completed",
-   "conclusion": "success",
-   "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024",
-   "created_at": "2026-07-15T00:48:15Z",
-   "updated_at": "2026-07-15T03:21:47Z",
-   "actor": "jhinpan",
-   "jobs": [
-    {
-     "runner": "linux-flydsl-navi-2",
-     "arch": "gfx1201",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-15T00:49:52Z",
-     "completed_at": "2026-07-15T01:05:49Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024/job/87241618376"
-    },
-    {
-     "runner": "linux-flydsl-mi325-1",
-     "arch": "gfx942",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-15T00:50:36Z",
-     "completed_at": "2026-07-15T02:37:48Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024/job/87241618379"
-    },
-    {
-     "runner": "linux-flydsl-mi355-1",
-     "arch": "gfx950",
-     "status": "completed",
-     "conclusion": "success",
-     "started_at": "2026-07-15T00:50:41Z",
-     "completed_at": "2026-07-15T03:21:46Z",
-     "url": "https://github.com/ROCm/FlyDSL/actions/runs/29380026024/job/87241618404"
     }
    ]
   }
