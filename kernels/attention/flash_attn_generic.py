@@ -264,6 +264,10 @@ def build_flash_attn_func_module_primary(
                     )
                 if cu_seqlens_q is not None:
                     return _dualwave_swp_launch(*args, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv, **kwargs)
+                # gfx950 dualwave is correctness-complete for all dense seq_lens; the
+                # generic dense fallback only covers long-seq perf tuning on gfx942.
+                if gpu_arch.startswith("gfx950"):
+                    return _dualwave_swp_launch(*args, **kwargs)
                 skv = kwargs.get("seq_len_kv", None)
                 if skv is not None:
                     S_int = _extract_seq_len(args, kwargs)
@@ -1011,6 +1015,7 @@ def build_flash_attn_func_module_primary(
 
         # ---- Constants ----
         c_neg_inf = fx.Float32(float("-inf"))
+        c_neg_floor = fx.Float32(-3.0e38)
         c_zero_f = fx.Float32(0.0)
         c_sm_scale_log2e = fx.Float32(sm_scale * _LOG2E)
         c_zero_v16f32 = Vec.filled(16, 0.0, fx.Float32)
@@ -1398,6 +1403,8 @@ def build_flash_attn_func_module_primary(
                 peer_max = reduction_peer(local_max)
                 row_max = _fmax(local_max, peer_max)
                 m_new_raw = _fmax(m_running, row_max)
+                if const_expr(CAUSAL):
+                    m_new_raw = _fmax(m_new_raw, c_neg_floor)
 
                 diff_m_raw = _fsub(m_running, m_new_raw)
                 diff_m_scaled = _fmul(diff_m_raw, c_sm_scale_log2e)
@@ -1640,7 +1647,11 @@ def build_flash_attn_func_module_primary(
         l_final = loop_results[1]
         o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
 
-        inv_l = rocdl.rcp(T.f32, l_final)
+        inv_l_rcp = rocdl.rcp(T.f32, l_final)
+        if const_expr(CAUSAL):
+            inv_l = ArithValue(fx.Float32(l_final) > c_zero_f).select(inv_l_rcp, c_zero_f)
+        else:
+            inv_l = inv_l_rcp
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(16)
         v_o = [Vec(o_finals[dc]) * inv_l_vec for dc in range_constexpr(D_CHUNKS)]
         # gfx950 fuses half-wave partners into 8 cols/store; o_rsrc drops partial-tile OOB rows.
