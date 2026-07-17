@@ -107,6 +107,11 @@ def c_shuffle_epilog(
     write_row_to_lds: Callable,
     precompute_row: Callable | None = None,
     store_pair: Callable,
+    # Optional: called once after all n_reps_shuffle col_pair stores for a given
+    # row finish, with (row_local, row, row_ctx). Used by token-level-sync fused gemm2
+    # to fire the device-scope cross-CTA atomic + cross-card per-token flag once
+    # the row's tile_n SLC stores are issued. None preserves baseline behaviour.
+    after_row_stores: Callable | None = None,
     # When LDS overflows, split lds_out across two buffers by wave-group.
     # Pass the second buffer here; first buffer is `lds_out`.
     lds_out_split=None,
@@ -170,7 +175,7 @@ def c_shuffle_epilog(
 
         def _write_row_split(mi: int, ii: int, row_in_tile, row):
             row_base_lds = row_in_tile * _half_n_idx
-            _if_g = scf.IfOp(_is_group_b)
+            _if_g = scf.IfOp(_is_group_b, has_else=True)
             with ir.InsertionPoint(_if_g.then_block):
                 write_row_to_lds(
                     mi=mi,
@@ -242,7 +247,7 @@ def c_shuffle_epilog(
                     col_pair0_local = col_base_nr + (n_lane_s * c_evec)
                     lds_idx = row_base_lds + col_pair0_local
 
-                    _if_ld = scf.IfOp(_is_group_b, [vec_frag])
+                    _if_ld = scf.IfOp(_is_group_b, [vec_frag], has_else=True)
                     with ir.InsertionPoint(_if_ld.then_block):
                         fb = vector.load_op(vec_frag, lds_out_split, [lds_idx])
                         scf.YieldOp([fb])
@@ -370,6 +375,10 @@ def c_shuffle_epilog(
                     col_g0=by_n_v + col_pair0,
                     frag=frag,
                 )
+            if after_row_stores is not None:
+                after_row_stores(
+                    row_local=row_local, row=row, row_ctx=row_ctx,
+                    n_lane=n_lane)
 
         if row_pred is not None:
             _if_row = scf.IfOp(row_pred)
@@ -408,6 +417,7 @@ def mfma_epilog(
     write_row_to_lds: Callable | None = None,
     precompute_row: Callable | None = None,
     store_pair: Callable | None = None,
+    after_row_stores: Callable | None = None,
     frag_elem_type: ir.Type | None = None,
 ):
     if not use_cshuffle:
@@ -446,4 +456,5 @@ def mfma_epilog(
         write_row_to_lds=write_row_to_lds,
         precompute_row=precompute_row,
         store_pair=store_pair,
+        after_row_stores=after_row_stores,
     )

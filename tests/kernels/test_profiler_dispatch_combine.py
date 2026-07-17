@@ -592,22 +592,25 @@ _MORI_SUPPORTED_DTYPES = {
 
 
 def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block: int = None):
-    if cfg.data_type not in _MORI_SUPPORTED_DTYPES:
+    if cfg.dispatch_dtype not in _MORI_SUPPORTED_DTYPES:
         raise RuntimeError(
-            f"mori ref kernel for dtype {cfg.data_type} is not available in this "
+            f"mori ref kernel for dtype {cfg.dispatch_dtype} is not available in this "
             f"container; will fall back to FlyDSL self-check"
         )
     from mori.ops.dispatch_combine import EpDispatchCombineConfig, EpDispatchCombineOp
 
-    elem = torch.tensor([], dtype=cfg.data_type).element_size()
+    # mori sizes its byte-pool by max_token_type_size (dtype inferred per-call at
+    # runtime); cover whichever of dispatch/combine dtype is the largest per-elem.
+    _disp_es = 1 if cfg.dispatch_is_fp4 else torch.tensor([], dtype=cfg.dispatch_dtype).element_size()
+    _comb_es = 1 if cfg.combine_is_fp4 else torch.tensor([], dtype=cfg.combine_dtype).element_size()
     mcfg = EpDispatchCombineConfig(
-        data_type=cfg.data_type,
+        data_type=cfg.dispatch_dtype,
         rank=rank,
         world_size=world_size,
         hidden_dim=cfg.hidden_dim,
         scale_dim=cfg.num_experts_per_token,
         scale_type_size=4,
-        max_token_type_size=cfg.max_token_type_size if cfg.max_token_type_size > 0 else elem,
+        max_token_type_size=max(_disp_es, _comb_es),
         max_num_inp_token_per_rank=cfg.max_num_inp_token_per_rank,
         num_experts_per_rank=cfg.num_experts_per_rank,
         num_experts_per_token=cfg.num_experts_per_token,
@@ -615,7 +618,7 @@ def build_mori_ref(rank, world_size, cfg, block_num: int = None, warp_per_block:
         block_num=block_num if block_num is not None else _DEFAULT_DISPATCH_BLOCK_NUM,
         gpu_per_node=world_size,
         use_external_inp_buf=not cfg.zero_copy,
-        quant_type=cfg.quant_type,
+        quant_type=cfg.combine_quant_type,
         # ``max_total_recv_tokens`` is intentionally NOT forwarded to
         # mori unless the cap equals the worst-case ws*M (effectively
         # uncapped).  mori treats the cap as a hard contract -- when
@@ -779,7 +782,7 @@ def _algo_bw_GBs(total_recv: int, token_bytes_per_tok: int, duration_us: float) 
         bytes  = total_recv * token_bytes_per_tok
         bw_GBs = bytes / 1000**3 / (duration_us / 1e6)
 
-    ``token_bytes_per_tok`` is ``cfg.token_bytes`` which equals
+    ``token_bytes_per_tok`` is ``cfg.dispatch_token_bytes`` which equals
     ``hidden_dim * element_size`` for non-fp4 dtypes and
     ``hidden_dim // 2`` for fp4 (one packed byte per pair of fp4
     lanes), so the formula matches mori's ``hidden_dim * element_size``
@@ -1648,7 +1651,7 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
     # fp4 has no element-wise ``index_cuda`` kernel; we must view-as-uint8
     # before all-gather + index.  fp8 supports indexing but we still byte
     # compare below.
-    is_fp4 = cfg.data_type == torch.float4_e2m1fn_x2
+    is_fp4 = cfg.dispatch_is_fp4
     inp_for_gather = inp.view(torch.uint8) if is_fp4 else inp
 
     g_inp = _allgather_rows(inp_for_gather, world_size)
@@ -1673,7 +1676,7 @@ def _verify_dispatch_self_consistency(ret_f, op_fly, inp, wts, idx, scales, cfg,
             expected_tok,
             rank,
         )
-    elif cfg.data_type in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+    elif cfg.dispatch_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
         all_pass &= _check_exact(
             "dispatch out_tok == g_inp (fp8 bytes)",
             f_tok.view(torch.uint8),
@@ -1748,11 +1751,11 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
     if cfg.enable_std_moe:
         epr = cfg.num_experts_per_rank
         mr = cfg.max_recv
-        _prx_nbytes = epr * mr * cfg.token_bytes
+        _prx_nbytes = epr * mr * cfg.dispatch_token_bytes
         packed_recv_x = (
             torch.zeros(_prx_nbytes, dtype=torch.uint8, device=dev)
-            .view(cfg.data_type)
-            .view(epr * mr, cfg.token_view_dim)
+            .view(cfg.dispatch_dtype)
+            .view(epr * mr, cfg.dispatch_token_view_dim)
         )
 
     scales = None
@@ -1812,7 +1815,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
     # enforced.
     mori_tok = None
     mori_out_wts = None
-    if op_mori is not None and not cfg.enable_std_moe and cfg.quant_type == "none":
+    if op_mori is not None and not cfg.enable_std_moe and cfg.combine_quant_type == "none":
         try:
             op_mori.reset()
             ms.shmem_barrier_all()
@@ -1837,7 +1840,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
         scale_factor = k
         check_label = "out_tok vs k*inp"
 
-    # Symmetric I/O contract: ``f_tok`` is in ``cfg.data_type`` (matches
+    # Symmetric I/O contract: ``f_tok`` is in ``cfg.dispatch_dtype`` (matches
     # dispatch input dtype).  mori parity -- caller dtype is symmetric;
     # the only wire-format divergence is ``fp8_direct_cast`` (bf16
     # caller / fp8 wire), which still writes back bf16 to ``f_tok``.
@@ -1936,7 +1939,7 @@ def verify_self(op_fly, inp, wts, idx, k, rank, world_size, dev, dtype_key, cfg,
                     diff_to_kinp = (f_tok.float() - inp_for_diag * scale_factor).abs().max().item()
                 except Exception:
                     diff_to_kinp = float("inf")
-                zero_copy_mode = cfg.zero_copy and cfg.quant_type == "none"
+                zero_copy_mode = cfg.zero_copy and cfg.combine_quant_type == "none"
 
                 if combine_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
                     ok_b = torch.equal(f_tok.view(torch.uint8), mori_tok.view(torch.uint8))
@@ -2092,18 +2095,6 @@ def run_profiler(rank, world_size, args):
     _dtype = DTYPE_MAP.get(args.dtype, torch.bfloat16)
     _comb_dtype = _resolve_combine_dtype(args, _dtype)
 
-    # Mori-parity buffer-capacity hint for mixed dtypes: when dispatch
-    # and combine use different dtypes, ``cfg.max_token_type_size`` must
-    # cover whichever dtype writes the largest per-element record (else
-    # the shmem ``comb_inp_tok`` view-cast would OOB the per-row budget).
-    _user_mtt = getattr(args, "max_token_type_size", 0)
-    if _comb_dtype != _dtype:
-        _disp_es = 1 if _dtype == torch.float4_e2m1fn_x2 else torch.tensor([], dtype=_dtype).element_size()
-        _comb_es = 1 if _comb_dtype == torch.float4_e2m1fn_x2 else torch.tensor([], dtype=_comb_dtype).element_size()
-        _auto_mtt = max(_disp_es, _comb_es)
-        if _user_mtt <= 0 or _user_mtt < _auto_mtt:
-            _user_mtt = _auto_mtt
-
     cfg = FlyDSLDispatchCombineConfig(
         rank=rank,
         world_size=world_size,
@@ -2111,7 +2102,8 @@ def run_profiler(rank, world_size, args):
         max_num_inp_token_per_rank=cur_tok,
         num_experts_per_rank=args.num_experts_per_rank,
         num_experts_per_token=k,
-        data_type=_dtype,
+        dispatch_dtype=_dtype,
+        combine_dtype=_comb_dtype,
         dispatch_block_num=args.dispatch_block_num,
         dispatch_warp_num_per_block=args.dispatch_warp_per_block,
         combine_block_num=args.combine_block_num,
@@ -2120,9 +2112,8 @@ def run_profiler(rank, world_size, args):
         enable_std_moe=args.enable_std_moe,
         scale_dim=args.scale_dim,
         scale_type_size=args.scale_type_size,
-        quant_type=args.quant_type,
+        combine_quant_type=args.quant_type,
         max_total_recv_tokens=getattr(args, "max_total_recv_tokens", 0),
-        max_token_type_size=_user_mtt,
     )
 
     mori_bn = (
@@ -2151,7 +2142,7 @@ def run_profiler(rank, world_size, args):
         enable_std_moe=cfg.enable_std_moe,
         scale_dim=cfg.scale_dim,
         scale_type_size=cfg.scale_type_size,
-        quant_type=cfg.quant_type,
+        quant_type=cfg.combine_quant_type,
     )
 
     # Output dir layout: <output_dir>/ep{ws}_bs{cur_tok}/
@@ -2178,7 +2169,7 @@ def run_profiler(rank, world_size, args):
     # verify path can only do a NaN/Inf liveness gate on combine
     # outputs (see ``verify_self`` for details — Bug-A history).
     op_ref = None
-    _want_mori = not cfg.enable_std_moe and cfg.quant_type == "none"
+    _want_mori = not cfg.enable_std_moe and cfg.combine_quant_type == "none"
     if _want_mori:
         mori_bn = args.mori_block_num if args.mori_block_num > 0 else None
         mori_wpb = args.mori_warp_per_block if args.mori_warp_per_block > 0 else None
@@ -2200,14 +2191,14 @@ def run_profiler(rank, world_size, args):
 
     # Prepare inputs (fixed seed so FlyDSL and mori see identical data).
     torch.manual_seed(42 + rank)
-    if cfg.data_type == torch.float4_e2m1fn_x2:
+    if cfg.dispatch_dtype == torch.float4_e2m1fn_x2:
         inp = torch.randint(0, 256, (cur_tok, cfg.hidden_dim // 2), dtype=torch.uint8, device=dev).view(
             torch.float4_e2m1fn_x2
         )
-    elif cfg.data_type in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-        inp = torch.randn(cur_tok, cfg.hidden_dim, dtype=torch.bfloat16, device=dev).to(cfg.data_type)
+    elif cfg.dispatch_dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+        inp = torch.randn(cur_tok, cfg.hidden_dim, dtype=torch.bfloat16, device=dev).to(cfg.dispatch_dtype)
     else:
-        inp = torch.randn(cur_tok, cfg.hidden_dim, dtype=cfg.data_type, device=dev)
+        inp = torch.randn(cur_tok, cfg.hidden_dim, dtype=cfg.dispatch_dtype, device=dev)
     wts = torch.rand(cur_tok, k, dtype=torch.float32, device=dev)
     wts = wts / wts.sum(-1, keepdim=True)
     epr = args.num_experts_per_rank
@@ -2279,11 +2270,11 @@ def run_profiler(rank, world_size, args):
     # Build scales / packed_recv_x (shared across modes).
     packed_recv_x = None
     if cfg.enable_std_moe:
-        _prx_nbytes = cfg.num_experts_per_rank * cfg.max_recv * cfg.token_bytes
+        _prx_nbytes = cfg.num_experts_per_rank * cfg.max_recv * cfg.dispatch_token_bytes
         packed_recv_x = (
             torch.zeros(_prx_nbytes, dtype=torch.uint8, device=dev)
-            .view(cfg.data_type)
-            .view(cfg.num_experts_per_rank * cfg.max_recv, cfg.token_view_dim)
+            .view(cfg.dispatch_dtype)
+            .view(cfg.num_experts_per_rank * cfg.max_recv, cfg.dispatch_token_view_dim)
         )
 
     scales = None
@@ -2327,10 +2318,10 @@ def run_profiler(rank, world_size, args):
     torch.cuda.synchronize()
     ms.shmem_barrier_all()
     meta["total_recv"] = total_recv_per_rank
-    meta["token_bytes_per_tok"] = cfg.token_bytes
+    meta["token_bytes_per_tok"] = cfg.dispatch_token_bytes
     meta["combine_dtype"] = str(_comb_dtype)
     if rank == 0:
-        print(f"[setup] per-rank total_recv = {total_recv_per_rank} tokens; " f"token bytes = {cfg.token_bytes}")
+        print(f"[setup] per-rank total_recv = {total_recv_per_rank} tokens; " f"token bytes = {cfg.dispatch_token_bytes}")
 
     # profile+eager needs an external warmup; the other three combos
     # warm up inside their own functions.
