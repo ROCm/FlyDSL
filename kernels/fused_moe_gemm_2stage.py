@@ -220,6 +220,11 @@ def compile_fused_moe_gemm1(
     # adaptation (group_major_a2=False).  Only meaningful with contiguous_io.
     atom_contract: bool = False,
     dedup_gather: bool = False,
+    # payload dedup (full: producer write-once + srcmap gather).  When True the dispatch
+    # producer writes each source token's activation ONCE into a token-major buffer (p2p_rx_tok,
+    # disp slot 26) instead of once-per-expert-copy expert-major, and the GEMM A-gather reads
+    # rx_tok[src_global] via srcmap (disp[19]).  Requires atom_contract (srcmap contract).
+    dedup: bool = False,
     diag_scale_valu: bool = False,
     raw_a_scale: bool = False,
     overlap_gate: bool = False,
@@ -432,6 +437,8 @@ def compile_fused_moe_gemm1(
     _phase_ts = False
     # atom_contract (megav1->stage2): logical-row a2 output via srcmap, A still expert-major direct.
     _atom_contract = bool(atom_contract and contiguous_io)
+    # payload dedup requires the srcmap (atom) contract; auto-off otherwise.
+    _dedup = bool(dedup) and _atom_contract
     # compact+atom combo: compact DISPATCH (dense rx) but atom-logical a2 OUTPUT.  A-gather stays
     # compact (sparse_tiles via _trb + expert via _se); the atom outputs (_sti/_se_atom) go to
     # SEPARATE disp slots 40/41 (the _trb/_se args are needed for A-gather, unlike non-compact atom
@@ -492,7 +499,7 @@ def compile_fused_moe_gemm1(
     _w1l_tag = f"_w1l{experts_per_rank}"
     module_name = (
         f"mfma_fmoe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"
-        f"_t{tile_m}x{tile_n}x{tile_k}_{_pm_tag}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}{_ci_tag}{_dg_tag}{_dsv_tag}{_ras_tag}{_spt_tag}{_og_tag}{_is_tag}{_fuse_tag}{_w1l_tag}_v37"
+        f"_t{tile_m}x{tile_n}x{tile_k}_{_pm_tag}{_fp4q_tag}{_fp8q_tag}{_sort_tag}{_async_tag}{_sk_tag}{_go_tag}{_gui_tag}{_as1_tag}{_xcd_tag}{_ci_tag}{_dg_tag}{_dsv_tag}{_ras_tag}{_spt_tag}{_og_tag}{_is_tag}{_fuse_tag}{_w1l_tag}{(f'_bnt{b_nt}' if b_nt else '')}{('_dd' if _dedup else '')}_v37"
     ).replace("-", "_")
 
     # -- LDS sizing --
@@ -777,6 +784,9 @@ def compile_fused_moe_gemm1(
                 if const_expr(_atom_contract):
                     _a_trecv = _dp(21); _a_dctr = _dp(22)
                     _a_rnum = _dp(23); _p_rnum = _dp(24)
+                # dedup: token-major recv buffer p2p table (host appends at slot 26).
+                if const_expr(_dedup):
+                    _p_rx_tok = _dp(26)
 
                 _tid = fx.thread_idx.x
                 _lane = _tid & 63
@@ -869,24 +879,49 @@ def compile_fused_moe_gemm1(
                                 buffer_ops.buffer_store(_sc_val, _crfa(_sc_remote), _slot * arith.constant(_fz_scale_n_i32) + _lane)
 
                     # token embedding copy (all lanes, 16B v4i32 chunks)
-                    _tok_remote_base = buffer_ops.buffer_load(_crfa(_p_rx), _dest_pe, vec_width=1, dtype=T.i64)
                     _rsrc_src = _crfa(_a_tok + _epk._to_i64(_src_tok) * _fz_nbytes)
-                    _rsrc_dst = _crfa(_tok_remote_base + _epk._to_i64(_slot) * _fz_nbytes)
+                    if const_expr(_dedup):
+                        # first-dest dedup: write the 7KB activation ONCE per (token,dest)
+                        # into token-major rx_tok[src_global]; same-dest sibling routes skip it.  The
+                        # expert-major metadata (idx/wts/srcmap/scale @ slot) is still written above,
+                        # so the GEMM tile still finds src_global via srcmap; only the heavy payload
+                        # dedups (kills the intra-dest write-amp when a token hits >1 local expert).
+                        _fd_prior = arith.constant(0, type=T.i32)
+                        for _kk_f in range_constexpr(_fz_k):
+                            _kk_if = arith.constant(_kk_f)
+                            _isp_f = arith.cmpi(CmpIPredicate.ult, _kk_if, _k_slot)
+                            _ee_f = buffer_ops.buffer_load(
+                                _r_idx, _src_tok * arith.constant(_fz_k) + _kk_if, vec_width=1, dtype=T.i32)
+                            _vld_f = arith.cmpi(CmpIPredicate.ult, _ee_f, arith.constant(_fz_total_experts))
+                            _same_f = arith.cmpi(CmpIPredicate.eq, _ee_f // _c_epr, _dest_pe)
+                            _fd_prior = arith.select(
+                                arith.andi(_isp_f, arith.andi(_vld_f, _same_f)),
+                                arith.constant(1, type=T.i32), _fd_prior)
+                        _is_first_dest_all = arith.cmpi(
+                            CmpIPredicate.eq, _fd_prior, arith.constant(0, type=T.i32))
+                        _copy_ok = arith.andi(_do_pub, _is_first_dest_all)
+                        _src_global = arith.constant(_fz_rank * _fz_mtpr) + _src_tok
+                        _rxtok_remote = buffer_ops.buffer_load(_crfa(_p_rx_tok), _dest_pe, vec_width=1, dtype=T.i64)
+                        _rsrc_dst = _crfa(_rxtok_remote + _epk._to_i64(_src_global) * _fz_nbytes)
+                    else:
+                        _tok_remote_base = buffer_ops.buffer_load(_crfa(_p_rx), _dest_pe, vec_width=1, dtype=T.i64)
+                        _rsrc_dst = _crfa(_tok_remote_base + _epk._to_i64(_slot) * _fz_nbytes)
+                        _copy_ok = _do_pub
                     _lane_off = _lane * 4
                     if const_expr(_fz_n_i32 >= 512 and _fz_safe_end_i32 > 0):
-                        _ce_main = arith.select(_do_pub, arith.constant(_fz_safe_end_i32), _lane_off)
+                        _ce_main = arith.select(_copy_ok, arith.constant(_fz_safe_end_i32), _lane_off)
                         for _co in range(_lane_off, _ce_main, 512):
                             _va = buffer_ops.buffer_load(_rsrc_src, _co, vec_width=4, dtype=T.i32)
                             _vb = buffer_ops.buffer_load(_rsrc_src, _co + 256, vec_width=4, dtype=T.i32)
                             buffer_ops.buffer_store(_va, _rsrc_dst, _co)
                             buffer_ops.buffer_store(_vb, _rsrc_dst, _co + 256)
                     if const_expr(_fz_safe_end_i32 < _fz_n_i32):
-                        _ce_tail = arith.select(_do_pub, arith.constant(_fz_n_i32), _lane_off)
+                        _ce_tail = arith.select(_copy_ok, arith.constant(_fz_n_i32), _lane_off)
                         for _co in range(_lane_off + _fz_safe_end_i32, _ce_tail, 256):
                             _va = buffer_ops.buffer_load(_rsrc_src, _co, vec_width=4, dtype=T.i32)
                             buffer_ops.buffer_store(_va, _rsrc_dst, _co)
                     elif const_expr(_fz_n_i32 < 512):
-                        _ce_small = arith.select(_do_pub, arith.constant(_fz_n_i32), _lane_off)
+                        _ce_small = arith.select(_copy_ok, arith.constant(_fz_n_i32), _lane_off)
                         for _co in range(_lane_off, _ce_small, 256):
                             _va = buffer_ops.buffer_load(_rsrc_src, _co, vec_width=4, dtype=T.i32)
                             buffer_ops.buffer_store(_va, _rsrc_dst, _co)
@@ -1991,7 +2026,21 @@ def compile_fused_moe_gemm1(
                     x_col_local_i32.append(col_local_i32)
 
                     sorted_row_i = bx_m + row_local
-                    if const_expr(dedup_gather):
+                    if const_expr(_dedup):
+                        # dedup gather: A row = rx_tok[src_global].  src_global is decoded from
+                        # the LOCAL srcmap (disp[19]) at this tile row -> low 24b.  Reads srcmap from
+                        # disp[19] (NOT arg_sorted_token_ids) so the sorted arg stays free for the atom
+                        # output emit.  Padding rows carry a sentinel src_global -> bounded rsrc -> 0.
+                        _dd_sm_addr = buffer_ops.buffer_load(
+                            buffer_ops.create_buffer_resource_from_addr(addr_disp),
+                            arith.constant(19), vec_width=1, dtype=T.i64)
+                        _dd_sm = buffer_ops.buffer_load(
+                            buffer_ops.create_buffer_resource_from_addr(_dd_sm_addr),
+                            sorted_row_i, vec_width=1, dtype=T.i32)
+                        _dd_sg = arith.andi(_dd_sm, mask24)
+                        _dd_idx = arith.index_cast(ir.IndexType.get(), _dd_sg)
+                        x_row_base_div4.append(_dd_idx * c_k_div4)
+                    elif const_expr(dedup_gather):
                         # Lever B: A row r = dedup_rx[srcmap_em[r] & 0xFFFFFF].  arg_sorted_token_ids
                         # carries srcmap_em; low 24b = src_global = the per-source-token dedup row.
                         # Out-of-range / stale padding rows fall back to row 0 (OOB also reads 0 via

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import re
 from pathlib import Path
 
@@ -42,6 +43,18 @@ def _is_fp4(dt):
 # hand-maintained host-side tune table.
 def _mega_default_tile(inter_dim):
     return 64, (256 if (int(inter_dim) % 256 == 0) else 128)
+
+
+# ── B-load cache modifier (b_nt) heuristic ────────────────────────────────────────────────────────
+# ``b_nt`` is the GEMM1 B-load (weight) cache modifier, threaded to the kernel's ``cache_modifier``:
+#   0 = normal cache (default);  3 = streaming (nt, bypass/evict-first).
+# Heuristic (validated, see docs/moe_stage1优化.md): a per-rank token count up to mtpr<=256 does
+# NOT meaningfully reuse an expert's weight across its M-tiles, so streaming the B-load (b_nt=3)
+# avoids polluting L2 with weights that won't be reused; at mtpr>=512 the weights ARE reused across
+# many M-tiles so caching (b_nt=0) wins.  Measured crossover is between 256 (streaming +5.3%) and
+# 512 (streaming -2.4%), so the threshold is 256.  Override with env ``FUSED_MEGA_B_NT``.
+def _default_b_nt(mtpr):
+    return 3 if int(mtpr) <= 256 else 0
 
 
 # ── Precise megastage1 tile, from the FlyDSL tune JSON (copied from aiter) ─────────────────────────
@@ -190,7 +203,7 @@ class FusedMoEMegaStage1:
                  network=None, scheme="fixedslot",
                  unit_size=-1, tile_n=-1, tile_k=256, warp_num_per_block=4,
                  waves_per_eu=4, use_async_copy=True, out_dtype="auto",
-                 total_recv_buf=None):
+                 total_recv_buf=None, b_nt=None, dedup=None):
         assert quant in ("a4w4", "a8w4")
         assert scheme == "fixedslot", f"scheme={scheme!r}: only 'fixedslot' supported (handshake removed)"
         assert out_dtype in ("auto", "f16", "fp8", "fp4"), out_dtype
@@ -266,6 +279,13 @@ class FusedMoEMegaStage1:
         self.tile_n = int(tile_n)
         self.mtpr = int(max_tok_per_rank)
         self.tune_tokens = int(tune_tokens)
+        # B-load cache modifier: explicit arg > env FUSED_MEGA_B_NT > heuristic(mtpr).
+        if b_nt is not None:
+            self._b_nt = int(b_nt)
+        elif "FUSED_MEGA_B_NT" in os.environ:
+            self._b_nt = int(os.environ["FUSED_MEGA_B_NT"])
+        else:
+            self._b_nt = _default_b_nt(self.mtpr)
         # ── XCD swizzle (XCD-aware block swizzle for L2 locality on the MI355X multi-die): validated
         #    L2-reuse win (v4_flash 1.3x, r1_v3 1.7x at gx|8).  The guard below auto-disables it when
         #    cu % gx != 0 (e.g. v4_pro gx=12), which is load-bearing for correctness. ────
@@ -331,7 +351,7 @@ class FusedMoEMegaStage1:
                     waves_per_eu=waves_per_eu, use_async_copy=use_async_copy,
                     use_cshuffle_epilog=None, contiguous_io=True, dedup_gather=False,
                     atom_contract=self.atom_contract,
-                    sparse_tiles=True, persist_m=-1,
+                    sparse_tiles=True, persist_m=-1, b_nt=self._b_nt,
                     raw_a_scale=True, xcd_swizzle=self._xcd,
                     fuse_dispatch=scheme, fuse_npes=world_size, fuse_topk=topk,
                     fuse_cap=self.cap, fuse_mtpr=self.mtpr,
@@ -396,6 +416,46 @@ class FusedMoEMegaStage1:
         # ---- dispatch-arg FIXED-pointer table (op bufs + p2p); built ONCE.  Per-step input
         # pointers are passed as scalar launch args in forward (slots 0-3 stay 0).
         self._build_disp_table()
+
+        # ── payload dedup (optional; env FUSED_MEGA_DEDUP=1 or dedup=True) ─────────────────────────
+        # The dispatch producer writes each source token's activation ONCE into a token-major buffer
+        # (rx_tok) instead of once-per-expert-copy expert-major; the GEMM A-gather reads rx_tok via
+        # srcmap.  Kills the intra-dest payload write-amp (a token routed to >1 local expert copies
+        # the 7KB activation only once).  Host wiring: alloc rx_tok + p2p table, recompile the GEMM
+        # with dedup=True, append p2p_rx_tok to the disp table (slot 26), repoint the A-input (_rx).
+        self._dedup = False
+        _want_dedup = ((os.environ.get("FUSED_MEGA_DEDUP", "0") == "1")
+                       if dedup is None else bool(dedup))
+        if _want_dedup and self.atom_contract and not self.compact:
+            self._rx_tok = mori_shmem_create_tensor(
+                (world_size * self.mtpr * model_dim,), self.data_type)
+            self.p2p_rx_tok = torch.zeros(world_size, dtype=torch.int64, device=self.dev)
+            for pe in range(world_size):
+                self.p2p_rx_tok[pe] = ms.shmem_ptr_p2p(self._rx_tok.data_ptr(), rank, pe)
+            for pe in range(world_size):
+                if rank == pe:
+                    self.mega = compile_fused_moe_gemm1(
+                        model_dim=model_dim, inter_dim=inter_dim, experts=experts, topk=1,
+                        tile_m=self.unit_size, tile_n=self.tile_n, tile_k=tile_k,
+                        doweight_stage1=False, a_dtype=self.a_dtype, b_dtype="fp4",
+                        out_dtype=out_dtype, act="silu", waves_per_eu=waves_per_eu,
+                        use_async_copy=use_async_copy, use_cshuffle_epilog=None,
+                        contiguous_io=True, dedup_gather=False, atom_contract=self.atom_contract,
+                        sparse_tiles=True, persist_m=-1, b_nt=self._b_nt,
+                        raw_a_scale=True, xcd_swizzle=self._xcd,
+                        fuse_dispatch=scheme, fuse_npes=world_size, fuse_topk=topk,
+                        fuse_cap=self.cap, fuse_mtpr=self.mtpr,
+                        fuse_scale_dim=self.scale_dim, fuse_scale_type_size=1,
+                        rank=rank, experts_per_rank=self.epr, compact_dispatch=self.compact,
+                        compact_allgather=True, dedup=True)
+                if dist.is_initialized():
+                    dist.barrier()
+            tbl = self._disp_host.tolist()  # fixedslot table is slots 0..25 -> append rx_tok at 26
+            tbl.append(int(self.p2p_rx_tok.data_ptr()))
+            self._disp = torch.tensor(tbl, dtype=torch.int64, device=self.dev)
+            self._disp_host = torch.tensor(tbl, dtype=torch.int64)
+            self._rx = self._rx_tok  # forward gathers A from the token-major dedup buffer
+            self._dedup = True
 
     def _build_disp_table(self):
         op = self.op
