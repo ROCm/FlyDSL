@@ -171,7 +171,7 @@ def _normalize_dim(dim: DimType) -> Tuple[DimValueType, DimValueType, DimValueTy
 # =============================================================================
 
 
-def _merge_compile_hints(*layers) -> dict:
+def merge_compile_hints(*layers) -> dict:
     """Shallow-merge hint layers; later non-None values win."""
     merged = {}
     for layer in layers:
@@ -204,7 +204,7 @@ class CompilationContext:
                 fn(*args, **kwargs)
         """
         prev = getattr(cls._compile_hints, "data", None)
-        cls._compile_hints.data = _merge_compile_hints(prev, hints)
+        cls._compile_hints.data = merge_compile_hints(prev, hints)
         try:
             yield
         finally:

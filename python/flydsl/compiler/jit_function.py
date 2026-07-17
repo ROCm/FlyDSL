@@ -41,11 +41,11 @@ from .jit_executor import CallState, CompiledArtifact
 from .kernel_function import (
     CompilationContext,
     KernelFunction,
-    _merge_compile_hints,
     create_gpu_module,
     effective_fastmath_hint,
     func_def_location,
     get_gpu_module_body,
+    merge_compile_hints,
 )
 from .link_utils import _append_link_lib_options_to_attach_targets, _format_link_lib_options
 from .protocol import (
@@ -1205,7 +1205,7 @@ class JitFunction:
 
     def _effective_compile_hints(self):
         """Resolve persistent defaults and the current thread-local overlay."""
-        return _merge_compile_hints(self.compile_hints, CompilationContext.get_compile_hints())
+        return merge_compile_hints(self.compile_hints, CompilationContext.get_compile_hints())
 
     def _get_global_refs(self, owner_cls=None) -> List[Tuple[str, str, dict]]:
         """Memoized global-ref discovery (see :func:`_discover_global_refs`)."""
